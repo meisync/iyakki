@@ -194,7 +194,19 @@ and closes the port. A loopback server with an unguessable path was chosen over 
 file-system access at all, the same code path as every other page, and no change to the helper's navigation rule. Cost: a
 local port is open while a video plays (reachable only from this machine, and only with the token). The WPE helper plays
 VP9 and Opus (WebM); H.264/AAC/MP3 need the optional `WEB_H264=1` build (docs/FULL-BROWSER.md, "Codec policy"), so the samples
-are WebM.
+are WebM. A plain video is buffered by WebKit in `/var/tmp` (RAM on the live image), so a video bigger than the free memory does
+not play there; a data volume is not used for that yet.
+
+### Checked in QEMU
+
+`dist/buildroot/qemu-media-test.py` boots the `web` image in QEMU (`sudo` for QEMU, KVM, 4 GB, 4 CPUs), signs in with real key presses,
+opens MEDIA and saves screenshots: the Tracks page with the two samples (types kuthu/beats and melody, tag sample), the MP3 playing
+(progress 0:05 / 0:20; the virtual sound card's WAV file grows by about 0.5 MB in 3 s), the Videos page, the sample video playing in
+the page area (two screenshots seconds apart differ; Space pauses), the download form with its chips, and two addresses served by
+the test machine downloading into Music and Videos with the Downloads page showing *Succeeded* and the Play / Show in library
+buttons. What it found that unit tests could not: the image had no `/var/tmp`, so WebKit refused every plain `<video src>` (fixed in
+`web-post-build.sh`); and a new account has no Music or Videos folder, so the first download failed until the download code made
+the folder (inside the write scope). Not checked: sound of the video, a real speaker, bare metal.
 
 ## Credentials stay in vaults
 

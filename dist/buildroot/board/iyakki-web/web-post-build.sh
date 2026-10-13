@@ -32,3 +32,9 @@ chmod 0700 "$TARGET_DIR/var/lib/iyakki/web-profile"
 if [ ! -s "$TARGET_DIR/etc/machine-id" ]; then
   echo "0d1e2f3a4b5c4d6e8f90a1b2c3d4e5f6" > "$TARGET_DIR/etc/machine-id"
 fi
+
+# A <video src=...> (the MEDIA app's video player, any site's plain video) is buffered by GStreamer's downloadbuffer into
+# /var/tmp/WebKit-Media-XXXXXX; without the folder every plain video fails with "Could not create temp file" (code 4 in the page).
+# It is in RAM on the live image, so a video larger than the free memory cannot be played that way.
+mkdir -p "$TARGET_DIR/var/tmp"
+chmod 1777 "$TARGET_DIR/var/tmp"

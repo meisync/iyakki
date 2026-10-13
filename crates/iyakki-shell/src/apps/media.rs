@@ -151,6 +151,9 @@ pub const VIDEO_NEEDS: &str = "Video needs the web image or an installed player 
 struct VideoView {
     full: Full,
     title: String,
+    /// The shell has pressed `p` in the page once it loaded: a key press is the user activation the engine wants before it
+    /// starts a video with sound (autoplay alone is refused, and the page then asks for Space).
+    kicked: bool,
     // dropped after the view: the server stays up while the engine may still ask
     _serve: LocalServe,
 }
@@ -846,7 +849,7 @@ impl MediaApp {
         form.set_chips(1, chip_rows(kind));
         let label = match form.choice_idx(4) {
             0 => {
-                let name = mediadl::auto_folder(folders, &cx.session.policy, &cx.session.user, kind).ok().map(|p| mediaqueue::folder_label(&p.to_string_lossy()));
+                let name = mediadl::planned_folder(folders, &cx.session.policy, &cx.session.user, kind).map(|p| mediaqueue::folder_label(&p.to_string_lossy()));
                 match (kind, name) {
                     (Some(_), Some(n)) => format!("Folder: {n} (auto)"),
                     (None, _) => "Folder: by file type, decided when it arrives (auto)".to_string(),
@@ -1119,7 +1122,7 @@ impl MediaApp {
                     let _ = g.save();
                 }
                 drop(g);
-                self.video = Some(VideoView { full, title: label.to_string(), _serve: serve });
+                self.video = Some(VideoView { full, title: label.to_string(), kicked: false, _serve: serve });
                 self.status = None;
             }
             Err(e) => self.say(format!("The video engine could not be started: {e}"), false),
@@ -1136,6 +1139,10 @@ impl MediaApp {
         match ev {
             Event::Tick => {
                 v.full.pump(&|h: &str| h == "127.0.0.1");
+                if !v.kicked && v.full.is_ready() && !v.full.loading && v.full.url.starts_with("http://127.0.0.1:") {
+                    v.kicked = true;
+                    v.full.key(&Key::Char('p'));
+                }
                 let mut gone = None;
                 for n in v.full.take_notes() {
                     match n {
@@ -3056,6 +3063,8 @@ mod tests {
         };
         assert_eq!(px(100.0, 72.0 + 40.0 + 100.0), [220, 40, 40, 255], "the engine's picture fills the page area");
         assert!(a.hint().contains("Space pause") && a.status_text().is_none());
+        // once the page has loaded the shell presses `p` in it (the user activation that lets the engine start the video)
+        pump_video(&mut a, &cx, "the play key", |a| a.video.as_ref().is_some_and(|v| v.kicked && v.full.log.iter().any(|l| l.contains("Key") && l.contains("112"))));
         // Space goes to the page (its script pauses and plays); keys do not reach the library behind it
         key(&mut a, &cx, Key::Char(' '));
         pump_video(&mut a, &cx, "the key to reach the engine", |a| a.video.as_ref().is_some_and(|v| v.full.log.iter().any(|l| l.contains("Key") && l.contains("32"))));

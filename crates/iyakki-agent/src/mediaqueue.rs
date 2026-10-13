@@ -218,7 +218,7 @@ impl DownloadQueue {
             st.next_id += 1;
             let dest = match &req.folder {
                 Some(f) => f.clone(),
-                None => mediadl::auto_folder(&ctx.folders, &ctx.policy, &ctx.user, kind).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+                None => mediadl::planned_folder(&ctx.folders, &ctx.policy, &ctx.user, kind).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
             };
             st.items.push(Entry {
                 s: Saved {

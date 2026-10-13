@@ -74,12 +74,13 @@ pub fn player_page(title: &str, audio_only: bool) -> String {
          <body><{tag} id=\"v\" controls autoplay src=\"media\"></{tag}><div id=\"msg\"></div><script>\
          var v=document.getElementById('v'),m=document.getElementById('msg');v.focus();\
          function say(t){{m.textContent=t}}\
-         v.addEventListener('error',function(){{say('This file cannot be played here (the codec may be missing).')}});\
+         v.addEventListener('error',function(){{say('This file cannot be played here (the codec may be missing). Error '+(v.error?v.error.code:'?')+'.')}});\
          v.addEventListener('ended',function(){{say('The end. Esc goes back.')}});\
          v.addEventListener('playing',function(){{say('')}});\
          var p=v.play();if(p&&p.catch){{p.catch(function(){{say('Press Space to play.')}})}}\
          document.addEventListener('keydown',function(e){{\
          if(e.key===' '){{e.preventDefault();if(v.paused){{v.play()}}else{{v.pause()}}}}\
+         else if(e.key==='p'){{e.preventDefault();v.play()}}\
          else if(e.key==='ArrowRight'){{e.preventDefault();v.currentTime=Math.min(v.duration||1e9,v.currentTime+5)}}\
          else if(e.key==='ArrowLeft'){{e.preventDefault();v.currentTime=Math.max(0,v.currentTime-5)}}\
          else if(e.key==='m'){{v.muted=!v.muted}}}});\

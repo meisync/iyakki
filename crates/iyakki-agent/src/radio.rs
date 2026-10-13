@@ -641,7 +641,7 @@ mod tests {
     #[test]
     fn the_language_presets_are_well_formed_and_the_level_bands_follow_the_pitch() {
         assert!(LANGUAGES.len() >= 60, "many languages: {}", LANGUAGES.len());
-        assert_eq!(LANGUAGES.iter().take(3).map(|l| l.name).collect::<Vec<_>>(), vec!["Tamil", "English", "Hindi"], "the first ones keep their place");
+        assert_eq!(LANGUAGES.iter().take(5).map(|l| l.name).collect::<Vec<_>>(), vec!["Tamil", "Telugu", "Malayalam", "English", "Hindi"], "the first ones keep their place (the South Indian languages come right after each other)");
         let mut names = std::collections::HashSet::new();
         assert!(LANGUAGES.iter().all(|l| names.insert(l.name)), "a language is listed twice");
         assert!(LANGUAGES.iter().any(|l| l.name == "Tamil") && LANGUAGES.iter().any(|l| l.name == "English") && LANGUAGES.iter().any(|l| l.name == "Spanish"));

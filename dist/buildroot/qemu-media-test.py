@@ -130,7 +130,7 @@ try:
     time.sleep(3)
     b = shot("4-video-b")
     print("the two video pictures differ: %s" % (a != b), flush=True)
-    keys("spc")                                           # pause
+    keys("spc")                                           # Space pauses (the video started by itself)
     time.sleep(2)
     shot("5-video-paused")
     keys("esc")                                           # stop and back to the lists

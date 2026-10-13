@@ -91,6 +91,11 @@ Build notes (things that went wrong, so the next person does not lose time):
   (OpenSSL flavour; the CA bundle is the image's `/etc/ssl/certs`).
 * **YouTube "Your browser can't play this video"**: MediaSource refused `audio/webm; codecs=opus` until gst-plugins-bad's
   `opusparse` (`BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_OPUS`) was built. Changing a package's options needs `<pkg>-dirclean` first.
+* **A plain `<video src=...>` fails with error code 4** while MediaSource video (YouTube) plays: WebKit buffers a progressive video
+  through GStreamer's `downloadbuffer` into `/var/tmp/WebKit-Media-XXXXXX`, and the image had no `/var/tmp` ("Could not create temp
+  file"; seen with `IYAKKI_WEB_ENV_EXTRA="GST_DEBUG=3,webkit*:5 GST_DEBUG_FILE=/tmp/gst.log"` on the kernel command line, which the
+  shell passes to the helper). `web-post-build.sh` now creates it (mode 1777). It is RAM on the live image, so a plain video larger than
+  the free memory cannot be played that way. The MEDIA app's video player depends on this.
 * `WPE_BACKEND_LIBRARY=libWPEBackend-fdo-1.0.so.1` is set by the helper (the web process loads the same backend); rendering
   uses WPEBackend-fdo with only `wpe_fdo_initialize_shm()`, so Mesa's Wayland EGL falls back to wl_shm buffers (llvmpipe), which
   is what `export_shm_buffer` hands over. WPEPlatform (the newer API) is not built in WPE 2.50.5 here.

@@ -251,19 +251,41 @@ pub fn kind_of_content_type(ct: &str) -> Option<crate::mediaindex::ItemKind> {
     }
 }
 
-/// The folder an automatic download of this kind goes to, among `folders` (writable ones only).
+/// The folder an automatic download of this kind goes to, among `folders` (writable ones only), made when it does not exist
+/// yet (a new account has no Music or Videos folder).
 pub fn auto_folder(folders: &[String], policy: &Policy, user: &str, kind: Option<crate::mediaindex::ItemKind>) -> Result<PathBuf, String> {
-    let f = default_folder(folders, policy, user, kind.unwrap_or(crate::mediaindex::ItemKind::Song)).ok_or("none of your library folders may be written to (outside your write scope)")?;
-    folder_ready(policy, user, Path::new(&f))
+    let f = planned_folder(folders, policy, user, kind).ok_or("none of your library folders may be written to (outside your write scope)")?;
+    folder_ready(policy, user, &f)
 }
 
+/// Where an automatic download of this kind would go, without making anything (for showing it before the download starts).
+pub fn planned_folder(folders: &[String], policy: &Policy, user: &str, kind: Option<crate::mediaindex::ItemKind>) -> Option<PathBuf> {
+    default_folder(folders, policy, user, kind.unwrap_or(crate::mediaindex::ItemKind::Song)).map(PathBuf::from)
+}
+
+/// The folder as a real path the account may write in. A folder that does not exist yet is made, but only after its real
+/// place has been worked out (through the nearest folder that exists, so a link cannot lead out of the write scope) and
+/// checked against the write scope.
 fn folder_ready(policy: &Policy, user: &str, dir: &Path) -> Result<PathBuf, String> {
-    let dir = crate::scope::resolve(Path::new("/"), &dir.to_string_lossy())?;
-    crate::scope::check_write(policy, user, &dir.join("x"))?;
-    if !dir.is_dir() {
-        return Err(format!("the folder {} does not exist", dir.display()));
+    let norm = iyakki_vfs::normalize(&dir.to_string_lossy()).map_err(|_| format!("invalid path: {}", dir.display()))?;
+    let mut missing: Vec<std::ffi::OsString> = vec![];
+    let mut cur = PathBuf::from(&norm);
+    while !cur.exists() {
+        missing.push(cur.file_name().ok_or("invalid path")?.to_owned());
+        cur = cur.parent().ok_or("invalid path")?.to_path_buf();
     }
-    Ok(dir)
+    let mut real = std::fs::canonicalize(&cur).map_err(|e| format!("no such directory: {}: {e}", cur.display()))?;
+    for m in missing.iter().rev() {
+        real.push(m);
+    }
+    crate::scope::check_write(policy, user, &real.join("x"))?;
+    if !missing.is_empty() {
+        std::fs::create_dir_all(&real).map_err(|e| format!("cannot make the folder {}: {e}", real.display()))?;
+    }
+    if !real.is_dir() {
+        return Err(format!("{} is not a folder", real.display()));
+    }
+    Ok(real)
 }
 
 /// Fetch `url` into `dir`. See the module notes for the checks.
@@ -654,6 +676,33 @@ pub mod tests {
         let p = policy_for(&d);
         let Fetched::Links(l) = download(&streamer(), &p, "alice", &format!("{base}/list.m3u"), &d, DEFAULT_MAX_BYTES, &Progress::default()).unwrap() else { panic!() };
         assert_eq!(l, vec![format!("{base}/one.mp3"), format!("{base}/two.mp3")]);
+    }
+
+    #[test]
+    fn a_missing_library_folder_is_made_inside_the_write_scope_and_never_outside_it() {
+        let d = tmp("mkdir");
+        let p = policy_for(&d);
+        let base = serve(vec![("/s.mp3", "audio/mpeg", tiny_mp3())]);
+        // a new account has no Music folder yet: the first download makes it (and the folders above it, inside the scope)
+        let folders = vec![format!("{}/home/ann/Music", d.display()), format!("{}/home/ann/Videos", d.display())];
+        let Fetched::File { path, .. } = download_to(&streamer(), &p, "ann", &format!("{base}/s.mp3"), Target::Auto(&folders), DEFAULT_MAX_BYTES, &Progress::default()).unwrap() else { panic!() };
+        assert_eq!(path, d.join("home/ann/Music/s.mp3"));
+        assert!(!d.join("home/ann/Videos").exists(), "only the folder that is used is made");
+        // showing the plan makes nothing
+        assert_eq!(planned_folder(&folders, &p, "ann", Some(crate::mediaindex::ItemKind::Video)), Some(PathBuf::from(&folders[1])));
+        assert!(!d.join("home/ann/Videos").exists());
+        // a folder outside the write scope is not made, nor one reached through a link out of the scope
+        let outside = tmp("mkdir-out");
+        let e = download_to(&streamer(), &p, "ann", &format!("{base}/s.mp3"), Target::Dir(&outside.join("new")), DEFAULT_MAX_BYTES, &Progress::default()).unwrap_err();
+        assert!(e.contains("permission denied"), "{e}");
+        assert!(!outside.join("new").exists());
+        std::os::unix::fs::symlink(&outside, d.join("home/ann/escape")).unwrap();
+        let e = download_to(&streamer(), &p, "ann", &format!("{base}/s.mp3"), Target::Dir(&d.join("home/ann/escape/sub")), DEFAULT_MAX_BYTES, &Progress::default()).unwrap_err();
+        assert!(e.contains("permission denied"), "{e}");
+        assert!(!outside.join("sub").exists());
+        // a file where a folder should be
+        std::fs::write(d.join("home/ann/file"), b"x").unwrap();
+        assert!(download_to(&streamer(), &p, "ann", &format!("{base}/s.mp3"), Target::Dir(&d.join("home/ann/file")), DEFAULT_MAX_BYTES, &Progress::default()).unwrap_err().contains("not a folder"));
     }
 
     #[test]
