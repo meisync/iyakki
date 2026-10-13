@@ -10,6 +10,11 @@
   <a href="LICENSE">Apache-2.0</a> · free for any use · permissive dependencies only
 </p>
 
+<p align="center">
+  <a href="docs/media/iyakki-tour.webp"><b>▶ See IYAKKI in action — a 30-second animated tour</b></a><br>
+  <a href="docs/media/iyakki-tour.webp"><img src="docs/media/iyakki-tour.webp" alt="Animated tour of IYAKKI: sign-in, launcher, chat, media, radio, browser, editor, system and inbox" width="720"></a>
+</p>
+
 ---
 
 ## The aim
