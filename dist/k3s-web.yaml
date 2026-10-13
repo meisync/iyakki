@@ -1,0 +1,114 @@
+# IYAKKI in the browser on K3s / Kubernetes: one pod serving the desktop over HTTPS, data on a volume.
+# Build + load the image first:  docker build -f dist/Dockerfile -t iyakki:0.1.0 .   (then push or `k3s ctr images import`)
+#
+# First account (the pod has no screen). Put the password in a Secret first (the namespace is made by the manifest, so create it ahead):
+#   kubectl create namespace iyakki-web
+#   kubectl -n iyakki-web create secret generic iyakki-admin --from-literal=password='a long password'
+#   kubectl apply -f dist/k3s-web.yaml            # an init container adds the account (if it is missing), then the server starts
+#
+# Reach it:  kubectl -n iyakki-web port-forward svc/iyakki 8443:8443   then open https://localhost:8443
+# (the certificate is self-signed unless you mount cert.pem and key.pem at /var/lib/iyakki/tls; behind an Ingress that
+#  does the TLS, set IYAKKI_WEB to http:8080 instead).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: iyakki-web
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: iyakki-data
+  namespace: iyakki-web
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iyakki
+  namespace: iyakki-web
+spec:
+  replicas: 1          # one writer for the data volume
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: iyakki
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: iyakki
+    spec:
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # makes the first account from the Secret before the server starts; nothing happens if it already exists
+        - name: first-account
+          image: iyakki:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ["user", "add", "admin", "--role", "admin", "--if-missing", "--password-file", "/secret/password"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/iyakki }
+            - { name: secret, mountPath: /secret, readOnly: true }
+      containers:
+        - name: iyakki
+          image: iyakki:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ["serve"]
+          env:
+            - name: IYAKKI_WEB
+              value: "1"
+            - name: IYAKKI_LOG
+              value: info
+          ports:
+            - { name: https, containerPort: 8443 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet: { path: /healthz, port: https, scheme: HTTPS }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: https, scheme: HTTPS }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "2", memory: 1Gi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/iyakki }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: iyakki-data }
+        - name: tmp
+          emptyDir: {}
+        - name: secret
+          secret: { secretName: iyakki-admin }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: iyakki
+  namespace: iyakki-web
+spec:
+  selector:
+    app.kubernetes.io/name: iyakki
+  ports:
+    - { name: https, port: 8443, targetPort: https }

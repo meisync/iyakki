@@ -1,0 +1,8 @@
+[package]
+name = "iyakki-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The reader browser's engine: web addresses, a forgiving HTML parser, a page model of headings, text, lists, links and tables, and a loader that follows redirects under a host policy. No JavaScript, no dependencies."
+
+[dependencies]

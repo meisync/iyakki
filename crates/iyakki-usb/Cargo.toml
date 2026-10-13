@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-usb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Writes an IYAKKI image to a USB stick safely: pick the drive with the arrow keys, see a clear erase warning, watch progress, verify."
+
+[[bin]]
+name = "iyakki-usb"
+path = "src/main.rs"
+
+[dependencies]
+iyakki-storage.workspace = true
+libc = "0.2"
+sha2 = "0.10"

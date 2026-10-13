@@ -1,0 +1,16 @@
+[package]
+name = "iyakki-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["https"]
+# Real HTTPS upstream (ureq + rustls). Disable for a plain-HTTP-only, dependency-light build.
+https = ["dep:ureq"]
+
+[dependencies]
+iyakki-sec.workspace = true
+iyakki-wasm.workspace = true
+iyakki-web.workspace = true
+ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }

@@ -1,0 +1,75 @@
+# Appended to the x86_64 defconfig for the optional "web" variant (./build.sh web, ./run.sh build-web).
+# Adds a full web engine as a SEPARATE program: WPE WebKit driven by the iyakki-webview-helper (dist/webview/wpe-helper),
+# rendering offscreen into the shell's browser tile. No compositor, no cage/cog/wlroots/libinput/seatd/eudev: /dev stays
+# on mdev like the default image. Nothing here is part of the default image. See docs/FULL-BROWSER.md.
+
+# ---- toolchain pieces WebKit and LLVM need
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+BR2_TOOLCHAIN_BUILDROOT_WCHAR=y
+
+# ---- graphics: Mesa (software llvmpipe works on any machine; hardware drivers when present)
+BR2_PACKAGE_MESA3D=y
+BR2_PACKAGE_MESA3D_LLVM=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_VIRGL=y
+# iris (Intel gen8+) and crocus (Intel gen4-7) are NOT included: Mesa 26 builds them with its precompiled OpenCL compiler (clang + libclc for the target, hours and ~1 GB more).
+# Intel GPUs therefore use llvmpipe (software) unless iyakki_web_iris.fragment is appended (iris; Intel gen8+).
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_RADEONSI=y
+BR2_PACKAGE_MESA3D_OPENGL_EGL=y
+BR2_PACKAGE_MESA3D_OPENGL_ES=y
+BR2_PACKAGE_MESA3D_GBM=y
+
+# ---- wayland libraries (WPEBackend-fdo runs a private wl_display inside the helper; no compositor program) and keyboard maps
+BR2_PACKAGE_WAYLAND=y
+BR2_PACKAGE_WAYLAND_PROTOCOLS=y
+BR2_PACKAGE_LIBXKBCOMMON=y
+BR2_PACKAGE_XKEYBOARD_CONFIG=y
+
+# ---- the engine and its helper (the helper package is in dist/buildroot/package/)
+BR2_PACKAGE_WPEWEBKIT=y
+BR2_PACKAGE_WPEWEBKIT_MULTIMEDIA=y
+BR2_PACKAGE_WPEWEBKIT_USE_GSTREAMER_GL=y
+BR2_PACKAGE_GST1_PLUGINS_BASE_LIB_OPENGL=y
+BR2_PACKAGE_GST1_PLUGINS_BASE_LIB_OPENGL_GLES2=y
+BR2_PACKAGE_GST1_PLUGINS_BASE_LIB_OPENGL_EGL=y
+BR2_PACKAGE_GST1_PLUGINS_BASE_LIB_OPENGL_WAYLAND=y
+BR2_PACKAGE_LIBWPE=y
+BR2_PACKAGE_WPEBACKEND_FDO=y
+BR2_PACKAGE_IYAKKI_WEBVIEW_HELPER=y
+BR2_PACKAGE_DBUS=y
+
+# ---- media: VP9 / AV1 / Opus / Vorbis, MP4 + WebM, ALSA output (no PulseAudio / PipeWire)
+BR2_PACKAGE_GSTREAMER1=y
+BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_ALSA=y
+BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_OPUS=y
+BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_VORBIS=y
+BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_OGG=y
+BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_VPX=y
+BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_ISOMP4=y
+BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_MATROSKA=y
+BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_AUDIOPARSERS=y
+BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_WAVPARSE=y
+BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_VIDEOPARSERS=y
+# opusparse: WebKit's MediaSource only accepts audio/webm opus (YouTube's audio) when it exists
+BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_OPUS=y
+BR2_PACKAGE_LIBVPX=y
+BR2_PACKAGE_DAV1D=y
+BR2_PACKAGE_OPUS=y
+BR2_PACKAGE_LIBVORBIS=y
+
+# ---- fonts (Liberation = Arial/Times/Courier metrics, DejaVu fallback; the Noto scripts the shell ships are added by web-post-build.sh)
+BR2_PACKAGE_FONTCONFIG=y
+BR2_PACKAGE_DEJAVU=y
+BR2_PACKAGE_LIBERATION=y
+BR2_PACKAGE_LIBERATION_MONO=y
+BR2_PACKAGE_LIBERATION_SANS=y
+BR2_PACKAGE_LIBERATION_SERIF=y
+BR2_PACKAGE_SHARED_MIME_INFO=y
+
+# ---- rootfs: same overlay plus the web one; extra post-build step
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki/overlay $(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki-web/overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki/post-build.sh $(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki-web/web-post-build.sh"
+
+# HTTPS for WebKit's network process: libsoup loads its TLS backend (GIO module) from glib-networking (OpenSSL flavour here,
+# the CA bundle is /etc/ssl/certs/ca-certificates.crt from BR2_PACKAGE_CA_CERTIFICATES).
+BR2_PACKAGE_GLIB_NETWORKING=y

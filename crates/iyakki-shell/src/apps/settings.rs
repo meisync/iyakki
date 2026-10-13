@@ -1,0 +1,3737 @@
+//! Settings: models (Ollama, OpenAI, Claude, Gemini, OpenRouter, …), RAG and external RAG,
+//! vaults (local encrypted + external providers) and your account.
+//!
+//! Everyone sees the app; system-wide tabs are read-only unless the role has `manage_settings`
+//! (admins). Every change is re-checked here, saved atomically, and written to the audit log —
+//! by *name* only, never by value. Secrets typed here go straight into a vault: settings files
+//! only ever hold references like `vault:openai-key`.
+
+use std::sync::mpsc::{channel, Receiver};
+use std::sync::Arc;
+use std::time::Duration;
+
+use iyakki_agent::providers::{valid_provider_id, Kind, ProviderCfg};
+use iyakki_agent::rag_ext::{ExtClient, ExternalRag};
+use iyakki_agent::services::Services;
+use iyakki_agent::settings::{ExtEntry, ModelChoice};
+use iyakki_agent::vault::{valid_secret_name, ProviderConfig as SecretProvider, VaultError};
+use iyakki_agent::voice::{self, Player, Recorder, SpeechEngine};
+
+use super::controls::{self, Slider};
+use super::devices::{DevRow, DevTab, DevicesPane, DeviceEnv};
+use super::settings_nav as nav;
+use super::widgets::{render_confirm, Form, FormEvent, PickEvent, Picker};
+use super::{blink, App, AppCx, Flow};
+use crate::accounts::AccountError;
+use crate::gfx::{rgb, Face, Gfx, Icon};
+use crate::ui::{Event, Key, TextField, DIM, ERR, MUTED, OK, R, TEXT};
+
+const ACCENT: [u8; 4] = rgb(120, 170, 255);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tab {
+    Models,
+    Rag,
+    Vault,
+    Skills,
+    Network,
+    Bluetooth,
+    Display,
+    Sound,
+    Browser,
+    Storage,
+    Voice,
+    SecretProviders,
+    Account,
+}
+
+impl Tab {
+    /// The heading this page sits under in the left list.
+    fn group(self) -> &'static str {
+        match self {
+            Tab::Models | Tab::Rag | Tab::Skills | Tab::Voice => "Assistant",
+            Tab::Browser => "Apps",
+            Tab::Vault | Tab::SecretProviders | Tab::Account => "Security",
+            Tab::Network | Tab::Bluetooth | Tab::Display | Tab::Sound | Tab::Storage => "Devices",
+        }
+    }
+
+    /// Words that should find this page when searching.
+    fn keywords(self) -> &'static str {
+        match self {
+            Tab::Models => "ai chat llm model provider openai claude anthropic gemini ollama openrouter api key endpoint",
+            Tab::Rag => "search knowledge documents retrieval chunk overlap results embedding index external qdrant chroma",
+            Tab::Vault => "secrets keys passwords tokens encrypted lock",
+            Tab::Skills => "instructions prompts reusable assistant behaviour",
+            Tab::Network => "wifi wi-fi ethernet internet lan cable ip address connection wireless",
+            Tab::Bluetooth => "bluetooth wireless pairing headphones keyboard mouse adapter",
+            Tab::Display => "screen monitor brightness resolution backlight output hdmi",
+            Tab::Sound => "audio volume speaker mute loud quiet card",
+            Tab::Browser => "web internet browser javascript scripts pictures images styles css cookies privacy sites",
+            Tab::Storage => "disk usb drive data persistence save space format",
+            Tab::Voice => "microphone speech voice stt tts speak listen recording",
+            Tab::SecretProviders => "vault external hashicorp provider secrets",
+            Tab::Account => "password profile sign out user login",
+        }
+    }
+
+    /// One line under the page's title.
+    fn blurb(self) -> &'static str {
+        match self {
+            Tab::Models => "The AI services the assistant can talk to, and which one it uses.",
+            Tab::Rag => "How documents are split and searched when the assistant looks things up.",
+            Tab::Vault => "Secrets such as API keys, kept encrypted.",
+            Tab::Skills => "Reusable instructions the assistant can follow.",
+            Tab::Network => "Ethernet and WiFi: what this computer has, and what is switched on.",
+            Tab::Bluetooth => "The Bluetooth adapter, if there is one.",
+            Tab::Display => "The screen in use, connected displays and brightness.",
+            Tab::Sound => "Sound cards, volume and mute.",
+            Tab::Browser => "What the web browser may do: run scripts, show pictures, apply styles, keep cookies.",
+            Tab::Storage => "Where your accounts, settings and files are kept.",
+            Tab::Voice => "Speech to text and text to speech.",
+            Tab::SecretProviders => "External vaults that hold secrets for you.",
+            Tab::Account => "Your account on this computer.",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Models => "Models",
+            Tab::Rag => "RAG",
+            Tab::Vault => "Vault",
+            Tab::Skills => "Skills",
+            Tab::Network => "Network",
+            Tab::Bluetooth => "Bluetooth",
+            Tab::Display => "Display",
+            Tab::Sound => "Sound",
+            Tab::Browser => "Browser",
+            Tab::Storage => "Storage",
+            Tab::Voice => "Voice",
+            Tab::SecretProviders => "Secret providers",
+            Tab::Account => "Account",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FormKind {
+    Provider(Option<String>),
+    ProviderKey(String),
+    External(Option<String>),
+    NewSecret(bool),
+    Keyfile,
+    SecretProvider,
+    Password,
+    VoiceStt,
+    VoiceTts,
+    VoiceCmds,
+    NewSkill,
+    ImportSkill,
+    TokenPrice,
+    /// (disk name, the user must also type ERASE because the disk holds data)
+    Persist(String, bool),
+    /// Make a virtual disk (the size is asked).
+    NewVirtualDisk,
+    /// The passphrase of a WiFi network found by the scan (name, what it offers).
+    WifiJoin(String, iyakki_devctl::wifi::Security),
+    /// A WiFi network that does not announce its name.
+    WifiHidden,
+    /// Remove a virtual disk (its name must be typed).
+    RemoveVirtualDisk(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PickKind {
+    Chat(String),
+    Embed(String),
+    /// A network from the WiFi scan (or one of the choices below the list).
+    Wifi,
+    /// A saved WiFi network to forget.
+    WifiForget,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ConfirmKind {
+    Provider(String),
+    External(String),
+    Secret(bool, String),
+    SecretProvider(String),
+    ResetPersonal,
+    Skill(iyakki_agent::skills::Scope, String),
+    Reboot,
+}
+
+enum Modal {
+    Form(FormKind, Form),
+    Pick(PickKind, Picker),
+    Confirm(ConfirmKind, String),
+}
+
+enum JobOut {
+    Msg(Result<String, String>),
+    Wifi(Result<Vec<iyakki_devctl::wifi::Ap>, String>),
+    Models { provider: String, models: Vec<String>, ms: u64 },
+}
+
+struct Job {
+    label: String,
+    rx: Receiver<JobOut>,
+}
+
+/// What the Storage tab acts on. Real paths in production; tests point these at a fake machine.
+#[derive(Clone)]
+pub struct StorageEnv {
+    pub roots: iyakki_storage::Roots,
+    pub mounter: Arc<dyn iyakki_storage::Mounter>,
+    /// Set when the disks are virtual (the desktop window): disks can be made and removed from the tab.
+    pub virtual_disks: Option<iyakki_storage::virt::VirtualDisks>,
+    pub mke2fs: std::path::PathBuf,
+    pub scratch: std::path::PathBuf,
+    /// The running data directory: copied onto the new disk so nothing is lost.
+    pub data_dir: std::path::PathBuf,
+}
+
+/// What the WiFi part of the Network page acts on: the programs that scan and join, the saved networks, and the machine's
+/// links. Real in production; tests point it at stand-ins.
+#[derive(Clone)]
+pub struct WifiEnv {
+    pub wifi: Arc<iyakki_devctl::wifi::Wifi>,
+    pub known: Arc<iyakki_devctl::wifi::KnownStore>,
+    pub roots: iyakki_devctl::Roots,
+}
+
+impl WifiEnv {
+    pub fn real() -> WifiEnv {
+        #[cfg(test)]
+        {
+            // unit tests never scan the real air or touch the real files
+            return WifiEnv { wifi: Arc::new(iyakki_devctl::wifi::Wifi { run_dir: "/nonexistent/run".into(), path: Some("/nonexistent/bin".into()) }), known: Arc::new(iyakki_devctl::wifi::KnownStore::new(std::path::Path::new("/nonexistent/wifi.json"))), roots: iyakki_devctl::Roots { sys: "/nonexistent/sys".into(), proc_: "/nonexistent/proc".into() } };
+        }
+        #[allow(unreachable_code)]
+        WifiEnv { wifi: Arc::new(iyakki_devctl::wifi::Wifi::real()), known: Arc::new(iyakki_devctl::wifi::KnownStore::new(std::path::Path::new("/var/lib/iyakki/wifi.json"))), roots: iyakki_devctl::Roots::real() }
+    }
+
+    /// The first WiFi adapter's interface name.
+    pub fn iface(&self) -> Option<String> {
+        iyakki_devctl::links(&self.roots).into_iter().find(|l| l.kind == iyakki_devctl::LinkKind::Wifi).map(|l| l.name)
+    }
+}
+
+static VIRTUAL_STORAGE: std::sync::OnceLock<StorageEnv> = std::sync::OnceLock::new();
+
+/// From now on the Storage tab shows only virtual disks kept in `dir` (sparse image files), never the machine's drives.
+/// Called once at start by the desktop window; `data_dir` is what making a data disk copies onto it.
+pub fn use_virtual_disks(dir: &std::path::Path, data_dir: &std::path::Path, mke2fs: Option<std::path::PathBuf>) -> Result<(), String> {
+    let v = iyakki_storage::virt::VirtualDisks::open(dir)?;
+    let mke2fs = mke2fs.or_else(|| ["/sbin/mke2fs", "/usr/sbin/mke2fs"].iter().map(std::path::PathBuf::from).find(|p| p.exists())).unwrap_or_else(|| "/sbin/mke2fs".into());
+    let env = StorageEnv { roots: v.roots(), mounter: Arc::new(v.mounter()), mke2fs, scratch: dir.to_path_buf(), data_dir: data_dir.to_path_buf(), virtual_disks: Some(v) };
+    VIRTUAL_STORAGE.set(env).map_err(|_| "virtual disks are already set up".to_string())
+}
+
+impl StorageEnv {
+    pub fn real() -> StorageEnv {
+        #[cfg(test)]
+        {
+            // unit tests never look at (or touch) the machine's real disks
+            return StorageEnv { roots: iyakki_storage::Roots { sys_block: "/nonexistent/sys".into(), dev: "/nonexistent/dev".into(), mounts: "/nonexistent/mounts".into(), require_block: true }, mounter: Arc::new(iyakki_storage::SysMounter), mke2fs: "/nonexistent/mke2fs".into(), scratch: "/nonexistent".into(), data_dir: "/nonexistent/data".into(), virtual_disks: None };
+        }
+        #[allow(unreachable_code)]
+        if let Some(v) = VIRTUAL_STORAGE.get() {
+            return v.clone();
+        }
+        let mke2fs = ["/sbin/mke2fs", "/usr/sbin/mke2fs"].iter().map(std::path::PathBuf::from).find(|p| p.exists()).unwrap_or_else(|| "/sbin/mke2fs".into());
+        StorageEnv { roots: iyakki_storage::Roots::real(), mounter: Arc::new(iyakki_storage::SysMounter), mke2fs, scratch: "/run".into(), data_dir: "/var/lib/iyakki".into(), virtual_disks: None }
+    }
+}
+
+const SLIDER_CHUNK: usize = 7001;
+const SLIDER_OVERLAP: usize = 7002;
+const SLIDER_TOPK: usize = 7003;
+/// Sliders on the hardware pages are `SLIDER_HW + row`.
+const SLIDER_HW: usize = 7100;
+
+pub struct SettingsApp {
+    tabs: Vec<Tab>,
+    tab: usize,
+    sel: [usize; 16],
+    /// Network, Bluetooth, Display and Sound pages.
+    hw: DevicesPane,
+    /// Ticks since the app opened (the hardware pages refresh on a timer).
+    ticks: u64,
+    /// How long the mic tests listen (milliseconds); shortened by tests.
+    pub test_record_ms: u64,
+    /// Vault tab: 0 = system vault, 1 = personal vault.
+    section: usize,
+    /// May edit the skills shared with everyone (set from the policy at open).
+    share_skills: bool,
+    /// The search box over the list of pages, whether it has the keyboard, and how far the list is scrolled.
+    nav_query: TextField,
+    nav_focus: bool,
+    nav_scroll: f32,
+    /// Where the pointer is and where the list was drawn (the wheel scrolls the list when the pointer is over it).
+    mouse: (i32, i32),
+    nav_rect: R,
+    nav_s: f32,
+    /// Width of each slider's track as last drawn, by slider id (a click's x is turned into a value with it).
+    slider_w: Vec<(usize, f32)>,
+    storage: StorageEnv,
+    wifi: WifiEnv,
+    /// The networks the last scan found, in the order the picker shows them (`None`: the extra choices below the list).
+    wifi_items: Vec<(String, Option<iyakki_devctl::wifi::Ap>)>,
+    devices: Vec<iyakki_storage::BlockDev>,
+    modal: Option<Modal>,
+    job: Option<Job>,
+    status: Option<(String, bool)>,
+}
+
+fn kind_labels() -> Vec<&'static str> {
+    Kind::ALL.iter().map(|k| k.label()).collect()
+}
+
+impl SettingsApp {
+    pub fn new(cx: &AppCx) -> SettingsApp {
+        let admin = cx.session.policy.manage_settings;
+        let mut tabs = vec![Tab::Models, Tab::Rag, Tab::Vault];
+        if cx.session.policy.skills {
+            tabs.push(Tab::Skills);
+        }
+        if admin {
+            tabs.extend([Tab::Network, Tab::Bluetooth, Tab::Display, Tab::Sound]);
+            tabs.push(Tab::Storage);
+        }
+        if admin || cx.session.policy.voice {
+            tabs.push(Tab::Voice);
+        }
+        if admin {
+            tabs.push(Tab::SecretProviders);
+        }
+        tabs.push(Tab::Browser);
+        tabs.push(Tab::Account);
+        let mut app = SettingsApp { tabs, tab: 0, sel: [0; 16], hw: DevicesPane::new(DeviceEnv::real()), ticks: 0, test_record_ms: 2000, section: if admin { 0 } else { 1 }, share_skills: cx.session.policy.manage_skills, nav_query: TextField::new("Search settings", false), nav_focus: false, nav_scroll: 0.0, mouse: (0, 0), nav_rect: R::new(0.0, 0.0, 0.0, 0.0), nav_s: 1.0, slider_w: Vec::new(), storage: StorageEnv::real(), wifi: WifiEnv::real(), wifi_items: Vec::new(), devices: vec![], modal: None, job: None, status: None };
+        app.refresh_devices();
+        app
+    }
+
+    /// Replace the machine the hardware pages look at (tests).
+    pub fn with_hardware(mut self, env: DeviceEnv) -> SettingsApp {
+        self.hw = DevicesPane::new(env);
+        self
+    }
+
+    /// Replace what the WiFi part acts on (tests).
+    pub fn with_wifi(mut self, env: WifiEnv) -> SettingsApp {
+        self.wifi = env;
+        self
+    }
+
+    /// Replace the storage environment (tests).
+    pub fn with_storage(mut self, env: StorageEnv) -> SettingsApp {
+        self.storage = env;
+        self.refresh_devices();
+        self
+    }
+
+    fn refresh_devices(&mut self) {
+        if self.tabs.contains(&Tab::Storage) {
+            self.devices = iyakki_storage::list(&self.storage.roots);
+            self.sel[self.tabs.iter().position(|t| *t == Tab::Storage).unwrap_or(0)] = self.sel[self.tabs.iter().position(|t| *t == Tab::Storage).unwrap_or(0)].min(self.devices.len().saturating_sub(1));
+        }
+    }
+
+    /// A click on a slider's track at `x` pixels from its left edge.
+    fn slider_click(&mut self, id: usize, x: f32, cx: &AppCx) {
+        let Some(w) = self.slider_w.iter().find(|(i, _)| *i == id).map(|(_, w)| *w) else { return };
+        match id {
+            SLIDER_CHUNK | SLIDER_OVERLAP | SLIDER_TOPK if self.admin(cx) => {
+                let rag = Self::svc(cx).settings.lock().unwrap().get().rag.clone();
+                let result = Self::svc(cx).settings.lock().unwrap().update(|st| match id {
+                    SLIDER_CHUNK => {
+                        st.rag.chunk_max = controls::value_at(x, w, 100, 4000, 100) as usize;
+                        // the overlap must stay under half the chunk size: bring it down with it
+                        let top = (st.rag.chunk_max / 2).saturating_sub(1);
+                        st.rag.overlap = st.rag.overlap.min(top) / 20 * 20;
+                    }
+                    SLIDER_OVERLAP => st.rag.overlap = controls::value_at(x, w, 0, (rag.chunk_max / 2).saturating_sub(1) as i64, 20) as usize,
+                    _ => st.rag.top_k = controls::value_at(x, w, 1, 50, 1) as usize,
+                });
+                match result {
+                    Ok(()) => {
+                        cx.audit.record(&cx.session.user, "settings.rag", "");
+                        self.ok("Saved.");
+                    }
+                    Err(e) => self.fail(e.to_string()),
+                }
+            }
+            id if id >= SLIDER_HW => self.hw_slider(id, x, w, cx),
+            _ => {}
+        }
+    }
+
+    fn nav_items(&self) -> Vec<nav::Item> {
+        self.tabs.iter().enumerate().map(|(i, t)| nav::Item { tab: i, label: t.label(), group: t.group(), keywords: t.keywords() }).collect()
+    }
+
+    /// The pages the search box lets through.
+    pub fn nav_matches(&self) -> Vec<usize> {
+        nav::entries(&self.nav_items(), &self.nav_query.value).iter().filter_map(|e| if let nav::Entry::Item { tab, .. } = e { Some(*tab) } else { None }).collect()
+    }
+
+    /// A key while the search box has the keyboard. Returns whether it was used.
+    fn nav_key(&mut self, k: &Key) -> bool {
+        let entries = nav::entries(&self.nav_items(), &self.nav_query.value);
+        match k {
+            Key::Esc => {
+                if self.nav_query.value.is_empty() {
+                    self.nav_focus = false;
+                } else {
+                    self.nav_query.set("");
+                }
+            }
+            Key::Enter => {
+                if let Some(t) = nav::first_tab(&entries) {
+                    self.tab = t;
+                }
+                self.nav_focus = false;
+            }
+            Key::Down | Key::Up => {
+                if let Some(t) = nav::step_tab(&entries, self.tab, if *k == Key::Down { 1 } else { -1 }) {
+                    self.tab = t;
+                }
+            }
+            Key::Tab => self.nav_focus = false,
+            other => {
+                self.nav_query.handle(other);
+                self.nav_after_edit();
+            }
+        }
+        self.nav_scroll = nav::scroll_to_show(self.nav_scroll, &nav::entries(&self.nav_items(), &self.nav_query.value), self.tab, self.nav_rect.h, self.nav_s);
+        true
+    }
+
+    /// The search text changed: keep the shown page among the matches (the first match becomes the page).
+    fn nav_after_edit(&mut self) {
+        let entries = nav::entries(&self.nav_items(), &self.nav_query.value);
+        if !entries.iter().any(|e| matches!(e, nav::Entry::Item { tab, .. } if *tab == self.tab)) {
+            if let Some(t) = nav::first_tab(&entries) {
+                self.tab = t;
+            }
+        }
+        self.nav_scroll = nav::scroll_to_show(self.nav_scroll, &entries, self.tab, self.nav_rect.h, self.nav_s);
+    }
+
+    pub fn tab(&self) -> Tab {
+        self.tabs[self.tab]
+    }
+    pub fn tabs(&self) -> &[Tab] {
+        &self.tabs
+    }
+    pub fn status(&self) -> Option<&(String, bool)> {
+        self.status.as_ref()
+    }
+    pub fn has_modal(&self) -> bool {
+        self.modal.is_some()
+    }
+    pub fn is_busy(&self) -> bool {
+        self.job.is_some()
+    }
+
+    fn ok(&mut self, m: impl Into<String>) {
+        self.status = Some((m.into(), true));
+    }
+    fn fail(&mut self, m: impl Into<String>) {
+        self.status = Some((m.into(), false));
+    }
+
+    fn admin(&mut self, cx: &AppCx) -> bool {
+        if cx.session.policy.manage_settings {
+            return true;
+        }
+        cx.audit.record(&cx.session.user, "settings.denied", self.tab().label());
+        self.fail("Only administrators can change this.");
+        false
+    }
+
+    fn svc(cx: &AppCx) -> &Arc<Services> {
+        &cx.services
+    }
+
+    fn sel(&self) -> usize {
+        self.sel[self.tab]
+    }
+
+    fn move_sel(&mut self, delta: i32, len: usize) {
+        let i = &mut self.sel[self.tab];
+        *i = (*i as i32 + delta).clamp(0, len.saturating_sub(1) as i32) as usize;
+    }
+
+    // ------------------------------------------------------------------ data helpers
+
+    fn providers(cx: &AppCx) -> Vec<ProviderCfg> {
+        Self::svc(cx).settings.lock().unwrap().get().providers.clone()
+    }
+
+    fn externals(cx: &AppCx) -> Vec<ExtEntry> {
+        Self::svc(cx).settings.lock().unwrap().get().external_rag.clone()
+    }
+
+    fn secret_providers(cx: &AppCx) -> Vec<(String, SecretProvider)> {
+        Self::svc(cx).settings.lock().unwrap().get().secret_providers.clone().into_iter().collect()
+    }
+
+    fn secret_names(&self, cx: &AppCx) -> Result<Vec<String>, VaultError> {
+        if self.section == 0 && cx.session.policy.manage_settings {
+            Self::svc(cx).system_names()
+        } else {
+            Self::svc(cx).user_names(&cx.session.user)
+        }
+    }
+
+    fn store_key(&mut self, cx: &AppCx, name: &str, value: &str, system: bool) -> Result<(), String> {
+        let r = if system { Self::svc(cx).system_set(name, value) } else { Self::svc(cx).user_set(&cx.session.user, name, value) };
+        r.map_err(|e| match e {
+            VaultError::Locked if system => "The system vault is locked. Sign in as an administrator who has access to it.".to_string(),
+            VaultError::Locked => "Your personal vault is locked (it could not be opened at sign-in).".to_string(),
+            other => other.to_string(),
+        })?;
+        cx.audit.record(&cx.session.user, if system { "vault.system.set" } else { "vault.user.set" }, name);
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------ jobs
+
+    fn start(&mut self, label: &str, f: impl FnOnce() -> JobOut + Send + 'static) {
+        if self.job.is_some() {
+            self.fail("Another operation is still running.");
+            return;
+        }
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        self.job = Some(Job { label: label.into(), rx });
+    }
+
+    fn poll(&mut self, cx: &AppCx) {
+        let Some(job) = &self.job else { return };
+        let Ok(out) = job.rx.try_recv() else { return };
+        self.job = None;
+        match out {
+            JobOut::Msg(Ok(m)) => {
+                self.ok(m);
+                self.refresh_devices();
+            }
+            JobOut::Wifi(Err(e)) => self.fail(e),
+            JobOut::Wifi(Ok(aps)) => self.show_wifi_picker(aps),
+            JobOut::Msg(Err(e)) => {
+                self.fail(e);
+                self.refresh_devices();
+            }
+            JobOut::Models { provider, models, ms } => {
+                let n = models.len();
+                let r = Self::svc(cx).settings.lock().unwrap().update(|s| {
+                    if let Some(p) = s.providers.iter_mut().find(|p| p.id == provider) {
+                        p.models = models;
+                    }
+                });
+                match r {
+                    Ok(()) => self.ok(format!("{provider}: connected in {ms} ms, {n} model(s) available")),
+                    Err(e) => self.fail(e.to_string()),
+                }
+            }
+        }
+    }
+
+    fn test_provider(&mut self, cx: &AppCx, id: &str) {
+        let svc = Self::svc(cx).clone();
+        let id = id.to_string();
+        match svc.client_for(&id, true) {
+            Err(e) => self.fail(e),
+            Ok(_) => self.start(&format!("testing {id}"), move || match svc.client_for(&id, true).and_then(|c| c.test()) {
+                Ok(r) => JobOut::Models { provider: id, models: r.models, ms: r.latency_ms },
+                Err(e) => JobOut::Msg(Err(format!("{id}: {e}"))),
+            }),
+        }
+    }
+
+    fn test_chat(&mut self, cx: &AppCx) {
+        let svc = Self::svc(cx).clone();
+        let Some(choice) = svc.settings.lock().unwrap().get().chat.clone() else {
+            self.fail("Choose a chat model first (press m on a provider).");
+            return;
+        };
+        self.start("asking the model", move || {
+            let r = svc.client_for(&choice.provider, false).and_then(|c| c.chat(&choice.model, &[iyakki_agent::chat::Message::user("Reply with the single word: OK")]));
+            JobOut::Msg(match r {
+                Ok(t) => Ok(format!("{} · {} replied: {}", choice.provider, choice.model, t.chars().take(80).collect::<String>())),
+                Err(e) => Err(format!("{}: {e}", choice.provider)),
+            })
+        });
+    }
+
+    // ------------------------------------------------------------------ forms
+
+    fn provider_form(cx: &AppCx, editing: Option<&ProviderCfg>) -> Form {
+        let kind = editing.map_or(0, |p| Kind::ALL.iter().position(|k| *k == p.kind).unwrap_or(0));
+        let default_url = editing.and_then(|p| p.base_url.clone()).or_else(|| Kind::ALL[kind].default_base().map(str::to_string)).unwrap_or_default();
+        let _ = cx;
+        Form::new(if editing.is_some() { "Edit model provider" } else { "Add model provider" })
+            .text("Name (lowercase id)", editing.map_or("", |p| p.id.as_str()), "e.g. local-ollama, openai, claude")
+            .choice("Type", &kind_labels(), kind)
+            .text("Base URL", &default_url, "http://localhost:11434")
+            .secret("API key", if editing.is_some() { "leave empty to keep the current key" } else { "stored in the system vault, never in settings" })
+            .text("Default model (optional)", editing.and_then(|p| p.default_model.as_deref()).unwrap_or(""), "pick one later with m")
+    }
+
+    fn save_provider(&mut self, cx: &AppCx, form: &Form, editing: Option<String>) -> Result<(), String> {
+        let id = form.value(0);
+        let kind = Kind::ALL[form.choice_idx(1)];
+        let url = form.value(2);
+        let key = form.raw(3);
+        let model = form.value(4);
+        let existing = Self::providers(cx).into_iter().find(|p| Some(&p.id) == editing.as_ref());
+        if editing.is_none() && Self::providers(cx).iter().any(|p| p.id == id) {
+            return Err(format!("A provider named `{id}` already exists."));
+        }
+        let mut cfg = existing.clone().unwrap_or_else(|| ProviderCfg::new(&id, kind));
+        if editing.is_none() {
+            cfg.id = id.clone();
+        }
+        cfg.kind = kind;
+        cfg.base_url = if url.is_empty() { None } else { Some(url) };
+        cfg.default_model = if model.is_empty() { None } else { Some(model) };
+        let key_name = format!("{}-key", cfg.id);
+        if !key.is_empty() {
+            cfg.key_ref = Some(format!("vault:{key_name}"));
+        } else if existing.is_none() && !kind.needs_key() {
+            cfg.key_ref = None;
+        }
+        cfg.validate()?; // before touching the vault: a rejected form stores nothing
+        if !key.is_empty() {
+            self.store_key(cx, &key_name, &key, true)?;
+        }
+        Self::svc(cx).settings.lock().unwrap().upsert_provider(cfg.clone()).map_err(|e| e.to_string())?;
+        cx.audit.record(&cx.session.user, "settings.provider.save", &format!("{} ({})", cfg.id, cfg.kind.label()));
+        Ok(())
+    }
+
+    fn external_form(editing: Option<&ExtEntry>) -> Form {
+        let (kind, id, url, coll, cred) = match editing.map(|e| &e.backend) {
+            Some(ExternalRag::Qdrant { id, url, collection, key_ref }) => (0, id.as_str(), url.as_str(), collection.as_str(), key_ref.is_some()),
+            Some(ExternalRag::Chroma { id, url, collection, token_ref, .. }) => (1, id.as_str(), url.as_str(), collection.as_str(), token_ref.is_some()),
+            Some(ExternalRag::Http { id, url, key_ref }) => (2, id.as_str(), url.as_str(), "", key_ref.is_some()),
+            None => (0, "", "", "", false),
+        };
+        Form::new(if editing.is_some() { "Edit external RAG" } else { "Add external RAG" })
+            .text("Name (lowercase id)", id, "e.g. team-qdrant")
+            .choice("Type", &["Qdrant", "Chroma", "HTTP search endpoint"], kind)
+            .text("URL", url, "http://host:6333  /  http://host:8000  /  https://search.corp/api")
+            .text("Collection (Qdrant / Chroma)", coll, "collection name")
+            .secret("API key / token (optional)", if cred { "leave empty to keep the current credential" } else { "stored in the system vault" })
+    }
+
+    fn save_external(&mut self, cx: &AppCx, form: &Form, editing: Option<String>) -> Result<(), String> {
+        let (id, url, coll, key) = (form.value(0), form.value(2), form.value(3), form.raw(4));
+        let prev = Self::externals(cx).into_iter().find(|e| Some(e.backend.id()) == editing.as_deref());
+        if editing.is_none() && Self::externals(cx).iter().any(|e| e.backend.id() == id) {
+            return Err(format!("A backend named `{id}` already exists."));
+        }
+        let key_name = format!("{id}-key");
+        let prev_ref = prev.as_ref().and_then(|p| match &p.backend {
+            ExternalRag::Qdrant { key_ref, .. } | ExternalRag::Http { key_ref, .. } => key_ref.clone(),
+            ExternalRag::Chroma { token_ref, .. } => token_ref.clone(),
+        });
+        let cred = if !key.is_empty() { Some(format!("vault:{key_name}")) } else { prev_ref };
+        let backend = match form.choice_idx(1) {
+            0 => ExternalRag::Qdrant { id: id.clone(), url, collection: coll, key_ref: cred },
+            1 => ExternalRag::Chroma { id: id.clone(), url, tenant: "default_tenant".into(), database: "default_database".into(), collection: coll, token_ref: cred },
+            _ => ExternalRag::Http { id: id.clone(), url, key_ref: cred },
+        };
+        backend.validate()?;
+        if !key.is_empty() {
+            self.store_key(cx, &key_name, &key, true)?;
+        }
+        Self::svc(cx).settings.lock().unwrap().upsert_external(ExtEntry { enabled: prev.map_or(true, |p| p.enabled), backend }).map_err(|e| e.to_string())?;
+        cx.audit.record(&cx.session.user, "settings.external.save", &id);
+        Ok(())
+    }
+
+    fn secret_provider_form() -> Form {
+        Form::new("Add external secret provider")
+            .text("Alias (lowercase id)", "", "e.g. corp-vault — used as ext:corp-vault/path#field")
+            .choice("Type", &["HashiCorp Vault / OpenBao (KV v2)", "1Password Connect"], 0)
+            .text("Address", "", "https://vault.example.com:8200")
+            .secret("Access token", "stored in the system vault")
+            .text("KV mount (HashiCorp)", "secret", "secret")
+            .text("Namespace (HashiCorp, optional)", "", "")
+    }
+
+    fn save_secret_provider(&mut self, cx: &AppCx, form: &Form) -> Result<(), String> {
+        let (alias, addr, token, mount, ns) = (form.value(0), form.value(2), form.raw(3), form.value(4), form.value(5));
+        if !valid_provider_id(&alias) {
+            return Err("Alias: lowercase letters, digits, - and _; must start with a letter.".into());
+        }
+        if token.is_empty() {
+            return Err("An access token is required.".into());
+        }
+        let key_name = format!("{alias}-token");
+        let token_ref = format!("vault:{key_name}");
+        let cfg = if form.choice_idx(1) == 0 {
+            SecretProvider::Hashicorp { addr, mount: if mount.is_empty() { "secret".into() } else { mount }, namespace: if ns.is_empty() { None } else { Some(ns) }, token_ref }
+        } else {
+            SecretProvider::Onepassword { addr, token_ref }
+        };
+        // validate the combination before storing the token
+        let mut probe = Self::svc(cx).settings.lock().unwrap().get().clone();
+        probe.secret_providers.insert(alias.clone(), cfg.clone());
+        probe.validate().map_err(|e| e.to_string())?;
+        self.store_key(cx, &key_name, &token, true)?;
+        Self::svc(cx).settings.lock().unwrap().upsert_secret_provider(&alias, cfg).map_err(|e| e.to_string())?;
+        Self::svc(cx).refresh_secret_providers();
+        cx.audit.record(&cx.session.user, "settings.secret_provider.save", &alias);
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------ modal handling
+
+    fn handle_modal(&mut self, ev: &Event, cx: &AppCx) {
+        let Some(modal) = self.modal.take() else { return };
+        match modal {
+            Modal::Form(kind, mut form) => match form.handle_event(ev) {
+                FormEvent::Cancel => {}
+                FormEvent::Changed(1) if matches!(kind, FormKind::Provider(_)) => {
+                    // switching type refreshes the URL default unless the user typed their own
+                    let old_default: Vec<String> = Kind::ALL.iter().map(|k| k.default_base().unwrap_or("").to_string()).collect();
+                    if old_default.contains(&form.value(2)) || form.value(2).is_empty() {
+                        form.set_value(2, Kind::ALL[form.choice_idx(1)].default_base().unwrap_or(""));
+                    }
+                    self.modal = Some(Modal::Form(kind, form));
+                }
+                FormEvent::Submit => {
+                    if let Some(next) = self.submit_form(cx, kind.clone(), &mut form) {
+                        self.modal = Some(next);
+                    }
+                }
+                _ => self.modal = Some(Modal::Form(kind, form)),
+            },
+            Modal::Pick(kind, mut picker) => match picker.handle_event(ev) {
+                PickEvent::Cancel => {}
+                PickEvent::Chosen(item) => self.apply_pick(cx, kind, &item),
+                PickEvent::None => self.modal = Some(Modal::Pick(kind, picker)),
+            },
+            Modal::Confirm(kind, text) => match ev {
+                Event::Key(Key::Char('y')) => self.apply_confirm(cx, kind),
+                // Esc or any letter cancels; other input (clicks on the backdrop, arrows) keeps it open
+                Event::Key(Key::Esc) | Event::Key(Key::Char(_)) => {}
+                _ => self.modal = Some(Modal::Confirm(kind, text)),
+            },
+        }
+    }
+
+    /// Returns a modal to keep open (the form again, with an error) when saving failed.
+    fn submit_form(&mut self, cx: &AppCx, kind: FormKind, form: &mut Form) -> Option<Modal> {
+        let result: Result<String, String> = match &kind {
+            FormKind::Provider(editing) => {
+                if !self.admin(cx) {
+                    return None;
+                }
+                self.save_provider(cx, form, editing.clone()).map(|_| format!("Saved provider `{}`.", if let Some(e) = editing { e.clone() } else { form.value(0) }))
+            }
+            FormKind::ProviderKey(id) => {
+                if !self.admin(cx) {
+                    return None;
+                }
+                let key = form.raw(0);
+                if key.is_empty() {
+                    Err("Enter the key.".into())
+                } else {
+                    let name = format!("{id}-key");
+                    self.store_key(cx, &name, &key, true).and_then(|_| {
+                        let id2 = id.clone();
+                        Self::svc(cx)
+                            .settings
+                            .lock()
+                            .unwrap()
+                            .update(|s| {
+                                if let Some(p) = s.providers.iter_mut().find(|p| p.id == id2) {
+                                    p.key_ref = Some(format!("vault:{name}"));
+                                }
+                            })
+                            .map_err(|e| e.to_string())
+                    })
+                    .map(|_| format!("Key for `{id}` stored in the system vault."))
+                }
+            }
+            FormKind::External(editing) => {
+                if !self.admin(cx) {
+                    return None;
+                }
+                self.save_external(cx, form, editing.clone()).map(|_| "Saved external RAG backend.".to_string())
+            }
+            FormKind::NewSecret(system) => {
+                let (name, value) = (form.value(0), form.raw(1));
+                if *system && !self.admin(cx) {
+                    return None;
+                }
+                if !valid_secret_name(&name) {
+                    Err("Name: lowercase letters, digits, . _ - (max 64).".into())
+                } else if value.is_empty() {
+                    Err("Enter the secret value.".into())
+                } else {
+                    self.store_key(cx, &name, &value, *system).map(|_| format!("Stored `{name}`."))
+                }
+            }
+            FormKind::Keyfile => {
+                if !self.admin(cx) {
+                    return None;
+                }
+                let path = form.value(0);
+                let r = Self::svc(cx).enable_keyfile(&path);
+                if r.is_ok() {
+                    cx.audit.record(&cx.session.user, "vault.keyfile.enable", &path);
+                }
+                r.map(|_| format!("Key file created at {path}; the system vault will open at boot."))
+            }
+            FormKind::SecretProvider => {
+                if !self.admin(cx) {
+                    return None;
+                }
+                self.save_secret_provider(cx, form).map(|_| "Saved secret provider.".to_string())
+            }
+            FormKind::VoiceStt | FormKind::VoiceTts => {
+                if !self.admin(cx) {
+                    return None;
+                }
+                let stt = kind == FormKind::VoiceStt;
+                self.save_speech_engine(cx, form, stt).map(|_| format!("Saved the {} engine.", if stt { "speech-to-text" } else { "text-to-speech" }))
+            }
+            FormKind::VoiceCmds => {
+                if !self.admin(cx) {
+                    return None;
+                }
+                let (rec, play) = (form.value(0), form.value(1));
+                Self::svc(cx).settings.lock().unwrap().update(|st| {
+                    st.voice.record_cmd = rec;
+                    st.voice.play_cmd = play;
+                }).map(|_| {
+                    cx.audit.record(&cx.session.user, "settings.voice.commands", "");
+                    "Saved the microphone and speaker commands.".to_string()
+                }).map_err(|e| e.to_string())
+            }
+            FormKind::Persist(dev, needs_force) => {
+                if !self.admin(cx) {
+                    return None;
+                }
+                let typed = form.value(0);
+                let erase_ok = !*needs_force || form.value(1).trim() == "ERASE";
+                if typed.trim().trim_start_matches("/dev/") != dev.as_str() {
+                    Err(format!("Type {dev} exactly to confirm."))
+                } else if !erase_ok {
+                    Err("This disk holds data. Type ERASE (capitals) to replace it.".to_string())
+                } else {
+                    let (env, dev, force) = (self.storage.clone(), dev.clone(), *needs_force);
+                    cx.audit.record(&cx.session.user, "storage.persist", &dev);
+                    self.start("preparing the data disk", move || {
+                        JobOut::Msg(iyakki_storage::persist(&env.roots, env.mounter.as_ref(), &env.mke2fs, &env.scratch, &dev, force, Some(&env.data_dir)).map(|r| format!("{} is now the IYAKKI data disk ({} files copied). Reboot to start using it.", r.device, r.files_copied)))
+                    });
+                    Ok("Working… this takes a few seconds.".to_string())
+                }
+            }
+            FormKind::WifiJoin(ssid, security) => {
+                if !self.admin(cx) {
+                    return None;
+                }
+                match iyakki_devctl::wifi::Known::new(ssid, &form.raw(0), *security, false, iyakki_agent::clock::now_unix()) {
+                    Ok(k) => {
+                        self.join_wifi(cx, k);
+                        Ok("Working… this takes a few seconds.".to_string())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            FormKind::WifiHidden => {
+                if !self.admin(cx) {
+                    return None;
+                }
+                let (name, pass) = (form.value(0), form.raw(1));
+                let sec = if pass.is_empty() { iyakki_devctl::wifi::Security::Open } else { iyakki_devctl::wifi::Security::Wpa2 };
+                match iyakki_devctl::wifi::Known::new(name.trim(), &pass, sec, true, iyakki_agent::clock::now_unix()) {
+                    Ok(k) => {
+                        self.join_wifi(cx, k);
+                        Ok("Working… this takes a few seconds.".to_string())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            FormKind::NewVirtualDisk => {
+                if !self.admin(cx) {
+                    return None;
+                }
+                let Some(v) = self.storage.virtual_disks.clone() else { return None };
+                match iyakki_storage::virt::parse_size(&form.value(0)) {
+                    None => Err("Write a size such as 8G or 512M.".to_string()),
+                    Some(bytes) => v.add(bytes).map(|name| {
+                        cx.audit.record(&cx.session.user, "storage.virtual.add", &name);
+                        self.refresh_devices();
+                        format!("Made the virtual disk {name} ({}).", iyakki_storage::human(bytes))
+                    }),
+                }
+            }
+            FormKind::RemoveVirtualDisk(name) => {
+                if !self.admin(cx) {
+                    return None;
+                }
+                let Some(v) = self.storage.virtual_disks.clone() else { return None };
+                if form.value(0).trim().trim_start_matches("/dev/") != name.as_str() {
+                    Err(format!("Type {name} exactly to confirm."))
+                } else {
+                    v.remove(name).map(|_| {
+                        cx.audit.record(&cx.session.user, "storage.virtual.remove", name);
+                        self.refresh_devices();
+                        format!("Removed {name}.")
+                    })
+                }
+            }
+            FormKind::TokenPrice => {
+                if !self.admin(cx) {
+                    return None;
+                }
+                match form.value(0).trim().parse::<u32>() {
+                    Err(_) => Err("enter a whole number of cents (0 or more)".to_string()),
+                    Ok(v) => Self::svc(cx).settings.lock().unwrap().update(|s| s.token_price_cents_per_mtok = v).map(|_| {
+                        cx.audit.record(&cx.session.user, "settings.token_price", &v.to_string());
+                        format!("Agent token price: {v} cents per million tokens.")
+                    }).map_err(|e| e.to_string()),
+                }
+            }
+            FormKind::NewSkill => {
+                let md = format!("---\nname: {}\ndescription: {}\ntriggers: {}\n---\n{}\n", form.value(0), form.value(1), form.value(2), form.value(3));
+                self.add_skill(cx, &md, form.choice_idx(4) == 1)
+            }
+            FormKind::ImportSkill => {
+                let path = form.value(0);
+                let shared = form.choice_idx(1) == 1;
+                Self::read_skill_file(cx, &path).and_then(|md| self.add_skill(cx, &md, shared))
+            }
+            FormKind::Password => {
+                let (old, new, again) = (form.raw(0), form.raw(1), form.raw(2));
+                if new != again {
+                    Err("The new passwords don't match.".into())
+                } else {
+                    let user = cx.session.user.clone();
+                    let r = cx.store.lock().map_err(|_| "store busy".to_string()).and_then(|mut s| s.set_password(&cx.session, &user, Some(&old), &new).map_err(|e| match e {
+                        AccountError::Forbidden => "The current password is wrong.".to_string(),
+                        other => other.to_string(),
+                    }));
+                    if r.is_ok() {
+                        Self::svc(cx).on_password_change(&user, &old, &new);
+                        cx.audit.record(&user, "account.password", "");
+                    }
+                    r.map(|_| "Password changed. Your personal vault keeps working with the new one.".to_string())
+                }
+            }
+        };
+        match result {
+            Ok(m) => {
+                self.ok(m);
+                None
+            }
+            Err(e) => {
+                form.error = Some(e);
+                Some(Modal::Form(kind, form.clone()))
+            }
+        }
+    }
+
+    fn apply_pick(&mut self, cx: &AppCx, kind: PickKind, item: &str) {
+        if !self.admin(cx) {
+            return;
+        }
+        match kind {
+            PickKind::Wifi => {
+                let chosen = self.wifi_items.iter().find(|(t, _)| t == item).cloned();
+                match chosen {
+                    Some((_, Some(ap))) => {
+                        if !ap.security.joinable() {
+                            return self.fail(format!("{} networks ({}) cannot be joined from here.", ap.security.label(), ap.ssid));
+                        }
+                        if ap.security == iyakki_devctl::wifi::Security::Open {
+                            match iyakki_devctl::wifi::Known::new(&ap.ssid, "", ap.security, false, iyakki_agent::clock::now_unix()) {
+                                Ok(k) => self.join_wifi(cx, k),
+                                Err(e) => self.fail(e),
+                            }
+                        } else {
+                            let f = Form::new(&format!("Join {} ({})", ap.ssid, ap.security.label())).secret("Passphrase", "8 to 63 characters; only the key made from it is saved");
+                            self.open_form(FormKind::WifiJoin(ap.ssid.clone(), ap.security), f);
+                        }
+                    }
+                    Some((t, None)) if t.starts_with("Hidden") => {
+                        let f = Form::new("Join a hidden WiFi network").text("Network name", "", "exactly as it is spelled").secret("Passphrase", "empty if the network is open");
+                        self.open_form(FormKind::WifiHidden, f);
+                    }
+                    Some((t, None)) if t.starts_with("Forget") => {
+                        let names: Vec<String> = self.wifi.known.list().into_iter().map(|k| k.ssid).collect();
+                        self.modal = Some(Modal::Pick(PickKind::WifiForget, Picker::new("Forget which network?", names)));
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            PickKind::WifiForget => {
+                match self.wifi.known.forget(item) {
+                    Ok(true) => {
+                        cx.audit.record(&cx.session.user, "settings.wifi.forget", item);
+                        if let Some(iface) = self.wifi.iface() {
+                            let _ = self.wifi.wifi.apply(&iface, &self.wifi.known.list());
+                        }
+                        self.ok(format!("Forgot {item}."));
+                    }
+                    Ok(false) => self.fail(format!("{item} was not saved.")),
+                    Err(e) => self.fail(e),
+                }
+                return;
+            }
+            _ => {}
+        }
+        let (r, what, provider) = match &kind {
+            PickKind::Chat(p) => (
+                Self::svc(cx).settings.lock().unwrap().update(|s| {
+                    s.chat = Some(ModelChoice { provider: p.clone(), model: item.into() });
+                    if let Some(pr) = s.providers.iter_mut().find(|x| x.id == *p) {
+                        pr.default_model = Some(item.into());
+                    }
+                }),
+                "chat",
+                p,
+            ),
+            PickKind::Wifi | PickKind::WifiForget => return,
+            PickKind::Embed(p) => {
+                let choice = if item.starts_with("(built-in") { None } else { Some(ModelChoice { provider: p.clone(), model: item.into() }) };
+                (Self::svc(cx).settings.lock().unwrap().set_embedding(choice), "embedding", p)
+            }
+        };
+        match r {
+            Ok(()) => {
+                cx.audit.record(&cx.session.user, &format!("settings.{what}_model"), &format!("{provider}/{item}"));
+                let extra = if what == "embedding" && Self::svc(cx).reindex_stale_in_background() { " Existing documents are being re-embedded in the background." } else { "" };
+                self.ok(format!("{what} model: {provider} · {item}.{extra}"));
+            }
+            Err(e) => self.fail(e.to_string()),
+        }
+    }
+
+    fn apply_confirm(&mut self, cx: &AppCx, kind: ConfirmKind) {
+        let r: Result<String, String> = match &kind {
+            ConfirmKind::Provider(id) if self.admin(cx) => Self::svc(cx).settings.lock().unwrap().remove_provider(id).map(|_| format!("Removed provider `{id}`.")).map_err(|e| e.to_string()),
+            ConfirmKind::External(id) if self.admin(cx) => Self::svc(cx).settings.lock().unwrap().remove_external(id).map(|_| format!("Removed `{id}`.")).map_err(|e| e.to_string()),
+            ConfirmKind::SecretProvider(a) if self.admin(cx) => {
+                let r = Self::svc(cx).settings.lock().unwrap().remove_secret_provider(a).map(|_| format!("Removed `{a}`.")).map_err(|e| e.to_string());
+                Self::svc(cx).refresh_secret_providers();
+                r
+            }
+            ConfirmKind::Secret(system, name) => {
+                if *system && !self.admin(cx) {
+                    return;
+                }
+                let r = if *system { Self::svc(cx).system_delete(name) } else { Self::svc(cx).user_delete(&cx.session.user, name) };
+                r.map(|_| format!("Deleted secret `{name}`.")).map_err(|e| e.to_string())
+            }
+            ConfirmKind::Reboot if self.admin(cx) && cx.session.policy.power => {
+                cx.audit.record(&cx.session.user, "power.reboot", "storage");
+                cx.host.reboot();
+                Ok("Restarting…".to_string())
+            }
+            ConfirmKind::Skill(scope, name) => {
+                let p = &cx.session.policy;
+                Self::svc(cx).skills.remove(scope, name, p.manage_skills, p.skills).map(|_| {
+                    cx.audit.record(&cx.session.user, "skills.delete", &format!("{}:{name}", scope.label()));
+                    format!("Deleted skill `{name}`.")
+                }).map_err(|e| e.to_string())
+            }
+            ConfirmKind::ResetPersonal => Self::svc(cx).reset_user_vault(&cx.session.user).map(|_| "Personal vault removed; a new empty one is created at your next sign-in.".to_string()),
+            _ => return,
+        };
+        match r {
+            Ok(m) => {
+                cx.audit.record(&cx.session.user, "settings.delete", &m);
+                self.ok(m);
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
+    // ------------------------------------------------------------------ per-tab keys
+
+    // ------------------------------------------------------------------ voice
+
+    fn engine_form(cx: &AppCx, stt: bool) -> Form {
+        let cur = {
+            let st = Self::svc(cx).settings.lock().unwrap();
+            if stt { st.get().voice.stt.clone() } else { st.get().voice.tts.clone() }
+        };
+        let (kind, target, model, voice_name, lang, has_key) = match &cur {
+            Some(SpeechEngine::Http { url, model, voice, language, key_ref }) => (0, url.clone(), model.clone(), voice.clone().unwrap_or_default(), language.clone().unwrap_or_default(), key_ref.is_some()),
+            Some(SpeechEngine::Command { command }) => (1, command.clone(), String::new(), String::new(), String::new(), false),
+            None => (0, if stt { "http://127.0.0.1:8080/v1/audio/transcriptions".into() } else { "http://127.0.0.1:8000/v1/audio/speech".into() }, String::new(), String::new(), String::new(), false),
+        };
+        let hint = if stt { "whisper-cli -m model.bin -f {wav} -nt -np" } else { "piper -m voice.onnx -f {out}" };
+        let f = Form::new(if stt { "Speech-to-text engine" } else { "Text-to-speech engine" })
+            .choice("Type", &["HTTP endpoint (OpenAI-compatible)", "Local command"], kind)
+            .text("URL or command", &target, hint)
+            .text("Model (HTTP only)", &model, if stt { "whisper-1, tiny.en, …" } else { "tts-1, kokoro, …" })
+            .secret("API key (optional, HTTP only)", if has_key { "leave empty to keep the current key" } else { "stored in the system vault" });
+        if stt { f.text("Language hint (optional)", &lang, "en") } else { f.text("Voice (optional)", &voice_name, "alloy, nova, …") }
+    }
+
+    fn save_speech_engine(&mut self, cx: &AppCx, form: &Form, stt: bool) -> Result<(), String> {
+        let (target, model, key, extra) = (form.value(1), form.value(2), form.raw(3), form.value(4));
+        let key_name = if stt { "stt-key" } else { "tts-key" };
+        let prev_key = {
+            let st = Self::svc(cx).settings.lock().unwrap();
+            match if stt { &st.get().voice.stt } else { &st.get().voice.tts } {
+                Some(SpeechEngine::Http { key_ref, .. }) => key_ref.clone(),
+                _ => None,
+            }
+        };
+        let engine = if form.choice_idx(0) == 0 {
+            let key_ref = if !key.is_empty() { Some(format!("vault:{key_name}")) } else { prev_key };
+            let opt = |s: String| if s.is_empty() { None } else { Some(s) };
+            SpeechEngine::Http { url: target, model, key_ref, voice: if stt { None } else { opt(extra.clone()) }, language: if stt { opt(extra) } else { None } }
+        } else {
+            SpeechEngine::Command { command: target }
+        };
+        engine.validate()?;
+        if form.choice_idx(0) == 0 && !key.is_empty() {
+            self.store_key(cx, key_name, &key, true)?;
+        }
+        Self::svc(cx).settings.lock().unwrap().update(|st| if stt { st.voice.stt = Some(engine) } else { st.voice.tts = Some(engine) }).map_err(|e| e.to_string())?;
+        cx.audit.record(&cx.session.user, if stt { "settings.voice.stt" } else { "settings.voice.tts" }, "");
+        Ok(())
+    }
+
+    fn handle_voice(&mut self, k: &Key, cx: &AppCx) {
+        let svc = Self::svc(cx).clone();
+        let toggle = |cx: &AppCx, f: &dyn Fn(&mut iyakki_agent::voice::VoiceSettings)| Self::svc(cx).settings.lock().unwrap().update(|s| f(&mut s.voice));
+        match k {
+            Key::Char('s') if self.admin(cx) => {
+                let f = Self::engine_form(cx, true);
+                self.open_form(FormKind::VoiceStt, f);
+            }
+            Key::Char('v') if self.admin(cx) => {
+                let f = Self::engine_form(cx, false);
+                self.open_form(FormKind::VoiceTts, f);
+            }
+            Key::Char('c') if self.admin(cx) => {
+                let v = svc.voice_settings();
+                let f = Form::new("Microphone and speaker commands").text("Record command (raw 16 kHz mono S16_LE on stdout)", &v.record_cmd, "arecord -q -f S16_LE -r 16000 -c 1 -t raw").text("Play command (WAV on stdin)", &v.play_cmd, "aplay -q");
+                self.open_form(FormKind::VoiceCmds, f);
+            }
+            Key::Char('a') if self.admin(cx) => match toggle(cx, &|v| v.auto_send = !v.auto_send) {
+                Ok(()) => self.ok("Auto-send toggled."),
+                Err(e) => self.fail(e.to_string()),
+            },
+            Key::Char('r') if self.admin(cx) => match toggle(cx, &|v| v.speak_replies = !v.speak_replies) {
+                Ok(()) => self.ok("Read replies aloud toggled."),
+                Err(e) => self.fail(e.to_string()),
+            },
+            Key::Char('S') if self.admin(cx) => match toggle(cx, &|v| v.stt = None) {
+                Ok(()) => self.ok("Speech-to-text cleared."),
+                Err(e) => self.fail(e.to_string()),
+            },
+            Key::Char('V') if self.admin(cx) => match toggle(cx, &|v| v.tts = None) {
+                Ok(()) => self.ok("Text-to-speech cleared."),
+                Err(e) => self.fail(e.to_string()),
+            },
+            Key::Char(c) if "mpty".contains(*c) => {
+                if !cx.session.policy.voice {
+                    cx.audit.record(&cx.session.user, "voice.denied", "test");
+                    self.fail("Voice is not enabled for your account.");
+                    return;
+                }
+                let ms = self.test_record_ms;
+                let v = svc.voice_settings();
+                let user = cx.session.user.clone();
+                cx.audit.record(&user, "voice.test", &c.to_string());
+                match *c {
+                    'm' => self.start("listening to the microphone", move || {
+                        JobOut::Msg((|| {
+                            let rec = Recorder::start(&v.record_cmd)?;
+                            std::thread::sleep(Duration::from_millis(ms));
+                            let pcm = rec.stop()?;
+                            let pk = voice::peak(&pcm);
+                            if pk < 150 {
+                                Err(format!("Microphone opened but it is silent (peak {pk}). Check the input volume and mute switch."))
+                            } else {
+                                Ok(format!("Microphone works: {:.1} s captured, peak level {pk} of 32767.", pcm.len() as f32 / voice::SAMPLE_RATE as f32))
+                            }
+                        })())
+                    }),
+                    'p' => self.start("playing a test tone", move || {
+                        JobOut::Msg((|| {
+                            let mut p = Player::start(&v.play_cmd, &voice::encode_wav(&voice::tone(660.0, 700), voice::SAMPLE_RATE))?;
+                            p.wait(Duration::from_secs(8));
+                            Ok("Played a test tone through the speaker command.".to_string())
+                        })())
+                    }),
+                    't' => self.start("say something…", move || {
+                        JobOut::Msg((|| {
+                            let rec = Recorder::start(&v.record_cmd)?;
+                            std::thread::sleep(Duration::from_millis(ms * 2));
+                            let pcm = rec.stop()?;
+                            let text = svc.transcribe_samples(&pcm)?;
+                            Ok(format!("Heard: “{text}”"))
+                        })())
+                    }),
+                    _ => self.start("speaking", move || {
+                        JobOut::Msg((|| {
+                            let wav = svc.synthesize_text("This is the IYAKKI voice test.")?;
+                            let mut p = Player::start(&v.play_cmd, &wav)?;
+                            p.wait(Duration::from_secs(20));
+                            Ok("Synthesised speech and played it.".to_string())
+                        })())
+                    }),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn render_voice(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+        let v = Self::svc(cx).voice_settings();
+        let lines: [(&str, String, [u8; 4]); 6] = [
+            ("Speech-to-text", v.stt.as_ref().map_or("not set up".into(), |e| e.label()), if v.stt.is_some() { OK } else { MUTED }),
+            ("Text-to-speech", v.tts.as_ref().map_or("not set up".into(), |e| e.label()), if v.tts.is_some() { OK } else { MUTED }),
+            ("Record command", v.record_cmd.clone(), TEXT),
+            ("Play command", v.play_cmd.clone(), TEXT),
+            ("Auto-send speech", if v.auto_send { "on — transcribed text is sent immediately".into() } else { "off — text lands in the input box so you can edit it".into() }, TEXT),
+            ("Read replies aloud", if v.speak_replies { "on".into() } else { "off".into() }, TEXT),
+        ];
+        for (i, (k, val, col)) in lines.iter().enumerate() {
+            g.text(a.x, a.y + i as f32 * 28.0 * s, 14.0 * s, MUTED, k, Face::Sans);
+            let val = g.fit(15.0 * s, val, Face::Mono, a.w - 190.0 * s);
+            g.text(a.x + 180.0 * s, a.y + i as f32 * 28.0 * s, 15.0 * s, *col, &val, Face::Mono);
+        }
+        let mut y = a.y + 6.0 * 28.0 * s + 14.0 * s;
+        let notes = [
+            if cx.session.policy.voice { "Your account may use the microphone and speaker." } else { "Voice is switched off for your account (an admin can enable it in Users)." },
+            "Speech engines: an OpenAI-compatible HTTP server (OpenAI, speaches, LocalAI, whisper.cpp server) or a local command (whisper-cli, piper).",
+            "Audio never leaves the machine unless you point an engine at a remote server. Recordings are not stored.",
+        ];
+        for n in notes {
+            for l in g.wrap(14.0 * s, n, Face::Sans, a.w) {
+                g.text(a.x, y, 14.0 * s, DIM, &l, Face::Sans);
+                y += 20.0 * s;
+            }
+        }
+    }
+
+    /// Number of selectable rows on the current tab.
+    fn list_len(&mut self, cx: &AppCx) -> usize {
+        match self.tab() {
+            Tab::Models => Self::providers(cx).len(),
+            Tab::Rag => Self::externals(cx).len(),
+            Tab::Vault => self.secret_names(cx).map_or(0, |n| n.len()),
+            Tab::SecretProviders => Self::secret_providers(cx).len(),
+            Tab::Skills => Self::svc(cx).skills.list(&cx.session.user).len(),
+            Tab::Storage => self.devices.len(),
+            Tab::Network | Tab::Bluetooth | Tab::Display | Tab::Sound => self.dev_rows().len(),
+            Tab::Voice | Tab::Account | Tab::Browser => 0,
+        }
+    }
+
+    fn add_skill(&mut self, cx: &AppCx, markdown: &str, shared: bool) -> Result<String, String> {
+        use iyakki_agent::skills::Scope;
+        let p = &cx.session.policy;
+        if shared && !p.manage_skills {
+            cx.audit.record(&cx.session.user, "settings.denied", "skills.shared");
+            return Err("You may not edit the shared skills.".into());
+        }
+        let scope = if shared { Scope::Shared } else { Scope::User(cx.session.user.clone()) };
+        let sk = Self::svc(cx).skills.add(scope, markdown, p.manage_skills, p.skills).map_err(|e| e.to_string())?;
+        cx.audit.record(&cx.session.user, "skills.add", &format!("{}:{}", sk.scope.label(), sk.name));
+        Ok(format!("Saved {} skill `{}`.", sk.scope.label(), sk.name))
+    }
+
+    /// Read a skill file, but only from where this user may read (symlinks resolved first).
+    fn read_skill_file(cx: &AppCx, path: &str) -> Result<String, String> {
+        let real = iyakki_agent::scope::resolve(std::path::Path::new("/"), path.trim())?;
+        iyakki_agent::scope::check_read(&cx.session.policy, &cx.session.user, &real)?;
+        let len = std::fs::metadata(&real).map_err(|e| format!("{}: {e}", real.display()))?.len();
+        if len > 2 * iyakki_agent::skills::MAX_BODY_BYTES as u64 {
+            return Err(format!("{} is too large for a skill", real.display()));
+        }
+        std::fs::read_to_string(&real).map_err(|e| format!("{}: {e}", real.display()))
+    }
+
+    fn handle_storage(&mut self, k: &Key, cx: &AppCx) {
+        match k {
+            Key::Up => self.move_sel(-1, self.devices.len()),
+            Key::Down => self.move_sel(1, self.devices.len()),
+            Key::Char('r') => {
+                self.refresh_devices();
+                self.ok("Disks rescanned.");
+            }
+            Key::Char('b') if self.admin(cx) => {
+                if cx.session.policy.power {
+                    self.modal = Some(Modal::Confirm(ConfirmKind::Reboot, "Restart this machine now?".into()));
+                } else {
+                    self.fail("Your account may not restart the machine.");
+                }
+            }
+            Key::Char('n') if self.admin(cx) && self.storage.virtual_disks.is_some() => {
+                self.open_form(FormKind::NewVirtualDisk, Form::new("New virtual disk").text("Size (for example 8G, 512M)", "8G", "8G"));
+            }
+            Key::Char('x') if self.admin(cx) && self.storage.virtual_disks.is_some() => {
+                let Some(dev) = self.devices.get(self.sel()).cloned() else { return };
+                if dev.parent.is_some() {
+                    return self.fail("Pick the disk itself, not one of its partitions.");
+                }
+                let f = Form::new(&format!("Delete the virtual disk {} and everything on it?", dev.name)).text(&format!("Type {} to confirm", dev.name), "", "the image file is removed");
+                self.open_form(FormKind::RemoveVirtualDisk(dev.name.clone()), f);
+            }
+            Key::Char('m') if self.admin(cx) => {
+                let Some(dev) = self.devices.get(self.sel()).cloned() else { return };
+                match iyakki_storage::eligibility(&dev, &self.devices) {
+                    Err(why) => self.fail(format!("Cannot use it: {why}.")),
+                    Ok(what) => {
+                        let mut f = Form::new(&format!("Erase /dev/{} and use it for IYAKKI data?", dev.name)).text(&format!("Type {} to confirm", dev.name), "", "everything on this disk will be lost");
+                        if let Some(w) = &what {
+                            f = f.text(&format!("It holds {w}. Type ERASE"), "", "ERASE");
+                        }
+                        self.open_form(FormKind::Persist(dev.name.clone(), what.is_some()), f);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn render_storage(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+        use iyakki_storage::DataLocation;
+        let loc = iyakki_storage::data_location(&self.storage.roots, &self.storage.data_dir);
+        let (text, col) = match &loc {
+            DataLocation::Disk(d) => (format!("Saved to disk ({d}). Your accounts, settings, vaults, documents and chats survive power-off."), OK),
+            DataLocation::Memory => ("Kept in RAM. Everything is forgotten at power-off. Pick a disk below to keep your data.".to_string(), rgb(255, 196, 94)),
+            DataLocation::Other(o) => (format!("Stored on a {o} volume."), MUTED),
+        };
+        for (i, l) in g.wrap(15.0 * s, &text, Face::Bold, a.w).iter().take(2).enumerate() {
+            g.text(a.x, a.y + i as f32 * 21.0 * s, 15.0 * s, col, l, Face::Bold);
+        }
+        if let Some((free, total)) = iyakki_storage::space(&self.storage.data_dir) {
+            g.text(a.x, a.y + 46.0 * s, 13.0 * s, MUTED, &format!("{} free of {}", iyakki_storage::human(free), iyakki_storage::human(total)), Face::Sans);
+        }
+        let mut y = a.y + 76.0 * s;
+        if self.storage.virtual_disks.is_some() {
+            let note = "Virtual disks: this window only shows disks it makes for itself (files in its own folder), so nothing here can touch your computer's drives.";
+            for l in g.wrap(13.0 * s, note, Face::Sans, a.w).iter().take(2) {
+                g.text(a.x, y, 13.0 * s, ACCENT, l, Face::Sans);
+                y += 18.0 * s;
+            }
+            y += 6.0 * s;
+        }
+        if self.devices.is_empty() {
+            let none = if self.storage.virtual_disks.is_some() { "No virtual disks yet. Press n to make one." } else { "No disks found. Attach a USB drive or disk and press r." };
+            g.text(a.x, y, 15.0 * s, DIM, none, Face::Sans);
+        }
+        let _ = cx;
+        for (i, d) in self.devices.iter().enumerate() {
+            if y > a.y + a.h - 58.0 * s {
+                break;
+            }
+            let indent = if d.parent.is_some() { 24.0 * s } else { 0.0 };
+            let verdict = match iyakki_storage::eligibility(d, &self.devices) {
+                Err(why) => why,
+                Ok(None) => "empty — can be used".to_string(),
+                Ok(Some(what)) => format!("holds {what}"),
+            };
+            let sub = format!("{} · {}", if d.model.is_empty() { d.content.describe() } else { format!("{} · {}", d.model, d.content.describe()) }, verdict);
+            let size = d.human_size();
+            let mut chips: Vec<(&str, [u8; 4])> = vec![(size.as_str(), MUTED)];
+            if d.removable {
+                chips.push(("removable", ACCENT));
+            }
+            if d.content == iyakki_storage::Content::Iyakki {
+                chips.push(("IYAKKI data", OK));
+            }
+            if d.mounted_at.is_some() {
+                chips.push(("in use", ERR));
+            }
+            row(g, i, a.x + indent, y, a.w - indent, 58.0 * s, s, i == self.sel(), &format!("/dev/{}", d.name), &sub, &chips);
+            y += 64.0 * s;
+        }
+    }
+
+    fn dev_tab(&self) -> Option<DevTab> {
+        match self.tab() {
+            Tab::Network => Some(DevTab::Network),
+            Tab::Bluetooth => Some(DevTab::Bluetooth),
+            Tab::Display => Some(DevTab::Display),
+            Tab::Sound => Some(DevTab::Sound),
+            _ => None,
+        }
+    }
+
+    fn dev_rows(&mut self) -> Vec<DevRow> {
+        let ticks = self.ticks;
+        self.dev_tab().map(|t| self.hw.rows(t, ticks)).unwrap_or_default()
+    }
+
+    /// `w` on the Network page: look for networks.
+    fn scan_wifi(&mut self, cx: &AppCx) {
+        if !self.admin(cx) {
+            return self.fail("Only administrators can change the network.");
+        }
+        let Some(iface) = self.wifi.iface() else { return self.fail("This computer has no WiFi adapter.") };
+        let w = self.wifi.wifi.clone();
+        cx.audit.record(&cx.session.user, "settings.wifi.scan", &iface);
+        self.start("looking for WiFi networks", move || JobOut::Wifi(w.scan(&iface)));
+    }
+
+    fn show_wifi_picker(&mut self, aps: Vec<iyakki_devctl::wifi::Ap>) {
+        let known: Vec<String> = self.wifi.known.list().into_iter().map(|k| k.ssid).collect();
+        let mut items: Vec<(String, Option<iyakki_devctl::wifi::Ap>)> = aps
+            .into_iter()
+            .map(|a| {
+                let bars = "▂▄▆█".chars().take(a.bars()).collect::<String>();
+                let tag = if a.connected { "  · connected" } else if known.contains(&a.ssid) { "  · saved" } else { "" };
+                (format!("{}   {bars:<4}  {}  {}{tag}", a.ssid, a.security.label(), a.band()), Some(a))
+            })
+            .collect();
+        items.push(("Hidden network…".into(), None));
+        if !known.is_empty() {
+            items.push(("Forget a saved network…".into(), None));
+        }
+        let titles = items.iter().map(|(t, _)| t.clone()).collect();
+        self.wifi_items = items;
+        self.modal = Some(Modal::Pick(PickKind::Wifi, Picker::new("Join a WiFi network", titles)));
+    }
+
+    /// Remember a network and make the machine use it, in the background.
+    fn join_wifi(&mut self, cx: &AppCx, k: iyakki_devctl::wifi::Known) {
+        let Some(iface) = self.wifi.iface() else { return self.fail("This computer has no WiFi adapter.") };
+        let (w, store) = (self.wifi.wifi.clone(), self.wifi.known.clone());
+        cx.audit.record(&cx.session.user, "settings.wifi.join", &k.ssid);
+        let ssid = k.ssid.clone();
+        self.start("joining the network", move || {
+            JobOut::Msg((|| {
+                store.add(k)?;
+                w.apply(&iface, &store.list())?;
+                Ok(format!("Joining {ssid}. It is remembered and tried first the next time."))
+            })())
+        });
+    }
+
+    /// Bigger (`u`) or smaller (`U`) text and buttons, kept for this person.
+    fn change_ui_size(&mut self, bigger: bool, cx: &AppCx) {
+        use crate::uisize::{apply, load, save, LEVELS};
+        let cur = load(cx.services.dir(), &cx.session.user);
+        let next = if bigger { (cur + 1).min(LEVELS.len() - 1) } else { cur.saturating_sub(1) };
+        if next == cur {
+            return self.ok(format!("Already the {} size.", if bigger { "largest" } else { "smallest" }));
+        }
+        save(cx.services.dir(), &cx.session.user, next);
+        apply(Some(next));
+        self.ok(format!("Text and buttons: {} ({}%).", LEVELS[next].0, (LEVELS[next].1 * 100.0).round()));
+    }
+
+    fn handle_hw(&mut self, k: &Key, cx: &AppCx) {
+        let Some(tab) = self.dev_tab() else { return };
+        let len = self.dev_rows().len();
+        match k {
+            Key::Char('w') if tab == DevTab::Network => self.scan_wifi(cx),
+            Key::Char('u') if tab == DevTab::Display => self.change_ui_size(true, cx),
+            Key::Char('U') if tab == DevTab::Display => self.change_ui_size(false, cx),
+            Key::Up => self.move_sel(-1, len),
+            Key::Down => self.move_sel(1, len),
+            Key::Char('r') => {
+                self.hw.invalidate();
+                self.ok("Looked at the hardware again.");
+            }
+            other => {
+                if !self.admin(cx) {
+                    return;
+                }
+                let (sel, ticks) = (self.sel(), self.ticks);
+                if let Some(d) = self.hw.act(tab, sel, other, ticks) {
+                    match d.result {
+                        Ok(m) => {
+                            if !d.audit.is_empty() {
+                                cx.audit.record(&cx.session.user, &format!("settings.{}", self.tab().label().to_lowercase()), &d.audit);
+                            }
+                            self.ok(m);
+                        }
+                        Err(e) => self.fail(e),
+                    }
+                }
+            }
+        }
+    }
+
+    fn render_hw(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+        let note = match self.tab() {
+            Tab::Network => "w looks for WiFi networks and joins one (it is remembered and tried first next time). A WiFi in /etc/iyakki/net.conf still works.",
+            Tab::Bluetooth => "Pairing keyboards, mice and speakers is planned; today you can see and switch the adapter.",
+            Tab::Display => "The desktop uses the screen's best mode. Choosing another resolution needs direct display control, which is planned.",
+            _ => "Each card's playback volume. The speaker test is on the Voice tab.",
+        };
+        let admin = cx.session.policy.manage_settings;
+        let rows = self.dev_rows();
+        let mut y = a.y;
+        if self.tab() == Tab::Display {
+            y += self.render_ui_size_card(g, R::new(a.x, y, a.w, 74.0 * s), s, cx) + 10.0 * s;
+        }
+        for (i, r) in rows.iter().enumerate() {
+            if y > a.y + a.h - 70.0 * s {
+                break;
+            }
+            if let Some(v) = r.slider {
+                // a click on the card selects the row; the buttons and the track on top of it change the value
+                let card = R::new(a.x, y, a.w, 82.0 * s);
+                g.hit(card, Event::Row(i), &r.title);
+                let track = controls::slider_row(
+                    g,
+                    card,
+                    s,
+                    &Slider { id: SLIDER_HW + i, title: &r.title, help: &r.sub, value: v.value, min: v.min, max: v.max, unit: v.unit, minus: Event::Sub(i as u8, Key::Char('-')), plus: Event::Sub(i as u8, Key::Char('+')), enabled: admin && r.actionable() },
+                    ACCENT,
+                );
+                self.slider_w.push((SLIDER_HW + i, track.w));
+                if i == self.sel() {
+                    g.rrect_outline(card.x, card.y, card.w, card.h, 14.0 * s, 2.0 * s, ACCENT);
+                }
+                y += 90.0 * s;
+            } else {
+                let chips: Vec<(&str, [u8; 4])> = r.chips.iter().map(|c| (c.0.as_str(), c.1)).collect();
+                row(g, i, a.x, y, a.w, 58.0 * s, s, i == self.sel(), &r.title, &r.sub, &chips);
+                y += 64.0 * s;
+            }
+        }
+        let note = g.fit(13.0 * s, note, Face::Sans, a.w);
+        g.text(a.x, a.y + a.h - 22.0 * s, 13.0 * s, DIM, &note, Face::Sans);
+    }
+
+    /// A click on a hardware page's slider track.
+    fn hw_slider(&mut self, id: usize, x: f32, w: f32, cx: &AppCx) {
+        let row = id - SLIDER_HW;
+        let Some(tab) = self.dev_tab() else { return };
+        if !self.admin(cx) {
+            return;
+        }
+        let Some(v) = self.dev_rows().get(row).and_then(|r| r.slider) else { return };
+        self.sel[self.tab] = row;
+        let value = controls::value_at(x, w, v.min, v.max, v.step);
+        let ticks = self.ticks;
+        if let Some(d) = self.hw.set_value(tab, row, value, ticks) {
+            match d.result {
+                Ok(m) => {
+                    if !d.audit.is_empty() {
+                        cx.audit.record(&cx.session.user, &format!("settings.{}", self.tab().label().to_lowercase()), &d.audit);
+                    }
+                    self.ok(m);
+                }
+                Err(e) => self.fail(e),
+            }
+        }
+    }
+
+    fn handle_browser(&mut self, k: &Key, cx: &AppCx) {
+        let mut c = super::browser_config::load(cx);
+        let what = match k {
+            Key::Char('a') => {
+                c.js_all = !c.js_all;
+                if c.js_all {
+                    iyakki_js::warm_up();
+                }
+                format!("Scripts on every site: {}.", if c.js_all { "on" } else { "off" })
+            }
+            Key::Char('i') => {
+                c.images = !c.images;
+                format!("Pictures: {}.", if c.images { "on" } else { "off" })
+            }
+            Key::Char('s') => {
+                c.styles = !c.styles;
+                format!("Style sheets: {}.", if c.styles { "on" } else { "off" })
+            }
+            Key::Char('c') => {
+                c.cookies = !c.cookies;
+                format!("Cookies: {}.", if c.cookies { "on" } else { "off" })
+            }
+            Key::Char('e') => {
+                c.search = c.search.next();
+                format!("Search engine: {}.", c.search.name())
+            }
+            Key::Char('f') => {
+                c.js_sites.clear();
+                "Forgot the sites allowed to run scripts.".to_string()
+            }
+            _ => return,
+        };
+        super::browser_config::save(cx, &c);
+        cx.audit.record(&cx.session.user, "settings.browser", &what);
+        self.ok(what);
+    }
+
+    fn render_browser(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+        let c = super::browser_config::load(cx);
+        let (gap, rh) = (10.0 * s, 70.0 * s);
+        let two = a.w > 820.0 * s;
+        let cw = if two { (a.w - gap) / 2.0 } else { a.w };
+        let mut y = a.y + controls::section_title(g, a.x, a.y, s, "Pages");
+        let rows: [(&str, &str, bool, char); 4] = [
+            ("Run scripts on every site", "Pages can change themselves, load more content and answer clicks. Scripts run in a sandbox with time and memory limits. When this is off, scripts run only on the sites you allow (press j on a page).", c.js_all, 'a'),
+            ("Show pictures", "PNG, JPEG and GIF pictures are fetched after the text.", c.images, 'i'),
+            ("Apply style sheets", "Colours, sizes and layout from the page's own style sheets.", c.styles, 's'),
+            ("Accept cookies", "Let sites remember you for this session (sign-ins, preferences). Off: none are sent or kept.", c.cookies, 'c'),
+        ];
+        for (i, (title, help, on, key)) in rows.into_iter().enumerate() {
+            let x = if two { a.x + (i % 2) as f32 * (cw + gap) } else { a.x };
+            controls::switch_row(g, R::new(x, y, cw, rh), s, title, help, on, true, Event::Key(Key::Char(key)), ACCENT);
+            if !two || i % 2 == 1 {
+                y += rh + gap;
+            }
+        }
+        if two {
+            // an even number of switches ends a row
+        }
+        y += 6.0 * s;
+        y += controls::section_title(g, a.x, y, s, "Search");
+        controls::info_row(g, R::new(a.x, y, a.w - 130.0 * s, 44.0 * s), s, c.search.name(), "words typed in the address bar are searched here (Google, Bing and DuckDuckGo ask for checks this browser cannot pass)");
+        g.button(a.x + a.w - 120.0 * s, y + 6.0 * s, 15.0 * s, "Change (e)", ACCENT, Event::Key(Key::Char('e')));
+        y += 54.0 * s;
+        y += controls::section_title(g, a.x, y, s, "Sites allowed to run scripts");
+        if c.js_sites.is_empty() {
+            g.text(a.x + 4.0 * s, y, 14.0 * s, DIM, if c.js_all { "None needed: scripts run everywhere." } else { "None yet. Press j on a page in the browser to allow one." }, Face::Sans);
+        }
+        for h in c.js_sites.iter().take(8) {
+            controls::info_row(g, R::new(a.x, y, a.w, 38.0 * s), s, h, "scripts allowed");
+            y += 44.0 * s;
+            if y > a.y + a.h - 40.0 * s {
+                break;
+            }
+        }
+    }
+
+    fn handle_skills(&mut self, k: &Key, cx: &AppCx) {
+        let list = Self::svc(cx).skills.list(&cx.session.user);
+        let cur = list.get(self.sel()).cloned();
+        match k {
+            Key::Up => self.move_sel(-1, list.len()),
+            Key::Down => self.move_sel(1, list.len()),
+            Key::Char(c @ ('c' | 'C')) => {
+                let shared = *c == 'C';
+                match crate::ui::clipboard::latest() {
+                    None => self.fail("The clipboard is empty. Copy a skill (Markdown with name/description at the top) first."),
+                    Some(t) => match self.add_skill(cx, &t, shared) {
+                        Ok(m) => self.ok(m),
+                        Err(e) => self.fail(e),
+                    },
+                }
+            }
+            Key::Char('a') => {
+                let mut f = Form::new("New skill").text("Name", "", "lowercase-with-dashes").text("Description", "", "when should the assistant use it?").text("Triggers", "", "words that suggest it, comma separated").text("Instructions", "", "what the assistant should do");
+                if self.share_skills {
+                    f = f.choice("Scope", &["Mine", "Shared with everyone"], 0);
+                } else {
+                    f = f.choice("Scope", &["Mine"], 0);
+                }
+                self.open_form(FormKind::NewSkill, f);
+            }
+            Key::Char('i') => {
+                let mut f = Form::new("Import skill file").text("File path", "", "/path/to/skill.md");
+                f = if self.share_skills { f.choice("Scope", &["Mine", "Shared with everyone"], 0) } else { f.choice("Scope", &["Mine"], 0) };
+                self.open_form(FormKind::ImportSkill, f);
+            }
+            Key::Char('d') => {
+                if let Some(sk) = cur {
+                    let can = match sk.scope {
+                        iyakki_agent::skills::Scope::Shared => cx.session.policy.manage_skills,
+                        _ => true,
+                    };
+                    if can {
+                        let text = format!("Delete the {} skill “{}”?", sk.scope.label(), sk.name);
+                        self.modal = Some(Modal::Confirm(ConfirmKind::Skill(sk.scope, sk.name), text));
+                    } else {
+                        self.fail("Only operators and administrators can delete shared skills.");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn render_skills(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+        let list = cx.services.skills.list(&cx.session.user);
+        if list.is_empty() {
+            g.text(a.x, a.y + 4.0 * s, 15.0 * s, DIM, "No skills yet. A skill is a short Markdown file with instructions the assistant follows when a request matches it.", Face::Sans);
+            g.text(a.x, a.y + 28.0 * s, 15.0 * s, DIM, "Copy one and press c, or press a to write one here.", Face::Sans);
+            return;
+        }
+        let preview_h = 96.0 * s;
+        let mut y = a.y;
+        for (i, sk) in list.iter().enumerate() {
+            if y + 58.0 * s > a.y + a.h - preview_h {
+                break;
+            }
+            let chips: Vec<(&str, [u8; 4])> = vec![(sk.scope.label(), if sk.scope == iyakki_agent::skills::Scope::Shared { rgb(255, 196, 94) } else { ACCENT })];
+            row(g, i, a.x, y, a.w, 52.0 * s, s, i == self.sel(), &sk.name, &sk.description, &chips);
+            y += 58.0 * s;
+        }
+        if let Some(sk) = list.get(self.sel()) {
+            let py = a.y + a.h - preview_h + 6.0 * s;
+            g.text(a.x, py, 13.0 * s, MUTED, &format!("triggers: {}", if sk.triggers.is_empty() { "(none)".to_string() } else { sk.triggers.join(", ") }), Face::Bold);
+            for (n, l) in g.wrap(13.0 * s, &sk.body, Face::Mono, a.w).iter().take(4).enumerate() {
+                g.text(a.x, py + 22.0 * s + n as f32 * 17.0 * s, 13.0 * s, TEXT, l, Face::Mono);
+            }
+        }
+    }
+
+    fn open_form(&mut self, kind: FormKind, form: Form) {
+        self.modal = Some(Modal::Form(kind, form));
+    }
+
+    fn handle_models(&mut self, k: &Key, cx: &AppCx) {
+        let provs = Self::providers(cx);
+        let cur = provs.get(self.sel()).cloned();
+        match k {
+            Key::Up => self.move_sel(-1, provs.len()),
+            Key::Down => self.move_sel(1, provs.len()),
+            Key::Char('a') if self.admin(cx) => {
+                let f = Self::provider_form(cx, None);
+                self.open_form(FormKind::Provider(None), f);
+            }
+            Key::Char('p') if self.admin(cx) => {
+                let cur_price = Self::svc(cx).settings.lock().unwrap().get().token_price_cents_per_mtok;
+                let f = Form::new("Agent token price").text("US cents per million tokens", &cur_price.to_string(), "0 = free or untracked; used for agent cost budgets");
+                self.open_form(FormKind::TokenPrice, f);
+            }
+            Key::Char(c) if cur.is_some() && "edkmbxtc".contains(*c) => {
+                let p = cur.expect("checked");
+                match *c {
+                    't' => self.test_provider(cx, &p.id),
+                    'c' => self.test_chat(cx),
+                    _ if !self.admin(cx) => {}
+                    'e' => {
+                        let f = Self::provider_form(cx, Some(&p));
+                        self.open_form(FormKind::Provider(Some(p.id.clone())), f);
+                    }
+                    'd' => self.modal = Some(Modal::Confirm(ConfirmKind::Provider(p.id.clone()), format!("Remove provider “{}”?", p.id))),
+                    'k' => {
+                        let f = Form::new(&format!("API key for {}", p.id)).secret("API key", "stored in the system vault");
+                        self.open_form(FormKind::ProviderKey(p.id.clone()), f);
+                    }
+                    'x' => {
+                        let id = p.id.clone();
+                        let r = Self::svc(cx).settings.lock().unwrap().update(|s| {
+                            if let Some(x) = s.providers.iter_mut().find(|x| x.id == id) {
+                                x.enabled = !x.enabled;
+                            }
+                        });
+                        match r {
+                            Ok(()) => self.ok(format!("{} {}.", p.id, if p.enabled { "disabled" } else { "enabled" })),
+                            Err(e) => self.fail(e.to_string()),
+                        }
+                    }
+                    'm' | 'b' => {
+                        if p.models.is_empty() {
+                            self.fail("No model list yet: press t to test the connection and fetch it.");
+                        } else {
+                            let mut items = p.models.clone();
+                            if *c == 'b' {
+                                items.insert(0, "(built-in hashing embeddings)".into());
+                            }
+                            let title = if *c == 'm' { format!("Chat model on {}", p.id) } else { format!("Embedding model on {}", p.id) };
+                            let kind = if *c == 'm' { PickKind::Chat(p.id.clone()) } else { PickKind::Embed(p.id.clone()) };
+                            self.modal = Some(Modal::Pick(kind, Picker::new(&title, items)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_rag(&mut self, k: &Key, cx: &AppCx) {
+        let exts = Self::externals(cx);
+        let cur = exts.get(self.sel()).cloned();
+        let tweak = |cx: &AppCx, f: &dyn Fn(&mut iyakki_agent::settings::RagSettings)| Self::svc(cx).settings.lock().unwrap().update(|s| f(&mut s.rag));
+        let mut result: Option<Result<(), iyakki_agent::settings::SettingsError>> = None;
+        match k {
+            Key::Up => self.move_sel(-1, exts.len()),
+            Key::Down => self.move_sel(1, exts.len()),
+            Key::Char('[') if self.admin(cx) => result = Some(tweak(cx, &|r| r.top_k = r.top_k.saturating_sub(1).max(1))),
+            Key::Char(']') if self.admin(cx) => result = Some(tweak(cx, &|r| r.top_k = (r.top_k + 1).min(50))),
+            Key::Char('-') if self.admin(cx) => {
+                result = Some(tweak(cx, &|r| {
+                    r.chunk_max = r.chunk_max.saturating_sub(100).max(100);
+                    r.overlap = r.overlap.min((r.chunk_max / 2).saturating_sub(1)) / 20 * 20;
+                }))
+            }
+            Key::Char('=') if self.admin(cx) => result = Some(tweak(cx, &|r| r.chunk_max = (r.chunk_max + 100).min(4000))),
+            Key::Char(',') if self.admin(cx) => result = Some(tweak(cx, &|r| r.overlap = r.overlap.saturating_sub(20))),
+            Key::Char('.') if self.admin(cx) => result = Some(tweak(cx, &|r| r.overlap += 20)),
+            Key::Char('u') if self.admin(cx) => result = Some(tweak(cx, &|r| r.use_external = !r.use_external)),
+            Key::Char('a') if self.admin(cx) => {
+                let f = Self::external_form(None);
+                self.open_form(FormKind::External(None), f);
+            }
+            Key::Char('r') => self.reindex(cx),
+            Key::Char('i') => self.ingest(cx),
+            Key::Char(c) if cur.is_some() && "edtx".contains(*c) => {
+                let e = cur.expect("checked");
+                match *c {
+                    't' => {
+                        let svc = Self::svc(cx).clone();
+                        let backend = e.backend.clone();
+                        self.start("testing backend", move || {
+                            let c = ExtClient::new(backend.clone(), svc.secrets.clone(), svc.quick_upstream());
+                            JobOut::Msg(c.test().map(|m| format!("{}: {m}", backend.id())).map_err(|e| format!("{}: {e}", backend.id())))
+                        });
+                    }
+                    _ if !self.admin(cx) => {}
+                    'e' => {
+                        let f = Self::external_form(Some(&e));
+                        self.open_form(FormKind::External(Some(e.backend.id().into())), f);
+                    }
+                    'd' => self.modal = Some(Modal::Confirm(ConfirmKind::External(e.backend.id().into()), format!("Remove backend “{}”?", e.backend.id()))),
+                    'x' => {
+                        let mut n = e.clone();
+                        n.enabled = !n.enabled;
+                        result = Some(Self::svc(cx).settings.lock().unwrap().upsert_external(n));
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        if let Some(r) = result {
+            match r {
+                Ok(()) => {
+                    cx.audit.record(&cx.session.user, "settings.rag", "");
+                    self.ok("Saved.");
+                }
+                Err(e) => self.fail(e.to_string()),
+            }
+        }
+    }
+
+    fn own_namespaces(cx: &AppCx) -> Vec<String> {
+        if cx.session.policy.manage_settings {
+            let mut v = Self::svc(cx).kb.lock().unwrap().namespaces();
+            for n in ["shared"] {
+                if !v.iter().any(|x| x == n) {
+                    v.push(n.into());
+                }
+            }
+            v
+        } else {
+            vec![format!("user/{}", cx.session.user)]
+        }
+    }
+
+    fn reindex(&mut self, cx: &AppCx) {
+        let svc = Self::svc(cx).clone();
+        let nss = Self::own_namespaces(cx);
+        self.start("re-embedding documents", move || {
+            let mut kb = svc.kb.lock().unwrap();
+            let mut done = 0;
+            for ns in &nss {
+                if kb.stats(ns).is_some() {
+                    if let Err(e) = kb.reindex(ns) {
+                        return JobOut::Msg(Err(format!("{ns}: {e:?}")));
+                    }
+                    done += 1;
+                }
+            }
+            JobOut::Msg(Ok(format!("Re-embedded {done} namespace(s) with {}.", kb.embedder_id())))
+        });
+    }
+
+    fn ingest(&mut self, cx: &AppCx) {
+        let svc = Self::svc(cx).clone();
+        let base = std::path::PathBuf::from(&cx.cfg.rag_docs);
+        let (ns, dir) = if cx.session.policy.manage_settings { ("shared".to_string(), base.join("shared")) } else { (format!("user/{}", cx.session.user), base.join(&cx.session.user)) };
+        self.start("indexing documents", move || {
+            let (added, seen) = svc.kb.lock().unwrap().ingest_dir(&ns, &dir);
+            JobOut::Msg(Ok(format!("{ns}: {added} new document(s) indexed ({seen} files scanned in {}).", dir.display())))
+        });
+    }
+
+    fn handle_secret_providers(&mut self, k: &Key, cx: &AppCx) {
+        let list = Self::secret_providers(cx);
+        match k {
+            Key::Up => self.move_sel(-1, list.len()),
+            Key::Down => self.move_sel(1, list.len()),
+            Key::Char('a') if self.admin(cx) => self.open_form(FormKind::SecretProvider, Self::secret_provider_form()),
+            Key::Char('d') if self.admin(cx) => {
+                if let Some((a, _)) = list.get(self.sel()) {
+                    self.modal = Some(Modal::Confirm(ConfirmKind::SecretProvider(a.clone()), format!("Remove secret provider “{a}”?")));
+                }
+            }
+            Key::Char('t') => {
+                if let Some((a, _)) = list.get(self.sel()) {
+                    let (svc, a) = (Self::svc(cx).clone(), a.clone());
+                    self.start("testing provider", move || JobOut::Msg(svc.secrets.test_provider(&a).map(|_| format!("{a}: reachable, token accepted")).map_err(|e| format!("{a}: {e}"))));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_vault(&mut self, k: &Key, cx: &AppCx) {
+        let admin = cx.session.policy.manage_settings;
+        let names = self.secret_names(cx).unwrap_or_default();
+        let system = self.section == 0 && admin;
+        match k {
+            Key::Tab if admin => {
+                self.section = 1 - self.section;
+                self.sel[self.tab] = 0;
+            }
+            Key::Up => self.move_sel(-1, names.len()),
+            Key::Down => self.move_sel(1, names.len()),
+            Key::Char('n') => {
+                let title = if system { "New system secret" } else { "New personal secret" };
+                let f = Form::new(title).text("Name", "", "lowercase, e.g. github-token").secret("Value", "never shown again");
+                self.open_form(FormKind::NewSecret(system), f);
+            }
+            Key::Char('d') => {
+                if let Some(n) = names.get(self.sel()) {
+                    self.modal = Some(Modal::Confirm(ConfirmKind::Secret(system, n.clone()), format!("Delete secret “{n}”? This cannot be undone.")));
+                }
+            }
+            Key::Char('l') if system => {
+                Self::svc(cx).lock_system();
+                cx.audit.record(&cx.session.user, "vault.system.lock", "");
+                self.ok("System vault locked. An admin with access unlocks it by signing in.");
+            }
+            Key::Char('f') if system => {
+                let f = Form::new("Unattended unlock key file").text("Path for the new key file", &Self::svc(cx).dir().join("vault.key").display().to_string(), "absolute path");
+                self.open_form(FormKind::Keyfile, f);
+            }
+            Key::Char('R') if !system => self.modal = Some(Modal::Confirm(ConfirmKind::ResetPersonal, "Delete your personal vault and all secrets in it?".into())),
+            _ => {}
+        }
+    }
+
+    fn handle_account(&mut self, k: &Key, cx: &AppCx) {
+        match k {
+            Key::Char('p') => {
+                let f = Form::new("Change password").secret("Current password", "").secret("New password (min 8)", "").secret("Repeat new password", "");
+                self.open_form(FormKind::Password, f);
+            }
+            Key::Char('u') => self.change_ui_size(true, cx),
+            Key::Char('U') => self.change_ui_size(false, cx),
+            _ => {}
+        }
+    }
+}
+
+impl App for SettingsApp {
+    fn title(&self) -> &'static str {
+        "Settings"
+    }
+    fn icon(&self) -> Icon {
+        Icon::Settings
+    }
+    fn accent(&self) -> [u8; 4] {
+        ACCENT
+    }
+    fn hint(&self) -> String {
+        if self.modal.is_some() {
+            return "Esc cancel".into();
+        }
+        match self.tab() {
+            Tab::Models => "a add · e edit · d delete · t test · m chat model · b embeddings · k key · x on/off · c test chat",
+            Tab::Rag => "a add backend · t test · r reindex · i ingest documents · / find a page",
+            Tab::Vault => "n new · d delete · Tab system/personal · l lock · f key file",
+            Tab::Skills => "c add from clipboard · a quick create · i import file · d delete",
+            Tab::Network => "Enter turn on/off · w join a WiFi network · r look again",
+            Tab::Bluetooth => "Enter turn on/off · r look again",
+            Tab::Display => "u bigger text · U smaller text · + brighter · − dimmer · r look again",
+            Tab::Sound => "+ louder · − quieter · m mute · r look again",
+            Tab::Browser => "a scripts everywhere · i pictures · s styles · c cookies · f forget the allowed sites",
+            Tab::Storage if self.storage.virtual_disks.is_some() => "n new virtual disk · x delete it · m make this disk the data disk (erases it) · r rescan",
+            Tab::Storage => "m make this disk the data disk (erases it) · r rescan · b reboot",
+            Tab::Voice => "s speech-to-text · v text-to-speech · c commands · m mic test · p speaker test · t STT test · y TTS test",
+            Tab::SecretProviders => "a add · t test · d delete",
+            Tab::Account => "p change password · u bigger text · U smaller text",
+        }
+        .into()
+    }
+
+    fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        if matches!(ev, Event::Tick) {
+            self.ticks += 1;
+            self.poll(cx);
+            return Flow::Stay;
+        }
+        if self.modal.is_some() {
+            self.handle_modal(ev, cx);
+            return Flow::Stay;
+        }
+        match ev {
+            Event::MouseMove(x, y) => self.mouse = (*x, *y),
+            Event::Tab(i) => {
+                self.tab = (*i).min(self.tabs.len() - 1);
+                self.nav_focus = false;
+            }
+            Event::FocusAt(id, x) if *id == nav::SEARCH_ID => {
+                self.nav_focus = true;
+                self.nav_query.click(*x);
+            }
+            Event::Paste(t) if self.nav_focus => {
+                self.nav_query.paste(t);
+                self.nav_after_edit();
+            }
+            Event::AreaAt(id, x, _) => self.slider_click(*id, *x, cx),
+            // a button on a slider card: select that row, then press the key on it
+            Event::Sub(row, k) if self.dev_tab().is_some() => {
+                self.sel[self.tab] = *row as usize;
+                self.handle_hw(k, cx);
+            }
+            Event::Row(i) => {
+                let len = self.list_len(cx);
+                self.sel[self.tab] = (*i).min(len.saturating_sub(1));
+            }
+            Event::Scroll(d) => {
+                if self.nav_rect.contains(self.mouse.0, self.mouse.1) {
+                    let entries = nav::entries(&self.nav_items(), &self.nav_query.value);
+                    self.nav_scroll = nav::clamp_scroll(self.nav_scroll - *d as f32 * 48.0 * self.nav_s, &entries, self.nav_rect.h, self.nav_s);
+                } else {
+                    let len = self.list_len(cx);
+                    self.move_sel(-*d, len);
+                }
+            }
+            Event::Key(k) if self.nav_focus => {
+                self.nav_key(k);
+            }
+            // find a page: Ctrl+F, or / when no page needs the key
+            Event::Key(Key::Ctrl('f')) | Event::Key(Key::Char('/')) => self.nav_focus = true,
+            Event::Key(Key::Esc) => return Flow::Back,
+            Event::Key(Key::Left) => self.tab = self.tab.saturating_sub(1),
+            Event::Key(Key::Right) => self.tab = (self.tab + 1).min(self.tabs.len() - 1),
+            Event::Key(other) => match self.tab() {
+                Tab::Models => self.handle_models(other, cx),
+                Tab::Rag => self.handle_rag(other, cx),
+                Tab::Vault => self.handle_vault(other, cx),
+                Tab::Skills => self.handle_skills(other, cx),
+                Tab::Storage => self.handle_storage(other, cx),
+                Tab::Network | Tab::Bluetooth | Tab::Display | Tab::Sound => self.handle_hw(other, cx),
+                Tab::Voice => self.handle_voice(other, cx),
+                Tab::SecretProviders => self.handle_secret_providers(other, cx),
+                Tab::Account => self.handle_account(other, cx),
+                Tab::Browser => self.handle_browser(other, cx),
+            },
+            _ => {}
+        }
+        Flow::Stay
+    }
+
+    fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+        // left: search and the list of pages; right: the page
+        let pad = 20.0 * s;
+        let nav_w = if area.w > 900.0 * s { 260.0 * s } else { (area.w * 0.30).max(170.0 * s) };
+        let nav_r = R::new(area.x + pad, area.y + 10.0 * s, nav_w, area.h - 20.0 * s);
+        self.nav_rect = nav_r;
+        self.nav_s = s;
+        let entries = nav::entries(&self.nav_items(), &self.nav_query.value);
+        self.nav_scroll = nav::clamp_scroll(self.nav_scroll, &entries, nav_r.h, s);
+        nav::draw(g, nav_r, s, &entries, self.tab, self.nav_scroll, &self.nav_query, self.nav_focus, blink(tick), ACCENT);
+        let x = nav_r.x + nav_r.w + 28.0 * s;
+        let w = (area.x + area.w - pad - x).max(120.0 * s);
+        let page = self.tab();
+        let title = g.fit(28.0 * s, page.label(), Face::Bold, w);
+        g.text(x, area.y + 14.0 * s, 28.0 * s, TEXT, &title, Face::Bold);
+        let blurb = g.fit(14.0 * s, page.blurb(), Face::Sans, w);
+        g.text(x, area.y + 14.0 * s + 38.0 * s, 14.0 * s, MUTED, &blurb, Face::Sans);
+        let bar_h = 88.0 * s;
+        let admin = cx.session.policy.manage_settings;
+        let rows_of_buttons = self.button_rows(admin);
+        let btn_h = rows_of_buttons as f32 * 40.0 * s;
+        self.slider_w.clear();
+        let body = R::new(x, area.y + bar_h, w, area.h - bar_h - 40.0 * s - btn_h);
+        match self.tab() {
+            Tab::Models => self.render_models(g, body, s, cx),
+            Tab::Rag => self.render_rag(g, body, s, cx),
+            Tab::Vault => self.render_vault(g, body, s, cx),
+            Tab::Skills => self.render_skills(g, body, s, cx),
+            Tab::Storage => self.render_storage(g, body, s, cx),
+            Tab::Network | Tab::Bluetooth | Tab::Display | Tab::Sound => self.render_hw(g, body, s, cx),
+            Tab::Voice => self.render_voice(g, body, s, cx),
+            Tab::SecretProviders => self.render_secret_providers(g, body, s, cx),
+            Tab::Account => self.render_account(g, body, s, cx),
+            Tab::Browser => self.render_browser(g, body, s, cx),
+        }
+        self.render_buttons(g, x, area.y + area.h - 36.0 * s - btn_h + 4.0 * s, w, s, admin);
+        // status line
+        let y = area.y + area.h - 30.0 * s;
+        if let Some(j) = &self.job {
+            g.text(x, y, 15.0 * s, MUTED, &format!("{}{}", j.label, ".".repeat(1 + (tick / 10 % 3) as usize)), Face::Sans);
+        } else if let Some((m, ok)) = &self.status {
+            crate::fx::status_line(g, x, y, w, s, m, *ok);
+        }
+        let modal_area = R::new(area.x, area.y, area.w, area.h);
+        match &self.modal {
+            Some(Modal::Form(_, f)) => f.render(g, modal_area, s, ACCENT, blink(tick)),
+            Some(Modal::Pick(_, p)) => p.render(g, modal_area, s, ACCENT),
+            Some(Modal::Confirm(_, text)) => render_confirm(g, modal_area, s, text, "Yes, do it"),
+            None => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------- rendering
+
+type Btn = (&'static str, [u8; 4], char);
+
+impl SettingsApp {
+    fn buttons_for(&self, admin: bool) -> Vec<Btn> {
+        let (acc, mut_, err) = (ACCENT, TEXT, ERR);
+        match (self.tab(), admin) {
+            (Tab::Models, true) => vec![("Add", acc, 'a'), ("Edit", mut_, 'e'), ("Delete", err, 'd'), ("Test", mut_, 't'), ("Chat model", mut_, 'm'), ("Embeddings", mut_, 'b'), ("Set key", mut_, 'k'), ("On/Off", mut_, 'x'), ("Agent price", mut_, 'p'), ("Test chat", mut_, 'c')],
+            (Tab::Models, false) => vec![("Test", mut_, 't'), ("Test chat", mut_, 'c')],
+            (Tab::Rag, true) => vec![("Add backend", acc, 'a'), ("Edit", mut_, 'e'), ("Delete", err, 'd'), ("Test", mut_, 't'), ("On/Off", mut_, 'x'), ("Reindex", mut_, 'r'), ("Ingest docs", mut_, 'i')],
+            (Tab::Rag, false) => vec![("Reindex", mut_, 'r'), ("Ingest my docs", acc, 'i'), ("Test backend", mut_, 't')],
+            (Tab::Vault, true) if self.section == 0 => vec![("New secret", acc, 'n'), ("Delete", err, 'd'), ("Lock now", mut_, 'l'), ("Key file", mut_, 'f')],
+            (Tab::Vault, _) => vec![("New secret", acc, 'n'), ("Delete", err, 'd'), ("Reset vault", mut_, 'R')],
+            (Tab::Voice, true) => vec![
+                ("Speech-to-text", acc, 's'), ("Text-to-speech", acc, 'v'), ("Commands", mut_, 'c'), ("Auto-send", mut_, 'a'), ("Speak replies", mut_, 'r'), ("Clear STT", err, 'S'), ("Clear TTS", err, 'V'),
+                ("Test mic", mut_, 'm'), ("Test speaker", mut_, 'p'), ("Test STT", mut_, 't'), ("Test TTS", mut_, 'y'),
+            ],
+            (Tab::Voice, false) => vec![("Test mic", mut_, 'm'), ("Test speaker", mut_, 'p'), ("Test STT", mut_, 't'), ("Test TTS", mut_, 'y')],
+            (Tab::Network, _) => vec![("Turn on/off", acc, 'e'), ("Join WiFi", acc, 'w'), ("Look again", mut_, 'r')],
+            (Tab::Bluetooth, _) => vec![("Turn on/off", acc, 'e'), ("Look again", mut_, 'r')],
+            (Tab::Display, _) => vec![("Brighter", acc, '+'), ("Dimmer", mut_, '-'), ("Look again", mut_, 'r')],
+            (Tab::Sound, _) => vec![("Louder", acc, '+'), ("Quieter", mut_, '-'), ("Mute", mut_, 'm'), ("Look again", mut_, 'r')],
+            (Tab::Storage, _) if self.storage.virtual_disks.is_some() => vec![("New virtual disk", acc, 'n'), ("Delete it", err, 'x'), ("Make data disk", ERR, 'm'), ("Rescan", TEXT, 'r')],
+            (Tab::Storage, _) => vec![("Make data disk", ERR, 'm'), ("Rescan", TEXT, 'r'), ("Reboot", TEXT, 'b')],
+            (Tab::Skills, _) => {
+                let mut v = vec![("From clipboard", acc, 'c'), ("Quick create", mut_, 'a'), ("Import file", mut_, 'i'), ("Delete", err, 'd')];
+                if self.share_skills {
+                    v.insert(1, ("Share clipboard", mut_, 'C'));
+                }
+                v
+            }
+            (Tab::SecretProviders, _) => vec![("Add provider", acc, 'a'), ("Test", mut_, 't'), ("Delete", err, 'd')],
+            (Tab::Account, _) => vec![("Change password", acc, 'p'), ("Bigger text", mut_, 'u'), ("Smaller text", mut_, 'U')],
+            (Tab::Browser, _) => vec![("Forget allowed sites", err, 'f')],
+        }
+    }
+
+    /// Rows the button bar needs (buttons wrap).
+    fn button_rows(&self, admin: bool) -> usize {
+        if self.tab() == Tab::Voice && admin { 2 } else { 1 }
+    }
+
+    fn render_buttons(&self, g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, admin: bool) {
+        let (mut bx, mut by) = (x, y);
+        for (label, col, key) in self.buttons_for(admin) {
+            let bw = g.text_width(14.0 * s, label, Face::Bold) + 14.0 * s * 1.7;
+            if bx + bw > x + w {
+                bx = x;
+                by += 40.0 * s;
+            }
+            bx += g.button(bx, by, 14.0 * s, label, col, Event::Key(Key::Char(key))) + 8.0 * s;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn row(g: &mut Gfx, idx: usize, x: f32, y: f32, w: f32, h: f32, s: f32, selected: bool, title: &str, sub: &str, chips: &[(&str, [u8; 4])]) {
+    let hot = g.hovered(R::new(x, y, w, h));
+    crate::fx::row_at(g, x, y, w, h, 12.0 * s, selected, hot, ACCENT);
+    g.hit(R::new(x, y, w, h), Event::Row(idx), title);
+    if selected {
+        g.rect(x, y + 10.0 * s, 4.0 * s, h - 20.0 * s, ACCENT);
+    }
+    g.text(x + 18.0 * s, y + 8.0 * s, 17.0 * s, TEXT, title, Face::Bold);
+    let sub = g.fit(13.0 * s, sub, Face::Mono, w - 36.0 * s - 150.0 * s);
+    g.text(x + 18.0 * s, y + 34.0 * s, 13.0 * s, MUTED, &sub, Face::Mono);
+    let mut cx = x + w - 14.0 * s;
+    for (label, col) in chips.iter().rev() {
+        let cw = g.text_width(12.0 * s, label, Face::Bold) + 18.0 * s;
+        cx -= cw;
+        crate::fx::chip(g, cx, y + 10.0 * s, s, label, *col, false);
+        cx -= 6.0 * s;
+    }
+}
+
+impl SettingsApp {
+    fn render_models(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+        let (chat, emb, provs) = {
+            let st = cx.services.settings.lock().unwrap();
+            (st.get().chat.clone(), st.get().embedding.clone(), st.get().providers.clone())
+        };
+        let admin = cx.session.policy.manage_settings;
+        let fmt = |c: &Option<ModelChoice>, none: &str| c.as_ref().map_or(none.to_string(), |c| format!("{} · {}", c.provider, c.model));
+        g.text(a.x, a.y, 15.0 * s, MUTED, "Chat model", Face::Sans);
+        g.text(a.x + 150.0 * s, a.y, 15.0 * s, if chat.is_some() { OK } else { ERR }, &fmt(&chat, "none selected"), Face::Bold);
+        g.text(a.x, a.y + 24.0 * s, 15.0 * s, MUTED, "Embeddings", Face::Sans);
+        g.text(a.x + 150.0 * s, a.y + 24.0 * s, 15.0 * s, TEXT, &fmt(&emb, "built-in (hashing, no model needed)"), Face::Bold);
+        let price = cx.services.settings.lock().unwrap().get().token_price_cents_per_mtok;
+        g.text(a.x, a.y + 48.0 * s, 15.0 * s, MUTED, "Agent price", Face::Sans);
+        g.text(a.x + 150.0 * s, a.y + 48.0 * s, 15.0 * s, TEXT, &if price == 0 { "not set (cost budgets are not enforced)".to_string() } else { format!("{price} cents per million tokens  [p]") }, Face::Bold);
+        let mut y = a.y + 86.0 * s;
+        if provs.is_empty() {
+            let msg = if admin { "No model providers yet. Press a to add Ollama, OpenAI, Claude, Gemini, OpenRouter or any OpenAI-compatible server." } else { "No model providers configured. Ask an administrator." };
+            crate::fx::empty_state(g, R::new(a.x, y, a.w, 220.0 * s), s, Icon::Settings, "No model providers yet", msg, ACCENT);
+        }
+        for (i, p) in provs.iter().enumerate() {
+            if y > a.y + a.h - 70.0 * s {
+                break;
+            }
+            let key_ok = match &p.key_ref {
+                None => ("no key", DIM),
+                Some(r) if r.starts_with("ext:") => ("key: provider", MUTED),
+                Some(r) => {
+                    if cx.services.secrets.resolve(r, None).is_ok() { ("key ✓", OK) } else { ("key ✗ locked/missing", ERR) }
+                }
+            };
+            let url = if admin { p.base_url.clone().unwrap_or_else(|| p.kind.default_base().unwrap_or("").to_string()) } else { String::new() };
+            let sub = format!("{}{}{} models", url, if url.is_empty() { "" } else { "  ·  " }, p.models.len());
+            let active = chat.as_ref().is_some_and(|c| c.provider == p.id);
+            let chips: Vec<(&str, [u8; 4])> = [Some((p.kind.label(), ACCENT)), Some(key_ok), if active { Some(("chat", OK)) } else { None }, if p.enabled { None } else { Some(("off", ERR)) }].into_iter().flatten().collect();
+            let selected = i == self.sel();
+            let rh = if selected { 108.0 * s } else { 62.0 * s };
+            row(g, i, a.x, y, a.w, rh, s, selected, &p.id, &sub, &chips);
+            if selected {
+                // the actions of the chosen provider, right on its row
+                let mut bx = a.x + 18.0 * s;
+                let by = y + 62.0 * s;
+                let acts: Vec<(&str, [u8; 4], char)> = if admin { vec![("Edit", TEXT, 'e'), ("Delete", ERR, 'd'), ("Models", ACCENT, 'm'), ("Test", TEXT, 't'), ("Key", TEXT, 'k'), (if p.enabled { "Turn off" } else { "Turn on" }, TEXT, 'x')] } else { vec![("Test", ACCENT, 't')] };
+                for (label, col, key) in acts {
+                    let bw = g.text_width(13.0 * s, label, Face::Bold) + 13.0 * s * 1.7;
+                    if bx + bw > a.x + a.w - 12.0 * s {
+                        break;
+                    }
+                    bx += g.button(bx, by, 13.0 * s, label, col, Event::Key(Key::Char(key))) + 8.0 * s;
+                }
+            }
+            y += rh + 8.0 * s;
+        }
+        if !provs.is_empty() {
+            g.text(a.x + 4.0 * s, y + 2.0 * s, 13.0 * s, MUTED, if admin { "Select a provider, then Delete / Edit / Models" } else { "Select a provider, then Test" }, Face::Sans);
+        }
+    }
+
+    fn render_rag(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+        let admin = cx.session.policy.manage_settings;
+        let (rag, exts) = {
+            let st = cx.services.settings.lock().unwrap();
+            (st.get().rag.clone(), st.get().external_rag.clone())
+        };
+        let (embed_id, ns_stats) = {
+            let kb = cx.services.kb.lock().unwrap();
+            let nss = if admin { kb.namespaces() } else { vec![format!("user/{}", cx.session.user), "shared".to_string()] };
+            (kb.embedder_id(), nss.into_iter().filter_map(|n| kb.stats(&n).map(|st| (n, st))).collect::<Vec<_>>())
+        };
+        // sliders in two columns when there is room, one when there is not
+        let can = admin;
+        let two = a.w > 820.0 * s;
+        let gap = 10.0 * s;
+        let (cw, rh) = if two { ((a.w - gap) / 2.0, 82.0 * s) } else { (a.w, 82.0 * s) };
+        let mut y = a.y;
+        y += controls::section_title(g, a.x, y, s, "Retrieval");
+        let max_overlap = (rag.chunk_max / 2).saturating_sub(1) as i64;
+        let specs = [
+            (SLIDER_CHUNK, "Chunk size", "Characters of a document in one searchable piece. Bigger keeps more context; smaller finds more exactly.", rag.chunk_max as i64, 100, 4000, "characters", '-', '='),
+            (SLIDER_OVERLAP, "Overlap", "Characters shared by neighbouring pieces, so a sentence is not cut off at an edge.", rag.overlap as i64, 0, max_overlap, "characters", ',', '.'),
+            (SLIDER_TOPK, "Results", "How many pieces come back for each question.", rag.top_k as i64, 1, 50, "per question", '[', ']'),
+        ];
+        let mut col = 0usize;
+        let mut row_y = y;
+        for (id, title, help, value, min, max, unit, minus, plus) in specs {
+            let x = if two { a.x + col as f32 * (cw + gap) } else { a.x };
+            let tr = controls::slider_row(g, R::new(x, row_y, cw, rh), s, &Slider { id, title, help, value, min, max, unit, minus: Event::Key(Key::Char(minus)), plus: Event::Key(Key::Char(plus)), enabled: can }, ACCENT);
+            self.slider_w.push((id, tr.w));
+            if two && col == 0 {
+                col = 1;
+            } else {
+                col = 0;
+                row_y += rh + gap;
+            }
+        }
+        if col == 1 {
+            // the odd one out: the switch sits beside it
+            controls::switch_row(g, R::new(a.x + cw + gap, row_y, cw, rh), s, "Search external backends", "Also ask the backends listed below, not only the local documents.", rag.use_external, can, Event::Key(Key::Char('u')), ACCENT);
+            row_y += rh + gap;
+        } else {
+            controls::switch_row(g, R::new(a.x, row_y, a.w, 66.0 * s), s, "Search external backends", "Also ask the backends listed below, not only the local documents.", rag.use_external, can, Event::Key(Key::Char('u')), ACCENT);
+            row_y += 66.0 * s + gap;
+        }
+        let embed_note = if Self::svc(cx).is_reindexing() { format!("{embed_id} — updating documents in the background…") } else { embed_id.clone() };
+        controls::info_row(g, R::new(a.x, row_y, a.w, 44.0 * s), s, "Embedding", &embed_note);
+        let mut y = row_y + 44.0 * s + 16.0 * s;
+        g.text(a.x, y, 14.0 * s, MUTED, "Local knowledge base (r reindex · i ingest documents folder)", Face::Bold);
+        y += 24.0 * s;
+        if ns_stats.is_empty() {
+            g.text(a.x, y, 14.0 * s, DIM, "empty — press i to index the documents folder", Face::Sans);
+            y += 24.0 * s;
+        }
+        for (n, st) in ns_stats.iter().take(4) {
+            let un = if st.unembedded > 0 { format!("  ({} without vectors: press r)", st.unembedded) } else { String::new() };
+            g.text(a.x, y, 14.0 * s, TEXT, &format!("{n:<22}{} docs · {} chunks{un}", st.docs, st.chunks), Face::Mono);
+            y += 22.0 * s;
+        }
+        y += 14.0 * s;
+        g.text(a.x, y, 14.0 * s, MUTED, "External RAG backends", Face::Bold);
+        y += 26.0 * s;
+        if exts.is_empty() {
+            g.text(a.x, y, 14.0 * s, DIM, if admin { "none — press a to add Qdrant, Chroma or a custom HTTP search service" } else { "none configured" }, Face::Sans);
+        }
+        for (i, e) in exts.iter().enumerate() {
+            if y > a.y + a.h - 60.0 * s {
+                break;
+            }
+            let url = if admin { match &e.backend { ExternalRag::Qdrant { url, collection, .. } | ExternalRag::Chroma { url, collection, .. } => format!("{url}  ·  {collection}"), ExternalRag::Http { url, .. } => url.clone() } } else { String::new() };
+            let chips: Vec<(&str, [u8; 4])> = vec![(e.backend.label(), ACCENT), if e.enabled { ("on", OK) } else { ("off", ERR) }];
+            row(g, i, a.x, y, a.w, 58.0 * s, s, i == self.sel(), e.backend.id(), &url, &chips);
+            y += 66.0 * s;
+        }
+    }
+
+    fn render_vault(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+        let admin = cx.session.policy.manage_settings;
+        let svc = &cx.services;
+        let system = self.section == 0 && admin;
+        let (exists, unlocked) = svc.system_vault_state();
+        let mut y = a.y;
+        let pill = |g: &mut Gfx, x: f32, y: f32, label: &str, on: bool| {
+            let w = g.text_width(14.0 * s, label, Face::Bold) + 28.0 * s;
+            let hot = g.hovered(R::new(x, y, w, 30.0 * s));
+            if on {
+                g.rrect_glow(x, y, w, 30.0 * s, 15.0 * s, 4.0 * s, [ACCENT[0], ACCENT[1], ACCENT[2], 80]);
+                g.rrect(x, y, w, 30.0 * s, 15.0 * s, ACCENT);
+            } else {
+                crate::fx::row_at(g, x, y, w, 30.0 * s, 15.0 * s, false, hot, ACCENT);
+            }
+            if !on {
+                g.hit(R::new(x, y, w, 30.0 * s), Event::Key(Key::Tab), label); // switches system <-> personal
+            }
+            g.text(x + 14.0 * s, y + 6.0 * s, 14.0 * s, if on { rgb(10, 14, 28) } else { MUTED }, label, Face::Bold);
+            w + 8.0 * s
+        };
+        let mut px = a.x;
+        if admin {
+            px += pill(g, px, y, "System vault", system);
+        }
+        pill(g, px, y, "My vault", !system);
+        y += 44.0 * s;
+        if system {
+            let st = if !exists { "not created yet (created when an admin first signs in)".to_string() } else if unlocked { "unlocked".to_string() } else { "LOCKED — sign in as an admin with access".to_string() };
+            g.text(a.x, y, 15.0 * s, if unlocked { OK } else { ERR }, &format!("Status: {st}"), Face::Bold);
+            y += 24.0 * s;
+            let slots = svc.system_slots().join(", ");
+            let slots = g.fit(13.0 * s, &format!("Key holders: {}", if slots.is_empty() { "-".into() } else { slots }), Face::Sans, a.w);
+            g.text(a.x, y, 13.0 * s, MUTED, &slots, Face::Sans);
+            y += 30.0 * s;
+        } else {
+            let un = svc.user_vault_unlocked(&cx.session.user);
+            g.text(a.x, y, 15.0 * s, if un { OK } else { ERR }, &format!("Status: {}", if un { "unlocked with your sign-in password" } else { "LOCKED (press R to start a fresh one)" }), Face::Bold);
+            y += 30.0 * s;
+        }
+        match self.secret_names(cx) {
+            Err(e) => {
+                g.text(a.x, y, 15.0 * s, ERR, &e.to_string(), Face::Sans);
+            }
+            Ok(names) => {
+                if names.is_empty() {
+                    g.text(a.x, y, 15.0 * s, DIM, "No secrets yet. Press n to add one. Values are never displayed after saving.", Face::Sans);
+                }
+                for (i, n) in names.iter().enumerate() {
+                    if y > a.y + a.h - 60.0 * s {
+                        break;
+                    }
+                    row(g, i, a.x, y, a.w, 48.0 * s, s, i == self.sel(), n, &format!("reference:  {}:{n}", if system { "vault" } else { "uvault" }), &[("••••••••", DIM)]);
+                    y += 56.0 * s;
+                }
+            }
+        }
+    }
+
+    fn render_secret_providers(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+        let list = Self::secret_providers(cx);
+        g.text(a.x, a.y, 14.0 * s, MUTED, "External vaults. Use their secrets anywhere a reference is accepted:  ext:<alias>/<path>#<field>", Face::Sans);
+        let mut y = a.y + 34.0 * s;
+        if list.is_empty() {
+            g.text(a.x, y, 15.0 * s, DIM, "None configured. Press a to connect HashiCorp Vault / OpenBao or 1Password Connect.", Face::Sans);
+        }
+        for (i, (alias, cfg)) in list.iter().enumerate() {
+            let (label, addr) = match cfg {
+                SecretProvider::Hashicorp { addr, mount, namespace, .. } => ("HashiCorp/OpenBao", format!("{addr}  ·  mount {mount}{}", namespace.as_ref().map(|n| format!("  ·  ns {n}")).unwrap_or_default())),
+                SecretProvider::Onepassword { addr, .. } => ("1Password Connect", addr.clone()),
+            };
+            row(g, i, a.x, y, a.w, 58.0 * s, s, i == self.sel(), alias, &addr, &[(label, ACCENT)]);
+            y += 66.0 * s;
+        }
+    }
+
+    /// The size of text and buttons, for whoever is signed in (every account has it on the Account page, administrators also
+    /// on Display). Returns the height used.
+    fn render_ui_size_card(&mut self, g: &mut Gfx, card: R, s: f32, cx: &AppCx) -> f32 {
+        let cur = crate::uisize::load(cx.services.dir(), &cx.session.user);
+        crate::fx::glass(g, card.x, card.y, card.w, card.h, 14.0 * s, ACCENT);
+        g.text(card.x + 18.0 * s, card.y + 10.0 * s, 16.0 * s, TEXT, "Text and button size", Face::Bold);
+        g.text(card.x + 18.0 * s, card.y + 34.0 * s, 13.0 * s, MUTED, "Applies to you at every sign-in. u makes it bigger, Shift+U smaller.", Face::Sans);
+        let mut bx = card.x + card.w - 18.0 * s;
+        for (i, (name, f)) in crate::uisize::LEVELS.iter().enumerate().rev() {
+            let label = format!("{name} {}%", (f * 100.0).round());
+            let w = g.text_width(13.0 * s, &label, Face::Bold) + 13.0 * s * 1.7;
+            bx -= w;
+            let ev = if i > cur { Event::Key(Key::Char('u')) } else { Event::Key(Key::Char('U')) };
+            if i == cur {
+                g.button_off(bx, card.y + 20.0 * s, 13.0 * s, &label);
+            } else {
+                g.button(bx, card.y + 20.0 * s, 13.0 * s, &label, MUTED, ev);
+            }
+            bx -= 6.0 * s;
+        }
+        card.h
+    }
+
+    fn render_account(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+        let p = &cx.session.policy;
+        let lines = [
+            format!("User        {}", cx.session.user),
+            format!("Role        {}", cx.session.role.name()),
+            format!("Compute     {} instructions per run", p.max_fuel),
+            format!("Memory      {} MiB per task", p.max_memory_mb),
+            format!("Storage     {} MiB", p.vfs_quota_mb),
+            format!("Apps        {}", p.apps.iter().map(|x| x.id()).collect::<Vec<_>>().join(", ")),
+            String::new(),
+            "Press p to change your password. Your personal vault is re-keyed automatically.".into(),
+            "If an administrator resets your password, your personal vault cannot be recovered (by design).".into(),
+        ];
+        for (i, l) in lines.iter().enumerate() {
+            let l = g.fit(15.0 * s, l, Face::Mono, a.w);
+            g.text(a.x, a.y + i as f32 * 26.0 * s, 15.0 * s, if i < 6 { TEXT } else { MUTED }, &l, Face::Mono);
+        }
+        self.render_ui_size_card(g, R::new(a.x, a.y + lines.len() as f32 * 26.0 * s + 14.0 * s, a.w, 74.0 * s), s, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::apps::tests::{cx_with_admin_store, services_in, temp_dir};
+    use iyakki_agent::iyakki_proxy::{Upstream, UpstreamResponse};
+    use iyakki_sec::policy::Role;
+    use std::sync::Mutex;
+
+    type Reply = Box<dyn Fn(&str, &str) -> (u16, String) + Send + Sync>;
+    struct Mock {
+        calls: Mutex<Vec<(String, String)>>,
+        reply: Reply,
+    }
+    impl Upstream for Mock {
+        fn request(&self, m: &str, url: &str, _h: &[(String, String)], _b: &[u8]) -> Result<UpstreamResponse, String> {
+            self.calls.lock().unwrap().push((m.into(), url.into()));
+            let (status, body) = (self.reply)(m, url);
+            Ok(UpstreamResponse { status, body: body.into_bytes() })
+        }
+    }
+
+    fn ollama_like(m: &str, url: &str) -> (u16, String) {
+        match (m, url) {
+            ("GET", u) if u.ends_with("/v1/models") => (200, r#"{"data":[{"id":"qwen3:32b"},{"id":"llama3.2:3b"}]}"#.into()),
+            ("POST", u) if u.ends_with("/chat/completions") => (200, r#"{"choices":[{"message":{"content":"OK"}}]}"#.into()),
+            ("POST", u) if u == "http://rag.corp/search" => (200, r#"{"results":[{"text":"x"}]}"#.into()),
+            ("GET", u) if u.ends_with("/v1/auth/token/lookup-self") => (200, "{}".into()),
+            _ => (404, String::new()),
+        }
+    }
+
+    /// Admin session with a real Services over a mock network; the system vault is unlocked.
+    fn admin(tag: &str) -> (AppCx, std::path::PathBuf) {
+        let mut cx = cx_with_admin_store(tag);
+        let d = temp_dir(&format!("{tag}-svc"));
+        cx.services = services_in(&d, Arc::new(Mock { calls: Default::default(), reply: Box::new(ollama_like) }));
+        cx.services.on_login("root", "rootpass12", true);
+        (cx, d)
+    }
+
+    fn user(tag: &str) -> AppCx {
+        let (mut cx, _) = admin(tag);
+        cx.session.user = "amy".into();
+        cx.session.role = Role::User;
+        cx.session.policy = Role::User.template();
+        cx.services.on_login("amy", "amypass-123", false);
+        cx
+    }
+
+    fn typ(a: &mut SettingsApp, cx: &AppCx, s: &str) {
+        for c in s.chars() {
+            a.handle(&Event::Key(Key::Char(c)), cx);
+        }
+    }
+    fn key(a: &mut SettingsApp, cx: &AppCx, k: Key) {
+        a.handle(&Event::Key(k), cx);
+    }
+    fn settle(a: &mut SettingsApp, cx: &AppCx) {
+        for _ in 0..500 {
+            a.handle(&Event::Tick, cx);
+            if !a.is_busy() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("job did not finish");
+    }
+    fn goto(a: &mut SettingsApp, cx: &AppCx, t: Tab) {
+        while a.tab() != t {
+            key(a, cx, Key::Right);
+        }
+    }
+    fn status(a: &SettingsApp) -> String {
+        a.status().map(|s| s.0.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn admin_adds_ollama_tests_it_and_picks_a_model() {
+        let (cx, _) = admin("set1");
+        let mut a = SettingsApp::new(&cx);
+        key(&mut a, &cx, Key::Char('a'));
+        assert!(a.has_modal());
+        typ(&mut a, &cx, "local");
+        for _ in 0..5 {
+            key(&mut a, &cx, Key::Enter); // id → type → url → key → model → submit
+        }
+        assert!(!a.has_modal(), "{}", status(&a));
+        let p = cx.services.settings.lock().unwrap().get().providers.clone();
+        assert_eq!((p.len(), p[0].id.as_str(), p[0].kind), (1, "local", Kind::Ollama));
+        assert_eq!(p[0].base_url.as_deref(), Some("http://localhost:11434"));
+        // test connection fetches and caches the model list
+        key(&mut a, &cx, Key::Char('t'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("2 model(s)"), "{}", status(&a));
+        assert_eq!(cx.services.settings.lock().unwrap().get().providers[0].models, vec!["llama3.2:3b", "qwen3:32b"]);
+        // choose the chat model by filtering the picker
+        key(&mut a, &cx, Key::Char('m'));
+        typ(&mut a, &cx, "qwen");
+        key(&mut a, &cx, Key::Enter);
+        let chat = cx.services.settings.lock().unwrap().get().chat.clone().unwrap();
+        assert_eq!((chat.provider.as_str(), chat.model.as_str()), ("local", "qwen3:32b"));
+        // and the chat app's live backend now answers through it
+        key(&mut a, &cx, Key::Char('c'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("replied: OK"), "{}", status(&a));
+        assert!(cx.audit.recent(20).iter().any(|l| l.contains("settings.chat_model") && l.contains("local/qwen3:32b")));
+    }
+
+    #[test]
+    fn api_keys_go_to_the_vault_never_to_settings_or_logs() {
+        let (cx, d) = admin("set2");
+        let mut a = SettingsApp::new(&cx);
+        key(&mut a, &cx, Key::Char('a'));
+        typ(&mut a, &cx, "openai");
+        key(&mut a, &cx, Key::Enter);
+        key(&mut a, &cx, Key::Right); // Ollama → OpenAI: URL default follows
+        key(&mut a, &cx, Key::Enter);
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "sk-super-secret-value");
+        key(&mut a, &cx, Key::Enter);
+        key(&mut a, &cx, Key::Enter);
+        assert!(!a.has_modal(), "{:?}", a.status());
+        let st = cx.services.settings.lock().unwrap().get().clone();
+        assert_eq!(st.providers[0].base_url.as_deref(), Some("https://api.openai.com/v1"));
+        assert_eq!(st.providers[0].key_ref.as_deref(), Some("vault:openai-key"));
+        assert_eq!(&*cx.services.secrets.resolve("vault:openai-key", None).unwrap(), "sk-super-secret-value");
+        let settings_file = std::fs::read_to_string(cx.services.dir().join("settings.json")).unwrap();
+        assert!(!settings_file.contains("sk-super-secret-value"));
+        let audit = std::fs::read_to_string(d.parent().unwrap().join(format!("iyakki-shell-{}-set2-x/audit.log", std::process::id()))).unwrap_or_default();
+        assert!(!audit.contains("sk-super-secret-value"));
+        assert!(cx.audit.recent(50).iter().all(|l| !l.contains("sk-super-secret-value")));
+        // the vault file itself is encrypted
+        let vault = std::fs::read_to_string(cx.services.dir().join("vault/system.afv")).unwrap();
+        assert!(!vault.contains("sk-super-secret-value"));
+    }
+
+    #[test]
+    fn a_rejected_form_stores_nothing() {
+        let (cx, _) = admin("set3");
+        let mut a = SettingsApp::new(&cx);
+        // OpenAI needs a key: submitting without one is refused and the form stays open
+        key(&mut a, &cx, Key::Char('a'));
+        typ(&mut a, &cx, "openai");
+        key(&mut a, &cx, Key::Enter);
+        key(&mut a, &cx, Key::Right);
+        for _ in 0..4 {
+            key(&mut a, &cx, Key::Enter);
+        }
+        assert!(a.has_modal());
+        assert!(cx.services.settings.lock().unwrap().get().providers.is_empty());
+        // a locked system vault makes saving a key fail cleanly (no half-saved provider)
+        cx.services.lock_system();
+        key(&mut a, &cx, Key::Tab); // wrap focus
+        key(&mut a, &cx, Key::Tab);
+        key(&mut a, &cx, Key::Tab);
+        typ(&mut a, &cx, "sk-abc");
+        key(&mut a, &cx, Key::Enter);
+        key(&mut a, &cx, Key::Enter);
+        assert!(a.has_modal());
+        assert!(cx.services.settings.lock().unwrap().get().providers.is_empty(), "no provider without its key");
+        // Esc closes the dialog
+        key(&mut a, &cx, Key::Esc);
+        assert!(!a.has_modal());
+    }
+
+    #[test]
+    fn non_admins_cannot_change_system_settings_and_it_is_audited() {
+        let cx = user("set4");
+        let mut a = SettingsApp::new(&cx);
+        assert_eq!(a.tabs(), &[Tab::Models, Tab::Rag, Tab::Vault, Tab::Skills, Tab::Voice, Tab::Browser, Tab::Account], "no secret-provider tab for users");
+        for k in ['a', 'e', 'd', 'k', 'x'] {
+            key(&mut a, &cx, Key::Char(k));
+            assert!(!a.has_modal(), "{k}");
+        }
+        assert_eq!(a.status().unwrap().1, false);
+        assert!(status(&a).contains("administrators"));
+        goto(&mut a, &cx, Tab::Rag);
+        key(&mut a, &cx, Key::Char(']'));
+        key(&mut a, &cx, Key::Char('a'));
+        assert!(!a.has_modal());
+        assert_eq!(cx.services.settings.lock().unwrap().get().rag.top_k, 5, "unchanged");
+        assert!(cx.audit.recent(10).iter().any(|l| l.contains("settings.denied")));
+        // even a hand-built admin form submitted by a non-admin is refused at save time
+        let mut forced = SettingsApp::new(&cx);
+        let form = SettingsApp::provider_form(&cx, None).text("x", "", "");
+        forced.modal = Some(Modal::Form(FormKind::Provider(None), form));
+        key(&mut forced, &cx, Key::Enter);
+        assert!(cx.services.settings.lock().unwrap().get().providers.is_empty());
+    }
+
+    #[test]
+    fn personal_vault_is_private_to_the_user() {
+        let cx = user("set5");
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Vault);
+        key(&mut a, &cx, Key::Char('n'));
+        typ(&mut a, &cx, "github-token");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "ghp_personal_secret");
+        key(&mut a, &cx, Key::Enter);
+        assert!(!a.has_modal(), "{:?}", a.status());
+        assert_eq!(cx.services.user_names("amy").unwrap(), vec!["github-token"]);
+        // the system vault is not reachable from a user session at all
+        assert!(cx.services.system_names().is_err() || !cx.session.policy.manage_settings);
+        key(&mut a, &cx, Key::Char('l')); // lock is a system-vault action: ignored for users
+        assert!(cx.services.user_vault_unlocked("amy"));
+        // delete with confirmation
+        key(&mut a, &cx, Key::Char('d'));
+        key(&mut a, &cx, Key::Char('n')); // anything but y cancels
+        assert_eq!(cx.services.user_names("amy").unwrap().len(), 1);
+        key(&mut a, &cx, Key::Char('d'));
+        key(&mut a, &cx, Key::Char('y'));
+        assert!(cx.services.user_names("amy").unwrap().is_empty());
+    }
+
+    #[test]
+    fn system_vault_secrets_lock_and_keyfile() {
+        let (cx, d) = admin("set6");
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Vault);
+        key(&mut a, &cx, Key::Char('n'));
+        typ(&mut a, &cx, "slack-webhook");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "https://hooks.example/abc");
+        key(&mut a, &cx, Key::Enter);
+        assert_eq!(cx.services.system_names().unwrap(), vec!["slack-webhook"]);
+        // invalid names are rejected in the form
+        key(&mut a, &cx, Key::Char('n'));
+        typ(&mut a, &cx, "Bad Name");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "v");
+        key(&mut a, &cx, Key::Enter);
+        assert!(a.has_modal(), "form stays open with the reason");
+        key(&mut a, &cx, Key::Esc);
+        // key file
+        key(&mut a, &cx, Key::Char('f'));
+        for _ in 0..80 {
+            key(&mut a, &cx, Key::Backspace);
+        }
+        typ(&mut a, &cx, &d.join("unattended.key").display().to_string());
+        key(&mut a, &cx, Key::Enter);
+        assert!(!a.has_modal(), "{:?}", a.status());
+        assert!(d.join("unattended.key").exists());
+        // lock now
+        key(&mut a, &cx, Key::Char('l'));
+        assert_eq!(cx.services.system_vault_state(), (true, false));
+        let mut g = Gfx::new(1100, 650);
+        g.clear(rgb(0, 0, 0));
+        a.render(&mut g, R::new(0.0, 72.0, 1100.0, 578.0), 1.0, &cx, 0);
+    }
+
+    #[test]
+    fn rag_tuning_external_backends_ingest_and_reindex() {
+        let (mut cx, d) = admin("set7");
+        let docs = d.join("docs");
+        std::fs::create_dir_all(docs.join("shared")).unwrap();
+        std::fs::write(docs.join("shared/a.md"), "Deploy keys live in the vault under prod.").unwrap();
+        cx.cfg.rag_docs = docs.display().to_string();
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Rag);
+        key(&mut a, &cx, Key::Char(']'));
+        key(&mut a, &cx, Key::Char('='));
+        key(&mut a, &cx, Key::Char('.'));
+        key(&mut a, &cx, Key::Char('u'));
+        let r = cx.services.settings.lock().unwrap().get().rag.clone();
+        assert_eq!((r.top_k, r.chunk_max, r.overlap, r.use_external), (6, 800, 120, false));
+        key(&mut a, &cx, Key::Char('u'));
+        // add a generic HTTP backend
+        key(&mut a, &cx, Key::Char('a'));
+        typ(&mut a, &cx, "corp");
+        key(&mut a, &cx, Key::Enter);
+        key(&mut a, &cx, Key::Right);
+        key(&mut a, &cx, Key::Right); // → HTTP
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "http://rag.corp/search");
+        for _ in 0..3 {
+            key(&mut a, &cx, Key::Enter);
+        }
+        assert!(!a.has_modal(), "{:?}", a.status());
+        assert_eq!(cx.services.settings.lock().unwrap().get().external_rag.len(), 1);
+        key(&mut a, &cx, Key::Char('t'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("endpoint responded"), "{}", status(&a));
+        key(&mut a, &cx, Key::Char('x'));
+        assert!(!cx.services.settings.lock().unwrap().get().external_rag[0].enabled);
+        // ingest the shared folder, then reindex
+        key(&mut a, &cx, Key::Char('i'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("1 new document"), "{}", status(&a));
+        assert_eq!(cx.services.kb.lock().unwrap().stats("shared").unwrap().docs, 1);
+        key(&mut a, &cx, Key::Char('i'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("0 new document"), "idempotent: {}", status(&a));
+        key(&mut a, &cx, Key::Char('r'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("Re-embedded"), "{}", status(&a));
+        key(&mut a, &cx, Key::Char('d'));
+        key(&mut a, &cx, Key::Char('y'));
+        assert!(cx.services.settings.lock().unwrap().get().external_rag.is_empty());
+        let mut g = Gfx::new(1100, 650);
+        g.clear(rgb(0, 0, 0));
+        a.render(&mut g, R::new(0.0, 72.0, 1100.0, 578.0), 1.0, &cx, 0);
+    }
+
+    #[test]
+    fn external_secret_provider_roundtrip() {
+        let (cx, _) = admin("set8");
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::SecretProviders);
+        key(&mut a, &cx, Key::Char('a'));
+        typ(&mut a, &cx, "corp");
+        key(&mut a, &cx, Key::Enter);
+        key(&mut a, &cx, Key::Enter); // type: HashiCorp (default)
+        typ(&mut a, &cx, "http://bao:8200");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "s.root-token");
+        for _ in 0..3 {
+            key(&mut a, &cx, Key::Enter);
+        }
+        assert!(!a.has_modal(), "{:?}", a.status());
+        assert_eq!(&*cx.services.secrets.resolve("vault:corp-token", None).unwrap(), "s.root-token");
+        key(&mut a, &cx, Key::Char('t'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("reachable"), "{}", status(&a));
+        key(&mut a, &cx, Key::Char('d'));
+        key(&mut a, &cx, Key::Char('y'));
+        assert!(cx.services.settings.lock().unwrap().get().secret_providers.is_empty());
+    }
+
+    #[test]
+    fn password_change_rekeys_the_personal_vault() {
+        let (cx, _) = admin("set9");
+        // root's account exists in the store with password rootpass12
+        cx.services.user_set("root", "tok", "personal").unwrap();
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Account);
+        key(&mut a, &cx, Key::Char('p'));
+        typ(&mut a, &cx, "wrong-old-pw");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "brand-new-pw1");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "brand-new-pw1");
+        key(&mut a, &cx, Key::Enter);
+        assert!(a.has_modal(), "wrong current password keeps the form open");
+        // fix the first field and retry (focus is on the last field; one Tab wraps to the first)
+        key(&mut a, &cx, Key::Tab);
+        for _ in 0..20 {
+            key(&mut a, &cx, Key::Backspace);
+        }
+        typ(&mut a, &cx, "rootpass12");
+        for _ in 0..2 {
+            key(&mut a, &cx, Key::Enter);
+        }
+        key(&mut a, &cx, Key::Enter);
+        assert!(!a.has_modal(), "{:?}", a.status());
+        assert!(cx.store.lock().unwrap().authenticate("root", "brand-new-pw1").is_ok());
+        cx.services.on_logout("root", true);
+        assert_eq!(cx.services.on_login("root", "brand-new-pw1", true).user_vault, iyakki_agent::services::VaultState::Unlocked);
+        assert_eq!(cx.services.user_names("root").unwrap(), vec!["tok"], "personal secrets survive the change");
+        assert!(cx.audit.recent(20).iter().any(|l| l.contains("account.password")));
+    }
+
+    #[test]
+    fn mismatched_new_passwords_are_rejected() {
+        let (cx, _) = admin("set10");
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Account);
+        key(&mut a, &cx, Key::Char('p'));
+        typ(&mut a, &cx, "rootpass12");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "new-password-1");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "new-password-2");
+        key(&mut a, &cx, Key::Enter);
+        assert!(a.has_modal());
+        assert!(cx.store.lock().unwrap().authenticate("root", "rootpass12").is_ok(), "nothing changed");
+    }
+
+    #[test]
+    fn every_tab_renders_for_admin_and_user_at_several_sizes() {
+        for (w, h) in [(1280u32, 720u32), (800, 600), (640, 480)] {
+            for admin_view in [true, false] {
+                let (cx, _) = admin(&format!("set-r-{w}-{admin_view}"));
+                let cx = if admin_view { cx } else { user(&format!("set-ru-{w}")) };
+                let mut a = SettingsApp::new(&cx);
+                let mut g = Gfx::new(w, h);
+                for _ in 0..a.tabs().len() {
+                    g.clear(rgb(0, 0, 0));
+                    a.render(&mut g, R::new(0.0, 72.0, w as f32, h as f32 - 72.0), (w as f32 / 1280.0).max(0.6), &cx, 3);
+                    key(&mut a, &cx, Key::Right);
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ voice tab
+
+    fn fake_audio(d: &std::path::Path, silent: bool) -> iyakki_agent::voice::VoiceSettings {
+        use iyakki_agent::voice::{encode_wav, tone};
+        let pcm: Vec<u8> = if silent { vec![0u8; 32_000] } else { (0..16_000).flat_map(|i| (((i as f32 * 0.2).sin() * 9000.0) as i16).to_le_bytes()).collect() };
+        std::fs::write(d.join("mic.raw"), pcm).unwrap();
+        std::fs::write(d.join("canned.wav"), encode_wav(&tone(500.0, 200), 16_000)).unwrap();
+        std::fs::write(d.join("whisper.sh"), "#!/bin/sh\necho 'hello from the test'\n").unwrap();
+        let mut v = iyakki_agent::voice::VoiceSettings::default();
+        v.record_cmd = format!("sh -c 'cat {}; sleep 30'", d.join("mic.raw").display());
+        v.play_cmd = format!("sh -c 'cat > {}'", d.join("played.wav").display());
+        v.stt = Some(SpeechEngine::Command { command: format!("sh {} {{wav}}", d.join("whisper.sh").display()) });
+        v.tts = Some(SpeechEngine::Command { command: format!("sh -c 'cat >/dev/null; cat {}'", d.join("canned.wav").display()) });
+        v
+    }
+
+    #[test]
+    fn voice_tab_visibility_follows_the_role() {
+        let (cx, _) = admin("sv0");
+        assert!(SettingsApp::new(&cx).tabs().contains(&Tab::Voice));
+        let ucx = user("sv0u");
+        assert!(SettingsApp::new(&ucx).tabs().contains(&Tab::Voice), "users with voice may test their hardware");
+        let mut gcx = user("sv0g");
+        gcx.session.policy.voice = false;
+        assert!(!SettingsApp::new(&gcx).tabs().contains(&Tab::Voice), "no voice permission, no tab");
+    }
+
+    #[test]
+    fn admin_configures_engines_and_the_key_goes_to_the_vault() {
+        let (cx, _) = admin("sv1");
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Voice);
+        // HTTP speech-to-text with an API key
+        key(&mut a, &cx, Key::Char('s'));
+        key(&mut a, &cx, Key::Enter); // type: HTTP (default) -> URL
+        key(&mut a, &cx, Key::Ctrl('a'));
+        typ(&mut a, &cx, "http://192.168.1.9:8080/v1/audio/transcriptions");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "whisper-large");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "sk-voice-secret");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "en");
+        key(&mut a, &cx, Key::Enter);
+        assert!(!a.has_modal(), "{:?}", a.status());
+        let v = cx.services.voice_settings();
+        match v.stt.unwrap() {
+            SpeechEngine::Http { url, model, key_ref, language, .. } => {
+                assert_eq!((url.as_str(), model.as_str(), key_ref.as_deref(), language.as_deref()), ("http://192.168.1.9:8080/v1/audio/transcriptions", "whisper-large", Some("vault:stt-key"), Some("en")));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(&*cx.services.secrets.resolve("vault:stt-key", None).unwrap(), "sk-voice-secret");
+        assert!(!std::fs::read_to_string(cx.services.dir().join("settings.json")).unwrap().contains("sk-voice-secret"));
+        // local command text-to-speech
+        key(&mut a, &cx, Key::Char('v'));
+        key(&mut a, &cx, Key::Right); // Local command
+        key(&mut a, &cx, Key::Enter);
+        key(&mut a, &cx, Key::Ctrl('a'));
+        typ(&mut a, &cx, "piper -m voice.onnx -f {out}");
+        for _ in 0..4 {
+            key(&mut a, &cx, Key::Enter);
+        }
+        assert!(!a.has_modal(), "{:?}", a.status());
+        assert_eq!(cx.services.voice_settings().tts, Some(SpeechEngine::Command { command: "piper -m voice.onnx -f {out}".into() }));
+        // invalid input keeps the dialog open
+        key(&mut a, &cx, Key::Char('s'));
+        key(&mut a, &cx, Key::Enter);
+        key(&mut a, &cx, Key::Ctrl('a'));
+        typ(&mut a, &cx, "ftp://nope");
+        for _ in 0..4 {
+            key(&mut a, &cx, Key::Enter);
+        }
+        assert!(a.has_modal(), "bad URL is rejected");
+        key(&mut a, &cx, Key::Esc);
+        // toggles and clearing
+        key(&mut a, &cx, Key::Char('a'));
+        key(&mut a, &cx, Key::Char('r'));
+        let v = cx.services.voice_settings();
+        assert!(v.auto_send && v.speak_replies);
+        key(&mut a, &cx, Key::Char('S'));
+        key(&mut a, &cx, Key::Char('V'));
+        let v = cx.services.voice_settings();
+        assert!(v.stt.is_none() && v.tts.is_none());
+        let mut g = Gfx::new(1280, 700);
+        g.clear(rgb(0, 0, 0));
+        a.render(&mut g, R::new(0.0, 72.0, 1280.0, 628.0), 1.0, &cx, 0);
+    }
+
+    #[test]
+    fn hardware_tests_report_what_they_find() {
+        let (cx, d) = admin("sv2");
+        let dir = d.join("audio");
+        std::fs::create_dir_all(&dir).unwrap();
+        cx.services.settings.lock().unwrap().update(|s| s.voice = fake_audio(&dir, false)).unwrap();
+        let mut a = SettingsApp::new(&cx);
+        a.test_record_ms = 300;
+        goto(&mut a, &cx, Tab::Voice);
+        key(&mut a, &cx, Key::Char('m'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("Microphone works") && status(&a).contains("peak level"), "{}", status(&a));
+        key(&mut a, &cx, Key::Char('p'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("test tone"), "{}", status(&a));
+        assert!(std::fs::read(dir.join("played.wav")).unwrap().starts_with(b"RIFF"), "a real WAV reached the speaker command");
+        key(&mut a, &cx, Key::Char('t'));
+        settle(&mut a, &cx);
+        assert_eq!(status(&a), "Heard: “hello from the test”");
+        let _ = std::fs::remove_file(dir.join("played.wav"));
+        key(&mut a, &cx, Key::Char('y'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("Synthesised"), "{}", status(&a));
+        assert!(dir.join("played.wav").exists());
+        // a silent microphone is reported as silent
+        cx.services.settings.lock().unwrap().update(|s| s.voice = fake_audio(&dir, true)).unwrap();
+        key(&mut a, &cx, Key::Char('m'));
+        settle(&mut a, &cx);
+        assert_eq!(a.status().unwrap().1, false);
+        assert!(status(&a).contains("silent"), "{}", status(&a));
+        // a missing tool names the fix
+        cx.services.settings.lock().unwrap().update(|s| s.voice.record_cmd = "/no/such/recorder".into()).unwrap();
+        key(&mut a, &cx, Key::Char('m'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("cannot start") && status(&a).contains("Settings"), "{}", status(&a));
+    }
+
+    #[test]
+    fn users_can_test_but_not_change_voice_settings() {
+        let cx = user("sv3");
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Voice);
+        for k in ['s', 'v', 'c', 'a', 'r', 'S', 'V'] {
+            key(&mut a, &cx, Key::Char(k));
+            assert!(!a.has_modal(), "{k}");
+        }
+        assert!(status(&a).contains("administrators"));
+        assert!(cx.audit.recent(10).iter().any(|l| l.contains("settings.denied")));
+        // testing needs the voice permission (and is audited)
+        key(&mut a, &cx, Key::Char('p'));
+        assert!(a.is_busy() || status(&a).contains("Played") || a.status().is_some());
+        settle(&mut a, &cx);
+        assert!(cx.audit.recent(10).iter().any(|l| l.contains("voice.test")));
+        let mut no_voice = user("sv3b");
+        no_voice.session.policy.voice = false;
+        let mut b = SettingsApp::new(&no_voice);
+        b.tab = 0;
+        b.tabs.push(Tab::Voice); // even if the tab were reached, the tests refuse
+        b.tab = b.tabs.len() - 1;
+        key(&mut b, &no_voice, Key::Char('m'));
+        assert!(!b.is_busy() && status(&b).contains("not enabled"));
+        assert!(no_voice.audit.recent(10).iter().any(|l| l.contains("voice.denied")));
+    }
+
+    // ------------------------------------------------------------------ skills tab
+
+    const SKILL_MD: &str = "---\nname: meeting-notes\ndescription: Summarise meeting notes\ntriggers: meeting, minutes\n---\nList decisions first.\n";
+
+    #[test]
+    fn users_keep_personal_skills_from_clipboard_form_and_file() {
+        let cx = user("skills-user");
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Skills);
+        // from the clipboard (newlines preserved)
+        crate::ui::clipboard::copy(SKILL_MD);
+        key(&mut a, &cx, Key::Char('c'));
+        assert!(status(&a).contains("Saved mine skill `meeting-notes`"), "{}", status(&a));
+        let l = cx.services.skills.list("amy");
+        assert_eq!((l.len(), l[0].body.as_str()), (1, "List decisions first."));
+        assert_eq!(a.list_len(&cx), 1);
+        // quick-create form (a user has no Scope choice beyond "Mine")
+        key(&mut a, &cx, Key::Char('a'));
+        typ(&mut a, &cx, "code-review");
+        key(&mut a, &cx, Key::Tab);
+        typ(&mut a, &cx, "Review a diff for bugs");
+        key(&mut a, &cx, Key::Tab);
+        typ(&mut a, &cx, "review, diff");
+        key(&mut a, &cx, Key::Tab);
+        typ(&mut a, &cx, "Look for bugs before style.");
+        // Ctrl+S submits
+        a.handle(&Event::Key(Key::Ctrl('s')), &cx);
+        assert!(!a.has_modal(), "{}", status(&a));
+        assert!(cx.services.skills.get(&iyakki_agent::skills::Scope::User("amy".into()), "code-review").is_some());
+        // import from a file inside the user's read scope; outside it is refused
+        let home = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("iyakki-skill-import-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("tone.md"), SKILL_MD.replace("meeting-notes", "tone")).unwrap();
+        let mut cx2 = cx.clone();
+        cx2.session.policy.fs_read = vec![home.display().to_string()];
+        let mut b = SettingsApp::new(&cx2);
+        goto(&mut b, &cx2, Tab::Skills);
+        key(&mut b, &cx2, Key::Char('i'));
+        typ(&mut b, &cx2, &home.join("tone.md").display().to_string());
+        b.handle(&Event::Key(Key::Ctrl('s')), &cx2);
+        assert!(cx2.services.skills.get(&iyakki_agent::skills::Scope::User("amy".into()), "tone").is_some(), "{}", status(&b));
+        key(&mut b, &cx2, Key::Char('i'));
+        typ(&mut b, &cx2, "/etc/passwd");
+        b.handle(&Event::Key(Key::Ctrl('s')), &cx2);
+        assert!(b.has_modal(), "a refused import keeps the form open");
+        assert!(cx2.audit.recent(20).iter().any(|l| l.contains("skills.add")));
+    }
+
+    #[test]
+    fn shared_skills_need_the_permission_and_deleting_asks_first() {
+        let cx = user("skills-shared");
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Skills);
+        crate::ui::clipboard::copy(SKILL_MD);
+        key(&mut a, &cx, Key::Char('C'));
+        assert!(cx.services.skills.list_scope(&iyakki_agent::skills::Scope::Shared).is_empty(), "plain users cannot add shared skills");
+        assert!(!status(&a).starts_with("Saved") && a.status().unwrap().1 == false);
+        // a forged form that asks for the shared scope is refused too
+        assert!(SettingsApp::add_skill(&mut a, &cx, SKILL_MD, true).is_err());
+        assert!(cx.audit.recent(20).iter().any(|l| l.contains("settings.denied")));
+        // operators can; users then see it but cannot delete it
+        let mut op = cx.clone();
+        op.session.role = Role::Operator;
+        op.session.policy = Role::Operator.template();
+        let mut o = SettingsApp::new(&op);
+        goto(&mut o, &op, Tab::Skills);
+        crate::ui::clipboard::copy(SKILL_MD);
+        key(&mut o, &op, Key::Char('C'));
+        assert_eq!(cx.services.skills.list_scope(&iyakki_agent::skills::Scope::Shared).len(), 1, "{}", status(&o));
+        let mut a2 = SettingsApp::new(&cx);
+        goto(&mut a2, &cx, Tab::Skills);
+        assert_eq!(a2.list_len(&cx), 1);
+        key(&mut a2, &cx, Key::Char('d'));
+        assert!(!a2.has_modal() && status(&a2).contains("Only operators"));
+        // the operator confirms before deleting
+        key(&mut o, &op, Key::Char('d'));
+        assert!(o.has_modal());
+        key(&mut o, &op, Key::Char('n'));
+        assert_eq!(cx.services.skills.list_scope(&iyakki_agent::skills::Scope::Shared).len(), 1, "declined");
+        key(&mut o, &op, Key::Char('d'));
+        key(&mut o, &op, Key::Char('y'));
+        assert!(cx.services.skills.list_scope(&iyakki_agent::skills::Scope::Shared).is_empty());
+    }
+
+    #[test]
+    fn skills_tab_follows_the_permission_and_renders() {
+        let mut cx = user("skills-vis");
+        cx.session.policy.skills = false;
+        assert!(!SettingsApp::new(&cx).tabs().contains(&Tab::Skills));
+        let cx = user("skills-vis2");
+        cx.services.skills.add(iyakki_agent::skills::Scope::User("amy".into()), SKILL_MD, false, true).unwrap();
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Skills);
+        let mut g = Gfx::new(1100, 650);
+        g.clear(rgb(0, 0, 0));
+        a.render(&mut g, R::new(0.0, 72.0, 1100.0, 578.0), 1.0, &cx, 0);
+        assert!(g.hits.iter().any(|h| h.label == "meeting-notes"), "the skill row is clickable");
+    }
+
+    #[test]
+    fn admin_sets_the_token_price_and_bad_values_are_rejected() {
+        let (cx, _) = admin("set-price");
+        let mut a = SettingsApp::new(&cx);
+        key(&mut a, &cx, Key::Char('p'));
+        assert!(a.has_modal());
+        typ(&mut a, &cx, "250");
+        key(&mut a, &cx, Key::Enter);
+        assert_eq!(cx.services.settings.lock().unwrap().get().token_price_cents_per_mtok, 250);
+        assert!(cx.audit.recent(5).iter().any(|l| l.contains("settings.token_price") && l.contains("250")));
+        key(&mut a, &cx, Key::Char('p'));
+        for _ in 0..3 {
+            key(&mut a, &cx, Key::Backspace);
+        }
+        typ(&mut a, &cx, "abc");
+        key(&mut a, &cx, Key::Enter);
+        assert!(a.has_modal(), "a non-number keeps the form open");
+        assert_eq!(cx.services.settings.lock().unwrap().get().token_price_cents_per_mtok, 250);
+        key(&mut a, &cx, Key::Esc);
+        // users cannot
+        let ucx = user("set-price-u");
+        let mut u = SettingsApp::new(&ucx);
+        key(&mut u, &ucx, Key::Char('p'));
+        assert!(!u.has_modal());
+        assert_eq!(ucx.services.settings.lock().unwrap().get().token_price_cents_per_mtok, 0);
+    }
+
+    // ------------------------------------------------------------------ storage tab
+
+    struct DirMounter;
+    impl iyakki_storage::Mounter for DirMounter {
+        fn mount(&self, _dev: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+            std::fs::create_dir_all(target).map_err(|e| e.to_string())
+        }
+        fn unmount(&self, _target: &std::path::Path) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// A fake machine: sda = the boot medium, vdb = empty disk, vdc = a disk with a filesystem on it.
+    fn machine(tag: &str) -> Option<(StorageEnv, std::path::PathBuf)> {
+        let mke2fs = ["/usr/sbin/mke2fs", "/sbin/mke2fs"].iter().map(std::path::PathBuf::from).find(|p| p.exists())?;
+        let root = std::env::temp_dir().join(format!("iyakki-ui-storage-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sys/block")).unwrap();
+        std::fs::create_dir_all(root.join("dev")).unwrap();
+        std::fs::write(root.join("mounts"), "rootfs / rootfs rw 0 0\n").unwrap();
+        for (name, extra) in [("sda", Some((0x8001u64, &b"CD001"[..]))), ("vdb", None), ("vdc", Some((0u64, &b"precious"[..])))] {
+            let d = root.join("sys/block").join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("size"), "32768\n").unwrap();
+            std::fs::write(d.join("removable"), "0\n").unwrap();
+            let node = root.join("dev").join(name);
+            std::fs::File::create(&node).unwrap().set_len(16 * 1024 * 1024).unwrap();
+            if let Some((off, b)) = extra {
+                use std::os::unix::fs::FileExt;
+                std::fs::OpenOptions::new().write(true).open(&node).unwrap().write_all_at(b, off).unwrap();
+            }
+        }
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("users.json"), "{}").unwrap();
+        let env = StorageEnv { roots: iyakki_storage::Roots { sys_block: root.join("sys/block"), dev: root.join("dev"), mounts: root.join("mounts"), require_block: false }, mounter: Arc::new(DirMounter), mke2fs, scratch: root.clone(), data_dir: data, virtual_disks: None };
+        Some((env, root))
+    }
+
+    fn select_disk(a: &mut SettingsApp, cx: &AppCx, name: &str) {
+        let i = a.devices.iter().position(|d| d.name == name).unwrap();
+        a.handle(&Event::Row(i), cx);
+    }
+
+    #[test]
+    fn admin_makes_an_empty_disk_the_data_disk_after_confirming() {
+        let Some((env, root)) = machine("empty") else { return eprintln!("mke2fs missing; skipping") };
+        let (cx, _) = admin("storage1");
+        let mut a = SettingsApp::new(&cx).with_storage(env);
+        assert!(a.tabs().contains(&Tab::Storage));
+        goto(&mut a, &cx, Tab::Storage);
+        assert_eq!(a.list_len(&cx), 3);
+        select_disk(&mut a, &cx, "vdb");
+        key(&mut a, &cx, Key::Char('m'));
+        assert!(a.has_modal());
+        typ(&mut a, &cx, "vda");
+        key(&mut a, &cx, Key::Enter);
+        assert!(a.has_modal(), "a wrong name keeps the confirmation open");
+        assert_eq!(iyakki_storage::probe(&root.join("dev/vdb")).unwrap(), iyakki_storage::Content::Empty, "nothing happened yet");
+        for _ in 0..3 {
+            key(&mut a, &cx, Key::Backspace);
+        }
+        typ(&mut a, &cx, "vdb");
+        key(&mut a, &cx, Key::Enter);
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("vdb is now the IYAKKI data disk") && status(&a).contains("Reboot"), "{}", status(&a));
+        assert_eq!(iyakki_storage::probe(&root.join("dev/vdb")).unwrap(), iyakki_storage::Content::Iyakki);
+        assert!(a.devices.iter().find(|d| d.name == "vdb").unwrap().content == iyakki_storage::Content::Iyakki, "the list refreshed");
+        assert!(cx.audit.recent(10).iter().any(|l| l.contains("storage.persist") && l.contains("vdb")));
+    }
+
+    #[test]
+    fn in_the_window_disks_are_virtual_made_and_deleted_from_the_storage_tab() {
+        let Some((_, _)) = machine("virt-probe") else { return eprintln!("mke2fs missing; skipping") };
+        let root = std::env::temp_dir().join(format!("iyakki-ui-virtual-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let v = iyakki_storage::virt::VirtualDisks::open(&root).unwrap();
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("users.json"), "{}").unwrap();
+        let env = StorageEnv { roots: v.roots(), mounter: Arc::new(v.mounter()), mke2fs: "/usr/sbin/mke2fs".into(), scratch: root.clone(), data_dir: data, virtual_disks: Some(v) };
+        let (cx, _) = admin("storage-virtual");
+        let mut a = SettingsApp::new(&cx).with_storage(env);
+        goto(&mut a, &cx, Tab::Storage);
+        assert_eq!(a.list_len(&cx), 0, "no real drive is listed");
+        key(&mut a, &cx, Key::Char('n'));
+        assert!(a.has_modal());
+        for _ in 0..2 {
+            key(&mut a, &cx, Key::Backspace);
+        }
+        typ(&mut a, &cx, "banana");
+        key(&mut a, &cx, Key::Enter);
+        assert!(a.has_modal(), "a size that is not a size is refused and the question stays");
+        for _ in 0..6 {
+            key(&mut a, &cx, Key::Backspace);
+        }
+        typ(&mut a, &cx, "128M");
+        key(&mut a, &cx, Key::Enter);
+        assert!(status(&a).contains("Made the virtual disk vda"), "{}", status(&a));
+        assert_eq!(a.list_len(&cx), 1);
+        assert!(root.join("dev/vda").exists());
+        // the disk can become the data disk with the same confirmation as a real one
+        select_disk(&mut a, &cx, "vda");
+        key(&mut a, &cx, Key::Char('m'));
+        typ(&mut a, &cx, "vda");
+        key(&mut a, &cx, Key::Enter);
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("vda is now the IYAKKI data disk"), "{}", status(&a));
+        // and be deleted again, by typing its name
+        key(&mut a, &cx, Key::Char('x'));
+        typ(&mut a, &cx, "vdb");
+        key(&mut a, &cx, Key::Enter);
+        assert!(a.has_modal(), "the wrong name keeps the disk");
+        for _ in 0..3 {
+            key(&mut a, &cx, Key::Backspace);
+        }
+        typ(&mut a, &cx, "vda");
+        key(&mut a, &cx, Key::Enter);
+        assert!(status(&a).contains("Removed vda"), "{}", status(&a));
+        assert_eq!(a.list_len(&cx), 0);
+        assert!(!root.join("dev/vda").exists());
+        assert!(cx.audit.recent(10).iter().any(|l| l.contains("storage.virtual.add")) && cx.audit.recent(10).iter().any(|l| l.contains("storage.virtual.remove")));
+    }
+
+    #[test]
+    fn storage_refuses_the_boot_medium_and_needs_erase_for_disks_with_data() {
+        let Some((env, root)) = machine("guard") else { return eprintln!("mke2fs missing; skipping") };
+        let (cx, _) = admin("storage2");
+        let mut a = SettingsApp::new(&cx).with_storage(env);
+        goto(&mut a, &cx, Tab::Storage);
+        select_disk(&mut a, &cx, "sda");
+        key(&mut a, &cx, Key::Char('m'));
+        assert!(!a.has_modal() && status(&a).contains("booted from"), "{}", status(&a));
+        // a disk with data asks for a second, explicit confirmation
+        select_disk(&mut a, &cx, "vdc");
+        key(&mut a, &cx, Key::Char('m'));
+        assert!(a.has_modal());
+        typ(&mut a, &cx, "vdc");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "erase");
+        key(&mut a, &cx, Key::Enter);
+        assert!(a.has_modal(), "lower-case erase is not enough");
+        assert_eq!(iyakki_storage::probe(&root.join("dev/vdc")).unwrap(), iyakki_storage::Content::Other("data of unknown type".into()));
+        for _ in 0..5 {
+            key(&mut a, &cx, Key::Backspace);
+        }
+        typ(&mut a, &cx, "ERASE");
+        key(&mut a, &cx, Key::Enter);
+        settle(&mut a, &cx);
+        assert_eq!(iyakki_storage::probe(&root.join("dev/vdc")).unwrap(), iyakki_storage::Content::Iyakki);
+        assert_eq!(iyakki_storage::probe(&root.join("dev/vdb")).unwrap(), iyakki_storage::Content::Empty, "other disks untouched");
+    }
+
+    #[test]
+    fn storage_is_admin_only_and_renders() {
+        let ucx = user("storage3");
+        assert!(!SettingsApp::new(&ucx).tabs().contains(&Tab::Storage));
+        // a hand-built request from a non-admin is refused at save time
+        let mut forced = SettingsApp::new(&ucx);
+        let f = Form::new("x").text("Type vdb", "vdb", "");
+        forced.modal = Some(Modal::Form(FormKind::Persist("vdb".into(), false), f));
+        key(&mut forced, &ucx, Key::Enter);
+        assert!(!forced.is_busy());
+        let (cx, _) = admin("storage4");
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Storage);
+        let mut g = Gfx::new(1100, 650);
+        g.clear(rgb(0, 0, 0));
+        a.render(&mut g, R::new(0.0, 72.0, 1100.0, 578.0), 1.0, &cx, 0);
+        if let Some((env, _)) = machine("render") {
+            let mut b = SettingsApp::new(&cx).with_storage(env);
+            goto(&mut b, &cx, Tab::Storage);
+            g.clear(rgb(0, 0, 0));
+            b.render(&mut g, R::new(0.0, 72.0, 1100.0, 578.0), 1.0, &cx, 0);
+            assert!(g.hits.iter().any(|h| h.label == "/dev/vdb"), "disks are clickable rows");
+        }
+    }
+
+    // ---------------------------------------------------------------- hardware pages
+
+    struct FakeCtl(Mutex<Vec<String>>);
+    impl iyakki_devctl::Control for FakeCtl {
+        fn set_link(&self, n: &str, up: bool) -> Result<(), String> {
+            self.0.lock().unwrap().push(format!("{n} {up}"));
+            Ok(())
+        }
+        fn ipv4(&self) -> Vec<(String, String)> {
+            vec![]
+        }
+        fn volume(&self, _: u32) -> Option<iyakki_devctl::Volume> {
+            None
+        }
+        fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_devctl::Volume, String> {
+            Err("no".into())
+        }
+        fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_devctl::Volume, String> {
+            Err("no".into())
+        }
+        fn dhcp(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn fake_machine(tag: &str) -> (DeviceEnv, Arc<FakeCtl>) {
+        let d = temp_dir(&format!("{tag}-hw"));
+        let put = |rel: &str, c: &str| {
+            let p = d.join("sys").join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, c).unwrap();
+        };
+        put("class/net/eno1/type", "1\n");
+        put("class/net/eno1/flags", "0x1003\n");
+        put("class/net/eno1/carrier", "1\n");
+        put("class/net/eno1/device/x", "");
+        let ctl = Arc::new(FakeCtl(Mutex::new(vec![])));
+        (DeviceEnv { roots: iyakki_devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") }, ctl: ctl.clone() }, ctl)
+    }
+
+    #[test]
+    fn the_hardware_pages_are_admin_only() {
+        let ucx = user("hw1");
+        let a = SettingsApp::new(&ucx);
+        for t in [Tab::Network, Tab::Bluetooth, Tab::Display, Tab::Sound] {
+            assert!(!a.tabs().contains(&t), "{t:?} is for administrators");
+        }
+        let (cx, _) = admin("hw2");
+        let a = SettingsApp::new(&cx);
+        for t in [Tab::Network, Tab::Bluetooth, Tab::Display, Tab::Sound] {
+            assert!(a.tabs().contains(&t), "{t:?}");
+        }
+    }
+
+    #[test]
+    fn enter_on_the_network_page_switches_the_link_and_is_audited() {
+        let (cx, _) = admin("hw3");
+        let (env, ctl) = fake_machine("hw3");
+        let mut a = SettingsApp::new(&cx).with_hardware(env);
+        goto(&mut a, &cx, Tab::Network);
+        key(&mut a, &cx, Key::Enter);
+        assert_eq!(status(&a), "Ethernet eno1 turned off.");
+        assert_eq!(ctl.0.lock().unwrap().clone(), vec!["eno1 false"]);
+        assert!(cx.audit.recent(10).iter().any(|l| l.contains("settings.network") && l.contains("ethernet eno1 off")), "{:?}", cx.audit.recent(10));
+        // a missing WiFi adapter is listed, and pressing Enter on it only explains
+        key(&mut a, &cx, Key::Down);
+        key(&mut a, &cx, Key::Enter);
+        assert!(status(&a).contains("nothing to switch"), "{}", status(&a));
+    }
+
+    #[test]
+    fn a_non_admin_who_forces_the_page_cannot_switch_anything() {
+        let ucx = user("hw4");
+        let (env, ctl) = fake_machine("hw4");
+        let mut a = SettingsApp::new(&ucx).with_hardware(env);
+        a.tabs.push(Tab::Network); // a hand-built request, as the storage test does
+        a.tab = a.tabs.len() - 1;
+        key(&mut a, &ucx, Key::Enter);
+        assert!(ctl.0.lock().unwrap().is_empty(), "the actuator was never called");
+    }
+
+    #[test]
+    fn the_hardware_pages_render_with_clickable_rows_and_all_tabs_fit() {
+        let (cx, _) = admin("hw5");
+        let (env, _) = fake_machine("hw5");
+        let mut a = SettingsApp::new(&cx).with_hardware(env);
+        let mut g = Gfx::new(1280, 720);
+        for t in [Tab::Network, Tab::Bluetooth, Tab::Display, Tab::Sound] {
+            goto(&mut a, &cx, t);
+            g.clear(rgb(0, 0, 0));
+            g.hits.clear();
+            a.render(&mut g, R::new(0.0, 72.0, 1280.0, 648.0), 1.0, &cx, 0);
+            assert!(g.hits.iter().any(|h| matches!(h.ev, Event::Row(0))), "{t:?} rows are clickable");
+            assert!(g.hits.iter().any(|h| h.label == "Look again"), "{t:?} has its buttons");
+        }
+        // every tab can be clicked even when the bar wraps onto a second line
+        for (i, _) in a.tabs().to_vec().iter().enumerate() {
+            assert!(g.hits.iter().any(|h| h.ev == Event::Tab(i)), "tab {i} is on screen");
+        }
+    }
+
+    // ---------------------------------------------------------------- the left list, search and sliders
+
+    fn draw(a: &mut SettingsApp, cx: &AppCx, w: u32, h: u32) -> Gfx {
+        let mut g = Gfx::new(w, h);
+        g.clear(rgb(0, 0, 0));
+        let s = (w as f32 / 1280.0).min(h as f32 / 720.0).clamp(0.6, 3.0);
+        a.render(&mut g, R::new(0.0, 72.0, w as f32, h as f32 - 72.0), s, cx, 0);
+        g
+    }
+
+    #[test]
+    fn typing_in_the_search_box_narrows_the_pages_and_the_first_match_becomes_the_page() {
+        let (cx, _) = admin("nav1");
+        let mut a = SettingsApp::new(&cx);
+        let all = a.nav_matches().len();
+        assert_eq!(all, a.tabs().len());
+        key(&mut a, &cx, Key::Ctrl('f'));
+        assert!(a.nav_focus, "Ctrl+F goes to the search box");
+        typ(&mut a, &cx, "wifi");
+        assert_eq!(a.nav_matches().len(), 1);
+        assert_eq!(a.tab(), Tab::Network, "the one match is shown at once");
+        // keys go to the search box while it has the keyboard: 'a' does not open a form on the Models page
+        key(&mut a, &cx, Key::Esc);
+        assert_eq!(a.nav_query.value, "", "Esc clears the text first");
+        assert!(a.nav_focus);
+        key(&mut a, &cx, Key::Esc);
+        assert!(!a.nav_focus, "and then leaves the box");
+        // words in any order, keywords and group names
+        key(&mut a, &cx, Key::Char('/'));
+        typ(&mut a, &cx, "volume");
+        assert_eq!(a.tab(), Tab::Sound);
+        key(&mut a, &cx, Key::Esc);
+        typ(&mut a, &cx, "devices");
+        assert!(a.nav_matches().len() >= 4, "a group name finds its pages");
+        key(&mut a, &cx, Key::Down);
+        let second = a.tab();
+        key(&mut a, &cx, Key::Enter);
+        assert!(!a.nav_focus);
+        assert_eq!(a.tab(), nav_first(&a).map_or(second, |_| a.tab()));
+        // pasting works in the box
+        let mut b = SettingsApp::new(&cx);
+        key(&mut b, &cx, Key::Ctrl('f'));
+        b.handle(&Event::Paste("bluetooth".into()), &cx);
+        assert_eq!(b.tab(), Tab::Bluetooth);
+        // nothing found: the page stays as it was and the list says so
+        let mut c = SettingsApp::new(&cx);
+        key(&mut c, &cx, Key::Ctrl('f'));
+        typ(&mut c, &cx, "zzzzzz");
+        assert!(c.nav_matches().is_empty());
+        let g = draw(&mut c, &cx, 1280, 720);
+        assert!(!g.hits.iter().any(|h| matches!(h.ev, Event::Tab(_))));
+    }
+
+    fn nav_first(a: &SettingsApp) -> Option<usize> {
+        a.nav_matches().first().copied()
+    }
+
+    #[test]
+    fn the_list_is_clickable_scrolls_with_the_wheel_over_it_and_a_page_stays_in_view() {
+        let (cx, _) = admin("nav2");
+        let mut a = SettingsApp::new(&cx);
+        let g = draw(&mut a, &cx, 1280, 720);
+        for i in 0..a.tabs().len() {
+            assert!(g.hits.iter().any(|h| h.ev == Event::Tab(i)), "page {i} is in the list");
+        }
+        assert!(g.hits.iter().any(|h| h.ev == Event::Focus(nav::SEARCH_ID)));
+        // a short window: the list is longer than the box and scrolls
+        let last = *a.nav_matches().last().unwrap();
+        let g = draw(&mut a, &cx, 800, 300);
+        assert_eq!(a.nav_scroll, 0.0);
+        let shown: Vec<usize> = g.hits.iter().filter_map(|h| if let Event::Tab(t) = h.ev { Some(t) } else { None }).collect();
+        assert!(shown.contains(&0) && !shown.contains(&last), "the end of the list is out of the box: shown {shown:?}, last {last}, nav {:?}", a.nav_rect);
+        let inside = ((a.nav_rect.x + 20.0) as i32, (a.nav_rect.y + 100.0) as i32);
+        a.handle(&Event::MouseMove(inside.0, inside.1), &cx);
+        a.handle(&Event::Scroll(-4), &cx);
+        assert!(a.nav_scroll > 0.0, "the wheel over the list scrolls the list: {}", a.nav_scroll);
+        a.handle(&Event::Scroll(-100), &cx);
+        let g = draw(&mut a, &cx, 800, 300);
+        assert!(g.hits.iter().any(|h| h.ev == Event::Tab(last)), "scrolled to the end, the last page is in the box");
+        let max = a.nav_scroll;
+        a.handle(&Event::Scroll(-100), &cx);
+        assert_eq!(a.nav_scroll, max, "it stops at the end");
+        for _ in 0..20 {
+            a.handle(&Event::Scroll(100), &cx);
+        }
+        assert_eq!(a.nav_scroll, 0.0, "and at the start");
+        // the wheel elsewhere moves the selection in the page, not the list
+        a.handle(&Event::MouseMove(700, 300), &cx);
+        a.handle(&Event::Scroll(-1), &cx);
+        assert_eq!(a.nav_scroll, 0.0);
+        // choosing a page near the end by search keeps it visible
+        key(&mut a, &cx, Key::Ctrl('f'));
+        typ(&mut a, &cx, "account");
+        let g = draw(&mut a, &cx, 800, 300);
+        assert!(g.hits.iter().any(|h| h.ev == Event::Tab(a.tab)), "the chosen page is in the box");
+    }
+
+    #[test]
+    fn a_click_on_a_rag_slider_sets_that_value_through_the_settings_checks_and_is_audited() {
+        let (cx, _) = admin("sld1");
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Rag);
+        let _ = draw(&mut a, &cx, 1280, 720);
+        let w = |id: usize| a.slider_w.iter().find(|(i, _)| *i == id).map(|(_, w)| *w).expect("slider drawn");
+        let (wc, wo, wt) = (w(SLIDER_CHUNK), w(SLIDER_OVERLAP), w(SLIDER_TOPK));
+        let rag = |cx: &AppCx| cx.services.settings.lock().unwrap().get().rag.clone();
+        a.handle(&Event::AreaAt(SLIDER_TOPK, wt * 0.5, 5.0), &cx);
+        assert_eq!(rag(&cx).top_k, 26, "halfway along 1..50");
+        a.handle(&Event::AreaAt(SLIDER_CHUNK, wc, 5.0), &cx);
+        assert_eq!(rag(&cx).chunk_max, 4000, "the far end");
+        a.handle(&Event::AreaAt(SLIDER_CHUNK, 0.0, 5.0), &cx);
+        assert_eq!(rag(&cx).chunk_max, 100, "the near end");
+        // overlap must stay under half the chunk size: with chunk 100 the slider's range is 0..49, and an overlap above
+        // that is refused by the settings checks, never saved
+        a.handle(&Event::AreaAt(SLIDER_OVERLAP, wo, 5.0), &cx);
+        let r = rag(&cx);
+        assert!(r.overlap < r.chunk_max / 2, "{r:?}");
+        a.handle(&Event::AreaAt(SLIDER_CHUNK, wc * 0.5, 5.0), &cx);
+        a.handle(&Event::AreaAt(SLIDER_OVERLAP, wo * 0.5, 5.0), &cx);
+        let r = rag(&cx);
+        assert_eq!((r.chunk_max, r.overlap % 20), (2100, 0), "values snap to their step: {r:?}");
+        assert!(cx.audit.recent(20).iter().any(|l| l.contains("settings.rag")));
+        // the buttons on the card do what they always did
+        let before = rag(&cx).top_k;
+        key(&mut a, &cx, Key::Char(']'));
+        assert_eq!(rag(&cx).top_k, before + 1);
+        // a click on a switch's key toggles external search
+        let ext = rag(&cx).use_external;
+        key(&mut a, &cx, Key::Char('u'));
+        assert_eq!(rag(&cx).use_external, !ext);
+    }
+
+    #[test]
+    fn the_sliders_are_not_clickable_for_someone_who_may_not_change_settings() {
+        let ucx = user("sld2");
+        let mut a = SettingsApp::new(&ucx);
+        goto(&mut a, &ucx, Tab::Rag);
+        let g = draw(&mut a, &ucx, 1280, 720);
+        assert!(!g.hits.iter().any(|h| h.label == "slider" || h.label == "increase" || h.label == "decrease"), "nothing to click");
+        let before = ucx.services.settings.lock().unwrap().get().rag.clone();
+        a.handle(&Event::AreaAt(SLIDER_TOPK, 10.0, 5.0), &ucx);
+        a.slider_w.push((SLIDER_TOPK, 100.0));
+        a.handle(&Event::AreaAt(SLIDER_TOPK, 10.0, 5.0), &ucx);
+        assert_eq!(ucx.services.settings.lock().unwrap().get().rag, before, "a forged click changes nothing");
+    }
+
+    #[test]
+    fn brightness_and_volume_have_sliders_whose_buttons_and_track_work() {
+        let (cx, _) = admin("sld3");
+        let d = temp_dir("sld3-hw");
+        let put = |rel: &str, c: &str| {
+            let p = d.join("sys").join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, c).unwrap();
+        };
+        put("class/backlight/bl0/max_brightness", "100\n");
+        put("class/backlight/bl0/brightness", "50\n");
+        put("class/graphics/fb0/virtual_size", "1280,720\n");
+        let ctl = Arc::new(FakeCtl(Mutex::new(vec![])));
+        let env = DeviceEnv { roots: iyakki_devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") }, ctl };
+        let mut a = SettingsApp::new(&cx).with_hardware(env);
+        goto(&mut a, &cx, Tab::Display);
+        let g = draw(&mut a, &cx, 1280, 720);
+        let row = a.dev_rows().iter().position(|r| r.slider.is_some()).expect("a brightness slider");
+        assert!(g.hits.iter().any(|h| h.ev == Event::Area(SLIDER_HW + row)), "its track takes clicks");
+        let bl = |d: &std::path::Path| std::fs::read_to_string(d.join("sys/class/backlight/bl0/brightness")).unwrap().trim().to_string();
+        a.handle(&Event::Sub(row as u8, Key::Char('+')), &cx);
+        assert_eq!(bl(&d), "60", "the + button on the card steps by ten");
+        let w = a.slider_w.iter().find(|(i, _)| *i == SLIDER_HW + row).unwrap().1;
+        a.handle(&Event::AreaAt(SLIDER_HW + row, w * 0.8, 5.0), &cx);
+        assert_eq!(bl(&d), "80", "a click on the track sets that brightness");
+        assert!(cx.audit.recent(20).iter().any(|l| l.contains("brightness bl0 80")));
+        a.handle(&Event::AreaAt(SLIDER_HW + row, 0.0, 5.0), &cx);
+        assert_eq!(bl(&d), "5", "never fully dark");
+    }
+
+    #[test]
+    fn the_browser_page_has_switches_that_are_saved_for_the_user_and_audited() {
+        let (cx, _) = admin("brs1");
+        let mut a = SettingsApp::new(&cx);
+        assert!(a.tabs().contains(&Tab::Browser));
+        assert!(a.nav_matches().contains(&a.tabs().iter().position(|t| *t == Tab::Browser).unwrap()));
+        goto(&mut a, &cx, Tab::Browser);
+        let g = draw(&mut a, &cx, 1280, 720);
+        assert_eq!(g.hits.iter().filter(|h| matches!(h.ev, Event::Key(Key::Char('a' | 'i' | 's' | 'c')))).count(), 4, "four switches");
+        let load = |cx: &AppCx| super::super::browser_config::load(cx);
+        assert!(!load(&cx).js_all && load(&cx).images && load(&cx).styles && load(&cx).cookies);
+        key(&mut a, &cx, Key::Char('a'));
+        key(&mut a, &cx, Key::Char('i'));
+        key(&mut a, &cx, Key::Char('s'));
+        key(&mut a, &cx, Key::Char('c'));
+        let c = load(&cx);
+        assert!(c.js_all && !c.images && !c.styles && !c.cookies);
+        assert_eq!(status(&a), "Cookies: off.");
+        assert!(cx.audit.recent(20).iter().any(|l| l.contains("settings.browser") && l.contains("Scripts on every site: on")));
+        // forgetting the allowed sites
+        let mut c2 = load(&cx);
+        c2.js_sites.insert("a.org".into());
+        super::super::browser_config::save(&cx, &c2);
+        key(&mut a, &cx, Key::Char('f'));
+        assert!(load(&cx).js_sites.is_empty());
+        // another user is not affected
+        let mut other = cx.clone();
+        other.session.user = "amy".into();
+        assert!(!load(&other).js_all);
+        // everyone can use the page (it is their own browser), also a plain user
+        let ucx = user("brs2");
+        assert!(SettingsApp::new(&ucx).tabs().contains(&Tab::Browser));
+        let _ = draw(&mut a, &cx, 640, 480);
+    }
+
+    #[test]
+    fn the_display_tab_makes_text_and_buttons_bigger_or_smaller_for_the_person_and_keeps_it() {
+        let (cx, _) = admin("uisize1");
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Display);
+        let normal = crate::ui::ui_size();
+        key(&mut a, &cx, Key::Char('u'));
+        assert_eq!(crate::uisize::load(cx.services.dir(), "root"), crate::uisize::NORMAL + 1);
+        assert_eq!(crate::ui::ui_size(), 1.25);
+        assert!(status(&a).contains("Large (125%)"), "{}", status(&a));
+        for _ in 0..5 {
+            key(&mut a, &cx, Key::Char('u'));
+        }
+        assert_eq!(crate::ui::ui_size(), 2.0);
+        assert!(status(&a).contains("largest"), "{}", status(&a));
+        key(&mut a, &cx, Key::Char('U'));
+        assert_eq!(crate::ui::ui_size(), 1.5);
+        // the page draws the choices as buttons, the current one off
+        let mut g = Gfx::new(1280, 720);
+        g.clear(rgb(9, 11, 20));
+        a.render(&mut g, R::new(0.0, 72.0, 1280.0, 648.0), 1.0, &cx, 0);
+        assert!(g.hits.iter().any(|h| h.label.starts_with("Huge")) && g.hits.iter().any(|h| h.label.starts_with("Small")));
+        assert!(!g.hits.iter().any(|h| h.label.starts_with("Larger")), "the current one is not a button");
+        crate::ui::set_ui_size(normal);
+        // an ordinary account can change its own size too
+        let mut cx2 = cx.clone();
+        cx2.session.user = "bea".into();
+        cx2.session.role = Role::User;
+        cx2.session.policy = Role::User.template();
+        let mut b = SettingsApp::new(&cx2);
+        assert!(!b.tabs().contains(&Tab::Display), "the hardware pages are for administrators");
+        goto(&mut b, &cx2, Tab::Account);
+        key(&mut b, &cx2, Key::Char('U'));
+        let mut g2 = Gfx::new(1280, 720);
+        g2.clear(rgb(9, 11, 20));
+        b.render(&mut g2, R::new(0.0, 72.0, 1280.0, 648.0), 1.0, &cx2, 0);
+        assert!(g2.hits.iter().any(|h| h.label.starts_with("Normal")), "the Account page offers the sizes");
+        assert_eq!(crate::uisize::load(cx2.services.dir(), "bea"), 0);
+        assert_eq!(crate::uisize::load(cx2.services.dir(), "root"), 4 - 1, "root's own choice is separate");
+        crate::ui::set_ui_size(1.0);
+    }
+
+    // ------------------------------------------------------------------ WiFi
+
+    /// A machine with a WiFi adapter `wlan0` and stand-in `iw`, `ip`, `wpa_cli`, `wpa_supplicant` and `udhcpc`.
+    fn wifi_world(tag: &str) -> (WifiEnv, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("iyakki-ui-wifi-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let net = d.join("sys/class/net/wlan0");
+        std::fs::create_dir_all(net.join("device")).unwrap();
+        std::fs::create_dir_all(net.join("wireless")).unwrap();
+        std::fs::write(net.join("type"), "1\n").unwrap();
+        std::fs::create_dir_all(d.join("proc")).unwrap();
+        let bin = d.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let rec = d.join("rec.log");
+        let script = |name: &str, body: &str| {
+            let p = bin.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\necho \"{name} $*\" >> {}\n{body}\n", rec.display())).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        script("ip", "exit 0");
+        script("iw", "printf 'BSS aa:bb:cc:00:00:01(on wlan0)\\n\\tfreq: 2437.0\\n\\tcapability: ESS Privacy (0x0411)\\n\\tsignal: -50.00 dBm\\n\\tSSID: Seen\\n\\tRSN:\\t * Version: 1\\n\\t\\t * Authentication suites: PSK\\nBSS aa:bb:cc:00:00:02(on wlan0)\\n\\tfreq: 2412.0\\n\\tcapability: ESS (0x0401)\\n\\tsignal: -70.00 dBm\\n\\tSSID: Cafe\\n'");
+        script("wpa_cli", "exit 1");
+        script("wpa_supplicant", "exit 0");
+        script("udhcpc", "exit 0");
+        let env = WifiEnv {
+            wifi: Arc::new(iyakki_devctl::wifi::Wifi { run_dir: d.join("run"), path: Some(bin) }),
+            known: Arc::new(iyakki_devctl::wifi::KnownStore::new(&d.join("wifi.json"))),
+            roots: iyakki_devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") },
+        };
+        (env, d)
+    }
+
+    #[test]
+    fn an_administrator_scans_picks_a_network_types_the_passphrase_and_it_is_joined_and_remembered() {
+        let (env, d) = wifi_world("join");
+        let (cx, _) = admin("wifi1");
+        let mut a = SettingsApp::new(&cx).with_wifi(env.clone());
+        goto(&mut a, &cx, Tab::Network);
+        key(&mut a, &cx, Key::Char('w'));
+        settle(&mut a, &cx);
+        assert!(a.has_modal(), "the list of networks is shown: {}", status(&a));
+        let items: Vec<String> = a.wifi_items.iter().map(|(t, _)| t.clone()).collect();
+        assert!(items[0].starts_with("Seen") && items[0].contains("WPA2") && items[0].contains("2.4 GHz"), "{items:?}");
+        assert!(items[1].starts_with("Cafe") && items[1].contains("open"));
+        assert_eq!(items[2], "Hidden network…");
+        assert!(!items.iter().any(|t| t.starts_with("Forget")), "nothing is saved yet");
+        key(&mut a, &cx, Key::Enter); // the first one
+        assert!(a.has_modal());
+        typ(&mut a, &cx, "short");
+        key(&mut a, &cx, Key::Enter);
+        assert!(a.has_modal(), "a passphrase that is too short keeps the question open");
+        for _ in 0..5 {
+            key(&mut a, &cx, Key::Backspace);
+        }
+        typ(&mut a, &cx, "password1");
+        key(&mut a, &cx, Key::Enter);
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("Joining Seen"), "{}", status(&a));
+        let known = env.known.list();
+        assert_eq!(known.len(), 1);
+        assert_eq!(known[0].ssid, "Seen");
+        assert!(known[0].passphrase.is_none() && known[0].psk.is_some(), "only the derived key is kept");
+        let log = std::fs::read_to_string(d.join("rec.log")).unwrap();
+        assert!(log.contains("iw dev wlan0 scan") && log.contains("wpa_supplicant -B -i wlan0") && log.contains("udhcpc"), "{log}");
+        assert!(std::fs::read_to_string(d.join("run/wpa_supplicant-wlan0.conf")).unwrap().contains("ssid=\"Seen\""));
+        assert!(!std::fs::read_to_string(d.join("run/wpa_supplicant-wlan0.conf")).unwrap().contains("password1"));
+        assert!(cx.audit.recent(10).iter().any(|l| l.contains("settings.wifi.join") && l.contains("Seen")));
+        assert!(!std::fs::read_to_string(cx.audit.path()).unwrap().contains("password1"), "the passphrase is never logged");
+        // an open network is joined without a question; the saved one is marked and can be forgotten
+        key(&mut a, &cx, Key::Char('w'));
+        settle(&mut a, &cx);
+        assert!(a.wifi_items[0].0.contains("saved") && a.wifi_items.iter().any(|(t, _)| t.starts_with("Forget")));
+        typ(&mut a, &cx, "Cafe");
+        key(&mut a, &cx, Key::Enter);
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("Joining Cafe"), "{}", status(&a));
+        assert_eq!(env.known.list().iter().map(|k| k.ssid.as_str()).collect::<Vec<_>>(), vec!["Cafe", "Seen"]);
+        key(&mut a, &cx, Key::Char('w'));
+        settle(&mut a, &cx);
+        typ(&mut a, &cx, "Forget");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "Seen");
+        key(&mut a, &cx, Key::Enter);
+        assert_eq!(env.known.list().iter().map(|k| k.ssid.as_str()).collect::<Vec<_>>(), vec!["Cafe"]);
+        assert!(status(&a).contains("Forgot Seen"), "{}", status(&a));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_hidden_network_a_missing_adapter_and_an_ordinary_account_are_handled() {
+        let (env, d) = wifi_world("hidden");
+        let (cx, _) = admin("wifi2");
+        let mut a = SettingsApp::new(&cx).with_wifi(env.clone());
+        goto(&mut a, &cx, Tab::Network);
+        key(&mut a, &cx, Key::Char('w'));
+        settle(&mut a, &cx);
+        typ(&mut a, &cx, "Hidden");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "Secret Net");
+        key(&mut a, &cx, Key::Tab);
+        typ(&mut a, &cx, "hiddenpass1");
+        key(&mut a, &cx, Key::Enter);
+        settle(&mut a, &cx);
+        let k = env.known.list();
+        assert_eq!((k[0].ssid.as_str(), k[0].hidden), ("Secret Net", true));
+        assert!(std::fs::read_to_string(d.join("run/wpa_supplicant-wlan0.conf")).unwrap().contains("scan_ssid=1"));
+        // no adapter: said plainly
+        let mut b = SettingsApp::new(&cx).with_wifi(WifiEnv { roots: iyakki_devctl::Roots { sys: d.join("nothing"), proc_: d.join("nothing") }, ..env.clone() });
+        goto(&mut b, &cx, Tab::Network);
+        key(&mut b, &cx, Key::Char('w'));
+        assert!(status(&b).contains("no WiFi adapter"), "{}", status(&b));
+        // an ordinary account has no Network page at all
+        let mut cx2 = cx.clone();
+        cx2.session.role = Role::User;
+        cx2.session.policy = Role::User.template();
+        assert!(!SettingsApp::new(&cx2).tabs().contains(&Tab::Network));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

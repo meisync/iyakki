@@ -1,0 +1,41 @@
+# IYAKKI as an ordinary service on a Linux machine that already has an operating system (Debian, Ubuntu, Fedora, Arch, …):
+# the supervisor and the browser front end, not PID 1. Install the static binary, make the first account, then enable:
+#
+#   sudo install -m 0755 iyakki /usr/local/bin/iyakki
+#   echo 'a long password' | sudo -u iyakki iyakki user add admin --role admin --password-stdin     (after: sudo useradd -r -m -d /var/lib/iyakki iyakki)
+#   sudo install -m 0644 dist/systemd/iyakki.service /etc/systemd/system/ && sudo systemctl enable --now iyakki
+#   open https://this-machine:8443
+[Unit]
+Description=IYAKKI, an OS for agents (supervisor and browser front end)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=iyakki
+Group=iyakki
+# the supervisor and the desktop for browsers; set IYAKKI_WEB=http:8080 behind a TLS proxy instead
+Environment=IYAKKI_WEB=1
+Environment=IYAKKI_LOG=info
+ExecStart=/usr/local/bin/iyakki serve
+Restart=on-failure
+RestartSec=3
+StateDirectory=iyakki
+WorkingDirectory=/var/lib/iyakki
+# the data folder is /var/lib/iyakki (accounts, settings, vaults); nothing else is written
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/iyakki
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=true
+# the port is above 1024, so no capability is needed
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

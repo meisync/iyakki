@@ -1,0 +1,26 @@
+# Standalone workspace: egui's wasm-bindgen pins conflict with libp2p's in a single lockfile,
+# so the GPU front-end resolves its dependencies separately. Build: `cd crates/iyakki-gui && cargo run`.
+[workspace]
+
+[package]
+name = "iyakki-gui"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "iyakki-editor"
+path = "src/main.rs"
+
+[[bin]]
+name = "iyakki-desktop"
+path = "src/desktop.rs"
+
+[dependencies]
+iyakki-ui = { path = "../iyakki-ui" }
+iyakki-shell = { path = "../iyakki-shell" }
+iyakki-agent = { path = "../iyakki-agent" }
+iyakki-storage = { path = "../iyakki-storage" }
+# no swarm/egress features: libp2p's wasm-bindgen pins conflict with egui's (see comment at top)
+iyakki-core = { path = "../iyakki-core", default-features = false, features = ["shell"] }
+eframe = "0.36"

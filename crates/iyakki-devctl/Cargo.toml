@@ -1,0 +1,12 @@
+[package]
+name = "iyakki-devctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Finds the machine's network, Bluetooth, display and sound hardware and switches it on and off, for the Settings app."
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+iyakki-sec.workspace = true

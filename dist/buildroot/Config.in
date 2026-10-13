@@ -1,0 +1,2 @@
+# Extra Buildroot packages of IYAKKI. Nothing here is selected by the default image.
+source "$BR2_EXTERNAL_IYAKKI_PATH/package/iyakki-webview-helper/Config.in"

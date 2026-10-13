@@ -1,0 +1,12 @@
+[package]
+name = "iyakki-webview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The shell side of the embedded full web engine: the wire protocol (docs/WEBVIEW-PROTOCOL.md), a client that starts the engine's helper program and reads its frames from a shared file, and a pure-Rust fake helper for tests. No dependencies."
+
+[dependencies]
+
+[[bin]]
+name = "iyakki-fake-webview"
+path = "src/bin/fake_helper.rs"

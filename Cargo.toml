@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+exclude = ["crates/iyakki-gui"]
+members = [
+    "crates/iyakki-sec",
+    "crates/iyakki-vfs",
+    "crates/iyakki-wasm",
+    "crates/iyakki-ledger",
+    "crates/iyakki-mem",
+    "crates/iyakki-hw",
+    "crates/iyakki-agent",
+    "crates/iyakki-shell",
+    "crates/iyakki-core",
+    "crates/iyakki-ui",
+    "crates/iyakki-proxy",
+    "crates/iyakki-swarm",
+    "crates/iyakki-storage",
+    "crates/iyakki-edit",
+    "crates/iyakki-hwinfo",
+    "crates/iyakki-usb",
+    "crates/iyakki-devctl",
+    "crates/iyakki-web",
+    "crates/iyakki-js",
+    "crates/iyakki-netscan",
+    "crates/iyakki-remote",
+    "crates/iyakki-webview",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+iyakki-sec = { path = "crates/iyakki-sec" }
+iyakki-devctl = { path = "crates/iyakki-devctl" }
+iyakki-web = { path = "crates/iyakki-web" }
+iyakki-webview = { path = "crates/iyakki-webview" }
+iyakki-js = { path = "crates/iyakki-js" }
+iyakki-vfs = { path = "crates/iyakki-vfs" }
+iyakki-wasm = { path = "crates/iyakki-wasm" }
+iyakki-agent = { path = "crates/iyakki-agent" }
+iyakki-hw = { path = "crates/iyakki-hw" }
+iyakki-mem = { path = "crates/iyakki-mem" }
+iyakki-ledger = { path = "crates/iyakki-ledger" }
+iyakki-storage = { path = "crates/iyakki-storage" }
+iyakki-edit = { path = "crates/iyakki-edit" }
+iyakki-hwinfo = { path = "crates/iyakki-hwinfo" }
+iyakki-netscan = { path = "crates/iyakki-netscan" }
+thiserror = "2"
+log = "0.4"
+wasmtime = { version = "*", default-features = false, features = ["runtime", "cranelift", "wat", "std"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+# panics unwind so the supervisor can report them and keep running; "abort" would turn any panic into a
+# kernel panic when IYAKKI is PID 1
+strip = true
+
+# Quick test images (IYAKKI_PROFILE=fast ./dist/buildroot/build.sh): parallel code generation, a bigger and slower binary.
+[profile.fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16

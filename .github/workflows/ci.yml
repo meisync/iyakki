@@ -1,0 +1,33 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-unknown-linux-musl }
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config musl-tools
+      - run: cargo test --workspace
+      - run: cargo build --release --target x86_64-unknown-linux-musl -p iyakki-core
+      - run: cargo build -p iyakki-hw --features audio,video
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with: { command: check licenses sources, arguments: --all-features }
+  gui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cd crates/iyakki-gui && cargo build
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with: { command: check licenses sources, manifest-path: crates/iyakki-gui/Cargo.toml }
+  kernel-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y flex bison libelf-dev libssl-dev bc
+      - run: dist/buildroot/verify-kernel-config.sh

@@ -1,0 +1,28 @@
+[package]
+name = "iyakki-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iyakki-agent = { path = "../iyakki-agent" }
+iyakki-sec.workspace = true
+iyakki-storage.workspace = true
+iyakki-edit.workspace = true
+iyakki-hwinfo.workspace = true
+iyakki-devctl.workspace = true
+iyakki-web.workspace = true
+iyakki-js.workspace = true
+iyakki-netscan.workspace = true
+iyakki-webview.workspace = true
+iyakki-ledger.workspace = true
+argon2 = { version = "0.5", features = ["std", "rand"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny-skia = "0.11"
+fontdue = "0.9"
+rustybuzz = "0.20"
+unicode-bidi = "0.3"
+libc = "0.2"
+thiserror.workspace = true
+log.workspace = true

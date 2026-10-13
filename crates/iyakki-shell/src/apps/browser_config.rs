@@ -1,0 +1,130 @@
+//! What a user has chosen for the browser: scripts (everywhere, or only for sites they allow), pictures, style sheets and
+//! cookies. Kept in one small file per user next to their other settings; the browser reads it before every page, so a
+//! change made in Settings applies at once.
+
+use std::collections::BTreeSet;
+
+use iyakki_web::SearchEngine;
+
+use super::AppCx;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserConfig {
+    /// Run scripts on every site (when off, only on `js_sites`).
+    pub js_all: bool,
+    /// Hosts the user has allowed scripts for.
+    pub js_sites: BTreeSet<String>,
+    /// Fetch and show pictures.
+    pub images: bool,
+    /// Fetch and apply style sheets.
+    pub styles: bool,
+    /// Accept cookies (off: none are sent or kept).
+    pub cookies: bool,
+    /// Where words typed into the address bar are searched.
+    pub search: SearchEngine,
+    /// The program that plays video and audio files, with its arguments (the address is added last). Empty: look for
+    /// mpv, VLC, ffplay or mplayer.
+    pub player: String,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        // scripts stay off until the user allows them; the rest is on
+        BrowserConfig { js_all: false, js_sites: BTreeSet::new(), images: true, styles: true, cookies: true, search: SearchEngine::default(), player: String::new() }
+    }
+}
+
+impl BrowserConfig {
+    pub fn scripts_for(&self, host: &str) -> bool {
+        self.js_all || self.js_sites.contains(host)
+    }
+}
+
+pub(super) fn who(cx: &AppCx) -> String {
+    cx.session.user.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect()
+}
+
+fn path(cx: &AppCx) -> std::path::PathBuf {
+    cx.services.dir().join(format!("browser-{}.json", who(cx)))
+}
+
+fn old_sites_path(cx: &AppCx) -> std::path::PathBuf {
+    cx.services.dir().join(format!("browser-js-{}.json", who(cx)))
+}
+
+fn clean_hosts<I: IntoIterator<Item = String>>(list: I) -> BTreeSet<String> {
+    list.into_iter().filter(|h| !h.is_empty() && h.len() < 254 && h.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))).take(500).collect()
+}
+
+pub fn load(cx: &AppCx) -> BrowserConfig {
+    let mut c = BrowserConfig::default();
+    if let Ok(text) = std::fs::read_to_string(path(cx)) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            c.js_all = v["js_all"].as_bool().unwrap_or(c.js_all);
+            c.images = v["images"].as_bool().unwrap_or(c.images);
+            c.styles = v["styles"].as_bool().unwrap_or(c.styles);
+            c.cookies = v["cookies"].as_bool().unwrap_or(c.cookies);
+            c.search = v["search"].as_str().and_then(SearchEngine::from_id).unwrap_or(c.search);
+            c.player = v["player"].as_str().filter(|p| iyakki_agent::voice::validate_command(p).is_ok()).unwrap_or("").to_string();
+            c.js_sites = clean_hosts(v["js_sites"].as_array().into_iter().flatten().filter_map(|h| h.as_str().map(str::to_string)));
+        }
+    } else if let Ok(text) = std::fs::read_to_string(old_sites_path(cx)) {
+        // the first version kept only the list of sites
+        let list: Vec<String> = serde_json::from_str(&text).unwrap_or_default();
+        c.js_sites = clean_hosts(list);
+    }
+    c
+}
+
+pub fn save(cx: &AppCx, c: &BrowserConfig) {
+    let p = path(cx);
+    let tmp = p.with_extension("tmp");
+    let json = serde_json::json!({ "js_all": c.js_all, "js_sites": c.js_sites, "images": c.images, "styles": c.styles, "cookies": c.cookies, "search": c.search.id(), "player": c.player });
+    if std::fs::write(&tmp, json.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::apps::tests::cx_with_admin_store;
+
+    #[test]
+    fn the_defaults_keep_scripts_off_and_the_rest_on() {
+        let c = BrowserConfig::default();
+        assert!(!c.js_all && c.images && c.styles && c.cookies);
+        assert!(!c.scripts_for("a.org"));
+    }
+
+    #[test]
+    fn choices_are_saved_per_user_and_read_back_and_bad_files_fall_back_to_defaults() {
+        let cx = cx_with_admin_store("bcfg1");
+        assert_eq!(load(&cx), BrowserConfig::default());
+        let mut c = BrowserConfig { js_all: true, images: false, search: SearchEngine::DuckDuckGo, ..BrowserConfig::default() };
+        c.js_sites.insert("a.org".into());
+        save(&cx, &c);
+        assert_eq!(load(&cx), c);
+        assert!(c.scripts_for("anything.example"), "all sites");
+        // another user has their own
+        let mut other = cx.clone();
+        other.session.user = "amy".into();
+        assert_eq!(load(&other), BrowserConfig::default());
+        // a damaged file does no harm
+        std::fs::write(super::path(&cx), "{ not json").unwrap();
+        assert_eq!(load(&cx), BrowserConfig::default());
+        std::fs::write(super::path(&cx), r#"{"js_sites":["ok.org","bad host!","../x"],"images":"yes"}"#).unwrap();
+        let d = load(&cx);
+        assert_eq!(d.js_sites.iter().cloned().collect::<Vec<_>>(), vec!["ok.org".to_string()], "only valid host names");
+        assert!(d.images, "a value of the wrong type is ignored");
+    }
+
+    #[test]
+    fn the_first_versions_site_list_is_carried_over() {
+        let cx = cx_with_admin_store("bcfg2");
+        std::fs::write(super::old_sites_path(&cx), r#"["old.org"]"#).unwrap();
+        let c = load(&cx);
+        assert!(c.scripts_for("old.org") && !c.scripts_for("new.org"));
+        assert!(c.images && c.styles);
+    }
+}

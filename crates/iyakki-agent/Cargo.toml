@@ -1,0 +1,29 @@
+[package]
+name = "iyakki-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+log.workspace = true
+iyakki-sec.workspace = true
+iyakki-edit.workspace = true
+iyakki-vfs.workspace = true
+iyakki-wasm.workspace = true
+iyakki-mem.workspace = true
+iyakki-ledger.workspace = true
+iyakki-netscan.workspace = true
+iyakki-proxy = { path = "../iyakki-proxy" }
+iyakki-web.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror.workspace = true
+chacha20poly1305 = "0.10"
+argon2 = { version = "0.5", features = ["std"] }
+zeroize = "1"
+sha2 = "0.10"
+miniz_oxide = "0.8"
+ruzstd = "0.9"
+nanomp3 = { version = "0.2", default-features = false, features = ["std"] }
+ed25519-dalek = "3"
+libc = "0.2"

@@ -1,0 +1,1155 @@
+//! Software 2D drawing on a `tiny-skia` pixmap: rectangles, rounded cards, anti-aliased vector
+//! icons, and TrueType text (DejaVu, bundled). No GPU, window system or Mesa needed, so the same
+//! code draws to a Linux framebuffer on bare metal, to a PNG for tests, or into any window.
+
+use std::collections::HashMap;
+
+use fontdue::{Font, FontSettings};
+
+use crate::ui::{Event, Hit, R};
+use tiny_skia::{
+    Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Paint, Path, PathBuilder, Pixmap, Point, Rect, Shader, SpreadMode, Stroke,
+    Transform,
+};
+
+pub const fn rgb(r: u8, g: u8, b: u8) -> [u8; 4] {
+    [r, g, b, 255]
+}
+
+fn col(c: [u8; 4]) -> Color {
+    Color::from_rgba8(c[0], c[1], c[2], c[3])
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Face {
+    Sans,
+    Bold,
+    Mono,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Icon {
+    Chat,
+    Rag,
+    Mcp,
+    Cli,
+    Users,
+    Lock,
+    Power,
+    Logout,
+    Settings,
+    Clipboard,
+    Mic,
+    Speaker,
+    Runs,
+    Edit,
+    Browser,
+    Camera,
+    Mesh,
+    Radio,
+    Scan,
+    Skills,
+    Usage,
+    Calendar,
+    System,
+    Media,
+    Bell,
+}
+
+type GlyphKey = (char, u32, Face);
+
+pub struct Gfx {
+    pub pm: Pixmap,
+    /// Clickable regions registered during this frame (later = on top).
+    pub hits: Vec<Hit>,
+    /// Pointer position, for hover highlights.
+    pub mouse: (i32, i32),
+    /// Every rectangle the frame asked about with [`Gfx::hovered`]: only a pointer crossing one of their edges
+    /// can change the picture.
+    probes: std::cell::RefCell<Vec<R>>,
+    sans: Font,
+    bold: Font,
+    mono: Font,
+    cache: HashMap<GlyphKey, (fontdue::Metrics, Vec<u8>)>,
+    /// Made the first time text in a script that needs shaping appears (it parses a couple of MB of fonts).
+    shaper: Option<crate::shaping::Shaper>,
+    shaped_cache: HashMap<(usize, u16, u32), (fontdue::Metrics, Vec<u8>)>,
+}
+
+fn load(bytes: &[u8]) -> Font {
+    Font::from_bytes(bytes, FontSettings::default()).expect("bundled font is valid")
+}
+
+/// Blend one glyph bitmap into premultiplied RGBA pixels (clipped to the pixmap).
+fn blit(data: &mut [u8], (w, h): (i32, i32), gx: i32, gy: i32, m: &fontdue::Metrics, bmp: &[u8], color: [u8; 4]) {
+    for row in 0..m.height as i32 {
+        let py = gy + row;
+        if py < 0 || py >= h {
+            continue;
+        }
+        for colm in 0..m.width as i32 {
+            let px_ = gx + colm;
+            if px_ < 0 || px_ >= w {
+                continue;
+            }
+            let cov = bmp[(row as usize) * m.width + colm as usize] as u32;
+            if cov == 0 {
+                continue;
+            }
+            let a = cov * color[3] as u32 / 255;
+            let i = ((py * w + px_) * 4) as usize;
+            for k in 0..3 {
+                // destination is premultiplied RGBA; source colour is straight
+                let src = color[k] as u32 * a / 255;
+                data[i + k] = (src + data[i + k] as u32 * (255 - a) / 255).min(255) as u8;
+            }
+            data[i + 3] = (a + data[i + 3] as u32 * (255 - a) / 255).min(255) as u8;
+        }
+    }
+}
+
+fn paint(c: [u8; 4]) -> Paint<'static> {
+    let mut p = Paint::default();
+    p.set_color(col(c));
+    p.anti_alias = true;
+    p
+}
+
+fn stroke(w: f32) -> Stroke {
+    // Widths under ~1px take tiny-skia's hairline path, which can assert on some geometry.
+    Stroke { width: w.max(1.25), line_cap: LineCap::Round, line_join: LineJoin::Round, ..Default::default() }
+}
+
+fn rrect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<Path> {
+    let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+    let k = 0.5523 * r; // cubic approximation of a quarter circle
+    let mut pb = PathBuilder::new();
+    pb.move_to(x + r, y);
+    pb.line_to(x + w - r, y);
+    pb.cubic_to(x + w - r + k, y, x + w, y + r - k, x + w, y + r);
+    pb.line_to(x + w, y + h - r);
+    pb.cubic_to(x + w, y + h - r + k, x + w - r + k, y + h, x + w - r, y + h);
+    pb.line_to(x + r, y + h);
+    pb.cubic_to(x + r - k, y + h, x, y + h - r + k, x, y + h - r);
+    pb.line_to(x, y + r);
+    pb.cubic_to(x, y + r - k, x + r - k, y, x + r, y);
+    pb.close();
+    pb.finish()
+}
+
+impl Gfx {
+    pub fn new(w: u32, h: u32) -> Gfx {
+        Gfx {
+            pm: Pixmap::new(w.max(1), h.max(1)).expect("pixmap"),
+            hits: Vec::new(),
+            mouse: (-1, -1),
+            probes: std::cell::RefCell::new(Vec::new()),
+            sans: load(include_bytes!("../assets/DejaVuSans.ttf")),
+            bold: load(include_bytes!("../assets/DejaVuSans-Bold.ttf")),
+            mono: load(include_bytes!("../assets/DejaVuSansMono.ttf")),
+            cache: HashMap::new(),
+            shaper: None,
+            shaped_cache: HashMap::new(),
+        }
+    }
+
+    /// Register a clickable region. `ev` is delivered to the screen on click.
+    pub fn hit(&mut self, rect: R, ev: Event, label: &str) {
+        self.hits.push(Hit { rect, ev, label: label.into() });
+    }
+
+    /// Drop every region registered so far (a modal calls this so the dimmed UI behind it can't be clicked).
+    pub fn clear_hits(&mut self) {
+        self.hits.clear();
+    }
+
+    pub fn hovered(&self, r: R) -> bool {
+        self.probes.borrow_mut().push(r);
+        r.contains(self.mouse.0, self.mouse.1)
+    }
+
+    /// Forget the rectangles probed so far (start of a frame).
+    pub fn clear_probes(&mut self) {
+        self.probes.get_mut().clear();
+    }
+
+    /// The rectangles probed during the last frame.
+    pub fn probes(&self) -> Vec<R> {
+        self.probes.borrow().clone()
+    }
+
+    /// Pill button; returns its width. `ev` is what a click does (usually the same key as the shortcut). The look follows
+    /// the accent (see [`crate::fx::Variant`]): neon outline and glow for primary, red for danger, quiet for secondary.
+    pub fn button(&mut self, x: f32, y: f32, size: f32, label: &str, accent: [u8; 4], ev: Event) -> f32 {
+        let w = self.text_width(size, label, Face::Bold) + size * 1.7;
+        let h = size * 2.1;
+        let r = R::new(x, y, w, h);
+        let hot = self.hovered(r);
+        let tc = crate::fx::pill(self, r, size / 14.0, accent, hot, true);
+        self.text(x + size * 0.85, y + (h - self.line_height(size, Face::Bold)) / 2.0, size, tc, label, Face::Bold);
+        self.hit(r, ev, label);
+        w
+    }
+
+    /// Round icon button; `active` highlights it (e.g. recording). Returns its diameter.
+    pub fn icon_button(&mut self, x: f32, y: f32, d: f32, icon: Icon, color: [u8; 4], active: bool, ev: Event, label: &str) -> f32 {
+        let r = R::new(x, y, d, d);
+        let hot = self.hovered(r);
+        if active {
+            self.rrect_glow(x, y, d, d, d / 2.0, 4.0, [255, 90, 100, 80]);
+            self.rrect(x, y, d, d, d / 2.0, rgb(120, 40, 50));
+            self.rrect_outline(x, y, d, d, d / 2.0, 1.4, rgb(255, 120, 120));
+        } else {
+            crate::fx::pill(self, r, d / 40.0, color, hot, true);
+        }
+        self.icon(icon, x + d / 2.0, y + d / 2.0, d * 0.5, if active { rgb(255, 200, 200) } else { color });
+        self.hit(r, ev, label);
+        d
+    }
+
+    /// A button that is shown but inactive.
+    pub fn button_off(&mut self, x: f32, y: f32, size: f32, label: &str) -> f32 {
+        let w = self.text_width(size, label, Face::Bold) + size * 1.7;
+        let h = size * 2.1;
+        let tc = crate::fx::pill(self, R::new(x, y, w, h), size / 14.0, [0, 0, 0, 255], false, false);
+        self.text(x + size * 0.85, y + (h - self.line_height(size, Face::Bold)) / 2.0, size, tc, label, Face::Bold);
+        w
+    }
+
+    pub fn width(&self) -> u32 {
+        self.pm.width()
+    }
+    pub fn height(&self) -> u32 {
+        self.pm.height()
+    }
+
+    pub fn resize(&mut self, w: u32, h: u32) {
+        if (w, h) != (self.width(), self.height()) {
+            self.pm = Pixmap::new(w.max(1), h.max(1)).expect("pixmap");
+        }
+    }
+
+    pub fn clear(&mut self, c: [u8; 4]) {
+        self.pm.fill(col(c));
+    }
+
+    /// Vertical gradient background.
+    pub fn gradient(&mut self, top: [u8; 4], bottom: [u8; 4]) {
+        let h = self.height() as f32;
+        let shader = LinearGradient::new(
+            Point::from_xy(0.0, 0.0),
+            Point::from_xy(0.0, h),
+            vec![GradientStop::new(0.0, col(top)), GradientStop::new(1.0, col(bottom))],
+            SpreadMode::Pad,
+            Transform::identity(),
+        );
+        let mut p = Paint::default();
+        p.shader = shader.unwrap_or(Shader::SolidColor(col(top)));
+        if let Some(r) = Rect::from_xywh(0.0, 0.0, self.width() as f32, h) {
+            self.pm.fill_rect(r, &p, Transform::identity(), None);
+        }
+    }
+
+    /// A rectangle filled with a gradient from (x0, y0) to (x1, y1); `stops` are (position 0..1, colour).
+    pub fn gradient_rect(&mut self, x: f32, y: f32, w: f32, h: f32, from: (f32, f32), to: (f32, f32), stops: &[(f32, [u8; 4])]) {
+        let stops: Vec<GradientStop> = stops.iter().map(|(p, c)| GradientStop::new(*p, col(*c))).collect();
+        let Some(shader) = LinearGradient::new(Point::from_xy(from.0, from.1), Point::from_xy(to.0, to.1), stops, SpreadMode::Pad, Transform::identity()) else { return };
+        let mut p = Paint::default();
+        p.shader = shader;
+        if let Some(r) = Rect::from_xywh(x, y, w.max(1.0), h.max(1.0)) {
+            self.pm.fill_rect(r, &p, Transform::identity(), None);
+        }
+    }
+
+    /// A soft round glow: `c` at its own alpha in the middle, fading to nothing at `radius`.
+    pub fn radial_glow(&mut self, cx: f32, cy: f32, radius: f32, c: [u8; 4]) {
+        let faded = [c[0], c[1], c[2], 0];
+        let Some(shader) = tiny_skia::RadialGradient::new(Point::from_xy(cx, cy), Point::from_xy(cx, cy), radius, vec![GradientStop::new(0.0, col(c)), GradientStop::new(1.0, col(faded))], SpreadMode::Pad, Transform::identity()) else { return };
+        let mut p = Paint::default();
+        p.shader = shader;
+        if let Some(r) = Rect::from_xywh(cx - radius, cy - radius, radius * 2.0, radius * 2.0) {
+            self.pm.fill_rect(r, &p, Transform::identity(), None);
+        }
+    }
+
+    /// A glow around a rounded rectangle: three translucent rings growing outwards, `c` is the strongest alpha.
+    pub fn rrect_glow(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, spread: f32, c: [u8; 4]) {
+        for (k, f) in [(1.0f32, 0.35f32), (0.66, 0.6), (0.33, 1.0)] {
+            let d = spread * k;
+            let a = (c[3] as f32 * f * 0.5) as u8;
+            self.rrect(x - d, y - d, w + 2.0 * d, h + 2.0 * d, r + d, [c[0], c[1], c[2], a]);
+        }
+    }
+
+    /// Axis-aligned fill, snapped to whole pixels (crisp edges; avoids tiny-skia's thin-rect hairline path).
+    pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, c: [u8; 4]) {
+        if let Some(r) = Rect::from_xywh(x.round(), y.round(), w.round().max(1.0), h.round().max(1.0)) {
+            self.pm.fill_rect(r, &paint(c), Transform::identity(), None);
+        }
+    }
+
+    pub fn rrect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, c: [u8; 4]) {
+        if let Some(p) = rrect_path(x, y, w, h, r) {
+            self.pm.fill_path(&p, &paint(c), FillRule::Winding, Transform::identity(), None);
+        }
+    }
+
+    pub fn rrect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, width: f32, c: [u8; 4]) {
+        if let Some(p) = rrect_path(x, y, w, h, r) {
+            self.pm.stroke_path(&p, &paint(c), &stroke(width), Transform::identity(), None);
+        }
+    }
+
+    pub fn circle(&mut self, cx: f32, cy: f32, r: f32, c: [u8; 4]) {
+        if let Some(p) = PathBuilder::from_circle(cx, cy, r) {
+            self.pm.fill_path(&p, &paint(c), FillRule::Winding, Transform::identity(), None);
+        }
+    }
+
+    /// A circle's outline.
+    pub fn ring(&mut self, cx: f32, cy: f32, r: f32, width: f32, c: [u8; 4]) {
+        if let Some(p) = PathBuilder::from_circle(cx, cy, r) {
+            self.pm.stroke_path(&p, &paint(c), &stroke(width), Transform::identity(), None);
+        }
+    }
+
+    /// A straight line with round ends.
+    pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, c: [u8; 4]) {
+        let mut pb = PathBuilder::new();
+        pb.move_to(x0, y0);
+        pb.line_to(x1, y1);
+        if let Some(p) = pb.finish() {
+            let mut st = stroke(width);
+            st.line_cap = tiny_skia::LineCap::Round;
+            self.pm.stroke_path(&p, &paint(c), &st, Transform::identity(), None);
+        }
+    }
+
+    /// A filled polygon (a play arrow, a skip mark).
+    pub fn polygon(&mut self, pts: &[(f32, f32)], c: [u8; 4]) {
+        let mut pb = PathBuilder::new();
+        for (i, (x, y)) in pts.iter().enumerate() {
+            if i == 0 {
+                pb.move_to(*x, *y);
+            } else {
+                pb.line_to(*x, *y);
+            }
+        }
+        pb.close();
+        if let Some(p) = pb.finish() {
+            self.pm.fill_path(&p, &paint(c), FillRule::Winding, Transform::identity(), None);
+        }
+    }
+
+    fn font(&self, f: Face) -> &Font {
+        match f {
+            Face::Sans => &self.sans,
+            Face::Bold => &self.bold,
+            Face::Mono => &self.mono,
+        }
+    }
+
+    pub fn line_height(&self, size: f32, face: Face) -> f32 {
+        self.font(face).horizontal_line_metrics(size).map_or(size * 1.3, |m| m.new_line_size)
+    }
+
+    pub fn text_width(&mut self, size: f32, s: &str, face: Face) -> f32 {
+        let px = size.round().max(1.0);
+        if crate::shaping::needs_shaping(s) {
+            return self.shaper.get_or_insert_with(crate::shaping::Shaper::new).layout(s, px).1;
+        }
+        s.chars().map(|c| self.font(face).metrics(c, px).advance_width).sum()
+    }
+
+    /// Draw `s` with its top-left at (x, y). Returns the advance width. Text is clipped to the pixmap.
+    pub fn text(&mut self, x: f32, y: f32, size: f32, color: [u8; 4], s: &str, face: Face) -> f32 {
+        let px = size.round().max(1.0);
+        let ascent = self.font(face).horizontal_line_metrics(px).map_or(px, |m| m.ascent);
+        let base = y + ascent;
+        let (w, h) = (self.width() as i32, self.height() as i32);
+        if crate::shaping::needs_shaping(s) {
+            return self.shaped_text(x, base, px, color, s);
+        }
+        let mut pen = x;
+        for ch in s.chars() {
+            if ch == '\n' || ch == '\r' {
+                continue;
+            }
+            let key = (ch, px as u32, face);
+            if !self.cache.contains_key(&key) {
+                let (m, bmp) = self.font(face).rasterize(ch, px);
+                self.cache.insert(key, (m, bmp));
+            }
+            let (m, bmp) = &self.cache[&key];
+            let (gx, gy) = ((pen + m.xmin as f32).round() as i32, (base - m.height as f32 - m.ymin as f32).round() as i32);
+            blit(self.pm.data_mut(), (w, h), gx, gy, m, bmp, color);
+            pen += m.advance_width;
+        }
+        pen - x
+    }
+
+    /// `s` as coverage, for pictures that draw their own text (SVG): white text on a clear pixmap, kept as alpha. The mask's
+    /// corner is given relative to the pen on the baseline. Empty when the text is too wide to be worth drawing.
+    pub fn text_mask(&mut self, size: f32, s: &str, face: Face) -> iyakki_web::svg::TextMask {
+        use iyakki_web::svg::TextMask;
+        let px = size.round().max(1.0);
+        let advance = self.text_width(px, s, face);
+        let ascent = self.font(face).horizontal_line_metrics(px).map_or(px, |m| m.ascent);
+        let lh = self.line_height(px, face).max(px * 1.2);
+        let pad = 3.0f32;
+        let (w, h) = ((advance.ceil() + 2.0 * pad + px * 0.3) as u32, (lh.ceil() + 2.0 * pad + px * 0.3) as u32);
+        if !advance.is_finite() || w > 4096 || h > 800 {
+            return TextMask { advance: advance as f64, ..TextMask::default() };
+        }
+        let Some(scratch) = Pixmap::new(w, h) else { return TextMask::default() };
+        let old = std::mem::replace(&mut self.pm, scratch);
+        self.text(pad, pad, px, [255, 255, 255, 255], s, face);
+        let drawn = std::mem::replace(&mut self.pm, old);
+        let alpha: Vec<u8> = drawn.data().chunks_exact(4).map(|p| p[3]).collect();
+        TextMask { advance: advance as f64, x: -(pad as i32), y: -((pad + ascent).round() as i32), w, h, alpha }
+    }
+
+    /// Draw a line in a script that needs shaping (see [`crate::shaping`]); `base` is the baseline.
+    fn shaped_text(&mut self, x: f32, base: f32, px: f32, color: [u8; 4], s: &str) -> f32 {
+        let (w, h) = (self.width() as i32, self.height() as i32);
+        let sh = self.shaper.get_or_insert_with(crate::shaping::Shaper::new);
+        let (glyphs, total) = sh.layout(s, px);
+        for g in glyphs {
+            let key = (g.font, g.glyph, px as u32);
+            if !self.shaped_cache.contains_key(&key) {
+                let r = sh.font(g.font).rasterize_indexed(g.glyph, px);
+                self.shaped_cache.insert(key, r);
+            }
+            let (m, bmp) = &self.shaped_cache[&key];
+            let gx = (x + g.x + m.xmin as f32).round() as i32;
+            let gy = (base - g.y - m.height as f32 - m.ymin as f32).round() as i32;
+            blit(self.pm.data_mut(), (w, h), gx, gy, m, bmp, color);
+        }
+        total
+    }
+
+    /// Truncate with an ellipsis so the text fits in `max_w`.
+    pub fn fit(&mut self, size: f32, s: &str, face: Face, max_w: f32) -> String {
+        if self.text_width(size, s, face) <= max_w {
+            return s.to_string();
+        }
+        if !crate::shaping::needs_shaping(s) {
+            // one pass over the glyph advances (the width of a plain string is their sum) instead of measuring every shorter prefix
+            let px = size.round().max(1.0);
+            let room = max_w - self.font(face).metrics('…', px).advance_width;
+            let mut acc = 0.0;
+            let mut end = 0;
+            for (i, c) in s.char_indices() {
+                acc += self.font(face).metrics(c, px).advance_width;
+                if acc > room {
+                    break;
+                }
+                end = i + c.len_utf8();
+            }
+            return format!("{}…", &s[..end]);
+        }
+        let mut out: String = s.to_string();
+        while !out.is_empty() && self.text_width(size, &format!("{out}…"), face) > max_w {
+            out.pop();
+        }
+        format!("{out}…")
+    }
+
+    /// Word-wrap into lines no wider than `max_w`.
+    pub fn wrap(&mut self, size: f32, s: &str, face: Face, max_w: f32) -> Vec<String> {
+        let mut lines = Vec::new();
+        for para in s.split('\n') {
+            let mut cur = String::new();
+            for word in para.split(' ') {
+                let cand = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
+                if self.text_width(size, &cand, face) <= max_w || cur.is_empty() {
+                    cur = cand;
+                    // a single over-long word: hard-break it
+                    while self.text_width(size, &cur, face) > max_w && cur.chars().count() > 1 {
+                        let mut head = String::new();
+                        for ch in cur.chars() {
+                            if self.text_width(size, &format!("{head}{ch}"), face) > max_w && !head.is_empty() {
+                                break;
+                            }
+                            head.push(ch);
+                        }
+                        let rest: String = cur.chars().skip(head.chars().count()).collect();
+                        lines.push(head);
+                        cur = rest;
+                    }
+                } else {
+                    lines.push(std::mem::take(&mut cur));
+                    cur = word.to_string();
+                }
+            }
+            lines.push(cur);
+        }
+        lines
+    }
+
+    /// Draw an icon centred at (cx, cy) fitting a `size` square.
+    pub fn icon(&mut self, icon: Icon, cx: f32, cy: f32, size: f32, c: [u8; 4]) {
+        let s = size;
+        let (x0, y0) = (cx - s / 2.0, cy - s / 2.0);
+        let lw = (s * 0.075).max(1.5);
+        let st = stroke(lw);
+        let id = Transform::identity();
+        let p = paint(c);
+        let mut pb = PathBuilder::new();
+        match icon {
+            Icon::Chat => {
+                // speech bubble with tail + three dots
+                let (bx, by, bw, bh) = (x0 + s * 0.08, y0 + s * 0.12, s * 0.84, s * 0.58);
+                if let Some(b) = rrect_path(bx, by, bw, bh, s * 0.16) {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                pb.move_to(x0 + s * 0.28, by + bh);
+                pb.line_to(x0 + s * 0.22, y0 + s * 0.90);
+                pb.line_to(x0 + s * 0.46, by + bh);
+                if let Some(t) = pb.finish() {
+                    self.pm.stroke_path(&t, &p, &st, id, None);
+                }
+                for i in 0..3 {
+                    self.circle(x0 + s * (0.33 + 0.17 * i as f32), by + bh / 2.0, s * 0.045, c);
+                }
+            }
+            Icon::Rag => {
+                // document with folded corner and text lines, plus a magnifier
+                let (dx, dy, dw, dh) = (x0 + s * 0.12, y0 + s * 0.08, s * 0.56, s * 0.74);
+                let fold = s * 0.18;
+                pb.move_to(dx, dy);
+                pb.line_to(dx + dw - fold, dy);
+                pb.line_to(dx + dw, dy + fold);
+                pb.line_to(dx + dw, dy + dh);
+                pb.line_to(dx, dy + dh);
+                pb.close();
+                pb.move_to(dx + dw - fold, dy);
+                pb.line_to(dx + dw - fold, dy + fold);
+                pb.line_to(dx + dw, dy + fold);
+                if let Some(d) = pb.finish() {
+                    self.pm.stroke_path(&d, &p, &st, id, None);
+                }
+                for i in 0..3 {
+                    let ly = dy + s * (0.30 + 0.14 * i as f32);
+                    let mut l = PathBuilder::new();
+                    l.move_to(dx + s * 0.1, ly);
+                    l.line_to(dx + s * (if i == 2 { 0.28 } else { 0.4 }), ly);
+                    if let Some(l) = l.finish() {
+                        self.pm.stroke_path(&l, &p, &st, id, None);
+                    }
+                }
+                // magnifier
+                let (mx, my, mr) = (x0 + s * 0.68, y0 + s * 0.64, s * 0.17);
+                if let Some(ring) = PathBuilder::from_circle(mx, my, mr) {
+                    self.pm.stroke_path(&ring, &p, &st, id, None);
+                }
+                let mut h = PathBuilder::new();
+                h.move_to(mx + mr * 0.72, my + mr * 0.72);
+                h.line_to(x0 + s * 0.92, y0 + s * 0.88);
+                if let Some(h) = h.finish() {
+                    self.pm.stroke_path(&h, &p, &stroke(lw * 1.4), id, None);
+                }
+            }
+            Icon::Mcp => {
+                // hub-and-spoke: a central node connected to four peripheral nodes
+                let (hx, hy) = (cx, cy);
+                let nodes = [(0.18, 0.2), (0.82, 0.2), (0.14, 0.78), (0.86, 0.78)];
+                for (nx, ny) in nodes {
+                    let mut l = PathBuilder::new();
+                    l.move_to(hx, hy);
+                    l.line_to(x0 + s * nx, y0 + s * ny);
+                    if let Some(l) = l.finish() {
+                        self.pm.stroke_path(&l, &p, &st, id, None);
+                    }
+                }
+                for (nx, ny) in nodes {
+                    self.circle(x0 + s * nx, y0 + s * ny, s * 0.085, c);
+                }
+                self.circle(hx, hy, s * 0.17, c);
+                // socket notch in the hub
+                if let Some(i) = PathBuilder::from_circle(hx, hy, s * 0.07) {
+                    let mut clear = Paint::default();
+                    clear.set_color(Color::from_rgba8(0, 0, 0, 90));
+                    self.pm.fill_path(&i, &clear, FillRule::Winding, id, None);
+                }
+            }
+            Icon::Cli => {
+                // terminal window with a prompt chevron and cursor underscore
+                if let Some(w) = rrect_path(x0 + s * 0.06, y0 + s * 0.14, s * 0.88, s * 0.72, s * 0.12) {
+                    self.pm.stroke_path(&w, &p, &st, id, None);
+                }
+                let mut ln = PathBuilder::new();
+                ln.move_to(x0 + s * 0.06, y0 + s * 0.32);
+                ln.line_to(x0 + s * 0.94, y0 + s * 0.32);
+                if let Some(l) = ln.finish() {
+                    self.pm.stroke_path(&l, &p, &st, id, None);
+                }
+                let mut ch = PathBuilder::new();
+                ch.move_to(x0 + s * 0.24, y0 + s * 0.46);
+                ch.line_to(x0 + s * 0.40, y0 + s * 0.58);
+                ch.line_to(x0 + s * 0.24, y0 + s * 0.70);
+                if let Some(ch) = ch.finish() {
+                    self.pm.stroke_path(&ch, &p, &stroke(lw * 1.3), id, None);
+                }
+                let mut us = PathBuilder::new();
+                us.move_to(x0 + s * 0.50, y0 + s * 0.72);
+                us.line_to(x0 + s * 0.72, y0 + s * 0.72);
+                if let Some(us) = us.finish() {
+                    self.pm.stroke_path(&us, &p, &stroke(lw * 1.3), id, None);
+                }
+            }
+            Icon::Users => {
+                // two people: head circles and shoulder arcs
+                for (px, py, k) in [(0.36, 0.34, 1.0), (0.68, 0.40, 0.8)] {
+                    if let Some(head) = PathBuilder::from_circle(x0 + s * px, y0 + s * py, s * 0.13 * k) {
+                        self.pm.stroke_path(&head, &p, &st, id, None);
+                    }
+                    let mut sh = PathBuilder::new();
+                    let (sx, sy, sw) = (x0 + s * px, y0 + s * (py + 0.46 * k), s * 0.26 * k);
+                    sh.move_to(sx - sw, sy);
+                    sh.quad_to(sx - sw, sy - s * 0.26 * k, sx, sy - s * 0.26 * k);
+                    sh.quad_to(sx + sw, sy - s * 0.26 * k, sx + sw, sy);
+                    if let Some(sh) = sh.finish() {
+                        self.pm.stroke_path(&sh, &p, &st, id, None);
+                    }
+                }
+            }
+            Icon::Settings => {
+                // gear: ring, eight teeth, hub
+                let (r_out, r_in) = (s * 0.30, s * 0.12);
+                if let Some(ring) = PathBuilder::from_circle(cx, cy, r_out) {
+                    self.pm.stroke_path(&ring, &p, &st, id, None);
+                }
+                if let Some(hub) = PathBuilder::from_circle(cx, cy, r_in) {
+                    self.pm.stroke_path(&hub, &p, &st, id, None);
+                }
+                for i in 0..8 {
+                    let a = i as f32 * std::f32::consts::TAU / 8.0;
+                    let (dx, dy) = (a.cos(), a.sin());
+                    let mut t = PathBuilder::new();
+                    t.move_to(cx + dx * r_out, cy + dy * r_out);
+                    t.line_to(cx + dx * s * 0.44, cy + dy * s * 0.44);
+                    if let Some(t) = t.finish() {
+                        self.pm.stroke_path(&t, &p, &stroke(lw * 1.8), id, None);
+                    }
+                }
+            }
+            Icon::Clipboard => {
+                // board with a clip at the top and two text lines
+                if let Some(b) = rrect_path(x0 + s * 0.16, y0 + s * 0.16, s * 0.68, s * 0.76, s * 0.1) {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                if let Some(c) = rrect_path(x0 + s * 0.34, y0 + s * 0.06, s * 0.32, s * 0.2, s * 0.06) {
+                    self.pm.fill_path(&c, &p, FillRule::Winding, id, None);
+                }
+                for (i, w) in [0.34f32, 0.24].iter().enumerate() {
+                    let mut l = PathBuilder::new();
+                    l.move_to(x0 + s * 0.3, y0 + s * (0.5 + 0.18 * i as f32));
+                    l.line_to(x0 + s * (0.3 + w), y0 + s * (0.5 + 0.18 * i as f32));
+                    if let Some(l) = l.finish() {
+                        self.pm.stroke_path(&l, &p, &st, id, None);
+                    }
+                }
+            }
+            Icon::Runs => {
+                // a vertical timeline: three steps joined by a line, the last one checked
+                let mut line = PathBuilder::new();
+                line.move_to(x0 + s * 0.22, y0 + s * 0.2);
+                line.line_to(x0 + s * 0.22, y0 + s * 0.8);
+                if let Some(l) = line.finish() {
+                    self.pm.stroke_path(&l, &p, &st, id, None);
+                }
+                for (i, w) in [0.62f32, 0.5, 0.58].iter().enumerate() {
+                    let y = y0 + s * (0.2 + 0.3 * i as f32);
+                    self.circle(x0 + s * 0.22, y, s * 0.085, c);
+                    let mut bar = PathBuilder::new();
+                    bar.move_to(x0 + s * 0.4, y);
+                    bar.line_to(x0 + s * (0.4 + w * 0.55), y);
+                    if let Some(b) = bar.finish() {
+                        self.pm.stroke_path(&b, &p, &st, id, None);
+                    }
+                }
+                let mut tick = PathBuilder::new();
+                tick.move_to(x0 + s * 0.68, y0 + s * 0.74);
+                tick.line_to(x0 + s * 0.76, y0 + s * 0.82);
+                tick.line_to(x0 + s * 0.92, y0 + s * 0.64);
+                if let Some(t) = tick.finish() {
+                    self.pm.stroke_path(&t, &p, &stroke(lw * 1.4), id, None);
+                }
+            }
+            Icon::Browser => {
+                // a globe: outline, equator, two parallels and a meridian
+                let (gx, gy, r) = (x0 + s * 0.5, y0 + s * 0.5, s * 0.40);
+                if let Some(c) = PathBuilder::from_circle(gx, gy, r) {
+                    self.pm.stroke_path(&c, &p, &st, id, None);
+                }
+                if let Some(m) = tiny_skia::Rect::from_xywh(gx - r * 0.42, gy - r, r * 0.84, r * 2.0).and_then(PathBuilder::from_oval) {
+                    self.pm.stroke_path(&m, &p, &st, id, None);
+                }
+                for (dy, half) in [(0.0f32, r), (-0.5, r * 0.866), (0.5, r * 0.866)] {
+                    let mut l = PathBuilder::new();
+                    l.move_to(gx - half, gy + dy * r);
+                    l.line_to(gx + half, gy + dy * r);
+                    if let Some(l) = l.finish() {
+                        self.pm.stroke_path(&l, &p, &st, id, None);
+                    }
+                }
+                let mut v = PathBuilder::new();
+                v.move_to(gx, gy - r);
+                v.line_to(gx, gy + r);
+                if let Some(v) = v.finish() {
+                    self.pm.stroke_path(&v, &p, &st, id, None);
+                }
+            }
+            Icon::Edit => {
+                // a page with text lines and a pencil across its corner
+                if let Some(b) = rrect_path(x0 + s * 0.12, y0 + s * 0.14, s * 0.56, s * 0.72, s * 0.08) {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                for (i, w) in [0.3f32, 0.22, 0.3].iter().enumerate() {
+                    let y = y0 + s * (0.34 + 0.17 * i as f32);
+                    let mut l = PathBuilder::new();
+                    l.move_to(x0 + s * 0.24, y);
+                    l.line_to(x0 + s * (0.24 + w), y);
+                    if let Some(l) = l.finish() {
+                        self.pm.stroke_path(&l, &p, &st, id, None);
+                    }
+                }
+                let mut pen = PathBuilder::new();
+                pen.move_to(x0 + s * 0.84, y0 + s * 0.2);
+                pen.line_to(x0 + s * 0.5, y0 + s * 0.58);
+                if let Some(pn) = pen.finish() {
+                    self.pm.stroke_path(&pn, &p, &stroke(lw * 2.4), id, None);
+                }
+                let mut tip = PathBuilder::new();
+                tip.move_to(x0 + s * 0.5, y0 + s * 0.58);
+                tip.line_to(x0 + s * 0.42, y0 + s * 0.74);
+                tip.line_to(x0 + s * 0.6, y0 + s * 0.68);
+                tip.close();
+                if let Some(t) = tip.finish() {
+                    self.pm.fill_path(&t, &p, FillRule::Winding, id, None);
+                }
+            }
+            Icon::Mic => {
+                // capsule, pickup arc, stem and base
+                if let Some(c) = rrect_path(x0 + s * 0.34, y0 + s * 0.06, s * 0.32, s * 0.5, s * 0.16) {
+                    self.pm.fill_path(&c, &p, FillRule::Winding, id, None);
+                }
+                let mut arc = PathBuilder::new();
+                arc.move_to(x0 + s * 0.2, y0 + s * 0.42);
+                arc.cubic_to(x0 + s * 0.2, y0 + s * 0.78, x0 + s * 0.8, y0 + s * 0.78, x0 + s * 0.8, y0 + s * 0.42);
+                arc.move_to(x0 + s * 0.5, y0 + s * 0.74);
+                arc.line_to(x0 + s * 0.5, y0 + s * 0.92);
+                arc.move_to(x0 + s * 0.34, y0 + s * 0.92);
+                arc.line_to(x0 + s * 0.66, y0 + s * 0.92);
+                if let Some(a) = arc.finish() {
+                    self.pm.stroke_path(&a, &p, &st, id, None);
+                }
+            }
+            Icon::Speaker => {
+                // cone with two sound waves
+                let mut cone = PathBuilder::new();
+                cone.move_to(x0 + s * 0.12, y0 + s * 0.38);
+                cone.line_to(x0 + s * 0.32, y0 + s * 0.38);
+                cone.line_to(x0 + s * 0.54, y0 + s * 0.18);
+                cone.line_to(x0 + s * 0.54, y0 + s * 0.82);
+                cone.line_to(x0 + s * 0.32, y0 + s * 0.62);
+                cone.line_to(x0 + s * 0.12, y0 + s * 0.62);
+                cone.close();
+                if let Some(c) = cone.finish() {
+                    self.pm.fill_path(&c, &p, FillRule::Winding, id, None);
+                }
+                let mut waves = PathBuilder::new();
+                waves.move_to(x0 + s * 0.68, y0 + s * 0.36);
+                waves.cubic_to(x0 + s * 0.78, y0 + s * 0.44, x0 + s * 0.78, y0 + s * 0.56, x0 + s * 0.68, y0 + s * 0.64);
+                waves.move_to(x0 + s * 0.78, y0 + s * 0.24);
+                waves.cubic_to(x0 + s * 0.98, y0 + s * 0.4, x0 + s * 0.98, y0 + s * 0.6, x0 + s * 0.78, y0 + s * 0.76);
+                if let Some(w) = waves.finish() {
+                    self.pm.stroke_path(&w, &p, &st, id, None);
+                }
+            }
+            Icon::Lock => {
+                if let Some(b) = rrect_path(x0 + s * 0.2, y0 + s * 0.44, s * 0.6, s * 0.46, s * 0.08) {
+                    self.pm.fill_path(&b, &p, FillRule::Winding, id, None);
+                }
+                let mut sh = PathBuilder::new();
+                sh.move_to(x0 + s * 0.32, y0 + s * 0.44);
+                sh.line_to(x0 + s * 0.32, y0 + s * 0.30);
+                sh.cubic_to(x0 + s * 0.32, y0 + s * 0.04, x0 + s * 0.68, y0 + s * 0.04, x0 + s * 0.68, y0 + s * 0.30);
+                sh.line_to(x0 + s * 0.68, y0 + s * 0.44);
+                if let Some(sh) = sh.finish() {
+                    self.pm.stroke_path(&sh, &p, &st, id, None);
+                }
+            }
+            Icon::Power => {
+                let mut arc = PathBuilder::new();
+                let r = s * 0.34;
+                // ring open at the top
+                arc.move_to(cx - r * 0.55, cy - r * 0.84);
+                arc.cubic_to(cx - r * 1.5, cy - r * 0.2, cx - r * 1.1, cy + r * 1.1, cx, cy + r * 1.05);
+                arc.cubic_to(cx + r * 1.1, cy + r * 1.1, cx + r * 1.5, cy - r * 0.2, cx + r * 0.55, cy - r * 0.84);
+                if let Some(a) = arc.finish() {
+                    self.pm.stroke_path(&a, &p, &st, id, None);
+                }
+                let mut l = PathBuilder::new();
+                l.move_to(cx, cy - r * 1.15);
+                l.line_to(cx, cy - r * 0.1);
+                if let Some(l) = l.finish() {
+                    self.pm.stroke_path(&l, &p, &st, id, None);
+                }
+            }
+            Icon::Camera => {
+                // body with a small bump on top, and the lens
+                if let Some(b) = rrect_path(x0 + s * 0.08, y0 + s * 0.28, s * 0.84, s * 0.58, s * 0.1) {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                let mut top = PathBuilder::new();
+                top.move_to(x0 + s * 0.32, y0 + s * 0.28);
+                top.line_to(x0 + s * 0.38, y0 + s * 0.14);
+                top.line_to(x0 + s * 0.62, y0 + s * 0.14);
+                top.line_to(x0 + s * 0.68, y0 + s * 0.28);
+                if let Some(t) = top.finish() {
+                    self.pm.stroke_path(&t, &p, &st, id, None);
+                }
+                let mut lens = PathBuilder::new();
+                lens.push_circle(x0 + s * 0.5, y0 + s * 0.57, s * 0.17);
+                if let Some(l) = lens.finish() {
+                    self.pm.stroke_path(&l, &p, &st, id, None);
+                }
+            }
+            Icon::Skills => {
+                // a spark: a four-pointed star and a small one beside it
+                let mut star = PathBuilder::new();
+                let (cx0, cy0, big, waist) = (x0 + s * 0.42, y0 + s * 0.52, s * 0.38, s * 0.1);
+                star.move_to(cx0, cy0 - big);
+                star.line_to(cx0 + waist, cy0 - waist);
+                star.line_to(cx0 + big, cy0);
+                star.line_to(cx0 + waist, cy0 + waist);
+                star.line_to(cx0, cy0 + big);
+                star.line_to(cx0 - waist, cy0 + waist);
+                star.line_to(cx0 - big, cy0);
+                star.line_to(cx0 - waist, cy0 - waist);
+                star.close();
+                if let Some(st2) = star.finish() {
+                    self.pm.stroke_path(&st2, &p, &st, id, None);
+                }
+                let mut small = PathBuilder::new();
+                small.push_circle(x0 + s * 0.8, y0 + s * 0.2, s * 0.06);
+                small.push_circle(x0 + s * 0.8, y0 + s * 0.8, s * 0.045);
+                if let Some(sm) = small.finish() {
+                    self.pm.fill_path(&sm, &p, FillRule::Winding, id, None);
+                }
+            }
+            Icon::System => {
+                // a gauge: a ring open at the bottom, tick marks and a needle
+                let mut ring = PathBuilder::new();
+                let (cx, cy, r) = (x0 + s * 0.5, y0 + s * 0.56, s * 0.38);
+                for i in 0..=24 {
+                    let a = (150.0 + 240.0 * i as f32 / 24.0).to_radians();
+                    let (px, py) = (cx + r * a.cos(), cy + r * a.sin());
+                    if i == 0 { ring.move_to(px, py) } else { ring.line_to(px, py) }
+                }
+                if let Some(rp) = ring.finish() {
+                    self.pm.stroke_path(&rp, &p, &st, id, None);
+                }
+                let mut ticks = PathBuilder::new();
+                for i in 0..=6 {
+                    let a = (150.0 + 240.0 * i as f32 / 6.0).to_radians();
+                    ticks.move_to(cx + r * 0.78 * a.cos(), cy + r * 0.78 * a.sin());
+                    ticks.line_to(cx + r * 0.62 * a.cos(), cy + r * 0.62 * a.sin());
+                }
+                if let Some(tp) = ticks.finish() {
+                    self.pm.stroke_path(&tp, &p, &st, id, None);
+                }
+                let mut needle = PathBuilder::new();
+                let a = 320.0f32.to_radians();
+                needle.move_to(cx, cy);
+                needle.line_to(cx + r * 0.6 * a.cos(), cy + r * 0.6 * a.sin());
+                if let Some(np) = needle.finish() {
+                    self.pm.stroke_path(&np, &p, &st, id, None);
+                }
+                let mut hub = PathBuilder::new();
+                hub.push_circle(cx, cy, s * 0.06);
+                if let Some(h) = hub.finish() {
+                    self.pm.fill_path(&h, &p, FillRule::Winding, id, None);
+                }
+            }
+            Icon::Media => {
+                // a screen with a play triangle, and a base line
+                if let Some(b) = rrect_path(x0 + s * 0.08, y0 + s * 0.14, s * 0.84, s * 0.62, s * 0.08) {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                let mut tri = PathBuilder::new();
+                tri.move_to(x0 + s * 0.42, y0 + s * 0.28);
+                tri.line_to(x0 + s * 0.42, y0 + s * 0.62);
+                tri.line_to(x0 + s * 0.68, y0 + s * 0.45);
+                tri.close();
+                if let Some(t) = tri.finish() {
+                    self.pm.fill_path(&t, &p, FillRule::Winding, id, None);
+                }
+                let mut base = PathBuilder::new();
+                base.move_to(x0 + s * 0.28, y0 + s * 0.88);
+                base.line_to(x0 + s * 0.72, y0 + s * 0.88);
+                if let Some(b) = base.finish() {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+            }
+            Icon::Usage => {
+                // a bar chart on an axis
+                let mut axes = PathBuilder::new();
+                axes.move_to(x0 + s * 0.1, y0 + s * 0.08);
+                axes.line_to(x0 + s * 0.1, y0 + s * 0.9);
+                axes.line_to(x0 + s * 0.94, y0 + s * 0.9);
+                if let Some(a) = axes.finish() {
+                    self.pm.stroke_path(&a, &p, &st, id, None);
+                }
+                let mut bars = PathBuilder::new();
+                for (i, h) in [0.3f32, 0.55, 0.42, 0.74].iter().enumerate() {
+                    let bx = x0 + s * (0.22 + i as f32 * 0.19);
+                    bars.push_rect(tiny_skia::Rect::from_xywh(bx, y0 + s * (0.84 - h), s * 0.11, s * h).unwrap_or(tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap()));
+                }
+                if let Some(b) = bars.finish() {
+                    self.pm.fill_path(&b, &p, FillRule::Winding, id, None);
+                }
+            }
+            Icon::Bell => {
+                // a bell: a dome that flares at the rim, a clapper below and a small knob on top
+                let mut bell = PathBuilder::new();
+                bell.move_to(x0 + s * 0.14, y0 + s * 0.74);
+                bell.line_to(x0 + s * 0.22, y0 + s * 0.66);
+                bell.cubic_to(x0 + s * 0.28, y0 + s * 0.58, x0 + s * 0.26, y0 + s * 0.46, x0 + s * 0.28, y0 + s * 0.38);
+                bell.cubic_to(x0 + s * 0.31, y0 + s * 0.2, x0 + s * 0.69, y0 + s * 0.2, x0 + s * 0.72, y0 + s * 0.38);
+                bell.cubic_to(x0 + s * 0.74, y0 + s * 0.46, x0 + s * 0.72, y0 + s * 0.58, x0 + s * 0.78, y0 + s * 0.66);
+                bell.line_to(x0 + s * 0.86, y0 + s * 0.74);
+                bell.close();
+                if let Some(b) = bell.finish() {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                let mut parts = PathBuilder::new();
+                parts.move_to(x0 + s * 0.5, y0 + s * 0.12);
+                parts.line_to(x0 + s * 0.5, y0 + s * 0.2);
+                if let Some(b) = parts.finish() {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                let mut clap = PathBuilder::new();
+                clap.push_circle(x0 + s * 0.5, y0 + s * 0.84, s * 0.07);
+                if let Some(b) = clap.finish() {
+                    self.pm.fill_path(&b, &p, FillRule::Winding, id, None);
+                }
+            }
+            Icon::Calendar => {
+                // a calendar page with binding rings, a header bar and a grid of days
+                let r = tiny_skia::Rect::from_xywh(x0 + s * 0.1, y0 + s * 0.18, s * 0.8, s * 0.72);
+                if let Some(r) = r {
+                    let mut pb = PathBuilder::new();
+                    pb.push_rect(r);
+                    if let Some(p2) = pb.finish() {
+                        self.pm.stroke_path(&p2, &p, &st, id, None);
+                    }
+                }
+                let mut bar = PathBuilder::new();
+                bar.move_to(x0 + s * 0.1, y0 + s * 0.38);
+                bar.line_to(x0 + s * 0.9, y0 + s * 0.38);
+                bar.move_to(x0 + s * 0.3, y0 + s * 0.08);
+                bar.line_to(x0 + s * 0.3, y0 + s * 0.26);
+                bar.move_to(x0 + s * 0.7, y0 + s * 0.08);
+                bar.line_to(x0 + s * 0.7, y0 + s * 0.26);
+                if let Some(b) = bar.finish() {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                let mut dots = PathBuilder::new();
+                for row in 0..2 {
+                    for col in 0..3 {
+                        dots.push_circle(x0 + s * (0.28 + col as f32 * 0.22), y0 + s * (0.52 + row as f32 * 0.17), s * 0.035);
+                    }
+                }
+                if let Some(d) = dots.finish() {
+                    self.pm.fill_path(&d, &p, FillRule::Winding, id, None);
+                }
+            }
+            Icon::Scan => {
+                // a radar: rings, a sweep and two blips
+                for r in [0.42f32, 0.26] {
+                    let mut ring = PathBuilder::new();
+                    ring.push_circle(x0 + s * 0.5, y0 + s * 0.5, s * r);
+                    if let Some(rg) = ring.finish() {
+                        self.pm.stroke_path(&rg, &p, &st, id, None);
+                    }
+                }
+                let mut sweep = PathBuilder::new();
+                sweep.move_to(x0 + s * 0.5, y0 + s * 0.5);
+                sweep.line_to(x0 + s * 0.82, y0 + s * 0.24);
+                if let Some(sw) = sweep.finish() {
+                    self.pm.stroke_path(&sw, &p, &st, id, None);
+                }
+                for (px, py) in [(0.68f32, 0.62f32), (0.34, 0.32)] {
+                    let mut dot = PathBuilder::new();
+                    dot.push_circle(x0 + s * px, y0 + s * py, s * 0.05);
+                    if let Some(d) = dot.finish() {
+                        self.pm.fill_path(&d, &p, FillRule::Winding, id, None);
+                    }
+                }
+            }
+            Icon::Radio => {
+                // a radio: body, aerial, dial and speaker dots
+                if let Some(b) = rrect_path(x0 + s * 0.08, y0 + s * 0.34, s * 0.84, s * 0.54, s * 0.1) {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                let mut aerial = PathBuilder::new();
+                aerial.move_to(x0 + s * 0.30, y0 + s * 0.34);
+                aerial.line_to(x0 + s * 0.74, y0 + s * 0.10);
+                if let Some(a) = aerial.finish() {
+                    self.pm.stroke_path(&a, &p, &st, id, None);
+                }
+                let mut dial = PathBuilder::new();
+                dial.push_circle(x0 + s * 0.68, y0 + s * 0.61, s * 0.12);
+                if let Some(d) = dial.finish() {
+                    self.pm.stroke_path(&d, &p, &st, id, None);
+                }
+                for k in 0..3 {
+                    let mut dot = PathBuilder::new();
+                    dot.push_circle(x0 + s * 0.24, y0 + s * (0.50 + 0.1 * k as f32), s * 0.035);
+                    if let Some(d) = dot.finish() {
+                        self.pm.fill_path(&d, &p, FillRule::Winding, id, None);
+                    }
+                }
+            }
+            Icon::Mesh => {
+                // three linked nodes
+                let pts = [(0.5, 0.18), (0.16, 0.78), (0.84, 0.78)];
+                let mut links = PathBuilder::new();
+                links.move_to(x0 + s * pts[0].0, y0 + s * pts[0].1);
+                links.line_to(x0 + s * pts[1].0, y0 + s * pts[1].1);
+                links.line_to(x0 + s * pts[2].0, y0 + s * pts[2].1);
+                links.close();
+                if let Some(l) = links.finish() {
+                    self.pm.stroke_path(&l, &p, &st, id, None);
+                }
+                for (px, py) in pts {
+                    let mut dot = PathBuilder::new();
+                    dot.push_circle(x0 + s * px, y0 + s * py, s * 0.1);
+                    if let Some(d) = dot.finish() {
+                        self.pm.fill_path(&d, &p, FillRule::Winding, id, None);
+                    }
+                }
+            }
+            Icon::Logout => {
+                let mut door = PathBuilder::new();
+                door.move_to(x0 + s * 0.42, y0 + s * 0.15);
+                door.line_to(x0 + s * 0.15, y0 + s * 0.15);
+                door.line_to(x0 + s * 0.15, y0 + s * 0.85);
+                door.line_to(x0 + s * 0.42, y0 + s * 0.85);
+                door.move_to(x0 + s * 0.35, y0 + s * 0.5);
+                door.line_to(x0 + s * 0.88, y0 + s * 0.5);
+                door.move_to(x0 + s * 0.70, y0 + s * 0.32);
+                door.line_to(x0 + s * 0.88, y0 + s * 0.5);
+                door.line_to(x0 + s * 0.70, y0 + s * 0.68);
+                if let Some(d) = door.finish() {
+                    self.pm.stroke_path(&d, &p, &st, id, None);
+                }
+            }
+        }
+    }
+
+    /// RGBA8 (premultiplied) bytes.
+    pub fn rgba(&self) -> &[u8] {
+        self.pm.data()
+    }
+
+    pub fn save_png(&self, path: &std::path::Path) -> Result<(), String> {
+        self.pm.save_png(path).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn px(g: &Gfx, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * g.width() + x) * 4) as usize;
+        let d = g.rgba();
+        [d[i], d[i + 1], d[i + 2], d[i + 3]]
+    }
+
+    fn nonbg(g: &Gfx, bg: [u8; 4]) -> usize {
+        g.rgba().chunks(4).filter(|p| p != &bg).count()
+    }
+
+    #[test]
+    fn shapes_and_text_draw() {
+        let mut g = Gfx::new(200, 100);
+        g.clear(rgb(10, 10, 10));
+        g.rrect(10.0, 10.0, 80.0, 40.0, 8.0, rgb(200, 0, 0));
+        assert_eq!(px(&g, 50, 30), rgb(200, 0, 0));
+        assert_eq!(px(&g, 150, 80), rgb(10, 10, 10));
+        let before = nonbg(&g, rgb(10, 10, 10));
+        let w = g.text(10.0, 60.0, 20.0, rgb(255, 255, 255), "Hello", Face::Sans);
+        assert!(w > 30.0 && w < 120.0);
+        assert!(nonbg(&g, rgb(10, 10, 10)) > before + 50);
+    }
+
+    #[test]
+    fn every_icon_draws_something() {
+        for icon in [Icon::Chat, Icon::Rag, Icon::Mcp, Icon::Cli, Icon::Users, Icon::Settings, Icon::Clipboard, Icon::Mic, Icon::Speaker, Icon::Runs, Icon::Edit, Icon::Browser, Icon::Camera, Icon::Mesh, Icon::Radio, Icon::Scan, Icon::Skills, Icon::Usage, Icon::Calendar, Icon::System, Icon::Media, Icon::Bell, Icon::Lock, Icon::Power, Icon::Logout] {
+            let mut g = Gfx::new(96, 96);
+            g.clear(rgb(0, 0, 0));
+            g.icon(icon, 48.0, 48.0, 80.0, rgb(255, 255, 255));
+            assert!(nonbg(&g, rgb(0, 0, 0)) > 100, "{icon:?} drew nothing");
+            // stays inside its box (no ink in the outer 4px margin of a 96px canvas)
+            for (x, y) in [(1, 1), (94, 1), (1, 94), (94, 94)] {
+                assert_eq!(px(&g, x, y), rgb(0, 0, 0), "{icon:?} overflowed");
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_and_fit() {
+        let mut g = Gfx::new(10, 10);
+        let lines = g.wrap(16.0, "the quick brown fox jumps over the lazy dog", Face::Sans, 120.0);
+        assert!(lines.len() >= 3);
+        assert!(lines.iter().all(|l| g.text_width(16.0, l, Face::Sans) <= 120.5));
+        let long = g.wrap(16.0, &"w".repeat(80), Face::Sans, 100.0);
+        assert!(long.len() > 3 && long.iter().all(|l| g.text_width(16.0, l, Face::Sans) <= 100.5));
+        assert_eq!(g.wrap(16.0, "a\n\nb", Face::Sans, 100.0), vec!["a", "", "b"]);
+        let f = g.fit(16.0, "a very long label that cannot fit", Face::Sans, 80.0);
+        assert!(f.ends_with('…') && g.text_width(16.0, &f, Face::Sans) <= 80.5);
+        assert_eq!(g.fit(16.0, "ok", Face::Sans, 80.0), "ok");
+    }
+
+    #[test]
+    fn text_clips_at_edges_without_panicking() {
+        let mut g = Gfx::new(40, 20);
+        g.clear(rgb(0, 0, 0));
+        g.text(-30.0, -5.0, 24.0, rgb(255, 255, 255), "clipped text far wider than the canvas", Face::Mono);
+        g.text(30.0, 10.0, 24.0, rgb(255, 255, 255), "x", Face::Bold);
+    }
+
+    fn ink(g: &Gfx) -> usize {
+        g.pm.data().chunks(4).filter(|p| p[0] > 40).count()
+    }
+
+    #[test]
+    fn hindi_tamil_and_arabic_are_drawn_with_real_letters_not_empty_boxes() {
+        for text in ["नमस्ते दुनिया", "தமிழ் மொழி", "مرحبا بالعالم", "বাংলা"] {
+            let mut g = Gfx::new(300, 40);
+            g.clear(rgb(0, 0, 0));
+            let w = g.text(4.0, 6.0, 22.0, rgb(255, 255, 255), text, Face::Sans);
+            assert!(w > 30.0 && w < 290.0, "{text}: width {w}");
+            assert_eq!(w, g.text_width(22.0, text, Face::Sans), "measuring agrees with drawing");
+            let n = ink(&g);
+            assert!(n > 150, "{text}: only {n} lit pixels");
+            // a box for a missing letter is a hollow rectangle of equal ink for every letter; shaped text varies by column
+            let cols: std::collections::HashSet<usize> = (0..300usize).map(|x| (0..40usize).filter(|&y| g.pm.data()[(y * 300 + x) * 4] > 40).count()).collect();
+            assert!(cols.len() > 6, "{text}: columns look uniform");
+        }
+    }
+
+    #[test]
+    fn english_text_is_drawn_the_way_it_was() {
+        let mut g = Gfx::new(200, 30);
+        g.clear(rgb(0, 0, 0));
+        let w = g.text(2.0, 4.0, 18.0, rgb(255, 255, 255), "Hello world", Face::Sans);
+        assert!(g.shaper.is_none(), "plain English never loads the script fonts");
+        assert!(w > 60.0 && ink(&g) > 100);
+    }
+}

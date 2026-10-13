@@ -1,0 +1,12 @@
+[package]
+name = "iyakki-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iyakki-sec.workspace = true
+iyakki-vfs.workspace = true
+iyakki-ledger.workspace = true
+thiserror.workspace = true
+wasmtime.workspace = true

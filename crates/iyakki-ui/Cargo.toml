@@ -1,0 +1,11 @@
+[package]
+name = "iyakki-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iyakki-vfs.workspace = true
+iyakki-sec.workspace = true
+iyakki-wasm.workspace = true
+iyakki-edit.workspace = true

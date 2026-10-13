@@ -1,0 +1,21 @@
+[package]
+name = "iyakki-remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The shell in a web browser: an HTTPS and WebSocket server of our own, browser sign-in with the shell's accounts, and the screen streamed to a canvas with keys and mouse sent back."
+
+[dependencies]
+iyakki-shell = { path = "../iyakki-shell" }
+iyakki-sec.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+sha2 = "0.10"
+tiny-skia = "0.11"
+serde_json = "1"
+log.workspace = true
+
+[dev-dependencies]
+iyakki-agent.workspace = true
+iyakki-web.workspace = true
+iyakki-sec.workspace = true

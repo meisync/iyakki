@@ -1,0 +1,9 @@
+[package]
+name = "iyakki-hwinfo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reads what the machine has (firmware, CPU, display, input, network, audio) from /proc and /sys, for the boot hardware check."
+
+[dependencies]
+iyakki-storage.workspace = true

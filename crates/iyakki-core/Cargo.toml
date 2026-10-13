@@ -1,0 +1,34 @@
+[package]
+name = "iyakki-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "iyakki"
+path = "src/main.rs"
+
+[features]
+default = ["swarm", "egress", "shell", "web"]
+swarm = ["dep:iyakki-swarm", "dep:tokio"]
+egress = ["dep:iyakki-proxy"]
+shell = ["dep:iyakki-shell", "dep:iyakki-agent"]
+web = ["shell", "dep:iyakki-remote"]
+
+[dependencies]
+iyakki-ledger.workspace = true
+iyakki-swarm = { path = "../iyakki-swarm", optional = true }
+iyakki-proxy = { path = "../iyakki-proxy", optional = true }
+iyakki-shell = { path = "../iyakki-shell", optional = true }
+iyakki-agent = { path = "../iyakki-agent", optional = true }
+iyakki-remote = { path = "../iyakki-remote", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"], optional = true }
+iyakki-sec.workspace = true
+iyakki-devctl.workspace = true
+iyakki-storage.workspace = true
+iyakki-hwinfo.workspace = true
+iyakki-vfs.workspace = true
+iyakki-wasm.workspace = true
+thiserror.workspace = true
+log.workspace = true
+libc = "0.2"

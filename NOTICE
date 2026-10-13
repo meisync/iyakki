@@ -1,0 +1,36 @@
+IYAKKI — An OS for Agents
+Copyright 2026 IYAKKI contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+All code in this repository was written for this project. Third-party Rust
+dependencies are used under their own permissive licenses (Apache-2.0, MIT,
+BSD, ISC, Unicode, Zlib, ...); `cargo deny check licenses` (config: deny.toml)
+enforces this in CI and fails on any copyleft or unknown license.
+
+The browser's JavaScript engine is QuickJS-ng (https://github.com/quickjs-ng/quickjs), used under the MIT License:
+  Copyright (c) 2017-2026 Fabrice Bellard
+  Copyright (c) 2017-2024 Charlie Gordon
+  Copyright (c) 2023-2026 Ben Noordhuis
+Its source is vendored in crates/iyakki-js/vendor/quickjs-ng-0.17.0 together with its LICENSE file. It is compiled to
+WebAssembly with the WASI SDK (LLVM, Apache-2.0 with LLVM exceptions), which links the WASI libc (wasi-libc: MIT and
+Apache-2.0 with LLVM exceptions, with parts derived from musl, MIT) into crates/iyakki-js/assets/iyakki-js.wasm.
+
+
+nanomp3 / nanomp3-core 0.2 (MIT OR Apache-2.0), a pure Rust port of minimp3 (CC0), decodes the MP3 radio streams.
+
+The text is drawn with the DejaVu fonts (DejaVu Sans, Bold and Mono), which are free to use and redistribute under the
+Bitstream Vera / DejaVu license; the license text is in crates/iyakki-shell/assets/DEJAVU-LICENSE.txt and travels with the fonts.
+Hindi, Bengali, Gurmukhi, Gujarati, Tamil, Telugu, Kannada, Malayalam, Arabic and Hebrew text is drawn with Noto Sans fonts (Copyright Google Inc. / Google LLC), licensed under the SIL Open Font License 1.1; the license text is in crates/iyakki-shell/assets/NOTO-OFL-LICENSE.txt. Text shaping uses rustybuzz (MIT) and unicode-bidi (MIT or Apache-2.0).
+
+Radio stations offered as starting points were taken from the public Radio Browser directory (https://www.radio-browser.info);
+the station names and streams belong to their broadcasters, and IYAKKI only links to the public streams.
+
+Command-line tools installed from the CLI tile (kubectl, k3s, Helm, Terraform, GitHub CLI, AWS CLI, Google Cloud CLI, Azure CLI,
+Arduino CLI, esptool, espflash) and the container images used for running code (python, node, alpine) are downloaded
+from their vendors when a person asks for them. They are not part of IYAKKI and keep their own licenses.
+
+Optional full web engine (only in the separate "web" image variant, never in the default images; see docs/FULL-BROWSER.md and
+LICENSING.md item 9): WPE WebKit (LGPL-2.1+ / BSD-2-Clause), Cog (MIT), cage (MIT), wlroots (MIT), Mesa (MIT), GStreamer (LGPL-2.1+)
+and the libraries around them are separate programs and dynamically linked shared libraries started by IYAKKI, not part of it. They keep their
+own licences; the web image's legal-info/ directory carries their source and licence texts.

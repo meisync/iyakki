@@ -1,0 +1,33 @@
+# License policy: only permissive, free-software licenses may enter the build.
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "0BSD",
+    "Unlicense",
+    "BSL-1.0", # Boost: permissive (clipboard-win, error-code)
+]
+
+# Bundled fonts in egui use free font licenses (OFL-1.1, Ubuntu Font Licence): redistribution
+# is allowed; they cover only the font files, not our code. Scoped to that one crate.
+exceptions = [
+    # Mozilla CA root list, permissive data licence.
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+    { allow = ["OFL-1.1", "Ubuntu-font-1.0"], crate = "epaint_default_fonts" },
+]
+
+[bans]
+multiple-versions = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
