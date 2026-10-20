@@ -93,6 +93,7 @@ The helper may receive any shell message at any time after Hello, including befo
 | 0x0E | SetVisible | `bool visible` |
 | 0x0F | Ack | `u8 slot` |
 | 0x10 | Quit | (empty) |
+| 0x11 | Script | `u32 id`, `u32 timeout_ms`, `str js` (protocol 1.1) |
 
 **Hello.** `version` is the protocol version (1; a helper that does not know it exits with status 2 after writing a line to
 stderr). `w`,`h`: the size of the picture in *device pixels* (the size of the page area on the shell's screen). `scale_pct`: the
@@ -149,6 +150,16 @@ the browser's own address bar or shortcuts have it (stop blinking carets; do not
 
 **Quit.** End. Exit with status 0 within 2 s.
 
+**Script** (1.1, optional, used by the assistant's browser tools and the test runner, see `docs/BROWSER-AGENT.md`). Evaluate `js` as a
+script in the top-level page's main world and answer with **ScriptResult** carrying the same `id`. `timeout_ms` (clamped to 0.1-120
+s, 0 = 10 s) is how long the helper waits for the page; after it the helper answers `ok` false with `json` = `script timed out`. The
+script runs synchronously (a returned Promise is not awaited; the caller polls). On success `ok` is true and `json` is the result
+converted to JSON text (`undefined` and `null` become `null`; a string becomes a JSON string). On an exception `ok` is false and
+`json` holds the error text. Scripts that never finish must not block later messages. A helper that does not know type 0x11
+skips it (section 2) and the shell's own timeout ends the wait, so the protocol version stays 1: the shell only needs Script
+for the assistant's tab. The shell never logs script text (it may carry a typed secret); a helper must not either. Screenshots need
+no message: the shell keeps the latest Frame.
+
 ## 5. Pixels: the shared file and the frame handshake
 
 The file holds **two slots** (0 and 1) of `max_w * max_h * 4` bytes each: slot `k` starts at byte offset `k * max_w * max_h * 4`.
@@ -195,6 +206,7 @@ composites it into the same buffers (GStreamer), so nothing special is needed. U
 | 0x89 | Crashed | `str reason` |
 | 0x8A | Log | `str line` |
 | 0x8B | Clipboard | `str text` |
+| 0x8C | ScriptResult | `u32 id`, `bool ok`, `str json` (protocol 1.1) |
 
 * **Ready**: engine name and version for "about" displays (`WPE WebKit` `2.46.3`). Sent once, after Hello.
 * **Title**: the document title; sent when it changes (an empty title is sent as empty).
@@ -272,6 +284,6 @@ Esc, which first hands the keyboard back to the browser). Right-click is the she
 * `crates/iyakki-webview/tests/helper.rs` and the browser tests (`cargo test -p iyakki-shell --lib -- browser`) exercise the protocol against it.
 * `dist/webview/host-helper.py` is the WebKitGTK helper used in window mode on a development machine (virtual X server `Xvfb` for video, or `GtkOffscreenWindow`).
 
-A conforming helper: answers Hello with Ready; produces a whole-picture Frame first; never writes a slot it has sent and not had acked;
+A conforming helper: answers Script with ScriptResult (when it supports 1.1); answers Hello with Ready; produces a whole-picture Frame first; never writes a slot it has sent and not had acked;
 reports Url for every committed top-level address; never writes files outside the profile folder; cancels downloads and reports them;
 denies permission prompts; exits on Quit or EOF; skips unknown messages.

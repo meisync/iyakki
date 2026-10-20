@@ -17,11 +17,17 @@ and F says so.
 | where | the helper program | engine |
 |---|---|---|
 | desktop window (`./run.sh window`, a development machine) | `dist/webview/host-helper.py` (found next to the checkout; `IYAKKI_WEBVIEW_HELPER` overrides) | WebKitGTK (`python3-gi gir1.2-webkit2-4.1 gir1.2-gtk-3.0`; for video also `xvfb`) |
-| the `web` image variant | `/usr/libexec/iyakki/webview-helper` (a small C program, `dist/webview/wpe-helper/`, built by the Buildroot package `iyakki-webview-helper`) | WPE WebKit 2.50 with libwpe and WPEBackend-fdo (shared-memory buffers), GStreamer inside it |
+| the `web` and `macweb` image variants | `/usr/libexec/iyakki/webview-helper` (a small C program, `dist/webview/wpe-helper/`, built by the Buildroot package `iyakki-webview-helper`) | WPE WebKit 2.50 with libwpe and WPEBackend-fdo (shared-memory buffers), GStreamer inside it |
 
 The same helper plays the MEDIA app's videos on the `web` image: MEDIA starts a view of its own with `allow_hosts = [127.0.0.1]` and
 points it at a loopback-only server that serves the one chosen file under a random token (`mediaserve.rs`; no `file:` addresses,
 see `docs/MEDIA-SEARCH.md`, "Video on the web image").
+
+When no helper is installed (the default, `hw` and `mac` images), the BROWSER tile says so plainly instead of showing a half-loaded page:
+a banner above the page, "This site needs the full web engine.", appears for known web apps (YouTube, Netflix, Gmail, Outlook, Google
+Docs/Sheets/Slides/Drive, Slack, Notion, Twitter/X, Facebook, Instagram, Maps, WhatsApp Web, Teams, Figma, Spotify; the list is
+`HEAVY_SITES` in `webengine.rs`) and for any page the reader gave up on. Its "How to get it" button opens a short help page (no network).
+With the helper present there is no banner: such pages open in the engine by themselves.
 
 ## Using it
 
@@ -36,6 +42,22 @@ and drive the engine. The button then reads **Reader**.
 | Esc | the browser takes the keyboard back from the page (`b` back, `f` forward, `r` reload, `g` address, `+ - 0` zoom; Up, Down, PgUp, PgDn, Home, End, Space still scroll the page) |
 | F or Esc again (browser has the keyboard), or the Reader button | back to the built-in reader on the same page |
 | Ctrl+T, Ctrl+W, Ctrl+Shift+T, Ctrl+PgUp/PgDn, Ctrl+D, Ctrl+H, Ctrl+B, Ctrl+J | the browser's tab, bookmark, history and download shortcuts, as always |
+
+**Clicking and typing (fixed 2026-10).** The helper used to divide mouse and wheel positions by the interface scale a second time
+(WPE already divides device-pixel positions by the device scale factor), so at any scale above 100% (a 4K or large screen: the shell
+picks 125% at 3840x2160) a click landed 20% or more away from where the pointer was: it missed text boxes, blurred Google's
+autofocused search box and looked like "typing does not work". At 1280x800 (scale 100%) the bug was invisible, which is why QEMU
+tests passed. Positions now go to WPE unchanged (the protocol always said device pixels). Checked in QEMU at 3840x2160 with a page
+that logs its events (`dist/buildroot/qemu-web-input-test.py`, `dist/buildroot/qemu-web-test/input.html`): a click at screen
+(378,282) reached the page as (302,99) = (378/1.25, (282-157)/1.25); letters, digits, shifted symbols, Backspace, Delete, Home,
+Tab, Ctrl+A/C/V, the Google search box with suggestions and the Google sign-in email box all work.
+The shell's keys go to the page while it has the keyboard; the way back is Esc (browser keys), Ctrl+L (address bar), Ctrl+T/W (tabs).
+A touchpad (a device with BTN_TOOL_FINGER) is not used by the shell: use a mouse.
+
+**Clipboard.** Ctrl+C or Ctrl+X in a page, a page's `copy`/`cut` event and `navigator.clipboard.writeText` (a "Copy" button such as a
+sign-in code) all reach IYAKKI's clipboard (a "Copied" toast; the helper injects a small user script and sends the text as
+`Clipboard`). Ctrl+V pastes the shell's clipboard into the focused field (`Text`). `navigator.clipboard.readText` returns an empty
+string.
 
 Each tab that uses the engine has its own helper (a tab in the background stops drawing). Ctrl+F (find in page), right-click
 menus, pointer shapes and input methods are not available in the engine yet. A capital F typed in a page is a letter, not the
@@ -69,10 +91,12 @@ that path is dead there. The code stays for a custom image that has `/usr/bin/ca
     ./run.sh build-web --h264     # also ships H.264/AAC (see Codec policy)
     WEB_IRIS=1 ./run.sh build-web # also Mesa's iris driver for Intel gen8+ (adds clang: hours more)
     JOBS=12 ./run.sh build-web    # fewer parallel jobs when RAM is short
+    ./run.sh build-macweb         # Intel Macs: the mac variant (drivers + firmware) and the web engine in one image -> target/buildroot-macweb/images/
+    WEB_CROCUS=1 ./run.sh build-macweb   # also Mesa's crocus driver for Haswell (Intel gen4-7); adds the iris fragment (clang): hours more, unverified
 
 The variant is the x86_64 defconfig plus `dist/buildroot/configs/iyakki_web.fragment` (Mesa with LLVM/llvmpipe, WPE WebKit,
 GStreamer, glib-networking for HTTPS, fonts, the helper package) and the overlay `board/iyakki-web/overlay`; `web-post-build.sh`
-adds the Noto fonts the shell ships, a machine id and removes gst-libav unless asked. aarch64 is not done (the same fragment would
+adds the Noto fonts the shell ships, a marker `/usr/share/iyakki/web-gl-drivers` (`software` or `intel`: with an Intel GPU and `software` the shell runs the engine with `LIBGL_ALWAYS_SOFTWARE=1`), a machine id and removes gst-libav unless asked. aarch64 is not done (the same fragment would
 need testing; llvmpipe and WebKit support aarch64 in Buildroot).
 Host needs: ~40 GB disk, 16+ GB RAM (28 GB used here, `JOBS=5`), several hours the first time, minutes for an incremental build.
 
@@ -105,6 +129,36 @@ Test it in QEMU: `dist/buildroot/qemu-web-test.sh` (a wrapper of `qemu-web-test.
 loads the local test page, google.com and youtube.com in the full engine and saves PNGs; `SSH_KEY=` adds a key so you can
 `ssh -p 2222 root@127.0.0.1`; set `IYAKKI_WEBVIEW_DEBUG=1` in the helper's environment for a frame statistics line every 5 s).
 
+### The `macweb` variant (Intel Macs)
+
+`dist/buildroot/build.sh macweb` = the x86_64 defconfig + `iyakki_firmware.fragment` + `iyakki_mac.fragment` (kernel drivers: applesmc, hid_apple,
+Cirrus audio, i915, Broadcom Wi-Fi/Bluetooth bits) + `iyakki_web.fragment` (+ `iyakki_web_h264.fragment` with `WEB_H264=1`, + iris/crocus with
+`WEB_IRIS=1` / `WEB_CROCUS=1`). The fragments do not set the same option twice (the Mac one sets the kernel fragment list, the web one the rootfs
+overlay and post-build hooks), so the order does not matter. Release files are named `iyakki-macweb-*` (`./run.sh release --with-macweb`).
+The reason it exists: the `mac` and `web` images could not be combined, and the Mac mini 2014 booted from `mac` has no full engine. Why the
+web engine renders in software on a Haswell Mac mini and what to expect: `docs/YOUTUBE-ON-IYAKKI.md`. Not built or booted yet.
+
+## Troubleshooting
+
+* A site "does not load" although the engine is installed: check the audit log for `browser.full`. Without it the built-in reader showed
+  the page. YouTube, Google and the other known heavy sites open in the engine by themselves; other pages move to it when the reader judges
+  it cannot show them, or press F. After the engine stops, or after F leaves it, the shell stops sending sites to it until the BROWSER is reopened.
+* To test the engine alone on a device, use the `probe` example of `iyakki-webview` (see `docs/YOUTUBE-ON-IYAKKI.md`, Google or YouTube
+  does not load). On a Mac mini 2018 it loaded Google and YouTube at 1920x1080 with software GL and the real LAN.
+* Video that needs H.264 (TikTok) shows a black player: the codec is not shipped (see below) and the page gives no message.
+
+## MEDIA says "Error relocating ... symbol not found" (or "undefined symbol")
+
+That is the dynamic linker, from a program whose libraries are not all there. Seen on a Mac mini 2018 `macweb` image: the web post-build had
+removed FFmpeg's libraries (codec policy) but left `/usr/bin/ffmpeg` and `libavdevice`, and MEDIA ran that ffmpeg. Fixed twice: the hook
+(`dist/buildroot/board/iyakki-web/web-post-build.sh`) now removes the whole FFmpeg set unless `WITH_FFMPEG=1` or `WEB_H264=1`, and the player only
+uses an ffmpeg that starts. All GStreamer plugins of the image load (`GST_REGISTRY_1_0=/tmp/r gst-inspect-1.0` on the device lists 37 and no error).
+
+## Video does not start
+
+The helper allows autoplay (without it `play()` fails with NotAllowedError and a page waits for a click). VP8/VP9 and Opus/Vorbis play;
+H.264, AAC and AV1 do not, and an H.264-only page shows a black player without a message. Measurements: `docs/YOUTUBE-ON-IYAKKI.md`.
+
 ## Codec policy
 
 Shipped by default: VP9 (libvpx), Opus (with opusparse), Vorbis; AV1 is NOT playable (libdav1d is built but GStreamer 1.24 in Buildroot has no dav1d plugin: `MediaSource.isTypeSupported('av01...')` is false); MP4 and WebM demuxing; audio through GStreamer's ALSA sink
@@ -114,6 +168,27 @@ gst-libav, so it is *built*, but `web-post-build.sh` deletes it from the image u
 announce it (measured); other sites that only have H.264 will not play video. These codecs are patent-encumbered in some
 countries (a separate matter from the copyright licences below); whoever builds and distributes the H.264 variant is
 responsible for that.
+
+**Decision for the alpha (owner, 2026-10-18): leave H.264 and AAC out.** Questions looked at, not legal advice (a lawyer must
+confirm before any image ships these codecs):
+
+* **The Apache-2.0 licence does not help.** Its patent grant covers only patents of the people who contributed code. The H.264
+  and AAC patent pools are third parties, and the licence disclaims warranties ("AS IS").
+* **"Link to the platform's decoder" has no platform here.** On macOS, Windows or Android the system vendor has paid for the codec
+  and an application only calls its API. IYAKKI is the operating system: the image would be the thing that carries the decoder.
+  A design where IYAKKI ships only the glue and the person installs the decoder (as with ffmpeg in Quick install, downloaded
+  from its vendor at the person's request, never in an image) is consistent with how IYAKKI already treats third-party tools.
+* **Options for later, none done:**
+  1. *Hardware decoding through VA-API* for H.264 video (GStreamer's `va` plugin, libva and Intel's media driver are MIT; the
+     Intel GPU in the Macs has a fixed-function H.264 decoder, and AMD GPUs have one too). The decoder is the chip's, not ours.
+     Video only: AAC audio has no hardware route. Needs a build option, GPU testing on a Mac and a legal opinion about whether
+     driving the chip's decoder is covered by the chip vendor's licence.
+  2. *Cisco's OpenH264 binary* (GStreamer's `openh264` plugin loads it at run time). Cisco pays the royalties only for the
+     binary downloaded from Cisco's own servers, never for a self-built copy, and it does not cover AAC. Its Linux builds are
+     believed to be glibc builds (to verify), which would not load on IYAKKI's musl images.
+  3. *A person-installed full libavcodec*: not possible with the current plugin without a compatible build for musl.
+* **What works today without them:** YouTube (VP9 and Opus), most video platforms that offer WebM, and any H.264 file through
+  the installed ffmpeg in IYAKKI's own player. Sites that only have H.264/AAC do not play video in the browser.
 
 ## Licences
 

@@ -17,7 +17,7 @@ What each still lacks is written on its row in `FEATURES.md`.
 
 ## Needed next (P0: without these the browser is not a daily tool)
 1. **CJK and emoji fonts** (the rest of F-BROW-26), autofill of names and addresses.
-2. **Video inside pages** with permissive decoders (F-BROW-27); this is also what YouTube and TikTok need.
+2. **Video inside pages** with permissive decoders (now served by the full web engine, F-BROW-50 and F-BROW-43); this is also what YouTube and TikTok need.
 3. **Layout sizes and responsive pages** for scripts (F-BROW-28).
 4. **Safe browsing**, the rest: certificate details, permissions, blockers (F-BROW-34).
 5. **Speed**: cache, script caching, engine snapshot (F-BROW-36).

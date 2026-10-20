@@ -49,7 +49,7 @@ anything here.
 
 ## 3. The design system (`fx.rs`)
 
-Everything takes the UI scale `s` (so Settings -> Display text size keeps working) and only draws. Click regions are only
+Everything takes the UI scale `s` (so Settings -> Display text size keeps working). `s` is `0.9 * (window / 1280x720)^0.3 * text size` (`shell::scale_for`): 0.9 at 1280x720 (body text 13 px), about 1.0 at 1920x1080 and 1.25 at 4K, so a bigger window gives more room and only gently bigger text, as on Ubuntu and macOS; no text is drawn under 10 px (`gfx::MIN_TEXT_PX`) and only draws. Click regions are only
 registered by the helpers that say so (`tab_strip`, `modal`), exactly as before, with the same labels.
 
 **Palette.** `CYAN`, `MAGENTA`, `PANEL`, `WELL (18,24,46)`, `AMBER`; `mix`, `with_alpha`, `over` (a translucent colour
@@ -92,6 +92,35 @@ focused).
 signal "live" with `CYAN` to `MAGENTA`. Animate only small things and only while something is happening; never request frames
 for decoration. The static background is cached; do not paint full-screen gradients per frame. Keep hit labels and keys when
 restyling. The editor's text area and the browser's page content stay as they are (legibility first).
+
+### SRE PILOT (demo)
+
+A demo page in the same language (`apps/srepilot.rs`): glass node cards with a glowing accent border, neon particles (cyan data,
+amber action, magenta notification, green feedback, red incident) moving along the edges, a side panel (`fx::panel`, sections,
+`kv_row`, a sparkline in a `well`), chips for DEMO and the modes, and a primary neon pill button ("Click To Schedule a Demo": filled
+cyan, dark text, glow that breathes while the page animates and grows on hover or keyboard focus). Its launcher tile wears the
+**DEMO ribbon** (`fx::demo_ribbon`: an amber pill straddling the tile's top edge; `launcher::is_demo` says which apps get it).
+The static layer (nodes, edges, or the scaled whiteboard photo) is drawn once per size and copied each frame; only particles,
+pulses and small texts are drawn per frame. The button's handler is the single function `schedule_demo()`; replace it when the
+real scheduling flow is decided.
+
+### AI IDE
+
+The AI IDE (`apps/ide.rs`, `ide_ui.rs`, `ide_layout.rs`, `ide_tree.rs`, `ide_bottom.rs`, `ide_k8s.rs`, `board.rs`; `docs/AI-IDE.md`) is the largest user of the
+design system: a workspace rail of round avatars with an activity dot (cyan working, amber waiting, green done, red error), a top bar of
+flat text buttons (`ide_chrome`: `flat_tab`, `icon_tab`, `icon_btn_glyph`, `text_btn`, `icon_btn`, `pane_head`, `tooltip`; sizes from `Metrics`, see Density in `docs/AI-IDE.md`), panes drawn with a glass frame (`fx::PANEL`, 6 px radius, a hairline in the workspace's accent that
+becomes a glow while the pane has the focus), flat underlined tabs for the main and bottom tabs, `fx::chip`, `fx::progress_bar`,
+`fx::ring_gauge`, `fx::table_header`, `fx::scrollbar`, `fx::modal` for the dialogs and `widgets::Form` / `Picker` for input. Every
+workspace has its own accent colour from a fixed list of eight, used for its frame, its rail ring and the board's highlights. The
+statuses of the board have fixed colours (planned blue, partial amber, done green, blocked red, deprecated grey, others magenta) and
+health dots in the cluster view use green, amber, red and grey. The embedded EDIT and CHAT apps draw into the pane rectangles
+unchanged; their click ids are moved into a range of their own (`ide::remap` / `decode`) so they never collide.
+
+Pictures for tabs and buttons come from `fx::glyph(g, Glyph, cx, cy, size, colour)`: 25 stroke-and-polygon drawings in a unit square
+(editor brackets, board columns, helm wheel, prompt, warning triangle, magnifier, folder, panel, bubble, play, check, open, the seven
+cluster kinds, refresh, namespace, cluster, registry, deploy, restart). They are drawn at 14-18 px (`ide_chrome::icon_size`, following the
+density), take the colour of the text beside them (lifted to 4.5:1 on the panel), need no font, and a row that does not fit with its text
+shows the pictures alone with the names as hover hints. Only the pane that owns the keyboard draws a blinking caret (`apps::with_caret`).
 
 ## 4. For the CHAT and MEDIA owners
 
@@ -170,4 +199,15 @@ slow before (it cloned every process and fitted kilobyte-long command lines); bo
 | media | 1.96* | 1.82 |
 
 `*` = measured with the app body unchanged and only the new backdrop/header (see above); pages of an app use their app's figure. Slowest screen now: 4.6 ms (limit 15). RADIO tabs and MEDIA pages are within 0.1 ms of their first screens. Measured on a busy shared machine (load average 6 to 20), so treat sub-millisecond differences as noise; a few small apps (USERS, CALENDAR, BROWSER) are now about 2 to 2.7 times their sub-millisecond old time, all under 5 ms.
+
+## STORE: trust badges
+
+The STORE tile (`apps/store.rs`) draws one badge per app, the same everywhere (rows, pages, publishers, the review dialog): a pill
+holding a shield and the level's name, in the level's colour, with a plain-words tooltip on hover and the same sentence under it on the
+app's page. Official = cyan (`fx::CYAN`), Verified = green, Trusted = blue, Community = amber, Unsigned = red outline (no fill),
+Revoked = red with a cross. The shield carries a tick for the three vouched-for levels, an exclamation mark for Community. Never
+colour a price or a state chip like a badge: prices are green (free) or amber (paid), state chips are green (installed), the accent
+(update), amber (locked), pink (DEMO). A button that cannot do anything yet (Buy) is drawn with `button_off` and has no click region.
+Pictures of apps are PNG or SVG sent by the publisher and drawn through `PicCache`; without one the tile shows the first letter on
+the type's colour.
 

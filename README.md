@@ -15,6 +15,36 @@
   <a href="docs/media/iyakki-tour.webp"><img src="docs/media/iyakki-tour.webp" alt="Animated tour of IYAKKI: sign-in, launcher, chat, media, radio, browser, editor, system and inbox" width="720"></a>
 </p>
 
+
+> **Status: alpha (0.1.0-alpha.1), 2026-10-19.** IYAKKI is a first public preview **for developers and testers, not for production**.
+> The desktop window and the QEMU virtual machine are the long-tested paths; the USB image has been booted on **one real computer, a
+> Mac mini 2018 (Macmini8,1, T2), and nowhere else** (its Wi-Fi and Bluetooth do not work yet); many features are partial
+> ([`FEATURES.md`](FEATURES.md)); data formats and upgrade paths are not promised to stay stable. The installer erases the whole drive you
+> pick: do not use it on a machine holding anything you cannot lose. Read [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md) first, and the [`RELEASE-NOTES-0.1.0-alpha.1.md`](RELEASE-NOTES-0.1.0-alpha.1.md).
+
+![The IYAKKI launcher](docs/media/shots/01-launcher.png)
+
+## Quick start
+
+| I want to... | Do this | Read |
+|---|---|---|
+| **Try it in 10 minutes** (Linux desktop) | `./run.sh window` (needs the Rust toolchain; first run asks you to create the administrator) | [`docs/INSTALL.md`](docs/INSTALL.md#1-window-mode-linux), then [`docs/QUICKSTART.md`](docs/QUICKSTART.md) |
+| **Boot it on a PC from a USB stick** | `cargo build --release -p iyakki-usb`, then `sudo target/release/iyakki-usb --install iyakki-install-x86_64.img` (pick the drive, type its name to confirm; **the stick is erased**); turn Secure Boot off | [`docs/INSTALL.md`](docs/INSTALL.md#2-usb-stick) |
+| **Run it in a virtual machine** | `./run.sh build` once (30-40 min), then `./run.sh vm` or `./run.sh vm-disk` (QEMU) | [`docs/INSTALL.md`](docs/INSTALL.md#4-virtual-machine) |
+| **Serve it in a browser / on Kubernetes** | `iyakki web`, or `kubectl apply -f dist/k3s-web.yaml` | [`docs/ADMIN-GUIDE.md`](docs/ADMIN-GUIDE.md#network-exposure) |
+
+Chat needs a model: **SETTINGS -> Models** (Ollama, OpenAI-compatible, OpenAI, OpenRouter, Anthropic, Gemini). Something wrong?
+[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) and [`docs/FAQ.md`](docs/FAQ.md).
+
+**All documentation** is listed in [`docs/INDEX.md`](docs/INDEX.md): start here ([`INSTALL`](docs/INSTALL.md),
+[`QUICKSTART`](docs/QUICKSTART.md)) · use ([`USER-GUIDE`](docs/USER-GUIDE.md), [`FAQ`](docs/FAQ.md)) · administer
+([`ADMIN-GUIDE`](docs/ADMIN-GUIDE.md), [`TROUBLESHOOTING`](docs/TROUBLESHOOTING.md)) · build and extend
+([`ARCHITECTURE`](docs/ARCHITECTURE.md), [`CONTRIBUTING`](CONTRIBUTING.md)) · release and legal
+([`CHANGELOG`](CHANGELOG.md), [`SECURITY`](SECURITY.md), [`SUPPORT`](SUPPORT.md), [`LICENSING`](LICENSING.md)).
+
+**Report an issue:** see [`CONTRIBUTING.md`](CONTRIBUTING.md#reporting-issues) and [`SUPPORT.md`](SUPPORT.md); security problems go to
+[`SECURITY.md`](SECURITY.md). Licence: [Apache-2.0](LICENSE). Community rules: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+
 ---
 
 ## The aim
@@ -31,7 +61,7 @@ program in a container, play music, flash a microcontroller — **without being 
   guest) and a policy: which apps, which folders, which network hosts, which tools, how many tokens. The assistant
   can never do more than the person it works for.
 * **Anything risky asks first.** Reading is free; writing a file, calling an API, running a program or starting a
-  container pauses for *Approve / Always / Deny*. No answer means deny. Every run is recorded in a tamper-evident ledger.
+  container pauses for *Allow once / Allow for this session / Deny*. No answer means deny. Every run is recorded in a tamper-evident ledger.
 * **Untrusted code runs in a sandbox.** Plugins, tools and model-generated code run in WebAssembly (wasmtime) with a
   fuel budget, a memory cap and capability tokens, or in a limited container, never with the system's own rights.
 * **It runs on your own machine.** It talks to the models *you* connect (Ollama on your network, or a cloud provider with
@@ -49,27 +79,37 @@ After signing in you get a launcher with tiles. Each tile is an app, locked or u
 
 **Look.** Every app shares one futuristic design language (dark glass cards, a cyan/magenta neon palette, an accent colour per app, small animated highlights only; set `IYAKKI_REDUCED_MOTION=1` to freeze them): the pieces live in `crates/iyakki-shell/src/fx.rs` and are described in `docs/DESIGN.md`.
 
-**Launcher groups.** The tiles are sorted into named groups shown as chips under the title: *All*, *Assistant* (CHAT, RAG, MCP, RUNS, SKILLS), *Web & Media* (BROWSER, RADIO, MEDIA), *Work* (CLI, EDIT, CALENDAR) and *System* (USERS, SETTINGS, NET SCAN, MESH, USAGE, SYSTEM); a group with nothing for your role is hidden. Click a chip or press Tab / Shift+Tab to switch; IYAKKI remembers your last group. When a group has more tiles than fit the window (it depends on the window and text size) the rest continue on the next page: PageUp/PageDown, the mouse wheel, the dots and arrows at the bottom, or simply arrow past the last tile. The number keys 1-9 still open the Nth app of the *All* list from any group.
+**Launcher groups.** The tiles are sorted into named groups shown as chips under the title: *All*, *Assistant* (CHAT, RAG, MCP, RUNS, SKILLS), *Web & Media* (BROWSER, RADIO, MEDIA, TALES), *Work* (CLI, EDIT, AI IDE, CALENDAR, DATA, DASH) and *System* (USERS, SETTINGS, NET SCAN, MESH, USAGE, SYSTEM, SRE PILOT, STORE); a group with nothing for your role is hidden. Click a chip or press Tab / Shift+Tab to switch; IYAKKI remembers your last group. When a group has more tiles than fit the window (it depends on the window and text size) the rest continue on the next page: PageUp/PageDown, the mouse wheel, the dots and arrows at the bottom, or simply arrow past the last tile. The number keys 1-9 still open the Nth app of the *All* list from any group.
 
 | Tile | What it is |
 |---|---|
-| **CHAT** | Talk to a model. Chats are saved with memory, shown as Markdown, listed in a side panel; the conversation is a timeline (your message in a box, tool calls with `IN`/`OUT`, answers as Markdown). With **agent mode** (Ctrl+G) the assistant can use tools (below), each call approved by you or auto-approved if it only reads, and can look things up: web search and page reading, weather, share prices, and the page you have open in the BROWSER (asked each time). **SVG drawings and images are rendered in the chat:** an `svg` block (or a `show_svg` / `show_image` tool call, or an image sent as a data address or base64) appears as a picture with Copy and Save buttons and the long code folded away. |
-| **RAG** | Search your documents (and external backends such as Qdrant/Chroma) with hybrid keyword + vector search; ask the model a question grounded in them, with citations. A Documents list lets you delete what you don't need. |
-| **MCP** | Connect to Model Context Protocol servers, browse and call their tools; add or remove servers. A sample server is included. |
-| **CLI** | Two tabs: a policy-checked **Terminal** (with `grep sed tr cut sort …`, pipes, `curl`, `date`, `calendar`, `alarm`) and **CLIs**, where administrators install kubectl, k3s, Helm, Terraform, GitHub/AWS/Google Cloud/Azure CLIs, Arduino CLI, esptool, espflash and Ollama (which it can also start as a local model server). Installed tools are available to the chat. |
-| **EDIT** | A code editor written in-house (11 languages highlighted, undo, find/replace, diff review). Chat can propose edits you accept or reject one by one. |
-| **BROWSER** | A browser written in-house: HTML + CSS, forms, cookies, images, a JavaScript engine (QuickJS in WebAssembly) with ES modules and Shadow DOM, tabs, find in page, text selection, zoom, bookmarks and history, downloads, saved sign-ins in your vault, cookies and site data kept in your vault, reader view (R), night colours (N), view source (U), drop-down lists, a disk cache, WebP/JPEG/PNG/GIF pictures, and an assistant you must say yes to each time (Q ask, S summarise, T translate, M keep in your knowledge), a Secure / Not secure mark. It is honest about what it cannot do yet (see `docs/BROWSER-ROADMAP.md`). |
-| **SKILLS** | Short Markdown instructions the assistant follows when a request matches; install signed skill packages after reading them. |
-| **CALENDAR** | Month calendar, events with repeats and reminders, a clock with alarms that ring anywhere in the system. The chat reads it and plans in it. |
-| **INBOX** | The bell at the top of every screen (or F9): Notifications (reminders that rang, finished runs, new devices; read, flag, snooze, add to the calendar), Tasks (pending, doing, done; assistants can add to-dos) and Approvals (approve or reject each waiting tool call, one at a time, from any app). |
-| **RADIO** | Internet radio in 80 languages, pause/play, level display, your own stations. The chat can find and play stations too ("play a tamil online fm": built-in lists plus the online Radio Browser directory). |
-| **MEDIA** | Your music, videos and pictures from the folders your account may read, in a futuristic player: tracks, artists, albums, videos, photos, playlists, **types** (kuthu, melody, beats, ...) and top rated; search in plain words ("kutthu song", "melody by anirudh above 4 stars"), star ratings, your own tags, a **download queue** (add addresses with `D`: free-text categories with example chips, the folder chosen by file type, two downloads at a time, a Downloads page with status, retry and cancel, kept across restarts), and three built-in CC0 samples (a melody, a kuthu-style beat and a short video) in a read-only "IYAKKI samples" folder. MP3 plays inside IYAKKI (the in-house decoder of RADIO); other audio and video play in an installed player (mpv, VLC, ffplay or mplayer), and on the `web` image a video plays inside the MEDIA page through the embedded web engine (WebM VP9/Opus). |
-| **USAGE** | Token usage per model as a chart (day, week, month, 3 months, year). |
-| **SYSTEM** | What the machine is doing: processor, memory, load, disks, network; the process list (administrators can stop or kill one); every agent run going on now, which you can stop. `iyakki top` shows the same in a terminal. |
-| **NET SCAN** | Finds Ollama servers, cameras and other services on your network; one click adds an Ollama server to Models and the vault. |
-| **MESH** | Consul service view. |
-| **RUNS** | History of every agent run, verified against its hash-chained ledger. |
-| **USERS / SETTINGS** | Accounts, roles, per-user policy and budgets; models, vaults, voice, network, display, sound, storage. |
+| **CHAT** | Talk to a model; agent mode (`Ctrl+G`) lets it use tools, each risky call asks first; web research, your browser tab, SVG and images in answers |
+| **RAG** | Search your documents (and Qdrant/Chroma) and ask questions grounded in them, with citations |
+| **MCP** | Connect Model Context Protocol servers and call their tools |
+| **CLI** | A policy-checked terminal, and a catalogue to install kubectl, k3s, Helm, Terraform, cloud CLIs, Ollama, DuckDB, Claude Code and more |
+| **EDIT** | In-house code editor (11 languages); the assistant proposes edits you accept one by one |
+| **RUNS** | History of every agent run, verified against its hash-chained ledger |
+| **USERS** | Accounts, roles, per-user limits and the audit log (administrators) |
+| **SETTINGS** | Models, agents, vault, voice, network, display, sound, storage, dev cluster, host access, account |
+| **BROWSER** | In-house browser (HTML, CSS, JavaScript) plus an optional full WebKit engine; the assistant can use it only with your consent |
+| **RADIO** | Internet radio in many languages and your own stations |
+| **SKILLS** | Markdown instructions the assistant follows; install signed packages after reading them |
+| **NET SCAN** | Find Ollama servers, cameras and other services on your network |
+| **MESH** | Consul service view |
+| **USAGE** | Token usage per model as a chart |
+| **SYSTEM** | Load, memory, disks, processes and every agent run in progress |
+| **CALENDAR** | Events, reminders and alarms that ring anywhere in the system |
+| **MEDIA** | Music, videos and pictures with plain-words search, ratings, playlists and a download queue |
+| **SRE PILOT** (demo) | Animated site-reliability assistant with sample data; nothing is connected |
+| **AI IDE** | One workspace per product: editor, terminal, feature board, Browser tab, Kubernetes view and approved Deploy flow |
+| **DATA** | Open CSV/TSV/JSON-lines tables of any size, sort, filter, summarise, export |
+| **TALES** | AI story teller: a conversation beside the story, automatic pictures, versions, reads aloud |
+| **STORE** | Find, install and remove skills, tools, MCP servers, themes, driver packs; every app wears a trust badge; a Store switcher and your own private store |
+| **DASH** | Dashboards over Prometheus, Elasticsearch/OpenSearch, ClickHouse and DuckDB, read-only, with an assistant |
+| **FLOWS** | Design, schedule and watch workflows; the assistant examines failed runs and proposes fixes you approve |
+| **INBOX** | Not a tile: the bell (or `F9`) with notifications, tasks and approvals |
+
+Every tile, its keys and its limits: [`docs/USER-GUIDE.md`](docs/USER-GUIDE.md). Long descriptions of the larger ones follow under *Features in more detail*.
 
 **What the assistant can do in agent mode** (each tool is gated by your policy; the risky ones ask first):
 read files and search your documents · look things up on the web (`web_search`, `web_fetch`), the weather (`weather`, Open-Meteo) and share prices (`stock_quote`), all with sources and never from memory, and read the page open in your browser (`browser_page`, asks every time) · call web APIs (`http_request`) · run read-only text commands (`terminal`) ·
@@ -212,7 +252,7 @@ flowchart TB
   CH -->|tool call| GATE{"Policy check<br/>apps · folders · hosts · budget"}
   GATE -->|denied| X["refused and audited"]
   GATE -->|read-only| RUN
-  GATE -->|risky| ASK{"You decide<br/>Approve · Always · Deny"}
+  GATE -->|risky| ASK{"You decide<br/>Allow once · Allow for this session · Deny"}
   ASK -->|deny / no answer| X
   ASK -->|approve| RUN["Run the tool"]
 
@@ -308,7 +348,7 @@ The reason this works is the boundary above: IYAKKI uses the kernel ABI, a short
 kernel command-line options and two folders of its own, and **nothing else** — a test enforces it. Boot-only work
 (mounting, loading drivers, rebooting) happens only when IYAKKI really is PID 1, so on any other base it simply does not run.
 
-*Honest status:* the Buildroot image (in QEMU) and a Linux desktop are the long-tested paths. The static program has also been
+*Honest status:* the Buildroot image (in QEMU, and on one Mac mini 2018) and a Linux desktop are the tested paths. The static program has also been
 run as an ordinary program on **Alpine, Debian, Ubuntu, Fedora and Arch Linux** (containers: `dist/test-bases.sh`) and as a
 hardened service on a real systemd (`dist/systemd/iyakki.service`); the framebuffer desktop, driver loading and the container
 cluster are what a distribution still has to arrange itself. The checklist for swapping the base is in
@@ -349,7 +389,7 @@ flowchart LR
 | Where | How | What you get | Status |
 |---|---|---|---|
 | **Desktop window** | `./run.sh window` | The full shell with every tile, on your real network and files | Works; the fastest way to try it |
-| **Bare metal** | Build the ISO, write it to a USB stick (`docs/BOOT-TEST.md`) | The full shell on a framebuffer, IYAKKI as PID 1, driver autoload, its own k3s for running code | Booted in QEMU (BIOS and UEFI); real hardware still to be tested. (A Mac mini cannot boot from USB; use the VM row.) |
+| **Bare metal** | Build the ISO, write it to a USB stick (`docs/BOOT-TEST.md`) | The full shell on a framebuffer, IYAKKI as PID 1, driver autoload, its own k3s for running code | Booted in QEMU (BIOS and UEFI) and on one Mac mini 2018 (T2) from a USB SSD (2026-10-18/19; Wi-Fi and Bluetooth not working there); other real hardware still to be tested. (Intel Macs boot USB sticks through the firmware's own boot picker, the Option key; what then works, and the Mac mini 2014 test list, are in `docs/MAC-HARDWARE.md`. Apple Silicon Macs: use the VM row.) |
 | **Virtual machine** | `./run.sh vm`, `vm-direct`, `vm-disk`, `vm-arm` (ARM64 as on Apple Silicon); see `docs/LOCAL-TEST.md` | The same as bare metal | Works in QEMU |
 | **Docker** | `docker build -f dist/Dockerfile -t iyakki:0.1.0 .` | A tiny `scratch` image running the supervisor (`iyakki serve`) as an unprivileged user: WebAssembly sandbox, capability tokens, ledger, CLI; with `IYAKKI_WEB=1` also the whole desktop in a browser | Image and manifest written; the manifest passes `kubectl --dry-run` |
 | **Local K3s** | Load the image, `kubectl apply -f dist/k3s-manifest.yaml` | One supervisor per node (a DaemonSet), hardened (non-root, read-only root, all capabilities dropped, seccomp), joined into a LAN swarm that runs WebAssembly tasks on its peers | Same status as Docker |
@@ -382,6 +422,8 @@ on the browser's. Tried with Chrome, in Docker and on a local K3s; **not yet tri
 
 ## Documentation map
 
+The full, grouped map is [`docs/INDEX.md`](docs/INDEX.md). The core files:
+
 | File | Read it for |
 |---|---|
 | [`BOUNDARY.md`](BOUNDARY.md) | Every place our code touches the base OS, and the rules |
@@ -390,17 +432,37 @@ on the browser's. Tried with Chrome, in Docker and on a local K3s; **not yet tri
 | [`Agent OS Architecture Specification.md`](Agent%20OS%20Architecture%20Specification.md) | The original design and roadmap |
 | [`docs/LOCAL-TEST.md`](docs/LOCAL-TEST.md) · [`docs/BOOT-TEST.md`](docs/BOOT-TEST.md) | Trying it on this computer, then on real hardware |
 | [`docs/BROWSER-ROADMAP.md`](docs/BROWSER-ROADMAP.md) | What the browser can't do yet |
+| [`docs/BROWSER-AGENT.md`](docs/BROWSER-AGENT.md) | The assistant in your browser: consent, threat model, the test runner and spec format |
 | [`docs/OTHER-BASES.md`](docs/OTHER-BASES.md) | Running IYAKKI on another base OS (distributions, systemd) and swapping the Buildroot base |
 | [`docs/MACOS.md`](docs/MACOS.md) | IYAKKI on a Mac: the window, Ollama on the Mac, and a VM |
+| [`docs/MAC-HARDWARE.md`](docs/MAC-HARDWARE.md) | IYAKKI on Mac hardware: what works per model, driver packs in the Store, the Mac image variant, the Mac mini 2014 test checklist |
 | [`docs/MEDIA-SEARCH.md`](docs/MEDIA-SEARCH.md) | The media catalog index, the search grammar, downloads, and keeping credentials in vaults |
+| [`docs/MEDIA-PLAYER.md`](docs/MEDIA-PLAYER.md) | IYAKKI's own video and sound player (ffmpeg decodes), installing ffmpeg, controls, what the image options do |
+| [`docs/STORY.md`](docs/STORY.md) | The TALES story teller: the prompt and its safety rules, reading aloud, the library, and what the image needs for speech |
+| [`docs/VOICE.md`](docs/VOICE.md) | Reading aloud with no setup: the speech engines found on the computer, the browser voice and the voice helper, what is GPL and not shipped, bare-metal options |
+| [`docs/CLI-SSH.md`](docs/CLI-SSH.md) | The SSH client in the CLI tile: host keys, vault keys, saved connections, rules for the assistant |
+| [`docs/JOBS.md`](docs/JOBS.md) | Detached jobs: long commands that outlive the chat, the Jobs strip, `job_start` for the assistant and Claude Code |
+| [`docs/PLATFORM-SERVICES.md`](docs/PLATFORM-SERVICES.md) | Gitea and the private store deployed into a k3s cluster you pick, with an approved plan |
+| [`docs/STORE.md`](docs/STORE.md) · [`docs/APP-AUTHORING.md`](docs/APP-AUTHORING.md) | Signed packages, the private store, several stores and the portal; making and publishing apps |
+| [`docs/ZRAM-AND-INSTALL.md`](docs/ZRAM-AND-INSTALL.md) · [`docs/HARDWARE.md`](docs/HARDWARE.md) | Compressed swap and the on-device installer; which machines run it |
+| [`docs/OWNER-CHECKLIST.md`](docs/OWNER-CHECKLIST.md) · [`ALPHA-GATE.md`](ALPHA-GATE.md) | What the owner must do before tagging; the release gate with evidence |
+| [`docs/DASHBOARD.md`](docs/DASHBOARD.md) | The DASH tile: connectors, the security model, how to add a connector, why DuckDB runs as a command |
 
 ## Features in more detail
+
+* **New in the alpha.** **Jobs**: slow commands run detached, with a Jobs strip (progress, Log, Stop) and an inbox note when they end.
+  **Approvals**: Allow once / Allow for this session / Deny, and the modes *Ask first*, *Auto-approve safe* and *Autopilot* (`Ctrl+Q`).
+  **TALES** is a conversation: a chat panel beside the story, corrections in words with saved versions, automatic pictures (real
+  images, SVG, or a built-in cartoon composer), reading aloud with the speech engines the computer already has or the browser's voice
+  (Settings, Voice). **STORE** has a Store switcher, *Add a store* from a portal link, and a private store you can run in your own cluster
+  (**platform services**: Settings, Dev cluster, Platform services; also Gitea). Message boxes take 20,000 characters. zram swap and an
+  on-device installer (Settings, System). All new, all tested with fakes: see KNOWN-ISSUES.md.
 
 * **Chat sessions with memory.** Every chat is saved and listed in a side panel (hide/show with `Ctrl+W`). A chat opens on
   its last three days (up to 1000 messages) and older messages load as you scroll up. Each finished exchange is indexed in a
   private knowledge-base namespace, so only a recent window goes to the model verbatim and older turns come back *by
   relevance*. Every chat has its own work folder; deleting a chat deletes its memory, runs and files.
-* **Agent mode** (`Ctrl+G`). Risky tools pause for Approve / Always / Deny. Every run is recorded in RUNS with a
+* **Agent mode** (`Ctrl+G`). Risky tools pause for Allow once / Allow for this session / Deny. Every run is recorded in RUNS with a
   hash-chained ledger that detects tampering. Tool calls are also logged for three days (`toollog`).
 * **Budgets per run** (USERS → `b`): tokens, seconds, files written and cost. Tokens are the provider's own counts when it reports them (OpenAI-style, Anthropic, Gemini, Ollama) and an estimate
   (about four characters each) otherwise; the USAGE tile charts them.
@@ -465,6 +527,11 @@ on the browser's. Tried with Chrome, in Docker and on a local K3s; **not yet tri
 | `iyakki-sec` | roles and policy, unforgeable revocable capability tokens |
 | `iyakki-ledger` | hash-chained execution ledger, time-travel to any recorded call |
 | `iyakki-mem` | L1 registers / L2 scratchpad / L3 vector store, with paging |
+| `iyakki-data` | table service behind DATA (CSV/TSV/JSON lines, pipelines, built-in and Polars engines) |
+| `iyakki-flow` | workflow engine behind FLOWS (scheduler, retries, healing, versions; no UI or network) |
+| `iyakki-drivers` | driver packs: hardware detection, firmware placement, kernel-module checks |
+| `iyakki-webview` | shell side of the optional full web engine helper |
+| `iyakki-zram` · `iyakki-relcheck` | memory tuning (zram swap) · repository release checks |
 | `iyakki-hw` | mic and camera bridges into WASM guests (`audio`, `video` features) |
 | `iyakki-shell` | login, role-aware launcher and all the apps; draws to a framebuffer, a window or a PNG |
 | `iyakki-agent` | model providers, knowledge base (BM25 + vector), external RAG, vaults, settings, MCP client, tools, calendar, skills and packages, CLI manager, container cluster, radio, usage |
@@ -505,35 +572,42 @@ audio, UVC cameras, TPM, watchdog, RTC and VM guest drivers. Ethernet and a WiFi
 ## Status
 
 Everything listed in `FEATURES.md` as *done* has unit tests; the file is checked by a test, so a row cannot claim a
-test that does not exist. At the time of writing: **165 features done, 57 partial, 46 planned**.
+test that does not exist. At the time of writing: **286 features done, 204 partial, 59 planned**.
 
 **Verified in this repo**
-* `cargo test --workspace` (990+ tests), licence audit for both workspaces (`cargo deny`), the third-party licence file
+* `cargo test --workspace` (3,845 tests passed on 2026-10-18), licence audit for both workspaces (`cargo deny`), the third-party licence file
   (`cargo about`).
 * The x86-64 ISO and the ARM64 disk image were built, and booted in QEMU (BIOS and UEFI): kernel, `iyakki` as PID 1, driver
   autoload, DHCP, a sandboxed WASM guest, clean power-off, a data volume that survives a reboot
   (`dist/buildroot/qemu-test.sh`, `qemu-persist-test.sh`). Power-on to the sign-in screen: about 1.6 s in QEMU
   (`dist/buildroot/boot-time.py`).
+* On real hardware (one machine, a Mac mini 2018, Macmini8,1, T2, 2026-10-18/19): booting the install image from a USB SSD, persistent
+  `/home`, HDMI and built-in audio, a USB webcam, the k3s dev cluster and Quick install, Claude Code and Copilot CLI sign-in, and the full web
+  engine opening Google and YouTube (VP9 video plays).
+* Last full `cargo test --workspace` (2026-10-18): 3,845 passed, 0 failed, 59 ignored; a final run precedes the tag.
 * Against the real services: Ollama (list, chat, pulling a model, and installing and starting the real server), all eleven CLI
   tools from their vendors with checksums, a real k3s cluster running sandboxed code with its limits (in a privileged
   container and on the booted image), the Docker image on a real K3s, the browser front end in a real Chrome.
 * The static program on Alpine, Debian, Ubuntu, Fedora and Arch containers, and as a hardened systemd service.
 
 **Not verified**
-* Real hardware beyond QEMU: WiFi association (the join logic is tested with stand-ins), real NICs, microphone/camera capture,
-  touch, GPUs, and booting on real PCs (`docs/BOOT-TEST.md` is the guide for that).
+* Real hardware other than that one Mac mini: booting on any PC or other Mac (`docs/BOOT-TEST.md` is the guide), touch, other GPUs. Wi-Fi
+  and Bluetooth of the Mac mini do not work yet (Apple's firmware and the `BCM.hcd` patch file are missing); no Wi-Fi association has
+  happened on any real access point. Secure Boot is verified in QEMU only; the T2 MacBook Pro 2019 patches were never booted; Apple Silicon is a VM only.
 * Live calls to OpenAI, Anthropic and Gemini (needs keys); picture generation (Ollama's image models run only on macOS);
-  sound output; the ARM64 cluster and CLI installs.
-* The `hw` image (firmware blobs) was never built or booted. The desktop window on a Mac (`docs/MACOS.md`).
+  Copilot full tool use, Autopilot with external agents, Developer mode and tile-app publishing beyond loopback; the ARM64 cluster and CLI installs.
+* Platform services (Gitea, the private store), jobs, voice engines and TALES pictures: fakes and scripted stand-ins only, never a real cluster, speaker or picture model (`KNOWN-ISSUES.md`).
+* The `hw` image (firmware blobs) was never booted. The desktop window on a Mac (`docs/MACOS.md`).
 
 **Known gaps**
-* Browser: no video decoding in pages, no WebP/SVG pictures, no canvas, no IndexedDB, no PDF viewer; Chinese, Japanese,
-  Korean and emoji text shows as boxes (Indic, Arabic and Hebrew scripts are shown). YouTube/TikTok-style sites do not work.
+* Browser: no video decoding in the built-in engine; the full web engine (web and macweb images) plays YouTube (VP9/Opus) but not H.264/AAC
+  video such as TikTok's (not shipped on purpose: patent policy). The built-in engine has no canvas, no IndexedDB, no PDF viewer; Chinese, Japanese,
+  Korean and emoji text shows as boxes (Indic, Arabic and Hebrew scripts are shown).
   Details in `docs/BROWSER-ROADMAP.md`.
-* Radio plays MP3 only. Chat and RAG answers are drawn as Markdown, but images in answers are not.
+* Radio plays MP3 only.
 * Size: the libre ISO is about 60 MB; the spec's 30 MB / 100 ms targets are not met for the all-hardware image.
 * No direct DRM/KMS renderer (the window uses eframe on Wayland/X11, so the screen resolution cannot be chosen); no copy-on-write
-  snapshots; a built-in cosine store instead of LanceDB/Qdrant; no Bluetooth userland.
+  snapshots; a built-in cosine store instead of LanceDB/Qdrant; no Bluetooth userland (Bluetooth does not work on the Mac mini 2018 yet).
 
 ## Licence
 

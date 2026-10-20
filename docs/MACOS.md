@@ -3,7 +3,7 @@
 Three ways, from least to most work. Models run best in **Ollama on the Mac itself** (it uses the GPU through Metal and the
 Mac's unified memory); IYAKKI then talks to it over the network.
 
-## 1. The desktop window, natively on macOS  (status: written for, not yet tried)
+## 1. The desktop window, natively on macOS  (status: compiles for macOS, not yet run on a Mac)
 
 ```
 xcode-select --install                                   # compiler and linker
@@ -13,6 +13,17 @@ curl https://sh.rustup.rs -sSf | sh                      # Rust
 
 The window shows only **virtual disks** (files IYAKKI makes in `~/.local/share/iyakki-dev/disks`, `./run.sh disk add 8G`), never
 your Mac's drives, and keeps its accounts and settings in `~/.local/share/iyakki-dev`.
+
+**What is checked.** `./run.sh check-macos` (`dist/release/check-macos.sh`, also a WARN row "macOS cross-check" in `./run.sh alpha-check`)
+runs `cargo check` for `aarch64-apple-darwin` (and `x86_64-apple-darwin` when that Rust target is installed) on the agent, the shell, the
+core (window feature set and default set) and the window binary `iyakki-desktop`. That proves the code *compiles* for macOS; nothing is
+linked or started, so it says nothing about behaviour. The Linux-only pieces are fenced with `cfg(target_os = "linux")` and have a stub that
+answers "not available on this OS": mounts, `reboot`/`power off` and the RAM-root jail for k3s (`boot.rs`, `cluster.rs`), changing a network
+link (`iyakki-devctl`). Job and window-lock liveness use `ps`/`kill(pid, 0)` instead of `/proc`. The framebuffer and evdev readers
+compile everywhere but find no `/dev/fb0` or `/dev/input` on a Mac, so they stay unused in the window.
+
+**Bare-metal drivers are Linux only** (framebuffer, evdev, GPU/Wi-Fi/audio drivers, boot as init, data-disk mounting, zram/swap). On a Mac the
+story is the window (and Ollama), not booting IYAKKI; for the Mac mini 2014 booting from a stick see `MAC-HARDWARE.md`.
 
 What is expected to work: every tile that is plain code (chat, RAG, editor, browser, calendar, usage, skills, MCP). What is Linux-specific and must degrade cleanly, and has **not been run on a Mac**:
 
@@ -33,7 +44,9 @@ listed in `BOUNDARY.md`.
 4. Pictures: Ollama's image models (for example `x/z-image-turbo`, `x/flux2-klein`) only run on macOS today, so this is also the
    way to use `generate_image` from the chat.
 
-NET SCAN finds Ollama servers elsewhere on your network too.
+NET SCAN finds Ollama servers elsewhere on your network too. AMD's Lemonade Server is Windows/Linux software for Ryzen AI machines,
+so it does not run on a Mac; a Lemonade on another machine is found by NET SCAN or added with the Auto-detect type (see
+`ADMIN-GUIDE.md`, *Lemonade*).
 
 ## 3. IYAKKI in a virtual machine on the Mac
 

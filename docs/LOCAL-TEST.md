@@ -11,7 +11,7 @@ you take them to real hardware (an Apple Silicon Mac, an older Mac, an AMD PC).
 | Measure boot time | `QEMU="sudo qemu-system-x86_64" python3 dist/buildroot/boot-time.py` | Power-on to the sign-in screen in QEMU (3 runs, medians); the first baseline is in FEATURES.md F-BOOT-03. |
 | Try the program on other distributions | `dist/test-bases.sh` | Alpine, Debian, Ubuntu, Fedora and Arch containers: starts, runs a guest, serves the browser page, signs in. |
 | Prepare a release | `./run.sh release 0.1.0` | Copies the built images to `target/release-0.1.0/`, writes `SHA256SUMS`, signs it, writes the download page. |
-| Boot the real system (kernel, init, boot screen) | `./run.sh vm-direct` | Skips GRUB. Add `--ssh` to log in with `ssh -i ~/.ssh/afos_diag -p 2222 root@127.0.0.1`. |
+| Boot the real system (kernel, init, boot screen) | `./run.sh vm-direct` | Skips GRUB. Add `--ssh` to log in with `ssh -i ~/.ssh/iyakki_diag -p 2222 root@127.0.0.1`. |
 | Boot it like the USB stick (GRUB, data partition) | `./run.sh vm-disk` | A 4 GB virtual disk made by the same writer as the stick. The account you create is kept between runs. `--uefi` for UEFI. `./run.sh vm-reset` starts over. |
 | Boot the ARM64 build (Apple Silicon VM path) | `./run.sh vm-arm` | Emulated, so slow; first run `./run.sh build-arm` (long, once). |
 | Look at every screen as pictures | `./run.sh screens` | PNG files in `/tmp/iyakki-screens`. |

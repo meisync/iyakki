@@ -29,7 +29,7 @@ red erase warning, requires you to type the drive's name, and reads the stick ba
 Rufus in **DD Image mode** or balenaEtcher for now (F-PKG-07). Manual fallback: `sudo dd if=rootfs.iso9660 of=/dev/sdX bs=4M conv=fsync status=progress`
 (check the device with `lsblk` first).
 
-**Firmware settings.** Turn **Secure Boot off** (IYAKKI images are not signed yet: F-BOOT-02). Legacy/CSM or
+**Firmware settings.** Turn **Secure Boot off** (or use an image the owner signed and enrol its key once: `docs/SECURE-BOOT.md`). Legacy/CSM or
 UEFI both work. Open the one-time boot menu (usually F12, F10, F8 or Esc) and pick the USB stick.
 
 **Boot menu.** Choose **"IYAKKI - hardware check (keyboard, mouse, touch, display)"** first.
@@ -65,7 +65,7 @@ that cable first and look in the USB section for the monitor. IYAKKI reads singl
 
 | Symptom | Try |
 |---|---|
-| "Security Violation" or the stick is ignored | Secure Boot is on: turn it off. |
+| "Security Violation" or the stick is ignored | Secure Boot is on: turn it off, or enrol the key of a signed image (`docs/SECURE-BOOT.md`). |
 | Black screen after the menu | the "safe graphics" entry; then tell me the machine model and GPU. |
 | No keyboard or mouse | another USB port (some ports sit behind a hub); note the report's USB list. |
 | No WiFi | expected: the libre image has no firmware blobs (F-PKG-04). Use Ethernet or a USB tether. |
@@ -119,3 +119,23 @@ Hardware compatibility results feed F-BOOT-01 in `FEATURES.md`.
 boot screen is up and checks that the logo, the name, the progress bar and the galaxy are drawn, that the picture
 moves, and that pressing `L` shows the loading log. It saves the pictures and prints where. Without QEMU,
 `cargo run --release -p iyakki-shell --example splashshot <dir>` writes pictures of the same screen at several sizes.
+
+`sudo python3 dist/buildroot/qemu-splash-test.py --boot target/buildroot-mac <dir>` boots the ISO's normal GRUB entry
+(BIOS, then UEFI with OVMF) and takes a screenshot every ~200 ms from the GRUB menu to the sign-in screen, sorting each
+into GRUB menu, logo (GRUB loading the kernel), black, GRUB's terminal box, boot screen (logo + progress bar) or shell. It
+fails when no boot screen comes between GRUB and the shell, or when anything else shows once the boot screen has
+appeared. `INITRD=` boots another initrd (for example the image's `rootfs.cpio.zst` with a cpio holding a newly built
+`usr/bin/iyakki` appended), `GRUB_FROM_REPO=1` uses this checkout's `grub.cfg` and theme, `GFXMODE=1920x1080` picks the
+Mac mini's screen size, and `SPLASH_MIN=4` keeps the boot screen up for 4 s (a VM starts too fast to see it otherwise).
+
+First-start timing without the Mac: make a sparse 900 GB disk with one GPT partition named `IYAKKI-DATA`, write the image's `data-marker.img` at its first sector (a copy, never a real drive), attach it with `-device usb-storage`, boot `bzImage` with `-initrd` set to `rootfs.cpio.zst` followed by a zstd-compressed cpio holding the new `usr/bin/iyakki` (a plain cpio after the zst file is refused by the kernel), `loglevel=7 printk.devkmsg=on`, and read `data: first boot, formatted ... in N ms`, `data: mount took`, `boot: shell environment took` and `shell: first picture` in the serial log. QEMU's USB, entropy and CPU load differ from a Mac (add `-device virtio-rng-pci` to see the random-pool effect); use the numbers to compare two binaries, not as Mac times.
+
+![GRUB menu](media/shots/boot-grub.png) ![Boot screen](media/shots/boot-splash.png) ![Sign-in](media/shots/boot-shell.png)
+
+## Secure Boot in QEMU
+
+`dist/buildroot/secureboot-testkit.sh KIT` builds a small test kernel (with the Secure Boot options and patch) and a test module;
+`dist/buildroot/qemu-secureboot-test.py --kit KIT --buildroot target/buildroot-mac` makes throwaway keys, stages the real GRUB, `grub.cfg`,
+shim and MokManager, and boots six scenarios under OVMF's Secure Boot firmware (off, enrolled, wrong key, nothing enrolled, unsigned files,
+enrolment through MokManager by key presses). Needs qemu, OVMF 4M files, sbsign, busybox (static), cpio and `virt-fw-vars`
+(`pip install virt-firmware` in a venv; test only). Details and results: `docs/SECURE-BOOT.md`.
