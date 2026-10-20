@@ -31,13 +31,28 @@ pub struct Raw {
     pub value: i32,
 }
 
+#[cfg(target_os = "linux")]
+use libc::input_event as InputEvent;
+
+/// macOS has no evdev and `libc` has no `input_event` there; the record is the kernel's 64-bit layout so the parser (and its
+/// tests) build everywhere.
+#[cfg(not(target_os = "linux"))]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct InputEvent {
+    time: libc::timeval,
+    type_: u16,
+    code: u16,
+    value: i32,
+}
+
 /// Parse a buffer of `struct input_event` records (layout of the running platform).
 pub fn parse_events(buf: &[u8]) -> Vec<Raw> {
-    let sz = std::mem::size_of::<libc::input_event>();
+    let sz = std::mem::size_of::<InputEvent>();
     buf.chunks_exact(sz)
         .map(|c| {
             // SAFETY: `c` is exactly size_of::<input_event>() bytes; input_event is plain old data.
-            let ev: libc::input_event = unsafe { std::ptr::read_unaligned(c.as_ptr().cast()) };
+            let ev: InputEvent = unsafe { std::ptr::read_unaligned(c.as_ptr().cast()) };
             Raw { typ: ev.type_, code: ev.code, value: ev.value }
         })
         .collect()
@@ -310,6 +325,53 @@ pub fn scan_devices(open: &mut Vec<Device>) {
     }
 }
 
+/// Scans for input devices on a thread of its own and hands over the ones it finds. Opening an event device the kernel is still
+/// setting up can block for seconds at boot (5.3 s seen on a Mac mini 2018): a screen that animates must not wait for it.
+pub struct BackgroundScan {
+    found: std::sync::Arc<std::sync::Mutex<Vec<Device>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl BackgroundScan {
+    pub fn start() -> BackgroundScan {
+        use std::sync::atomic::Ordering::Relaxed;
+        let found = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (f, s) = (found.clone(), stop.clone());
+        let _ = std::thread::Builder::new().name("iyakki-input-scan".into()).spawn(move || {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            while !s.load(Relaxed) {
+                let mut tmp = Vec::new();
+                scan_devices(&mut tmp);
+                let fresh: Vec<Device> = tmp.into_iter().filter(|d| seen.insert(d.path.clone())).collect();
+                if !fresh.is_empty() {
+                    f.lock().unwrap_or_else(|p| p.into_inner()).extend(fresh);
+                }
+                for _ in 0..20 {
+                    if s.load(Relaxed) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        });
+        BackgroundScan { found, stop }
+    }
+
+    /// Move the devices found since the last call into `into` (never waits: when the scan thread holds the list, next time).
+    pub fn take_into(&self, into: &mut Vec<Device>) {
+        if let Ok(mut g) = self.found.try_lock() {
+            into.append(&mut g);
+        }
+    }
+}
+
+impl Drop for BackgroundScan {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Wait up to `timeout_ms` for input, then read everything available. Dead devices are dropped.
 pub fn poll_devices(devs: &mut Vec<Device>, timeout_ms: i32) -> Vec<(Raw, Option<(i32, i32)>)> {
     let mut out = Vec::new();
@@ -345,6 +407,20 @@ pub fn poll_devices(devs: &mut Vec<Device>, timeout_ms: i32) -> Vec<(Raw, Option
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_background_scan_never_makes_the_caller_wait_and_stops_when_dropped() {
+        let t = std::time::Instant::now();
+        let scan = BackgroundScan::start();
+        let mut devs = Vec::new();
+        scan.take_into(&mut devs); // returns at once, whatever the scan thread is doing
+        assert!(t.elapsed() < std::time::Duration::from_millis(200), "starting and taking must not wait for the scan");
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        scan.take_into(&mut devs); // what was found (maybe nothing on a build machine) arrives without waiting
+        let stop = scan.stop.clone();
+        drop(scan);
+        assert!(stop.load(std::sync::atomic::Ordering::Relaxed), "dropping the handle tells the scan thread to stop");
+    }
+
     use super::*;
 
     #[test]
@@ -475,10 +551,10 @@ mod tests {
 
     #[test]
     fn parses_raw_input_event_records() {
-        let sz = std::mem::size_of::<libc::input_event>();
+        let sz = std::mem::size_of::<InputEvent>();
         let mut buf = vec![0u8; sz * 2];
         for (i, (t, c, v)) in [(EV_KEY, 30u16, 1i32), (EV_REL, 0, -7)].iter().enumerate() {
-            let ev = libc::input_event { time: libc::timeval { tv_sec: 1, tv_usec: 2 }, type_: *t, code: *c, value: *v };
+            let ev = InputEvent { time: libc::timeval { tv_sec: 1, tv_usec: 2 }, type_: *t, code: *c, value: *v };
             // SAFETY: writing a POD struct into a byte buffer of sufficient size.
             unsafe { std::ptr::write_unaligned(buf[i * sz..].as_mut_ptr().cast(), ev) };
         }

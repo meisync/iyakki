@@ -2,13 +2,16 @@
 //! devices, downloads, warnings: read, flag, snooze, add to the calendar), **Tasks** (a small to-do list the assistants can
 //! add to: pending, doing, done) and **Approvals** (tool calls that agent runs are waiting to do: approve or reject each one
 //! on its own, from whichever app started the run). Opened from the bell at the top of every screen or with F9.
-//! Approvals are never bundled: there is no "approve all".
+//! Approvals are never bundled: there is no "approve all" for tool calls. (The one exception is the person's own choice for the
+//! assistant in their browser: "Approve all actions on <site> for this session", asked as a question of its own; see
+//! `browser_consent.rs` and docs/BROWSER-AGENT.md.)
 
 use iyakki_agent::calendar::{parse_local, Repeat};
 use iyakki_agent::clock::Zone;
 use iyakki_agent::inbox::{Kind, Notification, Priority, Status, Task, TaskPatch, TaskSort};
 use iyakki_agent::runs::PendingApproval;
 
+use super::browser_consent::{row_summary, ConsentDialog};
 use super::widgets::{render_confirm, Form, FormEvent};
 use super::{blink, App, AppCx, Flow};
 use crate::gfx::{rgb, Face, Gfx, Icon};
@@ -62,6 +65,8 @@ enum Mode {
     Confirm(String, Confirmed),
     /// The assistant asked for a secret: the private form, and the request it answers.
     Secret(Form, String),
+    /// A question about the assistant in the person's browser (look at a site, act on it, one action, a hand-over).
+    Browser(ConsentDialog),
 }
 
 #[derive(Clone)]
@@ -168,6 +173,10 @@ impl InboxApp {
         for r in cx.services.secret_requests.pending(u) {
             let summary = format!("Enter a {} for “{}”. It goes straight into your vault as {} and the assistant never sees it.", r.kind.replace('_', " "), r.purpose, r.name);
             asked.push(PendingApproval { run_id: "vault".into(), user: u.to_string(), prompt: format!("needs a secret: {}", r.purpose), call_id: r.id, tool: "vault_request".into(), summary, detail: String::new(), risk: "low", since: r.since });
+        }
+        // questions about the assistant in the person's browser (the wait of a running tool ends when they answer)
+        for r in cx.services.browser.consent.pending(u) {
+            asked.push(PendingApproval { run_id: "browser".into(), user: u.to_string(), prompt: r.title.clone(), call_id: r.id.clone(), tool: "browser_consent".into(), summary: row_summary(&r), detail: r.detail.clone(), risk: "medium", since: r.since });
         }
         asked.append(&mut self.approvals);
         self.approvals = asked;
@@ -361,6 +370,21 @@ impl InboxApp {
         Ok(())
     }
 
+    fn is_browser(a: &PendingApproval) -> bool {
+        a.run_id == "browser" && a.tool == "browser_consent"
+    }
+
+    /// Open the dialog for a browser question.
+    fn open_browser(&mut self, cx: &AppCx, a: &PendingApproval) {
+        match cx.services.browser.consent.get(&cx.session.user, &a.call_id) {
+            Some(r) => self.mode = Mode::Browser(ConsentDialog::new(r)),
+            None => {
+                self.fail("That question is not waiting any more.");
+                self.reload(cx);
+            }
+        }
+    }
+
     fn is_secret(a: &PendingApproval) -> bool {
         a.run_id == "vault" && a.tool == "vault_request"
     }
@@ -387,6 +411,21 @@ impl InboxApp {
     }
 
     fn decide(&mut self, cx: &AppCx, a: &PendingApproval, approve: bool, reason: &str) {
+        if Self::is_browser(a) {
+            if approve {
+                self.open_browser(cx, a);
+            } else if let Some(r) = cx.services.browser.consent.get(&cx.session.user, &a.call_id) {
+                // "n" says no: Deny (or Cancel for a hand-over)
+                let d = ConsentDialog::new(r);
+                match d.answer_of(&Key::Esc).map(|ans| d.answer(cx, ans)) {
+                    Some(Ok(())) => self.ok("Said no; the assistant was told."),
+                    Some(Err(e)) => self.fail(e),
+                    None => self.fail("Open the question (Enter) and choose."),
+                }
+                self.reload(cx);
+            }
+            return;
+        }
         if Self::is_secret(a) {
             if !approve {
                 match cx.services.cancel_secret_request(&cx.session.user, &a.call_id) {
@@ -499,6 +538,22 @@ impl App for InboxApp {
                 }
                 return Flow::Stay;
             }
+            Mode::Browser(d) => {
+                if let Event::Key(k) = ev {
+                    if let Some(ans) = d.answer_of(k) {
+                        let d = d.clone();
+                        match d.answer(cx, ans) {
+                            Ok(()) => self.ok("Answered; the assistant carries on."),
+                            Err(e) => self.fail(e),
+                        }
+                        self.mode = Mode::Browse;
+                        self.reload(cx);
+                    } else if matches!(k, Key::Enter) {
+                        self.mode = Mode::Browse;
+                    }
+                }
+                return Flow::Stay;
+            }
             Mode::Detail(_) => {
                 if self.pane.handle(ev) {
                     return Flow::Stay;
@@ -577,7 +632,7 @@ impl App for InboxApp {
                         }
                     }
                     Key::Char('n') => {
-                        if let Some(a) = self.approval().cloned().filter(Self::is_secret) {
+                        if let Some(a) = self.approval().cloned().filter(|a| Self::is_secret(a) || Self::is_browser(a)) {
                             self.decide(cx, &a, false, "");
                         } else if let Some(a) = self.approval().cloned() {
                             self.mode = Mode::Reject(Form::new(&format!("Reject {}", a.tool)).text("Reason", "", "optional: why not?"), a);
@@ -585,7 +640,9 @@ impl App for InboxApp {
                     }
                     Key::Enter => {
                         if let Some(a) = self.approval().cloned() {
-                            if Self::is_secret(&a) {
+                            if Self::is_browser(&a) {
+                                self.open_browser(cx, &a);
+                            } else if Self::is_secret(&a) {
                                 self.open_secret(cx, &a);
                             } else {
                                 self.mode = Mode::Detail(a);
@@ -626,6 +683,7 @@ impl App for InboxApp {
         match &self.mode {
             Mode::Task(f, _) | Mode::Calendar(f, _) | Mode::Reject(f, _) => f.render(g, area, s, ACCENT, blink(tick)),
             Mode::Secret(f, _) => f.render(g, area, s, ACCENT, blink(tick)),
+            Mode::Browser(d) => d.render(g, area, s),
             Mode::Confirm(text, _) => render_confirm(g, area, s, text, "Yes"),
             Mode::Detail(a) => draw_detail(g, area, s, a, now, &mut self.pane),
             Mode::Browse => {}
@@ -1213,5 +1271,44 @@ mod tests {
         typ(&mut b, &cx2, "abc12345");
         key(&mut b, &cx2, Key::Ctrl('s'));
         assert!(b.dialog_open() && cx2.services.secret_requests.get("root", &id).is_some(), "still waiting");
+    }
+
+    #[test]
+    fn questions_about_the_assistant_in_the_browser_are_answered_in_the_approvals_page() {
+        use iyakki_agent::browserconsent::{Answer, ConsentKind};
+        let cx = admin_cx("inbbrowser");
+        let mut a = InboxApp::new(&cx);
+        a.handle(&Event::Tab(2), &cx);
+        let c = &cx.services.browser.consent;
+        let look = c.create("root", ConsentKind::Look, "gemini.google.com", "", "", 1).unwrap();
+        let act = c.create("root", ConsentKind::Interact, "gemini.google.com", &iyakki_agent::browserconsent::willingness_text("gemini.google.com", None), "click button \"Send\"", 2).unwrap();
+        a.handle(&Event::Tick, &cx);
+        let rows: Vec<_> = a.approval_rows().iter().filter(|r| r.tool == "browser_consent").collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].prompt, "Let the assistant look at gemini.google.com in your browser?");
+        assert!(rows[1].summary.starts_with("Are you willing to let the assistant act on your behalf on gemini.google.com?"), "{}", rows[1].summary);
+        // Enter opens the question; the numbered choices answer it
+        key(&mut a, &cx, Key::Enter);
+        assert!(a.dialog_open());
+        let g = draw(&mut a, &cx, 1280, 720);
+        assert!(g.hits.iter().any(|h| h.label == "1  Allow") && g.hits.iter().any(|h| h.label == "3  Deny"));
+        key(&mut a, &cx, Key::Char('1'));
+        assert!(!a.dialog_open());
+        assert_eq!(c.wait(&look, std::time::Duration::from_millis(20)), Some(Answer::Allow));
+        // the willingness question: three choices, exactly
+        assert_eq!(a.approval_rows().iter().filter(|r| r.tool == "browser_consent").count(), 1);
+        key(&mut a, &cx, Key::Enter);
+        let g = draw(&mut a, &cx, 1280, 720);
+        let numbered: Vec<_> = g.hits.iter().filter(|h| h.label.starts_with(|ch: char| ch.is_ascii_digit())).map(|h| h.label.clone()).collect();
+        assert_eq!(numbered, vec!["1  Approve all actions on gemini.google.com for this session", "2  Approve one by one", "3  Deny"]);
+        key(&mut a, &cx, Key::Esc);
+        assert_eq!(c.wait(&act, std::time::Duration::from_millis(20)), Some(Answer::Deny), "Esc is no");
+        let log = audit(&cx);
+        assert!(log.contains("browser.agent.answer") && log.contains("look allowed") && log.contains("interaction denied"), "{log}");
+        // n answers no without opening anything
+        let step = c.create("root", ConsentKind::Step, "gemini.google.com", "t", "", 3).unwrap();
+        a.handle(&Event::Tick, &cx);
+        key(&mut a, &cx, Key::Char('n'));
+        assert_eq!(c.wait(&step, std::time::Duration::from_millis(20)), Some(Answer::Deny));
     }
 }

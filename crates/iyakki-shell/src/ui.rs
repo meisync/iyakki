@@ -258,6 +258,11 @@ pub mod clipboard {
         });
     }
 
+    /// Take `text` out of the copy history again (a secret that was copied once to be pasted).
+    pub fn forget(text: &str) {
+        S.with(|s| s.borrow_mut().items.retain(|i| !matches!(i, Entry::Text(x) if x == text)));
+    }
+
     /// Record text that arrived *from* the host clipboard (not sent back out).
     pub fn remember(text: &str) {
         push(text);
@@ -363,6 +368,72 @@ pub mod clipboard {
             one_line
         }
     }
+}
+
+thread_local! {
+    static CARETS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static WINDOW_FOCUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    static PANE_INPUT_OK: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    #[cfg(test)]
+    static LEGACY_RINGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+
+/// The host tells whether the window has the operating system's keyboard focus. Without it no input shows a caret or a focus ring.
+pub fn set_window_focused(on: bool) {
+    WINDOW_FOCUSED.with(|c| c.set(on));
+}
+
+pub fn window_focused() -> bool {
+    WINDOW_FOCUSED.with(|c| c.get())
+}
+
+/// May an input being drawn now look focused (accent frame, caret)? Only while the window has the focus and the pane or dialog
+/// being drawn owns the keyboard (see [`with_input_focus`]).
+pub fn input_focus_allowed() -> bool {
+    window_focused() && PANE_INPUT_OK.with(|c| c.get())
+}
+
+/// Draw `f` with focused-looking inputs allowed only when `on` (and they already were). The AI IDE and the chat draw several
+/// inputs side by side; only the one that owns the keyboard may show a caret and the accent frame.
+pub fn with_input_focus<T>(on: bool, f: impl FnOnce() -> T) -> T {
+    let before = PANE_INPUT_OK.with(|c| c.replace(c.get() && on));
+    let out = f();
+    PANE_INPUT_OK.with(|c| c.set(before));
+    out
+}
+
+/// A focused-looking input frame was drawn (tests count them, like carets).
+pub fn note_focus_ring() {
+    RINGS.with(|c| c.set(c.get() + 1));
+}
+
+/// How many focus frames were drawn since the last call.
+pub fn take_focus_rings() -> usize {
+    RINGS.with(|c| c.replace(0))
+}
+
+/// Test only: are the old always-focused looks on (see [`legacy_rings`])?
+#[cfg(test)]
+pub fn legacy_on() -> bool {
+    LEGACY_RINGS.with(|c| c.get())
+}
+
+/// Test only: draw inputs the way they were before the one-owner rule (frame and clipboard button on a constantly "focused" box).
+#[cfg(test)]
+pub fn legacy_rings(on: bool) {
+    LEGACY_RINGS.with(|c| c.set(on));
+}
+
+/// A caret was drawn (tests count them to prove that only the input that owns the keyboard shows one).
+pub fn note_caret() {
+    CARETS.with(|c| c.set(c.get() + 1));
+}
+
+/// How many carets were drawn since the last call; starts counting again from zero.
+pub fn take_carets() -> usize {
+    CARETS.with(|c| c.replace(0))
 }
 
 /// Single-line text input with a caret, a selection (keys, mouse drag, double click for a word), and clipboard support.
@@ -674,6 +745,15 @@ impl TextField {
 
     #[allow(clippy::too_many_arguments)]
     fn draw(&self, g: &mut Gfx, r: R, focused: bool, s: f32, blink_on: bool, face: Face, id: usize, boxed: bool) {
+        #[cfg(test)]
+        let legacy = LEGACY_RINGS.with(|c| c.get());
+        #[cfg(not(test))]
+        let legacy = false;
+        // an input looks focused (frame, caret, clipboard button) only when it owns the keyboard of a window that has the focus
+        let focused = focused && (legacy || input_focus_allowed());
+        if focused && boxed {
+            note_focus_ring();
+        }
         g.hit(r, Event::Focus(id), "field");
         crate::ctxmenu::note_field(crate::ctxmenu::FieldNote { rect: r, id, focused, has_selection: self.selection().is_some(), empty: self.value.is_empty(), secret: self.mask });
         let (size, pad) = if boxed { (17.0 * s, 12.0 * s) } else { (16.0 * s, 0.0) };
@@ -720,6 +800,7 @@ impl TextField {
         let vis: String = chars[start..end].iter().collect();
         g.text(x0, ty, size, TEXT, &vis, face);
         if focused && blink_on && self.selection().is_none() {
+            note_caret();
             let cx = x0 + advances.get(cursor - start).copied().unwrap_or(acc);
             g.rect(cx, ty, 2.0 * s, lh, TEXT);
         }

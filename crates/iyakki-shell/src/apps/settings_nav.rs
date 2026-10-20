@@ -22,7 +22,7 @@ pub enum Entry {
 /// The hit id of the search box (`Event::Focus` → `FocusAt`).
 pub const SEARCH_ID: usize = 900;
 
-const ROW_H: f32 = 36.0;
+const ROW_H: f32 = 34.0;
 const GROUP_H: f32 = 30.0;
 const SEARCH_H: f32 = 48.0;
 

@@ -314,8 +314,41 @@ impl ScanApp {
     }
 }
 
+/// A Lemonade server found by the scan (it names itself in its health answer).
+fn is_lemonade(svc: &Service) -> bool {
+    svc.kind == Kind::LlmServer && svc.name.starts_with("Lemonade")
+}
+
+/// Add a Lemonade server from the scan: its typed list is read at once so the chat list holds its chat models only, and the
+/// model chosen in the form becomes the chat model when none is set and it is one of those.
+fn add_lemonade(cx: &AppCx, ip: Ipv4Addr, mut cfg: ProviderCfg, model: &str, key: &str) -> Result<String, String> {
+    let id = cfg.id.clone();
+    let key_name = format!("{id}-key");
+    if !key.is_empty() {
+        cfg.key_ref = Some(format!("vault:{key_name}"));
+    }
+    cfg.validate()?;
+    if !key.is_empty() {
+        cx.services.system_set(&key_name, key).map_err(|e| e.to_string())?;
+        cx.audit.record(&cx.session.user, "vault.system.set", &key_name);
+    }
+    cx.services.settings.lock().unwrap().upsert_provider(cfg).map_err(|e| e.to_string())?;
+    cx.audit.record(&cx.session.user, "settings.provider.save", &format!("{id} (Lemonade) from net scan {ip}"));
+    let list = cx.services.refresh_lemonade(&id).unwrap_or_default();
+    let chats: Vec<String> = list.iter().filter(|m| m.downloaded && m.kind.chats()).map(|m| m.id.clone()).collect();
+    let mut note = String::new();
+    let mut st = cx.services.settings.lock().unwrap();
+    let pick = if chats.iter().any(|m| m == model) { Some(model.to_string()) } else { chats.first().cloned() };
+    if let (None, Some(m)) = (st.get().chat.clone(), pick) {
+        st.set_chat(Some(ModelChoice { provider: id.clone(), model: m.clone() })).map_err(|e| e.to_string())?;
+        note = format!(" It is now the chat model ({m}).");
+    }
+    let others = list.len() - chats.len();
+    Ok(format!("Added {id} (Lemonade) to Models with {} chat model{} and {others} other{} (pictures, speech, embeddings: see Settings → Models).{note}", chats.len(), if chats.len() == 1 { "" } else { "s" }, if others == 1 { "" } else { "s" }))
+}
+
 fn provider_id(ip: Ipv4Addr, svc: &Service) -> String {
-    let base = if svc.kind == Kind::Ollama { "ollama" } else { "llm" };
+    let base = if svc.kind == Kind::Ollama { "ollama" } else if is_lemonade(svc) { "lemonade" } else { "llm" };
     let dashed = ip.to_string().replace('.', "-");
     if svc.port == 11434 || svc.port == 1234 { format!("{base}-{dashed}") } else { format!("{base}-{dashed}-{}", svc.port) }
 }
@@ -339,9 +372,13 @@ pub fn add_model_server(cx: &AppCx, ip: Ipv4Addr, svc: &Service, id: &str, addre
     if !valid_provider_id(id) {
         return Err("Provider name: lowercase letters, digits, - and _; it starts with a letter.".into());
     }
-    let kind = if svc.kind == Kind::Ollama { ProviderKind::Ollama } else { ProviderKind::Compat };
+    let kind = if svc.kind == Kind::Ollama { ProviderKind::Ollama } else if is_lemonade(svc) { ProviderKind::Lemonade } else { ProviderKind::Compat };
     let mut cfg = ProviderCfg::new(id, kind);
     cfg.base_url = Some(address.trim().to_string());
+    if kind == ProviderKind::Lemonade {
+        // Lemonade's list says what each model does: only its chat models go to the chat list (read after it is added)
+        return add_lemonade(cx, ip, cfg, model, key);
+    }
     cfg.models = svc.models.clone();
     cfg.default_model = if model.is_empty() { svc.models.first().cloned() } else { Some(model.to_string()) };
     let key_name = format!("{id}-key");
@@ -804,6 +841,33 @@ mod tests {
         assert!(!json.contains("tok-123"), "the key is not in the settings file");
         let log = std::fs::read_to_string(cx.audit.path()).unwrap();
         assert!(log.contains("settings.provider.save") && log.contains("vault.system.set"));
+    }
+
+    #[test]
+    fn a_lemonade_found_on_the_network_is_added_as_lemonade_with_only_its_chat_models_in_the_chat_list() {
+        let fake = crate::apps::lemonade_fake::serve();
+        let mut cx = cx_with_admin_store("scanlem");
+        let d = temp_dir("scanlem-svc");
+        cx.services = services_in(&d, Arc::new(iyakki_agent::iyakki_proxy::https::UreqUpstream::with_timeout(std::time::Duration::from_secs(10))));
+        cx.services.on_login("root", "rootpass12", true);
+        let mut a = ScanApp::new(&cx);
+        a.ports = Some(vec![fake.port]);
+        a.net_sel = a.nets.len() - 1;
+        a.handle(&Event::Key(Key::Char('s')), &cx);
+        finish(&mut a, &cx);
+        let s = a.hosts()[0].services[0].clone();
+        assert_eq!((s.kind, s.name.as_str()), (Kind::LlmServer, "Lemonade Server 2026.42.1"));
+        a.handle(&Event::Key(Key::Char('a')), &cx);
+        let Mode::Form(f, _) = &mut a.mode else { panic!("the add form opens") };
+        assert_eq!((f.value(0), f.value(1)), (format!("lemonade-127-0-0-1-{}", fake.port), fake.base()));
+        a.handle(&Event::Key(Key::Ctrl('s')), &cx);
+        assert!(matches!(a.mode, Mode::Browse), "{:?}", a.status_text());
+        assert!(a.status_text().unwrap().contains("(Lemonade)") && a.status_text().unwrap().contains("2 chat models"), "{:?}", a.status_text());
+        let st = cx.services.settings.lock().unwrap().get().clone();
+        let p = &st.providers[0];
+        assert_eq!((p.kind, p.models.clone()), (ProviderKind::Lemonade, vec!["Qwen3-0.6B-GGUF".to_string(), "Phi-4-Multimodal-GGUF".to_string()]));
+        assert_eq!(p.model_kinds.get("Whisper-Base").map(String::as_str), Some("stt"));
+        assert_eq!(st.chat.as_ref().map(|c| c.model.as_str()), Some("Qwen3-0.6B-GGUF"), "the first chat model, never a picture model");
     }
 
     #[test]

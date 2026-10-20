@@ -390,6 +390,13 @@ impl Pane {
         }
     }
 
+    /// The line (counting the lines handed to [`Pane::line`] this frame) and character under a point given relative to the
+    /// area (what `Event::AreaAt` carries): used to start reading from a click.
+    pub fn locate(&self, xr: f32, yr: f32) -> Option<(usize, usize)> {
+        let a = self.area?;
+        self.doc.pos_at(a.x + xr, a.y + yr).map(|p| (p.line, p.ch))
+    }
+
     pub fn has_selection(&self) -> bool {
         !self.sel.is_empty()
     }

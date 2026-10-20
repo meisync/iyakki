@@ -150,6 +150,7 @@ impl UserStore {
     }
 
     fn add(&mut self, name: &str, pw: &str, role: Role) -> Result<(), AccountError> {
+        self.refresh(); // another window may have changed the accounts: never save over their change
         if !valid_username(name) {
             return Err(AccountError::BadUsername);
         }
@@ -220,6 +221,7 @@ impl UserStore {
 
     pub fn delete_user(&mut self, actor: &Session, name: &str) -> Result<(), AccountError> {
         Self::require_admin(actor)?;
+        self.refresh(); // another window may have changed the accounts: never save over their change
         let u = self.get(name).ok_or(AccountError::NoSuchUser)?;
         if u.role == Role::Admin && self.admin_count() <= 1 {
             return Err(AccountError::LastAdmin);
@@ -230,6 +232,7 @@ impl UserStore {
 
     pub fn set_role(&mut self, actor: &Session, name: &str, role: Role) -> Result<(), AccountError> {
         Self::require_admin(actor)?;
+        self.refresh(); // another window may have changed the accounts: never save over their change
         let admins = self.admin_count();
         let u = self.users.iter_mut().find(|u| u.name == name).ok_or(AccountError::NoSuchUser)?;
         if u.role == Role::Admin && role != Role::Admin && admins <= 1 {
@@ -241,6 +244,7 @@ impl UserStore {
 
     pub fn set_overrides(&mut self, actor: &Session, name: &str, ov: PolicyOverride) -> Result<(), AccountError> {
         Self::require_admin(actor)?;
+        self.refresh(); // another window may have changed the accounts: never save over their change
         self.users.iter_mut().find(|u| u.name == name).ok_or(AccountError::NoSuchUser)?.overrides = ov;
         self.save()
     }
@@ -259,6 +263,7 @@ impl UserStore {
                 return Err(AccountError::Forbidden);
             }
         }
+        self.refresh();
         let h = hash_password(new)?;
         self.users.iter_mut().find(|u| u.name == name).ok_or(AccountError::NoSuchUser)?.hash = h;
         self.save()
@@ -306,6 +311,10 @@ impl AuditLog {
 
     pub fn record(&self, user: &str, event: &str, detail: &str) {
         use std::os::unix::fs::OpenOptionsExt;
+        // One writer at a time: reading the last hash and appending must be atomic,
+        // or two events in the same second share a `prev` and the chain reads as broken.
+        static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = self.read().last().map_or_else(|| "0".repeat(64), |l| l.hash.clone());
         let mut l = AuditLine {
             ts: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()),

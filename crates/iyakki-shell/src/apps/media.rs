@@ -136,6 +136,8 @@ enum Mode {
 /// How a video can be played here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VideoRoute {
+    /// IYAKKI's own player: `ffmpeg` decodes, the picture is drawn in this app's page area (`mediaplay.rs`).
+    Native,
     /// An installed player program (mpv, VLC, ffplay, mplayer) in its own window.
     External,
     /// The embedded full web engine of the `web` image (this helper program), in this app's page area.
@@ -145,7 +147,7 @@ pub enum VideoRoute {
 }
 
 /// The message when a video cannot be played at all.
-pub const VIDEO_NEEDS: &str = "Video needs the web image or an installed player (mpv, VLC, ffplay)";
+pub const VIDEO_NEEDS: &str = "Install the media player: IYAKKI menu \u{2192} Quick install \u{2192} Media";
 
 /// A video playing in the embedded engine: the engine's view, and the loopback server that gives it the one file.
 struct VideoView {
@@ -167,6 +169,11 @@ pub struct MediaApp {
     searching: bool,
     lib: Library,
     scanning: Option<Arc<Mutex<Option<Library>>>>,
+    /// The shared host folders that were reachable at the last scan (a change, a folder unplugged or back, starts a new scan).
+    host_seen: Vec<String>,
+    host_ticks: u64,
+    /// A shared host folder whose options (convert to a copy, stop sharing) were asked for.
+    host_menu: Option<String>,
     store: MediaStore,
     player: Arc<MediaPlayer>,
     index: Arc<Mutex<MediaIndex>>,
@@ -195,6 +202,8 @@ pub struct MediaApp {
     samples: Option<std::path::PathBuf>,
     /// A video playing in the embedded engine.
     video: Option<VideoView>,
+    /// A video or sound playing in IYAKKI's own player.
+    native: Option<super::mediaplay::NativeView>,
     /// For tests and unusual setups: how videos are played instead of looking for a player or the engine's helper.
     route_override: Option<VideoRoute>,
     /// A download finished: look at the folders again once the current scan is done.
@@ -245,6 +254,7 @@ impl MediaApp {
     }
 
     pub fn with_player(cx: &AppCx, player: Arc<MediaPlayer>) -> MediaApp {
+        iyakki_agent::player::register_dir(cx.services.clis.bin_dir());
         let store = MediaStore::new(cx.services.dir(), &cx.session.user);
         let (shuffle, repeat) = store.flags();
         let mut a = MediaApp {
@@ -256,6 +266,9 @@ impl MediaApp {
             searching: false,
             lib: Library::default(),
             scanning: None,
+            host_seen: Vec::new(),
+            host_ticks: 0,
+            host_menu: None,
             store,
             player,
             index: cx.services.media_index(&cx.session.user),
@@ -277,6 +290,7 @@ impl MediaApp {
             samples: media::samples_dir(),
             video: None,
             route_override: None,
+            native: None,
             rescan: false,
             area: R::new(0.0, 0.0, 1280.0, 600.0),
             ui_scale: 1.0,
@@ -313,14 +327,26 @@ impl MediaApp {
         self.status = Some((t.into(), ok));
     }
 
+    /// Paths of the shared host folders that can be reached now.
+    fn host_available(&self) -> Vec<String> {
+        self.store.host_mounts().into_iter().map(|m| m.path).collect()
+    }
+
     /// The folders scanned: the person's own and the built-in samples.
     fn scan_list(&self) -> Vec<String> {
-        media::scan_folders(&self.store.folders(), self.samples.as_deref())
+        let mut own = self.store.folders();
+        // shared host folders are read where they are (read-only: nothing here writes to a folder)
+        for m in self.store.host_mounts() {
+            if !own.contains(&m.path) {
+                own.push(m.path);
+            }
+        }
+        media::scan_folders(&own, self.samples.as_deref())
     }
 
     /// May this account read (and so list and play) the file? The samples can always be read.
     fn may_read(&self, cx: &AppCx, path: &str) -> bool {
-        cx.session.policy.allows_read(&cx.session.user, path) || self.samples.as_deref().is_some_and(|d| media::is_sample_in(d, path))
+        cx.session.policy.allows_read(&cx.session.user, path) || self.samples.as_deref().is_some_and(|d| media::is_sample_in(d, path)) || self.store.host_mount_for(path).is_some()
     }
 
     /// Scan the folders in the background and bring the index up to date there too (the account's read scope decides what
@@ -329,11 +355,13 @@ impl MediaApp {
         let folders = self.scan_list();
         let (policy, user) = (cx.session.policy.clone(), cx.session.user.clone());
         let samples = self.samples.clone();
+        let hosts: Vec<String> = self.store.host_mounts().into_iter().map(|m| m.path).collect();
+        self.host_seen = self.host_available();
         let slot: Arc<Mutex<Option<Library>>> = Arc::new(Mutex::new(None));
         let out = slot.clone();
         let index = self.index.clone();
         std::thread::spawn(move || {
-            let allow = |p: &str| policy.allows_read(&user, p) || samples.as_deref().is_some_and(|d| media::is_sample_in(d, p));
+            let allow = |p: &str| policy.allows_read(&user, p) || samples.as_deref().is_some_and(|d| media::is_sample_in(d, p)) || hosts.iter().any(|h| std::path::Path::new(p).starts_with(h));
             let (lib, images) = mediaindex::scan_for_index(&folders, &user, &allow);
             index.lock().unwrap_or_else(|e| e.into_inner()).sync(&lib, &images, iyakki_agent::clock::now_unix());
             if let Some(d) = &samples {
@@ -495,6 +523,11 @@ impl MediaApp {
                 .collect(),
             Page::Folders => {
                 let mut rows: Vec<Row> = self.store.folders().into_iter().map(|f| Row::plain(f.clone(), String::new(), String::new(), Act::Folder(f))).collect();
+                // folders shared from the host computer: read in place, read-only, with a plain state when they are away
+                for (m, ok) in self.store.host_mount_states() {
+                    let sub = if ok { format!("{} · shared from your computer, read-only", m.path) } else { format!("{} · folder not available (unplugged or moved); it is picked up again when it returns", m.path) };
+                    rows.push(Row { types: vec!["host".to_string()], ..Row::plain(format!("host:{}", m.name), sub, if ok { "host · read-only".into() } else { "not available".into() }, Act::Folder(m.path.clone())) });
+                }
                 // the built-in samples: always there, read-only, not something to delete
                 if let Some(d) = &self.samples {
                     rows.push(Row { types: vec![media::SAMPLES_TAG.to_string()], ..Row::plain(media::SAMPLES_LABEL.to_string(), format!("{} · built in, read-only", d.display()), "read-only".into(), Act::Folder(d.to_string_lossy().into_owned())) });
@@ -599,9 +632,17 @@ impl MediaApp {
         }
         let label = self.label_of(&path);
         // a video with no player program goes to the embedded engine (the web image), or the person is told what is needed
+        let non_mp3_audio = !media::is_mp3(&path) && !media::is_video_path(&path);
+        if self.video_route() == VideoRoute::Native && (media::is_video_path(&path) || non_mp3_audio) {
+            self.player.stop();
+            self.queue_active = false;
+            self.publish_queue(cx);
+            self.start_native(&path, &label, cx);
+            return;
+        }
         if media::is_video_path(&path) {
             match self.video_route() {
-                VideoRoute::External => {}
+                VideoRoute::External | VideoRoute::Native => {}
                 VideoRoute::Embedded(helper) => {
                     self.player.stop();
                     self.queue_active = false;
@@ -731,6 +772,7 @@ impl MediaApp {
                 self.say(format!("Photo: {p}  {info}"), true);
             }
             Act::Folder(f) if self.samples.as_deref().is_some_and(|d| d.to_string_lossy() == f.as_str()) => self.say("The IYAKKI samples are built in and read-only: they cannot be changed or removed.", true),
+            Act::Folder(f) if self.store.host_mount_states().iter().any(|(m, _)| m.path == f) => self.say("This folder is shared from your computer, read-only: nothing here changes it. Stop sharing, or turn it into a copy, under Host files in the DATA tile.", true),
             Act::Folder(_) => self.say("Press R to look at the folders again, n to add one, d to remove the chosen one.", true),
             Act::Download(_) => self.activate_download(cx),
         }
@@ -1060,6 +1102,9 @@ impl MediaApp {
         if let Some(r) = &self.route_override {
             return r.clone();
         }
+        if iyakki_agent::player::available() {
+            return VideoRoute::Native;
+        }
         if iyakki_agent::voice::find_media_player("").is_some() {
             return VideoRoute::External;
         }
@@ -1081,7 +1126,26 @@ impl MediaApp {
     }
 
     pub fn video_playing(&self) -> bool {
-        self.video.is_some()
+        self.video.is_some() || self.native.is_some()
+    }
+
+    /// Play a file in IYAKKI's own player (the view takes the page area).
+    fn start_native(&mut self, path: &str, label: &str, cx: &AppCx) {
+        self.native = None;
+        let area = if self.area.w > 64.0 && self.area.h > 64.0 { self.area } else { R::new(0.0, 0.0, 800.0, 520.0) };
+        match super::mediaplay::NativeView::start(path, label, area) {
+            Ok(v) => {
+                cx.audit.record(&cx.session.user, "media.video", path.rsplit('/').next().unwrap_or(""));
+                let mut g = self.index.lock().unwrap_or_else(|e| e.into_inner());
+                if g.record_play(&mediaindex::item_id(path), iyakki_agent::clock::now_unix()).is_ok() {
+                    let _ = g.save();
+                }
+                drop(g);
+                self.native = Some(v);
+                self.status = None;
+            }
+            Err(e) => self.say(format!("Could not play it: {e}"), false),
+        }
     }
 
     fn start_video(&mut self, helper: std::path::PathBuf, path: &str, label: &str, cx: &AppCx) {
@@ -1344,6 +1408,20 @@ impl MediaApp {
 }
 
 impl App for MediaApp {
+    /// Files dropped on the window (window mode) go into the first music folder the account may write to (a dropped folder
+    /// can be linked read-only instead), and the library looks again.
+    fn on_drop(&mut self, _paths: &[std::path::PathBuf], cx: &AppCx) -> super::DropAction {
+        match self.store.folders().into_iter().find(|f| std::path::Path::new(f).is_dir() && cx.session.policy.allows_write(&cx.session.user, f)) {
+            Some(f) => super::DropAction::Into { dest: std::path::PathBuf::from(f), label: "your music folder".into() },
+            None => super::DropAction::Uploads,
+        }
+    }
+    fn dropped_done(&mut self, _files: &[std::path::PathBuf], _cx: &AppCx) {
+        self.rescan = true;
+    }
+    fn take_host_mount_menu(&mut self) -> Option<String> {
+        self.host_menu.take()
+    }
     fn title(&self) -> &'static str {
         "Media"
     }
@@ -1354,6 +1432,9 @@ impl App for MediaApp {
         ACCENT
     }
     fn hint(&self) -> String {
+        if let Some(n) = &self.native {
+            return n.hint().into();
+        }
         if self.video.is_some() {
             return "Space pause or play · ← → seek 5 s · m mute · Esc stop the video".into();
         }
@@ -1385,13 +1466,28 @@ impl App for MediaApp {
         .collect()
     }
 
+    fn open_item(&mut self, item: &str, cx: &AppCx) {
+        // the IYAKKI menu's Media player and other apps: `play:<path>`
+        if let Some(path) = item.strip_prefix("play:") {
+            self.start_queue(vec![path.to_string()], 0, cx);
+        }
+    }
+
     fn wants_redraw(&mut self) -> bool {
+        if self.native.is_some() {
+            return true;
+        }
         self.video.as_mut().is_some_and(|v| v.full.take_redraw())
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
         if matches!(ev, Event::Tick) {
             self.poll_scan();
+            // a shared host folder that was unplugged or came back (or was added or removed) means a new look, about every 5 s
+            self.host_ticks += 1;
+            if self.host_ticks % 150 == 0 && self.scanning.is_none() && self.host_available() != self.host_seen {
+                self.rescan = true;
+            }
             self.poll_downloads();
             if self.rescan && self.scanning.is_none() {
                 self.rescan = false;
@@ -1401,10 +1497,20 @@ impl App for MediaApp {
             if self.video.is_some() {
                 self.video_event(ev, cx);
             }
+            if let Some(n) = &mut self.native {
+                n.event(ev);
+            }
             if let Check::Ended { user } = self.player.check() {
                 if user == cx.session.user {
                     self.advance(cx);
                 }
+            }
+            return Flow::Stay;
+        }
+        // IYAKKI's own player has the keys and the page area while it plays
+        if let Some(n) = &mut self.native {
+            if n.event(ev) == super::mediaplay::Out::Close {
+                self.native = None;
             }
             return Flow::Stay;
         }
@@ -1626,10 +1732,18 @@ impl App for MediaApp {
                     self.mode = Mode::DeletePlaylist(n);
                 }
             }
+            // a linked host folder: convert it to a copy, or stop sharing it (the options open over the page)
+            Key::Char('c') | Key::Char('u') if self.page == Page::Folders && matches!(self.selected(), Some(Row { act: Act::Folder(f), .. }) if self.store.host_mount_states().iter().any(|(m, _)| m.path == *f)) => {
+                if let Some(Row { act: Act::Folder(f), .. }) = self.selected() {
+                    self.host_menu = self.store.host_mount_states().into_iter().find(|(m, _)| m.path == f).map(|(m, _)| m.name);
+                }
+            }
             Key::Char('d') if self.page == Page::Folders => {
                 if let Some(Row { act: Act::Folder(f), .. }) = self.selected() {
                     if self.samples.as_deref().is_some_and(|d| d.to_string_lossy() == f.as_str()) {
                         self.say("The IYAKKI samples are built in and read-only: they cannot be removed.", false);
+                    } else if self.store.host_mount_states().iter().any(|(m, _)| m.path == f) {
+                        self.say("A shared host folder is stopped under Host files in the DATA tile (it is never deleted).", false);
                     } else {
                         self.mode = Mode::RemoveFolder(f);
                     }
@@ -1661,6 +1775,10 @@ impl App for MediaApp {
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, _cx: &AppCx, tick: u64) {
         self.area = area;
         self.ui_scale = s;
+        if let Some(n) = &mut self.native {
+            n.render(g, area, s);
+            return;
+        }
         if self.video.is_some() {
             self.render_video(g, area, s);
             return;
@@ -2407,6 +2525,81 @@ mod tests {
     }
 
     #[test]
+    fn a_linked_host_folder_is_played_in_place_read_only_and_goes_away_and_comes_back() {
+        let _g = iyakki_agent::hostfiles::test_guard();
+        let (mut a, cx, _f, d) = setup("media-host");
+        let host = std::fs::canonicalize(d.join("hosthome")).unwrap_or_else(|_| {
+            std::fs::create_dir_all(d.join("hosthome")).unwrap();
+            std::fs::canonicalize(d.join("hosthome")).unwrap()
+        });
+        let t1 = put(&host, "Songs/Rock/h1.mp3", &mp3("HostOne", "Hal", "Live"));
+        put(&host, "Songs/Rock/h2.mp3", &mp3("HostTwo", "Hal", "Live"));
+        let before: Vec<_> = std::fs::read_dir(host.join("Songs/Rock")).unwrap().flatten().map(|e| (e.file_name(), e.metadata().unwrap().len())).collect();
+        iyakki_agent::hostfiles::set_enabled(true);
+        iyakki_agent::hostfiles::set_host_home(Some(host.clone()));
+        let before_n = a.library().audio("").len();
+        assert!(!a.may_read(&cx, &t1), "not reachable before it is shared");
+        let mut m = iyakki_agent::hostfiles::HostMounts::load(cx.services.dir(), &cx.session.user);
+        m.add(&host, "~/Songs", Some("Songs"), false).unwrap();
+        rescan(&mut a, &cx);
+        assert_eq!(a.library().audio("").len(), before_n + 2, "the shared folder's songs are in the library");
+        assert!(a.may_read(&cx, &t1), "playback resolves through the mount");
+        // the Folders page says where it is from
+        a.handle(&Event::Tab(5), &cx);
+        let rows = a.rows();
+        let r = rows.iter().find(|r| r.main == "host:Songs").expect("a row for the shared folder");
+        assert_eq!(r.right, "host · read-only");
+        assert!(r.sub.contains("shared from your computer"), "{}", r.sub);
+        // d never deletes it, and nothing is written to the host
+        let at = rows.iter().position(|r| r.main == "host:Songs").unwrap();
+        a.set_sel(at);
+        key(&mut a, &cx, Key::Char('d'));
+        assert!(a.status_text().unwrap().contains("never deleted") && !matches!(a.mode, Mode::RemoveFolder(_)), "{:?}", a.status_text());
+        let after: Vec<_> = std::fs::read_dir(host.join("Songs/Rock")).unwrap().flatten().map(|e| (e.file_name(), e.metadata().unwrap().len())).collect();
+        assert_eq!(before.len(), after.len(), "the host folder is untouched");
+        assert_eq!(std::fs::read_dir(host.join("Songs")).unwrap().count(), 1, "no index or tag files were written there");
+        // unplugged: a plain state, the songs leave the library (nothing is cached from a folder that is not there)
+        std::fs::rename(host.join("Songs"), host.join("Songs-away")).unwrap();
+        rescan(&mut a, &cx);
+        let rows = a.rows();
+        let r = rows.iter().find(|r| r.main == "host:Songs").expect("still listed");
+        assert_eq!(r.right, "not available");
+        assert!(r.sub.contains("folder not available"), "{}", r.sub);
+        assert_eq!(a.library().audio("").len(), before_n, "the library no longer lists them");
+        // back: noticed by the periodic look, no key needed
+        std::fs::rename(host.join("Songs-away"), host.join("Songs")).unwrap();
+        for _ in 0..160 {
+            a.handle(&Event::Tick, &cx);
+        }
+        wait_scan(&mut a, &cx);
+        assert_eq!(a.library().audio("").len(), before_n + 2, "it returned and was looked at again");
+        // c and u on a linked folder ask for its options (convert to a copy, stop sharing)
+        a.handle(&Event::Tab(5), &cx);
+        let at = a.rows().iter().position(|r| r.main == "host:Songs").unwrap();
+        a.set_sel(at);
+        key(&mut a, &cx, Key::Char('u'));
+        assert_eq!(a.take_host_mount_menu().as_deref(), Some("Songs"));
+        key(&mut a, &cx, Key::Char('c'));
+        assert_eq!(a.take_host_mount_menu().as_deref(), Some("Songs"));
+        // a drop goes into the first music folder the account may write to, and the library looks again afterwards
+        match a.on_drop(&[], &cx) {
+            crate::apps::DropAction::Into { label, .. } => assert_eq!(label, "your music folder"),
+            crate::apps::DropAction::Uploads => {}
+            other => panic!("{other:?}"),
+        }
+        a.dropped_done(&[], &cx);
+        assert!(a.rescan);
+        // stop sharing: gone from the library and not readable
+        m.remove("Songs").unwrap();
+        rescan(&mut a, &cx);
+        assert_eq!(a.library().audio("").len(), before_n);
+        assert!(!a.may_read(&cx, &t1));
+        iyakki_agent::hostfiles::set_host_home(None);
+        iyakki_agent::hostfiles::set_enabled(false);
+    }
+
+
+    #[test]
     fn the_tile_is_in_the_policy_for_every_role_that_has_apps() {
         use iyakki_sec::policy::{App, Role};
         assert!(App::ALL.contains(&App::Media) && App::Media.id() == "media" && App::Media.label() == "MEDIA");
@@ -3090,7 +3283,7 @@ mod tests {
         a.set_video_route(Some(VideoRoute::Missing));
         key(&mut a, &cx, Key::Enter);
         assert!(!a.video_playing());
-        assert_eq!(a.status_text(), Some("Video needs the web image or an installed player (mpv, VLC, ffplay)."), "{:?}", a.status_text());
+        assert_eq!(a.status_text(), Some("Install the media player: IYAKKI menu \u{2192} Quick install \u{2192} Media."), "{:?}", a.status_text());
         assert!(fake.launched.lock().unwrap().is_empty());
         let _ = draw(&mut a, &cx, 1280, 720);
         // with an installed player the video goes to it, and an audio file is not a video at all

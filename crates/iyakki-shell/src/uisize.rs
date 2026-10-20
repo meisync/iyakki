@@ -45,6 +45,30 @@ pub fn save_group(dir: &std::path::Path, user: &str, group: &str) {
     write(dir, user, &v);
 }
 
+/// The AI IDE's density (0 Comfortable, 1 Compact, 2 Dense), Compact when the person never chose.
+pub fn load_ide_density(dir: &std::path::Path, user: &str) -> usize {
+    read(dir, user)["ide_density"].as_u64().map_or(1, |i| (i as usize).min(2))
+}
+
+pub fn save_ide_density(dir: &std::path::Path, user: &str, level: usize) {
+    let mut v = read(dir, user);
+    v["ide_density"] = serde_json::json!(level.min(2));
+    write(dir, user, &v);
+}
+
+/// The person's clock choices: (12-hour clock, seconds shown). The zone and network time are the machine's, in Settings.
+pub fn load_clock(dir: &std::path::Path, user: &str) -> (bool, bool) {
+    let v = read(dir, user);
+    (v["hour12"].as_bool().unwrap_or(false), v["seconds"].as_bool().unwrap_or(false))
+}
+
+pub fn save_clock(dir: &std::path::Path, user: &str, hour12: bool, seconds: bool) {
+    let mut v = read(dir, user);
+    v["hour12"] = serde_json::json!(hour12);
+    v["seconds"] = serde_json::json!(seconds);
+    write(dir, user, &v);
+}
+
 /// Make the program draw at the person's size (or at normal size with `None`).
 pub fn apply(level: Option<usize>) {
     crate::ui::set_ui_size(level.map_or(1.0, |l| LEVELS[l.min(LEVELS.len() - 1)].1));
@@ -73,6 +97,11 @@ mod tests {
         save_group(&d, "bob", "work");
         save(&d, "bob", 2);
         assert_eq!((load(&d, "bob"), load_group(&d, "bob").as_deref()), (2, Some("work")));
+        // the IDE's density is kept per person next to them, and does not disturb them
+        assert_eq!(load_ide_density(&d, "bob"), 1, "Compact by default");
+        save_ide_density(&d, "bob", 2);
+        assert_eq!((load_ide_density(&d, "bob"), load(&d, "bob"), load_group(&d, "bob").as_deref()), (2, 2, Some("work")));
+        assert_eq!(load_ide_density(&d, "ann"), 1);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

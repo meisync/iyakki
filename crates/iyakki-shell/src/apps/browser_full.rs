@@ -73,6 +73,9 @@ pub struct Full {
     pub frames: u64,
     /// The helper's last messages and error output (for diagnosis and tests).
     pub log: std::collections::VecDeque<String>,
+    /// Answers to `eval` scripts not yet taken: `(id, ok, json or error text)`.
+    script_results: Vec<(u32, bool, String)>,
+    next_script: u32,
 }
 
 pub struct Start {
@@ -140,6 +143,8 @@ impl Full {
             visible: true,
             frames: 0,
             log: Default::default(),
+            script_results: Vec::new(),
+            next_script: 1,
         };
         f.send_zoom(st.scale);
         f.view.send(ToHelper::Focus(true));
@@ -161,6 +166,24 @@ impl Full {
     pub fn navigate(&mut self, url: &str) {
         self.loading = true;
         self.view.send(ToHelper::Navigate(url.to_string()));
+    }
+
+    /// Run JavaScript in the page (protocol 1.1 `Script`); the answer arrives through [`Full::take_script_result`] after a `pump`.
+    pub fn eval(&mut self, js: &str, timeout_ms: u32) -> u32 {
+        let id = self.next_script;
+        self.next_script = self.next_script.wrapping_add(1).max(1);
+        self.view.send(ToHelper::Script { id, js: js.to_string(), timeout_ms });
+        id
+    }
+
+    pub fn shm_path(&self) -> PathBuf {
+        self.view.shm_path().to_path_buf()
+    }
+
+    pub fn take_script_result(&mut self, id: u32) -> Option<(bool, String)> {
+        let i = self.script_results.iter().position(|r| r.0 == id)?;
+        let (_, ok, j) = self.script_results.remove(i);
+        Some((ok, j))
     }
 
     pub fn reload(&mut self) {
@@ -283,6 +306,12 @@ impl Full {
                 WvEvent::Cursor(k) => self.cursor = k,
                 WvEvent::Download { url, name } => self.notes.push(Note::Download { url, name }),
                 WvEvent::Clipboard(t) => self.notes.push(Note::Clipboard(t)),
+                WvEvent::ScriptResult { id, ok, json } => {
+                    if self.script_results.len() >= 32 {
+                        self.script_results.remove(0);
+                    }
+                    self.script_results.push((id, ok, json));
+                }
                 WvEvent::Crashed(r) => self.notes.push(Note::Trouble(r)),
                 WvEvent::Log(l) => {
                     log::debug!("webview: {l}");
@@ -522,6 +551,13 @@ mod tests {
         assert_eq!(first(Key::Char('é')), (0xe9, 0, "é".into()));
         assert_eq!(first(Key::Char('€')), (0x0100_20ac, 0, "€".into()));
         assert_eq!(first(Key::Char(' ')), (0x20, 0, " ".into()));
+        // shifted symbols and digits are their own keysyms (ASCII is the X11 keysym); Ctrl+A/C/V/X carry the control modifier only
+        assert_eq!(first(Key::Char('!')), (0x21, 0, "!".into()));
+        assert_eq!(first(Key::Char('@')), (0x40, 0, "@".into()));
+        assert_eq!(first(Key::Char('7')), (0x37, 0, "7".into()));
+        for c in ['a', 'c', 'v', 'x'] {
+            assert_eq!(first(Key::Ctrl(c)), (c as u32, proto::MOD_CTRL, String::new()));
+        }
         assert_eq!(first(Key::Ctrl('c')), (0x63, proto::MOD_CTRL, String::new()));
         assert_eq!(first(Key::Ctrl('C')), (0x43, proto::MOD_CTRL | proto::MOD_SHIFT, String::new()));
         assert_eq!(first(Key::Enter), (0xff0d, 0, "\r".into()));

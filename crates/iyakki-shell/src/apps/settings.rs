@@ -15,10 +15,13 @@ use iyakki_agent::rag_ext::{ExtClient, ExternalRag};
 use iyakki_agent::services::Services;
 use iyakki_agent::settings::{ExtEntry, ModelChoice};
 use iyakki_agent::vault::{valid_secret_name, ProviderConfig as SecretProvider, VaultError};
+use iyakki_agent::hostengines;
+use iyakki_agent::hostvoice::{self, HostVoice};
+use iyakki_agent::story as st;
 use iyakki_agent::voice::{self, Player, Recorder, SpeechEngine};
 
 use super::controls::{self, Slider};
-use super::devices::{DevRow, DevTab, DevicesPane, DeviceEnv};
+use super::devices::{DevRow, DevTab, DevicesPane, DeviceEnv, Target};
 use super::settings_nav as nav;
 use super::widgets::{render_confirm, Form, FormEvent, PickEvent, Picker};
 use super::{blink, App, AppCx, Flow};
@@ -26,11 +29,14 @@ use crate::accounts::AccountError;
 use crate::gfx::{rgb, Face, Gfx, Icon};
 use crate::ui::{Event, Key, TextField, DIM, ERR, MUTED, OK, R, TEXT};
 
+/// The third kind of text-to-speech engine: the voices of the browser or desktop window the person is using.
+const BROWSER_CHOICE: &str = "Browser voice (uses the voices of the browser or desktop you are using)";
 const ACCENT: [u8; 4] = rgb(120, 170, 255);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Models,
+    Agents,
     Rag,
     Vault,
     Skills,
@@ -39,9 +45,17 @@ pub enum Tab {
     Display,
     Sound,
     Browser,
+    DevCluster,
     Storage,
+    Memory,
+    Time,
+    HostName,
+    Install,
     Voice,
+    IndicVoices,
     SecretProviders,
+    HostAccess,
+    Developer,
     Account,
 }
 
@@ -49,10 +63,11 @@ impl Tab {
     /// The heading this page sits under in the left list.
     fn group(self) -> &'static str {
         match self {
-            Tab::Models | Tab::Rag | Tab::Skills | Tab::Voice => "Assistant",
-            Tab::Browser => "Apps",
+            Tab::Models | Tab::Agents | Tab::Rag | Tab::Skills | Tab::Voice | Tab::IndicVoices => "Assistant",
+            Tab::Browser | Tab::HostAccess | Tab::DevCluster => "Apps",
             Tab::Vault | Tab::SecretProviders | Tab::Account => "Security",
             Tab::Network | Tab::Bluetooth | Tab::Display | Tab::Sound | Tab::Storage => "Devices",
+            Tab::Memory | Tab::Install | Tab::Time | Tab::HostName | Tab::Developer => "System",
         }
     }
 
@@ -60,17 +75,26 @@ impl Tab {
     fn keywords(self) -> &'static str {
         match self {
             Tab::Models => "ai chat llm model provider openai claude anthropic gemini ollama openrouter api key endpoint",
+            Tab::Agents => "claude code copilot github coding agent cli codex gemini aider anthropic external install login api key auto approval",
             Tab::Rag => "search knowledge documents retrieval chunk overlap results embedding index external qdrant chroma",
             Tab::Vault => "secrets keys passwords tokens encrypted lock",
             Tab::Skills => "instructions prompts reusable assistant behaviour",
             Tab::Network => "wifi wi-fi ethernet internet lan cable ip address connection wireless",
             Tab::Bluetooth => "bluetooth wireless pairing headphones keyboard mouse adapter",
             Tab::Display => "screen monitor brightness resolution backlight output hdmi",
-            Tab::Sound => "audio volume speaker mute loud quiet card",
+            Tab::Sound => "audio volume speaker mute loud quiet card output hdmi displayport usb headphones test sound",
             Tab::Browser => "web internet browser javascript scripts pictures images styles css cookies privacy sites",
+            Tab::DevCluster => "k3s kubernetes cluster kubectl kubeconfig deploy registry namespace podman profile context node bare metal in-cluster service account vault developer",
             Tab::Storage => "disk usb drive data persistence save space format",
+            Tab::Memory => "ram zram swap swappiness compressed memory zstd lz4 zswap pressure out of memory oom",
+            Tab::Time => "clock time date timezone time zone utc 12 24 hour am pm seconds ntp sntp network time server sync 1970 battery wrong",
+            Tab::HostName => "host name hostname computer name rename network name dns mdns",
+            Tab::Developer => "developer mode adb dev install sideload pair pairing remote deploy tile app laptop computer key revoke push watch live reload logs screenshot",
+            Tab::Install => "install installer disk erase internal ssd nvme sata drive usb copy computer partition boot",
             Tab::Voice => "microphone speech voice stt tts speak listen recording",
+            Tab::IndicVoices => "indic tts neural voice tamil telugu malayalam kannada hindi bengali marathi gujarati punjabi odia assamese ai4bharat fastpitch hifigan download model usb offline read aloud",
             Tab::SecretProviders => "vault external hashicorp provider secrets",
+            Tab::HostAccess => "host files folders share import export drag drop computer home read-only link copy unplugged audit",
             Tab::Account => "password profile sign out user login",
         }
     }
@@ -79,17 +103,26 @@ impl Tab {
     fn blurb(self) -> &'static str {
         match self {
             Tab::Models => "The AI services the assistant can talk to, and which one it uses.",
+            Tab::Agents => "Claude Code, GitHub Copilot and other coding agents that can answer the chat next to the built-in models.",
             Tab::Rag => "How documents are split and searched when the assistant looks things up.",
             Tab::Vault => "Secrets such as API keys, kept encrypted.",
             Tab::Skills => "Reusable instructions the assistant can follow.",
             Tab::Network => "Ethernet and WiFi: what this computer has, and what is switched on.",
             Tab::Bluetooth => "The Bluetooth adapter, if there is one.",
             Tab::Display => "The screen in use, connected displays and brightness.",
-            Tab::Sound => "Sound cards, volume and mute.",
+            Tab::Sound => "Where sound plays (HDMI/DP, USB, speakers), a test chime, volume and mute.",
             Tab::Browser => "What the web browser may do: run scripts, show pictures, apply styles, keep cookies.",
+            Tab::DevCluster => "The clusters the AI IDE can deploy to, this machine's own k3s, and where images go.",
             Tab::Storage => "Where your accounts, settings and files are kept.",
+            Tab::Memory => "RAM, compressed swap in memory (zram) and an optional swap file.",
+            Tab::Time => "The clock in the top bar: time zone, 12 or 24 hours, and setting the time from the network.",
+            Tab::HostName => "The name of this computer on the network.",
+            Tab::Developer => "Let a paired computer install, run and watch apps here (iyakki dev). Off by default.",
+            Tab::Install => "Put IYAKKI on this computer's disk, from the stick it is running from.",
             Tab::Voice => "Speech to text and text to speech.",
+            Tab::IndicVoices => "Neural voices for Tamil, Telugu, Malayalam, Kannada, Hindi, Bengali, Marathi and more: install, remove, choose.",
             Tab::SecretProviders => "External vaults that hold secrets for you.",
+            Tab::HostAccess => "Folders of the computer this window runs on that this account may use, and what it may do with them.",
             Tab::Account => "Your account on this computer.",
         }
     }
@@ -97,6 +130,7 @@ impl Tab {
     fn label(self) -> &'static str {
         match self {
             Tab::Models => "Models",
+            Tab::Agents => "Agents",
             Tab::Rag => "RAG",
             Tab::Vault => "Vault",
             Tab::Skills => "Skills",
@@ -105,13 +139,43 @@ impl Tab {
             Tab::Display => "Display",
             Tab::Sound => "Sound",
             Tab::Browser => "Browser",
+            Tab::DevCluster => "Dev cluster",
             Tab::Storage => "Storage",
+            Tab::Memory => "Memory",
+            Tab::Time => "Time",
+            Tab::HostName => "Host name",
+            Tab::Developer => "Developer mode",
+            Tab::Install => "Install to disk",
             Tab::Voice => "Voice",
+            Tab::IndicVoices => "Indic voices",
             Tab::SecretProviders => "Secret providers",
+            Tab::HostAccess => "Host access",
             Tab::Account => "Account",
         }
     }
 }
+
+#[path = "settings_agents.rs"]
+mod agents;
+#[path = "settings_lemonade.rs"]
+mod lemonade_page;
+#[path = "settings_devcluster.rs"]
+mod devcluster;
+#[path = "settings_host.rs"]
+mod host_access;
+#[path = "settings_memory.rs"]
+mod memory;
+#[path = "settings_sound.rs"]
+mod sound;
+#[path = "settings_time.rs"]
+mod time;
+#[path = "settings_install.rs"]
+mod install_page;
+#[path = "settings_indic.rs"]
+mod indic_page;
+#[path = "settings_developer.rs"]
+mod developer_page;
+pub use install_page::InstallEnv;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum FormKind {
@@ -138,16 +202,47 @@ enum FormKind {
     WifiHidden,
     /// Remove a virtual disk (its name must be typed).
     RemoveVirtualDisk(String),
+    /// Settings → Agents: the model of an agent; a custom agent (new, or the id being edited).
+    AgentModel(String),
+    AgentCustom(Option<String>),
+    /// Settings → Dev cluster.
+    Dc(devcluster::DcForm),
+    /// Settings → Memory: one of its settings.
+    Mem(memory::MemField),
+    /// Settings → Time: the time server; Settings → Host name: the new name.
+    TimeServer,
+    HostName,
+    /// Settings → Install to disk: the questions and the typed confirmation for this disk.
+    Install(String),
+    /// Settings → Indic voices: install from a folder (the language), where the bundles are published, where the server listens.
+    IndicFolder(String),
+    IndicSource,
+    IndicServer,
 }
+
+/// The extra last line of the provider form's Type choice: look at the address and use what answers.
+const AUTO_TYPE: &str = "Auto-detect (Ollama, Lemonade or OpenAI-compatible)";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PickKind {
+    /// A time zone from the list in Settings → Time.
+    Zone,
     Chat(String),
     Embed(String),
     /// A network from the WiFi scan (or one of the choices below the list).
     Wifi,
     /// A saved WiFi network to forget.
     WifiForget,
+    /// The vault entry holding an external agent's API key.
+    AgentKey(String),
+    /// The model of an external agent (a line of its list, or "Custom model id…").
+    AgentModel(String),
+    /// Settings → Models: a model of a Lemonade provider, then what to do with it, then the reading voice.
+    Lemonade(lemonade_page::LemPick),
+    /// Settings → Network: the private MAC address mode for every adapter of this kind.
+    MacMode(iyakki_devctl::LinkKind),
+    /// Settings → Sound: Automatic or one output.
+    SoundOutput,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,6 +254,19 @@ enum ConfirmKind {
     ResetPersonal,
     Skill(iyakki_agent::skills::Scope, String),
     Reboot,
+    AgentInstall(String),
+    AgentAuto(String),
+    AgentTest(String),
+    AgentRemove(String),
+    Dc(devcluster::DcAct),
+    /// Settings → Memory: apply the draft to the running system.
+    MemApply,
+    /// Settings → Network: change this adapter's MAC address now (the connection drops for a moment).
+    MacApply(String),
+    /// Settings → Indic voices: download or delete a language (the approval card names the host and the size).
+    Indic(indic_page::IndicAct),
+    /// Settings → Models: pull (download) or load a Lemonade model (the approval card names the model and its size).
+    Lemonade(lemonade_page::LemAct),
 }
 
 enum Modal {
@@ -171,6 +279,7 @@ enum JobOut {
     Msg(Result<String, String>),
     Wifi(Result<Vec<iyakki_devctl::wifi::Ap>, String>),
     Models { provider: String, models: Vec<String>, ms: u64 },
+    Dc(devcluster::DcOut),
 }
 
 struct Job {
@@ -253,13 +362,17 @@ const SLIDER_HW: usize = 7100;
 pub struct SettingsApp {
     tabs: Vec<Tab>,
     tab: usize,
-    sel: [usize; 16],
+    sel: [usize; 24],
     /// Network, Bluetooth, Display and Sound pages.
     hw: DevicesPane,
     /// Ticks since the app opened (the hardware pages refresh on a timer).
     ticks: u64,
     /// How long the mic tests listen (milliseconds); shortened by tests.
     pub test_record_ms: u64,
+    /// Voice page: the language of the test sentence (index in `VO_LANGS`), and how far the lower part is scrolled.
+    vo_lang: usize,
+    vo_scroll: f32,
+    vo_max: f32,
     /// Vault tab: 0 = system vault, 1 = personal vault.
     section: usize,
     /// May edit the skills shared with everyone (set from the policy at open).
@@ -281,11 +394,29 @@ pub struct SettingsApp {
     devices: Vec<iyakki_storage::BlockDev>,
     modal: Option<Modal>,
     job: Option<Job>,
+    /// The Host access page's state.
+    host: host_access::HostPanel,
     status: Option<(String, bool)>,
+    /// Settings → Dev cluster.
+    dc: devcluster::Dc,
+    /// Settings → Memory.
+    mem: memory::MemPanel,
+    time: time::TimePanel,
+    hn: time::NamePanel,
+    /// Settings → Install to disk.
+    inst: install_page::InstallPanel,
+    /// Settings → Indic voices.
+    indic: indic_page::IndicPanel,
+    /// Settings → Developer mode.
+    devel: developer_page::DevPanel,
+}
+
+fn hf_on() -> bool {
+    iyakki_agent::hostfiles::enabled()
 }
 
 fn kind_labels() -> Vec<&'static str> {
-    Kind::ALL.iter().map(|k| k.label()).collect()
+    Kind::ALL.iter().map(|k| k.label()).chain([AUTO_TYPE]).collect()
 }
 
 impl SettingsApp {
@@ -296,18 +427,35 @@ impl SettingsApp {
             tabs.push(Tab::Skills);
         }
         if admin {
+            tabs.insert(1, Tab::Agents);
+        }
+        if admin {
             tabs.extend([Tab::Network, Tab::Bluetooth, Tab::Display, Tab::Sound]);
             tabs.push(Tab::Storage);
+            tabs.push(Tab::Memory);
+            tabs.push(Tab::HostName);
+            tabs.push(Tab::Developer);
+        }
+        if admin && !hf_on() && install_page::InstallEnv::real().available() {
+            tabs.push(Tab::Install);
         }
         if admin || cx.session.policy.voice {
             tabs.push(Tab::Voice);
         }
         if admin {
+            tabs.push(Tab::IndicVoices);
+        }
+        if admin {
             tabs.push(Tab::SecretProviders);
         }
+        if Self::dc_visible(cx) {
+            tabs.push(Tab::DevCluster);
+        }
+        tabs.push(Tab::Time);
         tabs.push(Tab::Browser);
+        tabs.push(Tab::HostAccess);
         tabs.push(Tab::Account);
-        let mut app = SettingsApp { tabs, tab: 0, sel: [0; 16], hw: DevicesPane::new(DeviceEnv::real()), ticks: 0, test_record_ms: 2000, section: if admin { 0 } else { 1 }, share_skills: cx.session.policy.manage_skills, nav_query: TextField::new("Search settings", false), nav_focus: false, nav_scroll: 0.0, mouse: (0, 0), nav_rect: R::new(0.0, 0.0, 0.0, 0.0), nav_s: 1.0, slider_w: Vec::new(), storage: StorageEnv::real(), wifi: WifiEnv::real(), wifi_items: Vec::new(), devices: vec![], modal: None, job: None, status: None };
+        let mut app = SettingsApp { tabs, tab: 0, sel: [0; 24], hw: DevicesPane::new(DeviceEnv::real()), ticks: 0, test_record_ms: 2000, vo_lang: 0, vo_scroll: 0.0, vo_max: 0.0, section: if admin { 0 } else { 1 }, share_skills: cx.session.policy.manage_skills, nav_query: TextField::new("Search settings", false), nav_focus: false, nav_scroll: 0.0, mouse: (0, 0), nav_rect: R::new(0.0, 0.0, 0.0, 0.0), nav_s: 1.0, slider_w: Vec::new(), storage: StorageEnv::real(), wifi: WifiEnv::real(), wifi_items: Vec::new(), devices: vec![], modal: None, job: None, host: Default::default(), status: None, dc: Default::default(), mem: Default::default(), time: Default::default(), hn: Default::default(), inst: Default::default(), indic: Default::default(), devel: Default::default() };
         app.refresh_devices();
         app
     }
@@ -315,6 +463,12 @@ impl SettingsApp {
     /// Replace the machine the hardware pages look at (tests).
     pub fn with_hardware(mut self, env: DeviceEnv) -> SettingsApp {
         self.hw = DevicesPane::new(env);
+        self
+    }
+
+    /// Replace what the private MAC address setting reads and changes (tests).
+    pub fn with_mac(mut self, mac: iyakki_devctl::mac::MacEnv) -> SettingsApp {
+        self.hw.set_mac(mac);
         self
     }
 
@@ -518,12 +672,15 @@ impl SettingsApp {
         match out {
             JobOut::Msg(Ok(m)) => {
                 self.ok(m);
+                self.mem_after_job();
                 self.refresh_devices();
             }
+            JobOut::Dc(out) => self.dc_job_done(cx, out),
             JobOut::Wifi(Err(e)) => self.fail(e),
             JobOut::Wifi(Ok(aps)) => self.show_wifi_picker(aps),
             JobOut::Msg(Err(e)) => {
                 self.fail(e);
+                self.mem_after_job();
                 self.refresh_devices();
             }
             JobOut::Models { provider, models, ms } => {
@@ -547,7 +704,13 @@ impl SettingsApp {
         match svc.client_for(&id, true) {
             Err(e) => self.fail(e),
             Ok(_) => self.start(&format!("testing {id}"), move || match svc.client_for(&id, true).and_then(|c| c.test()) {
-                Ok(r) => JobOut::Models { provider: id, models: r.models, ms: r.latency_ms },
+                Ok(r) => {
+                    // a Lemonade server's typed list is kept too (pictures, voices, embeddings)
+                    if svc.client_for(&id, true).is_ok_and(|c| c.cfg.kind == Kind::Lemonade) {
+                        let _ = svc.refresh_lemonade(&id);
+                    }
+                    JobOut::Models { provider: id, models: r.models, ms: r.latency_ms }
+                }
                 Err(e) => JobOut::Msg(Err(format!("{id}: {e}"))),
             }),
         }
@@ -584,7 +747,7 @@ impl SettingsApp {
 
     fn save_provider(&mut self, cx: &AppCx, form: &Form, editing: Option<String>) -> Result<(), String> {
         let id = form.value(0);
-        let kind = Kind::ALL[form.choice_idx(1)];
+        let Some(&kind) = Kind::ALL.get(form.choice_idx(1)) else { return self.save_provider_auto(cx, form, editing) };
         let url = form.value(2);
         let key = form.raw(3);
         let model = form.value(4);
@@ -701,8 +864,8 @@ impl SettingsApp {
                 FormEvent::Changed(1) if matches!(kind, FormKind::Provider(_)) => {
                     // switching type refreshes the URL default unless the user typed their own
                     let old_default: Vec<String> = Kind::ALL.iter().map(|k| k.default_base().unwrap_or("").to_string()).collect();
-                    if old_default.contains(&form.value(2)) || form.value(2).is_empty() {
-                        form.set_value(2, Kind::ALL[form.choice_idx(1)].default_base().unwrap_or(""));
+                    if let Some(k) = Kind::ALL.get(form.choice_idx(1)).filter(|_| old_default.contains(&form.value(2)) || form.value(2).is_empty()) {
+                        form.set_value(2, k.default_base().unwrap_or(""));
                     }
                     self.modal = Some(Modal::Form(kind, form));
                 }
@@ -903,6 +1066,16 @@ impl SettingsApp {
                     }).map_err(|e| e.to_string()),
                 }
             }
+            FormKind::Dc(f) => self.dc_submit(cx, &f, form),
+            FormKind::Mem(f) => self.mem_submit(*f, form),
+            FormKind::TimeServer => self.time_submit(cx, form),
+            FormKind::HostName => self.host_name_submit(cx, form),
+            FormKind::Install(d) => self.inst_submit(cx, d, form),
+            FormKind::IndicFolder(_) | FormKind::IndicSource | FormKind::IndicServer => self.indic_submit(cx, &kind, form),
+            FormKind::AgentModel(_) | FormKind::AgentCustom(_) => match self.agents_submit(cx, &kind, form) {
+                Some(r) => r,
+                None => return None,
+            },
             FormKind::NewSkill => {
                 let md = format!("---\nname: {}\ndescription: {}\ntriggers: {}\n---\n{}\n", form.value(0), form.value(1), form.value(2), form.value(3));
                 self.add_skill(cx, &md, form.choice_idx(4) == 1)
@@ -945,6 +1118,18 @@ impl SettingsApp {
     fn apply_pick(&mut self, cx: &AppCx, kind: PickKind, item: &str) {
         if !self.admin(cx) {
             return;
+        }
+        if kind == PickKind::Zone {
+            return self.time_pick(cx, item);
+        }
+        if self.agents_pick(cx, &kind, item) {
+            return;
+        }
+        if kind == PickKind::SoundOutput {
+            return self.sound_pick(cx, item);
+        }
+        if let PickKind::Lemonade(p) = kind {
+            return self.lem_pick(cx, p, item);
         }
         match kind {
             PickKind::Wifi => {
@@ -990,9 +1175,24 @@ impl SettingsApp {
                 }
                 return;
             }
+            PickKind::MacMode(k) => {
+                let Some(mode) = iyakki_devctl::mac::MacMode::ALL.into_iter().find(|m| m.label() == item) else { return };
+                let mac = self.hw.mac().clone();
+                let name = if k == iyakki_devctl::LinkKind::Wifi { "WiFi" } else { "Ethernet" };
+                match mac.set_mode(Some(k), None, mode) {
+                    Ok(_) => {
+                        cx.audit.record(&cx.session.user, "settings.network.mac", &format!("{} {}", name.to_lowercase(), mode.key()));
+                        self.hw.invalidate();
+                        self.ok(format!("Private MAC address for {name}: {}. It applies on the next connection; press a to apply it now.", mode.key()));
+                    }
+                    Err(e) => self.fail(e),
+                }
+                return;
+            }
             _ => {}
         }
         let (r, what, provider) = match &kind {
+            PickKind::Zone => return,
             PickKind::Chat(p) => (
                 Self::svc(cx).settings.lock().unwrap().update(|s| {
                     s.chat = Some(ModelChoice { provider: p.clone(), model: item.into() });
@@ -1003,7 +1203,7 @@ impl SettingsApp {
                 "chat",
                 p,
             ),
-            PickKind::Wifi | PickKind::WifiForget => return,
+            PickKind::Wifi | PickKind::WifiForget | PickKind::AgentKey(_) | PickKind::AgentModel(_) | PickKind::MacMode(_) | PickKind::Lemonade(_) | PickKind::SoundOutput => return,
             PickKind::Embed(p) => {
                 let choice = if item.starts_with("(built-in") { None } else { Some(ModelChoice { provider: p.clone(), model: item.into() }) };
                 (Self::svc(cx).settings.lock().unwrap().set_embedding(choice), "embedding", p)
@@ -1020,6 +1220,27 @@ impl SettingsApp {
     }
 
     fn apply_confirm(&mut self, cx: &AppCx, kind: ConfirmKind) {
+        if let ConfirmKind::Dc(a) = kind {
+            return self.dc_confirm(cx, a);
+        }
+        if let ConfirmKind::MacApply(iface) = kind {
+            return self.mac_apply_now(cx, iface);
+        }
+        if let ConfirmKind::Indic(act) = kind {
+            return self.indic_confirm(cx, act);
+        }
+        if let ConfirmKind::Lemonade(act) = kind {
+            return self.lem_confirm(cx, act);
+        }
+        if kind == ConfirmKind::MemApply {
+            if self.admin(cx) && self.mem.writable {
+                self.mem_apply(cx);
+            }
+            return;
+        }
+        if self.admin(cx) && self.agents_confirm(cx, &kind) {
+            return;
+        }
         let r: Result<String, String> = match &kind {
             ConfirmKind::Provider(id) if self.admin(cx) => Self::svc(cx).settings.lock().unwrap().remove_provider(id).map(|_| format!("Removed provider `{id}`.")).map_err(|e| e.to_string()),
             ConfirmKind::External(id) if self.admin(cx) => Self::svc(cx).settings.lock().unwrap().remove_external(id).map(|_| format!("Removed `{id}`.")).map_err(|e| e.to_string()),
@@ -1071,11 +1292,14 @@ impl SettingsApp {
         let (kind, target, model, voice_name, lang, has_key) = match &cur {
             Some(SpeechEngine::Http { url, model, voice, language, key_ref }) => (0, url.clone(), model.clone(), voice.clone().unwrap_or_default(), language.clone().unwrap_or_default(), key_ref.is_some()),
             Some(SpeechEngine::Command { command }) => (1, command.clone(), String::new(), String::new(), String::new(), false),
+            Some(SpeechEngine::Browser) => (2, String::new(), String::new(), String::new(), String::new(), false),
+            // an engine of this computer is chosen on the page itself (Engine, Voice); here it is a command that runs it
+            Some(SpeechEngine::Host { .. }) => (0, "http://127.0.0.1:8000/v1/audio/speech".into(), String::new(), String::new(), String::new(), false),
             None => (0, if stt { "http://127.0.0.1:8080/v1/audio/transcriptions".into() } else { "http://127.0.0.1:8000/v1/audio/speech".into() }, String::new(), String::new(), String::new(), false),
         };
         let hint = if stt { "whisper-cli -m model.bin -f {wav} -nt -np" } else { "piper -m voice.onnx -f {out}" };
         let f = Form::new(if stt { "Speech-to-text engine" } else { "Text-to-speech engine" })
-            .choice("Type", &["HTTP endpoint (OpenAI-compatible)", "Local command"], kind)
+            .choice("Type", if stt { &["HTTP endpoint (OpenAI-compatible)", "Local command"][..] } else { &["HTTP endpoint (OpenAI-compatible)", "Local command", BROWSER_CHOICE][..] }, if stt { kind.min(1) } else { kind })
             .text("URL or command", &target, hint)
             .text("Model (HTTP only)", &model, if stt { "whisper-1, tiny.en, …" } else { "tts-1, kokoro, …" })
             .secret("API key (optional, HTTP only)", if has_key { "leave empty to keep the current key" } else { "stored in the system vault" });
@@ -1092,6 +1316,12 @@ impl SettingsApp {
                 _ => None,
             }
         };
+        if !stt && form.choice_idx(0) == 2 {
+            // nothing to configure: the voices come from the browser or window in use
+            Self::svc(cx).settings.lock().unwrap().update(|st| st.voice.tts = Some(SpeechEngine::Browser)).map_err(|e| e.to_string())?;
+            cx.audit.record(&cx.session.user, "settings.voice.tts", "browser");
+            return Ok(());
+        }
         let engine = if form.choice_idx(0) == 0 {
             let key_ref = if !key.is_empty() { Some(format!("vault:{key_name}")) } else { prev_key };
             let opt = |s: String| if s.is_empty() { None } else { Some(s) };
@@ -1141,6 +1371,29 @@ impl SettingsApp {
                 Ok(()) => self.ok("Text-to-speech cleared."),
                 Err(e) => self.fail(e.to_string()),
             },
+            Key::Char('e') if self.admin(cx) => self.vo_cycle_engine(cx),
+            Key::Char('g') if self.admin(cx) => self.vo_cycle_voice(cx),
+            Key::Char('f') if self.admin(cx) => self.vo_cycle_speed(cx),
+            Key::Char('h') if self.admin(cx) => self.vo_cycle_highlight(cx),
+            Key::Char('w') if self.admin(cx) => match toggle(cx, &|v| v.align_words = !v.align_words) {
+                Ok(()) => self.ok(if Self::svc(cx).voice_settings().align_words { "Word timing: from the sound (speech-to-text matches the read words when a server is there)." } else { "Word timing: estimated." }),
+                Err(e) => self.fail(e.to_string()),
+            },
+            Key::Char('l') => {
+                self.vo_lang = (self.vo_lang + 1) % VO_LANGS.len();
+                self.vo_scroll = 0.0;
+            }
+            Key::Char('k') => {
+                cx.audit.record(&cx.session.user, "voice.recheck", "");
+                if !svc.host_tts.is_enabled() {
+                    self.fail("Looking for speech engines is switched off in this build.");
+                } else {
+                    svc.host_tts.recheck();
+                    self.ok("Looking for speech engines on this computer…");
+                }
+            }
+            Key::Char('o') => self.vo_helper_toggle(cx),
+            Key::Char(c @ '1'..='6') if self.admin(cx) => self.vo_quick(cx, (*c as u8 - b'1') as usize),
             Key::Char(c) if "mpty".contains(*c) => {
                 if !cx.session.policy.voice {
                     cx.audit.record(&cx.session.user, "voice.denied", "test");
@@ -1181,60 +1434,377 @@ impl SettingsApp {
                             Ok(format!("Heard: “{text}”"))
                         })())
                     }),
-                    _ => self.start("speaking", move || {
-                        JobOut::Msg((|| {
-                            let wav = svc.synthesize_text("This is the IYAKKI voice test.")?;
-                            let mut p = Player::start(&v.play_cmd, &wav)?;
-                            p.wait(Duration::from_secs(20));
-                            Ok("Synthesised speech and played it.".to_string())
-                        })())
-                    }),
+                    _ => self.vo_test(cx),
                 }
             }
             _ => {}
         }
     }
 
-    fn render_voice(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let v = Self::svc(cx).voice_settings();
-        let lines: [(&str, String, [u8; 4]); 6] = [
-            ("Speech-to-text", v.stt.as_ref().map_or("not set up".into(), |e| e.label()), if v.stt.is_some() { OK } else { MUTED }),
-            ("Text-to-speech", v.tts.as_ref().map_or("not set up".into(), |e| e.label()), if v.tts.is_some() { OK } else { MUTED }),
-            ("Record command", v.record_cmd.clone(), TEXT),
-            ("Play command", v.play_cmd.clone(), TEXT),
-            ("Auto-send speech", if v.auto_send { "on — transcribed text is sent immediately".into() } else { "off — text lands in the input box so you can edit it".into() }, TEXT),
-            ("Read replies aloud", if v.speak_replies { "on".into() } else { "off".into() }, TEXT),
-        ];
-        for (i, (k, val, col)) in lines.iter().enumerate() {
-            g.text(a.x, a.y + i as f32 * 28.0 * s, 14.0 * s, MUTED, k, Face::Sans);
-            let val = g.fit(15.0 * s, val, Face::Mono, a.w - 190.0 * s);
-            g.text(a.x + 180.0 * s, a.y + i as f32 * 28.0 * s, 15.0 * s, *col, &val, Face::Mono);
-        }
-        let mut y = a.y + 6.0 * 28.0 * s + 14.0 * s;
-        let notes = [
-            if cx.session.policy.voice { "Your account may use the microphone and speaker." } else { "Voice is switched off for your account (an admin can enable it in Users)." },
-            "Speech engines: an OpenAI-compatible HTTP server (OpenAI, speaches, LocalAI, whisper.cpp server) or a local command (whisper-cli, piper).",
-            "Audio never leaves the machine unless you point an engine at a remote server. Recordings are not stored.",
-        ];
-        for n in notes {
-            for l in g.wrap(14.0 * s, n, Face::Sans, a.w) {
-                g.text(a.x, y, 14.0 * s, DIM, &l, Face::Sans);
-                y += 20.0 * s;
+    // ---- reading aloud: the engines of this computer, the voice, the speed, the test and the browser voice helper
+
+    fn vo_tag(&self) -> &'static str {
+        hostvoice::lang_tag(VO_LANGS[self.vo_lang % VO_LANGS.len()])
+    }
+
+    /// The engine that reads: the chosen one, else the best found on this computer, else the browser voice of the screen.
+    fn vo_engine(&self, cx: &AppCx) -> Option<SpeechEngine> {
+        let svc = Self::svc(cx);
+        let v = svc.voice_settings();
+        let auto = if v.tts.is_none() { svc.host_tts.auto_engine(Some(self.vo_tag())) } else { None };
+        st::effective_engine_auto(&v, &HostVoice::current(), auto.as_ref())
+    }
+
+    fn vo_usable(cx: &AppCx) -> Vec<hostengines::Engine> {
+        Self::svc(cx).host_tts.report().map(|r| r.engines.iter().filter(|e| e.usable()).cloned().collect()).unwrap_or_default()
+    }
+
+    fn set_tts(&mut self, cx: &AppCx, e: Option<SpeechEngine>, what: &str) {
+        if let Some(e) = &e {
+            if let Err(m) = e.validate() {
+                self.fail(m);
+                return;
             }
         }
+        match Self::svc(cx).settings.lock().unwrap().update(|st| st.voice.tts = e) {
+            Ok(()) => {
+                cx.audit.record(&cx.session.user, "settings.voice.tts", what);
+                self.ok(format!("Text to speech: {what}."));
+            }
+            Err(e) => self.fail(e.to_string()),
+        }
+    }
+
+    /// Engine ▾: automatic (the best found), each usable engine of this computer, then the browser voice when the screen has one.
+    fn vo_cycle_engine(&mut self, cx: &AppCx) {
+        let mut seq: Vec<(Option<SpeechEngine>, String)> = vec![(None, "automatic".into())];
+        for e in Self::vo_usable(cx) {
+            seq.push((Some(e.setting()), e.kind.label().to_string()));
+        }
+        if HostVoice::current().is_ready() {
+            seq.push((Some(SpeechEngine::Browser), "browser voice".into()));
+        }
+        // the Indic neural voices (Settings → Indic voices installs them and says where their server is)
+        let indic_url = Self::indic_engine(cx).map_or_else(|| iyakki_agent::indic::models::server(&iyakki_agent::indic::models::root(Self::svc(cx).dir())), |(u, _)| u);
+        seq.push((Some(SpeechEngine::Host { engine: iyakki_agent::indic::ENGINE_ID.into(), program: Some(indic_url), voice: None }), hostengines::Kind::IndicTts.label().to_string()));
+        let cur = Self::svc(cx).voice_settings().tts;
+        let same = |a: &Option<SpeechEngine>, b: &Option<SpeechEngine>| match (a, b) {
+            (Some(SpeechEngine::Host { engine: x, .. }), Some(SpeechEngine::Host { engine: y, .. })) => x == y,
+            (a, b) => a == b,
+        };
+        let at = seq.iter().position(|(e, _)| same(e, &cur)).unwrap_or(0);
+        let (next, name) = seq[(at + 1) % seq.len()].clone();
+        self.set_tts(cx, next, &name);
+    }
+
+    /// The voices of the engine in use for the language shown: (id, name).
+    fn vo_voices(&self, cx: &AppCx) -> Vec<(String, String)> {
+        let Some(SpeechEngine::Host { engine, program, .. }) = self.vo_engine(cx) else { return Vec::new() };
+        if engine == iyakki_agent::indic::ENGINE_ID {
+            // the voices the Indic server has, for the language shown (its own gender choice: female, male)
+            let tag = self.vo_tag();
+            let url = program.filter(|p| !p.is_empty()).unwrap_or_else(|| iyakki_agent::indic::DEFAULT_URL.to_string());
+            let voices = iyakki_agent::indic::cached_voices(&url).unwrap_or_default();
+            let lang = iyakki_agent::indic::lang_code(tag);
+            return voices.into_iter().filter(|v| lang.is_none_or(|l| v.lang == l)).map(|v| (v.gender.clone(), v.label())).collect();
+        }
+        let Some(report) = Self::svc(cx).host_tts.report() else { return Vec::new() };
+        let Some(e) = hostengines::Kind::from_id(&engine).and_then(|k| report.get(k)) else { return Vec::new() };
+        let tag = self.vo_tag();
+        let mut mine: Vec<&hostengines::HVoice> = e.voices.iter().filter(|v| v.fit(tag) > 0).collect();
+        if mine.is_empty() {
+            mine = e.voices.iter().collect();
+        }
+        mine.into_iter().take(60).map(|v| (v.id.clone(), v.name.clone())).collect()
+    }
+
+    fn vo_cycle_voice(&mut self, cx: &AppCx) {
+        let Some(SpeechEngine::Host { engine, program, voice }) = self.vo_engine(cx) else {
+            self.fail("The voice is part of the engine's own settings; choose an engine of this computer (Engine) to pick its voices.");
+            return;
+        };
+        let voices = self.vo_voices(cx);
+        if voices.is_empty() {
+            self.fail("This engine lists no voices.");
+            return;
+        }
+        let at = voice.as_ref().and_then(|cur| voices.iter().position(|(id, _)| id == cur));
+        // automatic, then each voice
+        let next = match at {
+            None if voice.is_none() => Some(0),
+            None => Some(0),
+            Some(i) if i + 1 < voices.len() => Some(i + 1),
+            Some(_) => None,
+        };
+        let (new_voice, name) = match next {
+            Some(i) => (Some(voices[i].0.clone()), voices[i].1.clone()),
+            None => (None, "automatic".to_string()),
+        };
+        self.set_tts(cx, Some(SpeechEngine::Host { engine, program, voice: new_voice }), &format!("voice {name}"));
+    }
+
+    /// Sentence + word, sentence only, off: what is lit while text is read aloud (stories and chat).
+    fn vo_cycle_highlight(&mut self, cx: &AppCx) {
+        use iyakki_agent::voice::Highlight;
+        let cur = Self::svc(cx).voice_settings().highlight;
+        let next = Highlight::ALL[(Highlight::ALL.iter().position(|h| *h == cur).unwrap_or(0) + 1) % Highlight::ALL.len()];
+        match Self::svc(cx).settings.lock().unwrap().update(|st| st.voice.highlight = next) {
+            Ok(()) => {
+                cx.audit.record(&cx.session.user, "settings.voice.highlight", next.label());
+                self.ok(format!("While reading aloud: highlight {}.", next.label().to_lowercase()));
+            }
+            Err(e) => self.fail(e.to_string()),
+        }
+    }
+
+    fn vo_cycle_speed(&mut self, cx: &AppCx) {
+        const SPEEDS: [u32; 5] = [75, 100, 125, 150, 200];
+        let cur = Self::svc(cx).voice_settings().speed_pct;
+        let next = SPEEDS.iter().copied().find(|s| *s > cur).unwrap_or(SPEEDS[0]);
+        match Self::svc(cx).settings.lock().unwrap().update(|st| st.voice.speed_pct = next) {
+            Ok(()) => {
+                cx.audit.record(&cx.session.user, "settings.voice.speed", &next.to_string());
+                self.ok(format!("Speaking speed {next}%."));
+            }
+            Err(e) => self.fail(e.to_string()),
+        }
+    }
+
+    /// One-click engine `i` of the providers set up under Models.
+    fn vo_quick(&mut self, cx: &AppCx, i: usize) {
+        let Some(q) = Self::vo_quick_list(cx).get(i).cloned() else { return };
+        self.set_tts(cx, Some(q.engine), q.label.trim_start_matches("Use "));
+    }
+
+    /// Speech endpoints of the providers already set up under Models (OpenAI and compatible servers).
+    fn vo_quick_list(cx: &AppCx) -> Vec<st::QuickEngine> {
+        let providers = Self::svc(cx).settings.lock().map(|s| s.get().providers.clone()).unwrap_or_default();
+        st::quick_engines(&providers, "", &[]).into_iter().filter(|q| matches!(q.engine, SpeechEngine::Http { .. })).collect()
+    }
+
+    /// Test voice: say a sentence in the chosen language with the engine in use, and say what happened.
+    fn vo_test(&mut self, cx: &AppCx) {
+        let svc = Self::svc(cx).clone();
+        let v = svc.voice_settings();
+        let tag = self.vo_tag();
+        let speed = v.speed_pct as f32 / 100.0;
+        let hv = HostVoice::current();
+        let Some(engine) = self.vo_engine(cx) else {
+            self.fail(if svc.host_tts.is_enabled() && svc.host_tts.report().is_none() {
+                "Still looking for speech engines on this computer; try again in a moment."
+            } else {
+                "No speech engine is ready. Install one (see the list below), press Re-check, or open the voice helper in your browser."
+            });
+            return;
+        };
+        self.start("speaking", move || {
+            JobOut::Msg((|| {
+                let sample = hostengines::sample_sentence(tag);
+                match &engine {
+                    SpeechEngine::Host { engine: id, program, voice } => {
+                        let spec = hostengines::Spec::from_parts(id, program.as_deref(), voice.as_deref())?;
+                        hostengines::test_speak(&spec, tag, speed, &v.play_cmd)
+                    }
+                    SpeechEngine::Browser => {
+                        let id = hv.speak(sample, None, Some(tag), speed)?;
+                        let t = std::time::Instant::now();
+                        loop {
+                            match hv.state(id) {
+                                hostvoice::UttState::Ended => break,
+                                hostvoice::UttState::Failed(m) => return Err(m),
+                                _ if t.elapsed() > Duration::from_secs(30) => return Err("the browser did not finish speaking".into()),
+                                _ => std::thread::sleep(Duration::from_millis(40)),
+                            }
+                        }
+                        Ok(format!("Spoke a sentence in {} with the browser voice.", hostengines::lang_name(tag)))
+                    }
+                    other => {
+                        let wav = svc.synthesize_with_opts(sample, &voice::SpeakOpts { voice: None, speed, lang: Some(tag.to_string()) })?;
+                        let mut p = Player::start(&v.play_cmd, &wav)?;
+                        p.wait(Duration::from_secs(20));
+                        Ok(format!("Synthesised a sentence with {} and played it.", other.label()))
+                    }
+                }
+            })())
+        });
+    }
+
+    /// Open the voice helper (a tab of the default browser that speaks) or disconnect it.
+    fn vo_helper_toggle(&mut self, cx: &AppCx) {
+        let svc = Self::svc(cx);
+        if !cx.session.policy.voice {
+            cx.audit.record(&cx.session.user, "voice.denied", "helper");
+            self.fail("Voice is not enabled for your account.");
+            return;
+        }
+        if matches!(svc.host_tts.helper_state(), Some(iyakki_agent::voicehelper::HelperState::Waiting | iyakki_agent::voicehelper::HelperState::Connected)) {
+            svc.host_tts.helper_stop();
+            cx.audit.record(&cx.session.user, "voice.helper", "disconnected");
+            self.ok("Voice helper disconnected.");
+            return;
+        }
+        match svc.host_tts.helper_open(HostVoice::current(), None) {
+            Ok(_) => {
+                cx.audit.record(&cx.session.user, "voice.helper", "opened");
+                self.ok("Opening the voice helper in your browser. Click the button on that page once to allow sound.");
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
+    fn render_voice(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+        let svc = Self::svc(cx);
+        let v = svc.voice_settings();
+        let admin = cx.session.policy.manage_settings;
+        let hv = HostVoice::current();
+        svc.host_tts.ensure();
+        let report = svc.host_tts.report();
+        let engine = self.vo_engine(cx);
+        let tag = self.vo_tag();
+        let fs = 14.0 * s;
+        let bs = 13.0 * s;
+        // ---- the controls, always in view
+        let (status, col) = match (&engine, st::tts_status_auto(&v, cx.session.policy.voice, &std::env::var("PATH").unwrap_or_default(), &hv, if v.tts.is_none() { svc.host_tts.auto_engine(Some(tag)) } else { None }.as_ref())) {
+            (_, st::TtsStatus::Ready { engine }) => (format!("Reading aloud with {engine}."), OK),
+            (None, _) if svc.host_tts.scanning() || (svc.host_tts.is_enabled() && report.is_none()) => ("Looking for speech engines on this computer…".to_string(), MUTED),
+            (_, other) => (st::status_text(&other), ERR),
+        };
+        let mut y = a.y;
+        for l in g.wrap(15.0 * s, &status, Face::Bold, a.w).into_iter().take(2) {
+            g.text(a.x, y, 15.0 * s, col, &l, Face::Bold);
+            y += 20.0 * s;
+        }
+        y += 4.0 * s;
+        let engine_name = match (&v.tts, &engine) {
+            (Some(e), _) => e.label(),
+            (None, Some(SpeechEngine::Browser)) => "automatic: browser voice".to_string(),
+            (None, Some(e)) => format!("automatic: {}", e.label()),
+            (None, None) => "automatic: none found".to_string(),
+        };
+        let voice_name = match &engine {
+            Some(SpeechEngine::Host { voice: Some(id), .. }) => std::path::Path::new(id).file_stem().map_or(id.clone(), |x| x.to_string_lossy().to_string()),
+            Some(SpeechEngine::Host { .. }) => "automatic".to_string(),
+            _ => "set by the engine".to_string(),
+        };
+        let chips: Vec<(String, char)> = vec![
+            (format!("Engine: {} ▾", g.fit(bs, &engine_name, Face::Bold, (a.w * 0.6).max(90.0 * s))), 'e'),
+            (format!("Voice: {} ▾", g.fit(bs, &voice_name, Face::Bold, (a.w * 0.4).max(80.0 * s))), 'g'),
+            (format!("Language: {} ▾", VO_LANGS[self.vo_lang % VO_LANGS.len()]), 'l'),
+            (format!("Speed: {}% ▾", v.speed_pct), 'f'),
+            (format!("Highlight: {} ▾", v.highlight.label()), 'h'),
+            (format!("Word timing: {} ▾", if v.align_words { "from the sound" } else { "estimated" }), 'w'),
+        ];
+        y += vo_flow(g, a.x, y, a.w, bs, &chips, |c| if matches!(c, 'e' | 'g' | 'f' | 'h' | 'w') && !admin { DIM } else { ACCENT }, s);
+        let helper = svc.host_tts.helper_state();
+        let helper_on = matches!(helper, Some(iyakki_agent::voicehelper::HelperState::Waiting | iyakki_agent::voicehelper::HelperState::Connected));
+        let acts: Vec<(String, char)> = vec![
+            ("Test voice".into(), 'y'),
+            ("Re-check engines".into(), 'k'),
+            (if helper_on { "Disconnect voice helper".into() } else { "Open voice helper in your browser".into() }, 'o'),
+        ];
+        y += vo_flow(g, a.x, y, a.w, bs, &acts, |c| if c == 'y' { ACCENT } else { TEXT }, s);
+        let helper_line = match &helper {
+            Some(iyakki_agent::voicehelper::HelperState::Connected) => "Voice helper connected: your browser is speaking for IYAKKI.".to_string(),
+            Some(iyakki_agent::voicehelper::HelperState::Waiting) => "Voice helper: waiting for your browser to open the page (click the button on it once).".to_string(),
+            Some(iyakki_agent::voicehelper::HelperState::Closed(why)) => format!("Voice helper closed: {why}"),
+            None => "Voice helper: reads aloud with your web browser's voices when this window has none (nothing leaves this computer).".to_string(),
+        };
+        for l in g.wrap(12.0 * s, &helper_line, Face::Sans, a.w).into_iter().take(2) {
+            g.text(a.x, y, 12.0 * s, if matches!(helper, Some(iyakki_agent::voicehelper::HelperState::Connected)) { OK } else { MUTED }, &l, Face::Sans);
+            y += 17.0 * s;
+        }
+        y += 8.0 * s;
+        // ---- the rest scrolls
+        let rest = R::new(a.x, y, a.w, (a.y + a.h - y).max(40.0 * s));
+        let mut yy = rest.y - self.vo_scroll;
+        let mut used = 0.0f32;
+        let put = |g: &mut Gfx, yy: &mut f32, used: &mut f32, text: &str, size: f32, col: [u8; 4], face: Face, gap: f32| {
+            for l in g.wrap(size, text, face, rest.w) {
+                g.text(rest.x, *yy, size, col, &l, face);
+                *yy += size * 1.45;
+                *used += size * 1.45;
+            }
+            *yy += gap;
+            *used += gap;
+        };
+        g.clipped(rest, |g| {
+            put(g, &mut yy, &mut used, "Speech engines found on this computer", 15.0 * s, TEXT, Face::Bold, 2.0 * s);
+            match &report {
+                None if svc.host_tts.is_enabled() => put(g, &mut yy, &mut used, "Looking… (this runs once in the background)", fs, MUTED, Face::Sans, 6.0 * s),
+                None => put(g, &mut yy, &mut used, "Looking for engines is off in this program.", fs, MUTED, Face::Sans, 6.0 * s),
+                Some(r) => {
+                    for (line, col, size) in vo_engine_lines(r, tag) {
+                        put(g, &mut yy, &mut used, &line, size * s, col, Face::Sans, 3.0 * s);
+                    }
+                    put(g, &mut yy, &mut used, "", 4.0, DIM, Face::Sans, 4.0 * s);
+                }
+            }
+            let quick = Self::vo_quick_list(cx);
+            if !quick.is_empty() {
+                put(g, &mut yy, &mut used, "Speech from the providers you set up under Models (press the number)", fs, MUTED, Face::Sans, 2.0 * s);
+                let items: Vec<(String, char)> = quick.iter().enumerate().take(6).map(|(i, q)| (format!("{} {}", i + 1, q.label), (b'1' + i as u8) as char)).collect();
+                let h = vo_flow(g, rest.x, yy, rest.w, bs, &items, |_| if admin { ACCENT } else { DIM }, s);
+                yy += h;
+                used += h;
+            }
+            let timing = match (v.align_words, svc.speech_aligner()) {
+                (false, _) => "estimated (turned off)".to_string(),
+                (true, Some(SpeechEngine::Http { url, model, .. })) => format!("aligned with {model} on {} ({})", iyakki_sec::url_host(&url).unwrap_or_default(), iyakki_agent::speechtime::locality(&url).label()),
+                (true, _) => "estimated (no speech-to-text server on this computer or allowed)".to_string(),
+            };
+            let lines: [(&str, String, [u8; 4]); 8] = [
+                ("Speech-to-text", v.stt.as_ref().map_or("not set up".into(), |e| e.label()), if v.stt.is_some() { OK } else { MUTED }),
+                ("Text-to-speech", match &v.tts {
+                    Some(e) => e.label(),
+                    None => engine.as_ref().map_or("not set up".into(), |e| format!("{} (automatic)", e.label())),
+                }, if v.tts.is_some() || engine.is_some() { OK } else { MUTED }),
+                ("Record command", v.record_cmd.clone(), TEXT),
+                ("Play command", v.play_cmd.clone(), TEXT),
+                ("Auto-send speech", if v.auto_send { "on — transcribed text is sent immediately".into() } else { "off — text lands in the input box so you can edit it".into() }, TEXT),
+                ("Read replies aloud", if v.speak_replies { "on".into() } else { "off".into() }, TEXT),
+                ("Highlight while reading", v.highlight.label().to_lowercase(), TEXT),
+                ("Word timing", timing, TEXT),
+            ];
+            yy += 8.0 * s;
+            for (k, val, col) in lines.iter() {
+                g.text(rest.x, yy, fs, MUTED, k, Face::Sans);
+                let val = g.fit(15.0 * s, val, Face::Mono, rest.w - 190.0 * s);
+                g.text(rest.x + 180.0 * s, yy, 15.0 * s, *col, &val, Face::Mono);
+                yy += 26.0 * s;
+                used += 26.0 * s;
+            }
+            yy += 8.0 * s;
+            let notes = [
+                if cx.session.policy.voice { "Your account may use the microphone and speaker." } else { "Voice is switched off for your account (an admin can enable it in Users)." },
+                "Reading aloud works with no setup when this computer has a speech engine (espeak-ng, speech-dispatcher, piper, macOS say, Windows speech): the best one is used unless you choose another. docs/VOICE.md lists what to install.",
+                "Speech-to-text and other engines: an OpenAI-compatible HTTP server (OpenAI, speaches, LocalAI, whisper.cpp server) or a local command (whisper-cli, piper).",
+                "Audio never leaves the machine unless you point an engine at a remote server. Recordings are not stored.",
+            ];
+            for n in notes {
+                put(g, &mut yy, &mut used, n, 13.0 * s, DIM, Face::Sans, 4.0 * s);
+            }
+        });
+        self.vo_max = (used + 60.0 * s - rest.h).max(0.0);
+        self.vo_scroll = self.vo_scroll.clamp(0.0, self.vo_max);
     }
 
     /// Number of selectable rows on the current tab.
     fn list_len(&mut self, cx: &AppCx) -> usize {
         match self.tab() {
             Tab::Models => Self::providers(cx).len(),
+            Tab::Agents => Self::agent_ids(cx).len(),
             Tab::Rag => Self::externals(cx).len(),
             Tab::Vault => self.secret_names(cx).map_or(0, |n| n.len()),
             Tab::SecretProviders => Self::secret_providers(cx).len(),
             Tab::Skills => Self::svc(cx).skills.list(&cx.session.user).len(),
             Tab::Storage => self.devices.len(),
             Tab::Network | Tab::Bluetooth | Tab::Display | Tab::Sound => self.dev_rows().len(),
-            Tab::Voice | Tab::Account | Tab::Browser => 0,
+            Tab::HostAccess => Self::host_rows(cx).len(),
+            Tab::Developer => Self::devmode_keys(cx).len(),
+            Tab::DevCluster => self.dc_len(),
+            Tab::Install => self.inst_len(),
+            Tab::IndicVoices => Self::indic_len(),
+            Tab::Voice | Tab::Account | Tab::Browser | Tab::Memory | Tab::Time | Tab::HostName => 0,
         }
     }
 
@@ -1372,7 +1942,79 @@ impl SettingsApp {
 
     fn dev_rows(&mut self) -> Vec<DevRow> {
         let ticks = self.ticks;
+        // a window on another computer: the host operating system owns the MAC addresses
+        let host = self.storage.virtual_disks.is_some();
+        self.hw.set_host_managed(host);
         self.dev_tab().map(|t| self.hw.rows(t, ticks)).unwrap_or_default()
+    }
+
+    fn selected_target(&mut self) -> Option<Target> {
+        let sel = self.sel();
+        self.dev_rows().get(sel).map(|r| r.target.clone())
+    }
+
+    /// The adapter the selected Network row belongs to.
+    fn selected_adapter(&mut self) -> Option<(String, iyakki_devctl::LinkKind)> {
+        match self.selected_target()? {
+            Target::Ethernet(n) => Some((n, iyakki_devctl::LinkKind::Ethernet)),
+            Target::Wifi(n, _) => Some((n, iyakki_devctl::LinkKind::Wifi)),
+            Target::Mac(n, k) => Some((n, k)),
+            _ => None,
+        }
+    }
+
+    /// `m` on the Network page: choose the private MAC address mode for the kind of adapter that is selected.
+    fn choose_mac_mode(&mut self, cx: &AppCx) {
+        if !self.admin(cx) {
+            return self.fail("Only administrators can change the network.");
+        }
+        if self.hw.mac().host_managed {
+            return self.fail("The MAC address is managed by the host operating system here (this is a window on another computer).");
+        }
+        let Some((_, kind)) = self.selected_adapter() else { return self.fail("Select an Ethernet or WiFi row first.") };
+        let title = format!("Private MAC address for {}", if kind == iyakki_devctl::LinkKind::Wifi { "WiFi" } else { "Ethernet" });
+        let items = iyakki_devctl::mac::MacMode::ALL.iter().map(|m| m.label().to_string()).collect();
+        self.modal = Some(Modal::Pick(PickKind::MacMode(kind), Picker::new(&title, items)));
+    }
+
+    /// `a` on the Network page: ask before changing the selected adapter's address now.
+    fn ask_mac_apply(&mut self, cx: &AppCx) {
+        if !self.admin(cx) {
+            return self.fail("Only administrators can change the network.");
+        }
+        if self.hw.mac().host_managed {
+            return self.fail("The MAC address is managed by the host operating system here (this is a window on another computer).");
+        }
+        let Some((iface, _)) = self.selected_adapter() else { return self.fail("Select an Ethernet or WiFi row first.") };
+        let warn = if self.hw.mac().carries_session(&iface) { format!(" WARNING: {iface} carries the connection you are using now (SSH or the remote screen); it will drop and you may need to reconnect.") } else { String::new() };
+        let text = format!("Change the MAC address of {iface} now? The link goes down for a few seconds and reconnects with the address the setting calls for.{warn} Press y to continue.");
+        self.modal = Some(Modal::Confirm(ConfirmKind::MacApply(iface), text));
+    }
+
+    /// The `y` of the question above: change the address and reconnect, in the background.
+    fn mac_apply_now(&mut self, cx: &AppCx, iface: String) {
+        if !self.admin(cx) {
+            return;
+        }
+        let mac = self.hw.mac().clone();
+        let (w, known) = (self.wifi.wifi.clone(), self.wifi.known.clone());
+        cx.audit.record(&cx.session.user, "settings.network.mac.apply", &iface);
+        self.hw.invalidate();
+        self.start("changing the MAC address", move || {
+            JobOut::Msg((|| {
+                let wifi = iyakki_devctl::links(&mac.roots).iter().any(|l| l.name == iface && l.kind == iyakki_devctl::LinkKind::Wifi);
+                let ssid = if wifi { w.current_ssid(&iface) } else { None };
+                let said = mac.apply_now(&iface, ssid.as_deref(), true)?;
+                if wifi {
+                    let eff = ssid.or_else(|| mac.preferred_ssid());
+                    let mode = mac.config().mode_for(iyakki_devctl::LinkKind::Wifi, &iface, eff.as_deref());
+                    w.apply_with(&iface, &known.list(), mode, true)?;
+                } else {
+                    w.dhcp(&iface, true)?;
+                }
+                Ok(format!("{said} Reconnecting."))
+            })())
+        });
     }
 
     /// `w` on the Network page: look for networks.
@@ -1409,13 +2051,23 @@ impl SettingsApp {
     fn join_wifi(&mut self, cx: &AppCx, k: iyakki_devctl::wifi::Known) {
         let Some(iface) = self.wifi.iface() else { return self.fail("This computer has no WiFi adapter.") };
         let (w, store) = (self.wifi.wifi.clone(), self.wifi.known.clone());
+        let mac = iyakki_devctl::mac::MacEnv { roots: self.wifi.roots.clone(), ..self.hw.mac().clone() };
         cx.audit.record(&cx.session.user, "settings.wifi.join", &k.ssid);
         let ssid = k.ssid.clone();
         self.start("joining the network", move || {
             JobOut::Msg((|| {
                 store.add(k)?;
-                w.apply(&iface, &store.list())?;
-                Ok(format!("Joining {ssid}. It is remembered and tried first the next time."))
+                // the private address for this network (when one is chosen) before anything is sent from the adapter
+                let mode = mac.config().mode_for(iyakki_devctl::LinkKind::Wifi, &iface, Some(&ssid));
+                let (mut changed, mut note) = (false, String::new());
+                if !mac.host_managed && (mode.is_private() || mac.infos().iter().any(|i| i.iface == iface && i.private)) {
+                    match mac.apply_now(&iface, Some(&ssid), true) {
+                        Ok(m) => changed = !m.contains("already has"),
+                        Err(e) => note = format!(" Private MAC address not applied ({e}); the adapter keeps the address it has."),
+                    }
+                }
+                w.apply_with(&iface, &store.list(), mode, changed)?;
+                Ok(format!("Joining {ssid}. It is remembered and tried first the next time.{note}"))
             })())
         });
     }
@@ -1435,9 +2087,15 @@ impl SettingsApp {
 
     fn handle_hw(&mut self, k: &Key, cx: &AppCx) {
         let Some(tab) = self.dev_tab() else { return };
+        if tab == DevTab::Sound && self.sound_key(k, cx) {
+            return;
+        }
         let len = self.dev_rows().len();
         match k {
             Key::Char('w') if tab == DevTab::Network => self.scan_wifi(cx),
+            Key::Char('m') if tab == DevTab::Network => self.choose_mac_mode(cx),
+            Key::Char('a') if tab == DevTab::Network => self.ask_mac_apply(cx),
+            Key::Enter | Key::Char(' ') if tab == DevTab::Network && matches!(self.selected_target(), Some(Target::Mac(..))) => self.choose_mac_mode(cx),
             Key::Char('u') if tab == DevTab::Display => self.change_ui_size(true, cx),
             Key::Char('U') if tab == DevTab::Display => self.change_ui_size(false, cx),
             Key::Up => self.move_sel(-1, len),
@@ -1468,18 +2126,28 @@ impl SettingsApp {
 
     fn render_hw(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
         let note = match self.tab() {
-            Tab::Network => "w looks for WiFi networks and joins one (it is remembered and tried first next time). A WiFi in /etc/iyakki/net.conf still works.",
+            Tab::Network => "w joins a WiFi network. m chooses the private MAC address (off, per network, random): it applies on the next connection, a applies it now (reconnects). Off keeps DHCP reservations working.",
             Tab::Bluetooth => "Pairing keyboards, mice and speakers is planned; today you can see and switch the adapter.",
             Tab::Display => "The desktop uses the screen's best mode. Choosing another resolution needs direct display control, which is planned.",
-            _ => "Each card's playback volume. The speaker test is on the Voice tab.",
+            _ => "o chooses the output (Automatic follows what is connected) · t plays a test chime · the IYAKKI volume is applied by IYAKKI (HDMI has no hardware volume).",
         };
         let admin = cx.session.policy.manage_settings;
+        if self.tab() == Tab::Sound {
+            self.hw.set_sound(Self::svc(cx).sound_settings());
+        }
         let rows = self.dev_rows();
         let mut y = a.y;
         if self.tab() == Tab::Display {
             y += self.render_ui_size_card(g, R::new(a.x, y, a.w, 74.0 * s), s, cx) + 10.0 * s;
         }
-        for (i, r) in rows.iter().enumerate() {
+        // a small screen: rows above are left out until the selected one is on the page
+        let step = |r: &DevRow| if r.slider.is_some() { 90.0 * s } else { 64.0 * s };
+        let sel = self.sel().min(rows.len().saturating_sub(1));
+        let mut first = 0;
+        while first < sel && y + rows[first..sel].iter().map(step).sum::<f32>() > a.y + a.h - 70.0 * s {
+            first += 1;
+        }
+        for (i, r) in rows.iter().enumerate().skip(first) {
             if y > a.y + a.h - 70.0 * s {
                 break;
             }
@@ -1513,6 +2181,10 @@ impl SettingsApp {
     fn hw_slider(&mut self, id: usize, x: f32, w: f32, cx: &AppCx) {
         let row = id - SLIDER_HW;
         let Some(tab) = self.dev_tab() else { return };
+        if tab == DevTab::Sound && matches!(self.dev_rows().get(row).map(|r| &r.target), Some(Target::SoftVolume)) {
+            self.sel[self.tab] = row;
+            return self.sound_set_volume(cx, controls::value_at(x, w, 0, 100, 5) as u32);
+        }
         if !self.admin(cx) {
             return;
         }
@@ -1597,6 +2269,17 @@ impl SettingsApp {
         controls::info_row(g, R::new(a.x, y, a.w - 130.0 * s, 44.0 * s), s, c.search.name(), "words typed in the address bar are searched here (Google, Bing and DuckDuckGo ask for checks this browser cannot pass)");
         g.button(a.x + a.w - 120.0 * s, y + 6.0 * s, 15.0 * s, "Change (e)", ACCENT, Event::Key(Key::Char('e')));
         y += 54.0 * s;
+        y += controls::section_title(g, a.x, y, s, "The assistant in your browser");
+        {
+            let p = &cx.session.policy;
+            let (title, help) = match p.browser_agent {
+                iyakki_sec::policy::BrowserAgent::Off => ("Off for your account".to_string(), "The assistant cannot use your browser. An administrator can change this in Users (press w).".to_string()),
+                iyakki_sec::policy::BrowserAgent::ReadOnly => ("Read-only".to_string(), "The assistant can open pages in your browser, read them, take pictures and scroll, after you allow each site once. It cannot click or type. An administrator can allow more in Users (press w).".to_string()),
+                iyakki_sec::policy::BrowserAgent::Interactive => ("Read, click and type, with your approval".to_string(), format!("The assistant asks you before it acts on a site: approve all actions on that site for the session, one by one, or deny. Payments, deletions and sign-in codes are always yours. At most {} actions and {} minutes per request.", p.browser_max_actions, p.browser_max_minutes)),
+            };
+            controls::info_row(g, R::new(a.x, y, a.w, 56.0 * s), s, &title, &help);
+            y += 66.0 * s;
+        }
         y += controls::section_title(g, a.x, y, s, "Sites allowed to run scripts");
         if c.js_sites.is_empty() {
             g.text(a.x + 4.0 * s, y, 14.0 * s, DIM, if c.js_all { "None needed: scripts run everywhere." } else { "None yet. Press j on a page in the browser to allow one." }, Face::Sans);
@@ -1703,6 +2386,11 @@ impl SettingsApp {
                 let f = Form::new("Agent token price").text("US cents per million tokens", &cur_price.to_string(), "0 = free or untracked; used for agent cost budgets");
                 self.open_form(FormKind::TokenPrice, f);
             }
+            Key::Char('f') if self.admin(cx) => self.detect_servers(cx),
+            Key::Char('l') if cur.as_ref().is_some_and(|p| p.kind == Kind::Lemonade) => {
+                let id = cur.as_ref().expect("checked").id.clone();
+                self.lem_open(cx, &id);
+            }
             Key::Char(c) if cur.is_some() && "edkmbxtc".contains(*c) => {
                 let p = cur.expect("checked");
                 match *c {
@@ -1729,6 +2417,12 @@ impl SettingsApp {
                             Ok(()) => self.ok(format!("{} {}.", p.id, if p.enabled { "disabled" } else { "enabled" })),
                             Err(e) => self.fail(e.to_string()),
                         }
+                    }
+                    'b' if p.kind == Kind::Lemonade && !p.model_kinds.is_empty() => {
+                        // a Lemonade server says which of its models make embeddings
+                        let mut items: Vec<String> = p.model_kinds.iter().filter(|(_, k)| k.as_str() == "embeddings").map(|(m, _)| m.clone()).collect();
+                        items.insert(0, "(built-in hashing embeddings)".into());
+                        self.modal = Some(Modal::Pick(PickKind::Embed(p.id.clone()), Picker::new(&format!("Embedding model on {}", p.id), items)));
                     }
                     'm' | 'b' => {
                         if p.models.is_empty() {
@@ -1940,32 +2634,100 @@ impl App for SettingsApp {
             return "Esc cancel".into();
         }
         match self.tab() {
-            Tab::Models => "a add · e edit · d delete · t test · m chat model · b embeddings · k key · x on/off · c test chat",
+            Tab::Models => "a add · f detect Ollama/Lemonade · e edit · d delete · t test · m chat model · b embeddings · k key · x on/off · c test chat · l Lemonade models",
+            Tab::Agents => "d detect · i install · l login · o logout · k API key · m model · a Auto · u use for new chats · t test · n add custom · e edit · x hide/show",
             Tab::Rag => "a add backend · t test · r reindex · i ingest documents · / find a page",
             Tab::Vault => "n new · d delete · Tab system/personal · l lock · f key file",
             Tab::Skills => "c add from clipboard · a quick create · i import file · d delete",
             Tab::Network => "Enter turn on/off · w join a WiFi network · r look again",
             Tab::Bluetooth => "Enter turn on/off · r look again",
             Tab::Display => "u bigger text · U smaller text · + brighter · − dimmer · r look again",
-            Tab::Sound => "+ louder · − quieter · m mute · r look again",
+            Tab::Sound => "o output · t test sound · + louder · − quieter · m mute · Enter use the selected output · r look again",
             Tab::Browser => "a scripts everywhere · i pictures · s styles · c cookies · f forget the allowed sites",
+            Tab::DevCluster => "t test · d my default · w workspace default · k next workspace · h hide/show · x disconnect · g registry · P platform services (Gitea, private store) · v vault profile · r look again · s set up · b/o/e start/stop/restart · l logs",
             Tab::Storage if self.storage.virtual_disks.is_some() => "n new virtual disk · x delete it · m make this disk the data disk (erases it) · r rescan",
             Tab::Storage => "m make this disk the data disk (erases it) · r rescan · b reboot",
-            Tab::Voice => "s speech-to-text · v text-to-speech · c commands · m mic test · p speaker test · t STT test · y TTS test",
+            Tab::Memory => "z zram · c compressor · w swappiness · f swap file · x zswap · p preview · y apply now · v save for next boots · r read again",
+            Tab::Time => "h 12/24-hour · s seconds · z time zone · u machine's own zone · n network time on/off · c time server · y ask the server now · b set the clock to the network time",
+            Tab::HostName => "e change the name · y apply now and keep it · v save for next boots · r read again",
+            Tab::Developer => "e on/off · h switch-off time · p pair a computer · c cancel the code · Up/Down choose · x revoke · l activity log",
+            Tab::Install => "Up/Down choose a disk · i install (erases it) · p show the plan · t partition table (Auto/GPT/MBR) · r look again · b restart",
+            Tab::Voice => "s speech-to-text · v text-to-speech · c commands · m mic test · p speaker test · t STT test · y test voice · e engine · g voice · l language · f speed · k re-check · o voice helper",
+            Tab::IndicVoices => "Up/Down choose a language · d download (asks first) · x delete · u from a folder or USB stick · b where bundles are published · a voice server address · e use for reading on/off · g female/male · y test voice · c check the server · k cancel a download",
             Tab::SecretProviders => "a add · t test · d delete",
+            Tab::HostAccess => "a share a folder · o options · m read-only/read-write · c convert to a copy · u unlink · i import files · l audit trail",
             Tab::Account => "p change password · u bigger text · U smaller text",
         }
         .into()
     }
 
+    fn open_item(&mut self, item: &str, cx: &AppCx) {
+        // `tab:network` and the like: another part of the shell (the Devices popover, the clock) asks for one page
+        if let Some(name) = item.strip_prefix("tab:") {
+            let want = match name {
+                "network" => Some(Tab::Network),
+                "bluetooth" => Some(Tab::Bluetooth),
+                "display" => Some(Tab::Display),
+                "sound" => Some(Tab::Sound),
+                "storage" => Some(Tab::Storage),
+                "time" => Some(Tab::Time),
+                "hostname" => Some(Tab::HostName),
+                "developer" => Some(Tab::Developer),
+                _ => None,
+            };
+            if let Some(i) = want.and_then(|t| self.tabs.iter().position(|x| *x == t)) {
+                self.tab = i;
+            }
+            return;
+        }
+        if item == "voice" {
+            if let Some(i) = self.tabs.iter().position(|t| *t == Tab::Voice) {
+                self.tab = i;
+                self.vo_scroll = 0.0;
+                cx.services.host_tts.ensure();
+            }
+        }
+        if let Some(id) = item.strip_prefix("platform:") {
+            if let Some(i) = self.tabs.iter().position(|t| *t == Tab::DevCluster) {
+                self.tab = i;
+                self.dc_open_platform(cx, Some(id));
+            }
+        }
+    }
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
         if matches!(ev, Event::Tick) {
             self.ticks += 1;
             self.poll(cx);
+            self.host_dialog_event(ev);
+            if self.tab() == Tab::DevCluster {
+                self.dc_overlay_event(ev, cx);
+                self.dc_prepare(cx);
+            }
+            if self.dc_platform_open() {
+                self.dc_platform_event(ev);
+            }
+            return Flow::Stay;
+        }
+        if self.tab() == Tab::DevCluster && self.dc_platform_open() {
+            self.dc_platform_event(ev);
+            return Flow::Stay;
+        }
+        if self.tab() == Tab::DevCluster && self.dc_has_overlay() {
+            self.dc_overlay_event(ev, cx);
+            return Flow::Stay;
+        }
+        // a Host access dialog takes every key and click while it is open
+        if self.host_dialog_event(ev) {
             return Flow::Stay;
         }
         if self.modal.is_some() {
             self.handle_modal(ev, cx);
+            return Flow::Stay;
+        }
+        if self.tab() == Tab::Memory && self.memory_event(ev) {
+            return Flow::Stay;
+        }
+        if self.tab() == Tab::Install && self.inst.plan.handle(ev) {
             return Flow::Stay;
         }
         match ev {
@@ -1984,6 +2746,8 @@ impl App for SettingsApp {
             }
             Event::AreaAt(id, x, _) => self.slider_click(*id, *x, cx),
             // a button on a slider card: select that row, then press the key on it
+            // a model of the Lemonade panel on Settings → Models
+            Event::Sub(i, Key::Char('L')) if self.tab() == Tab::Models => self.lem_chip(*i as usize, cx),
             Event::Sub(row, k) if self.dev_tab().is_some() => {
                 self.sel[self.tab] = *row as usize;
                 self.handle_hw(k, cx);
@@ -1991,6 +2755,9 @@ impl App for SettingsApp {
             Event::Row(i) => {
                 let len = self.list_len(cx);
                 self.sel[self.tab] = (*i).min(len.saturating_sub(1));
+            }
+            Event::Scroll(d) if self.tab() == Tab::Voice && !self.nav_rect.contains(self.mouse.0, self.mouse.1) => {
+                self.vo_scroll = (self.vo_scroll - *d as f32 * 40.0 * self.nav_s).clamp(0.0, self.vo_max);
             }
             Event::Scroll(d) => {
                 if self.nav_rect.contains(self.mouse.0, self.mouse.1) {
@@ -2011,15 +2778,24 @@ impl App for SettingsApp {
             Event::Key(Key::Right) => self.tab = (self.tab + 1).min(self.tabs.len() - 1),
             Event::Key(other) => match self.tab() {
                 Tab::Models => self.handle_models(other, cx),
+                Tab::Agents => self.handle_agents(other, cx),
                 Tab::Rag => self.handle_rag(other, cx),
                 Tab::Vault => self.handle_vault(other, cx),
                 Tab::Skills => self.handle_skills(other, cx),
                 Tab::Storage => self.handle_storage(other, cx),
                 Tab::Network | Tab::Bluetooth | Tab::Display | Tab::Sound => self.handle_hw(other, cx),
                 Tab::Voice => self.handle_voice(other, cx),
+                Tab::IndicVoices => self.handle_indic(other, cx),
                 Tab::SecretProviders => self.handle_secret_providers(other, cx),
                 Tab::Account => self.handle_account(other, cx),
                 Tab::Browser => self.handle_browser(other, cx),
+                Tab::DevCluster => self.handle_devcluster(other, cx),
+                Tab::HostAccess => self.handle_host(other, cx),
+                Tab::Memory => self.handle_memory(other, cx),
+                Tab::Time => self.handle_time(other, cx),
+                Tab::HostName => self.handle_host_name(other, cx),
+                Tab::Developer => self.handle_developer(other, cx),
+                Tab::Install => self.handle_install(other, cx),
             },
             _ => {}
         }
@@ -2051,15 +2827,24 @@ impl App for SettingsApp {
         let body = R::new(x, area.y + bar_h, w, area.h - bar_h - 40.0 * s - btn_h);
         match self.tab() {
             Tab::Models => self.render_models(g, body, s, cx),
+            Tab::Agents => self.render_agents(g, body, s, cx),
             Tab::Rag => self.render_rag(g, body, s, cx),
             Tab::Vault => self.render_vault(g, body, s, cx),
             Tab::Skills => self.render_skills(g, body, s, cx),
             Tab::Storage => self.render_storage(g, body, s, cx),
             Tab::Network | Tab::Bluetooth | Tab::Display | Tab::Sound => self.render_hw(g, body, s, cx),
             Tab::Voice => self.render_voice(g, body, s, cx),
+            Tab::IndicVoices => self.render_indic(g, body, s, cx),
             Tab::SecretProviders => self.render_secret_providers(g, body, s, cx),
             Tab::Account => self.render_account(g, body, s, cx),
             Tab::Browser => self.render_browser(g, body, s, cx),
+            Tab::DevCluster => self.render_devcluster(g, body, s, cx),
+            Tab::HostAccess => self.render_host(g, body, s, cx),
+            Tab::Memory => self.render_memory(g, body, s, cx),
+            Tab::Time => self.render_time(g, body, s, cx),
+            Tab::HostName => self.render_host_name(g, body, s, cx),
+            Tab::Developer => self.render_developer(g, body, s, cx),
+            Tab::Install => self.render_install(g, body, s),
         }
         self.render_buttons(g, x, area.y + area.h - 36.0 * s - btn_h + 4.0 * s, w, s, admin);
         // status line
@@ -2070,9 +2855,11 @@ impl App for SettingsApp {
             crate::fx::status_line(g, x, y, w, s, m, *ok);
         }
         let modal_area = R::new(area.x, area.y, area.w, area.h);
+        self.render_host_dialog(g, modal_area, s, tick);
         match &self.modal {
             Some(Modal::Form(_, f)) => f.render(g, modal_area, s, ACCENT, blink(tick)),
             Some(Modal::Pick(_, p)) => p.render(g, modal_area, s, ACCENT),
+            Some(Modal::Confirm(ConfirmKind::Indic(act), text)) => indic_page::render_card(g, modal_area, s, act, text),
             Some(Modal::Confirm(_, text)) => render_confirm(g, modal_area, s, text, "Yes, do it"),
             None => {}
         }
@@ -2083,25 +2870,64 @@ impl App for SettingsApp {
 
 type Btn = (&'static str, [u8; 4], char);
 
+/// The languages the voice test and the voice list can be shown for.
+const VO_LANGS: [&str; 5] = ["English", "Tamil", "Hindi", "Telugu", "Malayalam"];
+
+/// What the page says about each engine: found ones with their voices and what they can do, then the unusable and missing ones
+/// with why and how to get them. (text, colour, size at scale 1)
+fn vo_engine_lines(r: &hostengines::Report, tag: &str) -> Vec<(String, [u8; 4], f32)> {
+    let mut out = Vec::new();
+    for e in &r.engines {
+        let speaks = if e.speaks(tag) { format!("speaks {}", hostengines::lang_name(tag)) } else { format!("no {} voice", hostengines::lang_name(tag)) };
+        match &e.problem {
+            None => out.push((format!("● {} · {} voices · {speaks} · {}{}", e.kind.label(), e.voices.len(), if e.kind.can_file() { "can save audio" } else { "play only: Save audio is unavailable" }, if e.kind.can_speak() { "" } else { " · needs a sound player" }), OK, 14.0)),
+            Some(why) => out.push((format!("○ {}: {why}", e.kind.label()), MUTED, 14.0)),
+        }
+    }
+    for (k, why) in &r.missing {
+        out.push((format!("○ {}: {why}", k.label()), DIM, 13.0));
+    }
+    out
+}
+
+/// Buttons that wrap; each sends its key. Returns the height used.
+fn vo_flow(g: &mut Gfx, x: f32, y: f32, w: f32, size: f32, items: &[(String, char)], col: impl Fn(char) -> [u8; 4], s: f32) -> f32 {
+    let (mut bx, mut by) = (x, y);
+    for (label, key) in items {
+        let bw = g.text_width(size, label, Face::Bold) + size * 1.7;
+        if bx > x && bx + bw > x + w {
+            bx = x;
+            by += 36.0 * s;
+        }
+        bx += g.button(bx, by, size, label, col(*key), Event::Key(Key::Char(*key))) + 8.0 * s;
+    }
+    by + 36.0 * s - y
+}
+
 impl SettingsApp {
     fn buttons_for(&self, admin: bool) -> Vec<Btn> {
         let (acc, mut_, err) = (ACCENT, TEXT, ERR);
+        if self.tab() == Tab::DevCluster && self.dc_platform_open() {
+            return vec![]; // Platform services draws its own buttons
+        }
         match (self.tab(), admin) {
-            (Tab::Models, true) => vec![("Add", acc, 'a'), ("Edit", mut_, 'e'), ("Delete", err, 'd'), ("Test", mut_, 't'), ("Chat model", mut_, 'm'), ("Embeddings", mut_, 'b'), ("Set key", mut_, 'k'), ("On/Off", mut_, 'x'), ("Agent price", mut_, 'p'), ("Test chat", mut_, 'c')],
+            (Tab::Models, true) => vec![("Add", acc, 'a'), ("Detect", acc, 'f'), ("Edit", mut_, 'e'), ("Delete", err, 'd'), ("Test", mut_, 't'), ("Chat model", mut_, 'm'), ("Embeddings", mut_, 'b'), ("Set key", mut_, 'k'), ("On/Off", mut_, 'x'), ("Agent price", mut_, 'p'), ("Test chat", mut_, 'c')],
             (Tab::Models, false) => vec![("Test", mut_, 't'), ("Test chat", mut_, 'c')],
+            (Tab::Agents, _) => vec![("Detect", acc, 'd'), ("Install", mut_, 'i'), ("Login", OK, 'l'), ("Logout", mut_, 'o'), ("API key", mut_, 'k'), ("Model", mut_, 'm'), ("Auto", mut_, 'a'), ("Use for new chats", mut_, 'u'), ("Test", mut_, 't'), ("Hide/show", mut_, 'x'), ("Add custom", mut_, 'n'), ("Edit", mut_, 'e'), ("Remove", err, 'R')],
             (Tab::Rag, true) => vec![("Add backend", acc, 'a'), ("Edit", mut_, 'e'), ("Delete", err, 'd'), ("Test", mut_, 't'), ("On/Off", mut_, 'x'), ("Reindex", mut_, 'r'), ("Ingest docs", mut_, 'i')],
             (Tab::Rag, false) => vec![("Reindex", mut_, 'r'), ("Ingest my docs", acc, 'i'), ("Test backend", mut_, 't')],
             (Tab::Vault, true) if self.section == 0 => vec![("New secret", acc, 'n'), ("Delete", err, 'd'), ("Lock now", mut_, 'l'), ("Key file", mut_, 'f')],
             (Tab::Vault, _) => vec![("New secret", acc, 'n'), ("Delete", err, 'd'), ("Reset vault", mut_, 'R')],
             (Tab::Voice, true) => vec![
                 ("Speech-to-text", acc, 's'), ("Text-to-speech", acc, 'v'), ("Commands", mut_, 'c'), ("Auto-send", mut_, 'a'), ("Speak replies", mut_, 'r'), ("Clear STT", err, 'S'), ("Clear TTS", err, 'V'),
-                ("Test mic", mut_, 'm'), ("Test speaker", mut_, 'p'), ("Test STT", mut_, 't'), ("Test TTS", mut_, 'y'),
+                ("Test mic", mut_, 'm'), ("Test speaker", mut_, 'p'), ("Test STT", mut_, 't'),
             ],
-            (Tab::Voice, false) => vec![("Test mic", mut_, 'm'), ("Test speaker", mut_, 'p'), ("Test STT", mut_, 't'), ("Test TTS", mut_, 'y')],
-            (Tab::Network, _) => vec![("Turn on/off", acc, 'e'), ("Join WiFi", acc, 'w'), ("Look again", mut_, 'r')],
+            (Tab::Voice, false) => vec![("Test mic", mut_, 'm'), ("Test speaker", mut_, 'p'), ("Test STT", mut_, 't')],
+            (Tab::IndicVoices, a) => self.indic_buttons(a),
+            (Tab::Network, _) => vec![("Turn on/off", acc, 'e'), ("Join WiFi", acc, 'w'), ("Private MAC", mut_, 'm'), ("Apply MAC now", mut_, 'a'), ("Look again", mut_, 'r')],
             (Tab::Bluetooth, _) => vec![("Turn on/off", acc, 'e'), ("Look again", mut_, 'r')],
             (Tab::Display, _) => vec![("Brighter", acc, '+'), ("Dimmer", mut_, '-'), ("Look again", mut_, 'r')],
-            (Tab::Sound, _) => vec![("Louder", acc, '+'), ("Quieter", mut_, '-'), ("Mute", mut_, 'm'), ("Look again", mut_, 'r')],
+            (Tab::Sound, _) => vec![("Output", acc, 'o'), ("Test sound", acc, 't'), ("Louder", mut_, '+'), ("Quieter", mut_, '-'), ("Mute", mut_, 'm'), ("Look again", mut_, 'r')],
             (Tab::Storage, _) if self.storage.virtual_disks.is_some() => vec![("New virtual disk", acc, 'n'), ("Delete it", err, 'x'), ("Make data disk", ERR, 'm'), ("Rescan", TEXT, 'r')],
             (Tab::Storage, _) => vec![("Make data disk", ERR, 'm'), ("Rescan", TEXT, 'r'), ("Reboot", TEXT, 'b')],
             (Tab::Skills, _) => {
@@ -2114,12 +2940,28 @@ impl SettingsApp {
             (Tab::SecretProviders, _) => vec![("Add provider", acc, 'a'), ("Test", mut_, 't'), ("Delete", err, 'd')],
             (Tab::Account, _) => vec![("Change password", acc, 'p'), ("Bigger text", mut_, 'u'), ("Smaller text", mut_, 'U')],
             (Tab::Browser, _) => vec![("Forget allowed sites", err, 'f')],
+            (Tab::DevCluster, _) => vec![("Test", acc, 't'), ("My default", mut_, 'd'), ("Workspace default", mut_, 'w'), ("Next workspace", mut_, 'k'), ("Hide/Show", mut_, 'h'), ("Disconnect", err, 'x'), ("Registry", mut_, 'g'), ("Platform services", acc, 'P'), ("Add vault profile", mut_, 'v'), ("Remove it", err, 'V'), ("Look again", mut_, 'r')],
+            (Tab::HostAccess, _) if hf_on() => Self::host_buttons(),
+            (Tab::HostAccess, _) => vec![],
+            (Tab::Memory, _) => self.memory_buttons(),
+            (Tab::Time, _) => self.time_buttons(),
+            (Tab::HostName, _) => self.host_name_buttons(),
+            (Tab::Developer, _) => self.developer_buttons(),
+            (Tab::Install, _) => self.install_buttons(),
         }
     }
 
     /// Rows the button bar needs (buttons wrap).
     fn button_rows(&self, admin: bool) -> usize {
-        if self.tab() == Tab::Voice && admin { 2 } else { 1 }
+        if self.tab() == Tab::DevCluster && self.dc_platform_open() {
+            0
+        } else if self.tab() == Tab::DevCluster {
+            self.dc_button_rows()
+        } else if (self.tab() == Tab::Voice && admin) || (self.tab() == Tab::IndicVoices && admin) || self.tab() == Tab::Agents || self.tab() == Tab::Memory || self.tab() == Tab::Time || self.tab() == Tab::Sound {
+            2
+        } else {
+            1
+        }
     }
 
     fn render_buttons(&self, g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, admin: bool) {
@@ -2197,7 +3039,10 @@ impl SettingsApp {
                 // the actions of the chosen provider, right on its row
                 let mut bx = a.x + 18.0 * s;
                 let by = y + 62.0 * s;
-                let acts: Vec<(&str, [u8; 4], char)> = if admin { vec![("Edit", TEXT, 'e'), ("Delete", ERR, 'd'), ("Models", ACCENT, 'm'), ("Test", TEXT, 't'), ("Key", TEXT, 'k'), (if p.enabled { "Turn off" } else { "Turn on" }, TEXT, 'x')] } else { vec![("Test", ACCENT, 't')] };
+                let mut acts: Vec<(&str, [u8; 4], char)> = if admin { vec![("Edit", TEXT, 'e'), ("Delete", ERR, 'd'), ("Models", ACCENT, 'm'), ("Test", TEXT, 't'), ("Key", TEXT, 'k'), (if p.enabled { "Turn off" } else { "Turn on" }, TEXT, 'x')] } else { vec![("Test", ACCENT, 't')] };
+                if p.kind == Kind::Lemonade {
+                    acts.insert(if admin { 2 } else { 1 }, ("All models", ACCENT, 'l'));
+                }
                 for (label, col, key) in acts {
                     let bw = g.text_width(13.0 * s, label, Face::Bold) + 13.0 * s * 1.7;
                     if bx + bw > a.x + a.w - 12.0 * s {
@@ -2208,7 +3053,11 @@ impl SettingsApp {
             }
             y += rh + 8.0 * s;
         }
-        if !provs.is_empty() {
+        if let Some(p) = provs.get(self.sel()).filter(|p| p.kind == Kind::Lemonade) {
+            // what this Lemonade server has, by type, with a quick action on each model
+            let top = y + 4.0 * s;
+            self.render_lemonade(g, R::new(a.x, top, a.w, (a.y + a.h - top).max(0.0)), s, cx, p);
+        } else if !provs.is_empty() {
             g.text(a.x + 4.0 * s, y + 2.0 * s, 13.0 * s, MUTED, if admin { "Select a provider, then Delete / Edit / Models" } else { "Select a provider, then Test" }, Face::Sans);
         }
     }
@@ -2575,10 +3424,67 @@ mod tests {
     }
 
     #[test]
+    fn host_access_says_why_it_is_unavailable_and_in_window_mode_lists_mounts_with_actions_and_the_audit_trail() {
+        let _g = iyakki_agent::hostfiles::test_guard();
+        let (cx, _) = admin("hostacc");
+        let mut a = SettingsApp::new(&cx);
+        assert!(a.tabs().contains(&Tab::HostAccess));
+        // not window mode: a plain explanation, no actions
+        iyakki_agent::hostfiles::set_enabled(false);
+        goto(&mut a, &cx, Tab::HostAccess);
+        let g = draw(&mut a, &cx, 1280, 960);
+        assert!(!g.hits.iter().any(|h| h.label == "Add folder…"), "no actions off window mode");
+        assert!(SettingsApp::host_rows(&cx).is_empty());
+        // window mode
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("iyakki-hostacc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("Music/Rock")).unwrap();
+        std::fs::write(base.join("Music/Rock/a.mp3"), vec![0u8; 2048]).unwrap();
+        iyakki_agent::hostfiles::set_enabled(true);
+        iyakki_agent::hostfiles::set_host_home(Some(base.clone()));
+        let g = draw(&mut a, &cx, 1280, 960);
+        for want in ["Add folder…", "Options…", "Change mode", "Convert to copy", "Unlink", "Import files…", "Audit trail"] {
+            assert!(g.hits.iter().any(|h| h.label == want), "{want}");
+        }
+        let mut m = iyakki_agent::hostfiles::HostMounts::load(cx.services.dir(), &cx.session.user);
+        m.add(&base, "~/Music", None, false).unwrap();
+        let g = draw(&mut a, &cx, 1280, 960);
+        assert!(g.hits.iter().any(|h| h.label == "host:Music" && matches!(h.ev, Event::Row(0))), "the folder is a clickable row");
+        // change mode (audited), open the options, and the audit trail
+        key(&mut a, &cx, Key::Char('m'));
+        assert!(SettingsApp::host_rows(&cx)[0].0.write, "now read-write");
+        assert!(cx.audit.recent(20).iter().any(|l| l.contains("host.mount.mode")));
+        key(&mut a, &cx, Key::Char('m'));
+        assert!(!SettingsApp::host_rows(&cx)[0].0.write);
+        // the first use explains itself; once agreed the options open
+        key(&mut a, &cx, Key::Char('o'));
+        let g = draw(&mut a, &cx, 1280, 960);
+        assert!(g.hits.iter().any(|h| h.label == "I understand, continue"), "the explanation comes first");
+        key(&mut a, &cx, Key::Esc);
+        std::fs::write(cx.services.dir().join(format!("host-consent-{}", cx.session.user)), "agreed\n").unwrap();
+        key(&mut a, &cx, Key::Char('o'));
+        let g = draw(&mut a, &cx, 1280, 960);
+        assert!(g.hits.iter().any(|h| h.label.contains("Stop sharing")) && g.hits.iter().any(|h| h.label.contains("Convert to a copy")), "{:?}", g.hits.iter().map(|h| &h.label).collect::<Vec<_>>());
+        key(&mut a, &cx, Key::Esc);
+        key(&mut a, &cx, Key::Char('l'));
+        let g = draw(&mut a, &cx, 1280, 960);
+        assert!(!g.hits.is_empty());
+        // unplugged: listed with its status
+        std::fs::rename(base.join("Music"), base.join("Music-away")).unwrap();
+        let rows = SettingsApp::host_rows(&cx);
+        assert_eq!((rows.len(), rows[0].1), (1, false), "listed, not available");
+        key(&mut a, &cx, Key::Char('l'));
+        let _ = draw(&mut a, &cx, 1280, 960);
+        iyakki_agent::hostfiles::set_host_home(None);
+        iyakki_agent::hostfiles::set_enabled(false);
+    }
+
+
+    #[test]
     fn non_admins_cannot_change_system_settings_and_it_is_audited() {
         let cx = user("set4");
         let mut a = SettingsApp::new(&cx);
-        assert_eq!(a.tabs(), &[Tab::Models, Tab::Rag, Tab::Vault, Tab::Skills, Tab::Voice, Tab::Browser, Tab::Account], "no secret-provider tab for users");
+        assert_eq!(a.tabs(), &[Tab::Models, Tab::Rag, Tab::Vault, Tab::Skills, Tab::Voice, Tab::Time, Tab::Browser, Tab::HostAccess, Tab::Account], "no secret-provider tab for users; everyone has Time");
         for k in ['a', 'e', 'd', 'k', 'x'] {
             key(&mut a, &cx, Key::Char(k));
             assert!(!a.has_modal(), "{k}");
@@ -2818,6 +3724,39 @@ mod tests {
         v.stt = Some(SpeechEngine::Command { command: format!("sh {} {{wav}}", d.join("whisper.sh").display()) });
         v.tts = Some(SpeechEngine::Command { command: format!("sh -c 'cat >/dev/null; cat {}'", d.join("canned.wav").display()) });
         v
+    }
+
+    #[test]
+    fn browser_voice_is_the_third_kind_of_text_to_speech_and_never_a_speech_to_text_kind() {
+        let (cx, _) = admin("sv-bv");
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Voice);
+        // Type -> Right, Right: the browser voice; the other fields are not needed
+        key(&mut a, &cx, Key::Char('v'));
+        key(&mut a, &cx, Key::Right);
+        key(&mut a, &cx, Key::Right);
+        for _ in 0..5 {
+            key(&mut a, &cx, Key::Enter);
+        }
+        assert!(!a.has_modal(), "{:?}", a.status());
+        assert_eq!(cx.services.voice_settings().tts, Some(SpeechEngine::Browser));
+        // the form shows it chosen the next time, and the screen names it
+        key(&mut a, &cx, Key::Char('v'));
+        let again = SettingsApp::engine_form(&cx, false);
+        assert_eq!(again.choice_idx(0), 2);
+        key(&mut a, &cx, Key::Esc);
+        let mut g = Gfx::new(1280, 700);
+        g.clear(rgb(0, 0, 0));
+        a.render(&mut g, R::new(0.0, 72.0, 1280.0, 628.0), 1.0, &cx, 0);
+        // speech-to-text has two kinds only
+        let stt = SettingsApp::engine_form(&cx, true);
+        assert_eq!(stt.choice_idx(0), 0);
+        // with nothing chosen, a browser that can speak is named as the default
+        cx.services.settings.lock().unwrap().update(|s| s.voice.tts = None).unwrap();
+        let hv = iyakki_agent::hostvoice::HostVoice::current();
+        hv.connect(iyakki_agent::hostvoice::Front::Browser);
+        hv.event(iyakki_agent::hostvoice::FromClient::Voices { supported: true, voices: vec![] });
+        a.render(&mut g, R::new(0.0, 72.0, 1280.0, 628.0), 1.0, &cx, 0);
     }
 
     #[test]
@@ -3347,12 +4286,13 @@ mod tests {
         let (cx, _) = admin("hw5");
         let (env, _) = fake_machine("hw5");
         let mut a = SettingsApp::new(&cx).with_hardware(env);
-        let mut g = Gfx::new(1280, 720);
+        // tall enough for the whole list of pages (it grows with every page that is added; Developer mode made it 1080)
+        let mut g = Gfx::new(1280, 1080);
         for t in [Tab::Network, Tab::Bluetooth, Tab::Display, Tab::Sound] {
             goto(&mut a, &cx, t);
             g.clear(rgb(0, 0, 0));
             g.hits.clear();
-            a.render(&mut g, R::new(0.0, 72.0, 1280.0, 648.0), 1.0, &cx, 0);
+            a.render(&mut g, R::new(0.0, 72.0, 1280.0, 1008.0), 1.0, &cx, 0);
             assert!(g.hits.iter().any(|h| matches!(h.ev, Event::Row(0))), "{t:?} rows are clickable");
             assert!(g.hits.iter().any(|h| h.label == "Look again"), "{t:?} has its buttons");
         }
@@ -3360,6 +4300,288 @@ mod tests {
         for (i, _) in a.tabs().to_vec().iter().enumerate() {
             assert!(g.hits.iter().any(|h| h.ev == Event::Tab(i)), "tab {i} is on screen");
         }
+    }
+
+    // ---------------------------------------------------------------- reading aloud: engines of this computer (docs/VOICE.md)
+
+    /// Fake engines on a temp PATH: espeak-ng lists three voices, logs stdin and arguments, speaks for a moment and writes a
+    /// WAV for -w; spd-say lists two voices; piper is there without a voice file.
+    fn host_fakes(d: &std::path::Path, which: &[&str]) {
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::write(d.join("voices.txt"), "Pty Language Age/Gender VoiceName File Other\n 5 en-us --/M English_(America) gmw/en-US\n 5 ta --/M Tamil inc/ta\n 5 hi --/M Hindi inc/hi\n").unwrap();
+        std::fs::write(d.join("tone.wav"), iyakki_agent::voice::encode_wav(&iyakki_agent::voice::tone(440.0, 100), 16_000)).unwrap();
+        let mk = |name: &str, body: &str| {
+            let p = d.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\nD=$(dirname \"$0\")\n{body}\n")).unwrap();
+            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        };
+        for w in which {
+            match *w {
+                "espeak-ng" => mk("espeak-ng", "case \"$1\" in --voices) cat \"$D/voices.txt\"; exit 0;; esac\ncat >> \"$D/said.log\"\necho \"$@\" >> \"$D/args.log\"\nout=''; prev=''; for a in \"$@\"; do [ \"$prev\" = -w ] && out=\"$a\"; prev=\"$a\"; done\nif [ -n \"$out\" ]; then cat \"$D/tone.wav\" > \"$out\"; else sleep 0.1; fi"),
+                "spd-say" => mk("spd-say", "case \"$1\" in -L) printf '  NAME LANGUAGE VARIANT\\n English en-US none\\n Tamil ta none\\n'; exit 0;; -C) exit 0;; esac\ncat >> \"$D/said.log\"\necho \"spd $@\" >> \"$D/args.log\"\nsleep 0.1"),
+                "piper" => mk("piper", "exit 0"),
+                other => panic!("no fake {other}"),
+            }
+        }
+    }
+
+    fn host_env(d: &std::path::Path) -> iyakki_agent::hostengines::Env {
+        iyakki_agent::hostengines::Env { path: d.to_string_lossy().to_string(), os: iyakki_agent::hostengines::Os::Linux, piper_dirs: Vec::new() }
+    }
+
+    fn eng_dir(tag: &str) -> std::path::PathBuf {
+        let d = temp_dir(tag);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn the_voice_page_finds_engines_with_no_setup_and_says_why_others_are_unavailable() {
+        let (cx, _) = admin("sv-host1");
+        let d = eng_dir("sv-host1-eng");
+        host_fakes(&d, &["espeak-ng", "spd-say", "piper"]);
+        cx.services.host_tts.configure(host_env(&d));
+        let report = cx.services.host_tts.scan_now();
+        assert_eq!(cx.services.voice_settings().tts, None, "nothing was set");
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Voice);
+        match a.vo_engine(&cx) {
+            Some(SpeechEngine::Host { engine, .. }) => assert_eq!(engine, "espeak-ng", "the best usable engine is used: piper has no voice file"),
+            other => panic!("{other:?}"),
+        }
+        let lines = vo_engine_lines(&report, "ta-IN");
+        let text: Vec<&str> = lines.iter().map(|l| l.0.as_str()).collect();
+        assert!(text.iter().any(|l| l.starts_with("● espeak-ng") && l.contains("speaks Tamil") && l.contains("can save audio")), "{text:?}");
+        assert!(text.iter().any(|l| l.starts_with("● speech-dispatcher") && l.contains("play only: Save audio is unavailable")), "{text:?}");
+        assert!(text.iter().any(|l| l.starts_with("○ piper") && l.contains("no voice file was found")), "missing voice files are named: {text:?}");
+        assert!(text.iter().any(|l| l.starts_with("○ festival") && l.contains("not found") && l.contains("install festival")), "a missing program says how to get it: {text:?}");
+        assert!(vo_engine_lines(&report, "te-IN").iter().any(|l| l.0.starts_with("● espeak-ng") && l.0.contains("no Telugu voice")), "no voice for the language is said");
+        for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+            let g = draw(&mut a, &cx, w, h);
+            let what = format!("voice page at {w}x{h}");
+            let mine = |l: &str| ["Test voice", "Re-check engines", "Open voice helper in your browser", "Engine: ", "Voice: ", "Language: ", "Speed: "].iter().any(|p| l.starts_with(p));
+            for hit in g.hits.iter().filter(|h| mine(&h.label)) {
+                let r = hit.rect;
+                assert!(r.x >= -0.5 && r.y >= 0.0 && r.x + r.w <= w as f32 + 0.5 && r.y + r.h <= h as f32 + 0.5, "{what}: {:?} is outside the window", (&hit.label, r.x, r.y, r.w, r.h));
+            }
+            for needed in ["Test voice", "Re-check engines", "Open voice helper in your browser"] {
+                assert!(g.hits.iter().any(|h| h.label == needed), "{what}: {needed} is there: {:?}", g.hits.iter().map(|h| &h.label).collect::<Vec<_>>());
+            }
+            for prefix in ["Engine: ", "Voice: ", "Language: ", "Speed: "] {
+                assert!(g.hits.iter().any(|h| h.label.starts_with(prefix)), "{what}: the {prefix} chooser is there");
+            }
+            // the controls are above the bottom button bar and do not sit on each other
+            let btns: Vec<&crate::ui::Hit> = g.hits.iter().filter(|h| matches!(h.ev, Event::Key(Key::Char(c)) if "eglfkoy".contains(c)) && ["Test voice", "Re-check engines", "Open voice helper in your browser"].iter().chain(["Engine: ", "Voice: ", "Language: ", "Speed: "].iter()).any(|p| h.label.starts_with(p))).collect();
+            for (i, x) in btns.iter().enumerate() {
+                for y in &btns[i + 1..] {
+                    let ox = (x.rect.x + x.rect.w).min(y.rect.x + y.rect.w) - x.rect.x.max(y.rect.x);
+                    let oy = (x.rect.y + x.rect.h).min(y.rect.y + y.rect.h) - x.rect.y.max(y.rect.y);
+                    assert!(ox <= 1.5 || oy <= 1.5, "{what}: {:?} and {:?} overlap", x.label, y.label);
+                }
+            }
+            // and none sits on the bottom button bar
+            for x in &btns {
+                for y in g.hits.iter().filter(|y| matches!(y.ev, Event::Key(Key::Char(_))) && !mine(&y.label)) {
+                    let ox = (x.rect.x + x.rect.w).min(y.rect.x + y.rect.w) - x.rect.x.max(y.rect.x);
+                    let oy = (x.rect.y + x.rect.h).min(y.rect.y + y.rect.h) - x.rect.y.max(y.rect.y);
+                    assert!(ox <= 1.5 || oy <= 1.5, "{what}: {:?} sits on the bar button {:?}", x.label, y.label);
+                }
+            }
+            // clicking each control does what its key does
+            let test = g.hits.iter().find(|h| h.label == "Test voice").unwrap();
+            assert_eq!(test.ev, Event::Key(Key::Char('y')));
+        }
+    }
+
+    #[test]
+    fn the_highlight_choice_cycles_sentence_and_word_sentence_only_off_and_is_saved() {
+        use iyakki_agent::voice::Highlight;
+        let (cx, _) = admin("sv-highlight");
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Voice);
+        assert_eq!(cx.services.voice_settings().highlight, Highlight::SentenceAndWord, "sentence + word is the default");
+        key(&mut a, &cx, Key::Char('h'));
+        assert_eq!(cx.services.voice_settings().highlight, Highlight::Sentence);
+        assert!(status(&a).contains("sentence only"), "{}", status(&a));
+        key(&mut a, &cx, Key::Char('h'));
+        assert_eq!(cx.services.voice_settings().highlight, Highlight::Off);
+        key(&mut a, &cx, Key::Char('h'));
+        assert_eq!(cx.services.voice_settings().highlight, Highlight::SentenceAndWord);
+        // an old settings file without the field loads with the default
+        let v: iyakki_agent::voice::VoiceSettings = serde_json::from_str("{\"speed_pct\": 120}").unwrap();
+        assert_eq!(v.highlight, Highlight::SentenceAndWord);
+        assert_eq!(serde_json::from_str::<iyakki_agent::voice::VoiceSettings>("{\"highlight\":\"sentence\"}").unwrap().highlight, Highlight::Sentence);
+        // word timing from the sound is on by default (also for an old settings file) and toggles with w
+        assert!(v.align_words && v.remote_ok.is_empty());
+        key(&mut a, &cx, Key::Char('w'));
+        assert!(!cx.services.voice_settings().align_words && status(&a).contains("estimated"), "{}", status(&a));
+        key(&mut a, &cx, Key::Char('w'));
+        assert!(cx.services.voice_settings().align_words);
+    }
+
+    #[test]
+    fn test_voice_speaks_a_sentence_in_the_chosen_language_with_the_chosen_voice_and_speed() {
+        let (cx, _) = admin("sv-host2");
+        let d = eng_dir("sv-host2-eng");
+        host_fakes(&d, &["espeak-ng"]);
+        cx.services.host_tts.configure(host_env(&d));
+        cx.services.host_tts.scan_now();
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Voice);
+        // English first
+        key(&mut a, &cx, Key::Char('y'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("Spoke a sentence in English with espeak-ng"), "{}", status(&a));
+        let said = std::fs::read_to_string(d.join("said.log")).unwrap();
+        assert!(said.contains("This is the IYAKKI voice test."), "{said}");
+        // Tamil: the Tamil voice, and a Tamil sentence
+        key(&mut a, &cx, Key::Char('l'));
+        key(&mut a, &cx, Key::Char('y'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("in Tamil") && status(&a).contains("voice ta"), "{}", status(&a));
+        let args = std::fs::read_to_string(d.join("args.log")).unwrap();
+        assert!(args.lines().last().unwrap().contains("-v ta "), "{args}");
+        assert!(std::fs::read_to_string(d.join("said.log")).unwrap().contains("வணக்கம்"), "the sentence is in Tamil");
+        // speed: 125 percent is 218 words per minute
+        key(&mut a, &cx, Key::Char('f'));
+        assert_eq!(cx.services.voice_settings().speed_pct, 125);
+        key(&mut a, &cx, Key::Char('y'));
+        settle(&mut a, &cx);
+        assert!(std::fs::read_to_string(d.join("args.log")).unwrap().lines().last().unwrap().contains("-s 219"), "{}", std::fs::read_to_string(d.join("args.log")).unwrap());
+        // a language without a voice is said, and the default voice is used
+        key(&mut a, &cx, Key::Char('l')); // Hindi
+        key(&mut a, &cx, Key::Char('l')); // Telugu
+        key(&mut a, &cx, Key::Char('y'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("no Telugu voice") && status(&a).contains("default voice"), "{}", status(&a));
+        // a voice chosen by name is kept for every language
+        key(&mut a, &cx, Key::Char('g'));
+        match cx.services.voice_settings().tts {
+            Some(SpeechEngine::Host { engine, voice: Some(v), .. }) => assert_eq!((engine.as_str(), v.as_str()), ("espeak-ng", "en-us")),
+            other => panic!("{other:?}"),
+        }
+        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        assert!(log.contains("voice.test") && log.contains("settings.voice.tts") && log.contains("settings.voice.speed"), "{log}");
+    }
+
+    #[test]
+    fn engine_choice_cycles_through_automatic_the_found_engines_and_the_browser_and_is_for_admins() {
+        let (cx, _) = admin("sv-host3");
+        let d = eng_dir("sv-host3-eng");
+        host_fakes(&d, &["espeak-ng", "spd-say"]);
+        cx.services.host_tts.configure(host_env(&d));
+        cx.services.host_tts.scan_now();
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Voice);
+        let hv = HostVoice::current();
+        hv.connect(iyakki_agent::hostvoice::Front::Browser);
+        hv.event(iyakki_agent::hostvoice::FromClient::Voices { supported: true, voices: vec![] });
+        let id = |cx: &AppCx| match cx.services.voice_settings().tts {
+            Some(SpeechEngine::Host { engine, .. }) => engine,
+            Some(SpeechEngine::Browser) => "browser".to_string(),
+            Some(other) => other.label(),
+            None => "automatic".to_string(),
+        };
+        let mut seen = vec![id(&cx)];
+        for _ in 0..5 {
+            key(&mut a, &cx, Key::Char('e'));
+            seen.push(id(&cx));
+        }
+        assert_eq!(seen, ["automatic", "espeak-ng", "spd-say", "browser", "indic-tts", "automatic"], "the Indic neural voices are the last choice before automatic");
+        // with a configured engine, it wins over what was found
+        let own = SpeechEngine::Command { command: "sh -c 'cat > /dev/null'".into() };
+        cx.services.settings.lock().unwrap().update(|s| s.voice.tts = Some(own.clone())).unwrap();
+        assert_eq!(a.vo_engine(&cx), Some(own));
+        // the default order when nothing is set: engine of this computer, then the browser voice, then nothing
+        cx.services.settings.lock().unwrap().update(|s| s.voice.tts = None).unwrap();
+        assert!(matches!(a.vo_engine(&cx), Some(SpeechEngine::Host { .. })));
+        std::fs::remove_file(d.join("espeak-ng")).unwrap();
+        std::fs::remove_file(d.join("spd-say")).unwrap();
+        cx.services.host_tts.scan_now();
+        assert_eq!(a.vo_engine(&cx), Some(SpeechEngine::Browser), "no engine here, the screen can speak");
+        hv.disconnect();
+        assert_eq!(a.vo_engine(&cx), None);
+        key(&mut a, &cx, Key::Char('y'));
+        assert!(status(&a).contains("No speech engine is ready") && status(&a).contains("voice helper"), "{}", status(&a));
+        // people who are not administrators can test but not change
+        let ucx = user("sv-host3u");
+        ucx.services.host_tts.configure(host_env(&d));
+        let mut u = SettingsApp::new(&ucx);
+        goto(&mut u, &ucx, Tab::Voice);
+        key(&mut u, &ucx, Key::Char('e'));
+        assert!(status(&u).contains("Only administrators"), "{}", status(&u));
+        key(&mut u, &ucx, Key::Char('f'));
+        assert_eq!(ucx.services.voice_settings().speed_pct, 100);
+    }
+
+    #[test]
+    fn re_check_finds_an_engine_installed_meanwhile() {
+        let (cx, _) = admin("sv-host4");
+        let d = eng_dir("sv-host4-eng");
+        cx.services.host_tts.configure(host_env(&d));
+        cx.services.host_tts.scan_now();
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Voice);
+        assert_eq!(a.vo_engine(&cx), None);
+        host_fakes(&d, &["espeak-ng"]);
+        key(&mut a, &cx, Key::Char('k'));
+        for _ in 0..300 {
+            if !cx.services.host_tts.scanning() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(a.vo_engine(&cx), Some(SpeechEngine::Host { ref engine, .. }) if engine == "espeak-ng"));
+        assert!(std::fs::read_to_string(cx.audit.path()).unwrap().contains("voice.recheck"));
+    }
+
+    #[test]
+    fn the_browser_voice_helper_is_opened_and_disconnected_from_the_voice_page() {
+        let (cx, _) = admin("sv-host5");
+        let d = eng_dir("sv-host5-eng");
+        let opener = d.join("fakeopen");
+        std::fs::write(&opener, format!("#!/bin/sh\nprintf '%s' \"$1\" > {}/opened\n", d.display())).unwrap();
+        std::fs::set_permissions(&opener, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        cx.services.host_tts.configure(host_env(&d));
+        cx.services.host_tts.set_opener(Some(vec![opener.to_string_lossy().to_string()]));
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Voice);
+        let g = draw(&mut a, &cx, 1280, 720);
+        assert!(g.hits.iter().any(|h| h.label == "Open voice helper in your browser"));
+        key(&mut a, &cx, Key::Char('o'));
+        assert!(status(&a).contains("Opening the voice helper"), "{}", status(&a));
+        assert_eq!(cx.services.host_tts.helper_state(), Some(iyakki_agent::voicehelper::HelperState::Waiting));
+        let url = (0..200).find_map(|_| { std::thread::sleep(std::time::Duration::from_millis(20)); std::fs::read_to_string(d.join("opened")).ok().filter(|u| !u.is_empty()) }).expect("the browser was asked to open it");
+        assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+        let g = draw(&mut a, &cx, 1280, 720);
+        assert!(g.hits.iter().any(|h| h.label == "Disconnect voice helper"), "the button turns into Disconnect");
+        // a second press disconnects: the listener is closed
+        key(&mut a, &cx, Key::Char('o'));
+        assert!(status(&a).contains("disconnected"), "{}", status(&a));
+        assert_eq!(cx.services.host_tts.helper_state(), None);
+        let addr = url.trim_start_matches("http://").split('/').next().unwrap().to_string();
+        let closed = (0..200).any(|_| { std::thread::sleep(std::time::Duration::from_millis(20)); std::net::TcpStream::connect(&addr).is_err() });
+        assert!(closed, "the helper's port is closed");
+        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        assert!(log.contains("voice.helper"), "{log}");
+        // without the voice permission it is refused
+        let mut gcx = user("sv-host5g");
+        gcx.session.policy.voice = false;
+        gcx.services.host_tts.configure(host_env(&d));
+        let mut g2 = SettingsApp::new(&gcx);
+        g2.tab = 0;
+        g2.vo_helper_toggle(&gcx);
+        assert!(status(&g2).contains("not enabled"), "{}", status(&g2));
+        assert_eq!(gcx.services.host_tts.helper_state(), None);
+    }
+
+    #[test]
+    fn settings_opens_on_the_voice_page_when_the_story_asks() {
+        let (cx, _) = admin("sv-host6");
+        let mut a = SettingsApp::new(&cx);
+        assert_ne!(a.tab(), Tab::Voice);
+        a.open_item("voice", &cx);
+        assert_eq!(a.tab(), Tab::Voice);
     }
 
     // ---------------------------------------------------------------- the left list, search and sliders
@@ -3423,7 +4645,8 @@ mod tests {
     fn the_list_is_clickable_scrolls_with_the_wheel_over_it_and_a_page_stays_in_view() {
         let (cx, _) = admin("nav2");
         let mut a = SettingsApp::new(&cx);
-        let g = draw(&mut a, &cx, 1280, 720);
+        // tall enough for every page of an administrator's list (it grows as pages are added)
+        let g = draw(&mut a, &cx, 1280, 1080);
         for i in 0..a.tabs().len() {
             assert!(g.hits.iter().any(|h| h.ev == Event::Tab(i)), "page {i} is in the list");
         }
@@ -3735,3 +4958,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 }
+
+#[cfg(test)]
+#[path = "settings_agents_tests.rs"]
+mod agents_tests;
+#[cfg(test)]
+#[path = "settings_memory_tests.rs"]
+mod memory_tests;
+#[cfg(test)]
+#[path = "settings_time_tests.rs"]
+mod time_tests;
+#[cfg(test)]
+#[path = "settings_install_tests.rs"]
+mod install_tests;
+#[cfg(test)]
+#[path = "settings_mac_tests.rs"]
+mod mac_tests;
+#[cfg(test)]
+#[path = "settings_indic_tests.rs"]
+mod indic_tests;
+#[cfg(test)]
+#[path = "settings_lemonade_tests.rs"]
+mod lemonade_tests;
+#[cfg(test)]
+#[path = "settings_sound_tests.rs"]
+mod sound_tests;
+#[cfg(test)]
+#[path = "settings_developer_tests.rs"]
+mod developer_tests;

@@ -1359,6 +1359,22 @@ fn col_basis(g: &mut Gfx, c: &iyakki_web::doc::Column, env: &Env, ctx: &Ctx, cap
     (intrinsic(g, &c.blocks, env, ctx, cap) + frame + 2.0).min(cap)
 }
 
+/// A flex item's `width`, `min-width` and `max-width` given as percentages (or `calc`) refer to the row it sits in, but
+/// the column is laid out in its slot of that row; the same style with those lengths turned into pixels of the row.
+/// `None` when nothing needs changing.
+fn row_relative_style(st: &BoxStyle, row_w: f32, s: f32) -> Option<BoxStyle> {
+    let relative = |l: Length| !matches!(l, Length::Px(_) | Length::Auto);
+    if !(relative(st.width) || relative(st.max_width) || relative(st.min_width)) {
+        return None;
+    }
+    let fix = |l: Length| if relative(l) { px(l, s, row_w).map_or(Length::Auto, |v| Length::Px(v / s)) } else { l };
+    let mut o = st.clone();
+    o.width = fix(st.width);
+    o.max_width = fix(st.max_width);
+    o.min_width = fix(st.min_width);
+    Some(o)
+}
+
 /// Columns side by side: a flex row (each column as wide as its content, or as it asked, with spare room shared out
 /// by `flex-grow` or by `justify-content`) or a grid (equal columns, as many rows as it takes).
 #[allow(clippy::too_many_arguments)]
@@ -1461,7 +1477,9 @@ fn row_block(g: &mut Gfx, r: &RowBlock, env: &Env, ox: f32, width: f32, y: f32, 
             let col = &r.cols[*i];
             let start = sink.prims.len();
             let mut pm = 0.0;
-            let out = box_block(g, &col.style, &col.blocks, env, ox + x, *w, y, ctx, &mut pm, sink, None);
+            // percentages in a column's own style (`width:50%`, `max-width:50%`) are shares of the row, not of the column's slot
+            let own = row_relative_style(&col.style, width, s);
+            let out = box_block(g, own.as_ref().unwrap_or(&col.style), &col.blocks, env, ox + x, *w, y, ctx, &mut pm, sink, None);
             outs.push((out, start, sink.prims.len()));
             bottom = bottom.max(outs.last().map_or(y, |o| o.0.y_end));
             x += w + gap + extra;
@@ -1942,6 +1960,46 @@ mod tests {
     }
 
     const GOOGLE: &str = include_str!("testdata/google_home.html");
+
+    #[test]
+    fn two_half_width_flex_columns_each_get_half_the_row_whatever_their_padding() {
+        let page = "<style>*{box-sizing:border-box} .card{margin:0 200px;padding:0 36px;background:#ffffff} .main{display:flex;flex-direction:row;flex-wrap:wrap} \
+            .l{flex-basis:50%;flex-grow:1;max-width:50%;padding-right:24px} .r{flex-basis:50%;flex-grow:1;max-width:50%;padding-left:24px} h1{font-size:36px;margin:24px 0 0}</style>\
+            <div class=card><main class=main><div class=l><c-wiz><div>logo</div></c-wiz><h1>Sign in</h1><div>Use your Google Account</div></div>\
+            <div class=r><div><div><input name=identifier></div><button>Forgot email?</button><p>Not your computer? Use Guest mode to sign in privately.</p></div></div></div></main></div>";
+        let (doc, l) = lay_page(page, 940.0);
+        let (sx, sy, _) = word(&l, "Sign");
+        let (ix, iy, _) = word(&l, "in");
+        assert!(ix > sx && (iy - sy).abs() < 1.0, "the heading stays on one line in a 210px column: {sx},{sy} {ix},{iy}");
+        let (ux, uy, _) = word(&l, "Use");
+        let (gx, gy, _) = word(&l, "Google");
+        assert!(gx > ux && (gy - uy).abs() < 1.0, "Use your Google fits a column half of 468px wide: {ux},{uy} {gx},{gy}");
+        let field = control_rect(&doc, &l, "identifier");
+        assert!(field.x >= 236.0 + 234.0 + 20.0 && field.w >= 150.0, "the right column starts at the middle and the field is wide: {field:?}");
+    }
+
+    /// Developer probe: `IYAKKI_PAGE=/path/page.html cargo test -p iyakki-shell --lib layout_probe -- --ignored --nocapture`
+    /// prints where the words of a saved page land.
+    #[test]
+    #[ignore]
+    fn layout_probe() {
+        let Ok(path) = std::env::var("IYAKKI_PAGE") else { return };
+        let html = std::fs::read_to_string(path).unwrap();
+        let w: f32 = std::env::var("IYAKKI_W").ok().and_then(|v| v.parse().ok()).unwrap_or(1263.0);
+        let l = if std::env::var("IYAKKI_STYLED").is_ok() {
+            let tree = iyakki_web::html::parse(&html);
+            let u = iyakki_web::Url::parse("https://accounts.google.com/").unwrap();
+            let doc = iyakki_web::style::styled_doc(&tree, &u, &Viewport::default(), &|_: &iyakki_web::Url| None);
+            let infos = vec![ImgInfo { size: Some((100, 100)), failed: false }; doc.images.len()];
+            let mut g = Gfx::new(100, 100);
+            layout(&mut g, &doc, w, 1.0, &infos, 0)
+        } else {
+            lay_page(&html, w).1
+        };
+        for (t, x, y, tw) in words(&l).into_iter().take(40) {
+            eprintln!("{t:<14} x={x:>7.1} y={y:>7.1} w={tw:>6.1}");
+        }
+    }
 
     #[test]
     fn google_home_search_buttons_sit_side_by_side_and_the_box_is_as_wide_as_the_page_says() {

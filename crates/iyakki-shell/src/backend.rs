@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::fb::Framebuffer;
 use crate::gfx::{rgb, Gfx};
-use crate::input::{poll_devices, scan_devices, Device, InputState};
+use crate::input::{poll_devices, scan_devices, BackgroundScan, Device, InputState};
 use crate::shell::Shell;
 use crate::ui::Event;
 
@@ -36,6 +36,30 @@ struct GraphicsMode(Option<std::fs::File>);
 
 impl GraphicsMode {
     const KDSETMODE: libc::c_ulong = 0x4B3A;
+    const KDGETMODE: libc::c_ulong = 0x4B3B;
+
+    /// Make sure the console is (still) in graphics mode, without ever leaving it: when a GPU driver replaces the firmware's
+    /// screen the text console moves to the new screen, and it must not paint text over the picture there. Returns
+    /// `Some(true)` when it already was, `Some(false)` when it had to be set again, `None` when there is no console.
+    fn reassert() -> Option<bool> {
+        use std::os::fd::AsRawFd;
+        for path in ["/dev/tty0", "/dev/console"] {
+            let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(path) else { continue };
+            let mut mode: libc::c_int = -1;
+            // SAFETY: KDGETMODE writes one int to the pointer given.
+            if unsafe { libc::ioctl(f.as_raw_fd(), Self::KDGETMODE as _, &mut mode as *mut libc::c_int) } != 0 {
+                continue;
+            }
+            if mode == 1 {
+                return Some(true);
+            }
+            // SAFETY: KDSETMODE takes an integer argument (1 = KD_GRAPHICS).
+            if unsafe { libc::ioctl(f.as_raw_fd(), Self::KDSETMODE as _, 1 as libc::c_ulong) } == 0 {
+                return Some(false);
+            }
+        }
+        None
+    }
 
     fn enter() -> GraphicsMode {
         use std::os::fd::AsRawFd;
@@ -118,22 +142,77 @@ pub fn run_splash(fb_path: &str) -> Result<(), String> {
     r
 }
 
+/// What the boot screen keeps between frames: the picture and a copy of what is on the screen already.
+///
+/// A new screen (the GPU driver replacing the firmware's, or a monitor found later) gets its first frame drawn in full in
+/// memory and then written whole: never a cleared (black) frame first, and no old-size picture.
+pub struct SplashCanvas {
+    gfx: Gfx,
+    shown: Vec<u8>,
+    /// How the last [`Framebuffer::scan_out`] went (after a whole frame), until [`SplashCanvas::take_scan_out`].
+    scanned: Option<Result<(), String>>,
+}
+
+impl SplashCanvas {
+    pub fn new(w: u32, h: u32) -> SplashCanvas {
+        SplashCanvas { gfx: Gfx::new(w, h), shown: Vec::new(), scanned: None }
+    }
+
+    /// The result of putting the last whole frame on the monitor, once.
+    pub fn take_scan_out(&mut self) -> Option<Result<(), String>> {
+        self.scanned.take()
+    }
+
+    /// The screen changed (or must be repainted): the next frame writes every row.
+    pub fn follow(&mut self, w: u32, h: u32) {
+        if (self.gfx.width(), self.gfx.height()) != (w, h) {
+            self.gfx = Gfx::new(w, h);
+        }
+        self.shown.clear();
+    }
+
+    /// Draw the frame and write what changed (everything after [`SplashCanvas::follow`]). Returns the rows written.
+    /// A whole frame (the first on a screen) is then put on the monitor with [`Framebuffer::scan_out`]: a GPU driver's
+    /// framebuffer is not shown until then (see there), and doing it after the write means the monitor goes from GRUB's
+    /// picture straight to a complete boot screen.
+    pub fn frame(&mut self, fb: &mut Framebuffer, view: &crate::splash::View) -> Result<usize, String> {
+        crate::splash::draw(&mut self.gfx, view);
+        let whole = self.shown.is_empty();
+        let rows = fb.present_banded(self.gfx.rgba(), &mut self.shown)?;
+        if whole {
+            self.scanned = Some(fb.scan_out());
+        }
+        Ok(rows)
+    }
+}
+
+/// A screen the boot screen stops using is never closed: it is usually the firmware's screen that a GPU driver just
+/// unplugged, and the last close of that device frees its buffer, which on this kernel (6.12, simpledrm) spins forever in
+/// the kernel (`shmem_undo_range` under `close`): the boot screen froze right after "screen changed" and a CPU core stayed
+/// busy for good. Keeping it costs one buffer of memory (8 MB at 1920x1080).
+fn keep_open(old: Framebuffer) {
+    std::mem::forget(old);
+}
+
 fn splash_loop(fb_path: &str) -> Result<(), String> {
     use crate::splash::{self, LogTail, View};
     let mut fb = Framebuffer::open(fb_path)?;
-    log::info!("splash: drawing on {} ({}x{}, {} bit, pitch {})", fb.id, fb.width, fb.height, fb.format.bpp, fb.pitch);
-    // leave the text console off for good: the shell that follows sets graphics mode again and restores it at its end
+    splash::note(&format!("drawing on {fb_path}: {}", fb.describe()));
+    // leave the text console off for good (the shell that follows keeps it so too): switching back to text would make
+    // the console set its mode again, which on some GPUs is a full mode change and a dark screen
     std::mem::forget(GraphicsMode::enter());
-    let mut gfx = Gfx::new(fb.width, fb.height);
-    let mut shown: Vec<u8> = Vec::new();
+    let mut canvas = SplashCanvas::new(fb.width, fb.height);
     let mut input = InputState::new(fb.width, fb.height);
+    // the devices are found on a thread of its own: opening one the kernel is still setting up can block for seconds, and the
+    // animation must not stop for it
     let mut devs: Vec<Device> = Vec::new();
-    scan_devices(&mut devs);
+    let scan = BackgroundScan::start();
     let mut log = LogTail::open();
     let mut show_log = false;
-    let (start, mut last_scan, mut last_check) = (Instant::now(), Instant::now(), Instant::now());
+    let (start, mut last_check) = (Instant::now(), Instant::now());
     let mut fraction = 0.0f32;
     let mut frames = 0u32;
+    let mut failures = 0u32;
     while !splash::is_done() {
         let frame_start = Instant::now();
         for (raw, abs) in poll_devices(&mut devs, 1) {
@@ -145,29 +224,60 @@ fn splash_loop(fb_path: &str) -> Result<(), String> {
                 }
             }
         }
-        if last_scan.elapsed() > Duration::from_secs(2) {
-            scan_devices(&mut devs); // the keyboard may appear after the drivers load
-            last_scan = Instant::now();
-        }
-        if last_check.elapsed() > Duration::from_millis(500) {
+        scan.take_into(&mut devs); // the keyboard may appear after the drivers load
+        // a GPU driver taking over is noticed within 100 ms (a cheap query, no mapping), and the very next frame on the new
+        // screen is complete
+        if last_check.elapsed() >= Duration::from_millis(100) {
             last_check = Instant::now();
-            if let Ok(now) = Framebuffer::open(fb_path) {
-                if now.id != fb.id || now.width != fb.width || now.height != fb.height || now.pitch != fb.pitch {
-                    log::info!("splash: screen changed ({} -> {}), following it", fb.id, now.id);
-                    gfx = Gfx::new(now.width, now.height);
+            if fb.screen_changed(fb_path) {
+                if let Ok(now) = Framebuffer::open(fb_path) {
+                    let console = match GraphicsMode::reassert() {
+                        Some(true) => "console still in graphics mode",
+                        Some(false) => "console was back in text mode; graphics mode set again",
+                        None => "no console",
+                    };
+                    splash::note(&format!("screen changed ({} -> {}), following it; {console}", fb.describe(), now.describe()));
+                    canvas.follow(now.width, now.height);
                     input = InputState::new(now.width, now.height);
-                    shown.clear();
-                    fb = now;
+                    keep_open(std::mem::replace(&mut fb, now));
                 }
             }
+        }
+        if splash::take_repaint() {
+            splash::note("a monitor was found; writing the whole picture again");
+            canvas.follow(fb.width, fb.height);
         }
         log.poll();
         let (percent, stage) = splash::current();
         let target = percent as f32 / 100.0;
         fraction += (target - fraction) * 0.10;
         let lines: &[String] = &log.lines;
-        splash::draw(&mut gfx, &View { t: start.elapsed().as_secs_f32(), fraction, stage: &stage, log: show_log.then_some(lines), steps: &[] });
-        fb.present_banded(gfx.rgba(), &mut shown)?;
+        let view = View { t: start.elapsed().as_secs_f32(), fraction, stage: &stage, log: show_log.then_some(lines), steps: &[] };
+        if let Err(e) = canvas.frame(&mut fb, &view) {
+            // the screen may be going away for a moment while a GPU driver takes over: look again instead of giving up
+            failures += 1;
+            if failures == 1 {
+                splash::note(&format!("could not draw ({e}); looking for the screen again"));
+            }
+            if failures > 150 {
+                return Err(format!("could not draw for {failures} frames: {e}"));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            if let Ok(now) = Framebuffer::open(fb_path) {
+                canvas.follow(now.width, now.height);
+                input = InputState::new(now.width, now.height);
+                keep_open(std::mem::replace(&mut fb, now));
+                let console = if GraphicsMode::reassert() == Some(false) { "; console was back in text mode, graphics mode set again" } else { "" };
+                splash::note(&format!("screen is back: {}{console}", fb.describe()));
+            }
+            continue;
+        }
+        match canvas.take_scan_out() {
+            Some(Ok(())) => splash::note(&format!("whole frame written and put on the monitor ({})", fb.describe())),
+            Some(Err(e)) => splash::note(&format!("whole frame written; putting it on the monitor failed: {e}")),
+            None => {}
+        }
+        failures = 0;
         frames += 1;
         // about 20 frames a second; a slow screen simply runs slower
         let spent = frame_start.elapsed();
@@ -175,7 +285,10 @@ fn splash_loop(fb_path: &str) -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(50) - spent);
         }
     }
-    log::info!("splash: stopped after {frames} frames in {:.1} s", start.elapsed().as_secs_f32());
+    splash::note(&format!("stopped after {frames} frames in {:.1} s (boot finished)", start.elapsed().as_secs_f32()));
+    if fb.screen_changed(fb_path) {
+        keep_open(fb); // replaced since the last look: closing it could be the unplugged screen's last close
+    }
     Ok(())
 }
 
@@ -339,13 +452,28 @@ fn hand_over(screen: &Mutex<Screen>, paused: &AtomicBool, idle: &AtomicBool, fb_
 }
 
 fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &AtomicBool) -> Result<(), String> {
+    let t_start = Instant::now();
     let fb = Framebuffer::open(fb_path)?;
-    let _graphics = GraphicsMode::enter();
+    let t_open = t_start.elapsed();
+    let graphics = GraphicsMode::enter();
+    let t_mode = t_start.elapsed();
+    // after a boot screen the console stays in graphics mode for good: going back to text when the shell stops or restarts
+    // would make the console set its mode, a visible mode change (and text) on some GPUs
+    let _graphics = if crate::splash::was_started() {
+        std::mem::forget(graphics);
+        None
+    } else {
+        Some(graphics)
+    };
     let (w, h) = (fb.width, fb.height);
     let mut gfx = Gfx::new(w, h);
+    let t_gfx = t_start.elapsed();
+    // The first scan of the input devices is done by the input thread right after the first picture is on the screen: opening an
+    // event device the kernel is still setting up can block for seconds (5.3 s seen on a Mac mini 2018 at boot), and the screen
+    // must not wait for it.
     let mut devs: Vec<Device> = Vec::new();
-    scan_devices(&mut devs);
-    log::info!("shell: {}x{} framebuffer, {} input device(s), {} CPU thread(s)", w, h, devs.len(), std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+    let t_scan = t_start.elapsed();
+    log::info!("shell: {}x{} framebuffer, {} input device(s) so far (scanned in the background), {} CPU thread(s); display set up in {} ms (open {} ms, console mode {} ms, drawing surface {} ms, input scan {} ms)", w, h, devs.len(), std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1), t_scan.as_millis(), t_open.as_millis(), (t_mode - t_open).as_millis(), (t_gfx - t_mode).as_millis(), (t_scan - t_gfx).as_millis());
     let screen = Mutex::new(Screen { fb, scene: Vec::new(), pointer_at: None, k: cursor_scale(w, h) });
     let pointer = Pointer { x: AtomicI32::new(0), y: AtomicI32::new(0), seen: AtomicBool::new(false) };
     let failed: Mutex<Option<String>> = Mutex::new(None);
@@ -360,7 +488,8 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
     std::thread::scope(|sc| {
         let input_thread = std::thread::Builder::new().name("iyakki-input".into()).stack_size(INPUT_STACK).spawn_scoped(sc, || {
             let mut input = InputState::new(w, h);
-            let mut last_scan = Instant::now();
+            // due at once: the first scan of the input devices happens here, not before the first picture
+            let mut last_scan = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);
             while !stop.load(Ordering::Relaxed) && !quit.load(Ordering::Relaxed) {
                 if paused.load(Ordering::SeqCst) {
                     // the screen and keyboard belong to another program: hold nothing open
@@ -429,6 +558,14 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                     break;
                 }
             }
+            if crate::splash::take_repaint() {
+                // a monitor was just found: write the whole picture on it, not only what changed
+                let mut s = lock(&screen);
+                s.scene.clear(); // the next write is the whole frame
+                s.pointer_at = None; // drawn again on top of it
+                drop(s);
+                first = true;
+            }
             if dirty || first || last_render.elapsed() >= Duration::from_millis(100) {
                 first = false;
                 let t0 = Instant::now();
@@ -438,7 +575,15 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                 // the screen holds `scene` + pointer: take the pointer off, update the changed rows, put it back
                 let res = s.take_pointer_off().and_then(|_| {
                     let Screen { fb, scene, .. } = &mut *s;
-                    fb.present_banded(gfx.rgba(), scene).map(|_| ())
+                    let whole = scene.is_empty();
+                    fb.present_banded(gfx.rgba(), scene)?;
+                    if whole {
+                        // a whole frame: make sure it is the framebuffer the monitor shows (see `Framebuffer::scan_out`)
+                        if let Err(e) = fb.scan_out() {
+                            log::warn!("shell: {e}");
+                        }
+                    }
+                    Ok(())
                 });
                 let res = res.and_then(|_| s.move_pointer(pointer.get()));
                 drop(s);
@@ -446,7 +591,7 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                 if first_picture {
                     first_picture = false;
                     // the end of "power on to sign-in screen": the kernel's own clock stamps this line (see dist/buildroot/boot-time.py)
-                    log::info!("shell: first picture on screen ({}x{}, first frame took {} ms)", w, h, (t1 - t0).as_millis());
+                    log::info!("shell: first picture on screen ({}x{}, first frame took {} ms, {} ms after the display was opened)", w, h, (t1 - t0).as_millis(), t_start.elapsed().as_millis());
                 }
                 stats.frame(t1 - t0, last_render - t1);
                 if let Err(e) = res {
@@ -463,6 +608,129 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_screen_gets_a_complete_boot_screen_frame_and_never_a_black_one() {
+        use crate::splash::View;
+        let view = |t: f32| View { t, fraction: 0.5, stage: "Starting hardware drivers", log: None, steps: &[] };
+        let black = |mem: &[u8]| mem.chunks_exact(4).filter(|p| p[0] == 0 && p[1] == 0 && p[2] == 0).count();
+        // the firmware's screen (simpledrm) at one size, then the GPU driver's screen at another, starting out black
+        let (aw, ah, bw, bh) = (480u32, 270u32, 640u32, 400u32);
+        let mut a = vec![0u8; (aw * ah * 4) as usize];
+        let mut b = vec![0u8; (bw * bh * 4) as usize];
+        let mut canvas = SplashCanvas::new(aw, ah);
+        let mut fa = Framebuffer::in_memory(&mut a, aw, ah);
+        assert_eq!(canvas.frame(&mut fa, &view(0.0)).unwrap(), ah as usize, "first frame: every row");
+        assert!(canvas.frame(&mut fa, &view(0.05)).unwrap() <= ah as usize);
+        drop(fa);
+        assert_eq!(black(&a), 0, "no black pixel on the first screen");
+        // the screen changes: the very first write on it is a whole, drawn frame
+        canvas.follow(bw, bh);
+        let mut fb = Framebuffer::in_memory(&mut b, bw, bh);
+        assert_eq!(canvas.frame(&mut fb, &view(0.1)).unwrap(), bh as usize, "every row of the new screen is written at once");
+        drop(fb);
+        assert_eq!(black(&b), 0, "not a single black pixel between the two screens");
+        // the logo is where the GRUB menu had it on both screens: its centre is bright
+        for (mem, w, h) in [(&a, aw, ah), (&b, bw, bh)] {
+            let (cx, cy, _) = crate::splash::logo_rect(w, h);
+            let i = (cy as usize * w as usize + cx as usize) * 4;
+            assert!(mem[i..i + 3].iter().any(|&c| c > 60), "{w}x{h}: logo centre is lit");
+        }
+        // a repaint request (a monitor found later) writes the whole frame again on the same screen
+        let mut fb = Framebuffer::in_memory(&mut b, bw, bh);
+        canvas.follow(bw, bh);
+        assert_eq!(canvas.frame(&mut fb, &view(0.15)).unwrap(), bh as usize);
+    }
+
+    /// The boot screen as it lands in screen memory of the sizes, strides and colour layouts real screens have (the Mac
+    /// mini's 1920x1080 and 2560x1440, QEMU's 800x600 and 1280x720; BGRX as simpledrm and i915 use, RGBX), decoded back to RGB.
+    #[test]
+    fn the_boot_screen_lands_in_screen_memory_whole_at_every_size_stride_and_colour_layout() {
+        use crate::fb::PixelFormat;
+        use crate::splash::{logo_rect, progress_bar_rect, View};
+        let bgrx = PixelFormat { bpp: 32, r: (16, 8), g: (8, 8), b: (0, 8) };
+        let rgbx = PixelFormat { bpp: 32, r: (0, 8), g: (8, 8), b: (16, 8) };
+        for (w, h) in [(800u32, 600u32), (1280, 720), (1920, 1080), (2560, 1440)] {
+            for (name, fmt) in [("BGRX", bgrx), ("RGBX", rgbx)] {
+                // a padded stride (as GPUs align rows), and memory that starts out as GRUB's leftovers: mid grey
+                let pitch = w as usize * 4 + 256;
+                let mut mem = vec![0x80u8; pitch * h as usize];
+                let mut canvas = SplashCanvas::new(w, h);
+                let mut fb = Framebuffer::in_memory_as(&mut mem, w, h, pitch, fmt);
+                let view = View { t: 2.0, fraction: 0.5, stage: "Starting drivers…", log: None, steps: &[] };
+                assert_eq!(canvas.frame(&mut fb, &view).unwrap(), h as usize, "{w}x{h} {name}: the first frame writes every row");
+                drop(fb);
+                let at = |x: u32, y: u32| -> [u8; 3] {
+                    let i = y as usize * pitch + x as usize * 4;
+                    let v = u32::from_le_bytes([mem[i], mem[i + 1], mem[i + 2], mem[i + 3]]);
+                    [(v >> fmt.r.0) as u8, (v >> fmt.g.0) as u8, (v >> fmt.b.0) as u8]
+                };
+                let count = |x0: f32, y0: f32, x1: f32, y1: f32, pred: &dyn Fn([u8; 3]) -> bool| -> f32 {
+                    let (mut n, mut hit) = (0u32, 0u32);
+                    for y in (y0.max(0.0) as u32..(y1 as u32).min(h)).step_by(2) {
+                        for x in (x0.max(0.0) as u32..(x1 as u32).min(w)).step_by(2) {
+                            n += 1;
+                            hit += pred(at(x, y)) as u32;
+                        }
+                    }
+                    hit as f32 / n.max(1) as f32
+                };
+                let tag = format!("{w}x{h} {name}");
+                // the emblem's cyan, where GRUB showed it
+                let (cx, cy, d) = logo_rect(w, h);
+                let cyan = count(cx - d / 2.0, cy - d / 2.0, cx + d / 2.0, cy + d / 2.0, &|p| p[1] > 150 && p[2] > 150 && p[0] < 200);
+                assert!(cyan > 0.08, "{tag}: the logo's cyan ({cyan})");
+                // the progress bar: half filled in the bar's blue, the rest its dark track
+                let (bx, by, bw, bh) = progress_bar_rect(w, h);
+                let mid = by + bh / 2.0;
+                let fill = count(bx + bw * 0.1, mid - 1.0, bx + bw * 0.4, mid + 1.0, &|p| p[2] > 200 && p[1] > 160 && p[0] < 140);
+                let track = count(bx + bw * 0.6, mid - 1.0, bx + bw * 0.9, mid + 1.0, &|p| p == [24, 34, 64]);
+                assert!(fill > 0.9 && track > 0.9, "{tag}: the progress bar (fill {fill}, track {track})");
+                // the stage text under the bar, and the name above it: light pixels where they are written
+                let s = (w as f32 / 1280.0).min(h as f32 / 720.0).clamp(0.6, 3.0);
+                let stage = count(bx, by + bh + 8.0 * s, bx + bw, by + bh + 36.0 * s, &|p| p.iter().all(|&c| c > 110));
+                assert!(stage > 0.01, "{tag}: the stage text ({stage})");
+                let name = count(cx - 160.0 * s, cy + d / 2.0 + 26.0 * s, cx + 160.0 * s, cy + d / 2.0 + 80.0 * s, &|p| p[0] > 190 && p[1] > 220);
+                assert!(name > 0.05, "{tag}: the name IYAKKI ({name})");
+                // stars around (the animation), and nothing black or left over anywhere: GRUB's picture and colour at worst
+                let stars = count(0.0, 0.0, w as f32, h as f32, &|p| p.iter().any(|&c| c > 150));
+                assert!(stars > 0.002, "{tag}: stars ({stars})");
+                for gy in 0..8 {
+                    for gx in 0..8 {
+                        let (x0, y0) = (w as f32 * gx as f32 / 8.0, h as f32 * gy as f32 / 8.0);
+                        let black = count(x0, y0, x0 + w as f32 / 8.0, y0 + h as f32 / 8.0, &|p| p.iter().all(|&c| c < 3));
+                        let grey = count(x0, y0, x0 + w as f32 / 8.0, y0 + h as f32 / 8.0, &|p| p == [0x80, 0x80, 0x80]);
+                        assert!(black < 0.01 && grey == 0.0, "{tag}: cell {gx},{gy} is black ({black}) or not painted ({grey})");
+                    }
+                }
+                // the padding past each row is the driver's, untouched
+                assert!((0..h as usize).step_by(97).all(|y| mem[y * pitch + w as usize * 4..(y + 1) * pitch].iter().all(|&b| b == 0x80)), "{tag}: stride padding untouched");
+            }
+        }
+    }
+
+    #[test]
+    fn our_display_code_never_sets_a_mode_or_switches_consoles_and_pans_only_in_place() {
+        // FBIOPUT_VSCREENINFO 0x4601, FBIOPAN_DISPLAY 0x4606, FBIOBLANK 0x4611, VT_ACTIVATE 0x5606, VT_SETMODE 0x5602; KDSETMODE
+        // only ever with 1 (graphics) outside of the restore at the very end of a shell that had no boot screen
+        for (name, src) in [("backend.rs", include_str!("backend.rs")), ("fb.rs", include_str!("fb.rs")), ("splash.rs", include_str!("splash.rs"))] {
+            let code = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+            for bad in ["0x4601", "0x4611", "0x5606", "0x5602", "FBIOPUT", "VT_ACTIVATE"] {
+                assert!(!code.contains(bad), "{name} must not use {bad}");
+            }
+        }
+        // the one pan: to the offsets the screen already has (read just before), in `scan_out`, which puts the framebuffer
+        // on the monitor after a GPU driver took over while the console was in graphics mode
+        let fb = include_str!("fb.rs").split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert_eq!(fb.matches("0x4606").count(), 1);
+        assert_eq!(fb.matches("FBIOPAN_DISPLAY as _").count(), 1);
+        let pan = fb.split("pub fn scan_out").nth(1).unwrap();
+        assert!(pan.find("FBIOGET_VSCREENINFO as _").unwrap() < pan.find("FBIOPAN_DISPLAY as _").unwrap(), "the pan reuses the current settings");
+        assert!(!include_str!("backend.rs").split("#[cfg(test)]\nmod tests").next().unwrap().contains("FBIOPAN"));
+        let code = include_str!("backend.rs").split("#[cfg(test)]\nmod tests").next().unwrap().to_string();
+        assert_eq!(code.matches("0 as libc::c_ulong").count(), 1, "text mode only in the guard's drop");
+        assert!(code.contains("if crate::splash::was_started()"), "after a boot screen the guard is never dropped");
+    }
 
     #[test]
     fn the_pointer_scales_with_the_screen() {

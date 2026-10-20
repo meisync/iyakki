@@ -4,7 +4,9 @@ use std::sync::mpsc::{channel, Receiver};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use iyakki_agent::agent::{RunEvent, RunLimits, UserTools, Verdict, AGENT_SYSTEM_PROMPT};
+use iyakki_agent::agent::{RunEvent, RunLimits, ToolDef, UserTools, Verdict};
+// the short system prompt of the assistant (the long one is kept for tests and tools that quote it)
+use iyakki_agent::toolblock::COMPACT_PROMPT as AGENT_SYSTEM_PROMPT;
 use iyakki_agent::chat::{ChatBackend, Message, Role, ToolCall};
 use iyakki_agent::context::{self, ContextInfo, ContextOptions};
 use iyakki_edit::proposal::edit_context;
@@ -14,24 +16,137 @@ use super::chatpic::{self, PicCache, PicKind, PicSrc, Rendered};
 use super::edit::EditApp;
 use iyakki_agent::sessions::{Session, SessionMeta};
 use iyakki_agent::runs::RunSession;
-use iyakki_agent::voice::{Player, Recorder};
+use iyakki_agent::hostengines;
+use iyakki_agent::hostvoice::{self, HostVoice};
+use iyakki_agent::story::{self as st, Chunk, Reader, Status};
+use iyakki_agent::voice::{self, Recorder, SpeakOpts, SpeechEngine};
+use iyakki_agent::wordtime;
 
+use super::model_picker::{self, Current, ModelList, Out, Pick};
 use super::widgets::{secret_form, Form, FormEvent};
 use super::{blink, App, AppCx, Flow};
 use iyakki_agent::credguard;
+use iyakki_agent::assistant_guard::{ask_from_args, detect_question, Ask};
 use crate::gfx::{rgb, Face, Gfx, Icon};
-use crate::ui::{Event, Key, TextField, CARD, DIM, ERR, MUTED, OK, R, TEXT};
+use super::multiline::{self, MultiLine};
+use crate::ui::{Event, Key, CARD, DIM, ERR, MUTED, OK, R, TEXT};
 
 const ACCENT: [u8; 4] = rgb(79, 140, 255);
 
+/// The Pause / Resume button of a reply being read aloud (Stop is Ctrl+K).
+const SPEAK_PAUSE: usize = 49_900;
+/// The Pause button of a running Autopilot (Ctrl+Shift+A switches Autopilot off instead: the step finishes, then it stops).
+const AP_PAUSE: usize = 49_901;
+
+/// The reply being read aloud: which message, what is said (markup removed), its sentences, and how the words said match the
+/// words drawn (see `wordtime::align_words`).
+struct Reading {
+    msg: usize,
+    chunks: Vec<Chunk>,
+    words: Vec<wordtime::WordSpan>,
+    texts: Vec<String>,
+    map: Vec<Option<usize>>,
+    /// How many drawn words `map` was made for (it is made again when the layout has another count).
+    drawn: usize,
+    chunk_seen: Option<usize>,
+}
+
+#[path = "chat_links.rs"]
+mod chat_links;
+pub use chat_links::{LinkOut, OpenHow};
+
+/// A chat that belongs to one AI IDE workspace: its tools reach only that folder, its chats are kept apart from every
+/// other workspace's, and its system prompt names the workspace.
+#[derive(Clone)]
+pub struct ProjectScope {
+    pub name: String,
+    pub root: std::path::PathBuf,
+    /// The key under which this workspace's chats are stored.
+    pub key: String,
+    pub features: std::path::PathBuf,
+    /// The workspace's cluster, when the IDE looks for one (docs/K3S-DEV.md): the k8s_* and deploy_* tools appear in the chat
+    /// when it answers.
+    pub cluster: Option<ClusterLink>,
+}
+
+impl std::fmt::Debug for ProjectScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProjectScope").field("name", &self.name).field("root", &self.root).finish()
+    }
+}
+
+/// How a workspace chat reaches its cluster.
+#[derive(Clone)]
+pub struct ClusterLink {
+    pub slot: iyakki_agent::devcluster::Slot,
+    pub namespace: String,
+    pub runner: Arc<dyn iyakki_agent::wsexec::Runner>,
+}
+
+/// The DASH tile's chat: the open dashboard (what the assistant sees and edits) and how to reach the data sources.
+#[derive(Clone)]
+pub struct DashLink {
+    pub env: Arc<iyakki_agent::dash::tools::Env>,
+    pub state: iyakki_agent::dash::session::Shared,
+}
+
+/// The FLOWS tile's chat: the flow, run and node open on the screen, and the engine the assistant's flow tools work on.
+#[derive(Clone)]
+pub struct FlowsLink {
+    pub env: Arc<iyakki_agent::flows::FlowEnv>,
+    pub open: iyakki_agent::flows::SharedOpen,
+}
+
 pub struct ChatApp {
+    /// The Jobs strip and log view: detached jobs of this chat's workspace (jobs_ui.rs).
+    jobs_ui: super::jobs_ui::JobsUi,
+    /// Links in the transcript: the card, the menu, what to hand to the app around the chat (chat_links.rs).
+    links: chat_links::LinkState,
+    dash: Option<DashLink>,
+    flows: Option<FlowsLink>,
+    /// Set when the chat lives in an AI IDE workspace.
+    project: Option<ProjectScope>,
+    /// The open file and selection of the IDE's editor, as marked data for the next plain (non-agent) question.
+    file_ctx: Option<String>,
+    /// Replies of the assistant to hand to the IDE's editor as reviewable changes.
+    proposals: Vec<String>,
     msgs: Vec<Message>,
-    input: TextField,
+    input: MultiLine,
+    /// Files dropped on the window (window mode) that go with the next message.
+    attachments: Vec<super::dropattach::Attachment>,
+    /// The last answer, queued to be saved on the host computer (window mode).
+    host_save: Option<(String, Vec<u8>)>,
     pending: Option<Receiver<(Result<String, String>, ContextInfo)>>,
+    /// The plain answer so far, from the thread that waits for the model.
+    partial: Option<Receiver<String>>,
     error: Option<String>,
     scroll_px: f32,
     // agent mode
     agent: bool,
+    /// Approval mode: Ask, Auto (this session only), or Auto pinned (remembered for this person and workspace).
+    approvals: Approvals,
+    /// What the person allowed "for this session": shared by every run of this chat (messages, Autopilot steps, an external agent),
+    /// emptied when the chat ends or on "Reset approvals".
+    grants: Arc<iyakki_agent::grants::Grants>,
+    /// The list of those approvals is open (revoke one, or reset all).
+    grants_open: bool,
+    /// Autopilot (IDE workspace chats): the assistant works toward the goal step by step until it is done (see `iyakki_agent::autopilot`).
+    autopilot: bool,
+    /// The live approval mode every run of this chat reads at each decision (`iyakki_agent::livemode`): kept in step with
+    /// `approvals` and `autopilot`, so a switch during a run applies to that run.
+    mode_cell: Arc<iyakki_agent::livemode::LiveMode>,
+    /// The running run is an Autopilot run (not a plain turn).
+    run_is_ap: bool,
+    /// Autopilot was switched on while a plain turn was running: when the turn finishes, the run continues into the plan.
+    ap_after_run: bool,
+    /// The next run continues the last request into Autopilot (no second copy of the message in the transcript).
+    ap_continue: bool,
+    /// The next run continues the saved autopilot place instead of starting over.
+    ap_resume: bool,
+    /// Where a paused or stopped autopilot run of this workspace stands, for the Resume button.
+    ap_saved: Option<iyakki_agent::autopilot::State>,
+    /// "stack: Go · board 3/10 done · 1 bug" for the footer of a workspace chat, re-read from the disk every few seconds.
+    footer_cache: Option<(std::time::Instant, String)>,
     run: Option<RunSession>,
     /// (call id, tool, what it will do) while waiting for the user's decision.
     approval: Option<(String, String, String)>,
@@ -49,8 +164,17 @@ pub struct ChatApp {
     // voice
     rec: Option<Recorder>,
     stt_rx: Option<Receiver<Result<String, String>>>,
-    speak_rx: Option<Receiver<Result<Player, String>>>,
-    player: Option<Player>,
+    /// Reads a reply aloud sentence by sentence (the same reader as TALES), so the sentence and word being said can be lit.
+    reader: Reader,
+    /// The message being read: see [`Reading`].
+    reading: Option<Reading>,
+    /// A plain click in a reply (waiting for its release), and the same waiting out the double-click time.
+    click_read: Option<(f32, f32)>,
+    pending_read: Option<(f32, f32, u32)>,
+    /// The last reader status a frame was drawn for, and when the last frame of a reading was asked for.
+    read_seen: Option<Status>,
+    /// When the last frame of the reading was asked for, on the reader's time (milliseconds).
+    read_frame: f32,
     /// `None` = follow the Settings default; set once the user toggles it.
     speak_on: Option<bool>,
     // sessions, memory, skills
@@ -60,13 +184,36 @@ pub struct ChatApp {
     last_q: String,
     /// (tokens, cost in cents, files, seconds) of the current or last agent run.
     usage: Option<(u64, f64, u32, u64)>,
+    /// The answer so far while the model is still writing it (not part of the saved chat).
+    live: String,
+    /// Where the last run's time went: (first token ms, first text ms, total ms, model ms, tools ms, our ms, prepare ms).
+    timing: Option<(u64, u64, u64, u64, u64, u64, u64, u64)>,
+    /// What the model has thought so far (shown as a collapsed "Thinking" block; never saved or sent back).
+    thinking: String,
+    /// Since when the model has been busy with this step (the "thinking… N s" count).
+    waiting_since: Option<std::time::Instant>,
+    /// Thinking from the thread that waits for a plain answer.
+    think_rx: Option<Receiver<String>>,
+    /// What the run's own thread found while building the context (shown in the status line, summary kept in the chat).
+    prep: Option<PrepSlot>,
+    note_n: u32,
     picker: Option<Picker>,
     /// The model chooser: every model of every enabled provider, and the one highlighted.
     models: Option<ModelList>,
+    /// The external coding agent answering this chat: `None` = not looked at yet, `Some(None)` = the built-in model.
+    ext_choice: Option<Option<String>>,
+    /// The workspace's parallel tasks (the IDE gives it): the lead assistant may start them with `task_spawn`.
+    tasks: Option<iyakki_agent::tasks::Manager>,
+    /// The model chosen for the agent in this chat (`""` = the CLI chooses); `None`: the agent's own setting.
+    ext_model: Option<String>,
+    /// Where an Autopilot run stands ("step 3 · row 2 of 7"), from the harness's notes, for the footer.
+    ap_step: String,
     /// A credential found in what was typed: it was not sent; the person may put it in the vault (`v`).
     cred: Option<credguard::Found>,
     /// The private form for a secret (the vault request this answers, if any).
     secret: Option<(Form, Option<String>)>,
+    /// A question about the assistant in the person's browser, asked in the open chat (the INBOX shows it too).
+    consent: Option<super::browser_consent::ConsentDialog>,
     /// A good-news line next to the errors (what was stored).
     info: Option<String>,
     /// "Edit with assistant" mode: the editor beside the conversation.
@@ -78,6 +225,8 @@ pub struct ChatApp {
     nav_dirty: bool,
     nav_top: usize,
     nav_hover: bool,
+    /// The last draw was inside the AI IDE (its Ctrl+J shows the bottom panel, so the box takes Ctrl+M for a new line only).
+    in_ide_now: bool,
     /// Messages of this chat that are saved but not shown yet: they load as the person scrolls up.
     older: Vec<Message>,
     /// How far the log can scroll, from the last drawing.
@@ -86,13 +235,25 @@ pub struct ChatApp {
     view: ChatView,
     /// What the right-click menu offered to copy as a whole (the message and the code block under the pointer).
     ctx_copy: (Option<String>, Option<String>),
+    /// The question the assistant ended with and the answers shown as buttons under it (gone once one is sent; not saved).
+    ask: Option<Ask>,
+    /// The `ask_user` call of the current run: its options are exact, so they win over a question found in the prose.
+    ask_call: Option<Ask>,
 }
 
-/// The model chooser (Ctrl+P or the Model button): (provider, model) pairs and the highlighted one.
-struct ModelList {
-    items: Vec<(String, String)>,
-    sel: usize,
-}
+/// Click ids of the answer buttons (the last one is "Other…").
+pub(crate) const CHIP_BASE: usize = 700;
+/// The press area of the composer (the message box).
+pub(crate) const INPUT_AREA: usize = 60_990;
+
+/// The context facts the run's thread hands back: what was added to the prompt, and the chat's rolling summary.
+type PrepSlot = Arc<std::sync::Mutex<Option<(ContextInfo, String)>>>;
+
+/// The request is kept under about this many tokens (old tool output is shortened first).
+const REQUEST_CAP_TOKENS: u64 = 6000;
+
+#[path = "chat_ext.rs"]
+pub(super) mod ext;
 
 /// The "Chats" list: pick a saved conversation to continue, or delete one.
 struct Picker {
@@ -111,7 +272,7 @@ fn ago(then_ms: u64, now: u64) -> String {
     if s < 60 { "now".into() } else if s < 3600 { format!("{}m", s / 60) } else if s < 86_400 { format!("{}h", s / 3600) } else { format!("{}d", s / 86_400) }
 }
 
-const BASE_PROMPT: &str = "You are the IYAKKI assistant running on an agent-first operating system. Be concise and accurate. Never ask the person to paste passwords, API keys, tokens or cookies into the chat. When something needs a credential (a media server, a cloud provider, a website login, an MCP server token, an SFTP or NAS login), tell them to store it in their vault (Settings → Vault, or turn the agent on so you can open the private form with vault_request) and refer to it as `vault:<name>` or `uvault:<name>`, never by value. You cannot look anything up in this mode: no web search, live weather, share prices or the person's open browser page. Never answer real-time questions (weather, prices, news, today's events) from memory: say you need the Agent switched on, and tell them to press Ctrl+G (the Agent button in the chat), then ask again. To show a drawing, diagram, logo, chart or icon, write it as SVG inside a ```svg fenced block: the chat draws it right there with Copy and Save buttons, so never tell the person to save a file and open it elsewhere. An image can also be sent as a data URL (data:image/png;base64,...); the chat shows it as a picture and folds the long text away.";
+const BASE_PROMPT: &str = "You are the IYAKKI assistant running on an agent-first operating system. Be concise and accurate. Never ask the person to paste passwords, API keys, tokens or cookies into the chat. When something needs a credential (a media server, a cloud provider, a website login, an MCP server token, an SFTP or NAS login), tell them to store it in their vault (Settings → Vault, or turn the agent on so you can open the private form with vault_request) and refer to it as `vault:<name>` or `uvault:<name>`, never by value. You cannot look anything up in this mode: no web search, live weather, share prices or the person's open browser page. Never answer real-time questions (weather, prices, news, today's events) from memory: say you need the Agent switched on, and tell them to press Ctrl+G (the Agent button in the chat), then ask again: with the Agent on you search the web yourself, open several sites, follow links and next pages, read the news and answer with a cited summary, with no further permission needed. Never claim that you cannot access websites in general, and never invent news or numbers. To show a drawing, diagram, logo, chart or icon, write it as SVG inside a ```svg fenced block: the chat draws it right there with Copy and Save buttons, so never tell the person to save a file and open it elsewhere. An image can also be sent as a data URL (data:image/png;base64,...); the chat shows it as a picture and folds the long text away.";
 
 impl Default for ChatApp {
     fn default() -> Self {
@@ -122,12 +283,35 @@ impl Default for ChatApp {
 impl ChatApp {
     pub fn new() -> ChatApp {
         ChatApp {
+            jobs_ui: super::jobs_ui::JobsUi::new(Some("")),
+            project: None,
+            dash: None,
+            file_ctx: None,
+            proposals: Vec::new(),
             msgs: vec![Message::system(BASE_PROMPT)],
-            input: TextField::new("Ask anything…", false),
+            input: {
+                let mut m = MultiLine::new(multiline::CHAT_MAX);
+                m.enter_newline = false;
+                m
+            },
+            attachments: Vec::new(),
+            host_save: None,
             pending: None,
+            partial: None,
             error: None,
             scroll_px: 0.0,
             agent: false,
+            approvals: Approvals::Ask,
+            grants: iyakki_agent::grants::Grants::new(),
+            grants_open: false,
+            autopilot: false,
+            mode_cell: iyakki_agent::livemode::LiveMode::new(iyakki_agent::livemode::Mode::Ask),
+            run_is_ap: false,
+            ap_after_run: false,
+            ap_continue: false,
+            ap_resume: false,
+            ap_saved: None,
+            footer_cache: None,
             run: None,
             approval: None,
             approval_detail: String::new(),
@@ -138,19 +322,37 @@ impl ChatApp {
             save_home: None,
             rec: None,
             stt_rx: None,
-            speak_rx: None,
-            player: None,
+            reader: Reader::new(),
+            reading: None,
+            click_read: None,
+            pending_read: None,
+            read_seen: None,
+            read_frame: f32::NEG_INFINITY,
             speak_on: None,
             session: None,
             use_docs: false,
             ctx: ContextInfo::default(),
             last_q: String::new(),
             usage: None,
+            live: String::new(),
+            timing: None,
+            thinking: String::new(),
+            waiting_since: None,
+            think_rx: None,
+            prep: None,
+            note_n: 0,
             picker: None,
             models: None,
+            ext_choice: None,
+            tasks: None,
+            ext_model: None,
+            ap_step: String::new(),
             cred: None,
             secret: None,
+            consent: None,
             info: None,
+            links: Default::default(),
+            flows: None,
             editor: None,
             edit_focus: false,
             nav_open: true,
@@ -158,19 +360,111 @@ impl ChatApp {
             nav_dirty: true,
             nav_top: 0,
             nav_hover: false,
+            in_ide_now: false,
             older: Vec::new(),
             max_off: 0.0,
             view: ChatView::new(),
             ctx_copy: (None, None),
+            ask: None,
+            ask_call: None,
         }
+    }
+
+    /// Make this chat work on the dashboard open in the DASH tile (call before `resumed`).
+    pub fn with_dash(mut self, d: DashLink) -> Self {
+        self.dash = Some(d);
+        self
+    }
+
+    /// Make this chat work on the flow open in the FLOWS tile (call before `resumed`).
+    pub fn with_flows(mut self, f: FlowsLink) -> Self {
+        self.flows = Some(f);
+        self
+    }
+
+    /// Offer the lead assistant `task_spawn` and `task_status` for these parallel tasks.
+    pub fn with_tasks(mut self, m: iyakki_agent::tasks::Manager) -> Self {
+        self.tasks = Some(m);
+        self
+    }
+
+    /// Make this chat belong to an AI IDE workspace (call before `resumed`).
+    pub fn with_project(mut self, p: ProjectScope) -> Self {
+        self.project = Some(p);
+        self
+    }
+
+    /// Point the chat at changed project settings (the features file may have moved).
+    pub fn set_project(&mut self, p: ProjectScope) {
+        self.project = Some(p);
+    }
+
+    /// Switch the agent tools on or off (a read-only workspace has them off).
+    pub fn set_agent_mode(&mut self, on: bool) {
+        self.agent = on;
+    }
+
+    pub fn project(&self) -> Option<&ProjectScope> {
+        self.project.as_ref()
+    }
+
+    /// The name chats are stored under: the person, or the workspace's own key.
+    fn skey(&self, cx: &AppCx) -> String {
+        match (&self.project, &self.dash, &self.flows) {
+            (Some(p), _, _) => p.key.clone(),
+            (None, Some(_), _) => iyakki_agent::dash::tools::chat_key(&cx.session.user),
+            (None, None, Some(_)) => iyakki_agent::flows::chat_key(&cx.session.user),
+            (None, None, None) => cx.session.user.clone(),
+        }
+    }
+
+    /// The IDE tells the chat what the editor shows (the file and the selection, as marked data), or nothing.
+    pub fn set_file_context(&mut self, ctx: Option<String>) {
+        self.file_ctx = ctx;
+    }
+
+    /// A reply that may hold edit blocks for the IDE's editor to review (oldest first).
+    pub fn take_proposal(&mut self) -> Option<String> {
+        if self.proposals.is_empty() { None } else { Some(self.proposals.remove(0)) }
+    }
+
+    /// Put text in the message box (the IDE sends a file or a selection this way).
+    pub fn prefill(&mut self, text: &str) {
+        self.input.set(text);
+    }
+
+    /// A turn the harness answered itself, without a model (changing the project context by saying "remember that ..."): both sides stay
+    /// in the transcript and the saved chat.
+    pub fn local_exchange(&mut self, cx: &AppCx, user: &str, reply: &str) {
+        if self.run.is_some() {
+            return;
+        }
+        self.msgs.push(Message::user(user));
+        self.msgs.push(Message::assistant(reply));
+        self.last_q = user.to_string();
+        self.persist(cx, reply);
+    }
+
+    /// Send a message now, as if typed (used by "ask the assistant about this feature").
+    pub fn ask(&mut self, cx: &AppCx, text: &str) {
+        self.input.set(text);
+        self.handle(&Event::Key(Key::Enter), cx);
+    }
+
+    /// The last error line the chat showed.
+    pub fn error_text(&self) -> Option<&str> {
+        self.error.as_deref()
     }
 
     /// Opens on the most recent chat when it was used in the last few days, so what you were doing is still there.
     pub fn resumed(mut self, cx: &AppCx) -> Self {
         let now = now_ms();
-        if let Some(m) = cx.services.sessions.list(&cx.session.user).into_iter().next() {
+        if is_pinned(cx, &self.skey(cx)) {
+            self.approvals = Approvals::Pinned;
+        }
+        if let Some(m) = cx.services.sessions.list(&self.skey(cx)).into_iter().next() {
             if now.saturating_sub(m.updated) <= iyakki_agent::sessions::WINDOW_DAYS * 86_400_000 {
-                if let Some(s) = cx.services.sessions.load(&cx.session.user, &m.id) {
+                if let Some(s) = cx.services.sessions.load(&self.skey(cx), &m.id) {
                     self.open_session(s);
                 }
             }
@@ -185,7 +479,9 @@ impl ChatApp {
         self.older = s.messages[..start].to_vec();
         self.msgs = std::iter::once(Message::system(BASE_PROMPT)).chain(s.messages[start..].iter().cloned()).collect();
         self.session = Some(s);
+        self.grants.clear();
         self.error = None;
+        self.ask = None;
         self.ctx = ContextInfo::default();
         self.scroll_px = 0.0;
     }
@@ -229,6 +525,244 @@ impl ChatApp {
         self
     }
 
+    pub fn approvals(&self) -> Approvals {
+        self.approvals
+    }
+
+    /// Ask first -> Auto-approve safe -> Auto-approve safe kept -> Autopilot (where there is one) -> Ask first. The pin is
+    /// remembered per person and workspace; plain Auto ends with the session or when the workspace changes.
+    pub fn cycle_approvals(&mut self, cx: &AppCx) {
+        let key = self.skey(cx);
+        if self.autopilot {
+            // Autopilot -> Ask first
+            self.autopilot = false;
+            self.ap_after_run = false;
+            self.approvals = Approvals::Ask;
+        } else {
+            match self.approvals {
+                Approvals::Ask => self.approvals = Approvals::Auto,
+                Approvals::Auto => self.approvals = Approvals::Pinned,
+                Approvals::Pinned if self.autopilot_available() => {
+                    // the kept mode is dropped so it does not outlive Autopilot
+                    self.approvals = Approvals::Auto;
+                    self.toggle_autopilot(cx);
+                }
+                Approvals::Pinned => self.approvals = Approvals::Ask,
+            }
+        }
+        set_pin(cx, &key, self.approvals == Approvals::Pinned);
+        cx.audit.record(&cx.session.user, "agent.approvals", &format!("{}:{}", if self.autopilot { "autopilot" } else { self.approvals.name() }, key));
+        self.sync_live(cx);
+    }
+
+    /// The mode the live cell holds: Autopilot, Auto-approve safe (kept or not) or Ask first.
+    fn live_mode(&self) -> iyakki_agent::livemode::Mode {
+        use iyakki_agent::livemode::Mode;
+        if self.autopilot {
+            Mode::Autopilot
+        } else if self.approvals.is_auto() {
+            Mode::Auto
+        } else {
+            Mode::Ask
+        }
+    }
+
+    /// Put the chip's mode in the live cell. During a run the change applies to that run at once: it is audited with the run
+    /// and the person, and a line in the timeline marks the point of change.
+    fn sync_live(&mut self, cx: &AppCx) {
+        use iyakki_agent::livemode::Mode;
+        let m = self.live_mode();
+        if !self.mode_cell.set(m) {
+            return;
+        }
+        let Some(run) = &self.run else { return };
+        let id = run.id().to_string();
+        cx.audit.record(&cx.session.user, "agent.approvals.live", &format!("approvals mode changed to {} during run {id} by {}", m.label(), cx.session.user));
+        let what = match m {
+            Mode::Autopilot if self.run_is_ap => "Autopilot goes on with the plan".to_string(),
+            Mode::Autopilot => "this turn finishes, then Autopilot works through the plan".to_string(),
+            _ if self.run_is_ap => format!("Autopilot stops after the current step and hands back with a summary (jobs keep running); until then {}", if m == Mode::Ask { "risky calls ask" } else { "only always-ask items ask" }),
+            Mode::Auto => "a waiting card it would run is approved now; always-ask items keep waiting".to_string(),
+            Mode::Ask => "the next risky call asks (a running tool keeps running)".to_string(),
+        };
+        self.push_note(format!("Approvals changed to {} during this run: {what}.", m.label()));
+    }
+
+    /// A line of the chat's own in the timeline (shown like the assistant's steps).
+    fn push_note(&mut self, text: String) {
+        self.note_n += 1;
+        let call = ToolCall { id: format!("mode_{}_{}", now_ms(), self.note_n), name: "assistant_check".into(), args: serde_json::Value::Null };
+        self.msgs.push(Message::assistant_calls("", vec![call.clone()]));
+        self.msgs.push(Message::tool_result(&call, text));
+    }
+
+    /// The one chip: Ask first, Auto-approve safe (kept), or Autopilot (with where a saved run stands).
+    pub fn mode_label(&self) -> String {
+        if self.autopilot {
+            let l = self.autopilot_label();
+            return format!("Autopilot{}", l.strip_prefix("AUTOPILOT").unwrap_or(""));
+        }
+        self.approvals.label().to_string()
+    }
+
+    /// What an external agent chosen for this chat does with the chip's mode, when it is not what the chip says: `Some((short, long))`
+    /// (Auto not allowed for the agent in Settings → Agents, so every action still asks; or Autopilot refused because the agent is a
+    /// read-only advisor). `None`: the mode is honoured, or the built-in assistant is in use.
+    pub fn mode_gap(&self, cx: &AppCx) -> Option<(String, String)> {
+        if !(self.autopilot || self.approvals.is_auto()) {
+            return None;
+        }
+        let id = self.ext_choice.clone().flatten()?;
+        let cfg = cx.services.agents_cfg();
+        let agent = cfg.agent(&id)?;
+        let label = agent.label();
+        if self.autopilot && agent.mode() != iyakki_agent::extagent::Mode::Bridged {
+            return Some((format!("refused for {label}"), format!("Autopilot is refused for {label}: it runs read-only here (advisor only) and cannot use IYAKKI's tools. Pick another agent or model (Ctrl+P), or change {label} in Settings → Agents.")));
+        }
+        let (allow_auto, _) = cfg.cfg_of(&id)?;
+        (!allow_auto).then(|| (format!("{label}: each action asks"), format!("{label} may not use Auto yet, so every action still asks first even in this mode. Allow it in Settings → Agents → {label} (key a).")))
+    }
+
+    /// The chip's text including what an external agent really does with the mode.
+    pub fn mode_label_in(&self, cx: &AppCx) -> String {
+        match self.mode_gap(cx) {
+            Some((short, _)) => format!("{} · {short}", self.mode_label()),
+            None => self.mode_label(),
+        }
+    }
+
+    /// The chip's hint including that gap.
+    pub fn mode_hint_in(&self, cx: &AppCx) -> String {
+        match self.mode_gap(cx) {
+            Some((_, long)) => format!("{} {long}", self.mode_hint()),
+            None => self.mode_hint(),
+        }
+    }
+
+    /// The hover hint of the chip: one short line per mode (the whole story is [`AUTO_LIMITS`] and the docs).
+    pub fn mode_hint(&self) -> String {
+        if self.run.is_some() {
+            return format!("{} {}", self.mode_hint_idle(), iyakki_agent::livemode::DURING_RUN);
+        }
+        self.mode_hint_idle()
+    }
+
+    fn mode_hint_idle(&self) -> String {
+        let next = "Ctrl+Q: next mode";
+        if self.autopilot {
+            return format!("Autopilot: works through the plan to the end within its budgets; still stops for always-ask items. {next}");
+        }
+        match self.approvals {
+            Approvals::Ask => format!("Ask first: asks before anything you have not approved; remembers your session approvals. {next}"),
+            Approvals::Auto => format!("Auto-approve safe: asks only for risky actions; deleting, secrets and the screen always ask. {next}"),
+            Approvals::Pinned => format!("Auto-approve safe, kept for this workspace: asks only for risky actions. {next}"),
+        }
+    }
+
+    /// Adds a session approval without a card (tests of the controls).
+    #[cfg(test)]
+    pub(crate) fn grant_for_test(&self, tool: &str, scope: &str, label: &str) {
+        self.grants.add(tool, scope, label);
+    }
+
+    /// What the person approved "for this session", as the list shows it.
+    pub fn session_approvals(&self) -> Vec<iyakki_agent::grants::Grant> {
+        self.grants.list()
+    }
+
+    /// Take one session approval back (the next such call asks again).
+    pub fn revoke_approval(&mut self, cx: &AppCx, i: usize) {
+        if let Some(g) = self.grants.list().get(i) {
+            cx.audit.record(&cx.session.user, "agent.approvals.revoke", &g.label);
+        }
+        self.grants.revoke(i);
+        if self.grants.is_empty() {
+            self.grants_open = false;
+        }
+    }
+
+    /// "Reset approvals": forget every session approval.
+    pub fn reset_approvals(&mut self, cx: &AppCx) {
+        cx.audit.record(&cx.session.user, "agent.approvals.reset", &format!("{} approvals", self.grants.len()));
+        self.grants.clear();
+        self.grants_open = false;
+    }
+
+    /// The footer line of a workspace chat: the stack, the board progress and the open bugs.
+    pub fn project_footer(&mut self) -> Option<String> {
+        let p = self.project.as_ref()?;
+        if let Some((t, s)) = &self.footer_cache {
+            if t.elapsed() < std::time::Duration::from_secs(3) {
+                return Some(s.clone());
+            }
+        }
+        let cfg = iyakki_agent::workspace::ProjectConfig::load(&p.root).unwrap_or_default();
+        let s = iyakki_agent::projectstate::footer(&p.root, &p.features, &cfg.stack);
+        self.footer_cache = Some((std::time::Instant::now(), s.clone()));
+        Some(s)
+    }
+
+    pub fn autopilot(&self) -> bool {
+        self.autopilot
+    }
+
+    /// Autopilot is only for the AI IDE's workspace chat, with the agent on (so never in a read-only workspace).
+    pub fn autopilot_available(&self) -> bool {
+        self.project.is_some() && self.agent
+    }
+
+    fn ap_state_path(&self) -> Option<std::path::PathBuf> {
+        self.project.as_ref().map(|p| p.root.join(".iyakki/autopilot.json"))
+    }
+
+    /// Turn Autopilot on or off (Ctrl+Shift+A). On implies Auto approvals for the safe set (the hard limits stay).
+    /// It works during a run too: switched on during a plain turn, the turn finishes and the run continues into the plan;
+    /// switched off during an Autopilot run, the current step finishes and the loop stops with a summary.
+    pub fn toggle_autopilot(&mut self, cx: &AppCx) {
+        if !self.autopilot && !self.autopilot_available() {
+            self.error = Some("Autopilot needs the agent switched on in an AI IDE workspace chat that is not read-only.".into());
+            return;
+        }
+        self.autopilot = !self.autopilot;
+        if self.autopilot {
+            if self.approvals == Approvals::Ask {
+                self.approvals = Approvals::Auto;
+            }
+            self.ap_saved = self.ap_state_path().and_then(|p| iyakki_agent::autopilot::State::load(&p)).filter(|s| matches!(s.status.as_str(), "paused" | "stopped" | "running"));
+        }
+        self.ap_after_run = self.autopilot && self.run.is_some() && !self.run_is_ap;
+        cx.audit.record(&cx.session.user, "agent.autopilot", if self.autopilot { "on" } else { "off" });
+        self.sync_live(cx);
+    }
+
+    /// What the chip says: off, on, or where a saved run stands.
+    pub fn autopilot_label(&self) -> String {
+        match (&self.ap_saved, self.autopilot, self.run.is_some()) {
+            (_, true, true) => "AUTOPILOT".into(),
+            (Some(s), true, false) => format!("AUTOPILOT · {} at step {}", if s.status == "paused" { "paused" } else { "stopped" }, s.step + 1),
+            (_, true, false) => "AUTOPILOT".into(),
+            _ => "Autopilot".into(),
+        }
+    }
+
+    /// Resume the saved run: the goal is the one that was saved.
+    pub fn resume_autopilot(&mut self, cx: &AppCx) {
+        if let (true, true, Some(s)) = (self.autopilot, self.run.is_none(), self.ap_saved.clone()) {
+            self.ap_resume = true;
+            self.start_run(cx, s.goal.clone());
+        }
+    }
+
+    /// Auto ends here unless it was pinned (the person signed out or went to another workspace).
+    pub fn end_auto_unless_pinned(&mut self) {
+        self.autopilot = false;
+        self.ap_after_run = false;
+        if self.approvals == Approvals::Auto {
+            self.approvals = Approvals::Ask;
+        }
+        self.mode_cell.set(self.live_mode());
+    }
+
     pub fn agent_mode(&self) -> bool {
         self.agent
     }
@@ -240,19 +774,37 @@ impl ChatApp {
     }
 
     fn start_run(&mut self, cx: &AppCx, text: String) {
+        // a turn that continues into Autopilot (switched on while it ran) already has its message in the transcript
+        let continues = std::mem::take(&mut self.ap_continue);
         if !cx.session.policy.agent {
             cx.audit.record(&cx.session.user, "agent.denied", "start");
             self.error = Some("The agent is not enabled for your account.".into());
             self.agent = false;
             return;
         }
+        let ext = self.ext_id(cx);
+        if self.autopilot && ext.is_some() {
+            if let Some(why) = self.autopilot_refusal(cx) {
+                self.error = Some(why);
+                return;
+            }
+        }
         self.error = None;
+        self.ap_step.clear();
+        self.ask = None;
+        self.ask_call = None;
         self.usage = None;
+        self.timing = None;
+        self.live.clear();
+        self.thinking.clear();
+        self.waiting_since = Some(std::time::Instant::now());
         self.scroll_px = 0.0;
         self.ensure_session(cx);
         self.last_q = text.trim().to_string();
         // the agent has its own document-search tool, so passages are not pre-loaded for it
-        let opts = ContextOptions { use_docs: false, ..Default::default() };
+        let mut opts = ContextOptions { use_docs: false, ..Default::default() };
+        // the PROJECT STATE of a workspace chat: rebuilt from the disk at the start of every run (and every Autopilot step)
+        let mut state_fn: Option<Arc<dyn Fn() -> String + Send + Sync>> = None;
         // every chat has a work folder of its own; the account may read and (if it may write at all) write there
         let mut policy = cx.session.policy.clone();
         let workdir = self.session.as_ref().and_then(|s| cx.services.session_workdir(&cx.session.user, &s.id).ok());
@@ -265,37 +817,301 @@ impl ChatApp {
                 policy.fs_read.push(p);
             }
         }
-        let system = match &workdir {
+        let mut workdir = workdir;
+        let mut k8s: Option<Arc<iyakki_agent::k8stools::K8sTools>> = None;
+        let mut platform: Option<Arc<iyakki_agent::platform::tools::PlatformTools>> = None;
+        let mut system = match &workdir {
             Some(d) => format!("{AGENT_SYSTEM_PROMPT}\nYour working folder for this chat is {}. Relative paths and new files go there; each chat has its own folder.", d.display()),
             None => AGENT_SYSTEM_PROMPT.to_string(),
         };
-        let (history, info) = context::build(&cx.services, &cx.services.skills, &cx.services.sessions, &cx.session.user, self.session.as_ref().map(|s| s.id.as_str()), &system, &self.msgs, text.trim(), &opts);
-        self.ctx = info;
-        self.msgs.push(Message::user(text.trim()));
-        let mut tools = UserTools::new(&cx.session.user, policy, cx.services.clone(), cx.host.clone(), cx.mcp_servers.clone());
+        // an AI IDE workspace: the account's file scope is narrowed to the workspace folder (what the account may do there stays)
+        let project = self.project.clone();
+        if let Some(p) = &project {
+            let root = p.root.display().to_string();
+            let (user, base) = (cx.session.user.as_str(), &cx.session.policy);
+            policy = base.clone();
+            policy.fs_read = if base.allows_read(user, &root) { vec![root.clone()] } else { vec![] };
+            policy.fs_write = if base.allows_write(user, &root) { vec![root] } else { vec![] };
+            workdir = Some(p.root.clone());
+            // the workspace's connected cluster: the k8s_* and deploy_* tools, only for an account that may run commands
+            let profile = p.cluster.as_ref().and_then(|c| c.slot.lock().ok().and_then(|g| g.resolution.as_ref().and_then(|r| r.reachable().cloned())));
+            let may_run = cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full && (profile.as_ref().is_none_or(|pr| pr.local) || cx.session.policy.allows_host("*"));
+            if let (Some(c), Some(pr), true) = (&p.cluster, profile, may_run) {
+                let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+                let k = iyakki_agent::k8stools::K8sTools::new(c.runner.clone(), pr, &c.namespace, &p.name, &p.root, Arc::new(move |a, d| audit.record(&user, &format!("k8s.{a}"), d)));
+                k8s = Some(Arc::new(k));
+                // platform services (Gitea, a private store) are offered with the cluster tools; they always ask
+                let env = if cfg!(test) { iyakki_agent::devcluster::Env::default() } else { iyakki_agent::devcluster::Env::real() };
+                platform = Some(Arc::new(iyakki_agent::platform::tools::PlatformTools::new(Arc::new(super::platform_services::platform_for(cx, c.runner.clone(), env)))));
+            }
+            system = format!("{AGENT_SYSTEM_PROMPT}{}", iyakki_agent::boardtools::workspace_prompt_with_cluster(&p.name, &p.root, &p.features.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "FEATURES.md".into()), k8s.as_ref().map(|k| (&k.profile, k.ns.as_str()))));
+            {
+                let cfg = iyakki_agent::workspace::ProjectConfig::load(&p.root).unwrap_or_default();
+                opts.pinned_skills = iyakki_agent::projectstate::detect_stack(&p.root, &cfg.stack).pinned_skills(text.trim()).iter().map(|s| s.to_string()).collect();
+                let cluster = k8s.as_ref().map(|k| format!("{} · namespace {}", k.profile.describe(), k.ns));
+                let history = (!cx.services.settings.lock().unwrap_or_else(|e| e.into_inner()).get().no_workspace_history).then(|| iyakki_agent::history::History::new(cx.services.kb.clone(), &cx.session.user, &p.name, self.session.as_ref().map(|s| s.id.as_str())));
+                let (root, name, features) = (p.root.clone(), p.name.clone(), p.features.clone());
+                let f: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || {
+                    let cfg = iyakki_agent::workspace::ProjectConfig::load(&root).unwrap_or_default();
+                    iyakki_agent::projectstate::build(&iyakki_agent::projectstate::Input { name: &name, root: &root, features: &features, stack_override: &cfg.stack, test: &cfg.commands.test, run: &cfg.commands.run, build: &cfg.commands.build, cluster: cluster.clone(), history: history.as_ref() })
+                });
+                if !self.autopilot {
+                    system.push_str("\n\n");
+                    system.push_str(&f());
+                }
+                state_fn = Some(f);
+            }
+            if iyakki_agent::idebrowser::IdeBrowserTools::offered(&cx.session.policy) {
+                system.push('\n');
+                system.push_str(iyakki_agent::idebrowser::PROMPT_RULES);
+            }
+            if self.tasks.is_some() && cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full {
+                system.push_str(iyakki_agent::tasktools::PROMPT_RULE);
+            }
+            if k8s.is_none() {
+                system.push_str("\nNo cluster is connected to this workspace. Never start, install or stop a cluster (k3s server, minikube, kind, kubeadm): it is refused. If the person wants to deploy, tell them to use the K8S panel's Change cluster, or to set a cluster up themselves.");
+            }
+        }
+        // detached jobs: anything slow goes through job_start (it outlives this chat and shows in the Jobs strip)
+        if iyakki_agent::jobtools::JobTools::offered(&cx.session.policy) {
+            system.push_str(iyakki_agent::jobtools::PROMPT_RULE);
+        }
+        // the DASH tile: the rules for working on the open dashboard and a compact picture of it, rebuilt for every message
+        if let Some(d) = &self.dash {
+            system.push_str(iyakki_agent::dash::tools::PROMPT_RULES);
+            system.push_str("\n\n");
+            system.push_str(&iyakki_agent::dash::tools::DashTools::context(&d.env, &d.state));
+        }
+        // the FLOWS tile: the rules for working on workflows and a compact, redacted picture of what is open
+        if let Some(f) = &self.flows {
+            system.push_str(iyakki_agent::flows::tools::PROMPT_RULES);
+            system.push_str("\n\n");
+            system.push_str(&iyakki_agent::flows::tools::FlowTools::context(&f.env, &f.open));
+        }
+        // recalling memory and skills (it may call an embedding service) and condensing the history happen on the run's own
+        // thread, so starting a run never waits on the UI thread
+        let (user_key, sid, before, saved) = (self.skey(cx), self.session.as_ref().map(|s| s.id.clone()), self.msgs.clone(), self.all_messages());
+        let (svc, ask) = (cx.services.clone(), text.trim().to_string());
+        let slot: PrepSlot = Arc::new(std::sync::Mutex::new(None));
+        let slot2 = slot.clone();
+        let prepare: iyakki_agent::assistrun::Prepare = Arc::new(move |defs: &[ToolDef]| {
+            let (history, info) = context::build(&svc, &svc.skills, &svc.sessions, &user_key, sid.as_deref(), &system, &before, &ask, &opts);
+            let names: Vec<&str> = defs.iter().map(|d| d.spec.name.as_str()).collect();
+            // what no longer fits the window is reduced to a few lines
+            let cut = &saved[..saved.len().saturating_sub(opts.window)];
+            let older = iyakki_agent::assistant_guard::extractive_summary(cut, "");
+            let c = iyakki_agent::assistant_guard::condense(history, &names, REQUEST_CAP_TOKENS, &older);
+            *slot2.lock().unwrap_or_else(|e| e.into_inner()) = Some((info, c.summary.clone()));
+            c.history
+        });
+        self.prep = Some(slot);
+        if !continues {
+            self.msgs.push(Message::user(text.trim()));
+        }
+        let ide_policy = policy.clone();
+        let job_policy = policy.clone();
+        let mut tools = UserTools::new(&cx.session.user, policy, cx.services.clone(), cx.host.clone(), cx.mcp_servers.clone()).with_request(text.trim());
         if let Some(d) = &workdir {
             tools = tools.with_cwd(d);
         }
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = match &project {
+            Some(p) => {
+                // the IDE's Browser tab tools sit under the board tools, so the harness's http check of a deploy row can use them
+                let base: Arc<dyn iyakki_agent::agent::Tools> = if iyakki_agent::idebrowser::IdeBrowserTools::offered(&ide_policy) {
+                    Arc::new(iyakki_agent::idebrowser::IdeBrowserTools::new(Arc::new(tools), cx.services.clone(), ide_policy, &cx.session.user, &p.name, &p.root))
+                } else {
+                    Arc::new(tools)
+                };
+                let mut pt = iyakki_agent::boardtools::ProjectTools::new(base, &p.root, &p.name, &p.features);
+                let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+                pt = pt.with_audit(Arc::new(move |k, d| audit.record(&user, k, d)));
+                if !cx.services.settings.lock().unwrap_or_else(|e| e.into_inner()).get().no_workspace_history {
+                    pt = pt.with_history(iyakki_agent::history::History::new(cx.services.kb.clone(), &cx.session.user, &p.name, self.session.as_ref().map(|s| s.id.as_str())));
+                }
+                if let Some(k) = k8s {
+                    pt = pt.with_k8s(k);
+                }
+                if let Some(pl) = platform {
+                    pt = pt.with_platform(pl);
+                }
+                Arc::new(pt)
+            }
+            None => Arc::new(tools),
+        };
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = match &self.dash {
+            Some(d) => Arc::new(iyakki_agent::dash::tools::DashTools::new(tools_arc, d.env.clone(), d.state.clone())),
+            None => tools_arc,
+        };
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = match &self.flows {
+            Some(f) => Arc::new(iyakki_agent::flows::tools::FlowTools::new(tools_arc, f.env.clone(), f.open.clone())),
+            None => tools_arc,
+        };
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = match (&self.tasks, &project) {
+            (Some(m), Some(_)) if cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full => Arc::new(iyakki_agent::tasktools::TaskTools::new(tools_arc, m.clone(), ext.as_deref().unwrap_or("builtin"), "")),
+            _ => tools_arc,
+        };
+        // the job tools sit outermost: an external agent gets them through the bridge like the others
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if iyakki_agent::jobtools::JobTools::offered(&cx.session.policy) {
+            let cwd = workdir.clone().unwrap_or_else(|| std::path::PathBuf::from(format!("/home/{}", cx.session.user)));
+            let cwd = if cwd.is_dir() { cwd } else { std::path::PathBuf::from("/") };
+            let ws = project.as_ref().map(|p| (p.name.as_str(), p.root.as_path()));
+            Arc::new(iyakki_agent::jobtools::JobTools::new(tools_arc, cx.services.jobs.clone(), &cx.session.user, job_policy, &cwd, ws))
+        } else {
+            tools_arc
+        };
         cx.audit.record(&cx.session.user, "agent.start", &format!("{} chars", text.len()));
-        let mut run = RunSession::start(Some(cx.services.runs.clone()), &cx.session.user, text.trim(), cx.chat.clone(), Arc::new(tools), history, RunLimits::for_budget(&cx.session.policy.budget, cx.services.settings.lock().unwrap().get().token_price_cents_per_mtok));
+        let browser = match cx.session.policy.browser_agent {
+            iyakki_sec::policy::BrowserAgent::Off => "off",
+            iyakki_sec::policy::BrowserAgent::Interactive => "interactive",
+            _ => "read-only",
+        };
+        let reminder = iyakki_agent::toolblock::ReminderCtx { agent_on: true, browser_policy: browser.into(), engine_installed: iyakki_agent::webengine::embedded_available(), screen_available: cx.services.screen.present(), loaded: None };
+        let mut assist = iyakki_agent::assistrun::Assist::standard(reminder);
+        {
+            // the thinking watchdog's limits (Settings; 0 = the defaults of 60 s of pure thinking and 120 s of silence)
+            let st = cx.services.settings.lock().unwrap_or_else(|e| e.into_inner());
+            let (t, q) = (st.get().think_limit_secs, st.get().silence_limit_secs);
+            if t > 0 {
+                assist.think_limit = std::time::Duration::from_secs(t as u64);
+            }
+            if q > 0 {
+                assist.silence_limit = std::time::Duration::from_secs(q as u64);
+            }
+        }
+        assist.prepare = Some(prepare);
+        // the live mode: the chip can change it while this run goes, and the run reads it at every decision
+        self.mode_cell.set(self.live_mode());
+        self.run_is_ap = false;
+        self.ap_after_run = false;
+        let limits = browser_limits(&cx.session.policy, RunLimits { auto: self.approvals.is_auto() || self.autopilot, grants: Some(self.grants.clone()), live: Some(self.mode_cell.clone()), ..RunLimits::for_budget(&cx.session.policy.budget, cx.services.settings.lock().unwrap().get().token_price_cents_per_mtok) });
+        if let (Some(id), false) = (ext.clone(), self.autopilot) {
+            // an external coding agent answers: it gets the same tools, approvals and policy through the bridge
+            let (workspace, prep) = (workdir.clone(), assist.prepare.clone());
+            match self.run_external(cx, &id, text.trim(), tools_arc, limits, prep, workspace) {
+                Ok(run) => {
+                    self.run = Some(match &self.session {
+                        Some(sess) => run.in_session(&sess.id),
+                        None => run,
+                    });
+                }
+                Err(e) => self.error = Some(e),
+            }
+            return;
+        }
+        let mut run = match (self.autopilot, &project) {
+            (true, Some(p)) => {
+                // the AI IDE's Autopilot: a series of runs toward the goal (see iyakki_agent::autopilot)
+                let mut actx = iyakki_agent::autopilot::Context::new(&p.root, &p.features, text.trim());
+                actx.resume = std::mem::take(&mut self.ap_resume);
+                actx.state = state_fn.clone();
+                actx.session = self.session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
+                // a message typed while the run was paused is an interjection to re-plan for, not a new goal
+                if !actx.resume {
+                    if let Some(s) = iyakki_agent::autopilot::State::load(&p.root.join(".iyakki/autopilot.json")).filter(|s| s.status == "paused") {
+                        actx.resume = true;
+                        actx.goal = s.goal.clone();
+                        actx.interjection = Some(text.trim().to_string());
+                    }
+                }
+                let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+                actx.audit = Some(Arc::new(move |k, d| audit.record(&user, if k.starts_with("autopilot") || k == "board.auto" { k } else { "autopilot.other" }, d)));
+                let (svc, user2) = (cx.services.clone(), cx.session.user.clone());
+                actx.notify = Some(Arc::new(move |title, body| {
+                    let _ = svc.inbox.add(&user2, iyakki_agent::inbox::Kind::Agent, title, body, "autopilot", Some(iyakki_agent::inbox::Link::new("inbox", "")), iyakki_agent::clock::now_unix());
+                }));
+                if !cx.services.settings.lock().unwrap_or_else(|e| e.into_inner()).get().no_workspace_history {
+                    actx.history = Some(iyakki_agent::history::History::new(cx.services.kb.clone(), &cx.session.user, &p.name, self.session.as_ref().map(|s| s.id.as_str())));
+                }
+                // an external coding agent carries out the steps (the harness keeps the board, the checks, the caps, the summary)
+                if let Some(id) = &ext {
+                    actx.executor = Some(self.ext_executor(cx, id, tools_arc.clone(), workdir.clone()));
+                }
+                self.run_is_ap = true;
+                let h = iyakki_agent::autopilot::start(cx.chat.clone(), tools_arc, vec![Message::user(text.trim())], limits, assist, actx);
+                RunSession::from_handle(Some(cx.services.runs.clone()), &cx.session.user, text.trim(), h)
+            }
+            _ => RunSession::start_with(Some(cx.services.runs.clone()), &cx.session.user, text.trim(), cx.chat.clone(), tools_arc, vec![Message::user(text.trim())], limits, assist),
+        };
         if let Some(s) = &self.session {
             run = run.in_session(&s.id);
         }
         self.run = Some(run);
     }
 
+    /// The Jobs strip reads the engine about once a second; a job that finished becomes a step in the transcript.
+    fn poll_jobs(&mut self, cx: &AppCx) {
+        let ws = self.project.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+        self.jobs_ui.set_workspace(&ws);
+        self.jobs_ui.set_hurry(self.run.is_some());
+        self.jobs_ui.poll(cx, false);
+        for line in self.jobs_ui.take_events() {
+            self.note_n += 1;
+            let call = ToolCall { id: format!("job_{}_{}", now_ms(), self.note_n), name: "assistant_check".into(), args: serde_json::Value::Null };
+            self.msgs.push(Message::assistant_calls("", vec![call.clone()]));
+            self.msgs.push(Message::tool_result(&call, line));
+        }
+    }
+
+    /// True while a job of this chat's workspace runs: the strip is moving and the shell draws about ten frames a second.
+    pub fn jobs_animating(&self) -> bool {
+        self.jobs_ui.animating()
+    }
+
+    /// See [`super::jobs_ui::JobsUi::frame_due`].
+    pub fn jobs_frame_due(&mut self) -> bool {
+        self.jobs_ui.frame_due()
+    }
+
     fn poll_run(&mut self, cx: &AppCx) {
         let Some(run) = self.run.as_mut() else { return };
         let events = run.poll();
+        let mut answered = false;
+        if let Some((info, summary)) = self.prep.as_ref().and_then(|p| p.lock().unwrap_or_else(|e| e.into_inner()).take()) {
+            self.ctx = info;
+            if let Some(sess) = self.session.as_mut() {
+                sess.summary = summary;
+            }
+        }
         for e in events {
+            if !matches!(e, RunEvent::Delta { .. } | RunEvent::Thinking { .. } | RunEvent::Usage { .. }) {
+                self.live.clear();
+            }
+            if matches!(e, RunEvent::Delta { .. } | RunEvent::Model { .. } | RunEvent::Final { .. } | RunEvent::Failed { .. } | RunEvent::Stopped { .. }) {
+                self.thinking.clear();
+            }
+            if matches!(e, RunEvent::ToolResult { .. }) {
+                self.waiting_since = Some(std::time::Instant::now());
+            }
             match e {
+                RunEvent::Thinking { text, .. } => self.thinking = text,
+                // the answer so far (the final text replaces it) and the assistant's own steps, shown like tool steps
+                RunEvent::Delta { text } => self.live = text,
+                RunEvent::Note { text } => {
+                    if let Some(rest) = text.strip_prefix("autopilot: step ") {
+                        self.ap_step = format!("step {}", rest.split(" · ").take(2).collect::<Vec<_>>().join(" · "));
+                    }
+                    self.note_n += 1;
+                    let call = ToolCall { id: format!("check_{}_{}", now_ms(), self.note_n), name: "assistant_check".into(), args: serde_json::Value::Null };
+                    self.msgs.push(Message::assistant_calls("", vec![call.clone()]));
+                    self.msgs.push(Message::tool_result(&call, text));
+                }
+                RunEvent::Timing { first_token_ms, first_text_ms, total_ms, model_ms, tools_ms, overhead_ms, prepare_ms, thinking_ms, .. } => self.timing = Some((first_token_ms, first_text_ms, total_ms, model_ms, tools_ms, overhead_ms, prepare_ms, thinking_ms)),
                 RunEvent::Model { text, calls } => {
+                    if let Some(a) = calls.iter().filter(|c| c.name == "ask_user").find_map(|c| ask_from_args(&c.args)) {
+                        self.ask_call = Some(a);
+                    }
                     if !calls.is_empty() {
                         let tc: Vec<ToolCall> = calls.into_iter().map(|c| ToolCall { id: c.id, name: c.name, args: c.args }).collect();
                         self.msgs.push(Message::assistant_calls(text, tc));
                     }
                 }
                 RunEvent::Approval { id, name, summary, detail } => {
+                    // what "Allow for this session" would cover, worked out from the call the card is about
+                    let args = self.msgs.iter().rev().flat_map(|m| m.tool_calls.iter()).find(|c| c.id == id).map(|c| c.args.clone());
+                    let summary = match args {
+                        Some(a) if name != "screen_capture" && !summary.contains(iyakki_agent::grants::ALWAYS_ASKS) => format!("{summary}{}{}", iyakki_agent::grants::SESSION_COVERS, iyakki_agent::grants::label_of(&name, &a)),
+                        _ => summary,
+                    };
                     self.approval = Some((id, name, summary));
                     self.approval_detail = detail;
                     self.scroll_px = 0.0; // the question is at the end of the conversation
@@ -309,10 +1125,14 @@ impl ChatApp {
                     self.msgs.push(Message::tool_result(&ToolCall { id, name, args: serde_json::Value::Null }, text));
                 }
                 RunEvent::Usage { tokens, cost_cents, files, seconds } => self.usage = Some((tokens, cost_cents, files, seconds)),
+                RunEvent::Final { text } if text.trim().is_empty() => self.error = Some("The model returned an empty answer. Try again, or choose another model (Ctrl+P).".into()),
                 RunEvent::Final { text } => {
+                    answered = true;
+                    self.ask = self.ask_call.take().or_else(|| detect_question(&text));
                     self.msgs.push(Message::assistant(text.clone()));
                     self.persist(cx, &text);
-                    self.speak(cx, text);
+                    let msg = self.msgs.len() - 1;
+                    self.speak(cx, text, msg);
                 }
                 RunEvent::Failed { error } => self.error = Some(error),
                 RunEvent::Stopped { reason } => self.error = Some(format!("The run stopped: {reason}.")),
@@ -320,7 +1140,37 @@ impl ChatApp {
         }
         if self.run.as_ref().is_some_and(|r| r.is_done()) {
             self.run = None;
+            // where an autopilot run stands now, for the Resume button
+            if self.autopilot {
+                self.ap_saved = self.ap_state_path().and_then(|p| iyakki_agent::autopilot::State::load(&p)).filter(|s| matches!(s.status.as_str(), "paused" | "stopped"));
+            }
             self.approval = None;
+            self.live.clear();
+            self.thinking.clear();
+            self.waiting_since = None;
+            self.run_is_ap = false;
+            // Autopilot was switched on while this turn ran: the turn is done, so the run continues into the plan (fresh budgets)
+            if std::mem::take(&mut self.ap_after_run) && self.autopilot {
+                if answered && self.autopilot_available() {
+                    self.ap_continue = true;
+                    cx.audit.record(&cx.session.user, "agent.autopilot", "continues the turn into the plan");
+                    let goal = self.last_q.clone();
+                    self.start_run(cx, goal);
+                } else {
+                    self.info = Some("Autopilot is on, but the turn did not finish: send a message to start the plan.".into());
+                }
+            }
+        }
+    }
+
+    /// Keys and clicks of the list of session approvals: a row revokes it, Reset forgets all, Esc closes.
+    fn grants_key(&mut self, ev: &Event, cx: &AppCx) {
+        match ev {
+            Event::Row(n) => self.revoke_approval(cx, *n),
+            Event::Key(Key::Ctrl('0')) => self.reset_approvals(cx),
+            Event::Key(Key::Ctrl(c @ '1'..='9')) => self.revoke_approval(cx, *c as usize - '1' as usize),
+            Event::Key(Key::Esc | Key::Ctrl('Q') | Key::Enter) | Event::MouseDown(..) => self.grants_open = false,
+            _ => {}
         }
     }
 
@@ -338,19 +1188,38 @@ impl ChatApp {
         self.stt_rx.is_some()
     }
     pub fn is_speaking(&mut self) -> bool {
-        self.speak_rx.is_some() || self.player.as_mut().is_some_and(|p| p.is_playing())
+        self.reading.is_some() && self.reader.is_active()
     }
+    /// The lines the message box shows now (three when empty, up to its most; it scrolls beyond that).
+    pub fn input_rows(&self) -> usize {
+        self.input.rows()
+    }
+
+    /// The notice under the message box: that something was left out (with the counts) or how full the box is, and whether it
+    /// is a warning.
+    pub fn input_notice(&self) -> Option<(String, bool)> {
+        self.input.notice()
+    }
+
     pub fn input_text(&self) -> &str {
-        &self.input.value
+        &self.input.text
     }
 
     fn speak_enabled(&self, cx: &AppCx) -> bool {
         self.speak_on.unwrap_or_else(|| cx.services.voice_settings().speak_replies)
     }
 
+    /// May this person have a reply read aloud, and is there a voice to do it?
+    fn voice_ok(cx: &AppCx) -> bool {
+        let (allowed, _, tts) = Self::voice_state(cx);
+        allowed && tts
+    }
+
     fn voice_state(cx: &AppCx) -> (bool, bool, bool) {
         let v = cx.services.voice_settings();
-        (cx.session.policy.voice, v.stt.is_some(), v.tts.is_some())
+        // an engine found on this computer reads replies with no setup (Settings → Voice shows it)
+        // (the browser voice of this screen reads too, with nothing set up)
+        (cx.session.policy.voice, v.stt.is_some(), cx.services.effective_tts(None).is_some() || HostVoice::current().is_ready())
     }
 
     fn start_recording(&mut self, cx: &AppCx) {
@@ -387,26 +1256,192 @@ impl ChatApp {
     }
 
     fn stop_speaking(&mut self) {
-        self.speak_rx = None;
-        if let Some(mut p) = self.player.take() {
-            p.stop();
+        self.reader.stop();
+        self.reading = None;
+        self.view.reading = None;
+        self.click_read = None;
+        self.pending_read = None;
+    }
+
+    /// How a reply is spoken: the engine of Settings → Voice (or the one found on this computer, or the browser voice of the
+    /// screen) as a maker of sound and a speaker, and a key that changes when the voice does.
+    fn reading_plan(cx: &AppCx) -> Option<(Arc<dyn st::Synth>, Arc<dyn st::Sink>, String)> {
+        let v = cx.services.voice_settings();
+        let host = HostVoice::current();
+        cx.services.host_tts.ensure();
+        let auto = if v.tts.is_none() { cx.services.host_tts.auto_engine(None) } else { None };
+        let engine = st::effective_engine_auto(&v, &host, auto.as_ref())?;
+        let speed = v.speed_pct as f32 / 100.0;
+        Some(match &engine {
+            SpeechEngine::Browser => {
+                host.want_probe();
+                (Arc::new(hostvoice::BrowserSynth), Arc::new(hostvoice::BrowserSink { hv: host, voice: None, lang: None, rate: speed }), "browser".to_string())
+            }
+            e if hostengines::speaks_directly(e) => {
+                let spec = hostengines::Spec::from_setting(e)?;
+                (Arc::new(hostengines::DirectSynth), Arc::new(hostengines::DirectSink { spec, lang: None, speed }), format!("direct:{speed:.2}"))
+            }
+            _ => {
+                let path = std::env::var("PATH").unwrap_or_default();
+                let play_cmd = hostengines::player_command(&v.play_cmd, &path).unwrap_or(v.play_cmd.clone());
+                (Arc::new(st::ServicesSynth { svc: cx.services.clone(), opts: SpeakOpts { voice: None, speed, lang: None } }), Arc::new(st::CommandSink { play_cmd }), format!("file:{speed:.2}"))
+            }
+        })
+    }
+
+    fn speak(&mut self, cx: &AppCx, text: String, msg: usize) {
+        if self.speak_enabled(cx) {
+            self.speak_from(cx, text, msg, 0);
         }
     }
 
-    fn speak(&mut self, cx: &AppCx, text: String) {
+    /// Read message `msg` aloud from sentence `from` (a reply that just arrived, or a click in one).
+    fn speak_from(&mut self, cx: &AppCx, text: String, msg: usize, from: usize) {
         let (allowed, _, tts) = Self::voice_state(cx);
-        if !allowed || !tts || !self.speak_enabled(cx) {
+        if !allowed || !tts {
             return;
         }
-        self.stop_speaking();
+        let spoken = voice::speakable(&text);
+        let chunks = st::sentence_chunks(&spoken, st::MAX_CHUNK_CHARS);
+        let Some((synth, sink, key)) = Self::reading_plan(cx) else { return };
+        if chunks.is_empty() {
+            return;
+        }
         cx.audit.record(&cx.session.user, "voice.speak", &format!("{} chars", text.len()));
-        let svc = cx.services.clone();
-        let (tx, rx) = channel();
-        std::thread::spawn(move || {
-            let r = svc.synthesize_text(&text).and_then(|wav| Player::start(&svc.voice_settings().play_cmd, &wav));
-            let _ = tx.send(r);
+        self.begin_reading(cx, msg, &spoken, chunks, from, synth, sink, &key);
+    }
+
+    /// Start the reader on the pieces of `spoken`, the text of message `msg` with its markup removed.
+    #[allow(clippy::too_many_arguments)]
+    fn begin_reading(&mut self, cx: &AppCx, msg: usize, spoken: &str, chunks: Vec<Chunk>, from: usize, synth: Arc<dyn st::Synth>, sink: Arc<dyn st::Sink>, key: &str) {
+        self.stop_speaking();
+        let v = cx.services.voice_settings();
+        self.reader.set_words(v.highlight.word());
+        self.reader.set_speed(v.speed_pct as f32 / 100.0);
+        let words = wordtime::words_of(spoken);
+        let texts: Vec<String> = {
+            let c: Vec<char> = spoken.chars().collect();
+            words.iter().map(|w| c[w.start..w.end].iter().collect()).collect()
+        };
+        self.reader.start(chunks.clone(), from, false, key, synth, sink);
+        self.reading = Some(Reading { msg, chunks, words, texts, map: Vec::new(), drawn: usize::MAX, chunk_seen: None });
+    }
+
+    /// Light the sentence and the word being said in the reply being read, keep the sentence in view, and end the reading
+    /// state when the reader is done. Called each frame after the transcript was laid out.
+    fn sync_reading(&mut self, cx: &AppCx, log_h: f32) {
+        let Some(r) = self.reading.as_mut() else {
+            self.view.reading = None;
+            return;
+        };
+        let snap = self.reader.snapshot();
+        match &snap.status {
+            Status::Idle | Status::Done => {
+                self.reading = None;
+                self.view.reading = None;
+                return;
+            }
+            Status::Failed(m) => {
+                self.error = Some(format!("Could not read the reply aloud: {m}"));
+                self.reading = None;
+                self.view.reading = None;
+                return;
+            }
+            _ => {}
+        }
+        let hl = cx.services.voice_settings().highlight;
+        if !hl.sentence() {
+            self.view.reading = None;
+            return;
+        }
+        let drawn = self.view.message_words(r.msg);
+        if drawn.len() != r.drawn {
+            r.map = wordtime::align_words(&r.texts, &drawn);
+            r.drawn = drawn.len();
+        }
+        let sentence = r.chunks.get(snap.chunk).and_then(|c| {
+            let inside: Vec<usize> = (0..r.words.len()).filter(|k| r.words[*k].end > c.start && r.words[*k].start < c.end).collect();
+            let first = inside.iter().find_map(|k| r.map.get(*k).copied().flatten())?;
+            let last = inside.iter().rev().find_map(|k| r.map.get(*k).copied().flatten())?;
+            Some((first, last))
         });
-        self.speak_rx = Some(rx);
+        let word = if hl.word() { snap.word.and_then(|(a, _)| r.words.iter().position(|w| w.start == a || (w.start <= a && a < w.end))).and_then(|k| r.map.get(k).copied().flatten()) } else { None };
+        let mark = chat_view::ReadMark { msg: r.msg, sentence, word };
+        let new_piece = r.chunk_seen != Some(snap.chunk);
+        r.chunk_seen = Some(snap.chunk);
+        self.view.reading = Some(mark);
+        if new_piece {
+            let max_off = self.max_off;
+            self.scroll_px = self.view.scroll_for_reading(log_h, self.scroll_px).clamp(0.0, max_off);
+        }
+    }
+
+    /// A click at (`x`, `y`) in the transcript: read that reply from the sentence under it.
+    fn read_from_point(&mut self, cx: &AppCx, x: f32, y: f32) {
+        let Some((msg, dwi)) = self.view.point_word(x, y) else { return };
+        let Some(text) = self.msgs.get(msg).filter(|m| m.role == Role::Assistant).map(|m| m.content.clone()) else { return };
+        let spoken = voice::speakable(&text);
+        let words = wordtime::words_of(&spoken);
+        let chars: Vec<char> = spoken.chars().collect();
+        let texts: Vec<String> = words.iter().map(|w| chars[w.start..w.end].iter().collect()).collect();
+        let map = wordtime::align_words(&texts, &self.view.message_words(msg));
+        // the last spoken word at or before the one under the pointer
+        let k = map.iter().rposition(|d| d.is_some_and(|d| d <= dwi)).unwrap_or(0);
+        let ch = words.get(k).map_or(0, |w| w.start);
+        let chunks = st::sentence_chunks(&spoken, st::MAX_CHUNK_CHARS);
+        let Some(idx) = chunks.iter().position(|c| c.start <= ch && ch < c.end).or_else(|| chunks.iter().position(|c| c.start >= ch)) else { return };
+        if self.reading.as_ref().is_some_and(|r| r.msg == msg) && self.reader.is_active() {
+            self.reader.seek(idx);
+        } else {
+            self.speak_from(cx, text, msg, idx);
+        }
+    }
+
+    /// Pause or carry on with the reply being read.
+    fn pause_speaking(&mut self) {
+        match self.reader.status() {
+            Status::Playing | Status::Buffering => self.reader.pause(),
+            Status::Paused => self.reader.resume(),
+            _ => {}
+        }
+    }
+
+    /// A frame is wanted: about ten a second while a reply is being said (the word moves), one when the state changes (paused,
+    /// done), none otherwise.
+    fn read_frame_due(&mut self) -> bool {
+        let st = self.reader.status();
+        let changed = self.read_seen.as_ref() != Some(&st);
+        self.read_seen = Some(st.clone());
+        if self.reading.is_some() && matches!(st, Status::Playing | Status::Buffering) {
+            let now = self.reader.now_ms();
+            if now - self.read_frame >= 100.0 {
+                self.read_frame = now;
+                return true;
+            }
+            return changed;
+        }
+        changed && self.reading.is_some()
+    }
+
+    /// " · 12 s" once the model has been busy for a couple of seconds with nothing to show yet.
+    fn waiting_text(&self) -> String {
+        match self.waiting_since.map(|t| t.elapsed().as_secs()) {
+            Some(n) if n >= 2 && self.live.is_empty() => format!("  {n} s"),
+            _ => String::new(),
+        }
+    }
+
+    /// "first token in 1.2 s, total 4.8 s": where the last run's time went, for the footer.
+    fn timing_text(&self) -> String {
+        match self.timing {
+            Some((tok, text, total, _, _, _, _, thought)) if total > 0 => {
+                let first = if text > 0 { text } else { tok };
+                let secs = |ms: u64| format!("{:.1} s", ms as f64 / 1000.0);
+                let think = if thought >= 500 { format!("thought {}, ", secs(thought)) } else { String::new() };
+                if first > 0 { format!("{think}first token in {}, total {}", secs(first), secs(total)) } else { format!("{think}total {}", secs(total)) }
+            }
+            _ => String::new(),
+        }
     }
 
     fn usage_text(&self) -> String {
@@ -418,7 +1453,7 @@ impl ChatApp {
 
     fn ensure_session(&mut self, cx: &AppCx) {
         if self.session.is_none() {
-            self.session = cx.services.sessions.create(&cx.session.user).ok();
+            self.session = cx.services.sessions.create(&self.skey(cx)).ok();
         }
     }
 
@@ -448,8 +1483,11 @@ impl ChatApp {
         self.msgs.truncate(1);
         self.older.clear();
         self.session = None;
+        self.grants.clear();
+        self.grants_open = false;
         self.nav_dirty = true;
         self.error = None;
+        self.ask = None;
         self.ctx = ContextInfo::default();
         self.scroll_px = 0.0;
         self.input.take();
@@ -459,7 +1497,7 @@ impl ChatApp {
         if self.run.is_some() || self.pending.is_some() {
             return;
         }
-        self.picker = Some(Picker { items: cx.services.sessions.list(&cx.session.user), sel: 0, confirm_delete: false });
+        self.picker = Some(Picker { items: cx.services.sessions.list(&self.skey(cx)), sel: 0, confirm_delete: false });
     }
 
     fn picker_key(&mut self, ev: &Event, cx: &AppCx) {
@@ -482,7 +1520,7 @@ impl ChatApp {
             Event::Key(Key::Enter) => {
                 if p.confirm_delete {
                     let id = p.items[p.sel].id.clone();
-                    match cx.services.delete_session(&cx.session.user, &id) {
+                    match cx.services.delete_session(&self.skey(cx), &id) {
                         Ok(gone) => {
                             cx.audit.record(&cx.session.user, "chat.delete", &format!("{id}: {} files, {} runs", gone.files, gone.runs));
                             self.nav_dirty = true;
@@ -490,9 +1528,11 @@ impl ChatApp {
                                 self.msgs.truncate(1);
                                 self.older.clear();
                                 self.session = None;
+                                self.grants.clear();
                             }
+                            let key = self.skey(cx);
                             let Some(p) = self.picker.as_mut() else { return };
-                            p.items = cx.services.sessions.list(&cx.session.user);
+                            p.items = cx.services.sessions.list(&key);
                             p.sel = p.sel.min(p.items.len().saturating_sub(1));
                             p.confirm_delete = false;
                         }
@@ -513,7 +1553,7 @@ impl ChatApp {
     fn load_selected(&mut self, cx: &AppCx) {
         let Some(p) = self.picker.take() else { return };
         let Some(meta) = p.items.get(p.sel) else { return };
-        match cx.services.sessions.load(&cx.session.user, &meta.id) {
+        match cx.services.sessions.load(&self.skey(cx), &meta.id) {
             Some(s) => self.open_session(s),
             None => self.error = Some("That chat could not be opened.".into()),
         }
@@ -569,8 +1609,10 @@ impl ChatApp {
                 self.edit_focus = !self.edit_focus;
                 return Some(Flow::Stay);
             }
+            // a press in the composer is the chat's too
+            Event::AreaAt(INPUT_AREA, ..) => self.edit_focus = false,
             // a press in the transcript is the chat's, whatever the editor is doing
-            Event::AreaAt(id, ..) if *id == chat_view::AREA => self.edit_focus = false,
+            Event::AreaAt(id, ..) if *id == chat_view::AREA || *id >= chat_view::LINK_BASE => self.edit_focus = false,
             // clicks inside the editor focus it
             Event::AreaAt(..) | Event::Sub(1, _) => self.edit_focus = true,
             Event::FocusAt(id, _) if *id >= 10 => self.edit_focus = true,
@@ -616,6 +1658,12 @@ impl ChatApp {
         }
     }
 
+    /// Put finished messages and a scroll position into the transcript (tests and the screenshot tour).
+    pub fn show_transcript(&mut self, msgs: Vec<Message>, scroll_px: f32) {
+        self.msgs.extend(msgs);
+        self.scroll_px = scroll_px;
+    }
+
     pub fn messages(&self) -> &[Message] {
         &self.msgs
     }
@@ -624,11 +1672,91 @@ impl ChatApp {
         self.pending.is_some()
     }
 
+    /// The answer buttons are showing: a question is open and nothing else is asking or running.
+    fn chips_active(&self) -> bool {
+        self.ask.is_some() && self.run.is_none() && self.pending.is_none() && self.approval.is_none() && self.consent.is_none() && self.rec.is_none() && self.secret.is_none()
+    }
+
+    /// The button a key picks: 1-9 the nth answer, Y and N for a yes/no question.
+    fn chip_for_key(&self, c: char) -> Option<usize> {
+        let a = self.ask.as_ref()?;
+        let n = a.answers().len();
+        match c {
+            '1'..='9' => Some(c as usize - '1' as usize).filter(|i| *i < n),
+            'y' | 'Y' if a.yes_no => Some(0),
+            'n' | 'N' if a.yes_no => Some(1),
+            _ => None,
+        }
+    }
+
+    fn chip_click(&mut self, cx: &AppCx, i: usize) {
+        let n = self.ask.as_ref().map_or(0, |a| a.answers().len());
+        if i < n {
+            self.answer(cx, i);
+        } else {
+            // "Other…": the buttons go away and the person types
+            self.ask = None;
+        }
+    }
+
+    /// Send the answer as the next message, exactly as if it was typed (a half-typed draft is kept).
+    fn answer(&mut self, cx: &AppCx, i: usize) {
+        let Some(text) = self.ask.as_ref().and_then(|a| a.answers().get(i).cloned()) else { return };
+        let draft = self.input.text.clone();
+        self.input.set(&text);
+        self.view.focus = None;
+        self.send(cx);
+        if !draft.is_empty() {
+            self.input.set(&draft);
+        }
+    }
+
+    /// The buttons laid out in rows inside `avail` wide: (label, answer index, x, y, width) with y from the top of the strip,
+    /// and the strip's height. The last button, "Other…", has the index after the answers.
+    fn chip_boxes(&self, g: &mut Gfx, avail: f32, size: f32, s: f32) -> (Vec<(String, usize, f32, f32, f32)>, f32) {
+        let Some(a) = self.ask.as_ref().filter(|_| self.chips_active()) else { return (vec![], 0.0) };
+        let answers = a.answers();
+        let mut labels: Vec<(String, usize)> = answers
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let hint = if a.yes_no { if i == 0 { " (Y)".to_string() } else { " (N)".to_string() } } else { String::new() };
+                let num = if a.yes_no { String::new() } else { format!("{} · ", i + 1) };
+                (format!("{num}{t}{hint}"), i)
+            })
+            .collect();
+        labels.push(("Other…".into(), answers.len()));
+        let (h, gap, pad) = (size * 2.1, 6.0 * s, 5.0 * s);
+        let (mut x, mut y) = (0.0f32, pad);
+        let mut out = Vec::new();
+        for (label, i) in labels {
+            let label = g.fit(size, &label, Face::Bold, (avail - size * 1.7).max(20.0));
+            let w = g.text_width(size, &label, Face::Bold) + size * 1.7;
+            if x > 0.0 && x + w > avail {
+                x = 0.0;
+                y += h + gap;
+            }
+            out.push((label, i, x, y, w));
+            x += w + gap;
+        }
+        (out, y + h + pad)
+    }
+
     fn send(&mut self, cx: &AppCx) {
         let mut text = self.input.take();
+        if text.trim().is_empty() && !self.attachments.is_empty() {
+            text = "Please look at what I attached.".to_string();
+        }
         if text.trim().is_empty() {
             return;
         }
+        // what was dropped on the window goes with this message (checked for secrets with the rest of the text below)
+        if !self.attachments.is_empty() {
+            let blocks: Vec<String> = self.attachments.drain(..).map(|a| a.block).collect();
+            text = format!("{}\n\n{}", text.trim(), blocks.join("\n\n"));
+            self.info = None;
+        }
+        self.ask = None;
         // a credential is never sent to the model: it is offered to the vault, and only a placeholder goes on
         if let Some(found) = credguard::detect(&text) {
             cx.audit.record(&cx.session.user, "chat.credential.blocked", found.what);
@@ -651,8 +1779,10 @@ impl ChatApp {
         self.msgs.push(Message::user(text.trim()));
         self.save_quiet(cx);
         let (tx, rx) = channel();
+        let (ptx, prx) = channel::<String>();
+        let (ttx, trx) = channel::<String>();
         let backend: Arc<dyn ChatBackend> = cx.chat.clone();
-        let (svc, user, sid, q) = (cx.services.clone(), cx.session.user.clone(), self.session.as_ref().map(|s| s.id.clone()), text.trim().to_string());
+        let (svc, user, sid, q) = (cx.services.clone(), self.skey(cx), self.session.as_ref().map(|s| s.id.clone()), text.trim().to_string());
         let opts = ContextOptions { use_docs: self.use_docs, use_skills: cx.session.policy.skills, ..Default::default() };
         // in edit mode the open file (as marked data) and the selection go in the system prompt
         let base = match &self.editor {
@@ -661,23 +1791,66 @@ impl ChatApp {
                 let sel = ed.selection_info();
                 format!("{BASE_PROMPT}\n\n{}", edit_context(&path, ed.lang().name(), &ed.text(), sel.as_ref().map(|(a, b, t)| (*a, *b, t.as_str()))))
             }
-            None => BASE_PROMPT.to_string(),
+            None => match (&self.project, &self.file_ctx) {
+                (Some(_), Some(c)) => format!("{BASE_PROMPT}\n\n{c}"),
+                _ => BASE_PROMPT.to_string(),
+            },
         };
         // context building searches the knowledge base (and may call an embedding service), so it runs off the UI thread
         std::thread::spawn(move || {
             let (history, info) = context::build(&svc, &svc.skills, &svc.sessions, &user, sid.as_deref(), &base, &before, &q, &opts);
-            let _ = tx.send((backend.complete(&history), info));
+            // the answer is read as the model writes it; a backend that cannot stream gives it in one piece
+            let mut text = String::new();
+            iyakki_agent::providers::set_thinking_sink(Some(Box::new(move |t: &str| {
+                let _ = ttx.send(t.to_string());
+            })));
+            let r = backend
+                .complete_tools_stream(&history, &[], &mut |piece| {
+                    if !piece.is_empty() {
+                        text.push_str(piece);
+                        let _ = ptx.send(text.clone());
+                    }
+                    true
+                })
+                .and_then(|turn| if turn.text.trim().is_empty() { Err("The model returned an empty answer. Try again, or choose another model (Ctrl+P).".to_string()) } else { Ok(turn.text) })
+                .map(|t| if iyakki_agent::providers::thinking_only() { format!("*(The model wrote no answer, only its thinking; that is shown.)*\n\n{t}") } else { t });
+            let _ = tx.send((r, info));
         });
         self.pending = Some(rx);
+        self.partial = Some(prx);
+        self.think_rx = Some(trx);
+        self.live.clear();
+        self.thinking.clear();
+        self.waiting_since = Some(std::time::Instant::now());
         cx.audit.record(&cx.session.user, "chat.send", &format!("{} chars", self.msgs.last().map_or(0, |m| m.content.len())));
     }
 
     fn poll(&mut self, cx: &AppCx) {
         self.poll_run(cx);
         self.offer_secret_request(cx);
+        self.offer_consent_request(cx);
+        if let Some(p) = &self.partial {
+            while let Ok(t) = p.try_recv() {
+                self.live = t;
+                self.thinking.clear();
+            }
+        }
+        if let Some(p) = &self.think_rx {
+            while let Ok(t) = p.try_recv() {
+                self.thinking.push_str(&t);
+                if self.thinking.chars().count() > 20_000 {
+                    self.thinking = self.thinking.chars().rev().take(20_000).collect::<Vec<_>>().into_iter().rev().collect();
+                }
+            }
+        }
         if let Some(rx) = &self.pending {
             if let Ok((r, info)) = rx.try_recv() {
                 self.pending = None;
+                self.partial = None;
+                self.think_rx = None;
+                self.live.clear();
+                self.thinking.clear();
+                self.waiting_since = None;
                 self.ctx = info;
                 match r {
                     Ok(t) => {
@@ -694,9 +1867,14 @@ impl ChatApp {
                                 Err(e) => self.error = Some(format!("Could not use the assistant's edit: {e}")),
                             }
                         }
+                        if self.project.is_some() && self.file_ctx.is_some() && self.editor.is_none() {
+                            self.proposals.push(t.clone());
+                        }
+                        self.ask = detect_question(&shown);
                         self.msgs.push(Message::assistant(shown.clone()));
                         self.persist(cx, &shown);
-                        self.speak(cx, shown);
+                        let msg = self.msgs.len() - 1;
+                        self.speak(cx, shown, msg);
                     }
                     Err(e) => self.error = Some(e),
                 }
@@ -712,7 +1890,7 @@ impl ChatApp {
                 match r {
                     Ok(text) => {
                         self.error = None;
-                        self.input.paste(&text);
+                        self.input.paste(text.trim_end());
                         if cx.services.voice_settings().auto_send && self.pending.is_none() {
                             self.send(cx);
                         }
@@ -721,22 +1899,35 @@ impl ChatApp {
                 }
             }
         }
-        if let Some(rx) = &self.speak_rx {
-            if let Ok(r) = rx.try_recv() {
-                self.speak_rx = None;
-                match r {
-                    Ok(p) => self.player = Some(p),
-                    Err(e) => self.error = Some(format!("Could not read the reply aloud: {e}")),
-                }
-            }
-        }
-        if self.player.as_mut().is_some_and(|p| !p.is_playing()) {
-            self.player = None;
-        }
     }
 }
 
 impl App for ChatApp {
+    fn take_request(&mut self) -> Option<(String, String)> {
+        self.take_link_request()
+    }
+    /// A running job moves the strip's spinner and bar: a frame about ten times a second while one runs, none when idle.
+    fn wants_redraw(&mut self) -> bool {
+        let reading = self.read_frame_due();
+        self.jobs_ui.frame_due() || reading
+    }
+    /// Files dropped on the chat (window mode) go with the next message: text quoted, pictures and other files saved in
+    /// Uploads and named.
+    fn take_host_save(&mut self) -> Option<(String, Vec<u8>)> {
+        self.host_save.take()
+    }
+    fn on_drop(&mut self, paths: &[std::path::PathBuf], cx: &AppCx) -> super::DropAction {
+        let home = iyakki_agent::scope::home_root(&cx.session.user, cx.services.dir());
+        let (got, notes) = super::dropattach::prepare(paths, &home.join("Uploads"));
+        let mut line = if got.is_empty() { String::new() } else { format!("Attached {}: {}. They go with your next message.", got.len(), got.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", ")) };
+        if !notes.is_empty() {
+            line.push_str(&format!(" Left out: {}.", notes.join("; ")));
+        }
+        cx.audit.record(&cx.session.user, "chat.attach", &format!("{} files", got.len()));
+        self.attachments.extend(got);
+        self.info = Some(line.trim().to_string());
+        super::DropAction::Taken
+    }
     fn title(&self) -> &'static str {
         "Chat"
     }
@@ -750,18 +1941,25 @@ impl App for ChatApp {
         if self.editor.is_some() {
             "Edit mode: Ctrl+T switch chat/editor · Ctrl+E close editor · ask for changes, then y/n on each suggestion · Esc back".into()
         } else {
-            "Enter send · Ctrl+N new chat · Ctrl+P choose the model · Ctrl+W hide/show the chat list · Ctrl+D my documents · Ctrl+E edit a file · Ctrl+G agent · Esc back".into()
+            "Enter send · Ctrl+N new chat · Ctrl+P choose the model · Ctrl+W hide/show the chat list · Ctrl+D my documents · Ctrl+E edit a file · Ctrl+G agent · Ctrl+Q approval mode (Ask first / Auto-approve safe / Autopilot) · Esc back".into()
         }
     }
 
     fn context_items(&mut self, x: i32, y: i32) -> Vec<crate::ctxmenu::Item> {
         use crate::ctxmenu::{Item, COPY, SELECT_ALL};
+        if self.jobs_ui.log_open() {
+            let v = self.jobs_ui.context_items(x, y);
+            if !v.is_empty() {
+                return v;
+            }
+        }
         if !self.view.over(x as f32, y as f32) {
             self.ctx_copy = (None, None);
             return Vec::new();
         }
         self.ctx_copy = self.view.zones_at(x as f32, y as f32);
-        let mut v = vec![Item::new(COPY, "Copy", "Ctrl+C").enabled(self.view.has_selection())];
+        let mut v = self.link_menu_items(x, y);
+        v.push(Item::new(COPY, "Copy", "Ctrl+C").enabled(self.view.has_selection()));
         if self.ctx_copy.0.is_some() {
             v.push(Item::new("copymsg", "Copy message", ""));
         }
@@ -772,7 +1970,10 @@ impl App for ChatApp {
         v
     }
 
-    fn context_pick(&mut self, id: &str, _cx: &AppCx) -> Flow {
+    fn context_pick(&mut self, id: &str, cx: &AppCx) -> Flow {
+        if self.link_menu_pick(id, cx) {
+            return Flow::Stay;
+        }
         let text = match id {
             "copymsg" => self.ctx_copy.0.take(),
             "copycode" => self.ctx_copy.1.take(),
@@ -785,6 +1986,22 @@ impl App for ChatApp {
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        if self.link_card_event(ev) {
+            return Flow::Stay;
+        }
+        if let (Some(slot), Event::Key(Key::Ctrl(ch @ ('y' | 'u' | 'n')))) = (&self.consent, ev) {
+            if self.approval.is_none() {
+                let n = slot.req.choices.len();
+                let idx = match ch {
+                    'y' => 0,
+                    'u' if n >= 3 => 1,
+                    'n' => n.saturating_sub(1),
+                    _ => usize::MAX,
+                };
+                self.consent_choice(cx, idx);
+                return Flow::Stay;
+            }
+        }
         if self.secret.is_some() && !matches!(ev, Event::Tick) {
             self.secret_key(ev, cx);
             return Flow::Stay;
@@ -801,12 +2018,30 @@ impl App for ChatApp {
             self.picker_key(ev, cx);
             return Flow::Stay;
         }
+        if self.grants_open && !matches!(ev, Event::Tick | Event::MouseMove(..)) {
+            self.grants_key(ev, cx);
+            return Flow::Stay;
+        }
         // the chat's own buttons, while the editor is open
         if let Event::Sub(0, k) = ev {
             return self.handle_chat(&Event::Key(k.clone()), cx);
         }
+        // the Jobs strip's buttons, and the log view's wheel, Esc and text selection while it is open
+        if matches!(ev, Event::Key(Key::Ctrl('a'))) && self.jobs_ui.log_open() && self.input.text.is_empty() {
+            self.jobs_ui.select_all();
+            return Flow::Stay;
+        }
+        if self.jobs_ui.handle(ev, cx) {
+            return Flow::Stay;
+        }
         if matches!(ev, Event::MouseUp(..)) {
             self.view.release();
+            // a plain click (no drag, nothing selected) on a reply: read it from there once the double-click time has passed
+            if let Some((x, y)) = self.click_read.take() {
+                if !self.view.has_selection() && Self::voice_ok(cx) {
+                    self.pending_read = Some((x, y, chat_view::LINK_DELAY));
+                }
+            }
         }
         if let Some(flow) = self.route_to_editor(ev, cx) {
             return flow;
@@ -819,10 +2054,90 @@ impl App for ChatApp {
         if let Some((f, _)) = &self.secret {
             f.render(g, full, s, ACCENT, blink(tick));
         }
+
         if let Some((f, _)) = &self.save {
             f.render(g, full, s, ACCENT, blink(tick));
         }
+        self.draw_link_card(g, full, s);
     }
+}
+
+/// A run with browser tools needs more steps than the standard cap (a form takes dozens of small steps); the browser's own budget
+/// (actions and minutes in the account's policy) and the account's agent budget still bound it.
+/// How the assistant's tool calls are approved. The person sees three plain modes (see [`Approvals::label`] and
+/// [`ChatApp::mode_label`]): **Ask first**, **Auto-approve safe** and **Autopilot**; `Pinned` is Auto-approve safe kept for
+/// this person and workspace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Approvals {
+    Ask,
+    Auto,
+    Pinned,
+}
+
+impl Approvals {
+    pub fn is_auto(self) -> bool {
+        self != Approvals::Ask
+    }
+    /// The stable id kept in the audit log (it never changed with the labels).
+    pub fn name(self) -> &'static str {
+        match self {
+            Approvals::Ask => "ask",
+            Approvals::Auto => "auto",
+            Approvals::Pinned => "auto-pinned",
+        }
+    }
+    /// What the person reads on the chip.
+    pub fn label(self) -> &'static str {
+        match self {
+            Approvals::Ask => "Ask first",
+            Approvals::Auto => "Auto-approve safe",
+            Approvals::Pinned => "Auto-approve safe · kept",
+        }
+    }
+    /// A saved or audited name, old or new, back to the mode (`None`: not a mode; Autopilot is not an approval mode here).
+    pub fn from_saved(name: &str) -> Option<Approvals> {
+        match name.trim().to_lowercase().replace([' ', '_'], "-").as_str() {
+            "ask" | "ask-first" | "approvals:-ask" => Some(Approvals::Ask),
+            "auto" | "auto-approve-safe" | "approvals:-auto" => Some(Approvals::Auto),
+            "auto-pinned" | "pinned" | "auto-approve-safe-kept" | "approvals:-auto-·-pinned" => Some(Approvals::Pinned),
+            _ => None,
+        }
+    }
+}
+
+/// The hover text of the approval chip, in chat and in the IDE chat (docs/AI-IDE.md repeats it).
+pub const AUTO_LIMITS: &str = "Approvals (Ctrl+Q cycles). Ask first: the assistant asks before anything you have not already approved, and remembers what you approve with \"Allow for this session\". Auto-approve safe: ordinary writes, commands and deploys run without asking (audited as auto-approved) and only risky actions ask. Autopilot: works through the plan to the end within its budgets and still stops for the always-ask list. Always asks, in every mode: secrets and the vault, the screen, browser actions on sites, deleting (k8s_delete, rm, prune, DELETE), anything outside the workspace, outside tools (MCP, packages), store publish, platform deploy/remove, drives. \"Allow for this session\" never covers those, nor a change to a remote cluster, and only covers the same tool in the same scope (same command, cluster, namespace, host or workspace). Production-looking clusters are read-only. Still enforced: the cluster guard, manifest linter, file scope, credential guard.";
+
+fn pin_file(cx: &AppCx) -> std::path::PathBuf {
+    let u: String = cx.session.user.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+    cx.services.dir().join(format!("approval-pins-{}.json", if u.is_empty() { "invalid" } else { &u }))
+}
+
+fn pins(cx: &AppCx) -> Vec<String> {
+    std::fs::read(pin_file(cx)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn is_pinned(cx: &AppCx, key: &str) -> bool {
+    pins(cx).iter().any(|k| k == key)
+}
+
+fn set_pin(cx: &AppCx, key: &str, on: bool) {
+    let mut v = pins(cx);
+    v.retain(|k| k != key);
+    if on {
+        v.push(key.to_string());
+    }
+    if let Ok(b) = serde_json::to_vec(&v) {
+        let _ = std::fs::write(pin_file(cx), b);
+    }
+}
+
+fn browser_limits(p: &iyakki_sec::policy::Policy, mut l: RunLimits) -> RunLimits {
+    if p.browser_agent != iyakki_sec::policy::BrowserAgent::Off {
+        l.max_steps = l.max_steps.max(p.browser_max_actions as usize + 20);
+        l.max_tool_calls = l.max_tool_calls.max(p.browser_max_actions as usize * 2 + 20);
+    }
+    l
 }
 
 /// What the transcript draws pictures with: the caches of this chat and the person's read scope.
@@ -960,6 +2275,38 @@ impl ChatApp {
         }
     }
 
+    /// While the assistant waits for the person's answer about their browser, the question opens by itself (and goes when it is answered elsewhere).
+    fn offer_consent_request(&mut self, cx: &AppCx) {
+        let user = cx.session.user.as_str();
+        if let Some(d) = &self.consent {
+            if cx.services.browser.consent.get(user, &d.req.id).is_none() {
+                self.consent = None;
+            }
+            return;
+        }
+        if let Some(r) = cx.services.browser.consent.pending(user).into_iter().next() {
+            self.consent = Some(super::browser_consent::ConsentDialog::new(r));
+        }
+    }
+
+    /// Answer the inline question with its `idx`-th choice (the buttons and Ctrl+Y / Ctrl+U / Ctrl+N all come here).
+    fn consent_choice(&mut self, cx: &AppCx, idx: usize) {
+        let Some(d) = self.consent.clone() else { return };
+        if let Some(c) = d.req.choices.get(idx) {
+            if let Err(e) = d.answer(cx, c.answer) {
+                self.error = Some(e);
+            }
+            self.consent = None;
+        }
+    }
+
+    /// The inline question as the approval block draws it: (id, tool, text, choices one per line).
+    pub fn consent_block(&self) -> Option<(String, String, String, String)> {
+        let d = self.consent.as_ref()?;
+        let text = if d.req.text.is_empty() { d.req.title.clone() } else { format!("{}\n{}", d.req.title, d.req.text) };
+        Some((d.req.id.clone(), "browser_consent".into(), text, d.req.choices.iter().map(|c| c.label.clone()).collect::<Vec<_>>().join("\n")))
+    }
+
     /// While an agent run waits for a secret the person has not yet given, the private form opens by itself.
     fn offer_secret_request(&mut self, cx: &AppCx) {
         if self.secret.is_some() || self.run.is_none() {
@@ -972,43 +2319,51 @@ impl ChatApp {
 
     /// Open the model chooser: the models every enabled provider announced (Settings → Models, `t` fetches the list).
     fn open_models(&mut self, cx: &AppCx) {
-        let st = cx.services.settings.lock().unwrap();
-        let s = st.get();
-        let items: Vec<(String, String)> = s.providers.iter().filter(|p| p.enabled).flat_map(|p| p.models.iter().map(move |m| (p.id.clone(), m.clone()))).collect();
-        let sel = s.chat.as_ref().and_then(|c| items.iter().position(|(p, m)| *p == c.provider && *m == c.model)).unwrap_or(0);
-        drop(st);
-        if items.is_empty() {
-            self.error = Some("No models yet. Open Settings → Models, add a provider and press t to fetch its model list.".into());
-            return;
+        let (plain, chat) = {
+            let st = cx.services.settings.lock().unwrap();
+            let s = st.get();
+            (s.providers.iter().filter(|p| p.enabled).flat_map(|p| p.models.iter().map(move |m| (p.id.clone(), m.clone()))).collect::<Vec<_>>(), s.chat.clone())
+        };
+        let agent = self.ext_id(cx).map(|a| {
+            let m = self.ext_model_of(cx, &a);
+            (a, m)
+        });
+        let current = Current { same: false, plain: chat.map(|c| (c.provider, c.model)), agent };
+        match model_picker::build(cx, plain, None, true, current, "Choose the model", "Enter or click chooses · Esc closes · Settings → Models adds providers, Settings → Agents sets up Claude Code and others.") {
+            Some(l) => {
+                self.error = None;
+                self.models = Some(l);
+            }
+            None => self.error = Some("No models yet. Open Settings → Models, add a provider and press t to fetch its model list.".into()),
         }
-        self.error = None;
-        self.models = Some(ModelList { items, sel });
     }
 
     fn models_key(&mut self, ev: &Event, cx: &AppCx) {
         let Some(m) = self.models.as_mut() else { return };
-        let n = m.items.len();
-        match ev {
-            Event::Key(Key::Esc) => self.models = None,
-            Event::Key(Key::Up) => m.sel = m.sel.saturating_sub(1),
-            Event::Key(Key::Down) => m.sel = (m.sel + 1).min(n - 1),
-            Event::Key(Key::PageUp) => m.sel = m.sel.saturating_sub(8),
-            Event::Key(Key::PageDown) => m.sel = (m.sel + 8).min(n - 1),
-            Event::Key(Key::Home) => m.sel = 0,
-            Event::Key(Key::End) => m.sel = n - 1,
-            Event::Row(i) if *i < n => {
-                m.sel = *i;
-                self.choose_model(cx);
+        match model_picker::key(m, ev) {
+            Out::Stay => {}
+            Out::Close => self.models = None,
+            Out::Bad(e) => self.error = Some(e),
+            Out::Pick(p) => {
+                self.models = None;
+                self.choose_model(cx, p);
             }
-            Event::Key(Key::Enter) => self.choose_model(cx),
-            _ => {}
         }
     }
 
-    /// Make the highlighted model the one that answers. The choice is the system's (administrators), as in Settings.
-    fn choose_model(&mut self, cx: &AppCx) {
-        let Some(m) = self.models.take() else { return };
-        let Some((provider, model)) = m.items.get(m.sel).cloned() else { return };
+    /// Make the picked model the one that answers. The choice is the system's (administrators), as in Settings.
+    fn choose_model(&mut self, cx: &AppCx, pick: Pick) {
+        let (provider, model) = match pick {
+            Pick::AgentModel { agent, model, custom } => {
+                if custom {
+                    self.error = None;
+                }
+                return self.choose_agent_model(cx, &agent, model, custom);
+            }
+            Pick::Agent(agent) => return self.choose_agent_model(cx, &agent, self.ext_model_of(cx, &agent), false),
+            Pick::Top => return,
+            Pick::Provider(p, m) => (p, m),
+        };
         if !cx.session.policy.manage_settings {
             self.error = Some("Only an administrator can change the model (Settings → Models).".into());
             return;
@@ -1017,6 +2372,7 @@ impl ChatApp {
         match r {
             Ok(()) => {
                 cx.audit.record(&cx.session.user, "settings.chat_model", &format!("{provider} {model}"));
+                self.choose_builtin(cx);
                 self.error = None;
             }
             Err(e) => self.error = Some(e.to_string()),
@@ -1090,19 +2446,42 @@ impl ChatApp {
         match ev {
             Event::Tick => {
                 self.poll(cx);
+                self.poll_jobs(cx);
                 // a drag held past the top or bottom edge keeps scrolling
                 if self.view.autoscroll(&mut self.scroll_px, self.max_off) {
                     self.maybe_load_older();
                 }
+                // a single click on a link, once it is clear it was not the first half of a double click
+                if let Some(l) = self.view.link_due() {
+                    self.activate_link(&l, OpenHow::Click, cx);
+                }
+                // a single click in a reply that waited out the double-click time reads it from that sentence
+                if let Some((x, y, n)) = self.pending_read {
+                    if n > 1 {
+                        self.pending_read = Some((x, y, n - 1));
+                    } else {
+                        self.pending_read = None;
+                        self.read_from_point(cx, x, y);
+                    }
+                }
             }
+            Event::Tab(SPEAK_PAUSE) => self.pause_speaking(),
             Event::Key(Key::Ctrl('e')) => self.toggle_editor(cx),
+            // an answer button under a question, or its key (1-9, Y, N) while nothing is typed
+            Event::Tab(n) if (CHIP_BASE..CHIP_BASE + 12).contains(n) && self.chips_active() => self.chip_click(cx, *n - CHIP_BASE),
+            Event::Key(Key::Char(c)) if self.input.text.is_empty() && self.chips_active() && self.chip_for_key(*c).is_some() => {
+                if let Some(i) = self.chip_for_key(*c) {
+                    self.answer(cx, i);
+                }
+            }
             // while recording, Esc cancels the recording and Enter stops it and transcribes
             Event::Key(Key::Esc) if self.rec.is_some() => self.rec = None,
             // a credential that was kept out of the message: `v` (with an empty box) puts it in the vault, Esc forgets it
-            Event::Key(Key::Char('v')) if self.cred.is_some() && self.input.value.is_empty() => {
+            Event::Key(Key::Char('v')) if self.cred.is_some() && self.input.text.is_empty() => {
                 let c = self.cred.clone().unwrap();
                 self.open_secret(None, "svc.", Some(&c.value));
             }
+            Event::Key(Key::Esc) if self.view.link_focus.is_some() => self.view.link_focus = None,
             Event::Key(Key::Esc) if self.cred.is_some() || self.info.is_some() => {
                 self.cred = None;
                 self.info = None;
@@ -1137,8 +2516,32 @@ impl ChatApp {
                     self.agent = !self.agent;
                 }
             }
+            // the mode is live: it can be changed while a run goes, and the run reads it at its next decision
+            Event::Key(Key::Ctrl('q')) if self.agent => self.cycle_approvals(cx),
+            // Ctrl+Shift+Q: the list of what was approved for this session (revoke one, or reset all)
+            Event::Key(Key::Ctrl('Q')) if self.agent && !self.grants.is_empty() => self.grants_open = true,
+            // Ctrl+Shift+A: Autopilot on/off, also during a run (on: this turn finishes, then the plan; off: the step finishes, then it
+            // stops with a summary); the Pause button pauses at once; Ctrl+Shift+R resumes a saved run
+            Event::Key(Key::Ctrl('A')) => self.toggle_autopilot(cx),
+            Event::Tab(AP_PAUSE) => {
+                if let (Some(r), true) = (&self.run, self.autopilot) {
+                    r.pause();
+                }
+            }
+            Event::Key(Key::Ctrl('R')) => self.resume_autopilot(cx),
+            // typing a message while autopilot works pauses it; Enter again sends the message and re-plans
+            Event::Key(Key::Enter) if self.autopilot && self.run.is_some() && !self.input.text.trim().is_empty() => {
+                if let Some(r) = &self.run {
+                    r.pause();
+                }
+                self.info = Some("Autopilot paused so your message can be sent: press Enter again once it has stopped.".into());
+            }
             Event::Key(Key::Ctrl('y')) if self.approval.is_some() => self.decide(cx, Verdict::Approve),
-            Event::Key(Key::Ctrl('u')) if self.approval.is_some() => self.decide(cx, Verdict::Always),
+            // "Allow for this session" (the screen has its own 5-minute grant, which the tools set handles as "always")
+            Event::Key(Key::Ctrl('u')) if self.approval.is_some() => {
+                let v = if self.approval.as_ref().is_some_and(|a| a.1 == "screen_capture" || iyakki_agent::camtools::takes_pictures(&a.1)) { Verdict::Always } else { Verdict::Session };
+                self.decide(cx, v)
+            }
             Event::Key(Key::Ctrl('n')) if self.approval.is_some() => self.decide(cx, Verdict::Deny),
             Event::Key(Key::Ctrl('n')) => self.new_chat(),
             Event::Key(Key::Ctrl('l')) => self.open_picker(cx),
@@ -1155,10 +2558,22 @@ impl ChatApp {
                 }
             }
             Event::Key(Key::Ctrl('d')) => self.use_docs = !self.use_docs,
+            // with nothing typed, Tab and Shift+Tab walk over the links and Enter opens the one the keyboard is on
+            Event::Key(Key::Tab) if self.input.text.is_empty() && self.view.link_count() > 0 && self.approval.is_none() => {
+                self.view.link_move(1);
+            }
+            Event::Key(Key::BackTab) if self.input.text.is_empty() && self.view.link_count() > 0 && self.approval.is_none() => {
+                self.view.link_move(-1);
+            }
+            Event::Key(Key::Enter) if self.input.text.is_empty() && self.view.link_focus.is_some() => {
+                if let Some(l) = self.view.focused_link() {
+                    self.activate_link(&l, OpenHow::Click, cx);
+                }
+            }
             // with nothing typed, Up/Down walk over the tool calls and Enter opens or closes the one that has the focus
-            Event::Key(Key::Up) if self.input.value.is_empty() && self.view.has_focusable() => self.view.move_focus(-1),
-            Event::Key(Key::Down) if self.input.value.is_empty() && self.view.has_focusable() => self.view.move_focus(1),
-            Event::Key(Key::Enter) if self.input.value.is_empty() && self.view.focus.is_some() => {
+            Event::Key(Key::Up) if self.input.text.is_empty() && self.view.has_focusable() => self.view.move_focus(-1),
+            Event::Key(Key::Down) if self.input.text.is_empty() && self.view.has_focusable() => self.view.move_focus(1),
+            Event::Key(Key::Enter) if self.input.text.is_empty() && self.view.focus.is_some() => {
                 self.view.toggle_focused();
             }
             Event::Tab(n) if *n >= TOGGLE_BASE => {
@@ -1173,12 +2588,20 @@ impl ChatApp {
                     crate::ui::clipboard::copy(t);
                 }
             }
+            // a press on a link: a press in the text like any other, and a plain click opens it (after the double-click time)
+            Event::AreaAt(id, x, y) if *id >= chat_view::LINK_BASE => {
+                self.click_read = None;
+                self.view.link_press(*id, *x, *y, crate::ui::click_count(), crate::ui::shift_held(), crate::ui::dragging());
+            }
             // presses and drags in the transcript select text
             Event::AreaAt(id, x, y) if *id == chat_view::AREA => {
                 if crate::ui::dragging() {
                     self.view.drag(*x, *y);
+                    self.click_read = None;
                 } else {
                     self.view.press(*x, *y, crate::ui::click_count(), crate::ui::shift_held());
+                    self.pending_read = None;
+                    self.click_read = (crate::ui::click_count() == 1 && !crate::ui::shift_held()).then_some((*x, *y));
                 }
             }
             // Ctrl+C / Ctrl+Insert copy the selected text; with nothing selected it stays the input's (its selection, or the line)
@@ -1187,7 +2610,13 @@ impl ChatApp {
                     crate::ui::clipboard::copy(&t);
                 }
             }
-            Event::Key(Key::Ctrl('a')) if self.input.value.is_empty() => self.view.select_all(),
+            // Ctrl+Shift+H: save the last answer (its table as CSV, its code, or the text) on the computer the window runs on
+            Event::Key(Key::Ctrl('H')) => match self.msgs.iter().rev().find(|m| m.role == Role::Assistant && !m.content.trim().is_empty()) {
+                Some(m) if iyakki_agent::hostfiles::enabled() => self.host_save = Some(super::dropattach::result_file(&m.content)),
+                Some(_) => self.error = Some(iyakki_agent::hostfiles::UNAVAILABLE.to_string()),
+                None => self.error = Some("There is no answer to save yet.".to_string()),
+            },
+            Event::Key(Key::Ctrl('a')) if self.input.text.is_empty() => self.view.select_all(),
 
             Event::Key(Key::Enter) if self.pending.is_none() && self.run.is_none() => {
                 self.view.focus = None;
@@ -1196,9 +2625,22 @@ impl ChatApp {
             Event::Paste(t) => {
                 self.input.paste(t);
             }
+            // a press in the composer puts the caret there (the right button too, which comes as a focus request)
+            Event::AreaAt(INPUT_AREA, x, y) => {
+                self.view.clear_selection();
+                self.input.press(*x, *y);
+            }
             Event::FocusAt(_, x) => {
                 self.view.clear_selection();
-                self.input.click(*x)
+                let pad = self.input.geo.map_or(0.0, |g| g.0);
+                self.input.press(*x, pad);
+            }
+            // a new line in the message: Ctrl+M anywhere, Ctrl+J too outside the AI IDE (where it shows the bottom panel)
+            Event::Key(Key::Ctrl('m' | 'M')) => {
+                self.input.insert("\n");
+            }
+            Event::Key(Key::Ctrl('j')) if !self.in_ide_now => {
+                self.input.insert("\n");
             }
             Event::Key(Key::PageUp) => {
                 self.scroll_px += 240.0;
@@ -1206,6 +2648,7 @@ impl ChatApp {
             }
             Event::Key(Key::PageDown) => self.scroll_px = (self.scroll_px - 240.0).max(0.0),
             // the wheel over the chat list moves the list; over the conversation it scrolls the messages
+            Event::Scroll(d) if self.input.wheel(*d) => {}
             Event::Scroll(d) if self.nav_hover => self.nav_top = (self.nav_top as i32 - *d).max(0) as usize,
             Event::Scroll(d) => {
                 self.scroll_px = (self.scroll_px + *d as f32 * 40.0).max(0.0);
@@ -1217,7 +2660,7 @@ impl ChatApp {
                 let busy = self.run.is_some() || self.pending.is_some();
                 if let (false, Some(m)) = (busy, self.nav_items.get(*n - 1000)) {
                     if self.session.as_ref().is_none_or(|s| s.id != m.id) {
-                        if let Some(s) = cx.services.sessions.load(&cx.session.user, &m.id) {
+                        if let Some(s) = cx.services.sessions.load(&self.skey(cx), &m.id) {
                             self.open_session(s);
                         } else {
                             self.error = Some("That chat could not be opened.".into());
@@ -1227,7 +2670,7 @@ impl ChatApp {
                 }
             }
             Event::Key(k) => {
-                self.input.handle(k);
+                self.input.key(k);
             }
             _ => {}
         }
@@ -1243,7 +2686,7 @@ impl ChatApp {
         let navw = (250.0 * s).min(full.w * 0.34);
         let nav_shown = self.nav_open && self.editor.is_none() && full.w - navw >= 480.0 * s;
         if self.nav_dirty {
-            self.nav_items = cx.services.sessions.list(&cx.session.user);
+            self.nav_items = cx.services.sessions.list(&self.skey(cx));
             self.nav_dirty = false;
         }
         let nav_rect = R::new(full.x, full.y, navw, full.h);
@@ -1255,24 +2698,86 @@ impl ChatApp {
         } else {
             (full, None)
         };
-        let input_h = 56.0 * s;
-        let head_h = 38.0 * s;
-        let log = R::new(area.x + 24.0 * s, area.y + 8.0 * s + head_h, area.w - 48.0 * s, area.h - input_h - 28.0 * s - head_h);
+        // inside the AI IDE the pane is narrow: a shorter header, a composer of one line, and the model and agent controls on
+        // their own small row above it (never beside the status text)
+        let in_ide = self.project.is_some() || self.dash.is_some() || self.flows.is_some();
+        let m = super::ide_chrome::cur();
+        self.in_ide_now = in_ide;
+        let head_h = if in_ide { 30.0 * s } else { 38.0 * s };
+        let side = if in_ide { 12.0 * s } else { 24.0 * s };
+        // the IDE's own scale, for the small controls it shares with the other panes
+        let is = s * m.k / m.chat_k.max(0.1);
+        let ctl_h = if in_ide { super::ide_chrome::tool(is) + 2.0 * is } else { 0.0 };
+        let stat_h = if in_ide { 16.0 * s } else { 0.0 };
+        // the message box: three lines when empty, growing with the text to ten (twelve in the full window) and then scrolling
+        // inside. Its height decides the room under the conversation, so it is measured first; when the window is short the box
+        // gives up lines (two at least) before the conversation loses its room.
+        let (allowed, has_stt, has_tts) = Self::voice_state(cx);
+        let (mic_d, send_w) = if in_ide { (34.0 * s, 64.0 * s) } else { (46.0 * s, 96.0 * s) };
+        let field_off = if allowed { side + mic_d + 8.0 * s } else { side };
+        let field_w = area.w - side - send_w - 8.0 * s - field_off;
+        let (fsz_in, fpad) = (17.0 * s, 9.0 * s);
+        let line_h = g.line_height(fsz_in, Face::Sans);
+        let box_room = area.h * 0.5 - ctl_h - stat_h - head_h - 44.0 * s;
+        let fit_rows = (((box_room - 2.0 * fpad) / line_h).floor().max(2.0) as usize).min(if in_ide { multiline::MAX_ROWS } else { multiline::MAX_ROWS_WIDE });
+        self.input.max_rows = fit_rows;
+        self.input.min_rows = fit_rows.min(multiline::MIN_ROWS);
+        let in_total = self.input.measure(g, field_w, fsz_in, fpad, 0.0, s, true);
+        let input_h = in_total + if in_ide { 6.0 * s } else { 10.0 * s };
+        let mut log = if in_ide {
+            R::new(area.x + side, area.y + 4.0 * s + head_h, area.w - 2.0 * side, area.h - input_h - 22.0 * s - ctl_h - stat_h - head_h)
+        } else {
+            R::new(area.x + 24.0 * s, area.y + 8.0 * s + head_h, area.w - 48.0 * s, area.h - input_h - 28.0 * s - head_h)
+        };
+        // the answer buttons under a question take a strip just above the composer; the conversation ends above it
+        let panel_top = if in_ide { area.y + area.h - input_h - 12.0 * s - ctl_h - stat_h - 6.0 * s } else { area.y + area.h - input_h - 42.0 * s };
+        let chip_size = if in_ide { 12.5 * s } else { 14.0 * s };
+        let (chip_boxes, chips_h) = self.chip_boxes(g, area.w - 2.0 * side, chip_size, s);
+        let chips_top = panel_top - chips_h;
+        if chips_h > 0.0 {
+            log.h = (chips_top - 2.0 * s - log.y).max(40.0 * s).min(log.h);
+        }
+        // the Jobs strip: detached jobs of this chat, just above the answer buttons and the composer; the conversation ends above it
+        let jobs_fs = if in_ide { (m.font_small * is + 1.0 * is).max(12.0) } else { (14.0 * s).max(12.0) };
+        let jobs_h = self.jobs_ui.strip_height(jobs_fs, s, (log.h * 0.45).max(0.0));
+        let jobs_rect = R::new(log.x, chips_top - 2.0 * s - jobs_h, log.w, jobs_h);
+        if jobs_h > 0.0 {
+            log.h = (jobs_rect.y - 2.0 * s - log.y).max(40.0 * s).min(log.h);
+        }
         // the transcript: turns built from the messages, each block laid out once per width (chat_view.rs)
         let busy = self.run.is_some() || self.pending.is_some();
-        let approval = self.approval.as_ref().map(|(id, tool, summary)| (id.as_str(), tool.as_str(), summary.as_str(), self.approval_detail.as_str()));
-        let bctx = chat_view::Ctx { tool_ok: &self.tool_ok, approval, busy, open: &Default::default() };
+        let consent = if self.approval.is_none() { self.consent_block() } else { None };
+        let approval = match (&self.approval, &consent) {
+            (Some((id, tool, summary)), _) => Some((id.as_str(), tool.as_str(), summary.as_str(), self.approval_detail.as_str())),
+            (None, Some((id, tool, text, choices))) => Some((id.as_str(), tool.as_str(), text.as_str(), choices.as_str())),
+            _ => None,
+        };
+        let bctx = chat_view::Ctx { tool_ok: &self.tool_ok, approval, busy, open: &Default::default(), live: &self.live, thinking: &self.thinking, think_secs: self.waiting_since.map_or(0, |t| t.elapsed().as_secs()) };
         let workdir = self.session.as_ref().and_then(|ss| cx.services.session_workdir(&cx.session.user, &ss.id).ok());
+        chat_view::set_mono_boost(if in_ide { 1.2 } else { 1.0 });
         let total = self.view.prepare(g, &self.msgs, &bctx, log.w, s, &mut ChatPics { images: &mut self.images, pics: &mut self.pics, cx, workdir });
         let max_off = (total - log.h).max(0.0);
         self.scroll_px = self.view.scroll_for_focus(log.h, self.scroll_px).min(max_off);
         self.max_off = max_off;
+        self.sync_reading(cx, log.h);
         if total <= 0.0 {
             let configured = cx.services.settings.lock().unwrap().get().chat.is_some();
             let msg = if configured { "Ask anything." } else { "No chat model selected yet. Open Settings → Models, add a provider and pick a model." };
-            g.text(log.x, log.y + 8.0 * s, 18.0 * s, MUTED, msg, Face::Sans);
+            let (fsz, lstep) = if in_ide { (15.5 * s, 21.0 * s) } else { (18.0 * s, 24.0 * s) };
+            for (i, l) in g.wrap(fsz, msg, Face::Sans, log.w).iter().take(4).enumerate() {
+                g.text(log.x, log.y + 8.0 * s + i as f32 * lstep, fsz, MUTED, l, Face::Sans);
+            }
         }
-        self.view.draw(g, log, self.scroll_px, tick, s, ACCENT, &cev);
+        // nothing of the transcript lands outside its own rectangle, however tall a block is or how far it is scrolled
+        // (in a narrow IDE pane it used to be drawn over the pane header and the top bar)
+        let (scroll_px, view) = (self.scroll_px, &self.view);
+        g.clipped(R::new(area.x, log.y, area.w, log.h), |g| view.draw(g, log, scroll_px, tick, s, ACCENT, &cev));
+        if jobs_h > 0.0 {
+            self.jobs_ui.draw_strip(g, jobs_rect, jobs_fs, s, tick);
+        }
+        if self.jobs_ui.log_open() {
+            self.jobs_ui.draw_log(g, R::new(log.x, log.y, log.w, log.h), jobs_fs, s);
+        }
         // a short stretch that does not fill the screen pulls in older messages by itself
         if total < log.h && !self.older.is_empty() {
             self.load_older();
@@ -1281,9 +2786,28 @@ impl ChatApp {
         g.rect(area.x, area.y, area.w, head_h + 6.0 * s, crate::ui::BG_TOP);
         {
             let busy = self.run.is_some() || self.pending.is_some();
-            let mut hx = area.x + area.w - 24.0 * s;
-            let btn = |g: &mut Gfx, hx: &mut f32, label: &str, col: [u8; 4], ev: Event, on: bool| {
+            let mut hx = area.x + area.w - side;
+            let narrow_head = in_ide && area.w < 300.0 * is;
+            let bounds = area;
+            let btn = |g: &mut Gfx, hx: &mut f32, label: &str, short: &str, col: [u8; 4], ev: Event, on: bool| {
+                if in_ide {
+                    // small text buttons; icon-sized when the pane is narrow; the full name in the hover hint
+                    let shown = if narrow_head { short } else { label.split(':').next().unwrap_or(label).trim_end_matches(" chat") };
+                    let shown = if narrow_head { short } else if label.starts_with("New") { "New" } else if label.starts_with("Delete") { "Delete" } else { shown };
+                    let sz = m.font_small * is + 1.0 * is;
+                    let w = g.text_width(sz, shown, Face::Bold) + 16.0 * is;
+                    if *hx - w < area.x + 110.0 * s {
+                        return;
+                    }
+                    super::ide_chrome::text_btn(g, *hx - w, area.y + (head_h - super::ide_chrome::tool(is)) / 2.0, is, shown, col, on, ev, label, Some(label), bounds);
+                    *hx -= w + 1.0 * is;
+                    return;
+                }
                 let w = g.text_width(13.0 * s, label, Face::Bold) + 13.0 * s * 1.7;
+                // a narrow chat (the IDE's side pane) drops the buttons that would not fit
+                if *hx - w < area.x + 150.0 * s {
+                    return;
+                }
                 if on {
                     g.button(*hx - w, area.y + 8.0 * s, 13.0 * s, label, col, ev);
                 } else {
@@ -1291,137 +2815,289 @@ impl ChatApp {
                 }
                 *hx -= w + 8.0 * s;
             };
-            btn(g, &mut hx, if nav_shown { "Chats: shown" } else { "Chats: hidden" }, if nav_shown { OK } else { MUTED }, cev(Key::Ctrl('w')), true);
-            btn(g, &mut hx, "Delete chat", ERR, cev(Key::Ctrl('b')), !busy && self.session.is_some() && self.approval.is_none());
-            btn(g, &mut hx, "New chat", ACCENT, cev(Key::Ctrl('n')), !busy && self.approval.is_none());
-            btn(g, &mut hx, if self.editor.is_some() { "Edit: on" } else { "Edit: off" }, if self.editor.is_some() { rgb(110, 224, 160) } else { MUTED }, cev(Key::Ctrl('e')), !self.agent && self.run.is_none());
-            btn(g, &mut hx, if self.use_docs { "My documents: on" } else { "My documents: off" }, if self.use_docs { OK } else { MUTED }, cev(Key::Ctrl('d')), true);
+            btn(g, &mut hx, if nav_shown { "Chats: shown" } else { "Chats: hidden" }, "☰", if nav_shown { OK } else { MUTED }, cev(Key::Ctrl('w')), true);
+            btn(g, &mut hx, "Delete chat", "×", ERR, cev(Key::Ctrl('b')), !busy && self.session.is_some() && self.approval.is_none());
+            btn(g, &mut hx, "New chat", "+", ACCENT, cev(Key::Ctrl('n')), !busy && self.approval.is_none());
+            let in_ide = self.project.is_some() || self.dash.is_some() || self.flows.is_some();
+            if !in_ide {
+            btn(g, &mut hx, if self.editor.is_some() { "Edit: on" } else { "Edit: off" }, "", if self.editor.is_some() { rgb(110, 224, 160) } else { MUTED }, cev(Key::Ctrl('e')), !self.agent && self.run.is_none());
+            btn(g, &mut hx, if self.use_docs { "My documents: on" } else { "My documents: off" }, "", if self.use_docs { OK } else { MUTED }, cev(Key::Ctrl('d')), true);
+            }
             let first_words = || self.msgs.iter().find(|m| m.role == Role::User).map(|m| m.content.split_whitespace().take(8).collect::<Vec<_>>().join(" ")).filter(|t| !t.is_empty());
             let mut title = self.session.as_ref().map(|x| x.title.clone()).filter(|t| !t.is_empty()).or_else(first_words).unwrap_or_else(|| "New chat".to_string());
             if !self.older.is_empty() {
                 title = format!("{title}  ·  {} earlier messages (scroll up)", self.older.len());
             }
-            let title = g.fit(16.0 * s, &title, Face::Bold, (hx - area.x - 48.0 * s).max(40.0 * s));
-            g.text(area.x + 24.0 * s, area.y + 10.0 * s, 16.0 * s, TEXT, &title, Face::Bold);
+            let (tsz, tx, ty) = if in_ide { (m.font_ui * s, area.x + side, area.y + (head_h - g.line_height(m.font_ui * s, Face::Bold)) / 2.0 + 1.0 * s) } else { (16.0 * s, area.x + 24.0 * s, area.y + 10.0 * s) };
+            let full_title = title.clone();
+            let title = g.fit(tsz, &title, Face::Bold, (hx - tx - if in_ide { 8.0 * s } else { 24.0 * s }).max(40.0 * s));
+            g.text(tx, ty, tsz, TEXT, &title, Face::Bold);
+            if in_ide && title != full_title && g.hovered(R::new(tx, area.y, hx - tx, head_h)) {
+                super::ide_chrome::tooltip(g, R::new(tx, area.y, 0.0, head_h), s, &full_title, bounds);
+            }
         }
         if nav_shown {
             self.draw_nav(g, nav_rect, s);
         }
         // input panel (opaque, so scrolled bubbles never show through)
-        let py = area.y + area.h - input_h - 16.0 * s;
-        g.rect(area.x, py - 16.0 * s, area.w, input_h + 40.0 * s, crate::ui::BG_BOTTOM);
-        let (allowed, has_stt, has_tts) = Self::voice_state(cx);
+        let py = if in_ide { area.y + area.h - input_h - 12.0 * s } else { area.y + area.h - input_h - 16.0 * s };
+        if in_ide {
+            g.rect(area.x, py - ctl_h - stat_h - 6.0 * s, area.w, input_h + ctl_h + stat_h + 18.0 * s, crate::ui::BG_BOTTOM);
+            g.rect(area.x + 1.0, py - ctl_h - stat_h - 6.0 * s, area.w - 2.0, 1.0, [255, 255, 255, 14]);
+        } else {
+            g.rect(area.x, py - 16.0 * s, area.w, input_h + 40.0 * s, crate::ui::BG_BOTTOM);
+        }
+        for (label, i, x, y, _) in &chip_boxes {
+            g.button(area.x + side + x, chips_top + y, chip_size, label, if *i + 1 == chip_boxes.len() { MUTED } else { ACCENT }, Event::Tab(CHIP_BASE + i));
+        }
         let speaking = self.is_speaking();
         // status line: recording > transcribing > speaking > error > thinking
-        let sy = py - 14.0 * s;
+        let sy = if in_ide { py - ctl_h - stat_h - 2.0 * s } else { py - 14.0 * s };
+        // the action buttons of the status row: beside the status text in the full app, on the control row in the IDE
+        let bty = if in_ide { py - ctl_h } else { sy - 8.0 * s };
+        let status_max = if in_ide { area.w - 2.0 * side } else { area.w * 0.62 };
         if let Some(rec) = &self.rec {
             let secs = rec.elapsed().as_secs();
             let pulse = (tick / 12) % 2 == 0;
-            g.circle(area.x + 32.0 * s, sy + 9.0 * s, 6.0 * s, if pulse { rgb(255, 90, 90) } else { rgb(150, 50, 50) });
-            g.text(area.x + 46.0 * s, sy, 15.0 * s, TEXT, &format!("Listening… {}:{:02}   Enter = done · Esc = cancel", secs / 60, secs % 60), Face::Sans);
+            g.circle(area.x + side + 8.0 * s, sy + 9.0 * s, 6.0 * s, if pulse { rgb(255, 90, 90) } else { rgb(150, 50, 50) });
+            g.text(area.x + side + 22.0 * s, sy, 15.0 * s, TEXT, &format!("Listening… {}:{:02}   Enter = done · Esc = cancel", secs / 60, secs % 60), Face::Sans);
             let lvl = rec.level();
-            let (bx, bw) = (area.x + area.w - 24.0 * s - 180.0 * s, 180.0 * s);
+            let (bx, bw) = (area.x + area.w - side - 180.0 * s, 180.0 * s);
             g.rrect(bx, sy + 4.0 * s, bw, 10.0 * s, 5.0 * s, rgb(30, 36, 60));
             g.rrect(bx, sy + 4.0 * s, (bw * lvl).max(6.0 * s), 10.0 * s, 5.0 * s, if lvl > 0.8 { rgb(255, 150, 90) } else { OK });
         } else if self.stt_rx.is_some() {
-            g.text(area.x + 24.0 * s, sy, 15.0 * s, MUTED, &format!("transcribing{}", ".".repeat(1 + (tick / 10 % 3) as usize)), Face::Sans);
+            g.text(area.x + side, sy, 15.0 * s, MUTED, &format!("transcribing{}", ".".repeat(1 + (tick / 10 % 3) as usize)), Face::Sans);
         } else if speaking {
-            g.text(area.x + 24.0 * s, sy, 15.0 * s, MUTED, &format!("speaking{}", ".".repeat(1 + (tick / 10 % 3) as usize)), Face::Sans);
-            g.button(area.x + area.w - 24.0 * s - 90.0 * s, sy - 8.0 * s, 13.0 * s, "Stop", ERR, cev(Key::Ctrl('k')));
+            let paused = self.reader.status() == Status::Paused;
+            let label = if paused { "paused".to_string() } else { format!("speaking{}", ".".repeat(1 + (tick / 10 % 3) as usize)) };
+            g.text(area.x + side, sy, 15.0 * s, MUTED, &label, Face::Sans);
+            g.button(area.x + area.w - side - 90.0 * s, bty, 13.0 * s, "Stop", ERR, cev(Key::Ctrl('k')));
+            g.button(area.x + area.w - side - 190.0 * s, bty, 13.0 * s, if paused { "Resume" } else { "Pause" }, ACCENT, Event::Tab(SPEAK_PAUSE));
         } else if let Some(c) = &self.cred {
-            let t = g.fit(14.0 * s, &format!("That looked like a {} and was not sent to the assistant. Store it in your vault so it can be used safely.", c.what), Face::Sans, area.w - 48.0 * s - 190.0 * s);
-            g.text(area.x + 24.0 * s, sy, 14.0 * s, rgb(255, 184, 64), &t, Face::Sans);
-            g.button(area.x + area.w - 24.0 * s - 180.0 * s, sy - 8.0 * s, 13.0 * s, "Store in vault (v)", OK, cev(Key::Char('v')));
+            let t = g.fit(14.0 * s, &format!("That looked like a {} and was not sent to the assistant. Store it in your vault so it can be used safely.", c.what), Face::Sans, area.w - 2.0 * side - 190.0 * s);
+            g.text(area.x + side, sy, 14.0 * s, rgb(255, 184, 64), &t, Face::Sans);
+            g.button(area.x + area.w - side - 180.0 * s, bty, 13.0 * s, "Store in vault (v)", OK, cev(Key::Char('v')));
         } else if let Some(i) = &self.info {
-            let i = g.fit(15.0 * s, i, Face::Sans, area.w - 48.0 * s);
-            g.text(area.x + 24.0 * s, sy, 15.0 * s, OK, &i, Face::Sans);
+            let i = g.fit(15.0 * s, i, Face::Sans, area.w - 2.0 * side);
+            g.text(area.x + side, sy, 15.0 * s, OK, &i, Face::Sans);
         } else if let Some(e) = &self.error {
-            let e = g.fit(15.0 * s, e, Face::Sans, area.w - 48.0 * s);
-            g.text(area.x + 24.0 * s, sy, 15.0 * s, ERR, &e, Face::Sans);
+            let e = g.fit(15.0 * s, e, Face::Sans, area.w - 2.0 * side);
+            g.text(area.x + side, sy, 15.0 * s, ERR, &e, Face::Sans);
         } else if self.run.is_some() && self.approval.is_none() {
-            g.text(area.x + 24.0 * s, sy, 15.0 * s, MUTED, &format!("agent working{:<3}{}", ".".repeat(1 + (tick / 10 % 3) as usize), self.usage_text()), Face::Sans);
+            let lead = match (self.autopilot, self.ext_choice.clone().flatten()) {
+                // "autopilot · Claude Code · step 3 · row 2 of 7 · ~1.2k tokens · $0.12"
+                (true, Some(id)) => format!("autopilot · {} · {} · ", cx.services.agents_cfg().agent(&id).map_or(id, |a| a.label()), if self.ap_step.is_empty() { "planning".to_string() } else { self.ap_step.clone() }),
+                _ => String::new(),
+            };
+            // the chip and Stop run stay on the right while a run goes: the line is cut before it reaches them
+            let line = format!("{lead}agent working{:<3}{}{}", ".".repeat(1 + (tick / 10 % 3) as usize), self.usage_text(), self.waiting_text());
+            let line = if in_ide { line } else { g.fit(15.0 * s, &line, Face::Sans, area.w * 0.45) };
+            g.text(area.x + side, sy, 15.0 * s, MUTED, &line, Face::Sans);
         } else if self.pending.is_some() {
             let dots = ".".repeat(1 + (tick / 10 % 3) as usize);
-            g.text(area.x + 24.0 * s, sy, 15.0 * s, MUTED, &format!("thinking{dots}"), Face::Sans);
+            g.text(area.x + side, sy, 15.0 * s, MUTED, &format!("thinking{dots}{}", self.waiting_text()), Face::Sans);
         } else {
             // idle: show which model is answering
-            let label = cx.services.settings.lock().unwrap().get().chat.as_ref().map_or("no model selected (Settings → Models)".to_string(), |c| format!("model: {} · {}", c.provider, c.model));
+            let label = match self.ext_footer(cx) {
+                Some(f) => f,
+                None => cx.services.settings.lock().unwrap().get().chat.as_ref().map_or("no model selected (Settings → Models)".to_string(), |c| format!("model: {} · {}", c.provider, c.model)),
+            };
             let mut extra = self.ctx.summary();
             if !self.usage_text().is_empty() {
                 extra = if extra.is_empty() { format!("last run: {}", self.usage_text()) } else { format!("{extra} · last run: {}", self.usage_text()) };
             }
+            if !self.timing_text().is_empty() {
+                extra = if extra.is_empty() { self.timing_text() } else { format!("{extra} · {}", self.timing_text()) };
+            }
             let label = if extra.is_empty() { label } else { format!("{label}  ·  {extra}") };
-            let label = g.fit(13.0 * s, &label, Face::Sans, area.w * 0.62);
+            let label = match self.project_footer() {
+                Some(f) => format!("{f}  ·  {label}"),
+                None => label,
+            };
+            let full = label.clone();
+            let label = g.fit(13.0 * s, &label, Face::Sans, status_max);
             let lw = g.text_width(13.0 * s, &label, Face::Sans);
-            g.text(area.x + 24.0 * s, sy + 1.0 * s, 13.0 * s, DIM, &label, Face::Sans);
-            g.button(area.x + 24.0 * s + lw + 10.0 * s, sy - 8.0 * s, 12.0 * s, "Model ▾", ACCENT, cev(Key::Ctrl('p')));
+            g.text(area.x + side, sy + 1.0 * s, 13.0 * s, if in_ide { super::ide_chrome::dim() } else { DIM }, &label, Face::Sans);
+            if in_ide {
+                // the whole text on hover (it is cut with an ellipsis in a narrow pane)
+                if label != full && g.hovered(R::new(area.x + side, sy, status_max, stat_h)) {
+                    super::ide_chrome::tooltip(g, R::new(area.x + side, sy, 0.0, stat_h), is, &full, area);
+                }
+            } else {
+                g.button(area.x + side + lw + 10.0 * s, bty, 12.0 * s, "Model ▾", ACCENT, cev(Key::Ctrl('p')));
+            }
+        }
+        if in_ide {
+            // one small control row above the composer: the model, the agent switch (or Stop while a run is active), read aloud.
+            // Each is a text button laid out left to right; one that does not fit is left out, never drawn over another.
+            let x = std::cell::Cell::new(area.x + side - 4.0 * is);
+            let limit = area.x + area.w - side + 4.0 * is;
+            let bw = |g: &mut Gfx, label: &str| g.text_width(m.font_small * is + 1.0 * is, label, Face::Bold) + 16.0 * is;
+            // a button that takes at least `min_w`, so what follows it stays put when its label changes (Stop run / Agent: on)
+            let put_ev = |g: &mut Gfx, label: &str, color: [u8; 4], ev: Event, tip: &str, min_w: f32| {
+                let w = bw(g, label);
+                if x.get() + w > limit {
+                    return;
+                }
+                super::ide_chrome::text_btn(g, x.get(), bty + 1.0 * is, is, label, color, true, ev, label, Some(tip), area);
+                x.set(x.get() + w.max(min_w) + 2.0 * is);
+            };
+            let put = |g: &mut Gfx, label: &str, color: [u8; 4], key: Key, tip: &str| put_ev(g, label, color, cev(key), tip, 0.0);
+            // the longest of the labels that still fits in the row (the last one is the short form)
+            let pick = |g: &mut Gfx, labels: &[String], reserve: f32| -> String { labels.iter().find(|l| x.get() + g.text_width(m.font_small * is + 1.0 * is, l, Face::Bold) + 16.0 * is + reserve <= limit).or(labels.last()).cloned().unwrap_or_default() };
+            if self.models.is_none() && self.run.is_none() && self.rec.is_none() {
+                put(g, "Model ▾", ACCENT, Key::Ctrl('p'), "Choose the model (Ctrl+P)");
+            } else if self.models.is_none() && self.rec.is_none() {
+                // the model cannot change during a run: its place is kept so the chip does not move
+                let w = bw(g, "Model ▾");
+                if x.get() + w <= limit {
+                    x.set(x.get() + w + 2.0 * is);
+                }
+            }
+            // Stop run and Agent: on/off share one slot as wide as the widest of them
+            let slot = ["Stop run", "Agent: on", "Agent: off"].iter().map(|l| bw(g, l)).fold(0.0f32, f32::max);
+            if self.run.is_some() {
+                put_ev(g, "Stop run", ERR, cev(Key::Ctrl('k')), "Stop the assistant (Ctrl+K)", slot);
+            } else if cx.session.policy.agent && self.rec.is_none() {
+                put_ev(g, if self.agent { "Agent: on" } else { "Agent: off" }, if self.agent { rgb(255, 196, 94) } else { MUTED }, cev(Key::Ctrl('g')), "Let the assistant use tools (Ctrl+G)", slot);
+            }
+            // the chip stays enabled while a run goes: the mode is live (see iyakki_agent::livemode)
+            if self.agent && cx.session.policy.agent && self.rec.is_none() {
+                // ONE control with three plain modes: Ask first, Auto-approve safe, Autopilot (Ctrl+Q cycles them)
+                let mode = self.mode_label_in(cx);
+                let labels = [format!("Approvals: {mode}"), mode.clone()];
+                // room for the shortest form of the indicator is kept free, so the person always sees that approvals are active
+                let reserve = if self.grants.is_empty() { 0.0 } else { g.text_width(m.font_small * is + 1.0 * is, &format!("✓ {}", self.grants.len()), Face::Bold) + 18.0 * is };
+                let label = pick(g, &labels, reserve);
+                put(g, &label, if self.mode_gap(cx).is_some() { rgb(255, 160, 40) } else if self.autopilot { OK } else if self.approvals.is_auto() { rgb(255, 160, 40) } else { MUTED }, Key::Ctrl('q'), &self.mode_hint_in(cx));
+                if self.autopilot && self.run_is_ap && self.run.is_some() {
+                    put_ev(g, "Pause", rgb(255, 160, 40), Event::Tab(AP_PAUSE), "Pause autopilot now; Resume continues from there. Typing a message also pauses it. Switching Autopilot off (Ctrl+Shift+A) lets the current step finish first.", 0.0);
+                }
+                if self.autopilot && self.ap_saved.is_some() && self.run.is_none() {
+                    put(g, if self.ap_saved.as_ref().is_some_and(|s| s.reason.contains("budget")) { "Resume (fresh context)" } else { "Resume" }, OK, Key::Ctrl('R'), "Continue the saved autopilot run from where it stopped, with new budgets and a context rebuilt from the board and the saved summary (Ctrl+Shift+R)");
+                }
+                if !self.grants.is_empty() {
+                    let n = self.grants.len();
+                    let labels = [format!("Approved this session: {n}"), format!("Approved: {n}"), format!("✓ {n}")];
+                    let label = pick(g, &labels, 0.0);
+                    put(g, &label, ACCENT, Key::Ctrl('Q'), "What you allowed for this session: click to see it, take one back, or reset all (Ctrl+Shift+Q)");
+                }
+            }
+            if allowed && has_tts && self.rec.is_none() && !speaking {
+                let on = self.speak_enabled(cx);
+                put(g, if on { "Read aloud: on" } else { "Read aloud: off" }, if on { OK } else { MUTED }, Key::Ctrl('o'), "Read answers aloud (Ctrl+O)");
+            }
         }
         // right-aligned toggles: Agent on/off (or Stop while a run is active), then Read aloud
-        let mut rx = area.x + area.w - 24.0 * s;
-        if self.run.is_some() {
-            let w = g.text_width(13.0 * s, "Stop run", Face::Bold) + 13.0 * s * 1.7;
-            g.button(rx - w, sy - 8.0 * s, 13.0 * s, "Stop run", ERR, cev(Key::Ctrl('k')));
-            rx -= w + 8.0 * s;
-        } else if cx.session.policy.agent && self.rec.is_none() {
-            let label = if self.agent { "Agent: on" } else { "Agent: off" };
+        let mut rx = area.x + area.w - side;
+        if in_ide {
+        } else if self.run.is_some() || (cx.session.policy.agent && self.rec.is_none()) {
+            // Stop run and Agent: on/off share one slot as wide as the widest of them, so the chip beside it never moves
+            let slot = ["Stop run", "Agent: on", "Agent: off"].iter().map(|l| g.text_width(13.0 * s, l, Face::Bold) + 13.0 * s * 1.7).fold(0.0f32, f32::max);
+            let (label, color, key) = match (self.run.is_some(), self.agent) {
+                (true, _) => ("Stop run", ERR, Key::Ctrl('k')),
+                (false, true) => ("Agent: on", rgb(255, 196, 94), Key::Ctrl('g')),
+                (false, false) => ("Agent: off", MUTED, Key::Ctrl('g')),
+            };
             let w = g.text_width(13.0 * s, label, Face::Bold) + 13.0 * s * 1.7;
-            g.button(rx - w, sy - 8.0 * s, 13.0 * s, label, if self.agent { rgb(255, 196, 94) } else { MUTED }, cev(Key::Ctrl('g')));
-            rx -= w + 8.0 * s;
+            g.button(rx - w, bty, 13.0 * s, label, color, cev(key));
+            rx -= slot + 8.0 * s;
+            // the chip stays enabled while a run goes: the mode is live (see iyakki_agent::livemode)
+            if self.agent && cx.session.policy.agent {
+                // the same single control as in the IDE chat; the long form only when there is room beside the status text
+                let mode = self.mode_label_in(cx);
+                let floor = area.x + side + 150.0 * s;
+                let label = [format!("Approvals: {mode}"), mode.clone()].into_iter().find(|l| rx - (g.text_width(13.0 * s, l, Face::Bold) + 13.0 * s * 1.7) >= floor + 150.0 * s).unwrap_or(mode.clone());
+                let w = g.text_width(13.0 * s, &label, Face::Bold) + 13.0 * s * 1.7;
+                g.button(rx - w, bty, 13.0 * s, &label, if self.autopilot { OK } else if self.approvals.is_auto() { rgb(255, 160, 40) } else { MUTED }, cev(Key::Ctrl('q')));
+                if g.hovered(R::new(rx - w, bty, w, 13.0 * s * 2.0)) {
+                    super::ide_chrome::tooltip(g, R::new(rx - w, bty, 0.0, 13.0 * s * 2.0), s, &self.mode_hint_in(cx), area);
+                }
+                rx -= w + 8.0 * s;
+                if !self.grants.is_empty() {
+                    let n = self.grants.len();
+                    let label = [format!("Approved this session: {n}"), format!("Approved: {n}")].into_iter().find(|l| rx - (g.text_width(13.0 * s, l, Face::Bold) + 13.0 * s * 1.7) >= floor + 100.0 * s).unwrap_or(format!("✓ {n}"));
+                    let w = g.text_width(13.0 * s, &label, Face::Bold) + 13.0 * s * 1.7;
+                    if rx - w >= floor {
+                        g.button(rx - w, bty, 13.0 * s, &label, ACCENT, cev(Key::Ctrl('Q')));
+                        rx -= w + 8.0 * s;
+                    }
+                }
+            }
         }
-        if allowed && has_tts && self.rec.is_none() && !speaking {
+        if !in_ide && allowed && has_tts && self.rec.is_none() && !speaking {
             let on = self.speak_enabled(cx);
             let label = if on { "Read aloud: on" } else { "Read aloud: off" };
             let w = g.text_width(13.0 * s, label, Face::Bold) + 13.0 * s * 1.7;
-            g.button(rx - w, sy - 8.0 * s, 13.0 * s, label, if on { OK } else { MUTED }, cev(Key::Ctrl('o')));
+            g.button(rx - w, bty, 13.0 * s, label, if on { OK } else { MUTED }, cev(Key::Ctrl('o')));
         }
-        let (mic_d, send_w) = (46.0 * s, 96.0 * s);
-        let mic_x = area.x + 24.0 * s;
+        let box_h = self.input.box_h;
+        let mic_x = area.x + side;
+        let cy0 = if in_ide { py + 3.0 * s } else { py + 8.0 * s };
         let show_mic = allowed;
+        // the mic and Send stay level with the middle of the box, however many lines it shows
+        let my0 = cy0 + (box_h - mic_d) / 2.0;
         if show_mic {
             let recording = self.rec.is_some();
             if has_stt && self.stt_rx.is_none() {
-                g.icon_button(mic_x, py + 8.0 * s, mic_d, Icon::Mic, ACCENT, recording, cev(Key::Ctrl('r')), if recording { "Stop recording" } else { "Speak" });
+                g.icon_button(mic_x, my0, mic_d, Icon::Mic, ACCENT, recording, cev(Key::Ctrl('r')), if recording { "Stop recording" } else { "Speak" });
             } else {
                 // not usable: shown dimmed; clicking explains why
-                g.icon_button(mic_x, py + 8.0 * s, mic_d, Icon::Mic, DIM, false, cev(Key::Ctrl('r')), "Speak (unavailable)");
+                g.icon_button(mic_x, my0, mic_d, Icon::Mic, DIM, false, cev(Key::Ctrl('r')), "Speak (unavailable)");
             }
         }
-        let field_x = if show_mic { mic_x + mic_d + 10.0 * s } else { area.x + 24.0 * s };
-        self.input.render(g, R::new(field_x, py + 8.0 * s, area.x + area.w - 24.0 * s - send_w - 12.0 * s - field_x, input_h - 10.0 * s), true, s, blink(tick), Face::Sans, 0);
+        // one keyboard owner: the composer, or the embedded editor, and neither while a dialog of the chat is open
+        let overlay = self.secret.is_some() || self.save.is_some() || self.models.is_some() || self.picker.is_some();
+        let composer_focus = !overlay && !(self.editor.is_some() && self.edit_focus);
+        let field_x = if show_mic { mic_x + mic_d + 8.0 * s } else { area.x + side };
+        let ph = "Ask anything… (Ctrl+M for a new line)";
+        self.input.render(g, field_x, cy0, area.x + area.w - side - send_w - 8.0 * s - field_x, s, fsz_in, fpad, 0.0, composer_focus, tick, ph, crate::fx::CYAN, INPUT_AREA, "message field", true, true);
+        let (send_sz, send_x) = (if in_ide { 13.0 * s } else { 15.0 * s }, area.x + area.w - side - send_w + 8.0 * s);
+        let send_y = cy0 + (box_h - send_sz * 2.1) / 2.0;
         if self.pending.is_none() && self.run.is_none() {
-            g.button(area.x + area.w - 24.0 * s - send_w + 8.0 * s, py + 14.0 * s, 15.0 * s, "Send", ACCENT, cev(Key::Enter));
+            g.button(send_x, send_y, send_sz, "Send", ACCENT, cev(Key::Enter));
         } else {
-            g.button_off(area.x + area.w - 24.0 * s - send_w + 8.0 * s, py + 14.0 * s, 15.0 * s, "Send");
+            g.button_off(send_x, send_y, send_sz, "Send");
         }
         let _ = has_stt;
+        if self.grants_open && !self.grants.is_empty() {
+            // the list of session approvals: each row can be taken back, or all of them reset
+            let list = self.grants.list();
+            g.clear_hits();
+            let (rh, fs) = (30.0 * s, 13.5 * s);
+            let shown = list.len().min(8);
+            let ph = 88.0 * s + shown as f32 * rh + if list.len() > shown { 22.0 * s } else { 0.0 } + 44.0 * s;
+            let pw = (area.w - 2.0 * side).clamp(280.0 * s, 480.0 * s).min(area.w - 16.0 * s);
+            let px = (area.x + area.w - side - pw).max(area.x + 8.0 * s);
+            let py0 = (bty - ph - 8.0 * s).max(area.y + 8.0 * s);
+            g.rrect(px, py0, pw, ph, 14.0 * s, rgb(16, 20, 36));
+            g.rrect_outline(px, py0, pw, ph, 14.0 * s, 1.5 * s, ACCENT);
+            g.text(px + 16.0 * s, py0 + 12.0 * s, 16.0 * s, TEXT, &format!("Approved this session: {}", list.len()), Face::Bold);
+            let note = g.fit(12.5 * s, "Each covers the same tool in the same scope (command, cluster, namespace, host or workspace). Revoke takes one back.", Face::Sans, pw - 32.0 * s);
+            g.text(px + 16.0 * s, py0 + 38.0 * s, 12.5 * s, MUTED, &note, Face::Sans);
+            let top = py0 + 66.0 * s;
+            for (i, gr) in list.iter().take(shown).enumerate() {
+                let y = top + i as f32 * rh;
+                let bw = g.text_width(12.5 * s, "Revoke", Face::Bold) + 12.5 * s * 1.7;
+                let t = g.fit(fs, &gr.label, Face::Sans, pw - 48.0 * s - bw);
+                g.text(px + 16.0 * s, y + 6.0 * s, fs, TEXT, &t, Face::Sans);
+                g.button(px + pw - 16.0 * s - bw, y, 12.5 * s, "Revoke", ERR, Event::Row(i));
+            }
+            let mut y = top + shown as f32 * rh;
+            if list.len() > shown {
+                g.text(px + 16.0 * s, y + 2.0 * s, 12.5 * s, MUTED, &format!("and {} more", list.len() - shown), Face::Sans);
+                y += 22.0 * s;
+            }
+            let bw = g.button(px + 16.0 * s, y + 10.0 * s, 13.0 * s, "Reset approvals (Ctrl+0)", ERR, Event::Key(Key::Ctrl('0')));
+            g.button(px + 16.0 * s + bw + 10.0 * s, y + 10.0 * s, 13.0 * s, "Close (Esc)", MUTED, Event::Key(Key::Esc));
+        }
         if let (Some(ea), Some(ed)) = (edit_area, self.editor.as_mut()) {
             g.rect(ea.x - 2.0 * s, ea.y, 2.0 * s, ea.h, if self.edit_focus { ACCENT } else { rgb(40, 48, 80) });
-            ed.render(g, ea, s, cx, tick);
+            let editor_owns = self.edit_focus && !overlay;
+            super::with_caret(editor_owns, || ed.render(g, ea, s, cx, tick));
         }
         if let Some(m) = &self.models {
-            g.clear_hits();
-            let (px, pw) = (area.x + 24.0 * s, (area.w - 48.0 * s).min(720.0 * s));
-            let (py0, ph) = (area.y + 8.0 * s, area.h - 24.0 * s);
-            g.rrect(px, py0, pw, ph, 16.0 * s, rgb(16, 20, 36));
-            g.rrect_outline(px, py0, pw, ph, 16.0 * s, 1.5 * s, ACCENT);
-            g.text(px + 20.0 * s, py0 + 14.0 * s, 18.0 * s, TEXT, "Choose the model", Face::Bold);
-            g.text(px + 20.0 * s, py0 + 40.0 * s, 13.0 * s, MUTED, "Enter or click chooses · Esc closes · Settings → Models adds providers.", Face::Sans);
-            let current = cx.services.settings.lock().unwrap().get().chat.clone();
-            let (rh, top) = (34.0 * s, py0 + 70.0 * s);
-            let rows = (((ph - 90.0 * s) / rh) as usize).max(1);
-            let first = m.sel.saturating_sub(rows - 1);
-            for (n, (prov, model)) in m.items.iter().enumerate().skip(first).take(rows) {
-                let y = top + (n - first) as f32 * rh;
-                if n == m.sel {
-                    g.rrect(px + 12.0 * s, y, pw - 24.0 * s, rh - 4.0 * s, 10.0 * s, rgb(34, 44, 80));
-                }
-                g.hit(R::new(px + 12.0 * s, y, pw - 24.0 * s, rh - 4.0 * s), Event::Row(n), "model");
-                let on = current.as_ref().is_some_and(|c| c.provider == *prov && c.model == *model);
-                let t = g.fit(15.0 * s, model, if on { Face::Bold } else { Face::Sans }, pw * 0.62);
-                g.text(px + 24.0 * s, y + 7.0 * s, 15.0 * s, if on { OK } else { TEXT }, &t, if on { Face::Bold } else { Face::Sans });
-                let w = g.text_width(13.0 * s, prov, Face::Sans);
-                g.text(px + pw - 24.0 * s - w, y + 9.0 * s, 13.0 * s, DIM, prov, Face::Sans);
-            }
+            model_picker::draw(g, area, s, cx, m);
         } else if let Some(p) = &self.picker {
             g.clear_hits();
             let (px, pw) = (area.x + 24.0 * s, area.w - 48.0 * s);
@@ -1486,6 +3162,37 @@ mod tests {
     }
 
     #[test]
+    fn files_dropped_on_the_chat_go_with_the_next_message_and_the_last_answer_can_be_saved_on_the_host() {
+        let _g = iyakki_agent::hostfiles::test_guard();
+        let (mut app, mut cx, d) = chat_with_answer("chatdrop");
+        let host = d.join("hostdrop");
+        std::fs::create_dir_all(&host).unwrap();
+        std::fs::write(host.join("notes.txt"), "remember the milk").unwrap();
+        std::fs::write(host.join("pic.png"), [137u8, 80, 78, 71, 0]).unwrap();
+        cx.session.policy.fs_write = vec![d.display().to_string()];
+        let action = app.on_drop(&[host.join("notes.txt"), host.join("pic.png"), host.clone()], &cx);
+        assert_eq!(action, crate::apps::DropAction::Taken);
+        assert_eq!(app.attachments.len(), 2);
+        let info = app.info.clone().unwrap();
+        assert!(info.contains("notes.txt") && info.contains("pic.png") && info.contains("is a folder"), "{info}");
+        app.input.set("what is in these?");
+        app.send(&cx);
+        let sent = app.msgs.iter().rev().find(|m| m.role == Role::User).unwrap().content.clone();
+        assert!(sent.starts_with("what is in these?") && sent.contains("[Attached file: notes.txt") && sent.contains("remember the milk") && sent.contains("[Attached picture: pic.png"), "{sent}");
+        assert!(app.attachments.is_empty(), "used once");
+        // Ctrl+Shift+H: only in window mode
+        iyakki_agent::hostfiles::set_enabled(false);
+        app.handle(&Event::Key(Key::Ctrl('H')), &cx);
+        assert!(app.take_host_save().is_none() && app.error.as_deref().is_some_and(|e| e.contains("desktop window")));
+        iyakki_agent::hostfiles::set_enabled(true);
+        app.msgs.push(Message::assistant("| a | b |\n|---|---|\n| 1 | 2 |\n".to_string()));
+        app.handle(&Event::Key(Key::Ctrl('H')), &cx);
+        let (name, bytes) = app.take_host_save().expect("a file to save");
+        assert_eq!((name.as_str(), String::from_utf8(bytes).unwrap().as_str()), ("result.csv", "a,b\n1,2\n"));
+        iyakki_agent::hostfiles::set_enabled(false);
+    }
+
+    #[test]
     fn ctrl_p_lists_every_model_of_every_enabled_provider_and_choosing_one_changes_the_chat_model() {
         let (mut app, mut cx, _h) = chat_with_answer("chatmodels");
         cx.session.policy.manage_settings = true;
@@ -1502,9 +3209,13 @@ mod tests {
         let g = render_with(&mut app, &cx, 1100, 650);
         assert!(g.hits.iter().any(|h| h.label == "Model ▾"), "a button in the footer");
         app.handle(&Event::Key(Key::Ctrl('p')), &cx);
-        assert_eq!(app.models.as_ref().map(|m| m.items.clone()), Some(vec![("home".to_string(), "llama3".to_string()), ("home".to_string(), "qwen3".to_string())]));
+        // one flat list: the models of the enabled providers, then each external coding agent with its models under it
+        let items = app.models.as_ref().map(|m| m.items.clone()).unwrap();
+        assert_eq!(&items[..2], &[("home".to_string(), "llama3".to_string()), ("home".to_string(), "qwen3".to_string())]);
+        assert_eq!(items[2], ("agent:claude-code".to_string(), String::new()), "the agent line comes right after the models");
+        assert!(items.iter().any(|(p, m)| p == "agent:copilot" && m.is_empty()));
         let g = render_with(&mut app, &cx, 1100, 650);
-        assert_eq!(g.hits.iter().filter(|h| h.label == "model").count(), 2);
+        assert!(g.hits.iter().filter(|h| h.label == "model").count() >= 4, "the models and the agent lines are click targets");
         app.handle(&Event::Key(Key::Down), &cx);
         app.handle(&Event::Key(Key::Enter), &cx);
         assert!(app.models.is_none());
@@ -1818,7 +3529,7 @@ mod tests {
         run_until(&mut app, &cx, |a| a.pending_approval().is_some());
         let g = render(&mut app, &cx);
         assert!(app.view.dots().iter().any(|d| d.1 == chat_view::Dot::Waiting));
-        let ev = g.hits.iter().find(|h| h.label == "Always allow write_file (Ctrl+U)").expect("the button is in the transcript").ev.clone();
+        let ev = g.hits.iter().find(|h| h.label == "Allow for this session (Ctrl+U)").expect("the button is in the transcript").ev.clone();
         assert_eq!(ev, Event::Key(Key::Ctrl('u')));
         app.handle(&ev, &cx);
         run_until(&mut app, &cx, |a| !a.is_running());
@@ -2086,7 +3797,7 @@ mod tests {
         app.handle(&Event::Key(Key::Enter), &cx);
         for _ in 0..400 {
             app.handle(&Event::Tick, &cx);
-            if app.is_speaking() && !app.is_waiting() && app.speak_rx.is_none() {
+            if app.is_speaking() && !app.is_waiting() && app.reader.status() == Status::Playing {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -2102,6 +3813,260 @@ mod tests {
         // switching it off stops and silences
         app.handle(&Event::Key(Key::Ctrl('o')), &cx);
         assert_eq!(app.speak_on, Some(false));
+    }
+
+    // ------------------------------------------------------------------ the sentence and the word being read
+
+    /// A speaker whose voice reports the word it is on (like the browser voice); it never ends by itself.
+    struct WordSink {
+        at: Arc<std::sync::Mutex<Option<(usize, usize)>>>,
+    }
+    struct WordChild {
+        at: Arc<std::sync::Mutex<Option<(usize, usize)>>>,
+        until: std::time::Instant,
+    }
+    impl st::Playing for WordChild {
+        fn is_playing(&mut self) -> bool {
+            std::time::Instant::now() < self.until
+        }
+        fn stop(&mut self) {}
+        fn spoken_word(&mut self) -> Option<(usize, usize)> {
+            *self.at.lock().unwrap()
+        }
+    }
+    impl st::Sink for WordSink {
+        fn play(&self, _wav: &[u8]) -> Result<Box<dyn st::Playing>, String> {
+            Ok(Box::new(WordChild { at: self.at.clone(), until: std::time::Instant::now() + std::time::Duration::from_secs(90) }))
+        }
+    }
+    struct LongTone;
+    impl st::Synth for LongTone {
+        fn synth(&self, _t: &str) -> Result<Vec<u8>, String> {
+            Ok(encode_wav(&tone(500.0, 60_000), 16_000))
+        }
+    }
+
+    const REPLY: &str = "Here is the **plan** for today. First, check the logs on the server. Then restart the service, and wait!\n\n- the first item is short\n- the second item is a little longer than that\n\nThat is all I have, thank you for asking.";
+
+    /// The time of a reader in these tests: it only moves when a test moves it (milliseconds), so how long the machine takes
+    /// to draw or to start threads cannot move the word or the frame rate.
+    type Moved = Arc<std::sync::atomic::AtomicU32>;
+
+    fn held_time(app: &ChatApp) -> Moved {
+        let time: Moved = Arc::new(std::sync::atomic::AtomicU32::new(1000));
+        let t2 = time.clone();
+        app.reader.set_time_source(Arc::new(move || t2.load(std::sync::atomic::Ordering::SeqCst) as f32));
+        time
+    }
+
+    /// Wait (up to a minute of wall time, which only matters when something is wrong) until `f` holds.
+    fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !f() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for: {what}");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// A chat with filler messages above and the reply last, which is being read with the voice on word `word` of sentence `from`.
+    fn reading_chat(tag: &str, w: u32, h: u32, from: usize) -> (ChatApp, AppCx, Arc<std::sync::Mutex<Option<(usize, usize)>>>, usize, Moved) {
+        let (cx, _d) = cx_with_backend(tag, iyakki_agent::chat::Unconfigured);
+        let _rig = Rig::new(&cx, tag);
+        let mut app = ChatApp::new();
+        for i in 0..14 {
+            app.msgs.push(Message::user(format!("question number {i}")));
+            app.msgs.push(Message::assistant(format!("answer number {i}, with a few words in it so that it is a line")));
+        }
+        app.msgs.push(Message::user("what is the plan?"));
+        app.msgs.push(Message::assistant(REPLY.to_string()));
+        let msg = app.msgs.len() - 1;
+        // lay it out once, then scroll to the oldest message: the reading has to bring the reply back into view
+        let mut g = Gfx::new(w, h);
+        app.render(&mut g, R::new(0.0, 72.0, w as f32, h as f32 - 72.0), crate::shell::scale_for(w, h), &cx, 0);
+        app.scroll_px = app.max_off;
+        let spoken = voice::speakable(REPLY);
+        let chunks = st::sentence_chunks(&spoken, st::MAX_CHUNK_CHARS);
+        let at = Arc::new(std::sync::Mutex::new(None));
+        let time = held_time(&app);
+        app.begin_reading(&cx, msg, &spoken, chunks, from, Arc::new(LongTone), Arc::new(WordSink { at: at.clone() }), "t");
+        wait_until("the reply to be playing", || app.reader.status() == Status::Playing);
+        (app, cx, at, msg, time)
+    }
+
+    fn render_chat(app: &mut ChatApp, cx: &AppCx, w: u32, h: u32, tick: u64) -> Gfx {
+        let mut g = Gfx::new(w, h);
+        g.clear(rgb(9, 11, 20));
+        app.render(&mut g, R::new(0.0, 72.0, w as f32, h as f32 - 72.0), crate::shell::scale_for(w, h), cx, tick);
+        g
+    }
+
+    #[test]
+    fn the_sentence_and_the_word_of_a_reply_being_read_are_lit_inside_the_transcript_and_the_view_follows() {
+        for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+            let (mut app, cx, at, msg, _time) = reading_chat(&format!("cr-{w}"), w, h, 1);
+            let spoken = voice::speakable(REPLY);
+            let words = wordtime::words_of(&spoken);
+            let sp: Vec<char> = spoken.chars().collect();
+            let say = |k: usize| -> String { sp[words[k].start..words[k].end].iter().collect() };
+            // sentence 1 is "First, check the logs on the server." — its words, one by one
+            let first = words.iter().position(|x| sp[x.start..x.end].iter().collect::<String>() == "First").unwrap();
+            let mut seen_lines = std::collections::BTreeSet::new();
+            // the voice counts the words of the piece it is saying (the sentence), not of the whole reply
+            let piece = 7; // First, check the logs on the server.
+            assert_eq!(wordtime::words_of("First, check the logs on the server.").len(), piece);
+            for k in [first, first + 3, first + piece - 1] {
+                *at.lock().unwrap() = Some((k - first, piece));
+                wait_until("the word said", || app.reader.snapshot().word == Some((words[k].start, words[k].end)));
+                let mut g = render_chat(&mut app, &cx, w, h, 1);
+                for t in 2..4 {
+                    g = render_chat(&mut app, &cx, w, h, t);
+                }
+                let mark = app.view.reading.clone().unwrap_or_else(|| panic!("{w}x{h}: nothing lit"));
+                assert_eq!(mark.msg, msg);
+                // the drawn word is the spoken word, through the markup (bold, list markers)
+                let drawn = app.view.message_words(msg);
+                assert_eq!(drawn[mark.word.expect("a word")].to_lowercase(), say(k).to_lowercase(), "{w}x{h} word {k}");
+                let log = app.view.log_rect().expect("log");
+                let (sent, word) = app.view.read_screen_rects(log, app.scroll_px);
+                let word = word.expect("word rect");
+                assert!(!sent.is_empty());
+                assert!(word.x >= log.x && word.x + word.w <= log.x + log.w + 1.0 && word.y >= log.y - 1.0 && word.y + word.h <= log.y + log.h + 1.0, "{w}x{h} word {k}: {word:?} outside the transcript {log:?}");
+                assert!(sent.iter().any(|r| word.x >= r.x - 0.6 && word.x + word.w <= r.x + r.w + 0.6 + 2.0 && word.y >= r.y - 0.6 && word.y + word.h <= r.y + r.h + 0.6), "{w}x{h}: word {word:?} outside the sentence {sent:?}");
+                // gold fill at the left edge of the word, where no glyph is drawn
+                let s = crate::shell::scale_for(w, h);
+                let px = g.pm.pixel((word.x - 1.0 * s).max(0.0) as u32, (word.y + word.h / 2.0) as u32).expect("pixel");
+                assert!(px.red() > 200 && px.green() > 170 && px.blue() > 80, "{w}x{h} word {k}: {px:?}");
+                seen_lines.insert((word.y * 10.0) as i32);
+                // the reply was far below the scrolled view: it was brought back
+                assert!(app.scroll_px < app.max_off - 1.0, "{w}x{h}: the view followed the reading");
+            }
+            assert!(!seen_lines.is_empty());
+            // no other text is lit: the word rect belongs to the last message only
+            app.stop_speaking();
+        }
+    }
+
+    #[test]
+    fn the_highlight_setting_is_respected_in_the_chat_and_pausing_freezes_and_stopping_clears_it() {
+        use iyakki_agent::voice::Highlight;
+        let (mut app, cx, at, _msg, time) = reading_chat("cr-setting", 1280, 720, 0);
+        let spoken = voice::speakable(REPLY);
+        let words = wordtime::words_of(&spoken);
+        *at.lock().unwrap() = Some((4, words.len()));
+        wait_until("an exact word", || app.reader.snapshot().word_exact);
+        let _ = render_chat(&mut app, &cx, 1280, 720, 1);
+        let m = app.view.reading.clone().unwrap();
+        assert!(m.sentence.is_some() && m.word.is_some(), "the default is sentence and word");
+        // pause: the Pause button of the status row, and the word stays put
+        let g = render_chat(&mut app, &cx, 1280, 720, 2);
+        let ev = g.hits.iter().find(|h| h.label == "Pause").expect("a Pause button while reading").ev.clone();
+        app.handle(&ev, &cx);
+        assert_eq!(app.reader.status(), Status::Paused);
+        let lit = app.view.read_screen_rects(app.view.log_rect().unwrap(), app.scroll_px);
+        for t in 3..8 {
+            // time passes: a paused reading stays where it is
+            time.fetch_add(30_000, std::sync::atomic::Ordering::SeqCst);
+            let g = render_chat(&mut app, &cx, 1280, 720, t);
+            assert_eq!(app.view.read_screen_rects(app.view.log_rect().unwrap(), app.scroll_px), lit, "a paused reading does not move");
+            assert!(g.hits.iter().any(|h| h.label == "Resume"), "the button offers to carry on");
+        }
+        // the setting: sentence only, then off
+        let set = |h: Highlight| cx.services.settings.lock().unwrap().update(|s| s.voice.highlight = h).unwrap();
+        set(Highlight::Sentence);
+        let _ = render_chat(&mut app, &cx, 1280, 720, 9);
+        let m = app.view.reading.clone().unwrap();
+        assert!(m.sentence.is_some() && m.word.is_none());
+        set(Highlight::Off);
+        let _ = render_chat(&mut app, &cx, 1280, 720, 10);
+        assert!(app.view.reading.is_none(), "off lights nothing");
+        set(Highlight::SentenceAndWord);
+        let _ = render_chat(&mut app, &cx, 1280, 720, 11);
+        assert!(app.view.reading.is_some());
+        // stop clears the highlight at once
+        app.handle(&Event::Key(Key::Ctrl('k')), &cx);
+        assert!(app.view.reading.is_none() && !app.is_speaking());
+        let _ = render_chat(&mut app, &cx, 1280, 720, 12);
+        assert!(app.view.read_screen_rects(app.view.log_rect().unwrap(), app.scroll_px).0.is_empty());
+    }
+
+    #[test]
+    fn frames_are_asked_for_only_while_a_reply_is_being_said() {
+        let (cx, _d) = cx_with_backend("cr-redraw", iyakki_agent::chat::Unconfigured);
+        let _rig = Rig::new(&cx, "cr-redraw");
+        let mut app = ChatApp::new();
+        assert!(!app.wants_redraw(), "idle: no frames");
+        app.msgs.push(Message::assistant(REPLY.to_string()));
+        let spoken = voice::speakable(REPLY);
+        let at = Arc::new(std::sync::Mutex::new(None));
+        let time = held_time(&app);
+        app.begin_reading(&cx, 0, &spoken, st::sentence_chunks(&spoken, 240), 0, Arc::new(LongTone), Arc::new(WordSink { at }), "t");
+        wait_until("the reply to be playing", || app.reader.status() == Status::Playing);
+        // one second of the reader's time, polled every 2 ms of it
+        let _ = app.wants_redraw();
+        let mut n = 0;
+        for _ in 0..500 {
+            time.fetch_add(2, std::sync::atomic::Ordering::SeqCst);
+            if app.wants_redraw() {
+                n += 1;
+            }
+        }
+        assert!((8..=11).contains(&n), "about ten frames a second while reading, got {n}");
+        app.reader.pause();
+        let _ = app.wants_redraw(); // the frame that shows the pause
+        time.fetch_add(150, std::sync::atomic::Ordering::SeqCst);
+        assert!(!app.wants_redraw(), "paused: nothing moves, no frames");
+        app.stop_speaking();
+        let _ = app.wants_redraw();
+        assert!(!app.wants_redraw(), "stopped: no frames");
+    }
+
+    #[test]
+    fn a_click_on_a_sentence_of_a_reply_reads_it_from_there() {
+        let (cx, _d) = cx_with_backend("cr-click", iyakki_agent::chat::Unconfigured);
+        let rig = Rig::new(&cx, "cr-click");
+        let mut app = ChatApp::new();
+        app.msgs.push(Message::user("what is the plan?"));
+        app.msgs.push(Message::assistant(REPLY.to_string()));
+        let _ = render_chat(&mut app, &cx, 1280, 720, 0);
+        assert!(!app.is_speaking(), "not reading yet, and reading replies is off");
+        // the pointer on the word "restart"
+        let lines = app.view.line_texts();
+        let (li, line) = lines.iter().enumerate().find(|(_, l)| l.contains("restart")).expect("a line with restart");
+        let ch = line.find("restart").unwrap();
+        let (x, y) = app.view.point_of(li, line[..ch].chars().count() + 3, false).unwrap();
+        let press = |app: &mut ChatApp, clicks: u8, drag: bool| {
+            crate::ui::set_click_count(clicks);
+            crate::ui::set_dragging(drag);
+            app.handle(&Event::AreaAt(chat_view::AREA, x, y), &cx);
+            crate::ui::set_dragging(false);
+            crate::ui::set_click_count(1);
+        };
+        // a double click selects the word and reads nothing
+        press(&mut app, 2, false);
+        app.handle(&Event::MouseUp(0, 0), &cx);
+        for _ in 0..30 {
+            app.handle(&Event::Tick, &cx);
+        }
+        assert!(!app.is_speaking());
+        // a plain click waits for a possible second click, then reads from the sentence under it
+        press(&mut app, 1, false);
+        app.view.clear_selection();
+        app.handle(&Event::MouseUp(0, 0), &cx);
+        for _ in 0..5 {
+            app.handle(&Event::Tick, &cx);
+        }
+        assert!(!app.is_speaking(), "still waiting");
+        for _ in 0..20 {
+            app.handle(&Event::Tick, &cx);
+        }
+        wait_until("the reading to start", || app.reading.is_some() && app.reader.status() != Status::Buffering);
+        let r = app.reading.as_ref().expect("reading started");
+        let snap = app.reader.snapshot();
+        assert_eq!(r.chunks[snap.chunk.max(r.chunks.iter().position(|c| c.text.starts_with("Then restart")).unwrap_or(0)).min(r.chunks.len() - 1)].text.chars().take(12).collect::<String>(), "Then restart", "reading starts at the clicked sentence");
+        assert!(snap.chunk >= r.chunks.iter().position(|c| c.text.starts_with("Then restart")).unwrap());
+        assert!(cx.audit.recent(20).iter().any(|l| l.contains("voice.speak")));
+        let _ = rig.p("x");
+        app.stop_speaking();
     }
 
     #[test]
@@ -2222,13 +4187,15 @@ mod tests {
         assert!(!target.exists(), "nothing is written before the user approves");
         let (_, tool, summary) = app.pending_approval().unwrap().clone();
         assert_eq!(tool, "write_file");
-        assert!(summary.starts_with("write 11 characters to ") && summary.ends_with("summary.txt"), "{summary}");
+        let q = iyakki_agent::grants::split_card(&summary);
+        assert!(q.question.starts_with("write 11 characters to ") && q.question.ends_with("summary.txt"), "{summary}");
+        assert!(q.covers.is_some_and(|c| c.starts_with("write_file: files in the folder ")) && q.always.is_none(), "the card says what a session answer covers: {summary}");
         let g = render(&mut app, &cx);
-        for want in ["Approve (Ctrl+Y)", "Deny (Ctrl+N)", "Always allow write_file (Ctrl+U)", "Stop run"] {
+        for want in ["Allow once (Ctrl+Y)", "Deny (Ctrl+N)", "Allow for this session (Ctrl+U)", "Stop run"] {
             assert!(g.hits.iter().any(|h| h.label == want), "{want}");
         }
         // the Approve button is exactly Ctrl+Y
-        let btn = g.hits.iter().find(|h| h.label == "Approve (Ctrl+Y)").unwrap();
+        let btn = g.hits.iter().find(|h| h.label == "Allow once (Ctrl+Y)").unwrap();
         assert_eq!(btn.ev, Event::Key(Key::Ctrl('y')));
         app.handle(&btn.ev.clone(), &cx);
         run_until(&mut app, &cx, |a| !a.is_running());
@@ -2236,6 +4203,117 @@ mod tests {
         assert_eq!(app.messages().last().unwrap().content, "Saved it.");
         assert!(cx.audit.recent(30).iter().any(|l| l.contains("agent.tool") && l.contains("write_file:approved:user")));
         assert!(!cx.audit.recent(30).iter().any(|l| l.contains("3pm meeting")), "file contents are never audited");
+    }
+
+    fn ap_scope(home: &Path) -> ProjectScope {
+        ProjectScope { name: "Web".into(), root: home.to_path_buf(), key: "web".into(), features: home.join("FEATURES.md"), cluster: None }
+    }
+
+    #[test]
+    fn the_workspace_chat_footer_shows_the_stack_the_board_progress_and_open_bugs_and_the_project_setting_wins() {
+        let (cx, home) = agent_cx("ag-footer", |_| vec![]);
+        std::fs::write(home.join("go.mod"), "module x").unwrap();
+        std::fs::write(home.join("FEATURES.md"), "| ID | Feature | Status | Notes |\n|---|---|---|---|\n| F-APP-01 | one | done |  |\n| F-APP-02 | two | planned |  |\n| B-APP-01 | crash | planned |  |\n").unwrap();
+        let mut app = ChatApp::new().with_agent(true).with_project(ap_scope(&home));
+        assert_eq!(app.project_footer().as_deref(), Some("stack: Go · board 1/2 done · 1 bug"));
+        // the stack of project.json overrides the detection (and the footer re-reads the disk every few seconds)
+        std::fs::create_dir_all(home.join(".iyakki")).unwrap();
+        std::fs::write(home.join(".iyakki/project.json"), r#"{"stack": "TypeScript"}"#).unwrap();
+        app.footer_cache = None;
+        assert_eq!(app.project_footer().as_deref(), Some("stack: TypeScript · board 1/2 done · 1 bug"));
+        // it is on screen in the idle status line of the workspace chat
+        let mut g = Gfx::new(900, 600);
+        g.clear(rgb(0, 0, 0));
+        app.render(&mut g, R::new(0.0, 0.0, 900.0, 600.0), 1.0, &cx, 0);
+        assert!(app.project_footer().is_some());
+        // a chat that is not in a workspace has none
+        assert!(ChatApp::new().project_footer().is_none());
+        let _ = &cx;
+    }
+
+    #[test]
+    fn the_autopilot_chip_toggles_implies_auto_fits_a_narrow_pane_and_exists_only_in_a_workspace_chat() {
+        let (cx, home) = agent_cx("ag-ap-chip", |_| vec![]);
+        let mut app = ChatApp::new().with_agent(true).with_project(ap_scope(&home));
+        assert!(app.autopilot_available() && !app.autopilot());
+        assert_eq!(app.autopilot_label(), "Autopilot");
+        app.handle(&Event::Key(Key::Ctrl('A')), &cx);
+        assert!(app.autopilot() && app.approvals() == Approvals::Auto, "on implies Auto approvals for the safe set");
+        assert!(cx.audit.recent(10).iter().any(|l| l.contains("agent.autopilot") && l.contains("on")));
+        for w in [520.0f32, 420.0, 340.0] {
+            let mut g = Gfx::new(w as u32, 600);
+            g.clear(rgb(0, 0, 0));
+            app.render(&mut g, R::new(0.0, 0.0, w, 600.0), 1.0, &cx, 0);
+            let h = g.hits.iter().find(|h| h.ev == Event::Key(Key::Ctrl('q')) && h.label.contains("Autopilot")).unwrap_or_else(|| panic!("the Autopilot mode chip is shown at width {w}"));
+            assert!(h.rect.x >= 0.0 && h.rect.x + h.rect.w <= w, "inside the pane at width {w}: {:?}", h.rect);
+        }
+        app.handle(&Event::Key(Key::Ctrl('A')), &cx);
+        assert!(!app.autopilot());
+        // a stand-alone chat and a chat with the agent off have no Autopilot
+        let mut plain = ChatApp::new().with_agent(true);
+        plain.handle(&Event::Key(Key::Ctrl('A')), &cx);
+        assert!(!plain.autopilot() && plain.error_text().is_some_and(|e| e.contains("Autopilot needs")));
+        let mut off = ChatApp::new().with_agent(false).with_project(ap_scope(&home));
+        off.handle(&Event::Key(Key::Ctrl('A')), &cx);
+        assert!(!off.autopilot(), "a read-only workspace has the agent off, so no autopilot");
+    }
+
+    #[test]
+    fn autopilot_in_the_chat_works_through_the_plan_to_the_end_without_another_message() {
+        let (cx, home) = agent_cx("ag-ap-run", |_| {
+            vec![
+                turn("", vec![("a1", "board_add", json!({"prefix": "APP", "title": "Add a Dockerfile"}))]),
+                turn("Planned one step.", vec![]),
+                turn("", vec![("w1", "write_file", json!({"path": "Dockerfile", "content": "FROM node:20\n"}))]),
+                turn("Wrote the Dockerfile.", vec![]),
+                turn("Checked: the Dockerfile exists. All done.", vec![]),
+            ]
+        });
+        let mut app = ChatApp::new().with_agent(true).with_project(ap_scope(&home));
+        app.handle(&Event::Key(Key::Ctrl('A')), &cx);
+        ask(&mut app, &cx, "add a dockerfile for the app");
+        run_until(&mut app, &cx, |a| !a.is_running());
+        assert!(app.pending_approval().is_none(), "nothing asked: Auto covers the safe set");
+        assert_eq!(std::fs::read_to_string(home.join("Dockerfile")).unwrap(), "FROM node:20\n");
+        let board = std::fs::read_to_string(home.join("FEATURES.md")).unwrap();
+        assert!(board.contains("F-APP-01") && board.contains("| done |"), "{board}");
+        let last = app.messages().last().unwrap().content.clone();
+        assert!(last.contains("Autopilot finished") && last.contains("Files changed: Dockerfile"), "{last}");
+        assert_eq!(app.messages().iter().filter(|m| m.role == Role::User).count(), 1, "the person typed once");
+        let audit = cx.audit.recent(60).join("\n");
+        assert!(audit.contains("autopilot.start") && audit.contains("autopilot.step") && audit.contains("autopilot.stop"), "{audit}");
+        assert!(cx.services.inbox.list(&cx.session.user).iter().any(|n| n.title.contains("Autopilot finished")), "a summary item for when the person is away");
+    }
+
+    #[test]
+    fn auto_approvals_write_without_asking_say_so_in_the_audit_and_end_unless_pinned() {
+        let (cx, home) = agent_cx("ag-auto", |h| vec![turn("", vec![("w1", "write_file", json!({"path": h.join("auto.txt").display().to_string(), "content": "x"}))]), turn("Saved it.", vec![])]);
+        let target = home.join("auto.txt");
+        let mut app = ChatApp::new();
+        app.handle(&Event::Key(Key::Ctrl('g')), &cx);
+        assert_eq!(app.approvals(), Approvals::Ask);
+        app.handle(&Event::Key(Key::Ctrl('q')), &cx);
+        assert_eq!(app.approvals(), Approvals::Auto);
+        let g = render(&mut app, &cx);
+        assert!(g.hits.iter().any(|h| h.label.contains("Auto-approve safe")), "the amber chip is on screen while Auto is on");
+        ask(&mut app, &cx, "save it");
+        run_until(&mut app, &cx, |a| !a.is_running());
+        assert!(app.pending_approval().is_none());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "x", "no prompt, the file is written");
+        assert!(cx.audit.recent(40).iter().any(|l| l.contains("agent.tool") && l.contains("write_file:approved:auto-approved")));
+        // plain Auto ends with the workspace or session; the pin is remembered per person and workspace
+        app.end_auto_unless_pinned();
+        assert_eq!(app.approvals(), Approvals::Ask);
+        app.handle(&Event::Key(Key::Ctrl('q')), &cx);
+        app.handle(&Event::Key(Key::Ctrl('q')), &cx);
+        assert_eq!(app.approvals(), Approvals::Pinned);
+        app.end_auto_unless_pinned();
+        assert_eq!(app.approvals(), Approvals::Pinned);
+        assert_eq!(ChatApp::new().resumed(&cx).approvals(), Approvals::Pinned, "remembered");
+        app.handle(&Event::Key(Key::Ctrl('q')), &cx);
+        assert_eq!(app.approvals(), Approvals::Ask);
+        assert_eq!(ChatApp::new().resumed(&cx).approvals(), Approvals::Ask, "unpinned again");
+        assert!(AUTO_LIMITS.contains("Always asks") && AUTO_LIMITS.contains("vault") && AUTO_LIMITS.contains("delet"));
     }
 
     #[test]
@@ -2283,7 +4361,7 @@ mod tests {
     }
 
     #[test]
-    fn always_allow_covers_later_calls_in_the_same_run() {
+    fn allow_for_this_session_covers_later_calls_in_the_same_run() {
         let (cx, home) = agent_cx("ag4", |h| {
             vec![
                 turn("", vec![("w1", "write_file", json!({"path": h.join("a.txt").display().to_string(), "content": "A"}))]),
@@ -2298,7 +4376,7 @@ mod tests {
         app.handle(&Event::Key(Key::Ctrl('u')), &cx);
         run_until(&mut app, &cx, |a| !a.is_running());
         assert_eq!((std::fs::read_to_string(home.join("a.txt")).unwrap(), std::fs::read_to_string(home.join("b.txt")).unwrap()), ("A".to_string(), "B".to_string()), "the second write did not ask again");
-        assert!(cx.audit.recent(30).iter().any(|l| l.contains("write_file:approved:always")));
+        assert!(cx.audit.recent(30).iter().any(|l| l.contains("write_file:approved:session")));
     }
 
     #[test]
@@ -2629,6 +4707,30 @@ mod edit_mode_tests {
         assert!(!a.editor().unwrap().in_review() && !a.editor().unwrap().is_dirty());
     }
 
+    /// With the editor open beside the chat the composer and the editor take turns: one caret and one focus frame, wherever
+    /// the typing goes, and none while a dialog of the chat is open.
+    #[test]
+    fn the_composer_and_the_embedded_editor_never_show_a_caret_together() {
+        let (cx, home, _) = rig("ce-caret", &[]);
+        std::fs::write(home.join("m.rs"), "x\n").unwrap();
+        let mut a = ChatApp::new();
+        open_in_editor(&mut a, &cx, &home, "m.rs");
+        let draw = |a: &mut ChatApp, tick: u64| {
+            let mut g = Gfx::new(1280, 720);
+            crate::ui::take_carets();
+            crate::ui::take_focus_rings();
+            a.render(&mut g, R::new(0.0, 60.0, 1280.0, 660.0), 1.0, &cx, tick);
+            (crate::ui::take_carets(), crate::ui::take_focus_rings())
+        };
+        assert!(a.editor_focused());
+        assert_eq!(draw(&mut a, 1), (1, 0), "the editor has the caret, the composer is plain");
+        assert_eq!(draw(&mut a, 16), (0, 0), "blinked off");
+        key(&mut a, &cx, Key::Ctrl('t'));
+        assert!(!a.editor_focused());
+        assert_eq!(draw(&mut a, 1), (1, 1), "the composer has the caret and the frame, the editor is plain");
+        assert_eq!(draw(&mut a, 16), (0, 1), "the frame stays while the caret blinks off");
+    }
+
     #[test]
     fn typing_goes_to_whichever_side_has_focus() {
         let (cx, home, _) = rig("ce4", &[]);
@@ -2847,6 +4949,54 @@ mod edit_mode_tests {
         assert!(app.secret.is_none());
         assert_eq!(cx.services.secret_requests.wait(&id2, std::time::Duration::from_millis(20)), Some(iyakki_agent::secretreq::Outcome::Cancelled));
     }
+
+    #[test]
+    fn a_question_about_the_browser_is_an_inline_amber_block_answered_by_keys_or_clicks() {
+        use iyakki_agent::browserconsent::{Answer, ConsentKind};
+        let (cx, _d) = cx_with_backend("chatconsent", iyakki_agent::chat::Unconfigured);
+        let mut app = ChatApp::new();
+        let c = &cx.services.browser.consent;
+        // the host question: Allow / Allow for this session / Deny, in the conversation
+        let id = c.create("tester", ConsentKind::Look, "gemini.google.com", "", "", 1).unwrap();
+        app.poll(&cx);
+        let (_, tool, text, choices) = app.consent_block().expect("the question is inline");
+        assert_eq!(tool, "browser_consent");
+        assert_eq!(text, "Let the assistant look at gemini.google.com in your browser?");
+        assert_eq!(choices, "Allow\nAllow for this session\nDeny");
+        let g = render_with(&mut app, &cx, 1280, 720);
+        for want in ["Allow (Ctrl+Y)", "Allow for this session (Ctrl+U)", "Deny (Ctrl+N)"] {
+            assert!(g.hits.iter().any(|h| h.label == want), "{want} in {:?}", g.hits.iter().map(|h| h.label.clone()).collect::<Vec<_>>());
+        }
+        // typing in the message box still works while the question waits
+        app.handle(&Event::Key(Key::Char('x')), &cx);
+        assert!(app.consent.is_some());
+        // a click on a button answers it
+        let hit = g.hits.iter().find(|h| h.label == "Allow for this session (Ctrl+U)").unwrap().ev.clone();
+        app.handle(&hit, &cx);
+        assert!(app.consent.is_none());
+        assert_eq!(c.wait(&id, std::time::Duration::from_millis(20)), Some(Answer::AllowSession));
+        // keys: Ctrl+Y the first choice, Ctrl+N the last
+        let id = c.create("tester", ConsentKind::Look, "a.test", "", "", 2).unwrap();
+        app.poll(&cx);
+        app.handle(&Event::Key(Key::Ctrl('y')), &cx);
+        assert_eq!(c.wait(&id, std::time::Duration::from_millis(20)), Some(Answer::Allow));
+        let id = c.create("tester", ConsentKind::Interact, "chat.test", &iyakki_agent::browserconsent::willingness_text("chat.test", None), "", 3).unwrap();
+        app.poll(&cx);
+        let g = render_with(&mut app, &cx, 1280, 720);
+        assert!(g.hits.iter().any(|h| h.label == "Approve all actions on chat.test for this session (Ctrl+Y)") && g.hits.iter().any(|h| h.label == "Approve one by one (Ctrl+U)"));
+        app.handle(&Event::Key(Key::Ctrl('n')), &cx);
+        assert_eq!(c.wait(&id, std::time::Duration::from_millis(20)), Some(Answer::Deny));
+        // answered in the INBOX: the chat's copy goes away
+        let id2 = c.create("tester", ConsentKind::Look, "b.test", "", "", 4).unwrap();
+        app.poll(&cx);
+        assert!(app.consent.is_some());
+        c.resolve("tester", &id2, Answer::Allow).unwrap();
+        app.poll(&cx);
+        assert!(app.consent.is_none());
+        // the bell counts it
+        c.create("tester", ConsentKind::Look, "c.test", "", "", 5).unwrap();
+        assert_eq!(cx.services.browser.consent.pending("tester").len(), 1);
+    }
 }
 
 #[cfg(test)]
@@ -2856,3 +5006,31 @@ mod select_tests;
 #[cfg(test)]
 #[path = "chat_pic_tests.rs"]
 mod pic_tests;
+
+#[cfg(test)]
+#[path = "chat_assist_tests.rs"]
+mod assist_tests;
+
+#[cfg(test)]
+#[path = "chat_ask_tests.rs"]
+mod ask_tests;
+
+#[cfg(test)]
+#[path = "chat_box_tests.rs"]
+mod box_tests;
+
+#[cfg(test)]
+#[path = "chat_ext_tests.rs"]
+mod ext_tests;
+
+#[cfg(test)]
+#[path = "chat_links_tests.rs"]
+mod links_tests;
+
+#[cfg(test)]
+#[path = "chat_approval_tests.rs"]
+mod approval_tests;
+
+#[cfg(test)]
+#[path = "chat_live_mode_tests.rs"]
+mod live_mode_tests;

@@ -61,7 +61,7 @@ fn each_apps_header_carries_its_own_accent() {
     let (w, h) = (1280u32, 720u32);
     let mut g = Gfx::new(w, h);
     let mut seen: Vec<(&str, [u8; 3])> = Vec::new();
-    let hh = (46.0 * (w as f32 / 1280.0).min(h as f32 / 720.0)) as usize;
+    let hh = (46.0 * crate::shell::scale_for(w, h)) as usize;
     for app in PApp::ALL {
         assert!(sh.open_for_demo(app.id()));
         sh.render(&mut g);
@@ -112,4 +112,105 @@ fn restyled_buttons_and_dialogs_keep_their_labels_and_keys() {
     render_confirm(&mut g, R::new(0.0, 70.0, 900.0, 530.0), 1.0, "Delete?", "Delete");
     assert!(g.hits.iter().any(|h| h.label == "Delete" && h.ev == Event::Key(Key::Char('y'))));
     assert!(g.hits.iter().any(|h| h.label == "Cancel" && h.ev == Event::Key(Key::Esc)));
+}
+
+#[test]
+fn an_app_can_ask_for_data_and_back_returns_to_it() {
+    use crate::apps::{App, AppCx, Flow};
+    struct Asker(bool);
+    impl App for Asker {
+        fn title(&self) -> &'static str {
+            "Asker"
+        }
+        fn icon(&self) -> crate::gfx::Icon {
+            crate::gfx::Icon::Ide
+        }
+        fn accent(&self) -> [u8; 4] {
+            [1, 2, 3, 255]
+        }
+        fn hint(&self) -> String {
+            String::new()
+        }
+        fn handle(&mut self, _: &Event, _: &AppCx) -> Flow {
+            self.0 = true;
+            Flow::Stay
+        }
+        fn take_request(&mut self) -> Option<(String, String)> {
+            std::mem::take(&mut self.0).then(|| ("data".to_string(), "/x.csv".to_string()))
+        }
+        fn render(&mut self, _: &mut Gfx, _: crate::ui::R, _: f32, _: &AppCx, _: u64) {}
+    }
+    let mut sh = signed_in();
+    sh.show_app_for_test(Box::new(Asker(false)), PApp::Ide);
+    sh.handle(&Event::Key(Key::Char('x')));
+    assert_eq!(sh.screen_name(), "app:data", "DATA opened");
+    sh.handle(&Event::Key(Key::Esc));
+    assert_eq!(sh.screen_name(), "app:ide", "Back returns to the app that asked");
+}
+
+#[test]
+fn files_dropped_on_the_window_offer_an_import_only_in_window_mode_and_show_where_they_go() {
+    let _g = iyakki_agent::hostfiles::test_guard();
+    let base = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("iyakki-drop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("host")).unwrap();
+    std::fs::write(base.join("host/notes.txt"), "hello").unwrap();
+    let mut sh = signed_in();
+    let mut g = Gfx::new(1280, 720);
+    // not window mode: a plain sentence, no dialog
+    iyakki_agent::hostfiles::set_enabled(false);
+    sh.drop_files(vec![base.join("host/notes.txt")]);
+    sh.render(&mut g);
+    assert!(sh.toast_text().is_some_and(|t| t.contains("desktop window")), "{:?}", sh.toast_text());
+    assert!(sh.host_access_chip().is_none());
+    // window mode: the overlay while dragging, then the dialog on the drop
+    iyakki_agent::hostfiles::set_enabled(true);
+    iyakki_agent::hostfiles::set_host_home(Some(base.join("host")));
+    sh.set_drag_hover(true);
+    sh.render(&mut g);
+    let lit = |g: &Gfx| g.rgba().chunks_exact(4).step_by(41).filter(|p| p[0] > 200 && p[1] > 200).count();
+    assert!(lit(&g) > 3, "the drop overlay shows its text");
+    sh.set_drag_hover(false);
+    sh.drop_files(vec![base.join("host/notes.txt")]);
+    sh.render(&mut g);
+    assert!(sh.hits().iter().any(|h| h.label == "Cancel"), "the host-files dialog is on screen");
+    // Esc leaves it without copying anything
+    sh.handle(&Event::Key(Key::Esc));
+    sh.render(&mut g);
+    assert!(!sh.hits().iter().any(|h| h.label == "Cancel"), "Esc closed it");
+    iyakki_agent::hostfiles::set_enabled(false);
+    iyakki_agent::hostfiles::set_host_home(None);
+}
+
+#[test]
+fn drops_are_routed_by_the_app_on_screen_the_browser_refuses_and_saves_open_the_host_dialog() {
+    let _g = iyakki_agent::hostfiles::test_guard();
+    let base = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("iyakki-route-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("host")).unwrap();
+    std::fs::write(base.join("host/n.txt"), "x").unwrap();
+    iyakki_agent::hostfiles::set_enabled(true);
+    iyakki_agent::hostfiles::set_host_home(Some(base.join("host")));
+    let mut sh = signed_in();
+    let mut g = Gfx::new(1280, 720);
+    // the browser says what to do instead
+    assert!(sh.open_for_demo("browser"));
+    sh.drop_files(vec![base.join("host/n.txt")]);
+    sh.render(&mut g);
+    assert!(sh.toast_text().is_some_and(|t| t.contains("does not take dropped files") && t.contains("DATA")), "{:?}", sh.toast_text());
+    assert!(!sh.hits().iter().any(|h| h.label == "Cancel"), "no dialog for the browser");
+    // an app that wants a file saved on the host gets the save dialog
+    assert!(sh.open_for_demo("edit"));
+    sh.handle(&Event::Key(Key::Ctrl('H')));
+    sh.render(&mut g);
+    assert!(sh.hits().iter().any(|h| h.label == "Cancel"), "the host save dialog is on screen");
+    sh.handle(&Event::Key(Key::Esc));
+    // the media tile and the IDE ask for their own destinations
+    assert!(sh.open_for_demo("media"));
+    sh.drop_files(vec![base.join("host/n.txt")]);
+    sh.render(&mut g);
+    assert!(sh.hits().iter().any(|h| h.label == "Cancel"), "the import dialog opens over the media tile");
+    sh.handle(&Event::Key(Key::Esc));
+    iyakki_agent::hostfiles::set_enabled(false);
+    iyakki_agent::hostfiles::set_host_home(None);
 }

@@ -72,6 +72,14 @@ pub enum Target {
     Radio(Vec<String>),
     Backlight(String),
     Card(u32),
+    /// The private MAC address setting of one adapter.
+    Mac(String, LinkKind),
+    /// Settings -> Sound: which output IYAKKI plays on (Automatic or one device).
+    SoundChoice,
+    /// One sound output: its key (`PCH:3`) and ALSA device (`plughw:0,3`).
+    SoundOut(String, String),
+    /// IYAKKI's own volume and mute (applied in software).
+    SoftVolume,
 }
 
 /// A value the row can show as a slider.
@@ -129,17 +137,63 @@ struct Snapshot {
     bt: iyakki_devctl::Bluetooth,
     screen: iyakki_devctl::Screen,
     cards: Vec<(iyakki_devctl::Card, Option<iyakki_devctl::Volume>)>,
+    outputs: Vec<iyakki_agent::audioout::Output>,
+    /// The card whose software volume (IYAKKI's ALSA softvol) carries the IYAKKI volume.
+    soft_card: Option<u32>,
+    mac: Vec<iyakki_devctl::mac::MacInfo>,
 }
 
 pub struct DevicesPane {
     env: DeviceEnv,
     snap: Option<Snapshot>,
     at: u64,
+    /// What the private MAC address setting reads and changes.
+    mac: iyakki_devctl::mac::MacEnv,
+    /// Settings -> Sound (output choice, IYAKKI's volume), given by the Settings app.
+    sound: iyakki_agent::audioout::SoundSettings,
 }
 
 impl DevicesPane {
     pub fn new(env: DeviceEnv) -> DevicesPane {
-        DevicesPane { env, snap: None, at: 0 }
+        #[cfg(test)]
+        let mac = iyakki_devctl::mac::MacEnv { roots: env.roots.clone(), ..iyakki_devctl::mac::MacEnv::nowhere(env.ctl.clone()) };
+        #[cfg(not(test))]
+        let mac = iyakki_devctl::mac::MacEnv { ctl: env.ctl.clone(), roots: env.roots.clone(), ..iyakki_devctl::mac::MacEnv::real() };
+        DevicesPane { env, snap: None, at: 0, mac, sound: Default::default() }
+    }
+
+    /// What Settings -> Sound says now (the rows show the choice and the volume).
+    pub fn set_sound(&mut self, sound: iyakki_agent::audioout::SoundSettings) {
+        self.sound = sound;
+    }
+
+    /// Does the page look at this computer's own sound cards (not a made-up tree)?
+    pub fn real_sound(&self) -> bool {
+        self.env.roots.proc_ == std::path::Path::new("/proc")
+    }
+
+    /// The sound outputs seen at the last look.
+    pub fn outputs(&mut self, tick: u64) -> Vec<iyakki_agent::audioout::Output> {
+        self.snap(tick).outputs.clone()
+    }
+
+    /// The private MAC address settings and actions (a copy).
+    pub fn mac(&self) -> &iyakki_devctl::mac::MacEnv {
+        &self.mac
+    }
+
+    /// Replace what the private MAC address setting acts on (tests).
+    pub fn set_mac(&mut self, mac: iyakki_devctl::mac::MacEnv) {
+        self.mac = mac;
+        self.invalidate();
+    }
+
+    /// The desktop window on someone else's computer: the host operating system owns the addresses.
+    pub fn set_host_managed(&mut self, on: bool) {
+        if self.mac.host_managed != on {
+            self.mac.host_managed = on;
+            self.invalidate();
+        }
     }
 
     /// Look at the hardware again on the next [`rows`](Self::rows).
@@ -153,7 +207,10 @@ impl DevicesPane {
             let v = self.env.ctl.volume(c.index);
             (c, v)
         });
-        self.snap = Some(Snapshot { links: iyakki_devctl::links(r), ips: self.env.ctl.ipv4(), rfkill: iyakki_devctl::rfkill_list(r), bt: iyakki_devctl::bluetooth(r), screen: iyakki_devctl::screen(r), cards: cards.collect() });
+        let mac = iyakki_devctl::mac::infos(&*self.env.ctl, r, &self.mac.config());
+        let outputs = iyakki_agent::audioout::outputs_at(&r.proc_);
+        let soft_card = if self.real_sound() { iyakki_agent::audioout::global().softvol_card() } else { None };
+        self.snap = Some(Snapshot { links: iyakki_devctl::links(r), ips: self.env.ctl.ipv4(), rfkill: iyakki_devctl::rfkill_list(r), bt: iyakki_devctl::bluetooth(r), screen: iyakki_devctl::screen(r), cards: cards.collect(), outputs, soft_card, mac });
         self.at = tick;
     }
 
@@ -165,12 +222,14 @@ impl DevicesPane {
     }
 
     pub fn rows(&mut self, tab: DevTab, tick: u64) -> Vec<DevRow> {
+        let host = self.mac.host_managed;
+        let sound = self.sound.clone();
         let s = self.snap(tick);
         match tab {
-            DevTab::Network => network_rows(s),
+            DevTab::Network => network_rows(s, host),
             DevTab::Bluetooth => bluetooth_rows(s),
             DevTab::Display => display_rows(s),
-            DevTab::Sound => sound_rows(s),
+            DevTab::Sound => sound_rows(s, &sound),
         }
     }
 
@@ -232,28 +291,51 @@ impl DevicesPane {
 
     fn toggle_link(&mut self, name: &str, row: &DevRow) -> Done {
         let on = row.chips.iter().any(|c| c.0 == "ON");
+        // switching on is a new connection: the private address (if chosen) is set while the link is still down
+        let note = if on { String::new() } else { self.private_address_note(name) };
         let r = if on { self.env.ctl.set_link(name, false) } else { self.env.ctl.set_link(name, true).and_then(|_| self.env.ctl.dhcp(name)) };
         match r {
-            Ok(()) => Done { result: Ok(format!("Ethernet {name} turned {}.", if on { "off" } else { "on" })), audit: format!("ethernet {name} {}", if on { "off" } else { "on" }) },
+            Ok(()) => Done { result: Ok(format!("Ethernet {name} turned {}.{note}", if on { "off" } else { "on" })), audit: format!("ethernet {name} {}", if on { "off" } else { "on" }) },
             Err(e) => Done { result: Err(e), audit: String::new() },
         }
     }
 
     fn toggle_wifi(&mut self, name: &str, ids: &[String], row: &DevRow) -> Done {
         let on = row.chips.iter().any(|c| c.0 == "ON");
+        let mut note = String::new();
         let res = (|| -> Result<(), String> {
             if on {
                 self.env.ctl.set_link(name, false)?;
                 ids.iter().try_for_each(|id| iyakki_devctl::rfkill_set(&self.env.roots, id, true))
             } else {
                 ids.iter().try_for_each(|id| iyakki_devctl::rfkill_set(&self.env.roots, id, false))?;
+                note = self.private_address_note(name);
                 self.env.ctl.set_link(name, true)?;
                 self.env.ctl.dhcp(name)
             }
         })();
         match res {
-            Ok(()) => Done { result: Ok(format!("WiFi {name} turned {}.", if on { "off" } else { "on" })), audit: format!("wifi {name} {}", if on { "off" } else { "on" }) },
+            Ok(()) => Done { result: Ok(format!("WiFi {name} turned {}.{note}", if on { "off" } else { "on" })), audit: format!("wifi {name} {}", if on { "off" } else { "on" }) },
             Err(e) => Done { result: Err(e), audit: String::new() },
+        }
+    }
+
+    /// Give the adapter its private address (when the setting calls for one) before it is switched on. A failure is said, never
+    /// fatal: the adapter then keeps its hardware address.
+    fn private_address_note(&self, name: &str) -> String {
+        if self.mac.host_managed {
+            return String::new();
+        }
+        let cfg = self.mac.config();
+        let kind = iyakki_devctl::links(&self.env.roots).into_iter().find(|l| l.name == name).map(|l| l.kind);
+        let Some(kind) = kind else { return String::new() };
+        let ssid = if kind == LinkKind::Wifi { self.mac.preferred_ssid() } else { None };
+        if !cfg.mode_for(kind, name, ssid.as_deref()).is_private() {
+            return String::new();
+        }
+        match self.mac.apply_now(name, ssid.as_deref(), true) {
+            Ok(m) => format!(" {m}"),
+            Err(e) => format!(" Private MAC address not applied ({e}); the hardware address is used."),
         }
     }
 
@@ -272,7 +354,22 @@ fn onoff(on: bool) -> (&'static str, [u8; 4]) {
     if on { ("ON", OK) } else { ("OFF", DIM) }
 }
 
-fn network_rows(s: &Snapshot) -> Vec<DevRow> {
+/// The private MAC address row of one adapter: what is chosen, the hardware address, the one in use now.
+fn mac_row(i: &iyakki_devctl::mac::MacInfo, host: bool) -> DevRow {
+    let now = format!("now {}{}", i.current, if i.locally_administered { " · locally administered" } else { "" });
+    if host {
+        return DevRow::new(format!("Private MAC · {}", i.iface), format!("{now} · managed by the host operating system"), Target::Nothing).chip("host", DIM);
+    }
+    let sub = format!("{} · hardware {} · {now}", i.mode.key(), i.permanent.as_deref().unwrap_or("unknown"));
+    let (label, col) = match i.mode {
+        iyakki_devctl::mac::MacMode::Off => ("MAC OFF", DIM),
+        iyakki_devctl::mac::MacMode::PerNetwork => ("PER NETWORK", OK),
+        iyakki_devctl::mac::MacMode::Random => ("RANDOM", OK),
+    };
+    DevRow::new(format!("Private MAC · {}", i.iface), sub, Target::Mac(i.iface.clone(), i.kind)).chip(label, col).chip(if i.private { "private" } else { "hardware" }, if i.private { OK } else { DIM })
+}
+
+fn network_rows(s: &Snapshot, host: bool) -> Vec<DevRow> {
     let mut rows = Vec::new();
     let ip_of = |n: &str| s.ips.iter().find(|(i, _)| i == n).map(|(_, a)| a.clone());
     let eth: Vec<_> = s.links.iter().filter(|l| l.kind == LinkKind::Ethernet).collect();
@@ -303,6 +400,8 @@ fn network_rows(s: &Snapshot) -> Vec<DevRow> {
         let sub = if s.rfkill.iter().any(|k| k.kind == "wlan") { "a radio is present but has no driver loaded (it may need firmware)" } else { "no adapter detected, so WiFi stays disabled" };
         rows.push(DevRow::new("WiFi", sub, Target::Nothing).chip("not found", DIM));
     }
+    // the private MAC address of each adapter, after the adapters themselves
+    rows.extend(s.mac.iter().map(|i| mac_row(i, host)));
     rows
 }
 
@@ -315,6 +414,10 @@ fn bluetooth_rows(s: &Snapshot) -> Vec<DevRow> {
         let mut row = DevRow::new(format!("Bluetooth · {}", if k.name.is_empty() { &k.id } else { &k.name }), state, if k.hard { Target::Nothing } else { Target::Radio(vec![k.id.clone()]) }).chip(t, c);
         if k.hard {
             row = row.chip("hardware off", WARN);
+        } else if on && !s.bt.unstarted.is_empty() {
+            // the kernel made hci0 but the controller never answered, so nothing can scan or pair
+            row.sub = "the controller did not start (no address): firmware or UART problem, see TROUBLESHOOTING".into();
+            row = row.chip("no answer", WARN);
         }
         rows.push(row);
     }
@@ -364,26 +467,77 @@ fn display_rows(s: &Snapshot) -> Vec<DevRow> {
     rows
 }
 
-fn sound_rows(s: &Snapshot) -> Vec<DevRow> {
+fn sound_rows(s: &Snapshot, prefs: &iyakki_agent::audioout::SoundSettings) -> Vec<DevRow> {
+    use iyakki_agent::audioout::{choose, Kind};
+    if s.cards.is_empty() && s.outputs.is_empty() {
+        return vec![DevRow::new("Sound", format!("no sound card detected · {}", iyakki_agent::audioout::NO_OUTPUT), Target::Nothing).chip("not found", DIM)];
+    }
     let mut rows = Vec::new();
-    for (c, v) in &s.cards {
-        let title = if c.long_name.is_empty() { c.name.clone() } else { c.long_name.clone() };
-        let (sub, chip) = match v {
-            Some(v) if v.muted => (format!("{} · muted", v.control), ("muted".to_string(), WARN)),
-            Some(v) => (format!("{} volume", v.control), (format!("{}%", v.percent), OK)),
-            None => ("no volume control on this card".to_string(), ("no mixer".to_string(), DIM)),
-        };
-        let target = if v.is_some() { Target::Card(c.index) } else { Target::Nothing };
-        let mut row = DevRow::new(format!("Sound · {title}"), sub, target).chip(chip.0, chip.1);
-        if let Some(v) = v {
-            row = row.with_slider(SliderVal { value: v.percent as i64, min: 0, max: 100, step: 5, unit: "%" });
+    // which output IYAKKI plays on, and why
+    let choice = choose(&s.outputs, &prefs.output);
+    let mode = if choice.chosen {
+        "chosen"
+    } else if !prefs.output.is_empty() {
+        "Automatic (chosen one missing)"
+    } else {
+        "Automatic"
+    };
+    let (sub, chip) = match &choice.output {
+        Some(o) => (format!("playing on {} · {}", o.label(), choice.reason), (if choice.chosen { "CHOSEN" } else { "AUTO" }, OK)),
+        None => (choice.reason.clone(), ("NO OUTPUT", WARN)),
+    };
+    rows.push(DevRow::new(format!("Sound output · {mode}"), sub, Target::SoundChoice).chip(chip.0, chip.1));
+    // IYAKKI's own volume: a software volume on the output (ALSA softvol) when it has no hardware volume, else applied to
+    // the sound IYAKKI plays
+    let hdmi = choice.output.as_ref().is_some_and(|o| o.kind == Kind::Hdmi);
+    let help = if s.soft_card.is_some() {
+        "This output has no hardware volume: IYAKKI gives it a software volume (ALSA softvol) that every program follows, media players included."
+    } else if hdmi {
+        "Volume is applied by IYAKKI for HDMI (HDMI has no hardware volume): radio, media, reading aloud and sounds."
+    } else {
+        "Applied by IYAKKI to the radio, media, reading aloud and sounds."
+    };
+    let mut vol = DevRow::new("IYAKKI volume", help, Target::SoftVolume).with_slider(SliderVal { value: prefs.volume_pct as i64, min: 0, max: 100, step: 5, unit: "%" });
+    vol = if prefs.muted { vol.chip("muted", WARN) } else { vol.chip(format!("{}%", prefs.volume_pct), OK) };
+    rows.push(vol);
+    for o in &s.outputs {
+        let active = choice.output.as_ref().is_some_and(|a| a.key() == o.key());
+        let mut row = DevRow::new(o.label(), format!("card {} · device {} · {} · {}", o.card, o.device, o.alsa(), o.state()), Target::SoundOut(o.key(), o.alsa()));
+        if active {
+            row = row.chip("IN USE", OK);
+        } else if o.connected == Some(true) {
+            row = row.chip("connected", OK);
+        } else if o.connected == Some(false) {
+            row = row.chip(if o.kind == Kind::Hdmi { "no monitor" } else { "unplugged" }, DIM);
         }
         rows.push(row);
     }
-    if rows.is_empty() {
-        rows.push(DevRow::new("Sound", "no sound card detected", Target::Nothing).chip("not found", DIM));
+    for (c, v) in &s.cards {
+        rows.push(card_row(c, v.as_ref(), s.soft_card, prefs));
     }
     rows
+}
+
+/// One card's mixer row. The card that carries IYAKKI's software volume (its only control is IYAKKI's softvol) moves the
+/// IYAKKI volume, so the two never disagree and mute keeps the level to come back to.
+fn card_row(c: &iyakki_devctl::Card, v: Option<&iyakki_devctl::Volume>, soft_card: Option<u32>, prefs: &iyakki_agent::audioout::SoundSettings) -> DevRow {
+    let title = if c.long_name.is_empty() { c.name.clone() } else { c.long_name.clone() };
+    let soft = soft_card == Some(c.index) && v.is_none_or(|v| v.control == iyakki_agent::softvol::CONTROL);
+    if soft {
+        let row = DevRow::new(format!("Sound · {title}"), "no hardware volume · IYAKKI's software volume (the IYAKKI volume above)", Target::SoftVolume).with_slider(SliderVal { value: prefs.volume_pct as i64, min: 0, max: 100, step: 5, unit: "%" });
+        return if prefs.muted { row.chip("muted", WARN) } else { row.chip(format!("{}%", prefs.volume_pct), OK) };
+    }
+    let (sub, chip) = match v {
+        Some(v) if v.muted => (format!("{} · muted", v.control), ("muted".to_string(), WARN)),
+        Some(v) => (format!("{} volume", v.control), (format!("{}%", v.percent), OK)),
+        None => ("no volume control on this card".to_string(), ("no mixer".to_string(), DIM)),
+    };
+    let target = if v.is_some() { Target::Card(c.index) } else { Target::Nothing };
+    let mut row = DevRow::new(format!("Sound · {title}"), sub, target).chip(chip.0, chip.1);
+    if let Some(v) = v {
+        row = row.with_slider(SliderVal { value: v.percent as i64, min: 0, max: 100, step: 5, unit: "%" });
+    }
+    row
 }
 
 #[cfg(test)]
@@ -506,7 +660,8 @@ mod tests {
     fn ethernet_and_wifi_rows_show_their_state() {
         let (mut p, _, _) = pane("net", true, Arc::new(Fake::default()));
         let rows = p.rows(DevTab::Network, 0);
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 4, "the two adapters, then the private MAC address row of each");
+        assert!(rows[2].title.contains("Private MAC") && rows[2].title.contains("eno1") && matches!(rows[2].target, Target::Mac(..)) && rows[3].title.contains("wlan0"), "{:?}", rows);
         assert!(rows[0].title.contains("eno1") && rows[0].sub.contains("192.168.1.9") && rows[0].sub.contains("1000 Mb/s"), "{:?}", rows[0]);
         assert_eq!(rows[0].chips[0].0, "ON");
         assert!(rows[1].title.contains("wlan0") && rows[1].sub.contains("not connected"), "{:?}", rows[1]);
@@ -538,7 +693,9 @@ mod tests {
         let rows = p.rows(DevTab::Network, 1);
         assert_eq!(rows[1].chips[0].0, "OFF");
         let d = p.act(DevTab::Network, 1, &Key::Enter, 1).unwrap();
-        assert_eq!(d.result.unwrap(), "WiFi wlan0 turned on.");
+        let said = d.result.unwrap();
+        // WiFi is private per network by default; this stand-in driver cannot change an address, which is said, not fatal
+        assert!(said.starts_with("WiFi wlan0 turned on.") && said.contains("Private MAC address not applied") && said.contains("hardware address is used"), "{said}");
         assert!(!iyakki_devctl::rfkill_list(&roots).iter().find(|k| k.kind == "wlan").unwrap().soft, "radio free again");
         assert!(fake.calls.lock().unwrap().contains(&"dhcp wlan0".to_string()));
     }
@@ -603,20 +760,44 @@ mod tests {
         *fake.volume.lock().unwrap() = Some(iyakki_devctl::Volume { control: "Master".into(), percent: 50, muted: false });
         let (mut p, _, fake) = pane("snd", true, fake);
         let rows = p.rows(DevTab::Sound, 0);
-        assert_eq!(rows.len(), 1);
-        assert!(rows[0].title.contains("HDA Intel PCH") && rows[0].chips[0].0 == "50%");
-        assert_eq!(p.act(DevTab::Sound, 0, &Key::Char('+'), 0).unwrap().result.unwrap(), "Volume 55%.");
-        assert_eq!(p.act(DevTab::Sound, 0, &Key::Char('-'), 1).unwrap().result.unwrap(), "Volume 50%.");
-        assert_eq!(p.act(DevTab::Sound, 0, &Key::Char('m'), 2).unwrap().result.unwrap(), "Muted.");
-        assert_eq!(p.rows(DevTab::Sound, 3)[0].chips[0].0, "muted");
+        assert_eq!(rows.len(), 3, "the output, IYAKKI's volume, the card: {rows:?}");
+        let c = rows.iter().position(|r| matches!(r.target, Target::Card(0))).unwrap();
+        assert!(rows[c].title.contains("HDA Intel PCH") && rows[c].chips[0].0 == "50%");
+        assert_eq!(p.act(DevTab::Sound, c, &Key::Char('+'), 0).unwrap().result.unwrap(), "Volume 55%.");
+        assert_eq!(p.act(DevTab::Sound, c, &Key::Char('-'), 1).unwrap().result.unwrap(), "Volume 50%.");
+        assert_eq!(p.act(DevTab::Sound, c, &Key::Char('m'), 2).unwrap().result.unwrap(), "Muted.");
+        assert_eq!(p.rows(DevTab::Sound, 3)[c].chips[0].0, "muted");
         assert_eq!(fake.calls.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn the_card_carrying_iyakkis_software_volume_moves_the_iyakki_volume_and_others_keep_their_mixer() {
+        let t2 = iyakki_devctl::Card { index: 1, name: "AppleT2x1".into(), long_name: "Apple T2 Audio".into() };
+        let prefs = iyakki_agent::audioout::SoundSettings { volume_pct: 35, ..Default::default() };
+        let soft = iyakki_devctl::Volume { control: iyakki_agent::softvol::CONTROL.into(), percent: 35, muted: false };
+        // the Mac mini 2018's T2 card: its only control is the softvol, so the row is the IYAKKI volume (mute keeps the level)
+        for v in [Some(&soft), None] {
+            let r = card_row(&t2, v, Some(1), &prefs);
+            assert!(matches!(r.target, Target::SoftVolume) && r.sub.contains("software volume"), "{r:?}");
+            assert_eq!(r.slider.unwrap().value, 35);
+            assert_eq!(r.chips[0].0, "35%");
+        }
+        let muted = iyakki_agent::audioout::SoundSettings { muted: true, ..prefs.clone() };
+        assert_eq!(card_row(&t2, Some(&soft), Some(1), &muted).chips[0].0, "muted");
+        // another card, or a card with a hardware control, keeps its own mixer
+        let pch = iyakki_devctl::Card { index: 0, name: "HDA-Intel".into(), long_name: "HDA Intel PCH".into() };
+        assert!(matches!(card_row(&pch, None, Some(1), &prefs).target, Target::Nothing));
+        let master = iyakki_devctl::Volume { control: "Master".into(), percent: 70, muted: false };
+        assert!(matches!(card_row(&pch, Some(&master), Some(0), &prefs).target, Target::Card(0)), "a hardware Master stays the card's own");
+        assert!(matches!(card_row(&t2, Some(&soft), None, &prefs).target, Target::Card(1)), "without IYAKKI's softvol in use the control is a plain mixer");
     }
 
     #[test]
     fn a_card_without_a_mixer_is_listed_but_not_adjustable() {
         let (mut p, _, _) = pane("nomix", true, Arc::new(Fake::default()));
         let rows = p.rows(DevTab::Sound, 0);
-        assert!(!rows[0].actionable() && rows[0].sub.contains("no volume control"));
+        let c = rows.iter().position(|r| r.title.contains("HDA Intel PCH")).unwrap();
+        assert!(!rows[c].actionable() && rows[c].sub.contains("no volume control"));
     }
 
     #[test]
@@ -641,12 +822,14 @@ mod tests {
         assert_eq!(p.set_value(DevTab::Display, bl, 0, 1).unwrap().result.unwrap(), "Brightness 5%.", "the lowest brightness is the floor");
         assert!(p.set_value(DevTab::Display, 0, 50, 2).is_none(), "the screen row has no slider");
         let rows = p.rows(DevTab::Sound, 3);
-        assert_eq!(rows[0].slider, Some(SliderVal { value: 50, min: 0, max: 100, step: 5, unit: "%" }));
-        assert_eq!(p.set_value(DevTab::Sound, 0, 30, 4).unwrap().result.unwrap(), "Volume 30%.");
-        assert_eq!(p.set_value(DevTab::Sound, 0, 999, 5).unwrap().result.unwrap(), "Volume 100%.", "values are kept in range");
+        let c = rows.iter().position(|r| matches!(r.target, Target::Card(0))).unwrap();
+        assert_eq!(rows[c].slider, Some(SliderVal { value: 50, min: 0, max: 100, step: 5, unit: "%" }));
+        assert_eq!(p.set_value(DevTab::Sound, c, 30, 4).unwrap().result.unwrap(), "Volume 30%.");
+        assert_eq!(p.set_value(DevTab::Sound, c, 999, 5).unwrap().result.unwrap(), "Volume 100%.", "values are kept in range");
         assert!(fake.calls.lock().unwrap().contains(&"set volume 0 30".to_string()));
         // a card without a mixer has no slider
         let (mut q, _, _) = pane("nomixer2", true, Arc::new(Fake::default()));
-        assert!(q.rows(DevTab::Sound, 0)[0].slider.is_none());
+        let rows = q.rows(DevTab::Sound, 0);
+        assert!(rows.iter().find(|r| r.title.contains("HDA Intel PCH")).unwrap().slider.is_none());
     }
 }

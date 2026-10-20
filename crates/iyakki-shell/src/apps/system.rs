@@ -69,6 +69,10 @@ pub struct SystemApp {
     proc_cpu: HashMap<u32, f32>,
     /// Bytes per second received and sent, summed over the interfaces.
     net_rate: (f64, f64),
+    /// "MAC: aa:bb:cc:dd:ee:ff (private)" for the adapter in use, read with the other figures.
+    mac_line: Option<String>,
+    /// Where sound plays and why (Settings -> Sound), read with the other figures.
+    sound_line: String,
     sort: Sort,
     sel: [usize; 4],
     /// The hardware page, read when it is opened or refreshed.
@@ -77,6 +81,9 @@ pub struct SystemApp {
     status: Option<(String, bool)>,
     live: Vec<LiveRun>,
     last_refresh: Option<Instant>,
+    /// The dev cluster's service log (View logs), selectable text.
+    cluster_log: Option<crate::apps::ScrollLog>,
+    health_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SystemApp {
@@ -85,7 +92,7 @@ impl SystemApp {
     }
 
     pub fn with_roots(roots: SysRoots, data_dir: std::path::PathBuf) -> SystemApp {
-        SystemApp { page: Page::Overview, roots, data_dir, prev: None, cur: None, history: Vec::new(), proc_cpu: HashMap::new(), net_rate: (0.0, 0.0), sort: Sort::Cpu, sel: [0; 4], hardware: Vec::new(), confirm: None, status: None, live: Vec::new(), last_refresh: None }
+        SystemApp { page: Page::Overview, roots, data_dir, prev: None, cur: None, history: Vec::new(), proc_cpu: HashMap::new(), net_rate: (0.0, 0.0), mac_line: None, sound_line: String::new(), sort: Sort::Cpu, sel: [0; 4], hardware: Vec::new(), confirm: None, status: None, live: Vec::new(), last_refresh: None, cluster_log: None, health_busy: Default::default() }
     }
 
     pub fn page(&self) -> Page {
@@ -117,8 +124,20 @@ impl SystemApp {
             self.prev = Some(cur);
         }
         self.cur = Some(sample);
+        self.mac_line = iyakki_devctl::mac::summary_line(&iyakki_devctl::Roots { sys: self.roots.sys.clone(), proc_: self.roots.proc.clone() });
+        self.sound_line = iyakki_agent::audioout::summary_at(&self.roots.proc);
         self.live = cx.services.runs.live().into_iter().filter(|r| Self::is_admin(cx) || r.user == cx.session.user).collect();
         self.last_refresh = Some(now);
+        // the dev cluster's health is read in the background every 15 s while it runs (a few kubectl calls)
+        let k = &cx.services.k3sdev;
+        let h = k.health();
+        if h.installed && !matches!(h.state.as_str(), "stopped" | "not installed") && h.checked_at < iyakki_agent::clock::now_unix() - 15 && !self.health_busy.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let (k, busy) = (k.clone(), self.health_busy.clone());
+            std::thread::spawn(move || {
+                k.refresh_health();
+                busy.store(false, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
     }
 
     /// The processes in the order chosen.
@@ -204,6 +223,20 @@ impl SystemApp {
         }
     }
 
+    /// The service log of the dev cluster (the end of it), as selectable text.
+    fn open_cluster_log(&mut self, cx: &AppCx) {
+        let t = cx.services.k3sdev.log_tail(400);
+        let mut l = crate::apps::ScrollLog::default();
+        if t.trim().is_empty() {
+            l.push("The log is empty.", DIM);
+        }
+        for line in t.lines() {
+            l.push(line, if line.contains("level=error") || line.contains("Failed") || line.contains("error") { ERR } else { [0, 0, 0, 0] });
+        }
+        cx.audit.record(&cx.session.user, "devcluster.logs", "");
+        self.cluster_log = Some(l);
+    }
+
     fn stop_selected_agent(&mut self, cx: &AppCx) {
         let Some(r) = self.live.get(self.sel[2]).cloned() else { return };
         if !Self::is_admin(cx) && r.user != cx.session.user {
@@ -240,7 +273,7 @@ impl App for SystemApp {
     }
     fn hint(&self) -> String {
         match self.page {
-            Page::Overview => "Tab or 1-3 pages · figures update every second · Esc back".into(),
+            Page::Overview => "Tab or 1-3 pages · figures update every second · l the dev cluster's log · Esc back".into(),
             Page::Processes => "↑↓ choose · c m p n sort · k stop it · K kill it · Tab next page · Esc back".into(),
             Page::Agents => "↑↓ choose · x stop this run · X stop all · Tab next page · Esc back".into(),
             Page::Hardware => "↑↓ PgUp PgDn scroll · r read again · Tab next page · Esc back".into(),
@@ -250,6 +283,7 @@ impl App for SystemApp {
         [
             "Tab / Shift+Tab · next or earlier page (Overview, Processes, Agents, Hardware)",
             "Overview · processor, memory, load, disks, network and heat, updated every second",
+            "l · on the Overview, the dev cluster's service log (administrators, when IYAKKI installed a cluster here)",
             "Processes (administrators) · Up / Down choose, c m p n sort by processor, memory, number or name",
             "k · ask the chosen process to stop (SIGTERM)    K · kill it (SIGKILL)    Enter confirms, Esc cancels",
             "Agents · every assistant run going on now, with what it waits for",
@@ -266,6 +300,21 @@ impl App for SystemApp {
         if matches!(ev, Event::Tick) {
             if self.last_refresh.is_none_or(|t| t.elapsed() >= Duration::from_millis(1000)) {
                 self.refresh(cx);
+            }
+            return Flow::Stay;
+        }
+        // the cluster's log: select with the mouse, scroll, Esc closes
+        if let Some(l) = self.cluster_log.as_mut() {
+            match ev {
+                Event::Key(Key::Esc) | Event::Key(Key::Enter) | Event::Tab(92) => self.cluster_log = None,
+                Event::Key(Key::Up) => l.scroll_by(1),
+                Event::Key(Key::Down) => l.scroll_by(-1),
+                Event::Key(Key::PageUp) => l.scroll_by(10),
+                Event::Key(Key::PageDown) => l.scroll_by(-10),
+                Event::Scroll(d) => l.scroll_by(*d * 3),
+                other => {
+                    l.handle(other);
+                }
             }
             return Flow::Stay;
         }
@@ -316,6 +365,7 @@ impl App for SystemApp {
             Event::Key(Key::Char('k')) if self.page == Page::Processes && Self::is_admin(cx) => self.ask_signal(false),
             Event::Key(Key::Char('K')) if self.page == Page::Processes && Self::is_admin(cx) => self.ask_signal(true),
             Event::Key(Key::Char('r')) if self.page == Page::Hardware => self.hardware = hardware_lines(&self.roots),
+            Event::Key(Key::Char('l')) | Event::Tab(93) if self.page == Page::Overview && Self::is_admin(cx) && cx.services.k3sdev.installed().is_some() => self.open_cluster_log(cx),
             Event::Key(Key::Char('x')) if self.page == Page::Agents => self.stop_selected_agent(cx),
             Event::Key(Key::Char('X')) if self.page == Page::Agents => {
                 if self.live.is_empty() {
@@ -367,6 +417,13 @@ impl App for SystemApp {
         if let Some((t, ok)) = &self.status {
             crate::fx::status_line(g, x, area.y + area.h - 26.0 * s, w, s, t, *ok);
         }
+        if let Some(l) = self.cluster_log.as_mut() {
+            let p = crate::fx::modal(g, area, s, 900.0 * s, area.h - 24.0 * s, ACCENT, false);
+            let y0 = crate::fx::modal_title(g, p, s, "The dev cluster's log (select with the mouse, Ctrl+C copies)", ACCENT);
+            let bh = 13.0 * s * 2.1;
+            l.render(g, R::new(p.x + 24.0 * s, y0 + 4.0 * s, p.w - 48.0 * s, (p.y + p.h - y0 - bh - 40.0 * s).max(40.0 * s)), 13.0 * s, Face::Mono);
+            g.button(p.x + 24.0 * s, p.y + p.h - bh - 16.0 * s, 13.0 * s, "Close", MUTED, Event::Tab(92));
+        }
         if let Some(c) = &self.confirm {
             let text = match c {
                 Confirm::Signal { pid, name, hard } => format!("{} {name} (process {pid})?", if *hard { "Kill" } else { "Ask to stop" }),
@@ -412,17 +469,27 @@ impl SystemApp {
         let frac = if m.total == 0 { 0.0 } else { m.used() as f32 / m.total as f32 };
         g.text(c.x + 14.0 * s, c.y + 26.0 * s, 24.0 * s, heat(frac * 100.0), &format!("{:.0}%", frac * 100.0), Face::Bold);
         g.text(c.x + 14.0 * s + 78.0 * s, c.y + 34.0 * s, 13.0 * s, MUTED, &format!("{} of {}", sysinfo::human_bytes(m.used()), sysinfo::human_bytes(m.total)), Face::Sans);
-        bar(g, R::new(c.x + 14.0 * s, c.y + 68.0 * s, c.w - 28.0 * s, 10.0 * s), frac, heat(frac * 100.0), s);
+        bar(g, R::new(c.x + 14.0 * s, c.y + 62.0 * s, c.w - 28.0 * s, 10.0 * s), frac, heat(frac * 100.0), s);
         if m.swap_total > 0 {
             let used = m.swap_total.saturating_sub(m.swap_free);
-            g.text(c.x + 14.0 * s, c.y + 86.0 * s, 12.0 * s, DIM, &format!("swap {} of {}", sysinfo::human_bytes(used), sysinfo::human_bytes(m.swap_total)), Face::Sans);
+            g.text(c.x + 14.0 * s, c.y + 76.0 * s, 12.0 * s, DIM, &format!("swap {} of {}", sysinfo::human_bytes(used), sysinfo::human_bytes(m.swap_total)), Face::Sans);
         } else {
-            g.text(c.x + 14.0 * s, c.y + 86.0 * s, 12.0 * s, DIM, "no swap", Face::Sans);
+            g.text(c.x + 14.0 * s, c.y + 76.0 * s, 12.0 * s, DIM, "no swap", Face::Sans);
         }
+        let zram = memory_extra_line(&iyakki_zram::MemStats::read(&iyakki_zram::Env { proc: self.roots.proc.clone(), sys: self.roots.sys.clone(), dev: "/dev".into() }));
+        let zram = g.fit(12.0 * s, &zram, Face::Sans, c.w - 28.0 * s);
+        g.text(c.x + 14.0 * s, c.y + 92.0 * s, 12.0 * s, DIM, &zram, Face::Sans);
         // load, uptime, heat
         let c = R::new(a.x + 2.0 * (card_w + 12.0 * s), a.y, card_w, ch);
         crate::fx::glass(g, c.x, c.y, c.w, c.h, 12.0 * s, ACCENT);
         g.text(c.x + 14.0 * s, c.y + 9.0 * s, 11.0 * s, DIM, "LOAD AND UPTIME", Face::Bold);
+        if iyakki_agent::flows::FlowEnv::scheduler_running(&cx.services, &cx.session.user) {
+            let t = "flows scheduler running";
+            let w = g.text_width(10.5 * s, t, Face::Sans);
+            if w + 150.0 * s < c.w {
+                g.text(c.x + c.w - w - 12.0 * s, c.y + 10.0 * s, 10.5 * s, crate::ui::OK, t, Face::Sans);
+            }
+        }
         g.text(c.x + 14.0 * s, c.y + 26.0 * s, 24.0 * s, TEXT, &format!("{l1:.2}"), Face::Bold);
         g.text(c.x + 14.0 * s + 78.0 * s, c.y + 34.0 * s, 13.0 * s, MUTED, &format!("{l5:.2} · {l15:.2} (5 and 15 min)"), Face::Sans);
         g.text(c.x + 14.0 * s, c.y + 66.0 * s, 14.0 * s, TEXT, &format!("up {}", sysinfo::human_duration(sysinfo::uptime_secs(&self.roots))), Face::Sans);
@@ -450,14 +517,71 @@ impl SystemApp {
         }
         let (rx, tx) = self.net_rate;
         g.text(a.x, y, 14.0 * s, TEXT, "Network", Face::Bold);
-        g.text(a.x + 130.0 * s, y, 14.0 * s, MUTED, &format!("↓ {}/s    ↑ {}/s", sysinfo::human_bytes(rx as u64), sysinfo::human_bytes(tx as u64)), Face::Sans);
+        let rates = format!("↓ {}/s    ↑ {}/s", sysinfo::human_bytes(rx as u64), sysinfo::human_bytes(tx as u64));
+        g.text(a.x + 130.0 * s, y, 14.0 * s, MUTED, &rates, Face::Sans);
+        if let Some(m) = &self.mac_line {
+            // after the rates, when it fits
+            let x = a.x + 130.0 * s + g.text_width(14.0 * s, &rates, Face::Sans) + 24.0 * s;
+            let room = a.x + a.w - x;
+            if room > 120.0 * s {
+                let t = g.fit(13.0 * s, m, Face::Sans, room);
+                g.text(x, y, 13.0 * s, DIM, &t, Face::Sans);
+            }
+        }
         y += 28.0 * s;
+        g.text(a.x, y, 14.0 * s, TEXT, "Host name", Face::Bold);
+        g.text(a.x + 130.0 * s, y, 14.0 * s, MUTED, &crate::hostname::current("iyakki"), Face::Sans);
+        y += 28.0 * s;
+        if !self.sound_line.is_empty() {
+            g.text(a.x, y, 14.0 * s, TEXT, "Sound", Face::Bold);
+            let t = g.fit(13.0 * s, &self.sound_line, Face::Sans, a.w - 130.0 * s);
+            g.text(a.x + 130.0 * s, y, 13.0 * s, if self.sound_line.starts_with("no sound output") { AMBER } else { MUTED }, &t, Face::Sans);
+            y += 28.0 * s;
+        }
         let working = self.live.len();
         let waiting: usize = self.live.iter().map(|r| r.pending).sum();
         g.text(a.x, y, 14.0 * s, TEXT, "Agents", Face::Bold);
         let txt = if working == 0 { "none running".to_string() } else { format!("{working} running{}", if waiting > 0 { format!(", {waiting} waiting for an answer") } else { String::new() }) };
         g.text(a.x + 130.0 * s, y, 14.0 * s, if waiting > 0 { AMBER } else { MUTED }, &txt, Face::Sans);
-        let _ = cx;
+        // About: the version and, on an installed image, what /etc/iyakki-release says
+        y += 28.0 * s;
+        g.text(a.x, y, 14.0 * s, TEXT, "About", Face::Bold);
+        let about = g.fit(13.0 * s, iyakki_agent::relinfo::machine_about(), Face::Sans, a.w - 130.0 * s);
+        g.text(a.x + 130.0 * s, y, 13.0 * s, MUTED, &about, Face::Sans);
+        // the dev cluster IYAKKI manages on this machine
+        let h = cx.services.k3sdev.health();
+        if h.installed {
+            y += 28.0 * s;
+            g.text(a.x, y, 14.0 * s, TEXT, "Cluster", Face::Bold);
+            let col = match h.state.as_str() {
+                "running" => ACCENT,
+                "failed" => ERR,
+                "stopped" => DIM,
+                _ => AMBER,
+            };
+            let line = g.fit(14.0 * s, &h.line(), Face::Sans, a.w - 130.0 * s - 120.0 * s);
+            g.text(a.x + 130.0 * s, y, 14.0 * s, col, &line, Face::Sans);
+            if Self::is_admin(cx) {
+                g.button(a.x + a.w - 110.0 * s, y - 6.0 * s, 13.0 * s, "View logs", ACCENT, Event::Tab(93));
+            }
+            y += 24.0 * s;
+            let mut d: Vec<String> = Vec::new();
+            if let Some(b) = h.data_bytes {
+                d.push(format!("data {}", sysinfo::human_bytes(b)));
+            }
+            if let Some(p) = h.disk_pct {
+                d.push(format!("disk {p}% full"));
+            }
+            if !h.failed_reason.is_empty() {
+                d.push(h.failed_reason.clone());
+            } else if h.restarts > 0 {
+                d.push(format!("restarted {}x, last: {}", h.restarts, h.last_restart_reason));
+            }
+            if !d.is_empty() {
+                let t = g.fit(13.0 * s, &d.join(" · "), Face::Sans, a.w - 130.0 * s);
+                g.text(a.x + 130.0 * s, y, 13.0 * s, if h.disk_pct.is_some_and(|p| p >= 85) || !h.failed_reason.is_empty() { ERR } else { MUTED }, &t, Face::Sans);
+            }
+        }
     }
 
     fn render_processes(&mut self, g: &mut Gfx, a: R, s: f32) {
@@ -559,6 +683,23 @@ impl SystemApp {
 
 /// Everything the hardware page shows, as lines: the boot hardware report, the PCI devices with the driver bound to
 /// each, and the loaded drivers (kernel modules).
+/// The extra line of the MEMORY card: compressed memory (zram) and memory pressure.
+pub fn memory_extra_line(m: &iyakki_zram::MemStats) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    match &m.zram {
+        Some(z) if z.disksize > 0 => parts.push(match z.ratio() {
+            Some(r) => format!("zram {} {r:.1}:1 ({} in {})", z.algorithm, sysinfo::human_bytes(z.orig), sysinfo::human_bytes(z.compressed)),
+            None => format!("zram {} {} (empty)", z.algorithm, sysinfo::human_bytes(z.disksize)),
+        }),
+        Some(_) => parts.push("zram off".into()),
+        None => parts.push("no zram".into()),
+    }
+    if let Some([p10, _, _]) = m.pressure {
+        parts.push(format!("stall {p10:.0}%"));
+    }
+    parts.join(" · ")
+}
+
 pub fn hardware_lines(roots: &SysRoots) -> Vec<String> {
     let report = iyakki_hwinfo::collect(&iyakki_hwinfo::Roots { sys: roots.sys.clone(), proc: roots.proc.clone() });
     let mut out: Vec<String> = report.to_text().lines().map(str::to_string).collect();
@@ -845,6 +986,33 @@ mod tests {
     }
 
     #[test]
+    fn the_memory_card_shows_zram_ratio_and_pressure() {
+        use iyakki_zram::{MemStats, ZramStats};
+        let mut m = MemStats::default();
+        assert_eq!(memory_extra_line(&m), "no zram");
+        m.zram = Some(ZramStats { device: "zram0".into(), algorithm: "zstd".into(), disksize: 4 << 30, orig: 3 << 30, compressed: 1 << 30, mem_used: 1 << 30, ..Default::default() });
+        m.pressure = Some([2.4, 1.0, 0.5]);
+        assert_eq!(memory_extra_line(&m), "zram zstd 3.0:1 (3.2 GB in 1.1 GB) · stall 2%");
+        m.zram.as_mut().unwrap().orig = 0;
+        m.zram.as_mut().unwrap().compressed = 0;
+        assert!(memory_extra_line(&m).contains("empty"));
+        // the card draws at the sizes the shell supports, with the real files of a made-up machine
+        let roots = machine("zcard", None);
+        let z = roots.sys.join("block/zram0");
+        std::fs::create_dir_all(&z).unwrap();
+        std::fs::write(z.join("comp_algorithm"), "lzo [zstd]\n").unwrap();
+        std::fs::write(z.join("disksize"), "1073741824\n").unwrap();
+        std::fs::write(z.join("mm_stat"), "4096000 1024000 1200000 0 0 0 0 0 0\n").unwrap();
+        let (cx, _) = (crate::apps::tests::cx_with_admin_store("zcard-cx"), ());
+        let mut a = SystemApp::with_roots(roots, std::env::temp_dir());
+        for (w, h) in [(1280u32, 720u32), (1024, 600), (800, 480)] {
+            let mut g = Gfx::new(w, h);
+            a.refresh(&cx);
+            a.render(&mut g, R::new(0.0, 72.0, w as f32, h as f32 - 72.0), (w as f32 / 1280.0).min(h as f32 / 720.0).clamp(0.6, 3.0), &cx, 0);
+        }
+    }
+
+    #[test]
     fn the_text_report_lists_the_busiest_processes() {
         let roots = machine("report", None);
         let t = text_report(&roots, 5);
@@ -878,3 +1046,7 @@ mod hardware_tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 }
+
+#[cfg(test)]
+#[path = "system_cluster_tests.rs"]
+mod cluster_tests;

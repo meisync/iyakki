@@ -36,11 +36,13 @@ pub struct SkillsApp {
     shared: bool,
     mode: Mode,
     status: Option<(String, bool)>,
+    /// STORE, on this skill's page: update, roll back, pin or remove it there.
+    request: Option<(String, String)>,
 }
 
 impl SkillsApp {
     pub fn new(_cx: &AppCx) -> SkillsApp {
-        SkillsApp { sel: 0, scroll: 0, shared: false, mode: Mode::Browse, status: None }
+        SkillsApp { sel: 0, scroll: 0, shared: false, mode: Mode::Browse, status: None, request: None }
     }
 
     pub fn status_text(&self) -> Option<&str> {
@@ -144,6 +146,10 @@ fn wrap_lines(g: &mut Gfx, text: &str, size: f32, face: Face, w: f32) -> Vec<Str
 }
 
 impl App for SkillsApp {
+    fn take_request(&mut self) -> Option<(String, String)> {
+        self.request.take()
+    }
+
     fn title(&self) -> &'static str {
         "Skills"
     }
@@ -154,7 +160,7 @@ impl App for SkillsApp {
         ACCENT
     }
     fn hint(&self) -> String {
-        "↑↓ choose · v paste · n new · l load a file · d delete · m mine or shared · k publishers".into()
+        "↑↓ choose · v paste · n new · l load a file · d delete · u update or roll back in STORE · m mine or shared · k publishers".into()
     }
 
     fn help(&self) -> Vec<String> {
@@ -341,6 +347,10 @@ impl App for SkillsApp {
                 }
             }
             Key::Char('k') => self.mode = Mode::Keys,
+            Key::Char('u') => match Self::list(cx).get(self.sel) {
+                Some(sk) => self.request = Some(("store".into(), format!("installed:skill:{}", sk.name))),
+                None => self.fail("There is no skill to manage."),
+            },
             _ => {}
         }
         Flow::Stay

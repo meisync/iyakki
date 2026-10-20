@@ -8,14 +8,19 @@ license.workspace = true
 iyakki-agent = { path = "../iyakki-agent" }
 iyakki-sec.workspace = true
 iyakki-storage.workspace = true
+iyakki-zram.workspace = true
+iyakki-usb = { path = "../iyakki-usb" }
 iyakki-edit.workspace = true
 iyakki-hwinfo.workspace = true
+iyakki-drivers.workspace = true
 iyakki-devctl.workspace = true
 iyakki-web.workspace = true
 iyakki-js.workspace = true
 iyakki-netscan.workspace = true
 iyakki-webview.workspace = true
 iyakki-ledger.workspace = true
+iyakki-data.workspace = true
+iyakki-flow.workspace = true
 argon2 = { version = "0.5", features = ["std", "rand"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

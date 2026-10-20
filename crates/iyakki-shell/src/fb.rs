@@ -68,6 +68,8 @@ struct FixInfo {
 
 const FBIOGET_VSCREENINFO: libc::c_ulong = 0x4600;
 const FBIOGET_FSCREENINFO: libc::c_ulong = 0x4602;
+/// `FBIOPAN_DISPLAY`, used only by [`Framebuffer::scan_out`], always with the offsets the screen already has.
+const FBIOPAN_DISPLAY: libc::c_ulong = 0x4606;
 
 /// How pixels are packed on screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,17 +80,114 @@ pub struct PixelFormat {
     pub b: (u32, u32),
 }
 
+/// One 8-bit channel placed in a field of `f.1` bits at bit `f.0` (fields wider than 8 bits, such as 10-bit
+/// channels, are scaled up; a field of 0 bits is left out).
+pub fn pack_channel(c: u8, f: (u32, u32)) -> u32 {
+    if f.1 == 0 || f.0 >= 32 {
+        return 0;
+    }
+    let v = if f.1 >= 8 { (c as u32) << (f.1 - 8).min(24) } else { (c as u32) >> (8 - f.1) };
+    v << f.0
+}
+
+/// What the kernel says about a screen (`fb_var_screeninfo` and `fb_fix_screeninfo`, the parts that matter), so the
+/// geometry rules can be tested with made-up screens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScreenInfo {
+    pub xres: u32,
+    pub yres: u32,
+    pub xres_virtual: u32,
+    pub yres_virtual: u32,
+    pub xoffset: u32,
+    pub yoffset: u32,
+    pub bpp: u32,
+    pub red: (u32, u32),
+    pub green: (u32, u32),
+    pub blue: (u32, u32),
+    pub line_length: u32,
+    pub smem_len: u32,
+}
+
+/// The usable geometry worked out from a [`ScreenInfo`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Geometry {
+    pub width: u32,
+    pub height: u32,
+    pub pitch: usize,
+    pub format: PixelFormat,
+    /// Bytes to map.
+    pub len: usize,
+    /// Something to mention in the boot log (a panned screen, a missing stride, a guessed colour layout).
+    pub notes: Vec<String>,
+}
+
+/// Work out how to draw on a screen of any stride and pixel layout; refuses only what cannot be drawn on.
+pub fn geometry(i: &ScreenInfo) -> Result<Geometry, String> {
+    let bpp = match i.bpp {
+        15 | 16 => 16,
+        24 => 24,
+        32 => 32,
+        other => return Err(format!("unsupported framebuffer depth {other} bpp")),
+    };
+    let bytes = (bpp / 8) as usize;
+    if i.xres == 0 || i.yres == 0 {
+        return Err(format!("framebuffer reports {}x{}", i.xres, i.yres));
+    }
+    let mut notes = Vec::new();
+    // a driver that does not report a stride: assume the rows are packed
+    let mut pitch = i.line_length as usize;
+    if pitch == 0 {
+        pitch = i.xres.max(i.xres_virtual) as usize * bytes;
+        notes.push("no stride reported, assuming packed rows".to_string());
+    }
+    let mut width = i.xres;
+    if pitch < width as usize * bytes {
+        width = (pitch / bytes) as u32;
+        notes.push(format!("stride {pitch} is narrower than {} pixels, using {width}", i.xres));
+    }
+    let mut height = i.yres;
+    let mut len = i.smem_len as usize;
+    if len == 0 {
+        len = pitch * i.yres_virtual.max(i.yres) as usize;
+    }
+    if len < pitch * height as usize {
+        height = (len / pitch) as u32;
+        notes.push(format!("memory holds only {height} rows of {}", i.yres));
+    }
+    if width == 0 || height == 0 {
+        return Err("framebuffer memory too small to draw on".into());
+    }
+    if i.yoffset != 0 || i.xoffset != 0 {
+        notes.push(format!("screen is panned to ({}, {}); drawing at the top-left of the memory", i.xoffset, i.yoffset));
+    }
+    // colour layout: take what the driver says; when it says nothing, use the usual one for the depth
+    let have = |f: (u32, u32)| f.1 > 0;
+    let (r, g, b) = if have(i.red) && have(i.green) && have(i.blue) {
+        (i.red, i.green, i.blue)
+    } else {
+        notes.push("no colour layout reported, assuming the usual one".to_string());
+        match bpp {
+            16 => ((11, 5), (5, 6), (0, 5)),
+            _ => ((16, 8), (8, 8), (0, 8)),
+        }
+    };
+    if r.0 + r.1 > bpp || g.0 + g.1 > bpp || b.0 + b.1 > bpp {
+        return Err(format!("colour fields do not fit in {bpp} bits"));
+    }
+    Ok(Geometry { width, height, pitch, format: PixelFormat { bpp, r, g, b }, len, notes })
+}
+
 /// Convert premultiplied-RGBA rows to the framebuffer layout. `src` is tightly packed RGBA,
-/// `dst` rows are `pitch` bytes apart. Only 16 and 32 bits per pixel are supported.
+/// `dst` rows are `pitch` bytes apart. 16, 24 and 32 bits per pixel are supported (15 counts as 16).
 pub fn blit(src: &[u8], w: usize, h: usize, fmt: PixelFormat, dst: &mut [u8], pitch: usize) -> Result<(), String> {
     let bytes = (fmt.bpp / 8) as usize;
-    if bytes != 2 && bytes != 4 {
+    if !matches!(bytes, 2..=4) {
         return Err(format!("unsupported framebuffer depth {} bpp", fmt.bpp));
     }
     if dst.len() < pitch * h || src.len() < w * h * 4 || pitch < w * bytes {
         return Err("framebuffer smaller than the frame".into());
     }
-    let pack = |c: u8, f: (u32, u32)| -> u32 { ((c as u32) >> 8u32.saturating_sub(f.1)) << f.0 };
+    let pack = |c: u8, f: (u32, u32)| -> u32 { pack_channel(c, f) };
     for y in 0..h {
         let s = &src[y * w * 4..(y + 1) * w * 4];
         let d = &mut dst[y * pitch..y * pitch + w * bytes];
@@ -108,7 +207,7 @@ pub fn blit(src: &[u8], w: usize, h: usize, fmt: PixelFormat, dst: &mut [u8], pi
 
 /// Convert one row of RGBA pixels into the framebuffer's layout.
 fn convert_row(s: &[u8], d: &mut [u8], bytes: usize, fmt: PixelFormat) {
-    let pack = |c: u8, f: (u32, u32)| -> u32 { ((c as u32) >> 8u32.saturating_sub(f.1)) << f.0 };
+    let pack = |c: u8, f: (u32, u32)| -> u32 { pack_channel(c, f) };
     if bytes == 4 && fmt.r == (16, 8) && fmt.g == (8, 8) && fmt.b == (0, 8) {
         for (sp, dp) in s.chunks_exact(4).zip(d.chunks_exact_mut(4)) {
             dp.copy_from_slice(&[sp[2], sp[1], sp[0], 0xff]); // BGRX
@@ -126,7 +225,7 @@ fn convert_row(s: &[u8], d: &mut [u8], bytes: usize, fmt: PixelFormat) {
 pub fn blit_rect(src: &[u8], w: usize, h: usize, rect: (usize, usize, usize, usize), fmt: PixelFormat, dst: &mut [u8], pitch: usize) -> Result<(), String> {
     let bytes = (fmt.bpp / 8) as usize;
     let (x, y, rw, rh) = rect;
-    if bytes != 2 && bytes != 4 {
+    if !matches!(bytes, 2..=4) {
         return Err(format!("unsupported framebuffer depth {} bpp", fmt.bpp));
     }
     if x + rw > w || y + rh > h || src.len() < w * h * 4 || dst.len() < pitch * h || pitch < w * bytes {
@@ -144,7 +243,7 @@ pub fn blit_rect(src: &[u8], w: usize, h: usize, rect: (usize, usize, usize, usi
 pub fn blit_patch(patch: &[u8], rect: (usize, usize, usize, usize), fmt: PixelFormat, dst: &mut [u8], pitch: usize) -> Result<(), String> {
     let bytes = (fmt.bpp / 8) as usize;
     let (x, y, rw, rh) = rect;
-    if bytes != 2 && bytes != 4 {
+    if !matches!(bytes, 2..=4) {
         return Err(format!("unsupported framebuffer depth {} bpp", fmt.bpp));
     }
     if patch.len() < rw * rh * 4 || dst.len() < (y + rh) * pitch || pitch < (x + rw) * bytes {
@@ -186,23 +285,119 @@ pub struct Framebuffer {
     pub height: u32,
     pub pitch: usize,
     pub format: PixelFormat,
+    /// What the kernel reported, for the boot log.
+    pub info: ScreenInfo,
+    /// Oddities found by [`geometry`].
+    pub notes: Vec<String>,
+    /// [`sysfs_signature`] of the device, read just before it was opened (`None` without sysfs).
+    pub signature: Option<String>,
+}
+
+impl Framebuffer {
+    /// One line for the boot log: "simpledrm 2560x1440 32 bpp stride 10240 (R16/8 G8/8 B0/8)".
+    pub fn describe(&self) -> String {
+        let f = self.format;
+        format!("{} {}x{} {} bpp stride {} (R{}/{} G{}/{} B{}/{}){}", self.id, self.width, self.height, f.bpp, self.pitch, f.r.0, f.r.1, f.g.0, f.g.1, f.b.0, f.b.1, if self.notes.is_empty() { String::new() } else { format!("; {}", self.notes.join("; ")) })
+    }
 }
 
 // SAFETY: the mapping is owned by this struct and only accessed through &mut self.
 unsafe impl Send for Framebuffer {}
 
+/// Which screen a framebuffer device is right now: the driver's name and the geometry. Changes when a GPU driver takes over
+/// from the firmware's screen or a monitor's mode changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+    pub id: String,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: usize,
+}
+
+/// Read the screen's settings without mapping it or changing anything (only the two read-only `FBIOGET_*` queries; IYAKKI
+/// never sets a mode or switches consoles, and pans only to the offsets the screen already has, in [`Framebuffer::scan_out`]; so it never causes a mode change itself).
+fn query(file: &std::fs::File, path: &str) -> Result<(ScreenInfo, String), String> {
+    let fd = file.as_raw_fd();
+    let (mut var, mut fix) = (VarInfo::default(), FixInfo::default());
+    // SAFETY: the ioctls fill the repr(C) structs above, which match the kernel's layouts.
+    unsafe {
+        if libc::ioctl(fd, FBIOGET_VSCREENINFO as _, &mut var as *mut VarInfo) < 0 || libc::ioctl(fd, FBIOGET_FSCREENINFO as _, &mut fix as *mut FixInfo) < 0 {
+            return Err(format!("{path}: not a framebuffer ({})", std::io::Error::last_os_error()));
+        }
+    }
+    let info = ScreenInfo {
+        xres: var.xres,
+        yres: var.yres,
+        xres_virtual: var.xres_virtual,
+        yres_virtual: var.yres_virtual,
+        xoffset: var.xoffset,
+        yoffset: var.yoffset,
+        bpp: var.bits_per_pixel,
+        red: (var.red.offset, var.red.length),
+        green: (var.green.offset, var.green.length),
+        blue: (var.blue.offset, var.blue.length),
+        line_length: fix.line_length,
+        smem_len: fix.smem_len,
+    };
+    Ok((info, String::from_utf8_lossy(&fix.id).trim_end_matches('\0').to_string()))
+}
+
+/// Which screen `path` is now (cheap: no mapping), for noticing a GPU driver's takeover quickly.
+pub fn identify(path: &str) -> Result<Identity, String> {
+    let file = std::fs::OpenOptions::new().read(true).open(path).map_err(|e| format!("{path}: {e}"))?;
+    let (info, id) = query(&file, path)?;
+    let geo = geometry(&info).map_err(|e| format!("{path}: {e}"))?;
+    Ok(Identity { id, width: geo.width, height: geo.height, pitch: geo.pitch })
+}
+
+/// What sysfs says about the screen behind `path` (`/dev/fbN` -> `<sys_graphics>/fbN`): the driver's name, the size, the
+/// stride and the depth, in one line. Reading it never opens the device. That matters: when a GPU driver takes over, the
+/// firmware's screen (simpledrm) is unplugged, and the last close of its device frees its buffer, which on this kernel
+/// (6.12, simpledrm's shmem fbdev) can spin forever in the kernel (`shmem_undo_range`), taking a CPU core and the thread
+/// with it. Polling with open/close every 100 ms could be that last close.
+pub fn sysfs_signature(sys_graphics: &std::path::Path, path: &str) -> Option<String> {
+    let node = std::path::Path::new(path).file_name()?.to_str()?;
+    let dir = sys_graphics.join(node);
+    let read = |f: &str| std::fs::read_to_string(dir.join(f)).ok().map(|v| v.trim().to_string());
+    let name = read("name")?;
+    Some(format!("{name} {} stride {} {} bpp", read("virtual_size").unwrap_or_default(), read("stride").unwrap_or_default(), read("bits_per_pixel").unwrap_or_default()))
+}
+
 impl Framebuffer {
+    /// Has the screen behind `path` changed since this framebuffer was opened (a GPU driver replacing the firmware's
+    /// screen, another mode)? Asks sysfs when it can (see [`sysfs_signature`]), else the device itself.
+    pub fn screen_changed(&self, path: &str) -> bool {
+        match (&self.signature, sysfs_signature(std::path::Path::new("/sys/class/graphics"), path)) {
+            (Some(was), Some(now)) => *was != now,
+            _ => identify(path).is_ok_and(|now| now != self.identity()),
+        }
+    }
+
+    /// This screen's [`Identity`].
+    pub fn identity(&self) -> Identity {
+        Identity { id: self.id.clone(), width: self.width, height: self.height, pitch: self.pitch }
+    }
+
+    /// A screen in ordinary memory, for tests of what gets written.
+    #[cfg(test)]
+    pub(crate) fn in_memory(mem: &mut [u8], width: u32, height: u32) -> Framebuffer {
+        Framebuffer::in_memory_as(mem, width, height, width as usize * 4, PixelFormat { bpp: 32, r: (16, 8), g: (8, 8), b: (0, 8) })
+    }
+
+    /// Like [`Framebuffer::in_memory`], with another stride and pixel layout.
+    #[cfg(test)]
+    pub(crate) fn in_memory_as(mem: &mut [u8], width: u32, height: u32, pitch: usize, format: PixelFormat) -> Framebuffer {
+        Framebuffer { _file: std::fs::File::open("/dev/null").ok(), id: "test".into(), map: mem.as_mut_ptr(), len: mem.len(), width, height, pitch, format, info: ScreenInfo::default(), notes: vec![], signature: None }
+    }
+
     pub fn open(path: &str) -> Result<Framebuffer, String> {
+        // read before opening: if the screen changes in between, the next [`Framebuffer::screen_changed`] notices
+        let signature = sysfs_signature(std::path::Path::new("/sys/class/graphics"), path);
         let file = std::fs::OpenOptions::new().read(true).write(true).open(path).map_err(|e| format!("{path}: {e}"))?;
         let fd = file.as_raw_fd();
-        let (mut var, mut fix) = (VarInfo::default(), FixInfo::default());
-        // SAFETY: the ioctls fill the repr(C) structs above, which match the kernel's layouts.
-        unsafe {
-            if libc::ioctl(fd, FBIOGET_VSCREENINFO as _, &mut var as *mut VarInfo) < 0 || libc::ioctl(fd, FBIOGET_FSCREENINFO as _, &mut fix as *mut FixInfo) < 0 {
-                return Err(format!("{path}: not a framebuffer ({})", std::io::Error::last_os_error()));
-            }
-        }
-        let len = fix.smem_len as usize;
+        let (info, id) = query(&file, path)?;
+        let geo = geometry(&info).map_err(|e| format!("{path}: {e}"))?;
+        let len = geo.len;
         // SAFETY: mapping the device file shared and writable for its reported length.
         let map = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0) };
         if map == libc::MAP_FAILED {
@@ -210,13 +405,16 @@ impl Framebuffer {
         }
         Ok(Framebuffer {
             _file: Some(file),
-            id: String::from_utf8_lossy(&fix.id).trim_end_matches('\0').to_string(),
+            id,
             map: map.cast(),
             len,
-            width: var.xres,
-            height: var.yres,
-            pitch: fix.line_length as usize,
-            format: PixelFormat { bpp: var.bits_per_pixel, r: (var.red.offset, var.red.length), g: (var.green.offset, var.green.length), b: (var.blue.offset, var.blue.length) },
+            width: geo.width,
+            height: geo.height,
+            pitch: geo.pitch,
+            format: geo.format,
+            info,
+            notes: geo.notes,
+            signature,
         })
     }
 
@@ -316,6 +514,37 @@ impl Framebuffer {
         Ok(rows)
     }
 
+    /// Make this framebuffer the picture the monitor shows, without changing its mode or offsets.
+    ///
+    /// The kernel puts a framebuffer on the monitor only when the text console sets it up, and the console skips that while
+    /// it is in graphics mode. IYAKKI switches the console to graphics mode on the firmware's screen (simpledrm), so when a
+    /// GPU driver (i915, bochs, amdgpu...) replaces that screen its framebuffer is never shown: the monitor keeps showing what
+    /// the firmware and GRUB left in memory (the boot menu with GRUB's black terminal box) while everything drawn goes into
+    /// a buffer nobody looks at, until a monitor hotplug happens to set it up. A pan to the current offsets is the fbdev
+    /// call that makes the DRM framebuffer helper commit its configuration (same mode, same buffer): the drawn frame
+    /// appears. On a screen that already shows this framebuffer it changes nothing. Call it after a whole frame has been
+    /// written, so the monitor switches straight to a complete picture: first the written pages are flushed (`fsync`, which
+    /// drivers that draw through a shadow buffer, such as bochs or simpledrm, implement by copying it to the screen at once
+    /// instead of up to 50 ms later, piece by piece), then the pan.
+    pub fn scan_out(&mut self) -> Result<(), String> {
+        let Some(file) = self._file.as_ref() else { return Err("the screen is not ours right now".into()) };
+        let fd = file.as_raw_fd();
+        // SAFETY: fsync on our own open descriptor; drivers without a shadow buffer answer EINVAL, which is fine
+        unsafe { libc::fsync(fd) };
+        let mut var = VarInfo::default();
+        // SAFETY: both ioctls take a pointer to a `fb_var_screeninfo`, which `VarInfo` matches; the pan writes back the
+        // offsets it applied into the same struct.
+        unsafe {
+            if libc::ioctl(fd, FBIOGET_VSCREENINFO as _, &mut var as *mut VarInfo) < 0 {
+                return Err(format!("reading the screen settings failed ({})", std::io::Error::last_os_error()));
+            }
+            if libc::ioctl(fd, FBIOPAN_DISPLAY as _, &mut var as *mut VarInfo) < 0 {
+                return Err(format!("showing the framebuffer failed ({})", std::io::Error::last_os_error()));
+            }
+        }
+        Ok(())
+    }
+
     /// Write a small RGBA patch at `rect` (x, y, w, h).
     pub fn present_patch(&mut self, patch: &[u8], rect: (usize, usize, usize, usize)) -> Result<(), String> {
         let (fmt, pitch) = (self.format, self.pitch);
@@ -350,7 +579,7 @@ mod tests {
         // SAFETY: mapping the 4096-byte test file shared and writable.
         let map = unsafe { libc::mmap(std::ptr::null_mut(), 4096, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, file.as_raw_fd(), 0) };
         assert_ne!(map, libc::MAP_FAILED);
-        let mut fb = Framebuffer { _file: Some(file), id: "test".into(), map: map.cast(), len: 4096, width: 4, height: 4, pitch: 16, format: XRGB };
+        let mut fb = Framebuffer { _file: Some(file), id: "test".into(), map: map.cast(), len: 4096, width: 4, height: 4, pitch: 16, format: XRGB, info: ScreenInfo::default(), notes: vec![], signature: None };
         let frame = vec![200u8; 4 * 4 * 4];
         assert!(fb.present(&frame).is_ok());
         assert!(!fb.is_released());
@@ -393,7 +622,7 @@ mod tests {
     #[test]
     fn rejects_bad_geometry_and_depths() {
         let src = vec![0u8; 16];
-        assert!(blit(&src, 2, 2, PixelFormat { bpp: 24, ..XRGB }, &mut vec![0u8; 100], 8).is_err());
+        assert!(blit(&src, 2, 2, PixelFormat { bpp: 8, ..XRGB }, &mut vec![0u8; 100], 8).is_err());
         assert!(blit(&src, 2, 2, XRGB, &mut vec![0u8; 8], 8).is_err(), "buffer too small");
         assert!(blit(&src, 2, 2, XRGB, &mut vec![0u8; 100], 4).is_err(), "pitch too small");
     }
@@ -431,7 +660,7 @@ mod tests {
     fn banded_presenting_writes_the_changed_rows_and_updates_the_old_frame() {
         let (w, h) = (4usize, 10usize);
         let mut fbmem = vec![0xEEu8; w * 4 * h];
-        let fb_new = |mem: &mut Vec<u8>| Framebuffer { _file: Some(std::fs::File::open("/dev/null").unwrap()), id: String::new(), map: mem.as_mut_ptr(), len: mem.len(), width: w as u32, height: h as u32, pitch: w * 4, format: XRGB };
+        let fb_new = |mem: &mut Vec<u8>| Framebuffer { _file: Some(std::fs::File::open("/dev/null").unwrap()), id: String::new(), map: mem.as_mut_ptr(), len: mem.len(), width: w as u32, height: h as u32, pitch: w * 4, format: XRGB, info: ScreenInfo::default(), notes: vec![], signature: None };
         let mut new = vec![10u8; w * 4 * h];
         let mut old: Vec<u8> = Vec::new();
         assert_eq!(fb_new(&mut fbmem).present_banded(&new, &mut old).unwrap(), h, "no old frame: everything is written");
@@ -443,6 +672,95 @@ mod tests {
         assert_eq!(old, new, "the old frame follows");
         assert_eq!(fbmem[0], 0xEE, "other rows are untouched");
         assert_ne!(fbmem[w * 4 * 7], 0xEE);
+    }
+
+    fn info(w: u32, h: u32, bpp: u32, stride: u32) -> ScreenInfo {
+        let (r, g, b) = match bpp {
+            16 => ((11, 5), (5, 6), (0, 5)),
+            _ => ((16, 8), (8, 8), (0, 8)),
+        };
+        ScreenInfo { xres: w, yres: h, xres_virtual: w, yres_virtual: h, bpp, red: r, green: g, blue: b, line_length: stride, smem_len: stride * h, ..Default::default() }
+    }
+
+    #[test]
+    fn odd_screens_get_a_geometry_or_a_clear_refusal() {
+        // a Mac mini's native 2560x1440 with a padded stride, a plain 1024x768, a 16 bit panel
+        let g = geometry(&info(2560, 1440, 32, 10240)).unwrap();
+        assert_eq!((g.width, g.height, g.pitch, g.len), (2560, 1440, 10240, 10240 * 1440));
+        assert!(g.notes.is_empty());
+        let g = geometry(&info(1366, 768, 32, 5504)).unwrap();
+        assert_eq!((g.width, g.pitch), (1366, 5504), "stride larger than the width is kept");
+        assert_eq!(geometry(&info(800, 600, 16, 1600)).unwrap().format.bpp, 16);
+        assert_eq!(geometry(&info(800, 600, 24, 2400)).unwrap().format.bpp, 24);
+        // no stride reported: packed rows are assumed and said so
+        let g = geometry(&info(1280, 720, 32, 0)).unwrap();
+        assert_eq!(g.pitch, 1280 * 4);
+        assert!(!g.notes.is_empty());
+        // a stride narrower than the width shrinks the width instead of writing past the row
+        let g = geometry(&info(1000, 100, 32, 3200)).unwrap();
+        assert_eq!(g.width, 800);
+        // memory shorter than the rows
+        let mut i = info(100, 100, 32, 400);
+        i.smem_len = 400 * 60;
+        assert_eq!(geometry(&i).unwrap().height, 60);
+        // no colour layout: the usual one for the depth
+        let mut i = info(100, 100, 32, 400);
+        i.red = (0, 0);
+        assert_eq!(geometry(&i).unwrap().format.r, (16, 8));
+        // refusals
+        assert!(geometry(&info(0, 100, 32, 400)).is_err());
+        assert!(geometry(&info(100, 100, 8, 100)).is_err());
+        let mut i = info(100, 100, 32, 400);
+        i.red = (28, 8);
+        assert!(geometry(&i).is_err(), "field past the end of the pixel");
+        let mut i = info(100, 100, 32, 400);
+        i.yoffset = 100;
+        assert!(geometry(&i).unwrap().notes.iter().any(|n| n.contains("panned")));
+    }
+
+    #[test]
+    fn channels_are_scaled_to_the_field_width() {
+        assert_eq!(pack_channel(255, (16, 8)), 0xFF0000);
+        assert_eq!(pack_channel(255, (20, 10)), 0x3FC << 20, "a 10 bit field gets the 8 bit value scaled up");
+        assert_eq!(pack_channel(255, (11, 5)), 0x1F << 11);
+        assert_eq!(pack_channel(255, (0, 0)), 0, "a missing field is left out");
+    }
+
+    #[test]
+    fn a_24_bit_and_a_bgr_screen_are_drawn_in_their_own_order() {
+        let src = [255, 0, 0, 255, 0, 0, 255, 255]; // red, blue
+        let mut dst = vec![0u8; 6];
+        blit(&src, 2, 1, PixelFormat { bpp: 24, r: (16, 8), g: (8, 8), b: (0, 8) }, &mut dst, 6).unwrap();
+        assert_eq!(dst, [0, 0, 255, 255, 0, 0], "BGR bytes, 3 per pixel");
+        let mut d = vec![0u8; 8];
+        let rgbx = PixelFormat { bpp: 32, r: (0, 8), g: (8, 8), b: (16, 8) };
+        blit(&src, 2, 1, rgbx, &mut d, 8).unwrap();
+        assert_eq!(&d[..4], &[255, 0, 0, 0], "RGBX");
+        assert_eq!(&d[4..7], &[0, 0, 255]);
+        // a stride bigger than the row leaves the padding alone, at every size the Mac may report
+        for (w, stride) in [(1usize, 8usize), (2560, 10240 + 64), (1920, 7680)] {
+            let src = vec![9u8; w * 4];
+            let mut dst = vec![0xAAu8; stride];
+            blit(&src, w, 1, XRGB, &mut dst, stride).unwrap();
+            assert!(dst[w * 4..].iter().all(|b| *b == 0xAA));
+        }
+    }
+
+    #[test]
+    fn the_sysfs_signature_follows_a_gpu_driver_taking_over_without_opening_the_device() {
+        let d = std::env::temp_dir().join(format!("iyakki-fb-sysfs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("fb0")).unwrap();
+        assert_eq!(sysfs_signature(&d, "/dev/fb0"), None, "no name: no signature (the caller asks the device)");
+        for (f, v) in [("name", "simpledrmdrmfb\n"), ("virtual_size", "1920,1080\n"), ("stride", "7680\n"), ("bits_per_pixel", "32\n")] {
+            std::fs::write(d.join("fb0").join(f), v).unwrap();
+        }
+        let firmware = sysfs_signature(&d, "/dev/fb0").unwrap();
+        assert_eq!(firmware, "simpledrmdrmfb 1920,1080 stride 7680 32 bpp");
+        std::fs::write(d.join("fb0/name"), "i915drmfb\n").unwrap();
+        assert_ne!(sysfs_signature(&d, "/dev/fb0").unwrap(), firmware, "same size, another driver");
+        assert_eq!(sysfs_signature(&d, "/dev/fb1"), None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

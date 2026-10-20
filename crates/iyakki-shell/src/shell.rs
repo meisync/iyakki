@@ -83,18 +83,37 @@ impl ShellEnv {
     /// Build the real environment from files on disk.
     pub fn from_paths(p: &ShellPaths, host: Arc<dyn HostApi>) -> Result<ShellEnv, AccountError> {
         use iyakki_agent::iyakki_proxy::https::UreqUpstream;
+        let t0 = std::time::Instant::now();
         let cfg = AiConfig::load(&p.ai_conf);
         let quick: Arc<dyn iyakki_agent::iyakki_proxy::Upstream> = Arc::new(UreqUpstream::with_timeout(std::time::Duration::from_secs(10)));
         let slow: Arc<dyn iyakki_agent::iyakki_proxy::Upstream> = Arc::new(UreqUpstream::with_timeout(std::time::Duration::from_secs(300)));
         let services = Services::open(std::path::Path::new(&p.data), quick, slow).map_err(AccountError::Storage)?;
+        let t_services = t0.elapsed();
         services.radio.set_streamer(Arc::new(iyakki_agent::iyakki_proxy::https::UreqStreamer::default()));
+        // what is installed from the CLI list is found everywhere (jobs, the terminal, agents) without links in /usr/bin, and a program
+        // that is on the machine already counts as installed
+        services.clis.export_path();
+        services.clis.set_detect_present(true);
+        // sound goes to the output that is connected (HDMI/DP, USB, ...), not to ALSA's card 0 device 0
+        let t1 = std::time::Instant::now();
+        services.start_sound_output();
+        let t_sound = t1.elapsed();
         // model downloads report their progress over time, like the radio
         services.set_streamer(Arc::new(iyakki_agent::iyakki_proxy::https::UreqStreamer::default()));
+        // model answers are read as they are written; a local model may need minutes to load before its first word
+        services.set_chat_streamer(Arc::new(iyakki_agent::iyakki_proxy::https::UreqStreamer::with_response_timeout(std::time::Duration::from_secs(600))));
         migrate_legacy_chat(&services, &cfg);
+        // the time zone the person chose in Settings -> Time applies to every front end from the start
+        if let Ok(st) = services.settings.lock() {
+            iyakki_agent::clock::set_chosen_zone(&st.get().time.zone);
+        }
         let chat = services.chat_backend();
         let mcp_servers = mcp::load_config(&cfg.mcp_config);
+        let t2 = std::time::Instant::now();
+        let store = UserStore::open(std::path::Path::new(&p.users))?;
+        log::info!("boot: shell environment took {} ms (services {}, sound {}, accounts {})", t0.elapsed().as_millis(), t_services.as_millis(), t_sound.as_millis(), t2.elapsed().as_millis());
         Ok(ShellEnv {
-            store: Arc::new(Mutex::new(UserStore::open(std::path::Path::new(&p.users))?)),
+            store: Arc::new(Mutex::new(store)),
             audit: Arc::new(AuditLog::new(std::path::Path::new(&p.audit))),
             host,
             cfg,
@@ -173,27 +192,54 @@ struct Tile {
     label: &'static str,
     sub: &'static str,
     accent: [u8; 4],
+    /// The home screen section the tile is in; `None` keeps it off the grid (Settings: the IYAKKI menu and F7 lead there).
+    group: Option<Group>,
 }
 
-const TILES: [Tile; 17] = [
-    Tile { app: PApp::Chat, icon: Icon::Chat, label: "CHAT", sub: "Talk to the AI", accent: rgb(79, 140, 255) },
-    Tile { app: PApp::Rag, icon: Icon::Rag, label: "RAG", sub: "Ask your files", accent: rgb(61, 214, 163) },
-    Tile { app: PApp::Mcp, icon: Icon::Mcp, label: "MCP", sub: "Tools, servers", accent: rgb(167, 116, 255) },
-    Tile { app: PApp::Cli, icon: Icon::Cli, label: "CLI", sub: "Terminal, tools", accent: rgb(255, 184, 77) },
-    Tile { app: PApp::Edit, icon: Icon::Edit, label: "EDIT", sub: "Edit files", accent: rgb(110, 224, 160) },
-    Tile { app: PApp::Runs, icon: Icon::Runs, label: "RUNS", sub: "Agent history", accent: rgb(255, 196, 94) },
-    Tile { app: PApp::Users, icon: Icon::Users, label: "USERS", sub: "Accounts", accent: rgb(255, 107, 154) },
-    Tile { app: PApp::Settings, icon: Icon::Settings, label: "SETTINGS", sub: "Models, vault", accent: rgb(120, 170, 255) },
-    Tile { app: PApp::Browser, icon: Icon::Browser, label: "BROWSER", sub: "Read the web", accent: rgb(88, 190, 235) },
-    Tile { app: PApp::Radio, icon: Icon::Radio, label: "RADIO", sub: "Online stations", accent: rgb(255, 150, 110) },
-    Tile { app: PApp::Skills, icon: Icon::Skills, label: "SKILLS", sub: "Teach tasks", accent: rgb(255, 170, 90) },
-    Tile { app: PApp::Scan, icon: Icon::Scan, label: "NET SCAN", sub: "Find services", accent: rgb(120, 220, 140) },
-    Tile { app: PApp::Mesh, icon: Icon::Mesh, label: "MESH", sub: "Consul, services", accent: rgb(86, 204, 196) },
-    Tile { app: PApp::Usage, icon: Icon::Usage, label: "USAGE", sub: "Tokens by model", accent: rgb(255, 130, 170) },
-    Tile { app: PApp::System, icon: Icon::System, label: "SYSTEM", sub: "Load, agents", accent: rgb(176, 226, 92) },
-    Tile { app: PApp::Calendar, icon: Icon::Calendar, label: "CALENDAR", sub: "Plans, alarms", accent: rgb(110, 190, 255) },
-    Tile { app: PApp::Media, icon: Icon::Media, label: "MEDIA", sub: "Music, videos", accent: rgb(240, 120, 220) },
+/// One thing on the launcher: a system tile, or a custom app.
+enum LItem {
+    Sys(&'static Tile),
+    App(Box<iyakki_agent::store::tilehub::TileEntry>),
+}
+
+const TILES: &[Tile] = &[
+    Tile { app: PApp::Chat, icon: Icon::Chat, label: "CHAT", sub: "Talk to the AI", accent: rgb(79, 140, 255), group: Some(Group::Home) },
+    Tile { app: PApp::Rag, icon: Icon::Rag, label: "RAG", sub: "Ask your files", accent: rgb(61, 214, 163), group: Some(Group::Home) },
+    Tile { app: PApp::Mcp, icon: Icon::Mcp, label: "MCP", sub: "Tools, servers", accent: rgb(167, 116, 255), group: Some(Group::Home) },
+    Tile { app: PApp::Cli, icon: Icon::Cli, label: "CLI", sub: "Terminal, tools", accent: rgb(255, 184, 77), group: Some(Group::Home) },
+    Tile { app: PApp::Edit, icon: Icon::Edit, label: "EDIT", sub: "Edit files", accent: rgb(110, 224, 160), group: Some(Group::Work) },
+    Tile { app: PApp::Runs, icon: Icon::Runs, label: "RUNS", sub: "Agent history", accent: rgb(255, 196, 94), group: Some(Group::Work) },
+    Tile { app: PApp::Users, icon: Icon::Users, label: "USERS", sub: "Accounts", accent: rgb(255, 107, 154), group: Some(Group::System) },
+    Tile { app: PApp::Settings, icon: Icon::Settings, label: "SETTINGS", sub: "Models, vault", accent: rgb(120, 170, 255), group: None },
+    Tile { app: PApp::Browser, icon: Icon::Browser, label: "BROWSER", sub: "Read the web", accent: rgb(88, 190, 235), group: Some(Group::WebMedia) },
+    Tile { app: PApp::Radio, icon: Icon::Radio, label: "RADIO", sub: "Online stations", accent: rgb(255, 150, 110), group: Some(Group::WebMedia) },
+    Tile { app: PApp::Skills, icon: Icon::Skills, label: "SKILLS", sub: "Teach tasks", accent: rgb(255, 170, 90), group: Some(Group::Home) },
+    Tile { app: PApp::Scan, icon: Icon::Scan, label: "NET SCAN", sub: "Find services", accent: rgb(120, 220, 140), group: Some(Group::System) },
+    Tile { app: PApp::Mesh, icon: Icon::Mesh, label: "MESH", sub: "Consul, services", accent: rgb(86, 204, 196), group: Some(Group::System) },
+    Tile { app: PApp::Usage, icon: Icon::Usage, label: "USAGE", sub: "Tokens by model", accent: rgb(255, 130, 170), group: Some(Group::System) },
+    Tile { app: PApp::System, icon: Icon::System, label: "SYSTEM", sub: "Load, agents", accent: rgb(176, 226, 92), group: Some(Group::System) },
+    Tile { app: PApp::Calendar, icon: Icon::Calendar, label: "CALENDAR", sub: "Plans, alarms", accent: rgb(110, 190, 255), group: Some(Group::Home) },
+    Tile { app: PApp::Media, icon: Icon::Media, label: "MEDIA", sub: "Music, videos", accent: rgb(240, 120, 220), group: Some(Group::WebMedia) },
+    Tile { app: PApp::SrePilot, icon: Icon::SrePilot, label: "SRE PILOT", sub: "Assist · Auto", accent: rgb(60, 235, 200), group: Some(Group::Work) },
+    Tile { app: PApp::Ide, icon: Icon::Ide, label: "AI IDE", sub: "Code with the AI", accent: rgb(100, 230, 255), group: Some(Group::Work) },
+    Tile { app: PApp::Data, icon: Icon::Data, label: "DATA", sub: "Tables, CSV", accent: crate::apps::data::ACCENT, group: Some(Group::Work) },
+    Tile { app: PApp::Tales, icon: Icon::Tales, label: "TALES", sub: "Read-aloud tales", accent: crate::apps::story::ACCENT, group: Some(Group::Home) },
+    Tile { app: PApp::Store, icon: Icon::Store, label: "STORE", sub: "Apps and skills", accent: crate::apps::store::ACCENT, group: Some(Group::System) },
+    Tile { app: PApp::Dash, icon: Icon::Dash, label: "DASH", sub: "Graphs, tables", accent: crate::apps::dash::ACCENT, group: Some(Group::Work) },
+    Tile { app: PApp::Flows, icon: Icon::Flows, label: "FLOWS", sub: "Workflows, runs", accent: crate::apps::flows::ACCENT, group: Some(Group::Work) },
+    Tile { app: PApp::Camera, icon: Icon::Camera, label: "CAMERA", sub: "Photos, video", accent: crate::apps::camera::ACCENT, group: Some(Group::WebMedia) },
 ];
+
+/// The home screen section of an app's tile (the tile table's `group` field; `None`: not on the grid).
+pub(crate) fn tile_group(app: PApp) -> Option<Group> {
+    TILES.iter().find(|t| t.app == app).and_then(|t| t.group)
+}
+
+/// The tiles as (app, label), for tests of other modules.
+#[cfg(test)]
+pub(crate) fn tiles_for_test() -> Vec<(PApp, &'static str)> {
+    TILES.iter().map(|t| (t.app, t.label)).collect()
+}
 
 /// The name of the last person who signed in, kept so the sign-in form can fill it in (a name, never a password).
 fn last_user(env: &ShellEnv) -> Option<String> {
@@ -214,6 +260,12 @@ pub struct Shell {
     hits: Vec<crate::ui::Hit>,
     /// Clipboard-history picker overlay (Ctrl+Shift+V, right-click, or the clipboard button).
     clip: Option<Picker>,
+    /// Host files (window mode): the import dialog shown over any screen for dropped files, and whether files are being
+    /// dragged over the window right now.
+    hostdlg: Option<Box<crate::apps::hostfiles::HostDialog>>,
+    /// The sign-in dialog of Claude Code / GitHub Copilot (agent_login.rs), over any screen.
+    login: Option<Box<crate::agent_login::LoginModal>>,
+    drag_over: bool,
     /// The right-click menu (ctxmenu.rs), and the text fields the last frame drew (it needs them to know what is under the pointer).
     ctx: Option<crate::ctxmenu::Menu>,
     fields: Vec<crate::ctxmenu::FieldNote>,
@@ -223,6 +275,11 @@ pub struct Shell {
     /// When and where the last press was, and how many in a row (double and triple clicks).
     click_run: (u64, i32, i32, u8),
     screen: Screen,
+    /// The custom apps (tile apps) this person has, refreshed when the launcher is shown and every couple of seconds.
+    custom: Vec<iyakki_agent::store::tilehub::TileEntry>,
+    custom_at: u64,
+    /// The custom app on screen, if the app on screen is one.
+    custom_open: Option<String>,
     session: Option<Session>,
     /// The selected tile, counted within the shown group (its page follows from it).
     sel: usize,
@@ -256,6 +313,31 @@ pub struct Shell {
     stash: Option<(Box<dyn App>, PApp)>,
     /// What the bell shows: unread notifications, approvals waiting, overdue tasks.
     badge: Badge,
+    /// The clock in the top bar, and the rectangle whose hover shows its tooltip this frame.
+    clock: crate::clockbar::ClockState,
+    clock_tip: Option<R>,
+    clock_text: String,
+    clock_ready: bool,
+    /// The Devices popover (button next to the screenshot icon, F8).
+    devpop: crate::devpop::DevPop,
+    /// Replaces the machine the popover looks at (tests).
+    devprobe: Option<crate::devpop::Probe>,
+    /// The IYAKKI menu (a click on the name in the launcher's top bar, F10): About, Quick install, Media player, Mac drivers.
+    brand: crate::brandmenu::BrandMenu,
+    /// The installer indicator beside the clock and the list of installs it opens.
+    installs: crate::installpop::InstallPop,
+    /// Replaces the program Quick install runs as its jobs (tests).
+    quick_launch: Option<iyakki_agent::quickinstall::Launch>,
+    /// "DEV" (or "DEV · pairing") while Developer mode is on, read every second.
+    dev_sign: Option<&'static str>,
+    /// The answer of the background lookup of newer versions for Quick install (taken into the menu when it arrives).
+    latest_slot: Arc<Mutex<Option<Vec<(iyakki_agent::quickinstall::Item, iyakki_agent::quickinstall::Latest)>>>>,
+    /// The answer of the background reading of what is installed (taken into the menu when it arrives).
+    facts_slot: Arc<Mutex<Option<iyakki_agent::quickinstall::Facts>>>,
+    /// The USB cameras: the CAMERA tile is greyed while there is none (looked at again every two seconds).
+    camera: crate::camera::Presence,
+    /// The "camera in use by the assistant" sign was on in the last frame.
+    cam_sign: bool,
 }
 
 /// The numbers behind the bell.
@@ -322,8 +404,15 @@ fn account_label(user: &str, role: &str) -> String {
     if user.eq_ignore_ascii_case(role) { user.to_string() } else { format!("{user}  ·  {role}") }
 }
 
-fn scale_for(w: u32, h: u32) -> f32 {
-    ((w as f32 / 1280.0).min(h as f32 / 720.0) * crate::ui::ui_size()).clamp(0.6, 3.0)
+/// The size of everything (1.0 draws body text at 14 px). A bigger window gives more room, not bigger text, as on Ubuntu and
+/// macOS: 0.9 at 1280x720 (body about 13 px), about 1.0 at 1920x1080, about 1.25 at 4K, then the person's own size choice on top.
+fn d_label(d: Option<&crate::apps::hostfiles::HostDialog>) -> String {
+    d.map_or_else(|| "your account".to_string(), |d| d.dest_label().to_string())
+}
+
+pub(crate) fn scale_for(w: u32, h: u32) -> f32 {
+    let raw = (w as f32 / 1280.0).min(h as f32 / 720.0).max(0.1);
+    (0.9 * raw.powf(0.3) * crate::ui::ui_size()).clamp(0.6, 3.0)
 }
 
 impl Shell {
@@ -336,7 +425,7 @@ impl Shell {
         } else {
             Screen::Login(Form::login_for(last_user(&env).as_deref()))
         };
-        Shell { env, hits: Vec::new(), clip: None, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, session: None, sel: 0, group: Group::All, mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default() }
+        Shell { env, hits: Vec::new(), clip: None, hostdlg: None, login: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), quick_launch: None, dev_sign: None, latest_slot: Default::default(), facts_slot: Default::default(), camera: if cfg!(test) { crate::camera::Presence::none() } else { crate::camera::Presence::system() }, cam_sign: false }
     }
 
     pub fn screen_name(&self) -> String {
@@ -345,6 +434,7 @@ impl Shell {
             Screen::Setup(_) => "setup".into(),
             Screen::Login(_) => "login".into(),
             Screen::Launcher => "launcher".into(),
+            Screen::App(_, _) if self.custom_open.is_some() => format!("tile:{}", self.custom_open.as_deref().unwrap_or("")),
             Screen::App(_, a) => format!("app:{}", a.id()),
             Screen::PowerMenu => "power".into(),
         }
@@ -393,6 +483,45 @@ impl Shell {
     }
 
     /// Clickable regions from the last frame (tests and tools).
+    /// The text of the custom app on screen (tests).
+    #[cfg(test)]
+    pub(crate) fn tile_text_for_test(&mut self) -> String {
+        match &mut self.screen {
+            Screen::App(app, _) => app.as_any_tile().map(|t| t.page_text()).unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tile_card_text_for_test(&mut self) -> String {
+        match &mut self.screen {
+            Screen::App(app, _) => app.as_any_tile().map(|t| t.card_text()).unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tile_card_geometry_for_test(&mut self) -> Option<(R, Vec<R>)> {
+        match &mut self.screen {
+            Screen::App(app, _) => app.as_any_tile().and_then(|t| t.card_geometry()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tile_bar_for_test(&mut self) -> Vec<(String, R)> {
+        match &mut self.screen {
+            Screen::App(app, _) => app.as_any_tile().map(|t| t.bar.clone()).unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resize_for_test(&mut self, w: u32, h: u32) {
+        self.size = (w, h);
+        self.stale = true;
+    }
+
     pub fn hits(&self) -> &[crate::ui::Hit] {
         &self.hits
     }
@@ -413,21 +542,23 @@ impl Shell {
     /// Tiles visible to the current user: the four core apps always, Users only for admins.
     fn visible_tiles(&self) -> Vec<&'static Tile> {
         let admin = self.session.as_ref().is_some_and(|s| s.policy.manage_users);
-        TILES.iter().filter(|t| t.app != PApp::Users || admin).collect()
+        TILES.iter().filter(|t| t.group.is_some() && (t.app != PApp::Users || admin)).collect()
     }
 
-    /// The group chips for this person: All, then each group that has a tile for them.
+    /// The section tabs for this person: each section that has a tile for them.
     fn groups(&self) -> Vec<Group> {
         let apps: Vec<PApp> = self.visible_tiles().iter().map(|t| t.app).collect();
-        launcher::groups_of(&apps)
+        let custom: Vec<Group> = self.custom.iter().map(|e| launcher::group_of_custom(&e.group)).collect();
+        launcher::groups_with(&apps, &custom)
     }
 
-    /// The group being shown (All when the remembered one has nothing for this person).
+    /// The section being shown (the first one, Home, when the remembered one has nothing for this person).
     fn current_group(&self) -> Group {
-        if self.groups().contains(&self.group) {
+        let gs = self.groups();
+        if gs.contains(&self.group) {
             self.group
         } else {
-            Group::All
+            gs.first().copied().unwrap_or(Group::Home)
         }
     }
 
@@ -435,6 +566,32 @@ impl Shell {
     fn group_tiles(&self) -> Vec<&'static Tile> {
         let g = self.current_group();
         self.visible_tiles().into_iter().filter(|t| g.holds(t.app)).collect()
+    }
+
+    /// The custom apps in the shown group (they follow the system tiles).
+    fn group_custom(&self) -> Vec<iyakki_agent::store::tilehub::TileEntry> {
+        let g = self.current_group();
+        self.custom.iter().filter(|e| launcher::group_of_custom(&e.group) == g).cloned().collect()
+    }
+
+    /// Everything the launcher shows in the shown group: the system tiles, then the custom apps.
+    fn group_items(&self) -> Vec<LItem> {
+        let mut v: Vec<LItem> = self.group_tiles().into_iter().map(LItem::Sys).collect();
+        v.extend(self.group_custom().into_iter().map(|e| LItem::App(Box::new(e))));
+        v
+    }
+
+    /// Look for the person's custom apps again (the launcher does this when it is shown, and every two seconds).
+    fn refresh_custom(&mut self) {
+        let Some(s) = &self.session else {
+            self.custom.clear();
+            return;
+        };
+        self.custom_at = self.tick.max(1);
+        self.custom = iyakki_agent::store::tilehub::installed(&self.env.services, &s.policy, &s.user);
+        if self.sel >= self.group_items().len() {
+            self.sel = 0;
+        }
     }
 
     /// Show a group (from its chip, Tab or a test) and remember it for this person.
@@ -486,9 +643,27 @@ impl Shell {
 
     fn sign_in(&mut self, s: Session, password: &str) {
         self.env.audit.record(&s.user, "login", s.role.name());
+        // a local model is loaded in the background now, so the first question is not the slow one
+        if s.policy.agent {
+            self.env.services.warm_up_chat();
+        }
         remember_user(&self.env, &s.user);
         // unlock the user's personal vault (and, for admins, the system vault) with the password just typed
         let report = self.env.services.on_login(&s.user, password, s.policy.manage_settings);
+        // schedules run while this account is signed in, without FLOWS being open (nothing starts for an account without flows)
+        {
+            let (svc, user, policy) = (self.env.services.clone(), s.user.clone(), s.policy.clone());
+            std::thread::spawn(move || {
+                iyakki_agent::flows::FlowEnv::start_for_login(&svc, &user, &policy);
+            });
+        }
+        // kubeconfigs held in this person's vaults can be used by cluster commands while they are signed in; the dev cluster's
+        // background events (restarts, exits) are audited
+        iyakki_agent::kubeprofiles::set_resolver(Some(iyakki_agent::kubeprofiles::resolver_for(&self.env.services, &s.user)));
+        {
+            let audit = self.env.audit.clone();
+            self.env.services.k3sdev.set_audit(Arc::new(move |u, a, d| audit.record(u, a, d)));
+        }
         if let VaultState::Locked(why) = &report.user_vault {
             self.env.audit.record(&s.user, "vault.user.locked", why);
             let _ = self.env.services.notify_once(&s.user, iyakki_agent::inbox::Kind::Warning, "Your personal vault is locked", "It could not be opened with the password you typed. See Settings → Vault.", Some(iyakki_agent::inbox::Link::new("settings", "")));
@@ -505,6 +680,7 @@ impl Shell {
             #[cfg(not(test))]
             {
                 self.env.services.detect_local_ollama_in_background();
+                self.env.services.detect_local_lemonade_in_background();
                 self.env.services.start_device_watch();
             }
         }
@@ -514,7 +690,7 @@ impl Shell {
         self.session = Some(s);
         self.load_clipboard_limit();
         self.sel = 0;
-        self.group = crate::uisize::load_group(self.env.services.dir(), &self.session.as_ref().map_or(String::new(), |s| s.user.clone())).and_then(|id| Group::from_id(&id)).unwrap_or(Group::All);
+        self.group = crate::uisize::load_group(self.env.services.dir(), &self.session.as_ref().map_or(String::new(), |s| s.user.clone())).and_then(|id| Group::from_id(&id)).unwrap_or(Group::Home);
         self.screen = Screen::Launcher;
         self.refresh_badge();
     }
@@ -528,11 +704,31 @@ impl Shell {
         crate::uisize::apply(None);
         self.stash = None;
         self.badge = Badge::default();
+        self.brand = Default::default();
+        self.installs = Default::default();
         if let Some(s) = self.session.take() {
             self.env.audit.record(&s.user, "logout", "");
+            iyakki_agent::flows::FlowEnv::stop_for_logout(&self.env.services, &s.user);
             self.env.services.on_logout(&s.user, s.policy.manage_settings);
+            iyakki_agent::kubeprofiles::set_resolver(None);
+            // the assistant's browser tab goes with the session (jobs still running are answered)
+            crate::apps::web_agent::close(&self.env.services, &s.user);
         }
         self.screen = Screen::Login(Form::login_for(last_user(&self.env).as_deref()));
+    }
+
+    /// Whether the CAMERA tile is usable (looks first when it has not looked yet).
+    fn camera_ready(&mut self) -> bool {
+        if !self.camera.scanned() {
+            self.camera.scan();
+        }
+        self.camera.available()
+    }
+
+    /// Look for cameras somewhere else (tests).
+    #[cfg(test)]
+    pub(crate) fn set_camera_for_test(&mut self, p: crate::camera::Presence) {
+        self.camera = p;
     }
 
     fn open(&mut self, app: PApp) {
@@ -560,10 +756,301 @@ impl Shell {
             PApp::System => Box::new(crate::apps::system::SystemApp::new(&cx)),
             PApp::Calendar => Box::new(crate::apps::calendar::CalendarApp::new(&cx)),
             PApp::Media => Box::new(crate::apps::media::MediaApp::new(&cx)),
+            PApp::SrePilot => Box::new(crate::apps::srepilot::SrePilotApp::new()),
+            PApp::Ide => Box::new(crate::apps::ide::IdeApp::new(&cx)),
+            PApp::Data => Box::new(crate::apps::data::DataApp::new(&cx)),
+            PApp::Store => Box::new(crate::apps::store::StoreApp::new(&cx)),
+            PApp::Dash => Box::new(crate::apps::dash::DashApp::new(&cx)),
+            PApp::Flows => Box::new(crate::apps::flows::FlowsApp::new(&cx)),
+            PApp::Camera => Box::new(crate::apps::camera::CameraApp::new(&cx)),
+            PApp::Tales => Box::new(crate::apps::story::StoryApp::new(&cx)),
             PApp::Inbox => Box::new(crate::apps::inbox::InboxApp::new(&cx)),
         };
         self.env.audit.record(&cx.session.user, "app.open", app.id());
+        self.custom_open = None;
         self.screen = Screen::App(boxed, app);
+    }
+
+    /// Open or close the Devices popover (F8, the button).
+    fn toggle_devices(&mut self) {
+        if self.session.is_none() {
+            return;
+        }
+        self.help = false;
+        self.brand.close();
+        self.installs.close();
+        self.devpop.toggle();
+        self.stale = true;
+    }
+
+    /// What the popover looks at: this machine (a made-up one in tests).
+    fn dev_probe(&self) -> crate::devpop::Probe {
+        if let Some(p) = &self.devprobe {
+            return p.clone();
+        }
+        let drivers = iyakki_agent::store::drivers::Drivers::for_services(&self.env.services);
+        let mut p = crate::devpop::Probe::real(crate::apps::devices::DeviceEnv::real(), Some(drivers), self.env.services.dir().to_path_buf(), self.env.hostname.clone(), self.env.data_volatile);
+        p.screen = self.size;
+        p
+    }
+
+    fn handle_devpop(&mut self, ev: &Event) {
+        use crate::devpop::Outcome;
+        let out = match ev {
+            Event::Key(k) => self.devpop.handle_key(k),
+            Event::Tab(n) => self.devpop.handle_hit(*n),
+            Event::Scroll(d) => {
+                self.devpop.scroll_by(if *d > 0 { -1 } else { 1 });
+                Outcome::Nothing
+            }
+            _ => Outcome::Nothing,
+        };
+        match out {
+            Outcome::Nothing => {}
+            Outcome::Close => self.devpop.close(),
+            Outcome::Jump(j) => {
+                self.devpop.close();
+                match j {
+                    crate::devpop::Jump::Settings(page) => self.jump_to("settings", &format!("tab:{page}")),
+                    crate::devpop::Jump::Drivers => self.jump_to("store", "drivers"),
+                    crate::devpop::Jump::None => {}
+                }
+            }
+            Outcome::Act(crate::devpop::Act::ToggleSoundMute) => {
+                // IYAKKI's software volume carries the output's volume: mute it in Settings -> Sound (the level is kept)
+                match self.env.services.update_sound(|s| s.muted = !s.muted) {
+                    Ok(now) if now.muted => self.say_info("Muted.".to_string()),
+                    Ok(now) => self.say_info(format!("Sound on, volume {}%.", now.volume_pct)),
+                    Err(e) => self.say(e),
+                }
+                self.devpop.invalidate();
+            }
+            Outcome::Act(a) => {
+                let p = self.dev_probe();
+                match crate::devpop::run_act(&p, &a) {
+                    Ok(m) => self.say_info(m),
+                    Err(m) => self.say(m),
+                }
+                self.devpop.invalidate();
+            }
+        }
+        self.stale = true;
+    }
+
+    /// Open or close the IYAKKI menu (F10, a click on the name in the launcher's top bar).
+    fn toggle_brand(&mut self) {
+        if self.session.is_none() {
+            return;
+        }
+        self.help = false;
+        self.devpop.close();
+        self.installs.close();
+        let (w, h) = self.size;
+        let s = scale_for(w, h);
+        // under the name in the launcher, under the header in an app
+        self.brand.anchor = match self.screen {
+            Screen::App(..) => (12.0 * s, HEADER_H * s + 6.0 * s),
+            _ => (34.0 * s, 76.0 * s),
+        };
+        self.brand.admin = self.session.as_ref().is_some_and(|x| x.policy.manage_settings);
+        self.brand.toggle();
+        self.stale = true;
+    }
+
+    /// Open or close the list of installs (the indicator beside the clock).
+    fn toggle_installs(&mut self) {
+        if self.session.is_none() {
+            return;
+        }
+        self.help = false;
+        self.devpop.close();
+        self.brand.close();
+        self.installs.toggle();
+        if let Some(cx) = self.cx() {
+            self.installs.poll(&cx, true);
+        }
+        self.stale = true;
+    }
+
+    /// The facts a page of the IYAKKI menu needs, read when it opens.
+    fn brand_opened(&mut self, page: crate::brandmenu::Page) {
+        use crate::brandmenu::Page;
+        match page {
+            Page::Install => {
+                let svc = self.env.services.clone();
+                // what is installed, what cannot run, what the catalogue installs underneath: programs are started for their versions,
+                // so off the screen's thread (the page says "checking..." until it arrives); tests read it at once
+                self.brand.presence.clear();
+                #[cfg(test)]
+                self.brand.set_facts(iyakki_agent::quickinstall::gather_facts(&svc));
+                #[cfg(not(test))]
+                {
+                    let slot = self.facts_slot.clone();
+                    *slot.lock().unwrap() = None;
+                    let _ = std::thread::Builder::new().name("iyakki-install-facts".into()).spawn(move || {
+                        let f = iyakki_agent::quickinstall::gather_facts(&svc);
+                        *slot.lock().unwrap() = Some(f);
+                    });
+                }
+                self.brand.window = iyakki_agent::webengine::host_session();
+                // what the vendors publish as newer (network: on a thread of its own, the page shows it when it arrives)
+                #[cfg(not(test))]
+                {
+                    let (slot, svc) = (self.latest_slot.clone(), self.env.services.clone());
+                    *slot.lock().unwrap() = None;
+                    let _ = std::thread::Builder::new().name("iyakki-upgrade-check".into()).spawn(move || {
+                        let r = iyakki_agent::quickinstall::check_upgrades(&svc);
+                        *slot.lock().unwrap() = Some(r);
+                    });
+                }
+                self.brand.latest.clear();
+                self.brand.failed = iyakki_agent::quickinstall::failed_items(self.installs.jobs());
+            }
+            Page::Media => {
+                iyakki_agent::player::register_dir(self.env.services.clis.bin_dir());
+                self.brand.players = crate::brandmenu::players_found(&crate::brandmenu::on_path);
+            }
+            Page::Mac => {
+                let p = self.dev_probe();
+                self.devpop.refresh_in_background(&p);
+                self.brand.mac = self.devpop.snapshot();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_brand(&mut self, ev: &Event) {
+        use crate::brandmenu::Outcome;
+        let out = match ev {
+            Event::Key(k) => self.brand.handle_key(k),
+            other => self.brand.handle_hit(other),
+        };
+        match out {
+            Outcome::Nothing => {}
+            Outcome::Close => self.brand.close(),
+            Outcome::Opened(p) => self.brand_opened(p),
+            Outcome::Install(item) => self.quick_install(item),
+            Outcome::ShowInstalls => {
+                self.brand.close();
+                self.toggle_installs();
+                if !self.installs.open {
+                    self.toggle_installs();
+                }
+            }
+            Outcome::Play(path) => self.brand_play(&path),
+            Outcome::StopMedia => {
+                iyakki_agent::media::shared().stop();
+                self.brand.note = Some(("Stopped.".into(), true));
+            }
+            Outcome::Jump(app, item) => {
+                self.brand.close();
+                if app == "devices" {
+                    self.toggle_devices();
+                } else {
+                    self.jump_to(app, &item);
+                }
+            }
+        }
+        self.stale = true;
+    }
+
+    /// Start the jobs of a Quick install (administrators), in dependency order.
+    fn quick_install(&mut self, item: iyakki_agent::quickinstall::Item) {
+        use iyakki_agent::quickinstall as qi;
+        let Some(sess) = self.session.clone() else { return };
+        if !sess.policy.manage_settings {
+            self.brand.note = Some((format!("Only an administrator can install software for the whole machine (your role is {}).", sess.role.name()), false));
+            return;
+        }
+        let svc = self.env.services.clone();
+        let launch = match self.quick_launch.clone() {
+            Some(l) => l,
+            None => match qi::Launch::this_program(svc.dir()) {
+                Ok(l) => l,
+                Err(e) => {
+                    self.brand.note = Some((e, false));
+                    return;
+                }
+            },
+        };
+        let present: Vec<qi::Item> = self.brand.presence.iter().filter(|(_, p)| p.present()).map(|(i, _)| *i).collect();
+        // Indic-TTS is deployed through the Platform services review once k3s is there
+        if item == qi::Item::IndicTts && present.contains(&qi::Item::K3s) {
+            self.env.audit.record(&sess.user, "quickinstall.handoff", "indic-tts");
+            self.brand.close();
+            self.jump_to("settings", "platform:indic-tts");
+            return;
+        }
+        match qi::start(&svc.jobs, &sess.user, item, &|i| present.contains(&i), &launch) {
+            Ok(started) if item == qi::Item::IndicTts => {
+                let steps: Vec<String> = started.iter().map(|j| j.label.clone()).collect();
+                self.env.audit.record(&sess.user, "quickinstall.start", &format!("indic-tts ({})", steps.join(", ")));
+                self.brand.note = Some((format!("Started: {}. When k3s is Ready, choose Indic-TTS again: its deploy review opens (Platform services).", steps.join(", ")), true));
+                if let Some(cx) = self.cx() {
+                    self.installs.poll(&cx, true);
+                }
+            }
+            Ok(started) => {
+                let steps: Vec<String> = started.iter().map(|j| j.label.clone()).collect();
+                self.env.audit.record(&sess.user, "quickinstall.start", &format!("{} ({})", item.id(), steps.join(", ")));
+                self.brand.note = Some((format!("Started: {}. Progress is beside the clock.", steps.join(", then ")), true));
+                if let Some(cx) = self.cx() {
+                    self.installs.poll(&cx, true);
+                }
+            }
+            Err(e) => self.brand.note = Some((e, false)),
+        }
+    }
+
+    /// Play a file from the menu's Media page in the shared player (MEDIA's own).
+    fn brand_play(&mut self, path: &str) {
+        let Some(sess) = self.session.clone() else { return };
+        let p = std::path::Path::new(path);
+        if !p.is_file() {
+            self.brand.note = Some((format!("No such file: {path}"), false));
+            return;
+        }
+        if !sess.policy.allows_read(&sess.user, path) {
+            self.brand.note = Some((format!("Your account may not read {path}."), false));
+            return;
+        }
+        // video and every sound but MP3 play in MEDIA's own player (ffmpeg decodes, IYAKKI draws the picture)
+        if iyakki_agent::player::available() && !iyakki_agent::media::is_mp3(path) {
+            self.env.audit.record(&sess.user, "media.play", path);
+            self.brand.close();
+            self.jump_to("media", &format!("play:{path}"));
+            return;
+        }
+        let label = p.file_name().map_or(path.to_string(), |n| n.to_string_lossy().into_owned());
+        match iyakki_agent::media::shared().play(&sess.user, &label, path) {
+            Ok(()) => {
+                self.env.audit.record(&sess.user, "media.play", path);
+                self.brand.note = Some((format!("Playing {label}."), true));
+            }
+            Err(e) => self.brand.note = Some((format!("Could not play it: {e}"), false)),
+        }
+    }
+
+    fn handle_installs(&mut self, ev: &Event) {
+        use crate::installpop::Outcome;
+        let Some(cx) = self.cx() else { return };
+        match self.installs.handle(ev, &cx) {
+            Outcome::Nothing => {}
+            Outcome::Close => self.installs.close(),
+            Outcome::OpenRuns => {
+                self.installs.close();
+                self.jump_to("runs", "jobs");
+            }
+        }
+        self.stale = true;
+    }
+
+    /// Open an app and ask it to show one thing (`tab:network` in Settings, `drivers` in the Store).
+    fn jump_to(&mut self, app: &str, item: &str) {
+        self.open_linked(app);
+        if let (Some(cx), Screen::App(a, _)) = (self.cx(), &mut self.screen) {
+            a.open_item(item, &cx);
+        }
     }
 
     fn inbox_allowed(&self) -> bool {
@@ -601,6 +1088,8 @@ impl Shell {
     /// Back out of the current app: to the app that was kept aside, or the launcher.
     fn leave_app(&mut self) {
         self.ctx = None;
+        self.custom_open = None;
+        self.custom_at = 0;
         self.screen = match self.stash.take() {
             Some((app, pa)) => Screen::App(app, pa),
             None => Screen::Launcher,
@@ -608,6 +1097,61 @@ impl Shell {
     }
 
     /// Open the app a notification points to.
+    /// An app asked for another one (the IDE opens a table in DATA). The asking app is kept aside, still running, and
+    /// comes back with Back; apps other than DATA replace it, as before.
+    fn open_linked_from_app(&mut self, app: &str) {
+        // the IDE's Run for a tile app (a folder, looked at live as an unsigned dev app) and Open for an installed one
+        if let Some(rest) = app.strip_prefix("tile-preview:").or_else(|| app.strip_prefix("tile-open:")) {
+            let preview = app.starts_with("tile-preview:");
+            let prev = std::mem::replace(&mut self.screen, Screen::Launcher);
+            if let Screen::App(a, pa) = prev {
+                if self.stash.is_none() {
+                    self.stash = Some((a, pa));
+                }
+            } else {
+                self.screen = prev;
+            }
+            if preview {
+                let user = self.session.as_ref().map(|s| s.user.clone()).unwrap_or_default();
+                match iyakki_agent::store::tilehub::preview_entry(&user, std::path::Path::new(rest)) {
+                    Ok(e) => self.open_custom(e),
+                    Err(m) => self.say(format!("Could not run the app: {m}")),
+                }
+            } else {
+                self.open_custom_by_name(rest);
+            }
+            if !matches!(&self.screen, Screen::App(..)) || self.custom_open.is_none() {
+                self.leave_app();
+            }
+            return;
+        }
+        // RUNS asking to show a run's task or row: back to the IDE that is kept aside (the caller then hands it the item)
+        if app == "ide" {
+            if self.stash.is_some() {
+                self.leave_app();
+            }
+            return;
+        }
+        if (app == "data" || app == "browser" || app == "runs") && self.stash.is_none() {
+            let target = match app {
+                "data" => PApp::Data,
+                "runs" => PApp::Runs,
+                _ => PApp::Browser,
+            };
+            let prev = std::mem::replace(&mut self.screen, Screen::Launcher);
+            match prev {
+                Screen::App(a, pa) if pa != target => self.stash = Some((a, pa)),
+                other => self.screen = other,
+            }
+            self.open_linked(app);
+            if !matches!(&self.screen, Screen::App(_, pa) if *pa == target) {
+                self.leave_app();
+            }
+            return;
+        }
+        self.open_linked(app);
+    }
+
     fn open_linked(&mut self, app: &str) {
         if let Some(pa) = PApp::ALL.into_iter().find(|a| a.id() == app) {
             if pa != PApp::Inbox {
@@ -622,6 +1166,11 @@ impl Shell {
     pub(crate) fn show_app_for_test(&mut self, app: Box<dyn crate::apps::App>, id: PApp) {
         self.screen = Screen::App(app, id);
         self.stale = true;
+    }
+
+    /// Run Quick install's jobs with another program (the screenshot tool uses a stand-in script).
+    pub fn set_quick_launch_for_demo(&mut self, l: iyakki_agent::quickinstall::Launch) {
+        self.quick_launch = Some(l);
     }
 
     pub fn open_for_demo(&mut self, id: &str) -> bool {
@@ -646,12 +1195,28 @@ impl Shell {
         let b = match &self.session {
             Some(s) => {
                 let c = self.env.services.inbox.counts(&s.user, iyakki_agent::clock::now_unix());
-                Badge { unread: c.unread, approvals: self.env.services.approvals(&s.user).len() + self.env.services.secret_requests.pending(&s.user).len(), overdue: c.overdue }
+                Badge { unread: c.unread, approvals: self.env.services.approvals(&s.user).len() + self.env.services.secret_requests.pending(&s.user).len() + self.env.services.browser.consent.pending(&s.user).len(), overdue: c.overdue }
             }
             None => Badge::default(),
         };
         if b != self.badge {
             self.badge = b;
+            self.stale = true;
+        }
+    }
+
+    /// A detached job ended (see `docs/JOBS.md`): one note in the inbox for each, whichever app is open, so the bell shows it and
+    /// the note opens the Jobs list. The chat that started the job shows its own event; this is for the person who is elsewhere.
+    pub fn announce_finished_jobs(&mut self) {
+        let Some(user) = self.session.as_ref().map(|s| s.user.clone()) else { return };
+        for j in self.env.services.jobs.take_finished_all(&user, iyakki_agent::jobs::Channel::Inbox) {
+            let (kind, word) = match j.state {
+                iyakki_agent::jobs::State::Succeeded => (iyakki_agent::inbox::Kind::Agent, "finished"),
+                iyakki_agent::jobs::State::Stopped => (iyakki_agent::inbox::Kind::Info, "was stopped"),
+                _ => (iyakki_agent::inbox::Kind::Warning, "did not finish"),
+            };
+            let _ = self.env.services.notify(&user, kind, &format!("Job “{}” {word}", j.label), &iyakki_agent::jobs::Jobs::finish_line(&j), Some(iyakki_agent::inbox::Link::new("runs", "jobs")));
+            self.refresh_badge();
             self.stale = true;
         }
     }
@@ -718,6 +1283,9 @@ impl Shell {
     pub fn handle(&mut self, ev: &Event) {
         use crate::ui::clipboard;
         let (prev_mouse, prev_sel) = (self.mouse, self.sel);
+        if let Some((agent, logout)) = crate::agent_login::take_request() {
+            self.login_request(agent, logout);
+        }
         if let Event::MouseMove(x, y) = ev {
             self.mouse = (*x, *y);
         }
@@ -728,14 +1296,154 @@ impl Shell {
             self.tick += 1;
             self.check_alarms(iyakki_agent::clock::now_unix());
             self.tick_stash();
+            // developer mode: a paired computer asked for an app on the screen (`iyakki dev run`); it waits for someone to sign in
+            if self.tick % 10 == 3 && self.session.is_some() {
+                for name in iyakki_agent::devmode::take_open(self.env.services.dir()) {
+                    if self.open_custom_by_name(&name) {
+                        self.stale = true;
+                    }
+                }
+            }
+            // the assistant's browser tab (the engine behind the browser_* tools) is serviced whichever app is open
+            if let Some(sess) = &self.session {
+                crate::apps::web_agent::tick(&self.env.services, &self.env.audit, sess);
+            }
             if self.tick % 15 == 0 {
                 self.refresh_badge();
+                // the clock changes the picture only when what it shows changes
+                if self.session.is_some() {
+                    let t = clock_time_text(&self.clock);
+                    if t != self.clock_text {
+                        self.clock_text = t;
+                        self.stale = true;
+                    }
+                }
+            }
+            if self.session.is_some() {
+                if self.devpop.wants_refresh() {
+                    let p = self.dev_probe();
+                    self.devpop.refresh_in_background(&p);
+                }
+                if self.devpop.take_fresh() {
+                    self.stale = true;
+                    if self.brand.open && self.brand.page == crate::brandmenu::Page::Mac {
+                        self.brand.mac = self.devpop.snapshot();
+                    }
+                }
+                // the installer indicator: read the installer jobs (the list throttles itself), animate while one runs
+                let busy = self.installs.open || matches!(self.installs.badge(), crate::installpop::Badge::Running { .. });
+                if self.tick % 30 == 0 || (busy && self.tick % 10 == 0) {
+                    if let Some(cx) = self.cx() {
+                        if self.installs.poll(&cx, false) {
+                            self.stale = true;
+                        }
+                    }
+                }
+                if self.installs.frame_due() {
+                    self.stale = true;
+                }
+                // Quick install: who is signed in to Claude Code and Copilot (from the remembered status; no program runs here)
+                if self.brand.open && self.brand.page == crate::brandmenu::Page::Install && (self.tick % 30 == 11 || self.brand.signin.is_empty()) {
+                    if let Some(cx) = self.cx() {
+                        let now: Vec<_> = [iyakki_agent::quickinstall::Item::ClaudeCode, iyakki_agent::quickinstall::Item::Copilot]
+                            .into_iter()
+                            .filter_map(|it| {
+                                let agent = it.cli_id().and_then(crate::agent_login::agent_of_cli)?;
+                                Some((it, crate::agent_login::state(&cx, agent, it.cli_id().is_some_and(|c| cx.services.clis.is_installed(c).is_some()))))
+                            })
+                            .collect();
+                        if now != self.brand.signin {
+                            self.brand.signin = now;
+                            self.stale = true;
+                        }
+                    }
+                }
+                // Quick install: which items' last install failed (Retry), and newer versions found
+                if self.brand.open && self.brand.page == crate::brandmenu::Page::Install {
+                    let failed = iyakki_agent::quickinstall::failed_items(self.installs.jobs());
+                    if failed != self.brand.failed {
+                        self.brand.failed = failed;
+                        self.stale = true;
+                    }
+                }
+                if self.brand.open && self.brand.page == crate::brandmenu::Page::Install {
+                    if let Some(f) = self.facts_slot.lock().ok().and_then(|mut x| x.take()) {
+                        self.brand.set_facts(f);
+                        self.stale = true;
+                    }
+                }
+                // newer versions found for Quick install
+                if self.brand.open && self.brand.page == crate::brandmenu::Page::Install {
+                    if let Some(l) = self.latest_slot.lock().ok().and_then(|mut x| x.take()) {
+                        self.brand.latest = l;
+                        self.stale = true;
+                    }
+                }
+                // Developer mode's sign in the top bar
+                if self.tick % 30 == 3 {
+                    let d = iyakki_agent::devmode::DevMode::open(self.env.services.dir());
+                    let sign = d.is_on().then(|| if d.pairing().is_some() { "DEV \u{00b7} pairing" } else { "DEV" });
+                    if sign != self.dev_sign {
+                        self.dev_sign = sign;
+                        self.stale = true;
+                    }
+                }
+                // Settings → Time "Detect automatically": looked up again when due (only while it is switched on)
+                if self.tick % 300 == 7 {
+                    iyakki_agent::tzdetect::refresh_in_background(&self.env.services, false, Arc::new(|z: &str| iyakki_agent::clock::set_chosen_zone(z)));
+                }
+            }
+            // a Quick install job installed k3s, Ollama or Lemonade: start (and connect) it here, where the supervisors live
+            if self.tick % 90 == 45 {
+                for r in iyakki_agent::quickinstall::service_requests(&self.env.services) {
+                    match r {
+                        Ok(m) => self.say_info(m),
+                        Err(e) => self.say(e),
+                    }
+                }
             }
             if self.tick % 90 == 0 {
                 self.check_new_devices();
             }
+            if self.tick % 60 == 0 {
+                self.check_cluster_alerts();
+            }
+            if self.tick % 45 == 0 {
+                self.announce_finished_jobs();
+            }
             if self.toast.as_ref().is_some_and(|t| t.1 <= self.tick) {
                 self.toast = None;
+            }
+            // the sign-in dialog reads what the vendor program printed; sign-outs report when they are done
+            // the browser was left: the sign-in dialog comes back, with the clipboard offer
+            if self.login.as_ref().is_some_and(|m| m.hidden()) && !matches!(self.screen, Screen::App(_, PApp::Browser)) {
+                if let Some(cx) = self.cx() {
+                    if let Some(m) = self.login.as_mut() {
+                        m.show_again(&cx);
+                    }
+                    self.stale = true;
+                }
+            }
+            if self.login.as_ref().is_some_and(|m| !m.hidden()) && self.tick % 15 == 7 {
+                if let Some(m) = self.login.as_mut() {
+                    m.refresh_clip_offer();
+                }
+            }
+            if self.login.is_some() && self.tick % 3 == 0 {
+                if let Some(cx) = self.cx() {
+                    if self.login.as_mut().is_some_and(|m| m.tick(&cx)) {
+                        self.stale = true;
+                    }
+                }
+            }
+            if self.tick % 10 == 5 {
+                for (m, ok) in crate::agent_login::take_results() {
+                    if ok {
+                        self.say_info(m);
+                    } else {
+                        self.say(m);
+                    }
+                }
             }
         }
         match ev {
@@ -777,6 +1485,18 @@ impl Shell {
         match ev {
             // the radio's display moves with the music: draw every tick while it is on screen and playing
             Event::Tick => {
+                // a camera plugged in or pulled out changes the CAMERA tile within two seconds
+                if matches!(self.screen, Screen::Launcher) && (self.tick % 60 == 0 || !self.camera.scanned()) && self.camera.scan() {
+                    self.stale = true;
+                }
+                // the "camera in use by the assistant" sign comes and goes (and its time moves) on every screen
+                if self.tick % 15 == 0 {
+                    let on = self.env.services.camera.in_use().is_some();
+                    if on || on != self.cam_sign {
+                        self.cam_sign = on;
+                        self.stale = true;
+                    }
+                }
                 if matches!(self.screen, Screen::App(_, PApp::Radio)) && self.env.services.radio.is_active() {
                     self.stale = true;
                 }
@@ -822,10 +1542,38 @@ impl Shell {
         match ev {
             // a ringing alarm takes every key and click until it is dismissed or snoozed
             _ if self.ring.is_some() && !matches!(ev, Event::Tick | Event::MouseMove(..)) => self.handle_ring(ev),
+            // the sign-in dialog takes every key, click and pasted text
+            _ if self.login.as_ref().is_some_and(|m| !m.hidden()) && !matches!(ev, Event::Tick | Event::MouseMove(..) | Event::MouseUp(..) | Event::FocusAt(..)) => self.handle_login(ev),
+            // a Login or Logout button of any screen
+            Event::Tab(n) if self.session.is_some() && self.clip.is_none() && crate::agent_login::agent_of_tab(*n).is_some() => {
+                if let Some((agent, logout)) = crate::agent_login::agent_of_tab(*n) {
+                    self.login_request(agent, logout);
+                }
+            }
+            // the host-files dialog (files dropped on the window) takes every key and click
+            _ if self.hostdlg.is_some() && !matches!(ev, Event::MouseMove(..)) => self.handle_hostdlg(ev),
             // a screenshot being framed takes every key and click
             _ if matches!(self.shot, Shot::Select { .. } | Shot::Review { .. }) => self.handle_shot(ev),
             // F12 (or Print Screen) starts a screenshot anywhere after sign-in
             Event::Key(Key::F(12)) if self.session.is_some() && self.clip.is_none() => self.start_shot(),
+            // F8 (or the Devices button) opens the devices popover; F7 (or the clock) opens Settings, Time
+            Event::Key(Key::F(8)) if self.session.is_some() && self.clip.is_none() => self.toggle_devices(),
+            Event::Key(Key::F(7)) if self.session.is_some() && self.clip.is_none() => {
+                self.devpop.close();
+                self.brand.close();
+                self.installs.close();
+                self.help = false;
+                self.jump_to("settings", "tab:time");
+            }
+            // F10 (or a click on the name in the launcher's top bar) opens the IYAKKI menu; the indicator beside the clock the installs
+            Event::Key(Key::F(10)) if self.session.is_some() && self.clip.is_none() => self.toggle_brand(),
+            Event::Tab(crate::installpop::INDICATOR) if self.session.is_some() && self.clip.is_none() => self.toggle_installs(),
+            Event::Tab(DEV_SIGN) if self.session.is_some() && self.clip.is_none() => self.jump_to("settings", "tab:developer"),
+            // the menu takes its keys, clicks, pasted text and the wheel while it is open
+            Event::Key(_) | Event::Tab(_) | Event::Scroll(_) | Event::Paste(_) | Event::FocusAt(..) if self.brand.open && self.session.is_some() && self.clip.is_none() && !self.help => self.handle_brand(ev),
+            Event::Key(_) | Event::Tab(_) | Event::Scroll(_) | Event::AreaAt(..) | Event::MouseUp(..) if self.installs.open && self.session.is_some() && self.clip.is_none() && !self.help => self.handle_installs(ev),
+            // the popover takes its keys, clicks and the wheel while it is open
+            Event::Key(_) | Event::Tab(_) | Event::Scroll(_) if self.devpop.open && self.session.is_some() && self.clip.is_none() && !self.help => self.handle_devpop(ev),
             // F1 opens the help popup anywhere after sign-in; while it is open it takes every key
             Event::Key(Key::F(1)) if self.session.is_some() && self.clip.is_none() => self.help = !self.help,
             // F9 (or the bell) opens the inbox anywhere after sign-in
@@ -871,6 +1619,17 @@ impl Shell {
             Event::MouseRight(..) => self.open_clipboard_picker(),
             _ if self.clip.is_some() => self.handle_clip_overlay(ev),
             _ => self.route(ev),
+        }
+    }
+
+    /// The dev cluster went down or its disk is nearly full: tell the signed-in administrator in the INBOX (once per event).
+    fn check_cluster_alerts(&mut self) {
+        let Some(user) = self.session.as_ref().filter(|s| s.policy.manage_settings).map(|s| s.user.clone()) else { return };
+        for a in self.env.services.k3sdev.take_alerts() {
+            let (title, body) = a.title_body();
+            self.env.audit.record(&user, "devcluster.alert", &title);
+            let _ = self.env.services.notify(&user, iyakki_agent::inbox::Kind::Warning, &title, &body, Some(iyakki_agent::inbox::Link::new("settings", "")));
+            self.say(format!("{title}. See Settings \u{2192} Dev cluster or SYSTEM."));
         }
     }
 
@@ -1065,6 +1824,166 @@ impl Shell {
         }
     }
 
+    /// An app asked for the options of a shared host folder (window mode).
+    fn host_mount_menu(&mut self, name: &str) {
+        if !iyakki_agent::hostfiles::enabled() {
+            self.say(iyakki_agent::hostfiles::UNAVAILABLE);
+            return;
+        }
+        let Some(cx) = self.cx() else { return };
+        self.hostdlg = Some(Box::new(crate::apps::hostfiles::HostDialog::mount_menu(crate::apps::hostfiles::HostEnv::for_cx(&cx), rgb(238, 226, 112), name)));
+        self.stale = true;
+    }
+
+    /// An app asked to save a file on the host computer: the save dialog (window mode only).
+    fn host_save(&mut self, name: &str, bytes: &[u8]) {
+        if !iyakki_agent::hostfiles::enabled() {
+            self.say(iyakki_agent::hostfiles::UNAVAILABLE);
+            return;
+        }
+        let Some(cx) = self.cx() else { return };
+        self.hostdlg = Some(Box::new(crate::apps::hostfiles::HostDialog::save_bytes(crate::apps::hostfiles::HostEnv::for_cx(&cx), rgb(238, 226, 112), name, bytes)));
+        self.stale = true;
+    }
+
+    /// Tell the app on screen what a drop brought in (the IDE opens it, the media library looks again).
+    fn tell_app_dropped(&mut self, files: &[std::path::PathBuf]) {
+        let Some(cx) = self.cx() else { return };
+        if let Screen::App(app, _) = &mut self.screen {
+            app.dropped_done(files, &cx);
+        }
+    }
+
+    /// The Login button of an agent was pressed (or its Logout button): open the dialog, or sign out.
+    fn login_request(&mut self, agent: &'static str, logout: bool) {
+        let Some(cx) = self.cx() else { return };
+        self.brand.close();
+        self.installs.close();
+        self.devpop.close();
+        if logout {
+            crate::agent_login::sign_out_in_background(&cx, agent);
+            self.say_info(format!("Signing out of {}…", crate::agent_login::name_of(agent)));
+        } else {
+            let mut m = Box::new(crate::agent_login::LoginModal::new(agent));
+            if agent != iyakki_agent::extagent::CLAUDE_CODE {
+                m.start(&cx);
+            }
+            self.login = Some(m);
+        }
+        self.stale = true;
+    }
+
+    fn handle_login(&mut self, ev: &Event) {
+        let Some(cx) = self.cx() else {
+            self.login = None;
+            return;
+        };
+        if let Some(m) = self.login.as_mut() {
+            match m.handle(ev, &cx) {
+                crate::agent_login::Out::Close => self.login = None,
+                crate::agent_login::Out::OpenBrowser(url) => {
+                    m.hide();
+                    self.open_in_browser(&url);
+                }
+                crate::agent_login::Out::Stay => {}
+            }
+        }
+        self.stale = true;
+    }
+
+    /// Show an address in the browser tile, in a new tab, keeping the screen it was opened from aside (Back returns to it). The sign-in
+    /// dialog is hidden meanwhile and comes back by itself when the browser is left (see the heartbeat).
+    fn open_in_browser(&mut self, url: &str) {
+        let prev = std::mem::replace(&mut self.screen, Screen::Launcher);
+        if let Screen::App(a, pa) = prev {
+            if self.stash.is_none() && pa != PApp::Browser {
+                self.stash = Some((a, pa));
+            } else if pa == PApp::Browser {
+                self.screen = Screen::App(a, pa);
+            }
+        } else {
+            self.screen = prev;
+        }
+        if !matches!(self.screen, Screen::App(_, PApp::Browser)) {
+            self.open(PApp::Browser);
+        }
+        if let (Some(cx), Screen::App(a, _)) = (self.cx(), &mut self.screen) {
+            a.open_item(&format!("newtab:{url}"), &cx);
+        }
+        if !matches!(self.screen, Screen::App(_, PApp::Browser)) {
+            // the browser could not be opened (the role may not use it): the dialog stays
+            if let Some(m) = self.login.as_mut() {
+                m.show_hidden_again_for_shell();
+            }
+            self.say("The browser is not available to your account: open the address from the QR code or copy it.");
+        }
+    }
+
+    fn handle_hostdlg(&mut self, ev: &Event) {
+        use crate::apps::hostfiles::Out;
+        let Some(d) = self.hostdlg.as_mut() else { return };
+        match d.handle(ev) {
+            Out::Close => self.hostdlg = None,
+            Out::Imported(files) => {
+                let label = d_label(self.hostdlg.as_deref());
+                self.say_info(format!("Imported {} file{} into {label}", files.len(), if files.len() == 1 { "" } else { "s" }));
+                self.tell_app_dropped(&files);
+            }
+            Out::Linked(n) => {
+                self.say_info(format!("host:{n} is shared read-only"));
+                self.tell_app_dropped(&[]);
+            }
+            Out::Unlinked(n) => self.say_info(format!("host:{n} is no longer shared")),
+            Out::Stay => {}
+        }
+        self.stale = true;
+    }
+
+    /// Files are being dragged over the window (window mode): show where a drop would go.
+    pub fn set_drag_hover(&mut self, on: bool) {
+        if self.drag_over != on {
+            self.drag_over = on;
+            self.stale = true;
+        }
+    }
+
+    /// Files or folders were dropped on the window. The app on screen may take them (DATA opens tables); otherwise a dialog
+    /// offers to import them into the Uploads folder. Only in window mode, after sign-in.
+    pub fn drop_files(&mut self, paths: Vec<std::path::PathBuf>) {
+        self.drag_over = false;
+        self.stale = true;
+        if self.session.is_none() || paths.is_empty() {
+            return;
+        }
+        if !iyakki_agent::hostfiles::enabled() {
+            self.say("Dropped files can only be imported in the desktop window");
+            return;
+        }
+        let Some(cx) = self.cx() else { return };
+        let action = match &mut self.screen {
+            Screen::App(app, _) => app.on_drop(&paths, &cx),
+            _ => crate::apps::DropAction::Uploads,
+        };
+        let env = crate::apps::hostfiles::HostEnv::for_cx(&cx);
+        let accent = rgb(238, 226, 112);
+        match action {
+            crate::apps::DropAction::Taken => {}
+            crate::apps::DropAction::Ignore(m) => self.say(m),
+            crate::apps::DropAction::Uploads => self.hostdlg = Some(Box::new(crate::apps::hostfiles::HostDialog::import_paths(env, accent, paths))),
+            crate::apps::DropAction::Into { dest, label } => self.hostdlg = Some(Box::new(crate::apps::hostfiles::HostDialog::import_paths(env.with_dest(dest, &label), accent, paths))),
+        }
+    }
+
+    /// "Host access: 2 folders" while folders of the host computer are shared with this account (for the window title).
+    pub fn host_access_chip(&self) -> Option<String> {
+        let s = self.session.as_ref()?;
+        if !iyakki_agent::hostfiles::enabled() {
+            return None;
+        }
+        let n = iyakki_agent::hostfiles::active_mounts(self.env.services.dir(), &s.user).len();
+        (n > 0).then(|| format!("Host access: {n} folder{}", if n == 1 { "" } else { "s" }))
+    }
+
     /// Resolve a click against the regions drawn last frame (topmost first).
     fn click(&mut self, x: i32, y: i32) {
         let (w, _) = self.size;
@@ -1072,6 +1991,22 @@ impl Shell {
         let hit = self.hits.iter().rev().find(|h| h.rect.contains(x, y)).cloned();
         if self.ctx.is_some() && self.ring.is_none() && !self.help && matches!(self.shot, Shot::Off) {
             self.handle_ctx(&Event::MouseDown(x, y));
+            return;
+        }
+        if self.hostdlg.is_some() {
+            if let Some(h) = hit {
+                if h.label != "backdrop" {
+                    self.handle_hostdlg(&h.ev);
+                }
+            }
+            return;
+        }
+        if self.login.as_ref().is_some_and(|m| !m.hidden()) {
+            if let Some(h) = hit {
+                if h.label != "backdrop" && !matches!(h.ev, Event::Focus(_)) {
+                    self.handle_login(&h.ev);
+                }
+            }
             return;
         }
         if matches!(self.shot, Shot::Select { .. }) {
@@ -1087,6 +2022,32 @@ impl Shell {
         }
         if self.help {
             self.help = false;
+            return;
+        }
+        if self.devpop.open && self.clip.is_none() && !self.help {
+            match hit {
+                Some(h) => self.dispatch(&h.ev),
+                None => self.devpop.close(), // a click outside closes it
+            }
+            return;
+        }
+        // the IYAKKI menu and the installs list: their own regions answer, a click outside closes them
+        if (self.brand.open || self.installs.open) && self.clip.is_none() {
+            match hit {
+                Some(h) => {
+                    let ev = match h.ev {
+                        Event::Focus(i) => Event::FocusAt(i, x as f32 - h.rect.x),
+                        Event::Area(i) => Event::AreaAt(i, x as f32 - h.rect.x, y as f32 - h.rect.y),
+                        other => other,
+                    };
+                    self.dispatch(&ev);
+                }
+                None => {
+                    self.brand.close();
+                    self.installs.close();
+                }
+            }
+            self.stale = true;
             return;
         }
         if self.clip.is_some() {
@@ -1211,10 +2172,14 @@ impl Shell {
                 // a bug inside one app must not take the whole shell down: the app is closed and the person is told
                 let mut crashed = None;
                 let mut request = None;
+                let mut host_save = None;
+                let mut mount_menu = None;
                 let flow = match (&mut self.screen, cx) {
-                    (Screen::App(app, _), Some(cx)) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (app.handle(ev, &cx), app.take_request()))) {
-                        Ok((f, r)) => {
+                    (Screen::App(app, _), Some(cx)) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (app.handle(ev, &cx), app.take_request(), app.take_host_save(), app.take_host_mount_menu()))) {
+                        Ok((f, r, save, menu)) => {
                             request = r;
+                            host_save = save;
+                            mount_menu = menu;
                             f
                         }
                         Err(_) => {
@@ -1227,10 +2192,21 @@ impl Shell {
                 if let Some(name) = crashed {
                     self.say(format!("{name} stopped because of an internal error. Details are in the system log."));
                 }
+                if let Some((name, bytes)) = host_save {
+                    self.host_save(&name, &bytes);
+                }
+                if let Some(name) = mount_menu {
+                    self.host_mount_menu(&name);
+                }
                 if back_click || matches!(flow, Flow::Back) {
                     self.leave_app();
-                } else if let Some((app, _item)) = request {
-                    self.open_linked(&app);
+                } else if let Some((app, item)) = request {
+                    self.open_linked_from_app(&app);
+                    if !item.is_empty() {
+                        if let (Some(cx), Screen::App(a, _)) = (self.cx(), &mut self.screen) {
+                            a.open_item(&item, &cx);
+                        }
+                    }
                 }
             }
         }
@@ -1243,8 +2219,46 @@ impl Shell {
         }
     }
 
+    fn open_item(&mut self, item: &LItem) {
+        match item {
+            // a greyed CAMERA tile says what is missing instead of opening
+            LItem::Sys(t) if t.app == PApp::Camera && !self.camera_ready() => self.say(self.camera.hint()),
+            LItem::Sys(t) => self.open(t.app),
+            LItem::App(e) => self.open_custom((**e).clone()),
+        }
+    }
+
+    /// Open a custom app in its own tile.
+    fn open_custom(&mut self, entry: iyakki_agent::store::tilehub::TileEntry) {
+        let Some(cx) = self.cx() else { return };
+        if !iyakki_agent::store::tilehub::allowed(&cx.session.policy) {
+            self.env.audit.record(&cx.session.user, "app.denied", &format!("tile:{}", entry.name));
+            self.say(format!("Your role ({}) can't run custom apps", cx.session.role.name()));
+            return;
+        }
+        let name = entry.name.clone();
+        let boxed = crate::apps::tile::open_entry(entry, &cx);
+        self.custom_open = Some(name);
+        self.screen = Screen::App(boxed, PApp::Browser);
+    }
+
+    /// Open a custom app by its id (the store's Open button, the IDE's Run).
+    pub fn open_custom_by_name(&mut self, name: &str) -> bool {
+        self.refresh_custom();
+        match self.custom.iter().find(|e| e.name == name).cloned() {
+            Some(e) => {
+                self.open_custom(e);
+                self.custom_open.is_some()
+            }
+            None => false,
+        }
+    }
+
     fn handle_launcher(&mut self, ev: &Event) {
-        let tiles = self.group_tiles();
+        if self.tick.saturating_sub(self.custom_at) > 60 || self.custom_at == 0 {
+            self.refresh_custom();
+        }
+        let tiles = self.group_items();
         let (w, h) = self.size;
         let s = scale_for(w, h);
         let n = tiles.len();
@@ -1281,7 +2295,7 @@ impl Shell {
                     self.sel = first - 1;
                 }
             }
-            Event::Key(Key::Enter) => self.open(tiles[self.sel].app),
+            Event::Key(Key::Enter) => self.open_item(&tiles[self.sel]),
             Event::Key(Key::Char(c)) => match c {
                 // the number keys open the Nth app of the whole list, whichever group is shown
                 '1'..='9' => {
@@ -1305,7 +2319,7 @@ impl Shell {
                 let nav = launcher::page_nav(w, h, s, pages);
                 if let Some(i) = rects.iter().position(|r| r.contains(*x, *y)) {
                     self.sel = first + i;
-                    self.open(tiles[first + i].app);
+                    self.open_item(&tiles[first + i]);
                 } else if let Some(i) = launcher::chip_rects(s, &labels).iter().position(|r| r.contains(*x, *y)) {
                     self.set_group(groups[i]);
                 } else if pages > 1 && nav.prev.contains(*x, *y) {
@@ -1321,8 +2335,10 @@ impl Shell {
                 } else if header_button(w, s, if power { 2 } else { 1 }).contains(*x, *y) {
                     self.start_shot();
                 } else if header_button(w, s, if power { 3 } else { 2 }).contains(*x, *y) {
+                    self.toggle_devices();
+                } else if header_button(w, s, if power { 4 } else { 3 }).contains(*x, *y) {
                     self.open_clipboard_picker();
-                } else if self.inbox_allowed() && header_button(w, s, if power { 4 } else { 3 }).contains(*x, *y) {
+                } else if self.inbox_allowed() && header_button(w, s, if power { 5 } else { 4 }).contains(*x, *y) {
                     self.open_inbox();
                 }
             }
@@ -1336,6 +2352,13 @@ impl Shell {
         self.size = (g.width(), g.height());
         let (w, h) = self.size;
         let s = scale_for(w, h);
+        let time_settings = self.env.services.settings.lock().ok().map(|st| st.get().time.clone());
+        let person = self.session.as_ref().filter(|_| self.tick % 15 == 0 || self.tick < 2 || !self.clock_ready || matches!(self.screen, Screen::App(_, PApp::Settings))).map(|se| crate::uisize::load_clock(self.env.services.dir(), &se.user));
+        self.clock.refresh(self.tick, time_settings.as_ref(), person);
+        // file names made by apps (CAMERA) carry the clock's local time
+        crate::camera::set_zone(time_settings.as_ref().map(|t| t.zone.clone()));
+        self.clock_ready = self.session.is_some();
+        self.clock_tip = None;
         g.hits.clear();
         g.clear_probes();
         g.mouse = self.mouse;
@@ -1362,8 +2385,32 @@ impl Shell {
                         crashed_title = Some(app.title());
                     }
                     // header drawn last so content scrolled above the area never shows through
-                    let sub = TILES.iter().find(|t| t.app == *pa).map_or("", |t| t.sub);
-                    crate::fx::app_header(g, w as f32, hh, s, app.title(), sub, app.icon(), app.accent(), tick, bell_rect(w, s).x - 12.0 * s);
+                    let sub = if self.custom_open.is_some() { "Custom app" } else { TILES.iter().find(|t| t.app == *pa).map_or("", |t| t.sub) };
+                    // where the clock goes (measured first so the title stops before it; drawn again after the header band,
+                    // which would otherwise paint over it)
+                    let hits_before = g.hits.len();
+                    let clock_box = app_clock(g, w, s, &self.clock);
+                    g.hits.truncate(hits_before);
+                    self.clock_tip = clock_box;
+                    // the installer indicator sits left of the clock while installs run (or just ended)
+                    let clock_left = clock_box.map_or(bell_rect(w, s).x, |b| b.x);
+                    let ind_w = self.installs.indicator_width(g, s);
+                    let title_limit = if ind_w > 0.0 && clock_left - ind_w - 6.0 * s > 300.0 * s { clock_left - ind_w - 6.0 * s } else { clock_left };
+                    crate::fx::app_header(g, w as f32, hh, s, app.title(), sub, app.icon(), app.accent(), tick, title_limit - 12.0 * s);
+                    if clock_box.is_some() {
+                        app_clock(g, w, s, &self.clock);
+                    }
+                    let mut dev_right = clock_left - 4.0 * s;
+                    if title_limit < clock_left {
+                        if let Some(b) = self.installs.draw_indicator(g, clock_left - 4.0 * s, 8.0 * s + 15.0 * s, s, tick) {
+                            dev_right = b.x - 6.0 * s;
+                        }
+                    } else {
+                        self.installs.anchor = None;
+                    }
+                    if let Some(sign) = self.dev_sign {
+                        draw_dev_sign(g, dev_right, 8.0 * s + 15.0 * s, s, sign, 300.0 * s);
+                    }
                     let acc = app.accent();
                     let cr = clip_rect(w, s);
                     let hot = g.hovered(cr);
@@ -1378,6 +2425,11 @@ impl Shell {
                     crate::fx::chrome_button(g, sr, s, hot, acc);
                     g.icon(Icon::Camera, sr.x + sr.w / 2.0, sr.y + sr.h / 2.0, 20.0 * s, MUTED);
                     g.hit(sr, Event::Key(Key::F(12)), "screenshot");
+                    let dr = dev_rect(w, s);
+                    let hot = g.hovered(dr) || self.devpop.open;
+                    crate::fx::chrome_button(g, dr, s, hot, acc);
+                    g.icon(Icon::Devices, dr.x + dr.w / 2.0, dr.y + dr.h / 2.0, 20.0 * s, MUTED);
+                    g.hit(dr, Event::Key(Key::F(8)), "devices");
                     let hr = help_rect(w, s);
                     let hot = g.hovered(hr);
                     crate::fx::chrome_button(g, hr, s, hot, acc);
@@ -1397,11 +2449,54 @@ impl Shell {
         if matches!(self.shot, Shot::Snap) {
             self.shot = Shot::Select { snap: g.pm.clone(), first: None };
         }
+        // the assistant's `screen_capture`: this frame is "the person's screen" (answered here because only the shell can see it)
+        {
+            let svc = &self.env.services;
+            svc.screen.set_present(true);
+            // the assistant's camera tools use the CAMERA app's code through this one backend
+            if !cfg!(test) && !svc.camera.present() {
+                svc.camera.set_backend(Some(Arc::new(crate::camera::agentcam::AgentCamera::system())));
+            }
+            if let Some(sess) = &self.session {
+                if svc.screen.wanted(&sess.user) {
+                    svc.screen.serve(&sess.user, || Some(iyakki_agent::screencap::Frame { w: g.pm.width(), h: g.pm.height(), rgba: g.pm.data().to_vec() }));
+                }
+            }
+            // developer mode's `iyakki dev screenshot` (only reachable from a paired computer while developer mode is on): whatever is drawn
+            if svc.screen.wanted(iyakki_agent::devmode::SCREEN_ANY) {
+                svc.screen.serve(iyakki_agent::devmode::SCREEN_ANY, || Some(iyakki_agent::screencap::Frame { w: g.pm.width(), h: g.pm.height(), rgba: g.pm.data().to_vec() }));
+            }
+        }
+        if let Some(d) = self.hostdlg.as_mut() {
+            d.render(g, R::new(0.0, 0.0, w as f32, h as f32), s, tick);
+        }
+        if self.drag_over && self.session.is_some() {
+            let dest = match &self.screen {
+                Screen::App(_, PApp::Data) => "the DATA viewer",
+                _ => "your Uploads folder",
+            };
+            crate::apps::hostfiles::drop_overlay(g, w as f32, h as f32, s, dest, rgb(238, 226, 112));
+        }
         if let Some(r) = &self.ring {
             draw_ring(g, w, h, s, r, self.tick);
         }
+        if let Some(b) = self.clock_tip.filter(|b| g.hovered(*b) && !self.devpop.open && !self.brand.open && !self.installs.open && self.session.is_some()) {
+            draw_clock_tip(g, w, h, s, b, &self.clock.tooltip());
+        }
+        if self.session.is_some() {
+            self.devpop.render(g, w, h, s);
+            self.installs.render(g, w, h, s, tick);
+            self.brand.render(g, w, h, s, tick);
+        }
+        if let (Some(m), true) = (self.login.as_mut(), self.session.is_some()) {
+            m.render(g, R::new(0.0, 0.0, w as f32, h as f32), s, tick);
+        }
         if let Some((t, _, info)) = &self.toast {
             crate::fx::toast(g, w as f32, h as f32, s, t, *info);
+        }
+        // the assistant is using the camera: a red sign on every screen, bottom left, while it lasts
+        if let Some(what) = self.env.services.camera.in_use() {
+            draw_camera_sign(g, h, s, &what);
         }
         if self.help {
             let (title, lines) = self.help_lines();
@@ -1650,37 +2745,61 @@ impl Shell {
         };
         lines.push(String::new());
         lines.push("Everywhere".to_string());
-        lines.extend(["F1 · this help".to_string(), "F9 or the bell · your inbox (notifications, tasks, approvals)".to_string(), "F12 or Print Screen · screenshot to the clipboard (click two corners, or Enter for the whole screen), then save a file or close".to_string(), "Esc · back".to_string(), "Ctrl+V · paste".to_string(), "Ctrl+Shift+V or right-click · clipboard history".to_string()]);
+        lines.extend(["F1 · this help".to_string(), "F9 or the bell · your inbox (notifications, tasks, approvals)".to_string(), "F10 or a click on the name IYAKKI · the IYAKKI menu (About, Quick install, Media player, Mac drivers)".to_string(), "F12 or Print Screen · screenshot to the clipboard (click two corners, or Enter for the whole screen), then save a file or close".to_string(), "Esc · back".to_string(), "Ctrl+V · paste".to_string(), "Ctrl+Shift+V or right-click · clipboard history".to_string()]);
         (format!("Help — {title}"), lines)
     }
 
     fn draw_launcher(&mut self, g: &mut Gfx, w: u32, h: u32, s: f32) {
         let Some(sess) = self.session.clone() else { return };
         // top bar
-        g.text(40.0 * s, 26.0 * s, 30.0 * s, TEXT, "IYAKKI", Face::Bold);
         let name_w = g.text_width(30.0 * s, "IYAKKI", Face::Bold);
+        // the name opens the IYAKKI menu (About, Quick install, Media player, Mac drivers)
+        let name_box = R::new(30.0 * s, 18.0 * s, name_w + 20.0 * s, 56.0 * s);
+        if g.hovered(name_box) || self.brand.open {
+            g.rrect(name_box.x, name_box.y, name_box.w, name_box.h, 12.0 * s, rgb(28, 36, 66));
+        }
+        g.text(40.0 * s, 26.0 * s, 30.0 * s, TEXT, "IYAKKI", Face::Bold);
         name_strip(g, 40.0 * s, 64.0 * s, name_w, 4.0 * s, s, false);
+        g.hit(name_box, Event::Key(Key::F(10)), "IYAKKI menu");
         let chip = account_label(&sess.user, sess.role.name());
         let cw = g.text_width(16.0 * s, &chip, Face::Bold) + 36.0 * s;
         let power = sess.policy.power;
         let bell = sess.policy.allows_app(PApp::Inbox);
-        let right = w as f32 - 40.0 * s - (header_button(w, s, 0).w + 12.0 * s) * (if power { 4.0 } else { 3.0 } + if bell { 1.0 } else { 0.0 });
+        let right = w as f32 - 40.0 * s - (header_button(w, s, 0).w + 12.0 * s) * (if power { 5.0 } else { 4.0 } + if bell { 1.0 } else { 0.0 });
         crate::fx::glass(g, right - cw, 24.0 * s, cw, 44.0 * s, 22.0 * s, crate::fx::CYAN);
         g.text(right - cw + 18.0 * s, 35.0 * s, 16.0 * s, TEXT, &chip, Face::Bold);
         // sign out, power (when allowed), the camera, then the clipboard queue, from the right
-        let buttons: Vec<Icon> = if power { vec![Icon::Logout, Icon::Power, Icon::Camera, Icon::Clipboard] } else { vec![Icon::Logout, Icon::Camera, Icon::Clipboard] };
+        let buttons: Vec<Icon> = if power { vec![Icon::Logout, Icon::Power, Icon::Camera, Icon::Devices, Icon::Clipboard] } else { vec![Icon::Logout, Icon::Camera, Icon::Devices, Icon::Clipboard] };
         for (i, ic) in buttons.iter().enumerate() {
             let r = header_button(w, s, i);
             let hover = g.hovered(r);
             crate::fx::chrome_button(g, r, s * 2.5, hover, crate::fx::CYAN);
-            g.icon(*ic, r.x + r.w / 2.0, r.y + r.h / 2.0, 22.0 * s, MUTED);
+            g.icon(*ic, r.x + r.w / 2.0, r.y + r.h / 2.0, 22.0 * s, if *ic == Icon::Devices && self.devpop.open { crate::fx::CYAN } else { MUTED });
+        }
+        let title_end = 40.0 * s + name_w;
+        self.clock_tip = launcher_clock(g, s, right - cw - 18.0 * s, title_end + 24.0 * s, &self.clock);
+        // the installer indicator, left of the clock (when there is room)
+        let ind_right = self.clock_tip.map_or(right - cw - 18.0 * s, |b| b.x) - 8.0 * s;
+        let mut dev_right = ind_right;
+        if ind_right - self.installs.indicator_width(g, s) > title_end + 24.0 * s {
+            if let Some(b) = self.installs.draw_indicator(g, ind_right, 46.0 * s, s, self.tick) {
+                dev_right = b.x - 8.0 * s;
+            }
+        } else {
+            self.installs.anchor = None;
+        }
+        if let Some(sign) = self.dev_sign {
+            draw_dev_sign(g, dev_right, 46.0 * s, s, sign, title_end + 24.0 * s);
         }
         if bell {
             let r = header_button(w, s, buttons.len());
             draw_bell(g, r, 22.0 * s, s, self.badge, false);
         }
         // tiles
-        let tiles = self.group_tiles();
+        if self.tick.saturating_sub(self.custom_at) > 60 || self.custom_at == 0 {
+            self.refresh_custom();
+        }
+        let tiles = self.group_items();
         self.sel = self.sel.min(tiles.len() - 1);
         let cap = launcher::per_page(w, h, s);
         let (pages, page) = (launcher::page_count(tiles.len(), cap), self.sel / cap);
@@ -1700,8 +2819,18 @@ impl Shell {
         }
         let first = page * cap;
         for (k, r) in rects.iter().enumerate() {
-            let (i, t) = (first + k, tiles[first + k]);
-            let allowed = sess.policy.allows_app(t.app);
+            let (i, item) = (first + k, &tiles[first + k]);
+            let t: &Tile = match item {
+                LItem::Sys(t) => t,
+                LItem::App(e) => {
+                    draw_custom_tile(g, e, *r, s, i == self.sel, tilehub_allowed(&sess.policy));
+                    continue;
+                }
+            };
+            let permitted = sess.policy.allows_app(t.app);
+            // CAMERA without a camera: greyed with a hint, no lock
+            let missing = t.app == PApp::Camera && !self.camera.available();
+            let allowed = permitted && !missing;
             let selected = i == self.sel;
             let hover = g.hovered(*r);
             let lift = if selected { 6.0 * s } else { 0.0 };
@@ -1717,14 +2846,17 @@ impl Shell {
             }
             let lw = g.text_width(ls, t.label, Face::Bold);
             g.text(x + (r.w - lw) / 2.0, y + 26.0 * s + badge + 18.0 * s + (24.0 * s - ls) / 2.0, ls, if allowed { TEXT } else { DIM }, t.label, Face::Bold);
-            let sub = if allowed { t.sub } else { "Restricted" };
+            let sub = if allowed { t.sub } else if permitted { self.camera.tile_hint() } else { "Restricted" };
             let mut ss = 14.0 * s;
             while ss > 8.0 * s && g.text_width(ss, sub, Face::Sans) > fit {
                 ss -= s * 0.5;
             }
             let lw = g.text_width(ss, sub, Face::Sans);
             g.text(x + (r.w - lw) / 2.0, y + 26.0 * s + badge + 54.0 * s, ss, MUTED, sub, Face::Sans);
-            if !allowed {
+            if launcher::is_demo(t.app) {
+                crate::fx::demo_ribbon(g, R::new(x, y, r.w, r.h), s);
+            }
+            if !permitted {
                 g.icon(Icon::Lock, x + r.w - 30.0 * s, y + 28.0 * s, 22.0 * s, DIM);
             }
         }
@@ -1773,6 +2905,102 @@ fn with_alpha(c: [u8; 4], a: u8) -> [u8; 4] {
     [m(c[0], bg[0]), m(c[1], bg[1]), m(c[2], bg[2]), 255]
 }
 
+/// The clock in the app header, left of the bell: the time, with the short date when there is room. Returns its box (for
+/// the tooltip and the click).
+fn app_clock(g: &mut Gfx, w: u32, s: f32, clock: &crate::clockbar::ClockState) -> Option<R> {
+    let right = bell_rect(w, s).x - 12.0 * s;
+    let (time, date) = (clock_time_text(clock), clock.date_text());
+    let (tw, dw) = (g.text_width(15.0 * s, &time, Face::Bold), g.text_width(13.0 * s, &date, Face::Sans));
+    // keep room for the app's name on the left
+    let avail = right - 300.0 * s;
+    let gap = 10.0 * s;
+    let (show_date, total) = match crate::clockbar::fit(avail, tw, dw, gap) {
+        crate::clockbar::Fit::Full => (true, tw + gap + dw),
+        crate::clockbar::Fit::TimeOnly => (false, tw),
+        crate::clockbar::Fit::Hidden => return None,
+    };
+    let b = R::new(right - total - 8.0 * s, 8.0 * s, total + 16.0 * s, 30.0 * s);
+    let hot = g.hovered(b);
+    if hot {
+        g.rrect(b.x, b.y, b.w, b.h, 8.0 * s, rgb(28, 36, 66));
+    }
+    let ink = if clock.looks_wrong() { rgb(255, 196, 94) } else { TEXT };
+    let ty = b.y + (b.h - g.line_height(15.0 * s, Face::Bold)) / 2.0;
+    g.text(b.x + 8.0 * s, ty, 15.0 * s, ink, &time, Face::Bold);
+    if show_date {
+        g.text(b.x + 8.0 * s + tw + gap, ty + 1.0 * s, 13.0 * s, MUTED, &date, Face::Sans);
+    }
+    g.hit(b, Event::Key(Key::F(7)), "clock");
+    Some(b)
+}
+
+/// The clock in the launcher's top bar, right-aligned at `right`: time over date, or the time alone, or nothing when
+/// there is no room left of `left_limit`.
+fn launcher_clock(g: &mut Gfx, s: f32, right: f32, left_limit: f32, clock: &crate::clockbar::ClockState) -> Option<R> {
+    let (time, date) = (clock_time_text(clock), clock.date_text());
+    let (tw, dw) = (g.text_width(22.0 * s, &time, Face::Bold), g.text_width(13.0 * s, &date, Face::Sans));
+    let avail = right - left_limit;
+    let (two_lines, wide) = if avail >= tw.max(dw) { (true, tw.max(dw)) } else if avail >= tw { (false, tw) } else { return None };
+    let b = R::new(right - wide - 10.0 * s, 24.0 * s, wide + 20.0 * s, 44.0 * s);
+    let hot = g.hovered(b);
+    if hot {
+        g.rrect(b.x, b.y, b.w, b.h, 10.0 * s, rgb(28, 36, 66));
+    }
+    let ink = if clock.looks_wrong() { rgb(255, 196, 94) } else { TEXT };
+    if two_lines {
+        g.text(right - tw, b.y + 3.0 * s, 22.0 * s, ink, &time, Face::Bold);
+        g.text(right - dw, b.y + 3.0 * s + g.line_height(22.0 * s, Face::Bold), 13.0 * s, MUTED, &date, Face::Sans);
+    } else {
+        g.text(right - tw, b.y + (b.h - g.line_height(22.0 * s, Face::Bold)) / 2.0, 22.0 * s, ink, &time, Face::Bold);
+    }
+    g.hit(b, Event::Key(Key::F(7)), "clock");
+    Some(b)
+}
+
+/// The time as shown in the bar; a clock that was never set gets an exclamation mark.
+fn clock_time_text(clock: &crate::clockbar::ClockState) -> String {
+    if clock.looks_wrong() { format!("{} !", clock.time_text()) } else { clock.time_text() }
+}
+
+/// The small amber "DEV" sign while Developer mode is on, right edge at `right`, centred on `cy`; skipped when it would cross
+/// `left_limit`. A click opens Settings → Developer mode.
+fn draw_dev_sign(g: &mut Gfx, right: f32, cy: f32, s: f32, sign: &str, left_limit: f32) {
+    let tw = g.text_width(11.5 * s, sign, Face::Bold);
+    let b = R::new(right - tw - 14.0 * s, cy - 10.0 * s, tw + 14.0 * s, 20.0 * s);
+    if b.x < left_limit {
+        return;
+    }
+    let amber = rgb(255, 196, 94);
+    g.rrect(b.x, b.y, b.w, b.h, 6.0 * s, crate::fx::with_alpha(amber, 40));
+    g.rrect_outline(b.x, b.y, b.w, b.h, 6.0 * s, 1.0, amber);
+    g.text(b.x + 7.0 * s, cy - g.line_height(11.5 * s, Face::Bold) / 2.0, 11.5 * s, amber, sign, Face::Bold);
+    g.hit(b, Event::Tab(DEV_SIGN), "developer mode on");
+}
+
+/// The click of the DEV sign.
+const DEV_SIGN: usize = 1_300_100;
+
+/// The clock's tooltip, under its box and kept on screen.
+fn draw_clock_tip(g: &mut Gfx, w: u32, h: u32, s: f32, anchor: R, lines: &[(String, bool)]) {
+    let size = 13.0 * s;
+    let maxw = (360.0 * s).min(w as f32 - 24.0 * s);
+    let mut wrapped: Vec<(String, bool)> = Vec::new();
+    for (t, warn) in lines {
+        for l in g.wrap(size, t, Face::Sans, maxw - 24.0 * s) {
+            wrapped.push((l, *warn));
+        }
+    }
+    let lh = g.line_height(size, Face::Sans) + 3.0 * s;
+    let pw = wrapped.iter().map(|(l, _)| g.text_width(size, l, Face::Sans)).fold(0.0f32, f32::max) + 24.0 * s;
+    let ph = wrapped.len() as f32 * lh + 18.0 * s;
+    let x = (anchor.x + anchor.w - pw).clamp(8.0 * s, (w as f32 - pw - 8.0 * s).max(8.0 * s));
+    let y = (anchor.y + anchor.h + 6.0 * s).min((h as f32 - ph - 8.0 * s).max(0.0));
+    crate::fx::modal_panel(g, R::new(x, y, pw, ph), s * 0.6, crate::fx::CYAN, false);
+    for (i, (l, warn)) in wrapped.iter().enumerate() {
+        g.text(x + 12.0 * s, y + 9.0 * s + i as f32 * lh, size, if *warn { rgb(255, 196, 94) } else if i == 0 { TEXT } else { MUTED }, l, Face::Sans);
+    }
+}
+
 fn header_button(w: u32, s: f32, i: usize) -> R {
     let d = 44.0 * s;
     R::new(w as f32 - 40.0 * s - d - i as f32 * (d + 12.0 * s), 24.0 * s, d, d)
@@ -1780,7 +3008,7 @@ fn header_button(w: u32, s: f32, i: usize) -> R {
 
 /// The bell, left of the clipboard queue button.
 fn bell_rect(w: u32, s: f32) -> R {
-    R::new(w as f32 - 226.0 * s - 120.0 * s, 8.0 * s, 32.0 * s, 30.0 * s)
+    R::new(w as f32 - 226.0 * s - 160.0 * s, 8.0 * s, 32.0 * s, 30.0 * s)
 }
 
 /// The bell with its count: red when something waits for an answer, amber for the rest.
@@ -1803,9 +3031,14 @@ fn draw_bell(g: &mut Gfx, r: R, radius: f32, s: f32, b: Badge, open: bool) {
     g.hit(r, Event::Key(Key::F(9)), "inbox");
 }
 
-/// The clipboard queue button, left of the camera.
-fn clip_rect(w: u32, s: f32) -> R {
+/// The Devices button, left of the camera.
+fn dev_rect(w: u32, s: f32) -> R {
     R::new(w as f32 - 226.0 * s - 80.0 * s, 8.0 * s, 32.0 * s, 30.0 * s)
+}
+
+/// The clipboard queue button, left of the Devices button.
+fn clip_rect(w: u32, s: f32) -> R {
+    R::new(w as f32 - 226.0 * s - 120.0 * s, 8.0 * s, 32.0 * s, 30.0 * s)
 }
 
 /// The camera button, left of the "F1 Help" chip.
@@ -1820,6 +3053,60 @@ fn help_rect(w: u32, s: f32) -> R {
 
 /// Height of the strip with the app's name, in units before scaling.
 const HEADER_H: f32 = 46.0;
+
+fn tilehub_allowed(p: &iyakki_sec::policy::Policy) -> bool {
+    iyakki_agent::store::tilehub::allowed(p)
+}
+
+/// The accent a custom app's tile wears: from its id, so the same app always has the same colour.
+pub(crate) fn custom_accent(name: &str) -> [u8; 4] {
+    const PALETTE: [[u8; 4]; 8] = [rgb(150, 220, 255), rgb(255, 170, 120), rgb(170, 230, 140), rgb(230, 150, 230), rgb(255, 215, 110), rgb(120, 200, 190), rgb(190, 170, 255), rgb(255, 140, 160)];
+    let h = name.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+    PALETTE[h as usize % PALETTE.len()]
+}
+
+/// A custom app's tile: a round badge with the first letter of its title in the app's colour, the title, the group, and the
+/// "custom app" mark (an unsigned dev app says so instead).
+fn draw_custom_tile(g: &mut Gfx, e: &iyakki_agent::store::tilehub::TileEntry, r: R, s: f32, selected: bool, allowed: bool) {
+    let accent = custom_accent(&e.name);
+    let hover = g.hovered(r);
+    let lift = if selected { 6.0 * s } else { 0.0 };
+    let (x, y) = (r.x, r.y - lift);
+    crate::fx::tile(g, R::new(x, y, r.w, r.h), s, accent, selected, hover, allowed);
+    let badge = r.w * 0.52;
+    g.rrect(x + (r.w - badge) / 2.0, y + 26.0 * s, badge, badge, 22.0 * s, if allowed { with_alpha(accent, 40) } else { rgb(38, 42, 58) });
+    let letter: String = e.title.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().collect()).unwrap_or_else(|| "?".into());
+    let ls = badge * 0.62;
+    let lw = g.text_width(ls, &letter, Face::Bold);
+    g.text(x + (r.w - lw) / 2.0, y + 26.0 * s + (badge - g.line_height(ls, Face::Bold)) / 2.0, ls, if allowed { accent } else { DIM }, &letter, Face::Bold);
+    let fit = r.w - 24.0 * s;
+    let mut ls = 22.0 * s;
+    while ls > 10.0 * s && g.text_width(ls, &e.title, Face::Bold) > fit {
+        ls -= s;
+    }
+    let lw = g.text_width(ls, &e.title, Face::Bold);
+    let title = if lw > fit { g.fit(ls, &e.title, Face::Bold, fit) } else { e.title.clone() };
+    let lw = g.text_width(ls, &title, Face::Bold);
+    g.text(x + (r.w - lw) / 2.0, y + 26.0 * s + badge + 18.0 * s + (24.0 * s - ls) / 2.0, ls, if allowed { TEXT } else { DIM }, &title, Face::Bold);
+    // an app from a paired developer computer (developer mode) is marked like a dev app, with its own words
+    let devlike = e.dev || e.is_developer();
+    let sub = if !allowed { "Restricted".to_string() } else if e.dev { "unsigned dev app".to_string() } else if e.is_developer() { e.trust.clone() } else { format!("custom app · {}", e.group) };
+    let mut ss = 13.0 * s;
+    while ss > 8.0 * s && g.text_width(ss, &sub, Face::Sans) > fit {
+        ss -= s * 0.5;
+    }
+    let sub = if g.text_width(ss, &sub, Face::Sans) > fit { g.fit(ss, &sub, Face::Sans, fit) } else { sub };
+    let lw = g.text_width(ss, &sub, Face::Sans);
+    g.text(x + (r.w - lw) / 2.0, y + 26.0 * s + badge + 54.0 * s, ss, if devlike { AMBER_DEV } else { MUTED }, &sub, Face::Sans);
+    if devlike {
+        crate::fx::ribbon(g, R::new(x, y, r.w, r.h), s, "DEV");
+    }
+    if !allowed {
+        g.icon(Icon::Lock, x + r.w - 30.0 * s, y + 28.0 * s, 22.0 * s, DIM);
+    }
+}
+
+const AMBER_DEV: [u8; 4] = rgb(255, 196, 94);
 
 fn back_rect(w: u32, s: f32) -> R {
     R::new(w as f32 - 114.0 * s, 8.0 * s, 94.0 * s, 30.0 * s)
@@ -2126,7 +3413,7 @@ pub(crate) mod tests {
         setup_admin(&mut sh);
         assert_eq!(sh.screen_name(), "launcher");
         assert_eq!(sh.session().unwrap().role, Role::Admin);
-        assert_eq!(sh.visible_tiles().len(), 17, "admins see the Users tile");
+        assert_eq!(sh.visible_tiles().len(), TILES.iter().filter(|t| t.group.is_some()).count(), "admins see the Users tile (every tile on the grid)");
         key(&mut sh, Key::Char('o'));
         assert_eq!(sh.screen_name(), "login");
         login(&mut sh, "root", "wrong-password");
@@ -2330,6 +3617,18 @@ pub(crate) mod tests {
         for n in ["sample-explain-simply", "sample-python-practice", "sample-meeting-notes"] {
             assert!(skills.contains(&n.to_string()), "{n}");
         }
+        // the skill that ships with IYAKKI is there too, and it parses and fits the prompt budget
+        assert!(skills.contains(&"k3s-dev-best-practices".to_string()));
+        let k3s = svc.skills.get(&iyakki_agent::skills::Scope::Shared, "k3s-dev-best-practices").unwrap();
+        assert!(k3s.body.chars().count() < 4000 && k3s.body.contains("deploy_build") && k3s.body.contains("k8s_teardown"));
+        for (name, md) in crate::samples::BUILTIN_SKILLS {
+            let k = iyakki_agent::skills::parse(md, iyakki_agent::skills::Scope::Shared).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(k.name == name && k.body.chars().count() <= 3950 && md.is_ascii() && k.triggers.len() <= 12, "{name}");
+            assert!(skills.contains(&name.to_string()), "{name} is installed");
+            // every dev skill insists on bugs as their own B- rows with captured logs
+            assert!(k.body.contains("B- id") && k.body.contains("bug_report") && k.body.contains("never F-"), "{name} has the bug rule");
+        }
+        assert!(svc.skills.select("alice", "deploy my node app to k3s", 3).iter().any(|s| s.name == "k3s-dev-best-practices"));
         for (file, _) in crate::samples::DOCS {
             assert!(docs.join("shared").join(file).is_file(), "{file}");
         }
@@ -2339,7 +3638,7 @@ pub(crate) mod tests {
         assert!(svc.skills.list("alice").iter().any(|s| s.name == "sample-python-practice"));
         // deleting them: they do not return at the next sign-in
         svc.mcp.remove("iyakki-demo").unwrap();
-        for n in ["sample-explain-simply", "sample-python-practice", "sample-meeting-notes"] {
+        for n in ["sample-explain-simply", "sample-python-practice", "sample-meeting-notes"].into_iter().chain(crate::samples::BUILTIN_SKILLS.iter().map(|b| b.0)) {
             svc.skills.remove(&iyakki_agent::skills::Scope::Shared, n, true, true).unwrap();
         }
         std::fs::remove_file(docs.join("shared/sample-iyakki-quick-start.md")).unwrap();
@@ -2619,10 +3918,113 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_sre_pilot_tile_is_one_demo_tile_in_a_group_for_every_role_with_a_ribbon() {
+        assert_eq!(TILES.iter().filter(|t| t.app == PApp::SrePilot).count(), 1);
+        let t = TILES.iter().find(|t| t.app == PApp::SrePilot).unwrap();
+        assert_eq!((t.label, t.sub), ("SRE PILOT", "Assist · Auto"));
+        assert_eq!(Group::of(PApp::SrePilot), Some(Group::Work));
+        assert!(launcher::is_demo(PApp::SrePilot) && !launcher::is_demo(PApp::System));
+        assert_eq!(PApp::SrePilot.id(), "srepilot");
+        for r in Role::ALL {
+            assert!(r.template().apps.contains(&PApp::SrePilot), "{r:?}");
+        }
+        let (mut sh, _) = shell_with_users("srepilot-tile");
+        login(&mut sh, "root", "rootpass12");
+        assert_eq!(sh.visible_tiles().iter().filter(|t| t.app == PApp::SrePilot).count(), 1);
+        assert!(sh.open_for_demo("srepilot"));
+        assert_eq!(sh.screen_name(), "app:srepilot");
+    }
+
+    #[test]
+    fn the_ai_ide_tile_is_one_tile_in_the_work_group_for_every_role_but_guest() {
+        assert_eq!(TILES.iter().filter(|t| t.app == PApp::Ide).count(), 1);
+        let t = TILES.iter().find(|t| t.app == PApp::Ide).unwrap();
+        assert_eq!((t.label, t.sub), ("AI IDE", "Code with the AI"));
+        assert_eq!(Group::of(PApp::Ide), Some(Group::Work));
+        assert_eq!((PApp::Ide.id(), PApp::Ide.label().as_str()), ("ide", "AI IDE"));
+        for r in [Role::Admin, Role::Operator, Role::User] {
+            assert!(r.template().apps.contains(&PApp::Ide), "{r:?}");
+            assert!(r.template().apps.contains(&PApp::Edit) && r.template().agent, "the IDE follows the editor and the agent: {r:?}");
+        }
+        assert!(!Role::Guest.template().apps.contains(&PApp::Ide), "guests have no files and no agent");
+        assert_eq!(TILES.len(), PApp::ALL.len() - 1, "every app but the inbox has a tile");
+        let (mut sh, _) = shell_with_users("ide-tile");
+        login(&mut sh, "root", "rootpass12");
+        assert_eq!(sh.visible_tiles().iter().filter(|t| t.app == PApp::Ide).count(), 1);
+        sh.set_group(Group::Work);
+        let work: Vec<PApp> = sh.group_tiles().iter().map(|t| t.app).collect();
+        assert!(work.contains(&PApp::Ide) && work.contains(&PApp::Edit) && work.contains(&PApp::Data), "{work:?}");
+        assert!(sh.open_for_demo("ide"));
+        assert_eq!(sh.screen_name(), "app:ide");
+    }
+
+    /// Every app, in both halves of the blink: at most one caret and one focus frame on the whole screen.
+    #[test]
+    fn no_app_draws_more_than_one_caret_or_focus_frame() {
+        let (mut sh, _) = shell_with_users("carets-all");
+        login(&mut sh, "root", "rootpass12");
+        let mut g = Gfx::new(1280, 720);
+        let mut seen = 0;
+        for a in PApp::ALL {
+            if !sh.open_for_demo(a.id()) {
+                continue;
+            }
+            seen += 1;
+            for _ in 0..4 {
+                for _ in 0..16 {
+                    sh.handle(&Event::Tick);
+                }
+                crate::ui::take_carets();
+                crate::ui::take_focus_rings();
+                sh.render(&mut g);
+                let (c, r) = (crate::ui::take_carets(), crate::ui::take_focus_rings());
+                assert!(c <= 1 && r <= 1, "{}: {c} carets and {r} focus frames", a.id());
+            }
+            sh.leave_app();
+        }
+        assert!(seen > 10, "the apps were opened: {seen}");
+    }
+
+    #[test]
+    fn the_demo_ribbon_is_drawn_at_the_top_of_the_tile_in_every_group_and_only_on_that_tile() {
+        let (mut sh, _) = shell_with_users("srepilot-ribbon");
+        let mut g = Gfx::new(1280, 720);
+        login(&mut sh, "root", "rootpass12");
+        let amber = |g: &Gfx, r: R| {
+            let mut n = 0;
+            for y in (r.y as i32 - 12)..(r.y as i32 + 20) {
+                for x in (r.x as i32)..(r.x + r.w) as i32 {
+                    let o = (y as usize * g.width() as usize + x as usize) * 4;
+                    let p = &g.rgba()[o..o + 3];
+                    if p[0] > 240 && p[1] > 180 && p[1] < 215 && p[2] > 70 && p[2] < 120 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        for group in [Group::Work] {
+            sh.set_group(group);
+            sh.render(&mut g);
+            let s = scale_for(1280, 720);
+            let tiles = sh.group_tiles();
+            let rects = tile_rects(1280, 720, s, tiles.len());
+            for (t, r) in tiles.iter().zip(&rects) {
+                let n = amber(&g, *r);
+                if t.app == PApp::SrePilot {
+                    assert!(n > 200, "the ribbon is drawn on SRE PILOT in {group:?}: {n}");
+                } else {
+                    assert_eq!(n, 0, "no ribbon on {} in {group:?}", t.label);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn tiles_follow_roles_and_denials_are_audited() {
         let (mut sh, _) = shell_with_users("sh3");
         login(&mut sh, "gus", "guestpass1");
-        assert_eq!(sh.visible_tiles().iter().map(|t| t.label).collect::<Vec<_>>(), vec!["CHAT", "RAG", "MCP", "CLI", "EDIT", "RUNS", "SETTINGS", "BROWSER", "RADIO", "SKILLS", "NET SCAN", "MESH", "USAGE", "SYSTEM", "CALENDAR", "MEDIA"]);
+        assert_eq!(sh.visible_tiles().iter().map(|t| t.label).collect::<Vec<_>>(), TILES.iter().filter(|t| t.app != PApp::Users && t.group.is_some()).map(|t| t.label).collect::<Vec<_>>(), "every tile on the grid but Users (Settings is in the IYAKKI menu)");
         // guest can only open chat; the others are locked, and the attempt is recorded
         key(&mut sh, Key::Char('4'));
         assert_eq!(sh.screen_name(), "launcher");
@@ -2660,48 +4062,71 @@ pub(crate) mod tests {
         let mut g = Gfx::new(1280, 720);
         login(&mut sh, "root", "rootpass12");
         sh.render(&mut g);
-        assert_eq!(sh.groups().iter().map(|x| x.label()).collect::<Vec<_>>(), vec!["All", "Assistant", "Web & Media", "Work", "System"]);
-        assert_eq!(names(&sh).len(), 17, "All shows every tile");
+        assert_eq!(sh.groups().iter().map(|x| x.label()).collect::<Vec<_>>(), vec!["Home", "Web & Media", "Work", "System"]);
+        assert_eq!(sh.current_group(), Group::Home, "Home is shown first");
         let mut seen = Vec::new();
-        for gr in sh.groups().into_iter().filter(|x| *x != Group::All) {
+        for gr in sh.groups() {
             sh.set_group(gr);
             seen.extend(names(&sh));
         }
         seen.sort();
-        let mut all: Vec<&str> = TILES.iter().map(|t| t.label).collect();
+        let mut all: Vec<&str> = TILES.iter().filter(|t| t.group.is_some()).map(|t| t.label).collect();
         all.sort();
-        assert_eq!(seen, all, "each tile is in exactly one group");
-        sh.set_group(Group::Assistant);
-        assert_eq!(names(&sh), vec!["CHAT", "RAG", "MCP", "RUNS", "SKILLS"]);
+        assert_eq!(seen, all, "each tile is in exactly one section");
+        assert!(!seen.contains(&"SETTINGS"), "Settings left the grid (it is in the IYAKKI menu)");
+        sh.set_group(Group::Home);
+        assert_eq!(names(&sh), vec!["CHAT", "RAG", "MCP", "CLI", "SKILLS", "CALENDAR", "TALES"]);
+        sh.set_group(Group::WebMedia);
+        assert_eq!(names(&sh), vec!["BROWSER", "RADIO", "MEDIA", "CAMERA"]);
         sh.set_group(Group::System);
         assert!(names(&sh).contains(&"USERS"));
         key(&mut sh, Key::Char('o'));
-        // an ordinary user has no Users tile, so it is in no group either
+        // an ordinary user has no Users tile, so it is in no section either
         login(&mut sh, "alice", "alicepass1");
         sh.render(&mut g);
         sh.set_group(Group::System);
-        assert!(!names(&sh).contains(&"USERS") && names(&sh).contains(&"SETTINGS"));
-        assert!(TILES.iter().all(|t| t.app == PApp::Users || sh.visible_tiles().iter().any(|v| v.app == t.app)));
+        assert!(!names(&sh).contains(&"USERS") && names(&sh).contains(&"STORE"));
+        assert!(TILES.iter().all(|t| t.app == PApp::Users || t.group.is_none() || sh.visible_tiles().iter().any(|v| v.app == t.app)));
     }
 
     #[test]
-    fn a_group_with_nothing_for_the_person_is_hidden_and_a_remembered_one_that_vanished_shows_all() {
+    fn a_group_with_nothing_for_the_person_is_hidden_and_a_remembered_one_that_vanished_shows_home() {
         let (mut sh, _) = shell_with_users("grp2");
         let mut g = Gfx::new(1280, 720);
         login(&mut sh, "alice", "alicepass1");
         sh.render(&mut g);
-        // pretend only two apps are visible: the other groups disappear
+        // pretend only two apps are visible: the other sections disappear
         let apps = [PApp::Chat, PApp::Edit];
-        assert_eq!(launcher::groups_of(&apps), vec![Group::All, Group::Assistant, Group::Work]);
+        assert_eq!(launcher::groups_of(&apps), vec![Group::Home, Group::Work]);
         sh.group = Group::System;
         assert_eq!(sh.current_group(), Group::System);
-        let seen = sh.groups();
-        assert!(seen.contains(&Group::System));
-        // a saved name that is not a group means All
-        crate::uisize::save_group(sh.env.services.dir(), "alice", "gone");
+        // a saved name that is not a section (the old "all") means Home; the old "assistant" is Home too
+        crate::uisize::save_group(sh.env.services.dir(), "alice", "all");
         key(&mut sh, Key::Char('o'));
         login(&mut sh, "alice", "alicepass1");
-        assert_eq!(sh.current_group(), Group::All);
+        assert_eq!(sh.current_group(), Group::Home);
+    }
+
+    #[test]
+    fn settings_is_reachable_from_the_iyakki_menu_f7_and_the_clock_but_not_the_grid() {
+        let (mut sh, _) = shell_with_users("grp-set");
+        let mut g = Gfx::new(1280, 720);
+        login(&mut sh, "root", "rootpass12");
+        sh.render(&mut g);
+        assert!(!sh.visible_tiles().iter().any(|t| t.app == PApp::Settings));
+        key(&mut sh, Key::F(10));
+        sh.render(&mut g);
+        let entry = sh.hits().iter().find(|h| h.label == "Settings").map(|h| h.rect).expect("a Settings entry in the menu");
+        let (x, y) = center(&entry);
+        sh.handle(&Event::MouseDown(x, y));
+        assert_eq!(sh.screen_name(), "app:settings");
+        key(&mut sh, Key::Esc);
+        key(&mut sh, Key::F(10));
+        key(&mut sh, Key::Char('s'));
+        assert_eq!(sh.screen_name(), "app:settings", "the letter works too");
+        key(&mut sh, Key::Esc);
+        key(&mut sh, Key::F(7));
+        assert_eq!(sh.screen_name(), "app:settings", "F7 (the clock) still opens Settings");
     }
 
     #[test]
@@ -2710,35 +4135,35 @@ pub(crate) mod tests {
         let mut g = Gfx::new(1280, 720);
         login(&mut sh, "alice", "alicepass1");
         sh.render(&mut g);
-        assert_eq!(sh.current_group(), Group::All);
+        assert_eq!(sh.current_group(), Group::Home);
         key(&mut sh, Key::Tab);
-        assert_eq!(sh.current_group(), Group::Assistant);
-        key(&mut sh, Key::Tab);
+        assert_eq!(sh.current_group(), Group::WebMedia);
         key(&mut sh, Key::Tab);
         assert_eq!(sh.current_group(), Group::Work);
         key(&mut sh, Key::BackTab);
         assert_eq!(sh.current_group(), Group::WebMedia);
         key(&mut sh, Key::BackTab);
-        key(&mut sh, Key::BackTab);
-        assert_eq!(sh.current_group(), Group::All);
+        assert_eq!(sh.current_group(), Group::Home);
         key(&mut sh, Key::BackTab);
         assert_eq!(sh.current_group(), Group::System, "Shift+Tab wraps round");
         // clicking a chip
         let r = chip(&sh, &g, "Work");
         at(&mut sh, &mut g, r);
         assert_eq!(sh.current_group(), Group::Work);
-        assert_eq!(names(&sh), vec!["CLI", "EDIT", "CALENDAR"]);
+        let work: Vec<&str> = TILES.iter().filter(|t| Group::Work.holds(t.app)).map(|t| t.label).collect();
+        assert!(work.contains(&"DATA") && work.contains(&"AI IDE"), "{work:?}");
+        assert_eq!(names(&sh), work);
         assert!(sh.hits().iter().any(|h| h.label == "group Work"), "chips are clickable regions");
         // a tile click in the group opens that app
-        let r0 = launcher::tile_rects(1280, 720, 1.0, 3)[1];
+        let r0 = launcher::tile_rects(1280, 720, 1.0, work.len())[1];
         at(&mut sh, &mut g, r0);
-        assert_eq!(sh.screen_name(), "app:edit");
+        assert_eq!(sh.screen_name(), "app:runs");
         key(&mut sh, Key::Esc);
         assert_eq!(sh.current_group(), Group::Work, "coming back from an app keeps the group");
         // remembered across sign-out and sign-in, for alice only
         key(&mut sh, Key::Char('o'));
         login(&mut sh, "root", "rootpass12");
-        assert_eq!(sh.current_group(), Group::All);
+        assert_eq!(sh.current_group(), Group::Home);
         key(&mut sh, Key::Char('o'));
         login(&mut sh, "alice", "alicepass1");
         assert_eq!(sh.current_group(), Group::Work);
@@ -2751,13 +4176,20 @@ pub(crate) mod tests {
     #[test]
     fn tiles_move_to_more_pages_on_a_small_screen_and_arrows_wheel_and_dots_turn_them() {
         let (mut sh, _) = shell_with_users("grp4");
-        let mut g = Gfx::new(1024, 600);
         login(&mut sh, "root", "rootpass12");
-        sh.render(&mut g);
-        let s = scale_for(1024, 600);
-        let cap = launcher::per_page(1024, 600, s);
+        // the Work section (7 tiles) on a screen where it takes two pages
+        sh.set_group(Group::Work);
         let n = names(&sh).len();
-        assert!(n > cap, "17 tiles do not fit 1024x600 ({cap} per page)");
+        let (w, h) = [(1024u32, 600u32), (900, 520), (800, 480), (720, 480), (640, 480), (600, 420), (560, 400), (520, 380)]
+            .into_iter()
+            .find(|(w, h)| launcher::page_count(n, launcher::per_page(*w, *h, scale_for(*w, *h))) == 2)
+            .expect("a screen where Work takes two pages");
+        sh.resize_for_test(w, h);
+        let mut g = Gfx::new(w, h);
+        sh.render(&mut g);
+        let s = scale_for(w, h);
+        let cap = launcher::per_page(w, h, s);
+        assert!(n > cap, "{n} tiles do not fit {w}x{h} ({cap} per page)");
         assert_eq!(launcher::page_count(n, cap), 2);
         let page = |sh: &Shell| sh.sel / cap;
         assert_eq!(page(&sh), 0);
@@ -2794,7 +4226,7 @@ pub(crate) mod tests {
         assert_eq!(page(&sh), 0);
         // the dots and arrows
         sh.render(&mut g);
-        let nav = launcher::page_nav(1024, 600, s, 2);
+        let nav = launcher::page_nav(w, h, s, 2);
         assert!(sh.hits().iter().any(|h| h.label == "page 2"));
         at(&mut sh, &mut g, nav.dots[1]);
         assert_eq!(page(&sh), 1);
@@ -2803,11 +4235,11 @@ pub(crate) mod tests {
         at(&mut sh, &mut g, nav.next);
         assert_eq!(page(&sh), 1);
         // a tile on the second page opens by click
-        let r = launcher::page_rects(1024, 600, s, n, 1)[0];
+        let r = launcher::page_rects(w, h, s, n, 1)[0];
         at(&mut sh, &mut g, r);
         assert_eq!(sh.screen_name(), format!("app:{}", sh.group_tiles()[cap].app.id()));
         key(&mut sh, Key::Esc);
-        // a small group is a single page: no dots, and the wheel does nothing
+        // a small section is a single page: no dots, and the wheel does nothing
         sh.set_group(Group::WebMedia);
         sh.render(&mut g);
         sh.handle(&Event::Scroll(-1));
@@ -2859,18 +4291,20 @@ pub(crate) mod tests {
         let (mut sh, _) = shell_with_users("sh5");
         let mut g = Gfx::new(1280, 720);
         login(&mut sh, "alice", "alicepass1");
+        sh.set_group(Group::Home);
         sh.render(&mut g);
-        let rects = tile_rects(1280, 720, 1.0, 14);
+        let rects = tile_rects(1280, 720, scale_for(1280, 720), names(&sh).len());
+        assert_eq!(names(&sh)[3], "CLI");
         let c = rects[3];
         sh.handle(&Event::MouseMove((c.x + 10.0) as i32, (c.y + 10.0) as i32));
         sh.handle(&Event::MouseDown((c.x + 10.0) as i32, (c.y + 10.0) as i32));
         assert_eq!(sh.screen_name(), "app:cli");
         // back button
-        let b = back_rect(1280, 1.0);
+        let b = back_rect(1280, scale_for(1280, 720));
         sh.handle(&Event::MouseDown((b.x + 5.0) as i32, (b.y + 5.0) as i32));
         assert_eq!(sh.screen_name(), "launcher");
-        // for a plain user: 5 = Edit, 6 = Runs, 7 = Settings (no Users tile exists for them), 8 = Browser, 9 = Radio
-        key(&mut sh, Key::Char('9'));
+        // for a plain user: 5 = Edit, 6 = Runs, 7 = Browser, 8 = Radio (no Users tile exists for them; Settings is not on the grid)
+        key(&mut sh, Key::Char('8'));
         assert_eq!(sh.screen_name(), "app:radio");
         key(&mut sh, Key::Esc);
         assert_eq!(sh.screen_name(), "launcher");
@@ -2881,16 +4315,21 @@ pub(crate) mod tests {
         assert_eq!(sh.screen_name(), "app:runs");
         key(&mut sh, Key::Esc);
         key(&mut sh, Key::Char('7'));
+        assert_eq!(sh.screen_name(), "app:browser");
+        key(&mut sh, Key::Esc);
+        // Settings: the IYAKKI menu's gear entry (or F7)
+        key(&mut sh, Key::F(10));
+        key(&mut sh, Key::Char('s'));
         assert_eq!(sh.screen_name(), "app:settings");
         key(&mut sh, Key::Esc);
         key(&mut sh, Key::Char('o'));
         login(&mut sh, "root", "rootpass12");
-        // for an admin: 5 = Edit, 6 = Runs, 7 = Users, 8 = Settings
+        // for an admin: 5 = Edit, 6 = Runs, 7 = Users, 8 = Browser
         key(&mut sh, Key::Char('7'));
         assert_eq!(sh.screen_name(), "app:users");
         key(&mut sh, Key::Esc);
         key(&mut sh, Key::Char('8'));
-        assert_eq!(sh.screen_name(), "app:settings");
+        assert_eq!(sh.screen_name(), "app:browser");
     }
 
     #[test]
@@ -2906,7 +4345,7 @@ pub(crate) mod tests {
         sh.handle(&Event::MouseMove(5, 1070));
         sh.handle(&Event::MouseMove(9, 1072));
         assert!(!sh.take_stale(), "moving over bare background changes nothing on screen");
-        let r = tile_rects(1920, 1080, s, 17)[2];
+        let r = tile_rects(1920, 1080, s, sh.group_tiles().len())[2];
         let (x, y) = center(&r);
         sh.handle(&Event::MouseMove(x, y));
         assert!(sh.take_stale(), "entering a tile highlights it");
@@ -3004,9 +4443,28 @@ pub(crate) mod tests {
         sh.hits().iter().any(|h| h.label == label)
     }
 
-    fn open_tile(sh: &mut Shell, g: &mut Gfx, index: usize, n: usize) {
+    /// Open an app with the mouse: its section's tab, then its tile; Settings (not on the grid) through the IYAKKI menu's entry.
+    fn open_tile(sh: &mut Shell, g: &mut Gfx, app: PApp) {
         sh.render(g);
-        let r = tile_rects(g.width(), g.height(), scale_for(g.width(), g.height()), n)[index];
+        if app == PApp::Settings {
+            let name = sh.hits().iter().find(|h| h.label == "IYAKKI menu").map(|h| h.rect).expect("the name in the top bar");
+            let (x, y) = center(&name);
+            sh.handle(&Event::MouseDown(x, y));
+            sh.render(g);
+            let e = sh.hits().iter().find(|h| h.label == "Settings").map(|h| h.rect).expect("the Settings entry");
+            let (x, y) = center(&e);
+            sh.handle(&Event::MouseMove(x, y));
+            sh.handle(&Event::MouseDown(x, y));
+            return;
+        }
+        let gr = Group::of(app).expect("a tile on the grid");
+        let tab = chip(sh, g, gr.label());
+        let (x, y) = center(&tab);
+        sh.handle(&Event::MouseDown(x, y));
+        sh.render(g);
+        let tiles = sh.group_tiles();
+        let index = tiles.iter().position(|t| t.app == app).expect("the tile in its section");
+        let r = tile_rects(g.width(), g.height(), scale_for(g.width(), g.height()), tiles.len())[index];
         let (x, y) = center(&r);
         sh.handle(&Event::MouseMove(x, y));
         sh.handle(&Event::MouseDown(x, y));
@@ -3064,7 +4522,7 @@ pub(crate) mod tests {
         click_field(&mut sh, &mut g, 1);
         typ(&mut sh, "rootpass12");
         click(&mut sh, &mut g, "Sign in");
-        open_tile(&mut sh, &mut g, 7, 17); // SETTINGS is the 8th tile for an admin
+        open_tile(&mut sh, &mut g, PApp::Settings); // through the IYAKKI menu
         assert_eq!(sh.screen_name(), "app:settings");
         assert!(has(&mut sh, &mut g, "Add"), "Models tab shows its buttons");
         click(&mut sh, &mut g, "RAG");
@@ -3092,7 +4550,7 @@ pub(crate) mod tests {
         click_field(&mut sh, &mut g, 1);
         typ(&mut sh, "rootpass12");
         click(&mut sh, &mut g, "Sign in");
-        open_tile(&mut sh, &mut g, 7, 17);
+        open_tile(&mut sh, &mut g, PApp::Settings);
         click(&mut sh, &mut g, "Add");
         assert!(has(&mut sh, &mut g, "Save") && has(&mut sh, &mut g, "Cancel"));
         // the tabs behind the dialog must not react to clicks: aim at where the RAG tab is drawn
@@ -3109,12 +4567,12 @@ pub(crate) mod tests {
         // URL: select all, paste the LAN address
         click_field(&mut sh, &mut g, 2);
         sh.handle(&Event::Key(Key::Ctrl('a')));
-        sh.handle(&Event::Paste("http://192.168.50.72:11434".into()));
+        sh.handle(&Event::Paste("http://192.168.1.72:11434".into()));
         click(&mut sh, &mut g, "Save");
         assert!(!has(&mut sh, &mut g, "Save"), "dialog closed");
         let st = sh.services_for_demo().settings.lock().unwrap().get().clone();
         assert_eq!(st.providers.len(), 1);
-        assert_eq!((st.providers[0].id.as_str(), st.providers[0].base_url.as_deref()), ("macmini64", Some("http://192.168.50.72:11434")));
+        assert_eq!((st.providers[0].id.as_str(), st.providers[0].base_url.as_deref()), ("macmini64", Some("http://192.168.1.72:11434")));
         // the new provider row is selectable by click and Cancel closes dialogs
         click(&mut sh, &mut g, "macmini64");
         click(&mut sh, &mut g, "Edit");
@@ -3133,7 +4591,7 @@ pub(crate) mod tests {
         click_field(&mut sh, &mut g, 1);
         typ(&mut sh, "alicepass1");
         click(&mut sh, &mut g, "Sign in");
-        open_tile(&mut sh, &mut g, 0, 16); // CHAT
+        open_tile(&mut sh, &mut g, PApp::Chat);
         assert_eq!(sh.screen_name(), "app:chat");
         // write a message (the offline backend answers with an error, but the user bubble exists)
         typ(&mut sh, "my first question");
@@ -3226,7 +4684,7 @@ pub(crate) mod tests {
         click_field(&mut sh, &mut g, 1);
         typ(&mut sh, "rootpass12");
         click(&mut sh, &mut g, "Sign in");
-        open_tile(&mut sh, &mut g, 6, 17); // USERS
+        open_tile(&mut sh, &mut g, PApp::Users);
         assert_eq!(sh.screen_name(), "app:users");
         click(&mut sh, &mut g, "gus");
         click(&mut sh, &mut g, "Change role"); // guest -> admin
@@ -3290,7 +4748,7 @@ pub(crate) mod tests {
         click_field(&mut sh, &mut g, 1);
         typ(&mut sh, "alicepass1");
         click(&mut sh, &mut g, "Sign in");
-        open_tile(&mut sh, &mut g, 3, 16); // CLI
+        open_tile(&mut sh, &mut g, PApp::Cli);
         assert_eq!(sh.screen_name(), "app:cli");
         typ(&mut sh, "ehx");
         click_field(&mut sh, &mut g, 0); // click on the prompt line: caret moves, field stays editable
@@ -3321,7 +4779,9 @@ pub(crate) mod tests {
         key(&mut sh, Key::Esc);
         assert!(!sh.help);
         // inside an app: that app's keys are listed, and the popup is drawn
-        while sh.visible_tiles().iter().position(|t| t.app == PApp::Browser).map_or(true, |p| p != sh.sel) {
+        sh.set_group(Group::WebMedia);
+        let at = sh.group_tiles().iter().position(|t| t.app == PApp::Browser).expect("BROWSER is in Web & Media");
+        for _ in 0..at {
             key(&mut sh, Key::Right);
         }
         key(&mut sh, Key::Enter);
@@ -3344,6 +4804,39 @@ pub(crate) mod tests {
         key(&mut sh, Key::F(1));
         key(&mut sh, Key::F(1));
         assert!(!sh.help);
+    }
+
+    #[test]
+    fn the_assistants_screen_capture_is_answered_with_the_frame_the_shell_just_drew() {
+        let (e, _) = env("capture1");
+        let svc = e.services.clone();
+        let mut sh = Shell::new(e);
+        assert!(!svc.screen.present(), "no screen, no tool");
+        setup_admin(&mut sh);
+        let mut g = Gfx::new(640, 360);
+        sh.render(&mut g);
+        assert!(svc.screen.present(), "a shell that draws offers the tool");
+        let s = svc.clone();
+        let asker = std::thread::spawn(move || s.screen.request("root", std::time::Duration::from_secs(5)));
+        for _ in 0..400 {
+            sh.render(&mut g);
+            if asker.is_finished() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let f = asker.join().unwrap().expect("the shell answered");
+        assert_eq!((f.w, f.h, f.rgba.len()), (640, 360, 640 * 360 * 4));
+        assert!(f.rgba.chunks_exact(4).any(|p| p[0] != p[1] || p[1] != p[2]), "it is the launcher as drawn, not a blank picture");
+        assert!(f.rgba.chunks_exact(4).all(|p| p[3] == 255), "opaque");
+        // nobody else's request is answered with this person's screen
+        let s = svc.clone();
+        let other = std::thread::spawn(move || s.screen.request("nobody-here", std::time::Duration::from_millis(200)));
+        for _ in 0..20 {
+            sh.render(&mut g);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(other.join().unwrap().is_err());
     }
 
     #[test]
@@ -3492,6 +4985,124 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_login_button_anywhere_opens_the_sign_in_dialog_over_the_screen_and_escape_closes_it() {
+        let (e, _) = env("alogin1");
+        let mut sh = Shell::new(e);
+        setup_admin(&mut sh);
+        let mut g = Gfx::new(1280, 720);
+        sh.render(&mut g);
+        assert!(sh.login.is_none());
+        // a screen draws the button; its click is answered by the shell itself
+        sh.handle(&Event::Tab(crate::agent_login::LOGIN_TAB));
+        assert!(sh.login.as_ref().is_some_and(|m| m.agent() == "claude-code"));
+        sh.render(&mut g);
+        assert!(sh.hits().iter().any(|h| h.ev == Event::Tab(crate::agent_login::T_START)), "Claude Code first asks how to sign in");
+        // the dialog takes the keys: a letter does not reach the screen behind
+        sh.handle(&Event::Key(Key::Char('x')));
+        assert!(sh.login.is_some());
+        sh.handle(&Event::Key(Key::Esc));
+        assert!(sh.login.is_none());
+        // a screen asking through the request slot gets the same dialog
+        crate::agent_login::request("claude-code", false);
+        sh.handle(&Event::Tick);
+        assert!(sh.login.is_some());
+        // clicking a button of the dialog works through the drawn regions
+        sh.render(&mut g);
+        let cancel = sh.hits().iter().find(|h| h.ev == Event::Tab(crate::agent_login::T_CANCEL)).map(|h| h.rect).expect("a Cancel button");
+        sh.handle(&Event::MouseDown(cancel.x as i32 + 4, cancel.y as i32 + 4));
+        assert!(sh.login.is_none());
+    }
+
+    /// A `claude` stand-in that prints an address and waits (or, with `die`, ends a second later with a failure).
+    fn login_claude(sh: &Shell, die: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let svc = &sh.env.services;
+        let d = svc.dir().join("login-fake");
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("claude");
+        let body = if die { "sleep 1; exit 1" } else { "read c; exit 0" };
+        std::fs::write(&p, format!("#!/bin/sh\ncase \"$1 $2\" in\n \"auth status\") echo '{{\"loggedIn\":false}}'; exit 1;;\n \"auth login\") printf 'visit https://claude.example.test/oauth/authorize?code=true&client_id=00000000000000000000\\r\\nPaste code here if prompted > '; {body};;\nesac\necho 2.1.7\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        iyakki_agent::clis::write_fake_installed(&svc.clis, "claude-code", "#!/bin/sh\nexit 0\n");
+        std::os::unix::fs::symlink(&p, svc.clis.bin_dir().join("claude")).unwrap();
+    }
+
+    fn wait_login(sh: &mut Shell, what: &str, f: impl Fn(&crate::agent_login::LoginModal) -> bool) {
+        let t0 = std::time::Instant::now();
+        while !sh.login.as_ref().is_some_and(|m| f(m)) {
+            sh.handle(&Event::Tick);
+            assert!(t0.elapsed() < std::time::Duration::from_secs(20), "timed out waiting for {what}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    const BIG_CODE: &str = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789#st-ate_0123456789ABCDEFGHIJKLMNOPQ";
+
+    #[test]
+    fn open_in_browser_hides_the_dialog_keeps_the_login_alive_and_brings_the_dialog_back_with_the_clipboard_offer() {
+        let (e, _) = env("alogin2");
+        let mut sh = Shell::new(e);
+        setup_admin(&mut sh);
+        login_claude(&sh, false);
+        let mut g = Gfx::new(1280, 720);
+        sh.handle(&Event::Tab(crate::agent_login::LOGIN_TAB));
+        sh.handle(&Event::Key(Key::Enter));
+        wait_login(&mut sh, "the address", |m| m.snapshot().is_some_and(|s| s.url.is_some() && s.wants_input));
+        sh.render(&mut g);
+        sh.handle(&Event::Tab(crate::agent_login::T_OPEN));
+        // the browser tile is the screen, with the address in a tab of its own; the dialog is out of the way
+        assert_eq!(sh.screen_name(), "app:browser");
+        assert!(sh.login.as_ref().unwrap().hidden() && sh.login.as_ref().unwrap().running(), "the login program keeps running");
+        sh.render(&mut g);
+        assert!(!sh.hits().iter().any(|h| h.ev == Event::Tab(crate::agent_login::T_CANCEL)), "no dialog over the browser");
+        for _ in 0..30 {
+            sh.handle(&Event::Tick);
+        }
+        assert!(sh.login.as_ref().unwrap().hidden() && sh.login.as_ref().unwrap().running(), "still waiting while the browser is open");
+        // the person copies the code on the page; the clipboard is IYAKKI's own and survives the browser closing
+        crate::ui::clipboard::copy(BIG_CODE);
+        sh.leave_app();
+        sh.handle(&Event::Tick);
+        let m = sh.login.as_ref().unwrap();
+        assert!(!m.hidden() && m.running(), "the dialog is back by itself, the program still waits");
+        assert_eq!(m.clip_offer(), Some(BIG_CODE.len()));
+        assert_eq!(m.field_text(), "", "nothing is filled in alone");
+        sh.render(&mut g);
+        assert!(sh.hits().iter().any(|h| h.ev == Event::Tab(crate::agent_login::T_PASTE_OFFER)), "one tap to paste");
+        // one tap and Enter: the program got it
+        sh.handle(&Event::Tab(crate::agent_login::T_PASTE_OFFER));
+        assert_eq!(sh.login.as_ref().unwrap().field_text(), BIG_CODE);
+        sh.handle(&Event::Key(Key::Enter));
+        wait_login(&mut sh, "the end", |m| m.snapshot().is_some_and(|s| s.phase.finished()));
+        assert_eq!(sh.login.as_ref().unwrap().snapshot().unwrap().phase, iyakki_agent::extagent::login::Phase::Succeeded);
+    }
+
+    #[test]
+    fn a_login_that_ends_while_the_browser_is_open_is_reported_on_return_with_try_again() {
+        let (e, _) = env("alogin3");
+        let mut sh = Shell::new(e);
+        setup_admin(&mut sh);
+        login_claude(&sh, true);
+        let mut g = Gfx::new(1280, 720);
+        sh.handle(&Event::Tab(crate::agent_login::LOGIN_TAB));
+        sh.handle(&Event::Key(Key::Enter));
+        wait_login(&mut sh, "the address", |m| m.snapshot().is_some_and(|s| s.url.is_some()));
+        sh.handle(&Event::Tab(crate::agent_login::T_OPEN));
+        assert_eq!(sh.screen_name(), "app:browser");
+        wait_login(&mut sh, "the program to end", |m| m.snapshot().is_some_and(|s| s.phase.finished()));
+        assert!(sh.login.as_ref().unwrap().hidden() && sh.login.as_ref().unwrap().ended_while_away());
+        crate::ui::clipboard::copy("not a code, just text");
+        sh.leave_app();
+        sh.handle(&Event::Tick);
+        let m = sh.login.as_ref().unwrap();
+        assert!(!m.hidden() && m.ended_while_away() && m.clip_offer().is_none(), "back, with the news and no paste offer");
+        sh.render(&mut g);
+        assert!(sh.hits().iter().any(|h| h.ev == Event::Tab(crate::agent_login::T_AGAIN)), "Try again");
+        sh.handle(&Event::Tab(crate::agent_login::T_CANCEL));
+        assert!(sh.login.is_none());
+    }
+
+    #[test]
     fn an_app_that_panics_is_closed_and_the_shell_carries_on() {
         let (e, _) = env("panic1");
         let mut sh = Shell::new(e);
@@ -3521,10 +5132,10 @@ pub(crate) mod tests {
         }
         assert_eq!(crate::ui::clipboard::history().len(), 10, "ten by default");
         sh.render(&mut g);
-        // the button sits next to the camera on the home screen
+        // the button sits next to the camera on the home screen (camera, Devices, then the clipboard)
         let s = scale_for(1280, 720);
         let power = sh.session().unwrap().policy.power;
-        let b = header_button(1280, s, if power { 3 } else { 2 });
+        let b = header_button(1280, s, if power { 4 } else { 3 });
         sh.handle(&Event::MouseDown(b.x as i32 + 5, b.y as i32 + 5));
         assert!(sh.clipboard_picker_open(), "the queue is open");
         sh.render(&mut g);
@@ -3652,3 +5263,40 @@ pub(crate) mod tests {
 #[cfg(test)]
 #[path = "shell_ctx_tests.rs"]
 mod ctx_tests;
+
+#[cfg(test)]
+#[path = "shell_cluster_tests.rs"]
+mod cluster_tests;
+
+#[cfg(test)]
+#[path = "shell_jobs_tests.rs"]
+mod jobs_tests;
+
+#[cfg(test)]
+#[path = "shell_tile_tests.rs"]
+mod tile_tests;
+
+#[cfg(test)]
+#[path = "shell_camera_tests.rs"]
+mod camera_tests;
+
+#[cfg(test)]
+#[path = "shell_header_tests.rs"]
+mod header_tests;
+
+#[cfg(test)]
+#[path = "shell_brand_tests.rs"]
+mod brand_tests;
+
+/// The red "Camera in use by the assistant" sign, bottom left of every screen.
+pub(crate) fn draw_camera_sign(g: &mut Gfx, h: u32, s: f32, what: &str) -> R {
+    let text = format!("Camera in use by the assistant: {what}");
+    let tw = g.text_width(14.0 * s, &text, Face::Bold) + 44.0 * s;
+    let r = R::new(16.0 * s, h as f32 - 64.0 * s, tw, 32.0 * s);
+    g.rrect_glow(r.x, r.y, r.w, r.h, r.h / 2.0, 6.0 * s, [255, 60, 70, 90]);
+    g.rrect(r.x, r.y, r.w, r.h, r.h / 2.0, rgb(70, 10, 18));
+    g.rrect_outline(r.x, r.y, r.w, r.h, r.h / 2.0, 1.5 * s, rgb(255, 90, 100));
+    g.circle(r.x + 17.0 * s, r.y + r.h / 2.0, 6.0 * s, rgb(255, 60, 70));
+    g.text(r.x + 30.0 * s, r.y + 7.0 * s, 14.0 * s, TEXT, &text, Face::Bold);
+    r
+}

@@ -157,6 +157,8 @@ struct RunOutput {
 }
 
 pub struct EditApp {
+    /// The open file, queued to be saved on the host computer (window mode).
+    host_save: Option<(String, Vec<u8>)>,
     buf: Buffer,
     hl: Highlighter,
     path: Option<PathBuf>,
@@ -173,11 +175,20 @@ pub struct EditApp {
     modal: Option<Modal>,
     status: Option<(String, bool)>,
     review: Option<Review>,
+    /// When the person last typed into the file, and until when keys must not answer a suggestion that arrived meanwhile.
+    last_typed: Option<std::time::Instant>,
+    review_guard: Option<std::time::Instant>,
     dir: PathBuf,
     /// A file chosen in the open dialog while the current text has unsaved changes: opened if the user confirms.
     parked_open: Option<PathBuf>,
     /// Embedded in the chat: Esc and some chrome behave differently.
     pub embedded: bool,
+    /// Drawn inside the AI IDE: flat tabs, a one-line text toolbar and smaller type (the IDE's density sets the scale).
+    pub ide: bool,
+    /// An AI IDE workspace's folder: nothing outside it is opened or saved.
+    pub root: Option<PathBuf>,
+    /// Without a workspace: the folders the Open dialog and typed paths stay inside (home, workspaces, narrow scopes).
+    confine: Option<iyakki_agent::scope::FileRoots>,
     /// The other files that are open (the one on screen lives in the fields above and has `None` here).
     docs: Vec<Option<DocState>>,
     active: usize,
@@ -277,13 +288,10 @@ fn write_atomic(real: &Path, text: &str) -> Result<(), String> {
 
 impl EditApp {
     pub fn new(cx: &AppCx) -> EditApp {
-        let home = PathBuf::from(format!("/home/{}", cx.session.user));
-        let dir = if cx.session.policy.allows_read(&cx.session.user, &home.to_string_lossy()) && home.is_dir() {
-            home
-        } else {
-            cx.session.policy.read_scopes(&cx.session.user).iter().map(PathBuf::from).find(|p| p.is_dir()).unwrap_or_else(|| PathBuf::from("/"))
-        };
+        let confine = iyakki_agent::scope::FileRoots::new(&cx.session.policy, &cx.session.user, cx.services.dir());
+        let dir = confine.home.clone();
         EditApp {
+            host_save: None,
             buf: Buffer::new(),
             hl: Highlighter::new(Lang::Plain),
             path: None,
@@ -300,9 +308,14 @@ impl EditApp {
             modal: None,
             status: None,
             review: None,
+            last_typed: None,
+            review_guard: None,
             dir,
             parked_open: None,
             embedded: false,
+            ide: false,
+            root: None,
+            confine: Some(confine),
             docs: vec![None],
             active: 0,
             running: None,
@@ -509,6 +522,79 @@ impl EditApp {
         }
     }
 
+    /// The files open in tabs (saved ones), in tab order.
+    pub fn open_paths(&self) -> Vec<PathBuf> {
+        (0..self.docs.len())
+            .filter_map(|i| match &self.docs[i] {
+                Some(d) => d.path.clone(),
+                None => self.path.clone(),
+            })
+            .collect()
+    }
+
+    /// Is this file open in a tab (and has it unsaved changes)?
+    pub fn tab_state(&self, p: &Path) -> Option<bool> {
+        if self.path.as_deref() == Some(p) {
+            return Some(self.buf.is_dirty());
+        }
+        self.docs.iter().flatten().find(|d| d.path.as_deref() == Some(p)).map(|d| d.buf.is_dirty())
+    }
+
+    pub fn any_unsaved(&self) -> bool {
+        self.any_dirty()
+    }
+
+    /// Re-read an open file from disk (the board or the assistant changed it); a tab with unsaved changes is left alone.
+    /// Returns true when the tab now shows the file's new content.
+    pub fn reload_clean(&mut self, cx: &AppCx, p: &Path) -> bool {
+        let Some(i) = (0..self.docs.len()).find(|i| match &self.docs[*i] {
+            Some(d) => d.path.as_deref() == Some(p),
+            None => self.path.as_deref() == Some(p),
+        }) else { return false };
+        if self.tab_state(p) != Some(false) {
+            return false;
+        }
+        let Ok((real, text)) = read_text_file(cx, &p.to_string_lossy()) else { return false };
+        if self.text_of_doc(i).as_deref() == Some(text.as_str()) {
+            return true;
+        }
+        let back = self.active;
+        self.switch_doc(i);
+        let (scroll, hscroll) = (self.scroll, self.hscroll);
+        let ok = self.load(real, &text, cx).is_ok();
+        self.scroll = scroll;
+        self.hscroll = hscroll;
+        self.switch_doc(back);
+        ok
+    }
+
+    fn text_of_doc(&self, i: usize) -> Option<String> {
+        match self.docs.get(i)? {
+            Some(d) => Some(d.buf.text()),
+            None => Some(self.buf.text()),
+        }
+    }
+
+    /// Show the cursor at a 1-based line.
+    pub fn goto_line(&mut self, line: usize) {
+        self.buf.goto_line(line.clamp(1, self.buf.line_count().max(1)));
+        self.follow = true;
+    }
+
+    /// Close the tab of a file (no questions asked: the IDE only calls it for files that are gone or clean).
+    pub fn close_path(&mut self, p: &Path) {
+        if let Some(i) = (0..self.docs.len()).find(|i| match &self.docs[*i] {
+            Some(d) => d.path.as_deref() == Some(p),
+            None => self.path.as_deref() == Some(p),
+        }) {
+            self.close_doc(i);
+        }
+    }
+
+    pub fn set_status(&mut self, msg: &str, ok: bool) {
+        if ok { self.ok(msg) } else { self.fail(msg) }
+    }
+
     /// What a toolbar button sends: a plain key, or a `Sub` event when embedded so the host can tell it
     /// apart from its own buttons.
     fn bev(&self, k: Key) -> Event {
@@ -592,6 +678,26 @@ impl EditApp {
 
     /// Open a file (resolved and permission-checked). Errors are shown in the status line too.
     pub fn open_path(&mut self, cx: &AppCx, input: &str) -> Result<(), String> {
+        if let Some(root) = &self.root {
+            if let Err(e) = iyakki_agent::workspace::resolve_in(root, input.trim()) {
+                self.fail(e.clone());
+                return Err(e);
+            }
+        }
+        let confined;
+        let input = match (&self.root, &self.confine) {
+            (None, Some(c)) => match c.resolve(&c.home, input) {
+                Ok(p) => {
+                    confined = p.to_string_lossy().into_owned();
+                    confined.as_str()
+                }
+                Err(e) => {
+                    self.fail(e.clone());
+                    return Err(e);
+                }
+            },
+            _ => input,
+        };
         let r = read_text_file(cx, input).and_then(|(real, text)| {
             cx.audit.record(&cx.session.user, "edit.open", &real.to_string_lossy());
             let name = real.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -637,6 +743,9 @@ impl EditApp {
     }
 
     fn save_to(&mut self, cx: &AppCx, input: &str) -> Result<(), String> {
+        if let Some(root) = &self.root {
+            iyakki_agent::workspace::resolve_in(root, input.trim())?;
+        }
         let real = iyakki_agent::scope::resolve(Path::new("/"), input.trim())?;
         iyakki_agent::scope::check_write(&cx.session.policy, &cx.session.user, &real)?;
         if real.is_dir() {
@@ -681,6 +790,11 @@ impl EditApp {
 
     // ------------------------------------------------------------------ open dialog
 
+    /// Is this real path one the Open dialog may show? (Inside a workspace the workspace decides; otherwise the roots.)
+    fn pick_ok(&self, real: &Path) -> bool {
+        self.root.is_some() || self.confine.as_ref().is_none_or(|c| c.contains(real))
+    }
+
     fn list_dir(&self, cx: &AppCx, dir: &Path) -> Vec<String> {
         let mut dirs = Vec::new();
         let mut files = Vec::new();
@@ -689,6 +803,10 @@ impl EditApp {
                 let p = e.path();
                 let name = e.file_name().to_string_lossy().into_owned();
                 if !cx.session.policy.allows_read(&cx.session.user, &p.to_string_lossy()) {
+                    continue;
+                }
+                // a link that leads out of the roots is not shown
+                if self.confine.is_some() && !std::fs::canonicalize(&p).is_ok_and(|r| self.pick_ok(&r)) {
                     continue;
                 }
                 match std::fs::metadata(&p) {
@@ -701,7 +819,7 @@ impl EditApp {
         dirs.sort();
         files.sort();
         let mut items = vec!["Type a path…".to_string()];
-        if dir.parent().is_some_and(|p| cx.session.policy.allows_read(&cx.session.user, &p.to_string_lossy())) {
+        if dir.parent().is_some_and(|p| cx.session.policy.allows_read(&cx.session.user, &p.to_string_lossy()) && self.pick_ok(p)) {
             items.push("../".into());
         }
         items.extend(dirs);
@@ -710,6 +828,12 @@ impl EditApp {
     }
 
     fn open_dialog(&mut self, cx: &AppCx, dir: PathBuf) {
+        // never show a folder outside the roots: go back to the start
+        let dir = match std::fs::canonicalize(&dir) {
+            Ok(r) if self.pick_ok(&r) => r,
+            _ if self.confine.is_some() && self.root.is_none() => self.confine.as_ref().map(|c| c.home.clone()).unwrap_or(dir),
+            _ => dir,
+        };
         let items = self.list_dir(cx, &dir);
         self.modal = Some(Modal::Open { picker: Picker::new(&format!("Open — {}", dir.display()), items), dir });
     }
@@ -738,6 +862,9 @@ impl EditApp {
         r.rebuild();
         r.focus_current();
         self.review = Some(r);
+        // a suggestion that arrives while the person is typing must not turn the next letters into answers (y, n, a, x, j...)
+        let now = std::time::Instant::now();
+        self.review_guard = self.last_typed.filter(|t| now.duration_since(*t) < std::time::Duration::from_millis(1500)).map(|_| now + std::time::Duration::from_millis(800));
         self.find = None;
         self.goto = None;
         self.modal = None;
@@ -746,6 +873,12 @@ impl EditApp {
     }
 
     fn review_key(&mut self, k: &Key, cx: &AppCx) {
+        if matches!(k, Key::Char(_)) && self.review_guard.is_some_and(|t| std::time::Instant::now() < t) {
+            // still typing: the guard stays a little longer
+            self.review_guard = Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
+            self.ok("The assistant's suggestion arrived while you were typing; those keys were not taken as answers. y accept · n reject · a accept all.");
+            return;
+        }
         let Some(r) = self.review.as_mut() else { return };
         let n = r.hunks.len();
         let next_undecided = |r: &Review| (1..=n).map(|d| (r.cur + d) % n).find(|i| r.decided[*i].is_none());
@@ -1271,22 +1404,53 @@ impl EditApp {
         if let Some(l) = self.buf.take_dirty() {
             self.hl.invalidate(l);
         }
-        let size = 15.0 * s;
+        let ide = self.ide;
+        let m = super::ide_chrome::cur();
+        let size = if ide { 14.5 * s } else { 15.0 * s };
         let (lh, cw) = (g.line_height(size, Face::Mono), g.text_width(size, "M", Face::Mono));
         self.geo = Geo { cw, lh };
-        let (pad, bar_h) = (14.0 * s, 28.0 * s);
+        let (pad, bar_h) = if ide { (8.0 * s, m.status_h * s) } else { (14.0 * s, 28.0 * s) };
         let x = area.x + pad;
         let w = area.w - 2.0 * pad;
         // the files that are open, when there are several
-        let tabs_h = if self.docs.len() > 1 && !self.embedded { 32.0 * s } else { 0.0 };
+        let tabs_h = if self.docs.len() > 1 && !self.embedded { if ide { m.tab_h * s } else { 32.0 * s } } else { 0.0 };
         if tabs_h > 0.0 {
             let titles = self.doc_titles();
             let n = titles.len();
-            let tw = ((w - 4.0 * s) / n as f32).clamp(90.0 * s, 240.0 * s);
+            let tw = ((w - 4.0 * s) / n as f32).clamp(if ide { 80.0 * s } else { 90.0 * s }, 240.0 * s);
             let mut tx = x;
             for (i, t) in titles.iter().enumerate() {
-                let r = R::new(tx, area.y + 4.0 * s, tw - 4.0 * s, tabs_h - 4.0 * s);
                 let on = i == self.active;
+                if ide {
+                    // flat tabs: the open one is brighter with an underline; the cross shows on the open one and on hover
+                    let r = R::new(tx, area.y + 1.0 * s, tw - 2.0 * s, tabs_h - 1.0 * s);
+                    let hot = g.hovered(r);
+                    if on {
+                        g.rect(r.x, r.y, r.w, r.h, rgb(18, 24, 46));
+                        g.rect(r.x, r.y + r.h - 2.0 * s, r.w, 2.0 * s.max(1.0), ACCENT);
+                    } else if hot {
+                        g.rect(r.x, r.y, r.w, r.h, rgb(15, 20, 38));
+                    }
+                    g.hit(r, Event::Tab(200 + i), "tab");
+                    let fsz = m.font_ui * s;
+                    let face = if on { Face::Bold } else { Face::Sans };
+                    let label = g.fit(fsz, t, face, r.w - 30.0 * s);
+                    g.text(r.x + 8.0 * s, r.y + (r.h - g.line_height(fsz, face)) / 2.0, fsz, if on { TEXT } else { super::ide_chrome::muted() }, &label, face);
+                    let ch = (20.0 * s).max(20.0).min(r.h);
+                    let cr = R::new(r.x + r.w - ch - 2.0 * s, r.y + (r.h - ch) / 2.0, ch, ch);
+                    let chot = g.hovered(cr);
+                    if chot {
+                        g.rrect(cr.x, cr.y, cr.w, cr.h, 4.0 * s, rgb(52, 60, 96));
+                    }
+                    if on || hot || chot {
+                        let xw = g.text_width(fsz, "×", Face::Sans);
+                        g.text(cr.x + (cr.w - xw) / 2.0, cr.y + (cr.h - g.line_height(fsz, Face::Sans)) / 2.0, fsz, super::ide_chrome::muted(), "×", Face::Sans);
+                    }
+                    g.hit(cr, Event::Tab(300 + i), "close tab");
+                    tx += tw;
+                    continue;
+                }
+                let r = R::new(tx, area.y + 4.0 * s, tw - 4.0 * s, tabs_h - 4.0 * s);
                 let hot = g.hovered(r);
                 g.rrect(r.x, r.y, r.w, r.h + 8.0 * s, 9.0 * s, if on { crate::fx::over(rgb(18, 24, 46), [ACCENT[0], ACCENT[1], ACCENT[2], 40]) } else if hot { rgb(22, 29, 54) } else { rgb(14, 18, 34) });
                 if on {
@@ -1305,11 +1469,29 @@ impl EditApp {
                 tx += tw;
             }
         }
+        if ide && tabs_h > 0.0 {
+            super::ide_chrome::strip_line(g, area.x + 1.0, area.y + tabs_h, area.w - 2.0);
+        }
         // toolbar
-        let ty = area.y + tabs_h + 6.0 * s;
+        let tool_h = if ide { super::ide_chrome::tool(s) } else { 0.0 };
+        let ty = area.y + tabs_h + if ide { 3.0 * s } else { 6.0 * s };
         let mut bx = x;
         let embedded = self.embedded;
+        let bounds = area;
         let mut btn = |g: &mut Gfx, label: &str, col: [u8; 4], key: Key, on: bool| {
+            if ide {
+                let bw = g.text_width(m.font_small * s + 1.0 * s, label, Face::Bold) + 16.0 * s;
+                if bx + bw > x + w * 0.62 {
+                    return;
+                }
+                let tip = match key {
+                    Key::Ctrl(c) => format!("{label} (Ctrl+{})", c.to_ascii_uppercase()),
+                    _ => label.to_string(),
+                };
+                super::ide_chrome::text_btn(g, bx, ty, s, label, col, on, if embedded { Event::Sub(1, key) } else { Event::Key(key) }, label, Some(&tip), bounds);
+                bx += bw + 1.0 * s;
+                return;
+            }
             let bw = g.text_width(13.0 * s, label, Face::Bold) + 13.0 * s * 1.7;
             if bx + bw > x + w * 0.62 {
                 return;
@@ -1338,18 +1520,30 @@ impl EditApp {
         let name = self.path.as_ref().and_then(|p| p.file_name()).map_or("untitled".to_string(), |n| n.to_string_lossy().into_owned());
         let label = format!("{}{}", name, if self.buf.is_dirty() { " ●" } else { "" });
         let lang = self.hl.lang().name();
-        let lw = g.text_width(13.0 * s, lang, Face::Bold) + 20.0 * s;
-        crate::fx::chip(g, x + w - lw, ty + 4.0 * s, s, lang, ACCENT, true);
-        let max_label = (x + w - lw - bx - 20.0 * s).max(40.0 * s);
-        let label = g.fit(15.0 * s, &label, Face::Bold, max_label);
-        let lbw = g.text_width(15.0 * s, &label, Face::Bold);
-        g.text(x + w - lw - 10.0 * s - lbw, ty + 6.0 * s, 15.0 * s, if self.buf.is_dirty() { rgb(255, 196, 94) } else { TEXT }, &label, Face::Bold);
+        if ide {
+            let cs = s * 0.85;
+            let chip_w = g.text_width(12.0 * cs, lang, Face::Bold) + 12.0 * cs * 1.4;
+            let lw = crate::fx::chip(g, x + w - chip_w, ty + (tool_h - 12.0 * cs * 1.9) / 2.0, cs, lang, ACCENT, true);
+            let fsz = m.font_ui * s;
+            let max_label = (x + w - lw - bx - 16.0 * s).max(40.0 * s);
+            let label = g.fit(fsz, &label, Face::Bold, max_label);
+            let lbw = g.text_width(fsz, &label, Face::Bold);
+            g.text(x + w - lw - 8.0 * s - lbw, ty + (tool_h - g.line_height(fsz, Face::Bold)) / 2.0, fsz, if self.buf.is_dirty() { rgb(255, 196, 94) } else { TEXT }, &label, Face::Bold);
+        } else {
+            let lw = g.text_width(13.0 * s, lang, Face::Bold) + 20.0 * s;
+            crate::fx::chip(g, x + w - lw, ty + 4.0 * s, s, lang, ACCENT, true);
+            let max_label = (x + w - lw - bx - 20.0 * s).max(40.0 * s);
+            let label = g.fit(15.0 * s, &label, Face::Bold, max_label);
+            let lbw = g.text_width(15.0 * s, &label, Face::Bold);
+            g.text(x + w - lw - 10.0 * s - lbw, ty + 6.0 * s, 15.0 * s, if self.buf.is_dirty() { rgb(255, 196, 94) } else { TEXT }, &label, Face::Bold);
+        }
         // text area
         let find_h = if self.find.as_ref().is_some_and(|f| f.show_replace) { 84.0 * s } else if self.find.is_some() || self.goto.is_some() { 46.0 * s } else { 0.0 };
-        let top = area.y + tabs_h + 44.0 * s;
+        let top_off = if ide { tool_h + 6.0 * s } else { 44.0 * s };
+        let top = area.y + tabs_h + top_off;
         // the result of running the file takes some of the room under the text
         let out_h = if self.output.is_some() && !self.embedded { (area.h * 0.28).clamp(80.0 * s, 240.0 * s) } else { 0.0 };
-        let body = R::new(x, top, w, area.h - tabs_h - 44.0 * s - bar_h - find_h - 6.0 * s - out_h);
+        let body = R::new(x, top, w, area.h - tabs_h - top_off - bar_h - find_h - 6.0 * s - out_h);
         self.rows_visible = ((body.h / lh) as usize).max(1);
         if self.review.is_some() {
             self.draw_review(g, body, s, size, lh, cw);
@@ -1402,21 +1596,24 @@ impl EditApp {
         }
         // status bar
         let sy = area.y + area.h - bar_h;
+        let fs = if ide { m.font_small * s } else { 13.0 * s };
+        let tyo = if ide { (bar_h - g.line_height(fs, Face::Sans)) / 2.0 } else { 6.0 * s };
+        let dimc = if ide { super::ide_chrome::dim() } else { MUTED };
         g.gradient_rect(area.x, sy, area.w, bar_h, (0.0, sy), (0.0, sy + bar_h), &[(0.0, rgb(17, 22, 42)), (1.0, rgb(10, 13, 26))]);
         g.rect(area.x, sy, area.w, 1.0, [ACCENT[0], ACCENT[1], ACCENT[2], 90]);
         if self.running.is_some() {
-            g.text(x + w * 0.45, sy + 6.0 * s, 13.0 * s, rgb(255, 196, 94), &format!("running{}", ".".repeat(1 + (tick / 10 % 3) as usize)), Face::Sans);
+            g.text(x + w * 0.45, sy + tyo, fs, rgb(255, 196, 94), &format!("running{}", ".".repeat(1 + (tick / 10 % 3) as usize)), Face::Sans);
         }
         let (l, c) = self.buf.cursor;
         let (_, map) = expand(self.buf.line(l));
         let pos = format!("Ln {}, Col {}  ·  {} lines  ·  {}  ·  {}", l + 1, map[c.min(map.len() - 1)] + 1, self.buf.line_count(), if self.buf.uses_crlf() { "CRLF" } else { "LF" }, if self.writable { "read-write" } else { "read-only" });
-        g.text(x, sy + 6.0 * s, 13.0 * s, MUTED, &pos, Face::Sans);
+        g.text(x, sy + tyo, fs, dimc, &pos, Face::Sans);
         if let Some((m, ok)) = &self.status {
-            let pw = g.text_width(13.0 * s, &pos, Face::Sans);
+            let pw = g.text_width(fs, &pos, Face::Sans);
             let room = (w - pw - 24.0 * s).max(40.0 * s);
-            let m = g.fit(13.0 * s, m, Face::Sans, room);
-            let mw = g.text_width(13.0 * s, &m, Face::Sans);
-            g.text(x + w - mw, sy + 6.0 * s, 13.0 * s, if *ok { OK } else { ERR }, &m, Face::Sans);
+            let m = g.fit(fs, m, Face::Sans, room);
+            let mw = g.text_width(fs, &m, Face::Sans);
+            g.text(x + w - mw, sy + tyo, fs, if *ok { OK } else { ERR }, &m, Face::Sans);
         }
         // modals
         match &self.modal {
@@ -1456,7 +1653,7 @@ impl EditApp {
             }
             let (chars, map) = expand(self.buf.line(li));
             let nchars = self.buf.line(li).chars().count();
-            if li == cur.0 {
+            if li == cur.0 && super::caret_allowed() {
                 g.rect(text_x - 4.0 * s, y, text_w + 8.0 * s, lh, rgb(22, 28, 50));
             }
             if let Some((a, b)) = sel {
@@ -1471,7 +1668,7 @@ impl EditApp {
             }
         }
         // the bracket next to the caret and its partner
-        if let Some((p, q)) = self.buf.match_bracket() {
+        if let Some((p, q)) = self.buf.match_bracket().filter(|_| super::caret_allowed()) {
             for (l, c) in [p, q] {
                 if l >= self.scroll && l < self.scroll + self.rows_visible && l < n {
                     let (_, map) = expand(self.buf.line(l));
@@ -1496,7 +1693,7 @@ impl EditApp {
             let nchars = line.chars().count();
             let num = (li + 1).to_string();
             let nw = g.text_width(size * 0.9, &num, Face::Mono);
-            g.text(text_x - 14.0 * s - nw, y + 1.0 * s, size * 0.9, if li == cur.0 { MUTED } else { DIM }, &num, Face::Mono);
+            g.text(text_x - 14.0 * s - nw, y + 1.0 * s, size * 0.9, if li == cur.0 && super::caret_allowed() { MUTED } else { DIM }, &num, Face::Mono);
             // coloured runs
             if nchars <= 3000 {
                 for (a, b, col) in self.text_color_runs(li, nchars, &map) {
@@ -1511,6 +1708,7 @@ impl EditApp {
                 g.text(text_x, y, size, TEXT, &seg, Face::Mono);
             }
             if li == cur.0 && blink(tick) {
+                crate::ui::note_caret();
                 let d = map[cur.1.min(nchars)];
                 if d >= self.hscroll {
                     g.rect(text_x + (d - self.hscroll) as f32 * cw, y + 1.0 * s, 2.0 * s, lh - 2.0 * s, rgb(230, 240, 255));
@@ -1587,6 +1785,10 @@ impl EditApp {
 }
 
 impl App for EditApp {
+    fn take_host_save(&mut self) -> Option<(String, Vec<u8>)> {
+        self.host_save.take()
+    }
+
     fn context_items(&mut self, _x: i32, _y: i32) -> Vec<crate::ctxmenu::Item> {
         use crate::ctxmenu::{Item, COPY, CUT, PASTE, SELECT_ALL};
         let sel = self.buf.selection().is_some();
@@ -1595,12 +1797,19 @@ impl App for EditApp {
             v.push(Item::separator());
             v.push(Item::new("comment", "Comment line", "Ctrl+L"));
         }
+        if iyakki_agent::hostfiles::enabled() {
+            v.push(Item::separator());
+            v.push(Item::new("hostsave", "Save a copy on this computer…", "Ctrl+Shift+H"));
+        }
         v
     }
 
     fn context_pick(&mut self, id: &str, cx: &AppCx) -> Flow {
         if id == "comment" {
             return self.handle(&Event::Key(Key::Ctrl('l')), cx);
+        }
+        if id == "hostsave" {
+            return self.handle(&Event::Key(Key::Ctrl('H')), cx);
         }
         Flow::Stay
     }
@@ -1716,6 +1925,15 @@ impl App for EditApp {
         }
         match ev {
             Event::Key(Key::Ctrl('s')) => self.save(cx),
+            // a copy of the open file on the computer the window runs on (window mode): the shell asks where
+            Event::Key(Key::Ctrl('H')) => {
+                if !iyakki_agent::hostfiles::enabled() {
+                    self.fail(iyakki_agent::hostfiles::UNAVAILABLE);
+                } else {
+                    let name = self.path.as_ref().and_then(|p| p.file_name()).map_or("untitled.txt".to_string(), |n| n.to_string_lossy().into_owned());
+                    self.host_save = Some((name, self.buf.text().into_bytes()));
+                }
+            }
             Event::Key(Key::Ctrl('w')) if !self.embedded => self.request(Pending::CloseTab, cx),
             Event::Key(Key::Nav { nav: Nav::PageDown, ctrl: true, .. }) if !self.embedded => self.step_doc(true),
             Event::Key(Key::Nav { nav: Nav::PageUp, ctrl: true, .. }) if !self.embedded => self.step_doc(false),
@@ -1812,6 +2030,7 @@ impl App for EditApp {
             Event::Key(Key::Char(c)) if !c.is_control() => {
                 // code files pair brackets and quotes as they are typed; plain text and Markdown do not
                 let r = if matches!(self.hl.lang(), Lang::Plain | Lang::Markdown) { self.buf.insert(&c.to_string()) } else { self.buf.type_char(*c) };
+                self.last_typed = Some(std::time::Instant::now());
                 self.do_edit(r);
             }
             Event::Paste(t) => {
@@ -1897,11 +2116,27 @@ mod tests {
     }
 
     #[test]
+    fn the_open_file_can_be_saved_as_a_copy_on_the_host_in_window_mode_only() {
+        let _g = iyakki_agent::hostfiles::test_guard();
+        let (cx, home) = world("e-host");
+        let mut a = app_with(&cx, &home, "report.md", "# Report\n");
+        iyakki_agent::hostfiles::set_enabled(false);
+        key(&mut a, &cx, Key::Ctrl('H'));
+        assert!(a.take_host_save().is_none() && a.status().is_some_and(|s| !s.1 && s.0.contains("desktop window")), "{:?}", a.status());
+        iyakki_agent::hostfiles::set_enabled(true);
+        key(&mut a, &cx, Key::Ctrl('H'));
+        assert_eq!(a.take_host_save(), Some(("report.md".to_string(), b"# Report\n".to_vec())));
+        assert!(a.context_items(10, 10).iter().any(|i| i.id == "hostsave"));
+        iyakki_agent::hostfiles::set_enabled(false);
+        assert!(!a.context_items(10, 10).iter().any(|i| i.id == "hostsave"));
+    }
+
+    #[test]
     fn scope_checks_apply_to_reading_writing_and_symlinks() {
         let (mut cx, home) = world("e2");
         let mut a = EditApp::new(&cx);
         assert!(a.open_path(&cx, "/etc/passwd").is_err());
-        assert!(a.status().is_some_and(|s| !s.1 && s.0.contains("permission denied")), "{:?}", a.status());
+        assert!(a.status().is_some_and(|s| !s.1 && (s.0.contains("permission denied") || s.0.contains("outside your home folder"))), "{:?}", a.status());
         // a symlink inside the home that points outside is checked at its destination
         std::os::unix::fs::symlink("/etc/passwd", home.join("link")).unwrap();
         assert!(a.open_path(&cx, &home.join("link").to_string_lossy()).is_err());
@@ -1962,6 +2197,8 @@ mod tests {
     #[test]
     fn the_context_menu_has_cut_copy_paste_select_all_and_comment_line_by_what_applies() {
         use crate::apps::App;
+        let _g = iyakki_agent::hostfiles::test_guard();
+        iyakki_agent::hostfiles::set_enabled(false);
         crate::ui::clipboard::clear();
         let (cx, home) = world("e-ctx");
         let mut code = app_with(&cx, &home, "m.rs", "fn main() {}\n");

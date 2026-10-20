@@ -47,12 +47,15 @@ pub struct McpApp {
     args: TextField,
     output: Option<(String, bool)>,
     error: Option<String>,
+    /// STORE, on this server's page: update, roll back, pin or remove it there.
+    request: Option<(String, String)>,
 }
 
 impl McpApp {
     pub fn new(cx: &AppCx) -> McpApp {
         let servers = Self::visible(cx);
         McpApp {
+            request: None,
             dialog: Dialog::None,
             status: None,
             servers,
@@ -188,6 +191,10 @@ impl McpApp {
 }
 
 impl App for McpApp {
+    fn take_request(&mut self) -> Option<(String, String)> {
+        self.request.take()
+    }
+
     fn title(&self) -> &'static str {
         "MCP"
     }
@@ -199,7 +206,7 @@ impl App for McpApp {
     }
     fn hint(&self) -> String {
         match self.stage {
-            Stage::Servers => "↑↓ choose · Enter connect · N add a server · D remove one · Esc back",
+            Stage::Servers => "↑↓ choose · Enter connect · N add a server · D remove one · U update, roll back or pin in STORE · Esc back",
             Stage::Connecting | Stage::Calling => "working… · Esc cancel view",
             Stage::Tools => "↑↓ choose · Enter call · Esc disconnect",
             Stage::Args => "JSON arguments · Enter run · Esc back",
@@ -317,6 +324,10 @@ impl App for McpApp {
                     }
                 }
                 Key::Char('d') | Key::Delete => self.ask_remove(cx),
+                Key::Char('u') => match self.servers.get(self.sel) {
+                    Some(sv) => self.request = Some(("store".into(), format!("installed:mcp:{}", sv.name))),
+                    None => self.status = Some(("There is no server to manage.".into(), false)),
+                },
                 _ => {}
             },
             Stage::Connecting | Stage::Calling => {

@@ -5,24 +5,25 @@ use iyakki_sec::policy::App;
 
 use crate::ui::R;
 
-/// A named set of tiles. `All` shows every tile; the others are shown only when they have a tile for the person.
+/// A section of the home screen, shown as a tab at the top. Every tile is in exactly one: the section is the `group` field of its
+/// entry in the shell's tile table (Settings has none: it is in the IYAKKI menu, not on the grid). Custom apps go where their
+/// app.json's `group` says, else Work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Group {
-    All,
-    Assistant,
+    /// The assistant: CHAT, RAG, TALES, CALENDAR, MCP, SKILLS, CLI.
+    Home,
     WebMedia,
     Work,
     System,
 }
 
 impl Group {
-    /// Chip order on the launcher.
-    pub const CHIPS: [Group; 5] = [Group::All, Group::Assistant, Group::WebMedia, Group::Work, Group::System];
+    /// Tab order on the home screen.
+    pub const CHIPS: [Group; 4] = [Group::Home, Group::WebMedia, Group::Work, Group::System];
 
     pub fn id(self) -> &'static str {
         match self {
-            Group::All => "all",
-            Group::Assistant => "assistant",
+            Group::Home => "home",
             Group::WebMedia => "web-media",
             Group::Work => "work",
             Group::System => "system",
@@ -31,37 +32,54 @@ impl Group {
 
     pub fn label(self) -> &'static str {
         match self {
-            Group::All => "All",
-            Group::Assistant => "Assistant",
+            Group::Home => "Home",
             Group::WebMedia => "Web & Media",
             Group::Work => "Work",
             Group::System => "System",
         }
     }
 
+    /// A remembered section by its id (`assistant`, the old name of Home, still works; `all` and `my-apps` are gone).
     pub fn from_id(id: &str) -> Option<Group> {
+        if id == "assistant" {
+            return Some(Group::Home);
+        }
         Group::CHIPS.into_iter().find(|g| g.id() == id)
     }
 
-    /// The group an app lives in (`None` for apps without a tile, like the inbox, which has the bell).
+    /// The section an app's tile is in (`None` for apps without a tile on the grid: the inbox has the bell, Settings the menu).
     pub fn of(app: App) -> Option<Group> {
-        Some(match app {
-            App::Chat | App::Rag | App::Runs | App::Mcp | App::Skills => Group::Assistant,
-            App::Browser | App::Radio | App::Media => Group::WebMedia,
-            App::Cli | App::Edit | App::Calendar => Group::Work,
-            App::Users | App::Settings | App::Scan | App::Mesh | App::Usage | App::System => Group::System,
-            App::Inbox => return None,
-        })
+        crate::shell::tile_group(app)
     }
 
     pub fn holds(self, app: App) -> bool {
-        self == Group::All || Group::of(app) == Some(self)
+        Group::of(app) == Some(self)
     }
 }
 
-/// The chips to show for these apps: `All`, then every group that has at least one of them (empty groups are hidden).
+/// The section a custom app's `group` (from its app.json) puts it in: a built-in one when the name is one of theirs
+/// ("Assistant" means Home), else Work.
+pub fn group_of_custom(name: &str) -> Group {
+    let n = name.trim().to_lowercase();
+    if n == "assistant" {
+        return Group::Home;
+    }
+    Group::CHIPS.into_iter().find(|g| g.label().to_lowercase() == n || g.id() == n).unwrap_or(Group::Work)
+}
+
+/// Apps whose tile wears the DEMO ribbon: they show sample data only and touch no real system.
+pub fn is_demo(app: App) -> bool {
+    app == App::SrePilot
+}
+
+/// The tabs to show for these apps: every section that has at least one of them (empty sections are hidden).
 pub fn groups_of(apps: &[App]) -> Vec<Group> {
-    Group::CHIPS.into_iter().filter(|g| *g == Group::All || apps.iter().any(|a| g.holds(*a))).collect()
+    groups_with(apps, &[])
+}
+
+/// Like [`groups_of`], with the groups that custom apps are in.
+pub fn groups_with(apps: &[App], custom: &[Group]) -> Vec<Group> {
+    Group::CHIPS.into_iter().filter(|g| apps.iter().any(|a| g.holds(*a)) || custom.contains(g)).collect()
 }
 
 const TOP: f32 = 140.0;
@@ -167,24 +185,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_tile_app_is_in_exactly_one_group_and_the_inbox_in_none() {
+    fn every_tile_app_is_in_exactly_one_section_and_the_inbox_and_settings_in_none() {
         for a in App::ALL {
-            let n = Group::CHIPS.iter().filter(|g| **g != Group::All && g.holds(a)).count();
-            assert_eq!(n, if a == App::Inbox { 0 } else { 1 }, "{a:?}");
-            assert!(Group::All.holds(a));
+            let n = Group::CHIPS.iter().filter(|g| g.holds(a)).count();
+            assert_eq!(n, if matches!(a, App::Inbox | App::Settings) { 0 } else { 1 }, "{a:?}");
         }
         for g in Group::CHIPS {
             assert_eq!(Group::from_id(g.id()), Some(g));
         }
+        assert_eq!(Group::from_id("assistant"), Some(Group::Home), "the old name of Home");
+        assert_eq!(Group::from_id("all"), None);
         assert_eq!(Group::from_id("nope"), None);
+        assert_eq!(group_of_custom("My apps"), Group::Work, "no declared section: Work");
+        assert_eq!(group_of_custom("web & media"), Group::WebMedia);
+        assert_eq!(group_of_custom("Assistant"), Group::Home);
+    }
+
+    #[test]
+    fn the_sections_hold_the_tiles_the_owner_listed() {
+        let of = |g: Group| -> Vec<App> { App::ALL.into_iter().filter(|a| g.holds(*a)).collect() };
+        let mut home = of(Group::Home);
+        home.sort_by_key(|a| a.id());
+        assert_eq!(home, [App::Calendar, App::Chat, App::Cli, App::Mcp, App::Rag, App::Skills, App::Tales]);
+        for a in [App::Browser, App::Radio, App::Media, App::Camera] {
+            assert!(Group::WebMedia.holds(a), "{a:?}");
+        }
+        for a in [App::Ide, App::Edit, App::Data, App::Dash, App::Flows, App::Runs, App::SrePilot] {
+            assert!(Group::Work.holds(a), "{a:?}");
+        }
+        for a in [App::System, App::Store, App::Users, App::Usage, App::Scan, App::Mesh] {
+            assert!(Group::System.holds(a), "{a:?}");
+        }
+    }
+
+    #[test]
+    fn the_four_section_tabs_fit_a_phone_wide_browser() {
+        for (w, h) in [(360u32, 740u32), (390, 844), (800, 480)] {
+            let s = crate::shell::scale_for(w, h);
+            let labels: Vec<&str> = Group::CHIPS.iter().map(|g| g.label()).collect();
+            let r = chip_rects(s, &labels);
+            let last = r.last().unwrap();
+            assert!(last.x + last.w <= w as f32 - 8.0, "{w}x{h}: {r:?}");
+            assert!(r.iter().all(|c| c.h >= 20.0), "{w}x{h}: tappable");
+        }
     }
 
     #[test]
     fn empty_groups_are_hidden() {
-        assert_eq!(groups_of(&[App::Chat, App::Rag]), vec![Group::All, Group::Assistant]);
-        assert_eq!(groups_of(&[App::Radio, App::Edit]), vec![Group::All, Group::WebMedia, Group::Work]);
-        assert_eq!(groups_of(&[]), vec![Group::All]);
-        assert_eq!(groups_of(&App::ALL).len(), 5);
+        assert_eq!(groups_of(&[App::Chat, App::Rag]), vec![Group::Home]);
+        assert_eq!(groups_of(&[App::Radio, App::Edit]), vec![Group::WebMedia, Group::Work]);
+        assert_eq!(groups_of(&[]), Vec::<Group>::new());
+        assert_eq!(groups_of(&App::ALL).len(), 4);
     }
 
     #[test]

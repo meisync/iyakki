@@ -11,9 +11,16 @@ use crate::gfx::{rgb, Face, Gfx, Icon};
 use crate::ui::{Event, Key, DIM, ERR, MUTED, OK, R, TEXT};
 
 const ACCENT: [u8; 4] = rgb(255, 196, 94);
+const CYAN_TASK: [u8; 4] = rgb(100, 230, 255);
 
 pub struct RunsApp {
     runs: Vec<RunMeta>,
+    /// Every run, before the filter.
+    all: Vec<RunMeta>,
+    /// Only the runs whose agent (`Agent 2`) or task id is this (key f cycles).
+    filter: Option<String>,
+    /// Asked of the shell: show a task or a row in the IDE kept aside (`("ide", "task:<id>")`).
+    request: Option<(String, String)>,
     sel: usize,
     detail: Option<(RunLog, Integrity)>,
     scroll: usize,
@@ -21,6 +28,9 @@ pub struct RunsApp {
     status: Option<(String, bool)>,
     /// Selecting and copying the text of the record.
     pane: crate::textsel::Pane,
+    /// The Jobs list (detached jobs of every workspace), shown instead of the runs when `jobs_mode` is on.
+    jobs: super::jobs_ui::JobsUi,
+    jobs_mode: bool,
 }
 
 /// `YYYY-MM-DD HH:MM` (UTC) from unix seconds, without a date library.
@@ -74,12 +84,19 @@ pub fn timeline(log: &RunLog) -> Vec<(String, [u8; 4])> {
                     "auto" => "automatically (safe tool)",
                     "user" => "by you",
                     "always" => "automatically (you chose always allow)",
+                    "grant" => "automatically (you allowed it for 5 minutes)",
                     _ => "by the system (no answer in time)",
                 };
                 v.push((format!("  {} {name} {who}", if *approved { "✓ allowed" } else { "✗ denied" }), if *approved { OK } else { ERR }));
             }
             RunEvent::ToolResult { name, ok, text, .. } => v.push((format!("  {} {name}: {}", if *ok { "result" } else { "error" }, one_line(text, 400)), if *ok { MUTED } else { ERR })),
-            RunEvent::Usage { .. } => {}
+            RunEvent::Usage { .. } | RunEvent::Delta { .. } | RunEvent::Thinking { .. } => {}
+            RunEvent::Note { text } => v.push((format!("  · {text}"), rgb(255, 196, 94))),
+            RunEvent::Timing { first_token_ms, first_text_ms, total_ms, model_ms, tools_ms, overhead_ms, thinking_ms, .. } => {
+                let s = |ms: &u64| format!("{:.1} s", *ms as f64 / 1000.0);
+                let first = if *first_text_ms > 0 { first_text_ms } else { first_token_ms };
+                v.push((format!("Time: first token {} · thinking {} · total {} · model {} · tools {} · IYAKKI {} ms", s(first), s(thinking_ms), s(total_ms), s(model_ms), s(tools_ms), overhead_ms), MUTED));
+            }
             RunEvent::Final { text } => v.push((format!("Answer: {text}"), OK)),
             RunEvent::Failed { error } => v.push((format!("Failed: {error}"), ERR)),
             RunEvent::Stopped { reason } => v.push((format!("Stopped: {reason}"), ERR)),
@@ -92,8 +109,29 @@ pub fn timeline(log: &RunLog) -> Vec<(String, [u8; 4])> {
 }
 
 impl RunsApp {
+    /// The Jobs list: every detached job of the person (any workspace), one row each with Log and Stop or Dismiss; the log of
+    /// the chosen job below the list.
+    fn render_jobs(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+        let fs = (15.0 * s).max(12.0);
+        let r = R::new(area.x + 24.0 * s, area.y + 4.0 * s, area.w - 48.0 * s, area.h - 20.0 * s);
+        self.jobs.poll(cx, false);
+        if self.jobs.jobs().is_empty() {
+            crate::fx::empty_state(g, area, s, Icon::Runs, "No detached jobs", "When the assistant or Claude Code starts a long command with job_start, it shows here with its progress, a Log and a Stop button.", ACCENT);
+            return;
+        }
+        let rh = super::jobs_ui::JobsUi::row_height(fs, s) + 4.0 * s;
+        let want = self.jobs.jobs().len() as f32 * rh;
+        let list_h = if self.jobs.log_open() { want.min(r.h * 0.4).max(rh) } else { want.min(r.h) };
+        self.jobs.draw_list(g, R::new(r.x, r.y, r.w, list_h), fs, s, tick);
+        if self.jobs.log_open() {
+            self.jobs.draw_log(g, R::new(r.x, r.y + list_h + 6.0 * s, r.w, (r.h - list_h - 6.0 * s).max(60.0 * s)), fs, s);
+        } else if self.jobs.overflow > 0 {
+            g.text(r.x, r.y + list_h + 4.0 * s, 13.0 * s, DIM, &format!("{} more not shown: dismiss finished jobs to make room", self.jobs.overflow), Face::Sans);
+        }
+    }
+
     pub fn new(cx: &AppCx) -> RunsApp {
-        let mut a = RunsApp { runs: vec![], sel: 0, detail: None, scroll: 0, confirm: false, status: None, pane: crate::textsel::Pane::new(61_200) };
+        let mut a = RunsApp { runs: vec![], all: vec![], filter: None, request: None, sel: 0, detail: None, scroll: 0, confirm: false, status: None, pane: crate::textsel::Pane::new(61_200), jobs: super::jobs_ui::JobsUi::new(None), jobs_mode: false };
         a.reload(cx);
         a
     }
@@ -108,9 +146,56 @@ impl RunsApp {
         self.status.as_ref()
     }
 
+    /// Open the Jobs list (the shell's link from a notification, and the `j` key).
+    pub fn show_jobs(&mut self, cx: &AppCx) {
+        self.jobs_mode = true;
+        self.jobs.poll(cx, true);
+    }
+
+    pub fn jobs_mode(&self) -> bool {
+        self.jobs_mode
+    }
+
+    pub fn jobs(&self) -> &super::jobs_ui::JobsUi {
+        &self.jobs
+    }
+
     fn reload(&mut self, cx: &AppCx) {
-        self.runs = cx.services.runs.list(&cx.session.user);
+        self.all = cx.services.runs.list(&cx.session.user);
+        self.apply_filter();
         self.sel = self.sel.min(self.runs.len().saturating_sub(1));
+        self.open_selected(cx);
+    }
+
+    fn apply_filter(&mut self) {
+        self.runs = match &self.filter {
+            None => self.all.clone(),
+            Some(f) => self.all.iter().filter(|m| m.agent.as_deref() == Some(f.as_str()) || m.task_id.as_deref() == Some(f.as_str())).cloned().collect(),
+        };
+    }
+
+    /// The agents and tasks that have runs, for the filter to cycle through.
+    fn filter_values(&self) -> Vec<String> {
+        let mut v: Vec<String> = Vec::new();
+        for m in &self.all {
+            for x in [&m.agent, &m.task_id].into_iter().flatten() {
+                if !v.contains(x) {
+                    v.push(x.clone());
+                }
+            }
+        }
+        v.sort();
+        v
+    }
+
+    fn cycle_filter(&mut self, cx: &AppCx) {
+        let vals = self.filter_values();
+        self.filter = match &self.filter {
+            None => vals.first().cloned(),
+            Some(f) => vals.iter().position(|x| x == f).and_then(|i| vals.get(i + 1)).cloned(),
+        };
+        self.apply_filter();
+        self.sel = 0;
         self.open_selected(cx);
     }
 
@@ -138,14 +223,86 @@ impl App for RunsApp {
         ACCENT
     }
     fn hint(&self) -> String {
-        if self.confirm { "y delete · Esc cancel".into() } else { "click a run · c copy transcript · d delete · PgUp/PgDn scroll".into() }
+        if self.jobs_mode {
+            "click Log or Stop on a job · wheel scrolls the log · Esc closes the log · j back to the runs".into()
+        } else if self.confirm {
+            "y delete · Esc cancel".into()
+        } else {
+            "click a run · c copy transcript · d delete · f filter by agent or task · g task · b row · PgUp/PgDn scroll · j detached jobs".into()
+        }
+    }
+
+    fn wants_redraw(&mut self) -> bool {
+        self.jobs_mode && self.jobs.frame_due()
+    }
+
+    /// A notification about a job opens the Jobs list.
+    fn open_item(&mut self, item: &str, cx: &AppCx) {
+        if item == "jobs" {
+            self.show_jobs(cx);
+        } else if let Some(id) = item.strip_prefix("run:") {
+            // a task's run, opened from the board's agent panel
+            self.jobs_mode = false;
+            self.filter = None;
+            self.reload(cx);
+            if let Some(i) = self.runs.iter().position(|m| m.id == id) {
+                self.sel = i;
+                self.open_selected(cx);
+            } else {
+                self.status = Some(("That run is not recorded (yet).".into(), false));
+            }
+        }
+    }
+
+    fn take_request(&mut self) -> Option<(String, String)> {
+        self.request.take()
     }
 
     fn context_items(&mut self, x: i32, y: i32) -> Vec<crate::ctxmenu::Item> {
+        if self.jobs_mode {
+            return self.jobs.context_items(x, y);
+        }
         self.pane.context_items(x, y)
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        match ev {
+            Event::Tab(super::jobs_ui::TAB_JOBS) => {
+                self.show_jobs(cx);
+                return Flow::Stay;
+            }
+            Event::Tab(super::jobs_ui::TAB_RUNS) => {
+                self.jobs_mode = false;
+                self.jobs.close_log();
+                return Flow::Stay;
+            }
+            Event::Key(Key::Char('j')) if !self.confirm => {
+                if self.jobs_mode {
+                    self.jobs_mode = false;
+                    self.jobs.close_log();
+                } else {
+                    self.show_jobs(cx);
+                }
+                return Flow::Stay;
+            }
+            _ => {}
+        }
+        if self.jobs_mode {
+            if matches!(ev, Event::Tick) {
+                self.jobs.poll(cx, false);
+            }
+            if matches!(ev, Event::Key(Key::Ctrl('a'))) && self.jobs.log_open() {
+                self.jobs.select_all();
+                return Flow::Stay;
+            }
+            if self.jobs.handle(ev, cx) {
+                return Flow::Stay;
+            }
+            return match ev {
+                Event::Key(Key::Esc) => Flow::Back,
+                _ => Flow::Stay,
+            };
+        }
         if !self.confirm {
             if self.pane.handle(ev) {
                 return Flow::Stay;
@@ -201,6 +358,20 @@ impl App for RunsApp {
                 Key::PageDown => self.scroll += 12,
                 Key::PageUp => self.scroll = self.scroll.saturating_sub(12),
                 Key::Char('r') => self.reload(cx),
+                Key::Char('f') => self.cycle_filter(cx),
+                Key::Char('g') | Key::Char('b') => {
+                    // from a task's run back to its task or its row on the board
+                    if let Some(m) = self.runs.get(self.sel) {
+                        let item = match (k, &m.task_id, &m.row) {
+                            (Key::Char('g'), Some(t), _) => Some(format!("task:{t}")),
+                            (Key::Char('b'), _, Some(r)) => Some(format!("row:{r}")),
+                            _ => None,
+                        };
+                        if let Some(i) = item {
+                            self.request = Some(("ide".into(), i));
+                        }
+                    }
+                }
                 Key::Char('d') if !self.runs.is_empty() => self.confirm = true,
                 Key::Char('c') if self.detail.is_some() => crate::ui::clipboard::copy(&self.transcript()),
                 _ => {}
@@ -210,7 +381,22 @@ impl App for RunsApp {
         Flow::Stay
     }
 
-    fn render(&mut self, g: &mut Gfx, area: R, s: f32, _cx: &AppCx, _tick: u64) {
+    fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+        // the switch between the recorded runs and the detached jobs
+        let th = 40.0 * s;
+        {
+            let mut x = area.x + 24.0 * s;
+            let n = self.jobs.jobs().iter().filter(|j| j.running()).count();
+            let jobs_label = if n > 0 { format!("Jobs ({n} running)") } else { "Jobs".to_string() };
+            for (label, on, ev) in [("Runs", !self.jobs_mode, Event::Tab(super::jobs_ui::TAB_RUNS)), (jobs_label.as_str(), self.jobs_mode, Event::Tab(super::jobs_ui::TAB_JOBS))] {
+                x += g.button(x, area.y + 4.0 * s, 14.0 * s, label, if on { ACCENT } else { MUTED }, ev) + 8.0 * s;
+            }
+        }
+        let area = R::new(area.x, area.y + th, area.w, (area.h - th).max(10.0));
+        if self.jobs_mode {
+            self.render_jobs(g, area, s, cx, tick);
+            return;
+        }
         let x = area.x + 24.0 * s;
         let list_w = (area.w * 0.34).min(400.0 * s);
         let mut y = area.y + 8.0 * s;
@@ -233,9 +419,14 @@ impl App for RunsApp {
                 "running" => ACCENT,
                 _ => ERR,
             };
-            g.text(x + 14.0 * s, y + 38.0 * s, 12.5 * s, MUTED, &format!("{} UTC · {} tool call{}", fmt_time(m.started), m.tool_calls, if m.tool_calls == 1 { "" } else { "s" }), Face::Sans);
+            g.text(x + 14.0 * s, y + 34.0 * s, 12.5 * s, MUTED, &format!("{} UTC · {} tool call{}", fmt_time(m.started), m.tool_calls, if m.tool_calls == 1 { "" } else { "s" }), Face::Sans);
+            let tl = m.task_label();
+            if !tl.is_empty() {
+                let t = g.fit(11.5 * s, &tl, Face::Bold, list_w - 28.0 * s);
+                g.text(x + 14.0 * s, y + 50.0 * s, 11.5 * s, crate::fx::readable(CYAN_TASK, crate::fx::PANEL, 4.5), &t, Face::Bold);
+            }
             let w = g.text_width(12.0 * s, &m.status, Face::Bold) + 17.0 * s;
-            crate::fx::chip(g, x + list_w - w - 10.0 * s, y + 33.0 * s, s, &m.status, col, i == self.sel);
+            crate::fx::chip(g, x + list_w - w - 10.0 * s, y + 29.0 * s, s, &m.status, col, i == self.sel);
             y += 74.0 * s;
         }
         // detail
@@ -276,8 +467,24 @@ impl App for RunsApp {
         }
         let by = area.y + area.h - 78.0 * s;
         let mut bx = x;
-        for (label, col, key) in [("Copy transcript", ACCENT, 'c'), ("Delete run", ERR, 'd'), ("Refresh", MUTED, 'r')] {
-            bx += g.button(bx, by, 14.0 * s, label, col, Event::Key(Key::Char(key))) + 10.0 * s;
+        let flabel = format!("Filter: {}", self.filter.clone().unwrap_or_else(|| "all".into()));
+        let sel_run = self.runs.get(self.sel).cloned();
+        let mut btns: Vec<(String, [u8; 4], char)> = vec![];
+        if let Some(m) = &sel_run {
+            if m.task_id.is_some() {
+                btns.push(("Show task".into(), CYAN_TASK, 'g'));
+            }
+            if m.row.is_some() {
+                btns.push(("Show row".into(), CYAN_TASK, 'b'));
+            }
+        }
+        btns.extend([("Copy transcript".to_string(), ACCENT, 'c'), ("Delete run".to_string(), ERR, 'd'), ("Refresh".to_string(), MUTED, 'r'), (flabel, MUTED, 'f')]);
+        for (label, col, key) in btns {
+            let w = g.text_width(14.0 * s, &label, Face::Bold) + 14.0 * s * 1.7;
+            if bx + w > area.x + area.w - 12.0 * s && bx > x {
+                break;
+            }
+            bx += g.button(bx, by, 14.0 * s, &label, col, Event::Key(Key::Char(key))) + 10.0 * s;
         }
         if let Some((m, ok)) = &self.status {
             crate::fx::status_line(g, x, area.y + area.h - 30.0 * s, area.w - 48.0 * s, s, m, *ok);
@@ -307,6 +514,9 @@ mod tests {
         RunLog {
             id: id.into(),
             session: None,
+            task_id: None,
+            row: None,
+            agent: None,
             user: user.into(),
             started,
             prompt: "tidy my notes".into(),
@@ -392,5 +602,70 @@ mod tests {
         g.clear(rgb(0, 0, 0));
         app.render(&mut g, R::new(0.0, 72.0, 900.0, 528.0), 1.0, &cx, 0);
         assert!(matches!(app.handle(&Event::Key(Key::Esc), &cx), Flow::Back));
+    }
+
+    fn task_log(user: &str, id: &str, started: u64, task: &str, agent: &str, row: &str) -> RunLog {
+        RunLog { task_id: Some(task.into()), agent: Some(agent.into()), row: Some(row.into()), ..log(user, id, started) }
+    }
+
+    #[test]
+    fn a_tasks_runs_show_its_task_agent_and_row_filter_open_by_item_and_link_back() {
+        let mut cx = cx_with_admin_store("runs-task");
+        cx.session.user = "amy".into();
+        let store = &cx.services.runs;
+        store.save(&log("amy", "aaaaaaaaaaaa", 100)).unwrap();
+        store.save(&task_log("amy", "bbbbbbbbbbbb", 200, "t1", "Agent 1", "F-APP-01")).unwrap();
+        store.save(&task_log("amy", "cccccccccccc", 300, "t2", "Agent 2", "F-APP-02")).unwrap();
+        let mut app = RunsApp::new(&cx);
+        assert_eq!(app.runs().iter().map(|m| m.task_label()).collect::<Vec<_>>(), ["Task t2 · Agent 2 · F-APP-02", "Task t1 · Agent 1 · F-APP-01", ""]);
+        // the hand-off from the board: the item selects that run (whatever filter was on)
+        app.filter = Some("Agent 2".into());
+        app.open_item("run:bbbbbbbbbbbb", &cx);
+        assert_eq!(app.filter, None);
+        assert_eq!(app.detail.as_ref().unwrap().0.id, "bbbbbbbbbbbb");
+        app.open_item("run:nope", &cx);
+        assert!(app.status.as_ref().is_some_and(|s| !s.1));
+        // the filter cycles agents, then tasks, then all
+        app.handle(&Event::Key(Key::Char('f')), &cx);
+        assert_eq!((app.filter.clone(), app.runs().len()), (Some("Agent 1".into()), 1));
+        app.handle(&Event::Key(Key::Char('f')), &cx);
+        assert_eq!(app.filter.as_deref(), Some("Agent 2"));
+        app.handle(&Event::Key(Key::Char('f')), &cx);
+        assert_eq!(app.filter.as_deref(), Some("t1"));
+        for _ in 0..2 {
+            app.handle(&Event::Key(Key::Char('f')), &cx);
+        }
+        assert_eq!((app.filter.clone(), app.runs().len()), (None, 3));
+        // from a task's run back to its task and its row; a run that is not a task's has no such buttons
+        app.open_item("run:cccccccccccc", &cx);
+        app.handle(&Event::Key(Key::Char('g')), &cx);
+        assert_eq!(app.take_request(), Some(("ide".into(), "task:t2".into())));
+        app.handle(&Event::Key(Key::Char('b')), &cx);
+        assert_eq!(app.take_request(), Some(("ide".into(), "row:F-APP-02".into())));
+        app.open_item("run:aaaaaaaaaaaa", &cx);
+        app.handle(&Event::Key(Key::Char('g')), &cx);
+        assert_eq!(app.take_request(), None);
+    }
+
+    #[test]
+    fn the_runs_screen_with_task_runs_fits_the_four_sizes_and_offers_the_links() {
+        let mut cx = cx_with_admin_store("runs-geom");
+        cx.session.user = "amy".into();
+        for i in 0..6 {
+            cx.services.runs.save(&task_log("amy", &format!("{i:012x}"), 100 + i as u64, &format!("t{i}"), &format!("Agent {}", i % 3 + 1), "F-APP-01")).unwrap();
+        }
+        let mut app = RunsApp::new(&cx);
+        for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+            let s = crate::shell::scale_for(w, h);
+            let mut g = Gfx::new(w, h);
+            g.clear(rgb(0, 0, 0));
+            app.render(&mut g, R::new(0.0, 46.0 * s, w as f32, h as f32 - 46.0 * s), s, &cx, 0);
+            for hit in g.hits.iter().filter(|x| x.rect.w > 0.0) {
+                assert!(hit.rect.x >= -0.5 && hit.rect.y >= -0.5 && hit.rect.x + hit.rect.w <= w as f32 + 0.5 && hit.rect.y + hit.rect.h <= h as f32 + 0.5, "{w}x{h}: {:?} {:?}", hit.label, hit.rect);
+            }
+            for want in ["Show task", "Show row"] {
+                assert!(g.hits.iter().any(|x| x.label == want || x.label.starts_with(want)), "{w}x{h}: {want}");
+            }
+        }
     }
 }

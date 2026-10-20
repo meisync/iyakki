@@ -14,6 +14,7 @@ use super::browser_assist;
 use super::browser_config::{self, BrowserConfig};
 use super::browser_dark;
 use super::browser_devtools;
+use super::browser_typo;
 use super::browser_full::{Full, Note, Start, AREA_FULL};
 use super::browser_data::{self, Data, Suggestion};
 use super::browser_logins::{self, Cred};
@@ -336,6 +337,15 @@ impl TabState {
     }
 }
 
+thread_local! {
+    static OPEN_NEXT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Ask for the BROWSER tile to open on `url` the next time it starts (the AI IDE does this, then asks the shell for the tile).
+pub fn request_open(url: &str) {
+    OPEN_NEXT.with(|o| *o.borrow_mut() = Some(url.to_string()));
+}
+
 pub struct BrowserApp {
     field: TextField,
     addr_focus: bool,
@@ -367,6 +377,10 @@ pub struct BrowserApp {
     show_notes: bool,
     /// The page being loaded replaces a Google search (see `go_request`).
     rerouted: bool,
+    /// Search pages that refused the current search (busy, or a check page); the next engine in the list is tried.
+    search_tried: Vec<iyakki_web::SearchEngine>,
+    /// Said above the results when another engine answered instead of the chosen one.
+    search_note: Option<String>,
     /// Bookmarks, history, zoom and downloads of this person.
     data: Data,
     /// What the address bar offers for the text typed in it, and which one is chosen.
@@ -411,6 +425,10 @@ pub struct BrowserApp {
     full: Option<Full>,
     /// A page the reader cannot show is opened in the full engine at once when it is there (off in most tests).
     auto_full: bool,
+    /// The engine stopped or the person left it: heavy sites are no longer sent to it by themselves (no crash loop).
+    full_declined: bool,
+    /// The full engine (helper program or cage/cog) is installed; false makes heavy sites show the "needs the full web engine" banner.
+    engine_offered: bool,
     /// Where the page area was drawn last and the interface scale then (the engine starts at that size).
     view_rect: R,
     ui_scale: f32,
@@ -418,10 +436,26 @@ pub struct BrowserApp {
     snap_key: String,
     snap_sel: String,
     snap: Option<iyakki_agent::webtools::PageSnapshot>,
+    /// The assistant's own tab is showing (see `web_agent`).
+    agent_view: bool,
+    /// Shown inside another app (the AI IDE's Browser tab, see `ide_browser`): this app is then only the built-in reader and
+    /// never starts a web engine of its own; a page that needs one is handed to the host in `want_full`, which shows it in the
+    /// host's shared engine (the assistant's tab), so there is one helper program per window.
+    embedded: bool,
+    want_full: Option<String>,
 }
 
 impl BrowserApp {
     pub fn new(cx: &AppCx) -> BrowserApp {
+        let mut app = BrowserApp::make(cx);
+        // the AI IDE's "open in the Browser tile" asked for this page
+        if let Some(u) = OPEN_NEXT.with(|o| o.borrow_mut().take()) {
+            app.open_url(&u, cx);
+        }
+        app
+    }
+
+    fn make(cx: &AppCx) -> BrowserApp {
         let field = new_field();
         let (img_tx, img_rx) = channel();
         let app = BrowserApp {
@@ -446,6 +480,8 @@ impl BrowserApp {
             sites: iyakki_js::Sites::default(),
             show_notes: false,
             rerouted: false,
+            search_tried: Vec::new(),
+            search_note: None,
             data: browser_data::load(cx),
             suggest: Vec::new(),
             sug_sel: None,
@@ -471,11 +507,16 @@ impl BrowserApp {
             col_off: 0.0,
             full: None,
             auto_full: !cfg!(test),
+            full_declined: false,
+            engine_offered: iyakki_agent::webengine::offered(),
             view_rect: R::new(0.0, 0.0, 1280.0, 600.0),
             ui_scale: 1.0,
             snap_key: String::new(),
             snap_sel: String::new(),
             snap: None,
+            agent_view: false,
+            embedded: false,
+            want_full: None,
         };
         if app.cfg.js_all || !app.cfg.js_sites.is_empty() {
             iyakki_js::warm_up();
@@ -648,6 +689,30 @@ impl BrowserApp {
         self.cfg.scripts_for(host)
     }
 
+    /// Open an address in a NEW tab while whatever is running (an overlay, a sign-in dialog) goes on: the full web engine when the
+    /// image has one and the account's policy allows the host, else the built-in reader. The tab becomes the active one.
+    pub fn open_in_new_tab(&mut self, input: &str, cx: &AppCx) {
+        let before = self.tabs.len();
+        self.new_tab();
+        if self.tabs.len() == before {
+            return; // at the tab limit: new_tab said so in the status line
+        }
+        let Ok(u) = Url::from_input_on(input, self.cfg.search) else {
+            self.status = Some((format!("{input} is not an address."), false));
+            return;
+        };
+        if !self.embedded && iyakki_agent::webengine::offered() {
+            if let (Ok(allowed), Some(helper)) = (iyakki_agent::webengine::allowed(&cx.session.policy, &u.to_string()), iyakki_agent::webengine::embedded_helper()) {
+                let host = iyakki_sec::url_host(&allowed).unwrap_or_default();
+                self.start_embedded(helper, allowed, host, cx);
+                if self.full.is_some() {
+                    return;
+                }
+            }
+        }
+        self.go(u, How::Push, cx);
+    }
+
     /// Open an address (used by tests and by "open this" from other apps).
     pub fn open_url(&mut self, input: &str, cx: &AppCx) {
         match Url::from_input_on(input, self.cfg.search) {
@@ -658,6 +723,66 @@ impl BrowserApp {
 
     pub fn current_url(&self) -> Option<&Url> {
         self.history.get(self.pos).and_then(|e| e.page.as_ref()).map(|p| &p.url)
+    }
+
+    /// A reader for another app to show in a rectangle of its own (the IDE's Browser tab).
+    pub(super) fn new_embedded(cx: &AppCx) -> BrowserApp {
+        let mut a = BrowserApp::make(cx);
+        a.embedded = true;
+        a.addr_focus = false;
+        a
+    }
+
+    /// The reader's page area (no toolbar, tabs or status line), drawn in `view`.
+    pub(super) fn render_body(&mut self, g: &mut Gfx, view: R, s: f32, tick: u64) {
+        self.view_h = view.h;
+        self.view_rect = view;
+        self.ui_scale = s;
+        self.render_reader(g, view, s, tick);
+    }
+
+    /// Work that needs no drawing: finished loads, pictures, the page the assistant may be told about.
+    pub(super) fn tick_embedded(&mut self, cx: &AppCx) {
+        self.poll(cx);
+        self.publish_snapshot(cx);
+    }
+
+    pub(super) fn embed_go_back(&mut self) {
+        self.back();
+    }
+    pub(super) fn embed_go_forward(&mut self) {
+        self.forward();
+    }
+    pub(super) fn embed_can_back(&self) -> bool {
+        self.pos > 0
+    }
+    pub(super) fn embed_can_forward(&self) -> bool {
+        self.pos + 1 < self.history.len()
+    }
+    pub(super) fn embed_reload(&mut self, cx: &AppCx) {
+        self.reload(cx);
+    }
+    pub(super) fn embed_title(&self) -> String {
+        self.page().map(|p| p.doc.title.trim().to_string()).unwrap_or_default()
+    }
+    pub(super) fn embed_notes(&self) -> usize {
+        self.page().map_or(0, |p| p.notes.len())
+    }
+    pub(super) fn embed_toggle_notes(&mut self) {
+        self.show_notes = !self.show_notes;
+    }
+    pub(super) fn embed_take_want_full(&mut self) -> Option<String> {
+        self.want_full.take()
+    }
+    pub(super) fn embed_status(&self) -> Option<(String, bool)> {
+        self.status.clone()
+    }
+    /// The host owns the keyboard fields: the reader's own address field never has it.
+    pub(super) fn embed_take_keyboard(&mut self) {
+        self.addr_focus = false;
+    }
+    pub(super) fn embed_is_loading(&self) -> bool {
+        self.is_loading()
     }
 
     pub fn is_loading(&self) -> bool {
@@ -716,6 +841,17 @@ impl BrowserApp {
         if self.full.is_some() {
             self.go_full(&req, cx);
             return;
+        }
+        // Google, YouTube and the other heavy sites are shown by the full engine from the start when the image has one: the
+        // built-in reader loads them as empty or stripped pages
+        if self.auto_full && !self.full_declined && !self.embedded && req.method.eq_ignore_ascii_case("GET") && iyakki_agent::webengine::full_by_default(&req.url.host) && iyakki_agent::webengine::offered() {
+            if let (Ok(allowed), Some(helper)) = (iyakki_agent::webengine::allowed(&cx.session.policy, &req.url.to_string()), iyakki_agent::webengine::embedded_helper()) {
+                let host = req.url.host.clone();
+                self.start_embedded(helper, allowed, host, cx);
+                if self.full.is_some() {
+                    return;
+                }
+            }
         }
         // Google's results page cannot be loaded without a full browser; the same words go to a search page that can
         let engine = browser_config::load(cx).search;
@@ -821,6 +957,22 @@ impl BrowserApp {
         let Nav::Loading { url: asked, .. } = std::mem::replace(&mut self.nav, Nav::Idle) else { return };
         match result {
             Ok(Loaded::Page { url, status, doc, mut notes, source }) => {
+                // a search page that is busy or asks for a check: the same words go to the next search page
+                if matches!(status, 202 | 403 | 429 | 503) {
+                    if let Some((engine, words)) = iyakki_web::SearchEngine::of_url(&url) {
+                        self.search_tried.push(engine);
+                        if let Some((next, nu)) = iyakki_web::SearchEngine::fallback(&self.search_tried, &words) {
+                            self.search_note = Some(format!("{} did not answer (it said {status}), so this search was run on {}.", engine.name(), next.name()));
+                            self.go_request(Request::get(&nu), how, cx);
+                            return;
+                        }
+                    }
+                } else {
+                    self.search_tried.clear();
+                }
+                if let Some(n) = self.search_note.take() {
+                    notes.push(n);
+                }
                 if std::mem::take(&mut self.rerouted) {
                     notes.push("Google's results page needs a full browser, so this search was run on another search page instead (Settings → Browser).".into());
                 }
@@ -848,7 +1000,7 @@ impl BrowserApp {
                 if (needs_full || scripted_site) && self.auto_full && iyakki_agent::webengine::offered() && self.full.is_none() {
                     // the built-in reader cannot show this page and the full engine is here: use it without asking
                     self.open_full_browser(cx);
-                    if self.full.is_some() {
+                    if self.full.is_some() || self.want_full.is_some() {
                         return;
                     }
                 }
@@ -882,6 +1034,14 @@ impl BrowserApp {
             }
             Err(e) => {
                 self.pending_cred = None;
+                if browser_typo::is_lookup_failure(&e) && !asked.host.is_empty() {
+                    // an unknown name: say so and offer a search (and the likely site) instead of the resolver's wording
+                    let html = browser_typo::not_found_html(&asked.host, self.cfg.search);
+                    let page = Arc::new(Page { url: asked.clone(), status: 404, doc: iyakki_web::doc::from_html(&html), notes: Vec::new(), source: String::new(), media: false, download: false, ctype: String::new() });
+                    self.show(page, how);
+                    self.status = Some((format!("Couldn't find {}", asked.host), false));
+                    return;
+                }
                 self.status = Some((friendly_error(&asked.host, &e), false));
                 self.addr_focus = true;
             }
@@ -1017,9 +1177,23 @@ impl BrowserApp {
             f.reload();
             return;
         }
-        if let Some(u) = self.page().map(|p| p.url.clone()) {
+        if let Some(u) = self.page().filter(|p| p.ctype != HELP_TYPE).map(|p| p.url.clone()) {
             self.go(u, How::Replace, cx);
         }
+    }
+
+    /// The banner button: the short help about the full web engine, as a page of its own (no network).
+    fn show_engine_help(&mut self) {
+        if let Ok(url) = Url::parse(HELP_URL) {
+            let doc = iyakki_web::doc::from_html(iyakki_agent::webengine::FULL_ENGINE_HELP_HTML);
+            self.show(Arc::new(Page { url, status: 200, doc, notes: Vec::new(), source: String::new(), media: false, download: false, ctype: HELP_TYPE.into() }), How::Push);
+        }
+    }
+
+    /// What the reader says above the page when the full engine is missing and the page needs it (None otherwise).
+    fn engine_banner(&self) -> Option<(String, String)> {
+        let p = self.page().filter(|p| p.ctype != HELP_TYPE && p.ctype != STUB_TYPE && !p.media && !p.download)?;
+        iyakki_agent::webengine::missing_engine_banner(&p.url.host, p.status < 400 && page_needs_full_engine(p), self.engine_offered)
     }
 
     fn home(&mut self) {
@@ -1044,7 +1218,7 @@ impl BrowserApp {
                 // an in-page anchor: stay where we are
                 self.status = Some((format!("#{}", u.fragment.unwrap_or_default()), true));
             }
-            Ok(u) => self.go(u, How::Push, cx),
+            Ok(u) => self.go(u.unwrap_search_link().unwrap_or(u), How::Push, cx),
             Err(e) => self.status = Some((e, false)),
         }
     }
@@ -1054,6 +1228,8 @@ impl BrowserApp {
         self.suggest.clear();
         self.sug_sel = None;
         self.cfg = browser_config::load(cx);
+        self.search_tried.clear();
+        self.search_note = None;
         match Url::from_input_on(&text, self.cfg.search) {
             Ok(u) => self.go(u, How::Push, cx),
             Err(e) => self.status = Some((e, false)),
@@ -2061,6 +2237,13 @@ impl BrowserApp {
     /// built-in reader. On an image that has only cage and cog (no helper), the old hand-over of the screen is used instead.
     /// The account's host policy is applied first.
     fn open_full_browser(&mut self, cx: &AppCx) {
+        if self.embedded {
+            // the host owns the one engine: tell it which page needs it
+            if let Some(t) = self.full_browser_target() {
+                self.want_full = Some(t);
+            }
+            return;
+        }
         if self.full.is_some() {
             self.leave_full(cx);
             return;
@@ -2133,6 +2316,7 @@ impl BrowserApp {
     /// F again, or Esc with the browser's own keys in charge: the page is shown by the built-in reader again.
     fn leave_full(&mut self, cx: &AppCx) {
         let Some(f) = self.full.take() else { return };
+        self.full_declined = true;
         let url = if f.url.is_empty() { f.good_url.clone() } else { f.url.clone() };
         drop(f);
         cx.audit.record(&cx.session.user, "browser.full.end", "");
@@ -2300,6 +2484,7 @@ impl BrowserApp {
             Note::Gone(why) => {
                 let url = self.full.as_ref().map(|f| if f.url.is_empty() { f.good_url.clone() } else { f.url.clone() }).unwrap_or_default();
                 self.full = None;
+                self.full_declined = true;
                 cx.audit.record(&cx.session.user, "browser.full.crash", &why.chars().take(120).collect::<String>());
                 match Url::parse(&url) {
                     Ok(u) if url.starts_with("http") => {
@@ -2467,6 +2652,9 @@ fn human_bytes(b: u64) -> String {
 /// What the history entry of a page shown by the full engine holds, so that tabs, stars and the history have a title and an
 /// address for it (the page itself is in the helper's picture).
 const STUB_TYPE: &str = "x-iyakki/full-engine";
+/// The built-in help page the "needs the full web engine" banner opens.
+const HELP_TYPE: &str = "x-iyakki/help";
+const HELP_URL: &str = "https://iyakki.invalid/help/full-engine";
 
 fn full_stub(url: &str, title: &str) -> Option<Arc<Page>> {
     let parsed = Url::parse(url).ok()?;
@@ -2728,12 +2916,45 @@ fn draw_control(g: &mut Gfx, c: &Control, st: &CtlState, r: R, s: f32, focused: 
 
 impl BrowserApp {
     /// The page (or the start page) as the in-house engine draws it, in a readable column.
+    /// The strip above the page that says plainly that the page needs the full web engine; returns the page area that is left.
+    fn render_engine_banner(&mut self, g: &mut Gfx, view: R, s: f32) -> R {
+        let Some((head, body)) = self.engine_banner() else { return view };
+        let pad = 10.0 * s;
+        let lh = g.line_height(13.0 * s, Face::Sans);
+        let lines: Vec<String> = g.wrap(13.0 * s, &body, Face::Sans, view.w - 2.0 * pad).into_iter().take(3).collect();
+        let h = (pad + 32.0 * s + lines.len() as f32 * lh + pad).min(view.h * 0.5);
+        let warn = rgb(255, 176, 70);
+        g.rect(view.x, view.y, view.w, h, rgb(44, 32, 14));
+        g.rect(view.x, view.y + h - 1.0, view.w, 1.0, [warn[0], warn[1], warn[2], 140]);
+        let bw = g.text_width(14.0 * s, "How to get it", Face::Bold) + 14.0 * s * 1.7;
+        let head = g.fit(15.0 * s, &head, Face::Bold, (view.w - 2.0 * pad - bw - 10.0 * s).max(40.0));
+        g.text(view.x + pad, view.y + pad + 4.0 * s, 15.0 * s, warn, &head, Face::Bold);
+        g.button(view.x + view.w - pad - bw, view.y + pad * 0.6, 14.0 * s, "How to get it", warn, Event::Tab(10));
+        let mut y = view.y + pad + 32.0 * s;
+        for l in &lines {
+            if y + lh > view.y + h {
+                break;
+            }
+            g.text(view.x + pad, y, 13.0 * s, TEXT, l, Face::Sans);
+            y += lh;
+        }
+        let left = R::new(view.x, view.y + h, view.w, (view.h - h).max(0.0));
+        self.view_rect = left;
+        self.view_h = left.h;
+        left
+    }
+
     fn render_reader(&mut self, g: &mut Gfx, view: R, s: f32, tick: u64) {
+        let view = self.render_engine_banner(g, view, s);
         // the page (or the start page), in a readable column
         let ps = s * self.zoom();
-        let col_w = (view.w - 48.0 * s).min(940.0 * ps).max(120.0);
-        let col_x = view.x + (view.w - col_w) / 2.0;
         let page = self.page().cloned();
+        // a page with style sheets of its own was designed for the whole window (its media queries were evaluated for it,
+        // see `Viewport`): it gets the width; plain documents stay in a column that is comfortable to read
+        let designed = page.as_ref().is_some_and(|p| p.doc.canvas.is_some() && !matches!(p.ctype.as_str(), HELP_TYPE | STUB_TYPE));
+        let col_max = if designed { iyakki_web::css::Viewport::default().width } else { 940.0 };
+        let col_w = (view.w - 48.0 * s).min(col_max * ps).max(120.0);
+        let col_x = view.x + (view.w - col_w) / 2.0;
         let start_doc;
         let doc: &Doc = match &page {
             Some(p) => &p.doc,
@@ -2944,6 +3165,16 @@ impl BrowserApp {
 }
 
 impl App for BrowserApp {
+    /// `newtab:<address>`: the address in a new tab (the sign-in dialog of Claude Code / Copilot uses it; agent_login.rs).
+    fn open_item(&mut self, item: &str, cx: &AppCx) {
+        if let Some(url) = item.strip_prefix("newtab:") {
+            self.new_tab();
+            self.open_url(url, cx);
+        }
+    }
+    fn on_drop(&mut self, _paths: &[std::path::PathBuf], _cx: &AppCx) -> super::DropAction {
+        super::DropAction::Ignore("The browser does not take dropped files: drop them on DATA, the AI IDE or the chat".into())
+    }
     fn title(&self) -> &'static str {
         "Browser"
     }
@@ -2954,7 +3185,9 @@ impl App for BrowserApp {
         ACCENT
     }
     fn hint(&self) -> String {
-        if self.addr_focus {
+        if self.agent_view {
+            "the assistant's tab · your clicks and keys work as usual · Stop or Take over above · Esc back to your tabs".into()
+        } else if self.addr_focus {
             "Enter open · Esc stop typing".into()
         } else if self.full.as_ref().is_some_and(|f| f.page_focus) {
             "typing goes to the page · Esc leave it · Ctrl+L address · Ctrl+T tab".into()
@@ -2989,6 +3222,22 @@ impl App for BrowserApp {
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        if matches!(ev, Event::Tick) {
+            super::web_agent::tick(&cx.services, &cx.audit, &cx.session);
+        }
+        if matches!(ev, Event::Tab(super::web_agent::TAB_OPEN)) {
+            self.agent_view = true;
+            return Flow::Stay;
+        }
+        if self.agent_view && !matches!(ev, Event::Tick) {
+            if matches!(ev, Event::Tab(super::web_agent::TAB_LEAVE) | Event::Key(Key::Esc)) {
+                self.agent_view = false;
+                return Flow::Stay;
+            }
+            if super::web_agent::handle(ev, &cx.services, &cx.session.user) {
+                return Flow::Stay;
+            }
+        }
         match ev {
             Event::Tick => {
                 self.poll(cx);
@@ -3113,7 +3362,7 @@ impl App for BrowserApp {
                 self.follow(*i, cx);
                 Flow::Stay
             }
-            // toolbar buttons: 0 back, 1 forward, 2 reload, 3 home, 4 go, 5 JavaScript, 6 notes, 7 play, 8 bookmark, 9 full browser
+            // toolbar buttons: 0 back, 1 forward, 2 reload, 3 home, 4 go, 5 JavaScript, 6 notes, 7 play, 8 bookmark, 9 full browser, 10 help about the missing full engine
             Event::Tab(i) => {
                 match i {
                     0 => self.back(),
@@ -3125,6 +3374,7 @@ impl App for BrowserApp {
                     7 => self.play_media(cx),
                     8 => self.toggle_bookmark(cx),
                     9 => self.open_full_browser(cx),
+                    10 => self.show_engine_help(),
                     999 => self.popup = None,
                     n if *n >= 1000 => self.pick_option(n - 1000),
                     500 => self.step_find(false),
@@ -3148,6 +3398,10 @@ impl App for BrowserApp {
     }
 
     fn wants_redraw(&mut self) -> bool {
+        if self.agent_view {
+            // the assistant's tab shows a live picture, and its banner changes with what it does
+            return true;
+        }
         self.full.as_mut().is_some_and(|f| f.take_redraw())
     }
 
@@ -3234,6 +3488,10 @@ impl App for BrowserApp {
     }
 
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+        if self.agent_view {
+            super::web_agent::render(g, area, s, &cx.services, &cx.session.user);
+            return;
+        }
         let bar_h = 46.0 * s;
         let tabs_h = 34.0 * s;
         let status_h = 30.0 * s;
@@ -3348,7 +3606,10 @@ impl App for BrowserApp {
             let titles = self.tab_titles();
             let n = titles.len();
             let plus_w = 34.0 * s;
-            let tw = ((area.w - 16.0 * s - plus_w) / n as f32).clamp(70.0 * s, 230.0 * s);
+            // the assistant's own tab, while it exists or is acting
+            let assistant = cx.session.policy.browser_agent != iyakki_sec::policy::BrowserAgent::Off && (super::web_agent::alive(&cx.session.user) || cx.services.browser.control_view(&cx.session.user).active);
+            let ass_w = if assistant { 150.0 * s } else { 0.0 };
+            let tw = ((area.w - 16.0 * s - plus_w - ass_w) / n as f32).clamp(70.0 * s, 230.0 * s);
             let mut x = area.x + 8.0 * s;
             for (i, title) in titles.iter().enumerate() {
                 let r = R::new(x, area.y + 4.0 * s, tw - 4.0 * s, tabs_h - 4.0 * s);
@@ -3380,6 +3641,13 @@ impl App for BrowserApp {
                 crate::fx::row_at(g, r.x, r.y, r.w, r.h, 8.0 * s, false, hot, ACCENT);
                 g.hit(r, Event::Tab(400), "new tab");
                 g.text(r.x + 9.0 * s, r.y + 1.0 * s, 18.0 * s, MUTED, "+", Face::Bold);
+            }
+            if assistant {
+                let acting = cx.services.browser.control_view(&cx.session.user).active;
+                let r = R::new(area.x + area.w - ass_w - 4.0 * s, area.y + 5.0 * s, ass_w, tabs_h - 8.0 * s);
+                crate::fx::row_at(g, r.x, r.y, r.w, r.h, 8.0 * s, acting, g.hovered(r), rgb(255, 150, 60));
+                g.hit(r, Event::Tab(super::web_agent::TAB_OPEN), "assistant tab");
+                g.text(r.x + 10.0 * s, r.y + 3.0 * s, 14.0 * s, if acting { rgb(255, 170, 80) } else { MUTED }, if acting { "● Assistant tab" } else { "Assistant tab" }, Face::Bold);
             }
         }
         // what the address bar offers for the text typed, over the page
@@ -3454,6 +3722,9 @@ mod tests {
     impl Fetch for Site {
         fn get(&self, url: &Url) -> Result<Response, String> {
             self.asked.lock().unwrap().push(url.to_string());
+            if url.host.starts_with("nodns") || url.host == "youtub.com" {
+                return Err("io: failed to lookup address information: Name has no usable address".into());
+            }
             self.pages.lock().unwrap().get(&url.to_string()).cloned().ok_or_else(|| "connection refused".to_string())
         }
     }
@@ -3814,7 +4085,7 @@ mod tests {
 
     #[test]
     fn words_in_the_address_bar_search_and_google_searches_are_rerouted() {
-        let ddg = "https://search.brave.com/search?q=tamil+language";
+        let ddg = "https://www.bing.com/search?q=tamil+language";
         let web = site(vec![
             (ddg, html("<p>results for tamil</p>")),
             ("https://html.duckduckgo.com/html/?q=tamil+language", html("<p>results for tamil</p>")),
@@ -3852,6 +4123,80 @@ mod tests {
         assert_eq!(first_text(&c), "results for tamil", "{:?}", web.asked.lock().unwrap());
     }
 
+    #[test]
+    fn a_search_page_that_refuses_hands_the_search_to_the_next_one_and_result_links_are_unwrapped() {
+        let busy = Response { status: 429, content_type: "text/html".into(), body: b"slow down".to_vec(), ..Response::default() };
+        let check = Response { status: 202, content_type: "text/html".into(), body: b"are you human".to_vec(), ..Response::default() };
+        let web = site(vec![
+            ("https://www.bing.com/search?q=cats", busy.clone()),
+            ("https://html.duckduckgo.com/html/?q=cats", check),
+            ("https://search.brave.com/search?q=cats", html("<p>results from brave</p>")),
+        ]);
+        let cx = cx_with("br_fallback", web.clone());
+        let mut a = BrowserApp::new(&cx);
+        a.field.value = "cats".into();
+        a.submit_address(&cx);
+        settle(&mut a, &cx);
+        assert_eq!(first_text(&a), "results from brave", "{:?}", web.asked.lock().unwrap());
+        let notes = &a.page().unwrap().notes;
+        assert!(notes.iter().any(|n| n.contains("DuckDuckGo did not answer") && n.contains("Brave Search")), "{notes:?}");
+        assert_eq!(web.asked.lock().unwrap().len(), 3);
+        // every engine busy: the last answer is shown, and nothing loops
+        let all = site(vec![
+            ("https://www.bing.com/search?q=cats", busy.clone()),
+            ("https://html.duckduckgo.com/html/?q=cats", busy.clone()),
+            ("https://search.brave.com/search?q=cats", busy.clone()),
+            ("https://en.wikipedia.org/w/index.php?search=cats", busy),
+        ]);
+        let cx2 = cx_with("br_fallback2", all.clone());
+        let mut b = BrowserApp::new(&cx2);
+        b.field.value = "cats".into();
+        b.submit_address(&cx2);
+        settle(&mut b, &cx2);
+        assert_eq!(all.asked.lock().unwrap().len(), 4);
+        assert_eq!(b.status.as_ref().map(|s| s.0.as_str()), Some("The server answered 429."));
+        // a Bing result link goes straight to the page it names
+        let res = site(vec![
+            ("https://www.bing.com/search?q=cats", html("<a href=\"https://www.bing.com/ck/a?!&&p=x&u=a1aHR0cHM6Ly9lbi53aWtpcGVkaWEub3JnL3dpa2kvQ2F0&ntb=1\">Cat</a>")),
+            ("https://en.wikipedia.org/wiki/Cat", html("<p>the cat page</p>")),
+        ]);
+        let cx3 = cx_with("br_fallback3", res.clone());
+        let mut c = BrowserApp::new(&cx3);
+        c.field.value = "cats".into();
+        c.submit_address(&cx3);
+        settle(&mut c, &cx3);
+        c.follow(0, &cx3);
+        settle(&mut c, &cx3);
+        assert_eq!(first_text(&c), "the cat page", "{:?}", res.asked.lock().unwrap());
+        assert!(res.asked.lock().unwrap().iter().all(|u| !u.contains("/ck/")));
+    }
+
+    #[test]
+    fn a_mistyped_host_shows_a_not_found_page_with_a_search_and_a_suggestion() {
+        let web = site(vec![("https://www.bing.com/search?q=youtub.com", html("<p>results for the typo</p>"))]);
+        let cx = cx_with("br_typo", web.clone());
+        let mut a = BrowserApp::new(&cx);
+        a.field.value = "youtub.com".into();
+        a.submit_address(&cx);
+        settle(&mut a, &cx);
+        let p = a.page().expect("a page is shown");
+        assert!(p.doc.links.iter().any(|l| l == "https://youtube.com/"), "{:?}", p.doc.links);
+        assert!(p.doc.links.iter().any(|l| l.contains("www.bing.com/search?q=youtub.com")), "{:?}", p.doc.links);
+        assert_eq!(a.status.as_ref().map(|s| s.0.as_str()), Some("Couldn't find youtub.com"));
+        assert!(!a.status.as_ref().unwrap().0.contains("lookup"));
+        // following the search link searches for the typed text
+        let i = p.doc.links.iter().position(|l| l.contains("www.bing.com")).unwrap();
+        a.follow(i, &cx);
+        settle(&mut a, &cx);
+        assert_eq!(first_text(&a), "results for the typo");
+        // other failures keep the plain message
+        let mut b = BrowserApp::new(&cx);
+        b.field.value = "refused.example".into();
+        b.submit_address(&cx);
+        settle(&mut b, &cx);
+        assert!(b.page().is_none(), "no replacement page for a refused connection");
+    }
+
     /// `IYAKKI_LIVE_URL=https://… IYAKKI_SHOT=/path.png cargo test -p iyakki-shell --lib live_page -- --ignored`: load a real
     /// page over the network and save what the browser draws, to look at it.
     #[test]
@@ -3868,6 +4213,9 @@ mod tests {
         settle(&mut a, &cx);
         if let Some(p) = a.page() {
             eprintln!("blocks {} canvas {:?} notes {:?}", p.doc.blocks.len(), p.doc.canvas, p.notes);
+            if let Ok(f) = std::env::var("IYAKKI_SAVE_SOURCE") {
+                let _ = std::fs::write(f, &p.source);
+            }
             fn walk(b: &[Block], d: usize) {
                 for x in b.iter().take(6) {
                     match x {
@@ -4231,7 +4579,8 @@ mod tests {
         assert!((ay - by).abs() < 1.0 && (ay - gy).abs() < 1.0, "one line");
         let l = a.layout.as_ref().unwrap();
         let card = l.prims.iter().find(|p| matches!(p.kind, Kind::Rect { color, .. } if color == [0x33, 0x66, 0x99, 255])).expect("the card's background");
-        let col = (1280.0f32 - 48.0).min(940.0 * (1280.0f32 / 1280.0));
+        // a page with style sheets of its own gets the whole window (less the margins), not the 940px reading column
+        let col = 1280.0f32 - 48.0;
         assert!((card.w - 300.0).abs() < 1.0, "{}", card.w);
         assert!((card.x - (col - 300.0) / 2.0).abs() < 2.0, "centred: {} in {col}", card.x);
         let (ix, ..) = word_prim(&a, "inside").unwrap();
@@ -4697,6 +5046,60 @@ mod tests {
     }
 
     #[test]
+    fn a_heavy_site_gets_the_needs_the_full_engine_banner_only_without_the_engine() {
+        let web = site(vec![("https://www.youtube.com/", html("<html><head><title>YouTube</title></head><body><p>Loading...</p></body></html>")), ("https://a.org/", html(GUIDE))]);
+        let cx = cx_with("banner1", web);
+        let mut a = BrowserApp::new(&cx);
+        a.engine_offered = false;
+        a.open_url("www.youtube.com", &cx);
+        settle(&mut a, &cx);
+        let (head, body) = a.engine_banner().expect("YouTube without the engine");
+        assert_eq!(head, "This site needs the full web engine.");
+        assert!(body.contains("YouTube") && body.contains("\"web\" or \"macweb\" image") && body.contains("window mode"), "{body}");
+        for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+            let g = frame(&mut a, &cx, w, h);
+            let btn = g.hits.iter().find(|x| x.label == "How to get it").unwrap_or_else(|| panic!("no banner button at {w}x{h}"));
+            assert!(btn.rect.x >= 0.0 && btn.rect.x + btn.rect.w <= w as f32 + 0.5 && btn.rect.y >= 72.0 && btn.rect.y + btn.rect.h <= h as f32, "{w}x{h}: {:?}", btn.rect);
+            let v = a.view_rect;
+            assert!(v.h > h as f32 * 0.3 && v.y > btn.rect.y, "{w}x{h}: the page area under the banner keeps its room: {v:?}");
+            assert!(v.x + v.w <= w as f32 + 0.5 && v.y + v.h <= h as f32, "{w}x{h}: {v:?}");
+        }
+        // one click opens the help text, which is a page of its own and has no banner and no network address to reload
+        a.handle(&Event::Tab(10), &cx);
+        assert_eq!(a.page().unwrap().ctype, HELP_TYPE);
+        assert!(a.page().unwrap().doc.title.contains("full web engine"));
+        assert!(a.engine_banner().is_none());
+        a.handle(&Event::Tab(2), &cx);
+        settle(&mut a, &cx);
+        assert_eq!(a.page().unwrap().ctype, HELP_TYPE, "reload leaves the help alone");
+        // with the engine installed there is no banner; an ordinary page never has one
+        a.engine_offered = true;
+        a.back();
+        assert!(a.engine_banner().is_none());
+        assert!(!frame(&mut a, &cx, 1280, 720).hits.iter().any(|x| x.label == "How to get it"));
+        a.engine_offered = false;
+        a.open_url("a.org", &cx);
+        settle(&mut a, &cx);
+        assert!(a.engine_banner().is_none());
+        assert!(!frame(&mut a, &cx, 1280, 720).hits.iter().any(|x| x.label == "How to get it"));
+    }
+
+    #[test]
+    fn a_page_the_reader_gave_up_on_gets_the_generic_banner_without_the_engine() {
+        let app = "<html><head><title>App</title></head><body><div id=root></div><script>window.boot = 1;</script></body></html>";
+        let web = site(vec![("https://app.example/", html(app))]);
+        let cx = cx_with("banner2", web);
+        let mut a = BrowserApp::new(&cx);
+        a.engine_offered = false;
+        a.open_url("app.example", &cx);
+        settle(&mut a, &cx);
+        let (_, body) = a.engine_banner().expect("an empty scripted page");
+        assert!(body.starts_with("This page will not load properly"), "{body}");
+        a.engine_offered = true;
+        assert!(a.engine_banner().is_none());
+    }
+
+    #[test]
     fn a_page_the_reader_cannot_show_opens_in_the_full_engine_by_itself_when_it_is_there() {
         let _fake = Fake::new("fullauto", "--static");
         let app = "<html><head><title>App</title></head><body><div id=root></div><script>window.boot = 1;</script></body></html>";
@@ -4714,6 +5117,34 @@ mod tests {
         b.open_url("https://a.org/", &cx);
         settle(&mut b, &cx);
         assert!(b.full.is_none());
+    }
+
+    #[test]
+    fn youtube_and_google_open_in_the_full_engine_at_once_and_a_dead_engine_is_not_retried_by_itself() {
+        let _fake = Fake::new("fullheavy", "--static");
+        let web = site(vec![("https://www.youtube.com/", html(GUIDE)), ("https://www.google.com/", html(GUIDE)), ("https://a.org/", html(GUIDE))]);
+        let cx = cx_with("fullheavy", web);
+        let mut a = BrowserApp::new(&cx);
+        a.auto_full = true;
+        a.open_url("https://www.youtube.com/", &cx);
+        assert!(a.full.is_some(), "YouTube goes to the engine without asking the reader: {:?}", a.status_text());
+        let mut g = BrowserApp::new(&cx);
+        g.auto_full = true;
+        g.open_url("https://www.google.com/", &cx);
+        assert!(g.full.is_some(), "{:?}", g.status_text());
+        // an ordinary page stays in the reader
+        let mut b = BrowserApp::new(&cx);
+        b.auto_full = true;
+        b.open_url("https://a.org/", &cx);
+        settle(&mut b, &cx);
+        assert!(b.full.is_none());
+        // the person left the engine: the same site is then shown by the reader
+        let mut c = BrowserApp::new(&cx);
+        c.auto_full = true;
+        c.full_declined = true;
+        c.open_url("https://www.youtube.com/", &cx);
+        settle(&mut c, &cx);
+        assert!(c.full.is_none());
     }
 
     #[test]
@@ -5804,6 +6235,19 @@ mod tests {
             key(&mut a, &cx, Key::Esc); // the first closes the list of suggestions
         }
         assert!(!a.addr_focus && a.full.as_ref().unwrap().page_focus);
+    }
+
+    #[test]
+    fn open_in_new_tab_leaves_the_current_tab_alone_and_opens_the_address_in_the_engine() {
+        let (_fake, cx, mut a, _g) = in_full("full_newtab", "--static");
+        let before = a.tab_titles().len();
+        a.open_in_new_tab("https://c.org/y", &cx);
+        assert_eq!(a.tab_titles().len(), before + 1);
+        assert_eq!(a.active, before, "the new tab is the active one");
+        pump(&mut a, &cx, "the new tab's page", |a| full_title(a) == "fake page https://c.org/y");
+        // the first tab still has its page
+        a.switch_to(0);
+        assert_eq!(a.tab_titles()[0], "fake page https://a.org/");
     }
 
     #[test]

@@ -30,8 +30,18 @@ pub const COPY_BASE: usize = 50_000;
 pub const PIC_BASE: usize = 80_000;
 /// The transcript is one area for text selection: presses and drags arrive as `Event::AreaAt(AREA, x, y)`.
 pub const AREA: usize = 61_000;
+/// A link's rectangle takes presses as `Event::Area(LINK_BASE + 32 * link + part)` (a link that wraps has one part per line):
+/// it shows the hand pointer, and the press is still a press in the text (a drag from a link selects).
+pub const LINK_BASE: usize = 2_000_000;
+/// Heartbeats between a single click on a link and opening it: a second click inside this time is a double click (it selects a
+/// word) and opens nothing.
+pub const LINK_DELAY: u32 = 14;
+const LINK_COL: [u8; 4] = rgb(125, 175, 255);
 
 const AMBER: [u8; 4] = rgb(255, 196, 94);
+/// The word being said while a message is read aloud: a solid gold fill with dark text on it (the sentence is a soft wash of the same gold).
+const WORD_FILL: [u8; 4] = [255, 220, 130, 255];
+const WORD_INK: [u8; 4] = [22, 18, 6, 255];
 const USER_BG: [u8; 4] = rgb(14, 24, 44);
 const USER_LINE: [u8; 4] = rgb(44, 112, 150);
 const OUT_BG: [u8; 4] = rgb(11, 14, 26);
@@ -56,7 +66,7 @@ pub enum ToolStatus {
 #[derive(Clone, Debug, PartialEq, Hash)]
 pub enum Block {
     /// The model is thinking. `text` is the reasoning when the provider sends it; without it the block only shows activity.
-    Thinking { text: String, live: bool, expanded: bool },
+    Thinking { text: String, live: bool, expanded: bool, secs: u64 },
     /// An answer, as Markdown; `msg` is the message it came from (a click copies that message).
     Text { text: String, msg: usize },
     Tool { key: String, name: String, status: ToolStatus, input: String, input_full: String, output: Option<String>, hidden: bool, expanded: bool },
@@ -82,6 +92,11 @@ pub struct Ctx<'a> {
     /// A request is under way (an agent run or a plain answer).
     pub busy: bool,
     pub open: &'a HashSet<String>,
+    /// The answer so far while the model is still writing it (empty: none).
+    pub live: &'a str,
+    /// What the model has thought so far, and how long it has been busy with this step.
+    pub thinking: &'a str,
+    pub think_secs: u64,
 }
 
 /// The tools whose results are private: the model gets them, the transcript says `(hidden)` (like the tool log).
@@ -194,7 +209,12 @@ pub fn build_turns(msgs: &[Message], cx: &Ctx) -> Vec<Turn> {
     if let Some(turn) = turns.last_mut() {
         let waiting = matches!(turn.blocks.last(), Some(Block::Approval { .. }) | Some(Block::Tool { status: ToolStatus::Running | ToolStatus::Waiting, .. }));
         if cx.busy && !waiting {
-            turn.blocks.push(Block::Thinking { text: String::new(), live: true, expanded: cx.open.contains("think:live") });
+            if cx.live.trim().is_empty() {
+                turn.blocks.push(Block::Thinking { text: cx.thinking.to_string(), live: true, expanded: cx.open.contains("think:live"), secs: cx.think_secs });
+            } else {
+                // the answer as it is written (a message that is not in the chat yet, so nothing to copy by index)
+                turn.blocks.push(Block::Text { text: cx.live.to_string(), msg: usize::MAX });
+            }
         }
     }
     turns
@@ -290,6 +310,71 @@ pub struct BlockLayout {
     sel: Vec<SelLine>,
     /// What the copy buttons copy.
     zones: Vec<Zone>,
+    /// The links in this block, in reading order.
+    pub links: Vec<LinkItem>,
+}
+
+/// A link of a block: where it goes, and the rectangles it occupies (one per line), relative to the block's corner.
+#[derive(Clone, Debug)]
+pub struct LinkItem {
+    pub link: mdtext::LinkRef,
+    pub rects: Vec<(f32, f32, f32, f32)>,
+    /// Drawn by the view (a block of plain text); the Markdown layout underlines its own links.
+    pub underline: bool,
+}
+
+/// A line of text that may hold addresses, and the selectable lines it was broken into (`sep` characters stand between them).
+struct RowSpec {
+    lines: Vec<usize>,
+    sep: usize,
+    full: String,
+}
+
+/// The links written in rows of text, with their rectangles taken from the selectable lines.
+fn row_links(sel: &[SelLine], rows: &[RowSpec]) -> Vec<LinkItem> {
+    let mut out = Vec::new();
+    for r in rows {
+        let mut segs: Vec<(usize, usize, usize)> = Vec::new();
+        let mut off = 0;
+        for &li in &r.lines {
+            let Some(l) = sel.get(li) else { break };
+            let n = l.text.chars().count();
+            // a row cut with an ellipsis shows less than it holds
+            let vis = if l.text.ends_with('\u{2026}') && l.text != r.full { n - 1 } else { n };
+            segs.push((li, off, off + vis));
+            off += n + r.sep;
+        }
+        for sp in crate::links::find_bare(&r.full) {
+            let (cs, ce) = (r.full[..sp.start].chars().count(), r.full[..sp.end].chars().count());
+            let mut rects = Vec::new();
+            for &(li, a0, a1) in &segs {
+                let (a, b) = (cs.max(a0), ce.min(a1));
+                if a < b {
+                    let l = &sel[li];
+                    if let (Some(x0), Some(x1)) = (l.xs.get(a - a0), l.xs.get(b - a0)) {
+                        rects.push((*x0, l.y, (x1 - x0).max(1.0), l.h));
+                    }
+                }
+            }
+            if !rects.is_empty() {
+                let shown = r.full[sp.start..sp.end].to_string();
+                out.push(LinkItem { link: mdtext::LinkRef { warn: crate::links::warnings(&shown, &sp.url), text: shown, url: sp.url }, rects, underline: true });
+            }
+        }
+    }
+    out
+}
+
+/// The links of a Markdown layout, each with a rectangle per line.
+fn md_links(g: &mut Gfx, l: &mdtext::Layout) -> Vec<LinkItem> {
+    let mut items: Vec<(usize, LinkItem)> = Vec::new();
+    for r in l.link_rects(g) {
+        match items.iter_mut().find(|(id, _)| *id == r.link) {
+            Some((_, it)) => it.rects.push((r.x, r.y, r.w, r.h)),
+            None => items.push((r.link, LinkItem { link: l.links[r.link].clone(), rects: vec![(r.x, r.y, r.w, r.h)], underline: false })),
+        }
+    }
+    items.into_iter().map(|(_, i)| i).collect()
 }
 
 impl BlockLayout {
@@ -352,7 +437,9 @@ fn layout_user(g: &mut Gfx, t: &str, _idx: usize, w: f32, s: f32) -> BlockLayout
     if extra > 0 {
         text(&mut prims, px, py + lines.len() as f32 * lh, size * 0.85, DIM, Face::Sans, format!("… {extra} more lines"));
     }
-    BlockLayout { h, dot: None, prims, toggle: None, sel, zones: vec![Zone { x: 0.0, y: 0.0, w, h, text: t.trim_end().to_string(), code: false }] }
+    let rows = [RowSpec { lines: (0..lines.len()).collect(), sep: 1, full: lines.join(" ") }];
+    let links = row_links(&sel, &rows);
+    BlockLayout { h, dot: None, prims, toggle: None, sel, zones: vec![Zone { x: 0.0, y: 0.0, w, h, text: t.trim_end().to_string(), code: false }], links }
 }
 
 fn layout_text(g: &mut Gfx, md: &str, _idx: usize, w: f32, s: f32) -> BlockLayout {
@@ -360,8 +447,9 @@ fn layout_text(g: &mut Gfx, md: &str, _idx: usize, w: f32, s: f32) -> BlockLayou
     let h = l.height + 6.0 * s;
     let (sel, mut zones) = md_selection(g, &l, w, md);
     zones.insert(0, Zone { x: 0.0, y: 0.0, w, h, text: md.trim_end().to_string(), code: false });
+    let links = md_links(g, &l);
     let prims = vec![Prim::Md { l: Rc::new(l), x: 0.0, y: 0.0, w }];
-    BlockLayout { h, dot: None, prims, toggle: None, sel, zones }
+    BlockLayout { h, dot: None, prims, toggle: None, sel, zones, links }
 }
 
 /// One selectable line: `t` drawn from `x` at `size` in `face`, `h` tall, from `y`.
@@ -467,16 +555,17 @@ fn md_selection(g: &mut Gfx, l: &mdtext::Layout, w: f32, md: &str) -> (Vec<SelLi
     (sel, zones)
 }
 
-fn layout_thinking(g: &mut Gfx, reasoning: &str, live: bool, expanded: bool, w: f32, s: f32) -> BlockLayout {
+fn layout_thinking(g: &mut Gfx, reasoning: &str, live: bool, expanded: bool, secs: u64, w: f32, s: f32) -> BlockLayout {
     let size = 14.5 * s;
     let lh = g.line_height(size, Face::Sans);
     let mut prims = Vec::new();
-    text(&mut prims, 0.0, 0.0, size, DIM, Face::Sans, "Thinking");
+    let label = if live && secs >= 2 { format!("Thinking… {secs} s") } else { "Thinking".to_string() };
+    text(&mut prims, 0.0, 0.0, size, DIM, Face::Sans, label.clone());
     let has = !reasoning.trim().is_empty();
     let mut h = lh;
     let mut sel = Vec::new();
     if has {
-        let tw = g.text_width(size, "Thinking", Face::Sans);
+        let tw = g.text_width(size, &label, Face::Sans);
         prims.push(Prim::Chevron { x: tw + 10.0 * s, y: lh / 2.0, size: 9.0 * s, open: expanded });
         if expanded {
             let sz = 13.5 * s;
@@ -493,7 +582,7 @@ fn layout_thinking(g: &mut Gfx, reasoning: &str, live: bool, expanded: bool, w: 
         prims.push(Prim::Hit { x: 0.0, y: 0.0, w, h: lh + 4.0 * s, act: Act::Toggle });
     }
     let toggle = has.then(|| if live { "think:live".to_string() } else { "think".to_string() });
-    BlockLayout { h: h + 6.0 * s, dot: Some((lh / 2.0, if live { Dot::Live } else { Dot::Idle })), prims, toggle, sel, zones: vec![] }
+    BlockLayout { h: h + 6.0 * s, dot: Some((lh / 2.0, if live { Dot::Live } else { Dot::Idle })), prims, toggle, sel, zones: vec![], links: vec![] }
 }
 
 /// `text` cut to a whole number of monospace columns, with an ellipsis when it was longer.
@@ -541,7 +630,7 @@ fn layout_tool(g: &mut Gfx, name: &str, status: ToolStatus, input: &str, input_f
         ToolStatus::Ok => Dot::Ok,
         ToolStatus::Failed => Dot::Failed,
     };
-    let msz = 12.5 * s;
+    let msz = 12.5 * s * mono_boost();
     let mlh = g.line_height(msz, Face::Mono) * 1.18;
     let adv = g.text_width(msz, "0", Face::Mono).max(1.0);
     let lab = 38.0 * s;
@@ -598,11 +687,34 @@ fn layout_tool(g: &mut Gfx, name: &str, status: ToolStatus, input: &str, input_f
     text(&mut prims, 0.0, y + pad.1 + 1.0 * s, 10.5 * s, DIM, Face::Mono, "OUT");
     prims.push(Prim::Fill { x: lab, y, w: bw, h: box_h, r: 8.0 * s, c: OUT_BG });
     prims.push(Prim::Stroke { x: lab, y, w: bw, h: box_h, r: 8.0 * s, bw: 1.0 * s, c: OUT_LINE });
+    let out_sel = sel.len();
     for (i, l) in rows.iter().enumerate() {
         text(&mut prims, lab + pad.0, y + pad.1 + i as f32 * mlh, msz, if dim { DIM } else { OUT_TEXT }, Face::Mono, l.clone());
         if !dim {
             sel.push(sel_line(g, lab + pad.0, y + pad.1 + i as f32 * mlh, mlh, msz, Face::Mono, l, 2));
         }
+    }
+    // addresses in the result: a long line broken into rows is still one address
+    let mut links = Vec::new();
+    if let (false, Some(o)) = (dim, output) {
+        let mut specs: Vec<RowSpec> = Vec::new();
+        let src: Vec<&str> = o.trim_end().lines().collect();
+        if expanded {
+            let mut at = 0;
+            for l in &src {
+                let n = chunk_cols(l, cols).len();
+                if at >= rows.len() {
+                    break;
+                }
+                specs.push(RowSpec { lines: (at..(at + n).min(rows.len())).map(|k| out_sel + k).collect(), sep: 0, full: l.replace('\t', "    ") });
+                at += n;
+            }
+        } else {
+            for (i, l) in src.iter().take(rows.len()).enumerate() {
+                specs.push(RowSpec { lines: vec![out_sel + i], sep: 0, full: l.replace('\t', "    ") });
+            }
+        }
+        links = row_links(&sel, &specs);
     }
     if faded {
         let fh = mlh * 2.2;
@@ -618,7 +730,7 @@ fn layout_tool(g: &mut Gfx, name: &str, status: ToolStatus, input: &str, input_f
         prims.push(Prim::Hit { x: lab, y: y + box_h - foot_h, w: bw, h: foot_h, act: Act::Toggle });
     }
     y += box_h;
-    BlockLayout { h: y + 8.0 * s, dot: Some((nlh / 2.0, dot)), prims, toggle: Some(String::new()), sel, zones: vec![] }
+    BlockLayout { h: y + 8.0 * s, dot: Some((nlh / 2.0, dot)), prims, toggle: Some(String::new()), sel, zones: vec![], links }
 }
 
 fn layout_approval(g: &mut Gfx, tool: &str, summary: &str, detail: &str, w: f32, s: f32) -> BlockLayout {
@@ -628,13 +740,18 @@ fn layout_approval(g: &mut Gfx, tool: &str, summary: &str, detail: &str, w: f32,
     let hlh = g.line_height(hsz, Face::Bold);
     let inner = w - 2.0 * pad;
     let mut y = pad;
-    text(&mut prims, pad, y, hsz, AMBER, Face::Bold, format!("Approval needed · {tool}"));
+    // a question about the assistant in the person's browser: `detail` holds the choices, one per line
+    let consent = tool == "browser_consent";
+    text(&mut prims, pad, y, hsz, AMBER, Face::Bold, if consent { "Approval needed · your browser (waiting for your answer)".to_string() } else { format!("Approval needed · {tool}") });
     let dot_y = y + hlh / 2.0;
     y += hlh + 5.0 * s;
     let bsz = 14.5 * s;
     let blh = g.line_height(bsz, Face::Sans) * 1.2;
+    // the card text carries two extras: why a call always asks (no session button) or what "Allow for this session" covers
+    let card = iyakki_agent::grants::split_card(summary);
+    let summary = card.question;
     let mut sum = g.wrap(bsz, summary, Face::Sans, inner);
-    sum.truncate(4);
+    sum.truncate(if consent { 10 } else { 4 });
     let mut sel = Vec::new();
     for l in &sum {
         text(&mut prims, pad, y, bsz, TEXT, Face::Sans, l.clone());
@@ -642,9 +759,28 @@ fn layout_approval(g: &mut Gfx, tool: &str, summary: &str, detail: &str, w: f32,
         y += blh;
     }
     y += 4.0 * s;
-    let diff: Vec<&str> = detail.lines().take(10).collect();
+    if !consent {
+        // small but readable (12.5 at the base scale)
+        let nsz = 12.5 * s;
+        let nlh = g.line_height(nsz, Face::Sans) * 1.15;
+        let (note, col) = match (card.always, card.covers, tool) {
+            (_, _, "screen_capture") => (Some("Allow for 5 minutes lets it look at the screen until the time is up.".to_string()), MUTED),
+            (_, _, t) if iyakki_agent::camtools::takes_pictures(t) => (Some(iyakki_agent::camtools::ASK_NOTE.to_string()), AMBER),
+            (Some(why), _, _) => (Some(format!("Always asks: {why}")), AMBER),
+            (None, Some(c), _) => (Some(format!("Allow for this session covers: {c}")), MUTED),
+            _ => (None, MUTED),
+        };
+        if let Some(n) = note {
+            for l in g.wrap(nsz, &n, Face::Sans, inner).into_iter().take(2) {
+                text(&mut prims, pad, y, nsz, col, Face::Sans, l);
+                y += nlh;
+            }
+            y += 4.0 * s;
+        }
+    }
+    let diff: Vec<&str> = if consent { Vec::new() } else { detail.lines().take(10).collect() };
     if !diff.is_empty() {
-        let msz = 12.5 * s;
+        let msz = 12.5 * s * mono_boost();
         let mlh = g.line_height(msz, Face::Mono) * 1.15;
         let adv = g.text_width(msz, "0", Face::Mono).max(1.0);
         let cols = ((inner - 12.0 * s) / adv).floor().max(4.0) as usize;
@@ -667,11 +803,25 @@ fn layout_approval(g: &mut Gfx, tool: &str, summary: &str, detail: &str, w: f32,
         }
         y += h + 8.0 * s;
     }
-    // the buttons keep their keys: Ctrl+Y approve, Ctrl+U always, Ctrl+N deny
+    // the buttons keep their keys: Ctrl+Y allow once, Ctrl+U allow for this session, Ctrl+N deny
     let size = 14.0 * s;
     let bh = size * 2.1;
     let mut x = pad;
-    for (label, c, key) in [("Approve (Ctrl+Y)".to_string(), OK, 'y'), (format!("Always allow {tool} (Ctrl+U)"), TEXT, 'u'), ("Deny (Ctrl+N)".to_string(), ERR, 'n')] {
+    let buttons: Vec<(String, [u8; 4], char)> = if consent {
+        let labels: Vec<&str> = detail.lines().collect();
+        let n = labels.len();
+        labels.iter().enumerate().map(|(i, l)| if i + 1 == n { (format!("{l} (Ctrl+N)"), ERR, 'n') } else if i == 0 { (format!("{l} (Ctrl+Y)"), OK, 'y') } else { (format!("{l} (Ctrl+U)"), TEXT, 'u') }).collect()
+    } else {
+        let mut b = vec![("Allow once (Ctrl+Y)".to_string(), OK, 'y')];
+        if tool == "screen_capture" || iyakki_agent::camtools::takes_pictures(tool) {
+            b.push(("Allow for 5 minutes (Ctrl+U)".to_string(), TEXT, 'u'));
+        } else if card.always.is_none() {
+            b.push(("Allow for this session (Ctrl+U)".to_string(), TEXT, 'u'));
+        }
+        b.push(("Deny (Ctrl+N)".to_string(), ERR, 'n'));
+        b
+    };
+    for (label, c, key) in buttons {
         let bw = g.text_width(size, &label, Face::Bold) + size * 1.7;
         if x + bw > w - pad && x > pad {
             x = pad;
@@ -683,7 +833,7 @@ fn layout_approval(g: &mut Gfx, tool: &str, summary: &str, detail: &str, w: f32,
     y += bh + pad;
     prims.insert(0, Prim::Stroke { x: 0.0, y: 0.0, w, h: y, r: 10.0 * s, bw: 1.5 * s, c: AMBER });
     prims.insert(0, Prim::Fill { x: 0.0, y: 0.0, w, h: y, r: 10.0 * s, c: rgb(36, 30, 16) });
-    BlockLayout { h: y + 4.0 * s, dot: Some((dot_y, Dot::Waiting)), prims, toggle: None, sel, zones: vec![] }
+    BlockLayout { h: y + 4.0 * s, dot: Some((dot_y, Dot::Waiting)), prims, toggle: None, sel, zones: vec![], links: vec![] }
 }
 
 fn layout_image(pm: Option<Arc<tiny_skia::Pixmap>>, path: &str, w: f32, s: f32) -> BlockLayout {
@@ -771,7 +921,7 @@ fn layout_picture(g: &mut Gfx, src: &PicSrc, res: &Result<Rendered, String>, exp
     }
     y += bh + 6.0 * s;
     if expanded || res.is_err() {
-        let msz = 12.0 * s;
+        let msz = 12.0 * s * mono_boost();
         let mlh = g.line_height(msz, Face::Mono) * 1.15;
         let adv = g.text_width(msz, "0", Face::Mono).max(1.0);
         let pad = 8.0 * s;
@@ -791,7 +941,7 @@ fn layout_picture(g: &mut Gfx, src: &PicSrc, res: &Result<Rendered, String>, exp
         zones.push(Zone { x: 0.0, y, w, h: bh2, text: src.text.clone(), code: true });
         y += bh2 + 6.0 * s;
     }
-    BlockLayout { h: y + 2.0 * s, dot: None, prims, toggle: res.is_ok().then(String::new), sel: vec![], zones }
+    BlockLayout { h: y + 2.0 * s, dot: None, prims, toggle: res.is_ok().then(String::new), sel: vec![], zones, links: vec![] }
 }
 
 // ------------------------------------------------------------------ the view
@@ -807,8 +957,11 @@ struct Item {
     /// Where this block's lines start in the selectable document, and its first copy zone in `copy_texts`.
     first_line: usize,
     first_zone: usize,
+    first_link: usize,
     /// Index in `pic_list` for a picture block.
     pic: Option<usize>,
+    /// The message this block shows the text of (an answer), for the reading highlight.
+    msg: Option<usize>,
 }
 
 /// Where the transcript was drawn last: its rectangle and the y of the first block, for turning pointer positions into text positions.
@@ -846,12 +999,61 @@ pub struct ChatView {
     /// While a drag is held outside the transcript: how far to scroll per heartbeat (positive = towards older messages).
     auto: f32,
     ptr: Option<(f32, f32)>,
+    /// Every link of the transcript in order: (item, index in the block). Rebuilt with the layout.
+    link_list: Vec<(usize, usize)>,
+    /// The link the keyboard is on.
+    pub link_focus: Option<usize>,
+    /// Where each link rectangle was drawn last (screen pixels): (event id, rectangle, link).
+    link_hits: std::cell::RefCell<Vec<(usize, R, usize)>>,
+    /// A press that started on a link: the link and where; `moved` once it became a drag.
+    press_link: Option<(usize, (f32, f32))>,
+    moved: bool,
+    /// A single click waiting out the double-click time: the link and the heartbeats left.
+    pending: Option<(usize, u32)>,
+    /// The sentence and word being read aloud, as word numbers of the message's drawn text (see [`ReadMark`]).
+    pub reading: Option<ReadMark>,
 }
+
+/// What is lit while a message is read aloud: the message, the drawn words of the sentence being said (first, last) and the
+/// word being said. Word numbers count the words of the message's text as drawn, in order (see `ChatView::message_words`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadMark {
+    pub msg: usize,
+    pub sentence: Option<(usize, usize)>,
+    pub word: Option<usize>,
+}
+
+/// A word of a message as drawn: its block, the selectable line in that block and its characters in the line.
+#[derive(Clone, Debug)]
+struct DrawnWord {
+    item: usize,
+    line: usize,
+    a: usize,
+    b: usize,
+    text: String,
+}
+
+/// Rectangles to light, relative to the block's corner of each item: (item, line top, line height, x0, x1).
+pub type LitRect = (usize, f32, f32, f32, f32);
 
 impl Default for ChatView {
     fn default() -> Self {
         Self::new()
     }
+}
+
+thread_local! {
+    static MONO_BOOST: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
+
+/// The embedded chat of the AI IDE draws its small type smaller overall, but tool and command text (mono) stays at 12 px: this
+/// factor, set before each draw, lifts the mono sizes of the tool blocks. The stand-alone CHAT leaves it at 1.
+pub fn set_mono_boost(k: f32) {
+    MONO_BOOST.with(|c| c.set(k));
+}
+
+fn mono_boost() -> f32 {
+    MONO_BOOST.with(|c| c.get())
 }
 
 /// Width of the timeline gutter, in pixels at scale 1.
@@ -860,7 +1062,7 @@ const MAX_COLUMN: f32 = 900.0;
 
 impl ChatView {
     pub fn new() -> ChatView {
-        ChatView { cache: HashMap::new(), laid: 0, key_dims: (0, 0), open: HashSet::new(), open_sig: 0, turns: vec![], sigs: vec![], built_for: None, items: vec![], toggle_keys: vec![], pic_list: vec![], focus: None, total: 0.0, col: (0.0, 0.0), reveal: false, doc: SelDoc::new(), doc_key: None, sel: Selection::default(), copy_texts: vec![], geo: std::cell::Cell::new(Geo::default()), auto: 0.0, ptr: None }
+        ChatView { cache: HashMap::new(), laid: 0, key_dims: (0, 0), open: HashSet::new(), open_sig: 0, turns: vec![], sigs: vec![], built_for: None, items: vec![], toggle_keys: vec![], pic_list: vec![], focus: None, total: 0.0, col: (0.0, 0.0), reveal: false, doc: SelDoc::new(), doc_key: None, sel: Selection::default(), copy_texts: vec![], geo: std::cell::Cell::new(Geo::default()), auto: 0.0, ptr: None, link_list: vec![], link_focus: None, link_hits: Default::default(), press_link: None, moved: false, pending: None, reading: None }
     }
 
     pub fn turns(&self) -> &[Turn] {
@@ -900,6 +1102,7 @@ impl ChatView {
 
     /// Up (-1) and Down (+1) walk over the blocks that open; walking past the ends leaves them.
     pub fn move_focus(&mut self, dir: i32) {
+        self.link_focus = None;
         if self.toggle_keys.is_empty() {
             self.focus = None;
             return;
@@ -942,10 +1145,15 @@ impl ChatView {
         cx.tool_ok.iter().fold(0u64, |a, (k, v)| a ^ hash_of(&(k, v))).hash(&mut h);
         cx.approval.hash(&mut h);
         cx.busy.hash(&mut h);
+        // the answer and the thinking as they are written, and the seconds counted in the thinking label
+        cx.live.hash(&mut h);
+        cx.thinking.len().hash(&mut h);
+        cx.thinking.get(cx.thinking.len().saturating_sub(24)..).hash(&mut h);
+        (cx.think_secs >= 2).then_some(cx.think_secs).hash(&mut h);
         self.open_sig.hash(&mut h);
         let sig = h.finish();
         if self.built_for != Some(sig) {
-            self.turns = build_turns(msgs, &Ctx { tool_ok: cx.tool_ok, approval: cx.approval, busy: cx.busy, open: &self.open });
+            self.turns = build_turns(msgs, &Ctx { tool_ok: cx.tool_ok, approval: cx.approval, busy: cx.busy, open: &self.open, live: cx.live, thinking: cx.thinking, think_secs: cx.think_secs });
             self.sigs = self.turns.iter().map(|t| (hash_of(&t.user), t.blocks.iter().map(hash_of).collect())).collect();
             self.built_for = Some(sig);
         }
@@ -980,14 +1188,14 @@ impl ChatView {
             if let Some((idx, t)) = &turn.user {
                 let l = fetch(hash_of(&(usig, 1u8)), &mut || layout_user(g, t, *idx, colw, s));
                 let h = l.h;
-                items.push(Item { y, l, x: 0.0, turn: ti, toggle: None, first_line: 0, first_zone: 0, pic: None });
+                items.push(Item { y, l, x: 0.0, turn: ti, toggle: None, first_line: 0, first_zone: 0, first_link: 0, pic: None, msg: None });
                 y += h + 14.0 * s;
             }
             for (bi, b) in turn.blocks.iter().enumerate() {
                 let sg = bsigs[bi];
                 let l = match b {
                     Block::Text { text, msg } => fetch(sg, &mut || layout_text(g, text, *msg, cw, s)),
-                    Block::Thinking { text, live, expanded } => fetch(sg, &mut || layout_thinking(g, text, *live, *expanded, cw, s)),
+                    Block::Thinking { text, live, expanded, secs } => fetch(sg, &mut || layout_thinking(g, text, *live, *expanded, *secs, cw, s)),
                     Block::Tool { name, status, input, input_full, output, hidden, expanded, .. } => fetch(sg, &mut || layout_tool(g, name, *status, input, input_full, output.as_deref(), *hidden, *expanded, cw, s)),
                     Block::Approval { tool, summary, detail } => fetch(sg, &mut || layout_approval(g, tool, summary, detail, cw, s)),
                     Block::Image { path } => {
@@ -1020,7 +1228,8 @@ impl ChatView {
                     None
                 };
                 let h = l.h;
-                items.push(Item { y, l, x: gut, turn: ti, toggle, first_line: 0, first_zone: 0, pic });
+                let msg = if let Block::Text { msg, .. } = b { Some(*msg) } else { None };
+                items.push(Item { y, l, x: gut, turn: ti, toggle, first_line: 0, first_zone: 0, first_link: 0, pic, msg });
                 y += h + 3.0 * s;
             }
             y += 22.0 * s;
@@ -1036,9 +1245,12 @@ impl ChatView {
         self.total = (y - 25.0 * s + 12.0 * s).max(0.0);
         // the selectable text, rebuilt only when the layout changed
         let (mut lines, mut zones) = (0, 0);
-        for it in self.items.iter_mut() {
+        self.link_list.clear();
+        for (ii, it) in self.items.iter_mut().enumerate() {
             it.first_line = lines;
             it.first_zone = zones;
+            it.first_link = self.link_list.len();
+            self.link_list.extend((0..it.l.links.len()).map(|k| (ii, k)));
             lines += it.l.sel.len();
             zones += it.l.zones.len();
         }
@@ -1096,8 +1308,104 @@ impl ChatView {
         self.sel.drag(&self.doc, x, y);
     }
 
+    /// A press or drag that landed on a link rectangle (`Event::AreaAt(LINK_BASE + 32 * link + part, x, y)`, `x` and `y` relative to
+    /// that rectangle). It is a press in the text like any other; a plain single click also marks the link for opening (see
+    /// [`ChatView::release`] and [`ChatView::link_due`]).
+    pub fn link_press(&mut self, id: usize, x: f32, y: f32, clicks: u8, shift: bool, dragging: bool) {
+        let Some((_, r, n)) = self.link_hits.borrow().iter().find(|h| h.0 == id).copied() else { return };
+        let log = self.geo.get().log.map_or((0.0, 0.0), |l| (l.x, l.y));
+        let (xr, yr) = (r.x as f32 + x - log.0, r.y as f32 + y - log.1);
+        if dragging {
+            if let Some((_, (px, py))) = self.press_link {
+                if (xr - px).abs() > 4.0 || (yr - py).abs() > 4.0 {
+                    self.moved = true;
+                }
+            }
+            self.drag(xr, yr);
+        } else {
+            self.press(xr, yr, clicks, shift);
+            self.moved = false;
+            self.link_focus = None;
+            if clicks == 1 && !shift {
+                self.press_link = Some((n, (xr, yr)));
+            } else {
+                self.press_link = None;
+                self.pending = None;
+            }
+        }
+    }
+
+    /// One heartbeat: the link whose single click has waited out the double-click time, to be opened now.
+    pub fn link_due(&mut self) -> Option<mdtext::LinkRef> {
+        let (n, left) = self.pending?;
+        if left > 1 {
+            self.pending = Some((n, left - 1));
+            return None;
+        }
+        self.pending = None;
+        self.link(n)
+    }
+
+    /// The `n`-th link of the transcript.
+    pub fn link(&self, n: usize) -> Option<mdtext::LinkRef> {
+        let (ii, k) = *self.link_list.get(n)?;
+        self.items.get(ii)?.l.links.get(k).map(|l| l.link.clone())
+    }
+
+    /// Where link `n` was drawn last: (the event id of each rectangle, the rectangle on screen). Tests and tools.
+    pub fn link_screen_rects(&self, n: usize) -> Vec<(usize, R)> {
+        self.link_hits.borrow().iter().filter(|h| h.2 == n).map(|h| (h.0, h.1)).collect()
+    }
+
+    /// How many links there are.
+    pub fn link_count(&self) -> usize {
+        self.link_list.len()
+    }
+
+    /// The link under a point of the screen, as drawn last.
+    pub fn link_at(&self, x: f32, y: f32) -> Option<mdtext::LinkRef> {
+        let (xi, yi) = (x as i32, y as i32);
+        let n = self.link_hits.borrow().iter().rev().find(|h| h.1.contains(xi, yi)).map(|h| h.2)?;
+        self.link(n)
+    }
+
+    /// Tab (+1) and Shift+Tab (-1) walk over the links; walking past the ends leaves them (false: nothing to walk).
+    pub fn link_move(&mut self, dir: i32) -> bool {
+        let n = self.link_list.len() as i32;
+        if n == 0 {
+            self.link_focus = None;
+            return false;
+        }
+        let next = match (self.link_focus, dir) {
+            (None, d) if d < 0 => n - 1,
+            (None, _) => 0,
+            (Some(c), d) => c as i32 + d,
+        };
+        self.focus = None;
+        self.reveal = true;
+        if (0..n).contains(&next) {
+            self.link_focus = Some(next as usize);
+            true
+        } else {
+            self.link_focus = None;
+            false
+        }
+    }
+
+    /// The link the keyboard is on.
+    pub fn focused_link(&self) -> Option<mdtext::LinkRef> {
+        self.link(self.link_focus?)
+    }
+
     /// The button was released.
     pub fn release(&mut self) {
+        // a click that stayed a click on a link: it opens once the double-click time has passed
+        if let Some((n, _)) = self.press_link.take() {
+            if !self.moved {
+                self.pending = Some((n, LINK_DELAY));
+            }
+        }
+        self.moved = false;
         self.auto = 0.0;
         self.ptr = None;
     }
@@ -1194,6 +1502,119 @@ impl ChatView {
         (msg, code)
     }
 
+    // ------------------------------------------------------------------ reading aloud
+
+    /// Where the transcript was drawn last (tests and tools).
+    pub fn log_rect(&self) -> Option<R> {
+        self.geo.get().log
+    }
+
+    /// The words of message `msg` as drawn, in order (list markers included; code and addresses too).
+    fn drawn_words(&self, msg: usize) -> Vec<DrawnWord> {
+        let mut out = Vec::new();
+        for (ii, it) in self.items.iter().enumerate() {
+            if it.msg != Some(msg) {
+                continue;
+            }
+            for (j, l) in it.l.sel.iter().enumerate() {
+                let chars: Vec<char> = l.text.chars().collect();
+                for w in iyakki_agent::wordtime::words_of(&l.text) {
+                    out.push(DrawnWord { item: ii, line: j, a: w.start, b: w.end, text: chars[w.start..w.end].iter().collect() });
+                }
+            }
+        }
+        out
+    }
+
+    /// The words of message `msg` as drawn, in order: what the reading highlight counts in.
+    pub fn message_words(&self, msg: usize) -> Vec<String> {
+        self.drawn_words(msg).into_iter().map(|w| w.text).collect()
+    }
+
+    /// The message and the drawn word (its number) under a point relative to the transcript (what `Event::AreaAt` carries):
+    /// the word under it, or the next one when it is between words. Only answers have words.
+    pub fn point_word(&self, xr: f32, yr: f32) -> Option<(usize, usize)> {
+        let (x, y) = self.doc_point(xr, yr);
+        let p = self.doc.pos_at(x, y)?;
+        let ii = self.doc.lines.get(p.line)?.block as usize;
+        let it = self.items.get(ii)?;
+        let msg = it.msg.filter(|m| *m != usize::MAX)?;
+        let line = p.line - it.first_line;
+        let words = self.drawn_words(msg);
+        let k = words.iter().position(|w| w.item == ii && w.line == line && w.b > p.ch).or_else(|| words.iter().rposition(|w| w.item == ii && w.line <= line))?;
+        Some((msg, k))
+    }
+
+    /// The rectangles of the sentence and of the word that [`ChatView::reading`] names, and the top and bottom of the sentence
+    /// (relative to the top of the transcript), for painting and for scrolling.
+    fn read_rects(&self) -> (Vec<LitRect>, Option<(LitRect, String)>, Option<(f32, f32)>) {
+        let Some(m) = &self.reading else { return (vec![], None, None) };
+        let words = self.drawn_words(m.msg);
+        let rect = |w: &DrawnWord| -> Option<LitRect> {
+            let it = self.items.get(w.item)?;
+            let l = it.l.sel.get(w.line)?;
+            let (x0, x1) = (*l.xs.get(w.a)?, *l.xs.get(w.b)?);
+            Some((w.item, l.y, l.h, it.x + x0, it.x + x1))
+        };
+        let mut sentence: Vec<LitRect> = Vec::new();
+        let mut span = None;
+        if let Some((a, b)) = m.sentence {
+            let mut cur: Option<(usize, usize, LitRect)> = None;
+            for w in words.iter().skip(a).take(b.saturating_sub(a) + 1) {
+                let Some(r) = rect(w) else { continue };
+                match cur.as_mut() {
+                    Some((ci, cl, c)) if *ci == w.item && *cl == w.line => c.4 = r.4,
+                    _ => {
+                        if let Some((_, _, c)) = cur.take() {
+                            sentence.push(c);
+                        }
+                        cur = Some((w.item, w.line, r));
+                    }
+                }
+            }
+            if let Some((_, _, c)) = cur {
+                sentence.push(c);
+            }
+            if let (Some(f), Some(l)) = (sentence.first(), sentence.last()) {
+                let it = |r: &LitRect| self.items.get(r.0).map_or(0.0, |i| i.y);
+                span = Some((it(f) + f.1, it(l) + l.1 + l.2));
+            }
+        }
+        let word = m.word.and_then(|k| words.get(k)).and_then(|w| rect(w).map(|r| (r, w.text.clone())));
+        (sentence, word, span)
+    }
+
+    /// The scroll offset that keeps the sentence being read in view (unchanged when it already is, or nothing is read).
+    pub fn scroll_for_reading(&self, log_h: f32, scroll_px: f32) -> f32 {
+        let Some((t, b)) = self.read_rects().2 else { return scroll_px };
+        if self.total <= log_h {
+            return scroll_px;
+        }
+        let base = log_h - self.total + scroll_px.min(self.total - log_h).max(0.0);
+        let (top, bottom) = (base + t, base + b);
+        let m = (log_h * 0.12).min(48.0);
+        if bottom - top > log_h - 2.0 * m {
+            // taller than the room: keep its first line near the top
+            return (scroll_px - (top - m)).max(0.0);
+        }
+        if top < m {
+            scroll_px - top + m
+        } else if bottom > log_h - m {
+            (scroll_px - (bottom - (log_h - m))).max(0.0)
+        } else {
+            scroll_px
+        }
+    }
+
+    /// Where the sentence and the word being read are on screen when drawn in `log` at `scroll_px` (tests and tools).
+    pub fn read_screen_rects(&self, log: R, scroll_px: f32) -> (Vec<R>, Option<R>) {
+        let top = self.top(log, scroll_px);
+        let col_x = log.x + self.col.0;
+        let (sent, word, _) = self.read_rects();
+        let to = |r: &LitRect| R::new(col_x + r.3, top + self.items.get(r.0).map_or(0.0, |i| i.y) + r.1, r.4 - r.3, r.2);
+        (sent.iter().map(to).collect(), word.as_ref().map(|w| to(&w.0)))
+    }
+
     fn top(&self, log: R, scroll_px: f32) -> f32 {
         if self.total < log.h {
             log.y
@@ -1206,6 +1627,20 @@ impl ChatView {
     pub fn scroll_for_focus(&mut self, log_h: f32, scroll_px: f32) -> f32 {
         if !std::mem::take(&mut self.reveal) || self.total <= log_h {
             return scroll_px;
+        }
+        if let Some(n) = self.link_focus {
+            let Some((ii, k)) = self.link_list.get(n).copied() else { return scroll_px };
+            let Some(it) = self.items.get(ii) else { return scroll_px };
+            let Some(r) = it.l.links.get(k).and_then(|l| l.rects.first()) else { return scroll_px };
+            let top = log_h - self.total + scroll_px.min(self.total - log_h).max(0.0) + it.y + r.1;
+            let bottom = top + r.3;
+            return if top < 0.0 {
+                scroll_px - top + 24.0
+            } else if bottom > log_h - 24.0 {
+                (scroll_px - (bottom - log_h) - 32.0).max(0.0)
+            } else {
+                scroll_px
+            };
         }
         let Some(item) = self.focus.as_ref().and_then(|f| self.toggle_keys.iter().position(|k| k == f)).and_then(|n| self.items.iter().find(|i| i.toggle == Some(n))) else { return scroll_px };
         let top = log_h - self.total + scroll_px.min(self.total - log_h).max(0.0) + item.y;
@@ -1245,6 +1680,9 @@ impl ChatView {
             }
         }
         let clip = (log.y - 40.0 * s, log.y + log.h + 40.0 * s);
+        let lit = self.reading.as_ref().map(|_| self.read_rects());
+        self.link_hits.borrow_mut().clear();
+        let mut shown_link: Option<usize> = None;
         let phase = (tick % 48) as f32 / 48.0;
         for it in &self.items {
             let oy = top + it.y;
@@ -1328,6 +1766,53 @@ impl ChatView {
                     }
                 }
             }
+            // the sentence being read aloud as a soft wash, and the word being said as a solid fill with dark text on it
+            if let Some((sent, word, _)) = lit.as_ref() {
+                for r in sent.iter().filter(|r| std::ptr::eq(&self.items[r.0], it)) {
+                    let (ya, yb) = (oy + r.1, oy + r.1 + r.2);
+                    if yb >= log.y && ya <= log.y + log.h {
+                        g.rrect(col_x + r.3 - 2.0 * s, ya, r.4 - r.3 + 4.0 * s, r.2, 4.0 * s, [WORD_FILL[0], WORD_FILL[1], WORD_FILL[2], 46]);
+                    }
+                }
+                if let Some((r, txt)) = word.as_ref().filter(|(r, _)| std::ptr::eq(&self.items[r.0], it)) {
+                    let (ya, yb) = (oy + r.1, oy + r.1 + r.2);
+                    if yb >= log.y && ya <= log.y + log.h {
+                        g.rrect(col_x + r.3 - 2.5 * s, ya, r.4 - r.3 + 5.0 * s, r.2, 4.0 * s, WORD_FILL);
+                        // the word again in dark ink (smaller if its face is wider than the one it was laid out in)
+                        let mut size = 16.0 * s;
+                        let tw = g.text_width(size, txt, Face::Sans);
+                        if tw > r.4 - r.3 + 2.0 * s {
+                            size *= ((r.4 - r.3 + 2.0 * s) / tw).max(0.6);
+                        }
+                        g.text(col_x + r.3, ya + (r.2 - g.line_height(size, Face::Sans)) / 2.0, size, WORD_INK, txt, Face::Sans);
+                    }
+                }
+            }
+            // links: the hand pointer and the press that may open them, a lit background under the pointer, a ring for the keyboard
+            for (k, li) in l.links.iter().enumerate() {
+                let n = it.first_link + k;
+                let warn = li.link.warn.any();
+                for (part, &(rx, ry, rw, rh)) in li.rects.iter().enumerate().take(32) {
+                    let (y0, y1) = ((oy + ry).max(log.y), (oy + ry + rh).min(log.y + log.h));
+                    if y1 <= y0 {
+                        continue;
+                    }
+                    let r = R::new(ox + rx - 1.0, y0, rw + 2.0, y1 - y0);
+                    let id = LINK_BASE + n * 32 + part;
+                    g.hit(r, Event::Area(id), "link");
+                    self.link_hits.borrow_mut().push((id, r, n));
+                    if g.hovered(r) {
+                        shown_link = Some(n);
+                        g.rrect(r.x, r.y, r.w, r.h, 3.0 * s, [LINK_COL[0], LINK_COL[1], LINK_COL[2], 40]);
+                    }
+                    if li.underline {
+                        g.rect(ox + rx, oy + ry + rh - 3.0, rw, 1.0, if warn { AMBER } else { LINK_COL });
+                    }
+                    if self.link_focus == Some(n) {
+                        g.rrect_outline(r.x, r.y, r.w, r.h, 3.0 * s, 1.5 * s, accent);
+                    }
+                }
+            }
             // a small copy button at the top-right of a hovered message or code block
             for (zi, z) in l.zones.iter().enumerate() {
                 let zr = R::new(ox + z.x, oy + z.y, z.w, z.h);
@@ -1364,6 +1849,32 @@ impl ChatView {
                 g.circle(cx, cy, r, col);
             }
         }
+        if let Some(n) = shown_link.or(self.link_focus) {
+            self.link_status(g, log, s, n);
+        }
+    }
+
+    /// The status line under the pointer: the full address a link goes to, and what is wrong with it.
+    fn link_status(&self, g: &mut Gfx, log: R, s: f32, n: usize) {
+        let Some(l) = self.link(n) else { return };
+        let size = 12.0 * s;
+        let h = size * 1.7;
+        let warn = l.warn.text(&l.url);
+        let max = (log.w - 16.0 * s).max(40.0);
+        let mut text = l.url.clone();
+        // cut the address, never the warning
+        let room = |g: &mut Gfx, t: &str| g.text_width(size, t, Face::Sans) <= max;
+        let tail = if warn.is_empty() { String::new() } else { format!("   {warn}") };
+        while text.chars().count() > 8 && !room(g, &format!("{text}{tail}")) {
+            let keep = text.chars().count() * 9 / 10;
+            text = format!("{}…", text.chars().take(keep.saturating_sub(1)).collect::<String>());
+        }
+        let line = format!("{text}{tail}");
+        let w = (g.text_width(size, &line, Face::Sans) + 12.0 * s).min(log.w);
+        let y = log.y + log.h - h;
+        g.rrect(log.x, y, w, h, 5.0 * s, rgb(18, 26, 48));
+        g.rrect_outline(log.x, y, w, h, 5.0 * s, 1.0, if l.warn.any() { AMBER } else { rgb(70, 82, 120) });
+        g.text(log.x + 6.0 * s, y + (h - size) / 2.0 - 1.0, size, if l.warn.any() { AMBER } else { TEXT }, &line, Face::Sans);
     }
 
     /// The dots, in order, for tests: (turn, kind).
@@ -1402,7 +1913,7 @@ mod tests {
         }
         fn prep(&mut self, msgs: &[Message], w: f32) -> f32 {
             let ap = self.approval.clone();
-            let cx = Ctx { tool_ok: &self.ok, approval: ap.as_ref().map(|(a, b, c, d)| (a.as_str(), b.as_str(), c.as_str(), d.as_str())), busy: self.busy, open: &HashSet::new() };
+            let cx = Ctx { tool_ok: &self.ok, approval: ap.as_ref().map(|(a, b, c, d)| (a.as_str(), b.as_str(), c.as_str(), d.as_str())), busy: self.busy, open: &HashSet::new(), live: "", thinking: "", think_secs: 0 };
             let open = self.v.open.clone();
             let cx = Ctx { open: &open, ..cx };
             self.v.prepare(&mut self.g, msgs, &cx, w, 1.0, &mut NoPics)
@@ -1458,6 +1969,28 @@ mod tests {
     }
 
     #[test]
+    fn what_the_model_thinks_fills_the_live_thinking_block_and_counts_the_seconds() {
+        let msgs = vec![Message::system("s"), Message::user("hi")];
+        let mk = |thinking: &str, secs: u64, live: &str| {
+            let cx = Ctx { tool_ok: &HashMap::new(), approval: None, busy: true, open: &HashSet::new(), live, thinking, think_secs: secs };
+            build_turns(&msgs, &cx)
+        };
+        let turns = mk("first I check the folder", 7, "");
+        assert!(matches!(turns[0].blocks.last(), Some(Block::Thinking { text, live: true, secs: 7, .. }) if text == "first I check the folder"));
+        let mut r = Rig::new();
+        let l = layout_thinking(&mut r.g, "first I check the folder", true, false, 7, 600.0, 1.0);
+        assert_eq!(l.texts(), vec!["Thinking… 7 s"], "collapsed: only the label, with the seconds");
+        assert!(l.toggle.is_some(), "and it opens to the thinking");
+        let open = layout_thinking(&mut r.g, "first I check the folder", true, true, 7, 600.0, 1.0);
+        assert!(open.texts().iter().any(|t| t.contains("check the folder")));
+        let quick = layout_thinking(&mut r.g, "", true, false, 1, 600.0, 1.0);
+        assert_eq!(quick.texts(), vec!["Thinking"], "no count in the first moments");
+        // once the answer is being written the answer replaces the block
+        let turns = mk("still thinking text", 3, "The answer so far");
+        assert!(matches!(turns[0].blocks.last(), Some(Block::Text { text, .. }) if text == "The answer so far"));
+    }
+
+    #[test]
     fn thinking_is_collapsed_dimmed_and_opens_only_when_there_is_reasoning() {
         let mut r = Rig::new();
         r.busy = true;
@@ -1468,10 +2001,10 @@ mod tests {
         assert_eq!(l[1].texts(), vec!["Thinking"]);
         assert!(l[1].toggle.is_none(), "no reasoning text: it only shows activity");
         // with reasoning: collapsed shows the label only; opening shows the text
-        let l = layout_thinking(&mut r.g, "first I check the folder, then I answer", false, false, 600.0, 1.0);
+        let l = layout_thinking(&mut r.g, "first I check the folder, then I answer", false, false, 0, 600.0, 1.0);
         assert_eq!(l.texts(), vec!["Thinking"]);
         assert!(l.toggle.is_some());
-        let open = layout_thinking(&mut r.g, "first I check the folder, then I answer", false, true, 600.0, 1.0);
+        let open = layout_thinking(&mut r.g, "first I check the folder, then I answer", false, true, 0, 600.0, 1.0);
         assert!(open.texts().iter().any(|t| t.contains("check the folder")) && open.h > l.h);
     }
 
@@ -1580,13 +2113,13 @@ mod tests {
         assert_eq!(r.v.dots(), vec![(0, Dot::Waiting), (0, Dot::Waiting)], "the call and the question");
         let ap = r.v.layouts().pop().unwrap();
         let b = ap.buttons();
-        assert_eq!(b.iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), vec!["Approve (Ctrl+Y)", "Always allow write_file (Ctrl+U)", "Deny (Ctrl+N)"]);
+        assert_eq!(b.iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), vec!["Allow once (Ctrl+Y)", "Allow for this session (Ctrl+U)", "Deny (Ctrl+N)"]);
         assert_eq!(b.iter().map(|x| x.1.clone()).collect::<Vec<_>>(), vec![Key::Ctrl('y'), Key::Ctrl('u'), Key::Ctrl('n')]);
         assert!(ap.texts().iter().any(|t| t.contains("write 3 characters")) && ap.texts().contains(&"+3pm".to_string()));
         // no extra "Thinking" while it waits for the decision
         assert!(!r.v.layouts().iter().any(|l| l.texts() == vec!["Thinking"]));
         r.draw(0.0, 3);
-        for want in ["Approve (Ctrl+Y)", "Deny (Ctrl+N)"] {
+        for want in ["Allow once (Ctrl+Y)", "Deny (Ctrl+N)"] {
             assert!(r.g.hits.iter().any(|h| h.label == want), "{want}");
         }
         // narrow: the buttons wrap onto more rows instead of leaving the block
@@ -1644,7 +2177,7 @@ mod tests {
         assert!(r.v.col.1 <= MAX_COLUMN + 0.5 && r.v.col.0 > 100.0);
         // scale: bigger text, taller blocks
         let small = r.prep(&msgs, 900.0);
-        let cx = Ctx { tool_ok: &HashMap::new(), approval: None, busy: false, open: &HashSet::new() };
+        let cx = Ctx { tool_ok: &HashMap::new(), approval: None, busy: false, open: &HashSet::new(), live: "", thinking: "", think_secs: 0 };
         let big = r.v.prepare(&mut r.g, &msgs, &cx, 900.0, 2.0, &mut NoPics);
         assert!(big > small * 1.5);
     }
@@ -1689,7 +2222,7 @@ mod tests {
         let mut pm = tiny_skia::Pixmap::new(200, 100).unwrap();
         pm.fill(tiny_skia::Color::from_rgba8(230, 60, 90, 255));
         let pm = Arc::new(pm);
-        let cx = Ctx { tool_ok: &HashMap::new(), approval: None, busy: false, open: &HashSet::new() };
+        let cx = Ctx { tool_ok: &HashMap::new(), approval: None, busy: false, open: &HashSet::new(), live: "", thinking: "", think_secs: 0 };
         r.v.prepare(&mut r.g, &msgs, &cx, 900.0, 1.0, &mut OnePic(pm.clone()));
         assert!(matches!(r.v.turns()[0].blocks[1], Block::Image { .. }));
         assert!(!r.v.layouts()[1].texts().iter().any(|t| t.contains("IMAGE:")), "the marker line is not shown");

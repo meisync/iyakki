@@ -523,6 +523,26 @@ pub fn tile(g: &mut Gfx, r: R, s: f32, accent: [u8; 4], selected: bool, hot: boo
     g.rrect_outline(r.x, r.y, r.w, r.h, rad, if selected { 2.5 * s } else { 1.0 }, with_alpha(a, if selected { 255 } else if hot { 130 } else { 46 }));
 }
 
+/// The DEMO ribbon of a launcher tile: a small amber pill that straddles the tile's top edge, centred, so it reads in
+/// every group and at every size. Returns its rectangle.
+pub fn demo_ribbon(g: &mut Gfx, r: R, s: f32) -> R {
+    ribbon(g, r, s, "DEMO")
+}
+
+/// The amber ribbon across the top edge of a tile, with a short word on it (DEMO, DEV).
+pub fn ribbon(g: &mut Gfx, r: R, s: f32, word: &str) -> R {
+    let (w, h) = (r.w.min(66.0 * s).max(30.0), 19.0 * s);
+    let x = r.x + (r.w - w) / 2.0;
+    let y = r.y - h * 0.45;
+    g.rrect_glow(x, y, w, h, h / 2.0, 4.0 * s, with_alpha(AMBER, 90));
+    g.rrect(x, y, w, h, h / 2.0, AMBER);
+    g.rrect_outline(x, y, w, h, h / 2.0, 1.0, [255, 232, 170, 255]);
+    let sz = 12.0 * s;
+    let tw = g.text_width(sz, word, Face::Bold);
+    g.text(x + (w - tw) / 2.0, y + (h - g.line_height(sz, Face::Bold)) / 2.0, sz, rgb(40, 24, 0), word, Face::Bold);
+    R::new(x, y, w, h)
+}
+
 /// A small square-ish button in the app header (clipboard, camera, help, back): dark glass with a hairline, accent on hover.
 pub fn chrome_button(g: &mut Gfx, r: R, s: f32, hot: bool, accent: [u8; 4]) {
     let rad = 8.0 * s;
@@ -589,6 +609,257 @@ pub fn field_frame(g: &mut Gfx, r: R, s: f32, focused: bool, accent: [u8; 4]) {
     }
     g.rrect(r.x, r.y, r.w, r.h, rad, crate::ui::FIELD);
     g.rrect_outline(r.x, r.y, r.w, r.h, rad, if focused { 1.8 * s } else { 1.0 }, if focused { accent } else { rgb(62, 72, 108) });
+}
+
+// ------------------------------------------------------------------------------------------------------------ glyphs
+
+/// Small vector pictures for tabs and buttons (the AI IDE and its cluster view), drawn with strokes and polygons so they
+/// are crisp at 14-18 px, need no font and take the colour of the text next to them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Glyph {
+    Editor,
+    Board,
+    K8s,
+    Terminal,
+    Problems,
+    Search,
+    Files,
+    Panel,
+    Chat,
+    Run,
+    Tests,
+    Open,
+    Workloads,
+    Services,
+    Ingresses,
+    Pods,
+    Config,
+    Storage,
+    Nodes,
+    Refresh,
+    Namespace,
+    Cluster,
+    Registry,
+    Deploy,
+    Restart,
+    Globe,
+    /// A page with a folded corner and lines: the Notes tab.
+    Note,
+}
+
+impl Glyph {
+    pub const ALL: [Glyph; 27] = [
+        Glyph::Editor,
+        Glyph::Board,
+        Glyph::K8s,
+        Glyph::Terminal,
+        Glyph::Problems,
+        Glyph::Search,
+        Glyph::Files,
+        Glyph::Panel,
+        Glyph::Chat,
+        Glyph::Run,
+        Glyph::Tests,
+        Glyph::Open,
+        Glyph::Workloads,
+        Glyph::Services,
+        Glyph::Ingresses,
+        Glyph::Pods,
+        Glyph::Config,
+        Glyph::Storage,
+        Glyph::Nodes,
+        Glyph::Refresh,
+        Glyph::Namespace,
+        Glyph::Cluster,
+        Glyph::Registry,
+        Glyph::Deploy,
+        Glyph::Restart,
+        Glyph::Globe,
+        Glyph::Note,
+    ];
+}
+
+/// Draw `glyph` centred on (`cx`, `cy`) inside a `size` x `size` square, in colour `c`.
+pub fn glyph(g: &mut Gfx, glyph: Glyph, cx: f32, cy: f32, size: f32, c: [u8; 4]) {
+    let (x0, y0) = (cx - size / 2.0, cy - size / 2.0);
+    let lw = (size * 0.1).max(1.4);
+    // a point of the unit square
+    let p = |x: f32, y: f32| (x0 + x * size, y0 + y * size);
+    let poly = |g: &mut Gfx, pts: &[(f32, f32)], close: bool| {
+        let n = pts.len();
+        for i in 0..n.saturating_sub(1) + usize::from(close && n > 2) {
+            let (a, b) = (p(pts[i].0, pts[i].1), p(pts[(i + 1) % n].0, pts[(i + 1) % n].1));
+            g.line(a.0, a.1, b.0, b.1, lw, c);
+        }
+    };
+    // an arc of the ellipse at (ex, ey) with radii (rx, ry), from angle a to b in degrees (0 = right, 90 = down)
+    let arc = |ex: f32, ey: f32, rx: f32, ry: f32, a: f32, b: f32| -> Vec<(f32, f32)> {
+        let n = (((b - a).abs() / 18.0).ceil() as usize).max(2);
+        (0..=n)
+            .map(|i| {
+                let t = (a + (b - a) * i as f32 / n as f32).to_radians();
+                (ex + rx * t.cos(), ey + ry * t.sin())
+            })
+            .collect()
+    };
+    let hexagon = |r: f32| -> Vec<(f32, f32)> {
+        (0..6)
+            .map(|i| {
+                let t = (-90.0 + 60.0 * i as f32).to_radians();
+                (0.5 + r * t.cos(), 0.5 + r * t.sin())
+            })
+            .collect()
+    };
+    match glyph {
+        Glyph::Editor => {
+            poly(g, &[(0.36, 0.25), (0.1, 0.5), (0.36, 0.75)], false);
+            poly(g, &[(0.64, 0.25), (0.9, 0.5), (0.64, 0.75)], false);
+            poly(g, &[(0.56, 0.2), (0.44, 0.8)], false);
+        }
+        Glyph::Board => {
+            for (x, h) in [(0.1, 0.7), (0.4, 0.5), (0.7, 0.62)] {
+                let (a, w, hh) = (p(x, 0.15), 0.2 * size, h * size);
+                g.rrect_outline(a.0, a.1, w, hh, 1.2, lw * 0.9, c);
+            }
+        }
+        Glyph::K8s => {
+            poly(g, &hexagon(0.44), true);
+            let ctr = p(0.5, 0.5);
+            g.ring(ctr.0, ctr.1, size * 0.13, lw * 0.9, c);
+            for i in 0..7 {
+                let t = (-90.0 + 360.0 / 7.0 * i as f32).to_radians();
+                let (a, b) = (p(0.5 + 0.13 * t.cos(), 0.5 + 0.13 * t.sin()), p(0.5 + 0.27 * t.cos(), 0.5 + 0.27 * t.sin()));
+                g.line(a.0, a.1, b.0, b.1, lw * 0.8, c);
+            }
+        }
+        Glyph::Terminal => {
+            poly(g, &[(0.14, 0.28), (0.44, 0.5), (0.14, 0.72)], false);
+            poly(g, &[(0.54, 0.76), (0.88, 0.76)], false);
+        }
+        Glyph::Problems => {
+            poly(g, &[(0.5, 0.1), (0.93, 0.86), (0.07, 0.86)], true);
+            poly(g, &[(0.5, 0.38), (0.5, 0.6)], false);
+            let d = p(0.5, 0.74);
+            g.circle(d.0, d.1, lw * 0.6, c);
+        }
+        Glyph::Search => {
+            let r = p(0.42, 0.42);
+            g.ring(r.0, r.1, size * 0.27, lw, c);
+            poly(g, &[(0.62, 0.62), (0.9, 0.9)], false);
+        }
+        Glyph::Note => {
+            poly(g, &[(0.2, 0.1), (0.62, 0.1), (0.84, 0.32), (0.84, 0.9), (0.2, 0.9)], true);
+            poly(g, &[(0.62, 0.1), (0.62, 0.32), (0.84, 0.32)], false);
+            poly(g, &[(0.32, 0.5), (0.72, 0.5)], false);
+            poly(g, &[(0.32, 0.68), (0.72, 0.68)], false);
+        }
+        Glyph::Files => poly(g, &[(0.08, 0.2), (0.4, 0.2), (0.5, 0.32), (0.92, 0.32), (0.92, 0.82), (0.08, 0.82)], true),
+        Glyph::Panel => {
+            let a = p(0.08, 0.15);
+            g.rrect_outline(a.0, a.1, 0.84 * size, 0.7 * size, 1.5, lw * 0.9, c);
+            poly(g, &[(0.08, 0.62), (0.92, 0.62)], false);
+        }
+        Glyph::Chat => {
+            let a = p(0.08, 0.14);
+            g.rrect_outline(a.0, a.1, 0.84 * size, 0.56 * size, 2.5, lw * 0.9, c);
+            poly(g, &[(0.26, 0.7), (0.22, 0.9), (0.46, 0.7)], false);
+        }
+        Glyph::Run => g.polygon(&[p(0.24, 0.12), p(0.86, 0.5), p(0.24, 0.88)], c),
+        Glyph::Tests => poly(g, &[(0.12, 0.54), (0.38, 0.78), (0.88, 0.24)], false),
+        Glyph::Open => {
+            poly(g, &[(0.42, 0.18), (0.14, 0.18), (0.14, 0.86), (0.82, 0.86), (0.82, 0.58)], false);
+            poly(g, &[(0.46, 0.54), (0.88, 0.12)], false);
+            poly(g, &[(0.62, 0.12), (0.88, 0.12), (0.88, 0.38)], false);
+        }
+        Glyph::Workloads => {
+            for y in [0.14, 0.4, 0.66] {
+                let a = p(0.1, y);
+                g.rrect_outline(a.0, a.1, 0.8 * size, 0.2 * size, 1.5, lw * 0.9, c);
+            }
+        }
+        Glyph::Services => {
+            poly(g, &[(0.1, 0.34), (0.9, 0.34)], false);
+            poly(g, &[(0.7, 0.14), (0.9, 0.34), (0.7, 0.54)], false);
+            poly(g, &[(0.9, 0.7), (0.1, 0.7)], false);
+            poly(g, &[(0.3, 0.5), (0.1, 0.7), (0.3, 0.9)], false);
+        }
+        Glyph::Ingresses => {
+            let a = p(0.5, 0.16);
+            g.rrect_outline(a.0, a.1, 0.4 * size, 0.68 * size, 1.5, lw * 0.9, c);
+            poly(g, &[(0.06, 0.5), (0.7, 0.5)], false);
+            poly(g, &[(0.5, 0.3), (0.7, 0.5), (0.5, 0.7)], false);
+        }
+        Glyph::Pods => {
+            let a = p(0.1, 0.2);
+            g.rrect_outline(a.0, a.1, 0.8 * size, 0.6 * size, 0.2 * size, lw * 0.9, c);
+            for x in [0.3, 0.5, 0.7] {
+                let d = p(x, 0.5);
+                g.circle(d.0, d.1, lw * 0.6, c);
+            }
+        }
+        Glyph::Config => {
+            for (y, k) in [(0.22, 0.34), (0.5, 0.66), (0.78, 0.42)] {
+                poly(g, &[(0.1, y), (0.9, y)], false);
+                let d = p(k, y);
+                g.circle(d.0, d.1, size * 0.1, c);
+            }
+        }
+        Glyph::Storage => {
+            poly(g, &[(0.16, 0.24), (0.16, 0.76)], false);
+            poly(g, &[(0.84, 0.24), (0.84, 0.76)], false);
+            poly(g, &arc(0.5, 0.24, 0.34, 0.14, 0.0, 360.0), true);
+            poly(g, &arc(0.5, 0.5, 0.34, 0.14, 0.0, 180.0), false);
+            poly(g, &arc(0.5, 0.76, 0.34, 0.14, 0.0, 180.0), false);
+        }
+        Glyph::Nodes => {
+            for y in [0.14, 0.56] {
+                let a = p(0.1, y);
+                g.rrect_outline(a.0, a.1, 0.8 * size, 0.3 * size, 1.5, lw * 0.9, c);
+                let d = p(0.26, y + 0.15);
+                g.circle(d.0, d.1, lw * 0.6, c);
+            }
+        }
+        Glyph::Refresh => {
+            poly(g, &arc(0.5, 0.5, 0.34, 0.34, -40.0, 250.0), false);
+            g.polygon(&[p(0.9, 0.12), p(0.92, 0.5), p(0.55, 0.38)], c);
+        }
+        Glyph::Namespace => {
+            poly(g, &[(0.3, 0.14), (0.12, 0.14), (0.12, 0.86), (0.3, 0.86)], false);
+            poly(g, &[(0.7, 0.14), (0.88, 0.14), (0.88, 0.86), (0.7, 0.86)], false);
+            let d = p(0.5, 0.5);
+            g.circle(d.0, d.1, size * 0.1, c);
+        }
+        Glyph::Cluster => {
+            let ctr = p(0.5, 0.5);
+            g.ring(ctr.0, ctr.1, size * 0.4, lw * 0.9, c);
+            poly(g, &[(0.1, 0.5), (0.9, 0.5)], false);
+            poly(g, &arc(0.5, 0.5, 0.18, 0.4, 0.0, 360.0), true);
+        }
+        Glyph::Registry => {
+            poly(g, &hexagon(0.44), true);
+            poly(g, &[(0.5, 0.5), (0.5, 0.94)], false);
+            poly(g, &[(0.5, 0.5), (0.12, 0.28)], false);
+            poly(g, &[(0.5, 0.5), (0.88, 0.28)], false);
+        }
+        Glyph::Deploy => {
+            poly(g, &[(0.5, 0.7), (0.5, 0.1)], false);
+            poly(g, &[(0.26, 0.34), (0.5, 0.1), (0.74, 0.34)], false);
+            poly(g, &[(0.12, 0.66), (0.12, 0.88), (0.88, 0.88), (0.88, 0.66)], false);
+        }
+        Glyph::Restart => {
+            poly(g, &arc(0.5, 0.56, 0.32, 0.32, -55.0, 235.0), false);
+            poly(g, &[(0.5, 0.1), (0.5, 0.5)], false);
+        }
+        // a globe: the outline, the equator, a parallel above and below, and the meridian
+        Glyph::Globe => {
+            let ctr = p(0.5, 0.5);
+            g.ring(ctr.0, ctr.1, size * 0.42, lw * 0.9, c);
+            poly(g, &[(0.08, 0.5), (0.92, 0.5)], false);
+            poly(g, &[(0.17, 0.28), (0.83, 0.28)], false);
+            poly(g, &[(0.17, 0.72), (0.83, 0.72)], false);
+            poly(g, &arc(0.5, 0.5, 0.2, 0.42, 0.0, 360.0), true);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -718,5 +989,30 @@ mod tests {
         assert_eq!(g.hits.len(), 1);
         assert_eq!(g.hits[0].label, "Save");
         assert!((g.hits[0].rect.h - 14.0 * 2.1).abs() < 0.01);
+    }
+
+    #[test]
+    fn every_glyph_draws_inside_its_box_at_every_size() {
+        for size in [14.0f32, 15.0, 16.0, 18.0] {
+            for gl in Glyph::ALL {
+                let mut g = Gfx::new(60, 60);
+                g.clear(rgb(0, 0, 0));
+                glyph(&mut g, gl, 30.0, 30.0, size, rgb(255, 255, 255));
+                let (mut lit, mut outside) = (0, 0);
+                for y in 0..60u32 {
+                    for x in 0..60u32 {
+                        if g.rgba()[((y * 60 + x) * 4) as usize] > 40 {
+                            lit += 1;
+                            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                            if (px - 30.0).abs() > size / 2.0 + 1.5 || (py - 30.0).abs() > size / 2.0 + 1.5 {
+                                outside += 1;
+                            }
+                        }
+                    }
+                }
+                assert!(lit as f32 > size * 1.5, "{gl:?} at {size} draws something ({lit} px)");
+                assert_eq!(outside, 0, "{gl:?} at {size} stays in its box");
+            }
+        }
     }
 }

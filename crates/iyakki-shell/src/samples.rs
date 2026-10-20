@@ -40,12 +40,42 @@ pub const SKILLS: [(&str, &str); 3] = [
     ),
 ];
 
+/// Skills that ship with IYAKKI (unlike the samples they are meant to be kept). Each is added once per name for an account that
+/// manages the system: a marker file per skill means one the person deleted does not come back.
+pub const BUILTIN_SKILLS: [(&str, &str); 15] = [
+    ("k3s-dev-best-practices", include_str!("../../../dist/skills/k3s-dev-best-practices.md")),
+    ("lang-python", include_str!("../../../dist/skills/lang-python.md")),
+    ("lang-javascript", include_str!("../../../dist/skills/lang-javascript.md")),
+    ("lang-typescript", include_str!("../../../dist/skills/lang-typescript.md")),
+    ("lang-java", include_str!("../../../dist/skills/lang-java.md")),
+    ("lang-c", include_str!("../../../dist/skills/lang-c.md")),
+    ("lang-cpp", include_str!("../../../dist/skills/lang-cpp.md")),
+    ("lang-csharp", include_str!("../../../dist/skills/lang-csharp.md")),
+    ("lang-go", include_str!("../../../dist/skills/lang-go.md")),
+    ("lang-rust", include_str!("../../../dist/skills/lang-rust.md")),
+    ("lang-php", include_str!("../../../dist/skills/lang-php.md")),
+    ("iyakki-app-author", include_str!("../../../dist/skills/iyakki-app-author.md")),
+    ("iyakki-mcp-author", include_str!("../../../dist/skills/iyakki-mcp-author.md")),
+    ("iyakki-skill-author", include_str!("../../../dist/skills/iyakki-skill-author.md")),
+    ("iyakki-tile-author", include_str!("../../../dist/skills/iyakki-tile-author.md")),
+];
+
 /// Puts the examples in place once. Only for accounts that manage the system (they own the shared things).
 pub fn seed(env: &ShellEnv, user: &str, policy: &Policy) {
     if !policy.manage_settings {
         return;
     }
     let svc = &env.services;
+    for (name, md) in BUILTIN_SKILLS {
+        let done = svc.dir().join(format!("skill-{name}.done"));
+        if !done.exists() {
+            if svc.skills.get(&Scope::Shared, name).is_none() {
+                let _ = svc.skills.add(Scope::Shared, md, true, true);
+            }
+            let _ = std::fs::write(&done, "added once; delete the skill in SKILLS if you do not want it\n");
+            env.audit.record(user, "skills.builtin", name);
+        }
+    }
     let marker = svc.dir().join(MARKER);
     if marker.exists() {
         return;

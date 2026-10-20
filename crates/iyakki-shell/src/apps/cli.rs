@@ -12,10 +12,29 @@ use crate::ui::{Event, Key, TextField, DIM, ERR, MUTED, OK, R, TEXT};
 
 const ACCENT: [u8; 4] = rgb(255, 184, 77);
 
+/// The confirmation for an install that runs a command (npm, pip): the whole command in plain words, wrapped, nothing cut.
+fn render_plan(g: &mut Gfx, area: R, s: f32, name: &str, plan: &str) {
+    let p = crate::fx::modal(g, area, s, 640.0 * s, 330.0 * s, ERR, true);
+    g.text(p.x + 24.0 * s, p.y + 24.0 * s, 19.0 * s, TEXT, &format!("Install {name}?"), Face::Bold);
+    let mut y = p.y + 58.0 * s;
+    for l in g.wrap(14.0 * s, plan, Face::Sans, p.w - 48.0 * s).into_iter().take(9) {
+        g.text(p.x + 24.0 * s, y, 14.0 * s, TEXT, &l, Face::Sans);
+        y += 19.0 * s;
+    }
+    g.text(p.x + 24.0 * s, p.y + p.h - 92.0 * s, 13.0 * s, MUTED, "Press y to confirm, or Esc to cancel. Nothing runs before you confirm.", Face::Sans);
+    g.button(p.x + 24.0 * s, p.y + p.h - 58.0 * s, 14.0 * s, "Install", ERR, Event::Key(Key::Char('y')));
+    g.button(p.x + 24.0 * s + 150.0 * s, p.y + p.h - 58.0 * s, 14.0 * s, "Cancel", MUTED, Event::Key(Key::Esc));
+}
+
+#[path = "cli_conn.rs"]
+mod conn;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
     Terminal,
     Clis,
+    /// Saved SSH hosts (cli_conn.rs).
+    Connections,
 }
 
 enum Mode {
@@ -35,12 +54,15 @@ pub struct CliApp {
     list_top: usize,
     list_hover: bool,
     mode: Mode,
+    /// What the install about to be confirmed will do (the exact command), worked out once when it is asked for.
+    plan: Option<String>,
     status: Option<(String, bool)>,
     cli: Cli,
     log: ScrollLog,
     input: TextField,
     history: Vec<String>,
     hist_pos: Option<usize>,
+    conns: conn::Conns,
 }
 
 impl CliApp {
@@ -48,7 +70,7 @@ impl CliApp {
         let cli = Cli::new(&cx.session.user, cx.session.policy.clone(), cx.host.clone()).with_skills(cx.services.skills.clone(), cx.services.packages.clone()).with_services(cx.services.clone());
         let mut log = ScrollLog::default();
         log.push(format!("IYAKKI terminal — {} ({}). Type `help`, or press F1 for the main commands.", cx.session.user, cx.session.role.name()), MUTED);
-        CliApp { tab: Tab::Terminal, sel: 0, list_top: 0, list_hover: false, mode: Mode::Browse, status: None, cli, log, input: TextField::new("", false), history: vec![], hist_pos: None }
+        CliApp { tab: Tab::Terminal, sel: 0, list_top: 0, list_hover: false, mode: Mode::Browse, plan: None, status: None, cli, log, input: TextField::new("", false), history: vec![], hist_pos: None, conns: conn::Conns::new() }
     }
 
     pub fn tab(&self) -> Tab {
@@ -57,6 +79,15 @@ impl CliApp {
 
     pub fn status_text(&self) -> Option<&str> {
         self.status.as_ref().map(|s| s.0.as_str())
+    }
+
+    /// The external agent a catalogue entry is (`claude-code`, `copilot`), if it is one the IDE chat can use.
+    fn agent_of(cli: &str) -> Option<&'static str> {
+        match cli {
+            "claude-code" => Some(iyakki_agent::extagent::CLAUDE_CODE),
+            "github-copilot" => Some(iyakki_agent::extagent::COPILOT),
+            _ => None,
+        }
     }
 
     fn can_manage(cx: &AppCx) -> bool {
@@ -140,7 +171,12 @@ impl CliApp {
                 return;
             }
             let d = &CATALOG[this.sel.min(n - 1)];
+            if matches!(d.source, clis::Source::System) {
+                this.status = Some((format!("{} comes with the system and is not downloaded here. {}", d.name, cx.services.clis.system_status(d.id).map(|s| s.how_to).unwrap_or_default()), false));
+                return;
+            }
             if install {
+                this.plan = cx.services.clis.install_plan(d.id);
                 this.mode = Mode::ConfirmInstall(d.id);
             } else if cx.services.clis.is_installed(d.id).is_some() {
                 this.mode = Mode::ConfirmRemove(d.id);
@@ -154,8 +190,55 @@ impl CliApp {
             Event::Key(Key::Down) => self.sel = (self.sel + 1).min(n - 1),
             Event::Row(i) => self.sel = (*i).min(n - 1),
             Event::Scroll(d) if self.list_hover => self.list_top = (self.list_top as i32 - d).max(0) as usize,
+            Event::Key(Key::Char('c')) if matches!(CATALOG[self.sel.min(n - 1)].source, clis::Source::System) => self.tab = Tab::Connections,
             Event::Tab(10) | Event::Key(Key::Char('i')) => ask(self, true),
+            // update: the same download, checksum check and swap as an install, which keeps the old version for one rollback
+            Event::Key(Key::Char('u')) => {
+                let d = &CATALOG[self.sel.min(n - 1)];
+                if matches!(d.source, clis::Source::System) {
+                    self.status = Some((format!("{} comes with the system and is updated by its package manager.", d.name), false));
+                } else if cx.services.clis.is_installed(d.id).is_none() {
+                    self.status = Some((format!("{} is not installed; press i to install it.", d.name), false));
+                } else {
+                    ask(self, true);
+                }
+            }
+            Event::Key(Key::Char('b')) => {
+                let d = &CATALOG[self.sel.min(n - 1)];
+                if !Self::can_manage(cx) {
+                    self.status = Some(("Only administrators with a full terminal can change tools.".into(), false));
+                } else {
+                    match cx.services.clis.rollback(d.id) {
+                        Ok(m) => {
+                            cx.audit.record(&cx.session.user, "cli.rollback", d.id);
+                            self.status = Some((m, true));
+                        }
+                        Err(e) => self.status = Some((e, false)),
+                    }
+                }
+            }
             Event::Tab(11) | Event::Key(Key::Char('x')) | Event::Key(Key::Delete) => ask(self, false),
+            Event::Tab(16) | Event::Key(Key::Char('g')) if Self::agent_of(CATALOG[self.sel.min(n - 1)].id).is_some() => {
+                let d = &CATALOG[self.sel.min(n - 1)];
+                if cx.services.clis.is_installed(d.id).is_none() {
+                    self.status = Some((format!("Install {} first.", d.name), false));
+                } else if let Some(agent) = crate::agent_login::agent_of_cli(d.id) {
+                    // the shell opens the sign-in dialog (agent_login.rs): the vendor's login runs there, with its address, code and QR code
+                    crate::agent_login::request(agent, false);
+                }
+            }
+            Event::Tab(17) | Event::Key(Key::Char('c')) if Self::agent_of(CATALOG[self.sel.min(n - 1)].id).is_some() => {
+                let d = &CATALOG[self.sel.min(n - 1)];
+                let id = Self::agent_of(d.id).unwrap_or_default();
+                if cx.services.clis.is_installed(d.id).is_none() {
+                    self.status = Some((format!("Install {} first.", d.name), false));
+                } else if cx.services.agents_cfg().agent(id).is_some_and(|a| a.auth_args().is_none()) {
+                    self.status = Some((format!("{} has no documented sign-in status command. Sign in with the button, then try a message in the chat.", d.name), false));
+                } else {
+                    cx.services.ext_status.refresh(cx.services.agents_cfg());
+                    self.status = Some((format!("Checking {}'s sign-in status (its own `auth status` command; no model is called)…", d.name), true));
+                }
+            }
             Event::Tab(12) | Event::Key(Key::Char('s')) if CATALOG[self.sel.min(n - 1)].id == "k3s" => {
                 if !Self::can_manage(cx) {
                     self.status = Some(("Only administrators with a full terminal can start or stop the cluster.".into(), false));
@@ -190,8 +273,8 @@ impl CliApp {
     }
 
     fn draw_tabs(&mut self, g: &mut Gfx, area: R, s: f32) -> f32 {
-        let tabs = [("Terminal".to_string(), Event::Tab(0)), ("CLIs".to_string(), Event::Tab(1))];
-        crate::fx::tab_strip(g, area.x + 24.0 * s, area.y + 6.0 * s, s, area.w * 0.5, &tabs, if self.tab == Tab::Terminal { 0 } else { 1 }, ACCENT);
+        let tabs = [("Terminal".to_string(), Event::Tab(0)), ("CLIs".to_string(), Event::Tab(1)), ("Connections".to_string(), Event::Tab(2))];
+        crate::fx::tab_strip(g, area.x + 24.0 * s, area.y + 6.0 * s, s, area.w - 48.0 * s, &tabs, match self.tab { Tab::Terminal => 0, Tab::Clis => 1, Tab::Connections => 2 }, ACCENT);
         46.0 * s
     }
 
@@ -221,17 +304,21 @@ impl CliApp {
             crate::fx::row_at(g, r.x, r.y, r.w, r.h, 12.0 * s, i == self.sel, false, ACCENT);
             g.hit(r, Event::Row(i), d.name);
             let inst = installed.iter().find(|x| x.id == d.id);
+            let sys = cx.services.clis.system_status(d.id);
             let job = cx.services.clis.job(d.id).filter(|j| !j.finished);
-            g.rect(r.x, r.y + 9.0 * s, 4.0 * s, r.h - 18.0 * s, if inst.is_some() { OK } else if job.is_some() { ACCENT } else { DIM });
+            let here = inst.is_some() || sys.as_ref().is_some_and(|s| s.found);
+            g.rect(r.x, r.y + 9.0 * s, 4.0 * s, r.h - 18.0 * s, if here { OK } else if job.is_some() { ACCENT } else { DIM });
             let nm = g.fit(15.0 * s, d.name, Face::Bold, r.w - 30.0 * s);
             g.text(r.x + 16.0 * s, r.y + 6.0 * s, 15.0 * s, TEXT, &nm, Face::Bold);
-            let sub = match (&job, inst) {
-                (Some(j), _) => j.phase.clone(),
-                (None, Some(i)) => format!("installed {}", i.version),
+            let sub = match (&job, inst, &sys) {
+                (Some(j), _, _) => j.phase.clone(),
+                (None, Some(i), _) => format!("installed {}", i.version),
+                (None, None, Some(st)) if st.found => format!("on this machine: {}", st.label),
+                (None, None, Some(_)) => "not found on this machine".to_string(),
                 _ => "not installed".to_string(),
             };
             let sub = g.fit(12.0 * s, &sub, Face::Sans, r.w - 30.0 * s);
-            g.text(r.x + 16.0 * s, r.y + 26.0 * s, 12.0 * s, if inst.is_some() { OK } else { MUTED }, &sub, Face::Sans);
+            g.text(r.x + 16.0 * s, r.y + 26.0 * s, 12.0 * s, if here { OK } else { MUTED }, &sub, Face::Sans);
         }
         if CATALOG.len() > slots {
             g.text(x + 4.0 * s, area.y + area.h - 16.0 * s, 11.0 * s, DIM, &format!("{}–{} of {}", self.list_top + 1, (self.list_top + slots).min(CATALOG.len()), CATALOG.len()), Face::Sans);
@@ -262,9 +349,25 @@ impl CliApp {
             }
             *ty += 4.0 * s;
         };
+        // a tool that comes with the system: found, never downloaded
+        if let Some(st) = cx.services.clis.system_status(d.id) {
+            line(g, &mut ty, "STATUS", &if st.found { format!("available: {} at {}", st.label, st.path) } else { "not found on this machine".to_string() }, if st.found { OK } else { rgb(255, 196, 94) });
+            line(g, &mut ty, "COMMANDS", &if st.found { st.commands.join("   ") } else { cmds.join("   ") }, TEXT);
+            line(g, &mut ty, "HOW TO GET IT", &st.how_to, TEXT);
+            line(g, &mut ty, "FOR THE CHAT", "yes, with your approval for every call: run_command with ssh, scp or sftp, hosts you trusted, keys from your vault", TEXT);
+            line(g, &mut ty, "HOME PAGE", d.home, MUTED);
+            if !d.note.is_empty() {
+                line(g, &mut ty, "NOTE", d.note, rgb(255, 196, 94));
+            }
+            g.button(px + 20.0 * s, y + ph - 54.0 * s, 15.0 * s, "Saved hosts (c)", ACCENT, Event::Tab(2));
+            return;
+        }
         match inst {
             Some(i) => {
                 line(g, &mut ty, "STATUS", &format!("installed {}{}", i.version, if i.verified { ", download checked against the vendor's checksum" } else { ", no vendor checksum was available" }), OK);
+                if let Some(p) = &i.previous {
+                    line(g, &mut ty, "KEPT", &format!("{} (press B to go back to it; U updates, I installs the newest again)", p.version), TEXT);
+                }
                 if !i.reported.is_empty() {
                     line(g, &mut ty, "REPORTS", &i.reported, TEXT);
                 }
@@ -278,6 +381,24 @@ impl CliApp {
         line(g, &mut ty, "HOME PAGE", d.home, MUTED);
         if !d.note.is_empty() {
             line(g, &mut ty, "NOTE", d.note, rgb(255, 196, 94));
+        }
+        // an external coding agent: what the AI IDE sees of it, and the vendor's sign-in
+        if let Some(aid) = Self::agent_of(d.id) {
+            let (text, col) = match (inst.is_some(), cx.services.ext_status.get(aid)) {
+                (false, _) => ("install it first".to_string(), MUTED),
+                (true, None) => ("checking…".to_string(), MUTED),
+                (true, Some(st)) if st.ready() => (format!("{}{}", st.chip, match &st.auth { iyakki_agent::extagent::Auth::SignedIn(w) => format!(" ({w})"), iyakki_agent::extagent::Auth::Unknown => " (sign-in cannot be checked from here)".to_string(), _ => String::new() }), OK),
+                (true, Some(st)) => (st.chip.clone(), ERR),
+            };
+            line(g, &mut ty, "IN THE AI IDE", &format!("{text} · listed in the chat's model list and Settings → Agents"), col);
+            if inst.is_some() {
+                let (t, col) = crate::agent_login::chip(&crate::agent_login::state(cx, aid, true));
+                line(g, &mut ty, "SIGNED IN", &t, col);
+                line(g, &mut ty, "SIGN IN", "the Login button runs the vendor's own sign-in and shows its address, code and a QR code to scan with a phone; your login stays in your home folder, IYAKKI never sees it", MUTED);
+            }
+            if d.id == "github-copilot" {
+                line(g, &mut ty, "UNVERIFIED", "GitHub documents no command that reports whether Copilot CLI is signed in: this reads the program's own settings file, and its JSONL output format is unverified.", rgb(255, 196, 94));
+            }
         }
         // the container cluster, on the k3s entry
         if d.id == "k3s" {
@@ -330,6 +451,11 @@ impl CliApp {
             if inst.is_some() && !busy {
                 bx += g.button(bx, by, 15.0 * s, "Remove (x)", ERR, Event::Tab(11)) + 10.0 * s;
             }
+            if Self::agent_of(d.id).is_some() && inst.is_some() && !busy {
+                let st = crate::agent_login::state(cx, Self::agent_of(d.id).unwrap_or_default(), true);
+                bx += crate::agent_login::buttons(g, bx, by, 15.0 * s, Self::agent_of(d.id).unwrap_or_default(), &st);
+                bx += g.button(bx, by, 15.0 * s, "Status (c)", TEXT, Event::Tab(17)) + 10.0 * s;
+            }
             if d.id == "ollama" && inst.is_some() {
                 use iyakki_agent::ollama::OllamaState;
                 if matches!(cx.services.ollama.state(), OllamaState::Running { .. } | OllamaState::Starting) {
@@ -349,7 +475,14 @@ impl CliApp {
                 }
             }
         } else {
-            g.text(px + 20.0 * s, by + 8.0 * s, 13.0 * s, DIM, "Only administrators with a full terminal can install or remove tools.", Face::Sans);
+            let note = "Only administrators with a full terminal can install or remove tools.";
+            g.text(px + 20.0 * s, by + 8.0 * s, 13.0 * s, DIM, note, Face::Sans);
+            // signing in is personal: anyone who may run commands can do it
+            if let (Some(aid), true) = (Self::agent_of(d.id), inst.is_some() && cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full) {
+                let nw = g.text_width(13.0 * s, note, Face::Sans);
+                let st = crate::agent_login::state(cx, aid, true);
+                crate::agent_login::buttons(g, px + 40.0 * s + nw, by, 15.0 * s, aid, &st);
+            }
         }
     }
 
@@ -366,6 +499,14 @@ impl CliApp {
         }
         self.history.push(line.clone());
         let cmd = line.split_whitespace().next().unwrap_or("");
+        // ssh, scp, sftp and sshtrust can take long: they run on a thread and stream into this log
+        if let Some(call) = self.cli.ssh_call(&line) {
+            cx.audit.record(&cx.session.user, "cli.exec", call.command());
+            if !self.conns.start_call(call) {
+                self.log.push("another ssh command is still running; wait for it to finish", ERR);
+            }
+            return Flow::Stay;
+        }
         let o = self.cli.exec(&line);
         // log which command ran (never its arguments, which may hold secrets) and refusals
         let denied = o.text.contains("not permitted") || o.text.contains("permission denied") || o.text.contains("disabled");
@@ -405,7 +546,8 @@ impl App for CliApp {
     fn hint(&self) -> String {
         match self.tab {
             Tab::Terminal => "Enter run · ↑↓ history · Ctrl+V paste · PgUp/PgDn scroll · Tab CLIs · Esc back".into(),
-            Tab::Clis => "↑↓ choose · I install or update · X remove · S start / T stop the container cluster (k3s) or Ollama · Tab terminal · Esc back".into(),
+            Tab::Connections => self.conns.hint().into(),
+            Tab::Clis => "↑↓ choose · I install · U update to the newest · B go back a version · X remove · S start / T stop the container cluster (k3s) or Ollama · Tab terminal · Esc back".into(),
         }
     }
 
@@ -425,7 +567,7 @@ impl App for CliApp {
         .map(|s| s.to_string())
         .collect();
         if full {
-            v.extend(["mkdir, write · create folders and files you may write".to_string(), "detect, net · what machine this is and its network".to_string(), "poweroff, reboot · when your role allows".to_string()]);
+            v.extend(["mkdir, write · create folders and files you may write".to_string(), "detect, net · what machine this is and its network".to_string(), "ssh, scp, sftp · other machines, with host keys you trust first (sshtrust <host>, sshhosts, sshforget); see the Connections tab".to_string(), "poweroff, reboot · when your role allows".to_string()]);
         }
         v.push(String::new());
         v.push("Keys".to_string());
@@ -454,13 +596,33 @@ impl App for CliApp {
                     self.status = None;
                     return Flow::Stay;
                 }
-                Event::Key(Key::Tab) => {
-                    self.tab = if self.tab == Tab::Terminal { Tab::Clis } else { Tab::Terminal };
+                Event::Tab(2) => {
+                    self.tab = Tab::Connections;
+                    return Flow::Stay;
+                }
+                // the Tab key goes round the tabs, except while a form of the Connections tab is open
+                Event::Key(Key::Tab) if !(self.tab == Tab::Connections && self.conns.in_form()) => {
+                    self.tab = match self.tab {
+                        Tab::Terminal => Tab::Clis,
+                        Tab::Clis => Tab::Connections,
+                        Tab::Connections => Tab::Terminal,
+                    };
                     self.status = None;
                     return Flow::Stay;
                 }
                 _ => {}
             }
+        }
+        // SSH calls started from either tab go on in the background: their output reaches the terminal log
+        if matches!(ev, Event::Tick) {
+            self.conns.tick(cx);
+        }
+        let flow = if self.tab == Tab::Connections { Some(self.conns.handle(ev, cx)) } else { None };
+        for (t, c) in self.conns.out.drain(..) {
+            self.log.push(t, c);
+        }
+        if let Some(f) = flow {
+            return f;
         }
         if self.tab == Tab::Clis {
             return self.handle_clis(ev, cx);
@@ -510,9 +672,17 @@ impl App for CliApp {
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
         let off = self.draw_tabs(g, area, s);
         let area = R::new(area.x, area.y + off, area.w, area.h - off);
+        if self.tab == Tab::Connections {
+            self.conns.render(g, area, s, cx, tick);
+            return;
+        }
         if self.tab == Tab::Clis {
             self.draw_clis(g, area, s, cx);
             match &self.mode {
+                Mode::ConfirmInstall(id) if self.plan.is_some() => {
+                    let d = clis::def(id).expect("catalogue entry");
+                    render_plan(g, R::new(area.x, area.y - off, area.w, area.h + off), s, d.name, self.plan.as_deref().unwrap_or_default());
+                }
                 Mode::ConfirmInstall(id) => {
                     let d = clis::def(id).expect("catalogue entry");
                     render_confirm(g, R::new(area.x, area.y - off, area.w, area.h + off), s, &format!("Download and install {} from {}?{}", d.name, d.hosts.join(", "), if d.checksum.is_some() { " It is checked against the vendor's checksum." } else { " The vendor publishes no checksum for it." }), "Install");
@@ -622,7 +792,7 @@ mod tests {
             assert!(g.hits.iter().any(|h| h.label == want), "{want} is listed");
         }
         // the rest of the list is reached by selecting further down (the list scrolls to follow)
-        for _ in 0..CATALOG.len() {
+        for _ in 0..10 {
             app.handle(&Event::Key(Key::Down), &cx);
         }
         let g = draw(&mut app, &cx, 1100, 650);
@@ -842,3 +1012,11 @@ mod tests {
 #[cfg(test)]
 #[path = "cli_select_tests.rs"]
 mod select_tests;
+
+#[cfg(test)]
+#[path = "cli_agents_tests.rs"]
+mod agents_tests;
+
+#[cfg(test)]
+#[path = "cli_conn_tests.rs"]
+mod conn_tests;

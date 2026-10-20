@@ -15,6 +15,7 @@ use crate::ui::{Event, R, TEXT};
 
 pub mod chat;
 pub mod chat_view;
+pub(crate) mod model_picker;
 pub mod chatpic;
 pub mod browser;
 pub mod browser_assist;
@@ -22,15 +23,34 @@ pub mod browser_config;
 pub mod browser_dark;
 pub mod browser_data;
 pub mod browser_full;
+pub mod web_agent;
+pub mod browser_consent;
 pub mod browser_devtools;
 pub mod browser_images;
+pub mod browser_typo;
 pub mod browser_logins;
 pub mod browser_persist;
 pub mod browser_layout;
 pub mod cli;
 pub mod controls;
+pub mod dash;
+pub mod dash_charts;
+pub mod dash_query;
+pub mod flows;
+pub mod flows_board;
+pub mod flows_canvas;
+pub mod flows_keys;
+pub mod flows_paint;
+pub mod flows_props;
+pub mod flows_run;
+pub mod flows_view;
+pub mod data;
+pub mod dropattach;
+pub mod hostfiles;
 pub mod mcp;
 pub mod media;
+pub mod mediaplay;
+pub mod multiline;
 pub mod neon;
 pub mod mesh;
 pub mod radio;
@@ -38,16 +58,53 @@ pub mod rag;
 pub mod runs;
 pub mod scan;
 pub mod skills;
+pub mod store;
+pub(crate) mod store_drivers;
 pub mod usage;
+pub mod srepilot;
+pub mod story;
 pub mod system;
 pub mod calendar;
+pub mod camera;
+pub mod card;
+pub mod tile;
 pub mod inbox;
+pub mod jobs_ui;
 pub mod edit;
+pub mod board;
+pub mod component;
+pub mod ide;
+pub mod ide_browser;
+pub mod ide_bottom;
+pub mod ide_chrome;
+pub mod ide_deploy;
+pub mod ide_k8s;
+pub mod platform_services;
+pub mod ide_notes;
+pub mod ide_tasks;
+pub mod ide_tile;
+pub mod ide_tasks_run;
+pub mod ide_layout;
+pub mod ide_tree;
+pub mod ide_ui;
 pub mod devices;
 pub mod settings;
 pub mod settings_nav;
 pub mod users;
 pub mod widgets;
+
+/// What an app asks the shell to do with files dropped on the window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DropAction {
+    /// Offer to import them into the Uploads folder (the default).
+    Uploads,
+    /// Offer to import them into this folder (named by `label` in the dialog); the app is told what arrived.
+    Into { dest: std::path::PathBuf, label: String },
+    /// The app handled them itself.
+    Taken,
+    /// Nothing sensible to do here: say so.
+    Ignore(String),
+}
 
 pub enum Flow {
     Stay,
@@ -85,6 +142,8 @@ pub trait App {
     fn take_request(&mut self) -> Option<(String, String)> {
         None
     }
+    /// The shell opened this app because another one asked for a particular thing in it (`platform:private-store` in Settings).
+    fn open_item(&mut self, _item: &str, _cx: &AppCx) {}
     /// Something changed on screen without a key or click (a frame arrived from an embedded engine): the shell draws again.
     /// Asked after every heartbeat; true once per change.
     fn wants_redraw(&mut self) -> bool {
@@ -95,6 +154,21 @@ pub trait App {
     fn pointer_hint(&self, _x: i32, _y: i32) -> Option<crate::ui::Pointer> {
         None
     }
+    /// Files or folders dropped on the window (window mode only): what this app wants done with them.
+    fn on_drop(&mut self, _paths: &[std::path::PathBuf], _cx: &AppCx) -> DropAction {
+        DropAction::Uploads
+    }
+    /// A file the app wants saved on the host computer (window mode): its suggested name and bytes. The shell shows the save
+    /// dialog (rooted at the host home or a writable shared folder; nothing is replaced silently).
+    fn take_host_save(&mut self) -> Option<(String, Vec<u8>)> {
+        None
+    }
+    /// The app asks for the options of one shared host folder (convert to a copy, stop sharing, ...): its name.
+    fn take_host_mount_menu(&mut self) -> Option<String> {
+        None
+    }
+    /// The files a drop brought in (copied into the destination the app asked for), or empty after a folder was shared.
+    fn dropped_done(&mut self, _files: &[std::path::PathBuf], _cx: &AppCx) {}
     /// Entries the app adds to the right-click menu at (x, y) (the shell adds Cut / Copy / Paste / Select all over a text
     /// field and always ends with "Clipboard history…"). Entries with the ids `copy`, `cut`, `paste` and `selall` are
     /// carried out by the shell as Ctrl+C / X / V / A sent to the app; any other id comes back through [`App::context_pick`].
@@ -104,6 +178,11 @@ pub trait App {
     /// An entry the app added to the context menu was chosen.
     fn context_pick(&mut self, _id: &str, _cx: &AppCx) -> Flow {
         Flow::Stay
+    }
+    /// A custom app answers with itself so the shell's tests can look inside (every other app: nothing).
+    #[cfg(test)]
+    fn as_any_tile(&mut self) -> Option<&mut tile::TileApp> {
+        None
     }
     /// Draw into `area` (below the header). `tick` advances ~30 times a second.
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64);
@@ -120,6 +199,8 @@ pub struct ScrollLog {
     /// Selection over what was drawn last.
     pub pane: crate::textsel::Pane,
     lh: f32,
+    /// Keep each entry on one line (cut with an ellipsis) instead of wrapping it.
+    pub nowrap: bool,
 }
 
 /// The id of the area a scroll log registers for presses (`Event::Area`).
@@ -127,7 +208,7 @@ pub const LOG_AREA: usize = 61_100;
 
 impl Default for ScrollLog {
     fn default() -> Self {
-        ScrollLog { lines: Vec::new(), scroll: 0, pane: crate::textsel::Pane::new(LOG_AREA), lh: 16.0 }
+        ScrollLog { lines: Vec::new(), scroll: 0, pane: crate::textsel::Pane::new(LOG_AREA), lh: 16.0, nowrap: false }
     }
 }
 
@@ -169,6 +250,11 @@ impl ScrollLog {
         let mut visual: Vec<([u8; 4], String)> = Vec::new();
         let mut entry_of: Vec<u32> = Vec::new();
         for (n, (t, c)) in self.lines.iter().enumerate() {
+            if self.nowrap {
+                visual.push((*c, g.fit(size, t, face, area.w)));
+                entry_of.push(n as u32);
+                continue;
+            }
             for l in g.wrap(size, t, face, area.w) {
                 visual.push((*c, l));
                 entry_of.push(n as u32);
@@ -192,9 +278,33 @@ impl ScrollLog {
     }
 }
 
+/// The blinking caret: on for half a second, off for half, and never while the pane being drawn does not own the keyboard or
+/// the window has lost the system focus (see [`with_caret`]). Every text input and the editor take their caret from here.
 pub fn blink(tick: u64) -> bool {
-    (tick / 15) % 2 == 0
+    crate::ui::input_focus_allowed() && (tick / 15) % 2 == 0
 }
+
+/// Whether anything that marks "typing goes here" (caret, current-line wash, bracket box) may be drawn now.
+pub fn caret_allowed() -> bool {
+    crate::ui::input_focus_allowed()
+}
+
+/// Draw with the caret allowed (`on`) or hidden: the AI IDE draws the editor and the chat side by side and only the pane
+/// that has the keyboard may show a caret, so a blinking caret always means "typing goes here".
+pub fn with_caret<T>(on: bool, f: impl FnOnce() -> T) -> T {
+    crate::ui::with_input_focus(on, f)
+}
+
+#[cfg(test)]
+mod ide_tests;
+#[cfg(test)]
+mod jobs_screens_tests;
+#[cfg(test)]
+mod dash_tests;
+#[cfg(test)]
+mod flows_tests;
+#[cfg(test)]
+pub(crate) mod lemonade_fake;
 
 #[cfg(test)]
 pub(crate) mod tests {

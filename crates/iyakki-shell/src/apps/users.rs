@@ -203,6 +203,7 @@ impl UsersApp {
             Key::Char('b') => self.edit_overrides(cx, "user.budget", |ov, eff| ov.budget = Some(eff.budget.next_preset())),
             Key::Char('k') => self.edit_overrides(cx, "user.skills", |ov, eff| ov.skills = Some(!eff.skills)),
             Key::Char('a') => self.edit_overrides(cx, "user.agent", |ov, eff| ov.agent = Some(!eff.agent)),
+            Key::Char('w') => self.edit_overrides(cx, "user.browser_agent", |ov, eff| ov.browser_agent = Some(eff.browser_agent.next())),
             Key::Char('f') => self.edit_overrides(cx, "user.fuel", |ov, eff| ov.max_fuel = Some(next_preset(&FUEL, eff.max_fuel))),
             Key::Char('m') => self.edit_overrides(cx, "user.memory", |ov, eff| ov.max_memory_mb = Some(next_preset(&MEM, eff.max_memory_mb))),
             Key::Char('q') => self.edit_overrides(cx, "user.disk", |ov, eff| ov.vfs_quota_mb = Some(next_preset(&DISK, eff.vfs_quota_mb))),
@@ -224,7 +225,7 @@ impl App for UsersApp {
     }
     fn hint(&self) -> String {
         match &self.mode {
-            Mode::List => "click a user, then a button · or n r d p 1-4 a v k b f m q h s l".into(),
+            Mode::List => "click a user, then a button · or n r d p 1-4 a v k b w f m q h s l".into(),
             Mode::Audit => "click or press any key to return".into(),
             Mode::Form(_) => "Save · Cancel · Tab next field · Ctrl+V paste".into(),
             Mode::ConfirmDelete(_) => "y confirm · Esc cancel".into(),
@@ -333,12 +334,13 @@ impl App for UsersApp {
             dy += 54.0 * s;
             g.text(dx, dy - 8.0 * s, 13.0 * s, DIM, "click a line to change it", Face::Sans);
             dy += 14.0 * s;
-            let facts: [(String, Option<char>); 8] = [
+            let facts: [(String, Option<char>); 9] = [
                 (format!("compute   {} instructions per run", p.max_fuel), Some('f')),
                 (format!("memory    {} MiB per task", p.max_memory_mb), Some('m')),
                 (format!("storage   {} MiB", p.vfs_quota_mb), Some('q')),
                 (format!("budget    {}: {}", p.budget.preset_name(), p.budget.describe()), Some('b')),
                 (format!("network   {}", if p.net_hosts.is_empty() { "none".into() } else { p.net_hosts.join(", ") }), Some('h')),
+                (format!("browser   assistant: {}   ({})", p.browser_agent.name().replace('_', "-"), p.browser_agent.describe()), Some('w')),
                 (format!("MCP       {}", if p.mcp_servers.is_empty() { "none".into() } else { p.mcp_servers.join(", ") }), Some('s')),
                 (format!("files     read {}   write {}", p.read_scopes(&u.name).join(" "), p.write_scopes(&u.name).join(" ")), None),
                 (format!("terminal  {:?}   power {}   swarm {}   voice {}   agent {}", p.cli, if p.power { "yes" } else { "no" }, if p.swarm { "yes" } else { "no" }, if p.voice { "yes" } else { "no" }, if p.agent { "yes" } else { "no" }), None),
@@ -558,5 +560,29 @@ mod tests {
         app.handle(&Event::Key(Key::Char('b')), &cx);
         assert_eq!(budget(&cx).preset_name(), "tiny", "wraps around");
         assert!(cx.audit.recent(5).iter().any(|l| l.contains("user.budget") && l.contains("fay")));
+    }
+
+    #[test]
+    fn admin_sets_how_far_the_assistant_may_go_in_a_users_browser() {
+        use iyakki_sec::policy::BrowserAgent;
+        let cx = cx_with_admin_store("users-browser");
+        cx.store.lock().unwrap().create_user(&cx.session, "gus", "guspass-123", Role::User).unwrap();
+        let mut app = UsersApp::new();
+        app.sel = cx.store.lock().unwrap().list().iter().position(|u| u.name == "gus").unwrap();
+        let level = |cx: &AppCx| cx.store.lock().unwrap().get("gus").unwrap().policy().browser_agent;
+        assert_eq!(level(&cx), BrowserAgent::ReadOnly, "read-only is the default");
+        app.handle(&Event::Key(Key::Char('w')), &cx);
+        assert_eq!(level(&cx), BrowserAgent::Interactive);
+        app.handle(&Event::Key(Key::Char('w')), &cx);
+        assert_eq!(level(&cx), BrowserAgent::Off);
+        app.handle(&Event::Key(Key::Char('w')), &cx);
+        assert_eq!(level(&cx), BrowserAgent::ReadOnly);
+        assert!(cx.audit.recent(6).iter().any(|l| l.contains("user.browser_agent") && l.contains("gus")));
+        // the detail pane says it
+        let mut g = crate::gfx::Gfx::new(1280, 800);
+        let _ = &mut g;
+        let guest = cx.store.lock().unwrap().create_user(&cx.session, "hal", "halpass-123", Role::Guest);
+        assert!(guest.is_ok());
+        assert_eq!(cx.store.lock().unwrap().get("hal").unwrap().policy().browser_agent, BrowserAgent::Off, "off for guests");
     }
 }

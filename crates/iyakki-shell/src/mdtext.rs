@@ -2,7 +2,7 @@
 //! with the shell's own fonts. It understands what models actually write: headings, **bold**, *italic*, `code`,
 //! fenced code blocks, bullet and numbered lists (nested by indentation), > quotes, --- rules, [links](address) and
 //! simple tables. Anything it does not recognise, or a marker that is never closed, is shown as it was written.
-//! Nothing is fetched or run: a link is just coloured text.
+//! Nothing is fetched or run: a link is coloured text that remembers its address (see `links`); opening is the app's job.
 
 use crate::gfx::{rgb, Face, Gfx};
 
@@ -30,6 +30,26 @@ pub struct Piece {
     pub text: String,
     pub style: Style,
     pub x: f32,
+    /// The link this piece belongs to (index into `Layout::links`).
+    pub link: Option<usize>,
+}
+
+/// A link of the text: what is shown, where it goes, and what is wrong with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkRef {
+    pub text: String,
+    pub url: String,
+    pub warn: crate::links::Warnings,
+}
+
+/// One underlined stretch of a link on one line (a link that wraps has one per line), relative to the layout's corner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinkRect {
+    pub link: usize,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +65,7 @@ pub struct Line {
 }
 
 pub struct Layout {
+    pub links: Vec<LinkRef>,
     pub lines: Vec<Line>,
     pub width: f32,
     pub height: f32,
@@ -61,14 +82,41 @@ fn face(style: Style, heading: bool) -> Face {
 
 /// Splits one line of text into styled runs. Markers that are not closed stay as written.
 pub fn inline(s: &str) -> Vec<(String, Style)> {
-    let c: Vec<char> = s.chars().collect();
-    let mut out: Vec<(String, Style)> = Vec::new();
-    let mut plain = String::new();
-    let flush = |plain: &mut String, out: &mut Vec<(String, Style)>| {
-        if !plain.is_empty() {
-            out.push((std::mem::take(plain), Style::Plain));
+    inline_links(s, &mut Vec::new()).into_iter().map(|(t, st, _)| (t, st)).collect()
+}
+
+type Run = (String, Style, Option<usize>);
+
+fn push_link(links: &mut Vec<LinkRef>, out: &mut Vec<Run>, text: String, url: String) {
+    links.push(LinkRef { warn: crate::links::warnings(&text, &url), text: text.clone(), url });
+    out.push((text, Style::Link, Some(links.len() - 1)));
+}
+
+/// Plain text, searched for written addresses.
+fn flush_plain(plain: &mut String, out: &mut Vec<Run>, links: &mut Vec<LinkRef>) {
+    if plain.is_empty() {
+        return;
+    }
+    let t = std::mem::take(plain);
+    let mut at = 0;
+    for sp in crate::links::find_bare(&t) {
+        if sp.start > at {
+            out.push((t[at..sp.start].to_string(), Style::Plain, None));
         }
-    };
+        push_link(links, out, t[sp.start..sp.end].to_string(), sp.url);
+        at = sp.end;
+    }
+    if at < t.len() {
+        out.push((t[at..].to_string(), Style::Plain, None));
+    }
+}
+
+/// Like [`inline`], and the links are recorded in `links` (each run of a link carries its index). Written addresses (`https://…`,
+/// `www.…`, `<…>`) are links too; a markdown link to an address that is never opened is plain text followed by a note.
+pub fn inline_links(s: &str, links: &mut Vec<LinkRef>) -> Vec<Run> {
+    let c: Vec<char> = s.chars().collect();
+    let mut out: Vec<Run> = Vec::new();
+    let mut plain = String::new();
     let find = |from: usize, pat: &[char]| -> Option<usize> { (from..c.len().saturating_sub(pat.len() - 1)).find(|&j| c[j..j + pat.len()] == *pat) };
     let mut i = 0;
     while i < c.len() {
@@ -77,8 +125,8 @@ pub fn inline(s: &str) -> Vec<(String, Style)> {
         if ch == '`' {
             if let Some(j) = find(i + 1, &['`']) {
                 if j > i + 1 {
-                    flush(&mut plain, &mut out);
-                    out.push((c[i + 1..j].iter().collect(), Style::Code));
+                    flush_plain(&mut plain, &mut out, links);
+                    out.push((c[i + 1..j].iter().collect(), Style::Code, None));
                     i = j + 1;
                     continue;
                 }
@@ -86,8 +134,8 @@ pub fn inline(s: &str) -> Vec<(String, Style)> {
         } else if (ch == '*' || ch == '_') && c.get(i + 1) == Some(&ch) && c.get(i + 2).is_some_and(|x| !x.is_whitespace()) && (ch == '*' || word_start) {
             if let Some(j) = find(i + 2, &[ch, ch]) {
                 if j > i + 2 && !c[j - 1].is_whitespace() {
-                    flush(&mut plain, &mut out);
-                    out.push((c[i + 2..j].iter().collect(), Style::Bold));
+                    flush_plain(&mut plain, &mut out, links);
+                    out.push((c[i + 2..j].iter().collect(), Style::Bold, None));
                     i = j + 2;
                     continue;
                 }
@@ -96,30 +144,63 @@ pub fn inline(s: &str) -> Vec<(String, Style)> {
             if let Some(j) = find(i + 1, &[ch]) {
                 let ends_word = c.get(j + 1).is_none_or(|x| !x.is_alphanumeric());
                 if j > i + 1 && !c[j - 1].is_whitespace() && ends_word {
-                    flush(&mut plain, &mut out);
-                    out.push((c[i + 1..j].iter().collect(), Style::Em));
+                    flush_plain(&mut plain, &mut out, links);
+                    out.push((c[i + 1..j].iter().collect(), Style::Em, None));
                     i = j + 1;
                     continue;
                 }
             }
         } else if ch == '[' {
-            if let Some(j) = find(i + 1, &[']']) {
-                if c.get(j + 1) == Some(&'(') {
-                    if let Some(k) = find(j + 2, &[')']) {
-                        if j > i + 1 {
-                            flush(&mut plain, &mut out);
-                            out.push((c[i + 1..j].iter().collect(), Style::Link));
-                            i = k + 1;
-                            continue;
+            // the label may hold brackets: find the `]` that closes it
+            let mut depth = 0;
+            let close = (i + 1..c.len()).find(|&j| match c[j] {
+                '[' => {
+                    depth += 1;
+                    false
+                }
+                ']' if depth == 0 => true,
+                ']' => {
+                    depth -= 1;
+                    false
+                }
+                _ => false,
+            });
+            if let Some(j) = close.filter(|&j| j > i + 1 && c.get(j + 1) == Some(&'(')) {
+                if let Some((url, next)) = crate::links::parse_destination(&c, j + 2) {
+                    flush_plain(&mut plain, &mut out, links);
+                    let label: String = c[i + 1..j].iter().collect();
+                    match crate::links::classify(&url) {
+                        crate::links::Kind::Never(sch) => {
+                            out.push((label, Style::Plain, None));
+                            out.push((format!(" [{sch}: link not opened]"), Style::Em, None));
                         }
+                        _ if url.chars().count() > crate::links::MAX_URL => {
+                            out.push((label, Style::Plain, None));
+                            out.push((" [link too long, not opened]".to_string(), Style::Em, None));
+                        }
+                        _ => push_link(links, &mut out, label, url),
                     }
+                    i = next;
+                    continue;
+                }
+            }
+        } else if ch == '<' {
+            if let Some(j) = find(i + 1, &['>']) {
+                let inner: String = c[i + 1..j].iter().collect();
+                let lower = inner.to_ascii_lowercase();
+                let known = ["http://", "https://", "mailto:", "tel:", "geo:", "sms:", "ssh://", "vnc://", "rdp://", "ftp://", "file://"].iter().any(|p| lower.starts_with(p));
+                if known && !inner.contains(char::is_whitespace) && inner.len() <= crate::links::MAX_URL {
+                    flush_plain(&mut plain, &mut out, links);
+                    push_link(links, &mut out, inner.clone(), inner);
+                    i = j + 1;
+                    continue;
                 }
             }
         }
         plain.push(ch);
         i += 1;
     }
-    flush(&mut plain, &mut out);
+    flush_plain(&mut plain, &mut out, links);
     out
 }
 
@@ -218,6 +299,7 @@ pub fn layout_with(g: &mut Gfx, md: &str, size: f32, max_w: f32, spacing: f32) -
     let hang = size * 1.5;
     let lh = |g: &Gfx, sz: f32| g.line_height(sz, Face::Sans) * spacing;
     let mut prev_gap = true;
+    let mut links: Vec<LinkRef> = Vec::new();
     for b in blocks(md) {
         match b {
             Block::Gap => {
@@ -249,7 +331,7 @@ pub fn layout_with(g: &mut Gfx, md: &str, size: f32, max_w: f32, spacing: f32) -
                         let w = g.text_width(sz, &head, Face::Mono) + 2.0 * pad;
                         width = width.max(w);
                         let top = n == 0 && first;
-                        lines.push(Line { kind: Kind::Code, y: y + if top { pad * 0.5 } else { 0.0 }, h, size: sz, indent: pad, marker: None, pieces: vec![Piece { text: head, style: Style::Code, x: 0.0 }] });
+                        lines.push(Line { kind: Kind::Code, y: y + if top { pad * 0.5 } else { 0.0 }, h, size: sz, indent: pad, marker: None, pieces: vec![Piece { text: head, style: Style::Code, x: 0.0, link: None }] });
                         y += h + if top { pad * 0.5 } else { 0.0 };
                         rest.drain(..take);
                         first = false;
@@ -265,12 +347,12 @@ pub fn layout_with(g: &mut Gfx, md: &str, size: f32, max_w: f32, spacing: f32) -
                 if !prev_gap {
                     y += size * 0.25;
                 }
-                wrap_into(g, &mut lines, &mut y, &mut width, &text, sz, 0.0, None, max_w, Kind::Heading, lh(g, sz));
+                wrap_into(g, &mut lines, &mut links, &mut y, &mut width, &text, sz, 0.0, None, max_w, Kind::Heading, lh(g, sz));
                 y += size * 0.1;
             }
             Block::Para { indent, marker, text, quote } => {
                 let ind = if indent > 0 { indent as f32 * hang } else { 0.0 } + if quote { size * 0.9 } else { 0.0 };
-                wrap_into(g, &mut lines, &mut y, &mut width, &text, size, ind, marker, max_w, if quote { Kind::Quote } else { Kind::Text }, lh(g, size));
+                wrap_into(g, &mut lines, &mut links, &mut y, &mut width, &text, size, ind, marker, max_w, if quote { Kind::Quote } else { Kind::Text }, lh(g, size));
             }
         }
         prev_gap = false;
@@ -278,16 +360,16 @@ pub fn layout_with(g: &mut Gfx, md: &str, size: f32, max_w: f32, spacing: f32) -
     while lines.last().is_some_and(|l| l.kind == Kind::Gap) {
         y -= lines.pop().map_or(0.0, |l| l.h);
     }
-    Layout { lines, width, height: y }
+    Layout { links, lines, width, height: y }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn wrap_into(g: &mut Gfx, lines: &mut Vec<Line>, y: &mut f32, width: &mut f32, text: &str, sz: f32, indent: f32, marker: Option<String>, max_w: f32, kind: Kind, h: f32) {
+fn wrap_into(g: &mut Gfx, lines: &mut Vec<Line>, links: &mut Vec<LinkRef>, y: &mut f32, width: &mut f32, text: &str, sz: f32, indent: f32, marker: Option<String>, max_w: f32, kind: Kind, h: f32) {
     let heading = kind == Kind::Heading;
     // words with the style they were written in; a space in the source before a word is remembered
-    let mut flagged: Vec<(String, Style, bool)> = Vec::new();
+    let mut flagged: Vec<(String, Style, bool, Option<usize>)> = Vec::new();
     let mut pending_space = false;
-    for (t, st) in inline(text) {
+    for (t, st, lk) in inline_links(text, links) {
         let parts: Vec<&str> = t.split(' ').collect();
         for (n, w) in parts.iter().enumerate() {
             if n > 0 {
@@ -296,7 +378,7 @@ fn wrap_into(g: &mut Gfx, lines: &mut Vec<Line>, y: &mut f32, width: &mut f32, t
             if w.is_empty() {
                 continue;
             }
-            flagged.push((w.to_string(), st, pending_space && !flagged.is_empty()));
+            flagged.push((w.to_string(), st, pending_space && !flagged.is_empty(), lk));
             pending_space = false;
         }
     }
@@ -315,7 +397,7 @@ fn wrap_into(g: &mut Gfx, lines: &mut Vec<Line>, y: &mut f32, width: &mut f32, t
         *x = 0.0;
         *first = false;
     };
-    for (word, st, spaced) in atoms {
+    for (word, st, spaced, lk) in atoms {
         let f = face(st, heading);
         let w = g.text_width(fsz(st), &word, f);
         let sp = if spaced && !cur.is_empty() { space } else { 0.0 };
@@ -330,7 +412,7 @@ fn wrap_into(g: &mut Gfx, lines: &mut Vec<Line>, y: &mut f32, width: &mut f32, t
                 let take = fit_chars(g, fsz(st), f, &rest, avail - x);
                 let head: String = rest[..take].iter().collect();
                 let hw = g.text_width(fsz(st), &head, f);
-                cur.push(Piece { text: head, style: st, x });
+                cur.push(Piece { text: head, style: st, x, link: lk });
                 x += hw;
                 rest.drain(..take);
                 if !rest.is_empty() {
@@ -340,10 +422,36 @@ fn wrap_into(g: &mut Gfx, lines: &mut Vec<Line>, y: &mut f32, width: &mut f32, t
             continue;
         }
         x += sp;
-        cur.push(Piece { text: word, style: st, x });
+        cur.push(Piece { text: word, style: st, x, link: lk });
         x += w;
     }
     push_line(g, &mut cur, &mut x, &mut first, lines, y, width);
+}
+
+impl Layout {
+    /// Where each link sits: one rectangle per line it occupies, so a link that wraps is one link with several rectangles.
+    pub fn link_rects(&self, g: &mut Gfx) -> Vec<LinkRect> {
+        let mut out = Vec::new();
+        for line in &self.lines {
+            let mut k = 0;
+            while k < line.pieces.len() {
+                let (Some(id), Style::Link) = (line.pieces[k].link, line.pieces[k].style) else {
+                    k += 1;
+                    continue;
+                };
+                let mut end = k;
+                while end + 1 < line.pieces.len() && line.pieces[end + 1].link == Some(id) {
+                    end += 1;
+                }
+                let last = &line.pieces[end];
+                let x1 = last.x + g.text_width(line.size, &last.text, Face::Sans);
+                let x0 = line.pieces[k].x;
+                out.push(LinkRect { link: id, x: line.indent + x0, y: line.y, w: (x1 - x0).max(1.0), h: line.h });
+                k = end + 1;
+            }
+        }
+        out
+    }
 }
 
 pub const CODE_BG: [u8; 4] = rgb(12, 16, 30);
@@ -374,7 +482,7 @@ pub fn draw(g: &mut Gfx, l: &Layout, x: f32, y: f32, color: [u8; 4], clip: (f32,
                     let mw = g.text_width(line.size, m, Face::Sans);
                     g.text(tx - mw - line.size * 0.35, ly, line.size, rgb(130, 160, 230), m, Face::Sans);
                 }
-                for p in &line.pieces {
+                for (pi, p) in line.pieces.iter().enumerate() {
                     let (col, f, sz) = match (p.style, line.kind) {
                         (Style::Code, _) => (rgb(255, 205, 120), Face::Mono, line.size * 0.92),
                         (Style::Bold, _) => (color, Face::Bold, line.size),
@@ -388,7 +496,20 @@ pub fn draw(g: &mut Gfx, l: &Layout, x: f32, y: f32, color: [u8; 4], clip: (f32,
                         g.rrect(tx + p.x - 2.0, ly + 1.0, w + 4.0, line.h - 2.0, 4.0, CODE_BG);
                     }
                     let w = g.text(tx + p.x, ly, sz, col, &p.text, f);
-                    if p.style == Style::Link {
+                    if let (Style::Link, Some(id)) = (p.style, p.link) {
+                        // one underline for the whole stretch of the link on this line, the spaces between its words included
+                        if pi == 0 || line.pieces[pi - 1].link != Some(id) {
+                            let end = line.pieces[pi..].iter().take_while(|q| q.link == Some(id)).last().map_or(p.x, |q| q.x + g.text_width(sz, &q.text, Face::Sans));
+                            let warn = l.links.get(id).is_some_and(|k| k.warn.any());
+                            let lc = if warn { rgb(255, 190, 90) } else { col };
+                            g.rect(tx + p.x, ly + line.h - 3.0, (end - p.x).max(1.0), 1.0, lc);
+                            if warn {
+                                let cw = sz * 0.55;
+                                g.rrect(tx + end - cw * 0.3, ly, cw, cw * 1.1, cw * 0.3, rgb(255, 190, 90));
+                                g.text(tx + end - cw * 0.3 + cw * 0.2, ly - sz * 0.05, sz * 0.5, rgb(40, 24, 0), "!", Face::Bold);
+                            }
+                        }
+                    } else if p.style == Style::Link {
                         g.rect(tx + p.x, ly + line.h - 3.0, w.max(1.0), 1.0, col);
                     }
                 }

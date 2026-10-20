@@ -1,4 +1,4 @@
-//! Modal forms and a filterable picker, shared by the Settings app.
+//! Modal forms, a filterable picker, and a small drop-down select (closed box and open list), shared by the apps.
 
 use crate::gfx::{rgb, Face, Gfx};
 use crate::ui::{Event, Key, TextField, DIM, ERR, MUTED, R, TEXT};
@@ -118,6 +118,12 @@ impl Form {
     /// Secret values keep their exact text (no trimming of intentional spaces other than ends).
     pub fn raw(&self, i: usize) -> String {
         self.fields[i].tf.value.clone()
+    }
+
+    pub fn set_choice(&mut self, i: usize, n: usize) {
+        if let Some(f) = self.fields.get_mut(i) {
+            f.choice = n;
+        }
     }
 
     pub fn choice_idx(&self, i: usize) -> usize {
@@ -333,6 +339,61 @@ pub fn render_confirm(g: &mut Gfx, area: R, s: f32, text: &str, yes_label: &str)
     g.text(bx + 24.0 * s, by + 70.0 * s, 14.0 * s, MUTED, "Press y to confirm, or Esc to cancel.", Face::Sans);
     g.button(bx + 24.0 * s, by + bh - 58.0 * s, 14.0 * s, yes_label, ERR, Event::Key(Key::Char('y')));
     g.button(bx + 24.0 * s + 150.0 * s, by + bh - 58.0 * s, 14.0 * s, "Cancel", MUTED, Event::Key(Key::Esc));
+}
+
+/// A closed drop-down: a framed box of the control height with the label and a caret. Registers a click that sends `ev`.
+/// Returns its rectangle.
+#[allow(clippy::too_many_arguments)]
+pub fn select_box(g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, label: &str, open: bool, accent: [u8; 4], ev: Event, hit: &str) -> R {
+    let m = super::ide_chrome::cur();
+    let sz = m.font_small * s + 1.0 * s;
+    let r = R::new(x, y, w, super::ide_chrome::tool(s));
+    let hot = g.hovered(r);
+    g.rrect(r.x, r.y, r.w, r.h, 5.0 * s, if hot || open { rgb(34, 44, 78) } else { crate::fx::WELL });
+    g.rrect_outline(r.x, r.y, r.w, r.h, 5.0 * s, if open { 1.5 * s } else { 1.0 }, if open { accent } else if hot { crate::fx::with_alpha(accent, 130) } else { rgb(50, 60, 92) });
+    let caret = g.text_width(sz, "▾", Face::Bold);
+    let t = g.fit(sz, label, Face::Bold, (w - caret - 22.0 * s).max(10.0));
+    let lh = g.line_height(sz, Face::Bold);
+    g.text(r.x + 8.0 * s, r.y + (r.h - lh) / 2.0, sz, crate::fx::readable(TEXT, crate::fx::WELL, 4.5), &t, Face::Bold);
+    g.text(r.x + r.w - caret - 8.0 * s, r.y + (r.h - lh) / 2.0, sz, crate::fx::readable(MUTED, crate::fx::WELL, 4.5), "▾", Face::Bold);
+    g.hit(r, ev, hit);
+    r
+}
+
+/// The natural width of a select box showing `label`.
+pub fn select_width(g: &mut Gfx, s: f32, label: &str) -> f32 {
+    let sz = super::ide_chrome::cur().font_small * s + 1.0 * s;
+    g.text_width(sz, label, Face::Bold) + g.text_width(sz, "▾", Face::Bold) + 28.0 * s
+}
+
+/// An open list of choices next to `anchor` (above it when there is no room below, inside `bounds`). A click anywhere else
+/// sends `close`. Each row is (label, chosen, click). Register it last: the later hit wins. Returns the list's rectangle.
+#[allow(clippy::too_many_arguments)]
+pub fn menu_list(g: &mut Gfx, anchor: R, bounds: R, s: f32, rows: &[(String, bool, Event)], close: Event, accent: [u8; 4]) -> R {
+    let sz = super::ide_chrome::cur().font_small * s + 2.0 * s;
+    let rh = (super::ide_chrome::tool(s) + 4.0 * s).max(sz * 1.9);
+    let w = rows.iter().map(|r| g.text_width(sz, &r.0, Face::Bold)).fold(0.0f32, f32::max) + 40.0 * s;
+    let w = w.max(anchor.w).min(bounds.w - 8.0 * s);
+    let h = (rows.len() as f32 * rh + 10.0 * s).min(bounds.h - 8.0 * s);
+    let x = anchor.x.min(bounds.x + bounds.w - w - 4.0 * s).max(bounds.x + 4.0 * s);
+    let below = anchor.y + anchor.h + 4.0 * s;
+    let y = if below + h <= bounds.y + bounds.h { below } else { (anchor.y - h - 4.0 * s).max(bounds.y + 4.0 * s) };
+    g.hit(bounds, close, "close the menu");
+    let r = R::new(x, y, w, h);
+    g.rrect(r.x, r.y, r.w, r.h, 8.0 * s, rgb(16, 20, 36));
+    g.rrect_outline(r.x, r.y, r.w, r.h, 8.0 * s, 1.5 * s, accent);
+    let fit = ((h - 10.0 * s) / rh) as usize;
+    for (i, (label, on, ev)) in rows.iter().enumerate().take(fit.max(1)) {
+        let rr = R::new(x + 5.0 * s, y + 5.0 * s + i as f32 * rh, w - 10.0 * s, rh - 2.0 * s);
+        let hot = g.hovered(rr);
+        if hot || *on {
+            g.rrect(rr.x, rr.y, rr.w, rr.h, 5.0 * s, if hot { rgb(34, 44, 78) } else { crate::fx::over(crate::fx::WELL, crate::fx::with_alpha(accent, 50)) });
+        }
+        let t = g.fit(sz, label, Face::Bold, rr.w - 20.0 * s);
+        g.text(rr.x + 10.0 * s, rr.y + (rr.h - g.line_height(sz, Face::Bold)) / 2.0, sz, if *on { accent } else { TEXT }, &t, if *on { Face::Bold } else { Face::Sans });
+        g.hit(rr, ev.clone(), label);
+    }
+    r
 }
 
 #[derive(Clone, Debug)]

@@ -20,6 +20,9 @@ fn col(c: [u8; 4]) -> Color {
     Color::from_rgba8(c[0], c[1], c[2], c[3])
 }
 
+/// No text is drawn smaller than this many pixels, whatever the window's scale: small windows get less room, not unreadable text.
+pub const MIN_TEXT_PX: f32 = 10.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Face {
     Sans,
@@ -53,7 +56,16 @@ pub enum Icon {
     Calendar,
     System,
     Media,
+    SrePilot,
+    Ide,
     Bell,
+    Data,
+    Tales,
+    Store,
+    Dash,
+    Flows,
+    /// The Devices button: a screen on its stand.
+    Devices,
 }
 
 type GlyphKey = (char, u32, Face);
@@ -156,6 +168,45 @@ impl Gfx {
     /// Register a clickable region. `ev` is delivered to the screen on click.
     pub fn hit(&mut self, rect: R, ev: Event, label: &str) {
         self.hits.push(Hit { rect, ev, label: label.into() });
+    }
+
+    /// Run `f` so that nothing it draws or registers as clickable lands outside `clip`: pixels outside the rectangle are put
+    /// back afterwards and click regions are cut to it (dropped when nothing is left). For scrolled content (a transcript, a
+    /// list) whose items are taller than the pane or start above it.
+    pub fn clipped<T>(&mut self, clip: R, f: impl FnOnce(&mut Gfx) -> T) -> T {
+        let before = self.pm.data().to_vec();
+        let start = self.hits.len();
+        let out = f(self);
+        let (w, h) = (self.pm.width() as usize, self.pm.height() as usize);
+        let x0 = (clip.x.floor().max(0.0) as usize).min(w);
+        let x1 = ((clip.x + clip.w).ceil().max(0.0) as usize).min(w).max(x0);
+        let y0 = (clip.y.floor().max(0.0) as usize).min(h);
+        let y1 = ((clip.y + clip.h).ceil().max(0.0) as usize).min(h).max(y0);
+        if before.len() == w * h * 4 {
+            let data = self.pm.data_mut();
+            for y in 0..h {
+                let row = y * w * 4;
+                if y < y0 || y >= y1 {
+                    data[row..row + w * 4].copy_from_slice(&before[row..row + w * 4]);
+                } else {
+                    data[row..row + x0 * 4].copy_from_slice(&before[row..row + x0 * 4]);
+                    data[row + x1 * 4..row + w * 4].copy_from_slice(&before[row + x1 * 4..row + w * 4]);
+                }
+            }
+        }
+        if self.hits.len() >= start {
+            let mut kept = Vec::with_capacity(self.hits.len() - start);
+            for mut hit in self.hits.drain(start..) {
+                let (nx0, ny0) = (hit.rect.x.max(clip.x), hit.rect.y.max(clip.y));
+                let (nx1, ny1) = ((hit.rect.x + hit.rect.w).min(clip.x + clip.w), (hit.rect.y + hit.rect.h).min(clip.y + clip.h));
+                if nx1 > nx0 && ny1 > ny0 {
+                    hit.rect = R::new(nx0, ny0, nx1 - nx0, ny1 - ny0);
+                    kept.push(hit);
+                }
+            }
+            self.hits.extend(kept);
+        }
+        out
     }
 
     /// Drop every region registered so far (a modal calls this so the dimmed UI behind it can't be clicked).
@@ -354,7 +405,7 @@ impl Gfx {
     }
 
     pub fn text_width(&mut self, size: f32, s: &str, face: Face) -> f32 {
-        let px = size.round().max(1.0);
+        let px = size.round().max(MIN_TEXT_PX);
         if crate::shaping::needs_shaping(s) {
             return self.shaper.get_or_insert_with(crate::shaping::Shaper::new).layout(s, px).1;
         }
@@ -363,7 +414,7 @@ impl Gfx {
 
     /// Draw `s` with its top-left at (x, y). Returns the advance width. Text is clipped to the pixmap.
     pub fn text(&mut self, x: f32, y: f32, size: f32, color: [u8; 4], s: &str, face: Face) -> f32 {
-        let px = size.round().max(1.0);
+        let px = size.round().max(MIN_TEXT_PX);
         let ascent = self.font(face).horizontal_line_metrics(px).map_or(px, |m| m.ascent);
         let base = y + ascent;
         let (w, h) = (self.width() as i32, self.height() as i32);
@@ -435,7 +486,7 @@ impl Gfx {
         }
         if !crate::shaping::needs_shaping(s) {
             // one pass over the glyph advances (the width of a plain string is their sum) instead of measuring every shorter prefix
-            let px = size.round().max(1.0);
+            let px = size.round().max(MIN_TEXT_PX);
             let room = max_w - self.font(face).metrics('…', px).advance_width;
             let mut acc = 0.0;
             let mut end = 0;
@@ -798,6 +849,25 @@ impl Gfx {
                     self.pm.stroke_path(&l, &p, &st, id, None);
                 }
             }
+            Icon::Devices => {
+                // a screen on a stand, with a small plug-in dot at the lower right
+                if let Some(b) = rrect_path(x0 + s * 0.08, y0 + s * 0.14, s * 0.84, s * 0.50, s * 0.08) {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                let mut stand = PathBuilder::new();
+                stand.move_to(x0 + s * 0.5, y0 + s * 0.64);
+                stand.line_to(x0 + s * 0.5, y0 + s * 0.80);
+                stand.move_to(x0 + s * 0.28, y0 + s * 0.84);
+                stand.line_to(x0 + s * 0.72, y0 + s * 0.84);
+                if let Some(t) = stand.finish() {
+                    self.pm.stroke_path(&t, &p, &st, id, None);
+                }
+                let mut dot = PathBuilder::new();
+                dot.push_circle(x0 + s * 0.74, y0 + s * 0.47, s * 0.05);
+                if let Some(d) = dot.finish() {
+                    self.pm.fill_path(&d, &p, FillRule::Winding, id, None);
+                }
+            }
             Icon::Camera => {
                 // body with a small bump on top, and the lens
                 if let Some(b) = rrect_path(x0 + s * 0.08, y0 + s * 0.28, s * 0.84, s * 0.58, s * 0.1) {
@@ -874,6 +944,80 @@ impl Gfx {
                     self.pm.fill_path(&h, &p, FillRule::Winding, id, None);
                 }
             }
+            Icon::SrePilot => {
+                // a radar: two rings, cross hairs, a sweep line and a blip (the pilot watching the site)
+                let (cx, cy, r) = (x0 + s * 0.5, y0 + s * 0.5, s * 0.40);
+                self.pm.stroke_path(&PathBuilder::from_circle(cx, cy, r).unwrap(), &p, &st, id, None);
+                self.pm.stroke_path(&PathBuilder::from_circle(cx, cy, r * 0.5).unwrap(), &p, &st, id, None);
+                let mut cross = PathBuilder::new();
+                for (dx, dy) in [(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                    cross.move_to(cx + dx * r * 0.82, cy + dy * r * 0.82);
+                    cross.line_to(cx + dx * r * 1.18, cy + dy * r * 1.18);
+                }
+                if let Some(cp) = cross.finish() {
+                    self.pm.stroke_path(&cp, &p, &st, id, None);
+                }
+                let a = (-48.0f32).to_radians();
+                let mut sweep = PathBuilder::new();
+                sweep.move_to(cx, cy);
+                sweep.line_to(cx + r * a.cos(), cy + r * a.sin());
+                if let Some(sp) = sweep.finish() {
+                    self.pm.stroke_path(&sp, &p, &st, id, None);
+                }
+                let mut wedge = PathBuilder::new();
+                wedge.move_to(cx, cy);
+                for i in 0..=6 {
+                    let b = (-48.0 - 34.0 * i as f32 / 6.0).to_radians();
+                    wedge.line_to(cx + r * b.cos(), cy + r * b.sin());
+                }
+                wedge.close();
+                if let Some(wp) = wedge.finish() {
+                    self.pm.fill_path(&wp, &paint([c[0], c[1], c[2], (c[3] as f32 * 0.28) as u8]), FillRule::Winding, id, None);
+                }
+                self.circle(cx + r * 0.62, cy + r * 0.12, s * 0.07, c);
+                self.circle(cx - r * 0.2, cy + r * 0.45, s * 0.045, c);
+            }
+            Icon::Ide => {
+                // a window with a sidebar and the code chevrons </>, and a small spark (the assistant) at its corner
+                if let Some(b) = rrect_path(x0 + s * 0.06, y0 + s * 0.14, s * 0.88, s * 0.7, s * 0.09) {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                let mut bars = PathBuilder::new();
+                bars.move_to(x0 + s * 0.06, y0 + s * 0.3);
+                bars.line_to(x0 + s * 0.94, y0 + s * 0.3);
+                bars.move_to(x0 + s * 0.3, y0 + s * 0.3);
+                bars.line_to(x0 + s * 0.3, y0 + s * 0.84);
+                if let Some(b) = bars.finish() {
+                    self.pm.stroke_path(&b, &p, &stroke(lw * 0.8), id, None);
+                }
+                let mut ch = PathBuilder::new();
+                ch.move_to(x0 + s * 0.5, y0 + s * 0.45);
+                ch.line_to(x0 + s * 0.42, y0 + s * 0.57);
+                ch.line_to(x0 + s * 0.5, y0 + s * 0.69);
+                ch.move_to(x0 + s * 0.76, y0 + s * 0.45);
+                ch.line_to(x0 + s * 0.84, y0 + s * 0.57);
+                ch.line_to(x0 + s * 0.76, y0 + s * 0.69);
+                ch.move_to(x0 + s * 0.67, y0 + s * 0.43);
+                ch.line_to(x0 + s * 0.59, y0 + s * 0.71);
+                if let Some(c2) = ch.finish() {
+                    self.pm.stroke_path(&c2, &p, &st, id, None);
+                }
+                // the spark: a four-point star
+                let (sx, sy, r) = (x0 + s * 0.86, y0 + s * 0.14, s * 0.13);
+                let mut star = PathBuilder::new();
+                star.move_to(sx, sy - r);
+                star.line_to(sx + r * 0.3, sy - r * 0.3);
+                star.line_to(sx + r, sy);
+                star.line_to(sx + r * 0.3, sy + r * 0.3);
+                star.line_to(sx, sy + r);
+                star.line_to(sx - r * 0.3, sy + r * 0.3);
+                star.line_to(sx - r, sy);
+                star.line_to(sx - r * 0.3, sy - r * 0.3);
+                star.close();
+                if let Some(st2) = star.finish() {
+                    self.pm.fill_path(&st2, &p, FillRule::Winding, id, None);
+                }
+            }
             Icon::Media => {
                 // a screen with a play triangle, and a base line
                 if let Some(b) = rrect_path(x0 + s * 0.08, y0 + s * 0.14, s * 0.84, s * 0.62, s * 0.08) {
@@ -892,6 +1036,121 @@ impl Gfx {
                 base.line_to(x0 + s * 0.72, y0 + s * 0.88);
                 if let Some(b) = base.finish() {
                     self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+            }
+            Icon::Tales => {
+                // an open book with a few lines of text on its pages
+                let mut b = PathBuilder::new();
+                b.move_to(x0 + s * 0.5, y0 + s * 0.26);
+                b.line_to(x0 + s * 0.1, y0 + s * 0.18);
+                b.line_to(x0 + s * 0.1, y0 + s * 0.78);
+                b.line_to(x0 + s * 0.5, y0 + s * 0.86);
+                b.line_to(x0 + s * 0.9, y0 + s * 0.78);
+                b.line_to(x0 + s * 0.9, y0 + s * 0.18);
+                b.line_to(x0 + s * 0.5, y0 + s * 0.26);
+                b.line_to(x0 + s * 0.5, y0 + s * 0.86);
+                if let Some(path) = b.finish() {
+                    self.pm.stroke_path(&path, &p, &st, id, None);
+                }
+                let mut t = PathBuilder::new();
+                for k in 0..2 {
+                    let dy = s * 0.15 * k as f32;
+                    t.move_to(x0 + s * 0.2, y0 + s * (0.36 + 0.0) + dy);
+                    t.line_to(x0 + s * 0.4, y0 + s * 0.4 + dy);
+                    t.move_to(x0 + s * 0.6, y0 + s * 0.4 + dy);
+                    t.line_to(x0 + s * 0.8, y0 + s * 0.36 + dy);
+                }
+                if let Some(path) = t.finish() {
+                    self.pm.stroke_path(&path, &p, &st, id, None);
+                }
+            }
+            Icon::Dash => {
+                // a dashboard: a frame, a rising line and two bars
+                if let Some(b) = rrect_path(x0 + s * 0.08, y0 + s * 0.14, s * 0.84, s * 0.72, s * 0.08) {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                let mut line = PathBuilder::new();
+                line.move_to(x0 + s * 0.16, y0 + s * 0.62);
+                line.line_to(x0 + s * 0.34, y0 + s * 0.46);
+                line.line_to(x0 + s * 0.5, y0 + s * 0.54);
+                line.line_to(x0 + s * 0.7, y0 + s * 0.3);
+                if let Some(l) = line.finish() {
+                    self.pm.stroke_path(&l, &p, &st, id, None);
+                }
+                for (bx, bh) in [(0.62, 0.16), (0.76, 0.28)] {
+                    let mut bar = PathBuilder::new();
+                    bar.push_rect(tiny_skia::Rect::from_xywh(x0 + s * bx, y0 + s * (0.8 - bh), s * 0.08, s * bh - s * 0.02).unwrap_or(tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap()));
+                    if let Some(b) = bar.finish() {
+                        self.pm.fill_path(&b, &p, FillRule::Winding, id, None);
+                    }
+                }
+            }
+            Icon::Flows => {
+                // a workflow: a step on the left fanning out to two steps on the right, joined by curves with arrowheads
+                for (bx, by) in [(0.06, 0.38), (0.68, 0.10), (0.68, 0.66)] {
+                    if let Some(b) = rrect_path(x0 + s * bx, y0 + s * by, s * 0.26, s * 0.24, s * 0.06) {
+                        self.pm.stroke_path(&b, &p, &st, id, None);
+                    }
+                }
+                for ty in [0.22, 0.78] {
+                    let mut curve = PathBuilder::new();
+                    curve.move_to(x0 + s * 0.32, y0 + s * 0.50);
+                    curve.cubic_to(x0 + s * 0.50, y0 + s * 0.50, x0 + s * 0.50, y0 + s * ty, x0 + s * 0.66, y0 + s * ty);
+                    if let Some(l) = curve.finish() {
+                        self.pm.stroke_path(&l, &p, &st, id, None);
+                    }
+                    let mut head = PathBuilder::new();
+                    head.move_to(x0 + s * 0.60, y0 + s * (ty - 0.05));
+                    head.line_to(x0 + s * 0.67, y0 + s * ty);
+                    head.line_to(x0 + s * 0.60, y0 + s * (ty + 0.05));
+                    if let Some(h) = head.finish() {
+                        self.pm.stroke_path(&h, &p, &st, id, None);
+                    }
+                }
+                let mut dot = PathBuilder::new();
+                dot.push_circle(x0 + s * 0.19, y0 + s * 0.50, s * 0.04);
+                if let Some(d) = dot.finish() {
+                    self.pm.fill_path(&d, &p, FillRule::Winding, id, None);
+                }
+            }
+            Icon::Store => {
+                // a shopping bag: the body, the handle and a small tag
+                if let Some(b) = rrect_path(x0 + s * 0.14, y0 + s * 0.3, s * 0.72, s * 0.6, s * 0.08) {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                let mut handle = PathBuilder::new();
+                handle.move_to(x0 + s * 0.34, y0 + s * 0.38);
+                handle.cubic_to(x0 + s * 0.34, y0 + s * 0.04, x0 + s * 0.66, y0 + s * 0.04, x0 + s * 0.66, y0 + s * 0.38);
+                if let Some(h) = handle.finish() {
+                    self.pm.stroke_path(&h, &p, &st, id, None);
+                }
+                let mut dot = PathBuilder::new();
+                dot.push_circle(x0 + s * 0.5, y0 + s * 0.62, s * 0.07);
+                if let Some(d) = dot.finish() {
+                    self.pm.fill_path(&d, &p, FillRule::Winding, id, None);
+                }
+            }
+            Icon::Data => {
+                // a table: a frame, a header band and the grid lines
+                if let Some(b) = rrect_path(x0 + s * 0.08, y0 + s * 0.14, s * 0.84, s * 0.72, s * 0.08) {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                let mut grid = PathBuilder::new();
+                grid.move_to(x0 + s * 0.08, y0 + s * 0.38);
+                grid.line_to(x0 + s * 0.92, y0 + s * 0.38);
+                grid.move_to(x0 + s * 0.08, y0 + s * 0.62);
+                grid.line_to(x0 + s * 0.92, y0 + s * 0.62);
+                grid.move_to(x0 + s * 0.38, y0 + s * 0.14);
+                grid.line_to(x0 + s * 0.38, y0 + s * 0.86);
+                grid.move_to(x0 + s * 0.65, y0 + s * 0.14);
+                grid.line_to(x0 + s * 0.65, y0 + s * 0.86);
+                if let Some(gp) = grid.finish() {
+                    self.pm.stroke_path(&gp, &p, &st, id, None);
+                }
+                let mut head = PathBuilder::new();
+                head.push_rect(tiny_skia::Rect::from_xywh(x0 + s * 0.1, y0 + s * 0.16, s * 0.8, s * 0.2).unwrap_or(tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap()));
+                if let Some(h) = head.finish() {
+                    self.pm.fill_path(&h, &p, FillRule::Winding, id, None);
                 }
             }
             Icon::Usage => {
@@ -1090,7 +1349,7 @@ mod tests {
 
     #[test]
     fn every_icon_draws_something() {
-        for icon in [Icon::Chat, Icon::Rag, Icon::Mcp, Icon::Cli, Icon::Users, Icon::Settings, Icon::Clipboard, Icon::Mic, Icon::Speaker, Icon::Runs, Icon::Edit, Icon::Browser, Icon::Camera, Icon::Mesh, Icon::Radio, Icon::Scan, Icon::Skills, Icon::Usage, Icon::Calendar, Icon::System, Icon::Media, Icon::Bell, Icon::Lock, Icon::Power, Icon::Logout] {
+        for icon in [Icon::Chat, Icon::Rag, Icon::Mcp, Icon::Cli, Icon::Users, Icon::Settings, Icon::Clipboard, Icon::Mic, Icon::Speaker, Icon::Runs, Icon::Edit, Icon::Browser, Icon::Camera, Icon::Mesh, Icon::Radio, Icon::Scan, Icon::Skills, Icon::Usage, Icon::Calendar, Icon::System, Icon::Media, Icon::SrePilot, Icon::Ide, Icon::Data, Icon::Tales, Icon::Bell, Icon::Lock, Icon::Power, Icon::Logout, Icon::Store, Icon::Dash, Icon::Flows, Icon::Devices] {
             let mut g = Gfx::new(96, 96);
             g.clear(rgb(0, 0, 0));
             g.icon(icon, 48.0, 48.0, 80.0, rgb(255, 255, 255));
