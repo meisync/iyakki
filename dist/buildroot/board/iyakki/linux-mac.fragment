@@ -1,0 +1,100 @@
+# Kernel config fragment for the OPTIONAL "mac" variant (x86_64, Intel Macs), applied after linux.fragment.
+# Only mainline, GPL, redistributable drivers. Verified against nothing yet: run
+#   VARIANT=mac ./verify-kernel-config.sh
+# against the kernel source (6.12.112) before the first build; kconfig silently drops options whose dependencies are unmet.
+# Option names are for 6.12; see docs/MAC-HARDWARE.md ("Unverified") for the ones that change in later kernels.
+
+# ---- Apple keyboard, trackpad (USB/Bluetooth Apple HID), IR receiver ----------------------------------
+CONFIG_HID_APPLE=m
+CONFIG_HID_APPLEIR=m
+
+# ---- T2 MacBooks (2018-2020): internal keyboard, trackpad, Touch Bar (all behind apple-bce's VHCI) -----------------
+# Keyboard: hid-apple already knows the T2 ids (WELLSPRINGT2_*) in 6.12, keyboard backlight (APPLE_BACKLIGHT_CTL) on the
+# 2018/2019 13" and 15" models. Trackpad: bcm5974 with patch 0003 (t2linux, adds the T2 ids; usbhid already ignores the
+# trackpad interface). Touch Bar: patch 0002 backports hid-appletb-kbd (Esc/F1-F12 or media keys drawn by the T2 itself,
+# Fn switches) and hid-appletb-bl (its backlight) from 6.18. No appletbdrm (custom drawing needs tiny-dfr; not shipped).
+# Checked with kconfig and compiled against the 6.12.112 tree; not booted on a MacBook (docs/MAC-HARDWARE.md, MacBook Pro 2019).
+CONFIG_MOUSE_BCM5974=m
+CONFIG_HID_APPLETB_BL=m
+CONFIG_HID_APPLETB_KBD=m
+
+# ---- System Management Controller: fans, temperatures, light sensor, keyboard backlight --------------
+CONFIG_X86_PLATFORM_DEVICES=y
+CONFIG_SENSORS_APPLESMC=m
+CONFIG_SENSORS_CORETEMP=m
+# Apple backlight and the GPU mux of dual-GPU MacBooks (the Mac mini has neither; harmless there)
+CONFIG_BACKLIGHT_CLASS_DEVICE=y
+CONFIG_BACKLIGHT_APPLE=m
+CONFIG_APPLE_GMUX=m
+# EFI device properties that Apple firmware passes to the kernel
+CONFIG_APPLE_PROPERTIES=y
+
+# ---- Wi-Fi: open Broadcom drivers (the firmware files come from linux-firmware or from the person) ---
+# brcmfmac (already in linux.fragment) covers BCM43602-class PCIe chips; brcmsmac covers some older SoftMAC chips.
+# NOT covered by any open driver: BCM4360 (the Mac mini 2014), which needs Broadcom's proprietary wl.
+CONFIG_BCMA=m
+CONFIG_BRCMSMAC=m
+# The proprietary `wl` is never in the image. The owner builds it for exactly this kernel (dist/drivers/build-wl-pack.sh) and
+# installs it as a signed driver pack. What the built wl.ko 6.30.223.271 needs from this kernel (checked against the built
+# 6.12.112 .config; nothing to add, no rebuild): CONFIG_MODULES=y, CONFIG_CFG80211=m (its only `depends:`; it registers a
+# normal wlan0 through cfg80211, so no CFG80211_WEXT, WIRELESS_EXT or LIB80211 is needed), CONFIG_RFKILL=y, CONFIG_PCI=y.
+# MODULE_SIG_FORCE must stay unset (an unsigned module would be refused). b43, bcma, ssb and brcmsmac are modules here, never
+# built in, so the pack can blacklist and unload them; bcma has BCMA_HOST_PCI=y and WOULD bind the BCM4360 PCI id, which is
+# why the pack blacklists it. Do not make any of them =y.
+
+# ---- USB Wi-Fi adapters with open drivers (already =m in linux.fragment; named here so nobody removes them) ----------
+# MT7612U (mt76x2u, firmware mt7662.bin), MT7921AU (mt7921u, MT7961 firmware), MT7601U, AR9271 (ath9k_htc, htc_9271.fw): their
+# firmware is in the `hw`/`mac` image (iyakki_firmware.fragment). MT7610U (mt76x0u) needs mediatek/mt7610u.bin, which Buildroot's
+# linux-firmware package cannot select (only mt7610e.bin), so it is not offered. RTL8812AU/8821AU have no in-kernel driver.
+# The Wi-Fi code (net.rs, devctl wifi.rs) takes any cfg80211 interface and starts wpa_supplicant (nl80211, WPA2 and WPA3-SAE).
+
+# ---- Bluetooth: Broadcom (patch-RAM .hcd files are supplied by the person; see the driver pack) -------
+CONFIG_BT_HCIBTUSB_BCM=y
+CONFIG_BT_BCM=m
+# T2 Macs (Mac mini 2018: BCM4364) have Bluetooth on a UART, not USB: ACPI \_SB.PCI0.URT0.BLTH (BCM2E7C) on the Intel LPSS UART
+# 00:1e.0 (dw-apb-uart.0), powered through Apple's ACPI methods BTPU/BTPD/BTLP that hci_bcm calls on Macs. Seen on the machine
+# with the 6.12.112 Mac image: the ACPI device is present (status 15) but nothing binds it, because these options were missing.
+# The DesignWare UART driver, the serial device bus (serdev) and hci_uart with the Broadcom protocol make it hci0. Checked with
+# kconfig against the built 6.12.112 .config (all resolve). Booted 2026-10-18: hci0 appears, hci_bcm powers the chip (BTPU ok, CTS
+# asserted) but the controller never answers HCI Reset (115200 or 3 Mbaud) - see docs/MAC-HARDWARE.md, Bluetooth. No firmware file
+# is involved at that point (the BCM4364 runs from ROM; an optional macOS patch file would be brcm/BCM.hcd).
+CONFIG_SERIAL_8250_DW=y
+CONFIG_SERIAL_DEV_BUS=y
+CONFIG_SERIAL_DEV_CTRL_TTYPORT=y
+CONFIG_BT_HCIUART=m
+CONFIG_BT_HCIUART_BCM=y
+# Untested guess for the silent controller: distribution T2 kernels have the ACPI LPSS handler and the Cannon Lake pin controller
+# (this image had neither); harmless where the firmware already sets the pads.
+CONFIG_X86_INTEL_LPSS=y
+CONFIG_PINCTRL_CANNONLAKE=m
+# Using a paired keyboard/mouse needs the kernel HID-over-Bluetooth transports: classic HIDP, and uhid for a user-space
+# HID-over-GATT (low energy) bridge. IYAKKI's own Bluetooth code (devctl btmgmt) does pairing; see docs/MAC-HARDWARE.md.
+CONFIG_BT_HIDP=m
+CONFIG_UHID=m
+# BCM4377 (MacBookPro15,4, MacBookPro16,3, MacBookAir9,1): Bluetooth is a PCIe function (14e4:5fa0), driver hci_bcm4377;
+# it needs brcm/brcmbt4377*.bin and .ptb from macOS (dist/drivers/mac-wifi-firmware-from-macos.sh copies them).
+CONFIG_BT_HCIBCM4377=m
+
+# ---- Apple T2 chip: apple-bce (out of tree, package/apple-bce) needs only what the kernel already has ----------------
+# Checked by building it against this kernel: SND_PCM (=m) is its one module dependency; USB core and PCI MSI are built in.
+# Its T2 network link (cdc_ncm, MAC ac:de:48:00:11:22) uses USB_NET_CDC_NCM (=m already); IYAKKI leaves that link down.
+# NOT needed: IRQ_REMAP / intel_iommu=on (what t2linux kernels use to give the BCE five MSI vectors): our patch 0001 shares one.
+CONFIG_SND_PCM=m
+
+# ---- Audio: Cirrus Logic HD-audio codecs (CS4206 in the Mac mini 2014; CS420x/CS421x in other Macs) ---
+# 6.12 has one option for both; kernels from about 6.17 split it into SND_HDA_CODEC_CS420X / _CS421X (not verified here).
+CONFIG_SND_HDA_CODEC_CIRRUS=m
+CONFIG_SND_HDA_CODEC_CA0132=m
+
+# ---- Graphics: Intel (Haswell HD 5000 needs no firmware blob) ------------------------------------------
+CONFIG_DRM_I915=m
+# Radeon Pro of the 15"/16" MacBook Pro (555X/560X Polaris 11, Vega 16/20 = Vega 12, 5300M/5500M Navi 14): amdgpu, already
+# in linux.fragment; its firmware (amdgpu/polaris11_*, vega12_*, navi14_*) is in the `hw` firmware set. Patch 0004: 5300M boot.
+CONFIG_DRM_AMDGPU=m
+
+# ---- Thunderbolt and USB4 controllers (Thunderbolt 2 on the Mac mini 2014 relies on firmware-set-up PCIe hotplug) -----
+CONFIG_USB4=m
+CONFIG_HOTPLUG_PCI_PCIE=y
+
+# ---- Modules: no signature enforcement, so a prebuilt driver-pack module for this exact kernel can load ------------
+# (not set: CONFIG_MODULE_SIG_FORCE, CONFIG_SECURITY_LOCKDOWN_LSM; leaving them unset is the existing behaviour)

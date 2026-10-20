@@ -1,0 +1,42 @@
+# GRUB theme for the IYAKKI boot menu: the logo picture fills the screen; the menu sits below the emblem.
+# (If this theme cannot be loaded, GRUB shows the plain menu over iyakki-bg.png or on black.)
+title-text: ""
+desktop-image: "iyakki-bg.png"
+desktop-image-scale-method: "padding"
+desktop-color: "#050710"
+terminal-font: "Unifont Regular 16"
+# GRUB's terminal window, which it paints (in background_color, set in grub.cfg to the desktop colour) when an entry starts and
+# while it loads the kernel: below the emblem, over the menu, so the logo stays on screen until IYAKKI's boot screen takes over
+# at the same place. GRUB makes it at least 80 x 24 characters (640 x 384 pixels with this font) and centres it when the
+# room given is smaller, so it stays clear of the logo on screens 1080 pixels high or more; on smaller ones it covers the
+# middle in the desktop colour (never the black box over the logo, never the menu left behind).
+terminal-left: "0"
+terminal-top: "61%"
+terminal-width: "100%"
+terminal-height: "39%"
+terminal-border: "0"
+
++ boot_menu {
+	left = 14%
+	top = 61%
+	width = 72%
+	height = 34%
+	item_font = "Unifont Regular 16"
+	selected_item_font = "Unifont Regular 16"
+	item_color = "#9aa6c8"
+	selected_item_color = "#46e1ff"
+	item_height = 22
+	item_padding = 3
+	item_spacing = 1
+	scrollbar = true
+}
+
++ label {
+	left = 0
+	top = 95%
+	width = 100%
+	align = "center"
+	font = "Unifont Regular 16"
+	color = "#5d6a8f"
+	text = "IYAKKI  -  an OS for agents    (Up/Down and Enter choose a start, e edits it)"
+}

@@ -1,0 +1,23 @@
+<!doctype html><meta charset="utf-8"><title>input test</title>
+<style>body{font:20px sans-serif;margin:20px}input,textarea{display:block;margin:12px 0;font-size:22px;width:560px}textarea{height:90px}#log{font:13px monospace;white-space:pre}</style>
+<h2>IYAKKI typing test</h2>
+<input id="t" type="text" placeholder="text input">
+<textarea id="a" placeholder="textarea"></textarea>
+<input id="p" type="password" placeholder="password">
+<button id="cp" style="font-size:20px">Copy code</button> <button id="cp2" style="font-size:20px">execCommand copy</button> <span id="sel" style="user-select:all">SIGNIN-CODE-4f9a-77</span>
+<div id="log"></div>
+<script>
+function rep(s){var l=document.getElementById('log');l.textContent=(s+'\n'+l.textContent).split('\n').slice(0,14).join('\n');
+ new Image().src='/report?'+encodeURIComponent(s)+'&r='+Math.random();}
+['t','a','p'].forEach(function(id){var e=document.getElementById(id);
+ ['focus','blur'].forEach(function(n){e.addEventListener(n,function(){rep(id+' '+n)})});
+ e.addEventListener('keydown',function(v){rep(id+' keydown key='+v.key+' code='+v.code+' kc='+v.keyCode+' ctrl='+v.ctrlKey+' shift='+v.shiftKey)});
+ e.addEventListener('input',function(v){rep(id+' input value='+(id=='p'?'*'.repeat(e.value.length):e.value))});});
+document.getElementById('cp').onclick=function(){navigator.clipboard.writeText('SIGNIN-CODE-4f9a-77').then(function(){rep('writeText ok')},function(e){rep('writeText failed '+e)})};
+document.getElementById('cp2').onclick=function(){var r=document.createRange();r.selectNode(document.getElementById('sel'));getSelection().removeAllRanges();getSelection().addRange(r);rep('execCommand copy='+document.execCommand('copy'))};
+window.addEventListener('scroll',function(){rep('scrollY='+scrollY)});
+window.addEventListener('wheel',function(v){rep('wheel dy='+v.deltaY)});
+document.addEventListener('mousedown',function(v){rep('mousedown at '+v.clientX+','+v.clientY+' target='+(v.target.id||v.target.tagName))});
+document.addEventListener('click',function(v){rep('click at '+v.clientX+','+v.clientY)});
+</script>
+<div style="height:1500px"></div>

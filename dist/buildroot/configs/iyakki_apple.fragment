@@ -1,0 +1,17 @@
+# OPTIONAL "apple" variant (aarch64 only): Apple Silicon bare metal through Asahi Linux's boot chain. NOT part of the default
+# build, NOT built, NOT booted.  Appended to iyakki_aarch64_defconfig (a future  ARCH=aarch64 build.sh apple).  docs/APPLE-SILICON.md.
+# The kernel is the linux-asahi fork (GPL-2.0), pinned by dist/asahi/PINS; replace the tag below with the value in PINS.
+BR2_LINUX_KERNEL_CUSTOM_VERSION=n
+BR2_LINUX_KERNEL_CUSTOM_GIT=y
+BR2_LINUX_KERNEL_CUSTOM_REPO_URL="https://github.com/AsahiLinux/linux.git"
+BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="UNPINNED-see-dist-asahi-PINS"
+BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=n
+BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki-aarch64/linux.fragment $(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki-apple/linux-asahi.fragment"
+# the Apple device trees (arch/arm64/boot/dts/apple/*.dtb) are built with the kernel and copied by the package script
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="apple/t8103-j274 apple/t6000-j314s apple/t8112-j413 apple/t8122-j504"
+# Rust support in the kernel (DRM_ASAHI): needs host rustc and bindgen of the version the tree asks for
+BR2_PACKAGE_HOST_RUSTC=y
+BR2_PACKAGE_HOST_RUST_BIN=y
+BR2_PACKAGE_HOST_RUST_BINDGEN=y

@@ -1,0 +1,22 @@
+# OPTIONAL, off by default, NOT BUILT OR TESTED YET: the packages the "k3s in Podman" variant of Settings -> Dev cluster needs.
+#
+# The default images (libre, hw, web) stay as they are. Native k3s needs none of this: IYAKKI downloads the k3s program, checks it
+# against the project's SHA-256 file and installs it into the data partition (docs/K3S-DEV.md, phase 4). Only the Podman variant
+# ("run the official k3s image as a privileged container") needs a container engine in the image. build.sh does not use this file
+# yet; to try it by hand, append it to the defconfig of the variant you build:
+#
+#   cat dist/buildroot/configs/iyakki_cluster.fragment >> target/buildroot-libre/defconfig      (then run the usual defconfig / make)
+#
+# Size and RAM must be measured first (podman, conmon, crun and netavark add tens of megabytes to the image and, with the images
+# k3s pulls, much more to the data partition). Rootful Podman only: k3s cannot run rootless.
+BR2_PACKAGE_PODMAN=y
+BR2_PACKAGE_CONMON=y
+BR2_PACKAGE_CRUN=y
+BR2_PACKAGE_NETAVARK=y
+BR2_PACKAGE_AARDVARK_DNS=y
+BR2_PACKAGE_IPTABLES=y
+BR2_PACKAGE_IPROUTE2=y
+BR2_PACKAGE_CA_CERTIFICATES=y
+# The kernel needs cgroup v2, overlayfs, veth, bridge, VXLAN and netfilter (nat, conntrack, masquerade). Check an image with
+# dist/buildroot/verify-kernel-config.sh and add what is missing to board/iyakki/linux.fragment (that file is a default: change it
+# deliberately, not from this fragment).

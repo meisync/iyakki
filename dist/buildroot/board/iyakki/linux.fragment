@@ -324,6 +324,26 @@ CONFIG_VIRTIO_BALLOON=m
 CONFIG_VIRTIO_CONSOLE=y
 CONFIG_VIRTIO_INPUT=m
 
+# ---- memory: compressed swap in RAM (zram), see docs/ZRAM-AND-INSTALL.md ------------------------------------------
+# iyakki-core sets /dev/zram0 up at boot (boot.rs, iyakki-zram). Built in, so it works before any module loads.
+# Compressors: zstd (default), lz4, lzo-rle (kept as the fallback), all built in.
+CONFIG_SWAP=y
+CONFIG_ZSMALLOC=y
+CONFIG_ZRAM=y
+CONFIG_ZRAM_BACKEND_ZSTD=y
+CONFIG_ZRAM_BACKEND_LZ4=y
+CONFIG_ZRAM_BACKEND_LZO=y
+CONFIG_ZRAM_DEF_COMP_ZSTD=y
+CONFIG_CRYPTO_ZSTD=y
+CONFIG_CRYPTO_LZ4=y
+CONFIG_CRYPTO_LZO=y
+# zswap (optional second tier in front of a swap file; off unless iyakki.zswap=on)
+CONFIG_ZSWAP=y
+CONFIG_ZSWAP_COMPRESSOR_DEFAULT_ZSTD=y
+CONFIG_ZSWAP_ZPOOL_DEFAULT_ZSMALLOC=y
+# memory pressure figures (/proc/pressure/memory) for the SYSTEM tile
+CONFIG_PSI=y
+
 # ---- hardening ---------------------------------------------------------------
 CONFIG_STACKPROTECTOR_STRONG=y
 CONFIG_RANDOMIZE_BASE=y
@@ -384,3 +404,26 @@ CONFIG_NFT_FIB_IPV4=m
 CONFIG_NFT_FIB_IPV6=m
 CONFIG_NF_NAT_MASQUERADE=y
 CONFIG_NETFILTER_XT_MATCH_PHYSDEV=y
+
+# ---- Secure Boot (docs/SECURE-BOOT.md): the kernel can run under shim + a Machine Owner Key -------------------------------
+# With Secure Boot OFF none of this changes anything: modules (signed or not) load, nothing is locked. With Secure Boot ON the
+# kernel locks itself down (integrity mode; stock 6.12 does not do this by itself, so patches-sb/ adds the few lines every distribution carries) and only loads modules signed by a key the person
+# enrolled as a MOK: shim hands the MOK list to the kernel, which puts it in the ".machine" keyring, linked to the secondary
+# trusted keyring that module signatures are checked against. Modules are signed at image build time with the owner's key
+# (dist/buildroot/secureboot.sh), NOT by the kernel build (MODULE_SIG_ALL stays off, so a build without a key is plain).
+# MODULE_SIG_FORCE stays off on purpose: driver packs (wl.ko) must keep loading with Secure Boot off; under lockdown the kernel
+# refuses unsigned modules by itself.
+CONFIG_MODULE_SIG=y
+# CONFIG_MODULE_SIG_FORCE is not set
+# CONFIG_MODULE_SIG_ALL is not set
+CONFIG_MODULE_SIG_SHA256=y
+CONFIG_SECURITY_LOCKDOWN_LSM=y
+CONFIG_SECURITY_LOCKDOWN_LSM_EARLY=y
+# CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY is not set
+CONFIG_SYSTEM_BLACKLIST_KEYRING=y
+CONFIG_SECONDARY_TRUSTED_KEYRING=y
+CONFIG_INTEGRITY_SIGNATURE=y
+CONFIG_INTEGRITY_ASYMMETRIC_KEYS=y
+CONFIG_INTEGRITY_PLATFORM_KEYRING=y
+CONFIG_INTEGRITY_MACHINE_KEYRING=y
+CONFIG_LOAD_UEFI_KEYS=y

@@ -1,0 +1,1 @@
+{"kind":"tile","name":"__NAME__","version":"0.1.0","license":"Apache-2.0","title":"__TITLE__","summary":"A tile app for the IYAKKI launcher.","permissions":["tile:storage"],"min_version":"","categories":["tools"],"tags":[],"entry":"index.html"}

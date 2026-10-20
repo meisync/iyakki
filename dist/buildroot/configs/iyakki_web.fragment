@@ -12,8 +12,8 @@ BR2_PACKAGE_MESA3D=y
 BR2_PACKAGE_MESA3D_LLVM=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_VIRGL=y
-# iris (Intel gen8+) and crocus (Intel gen4-7) are NOT included: Mesa 26 builds them with its precompiled OpenCL compiler (clang + libclc for the target, hours and ~1 GB more).
-# Intel GPUs therefore use llvmpipe (software) unless iyakki_web_iris.fragment is appended (iris; Intel gen8+).
+# iris (Intel gen8+) and crocus (Intel gen4-7, Haswell) are NOT included by default: Mesa 26 builds them with its precompiled OpenCL compiler (clang + libclc for the target, hours and ~1 GB more).
+# Intel GPUs therefore use llvmpipe (software; explicit, Mesa has no other Intel driver here) unless WEB_IRIS=1 (iris, gen8+) or WEB_CROCUS=1 (crocus, gen4-7 incl. Haswell Macs) is set.
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_RADEONSI=y
 BR2_PACKAGE_MESA3D_OPENGL_EGL=y
 BR2_PACKAGE_MESA3D_OPENGL_ES=y

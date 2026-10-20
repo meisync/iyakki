@@ -1,3 +1,3 @@
-# OPTIONAL (WEB_IRIS=1 ./build.sh web): Mesa's iris driver for Intel gen8+ GPUs. It makes Mesa build clang + libclc for the
+# OPTIONAL (WEB_IRIS=1 or WEB_CROCUS=1 ./build.sh web): Mesa's iris driver for Intel gen8+ GPUs. It makes Mesa build clang + libclc for the
 # target, which adds hours and about a gigabyte; without it Intel GPUs fall back to llvmpipe (software).
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_IRIS=y

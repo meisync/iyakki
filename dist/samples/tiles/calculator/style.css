@@ -1,0 +1,5 @@
+body { background: #10162b; color: #e8ecff; font-family: sans-serif; margin: 0; padding: 24px; }
+h1 { font-size: 22px; margin: 0 0 12px 0; }
+output { display: block; background: #1b2442; color: #ffffff; font-size: 40px; padding: 14px 18px; margin-bottom: 14px; }
+table { border-spacing: 8px; }
+button { background: #26335f; color: #ffffff; font-size: 24px; padding: 12px 22px; border: 1px solid #4f6bd8; }

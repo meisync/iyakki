@@ -1,2 +1,4 @@
 # Extra Buildroot packages of IYAKKI. Nothing here is selected by the default image.
 source "$BR2_EXTERNAL_IYAKKI_PATH/package/iyakki-webview-helper/Config.in"
+# t2linux apple-bce (T2 Macs: internal USB and sound); selected by the "mac" variant only
+source "$BR2_EXTERNAL_IYAKKI_PATH/package/apple-bce/Config.in"

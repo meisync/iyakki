@@ -13,7 +13,7 @@ timeout 120 $QEMU -accel kvm -accel tcg -m 1024 -smp 2 -nographic -no-reboot \
   -netdev user,id=n2 -device rtl8139,netdev=n2 \
   -audiodev none,id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0 >"$LOG" 2>&1 || true
 tr -d '\r' < "$LOG" | grep -a "IYAKKI-SELFTEST\|IYAKKI-HWREPORT" || true
-for want in "IYAKKI-HWREPORT   architecture: x86_64" "IYAKKI-HWREPORT   \[keyboard\]" "IYAKKI-SELFTEST tool arecord ok" "IYAKKI-SELFTEST tool aplay ok" "IYAKKI-SELFTEST audio-capture card" "IYAKKI-SELFTEST begin" "IYAKKI-SELFTEST wasm guest-ok" "IYAKKI-SELFTEST end" "iface eth2 Ethernet" "addr eth2 .* 10\\.0\\.2\\."; do
+for want in "IYAKKI-HWREPORT   architecture: x86_64" "IYAKKI-HWREPORT   \[keyboard\]" "IYAKKI-SELFTEST tool arecord ok" "IYAKKI-SELFTEST tool aplay ok" "IYAKKI-SELFTEST tool ssh ok" "IYAKKI-SELFTEST tool scp ok" "IYAKKI-SELFTEST tool dropbearkey ok" "IYAKKI-SELFTEST ssh Dropbear v" "IYAKKI-SELFTEST audio-capture card" "IYAKKI-SELFTEST begin" "IYAKKI-SELFTEST wasm guest-ok" "IYAKKI-SELFTEST end" "iface eth2 Ethernet" "addr eth2 .* 10\\.0\\.2\\."; do
   tr -d '\r' < "$LOG" | grep -aq "$want" || { echo "FAIL: missing '$want' (log: $LOG)"; exit 1; }
 done
 echo "PASS"

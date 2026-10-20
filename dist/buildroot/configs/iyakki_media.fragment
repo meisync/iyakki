@@ -1,0 +1,27 @@
+# OPTIONAL, off by default: put the `ffmpeg` and `ffprobe` programs in the image, so IYAKKI's own media player (MEDIA tile,
+# IYAKKI menu -> Media player, the camera's recordings; crates/iyakki-agent/src/player.rs) works at once, with no download.
+#   WITH_FFMPEG=1 ./build.sh mac        (also hw, libre, aarch64, web, macweb)       See docs/MEDIA-PLAYER.md.
+#
+# An LGPL build: no GPL parts (no libx264/libx265/postproc), no nonfree parts, no ffplay and no ffserver (ffplay needs SDL2, which
+# has no plain framebuffer backend), no SDL. The programs are only started by IYAKKI as a decoder with fixed arguments (BOUNDARY.md).
+# Only the decoders, demuxers, filters and the two raw outputs the player uses are built, which keeps it small.
+#
+# Codec policy (same as WEB_H264 in docs/FULL-BROWSER.md): H.264, HEVC, AAC and MP3 are patent-encumbered in some countries
+# (a separate matter from the copyright licence). Whoever builds and distributes an image with this fragment decides that for
+# the image; the default images do not carry it. The person can instead download the static build from Quick install -> Media.
+BR2_PACKAGE_FFMPEG=y
+BR2_PACKAGE_FFMPEG_FFMPEG=y
+BR2_PACKAGE_FFMPEG_FFPROBE=y
+# BR2_PACKAGE_FFMPEG_GPL is not set
+# BR2_PACKAGE_FFMPEG_NONFREE is not set
+BR2_PACKAGE_FFMPEG_SWSCALE=y
+BR2_PACKAGE_FFMPEG_ENCODERS="rawvideo pcm_s16le"
+BR2_PACKAGE_FFMPEG_DECODERS="h264 hevc vp8 vp9 libdav1d mpeg4 msmpeg4v3 mpeg2video mjpeg aac aac_latm mp3 mp3float opus vorbis flac alac pcm_s16le pcm_s16be pcm_u8 pcm_f32le pcm_s24le pcm_s32le adpcm_ima_wav adpcm_ms ac3 eac3"
+BR2_PACKAGE_FFMPEG_MUXERS="rawvideo s16le"
+BR2_PACKAGE_FFMPEG_DEMUXERS="mov matroska avi mpegts mpegps ogg flac mp3 wav aac ac3 eac3 m4v h264 hevc rawvideo"
+BR2_PACKAGE_FFMPEG_PARSERS="h264 hevc vp8 vp9 av1 mpeg4video mpegvideo mpegaudio aac aac_latm opus vorbis flac ac3 mjpeg"
+BR2_PACKAGE_FFMPEG_BSFS="h264_mp4toannexb hevc_mp4toannexb aac_adtstoasc"
+BR2_PACKAGE_FFMPEG_PROTOCOLS="file pipe"
+BR2_PACKAGE_FFMPEG_FILTERS="scale fps format aresample null anull buffer buffersink abuffer abuffersink"
+# AV1 comes from dav1d (the web fragment builds it too); the other decoders are FFmpeg's own
+BR2_PACKAGE_DAV1D=y

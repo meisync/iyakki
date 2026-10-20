@@ -1,0 +1,14 @@
+{
+  "kind": "tool",
+  "name": "__NAME__",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "title": "__TITLE__",
+  "summary": "A sandboxed tool the assistant can call.",
+  "permissions": [],
+  "min_version": "",
+  "categories": ["tools"],
+  "tags": [],
+  "entry": "tool.json",
+  "module": "module.wat"
+}

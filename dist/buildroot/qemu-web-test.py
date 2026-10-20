@@ -10,7 +10,7 @@ Environment: URLS (space separated; default: the local test page, google.com, yo
 SSH_KEY (a public key file: adds it to the initrd as /etc/iyakki/authorized_keys and forwards host port 2222 to the guest's SSH,
 which is how the helper's log and `ps` can be looked at: `ssh -p 2222 root@127.0.0.1`).
 The local test page (canvas animation, CSS grid, fonts) is served from this machine, reached from the guest as http://10.0.2.2:PORT/ .
-The tile position assumes the launcher's current layout (the BROWSER tile is one row down, one to the right of CHAT).
+The tile choice assumes the launcher's current layout: Tab moves to the Web & Media section, whose first tile is BROWSER.
 """
 import os, shlex, shutil, socket, struct, subprocess, sys, tempfile, time, zlib
 
@@ -104,15 +104,15 @@ try:
     time.sleep(3)
     typ("admin"); keys("tab"); typ("adminpass1"); keys("tab"); typ("adminpass1"); keys("ret")
     time.sleep(8)
-    keys("down", "right", "ret")        # the BROWSER tile
+    keys("tab", "ret")                  # Tab: the Web & Media section, Enter: its first tile, BROWSER
     time.sleep(3)
     ok = True
     for n, url in enumerate(urls, 1):
         keys("ctrl-l") if n > 1 else None
         typ(url); keys("ret")
         time.sleep(6)
-        if n == 1:
-            keys("shift-f")             # the full engine (the second and later addresses are sent to it by Ctrl+L)
+        if n == 1 and not any(h in url for h in ("google.", "youtube.", "youtu.be")):
+            keys("shift-f")             # the full engine (Google and YouTube open in it by themselves) (the second and later addresses are sent to it by Ctrl+L)
         time.sleep(wait)
         ok &= shot(f"{n}") > 30
     print("OK (read the PNGs in %s)" % out if ok else "FAIL: a screenshot looks blank")

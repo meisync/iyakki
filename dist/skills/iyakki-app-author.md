@@ -1,0 +1,20 @@
+---
+name: iyakki-app-author
+description: Create something that extends IYAKKI (tile app, skill, WASM tool, MCP server, agent preset, template, theme, extension) and ship it to a private store: scaffold, test, validate, sign, publish, version
+triggers: new app, create app, custom app, extension, package, publish, private store, iyakki pkg, scaffold, app store, tile
+---
+Use this when the person wants to build and share something for IYAKKI.
+
+0. FIRST pick the target (the PROJECT STATE line "Target" says it). Mentions iyakki, tile, launcher, "in the OS": an IYAKKI tile app (kind tile, skill iyakki-tile-author). Mentions k3s, kubernetes, deploy, service, api, docker: a web service for k3s (not an IYAKKI package). Otherwise ask ONE short question with ask_user, options: IYAKKI tile app, Web service on k3s, MCP server, Skill. Never deploy a tile app to k3s.
+
+1. What an app is: one signed package (IYAKKI-PKG) of a kind: tile (a web page that gets its own launcher tile), skill (text the assistant reads), tool (sandboxed WASM, budgets), mcp (a server run by the MCP tile), agent (a chat preset), template (DASH/TALES/FLOWS), theme, extension (for dash, tales, flows or ide: ext_kind connector, panel, preset, node). Pick the smallest kind that does the job; a skill needs no code and no access.
+2. Scaffold: tool app_scaffold {kind: tile|skill|mcp-python|mcp-node|wasm-tool, name, dir} (tile_scaffold for a tile app) in the workspace. It writes iyakki-app.json (kind, name, version, license, title, summary, permissions, min_version, categories, entry), the code, a README and a test. For agent, template, theme or extension write the JSON payload yourself, set kind and entry in iyakki-app.json, and for extensions set target and ext_kind.
+3. Edit with the person; keep it small. Name: lowercase letters, digits, dashes. Title at most 60 characters, summary at most 140, plain words. Licence: a permissive SPDX name (MIT, Apache-2.0, BSD-3-Clause, ISC). Never put keys, tokens or passwords in any file: read them from the vault or the environment at run time.
+4. Permissions: list only what the app needs, in the store vocabulary: read:/abs/path, write:/abs/path, net:host.example.com, vault:entry-name, run:program. No wildcards, no whole-disk paths. Least permission wins; each one is shown to the person in plain words at install.
+5. Test locally: run the project's own test (python3 tests/test_server.py, node tests/test_server.js, python3 tests/test_skill.py, python3 tests/check_tool.py). Fix until green before anything else.
+6. store_validate {path: "."} runs the install-review checks: manifest, size, permissions, licence, secrets scan, look-alike names. Fix every PROBLEM.
+7. Package and sign (shell, in the project folder): `iyakki pkg keygen me` once (keep me.key private, never commit it), `iyakki pkg pack . --key me.key -o NAME.iyp`, `iyakki pkg verify NAME.iyp`. A trial install on this device: STORE, Settings, install from a file, as your own account.
+8. Publish: tool store_publish {package_path, target?}. It always asks the person, who sees the server, the package and its trust level. The publish token is in their vault (store-token-<catalog id>); never ask for it in chat. If no private store exists, tell them: STORE, Settings, Private store, Deploy to k3s (or platform_deploy with service private-store, they pick the cluster).
+9. Versions only go up: bump version in iyakki-app.json for every release, add a line to CHANGELOG.md, re-run tests, validate, pack, publish. A store refuses a version that is not newer.
+10. Never: skip the secrets scan, widen permissions to make a test pass, publish without the person's approval, reuse a name that looks like someone else's.
+11. Track multi-step work on the feature board (board_list/board_add/board_update, tests=, files=; done only after tests pass). ACT: write files and run builds and tests yourself; never ask the person to. Bugs/failures: own board row with a B- id (never F-); bug_report (failing pods) captures logs; fix, verify, attach the passing run.

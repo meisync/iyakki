@@ -1,0 +1,29 @@
+{
+  "name": "fixture: sign in, then a dynamic shipping form",
+  "allow_domains": ["127.0.0.1"],
+  "base_url": "http://127.0.0.1:8765",
+  "timeout_ms": 8000,
+  "steps": [
+    {"goto": "/form.html"},
+    {"expect": {"visible": {"role": "heading", "name": "Fixture shop"}}},
+    {"fill": {"label": "Email", "value": "ann@example.org"}},
+    {"fill": {"label": "Password", "value": "test-password-only"}},
+    {"click": {"role": "button", "name": "Sign in"}},
+    {"wait_for": {"text": "Signed in as ann@example.org"}},
+    {"select": {"label": "Country", "option": "United States"}},
+    {"wait_for": {"element": {"role": "textbox", "name": "State"}}},
+    {"click": {"role": "button", "name": "Continue"}},
+    {"expect": {"text": "Please enter your state"}},
+    {"fill": {"label": "State", "value": "Ohio"}},
+    {"fill": {"label": "ZIP code", "value": "43004"}},
+    {"click": {"role": "button", "name": "Continue"}},
+    {"wait_for": {"text": "Order step 2: Payment"}},
+    {"expect": {"value": {"label": "ZIP code", "equals": "43004"}}},
+    {"screenshot": "done"},
+    {"goto": "/chat.html"},
+    {"fill": {"label": "Message", "value": "What is the capital of France?"}},
+    {"click": {"role": "button", "name": "Send"}},
+    {"wait_for": {"text": "The capital of France is Paris."}},
+    {"snapshot_assert": "You: What is the capital of France?"}
+  ]
+}

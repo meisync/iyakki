@@ -1,5 +1,5 @@
 # IYAKKI in the browser on K3s / Kubernetes: one pod serving the desktop over HTTPS, data on a volume.
-# Build + load the image first:  docker build -f dist/Dockerfile -t iyakki:0.1.0 .   (then push or `k3s ctr images import`)
+# Build + load the image first:  docker build -f dist/Dockerfile -t iyakki:0.1.0-alpha.1 .   (then push or `k3s ctr images import`)
 #
 # First account (the pod has no screen). Put the password in a Secret first (the namespace is made by the manifest, so create it ahead):
 #   kubectl create namespace iyakki-web
@@ -53,7 +53,7 @@ spec:
       initContainers:
         # makes the first account from the Secret before the server starts; nothing happens if it already exists
         - name: first-account
-          image: iyakki:0.1.0
+          image: iyakki:0.1.0-alpha.1
           imagePullPolicy: IfNotPresent
           args: ["user", "add", "admin", "--role", "admin", "--if-missing", "--password-file", "/secret/password"]
           securityContext:
@@ -66,7 +66,7 @@ spec:
             - { name: secret, mountPath: /secret, readOnly: true }
       containers:
         - name: iyakki
-          image: iyakki:0.1.0
+          image: iyakki:0.1.0-alpha.1
           imagePullPolicy: IfNotPresent
           args: ["serve"]
           env:

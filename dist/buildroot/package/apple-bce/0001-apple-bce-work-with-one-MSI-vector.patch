@@ -1,0 +1,117 @@
+From: IYAKKI <noreply@iyakki.invalid>
+Subject: [PATCH] apple-bce: work with one MSI vector (no interrupt remapping)
+
+Without interrupt remapping (CONFIG_IRQ_REMAP plus intel_iommu=on), x86 grants
+a PCI function a single MSI vector, and apple_bce_probe() failed with -EINVAL
+("probe with driver apple-bce failed with error -22", then aaudio "No BCE
+available"). With Multiple Message Enable at 0 the device signals every
+message on vector 0, so the mailbox handler (vector 0) and the DMA completion
+handler (vector 4) can share it: the hard handler reads the mailbox and wakes
+the thread, which runs the DMA completions.
+
+Tried on a Mac mini 2018 (Macmini8,1), Linux 6.12.112 without IRQ_REMAP:
+"1 MSI vector(s); mailbox and DMA share vector 0", "handshake done", the VHCI
+bus and the Apple T2 Audio card appear.
+
+Signed-off-by: IYAKKI
+---
+--- a/apple_bce.c
++++ b/apple_bce.c
+@@ -13,6 +13,7 @@
+ static void bce_free_command_queues(struct apple_bce_device *bce);
+ static irqreturn_t bce_handle_mb_irq(int irq, void *dev);
+ static irqreturn_t bce_handle_dma_irq(int irq, void *dev);
++static irqreturn_t bce_handle_shared_irq(int irq, void *dev);
+ static int bce_fw_version_handshake(struct apple_bce_device *bce);
+ static int bce_register_command_queue(struct apple_bce_device *bce, struct bce_queue_memcfg *cfg, int is_sq);
+ 
+@@ -32,10 +33,15 @@
+     }
+     pci_set_master(dev);
+     nvec = pci_alloc_irq_vectors(dev, 1, 8, PCI_IRQ_MSI);
+-    if (nvec < 5) {
++    if (nvec < 1) {
+         status = -EINVAL;
+         goto fail;
+     }
++    /* Without interrupt remapping (CONFIG_IRQ_REMAP and intel_iommu=on), x86 grants a PCI function only one MSI
++       vector. With Multiple Message Enable at 0 the device sends every message on vector 0, so the mailbox
++       (vector 0) and DMA (vector 4) handlers then share that one vector. */
++    if (nvec < 5)
++        dev_info(&dev->dev, "apple-bce: %d MSI vector(s); mailbox and DMA share vector 0\n", nvec);
+ 
+     bce = kzalloc(sizeof(struct apple_bce_device), GFP_KERNEL);
+     if (!bce) {
+@@ -44,6 +50,7 @@
+     }
+ 
+     bce->pci = dev;
++    bce->shared_irq = nvec < 5;
+     pci_set_drvdata(dev, bce);
+ 
+     bce->devt = bce_chrdev;
+@@ -67,10 +74,15 @@
+     spin_lock_init(&bce->queues_lock);
+     ida_init(&bce->queue_ida);
+ 
+-    if ((status = pci_request_irq(dev, 0, bce_handle_mb_irq, NULL, dev, "bce_mbox")))
+-        goto fail;
+-    if ((status = pci_request_irq(dev, 4, NULL, bce_handle_dma_irq, dev, "bce_dma")))
+-        goto fail_interrupt_0;
++    if (bce->shared_irq) {
++        if ((status = pci_request_irq(dev, 0, bce_handle_shared_irq, bce_handle_dma_irq, dev, "bce")))
++            goto fail;
++    } else {
++        if ((status = pci_request_irq(dev, 0, bce_handle_mb_irq, NULL, dev, "bce_mbox")))
++            goto fail;
++        if ((status = pci_request_irq(dev, 4, NULL, bce_handle_dma_irq, dev, "bce_dma")))
++            goto fail_interrupt_0;
++    }
+ 
+     if ((status = dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(37)))) {
+         dev_warn(&dev->dev, "dma: Setting mask failed\n");
+@@ -113,7 +125,8 @@
+ #endif
+     pci_dev_put(bce->pci0);
+ fail_interrupt:
+-    pci_free_irq(dev, 4, dev);
++    if (!bce->shared_irq)
++        pci_free_irq(dev, 4, dev);
+ fail_interrupt_0:
+     pci_free_irq(dev, 0, dev);
+ fail:
+@@ -189,6 +202,14 @@
+     return IRQ_HANDLED;
+ }
+ 
++/* One vector for both: read the mailbox here, then run the DMA completions in the thread. */
++static irqreturn_t bce_handle_shared_irq(int irq, void *dev)
++{
++    struct apple_bce_device *bce = pci_get_drvdata(dev);
++    bce_mailbox_handle_interrupt(&bce->mbox);
++    return IRQ_WAKE_THREAD;
++}
++
+ static irqreturn_t bce_handle_dma_irq(int irq, void *dev)
+ {
+     int i;
+@@ -249,7 +270,8 @@
+ #endif
+     pci_dev_put(bce->pci0);
+     pci_free_irq(dev, 0, dev);
+-    pci_free_irq(dev, 4, dev);
++    if (!bce->shared_irq)
++        pci_free_irq(dev, 4, dev);
+     bce_free_command_queues(bce);
+     pci_iounmap(dev, bce->reg_mem_mb);
+     pci_iounmap(dev, bce->reg_mem_dma);
+--- a/apple_bce.h
++++ b/apple_bce.h
+@@ -28,6 +28,7 @@
+     struct bce_queue_cmdq *cmd_cmdq;
+     struct bce_queue_sq *int_sq_list[BCE_MAX_QUEUE_COUNT];
+     bool is_being_removed;
++    bool shared_irq;
+ 
+     dma_addr_t saved_data_dma_addr;
+     void *saved_data_dma_ptr;

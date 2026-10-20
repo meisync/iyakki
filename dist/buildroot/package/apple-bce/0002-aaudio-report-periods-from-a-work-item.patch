@@ -1,0 +1,152 @@
+From: IYAKKI <noreply@iyakki.invalid>
+Subject: [PATCH] aaudio: report periods from a work item, not the BCE completion handler
+
+aaudio_handle_timestamp() called snd_pcm_period_elapsed() from the BCE DMA
+completion handler, which holds queues_lock (a spinlock). At the end of a
+drain (`aplay file.wav`) ALSA stops the stream from inside period_elapsed;
+the stop sends aaudio_cmd_stop_io() and sleeps for the T2's reply, which can
+only arrive through that same handler: "BUG: scheduling while atomic:
+irq/NN-bce", a 500 ms timeout and "aaudio_handle_reply: No queued item found".
+The period update now runs from a work item per stream; the work is cancelled
+on close and before the card is freed.
+
+Signed-off-by: IYAKKI
+---
+--- a/audio/audio.h
++++ b/audio/audio.h
+@@ -2,6 +2,7 @@
+ #define AAUDIO_H
+ 
+ #include <linux/types.h>
++#include <linux/workqueue.h>
+ #include <sound/pcm.h>
+ #include "../apple_bce.h"
+ #include "protocol_bce.h"
+@@ -67,6 +68,12 @@
+     ktime_t remote_timestamp;
+     snd_pcm_sframes_t frame_min;
+     int started;
++
++    /* Period updates run from a work item, never from the BCE completion handler (which holds a spinlock):
++       at the end of a drain ALSA stops the stream from period_elapsed, and stopping waits for the T2's reply. */
++    struct work_struct period_work;
++    struct snd_pcm_substream *period_substream;
++    bool period_work_ready;
+ };
+ struct aaudio_subdevice {
+     struct aaudio_device *a;
+--- a/audio/pcm.c
++++ b/audio/pcm.c
+@@ -117,7 +117,10 @@
+ 
+ static int aaudio_pcm_close(struct snd_pcm_substream *substream)
+ {
++    struct aaudio_stream *stream = aaudio_pcm_stream(substream);
+     pr_debug("aaudio_pcm_close\n");
++    if (stream->period_work_ready)
++        cancel_work_sync(&stream->period_work);
+     return 0;
+ }
+ 
+@@ -247,11 +250,30 @@
+         .mmap    =     snd_pcm_lib_mmap_iomem
+ };
+ 
++static void aaudio_period_work(struct work_struct *work)
++{
++    struct aaudio_stream *stream = container_of(work, struct aaudio_stream, period_work);
++    struct snd_pcm_substream *substream = READ_ONCE(stream->period_substream);
++    unsigned long flags;
++
++    if (!substream)
++        return;
++    snd_pcm_stream_lock_irqsave(substream, flags);
++    if (stream->waiting_for_first_ts) {
++        stream->waiting_for_first_ts = false;
++        snd_pcm_stream_unlock_irqrestore(substream, flags);
++        return;
++    }
++    snd_pcm_stream_unlock_irqrestore(substream, flags);
++    snd_pcm_period_elapsed(substream);
++}
++
+ int aaudio_create_pcm(struct aaudio_subdevice *sdev)
+ {
+     struct snd_pcm *pcm;
+     struct aaudio_alsa_pcm_id_mapping *id_mapping;
+     int err;
++    size_t i;
+ 
+     if (!sdev->is_pcm || (sdev->in_stream_cnt == 0 && sdev->out_stream_cnt == 0)) {
+         return -EINVAL;
+@@ -271,6 +293,14 @@
+         return err;
+     pcm->private_data = sdev;
+     pcm->nonatomic = 1;
++    for (i = 0; i < sdev->in_stream_cnt; i++) {
++        INIT_WORK(&sdev->in_streams[i].period_work, aaudio_period_work);
++        sdev->in_streams[i].period_work_ready = true;
++    }
++    for (i = 0; i < sdev->out_stream_cnt; i++) {
++        INIT_WORK(&sdev->out_streams[i].period_work, aaudio_period_work);
++        sdev->out_streams[i].period_work_ready = true;
++    }
+     sdev->pcm = pcm;
+     strcpy(pcm->name, sdev->uid);
+     snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &aaudio_pcm_ops);
+@@ -280,19 +310,14 @@
+ 
+ static void aaudio_handle_stream_timestamp(struct snd_pcm_substream *substream, ktime_t timestamp)
+ {
+-    unsigned long flags;
+     struct aaudio_stream *stream;
+ 
+     stream = aaudio_pcm_stream(substream);
+-    snd_pcm_stream_lock_irqsave(substream, flags);
+-    stream->remote_timestamp = timestamp;
+-    if (stream->waiting_for_first_ts) {
+-        stream->waiting_for_first_ts = false;
+-        snd_pcm_stream_unlock_irqrestore(substream, flags);
++    WRITE_ONCE(stream->remote_timestamp, timestamp);
++    if (!stream->period_work_ready)
+         return;
+-    }
+-    snd_pcm_stream_unlock_irqrestore(substream, flags);
+-    snd_pcm_period_elapsed(substream);
++    WRITE_ONCE(stream->period_substream, substream);
++    schedule_work(&stream->period_work);
+ }
+ 
+ void aaudio_handle_timestamp(struct aaudio_subdevice *sdev, ktime_t os_timestamp, u64 dev_timestamp)
+--- a/audio/audio.c
++++ b/audio/audio.c
+@@ -157,7 +157,16 @@
+ {
+     struct aaudio_subdevice *sdev;
+     struct aaudio_device *aaudio = pci_get_drvdata(dev);
++    size_t i;
+ 
++    list_for_each_entry(sdev, &aaudio->subdevice_list, list) {
++        for (i = 0; i < sdev->in_stream_cnt; i++)
++            if (sdev->in_streams[i].period_work_ready)
++                cancel_work_sync(&sdev->in_streams[i].period_work);
++        for (i = 0; i < sdev->out_stream_cnt; i++)
++            if (sdev->out_streams[i].period_work_ready)
++                cancel_work_sync(&sdev->out_streams[i].period_work);
++    }
+     snd_card_free(aaudio->card);
+     while (!list_empty(&aaudio->subdevice_list)) {
+         sdev = list_first_entry(&aaudio->subdevice_list, struct aaudio_subdevice, list);
+@@ -339,6 +348,12 @@
+ static void aaudio_free_dev(struct aaudio_subdevice *sdev)
+ {
+     size_t i;
++    for (i = 0; i < sdev->in_stream_cnt; i++)
++        if (sdev->in_streams[i].period_work_ready)
++            cancel_work_sync(&sdev->in_streams[i].period_work);
++    for (i = 0; i < sdev->out_stream_cnt; i++)
++        if (sdev->out_streams[i].period_work_ready)
++            cancel_work_sync(&sdev->out_streams[i].period_work);
+     for (i = 0; i < sdev->in_stream_cnt; i++) {
+         if (sdev->in_streams[i].alsa_hw_desc)
+             kfree(sdev->in_streams[i].alsa_hw_desc);

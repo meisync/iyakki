@@ -285,6 +285,26 @@ CONFIG_THERMAL=y
 CONFIG_PARAVIRT=y
 CONFIG_SCSI_VIRTIO=y
 
+# ---- memory: compressed swap in RAM (zram), see docs/ZRAM-AND-INSTALL.md ------------------------------------------
+# iyakki-core sets /dev/zram0 up at boot (boot.rs, iyakki-zram). Built in, so it works before any module loads.
+# Compressors: zstd (default), lz4, lzo-rle (kept as the fallback), all built in.
+CONFIG_SWAP=y
+CONFIG_ZSMALLOC=y
+CONFIG_ZRAM=y
+CONFIG_ZRAM_BACKEND_ZSTD=y
+CONFIG_ZRAM_BACKEND_LZ4=y
+CONFIG_ZRAM_BACKEND_LZO=y
+CONFIG_ZRAM_DEF_COMP_ZSTD=y
+CONFIG_CRYPTO_ZSTD=y
+CONFIG_CRYPTO_LZ4=y
+CONFIG_CRYPTO_LZO=y
+# zswap (optional second tier in front of a swap file; off unless iyakki.zswap=on)
+CONFIG_ZSWAP=y
+CONFIG_ZSWAP_COMPRESSOR_DEFAULT_ZSTD=y
+CONFIG_ZSWAP_ZPOOL_DEFAULT_ZSMALLOC=y
+# memory pressure figures (/proc/pressure/memory) for the SYSTEM tile
+CONFIG_PSI=y
+
 # ---- hardening ---------------------------------------------------------------
 CONFIG_STACKPROTECTOR_STRONG=y
 CONFIG_RANDOMIZE_BASE=y

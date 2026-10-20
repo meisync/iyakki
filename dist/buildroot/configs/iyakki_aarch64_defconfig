@@ -22,6 +22,8 @@ BR2_PACKAGE_KMOD=y
 BR2_PACKAGE_KMOD_TOOLS=y
 BR2_PACKAGE_IPROUTE2=y
 BR2_PACKAGE_DROPBEAR=y
+# the SSH client of the CLI tile (ssh, scp, dbclient, dropbearkey): already part of Dropbear, kept on on purpose (docs/CLI-SSH.md)
+BR2_PACKAGE_DROPBEAR_CLIENT=y
 BR2_PACKAGE_IW=y
 BR2_PACKAGE_WIRELESS_REGDB=y
 BR2_PACKAGE_WPA_SUPPLICANT=y
@@ -34,6 +36,9 @@ BR2_PACKAGE_ALSA_UTILS=y
 BR2_PACKAGE_ALSA_UTILS_APLAY=y
 BR2_PACKAGE_ALSA_UTILS_AMIXER=y
 BR2_PACKAGE_CA_CERTIFICATES=y
+# the time zone database (/usr/share/zoneinfo, public domain): every zone for Settings -> Time and correct daylight saving
+BR2_PACKAGE_TZDATA=y
+BR2_PACKAGE_TZDATA_ZONELIST="default"
 BR2_TARGET_ROOTFS_CPIO=y
 BR2_TARGET_ROOTFS_CPIO_GZIP=y
 BR2_LINUX_KERNEL_IMAGE=y

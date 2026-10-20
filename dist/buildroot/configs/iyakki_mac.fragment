@@ -1,0 +1,20 @@
+# OPTIONAL "mac" variant (x86_64 only): bare-metal Intel Macs such as the Mac mini 2014 (Macmini7,1). NOT part of the default
+# build and not built by default:  dist/buildroot/build.sh mac   (a future  ./run.sh build-mac).  See docs/MAC-HARDWARE.md.
+# It adds three things to the libre defconfig:
+#   1. the redistributable mainline drivers Macs need, as a second kernel fragment (board/iyakki/linux-mac.fragment);
+#   2. the linux-firmware blobs of the `hw` variant (iyakki_firmware.fragment is appended by build.sh before this file), which
+#      already carry brcmfmac43602-pcie.bin (BCM43602 Wi-Fi), i915 and tg3 files; nothing proprietary beyond what `hw` has;
+#   3. nothing for Broadcom Bluetooth (BCM20702 .hcd) and nothing for the BCM4360 Wi-Fi of the Mac mini 2014: Buildroot has
+#      no package for them and Broadcom's licence does not let us ship them. Those come as driver packs the person supplies
+#      (STORE, Drivers).
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki/linux.fragment $(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki/linux-mac.fragment"
+# Kernel patches for this variant only (board/iyakki/patches/linux/<kernel version>/*.patch; Buildroot applies them in order):
+#   0001 keeps the firmware's CDCLK on Skylake..Coffee Lake so i915 does not turn the screen off at load (Mac mini 2018, see
+#        docs/MAC-HARDWARE.md). Listed in BOUNDARY.md rule 3. build.sh rebuilds the kernel when these patches change.
+#   0002 Touch Bar keyboard mode + backlight (hid-appletb-kbd/-bl, upstream 6.15, files from v6.18), 0003 T2 trackpad in bcm5974
+#        (t2linux), 0004 Radeon Pro 5300M boot fix for the MacBookPro16,1 only (t2linux). T2 MacBooks; GPL-2.0, sources in headers.
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki/patches $(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki/patches-sb"
+# 4. apple-bce (t2linux, GPL-2.0, out of tree; package/apple-bce): the T2 chip's internal USB and its sound card "Apple T2 Audio"
+#    (built-in speaker, headphone jack) on T2 Macs such as the Mac mini 2018. Built against this image's kernel, loaded by its
+#    PCI id at boot. Tried by hand on a Mac mini 2018 (docs/MAC-HARDWARE.md section 6); this package itself has not been built yet.
+BR2_PACKAGE_APPLE_BCE=y

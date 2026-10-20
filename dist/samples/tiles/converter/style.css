@@ -1,0 +1,5 @@
+body { background: #10162b; color: #e8ecff; font-family: sans-serif; margin: 0; padding: 24px; }
+h1 { font-size: 22px; margin: 0 0 12px 0; }
+input, select { background: #1b2442; color: #ffffff; padding: 8px; border: 1px solid #4f6bd8; }
+button { background: #26335f; color: #ffffff; padding: 8px 16px; border: 1px solid #4f6bd8; }
+output { display: block; font-size: 28px; margin-top: 14px; }
