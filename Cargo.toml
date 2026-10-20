@@ -24,10 +24,16 @@ members = [
     "crates/iyakki-netscan",
     "crates/iyakki-remote",
     "crates/iyakki-webview",
+    "crates/iyakki-data",
+    "crates/iyakki-drivers",
+    "crates/iyakki-flow",
+    "crates/iyakki-zram",
+    "crates/iyakki-relcheck",
+    "crates/iyakki-store-server",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -47,6 +53,10 @@ iyakki-storage = { path = "crates/iyakki-storage" }
 iyakki-edit = { path = "crates/iyakki-edit" }
 iyakki-hwinfo = { path = "crates/iyakki-hwinfo" }
 iyakki-netscan = { path = "crates/iyakki-netscan" }
+iyakki-data = { path = "crates/iyakki-data" }
+iyakki-drivers = { path = "crates/iyakki-drivers" }
+iyakki-flow = { path = "crates/iyakki-flow" }
+iyakki-zram = { path = "crates/iyakki-zram" }
 thiserror = "2"
 log = "0.4"
 wasmtime = { version = "*", default-features = false, features = ["runtime", "cranelift", "wat", "std"] }

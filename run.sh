@@ -15,7 +15,7 @@ IYAKKI launcher
   ./run.sh disk       add 8G | list | rm vda: the window's virtual disks
                       first run: create the administrator account on the setup screen
   ./run.sh vm         boot the real ISO in QEMU (BIOS + GRUB + kernel + iyakki as PID 1)
-  ./run.sh vm-direct  same, skipping GRUB (faster boot); add --ssh to reach it with: ssh -i ~/.ssh/afos_diag -p 2222 root@127.0.0.1
+  ./run.sh vm-direct  same, skipping GRUB (faster boot); add --ssh to reach it with: ssh -i ~/.ssh/iyakki_diag -p 2222 root@127.0.0.1
   ./run.sh vm-disk    boot an installed disk like the USB stick (GRUB, data partition that keeps your account between runs)
                       add --uefi for UEFI instead of BIOS;  ./run.sh vm-reset  forgets that disk
   ./run.sh vm-arm     boot the ARM64 image the way an Apple Silicon VM does (UEFI; slow without KVM, but real);  build-arm builds it
@@ -23,8 +23,15 @@ IYAKKI launcher
   ./run.sh test       run the whole automated test suite
   ./run.sh vmtest     boot in QEMU, type into the login screen, save screenshots
   ./run.sh build      build the ISO (first time: ~30-40 min, downloads ~1 GB)
+  ./run.sh build-mac  OPTIONAL image for Intel Macs (Mac mini 2014 and similar): adds applesmc, hid_apple, Cirrus audio and the Wi-Fi
+                      firmware files; see docs/MAC-HARDWARE.md. Not part of the default build.
   ./run.sh build-web  OPTIONAL big image with the full web engine (WPE WebKit in the shell, Mesa, GStreamer): YouTube and modern
                       sites; hours to build, needs ~30 GB disk and 16+ GB RAM; add --h264 for H.264/AAC; see docs/FULL-BROWSER.md
+  ./run.sh build-macweb  OPTIONAL: build-mac and build-web in one image (Intel Macs such as the Mac mini 2014 that should run YouTube and modern
+                      sites); output target/buildroot-macweb; --h264 for H.264/AAC, --crocus for Mesa's Haswell GPU driver (hours more); docs/YOUTUBE-ON-IYAKKI.md
+  ./run.sh alpha-check  the gate before an alpha: build, tests, licences, docs links, versions, secrets, QEMU smoke tests (--dry: fast checks only)
+  ./run.sh check-macos  cargo check of the window crates for the macOS targets (compiles only; skips when the Rust target is not installed)
+  ./run.sh release [version]  collect the images, sign them, write release.json and the download page (docs/RELEASING.md)
   ./run.sh cli ARGS   run the iyakki command line, e.g.  ./run.sh cli run tests/fixtures/hello.wat
 
 Reset the desktop demo:  rm -rf ~/.local/share/iyakki-dev
@@ -115,31 +122,41 @@ case "${1:-help}" in
     echo "Screenshots in /tmp/iyakki-screens:"; ls /tmp/iyakki-screens
     command -v xdg-open >/dev/null && xdg-open /tmp/iyakki-screens >/dev/null 2>&1 || true ;;
   test)
+    # tests leak temporary folders: keep them on the disk (not in a small or RAM-backed /tmp) and clean old ones afterwards
+    . dist/release/env.sh; trap iyakki_tmp_clean EXIT
     cargo test --workspace
     (cd crates/iyakki-gui && cargo build -q --bin iyakki-desktop && echo "iyakki-gui: builds") ;;
   vmtest)
     [ -f "$IMG/rootfs.cpio.zst" ] || { echo "No image yet. Run:  ./run.sh build" >&2; exit 1; }
     sudo python3 dist/buildroot/qemu-ui-test.py target/buildroot-libre /tmp/iyakki-qemu
     echo "Screenshots in /tmp/iyakki-qemu" ;;
-  build) exec dist/buildroot/build.sh libre ;;
+  # The build commands go through smart-build.sh: it reuses the images when nothing changed, repacks when only the iyakki binary
+  # changed, and builds only what changed otherwise (docs/BUILD-INCREMENTAL.md). --force-full, --clean, --dry-run are passed on.
+  build) shift; exec dist/buildroot/smart-build.sh libre ${1+"$@"} ;;
+  build-mac) shift; exec dist/buildroot/smart-build.sh mac ${1+"$@"} ;;
+  build-macweb)
+    shift
+    SB=()
+    for a in "$@"; do case "$a" in --h264) export WEB_H264=1 ;; --iris) export WEB_IRIS=1 ;; --crocus) export WEB_CROCUS=1 ;; --force-full|--clean|--dry-run) SB+=("$a") ;; *) echo "build-macweb: unknown option $a" >&2; exit 2 ;; esac; done
+    exec dist/buildroot/smart-build.sh macweb ${SB[@]+"${SB[@]}"} ;;
   build-web)
     shift
-    [ "${1:-}" = "--h264" ] && export WEB_H264=1
-    exec dist/buildroot/build.sh web ;;
+    SB=(); for a in "$@"; do case "$a" in --h264) export WEB_H264=1 ;; *) SB+=("$a") ;; esac; done
+    exec dist/buildroot/smart-build.sh web ${SB[@]+"${SB[@]}"} ;;
+  # macweb without compiling WebKit again: the web rootfs with the mac kernel, modules and firmware (minutes, not hours)
+  build-macweb-layered) shift; exec dist/buildroot/repack.sh macweb --base target/buildroot-web --kernel-from target/buildroot-mac --cargo ${1+"$@"} ;;
+  build-changed) shift; exec dist/buildroot/changed.sh ${1+"$@"} ;;
   release)
-    # ./run.sh release [version]: copy the built images to target/release-<version>/, sum and sign them, write the download page.
-    # The signing key is made once in ~/.config/iyakki/release.key (back it up; the public half is printed).
-    VER="${2:-$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)}"
-    DEST="$ROOT/target/release-$VER"
-    mkdir -p "$DEST" "$HOME/.config/iyakki"
-    for f in "$IMG/iyakki-x86_64.iso" "$IMG/iyakki-install-x86_64.img" "$ROOT/target/buildroot-aarch64/images/iyakki-aarch64.img"; do
-      [ -f "$f" ] && ln -f "$f" "$DEST/$(basename "$f")" 2>/dev/null || { [ -f "$f" ] && cp "$f" "$DEST/"; }
-    done
-    [ -n "$(ls -A "$DEST")" ] || { echo "No images to release. Build them first: ./run.sh build  (and ./run.sh build-arm)" >&2; exit 1; }
-    cargo build -q --release -p iyakki-core
-    [ -f "$HOME/.config/iyakki/release.key" ] || target/release/iyakki release keygen "$HOME/.config/iyakki/release.key"
-    target/release/iyakki release sign "$DEST" --key "$HOME/.config/iyakki/release.key" --version "$VER"
-    echo "Release folder: $DEST" ;;
+    # ./run.sh release [version] [--with-web] [--with-mac] [--with-macweb] [--no-window] [--allow-stale] [--dry-run]
+    # collects images + window tarball + documents in target/release-<version>/, signs them (key: ~/.config/iyakki/release.key,
+    # made once: back it up), writes release.json and the download page. Details: docs/RELEASING.md
+    shift; exec dist/release/release.sh "$@" ;;
+  alpha-check)
+    # the gate before an alpha: build, test, licences, docs links, versions, secrets, QEMU smoke tests -> PASS/FAIL table
+    shift; exec dist/release/alpha-check.sh "$@" ;;
+  check-macos)
+    # does the code still compile for macOS (cargo check of the window's crates for the installed apple-darwin targets)? Never links or runs
+    shift; exec dist/release/check-macos.sh "$@" ;;
   cli) shift; exec cargo run -q -p iyakki-core -- "$@" ;;
   help|-h|--help) usage ;;
   *) usage; exit 2 ;;

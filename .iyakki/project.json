@@ -1,0 +1,15 @@
+{
+  "name": "iyakki",
+  "k8s": {
+    "profile": "",
+    "namespace": "iyakki-dev",
+    "selector": "",
+    "kubeconfig": ""
+  },
+  "features_file": "FEATURES.md",
+  "commands": {
+    "test": "cargo test -p iyakki-core --test feature_matrix",
+    "run": "",
+    "build": "cargo build --workspace"
+  }
+}

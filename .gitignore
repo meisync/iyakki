@@ -18,3 +18,37 @@ authorized_keys
 # editor and OS
 .DS_Store
 *.swp
+
+# AI IDE: the advisory lock of an open workspace
+.iyakki/lock
+
+# release engineering: backups, rejects, local state of an open workspace (the project file stays), ssh keys
+*.bak
+*.orig
+*.rej
+.iyakki/*
+!.iyakki/project.json
+# the shared project context (decisions, constraints, gotchas for the whole team and every agent) is committed with the project: the data and its
+# readable mirror (notes.json / NOTES.md are the first version's names, still read)
+!.iyakki/context.json
+!.iyakki/CONTEXT.md
+!.iyakki/notes.json
+!.iyakki/NOTES.md
+id_rsa*
+id_ed25519*
+.netrc
+
+# Broadcom's proprietary Wi-Fi driver is never committed or shipped: the pack builder's output, downloads, built modules and keys
+dist/drivers/out/
+*.ko
+*.ko.*
+wl-owner.key
+
+# Indic voice models (AI4Bharat Indic-TTS and its ONNX exports): never committed, never bundled
+.cache/iyakki-tts/
+iyakki-tts/
+tts/indic/
+dist/tts-indic/models/
+dist/tts-indic/venv/
+*.onnx
+*.pth
