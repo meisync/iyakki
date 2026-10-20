@@ -23,6 +23,12 @@ pub struct UpstreamResponse {
 /// Transport used by the proxy; swap in a fake for tests.
 pub trait Upstream: Send + Sync {
     fn request(&self, method: &str, url: &str, headers: &[(String, String)], body: &[u8]) -> Result<UpstreamResponse, String>;
+
+    /// Like `request`, also returning the response headers (names lower-cased). The default has none (FLOWS reads `Retry-After`
+    /// and the headers of a reply through this; a transport that can report them overrides it).
+    fn request_full(&self, method: &str, url: &str, headers: &[(String, String)], body: &[u8]) -> Result<(UpstreamResponse, Vec<(String, String)>), String> {
+        self.request(method, url, headers, body).map(|r| (r, Vec::new()))
+    }
 }
 
 /// The start of a streamed response: status and headers now, the body as it arrives.
@@ -192,10 +198,52 @@ pub mod https {
             let agent = ureq::Agent::config_builder().max_redirects(0).http_status_as_error(false).timeout_global(Some(timeout)).build().new_agent();
             Self { agent }
         }
+
+        /// Like [`with_timeout`](Self::with_timeout) with the options a data source may need: an extra CA certificate (PEM)
+        /// to trust, switching certificate checks off (the caller shows a warning), a proxy address, and a client
+        /// certificate with its key (PEM) for mutual TLS.
+        pub fn with_options(o: &HttpOptions) -> Result<Self, String> {
+            use ureq::tls::{Certificate, ClientCert, PrivateKey, RootCerts, TlsConfig};
+            let mut tls = TlsConfig::builder().disable_verification(o.insecure);
+            if let Some(pem) = &o.ca_pem {
+                let cert = Certificate::from_pem(pem).map_err(|e| format!("the CA certificate file is not valid PEM: {e}"))?;
+                tls = tls.root_certs(RootCerts::new_with_certs(&[cert]));
+            }
+            match (&o.client_cert_pem, &o.client_key_pem) {
+                (Some(c), Some(k)) => {
+                    let cert = Certificate::from_pem(c).map_err(|e| format!("the client certificate is not valid PEM: {e}"))?;
+                    let key = PrivateKey::from_pem(k).map_err(|e| format!("the client key is not valid PEM: {e}"))?;
+                    tls = tls.client_cert(Some(ClientCert::new_with_certs(&[cert], key)));
+                }
+                (None, None) => {}
+                _ => return Err("a client certificate needs both the certificate file and the key".into()),
+            }
+            let proxy = match &o.proxy {
+                Some(p) if !p.is_empty() => Some(ureq::Proxy::new(p).map_err(|e| format!("the proxy address is not valid: {e}"))?),
+                _ => None,
+            };
+            let agent = ureq::Agent::config_builder().max_redirects(0).http_status_as_error(false).timeout_global(Some(o.timeout)).tls_config(tls.build()).proxy(proxy).build().new_agent();
+            Ok(Self { agent })
+        }
+    }
+
+    /// What [`UreqUpstream::with_options`] takes.
+    #[derive(Clone, Default)]
+    pub struct HttpOptions {
+        pub timeout: std::time::Duration,
+        pub ca_pem: Option<Vec<u8>>,
+        pub insecure: bool,
+        pub proxy: Option<String>,
+        pub client_cert_pem: Option<Vec<u8>>,
+        pub client_key_pem: Option<Vec<u8>>,
     }
 
     impl Upstream for UreqUpstream {
         fn request(&self, method: &str, url: &str, headers: &[(String, String)], body: &[u8]) -> Result<UpstreamResponse, String> {
+            self.request_full(method, url, headers, body).map(|r| r.0)
+        }
+
+        fn request_full(&self, method: &str, url: &str, headers: &[(String, String)], body: &[u8]) -> Result<(UpstreamResponse, Vec<(String, String)>), String> {
             let with_headers = |mut r: ureq::RequestBuilder<ureq::typestate::WithBody>| {
                 for (k, v) in headers {
                     r = r.header(k, v);
@@ -217,8 +265,9 @@ pub mod https {
             }
             .map_err(|e| e.to_string())?;
             let status = resp.status().as_u16();
+            let reply_headers: Vec<(String, String)> = resp.headers().iter().map(|(k, v)| (k.as_str().to_ascii_lowercase(), v.to_str().unwrap_or("").to_string())).collect();
             let body = resp.body_mut().with_config().limit(8 << 20).read_to_vec().map_err(|e| e.to_string())?;
-            Ok(UpstreamResponse { status, body })
+            Ok((UpstreamResponse { status, body }, reply_headers))
         }
     }
 
@@ -229,11 +278,18 @@ pub mod https {
 
     impl Default for UreqStreamer {
         fn default() -> Self {
+            Self::with_response_timeout(std::time::Duration::from_secs(15))
+        }
+    }
+
+    impl UreqStreamer {
+        /// Waits up to `first_byte` for the answer to start (a local model that has to be loaded first needs minutes).
+        pub fn with_response_timeout(first_byte: std::time::Duration) -> Self {
             let agent = ureq::Agent::config_builder()
                 .max_redirects(0)
                 .http_status_as_error(false)
                 .timeout_connect(Some(std::time::Duration::from_secs(10)))
-                .timeout_recv_response(Some(std::time::Duration::from_secs(15)))
+                .timeout_recv_response(Some(first_byte))
                 .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Iyakki/0.1")
                 .build()
                 .new_agent();
@@ -271,6 +327,32 @@ pub mod https {
         agent: ureq::Agent,
     }
 
+    /// Unpack a gzip stream (RFC 1952) with the deflate decoder already in the workspace; the result is capped at `limit` bytes.
+    pub fn gunzip(data: &[u8], limit: usize) -> Result<Vec<u8>, String> {
+        if data.len() < 18 || data[0] != 0x1f || data[1] != 0x8b || data[2] != 8 {
+            return Err("not a gzip stream".into());
+        }
+        let flags = data[3];
+        let mut at = 10;
+        if flags & 4 != 0 {
+            let n = *data.get(at).ok_or("short header")? as usize | (*data.get(at + 1).ok_or("short header")? as usize) << 8;
+            at += 2 + n;
+        }
+        for bit in [8u8, 16] {
+            if flags & bit != 0 {
+                at += data.get(at..).ok_or("short header")?.iter().position(|&b| b == 0).ok_or("bad header")? + 1;
+            }
+        }
+        if flags & 2 != 0 {
+            at += 2;
+        }
+        let end = data.len() - 8;
+        if at >= end {
+            return Err("short stream".into());
+        }
+        miniz_oxide::inflate::decompress_to_vec_with_limit(&data[at..end], limit).map_err(|e| format!("{:?}", e.status))
+    }
+
     /// Larger pages are refused instead of filling memory.
     pub const MAX_PAGE: u64 = 12 << 20;
     /// How much of a video or audio file is read to describe it.
@@ -298,9 +380,9 @@ pub mod https {
 
         fn send(&self, req: &iyakki_web::Request) -> Result<iyakki_web::Response, String> {
             let target = req.url.to_string();
-            let accept = "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5";
+            let accept = "text/html,application/xhtml+xml,application/rss+xml;q=0.9,application/atom+xml;q=0.9,application/xml;q=0.8,text/plain;q=0.8,*/*;q=0.5";
             let with = |mut r: ureq::RequestBuilder<ureq::typestate::WithBody>| {
-                r = r.header("Accept", accept).header("Accept-Language", "en;q=0.9,*;q=0.5");
+                r = r.header("Accept", accept).header("Accept-Language", "en-US,en;q=0.9,*;q=0.5").header("Accept-Encoding", "gzip");
                 if !req.cookie.is_empty() {
                     r = r.header("Cookie", &req.cookie);
                 }
@@ -310,7 +392,7 @@ pub mod https {
                 r
             };
             let without = |mut r: ureq::RequestBuilder<ureq::typestate::WithoutBody>| {
-                r = r.header("Accept", accept).header("Accept-Language", "en;q=0.9,*;q=0.5");
+                r = r.header("Accept", accept).header("Accept-Language", "en-US,en;q=0.9,*;q=0.5").header("Accept-Encoding", "gzip");
                 if !req.cookie.is_empty() {
                     r = r.header("Cookie", &req.cookie);
                 }
@@ -344,7 +426,11 @@ pub mod https {
                 let content_length = announced.or(Some(body.len() as u64));
                 return Ok(iyakki_web::Response { status, location, content_type, set_cookies, body, content_length, max_age: None });
             }
-            let body = resp.body_mut().with_config().limit(MAX_PAGE).read_to_vec().map_err(|e| format!("the page could not be read completely ({e}); pages over {} MB are not opened", MAX_PAGE >> 20))?;
+            let gzip = header("content-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("gzip"));
+            let mut body = resp.body_mut().with_config().limit(MAX_PAGE).read_to_vec().map_err(|e| format!("the page could not be read completely ({e}); pages over {} MB are not opened", MAX_PAGE >> 20))?;
+            if gzip {
+                body = gunzip(&body, MAX_PAGE as usize).map_err(|e| format!("the page was compressed and could not be unpacked ({e})"))?;
+            }
             Ok(iyakki_web::Response { status, location, content_type, set_cookies, body, content_length: None, max_age })
         }
     }
@@ -354,6 +440,18 @@ pub mod https {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[cfg(feature = "https")]
+    #[test]
+    fn gzip_bodies_are_unpacked() {
+        let raw = b"hello hello hello hello, a page of news".repeat(20);
+        let mut gz = vec![0x1f, 0x8b, 8, 8, 0, 0, 0, 0, 0, 3, b'a', b'.', b't', b'x', b't', 0];
+        gz.extend(miniz_oxide::deflate::compress_to_vec(&raw, 6));
+        gz.extend([0u8; 8]);
+        assert_eq!(https::gunzip(&gz, 1 << 20).unwrap(), raw);
+        assert!(https::gunzip(&gz, 100).is_err(), "the size cap holds");
+        assert!(https::gunzip(b"plain text that is not gzip at all", 100).is_err());
+    }
 
     type Seen = Vec<(String, Vec<(String, String)>)>;
     struct Fake {

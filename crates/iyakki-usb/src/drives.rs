@@ -89,6 +89,16 @@ pub fn verdict(d: &Drive, image: &Path) -> Verdict {
     if d.removable || d.usb { Verdict::Ok } else { Verdict::Internal }
 }
 
+/// The logical sector size of a drive: Linux reads it from `/sys/block/<name>/queue/logical_block_size`; elsewhere (and when
+/// unknown) 512.
+pub fn logical_sector(d: &Drive) -> u32 {
+    logical_sector_in(Path::new("/sys"), &d.name)
+}
+
+pub fn logical_sector_in(sys: &Path, name: &str) -> u32 {
+    std::fs::read_to_string(sys.join("block").join(name).join("queue/logical_block_size")).ok().and_then(|t| t.trim().parse().ok()).filter(|n| *n >= 512).unwrap_or(512)
+}
+
 fn read(p: &Path) -> String {
     std::fs::read_to_string(p).unwrap_or_default().trim().to_string()
 }

@@ -2,9 +2,11 @@
 //! accounts of this machine and streams their screen to a canvas, taking keys and mouse back. Every tile works at once
 //! because the browser only ever sees pixels; no tile needs a web version.
 
+pub mod devserver;
 pub mod http;
 pub mod input;
 pub mod page;
+pub mod relay;
 pub mod screen;
 pub mod server;
 pub mod session;

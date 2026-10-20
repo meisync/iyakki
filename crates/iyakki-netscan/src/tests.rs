@@ -84,6 +84,15 @@ fn openai_compatible_servers_are_found_by_their_models_url() {
 }
 
 #[test]
+fn lemonade_is_found_by_its_health_answer_before_the_openai_check() {
+    let port = http(&[("/api/v1/health", "application/json", "{\"status\":\"ok\",\"version\":\"2026.42.1\",\"model_loaded\":null,\"all_models_loaded\":[],\"max_models\":{\"llm\":1}}"), ("/api/v1/models", "application/json", "{\"data\":[{\"id\":\"Qwen3-0.6B-GGUF\",\"recipe\":\"llamacpp\"},{\"id\":\"SD-Turbo\",\"recipe\":\"sd-cpp\"}]}"), ("/v1/models", "application/json", "{\"data\":[{\"id\":\"Qwen3-0.6B-GGUF\"}]}")], "Content-Type: application/json\r\n");
+    let s = scan_ports(&[port]).services.remove(0);
+    assert_eq!((s.kind, s.name.as_str(), s.confidence), (Kind::LlmServer, "Lemonade Server 2026.42.1", Confidence::High));
+    assert_eq!(s.models, vec!["Qwen3-0.6B-GGUF", "SD-Turbo"]);
+    assert_eq!(s.url.as_deref(), Some(&format!("http://127.0.0.1:{port}/api/v1")[..]));
+}
+
+#[test]
 fn cameras_are_found_by_rtsp_by_their_web_page_and_by_onvif() {
     let rtsp = serve(|mut s| {
         let mut b = [0u8; 512];

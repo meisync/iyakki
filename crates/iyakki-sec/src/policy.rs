@@ -29,11 +29,19 @@ pub enum App {
     Calendar,
     System,
     Media,
+    SrePilot,
     Inbox,
+    Ide,
+    Data,
+    Tales,
+    Store,
+    Dash,
+    Flows,
+    Camera,
 }
 
 impl App {
-    pub const ALL: [App; 18] = [App::Chat, App::Rag, App::Mcp, App::Cli, App::Users, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::Inbox];
+    pub const ALL: [App; 26] = [App::Chat, App::Rag, App::Mcp, App::Cli, App::Users, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -54,7 +62,15 @@ impl App {
             App::Calendar => "calendar",
             App::System => "system",
             App::Media => "media",
+            App::SrePilot => "srepilot",
             App::Inbox => "inbox",
+            App::Ide => "ide",
+            App::Data => "data",
+            App::Store => "store",
+            App::Tales => "tales",
+            App::Dash => "dash",
+            App::Flows => "flows",
+            App::Camera => "camera",
         }
     }
 
@@ -63,6 +79,8 @@ impl App {
         match self {
             App::Cli => "CLI".to_string(),
             App::Scan => "NET SCAN".to_string(),
+            App::SrePilot => "SRE PILOT".to_string(),
+            App::Ide => "AI IDE".to_string(),
             other => other.id().to_uppercase(),
         }
     }
@@ -115,6 +133,51 @@ pub enum CliLevel {
     Full,
 }
 
+/// What the assistant may do in the person's own browser tab (the full web engine): see `docs/BROWSER-AGENT.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserAgent {
+    /// No browser tools at all.
+    Off,
+    /// Open pages, snapshots, screenshots, scroll, wait: nothing is clicked or typed.
+    ReadOnly,
+    /// As read-only, and click/type/select/submit after the person's per-domain approval.
+    Interactive,
+}
+
+impl BrowserAgent {
+    pub const ALL: [BrowserAgent; 3] = [BrowserAgent::Off, BrowserAgent::ReadOnly, BrowserAgent::Interactive];
+    pub fn name(self) -> &'static str {
+        match self {
+            BrowserAgent::Off => "off",
+            BrowserAgent::ReadOnly => "read_only",
+            BrowserAgent::Interactive => "interactive",
+        }
+    }
+    /// The next level when cycling in Settings (off, read-only, interactive).
+    pub fn next(self) -> BrowserAgent {
+        match self {
+            BrowserAgent::Off => BrowserAgent::ReadOnly,
+            BrowserAgent::ReadOnly => BrowserAgent::Interactive,
+            BrowserAgent::Interactive => BrowserAgent::Off,
+        }
+    }
+    pub fn describe(self) -> &'static str {
+        match self {
+            BrowserAgent::Off => "the assistant cannot use your browser",
+            BrowserAgent::ReadOnly => "the assistant can look at pages in your browser, not click or type",
+            BrowserAgent::Interactive => "the assistant can click and type in your browser after you approve a site",
+        }
+    }
+}
+
+fn default_browser_actions() -> u32 {
+    60
+}
+fn default_browser_minutes() -> u32 {
+    20
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Policy {
     pub apps: BTreeSet<App>,
@@ -143,6 +206,20 @@ pub struct Policy {
     pub manage_skills: bool,
     pub power: bool,
     pub swarm: bool,
+    /// What the assistant may do in the person's browser tab.
+    #[serde(default = "BrowserAgent::default_read_only")]
+    pub browser_agent: BrowserAgent,
+    /// Most browser actions and minutes one run may use.
+    #[serde(default = "default_browser_actions")]
+    pub browser_max_actions: u32,
+    #[serde(default = "default_browser_minutes")]
+    pub browser_max_minutes: u32,
+}
+
+impl BrowserAgent {
+    fn default_read_only() -> BrowserAgent {
+        BrowserAgent::ReadOnly
+    }
 }
 
 /// How much one agent run may consume. `0` means "no limit" for that dimension.
@@ -202,6 +279,9 @@ pub struct PolicyOverride {
     pub agent: Option<bool>,
     pub skills: Option<bool>,
     pub budget: Option<AgentBudget>,
+    pub browser_agent: Option<BrowserAgent>,
+    pub browser_max_actions: Option<u32>,
+    pub browser_max_minutes: Option<u32>,
 }
 
 fn set(a: &[App]) -> BTreeSet<App> {
@@ -234,9 +314,12 @@ impl Role {
                 manage_skills: true,
                 power: true,
                 swarm: true,
+                browser_agent: BrowserAgent::ReadOnly,
+                browser_max_actions: 60,
+                browser_max_minutes: 20,
             },
             Role::Operator => Policy {
-                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::Inbox]),
+                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera]),
                 cli: CliLevel::Full,
                 fs_read: strs(&["{home}", "/shared"]),
                 fs_write: strs(&["{home}", "/shared"]),
@@ -254,9 +337,12 @@ impl Role {
                 manage_skills: true,
                 power: true,
                 swarm: true,
+                browser_agent: BrowserAgent::ReadOnly,
+                browser_max_actions: 60,
+                browser_max_minutes: 20,
             },
             Role::User => Policy {
-                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Radio, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::Inbox]),
+                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Radio, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera]),
                 cli: CliLevel::Restricted,
                 fs_read: strs(&["{home}", "/shared"]),
                 fs_write: strs(&["{home}"]),
@@ -274,9 +360,12 @@ impl Role {
                 manage_skills: false,
                 power: false,
                 swarm: false,
+                browser_agent: BrowserAgent::ReadOnly,
+                browser_max_actions: 60,
+                browser_max_minutes: 20,
             },
             Role::Guest => Policy {
-                apps: set(&[App::Chat, App::Inbox]),
+                apps: set(&[App::Chat, App::SrePilot, App::Inbox]),
                 cli: CliLevel::Off,
                 fs_read: vec![],
                 fs_write: vec![],
@@ -294,6 +383,9 @@ impl Role {
                 manage_skills: false,
                 power: false,
                 swarm: false,
+                browser_agent: BrowserAgent::Off,
+                browser_max_actions: 60,
+                browser_max_minutes: 20,
             },
         }
     }
@@ -342,6 +434,19 @@ impl Policy {
         }
         if let Some(v) = ov.skills {
             p.skills = v;
+        }
+        if let Some(v) = ov.browser_agent {
+            p.browser_agent = v;
+        }
+        if let Some(v) = ov.browser_max_actions {
+            p.browser_max_actions = v.clamp(1, 500);
+        }
+        if let Some(v) = ov.browser_max_minutes {
+            p.browser_max_minutes = v.clamp(1, 240);
+        }
+        // no browser app, no assistant in it
+        if !p.apps.contains(&App::Browser) {
+            p.browser_agent = BrowserAgent::Off;
         }
         if !p.skills {
             p.manage_skills = false;
@@ -432,6 +537,25 @@ pub fn valid_username(n: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_control_defaults_are_read_only_and_off_for_guests_and_overrides_apply() {
+        for r in [Role::Admin, Role::Operator, Role::User] {
+            let p = r.template();
+            assert_eq!((p.browser_agent, p.browser_max_actions, p.browser_max_minutes), (BrowserAgent::ReadOnly, 60, 20), "{r:?}");
+        }
+        assert_eq!(Role::Guest.template().browser_agent, BrowserAgent::Off);
+        let ov = PolicyOverride { browser_agent: Some(BrowserAgent::Interactive), browser_max_actions: Some(5000), browser_max_minutes: Some(0), ..Default::default() };
+        let p = Policy::resolve(Role::User, &ov);
+        assert_eq!((p.browser_agent, p.browser_max_actions, p.browser_max_minutes), (BrowserAgent::Interactive, 500, 1), "limits are clamped");
+        // no BROWSER app, no browser control
+        let ov = PolicyOverride { browser_agent: Some(BrowserAgent::Interactive), deny_apps: vec![App::Browser], ..Default::default() };
+        assert_eq!(Policy::resolve(Role::User, &ov).browser_agent, BrowserAgent::Off);
+        // the settings cycle visits every level
+        assert_eq!(BrowserAgent::Off.next().next().next(), BrowserAgent::Off);
+        assert_eq!(BrowserAgent::ALL.map(|b| b.name()), ["off", "read_only", "interactive"]);
+    }
+
     use crate::Access;
 
     #[test]
@@ -440,7 +564,7 @@ mod tests {
         assert!(a.max_fuel > o.max_fuel && o.max_fuel > u.max_fuel && u.max_fuel > g.max_fuel);
         assert!(a.manage_users && !o.manage_users && !u.manage_users && !g.manage_users);
         assert!(a.manage_settings && !o.manage_settings && !u.manage_settings && !g.manage_settings);
-        assert_eq!(g.apps, [App::Chat, App::Inbox].into());
+        assert_eq!(g.apps, [App::Chat, App::SrePilot, App::Inbox].into());
         assert_eq!(g.cli, CliLevel::Off);
         assert!(a.apps.contains(&App::Users) && !o.apps.contains(&App::Users));
         assert!(o.apps.contains(&App::Settings) && u.apps.contains(&App::Settings) && !g.apps.contains(&App::Settings), "settings app = personal vault + password for everyone but guests");

@@ -1,10 +1,15 @@
 //! IYAKKI supervisor core: host detection, logging, signals, agent task running.
 
 pub mod boot;
+pub mod homebind;
+pub mod display;
+pub mod camera;
 pub mod web;
 pub mod console;
 #[cfg(feature = "shell")]
 pub mod host;
+#[cfg(feature = "shell")]
+pub mod browsertest;
 pub mod net;
 
 use std::sync::atomic::{AtomicBool, Ordering};

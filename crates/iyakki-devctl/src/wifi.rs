@@ -285,7 +285,13 @@ impl KnownStore {
 
 /// The supplicant's configuration for all the known networks, the newest with the highest priority.
 pub fn wpa_conf_for(known: &[Known]) -> String {
+    wpa_conf_for_mode(known, crate::mac::MacMode::Off)
+}
+
+/// The same with the scan randomisation that goes with a private MAC address (`mode` other than Off).
+pub fn wpa_conf_for_mode(known: &[Known], mode: crate::mac::MacMode) -> String {
     let mut s = String::from("ctrl_interface=/run/wpa_supplicant\nupdate_config=0\ncountry=00\n");
+    s.push_str(crate::mac::supplicant_lines(mode));
     for (i, k) in known.iter().enumerate() {
         if !valid_ssid(&k.ssid) {
             continue;
@@ -344,6 +350,12 @@ impl Wifi {
     /// Write the configuration for every known network and make the supplicant use it (starting it, and the DHCP client, if
     /// they are not running).
     pub fn apply(&self, iface: &str, known: &[Known]) -> Result<(), String> {
+        self.apply_with(iface, known, crate::mac::MacMode::Off, false)
+    }
+
+    /// [`apply`](Self::apply) for a private MAC address `mode`. `address_changed`: the adapter has a new address, so a DHCP
+    /// client that holds a lease for the old one is stopped (releasing it) and a new one asks again.
+    pub fn apply_with(&self, iface: &str, known: &[Known], mode: crate::mac::MacMode, address_changed: bool) -> Result<(), String> {
         if iface.is_empty() || !iface.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
             return Err("not an interface name".into());
         }
@@ -352,7 +364,7 @@ impl Wifi {
             use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
             std::fs::create_dir_all(&self.run_dir).map_err(|e| e.to_string())?;
-            std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&conf).and_then(|mut f| f.write_all(wpa_conf_for(known).as_bytes())).map_err(|e| format!("{}: {e}", conf.display()))?;
+            std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&conf).and_then(|mut f| f.write_all(wpa_conf_for_mode(known, mode).as_bytes())).map_err(|e| format!("{}: {e}", conf.display()))?;
         }
         let _ = run(self, "ip", &["link", "set", iface, "up"]);
         if run(self, "wpa_cli", &["-i", iface, "status"]).is_ok() {
@@ -361,12 +373,49 @@ impl Wifi {
             run(self, "wpa_supplicant", &["-B", "-i", iface, "-c", &conf.display().to_string()]).map_err(|e| format!("could not start the WiFi supplicant: {e}"))?;
         }
         // an address for the link (the client keeps trying until the network is joined)
+        self.dhcp(iface, address_changed)?;
+        Ok(())
+    }
+
+    /// Make sure a DHCP client runs for `iface`. With `restart`, one that is running (it holds a lease for the old hardware
+    /// address) is stopped first, which releases the lease, and a new one asks again.
+    pub fn dhcp(&self, iface: &str, restart: bool) -> Result<(), String> {
+        if iface.is_empty() || !iface.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+            return Err("not an interface name".into());
+        }
         let pid = self.run_dir.join(format!("udhcpc-{iface}.pid"));
-        let running = std::fs::read_to_string(&pid).ok().and_then(|p| p.trim().parse::<u32>().ok()).is_some_and(|p| Path::new(&format!("/proc/{p}")).exists());
+        let pid_of = || std::fs::read_to_string(&pid).ok().and_then(|p| p.trim().parse::<u32>().ok()).filter(|p| *p > 1);
+        if restart {
+            if let Some(p) = pid_of() {
+                // SAFETY: SIGTERM to the DHCP client recorded in its own pid file (never pid 0 or 1).
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(p as libc::pid_t, libc::SIGTERM);
+                }
+                for _ in 0..20 {
+                    if !Path::new(&format!("/proc/{p}")).exists() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
+        let running = pid_of().is_some_and(|p| Path::new(&format!("/proc/{p}")).exists());
         if !running {
-            run(self, "udhcpc", &["-b", "-R", "-i", iface, "-p", &pid.display().to_string()]).map_err(|e| format!("could not ask for an address: {e}"))?;
+            let args = crate::mac::dhcp_args(iface, &pid.display().to_string());
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            run(self, "udhcpc", &args).map_err(|e| format!("could not ask for an address: {e}"))?;
         }
         Ok(())
+    }
+
+    /// The network the adapter is associated with now (`iw dev X link`).
+    pub fn current_ssid(&self, iface: &str) -> Option<String> {
+        if iface.is_empty() || !iface.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+            return None;
+        }
+        let out = run(self, "iw", &["dev", iface, "link"]).ok()?;
+        out.lines().find_map(|l| l.trim().strip_prefix("SSID:").map(|s| s.trim().to_string())).filter(|s| valid_ssid(s))
     }
 }
 
@@ -544,6 +593,37 @@ BSS aa:bb:cc:00:00:08(on wlan0)
         let log = std::fs::read_to_string(&rec).unwrap();
         assert!(log.contains("wpa_cli -i wlan0 reconfigure") && !log.contains("wpa_supplicant -B"), "{log}");
         assert!(w.scan("wlan0; reboot").is_err() && w.apply("../x", &known).is_err() && w.scan("").is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_private_address_adds_scan_randomisation_and_a_new_address_restarts_the_dhcp_client() {
+        use crate::mac::MacMode;
+        let d = std::env::temp_dir().join(format!("iyakki-wifi-mac-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let rec = d.join("rec.log");
+        let w = Wifi { run_dir: d.join("run"), path: Some(fake_tools(&d, &rec)) };
+        let known = vec![Known::new("Seen", "password", Security::Wpa2, false, 1).unwrap()];
+        assert_eq!(w.current_ssid("wlan0").as_deref(), Some("Seen"), "the network is read from the link report");
+        assert_eq!(w.current_ssid("wlan0; x"), None);
+        w.apply_with("wlan0", &known, MacMode::PerNetwork, false).unwrap();
+        let conf = std::fs::read_to_string(d.join("run/wpa_supplicant-wlan0.conf")).unwrap();
+        assert!(conf.contains("preassoc_mac_addr=1") && conf.contains("gas_rand_mac_addr=1"), "{conf}");
+        assert!(!conf.contains("\nmac_addr="), "the supplicant must not change the address itself: {conf}");
+        w.apply_with("wlan0", &known, MacMode::Off, false).unwrap();
+        assert!(!std::fs::read_to_string(d.join("run/wpa_supplicant-wlan0.conf")).unwrap().contains("preassoc_mac_addr"), "Off leaves the supplicant alone");
+        // an old DHCP client (a stand-in process) is stopped when the address changed, and a new one is started
+        let old_id; let mut old = std::process::Command::new("sleep").arg("30").spawn().unwrap(); old_id = old.id();
+        std::fs::write(d.join("run/udhcpc-wlan0.pid"), old_id.to_string()).unwrap();
+        // reaped by a thread like init would, so it does not linger as a zombie that still looks alive
+        let reaper = std::thread::spawn(move || old.wait().unwrap());
+        std::fs::write(&rec, "").unwrap();
+        w.apply_with("wlan0", &known, MacMode::PerNetwork, true).unwrap();
+        let st = reaper.join().unwrap();
+        assert!(!st.success(), "the old client was terminated");
+        let log = std::fs::read_to_string(&rec).unwrap();
+        assert!(log.contains("udhcpc -b -R -i wlan0 -p") && !log.contains(" -x") && !log.contains(" -F") && !log.contains(" -H"), "{log}");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

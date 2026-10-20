@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod btmgmt;
+pub mod mac;
 pub mod wifi;
 
 /// Where the kernel's views live. Real paths in production.
@@ -113,6 +115,7 @@ pub fn links(r: &Roots) -> Vec<Link> {
     out
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 struct IfReq {
     name: [u8; 16],
@@ -120,10 +123,20 @@ struct IfReq {
     pad: [u8; 22],
 }
 
+#[cfg(target_os = "linux")]
 const SIOCGIFFLAGS: libc::c_ulong = 0x8913;
+#[cfg(target_os = "linux")]
 const SIOCSIFFLAGS: libc::c_ulong = 0x8914;
+#[cfg(target_os = "linux")]
 const IFF_UP: libc::c_short = 1;
 
+/// Interface flag requests (`SIOCSIFFLAGS`) and `SOCK_CLOEXEC` are the Linux ones; the Mac manages its own network.
+#[cfg(not(target_os = "linux"))]
+pub fn set_link(name: &str, _up: bool) -> Result<(), String> {
+    Err(format!("{name}: changing a network link is not available on this OS"))
+}
+
+#[cfg(target_os = "linux")]
 /// Bring an interface up or down (what `ip link set dev X up|down` does).
 pub fn set_link(name: &str, up: bool) -> Result<(), String> {
     if name.is_empty() || name.len() > 15 || name.contains('/') || name.bytes().any(|b| b == 0) {
@@ -150,6 +163,115 @@ pub fn set_link(name: &str, up: bool) -> Result<(), String> {
         })();
         libc::close(fd);
         res
+    }
+}
+
+/// Hardware (MAC) address requests: read the adapter's permanent address (`SIOCETHTOOL`/`ETHTOOL_GPERMADDR`) and set a new
+/// one (`SIOCSIFHWADDR`, needs the link down and administrator rights). Never called by tests on a real interface.
+#[cfg(target_os = "linux")]
+mod hw {
+    use super::mac::{fmt_mac, parse_mac, valid_unicast};
+
+    const SIOCSIFHWADDR: libc::c_ulong = 0x8924;
+    const SIOCETHTOOL: libc::c_ulong = 0x8946;
+    const ETHTOOL_GPERMADDR: u32 = 0x20;
+    const ARPHRD_ETHER: u16 = 1;
+
+    #[repr(C)]
+    struct IfReqAddr {
+        name: [u8; 16],
+        family: u16,
+        data: [u8; 14],
+        pad: [u8; 8],
+    }
+
+    #[repr(C)]
+    struct IfReqPtr {
+        name: [u8; 16],
+        data: *mut libc::c_void,
+        pad: [u8; 16],
+    }
+
+    #[repr(C)]
+    struct PermAddr {
+        cmd: u32,
+        size: u32,
+        data: [u8; 32],
+    }
+
+    fn name_ok(name: &str) -> bool {
+        !name.is_empty() && name.len() <= 15 && !name.contains('/') && !name.bytes().any(|b| b == 0)
+    }
+
+    fn name_bytes(name: &str) -> [u8; 16] {
+        let mut n = [0u8; 16];
+        n[..name.len()].copy_from_slice(name.as_bytes());
+        n
+    }
+
+    pub fn permanent(name: &str) -> Option<String> {
+        if !name_ok(name) {
+            return None;
+        }
+        let mut perm = PermAddr { cmd: ETHTOOL_GPERMADDR, size: 32, data: [0; 32] };
+        let mut req = IfReqPtr { name: name_bytes(name), data: (&mut perm as *mut PermAddr).cast(), pad: [0; 16] };
+        // SAFETY: a datagram socket used for one read-only ethtool request; `req` is laid out like the kernel's `struct ifreq`
+        // (16-byte name, then a union of which the data pointer is used) and points at `perm`, which has room for the 32
+        // address bytes announced in `size`; both outlive the call.
+        let ok = unsafe {
+            let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
+            if fd < 0 {
+                return None;
+            }
+            let r = libc::ioctl(fd, SIOCETHTOOL as _, &mut req as *mut IfReqPtr);
+            libc::close(fd);
+            r >= 0
+        };
+        if !ok || perm.size != 6 {
+            return None;
+        }
+        let m = [perm.data[0], perm.data[1], perm.data[2], perm.data[3], perm.data[4], perm.data[5]];
+        // an adapter without a stored address reports zeros
+        valid_unicast(&m).then(|| fmt_mac(&m))
+    }
+
+    pub fn set(name: &str, mac: &str) -> Result<(), String> {
+        if !name_ok(name) {
+            return Err(format!("not an interface name: {name:?}"));
+        }
+        let m = parse_mac(mac).filter(valid_unicast).ok_or_else(|| format!("{mac}: not a valid unicast MAC address"))?;
+        let mut req = IfReqAddr { name: name_bytes(name), family: ARPHRD_ETHER, data: [0; 14], pad: [0; 8] };
+        req.data[..6].copy_from_slice(&m);
+        // SAFETY: a datagram socket used for the one address request; `req` matches the kernel's `struct ifreq` with the
+        // `ifr_hwaddr` (`struct sockaddr`: 2-byte family, 14 bytes of address) member and outlives the call.
+        unsafe {
+            let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
+            if fd < 0 {
+                return Err(format!("socket: {}", std::io::Error::last_os_error()));
+            }
+            let r = libc::ioctl(fd, SIOCSIFHWADDR as _, &mut req as *mut IfReqAddr);
+            let err = std::io::Error::last_os_error();
+            libc::close(fd);
+            if r >= 0 {
+                return Ok(());
+            }
+            Err(match err.raw_os_error() {
+                Some(libc::EPERM) | Some(libc::EACCES) => format!("{name}: changing the address needs administrator rights"),
+                Some(libc::EBUSY) => format!("{name}: the adapter is busy or still up, so its address cannot change now"),
+                Some(libc::EOPNOTSUPP) | Some(524) | Some(libc::EINVAL) | Some(libc::EADDRNOTAVAIL) => format!("{name}: not supported by this driver ({err})"),
+                _ => format!("{name}: {err}"),
+            })
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod hw {
+    pub fn permanent(_name: &str) -> Option<String> {
+        None
+    }
+    pub fn set(name: &str, _mac: &str) -> Result<(), String> {
+        Err(format!("{name}: the MAC address is managed by the host operating system"))
     }
 }
 
@@ -188,13 +310,17 @@ pub struct Bluetooth {
     /// A USB Bluetooth device is plugged in (class e0), whether or not a driver took it.
     pub usb_present: bool,
     pub switches: Vec<Rfkill>,
+    /// Controllers that exist but never started: the kernel creates `hciN` first and the address only after the
+    /// controller answered its reset (UART controllers that stay silent, missing firmware).
+    pub unstarted: Vec<String>,
 }
 
 pub fn bluetooth(r: &Roots) -> Bluetooth {
-    let adapters = dirs(&r.sys.join("class/bluetooth")).iter().map(|d| name_of(d)).filter(|n| n.starts_with("hci") && !n.contains(':')).collect();
+    let adapters: Vec<String> = dirs(&r.sys.join("class/bluetooth")).iter().map(|d| name_of(d)).filter(|n| n.starts_with("hci") && !n.contains(':')).collect();
     let usb_present = dirs(&r.sys.join("bus/usb/devices")).iter().any(|d| read(d.join("bDeviceClass")).as_deref() == Some("e0"));
     let switches = rfkill_list(r).into_iter().filter(|k| k.kind == "bluetooth").collect();
-    Bluetooth { adapters, usb_present, switches }
+    let unstarted: Vec<String> = adapters.iter().filter(|a| !r.sys.join("class/bluetooth").join(a).join("address").exists()).cloned().collect();
+    Bluetooth { adapters, usb_present, switches, unstarted }
 }
 
 impl Bluetooth {
@@ -317,37 +443,188 @@ pub fn parse_amixer(control: &str, out: &str) -> Option<Volume> {
     Some(Volume { control: control.to_string(), percent: pct, muted })
 }
 
-const CONTROLS: [&str; 4] = ["Master", "PCM", "Speaker", "Headphone"];
+/// The controls that set a card's playback volume, in the order they are looked for. `IYAKKI` is the software volume IYAKKI
+/// adds (ALSA softvol, `iyakki_agent::softvol`) to a card that has none, such as the HDMI devices of Intel graphics and the
+/// T2 Mac's `Apple T2 Audio`; a hardware control comes first.
+pub const CONTROLS: [&str; 5] = ["Master", "PCM", "Speaker", "Headphone", "IYAKKI"];
 
 fn amixer(args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("amixer").args(args).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// A control without a mute switch (`[on]`/`[off]`), such as a softvol: muting it sets 0 % and remembers the level here.
+#[derive(Default)]
+pub struct Mutes(std::sync::Mutex<std::collections::HashMap<(u32, String), u32>>);
+
+impl Mutes {
+    fn get(&self, card: u32, control: &str) -> Option<u32> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&(card, control.to_string())).copied()
+    }
+    fn set(&self, card: u32, control: &str, level: Option<u32>) {
+        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match level {
+            Some(l) => m.insert((card, control.to_string()), l),
+            None => m.remove(&(card, control.to_string())),
+        };
+    }
+}
+
+static MUTES: std::sync::OnceLock<Mutes> = std::sync::OnceLock::new();
+
+fn mutes() -> &'static Mutes {
+    MUTES.get_or_init(Mutes::default)
+}
+
+/// Runs `amixer` with these arguments (its output, None when it failed). Real or fake.
+pub type Amixer<'a> = &'a dyn Fn(&[&str]) -> Option<String>;
+
+/// Does this `amixer sget` output show a mute switch?
+fn has_switch(out: &str) -> bool {
+    out.contains("[on]") || out.contains("[off]")
+}
+
+/// The playback volume of a card (the first of [`CONTROLS`] it has), asking `run`.
+pub fn volume_via(run: Amixer, mutes: &Mutes, card: u32) -> Option<Volume> {
+    let c = card.to_string();
+    CONTROLS.iter().find_map(|ctl| {
+        let out = run(&["-c", &c, "sget", ctl])?;
+        let mut v = parse_amixer(ctl, &out)?;
+        if !has_switch(&out) {
+            // muted by setting 0 %: muted while it is still at 0 %
+            match mutes.get(card, ctl) {
+                Some(_) if v.percent == 0 => v.muted = true,
+                Some(_) => mutes.set(card, ctl, None), // moved by someone else meanwhile
+                None => {}
+            }
+        }
+        Some(v)
+    })
+}
+
+/// Change the volume by `delta` percent points, or mute/unmute when `delta` is `None`. A control without a switch is muted
+/// by setting 0 % and unmuted by setting the level it had; louder while muted starts from that level.
+pub fn change_volume_via(run: Amixer, mutes: &Mutes, card: u32, delta: Option<i32>) -> Result<Volume, String> {
+    let c = card.to_string();
+    let cur = volume_via(run, mutes, card).ok_or("this card has no volume control")?;
+    let switch = run(&["-c", &c, "sget", &cur.control]).is_some_and(|o| has_switch(&o));
+    let arg = match (delta, switch) {
+        (Some(d), false) if cur.muted => {
+            let back = mutes.get(card, &cur.control).unwrap_or(0) as i32;
+            mutes.set(card, &cur.control, None);
+            format!("{}%", (back + d).clamp(0, 100))
+        }
+        (Some(d), _) => format!("{}%{}", d.unsigned_abs(), if d < 0 { "-" } else { "+" }),
+        (None, true) => "toggle".into(),
+        (None, false) if cur.muted => {
+            let back = mutes.get(card, &cur.control).filter(|l| *l > 0).unwrap_or(50);
+            mutes.set(card, &cur.control, None);
+            format!("{back}%")
+        }
+        (None, false) => {
+            mutes.set(card, &cur.control, Some(cur.percent));
+            "0%".into()
+        }
+    };
+    run(&["-c", &c, "sset", &cur.control, &arg]).ok_or("the mixer did not accept the change")?;
+    volume_via(run, mutes, card).ok_or_else(|| "could not read the volume back".into())
+}
+
+/// Set the playback volume of a card to `percent` (0..=100); this also ends a mute of a control without a switch.
+pub fn set_volume_via(run: Amixer, mutes: &Mutes, card: u32, percent: u32) -> Result<Volume, String> {
+    let cur = volume_via(run, mutes, card).ok_or("this card has no volume control")?;
+    let c = card.to_string();
+    mutes.set(card, &cur.control, None);
+    run(&["-c", &c, "sset", &cur.control, &format!("{}%", percent.min(100))]).ok_or("the mixer did not accept the change")?;
+    volume_via(run, mutes, card).ok_or_else(|| "could not read the volume back".into())
+}
+
 /// The playback volume of a card (the first of the usual controls it has).
 pub fn volume(card: u32) -> Option<Volume> {
-    let c = card.to_string();
-    CONTROLS.iter().find_map(|ctl| parse_amixer(ctl, &amixer(&["-c", &c, "sget", ctl])?))
+    volume_via(&amixer, mutes(), card)
 }
 
 /// Change the volume by `delta` percent points, or toggle mute when `delta` is `None`.
 pub fn change_volume(card: u32, delta: Option<i32>) -> Result<Volume, String> {
-    let cur = volume(card).ok_or("this card has no volume control")?;
-    let c = card.to_string();
-    let arg = match delta {
-        Some(d) => format!("{}%{}", d.unsigned_abs(), if d < 0 { "-" } else { "+" }),
-        None => "toggle".into(),
-    };
-    amixer(&["-c", &c, "sset", &cur.control, &arg]).ok_or("the mixer did not accept the change")?;
-    volume(card).ok_or_else(|| "could not read the volume back".into())
+    change_volume_via(&amixer, mutes(), card, delta)
 }
 
 /// Set the playback volume of a card to `percent` (0..=100).
 pub fn set_volume(card: u32, percent: u32) -> Result<Volume, String> {
-    let cur = volume(card).ok_or("this card has no volume control")?;
-    let c = card.to_string();
-    amixer(&["-c", &c, "sset", &cur.control, &format!("{}%", percent.min(100))]).ok_or("the mixer did not accept the change")?;
-    volume(card).ok_or_else(|| "could not read the volume back".into())
+    set_volume_via(&amixer, mutes(), card, percent)
+}
+
+// ------------------------------------------------------------------------------------------------ host name
+
+/// Is this a host name the kernel and DNS accept (letters, digits and '-', not starting or ending with '-', up to 63)?
+pub fn hostname_ok(h: &str) -> bool {
+    !h.is_empty() && h.len() <= 63 && !h.starts_with('-') && !h.ends_with('-') && h.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+}
+
+/// The host name now: the kernel's, else the file, else `fallback`.
+pub fn current_hostname(fallback: &str) -> String {
+    read("/proc/sys/kernel/hostname").or_else(|| read("/etc/hostname")).filter(|h| !h.is_empty()).unwrap_or_else(|| fallback.to_string())
+}
+
+/// Change the host name of the running system and write it to `etc_hostname` (needs root for the first part).
+#[cfg(unix)]
+pub fn apply_hostname(name: &str, etc_hostname: &Path) -> Result<(), String> {
+    if !hostname_ok(name) {
+        return Err(format!("\"{name}\" is not a host name: use lower-case letters, digits and '-'"));
+    }
+    // SAFETY: pointer and length describe the bytes of `name`, which outlives the call.
+    let rc = unsafe { libc::sethostname(name.as_ptr().cast(), name.len() as _) };
+    if rc != 0 {
+        return Err(format!("could not change the host name: {}", std::io::Error::last_os_error()));
+    }
+    std::fs::write(etc_hostname, format!("{name}\n")).map_err(|e| format!("the name is changed but {} could not be written: {e}", etc_hostname.display()))
+}
+
+#[cfg(not(unix))]
+pub fn apply_hostname(_name: &str, _etc_hostname: &Path) -> Result<(), String> {
+    Err("not available on this OS".into())
+}
+
+// ------------------------------------------------------------------------------------------------ WiFi link details
+
+/// The network a WiFi interface is joined to and how strong the signal is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WifiLink {
+    pub ssid: String,
+    pub signal_dbm: Option<i32>,
+}
+
+/// `iw dev wlan0 link`: "Connected to ..." with an `SSID:` line and a `signal: -48 dBm` line, or "Not connected.".
+pub fn parse_iw_link(text: &str) -> Option<WifiLink> {
+    if text.trim_start().starts_with("Not connected") {
+        return None;
+    }
+    let ssid = text.lines().find_map(|l| l.trim().strip_prefix("SSID:")).map(|s| s.trim().to_string())?;
+    let signal_dbm = text.lines().find_map(|l| l.trim().strip_prefix("signal:")).and_then(|s| s.split_whitespace().next().and_then(|v| v.parse::<f32>().ok())).map(|v| v.round() as i32);
+    Some(WifiLink { ssid, signal_dbm })
+}
+
+/// The signal level (dBm) of `iface` from `/proc/net/wireless`.
+pub fn parse_proc_wireless(text: &str, iface: &str) -> Option<i32> {
+    let line = text.lines().find(|l| l.trim_start().starts_with(&format!("{iface}:")))?;
+    let f: Vec<&str> = line.split_once(':')?.1.split_whitespace().collect();
+    let level = f.get(2)?.trim_end_matches('.').parse::<f32>().ok()?;
+    // values above 0 are on a 0..100 scale (quality), not dBm: not worth showing as dBm
+    (level < 0.0).then_some(level.round() as i32)
+}
+
+/// Which network `iface` is joined to. Asks `iw` (a short-lived process, so call it from a background thread); the signal
+/// falls back to `/proc/net/wireless` when `iw` is missing.
+pub fn wifi_link(r: &Roots, iface: &str) -> Option<WifiLink> {
+    if iface.is_empty() || !iface.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')) {
+        return None;
+    }
+    let out = std::process::Command::new("iw").args(["dev", iface, "link"]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok().filter(|o| o.status.success());
+    let mut link = out.and_then(|o| parse_iw_link(&String::from_utf8_lossy(&o.stdout)))?;
+    if link.signal_dbm.is_none() {
+        link.signal_dbm = read(r.proc_.join("net/wireless")).and_then(|t| parse_proc_wireless(&t, iface));
+    }
+    Some(link)
 }
 
 // ------------------------------------------------------------------------------------------------ acting on the machine
@@ -362,6 +639,14 @@ pub trait Control: Send + Sync {
     fn set_volume(&self, card: u32, percent: u32) -> Result<Volume, String>;
     /// Ask for an address on this link (DHCP), in the background.
     fn dhcp(&self, name: &str) -> Result<(), String>;
+    /// The adapter's own (permanent) hardware address, when the driver tells.
+    fn permanent_mac(&self, _name: &str) -> Option<String> {
+        None
+    }
+    /// Give the adapter a new address (the link must be down). Drivers may refuse.
+    fn set_mac(&self, _name: &str, _mac: &str) -> Result<(), String> {
+        Err("changing the MAC address is not available here".into())
+    }
 }
 
 /// The real machine.
@@ -383,11 +668,17 @@ impl Control for System {
     fn set_volume(&self, card: u32, percent: u32) -> Result<Volume, String> {
         set_volume(card, percent)
     }
+    fn permanent_mac(&self, name: &str) -> Option<String> {
+        hw::permanent(name)
+    }
+    fn set_mac(&self, name: &str, mac: &str) -> Result<(), String> {
+        hw::set(name, mac)
+    }
     fn dhcp(&self, name: &str) -> Result<(), String> {
         if name.is_empty() || name.len() > 15 || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.') {
             return Err(format!("not an interface name: {name:?}"));
         }
-        std::process::Command::new("udhcpc").args(["-b", "-R", "-i", name, "-p", &format!("/run/udhcpc-{name}.pid")]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|e| format!("could not start DHCP on {name}: {e}"))
+        std::process::Command::new("udhcpc").args(mac::dhcp_args(name, &format!("/run/udhcpc-{name}.pid"))).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|e| format!("could not start DHCP on {name}: {e}"))
     }
 }
 
@@ -490,6 +781,9 @@ mod tests {
         put(&r.sys, "class/bluetooth/hci0:12/x", "");
         let b = bluetooth(&r);
         assert_eq!(b.adapters, vec!["hci0"], "connections are not adapters");
+        assert_eq!(b.unstarted, vec!["hci0"], "no address file: the controller never answered");
+        put(&r.sys, "class/bluetooth/hci0/address", "11:22:33:44:55:66\n");
+        assert!(bluetooth(&r).unstarted.is_empty(), "an address means it started");
         let r = fake("bt3");
         put(&r.sys, "bus/usb/devices/1-1/bDeviceClass", "09\n");
         assert!(!bluetooth(&r).detected(), "a hub is not Bluetooth");
@@ -538,6 +832,84 @@ mod tests {
         assert_eq!(parse_amixer("Master", "no controls here"), None);
     }
 
+    /// A fake `amixer` for one card: hardware `Master` with a switch, or only IYAKKI's softvol (no switch).
+    struct FakeMixer {
+        softvol_only: bool,
+        level: std::cell::Cell<u32>,
+        on: std::cell::Cell<bool>,
+        calls: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl FakeMixer {
+        fn new(softvol_only: bool, level: u32) -> FakeMixer {
+            FakeMixer { softvol_only, level: level.into(), on: true.into(), calls: Default::default() }
+        }
+        fn run(&self, args: &[&str]) -> Option<String> {
+            self.calls.borrow_mut().push(args.join(" "));
+            let ctl = if self.softvol_only { "IYAKKI" } else { "Master" };
+            if args.get(3) != Some(&ctl) {
+                return None; // amixer: Unable to find simple control
+            }
+            if args[2] == "sset" {
+                let a = args[4];
+                if a == "toggle" {
+                    self.on.set(!self.on.get());
+                } else if let Some(p) = a.strip_suffix("%+") {
+                    self.level.set((self.level.get() + p.parse::<u32>().unwrap()).min(100));
+                } else if let Some(p) = a.strip_suffix("%-") {
+                    self.level.set(self.level.get().saturating_sub(p.parse().unwrap()));
+                } else {
+                    self.level.set(a.trim_end_matches('%').parse().unwrap());
+                }
+            }
+            let l = self.level.get();
+            Some(if self.softvol_only {
+                format!("Simple mixer control 'IYAKKI',0\n  Capabilities: volume volume-joined\n  Limits: 0 - 255\n  Mono: {} [{l}%] [-20.00dB]\n", l * 255 / 100)
+            } else {
+                format!("Simple mixer control 'Master',0\n  Capabilities: pvolume pswitch\n  Front Left: Playback 40 [{l}%] [-20.00dB] [{}]\n", if self.on.get() { "on" } else { "off" })
+            })
+        }
+    }
+
+    #[test]
+    fn a_softvol_control_without_a_switch_is_found_and_muted_by_zero_percent_with_the_level_remembered() {
+        let m = FakeMixer::new(true, 30);
+        let run = |a: &[&str]| m.run(a);
+        let mutes = Mutes::default();
+        let v = volume_via(&run, &mutes, 1).unwrap();
+        assert_eq!(v, Volume { control: "IYAKKI".into(), percent: 30, muted: false }, "the T2 card's only volume is IYAKKI's softvol");
+        assert!(m.calls.borrow().iter().any(|c| c == "-c 1 sget Master"), "hardware controls are asked first");
+        let v = change_volume_via(&run, &mutes, 1, None).unwrap();
+        assert_eq!((v.percent, v.muted), (0, true), "mute is 0 %");
+        assert!(m.calls.borrow().iter().any(|c| c == "-c 1 sset IYAKKI 0%"));
+        assert!(volume_via(&run, &mutes, 1).unwrap().muted);
+        let v = change_volume_via(&run, &mutes, 1, None).unwrap();
+        assert_eq!((v.percent, v.muted), (30, false), "unmute restores the level");
+        // louder while muted starts from the remembered level
+        change_volume_via(&run, &mutes, 1, None).unwrap();
+        let v = change_volume_via(&run, &mutes, 1, Some(5)).unwrap();
+        assert_eq!((v.percent, v.muted), (35, false));
+        // an exact level ends the mute too
+        change_volume_via(&run, &mutes, 1, None).unwrap();
+        let v = set_volume_via(&run, &mutes, 1, 60).unwrap();
+        assert_eq!((v.percent, v.muted), (60, false));
+        assert!(!m.calls.borrow().iter().any(|c| c.contains("toggle")), "a control without a switch is never toggled");
+    }
+
+    #[test]
+    fn a_hardware_control_with_a_switch_is_toggled_as_before() {
+        let m = FakeMixer::new(false, 62);
+        let run = |a: &[&str]| m.run(a);
+        let mutes = Mutes::default();
+        let v = change_volume_via(&run, &mutes, 0, None).unwrap();
+        assert_eq!(v, Volume { control: "Master".into(), percent: 62, muted: true });
+        assert!(m.calls.borrow().iter().any(|c| c == "-c 0 sset Master toggle"));
+        assert_eq!(change_volume_via(&run, &mutes, 0, Some(-10)).unwrap().percent, 52);
+        assert!(m.calls.borrow().iter().any(|c| c == "-c 0 sset Master 10%-"));
+        let none = |_: &[&str]| None;
+        assert!(volume_via(&none, &mutes, 0).is_none() && change_volume_via(&none, &mutes, 0, None).is_err());
+    }
+
     #[test]
     fn link_names_are_checked_before_the_kernel_is_asked() {
         assert!(set_link("", true).is_err());
@@ -549,5 +921,29 @@ mod tests {
     #[test]
     fn the_loopback_address_is_found() {
         assert!(ipv4_addresses().iter().any(|(n, a)| n == "lo" && a == "127.0.0.1"));
+    }
+
+    #[test]
+    fn host_names_are_checked_before_anything_is_changed() {
+        for ok in ["iyakki", "kitchen-2", "a", "x1"] {
+            assert!(hostname_ok(ok), "{ok}");
+        }
+        for bad in ["", "-a", "a-", "Mac mini", "UPPER", "under_score", "dot.ted", &"a".repeat(64)] {
+            assert!(!hostname_ok(bad), "{bad}");
+        }
+        assert!(apply_hostname("Bad Name", Path::new("/nonexistent/hostname")).is_err());
+        assert!(!current_hostname("fallback").is_empty());
+    }
+
+    #[test]
+    fn wifi_link_text_is_read() {
+        let text = "Connected to aa:bb:cc:00:00:01 (on wlan0)\n\tSSID: Home Net\n\tfreq: 5180\n\tsignal: -48 dBm\n\ttx bitrate: 866.7 MBit/s\n";
+        assert_eq!(parse_iw_link(text), Some(WifiLink { ssid: "Home Net".into(), signal_dbm: Some(-48) }));
+        assert_eq!(parse_iw_link("Not connected.\n"), None);
+        assert_eq!(parse_iw_link(""), None);
+        let w = "Inter-| sta-|   Quality        |   Discarded packets\n face | tus | link level noise |  nwid\n wlan0: 0000   70.  -40.  -256        0      0\n";
+        assert_eq!(parse_proc_wireless(w, "wlan0"), Some(-40));
+        assert_eq!(parse_proc_wireless(w, "wlan1"), None);
+        assert!(wifi_link(&Roots { sys: "/x".into(), proc_: "/x".into() }, "bad name;").is_none());
     }
 }

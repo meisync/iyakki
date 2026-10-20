@@ -1,6 +1,6 @@
 //! The one page the server serves: a sign-in form and the canvas the screen is drawn on.
 
-pub const INDEX: &str = r##"<!doctype html>
+pub const INDEX: &str = concat!(r##"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -52,7 +52,7 @@ function showLogin(msg) {
 function status(t) { const s = $("status"); s.textContent = t || ""; s.style.display = t ? "block" : "none"; }
 
 async function login(ev) {
-  ev.preventDefault();
+  ev.preventDefault(); spPrime();
   $("go").disabled = true; $("err").textContent = "";
   try {
     const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ user: $("user").value, password: $("pass").value }) });
@@ -62,7 +62,10 @@ async function login(ev) {
   } catch (e) { $("err").textContent = "Could not reach the server"; $("go").disabled = false; }
 }
 
-function size() {
+"##,
+// the browser voice of the page (shared with the desktop window's voice helper page)
+include_str!("../../iyakki-agent/src/speech.js"),
+r##"function size() {
   const w = Math.max(640, Math.min(3840, Math.floor(window.innerWidth))), h = Math.max(400, Math.min(2160, Math.floor(window.innerHeight)));
   if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
   return [w, h];
@@ -79,7 +82,7 @@ function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(proto + "://" + location.host + "/ws?csrf=" + encodeURIComponent(csrf));
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => { status(""); const [w, h] = size(); send({ t: "size", w, h }); };
+  ws.onopen = () => { status(""); const [w, h] = size(); send({ t: "size", w, h }); spVoices(); };
   ws.onmessage = (m) => {
     if (typeof m.data === "string") {
       const j = JSON.parse(m.data);
@@ -87,6 +90,7 @@ function connect() {
       if (j.t === "cursor") cv.style.cursor = j.c;
       if (j.t === "readclip" && navigator.clipboard && navigator.clipboard.readText) navigator.clipboard.readText().then((s) => { if (s) send({ t: "paste", s }); }).catch(() => {});
       if (j.t === "bye") showLogin("Signed out.");
+      if (typeof j.t === "string" && j.t.indexOf("speak") === 0) spMessage(j);
       return;
     }
     const dv = new DataView(m.data), x = dv.getUint16(0, true), y = dv.getUint16(2, true);
@@ -108,11 +112,12 @@ function connect() {
 const pos = (e) => { const r = cv.getBoundingClientRect(); return { x: Math.round((e.clientX - r.left) * cv.width / r.width), y: Math.round((e.clientY - r.top) * cv.height / r.height) }; };
 let pending = null;
 cv.addEventListener("mousemove", (e) => { if (!pending) requestAnimationFrame(() => { send({ t: "move", ...pending }); pending = null; }); pending = pos(e); });
-cv.addEventListener("mousedown", (e) => { cv.focus(); e.preventDefault(); send({ t: "shift", on: e.shiftKey }); send({ t: e.button === 2 ? "right" : "down", ...pos(e) }); });
+cv.addEventListener("mousedown", (e) => { spPrime(); cv.focus(); e.preventDefault(); send({ t: "shift", on: e.shiftKey }); send({ t: e.button === 2 ? "right" : "down", ...pos(e) }); });
 window.addEventListener("mouseup", (e) => { if (e.button === 0 && !cv.hidden) send({ t: "up", ...pos(e) }); });
 cv.addEventListener("contextmenu", (e) => e.preventDefault());
 cv.addEventListener("wheel", (e) => { e.preventDefault(); const d = -Math.sign(e.deltaY) * Math.max(1, Math.min(10, Math.round(Math.abs(e.deltaY) / 40))); send({ t: "wheel", d }); }, { passive: false });
 cv.addEventListener("keydown", (e) => {
+  spPrime();
   const ctrl = e.ctrlKey || e.metaKey;
   if (ctrl && !e.shiftKey && (e.key === "v" || e.key === "V")) return; // the paste event carries the text
   if (e.key === "Control" || e.key === "Shift" || e.key === "Alt" || e.key === "Meta") return;
@@ -128,4 +133,4 @@ fetch("/api/session").then(async (r) => { if (r.ok) start((await r.json()).csrf)
 </script>
 </body>
 </html>
-"##;
+"##);

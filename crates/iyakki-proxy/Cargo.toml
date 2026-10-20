@@ -13,4 +13,5 @@ https = ["dep:ureq"]
 iyakki-sec.workspace = true
 iyakki-wasm.workspace = true
 iyakki-web.workspace = true
+miniz_oxide = "0.8"
 ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }

@@ -1,6 +1,7 @@
 //! `iyakki-usb`: write an IYAKKI image to a USB stick without typing `dd` and without risking your system disk.
 //!
 //! * [`drives`]: find the disks (Linux via `/sys`, macOS via `diskutil`) and decide which ones may be written.
+//! * [`install`], [`gpt_install`], [`fatclone`]: the installer (MBR or GPT layout, 512 or 4096-byte sectors).
 //! * [`writer`]: write the image, verify it by reading it back, with progress.
 //! * [`ui`]: the arrow-key menu, the erase warning and the progress bar, as plain strings (testable).
 //! * [`term`]: the raw-terminal glue (the only place that talks to the terminal driver).
@@ -10,7 +11,14 @@
 
 pub mod cli;
 pub mod drives;
+pub mod fatclone;
+pub mod gpt_install;
+pub mod install;
+pub mod install_cli;
 pub mod macos;
 pub mod term;
 pub mod ui;
 pub mod writer;
+
+#[cfg(test)]
+mod gpt_install_tests;

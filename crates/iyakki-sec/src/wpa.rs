@@ -44,7 +44,8 @@ fn sha1(data: &[u8]) -> [u8; 20] {
     out
 }
 
-fn hmac_sha1(key: &[u8], msg: &[u8]) -> [u8; 20] {
+/// HMAC-SHA1 (RFC 2104); also the keyed hash behind the private MAC addresses.
+pub fn hmac_sha1(key: &[u8], msg: &[u8]) -> [u8; 20] {
     let mut k = [0u8; 64];
     if key.len() > 64 {
         k[..20].copy_from_slice(&sha1(key));

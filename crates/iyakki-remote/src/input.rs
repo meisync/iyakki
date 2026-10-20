@@ -16,6 +16,8 @@ pub enum Input {
     Full,
     /// Shift is held (or not) at the next click: a shift+click extends a text selection.
     Shift(bool),
+    /// The page's speech synthesis speaking (browser voice, `docs/REMOTE-PROTOCOL.md`).
+    Speech(iyakki_agent::hostvoice::FromClient),
 }
 
 fn int(v: &Value, k: &str) -> Option<i32> {
@@ -86,6 +88,7 @@ pub fn parse(text: &str) -> Option<Input> {
         }
         "full" => Input::Full,
         "shift" => Input::Shift(v.get("on").and_then(Value::as_bool).unwrap_or(false)),
+        t if t.starts_with("sp_") => Input::Speech(iyakki_agent::hostvoice::FromClient::decode(text)?),
         _ => return None,
     })
 }
@@ -140,6 +143,9 @@ mod tests {
         assert_eq!(parse(r#"{"t":"size","w":1280,"h":720}"#), Some(Input::Size(1280, 720)));
         assert_eq!(parse(r#"{"t":"full"}"#), Some(Input::Full));
         assert_eq!(ev(r#"{"t":"paste","s":"héllo"}"#), Some(Event::Paste("héllo".into())));
+        assert_eq!(parse(r#"{"t":"sp_end","id":4}"#), Some(Input::Speech(iyakki_agent::hostvoice::FromClient::Ended { id: 4 })));
+        assert_eq!(parse(r#"{"t":"sp_end"}"#), None, "a speech event without an id is ignored");
+        assert_eq!(parse(r#"{"t":"sp_bogus","id":1}"#), None);
         assert_eq!(parse("not json"), None);
         assert_eq!(parse(r#"{"t":"reboot"}"#), None);
         assert_eq!(parse(r#"{"x":1}"#), None);

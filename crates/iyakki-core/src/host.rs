@@ -46,6 +46,13 @@ impl HostApi for CoreHost {
             s.push(String::new());
             s.extend(String::from_utf8_lossy(&o.stdout).lines().map(str::to_string));
         }
+        // read-only: the private MAC address mode and the addresses in use (changing it is for administrators, in Settings)
+        let mac = iyakki_devctl::mac::MacEnv::real();
+        let lines = iyakki_devctl::mac::status_lines_from_files(&mac.roots, &mac.config());
+        if lines.len() > 1 {
+            s.push(String::new());
+            s.extend(lines);
+        }
         s.join("\n")
     }
 

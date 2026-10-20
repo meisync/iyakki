@@ -237,6 +237,8 @@ fn route(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
                 None => Response::error(401, "not signed in"),
             }
         }
+        // the sign-in relay page (a login waiting for a code to be pasted from a phone): answered only to the local network
+        ("GET" | "POST", p) if p.starts_with("/login/") => crate::relay::respond(req, peer.ip()).unwrap_or_else(|| Response::error(404, "not found")),
         ("GET" | "POST", _) => Response::error(404, "not found"),
         _ => Response::error(405, "method not allowed"),
     }
@@ -323,6 +325,11 @@ fn serve_screen(conn: &mut Conn, screen: &mut dyn crate::screen::Screen, sh: &Sh
         }
         if let Some(c) = screen.take_cursor() {
             let m = serde_json::json!({ "t": "cursor", "c": c }).to_string();
+            if !send(conn, ws::text_frame(&m)) {
+                return false;
+            }
+        }
+        for m in screen.take_speech() {
             if !send(conn, ws::text_frame(&m)) {
                 return false;
             }

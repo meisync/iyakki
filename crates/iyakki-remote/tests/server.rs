@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 struct Log {
     inputs: Vec<String>,
     viewing: Vec<bool>,
+    /// Messages the fake screen wants the page's speech synthesis to get.
+    speech: Vec<String>,
 }
 
 struct Fake {
@@ -39,6 +41,9 @@ impl Screen for Fake {
     }
     fn take_copy(&mut self) -> Option<String> {
         None
+    }
+    fn take_speech(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.log.lock().unwrap().speech)
     }
     fn finished(&self) -> bool {
         false
@@ -316,4 +321,45 @@ fn https_works_with_a_made_certificate_and_the_cookie_is_marked_secure() {
     let (code, _, _) = http(srv.local_addr(), "GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n");
     assert_ne!(code, 200);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn speech_messages_reach_the_page_as_text_frames_and_the_pages_events_come_back_as_input() {
+    use iyakki_agent::hostvoice::{FromClient, ToClient};
+    let (srv, log) = start();
+    let a = srv.local_addr();
+    let (cookie, csrf) = signed_in(a);
+    let mut s = open_ws(a, &cookie, &csrf).expect("upgraded");
+    let (op, _) = read_frame(&mut s);
+    assert_eq!(op, 2);
+    let speak = ToClient::Speak { id: 5, text: "Once upon a time.".into(), voice: Some("Samantha".into()), lang: Some("en-US".into()), rate: 1.0 };
+    log.lock().unwrap().speech.push(speak.encode());
+    let (op, payload) = read_frame(&mut s);
+    assert_eq!(op, 1, "a text frame");
+    assert_eq!(ToClient::decode(std::str::from_utf8(&payload).unwrap()), Some(speak));
+    for e in [FromClient::Voices { supported: true, voices: vec![] }, FromClient::Started { id: 5 }, FromClient::Boundary { id: 5, char_index: 4 }, FromClient::Ended { id: 5 }] {
+        s.write_all(&masked_text(&e.encode())).unwrap();
+    }
+    let t0 = Instant::now();
+    loop {
+        let l = log.lock().unwrap();
+        if l.inputs.iter().any(|i| i.contains("Ended { id: 5 }")) {
+            let speech: Vec<_> = l.inputs.iter().filter(|i| i.starts_with("Speech")).collect();
+            assert_eq!(speech.len(), 4, "{speech:?}");
+            break;
+        }
+        drop(l);
+        assert!(t0.elapsed() < Duration::from_secs(5), "the page's speech events never arrived");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn the_page_has_the_speech_code_and_only_reaches_for_it_when_asked() {
+    let (srv, _) = start();
+    let (_, _, body) = http(srv.local_addr(), "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    for needed in ["speechSynthesis", "SpeechSynthesisUtterance", "voiceschanged", "onboundary", "sp_voices", "sp_start", "sp_end", "sp_error", "speak_cancel", "speak_pause", "speak_resume", "not-allowed"] {
+        assert!(body.contains(needed), "the page lacks {needed}");
+    }
+    assert!(!body.contains("SpeechRecognition"), "dictation is not part of this page yet");
 }

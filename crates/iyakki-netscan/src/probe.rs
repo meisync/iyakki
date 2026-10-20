@@ -58,6 +58,7 @@ pub const PORTS: &[(u16, Kind, &str)] = &[
     (9100, Kind::Printer, "Raw printing (JetDirect)"),
     (9200, Kind::Data, "Elasticsearch"),
     (11434, Kind::Ollama, "Ollama (default port)"),
+    (13305, Kind::LlmServer, "Lemonade (default port)"),
     (27017, Kind::Data, "MongoDB"),
     (32400, Kind::Media, "Plex"),
     (34567, Kind::Camera, "recorder (XM protocol)"),
@@ -254,6 +255,26 @@ fn camera_hint(h: &Http) -> Option<String> {
     CAMERA_WORDS.iter().find(|w| hay.contains(**w)).map(|w| w.to_string())
 }
 
+/// A Lemonade server at `base`: `GET /api/v1/health` answers `status` with `all_models_loaded` or `max_models`.
+fn lemonade(base: &str, port: u16, t: &Timing) -> Option<Service> {
+    let h = http_get(&format!("{base}/api/v1/health"), t.io).filter(|h| h.status == 200).and_then(|h| json(&h))?;
+    h["status"].as_str()?;
+    if !(h["all_models_loaded"].is_array() || h["max_models"].is_object()) {
+        return None;
+    }
+    let mut svc = Service::new(port, Kind::LlmServer, "Lemonade Server");
+    if let Some(v) = h["version"].as_str().filter(|v| !v.is_empty() && v.len() < 40) {
+        svc.name = format!("Lemonade Server {v}");
+    }
+    svc.confidence = Confidence::High;
+    if let Some(m) = http_get(&format!("{base}/api/v1/models"), t.io).filter(|m| m.status == 200).and_then(|m| json(&m)) {
+        svc.models = m["data"].as_array().map(|a| a.iter().filter_map(|x| x["id"].as_str().map(str::to_string)).take(60).collect()).unwrap_or_default();
+    }
+    svc.detail = format!("{} model{} downloaded · chat, pictures, speech", svc.models.len(), if svc.models.len() == 1 { "" } else { "s" });
+    svc.url = Some(format!("{base}/api/v1"));
+    Some(svc)
+}
+
 fn classify_http(ip: Ipv4Addr, port: u16, scheme: &str, h: &Http, t: &Timing) -> Service {
     let base = format!("{scheme}://{ip}:{port}");
     let server = h.header("server").to_string();
@@ -277,6 +298,12 @@ fn classify_http(ip: Ipv4Addr, port: u16, scheme: &str, h: &Http, t: &Timing) ->
     // other model servers speak the OpenAI API
     let models_url = format!("{base}/v1/models");
     let looks_like_api = port == 1234 || h.header("content-type").contains("json") || h.status == 404 || h.body.trim().is_empty() || h.body.contains("llama") || h.body.to_ascii_lowercase().contains("openai");
+    // AMD's Lemonade Server names itself in its health answer (it also answers /v1/models, so it is asked first)
+    if looks_like_api || matches!(port, 8000 | 13305) || format!("{title} {}", h.body).to_ascii_lowercase().contains("lemonade") {
+        if let Some(svc_l) = lemonade(&base, port, t) {
+            return svc_l;
+        }
+    }
     if looks_like_api {
         if let Some(m) = http_get(&models_url, t.io).filter(|m| m.status == 200).and_then(|m| json(&m)) {
             if let Some(list) = m["data"].as_array() {

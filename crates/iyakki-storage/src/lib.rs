@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 pub const LABEL: &str = "IYAKKI-DATA";
 
+pub mod gpt;
 pub mod virt;
 
 /// Written at the start of a data partition created by the installer (`iyakki-usb`): "format me on first boot".
@@ -231,6 +232,71 @@ pub fn find_pending(roots: &Roots) -> Option<BlockDev> {
     list(roots).into_iter().find(|d| d.content == Content::Pending && d.mounted_at.is_none() && d.parent.is_some())
 }
 
+/// A partition the GUID partition table of a disk says is the IYAKKI data volume (label `IYAKKI-DATA`, type Linux filesystem),
+/// found from the table itself: it exists whether or not the kernel has made a device for it yet. The partition's name
+/// follows the kernel's rule (`sda3`; `nvme0n1p3` and `mmcblk0p3` for disks whose names end in a digit).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GptHint {
+    pub disk: String,
+    pub part: String,
+    pub number: u32,
+}
+
+/// Name of partition `n` of `disk` as the kernel names it.
+pub fn partition_name(disk: &str, n: u32) -> String {
+    if disk.chars().last().is_some_and(|c| c.is_ascii_digit()) { format!("{disk}p{n}") } else { format!("{disk}{n}") }
+}
+
+/// The data partitions the disks' GPTs announce (4096-byte sectors are read as such). Used to decide whether boot should wait for
+/// a partition node that is still to appear, and to explain a data volume that cannot be found.
+pub fn gpt_hints(roots: &Roots) -> Vec<GptHint> {
+    let mut out = Vec::new();
+    for d in list(roots).into_iter().filter(|d| d.parent.is_none() && d.content != Content::Iso9660) {
+        let ss: u32 = read_trim(&roots.sys_block.join(&d.name).join("queue/logical_block_size")).parse().ok().filter(|n| matches!(n, 512 | 4096)).unwrap_or(512);
+        let Ok(mut f) = std::fs::File::open(&d.path) else { continue };
+        let Ok(p) = gpt::read_gpt(&mut f, ss, d.size_bytes / ss as u64) else { continue };
+        for e in p.table.entries.iter().filter(|e| e.name == LABEL && e.type_guid == gpt::TYPE_LINUX_DATA) {
+            out.push(GptHint { disk: d.name.clone(), part: partition_name(&d.name, e.index), number: e.index });
+        }
+    }
+    out
+}
+
+/// Where the installer leaves the administrator's first-boot choices (zram, swap file, ...) inside the marked, not yet
+/// formatted data partition: after the marker, still within the 64 KiB `probe` reads. Formatting destroys it, so the
+/// first boot reads it before [`format_pending`] and keeps it in `system.conf`.
+pub const PENDING_CONF_OFFSET: u64 = 4096;
+pub const PENDING_CONF_MAGIC: &str = "IYAKKI-INSTALL-CONF-v1\n";
+pub const PENDING_CONF_MAX: usize = 8192;
+
+/// The bytes to write at [`PENDING_CONF_OFFSET`] for `conf` (`key=value` lines).
+pub fn pending_conf_bytes(conf: &str) -> Result<Vec<u8>, String> {
+    let mut v = format!("{PENDING_CONF_MAGIC}{conf}").into_bytes();
+    if v.len() >= PENDING_CONF_MAX {
+        return Err("the install settings are too long".into());
+    }
+    v.push(0);
+    Ok(v)
+}
+
+/// The settings the installer left in a pending data partition (or file, in tests).
+pub fn read_pending_conf(path: &Path) -> Option<String> {
+    use std::io::Seek;
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(std::io::SeekFrom::Start(PENDING_CONF_OFFSET)).ok()?;
+    let mut buf = vec![0u8; PENDING_CONF_MAX];
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read(&mut buf[n..]) {
+            Ok(0) | Err(_) => break,
+            Ok(k) => n += k,
+        }
+    }
+    let text = std::str::from_utf8(&buf[..n]).ok()?;
+    let body = text.strip_prefix(PENDING_CONF_MAGIC)?;
+    Some(body.split('\0').next().unwrap_or("").to_string())
+}
+
 /// First boot after an install: format the marked partition as the IYAKKI-DATA volume. Returns its name.
 pub fn format_pending(roots: &Roots, mke2fs: &Path) -> Result<Option<String>, String> {
     let Some(dev) = find_pending(roots) else { return Ok(None) };
@@ -371,13 +437,56 @@ pub fn copy_tree(from: &Path, to: &Path) -> Result<(usize, u64), String> {
     Ok((n, bytes))
 }
 
+/// Devices at least this large get a bigger bytes-per-inode ratio, so the inode tables (written lazily by the
+/// kernel in the background, on a USB disk that is a lot of write traffic) stay small: 931 GB at the default
+/// 16 KiB ratio is ~15 GB of inode tables, at 64 KiB it is ~3.8 GB.
+const BIG_DEVICE: u64 = 256 << 30;
+
+/// The fixed `mke2fs` arguments (no shell). `nodiscard`: do not TRIM the whole device first, which on a 931 GB USB
+/// SSD took ~7 s of boot (nothing needs the old contents trimmed; the volume is new). Lazy table and journal
+/// initialisation keep the filesystem fully valid (checksummed groups are flagged uninitialised) and the journal stays.
+pub fn mke2fs_args(dev: &Path, size_bytes: u64) -> Vec<std::ffi::OsString> {
+    mke2fs_args_with(dev, size_bytes, &fresh_uuid())
+}
+
+/// A random (version 4) UUID from `/dev/urandom`, which never waits. Handing `mke2fs` its UUID and directory hash seed
+/// keeps it from asking the kernel for random numbers itself: right after power-on that call blocks until the random
+/// pool is ready, which delayed the format by several seconds on a machine with little early entropy. Neither value is a secret.
+fn fresh_uuid() -> String {
+    use std::io::Read;
+    let mut b = [0u8; 16];
+    let ok = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).is_ok();
+    if !ok {
+        // no urandom: mix the clock, still unique enough for a volume id
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        b = (t ^ (std::process::id() as u128) << 64).to_le_bytes();
+    }
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: Vec<String> = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", h[0..4].concat(), h[4..6].concat(), h[6..8].concat(), h[8..10].concat(), h[10..16].concat())
+}
+
+fn mke2fs_args_with(dev: &Path, size_bytes: u64, uuid: &str) -> Vec<std::ffi::OsString> {
+    let mut a: Vec<std::ffi::OsString> = ["-t", "ext4", "-L", LABEL, "-U", uuid, "-F", "-q", "-m", "1"].iter().map(Into::into).collect();
+    if size_bytes >= BIG_DEVICE {
+        a.extend(["-i", "65536"].iter().map(std::ffi::OsString::from));
+    }
+    a.push("-E".into());
+    a.push(format!("nodiscard,lazy_itable_init=1,lazy_journal_init=1,hash_seed={uuid}").into());
+    a.push(dev.into());
+    a
+}
+
+fn device_size(dev: &Path) -> u64 {
+    use std::io::{Seek, SeekFrom};
+    std::fs::File::open(dev).and_then(|mut f| f.seek(SeekFrom::End(0))).unwrap_or(0)
+}
+
 /// Run `mke2fs` without a shell.
 fn make_filesystem(mke2fs: &Path, dev: &Path) -> Result<(), String> {
     let out = std::process::Command::new(mke2fs)
-        // lazy initialisation: a 1 TB disk is formatted in a second instead of minutes (the kernel finishes the
-        // inode tables in the background); 1 % reserved instead of 5 %, which is a lot on a big disk
-        .args(["-t", "ext4", "-L", LABEL, "-F", "-q", "-m", "1", "-E", "lazy_itable_init=1,lazy_journal_init=1"])
-        .arg(dev)
+        .args(mke2fs_args(dev, device_size(dev)))
         .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| format!("could not run {}: {e}", mke2fs.display()))?;
@@ -494,6 +603,40 @@ mod tests {
     }
     fn with<'a>(v: &'a [(usize, Vec<u8>)]) -> Vec<(usize, &'a [u8])> {
         v.iter().map(|(o, b)| (*o, b.as_slice())).collect()
+    }
+
+    #[test]
+    fn the_gpt_names_the_data_partition_even_before_the_kernel_has_a_node_for_it() {
+        let m = machine("gpthint");
+        // a GPT disk "nvme0n1" (p suffix) with 4096-byte sectors and one "sda" with 512: both announce IYAKKI-DATA as partition 3
+        for (name, ss) in [("nvme0n1", 4096u32), ("sda", 512)] {
+            let mib = 64u64;
+            let total = mib * 1024 * 1024 / ss as u64;
+            let al = 1024 * 1024 / ss as u64;
+            let mut t = gpt::Table { sector_size: ss, total_sectors: total, disk_guid: [7; 16], entries: vec![] };
+            for (i, (ty, name)) in [(gpt::TYPE_BIOS_BOOT, "IYAKKI-BIOS"), (gpt::TYPE_ESP, "IYAKKI-BOOT"), (gpt::TYPE_LINUX_DATA, "IYAKKI-DATA")].into_iter().enumerate() {
+                t.entries.push(gpt::Entry { index: i as u32 + 1, type_guid: ty, guid: [i as u8 + 1; 16], first_lba: (i as u64 + 1) * al, last_lba: (i as u64 + 2) * al - 1, attrs: 0, name: name.into() });
+            }
+            let mut img = vec![0u8; (mib * 1024 * 1024) as usize];
+            let s = ss as usize;
+            img[s..2 * s].copy_from_slice(&t.header_bytes(false));
+            img[2 * s..2 * s + 16384].copy_from_slice(&t.entries_bytes());
+            let b = t.backup_entries_lba() as usize * s;
+            img[b..b + 16384].copy_from_slice(&t.entries_bytes());
+            img[(total as usize - 1) * s..].copy_from_slice(&t.header_bytes(true));
+            m.disk(name, None, mib, &[]);
+            std::fs::write(m.root.join("dev").join(name), &img).unwrap();
+            let q = m.root.join("sys/block").join(name).join("queue");
+            std::fs::create_dir_all(&q).unwrap();
+            std::fs::write(q.join("logical_block_size"), format!("{ss}\n")).unwrap();
+        }
+        m.disk("vdz", None, 8, &[]); // a disk without a table: nothing to say
+        let h = gpt_hints(&m.roots);
+        assert_eq!(h, vec![GptHint { disk: "nvme0n1".into(), part: "nvme0n1p3".into(), number: 3 }, GptHint { disk: "sda".into(), part: "sda3".into(), number: 3 }]);
+        assert_eq!(partition_name("mmcblk0", 2), "mmcblk0p2");
+        assert_eq!(partition_name("vda", 2), "vda2");
+        // the label alone is not enough: a partition of another type called IYAKKI-DATA is ignored
+        assert!(gpt_hints(&machine("gpthint-none").roots).is_empty());
     }
 
     #[test]
@@ -624,6 +767,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mke2fs_options_are_fast_and_safe() {
+        let s = |n| mke2fs_args(Path::new("/dev/x"), n).iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        let small = s(8 << 30);
+        assert!(small.contains("nodiscard,lazy_itable_init=1,lazy_journal_init=1,hash_seed=") && small.contains(" -U "), "{small}");
+        assert!(!small.contains("-i "), "{small}");
+        let u = fresh_uuid();
+        assert!(u.len() == 36 && u.as_bytes()[14] == b'4' && u != fresh_uuid(), "{u}");
+        assert!(!small.contains("^has_journal"), "the journal stays");
+        let big = s(931 << 30);
+        assert!(big.contains("-i 65536") && big.contains("nodiscard") && big.ends_with("/dev/x"), "{big}");
+    }
+
     fn mke2fs() -> Option<PathBuf> {
         ["/usr/sbin/mke2fs", "/sbin/mke2fs"].iter().map(PathBuf::from).find(|p| p.exists())
     }
@@ -730,5 +886,24 @@ mod tests {
         assert_eq!(data_location(&m.roots, Path::new("/var/lib/iyakki")), DataLocation::Other("unknown".into()));
         let (free, total) = space(Path::new("/tmp")).unwrap();
         assert!(total > 0 && free <= total);
+    }
+
+    #[test]
+    fn install_settings_ride_in_the_pending_partition() {
+        let dir = std::env::temp_dir().join(format!("iyakki-pconf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("part");
+        let mut disk = vec![0u8; 64 * 1024];
+        disk[..PENDING_MARKER.len()].copy_from_slice(PENDING_MARKER);
+        let b = pending_conf_bytes("zram=auto\nswapfile=2G\n").unwrap();
+        disk[PENDING_CONF_OFFSET as usize..PENDING_CONF_OFFSET as usize + b.len()].copy_from_slice(&b);
+        std::fs::write(&f, &disk).unwrap();
+        assert_eq!(classify(&disk), Content::Pending, "the marker still decides");
+        assert_eq!(read_pending_conf(&f).as_deref(), Some("zram=auto\nswapfile=2G\n"));
+        std::fs::write(&f, vec![0u8; 64 * 1024]).unwrap();
+        assert_eq!(read_pending_conf(&f), None, "no settings: nothing");
+        assert_eq!(read_pending_conf(&dir.join("missing")), None);
+        assert!(pending_conf_bytes(&"x".repeat(9000)).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

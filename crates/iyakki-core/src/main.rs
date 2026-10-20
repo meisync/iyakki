@@ -7,8 +7,11 @@ const USAGE: &str = "\
 iyakki — An OS for Agents
 
 USAGE:
+  iyakki --version                      print the version (and, on an installed image, its /etc/iyakki-release)
   iyakki shell [--fb /dev/fb0]          show the login screen and app tiles on a framebuffer
   iyakki net <up|status>                bring up / list network interfaces (/etc/iyakki/net.conf)
+  iyakki net mac [show|off|per-network|random|apply] [--iface X] [--wifi|--ethernet] [--yes]
+                                      private MAC address: show it, choose a mode (needs root), or change it now
   iyakki detect                         print detected host environment
   iyakki hwreport                       hardware report: firmware, display, keyboard/mouse/touch, network, …
   iyakki storage                        where data lives now and which disks could hold it
@@ -27,14 +30,30 @@ USAGE:
   iyakki release keygen FILE | sign DIR --key FILE | verify DIR --pubkey HEX
                                       sums and signs the images of a release, writes the download page, checks a download
   iyakki top [N]                        what the machine is doing: load, memory and the N busiest processes (default 15)
+  iyakki quick-install k3s|duckdb|elasticsearch [--data DIR]
+                                      one Quick install step (the IYAKKI menu runs it as a detached job)
+  iyakki store-manage reset|remove --kubeconfig FILE --namespace NS [--delete-data] [--wait SECS] [--force]
+                                      the cluster side of resetting or removing the private store (run as a detached job)
   iyakki web [ADDR]                     only the browser front end (no screen needed): ADDR is a port, host:port,
                                       or http:port to speak plain HTTP behind a TLS proxy (default HTTPS on 8443);
                                       also from the boot option iyakki.web=ADDR or the environment IYAKKI_WEB
   iyakki web-open URL                   open URL in the optional full web engine (WPE WebKit in the cage compositor; only in the
                                       `web` image variant) and wait; the shell must not be using the screen (docs/FULL-BROWSER.md)
+  iyakki browser-test SPEC.json [--out DIR] [--json] [--profile DIR] [--size WxH]
+                                      run a browser test spec (no model): the steps drive a real page in the full web engine and a
+                                      pass/fail report is printed; the spec's allow_domains are approved by running it (docs/BROWSER-AGENT.md)
   iyakki swarm-run <module> [--entry n] [--wait <secs>]
                                       run a module on a discovered LAN peer
   iyakki ledger-verify <file>           verify a replay ledger's hash chain
+  iyakki pkg <keygen|build|sign|verify|catalog-add|cert-issue|revoke-sign|license-issue|validate|pack|publish>
+                                      make and check signed app-store packages, catalogs and licences, offline; publish to a private store
+                                      (docs/STORE.md, docs/APP-AUTHORING.md)
+  iyakki store-server --data DIR [--listen 0.0.0.0:8080] [--publish-token-file F] [--catalog-key-file F | --catalog-seed-file F]
+                      [--read-only] [--require-trusted] [--id ID] [--name N] [--max-body-mib N] | publisher-add --pub-id ID [--pub-name N]
+                                      a private app store: signed catalog, packages and publishing over HTTP (docs/STORE.md, section 13)
+  iyakki dev <pair|devices|install|uninstall|list|logs|run|push|screenshot|whoami>
+                                      from a developer's computer: pair once with a device in developer mode, then install, upgrade,
+                                      remove, open and watch apps on it, push a folder on every change (docs/DEVELOPER-MODE.md)
 ";
 
 /// `println!` that never panics (see `iyakki_core::console`).
@@ -68,11 +87,24 @@ fn main() -> ExitCode {
 }
 
 fn real_main() -> ExitCode {
+    // speech engines already on this computer are found in the background and used for reading aloud (docs/VOICE.md)
+    #[cfg(feature = "shell")]
+    iyakki_agent::hostengines::enable_by_default();
+    // the sign-in relay page for Claude Code / Copilot logins: a listener of its own is started only while a login waits for a code
+    // (the web front end's port is used when it runs); the certificate is the web front end's
+    #[cfg(feature = "web")]
+    iyakki_agent::extagent::relay::set_listener(std::sync::Arc::new(iyakki_remote::relay::LazyListener::new(std::path::Path::new("/var/lib/iyakki/tls"))));
     // the sample MCP server (the MCP tile starts this program again with --mcp-demo)
     #[cfg(feature = "shell")]
     if std::env::args().nth(1).as_deref() == Some("--mcp-demo") {
         iyakki_agent::mcp::demo_serve_stdio();
         return ExitCode::SUCCESS;
+    }
+    // an external coding agent's view of IYAKKI's tools (docs/EXTERNAL-AGENTS.md): a relay to the run's local socket
+    #[cfg(feature = "shell")]
+    if std::env::args().nth(1).as_deref() == Some("--mcp-tools") {
+        let code = iyakki_agent::extagent::bridge::relay_stdio(&std::env::args().nth(2).unwrap_or_default());
+        return if code == 0 { ExitCode::SUCCESS } else { ExitCode::from(code as u8) };
     }
     init_logger();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -93,7 +125,21 @@ fn real_main() -> ExitCode {
                 }
                 ExitCode::SUCCESS
             }
-            _ => fail("usage: iyakki net <up|status>".into()),
+            Some("mac") => match iyakki_devctl::mac::parse_cmd(&args[2..]) {
+                Ok(c) => {
+                    // SAFETY: geteuid has no preconditions.
+                    let admin = unsafe { libc::geteuid() } == 0;
+                    match iyakki_devctl::mac::run_cmd(&c, &iyakki_devctl::mac::MacEnv::real(), admin) {
+                        Ok(t) => {
+                            out!("{t}");
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => fail(e),
+                    }
+                }
+                Err(e) => fail(e),
+            },
+            _ => fail("usage: iyakki net <up|status|mac>".into()),
         },
         "storage" => storage_cmd(),
         "hwreport" => {
@@ -101,11 +147,45 @@ fn real_main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "persist" => persist_cmd(&args[1..]),
+        // install to this computer's disk from the booted USB stick (docs/ZRAM-AND-INSTALL.md)
+        "install" => ExitCode::from(iyakki_usb::install_cli::run(&args[1..]).clamp(0, 255) as u8),
+        "mem" => mem_cmd(&args[1..]),
+        // keys, packages, certificates, catalogs, revocation lists and licences for the app store (works offline)
         #[cfg(feature = "shell")]
+        "pkg" => match iyakki_agent::store::publish::run(&args[1..]) {
+            Ok(text) => {
+                out!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(e),
+        },
+        #[cfg(feature = "shell")]
+        // a private app store server (runs as the one binary of a container image)
+        #[cfg(feature = "shell")]
+        "store-server" => match iyakki_agent::store::server_http::run_cli(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(e),
+        },
+        // developer mode, the computer's side: talks to a paired device over its TLS (docs/DEVELOPER-MODE.md)
+        #[cfg(feature = "shell")]
+        "dev" => match iyakki_agent::devmode::cli::run(&args[1..], &mut |s| out!("{s}")) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(e),
+        },
         "web-open" => match args.get(1) {
             Some(url) => web_open(url),
             None => fail("usage: iyakki web-open URL".into()),
         },
+        #[cfg(feature = "shell")]
+        "browser-test" => iyakki_core::browsertest::run(&args[1..]),
+        "--version" | "-V" | "version" => {
+            out!("iyakki {}", env!("CARGO_PKG_VERSION"));
+            #[cfg(feature = "shell")]
+            if let Some(i) = iyakki_agent::relinfo::ReleaseInfo::load(std::path::Path::new(iyakki_agent::relinfo::RELEASE_FILE)) {
+                out!("{}", iyakki_agent::relinfo::about_line(Some(&i)));
+            }
+            ExitCode::SUCCESS
+        }
         "detect" => {
             out!("{}", detect_env());
             ExitCode::SUCCESS
@@ -124,6 +204,10 @@ fn real_main() -> ExitCode {
             out_raw!("{}", iyakki_shell::apps::system::text_report(&iyakki_agent::sysinfo::SysRoots::real(), n));
             ExitCode::SUCCESS
         }
+        #[cfg(feature = "shell")]
+        "quick-install" => ExitCode::from(iyakki_agent::quickinstall::cli_main(&args[1..]).clamp(0, 255) as u8),
+        "store-manage" => ExitCode::from(iyakki_agent::store::privatemanage::cli_main(&args[1..]).clamp(0, 255) as u8),
+        "hostname" => hostname_cmd(&args[1..]),
         "ledger-verify" => match args.get(1).map(std::fs::read) {
             Some(Ok(b)) => match iyakki_ledger::Ledger::from_bytes(&b) {
                 Ok(l) => {
@@ -138,6 +222,7 @@ fn real_main() -> ExitCode {
         #[cfg(feature = "swarm")]
         "swarm-run" => swarm_run(&args[1..]),
         "serve" => {
+            log::info!("IYAKKI {} starting", env!("CARGO_PKG_VERSION"));
             // Real boot = we are PID 1 *and* nothing has mounted /proc yet. A container's PID 1 (docker, k3s)
             // already has /proc, and must never try to mount filesystems or load kernel modules.
             let pid1 = std::process::id() == 1 && !std::path::Path::new("/proc/self").exists();
@@ -190,8 +275,33 @@ fn real_main() -> ExitCode {
                         iyakki_core::boot::power_off();
                     }
                     // an installed disk's first boot formats the marked partition; the second must see what the first wrote
+                    // boot a USB-made install image with a second blank disk; install onto it with the real installer, no prompts
+                    // (test only: reachable only through the self-test boot option)
+                    Some("installhere") => {
+                        let spec = iyakki_core::boot::cmdline_param(&cmdline, "iyakki.testinstall").unwrap_or("vdb").to_string();
+                        let mut it = spec.split(',');
+                        let disk = it.next().unwrap_or("vdb").to_string();
+                        let mut a: Vec<String> = vec!["--disk".into(), disk.clone(), "--confirm".into(), disk, "--yes".into()];
+                        for kv in it {
+                            if let Some((k, v)) = kv.split_once('=') {
+                                a.extend([format!("--{k}"), v.to_string()]);
+                            }
+                        }
+                        if let Some(t) = iyakki_core::boot::cmdline_param(&cmdline, "iyakki.testtemplate") {
+                            a.extend(["--template".into(), t.to_string()]);
+                        }
+                        let rc = iyakki_usb::install_cli::run(&a);
+                        out!("IYAKKI-SELFTEST installhere exit {rc}");
+                        iyakki_core::boot::power_off();
+                    }
+                    // memory facts only (zram, swap, settings): for boots that test the kernel options and system.conf
+                    Some("memory") => {
+                        mem_report("memory");
+                        iyakki_core::boot::power_off();
+                    }
                     Some("install1") => {
                         let dir = std::path::Path::new(iyakki_core::boot::DATA_DIR);
+                        mem_report("install1");
                         out!("IYAKKI-SELFTEST install1 location {:?}", iyakki_storage::data_location(&iyakki_storage::Roots::real(), dir));
                         let _ = std::fs::write(dir.join("marker"), "iyakki-install-ok");
                         iyakki_core::boot::power_off();
@@ -199,6 +309,7 @@ fn real_main() -> ExitCode {
                     Some("install2") => {
                         let dir = std::path::Path::new(iyakki_core::boot::DATA_DIR);
                         out!("IYAKKI-SELFTEST install2 location {:?}", iyakki_storage::data_location(&iyakki_storage::Roots::real(), dir));
+                        mem_report("install2");
                         out!("IYAKKI-SELFTEST install2 marker {:?}", std::fs::read_to_string(dir.join("marker")).unwrap_or_else(|e| format!("missing: {e}")));
                         iyakki_core::boot::power_off();
                     }
@@ -219,6 +330,8 @@ fn real_main() -> ExitCode {
                 #[cfg(feature = "shell")]
                 if iyakki_core::boot::cmdline_param(&cmdline, "iyakki.shell") != Some("0") {
                     start_shell_thread();
+                    #[cfg(feature = "web")]
+                    start_devmode_watch();
                 }
                 // TEST ONLY (qemu-web-test.sh): open an address in the full web engine at boot, without the shell
                 #[cfg(feature = "shell")]
@@ -239,6 +352,11 @@ fn real_main() -> ExitCode {
             }
             #[cfg(feature = "web")]
             let _web = web_value.as_deref().and_then(start_web);
+            // developer mode's listener follows Settings -> Developer mode (off by default; nothing listens until an admin turns it on)
+            #[cfg(feature = "web")]
+            if _web.is_some() {
+                start_devmode_watch();
+            }
             #[cfg(not(feature = "web"))]
             let _ = web_value;
             let shutdown = match install_signal_handlers() {
@@ -410,6 +528,120 @@ fn swarm_run(a: &[String]) -> ExitCode {
     }
 }
 
+/// Memory facts for the boot self-tests: swap areas, zram settings, the saved system settings.
+fn mem_report(stage: &str) {
+    let rd = |p: &str| std::fs::read_to_string(p).unwrap_or_else(|e| format!("missing: {e}"));
+    // a swap file is made in the background after login: give it time (up to 40 s) when one is configured
+    let wants_file = |c: &str| c.lines().any(|l| l.trim().strip_prefix("swapfile=").is_some_and(|v| v != "off" && v != "0"));
+    if wants_file(&rd(iyakki_zram::CONF_PATH)) || iyakki_core::boot::cmdline_param(&rd("/proc/cmdline"), "iyakki.swapfile").is_some_and(|v| v != "off" && v != "0") {
+        for _ in 0..80 {
+            if rd("/proc/swaps").contains(iyakki_zram::SWAPFILE_PATH) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+    for l in rd("/proc/swaps").lines() {
+        out!("IYAKKI-SELFTEST {stage} swaps {l}");
+    }
+    out!("IYAKKI-SELFTEST {stage} zram algo {}", rd("/sys/block/zram0/comp_algorithm").trim());
+    out!("IYAKKI-SELFTEST {stage} zram disksize {}", rd("/sys/block/zram0/disksize").trim());
+    out!("IYAKKI-SELFTEST {stage} swappiness {}", rd("/proc/sys/vm/swappiness").trim());
+    out!("IYAKKI-SELFTEST {stage} page-cluster {}", rd("/proc/sys/vm/page-cluster").trim());
+    for l in rd(iyakki_zram::CONF_PATH).lines() {
+        out!("IYAKKI-SELFTEST {stage} system.conf {l}");
+    }
+    out!("IYAKKI-SELFTEST {stage} hostname {}", rd("/etc/hostname").trim());
+}
+
+/// `iyakki hostname [NAME]`: show the host name, or set it (needs root): applied now, written to /etc/hostname and kept in
+/// `system.conf` for the next boots. The boot option `iyakki.hostname=` locks it.
+fn hostname_cmd(a: &[String]) -> ExitCode {
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let conf = std::path::Path::new(iyakki_zram::CONF_PATH);
+    match a.first().map(String::as_str) {
+        None | Some("show") => {
+            #[cfg(feature = "shell")]
+            {
+                out!("{}", iyakki_shell::hostname::current("iyakki"));
+                if let Some(s) = iyakki_shell::hostname::saved(conf) {
+                    out!("kept for the next boots: {s}");
+                }
+                if let Some(n) = iyakki_shell::hostname::locked_by(&cmdline) {
+                    out!("locked by the boot option iyakki.hostname={n}");
+                }
+            }
+            #[cfg(not(feature = "shell"))]
+            out!("{}", iyakki_devctl::current_hostname("iyakki"));
+            ExitCode::SUCCESS
+        }
+        Some(name) if a.len() == 1 => {
+            #[cfg(feature = "shell")]
+            {
+                if let Some(n) = iyakki_shell::hostname::locked_by(&cmdline) {
+                    return fail(format!("the host name is fixed by the boot option iyakki.hostname={n}; edit the boot entry to change it"));
+                }
+                let name = match iyakki_shell::hostname::check(name) {
+                    Ok(n) => n,
+                    Err(e) => return fail(e),
+                };
+                if let Err(e) = iyakki_shell::hostname::save(conf, &name) {
+                    return fail(format!("could not save: {e}"));
+                }
+                if let Err(e) = iyakki_shell::hostname::apply(&name, std::path::Path::new("/etc/hostname")) {
+                    return fail(format!("saved for the next boots, but not applied now: {e}"));
+                }
+                out!("host name is now {name} (kept for the next boots)");
+                ExitCode::SUCCESS
+            }
+            #[cfg(not(feature = "shell"))]
+            {
+                let _ = (name, conf, &cmdline);
+                fail("this build has no shell; set hostname= in /var/lib/iyakki/system.conf".into())
+            }
+        }
+        _ => fail("usage: iyakki hostname [NAME]".into()),
+    }
+}
+
+/// `iyakki mem [status|apply|preview]`: the memory settings of this machine (what Settings, System, Memory shows).
+fn mem_cmd(a: &[String]) -> ExitCode {
+    let env = iyakki_zram::Env::real();
+    match a.first().map(String::as_str) {
+        None | Some("status") => {
+            let s = iyakki_zram::MemStats::read(&env);
+            out!("{}", s.summary());
+            for w in &s.swaps {
+                out!("swap {} used {} of {} bytes, priority {}", w.0, w.1, w.2, w.3);
+            }
+            if let Some(z) = &s.zram {
+                out!("{} {} of {} bytes stored as {} (ratio {}), algorithm {}", z.device, z.orig, z.disksize, z.compressed, z.ratio().map_or("-".into(), |r| format!("{r:.2}")), z.algorithm);
+            }
+            let r = iyakki_core::boot::memory_settings();
+            out!("configured: zram={} swappiness={} swapfile={:?} zswap={}{}", r.config.zram_value(), r.config.swappiness, r.config.swapfile, r.config.zswap, if r.zram_locked { " (zram locked by the boot option)" } else { "" });
+            ExitCode::SUCCESS
+        }
+        Some("preview") => {
+            let r = iyakki_core::boot::memory_settings();
+            for l in iyakki_zram::preview(&iyakki_zram::MemStats::read(&env), &r.config, iyakki_core::boot::total_ram()) {
+                out!("{l}");
+            }
+            ExitCode::SUCCESS
+        }
+        Some("apply") => {
+            let r = iyakki_core::boot::memory_settings();
+            match iyakki_zram::reconfigure(&env, &iyakki_zram::KernelSwap, &r.config, iyakki_core::boot::total_ram()) {
+                Ok(steps) => {
+                    steps.iter().for_each(|s| out!("{}{}", if s.ok { "" } else { "warning: " }, s.msg));
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        _ => fail("usage: iyakki mem [status|preview|apply]".into()),
+    }
+}
+
 /// Boot self-test (kernel arg `iyakki.selftest=1`): prints machine facts and runs a sandboxed
 /// guest, so a boot in QEMU or on real hardware can be verified from the serial console.
 fn selftest() {
@@ -422,9 +654,14 @@ fn selftest() {
         out!("IYAKKI-SELFTEST iface {} {:?}", i.name, i.kind);
     }
     // Voice needs the ALSA command-line tools and a sound device.
-    for tool in ["arecord", "aplay"] {
+    for tool in ["arecord", "aplay", "ssh", "scp", "dropbearkey"] {
         let found = std::env::var("PATH").unwrap_or_default().split(':').any(|d| std::path::Path::new(d).join(tool).exists()) || std::path::Path::new("/usr/bin").join(tool).exists();
         out!("IYAKKI-SELFTEST tool {tool} {}", if found { "ok" } else { "missing" });
+    }
+    // The SSH client of the CLI tile: `ssh -V` prints its version (Dropbear's client on the images).
+    match std::process::Command::new("ssh").arg("-V").output() {
+        Ok(o) => out!("IYAKKI-SELFTEST ssh {}", String::from_utf8_lossy(&[o.stdout, o.stderr].concat()).lines().find(|l| !l.trim().is_empty()).unwrap_or("(no version)").trim()),
+        Err(e) => out!("IYAKKI-SELFTEST ssh missing ({e})"),
     }
     if let Ok(o) = std::process::Command::new("arecord").arg("-l").output() {
         for l in String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.starts_with("card")) {
@@ -468,7 +705,14 @@ fn build_shell_env() -> Result<iyakki_shell::shell::ShellEnv, String> {
     let host = std::sync::Arc::new(iyakki_core::host::CoreHost::new());
     let hwcheck = iyakki_core::boot::cmdline_param(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default(), "iyakki.hwcheck") == Some("1");
     let paths = iyakki_shell::shell::ShellPaths { hwcheck, ..Default::default() };
-    iyakki_shell::shell::ShellEnv::from_paths(&paths, host).map_err(|e| e.to_string())
+    let env = iyakki_shell::shell::ShellEnv::from_paths(&paths, host).map_err(|e| e.to_string())?;
+    // As the machine's first process, keep its clock right from the network (a machine with a flat clock battery starts
+    // at 1970). The settings are read every round, so Settings -> Time takes effect without a restart.
+    if std::process::id() == 1 {
+        let svc = env.services.clone();
+        iyakki_agent::ntp::spawn_sync_thread(move || svc.settings.lock().map(|s| (!s.get().time.no_ntp, s.get().time.ntp_server.clone())).unwrap_or((true, String::new())));
+    }
+    Ok(env)
 }
 
 /// Run the optional full web engine on `url` and wait for it (no shell involved; used by `iyakki web-open` and the
@@ -492,25 +736,35 @@ fn start_shell_thread() {
     // a big stack (the renderer and the apps are stack hungry) and a guard: if the shell panics the message is
     // printed (panic hook) and the shell starts again, instead of the whole system going down with it
     let spawn = std::thread::Builder::new().name("iyakki-shell".into()).stack_size(iyakki_core::console::SHELL_STACK).spawn(|| {
-        let fb = "/dev/fb0";
-        iyakki_core::boot::progress(98, "Starting the desktop");
+        iyakki_core::boot::progress(98, iyakki_core::boot::DESKTOP_STAGE);
+        log::info!("boot: shell thread started");
+        let mut found = None;
         for _ in 0..300 {
-            if std::path::Path::new(fb).exists() {
+            found = iyakki_shell::splash::find_framebuffer(std::path::Path::new("/dev"));
+            if found.is_some() {
                 break;
             }
+            iyakki_shell::splash::make_missing_nodes(std::path::Path::new("/sys/class/graphics"), std::path::Path::new("/dev"));
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        if !std::path::Path::new(fb).exists() {
+        let Some(fb_path) = found else {
             log::warn!("shell: no framebuffer appeared; running headless");
             return;
-        }
+        };
+        log::info!("boot: display found");
+        let fb = fb_path.to_string_lossy().to_string();
+        let fb = fb.as_str();
         for attempt in 1..=5 {
             let run = std::panic::catch_unwind(|| match shell_env() {
                 Ok(env) => {
+                    let t_new = std::time::Instant::now();
                     let mut sh = iyakki_shell::shell::Shell::new(env);
+                    log::info!("boot: shell constructed in {} ms", t_new.elapsed().as_millis());
                     let stop = std::sync::atomic::AtomicBool::new(false);
                     // the boot screen lets go of the display before the desktop draws on it
                     iyakki_core::boot::finish_boot_screen();
+                    // a monitor that woke up during boot but was not seen: one more look (in the background)
+                    iyakki_core::display::probe_once_in_background("the desktop started", iyakki_core::boot::screen_found);
                     if let Err(e) = iyakki_shell::backend::run_fb(&mut sh, fb, &stop) {
                         log::error!("shell: {e}");
                     }
@@ -552,12 +806,13 @@ fn release_cmd(a: &[String]) -> ExitCode {
         },
         Some("sign") => {
             let (Some(dir), Some(key)) = (a.get(1).filter(|d| !d.starts_with("--")), flag("--key")) else { return fail("usage: iyakki release sign DIR --key FILE [--title T] [--version V]".into()) };
-            match release::sign_dir(std::path::Path::new(dir), std::path::Path::new(&key), &flag("--title").unwrap_or_else(|| "IYAKKI".into()), &flag("--version").unwrap_or_else(|| env!("CARGO_PKG_VERSION").into())) {
+            let meta = release::Meta { date: flag("--date").unwrap_or_default(), git_commit: flag("--git-commit").unwrap_or_default(), git_describe: flag("--git-describe").unwrap_or_default(), kernel: flag("--kernel").unwrap_or_default() };
+            match release::sign_dir_with(std::path::Path::new(dir), std::path::Path::new(&key), &flag("--title").unwrap_or_else(|| "IYAKKI".into()), &flag("--version").unwrap_or_else(|| env!("CARGO_PKG_VERSION").into()), &meta) {
                 Ok(entries) => {
                     for e in &entries {
                         out!("{}  {}  ({} bytes)", e.sha256, e.name, e.bytes);
                     }
-                    out!("wrote {}, {} and {} in {dir}; public key {}", release::SUMS, release::SIG, release::PAGE, release::public_key_of(std::path::Path::new(&key)).unwrap_or_default());
+                    out!("wrote {}, {}, {}, {} and {} in {dir}; public key {}", release::SUMS, release::SIG, release::MANIFEST, release::MANIFEST_SIG, release::PAGE, release::public_key_of(std::path::Path::new(&key)).unwrap_or_default());
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail(e),
@@ -574,6 +829,22 @@ fn release_cmd(a: &[String]) -> ExitCode {
                         } else {
                             bad += 1;
                             out!("FAILED  {}: {}", v.name, v.why);
+                        }
+                    }
+                    // the signed manifest, when the folder has one, must agree too
+                    if std::path::Path::new(dir).join(release::MANIFEST).exists() {
+                        match release::verify_manifest(std::path::Path::new(dir), &pubkey) {
+                            Ok((version, files)) => {
+                                out!("manifest {}: version {version}", release::MANIFEST);
+                                for v in files.iter().filter(|v| !v.ok) {
+                                    bad += 1;
+                                    out!("FAILED  {} (manifest): {}", v.name, v.why);
+                                }
+                            }
+                            Err(e) => {
+                                bad += 1;
+                                out!("FAILED  {}: {e}", release::MANIFEST);
+                            }
                         }
                     }
                     if bad == 0 { ExitCode::SUCCESS } else { fail(format!("{bad} file(s) failed")) }
@@ -668,6 +939,25 @@ fn start_web(value: &str) -> Option<iyakki_remote::server::Server> {
     }
 }
 
+/// Start (once per process) the thread that opens the developer-mode listener while developer mode is on and closes it when it goes
+/// off (`iyakki_remote::devserver::watch`). The certificate is the web front end's.
+#[cfg(feature = "web")]
+fn start_devmode_watch() {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return;
+    }
+    match shell_env() {
+        Ok(env) => {
+            let tls = iyakki_agent::devmode::tls_dir(env.services.dir());
+            if let Err(e) = iyakki_remote::devserver::watch(env, tls) {
+                log::error!("developer mode: could not start its watcher: {e}");
+            }
+        }
+        Err(e) => log::error!("developer mode: {e}"),
+    }
+}
+
 /// `iyakki web [ADDRESS]`: only the browser front end, for a server or a container with no screen.
 #[cfg(feature = "web")]
 fn run_web(a: &[String]) -> ExitCode {
@@ -677,6 +967,7 @@ fn run_web(a: &[String]) -> ExitCode {
         Err(e) => return fail(format!("signal setup: {e}")),
     };
     let Some(_server) = start_web(value) else { return fail("the web front end did not start (see the log; the address may be wrong or in use)".into()) };
+    start_devmode_watch();
     while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
@@ -698,6 +989,8 @@ fn run_shell(a: &[String]) -> ExitCode {
         Ok(f) => f,
         Err(e) => return fail(format!("signal setup: {e}")),
     };
+    #[cfg(feature = "web")]
+    start_devmode_watch();
     let mut sh = iyakki_shell::shell::Shell::new(env);
     match iyakki_shell::backend::run_fb(&mut sh, &fb, &shutdown) {
         Ok(()) => ExitCode::SUCCESS,

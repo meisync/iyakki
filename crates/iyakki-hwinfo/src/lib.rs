@@ -208,8 +208,30 @@ fn firmware(r: &Roots, sec: &mut Section) -> bool {
             _ => "unknown",
         };
         sec.lines.push(format!("Secure Boot: {sb}"));
+        let lock = read(&r.sys.join("kernel/security/lockdown"));
+        let (mode, note) = secure_boot_summary(sb == "ON", lock.as_deref());
+        sec.lines.push(format!("Kernel lockdown: {mode}"));
+        if let Some(n) = note {
+            sec.lines.push(n.to_string());
+        }
     }
     efi
+}
+
+/// The lockdown mode from `/sys/kernel/security/lockdown` (`none [integrity] confidentiality`: the bracketed one is active), and
+/// a plain sentence when Secure Boot is on but the kernel is not locked down (a kernel without the Secure Boot patch) or when it
+/// is on and the person may need the one-time key enrolment (docs/SECURE-BOOT.md).
+pub fn secure_boot_summary(secure_boot_on: bool, lockdown_file: Option<&str>) -> (String, Option<&'static str>) {
+    let mode = lockdown_file
+        .and_then(|t| t.split_whitespace().find(|w| w.starts_with('[') && w.ends_with(']')).map(|w| w.trim_matches(|c| c == '[' || c == ']').to_string()))
+        .unwrap_or_else(|| "unknown (this kernel has no lockdown)".into());
+    let note = match (secure_boot_on, mode.as_str()) {
+        (true, "none") => Some("Secure Boot is on but the kernel is not locked down: unsigned drivers could load. Use an image built with the Secure Boot patch (docs/SECURE-BOOT.md)."),
+        (true, _) => Some("Secure Boot is on: only drivers signed with the enrolled IYAKKI key load; driver packs with unsigned modules are refused (docs/SECURE-BOOT.md)."),
+        (false, "integrity" | "confidentiality") => Some("The kernel is locked down although Secure Boot is off (lockdown= on the command line)."),
+        (false, _) => None,
+    };
+    (mode, note)
 }
 
 pub fn collect(r: &Roots) -> Report {
@@ -459,12 +481,24 @@ mod tests {
         let rep = collect(&r);
         let text = rep.to_text();
         assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
-        for want in ["machine: Acme Nuc 12", "firmware: UEFI", "Secure Boot: ON", "i7-1260P (2 logical cores)", "memory: 15.6 GB", "fb0: simpledrmdrmfb 3840x2160, 32 bits/pixel", "HDMI-A-1: U2723QE 3840x2160 27.2 in", "[keyboard] AT Translated Set 2 keyboard (event3)", "[mouse] Logitech USB Optical Mouse", "[touchscreen] ILITEK ILITEK-TP (multi-touch)", "[touchpad] SynPS/2", "eth0: Ethernet, up", "wlan0: WiFi, down", "audio: 0 [PCH", "usb: Touch Monitor by ILITEK (222a:0001)", "kernel modules loaded: 2"] {
+        for want in ["machine: Acme Nuc 12", "firmware: UEFI", "Secure Boot: ON", "Kernel lockdown: unknown", "i7-1260P (2 logical cores)", "memory: 15.6 GB", "fb0: simpledrmdrmfb 3840x2160, 32 bits/pixel", "HDMI-A-1: U2723QE 3840x2160 27.2 in", "[keyboard] AT Translated Set 2 keyboard (event3)", "[mouse] Logitech USB Optical Mouse", "[touchscreen] ILITEK ILITEK-TP (multi-touch)", "[touchpad] SynPS/2", "eth0: Ethernet, up", "wlan0: WiFi, down", "audio: 0 [PCH", "usb: Touch Monitor by ILITEK (222a:0001)", "kernel modules loaded: 2"] {
             assert!(text.contains(want), "missing `{want}` in:\n{text}");
         }
         assert!(!text.contains("DP-1"), "disconnected connectors are not listed");
         assert!(!text.contains("sit0") && !text.contains("fbcon"), "tunnels and the console are not hardware:\n{text}");
         assert!(rep.section("input devices").is_some());
+    }
+
+    #[test]
+    fn secure_boot_and_lockdown_are_explained_in_plain_words() {
+        let (m, n) = secure_boot_summary(true, Some("none [integrity] confidentiality\n"));
+        assert_eq!(m, "integrity");
+        assert!(n.unwrap().contains("signed with the enrolled IYAKKI key"));
+        let (m, n) = secure_boot_summary(true, Some("[none] integrity confidentiality"));
+        assert_eq!(m, "none");
+        assert!(n.unwrap().contains("not locked down"));
+        assert_eq!(secure_boot_summary(false, Some("[none] integrity confidentiality")), ("none".to_string(), None));
+        assert!(secure_boot_summary(false, None).0.contains("no lockdown"));
     }
 
     #[test]

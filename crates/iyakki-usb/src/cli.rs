@@ -17,13 +17,24 @@ IMAGE is the .iso (PC) or .img (VM) file. Without it, an image in the current fo
 OPTIONS:
   --install          install IYAKKI on the stick: a real partitioned system with a FAT boot partition and a data
                      partition that fills the rest of the stick, bootable on legacy BIOS and UEFI PCs
+  --table <t>        with --install: the partition table, auto (default), gpt or mbr.
+                       gpt   BIOS boot partition + EFI System Partition (FAT32) + data partition filling the rest, primary
+                             and backup tables; boots on legacy BIOS and UEFI; any size (the data partition may pass
+                             2 TiB); 512 and 4096-byte sectors (4096: UEFI only)
+                       mbr   the classic table, bootable on any old PC; the data partition ends at 2 TiB; 512-byte sectors
+                       auto  gpt when the drive is over 2 TiB, has 4096-byte sectors, or this computer was started through
+                             UEFI; mbr otherwise. (A stick for an old BIOS-only PC made on a UEFI computer: add --table mbr
+                             if its firmware does not take GPT; most do.)
   --iso              copy the live ISO instead (read-only, loses changes at power-off unless a data disk exists)
                      (with both images available and neither flag, you are asked)
   --erase <drive>    no menu: write to this drive (for example /dev/sdb or disk4). Naming it is the confirmation,
                      so double-check it. The warning is still printed.
   --all              also offer internal disks (never the one holding the running system)
+  --manifest <file>  check the image against this release.json (its sha256) before writing; a release.json or
+                     <image>.sha256 next to the image is used automatically (check the signature with: iyakki release verify)
   --no-verify        skip reading the stick back to check it (not recommended)
   --no-zero-tail     do not wipe the last MiB of the stick
+  --sector-size <n>  testing, with --target-file: pretend the file is a drive with n-byte logical sectors (512 or 4096)
   -h, --help         this text
   -V, --version      version
 
@@ -44,6 +55,12 @@ pub struct Options {
     pub iso: bool,
     /// Testing: pretend this regular file is a drive (never offered otherwise).
     pub target_file: Option<PathBuf>,
+    /// `--install`: `auto`, `gpt` or `mbr`.
+    pub table: Option<String>,
+    /// Testing: the logical sector size a `--target-file` pretends to have.
+    pub sector_size: Option<u32>,
+    /// A release manifest (`release.json`) to check the image's SHA-256 against before writing.
+    pub manifest: Option<PathBuf>,
     pub help: bool,
     pub version: bool,
 }
@@ -62,6 +79,16 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--install" => o.install = true,
             "--iso" => o.iso = true,
             "--erase" => o.erase = Some(it.next().ok_or("--erase needs a drive, for example --erase /dev/sdb")?.clone()),
+            "--manifest" => o.manifest = Some(PathBuf::from(it.next().ok_or("--manifest needs the path of release.json")?)),
+            "--table" => {
+                let t = it.next().ok_or("--table needs auto, gpt or mbr")?;
+                crate::gpt_install::TableChoice::parse(t)?;
+                o.table = Some(t.clone());
+            }
+            "--sector-size" => {
+                let n: u32 = it.next().and_then(|v| v.parse().ok()).filter(|n| matches!(n, 512 | 4096)).ok_or("--sector-size needs 512 or 4096")?;
+                o.sector_size = Some(n);
+            }
             "--target-file" => o.target_file = Some(PathBuf::from(it.next().ok_or("--target-file needs a path")?)),
             s if s.starts_with('-') => return Err(format!("unknown option {s} (see --help)")),
             s => {

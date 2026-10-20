@@ -120,7 +120,7 @@ pub fn patch_install_mbr(sector0: &mut [u8], device_bytes: u64, new_signature: [
 /// Applied to each block just before it is hashed and written: `(offset in the image, block)`.
 pub type Patch<'a> = &'a dyn Fn(u64, &mut [u8]) -> Result<(), String>;
 
-fn hex(d: &[u8]) -> String {
+pub(crate) fn hex(d: &[u8]) -> String {
     d.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -146,6 +146,25 @@ pub fn read_sidecar(image: &Path) -> Option<String> {
     name.push(".sha256");
     let text = std::fs::read_to_string(PathBuf::from(name)).ok()?;
     let tok = text.split_whitespace().next()?.to_lowercase();
+    (tok.len() == 64 && tok.chars().all(|c| c.is_ascii_hexdigit())).then_some(tok)
+}
+
+/// The expected SHA-256 of `image` from a release manifest (`release.json`, written by `iyakki release sign`) in the same folder,
+/// or from `manifest` when given. The manifest is read as text (`"name": ...` followed by its `"sha256": ...`; the keys are
+/// written in that order); its signature is checked with `iyakki release verify`, not here.
+pub fn read_manifest_sum(image: &Path, manifest: Option<&Path>) -> Option<String> {
+    let path = manifest.map(Path::to_path_buf).unwrap_or_else(|| image.with_file_name("release.json"));
+    let text = std::fs::read_to_string(path).ok()?;
+    manifest_sum_in(&text, &image.file_name()?.to_string_lossy())
+}
+
+pub fn manifest_sum_in(text: &str, name: &str) -> Option<String> {
+    let at = text.find(&format!("\"name\": \"{name}\""))?;
+    let rest = &text[at..];
+    let end = rest.find('}').unwrap_or(rest.len());
+    let rest = &rest[..end];
+    let i = rest.find("\"sha256\": \"")? + "\"sha256\": \"".len();
+    let tok = rest[i..].split('"').next()?.to_lowercase();
     (tok.len() == 64 && tok.chars().all(|c| c.is_ascii_hexdigit())).then_some(tok)
 }
 
@@ -224,7 +243,14 @@ fn open_uncached(path: &Path) -> Result<std::fs::File, String> {
 
 /// Read back `bytes` bytes from `target` and compare their SHA-256 with `expected`.
 pub fn verify(target: &Path, bytes: u64, expected: &str, progress: &mut dyn FnMut(Progress)) -> Result<(), String> {
+    verify_range(target, 0, bytes, expected, progress)
+}
+
+/// Like [`verify`] for `bytes` bytes starting at byte `offset` (a multiple of the drive's sector size, as is `bytes` for
+/// direct reads). Progress reports within the range.
+pub fn verify_range(target: &Path, offset: u64, bytes: u64, expected: &str, progress: &mut dyn FnMut(Progress)) -> Result<(), String> {
     let mut f = open_uncached(target)?;
+    f.seek(SeekFrom::Start(offset)).map_err(|e| format!("reading back {}: {e}", target.display()))?;
     // O_DIRECT needs a buffer aligned to the device's block size
     let mut raw = vec![0u8; BLOCK + 4096];
     let off = raw.as_ptr().align_offset(4096);
@@ -365,6 +391,14 @@ mod tests {
         assert_eq!(read_sidecar(&d.join("a.iso")), Some(sum));
         std::fs::write(d.join("a.iso.sha256"), "not a checksum\n").unwrap();
         assert_eq!(read_sidecar(&d.join("a.iso")), None);
+        // a release manifest next to the image
+        let h = "ab".repeat(32);
+        let m = format!("{{\n  \"files\": [\n    {{\n      \"bytes\": 5,\n      \"name\": \"other.iso\",\n      \"sha256\": \"{}\"\n    }},\n    {{\n      \"bytes\": 1,\n      \"name\": \"a.iso\",\n      \"sha256\": \"{h}\"\n    }}\n  ]\n}}\n", "cd".repeat(32));
+        assert_eq!(manifest_sum_in(&m, "a.iso"), Some(h.clone()));
+        assert_eq!(manifest_sum_in(&m, "b.iso"), None);
+        assert_eq!(read_manifest_sum(&d.join("a.iso"), None), None);
+        std::fs::write(d.join("release.json"), &m).unwrap();
+        assert_eq!(read_manifest_sum(&d.join("a.iso"), None), Some(h));
         // known answer, so a broken hash would be noticed
         std::fs::write(d.join("abc"), b"abc").unwrap();
         assert_eq!(file_sha256(&d.join("abc"), &mut |_| {}).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");

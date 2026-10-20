@@ -7,6 +7,7 @@ description = "The shell in a web browser: an HTTPS and WebSocket server of our 
 
 [dependencies]
 iyakki-shell = { path = "../iyakki-shell" }
+iyakki-agent.workspace = true
 iyakki-sec.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
@@ -16,6 +17,5 @@ serde_json = "1"
 log.workspace = true
 
 [dev-dependencies]
-iyakki-agent.workspace = true
 iyakki-web.workspace = true
 iyakki-sec.workspace = true

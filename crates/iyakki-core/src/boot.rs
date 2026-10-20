@@ -3,7 +3,6 @@
 //! hotplug, and bring up networking. Everything is best-effort and logged — a failed
 //! step must never panic PID 1 (a kernel panic would follow).
 
-use std::ffi::CString;
 use std::path::Path;
 use std::process::Command;
 
@@ -19,7 +18,15 @@ pub const MOUNTS: &[(&str, &str, &str, u64, &str)] = &[
     ("efivarfs", "/sys/firmware/efi/efivars", "efivarfs", 0, ""),
 ];
 
+/// Mounting is Linux only (the boot code runs as init there); elsewhere the window runs as an ordinary program.
+#[cfg(not(target_os = "linux"))]
+fn mount(_src: &str, _target: &str, _fstype: &str, _flags: u64, _data: &str) -> Result<(), String> {
+    Err("mount is not available on this OS".into())
+}
+
+#[cfg(target_os = "linux")]
 fn mount(src: &str, target: &str, fstype: &str, flags: u64, data: &str) -> Result<(), String> {
+    use std::ffi::CString;
     let _ = std::fs::create_dir_all(target);
     let (s, t, f, d) = (CString::new(src), CString::new(target), CString::new(fstype), CString::new(data));
     let (Ok(s), Ok(t), Ok(f), Ok(d)) = (s, t, f, d) else { return Err("nul in mount args".into()) };
@@ -77,26 +84,68 @@ fn start_boot_screen() {
     iyakki_shell::splash::mark_started();
     let _ = BOOT_SCREEN_SINCE.set(std::time::Instant::now());
     let spawn = std::thread::Builder::new().name("iyakki-splash".into()).stack_size(crate::console::THREAD_STACK).spawn(|| {
-        // a GPU driver that is a module only creates the screen after it loads: wait for it (boot may finish first)
-        while !Path::new("/dev/fb0").exists() && !iyakki_shell::splash::is_done() {
+        use iyakki_shell::splash::{self, note};
+        let (dev, sys, started) = (Path::new("/dev"), Path::new("/sys"), std::time::Instant::now());
+        note(&format!("boot screen requested (minimum {} s); waiting for a framebuffer. {}", splash_minimum(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default()).as_secs(), splash::graphics_summary(sys)));
+        // a GPU driver that is a module only creates the screen after it loads, and a node can be missing even when
+        // the kernel has the screen: wait for either, never longer than boot itself
+        let mut told = 0u64;
+        let path = loop {
+            if splash::is_done() {
+                note(&format!("boot finished after {} ms before any framebuffer appeared; no boot screen was shown. {}", started.elapsed().as_millis(), splash::graphics_summary(sys)));
+                splash::mark_stopped();
+                return;
+            }
+            if let Some(p) = splash::find_framebuffer(dev) {
+                break p;
+            }
+            let made = splash::make_missing_nodes(&sys.join("class/graphics"), dev);
+            if !made.is_empty() {
+                note(&format!("the kernel has {} but /dev had no node; made it", made.join(", ")));
+                continue;
+            }
+            let s = started.elapsed().as_secs();
+            if s >= 1 && s > told && (s == 1 || s % 5 == 0) {
+                told = s;
+                note(&format!("still no framebuffer after {s} s. {}", splash::graphics_summary(sys)));
+            }
             std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        note(&format!("{} appeared {} ms after the boot screen was requested", path.display(), started.elapsed().as_millis()));
+        // a screen that fails (or vanishes while the GPU driver takes over) is tried again until boot ends
+        let mut attempt = 0;
+        while !splash::is_done() {
+            attempt += 1;
+            let p = splash::find_framebuffer(dev).unwrap_or_else(|| path.clone());
+            let r = std::panic::catch_unwind(|| iyakki_shell::backend::run_splash(&p.to_string_lossy()));
+            if matches!(r, Ok(Ok(()))) {
+                return;
+            }
+            note(&format!("stopped early (attempt {attempt}): {}", match &r {
+                Ok(Err(e)) => e.clone(),
+                Err(_) => "the drawing code panicked".to_string(),
+                Ok(Ok(())) => String::new(),
+            }));
+            if attempt >= 20 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
         }
-        if iyakki_shell::splash::is_done() {
-            iyakki_shell::splash::mark_stopped();
-            return;
-        }
-        let r = std::panic::catch_unwind(|| iyakki_shell::backend::run_splash("/dev/fb0"));
-        if !matches!(r, Ok(Ok(()))) {
-            log::warn!("splash: stopped early: {r:?}");
-            iyakki_shell::splash::mark_stopped();
-        }
+        splash::mark_stopped();
     });
     if spawn.is_err() {
+        iyakki_shell::splash::note("could not start the boot screen thread");
         iyakki_shell::splash::mark_stopped();
     }
 }
 #[cfg(not(feature = "shell"))]
 fn start_boot_screen() {}
+
+/// A monitor turned up after a probe: the boot screen (or the desktop) writes its whole picture again on it.
+pub fn screen_found() {
+    #[cfg(feature = "shell")]
+    iyakki_shell::splash::request_repaint();
+}
 
 static BOOT_SCREEN_SINCE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
@@ -210,11 +259,16 @@ pub fn early_boot_critical() -> LatePlan {
     std::env::set_var("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
     mount_pseudo_filesystems();
     tl.mark("mounts");
+    // Before anything can load the camera or USB sound driver by alias (mdev below, the coldplug): IYAKKI loads those
+    // itself, so a camera that needs a uvcvideo quirk gets it on its first probe (see camera.rs).
+    crate::camera::block_autoload();
     // Hotplug: let the kernel call mdev for new devices (creates nodes, loads modules).
     let _ = std::fs::write("/proc/sys/kernel/hotplug", "/sbin/mdev\n");
     let _ = Command::new("mdev").arg("-s").status();
     tl.mark("device nodes");
     start_boot_screen();
+    // a monitor the GPU driver does not see at first (a DP->HDMI converter, a monitor still waking up) is probed again
+    crate::display::start(screen_found);
     progress(8, "Preparing the system");
     for m in LOGIN_LOAD {
         let _ = Command::new("modprobe").arg("-b").arg(m).stderr(std::process::Stdio::null()).status();
@@ -229,12 +283,19 @@ pub fn early_boot_critical() -> LatePlan {
     let _ = Command::new("mdev").arg("-s").status(); // nodes for devices whose drivers just loaded
     progress(72, "Opening your storage");
     mount_data_volume();
+    progress(86, HOME_STAGE);
+    bind_home_on_data();
     tl.mark("storage");
+    memory_setup();
+    tl.mark("memory");
+    if let Some(h) = configured_hostname() {
+        let _ = std::fs::write("/etc/hostname", format!("{h}\n"));
+    }
     if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
         let h = h.trim();
         if !h.is_empty() {
             // SAFETY: pointer/len describe a valid byte slice.
-            unsafe { libc::sethostname(h.as_ptr().cast(), h.len()) };
+            unsafe { libc::sethostname(h.as_ptr().cast(), h.len() as _) };
         }
     }
     progress(94, "Almost ready");
@@ -246,11 +307,21 @@ static KERNEL_SECS: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new(
 
 /// The rest of boot: drivers for network, sound and Bluetooth, the network itself, remote diagnostics.
 pub fn late_boot(mut plan: LatePlan) {
+    swapfile_setup();
+    // Driver packs from the data volume (firmware links, modprobe options, matching prebuilt modules) go in before the
+    // network, sound and Bluetooth drivers load, so those drivers find their firmware the first time.
+    for l in iyakki_drivers::apply_boot(&iyakki_drivers::Fs::real(), &iyakki_drivers::run::System) {
+        log::info!("{l}");
+    }
     for m in ALWAYS_LOAD.iter().filter(|m| !LOGIN_LOAD.contains(m)) {
         let _ = Command::new("modprobe").arg("-b").arg(m).stderr(std::process::Stdio::null()).status();
     }
+    // Cameras known to need a quirk lose their microphone and are held back, then uvcvideo and snd-usb-audio are loaded
+    // by name (they are blacklisted for alias loading); the quirk binds and later hot plugs run in a background thread.
+    crate::camera::prepare_boot();
     load_aliases(&plan.deferred, "Starting network and sound", 70, 90);
     let _ = Command::new("mdev").arg("-s").status();
+    crate::camera::start();
     plan.tl.mark("late drivers");
     match crate::net::bring_up(Path::new("/etc/iyakki/net.conf"), Path::new("/sys/class/net")) {
         Ok(errs) => errs.iter().for_each(|e| log::warn!("net: {e}")),
@@ -269,9 +340,54 @@ pub const SSH_KEYS_SRC: &str = "/etc/iyakki/authorized_keys";
 /// Written once an address is known, for the sign-in screen to show.
 pub const SSH_NOTE: &str = "/run/iyakki-ssh";
 
-/// The SSH server command for remote diagnostics: keys only (no passwords), host keys made on demand.
-pub fn ssh_server_command() -> Vec<String> {
-    ["dropbear", "-R", "-s", "-E", "-p", "22"].iter().map(|s| s.to_string()).collect()
+/// Where the SSH host key lives when the data volume is on a disk, so it is the same on every boot (a key made anew each boot
+/// makes every SSH client warn "host key changed").
+pub const SSH_HOST_KEY: &str = "/var/lib/iyakki/ssh/dropbear_ed25519_host_key";
+
+/// Read by login shells (the image's `/etc/profile` sources `/etc/profile.d/*.sh`): the programs installed from the CLI catalogue
+/// (k3s, node, python3, ...) and the managed cluster's kubeconfig, so an SSH session finds them like the terminal tile does.
+pub const TOOLS_PROFILE: &str = "/etc/profile.d/iyakki-tools.sh";
+
+/// The text of [`TOOLS_PROFILE`] for a data folder.
+pub fn tools_profile(data: &str) -> String {
+    format!("export PATH=\"{data}/cli/bin:$PATH\"\n[ -r {data}/k3s-dev/kubeconfig ] && export KUBECONFIG={data}/k3s-dev/kubeconfig\n[ -e {data}/cli/bin/k3s ] && [ ! -e {data}/cli/bin/kubectl ] && alias kubectl='k3s kubectl'\n")
+}
+
+/// The SSH server command for remote diagnostics: keys only (no passwords). With `host_key` (a key kept on the data volume)
+/// the server uses that key; without one (a session in RAM) it makes host keys on demand, which change every boot.
+pub fn ssh_server_command(host_key: Option<&str>) -> Vec<String> {
+    let mut c: Vec<String> = ["dropbear", "-s", "-E", "-p", "22"].iter().map(|s| s.to_string()).collect();
+    match host_key {
+        Some(k) => c.extend(["-r".to_string(), k.to_string()]),
+        None => c.insert(1, "-R".to_string()),
+    }
+    c
+}
+
+/// The command that makes the kept host key the first time (Dropbear's own key tool).
+pub fn ssh_host_key_command(path: &str) -> Vec<String> {
+    ["dropbearkey", "-t", "ed25519", "-f", path].iter().map(|s| s.to_string()).collect()
+}
+
+/// The host key to use: the kept one on a disk data volume (made with `make` when missing: 0700 folder, 0600 file), or
+/// `None` when the data lives in RAM or the key cannot be made (the server then makes a fresh key for this boot).
+pub fn persistent_host_key(path: &Path, data_on_disk: bool, make: &mut dyn FnMut(&Path) -> bool) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    if !data_on_disk {
+        return None;
+    }
+    let dir = path.parent()?;
+    std::fs::create_dir_all(dir).ok()?;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    let usable = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() > 0);
+    if !usable(path) {
+        let _ = std::fs::remove_file(path); // an empty file left by an interrupted first try
+        if !make(path) || !usable(path) {
+            return None;
+        }
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).ok()?;
+    Some(path.to_path_buf())
 }
 
 /// First global IPv4 address in `ip -4 -o addr show scope global` output.
@@ -304,7 +420,20 @@ fn start_remote_diagnostics() {
         return;
     }
     let _ = std::fs::create_dir_all("/var/run/dropbear");
-    let cmd = ssh_server_command();
+    if let Err(e) = std::fs::write(TOOLS_PROFILE, tools_profile(DATA_DIR)) {
+        log::warn!("ssh: could not write {TOOLS_PROFILE}: {e}");
+    }
+    let on_disk = matches!(iyakki_storage::data_location(&iyakki_storage::Roots::real(), Path::new(DATA_DIR)), iyakki_storage::DataLocation::Disk(_));
+    let key = persistent_host_key(Path::new(SSH_HOST_KEY), on_disk, &mut |p| {
+        let c = ssh_host_key_command(&p.to_string_lossy());
+        Command::new(&c[0]).args(&c[1..]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+    });
+    match &key {
+        Some(k) => log::info!("ssh: host key {} (kept on the data volume)", k.display()),
+        None => log::warn!("ssh: data is in RAM (or the key could not be made); the host key is new this boot"),
+    }
+    let key = key.map(|k| k.to_string_lossy().to_string());
+    let cmd = ssh_server_command(key.as_deref());
     match Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
         Ok(_) => log::warn!("ssh: remote diagnostics ON (keys only, port 22)"),
         Err(e) => {
@@ -328,7 +457,72 @@ fn start_remote_diagnostics() {
     });
 }
 
+/// The memory settings in force: kernel command line over `system.conf` over the defaults.
+pub fn memory_settings() -> iyakki_zram::Resolved {
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let conf = std::fs::read_to_string(iyakki_zram::CONF_PATH).unwrap_or_default();
+    iyakki_zram::config::resolve(&cmdline, &conf)
+}
+
+/// Total RAM in bytes from `/proc/meminfo`.
+pub fn total_ram() -> u64 {
+    iyakki_zram::stats::parse_meminfo(&std::fs::read_to_string("/proc/meminfo").unwrap_or_default()).0
+}
+
+fn log_steps(steps: Vec<iyakki_zram::apply::Step>) {
+    for s in steps {
+        if s.ok {
+            log::info!("{}", s.msg);
+        } else {
+            log::warn!("{}", s.msg);
+        }
+    }
+}
+
+/// The host name chosen in the installer (`hostname=` in `system.conf`), if valid.
+fn configured_hostname() -> Option<String> {
+    // the boot option wins over the file (and locks the page in Settings)
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    if let Some(n) = cmdline_param(&cmdline, "iyakki.hostname").filter(|h| iyakki_usb::install::valid_hostname(h)) {
+        return Some(n.to_string());
+    }
+    let conf = iyakki_zram::config::parse_conf(&std::fs::read_to_string(iyakki_zram::CONF_PATH).ok()?);
+    conf.get("hostname").filter(|h| iyakki_usb::install::valid_hostname(h)).cloned()
+}
+
+/// zram swap and the vm settings, early so even a small machine has room while the rest starts. Never fatal.
+pub fn memory_setup() {
+    if cmdline_param(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default(), "iyakki.env").is_some_and(|e| e == "docker") {
+        return;
+    }
+    let r = memory_settings();
+    let steps = iyakki_zram::apply(&iyakki_zram::Env::real(), &iyakki_zram::KernelSwap, &r.config, total_ram());
+    // the serial console shows the outcome too (boot tests read it there)
+    for st in steps.iter().filter(|s| s.msg.starts_with("zram:")) {
+        crate::console::out_write(&format!("IYAKKI-BOOT {}\n", st.msg));
+    }
+    log_steps(steps);
+}
+
+/// The optional swap file on the data volume, in the background (writing it can take a while). Off unless asked for.
+fn swapfile_setup() {
+    let r = memory_settings();
+    let Some(bytes) = r.config.swapfile else { return };
+    std::thread::spawn(move || {
+        let on_disk = matches!(iyakki_storage::data_location(&iyakki_storage::Roots::real(), Path::new(DATA_DIR)), iyakki_storage::DataLocation::Disk(_));
+        log_steps(iyakki_zram::apply::apply_swapfile(&iyakki_zram::KernelSwap, &iyakki_zram::Env::real(), Path::new(iyakki_zram::SWAPFILE_PATH), Some(bytes), on_disk));
+    });
+}
+
 pub const DATA_DIR: &str = "/var/lib/iyakki";
+
+/// `/home` lives on the data volume (see `homebind`): before the sign-in, so nothing writes user files into RAM.
+fn bind_home_on_data() {
+    #[cfg(target_os = "linux")]
+    for l in crate::homebind::bind_home_real(Path::new(DATA_DIR), &|src, target| mount(&src.display().to_string(), &target.display().to_string(), "", libc::MS_BIND, "")) {
+        log::info!("{l}");
+    }
+}
 
 /// Mount the IYAKKI-DATA volume (if any) over the data directory so accounts, settings, vaults,
 /// documents and chats survive power-off. Without one, IYAKKI keeps running from RAM.
@@ -347,7 +541,9 @@ pub fn mount_data_volume() {
         let found = iyakki_storage::find_data(&roots).is_some() || iyakki_storage::find_pending(&roots).is_some();
         let has_disk = iyakki_storage::list(&roots).iter().any(|d| d.parent.is_none());
         let usb = usb_storage_present(Path::new("/sys"));
-        if !keep_waiting_for_storage(start.elapsed(), found, has_disk, usb) {
+        // a GPT that names the data partition whose device has not appeared yet: give the kernel a few more seconds
+        let announced_by_gpt = !found && start.elapsed() < std::time::Duration::from_secs(10) && !iyakki_storage::gpt_hints(&roots).is_empty();
+        if !keep_waiting_for_storage(start.elapsed(), found, has_disk, usb) && !announced_by_gpt {
             break;
         }
         if !announced {
@@ -359,24 +555,55 @@ pub fn mount_data_volume() {
         let _ = Command::new("mdev").arg("-s").status();
     }
     log::info!("data: storage search took {} ms", start.elapsed().as_millis());
-    // first boot after an install: the installer left a marked, unformatted data partition
+    if iyakki_storage::find_data(&roots).is_none() && iyakki_storage::find_pending(&roots).is_none() {
+        for h in iyakki_storage::gpt_hints(&roots) {
+            log::warn!("data: the partition table of {} lists IYAKKI-DATA as partition {} ({}) but that device is missing or holds no IYAKKI volume", h.disk, h.number, h.part);
+        }
+    }
+    // first boot after an install: the installer left a marked, unformatted data partition (and the choices made in the installer)
+    let install_conf = iyakki_storage::find_pending(&roots).and_then(|d| iyakki_storage::read_pending_conf(&d.path));
     if iyakki_storage::find_data(&roots).is_none() {
+        if iyakki_storage::find_pending(&roots).is_some() {
+            // once, on the first start after an install: the boot screen says why this start takes a little longer
+            progress(80, FIRST_START_FORMAT_STAGE);
+        }
+        let t_format = std::time::Instant::now();
         let mke2fs = ["/sbin/mke2fs", "/usr/sbin/mke2fs"].iter().map(std::path::PathBuf::from).find(|p| p.exists());
         match mke2fs.map(|m| iyakki_storage::format_pending(&roots, &m)) {
-            Some(Ok(Some(dev))) => log::info!("data: first boot, formatted {dev} as the IYAKKI data volume"),
+            Some(Ok(Some(dev))) => log::info!("data: first boot, formatted {dev} as the IYAKKI data volume in {} ms", t_format.elapsed().as_millis()),
             Some(Ok(None)) | None => {}
             Some(Err(e)) => log::error!("data: could not format the new data partition: {e}"),
         }
     }
-    match iyakki_storage::mount_data(&roots, &iyakki_storage::SysMounter, Path::new(DATA_DIR)) {
+    let t_mount = std::time::Instant::now();
+    let mounted = iyakki_storage::mount_data(&roots, &iyakki_storage::SysMounter, Path::new(DATA_DIR));
+    log::info!("data: mount took {} ms", t_mount.elapsed().as_millis());
+    match mounted {
         Ok(Some(dev)) => {
             log::info!("data: persistent volume {dev} mounted at {DATA_DIR}");
+            if let Some(conf) = install_conf {
+                let p = Path::new(iyakki_zram::CONF_PATH);
+                if !p.exists() {
+                    match std::fs::write(p, conf) {
+                        Ok(()) => log::info!("data: installer settings saved to {}", p.display()),
+                        Err(e) => log::warn!("data: could not save the installer settings: {e}"),
+                    }
+                }
+            }
             crate::console::out_write(&format!("IYAKKI-BOOT data: persistent volume {dev} mounted at {DATA_DIR}\n"));
         }
         Ok(None) => log::info!("data: no IYAKKI-DATA volume; this session is kept in RAM"),
         Err(e) => log::error!("data: {e}"),
     }
 }
+
+/// The boot screen's line while /home is set up on the data volume.
+pub const HOME_STAGE: &str = "Setting up your home folder…";
+/// The boot screen's line while the desktop is built, until its first picture.
+pub const DESKTOP_STAGE: &str = "Starting your desktop…";
+
+/// The boot screen's line while the data partition an install left is formatted (first start only).
+pub const FIRST_START_FORMAT_STAGE: &str = "Formatting the data partition (first start only)…";
 
 /// A USB mass-storage interface (class 08) is plugged in, whether or not its disk has appeared yet.
 pub fn usb_storage_present(sys: &Path) -> bool {
@@ -405,6 +632,12 @@ pub fn cmdline_param<'a>(cmdline: &'a str, key: &str) -> Option<&'a str> {
 }
 
 /// Flush disks and restart the machine.
+#[cfg(not(target_os = "linux"))]
+pub fn reboot() {
+    eprintln!("reboot is not available on this OS (IYAKKI runs as a program here, not as the init system)");
+}
+
+#[cfg(target_os = "linux")]
 pub fn reboot() {
     // SAFETY: as for `power_off`.
     unsafe {
@@ -414,6 +647,12 @@ pub fn reboot() {
 }
 
 /// Flush disks and power the machine off (never returns on success).
+#[cfg(not(target_os = "linux"))]
+pub fn power_off() {
+    eprintln!("power off is not available on this OS (IYAKKI runs as a program here, not as the init system)");
+}
+
+#[cfg(target_os = "linux")]
 pub fn power_off() {
     // SAFETY: sync/reboot take no pointers; reboot(2) with POWER_OFF is the documented shutdown path.
     unsafe {
@@ -425,14 +664,50 @@ pub fn power_off() {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn ssh_login_shells_get_the_tools_folder_and_the_cluster_kubeconfig() {
+        let p = super::tools_profile("/var/lib/iyakki");
+        assert!(p.contains("export PATH=\"/var/lib/iyakki/cli/bin:$PATH\""));
+        assert!(p.contains("export KUBECONFIG=/var/lib/iyakki/k3s-dev/kubeconfig") && p.contains("alias kubectl='k3s kubectl'"));
+    }
+
+    #[test]
     fn ssh_is_keys_only_and_finds_the_address() {
-        let c = super::ssh_server_command();
+        let c = super::ssh_server_command(None);
         assert_eq!(c[0], "dropbear");
         assert!(c.contains(&"-s".to_string()), "passwords are disabled");
-        assert!(c.contains(&"-R".to_string()), "host keys are made on demand");
+        assert!(c.contains(&"-R".to_string()), "in RAM, host keys are made on demand");
+        let k = super::ssh_server_command(Some(super::SSH_HOST_KEY));
+        assert!(k.contains(&"-s".to_string()) && !k.contains(&"-R".to_string()));
+        assert_eq!(&k[k.len() - 2..], &["-r".to_string(), super::SSH_HOST_KEY.to_string()], "the kept key is used");
         let out = "2: eth0    inet 192.168.1.42/24 brd 192.168.1.255 scope global eth0\n";
         assert_eq!(super::first_ipv4(out).as_deref(), Some("192.168.1.42"));
         assert_eq!(super::first_ipv4(""), None);
+    }
+
+    #[test]
+    fn the_ssh_host_key_is_kept_on_the_data_volume_and_made_only_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("iyakki-hostkey-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let key = d.join("ssh/dropbear_ed25519_host_key");
+        let mut made = 0;
+        let mut make = |p: &Path| {
+            made += 1;
+            std::fs::write(p, b"KEY").is_ok()
+        };
+        assert_eq!(super::persistent_host_key(&key, false, &mut make), None, "data in RAM: nothing is kept");
+        assert_eq!(super::persistent_host_key(&key, true, &mut make).as_deref(), Some(key.as_path()), "first boot on a disk: made");
+        assert_eq!(super::persistent_host_key(&key, true, &mut make).as_deref(), Some(key.as_path()), "next boot: the same file");
+        assert_eq!(made, 1, "made once, then reused");
+        assert_eq!(std::fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(key.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+        // an empty file from an interrupted first try is made again; a tool that fails gives no key (a fresh one per boot)
+        std::fs::write(&key, b"").unwrap();
+        assert!(super::persistent_host_key(&key, true, &mut |p: &Path| std::fs::write(p, b"K2").is_ok()).is_some());
+        std::fs::remove_file(&key).unwrap();
+        assert_eq!(super::persistent_host_key(&key, true, &mut |_: &Path| false), None);
+        assert_eq!(super::ssh_host_key_command("/k"), vec!["dropbearkey", "-t", "ed25519", "-f", "/k"]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -499,6 +774,54 @@ mod tests {
         assert!(!d("acpi:PNP0303:"), "PS/2 keyboard");
         assert!(!d("platform:simple-framebuffer"));
         assert!(!d("something:we-have-never-seen"), "unknown classes stay on the critical path");
+    }
+
+    #[test]
+    fn memory_is_set_up_after_the_data_volume_and_before_the_network() {
+        let src = include_str!("boot.rs");
+        let body = src.split("pub fn early_boot_critical").nth(1).unwrap().split("static KERNEL_SECS").next().unwrap();
+        let (data, mem) = (body.find("mount_data_volume();").unwrap(), body.find("memory_setup();").unwrap());
+        assert!(data < mem, "system.conf lives on the data volume");
+        let late = src.split("pub fn late_boot").nth(1).unwrap();
+        assert!(late.find("swapfile_setup();").unwrap() < late.find("net::bring_up").unwrap());
+    }
+
+    #[test]
+    fn the_slow_steps_have_their_own_plain_boot_screen_text_in_rising_order() {
+        let src = include_str!("boot.rs");
+        let body = src.split("pub fn early_boot_critical").nth(1).unwrap().split("static KERNEL_SECS").next().unwrap();
+        assert!(body.find("progress(86, HOME_STAGE)").unwrap() < body.find("bind_home_on_data();").unwrap(), "the home folder text comes before it is set up");
+        assert!(HOME_STAGE.contains("home folder") && DESKTOP_STAGE.contains("desktop") && FIRST_START_FORMAT_STAGE.contains("Formatting"));
+        // every progress number in the early part only goes up: 8, 68, 72, 78, 80, 86, 94, then 98 in the shell thread
+        let all = src.split("#[cfg(test)]").next().unwrap();
+        let nums: Vec<u32> = all.split("progress(").skip(1).filter_map(|r| r.split(',').next()?.trim().parse().ok()).collect();
+        let mut order: Vec<u32> = nums.iter().copied().filter(|n| matches!(n, 8 | 68 | 72 | 86 | 94)).collect();
+        let sorted = { let mut o = order.clone(); o.sort(); o };
+        order.dedup();
+        assert_eq!(order, sorted, "stage numbers rise: {nums:?}");
+        assert!(include_str!("main.rs").contains("progress(98, iyakki_core::boot::DESKTOP_STAGE)"));
+    }
+
+    #[test]
+    fn home_is_bound_after_the_data_volume_and_before_anything_else_uses_it() {
+        let src = include_str!("boot.rs");
+        let body = src.split("pub fn early_boot_critical").nth(1).unwrap().split("static KERNEL_SECS").next().unwrap();
+        let (data, home, mem) = (body.find("mount_data_volume();").unwrap(), body.find("bind_home_on_data();").unwrap(), body.find("memory_setup();").unwrap());
+        assert!(data < home && home < mem, "/home is bound once the volume is mounted, before the rest of boot and the shell");
+        assert!(!src.split("pub fn late_boot").nth(1).unwrap().split("pub const SSH_KEYS_SRC").next().unwrap().contains("bind_home_on_data"), "not in the background part");
+        assert!(!body.contains("\"/root\""), "/root (the image's SSH keys) is never bound over");
+    }
+
+    #[test]
+    fn the_boot_screen_says_when_the_first_start_formats_the_data_partition() {
+        let src = include_str!("boot.rs");
+        let body = src.split("pub fn mount_data_volume").nth(1).unwrap().split("pub fn usb_storage_present").next().unwrap();
+        let (stage, format) = (body.find("progress(80, FIRST_START_FORMAT_STAGE)").unwrap(), body.find("format_pending(").unwrap());
+        assert!(stage < format, "the stage text is shown before mke2fs runs");
+        assert!(FIRST_START_FORMAT_STAGE.contains("first start"));
+        // and the splash is up by then: it starts right after the device nodes, before drivers and storage
+        let early = src.split("pub fn early_boot_critical").nth(1).unwrap();
+        assert!(early.find("start_boot_screen();").unwrap() < early.find("mount_data_volume();").unwrap());
     }
 
     #[test]

@@ -11,5 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 iyakki-storage.workspace = true
+iyakki-zram.workspace = true
 libc = "0.2"
 sha2 = "0.10"

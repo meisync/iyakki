@@ -128,7 +128,14 @@ fn a_person_signs_in_and_sees_and_drives_the_real_desktop_from_the_browser() {
     assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 101"));
 
     // the first picture is the whole desktop at the default size, already signed in
-    let (op, m) = frame(&mut s);
+    // (the page is also asked for its speech voices on connecting: a text frame, in either order with the picture)
+    let (op, m) = loop {
+        let f = frame(&mut s);
+        if f.0 == 2 {
+            break f;
+        }
+        assert_eq!((f.0, String::from_utf8_lossy(&f.1).as_ref()), (1, r#"{"t":"speak_voices"}"#));
+    };
     assert_eq!(op, 2);
     assert_eq!(&m[..8], &[0, 0, 0, 0, 0, 5, 208, 2], "x 0, y 0, 1280 wide, 720 high");
     assert_eq!(png_size(&m[8..]), (1280, 720));

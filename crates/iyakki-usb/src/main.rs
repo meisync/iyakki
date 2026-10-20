@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use iyakki_usb::cli::{find_drive, items_for, parse_args, pick_image, Pick, HELP};
 use iyakki_usb::drives::{list_drives, reread_partitions, Drive, Verdict};
 use iyakki_usb::term::{width, Raw};
+use iyakki_usb::install::{self, TableKind};
 use iyakki_usb::ui::{self, confirmed, install_layout_lines, mode_menu_key, render_menu, render_mode_menu, render_progress, render_warning, Item, Key, Menu, MenuOutcome, BOLD, GREEN, RED, RESET, YELLOW};
 use iyakki_usb::writer::{self, ImageKind, Phase, Progress};
 
@@ -177,13 +178,19 @@ fn run() -> Result<ExitCode, String> {
         return Err("writing to a drive needs administrator rights: run it again with sudo".into());
     }
     // integrity of the download, when a checksum file sits next to the image
-    if let Some(expected) = writer::read_sidecar(&image) {
-        println!("Checking {image_name} against {image_name}.sha256 …");
+    // (<image>.sha256, or release.json from the release folder / --manifest FILE)
+    let sidecar = writer::read_sidecar(&image).map(|s| (s, format!("{image_name}.sha256")));
+    let from_manifest = || writer::read_manifest_sum(&image, o.manifest.as_deref()).map(|s| (s, "release.json".to_string()));
+    if o.manifest.is_some() && sidecar.is_none() && from_manifest().is_none() {
+        return Err(format!("{image_name} is not listed in the manifest you gave (--manifest). Nothing was written."));
+    }
+    if let Some((expected, source)) = sidecar.or_else(from_manifest) {
+        println!("Checking {image_name} against {source} …");
         let mut p = Printer::new();
         let got = writer::file_sha256(&image, &mut |pr| p.show(pr))?;
         p.done();
         if got != expected {
-            return Err(format!("the image does not match its .sha256 file (the download is damaged or was altered). Nothing was written.\n  expected {expected}\n  found    {got}"));
+            return Err(format!("the image does not match its checksum ({source}; the download is damaged or was altered). Nothing was written.\n  expected {expected}\n  found    {got}"));
         }
         println!("{GREEN}Checksum OK.{RESET}\n");
     }
@@ -211,7 +218,30 @@ fn run() -> Result<ExitCode, String> {
     }
     // the warning, and the confirmation: typing the name (or having named it with --erase)
     let installing = info.kind == ImageKind::InstallTemplate;
-    let layout = installing.then(|| install_layout_lines(d.size_bytes, 256 * 1024 * 1024));
+    if o.table.is_some() && !installing {
+        return Err("--table applies to --install (the install image); nothing was written".into());
+    }
+    let sector = o.sector_size.filter(|_| o.target_file.is_some()).unwrap_or_else(|| iyakki_usb::drives::logical_sector(d));
+    let table_choice = install::TableChoice::parse(o.table.as_deref().unwrap_or("auto"))?;
+    let (kind, why) = if installing { install::resolve_table(table_choice, d.size_bytes, sector, install::booted_uefi()).map_err(|e| format!("{}: {e}. Nothing was written.", d.path))? } else { (TableKind::Mbr, String::new()) };
+    let source = if installing && kind == TableKind::Gpt { Some(install::read_source(&image)?) } else { None };
+    let gpt_plan = match &source {
+        Some(src) => Some(install::plan_stick_gpt(d, sector, src, &why).map_err(|e| format!("{e}. Nothing was written."))?),
+        None => None,
+    };
+    let layout = installing.then(|| match &gpt_plan {
+        Some(p) => {
+            let mut v = vec![format!("{} partition table ({why}), {sector}-byte sectors", kind.label())];
+            v.extend(p.layout_lines());
+            v.push(if sector == 512 { "Boots on legacy BIOS PCs (GRUB in the BIOS boot partition) and on UEFI PCs.".to_string() } else { "Boots on UEFI PCs (4096-byte sectors: no legacy BIOS boot).".to_string() });
+            v
+        }
+        None => {
+            let mut v = vec![format!("MBR partition table ({why})")];
+            v.extend(install_layout_lines(d.size_bytes, 256 * 1024 * 1024));
+            v
+        }
+    });
     print!("{}", render_warning(d, &chosen.verdict, &image_name, info.size, layout.as_deref()));
     let _ = std::io::stdout().flush();
     if o.erase.is_some() {
@@ -229,6 +259,15 @@ fn run() -> Result<ExitCode, String> {
     let target = PathBuf::from(&d.path);
     let mut p = Printer::new();
     // installing: the data partition is stretched to fill the stick while the boot sector goes by
+    if let Some(plan) = &gpt_plan {
+        let report = install::execute(plan, false, "", &mut |pr| p.show(pr)).map_err(|e| format!("{e}\nThe drive may be half-written; do not boot it."))?;
+        p.done();
+        reread_partitions(&d.path);
+        println!("\n{BOLD}{GREEN}Done.{RESET} {} written to {} and verified (both copies of the GPT checked). It is safe to remove the stick.", ui::human_size(report.written), d.path);
+        println!("IYAKKI is installed. The first boot formats the data partition (a few seconds); after that your accounts, settings and files are kept on the stick.");
+        println!("Boot it: pick the stick in your computer's boot menu (usually F12, F10 or Esc at power-on). Secure Boot must be off for now.");
+        return Ok(ExitCode::SUCCESS);
+    }
     let (size, sig) = (d.size_bytes, random_signature());
     let patch = move |off: u64, buf: &mut [u8]| -> Result<(), String> {
         if off == 0 { writer::patch_install_mbr(&mut buf[..512], size, sig).map(|_| ()) } else { Ok(()) }

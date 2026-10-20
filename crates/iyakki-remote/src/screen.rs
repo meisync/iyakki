@@ -46,6 +46,10 @@ pub trait Screen: Send {
     fn take_clip_request(&mut self) -> bool {
         false
     }
+    /// Messages for the page's speech synthesis (browser voice), JSON text, oldest first.
+    fn take_speech(&mut self) -> Vec<String> {
+        Vec::new()
+    }
     /// The mouse pointer's CSS name when it changed since last asked (`pointer`, `text`, `default`...).
     fn take_cursor(&mut self) -> Option<&'static str> {
         None
@@ -127,12 +131,15 @@ pub struct ShellScreen {
     copied: Option<String>,
     cursor: Option<&'static str>,
     read_clip: bool,
+    /// Messages for the page's speech synthesis; a channel of its own so a slow page never makes one get lost like a frame.
+    speech: std::sync::mpsc::Receiver<String>,
 }
 
 impl ShellScreen {
     pub fn spawn(env: ShellEnv, session: iyakki_shell::accounts::Session, password: String) -> std::io::Result<ShellScreen> {
         let (tx, cmds) = std::sync::mpsc::channel::<Cmd>();
         let (out, rx) = std::sync::mpsc::sync_channel::<Out>(4);
+        let (speech_tx, speech) = std::sync::mpsc::channel::<String>();
         let done = Arc::new(AtomicBool::new(false));
         let user = session.user.clone();
         let flag = done.clone();
@@ -142,14 +149,14 @@ impl ShellScreen {
                 let mut shell = Shell::new(env);
                 shell.sign_in_checked(session, &password);
                 drop(password);
-                shell_loop(shell, cmds, out, &flag);
+                shell_loop(shell, cmds, out, speech_tx, &flag);
             }));
             if run.is_err() {
                 log::error!("web: a person's shell crashed; their session ends");
             }
             flag.store(true, Ordering::Relaxed);
         })?;
-        Ok(ShellScreen { tx, rx, user, done, copied: None, cursor: None, read_clip: false })
+        Ok(ShellScreen { tx, rx, user, done, copied: None, cursor: None, read_clip: false, speech })
     }
 }
 
@@ -172,7 +179,8 @@ fn css_cursor(p: iyakki_shell::ui::Pointer) -> &'static str {
     }
 }
 
-fn shell_loop(mut shell: Shell, cmds: std::sync::mpsc::Receiver<Cmd>, out: std::sync::mpsc::SyncSender<Out>, done: &AtomicBool) {
+fn shell_loop(mut shell: Shell, cmds: std::sync::mpsc::Receiver<Cmd>, out: std::sync::mpsc::SyncSender<Out>, speech: std::sync::mpsc::Sender<String>, done: &AtomicBool) {
+    let voice = iyakki_agent::hostvoice::HostVoice::current();
     let mut gfx = Gfx::new(1280, 720);
     let mut last: Vec<u8> = Vec::new();
     let (mut need_full, mut dirty, mut viewing) = (true, true, false);
@@ -200,11 +208,18 @@ fn shell_loop(mut shell: Shell, cmds: std::sync::mpsc::Receiver<Cmd>, out: std::
                     dirty = true;
                 }
                 Cmd::In(Input::Shift(on)) => iyakki_shell::ui::set_shift_held(on),
+                Cmd::In(Input::Speech(e)) => voice.event(e),
                 Cmd::In(Input::Full) => {
                     need_full = true;
                     dirty = true;
                 }
                 Cmd::Viewing(v) => {
+                    // the page is the person's speaker only while it is connected: it announces what it can do on connecting
+                    if v {
+                        voice.connect(iyakki_agent::hostvoice::Front::Browser);
+                    } else {
+                        voice.disconnect();
+                    }
                     viewing = v;
                     need_full |= v;
                     dirty |= v;
@@ -217,6 +232,9 @@ fn shell_loop(mut shell: Shell, cmds: std::sync::mpsc::Receiver<Cmd>, out: std::
             shell.handle(&Event::Tick);
             // an app with live pictures (the browser's full engine) asks for a redraw on the heartbeat
             dirty |= shell.take_stale();
+        }
+        for m in voice.take_outgoing() {
+            let _ = speech.send(m.encode());
         }
         if shell.session().is_none() {
             break;
@@ -306,6 +324,14 @@ impl Screen for ShellScreen {
         if !on {
             while self.rx.try_recv().is_ok() {}
         }
+    }
+
+    fn take_speech(&mut self) -> Vec<String> {
+        let mut v = Vec::new();
+        while let Ok(m) = self.speech.try_recv() {
+            v.push(m);
+        }
+        v
     }
 
     fn step(&mut self) -> Option<Frame> {

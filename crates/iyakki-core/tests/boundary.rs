@@ -18,7 +18,7 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-const SYSCALLS: [&str; 20] = ["mount", "umount", "umount2", "reboot", "sethostname", "ioctl", "sigaction", "getrandom", "statvfs", "sync", "waitpid", "kill", "killpg", "setsid", "setpgid", "prctl", "raise", "poll", "mmap", "munmap"];
+const SYSCALLS: [&str; 24] = ["swapon", "swapoff", "mount", "umount", "umount2", "reboot", "sethostname", "ioctl", "sigaction", "getrandom", "statvfs", "sync", "waitpid", "kill", "killpg", "setsid", "setpgid", "prctl", "raise", "poll", "mmap", "munmap", "mknod", "clock_settime"];
 
 /// What a file does at the base-OS boundary: process spawns and system-level libc calls (test code excluded).
 fn touchpoints(text: &str) -> Vec<String> {
@@ -102,9 +102,15 @@ fn upstream_sources_are_never_patched() {
             }
         }
     }
-    let mut bad = Vec::new();
-    walk(&root().join("dist"), &mut bad);
-    assert!(bad.is_empty(), "patch files under dist/ (BOUNDARY.md rule 3): {bad:?}");
+    let mut found = Vec::new();
+    walk(&root().join("dist"), &mut found);
+    // patching comes last and never silently: a patch file is allowed only when BOUNDARY.md names it (rule 3)
+    let doc = std::fs::read_to_string(root().join("BOUNDARY.md")).unwrap();
+    let bad: Vec<&String> = found.iter().filter(|p| !Path::new(p).file_name().is_some_and(|n| doc.contains(&*n.to_string_lossy()))).collect();
+    assert!(bad.is_empty(), "patch files under dist/ that BOUNDARY.md rule 3 does not list: {bad:?}");
+    // the Mac variant's four kernel patches (0001 IYAKKI's CDCLK fix, 0002-0004 pinned T2 MacBook backports) and the two
+    // patches of its out-of-tree apple-bce package, and the one Secure Boot lockdown patch of every x86-64 image (patches-sb)
+    assert!(found.len() <= 7, "more than the seven listed patches: {found:?}");
 }
 
 #[test]
