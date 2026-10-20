@@ -1,0 +1,261 @@
+//! `iyakki dev ...` on the developer's computer: pair once, then install, remove, list, read logs, open apps, take a screenshot and
+//! push a folder on every change (live reload). Talks only to paired devices, over their TLS, with signed requests ([`super::client`]).
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use serde_json::Value;
+
+use super::client::{self, DevClient, Home};
+use super::{ops, DEFAULT_PORT};
+
+pub const USAGE: &str = "usage: iyakki dev <command>
+  pair <address[:port]> [--code CODE] [--name THIS-COMPUTER] [--as DEVICE-NAME] [--fingerprint FP]
+                                      pair once with the code and fingerprint the device shows (Settings, Developer mode)
+  devices [--default NAME | --forget NAME]   the devices this computer paired with
+  install <pkg.iyp | folder> [--shared] [--open]   install a tile app, skill, MCP server, extension... (Developer (local))
+  uninstall <id>                      remove something developer mode installed (kind:name or name)
+  list [--all]                        what developer mode installed on the device (--all: everything you can see)
+  logs <id> [--follow]                the app's log on the device (installs, removals, its page's console)
+  run <id> | open <id>                open the app on the device's screen
+  push <folder> [--watch] [--open]    pack and install the folder; with --watch again on every change (live reload)
+  screenshot [-o FILE.png]            a picture of the device's screen
+  whoami                              the device, and the account this computer acts as
+options for every command: --device NAME (default: the first paired), --home DIR (default: ~/.config/iyakki/dev or $IYAKKI_DEV_HOME)";
+
+struct Args {
+    pos: Vec<String>,
+    flags: Vec<(String, Option<String>)>,
+}
+
+const WITH_VALUE: [&str; 9] = ["--code", "--name", "--as", "--fingerprint", "--device", "--home", "-o", "--default", "--forget"];
+
+impl Args {
+    fn parse(a: &[String]) -> Result<Args, String> {
+        let mut pos = Vec::new();
+        let mut flags = Vec::new();
+        let mut it = a.iter();
+        while let Some(x) = it.next() {
+            if let Some((k, v)) = x.split_once('=').filter(|(k, _)| k.starts_with("--")) {
+                flags.push((k.to_string(), Some(v.to_string())));
+            } else if WITH_VALUE.contains(&x.as_str()) {
+                flags.push((x.clone(), Some(it.next().ok_or_else(|| format!("{x} needs a value"))?.clone())));
+            } else if x.starts_with('-') && x.len() > 1 {
+                flags.push((x.clone(), None));
+            } else {
+                pos.push(x.clone());
+            }
+        }
+        Ok(Args { pos, flags })
+    }
+
+    fn get(&self, k: &str) -> Option<&str> {
+        self.flags.iter().find(|(f, _)| f == k).and_then(|(_, v)| v.as_deref())
+    }
+
+    fn has(&self, k: &str) -> bool {
+        self.flags.iter().any(|(f, _)| f == k)
+    }
+}
+
+fn computer_name() -> String {
+    let h = std::fs::read_to_string("/etc/hostname").ok().map(|s| s.trim().to_string()).filter(|s| super::valid_name(s));
+    h.or_else(|| std::env::var("HOSTNAME").ok().filter(|s| super::valid_name(s))).unwrap_or_else(|| "laptop".into())
+}
+
+fn read_line(prompt: &str, out: &mut dyn FnMut(&str)) -> String {
+    out(prompt);
+    let mut s = String::new();
+    let _ = std::io::stdin().read_line(&mut s);
+    s.trim().to_string()
+}
+
+fn show_install(v: &Value) -> String {
+    let mut s = format!(
+        "{} {}:{} {} for {} ({}){}",
+        if v["reinstalled"].as_bool() == Some(true) { "Reinstalled" } else { "Installed" },
+        v["kind"].as_str().unwrap_or(""),
+        v["name"].as_str().unwrap_or(""),
+        v["version"].as_str().unwrap_or(""),
+        if v["scope"] == "shared" { "everyone".to_string() } else { v["scope"].as_str().unwrap_or("").trim_start_matches("user/").to_string() },
+        "Developer (local)",
+        if v["kind"] == "tile" { format!("; open it with `iyakki dev run {}`", v["name"].as_str().unwrap_or("")) } else { String::new() }
+    );
+    for p in v["permissions"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        s.push_str(&format!("\n  may: {p}"));
+    }
+    for w in v["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        s.push_str(&format!("\n  warning: {w}"));
+    }
+    s
+}
+
+/// What `push` does besides installing once.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Push {
+    pub shared: bool,
+    /// Open the app on the device's screen after the first install.
+    pub open: bool,
+    /// Keep watching the folder and install again on every change.
+    pub watch: bool,
+}
+
+/// Pack and install `dir`; with `watch`, again whenever a file in it changes, for as long as `go_on` says so (live reload: an open copy
+/// of a tile app reloads by itself on the device). A build that fails is reported and the watch goes on.
+pub fn push(c: &DevClient, dir: &Path, key: &ed25519_dalek::SigningKey, opts: Push, out: &mut dyn FnMut(&str), go_on: &dyn Fn() -> bool) -> Result<(), String> {
+    let mut opened = false;
+    let mut once = |out: &mut dyn FnMut(&str)| -> Result<(), String> {
+        let bytes = ops::package_bytes(dir, key)?;
+        let v = c.install(&bytes, opts.shared)?;
+        out(&show_install(&v));
+        if opts.open && !opened {
+            c.open(v["name"].as_str().unwrap_or(""))?;
+            opened = true;
+        }
+        Ok(())
+    };
+    once(out)?;
+    if !opts.watch {
+        return Ok(());
+    }
+    out(&format!("Watching {} for changes (Ctrl+C stops). Each change is packed and installed again; an open copy reloads.", dir.display()));
+    let mut stamp = ops::folder_stamp(dir);
+    while go_on() {
+        std::thread::sleep(Duration::from_millis(400));
+        if ops::folder_stamp(dir) == stamp {
+            continue;
+        }
+        // let a burst of saves settle
+        std::thread::sleep(Duration::from_millis(300));
+        stamp = ops::folder_stamp(dir);
+        if let Err(e) = once(out) {
+            out(&format!("not installed: {e}"));
+        }
+    }
+    Ok(())
+}
+
+/// Run `iyakki dev <args>`; lines go to `out` as they happen (`logs --follow` and `push --watch` run until interrupted).
+pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
+    let args = Args::parse(a)?;
+    let home = Home::at(&args.get("--home").map(PathBuf::from).unwrap_or_else(client::default_home));
+    let Some(cmd) = args.pos.first().map(String::as_str) else { return Err(USAGE.into()) };
+    let arg1 = args.pos.get(1).map(String::as_str);
+    let connect = || -> Result<DevClient, String> { DevClient::new(&home, home.device(args.get("--device"))?) };
+    match cmd {
+        "help" | "--help" => out(USAGE),
+        "pair" => {
+            let (host, port) = client::split_host(arg1.ok_or("usage: iyakki dev pair <address[:port]> [--code CODE]")?, DEFAULT_PORT)?;
+            let (fp, info) = client::hello(&host, port)?;
+            out(&format!("Device {} (IYAKKI {}) at {host}:{port}", info["name"].as_str().unwrap_or("?"), info["version"].as_str().unwrap_or("?")));
+            out(&format!("Its certificate fingerprint: {fp}\nCheck that the device's screen shows the same fingerprint."));
+            if info["pairing"].as_bool() != Some(true) {
+                return Err("no pairing code is open on the device: an administrator chooses Pair a computer in Settings, Developer mode".into());
+            }
+            let code = match args.get("--code") {
+                Some(c) => c.to_string(),
+                None => read_line("Pairing code shown on the device: ", out),
+            };
+            let name = args.get("--name").map(str::to_string).unwrap_or_else(computer_name);
+            let d = client::pair(&home, &host, port, &name, &code, args.get("--fingerprint").or(Some(&fp)), args.get("--as"))?;
+            out(&format!("Paired: this computer is “{name}” on {} and acts as the account {}. Saved as device “{}” in {}.", host, d.account, d.name, home.dir().display()));
+        }
+        "devices" => {
+            if let Some(n) = args.get("--forget") {
+                home.remove(n)?;
+                out(&format!("Forgot {n} on this computer (revoke the key on the device too: Settings, Developer mode)."));
+                return Ok(());
+            }
+            if let Some(n) = args.get("--default") {
+                home.set_default(n)?;
+            }
+            let def = home.default_name();
+            let list = home.devices();
+            if list.is_empty() {
+                out("No device is paired yet: run `iyakki dev pair <address>`.");
+            }
+            for d in list {
+                out(&format!("{} {:<16} {}:{}  as {}  key {}", if d.name == def { "*" } else { " " }, d.name, d.host, d.port, d.account, d.fingerprint.chars().take(23).collect::<String>()));
+            }
+            if let Some(k) = home.public_key() {
+                out(&format!("This computer's key: {k}"));
+            }
+        }
+        "whoami" | "status" => {
+            let c = connect()?;
+            let v = c.whoami()?;
+            out(&format!("{} ({}:{}): this computer is “{}”, acting as {} ({}); developer mode {}", v["device"].as_str().unwrap_or(""), c.device.host, c.device.port, v["computer"].as_str().unwrap_or(""), v["account"].as_str().unwrap_or(""), v["role"].as_str().unwrap_or(""), v["status"].as_str().unwrap_or("")));
+        }
+        "install" => {
+            let path = Path::new(arg1.ok_or("usage: iyakki dev install <pkg.iyp | folder> [--shared] [--open]")?);
+            let c = connect()?;
+            let bytes = ops::package_bytes(path, &home.key()?)?;
+            let v = c.install(&bytes, args.has("--shared"))?;
+            out(&show_install(&v));
+            if args.has("--open") {
+                c.open(v["name"].as_str().unwrap_or(""))?;
+                out("Opened on the device's screen.");
+            }
+        }
+        "uninstall" | "remove" => {
+            let id = arg1.ok_or("usage: iyakki dev uninstall <id>")?;
+            let v = connect()?.uninstall(id)?;
+            out(&format!("Removed {}:{} {} (its saved data is kept).", v["kind"].as_str().unwrap_or(""), v["name"].as_str().unwrap_or(""), v["version"].as_str().unwrap_or("")));
+        }
+        "list" => {
+            let v = connect()?.list(args.has("--all"))?;
+            let items = v["items"].as_array().cloned().unwrap_or_default();
+            if items.is_empty() {
+                out("Nothing installed from a developer computer.");
+            }
+            for i in items {
+                out(&format!("{:<10} {:<24} {:<10} {:<18} {:<14} {}", i["kind"].as_str().unwrap_or(""), i["name"].as_str().unwrap_or(""), i["version"].as_str().unwrap_or(""), i["trust"].as_str().unwrap_or(""), i["scope"].as_str().unwrap_or(""), i["source"].as_str().unwrap_or("")));
+            }
+        }
+        "logs" => {
+            let id = arg1.ok_or("usage: iyakki dev logs <id> [--follow]")?;
+            let name = id.rsplit(':').next().unwrap_or(id);
+            let c = connect()?;
+            let mut since = 0u64;
+            loop {
+                let v = c.logs(name, since)?;
+                let t = v["text"].as_str().unwrap_or("");
+                if !t.is_empty() {
+                    out(t.trim_end_matches('\n'));
+                }
+                let next = v["next"].as_u64().unwrap_or(since);
+                let more = next > since && v["more"].as_bool() == Some(true);
+                since = next;
+                if more {
+                    continue;
+                }
+                if !args.has("--follow") && !args.has("-f") {
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+        "run" | "open" => {
+            let id = arg1.ok_or("usage: iyakki dev run <id>")?;
+            let v = connect()?.open(id.rsplit(':').next().unwrap_or(id))?;
+            out(v["message"].as_str().unwrap_or("Asked the device to open it."));
+        }
+        "push" => {
+            let dir = PathBuf::from(arg1.ok_or("usage: iyakki dev push <folder> [--watch] [--open]")?);
+            if !dir.is_dir() {
+                return Err(format!("{} is not a folder", dir.display()));
+            }
+            let c = connect()?;
+            let opts = Push { shared: args.has("--shared"), open: args.has("--open"), watch: args.has("--watch") };
+            push(&c, &dir, &home.key()?, opts, out, &|| true)?;
+        }
+        "screenshot" => {
+            let png = connect()?.screenshot()?;
+            let file = args.get("-o").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(format!("iyakki-screen-{}.png", crate::clock::now_unix())));
+            std::fs::write(&file, &png).map_err(|e| format!("{}: {e}", file.display()))?;
+            out(&format!("Saved {} ({} KB).", file.display(), png.len().div_ceil(1024)));
+        }
+        other => return Err(format!("unknown command {other:?}\n{USAGE}")),
+    }
+    Ok(())
+}

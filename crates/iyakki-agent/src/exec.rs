@@ -1,4 +1,5 @@
-//! Running a few cloud and remote-access programs for the assistant: `ssh`, `aws` and `gcloud`. No shell is involved
+//! Running a few cloud and remote-access programs for the assistant: `ssh`, `scp`, `sftp`, `aws` and `gcloud` (the three SSH
+//! programs go through [`crate::ssh`], which checks every option and keeps the host keys and private keys). No shell is involved
 //! (the program and each argument are passed separately, so nothing in an argument can chain a second command), only
 //! these programs are allowed, the environment is cut down to what they need to find the person's own credentials,
 //! the run is time-limited and its output capped. Every call is shown to the person for approval before it runs.
@@ -9,7 +10,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// The programs the assistant may start.
-pub const PROGRAMS: [&str; 3] = ["ssh", "aws", "gcloud"];
+pub const PROGRAMS: [&str; 5] = ["ssh", "scp", "sftp", "aws", "gcloud"];
 const MAX_ARGS: usize = 64;
 const MAX_ARG_LEN: usize = 4096;
 const MAX_OUTPUT: usize = 64 * 1024;
@@ -28,44 +29,6 @@ fn passes(name: &str) -> bool {
         || name.starts_with("TF_")
         || name.starts_with("K3S_")
         || matches!(name, "GH_TOKEN" | "GITHUB_TOKEN" | "GH_HOST")
-}
-
-/// The host an `ssh` command line connects to, and what in it must be refused. Options that run a local program
-/// (`ProxyCommand`, `LocalCommand` …) or hop through another machine are not allowed.
-fn ssh_target(args: &[String]) -> Result<String, String> {
-    const WITH_VALUE: &[&str] = &["-p", "-i", "-l", "-b", "-c", "-E", "-e", "-m", "-O", "-S", "-w", "-W", "-B", "-I", "-L", "-R", "-D", "-Q", "-o"];
-    let bad_option = |v: &str| {
-        let name = v.split(['=', ' ']).next().unwrap_or("").to_ascii_lowercase();
-        matches!(name.as_str(), "proxycommand" | "localcommand" | "permitlocalcommand" | "knownhostscommand" | "proxyjump" | "include" | "match")
-    };
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        if a == "-F" || a == "-J" || a.starts_with("-F") && a.len() > 2 || a.starts_with("-J") && a.len() > 2 {
-            return Err("ssh -F and -J are not allowed (another configuration file or a hop through another machine)".into());
-        }
-        if a == "-o" {
-            if args.get(i + 1).is_some_and(|v| bad_option(v)) {
-                return Err("that ssh option can run a program on this machine and is not allowed".into());
-            }
-        } else if let Some(v) = a.strip_prefix("-o") {
-            if bad_option(v) {
-                return Err("that ssh option can run a program on this machine and is not allowed".into());
-            }
-        }
-        if WITH_VALUE.contains(&a) {
-            i += 2;
-        } else if a.starts_with('-') {
-            i += 1;
-        } else {
-            let host = a.rsplit('@').next().unwrap_or(a).trim_matches(['[', ']']);
-            if host.is_empty() {
-                return Err("ssh needs a host".into());
-            }
-            return Ok(host.to_string());
-        }
-    }
-    Err("ssh needs a host".into())
 }
 
 /// A program installed from the CLI manager: its name and the host its network policy check uses
@@ -95,7 +58,7 @@ pub fn check_with(extra: &[Extra], program: &str, args: &[String]) -> Result<Str
         return Ok(x.host.clone().unwrap_or_else(|| "*".into()));
     }
     Ok(match program {
-        "ssh" => ssh_target(args)?,
+        "ssh" | "scp" | "sftp" => crate::ssh::plan(program, args, crate::ssh::Mode::Person)?.host,
         "aws" => "amazonaws.com".into(),
         _ => "googleapis.com".into(),
     })
@@ -107,7 +70,10 @@ pub fn command_line(program: &str, args: &[String]) -> String {
     std::iter::once(program.to_string()).chain(args.iter().map(q)).collect::<Vec<_>>().join(" ")
 }
 
-fn read_capped(mut r: impl Read + Send + 'static) -> std::sync::mpsc::Receiver<Vec<u8>> {
+/// Told about output as it arrives (the CLI tile shows a long run while it is still going).
+pub type Sink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
+fn read_capped(mut r: impl Read + Send + 'static, sink: Option<Sink>) -> std::sync::mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut out = Vec::new();
@@ -116,6 +82,9 @@ fn read_capped(mut r: impl Read + Send + 'static) -> std::sync::mpsc::Receiver<V
             match r.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    if let Some(f) = &sink {
+                        f(&String::from_utf8_lossy(&iyakki_proxy::sanitize(&buf[..n])));
+                    }
                     if out.len() < MAX_OUTPUT {
                         out.extend_from_slice(&buf[..n.min(MAX_OUTPUT - out.len())]);
                     }
@@ -127,8 +96,7 @@ fn read_capped(mut r: impl Read + Send + 'static) -> std::sync::mpsc::Receiver<V
     rx
 }
 
-/// Runs the program and returns what it printed with its exit status. `ssh` never asks for a password (it would hang
-/// with nobody to type it) and gives up connecting after ten seconds.
+/// Runs the program and returns what it printed with its exit status.
 pub fn run(program: &str, args: &[String], cwd: &Path, home: Option<&Path>, seconds: u64) -> Result<String, String> {
     run_with(&[], program, args, cwd, home, seconds, None)
 }
@@ -144,13 +112,18 @@ pub fn run_with(extra: &[Extra], program: &str, args: &[String], cwd: &Path, hom
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_env(extra: &[Extra], program: &str, args: &[String], cwd: &Path, home: Option<&Path>, seconds: u64, path_prefix: Option<&Path>, env: &[(String, String)]) -> Result<String, String> {
     check_with(extra, program, args)?;
-    let mut cmd = Command::new(program);
-    if program == "ssh" {
-        cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new"]);
+    if matches!(program, "ssh" | "scp" | "sftp") {
+        return Err(format!("`{program}` runs through the SSH client with the person's keys and host keys; it cannot be started from here"));
     }
+    if !cwd.is_dir() {
+        return Err(crate::scope::explain_io(&std::io::Error::from_raw_os_error(if cwd.exists() { 20 } else { 2 }), cwd, "run a command in"));
+    }
+    let mut cmd = Command::new(program);
     cmd.args(args).current_dir(cwd).env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // an explicit kubeconfig replaces whatever KUBE* the process inherited (a stale KUBECONTEXT must not steer the command elsewhere)
+    let pinned = env.iter().any(|(k, _)| k == "KUBECONFIG");
     for (k, v) in std::env::vars() {
-        if passes(&k) {
+        if passes(&k) && !(pinned && k.starts_with("KUBE")) {
             cmd.env(k, v);
         }
     }
@@ -160,11 +133,24 @@ pub fn run_with_env(extra: &[Extra], program: &str, args: &[String], cwd: &Path,
     for (k, v) in env {
         cmd.env(k, v);
     }
+    // a managed dev cluster is the default target of kubectl, k3s and helm in every program IYAKKI starts (no ~/.kube/config needed)
+    if !pinned && !std::env::vars().any(|(k, _)| k == "KUBECONFIG") {
+        if let Some(m) = crate::devcluster::machine_kubeconfig().filter(|m| m.is_file()) {
+            cmd.env("KUBECONFIG", m);
+        }
+    }
     if let Some(h) = home {
         cmd.env("HOME", h);
     } else if let Ok(h) = std::env::var("HOME") {
         cmd.env("HOME", h);
     }
+    run_prepared(cmd, program, seconds, None)
+}
+
+/// Starts a command that is already set up, waits for it for `seconds`, and returns what it printed with its exit status
+/// (the output is capped; `sink` sees it as it arrives).
+pub fn run_prepared(mut cmd: Command, program: &str, seconds: u64, sink: Option<Sink>) -> Result<String, String> {
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut spawned = None;
     for attempt in 0..8 {
         match cmd.spawn() {
@@ -179,8 +165,8 @@ pub fn run_with_env(extra: &[Extra], program: &str, args: &[String], cwd: &Path,
         }
     }
     let mut child = spawned.ok_or_else(|| format!("could not start `{program}`"))?;
-    let out = read_capped(child.stdout.take().ok_or("no output pipe")?);
-    let err = read_capped(child.stderr.take().ok_or("no error pipe")?);
+    let out = read_capped(child.stdout.take().ok_or("no output pipe")?, sink.clone());
+    let err = read_capped(child.stderr.take().ok_or("no error pipe")?, sink);
     let limit = Duration::from_secs(seconds.clamp(1, MAX_SECONDS));
     let start = Instant::now();
     let status = loop {
@@ -364,7 +350,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let script = d.join("aws");
-        std::fs::write(&script, "#!/bin/sh\nif [ \"$1\" = sleep ]; then sleep 5; fi\nif [ \"$1\" = fail ]; then echo oops >&2; exit 3; fi\nif [ \"$1\" = big ]; then head -c 200000 /dev/zero | tr '\\0' x; fi\necho \"args=$# first=$1 second=$2 secret=${IYAKKI_SECRET:-none} key=${AWS_ACCESS_KEY_ID:-none}\"\n").unwrap();
+        std::fs::write(&script, "#!/bin/sh\nif [ \"$1\" = sleep ]; then sleep 5; fi\nif [ \"$1\" = fail ]; then echo oops >&2; exit 3; fi\nif [ \"$1\" = big ]; then head -c 200000 /dev/zero | tr '\\0' x; fi\necho \"args=$# first=$1 second=$2 secret=${IYAKKI_SECRET:-none} key=${AWS_ACCESS_KEY_ID:-none} home=$HOME\"\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let old = std::env::var("PATH").unwrap_or_default();
@@ -375,6 +361,11 @@ mod tests {
         assert!(out.contains("args=2 first=s3 ls; echo pwned second=b"), "{out}");
         assert!(out.contains("secret=none") && out.contains("key=AKIATEST"), "{out}");
         assert!(!out.contains("pwned\n"), "no shell ran the semicolon: {out}");
+        // the person's home (on the data volume) is the program's HOME, whatever HOME IYAKKI itself has
+        let person = d.join("person-home");
+        std::fs::create_dir_all(&person).unwrap();
+        let out = run("aws", &v(&["x"]), &d, Some(&person), 10).unwrap();
+        assert!(out.contains(&format!("home={}", person.display())), "{out}");
         let e = run("aws", &v(&["fail"]), &d, None, 10).unwrap_err();
         assert!(e.contains("exit status 3") && e.contains("oops"), "{e}");
         let t = std::time::Instant::now();

@@ -23,7 +23,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+pub use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -33,6 +34,10 @@ use crate::wtool::{self, ToolPackage};
 pub const MAX_PACKAGE_BYTES: usize = 64 * 1024;
 /// Tool packages carry a module (in hexadecimal), so they may be larger.
 pub const MAX_TOOL_PACKAGE_BYTES: usize = 2 * wtool::MAX_MODULE_BYTES + 16 * 1024;
+/// Driver packs carry firmware blobs (in base64), so `extension` packages may be larger than the other kinds.
+/// A tile app is a whole web bundle (see `store::tile`).
+pub const MAX_TILE_PACKAGE_BYTES: usize = 3 * 1024 * 1024;
+pub const MAX_EXTENSION_PACKAGE_BYTES: usize = 12 * 1024 * 1024; // room for a ~7.5 MB kernel module in base64 (the Mac mini Wi-Fi driver pack)
 const MAGIC: &str = "IYAKKI-PKG 1";
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -65,7 +70,17 @@ pub struct Manifest {
     pub license: String,
     pub sha256: String,
     pub signer: Option<String>,
+    /// Store metadata: one line of compact JSON (see `store::manifest::Meta`), covered by the signature.
+    pub meta: Option<String>,
+    /// A publisher certificate: one line of compact JSON (see `store::trust::Cert`), covered by the signature.
+    pub cert: Option<String>,
 }
+
+/// The package kinds the header may name. `skill` and `tool` have their own installers here; the rest are handled by
+/// the store (`crate::store`).
+pub const KINDS: [&str; 10] = ["skill", "tool", "mcp", "cli", "agent", "template", "theme", "extension", "app", "tile"];
+/// The longest `store:` or `cert:` header line.
+pub const MAX_HEADER_JSON: usize = 40 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Package {
@@ -92,11 +107,11 @@ impl Trust {
     }
 }
 
-fn hex(b: &[u8]) -> String {
+pub(crate) fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
+pub(crate) fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
     if s.len() != N * 2 || !s.is_ascii() {
         return None;
     }
@@ -107,8 +122,18 @@ fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
     Some(out)
 }
 
-fn hash(payload: &str) -> String {
+pub(crate) fn hash(payload: &str) -> String {
     hex(&Sha256::digest(payload.as_bytes()))
+}
+
+/// The size limit of a package of this kind.
+pub fn max_bytes(kind: &str) -> usize {
+    match kind {
+        "tool" => MAX_TOOL_PACKAGE_BYTES,
+        "extension" => MAX_EXTENSION_PACKAGE_BYTES,
+        "tile" => MAX_TILE_PACKAGE_BYTES,
+        _ => MAX_PACKAGE_BYTES,
+    }
 }
 
 pub fn valid_version(v: &str) -> bool {
@@ -119,7 +144,7 @@ fn version_key(v: &str) -> Vec<u64> {
     v.split('.').map(|p| p.parse().unwrap_or(0)).collect()
 }
 
-fn newer(new: &str, old: &str) -> bool {
+pub fn newer(new: &str, old: &str) -> bool {
     let (mut a, mut b) = (version_key(new), version_key(old));
     let n = a.len().max(b.len());
     a.resize(n, 0);
@@ -131,6 +156,12 @@ fn header_text(m: &Manifest) -> String {
     let mut h = format!("{MAGIC}\ntype: {}\nname: {}\nversion: {}\nlicense: {}\nsha256: {}\n", m.kind, m.name, m.version, m.license, m.sha256);
     if let Some(s) = &m.signer {
         h.push_str(&format!("signer: {s}\n"));
+    }
+    if let Some(j) = &m.meta {
+        h.push_str(&format!("store: {j}\n"));
+    }
+    if let Some(j) = &m.cert {
+        h.push_str(&format!("cert: {j}\n"));
     }
     h
 }
@@ -166,7 +197,7 @@ pub fn build_skill(markdown: &str, version: &str, license: &str, key: Option<&Si
     }
     let skill = skills::parse(markdown, Scope::Shared)?;
     let payload = skills::render(&skill);
-    let mut m = Manifest { kind: "skill".into(), name: skill.name, version: version.into(), license: license.into(), sha256: hash(&payload), signer: key.map(public_key_hex) };
+    let mut m = Manifest { kind: "skill".into(), name: skill.name, version: version.into(), license: license.into(), sha256: hash(&payload), signer: key.map(public_key_hex), meta: None, cert: None };
     let mut text = header_text(&m);
     if let Some(k) = key {
         let sig = k.sign(text.as_bytes());
@@ -179,7 +210,7 @@ pub fn build_skill(markdown: &str, version: &str, license: &str, key: Option<&Si
 /// Make a tool package from a JSON manifest and a module (see [`crate::wtool`]). Without a key it is unsigned.
 pub fn build_tool(manifest_json: &str, module: &[u8], key: Option<&SigningKey>) -> Result<String, PkgError> {
     let (tm, payload) = wtool::make_payload(manifest_json, module).map_err(PkgError::Invalid)?;
-    let mut m = Manifest { kind: "tool".into(), name: tm.name, version: tm.version, license: tm.license, sha256: hash(&payload), signer: key.map(public_key_hex) };
+    let mut m = Manifest { kind: "tool".into(), name: tm.name, version: tm.version, license: tm.license, sha256: hash(&payload), signer: key.map(public_key_hex), meta: None, cert: None };
     let mut text = header_text(&m);
     if let Some(k) = key {
         let sig = k.sign(text.as_bytes());
@@ -193,10 +224,51 @@ pub fn build_tool(manifest_json: &str, module: &[u8], key: Option<&SigningKey>) 
     Ok(text)
 }
 
+/// Make a package of any kind from a payload text. `meta` and `cert` are compact one-line JSON (checked by the store).
+pub fn build_generic(kind: &str, name: &str, version: &str, license: &str, payload: &str, meta: Option<&str>, cert: Option<&str>, key: Option<&SigningKey>) -> Result<String, PkgError> {
+    if !KINDS.contains(&kind) {
+        return bad(format!("type: one of {}", KINDS.join(", ")));
+    }
+    if !skills::valid_skill_name(name) {
+        return bad("name: lowercase letters, digits and `-`");
+    }
+    if !valid_version(version) {
+        return bad("version: digits separated by dots, like 1.2.0");
+    }
+    if license.is_empty() || license.len() > 40 || !license.chars().all(|c| c.is_ascii_alphanumeric() || "-.+ ".contains(c)) {
+        return bad("license: an SPDX name such as MIT or Apache-2.0");
+    }
+    let one_line = |j: Option<&str>| j.map(|j| j.trim().to_string()).filter(|j| !j.is_empty());
+    let (meta, cert) = (one_line(meta), one_line(cert));
+    if meta.iter().chain(cert.iter()).any(|j| j.contains('\n') || j.len() > MAX_HEADER_JSON) {
+        return bad("store and cert must be one line of JSON, at most 40 KiB");
+    }
+    let m = Manifest { kind: kind.into(), name: name.into(), version: version.into(), license: license.into(), sha256: hash(payload), signer: key.map(public_key_hex), meta, cert };
+    let mut text = header_text(&m);
+    if let Some(k) = key {
+        let sig = k.sign(text.as_bytes());
+        text.push_str(&format!("signature: {}\n", hex(&sig.to_bytes())));
+    }
+    let text = format!("{text}---\n{payload}");
+    if text.len() > max_bytes(kind) {
+        return bad("the package is too large");
+    }
+    Ok(text)
+}
+
+/// Take an existing package (signed or not), set its store metadata and certificate and sign it again with `key`.
+/// The payload and the header fields are carried over unchanged, so this is how a package gets its signature
+/// (`iyakki pkg sign`). `None` keeps what the package already had.
+pub fn resign(text: &str, meta: Option<&str>, cert: Option<&str>, key: &SigningKey) -> Result<String, PkgError> {
+    let p = parse(text)?;
+    let m = &p.manifest;
+    build_generic(&m.kind, &m.name, &m.version, &m.license, &p.payload, meta.or(m.meta.as_deref()), cert.or(m.cert.as_deref()), Some(key))
+}
+
 /// Read a package and check its hash and signature. The result is not trusted yet; see [`Packages::review`].
 pub fn parse(text: &str) -> Result<Package, PkgError> {
-    if text.len() > MAX_TOOL_PACKAGE_BYTES {
-        return bad(format!("packages are limited to {} KiB", MAX_TOOL_PACKAGE_BYTES / 1024));
+    if text.len() > MAX_EXTENSION_PACKAGE_BYTES {
+        return bad(format!("packages are limited to {} KiB", MAX_EXTENSION_PACKAGE_BYTES / 1024));
     }
     let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     let (head, payload) = text.split_once("\n---\n").ok_or_else(|| PkgError::Invalid("not an IYAKKI package (no `---` after the header)".into()))?;
@@ -205,6 +277,7 @@ pub fn parse(text: &str) -> Result<Package, PkgError> {
         return bad("not an IYAKKI package, or a newer format than this system understands");
     }
     let (mut kind, mut name, mut version, mut license, mut sha, mut signer, mut sig) = (String::new(), String::new(), String::new(), String::new(), String::new(), None, None);
+    let (mut meta, mut cert): (Option<String>, Option<String>) = (None, None);
     let mut signed_len = MAGIC.len() + 1;
     for line in lines {
         let Some((k, v)) = line.split_once(": ") else { return bad(format!("unreadable header line {line:?}")) };
@@ -216,17 +289,20 @@ pub fn parse(text: &str) -> Result<Package, PkgError> {
             "sha256" => sha = v.into(),
             "signer" => signer = Some(v.to_string()),
             "signature" => sig = Some(v.to_string()),
+            "store" | "cert" if v.len() > MAX_HEADER_JSON => return bad(format!("the {k} line is too long")),
+            "store" => meta = Some(v.to_string()),
+            "cert" => cert = Some(v.to_string()),
             _ => return bad(format!("unknown header field {k:?}")),
         }
         if k != "signature" {
             signed_len += line.len() + 1;
         }
     }
-    if kind != "skill" && kind != "tool" {
-        return bad(format!("package type {kind:?} is not supported yet (skills and tools only)"));
+    if !KINDS.contains(&kind.as_str()) {
+        return bad(format!("package type {kind:?} is not known to this system"));
     }
-    if kind == "skill" && text.len() > MAX_PACKAGE_BYTES {
-        return bad(format!("skill packages are limited to {} KiB", MAX_PACKAGE_BYTES / 1024));
+    if text.len() > max_bytes(&kind) {
+        return bad(format!("{kind} packages are limited to {} KiB", max_bytes(&kind) / 1024));
     }
     if !skills::valid_skill_name(&name) {
         return bad("name: lowercase letters, digits and `-`");
@@ -249,7 +325,7 @@ pub fn parse(text: &str) -> Result<Package, PkgError> {
         (None, None) => {}
         _ => return Err(PkgError::BadSignature),
     }
-    Ok(Package { manifest: Manifest { kind, name, version, license, sha256: sha, signer }, payload: payload.to_string() })
+    Ok(Package { manifest: Manifest { kind, name, version, license, sha256: sha, signer, meta, cert }, payload: payload.to_string() })
 }
 
 /// What the person is asked to approve.
@@ -378,11 +454,17 @@ impl Packages {
     /// person read `Review::summary`. A skill you wrote by hand and kept under the same name is replaced only
     /// by a newer package version.
     pub fn install(&self, review: &Review, approved: bool, can_shared: bool, can_own: bool) -> Result<Skill, PkgError> {
+        self.install_with(review, approved, can_shared, can_own, false)
+    }
+
+    /// [`Packages::install`], but with `allow_older` the version may be lower than the installed one: only the store's explicit
+    /// "go back to the previous version" uses it (the store records that it did).
+    pub fn install_with(&self, review: &Review, approved: bool, can_shared: bool, can_own: bool, allow_older: bool) -> Result<Skill, PkgError> {
         if !matches!(review.trust, Trust::Trusted(_)) && !approved {
             return Err(PkgError::NotApproved);
         }
         let m = &review.package.manifest;
-        if let Some(old) = &review.installed {
+        if let Some(old) = review.installed.as_ref().filter(|_| !allow_older) {
             if !newer(&m.version, old) {
                 return Err(PkgError::NotNewer { old: old.clone(), new: m.version.clone() });
             }
@@ -488,6 +570,11 @@ impl Packages {
 
     /// Install what was reviewed (same rules as [`Packages::install`]).
     pub fn install_tool(&self, review: &ToolReview, approved: bool, can_shared: bool, can_own: bool) -> Result<(), PkgError> {
+        self.install_tool_with(review, approved, can_shared, can_own, false)
+    }
+
+    /// [`Packages::install_tool`] with the option of going back to an older version (see [`Packages::install_with`]).
+    pub fn install_tool_with(&self, review: &ToolReview, approved: bool, can_shared: bool, can_own: bool, allow_older: bool) -> Result<(), PkgError> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         if !matches!(review.trust, Trust::Trusted(_)) && !approved {
@@ -499,7 +586,7 @@ impl Packages {
             _ => {}
         }
         let (m, name) = (&review.package.manifest, &review.tool.manifest.name);
-        if let Some(old) = &review.installed {
+        if let Some(old) = review.installed.as_ref().filter(|_| !allow_older) {
             if !newer(&m.version, old) {
                 return Err(PkgError::NotNewer { old: old.clone(), new: m.version.clone() });
             }

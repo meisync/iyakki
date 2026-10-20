@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>Example Atom</title>
+<entry><title>First post</title><link rel="self" href="https://blog.example.com/feed/1"/><link rel="alternate" type="text/html" href="https://blog.example.com/posts/first"/><updated>2026-10-12T10:00:00Z</updated><summary>The first post says hello.</summary></entry>
+<entry><title>Second post</title><link href="/posts/second"/><published>2026-10-13T07:30:00Z</published><content type="html">&lt;p&gt;Second post body&lt;/p&gt;</content></entry>
+</feed>

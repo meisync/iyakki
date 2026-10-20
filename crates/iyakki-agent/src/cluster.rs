@@ -7,7 +7,6 @@
 //! Code runs in a Job in its own namespace: an unprivileged user, no extra capabilities, no access to the cluster's
 //! API token, memory, processor, disk and time limits, and no network unless the person allowed it for that run.
 
-use std::ffi::CString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -106,7 +105,9 @@ pub fn plan_jail(entries: &[(String, bool, Option<String>)], holder: &str) -> Ve
 /// The system runs from RAM, where `/` is the `rootfs` that runc cannot `pivot_root` away from ("pivot_root .: invalid
 /// argument"). So k3s is started in a mount namespace of its own whose root is a tmpfs holding the same folders (bound from
 /// the real ones), which lets containers start. Everything k3s writes still lands in the real folders.
-fn start_in_ram_root_jail(cmd: &mut Command) -> Result<(), String> {
+#[cfg(target_os = "linux")]
+pub(crate) fn start_in_ram_root_jail(cmd: &mut Command) -> Result<(), String> {
+    use std::ffi::CString;
     use std::os::unix::process::CommandExt;
     const HOLDER: &str = "mnt";
     let entries: Vec<(String, bool, Option<String>)> = std::fs::read_dir("/")
@@ -181,6 +182,12 @@ fn start_in_ram_root_jail(cmd: &mut Command) -> Result<(), String> {
     Ok(())
 }
 
+/// Mount namespaces and `MS_MOVE` are Linux only; a RAM root does not exist anywhere else.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn start_in_ram_root_jail(_cmd: &mut Command) -> Result<(), String> {
+    Err("the RAM-root jail is not available on this OS".into())
+}
+
 /// On a RAM root the node reports no ephemeral storage, so a Job that asks for some could never be placed. The memory limit
 /// (the files live in RAM) still bounds what the code can write.
 pub fn without_storage_limits(job: &mut Value) {
@@ -190,6 +197,11 @@ pub fn without_storage_limits(job: &mut Value) {
     if let Some(e) = job.pointer_mut("/spec/template/spec/volumes/0/emptyDir").and_then(Value::as_object_mut) {
         e.remove("sizeLimit");
     }
+}
+
+/// Is `/` a RAM file system right now (`rootfs`/`ramfs` in `/proc/mounts`)? The managed dev cluster (`k3sdev.rs`) asks the same.
+pub(crate) fn ramfs_root_now() -> bool {
+    std::fs::read_to_string("/proc/mounts").is_ok_and(|m| m.lines().any(|l| { let mut p = l.split_whitespace(); matches!((p.next(), p.next(), p.next()), (Some("rootfs"), Some("/"), Some("rootfs")) | (Some("none"), Some("/"), Some("ramfs"))) }))
 }
 
 pub struct Cluster {
@@ -224,7 +236,7 @@ impl Cluster {
 
     /// The live system runs from RAM: `/` is `rootfs`, which the kubelet cannot measure.
     fn root_is_ramfs(&self) -> bool {
-        self.over.lock().unwrap().ramfs.unwrap_or_else(|| std::fs::read_to_string("/proc/mounts").is_ok_and(|m| m.lines().any(|l| { let mut p = l.split_whitespace(); matches!((p.next(), p.next(), p.next()), (Some("rootfs"), Some("/"), Some("rootfs")) | (Some("none"), Some("/"), Some("ramfs"))) })))
+        self.over.lock().unwrap().ramfs.unwrap_or_else(ramfs_root_now)
     }
 
     pub fn kubeconfig(&self) -> PathBuf {
@@ -283,6 +295,11 @@ impl Cluster {
     }
 
     pub fn start(self: &Arc<Self>) -> Result<(), String> {
+        // in a desktop window the machine's own cluster is used; this sandbox cluster is for the IYAKKI image
+        crate::devcluster::guard("k3s", &["server".to_string()])?;
+        if crate::k3sdev::managed_running() {
+            return Err("the dev cluster that IYAKKI manages (Settings \u{2192} Dev cluster) is running; IYAKKI does not start a second cluster".into());
+        }
         let missing = self.requirements();
         if !missing.is_empty() {
             return Err(format!("the container cluster cannot start here: {}", missing.join("; ")));

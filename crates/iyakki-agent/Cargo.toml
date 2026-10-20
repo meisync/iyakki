@@ -15,6 +15,11 @@ iyakki-ledger.workspace = true
 iyakki-netscan.workspace = true
 iyakki-proxy = { path = "../iyakki-proxy" }
 iyakki-web.workspace = true
+iyakki-webview.workspace = true
+iyakki-data.workspace = true
+iyakki-drivers.workspace = true
+iyakki-flow.workspace = true
+iyakki-js.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror.workspace = true
@@ -26,4 +31,6 @@ miniz_oxide = "0.8"
 ruzstd = "0.9"
 nanomp3 = { version = "0.2", default-features = false, features = ["std"] }
 ed25519-dalek = "3"
+# developer mode's client (`devmode::client`): the same TLS library and features as the web front end (iyakki-remote)
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 libc = "0.2"

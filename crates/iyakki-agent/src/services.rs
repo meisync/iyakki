@@ -51,6 +51,12 @@ pub struct Services {
     pub page_snapshot: Mutex<HashMap<String, crate::webtools::PageSnapshot>>,
     /// What the assistant's tools did, kept for a few days.
     pub toollog: crate::toollog::ToolLog,
+    /// Detached jobs (long commands that outlive the chat), found again after a restart (see `docs/JOBS.md`).
+    pub jobs: crate::jobs::Jobs,
+    /// The vendor session id of each chat with an external coding agent (so the next message resumes it).
+    pub ext_sessions: crate::extagent::run::SessionMap,
+    /// What the last look at each external coding agent found (Settings → Agents, the model list).
+    pub ext_status: Arc<crate::extagent::StatusCache>,
     /// Tokens used by each model, for the USAGE tile.
     pub usage: crate::usage::UsageLog,
     /// Each person's events and alarms, shared by the calendar app, the chat and the terminal.
@@ -59,10 +65,14 @@ pub struct Services {
     pub clis: Arc<crate::clis::CliManager>,
     /// The container cluster (k3s) the assistant can run code in.
     pub cluster: Arc<crate::cluster::Cluster>,
+    /// The local dev cluster IYAKKI installs and keeps on a bare-metal machine (Settings \u{2192} Dev cluster, SYSTEM).
+    pub k3sdev: Arc<crate::k3sdev::K3sDev>,
     /// Machines seen on the local network, and which of them are new.
     pub devwatch: Arc<crate::devwatch::DeviceWatch>,
     /// Each person's notifications and tasks (the INBOX).
     pub inbox: crate::inbox::Inbox,
+    /// The speech engines found on this computer (detected in the background, `docs/VOICE.md`) and the browser voice helper.
+    pub host_tts: Arc<crate::hostengines::HostTts>,
     watching: std::sync::atomic::AtomicBool,
     /// A local Ollama server, started from the CLI tile once Ollama is installed there.
     pub ollama: Arc<crate::ollama::OllamaServer>,
@@ -73,14 +83,26 @@ pub struct Services {
     pub sessions: Arc<SessionStore>,
     /// Secrets the assistant asked the person to enter themselves (they never pass through the assistant).
     pub secret_requests: crate::secretreq::SecretRequests,
+    /// The assistant's use of the person's browser: the job queue the shell services, the questions it asks, the grants and budgets.
+    pub browser: crate::browserconsent::BrowserState,
+    /// The assistant's `screen_capture`: requests the shell answers with the frame it last drew.
+    pub screen: crate::screencap::ScreenCapture,
+    /// The assistant's camera tools: the shell's camera, the 5-minute grants and the "in use" sign.
+    pub camera: crate::camtools::CameraHub,
     media_indexes: Mutex<HashMap<String, Arc<Mutex<crate::mediaindex::MediaIndex>>>>,
     media_queues: Mutex<HashMap<String, Arc<crate::mediaqueue::DownloadQueue>>>,
     quick: Arc<dyn Upstream>,
     slow: Arc<dyn Upstream>,
     dir: PathBuf,
     user_vaults: Mutex<HashMap<String, LocalVault>>,
+    /// The person signed in at the screen: whose home and vault the vendor coding agents are looked at and started with.
+    agent_user: Mutex<String>,
     /// For model downloads (their progress arrives over time).
     streamer: Mutex<Option<Arc<dyn iyakki_proxy::Streamer>>>,
+    /// For model answers read as they are written (waits long for the first byte: a local model may need loading).
+    chat_streamer: Mutex<Option<Arc<dyn iyakki_proxy::Streamer>>>,
+    /// How long the last model warm-up took (milliseconds), for the benchmark and the SYSTEM tile.
+    pub last_warm_up_ms: std::sync::atomic::AtomicU64,
     pulls: Mutex<HashMap<String, PullStatus>>,
     /// Bringing documents up to date with the embedding model in use: whether it is going and how the last run ended.
     reindexing: std::sync::atomic::AtomicBool,
@@ -132,12 +154,16 @@ fn io_err(e: impl std::fmt::Display) -> String {
 impl Services {
     /// `quick` is used for tests and model listing (short timeout), `slow` for generation.
     pub fn open(dir: &Path, quick: Arc<dyn Upstream>, slow: Arc<dyn Upstream>) -> Result<Arc<Services>, String> {
+        let t0 = std::time::Instant::now();
         std::fs::create_dir_all(dir.join("vault/users")).map_err(io_err)?;
         let settings = SettingsStore::open(&dir.join("settings.json")).map_err(io_err)?;
         let sys_path = dir.join("vault/system.afv");
         let system = if LocalVault::exists(&sys_path) { Some(LocalVault::open(&sys_path).map_err(io_err)?) } else { None };
         let secrets = Secrets::new(system, quick.clone());
         secrets.set_providers(settings.get().secret_providers.clone().into_iter().collect());
+        // models a server said can see pictures (Lemonade's vision label) stay known after a restart
+        let vision: Vec<String> = settings.get().providers.iter().flat_map(|p| p.model_kinds.iter().filter(|(_, k)| k.as_str() == "vision").map(|(m, _)| m.clone())).collect();
+        crate::providers::note_vision_models(&vision);
         let clis = Arc::new(crate::clis::CliManager::new(&dir.join("cli")));
         let svc = Arc::new_cyclic(|weak: &std::sync::Weak<Services>| {
             let embedder: Arc<dyn TextEmbedder> = Arc::new(DynamicEmbed { svc: weak.clone() });
@@ -153,12 +179,17 @@ impl Services {
                 web: crate::webtools::WebClient::new(),
                 page_snapshot: Mutex::new(HashMap::new()),
                 toollog: crate::toollog::ToolLog::new(&dir.join("tools.jsonl")),
+                jobs: crate::jobs::Jobs::new(&dir.join("jobs")),
+                ext_sessions: crate::extagent::run::SessionMap::open(&dir.join("ext-sessions.json")),
+                ext_status: Arc::new(crate::extagent::StatusCache::open(&dir.join("ext-models.json"))),
                 usage: crate::usage::UsageLog::open(&dir.join("usage.jsonl")),
                 calendar: crate::calendar::CalendarStore::new(&dir.join("calendar")),
                 clis: clis.clone(),
                 cluster: Arc::new(crate::cluster::Cluster::new(&dir.join("cluster"), clis.clone())),
+                k3sdev: crate::k3sdev::K3sDev::new(dir, clis.clone(), Arc::new(crate::wsexec::System)),
                 devwatch: Arc::new(crate::devwatch::DeviceWatch::open(&dir.join("devices.json"))),
                 inbox: crate::inbox::Inbox::new(&dir.join("inbox")),
+                host_tts: Arc::new(crate::hostengines::HostTts::new(&[dir.join("voices")])),
                 watching: std::sync::atomic::AtomicBool::new(false),
                 ollama: {
                     let server = Arc::new(crate::ollama::OllamaServer::new(&dir.join("ollama"), clis.clone()));
@@ -175,6 +206,9 @@ impl Services {
                 sessions: Arc::new(SessionStore::new(&dir.join("sessions"), kb.clone())),
                 kb,
                 secret_requests: crate::secretreq::SecretRequests::new(),
+                browser: crate::browserconsent::BrowserState::new(),
+                screen: crate::screencap::ScreenCapture::new(),
+                camera: crate::camtools::CameraHub::new(),
                 media_indexes: Mutex::new(HashMap::new()),
                 media_queues: Mutex::new(HashMap::new()),
                 runs: Arc::new(RunStore::new(&dir.join("runs"))),
@@ -182,13 +216,26 @@ impl Services {
                 slow,
                 dir: dir.into(),
                 user_vaults: Mutex::new(HashMap::new()),
+                agent_user: Mutex::new(String::new()),
                 streamer: Mutex::new(None),
+                chat_streamer: Mutex::new(None),
+                last_warm_up_ms: std::sync::atomic::AtomicU64::new(0),
                 pulls: Mutex::new(HashMap::new()),
                 reindexing: std::sync::atomic::AtomicBool::new(false),
                 reindex_note: Mutex::new(None),
             }
         });
+        let t_build = t0.elapsed();
+        svc.wire_agent_installs();
         svc.unlock_with_keyfile();
+        let t_unlock = t0.elapsed();
+        // the managed dev cluster never starts next to the sandbox cluster, and starts with IYAKKI when it was installed here
+        {
+            let sandbox = svc.cluster.clone();
+            svc.k3sdev.set_sandbox_probe(Arc::new(move || matches!(sandbox.state(), crate::cluster::ClusterState::Starting | crate::cluster::ClusterState::Running)));
+            svc.k3sdev.autostart();
+        }
+        log::info!("boot: services opened in {} ms (stores {}, vault key {}, dev cluster {})", t0.elapsed().as_millis(), t_build.as_millis(), (t_unlock - t_build).as_millis(), (t0.elapsed() - t_unlock).as_millis());
         // MP3 files of the MEDIA library play in IYAKKI's own player (the one the RADIO tile uses)
         let weak_svc = Arc::downgrade(&svc);
         crate::media::set_builtin_audio(svc.radio.clone(), Arc::new(move || weak_svc.upgrade().map(|s| s.voice_settings().play_cmd).unwrap_or_default()));
@@ -300,6 +347,141 @@ impl Services {
         let _ = st.upsert_provider(p);
     }
 
+    /// Make the Lemonade server at `base` available in Models as `lemonade-local` (or `lemonade-local-<port>` when that name is
+    /// taken by another address). Never overwrites: a provider that already points at this server, or one named like that,
+    /// is left exactly as the person set it. Returns what to tell the person.
+    pub fn use_local_lemonade(&self, base: &str, version: Option<&str>) -> String {
+        use crate::providers::Kind;
+        let base = crate::lemonade::api_base(base);
+        let found = crate::lemonade::Server::Lemonade { base: base.clone(), version: version.map(str::to_string) }.found();
+        let same = |u: &str| crate::lemonade::api_base(u) == base || crate::lemonade::origin(u) == crate::lemonade::origin(&base) && crate::lemonade::api_base(u).ends_with("/v1");
+        let mut st = self.settings.lock().unwrap();
+        if let Some(p) = st.get().providers.iter().find(|p| p.base_url.as_deref().is_some_and(same)) {
+            return format!("{found}; it is already in Models as {}.", p.id);
+        }
+        let port = base.rsplit_once(':').and_then(|(_, r)| r.split('/').next()).unwrap_or("").to_string();
+        let id = ["lemonade-local".to_string(), format!("lemonade-local-{port}")].into_iter().find(|id| st.get().provider(id).is_none() && crate::providers::valid_provider_id(id));
+        let Some(id) = id else { return format!("{found}; a provider named lemonade-local already exists, so it was not added (add it in Settings → Models).") };
+        let mut p = ProviderCfg::new(&id, Kind::Lemonade);
+        p.base_url = Some(base);
+        match st.upsert_provider(p) {
+            Ok(()) => format!("{found}; added to Models as {id}."),
+            Err(e) => format!("{found}, but it could not be added: {e}"),
+        }
+    }
+
+    /// Look for Ollama and Lemonade on this machine (Ollama's port, Lemonade's ports) and add what answers to Models. Blocking,
+    /// with short timeouts; returns one line per server found.
+    pub fn detect_local_servers(&self) -> Vec<String> {
+        match crate::lemonade::local_ports_override() {
+            Some((o, l)) => self.detect_local_servers_at(o, &l),
+            None => self.detect_local_servers_at(crate::ollama::DEFAULT_PORT, &crate::lemonade::local_ports()),
+        }
+    }
+
+    pub fn detect_local_servers_at(&self, ollama_port: u16, lemonade_ports: &[u16]) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(v) = crate::ollama::probe(ollama_port) {
+            let url = format!("http://127.0.0.1:{ollama_port}");
+            let had = self.settings.lock().unwrap().get().providers.iter().any(|p| p.kind == crate::providers::Kind::Ollama && p.base_url.as_deref().map(|u| u.trim_end_matches('/')) == Some(url.as_str()));
+            self.use_local_ollama(&url);
+            out.push(format!("Ollama found at {url} (version {v}){}", if had { "; it is already in Models." } else { "; it is in Models as ollama-local." }));
+        }
+        for port in lemonade_ports {
+            if let Some((base, version)) = crate::lemonade::probe_local(*port) {
+                let msg = self.use_local_lemonade(&base, version.as_deref());
+                let _ = self.refresh_lemonade_at(&base);
+                out.push(msg);
+            }
+        }
+        out
+    }
+
+    /// Look (briefly, in the background) for a Lemonade server on this machine and add it to Models like Ollama.
+    pub fn detect_local_lemonade_in_background(self: &Arc<Self>) {
+        let me = self.clone();
+        let _ = std::thread::Builder::new().name("iyakki-lemonade-detect".into()).spawn(move || {
+            for port in crate::lemonade::local_ports() {
+                if let Some((base, version)) = crate::lemonade::probe_local(port) {
+                    me.use_local_lemonade(&base, version.as_deref());
+                    let _ = me.refresh_lemonade_at(&base);
+                }
+            }
+        });
+    }
+
+    fn refresh_lemonade_at(&self, base: &str) -> Result<(), String> {
+        let id = self.settings.lock().unwrap().get().providers.iter().find(|p| p.kind == crate::providers::Kind::Lemonade && p.base_url.as_deref().is_some_and(|u| crate::lemonade::api_base(u) == crate::lemonade::api_base(base))).map(|p| p.id.clone());
+        id.map_or(Ok(()), |id| self.refresh_lemonade(&id).map(|_| ()))
+    }
+
+    /// Which server answers at `url` (Ollama, Lemonade or another OpenAI-compatible one), asked with GET requests only.
+    pub fn detect_server(&self, url: &str) -> Result<crate::lemonade::Server, String> {
+        crate::lemonade::detect(url, self.quick.as_ref(), &[])
+    }
+
+    /// Read a Lemonade provider's typed model list and keep it: the chat models in `models`, the type of each in `model_kinds`.
+    pub fn refresh_lemonade(&self, provider: &str) -> Result<Vec<crate::lemonade::Model>, String> {
+        let list = self.client_for(provider, true)?.lemonade_catalog()?;
+        let mut st = self.settings.lock().unwrap();
+        if let Some(mut cfg) = st.get().provider(provider).cloned() {
+            cfg.models = list.iter().filter(|m| m.downloaded && m.kind.chats()).map(|m| m.id.clone()).collect();
+            cfg.model_kinds = crate::lemonade::kinds_map(&list);
+            st.upsert_provider(cfg).map_err(|e| e.to_string())?;
+        }
+        Ok(list)
+    }
+
+    /// A Lemonade provider's typed list without waiting on the network: the one last read, else the saved types.
+    pub fn lemonade_cached(&self, provider: &str) -> Vec<crate::lemonade::Model> {
+        let Some(cfg) = self.settings.lock().unwrap().get().provider(provider).cloned() else { return vec![] };
+        if let Some(c) = cfg.base().ok().and_then(|b| crate::lemonade::cached(&crate::lemonade::api_base(&b))) {
+            return c;
+        }
+        cfg.model_kinds
+            .iter()
+            .map(|(id, k)| crate::lemonade::Model { id: id.clone(), kind: crate::lemonade::ModelType::from_key(k).unwrap_or(crate::lemonade::ModelType::Other), recipe: String::new(), checkpoint: String::new(), labels: vec![], downloaded: true, loaded: false, suggested: false, size_gb: None, image_defaults: None })
+            .collect()
+    }
+
+    /// The downloaded models of one type on every enabled Lemonade provider, as (provider, model).
+    pub fn lemonade_models(&self, t: crate::lemonade::ModelType) -> Vec<(String, String)> {
+        let ids: Vec<String> = self.settings.lock().unwrap().get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
+        ids.into_iter().flat_map(|id| self.lemonade_cached(&id).into_iter().filter(|m| m.kind == t && m.downloaded).map(move |m| (id.clone(), m.id)).collect::<Vec<_>>()).collect()
+    }
+
+    /// Load a model into a Lemonade server's memory (or unload it); blocking, for a background job.
+    pub fn lemonade_load(&self, provider: &str, model: &str, load: bool) -> Result<String, String> {
+        let msg = self.client_for(provider, false)?.lemonade_call(if load { "load" } else { "unload" }, model)?;
+        let _ = self.refresh_lemonade(provider);
+        Ok(msg)
+    }
+
+    /// Read aloud with a Lemonade text-to-speech model (TALES, chat replies): the speech engine becomes its endpoint.
+    pub fn use_lemonade_voice(&self, provider: &str, model: &str, voice: Option<&str>) -> Result<String, String> {
+        let cfg = self.settings.lock().unwrap().get().provider(provider).cloned().ok_or("unknown provider")?;
+        let base = cfg.base()?;
+        if !self.speech_server_allowed(&base) {
+            return Err(format!("{provider} is {}: what is read aloud would be sent there. Say yes to that first.", crate::speechtime::locality(&base).label()));
+        }
+        let engine = crate::lemonade::tts_engine(&base, model, voice, cfg.key_ref.clone());
+        let label = engine.label();
+        self.settings.lock().unwrap().update(|s| s.voice.tts = Some(engine)).map_err(|e| e.to_string())?;
+        Ok(format!("Reading voice: {model} on {provider} ({label})."))
+    }
+
+    /// Listen with a Lemonade whisper model (Settings → Voice speech-to-text).
+    pub fn use_lemonade_stt(&self, provider: &str, model: &str) -> Result<String, String> {
+        let cfg = self.settings.lock().unwrap().get().provider(provider).cloned().ok_or("unknown provider")?;
+        let base = cfg.base()?;
+        if !self.speech_server_allowed(&base) {
+            return Err(format!("{provider} is {}: what the microphone hears, and speech whose words are timed, would be sent there. Say yes to that first.", crate::speechtime::locality(&base).label()));
+        }
+        let engine = crate::lemonade::stt_engine(&base, model, cfg.key_ref.clone());
+        self.settings.lock().unwrap().update(|s| s.voice.stt = Some(engine)).map_err(|e| e.to_string())?;
+        Ok(format!("Speech-to-text: {model} on {provider}."))
+    }
+
     /// Start reading the network neighbour table every half minute for new devices (once; a second call does nothing).
     pub fn start_device_watch(self: &Arc<Self>) {
         self.start_device_watch_from(std::path::PathBuf::from("/proc/net/arp"), std::time::Duration::from_secs(30));
@@ -367,6 +549,28 @@ impl Services {
         self.streamer.lock().unwrap().clone()
     }
 
+    /// The transport model answers are streamed over; without one answers arrive in one piece.
+    pub fn set_chat_streamer(&self, s: Arc<dyn iyakki_proxy::Streamer>) {
+        *self.chat_streamer.lock().unwrap() = Some(s);
+    }
+
+    pub fn chat_streamer(&self) -> Option<Arc<dyn iyakki_proxy::Streamer>> {
+        self.chat_streamer.lock().unwrap().clone()
+    }
+
+    /// Load the chat model into memory in the background when it is a local Ollama model, so the first question is not slow.
+    pub fn warm_up_chat(self: &Arc<Self>) {
+        let svc = self.clone();
+        let _ = std::thread::Builder::new().name("iyakki-warm".into()).spawn(move || {
+            let Some(c) = svc.settings.lock().unwrap().get().chat.clone() else { return };
+            if let Ok(client) = svc.client_for(&c.provider, false) {
+                if let Ok(t) = client.warm_up(&c.model) {
+                    svc.last_warm_up_ms.store(t, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        });
+    }
+
     pub fn set_streamer(&self, s: Arc<dyn iyakki_proxy::Streamer>) {
         self.clis.set_streamer(s.clone());
         *self.streamer.lock().unwrap() = Some(s);
@@ -388,7 +592,14 @@ impl Services {
 
     /// The models that draw pictures, as (provider, model).
     pub fn image_models(&self) -> Vec<(String, String)> {
-        self.all_models().into_iter().filter(|(_, m)| crate::models::is_image_model(m)).collect()
+        // a Lemonade server says which of its models draw (they are not in its chat list); the others are judged by name
+        let mut v: Vec<(String, String)> = self.all_models().into_iter().filter(|(_, m)| crate::models::is_image_model(m)).collect();
+        for m in self.lemonade_models(crate::lemonade::ModelType::Image) {
+            if !v.contains(&m) {
+                v.push(m);
+            }
+        }
+        v
     }
 
     /// Draws a picture with `model` (or, when none is named, the first picture model found).
@@ -443,7 +654,8 @@ impl Services {
                 f(s);
             }
         };
-        let fail = |e: String| set(&|s: &mut PullStatus| s.error = Some(crate::models::explain_pull_error(model, &e)));
+        let lemonade = self.settings.lock().unwrap().get().provider(provider).is_some_and(|p| p.kind == crate::providers::Kind::Lemonade);
+        let fail = |e: String| set(&|s: &mut PullStatus| s.error = Some(if lemonade { format!("the download of `{model}` into Lemonade failed: {e}") } else { crate::models::explain_pull_error(model, &e) }));
         let head = match streamer.post(url, headers, body) {
             Ok(h) => h,
             Err(e) => return fail(format!("could not reach the server: {e}")),
@@ -482,7 +694,10 @@ impl Services {
             return fail(if status >= 400 { format!("HTTP {status}") } else { "the server stopped answering before the download finished".into() });
         }
         // the new model goes into the provider's list so it can be chosen and found
-        if let Ok(names) = self.client_for(provider, true).and_then(|c| c.list_models()) {
+        let lemonade = self.settings.lock().unwrap().get().provider(provider).is_some_and(|p| p.kind == crate::providers::Kind::Lemonade);
+        if lemonade {
+            let _ = self.refresh_lemonade(provider);
+        } else if let Ok(names) = self.client_for(provider, true).and_then(|c| c.list_models()) {
             let mut st = self.settings.lock().unwrap();
             if let Some(mut cfg) = st.get().provider(provider).cloned() {
                 cfg.models = names;
@@ -513,6 +728,11 @@ impl Services {
         count_files(&self.dir.join("work").join(user).join(id))
     }
 
+    /// The upstream for long requests (speech, transcription).
+    pub fn slow_upstream(&self) -> Arc<dyn Upstream> {
+        self.slow.clone()
+    }
+
     pub fn quick_upstream(&self) -> Arc<dyn Upstream> {
         self.quick.clone()
     }
@@ -538,6 +758,7 @@ impl Services {
     /// Called with the password the user just typed. Opens their personal vault (creating it the
     /// first time) and, for admins, the system vault.
     pub fn on_login(&self, user: &str, password: &str, is_admin: bool) -> LoginReport {
+        *self.agent_user.lock().unwrap_or_else(|e| e.into_inner()) = user.to_string();
         let slot = format!("user:{user}");
         let up = self.user_path(user);
         let user_state = if LocalVault::exists(&up) {
@@ -592,6 +813,8 @@ impl Services {
     pub fn on_logout(&self, user: &str, is_admin: bool) {
         self.user_vaults.lock().unwrap().remove(user);
         self.page_snapshot.lock().unwrap().remove(user);
+        crate::datatools::forget(user);
+        self.browser.on_logout(user);
         if is_admin && self.settings.lock().unwrap().get().vault.lock_on_admin_logout {
             if let Some(v) = self.secrets.system.lock().unwrap().as_mut() {
                 v.lock();
@@ -747,9 +970,58 @@ impl Services {
         Ok(ProviderClient::new(cfg, self.secrets.clone(), if quick { self.quick.clone() } else { self.slow.clone() }))
     }
 
+    /// The external-agent settings, plus the CLI tile's folder so a Claude Code or Copilot installed from the tile is found.
+    pub fn agents_cfg(&self) -> crate::extagent::AgentsCfg {
+        let mut c = self.settings.lock().unwrap_or_else(|e| e.into_inner()).get().agents.clone();
+        c.extra_bin = Some(self.clis.bin_dir());
+        // the person's own home (the one the login runs in) and the token kept in their vault: one place for the chip, the status
+        // lookups, the agents' runs and the smoke tests
+        let user = self.agent_user.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if !user.is_empty() {
+            let home = crate::extagent::login::login_home(&user, &self.dir);
+            c.env = vec![("HOME".into(), home.display().to_string()), ("CLAUDE_CONFIG_DIR".into(), home.join(".claude").display().to_string())];
+            match self.user_get(&user, crate::extagent::login::COPILOT_VAULT) {
+                Ok(v) => {
+                    if let Some((login, _)) = crate::extagent::login::parse_vault_entry(&v) {
+                        c.vault_logins.insert(crate::extagent::COPILOT.into(), if login.is_empty() { "GitHub".into() } else { login });
+                    }
+                }
+                Err(VaultError::Locked) => c.vault_locked = true,
+                Err(_) => {}
+            }
+        }
+        c
+    }
+
+    /// The token of a coding agent kept in the person's vault, for the one process started for them (never for this process's own
+    /// environment): `(variable, token)`.
+    pub fn agent_vault_token(&self, user: &str, agent: &str) -> Option<(&'static str, zeroize::Zeroizing<String>)> {
+        if agent != crate::extagent::COPILOT {
+            return None;
+        }
+        let v = self.user_get(user, crate::extagent::login::COPILOT_VAULT).ok()?;
+        crate::extagent::login::parse_vault_entry(&v).map(|(_, t)| (crate::extagent::login::COPILOT_TOKEN_ENV, t))
+    }
+
+    /// An install from the CLI tile finished: look at the external agents again at once (no restart).
+    pub fn wire_agent_installs(self: &Arc<Self>) {
+        let me = Arc::downgrade(self);
+        self.clis.set_on_installed(Arc::new(move |_id| {
+            if let Some(s) = me.upgrade() {
+                s.ext_status.refresh(s.agents_cfg());
+            }
+        }));
+    }
+
     /// A chat backend that always follows the *current* Settings.
     pub fn chat_backend(self: &Arc<Self>) -> Arc<dyn ChatBackend> {
         Arc::new(DynamicChat { svc: self.clone() })
+    }
+
+    /// A chat backend that always uses `choice` (a model chosen for one tile, such as TALES) instead of the chat model.
+    /// Providers are looked up when a request is made, so a provider removed later gives an error, not a stale answer.
+    pub fn chat_backend_for(self: &Arc<Self>, choice: ModelChoice) -> Arc<dyn ChatBackend> {
+        Arc::new(FixedChat { svc: self.clone(), choice })
     }
 
     pub fn embedder(self: &Arc<Self>) -> Arc<dyn TextEmbedder> {
@@ -762,6 +1034,78 @@ impl Services {
         self.settings.lock().unwrap().get().voice.clone()
     }
 
+    // ------------------------------------------------------------ sound output (Settings -> Sound)
+
+    pub fn sound_settings(&self) -> crate::audioout::SoundSettings {
+        self.settings.lock().unwrap().get().sound.clone()
+    }
+
+    /// Change Settings -> Sound (callers check that the person may). Takes effect for the next sound, and at once for the
+    /// radio's volume.
+    /// The volume is remembered for the output in use (restored when that output is used again, see `audioout`); the
+    /// settings returned are the ones in effect afterwards (another output chosen brings its own volume).
+    pub fn update_sound(&self, f: impl FnOnce(&mut crate::audioout::SoundSettings)) -> Result<crate::audioout::SoundSettings, String> {
+        let in_use = crate::audioout::global().current_key();
+        let now = {
+            let mut st = self.settings.lock().unwrap();
+            st.update(|s| {
+                f(&mut s.sound);
+                if let Some(k) = &in_use {
+                    s.sound.remember_level(k);
+                }
+            })
+            .map_err(|e| e.to_string())?;
+            st.get().sound.clone()
+        };
+        // the settings lock is released: the selector may save a restored volume through `start_sound_output`'s hook
+        crate::audioout::apply_prefs(now);
+        Ok(self.sound_settings())
+    }
+
+    /// The real front end: IYAKKI's players use the output of Settings -> Sound from now on, and watch for changes. When the
+    /// selector restores the remembered volume of an output, the settings file follows.
+    pub fn start_sound_output(&self) {
+        let store = Arc::downgrade(&self.settings);
+        crate::audioout::global().set_on_prefs(move |p| {
+            if let Some(store) = store.upgrade() {
+                if let Ok(mut st) = store.lock() {
+                    let v = p.volume_pct;
+                    if let Err(e) = st.update(|s| s.sound.volume_pct = v) {
+                        log::warn!("sound: could not save the volume of the output now in use: {e}");
+                    }
+                }
+            }
+        });
+        crate::audioout::install(self.sound_settings());
+    }
+
+    /// Test sound: a short gentle chime on `device` (an ALSA device such as `plughw:0,3`), else on the output in use. Waits
+    /// for the end (up to 5 s); says where it played.
+    pub fn test_sound(&self, device: Option<&str>) -> Result<String, String> {
+        if self.sound_settings().muted {
+            return Err("Sound is muted in Settings → Sound.".into());
+        }
+        let play = self.voice_settings().play_cmd;
+        let cmd = match device {
+            Some(d) => crate::audioout::command_with_device(&play, d)?,
+            None => play,
+        };
+        let out = crate::audioout::global();
+        let args = crate::audioout::route_args(voice::split_command(&cmd)?, out.device().as_deref());
+        let used = args.iter().position(|a| a == "-D").and_then(|i| args.get(i + 1).cloned());
+        if args.is_empty() {
+            return Err("the play command is empty (Settings → Voice)".into());
+        }
+        // IYAKKI's own device carries the volume itself; a device named by hand (one output's row) bypasses it
+        let wav = crate::audioout::scale_wav(&crate::audioout::test_tone_wav(), crate::audioout::gain_for(out, &args));
+        voice::run_capture(voice::command_for(&args, None), Some(&wav), std::time::Duration::from_secs(8)).map_err(|e| format!("The test sound did not play on {}: {e}", used.as_deref().unwrap_or("the default output")))?;
+        Ok(match used {
+            Some(d) if d == crate::softvol::PCM => format!("Played a short chime on the output in use (ALSA device {d}, with IYAKKI's volume)."),
+            Some(d) => format!("Played a short chime on {d}."),
+            None => "Played a short chime on the default output.".into(),
+        })
+    }
+
     /// Speech to text for recorded 16 kHz mono samples.
     pub fn transcribe_samples(&self, pcm: &[i16]) -> Result<String, String> {
         let engine = self.voice_settings().stt.ok_or("No speech-to-text engine is set up. Open Settings → Voice.")?;
@@ -772,10 +1116,42 @@ impl Services {
         if text.is_empty() { Err("No speech was recognised.".into()) } else { Ok(text) }
     }
 
+    /// The engine that makes speech for the assistant and the stories: the one of Settings → Voice, else the best engine found
+    /// on this computer (`hostengines`; `lang` prefers one that has a voice for it). The browser voice is not here: it needs
+    /// the screen (see `story::effective_engine_auto`).
+    pub fn effective_tts(&self, lang: Option<&str>) -> Option<voice::SpeechEngine> {
+        self.host_tts.ensure(); // the first call starts the look for engines in the background
+        // a Lemonade voice (Kokoro) on this computer, or on a server the person allowed, reads better than the engines found here
+        self.voice_settings().tts.or_else(|| self.lemonade_auto_voice(lang)).or_else(|| self.host_tts.auto_engine(lang))
+    }
+
     /// Text to speech; returns WAV bytes.
     pub fn synthesize_text(&self, text: &str) -> Result<Vec<u8>, String> {
-        let engine = self.voice_settings().tts.ok_or("No text-to-speech engine is set up. Open Settings → Voice.")?;
+        let engine = self.effective_tts(None).ok_or("No text-to-speech engine is set up. Open Settings → Voice.")?;
         voice::synthesize(&engine, text, &self.secrets, self.slow.as_ref())
+    }
+
+    /// Text to speech with a voice and speed chosen for this request (the STORY tile).
+    pub fn synthesize_with_opts(&self, text: &str, opts: &voice::SpeakOpts) -> Result<Vec<u8>, String> {
+        let engine = self.effective_tts(opts.lang.as_deref()).ok_or("No text-to-speech engine is set up. Open Settings → Voice.")?;
+        voice::synthesize_with(&engine, text, opts, &self.secrets, self.slow.as_ref())
+    }
+
+    /// Start reading `text` aloud (a chat reply): the engine speaks it itself when it can, otherwise a WAV is made and played
+    /// by the play command. Stop it with `Player::stop`.
+    pub fn speak_player(&self, text: &str) -> Result<voice::Player, String> {
+        let v = self.voice_settings();
+        let engine = self.effective_tts(None).ok_or("No text-to-speech engine is set up. Open Settings → Voice.")?;
+        if let voice::SpeechEngine::Host { engine: id, program, voice: vo } = &engine {
+            let said = voice::speakable(text);
+            if said.is_empty() {
+                return Err("nothing to say".into());
+            }
+            let spec = crate::hostengines::Spec::from_parts(id, program.as_deref(), vo.as_deref())?;
+            return crate::hostengines::speak(&spec, &said, None, v.speed_pct as f32 / 100.0, &v.play_cmd);
+        }
+        let wav = voice::synthesize(&engine, text, &self.secrets, self.slow.as_ref())?;
+        voice::Player::start(&v.play_cmd, &wav)
     }
 
     // ------------------------------------------------------------ RAG
@@ -837,6 +1213,29 @@ struct DynamicChat {
     svc: Arc<Services>,
 }
 
+struct FixedChat {
+    svc: Arc<Services>,
+    choice: ModelChoice,
+}
+
+impl ChatBackend for FixedChat {
+    fn complete(&self, history: &[Message]) -> Result<String, String> {
+        self.svc.client_for(&self.choice.provider, false)?.chat(&self.choice.model, history)
+    }
+
+    fn complete_tools(&self, history: &[Message], tools: &[ToolSpec]) -> Result<ModelTurn, String> {
+        self.svc.client_for(&self.choice.provider, false)?.chat_turn(&self.choice.model, history, tools)
+    }
+
+    fn complete_tools_stream(&self, history: &[Message], tools: &[ToolSpec], on_text: &mut dyn FnMut(&str) -> bool) -> Result<ModelTurn, String> {
+        let client = self.svc.client_for(&self.choice.provider, false)?;
+        match self.svc.chat_streamer() {
+            Some(s) => client.chat_turn_stream(&self.choice.model, history, tools, s.as_ref(), on_text),
+            None => client.chat_turn(&self.choice.model, history, tools),
+        }
+    }
+}
+
 impl ChatBackend for DynamicChat {
     fn complete(&self, history: &[Message]) -> Result<String, String> {
         let choice: Option<ModelChoice> = self.svc.settings.lock().unwrap().get().chat.clone();
@@ -848,6 +1247,16 @@ impl ChatBackend for DynamicChat {
         let choice: Option<ModelChoice> = self.svc.settings.lock().unwrap().get().chat.clone();
         let c = choice.ok_or("No chat model selected. Open Settings → Models, add a provider and pick a model.")?;
         self.svc.client_for(&c.provider, false)?.chat_turn(&c.model, history, tools)
+    }
+
+    fn complete_tools_stream(&self, history: &[Message], tools: &[ToolSpec], on_text: &mut dyn FnMut(&str) -> bool) -> Result<ModelTurn, String> {
+        let choice: Option<ModelChoice> = self.svc.settings.lock().unwrap().get().chat.clone();
+        let c = choice.ok_or("No chat model selected. Open Settings → Models, add a provider and pick a model.")?;
+        let client = self.svc.client_for(&c.provider, false)?;
+        match self.svc.chat_streamer() {
+            Some(s) => client.chat_turn_stream(&c.model, history, tools, s.as_ref(), on_text),
+            None => client.chat_turn(&c.model, history, tools),
+        }
     }
 }
 
@@ -913,7 +1322,7 @@ mod tests {
         std::fs::write(w1.join("a.txt"), "a").unwrap();
         std::fs::write(w1.join("sub/b.txt"), "b").unwrap();
         std::fs::write(w2.join("keep.txt"), "k").unwrap();
-        let log = |id: &str, session: Option<&str>| crate::runs::RunLog { id: id.into(), user: "alice".into(), started: 1, prompt: "p".into(), status: "completed".into(), events: vec![], session: session.map(String::from) };
+        let log = |id: &str, session: Option<&str>| crate::runs::RunLog { id: id.into(), user: "alice".into(), started: 1, prompt: "p".into(), status: "completed".into(), events: vec![], session: session.map(String::from), task_id: None, row: None, agent: None };
         s.runs.save(&log("aaaaaaaaaaaa", Some(&one.id))).unwrap();
         s.runs.save(&log("bbbbbbbbbbbb", Some(&two.id))).unwrap();
         s.runs.save(&log("cccccccccccc", None)).unwrap();

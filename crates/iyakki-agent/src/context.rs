@@ -17,11 +17,13 @@ pub struct ContextOptions {
     pub docs_k: usize,
     pub use_docs: bool,
     pub use_skills: bool,
+    /// Skills that are always included, before the one chosen by similarity (at most two pinned): the stack's language skill, the k3s practices.
+    pub pinned_skills: Vec<String>,
 }
 
 impl Default for ContextOptions {
     fn default() -> Self {
-        Self { window: 12, memory_k: 3, docs_k: 4, use_docs: false, use_skills: true }
+        Self { window: 12, memory_k: 3, docs_k: 4, use_docs: false, use_skills: true, pinned_skills: Vec::new() }
     }
 }
 
@@ -68,7 +70,11 @@ pub fn build(services: &Services, skills: &SkillStore, sessions: &SessionStore, 
     system.push_str(&format!("\n\nIt is now {} (the machine's clock; use it for any question about today's date, the day or the time).", crate::clock::format(&crate::clock::Zone::system(), crate::clock::now_unix(), "%A, %d %B %Y, %H:%M %Z (UTC%z)")));
 
     if opts.use_skills {
-        let picked = skills.select(user, user_msg, 2);
+        // the pinned skills first (the project's language, the k3s practices), then what the request resembles
+        let mut picked: Vec<crate::skills::Skill> = opts.pinned_skills.iter().take(2).filter_map(|n| skills.get(&crate::skills::Scope::User(user.to_string()), n).or_else(|| skills.get(&crate::skills::Scope::Shared, n))).collect();
+        let room = if picked.is_empty() { 2 } else { 1 };
+        let extra: Vec<crate::skills::Skill> = skills.select(user, user_msg, 3).into_iter().filter(|s| !picked.iter().any(|p| p.name == s.name)).take(room).collect();
+        picked.extend(extra);
         info.skills = picked.iter().map(|s| s.name.clone()).collect();
         let block = prompt_block(&picked);
         if !block.is_empty() {
@@ -194,6 +200,35 @@ mod tests {
         let (m3, info3) = build(&svc, &svc.skills, &svc.sessions, "amy", Some(&s.id), "SYS", &h[..4], "deploy key", &opts);
         assert_eq!(info3.recalled, 0);
         assert!(!m3[0].content.contains("Relevant earlier"));
+    }
+
+    #[test]
+    fn pinned_skills_are_always_in_the_context_before_the_one_the_request_resembles() {
+        let svc = world("pinned");
+        let add = |name: &str, trig: &str, body: &str| {
+            svc.skills.add(Scope::Shared, &format!("---\nname: {name}\ndescription: {name} things\ntriggers: {trig}\n---\n{body}\n"), true, true).unwrap();
+        };
+        add("lang-go", "golang, goroutine", "GO-RULES use go test.");
+        add("k3s-dev-best-practices", "k3s, kubernetes", "K3S-RULES use deploy_build.");
+        add("meeting-notes", "meeting, minutes", "NOTES-RULES list decisions.");
+        add("other-skill", "weather, forecast", "OTHER-RULES.");
+        let pinned = vec!["lang-go".to_string(), "k3s-dev-best-practices".to_string()];
+        // a request that resembles none of the pinned skills: they are in anyway, and one skill is chosen by similarity
+        let (m, info) = build(&svc, &svc.skills, &svc.sessions, "amy", None, "SYS", &[], "summarise the meeting minutes", &ContextOptions { pinned_skills: pinned.clone(), ..Default::default() });
+        assert_eq!(info.skills, vec!["lang-go", "k3s-dev-best-practices", "meeting-notes"]);
+        let sys = &m[0].content;
+        assert!(sys.contains("GO-RULES") && sys.contains("K3S-RULES") && sys.contains("NOTES-RULES") && !sys.contains("OTHER-RULES"), "{sys}");
+        assert!(sys.find("GO-RULES") < sys.find("K3S-RULES") && sys.find("K3S-RULES") < sys.find("NOTES-RULES"), "pinned first");
+        // an empty-handed request still has them; a pinned skill is not repeated when the request also picks it
+        let (_, info) = build(&svc, &svc.skills, &svc.sessions, "amy", None, "SYS", &[], "hello there", &ContextOptions { pinned_skills: pinned.clone(), ..Default::default() });
+        assert_eq!(info.skills, vec!["lang-go", "k3s-dev-best-practices"]);
+        let (_, info) = build(&svc, &svc.skills, &svc.sessions, "amy", None, "SYS", &[], "write a goroutine in golang", &ContextOptions { pinned_skills: pinned.clone(), ..Default::default() });
+        assert_eq!(info.skills.iter().filter(|s| *s == "lang-go").count(), 1);
+        // at most two are pinned, and an unknown pinned name is skipped; without pins nothing changes
+        let (_, info) = build(&svc, &svc.skills, &svc.sessions, "amy", None, "SYS", &[], "x", &ContextOptions { pinned_skills: vec!["nope".into(), "lang-go".into(), "k3s-dev-best-practices".into(), "meeting-notes".into()], ..Default::default() });
+        assert_eq!(info.skills, vec!["lang-go"], "only the first two names are pinned (one of them does not exist)");
+        let (_, info) = build(&svc, &svc.skills, &svc.sessions, "amy", None, "SYS", &[], "the weather forecast", &ContextOptions::default());
+        assert_eq!(info.skills, vec!["other-skill"]);
     }
 
     #[test]

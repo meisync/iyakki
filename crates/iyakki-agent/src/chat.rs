@@ -53,11 +53,17 @@ pub struct Message {
     /// Set on `Role::Tool` messages: which call this answers (and the tool's name).
     pub tool_call_id: Option<String>,
     pub tool_name: Option<String>,
+    /// PNG or JPEG files the (user) message shows to a model that can look at pictures (a flow's agent step with a screenshot).
+    pub images: Vec<Vec<u8>>,
 }
 
 impl Message {
     fn plain(role: Role, s: impl Into<String>) -> Self {
-        Self { role, content: s.into(), tool_calls: vec![], tool_call_id: None, tool_name: None }
+        Self { role, content: s.into(), tool_calls: vec![], tool_call_id: None, tool_name: None, images: vec![] }
+    }
+    /// A user message with pictures.
+    pub fn user_with_images(s: impl Into<String>, images: Vec<Vec<u8>>) -> Self {
+        Self { images, ..Self::plain(Role::User, s) }
     }
     pub fn user(s: impl Into<String>) -> Self {
         Self::plain(Role::User, s)
@@ -94,6 +100,14 @@ pub trait ChatBackend: Send + Sync {
             return self.complete(history).map(|text| ModelTurn { text, calls: vec![] });
         }
         Err("this model backend does not support tool calling".into())
+    }
+
+    /// Like [`complete_tools`](ChatBackend::complete_tools) but the answer is reported as it is written: `on_text` is called
+    /// with each piece of visible text (and with `""` when the model is busy but has shown nothing yet, for example while it
+    /// thinks or writes a tool call). Returning `false` from it asks the backend to stop early. The default does not stream:
+    /// the whole turn arrives at once.
+    fn complete_tools_stream(&self, history: &[Message], tools: &[ToolSpec], _on_text: &mut dyn FnMut(&str) -> bool) -> Result<ModelTurn, String> {
+        self.complete_tools(history, tools)
     }
 }
 

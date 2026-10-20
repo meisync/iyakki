@@ -51,9 +51,33 @@ pub struct VaultSettings {
     pub keyfile: Option<String>,
 }
 
+/// The clock in the top bar and the machine's time (Settings -> Time).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TimeSettings {
+    /// A zone name such as "Europe/Paris"; empty = what the machine says (`TZ`, `/etc/localtime`, else UTC).
+    pub zone: String,
+    /// 12-hour clock with AM/PM (the default is 24-hour).
+    pub hour12: bool,
+    /// Show seconds in the top bar.
+    pub seconds: bool,
+    /// Do not set the clock from the network.
+    pub no_ntp: bool,
+    /// A time server other than the built-in ones (a host name).
+    pub ntp_server: String,
+    /// Detect the zone from the public IP address (opt-in: asks an internet service, see `tzdetect.rs`) and keep it up to date.
+    /// Choosing a zone by hand switches it off.
+    pub zone_auto: bool,
+    /// When the zone was last looked up (seconds since the epoch; 0 = never).
+    pub zone_checked_at: i64,
+    /// Which service answered the last lookup, and what it said ("ipapi.co: Asia/Kolkata"), or why it failed.
+    pub zone_note: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub time: TimeSettings,
     pub providers: Vec<ProviderCfg>,
     pub chat: Option<ModelChoice>,
     /// `None` = built-in hashed embeddings (no model needed).
@@ -63,12 +87,22 @@ pub struct Settings {
     pub secret_providers: BTreeMap<String, SecretProviderCfg>,
     pub vault: VaultSettings,
     pub voice: VoiceSettings,
+    /// Settings -> Sound: the output IYAKKI plays on (automatic or chosen), its volume and mute.
+    pub sound: crate::audioout::SoundSettings,
     /// What a million tokens cost, in US cents. Used only to enforce agents' cost budgets (0 = free / untracked).
     pub token_price_cents_per_mtok: u32,
     /// How many days the log of what the assistant's tools did is kept (0 = the default, 3).
     pub tool_log_days: u32,
     /// The largest media file a download may fetch, in MB (0 = the default, 2048).
     pub media_download_max_mb: u32,
+    /// Seconds of pure thinking (no answer, no tool call) before a model call is abandoned and retried with shorter thinking (0 = the default, 60).
+    pub think_limit_secs: u32,
+    /// Seconds with no token of any kind before a model call is abandoned (0 = the default, 120).
+    pub silence_limit_secs: u32,
+    /// Turn the workspace history off (it is on by default: Autopilot steps and summaries are kept in the workspace's own knowledge base).
+    pub no_workspace_history: bool,
+    /// External coding agents (Claude Code, GitHub Copilot, custom commands): Settings → Agents.
+    pub agents: crate::extagent::AgentsCfg,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -89,6 +123,12 @@ impl Settings {
     }
 
     pub fn validate(&self) -> Result<(), SettingsError> {
+        if !self.time.zone.is_empty() && crate::clock::Zone::named(&self.time.zone).is_none() {
+            return bad(format!("unknown time zone `{}`", self.time.zone));
+        }
+        if !self.time.ntp_server.is_empty() && !crate::ntp::valid_server(&self.time.ntp_server) {
+            return bad("the time server must be a host name or address");
+        }
         let mut seen = HashSet::new();
         for p in &self.providers {
             p.validate().map_err(|e| SettingsError::Invalid(format!("provider `{}`: {e}", p.id)))?;
@@ -98,6 +138,11 @@ impl Settings {
         }
         for (what, choice) in [("chat", &self.chat), ("embedding", &self.embedding)] {
             if let Some(c) = choice {
+                if let Some(a) = crate::extagent::agent_of(&c.provider) {
+                    if what == "chat" && self.agents.agent(a).is_some() {
+                        continue;
+                    }
+                }
                 let p = self.provider(&c.provider).ok_or_else(|| SettingsError::Invalid(format!("{what}: unknown provider `{}`", c.provider)))?;
                 if !p.enabled {
                     return bad(format!("{what}: provider `{}` is disabled", c.provider));
@@ -136,7 +181,9 @@ impl Settings {
         if self.tool_log_days > crate::toollog::MAX_DAYS {
             return bad(format!("the tool log can be kept for at most {} days", crate::toollog::MAX_DAYS));
         }
+        self.agents.validate().map_err(SettingsError::Invalid)?;
         self.voice.validate().map_err(SettingsError::Invalid)?;
+        self.sound.validate().map_err(|e| SettingsError::Invalid(format!("sound: {e}")))?;
         if let Some(k) = &self.vault.keyfile {
             if !k.starts_with('/') {
                 return bad("vault key file needs an absolute path");

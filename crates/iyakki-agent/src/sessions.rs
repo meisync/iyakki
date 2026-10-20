@@ -35,6 +35,10 @@ pub struct Session {
     /// When each message was added (milliseconds since the epoch), in step with `messages`.
     #[serde(default)]
     pub stamps: Vec<u64>,
+    /// A few lines about the part of this chat that is no longer sent to the model word for word (rolling, rebuilt as the
+    /// chat grows).
+    #[serde(default)]
+    pub summary: String,
 }
 
 impl Session {
@@ -103,7 +107,7 @@ impl SessionStore {
         let mut r = [0u8; 5];
         iyakki_sec::random_fill(&mut r).map_err(|e| e.to_string())?;
         let id = format!("s_{}", r.iter().map(|b| format!("{b:02x}")).collect::<String>());
-        Ok(Session { id, owner: user.into(), title: "New chat".into(), created: now(), updated: now(), messages: vec![], stamps: vec![] })
+        Ok(Session { id, owner: user.into(), title: "New chat".into(), created: now(), updated: now(), messages: vec![], stamps: vec![], summary: String::new() })
     }
 
     /// Save (creating the file on first save). The title follows the first user message.
@@ -208,7 +212,7 @@ mod tests {
     fn a_chat_opens_on_its_last_three_days_and_up_to_a_thousand_messages_and_older_ones_load_in_steps() {
         let day = 86_400_000u64;
         let now = 100 * day;
-        let mk = |stamps: Vec<u64>| Session { id: "s_0123456789".into(), owner: "a".into(), title: "t".into(), created: 0, updated: now, messages: stamps.iter().map(|_| Message::user("m")).collect(), stamps };
+        let mk = |stamps: Vec<u64>| Session { id: "s_0123456789".into(), owner: "a".into(), title: "t".into(), created: 0, updated: now, messages: stamps.iter().map(|_| Message::user("m")).collect(), stamps, summary: String::new() };
         // 100 messages a day for ten days
         let s = mk((0..1000u64).map(|i| now - 10 * day + i * day / 100).collect());
         let start = s.window_start(now, 3, 1000);

@@ -95,6 +95,58 @@ pub fn gunzip_file(src: &Path, dst: &Path, limit: u64) -> Result<u64, String> {
     Ok(n)
 }
 
+/// Every member of a gzip stream held in memory, decompressed (an Alpine `.apk` is three members: signature, control, files).
+pub fn gunzip_members(data: &[u8], limit: u64) -> Result<Vec<Vec<u8>>, String> {
+    let (mut out, mut pos, mut total) = (Vec::new(), 0usize, 0u64);
+    while pos < data.len() {
+        let h = &data[pos..];
+        if h.len() < 18 || h[0] != 0x1f || h[1] != 0x8b || h[2] != 8 {
+            return Err(err("not a gzip stream"));
+        }
+        let flags = h[3];
+        let mut i = 10usize;
+        if flags & 4 != 0 {
+            let l = h.get(i..i + 2).ok_or_else(|| err("the gzip header ends early"))?;
+            i += 2 + u16::from_le_bytes([l[0], l[1]]) as usize;
+        }
+        for bit in [8u8, 16] {
+            if flags & bit != 0 {
+                while *h.get(i).ok_or_else(|| err("the gzip header ends early"))? != 0 {
+                    i += 1;
+                }
+                i += 1;
+            }
+        }
+        if flags & 2 != 0 {
+            i += 2;
+        }
+        if i >= h.len() {
+            return Err(err("the gzip header ends early"));
+        }
+        let mut state = InflateState::new_boxed(DataFormat::Raw);
+        let (mut buf, mut chunk, mut p) = (Vec::new(), vec![0u8; 256 * 1024], i);
+        loop {
+            let r = inflate(&mut state, &h[p..], &mut chunk, MZFlush::None);
+            p += r.bytes_consumed;
+            total += r.bytes_written as u64;
+            if total > limit {
+                return Err(err("the archive expands to more than its limit"));
+            }
+            buf.extend_from_slice(&chunk[..r.bytes_written]);
+            let stuck = r.bytes_consumed == 0 && r.bytes_written == 0;
+            match r.status {
+                Ok(MZStatus::StreamEnd) => break,
+                Ok(_) | Err(miniz_oxide::MZError::Buf) if !stuck => {}
+                Ok(_) | Err(miniz_oxide::MZError::Buf) => return Err(err("the compressed data ends early")),
+                Err(e) => return Err(format!("the compressed data is damaged ({e:?})")),
+            }
+        }
+        pos += p + 8;
+        out.push(buf);
+    }
+    Ok(out)
+}
+
 /// A path from an archive, made safe to join onto the destination: relative, with no `..`.
 fn safe_rel(name: &str) -> Result<PathBuf, String> {
     let mut out = PathBuf::new();
@@ -430,6 +482,19 @@ pub mod tests {
         body.extend_from_slice(&cd_off.to_le_bytes());
         body.extend_from_slice(&[0, 0]);
         body
+    }
+
+    #[test]
+    fn a_gzip_stream_of_several_members_is_read_member_by_member() {
+        let (a, b, c) = (b"first".repeat(100), b"second".to_vec(), "third".repeat(70_000).into_bytes());
+        let mut all = gzip(&a);
+        all.extend(gzip(&b));
+        all.extend(gzip(&c));
+        let m = gunzip_members(&all, 1 << 20).unwrap();
+        assert_eq!(m, vec![a, b, c]);
+        assert!(gunzip_members(&all, 1000).unwrap_err().contains("more than its limit"));
+        assert!(gunzip_members(b"not gzip at all, really", 100).is_err());
+        assert!(gunzip_members(&all[..all.len() / 2], 1 << 20).is_err(), "a cut-off stream is refused");
     }
 
     #[test]

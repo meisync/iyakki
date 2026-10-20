@@ -451,6 +451,7 @@ impl RadioPlayer {
         let mut buf: Vec<u8> = Vec::new();
         let mut eof = false;
         let mut out: Option<(std::process::Child, std::process::ChildStdin, u32, u16)> = None;
+        let mut out_gen = crate::audioout::global().generation();
         let mut garbage = 0usize;
         let result = loop {
             if !self.current(gen) {
@@ -494,7 +495,10 @@ impl RadioPlayer {
                 Ok(info) if info.samples_produced > 0 => {
                     garbage = 0;
                     let ch = info.channels.num() as u16;
-                    if out.as_ref().is_none_or(|o| o.2 != info.sample_rate || o.3 != ch) {
+                    // the sound output changed (a monitor plugged in or moved, another output chosen): the player starts
+                    // again on the new device, after a short gap
+                    let sound_gen = crate::audioout::global().generation();
+                    if out.as_ref().is_none_or(|o| o.2 != info.sample_rate || o.3 != ch) || out_gen != sound_gen {
                         if let Some((mut c, _, _, _)) = out.take() {
                             crate::voice::kill_child(&mut c);
                         }
@@ -502,8 +506,10 @@ impl RadioPlayer {
                         let mut stdin = child.stdin.take().ok_or_else(|| StreamEnd::Failed("the player has no input".into()))?;
                         stdin.write_all(&wav_header(info.sample_rate, ch)).map_err(|_| StreamEnd::Failed("the player stopped".into()))?;
                         out = Some((child, stdin, info.sample_rate, ch));
+                        out_gen = sound_gen;
                     }
-                    let vol = self.volume() as i32;
+                    // the radio's own volume, then IYAKKI's volume and mute (Settings -> Sound; HDMI has no hardware volume)
+                    let vol = self.volume() as i32 * crate::audioout::global().gain() as i32 / 100;
                     let n = info.samples_produced * ch as usize;
                     {
                         let fresh = band_levels(&pcm[..n], ch as usize, info.sample_rate);

@@ -44,6 +44,19 @@ pub enum SpeechEngine {
     /// Local program. STT: `{wav}` is replaced by the audio file, text comes from stdout.
     /// TTS: the text arrives on stdin; audio is read from the file named by `{out}`, or from stdout.
     Command { command: String },
+    /// Text to speech only: the voices of the browser (or desktop window) the person is using, through the Web Speech API
+    /// (`hostvoice`). Nothing is made on this machine, so there is no audio file.
+    Browser,
+    /// Text to speech only: a speech engine already installed on this computer (espeak-ng, speech-dispatcher, piper, macOS `say`,
+    /// Windows speech, ...), found by `hostengines`. `engine` is its id (`espeak-ng`), `program` where it was found (looked up
+    /// again when empty) and `voice` the voice (empty: chosen from the language of what is read).
+    Host {
+        engine: String,
+        #[serde(default)]
+        program: Option<String>,
+        #[serde(default)]
+        voice: Option<String>,
+    },
 }
 
 impl SpeechEngine {
@@ -51,6 +64,9 @@ impl SpeechEngine {
         match self {
             SpeechEngine::Http { url, model, .. } => format!("HTTP · {model} · {}", iyakki_sec::url_host(url).unwrap_or_default()),
             SpeechEngine::Command { command } => format!("command · {}", command.split_whitespace().next().unwrap_or("")),
+            SpeechEngine::Browser => "browser voice".to_string(),
+            SpeechEngine::Host { engine, program, .. } if engine == crate::indic::ENGINE_ID => format!("{} · server {}", crate::hostengines::Kind::IndicTts.label(), iyakki_sec::url_host(program.as_deref().filter(|p| !p.is_empty()).unwrap_or(crate::indic::DEFAULT_URL)).unwrap_or_default()),
+            SpeechEngine::Host { engine, .. } => crate::hostengines::Kind::from_id(engine).map_or_else(|| format!("{engine} (this computer)"), |k| format!("{} (on this computer)", k.label())),
         }
     }
 
@@ -69,6 +85,8 @@ impl SpeechEngine {
                 Ok(())
             }
             SpeechEngine::Command { command } => validate_command(command),
+            SpeechEngine::Browser => Ok(()),
+            SpeechEngine::Host { engine, program, voice } => crate::hostengines::validate_host(engine, program.as_deref(), voice.as_deref()),
         }
     }
 }
@@ -84,21 +102,69 @@ pub struct VoiceSettings {
     pub auto_send: bool,
     /// Read assistant replies aloud.
     pub speak_replies: bool,
+    /// Speaking speed of replies and of the voice test, in percent (100 = normal), 50 to 200.
+    pub speed_pct: u32,
+    /// What is lit while text is read aloud: the sentence and the word, the sentence only, or nothing.
+    pub highlight: Highlight,
+    /// Time the lit word from the sound itself: made speech is given to a speech-to-text server and what it heard is matched
+    /// to the text (`speechtime`). Off: the word times are estimated.
+    pub align_words: bool,
+    /// Speech servers on another machine (`scheme://host:port`) the person agreed to send text and sound to.
+    pub remote_ok: Vec<String>,
+}
+
+/// What is highlighted while text is read aloud (TALES, chat).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Highlight {
+    /// The sentence being read, and inside it the word being said.
+    #[default]
+    SentenceAndWord,
+    /// The sentence only.
+    Sentence,
+    /// Nothing is lit (the page still scrolls along with the reading).
+    Off,
+}
+
+impl Highlight {
+    pub const ALL: [Highlight; 3] = [Highlight::SentenceAndWord, Highlight::Sentence, Highlight::Off];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Highlight::SentenceAndWord => "Sentence + word",
+            Highlight::Sentence => "Sentence only",
+            Highlight::Off => "Off",
+        }
+    }
+
+    pub fn sentence(self) -> bool {
+        self != Highlight::Off
+    }
+
+    pub fn word(self) -> bool {
+        self == Highlight::SentenceAndWord
+    }
 }
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        Self { stt: None, tts: None, record_cmd: DEFAULT_RECORD_CMD.into(), play_cmd: DEFAULT_PLAY_CMD.into(), auto_send: false, speak_replies: false }
+        Self { stt: None, tts: None, record_cmd: DEFAULT_RECORD_CMD.into(), play_cmd: DEFAULT_PLAY_CMD.into(), auto_send: false, speak_replies: false, speed_pct: 100, highlight: Highlight::default(), align_words: true, remote_ok: Vec::new() }
     }
 }
 
 impl VoiceSettings {
     pub fn validate(&self) -> Result<(), String> {
         if let Some(e) = &self.stt {
+            if matches!(e, SpeechEngine::Browser | SpeechEngine::Host { .. }) {
+                return Err("speech-to-text: the browser voice and the speech engines of this computer only speak; they cannot listen".into());
+            }
             e.validate().map_err(|m| format!("speech-to-text: {m}"))?;
         }
         if let Some(e) = &self.tts {
             e.validate().map_err(|m| format!("text-to-speech: {m}"))?;
+        }
+        if !(50..=200).contains(&self.speed_pct) {
+            return Err("speaking speed must be between 50 and 200 percent".into());
         }
         validate_command(&self.record_cmd).map_err(|m| format!("record command: {m}"))?;
         validate_command(&self.play_cmd).map_err(|m| format!("play command: {m}"))?;
@@ -161,7 +227,7 @@ pub fn validate_command(cmd: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn private_tempdir(tag: &str) -> Result<PathBuf, String> {
+pub(crate) fn private_tempdir(tag: &str) -> Result<PathBuf, String> {
     use std::os::unix::fs::DirBuilderExt;
     let mut r = [0u8; 8];
     iyakki_sec::random_fill(&mut r).map_err(|e| e.to_string())?;
@@ -180,7 +246,7 @@ fn kill_tree(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn command_for(args: &[String], cwd: Option<&Path>) -> Command {
+pub(crate) fn command_for(args: &[String], cwd: Option<&Path>) -> Command {
     use std::os::unix::process::CommandExt;
     let mut c = Command::new(&args[0]);
     c.process_group(0);
@@ -201,7 +267,7 @@ fn command_for(args: &[String], cwd: Option<&Path>) -> Command {
 }
 
 /// Run to completion with a timeout; returns (stdout, stderr). The child is killed on timeout.
-fn run_capture(mut cmd: Command, stdin: Option<&[u8]>, timeout: Duration) -> Result<(Vec<u8>, String), String> {
+pub(crate) fn run_capture(mut cmd: Command, stdin: Option<&[u8]>, timeout: Duration) -> Result<(Vec<u8>, String), String> {
     cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("cannot start `{}`: {e}", cmd.get_program().to_string_lossy()))?;
     if let (Some(data), Some(mut si)) = (stdin, child.stdin.take()) {
@@ -448,8 +514,9 @@ impl Drop for Recorder {
 // ------------------------------------------------------------------ speaker
 
 /// Start the play command with a pipe on its stdin, for audio that arrives as it goes (radio). Kill it with [`kill_child`].
+/// The output of Settings -> Sound is given to `aplay` (`-D plughw:C,D`) unless the command names a device itself.
 pub fn spawn_player(play_cmd: &str) -> Result<Child, String> {
-    let args = split_command(play_cmd)?;
+    let args = crate::audioout::route_args(split_command(play_cmd)?, crate::audioout::global().device().as_deref());
     let prog = args.first().ok_or("play command is empty")?;
     command_for(&args, None)
         .stdin(Stdio::piped())
@@ -524,12 +591,18 @@ pub fn kill_child(child: &mut Child) {
 
 pub struct Player {
     child: Child,
+    /// Run once when it is stopped while still playing (speech-dispatcher keeps talking after its client is killed).
+    stop_cmd: Option<Vec<String>>,
+    /// A speech process that has not ended by then is killed (an engine that hangs must not hold the speaker forever).
+    deadline: Option<Instant>,
 }
 
 impl Player {
-    /// Start playing a WAV file through the play command (audio is written to its stdin).
+    /// Start playing a WAV file through the play command (audio is written to its stdin). The output and the volume of
+    /// Settings -> Sound apply (see `audioout`).
     pub fn start(play_cmd: &str, wav: &[u8]) -> Result<Player, String> {
-        let args = split_command(play_cmd)?;
+        let out = crate::audioout::global();
+        let args = crate::audioout::route_args(split_command(play_cmd)?, out.device().as_deref());
         let prog = args.first().ok_or("play command is empty")?;
         let mut child = command_for(&args, None)
             .stdin(Stdio::piped())
@@ -538,15 +611,30 @@ impl Player {
             .spawn()
             .map_err(|e| format!("cannot start `{prog}`: {e} (change the play command in Settings → Voice)"))?;
         if let Some(mut si) = child.stdin.take() {
-            let data = wav.to_vec();
+            let data = crate::audioout::scale_wav(wav, crate::audioout::gain_for(out, &args));
             std::thread::spawn(move || {
                 let _ = si.write_all(&data);
             });
         }
-        Ok(Player { child })
+        Ok(Player { child, stop_cmd: None, deadline: None })
+    }
+
+    /// A process that speaks by itself (a host speech engine): the text goes to its standard input, which is then closed.
+    /// `stop_cmd` is run, without a shell, when it is stopped while still speaking; `max` is the longest it may take.
+    pub fn from_speech(mut child: Child, text: Vec<u8>, stop_cmd: Option<Vec<String>>, max: Duration) -> Player {
+        if let Some(mut si) = child.stdin.take() {
+            std::thread::spawn(move || {
+                let _ = si.write_all(&text);
+            });
+        }
+        Player { child, stop_cmd, deadline: Some(Instant::now() + max) }
     }
 
     pub fn is_playing(&mut self) -> bool {
+        if self.deadline.is_some_and(|d| Instant::now() > d) && matches!(self.child.try_wait(), Ok(None)) {
+            self.stop();
+            return false;
+        }
         matches!(self.child.try_wait(), Ok(None))
     }
 
@@ -562,6 +650,11 @@ impl Player {
     }
 
     pub fn stop(&mut self) {
+        if let Some(cmd) = self.stop_cmd.take() {
+            if matches!(self.child.try_wait(), Ok(None)) && !cmd.is_empty() {
+                let _ = run_capture(command_for(&cmd, None), None, Duration::from_secs(3));
+            }
+        }
         kill_tree(&mut self.child);
     }
 }
@@ -601,6 +694,7 @@ fn clean_transcript(raw: &str) -> String {
 /// Speech to text. `wav` must be a WAV file (16 kHz mono works everywhere).
 pub fn transcribe(engine: &SpeechEngine, wav: &[u8], secrets: &Secrets, upstream: &dyn Upstream) -> Result<String, String> {
     match engine {
+        SpeechEngine::Browser | SpeechEngine::Host { .. } => Err("the browser voice and the speech engines of this computer only speak; choose an HTTP endpoint or a local command for speech-to-text".into()),
         SpeechEngine::Http { url, model, key_ref, language, .. } => {
             let mut fields = vec![("model", model.as_str()), ("response_format", "json")];
             if let Some(l) = language {
@@ -656,18 +750,51 @@ pub fn speakable(text: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(1500).collect()
 }
 
+/// Per-request choices for text to speech (the STORY tile): another voice than the engine's configured one, and a speaking
+/// speed (1.0 = normal). An HTTP engine gets `voice` and `speed` in the request body; a command gets them where it says
+/// `{voice}`, `{speed}` (for example 1.2) or `{length_scale}` (1 / speed, what piper's `--length_scale` takes). A command
+/// without those words simply ignores them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpeakOpts {
+    pub voice: Option<String>,
+    pub speed: f32,
+    /// Language tag of the text (`ta-IN`): an engine of this computer picks a voice that speaks it.
+    pub lang: Option<String>,
+}
+
+impl Default for SpeakOpts {
+    fn default() -> Self {
+        SpeakOpts { voice: None, speed: 1.0, lang: None }
+    }
+}
+
 /// Text to speech; returns a WAV file.
 pub fn synthesize(engine: &SpeechEngine, text: &str, secrets: &Secrets, upstream: &dyn Upstream) -> Result<Vec<u8>, String> {
+    synthesize_with(engine, text, &SpeakOpts::default(), secrets, upstream)
+}
+
+/// [`synthesize`] with a voice and a speed chosen for this request.
+pub fn synthesize_with(engine: &SpeechEngine, text: &str, opts: &SpeakOpts, secrets: &Secrets, upstream: &dyn Upstream) -> Result<Vec<u8>, String> {
     let text = speakable(text);
     if text.is_empty() {
         return Err("nothing to say".into());
     }
+    let speed = if opts.speed.is_finite() { opts.speed.clamp(0.5, 2.0) } else { 1.0 };
     let audio = match engine {
+        SpeechEngine::Browser => return Err("the browser voice speaks inside the browser and makes no audio file".into()),
+        SpeechEngine::Host { engine, program, voice } => {
+            let spec = crate::hostengines::Spec::from_parts(engine, program.as_deref(), opts.voice.as_deref().filter(|v| !v.trim().is_empty()).or(voice.as_deref()))?;
+            return crate::hostengines::synth_wav(&spec, &text, opts.lang.as_deref(), speed);
+        }
         SpeechEngine::Http { url, model, key_ref, voice, .. } => {
             let mut headers = key_headers(key_ref, secrets)?;
             headers.push(("Content-Type".into(), "application/json".into()));
-            let body = json!({"model": model, "input": text, "voice": voice.as_deref().unwrap_or("alloy"), "response_format": "wav"}).to_string();
-            let r = upstream.request("POST", url, &headers, body.as_bytes())?;
+            let voice = opts.voice.as_deref().filter(|v| !v.trim().is_empty()).or(voice.as_deref()).unwrap_or("alloy");
+            let mut body = json!({"model": model, "input": text, "voice": voice, "response_format": "wav"});
+            if (speed - 1.0).abs() > 0.01 {
+                body["speed"] = json!(speed);
+            }
+            let r = upstream.request("POST", url, &headers, body.to_string().as_bytes())?;
             if !(200..300).contains(&r.status) {
                 return Err(format!("HTTP {}: {}", r.status, String::from_utf8_lossy(&r.body).chars().filter(|c| !c.is_control()).take(160).collect::<String>().trim()));
             }
@@ -677,7 +804,11 @@ pub fn synthesize(engine: &SpeechEngine, text: &str, secrets: &Secrets, upstream
             let dir = private_tempdir("tts")?;
             let out_path = dir.join("speech.wav");
             let result = (|| {
-                let args: Vec<String> = split_command(command)?.into_iter().map(|a| a.replace("{out}", &out_path.to_string_lossy())).collect();
+                let voice = opts.voice.clone().unwrap_or_default();
+                let args: Vec<String> = split_command(command)?
+                    .into_iter()
+                    .map(|a| a.replace("{out}", &out_path.to_string_lossy()).replace("{voice}", &voice).replace("{speed}", &format!("{speed:.2}")).replace("{length_scale}", &format!("{:.2}", 1.0 / speed)))
+                    .collect();
                 let (stdout, _) = run_capture(command_for(&args, Some(&dir)), Some(text.as_bytes()), Duration::from_secs(180))?;
                 if command.contains("{out}") { std::fs::read(&out_path).map_err(|e| format!("the command did not write {{out}}: {e}")) } else { Ok(stdout) }
             })();

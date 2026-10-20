@@ -1,6 +1,9 @@
 //! The time of day, in the machine's own time zone, so the assistant can say what day it is and `date` works.
 //! The zone comes from `TZ` or `/etc/localtime` (the standard compiled zone files, read by our own parser, including
 //! the rule at the end of the file that covers years after the last listed change). Without one the time is UTC.
+//! The person can choose a zone in Settings -> Time: that name wins over `TZ` and `/etc/localtime`, and is found in
+//! the zone files when the machine has them, else in the small built-in table of common zones ([`BUILTIN_ZONES`]),
+//! so the image needs no tzdata package.
 
 use std::path::Path;
 
@@ -210,6 +213,18 @@ impl Zone {
         Some(Zone { trans, types, footer })
     }
 
+    /// A zone by its usual name ("Europe/Paris"): from the zone files when present, else the built-in table.
+    pub fn named(name: &str) -> Option<Zone> {
+        let name = name.trim();
+        if name.is_empty() || name.contains("..") || name.starts_with('/') {
+            return None;
+        }
+        if let Some(z) = std::fs::read(Path::new(&zoneinfo_dir()).join(name)).ok().and_then(|b| Zone::parse(&b)) {
+            return Some(z);
+        }
+        BUILTIN_ZONES.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).and_then(|(_, rule)| Zone::from_posix(rule))
+    }
+
     pub fn from_posix(s: &str) -> Option<Zone> {
         let p = parse_posix(s)?;
         Some(Zone { trans: vec![], types: vec![p.std.clone()], footer: Some(p) })
@@ -217,6 +232,14 @@ impl Zone {
 
     /// This machine's zone: `TZ` (a zone name or a rule), else `/etc/localtime`, else UTC.
     pub fn system() -> Zone {
+        Zone::system_with(chosen_zone_name())
+    }
+
+    /// [`Zone::system`] with the person's choice given instead of read from the process-wide one (so it can be tested).
+    pub fn system_with(chosen: Option<String>) -> Zone {
+        if let Some(z) = chosen.and_then(|n| Zone::named(&n)) {
+            return z;
+        }
         if let Ok(tz) = std::env::var("TZ") {
             let name = tz.trim_start_matches(':');
             if !name.is_empty() && !name.contains("..") {
@@ -270,6 +293,159 @@ impl Zone {
         let (year, month, day) = civil(days);
         Local { year, month, day, hour: secs / 3600, minute: secs % 3600 / 60, second: secs % 60, weekday: (days + 4).rem_euclid(7) as u32, yday: (days - days_from_civil(year, 1, 1)) as u32 + 1, offset: tt.off, abbrev: tt.abbrev }
     }
+}
+
+/// The folder of compiled zone files (`IYAKKI_ZONEINFO` for tests; else the standard place).
+fn zoneinfo_dir() -> String {
+    std::env::var("IYAKKI_ZONEINFO").unwrap_or_else(|_| "/usr/share/zoneinfo".into())
+}
+
+static CHOSEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The zone the person chose in Settings -> Time (applied at start and when it is changed); `""` clears it.
+pub fn set_chosen_zone(name: &str) {
+    if let Ok(mut c) = CHOSEN.lock() {
+        *c = (!name.trim().is_empty()).then(|| name.trim().to_string());
+    }
+}
+
+pub fn chosen_zone_name() -> Option<String> {
+    CHOSEN.lock().ok().and_then(|c| c.clone())
+}
+
+/// Common zones with their POSIX rules, for machines without zone files. Rules are the current ones (they change
+/// rarely; a machine with zone files uses those instead).
+pub const BUILTIN_ZONES: &[(&str, &str)] = &[
+    ("UTC", "UTC0"),
+    ("Atlantic/Reykjavik", "GMT0"),
+    ("Europe/London", "GMT0BST,M3.5.0/1,M10.5.0"),
+    ("Europe/Dublin", "GMT0IST,M3.5.0/1,M10.5.0"),
+    ("Europe/Lisbon", "WET0WEST,M3.5.0/1,M10.5.0"),
+    ("Europe/Paris", "CET-1CEST,M3.5.0,M10.5.0/3"),
+    ("Europe/Berlin", "CET-1CEST,M3.5.0,M10.5.0/3"),
+    ("Europe/Madrid", "CET-1CEST,M3.5.0,M10.5.0/3"),
+    ("Europe/Rome", "CET-1CEST,M3.5.0,M10.5.0/3"),
+    ("Europe/Amsterdam", "CET-1CEST,M3.5.0,M10.5.0/3"),
+    ("Europe/Brussels", "CET-1CEST,M3.5.0,M10.5.0/3"),
+    ("Europe/Vienna", "CET-1CEST,M3.5.0,M10.5.0/3"),
+    ("Europe/Zurich", "CET-1CEST,M3.5.0,M10.5.0/3"),
+    ("Europe/Stockholm", "CET-1CEST,M3.5.0,M10.5.0/3"),
+    ("Europe/Oslo", "CET-1CEST,M3.5.0,M10.5.0/3"),
+    ("Europe/Copenhagen", "CET-1CEST,M3.5.0,M10.5.0/3"),
+    ("Europe/Prague", "CET-1CEST,M3.5.0,M10.5.0/3"),
+    ("Europe/Warsaw", "CET-1CEST,M3.5.0,M10.5.0/3"),
+    ("Europe/Budapest", "CET-1CEST,M3.5.0,M10.5.0/3"),
+    ("Europe/Athens", "EET-2EEST,M3.5.0/3,M10.5.0/4"),
+    ("Europe/Helsinki", "EET-2EEST,M3.5.0/3,M10.5.0/4"),
+    ("Europe/Kyiv", "EET-2EEST,M3.5.0/3,M10.5.0/4"),
+    ("Europe/Bucharest", "EET-2EEST,M3.5.0/3,M10.5.0/4"),
+    ("Europe/Istanbul", "<+03>-3"),
+    ("Europe/Moscow", "MSK-3"),
+    ("Africa/Cairo", "EET-2EEST,M4.5.5/0,M10.5.4/24"),
+    ("Africa/Lagos", "WAT-1"),
+    ("Africa/Johannesburg", "SAST-2"),
+    ("Africa/Nairobi", "EAT-3"),
+    ("Asia/Jerusalem", "IST-2IDT,M3.4.4/26,M10.5.0"),
+    ("Asia/Riyadh", "<+03>-3"),
+    ("Asia/Tehran", "<+0330>-3:30"),
+    ("Asia/Dubai", "<+04>-4"),
+    ("Asia/Karachi", "PKT-5"),
+    ("Asia/Kolkata", "IST-5:30"),
+    ("Asia/Colombo", "<+0530>-5:30"),
+    ("Asia/Kathmandu", "<+0545>-5:45"),
+    ("Asia/Dhaka", "<+06>-6"),
+    ("Asia/Bangkok", "<+07>-7"),
+    ("Asia/Jakarta", "WIB-7"),
+    ("Asia/Shanghai", "CST-8"),
+    ("Asia/Hong_Kong", "HKT-8"),
+    ("Asia/Singapore", "<+08>-8"),
+    ("Asia/Manila", "PST-8"),
+    ("Asia/Taipei", "CST-8"),
+    ("Asia/Tokyo", "JST-9"),
+    ("Asia/Seoul", "KST-9"),
+    ("Australia/Perth", "AWST-8"),
+    ("Australia/Darwin", "ACST-9:30"),
+    ("Australia/Adelaide", "ACST-9:30ACDT,M10.1.0,M4.1.0/3"),
+    ("Australia/Brisbane", "AEST-10"),
+    ("Australia/Sydney", "AEST-10AEDT,M10.1.0,M4.1.0/3"),
+    ("Australia/Melbourne", "AEST-10AEDT,M10.1.0,M4.1.0/3"),
+    ("Pacific/Auckland", "NZST-12NZDT,M9.5.0,M4.1.0/3"),
+    ("Pacific/Honolulu", "HST10"),
+    ("America/Anchorage", "AKST9AKDT,M3.2.0,M11.1.0"),
+    ("America/Los_Angeles", "PST8PDT,M3.2.0,M11.1.0"),
+    ("America/Vancouver", "PST8PDT,M3.2.0,M11.1.0"),
+    ("America/Denver", "MST7MDT,M3.2.0,M11.1.0"),
+    ("America/Phoenix", "MST7"),
+    ("America/Chicago", "CST6CDT,M3.2.0,M11.1.0"),
+    ("America/Mexico_City", "CST6"),
+    ("America/New_York", "EST5EDT,M3.2.0,M11.1.0"),
+    ("America/Toronto", "EST5EDT,M3.2.0,M11.1.0"),
+    ("America/Halifax", "AST4ADT,M3.2.0,M11.1.0"),
+    ("America/St_Johns", "NST3:30NDT,M3.2.0,M11.1.0"),
+    ("America/Bogota", "<-05>5"),
+    ("America/Lima", "<-05>5"),
+    ("America/Santiago", "<-04>4<-03>,M9.1.6/24,M4.1.6/24"),
+    ("America/Sao_Paulo", "<-03>3"),
+    ("America/Argentina/Buenos_Aires", "<-03>3"),
+];
+
+/// Does the machine have its own zone files (`zone1970.tab` and the compiled zones)? Otherwise the built-in table is used.
+pub fn has_zone_files() -> bool {
+    ["zone1970.tab", "zone.tab"].iter().any(|f| std::fs::read_to_string(Path::new(&zoneinfo_dir()).join(f)).is_ok_and(|t| t.lines().filter(|l| !l.starts_with('#')).count() >= 20))
+}
+
+/// The zones to offer: every one in the zone files' index when the machine has them, else the built-in table. Sorted.
+pub fn zone_names() -> Vec<String> {
+    // `zone1970.tab`, else the older `zone.tab` (both list the zone in the third column)
+    let mut v: Vec<String> = ["zone1970.tab", "zone.tab"]
+        .iter()
+        .find_map(|f| std::fs::read_to_string(Path::new(&zoneinfo_dir()).join(f)).ok())
+        .map(|t| t.lines().filter(|l| !l.starts_with('#')).filter_map(|l| l.split('\t').nth(2)).map(str::to_string).collect())
+        .unwrap_or_default();
+    if v.len() < 20 {
+        v = BUILTIN_ZONES.iter().map(|(n, _)| n.to_string()).collect();
+    }
+    if !v.iter().any(|n| n == "UTC") {
+        v.push("UTC".into());
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// The earliest date a working clock can show: the machine was built after it. A clock before this (a Mac mini
+/// without its clock battery starts at 1970) has not been set.
+pub const EARLIEST_SANE: i64 = 1_704_067_200; // 2024-01-01
+
+pub fn looks_wrong(unix: i64) -> bool {
+    unix < EARLIEST_SANE
+}
+
+/// The time for the top bar: `14:05`, `2:05 PM`, with seconds when asked.
+pub fn bar_time(z: &Zone, unix: i64, hour12: bool, seconds: bool) -> String {
+    let l = z.local(unix);
+    let secs = if seconds { format!(":{:02}", l.second) } else { String::new() };
+    if hour12 {
+        format!("{}:{:02}{secs} {}", if l.hour % 12 == 0 { 12 } else { l.hour % 12 }, l.minute, if l.hour < 12 { "AM" } else { "PM" })
+    } else {
+        format!("{:02}:{:02}{secs}", l.hour, l.minute)
+    }
+}
+
+/// The date for the top bar: `Sat 17 Oct`, or with `long` the full `Saturday, 17 October 2026`.
+pub fn bar_date(z: &Zone, unix: i64, long: bool) -> String {
+    let l = z.local(unix);
+    if long {
+        format!("{}, {} {} {}", WEEKDAYS[l.weekday as usize], l.day, MONTHS[l.month as usize - 1], l.year)
+    } else {
+        format!("{} {} {}", &WEEKDAYS[l.weekday as usize][..3], l.day, &MONTHS[l.month as usize - 1][..3])
+    }
+}
+
+/// Today's date as `2026-10-17` (UTC), for change logs.
+pub fn today() -> String {
+    let (y, m, d) = civil(now_unix().div_euclid(86_400));
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 pub fn now_unix() -> i64 {
@@ -423,5 +599,51 @@ mod tests {
         assert_eq!(format(&z, t, "%a %b %e %y %H:%M:%S %j %u %w"), "Sun Oct 11 26 14:03:09 284 7 0");
         let d = describe(&z, t);
         assert!(d.starts_with("Sunday, 11 October 2026, 14:03:09 UTC (UTC+00:00)"), "{d}");
+    }
+
+    #[test]
+    fn the_bar_shows_24_or_12_hour_time_with_optional_seconds_and_a_short_or_long_date() {
+        let z = Zone::utc();
+        let at = |h: i64, m: i64| days_from_civil(2026, 10, 17) * DAY + h * 3600 + m * 60 + 9;
+        assert_eq!(bar_time(&z, at(7, 5), false, false), "07:05");
+        assert_eq!(bar_time(&z, at(7, 5), false, true), "07:05:09");
+        assert_eq!(bar_time(&z, at(0, 5), true, false), "12:05 AM");
+        assert_eq!(bar_time(&z, at(12, 0), true, false), "12:00 PM");
+        assert_eq!(bar_time(&z, at(15, 30), true, true), "3:30:09 PM");
+        assert_eq!(bar_date(&z, at(7, 5), false), "Sat 17 Oct");
+        assert_eq!(bar_date(&z, at(7, 5), true), "Saturday, 17 October 2026");
+    }
+
+    #[test]
+    fn every_built_in_zone_parses_and_gives_the_right_local_time_and_daylight_saving() {
+        let at = |y: i64, m: u32, d: u32, h: i64| days_from_civil(y, m, d) * DAY + h * 3600;
+        for (name, rule) in BUILTIN_ZONES {
+            assert!(Zone::from_posix(rule).is_some(), "{name}: {rule}");
+        }
+        std::env::set_var("IYAKKI_ZONEINFO", "/nonexistent");
+        let tz = |n: &str| Zone::named(n).unwrap_or_else(|| panic!("{n}"));
+        assert_eq!(tz("Asia/Kolkata").local(at(2026, 10, 17, 0)).hour, 5);
+        assert_eq!(tz("Asia/Kolkata").local(at(2026, 10, 17, 0)).minute, 30);
+        assert_eq!(tz("Asia/Kathmandu").local(at(2026, 10, 17, 0)).minute, 45);
+        assert_eq!(tz("America/New_York").local(at(2026, 7, 1, 12)).hour, 8, "EDT");
+        assert_eq!(tz("America/New_York").local(at(2026, 1, 1, 12)).hour, 7, "EST");
+        assert_eq!(tz("Europe/London").local(at(2026, 7, 1, 12)).hour, 13, "BST");
+        assert_eq!(tz("Europe/Berlin").local(at(2026, 3, 29, 0) + 3600).hour, 3, "clocks went forward at 01:00 UTC on 29 March");
+        assert_eq!(tz("Australia/Sydney").local(at(2026, 1, 1, 0)).hour, 11, "southern summer");
+        assert_eq!(tz("Australia/Sydney").local(at(2026, 7, 1, 0)).hour, 10);
+        assert_eq!(tz("America/Santiago").local(at(2026, 1, 1, 12)).hour, 9, "-03 in summer");
+        assert_eq!(tz("Asia/Tokyo").local(at(2026, 10, 17, 0)).hour, 9);
+        assert!(Zone::named("Mars/Olympus").is_none() && Zone::named("../etc/passwd").is_none() && Zone::named("").is_none());
+        assert!(zone_names().len() >= BUILTIN_ZONES.len() && zone_names().contains(&"Europe/Paris".to_string()));
+        std::env::remove_var("IYAKKI_ZONEINFO");
+    }
+
+    #[test]
+    fn a_chosen_zone_wins_and_a_clock_in_1970_looks_wrong() {
+        std::env::set_var("IYAKKI_ZONEINFO", "/nonexistent");
+        assert_eq!(Zone::system_with(Some("Asia/Tokyo".into())).local(0).hour, 9);
+        assert_eq!(Zone::system_with(Some("Nowhere/Land".into())).local(0).hour, Zone::system_with(None).local(0).hour, "an unknown choice falls back to the machine's zone");
+        std::env::remove_var("IYAKKI_ZONEINFO");
+        assert!(looks_wrong(0) && looks_wrong(1_700_000_000) && !looks_wrong(1_790_000_000));
     }
 }

@@ -301,6 +301,23 @@ impl McpStore {
         self.save(&v)
     }
 
+    /// Put `s` in place of the server of the same name (or add it), in one write, so an update never leaves the server missing.
+    /// Returns the definition that was replaced.
+    pub fn replace(&self, s: StoredServer) -> Result<Option<StoredServer>, String> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        if !valid_server_name(&s.name) {
+            return Err("the name: letters, digits, - and _ (up to 32)".into());
+        }
+        if s.command.trim().is_empty() || s.command.len() > 500 || s.args.len() > 32 || s.args.iter().any(|a| a.len() > 500) {
+            return Err("the command is empty or too long".into());
+        }
+        let mut v = self.load();
+        let old = v.iter().position(|x| x.name == s.name).map(|i| v.remove(i));
+        v.push(s);
+        self.save(&v)?;
+        Ok(old)
+    }
+
     pub fn remove(&self, name: &str) -> Result<(), String> {
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut v = self.load();

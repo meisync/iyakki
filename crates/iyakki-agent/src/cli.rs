@@ -40,6 +40,66 @@ pub struct Cli {
 
 const RESTRICTED: &[&str] = &["help", "whoami", "policy", "echo", "clear", "pwd", "cd", "ls", "cat", "run", "skill", "tool", "store", "toollog", "curl", "grep", "sed", "tr", "cut", "sort", "uniq", "wc", "head", "tail", "tac", "rev", "nl", "seq", "date", "basename", "dirname", "calendar", "alarm", "clis"];
 
+/// One SSH command of the terminal, owning what it needs so it can run on a thread of its own.
+pub struct SshCall {
+    user: String,
+    policy: Policy,
+    cwd: PathBuf,
+    svc: Arc<crate::services::Services>,
+    cmd: String,
+    rest: String,
+}
+
+impl SshCall {
+    /// The program name and the arguments as typed (never shown in the audit log: they can hold host names and users).
+    pub fn command(&self) -> &str {
+        &self.cmd
+    }
+
+    fn reach(&self, host: &str) -> Result<(), String> {
+        if self.policy.allows_host(host) { Ok(()) } else { Err(format!("your account may not reach {host}")) }
+    }
+
+    fn check_local(&self, path: &str, write: bool) -> Result<PathBuf, String> {
+        if write {
+            let r = crate::scope::resolve_for_write(&self.cwd, path)?;
+            crate::scope::check_write(&self.policy, &self.user, &r)?;
+            Ok(r)
+        } else {
+            let r = crate::scope::resolve(&self.cwd, path)?;
+            crate::scope::check_read(&self.policy, &self.user, &r)?;
+            Ok(r)
+        }
+    }
+
+    pub fn run(&self, sink: Option<crate::exec::Sink>) -> Result<String, String> {
+        let env = crate::ssh::Env::for_services(&self.svc, &self.user);
+        let args = crate::exec::split_words(&self.rest)?;
+        match self.cmd.as_str() {
+            "ssh" | "scp" | "sftp" => {
+                let plan = crate::ssh::plan(&self.cmd, &args, crate::ssh::Mode::Person)?;
+                self.reach(&plan.host)?;
+                crate::ssh::run(&env, crate::ssh::Mode::Person, &self.cmd, &args, &self.cwd, 120, &|p, w| self.check_local(p, w), sink)
+            }
+            "sshhosts" => {
+                let keys = env.known_hosts().read();
+                Ok(if keys.is_empty() { "no host keys are trusted yet (sshtrust <host> shows a host's fingerprint and trusts it once you confirm)".into() } else { keys.iter().map(|k| format!("{}  {} {}", k.pattern, k.kind, k.fingerprint())).collect::<Vec<_>>().join("\n") })
+            }
+            "sshforget" => {
+                let (host, port) = crate::ssh::host_port(&args)?;
+                let n = env.known_hosts().forget(&host, port)?;
+                Ok(if n == 0 { format!("nothing was trusted for {}", crate::ssh::pattern(&host, port)) } else { format!("forgot {n} key(s) for {}", crate::ssh::pattern(&host, port)) })
+            }
+            _ => {
+                let (host, port) = crate::ssh::host_port(&args)?;
+                self.reach(&host)?;
+                let want = args.iter().find(|a| a.starts_with("SHA256:")).cloned();
+                crate::ssh::trust_flow(&env, &host, port, want.as_deref())
+            }
+        }
+    }
+}
+
 /// Splits a command line at `|` (not inside quotes, and not `||`).
 fn split_pipes(line: &str) -> Vec<String> {
     let (mut out, mut cur) = (Vec::new(), String::new());
@@ -69,7 +129,7 @@ const FULL_ONLY: &[&str] = &["detect", "net", "scan", "mkdir", "write", "powerof
 
 impl Cli {
     pub fn new(user: &str, policy: Policy, host: Arc<dyn HostApi>) -> Cli {
-        let home = PathBuf::from(format!("/home/{user}"));
+        let home = crate::scope::user_home(user);
         let cwd = if policy.allows_read(user, home.to_str().unwrap_or("/")) && home.is_dir() { home } else { PathBuf::from("/") };
         Cli { user: user.into(), policy, host, cwd, skills: None, services: None }
     }
@@ -153,6 +213,9 @@ impl Cli {
         if self.policy.cli != CliLevel::Full {
             return None;
         }
+        if let Some(call) = self.ssh_call(&format!("{cmd} {rest}")) {
+            return Some(call.run(None));
+        }
         let extras = svc.clis.extras();
         if !extras.iter().any(|x| x.name == cmd) {
             return None;
@@ -163,9 +226,24 @@ impl Cli {
             if host != "-" && (!self.policy.allows_host(&host) || (host == "*" && !self.policy.net_hosts.iter().any(|h| h == "*"))) {
                 return Err(if host == "*" { format!("`{cmd}` can reach any server, so only an account allowed every host may run it") } else { format!("your account may not reach {host}") });
             }
-            let home = PathBuf::from(format!("/home/{}", self.user));
-            crate::exec::run_with(&extras, cmd, &args, &self.cwd, home.is_dir().then_some(home.as_path()), 120, Some(&svc.clis.bin_dir()))
+            // the person's home (what the login used), and for Copilot the token from their vault, for this one program only
+            let home = crate::extagent::login::login_home(&self.user, svc.dir());
+            let agent = if cmd == "copilot" { crate::extagent::COPILOT } else { "" };
+            let env: Vec<(String, String)> = svc.agent_vault_token(&self.user, agent).map(|(k, t)| vec![(k.to_string(), t.to_string())]).unwrap_or_default();
+            crate::exec::run_with_env(&extras, cmd, &args, &self.cwd, Some(home.as_path()), 120, Some(&svc.clis.bin_dir()), &env)
         })())
+    }
+
+    /// A line that is one SSH command (`ssh`, `scp`, `sftp`, `sshtrust`, `sshforget`, `sshhosts`), ready to run on another thread
+    /// (they can take a long time, and the screen must not wait). `None` for anything else, and for terminals that are not full.
+    pub fn ssh_call(&self, line: &str) -> Option<SshCall> {
+        let svc = self.services.clone()?;
+        let line = line.trim();
+        let (cmd, rest) = line.split_once(char::is_whitespace).map_or((line, ""), |(c, r)| (c, r.trim()));
+        if self.policy.cli != CliLevel::Full || !matches!(cmd, "ssh" | "scp" | "sftp" | "sshtrust" | "sshforget" | "sshhosts") || line.contains('|') {
+            return None;
+        }
+        Some(SshCall { user: self.user.clone(), policy: self.policy.clone(), cwd: self.cwd.clone(), svc, cmd: cmd.to_string(), rest: rest.to_string() })
     }
 
     fn read_for_text(&self, f: &str) -> Result<String, String> {
@@ -360,8 +438,14 @@ impl Cli {
 
     /// `store show <file> | install <file> [--yes] [--shared] | list | remove <name> | keys | trust <key> <label>`
     fn store_cmd(&self, rest: &str) -> Result<String, String> {
-        let (_, pk) = self.skill_stores()?;
         let words: Vec<&str> = rest.split_whitespace().collect();
+        // check, update, roll back, pin and remove for everything installed (the same layer as the STORE tile)
+        if let Some(svc) = &self.services {
+            if let Some(r) = crate::store::storecmd::run(svc, &self.policy, &self.user, &words) {
+                return r;
+            }
+        }
+        let (_, pk) = self.skill_stores()?;
         let shared = words.contains(&"--shared");
         let yes = words.contains(&"--yes");
         let args: Vec<&str> = words.iter().copied().filter(|a| !a.starts_with("--")).collect();
@@ -399,14 +483,14 @@ impl Cli {
                 pk.trust_key(key, &label.join(" ")).map_err(|e| e.to_string())?;
                 Ok("publisher trusted".into())
             }
-            _ => Err("usage: store show <file> | install <file> [--yes] [--shared] | list | remove <name> | keys | trust <key> <label>".into()),
+            _ => Err(format!("usage: store show <file> | install <file> [--yes] [--shared] | list | remove <name> | keys | trust <key> <label>\nlifecycle: {}", crate::store::storecmd::USAGE)),
         }
     }
 
     fn dispatch(&mut self, cmd: &str, rest: &str) -> Result<CliOut, String> {
         Ok(match cmd {
             "help" => out(if self.policy.cli == CliLevel::Full {
-                "commands: help whoami policy echo clear pwd cd ls cat mkdir write run skill tool store toollog curl grep sed tr cut sort uniq wc head tail date calendar alarm clis detect net scan poweroff reboot"
+                "commands: help whoami policy echo clear pwd cd ls cat mkdir write run skill tool store toollog curl grep sed tr cut sort uniq wc head tail date calendar alarm clis ssh scp sftp sshtrust sshhosts sshforget detect net scan poweroff reboot"
             } else {
                 "commands: help whoami policy echo clear pwd cd ls cat run skill tool store toollog curl grep sed tr cut sort uniq wc head tail date calendar alarm clis"
             }),
@@ -519,14 +603,20 @@ impl Cli {
                         svc.clis.install(id, &self.user)?;
                         out(format!("installing {id} in the background; `clis` shows how far it is, and the CLI tile's CLIs tab shows progress"))
                     }
-                    ["remove", id] => {
+                    ["remove", id] | ["remove", id, "yes"] => {
                         if !self.policy.manage_settings || self.policy.cli != CliLevel::Full {
                             return Err("only administrators may remove command-line tools".into());
+                        }
+                        // a runtime (Node.js, Python) that installed tools use is removed only when asked twice
+                        if w.len() == 2 {
+                            if let Some(warning) = svc.clis.uninstall_warning(id) {
+                                return Err(format!("{warning} Run `clis remove {id} yes` to remove it anyway."));
+                            }
                         }
                         svc.clis.remove(id)?;
                         out(format!("removed {id}"))
                     }
-                    _ => return Err("usage: clis | clis install <id> | clis remove <id>".into()),
+                    _ => return Err("usage: clis | clis install <id> | clis remove <id> [yes]".into()),
                 }
             }
             "calendar" | "alarm" => {

@@ -300,6 +300,16 @@ impl ChatBackend for Metered {
         self.note(i, o);
         Ok(t)
     }
+
+    fn complete_tools_stream(&self, history: &[Message], tools: &[ToolSpec], on_text: &mut dyn FnMut(&str) -> bool) -> Result<ModelTurn, String> {
+        crate::providers::forget_usage();
+        let t = self.inner.complete_tools_stream(history, tools, on_text)?;
+        let out = crate::agent::estimate_tokens(&[Message::assistant_calls(t.text.clone(), t.calls.clone())]);
+        let est_in = crate::agent::estimate_tokens(history) + tools.iter().map(|x| (x.name.len() + x.description.len() + x.schema.to_string().len()) as u64 / 4).sum::<u64>();
+        let (i, o) = crate::providers::reported_usage().unwrap_or((est_in, out));
+        self.note(i, o);
+        Ok(t)
+    }
 }
 
 #[cfg(test)]

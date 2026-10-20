@@ -26,6 +26,83 @@ pub const RUNTIME_DIR: &str = "/run/iyakki-web";
 
 pub const NOT_INSTALLED: &str = "The full web engine is not installed in this image (see docs/FULL-BROWSER.md)";
 
+/// Sites that are web apps the built-in reader cannot run (fast JavaScript, video, Media Source, WebGL): (domain, name).
+/// A host matches when it is the domain or a sub-domain of it. Used only to say so plainly when no full engine is installed.
+const HEAVY_SITES: &[(&str, &str)] = &[
+    ("youtube.com", "YouTube"),
+    ("youtu.be", "YouTube"),
+    ("youtube-nocookie.com", "YouTube"),
+    ("netflix.com", "Netflix"),
+    ("mail.google.com", "Gmail"),
+    ("gmail.com", "Gmail"),
+    ("accounts.google.com", "Google sign-in"),
+    ("outlook.live.com", "Outlook"),
+    ("outlook.office.com", "Outlook"),
+    ("outlook.office365.com", "Outlook"),
+    ("docs.google.com", "Google Docs"),
+    ("sheets.google.com", "Google Sheets"),
+    ("slides.google.com", "Google Slides"),
+    ("drive.google.com", "Google Drive"),
+    ("slack.com", "Slack"),
+    ("notion.so", "Notion"),
+    ("twitter.com", "Twitter"),
+    ("x.com", "X"),
+    ("facebook.com", "Facebook"),
+    ("instagram.com", "Instagram"),
+    ("maps.google.com", "Google Maps"),
+    ("web.whatsapp.com", "WhatsApp Web"),
+    ("teams.microsoft.com", "Microsoft Teams"),
+    ("figma.com", "Figma"),
+    ("spotify.com", "Spotify"),
+];
+
+/// The name of a known heavy site when `host` belongs to it (`music.youtube.com` and `www.youtube.com` are YouTube).
+pub fn heavy_site(host: &str) -> Option<&'static str> {
+    let h = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    HEAVY_SITES.iter().find(|(d, _)| h == *d || h.ends_with(&format!(".{d}"))).map(|(_, n)| *n)
+}
+
+/// Sites the BROWSER tile opens straight in the full engine when the image has one, without trying the built-in reader first: the
+/// heavy sites, and Google itself (its pages load in the reader but come out empty or stripped, which looks like "not loading").
+pub fn full_by_default(host: &str) -> bool {
+    let h = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    heavy_site(&h).is_some() || h == "google.com" || h.ends_with(".google.com") || h == "youtu.be"
+}
+
+/// What the BROWSER tile says above a page when the full engine is absent (`offered` false) and the page is one the built-in
+/// reader cannot run: a known heavy site, or a page the reader judged it could not show (`reader_gave_up`).
+/// `(headline, explanation)`; `None` when the engine is there or the page is fine.
+pub fn missing_engine_banner(host: &str, reader_gave_up: bool, offered: bool) -> Option<(String, String)> {
+    if offered {
+        return None;
+    }
+    let site = heavy_site(host);
+    if site.is_none() && !reader_gave_up {
+        return None;
+    }
+    let what = site.map_or_else(|| "This page".to_string(), |n| n.to_string());
+    Some((
+        "This site needs the full web engine.".into(),
+        format!("{what} will not load properly in the built-in reader. Boot the \"web\" or \"macweb\" image (macweb is the Mac image with the web engine), or use window mode. Web searches, Wikipedia and most articles work here."),
+    ))
+}
+
+/// The help the banner's button opens: an HTML page (kept short; the long version is docs/FULL-BROWSER.md).
+pub const FULL_ENGINE_HELP_HTML: &str = "<html><head><title>The full web engine</title></head><body>\
+<h1>The full web engine</h1>\
+<p>The built-in reader shows documents and runs small scripts. YouTube, Gmail, Google Docs, Netflix, Slack, Notion, X, Facebook, Instagram and Maps need a full web engine (fast JavaScript, video, WebGL). This image does not have one.</p>\
+<h2>Ways to get it</h2>\
+<ul>\
+<li>Boot the <b>web</b> image (any PC) or the <b>macweb</b> image (Intel Macs such as the Mac mini 2014): the engine is WPE WebKit in a helper program, and the BROWSER tile uses it by itself or when you press F.</li>\
+<li>Use <b>window mode</b> on a desktop (./run.sh window): the host's WebKitGTK is the engine.</li>\
+</ul>\
+<h2>Good to know</h2>\
+<ul>\
+<li>YouTube plays VP9 and Opus on the web images without H.264. Build with WEB_H264=1 for H.264 and AAC.</li>\
+<li>Sign-in and video need the clock to be right: a wrong date breaks HTTPS.</li>\
+<li>Details: docs/FULL-BROWSER.md and docs/YOUTUBE-ON-IYAKKI.md in the source tree.</li>\
+</ul></body></html>";
+
 /// Both programs are present: this image is the `web` variant.
 pub fn available() -> bool {
     Path::new(CAGE).is_file() && Path::new(COG).is_file()
@@ -286,7 +363,22 @@ pub fn helper_env(profile: &Path) -> Option<Vec<(String, String)>> {
     }
     let mut v = session_env(profile);
     v.retain(|(k, _)| !k.starts_with("WLR_") && !k.starts_with("LIBSEAT") && k != "SEATD_VTBOUND");
+    let vendors: Vec<String> = (0..4).filter_map(|i| std::fs::read_to_string(format!("/sys/class/drm/card{i}/device/vendor")).ok()).collect();
+    let marker = std::fs::read_to_string(GL_MARKER).unwrap_or_default();
+    if force_software_gl(&vendors, &marker) {
+        v.push(("LIBGL_ALWAYS_SOFTWARE".into(), "1".into()));
+    }
     Some(v)
+}
+
+/// Written by `web-post-build.sh`: `intel` when Mesa was built with an Intel GPU driver (iris or crocus), `software` when not.
+pub const GL_MARKER: &str = "/usr/share/iyakki/web-gl-drivers";
+
+/// Mesa must be told to use llvmpipe when an Intel GPU is present but this image has no Intel driver in it: otherwise EGL finds the
+/// render node, finds no driver for it and may give up instead of falling back (the Haswell Mac mini on the default web image).
+/// `vendors` are the contents of `/sys/class/drm/card*/device/vendor`.
+pub fn force_software_gl(vendors: &[String], marker: &str) -> bool {
+    vendors.iter().any(|v| v.trim().eq_ignore_ascii_case("0x8086")) && marker.trim() != "intel"
 }
 
 /// Added to the engine's own user agent so sites see a current browser name followed by ours.
@@ -298,6 +390,51 @@ pub fn user_agent_suffix() -> String {
 mod tests {
     use super::*;
     use iyakki_sec::policy::Role;
+
+    #[test]
+    fn known_heavy_sites_are_recognised_by_domain_and_subdomain_only() {
+        for (h, n) in [("youtube.com", "YouTube"), ("www.youtube.com", "YouTube"), ("music.youtube.com", "YouTube"), ("youtu.be", "YouTube"), ("WWW.NETFLIX.COM", "Netflix"),
+            ("mail.google.com", "Gmail"), ("docs.google.com", "Google Docs"), ("app.slack.com", "Slack"), ("www.notion.so", "Notion"), ("x.com", "X"), ("twitter.com", "Twitter"),
+            ("m.facebook.com", "Facebook"), ("www.instagram.com", "Instagram"), ("maps.google.com", "Google Maps"), ("youtube.com.", "YouTube")] {
+            assert_eq!(heavy_site(h), Some(n), "{h}");
+        }
+        for h in ["example.org", "notyoutube.com", "box.com", "youtube.com.evil.org", "wikipedia.org", "google.com", ""] {
+            assert_eq!(heavy_site(h), None, "{h}");
+        }
+    }
+
+    #[test]
+    fn google_and_the_heavy_sites_go_straight_to_the_full_engine() {
+        for h in ["google.com", "www.google.com", "accounts.google.com", "WWW.YOUTUBE.COM", "youtu.be", "mail.google.com", "google.com."] {
+            assert!(full_by_default(h), "{h}");
+        }
+        for h in ["example.org", "notgoogle.com", "google.com.evil.org", "wikipedia.org", "www.bing.com", ""] {
+            assert!(!full_by_default(h), "{h}");
+        }
+    }
+
+    #[test]
+    fn an_intel_gpu_without_an_intel_mesa_driver_is_told_to_use_software_rendering() {
+        let intel = vec!["0x8086\n".to_string()];
+        assert!(force_software_gl(&intel, "software\n"));
+        assert!(force_software_gl(&intel, ""), "no marker: a plain build");
+        assert!(!force_software_gl(&intel, "intel\n"), "iris or crocus is there");
+        assert!(!force_software_gl(&["0x1002\n".into()], "software"), "radeonsi is built");
+        assert!(!force_software_gl(&[], "software"), "no GPU (a VM without one)");
+    }
+
+    #[test]
+    fn the_missing_engine_banner_shows_only_without_the_engine() {
+        let (head, body) = missing_engine_banner("www.youtube.com", false, false).unwrap();
+        assert_eq!(head, "This site needs the full web engine.");
+        assert!(body.starts_with("YouTube") && body.contains("\"web\" or \"macweb\" image") && body.contains("window mode"), "{body}");
+        assert!(missing_engine_banner("www.youtube.com", false, true).is_none(), "the engine is here: no banner");
+        assert!(missing_engine_banner("example.org", false, false).is_none(), "an ordinary page gets none");
+        let (_, generic) = missing_engine_banner("example.org", true, false).unwrap();
+        assert!(generic.starts_with("This page"), "{generic}");
+        assert!(missing_engine_banner("example.org", true, true).is_none());
+        assert!(FULL_ENGINE_HELP_HTML.contains("macweb") && FULL_ENGINE_HELP_HTML.contains("window mode"));
+    }
 
     #[test]
     fn user_names_cannot_leave_the_profile_folder() {

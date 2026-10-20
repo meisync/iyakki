@@ -8,7 +8,7 @@ use std::sync::Arc;
 use iyakki_ledger::{Event as LedgerEvent, Ledger};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::{start, RunEvent, RunHandle, RunLimits, Tools, Verdict};
+use crate::agent::{RunEvent, RunHandle, RunLimits, Tools, Verdict};
 use crate::chat::{ChatBackend, Message};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -23,6 +23,13 @@ pub struct RunLog {
     /// The chat this run belongs to, so deleting the chat can delete its runs.
     #[serde(default)]
     pub session: Option<String>,
+    /// A parallel task's run: the task, the board row and the agent's display name (`Agent 2`). Old logs have none.
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub row: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +39,29 @@ pub struct RunMeta {
     pub prompt: String,
     pub status: String,
     pub tool_calls: usize,
+    /// Where the time went, in milliseconds (0 for runs recorded before this was measured).
+    pub model_ms: u64,
+    pub tools_ms: u64,
+    /// Everything that was ours: building the request, repairing calls, queues, drawing hand-over.
+    pub overhead_ms: u64,
+    pub first_token_ms: u64,
+    pub total_ms: u64,
+    pub task_id: Option<String>,
+    pub row: Option<String>,
+    pub agent: Option<String>,
+}
+
+impl RunMeta {
+    /// `Task t1a2b3 · Agent 2 · F-APP-01`, empty for a run that is not a task's.
+    pub fn task_label(&self) -> String {
+        let Some(t) = &self.task_id else { return String::new() };
+        let mut s = format!("Task {t}");
+        for p in [&self.agent, &self.row].into_iter().flatten().filter(|x| !x.is_empty()) {
+            s.push_str(" · ");
+            s.push_str(p);
+        }
+        s
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,7 +86,7 @@ pub fn ledger_for(log: &RunLog) -> Ledger {
     l.append(LedgerEvent::Input(log.prompt.clone().into_bytes()));
     for e in &log.events {
         match e {
-            RunEvent::Model { .. } | RunEvent::Approval { .. } | RunEvent::Usage { .. } | RunEvent::Final { .. } | RunEvent::Failed { .. } | RunEvent::Stopped { .. } => {
+            RunEvent::Model { .. } | RunEvent::Approval { .. } | RunEvent::Usage { .. } | RunEvent::Final { .. } | RunEvent::Failed { .. } | RunEvent::Stopped { .. } | RunEvent::Note { .. } | RunEvent::Timing { .. } | RunEvent::Delta { .. } | RunEvent::Thinking { .. } => {
                 l.append(LedgerEvent::ToolOutput { tool: "run".into(), data: serde_json::to_vec(e).unwrap_or_default() })
             }
             RunEvent::Decision { id, name, approved, by } => l.append(LedgerEvent::HostCall { name: format!("decision:{by}"), path: format!("{name}#{id}"), status: *approved as i32 }),
@@ -243,7 +273,10 @@ impl RunStore {
             .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
             .filter_map(|e| serde_json::from_slice::<RunLog>(&std::fs::read(e.path()).ok()?).ok())
             .filter(|l| valid_id(&l.id) && l.user == user)
-            .map(|l| RunMeta { tool_calls: l.events.iter().filter(|e| matches!(e, RunEvent::ToolResult { .. })).count(), id: l.id, started: l.started, prompt: l.prompt, status: l.status })
+            .map(|l| {
+                let (model_ms, tools_ms, overhead_ms, first_token_ms, total_ms) = l.events.iter().find_map(|e| if let RunEvent::Timing { model_ms, tools_ms, overhead_ms, first_token_ms, total_ms, .. } = e { Some((*model_ms, *tools_ms, *overhead_ms, *first_token_ms, *total_ms)) } else { None }).unwrap_or_default();
+                RunMeta { tool_calls: l.events.iter().filter(|e| matches!(e, RunEvent::ToolResult { .. })).count(), id: l.id, started: l.started, prompt: l.prompt, status: l.status, model_ms, tools_ms, overhead_ms, first_token_ms, total_ms, task_id: l.task_id, row: l.row, agent: l.agent }
+            })
             .collect();
         v.sort_by(|a, b| b.started.cmp(&a.started).then(b.id.cmp(&a.id)));
         v
@@ -310,13 +343,34 @@ pub struct RunSession {
 
 impl RunSession {
     pub fn start(store: Option<Arc<RunStore>>, user: &str, prompt: &str, backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, history: Vec<Message>, limits: RunLimits) -> RunSession {
-        let log = RunLog { id: new_run_id(), user: user.into(), started: now(), prompt: prompt.into(), status: "running".into(), events: vec![], session: None };
-        let handle = start(backend, tools, history, limits);
+        Self::start_with(store, user, prompt, backend, tools, history, limits, crate::assistrun::Assist::off())
+    }
+
+    /// [`start`](RunSession::start) with the assistant's safety net (capability reminder, denial guard, repair, streaming, ...).
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with(store: Option<Arc<RunStore>>, user: &str, prompt: &str, backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, history: Vec<Message>, limits: RunLimits, assist: crate::assistrun::Assist) -> RunSession {
+        let log = RunLog { id: new_run_id(), user: user.into(), started: now(), prompt: prompt.into(), status: "running".into(), events: vec![], session: None, task_id: None, row: None, agent: None };
+        let handle = crate::agent::start_with(backend, tools, history, limits, assist);
         if let Some(s) = &store {
             let live = LiveRun { id: log.id.clone(), user: user.into(), prompt: prompt.chars().take(100).collect(), started: log.started as i64, pending: 0, steps: 0, tokens: 0, last: "started".into() };
             s.live_lock().insert(log.id.clone(), LiveEntry { run: live, cancel: handle.cancel_flag(), decisions: handle.decision_sender(), approvals: vec![] });
         }
         RunSession { handle, log, store, done: false, pending: Default::default() }
+    }
+
+    /// A session around a run started elsewhere (an Autopilot run), logged and listed like any other.
+    pub fn from_handle(store: Option<Arc<RunStore>>, user: &str, prompt: &str, handle: RunHandle) -> RunSession {
+        let log = RunLog { id: new_run_id(), user: user.into(), started: now(), prompt: prompt.into(), status: "running".into(), events: vec![], session: None, task_id: None, row: None, agent: None };
+        if let Some(s) = &store {
+            let live = LiveRun { id: log.id.clone(), user: user.into(), prompt: prompt.chars().take(100).collect(), started: log.started as i64, pending: 0, steps: 0, tokens: 0, last: "autopilot".into() };
+            s.live_lock().insert(log.id.clone(), LiveEntry { run: live, cancel: handle.cancel_flag(), decisions: handle.decision_sender(), approvals: vec![] });
+        }
+        RunSession { handle, log, store, done: false, pending: Default::default() }
+    }
+
+    /// Pause an Autopilot run (it keeps its place); a plain run just stops.
+    pub fn pause(&self) {
+        self.handle.pause();
     }
 
     /// Marks the run as part of a chat.
@@ -409,6 +463,10 @@ impl RunSession {
                     RunEvent::Final { .. } => ("finished".to_string(), None),
                     RunEvent::Failed { .. } => ("failed".to_string(), None),
                     RunEvent::Stopped { .. } => ("stopped".to_string(), None),
+                    RunEvent::Note { text } => (text.chars().take(60).collect(), None),
+                    RunEvent::Delta { .. } => ("writing the answer".to_string(), None),
+                    RunEvent::Thinking { .. } => ("thinking".to_string(), None),
+                    RunEvent::Timing { .. } => ("finishing".to_string(), None),
                 };
                 store.live_update(&self.log.id, |r| {
                     r.pending = pending;
@@ -419,7 +477,10 @@ impl RunSession {
                     }
                 });
             }
-            self.log.events.push(e.clone());
+            // the partial answer is for the screen only: the record keeps the final text
+            if !matches!(e, RunEvent::Delta { .. } | RunEvent::Thinking { .. }) {
+                self.log.events.push(e.clone());
+            }
             out.push(e);
             if let Some(s) = status {
                 self.finish(s);
@@ -456,6 +517,9 @@ mod tests {
         RunLog {
             id: id.into(),
             session: None,
+            task_id: None,
+            row: None,
+            agent: None,
             user: user.into(),
             started,
             prompt: "summarise notes.txt".into(),

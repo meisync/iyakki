@@ -686,6 +686,30 @@ impl MediaStore {
         self.load().folders.unwrap_or_else(|| default_folders(&self.user))
     }
 
+    /// Host folders this person shared (window mode), as they are right now: only those still there. The library reads
+    /// them in place and never writes to them.
+    pub fn host_mounts(&self) -> Vec<crate::hostfiles::HostMount> {
+        self.path.parent().map(|d| crate::hostfiles::active_mounts(d, &self.user)).unwrap_or_default()
+    }
+
+    /// Every shared host folder with whether it can be reached now: an unplugged or moved one is listed as not available,
+    /// and comes back by itself when the folder does.
+    pub fn host_mount_states(&self) -> Vec<(crate::hostfiles::HostMount, bool)> {
+        let Some(d) = self.path.parent() else { return Vec::new() };
+        if !crate::hostfiles::enabled() {
+            return Vec::new();
+        }
+        let valid = self.host_mounts();
+        crate::hostfiles::HostMounts::load(d, &self.user).items.into_iter().map(|m| {
+            let ok = valid.iter().any(|v| v.name == m.name);
+            (m, ok)
+        }).collect()
+    }
+
+    pub fn host_mount_for(&self, path: &str) -> Option<crate::hostfiles::HostMount> {
+        self.host_mounts().into_iter().find(|m| Path::new(path).starts_with(&m.path))
+    }
+
     pub fn add_folder(&self, folder: &str) -> Result<(), String> {
         let f = folder.trim().trim_end_matches('/').to_string();
         if !f.starts_with('/') || f.split('/').any(|p| p == "..") || f.chars().any(char::is_control) {
