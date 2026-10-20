@@ -1,0 +1,13 @@
+[package]
+name = "iyakki-store-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The IYAKKI private store server as its own small static program (the same code as `iyakki store-server`)."
+
+[[bin]]
+name = "iyakki-store-server"
+path = "src/main.rs"
+
+[dependencies]
+iyakki-agent = { path = "../iyakki-agent" }

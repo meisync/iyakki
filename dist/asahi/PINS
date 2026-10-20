@@ -1,0 +1,8 @@
+# Versions the Apple Silicon image is built from. Filled in by the first real build; the validator refuses UNPINNED.
+# linux-asahi (GPL-2.0)   https://github.com/AsahiLinux/linux            tag/branch: UNPINNED
+# m1n1 (MIT)              https://github.com/AsahiLinux/m1n1             tag: UNPINNED
+# U-Boot, Asahi (GPL-2.0+) https://github.com/AsahiLinux/u-boot          tag: UNPINNED
+# asahi-installer (MIT)   https://github.com/AsahiLinux/asahi-installer  (checked against the tree of 2026-10-02, e93743d is m1n1's)
+LINUX_ASAHI=UNPINNED
+M1N1=UNPINNED
+UBOOT_ASAHI=UNPINNED
