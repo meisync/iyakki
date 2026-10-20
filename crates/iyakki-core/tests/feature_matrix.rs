@@ -60,7 +60,7 @@ fn check_matrix(text: &str, root: &Path) -> Vec<String> {
             continue;
         }
         let (id, name, phase, status, pri, prog, tests, notes) = (cells[0], cells[1], cells[2], cells[3], cells[4], cells[5], cells[6], cells[7]);
-        let id_ok = id.strip_prefix("F-").and_then(|r| r.rsplit_once('-')).is_some_and(|(area, num)| !area.is_empty() && area.chars().all(|c| c.is_ascii_uppercase()) && num.len() == 2 && num.chars().all(|c| c.is_ascii_digit()));
+        let id_ok = id.strip_prefix("F-").and_then(|r| r.rsplit_once('-')).is_some_and(|(area, num)| !area.is_empty() && area.starts_with(|c: char| c.is_ascii_uppercase()) && area.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) && num.len() == 2 && num.chars().all(|c| c.is_ascii_digit()));
         if !id_ok {
             problems.push(format!("{at}: bad ID `{id}` (want F-AREA-nn)"));
         }
