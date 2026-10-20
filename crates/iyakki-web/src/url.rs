@@ -112,6 +112,18 @@ impl Url {
         (!q.is_empty()).then(|| engine.url_encoded(q))
     }
 
+    /// A Bing result link (`bing.com/ck/a?...&u=a1<base64 of the address>`) names the real address inside it; its own page only
+    /// redirects with a script. Returns the address it points to.
+    pub fn unwrap_search_link(&self) -> Option<Url> {
+        if !(self.host == "www.bing.com" || self.host == "bing.com") || self.path != "/ck/a" {
+            return None;
+        }
+        let u = self.query.as_deref()?.split('&').find_map(|kv| kv.strip_prefix("u=a1"))?;
+        let bytes = crate::image::base64_decode(u)?;
+        let target = Url::parse(std::str::from_utf8(&bytes).ok()?).ok()?;
+        (target.host != self.host).then_some(target)
+    }
+
     /// Like [`Url::from_input`], but words that are not an address are searched for on `engine`.
     pub fn from_input_on(s: &str, engine: SearchEngine) -> Result<Url, String> {
         let u = Url::from_input(s)?;
@@ -187,24 +199,32 @@ impl std::fmt::Display for Url {
     }
 }
 
-/// Search pages that answer an ordinary request with results. Google, Bing and DuckDuckGo's own pages ask for a
-/// JavaScript or picture check that this browser cannot pass, so they are not offered.
+/// Search pages that answer an ordinary request with results (checked live: Google now answers every request without
+/// JavaScript with "enable JavaScript", and Startpage, Mojeek, Yandex and Ecosia show a picture check or refuse, so
+/// those are not offered). Bing's plain results page works without scripts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SearchEngine {
-    /// Brave Search: server-rendered results with direct links.
-    #[default]
+    /// Brave Search: server-rendered results with direct links. It answers 429 to HTTP/1.1 clients (checked live), which is
+    /// all this browser speaks, so it is only tried after the others.
     Brave,
     /// DuckDuckGo's plain-HTML page; it sometimes asks for a check and then shows nothing useful here.
     DuckDuckGo,
+    /// Bing: server-rendered results; its result links are unwrapped to the real address ([`Url::unwrap_search_link`]).
+    #[default]
+    Bing,
+    /// Wikipedia's own search, for looking something up rather than finding sites.
+    Wikipedia,
 }
 
 impl SearchEngine {
-    pub const ALL: [SearchEngine; 2] = [SearchEngine::Brave, SearchEngine::DuckDuckGo];
+    pub const ALL: [SearchEngine; 4] = [SearchEngine::Bing, SearchEngine::DuckDuckGo, SearchEngine::Brave, SearchEngine::Wikipedia];
 
     pub fn name(self) -> &'static str {
         match self {
             SearchEngine::Brave => "Brave Search",
             SearchEngine::DuckDuckGo => "DuckDuckGo",
+            SearchEngine::Bing => "Bing",
+            SearchEngine::Wikipedia => "Wikipedia",
         }
     }
 
@@ -212,6 +232,8 @@ impl SearchEngine {
         match self {
             SearchEngine::Brave => "brave",
             SearchEngine::DuckDuckGo => "duckduckgo",
+            SearchEngine::Bing => "bing",
+            SearchEngine::Wikipedia => "wikipedia",
         }
     }
 
@@ -227,6 +249,8 @@ impl SearchEngine {
         match self {
             SearchEngine::Brave => "search.brave.com",
             SearchEngine::DuckDuckGo => "html.duckduckgo.com",
+            SearchEngine::Bing => "www.bing.com",
+            SearchEngine::Wikipedia => "en.wikipedia.org",
         }
     }
 
@@ -234,6 +258,16 @@ impl SearchEngine {
         match self {
             SearchEngine::Brave => "/search",
             SearchEngine::DuckDuckGo => "/html/",
+            SearchEngine::Bing => "/search",
+            SearchEngine::Wikipedia => "/w/index.php",
+        }
+    }
+
+    /// The name of the query field in the engine's address.
+    fn param(self) -> &'static str {
+        match self {
+            SearchEngine::Wikipedia => "search",
+            _ => "q",
         }
     }
 
@@ -241,9 +275,22 @@ impl SearchEngine {
         self.url_encoded(&form_urlencode(&[("q".to_string(), words.trim().to_string())])[2..])
     }
 
+    /// The engine whose results page `url` is, and the search words in it (still form-encoded).
+    pub fn of_url(url: &Url) -> Option<(SearchEngine, String)> {
+        let e = SearchEngine::ALL.into_iter().find(|e| e.host() == url.host && e.path() == url.path)?;
+        let q = url.query.as_deref()?.split('&').find_map(|kv| kv.strip_prefix(e.param()).and_then(|r| r.strip_prefix('=')))?;
+        Some((e, q.to_string()))
+    }
+
+    /// The same words on the next engine in the list that is not in `tried`.
+    pub fn fallback(tried: &[SearchEngine], words: &str) -> Option<(SearchEngine, Url)> {
+        let e = SearchEngine::ALL.into_iter().find(|e| !tried.contains(e))?;
+        Some((e, e.url_encoded(words)))
+    }
+
     /// `q` is already form-encoded.
     fn url_encoded(self, q: &str) -> Url {
-        Url { https: true, host: self.host().into(), port: None, path: self.path().into(), query: Some(format!("q={q}")), fragment: None }
+        Url { https: true, host: self.host().into(), port: None, path: self.path().into(), query: Some(format!("{}={q}", self.param())), fragment: None }
     }
 }
 
@@ -326,8 +373,8 @@ mod tests {
         assert_eq!(Url::from_input("example.org/news").unwrap().to_string(), "https://example.org/news");
         assert_eq!(Url::from_input(" http://example.org ").unwrap().to_string(), "http://example.org/");
         assert_eq!(Url::from_input("localhost:8080/x").unwrap().to_string(), "https://localhost:8080/x");
-        assert_eq!(Url::from_input("what is rust").unwrap().to_string(), "https://search.brave.com/search?q=what+is+rust");
-        assert_eq!(Url::from_input("rust").unwrap().host, "search.brave.com");
+        assert_eq!(Url::from_input("what is rust").unwrap().to_string(), "https://www.bing.com/search?q=what+is+rust");
+        assert_eq!(Url::from_input("rust").unwrap().host, "www.bing.com");
         assert!(Url::from_input("   ").is_err());
         assert!(Url::from_input("javascript:alert(1)").is_err());
     }
@@ -360,19 +407,47 @@ mod tests {
     }
 
     #[test]
+    fn bing_result_links_are_unwrapped_to_the_real_address() {
+        let u = Url::parse("https://www.bing.com/ck/a?!&&p=abc&ptn=3&ver=2&u=a1aHR0cHM6Ly9lbi53aWtpcGVkaWEub3JnL3dpa2kvQ2F0&ntb=1").unwrap();
+        assert_eq!(u.unwrap_search_link().unwrap().to_string(), "https://en.wikipedia.org/wiki/Cat");
+        assert!(Url::parse("https://www.bing.com/search?q=a").unwrap().unwrap_search_link().is_none());
+        assert!(Url::parse("https://www.bing.com/ck/a?u=a1bm90IGEgdXJs").unwrap().unwrap_search_link().is_none());
+        assert!(Url::parse("https://example.org/ck/a?u=a1aHR0cHM6Ly9lbi53aWtpcGVkaWEub3JnLw").unwrap().unwrap_search_link().is_none());
+    }
+
+    #[test]
     fn words_become_a_search_and_google_searches_are_rerouted() {
-        assert_eq!(Url::from_input("tamil language").unwrap().to_string(), "https://search.brave.com/search?q=tamil+language");
-        assert_eq!(Url::from_input("weather").unwrap().host, "search.brave.com");
+        assert_eq!(Url::from_input("tamil language").unwrap().to_string(), "https://www.bing.com/search?q=tamil+language");
+        assert_eq!(Url::from_input("weather").unwrap().host, "www.bing.com");
         assert_eq!(Url::from_input("example.org").unwrap().host, "example.org");
         assert_eq!(Url::search("a&b=c d").query.as_deref(), Some("q=a%26b%3Dc+d"));
         let g = |s: &str| Url::parse(s).unwrap().reroute_google_search().map(|u| u.to_string());
-        assert_eq!(g("https://www.google.com/search?q=tamil+language&hl=en").as_deref(), Some("https://search.brave.com/search?q=tamil+language"));
-        assert_eq!(g("https://google.co.in/search?hl=en&q=a%26b").as_deref(), Some("https://search.brave.com/search?q=a%26b"));
+        assert_eq!(g("https://www.google.com/search?q=tamil+language&hl=en").as_deref(), Some("https://www.bing.com/search?q=tamil+language"));
+        assert_eq!(g("https://google.co.in/search?hl=en&q=a%26b").as_deref(), Some("https://www.bing.com/search?q=a%26b"));
         let ddg = Url::from_input_on("tamil language", SearchEngine::DuckDuckGo).unwrap().to_string();
         assert_eq!(ddg, "https://html.duckduckgo.com/html/?q=tamil+language");
         assert_eq!(Url::from_input_on("example.org", SearchEngine::DuckDuckGo).unwrap().host, "example.org");
         assert_eq!(SearchEngine::from_id("duckduckgo"), Some(SearchEngine::DuckDuckGo));
-        assert_eq!(SearchEngine::Brave.next().next(), SearchEngine::Brave);
+        assert_eq!(SearchEngine::Bing.next().next().next().next(), SearchEngine::Bing);
+        // an engine's own results page is recognised, and the next one gets the same words
+        let page = Url::parse("https://search.brave.com/search?q=a%26b+c&source=web").unwrap();
+        let (e, q) = SearchEngine::of_url(&page).unwrap();
+        assert_eq!((e, q.as_str()), (SearchEngine::Brave, "a%26b+c"));
+        assert_eq!(SearchEngine::fallback(&[e], &q).unwrap().1.to_string(), "https://www.bing.com/search?q=a%26b+c");
+        assert_eq!(SearchEngine::fallback(&[SearchEngine::Bing, e], &q).unwrap().0, SearchEngine::DuckDuckGo);
+        assert!(SearchEngine::fallback(&SearchEngine::ALL, &q).is_none());
+        let wp = Url::parse("https://en.wikipedia.org/w/index.php?search=cats").unwrap();
+        assert_eq!(SearchEngine::of_url(&wp).map(|(e, q)| (e, q)), Some((SearchEngine::Wikipedia, "cats".to_string())));
+        assert!(SearchEngine::of_url(&Url::parse("https://example.org/search?q=x").unwrap()).is_none());
+        assert_eq!(Url::from_input_on("cats and dogs", SearchEngine::Bing).unwrap().to_string(), "https://www.bing.com/search?q=cats+and+dogs");
+        assert_eq!(Url::from_input_on("cats", SearchEngine::Wikipedia).unwrap().to_string(), "https://en.wikipedia.org/w/index.php?search=cats");
+        // a typed Google results address follows the chosen engine, whatever its field is called
+        let gw = Url::parse("https://www.google.com/search?q=a%26b").unwrap().reroute_google_search_on(SearchEngine::Wikipedia).unwrap();
+        assert_eq!(gw.to_string(), "https://en.wikipedia.org/w/index.php?search=a%26b");
+        for e in SearchEngine::ALL {
+            assert_eq!(SearchEngine::from_id(e.id()), Some(e));
+            assert!(Url::from_input_on("x y", e).unwrap().to_string().starts_with(&format!("https://{}", e.host())));
+        }
         assert_eq!(g("https://www.google.com/"), None);
         assert_eq!(g("https://www.google.com/search"), None);
         assert_eq!(g("https://www.google.com/search?q="), None);

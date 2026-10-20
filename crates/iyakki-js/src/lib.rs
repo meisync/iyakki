@@ -13,4 +13,4 @@ mod cache;
 mod sha256;
 
 pub use engine::{warm_up, JsEngine, JsError, Limits, WebModule};
-pub use page::{renderer, renderer_with, run_page, PageReport, PageResult, SiteData, Sites};
+pub use page::{LivePage, renderer, renderer_with, run_page, run_page_with, PageReport, PageResult, SiteData, Sites};

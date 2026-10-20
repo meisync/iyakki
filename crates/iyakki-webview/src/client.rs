@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
@@ -52,6 +52,8 @@ pub enum Event {
     Cursor(u8),
     Download { url: String, name: String },
     Clipboard(String),
+    /// The answer to a `ToHelper::Script` (protocol 1.1).
+    ScriptResult { id: u32, ok: bool, json: String },
     /// The helper says its engine failed (it may recover by itself).
     Crashed(String),
     Log(String),
@@ -67,6 +69,27 @@ enum Incoming {
 }
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+/// The largest picture side the shell ever asks for (the shared file holds two pictures of the largest size).
+const MAX_DIM: u32 = 16384;
+/// More unread messages than this means the helper floods the shell: it is treated as broken.
+const MAX_QUEUED_IN: usize = 20_000;
+/// Bytes waiting to be written to a helper that does not read (a hung helper): beyond this, messages are dropped.
+const MAX_QUEUED_OUT: usize = 16 << 20;
+
+/// Remove the shared files of shell processes that no longer exist (killed without cleaning up).
+pub fn remove_stale_shm(dir: &std::path::Path) {
+    {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some(rest) = name.strip_prefix("iyakki-webview-").and_then(|r| r.strip_suffix(".shm")) else { continue };
+            let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) else { continue };
+            if pid != std::process::id() && !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
 
 struct Shm {
     file: File,
@@ -84,6 +107,8 @@ pub struct WebView {
     cfg: Config,
     child: Option<Child>,
     tx: Option<Sender<Vec<u8>>>,
+    out_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    in_msgs: Arc<std::sync::atomic::AtomicUsize>,
     rx: Receiver<Incoming>,
     stream: Option<UnixStream>,
     shm: Shm,
@@ -111,13 +136,19 @@ fn clamp_size(w: u32, h: u32, hello: &Hello) -> (u32, u32) {
 impl WebView {
     /// Start the helper and send it the `Hello`. Returns at once; [`WebView::poll`] delivers `Ready` when it is up.
     pub fn start(mut cfg: Config) -> Result<WebView, String> {
+        cfg.hello.w = cfg.hello.w.clamp(1, MAX_DIM);
+        cfg.hello.h = cfg.hello.h.clamp(1, MAX_DIM);
+        cfg.hello.max_w = cfg.hello.max_w.clamp(1, MAX_DIM);
+        cfg.hello.max_h = cfg.hello.max_h.clamp(1, MAX_DIM);
         let (w, h) = clamp_size(cfg.hello.w, cfg.hello.h, &cfg.hello);
         cfg.hello.w = w;
         cfg.hello.h = h;
-        cfg.hello.max_w = cfg.hello.max_w.clamp(w, 16384);
-        cfg.hello.max_h = cfg.hello.max_h.clamp(h, 16384);
-        let (rx, tx, stream, child, shm, tail) = spawn(&cfg)?;
+        cfg.hello.max_w = cfg.hello.max_w.clamp(w, MAX_DIM);
+        cfg.hello.max_h = cfg.hello.max_h.clamp(h, MAX_DIM);
+        let (rx, tx, stream, child, shm, tail, out_bytes, in_msgs) = spawn(&cfg)?;
         let v = WebView {
+            out_bytes,
+            in_msgs,
             want_size: (w, h),
             url: String::new(),
             zoom: 100,
@@ -145,7 +176,15 @@ impl WebView {
 
     fn raw_send(&self, m: &ToHelper) -> bool {
         match (&self.tx, &self.dead) {
-            (Some(tx), None) => tx.send(m.encode()).is_ok(),
+            (Some(tx), None) => {
+                let buf = m.encode();
+                // a helper that stopped reading must not make the shell queue without limit
+                if self.out_bytes.load(Ordering::Relaxed) > MAX_QUEUED_OUT {
+                    return false;
+                }
+                self.out_bytes.fetch_add(buf.len(), Ordering::Relaxed);
+                tx.send(buf).is_ok()
+            }
             _ => false,
         }
     }
@@ -183,7 +222,11 @@ impl WebView {
         let mut out = Vec::new();
         let mut frames: Vec<(u8, u32, u32, Vec<Rect>)> = Vec::new();
         loop {
-            match self.rx.try_recv() {
+            let got = self.rx.try_recv();
+            if got.is_ok() {
+                let _ = self.in_msgs.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| Some(n.saturating_sub(1)));
+            }
+            match got {
                 Ok(Incoming::Msg(m)) => match m {
                     FromHelper::Ready { engine, engine_version, .. } => {
                         self.ready = Some((engine.clone(), engine_version.clone()));
@@ -200,6 +243,7 @@ impl WebView {
                     FromHelper::Cursor(k) => out.push(Event::Cursor(k)),
                     FromHelper::Download { url, name } => out.push(Event::Download { url, name }),
                     FromHelper::Clipboard(s) => out.push(Event::Clipboard(s)),
+                    FromHelper::ScriptResult { id, ok, json } => out.push(Event::ScriptResult { id, ok, json }),
                     FromHelper::Crashed(s) => out.push(Event::Crashed(s)),
                     FromHelper::Log(s) => out.push(Event::Log(s)),
                 },
@@ -227,11 +271,15 @@ impl WebView {
             }
         }
         if !frames.is_empty() {
+            // far more pictures than can be shown: keep only the newest few (each is acknowledged all the same)
+            let skip = frames.len().saturating_sub(64);
+            let all_slots: Vec<u8> = frames.iter().map(|f| f.0).collect();
+            frames.drain(..skip);
             if self.take_frames(&frames) {
                 out.push(Event::Frame);
             }
-            for (slot, ..) in &frames {
-                self.raw_send(&ToHelper::Ack(*slot));
+            for slot in all_slots {
+                self.raw_send(&ToHelper::Ack(slot));
             }
         }
         if self.dead.is_none() {
@@ -267,6 +315,23 @@ impl WebView {
                 Some(st) if !why.contains(&st) => format!("{why} ({st})"),
                 _ => why,
             };
+            // the process is gone, but the thread reading its stderr may not have passed on the last lines yet (a loaded
+            // machine): wait for the pipes to end, but never long
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_millis(300) {
+                match self.rx.recv_timeout(Duration::from_millis(5)) {
+                    Ok(Incoming::Stderr(l)) => {
+                        if let Ok(mut tl) = self.tail.lock() {
+                            if tl.len() >= 20 {
+                                tl.pop_front();
+                            }
+                            tl.push_back(l);
+                        }
+                    }
+                    Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
             let tail: Vec<String> = self.tail.lock().map(|t| t.iter().rev().take(3).rev().cloned().collect()).unwrap_or_default();
             let why = if tail.is_empty() { why } else { format!("{why}: {}", tail.join(" | ")) };
             self.dead = Some(why.clone());
@@ -375,7 +440,9 @@ impl WebView {
         let mut cfg = self.cfg.clone();
         cfg.hello.w = self.want_size.0;
         cfg.hello.h = self.want_size.1;
-        let (rx, tx, stream, child, shm, tail) = spawn(&cfg)?;
+        let (rx, tx, stream, child, shm, tail, out_bytes, in_msgs) = spawn(&cfg)?;
+        self.out_bytes = out_bytes;
+        self.in_msgs = in_msgs;
         self.rx = rx;
         self.tx = Some(tx);
         self.stream = Some(stream);
@@ -432,10 +499,19 @@ impl Drop for WebView {
     }
 }
 
-type Spawned = (Receiver<Incoming>, Sender<Vec<u8>>, UnixStream, Child, Shm, Arc<Mutex<VecDeque<String>>>);
+type Spawned = (Receiver<Incoming>, Sender<Vec<u8>>, UnixStream, Child, Shm, Arc<Mutex<VecDeque<String>>>, Arc<std::sync::atomic::AtomicUsize>, Arc<std::sync::atomic::AtomicUsize>);
 
 fn spawn(cfg: &Config) -> Result<Spawned, String> {
+    // at most every few seconds: a directory listing per started view is plenty
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    if now.saturating_sub(LAST.load(Ordering::Relaxed)) >= 5 {
+        LAST.store(now, Ordering::Relaxed);
+        remove_stale_shm(&cfg.shm_dir);
+    }
     let hello = &cfg.hello;
+    let in_msgs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let out_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let slot_bytes = hello.max_w as u64 * hello.max_h as u64 * 4;
     let path = cfg.shm_dir.join(format!("iyakki-webview-{}-{}.shm", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)));
     let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -456,12 +532,17 @@ fn spawn(cfg: &Config) -> Result<Spawned, String> {
     // messages from the helper
     let mut reader = mine.try_clone().map_err(|e| e.to_string())?;
     let itx2 = itx.clone();
+    let counter = in_msgs.clone();
     std::thread::Builder::new()
         .name("iyakki-webview-read".into())
         .spawn(move || loop {
             match proto::read_frame(&mut reader) {
                 Ok(Some((ty, p))) => match FromHelper::decode(ty, &p) {
                     Ok(m) => {
+                        if counter.fetch_add(1, Ordering::Relaxed) > MAX_QUEUED_IN {
+                            let _ = itx2.send(Incoming::End("the helper flooded the shell with messages".into()));
+                            return;
+                        }
                         if itx2.send(Incoming::Msg(m)).is_err() {
                             return;
                         }
@@ -486,11 +567,21 @@ fn spawn(cfg: &Config) -> Result<Spawned, String> {
     // the helper's standard error, line by line
     if let Some(err) = child.stderr.take() {
         let itx3 = itx;
+        let counter3 = in_msgs.clone();
         std::thread::Builder::new()
             .name("iyakki-webview-log".into())
             .spawn(move || {
-                for line in BufReader::new(err).lines().map_while(Result::ok) {
-                    let line: String = line.chars().take(400).collect();
+                // read bytes, not text: a line that is not UTF-8 must not stop the draining (a full pipe would hang the helper)
+                let mut r = BufReader::new(err);
+                let mut buf = Vec::new();
+                loop {
+                    buf.clear();
+                    match std::io::BufRead::read_until(&mut r, b'\n', &mut buf) {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => {}
+                    }
+                    let line: String = String::from_utf8_lossy(&buf).trim_end().chars().take(400).collect();
+                    counter3.fetch_add(1, Ordering::Relaxed);
                     if itx3.send(Incoming::Stderr(line)).is_err() {
                         return;
                     }
@@ -501,15 +592,19 @@ fn spawn(cfg: &Config) -> Result<Spawned, String> {
     // messages to the helper
     let (tx, wrx) = channel::<Vec<u8>>();
     let mut writer = mine.try_clone().map_err(|e| e.to_string())?;
+    let sent = out_bytes.clone();
     std::thread::Builder::new()
         .name("iyakki-webview-write".into())
         .spawn(move || {
             for buf in wrx {
-                if writer.write_all(&buf).is_err() {
+                let n = buf.len();
+                let ok = writer.write_all(&buf).is_ok();
+                sent.fetch_sub(n.min(sent.load(Ordering::Relaxed)), Ordering::Relaxed);
+                if !ok {
                     return;
                 }
             }
         })
         .map_err(|e| e.to_string())?;
-    Ok((rx, tx, mine, child, shm, Arc::new(Mutex::new(VecDeque::new()))))
+    Ok((rx, tx, mine, child, shm, Arc::new(Mutex::new(VecDeque::new())), out_bytes, in_msgs))
 }

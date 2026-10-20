@@ -83,6 +83,22 @@ const TOTAL_WALL: Duration = Duration::from_secs(40);
 
 /// Run the page. `allow` is the account's host policy; `data` carries storage and cookies between pages.
 pub fn run_page(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> bool + Send + Clone + 'static, data: &SiteData, limits: Limits) -> PageResult {
+    run_page_with(html, url, web, allow, data, limits, |_| {})
+}
+
+/// Like [`run_page`], and `after` gets the engine once the page has loaded and its timers have played out, to drive the finished
+/// page further (the browser-automation tests evaluate `automation.js` there). The tree returned is the one after `after` ran.
+pub fn run_page_with(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> bool + Send + Clone + 'static, data: &SiteData, limits: Limits, after: impl FnOnce(&mut JsEngine)) -> PageResult {
+    match run_core(html, url, web, allow, data, limits, Vec::new(), after) {
+        Ok((r, _engine)) => r,
+        Err(r) => r,
+    }
+}
+
+/// Like [`run_page_with`], with more modules plugged in after the standard ones (the embedder's own bridge), and the engine
+/// handed back so the page can be kept alive and driven further ([`LivePage`]). `Err` is a page whose engine could not start.
+#[allow(clippy::too_many_arguments)]
+fn run_core(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> bool + Send + Clone + 'static, data: &SiteData, limits: Limits, extra: Vec<Box<dyn WebModule>>, after: impl FnOnce(&mut JsEngine)) -> Result<(PageResult, JsEngine), PageResult> {
     let t0 = Instant::now();
     let tree = iyakki_web::html::parse(html);
     let t_parse = t0.elapsed();
@@ -90,7 +106,7 @@ pub fn run_page(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str)
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     // the page's import map (bare module names), if it has one
     let import_map: Option<String> = tree.descendants(0).into_iter().find(|&n| tree.tag(n) == Some("script") && tree.attr(n, "type").is_some_and(|t| t.trim().eq_ignore_ascii_case("importmap"))).map(|n| tree.text_of(n));
-    let modules: Vec<Box<dyn WebModule>> = vec![
+    let mut modules: Vec<Box<dyn WebModule>> = vec![
         Box::new(crate::modules::EsmModule::new(url.clone(), web.clone(), Box::new(allow.clone()), import_map.as_deref())),
         Box::new(ConsoleModule::new()),
         Box::new(TimersModule),
@@ -105,11 +121,12 @@ pub fn run_page(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str)
         // after the page object: it replaces the placeholder `indexedDB` and the `IDB*` classes defined there
         Box::new(IdbModule::new(data.idb.clone())),
     ];
+    modules.extend(extra);
     let mut engine = match JsEngine::new(limits, modules) {
         Ok(e) => e,
         Err(e) => {
             report.notes.push(format!("scripts could not be started: {e}"));
-            return PageResult { tree, report };
+            return Err(PageResult { tree, report });
         }
     };
     if std::env::var_os("IYAKKI_JS_PROFILE").is_some() {
@@ -201,6 +218,7 @@ pub fn run_page(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str)
         }
         Err(e) => report.notes.push(format!("timers stopped: {e}")),
     }
+    after(&mut engine);
     if std::env::var_os("IYAKKI_JS_PROFILE").is_some() {
         eprintln!("JSPROF {}", engine.profile_report());
     }
@@ -216,7 +234,97 @@ pub fn run_page(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str)
     report.console = engine.module::<ConsoleModule>("console").map(|c| std::mem::take(&mut c.lines)).unwrap_or_default();
     report.navigation = engine.module::<EnvModule>("window").and_then(|e| e.navigation.clone());
     let tree = engine.module::<DomModule>("dom").map(|d| d.tree.clone()).unwrap_or(tree);
-    PageResult { tree, report }
+    Ok((PageResult { tree, report }, engine))
+}
+
+/// A page kept alive after it loaded: its engine stays, so clicks and typing reach its scripts and the page can be drawn again.
+/// This is what an app that lives in a tile (not a page that is read once) runs on.
+pub struct LivePage {
+    engine: JsEngine,
+    pub report: PageReport,
+    pub url: Url,
+}
+
+impl LivePage {
+    /// Load `html` at `url` with `extra` modules (the app's bridge) plugged in after the standard ones. `None`: the engine could not start.
+    pub fn load(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> bool + Send + Clone + 'static, data: &SiteData, limits: Limits, extra: Vec<Box<dyn WebModule>>) -> Option<LivePage> {
+        let (res, engine) = run_core(html, url, web, allow, data, limits, extra, |_| {}).ok()?;
+        Some(LivePage { engine, report: res.report, url: url.clone() })
+    }
+
+    /// The page as it is now.
+    pub fn tree(&mut self) -> iyakki_web::html::Tree {
+        self.engine.module::<DomModule>("dom").map(|d| d.tree.clone()).unwrap_or_else(|| iyakki_web::html::parse(""))
+    }
+
+    /// Run a script in the page (tests and the app's host).
+    pub fn eval(&mut self, name: &str, js: &str) -> Result<String, JsError> {
+        let r = self.engine.eval(name, js)?;
+        let _ = self.engine.run_jobs();
+        Ok(r)
+    }
+
+    fn settle(&mut self) {
+        let _ = run_timers(&mut self.engine, 50, 200);
+    }
+
+    /// Click the control made from this node of the tree.
+    pub fn click(&mut self, node: usize) -> Result<(), JsError> {
+        self.engine.eval("click", &format!("__dom.click({node})"))?;
+        self.settle();
+        Ok(())
+    }
+
+    /// Type this text into the field made from this node.
+    pub fn input(&mut self, node: usize, value: &str) -> Result<(), JsError> {
+        self.engine.eval("input", &format!("__dom.input({node}, {})", json_str(value)))?;
+        self.settle();
+        Ok(())
+    }
+
+    /// Check or uncheck a box or radio button.
+    pub fn check(&mut self, node: usize, on: bool) -> Result<(), JsError> {
+        self.engine.eval("check", &format!("__dom.check({node}, {on})"))?;
+        self.settle();
+        Ok(())
+    }
+
+    /// Let `ms` virtual milliseconds of timers pass (a clock in the page ticks).
+    pub fn advance(&mut self, ms: u64) -> u32 {
+        run_timers(&mut self.engine, ms, 200).map(|t| t.ran).unwrap_or(0)
+    }
+
+    /// Lines the page's scripts printed since the last call.
+    pub fn take_console(&mut self) -> Vec<ConsoleLine> {
+        self.engine.module::<ConsoleModule>("console").map(|c| std::mem::take(&mut c.lines)).unwrap_or_default()
+    }
+
+    /// A module plugged in at load, by name (the shell reads the bridge's outbox through it).
+    pub fn module<T: 'static>(&mut self, name: &str) -> Option<&mut T> {
+        self.engine.module::<T>(name)
+    }
+
+    /// The engine, for a host that needs to hand a result to the page (`iyakki.__resolve`).
+    pub fn engine(&mut self) -> &mut JsEngine {
+        &mut self.engine
+    }
+}
+
+fn json_str(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\t' => o.push_str("\\t"),
+            c if (c as u32) < 0x20 || c == '\u{2028}' || c == '\u{2029}' => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
 }
 
 fn fetch_script(web: &dyn Fetch, url: &Url, allow: &dyn Fn(&str) -> bool) -> Result<String, String> {

@@ -202,3 +202,92 @@ fn hidden_views_get_no_frames_and_come_back_whole() {
     v.send(ToHelper::SetVisible(true));
     until(&mut v, 10, |_, e| e.contains(&Event::Frame));
 }
+
+#[test]
+fn scripts_get_answers_and_unknown_messages_are_skipped() {
+    let mut v = WebView::start(config(&["--static"], 160, 100)).unwrap();
+    until(&mut v, 10, |_, e| e.contains(&Event::Frame));
+    assert!(v.send(ToHelper::Script { id: 5, js: "JSON:{\"a\":1}".into(), timeout_ms: 1000 }));
+    assert!(v.send(ToHelper::Script { id: 6, js: "THROW:boom".into(), timeout_ms: 1000 }));
+    assert!(v.send(ToHelper::Script { id: 7, js: "plain".into(), timeout_ms: 1000 }));
+    let ev = until(&mut v, 10, |_, e| e.iter().filter(|x| matches!(x, Event::ScriptResult { .. })).count() == 3);
+    let get = |id: u32| ev.iter().find_map(|e| match e { Event::ScriptResult { id: i, ok, json } if *i == id => Some((*ok, json.clone())), _ => None }).unwrap();
+    assert_eq!(get(5), (true, "{\"a\":1}".into()));
+    assert_eq!(get(6), (false, "boom".into()));
+    assert_eq!(get(7), (true, "\"plain\"".into()));
+}
+
+#[test]
+fn a_helper_that_dies_mid_frame_or_during_a_script_is_reported_once_and_leaves_no_file() {
+    for (what, step) in [("fake://crash-mid-frame", None), ("", Some("EXIT"))] {
+        let mut v = WebView::start(config(&["--static"], 160, 100)).unwrap();
+        let path = v.shm_path().to_path_buf();
+        until(&mut v, 10, |_, e| e.contains(&Event::Frame));
+        if let Some(js) = step {
+            v.send(ToHelper::Script { id: 1, js: js.into(), timeout_ms: 1000 });
+        } else {
+            v.send(ToHelper::Navigate(what.into()));
+        }
+        let ev = until(&mut v, 10, |_, e| e.iter().any(|x| matches!(x, Event::Exited(_))));
+        assert_eq!(ev.iter().filter(|x| matches!(x, Event::Exited(_))).count(), 1);
+        assert!(v.exited().is_some());
+        assert!(!v.send(ToHelper::Reload { hard: false }), "sending to a dead helper just says no");
+        assert!(v.poll().is_empty());
+        drop(v);
+        assert!(!path.exists(), "the shared file is removed: {what}{step:?}");
+    }
+}
+
+#[test]
+fn pictures_that_do_not_fit_are_ignored_without_a_panic() {
+    let mut v = WebView::start(config(&["--static"], 160, 100)).unwrap();
+    until(&mut v, 10, |_, e| e.contains(&Event::Frame));
+    v.send(ToHelper::Navigate("fake://badframes".into()));
+    // the good picture goes on being served afterwards
+    v.send(ToHelper::Resize { w: 200, h: 120 });
+    until(&mut v, 10, |v, _| v.frame_size() == (200, 120));
+    assert_eq!(v.pixels().len(), 200 * 120 * 4);
+    assert!(v.exited().is_none());
+}
+
+#[test]
+fn a_helper_that_floods_frames_or_writes_endless_binary_stderr_does_not_hang_or_grow_the_shell() {
+    let mut v = WebView::start(config(&[], 160, 100)).unwrap();
+    until(&mut v, 10, |_, e| e.contains(&Event::Frame));
+    v.send(ToHelper::Navigate("fake://noisy-stderr".into()));
+    v.send(ToHelper::Navigate("fake://spam".into()));
+    let t = Instant::now();
+    let mut frames = 0;
+    while t.elapsed() < Duration::from_secs(3) {
+        frames += v.poll().iter().filter(|e| **e == Event::Frame).count();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(frames > 0, "exited: {:?}", v.exited());
+    // still answers after the noise (stderr was drained, nothing blocked)
+    v.send(ToHelper::Navigate("https://after.example/".into()));
+    until(&mut v, 10, |_, e| e.iter().any(|x| matches!(x, Event::Url(u) if u == "https://after.example/")));
+}
+
+#[test]
+fn a_huge_window_size_is_clamped_not_a_panic_and_stale_files_of_dead_shells_are_removed() {
+    let stale = std::path::Path::new("/dev/shm").join("iyakki-webview-4000000-0.shm");
+    std::fs::write(&stale, b"x").unwrap();
+    let mut c = Config::new(env!("CARGO_BIN_EXE_iyakki-fake-webview"), Hello { w: 99_999, h: 99_999, max_w: 5, max_h: 5, ..Hello::default() });
+    c.args = vec!["--static".into()];
+    let v = WebView::start(c).unwrap();
+    let own = v.shm_path().to_path_buf();
+    assert!(v.size_wanted().0 <= 16384 && v.size_wanted().1 <= 16384);
+    iyakki_webview::client::remove_stale_shm(std::path::Path::new("/dev/shm"));
+    assert!(!stale.exists(), "the file of a process that no longer exists is gone");
+    drop(v);
+    assert!(!own.exists());
+}
+
+/// Measured on a Mac mini: without this policy WebKit answers `play()` with NotAllowedError for a video that has sound, so YouTube's
+/// watch page sat paused at 0:00 until someone clicked. The C helper cannot run in `cargo test`, so its source is checked.
+#[test]
+fn the_wpe_helper_allows_autoplay_like_window_mode() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/webview/wpe-helper/helper.c")).expect("helper source");
+    assert!(src.contains("webkit_website_policies_new_with_policies(\"autoplay\", WEBKIT_AUTOPLAY_ALLOW"), "autoplay policy");
+    assert!(src.contains("\"website-policies\", wpol"), "the policy is given to the view");
+}

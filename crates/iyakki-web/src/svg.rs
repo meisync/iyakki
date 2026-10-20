@@ -11,7 +11,9 @@
 //! scale are honoured, rotation is not) are drawn through a [`TextRenderer`] the caller supplies, because this crate has no fonts;
 //! without one (plain [`decode`]) text draws nothing.
 //!
-//! Not supported (silently left out): `image`, `pattern`, `clipPath`, `mask`, `filter`, `marker`,
+//! `clip-path` (a `clipPath` of shapes), `mask` (luminance) and `filter` with an `feGaussianBlur` (the first primitive) are honoured.
+//!
+//! Not supported (silently left out): `image`, `pattern`, other filter primitives, `marker`,
 //! the `viewBox` of a nested `svg`, CSS combinators and pseudo-classes. Hostile input cannot panic or run away: sizes,
 //! element counts, nesting, `use` expansion and total rasterising work are all capped.
 
@@ -1081,6 +1083,59 @@ impl Canvas {
     }
 }
 
+/// Scale a layer by the alpha of a clip or mask canvas.
+fn multiply_alpha(layer: &mut Canvas, k: &Canvas) {
+    for (d, s) in layer.px.chunks_exact_mut(4).zip(k.px.chunks_exact(4)) {
+        if d[3] == 0 {
+            continue;
+        }
+        let f = s[3] as u32;
+        if f == 255 {
+            continue;
+        }
+        for c in d.iter_mut() {
+            *c = ((*c as u32 * f + 127) / 255) as u8;
+        }
+    }
+}
+
+/// A Gaussian blur of a layer, as three box blurs (premultiplied channels, so edges stay soft and colours do not bleed).
+fn blur_canvas(cv: &mut Canvas, sigma: f64) {
+    let d = ((sigma * 3.0 * (2.0 * std::f64::consts::PI).sqrt() / 4.0 + 0.5).floor() as usize).max(1);
+    let (w, h) = (cv.w, cv.h);
+    let mut a: Vec<f32> = cv.px.iter().map(|&v| v as f32).collect();
+    let mut b = a.clone();
+    let radii = if d % 2 == 1 { [(d / 2, d / 2); 3] } else { [(d / 2, d / 2 - 1), (d / 2 - 1, d / 2), (d / 2, d / 2)] };
+    for (rl, rr) in radii {
+        let win = (rl + rr + 1) as f32;
+        // horizontal
+        for y in 0..h {
+            for c in 0..4 {
+                let at = |x: isize| -> f32 { if x < 0 || x >= w as isize { 0.0 } else { a[(y * w + x as usize) * 4 + c] } };
+                let mut acc: f32 = (-(rl as isize)..=rr as isize).map(at).sum();
+                for x in 0..w {
+                    b[(y * w + x) * 4 + c] = acc / win;
+                    acc += at(x as isize + rr as isize + 1) - at(x as isize - rl as isize);
+                }
+            }
+        }
+        // vertical
+        for x in 0..w {
+            for c in 0..4 {
+                let at = |y: isize| -> f32 { if y < 0 || y >= h as isize { 0.0 } else { b[(y as usize * w + x) * 4 + c] } };
+                let mut acc: f32 = (-(rl as isize)..=rr as isize).map(at).sum();
+                for y in 0..h {
+                    a[(y * w + x) * 4 + c] = acc / win;
+                    acc += at(y as isize + rr as isize + 1) - at(y as isize - rl as isize);
+                }
+            }
+        }
+    }
+    for (o, v) in cv.px.iter_mut().zip(a) {
+        *o = (v + 0.5).min(255.0) as u8;
+    }
+}
+
 // ------------------------------------------------------------------------------------------------ paint
 
 #[derive(Clone)]
@@ -1707,16 +1762,79 @@ impl<'a> Renderer<'a> {
             return;
         }
         let area = (cv.w * cv.h) as u64;
-        if st.opacity < 0.999 && self.layer_px + area <= MAX_LAYER_PIXELS {
+        let clip = self.reference(node, "clip-path", "clipPath");
+        let mask = self.reference(node, "mask", "mask");
+        let blur = self.reference(node, "filter", "filter").and_then(|f| self.blur_of(f)).map(|sd| sd * m2.scale_factor()).filter(|s| *s > 0.05);
+        let layered = st.opacity < 0.999 || clip.is_some() || mask.is_some() || blur.is_some();
+        if layered && self.layer_px + area <= MAX_LAYER_PIXELS {
             self.layer_px += area;
             let mut layer = Canvas::new(cv.w, cv.h);
             let mut st2 = st.clone();
             st2.opacity = 1.0;
             self.render_inner(&mut layer, n, &st2, &m2, depth);
+            if let Some(sd) = blur {
+                blur_canvas(&mut layer, sd.min(60.0));
+                self.work += area * 6;
+            }
+            if let Some(c) = clip {
+                if self.layer_px + area <= MAX_LAYER_PIXELS {
+                    self.layer_px += area;
+                    let k = self.clip_canvas(c, &m2, cv.w, cv.h, depth, false);
+                    multiply_alpha(&mut layer, &k);
+                }
+            }
+            if let Some(mk) = mask {
+                if self.layer_px + area <= MAX_LAYER_PIXELS {
+                    self.layer_px += area;
+                    let k = self.clip_canvas(mk, &m2, cv.w, cv.h, depth, true);
+                    multiply_alpha(&mut layer, &k);
+                }
+            }
             cv.composite_layer(&layer, st.opacity as f32);
         } else {
             self.render_inner(cv, n, &st, &m2, depth);
         }
+    }
+
+    /// The element a property such as `clip-path="url(#id)"` points to, when it is a `tag` element.
+    fn reference(&self, node: &Node, prop: &str, tag: &str) -> Option<usize> {
+        let v = node.attr(prop).map(str::to_string).or_else(|| {
+            node.attr("style").and_then(|s| s.split(';').filter_map(|d| d.split_once(':')).find(|(k, _)| k.trim().eq_ignore_ascii_case(prop)).map(|(_, v)| v.trim().to_string()))
+        })?;
+        let rest = &v[v.find("url(")? + 4..];
+        let id = rest[..rest.find(')')?].trim().trim_matches(['\'', '"']).strip_prefix('#')?.to_string();
+        self.ids.get(&id).copied().filter(|&t| self.xml.nodes[t].tag == tag)
+    }
+
+    /// The blur (standard deviation, user units) of a `filter` element: its first `feGaussianBlur`.
+    fn blur_of(&self, f: usize) -> Option<f64> {
+        let k = self.xml.nodes[f].kids.iter().copied().find(|&k| self.xml.nodes[k].tag == "feGaussianBlur")?;
+        let v = numbers(self.xml.nodes[k].attr("stdDeviation")?);
+        let sd = v.first().copied()?;
+        let sd = if v.len() > 1 { (sd + v[1]) / 2.0 } else { sd };
+        (sd.is_finite() && sd > 0.0).then_some(sd)
+    }
+
+    /// The shapes of a `clipPath` (drawn solid) or a `mask` (drawn as they are, then read as luminance) as a canvas whose
+    /// alpha says how much of the clipped picture stays.
+    fn clip_canvas(&mut self, t: usize, m: &M, w: usize, h: usize, depth: usize, luminance: bool) -> Canvas {
+        let mut c = Canvas::new(w, h);
+        let mut mt = *m;
+        if let Some(tf) = self.xml.nodes[t].attr("transform") {
+            mt = m.mul(&parse_transform(tf));
+        }
+        let kids = self.xml.nodes[t].kids.clone();
+        for k in kids {
+            self.render_node(&mut c, k, &Style::root(), &mt, depth + 2);
+        }
+        if luminance {
+            for p in c.px.chunks_exact_mut(4) {
+                // premultiplied colour: the sum is luminance times alpha
+                let l = (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32).min(255.0);
+                p[3] = l as u8;
+            }
+        }
+        c
     }
 
     fn render_kids(&mut self, cv: &mut Canvas, n: usize, st: &Style, m: &M, depth: usize) {
@@ -2469,5 +2587,47 @@ mod tests {
         assert_eq!((b.width, b.height), (40, 20));
         assert_eq!(px(&b, 39, 19), [255, 0, 0, 255], "the rectangle grew with the picture");
         assert_eq!(px(&b, 1, 1), [255, 0, 0, 255]);
+    }
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::*;
+
+    fn draw(inner: &str) -> Bitmap {
+        render(format!("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>{inner}</svg>").as_bytes(), Some((100, 100))).unwrap()
+    }
+    fn px(b: &Bitmap, x: u32, y: u32) -> [u8; 4] {
+        let o = ((y * b.width + x) * 4) as usize;
+        [b.rgba[o], b.rgba[o + 1], b.rgba[o + 2], b.rgba[o + 3]]
+    }
+
+    #[test]
+    fn a_clip_path_keeps_only_what_is_inside_it() {
+        let b = draw("<defs><clipPath id='c'><circle cx='50' cy='50' r='20'/></clipPath></defs><rect width='100' height='100' fill='#ff0000' clip-path='url(#c)'/>");
+        assert_eq!(px(&b, 50, 50), [255, 0, 0, 255]);
+        assert_eq!(px(&b, 5, 5)[3], 0, "outside the circle nothing is drawn");
+        assert_eq!(px(&b, 95, 50)[3], 0);
+        // a group clipped as a whole, and the quoted form of the reference
+        let b = draw("<defs><clipPath id='c'><rect x='0' y='0' width='50' height='100'/></clipPath></defs><g clip-path=\"url('#c')\"><rect width='100' height='100' fill='#00ff00'/><circle cx='80' cy='50' r='15' fill='#0000ff'/></g>");
+        assert_eq!(px(&b, 20, 50), [0, 255, 0, 255]);
+        assert_eq!(px(&b, 80, 50)[3], 0, "the right half is clipped away");
+    }
+
+    #[test]
+    fn a_blur_filter_softens_edges_and_keeps_the_total() {
+        let sharp = draw("<rect x='40' y='40' width='20' height='20' fill='#ffffff'/>");
+        let soft = draw("<defs><filter id='f'><feGaussianBlur stdDeviation='4'/></filter></defs><rect x='40' y='40' width='20' height='20' fill='#ffffff' filter='url(#f)'/>");
+        assert_eq!(px(&sharp, 35, 50)[3], 0);
+        assert!(px(&soft, 35, 50)[3] > 10, "the glow spreads outside the square: {:?}", px(&soft, 35, 50));
+        assert!(px(&soft, 50, 50)[3] > 200);
+        let sum = |b: &Bitmap| b.rgba.chunks(4).map(|p| p[3] as u64).sum::<u64>() as f64;
+        assert!((sum(&soft) / sum(&sharp) - 1.0).abs() < 0.05, "blur keeps the amount of paint");
+    }
+
+    #[test]
+    fn a_luminance_mask_fades_a_picture() {
+        let b = draw("<defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='0'><stop offset='0' stop-color='#000'/><stop offset='1' stop-color='#fff'/></linearGradient><mask id='m'><rect width='100' height='100' fill='url(#g)'/></mask></defs><rect width='100' height='100' fill='#ff0000' mask='url(#m)'/>");
+        assert!(px(&b, 5, 50)[3] < 40 && px(&b, 95, 50)[3] > 215, "{:?} {:?}", px(&b, 5, 50), px(&b, 95, 50));
     }
 }

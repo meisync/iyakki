@@ -794,5 +794,11 @@
       g.dispatchEvent(new Event('load'));
     },
     fire(target, type) { (target || g).dispatchEvent(new Event(type, { bubbles: true, cancelable: true })); },
+    // an element by the id of its node in the page tree (a host that keeps the page alive acts on controls this way)
+    byNode(id) { return wrap(id, H1('info', id).name); },
+    click(id) { this.byNode(id).click(); },
+    // set what the person typed, then fire the events a browser fires
+    input(id, value) { const e = this.byNode(id); e.value = String(value); e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); },
+    check(id, on) { const e = this.byNode(id); if (!!e.checked !== !!on) e.click(); },
   };
 })(globalThis);

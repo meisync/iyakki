@@ -49,8 +49,8 @@ def load_gtk():
 PROTOCOL_VERSION = 1
 
 # --- message types (docs/WEBVIEW-PROTOCOL.md) -----------------------------------------------------------------------
-T_HELLO, T_NAVIGATE, T_RELOAD, T_STOP, T_BACK, T_FORWARD, T_RESIZE, T_MOUSE, T_WHEEL, T_KEY, T_TEXT, T_ZOOM, T_FOCUS, T_VISIBLE, T_ACK, T_QUIT = range(1, 17)
-F_READY, F_FRAME, F_TITLE, F_URL, F_LOADING, F_HISTORY, F_CURSOR, F_DOWNLOAD, F_CRASHED, F_LOG, F_CLIPBOARD = range(0x81, 0x8C)
+T_HELLO, T_NAVIGATE, T_RELOAD, T_STOP, T_BACK, T_FORWARD, T_RESIZE, T_MOUSE, T_WHEEL, T_KEY, T_TEXT, T_ZOOM, T_FOCUS, T_VISIBLE, T_ACK, T_QUIT, T_SCRIPT = range(1, 18)
+F_READY, F_FRAME, F_TITLE, F_URL, F_LOADING, F_HISTORY, F_CURSOR, F_DOWNLOAD, F_CRASHED, F_LOG, F_CLIPBOARD, F_SCRIPT_RESULT = range(0x81, 0x8D)
 
 MOD_SHIFT, MOD_CTRL, MOD_ALT, MOD_SUPER = 1, 2, 4, 8
 CUR_DEFAULT, CUR_POINTER, CUR_TEXT = 0, 1, 2
@@ -604,6 +604,38 @@ class Helper:
         self.view.evaluate_javascript(js, -1, None, None, None, done, None)
         return False
 
+    def on_script(self, sid, js, timeout_ms):
+        """Protocol 1.1 Script: evaluate js in the top-level page, answer ScriptResult with the value as JSON text."""
+        state = {"done": False}
+
+        def reply(ok, text):
+            if state["done"]:
+                return
+            state["done"] = True
+            self.send(F_SCRIPT_RESULT, struct.pack("<IB", sid, 1 if ok else 0) + pack_str(text))
+
+        def done(view, res, _):
+            try:
+                val = view.evaluate_javascript_finish(res)
+                if val is None or val.is_undefined() or val.is_null():
+                    reply(True, "null")
+                else:
+                    reply(True, val.to_json(0) or "null")
+            except Exception as e:
+                reply(False, str(e)[:500])
+
+        def timed_out():
+            reply(False, "script timed out")
+            return False
+
+        try:
+            self.view.evaluate_javascript(js, -1, None, None, None, done, None)
+        except Exception as e:
+            reply(False, str(e)[:500])
+            return
+        GLib.timeout_add(max(100, min(timeout_ms or 10000, 120000)), timed_out)
+        self.idle_since = time.monotonic()
+
     def on_text(self, text):
         js = "document.execCommand('insertText', false, %s)" % json.dumps(text)
         self.view.evaluate_javascript(js, -1, None, None, None, None, None)
@@ -672,6 +704,9 @@ class Helper:
                 self.busy[s] = False
             if self.dirty is not None or self.maybe:
                 self.schedule_flush()
+        elif ty == T_SCRIPT:
+            sid, tmo = r.u32(), r.u32()
+            self.on_script(sid, r.s(), tmo)
         elif ty == T_QUIT:
             Gtk.main_quit()
 

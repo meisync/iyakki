@@ -355,6 +355,8 @@ fn named(n: &str) -> Option<char> {
         "hellip" => '…',
         "laquo" => '«',
         "raquo" => '»',
+        "rsaquo" => '›',
+        "lsaquo" => '‹',
         "lsquo" => '‘',
         "rsquo" => '’',
         "ldquo" => '“',

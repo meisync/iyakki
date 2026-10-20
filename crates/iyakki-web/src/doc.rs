@@ -107,6 +107,8 @@ pub struct Control {
     pub height: Length,
     pub margin: [f32; 4],
     pub valign: VAlign,
+    /// The node of the page's tree this control was made from (a script engine that keeps the page alive acts on it).
+    pub node: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1157,6 +1159,7 @@ impl<'a> Builder<'a> {
             height: css.map_or(Length::Auto, |c| c.height),
             margin: css.map_or([0.0; 4], |c| c.margin),
             valign: css.map_or(VAlign::Middle, |c| c.valign),
+            node: n,
         });
         let idx = self.doc.controls.len() - 1;
         if kind != ControlKind::Hidden {

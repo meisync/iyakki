@@ -129,6 +129,8 @@ pub enum ToHelper {
     Zoom(u32),
     Focus(bool),
     SetVisible(bool),
+    /// Evaluate JavaScript in the top-level page and answer with `ScriptResult` carrying the same `id` (protocol 1.1, optional).
+    Script { id: u32, js: String, timeout_ms: u32 },
     /// The shell has copied the pixels of this slot; the helper may draw into it again.
     Ack(u8),
     Quit,
@@ -149,6 +151,8 @@ pub enum FromHelper {
     Log(String),
     /// The page copied text (the shell puts it on its clipboard).
     Clipboard(String),
+    /// The answer to `Script`: `ok` false means the script threw or timed out and `json` is the error text.
+    ScriptResult { id: u32, ok: bool, json: String },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -258,6 +262,7 @@ impl ToHelper {
     pub const SET_VISIBLE: u8 = 0x0E;
     pub const ACK: u8 = 0x0F;
     pub const QUIT: u8 = 0x10;
+    pub const SCRIPT: u8 = 0x11;
 
     /// The whole framed message, ready to write to the socket.
     pub fn encode(&self) -> Vec<u8> {
@@ -341,6 +346,11 @@ impl ToHelper {
                 w.finish()
             }
             ToHelper::Quit => W::new(Self::QUIT).finish(),
+            ToHelper::Script { id, js, timeout_ms } => {
+                let mut w = W::new(Self::SCRIPT);
+                w.u32(*id).u32(*timeout_ms).str(js);
+                w.finish()
+            }
         }
     }
 
@@ -382,6 +392,10 @@ impl ToHelper {
             Self::SET_VISIBLE => ToHelper::SetVisible(r.bool()?),
             Self::ACK => ToHelper::Ack(r.u8()?),
             Self::QUIT => ToHelper::Quit,
+            Self::SCRIPT => {
+                let (id, timeout_ms) = (r.u32()?, r.u32()?);
+                ToHelper::Script { id, js: r.str()?, timeout_ms }
+            }
             t => return Err(DecodeError::Unknown(t)),
         })
     }
@@ -399,6 +413,7 @@ impl FromHelper {
     pub const CRASHED: u8 = 0x89;
     pub const LOG: u8 = 0x8A;
     pub const CLIPBOARD: u8 = 0x8B;
+    pub const SCRIPT_RESULT: u8 = 0x8C;
 
     pub fn encode(&self) -> Vec<u8> {
         match self {
@@ -441,6 +456,11 @@ impl FromHelper {
             FromHelper::Crashed(s) => str_msg(Self::CRASHED, s),
             FromHelper::Log(s) => str_msg(Self::LOG, s),
             FromHelper::Clipboard(s) => str_msg(Self::CLIPBOARD, s),
+            FromHelper::ScriptResult { id, ok, json } => {
+                let mut w = W::new(Self::SCRIPT_RESULT);
+                w.u32(*id).u8(*ok as u8).str(json);
+                w.finish()
+            }
         }
     }
 
@@ -469,6 +489,7 @@ impl FromHelper {
             Self::CRASHED => FromHelper::Crashed(r.str()?),
             Self::LOG => FromHelper::Log(r.str()?),
             Self::CLIPBOARD => FromHelper::Clipboard(r.str()?),
+            Self::SCRIPT_RESULT => FromHelper::ScriptResult { id: r.u32()?, ok: r.bool()?, json: r.str()? },
             t => return Err(DecodeError::Unknown(t)),
         })
     }
@@ -564,6 +585,7 @@ mod tests {
             ToHelper::SetVisible(false),
             ToHelper::Ack(1),
             ToHelper::Quit,
+            ToHelper::Script { id: 7, js: "document.title".into(), timeout_ms: 5000 },
         ]
     }
 
@@ -581,6 +603,7 @@ mod tests {
             FromHelper::Crashed("web process crashed".into()),
             FromHelper::Log("hello".into()),
             FromHelper::Clipboard("copied".into()),
+            FromHelper::ScriptResult { id: 7, ok: true, json: "\"ünï\"".into() },
         ]
     }
 
@@ -601,6 +624,8 @@ mod tests {
         assert_eq!(ToHelper::Navigate("ab".into()).encode(), vec![7, 0, 0, 0, 0x02, 2, 0, 0, 0, b'a', b'b']);
         assert_eq!(ToHelper::Resize { w: 0x0102, h: 3 }.encode(), vec![9, 0, 0, 0, 0x07, 2, 1, 0, 0, 3, 0, 0, 0]);
         assert_eq!(ToHelper::Quit.encode(), vec![1, 0, 0, 0, 0x10]);
+        assert_eq!(ToHelper::Script { id: 1, js: "1".into(), timeout_ms: 2 }.encode(), vec![14, 0, 0, 0, 0x11, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, b'1']);
+        assert_eq!(FromHelper::ScriptResult { id: 1, ok: true, json: "2".into() }.encode(), vec![11, 0, 0, 0, 0x8C, 1, 0, 0, 0, 1, 1, 0, 0, 0, b'2']);
         assert_eq!(FromHelper::Frame { slot: 1, w: 2, h: 3, rects: vec![Rect::new(0, 0, 2, 3)] }.encode(), vec![30, 0, 0, 0, 0x82, 1, 2, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0]);
     }
 

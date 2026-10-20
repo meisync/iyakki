@@ -7,6 +7,11 @@
 //! * `fake://goto/HOST` reports a top-level navigation to `https://HOST/landed` (a redirect the shell must vet),
 //! * `fake://clipboard` reports a copy; any other address becomes the current page (title `fake page ADDRESS`).
 //!
+//! `Script` (protocol 1.1) is answered with canned replies: `JSON:x` -> x, `THROW:x` -> failure x, `HANG...` -> no answer.
+//!
+//! Stress addresses: `fake://crash-mid-frame`, `fake://badframes` (pictures that do not fit), `fake://spam` (frames without acks),
+//! `fake://noisy-stderr` (binary and endless stderr); a script starting with `EXIT` kills the helper.
+//!
 //! Options: `--static` draws no animation (tests that look at exact pixels), `--fps N` (default 30).
 
 use std::fs::OpenOptions;
@@ -37,6 +42,7 @@ struct Fake {
     visible: bool,
     animate: bool,
     hung: bool,
+    spam: u32,
 }
 
 fn paint(img: &mut [u8], w: u32, h: u32, r: Rect, bar: u32, mouse: (i32, i32)) {
@@ -84,6 +90,8 @@ impl Fake {
         self.img = vec![0; (self.w * self.h * 4) as usize];
         self.bar = self.bar.min(self.w.saturating_sub(BAR_W));
         paint(&mut self.img, self.w, self.h, Rect::new(0, 0, self.w, self.h), self.bar, self.mouse);
+        // a part that was waiting to be sent belongs to the old size: the whole new picture replaces it
+        self.dirty = None;
         self.damage(Rect::new(0, 0, self.w, self.h));
     }
 
@@ -123,6 +131,24 @@ impl Fake {
                     std::process::exit(3);
                 } else if url == "fake://hang" {
                     self.hung = true;
+                } else if url == "fake://crash-mid-frame" {
+                    // a picture announced, then the helper dies before anything else
+                    let m = FromHelper::Frame { slot: 0, w: self.w, h: self.h, rects: vec![Rect::new(0, 0, self.w, self.h)] };
+                    self.send(m);
+                    std::process::exit(4);
+                } else if url == "fake://badframes" {
+                    // pictures that do not fit the shared file or the announced size
+                    for (slot, w, h, rects) in [(0u8, 0u32, 0u32, vec![]), (9, 10, 10, vec![]), (0, u32::MAX, u32::MAX, vec![]), (1, self.hello.max_w + 1, 1, vec![]), (0, 50, 50, vec![Rect::new(40, 40, 500, 500), Rect::new(u32::MAX, u32::MAX, u32::MAX, u32::MAX)]), (1, self.w + 7, self.h + 3, vec![Rect::new(0, 0, 5, 5)])] {
+                        self.send(FromHelper::Frame { slot, w, h, rects });
+                    }
+                } else if url == "fake://spam" {
+                    self.spam = 3000;
+                } else if url == "fake://noisy-stderr" {
+                    let mut e = std::io::stderr();
+                    for i in 0..2000 {
+                        let _ = e.write_all(b"\xff\xfe not utf-8 \n");
+                        let _ = e.write_all(format!("line {i} {}\n", "x".repeat(300)).as_bytes());
+                    }
                 } else if url == "fake://clipboard" {
                     self.send(FromHelper::Clipboard("copied text".into()));
                 } else {
@@ -178,6 +204,23 @@ impl Fake {
                     *b = false;
                 }
             }
+            ToHelper::Script { id, js, .. } => {
+                // canned, scriptable replies: "JSON:<text>" answers <text>; "THROW:<text>" fails with <text>; anything else answers its
+                // own first 60 characters as a JSON string, so tests can see that the script arrived whole.
+                if let Some(t) = js.strip_prefix("JSON:") {
+                    self.send(FromHelper::ScriptResult { id, ok: true, json: t.to_string() });
+                } else if let Some(t) = js.strip_prefix("THROW:") {
+                    self.send(FromHelper::ScriptResult { id, ok: false, json: t.to_string() });
+                } else if js.starts_with("EXIT") {
+                    eprintln!("fake helper: exiting during a script");
+                    std::process::exit(5);
+                } else if js.starts_with("HANG") {
+                    // never answers: the shell's own timeout must fire
+                } else {
+                    let head: String = js.chars().take(60).collect();
+                    self.send(FromHelper::ScriptResult { id, ok: true, json: format!("{:?}", head) });
+                }
+            }
             ToHelper::Quit => return false,
         }
         true
@@ -185,7 +228,11 @@ impl Fake {
 
     /// Send the damaged part if a slot is free.
     fn flush(&mut self) {
-        let Some(r) = self.dirty else { return };
+        let Some(r) = self.dirty.map(|r| r.clip(self.w, self.h)) else { return };
+        if r.is_empty() {
+            self.dirty = None;
+            return;
+        }
         if !self.visible || self.hung {
             return;
         }
@@ -254,7 +301,7 @@ fn main() {
             }
         }
     };
-    let mut f = Fake { stream: stream.try_clone().unwrap(), shm, w: 0, h: 0, img: Vec::new(), bar: 0, mouse: (-100, -100), history: Vec::new(), idx: 0, busy: [false; 2], next_slot: 0, dirty: None, visible: true, animate, hung: false, hello: hello.clone() };
+    let mut f = Fake { stream: stream.try_clone().unwrap(), shm, w: 0, h: 0, img: Vec::new(), bar: 0, mouse: (-100, -100), history: Vec::new(), idx: 0, busy: [false; 2], next_slot: 0, dirty: None, visible: true, animate, hung: false, spam: 0, hello: hello.clone() };
     f.send(FromHelper::Ready { version: proto::VERSION, engine: "fake".into(), engine_version: "1".into() });
     f.resize(hello.w, hello.h);
     f.log(format!("got Hello {hello:?}"));
@@ -286,6 +333,14 @@ fn main() {
         if f.animate && f.visible && !f.hung && last_step.elapsed() >= Duration::from_millis(1000 / fps) {
             last_step = Instant::now();
             f.step_bar();
+        }
+        if f.spam > 0 {
+            // frames without waiting for acknowledgements, as fast as the socket takes them
+            for _ in 0..200 {
+                let m = FromHelper::Frame { slot: (f.spam % 2) as u8, w: f.w, h: f.h, rects: vec![Rect::new(0, 0, f.w.min(8), f.h.min(8))] };
+                f.send(m);
+            }
+            f.spam = f.spam.saturating_sub(200);
         }
         f.flush();
     }

@@ -122,7 +122,7 @@ pub fn load_request(f: &dyn Fetch, req: Request, allow: &dyn Fn(&str) -> bool, r
 const MAX_REFRESHES: usize = 4;
 
 /// Where a small HTML page that immediately refreshes elsewhere sends the reader.
-fn refresh_target(r: &Response, base: &Url) -> Option<Url> {
+pub fn refresh_target(r: &Response, base: &Url) -> Option<Url> {
     let ct = r.content_type.to_ascii_lowercase();
     if r.status != 200 || r.body.len() > 8192 || !(ct.contains("html") || ct.is_empty()) {
         return None;

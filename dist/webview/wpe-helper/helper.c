@@ -425,7 +425,8 @@ static int css(int v) { return (int)((int64_t)v * 100 / (int)G.scale); }
 static void on_mouse(uint8_t kind, int x, int y, uint8_t button, uint8_t held, uint32_t mods) {
     struct wpe_input_pointer_event e = {0};
     e.time = now_ms();
-    e.x = css(x); e.y = css(y);
+    /* WPE pointer coordinates are device pixels (WebKit divides them by the device scale factor itself): no css() here */
+    e.x = x; e.y = y;
     e.modifiers = wpe_mods(mods) | button_mods(held);
     if (kind == 0) {
         e.type = wpe_input_pointer_event_type_motion;
@@ -442,7 +443,7 @@ static void on_wheel(int x, int y, int dx, int dy, uint32_t mods) {
     struct wpe_input_axis_2d_event e = {0};
     e.base.type = wpe_input_axis_event_type_mask_2d | wpe_input_axis_event_type_motion_smooth;
     e.base.time = now_ms();
-    e.base.x = css(x); e.base.y = css(y);
+    e.base.x = x; e.base.y = y;   /* device pixels, as for the pointer */
     e.base.modifiers = wpe_mods(mods);
     /* 120 = one notch = about 53 CSS px; WPE counts scroll-down as negative */
     e.x_axis = -(double)dx * 53.0 / 120.0;
@@ -482,6 +483,27 @@ static void on_key(int down, uint32_t keysym, uint32_t mods) {
     if (down && (mods & 2) && (keysym == 'c' || keysym == 'C' || keysym == 'x' || keysym == 'X')) g_timeout_add(150, report_selection, NULL);
 }
 
+
+/* ---------------------------------------------------------------------------------------------- clipboard bridge
+ * WPE has no system clipboard here: a user script makes navigator.clipboard.writeText (a page's "Copy" button, e.g. a sign-in code)
+ * and copy/cut events hand the text to the shell (F_CLIPBOARD), which keeps IYAKKI's one clipboard. Paste goes the other way:
+ * the shell sends T_TEXT. */
+static const char CLIP_JS[] =
+    "(function(){try{var post=function(t){try{window.webkit.messageHandlers.iyakkiClip.postMessage(String(t))}catch(e){}};"
+    "var sel=function(){var a=document.activeElement;if(a&&a.selectionStart!=null&&a.selectionEnd>a.selectionStart)return a.value.substring(a.selectionStart,a.selectionEnd);return String(window.getSelection())};"
+    "var cb={writeText:function(t){post(t);return Promise.resolve()},readText:function(){return Promise.resolve(window.__iyakkiClip||'')},"
+    "write:function(items){try{var it=items&&items[0];if(it&&it.getType){it.getType('text/plain').then(function(b){return b.text()}).then(post)}}catch(e){}return Promise.resolve()}};"
+    "try{Object.defineProperty(navigator,'clipboard',{value:cb,configurable:true})}catch(e){}"
+    "var f=function(){setTimeout(function(){var t=sel();if(t)post(t)},0)};document.addEventListener('copy',f,true);document.addEventListener('cut',f,true);}catch(e){}})();";
+
+static void on_clip_message(WebKitUserContentManager *m, JSCValue *val, gpointer ud) {
+    (void)m; (void)ud;
+    if (!val || !jsc_value_is_string(val)) return;
+    char *t = jsc_value_to_string(val);
+    if (t && *t) send_str_msg(F_CLIPBOARD, t);
+    g_free(t);
+}
+
 static void on_text(const char *text) {
     GString *js = g_string_new("document.execCommand('insertText',false,\"");
     for (const char *p = text; *p; p = g_utf8_next_char(p)) {
@@ -495,6 +517,58 @@ static void on_text(const char *text) {
     g_string_append(js, "\")");
     webkit_web_view_evaluate_javascript(G.view, js->str, -1, NULL, NULL, NULL, NULL, NULL);
     g_string_free(js, TRUE);
+}
+
+/* Protocol 1.1 Script: evaluate JavaScript in the top-level page, answer ScriptResult{id, ok, json}. The value is turned into JSON text
+ * with jsc_value_to_json (undefined and null become "null"). A timer answers "script timed out" if the page never finishes. */
+typedef struct { uint32_t id; int done; int refs; } ScriptJob;
+
+static void script_unref(ScriptJob *j) { if (--j->refs == 0) g_free(j); }
+
+static void send_script_result(ScriptJob *j, int ok, const char *text) {
+    if (j->done) return;
+    j->done = 1;
+    Buf b = {0};
+    buf_u32(&b, j->id); buf_u8(&b, (uint8_t)ok); buf_str(&b, text);
+    send_msg(F_SCRIPT_RESULT, &b);
+    buf_free(&b);
+}
+
+static void script_done(GObject *src, GAsyncResult *res, gpointer ud) {
+    ScriptJob *j = ud;
+    GError *err = NULL;
+    JSCValue *val = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(src), res, &err);
+    if (!val) {
+        send_script_result(j, 0, err && err->message ? err->message : "script failed");
+    } else {
+        if (jsc_value_is_undefined(val) || jsc_value_is_null(val)) {
+            send_script_result(j, 1, "null");
+        } else {
+            char *json = jsc_value_to_json(val, 0);
+            send_script_result(j, 1, json ? json : "null");
+            g_free(json);
+        }
+        g_object_unref(val);
+    }
+    if (err) g_error_free(err);
+    script_unref(j);   /* the timer holds the other reference */
+}
+
+static gboolean script_timeout(gpointer ud) {
+    ScriptJob *j = ud;
+    send_script_result(j, 0, "script timed out");
+    script_unref(j);
+    return G_SOURCE_REMOVE;
+}
+
+static void on_script(uint32_t id, const char *js, uint32_t timeout_ms) {
+    ScriptJob *j = g_new0(ScriptJob, 1);
+    j->id = id;
+    j->refs = 2;
+    if (timeout_ms < 100) timeout_ms = 10000;
+    if (timeout_ms > 120000) timeout_ms = 120000;
+    g_timeout_add(timeout_ms, script_timeout, j);   /* drops one reference */
+    webkit_web_view_evaluate_javascript(G.view, js, -1, NULL, NULL, NULL, script_done, j);
 }
 
 static void apply_zoom(void) { webkit_web_view_set_zoom_level(G.view, G.zoom / 100.0); }
@@ -559,6 +633,7 @@ static void handle(uint8_t ty, const uint8_t *p, size_t n) {
         if (G.back_new) schedule_flush();
         break;
     }
+    case T_SCRIPT: { uint32_t id = rd_u32(&r), tmo = rd_u32(&r); char *js = rd_str(&r); if (!r.bad) on_script(id, js, tmo); g_free(js); break; }
     case T_QUIT: quit_loop(); break;
     default: break;   /* unknown: skipped */
     }
@@ -678,7 +753,17 @@ static void setup_engine(void) {
         g_free(name);
     }
 
-    G.view = g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", wb, "web-context", ctx, "network-session", G.session, "settings", st, NULL);
+    WebKitUserContentManager *ucm = webkit_user_content_manager_new();
+    webkit_user_content_manager_register_script_message_handler(ucm, "iyakkiClip", NULL);
+    g_signal_connect(ucm, "script-message-received::iyakkiClip", G_CALLBACK(on_clip_message), NULL);
+    WebKitUserScript *us = webkit_user_script_new(CLIP_JS, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
+    webkit_user_content_manager_add_script(ucm, us);
+    webkit_user_script_unref(us);
+    /* The browser tile is a person's browser, not a kiosk of unattended pages: sound and video may start without a gesture, as in
+     * window mode. Without this WebKit answers play() with NotAllowedError for any video that has sound. */
+    WebKitWebsitePolicies *wpol = webkit_website_policies_new_with_policies("autoplay", WEBKIT_AUTOPLAY_ALLOW, NULL);
+    G.view = g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", wb, "user-content-manager", ucm, "web-context", ctx, "network-session", G.session, "settings", st, "website-policies", wpol, NULL);
+    g_object_unref(wpol);
     g_object_unref(st);
     G.visible = TRUE;
     G.focused = TRUE;
