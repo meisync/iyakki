@@ -1,0 +1,134 @@
+# The firmware the PC image (variant "pc": the macweb recipe for ordinary x86-64 PCs; ./run.sh build-pc-layered) keeps. repack.sh puts
+# the whole linux-firmware set into /lib/firmware for that variant and post-build.sh then deletes every file no pattern below matches.
+# Same format as mac-firmware.keep: one pattern per line, relative to /lib/firmware, shell globbing where * also matches '/', a kept
+# symbolic link keeps its target, '#' lines and blank lines are ignored. crates/iyakki-core/tests/boot_menu.rs checks that the files
+# named "required" below stay matched.
+#
+# What is kept, and why: every GPU a PC can have (the point of this image: docs/GPU-K3S.md), the Wi-Fi, Bluetooth and Ethernet
+# chips of ordinary PCs and laptops, the regulatory database. What is dropped: Mac-only Broadcom files that need Apple's firmware,
+# single-board-computer and server NIC families (Mellanox, Marvell, Cavium, Chelsio ...), TV tuners, sound DSP images (no SOF driver in
+# this kernel), Qualcomm phone/ARM parts, and the NVIDIA GSP 570 files (kernel 6.12's nouveau loads 535.113.01 only; the NVIDIA open
+# modules bring their own GSP firmware from the vendor download, never from this image).
+
+# Wireless regulatory database (every Wi-Fi driver).
+regulatory.db
+regulatory.db.p7s
+
+# ---- GPUs ----
+# NVIDIA through nouveau. Turing, Ampere, Ada: the GSP firmware (535.113.01; Ada's and the GA10x entries are links to ga102's files)
+# plus the signed boot files; the older generations (Maxwell, Pascal, Volta) have small per-engine files and no GSP.
+# required: nvidia/ga102/gsp/gsp-535.113.01.bin nvidia/ad102/gsp/gsp-535.113.01.bin nvidia/tu102/gsp/gsp-535.113.01.bin nvidia/ad102/gsp/booter_load-535.113.01.bin
+nvidia/tu1*/gsp/*535.113.01*
+nvidia/ga10*/gsp/*535.113.01*
+nvidia/ad10*/gsp/*535.113.01*
+nvidia/tu1*/acr/*
+nvidia/tu1*/gr/*
+nvidia/tu1*/nvdec/*
+nvidia/tu1*/sec2/*
+nvidia/ga10*/acr/*
+nvidia/ga10*/gr/*
+nvidia/ga10*/nvdec/*
+nvidia/ga10*/sec2/*
+nvidia/ad10*/acr/*
+nvidia/ad10*/gr/*
+nvidia/gm*/*
+nvidia/gp*/*
+nvidia/gv*/*
+nvidia/gk20a/*
+nvidia/tegra*/*
+
+# AMD graphics: all of amdgpu (GCN to RDNA 4, video decode and the power/display microcontrollers), and radeon for the older cards.
+# required: amdgpu/gc_11_0_1_pfp.bin amdgpu/polaris10_mc.bin amdgpu/psp_13_0_4_toc.bin radeon/verde_mc.bin
+amdgpu/*
+radeon/*
+# Not shipped (licence, docs/FIRMWARE-LICENCES.md): amdgpu/isp_* is under LICENSE.amdisp, which allows use only with one APU generation (GFX 11.5.1)
+# and is revocable; our kernel has no ISP camera driver for it. A line starting with '!' drops matching files even when a pattern above keeps them.
+!amdgpu/isp_*
+
+# Intel graphics: i915 (display microcontroller DMC, GuC, HuC), xe, and the GSC/HDCP parts.
+# required: i915/tgl_dmc_ver2_12.bin i915/adlp_guc_70.bin i915/tgl_huc.bin
+i915/*
+xe/*
+
+# ---- Wi-Fi ----
+# Intel iwlwifi is NOT listed here: post-build.sh adds the patterns that iwlwifi-keep.sh derives from the kernel's own MODULE_FIRMWARE
+# (the newest file of each chip that the kernel can use, and the one below it; 71 MB instead of 265 MB). Realtek, MediaTek,
+# Atheros/Qualcomm and Ralink follow.
+# required: rtw88/rtw8822c_fw.bin rtw89/rtw8852a_fw.bin mediatek/WIFI_RAM_CODE_MT7961_1.bin
+rtw88/*
+rtw89/*
+rtlwifi/*
+# Realtek Ethernet over USB (r8152: RTL8153/RTL8156) only. The PCIe files (r8169: LICENSE.r8169, a two-line "hexadecimal or equivalent
+# format" permission) are not shipped (docs/RESTRICTED-FIRMWARE.md): the "Realtek network firmware" tile installs them at the person's click.
+rtl_nic/rtl8153*
+rtl_nic/rtl8156*
+# MediaTek: the PC Wi-Fi 6/7 cards and their Bluetooth (MT7921/MT7922/MT7925), the older MT76xx USB sticks; not the router, TV and phone SoC parts
+mediatek/BT_*
+mediatek/WIFI_*
+mediatek/mt76*
+mediatek/mt7925/*
+mt7601u.bin
+mt7662*.bin
+ath9k_htc/*
+ath10k/*
+# Not shipped: the WCN3990 phone-SoC files fall under LICENSE.qcom (no open-source terms on the Materials, Qualcomm chipsets only) and no PC has that chip.
+!ath10k/WCN3990/*
+# Qualcomm Atheros 11ax/11be: the laptop chips (QCA6390, QCA2066, WCN6855, WCN7850), not the router (IPQ, QCN9274) or phone (WCN6750) ones
+ath11k/QCA6390/*
+ath11k/QCA2066/*
+ath11k/WCN6855/*
+ath12k/WCN7850/*
+ar3k/*
+ath3k-1.fw
+ar9170-*.fw
+ar9271.fw
+ar7010*.fw
+# carl9170-1.fw is not shipped: GPL-2.0-or-later with no source offer in linux-firmware (docs/FIRMWARE-LICENCES.md); a tile installs it.
+htc_7010.fw
+htc_9271.fw
+rt2561.bin
+rt2561s.bin
+rt2661.bin
+rt2860.bin
+rt2870.bin
+rt3070.bin
+rt3071.bin
+rt3090.bin
+rt3290.bin
+rt73.bin
+
+# ---- Bluetooth ----
+# Intel (ibt-*), Realtek, Qualcomm/Atheros, MediaTek (in mediatek/ above).
+# required: intel/ibt-19-0-4.sfi rtl_bt/rtl8761bu_fw.bin
+intel/ibt-*
+rtl_bt/*
+# Qualcomm Atheros Bluetooth: the files under LICENSE.QualcommAtheros_ath10k stay (QCA61x4, QCA9377, WCN399x, WCN6750, QCA2066). The 20 files
+# under LICENSE.qcom ("you shall not subject the Materials to any third party license terms (e.g. open source license terms)") are not shipped;
+# see the '!' lines at the end of this list and the "Qualcomm Bluetooth firmware" tile (docs/RESTRICTED-FIRMWARE.md).
+qca/*
+
+# ---- Ethernet and USB ----
+# Realtek (rtl_nic/ above), Intel (e100, igc/e1000e need none), Broadcom (tg3, bnx2, bnx2x), Aquantia, USB 3 host controllers that need a
+# firmware file (Renesas uPD720201/2).
+# required: rtl_nic/rtl8153b-2.fw e100/d101m_ucode.bin
+# Broadcom Ethernet (tigon, bnx2, bnx2x: LICENCE.tigon, LICENCE.bnx2, LICENCE.bnx2x, the same two-line "hexadecimal or equivalent format"
+# permission) is not shipped: the "Broadcom Tigon3 network firmware" tile installs it. Without it tg3 works at reduced function; bnx2 and bnx2x
+# (server cards) do not start (docs/RESTRICTED-FIRMWARE.md lists what degrades per chip).
+e100/*
+renesas_usb_fw.mem
+
+# ---- Restricted firmware (docs/RESTRICTED-FIRMWARE.md): never shipped, whatever a pattern above says. post-build.sh also strips every file of
+# restricted-firmware.table from the image (all variants), so this list and the table cannot drift apart: a test runs both.
+!tigon/*
+!bnx2/*
+!bnx2x/*
+!carl9170-1.fw
+!qca/cmbtfw*
+!qca/cmnv*
+!qca/apbtfw*
+!qca/apnv*
+!qca/htbtfw*
+!qca/htnv*
+!qca/hmtbtfw*
+!qca/hmtnv*
+!qca/QCA6698/*

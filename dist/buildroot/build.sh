@@ -52,6 +52,12 @@ if [ "$VARIANT" = "web" ] || [ "$VARIANT" = "macweb" ]; then
 fi
 # OPTIONAL, any variant: ffmpeg and ffprobe (LGPL build) for IYAKKI's own media player. docs/MEDIA-PLAYER.md.
 if [ "${WITH_FFMPEG:-0}" = 1 ]; then cat "$HERE/configs/iyakki_media.fragment" >> "$OUT/defconfig"; fi
+# OPTIONAL, x86_64 mac/macweb (the kernel donor of the PC image): NVIDIA's open GPU kernel modules, built out of tree (package/nvidia-open).
+# Nothing proprietary: the vendor libraries and firmware are downloaded by the installer (docs/GPU-K3S.md).
+if [ "${IYAKKI_NVIDIA_OPEN:-0}" = 1 ]; then
+  [ "$ARCH" = "x86_64" ] || { echo "IYAKKI_NVIDIA_OPEN=1 is x86_64 only" >&2; exit 2; }
+  cat "$HERE/configs/iyakki_nvidia_open.fragment" >> "$OUT/defconfig"
+fi
 # Shared compiler cache (docs/BUILD-INCREMENTAL.md): only for an output directory that has no build yet, or when asked for
 # (IYAKKI_CCACHE=1); IYAKKI_CCACHE=0 switches it off. A finished tree is not changed behind its back.
 if [ "${IYAKKI_CCACHE:-auto}" = 1 ] || { [ "${IYAKKI_CCACHE:-auto}" = auto ] && [ ! -d "$OUT/build" ]; }; then
@@ -97,6 +103,24 @@ rebuild_if_changed linux "$KSTATE" "$LNEW"
 if grep -q '^BR2_PACKAGE_APPLE_BCE=y' "$OUT/.config"; then
   rebuild_if_changed apple-bce "$KSTATE
 $(cat "$HERE"/package/apple-bce/*.patch "$HERE"/package/apple-bce/apple-bce.mk)" no
+fi
+
+# And snd-hda-macbookpro (CS8409 sound of MacBookPro13/14): built from the kernel tree's own patch_cs8409 files, so any kernel change rebuilds it.
+if grep -q '^BR2_PACKAGE_SND_HDA_MACBOOKPRO=y' "$OUT/.config"; then
+  rebuild_if_changed snd-hda-macbookpro "$KSTATE
+$(cat "$HERE"/package/snd-hda-macbookpro/snd-hda-macbookpro.mk "$HERE"/package/snd-hda-macbookpro/Kbuild)" no
+fi
+
+# And facetimehd (FaceTime HD camera): needs the kernel tree's videobuf2-dma-sg.c, so a kernel change rebuilds it.
+if grep -q '^BR2_PACKAGE_FACETIMEHD=y' "$OUT/.config"; then
+  rebuild_if_changed facetimehd "$KSTATE
+$(cat "$HERE"/package/facetimehd/facetimehd.mk "$HERE"/package/facetimehd/Kbuild)" no
+fi
+
+# Same for NVIDIA's open modules: a different kernel or a new package version rebuilds them.
+if grep -q '^BR2_PACKAGE_NVIDIA_OPEN=y' "$OUT/.config"; then
+  rebuild_if_changed nvidia-open "$KSTATE
+$(cat "$HERE"/package/nvidia-open/nvidia-open.mk)" no
 fi
 
 rustup target add "$RUST_TARGET"

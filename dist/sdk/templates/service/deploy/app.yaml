@@ -1,0 +1,31 @@
+# Replace IMAGE with the exact name the build/load step returns (never :latest). No Namespace here: the workspace namespace is used.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: __NAME__
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: __NAME__}
+  template:
+    metadata:
+      labels: {app: __NAME__}
+    spec:
+      containers:
+        - name: __NAME__
+          image: IMAGE
+          ports: [{containerPort: 8080}]
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          readinessProbe: {httpGet: {path: /healthz, port: 8080}}
+          livenessProbe: {httpGet: {path: /healthz, port: 8080}, initialDelaySeconds: 10}
+          securityContext: {runAsNonRoot: true, allowPrivilegeEscalation: false}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: __NAME__
+spec:
+  selector: {app: __NAME__}
+  ports: [{port: 8080, targetPort: 8080}]

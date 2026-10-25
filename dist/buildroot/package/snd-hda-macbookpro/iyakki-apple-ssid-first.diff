@@ -1,0 +1,93 @@
+--- a/patch_cs8409.c
++++ b/patch_cs8409.c
+@@ -1442,10 +1442,39 @@
+ 
+ static int patch_cs8409_apple(struct hda_codec *codec);
+ 
++/* IYAKKI: the codec subsystem ids of Apple machines the Apple code below handles (MacBookPro13,x/14,x, iMac 18,x/19,x). They
++ * are matched before anything else so the Apple code runs whatever the in-tree fixup table does (the Dell table never lists
++ * 0x106b, but a future kernel could), and so the log says which way the codec went. */
++static bool cs8409_is_apple_ssid(u32 ssid)
++{
++	switch (ssid) {
++	case 0x106b3300:	/* MacBookPro13,1 / 14,1 */
++	case 0x106b3600:	/* MacBookPro14,2 */
++	case 0x106b3900:	/* MacBookPro14,3 */
++	case 0x106b0e00:	/* iMac18,1 */
++	case 0x106b0f00:	/* iMac18,2 */
++	case 0x106b1000:	/* iMac18,3 / 19,1 */
++		return true;
++	default:
++		return false;
++	}
++}
++
+ static int patch_cs8409(struct hda_codec *codec)
+ {
+ 	int err;
+ 
++	if (cs8409_is_apple_ssid(codec->core.subsystem_id)) {
++		pr_info("cs8409: Apple path for SSID 0x%08x (PCI SSID %04x:%04x)\n", codec->core.subsystem_id,
++			codec->bus->pci ? codec->bus->pci->subsystem_vendor : 0,
++			codec->bus->pci ? codec->bus->pci->subsystem_device : 0);
++		err = patch_cs8409_apple(codec);
++		pr_info("cs8409: Apple path finished with %d (chip name now \"%s\")\n", err,
++			codec->core.chip_name ? codec->core.chip_name : "?");
++		return err;
++	}
++	pr_info("cs8409: primary (Dell) path for SSID 0x%08x\n", codec->core.subsystem_id);
++
+ 	if (!cs8409_alloc_spec(codec))
+ 		return -ENOMEM;
+ 
+--- a/patch_cirrus_apple.h
++++ b/patch_cirrus_apple.h
+@@ -1476,6 +1476,7 @@
+ 	// if the nid has no PIN_SENSE then these will be phantom jacks (which means treated as always plugged in)
+ 
+ 	err = snd_hda_gen_build_controls(codec);
++	pr_info("cs8409: Apple build_controls=%d\n", err);
+ 	if (err < 0)
+ 		return err;
+ 	snd_hda_apply_fixup(codec, HDA_FIXUP_ACT_BUILD);
+@@ -1515,6 +1516,14 @@
+         // from hda_generic.c (and maybe hda_codec.c)
+         // current issue is the default code will add a 2.1 chmap for 4 channels - I want to remove that
+ 	retval =  snd_hda_gen_build_pcms(codec);
++	{
++		int n = 0;
++		list_for_each_entry(pcm, &codec->pcm_list_head, list) {
++			pr_info("cs8409: Apple PCM #%d \"%s\" device %d playback nid 0x%02x capture nid 0x%02x\n", n++, pcm->name,
++				pcm->device, pcm->stream[SNDRV_PCM_STREAM_PLAYBACK].nid, pcm->stream[SNDRV_PCM_STREAM_CAPTURE].nid);
++		}
++		pr_info("cs8409: Apple build_pcms=%d, %d PCM(s)\n", retval, n);
++	}
+ 
+ 
+         list_for_each_entry(pcm, &codec->pcm_list_head, list) {
+@@ -1799,6 +1808,9 @@
+ 		return err;
+ 
+ 	err = snd_hda_gen_parse_auto_config(codec, &spec->gen.autocfg);
++	pr_info("cs8409: Apple parse: gen_parse_auto_config=%d line_outs=%d speaker_outs=%d hp_outs=%d num_dacs=%d adcs=%d no_analog=%d\n",
++		err, spec->gen.autocfg.line_outs, spec->gen.autocfg.speaker_outs, spec->gen.autocfg.hp_outs,
++		spec->gen.multiout.num_dacs, spec->gen.num_adc_nids, spec->gen.no_analog);
+ 	if (err < 0)
+ 		return err;
+ 
+@@ -3096,6 +3108,7 @@
+ 
+ 
+        err = cs_8409_boot_setup(codec);
++       pr_info("cs8409: Apple boot setup returned %d\n", err);
+        if (err < 0)
+                goto error;
+ 
+@@ -3121,6 +3134,7 @@
+        getnstimeofday(&(spec->first_play_time));
+ #endif
+ 
++       pr_info("cs8409: Apple patch done: dacs=%d adcs=%d\n", spec->gen.multiout.num_dacs, spec->gen.num_adc_nids);
+        myprintk("snd_hda_intel: Post Patching for CS8409 Apple\n");
+        //mycodec_info(codec, "Post Patching for CS8409 Apple\n");
+ 

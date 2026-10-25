@@ -143,6 +143,15 @@ CONFIG_USB_NET_CDC_EEM=m
 CONFIG_USB_NET_RNDIS_HOST=m
 CONFIG_USB_IPHETH=m
 CONFIG_USB_NET_SMSC95XX=m
+# Two computers joined by ONE cable (`iyakki dev usb`, docs/DEVELOPER-MODE.md): Thunderbolt 3/4 and USB4 networking (the `thunderbolt` module
+# and `thunderbolt_net`, which makes the interface thunderbolt0), and host-to-host USB bridge cables with a usbnet driver of their own
+# (Prolific PL-2301/2302/25A1/27A1 = plusb, NetChip = net1080, the CDC "subset" links). A plain USB-C cable between two PCs carries no
+# network: both ends are USB hosts. Not set: CONFIG_USB4_KUNIT_TEST, CONFIG_USB4_DEBUGFS_WRITE (test and debug only).
+CONFIG_USB4=m
+CONFIG_USB4_NET=m
+CONFIG_USB_NET_PLUSB=m
+CONFIG_USB_NET_NET1080=m
+CONFIG_USB_NET_CDC_SUBSET=m
 # virtualisation guests
 CONFIG_VIRTIO_NET=y
 CONFIG_VMXNET3=m
@@ -273,6 +282,17 @@ CONFIG_DRM_BOCHS=m
 CONFIG_DRM_QXL=m
 CONFIG_DRM_VMWGFX=m
 CONFIG_DRM_HYPERV=m
+# GPU compute and ordinary PCs (docs/GPU-K3S.md; alpha.2). Turing/Ampere need the GSP firmware path of nouveau (Ada always uses it);
+# without GSP_DEFAULT it takes nouveau.config=NvGspRm=1 on the kernel line. HSA_AMD is the kernel side of AMD ROCm (F-GPU-02, stage 2,
+# nothing user-visible yet: it costs about 150 KB). The NVIDIA open modules (package/nvidia-open) are built against this kernel and need
+# DRM, MMU_NOTIFIER and HMM_MIRROR, which are already on.
+CONFIG_DRM_NOUVEAU_GSP_DEFAULT=y
+CONFIG_HSA_AMD=y
+# Newer Intel laptops and desktops: GPIO/pin control and the I2C controller of the touchpad, idle states.
+CONFIG_PINCTRL_ICELAKE=m
+CONFIG_PINCTRL_METEORLAKE=m
+CONFIG_I2C_DESIGNWARE_PCI=m
+CONFIG_INTEL_IDLE=y
 
 # ---- audio / video capture ---------------------------------------------------
 CONFIG_SOUND=y
@@ -293,6 +313,18 @@ CONFIG_USB_VIDEO_CLASS=m
 
 # ---- platform / reliability ----------------------------------------------------
 CONFIG_ACPI=y
+# ---- laptop battery and charger (docs/BATTERY.md): the shell's battery indicator reads /sys/class/power_supply -------------
+# Without CONFIG_ACPI_BATTERY a laptop's ACPI battery device (PNP0C0A) has no driver and no BAT0 appears (seen on a 2020 MacBook
+# Pro: only the AC adapter showed up). Built in, so no module loading is needed. ACPI_PROCFS_POWER is the old /proc interface: off.
+CONFIG_PM=y
+CONFIG_POWER_SUPPLY=y
+CONFIG_POWER_SUPPLY_HWMON=y
+CONFIG_ACPI_AC=y
+CONFIG_ACPI_BATTERY=y
+CONFIG_ACPI_SBS=y
+# CONFIG_ACPI_PROCFS_POWER is not set
+CONFIG_ACPI_BUTTON=y
+CONFIG_ACPI_VIDEO=y
 CONFIG_X86_INTEL_PSTATE=y
 # no governor daemon runs: without this the CPU can sit at its lowest speed and the whole UI feels slow
 CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y
@@ -364,6 +396,11 @@ CONFIG_CGROUP_PERF=y
 CONFIG_BLK_CGROUP=y
 CONFIG_USER_NS=y
 CONFIG_OVERLAY_FS=y
+# the lean boot layout's root image (docs/BOOT-SPEED.md): a zstd squashfs on the boot volume, read lazily through a loop device
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_ZSTD=y
+CONFIG_SQUASHFS_FILE_DIRECT=y
+CONFIG_SQUASHFS_COMPILE_DECOMP_MULTI_PERCPU=y
 CONFIG_VXLAN=m
 CONFIG_NETFILTER_ADVANCED=y
 CONFIG_BRIDGE_NETFILTER=y

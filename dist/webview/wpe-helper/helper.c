@@ -9,9 +9,14 @@
  * picture to us, we copy it into a private picture, find what changed since the last one the shell has, write that into a
  * free slot of the shared file and send Frame. No display server, no compositor program.
  *
- * Environment: IYAKKI_WEBVIEW_FPS (default 30), IYAKKI_WEBVIEW_DEBUG=1 (more log lines).
+ * Environment: IYAKKI_WEBVIEW_FPS (default 30), IYAKKI_WEBVIEW_DEBUG=1 (more log lines), IYAKKI_WEBVIEW_NICE (default 0 = leave alone;
+ * 1 to 19: the engine's processes run that much below the shell, so a page that keeps every core busy cannot starve the shell's own
+ * drawing and input; off by default because an A/B on a MacBook Pro was inconclusive and other programs (k3s) share the machine).
  */
 #define _GNU_SOURCE
+#ifndef IYAKKI_AUTOPLAY_DEFAULT
+#define IYAKKI_AUTOPLAY_DEFAULT "allow"
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -22,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -32,6 +38,13 @@
 #include <wpe/webkit.h>
 #include <wpe/fdo.h>
 #include <wpe/unstable/fdo-shm.h>
+#include <wpe/fdo-egl.h>
+
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+#include <gbm.h>
 
 #include "proto.h"
 
@@ -51,8 +64,12 @@ typedef struct {
     struct wpe_view_backend *backend;
     WebKitWebView *view;
     WebKitNetworkSession *session;
+    WebKitUserContentManager *ucm;
+    int filter_wait;                 /* a content filter is being loaded: the first page waits for it */
+    char *pending_nav;
     uint32_t zoom;
     int visible, focused;
+    int fullscreen;                  /* the page is in DOM fullscreen (the shell shows it over the whole screen) */
     int ready;
     /* pixels */
     uint8_t *back;                   /* newest picture from the engine, bw x bh */
@@ -72,6 +89,14 @@ typedef struct {
     int crashes;
     uint32_t last_buttons;
     int debug;
+    /* hardware path: EGL display on the render node, finished pictures read back with GL */
+    int egl;                         /* 1: fdo is initialised for an EGL display and exports EGL images */
+    EGLDisplay edpy; EGLContext ectx;
+    struct gbm_device *gbm; int drm_fd;
+    GLuint tex, fbo;
+    PFNGLEGLIMAGETARGETTEXTURE2DOESPROC img_target;
+    int bgra_ok;                     /* glReadPixels can return BGRA directly */
+    unsigned nreadback;
     unsigned nframes, nexports, nacks, nblocked, nsame;
     GMainLoop *loop;
 } H;
@@ -215,6 +240,46 @@ static gboolean flush(gpointer unused) {
     return G_SOURCE_REMOVE;
 }
 
+/* the engine finished a picture as an EGL image (a dma-buf of the GPU): read it back into G.back */
+static void export_egl_image(void *data, struct wpe_fdo_egl_exported_image *img) {
+    (void)data;
+    uint32_t bw = wpe_fdo_egl_exported_image_get_width(img), bh = wpe_fdo_egl_exported_image_get_height(img);
+    if (bw > 0 && bh > 0 && bw <= G.max_w && bh <= G.max_h) {
+        if (bw != G.bw || bh != G.bh || !G.back) {
+            free(G.back);
+            G.back = malloc((size_t)bw * bh * 4);
+            G.bw = bw; G.bh = bh;
+        }
+        EGLImageKHR ei = wpe_fdo_egl_exported_image_get_egl_image(img);
+        while (glGetError() != GL_NO_ERROR) {}
+        glBindTexture(GL_TEXTURE_2D, G.tex);
+        G.img_target(GL_TEXTURE_2D, (GLeglImageOES)ei);
+        glBindFramebuffer(GL_FRAMEBUFFER, G.fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, G.tex, 0);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+            glPixelStorei(GL_PACK_ALIGNMENT, 4);
+            glReadPixels(0, 0, (GLsizei)bw, (GLsizei)bh, G.bgra_ok ? GL_BGRA_EXT : GL_RGBA, GL_UNSIGNED_BYTE, G.back);
+            if (glGetError() == GL_NO_ERROR) {
+                if (!G.bgra_ok) {
+                    uint32_t *q = (uint32_t *)G.back;
+                    for (size_t i = 0, n = (size_t)bw * bh; i < n; i++) {
+                        uint32_t v = q[i];
+                        q[i] = (v & 0xff00ff00u) | ((v & 0xffu) << 16) | ((v >> 16) & 0xffu);
+                    }
+                }
+                G.back_new = TRUE;
+                G.nreadback++;
+            }
+        } else if (G.debug) logf_("framebuffer for the exported image is incomplete");
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+    G.nexports++;
+    wpe_view_backend_exportable_fdo_egl_dispatch_release_exported_image(G.exportable, img);
+    wpe_view_backend_exportable_fdo_dispatch_frame_complete(G.exportable);
+    schedule_flush();
+}
+
 /* the engine finished a picture */
 static void export_shm_buffer(void *data, struct wpe_fdo_shm_exported_buffer *eb) {
     (void)data;
@@ -243,12 +308,76 @@ static void export_shm_buffer(void *data, struct wpe_fdo_shm_exported_buffer *eb
         }
     }
     G.nexports++;
-    wpe_view_backend_exportable_fdo_dispatch_release_shm_exported_buffer(G.exportable, eb);
+    if (G.egl) wpe_view_backend_exportable_fdo_egl_dispatch_release_shm_exported_buffer(G.exportable, eb);
+    else wpe_view_backend_exportable_fdo_dispatch_release_shm_exported_buffer(G.exportable, eb);
     wpe_view_backend_exportable_fdo_dispatch_frame_complete(G.exportable);
     schedule_flush();
 }
 
 static const struct wpe_view_backend_exportable_fdo_client export_client = { .export_shm_buffer = export_shm_buffer };
+static const struct wpe_view_backend_exportable_fdo_egl_client export_egl_client = { .export_fdo_egl_image = export_egl_image, .export_shm_buffer = export_shm_buffer };
+
+/* A hardware EGL display on the render node (GBM, else surfaceless) with a GLES2 context for the read-back.
+ * Returns 1 when everything needed exists; on any failure everything is released and 0 is returned (the caller falls back to wl_shm). */
+static void hw_close(void) {
+    if (G.edpy != EGL_NO_DISPLAY) {
+        eglMakeCurrent(G.edpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (G.ectx != EGL_NO_CONTEXT) eglDestroyContext(G.edpy, G.ectx);
+        eglTerminate(G.edpy);
+    }
+    G.edpy = EGL_NO_DISPLAY; G.ectx = EGL_NO_CONTEXT;
+    if (G.gbm) gbm_device_destroy(G.gbm);
+    G.gbm = NULL;
+    if (G.drm_fd >= 0) close(G.drm_fd);
+    G.drm_fd = -1;
+}
+
+static int hw_open(void) {
+    G.drm_fd = -1; G.edpy = EGL_NO_DISPLAY; G.ectx = EGL_NO_CONTEXT;
+    const char *off = getenv("IYAKKI_WEBVIEW_GPU");
+    if (getenv("LIBGL_ALWAYS_SOFTWARE") || (off && !strcmp(off, "0"))) { logf_("graphics: software requested, using shared memory pictures"); return 0; }
+    const char *node = getenv("IYAKKI_WEBVIEW_RENDER_NODE");
+    char path[64];
+    PFNEGLGETPLATFORMDISPLAYEXTPROC get_pd = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
+    if (!get_pd) { logf_("graphics: no eglGetPlatformDisplayEXT, using shared memory pictures"); return 0; }
+    for (int i = 0; i < 4 && G.edpy == EGL_NO_DISPLAY; i++) {
+        if (node) { if (i) break; snprintf(path, sizeof path, "%s", node); }
+        else snprintf(path, sizeof path, "/dev/dri/renderD%d", 128 + i);
+        int fd = open(path, O_RDWR | O_CLOEXEC);
+        if (fd < 0) continue;
+        struct gbm_device *gbm = gbm_create_device(fd);
+        EGLDisplay d = gbm ? get_pd(EGL_PLATFORM_GBM_KHR, gbm, NULL) : EGL_NO_DISPLAY;
+        EGLint maj, min;
+        if (d != EGL_NO_DISPLAY && eglInitialize(d, &maj, &min)) { G.drm_fd = fd; G.gbm = gbm; G.edpy = d; break; }
+        if (gbm) gbm_device_destroy(gbm);
+        close(fd);
+    }
+    if (G.edpy == EGL_NO_DISPLAY) { logf_("graphics: no usable render node, using shared memory pictures"); return 0; }
+    const char *ext = eglQueryString(G.edpy, EGL_EXTENSIONS);
+    if (!ext || !strstr(ext, "EGL_WL_bind_wayland_display") || !strstr(ext, "EGL_KHR_image_base")) {
+        logf_("graphics: display lacks wl_bind or image support, using shared memory pictures"); hw_close(); return 0;
+    }
+    eglBindAPI(EGL_OPENGL_ES_API);
+    EGLint cfg_attr[] = { EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_SURFACE_TYPE, 0, EGL_NONE };
+    EGLConfig cfg; EGLint ncfg = 0;
+    if (!eglChooseConfig(G.edpy, cfg_attr, &cfg, 1, &ncfg) || ncfg < 1) {
+        EGLint a2[] = { EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE };
+        if (!eglChooseConfig(G.edpy, a2, &cfg, 1, &ncfg) || ncfg < 1) { logf_("graphics: no ES2 config, using shared memory pictures"); hw_close(); return 0; }
+    }
+    EGLint ctx_attr[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
+    G.ectx = eglCreateContext(G.edpy, cfg, EGL_NO_CONTEXT, ctx_attr);
+    if (G.ectx == EGL_NO_CONTEXT || !eglMakeCurrent(G.edpy, EGL_NO_SURFACE, EGL_NO_SURFACE, G.ectx)) {
+        logf_("graphics: no GLES2 context (0x%x), using shared memory pictures", eglGetError()); hw_close(); return 0;
+    }
+    const char *gl = (const char *)glGetString(GL_EXTENSIONS);
+    G.img_target = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+    if (!G.img_target || !gl || !strstr(gl, "GL_OES_EGL_image")) { logf_("graphics: no GL_OES_EGL_image, using shared memory pictures"); hw_close(); return 0; }
+    G.bgra_ok = strstr(gl, "GL_EXT_read_format_bgra") != NULL;
+    glGenTextures(1, &G.tex);
+    glGenFramebuffers(1, &G.fbo);
+    logf_("graphics: hardware %s on %s (%s)", (const char *)glGetString(GL_RENDERER), path, G.bgra_ok ? "BGRA read-back" : "RGBA read-back");
+    return 1;
+}
 
 static void mark_all(void) { G.need_full = TRUE; G.back_new = G.back != NULL; schedule_flush(); }
 
@@ -571,6 +700,40 @@ static void on_script(uint32_t id, const char *js, uint32_t timeout_ms) {
     webkit_web_view_evaluate_javascript(G.view, js, -1, NULL, NULL, NULL, script_done, j);
 }
 
+/* DOM fullscreen (YouTube's button, F, double click). WPE asks the backend to "fullscreen the window" through this handler; with none
+ * set WebKit treats the request as failed and leaves fullscreen again at once (the player jumps back to the mini player). The shell
+ * owns the screen, so the handler only tells it (Fullscreen{on}); it then sends Resize for the whole page area. Refused while the
+ * tab is hidden, so the page never ends up half in fullscreen. Leaving comes from the page (button, Esc in the page, navigation)
+ * through this same handler with enable false, or from the shell (LeaveFullscreen). */
+static void send_fullscreen(int on) { Buf b = {0}; buf_u8(&b, on ? 1 : 0); send_msg(F_FULLSCREEN, &b); buf_free(&b); }
+
+/* Sound doctor (docs/WEBVIEW-PROTOCOL.md, AudioPlaying): the shell compares "the page plays audio" with the playback streams the engine's
+ * processes hold open and reconnects the sound when the page is loud but nothing holds the card. Only reports changes. */
+static void send_audio_playing(int on) { Buf b = {0}; buf_u8(&b, on ? 1 : 0); send_msg(F_AUDIO_PLAYING, &b); buf_free(&b); }
+static void on_audio_playing(void) {
+    static int last = -1;
+    int on = webkit_web_view_is_playing_audio(G.view) ? 1 : 0;
+    if (on == last) return;
+    last = on;
+    send_audio_playing(on);
+}
+
+static bool fullscreen_handler(void *ud, bool enable) {
+    (void)ud;
+    if (enable == (G.fullscreen != 0)) return true;
+    if (enable && !G.visible) { logf_("fullscreen refused: the tab is hidden"); return false; }
+    G.fullscreen = enable ? 1 : 0;
+    send_fullscreen(G.fullscreen);
+    return true;
+}
+
+static void leave_fullscreen(void) {
+    if (!G.fullscreen) return;
+    wpe_view_backend_dispatch_request_exit_fullscreen(G.backend);
+    /* belt and braces for a page that did not take the request: the script path of the same thing */
+    webkit_web_view_evaluate_javascript(G.view, "if(document.fullscreenElement&&document.exitFullscreen)document.exitFullscreen();", -1, NULL, NULL, NULL, NULL, NULL);
+}
+
 static void apply_zoom(void) { webkit_web_view_set_zoom_level(G.view, G.zoom / 100.0); }
 
 static void set_activity(void) {
@@ -584,6 +747,60 @@ static void apply_size(void) {
     wpe_view_backend_dispatch_set_size(G.backend, (uint32_t)css((int)G.w), (uint32_t)css((int)G.h));
 }
 
+/* ---------------------------------------------------------------------------------------------- content blocking
+ * The shell compiles the person's filter lists into WebKit's rule-list JSON (iyakki-web blocker_json) and names the file in
+ * IYAKKI_WEBVIEW_FILTER, with a content hash in IYAKKI_WEBVIEW_FILTER_ID. The compiled form is kept by WebKit's filter store
+ * under the profile, so only the first helper after a list change pays for compiling; the others load it by name. The first
+ * page waits (at most 20 seconds) so nothing loads unfiltered. Any failure is logged and the engine runs without a filter:
+ * blocking fails open, never closed. */
+static void filter_done(void) {
+    if (!G.filter_wait) return;
+    G.filter_wait = 0;
+    if (G.pending_nav && G.view) webkit_web_view_load_uri(G.view, G.pending_nav);
+    g_free(G.pending_nav);
+    G.pending_nav = NULL;
+}
+
+static gboolean filter_timeout(gpointer d) { logf_("content filter: gave up waiting"); filter_done(); return G_SOURCE_REMOVE; }
+
+static void filter_use(WebKitUserContentFilter *f, const char *how) {
+    webkit_user_content_manager_add_filter(G.ucm, f);
+    webkit_user_content_filter_unref(f);
+    logf_("content filter %s", how);
+    filter_done();
+}
+
+static void filter_saved(GObject *src, GAsyncResult *res, gpointer ud) {
+    GError *err = NULL;
+    WebKitUserContentFilter *f = webkit_user_content_filter_store_save_from_file_finish(WEBKIT_USER_CONTENT_FILTER_STORE(src), res, &err);
+    if (!f) { logf_("content filter not compiled: %s", err ? err->message : "unknown"); g_clear_error(&err); filter_done(); return; }
+    filter_use(f, "compiled and loaded");
+}
+
+static void filter_loaded(GObject *src, GAsyncResult *res, gpointer ud) {
+    GError *err = NULL;
+    WebKitUserContentFilter *f = webkit_user_content_filter_store_load_finish(WEBKIT_USER_CONTENT_FILTER_STORE(src), res, &err);
+    g_clear_error(&err);
+    if (f) { filter_use(f, "loaded from the store"); return; }
+    const char *path = getenv("IYAKKI_WEBVIEW_FILTER"), *id = getenv("IYAKKI_WEBVIEW_FILTER_ID");
+    GFile *file = g_file_new_for_path(path);
+    webkit_user_content_filter_store_save_from_file(WEBKIT_USER_CONTENT_FILTER_STORE(src), id, file, NULL, filter_saved, NULL);
+    g_object_unref(file);
+}
+
+static void setup_filter(void) {
+    const char *path = getenv("IYAKKI_WEBVIEW_FILTER"), *id = getenv("IYAKKI_WEBVIEW_FILTER_ID");
+    if (!path || !*path || !id || !*id || !G.ucm || access(path, R_OK) != 0) return;
+    for (const char *c = id; *c; c++) if (!g_ascii_isalnum(*c) && *c != '-' && *c != '_') { logf_("content filter: bad id"); return; }
+    char *store_dir = g_build_filename(G.profile && *G.profile ? G.profile : g_get_tmp_dir(), "content-filter-store", NULL);
+    WebKitUserContentFilterStore *store = webkit_user_content_filter_store_new(store_dir);
+    g_free(store_dir);
+    G.filter_wait = 1;
+    g_timeout_add_seconds(20, filter_timeout, NULL);
+    webkit_user_content_filter_store_load(store, id, NULL, filter_loaded, NULL);
+    /* the store object stays alive until the callbacks have run (GIO holds a reference for the pending operation) */
+}
+
 /* ---------------------------------------------------------------------------------------------- messages */
 static void handle(uint8_t ty, const uint8_t *p, size_t n) {
     Rd r = { .p = p, .n = n };
@@ -591,7 +808,9 @@ static void handle(uint8_t ty, const uint8_t *p, size_t n) {
     switch (ty) {
     case T_NAVIGATE: {
         char *u = rd_str(&r);
-        if (host_allowed(u)) webkit_web_view_load_uri(G.view, u); else logf_("refused to open %s", u);
+        if (!host_allowed(u)) logf_("refused to open %s", u);
+        else if (G.filter_wait) { g_free(G.pending_nav); G.pending_nav = g_strdup(u); }   /* opened when the filter is in */
+        else webkit_web_view_load_uri(G.view, u);
         g_free(u);
         break;
     }
@@ -625,7 +844,7 @@ static void handle(uint8_t ty, const uint8_t *p, size_t n) {
     case T_TEXT: { char *t = rd_str(&r); if (*t) on_text(t); g_free(t); break; }
     case T_ZOOM: { uint32_t z = rd_u32(&r); G.zoom = z < 25 ? 25 : z > 500 ? 500 : z; apply_zoom(); break; }
     case T_FOCUS: G.focused = rd_u8(&r) != 0; set_activity(); break;
-    case T_VISIBLE: G.visible = rd_u8(&r) != 0; set_activity(); if (G.visible) mark_all(); break;
+    case T_VISIBLE: G.visible = rd_u8(&r) != 0; set_activity(); if (G.visible) mark_all(); else leave_fullscreen(); break;
     case T_ACK: {
         uint8_t s = rd_u8(&r);
         G.nacks++;
@@ -634,6 +853,7 @@ static void handle(uint8_t ty, const uint8_t *p, size_t n) {
         break;
     }
     case T_SCRIPT: { uint32_t id = rd_u32(&r), tmo = rd_u32(&r); char *js = rd_str(&r); if (!r.bad) on_script(id, js, tmo); g_free(js); break; }
+    case T_LEAVE_FULLSCREEN: leave_fullscreen(); break;
     case T_QUIT: quit_loop(); break;
     default: break;   /* unknown: skipped */
     }
@@ -706,12 +926,22 @@ static gboolean read_hello(void) {
 static void setup_engine(void) {
     /* the web process finds the same backend library through the environment */
     setenv("WPE_BACKEND_LIBRARY", "libWPEBackend-fdo-1.0.so.1", 0);
+    /* GStreamer errors and warnings, and what the audio sinks do when they open the card, reach the web process's stderr (the shell keeps
+     * the tail and the agent log shows it): the evidence a silent session needs. The owner can set GST_DEBUG to change it. */
+    setenv("GST_DEBUG", "*:1,alsasink:4,autoaudiosink:4", 0);
+    setenv("GST_DEBUG_NO_COLOR", "1", 0);
     wpe_loader_init(getenv("WPE_BACKEND_LIBRARY"));
-    if (!wpe_fdo_initialize_shm()) { fprintf(stderr, "wpe-helper: wpe_fdo_initialize_shm failed\n"); exit(3); }
+    if (hw_open()) {
+        if (wpe_fdo_initialize_for_egl_display(G.edpy)) G.egl = 1;
+        else { logf_("graphics: wpe_fdo_initialize_for_egl_display failed, using shared memory pictures"); hw_close(); }
+    }
+    if (!G.egl && !wpe_fdo_initialize_shm()) { fprintf(stderr, "wpe-helper: wpe_fdo_initialize_shm failed\n"); exit(3); }
 
-    G.exportable = wpe_view_backend_exportable_fdo_create(&export_client, NULL, G.w, G.h);
+    if (G.egl) G.exportable = wpe_view_backend_exportable_fdo_egl_create(&export_egl_client, NULL, G.w, G.h);
+    else G.exportable = wpe_view_backend_exportable_fdo_create(&export_client, NULL, G.w, G.h);
     G.backend = wpe_view_backend_exportable_fdo_get_view_backend(G.exportable);
     wpe_view_backend_set_target_refresh_rate(G.backend, G.fps * 1000);
+    wpe_view_backend_set_fullscreen_handler(G.backend, fullscreen_handler, NULL);
     WebKitWebViewBackend *wb = webkit_web_view_backend_new(G.backend, NULL, NULL);
 
     if (G.profile && *G.profile) {
@@ -737,6 +967,7 @@ static void setup_engine(void) {
 
     WebKitSettings *st = webkit_settings_new();
     webkit_settings_set_enable_javascript(st, TRUE);
+    webkit_settings_set_enable_fullscreen(st, TRUE);
     webkit_settings_set_enable_media(st, TRUE);
     webkit_settings_set_enable_mediasource(st, TRUE);
     webkit_settings_set_enable_webaudio(st, TRUE);
@@ -754,6 +985,7 @@ static void setup_engine(void) {
     }
 
     WebKitUserContentManager *ucm = webkit_user_content_manager_new();
+    G.ucm = ucm;
     webkit_user_content_manager_register_script_message_handler(ucm, "iyakkiClip", NULL);
     g_signal_connect(ucm, "script-message-received::iyakkiClip", G_CALLBACK(on_clip_message), NULL);
     WebKitUserScript *us = webkit_user_script_new(CLIP_JS, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
@@ -761,7 +993,13 @@ static void setup_engine(void) {
     webkit_user_script_unref(us);
     /* The browser tile is a person's browser, not a kiosk of unattended pages: sound and video may start without a gesture, as in
      * window mode. Without this WebKit answers play() with NotAllowedError for any video that has sound. */
-    WebKitWebsitePolicies *wpol = webkit_website_policies_new_with_policies("autoplay", WEBKIT_AUTOPLAY_ALLOW, NULL);
+    /* IYAKKI_WEBVIEW_AUTOPLAY: allow (default), muted (only media without sound starts by itself) or deny (a click starts everything).
+     * A sound device that cannot be shared (the T2 speaker has no mixer) is held by the first media element that opens it, and
+     * pages such as YouTube open several (muted previews), so the player that is meant to be heard stays silent. */
+    const char *ap_env = getenv("IYAKKI_WEBVIEW_AUTOPLAY");
+    if (!ap_env) ap_env = IYAKKI_AUTOPLAY_DEFAULT;
+    WebKitAutoplayPolicy ap = !strcmp(ap_env, "deny") ? WEBKIT_AUTOPLAY_DENY : !strcmp(ap_env, "muted") ? WEBKIT_AUTOPLAY_ALLOW_WITHOUT_SOUND : WEBKIT_AUTOPLAY_ALLOW;
+    WebKitWebsitePolicies *wpol = webkit_website_policies_new_with_policies("autoplay", ap, NULL);
     G.view = g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", wb, "user-content-manager", ucm, "web-context", ctx, "network-session", G.session, "settings", st, "website-policies", wpol, NULL);
     g_object_unref(wpol);
     g_object_unref(st);
@@ -775,6 +1013,7 @@ static void setup_engine(void) {
     WebKitWebView *v = G.view;
     g_signal_connect(v, "notify::title", G_CALLBACK(on_title), NULL);
     g_signal_connect(v, "notify::uri", G_CALLBACK(on_uri), NULL);
+    g_signal_connect(v, "notify::is-playing-audio", G_CALLBACK(on_audio_playing), NULL);
     g_signal_connect(v, "notify::estimated-load-progress", G_CALLBACK(on_progress), NULL);
     g_signal_connect(v, "load-changed", G_CALLBACK(on_load_changed), NULL);
     g_signal_connect(v, "load-failed", G_CALLBACK(on_load_failed), NULL);
@@ -787,6 +1026,7 @@ static void setup_engine(void) {
     g_signal_connect(v, "web-process-terminated", G_CALLBACK(on_crash), NULL);
     g_signal_connect_swapped(webkit_web_view_get_back_forward_list(v), "changed", G_CALLBACK(send_history), NULL);
     apply_zoom();
+    setup_filter();
 
     Buf b = {0};
     buf_u32(&b, PROTOCOL_VERSION);
@@ -800,7 +1040,7 @@ static void setup_engine(void) {
 }
 
 static gboolean debug_stats(gpointer unused) {
-    logf_("stats: %u frames sent, %u pictures from the engine, %u acks, %u blocked, %u unchanged in the last 5 s", G.nframes, G.nexports, G.nacks, G.nblocked, G.nsame);
+    logf_("stats(%s): %u frames sent, %u pictures from the engine, %u acks, %u blocked, %u unchanged in the last 5 s", G.egl ? "gpu" : "shm", G.nframes, G.nexports, G.nacks, G.nblocked, G.nsame);
     G.nframes = G.nexports = G.nacks = G.nblocked = G.nsame = 0;
     return G_SOURCE_CONTINUE;
 }
@@ -816,6 +1056,16 @@ int main(int argc, char **argv) {
     }
     if (!shm) { fprintf(stderr, "usage: webview-helper --socket-fd N --shm PATH\n"); return 2; }
     prctl(PR_SET_PDEATHSIG, SIGTERM);
+    /* Opt in (IYAKKI_WEBVIEW_NICE): the engine's processes (web, network, GPU) are started from this one and inherit its priority.
+     * A page that scrolls or plays a video keeps all cores busy; at the shell's priority they would take turns with the shell, whose drawing and input then wait
+     * (the cost is on the shell's side of every frame). Linux keeps a nice value per thread: this is the main thread, before any
+     * other thread or child exists. Raising it again is not allowed to an unprivileged user, which is fine: it is only lowered. */
+    {
+        const char *nice_env = getenv("IYAKKI_WEBVIEW_NICE");
+        int nice_v = nice_env ? atoi(nice_env) : 0;
+        if (nice_v > 0 && nice_v <= 19 && setpriority(PRIO_PROCESS, 0, nice_v) != 0)
+            fprintf(stderr, "wpe-helper: could not lower the engine's priority: %s\n", strerror(errno));
+    }
     signal(SIGTERM, on_term);
     signal(SIGPIPE, SIG_IGN);
     G.sock = fd;

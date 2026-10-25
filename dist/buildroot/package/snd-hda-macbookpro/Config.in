@@ -1,0 +1,22 @@
+config BR2_PACKAGE_SND_HDA_MACBOOKPRO
+	bool "snd-hda-macbookpro"
+	depends on BR2_LINUX_KERNEL
+	depends on BR2_x86_64
+	help
+	  Sound output for Macs whose HD-audio codec is the Cirrus Logic
+	  CS8409 with Apple's amplifiers: MacBookPro13,x and 14,x (2016
+	  and 2017, no T2 chip) and the 2017-2019 iMacs. The kernel
+	  binds its generic codec driver to that codec, which has no
+	  volume or switch controls, so the speakers stay silent. This is
+	  David Odin's snd_hda_macbookpro: the kernel's own patch_cs8409
+	  with Apple's setup patched in, built out of tree as
+	  snd-hda-codec-cs8409.ko and picked by the codec's vendor id.
+	  Speaker and headphone output; the microphone does not work.
+	  Selected by the IYAKKI "mac" variant only
+	  (configs/iyakki_mac.fragment). GPL-2.0.
+
+	  https://github.com/davidjo/snd_hda_macbookpro
+
+comment "snd-hda-macbookpro needs a Linux kernel to be built (x86_64)"
+	depends on BR2_x86_64
+	depends on !BR2_LINUX_KERNEL

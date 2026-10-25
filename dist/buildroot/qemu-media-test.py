@@ -7,7 +7,7 @@ prints what it measured; read the PNGs: that is the test.
 
 Environment: PORT (8741, the local server of the sample files, reached from the guest as http://10.0.2.2:PORT/), WAIT (video
 seconds, default 12), SSH_KEY (a public key file: adds it to the initrd and forwards host port 2222 to the guest's SSH).
-The key sequences assume the launcher's current layout (Web & Media group: BROWSER, RADIO, MEDIA).
+The key sequences assume the launcher's current layout (Web & Media group: BROWSER, RADIO, MEDIA, CAMERA).
 """
 import os, shlex, shutil, socket, struct, subprocess, sys, tempfile, time, zlib
 
@@ -110,7 +110,7 @@ try:
     time.sleep(3)
     typ("admin"); keys("tab"); typ("adminpass1"); keys("tab"); typ("adminpass1"); keys("ret")
     time.sleep(8)
-    keys("tab", "tab", "right", "right", "ret")          # the Web & Media group, third tile: MEDIA
+    keys("tab", "right", "right", "ret")                 # the Web & Media group (one Tab from Home), third tile: MEDIA
     time.sleep(6)
     shot("1-tracks")                                      # the samples in a fresh library
     keys("ret")                                           # play the first track (the beats sample): MP3 inside IYAKKI

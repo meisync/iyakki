@@ -4,8 +4,9 @@
 #
 # The t2linux BCE driver (T2 VHCI USB + aaudio sound) for Intel Macs with the Apple T2 chip, built as an out-of-tree module
 # against the image's kernel. Only the "mac" variant selects it (configs/iyakki_mac.fragment). See docs/MAC-HARDWARE.md,
-# section 6. Our two patches (in this folder, applied in order) make it work on the IYAKKI kernel: one MSI vector without
-# interrupt remapping, and ALSA period updates outside the completion handler's spinlock.
+# section 6. Our four patches (in this folder, applied in order) make it work on the IYAKKI kernel: one MSI vector without
+# interrupt remapping, ALSA period updates outside the completion handler's spinlock, real ALSA periods with capture off by default (0003),
+# and a PCI shutdown/remove hook that stops playback and zeroes the ring so the speaker does not loop old samples (0004).
 #
 ################################################################################
 

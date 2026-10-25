@@ -65,16 +65,21 @@ radeon/si58_mc.bin
 brcm/brcmfmac*-pcie*
 brcm/bcm43xx*
 
-# Broadcom Ethernet (tg3): BCM57766 in the Mac mini 2014 and iMac, BCM57762 in the Thunderbolt Ethernet adapter.
-# required: tigon/tg357766.bin
-tigon/*
+# Broadcom Ethernet (tg3: BCM57766 in the Mac mini 2014 and iMac, BCM57762 in the Thunderbolt Ethernet adapter): tigon/* is NOT kept any
+# more. LICENCE.tigon is a two-line "hexadecimal or equivalent format" permission; the owner's rule is that what we are not sure we may
+# redistribute is not shipped (docs/RESTRICTED-FIRMWARE.md). tg3 works without it at reduced function (no Energy-Efficient Ethernet on the
+# BCM57766); the "Broadcom Tigon3 network firmware" tile of Store -> Setup -> Hardware installs it at the person's click.
 
-# Realtek Ethernet: USB adapters (r8152: RTL8153/RTL8156) and Thunderbolt or USB-C docks with a PCIe RTL8111/RTL8125 (r8169).
-rtl_nic/*
+# Realtek Ethernet over USB (r8152: RTL8153/RTL8156, LICENCE.rtlwifi_firmware.txt: kept). The PCIe files (r8169: RTL8111/RTL8125 in a
+# Thunderbolt or USB-C dock, LICENSE.r8169) are NOT kept: same rule, the "Realtek network firmware" tile installs them.
+# required: rtl_nic/rtl8153b-2.fw rtl_nic/rtl8156b-2.fw
+rtl_nic/rtl8153*
+rtl_nic/rtl8156*
 
 # USB Wi-Fi adapters recommended in docs/MAC-HARDWARE.md section 4: MediaTek MT7612U (mt76x2u), MT7921AU (mt7921u, with its
 # Bluetooth), MT7601U, Atheros AR9271 (ath9k_htc). Also the tiny files of other common USB adapters: AR7010 (ath9k_htc), AR9170
-# (carl9170), Ralink RT2870/RT3070/RT5370 (rt2800usb).
+# (the old ar9170 files only; carl9170-1.fw is GPL without a source offer in linux-firmware, so it is NOT kept: a tile installs it),
+# Ralink RT2870/RT3070/RT5370 (rt2800usb).
 # required: mt7662.bin mt7662_rom_patch.bin mediatek/WIFI_RAM_CODE_MT7961_1.bin mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin mediatek/BT_RAM_CODE_MT7961_1_2_hdr.bin mt7601u.bin ath9k_htc/htc_9271-1.4.0.fw
 mt7662.bin
 mt7662_rom_patch.bin
@@ -90,7 +95,6 @@ htc_7010.fw
 ar9271.fw
 ar7010*.fw
 ar9170-*.fw
-carl9170-1.fw
 rt2870.bin
 rt3070.bin
 rt3071.bin
@@ -98,3 +102,19 @@ rt3071.bin
 # Realtek USB Bluetooth dongles (RTL8761B/BU, e.g. the common 5.0 dongles): the Mac's own Broadcom Bluetooth firmware cannot
 # be shipped (section 11), so a dongle is the way to Bluetooth before a driver pack is installed.
 rtl_bt/rtl8761b*
+
+# ---- Restricted firmware (docs/RESTRICTED-FIRMWARE.md): never shipped, whatever a pattern above says. post-build.sh also strips every file of
+# restricted-firmware.table from the image (all variants), so this list and the table cannot drift apart: a test runs both.
+!tigon/*
+!bnx2/*
+!bnx2x/*
+!carl9170-1.fw
+!qca/cmbtfw*
+!qca/cmnv*
+!qca/apbtfw*
+!qca/apnv*
+!qca/htbtfw*
+!qca/htnv*
+!qca/hmtbtfw*
+!qca/hmtnv*
+!qca/QCA6698/*

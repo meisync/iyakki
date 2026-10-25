@@ -1,0 +1,4 @@
+# Locally computed (GitHub archive of the release tag; the tag is the driver version)
+sha256  b8891cb617683e28ef1e4c3add8dbc30e648b8cd6429a3d521f20dde44633262  nvidia-open-595.99.02.tar.gz
+# Licence texts
+sha256  d8e96d29bc323000e7ba56102d77c88226a7a3d0d94e2081cb4b071ae9de4a06  COPYING

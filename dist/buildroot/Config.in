@@ -2,3 +2,10 @@
 source "$BR2_EXTERNAL_IYAKKI_PATH/package/iyakki-webview-helper/Config.in"
 # t2linux apple-bce (T2 Macs: internal USB and sound); selected by the "mac" variant only
 source "$BR2_EXTERNAL_IYAKKI_PATH/package/apple-bce/Config.in"
+# davidjo snd_hda_macbookpro (CS8409 speakers of MacBookPro13,x/14,x and iMacs 2017-2019); selected by the "mac" variant only
+source "$BR2_EXTERNAL_IYAKKI_PATH/package/snd-hda-macbookpro/Config.in"
+# patjak facetimehd (FaceTime HD camera of non-T2 MacBooks); selected by the "mac" variant only
+source "$BR2_EXTERNAL_IYAKKI_PATH/package/facetimehd/Config.in"
+source "$BR2_EXTERNAL_IYAKKI_PATH/package/iyakki-git-ssh/Config.in"
+# NVIDIA open GPU kernel modules (PC and Mac kernels, optional: IYAKKI_NVIDIA_OPEN=1)
+source "$BR2_EXTERNAL_IYAKKI_PATH/package/nvidia-open/Config.in"

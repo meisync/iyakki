@@ -147,6 +147,21 @@ CONFIG_USB_NET_CDC_EEM=m
 CONFIG_USB_NET_RNDIS_HOST=m
 CONFIG_USB_IPHETH=m
 CONFIG_USB_NET_SMSC95XX=m
+# Two computers joined by ONE cable (`iyakki dev usb`): host-to-host USB bridge cables (plusb = Prolific PL-2301/2302/25A1/27A1, net1080,
+# CDC subset), Thunderbolt/USB4 networking for boards that have it, and USB gadget mode (configfs, NCM and ECM) so a board with a USB
+# device controller looks like a network card to the computer on the other end. The controller's own driver (dwc2, dwc3, musb, ...) is
+# SoC specific and is not set here: a board that needs one adds it in its own fragment.
+CONFIG_USB_NET_PLUSB=m
+CONFIG_USB_NET_NET1080=m
+CONFIG_USB_NET_CDC_SUBSET=m
+CONFIG_USB4=m
+CONFIG_USB4_NET=m
+CONFIG_CONFIGFS_FS=y
+CONFIG_USB_GADGET=y
+CONFIG_USB_LIBCOMPOSITE=m
+CONFIG_USB_CONFIGFS=m
+CONFIG_USB_CONFIGFS_NCM=y
+CONFIG_USB_CONFIGFS_ECM=y
 # virtualisation guests
 CONFIG_VMXNET3=m
 CONFIG_NET_FAILOVER=y
@@ -272,6 +287,16 @@ CONFIG_USB_VIDEO_CLASS=m
 
 # ---- platform / reliability ----------------------------------------------------
 CONFIG_ACPI=y
+# ---- laptop battery and charger (docs/BATTERY.md). ACPI machines use the ACPI battery and AC drivers (kconfig keeps them only
+# where the architecture allows); device-tree tablets and laptops use a fuel-gauge chip on I2C (SBS smart battery, TI BQ27xxx).
+# Charger chips and SoC-specific gauges are board-specific and not listed: add the one a board needs. Not tested on any board.
+CONFIG_POWER_SUPPLY=y
+CONFIG_POWER_SUPPLY_HWMON=y
+CONFIG_ACPI_AC=y
+CONFIG_ACPI_BATTERY=y
+CONFIG_BATTERY_SBS=y
+CONFIG_BATTERY_BQ27XXX=y
+CONFIG_BATTERY_BQ27XXX_I2C=y
 CONFIG_HW_RANDOM=y
 CONFIG_TCG_TPM=y
 CONFIG_TCG_TIS=y

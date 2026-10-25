@@ -8,7 +8,7 @@
 #
 # Codec policy (same as WEB_H264 in docs/FULL-BROWSER.md): H.264, HEVC, AAC and MP3 are patent-encumbered in some countries
 # (a separate matter from the copyright licence). Whoever builds and distributes an image with this fragment decides that for
-# the image; the default images do not carry it. The person can instead download the static build from Quick install -> Media.
+# the image; the default images do not carry it. The person can instead download the static build from Store -> Setup -> Media tools.
 BR2_PACKAGE_FFMPEG=y
 BR2_PACKAGE_FFMPEG_FFMPEG=y
 BR2_PACKAGE_FFMPEG_FFPROBE=y

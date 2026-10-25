@@ -98,12 +98,12 @@ pkgdir_sums > "$WORK/g.pkgdirs"
 # everything that only lands in the root file system or the boot menu: a repack covers it
 {
   echo "overlay $(hash_files "$BOARD/iyakki/overlay" $( [ "$VARIANT" = web ] || [ "$VARIANT" = macweb ] && echo "$BOARD/iyakki-web/overlay" ))"
-  echo "hooks $(hash_files "$BOARD/iyakki/post-build.sh" "$BOARD/iyakki/prune-firmware.sh" "$BOARD/iyakki/mac-firmware.keep" $( [ "$VARIANT" = web ] || [ "$VARIANT" = macweb ] && echo "$BOARD/iyakki-web/web-post-build.sh" ))"
+  echo "hooks $(hash_files "$BOARD/iyakki/post-build.sh" "$BOARD/iyakki/prune-firmware.sh" "$BOARD/iyakki/mac-firmware.keep" "$BOARD/iyakki/pc-firmware.keep" "$BOARD/iyakki/restricted-firmware.sh" "$BOARD/iyakki/restricted-firmware.table" $( [ "$VARIANT" = web ] || [ "$VARIANT" = macweb ] && echo "$BOARD/iyakki-web/web-post-build.sh" ))"
   echo "boot $(hash_files "$BOARD/iyakki/grub.cfg" "$BOARD/iyakki/grub" "$BOARD/iyakki/post-image.sh" "$BOARD/iyakki/genimage-install.cfg" "$HERE/secureboot.sh" "$BOARD/iyakki-aarch64/grub.cfg" "$BOARD/iyakki-aarch64/genimage.cfg" "$BOARD/iyakki-aarch64/post-image.sh")"
   echo "docs $(hash_files "$ROOT/LICENSE" "$ROOT/NOTICE" "$ROOT/LICENSING.md" "$ROOT/THIRD_PARTY_LICENSES.txt")"
   echo "samples $(hash_files "$ROOT/dist/samples/Music" "$ROOT/dist/samples/Videos" "$ROOT/dist/samples/README.md" "$ROOT/dist/samples/LICENSE")"
   if [ "$VARIANT" = web ] || [ "$VARIANT" = macweb ]; then echo "fonts $(hash_files "$ROOT"/crates/iyakki-shell/assets/NotoSans*.ttf "$ROOT/crates/iyakki-shell/assets/NOTO-OFL-LICENSE.txt")"; fi
-  echo "env h264=${WEB_H264:-0} intel=${WEB_IRIS:-0}${WEB_CROCUS:-0}"
+  echo "env h264=${WEB_H264:-0} intel=${WEB_IRIS:-0}${WEB_CROCUS:-0} restricted=${IYAKKI_INCLUDE_RESTRICTED_FIRMWARE:-0}"
 } | sed 's/ /\t/' > "$WORK/g.rootfs"
 # the iyakki program and the private store server (cargo output; absent when cargo has not run yet)
 BIN="$ROOT/target/$RUST_TARGET/$PROFILE/iyakki"; SBIN="$ROOT/target/$RUST_TARGET/$PROFILE/iyakki-store-server"

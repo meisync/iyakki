@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0
+# Kbuild file of the facetimehd package (IYAKKI). Replaces the project's Makefile (which builds against /lib/modules/$(uname -r)).
+#   facetimehd.ko         the FaceTime HD (Broadcom 14e4:1570) camera driver of patjak/facetimehd
+#   videobuf2-dma-sg.ko   the kernel's own videobuf2 scatter/gather memory ops, copied from the kernel tree by facetimehd.mk: the driver
+#                         needs it and the IYAKKI kernel does not build it (CONFIG_VIDEOBUF2_DMA_SG has no prompt; only PCI media drivers
+#                         select it, and CONFIG_MEDIA_PCI_SUPPORT is off). Building it here means no kernel rebuild.
+facetimehd-objs := fthd_ddr.o fthd_hw.o fthd_drv.o fthd_ringbuf.o fthd_isp.o fthd_v4l2.o fthd_buffer.o fthd_debugfs.o
+obj-m += facetimehd.o
+obj-m += videobuf2-dma-sg.o

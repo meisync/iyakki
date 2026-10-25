@@ -67,6 +67,31 @@ case "${IYAKKI_VARIANT:-}" in
     ;;
 esac
 
+# The PC image (variant "pc", made by repack.sh from the macweb recipe, docs/GPU-K3S.md): repack.sh has put the whole linux-firmware set in
+# /lib/firmware; keep the GPUs (NVIDIA GSP, all AMD, all Intel), the Wi-Fi, Bluetooth and Ethernet chips of ordinary PCs
+# (board/iyakki/pc-firmware.keep) and drop the rest. The Apple-only drivers of the Mac kernel stay as modules: they bind to nothing on a PC.
+case "${IYAKKI_VARIANT:-}" in
+  pc-*)
+    # the Intel Wi-Fi files are chosen by what this kernel's iwlwifi asks for (iwlwifi-keep.sh), the rest by the static list
+    PCKEEP="$(mktemp)"
+    cat "$(dirname "$0")/pc-firmware.keep" > "$PCKEEP"
+    sh "$(dirname "$0")/iwlwifi-keep.sh" "$TARGET_DIR/lib/modules" "$TARGET_DIR/lib/firmware" >> "$PCKEEP"
+    sh "$(dirname "$0")/prune-firmware.sh" "$PCKEEP" "$TARGET_DIR/lib/firmware"
+    rm -f "$PCKEEP"
+    ;;
+esac
+
+# Restricted firmware (docs/RESTRICTED-FIRMWARE.md, docs/FIRMWARE-LICENCES.md): files whose licence IYAKKI is not sure it may redistribute are removed from
+# EVERY variant (hw, mac, macweb, pc: the keep lists also exclude them, this catches what a package or a repack brought in). The person installs them from
+# Store -> Setup -> Hardware. With IYAKKI_INCLUDE_RESTRICTED_FIRMWARE=1 (a build for the builder's own use) nothing is stripped, the pinned files are added
+# after a sha256 check, and the image says "not for redistribution by the IYAKKI project" (restricted-firmware.sh add).
+sh "$(dirname "$0")/restricted-firmware.sh" strip "$TARGET_DIR/lib/firmware"
+sh "$(dirname "$0")/restricted-firmware.sh" add "$TARGET_DIR"
+
+# Firmware licence texts: every image that carries linux-firmware files also carries the licences that allow redistributing them
+# (board/iyakki/firmware-licences.sh, LICENSING.md item 7). The source tree is Buildroot's build dir, or the donor's when repack.sh assembled the image.
+sh "$(dirname "$0")/firmware-licences.sh" "$TARGET_DIR" ${FWFROM:+"$FWFROM"} ${BUILD_DIR:+"$BUILD_DIR"/linux-firmware-*} ${KFROM:+"$KFROM"/build/linux-firmware-*}
+
 # Secure Boot (docs/SECURE-BOOT.md): with a signing key every kernel module in the image, the out-of-tree ones included (apple-bce in
 # updates/), gets the owner's signature. The kernel build itself signs nothing (MODULE_SIG_ALL is off), so a build without a key
 # leaves them unsigned and Secure Boot must be off. With Secure Boot on the kernel only loads modules signed by the enrolled key.

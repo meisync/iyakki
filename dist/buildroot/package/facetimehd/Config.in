@@ -1,0 +1,21 @@
+config BR2_PACKAGE_FACETIMEHD
+	bool "facetimehd"
+	depends on BR2_LINUX_KERNEL
+	depends on BR2_x86_64
+	help
+	  Camera driver for the Broadcom 720p FaceTime HD camera
+	  (PCI 14e4:1570) of MacBooks without the T2 chip, such as the
+	  MacBookPro13,x/14,x. This is patjak's facetimehd, built out of
+	  tree as facetimehd.ko together with the kernel's own
+	  videobuf2-dma-sg.ko (copied from the kernel tree). The camera
+	  needs Apple's firmware, which is never shipped: the person
+	  downloads it on their own machine (IYAKKI Setup, "Camera
+	  firmware"). The module is loaded by its PCI alias. GPL-2.0.
+	  Selected by the IYAKKI "mac" variant only
+	  (configs/iyakki_mac.fragment).
+
+	  https://github.com/patjak/facetimehd
+
+comment "facetimehd needs a Linux kernel to be built (x86_64)"
+	depends on BR2_x86_64
+	depends on !BR2_LINUX_KERNEL

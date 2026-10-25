@@ -29,6 +29,11 @@ IYAKKI launcher
                       sites; hours to build, needs ~30 GB disk and 16+ GB RAM; add --h264 for H.264/AAC; see docs/FULL-BROWSER.md
   ./run.sh build-macweb  OPTIONAL: build-mac and build-web in one image (Intel Macs such as the Mac mini 2014 that should run YouTube and modern
                       sites); output target/buildroot-macweb; --h264 for H.264/AAC, --crocus for Mesa's Haswell GPU driver (hours more); docs/YOUTUBE-ON-IYAKKI.md
+  ./run.sh build-pc-layered  OPTIONAL: the PC image (macweb recipe, no compile): the whole GPU firmware set (NVIDIA GSP, all AMD, all Intel) and common PC
+                      Wi-Fi/Ethernet firmware, for an ordinary x86-64 PC; output target/buildroot-pc; docs/GPU-K3S.md
+                      Restricted firmware (Qualcomm Bluetooth, Realtek and Broadcom Ethernet, Atheros AR9170) is NOT in these images; for an image
+                      of your OWN use that includes it: IYAKKI_INCLUDE_RESTRICTED_FIRMWARE=1 ./run.sh build-pc-layered (also build-mac, build-macweb).
+                      Not for redistribution; docs/RESTRICTED-FIRMWARE.md
   ./run.sh alpha-check  the gate before an alpha: build, tests, licences, docs links, versions, secrets, QEMU smoke tests (--dry: fast checks only)
   ./run.sh check-macos  cargo check of the window crates for the macOS targets (compiles only; skips when the Rust target is not installed)
   ./run.sh release [version]  collect the images, sign them, write release.json and the download page (docs/RELEASING.md)
@@ -144,7 +149,11 @@ case "${1:-help}" in
     SB=(); for a in "$@"; do case "$a" in --h264) export WEB_H264=1 ;; *) SB+=("$a") ;; esac; done
     exec dist/buildroot/smart-build.sh web ${SB[@]+"${SB[@]}"} ;;
   # macweb without compiling WebKit again: the web rootfs with the mac kernel, modules and firmware (minutes, not hours)
-  build-macweb-layered) shift; exec dist/buildroot/repack.sh macweb --base target/buildroot-web --kernel-from target/buildroot-mac --cargo ${1+"$@"} ;;
+  build-macweb-layered) shift; exec dist/buildroot/repack.sh macweb --base target/buildroot-web --kernel-from target/buildroot-mac --graft git --cargo ${1+"$@"} ;;
+  # The PC image (docs/GPU-K3S.md): the macweb recipe for ordinary x86-64 PCs, with the FULL GPU firmware set (NVIDIA GSP, all AMD, all Intel) and the
+  # Wi-Fi, Bluetooth and Ethernet firmware of common PCs. Output target/buildroot-pc (images/iyakki-x86_64.iso, iyakki-install-x86_64.img),
+  # /etc/iyakki-release says pc-x86_64. Needs the web and mac builds like build-macweb-layered; writes no drive.
+  build-pc-layered) shift; exec dist/buildroot/repack.sh pc --base target/buildroot-web --kernel-from target/buildroot-mac --graft git --cargo ${1+"$@"} ;;
   build-changed) shift; exec dist/buildroot/changed.sh ${1+"$@"} ;;
   release)
     # ./run.sh release [version] [--with-web] [--with-mac] [--with-macweb] [--no-window] [--allow-stale] [--dry-run]

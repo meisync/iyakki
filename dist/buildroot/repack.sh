@@ -2,7 +2,7 @@
 # IYAKKI-ONLY fast path: put a new iyakki program (and changed overlay / release texts / boot menu) into the image a variant
 # already has, WITHOUT running Buildroot's make.   docs/BUILD-INCREMENTAL.md
 #
-#   repack.sh <variant> [OUT_DIR] [--dry-run] [--cargo] [--fast-zstd] [--base BASE_OUT] [--kernel-from KERNEL_OUT]
+#   repack.sh <variant> [OUT_DIR] [--dry-run] [--cargo] [--fast-zstd] [--base BASE_OUT] [--kernel-from KERNEL_OUT] [--graft NAME]... [--firmware-from LINUX_FIRMWARE_DIR]
 #
 # What it does (x86_64 only; minutes instead of hours):
 #   1. unpacks OUT/images/rootfs.cpio.zst under fakeroot (owners and device nodes survive),
@@ -18,6 +18,12 @@
 # --kernel-from KERNEL_OUT: graft that build's kernel (images/bzImage), /lib/modules and /lib/firmware into the rootfs. Together:
 #     repack.sh macweb --base target/buildroot-web --kernel-from target/buildroot-mac
 #   makes the macweb image from the web and mac builds with no compile (docs/BUILD-INCREMENTAL.md, "layered macweb").
+# --graft NAME (repeatable, or IYAKKI_GRAFT="git ..."): copy the files of dist/buildroot/graft/NAME.list from BASE/target (a package built
+#     alone with `make -C BASE <package>`, e.g. git: `make -C target/buildroot-web git iyakki-git-ssh`) into the unpacked root, with graft.sh
+#     (hard links kept, perl/python scripts skipped, shared libraries checked). Nothing else of the base's target/ is used.
+# --firmware-from DIR (variant "pc"; default: the linux-firmware tree of the --kernel-from build): put the WHOLE linux-firmware set (DIR's own
+#     copy-firmware.sh, uncompressed) into /lib/firmware instead of the kernel donor's pruned one; post-build.sh then prunes it with
+#     board/iyakki/pc-firmware.keep (all GPUs, common PC Wi-Fi/Bluetooth/Ethernet). ./run.sh build-pc-layered does it (docs/GPU-K3S.md).
 # --fast-zstd: zstd -3 instead of -19 (quick tests; the file is bigger, do not release it).
 # Secure Boot: run it with the same IYAKKI_SB_KEY / IYAKKI_SB_CERT as the build (a change from signed to unsigned is FULL for
 # changed.sh); modules are not signed again (they already are), the kernel and the EFI image are, as in post-image.sh.
@@ -25,17 +31,18 @@ set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="${IYAKKI_ROOT:-$(cd "$HERE/../.." && pwd)}"
-VARIANT=""; OUT=""; DRY=0; CARGO=0; ZL=19; BASE=""; KFROM=""; NEXT=""
+VARIANT=""; OUT=""; DRY=0; CARGO=0; ZL=19; BASE=""; KFROM=""; NEXT=""; GRAFTS="${IYAKKI_GRAFT:-}"; FWFROM=""
 for a in "$@"; do
-  case "$NEXT" in base) BASE="$a"; NEXT=""; continue ;; kernel) KFROM="$a"; NEXT=""; continue ;; esac
+  case "$NEXT" in base) BASE="$a"; NEXT=""; continue ;; kernel) KFROM="$a"; NEXT=""; continue ;; graft) GRAFTS="$GRAFTS $a"; NEXT=""; continue ;; fwfrom) FWFROM="$a"; NEXT=""; continue ;; esac
   case "$a" in
-    --base) NEXT=base ;; --kernel-from) NEXT=kernel ;;
+    --base) NEXT=base ;; --kernel-from) NEXT=kernel ;; --graft) NEXT=graft ;; --firmware-from) NEXT=fwfrom ;;
     --dry-run) DRY=1 ;; --cargo) CARGO=1 ;; --fast-zstd) ZL=3 ;;
     -*) echo "repack.sh: unknown option $a" >&2; exit 2 ;;
     *) if [ -z "$VARIANT" ]; then VARIANT="$a"; elif [ -z "$OUT" ]; then OUT="$a"; else echo "repack.sh: too many arguments" >&2; exit 2; fi ;;
   esac
 done
 [ -n "$VARIANT" ] || { sed -n '2,8p' "$0" >&2; exit 2; }
+[ "$NEXT" = "" ] || { echo "repack.sh: --$NEXT needs a value" >&2; exit 2; }
 # a relative --base / --kernel-from means relative to the repository (the steps below change directory)
 case "$BASE" in ""|/*) ;; *) BASE="$ROOT/$BASE" ;; esac
 case "$KFROM" in ""|/*) ;; *) KFROM="$ROOT/$KFROM" ;; esac
@@ -66,6 +73,13 @@ for t in xorriso genimage zstd; do [ -x "$HOSTD/bin/$t" ] || die "missing $HOSTD
 FAKEROOT="$HOSTD/bin/fakeroot"; [ -x "$FAKEROOT" ] || FAKEROOT="$(command -v fakeroot || true)"
 [ -n "$FAKEROOT" ] || die "fakeroot not found"
 command -v cpio >/dev/null || die "cpio not found"; command -v rsync >/dev/null || die "rsync not found"
+# the PC image: the full linux-firmware set comes from the source tree of the kernel donor (its copy-firmware.sh), post-build.sh prunes it
+if [ "$VARIANT" = pc ] && [ -z "$FWFROM" ] && [ -n "$KFROM" ]; then FWFROM="$(ls -d "$KFROM"/build/linux-firmware-* 2>/dev/null | head -n1 || true)"; fi
+case "$FWFROM" in ""|/*) ;; *) FWFROM="$ROOT/$FWFROM" ;; esac
+if [ "$VARIANT" = pc ] || [ -n "$FWFROM" ]; then
+  [ -f "$FWFROM/copy-firmware.sh" ] && [ -f "$FWFROM/WHENCE" ] || die "variant pc needs the linux-firmware source tree (copy-firmware.sh, WHENCE): give --firmware-from DIR or --kernel-from a build that has build/linux-firmware-*"
+  [ -f "$HERE/board/iyakki/pc-firmware.keep" ] || die "no board/iyakki/pc-firmware.keep"
+fi
 BIN="$ROOT/target/$RUST_TARGET/$PROFILE/iyakki"; SBIN="$ROOT/target/$RUST_TARGET/$PROFILE/iyakki-store-server"
 cfgval() { sed -n "s/^$1=\"\(.*\)\"\$/\1/p" "$BASE/.config" | head -n1 | sed "s#\$(BR2_EXTERNAL_IYAKKI_PATH)#$HERE#g"; }
 OVERLAYS="$(cfgval BR2_ROOTFS_OVERLAY)"; HOOKS="$(cfgval BR2_ROOTFS_POST_BUILD_SCRIPT)"
@@ -73,7 +87,20 @@ POSTIMG="$(cfgval BR2_ROOTFS_POST_IMAGE_SCRIPT)"; PIARGS="$(cfgval BR2_ROOTFS_PO
 [ -n "$HOOKS" ] || die "no BR2_ROOTFS_POST_BUILD_SCRIPT in $BASE/.config"
 case "$POSTIMG" in *post-image.sh*genimage.sh*) ;; *) die "unexpected BR2_ROOTFS_POST_IMAGE_SCRIPT: $POSTIMG" ;; esac
 set -- $POSTIMG; PI_SCRIPT="$1"; GI_SCRIPT="$BR_DIR/$2"
+# the PC image: its initial RAM disk (the whole GPU and Wi-Fi firmware set) does not fit the 256 MB boot volume of the other variants:
+# the install template gets a 512 MB one (iyakki-usb takes the size from the image; a 4096-byte-sector drive gets its own fixed 320 MiB)
+PC_GI_CFG=""
+if [ "$VARIANT" = pc ]; then
+  case "$PIARGS" in *genimage-install.cfg*) PC_GI_CFG="$OUT/.repack/genimage-install-pc.cfg"; PIARGS="$(printf '%s' "$PIARGS" | sed "s#[^ ]*genimage-install\.cfg#$PC_GI_CFG#")" ;; *) die "unexpected genimage arguments for the pc variant: $PIARGS" ;; esac
+fi
 [ "$CARGO" = 1 ] || [ -f "$BIN" ] || die "$BIN is missing: cargo build $PFLAG --target $RUST_TARGET -p iyakki-core (or use --cargo)"
+
+# every graft must be possible before anything is unpacked (the package built in BASE, the list known)
+for g in $GRAFTS; do
+  [ -f "$HERE/graft/$g.list" ] || die "no graft list $HERE/graft/$g.list"
+  sh "$HERE/graft.sh" "$g" "$BASE/target" "$BASE" --dry-run >/dev/null 2>"$STAGE.graft.err" || { cat "$STAGE.graft.err" >&2; rm -f "$STAGE.graft.err"; die "graft $g is not possible from $BASE/target"; }
+  rm -f "$STAGE.graft.err"
+done
 
 # the base build must have been made with the same WEB_* switches as this run asks for (they change packages, not just files)
 for pair in "WEB_IRIS:iyakki_web_iris" "WEB_CROCUS:iyakki_web_crocus"; do
@@ -102,6 +129,8 @@ if [ "${WEB_IRIS:-0}" = 1 ] || [ "${WEB_CROCUS:-0}" = 1 ]; then export IYAKKI_WE
 say "variant      $VARIANT ($OUT)"
 [ "$BASE" = "$OUT" ] || say "base         $BASE"
 [ -z "$KFROM" ] || say "kernel from  $KFROM (bzImage, /lib/modules, /lib/firmware)"
+[ -z "$GRAFTS" ] || say "grafts       $GRAFTS (from $BASE/target)"
+[ -z "$FWFROM" ] || say "firmware     the whole set from $FWFROM, pruned by board/iyakki/pc-firmware.keep"
 say "overlays     $OVERLAYS"
 say "post-build   $HOOKS"
 say "post-image   $PI_SCRIPT, then $GI_SCRIPT $PIARGS"
@@ -121,6 +150,7 @@ fi
 [ -f "$BIN" ] || die "$BIN is missing"
 
 mkdir -p "$OUT/images"; rm -rf "$STAGE"; mkdir -p "$STAGE/root" "$STAGE/bin" "$STAGE/build/buildroot-fs"
+if [ -n "$PC_GI_CFG" ]; then sed 's/^\tsize = 256M$/\tsize = 512M/' "$HERE/board/iyakki/genimage-install.cfg" > "$PC_GI_CFG"; grep -q 'size = 512M' "$PC_GI_CFG" || die "the genimage configuration has no 256M boot volume to enlarge"; fi
 trap 'rm -rf "$STAGE/root"' EXIT   # the staging folder itself stays on failure for a look; the unpacked root is big
 t0=$(date +%s)
 
@@ -136,12 +166,49 @@ if [ -n "$KFROM" ]; then
   [ -d lib/modules ] && [ -d lib/firmware ] || { echo "graft: the kernel build has no /lib/modules or /lib/firmware" >&2; exit 1; }
   [ "$(ls lib/modules)" = "$(basename "$(ls -d lib/modules/*/ | head -n1)")" ] || { echo "graft: more than one kernel version in /lib/modules" >&2; exit 1; }
 fi
+# out-of-tree modules built alone in the kernel donor (`make -C target/buildroot-mac snd-hda-macbookpro`, docs/MAC-HARDWARE.md): a .ko in the
+# donor's target/lib/modules/<ver>/updates that its packed rootfs.cpio does not have yet (or has in an older build) is added, signed when a Secure Boot key is given,
+# and modules.dep/alias are rebuilt with the donor's depmod (the HD-audio bus finds snd-hda-codec-cs8409 by its alias hdaudio:v10138409; the PCI core finds facetimehd by pci:v000014E4d00001570)
+if [ -n "$KFROM" ]; then
+  KVER="$(ls lib/modules)"; XUP="$KFROM/target/lib/modules/$KVER/updates"; added=""
+  # the list of out-of-tree modules: the sound codec, the FaceTime HD camera and the videobuf2 module the camera driver needs (package/facetimehd)
+  OOT_MODULES="snd-hda-codec-cs8409 facetimehd videobuf2-dma-sg apple-bce"
+  for m in $OOT_MODULES; do
+    ko="$XUP/$m.ko"
+    [ -f "$ko" ] || continue
+    # a module built alone AFTER the donor's rootfs was packed (the sound driver was rebuilt with new log lines and the image kept the
+    # old copy): the donor's target copy wins when it differs from the packed one
+    [ -f "lib/modules/$KVER/updates/$(basename "$ko")" ] && cmp -s "$ko" "lib/modules/$KVER/updates/$(basename "$ko")" && continue
+    mkdir -p "lib/modules/$KVER/updates"; cp -f "$ko" "lib/modules/$KVER/updates/"; chmod 0644 "lib/modules/$KVER/updates/$(basename "$ko")"
+    added="$added $(basename "$ko")"
+  done
+  if [ -n "$added" ]; then
+    if [ -n "${IYAKKI_SB_KEY:-}" ] && [ -n "${IYAKKI_SB_CERT:-}" ]; then
+      SF="${IYAKKI_SIGN_FILE:-$(ls "$KFROM"/build/linux-[0-9]*/scripts/sign-file 2>/dev/null | head -n1 || true)}"
+      [ -n "$SF" ] && [ -x "$SF" ] || { echo "repack: no scripts/sign-file to sign$added (set IYAKKI_SIGN_FILE)" >&2; exit 1; }
+      for m in $added; do "$SF" sha256 "$IYAKKI_SB_KEY" "$IYAKKI_SB_CERT" "lib/modules/$KVER/updates/$m" || { echo "repack: could not sign $m" >&2; exit 1; }; done
+    fi
+    DEPMOD="$BASE/host/sbin/depmod"; [ -x "$DEPMOD" ] || DEPMOD="$(command -v depmod || true)"
+    [ -n "$DEPMOD" ] || { echo "repack: depmod not found (needed for$added)" >&2; exit 1; }
+    "$DEPMOD" -b "$STAGE/root" "$KVER" || { echo "repack: depmod failed" >&2; exit 1; }
+    echo "repack: modules added from $KFROM:$added (depmod run)"
+  fi
+fi
+# the PC image: all of linux-firmware (uncompressed, as the kernel of this image reads it), pruned later by the post-build hook
+if [ -n "$FWFROM" ]; then
+  rm -rf lib/firmware; mkdir -p lib/firmware
+  (cd "$FWFROM" && sh ./copy-firmware.sh "$STAGE/root/lib/firmware") >/dev/null || { echo "firmware: copy-firmware.sh failed" >&2; exit 1; }
+  echo "repack: firmware: the full set from $FWFROM is in place (post-build prunes it)"
+fi
 # a web engine helper rebuilt alone (`make iyakki-webview-helper` in the base tree) is newer than the packed image: take it
 NEWH="$BASE/target/usr/libexec/iyakki/webview-helper"
 if [ -f "$NEWH" ] && [ -f usr/libexec/iyakki/webview-helper ] && [ "$NEWH" -nt "$IMG/rootfs.cpio.zst" ]; then
   cp -f "$NEWH" usr/libexec/iyakki/webview-helper; chmod 0755 usr/libexec/iyakki/webview-helper
   echo "repack: web engine helper refreshed from $NEWH"
 fi
+for g in $GRAFTS; do
+  sh "$HERE/graft.sh" "$g" "$BASE/target" "$STAGE/root" | tail -n 1
+done
 for d in $OVERLAYS; do
   rsync -a --ignore-times --keep-dirlinks --chmod=u=rwX,go=rX --exclude .empty --exclude '*~' "$d/" "$STAGE/root/"
 done
@@ -151,9 +218,14 @@ for s in $HOOKS; do sh "$s" "$STAGE/root"; done
 [ -z "$OLD_SB" ] || echo "$OLD_SB" >> etc/iyakki-release
 find . | LC_ALL=C sort | cpio --quiet -o -H newc > "$STAGE/bin/rootfs.cpio"
 EOS
-export STAGE IMG OVERLAYS HOOKS KFROM BASE
+export STAGE IMG OVERLAYS HOOKS KFROM BASE FWFROM GRAFTS HERE
 say "unpacking, applying overlays and hooks, packing (fakeroot)"
-"$FAKEROOT" -- sh "$STAGE/session.sh" >"$STAGE/session.log" 2>&1 || { tail -n 20 "$STAGE/session.log" >&2; die "the unpack/hook/pack step failed (log: $STAGE/session.log)"; }
+# Buildroot's fakeroot script has the absolute path of the tree it was built in baked in (here a folder that has since been renamed:
+# "libfakeroot.so not found, aborting"): when it is the host tree's own script, name the library and the daemon of THIS tree
+FRARGS=""
+if [ "$FAKEROOT" = "$HOSTD/bin/fakeroot" ] && [ -f "$HOSTD/lib/libfakeroot.so" ] && [ -x "$HOSTD/bin/faked" ]; then FRARGS="-l $HOSTD/lib/libfakeroot.so -f $HOSTD/bin/faked"; fi
+# shellcheck disable=SC2086
+"$FAKEROOT" $FRARGS -- sh "$STAGE/session.sh" >"$STAGE/session.log" 2>&1 || { tail -n 20 "$STAGE/session.log" >&2; die "the unpack/hook/pack step failed (log: $STAGE/session.log)"; }
 sed -n '/^post-build\|^web-post-build\|^prune-firmware\|^repack: web engine helper/p' "$STAGE/session.log" | head -n 10 || true
 say "compressing (zstd -$ZL)"
 "$HOSTD/bin/zstd" -$ZL -z -f -T0 -q "$STAGE/bin/rootfs.cpio" -o "$STAGE/bin/rootfs.cpio.zst"

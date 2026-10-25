@@ -3,7 +3,7 @@
 #   make install DESTDIR=... installs /usr/libexec/iyakki/webview-helper
 CC ?= cc
 PKG_CONFIG ?= pkg-config
-PKGS = wpe-webkit-2.0 wpebackend-fdo-1.0 wayland-server glib-2.0 gio-2.0
+PKGS = wpe-webkit-2.0 wpebackend-fdo-1.0 wayland-server egl glesv2 gbm glib-2.0 gio-2.0
 CFLAGS ?= -O2
 override CFLAGS += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-array-bounds $(shell $(PKG_CONFIG) --cflags $(PKGS))
 LDLIBS += $(shell $(PKG_CONFIG) --libs $(PKGS))

@@ -18,6 +18,10 @@ CONFIG_MOUSE_BCM5974=m
 CONFIG_HID_APPLETB_BL=m
 CONFIG_HID_APPLETB_KBD=m
 
+# ---- Battery: every Intel MacBook (T2 or not) has an ACPI control-method battery (PNP0C0A) and the AC adapter (ADP1). Their
+# drivers (CONFIG_ACPI_BATTERY=y, CONFIG_ACPI_AC=y, CONFIG_POWER_SUPPLY=y) are set in linux.fragment, which this variant includes;
+# applesmc below does not provide the battery. docs/BATTERY.md, docs/MAC-HARDWARE.md.
+
 # ---- System Management Controller: fans, temperatures, light sensor, keyboard backlight --------------
 CONFIG_X86_PLATFORM_DEVICES=y
 CONFIG_SENSORS_APPLESMC=m
@@ -95,6 +99,18 @@ CONFIG_DRM_AMDGPU=m
 # ---- Thunderbolt and USB4 controllers (Thunderbolt 2 on the Mac mini 2014 relies on firmware-set-up PCIe hotplug) -----
 CONFIG_USB4=m
 CONFIG_HOTPLUG_PCI_PCIE=y
+
+# ---- Built-in keyboard and trackpad of the 2015-2017 MacBooks without the T2 chip (MacBook8,1 / 9,1 / 10,1, MacBookPro12,1 /
+# 13,x / 14,x): they hang off the Intel LPSS SPI controller and are served by the in-tree applespi driver (keyboard, trackpad,
+# keyboard backlight). Found on a MacBookPro14,1 with this kernel: the LPSS devices enabled but /sys/bus/spi did not exist, because
+# CONFIG_SPI was off, so only a USB keyboard and mouse worked. T2 Macs (2018 and later) use apple-bce instead and are unaffected.
+CONFIG_SPI=y
+CONFIG_SPI_PXA2XX=m
+CONFIG_SPI_PXA2XX_PCI=m
+CONFIG_MFD_INTEL_LPSS_PCI=m
+CONFIG_MFD_INTEL_LPSS_ACPI=m
+CONFIG_KEYBOARD_APPLESPI=m
+CONFIG_INPUT_UINPUT=m
 
 # ---- Modules: no signature enforcement, so a prebuilt driver-pack module for this exact kernel can load ------------
 # (not set: CONFIG_MODULE_SIG_FORCE, CONFIG_SECURITY_LOCKDOWN_LSM; leaving them unset is the existing behaviour)

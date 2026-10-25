@@ -1,0 +1,31 @@
+{
+  "id": "busybox-httpd",
+  "name": "BusyBox web server (example)",
+  "example": true,
+  "description": "EXAMPLE. A tiny static web server (BusyBox httpd, about 2 MB) that serves one page. It shows what an image app is; it is not a recommendation.",
+  "kind": "container",
+  "image": "docker.io/library/busybox:1.36@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "command": [
+    "sh",
+    "-c",
+    "echo '<h1>IYAKKI image app example</h1>' > /www/index.html && exec httpd -f -p 8080 -h /www"
+  ],
+  "ports": [
+    {
+      "name": "http",
+      "port": 8080
+    }
+  ],
+  "env": [],
+  "volumes": [
+    {
+      "name": "www",
+      "path": "/www",
+      "size_mb": 8
+    }
+  ],
+  "licence": "GPL-2.0-only (BusyBox)",
+  "homepage": "https://busybox.net",
+  "memory_mb": 64,
+  "cpu_milli": 200
+}

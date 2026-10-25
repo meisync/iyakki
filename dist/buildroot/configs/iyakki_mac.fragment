@@ -18,3 +18,11 @@ BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki/patches $(BR2_EXT
 #    (built-in speaker, headphone jack) on T2 Macs such as the Mac mini 2018. Built against this image's kernel, loaded by its
 #    PCI id at boot. Tried by hand on a Mac mini 2018 (docs/MAC-HARDWARE.md section 6); this package itself has not been built yet.
 BR2_PACKAGE_APPLE_BCE=y
+# 5. snd-hda-macbookpro (davidjo, GPL-2.0, out of tree; package/snd-hda-macbookpro): speaker and headphone output of the Cirrus Logic
+#    CS8409 on MacBookPro13,x/14,x (2016-2017, no T2) and the 2017-2019 iMacs, whose generic codec driver has no volume controls.
+#    The macweb and pc images take the module from this build's kernel donor (repack.sh). Not tried on a Mac yet (docs/MAC-HARDWARE.md).
+BR2_PACKAGE_SND_HDA_MACBOOKPRO=y
+# 6. facetimehd (patjak, GPL-2.0, out of tree; package/facetimehd): the built-in FaceTime HD camera (PCI 14e4:1570) of non-T2 MacBooks such as the
+#    MacBookPro14,1. Builds with the kernel as it is (the package also builds the kernel's videobuf2-dma-sg.ko). Needs Apple's firmware, made
+#    on the person's machine by the "Camera firmware" job; not shipped. The macweb and pc images take the module from the kernel donor (repack.sh).
+BR2_PACKAGE_FACETIMEHD=y

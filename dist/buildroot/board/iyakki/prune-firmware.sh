@@ -11,13 +11,23 @@ FW="$2"
 FW="$(cd "$FW" && pwd -P)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-grep -v '^[[:space:]]*#' "$LIST" | grep -v '^[[:space:]]*$' > "$WORK/patterns" || true
+grep -v '^[[:space:]]*#' "$LIST" | grep -v '^[[:space:]]*$' > "$WORK/allpatterns" || true
+# a line starting with '!' is an exclusion: a file it matches is dropped even if a keep pattern matches too (used for blobs whose licence
+# does not allow shipping them to everyone, docs/FIRMWARE-LICENCES.md)
+grep -v '^!' "$WORK/allpatterns" > "$WORK/patterns" || true
+grep '^!' "$WORK/allpatterns" | sed 's/^!//' > "$WORK/excludes" || true
 [ -s "$WORK/patterns" ] || { echo "prune-firmware: $LIST has no patterns; refusing to delete all firmware" >&2; exit 1; }
 (cd "$FW" && find . \( -type f -o -type l \) | sed 's|^\./||' | LC_ALL=C sort) > "$WORK/all"
 
 # 1. what the patterns match (no pathname expansion of the patterns themselves: they are only used by `case`)
 set -f
 while IFS= read -r f; do
+  excluded=0
+  while IFS= read -r x; do
+    # shellcheck disable=SC2254
+    case "$f" in $x) excluded=1; break ;; esac
+  done < "$WORK/excludes"
+  [ "$excluded" = 0 ] || continue
   while IFS= read -r p; do
     # shellcheck disable=SC2254
     case "$f" in $p) printf '%s\n' "$f"; break ;; esac

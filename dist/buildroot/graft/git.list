@@ -1,0 +1,27 @@
+# Files of the `git` graft (F-GIT-01): paths relative to the base build's target/ (target/buildroot-web/target), one per line.
+# A line may be a glob. A line starting with "-" removes matching files from what was collected so far.
+# Built with: make -C target/buildroot-web git iyakki-git-ssh     (docs/GIT-AND-SSH.md, docs/BUILD-INCREMENTAL.md)
+usr/bin/git
+usr/libexec/git-core
+usr/share/git-core
+usr/lib/libcurl.so*
+usr/libexec/iyakki/git-ssh
+# Perl and Python helpers need interpreters the image does not have (graft.sh also skips every file whose first line is a perl
+# or python shebang); these are named so that the list says why they are not here
+-usr/libexec/git-core/git-cvs*
+-usr/libexec/git-core/git-archimport
+-usr/libexec/git-core/git-svn
+-usr/libexec/git-core/git-send-email
+-usr/libexec/git-core/git-instaweb
+-usr/libexec/git-core/git-p4
+-usr/libexec/git-core/git-daemon
+-usr/libexec/git-core/git-http-backend
+-usr/libexec/git-core/git-imap-send
+-usr/libexec/git-core/git-shell
+-usr/share/git-core/templates/hooks/*.sample
+-usr/libexec/git-core/mergetools
+-usr/libexec/git-core/git-mergetool*
+-usr/libexec/git-core/git-difftool*
+-usr/libexec/git-core/git-http-push
+-usr/libexec/git-core/scalar
+-usr/libexec/git-core/git-credential-cache*
