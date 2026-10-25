@@ -67,6 +67,11 @@ pub fn sniff_image(b: Vec<u8>) -> Option<(Vec<u8>, &'static str)> {
 /// too, and its plain answer (`{"status":"success"}`) is the end.
 pub fn pull_line(line: &str) -> Option<PullLine> {
     let t = line.trim();
+    // Lemonade's end of a download is the event NAME (`event: complete`); the data line after it still carries bytes fields (zeros), which
+    // read as one more progress step, so the name is what says "finished". `event: error` is followed by a data line with the error.
+    if t.strip_prefix("event:").is_some_and(|e| e.trim() == "complete") {
+        return Some(PullLine::Done);
+    }
     let t = t.strip_prefix("data:").map_or(t, str::trim);
     let v: Value = serde_json::from_str(t).ok()?;
     if let Some(e) = v.get("error").and_then(Value::as_str) {
@@ -172,6 +177,14 @@ mod tests {
         assert_eq!(pull_line("data: {\"file\":\"sd_xl.safetensors\",\"file_index\":1,\"total_files\":2,\"bytes_downloaded\":10,\"bytes_total\":40,\"percent\":25}"), Some(PullLine::Progress { status: "downloading sd_xl.safetensors (file 1 of 2)".into(), completed: 10, total: 40 }));
         assert_eq!(pull_line("data: {\"file_index\":2,\"total_files\":2,\"percent\":100}"), Some(PullLine::Done));
         assert_eq!(pull_line("data: {\"error\":\"disk full\"}"), Some(PullLine::Error("disk full".into())));
+        // the real stream of a model that is already on the server (Whisper-Tiny, 2026-10-24): two progress events, then `complete` whose data
+        // line has bytes fields; the pull must end as Done, not as 'the server stopped answering'
+        let real = "event: progress\ndata: {\"bytes_downloaded\":0,\"bytes_previously_downloaded\":0,\"bytes_total\":77691713,\"file\":\"ggml-tiny.bin\",\"file_index\":1,\"percent\":0,\"total_download_size\":77691713,\"total_files\":1}\n\nevent: progress\ndata: {\"bytes_downloaded\":77691713,\"bytes_previously_downloaded\":77691713,\"bytes_total\":77691713,\"file\":\"ggml-tiny.bin\",\"file_index\":1,\"percent\":100,\"total_download_size\":77691713,\"total_files\":1}\n\nevent: complete\ndata: {\"bytes_downloaded\":0,\"bytes_previously_downloaded\":0,\"bytes_total\":0,\"file\":\"\",\"file_index\":1,\"percent\":100,\"total_download_size\":0,\"total_files\":1}\n";
+        let lines: Vec<Option<PullLine>> = real.lines().map(pull_line).collect();
+        assert!(lines.iter().any(|l| *l == Some(PullLine::Done)), "{lines:?}");
+        let first_done = lines.iter().position(|l| *l == Some(PullLine::Done)).unwrap();
+        assert!(lines[..first_done].iter().all(|l| matches!(l, None | Some(PullLine::Progress { .. }))), "nothing before the end is an error: {lines:?}");
+        assert_eq!(pull_line("event: error"), None);
         assert_eq!(pull_line("{\"status\":\"error\",\"message\":\"no such model\"}"), Some(PullLine::Error("no such model".into())));
         assert!(explain_pull_error("qwen-image-2.1", "pull model manifest: file does not exist").contains("was not found in the Ollama library"));
         assert!(explain_pull_error("m", "no space left on device").contains("no room"));

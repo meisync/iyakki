@@ -24,6 +24,8 @@ mod fake;
 mod tests;
 #[cfg(test)]
 mod autopilot_tests;
+#[cfg(test)]
+mod auth_tests;
 
 use std::path::Path;
 use std::time::Duration;
@@ -439,6 +441,10 @@ pub trait ExternalAgent: Send + Sync {
     fn auth_offline(&self) -> Auth {
         Auth::Unknown
     }
+    /// The files the program keeps its login in (paths only, for the log line that says why it looks signed out).
+    fn auth_files(&self, _env: &[(String, String)]) -> Vec<std::path::PathBuf> {
+        vec![]
+    }
     /// The environment this program is looked at and started with besides the process's own: the person's home.
     fn child_env(&self) -> Vec<(String, String)> {
         vec![]
@@ -486,14 +492,70 @@ pub fn explain(a: &dyn ExternalAgent, installed: bool, auth: &Auth) -> (String, 
     ("ready".into(), String::new())
 }
 
+/// Run a lookup; a program that has not answered in time (a big binary starting cold from the disk right after boot) is given one
+/// more, longer try before anything is concluded from the silence.
+fn run_patient(runner: &dyn Runner, cwd: &Path, argv: &[String], env: &[(String, String)]) -> Out {
+    let o = runner.run(cwd, argv, env, Duration::from_secs(15), 16 * 1024, None);
+    if o.timed_out {
+        return runner.run(cwd, argv, env, Duration::from_secs(90), 16 * 1024, None);
+    }
+    o
+}
+
+/// Anything that looks like a token or an address replaced, so a line may go to the system log: long runs of token characters,
+/// known token prefixes and words with an `@`.
+pub fn redact(s: &str) -> String {
+    let is_tok = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '=' | '+' | '/' | '@');
+    let mut out = String::new();
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        if !run.is_empty() {
+            let r = run.as_str();
+            let prefixed = ["sk-", "ghp_", "gho_", "ghu_", "ghs_", "github_pat_", "eyJ", "xox"].iter().any(|p| r.contains(p)) && r.len() >= 12;
+            if r.contains('@') && r.len() > 3 && !r.starts_with('@') {
+                out.push_str("[address]");
+            } else if prefixed || (r.len() >= 24 && !r.starts_with('/')) {
+                out.push_str("[redacted]");
+            } else {
+                out.push_str(r);
+            }
+            run.clear();
+        }
+    };
+    for c in s.chars() {
+        if is_tok(c) {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
+fn home_of(env: &[(String, String)], k: &str) -> String {
+    env.iter().find(|(n, _)| n == k).map_or_else(|| format!("(process: {})", std::env::var(k).unwrap_or_default()), |(_, v)| v.clone())
+}
+
+/// One line for the system log saying why an agent looks signed out: the home and config folder it was asked in, the exit code,
+/// whether its login file is there (the path only) and the start of what it printed, with anything token-like replaced.
+pub fn signed_out_line(a: &dyn ExternalAgent, env: &[(String, String)], o: Option<&Out>) -> String {
+    let files: Vec<String> = a.auth_files(env).iter().map(|f| format!("{} {}", f.display(), if f.is_file() { "exists" } else { "missing" })).collect();
+    let (code, text) = match o {
+        Some(o) => (o.code.map_or("none".to_string(), |c| c.to_string()) + if o.timed_out { " (timed out)" } else { "" }, redact(&tidy(&o.combined().replace('\n', " "), 160))),
+        None => ("-".to_string(), String::new()),
+    };
+    format!("agent {}: looks signed out (HOME={}, CLAUDE_CONFIG_DIR={}, exit {code}, login files: [{}], output: {text})", a.id(), home_of(env, "HOME"), home_of(env, "CLAUDE_CONFIG_DIR"), files.join(", "))
+}
+
 /// Look at the program: is it there, which version, is it signed in. Only `--version` and the status command run; no model is called.
 pub fn detect(a: &dyn ExternalAgent, runner: &dyn Runner, cwd: &Path) -> Status {
     let prog = a.program();
     let env = a.child_env();
-    let timeout = Duration::from_secs(15);
     let mut argv = vec![prog.clone()];
     argv.extend(a.version_args());
-    let o = runner.run(cwd, &argv, &env, timeout, 16 * 1024, None);
+    let o = run_patient(runner, cwd, &argv, &env);
     if o.missing || (o.code.is_none() && !o.timed_out) {
         let (chip, fix) = explain(a, false, &Auth::Unknown);
         return Status { installed: false, version: String::new(), auth: Auth::Unknown, mode: a.mode(), chip, fix };
@@ -504,6 +566,7 @@ pub fn detect(a: &dyn ExternalAgent, runner: &dyn Runner, cwd: &Path) -> Status 
         let (chip, fix) = explain(a, false, &Auth::Unknown);
         return Status { installed: false, version, auth: Auth::Unknown, mode: a.mode(), chip, fix: format!("{fix} (`{} --version` failed: {})", prog, o.combined().lines().next().unwrap_or("")) };
     }
+    let mut last: Option<Out> = None;
     let auth = if !a.cfg_key_ref().is_empty() {
         Auth::Key
     } else {
@@ -511,13 +574,23 @@ pub fn detect(a: &dyn ExternalAgent, runner: &dyn Runner, cwd: &Path) -> Status 
             Some(args) => {
                 let mut argv = vec![prog];
                 argv.extend(args);
-                let o = runner.run(cwd, &argv, &env, timeout, 16 * 1024, None);
-                a.parse_auth(&o)
+                let o = run_patient(runner, cwd, &argv, &env);
+                let r = a.parse_auth(&o);
+                last = Some(o);
+                r
             }
             None => a.auth_offline(),
         }
     };
-    let (chip, fix) = explain(a, true, &auth);
+    if auth == Auth::SignedOut {
+        log::warn!("{}", signed_out_line(a, &env, last.as_ref()));
+    }
+    let (chip, mut fix) = explain(a, true, &auth);
+    // the login files live in the home folder on the boot drive: while it is lost "signed out" is not the real reason
+    let snap = iyakki_storage::loss::snapshot();
+    if !snap.state.healthy() {
+        fix = format!("{} {fix}", iyakki_storage::loss::unavailable_text(&snap));
+    }
     Status { installed, version, auth, mode: a.mode(), chip, fix }
 }
 
@@ -533,6 +606,11 @@ pub fn tidy(s: &str, n: usize) -> String {
 
 /// Plain words for a failed run, with the fix, from what the program printed.
 pub fn classify_failure(label: &str, login_help: &str, text: &str) -> String {
+    // the program's home (login, settings, work folder) is on the boot drive: while that is lost, say so instead of a bare error
+    let snap = iyakki_storage::loss::snapshot();
+    if !snap.state.healthy() {
+        return format!("{label} cannot work right now. {}", iyakki_storage::loss::unavailable_text(&snap));
+    }
     let l = text.to_lowercase();
     let has = |ws: &[&str]| ws.iter().any(|w| l.contains(w));
     let tail = tidy(text.trim(), 400);
@@ -555,6 +633,12 @@ pub fn classify_failure(label: &str, login_help: &str, text: &str) -> String {
 pub struct StatusCache {
     map: std::sync::Mutex<std::collections::BTreeMap<String, Status>>,
     busy: std::sync::atomic::AtomicBool,
+    /// Bumped when the person signs in or out: a lookup that began before it describes another home and is dropped.
+    generation: std::sync::atomic::AtomicU64,
+    /// A lookup asked for while one was running: done right after it, with the newest settings.
+    pending: std::sync::Mutex<Option<AgentsCfg>>,
+    /// When each agent was last looked at.
+    looked: std::sync::Mutex<std::collections::BTreeMap<String, std::time::Instant>>,
     /// Model lists the CLIs printed: (when, models). Kept for [`MODELS_TTL`] and saved in `file`.
     models: std::sync::Mutex<std::collections::BTreeMap<String, (u64, Vec<ModelInfo>)>>,
     file: Option<std::path::PathBuf>,
@@ -615,9 +699,42 @@ impl StatusCache {
     }
     pub fn set(&self, id: &str, s: Status) {
         self.map.lock().unwrap_or_else(|e| e.into_inner()).insert(id.into(), s);
+        self.looked.lock().unwrap_or_else(|e| e.into_inner()).insert(id.into(), std::time::Instant::now());
     }
     pub fn busy(&self) -> bool {
         self.busy.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Forget what was found (the person signed in or out, so the home the programs look in changed): the screens show
+    /// "checking…" and look again with the new settings; a lookup still running for the old home is dropped.
+    pub fn invalidate(&self) {
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.map.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.looked.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    /// [`invalidate`](Self::invalidate), then look at every agent again with `cfg`.
+    pub fn reset(self: &std::sync::Arc<Self>, cfg: AgentsCfg) {
+        self.invalidate();
+        self.refresh(cfg);
+    }
+
+    /// A screen shows an agent that looks signed out (or not found): look again, at most every 5 seconds, so a status found at a
+    /// bad moment (before sign-in, with the network down, the program starting cold) mends itself.
+    pub fn recheck(self: &std::sync::Arc<Self>, cfg: AgentsCfg, id: &str) {
+        self.recheck_after(cfg, id, Duration::from_secs(5));
+    }
+
+    pub fn recheck_after(self: &std::sync::Arc<Self>, cfg: AgentsCfg, id: &str, min: Duration) {
+        let stale = match self.get(id) {
+            Some(s) => !s.ready() || !s.installed,
+            None => return,
+        };
+        let due = self.looked.lock().unwrap_or_else(|e| e.into_inner()).get(id).is_none_or(|t| t.elapsed() >= min);
+        if stale && due {
+            self.looked.lock().unwrap_or_else(|e| e.into_inner()).insert(id.into(), std::time::Instant::now());
+            self.refresh_one(cfg, id, None);
+        }
     }
 
     /// Look at one agent again (after a sign-in or sign-out), on a thread of its own; `done` is called with the new status.
@@ -626,8 +743,11 @@ impl StatusCache {
         let id = id.to_string();
         std::thread::spawn(move || {
             if let Some(a) = cfg.agent(&id) {
+                let gen = me.generation.load(std::sync::atomic::Ordering::SeqCst);
                 let st = detect(a.as_ref(), &crate::wsexec::System, &std::env::temp_dir());
-                me.set(&id, st.clone());
+                if me.generation.load(std::sync::atomic::Ordering::SeqCst) == gen {
+                    me.set(&id, st.clone());
+                }
                 if let Some(f) = done {
                     f(&st);
                 }
@@ -635,33 +755,56 @@ impl StatusCache {
         });
     }
 
-    /// Look at every agent again, on a thread of its own (`--version` and the status command only; no model is called).
+    /// Look at every agent again, on a thread of its own (`--version` and the status command only; no model is called). A request
+    /// that comes while one is running is not lost: it runs next, with the newest settings.
     pub fn refresh(self: &std::sync::Arc<Self>, cfg: AgentsCfg) {
-        if self.busy.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            return;
+        {
+            let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            if self.busy.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                *p = Some(cfg);
+                return;
+            }
         }
         let me = self.clone();
         std::thread::spawn(move || {
-            let cwd = std::env::temp_dir();
-            for a in cfg.all() {
-                let st = detect(a.as_ref(), &crate::wsexec::System, &cwd);
-                // only when the person pressed Detect and the program is there: ask the CLI for its models, with a short timeout
-                if st.installed {
-                    if let Some(mut argv) = a.list_models_argv() {
-                        if !argv[0].contains('/') {
-                            argv[0] = a.program_for(&argv[0]);
-                        }
-                        let o = crate::wsexec::System.run(&cwd, &argv, &[], Duration::from_secs(10), 64 * 1024, None);
-                        let list = if o.ok() { a.parse_models(&o) } else { vec![] };
-                        if !list.is_empty() {
-                            me.set_models(&a.id(), list);
-                        }
+            let mut cfg = cfg;
+            loop {
+                me.refresh_now(&cfg);
+                let mut p = me.pending.lock().unwrap_or_else(|e| e.into_inner());
+                match p.take() {
+                    Some(next) => cfg = next,
+                    None => {
+                        me.busy.store(false, std::sync::atomic::Ordering::SeqCst);
+                        break;
                     }
                 }
-                me.set(&a.id(), st);
             }
-            me.busy.store(false, std::sync::atomic::Ordering::SeqCst);
         });
+    }
+
+    fn refresh_now(&self, cfg: &AgentsCfg) {
+        let cwd = std::env::temp_dir();
+        let gen = self.generation.load(std::sync::atomic::Ordering::SeqCst);
+        for a in cfg.all() {
+            let st = detect(a.as_ref(), &crate::wsexec::System, &cwd);
+            // only when the person pressed Detect and the program is there: ask the CLI for its models, with a short timeout
+            if st.installed {
+                if let Some(mut argv) = a.list_models_argv() {
+                    if !argv[0].contains('/') {
+                        argv[0] = a.program_for(&argv[0]);
+                    }
+                    let o = crate::wsexec::System.run(&cwd, &argv, &[], Duration::from_secs(10), 64 * 1024, None);
+                    let list = if o.ok() { a.parse_models(&o) } else { vec![] };
+                    if !list.is_empty() {
+                        self.set_models(&a.id(), list);
+                    }
+                }
+            }
+            if self.generation.load(std::sync::atomic::Ordering::SeqCst) != gen {
+                return; // signed in or out meanwhile: this describes the old home
+            }
+            self.set(&a.id(), st);
+        }
     }
 }
 

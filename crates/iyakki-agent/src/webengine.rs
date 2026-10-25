@@ -365,10 +365,129 @@ pub fn helper_env(profile: &Path) -> Option<Vec<(String, String)>> {
     v.retain(|(k, _)| !k.starts_with("WLR_") && !k.starts_with("LIBSEAT") && k != "SEATD_VTBOUND");
     let vendors: Vec<String> = (0..4).filter_map(|i| std::fs::read_to_string(format!("/sys/class/drm/card{i}/device/vendor")).ok()).collect();
     let marker = std::fs::read_to_string(GL_MARKER).unwrap_or_default();
-    if force_software_gl(&vendors, &marker) {
+    let software = force_software_gl(&vendors, &marker);
+    if software {
         v.push(("LIBGL_ALWAYS_SOFTWARE".into(), "1".into()));
     }
+    // rendering experiments an administrator switches on by writing a word into <data>/web-profile/web-tuning (docs/BROWSER-SPEED.md)
+    let mode = profile.parent().and_then(|d| std::fs::read_to_string(d.join("web-tuning")).ok()).unwrap_or_default();
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+    let tuned = tuning_env(&mode, cores);
+    // Mesa's software renderer starts one thread per logical CPU by default: half of them unless the web-tuning file says `lp:N`
+    if software && !tuned.iter().any(|(k, _)| k == "LP_NUM_THREADS") {
+        v.push(("LP_NUM_THREADS".into(), llvmpipe_threads(cores).to_string()));
+    }
+    v.extend(tuned);
+    // sound: where the sound output is a T2 Mac's, the engine plays through its own PCM (softvol.rs), see web_audio_env
+    let asound = std::fs::read_to_string(ASOUND_CONF).unwrap_or_default();
+    if let Some(dir) = profile.parent() {
+        v.extend(web_audio_env(&asound, &dir.join("web-alsa.conf")));
+    }
+    v.extend(web_autoplay_env(&asound));
     Some(v)
+}
+
+/// The system's ALSA configuration, written by the sound watcher ([`crate::softvol`]).
+const ASOUND_CONF: &str = "/etc/asound.conf";
+
+/// `ALSA_CONFIG_PATH` for the engine's processes when the system configuration has the web PCM ([`crate::softvol::WEB_PCM`]):
+/// the file (written here) loads the system's ALSA configuration and makes that PCM the engine's `default`, so GStreamer's
+/// `alsasink` never goes through the rate conversion that is broken on the T2 sound device. Empty on every other machine.
+pub fn web_audio_env(asound_conf: &str, conf_path: &Path) -> Vec<(String, String)> {
+    let defined = asound_conf.contains(&format!("pcm.{} {{", crate::softvol::WEB_PCM));
+    if !defined {
+        return Vec::new();
+    }
+    if std::fs::read_to_string(conf_path).ok().as_deref() != Some(crate::softvol::WEB_ALSA_CONF) && std::fs::write(conf_path, crate::softvol::WEB_ALSA_CONF).is_err() {
+        return Vec::new();
+    }
+    vec![("ALSA_CONFIG_PATH".to_string(), conf_path.to_string_lossy().into_owned())]
+}
+
+/// `IYAKKI_WEBVIEW_AUTOPLAY=deny` where the sound output cannot be shared (a configuration without dmix: the T2 Mac's speaker, a card
+/// with a hardware volume). The first media element that opens the device holds it, and pages such as YouTube open several muted
+/// previews on their own, so the video that is meant to be heard stays silent. With deny a click starts the media instead.
+/// Nothing is set where the system configuration is unknown (empty) or mixes (dmix).
+pub fn web_autoplay_env(asound_conf: &str) -> Vec<(String, String)> {
+    if asound_conf.trim().is_empty() || asound_conf.contains("type dmix") {
+        return Vec::new();
+    }
+    vec![("IYAKKI_WEBVIEW_AUTOPLAY".to_string(), "deny".to_string())]
+}
+
+/// How many threads Mesa's software renderer (llvmpipe) may use for the engine: half the logical CPUs, at least 2. By default it
+/// starts one per logical CPU, and on a 2020 MacBook Pro (8 threads, no Intel driver in the image) that left the video decoder no
+/// core of its own: a 720p60 YouTube video dropped 428 to 564 of about 700 frames in four runs, and none in three runs with 4 threads
+/// (docs/BROWSER-SPEED.md, "Interactive performance"). Pages that only scroll used 30 to 45 % less CPU for the same frame rate.
+pub fn llvmpipe_threads(cores: usize) -> usize {
+    (cores / 2).clamp(2, 16).min(cores.max(1))
+}
+
+/// Engine settings for the experiment words in `<data>/web-profile/web-tuning` (separated by spaces; `docs/BROWSER-SPEED.md`):
+/// `cpu` paints on the processor (WebKit's default for painting is the GPU through GL, which on a machine whose only GL is llvmpipe
+/// means software GL plus a copy), `cpu:N` the same with N painting threads (WebKit's default is half the cores), `gpu:N` GL
+/// painting with N threads (default 1, 0 paints on the main thread), `lp:N` N llvmpipe threads (default [`llvmpipe_threads`]),
+/// `gstgl:off` GStreamer's own video sink instead of the GL one, `nice:N` (1 to 19) the engine N steps below the shell, `fps:N` (5 to 60) the most pictures a second the helper sends (default 30). Anything else, including an empty file, changes nothing. The names
+/// were read from the WPE WebKit 2.50 sources shipped in the image build (`SkiaPaintingEngine.cpp`, `WebProcessGLib.cpp`) and from
+/// the shipped binary; which one is faster on a given Mac has to be measured there.
+pub fn tuning_env(mode: &str, cores: usize) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = Vec::new();
+    let mut push = |v: &mut Vec<(String, String)>, k: &str, val: String| {
+        v.retain(|(name, _)| name != k);
+        v.push((k.to_string(), val));
+    };
+    for word in mode.split_whitespace().take(8) {
+        let (kind, arg) = match word.split_once(':') {
+            Some((k, a)) => (k, Some(a.trim())),
+            None => (word, None),
+        };
+        let n = arg.and_then(|a| a.parse::<usize>().ok()).map(|n| n.min(cores.max(1)));
+        match kind {
+            "cpu" => {
+                push(&mut v, "WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1".to_string());
+                if let Some(n) = n {
+                    push(&mut v, "WEBKIT_SKIA_CPU_PAINTING_THREADS", n.to_string());
+                }
+            }
+            "gpu" => {
+                if let Some(n) = n {
+                    push(&mut v, "WEBKIT_SKIA_GPU_PAINTING_THREADS", n.to_string());
+                }
+            }
+            "lp" => {
+                if let Some(n) = n.filter(|n| *n >= 1) {
+                    push(&mut v, "LP_NUM_THREADS", n.to_string());
+                }
+            }
+            "gstgl" if arg == Some("off") => push(&mut v, "WEBKIT_GST_DISABLE_GL_SINK", "1".to_string()),
+            // the helper's own switches (helper.c): run the engine N steps below the shell; the most frames a second it sends
+            "nice" => {
+                if let Some(n) = arg.and_then(|a| a.parse::<u32>().ok()).filter(|n| (1..=19).contains(n)) {
+                    push(&mut v, "IYAKKI_WEBVIEW_NICE", n.to_string());
+                }
+            }
+            "fps" => {
+                if let Some(n) = arg.and_then(|a| a.parse::<u32>().ok()).filter(|n| (5..=60).contains(n)) {
+                    push(&mut v, "IYAKKI_WEBVIEW_FPS", n.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    v
+}
+
+/// The two variables that make the helper load the person's content-filter rule list (written by the browser next to the
+/// profile when the lists change): empty when there is none or blocking is off.
+pub fn filter_env(profile: &Path) -> Vec<(String, String)> {
+    let json = profile.join("content-filter.json");
+    let id = std::fs::read_to_string(profile.join("content-filter.id")).unwrap_or_default();
+    let id = id.trim();
+    if json.is_file() && !id.is_empty() && id.len() <= 64 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
+        vec![("IYAKKI_WEBVIEW_FILTER".into(), json.to_string_lossy().into_owned()), ("IYAKKI_WEBVIEW_FILTER_ID".into(), id.to_string())]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Written by `web-post-build.sh`: `intel` when Mesa was built with an Intel GPU driver (iris or crocus), `software` when not.
@@ -388,6 +507,28 @@ pub fn user_agent_suffix() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_engine_gets_its_own_alsa_default_only_where_the_system_configuration_has_the_web_pcm() {
+        let d = std::env::temp_dir().join(format!("iyakki-webalsa-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("web-alsa.conf");
+        assert!(super::web_audio_env("pcm.iyakkivol {\n}\n", &f).is_empty());
+        assert!(!f.exists());
+        let env = super::web_audio_env("pcm.iyakkiweb {\n type linear\n}\n", &f);
+        assert_eq!(env, vec![("ALSA_CONFIG_PATH".to_string(), f.to_string_lossy().into_owned())]);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), crate::softvol::WEB_ALSA_CONF);
+        assert!(super::web_audio_env("pcm.iyakkiweb {\n}\n", &d.join("no/such/dir/x.conf")).is_empty());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn autoplay_is_denied_only_where_the_sound_output_cannot_be_shared() {
+        assert!(super::web_autoplay_env("").is_empty(), "unknown configuration: unchanged");
+        assert!(super::web_autoplay_env("pcm.iyakkimix {\n    type dmix\n}\n").is_empty(), "a mixing output shares the device");
+        let env = super::web_autoplay_env("pcm.iyakkivol {\n    type softvol\n    slave.pcm \"plughw:0,0\"\n}\n");
+        assert_eq!(env, vec![("IYAKKI_WEBVIEW_AUTOPLAY".to_string(), "deny".to_string())]);
+    }
+
     use super::*;
     use iyakki_sec::policy::Role;
 
@@ -434,6 +575,45 @@ mod tests {
         assert!(generic.starts_with("This page"), "{generic}");
         assert!(missing_engine_banner("example.org", true, true).is_none());
         assert!(FULL_ENGINE_HELP_HTML.contains("macweb") && FULL_ENGINE_HELP_HTML.contains("window mode"));
+    }
+
+    #[test]
+    fn rendering_experiments_are_off_unless_asked_for() {
+        assert!(tuning_env("", 8).is_empty() && tuning_env("gpu", 8).is_empty() && tuning_env("nonsense", 8).is_empty() && tuning_env("cpu:x", 8).len() == 1);
+        assert_eq!(tuning_env("cpu\n", 8), vec![("WEBKIT_SKIA_ENABLE_CPU_RENDERING".to_string(), "1".to_string())]);
+        let v = tuning_env("cpu:4", 8);
+        assert_eq!(v[1], ("WEBKIT_SKIA_CPU_PAINTING_THREADS".to_string(), "4".to_string()));
+        assert_eq!(tuning_env("cpu:64", 2)[1].1, "2", "never more threads than cores");
+        assert_eq!(tuning_env("gpu:0", 8), vec![("WEBKIT_SKIA_GPU_PAINTING_THREADS".to_string(), "0".to_string())]);
+        // several words, llvmpipe threads, the video sink; a later word for the same variable wins; junk is ignored
+        let v = tuning_env("cpu:4 lp:3 gstgl:off lp:2 zzz lp:0 gstgl:on", 8);
+        let get = |k: &str| v.iter().find(|(n, _)| n == k).map(|(_, x)| x.as_str());
+        assert_eq!((get("LP_NUM_THREADS"), get("WEBKIT_GST_DISABLE_GL_SINK"), get("WEBKIT_SKIA_CPU_PAINTING_THREADS")), (Some("2"), Some("1"), Some("4")));
+        assert_eq!(v.iter().filter(|(n, _)| n == "LP_NUM_THREADS").count(), 1, "one entry per variable");
+        assert_eq!(tuning_env("nice:5 fps:60", 8), vec![("IYAKKI_WEBVIEW_NICE".to_string(), "5".to_string()), ("IYAKKI_WEBVIEW_FPS".to_string(), "60".to_string())]);
+        assert!(tuning_env("nice:0 nice:20 nice:-1 nice fps:4 fps:61 fps", 8).is_empty(), "out of range values change nothing");
+        assert!(tuning_env("lp:0", 8).is_empty() && tuning_env("lp", 8).is_empty() && tuning_env("gstgl", 8).is_empty());
+        assert_eq!(tuning_env("lp:64", 4)[0].1, "4", "never more threads than cores");
+        assert_eq!(tuning_env(&"cpu ".repeat(100), 8).len(), 1, "a long file is bounded");
+        // llvmpipe gets half the logical CPUs, at least two (one on a single-CPU machine)
+        assert_eq!([llvmpipe_threads(1), llvmpipe_threads(2), llvmpipe_threads(4), llvmpipe_threads(8), llvmpipe_threads(16), llvmpipe_threads(64)], [1, 2, 2, 4, 8, 16]);
+    }
+
+    #[test]
+    fn the_filter_variables_need_both_files_and_a_safe_id() {
+        let d = std::env::temp_dir().join(format!("iyakki-fenv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(filter_env(&d).is_empty());
+        std::fs::write(d.join("content-filter.json"), "[]").unwrap();
+        assert!(filter_env(&d).is_empty(), "no id yet");
+        std::fs::write(d.join("content-filter.id"), "ab12-CD_3\n").unwrap();
+        let v = filter_env(&d);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[1].1, "ab12-CD_3");
+        std::fs::write(d.join("content-filter.id"), "../x").unwrap();
+        assert!(filter_env(&d).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

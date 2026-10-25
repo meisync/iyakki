@@ -225,7 +225,7 @@ fn setup_is_refused_when_a_cluster_exists_when_not_root_in_a_window_or_on_a_memo
         std::fs::create_dir_all(w.dir.join("usr/local/bin")).unwrap();
         std::fs::write(w.dir.join("usr/local/bin/k3s"), "x").unwrap();
     })));
-    cases.push(("lib", Box::new(|w: &World| std::fs::create_dir_all(w.dir.join("var/lib/rancher/k3s")).unwrap())));
+    cases.push(("lib", Box::new(|w: &World| std::fs::create_dir_all(w.dir.join("var/lib/rancher/k3s/server")).unwrap())));
     cases.push(("conn", Box::new(|w: &World| w.d.assume_connected(Some("k3s (kubeconfig /etc/rancher/k3s/k3s.yaml)")))));
     cases.push(("sandbox", Box::new(|w: &World| w.d.set_sandbox_probe(Arc::new(|| true)))));
     for (tag, make) in cases {
@@ -545,4 +545,631 @@ fn autostart_starts_an_installed_cluster_once_unless_it_is_switched_off_or_this_
     w.d.set_registry_choice("system", "root").unwrap();
     assert_eq!(w.d.installed().unwrap().registry_choice, "system");
     assert!(w.d.set_registry_choice("bogus", "root").is_err());
+}
+
+// ------------------------------------------------------------------------------------------------ waiting for the network
+
+const ROUTE_HEAD: &str = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n";
+const ROUTE_DEFAULT: &str = "eth0\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n";
+const ROUTE_LAN: &str = "eth0\t0000A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n";
+
+fn route_text(body: &str) -> String {
+    format!("{ROUTE_HEAD}{body}")
+}
+
+#[test]
+fn the_route_file_parser_finds_an_ipv4_default_route_on_an_interface_that_is_up() {
+    assert!(has_default_route(&route_text(&format!("{ROUTE_LAN}{ROUTE_DEFAULT}"))));
+    assert!(!has_default_route(&route_text(ROUTE_LAN)), "only the local network");
+    assert!(!has_default_route(ROUTE_HEAD), "header only");
+    assert!(!has_default_route(""), "empty or missing file");
+    assert!(!has_default_route(&route_text("lo\t00000000\t00000000\t0001\t0\t0\t0\t00000000\t0\t0\t0\n")), "the loopback does not count");
+    assert!(!has_default_route(&route_text("eth0\t00000000\t0100A8C0\t0002\t0\t0\t100\t00000000\t0\t0\t0\n")), "gateway flag but not up");
+    assert!(!has_default_route(&route_text("eth0\t00000000\t0100A8C0\t0003\t0\t0\t100\t00FFFFFF\t0\t0\t0\n")), "a netmask other than 0 is not a default route");
+    // IPv6 only: /proc/net/ipv6_route lines (32 hex digit addresses) are not IPv4 default routes
+    assert!(!has_default_route(&route_text("00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000064 00000001 00000000 00000003 eth0\n")));
+    // malformed lines are skipped, a good one after them still counts
+    assert!(!has_default_route(&route_text("garbage\neth0 00000000\nzz zz zz zz zz zz zz zz\n")));
+    assert!(has_default_route(&route_text(&format!("garbage\n{ROUTE_DEFAULT}"))));
+    assert!(has_default_route(&route_text("wlan0 00000000 0100A8C0 0003 0 0 600 00000000 0 0 0\n")), "spaces instead of tabs");
+}
+
+#[test]
+fn the_wait_ends_when_a_route_appears_says_no_network_yet_after_the_grace_time_and_never_gives_up() {
+    // fake clock: every sleep is one step; the route appears after 40 steps of 3 s = 120 s
+    let mut steps = 0u32;
+    let mut notes = vec![];
+    let r = {
+        let steps_cell = std::cell::Cell::new(0u32);
+        let r = wait_for_route(|| steps_cell.get() >= 40, |_| { steps_cell.set(steps_cell.get() + 1); true }, |n| notes.push((n, steps_cell.get())), Duration::from_secs(90), Duration::from_secs(3));
+        steps = steps_cell.get().max(steps);
+        r
+    };
+    assert_eq!(r, NetWait::Ready);
+    assert_eq!(steps, 40, "no sleep after the route showed up");
+    assert_eq!(notes, vec![(NetNote::Waiting, 0), (NetNote::NoNetworkYet, 30)], "waiting at once, no network yet after 90 s, each said once");
+    // a route that is there at once: no sleep at all
+    let mut slept = 0;
+    assert_eq!(wait_for_route(|| true, |_| { slept += 1; true }, |_| {}, Duration::from_secs(90), Duration::from_secs(3)), NetWait::Ready);
+    assert_eq!(slept, 0);
+    // cancelled (Stop) while waiting
+    let mut n = 0;
+    let r = wait_for_route(|| false, |_| { n += 1; n < 5 }, |_| {}, Duration::from_secs(90), Duration::from_secs(3));
+    assert_eq!(r, NetWait::Cancelled);
+    assert_eq!(n, 5);
+}
+
+fn world_net(tag: &str, k3s: &str, with_route: bool) -> (World, PathBuf) {
+    let w = world(tag);
+    let st = routes(k3s.as_bytes(), &sha(k3s.as_bytes()));
+    w.d.install(&w.plan(&st, Backend::Native), &*st, "root").unwrap();
+    let route = w.dir.join("route");
+    std::fs::write(&route, route_text(if with_route { ROUTE_DEFAULT } else { ROUTE_LAN })).unwrap();
+    w.d.assume_route_file(&route, Duration::from_millis(100));
+    (w, route)
+}
+
+#[test]
+fn start_without_a_default_route_waits_shows_it_then_starts_when_the_route_appears_and_counts_nothing() {
+    let (w, route) = world_net("k3sdev-netwait", GOOD_K3S, false);
+    w.nodes_ready();
+    w.d.start("root").unwrap();
+    assert!(wait_for(5, || w.d.health().note == WAITING_NET || w.d.health().note == NO_NET_YET), "{:?}", w.d.health());
+    assert!(lock(&w.d.child).is_none(), "k3s is not started without a route");
+    let h = w.d.health();
+    assert_eq!(h.state, "starting");
+    assert!(h.line().contains("starting") && h.line().contains("waiting for the network"), "{}", h.line());
+    // after the grace time: a waiting state with the reason, not a failure
+    assert!(wait_for(5, || w.d.health().note == NO_NET_YET), "{:?}", w.d.health().note);
+    assert!(w.d.health().line().contains("needs a network interface with a default route"));
+    assert_eq!(w.d.state(), Svc::Starting);
+    assert!(w.d.take_alerts().is_empty(), "no GaveUp, no Down");
+    assert!(std::fs::read_to_string(w.d.layout.log()).unwrap().contains("iyakki: waiting for the network"), "the log says it too");
+    // DHCP finishes
+    std::fs::write(&route, route_text(ROUTE_DEFAULT)).unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    let h = w.d.health();
+    assert!(h.note.is_empty() && h.restarts == 0, "{h:?}");
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn stop_cancels_the_wait_for_the_network() {
+    let (w, _route) = world_net("k3sdev-netstop", GOOD_K3S, false);
+    w.d.start("root").unwrap();
+    assert!(wait_for(5, || !w.d.health().note.is_empty()));
+    w.d.stop("root").expect("Stop while waiting is fine");
+    assert_eq!(w.d.state(), Svc::Stopped);
+    assert!(w.d.health().note.is_empty());
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(lock(&w.d.child).is_none(), "nothing was started after Stop");
+    assert_eq!(w.d.state(), Svc::Stopped);
+}
+
+#[test]
+fn k3s_dying_while_the_route_is_missing_is_not_a_failure_and_a_real_crash_with_a_route_still_gives_up() {
+    // the stand-in removes the route file as it dies, like a lost lease
+    let route_placeholder = "ROUTEFILE";
+    let script = format!("#!/bin/sh\necho 'level=fatal msg=\"Error: no default routes found in /proc/net/route\"'\nrm -f {route_placeholder}\nexit 1\n");
+    // the path is only known after the world exists: build the script text with a fixed path under /tmp-less test dir
+    let dir_probe = world("k3sdev-netdie-probe").dir;
+    let route = dir_probe.join("route");
+    let script = script.replace(route_placeholder, &route.display().to_string());
+    let (w, _) = world_net("k3sdev-netdie", &script, true);
+    // use the probe dir's route file (the script removes exactly that one)
+    std::fs::write(&route, route_text(ROUTE_DEFAULT)).unwrap();
+    w.d.assume_route_file(&route, Duration::from_millis(100));
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.health().note == WAITING_NET || w.d.health().note == NO_NET_YET), "{:?}", w.d.health());
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(w.d.state(), Svc::Starting, "waiting, not Failed");
+    assert_eq!(w.d.installed().unwrap().restarts, 0, "waiting for the network is not a restart");
+    assert!(w.d.take_alerts().is_empty(), "no Down and no GaveUp while there is no network");
+    assert!(w.actions().iter().any(|a| a == "devcluster.exited-no-network"));
+    w.d.stop("root").unwrap();
+    // with a route that stays, real crashes still count and end in GaveUp (the existing test above covers the full text)
+    let w2 = world("k3sdev-netcrash");
+    let st = routes(DYING_K3S.as_bytes(), &sha(DYING_K3S.as_bytes()));
+    w2.d.install(&w2.plan(&st, Backend::Native), &*st, "root").unwrap();
+    let r2 = w2.dir.join("route");
+    std::fs::write(&r2, route_text(ROUTE_DEFAULT)).unwrap();
+    w2.d.assume_route_file(&r2, Duration::from_millis(100));
+    w2.d.start("root").unwrap();
+    assert!(wait_for(20, || matches!(w2.d.state(), Svc::Failed(_))), "{:?}", w2.d.state());
+    assert!(w2.d.take_alerts().iter().any(|a| matches!(a, Alert::GaveUp(_))));
+}
+
+#[test]
+fn a_rancher_folder_with_only_unpacked_binaries_is_not_a_cluster_but_server_state_is() {
+    let w = world("lib-data-only");
+    let lib = w.dir.join("var/lib/rancher/k3s");
+    std::fs::create_dir_all(lib.join("data/abc/bin")).unwrap();
+    std::fs::write(lib.join("data/abc/bin/runc"), b"x").unwrap();
+    let m = Machine { k3s_yaml: w.dir.join("etc/rancher/k3s/k3s.yaml"), lib_dir: lib.clone(), bins: vec![], units: vec![], proc_dir: w.dir.join("proc") };
+    assert!(existing(&m, &[], None, false).is_empty(), "only the unpacked binaries: no cluster");
+    std::fs::create_dir_all(lib.join("server/cred")).unwrap();
+    let v = existing(&m, &[], None, false);
+    assert!(v.iter().any(|x| x.contains("k3s has run here")), "{v:?}");
+    std::fs::remove_dir_all(lib.join("server")).unwrap();
+    std::fs::create_dir_all(lib.join("agent")).unwrap();
+    assert!(!existing(&m, &[], None, false).is_empty(), "an agent folder is a cluster");
+}
+
+// ------------------------------------------------------------------------------------------------ a supervisor that never goes quiet
+
+fn running_world(tag: &str) -> World {
+    let (w, _route) = world_net(tag, GOOD_K3S, true);
+    w.nodes_ready();
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    w
+}
+
+fn try_pid(w: &World) -> Option<u32> {
+    lock(&w.d.child).as_ref().map(|c| c.id())
+}
+
+fn child_pid(w: &World) -> u32 {
+    lock(&w.d.child).as_ref().expect("a child").id()
+}
+
+#[test]
+fn two_starts_at_boot_make_one_k3s_not_two() {
+    let (w, _route) = world_net("k3sdev-twostarts", GOOD_K3S, true);
+    w.nodes_ready();
+    let (a, b) = (w.d.clone(), w.d.clone());
+    let (t1, t2) = (std::thread::spawn(move || a.start("system")), std::thread::spawn(move || b.start("shell")));
+    let (r1, r2) = (t1.join().unwrap(), t2.join().unwrap());
+    assert!(r1.is_ok() != r2.is_ok(), "exactly one start wins: {r1:?} {r2:?}");
+    assert!(wait_for(10, || w.d.state() == Svc::Running));
+    let pid = child_pid(&w);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(child_pid(&w), pid, "the one child is still the one tracked");
+    assert_eq!(w.actions().iter().filter(|a| *a == "devcluster.start").count(), 1);
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn a_k3s_killed_by_a_signal_is_noticed_logged_with_the_signal_and_restarted() {
+    let w = running_world("k3sdev-signal");
+    let pid = child_pid(&w);
+    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.exited")), "{:?}", w.actions());
+    let log = std::fs::read_to_string(w.d.layout.log()).unwrap();
+    assert!(log.contains("iyakki: k3s exited (signal 9 (SIGKILL))"), "{log}");
+    assert!(w.audit.lock().unwrap().iter().any(|a| a.1 == "devcluster.exited" && a.2.contains("signal 9")));
+    assert!(wait_for(10, || w.d.state() == Svc::Running && try_pid(&w).is_some_and(|p| p != pid)), "restarted: {:?}", w.d.state());
+    assert_eq!(w.d.installed().unwrap().restarts, 1);
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn a_lost_child_handle_is_a_death_not_a_silent_exit_and_a_panicking_supervisor_never_leaves_running() {
+    let w = running_world("k3sdev-lost");
+    let pid = child_pid(&w);
+    // the handle disappears while the process is gone (what the Mac showed: Running, no process, no audit)
+    let ch = lock(&w.d.child).take();
+    drop(ch);
+    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.exited")), "{:?}", w.actions());
+    assert!(wait_for(10, || w.d.state() == Svc::Running && lock(&w.d.child).is_some()), "{:?}", w.d.state());
+    w.d.stop("root").unwrap();
+    // every exit is audited with its reason; one that happens while the cluster should run turns into Failed plus an alert
+    let a = w.audit.lock().unwrap().clone();
+    assert!(a.iter().any(|x| x.1 == "devcluster.supervisor-stopped"), "{a:?}");
+    let w = world_net("k3sdev-panic", GOOD_K3S, true).0;
+    w.nodes_ready();
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running));
+    // a panic in the supervisor: the health call runs kubectl through the fake runner, so make that panic
+    w.run.answer("get pods -A", "x");
+    let d = w.d.clone();
+    let gen = d.gen.load(Ordering::SeqCst);
+    d.monitor_panic_for_test(gen);
+    assert!(matches!(w.d.state(), Svc::Failed(ref why) if why.contains("stopped watching")), "{:?}", w.d.state());
+    assert!(w.d.take_alerts().iter().any(|a| matches!(a, Alert::GaveUp(r) if r.contains("panicked"))));
+    assert!(w.audit.lock().unwrap().iter().any(|x| x.1 == "devcluster.supervisor-stopped" && x.2.contains("panicked")));
+    let _ = w.d.stop("root");
+}
+
+#[test]
+fn the_watchdog_takes_over_from_a_supervisor_that_stalled_while_k3s_died() {
+    let w = running_world("k3sdev-watchdog");
+    let pid = child_pid(&w);
+    // the supervisor sleeps for an hour (stalled) while k3s is killed
+    lock(&w.d.over).poll = Some(Duration::from_secs(3600));
+    std::thread::sleep(Duration::from_millis(300));
+    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    std::thread::sleep(Duration::from_millis(200));
+    let gen = w.d.gen.load(Ordering::SeqCst);
+    assert!(!w.d.watchdog_step(gen, Backend::Native, Duration::from_secs(3600)), "a fresh heartbeat: leave it alone");
+    assert!(w.d.watchdog_step(gen, Backend::Native, Duration::ZERO), "stale: take over");
+    assert!(w.actions().iter().any(|a| a == "devcluster.supervisor-stalled") && w.actions().iter().any(|a| a == "devcluster.exited"), "{:?}", w.actions());
+    assert!(std::fs::read_to_string(w.d.layout.log()).unwrap().contains("iyakki: k3s exited (signal 9"));
+    assert_ne!(child_pid(&w), pid, "started again");
+    assert_eq!(w.d.installed().unwrap().restarts, 1);
+    assert!(w.audit.lock().unwrap().iter().any(|x| x.1 == "devcluster.restart"));
+    lock(&w.d.over).poll = Some(Duration::from_millis(20));
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn k3s_ending_after_the_machine_moved_to_another_network_is_expected_and_restarted_at_once_without_a_failure() {
+    let (w, _route) = world_net("k3sdev-ipchange", GOOD_K3S, true);
+    w.nodes_ready();
+    w.d.assume_ip(Some("192.168.50.72"));
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running));
+    let pid = child_pid(&w);
+    // the stick is on another network: the address changed, and k3s exits itself
+    w.d.assume_ip(Some("192.168.50.61"));
+    unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.exited-ip-changed")), "{:?}", w.actions());
+    assert!(wait_for(10, || try_pid(&w).is_some_and(|p| p != pid) && w.d.state() == Svc::Running));
+    assert_eq!(w.d.installed().unwrap().restarts, 0, "a move is not a restart that counts");
+    assert!(!w.actions().iter().any(|a| a == "devcluster.exited"));
+    assert!(w.d.take_alerts().is_empty());
+    // the same exit with the address unchanged is a failure as before
+    let pid = child_pid(&w);
+    unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.exited")), "{:?}", w.actions());
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn exit_text_names_codes_signals_and_core_dumps() {
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(exit_text(&std::process::ExitStatus::from_raw(3 << 8)), "exit status 3");
+    assert_eq!(exit_text(&std::process::ExitStatus::from_raw(9)), "signal 9 (SIGKILL)");
+    assert_eq!(exit_text(&std::process::ExitStatus::from_raw(11 | 0x80)), "signal 11 (SIGSEGV), core dumped");
+    assert_eq!(default_route_iface(&route_text(&format!("{ROUTE_LAN}{ROUTE_DEFAULT}"))).as_deref(), Some("eth0"));
+}
+
+// ------------------------------------------------------------------------------------------------ the clock gate
+
+/// A clock the test moves by hand: `advance` moves both the wall and the monotonic time, `jump` only the wall time.
+struct FakeClock {
+    wall: std::sync::atomic::AtomicI64,
+    mono_ms: AtomicU64,
+    pending: AtomicBool,
+    synced: AtomicBool,
+}
+
+impl FakeClock {
+    fn new(pending: bool, synced: bool) -> Arc<FakeClock> {
+        Arc::new(FakeClock { wall: std::sync::atomic::AtomicI64::new(1_704_067_320), mono_ms: AtomicU64::new(10_000), pending: AtomicBool::new(pending), synced: AtomicBool::new(synced) })
+    }
+    fn advance(&self, secs: u64) {
+        self.mono_ms.fetch_add(secs * 1000, Ordering::SeqCst);
+        self.wall.fetch_add(secs as i64, Ordering::SeqCst);
+    }
+    fn jump(&self, secs: i64) {
+        self.wall.fetch_add(secs, Ordering::SeqCst);
+    }
+}
+
+impl ClockSource for FakeClock {
+    fn wall(&self) -> i64 {
+        self.wall.load(Ordering::SeqCst)
+    }
+    fn mono(&self) -> Duration {
+        Duration::from_millis(self.mono_ms.load(Ordering::SeqCst))
+    }
+    fn floor_pending(&self) -> bool {
+        self.pending.load(Ordering::SeqCst)
+    }
+    fn synced(&self) -> bool {
+        self.synced.load(Ordering::SeqCst)
+    }
+}
+
+#[test]
+fn the_clock_rules_are_pure_functions() {
+    let lim = Duration::from_secs(120);
+    assert!(!clock_ready(true, true, Duration::from_secs(500), lim), "never before the floor was applied");
+    assert!(!clock_ready(false, false, Duration::from_secs(119), lim), "no time server yet and not long enough");
+    assert!(clock_ready(false, true, Duration::from_secs(5), lim), "a time server answered");
+    assert!(clock_ready(false, false, Duration::from_secs(120), lim), "offline: the floor is good enough after the limit");
+    let m = Duration::from_secs;
+    assert_eq!(clock_stepped(1000, m(50), 1010, m(60), 180), None, "time passing normally");
+    assert_eq!(clock_stepped(1000, m(50), 1000 + 88_692_568, m(60), 180), Some(88_692_558), "the NTP jump");
+    assert_eq!(clock_stepped(1000, m(50), 1010 - 3600, m(60), 180), Some(-3600), "a step back counts too");
+    assert_eq!(clock_stepped(1000, m(50), 1100, m(60), 180), None, "a small step is ignored");
+    assert!(log_shows_clock_trouble("E Failed to validate connection to cluster: CA cert validation failed: x"));
+    assert!(log_shows_clock_trouble("tls: failed to verify certificate: x509: certificate has expired or is not yet valid"));
+    assert!(!log_shows_clock_trouble("x509: certificate signed by unknown authority"));
+}
+
+#[test]
+fn k3s_waits_for_the_floor_and_then_for_a_time_server_or_the_limit_and_the_wait_is_audited() {
+    let (w, _route) = world_net("k3sdev-clockgate", GOOD_K3S, true);
+    w.nodes_ready();
+    let clock = FakeClock::new(true, false);
+    w.d.assume_clock(clock.clone());
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.waiting-for-clock")), "{:?}", w.actions());
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(try_pid(&w).is_none() && w.d.state() == Svc::Starting, "nothing starts while the floor is pending");
+    // the floor is applied, but no time server has answered and the machine is young
+    clock.pending.store(false, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(try_pid(&w).is_none(), "still waiting for the time");
+    // offline for two minutes: the floor is good enough
+    clock.advance(120);
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    assert!(try_pid(&w).is_some());
+    assert!(w.d.log_tail(20).contains("no time server answered"), "{}", w.d.log_tail(20));
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn a_time_server_answering_opens_the_gate_at_once_and_a_ready_clock_never_waits() {
+    let (w, _route) = world_net("k3sdev-clocksynced", GOOD_K3S, true);
+    w.nodes_ready();
+    let clock = FakeClock::new(true, false);
+    w.d.assume_clock(clock.clone());
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.waiting-for-clock")));
+    clock.pending.store(false, Ordering::SeqCst);
+    clock.synced.store(true, Ordering::SeqCst);
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    w.d.stop("root").unwrap();
+    // a clock that is fine from the start: no waiting at all
+    let (w2, _r) = world_net("k3sdev-clockfine", GOOD_K3S, true);
+    w2.nodes_ready();
+    w2.d.assume_clock(FakeClock::new(false, true));
+    w2.d.start("root").unwrap();
+    assert!(wait_for(10, || w2.d.state() == Svc::Running));
+    assert!(!w2.actions().iter().any(|a| a == "devcluster.waiting-for-clock"));
+    w2.d.stop("root").unwrap();
+}
+
+#[test]
+fn stop_cancels_the_wait_for_the_clock() {
+    let (w, _route) = world_net("k3sdev-clockstop", GOOD_K3S, true);
+    let clock = FakeClock::new(true, false);
+    w.d.assume_clock(clock);
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.waiting-for-clock")));
+    w.d.stop("root").unwrap();
+    assert_eq!(w.d.state(), Svc::Stopped);
+    assert!(try_pid(&w).is_none());
+}
+
+#[test]
+fn a_clock_step_while_k3s_runs_restarts_it_once_without_a_failure_and_audits_it() {
+    let (w, _route) = world_net("k3sdev-clockstep", GOOD_K3S, true);
+    w.nodes_ready();
+    let clock = FakeClock::new(false, true);
+    w.d.assume_clock(clock.clone());
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running));
+    let pid = child_pid(&w);
+    // time passing normally changes nothing
+    clock.advance(30);
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(child_pid(&w), pid);
+    // the network time arrives: 2.8 years in one step
+    clock.jump(88_692_568);
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.restart-clock-step")), "{:?}", w.actions());
+    assert!(wait_for(10, || try_pid(&w).is_some_and(|p| p != pid) && w.d.state() == Svc::Running), "{:?}", w.d.state());
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(w.actions().iter().filter(|a| *a == "devcluster.restart-clock-step").count(), 1, "one restart per step");
+    assert_eq!(w.d.installed().unwrap().restarts, 0, "not counted as a failure");
+    assert!(!w.actions().iter().any(|a| a == "devcluster.exited") && w.d.take_alerts().is_empty());
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn a_k3s_that_ends_right_after_the_clock_moved_is_started_again_without_a_failure() {
+    let (w, _route) = world_net("k3sdev-clockdied", GOOD_K3S, true);
+    w.nodes_ready();
+    let clock = FakeClock::new(false, true);
+    w.d.assume_clock(clock.clone());
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running));
+    let pid = child_pid(&w);
+    // the jump and the exit are seen in the same look at k3s
+    let guard = lock(&w.d.child);
+    clock.jump(1_000_000);
+    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    std::thread::sleep(Duration::from_millis(100));
+    drop(guard);
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.restart-clock-step")), "{:?}", w.actions());
+    assert!(wait_for(10, || try_pid(&w).is_some_and(|p| p != pid) && w.d.state() == Svc::Running));
+    assert!(!w.actions().iter().any(|a| a == "devcluster.exited"), "{:?}", w.actions());
+    assert_eq!(w.d.installed().unwrap().restarts, 0);
+    w.d.stop("root").unwrap();
+}
+
+/// A k3s that complains about certificates the way it does at the fake date.
+const CERT_K3S: &str = "#!/bin/sh\ncase \"$1\" in\nserver)\n  kc=\n  while [ $# -gt 0 ]; do if [ \"$1\" = \"--write-kubeconfig\" ]; then kc=\"$2\"; fi; shift; done\n  echo \"level=error msg=Failed to validate connection to cluster: CA cert validation failed: x509: certificate has expired or is not yet valid\"\n  printf 'apiVersion: v1\\n' > \"$kc\"\n  exec sleep 600;;\nesac\n";
+
+#[test]
+fn certificate_trouble_in_the_first_minutes_restarts_k3s_once_when_the_clock_is_plausible() {
+    let (w, _route) = world_net("k3sdev-certlog", CERT_K3S, true);
+    w.nodes_ready();
+    let clock = FakeClock::new(false, true);
+    w.d.assume_clock(clock);
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.restart-clock-cert")), "{:?}", w.actions());
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(w.actions().iter().filter(|a| *a == "devcluster.restart-clock-cert").count(), 1, "only once, even when the complaint repeats");
+    assert_eq!(w.d.installed().unwrap().restarts, 0);
+    assert!(!w.actions().iter().any(|a| a == "devcluster.exited"));
+    w.d.stop("root").unwrap();
+}
+
+// ------------------------------------------------------------------------------------------------ more than one local cluster
+
+/// A stand-in k3s that also records the arguments it was started with next to the kubeconfig.
+const ARGS_K3S: &str = "#!/bin/sh\ncase \"$1\" in\nserver)\n  kc=\n  all=\"$*\"\n  while [ $# -gt 0 ]; do if [ \"$1\" = \"--write-kubeconfig\" ]; then kc=\"$2\"; fi; shift; done\n  echo \"$all\" > \"$kc.args\"\n  printf 'apiVersion: v1\\n' > \"$kc\"\n  exec sleep 600;;\nesac\n";
+
+struct Extra {
+    d: Arc<K3sDev>,
+    audit: Arc<Mutex<Vec<(String, String, String)>>>,
+}
+
+impl Extra {
+    fn actions(&self) -> Vec<String> {
+        self.audit.lock().unwrap().iter().map(|a| a.1.clone()).collect()
+    }
+}
+
+/// A second managed cluster next to `w`'s: same data partition and runner, its own instance, a stand-in program, the same fakes.
+fn extra_of(w: &World, id: &str, slot: u16) -> Extra {
+    let inst = Instance::extra(id, slot);
+    let clis = Arc::new(CliManager::new(&w.dir.join("cli")));
+    let d = K3sDev::new_instance(&w.dir.join("data"), clis, w.run.clone(), inst);
+    let l = d.layout().clone();
+    std::fs::create_dir_all(l.bin().parent().unwrap()).unwrap();
+    std::fs::write(l.bin(), ARGS_K3S).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(l.bin(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    save_state(&l, &State { version: VERSION.into(), ..State::default() }).unwrap();
+    let machine = lock(&w.d.machine).clone();
+    d.assume(true, true, false, false, machine, Duration::from_millis(10), Duration::from_millis(20));
+    d.assume_connected(None);
+    d.assume_route_file(&w.dir.join("route"), Duration::from_millis(100));
+    let audit: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(vec![]));
+    let a2 = audit.clone();
+    d.set_audit(Arc::new(move |u, a, x| a2.lock().unwrap().push((u.into(), a.into(), x.into()))));
+    assert_eq!(d.state(), Svc::Stopped, "a folder with state.json is an installed cluster");
+    Extra { d, audit }
+}
+
+#[test]
+fn the_primary_instance_is_exactly_todays_cluster_and_an_extra_gets_its_own_ports_ranges_names_and_folder() {
+    let l = Layout::new(Path::new("/d"));
+    let p = Instance::primary();
+    assert_eq!((p.id.as_str(), p.api_port, p.node_name.as_str(), p.pod_name.as_str(), p.cluster_cidr.as_str(), p.service_cidr.as_str()), ("local", 6443, "iyakki-dev", "iyakki-k3s", "10.42.0.0/16", "10.43.0.0/16"));
+    assert_eq!(Layout::for_instance(Path::new("/d"), &p).root, l.root);
+    let old: Vec<String> = ["server", "--data-dir", "/d/k3s-dev/data", "--write-kubeconfig", "/d/k3s-dev/kubeconfig", "--write-kubeconfig-mode", "600", "--disable", "traefik", "--disable", "servicelb", "--node-name", "iyakki-dev"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(server_args(&l), old, "the single-cluster command line did not change");
+    assert!(!podman_create(&l, "img", &p).iter().any(|a| a.contains("cidr") || a.contains("listen-port")));
+    // extras: nothing is shared with the primary or with each other
+    let ins: Vec<Instance> = std::iter::once(p.clone()).chain((1..=4).map(|s| Instance::extra(&format!("c{s}"), s))).collect();
+    for (i, a) in ins.iter().enumerate() {
+        for b in ins.iter().skip(i + 1) {
+            assert_ne!(a.dir_name, b.dir_name);
+            assert_ne!(a.node_name, b.node_name);
+            assert_ne!(a.pod_name, b.pod_name);
+            assert_ne!(a.cluster_cidr, b.cluster_cidr);
+            assert_ne!(a.service_cidr, b.service_cidr);
+            let (pa, pb) = (a.all_ports(), b.all_ports());
+            assert!(!pa.iter().any(|x| pb.contains(x)), "{} and {} share a port: {pa:?} {pb:?}", a.id, b.id);
+        }
+    }
+    let e = Instance::extra("gpu2", 1);
+    assert_eq!((e.api_port, e.node_name.as_str(), e.cluster_dns().as_str()), (6543, "iyakki-dev-gpu2", "10.45.0.10"));
+    let args = server_args_for(&Layout::for_instance(Path::new("/d"), &e), &e);
+    for want in ["--https-listen-port=6543", "--cluster-cidr=10.44.0.0/16", "--service-cidr=10.45.0.0/16", "--cluster-dns=10.45.0.10", "--node-name", "iyakki-dev-gpu2", "/d/k3s-dev-gpu2/data"] {
+        assert!(args.iter().any(|a| a == want || a.contains(want)), "{want} in {args:?}");
+    }
+    let t = ports_for(&e);
+    assert!(t[0].0 == "6543/tcp" && t.iter().any(|x| x.0 == "30000-32767/tcp"));
+    assert!(valid_id("gpu2") && !valid_id("local") && !valid_id("a") && !valid_id("Bad") && !valid_id("-x"));
+}
+
+#[test]
+fn two_local_clusters_start_and_stop_on_their_own_with_their_own_arguments_and_logs() {
+    let (w, _route) = world_net("k3sdev-two", ARGS_K3S, true);
+    w.nodes_ready();
+    let x = extra_of(&w, "gpu2", 1);
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    x.d.start("root").unwrap();
+    assert!(wait_for(10, || x.d.state() == Svc::Running), "{:?}", x.d.state());
+    let a1 = std::fs::read_to_string(format!("{}.args", w.d.layout().kubeconfig().display())).unwrap();
+    let a2 = std::fs::read_to_string(format!("{}.args", x.d.layout().kubeconfig().display())).unwrap();
+    assert!(!a1.contains("--https-listen-port") && a1.contains("--node-name iyakki-dev"), "{a1}");
+    assert!(a2.contains("--https-listen-port=6543") && a2.contains("--node-name iyakki-dev-gpu2") && a2.contains("k3s-dev-gpu2/data"), "{a2}");
+    assert_ne!(w.d.layout().log(), x.d.layout().log());
+    assert_ne!(w.d.layout().state(), x.d.layout().state());
+    assert!(w.d.layout().log().is_file() && x.d.layout().log().is_file());
+    assert_ne!(lock(&w.d.child).as_ref().map(|c| c.id()), lock(&x.d.child).as_ref().map(|c| c.id()));
+    // stopping the extra leaves the primary running, and the other way round
+    x.d.stop("root").unwrap();
+    assert_eq!(x.d.state(), Svc::Stopped);
+    assert_eq!(w.d.state(), Svc::Running);
+    assert!(x.actions().iter().any(|a| a == "devcluster.stop") && !w.actions().iter().any(|a| a == "devcluster.stop"));
+    x.d.start("root").unwrap();
+    assert!(wait_for(10, || x.d.state() == Svc::Running));
+    w.d.stop("root").unwrap();
+    assert_eq!((w.d.state(), x.d.state()), (Svc::Stopped, Svc::Running));
+    x.d.stop("root").unwrap();
+}
+
+#[test]
+fn the_clock_gate_applies_to_each_instance_on_its_own() {
+    let (w, _route) = world_net("k3sdev-twoclock", ARGS_K3S, true);
+    w.nodes_ready();
+    let x = extra_of(&w, "gpu2", 1);
+    let clock = FakeClock::new(true, false);
+    x.d.assume_clock(clock.clone());
+    w.d.assume_clock(FakeClock::new(false, true));
+    w.d.start("root").unwrap();
+    x.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "the first one has a good clock and does not wait");
+    assert!(wait_for(10, || x.actions().iter().any(|a| a == "devcluster.waiting-for-clock")), "{:?}", x.actions());
+    assert!(!w.actions().iter().any(|a| a == "devcluster.waiting-for-clock"));
+    assert!(lock(&x.d.child).is_none(), "the second one is not started before its clock is ready");
+    clock.pending.store(false, Ordering::SeqCst);
+    clock.synced.store(true, Ordering::SeqCst);
+    assert!(wait_for(10, || x.d.state() == Svc::Running), "{:?}", x.d.state());
+    x.d.stop("root").unwrap();
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn the_watchdog_of_an_extra_instance_restarts_only_that_instance() {
+    let (w, _route) = world_net("k3sdev-twowatch", ARGS_K3S, true);
+    w.nodes_ready();
+    let x = extra_of(&w, "gpu2", 1);
+    w.d.start("root").unwrap();
+    x.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running && x.d.state() == Svc::Running));
+    let (p1, p2) = (lock(&w.d.child).as_ref().unwrap().id(), lock(&x.d.child).as_ref().unwrap().id());
+    lock(&x.d.over).poll = Some(Duration::from_secs(3600));
+    std::thread::sleep(Duration::from_millis(300));
+    unsafe { libc::kill(-(p2 as i32), libc::SIGKILL) };
+    std::thread::sleep(Duration::from_millis(200));
+    let gen = x.d.gen.load(Ordering::SeqCst);
+    assert!(!x.d.watchdog_step(gen, Backend::Native, Duration::from_secs(3600)), "a fresh heartbeat: leave it alone");
+    assert!(x.d.watchdog_step(gen, Backend::Native, Duration::ZERO), "stale: take over");
+    assert!(x.actions().iter().any(|a| a == "devcluster.supervisor-stalled"), "{:?}", x.actions());
+    assert_eq!(x.d.installed().unwrap().restarts, 1);
+    assert_ne!(lock(&x.d.child).as_ref().unwrap().id(), p2);
+    assert_eq!(lock(&w.d.child).as_ref().unwrap().id(), p1, "the other cluster was not touched");
+    assert_eq!(w.d.installed().unwrap().restarts, 0);
+    lock(&x.d.over).poll = Some(Duration::from_millis(20));
+    x.d.stop("root").unwrap();
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn another_managed_cluster_is_not_a_cluster_found_elsewhere_but_a_foreign_one_still_is() {
+    let w = world("k3sdev-found");
+    let proc = lock(&w.d.machine).proc_dir.clone();
+    std::fs::create_dir_all(proc.join("4242")).unwrap();
+    std::fs::write(proc.join("4242/comm"), "k3s-server\n").unwrap();
+    let x = extra_of(&w, "gpu2", 1);
+    assert!(w.d.found_elsewhere().iter().any(|f| f.contains("k3s-server")), "the first cluster still refuses next to a foreign k3s");
+    assert!(!x.d.found_elsewhere().iter().any(|f| f.contains("k3s-server")), "an extra cluster expects the first one's processes");
+}
+
+#[test]
+fn an_extra_instance_asks_for_its_own_node_name_to_reset_and_uninstall() {
+    let w = world("k3sdev-twotype");
+    let x = extra_of(&w, "gpu2", 1);
+    let e = x.d.reset("iyakki-dev", "root").unwrap_err();
+    assert!(e.contains("iyakki-dev-gpu2"), "{e}");
+    x.d.reset("iyakki-dev-gpu2", "root").unwrap();
+    assert!(x.d.uninstall("iyakki-dev", "root").is_err());
+    x.d.uninstall("iyakki-dev-gpu2", "root").unwrap();
+    assert_eq!(x.d.state(), Svc::NotInstalled);
+    assert!(!x.d.layout().root.exists());
+    assert!(w.d.layout().root.parent() == x.d.layout().root.parent() && w.d.layout().root != x.d.layout().root);
 }

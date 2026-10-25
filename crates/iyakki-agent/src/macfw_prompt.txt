@@ -1,0 +1,21 @@
+You are helping me install Apple's Wi-Fi and Bluetooth firmware on my T2 Mac that runs IYAKKI from a USB stick. Work in small steps and ask me before every command that writes, downloads or uses sudo. Explain in one line what each command does.
+
+GOAL: make the built-in Wi-Fi (Broadcom BCM4364) and, if possible, Bluetooth work. Model: <output of: cat /sys/class/dmi/id/product_name>. I have a USB stick with the folder iyakki-wifi-firmware at <path, or "none: download it">.
+
+DO:
+1. Read first: docs/MAC-WIFI-BLUETOOTH-SETUP.md and docs/MAC-HARDWARE.md (sections 6 and 9) if they are on this machine. Run: cat /sys/class/dmi/id/product_name; dmesg | grep -iE 'brcmfmac|bluetooth|firmware'; ls /sys/class/net; ls /lib/firmware/brcm | head.
+2. Find the exact file names the kernel asks for in the dmesg lines ("Direct firmware load for brcm/... failed"). The expected Wi-Fi names are brcmfmac4364b2-pcie.apple,<board>-<module>-<vendor>-<version>-<antenna>.bin, .txt, .clm_blob. For Bluetooth the BCM4364 asks for brcm/BCM.hcd.
+3. If the folder iyakki-wifi-firmware is on the stick: show me its file list and sizes. If I said "download it": first tell me about the built-in route (IYAKKI menu > Mac drivers > Download from Apple; it needs no terminal), and only if I prefer a terminal or it failed, explain the t2linux method (https://github.com/t2linux/wiki, tools/firmware.sh; macrecovery from OpenCore downloads Apple's macOS recovery image to this machine), ask my approval, download into a NEW empty scratch folder under my home directory, extract with 7z or dmg2img (read-only), then run dist/drivers/mac-wifi-firmware-from-macos.sh with IYAKKI_FW_SRC pointing at the extracted usr/share/firmware.
+4. Install by copying the files to /var/lib/iyakki/firmware/mac-wifi-brcmfmac/files/brcm/ (and BCM.hcd to /var/lib/iyakki/firmware/mac-bt-broadcom/files/brcm/BCM.hcd), then tell me to finish in STORE > Drivers > "Install from folder or USB" so the pack survives a reboot. For a quick test only, link them into /lib/firmware/brcm and run modprobe -r brcmfmac; modprobe brcmfmac.
+5. Verify and show me the evidence: dmesg lines with "brcmfmac" and the firmware version; ls /sys/class/net (a wlan0); iw dev; ip link; for Bluetooth: ls /sys/class/bluetooth; /usr/bin/btctl list (a controller listed with an address has started; a sysfs address file may not exist on this kernel); dmesg | grep -i bluetooth.
+
+DO NOT:
+- Never write to an internal disk, partition table or EFI/boot files. The macOS volume is read-only: mount nothing read-write. Use only the scratch folder, /var/lib/iyakki/firmware and /lib/firmware.
+- Never print, copy or send tokens, passwords, Wi-Fi keys, API keys or the vault. Do not paste secrets into any tool or web page.
+- Do not download anything except macrecovery and Apple's recovery image, and only after I approve the exact URL. Do not install packages without asking.
+- Do not guess which .hcd file to use: if there is more than one BCM4364 .hcd, stop and ask me.
+- Do not claim success without the verification output.
+
+ROLLBACK (offer it if anything fails): remove the links (rm /lib/firmware/brcm/<the files>), remove /var/lib/iyakki/firmware/<pack>, or use STORE > Drivers > Remove; delete the scratch folder; restart. Nothing else was changed.
+
+At the end, give me a short report: files installed (names only), the verifying lines, and what still does not work.

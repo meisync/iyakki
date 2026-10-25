@@ -36,6 +36,8 @@ pub struct Cli {
     cwd: PathBuf,
     skills: Option<(Arc<SkillStore>, Arc<Packages>)>,
     services: Option<Arc<crate::services::Services>>,
+    /// Inside a Linux apps sandbox (`linux use <name>`): the lines typed run there (`cli_linux.rs`).
+    sandbox: Option<String>,
 }
 
 const RESTRICTED: &[&str] = &["help", "whoami", "policy", "echo", "clear", "pwd", "cd", "ls", "cat", "run", "skill", "tool", "store", "toollog", "curl", "grep", "sed", "tr", "cut", "sort", "uniq", "wc", "head", "tail", "tac", "rev", "nl", "seq", "date", "basename", "dirname", "calendar", "alarm", "clis"];
@@ -125,13 +127,16 @@ fn split_pipes(line: &str) -> Vec<String> {
     out.push(cur);
     out
 }
-const FULL_ONLY: &[&str] = &["detect", "net", "scan", "mkdir", "write", "poweroff", "reboot"];
+const FULL_ONLY: &[&str] = &["detect", "net", "scan", "mkdir", "write", "poweroff", "reboot", "linux"];
+
+#[path = "cli_linux.rs"]
+mod linux;
 
 impl Cli {
     pub fn new(user: &str, policy: Policy, host: Arc<dyn HostApi>) -> Cli {
         let home = crate::scope::user_home(user);
         let cwd = if policy.allows_read(user, home.to_str().unwrap_or("/")) && home.is_dir() { home } else { PathBuf::from("/") };
-        Cli { user: user.into(), policy, host, cwd, skills: None, services: None }
+        Cli { user: user.into(), policy, host, cwd, skills: None, services: None, sandbox: None }
     }
 
     /// Give the terminal the `skill` and `store` commands.
@@ -147,6 +152,9 @@ impl Cli {
     }
 
     pub fn prompt(&self) -> String {
+        if let Some(s) = &self.sandbox {
+            return format!("{}@{s}:~$ ", self.user);
+        }
         format!("{}@iyakki:{}$ ", self.user, self.cwd.display())
     }
 
@@ -170,6 +178,17 @@ impl Cli {
         let line = line.trim();
         if line.is_empty() {
             return out("");
+        }
+        // inside a Linux apps sandbox every line but `linux ...` and `exit` runs there (no shell: the words are the arguments)
+        if let Some(name) = self.sandbox.clone() {
+            let first = line.split_whitespace().next().unwrap_or("");
+            if first == "exit" {
+                self.sandbox = None;
+                return out("left the sandbox; back in the IYAKKI terminal");
+            }
+            if first != "linux" && self.policy.cli == CliLevel::Full {
+                return self.sandbox_line(&name, line);
+            }
         }
         let stages = split_pipes(line);
         for st in &stages {
@@ -490,7 +509,7 @@ impl Cli {
     fn dispatch(&mut self, cmd: &str, rest: &str) -> Result<CliOut, String> {
         Ok(match cmd {
             "help" => out(if self.policy.cli == CliLevel::Full {
-                "commands: help whoami policy echo clear pwd cd ls cat mkdir write run skill tool store toollog curl grep sed tr cut sort uniq wc head tail date calendar alarm clis ssh scp sftp sshtrust sshhosts sshforget detect net scan poweroff reboot"
+                "commands: help whoami policy echo clear pwd cd ls cat mkdir write run skill tool store toollog curl grep sed tr cut sort uniq wc head tail date calendar alarm clis linux ssh scp sftp sshtrust sshhosts sshforget detect net scan poweroff reboot"
             } else {
                 "commands: help whoami policy echo clear pwd cd ls cat run skill tool store toollog curl grep sed tr cut sort uniq wc head tail date calendar alarm clis"
             }),
@@ -585,6 +604,7 @@ impl Cli {
                 svc.toollog.record(svc.tool_log_days(), &self.user, "curl", &format!("{} {}", r.method, r.url), reply.is_ok(), &shown);
                 out(shown)
             }
+            "linux" => out(self.linux_cmd(rest)?.text),
             "clis" => {
                 let svc = self.services.as_ref().ok_or("the tool manager is not available here")?;
                 let w: Vec<&str> = rest.split_whitespace().collect();

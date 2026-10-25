@@ -233,12 +233,12 @@ pub enum Permission {
     Vault(String),
     /// Run a program.
     Run(String),
-    /// What a tile app may ask of the bridge: `tile:storage`, `tile:clipboard`, `tile:notifications`, `tile:files`, `tile:agent`.
+    /// What a tile app may ask of the bridge: `tile:storage`, `tile:clipboard`, `tile:notifications`, `tile:files`, `tile:agent`, `tile:llm`, `tile:speech`.
     Tile(String),
 }
 
 /// The bridge permissions a tile app can declare (the vault is not one of them, and never will be).
-pub const TILE_PERMS: [&str; 5] = ["storage", "clipboard", "notifications", "files", "agent"];
+pub const TILE_PERMS: [&str; 7] = ["storage", "clipboard", "notifications", "files", "agent", "llm", "speech"];
 
 impl Permission {
     pub fn parse(s: &str) -> Result<Permission, String> {
@@ -271,6 +271,8 @@ impl Permission {
                 "clipboard" => "read and write the clipboard".into(),
                 "notifications" => "leave notes in your inbox".into(),
                 "files" => "open and save files you pick in the file dialog (it never sees other files)".into(),
+                "llm" => "use your AI model for its own questions, with no tools and no access to your files (you are asked once; it has a daily limit; the model is the one you chose in Settings, which may send the text to another computer)".into(),
+                "speech" => "read text aloud with your voice settings (you are asked once; a voice that runs on another computer gets the text)".into(),
                 _ => "ask the assistant questions, each one only after you allow it".into(),
             },
         }
@@ -278,7 +280,7 @@ impl Permission {
 
     /// Network, vault, run and writing files are the ones that ask the person again whatever the autonomy setting.
     pub fn sensitive(&self) -> bool {
-        !matches!(self, Permission::Cap(Cap::Read(_)) | Permission::Tile(_))
+        !matches!(self, Permission::Cap(Cap::Read(_))) && !matches!(self, Permission::Tile(t) if t != "llm" && t != "speech")
     }
 
     pub fn canonical(&self) -> String {

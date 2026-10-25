@@ -18,6 +18,13 @@ iyakki-web.workspace = true
 iyakki-webview.workspace = true
 iyakki-data.workspace = true
 iyakki-drivers.workspace = true
+iyakki-devctl.workspace = true
+# hot patches: the same id/layer rules as the first-stage init that mounts them (iyakki dev patch)
+iyakki-stage1 = { path = "../iyakki-stage1" }
+# update-pack reads the boot partition of an install image with the installer's own FAT reader
+iyakki-usb = { path = "../iyakki-usb" }
+# DISKS: the partition-table reader and writer (GPT), human sizes
+iyakki-storage.workspace = true
 iyakki-flow.workspace = true
 iyakki-js.workspace = true
 serde = { version = "1", features = ["derive"] }
@@ -31,6 +38,9 @@ miniz_oxide = "0.8"
 ruzstd = "0.9"
 nanomp3 = { version = "0.2", default-features = false, features = ["std"] }
 ed25519-dalek = "3"
+# SSH keys protected by a passphrase (aes256-ctr, see sshkey.rs)
+aes = "0.8"
+ctr = "0.9"
 # developer mode's client (`devmode::client`): the same TLS library and features as the web front end (iyakki-remote)
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 libc = "0.2"

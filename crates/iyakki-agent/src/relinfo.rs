@@ -17,7 +17,12 @@ pub struct ReleaseInfo {
     pub git_describe: String,
     pub variant: String,
     pub kernel: String,
+    /// `RESTRICTED_FIRMWARE=included`: a build made with IYAKKI_INCLUDE_RESTRICTED_FIRMWARE=1 (docs/RESTRICTED-FIRMWARE.md).
+    pub restricted_firmware: bool,
 }
+
+/// What About says about such an image.
+pub const RESTRICTED_NOTE: &str = "includes third-party firmware under its own licences: not for redistribution by the IYAKKI project";
 
 impl ReleaseInfo {
     pub fn parse(text: &str) -> ReleaseInfo {
@@ -31,6 +36,7 @@ impl ReleaseInfo {
                 "GIT_DESCRIBE" => r.git_describe = v,
                 "VARIANT" => r.variant = v,
                 "KERNEL" => r.kernel = v,
+                "RESTRICTED_FIRMWARE" => r.restricted_firmware = v == "included",
                 _ => {}
             }
         }
@@ -49,6 +55,9 @@ impl ReleaseInfo {
             if !x.is_empty() {
                 v.push((l, x.clone()));
             }
+        }
+        if self.restricted_firmware {
+            v.push(("Firmware", RESTRICTED_NOTE.to_string()));
         }
         v
     }
@@ -91,5 +100,9 @@ mod tests {
         assert!(about_line(None).contains(VERSION));
         assert!(ReleaseInfo::load(Path::new("/nonexistent/iyakki-release")).is_none());
         assert_eq!(ReleaseInfo::parse("").rows(), vec![("Version", VERSION.to_string())]);
+        // an image built for the builder's own use with the restricted firmware says so
+        let r = ReleaseInfo::parse(&format!("{t}RESTRICTED_FIRMWARE=included\n"));
+        assert!(r.restricted_firmware && about_line(Some(&r)).ends_with(RESTRICTED_NOTE) && about_line(Some(&r)).contains("not for redistribution by the IYAKKI project"));
+        assert!(!ReleaseInfo::parse(t).restricted_firmware && !about_line(Some(&ReleaseInfo::parse(t))).contains("redistribution"));
     }
 }

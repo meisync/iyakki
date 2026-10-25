@@ -18,13 +18,35 @@ use std::sync::{Arc, Mutex, OnceLock};
 use iyakki_sec::policy::Policy;
 use serde::{Deserialize, Serialize};
 
+pub mod api;
+pub mod app;
 pub mod auth;
+pub mod bootmount;
 pub mod cli;
+pub mod config;
+pub mod cli_adb;
+pub mod debug;
+pub mod files;
+pub mod grants;
+pub mod input;
 pub mod client;
 pub mod ops;
+pub mod scopes;
+pub mod shellexec;
+pub mod tunnel;
+pub mod sessions;
+pub mod update;
+pub mod patch;
+pub mod cli_patch;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_adb;
+#[cfg(test)]
+mod tests_update;
+#[cfg(test)]
+mod tests_patch;
 
 /// The "user" a developer screenshot is asked for: the shell answers it with whatever it is drawing (`*` is never in an account name).
 pub const SCREEN_ANY: &str = "*developer*";
@@ -72,6 +94,9 @@ pub struct DevKey {
     pub added_by: String,
     #[serde(default)]
     pub last_used: i64,
+    /// What this computer may do (see [`scopes`]); keys paired before scopes existed hold only `install`.
+    #[serde(default = "scopes::default_scopes")]
+    pub scopes: Vec<String>,
 }
 
 impl DevKey {
@@ -92,6 +117,9 @@ pub struct Pairing {
     /// The administrator who opened it.
     #[serde(default)]
     pub by: Option<String>,
+    /// The scopes the computer that pairs will get (shown on the pairing card; the administrator can change them while it is open).
+    #[serde(default = "scopes::default_scopes")]
+    pub scopes: Vec<String>,
 }
 
 /// One line of the activity log.
@@ -212,6 +240,8 @@ impl DevMode {
         if st.until > 0 && self.now() >= st.until {
             let _ = self.write("state.json", &State { enabled: false, ..st });
             self.cancel_pairing();
+            sessions::end_all(&self.data);
+            self.shell_forget_all();
             self.log("system", "", "devmode.off", "switched off automatically: its time was up", true);
             return false;
         }
@@ -242,6 +272,8 @@ impl DevMode {
         let st = self.state();
         self.write("state.json", &State { enabled: false, ..st })?;
         self.cancel_pairing();
+        sessions::end_all(&self.data);
+        self.shell_forget_all();
         self.log(user, user, "devmode.off", "switched off", true);
         Ok(())
     }
@@ -291,7 +323,7 @@ impl DevMode {
         if self.keys().len() >= MAX_KEYS {
             return Err(format!("{MAX_KEYS} computers are paired already: revoke one first"));
         }
-        let p = Pairing { code: auth::new_code()?, expires: self.now() + PAIR_SECS, account: account.into(), tries: 0, by: Some(user.into()) };
+        let p = Pairing { code: auth::new_code()?, expires: self.now() + PAIR_SECS, account: account.into(), tries: 0, by: Some(user.into()), scopes: scopes::default_scopes() };
         self.write("pairing.json", &p)?;
         self.log(user, account, "devmode.pair.open", &format!("a pairing code is on the screen (the computer will act as {account})"), true);
         Ok(p)
@@ -341,11 +373,11 @@ impl DevMode {
         }
         let mut keys = self.keys();
         keys.retain(|k| k.key != key_hex && k.name != name);
-        let k = DevKey { name: name.into(), key: key_hex.clone(), account: p.account.clone(), added: self.now(), added_by: p.by.clone().unwrap_or_else(|| p.account.clone()), last_used: 0 };
+        let k = DevKey { name: name.into(), key: key_hex.clone(), account: p.account.clone(), added: self.now(), added_by: p.by.clone().unwrap_or_else(|| p.account.clone()), last_used: 0, scopes: p.scopes.clone() };
         keys.push(k.clone());
         self.write("keys.json", &keys)?;
         self.cancel_pairing();
-        self.log(name, &k.account, "devmode.pair", &format!("paired key {}", k.short()), true);
+        self.log(name, &k.account, "devmode.pair", &format!("paired key {} with scopes: {}", k.short(), k.scope_text()), true);
         Ok((k, auth::pair_answer(&pk, fp, &key_hex)))
     }
 
@@ -373,12 +405,17 @@ impl DevMode {
     /// Take a computer's key away (administrators): by name or by key. Its next request is refused.
     pub fn revoke(&self, policy: &Policy, user: &str, name_or_key: &str) -> Result<DevKey, String> {
         Self::need_admin(policy)?;
-        let _one_at_a_time = keys_lock();
-        let mut keys = self.keys();
-        let pos = keys.iter().position(|k| k.name == name_or_key || k.key == name_or_key.to_ascii_lowercase()).ok_or_else(|| format!("no paired computer called {name_or_key}"))?;
-        let k = keys.remove(pos);
-        self.write("keys.json", &keys)?;
+        let k = {
+            let _one_at_a_time = keys_lock();
+            let mut keys = self.keys();
+            let pos = keys.iter().position(|k| k.name == name_or_key || k.key == name_or_key.to_ascii_lowercase()).ok_or_else(|| format!("no paired computer called {name_or_key}"))?;
+            let k = keys.remove(pos);
+            self.write("keys.json", &keys)?;
+            k
+        };
         self.log(user, user, "devmode.revoke", &format!("{} ({})", k.name, k.short()), true);
+        sessions::end_computer(&self.data, &k.name);
+        self.shell_forget(&k.name);
         Ok(k)
     }
 

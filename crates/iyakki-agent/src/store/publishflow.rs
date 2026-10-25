@@ -161,7 +161,7 @@ pub fn set_version(dir: &Path, new: &str) -> Result<(), String> {
         let p = dir.join(f);
         if let Ok(t) = std::fs::read_to_string(&p) {
             if let Some(n) = replace_json_string(&t, "version", new) {
-                std::fs::write(&p, n).map_err(|e| format!("{f}: {e}"))?;
+                std::fs::write(&p, n).map_err(|e| crate::scope::explain_io(&e, &p, "write"))?;
             }
         }
     }
@@ -181,7 +181,7 @@ pub fn add_changelog(dir: &Path, version: &str, line: &str, today: &str) -> Resu
         None if old.trim().is_empty() => format!("# Changelog\n\n{entry}"),
         None => format!("{entry}{old}"),
     };
-    std::fs::write(&p, new).map_err(|e| format!("CHANGELOG.md: {e}"))
+    std::fs::write(&p, new).map_err(|e| crate::scope::explain_io(&e, &p, "write"))
 }
 
 /// The newest version of `name` that a store lists, asked of its `catalog.json` (None: unreachable or not listed). Advisory: the store
@@ -277,6 +277,10 @@ pub fn card(svc: &Services, user: &str, dir: &Path, src: &SourceCfg, key: &(Sign
     let (text, _) = author::pack_dir(dir, Some(&key.0))?;
     let p = pkg::parse(&text).map_err(|e| e.to_string())?;
     let server = authtools::server_of(src);
+    // the store must answer before anything is shown for approval: a deployed store whose pod is not ready is said plainly here
+    if let Err(e) = fetch.get(&format!("{}/catalog.json", server.trim_end_matches('/')), super::catalog::MAX_CATALOG_BYTES) {
+        return Err(super::privatepub::unreachable_for(svc, user, &src.location, &e));
+    }
     let store_has = remote_version(fetch, &server, &p.manifest.name);
     check_version(&p.manifest.version, store_has.as_deref(), &src.name)?;
     let signer = p.manifest.signer.clone().unwrap_or_default();

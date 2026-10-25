@@ -30,12 +30,14 @@ pub mod lifecycle;
 pub mod manifest;
 pub mod organize;
 pub mod privatemanage;
+pub mod privatepub;
 pub mod privatestore;
 pub mod publishflow;
 pub mod publish;
 pub mod revocation;
 pub mod tile;
 pub mod tilehub;
+pub mod tilesdk;
 pub mod server;
 pub mod server_http;
 pub mod storecmd;
@@ -666,6 +668,9 @@ mod tests;
 
 #[cfg(test)]
 mod tile_tests;
+
+#[cfg(test)]
+mod tilesdk_tests;
 
 #[cfg(test)]
 mod publish_tests;

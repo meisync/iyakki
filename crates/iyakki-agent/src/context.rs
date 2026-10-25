@@ -17,7 +17,7 @@ pub struct ContextOptions {
     pub docs_k: usize,
     pub use_docs: bool,
     pub use_skills: bool,
-    /// Skills that are always included, before the one chosen by similarity (at most two pinned): the stack's language skill, the k3s practices.
+    /// Skills that are always included, before the one chosen by similarity (at most three pinned): the stack's language skill, the k3s practices.
     pub pinned_skills: Vec<String>,
 }
 
@@ -71,7 +71,7 @@ pub fn build(services: &Services, skills: &SkillStore, sessions: &SessionStore, 
 
     if opts.use_skills {
         // the pinned skills first (the project's language, the k3s practices), then what the request resembles
-        let mut picked: Vec<crate::skills::Skill> = opts.pinned_skills.iter().take(2).filter_map(|n| skills.get(&crate::skills::Scope::User(user.to_string()), n).or_else(|| skills.get(&crate::skills::Scope::Shared, n))).collect();
+        let mut picked: Vec<crate::skills::Skill> = opts.pinned_skills.iter().take(3).filter_map(|n| skills.get(&crate::skills::Scope::User(user.to_string()), n).or_else(|| skills.get(&crate::skills::Scope::Shared, n))).collect();
         let room = if picked.is_empty() { 2 } else { 1 };
         let extra: Vec<crate::skills::Skill> = skills.select(user, user_msg, 3).into_iter().filter(|s| !picked.iter().any(|p| p.name == s.name)).take(room).collect();
         picked.extend(extra);
@@ -224,9 +224,9 @@ mod tests {
         assert_eq!(info.skills, vec!["lang-go", "k3s-dev-best-practices"]);
         let (_, info) = build(&svc, &svc.skills, &svc.sessions, "amy", None, "SYS", &[], "write a goroutine in golang", &ContextOptions { pinned_skills: pinned.clone(), ..Default::default() });
         assert_eq!(info.skills.iter().filter(|s| *s == "lang-go").count(), 1);
-        // at most two are pinned, and an unknown pinned name is skipped; without pins nothing changes
+        // at most three are pinned, and an unknown pinned name is skipped; without pins nothing changes
         let (_, info) = build(&svc, &svc.skills, &svc.sessions, "amy", None, "SYS", &[], "x", &ContextOptions { pinned_skills: vec!["nope".into(), "lang-go".into(), "k3s-dev-best-practices".into(), "meeting-notes".into()], ..Default::default() });
-        assert_eq!(info.skills, vec!["lang-go"], "only the first two names are pinned (one of them does not exist)");
+        assert_eq!(info.skills, vec!["lang-go", "k3s-dev-best-practices"], "only the first three names are pinned and the unknown one is skipped");
         let (_, info) = build(&svc, &svc.skills, &svc.sessions, "amy", None, "SYS", &[], "the weather forecast", &ContextOptions::default());
         assert_eq!(info.skills, vec!["other-skill"]);
     }

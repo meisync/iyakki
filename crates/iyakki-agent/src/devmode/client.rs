@@ -354,6 +354,7 @@ pub fn pair(home: &Home, host: &str, port: u16, name: &str, code: &str, expect_f
 }
 
 /// A paired device and the key to sign with.
+#[derive(Clone)]
 pub struct DevClient {
     pub device: Device,
     key: SigningKey,
@@ -377,9 +378,28 @@ impl DevClient {
         https(&d.host, d.port, Some(&d.fingerprint), method, &target(path, query), &h, body, self.timeout)
     }
 
-    fn call(&self, method: &str, path: &str, query: &[(&str, &str)], body: &[u8]) -> Result<Value, String> {
+    /// A signed request whose answer is JSON (the device's error sentence on failure).
+    pub fn call(&self, method: &str, path: &str, query: &[(&str, &str)], body: &[u8]) -> Result<Value, String> {
         let q: Vec<(String, String)> = query.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         self.request(method, path, &q, body)?.ok_json()
+    }
+
+    /// A signed request whose answer is raw bytes (file chunks, pictures).
+    pub fn call_bytes(&self, method: &str, path: &str, query: &[(&str, &str)], body: &[u8]) -> Result<Vec<u8>, String> {
+        let q: Vec<(String, String)> = query.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let r = self.request(method, path, &q, body)?;
+        if r.status == 200 {
+            Ok(r.body)
+        } else {
+            r.ok_json().and_then(|_| Err("unexpected answer".to_string()))
+        }
+    }
+
+    /// Like [`DevClient::call`] but keeps the status and the JSON of a refusal (for the `have` of a resumable push).
+    pub fn call_status(&self, method: &str, path: &str, query: &[(&str, &str)], body: &[u8]) -> Result<(u16, Value), String> {
+        let q: Vec<(String, String)> = query.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let r = self.request(method, path, &q, body)?;
+        Ok((r.status, r.json()))
     }
 
     pub fn whoami(&self) -> Result<Value, String> {

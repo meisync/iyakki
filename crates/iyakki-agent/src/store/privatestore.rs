@@ -290,7 +290,7 @@ pub fn status_info(data_dir: &std::path::Path, user: &str, store: &crate::store:
     let inst = crate::platform::installed::load(data_dir, user).into_iter().find(|i| i.service == ID);
     let cfg = store.config();
     let catalog = inst.as_ref().and_then(|i| i.urls.iter().find(|u| u.kind == "catalog").map(|u| u.url.clone()));
-    let added = catalog.as_ref().and_then(|u| cfg.sources.iter().find(|s| &s.location == u)).map(|s| (s.id.clone(), s.name.clone()));
+    let added = catalog.as_ref().and_then(|u| cfg.sources.iter().find(|s| super::privatepub::same_location(&s.location, u))).map(|s| (s.id.clone(), s.name.clone()));
     StatusInfo { instance: inst.map(|i| (i.id.clone(), catalog.unwrap_or_default())), added, default_target: (!cfg.publish_target.is_empty()).then(|| cfg.publish_target.clone()) }
 }
 

@@ -411,6 +411,20 @@ pub const CATALOG: &[CliDef] = &[
         note: "GNU GPL version 3 (a static build, so it runs on the IYAKKI images). IYAKKI does not ship it: you download it here from johnvansickle.com, checked against the MD5 file the builder publishes next to it (about 42 MB on x86-64, 19 MB on ARM). H.264 and AAC are patent-licensed formats; decoding them is your choice and your licence matter, as in the web browser (docs/FULL-BROWSER.md). Unpacked it takes about 150 MB of the data folder. IYAKKI starts it only as a decoder with fixed arguments, never through a shell.",
     },
     CliDef {
+        id: "7zip",
+        name: "7-Zip (reads disk images)",
+        about: "Opens archives and disk images (DMG, HFS+, APFS, ISO, ZIP, tar and more): the `7zz` command. IYAKKI uses it to read Apple's Wi-Fi and Bluetooth firmware out of a Mac's recovery image or a macOS disk image (IYAKKI menu \u{2192} Mac drivers).",
+        home: "https://www.7-zip.org/",
+        version: VersionFrom::Redirect("https://github.com/ip7z/7zip/releases/latest"),
+        source: Source::TarXz("https://github.com/ip7z/7zip/releases/download/{v}/7z{v7}-linux-{arch7}.tar.xz"),
+        checksum: None,
+        bins: &[("7zz", "7zzs")],
+        hosts: &["github.com", "githubusercontent.com"],
+        net_host: Some("-"),
+        version_args: &["i"],
+        note: "7-Zip by Igor Pavlov: GNU LGPL, with the unRAR restriction for RAR code and a BSD licence for some parts (see 7-zip.org/license.txt). IYAKKI does not ship it: you download the project's own static Linux build (7zzs, linked with no libraries, so it runs on the IYAKKI images) from the project's release page on GitHub when you ask for it (about 1.5 MB). The project publishes no checksum file for it, so the list shows it as not verified: the download is protected by HTTPS only. IYAKKI runs it only to list and unpack a disk image into a folder on the data volume, with fixed arguments, never through a shell, and never on a drive.",
+    },
+    CliDef {
         id: "duckdb",
         name: "DuckDB",
         about: "Run SQL on CSV and Parquet files or a database file (the `duckdb` command); the DASH tile uses it for its DuckDB source.",
@@ -620,7 +634,7 @@ pub(crate) fn template_for(t: &str, v: &str, musl: bool, machine: &str) -> Resul
     let (node_dist, node_libc) = if musl { ("unofficial-builds.nodejs.org/download/release", "-musl") } else { ("nodejs.org/dist", "") };
     let node_arch = if a == "arm64" { "arm64" } else { "x64" };
     let t = t.replace("{libc_triple}", if musl { "musl" } else { "gnu" }).replace("{cplatform}", &format!("linux-{node_arch}{}", if musl { "-musl" } else { "" })).replace("{arch4}", node_arch).replace("{musl}", if musl { "musl" } else { "" });
-    Ok(t.replace("{node_dist}", node_dist).replace("{node_libc}", node_libc).replace("{node_arch}", node_arch).replace("{ve}", &pct_encode_version(v)).replace("{vn}", v.trim_start_matches('v')).replace("{v}", v).replace("{arduino}", if a == "arm64" { "Linux_ARM64" } else { "Linux_64bit" }).replace("{grpc}", if a == "arm64" { "arm64" } else { "x86_64" }).replace("{arch2}", a2).replace("{arch3}", a3).replace("{arch}", a).replace("{k3s_suffix}", if a == "arm64" { "-arm64" } else { "" }))
+    Ok(t.replace("{node_dist}", node_dist).replace("{node_libc}", node_libc).replace("{node_arch}", node_arch).replace("{ve}", &pct_encode_version(v)).replace("{vn}", v.trim_start_matches('v')).replace("{v7}", &v.trim_start_matches('v').replace('.', "")).replace("{arch7}", node_arch).replace("{v}", v).replace("{arduino}", if a == "arm64" { "Linux_ARM64" } else { "Linux_64bit" }).replace("{grpc}", if a == "arm64" { "arm64" } else { "x86_64" }).replace("{arch2}", a2).replace("{arch3}", a3).replace("{arch}", a).replace("{k3s_suffix}", if a == "arm64" { "-arm64" } else { "" }))
 }
 
 /// The C library of this machine is musl (the IYAKKI images, Alpine): programs built for glibc do not run.
@@ -812,18 +826,18 @@ impl CliManager {
     pub fn node_check(&self) -> Result<u32, String> {
         let (node, npm) = (self.node_program(), self.npm_program());
         let hint = "Node.js 22 or newer is best.";
-        let out = run_quiet(&node, &["--version"], 20).map_err(|_| format!("Node.js is not installed: IYAKKI menu \u{2192} Quick install \u{2192} Node.js (or Install on its line in the CLI tile). {hint}"))?;
+        let out = run_quiet(&node, &["--version"], 20).map_err(|_| format!("Node.js is not installed: Store \u{2192} Setup \u{2192} Get started \u{2192} Node.js (or Install on its line in the CLI tile). {hint}"))?;
         let major: u32 = out.trim().trim_start_matches('v').split('.').next().and_then(|m| m.parse().ok()).ok_or_else(|| format!("Node.js answered `{}`, which was not understood. {hint}", out.trim()))?;
         if major < 18 {
             return Err(format!("Node.js {} is too old (18 or newer is needed). {hint}", out.trim()));
         }
-        run_quiet(&npm, &["--version"], 20).map_err(|_| format!("npm is not installed next to Node.js: IYAKKI menu \u{2192} Quick install \u{2192} Node.js. {hint}"))?;
+        run_quiet(&npm, &["--version"], 20).map_err(|_| format!("npm is not installed next to Node.js: Store \u{2192} Setup \u{2192} Get started \u{2192} Node.js. {hint}"))?;
         Ok(major)
     }
 
     /// Python 3 can make environments and has pip.
     pub fn python_check(&self) -> Result<(), String> {
-        run_quiet(&self.python_program(), &["-c", "import venv, ensurepip"], 30).map(|_| ()).map_err(|e| if e.starts_with("could not start") { "Python 3 is not installed: IYAKKI menu \u{2192} Quick install \u{2192} Python 3 (or Install on its line in the CLI tile).".to_string() } else { format!("Python 3 is installed but cannot make environments with pip ({e}): IYAKKI menu \u{2192} Quick install \u{2192} Python 3.") })
+        run_quiet(&self.python_program(), &["-c", "import venv, ensurepip"], 30).map(|_| ()).map_err(|e| if e.starts_with("could not start") { "Python 3 is not installed: Store \u{2192} Setup \u{2192} Get started \u{2192} Python 3 (or Install on its line in the CLI tile).".to_string() } else { format!("Python 3 is installed but cannot make environments with pip ({e}): Store \u{2192} Setup \u{2192} Get started \u{2192} Python 3.") })
     }
 
     /// The catalogue programs `d` needs and the machine does not have, in the order to install them. An older Node.js than 22 counts
@@ -2752,10 +2766,10 @@ mod tests {
         std::env::set_var("PATH", before);
         m.set_npm("/nonexistent/npm", "/nonexistent/node");
         let e = m.node_check().unwrap_err();
-        assert!(e.contains("Node.js is not installed: IYAKKI menu") && e.contains("Quick install") && !e.contains("apt") && !e.contains("brew") && !e.contains("sudo"), "{e}");
+        assert!(e.contains("Node.js is not installed: Store") && e.contains("Setup") && !e.contains("apt") && !e.contains("brew") && !e.contains("sudo"), "{e}");
         m.set_python("/nonexistent/python3");
         let e = m.python_check().unwrap_err();
-        assert!(e.contains("Python 3 is not installed: IYAKKI menu") && !e.contains("apt") && !e.contains("brew"), "{e}");
+        assert!(e.contains("Python 3 is not installed: Store") && !e.contains("apt") && !e.contains("brew"), "{e}");
     }
 
     #[test]
@@ -2822,6 +2836,28 @@ mod tests {
         let j = wait(&m, "ffmpeg");
         assert!(j.error.as_deref().is_some_and(|e| e.contains("checksum")), "{j:?}");
         assert!(m.is_installed("ffmpeg").is_none());
+    }
+
+    #[test]
+    fn seven_zip_comes_from_the_projects_release_page_as_a_tar_xz_and_is_listed_as_not_verified() {
+        let d = def("7zip").unwrap();
+        assert!(d.checksum.is_none() && d.bins == [("7zz", "7zzs")] && d.hosts.contains(&"github.com"));
+        assert_eq!(tpl_glibc("{v7}", "25.01").unwrap(), "2501");
+        let Source::TarXz(tu) = d.source else { panic!("the 7zip entry changed shape") };
+        let url = tpl_glibc(tu, "25.01").unwrap();
+        assert!(url.starts_with("https://github.com/ip7z/7zip/releases/download/25.01/7z2501-linux-"), "{url}");
+        let tar = crate::archive::tests::make_tar(&[("7zz", b'0', "#!/bin/sh\necho '7zz dynamic'\n", 0o755), ("7zzs", b'0', "#!/bin/sh\necho '7-Zip (z) 25.01 (x64) static'\n", 0o755), ("License.txt", b'0', "LGPL", 0o644)]);
+        let xz = crate::xz::make_xz_stored(&tar);
+        let st = fake(vec![("https://github.com/ip7z/7zip/releases/latest".into(), (302, vec![("location".into(), "https://github.com/ip7z/7zip/releases/tag/25.01".into())], vec![])), (url, ok(&xz))]);
+        let m = manager("7zip", st);
+        m.install("7zip", "root").unwrap();
+        let j = wait(&m, "7zip");
+        assert!(j.error.is_none() && j.finished, "{j:?}");
+        let i = m.is_installed("7zip").unwrap();
+        assert!(!i.verified, "the project publishes no checksum");
+        let link = m.bin_dir().join("7zz");
+        assert!(link.exists(), "7zz is linked");
+        assert!(std::fs::read_to_string(&link).unwrap().contains("static"), "it is the static build, 7zzs");
     }
 
     fn kubectl_routes(st: &Fake, version: &str, program: &str) {

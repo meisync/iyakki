@@ -1,0 +1,226 @@
+{
+  "cdiVersion": "0.6.0",
+  "containerEdits": {
+    "deviceNodes": [
+      {
+        "fileMode": 438,
+        "path": "/dev/nvidiactl",
+        "permissions": "rw"
+      },
+      {
+        "fileMode": 438,
+        "path": "/dev/nvidia-uvm",
+        "permissions": "rw"
+      },
+      {
+        "fileMode": 438,
+        "path": "/dev/nvidia-uvm-tools",
+        "permissions": "rw"
+      }
+    ],
+    "env": [
+      "LD_LIBRARY_PATH=/usr/local/nvidia/lib64"
+    ],
+    "mounts": [
+      {
+        "containerPath": "/usr/local/nvidia/lib64/libGLX_nvidia.so.595.99.02",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/lib64/libGLX_nvidia.so.595.99.02",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      },
+      {
+        "containerPath": "/usr/local/nvidia/lib64/libGLX_indirect.so.0",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/lib64/libGLX_nvidia.so.595.99.02",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      },
+      {
+        "containerPath": "/usr/local/nvidia/lib64/libGLX_nvidia.so.0",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/lib64/libGLX_nvidia.so.595.99.02",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      },
+      {
+        "containerPath": "/usr/local/nvidia/lib64/libcuda.so.595.99.02",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/lib64/libcuda.so.595.99.02",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      },
+      {
+        "containerPath": "/usr/local/nvidia/lib64/libcuda.so.1",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/lib64/libcuda.so.595.99.02",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      },
+      {
+        "containerPath": "/usr/local/nvidia/lib64/libnvidia-ml.so.595.99.02",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/lib64/libnvidia-ml.so.595.99.02",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      },
+      {
+        "containerPath": "/usr/local/nvidia/lib64/libnvidia-ml.so.1",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/lib64/libnvidia-ml.so.595.99.02",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      },
+      {
+        "containerPath": "/usr/local/nvidia/lib64/libnvidia-nvvm.so.595.99.02",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/lib64/libnvidia-nvvm.so.595.99.02",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      },
+      {
+        "containerPath": "/usr/local/nvidia/lib64/libnvidia-nvvm.so.4",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/lib64/libnvidia-nvvm.so.595.99.02",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      },
+      {
+        "containerPath": "/usr/local/nvidia/lib64/libnvidia-nvvm70.so.4",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/lib64/libnvidia-nvvm70.so.4",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      },
+      {
+        "containerPath": "/usr/local/nvidia/lib64/libnvidia-ptxjitcompiler.so.595.99.02",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/lib64/libnvidia-ptxjitcompiler.so.595.99.02",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      },
+      {
+        "containerPath": "/usr/local/nvidia/lib64/libnvidia-ptxjitcompiler.so.1",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/lib64/libnvidia-ptxjitcompiler.so.595.99.02",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      },
+      {
+        "containerPath": "/usr/local/nvidia/bin/nvidia-cuda-mps-control",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/bin/nvidia-cuda-mps-control",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      },
+      {
+        "containerPath": "/usr/local/nvidia/bin/nvidia-smi",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/bin/nvidia-smi",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      },
+      {
+        "containerPath": "/usr/bin/nvidia-smi",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/bin/nvidia-smi",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      },
+      {
+        "containerPath": "/etc/vulkan/icd.d/nvidia_icd.json",
+        "hostPath": "/var/lib/iyakki/gpu/nvidia/595.99.02/stage/vulkan/nvidia_icd.json",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "bind"
+        ]
+      }
+    ]
+  },
+  "devices": [
+    {
+      "containerEdits": {
+        "deviceNodes": [
+          {
+            "fileMode": 438,
+            "path": "/dev/nvidia0",
+            "permissions": "rw"
+          }
+        ]
+      },
+      "name": "0"
+    },
+    {
+      "containerEdits": {
+        "deviceNodes": [
+          {
+            "fileMode": 438,
+            "path": "/dev/nvidia0",
+            "permissions": "rw"
+          }
+        ]
+      },
+      "name": "GPU-1b8a6e20-5ab2-3c55-b3a8-b1cb84a9ea5b"
+    },
+    {
+      "containerEdits": {
+        "deviceNodes": [
+          {
+            "fileMode": 438,
+            "path": "/dev/nvidia0",
+            "permissions": "rw"
+          }
+        ]
+      },
+      "name": "all"
+    }
+  ],
+  "kind": "nvidia.com/gpu"
+}

@@ -16,15 +16,20 @@ impl Qr {
     pub fn version(&self) -> usize {
         (self.size - 17) / 4
     }
+    /// A symbol from its modules (row by row); the decoder's tests build symbols at other levels this way.
+    #[cfg(test)]
+    pub(crate) fn from_modules(size: usize, modules: Vec<bool>) -> Qr {
+        Qr { size, modules }
+    }
 }
 
 /// Most bytes a symbol can hold at level L.
 pub const MAX_BYTES: usize = 858;
 
-const ECC_PER_BLOCK: [usize; 21] = [0, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28];
-const BLOCKS: [usize; 21] = [0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8];
+pub(crate) const ECC_PER_BLOCK: [usize; 21] = [0, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28];
+pub(crate) const BLOCKS: [usize; 21] = [0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8];
 
-fn raw_modules(ver: usize) -> usize {
+pub(crate) fn raw_modules(ver: usize) -> usize {
     let mut r = (16 * ver + 128) * ver + 64;
     if ver >= 2 {
         let n = ver / 7 + 2;
@@ -49,7 +54,7 @@ fn gf_mul(x: u8, y: u8) -> u8 {
     z as u8
 }
 
-fn rs_divisor(degree: usize) -> Vec<u8> {
+pub(crate) fn rs_divisor(degree: usize) -> Vec<u8> {
     let mut result = vec![0u8; degree];
     result[degree - 1] = 1;
     let mut root = 1u8;
@@ -65,7 +70,7 @@ fn rs_divisor(degree: usize) -> Vec<u8> {
     result
 }
 
-fn rs_remainder(data: &[u8], divisor: &[u8]) -> Vec<u8> {
+pub(crate) fn rs_remainder(data: &[u8], divisor: &[u8]) -> Vec<u8> {
     let mut result = vec![0u8; divisor.len()];
     for &b in data {
         let factor = b ^ result.remove(0);
@@ -136,19 +141,19 @@ fn all_words(data: &[u8], ver: usize) -> Vec<u8> {
     out
 }
 
-struct Grid {
-    size: usize,
-    m: Vec<bool>,
-    f: Vec<bool>,
+pub(crate) struct Grid {
+    pub(crate) size: usize,
+    pub(crate) m: Vec<bool>,
+    pub(crate) f: Vec<bool>,
 }
 
 impl Grid {
-    fn set_fn(&mut self, x: usize, y: usize, dark: bool) {
+    pub(crate) fn set_fn(&mut self, x: usize, y: usize, dark: bool) {
         self.m[y * self.size + x] = dark;
         self.f[y * self.size + x] = true;
     }
 
-    fn finder(&mut self, cx: i32, cy: i32) {
+    pub(crate) fn finder(&mut self, cx: i32, cy: i32) {
         for dy in -4..=4i32 {
             for dx in -4..=4i32 {
                 let (x, y) = (cx + dx, cy + dy);
@@ -160,7 +165,7 @@ impl Grid {
         }
     }
 
-    fn alignment(&mut self, cx: usize, cy: usize) {
+    pub(crate) fn alignment(&mut self, cx: usize, cy: usize) {
         for dy in -2..=2i32 {
             for dx in -2..=2i32 {
                 self.set_fn((cx as i32 + dx) as usize, (cy as i32 + dy) as usize, dx.abs().max(dy.abs()) != 1);
@@ -169,7 +174,12 @@ impl Grid {
     }
 
     fn format(&mut self, mask: usize) {
-        let data = (1usize << 3) | mask; // level L = 01
+        self.format_level(mask, 1);
+    }
+
+    /// The format bits for a mask and a level (L = 1, M = 0, Q = 3, H = 2, as the standard writes them).
+    pub(crate) fn format_level(&mut self, mask: usize, level: usize) {
+        let data = (level << 3) | mask;
         let mut rem = data;
         for _ in 0..10 {
             rem = (rem << 1) ^ ((rem >> 9) * 0x537);
@@ -195,7 +205,7 @@ impl Grid {
         self.set_fn(8, s - 8, true);
     }
 
-    fn version_info(&mut self, ver: usize) {
+    pub(crate) fn version_info(&mut self, ver: usize) {
         if ver < 7 {
             return;
         }
@@ -213,7 +223,7 @@ impl Grid {
     }
 }
 
-fn align_positions(ver: usize) -> Vec<usize> {
+pub(crate) fn align_positions(ver: usize) -> Vec<usize> {
     if ver == 1 {
         return vec![];
     }
@@ -228,7 +238,7 @@ fn align_positions(ver: usize) -> Vec<usize> {
     v
 }
 
-fn masked(mask: usize, x: usize, y: usize) -> bool {
+pub(crate) fn masked(mask: usize, x: usize, y: usize) -> bool {
     match mask {
         0 => (x + y) % 2 == 0,
         1 => y % 2 == 0,

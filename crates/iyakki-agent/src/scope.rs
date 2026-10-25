@@ -78,6 +78,10 @@ pub fn ensure_parent(path: &Path) -> Result<(), String> {
 /// the bare "Not a directory (os error 20)". `action` is a verb phrase such as "write", "read" or "list".
 pub fn explain_io(e: &std::io::Error, path: &Path, action: &str) -> String {
     let shown = path.display();
+    // the boot drive is gone or failing: say that, not a bare "Input/output error" (iyakki_storage::loss)
+    if let Some(t) = iyakki_storage::loss::explain_for_path(path, e.raw_os_error()) {
+        return format!("cannot {action} {shown}: {t}");
+    }
     // the first existing part of the path that is a file although something is supposed to be inside it
     let file_in_middle = || path.ancestors().skip(1).find(|a| a.is_file()).map(|a| a.display().to_string());
     // the first part that does not exist
@@ -304,6 +308,15 @@ mod tests {
         assert!(explain_io(&std::io::Error::from_raw_os_error(13), &d, "write").contains("denies access"));
         assert!(explain_io(&std::io::Error::from_raw_os_error(21), &d, "write").contains("is a folder"));
         assert!(explain_io(&std::io::Error::from_raw_os_error(28), &d, "write").contains("disk is full"));
+        // while the boot drive is lost the wording changes (and only then)
+        let lost = iyakki_storage::loss::Snapshot { state: iyakki_storage::loss::State::Lost, ..Default::default() };
+        iyakki_storage::loss::set_thread_override(Some(lost));
+        let eio = std::io::Error::from_raw_os_error(5);
+        assert!(explain_io(&eio, Path::new("/home/admin/Pictures/a.jpg"), "write").contains("drive is not available"));
+        assert!(explain_io(&std::io::Error::from_raw_os_error(2), Path::new("/var/lib/iyakki/x"), "read").contains("drive is not available"));
+        assert!(!explain_io(&std::io::Error::from_raw_os_error(2), &d.join("zz/x"), "read").contains("drive is not available"), "a path elsewhere keeps its own wording");
+        iyakki_storage::loss::set_thread_override(None);
+        assert!(!explain_io(&eio, Path::new("/home/admin/Pictures/a.jpg"), "write").contains("drive is not available"));
         assert!(looks_like_folder_name(Path::new("/x/deploy")) && !looks_like_folder_name(Path::new("/x/a.txt")) && !looks_like_folder_name(Path::new("/x/Dockerfile")));
     }
 

@@ -9,7 +9,7 @@ use super::catalog::{sha256_hex, Action, Catalog, Entry};
 use super::manifest::{Meta, PriceModel, Pricing, Publisher};
 use crate::skills::{self, Scope};
 
-pub const SKILLS: [(&str, &str); 15] = [
+pub const SKILLS: [(&str, &str); 17] = [
     ("k3s-dev-best-practices", include_str!("../../../../dist/skills/k3s-dev-best-practices.md")),
     ("lang-python", include_str!("../../../../dist/skills/lang-python.md")),
     ("lang-javascript", include_str!("../../../../dist/skills/lang-javascript.md")),
@@ -25,6 +25,8 @@ pub const SKILLS: [(&str, &str); 15] = [
     ("iyakki-mcp-author", include_str!("../../../../dist/skills/iyakki-mcp-author.md")),
     ("iyakki-skill-author", include_str!("../../../../dist/skills/iyakki-skill-author.md")),
     ("iyakki-tile-author", include_str!("../../../../dist/skills/iyakki-tile-author.md")),
+    ("k3s-build-and-deploy", include_str!("../../../../dist/skills/k3s-build-and-deploy.md")),
+    ("k3s-dockerfile-patterns", include_str!("../../../../dist/skills/k3s-dockerfile-patterns.md")),
 ];
 
 /// The three sample skills (the shell puts the same text in place on the first sign-in; a test keeps them equal).
@@ -103,6 +105,10 @@ fn skill_item(name: &str, md: &str, categories: &[&str], featured: bool) -> Buil
         format!("Coding in {}", match l { "cpp" => "C++".to_string(), "csharp" => "C#".to_string(), "php" => "PHP".to_string(), "c" => "C".to_string(), other => format!("{}{}", other[..1].to_uppercase(), &other[1..]) })
     } else if name == "k3s-dev-best-practices" {
         "k3s development practices".to_string()
+    } else if name == "k3s-build-and-deploy" {
+        "Build and deploy to k3s".to_string()
+    } else if name == "k3s-dockerfile-patterns" {
+        "Dockerfile patterns for k3s".to_string()
     } else {
         name.trim_start_matches("sample-").replace('-', " ")
     };
@@ -234,6 +240,24 @@ pub fn catalog() -> Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_k3s_build_and_deploy_skills_fit_reference_each_other_and_carry_the_cluster_rules() {
+        let get = |n: &str| SKILLS.iter().find(|(k, _)| *k == n).unwrap_or_else(|| panic!("{n} ships")).1;
+        let (bd, df) = (get("k3s-build-and-deploy"), get("k3s-dockerfile-patterns"));
+        for md in [bd, df] {
+            let sk = skills::parse(md, Scope::Shared).expect("parses");
+            assert!(sk.body.chars().count() <= 3950 && md.is_ascii() && sk.triggers.len() <= 12);
+            assert!(!md.contains("/home/") && !md.contains("192.168.") && !md.contains(":latest\n"));
+        }
+        assert!(bd.contains("k3s-dockerfile-patterns") && df.contains("k3s-build-and-deploy") && bd.contains("k3s-dev-best-practices"));
+        for w in ["k8s_status", "deploy_build target=test", "deploy_load", "k8s_apply", "deploy_status", "Never switch the active cluster", "read-only", "ImagePullBackOff", "OOMKilled", "store_publish", "nvidia.com/gpu", "HTTP 200"] {
+            assert!(bd.contains(w), "{w}");
+        }
+        for l in ["Node", "Python", "Go", "Rust", "Java", "C#", "PHP", "Static"] {
+            assert!(df.contains(l), "{l}");
+        }
+    }
 
     #[test]
     fn the_shipped_skills_the_samples_the_demo_server_and_the_clis_are_all_there() {

@@ -105,9 +105,9 @@ pub fn explain_kubectl(raw: &str) -> String {
     } else if low.contains("no such file") || low.contains("unable to read") || low.contains("kubeconfig") && low.contains("not") {
         format!("The cluster's kubeconfig cannot be read ({l}).")
     } else if low.contains("kubectl is not installed") {
-        "There is no kubectl on this machine. The dev cluster installed by IYAKKI brings its own (k3s kubectl), so install it with Quick install \u{2192} k3s; for another cluster install kubectl from the CLI tile.".to_string()
+        "There is no kubectl on this machine. The dev cluster installed by IYAKKI brings its own (k3s kubectl), so install it with Store \u{2192} Setup \u{2192} k3s; for another cluster install kubectl from the CLI tile.".to_string()
     } else if low.contains("not found in $path") || low.contains("executable file not found") || low.contains("no such file or directory") {
-        "kubectl is not available on this machine and k3s's own kubectl was not found either; install the dev cluster first (Quick install \u{2192} k3s).".to_string()
+        "kubectl is not available on this machine and k3s's own kubectl was not found either; install the dev cluster first (Store \u{2192} Setup \u{2192} k3s).".to_string()
     } else {
         l
     }

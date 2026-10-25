@@ -94,6 +94,9 @@ pub struct K8sTools {
     pub audit: Arc<dyn Fn(&str, &str) + Send + Sync>,
     /// k3s's registry mirror file (a field so tests can point elsewhere).
     pub registries_yaml: PathBuf,
+    /// The registry's name for the cluster these tools work against (`cluster "gpu-box" (remote)`, `clusters::ClusterEntry::phrase`); empty:
+    /// the resolved profile's own name. Every audit line names it.
+    pub cluster_phrase: String,
     /// `host:port` of the registry a REMOTE cluster pulls from (project.json `k8s.registry`); empty: look for one in the cluster.
     pub registry_setting: String,
     /// `k8s.registry_pull`: the address the nodes pull from when it differs from `registry_setting` (`localhost:30500`).
@@ -191,7 +194,7 @@ pub fn content_tag(dir: &Path) -> String {
 
 impl K8sTools {
     pub fn new(run: Arc<dyn Runner>, profile: ClusterProfile, ns: &str, ws: &str, root: &Path, audit: Arc<dyn Fn(&str, &str) + Send + Sync>) -> K8sTools {
-        K8sTools { run, profile, ns: ns.into(), ws: ws.into(), root: root.into(), audit, registries_yaml: "/etc/rancher/k3s/registries.yaml".into(), registry_setting: String::new(), registry_pull: String::new(), registry_kind: String::new(), state: Mutex::new(State::default()) }
+        K8sTools { run, profile, ns: ns.into(), ws: ws.into(), root: root.into(), audit, registries_yaml: "/etc/rancher/k3s/registries.yaml".into(), cluster_phrase: String::new(), registry_setting: String::new(), registry_pull: String::new(), registry_kind: String::new(), state: Mutex::new(State::default()) }
     }
 
     pub fn handles(name: &str) -> bool {
@@ -244,8 +247,16 @@ impl K8sTools {
         ["podman", "docker"].into_iter().find(|e| self.run.has(e))
     }
 
+    /// `cluster "gpu-box" (remote)`: the cluster every change and every audit line is about.
+    pub fn cluster_label(&self) -> String {
+        if !self.cluster_phrase.is_empty() {
+            return self.cluster_phrase.clone();
+        }
+        format!("cluster \"{}\"", if self.profile.name.is_empty() { "unnamed" } else { &self.profile.name })
+    }
+
     fn audit(&self, tool: &str, what: &str) {
-        (self.audit)(tool, &format!("{}:{}:{}", self.ws, self.ns, what));
+        (self.audit)(tool, &format!("{}:{}:{} on {}", self.ws, self.ns, what, self.cluster_label()));
     }
 
     fn read_only(&self) -> Option<String> {
@@ -1503,6 +1514,19 @@ mod tests {
         // the audit log has one entry per call
         assert!(g.audited.lock().unwrap().iter().all(|a| a.starts_with("k8s.k8s_") || a.starts_with("k8s.deploy_")), "{:?}", g.audited.lock().unwrap());
         assert!(g.audited.lock().unwrap().iter().any(|a| a.contains("Shop:shop-dev")));
+    }
+
+    #[test]
+    fn every_audit_line_names_the_cluster_the_tools_work_against() {
+        let mut g = rig("audit-cluster", true);
+        g.r.answer("get pods", "NAME READY\nweb-1 1/1\n");
+        g.t.call("k8s_get", &json!({"kind": "pods"})).unwrap();
+        assert!(g.audited.lock().unwrap().last().unwrap().ends_with(" on cluster \"k3s\""), "the resolved profile's name by default: {:?}", g.audited.lock().unwrap());
+        g.t.cluster_phrase = "cluster \"gpu-box\" (remote)".into();
+        g.t.call("k8s_get", &json!({"kind": "pods"})).unwrap();
+        let _ = g.t.call("k8s_get", &json!({"kind": "pods; x"}));
+        let a = g.audited.lock().unwrap().clone();
+        assert!(a.len() == 3 && a[1].ends_with(" on cluster \"gpu-box\" (remote)") && a[2].contains("failed") && a[2].ends_with(" on cluster \"gpu-box\" (remote)"), "{a:?}");
     }
 
     #[test]

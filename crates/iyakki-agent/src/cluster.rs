@@ -326,7 +326,7 @@ impl Cluster {
             .arg(self.dir.join("data"))
             .arg("--write-kubeconfig")
             .arg(self.kubeconfig())
-            .args(["--write-kubeconfig-mode", "600", "--disable", "traefik", "--disable", "servicelb", "--disable", "metrics-server", "--node-name", "iyakki"])
+            .args(["--write-kubeconfig-mode", "600", "--disable", "traefik", "--disable", "servicelb", "--node-name", "iyakki"])
             .env_clear()
             .env("PATH", format!("{}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", self.clis.bin_dir().display()))
             .env("HOME", &self.dir)

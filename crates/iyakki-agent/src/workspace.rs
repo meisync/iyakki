@@ -77,11 +77,20 @@ pub struct ProjectConfig {
     pub commands: Commands,
     #[serde(skip_serializing_if = "PreviewConfig::is_empty")]
     pub preview: PreviewConfig,
+    /// The repositories cloned into this workspace, each in its own folder (see `gitsite`); no secret is in the list.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<crate::gitsite::RepoEntry>,
+    /// Git host -> id of the SSH key to use for it in THIS workspace (overrides the person's table in Settings → Git and SSH keys).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub git_keys: std::collections::BTreeMap<String, String>,
+    /// Run this workspace's run/test commands and the IDE terminal inside the Linux apps sandbox of this name (docs/LINUX-APPS.md); empty: on the machine.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub sandbox: String,
 }
 
 impl Default for ProjectConfig {
     fn default() -> Self {
-        ProjectConfig { name: String::new(), k8s: K8sConfig::default(), features_file: "FEATURES.md".into(), stack: String::new(), target: String::new(), commands: Commands::default(), preview: PreviewConfig::default() }
+        ProjectConfig { name: String::new(), k8s: K8sConfig::default(), features_file: "FEATURES.md".into(), stack: String::new(), target: String::new(), commands: Commands::default(), preview: PreviewConfig::default(), repos: Vec::new(), git_keys: Default::default(), sandbox: String::new() }
     }
 }
 

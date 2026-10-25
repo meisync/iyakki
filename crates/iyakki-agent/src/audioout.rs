@@ -39,8 +39,18 @@ use serde::{Deserialize, Serialize};
 /// What is said when there is nothing to play on.
 pub const NO_OUTPUT: &str = "no sound output: connect a monitor with speakers over HDMI/DP or a USB audio device; built-in speakers on T2 Macs need the apple-bce driver of the Mac image";
 
-/// How often the background watcher looks at the sound hardware again.
+/// How often the background watcher takes a full look at the sound hardware (jacks and monitors are in that look).
 pub const WATCH_EVERY: Duration = Duration::from_secs(3);
+/// During the first minute after boot the watcher checks every 2 s whether a sound card or PCM appeared (the built-in
+/// speakers of a MacBookPro14,1 appear about 11 s after boot); a change is looked at at once.
+pub const WATCH_EARLY: Duration = Duration::from_secs(2);
+pub const EARLY_SECS: u64 = 60;
+/// A sound card that is slow to start is waited for this long before it counts as missing.
+pub const STARTING_SECS: u64 = 30;
+/// What the CS8409 of the MacBookPro14,1 accepts (measured): 32-bit, 44.1 kHz, four channels. Used when the card cannot be asked.
+pub const CS8409_MIX: crate::softvol::Mix = crate::softvol::Mix { format: "S32_LE", channels: 4, sized: true, rate: 44_100, probed: true };
+/// What Settings -> Sound says while the card starts.
+pub const STARTING_LINE: &str = "waiting for the sound card (the built-in speakers of this Mac start up slowly)";
 
 // ------------------------------------------------------------------------------------------------ settings
 
@@ -55,6 +65,43 @@ pub struct SoundSettings {
     pub muted: bool,
     /// The last volume of each output ([`Output::key`] → percent), restored when that output is used again.
     pub levels: std::collections::BTreeMap<String, u32>,
+    /// A software boost in dB for a card (card id → 0 to [`crate::softvol::MAX_BOOST_DB`]), for codecs whose fixed amplifier
+    /// gain is low (Settings → Sound → Advanced → Boost). It clips, so it may distort; 0 (absent) is the normal case.
+    pub boosts: std::collections::BTreeMap<String, u32>,
+    /// Which volume a card uses (card id → mode); absent = Automatic. Set from Settings -> Sound -> Advanced.
+    pub volume_modes: std::collections::BTreeMap<String, VolumeMode>,
+}
+
+/// Which volume control moves the sound of a card that has a hardware one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VolumeMode {
+    /// The hardware control, except on codecs known to have a control that does nothing ([`hw_volume_is_dummy`]).
+    #[default]
+    Automatic,
+    /// Always the card's hardware control.
+    Hardware,
+    /// Always IYAKKI's software volume (ALSA softvol); the card's own control is left alone.
+    Software,
+}
+
+impl VolumeMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            VolumeMode::Automatic => "Automatic",
+            VolumeMode::Hardware => "Hardware",
+            VolumeMode::Software => "Software",
+        }
+    }
+
+    /// The next mode in the order Automatic, Hardware, Software.
+    pub fn next(self) -> VolumeMode {
+        match self {
+            VolumeMode::Automatic => VolumeMode::Hardware,
+            VolumeMode::Hardware => VolumeMode::Software,
+            VolumeMode::Software => VolumeMode::Automatic,
+        }
+    }
 }
 
 /// At most this many outputs keep their own volume.
@@ -62,7 +109,7 @@ pub const MAX_LEVELS: usize = 32;
 
 impl Default for SoundSettings {
     fn default() -> Self {
-        SoundSettings { output: String::new(), volume_pct: 100, muted: false, levels: Default::default() }
+        SoundSettings { output: String::new(), volume_pct: 100, muted: false, levels: Default::default(), boosts: Default::default(), volume_modes: Default::default() }
     }
 }
 
@@ -81,7 +128,41 @@ impl SoundSettings {
         if self.levels.len() > MAX_LEVELS || self.levels.iter().any(|(k, v)| k.is_empty() || !output_key_ok(k) || *v > 100) {
             return Err("the remembered output volumes are not valid".into());
         }
+        if self.boosts.len() > MAX_LEVELS || self.boosts.iter().any(|(k, v)| k.is_empty() || !output_key_ok(k) || *v > crate::softvol::MAX_BOOST_DB) {
+            return Err(format!("the sound boost must be between 0 and {} dB", crate::softvol::MAX_BOOST_DB));
+        }
+        if self.volume_modes.len() > MAX_LEVELS || self.volume_modes.keys().any(|k| k.is_empty() || !output_key_ok(k)) {
+            return Err("the remembered volume controls are not valid".into());
+        }
         Ok(())
+    }
+
+    /// Which volume control this card uses.
+    pub fn volume_mode_for(&self, card_id: &str) -> VolumeMode {
+        self.volume_modes.get(card_id).copied().unwrap_or_default()
+    }
+
+    /// Set the volume control of a card; Automatic removes the entry.
+    pub fn set_volume_mode(&mut self, card_id: &str, m: VolumeMode) {
+        if m == VolumeMode::Automatic {
+            self.volume_modes.remove(card_id);
+        } else if output_key_ok(card_id) && !card_id.is_empty() && (self.volume_modes.len() < MAX_LEVELS || self.volume_modes.contains_key(card_id)) {
+            self.volume_modes.insert(card_id.to_string(), m);
+        }
+    }
+
+    /// The boost of this card in dB (0 when none was set).
+    pub fn boost_for(&self, card_id: &str) -> u32 {
+        self.boosts.get(card_id).copied().unwrap_or(0).min(crate::softvol::MAX_BOOST_DB)
+    }
+
+    /// Set the boost of a card; 0 removes it.
+    pub fn set_boost(&mut self, card_id: &str, db: u32) {
+        if db == 0 {
+            self.boosts.remove(card_id);
+        } else if output_key_ok(card_id) && !card_id.is_empty() && (self.boosts.len() < MAX_LEVELS || self.boosts.contains_key(card_id)) {
+            self.boosts.insert(card_id.to_string(), db.min(crate::softvol::MAX_BOOST_DB));
+        }
     }
 
     /// Remember the volume now as the one of `output` (a key such as `Audio:0`).
@@ -148,9 +229,21 @@ pub struct Output {
     pub builtin_speaker: bool,
     /// The card's hardware volume control (`Master`, `PCM`, ...), None when it has none (or `amixer` did not answer).
     pub hw_volume: Option<String>,
+    /// The card's hardware volume control is known to do nothing (the CS8409 of the Apple path, see [`hw_volume_is_dummy`]).
+    pub dummy_volume: bool,
 }
 
 impl Output {
+    /// Does the output's volume come from the card's hardware control? (Else: IYAKKI's software volume.)
+    pub fn uses_hw_volume(&self, mode: VolumeMode) -> bool {
+        self.hw_volume.is_some()
+            && match mode {
+                VolumeMode::Hardware => true,
+                VolumeMode::Software => false,
+                VolumeMode::Automatic => !self.dummy_volume,
+            }
+    }
+
     /// How Settings remembers it: `<card id>:<device>`.
     pub fn key(&self) -> String {
         format!("{}:{}", self.card_id, self.device)
@@ -347,6 +440,12 @@ pub fn mix_for(o: &Output) -> crate::softvol::Mix {
     }
 }
 
+/// The channel count in a T2 card's driver name (`/proc/asound/cards` says `AppleT2x4 - Apple T2 Audio` for four).
+fn t2_channels(cards: &str, card: u32) -> Option<u32> {
+    let (_, _, driver, _) = parse_cards(cards).into_iter().find(|c| c.0 == card)?;
+    driver.strip_prefix("AppleT2x")?.parse().ok().filter(|n| (1..=8).contains(n))
+}
+
 /// The T2's headphone jack is the PCM `Codec Output` (the speaker is `Speaker`).
 fn is_headphone_pcm(pcm_name: &str) -> bool {
     let n = pcm_name.to_ascii_lowercase();
@@ -406,7 +505,8 @@ pub fn scan(proc_root: &Path, mixer: &dyn Fn(u32) -> Option<String>) -> Vec<Outp
             let builtin_speaker = t2 && kind == Kind::Analog && pcm_name.eq_ignore_ascii_case("speaker");
             // the card's Master/PCM/... drive its analog codec, never the HDMI or S/PDIF stream
             let hw_volume = if matches!(kind, Kind::Hdmi | Kind::Digital) { None } else { crate::softvol::hw_control(&ctl.volumes) };
-            let mut o = Output { card, device, card_id: card_id.clone(), card_name: card_name.clone(), pcm_name, kind, connected: None, monitor: None, speakers: None, hdmi_no: 0, digital_off: false, builtin_speaker, hw_volume };
+            let dummy = hw_volume.is_some() && hw_volume_is_dummy(proc_root, card);
+            let mut o = Output { card, device, card_id: card_id.clone(), card_name: card_name.clone(), pcm_name, kind, connected: None, monitor: None, speakers: None, hdmi_no: 0, digital_off: false, builtin_speaker, hw_volume, dummy_volume: dummy };
             match kind {
                 Kind::Hdmi => {
                     hdmi_no += 1;
@@ -625,6 +725,115 @@ pub fn scale(pcm: &mut [i16], gain: u32) {
     }
 }
 
+/// A WAV whose samples are not 16-bit PCM (32- or 64-bit float, 24- or 32-bit integer: Lemonade's Kokoro answers 32-bit float
+/// mono at 24 kHz), as a 16-bit PCM WAV with the same rate and channels. `None` when it already is 16-bit PCM or is not a WAV
+/// this can read. Why: the output goes through ALSA's `plug` -> `softvol` chain, whose rate converter cannot take float
+/// samples ("Unable to install hw params ... RATE: NONE"), so a float WAV was silent on cards that need rate conversion.
+pub fn to_pcm16_wav(wav: &[u8]) -> Option<Vec<u8>> {
+    if wav.len() < 44 || &wav[..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
+        return None;
+    }
+    let (mut pos, mut fmt, mut data): (usize, Option<(u16, u16, u32, u16)>, Option<(usize, usize)>) = (12, None, None);
+    while pos + 8 <= wav.len() {
+        let id = &wav[pos..pos + 4];
+        let len = u32::from_le_bytes(wav[pos + 4..pos + 8].try_into().ok()?) as usize;
+        let body = pos + 8;
+        if id == b"fmt " && wav.len() >= body + 16 {
+            fmt = Some((u16::from_le_bytes([wav[body], wav[body + 1]]), u16::from_le_bytes([wav[body + 2], wav[body + 3]]), u32::from_le_bytes(wav[body + 4..body + 8].try_into().ok()?), u16::from_le_bytes([wav[body + 14], wav[body + 15]])));
+            // WAVE_FORMAT_EXTENSIBLE: the real format tag is the first two bytes of the sub-format GUID
+            if fmt.map(|f| f.0) == Some(0xFFFE) && wav.len() >= body + 26 && len >= 26 {
+                fmt = fmt.map(|f| (u16::from_le_bytes([wav[body + 24], wav[body + 25]]), f.1, f.2, f.3));
+            }
+        } else if id == b"data" {
+            // a stream written as it is made may say 0 or 0xFFFFFFFF: the data runs to the end
+            let end = if len == 0 || len == u32::MAX as usize { wav.len() } else { body.saturating_add(len).min(wav.len()) };
+            data = Some((body, end));
+            break;
+        }
+        pos = body.saturating_add(len).saturating_add(len & 1);
+    }
+    let (tag, channels, rate, bits) = fmt?;
+    let (start, end) = data?;
+    if channels == 0 || rate == 0 || end < start {
+        return None;
+    }
+    let raw = &wav[start..end];
+    let pcm: Vec<i16> = match (tag, bits) {
+        (3, 32) => raw.chunks_exact(4).map(|c| (f32::from_le_bytes([c[0], c[1], c[2], c[3]]).clamp(-1.0, 1.0) * 32767.0) as i16).collect(),
+        (3, 64) => raw.chunks_exact(8).map(|c| (f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]).clamp(-1.0, 1.0) * 32767.0) as i16).collect(),
+        (1, 24) => raw.chunks_exact(3).map(|c| i16::from_le_bytes([c[1], c[2]])).collect(),
+        (1, 32) => raw.chunks_exact(4).map(|c| i16::from_le_bytes([c[2], c[3]])).collect(),
+        (1, 8) => raw.iter().map(|&b| ((b as i16) - 128) << 8).collect(),
+        _ => return None, // 16-bit PCM (nothing to do) or a format this does not know
+    };
+    let frames = pcm.len() / channels as usize * channels as usize;
+    let data_len = (frames * 2) as u32;
+    let mut o = Vec::with_capacity(44 + frames * 2);
+    o.extend_from_slice(b"RIFF");
+    o.extend((36 + data_len).to_le_bytes());
+    o.extend_from_slice(b"WAVEfmt ");
+    o.extend(16u32.to_le_bytes());
+    o.extend(1u16.to_le_bytes());
+    o.extend(channels.to_le_bytes());
+    o.extend(rate.to_le_bytes());
+    o.extend((rate * channels as u32 * 2).to_le_bytes());
+    o.extend((channels * 2).to_le_bytes());
+    o.extend(16u16.to_le_bytes());
+    o.extend_from_slice(b"data");
+    o.extend(data_len.to_le_bytes());
+    for s in &pcm[..frames] {
+        o.extend(s.to_le_bytes());
+    }
+    Some(o)
+}
+
+/// The rate low-rate speech is brought to before it is played (what nearly every sound card runs at).
+pub const SPEECH_OUT_RATE: u32 = 48_000;
+
+/// A 16-bit PCM WAV below 44.1 kHz (Kokoro speaks at 24 kHz) as a 48 kHz WAV. `None` when it is not a 16-bit PCM WAV or its
+/// rate is already 44.1 kHz or more. Why: ALSA's rate converter in front of the T2 MacBook's sound card (fixed 48 kHz, one-frame
+/// periods) let 24 kHz audio through unconverted, so speech played at twice the speed ("a parrot"); doing the conversion here does
+/// not depend on the ALSA chain. Cubic (Catmull-Rom) interpolation: plenty for speech, which has nothing above half the old rate.
+pub fn resample_low_rate_wav(wav: &[u8]) -> Option<Vec<u8>> {
+    let w = crate::voice::parse_wav(wav).ok()?;
+    let ch = w.channels as usize;
+    if ch == 0 || w.rate == 0 || w.rate >= 44_100 || w.samples.len() < ch * 2 {
+        return None;
+    }
+    let frames = w.samples.len() / ch;
+    let out_frames = ((frames as u64 * SPEECH_OUT_RATE as u64) / w.rate as u64) as usize;
+    let at = |f: isize, c: usize| -> f32 { w.samples[(f.clamp(0, frames as isize - 1) as usize) * ch + c] as f32 };
+    let mut out: Vec<i16> = Vec::with_capacity(out_frames * ch);
+    for n in 0..out_frames {
+        let pos = n as f64 * w.rate as f64 / SPEECH_OUT_RATE as f64;
+        let i = pos.floor() as isize;
+        let t = (pos - i as f64) as f32;
+        for c in 0..ch {
+            let (p0, p1, p2, p3) = (at(i - 1, c), at(i, c), at(i + 1, c), at(i + 2, c));
+            let v = 0.5 * ((2.0 * p1) + (-p0 + p2) * t + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t * t + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t * t * t);
+            out.push(v.clamp(-32768.0, 32767.0) as i16);
+        }
+    }
+    let data_len = (out.len() * 2) as u32;
+    let mut o = Vec::with_capacity(44 + out.len() * 2);
+    o.extend_from_slice(b"RIFF");
+    o.extend((36 + data_len).to_le_bytes());
+    o.extend_from_slice(b"WAVEfmt ");
+    o.extend(16u32.to_le_bytes());
+    o.extend(1u16.to_le_bytes());
+    o.extend((ch as u16).to_le_bytes());
+    o.extend(SPEECH_OUT_RATE.to_le_bytes());
+    o.extend((SPEECH_OUT_RATE * ch as u32 * 2).to_le_bytes());
+    o.extend((ch as u16 * 2).to_le_bytes());
+    o.extend(16u16.to_le_bytes());
+    o.extend_from_slice(b"data");
+    o.extend(data_len.to_le_bytes());
+    for s in &out {
+        o.extend(s.to_le_bytes());
+    }
+    Some(o)
+}
+
 /// A WAV with its 16-bit PCM samples scaled by `gain` percent. Anything else is returned unchanged.
 pub fn scale_wav(wav: &[u8], gain: u32) -> Vec<u8> {
     let mut out = wav.to_vec();
@@ -663,6 +872,246 @@ pub fn test_tone_wav() -> Vec<u8> {
     crate::voice::encode_wav(&pcm, crate::voice::SAMPLE_RATE)
 }
 
+// ------------------------------------------------------------------------------------------------ slow cards
+
+/// The sound card of a MacBookPro13/14 or 2017-2019 iMac whose CS8409 codec is still setting up the Apple amplifiers (about
+/// 8 s): it shows its HDMI devices already but not yet the `CS8409/CS42L83 Analog` one. Its number, if that is the state.
+/// The model comes from the DMI name under `sys`; the codec from `/proc/asound/cardN/codec#*`.
+pub fn card_starting(proc_root: &Path, sys: &Path) -> Option<u32> {
+    let product = read(sys.join("class/dmi/id/product_name"));
+    if !iyakki_drivers::cs8409::MODELS.contains(&product.trim()) {
+        return None;
+    }
+    let outs = scan(proc_root, &|_| None);
+    for (card, _, _, _) in parse_cards(&read(proc_root.join("asound/cards"))) {
+        let cs8409 = is_cs8409_card(proc_root, card);
+        if cs8409 && !outs.iter().any(|o| o.card == card && o.kind == Kind::Analog) {
+            return Some(card);
+        }
+    }
+    None
+}
+
+/// The programs that have this playback device open (`/proc/<pid>/fd` links to `/dev/snd/pcmCcDdp`), by name.
+pub fn pcm_holders(proc_root: &Path, card: u32, device: u32) -> Vec<String> {
+    let want = format!("/dev/snd/pcmC{card}D{device}p");
+    let me = std::process::id().to_string();
+    let mut names = Vec::new();
+    for e in std::fs::read_dir(proc_root).into_iter().flatten().flatten() {
+        let pid = e.file_name().to_string_lossy().into_owned();
+        if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) || pid == me {
+            continue;
+        }
+        let holds = std::fs::read_dir(e.path().join("fd")).into_iter().flatten().flatten().any(|f| std::fs::read_link(f.path()).is_ok_and(|l| l.as_os_str() == want.as_str()));
+        if holds {
+            let name = read(e.path().join("comm")).trim().to_string();
+            let name = if name.is_empty() { format!("process {pid}") } else { format!("{name} ({pid})") };
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names.truncate(4);
+    names
+}
+
+/// The web engine's processes that hold this playback device open without playing anything. WebKit opens the sound device
+/// when a page makes a media element or an audio context and keeps it (state PREPARED, or SETUP) until the page goes; on a
+/// device that cannot be shared (the T2 Mac's: `dmix` underruns on it) that blocks the radio, the voice, and the sound test.
+/// A holder is idle when the device's state is not RUNNING or PAUSED (a page that is playing is never touched).
+pub fn idle_web_holders(proc_root: &Path, card: u32, device: u32) -> Vec<u32> {
+    let status = read(proc_root.join(format!("asound/card{card}/pcm{device}p/sub0/status")));
+    let state = status.lines().next().unwrap_or("").trim();
+    let state = state.strip_prefix("state:").unwrap_or(state).trim();
+    if matches!(state, "RUNNING" | "PAUSED" | "DRAINING") {
+        return Vec::new();
+    }
+    let want = format!("/dev/snd/pcmC{card}D{device}p");
+    let me = std::process::id().to_string();
+    let mut pids = Vec::new();
+    for e in std::fs::read_dir(proc_root).into_iter().flatten().flatten() {
+        let pid = e.file_name().to_string_lossy().into_owned();
+        if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) || pid == me {
+            continue;
+        }
+        if !read(e.path().join("comm")).trim().starts_with("WPEWebProcess") {
+            continue;
+        }
+        let holds = std::fs::read_dir(e.path().join("fd")).into_iter().flatten().flatten().any(|f| std::fs::read_link(f.path()).is_ok_and(|l| l.as_os_str() == want.as_str()));
+        if holds {
+            if let Ok(n) = pid.parse() {
+                pids.push(n);
+            }
+        }
+    }
+    pids
+}
+
+/// Ask the idle web processes holding the device to let go (SIGTERM: the helper starts a new web process for the page, which
+/// reloads; a page that plays is never touched). How many were asked. Called when something else needs the device.
+pub fn release_idle_web(proc_root: &Path, card: u32, device: u32) -> usize {
+    let pids = idle_web_holders(proc_root, card, device);
+    for p in &pids {
+        // SAFETY: a plain signal to a process found just now
+        unsafe { libc::kill(*p as i32, libc::SIGTERM) };
+    }
+    pids.len()
+}
+
+/// "sound card is in use by <process>: stop it, then press Look again".
+fn busy_line(proc_root: &Path, o: &Output) -> String {
+    let who = pcm_holders(proc_root, o.card, o.device);
+    let who = if who.is_empty() { "another program".to_string() } else { who.join(", ") };
+    format!("sound card is in use by {who}: stop it, then press Look again")
+}
+
+/// Is the codec of this card a Cirrus Logic CS8409 (`/proc/asound/cardN/codec#*` says `Codec: Cirrus Logic CS8409`)?
+fn is_cs8409_card(proc_root: &Path, card: u32) -> bool {
+    let dir = proc_root.join("asound").join(format!("card{card}"));
+    std::fs::read_dir(&dir).into_iter().flatten().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("codec#")).any(|e| {
+        let t = read(e.path());
+        t.lines().any(|l| l.starts_with("Codec:") && l.to_ascii_uppercase().contains("CS8409"))
+    })
+}
+
+/// A hardware volume control that is known to do nothing. The CS8409 codec of the MacBookPro13/14 and iMac18/19 (the driver of
+/// the Apple path) shows `PCM Playback Volume` with a decibel scale, but the owner played one tone at 255, 128, 51 and 13
+/// straight to `hw:0,0` and all four sounded the same: the amplifiers have a fixed gain. IYAKKI then uses its software volume
+/// there, unless Settings -> Sound -> Advanced says otherwise for that card ([`VolumeMode`]).
+pub fn hw_volume_is_dummy(proc_root: &Path, card: u32) -> bool {
+    is_cs8409_card(proc_root, card)
+}
+
+/// What changes when a card or a PCM appears or goes: `/proc/asound/cards` and `/proc/asound/pcm`.
+pub fn sound_signature(proc_root: &Path) -> String {
+    format!("{}\n--\n{}", read(proc_root.join("asound/cards")), read(proc_root.join("asound/pcm")))
+}
+
+/// Is a full look due: the cards or PCMs changed, or [`WATCH_EVERY`] has gone by.
+pub fn look_due(signature_changed: bool, since_last_look: Duration) -> bool {
+    signature_changed || since_last_look >= WATCH_EVERY
+}
+
+/// How long the watcher waits between checks: [`WATCH_EARLY`] while the computer has been up for less than a minute.
+pub fn watch_wait(uptime: Duration) -> Duration {
+    if uptime < Duration::from_secs(EARLY_SECS) { WATCH_EARLY } else { WATCH_EVERY }
+}
+
+fn uptime() -> Duration {
+    let up = read("/proc/uptime").split_whitespace().next().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1e9);
+    Duration::from_secs_f64(up.clamp(0.0, 1e9))
+}
+
+// ------------------------------------------------------------------------------------------------ test patterns
+
+/// Rate of the test patterns.
+pub const PATTERN_RATE: u32 = 48_000;
+
+fn wav_pcm16(channels: u16, rate: u32, frames: &[i16]) -> Vec<u8> {
+    let data = (frames.len() * 2) as u32;
+    let mut w = Vec::with_capacity(44 + frames.len() * 2);
+    w.extend_from_slice(b"RIFF");
+    w.extend_from_slice(&(36 + data).to_le_bytes());
+    w.extend_from_slice(b"WAVEfmt ");
+    w.extend_from_slice(&16u32.to_le_bytes());
+    w.extend_from_slice(&1u16.to_le_bytes());
+    w.extend_from_slice(&channels.to_le_bytes());
+    w.extend_from_slice(&rate.to_le_bytes());
+    w.extend_from_slice(&(rate * channels as u32 * 2).to_le_bytes());
+    w.extend_from_slice(&(channels * 2).to_le_bytes());
+    w.extend_from_slice(&16u16.to_le_bytes());
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&data.to_le_bytes());
+    for s in frames {
+        w.extend_from_slice(&s.to_le_bytes());
+    }
+    w
+}
+
+/// A 1 s tone (with short fades, no clicks) on one channel of `channels`, one after the other for `order` (the channel
+/// numbers to play, 1 s each); `amp` is the peak in 0 to 1.
+fn pattern(channels: u16, order: &[usize], freq: f32, amp: f32) -> Vec<u8> {
+    let n = PATTERN_RATE as usize;
+    let mut frames = Vec::with_capacity(n * order.len() * channels as usize);
+    for &ch in order {
+        for i in 0..n {
+            let t = i as f32 / PATTERN_RATE as f32;
+            let fade = (i.min(n - 1 - i) as f32 / 1200.0).min(1.0);
+            let v = ((2.0 * std::f32::consts::PI * freq * t).sin() * amp * fade * i16::MAX as f32) as i16;
+            for c in 0..channels as usize {
+                frames.push(if c == ch { v } else { 0 });
+            }
+        }
+    }
+    wav_pcm16(channels, PATTERN_RATE, &frames)
+}
+
+/// Stereo test: 1 s on the left speaker, then 1 s on the right one (2-channel WAV, 48 kHz).
+pub fn stereo_test_wav() -> Vec<u8> {
+    pattern(2, &[0, 1], 523.25, 0.5)
+}
+
+/// Channel walk for a card with `channels` channels (more than two): each channel alone for 1 s, quiet (WAV, 48 kHz).
+pub fn channel_walk_wav(channels: u16) -> Vec<u8> {
+    let order: Vec<usize> = (0..channels as usize).collect();
+    pattern(channels, &order, 440.0, 0.2)
+}
+
+/// The self-check tone: 2 s of 440 Hz on both channels.
+pub fn check_tone_wav() -> Vec<u8> {
+    let n = 2 * PATTERN_RATE as usize;
+    let mut frames = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        let fade = (i.min(n - 1 - i) as f32 / 1200.0).min(1.0);
+        let v = ((2.0 * std::f32::consts::PI * 440.0 * i as f32 / PATTERN_RATE as f32).sin() * 0.4 * fade * i16::MAX as f32) as i16;
+        frames.push(v);
+        frames.push(v);
+    }
+    wav_pcm16(2, PATTERN_RATE, &frames)
+}
+
+/// The first `[NN%]` of `amixer sget` output.
+pub fn percent_of(sget: &str) -> Option<u32> {
+    let i = sget.find('[')?;
+    let rest = &sget[i + 1..];
+    rest.split_once("%]").and_then(|(n, _)| n.trim().parse::<u32>().ok()).filter(|p| *p <= 100)
+}
+
+/// "Does the hardware volume work?" without a microphone: the same tone at 100 % and then at 12 % of the card's own control
+/// (`control`, e.g. `PCM`), played straight on the card; the person says whether the second was quieter. The control is put
+/// back to its old level afterwards, also when a tone failed. `amixer` runs `amixer` with these arguments, `play` plays a
+/// WAV on an ALSA device.
+pub fn hw_volume_check(amixer: &dyn Fn(&[String]) -> Result<String, String>, play: &dyn Fn(&str, &[u8]) -> Result<(), String>, card: u32, device: u32, control: &str) -> Result<String, String> {
+    let a = |args: &[&str]| amixer(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let c = card.to_string();
+    let old = a(&["-c", &c, "sget", control]).ok().and_then(|t| percent_of(&t));
+    let dev = format!("plughw:{card},{device}");
+    let wav = check_tone_wav();
+    let result = (|| {
+        a(&["-q", "-c", &c, "sset", control, "100%"])?;
+        play(&dev, &wav)?;
+        a(&["-q", "-c", &c, "sset", control, "12%"])?;
+        play(&dev, &wav)
+    })();
+    let _ = a(&["-q", "-c", &c, "sset", control, &format!("{}%", old.unwrap_or(100))]);
+    result.map(|_| "Played the same tone twice on the card itself: first with its hardware volume at 100 %, then at about 12 %.".to_string())
+}
+
+/// Play a WAV on one ALSA device with `aplay` (waits for the end, up to `secs`).
+pub fn play_wav_on(device: &str, wav: &[u8], secs: u64) -> Result<(), String> {
+    let args: Vec<String> = ["aplay", "-q", "-D", device].iter().map(|s| s.to_string()).collect();
+    crate::voice::run_capture(crate::voice::command_for(&args, None), Some(wav), Duration::from_secs(secs)).map(|_| ()).map_err(|e| format!("aplay -D {device}: {e}"))
+}
+
+/// [`hw_volume_check`] with the real `amixer` and `aplay`.
+pub fn hw_volume_check_system(card: u32, device: u32, control: &str) -> Result<String, String> {
+    let amixer = |args: &[String]| -> Result<String, String> {
+        let o = std::process::Command::new("amixer").args(args).stdin(std::process::Stdio::null()).output().map_err(|e| format!("amixer: {e}"))?;
+        if o.status.success() { Ok(String::from_utf8_lossy(&o.stdout).into_owned()) } else { Err(format!("amixer: {}", String::from_utf8_lossy(&o.stderr).trim())) }
+    };
+    hw_volume_check(&amixer, &|d, w| play_wav_on(d, w, 6), card, device, control)
+}
+
 // ------------------------------------------------------------------------------------------------ the selector
 
 /// What the selector sees now.
@@ -677,6 +1126,14 @@ pub struct Status {
     pub device: Option<String>,
     /// The card whose software volume (ALSA softvol, see [`crate::softvol`]) carries the volume of Settings -> Sound.
     pub softvol: Option<u32>,
+    /// How the shared device behind the software volume is opened (None: no shared device, or not IYAKKI's file).
+    pub mix: Option<crate::softvol::Mix>,
+    /// A sound card is still starting up (see [`card_starting`]): the built-in speakers of this Mac are not there yet.
+    pub starting: Option<String>,
+    /// The card whose own hardware volume control is NOT used although it has one (a dummy one, or Software chosen).
+    pub hw_ignored: Option<u32>,
+    /// The sound card is held by another program, so the volume control could not be created: the sentence to show.
+    pub busy: Option<String>,
 }
 
 impl Status {
@@ -700,6 +1157,14 @@ struct State {
     target: Option<String>,
     device: Option<String>,
     softvol: Option<u32>,
+    mix: Option<crate::softvol::Mix>,
+    hw_ignored: Option<u32>,
+    busy: Option<String>,
+    /// The outputs of the last look, to tell a new one from one that was always there.
+    seen_keys: Vec<String>,
+    /// When a starting card was first seen (the 30 s window of [`STARTING_SECS`]).
+    starting_since: Option<Instant>,
+    starting_over: bool,
     /// The output whose volume `prefs.volume_pct` is.
     level_key: Option<String>,
     at: Option<Instant>,
@@ -724,6 +1189,12 @@ pub struct Selector {
     soft_on: AtomicBool,
     /// Told when the selector itself changed the settings (a remembered output volume restored), to save them.
     on_prefs: Mutex<Option<PrefsHook>>,
+    /// Asks a device what it accepts (the analog cards that are not the T2's); None: the long-standing 16-bit stereo dmix.
+    prober: Option<crate::soundprobe::Prober>,
+    /// Where `/sys` is (for the model name, see [`card_starting`]); None: no look for starting cards.
+    sys: Option<PathBuf>,
+    /// Sentences for the front end ("Sound output ready: ..."), taken with [`take_notices`](Selector::take_notices).
+    notices: Mutex<Vec<String>>,
 }
 
 impl Selector {
@@ -735,13 +1206,92 @@ impl Selector {
             root: proc_root.into(),
             mixer: Box::new(mixer),
             server: Box::new(server),
-            state: Mutex::new(State { prefs, outputs: vec![], choice: choose(&[], ""), server: false, target: None, device: None, softvol: None, level_key: None, at: None }),
+            state: Mutex::new(State { prefs, outputs: vec![], choice: choose(&[], ""), server: false, target: None, device: None, softvol: None, mix: None, hw_ignored: None, busy: None, seen_keys: vec![], starting_since: None, starting_over: false, level_key: None, at: None }),
             generation: AtomicU64::new(0),
             gain: AtomicU32::new(100),
             active: AtomicBool::new(true),
             softvol: None,
             soft_on: AtomicBool::new(false),
             on_prefs: Mutex::new(None),
+            prober: None,
+            sys: None,
+            notices: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Learn what each analog device accepts (see [`crate::soundprobe`]) instead of assuming 16-bit stereo at 48 kHz.
+    pub fn with_prober(mut self, prober: crate::soundprobe::Prober) -> Selector {
+        self.prober = Some(prober);
+        self
+    }
+
+    /// Look at the model name under this `/sys` to tell a slow-starting sound card from a missing one.
+    pub fn with_sys(mut self, sys: impl Into<PathBuf>) -> Selector {
+        self.sys = Some(sys.into());
+        self
+    }
+
+    /// What the front end should say now (a sound output that appeared); each is returned once.
+    pub fn take_notices(&self) -> Vec<String> {
+        std::mem::take(&mut *self.notices.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Is a sound card still starting (for at most [`STARTING_SECS`])? The line to show, if so.
+    pub fn starting(&self) -> Option<String> {
+        if !self.is_active() {
+            return None;
+        }
+        self.lock().starting_since.map(|_| STARTING_LINE.to_string())
+    }
+
+    /// Why the volume cannot be changed right now, in a sentence for the F-keys and Settings (None: it can). Only once
+    /// [`install`]ed; a person pressing a volume key must hear about it instead of nothing happening.
+    pub fn volume_note(&self) -> Option<String> {
+        if !self.is_active() {
+            return None;
+        }
+        let st = self.lock();
+        if st.server {
+            return None;
+        }
+        if st.choice.output.is_none() {
+            return Some(if st.starting_since.is_some() { "Volume control not ready: starting".to_string() } else { "No sound output".to_string() });
+        }
+        if let Some(b) = &st.busy {
+            return Some(format!("Volume control not ready: {b}"));
+        }
+        None
+    }
+
+    /// The channel count the shared device behind the volume has (None: not a shared device).
+    pub fn chain_channels(&self) -> Option<u32> {
+        if !self.is_active() {
+            return None;
+        }
+        self.lock().mix.map(|m| m.channels)
+    }
+
+    /// The dmix parameters for this output: probed for an analog codec, else what [`mix_for`] says.
+    fn mix_of(&self, o: &Output) -> crate::softvol::Mix {
+        let mut default = mix_for(o);
+        // a T2 speaker with more channels than the one the table assumes (`AppleT2x4`: four, the only count its device takes)
+        if o.builtin_speaker {
+            if let Some(n) = t2_channels(&read(self.root.join("asound/cards")), o.card).filter(|n| *n > default.channels) {
+                default.channels = n;
+            }
+        }
+        let Some(p) = self.prober.as_ref().filter(|_| o.kind == Kind::Analog && !o.card_name.contains("Apple T2")) else { return default };
+        let cs8409 = is_cs8409_card(&self.root, o.card);
+        match (p.constraints(o.card, o.device), cs8409) {
+            // the CS8409 of the Apple path: all four speakers get the sound (two channels would reach only a pair of them)
+            (Some(c), true) => {
+                let m = c.mix().unwrap_or(CS8409_MIX);
+                if c.channels.is_empty() || c.channels.iter().any(|r| r.lo <= 4 && 4 <= r.hi) { crate::softvol::Mix { channels: 4, probed: true, ..m } } else { m }
+            }
+            (Some(c), false) => c.mix().unwrap_or(default),
+            // the card is busy (TALES or a player holds it) or does not answer: what was measured on these Macs
+            (None, true) => CS8409_MIX,
+            (None, false) => default,
         }
     }
 
@@ -763,7 +1313,7 @@ impl Selector {
     }
 
     fn status_of(st: &State) -> Status {
-        Status { outputs: st.outputs.clone(), choice: st.choice.clone(), sound_server: st.server, prefs: st.prefs.clone(), device: st.device.clone(), softvol: st.softvol }
+        Status { outputs: st.outputs.clone(), choice: st.choice.clone(), sound_server: st.server, prefs: st.prefs.clone(), device: st.device.clone(), softvol: st.softvol, mix: st.mix, starting: st.starting_since.map(|_| STARTING_LINE.to_string()), hw_ignored: st.hw_ignored, busy: st.busy.clone() }
     }
 
     /// Decide again from what is known. Returns the settings when the remembered volume of a newly used output replaced
@@ -791,11 +1341,28 @@ impl Selector {
                 let plan = if st.server {
                     None
                 } else {
-                    st.choice.output.as_ref().map(|o| if o.hw_volume.is_some() { crate::softvol::Plan::Hw { card: o.card, device: o.device } } else { crate::softvol::Plan::Mix { card: o.card, device: o.device, mix: mix_for(o) } })
+                    st.choice.output.as_ref().map(|o| if o.uses_hw_volume(st.prefs.volume_mode_for(&o.card_id)) { crate::softvol::Plan::Hw { card: o.card, device: o.device } } else { crate::softvol::Plan::Mix { card: o.card, device: o.device, mix: self.mix_of(o) } })
                 };
+                st.mix = match &plan {
+                    Some(crate::softvol::Plan::Mix { mix, .. }) => Some(*mix),
+                    _ => None,
+                };
+                st.hw_ignored = match (&plan, st.choice.output.as_ref()) {
+                    (Some(crate::softvol::Plan::Mix { card, .. }), Some(o)) if o.hw_volume.is_some() => Some(*card),
+                    _ => None,
+                };
+                sv.set_boost(st.choice.output.as_ref().map_or(0, |o| st.prefs.boost_for(&o.card_id)));
                 sv.sync(plan.as_ref(), st.prefs.gain())
             }
             _ => crate::softvol::Synced::default(),
+        };
+        if let (true, Some(o)) = (synced.busy, st.choice.output.as_ref()) {
+            // an idle web page holds the device: let it go, the next look finds the device free
+            release_idle_web(&self.root, o.card, o.device);
+        }
+        st.busy = match (synced.busy, st.choice.output.as_ref()) {
+            (true, Some(o)) => Some(busy_line(&self.root, o)),
+            _ => None,
         };
         st.softvol = synced.soft_card;
         self.soft_on.store(synced.soft_card.is_some(), Ordering::SeqCst);
@@ -807,6 +1374,39 @@ impl Selector {
             self.generation.fetch_add(1, Ordering::SeqCst);
         }
         restored
+    }
+
+    /// An analog output that was not there at the last look became the one in use (its card finished starting, headphones
+    /// were plugged in): say so, once. Not at the first look, and not when another output stays in use.
+    fn note_new_output(&self, st: &mut State, first: bool, before: &[String]) {
+        if first || st.server {
+            return;
+        }
+        if let Some(o) = st.choice.output.as_ref().filter(|o| o.kind == Kind::Analog && !before.contains(&o.key())) {
+            let line = format!("Sound output ready: {}", o.label());
+            log::info!("{line}");
+            self.notices.lock().unwrap_or_else(|e| e.into_inner()).push(line);
+        }
+    }
+
+    /// Keep the 30 s window of a starting card.
+    fn note_starting(&self, st: &mut State) {
+        let Some(sys) = &self.sys else { return };
+        if card_starting(&self.root, sys).is_none() {
+            st.starting_since = None;
+            st.starting_over = false;
+        } else if st.starting_over {
+            st.starting_since = None;
+        } else {
+            match st.starting_since {
+                None => st.starting_since = Some(Instant::now()),
+                Some(t) if t.elapsed() >= Duration::from_secs(STARTING_SECS) => {
+                    st.starting_since = None;
+                    st.starting_over = true; // waited long enough: it is missing, not slow
+                }
+                Some(_) => {}
+            }
+        }
     }
 
     fn tell(&self, restored: Option<SoundSettings>) {
@@ -834,10 +1434,21 @@ impl Selector {
         let server = (self.server)();
         let (status, restored) = {
             let mut st = self.lock();
+            let first = st.at.is_none();
+            let before = std::mem::take(&mut st.seen_keys);
+            // a card that went away may come back as something else: ask it again then
+            if let Some(p) = &self.prober {
+                for gone in st.outputs.iter().map(|o| o.card).filter(|c| !outputs.iter().any(|o| o.card == *c)) {
+                    p.forget(gone);
+                }
+            }
             st.outputs = outputs;
+            st.seen_keys = st.outputs.iter().map(Output::key).collect();
             st.server = server;
             st.at = Some(Instant::now());
             let r = self.recompute(&mut st);
+            self.note_new_output(&mut st, first, &before);
+            self.note_starting(&mut st);
             (Self::status_of(&st), r)
         };
         self.tell(restored);
@@ -929,7 +1540,7 @@ pub fn summary_at(proc_root: &Path) -> String {
     let outputs = outputs_at(proc_root);
     let prefs = global().prefs();
     let choice = choose(&outputs, &prefs.output);
-    Status { outputs, choice, sound_server: false, prefs, device: None, softvol: None }.summary()
+    Status { outputs, choice, sound_server: false, prefs, device: None, softvol: None, mix: None, starting: None, hw_ignored: None, busy: None }.summary()
 }
 
 /// `amixer -c N contents` (alsa-utils), or None when it is missing or fails.
@@ -953,7 +1564,7 @@ static WATCHING: AtomicBool = AtomicBool::new(false);
 /// The selector IYAKKI's players ask. Inactive (no `-D`, full volume) until [`install`].
 pub fn global() -> &'static Selector {
     GLOBAL.get_or_init(|| {
-        let s = Selector::new("/proc", amixer_contents, sound_server_running).with_softvol(crate::softvol::Softvol::system());
+        let s = Selector::new("/proc", amixer_contents, sound_server_running).with_softvol(crate::softvol::Softvol::system()).with_prober(crate::soundprobe::Prober::system()).with_sys("/sys");
         s.active.store(false, Ordering::SeqCst);
         s
     })
@@ -970,11 +1581,97 @@ pub fn install(prefs: SoundSettings) {
     start_watch();
 }
 
+static MASTER_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// The one master volume of IYAKKI (Settings -> Sound, the volume keys, the Devices popover, the radio and media sliders all
+/// read and change this). It lives in the settings file; the softvol control `IYAKKI` (or, without one, `gain()` for the
+/// players that scale their samples) applies it, once per stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Master {
+    pub percent: u32,
+    pub muted: bool,
+    /// Changes whenever the percent or the mute changes, so views can notice within a frame.
+    pub generation: u64,
+}
+
+impl SoundSettings {
+    /// The master volume these settings hold.
+    pub fn master(&self) -> Master {
+        Master { percent: self.volume_pct.min(100), muted: self.muted, generation: MASTER_GEN.load(Ordering::SeqCst) }
+    }
+}
+
+/// Counts every change of the master volume (see [`Master::generation`]).
+pub fn master_generation() -> u64 {
+    MASTER_GEN.load(Ordering::SeqCst)
+}
+
 /// Settings -> Sound changed (only reaches the selector once it is installed).
 pub fn apply_prefs(prefs: SoundSettings) {
+    MASTER_GEN.fetch_add(1, Ordering::SeqCst);
     let g = global();
     if g.is_active() {
         g.set_prefs(prefs);
+    }
+}
+
+/// Is there a sound card in `proc_root/asound/cards` yet?
+pub fn has_card(proc_root: &Path) -> bool {
+    !parse_cards(&read(proc_root.join("asound/cards"))).is_empty()
+}
+
+/// Wait in the background for the first sound card (it may appear long after the shell started: the MacBookPro14,1's card
+/// registers about 11 s after boot, when the Apple codec setup is done), then run `then` once. `wait` says how long to sleep
+/// between looks. Returns at once if a card is there.
+pub fn when_card_appears(proc_root: PathBuf, wait: impl Fn() -> Duration + Send + 'static, then: impl FnOnce() + Send + 'static) {
+    if has_card(&proc_root) {
+        return then();
+    }
+    let _ = std::thread::Builder::new().name("iyakki-sound-wait".into()).spawn(move || {
+        while !has_card(&proc_root) {
+            std::thread::sleep(wait());
+        }
+        then();
+    });
+}
+
+/// Like [`when_card_appears`] for the real machine and the global selector: [`install`] it when the card is there.
+pub fn install_when_card_appears(prefs: impl Fn() -> SoundSettings + Send + 'static) {
+    when_card_appears(PathBuf::from("/proc"), || watch_wait(uptime()), move || install(prefs()));
+}
+
+/// One round of the watcher: look at the cards and PCMs, and take a full look when they changed or it is due.
+pub struct Watch {
+    last_sig: Option<String>,
+    last_look: Option<Instant>,
+}
+
+impl Watch {
+    pub fn new() -> Watch {
+        Watch { last_sig: None, last_look: None }
+    }
+
+    /// Returns the status when a look was taken.
+    pub fn step(&mut self, sel: &Selector, proc_root: &Path) -> Option<Status> {
+        let sig = sound_signature(proc_root);
+        let changed = self.last_sig.as_deref() != Some(sig.as_str());
+        self.last_sig = Some(sig);
+        if self.last_look.is_none_or(|t| look_due(changed, t.elapsed())) {
+            let before = sel.generation();
+            let st = sel.refresh();
+            if sel.generation() != before {
+                log::info!("sound output: {}", st.summary());
+            }
+            self.last_look = Some(Instant::now());
+            return Some(st);
+        }
+        None
+    }
+}
+
+impl Default for Watch {
+    fn default() -> Self {
+        Watch::new()
     }
 }
 
@@ -983,13 +1680,12 @@ pub fn start_watch() {
     if WATCHING.swap(true, Ordering::SeqCst) {
         return;
     }
-    let started = std::thread::Builder::new().name("iyakki-audioout".into()).spawn(|| loop {
-        let before = global().generation();
-        let st = global().refresh();
-        if global().generation() != before {
-            log::info!("sound output: {}", st.summary());
+    let started = std::thread::Builder::new().name("iyakki-audioout".into()).spawn(|| {
+        let mut w = Watch::new();
+        loop {
+            w.step(global(), Path::new("/proc"));
+            std::thread::sleep(watch_wait(uptime()));
         }
-        std::thread::sleep(WATCH_EVERY);
     });
     if started.is_err() {
         WATCHING.store(false, Ordering::SeqCst);
@@ -998,6 +1694,29 @@ pub fn start_watch() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_idle_web_process_holding_the_sound_device_is_found_and_a_playing_one_never() {
+        let d = std::env::temp_dir().join(format!("iyakki-webhold-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("asound/card0/pcm0p/sub0")).unwrap();
+        let mk = |pid: &str, comm: &str, link: bool| {
+            let f = d.join(pid).join("fd");
+            std::fs::create_dir_all(&f).unwrap();
+            std::fs::write(d.join(pid).join("comm"), format!("{comm}\n")).unwrap();
+            if link {
+                std::os::unix::fs::symlink("/dev/snd/pcmC0D0p", f.join("37")).unwrap();
+            }
+        };
+        mk("4001", "WPEWebProcess", true);
+        mk("4002", "WPEWebProcess", false); // another web process: does not hold it
+        mk("4003", "aplay", true); // not the engine
+        for (state, found) in [("state: PREPARED", true), ("state: SETUP", true), ("closed", true), ("state: RUNNING", false), ("state: PAUSED", false), ("state: DRAINING", false)] {
+            std::fs::write(d.join("asound/card0/pcm0p/sub0/status"), format!("{state}\nhw_ptr : 0\n")).unwrap();
+            assert_eq!(idle_web_holders(&d, 0, 0), if found { vec![4001] } else { vec![] }, "{state}");
+        }
+        assert!(idle_web_holders(&d, 0, 2).is_empty(), "another device");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
     use super::*;
     use std::sync::Arc;
 
@@ -1392,6 +2111,17 @@ mod tests {
         assert_eq!(parse_cards(" 0 [PCH            ]: HDA-Intel - HDA Intel PCH\n                      HDA Intel PCH at 0x1 irq 3\n"), vec![(0, "PCH".into(), "HDA-Intel".into(), "HDA Intel PCH".into())]);
     }
 
+    #[test]
+    fn the_t2_driver_name_says_how_many_channels_the_speaker_takes() {
+        let cards = " 0 [Audio          ]: AppleT2x4 - Apple T2 Audio\n                      Apple T2 Audio\n 1 [PCH            ]: HDA-Intel - HDA Intel PCH\n                      HDA Intel PCH at 0x1 irq 3\n";
+        assert_eq!(t2_channels(cards, 0), Some(4));
+        assert_eq!(t2_channels(cards, 1), None, "not a T2 card");
+        assert_eq!(t2_channels(cards, 5), None, "no such card");
+        assert_eq!(t2_channels(" 1 [Audio          ]: AppleT2x1 - Apple T2 Audio\n", 1), Some(1));
+        assert_eq!(t2_channels(" 0 [Audio          ]: AppleT2x0 - Apple T2 Audio\n", 0), None);
+        assert_eq!(t2_channels(" 0 [Audio          ]: AppleT2 - Apple T2 Audio\n", 0), None);
+    }
+
     /// A T2 Mac mini whose monitor and headphones come and go, seen by a selector that keeps an asound.conf in `t`.
     fn t2_with_softvol(t: &Tree, monitor: Arc<Mutex<bool>>, headphones: Arc<Mutex<bool>>, fake: crate::softvol::fake::Fake) -> Selector {
         mac_mini_t2(t, *monitor.lock().unwrap());
@@ -1417,7 +2147,7 @@ mod tests {
         assert_eq!(st.device.as_deref(), Some("iyakki"), "players go through the softvol");
         assert_eq!(st.softvol, Some(1));
         let conf = std::fs::read_to_string(t.0.join("asound.conf")).unwrap();
-        assert_eq!(conf, crate::softvol::config_text(&crate::softvol::Plan::Mix { card: 1, device: 0, mix: crate::softvol::Mix::T2_MONO }));
+        assert_eq!(conf, crate::softvol::config_text(&crate::softvol::Plan::Soft { card: 1, device: 0 }), "the T2: no dmix");
         assert_eq!(*fake.calls.lock().unwrap(), ["prime iyakki", "amixer -q -c 1 sset IYAKKI 30%"]);
         assert_eq!(sel.gain(), 100, "the softvol scales: IYAKKI's players leave their samples alone");
         assert_eq!(sel.prefs_gain(), 30, "a sound sent to one output by hand still gets the volume");
@@ -1462,7 +2192,7 @@ mod tests {
         // headphones: no remembered volume, the current one stays
         *headphones.lock().unwrap() = true;
         let st = sel.refresh();
-        assert!(std::fs::read_to_string(t.0.join("asound.conf")).unwrap().contains("pcm \"hw:1,2\""));
+        assert!(std::fs::read_to_string(t.0.join("asound.conf")).unwrap().contains("plughw:1,2"));
         assert_eq!(st.prefs.volume_pct, 70);
         // both unplugged: back on the speaker at 30 %
         *headphones.lock().unwrap() = false;
@@ -1470,7 +2200,8 @@ mod tests {
         assert_eq!(sel.refresh().prefs.volume_pct, 30);
         assert_eq!(*saved.lock().unwrap(), [70, 30]);
         let c = fake.calls.lock().unwrap().clone();
-        assert_eq!(c, ["prime iyakki", "amixer -q -c 1 sset IYAKKI 30%", "prime iyakki", "amixer -q -c 0 sset IYAKKI 70%", "prime iyakki", "amixer -q -c 1 sset IYAKKI 70%", "prime iyakki", "amixer -q -c 1 sset IYAKKI 30%"]);
+        // the fake's control stays once created, so later levels are set without opening the device again (softvol.rs rule: a control that exists is set, never primed)
+        assert_eq!(c, ["prime iyakki", "amixer -q -c 1 sset IYAKKI 30%", "amixer -q -c 0 sset IYAKKI 70%", "amixer -q -c 1 sset IYAKKI 70%", "amixer -q -c 1 sset IYAKKI 30%"]);
         // remembering: the volume of the output in use goes into `levels`
         let mut p = sel.prefs();
         p.volume_pct = 45;
@@ -1528,3 +2259,7 @@ mod tests {
         assert!(tone.samples.len() > 8000 && crate::voice::peak(&tone.samples) < 9000, "short and gentle");
     }
 }
+
+#[cfg(test)]
+#[path = "audioout_macbook_tests.rs"]
+mod macbook_tests;

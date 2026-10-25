@@ -26,7 +26,7 @@ pub fn publish_token(svc: &Services, user: &str, src: &super::catalog::SourceCfg
     if let Ok(t) = svc.user_get(user, &token_entry(&src.id)) {
         return Some(t);
     }
-    let inst = crate::platform::installed::load(svc.dir(), user).into_iter().find(|i| i.service == super::privatestore::ID && i.urls.iter().any(|u| u.kind == "catalog" && u.url == src.location))?;
+    let inst = crate::platform::installed::load(svc.dir(), user).into_iter().find(|i| i.service == super::privatestore::ID && i.urls.iter().any(|u| u.kind == "catalog" && super::privatepub::same_location(&u.url, &src.location)))?;
     let name = inst.vault.iter().find(|v| v.ends_with(".admin-token"))?.clone();
     svc.user_get(user, &name).ok()
 }
@@ -36,7 +36,13 @@ fn no_target_text(svc: &Services, user: &str, st: &Store) -> String {
     let info = super::privatestore::status_info(svc.dir(), user, st);
     match (&info.instance, &info.added) {
         (None, _) => "No private store exists on this device yet. Tell the person exactly this and stop: \"Deploy the private store first (STORE \u{2192} Private store \u{2192} Deploy; one click now creates the registry), then ask me again.\" Do not try other ways to publish and do not ask for keys or tokens.".to_string(),
-        (Some(_), None) => "The private store is deployed but not added to this device's STORE yet. Tell the person exactly this and stop: \"Add it in STORE \u{2192} Settings \u{2192} Private store \u{2192} Add this store (check the fingerprint), then ask me again.\"".to_string(),
+        (Some(_), None) => match super::privatepub::offer(svc, user, st, &super::catalog::HttpFetch(svc.quick_upstream())) {
+            Some(o) => match &o.probe {
+                Ok(p) => format!("The private store {} is deployed on this device but not added to its STORE yet. Its catalog key fingerprint is {} (read just now from {}). Do NOT send the person to Settings: call this tool again with add_deployed_store set to exactly that fingerprint. The person then gets one approval card that shows the fingerprint; when they approve, the store is added with that key pinned, chosen as the publishing target, and the publish goes on.", p.name, p.fingerprint, o.dep.catalog_url.trim_end_matches("/catalog.json")),
+                Err(why) => format!("The private store is deployed on this device but not added to its STORE yet, and it cannot be read now. Tell the person exactly this and stop: \"{why}\""),
+            },
+            None => "The private store is deployed but not added to this device's STORE yet. Tell the person: \"Add it in STORE \u{2192} Settings \u{2192} Private store \u{2192} Add this store (check the fingerprint), then ask me again.\"".to_string(),
+        },
         (Some(_), Some(_)) => "The private store is not chosen as the publishing target. Tell the person: \"Choose it as the publishing target in STORE \u{2192} Settings \u{2192} Private store, then ask me again.\"".to_string(),
     }
 }
@@ -50,6 +56,22 @@ pub fn target_for(svc: &Services, user: &str, store: &Store, target: &str) -> Re
             e
         }
     })
+}
+
+/// [`target_for`], and when the private store of this device is deployed but not added, add it (with the key fingerprint the person
+/// approved on the card, passed back as `add_fp`) and make it the target. Without `add_fp` the explanation comes back instead.
+pub fn target_or_add(svc: &Services, user: &str, store: &Store, actor: &Actor, target: &str, add_fp: &str) -> Result<super::catalog::SourceCfg, String> {
+    match target_for(svc, user, store, target) {
+        Ok(s) => Ok(s),
+        Err(e) if add_fp.trim().is_empty() => Err(e),
+        Err(e) => {
+            let info = super::privatestore::status_info(svc.dir(), user, store);
+            if info.instance.is_none() || info.added.is_some() {
+                return Err(e);
+            }
+            super::privatepub::add_for_assistant(svc, user, store, actor, &super::catalog::HttpFetch(svc.quick_upstream()), add_fp)
+        }
+    }
 }
 
 /// The vault entry that holds the publish token of a catalog source.
@@ -66,7 +88,7 @@ pub fn defs(p: &Policy) -> Vec<ToolDef> {
     let mut d = vec![
         tool("store_validate", "Check a project folder (made by app_scaffold, with iyakki-app.json) or a package file (.iyp) in the workspace the way the store's install review does: manifest, size, permissions in plain words, the licence against the permissive list, a scan for secrets, the name against look-alikes. Fix every PROBLEM before packaging or publishing. `path` is inside the workspace. Read-only.", obj(json!({"path": {"type": "string"}}), &["path"]), Risk::Safe),
         tool("store_server_status", "Say whether a private IYAKKI store is deployed from this device, its catalog address, whether it is added to the STORE with its key pinned, and where publishing goes by default. Read-only. To deploy one use platform_deploy with service private-store (the person picks the cluster and approves).", obj(json!({}), &[]), Risk::Safe),
-        tool("store_publish", "Publish to a private store: `package_path` is a tile app / project FOLDER (it is checked, packed and signed with the person\'s key, made automatically if needed, then published; same as tile_ship) or an already signed package (.iyp). The person is shown the server, the package (name, version, permissions, trust level) and must approve; this always asks, even in Auto mode, and the publish token comes from their vault by itself, never shown to you. `target` is the catalog name or id of a private store added in STORE (default: the one chosen as the publishing target).", obj(json!({"package_path": {"type": "string"}, "target": {"type": "string"}}), &["package_path"]), Risk::Ask),
+        tool("store_publish", "Publish to a private store: `package_path` is a tile app / project FOLDER (it is checked, packed and signed with the person\'s key, made automatically if needed, then published; same as tile_ship) or an already signed package (.iyp). The person is shown the server, the package (name, version, permissions, trust level) and must approve; this always asks, even in Auto mode, and the publish token comes from their vault by itself, never shown to you. `target` is the catalog name or id of a private store added in STORE (default: the one chosen as the publishing target).", obj(json!({"package_path": {"type": "string"}, "target": {"type": "string"}, "add_deployed_store": {"type": "string", "description": "Only when the tool said the private store is deployed on this device but not added: the key fingerprint it printed, passed back unchanged. The person approves adding that store with that key."}}), &["package_path"]), Risk::Ask),
     ];
     if !p.fs_write.is_empty() {
         d.push(tool("app_scaffold", &format!("Create a starting project in the workspace for something that extends IYAKKI, with a README and a test: `kind` is one of {}. `name` is lowercase letters, digits and dashes; `dir` is a new or empty folder inside the workspace (default: the name). Then edit the files, run the project's test, store_validate it, pack and sign it, and store_publish it. Read the skills iyakki-app-author, iyakki-mcp-author and iyakki-skill-author first.", author::SCAFFOLDS.iter().map(|s| format!("{} ({})", s.0, s.1)).collect::<Vec<_>>().join("; ")), obj(json!({"kind": {"type": "string", "enum": author::SCAFFOLDS.iter().map(|s| s.0).collect::<Vec<_>>()}, "name": {"type": "string"}, "dir": {"type": "string"}}), &["kind", "name"]), Risk::Ask));
@@ -84,7 +106,7 @@ pub fn defs(p: &Policy) -> Vec<ToolDef> {
         d.push(tool("tile_pack", "Pack the tile app folder into a package file (.iyp) in the workspace, signed with the person's publisher key (made automatically when there is none), after the same checks as tile_validate. `path` is the app folder; `output` is the file to write (default <name>.iyp next to the folder). Then store_publish it.", obj(json!({"path": {"type": "string"}, "output": {"type": "string"}}), &["path"]), Risk::Ask));
     }
     if !p.fs_write.is_empty() {
-        d.push(tool("tile_ship", "ONE STEP from a tile app folder to the private store: checks it (the same checks as tile_validate and app_preflight, headless tests included), packs it, signs it with the person's own publisher key (made automatically), and publishes it. The person sees one approval card with the name, version, permissions in plain words and the store. If the store already has this version, the patch number is raised for you. Returns the tile name and the result. Never ask the person for keys, accounts or tokens: none are needed. `path` (or `dir`) is the app folder; `target` as for store_publish.", obj(json!({"path": {"type": "string"}, "dir": {"type": "string"}, "target": {"type": "string"}}), &[]), Risk::Ask));
+        d.push(tool("tile_ship", "ONE STEP from a tile app folder to the private store: checks it (the same checks as tile_validate and app_preflight, headless tests included), packs it, signs it with the person's own publisher key (made automatically), and publishes it. The person sees one approval card with the name, version, permissions in plain words and the store. If the store already has this version, the patch number is raised for you. Returns the tile name and the result. Never ask the person for keys, accounts or tokens: none are needed. `path` (or `dir`) is the app folder; `target` as for store_publish.", obj(json!({"path": {"type": "string"}, "dir": {"type": "string"}, "target": {"type": "string"}, "add_deployed_store": {"type": "string", "description": "Only when the tool said the private store is deployed on this device but not added: the key fingerprint it printed, passed back unchanged."}}), &[]), Risk::Ask));
     }
     if p.manage_settings {
         d.push(tool("tile_install_dev", "Add the tile app in a workspace folder to the person's launcher as an UNSIGNED DEV APP (shown clearly as such; it reloads when its files change). The person is asked; only administrators can do it. `path` is the app folder.", obj(json!({"path": {"type": "string"}}), &["path"]), Risk::Ask));
@@ -117,7 +139,7 @@ pub fn server_of(s: &super::catalog::SourceCfg) -> String {
 }
 
 fn package_line(svc: &Services, path: &Path) -> Result<String, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let text = std::fs::read_to_string(path).map_err(|e| crate::scope::explain_io(&e, path, "read"))?;
     let pk = crate::pkg::parse(&text).map_err(|e| format!("not a valid package: {e}"))?;
     let st = Store::for_services(svc);
     let own = svc.packages.trusted_keys();
@@ -126,6 +148,21 @@ fn package_line(svc: &Services, path: &Path) -> Result<String, String> {
     let rep = vet::vet_package(&text, &[]);
     let perms = rep.facts.iter().find_map(|f| f.strip_prefix("permissions: ")).unwrap_or("none");
     Ok(format!("{} {} {} (licence {}, {} bytes), trust level {} ({}), permissions: {perms}", pk.manifest.kind, pk.manifest.name, pk.manifest.version, pk.manifest.license, text.len(), v.level.label(), v.label))
+}
+
+/// The first half of an approval card when the publish also adds the private store deployed on this device: the address and the key
+/// fingerprint the person is approving. None when nothing is to be added (a target exists, or `add_deployed_store` was not given).
+fn add_card(svc: &Services, user: &str, st: &Store, args: &Value) -> Option<String> {
+    let fp = arg(args, "add_deployed_store");
+    if fp.is_empty() || target_source(st, arg(args, "target")).is_ok() {
+        return None;
+    }
+    let o = super::privatepub::offer(svc, user, st, &super::catalog::HttpFetch(svc.quick_upstream()))?;
+    Some(match &o.probe {
+        Ok(p) if p.fingerprint.split_whitespace().collect::<String>().eq_ignore_ascii_case(&fp.split_whitespace().collect::<String>()) => format!("ADD the private store {} ({}) to this device's STORE with its catalog key pinned, key fingerprint {} (compare it with the one printed after the deploy), and CHOOSE it as the publishing target; then", p.name, o.dep.catalog_url.trim_end_matches("/catalog.json"), p.fingerprint),
+        Ok(p) => format!("(REFUSED: the fingerprint {fp:?} is not the key of the private store, which shows {}; nothing will be added) then", p.fingerprint),
+        Err(why) => format!("(cannot add the private store yet: {why}) then"),
+    })
 }
 
 pub fn describe(svc: &Services, cwd: &Path, name: &str, args: &Value) -> String {
@@ -146,15 +183,17 @@ pub fn describe_for(svc: &Services, user: &str, cwd: &Path, name: &str, args: &V
         "tile_pack" => format!("pack the tile app {} into a package file", arg(args, "path")),
         "tile_install_dev" => format!("ADD {} to your launcher as an UNSIGNED DEV APP: a tile that runs the files in that folder, marked unsigned, only for you, reloading when the files change", arg(args, "path")),
         "tile_ship" => ship_card(svc, cwd, args, user),
-        "store_publish" if author::inside(cwd, arg(args, "package_path")).is_ok_and(|p| p.is_dir()) => ship_card(svc, cwd, &json!({"path": arg(args, "package_path"), "target": arg(args, "target")}), user),
+        "store_publish" if author::inside(cwd, arg(args, "package_path")).is_ok_and(|p| p.is_dir()) => ship_card(svc, cwd, &json!({"path": arg(args, "package_path"), "target": arg(args, "target"), "add_deployed_store": arg(args, "add_deployed_store")}), user),
         "store_publish" => {
             let st = Store::for_services(svc);
+            let adding = add_card(svc, user, &st, args);
             let to = match target_source(&st, arg(args, "target")) {
                 Ok(s) => format!("{} ({}), whose key you pinned", s.name, server_of(&s)),
+                Err(_) if adding.is_some() => "that store".to_string(),
                 Err(e) => format!("(no usable target: {e})"),
             };
             let pkg = author::inside(cwd, arg(args, "package_path")).and_then(|p| package_line(svc, &p)).unwrap_or_else(|e| format!("(unreadable: {e})"));
-            format!("PUBLISH to {to}: {pkg}. Everyone who uses that store can then install it. You use your vault's publish token for it.")
+            format!("{}PUBLISH to {to}: {pkg}. Everyone who uses that store can then install it. You use your vault's publish token for it.", adding.map(|a| format!("{a} ")).unwrap_or_default())
         }
         _ => name.into(),
     }
@@ -178,7 +217,7 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str, cw
                 let r = vet::vet_dir(&path);
                 Ok(r.text())
             } else {
-                let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                let text = std::fs::read_to_string(&path).map_err(|e| crate::scope::explain_io(&e, &path, "read"))?;
                 let r = vet::vet_package(&text, &[]);
                 let trust = package_line(svc, &path).ok();
                 Ok(format!("{}{}", r.text(), trust.map(|t| format!("\n{t}")).unwrap_or_default()))
@@ -249,7 +288,7 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str, cw
             if let Some(d) = out.parent() {
                 std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
             }
-            std::fs::write(&out, &text).map_err(|e| format!("{}: {e}", out.display()))?;
+            std::fs::write(&out, &text).map_err(|e| crate::scope::explain_io(&e, &out, "write"))?;
             Ok(format!("Packed {} ({} bytes){}. {}", out.display(), text.len(), key.as_ref().map(|k| format!(", signed with your key {}", k.1)).unwrap_or_default(), notes.join("; ")))
         }
         "tile_install_dev" => {
@@ -267,7 +306,7 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str, cw
                 return Err("your account may not publish".into());
             }
             let dir = if arg(args, "path").is_empty() { arg(args, "dir") } else { arg(args, "path") };
-            ship(svc, user, cwd, dir, arg(args, "target"))
+            ship(svc, user, &a, cwd, dir, arg(args, "target"), arg(args, "add_deployed_store"))
         }
         "store_publish" => {
             let a = Actor::from_policy(user, p);
@@ -276,10 +315,10 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str, cw
             }
             let path = author::inside(cwd, arg(args, "package_path"))?;
             if path.is_dir() {
-                return ship(svc, user, cwd, arg(args, "package_path"), arg(args, "target"));
+                return ship(svc, user, &a, cwd, arg(args, "package_path"), arg(args, "target"), arg(args, "add_deployed_store"));
             }
-            let src = target_for(svc, user, &st, arg(args, "target"))?;
-            let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let src = target_or_add(svc, user, &st, &a, arg(args, "target"), arg(args, "add_deployed_store"))?;
+            let text = std::fs::read_to_string(&path).map_err(|e| crate::scope::explain_io(&e, &path, "read"))?;
             let rep = vet::vet_package(&text, &[]);
             if !rep.ok() {
                 return Err(format!("not published, the package has problems:\n{}", rep.text()));
@@ -303,6 +342,7 @@ fn ship_card(svc: &Services, cwd: &Path, args: &Value, user: &str) -> String {
     let st = Store::for_services(svc);
     let src = match target_for(svc, user, &st, arg(args, "target")) {
         Ok(s) => s,
+        Err(_) if add_card(svc, user, &st, args).is_some() => return format!("{} PUBLISH {dir_arg} (checked, packed and signed with your own key) to it. Everyone who uses that store can then install it.", add_card(svc, user, &st, args).unwrap_or_default()),
         Err(e) => return format!("PUBLISH {dir_arg}: (not possible yet: {e})"),
     };
     let Ok(dir) = author::inside(cwd, dir_arg) else { return format!("PUBLISH {dir_arg}: (the folder must be inside the workspace)") };
@@ -329,10 +369,10 @@ fn ship_card(svc: &Services, cwd: &Path, args: &Value, user: &str) -> String {
 
 /// validate -> (raise the patch version when the store has this one) -> pack -> sign with the person's own key (made if needed) ->
 /// publish with the store's token from the vault. Every failure is one plain message; none asks the agent to fetch a key or token.
-fn ship(svc: &Services, user: &str, cwd: &Path, dir_arg: &str, target: &str) -> Result<String, String> {
+fn ship(svc: &Services, user: &str, actor: &Actor, cwd: &Path, dir_arg: &str, target: &str, add_fp: &str) -> Result<String, String> {
     use super::publishflow as pf;
     let st = Store::for_services(svc);
-    let src = target_for(svc, user, &st, target)?;
+    let src = target_or_add(svc, user, &st, actor, target, add_fp)?;
     let dir = author::inside(cwd, dir_arg)?;
     if !dir.is_dir() {
         return Err("`path` is the app's folder (with app.json and iyakki-app.json); make it with tile_scaffold".into());

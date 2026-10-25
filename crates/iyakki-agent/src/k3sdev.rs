@@ -39,11 +39,273 @@ const FAIL_WINDOW: Duration = Duration::from_secs(600);
 /// The data partition must have at least this much free room to install.
 pub const MIN_FREE: u64 = 3 << 30;
 
-static RUNNING: AtomicBool = AtomicBool::new(false);
+/// k3s refuses to start without a network interface that has a default route ("no default routes found in /proc/net/route").
+/// After a boot the DHCP client may not have installed one yet, so IYAKKI waits for it before every start of k3s.
+pub const ROUTE_FILE: &str = "/proc/net/route";
+/// After this long without a default route the status says "no network yet"; the wait goes on (without limit, until Stop).
+const NET_GRACE: Duration = Duration::from_secs(90);
+const NET_POLL: Duration = Duration::from_secs(3);
+pub const WAITING_NET: &str = "waiting for the network\u{2026}";
+pub const NO_NET_YET: &str = "no network yet: k3s needs a network interface with a default route; it starts by itself when one appears";
 
-/// Is the managed dev cluster starting or running in this process? (The sandbox cluster refuses to start then.)
+/// A machine whose clock starts in the past (a Mac's RTC reads 2024) must not start k3s before the clock is plausible: its
+/// certificates, made later, are "not yet valid" at the fake date. The start waits until the clock floor was applied
+/// ([`ClockSource::floor_pending`]) AND (a time server answered OR the machine has been up for [`CLOCK_WAIT_LIMIT`]: offline
+/// the floor is good enough).
+pub const CLOCK_WAIT_LIMIT: Duration = Duration::from_secs(120);
+pub const WAITING_CLOCK: &str = "waiting for the clock to be set\u{2026}";
+/// A jump of the wall clock against the monotonic clock of more than this while k3s runs restarts k3s once (not a failure).
+pub const CLOCK_STEP_SECS: i64 = 180;
+/// k3s complaining about certificates within this long of its start (and the clock plausible) is restarted once.
+const CERT_WINDOW: Duration = Duration::from_secs(120);
+/// At most this many clock-step restarts per supervisor (a clock that keeps jumping is not made worse by a restart loop).
+const MAX_CLOCK_RESTARTS: usize = 3;
+
+/// What the start gate and the step detection know about the clock. The real one is [`RealClock`]; tests bring a fake.
+pub trait ClockSource: Send + Sync {
+    /// Wall clock, unix seconds.
+    fn wall(&self) -> i64;
+    /// Monotonic time since boot (never jumps).
+    fn mono(&self) -> Duration;
+    /// The clock floor has not been applied yet (early boot).
+    fn floor_pending(&self) -> bool;
+    /// A time server has answered.
+    fn synced(&self) -> bool;
+}
+
+pub struct RealClock;
+
+impl ClockSource for RealClock {
+    fn wall(&self) -> i64 {
+        now()
+    }
+    fn mono(&self) -> Duration {
+        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        let up = std::fs::read_to_string("/proc/uptime").ok().and_then(|t| t.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()));
+        up.map(Duration::from_secs_f64).unwrap_or_else(|| START.get_or_init(Instant::now).elapsed())
+    }
+    fn floor_pending(&self) -> bool {
+        crate::clockfloor::pending()
+    }
+    fn synced(&self) -> bool {
+        crate::ntp::synced()
+    }
+}
+
+/// Is the clock plausible enough to start k3s?
+pub fn clock_ready(floor_pending: bool, synced: bool, uptime: Duration, limit: Duration) -> bool {
+    !floor_pending && (synced || uptime >= limit)
+}
+
+/// By how many seconds did the wall clock jump between two looks (`None`: by less than `threshold`)? The monotonic clock
+/// says how much time really passed.
+pub fn clock_stepped(prev_wall: i64, prev_mono: Duration, wall: i64, mono: Duration, threshold: i64) -> Option<i64> {
+    let passed = mono.saturating_sub(prev_mono).as_secs() as i64;
+    let jump = (wall - prev_wall) - passed;
+    (jump.abs() > threshold).then_some(jump)
+}
+
+/// Does this piece of k3s log show the failure of a certificate checked at the wrong date?
+pub fn log_shows_clock_trouble(text: &str) -> bool {
+    text.contains("CA cert validation failed") || (text.contains("x509") && text.contains("not yet valid"))
+}
+
+/// Does this text of `/proc/net/route` hold an IPv4 default route through an interface that is up and is not the loopback?
+/// Columns: Iface Destination Gateway Flags RefCnt Use Metric Mask ...; destination and mask 00000000, flag 0x1 (RTF_UP).
+/// IPv6-only routes do not count (k3s needs IPv4 here), malformed lines are skipped.
+pub fn has_default_route(text: &str) -> bool {
+    text.lines().skip(1).any(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f.len() < 8 || f[0] == "lo" {
+            return false;
+        }
+        let flags = u32::from_str_radix(f[3], 16).unwrap_or(0);
+        f[1] == "00000000" && f[7] == "00000000" && flags & 1 != 0
+    })
+}
+
+/// How the wait for a default route ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetWait {
+    Ready,
+    Cancelled,
+}
+
+/// What the wait tells the person.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetNote {
+    /// First seconds (usually DHCP is still working).
+    Waiting,
+    /// The grace time is over and there is still no route: a waiting state, not a failure.
+    NoNetworkYet,
+}
+
+/// Waits until `has_route()` is true. `sleep(step)` returns false when the wait was cancelled (Stop); the elapsed time is the sum of the
+/// steps, so a test with a fake clock needs no real time. Never counts as a failure and never gives up.
+pub fn wait_for_route(mut has_route: impl FnMut() -> bool, mut sleep: impl FnMut(Duration) -> bool, mut note: impl FnMut(NetNote), grace: Duration, step: Duration) -> NetWait {
+    let mut elapsed = Duration::ZERO;
+    let mut said_no_net = false;
+    note(NetNote::Waiting);
+    loop {
+        if has_route() {
+            return NetWait::Ready;
+        }
+        if !sleep(step) {
+            return NetWait::Cancelled;
+        }
+        elapsed += step;
+        if elapsed >= grace && !said_no_net {
+            said_no_net = true;
+            note(NetNote::NoNetworkYet);
+        }
+    }
+}
+
+/// "exit status 3", "signal 9 (SIGKILL)" or "signal 11 (SIGSEGV), core dumped": how a process ended, for the log and the audit.
+pub fn exit_text(st: &std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(sig) = st.signal() {
+        let name = match sig {
+            libc::SIGKILL => " (SIGKILL)",
+            libc::SIGTERM => " (SIGTERM)",
+            libc::SIGSEGV => " (SIGSEGV)",
+            libc::SIGABRT => " (SIGABRT)",
+            libc::SIGBUS => " (SIGBUS)",
+            libc::SIGHUP => " (SIGHUP)",
+            libc::SIGINT => " (SIGINT)",
+            _ => "",
+        };
+        format!("signal {sig}{name}{}", if st.core_dumped() { ", core dumped" } else { "" })
+    } else {
+        match st.code() {
+            Some(c) => format!("exit status {c}"),
+            None => st.to_string(),
+        }
+    }
+}
+
+/// The IPv4 address of the interface that carries the default route (`route_text` is /proc/net/route), as 4 bytes in text.
+fn default_route_iface(route_text: &str) -> Option<String> {
+    route_text.lines().skip(1).find_map(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        let flags = f.get(3).and_then(|x| u32::from_str_radix(x, 16).ok()).unwrap_or(0);
+        (f.len() >= 8 && f[0] != "lo" && f[1] == "00000000" && f[7] == "00000000" && flags & 1 != 0).then(|| f[0].to_string())
+    })
+}
+
+fn iface_ipv4(name: &str) -> Option<String> {
+    let mut found = None;
+    // SAFETY: getifaddrs fills a list that is read and then freed with freeifaddrs.
+    unsafe {
+        let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut list) != 0 {
+            return None;
+        }
+        let mut p = list;
+        while !p.is_null() {
+            let a = &*p;
+            if !a.ifa_addr.is_null() && (*a.ifa_addr).sa_family as i32 == libc::AF_INET && std::ffi::CStr::from_ptr(a.ifa_name).to_string_lossy() == name {
+                let sin = &*(a.ifa_addr as *const libc::sockaddr_in);
+                let b = sin.sin_addr.s_addr.to_ne_bytes();
+                found = Some(format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3]));
+                break;
+            }
+            p = a.ifa_next;
+        }
+        libc::freeifaddrs(list);
+    }
+    found
+}
+
+/// How long the supervisor may go without a heartbeat before the watchdog takes over.
+const STALL_AFTER: Duration = Duration::from_secs(150);
+
+/// The ids of the managed local clusters that are starting or running in this process.
+static RUNNING_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn running_ids() -> std::sync::MutexGuard<'static, Vec<String>> {
+    RUNNING_IDS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Is a managed dev cluster (any of them) starting or running in this process? (The sandbox cluster refuses to start then.)
 pub fn managed_running() -> bool {
-    RUNNING.load(Ordering::SeqCst)
+    !running_ids().is_empty()
+}
+
+/// How many managed local clusters are starting or running in this process.
+pub fn managed_running_count() -> usize {
+    running_ids().len()
+}
+
+// ------------------------------------------------------------------------------------------------ instances
+
+/// Which managed local cluster a [`K3sDev`] is: the first one (`local`, exactly today's names, ports and folder) or an extra one
+/// with its own folder, API port, kubelet ports, node name and address ranges, so two of them never share a port or a range.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Instance {
+    pub id: String,
+    pub dir_name: String,
+    pub api_port: u16,
+    pub kubelet_port: u16,
+    pub node_name: String,
+    pub pod_name: String,
+    pub cluster_cidr: String,
+    pub service_cidr: String,
+    pub primary: bool,
+}
+
+impl Instance {
+    /// The cluster IYAKKI has always managed: id `local`.
+    pub fn primary() -> Instance {
+        Instance { id: "local".into(), dir_name: "k3s-dev".into(), api_port: API_PORT, kubelet_port: 10250, node_name: NODE_NAME.into(), pod_name: POD_NAME.into(), cluster_cidr: "10.42.0.0/16".into(), service_cidr: "10.43.0.0/16".into(), primary: true }
+    }
+
+    /// An extra local cluster in slot `slot` (1, 2, ...): `id` is a short lowercase name (`valid_id`).
+    pub fn extra(id: &str, slot: u16) -> Instance {
+        let slot = slot.clamp(1, 60);
+        Instance {
+            id: id.into(),
+            dir_name: format!("k3s-dev-{id}"),
+            api_port: API_PORT + 100 * slot,
+            kubelet_port: 10250 + 10 * slot,
+            node_name: format!("{NODE_NAME}-{id}"),
+            pod_name: format!("{POD_NAME}-{id}"),
+            cluster_cidr: format!("10.{}.0.0/16", 42 + 2 * slot),
+            service_cidr: format!("10.{}.0.0/16", 43 + 2 * slot),
+            primary: false,
+        }
+    }
+
+    /// The cluster DNS address inside the service range (`10.45.0.10` for `10.45.0.0/16`).
+    pub fn cluster_dns(&self) -> String {
+        let base = self.service_cidr.split('/').next().unwrap_or("10.43.0.0");
+        let mut o: Vec<&str> = base.split('.').collect();
+        if o.len() == 4 {
+            o[3] = "10";
+        }
+        o.join(".")
+    }
+
+    /// The ports this instance listens on besides the API (kubelet, its health port, kube-proxy, controller manager, scheduler).
+    pub fn extra_ports(&self) -> Vec<u16> {
+        if self.primary {
+            return vec![10250];
+        }
+        let k = self.kubelet_port;
+        vec![k, k + 1, k + 2, k + 3, k + 4]
+    }
+
+    /// Every TCP port the instance needs free, API first.
+    pub fn all_ports(&self) -> Vec<u16> {
+        let mut v = vec![self.api_port];
+        v.extend(self.extra_ports());
+        v
+    }
+}
+
+/// A short id for an extra cluster: lowercase letters, digits and `-`, 2 to 16 characters, not `local`.
+pub fn valid_id(id: &str) -> bool {
+    (2..=16).contains(&id.len()) && id != "local" && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') && !id.starts_with('-') && !id.ends_with('-')
 }
 
 /// `(user, action, detail)`.
@@ -85,6 +347,9 @@ pub struct Layout {
 impl Layout {
     pub fn new(data_dir: &Path) -> Layout {
         Layout { root: data_dir.join("k3s-dev") }
+    }
+    pub fn for_instance(data_dir: &Path, i: &Instance) -> Layout {
+        Layout { root: data_dir.join(&i.dir_name) }
     }
     pub fn bin(&self) -> PathBuf {
         self.root.join("bin/k3s")
@@ -170,6 +435,16 @@ impl Machine {
     }
 }
 
+/// Whether `/var/lib/rancher/k3s` holds a cluster, not just the binaries k3s unpacks into its `data` folder the first time any of its
+/// commands (`k3s kubectl`, a `kubectl` link to the k3s program) runs without its own data directory. Those binaries are no cluster; any other
+/// entry (server, agent, storage, ...) is, and so is a folder that cannot be read.
+fn lib_dir_has_state(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        Ok(it) => it.flatten().any(|e| e.file_name() != "data"),
+    }
+}
+
 /// Everything that says a cluster already exists. `ignore` are folders whose files do not count (IYAKKI's own: the CLI tile's `k3s`
 /// and the managed folder). `connected` is the cluster some workspace is connected to, `sandbox_up` that IYAKKI's sandbox cluster runs.
 pub fn existing(m: &Machine, ignore: &[PathBuf], connected: Option<&str>, sandbox_up: bool) -> Vec<String> {
@@ -178,7 +453,7 @@ pub fn existing(m: &Machine, ignore: &[PathBuf], connected: Option<&str>, sandbo
     if m.k3s_yaml.exists() {
         v.push(format!("{} exists (a k3s server was installed here)", m.k3s_yaml.display()));
     }
-    if m.lib_dir.exists() {
+    if lib_dir_has_state(&m.lib_dir) {
         v.push(format!("{} exists (k3s has run here)", m.lib_dir.display()));
     }
     for b in &m.bins {
@@ -243,21 +518,49 @@ pub struct Plan {
     pub create: Vec<String>,
     pub image: String,
     pub notes: Vec<String>,
+    pub instance: Instance,
 }
 
 /// The arguments of `k3s server` for this layout: only what the plan lists.
 pub fn server_args(l: &Layout) -> Vec<String> {
-    ["server", "--data-dir", &l.data().display().to_string(), "--write-kubeconfig", &l.kubeconfig().display().to_string(), "--write-kubeconfig-mode", "600", "--disable", "traefik", "--disable", "servicelb", "--disable", "metrics-server", "--node-name", NODE_NAME].iter().map(|s| s.to_string()).collect()
+    server_args_for(l, &Instance::primary())
 }
 
-fn podman_create(l: &Layout, image: &str) -> Vec<String> {
-    let mut a: Vec<String> = ["podman", "create", "--name", POD_NAME, "--privileged", "--network=host", "--tmpfs", "/run", "--tmpfs", "/var/run", "-v"].iter().map(|s| s.to_string()).collect();
+/// The extra flags that keep a second cluster off the first one's ports and address ranges (none for the primary).
+fn instance_flags(i: &Instance) -> Vec<String> {
+    if i.primary {
+        return vec![];
+    }
+    let k = i.kubelet_port;
+    [
+        format!("--https-listen-port={}", i.api_port),
+        format!("--cluster-cidr={}", i.cluster_cidr),
+        format!("--service-cidr={}", i.service_cidr),
+        format!("--cluster-dns={}", i.cluster_dns()),
+        format!("--kubelet-arg=port={k}"),
+        format!("--kubelet-arg=healthz-port={}", k + 1),
+        format!("--kube-proxy-arg=metrics-bind-address=127.0.0.1:{}", k + 2),
+        format!("--kube-controller-manager-arg=secure-port={}", k + 3),
+        format!("--kube-scheduler-arg=secure-port={}", k + 4),
+    ]
+    .into()
+}
+
+pub fn server_args_for(l: &Layout, i: &Instance) -> Vec<String> {
+    let mut v: Vec<String> = ["server", "--data-dir", &l.data().display().to_string(), "--write-kubeconfig", &l.kubeconfig().display().to_string(), "--write-kubeconfig-mode", "600", "--disable", "traefik", "--disable", "servicelb", "--node-name", &i.node_name].iter().map(|s| s.to_string()).collect();
+    v.extend(instance_flags(i));
+    v
+}
+
+fn podman_create(l: &Layout, image: &str, i: &Instance) -> Vec<String> {
+    let mut a: Vec<String> = ["podman", "create", "--name", &i.pod_name, "--privileged", "--network=host", "--tmpfs", "/run", "--tmpfs", "/var/run", "-v"].iter().map(|s| s.to_string()).collect();
     a.push(format!("{}:/var/lib/rancher/k3s", l.data().display()));
     a.push("-v".into());
     a.push(format!("{}:/output", l.root.display()));
     a.extend(["-e", "K3S_KUBECONFIG_OUTPUT=/output/kubeconfig", "-e", "K3S_KUBECONFIG_MODE=600"].iter().map(|s| s.to_string()));
     a.push(image.to_string());
-    a.extend(["server", "--disable", "traefik", "--disable", "servicelb", "--disable", "metrics-server", "--node-name", NODE_NAME].iter().map(|s| s.to_string()));
+    a.extend(["server", "--disable", "traefik", "--disable", "servicelb", "--node-name", &i.node_name].iter().map(|s| s.to_string()));
+    a.extend(instance_flags(i));
     a
 }
 
@@ -278,6 +581,11 @@ pub fn release_urls(version: &str) -> Result<(String, String, String), String> {
 /// Read what a setup would download (version, the vendor's checksum, the size) and build the plan. This only reads from the network
 /// (the release redirect, the checksum file and the headers of the download); it installs and starts nothing.
 pub fn lookup(clis: &CliManager, st: &dyn iyakki_proxy::Streamer, l: &Layout, backend: Backend, registry: &str) -> Result<Plan, String> {
+    lookup_for(clis, st, l, backend, registry, &Instance::primary())
+}
+
+/// [`lookup`] for one managed local cluster (the primary or an extra one).
+pub fn lookup_for(clis: &CliManager, st: &dyn iyakki_proxy::Streamer, l: &Layout, backend: Backend, registry: &str, inst: &Instance) -> Result<Plan, String> {
     let d = clis::def("k3s").ok_or("k3s is not in the catalogue")?;
     let version = clis.latest_version(d, st)?;
     let (clis::Source::File(src), Some(clis::Checksum::Lines(sum))) = (d.source, d.checksum) else { return Err("the k3s catalogue entry has changed shape".into()) };
@@ -302,6 +610,7 @@ pub fn lookup(clis: &CliManager, st: &dyn iyakki_proxy::Streamer, l: &Layout, ba
         create: Vec::new(),
         image: String::new(),
         notes: Vec::new(),
+        instance: inst.clone(),
     };
     match backend {
         Backend::Native => {
@@ -311,13 +620,13 @@ pub fn lookup(clis: &CliManager, st: &dyn iyakki_proxy::Streamer, l: &Layout, ba
             let text = clis.small(st, &checksum_url, d.hosts)?;
             p.expected_sha = clis::extract_hash(&text, &file).ok_or("the vendor's checksum file has no entry for this download")?;
             let mut s = vec![l.bin().display().to_string()];
-            s.extend(server_args(l));
+            s.extend(server_args_for(l, inst));
             p.server = s;
         }
         Backend::Podman => {
             p.image = image_for(&version);
             p.pull = vec!["podman".into(), "pull".into(), p.image.clone()];
-            p.create = podman_create(l, &p.image);
+            p.create = podman_create(l, &p.image, inst);
             p.install_path = PathBuf::new();
             p.notes.push("The image is pulled by tag from Docker Hub. Podman verifies the layers against the image's own digest, but there is no separately published checksum to compare with; the digest it ends up with is recorded and shown in the log.".into());
         }
@@ -360,16 +669,16 @@ pub fn plan_text(p: &Plan, root: bool, ram_root: bool) -> String {
             }
         }
         Backend::Podman => {
-            s.push_str(&format!("  {}\n  then: podman start {POD_NAME}  (IYAKKI starts it, watches it and starts it again when it stops)\n", p.create.join(" ")));
+            s.push_str(&format!("  {}\n  then: podman start {}  (IYAKKI starts it, watches it and starts it again when it stops)\n", p.create.join(" "), p.instance.pod_name));
             s.push_str("  The container is privileged and uses the host network: that is how k3s runs in a container.\n");
         }
     }
-    s.push_str("  Switched off to save memory and ports: traefik, servicelb, metrics-server.\n");
+    s.push_str("  Switched off to save memory and ports: traefik, servicelb. metrics-server stays on (kubectl top, the usage columns of the Kubernetes tile).\n");
     s.push_str("\nPORTS\n");
-    for (port, what) in ports() {
+    for (port, what) in ports_for(&p.instance) {
         s.push_str(&format!("  {port}  {what}\n"));
     }
-    s.push_str(&format!("  The API server listens on every interface (TLS and a token are required); keep the machine off untrusted networks or firewall port {API_PORT}.\n"));
+    s.push_str(&format!("  The API server listens on every interface (TLS and a token are required); keep the machine off untrusted networks or firewall port {}.\n", p.instance.api_port));
     s.push_str("\nREGISTRY\n");
     s.push_str(match p.registry.as_str() {
         "system" => "  B, a system registry (registry:2 with podman or docker on localhost:5000). It is set up after the cluster is Ready, as a separate step you approve.\n",
@@ -387,9 +696,22 @@ pub fn plan_text(p: &Plan, root: bool, ram_root: bool) -> String {
 
 /// The ports the cluster uses.
 pub fn ports() -> Vec<(String, &'static str)> {
+    ports_for(&Instance::primary())
+}
+
+/// The ports one managed local cluster uses.
+pub fn ports_for(i: &Instance) -> Vec<(String, &'static str)> {
+    let mut v = vec![(format!("{}/tcp", i.api_port), "the Kubernetes API (kubectl)"), (format!("{}/tcp", i.kubelet_port), "the kubelet")];
+    if !i.primary {
+        let k = i.kubelet_port;
+        v.push((format!("{}-{}/tcp", k + 1, k + 4), "kubelet health, kube-proxy metrics, controller manager and scheduler"));
+    }
+    v.extend(ports_common());
+    v
+}
+
+fn ports_common() -> Vec<(String, &'static str)> {
     vec![
-        (format!("{API_PORT}/tcp"), "the Kubernetes API (kubectl)"),
-        ("10250/tcp".into(), "the kubelet"),
         ("8472/udp".into(), "flannel VXLAN between nodes"),
         ("30000-32767/tcp".into(), "NodePort services (the in-cluster registry uses 30500)"),
     ]
@@ -471,6 +793,8 @@ pub struct Health {
     pub last_restart_reason: String,
     pub autostart: bool,
     pub checked_at: i64,
+    /// "waiting for the network..." while the start waits for a default route; empty otherwise.
+    pub note: String,
 }
 
 impl Health {
@@ -480,6 +804,9 @@ impl Health {
             return "not installed".into();
         }
         let mut s = self.state.clone();
+        if !self.note.is_empty() {
+            s.push_str(&format!(" · {}", self.note));
+        }
         if !self.version.is_empty() {
             s.push_str(&format!(" · {}", self.version));
         }
@@ -515,12 +842,21 @@ struct Overrides {
     backoff: Option<Duration>,
     poll: Option<Duration>,
     window: Option<bool>,
-    /// Tests: leave the process-wide state alone (`RUNNING`, the connected cluster, the machine's registered kubeconfig).
+    /// Tests: leave the process-wide state alone (the running set, the connected cluster, the machine's registered kubeconfig).
     quiet: bool,
     connected: Option<Option<String>>,
+    /// Tests: the file read instead of /proc/net/route.
+    route_file: Option<PathBuf>,
+    net_grace: Option<Duration>,
+    /// Tests: the address the default route's interface has now (`Some(None)`: none).
+    ip: Option<Option<String>>,
+    stall_after: Option<Duration>,
+    /// Tests: the clock the start gate and the step detection look at.
+    clock: Option<Arc<dyn ClockSource>>,
 }
 
 pub struct K3sDev {
+    inst: Instance,
     layout: Layout,
     clis: Arc<CliManager>,
     run: Arc<dyn Runner>,
@@ -536,6 +872,16 @@ pub struct K3sDev {
     audit: Mutex<Option<AuditFn>>,
     sandbox_up: Mutex<Option<Arc<dyn Fn() -> bool + Send + Sync>>>,
     over: Mutex<Overrides>,
+    /// "waiting for the network..." / "no network yet..." while the start waits for a default route; empty otherwise.
+    net_note: Mutex<String>,
+    /// Only one start at a time (autostart, the start request of a quick-install job and the Settings button can meet at boot).
+    start_lock: Mutex<()>,
+    /// The supervisor's last sign of life.
+    beat_at: Mutex<Instant>,
+    /// The address of the default route's interface when k3s was last started (an exit after it changed is a move, not a crash).
+    spawn_ip: Mutex<Option<String>>,
+    /// When k3s was last started: the monotonic time and the length of the log then (to look at its first minutes only).
+    spawn_mark: Mutex<Option<(Duration, u64)>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -544,9 +890,16 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl K3sDev {
     pub fn new(data_dir: &Path, clis: Arc<CliManager>, run: Arc<dyn Runner>) -> Arc<K3sDev> {
-        let layout = Layout::new(data_dir);
+        K3sDev::new_instance(data_dir, clis, run, Instance::primary())
+    }
+
+    /// One managed local cluster: the primary (`Instance::primary()`, what `new` makes) or an extra one. Every instance has the
+    /// same start gate (clock, network, memory), watchdog and health checks; only the folder, ports, names and ranges differ.
+    pub fn new_instance(data_dir: &Path, clis: Arc<CliManager>, run: Arc<dyn Runner>, inst: Instance) -> Arc<K3sDev> {
+        let layout = Layout::for_instance(data_dir, &inst);
         let installed = load_state(&layout).is_some();
         let d = Arc::new(K3sDev {
+            inst,
             layout,
             clis,
             run,
@@ -561,11 +914,24 @@ impl K3sDev {
             audit: Mutex::new(None),
             sandbox_up: Mutex::new(None),
             over: Mutex::new(Overrides::default()),
+            net_note: Mutex::new(String::new()),
+            start_lock: Mutex::new(()),
+            beat_at: Mutex::new(Instant::now()),
+            spawn_ip: Mutex::new(None),
+            spawn_mark: Mutex::new(None),
         });
-        if installed {
+        if installed && d.inst.primary {
             crate::devcluster::register_machine_kubeconfig(Some(d.layout.kubeconfig()));
         }
         d
+    }
+
+    pub fn instance(&self) -> &Instance {
+        &self.inst
+    }
+
+    pub fn id(&self) -> &str {
+        &self.inst.id
     }
 
     pub fn layout(&self) -> &Layout {
@@ -574,6 +940,16 @@ impl K3sDev {
 
     pub fn set_audit(&self, f: AuditFn) {
         *lock(&self.audit) = Some(f);
+    }
+
+    /// An extra cluster uses the same audit log and sandbox probe as the first one (call after both are set).
+    pub fn inherit_hooks(&self, from: &K3sDev) {
+        if let Some(f) = lock(&from.audit).clone() {
+            *lock(&self.audit) = Some(f);
+        }
+        if let Some(f) = lock(&from.sandbox_up).clone() {
+            *lock(&self.sandbox_up) = Some(f);
+        }
     }
 
     pub fn set_sandbox_probe(&self, f: Arc<dyn Fn() -> bool + Send + Sync>) {
@@ -600,6 +976,162 @@ impl K3sDev {
     #[doc(hidden)]
     pub fn assume_connected(&self, c: Option<&str>) {
         lock(&self.over).connected = Some(c.map(str::to_string));
+    }
+
+    /// Tests: read this file as /proc/net/route, and say "no network yet" after `grace`.
+    #[doc(hidden)]
+    pub fn assume_route_file(&self, f: &Path, grace: Duration) {
+        let mut o = lock(&self.over);
+        o.route_file = Some(f.to_path_buf());
+        o.net_grace = Some(grace);
+    }
+
+    /// Is there a default route? Tests that did not give a route file are not about the network: yes.
+    fn has_route(&self) -> bool {
+        let (f, quiet) = {
+            let o = lock(&self.over);
+            (o.route_file.clone(), o.quiet)
+        };
+        match f {
+            Some(f) => has_default_route(&std::fs::read_to_string(f).unwrap_or_default()),
+            None if quiet => true,
+            None => has_default_route(&std::fs::read_to_string(ROUTE_FILE).unwrap_or_default()),
+        }
+    }
+
+    /// Tests: pretend the default route's interface has this address (`None`: none).
+    #[doc(hidden)]
+    pub fn assume_ip(&self, ip: Option<&str>) {
+        lock(&self.over).ip = Some(ip.map(str::to_string));
+    }
+
+    /// Tests: the supervisor counts as stalled after this long without a heartbeat.
+    #[doc(hidden)]
+    pub fn assume_stall_after(&self, d: Duration) {
+        lock(&self.over).stall_after = Some(d);
+    }
+
+    /// Tests: the clock the gate and the step detection use.
+    #[doc(hidden)]
+    pub fn assume_clock(&self, c: Arc<dyn ClockSource>) {
+        lock(&self.over).clock = Some(c);
+    }
+
+    /// The clock to look at: a test's, the real one, or none (tests that are not about the clock: the gate is open).
+    fn clock_src(&self) -> Option<Arc<dyn ClockSource>> {
+        let o = lock(&self.over);
+        match &o.clock {
+            Some(c) => Some(c.clone()),
+            None if o.quiet => None,
+            None => Some(Arc::new(RealClock)),
+        }
+    }
+
+    fn clock_ready_now(&self) -> bool {
+        self.clock_src().is_none_or(|c| clock_ready(c.floor_pending(), c.synced(), c.mono(), CLOCK_WAIT_LIMIT))
+    }
+
+    /// Waits (cancellable by Stop) until the clock is plausible. False: cancelled.
+    fn await_clock(&self, gen: u64) -> bool {
+        if self.clock_ready_now() {
+            return true;
+        }
+        let step = lock(&self.over).poll.unwrap_or(NET_POLL).min(Duration::from_secs(1));
+        self.audit("system", "devcluster.waiting-for-clock", "");
+        self.set_net_note(WAITING_CLOCK);
+        self.log_line(WAITING_CLOCK);
+        while !self.clock_ready_now() {
+            self.beat();
+            if !self.pause(gen, step) {
+                self.set_net_note("");
+                return false;
+            }
+        }
+        self.set_net_note("");
+        let why = if self.clock_src().is_some_and(|c| c.synced()) { "a time server answered" } else { "no time server answered; the saved time is good enough" };
+        self.log_line(&format!("the clock is plausible ({why}), starting k3s"));
+        self.current(gen)
+    }
+
+    /// Stop the running k3s (its process group) and start it again. Not a failure: nothing is counted or alerted.
+    fn restart_native_for_clock(&self, backend: Backend, action: &str, why: &str) -> Result<(), String> {
+        self.audit("system", action, why);
+        self.log_line(&format!("restarting k3s: {why}"));
+        self.set_svc(Svc::Starting);
+        let child = lock(&self.child).take();
+        if let Some(mut child) = child {
+            // SAFETY: signalling the process group we created with `process_group(0)`.
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM) };
+            let t = Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(None) if t.elapsed() <= Duration::from_secs(30) => std::thread::sleep(Duration::from_millis(30)),
+                    Ok(None) => {
+                        // SAFETY: as above.
+                        unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        let _ = std::fs::remove_file(self.layout.kubeconfig());
+        self.spawn_backend(backend)
+    }
+
+    fn default_ip(&self) -> Option<String> {
+        if let Some(ip) = lock(&self.over).ip.clone() {
+            return ip;
+        }
+        let f = lock(&self.over).route_file.clone();
+        let text = std::fs::read_to_string(f.unwrap_or_else(|| ROUTE_FILE.into())).unwrap_or_default();
+        iface_ipv4(&default_route_iface(&text)?)
+    }
+
+    fn beat(&self) {
+        *lock(&self.beat_at) = Instant::now();
+    }
+
+    fn set_net_note(&self, t: &str) {
+        *lock(&self.net_note) = t.to_string();
+    }
+
+    fn log_line(&self, t: &str) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(self.layout.log()) {
+            let _ = writeln!(f, "iyakki: {t}");
+        }
+    }
+
+    /// Waits (cancellable by Stop) for a default route; the status line and the log say so. False: cancelled.
+    fn await_network(&self, gen: u64) -> bool {
+        if self.has_route() {
+            return true;
+        }
+        let grace = lock(&self.over).net_grace.unwrap_or(NET_GRACE);
+        let step = lock(&self.over).poll.unwrap_or(NET_POLL).min(NET_POLL);
+        self.audit("system", "devcluster.waiting-for-network", "");
+        let r = wait_for_route(
+            || self.has_route(),
+            |d| {
+                self.beat();
+                self.pause(gen, d)
+            },
+            |n| {
+                let t = if n == NetNote::Waiting { WAITING_NET } else { NO_NET_YET };
+                self.set_net_note(t);
+                self.log_line(t);
+            },
+            grace,
+            step,
+        );
+        self.set_net_note("");
+        if r == NetWait::Ready {
+            self.log_line("a default route exists, starting k3s");
+        }
+        r == NetWait::Ready && self.current(gen)
     }
 
     fn quiet(&self) -> bool {
@@ -637,8 +1169,16 @@ impl K3sDev {
     fn set_svc(&self, s: Svc) {
         let up = matches!(s, Svc::Starting | Svc::Running | Svc::Stopping);
         if !self.quiet() {
-            RUNNING.store(up, Ordering::SeqCst);
-            if s == Svc::Running {
+            {
+                let mut ids = running_ids();
+                ids.retain(|i| *i != self.inst.id);
+                if up {
+                    ids.push(self.inst.id.clone());
+                }
+            }
+            if !self.inst.primary {
+                // only the primary cluster is "the connected cluster" of the old single-cluster logic
+            } else if s == Svc::Running {
                 if let Some(desc) = self.installed().map(|_| format!("k3s (kubeconfig {})", self.layout.kubeconfig().display())) {
                     crate::devcluster::set_active(Some(&desc));
                 }
@@ -659,7 +1199,12 @@ impl K3sDev {
 
     /// Why a cluster cannot be set up or started here, for a desktop window, or "already exists". Empty: fine.
     pub fn found_elsewhere(&self) -> Vec<String> {
-        let m = lock(&self.machine).clone();
+        let mut m = lock(&self.machine).clone();
+        // another managed local cluster of this process running is not "a cluster found elsewhere": its processes are ours
+        let siblings = running_ids().iter().any(|i| *i != self.inst.id);
+        if siblings || !self.inst.primary {
+            m.proc_dir = PathBuf::from("/nonexistent/iyakki-no-proc");
+        }
         let mut ignore = vec![self.layout.root.clone(), self.clis.bin_dir()];
         if let Some(d) = self.clis.bin_dir().parent() {
             ignore.push(d.join("pkg"));
@@ -668,6 +1213,7 @@ impl K3sDev {
         let own_running = managed_running();
         let connected = match lock(&self.over).connected.clone() {
             Some(c) => c,
+            None if !self.inst.primary => None,
             None => crate::devcluster::active().filter(|_| !own_running),
         };
         existing(&m, &ignore, connected.as_deref(), sandbox)
@@ -766,7 +1312,7 @@ impl K3sDev {
         }
         std::fs::create_dir_all(l.data()).map_err(io_err)?;
         save_state(l, &state)?;
-        if !self.quiet() {
+        if !self.quiet() && self.inst.primary {
             crate::devcluster::register_machine_kubeconfig(Some(l.kubeconfig()));
         }
         self.set_svc(Svc::Stopped);
@@ -864,7 +1410,7 @@ impl K3sDev {
         }
         let dg = self.run.run(&tmp, &["podman".into(), "image".into(), "inspect".into(), "--format".into(), "{{.Digest}}".into(), plan.image.clone()], &[], Duration::from_secs(30), 4096, None);
         let digest = if dg.ok() { dg.stdout.trim().to_string() } else { String::new() };
-        let _ = self.run.run(&tmp, &["podman".into(), "rm".into(), "-f".into(), POD_NAME.into()], &[], Duration::from_secs(60), 4096, None);
+        let _ = self.run.run(&tmp, &["podman".into(), "rm".into(), "-f".into(), self.inst.pod_name.clone()], &[], Duration::from_secs(60), 4096, None);
         let c = self.run.run(&tmp, &plan.create, &[], Duration::from_secs(120), 16 * 1024, None);
         if !c.ok() {
             return Err(format!("podman create failed: {}", c.combined().lines().last().unwrap_or("no message").trim()));
@@ -877,6 +1423,7 @@ impl K3sDev {
 
     /// Start the cluster (installed by IYAKKI). Refuses in a desktop window, when another cluster exists, or when it already runs.
     pub fn start(self: &Arc<Self>, user: &str) -> Result<(), String> {
+        let _one_at_a_time = lock(&self.start_lock);
         let st = self.installed().ok_or("no cluster is installed by IYAKKI here (Settings \u{2192} Dev cluster \u{2192} Set up a local cluster)")?;
         if self.window() {
             return Err("In a desktop window IYAKKI never starts a cluster: this machine manages its own.".into());
@@ -897,17 +1444,27 @@ impl K3sDev {
         self.outage.store(false, Ordering::SeqCst);
         std::fs::create_dir_all(self.layout.data()).map_err(io_err)?;
         let _ = std::fs::remove_file(self.layout.kubeconfig());
-        match st.backend {
-            Backend::Native => {
-                let child = self.spawn_native()?;
-                *lock(&self.child) = Some(child);
+        // no default route yet (after a boot DHCP may still be working): the supervisor waits for it, then starts k3s
+        let pending = !self.has_route() || !self.clock_ready_now();
+        if !pending {
+            *lock(&self.spawn_ip) = self.default_ip();
+            match st.backend {
+                Backend::Native => {
+                    let child = self.spawn_native()?;
+                    *lock(&self.child) = Some(child);
+                }
+                Backend::Podman => self.start_pod(&st)?,
             }
-            Backend::Podman => self.start_pod(&st)?,
+        } else if st.backend == Backend::Native && !self.layout.bin().is_file() {
+            return Err(format!("{} is missing; reinstall (Uninstall, then Set up)", self.layout.bin().display()));
         }
         self.set_svc(Svc::Starting);
         let gen = self.gen.fetch_add(1, Ordering::SeqCst) + 1;
         let me = self.clone();
-        std::thread::Builder::new().name("iyakki-k3s-dev".into()).spawn(move || me.monitor(gen, st.backend)).map_err(io_err)?;
+        self.beat();
+        let w = self.clone();
+        std::thread::Builder::new().name("iyakki-k3s-dev".into()).spawn(move || me.monitor(gen, st.backend, pending)).map_err(io_err)?;
+        let _ = std::thread::Builder::new().name("iyakki-k3s-watch".into()).spawn(move || w.watchdog(gen, st.backend));
         Ok(())
     }
 
@@ -926,9 +1483,10 @@ impl K3sDev {
             let _ = std::fs::remove_file(conf_d.join("10-iyakki.conf"));
         }
         let log = std::fs::OpenOptions::new().create(true).append(true).open(l.log()).map_err(io_err)?;
+        *lock(&self.spawn_mark) = self.clock_src().map(|c| (c.mono(), log.metadata().map(|m| m.len()).unwrap_or(0)));
         let log2 = log.try_clone().map_err(io_err)?;
         let mut cmd = Command::new(l.bin());
-        cmd.args(server_args(l))
+        cmd.args(server_args_for(l, &self.inst))
             .env_clear()
             .env("PATH", format!("{}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", l.root.join("bin").display()))
             .env("HOME", &l.root)
@@ -960,15 +1518,15 @@ impl K3sDev {
         if !self.run.has("podman") {
             return Err("podman is not installed, so the Podman variant cannot start. Uninstall and set up the native variant.".into());
         }
-        let exists = self.run.run(&tmp, &["podman".into(), "inspect".into(), POD_NAME.into()], &[], Duration::from_secs(20), 4096, None).ok();
+        let exists = self.run.run(&tmp, &["podman".into(), "inspect".into(), self.inst.pod_name.clone()], &[], Duration::from_secs(20), 4096, None).ok();
         if !exists {
-            let create = podman_create(&self.layout, &st.image);
+            let create = podman_create(&self.layout, &st.image, &self.inst);
             let c = self.run.run(&tmp, &create, &[], Duration::from_secs(120), 16 * 1024, None);
             if !c.ok() {
                 return Err(format!("podman create failed: {}", c.combined().lines().last().unwrap_or("no message").trim()));
             }
         }
-        let o = self.run.run(&tmp, &["podman".into(), "start".into(), POD_NAME.into()], &[], Duration::from_secs(120), 16 * 1024, None);
+        let o = self.run.run(&tmp, &["podman".into(), "start".into(), self.inst.pod_name.clone()], &[], Duration::from_secs(120), 16 * 1024, None);
         if o.ok() { Ok(()) } else { Err(format!("podman start failed: {}", o.combined().lines().last().unwrap_or("no message").trim())) }
     }
 
@@ -996,12 +1554,173 @@ impl K3sDev {
     }
 
     /// Watches the process (or container): the node becoming Ready, an unexpected exit (restart with a back-off, or give up), disk use.
-    fn monitor(self: Arc<Self>, gen: u64, backend: Backend) {
-        let began = Instant::now();
+    fn spawn_backend(&self, backend: Backend) -> Result<(), String> {
+        *lock(&self.spawn_ip) = self.default_ip();
+        match backend {
+            Backend::Native => self.spawn_native().map(|c| *lock(&self.child) = Some(c)),
+            Backend::Podman => self.installed().ok_or_else(|| "state is gone".to_string()).and_then(|s| self.start_pod(&s)),
+        }
+    }
+
+    /// The supervisor. Every way out is loud: audited as `devcluster.supervisor-stopped` with the reason, and the state never stays
+    /// Starting/Running without a supervisor (a panic counts too).
+    fn monitor(self: Arc<Self>, gen: u64, backend: Backend, pending: bool) {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.monitor_inner(gen, backend, pending)));
+        let reason = match r {
+            Ok(r) => r,
+            Err(e) => {
+                let m = e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_default();
+                format!("the supervisor panicked: {m}")
+            }
+        };
+        self.supervisor_ended(gen, reason);
+    }
+
+    fn supervisor_ended(&self, gen: u64, reason: String) {
+        self.audit("system", "devcluster.supervisor-stopped", &reason);
+        self.log_line(&format!("supervisor stopped: {reason}"));
+        if self.current(gen) && matches!(self.state(), Svc::Starting | Svc::Running) {
+            let why = format!("IYAKKI stopped watching k3s ({reason})");
+            self.set_svc(Svc::Failed(why.clone()));
+            self.alerts_push(Alert::GaveUp(why));
+        }
+    }
+
+    /// Tests: run the supervisor wrapper around a body that panics.
+    #[doc(hidden)]
+    pub fn monitor_panic_for_test(self: &Arc<Self>, gen: u64) {
+        let r = std::panic::catch_unwind(|| -> String { panic!("test panic") });
+        let reason = format!("the supervisor panicked: {}", r.err().and_then(|e| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default());
+        self.supervisor_ended(gen, reason);
+    }
+
+    /// Looks at the supervisor from outside: when it has not shown a sign of life for a long time (blocked, or gone) while the cluster
+    /// is meant to run, it takes over: the exit of k3s is recorded and k3s is started again, or a new supervisor replaces the old one.
+    fn watchdog(self: Arc<Self>, gen: u64, backend: Backend) {
+        while self.current(gen) {
+            let every = lock(&self.over).poll.unwrap_or(Duration::from_secs(5)).max(Duration::from_millis(20));
+            if !self.pause(gen, every) {
+                return;
+            }
+            let stale = lock(&self.over).stall_after.unwrap_or(STALL_AFTER);
+            if self.watchdog_step(gen, backend, stale) {
+                return;
+            }
+        }
+    }
+
+    /// One look of the watchdog; true: it took over (this watchdog is done, a new supervisor and watchdog run).
+    #[doc(hidden)]
+    pub fn watchdog_step(self: &Arc<Self>, gen: u64, backend: Backend, stale: Duration) -> bool {
+        if !self.current(gen) || !matches!(self.state(), Svc::Starting | Svc::Running) || lock(&self.beat_at).elapsed() < stale {
+            return false;
+        }
+        let mut gone: Option<String> = None;
+        if backend == Backend::Native {
+            let mut c = lock(&self.child);
+            match c.as_mut() {
+                None => gone = Some("the handle of the k3s process was lost".to_string()),
+                Some(ch) => {
+                    if let Ok(Some(st)) = ch.try_wait() {
+                        gone = Some(format!("k3s exited ({})", exit_text(&st)));
+                        *c = None;
+                    }
+                }
+            }
+        }
+        // retire the stalled supervisor (a Stop in the meantime wins)
+        if self.gen.compare_exchange(gen, gen + 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return false;
+        }
+        let ngen = gen + 1;
+        self.audit("system", "devcluster.supervisor-stalled", gone.as_deref().unwrap_or("k3s still runs; a new supervisor takes over"));
+        if let Some(reason) = gone {
+            self.log_line(&reason);
+            self.audit("system", "devcluster.exited", &format!("{reason} (found by the watchdog)"));
+            self.set_svc(Svc::Starting);
+            match self.spawn_backend(backend) {
+                Ok(()) => {
+                    self.note_restart(&reason, true);
+                    self.audit("system", "devcluster.restart", &reason);
+                }
+                Err(e) => {
+                    self.set_svc(Svc::Failed(format!("{reason}; restarting failed: {e}")));
+                    self.alerts_push(Alert::GaveUp(format!("{reason}; restarting failed: {e}")));
+                    return true;
+                }
+            }
+        }
+        self.beat();
+        let (me, w) = (self.clone(), self.clone());
+        let _ = std::thread::Builder::new().name("iyakki-k3s-dev".into()).spawn(move || me.monitor(ngen, backend, false));
+        let _ = std::thread::Builder::new().name("iyakki-k3s-watch".into()).spawn(move || w.watchdog(ngen, backend));
+        true
+    }
+
+    fn monitor_inner(self: &Arc<Self>, gen: u64, backend: Backend, pending: bool) -> String {
+        if pending {
+            if !self.await_network(gen) {
+                return "stopped while waiting for the network".into();
+            }
+            if !self.await_clock(gen) {
+                return "stopped while waiting for the clock".into();
+            }
+            if let Err(e) = self.spawn_backend(backend) {
+                self.set_svc(Svc::Failed(e));
+                return "could not start k3s".into();
+            }
+        }
+        let clock = if backend == Backend::Native { self.clock_src() } else { None };
+        let mut last_look = clock.as_ref().map(|c| (c.wall(), c.mono()));
+        let mut clock_restarts = 0usize;
+        let mut last_step_mono: Option<Duration> = None;
+        let mut cert_restarted = false;
+        let mut began = Instant::now();
         let mut failures: Vec<Instant> = Vec::new();
         let mut last_disk = Instant::now() - Duration::from_secs(3600);
         let mut chmodded = false;
         while self.current(gen) {
+            self.beat();
+            // 0. did the clock jump (the network time arrived)? Then k3s, started at the fake date, is started again once.
+            let mut stepped: Option<i64> = None;
+            if let Some(c) = &clock {
+                let (w, m) = (c.wall(), c.mono());
+                if let Some((pw, pm)) = last_look {
+                    stepped = clock_stepped(pw, pm, w, m, CLOCK_STEP_SECS);
+                }
+                last_look = Some((w, m));
+                if stepped.is_some() {
+                    last_step_mono = Some(m);
+                }
+            }
+            if let (Some(jump), true) = (stepped, clock_restarts < MAX_CLOCK_RESTARTS) {
+                if lock(&self.child).as_mut().is_some_and(|ch| matches!(ch.try_wait(), Ok(None))) {
+                    clock_restarts += 1;
+                    if let Err(e) = self.restart_native_for_clock(backend, "devcluster.restart-clock-step", &format!("the clock moved by {jump} s")) {
+                        self.set_svc(Svc::Failed(format!("clock step; restarting failed: {e}")));
+                        return "restarting failed".into();
+                    }
+                    began = Instant::now();
+                    last_look = clock.as_ref().map(|c| (c.wall(), c.mono()));
+                    continue;
+                }
+            }
+            // 0b. certificate trouble in the first minutes after a start at the wrong date, now that the clock is plausible
+            if let (Some(c), false) = (&clock, cert_restarted) {
+                let mark = *lock(&self.spawn_mark);
+                if let Some((m0, off)) = mark {
+                    if c.mono().saturating_sub(m0) <= CERT_WINDOW && self.clock_ready_now() && log_shows_clock_trouble(&read_from(&self.layout.log(), off, 256 * 1024)) {
+                        cert_restarted = true;
+                        if let Err(e) = self.restart_native_for_clock(backend, "devcluster.restart-clock-cert", "k3s reported a certificate that is not valid yet") {
+                            self.set_svc(Svc::Failed(format!("certificate trouble; restarting failed: {e}")));
+                            return "restarting failed".into();
+                        }
+                        began = Instant::now();
+                        last_look = Some((c.wall(), c.mono()));
+                        continue;
+                    }
+                }
+            }
             // 1. has it died?
             let died: Option<String> = match backend {
                 Backend::Native => {
@@ -1010,22 +1729,67 @@ impl K3sDev {
                         Some(ch) => match ch.try_wait() {
                             Ok(Some(status)) => {
                                 *c = None;
-                                Some(format!("k3s exited ({status}); the end of its log: {}", self.log_tail_text(3).replace('\n', " | ")))
+                                Some(format!("k3s exited ({}); the end of its log: {}", exit_text(&status), self.log_tail_text(3).replace('\n', " | ")))
                             }
                             _ => None,
                         },
-                        None => return,
+                        None => Some("the handle of the k3s process was lost (it is not tracked any more)".to_string()),
                     }
                 }
                 Backend::Podman => {
-                    let o = self.run.run(&std::env::temp_dir(), &["podman".into(), "inspect".into(), "--format".into(), "{{.State.Status}} {{.State.ExitCode}}".into(), POD_NAME.into()], &[], Duration::from_secs(20), 4096, None);
+                    let o = self.run.run(&std::env::temp_dir(), &["podman".into(), "inspect".into(), "--format".into(), "{{.State.Status}} {{.State.ExitCode}}".into(), self.inst.pod_name.clone()], &[], Duration::from_secs(20), 4096, None);
                     let t = o.stdout.trim().to_string();
                     if o.ok() && !t.starts_with("running") && !t.starts_with("created") { Some(format!("the container is {t}; the end of its log: {}", self.log_tail_text(3).replace('\n', " | "))) } else { None }
                 }
             };
             if let Some(reason) = died {
                 if !self.current(gen) {
-                    return;
+                    return "superseded by a newer start or stopped".into();
+                }
+                self.log_line(reason.split("; the end of its log").next().unwrap_or(&reason));
+                // the machine moved to another network (the stick travels): k3s ends itself when its node address changes. That is
+                // expected: no failure, no alert, start it again at once so the node takes the new address.
+                let (then, now_ip) = (lock(&self.spawn_ip).clone(), self.default_ip());
+                if self.has_route() && then.is_some() && now_ip.is_some() && then != now_ip {
+                    self.audit("system", "devcluster.exited-ip-changed", &format!("{reason}; address {} -> {}", then.unwrap_or_default(), now_ip.unwrap_or_default()));
+                    self.set_svc(Svc::Starting);
+                    if let Err(e) = self.spawn_backend(backend) {
+                        self.set_svc(Svc::Failed(format!("{reason}; restarting failed: {e}")));
+                        return "restarting failed".into();
+                    }
+                    began = Instant::now();
+                    continue;
+                }
+                // it ended right after the clock jumped: the jump is the cause, not a bug. Start it again, no failure counted.
+                if let (Some(c), Some(at)) = (&clock, last_step_mono) {
+                    if c.mono().saturating_sub(at) <= CERT_WINDOW && clock_restarts < MAX_CLOCK_RESTARTS {
+                        clock_restarts += 1;
+                        self.audit("system", "devcluster.restart-clock-step", &format!("{reason}; it ended after the clock moved"));
+                        self.set_svc(Svc::Starting);
+                        if let Err(e) = self.spawn_backend(backend) {
+                            self.set_svc(Svc::Failed(format!("{reason}; restarting failed: {e}")));
+                            return "restarting failed".into();
+                        }
+                        began = Instant::now();
+                        last_step_mono = None;
+                        last_look = Some((c.wall(), c.mono()));
+                        continue;
+                    }
+                }
+                // it died while the machine has no default route (k3s: "no default routes found"): the network is missing, k3s is
+                // not broken. Wait for the route and start it again; this is no failure, no alert and no restart is counted.
+                if !self.has_route() {
+                    self.audit("system", "devcluster.exited-no-network", &reason);
+                    self.set_svc(Svc::Starting);
+                    if !self.await_network(gen) {
+                        return "stopped while waiting for the network".into();
+                    }
+                    if let Err(e) = self.spawn_backend(backend) {
+                        self.set_svc(Svc::Failed(format!("{reason}; restarting failed: {e}")));
+                        return "restarting failed".into();
+                    }
+                    began = Instant::now();
+                    continue;
                 }
                 failures.retain(|t| t.elapsed() < FAIL_WINDOW);
                 failures.push(Instant::now());
@@ -1038,24 +1802,20 @@ impl K3sDev {
                     self.set_svc(Svc::Failed(why.clone()));
                     self.alerts_push(Alert::GaveUp(why));
                     self.note_restart(&reason, false);
-                    return;
+                    return "gave up after repeated failures".into();
                 }
                 self.set_svc(Svc::Starting);
                 if !self.pause(gen, self.backoff(failures.len() - 1)) {
-                    return;
+                    return "stopped during the back-off".into();
                 }
-                let r = match backend {
-                    Backend::Native => self.spawn_native().map(|c| *lock(&self.child) = Some(c)),
-                    Backend::Podman => self.installed().ok_or_else(|| "state is gone".to_string()).and_then(|s| self.start_pod(&s)),
-                };
-                match r {
+                match self.spawn_backend(backend) {
                     Ok(()) => {
                         self.note_restart(&reason, true);
                         self.audit("system", "devcluster.restart", &reason);
                     }
                     Err(e) => {
                         self.set_svc(Svc::Failed(format!("{reason}; restarting failed: {e}")));
-                        return;
+                        return "restarting failed".into();
                     }
                 }
                 continue;
@@ -1088,12 +1848,13 @@ impl K3sDev {
             if began.elapsed() > Duration::from_secs(900) && self.state() == Svc::Starting {
                 self.set_svc(Svc::Failed("the node did not become Ready within fifteen minutes".into()));
                 self.alerts_push(Alert::GaveUp("the node did not become Ready within fifteen minutes".into()));
-                return;
+                return "the node did not become Ready".into();
             }
             if !self.pause(gen, self.poll_every(self.state() == Svc::Running)) {
-                return;
+                return "stopped or superseded".into();
             }
         }
+        "superseded by a newer start or stopped".into()
     }
 
     fn kubeconfig_ready(&self, backend: Backend) -> bool {
@@ -1147,7 +1908,7 @@ impl K3sDev {
         let kc = self.layout.kubeconfig().display().to_string();
         let mut argv: Vec<String> = match backend {
             Backend::Native => vec![self.layout.bin().display().to_string(), "kubectl".into(), "--kubeconfig".into(), kc.clone()],
-            Backend::Podman => vec!["podman".into(), "exec".into(), POD_NAME.into(), "kubectl".into()],
+            Backend::Podman => vec!["podman".into(), "exec".into(), self.inst.pod_name.clone(), "kubectl".into()],
         };
         argv.push("--request-timeout=10s".into());
         argv.extend(args.iter().map(|s| s.to_string()));
@@ -1164,8 +1925,11 @@ impl K3sDev {
             Backend::Native => {
                 let child = lock(&self.child).take();
                 let Some(mut child) = child else {
+                    // still waiting for the network (nothing was started yet): Stop cancels the wait
+                    let waiting = self.state() == Svc::Starting;
+                    self.set_net_note("");
                     self.set_svc(Svc::Stopped);
-                    return Err("the cluster is not running".into());
+                    return if waiting { Ok(()) } else { Err("the cluster is not running".into()) };
                 };
                 self.set_svc(Svc::Stopping);
                 // SAFETY: signalling the process group we created with `process_group(0)`.
@@ -1188,7 +1952,7 @@ impl K3sDev {
             }
             Backend::Podman => {
                 self.set_svc(Svc::Stopping);
-                let o = self.run.run(&std::env::temp_dir(), &["podman".into(), "stop".into(), "-t".into(), "30".into(), POD_NAME.into()], &[], Duration::from_secs(90), 16 * 1024, None);
+                let o = self.run.run(&std::env::temp_dir(), &["podman".into(), "stop".into(), "-t".into(), "30".into(), self.inst.pod_name.clone()], &[], Duration::from_secs(90), 16 * 1024, None);
                 if !o.ok() && !o.combined().contains("no such") {
                     self.set_svc(Svc::Failed(format!("podman stop failed: {}", o.combined().trim())));
                     return Err(format!("podman stop failed: {}", o.combined().trim()));
@@ -1210,8 +1974,8 @@ impl K3sDev {
 
     /// Delete the cluster's state (the data folder only) so it starts fresh. The person must have typed [`NODE_NAME`].
     pub fn reset(&self, typed: &str, user: &str) -> Result<(), String> {
-        if typed.trim() != NODE_NAME {
-            return Err(format!("Reset deletes everything the cluster stores (its objects, volumes and images). Type {NODE_NAME} to confirm; nothing was changed."));
+        if typed.trim() != self.inst.node_name {
+            return Err(format!("Reset deletes everything the cluster stores (its objects, volumes and images). Type {} to confirm; nothing was changed.", self.inst.node_name));
         }
         self.installed().ok_or("no cluster is installed by IYAKKI here")?;
         self.audit(user, "devcluster.reset", &self.layout.data().display().to_string());
@@ -1246,8 +2010,8 @@ impl K3sDev {
 
     /// Stop and remove the cluster IYAKKI installed (program, data, kubeconfig, log and the Podman container). The person typed [`NODE_NAME`].
     pub fn uninstall(&self, typed: &str, user: &str) -> Result<(), String> {
-        if typed.trim() != NODE_NAME {
-            return Err(format!("Uninstall removes the cluster and all its data. Type {NODE_NAME} to confirm; nothing was changed."));
+        if typed.trim() != self.inst.node_name {
+            return Err(format!("Uninstall removes the cluster and all its data. Type {} to confirm; nothing was changed.", self.inst.node_name));
         }
         let st = self.installed().ok_or("no cluster is installed by IYAKKI here")?;
         self.audit(user, "devcluster.uninstall", &self.layout.root.display().to_string());
@@ -1255,11 +2019,11 @@ impl K3sDev {
             let _ = self.stop(user);
         }
         if st.backend == Backend::Podman && self.run.has("podman") {
-            let _ = self.run.run(&std::env::temp_dir(), &["podman".into(), "rm".into(), "-f".into(), POD_NAME.into()], &[], Duration::from_secs(60), 4096, None);
+            let _ = self.run.run(&std::env::temp_dir(), &["podman".into(), "rm".into(), "-f".into(), self.inst.pod_name.clone()], &[], Duration::from_secs(60), 4096, None);
         }
         let root = self.layout.root.clone();
         self.remove_managed(&root)?;
-        if !self.quiet() {
+        if !self.quiet() && self.inst.primary {
             crate::devcluster::register_machine_kubeconfig(None);
         }
         self.set_svc(Svc::NotInstalled);
@@ -1300,7 +2064,7 @@ impl K3sDev {
                 if was_running {
                     self.stop(user)?;
                 }
-                let _ = self.run.run(&tmp, &["podman".into(), "rm".into(), "-f".into(), POD_NAME.into()], &[], Duration::from_secs(60), 4096, None);
+                let _ = self.run.run(&tmp, &["podman".into(), "rm".into(), "-f".into(), self.inst.pod_name.clone()], &[], Duration::from_secs(60), 4096, None);
                 next.image = plan.image.clone();
             }
         }
@@ -1363,6 +2127,7 @@ impl K3sDev {
         h.last_restart_reason = st.last_restart_reason.clone();
         let s = self.state();
         h.state = s.word().to_string();
+        h.note = if matches!(s, Svc::Starting) { lock(&self.net_note).clone() } else { String::new() };
         h.failed_reason = if let Svc::Failed(r) = &s { r.clone() } else { String::new() };
         if !matches!(s, Svc::Running) {
             h.node_ready = if matches!(s, Svc::Starting) { Some(false) } else { None };
@@ -1426,7 +2191,7 @@ impl K3sDev {
     /// The end of the service log, as text (Podman: `podman logs --tail`).
     pub fn log_tail(&self, lines: usize) -> String {
         if self.installed().is_some_and(|s| s.backend == Backend::Podman) && self.run.has("podman") {
-            let o = self.run.run(&std::env::temp_dir(), &["podman".into(), "logs".into(), "--tail".into(), lines.to_string(), POD_NAME.into()], &[], Duration::from_secs(20), 256 * 1024, None);
+            let o = self.run.run(&std::env::temp_dir(), &["podman".into(), "logs".into(), "--tail".into(), lines.to_string(), self.inst.pod_name.clone()], &[], Duration::from_secs(20), 256 * 1024, None);
             return o.combined();
         }
         self.log_tail_text(lines)
@@ -1434,6 +2199,19 @@ impl K3sDev {
 }
 
 // ------------------------------------------------------------------------------------------------ small helpers
+
+/// The log from byte `off` on (at most `max` bytes of it).
+fn read_from(p: &Path, off: u64, max: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(p) else { return String::new() };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if off >= len || f.seek(SeekFrom::Start(off)).is_err() {
+        return String::new();
+    }
+    let mut b = Vec::new();
+    let _ = f.take(max).read_to_end(&mut b);
+    String::from_utf8_lossy(&b).into_owned()
+}
 
 fn read_tail(p: &Path, max: u64) -> String {
     use std::io::{Read, Seek, SeekFrom};
@@ -1448,7 +2226,7 @@ fn read_tail(p: &Path, max: u64) -> String {
 }
 
 /// Free and total bytes of the file system holding `p`.
-fn space(p: &Path) -> Option<(u64, u64)> {
+pub(crate) fn space(p: &Path) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
     // SAFETY: `c` is a NUL-terminated path and `st` is a writable statvfs.

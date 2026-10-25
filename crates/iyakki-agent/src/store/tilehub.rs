@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::install::record_key;
 use super::tile::{AppInfo, Bundle, Caps, FileData, TileRuntime, TileStorage};
+use super::tilesdk::TileSdk;
 use super::Store;
 use crate::services::Services;
 use crate::skills::Scope;
@@ -166,7 +167,7 @@ pub fn bundle_of(svc: &Services, user: &str, e: &TileEntry) -> Result<Bundle, St
 }
 
 /// Open an app: its page, its bridge with this person's data, and the network it declared and the policy allows.
-pub fn open(svc: &Services, policy: &Policy, user: &str, e: &TileEntry, web: Arc<dyn iyakki_web::Fetch>) -> Result<TileRuntime, String> {
+pub fn open(svc: &Arc<Services>, policy: &Policy, user: &str, e: &TileEntry, web: Arc<dyn iyakki_web::Fetch>) -> Result<TileRuntime, String> {
     if !allowed(policy) {
         return Err("your account may not run tile apps".into());
     }
@@ -177,7 +178,10 @@ pub fn open(svc: &Services, policy: &Policy, user: &str, e: &TileEntry, web: Arc
         super::tile::storage_file(&Store::for_services(svc), &e.scope, &e.name, user)
     };
     let info = AppInfo { id: e.name.clone(), name: e.title.clone(), version: e.version.clone(), publisher: e.publisher.clone(), trust: e.trust.clone(), dev: e.dev };
-    TileRuntime::open(bundle, info, TileStorage::open(&storage_path), web, policy)
+    let hosts = super::tile::reachable_hosts(&bundle.manifest, policy);
+    let app = e.name.clone();
+    // the model, the voice and the usage log of this system, for the apps that declared `llm` or `speech`
+    TileRuntime::open_sdk(bundle, info, TileStorage::open(&storage_path), web, hosts, None, |out| Some(TileSdk::for_services(svc, user, &app, out)))
 }
 
 /// A number that changes when a file of a dev app changes (the tile reloads when it does).

@@ -225,6 +225,148 @@ pub fn parse_models(v: &Value, loaded: &[String]) -> Vec<Model> {
     out
 }
 
+// ------------------------------------------------------------------ collections
+
+/// A Lemonade collection (`recipe: "collection.omni"`): a bundle of models that work together (chat and vision, pictures,
+/// speech in, speech out). It is kept beside the typed list, so the `Model` of a collection stays a plain list entry.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Collection {
+    pub id: String,
+    pub recipe: String,
+    /// The ids of the parts; empty when the server does not list them (a collection that is not downloaded).
+    pub components: Vec<String>,
+    /// The list entry carries a `system_prompt` (the collection tells its chat model how to use the other parts).
+    pub has_system_prompt: bool,
+}
+
+/// Is this list entry a collection of models (its recipe starts with `collection.`)?
+pub fn is_collection(m: &Model) -> bool {
+    m.recipe.to_ascii_lowercase().starts_with("collection.")
+}
+
+/// The collections of a `GET /models` answer. A missing or odd `components` is an empty list; ids that are not valid model
+/// names are dropped. Non-collections are not returned.
+pub fn parse_collections(v: &Value) -> Vec<Collection> {
+    let Some(list) = v.get("data").and_then(Value::as_array) else { return vec![] };
+    let mut out: Vec<Collection> = list
+        .iter()
+        .filter_map(|m| {
+            let id = m.get("id")?.as_str()?.to_string();
+            let recipe = m.get("recipe").and_then(Value::as_str).unwrap_or("").to_string();
+            if !crate::providers::valid_model_name(&id) || !recipe.to_ascii_lowercase().starts_with("collection.") {
+                return None;
+            }
+            let mut components: Vec<String> = m.get("components").and_then(Value::as_array).map(|a| a.iter().filter_map(|c| c.as_str()).filter(|c| crate::providers::valid_model_name(c)).map(str::to_string).collect()).unwrap_or_default();
+            let mut seen = std::collections::HashSet::new();
+            components.retain(|c| seen.insert(c.clone()));
+            let has_system_prompt = m.get("system_prompt").is_some_and(|p| p.as_str().is_none_or(|s| !s.trim().is_empty()));
+            Some(Collection { id, recipe, components, has_system_prompt })
+        })
+        .collect();
+    out.sort_by(|a, b| a.id.to_ascii_lowercase().cmp(&b.id.to_ascii_lowercase()));
+    out.dedup_by(|a, b| a.id == b.id);
+    out
+}
+
+/// One part of a collection, resolved against the same server's model list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Part {
+    pub id: String,
+    /// What the part does; for an id the list does not know, guessed from the name (so a part can still be shown).
+    pub kind: ModelType,
+    /// The server's list names this part (false: unknown component, treated as missing).
+    pub listed: bool,
+    pub downloaded: bool,
+    pub size_gb: Option<f64>,
+}
+
+impl Part {
+    /// "chat+vision", "chat", "pictures", "speech in", "speech out", or the type's name.
+    pub fn role(&self) -> &'static str {
+        match self.kind {
+            ModelType::Chat => "chat",
+            ModelType::Vision => "chat+vision",
+            ModelType::Image => "pictures",
+            ModelType::SpeechToText => "speech in",
+            ModelType::TextToSpeech => "speech out",
+            ModelType::Embeddings => "embeddings",
+            ModelType::Reranking => "reranking",
+            ModelType::Other => "other",
+        }
+    }
+
+    /// "9.3 GB" / "389 MB" / "size unknown".
+    pub fn size_text(&self) -> String {
+        Model { id: String::new(), kind: self.kind, recipe: String::new(), checkpoint: String::new(), labels: vec![], downloaded: self.downloaded, loaded: false, suggested: false, size_gb: self.size_gb, image_defaults: None }.size_text()
+    }
+
+    /// "chat+vision Qwen3.5-4B-MTP-GGUF", for the list of parts.
+    pub fn title(&self) -> String {
+        format!("{} {}", self.role(), self.id)
+    }
+
+    /// "installed", or "missing (2.6 GB)".
+    pub fn state(&self) -> String {
+        if self.listed && self.downloaded { "installed".into() } else { format!("missing ({})", self.size_text()) }
+    }
+}
+
+/// The parts of `c` with their kinds, state and sizes from `models` (the same server's list).
+pub fn resolve_parts(c: &Collection, models: &[Model]) -> Vec<Part> {
+    c.components
+        .iter()
+        .map(|id| match models.iter().find(|m| m.id == *id) {
+            Some(m) => Part { id: id.clone(), kind: m.kind, listed: true, downloaded: m.downloaded || m.loaded, size_gb: m.size_gb },
+            None => Part { id: id.clone(), kind: classify("", &[], id), listed: false, downloaded: false, size_gb: None },
+        })
+        .collect()
+}
+
+/// What "Use all parts" would do with a collection: the part for each use, and what is missing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsePlan {
+    pub parts: Vec<Part>,
+    /// The chat part (the first chat or vision part).
+    pub chat: Option<Part>,
+    pub image: Option<Part>,
+    pub stt: Option<Part>,
+    pub tts: Option<Part>,
+}
+
+impl UsePlan {
+    pub fn new(c: &Collection, models: &[Model]) -> UsePlan {
+        let parts = resolve_parts(c, models);
+        let first = |f: &dyn Fn(ModelType) -> bool| parts.iter().find(|p| f(p.kind)).cloned();
+        UsePlan { chat: first(&|k| k.chats()), image: first(&|k| k == ModelType::Image), stt: first(&|k| k == ModelType::SpeechToText), tts: first(&|k| k == ModelType::TextToSpeech), parts }
+    }
+
+    /// The parts that are not on the server yet (or that the list does not know).
+    pub fn missing(&self) -> Vec<&Part> {
+        self.parts.iter().filter(|p| !(p.listed && p.downloaded)).collect()
+    }
+
+    /// The use that has no part (a collection without a voice cannot be used for all four).
+    pub fn lacking(&self) -> Vec<&'static str> {
+        [(self.chat.is_none(), "chat"), (self.image.is_none(), "pictures"), (self.stt.is_none(), "speech in"), (self.tts.is_none(), "speech out")].into_iter().filter(|(l, _)| *l).map(|(_, w)| w).collect()
+    }
+
+    /// "chat+vision Qwen3.5-4B-MTP-GGUF, pictures SD-Turbo, speech in Whisper-Tiny, speech out kokoro-v1".
+    pub fn parts_text(&self) -> String {
+        self.parts.iter().map(Part::title).collect::<Vec<_>>().join(", ")
+    }
+
+    /// The missing parts' own ids (the fallback when pulling the collection fails or fetches only some parts).
+    pub fn missing_ids(&self) -> Vec<String> {
+        self.missing().into_iter().map(|p| p.id.clone()).collect()
+    }
+
+    /// Total download of what is missing, in GB, when every missing part has a size.
+    pub fn missing_gb(&self) -> Option<f64> {
+        let m = self.missing();
+        if m.is_empty() || m.iter().any(|p| p.size_gb.is_none()) { None } else { Some(m.iter().filter_map(|p| p.size_gb).sum()) }
+    }
+}
+
 /// What a health answer says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Health {
@@ -295,6 +437,23 @@ pub fn remember(base: &str, models: &[Model]) {
 /// The typed list last read from the server at `base`.
 pub fn cached(base: &str) -> Option<Vec<Model>> {
     cache().lock().ok()?.get(base.trim_end_matches('/')).cloned()
+}
+
+fn collections_cache() -> &'static Mutex<HashMap<String, Vec<Collection>>> {
+    static C: OnceLock<Mutex<HashMap<String, Vec<Collection>>>> = OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// Keep the collections of the server at `base` (read from the same answer as the typed list).
+pub fn remember_collections(base: &str, c: &[Collection]) {
+    if let Ok(mut m) = collections_cache().lock() {
+        m.insert(base.trim_end_matches('/').to_string(), c.to_vec());
+    }
+}
+
+/// The collections last read from the server at `base` (none when never read: an old list has none).
+pub fn collections_cached(base: &str) -> Vec<Collection> {
+    collections_cache().lock().ok().and_then(|m| m.get(base.trim_end_matches('/')).cloned()).unwrap_or_default()
 }
 
 /// `ProviderCfg::model_kinds` from a typed list.
@@ -434,6 +593,20 @@ pub fn probe_local(port: u16) -> Option<(String, Option<String>)> {
     }
     let h = parse_health(&serde_json::from_str(body.trim()).ok()?)?;
     Some((format!("http://127.0.0.1:{port}/api/v1"), h.version))
+}
+
+/// The models a Lemonade server on this machine answers with right now (`GET /api/v1/models`: the downloaded ones), or `None`
+/// when nothing answers. Quick (short timeouts): for checks like "is Kokoro really installed".
+pub fn probe_local_models() -> Option<Vec<Model>> {
+    let ports = local_ports_override().map(|o| o.1).unwrap_or_else(|| local_ports().to_vec());
+    ports.into_iter().find_map(|port| {
+        let (status, body) = local_get(port, "/api/v1/models")?;
+        if status != 200 {
+            return None;
+        }
+        let v: Value = serde_json::from_str(body.trim()).ok()?;
+        v.get("data").is_some_and(Value::is_array).then(|| parse_models(&v, &[]))
+    })
 }
 
 /// The ports Lemonade is looked for on this machine: today's, then the one of releases before v10.1.0.

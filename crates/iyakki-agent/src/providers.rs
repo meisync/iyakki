@@ -352,6 +352,56 @@ fn anthropic_body(model: &str, system: &[&str], turns: &[&Message], tools: &[Too
     body
 }
 
+/// What a picture request may carry besides the prompt.
+#[derive(Clone, Debug, Default)]
+pub struct ImageParams {
+    /// The seed (the same seed and prompt give the same picture on the same model).
+    pub seed: Option<u64>,
+    /// A negative prompt, sent as `negative_prompt`; only set when the server is known to take it.
+    pub negative: Option<String>,
+    /// Also read the server's health after the call (loaded models, backend address) for the picture log.
+    pub verbose: bool,
+    /// Steps and size to ask for instead of the model's own (the caller keeps them inside what the model supports).
+    pub steps: Option<u32>,
+    pub size: Option<(u32, u32)>,
+    /// Guidance, sent as `cfg_scale`; `None` leaves the model's own.
+    pub guidance: Option<f32>,
+}
+
+/// What one picture request sent and got back, for the picture log. Nothing secret is in it.
+#[derive(Clone, Debug, Default)]
+pub struct ImageTrace {
+    pub provider: String,
+    pub model: String,
+    pub url: String,
+    pub width: u32,
+    pub height: u32,
+    pub steps: Option<u32>,
+    pub seed: Option<u64>,
+    pub guidance: Option<f32>,
+    /// The request headers with every secret replaced by `***`.
+    pub request_headers: Vec<(String, String)>,
+    pub status: Option<u16>,
+    /// The server's own error text (secrets removed).
+    pub error: String,
+    pub ms: u64,
+    /// The size of the whole answer.
+    pub response_bytes: u64,
+    /// The size of the picture inside the answer.
+    pub image_bytes: u64,
+    /// `png`, `jpg`, `webp`, `gif`, or `invalid` when the bytes were none of these; empty when no picture came.
+    pub format: String,
+    /// The server's health after the call (verbose only).
+    pub health: Option<String>,
+}
+
+/// A short line from a Lemonade `/health` answer: the loaded models and the backend address when it gives one.
+fn health_text(h: &Value) -> String {
+    let loaded = crate::lemonade::loaded_models(h);
+    let backend = h.get("backend_url").and_then(Value::as_str).map(str::to_string).or_else(|| h.get("all_models_loaded").and_then(Value::as_array).and_then(|a| a.iter().find_map(|m| m.get("backend_url").and_then(Value::as_str).map(str::to_string))));
+    format!("loaded models: {}{}", if loaded.is_empty() { "none".to_string() } else { loaded.join(", ") }, backend.map_or(String::new(), |b| format!(" · backend_url {}", crate::piclog::strip_userinfo(&b))))
+}
+
 fn snippet(body: &[u8]) -> String {
     let t: String = String::from_utf8_lossy(body).chars().filter(|c| !c.is_control() || *c == ' ').take(200).collect();
     t.trim().to_string()
@@ -475,7 +525,17 @@ impl ProviderClient {
     /// A Lemonade server's picture call: OpenAI's images API with the model's own size and steps when its list gives them
     /// (SD-Turbo draws at 512x512 in 4 steps, SDXL at 1024x1024 in 20). Lemonade loads the model by itself on the first call.
     fn lemonade_image(&self, model: &str, prompt: &str, w: u32, h: u32) -> Result<(Vec<u8>, &'static str), String> {
+        self.lemonade_image_traced(model, prompt, w, h, &ImageParams::default(), &mut ImageTrace::default())
+    }
+
+    /// [`Self::lemonade_image`] that also fills `t` with what was sent and what came back (for the picture log). The size and
+    /// steps are the model's own, never more. The seed is sent as `seed` and a negative prompt as `negative_prompt` only when
+    /// `p` carries them.
+    fn lemonade_image_traced(&self, model: &str, prompt: &str, w: u32, h: u32, p: &ImageParams, t: &mut ImageTrace) -> Result<(Vec<u8>, &'static str), String> {
+        t.provider = self.cfg.id.clone();
+        t.model = model.to_string();
         if !valid_model_name(model) {
+            t.error = "invalid model name".into();
             return Err("invalid model name".into());
         }
         let base = self.openai_base()?;
@@ -484,13 +544,102 @@ impl ProviderClient {
             Some(d) => (d.width.unwrap_or(w), d.height.unwrap_or(h), d.steps),
             None => (w, h, None),
         };
+        let ((w, h), steps) = (p.size.unwrap_or((w, h)), p.steps.or(steps));
         let mut body = json!({"model": model, "prompt": prompt, "n": 1, "size": format!("{w}x{h}"), "response_format": "b64_json"});
         if let Some(s) = steps {
             body["steps"] = json!(s);
         }
-        let v = self.call("POST", &format!("{base}/images/generations"), body.to_string().as_bytes()).map_err(|e| crate::lemonade::explain_error(model, &e))?;
-        let b = crate::models::image_from_response(&v).ok_or("Lemonade answered without a picture")?;
-        crate::models::sniff_image(b).ok_or_else(|| "Lemonade answered, but not with a PNG, JPEG, GIF or WebP picture".to_string())
+        if let Some(g) = p.guidance {
+            body["cfg_scale"] = json!(g);
+        }
+        if let Some(s) = p.seed {
+            body["seed"] = json!(s);
+        }
+        if let Some(n) = p.negative.as_deref().filter(|n| !n.is_empty()) {
+            body["negative_prompt"] = json!(n);
+        }
+        let url = format!("{base}/images/generations");
+        let headers = self.headers()?;
+        let secrets = crate::piclog::secret_values(&headers);
+        (t.width, t.height, t.steps, t.seed, t.guidance) = (w, h, steps, p.seed, p.guidance);
+        t.url = crate::piclog::strip_userinfo(&url);
+        t.request_headers = crate::piclog::redact_headers(&headers);
+        let started = std::time::Instant::now();
+        let res = self.upstream.request("POST", &url, &headers, body.to_string().as_bytes());
+        t.ms = started.elapsed().as_millis() as u64;
+        let out = (|| {
+            let r = res.map_err(|e| {
+                t.error = crate::piclog::scrub(&e, &secrets);
+                crate::lemonade::explain_error(model, &t.error)
+            })?;
+            t.status = Some(r.status);
+            t.response_bytes = r.body.len() as u64;
+            if !(200..300).contains(&r.status) {
+                let msg = serde_json::from_slice::<Value>(&r.body)
+                    .ok()
+                    .and_then(|v| v.pointer("/error/message").or_else(|| v.get("error").filter(|e| e.is_string())).and_then(Value::as_str).map(str::to_string))
+                    .unwrap_or_else(|| snippet(&r.body));
+                t.error = crate::piclog::scrub(&msg, &secrets);
+                return Err(crate::lemonade::explain_error(model, &format!("HTTP {}: {}", r.status, t.error)));
+            }
+            let v: Value = serde_json::from_slice(&r.body).map_err(|_| {
+                t.error = "provider returned something that is not JSON".into();
+                "provider returned something that is not JSON".to_string()
+            })?;
+            let b = crate::models::image_from_response(&v).ok_or_else(|| {
+                t.error = "the answer holds no picture".into();
+                "Lemonade answered without a picture".to_string()
+            })?;
+            t.image_bytes = b.len() as u64;
+            match crate::models::sniff_image(b) {
+                Some((b, ext)) => {
+                    t.format = ext.to_string();
+                    Ok((b, ext))
+                }
+                None => {
+                    t.format = "invalid".into();
+                    Err("Lemonade answered, but not with a PNG, JPEG, GIF or WebP picture".to_string())
+                }
+            }
+        })();
+        if p.verbose {
+            let health = self.call_raw("GET", &format!("{base}/health"), b"").ok().map(|h| health_text(&h)).unwrap_or_else(|| "the health call did not answer".into());
+            t.health = Some(crate::piclog::scrub(&health, &secrets));
+        }
+        out
+    }
+
+    /// A Lemonade server's health as one line (the loaded models, the backend address) and the loaded model names.
+    pub fn lemonade_health(&self) -> Result<(String, Vec<String>), String> {
+        if self.cfg.kind != Kind::Lemonade {
+            return Err("only a Lemonade server has a health call".into());
+        }
+        let base = self.openai_base()?;
+        let h = self.call_raw("GET", &format!("{base}/health"), b"")?;
+        Ok((health_text(&h), crate::lemonade::loaded_models(&h)))
+    }
+
+    /// Draws a picture like [`Self::generate_image`] and also returns what was sent and what came back, even when it failed.
+    pub fn generate_image_traced(&self, model: &str, prompt: &str, size: &str, p: &ImageParams) -> (Result<(Vec<u8>, &'static str), String>, ImageTrace) {
+        let mut t = ImageTrace { provider: self.cfg.id.clone(), model: model.to_string(), ..Default::default() };
+        let parsed = size.split_once('x').and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?))).filter(|(a, b)| (64..=4096).contains(a) && (64..=4096).contains(b));
+        let Some((w, h)) = parsed else {
+            t.error = "the size must look like 1024x1024 (64 to 4096)".into();
+            return (Err(t.error.clone()), t);
+        };
+        if self.cfg.kind == Kind::Lemonade {
+            let r = self.lemonade_image_traced(model, prompt, w, h, p, &mut t);
+            return (r, t);
+        }
+        (t.width, t.height, t.seed) = (w, h, None);
+        let started = std::time::Instant::now();
+        let r = self.generate_image(model, prompt, size);
+        t.ms = started.elapsed().as_millis() as u64;
+        match &r {
+            Ok((b, ext)) => (t.image_bytes, t.format, t.status) = (b.len() as u64, ext.to_string(), Some(200)),
+            Err(e) => t.error = e.clone(),
+        }
+        (r, t)
     }
 
     /// Lemonade's typed model list (every model it knows, downloaded or not, with what it does and whether it is loaded). It
@@ -504,6 +653,7 @@ impl ProviderClient {
         let loaded = self.call_raw("GET", &format!("{base}/health"), b"").ok().map(|h| crate::lemonade::loaded_models(&h)).unwrap_or_default();
         let list = crate::lemonade::parse_models(&v, &loaded);
         crate::lemonade::remember(&base, &list);
+        crate::lemonade::remember_collections(&base, &crate::lemonade::parse_collections(&v));
         Ok(list)
     }
 
@@ -1109,6 +1259,56 @@ mod tests {
 
     fn convo() -> Vec<Message> {
         vec![Message::system("be brief"), Message::user("hi"), Message::assistant("hello"), Message::user("2+2?")]
+    }
+
+    #[test]
+    fn story_lemonade_picture_trace_has_what_was_sent_and_got_and_no_secret() {
+        use crate::lemonade::{ImageDefaults, Model, ModelType};
+        let base = "http://gpu.example:13305/api/v1";
+        crate::lemonade::remember(base, &[Model { id: "SDXL-Base-1.0".into(), kind: ModelType::Image, recipe: "sd-cpp".into(), checkpoint: String::new(), labels: vec!["image".into()], downloaded: true, loaded: true, suggested: false, size_gb: Some(6.9), image_defaults: Some(ImageDefaults { width: Some(1024), height: Some(1024), steps: Some(20) }) }]);
+        let png = "iVBORw0KGgowMDAw";
+        let (c, m) = client(Kind::Lemonade, Some("http://gpu.example:13305"), Some("k"), move |meth, url| match (meth, url) {
+            ("GET", u) if u.ends_with("/health") => (200, r#"{"status":"ok","all_models_loaded":[{"model_name":"SDXL-Base-1.0","backend_url":"http://127.0.0.1:8001"}]}"#.into()),
+            (_, u) if u.contains("/images/") => (200, format!(r#"{{"data":[{{"b64_json":"{png}"}}]}}"#)),
+            _ => (404, "{}".into()),
+        });
+        let params = ImageParams { seed: Some(42), ..Default::default() };
+        let (r, t) = c.generate_image_traced("SDXL-Base-1.0", "a fox", "512x512", &params);
+        let (bytes, ext) = r.unwrap();
+        assert_eq!((ext, bytes.len()), ("png", 12));
+        assert_eq!((t.provider.as_str(), t.model.as_str(), t.width, t.height, t.steps, t.seed), ("p", "SDXL-Base-1.0", 1024, 1024, Some(20), Some(42)), "the model's own size and steps, not the ones asked");
+        assert_eq!((t.status, t.format.as_str(), t.image_bytes), (Some(200), "png", 12));
+        assert!(t.response_bytes > 12 && t.health.is_none(), "no health call unless verbose");
+        let calls = m.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let body: Value = serde_json::from_str(&calls[0].3).unwrap();
+        assert_eq!((body["seed"].as_u64(), body["steps"].as_u64()), (Some(42), Some(20)));
+        assert!(body.get("negative_prompt").is_none(), "no negative prompt unless asked for");
+        assert!(t.request_headers.iter().any(|(k, v)| k == "Authorization" && v == "***") && !format!("{t:?}").contains("KEY123"), "{t:?}");
+        drop(calls);
+        // verbose adds the health, with the loaded models and the backend address
+        let (_, t) = c.generate_image_traced("SDXL-Base-1.0", "a fox", "512x512", &ImageParams { verbose: true, ..Default::default() });
+        let h = t.health.unwrap();
+        assert!(h.contains("loaded models: SDXL-Base-1.0") && h.contains("backend_url http://127.0.0.1:8001"), "{h}");
+        // a negative prompt goes as its own field when it is given
+        let (_, _) = c.generate_image_traced("SDXL-Base-1.0", "a fox", "512x512", &ImageParams { negative: Some("blurry".into()), ..Default::default() });
+        let last: Value = serde_json::from_str(&m.calls.lock().unwrap().last().unwrap().3).unwrap();
+        assert_eq!(last["negative_prompt"], "blurry");
+        // a server error: status and its own text come back, an echoed key is hidden
+        let (c2, _) = client(Kind::Lemonade, Some("http://gpu.example:13305"), Some("k"), |_, _| (500, r#"{"error":{"message":"out of memory for KEY123"}}"#.into()));
+        let (r, t) = c2.generate_image_traced("SDXL-Base-1.0", "a fox", "512x512", &ImageParams::default());
+        assert!(r.unwrap_err().contains("out of memory"));
+        assert_eq!(t.status, Some(500));
+        assert!(t.error.contains("out of memory") && !t.error.contains("KEY123") && t.error.contains("***"), "{}", t.error);
+        assert!(t.format.is_empty() && t.image_bytes == 0);
+        // an answer that is not a picture
+        let (c3, _) = client(Kind::Lemonade, Some("http://gpu.example:13305"), None, |_, _| (200, r#"{"data":[{"b64_json":"aGVsbG8gd29ybGQ="}]}"#.into()));
+        let (r, t) = c3.generate_image_traced("SDXL-Base-1.0", "a fox", "512x512", &ImageParams::default());
+        assert!(r.unwrap_err().contains("not with a PNG"));
+        assert_eq!((t.format.as_str(), t.image_bytes), ("invalid", 11));
+        // a bad size is said and nothing is sent
+        let (r, t) = c3.generate_image_traced("SDXL-Base-1.0", "a fox", "huge", &ImageParams::default());
+        assert!(r.unwrap_err().contains("size") && t.error.contains("size"));
     }
 
     #[test]

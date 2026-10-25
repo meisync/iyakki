@@ -60,8 +60,12 @@ impl Stack {
             }
         }
         let k3s_ok = self.target.is_none_or(Target::deploys_to_k3s) && !tile;
-        if k3s_ok && (self.dockerfile || self.deploy_dir || ["deploy", "k3s", "kubernetes", "k8s", "cluster", "container"].iter().any(|w| r.contains(w))) {
+        let ship = ["build and deploy", "deploy to k3s", "ship", "kubernetes"].iter().any(|w| r.contains(w)) || (r.contains("deploy") && (r.contains("k3s") || r.contains("k8s")));
+        if k3s_ok && (self.dockerfile || self.deploy_dir || ship || ["deploy", "k3s", "k8s", "cluster", "container"].iter().any(|w| r.contains(w))) {
             v.push("k3s-dev-best-practices");
+            if ship || self.dockerfile || self.deploy_dir {
+                v.push("k3s-build-and-deploy");
+            }
         }
         v
     }
@@ -314,6 +318,13 @@ pub fn build_with_notes(inp: &Input, notes_root: &Path) -> String {
         if stack.deploy_dir && service { "Manifests exist in deploy/." } else { "" }
     ));
     parts.push(crate::target::state_line(inp.root));
+    // the repositories cloned into this workspace (F-GIT-02): every agent sees all of them, each in its own folder
+    if let Ok(c) = crate::workspace::ProjectConfig::load(inp.root) {
+        let repos = crate::gitsite::describe(&c.repos);
+        if !repos.is_empty() {
+            parts.push(repos.trim_end().to_string());
+        }
+    }
     // the board
     let results = crate::testresults::load(inp.root);
     let mut graph: Option<crate::boarddeps::Graph> = None;
@@ -499,7 +510,7 @@ mod tests {
         let st = detect_stack(&d, "");
         assert_eq!(st.names, vec!["JavaScript".to_string(), "Go".to_string()]);
         assert!(st.dockerfile && st.deploy_dir);
-        assert_eq!(st.pinned_skills("hello"), vec!["lang-javascript", "k3s-dev-best-practices"]);
+        assert_eq!(st.pinned_skills("hello"), vec!["lang-javascript", "k3s-dev-best-practices", "k3s-build-and-deploy"]);
         // the person's override wins, in any spelling; an unknown name is ignored
         assert_eq!(detect_stack(&d, "golang").names, vec!["Go".to_string()]);
         assert_eq!(detect_stack(&d, "TS").lang_skill, Some("lang-typescript"));
@@ -509,7 +520,9 @@ mod tests {
         std::fs::write(e.join("Cargo.toml"), "").unwrap();
         let st = detect_stack(&e, "");
         assert_eq!(st.pinned_skills("add a button"), vec!["lang-rust"]);
-        assert_eq!(st.pinned_skills("deploy this to k3s"), vec!["lang-rust", "k3s-dev-best-practices"]);
+        assert_eq!(st.pinned_skills("deploy this to k3s"), vec!["lang-rust", "k3s-dev-best-practices", "k3s-build-and-deploy"]);
+        assert_eq!(st.pinned_skills("ship it"), vec!["lang-rust", "k3s-dev-best-practices", "k3s-build-and-deploy"]);
+        assert_eq!(st.pinned_skills("add a cluster view"), vec!["lang-rust", "k3s-dev-best-practices"], "a word like cluster alone pins the broad skill only");
         assert!(detect_stack(&dir("empty"), "").names.is_empty());
         for t in ["multi", "plain", "empty"] {
             let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("iyakki-pstate-{}-{t}", std::process::id())));
@@ -561,6 +574,24 @@ mod tests {
         std::fs::write(d.join("FEATURES.md"), &board).unwrap();
         assert_eq!(footer(&d, &d.join("FEATURES.md"), ""), "stack: Go · board 12/63 done · 1 bug");
         assert_eq!(footer(&d, &d.join("FEATURES.md"), "rust"), "stack: Rust · board 12/63 done · 1 bug", "the override is shown");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_state_block_lists_every_cloned_repository_without_credentials() {
+        let d = dir("repos");
+        std::fs::write(d.join("FEATURES.md"), board_of(2)).unwrap();
+        let mut c = crate::workspace::ProjectConfig::default();
+        c.repos = vec![
+            crate::gitsite::RepoEntry { url: "https://git.example.org/team/api.git".into(), path: "api".into(), branch: "main".into(), test: "cargo test".into(), ..Default::default() },
+            crate::gitsite::RepoEntry { url: "git@github.com:team/web.git".into(), path: "web".into(), key: "work".into(), ..Default::default() },
+            crate::gitsite::RepoEntry { url: "https://me:hunter2@host.example/x/y.git".into(), path: "y".into(), ..Default::default() },
+        ];
+        c.save(&d).unwrap();
+        let inp = Input { name: "Shop", root: &d, features: &d.join("FEATURES.md"), stack_override: "", test: "", run: "", build: "", cluster: None, history: None };
+        let s = build(&inp);
+        assert!(s.contains("Repositories in this workspace") && s.contains("- api/ <- https://git.example.org/team/api.git (branch main); test: cargo test") && s.contains("- web/ <- git@github.com:team/web.git"), "{s}");
+        assert!(!s.contains("hunter2") && !s.contains("\"work\""), "{s}");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

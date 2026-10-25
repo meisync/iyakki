@@ -77,11 +77,41 @@ pub struct RunnerKube {
 
 impl crate::k8s::Kube for RunnerKube {
     fn run(&self, args: &[String]) -> Out {
+        self.run_with(args, crate::k8s::REQUEST_TIMEOUT_SECS + 6)
+    }
+
+    fn run_with(&self, args: &[String], timeout_secs: u64) -> Out {
         let mut argv = vec!["kubectl".to_string()];
         argv.extend(args.iter().cloned());
         let kc = args.windows(2).find(|w| w[0] == "--kubeconfig").map(|w| w[1].clone());
         let env: Vec<(String, String)> = kc.map(|k| vec![("KUBECONFIG".to_string(), k)]).unwrap_or_default();
-        self.run.run(&std::env::temp_dir(), &argv, &env, Duration::from_secs(crate::k8s::REQUEST_TIMEOUT_SECS + 6), crate::k8s::MAX_OUTPUT, None)
+        self.run.run(&std::env::temp_dir(), &argv, &env, Duration::from_secs(timeout_secs), crate::k8s::MAX_OUTPUT, None)
+    }
+}
+
+/// `kubectl` inside the managed cluster's container (the Podman backend of `k3sdev`): the kubeconfig and context of the caller's
+/// arguments are left out, because the container's own kubectl already points at its cluster.
+pub struct PodKube {
+    pub run: Arc<dyn Runner>,
+    pub container: String,
+}
+
+impl crate::k8s::Kube for PodKube {
+    fn run(&self, args: &[String]) -> Out {
+        self.run_with(args, crate::k8s::REQUEST_TIMEOUT_SECS + 6)
+    }
+
+    fn run_with(&self, args: &[String], timeout_secs: u64) -> Out {
+        let mut argv: Vec<String> = vec!["podman".into(), "exec".into(), self.container.clone(), "kubectl".into()];
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            if a == "--kubeconfig" || a == "--context" {
+                it.next();
+            } else {
+                argv.push(a.clone());
+            }
+        }
+        self.run.run(&std::env::temp_dir(), &argv, &[], Duration::from_secs(timeout_secs), crate::k8s::MAX_OUTPUT, None)
     }
 }
 
@@ -624,6 +654,8 @@ pub fn resolve_in_background(slot: &Slot, run: Arc<dyn Runner>, env: Env, projec
             } else {
                 set_active(None);
             }
+            // the AI hardware profile reads the GPUs of a remote cluster that answers (aiprofile_remote.rs)
+            crate::aiprofile_remote::register_target(r.reachable().and_then(crate::aiprofile_remote::target_of));
             g.resolution = Some(r);
             g.resolving = false;
         }

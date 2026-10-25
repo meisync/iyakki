@@ -67,6 +67,8 @@ pub struct Services {
     pub cluster: Arc<crate::cluster::Cluster>,
     /// The local dev cluster IYAKKI installs and keeps on a bare-metal machine (Settings \u{2192} Dev cluster, SYSTEM).
     pub k3sdev: Arc<crate::k3sdev::K3sDev>,
+    /// Every managed local cluster (the one above and the optional extra ones of Settings \u{2192} Clusters), one supervisor each.
+    fleet: std::sync::OnceLock<Arc<crate::clusters::Fleet>>,
     /// Machines seen on the local network, and which of them are new.
     pub devwatch: Arc<crate::devwatch::DeviceWatch>,
     /// Each person's notifications and tasks (the INBOX).
@@ -107,6 +109,8 @@ pub struct Services {
     /// Bringing documents up to date with the embedding model in use: whether it is going and how the last run ended.
     reindexing: std::sync::atomic::AtomicBool,
     reindex_note: Mutex<Option<String>>,
+    /// What "Use all parts" of a Lemonade collection replaced, for Undo.
+    pub(crate) parts_undo: Mutex<Option<crate::omni::AllPartsUndo>>,
 }
 
 /// A model download started from the chat.
@@ -169,12 +173,18 @@ impl Services {
             let embedder: Arc<dyn TextEmbedder> = Arc::new(DynamicEmbed { svc: weak.clone() });
             let kb = Arc::new(Mutex::new(KnowledgeBase::open(&dir.join("kb"), embedder)));
             let skills = Arc::new(SkillStore::new(&dir.join("skills"), kb.clone()));
+            let settings_arc = Arc::new(Mutex::new(settings));
             Services {
-                settings: Arc::new(Mutex::new(settings)),
+                settings: settings_arc.clone(),
                 secrets,
                 packages: Arc::new(crate::pkg::Packages::new(&dir.join("packages"), skills.clone())),
                 skills,
-                radio: crate::radio::RadioPlayer::default(),
+                radio: {
+                    // the radio's volume is the master volume, not a second one
+                    let r = crate::radio::RadioPlayer::default();
+                    r.set_master_link(master_link(&settings_arc));
+                    r
+                },
                 radio_dir: crate::radiotools::Directory::new(Arc::new(crate::radiotools::UpstreamFetcher(quick.clone()))),
                 web: crate::webtools::WebClient::new(),
                 page_snapshot: Mutex::new(HashMap::new()),
@@ -187,6 +197,7 @@ impl Services {
                 clis: clis.clone(),
                 cluster: Arc::new(crate::cluster::Cluster::new(&dir.join("cluster"), clis.clone())),
                 k3sdev: crate::k3sdev::K3sDev::new(dir, clis.clone(), Arc::new(crate::wsexec::System)),
+                fleet: std::sync::OnceLock::new(),
                 devwatch: Arc::new(crate::devwatch::DeviceWatch::open(&dir.join("devices.json"))),
                 inbox: crate::inbox::Inbox::new(&dir.join("inbox")),
                 host_tts: Arc::new(crate::hostengines::HostTts::new(&[dir.join("voices")])),
@@ -223,6 +234,7 @@ impl Services {
                 pulls: Mutex::new(HashMap::new()),
                 reindexing: std::sync::atomic::AtomicBool::new(false),
                 reindex_note: Mutex::new(None),
+                parts_undo: Mutex::new(None),
             }
         });
         let t_build = t0.elapsed();
@@ -234,6 +246,26 @@ impl Services {
             let sandbox = svc.cluster.clone();
             svc.k3sdev.set_sandbox_probe(Arc::new(move || matches!(sandbox.state(), crate::cluster::ClusterState::Starting | crate::cluster::ClusterState::Running)));
             svc.k3sdev.autostart();
+            // a lost and reconnected boot drive: the cluster keeps files open on it, so it is stopped before and started after
+            if !cfg!(test) {
+                let (a, b, c) = (svc.k3sdev.clone(), svc.k3sdev.clone(), svc.k3sdev.clone());
+                iyakki_storage::loss::register_component(
+                    "k3s",
+                    move || matches!(a.state(), crate::k3sdev::Svc::Running | crate::k3sdev::Svc::Starting),
+                    move || {
+                        let _ = b.stop("system");
+                    },
+                    move || {
+                        let _ = c.start("system");
+                    },
+                );
+            }
+            {
+                let (fleet, dir) = (svc.fleet(), dir.to_path_buf());
+                let _ = std::thread::Builder::new().name("iyakki-clusters-autostart".into()).spawn(move || {
+                    let _ = fleet.autostart_all(&dir);
+                });
+            }
         }
         log::info!("boot: services opened in {} ms (stores {}, vault key {}, dev cluster {})", t0.elapsed().as_millis(), t_build.as_millis(), (t_unlock - t_build).as_millis(), (t0.elapsed() - t_unlock).as_millis());
         // MP3 files of the MEDIA library play in IYAKKI's own player (the one the RADIO tile uses)
@@ -450,6 +482,44 @@ impl Services {
         ids.into_iter().flat_map(|id| self.lemonade_cached(&id).into_iter().filter(|m| m.kind == t && m.downloaded).map(move |m| (id.clone(), m.id)).collect::<Vec<_>>()).collect()
     }
 
+    /// The Lemonade list entry of one model (its size, steps, whether it is downloaded or in memory), from the last list read.
+    pub fn lemonade_model(&self, provider: &str, model: &str) -> Option<crate::lemonade::Model> {
+        self.lemonade_cached(provider).into_iter().find(|m| m.id == model)
+    }
+
+    /// The picture models of the Lemonade servers that are not downloaded yet (they have to be pulled in Settings -> Models).
+    pub fn lemonade_images_missing(&self) -> Vec<crate::lemonade::Model> {
+        let ids: Vec<String> = self.settings.lock().unwrap().get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
+        ids.into_iter().flat_map(|id| self.lemonade_cached(&id)).filter(|m| m.kind == crate::lemonade::ModelType::Image && !m.downloaded).collect()
+    }
+
+    /// The Lemonade list entry of one model, asked of the server now (the cached list may be old or only the saved types).
+    pub fn lemonade_live_model(&self, provider: &str, model: &str) -> Result<Option<crate::lemonade::Model>, String> {
+        Ok(self.refresh_lemonade(provider)?.into_iter().find(|m| m.id == model))
+    }
+
+    /// A Lemonade server's health now: a line of text and the names of the loaded models.
+    pub fn lemonade_health(&self, provider: &str) -> Result<(String, Vec<String>), String> {
+        self.client_for(provider, true)?.lemonade_health()
+    }
+
+    pub fn provider_is_lemonade(&self, provider: &str) -> bool {
+        self.settings.lock().unwrap().get().provider(provider).is_some_and(|p| p.kind == crate::providers::Kind::Lemonade)
+    }
+
+    /// The picture models of `found` plus the picture models Lemonade servers have but have not downloaded, as choices that say
+    /// where they are, whether they are installed, their size and their own size and steps.
+    pub fn picture_choices(&self, found: &[(String, String)]) -> Vec<crate::storyillus::Cand> {
+        let mut v = self.picture_candidates(found);
+        let ids: Vec<String> = self.settings.lock().unwrap().get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
+        for id in ids {
+            for m in self.lemonade_cached(&id).into_iter().filter(|m| m.kind == crate::lemonade::ModelType::Image && !m.downloaded) {
+                v.push(crate::storyillus::Cand { remote: self.provider_is_remote(&id), provider: id.clone(), model: m.id, downloaded: false, loaded: false, size_gb: m.size_gb, defaults: m.image_defaults });
+            }
+        }
+        v
+    }
+
     /// Load a model into a Lemonade server's memory (or unload it); blocking, for a background job.
     pub fn lemonade_load(&self, provider: &str, model: &str, load: bool) -> Result<String, String> {
         let msg = self.client_for(provider, false)?.lemonade_call(if load { "load" } else { "unload" }, model)?;
@@ -544,6 +614,11 @@ impl Services {
         std::fs::canonicalize(&dir).map_err(io_err)
     }
 
+    /// The managed local clusters of this process (the registry's `local` and the extra ones).
+    pub fn fleet(&self) -> Arc<crate::clusters::Fleet> {
+        self.fleet.get_or_init(|| Arc::new(crate::clusters::Fleet::new(self.k3sdev.clone(), &self.dir, self.clis.clone(), Arc::new(crate::wsexec::System)))).clone()
+    }
+
     /// The streaming transport, when one was set (downloads use it).
     pub fn streamer(&self) -> Option<Arc<dyn iyakki_proxy::Streamer>> {
         self.streamer.lock().unwrap().clone()
@@ -602,21 +677,61 @@ impl Services {
         v
     }
 
-    /// Draws a picture with `model` (or, when none is named, the first picture model found).
-    pub fn generate_image(&self, model: Option<(&str, &str)>, prompt: &str, size: &str) -> Result<(String, String, Vec<u8>, &'static str), String> {
-        let (provider, model) = match model {
-            Some((p, m)) => (p.to_string(), m.to_string()),
+    /// The picture model to draw with: the one named, else the first picture model found.
+    fn pick_image_model(&self, model: Option<(&str, &str)>) -> Result<(String, String), String> {
+        match model {
+            Some((p, m)) => Ok((p.to_string(), m.to_string())),
             None => {
                 let found = self.image_models();
-                let first = found.first().cloned().ok_or_else(|| {
+                found.first().cloned().ok_or_else(|| {
                     let checked: Vec<String> = self.settings.lock().unwrap().get().providers.iter().filter(|p| p.enabled).map(|p| p.id.clone()).collect();
                     format!("No model that draws pictures was found{}. A picture model such as Qwen-Image, FLUX or Stable Diffusion has to be available on a connected server; I can download one into Ollama if you tell me its name.", if checked.is_empty() { " (no model provider is connected at all)".to_string() } else { format!(" (looked at: {})", checked.join(", ")) })
-                })?;
-                first
+                })
             }
-        };
+        }
+    }
+
+    /// Draws a picture with `model` (or, when none is named, the first picture model found).
+    pub fn generate_image(&self, model: Option<(&str, &str)>, prompt: &str, size: &str) -> Result<(String, String, Vec<u8>, &'static str), String> {
+        let (provider, model) = self.pick_image_model(model)?;
         let (bytes, ext) = self.client_for(&provider, false)?.generate_image(&model, prompt, size)?;
         Ok((provider, model, bytes, ext))
+    }
+
+    /// [`Self::generate_image`] that also says what was sent and what came back (the picture log), failures included.
+    pub fn generate_image_traced(&self, model: Option<(&str, &str)>, prompt: &str, size: &str, p: &crate::providers::ImageParams) -> (Result<(String, String, Vec<u8>, &'static str), String>, crate::providers::ImageTrace) {
+        let (provider, model) = match self.pick_image_model(model) {
+            Ok(x) => x,
+            Err(e) => return (Err(e.clone()), crate::providers::ImageTrace { error: e, ..Default::default() }),
+        };
+        let client = match self.client_for(&provider, false) {
+            Ok(c) => c,
+            Err(e) => return (Err(e.clone()), crate::providers::ImageTrace { provider, model, error: e, ..Default::default() }),
+        };
+        let (r, t) = client.generate_image_traced(&model, prompt, size, p);
+        (r.map(|(b, ext)| (provider, model, b, ext)), t)
+    }
+
+    /// Is this provider a server on another computer (not this one)?
+    pub fn provider_is_remote(&self, provider: &str) -> bool {
+        self.settings.lock().unwrap().get().provider(provider).and_then(|c| c.base().ok()).is_some_and(|b| crate::speechtime::locality(&b) != crate::speechtime::Locality::ThisComputer)
+    }
+
+    /// The first enabled Lemonade provider that is not this computer (a GPU machine, as far as the settings can tell).
+    pub fn gpu_lemonade(&self) -> Option<String> {
+        let ids: Vec<String> = self.settings.lock().unwrap().get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
+        ids.into_iter().find(|id| self.provider_is_remote(id))
+    }
+
+    /// The picture models of `found` (provider, model) as choices: where each one is, its size and its own size and steps.
+    pub fn picture_candidates(&self, found: &[(String, String)]) -> Vec<crate::storyillus::Cand> {
+        found
+            .iter()
+            .map(|(p, m)| {
+                let info = self.lemonade_model(p, m);
+                crate::storyillus::Cand { provider: p.clone(), model: m.clone(), remote: self.provider_is_remote(p), downloaded: info.as_ref().is_none_or(|i| i.downloaded), loaded: info.as_ref().is_some_and(|i| i.loaded), size_gb: info.as_ref().and_then(|i| i.size_gb), defaults: info.and_then(|i| i.image_defaults) }
+            })
+            .collect()
     }
 
     pub fn pull_status(&self) -> Vec<PullStatus> {
@@ -779,6 +894,11 @@ impl Services {
             }
         };
         let sys_state = if is_admin { self.admin_login_system(&slot, password) } else { VaultState::NotApplicable };
+        // the person's home and vault are known now: what was found for the agents before (HOME=/, nobody signed in) is void
+        self.ext_status.invalidate();
+        if self.agents_cfg().claude.enabled || self.agents_cfg().copilot.enabled {
+            self.ext_status.refresh(self.agents_cfg());
+        }
         LoginReport { user_vault: user_state, system_vault: sys_state }
     }
 
@@ -812,6 +932,15 @@ impl Services {
 
     pub fn on_logout(&self, user: &str, is_admin: bool) {
         self.user_vaults.lock().unwrap().remove(user);
+        {
+            let mut au = self.agent_user.lock().unwrap_or_else(|e| e.into_inner());
+            if *au == user {
+                au.clear();
+            }
+        }
+        self.ext_status.invalidate();
+        // key passphrases typed this session and the keys an assistant was allowed to use are forgotten with the sign-in
+        crate::gitkeys::shared_session().forget();
         self.page_snapshot.lock().unwrap().remove(user);
         crate::datatools::forget(user);
         self.browser.on_logout(user);
@@ -1036,6 +1165,25 @@ impl Services {
 
     // ------------------------------------------------------------ sound output (Settings -> Sound)
 
+    /// Settings -> Cloud mode: the administrator's choice (Automatic, On, Off).
+    pub fn cloud_setting(&self) -> crate::cloudmode::Setting {
+        self.settings.lock().unwrap().get().cloud
+    }
+
+    /// Change the Cloud mode setting (callers check that the person may).
+    pub fn set_cloud_setting(&self, v: crate::cloudmode::Setting) -> Result<(), String> {
+        self.settings.lock().unwrap().update(|s| s.cloud = v).map_err(|e| e.to_string())
+    }
+
+    /// Settings: "Show all AI tools" (default off): the AI tools the hardware profile hides are shown as "not recommended".
+    pub fn show_all_ai(&self) -> bool {
+        self.settings.lock().unwrap().get().show_all_ai
+    }
+
+    pub fn set_show_all_ai(&self, v: bool) -> Result<(), String> {
+        self.settings.lock().unwrap().update(|s| s.show_all_ai = v).map_err(|e| e.to_string())
+    }
+
     pub fn sound_settings(&self) -> crate::audioout::SoundSettings {
         self.settings.lock().unwrap().get().sound.clone()
     }
@@ -1045,21 +1193,45 @@ impl Services {
     /// The volume is remembered for the output in use (restored when that output is used again, see `audioout`); the
     /// settings returned are the ones in effect afterwards (another output chosen brings its own volume).
     pub fn update_sound(&self, f: impl FnOnce(&mut crate::audioout::SoundSettings)) -> Result<crate::audioout::SoundSettings, String> {
-        let in_use = crate::audioout::global().current_key();
-        let now = {
-            let mut st = self.settings.lock().unwrap();
-            st.update(|s| {
-                f(&mut s.sound);
-                if let Some(k) = &in_use {
-                    s.sound.remember_level(k);
+        update_sound_in(&self.settings, f)
+    }
+
+    /// The master volume (percent, mute, change counter): the one value every volume control and every view shows.
+    pub fn master(&self) -> crate::audioout::Master {
+        self.sound_settings().master()
+    }
+
+    /// Set the master volume (0 to 100); a set also unmutes.
+    pub fn master_set(&self, percent: u32) -> Result<crate::audioout::Master, String> {
+        self.update_sound(|s| {
+            s.volume_pct = percent.min(100);
+            s.muted = false;
+        })
+        .map(|s| s.master())
+    }
+
+    /// Change the master volume by `delta` points; louder or quieter, it also unmutes.
+    pub fn master_nudge(&self, delta: i32) -> Result<crate::audioout::Master, String> {
+        self.update_sound(|s| {
+            s.volume_pct = (s.volume_pct as i32 + delta).clamp(0, 100) as u32;
+            s.muted = false;
+        })
+        .map(|s| s.master())
+    }
+
+    /// Mute or unmute (the level is kept; unmuting a volume of 0 comes back at a quiet level).
+    pub fn master_toggle_mute(&self) -> Result<crate::audioout::Master, String> {
+        self.update_sound(|s| {
+            if s.muted {
+                s.muted = false;
+                if s.volume_pct == 0 {
+                    s.volume_pct = 30;
                 }
-            })
-            .map_err(|e| e.to_string())?;
-            st.get().sound.clone()
-        };
-        // the settings lock is released: the selector may save a restored volume through `start_sound_output`'s hook
-        crate::audioout::apply_prefs(now);
-        Ok(self.sound_settings())
+            } else {
+                s.muted = true;
+            }
+        })
+        .map(|s| s.master())
     }
 
     /// The real front end: IYAKKI's players use the output of Settings -> Sound from now on, and watch for changes. When the
@@ -1077,6 +1249,25 @@ impl Services {
             }
         });
         crate::audioout::install(self.sound_settings());
+    }
+
+    /// Like [`start_sound_output`](Self::start_sound_output), but the sound card may not exist yet: the selector is installed
+    /// as soon as a card shows up in `/proc/asound/cards` (the MacBookPro14,1's registers about 11 s after boot, long after
+    /// the shell started). This is what the real front end calls.
+    pub fn start_sound_output_when_ready(&self) {
+        let store = Arc::downgrade(&self.settings);
+        let first = Arc::downgrade(&self.settings);
+        crate::audioout::global().set_on_prefs(move |p| {
+            if let Some(store) = store.upgrade() {
+                if let Ok(mut st) = store.lock() {
+                    let v = p.volume_pct;
+                    if let Err(e) = st.update(|s| s.sound.volume_pct = v) {
+                        log::warn!("sound: could not save the volume of the output now in use: {e}");
+                    }
+                }
+            }
+        });
+        crate::audioout::install_when_card_appears(move || first.upgrade().and_then(|s| s.lock().ok().map(|g| g.get().sound.clone())).unwrap_or_default());
     }
 
     /// Test sound: a short gentle chime on `device` (an ALSA device such as `plughw:0,3`), else on the output in use. Waits
@@ -1104,6 +1295,32 @@ impl Services {
             Some(d) => format!("Played a short chime on {d}."),
             None => "Played a short chime on the default output.".into(),
         })
+    }
+
+    /// Settings -> Sound -> Advanced: the stereo test (left speaker, then right, 1 s each) through the same chain and at the
+    /// same volume as the radio, or the channel walk (every channel of a four-channel card alone, quiet).
+    pub fn test_pattern(&self, walk: bool) -> Result<String, String> {
+        if self.sound_settings().muted {
+            return Err("Sound is muted in Settings → Sound.".into());
+        }
+        let out = crate::audioout::global();
+        if walk {
+            let n = out.chain_channels().filter(|n| *n > 2 && out.device().as_deref() == Some(crate::softvol::PCM)).ok_or("The channel walk is only for cards that IYAKKI opens with more than two channels.")?;
+            let gain = out.prefs_gain().max(1);
+            let wav = crate::audioout::scale_wav(&crate::audioout::channel_walk_wav(n as u16), gain);
+            crate::audioout::play_wav_on("iyakkichan", &wav, 4 * n as u64 + 4)?;
+            return Ok(format!("Played channel 1 to {n} one after the other, 1 s each. Channels 1 and 3 carry the left side, 2 and 4 the right side of the sound IYAKKI plays."));
+        }
+        let dev = out.device();
+        let args = vec!["aplay".to_string(), "-D".to_string(), dev.clone().unwrap_or_else(|| "default".into())];
+        let wav = crate::audioout::scale_wav(&crate::audioout::stereo_test_wav(), crate::audioout::gain_for(out, &args));
+        crate::audioout::play_wav_on(dev.as_deref().unwrap_or("default"), &wav, 8)?;
+        Ok(format!("Played the left speaker for 1 s, then the right one (ALSA device {}, with IYAKKI's volume).", dev.as_deref().unwrap_or("default")))
+    }
+
+    /// "Does the hardware volume work?": see [`crate::audioout::hw_volume_check`]. Plays two tones on the card itself.
+    pub fn hw_volume_check(&self, card: u32, device: u32, control: &str) -> Result<String, String> {
+        crate::audioout::hw_volume_check_system(card, device, control)
     }
 
     /// Speech to text for recorded 16 kHz mono samples.
@@ -1705,4 +1922,40 @@ mod tests {
         assert!(s.notify("../x", crate::inbox::Kind::Info, "t", "", None).is_err());
     }
 
+}
+
+/// Change Settings -> Sound in `settings`, remembering the volume of the output in use, and tell the selector.
+pub(crate) fn update_sound_in(settings: &Arc<Mutex<SettingsStore>>, f: impl FnOnce(&mut crate::audioout::SoundSettings)) -> Result<crate::audioout::SoundSettings, String> {
+    let in_use = crate::audioout::global().current_key();
+    let now = {
+        let mut st = settings.lock().unwrap();
+        st.update(|s| {
+            f(&mut s.sound);
+            if let Some(k) = &in_use {
+                s.sound.remember_level(k);
+            }
+        })
+        .map_err(|e| e.to_string())?;
+        st.get().sound.clone()
+    };
+    // the settings lock is released: the selector may save a restored volume through `start_sound_output`'s hook
+    crate::audioout::apply_prefs(now.clone());
+    Ok(now)
+}
+
+/// The radio's view of the master volume.
+fn master_link(settings: &Arc<Mutex<SettingsStore>>) -> crate::radio::MasterLink {
+    let weak = Arc::downgrade(settings);
+    Arc::new(move |set: Option<u8>| {
+        let Some(st) = weak.upgrade() else { return 100 };
+        match set {
+            None => st.lock().map(|g| g.get().sound.volume_pct.min(100) as u8).unwrap_or(100),
+            Some(v) => update_sound_in(&st, |s| {
+                s.volume_pct = v.min(100) as u32;
+                s.muted = false;
+            })
+            .map(|s| s.volume_pct as u8)
+            .unwrap_or(v),
+        }
+    })
 }

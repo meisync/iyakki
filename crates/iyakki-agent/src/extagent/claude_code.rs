@@ -33,6 +33,12 @@ impl ClaudeCode {
     }
 }
 
+/// Output of a program that failed for a reason that is not "not signed in": the network, a timeout, a crash.
+pub fn looks_like_failure(text: &str) -> bool {
+    let l = text.to_lowercase();
+    ["enotfound", "econnrefused", "econnreset", "etimedout", "eai_again", "network", "fetch failed", "could not resolve", "unable to connect", "no route", "dns", "timed out", "timeout", "offline", "panic", "segmentation", "killed", "out of memory"].iter().any(|w| l.contains(w))
+}
+
 impl ExternalAgent for ClaudeCode {
     fn id(&self) -> String {
         super::CLAUDE_CODE.into()
@@ -91,9 +97,16 @@ impl ExternalAgent for ClaudeCode {
                     (None, true) => "signed in".to_string(),
                 })
             }
+            // exit 1 for another reason (no network to refresh the token, a DNS failure, a crash) says nothing about the login
+            (Some(1), None, _) if looks_like_failure(&o.combined()) => Auth::Unknown,
             (Some(1), _, _) => Auth::SignedOut,
             _ => Auth::Unknown,
         }
+    }
+    fn auth_files(&self, env: &[(String, String)]) -> Vec<std::path::PathBuf> {
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).or_else(|| std::env::var(k).ok()).filter(|v| !v.is_empty());
+        let dir = get("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from).or_else(|| get("HOME").map(|h| std::path::Path::new(&h).join(".claude")));
+        dir.map(|d| vec![d.join(".credentials.json")]).unwrap_or_default()
     }
     fn child_env(&self) -> Vec<(String, String)> {
         self.cfg.env.clone()

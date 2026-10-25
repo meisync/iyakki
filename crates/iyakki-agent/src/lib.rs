@@ -22,7 +22,13 @@ pub mod cli;
 pub mod embed;
 pub mod kb;
 pub mod config;
+pub mod layout;
+pub mod cloudmode;
 pub mod context;
+pub mod camfw;
+pub mod fwpack;
+pub mod macfw;
+pub mod macrecovery;
 pub mod mcp;
 pub mod providers;
 pub mod vault;
@@ -37,6 +43,8 @@ pub mod consul;
 pub mod pkg;
 pub mod store;
 pub mod devmode;
+pub mod sdkcli;
+pub mod directlink;
 pub mod wtool;
 pub mod media;
 pub mod mediaindex;
@@ -46,6 +54,11 @@ pub mod mediaqueue;
 pub mod mediaserve;
 pub mod credguard;
 pub mod qr;
+pub mod qr_decode;
+pub mod sharedfolder;
+pub mod sharedsite;
+#[cfg(test)]
+mod sharedfolder_tests;
 pub mod radio;
 pub mod radio_stations;
 pub mod radiotools;
@@ -67,7 +80,13 @@ pub mod webresearch;
 pub mod skills;
 pub mod voice;
 pub mod audioout;
+pub mod battery;
+pub mod screensaver;
 pub mod softvol;
+pub mod quiet;
+pub mod sounddoctor;
+pub mod soundprobe;
+pub mod keyboard;
 pub mod hostvoice;
 pub mod wsproto;
 pub mod httpmini;
@@ -75,13 +94,26 @@ pub mod hostengines;
 pub mod indic;
 pub mod voicehelper;
 pub mod story;
+pub mod piclog;
+pub mod lab;
+pub mod storyillus;
 pub mod wordtime;
 pub mod speechtime;
+pub mod syssounds;
+pub mod voicedesk;
+pub mod voicepack;
 pub mod scene;
 pub mod webengine;
 pub mod exec;
 pub mod ssh;
+pub mod sshkey;
+pub mod gitagent;
+pub mod gitsite;
+pub mod gitkeys;
+pub mod gitconn;
+pub mod gitjobs;
 pub mod clock;
+pub mod clockfloor;
 pub mod ntp;
 pub mod tzdetect;
 pub mod regex;
@@ -95,9 +127,20 @@ pub mod xz;
 pub mod player;
 pub mod clis;
 pub mod cluster;
+pub mod clusters;
 pub mod quickinstall;
 pub mod ollama;
 pub mod lemonade;
+pub mod omni;
+pub mod modelhost;
+// GPUs for local models in k3s (F-GPU-01, F-GPU-03; docs/GPU-K3S.md)
+pub mod gpu;
+pub mod aiprofile;
+pub mod aiprofile_remote;
+pub mod gpu_nvidia;
+pub mod gpu_steps;
+pub mod gpu_workloads;
+pub mod gpucdi;
 pub mod devwatch;
 pub mod release;
 pub mod relinfo;
@@ -112,12 +155,31 @@ pub mod assign;
 pub mod instance;
 pub mod workspace;
 pub mod wsexec;
+// Linux apps: a Debian/Ubuntu sandbox and image apps (docs/LINUX-APPS.md)
+pub mod rootfs;
+pub mod linuxapps;
+pub mod linuxapps_dist;
+pub mod linuxapps_init;
+pub mod linuxwin;
+#[cfg(test)]
+mod linuxwin_tests;
+pub mod imageapps;
+#[cfg(test)]
+mod linuxapps_tests;
 pub mod extagent;
 pub mod k8s;
+pub mod disks;
+pub mod disks_part;
+pub mod disks_sys;
+pub mod disks_fake;
+#[cfg(test)]
+mod disks_tests;
+pub mod k8sexp;
 pub mod devcluster;
 pub mod deploylint;
 pub mod dockerlint;
 pub mod k8stools;
+pub mod k8sretry;
 pub mod k3sdev;
 pub mod kubeprofiles;
 pub mod localreg;
@@ -153,4 +215,9 @@ pub trait HostApi: Send + Sync {
     fn run_wasm(&self, user: &str, policy: &Policy, wasm: &[u8], entry: &str) -> Result<String, String>;
     fn power_off(&self);
     fn reboot(&self);
+    /// Whether `power_off` and `reboot` can really act here (false in windowed development mode and tests that say so); the
+    /// login screen's power card tells the person instead of doing nothing.
+    fn can_power(&self) -> bool {
+        true
+    }
 }

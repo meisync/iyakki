@@ -209,10 +209,15 @@ struct Inner {
     generation: AtomicU64,
     paused: std::sync::atomic::AtomicBool,
     volume: AtomicU8,
+    /// When set, the radio's volume is the master volume of Settings -> Sound (a view of it, not a second attenuator).
+    link: Mutex<Option<MasterLink>>,
     streamer: Mutex<Option<Arc<dyn Streamer>>>,
     retry_wait: Mutex<Duration>,
     levels: Mutex<[f32; BANDS]>,
 }
+
+/// Reads (`None`) or sets (`Some(percent)`) the master volume; returns the volume in percent.
+pub type MasterLink = Arc<dyn Fn(Option<u8>) -> u8 + Send + Sync>;
 
 /// One player for the whole system: what is playing goes on while apps come and go.
 #[derive(Clone)]
@@ -224,7 +229,7 @@ type Allow = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 impl Default for RadioPlayer {
     fn default() -> Self {
-        RadioPlayer { inner: Arc::new(Inner { state: Mutex::new(RadioState::Idle), generation: AtomicU64::new(0), paused: std::sync::atomic::AtomicBool::new(false), volume: AtomicU8::new(80), streamer: Mutex::new(None), retry_wait: Mutex::new(Duration::from_secs(2)), levels: Mutex::new([0.0; BANDS]) }) }
+        RadioPlayer { inner: Arc::new(Inner { state: Mutex::new(RadioState::Idle), generation: AtomicU64::new(0), paused: std::sync::atomic::AtomicBool::new(false), volume: AtomicU8::new(80), link: Mutex::new(None), streamer: Mutex::new(None), retry_wait: Mutex::new(Duration::from_secs(2)), levels: Mutex::new([0.0; BANDS]) }) }
     }
 }
 
@@ -278,11 +283,27 @@ impl RadioPlayer {
         *self.inner.levels.lock().unwrap()
     }
 
+    /// Make the radio's volume the master volume: `f(None)` reads it (percent), `f(Some(v))` sets it (and unmutes).
+    pub fn set_master_link(&self, f: MasterLink) {
+        *self.inner.link.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    fn link(&self) -> Option<MasterLink> {
+        self.inner.link.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     pub fn volume(&self) -> u8 {
+        if let Some(l) = self.link() {
+            return l(None);
+        }
         self.inner.volume.load(Ordering::Relaxed)
     }
 
     pub fn set_volume(&self, v: u8) {
+        if let Some(l) = self.link() {
+            l(Some(v.min(100)));
+            return;
+        }
         self.inner.volume.store(v.min(100), Ordering::Relaxed);
     }
 
@@ -509,7 +530,10 @@ impl RadioPlayer {
                         out_gen = sound_gen;
                     }
                     // the radio's own volume, then IYAKKI's volume and mute (Settings -> Sound; HDMI has no hardware volume)
-                    let vol = self.volume() as i32 * crate::audioout::global().gain() as i32 / 100;
+                    // (linked to the master volume, the radio adds no attenuation of its own: the master is applied once, by the
+                    // softvol chain or by `gain()`)
+                    let own = if self.link().is_some() { 100 } else { self.volume() as i32 };
+                    let vol = own * crate::audioout::global().gain() as i32 / 100;
                     let n = info.samples_produced * ch as usize;
                     {
                         let fresh = band_levels(&pcm[..n], ch as usize, info.sample_rate);
@@ -523,9 +547,11 @@ impl RadioPlayer {
                     for s in &pcm[..n] {
                         bytes.extend_from_slice(&((*s as i32 * vol / 100) as i16).to_le_bytes());
                     }
-                    let (_, stdin, _, _) = out.as_mut().expect("player started");
+                    let (child, stdin, _, _) = out.as_mut().expect("player started");
                     if stdin.write_all(&bytes).is_err() {
-                        break Err(StreamEnd::Failed("the sound player stopped (is the speaker set up in Settings → Voice?)".into()));
+                        // say what the player said: the output refusing the format is not a matter of Settings → Voice
+                        let said = crate::voice::player_failure(child);
+                        break Err(StreamEnd::Failed(player_stopped_message(&said)));
                     }
                     let t = title.lock().unwrap().clone();
                     let kbps = if info.bitrate > 0 { info.bitrate } else { kbps_hint };
@@ -560,6 +586,15 @@ impl RadioPlayer {
     }
 }
 
+/// What the radio tells when the sound player ends while it plays: the player's own words when it had any.
+pub(crate) fn player_stopped_message(said: &str) -> String {
+    if said.is_empty() {
+        "the sound player stopped (is the speaker set up in Settings → Voice?)".into()
+    } else {
+        format!("the sound player stopped: {said} (the sound output refused the stream; Settings → Sound can pick another output)")
+    }
+}
+
 enum StreamEnd {
     Stopped,
     Failed(String),
@@ -567,6 +602,17 @@ enum StreamEnd {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_player_that_says_why_it_stopped_is_quoted_and_a_silent_one_gets_the_old_hint() {
+        assert!(player_stopped_message("").contains("Settings → Voice"));
+        let m = player_stopped_message("aplay: set_params:1462: Unable to install hw params:");
+        assert!(m.contains("Unable to install hw params") && m.contains("Settings → Sound") && !m.contains("Settings → Voice"), "{m}");
+        let mut c = crate::voice::spawn_player("sh -c").unwrap_or_else(|_| panic!());
+        let _ = c.kill();
+        let mut c = std::process::Command::new("sh").args(["-c", "echo 'aplay: boom' >&2; exit 1"]).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        assert_eq!(crate::voice::player_failure(&mut c), "aplay: boom");
+    }
+
     use super::*;
     use std::io::Cursor;
 

@@ -337,7 +337,7 @@ pub fn private_store_state(pl: &Platform, store: Option<&Store>, cluster: &Clust
     let source = record.as_ref().and_then(|r| store.and_then(|s| source_of(s, r)));
     let mut rep = Report { state: StoreState::NotInstalled, cluster: cluster.clone(), namespace: namespace.to_string(), instance: instance.clone(), facts: Facts::default(), record: record.clone(), elsewhere, source: source.clone() };
     if !pl.run.has("kubectl") {
-        rep.state = StoreState::Broken { why: Why::NoKubectl, reason: "There is no kubectl on this machine, and the managed k3s cluster's own kubectl was not found either. Install the dev cluster (Quick install, k3s), or install kubectl for another cluster, then look again. Nothing was changed.".into() };
+        rep.state = StoreState::Broken { why: Why::NoKubectl, reason: "There is no kubectl on this machine, and the managed k3s cluster's own kubectl was not found either. Install the dev cluster (Store \u{2192} Setup, k3s), or install kubectl for another cluster, then look again. Nothing was changed.".into() };
         return rep;
     }
     let kc = platform::kc_of(pl, cluster);
@@ -679,7 +679,7 @@ fn delete_args(kc: &Kc, args: &[&str], what: &str) -> Result<(), String> {
 /// only the one namespace, only when IYAKKI manages it.
 pub fn run_job(run: &Arc<dyn Runner>, a: &JobArgs, sleep: &dyn Fn(Duration), say: &mut dyn FnMut(&str)) -> Result<(), String> {
     if !run.has("kubectl") {
-        return Err("there is no kubectl and no k3s kubectl on this machine; install the dev cluster first (Quick install, k3s). Nothing was changed".into());
+        return Err("there is no kubectl and no k3s kubectl on this machine; install the dev cluster first (Store \u{2192} Setup, k3s). Nothing was changed".into());
     }
     let kc = Kc::new(run.clone(), &a.kubeconfig, &a.context);
     let ns = a.namespace.as_str();

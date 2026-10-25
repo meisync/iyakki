@@ -74,6 +74,16 @@ pub struct TimeSettings {
     pub zone_note: String,
 }
 
+/// The sign-in screen's saver choices (an administrator changes them; they start as `SaverConfig::signin_default`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SigninSaver(pub crate::screensaver::SaverConfig);
+
+impl Default for SigninSaver {
+    fn default() -> SigninSaver {
+        SigninSaver(crate::screensaver::SaverConfig::signin_default())
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -89,6 +99,16 @@ pub struct Settings {
     pub voice: VoiceSettings,
     /// Settings -> Sound: the output IYAKKI plays on (automatic or chosen), its volume and mute.
     pub sound: crate::audioout::SoundSettings,
+    /// Settings -> System sounds: cues for signing in and out, notifications and finished jobs (old files load with the defaults).
+    pub sounds: crate::syssounds::SystemSounds,
+    /// Settings -> Keyboard and function keys: Fn-key mode of Apple keyboards, key repeat.
+    pub keyboard: crate::keyboard::KeyboardSettings,
+    /// Settings -> Battery (laptops): percentage in the top bar, low-battery warnings, shutdown at the critical level.
+    pub battery: crate::battery::BatterySettings,
+    /// Settings -> Screen saver: what the sign-in screen does when idle (each person's own choices are in their own file, `screensaver`).
+    pub screensaver_signin: SigninSaver,
+    /// Settings -> Cloud mode: hide what needs local hardware (Automatic follows the machine; see `cloudmode`).
+    pub cloud: crate::cloudmode::Setting,
     /// What a million tokens cost, in US cents. Used only to enforce agents' cost budgets (0 = free / untracked).
     pub token_price_cents_per_mtok: u32,
     /// How many days the log of what the assistant's tools did is kept (0 = the default, 3).
@@ -103,6 +123,8 @@ pub struct Settings {
     pub no_workspace_history: bool,
     /// External coding agents (Claude Code, GitHub Copilot, custom commands): Settings → Agents.
     pub agents: crate::extagent::AgentsCfg,
+    /// Settings → Cloud mode → "Show all AI tools": show the AI tools the machine's hardware profile would hide (docs/AI-HARDWARE.md).
+    pub show_all_ai: bool,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -184,6 +206,8 @@ impl Settings {
         self.agents.validate().map_err(SettingsError::Invalid)?;
         self.voice.validate().map_err(SettingsError::Invalid)?;
         self.sound.validate().map_err(|e| SettingsError::Invalid(format!("sound: {e}")))?;
+        self.sounds.validate().map_err(|e| SettingsError::Invalid(format!("system sounds: {e}")))?;
+        self.keyboard.validate().map_err(|e| SettingsError::Invalid(format!("keyboard: {e}")))?;
         if let Some(k) = &self.vault.keyfile {
             if !k.starts_with('/') {
                 return bad("vault key file needs an absolute path");

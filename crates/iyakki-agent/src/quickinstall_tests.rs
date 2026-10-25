@@ -276,8 +276,8 @@ fn every_item_has_a_section_a_licence_and_the_pairs_say_pick_one_or_both() {
     for g in Group::ALL {
         assert!(!items_of(g).is_empty(), "{g:?}");
     }
-    assert_eq!(items_of(Group::Voice), [Item::Kokoro, Item::IndicTts]);
-    assert_eq!(items_of(Group::LocalModels), [Item::Lemonade, Item::Ollama]);
+    assert_eq!(items_of(Group::Voice), [Item::Kokoro, Item::IndicTts, Item::VoicePack]);
+    assert_eq!(items_of(Group::LocalModels), [Item::Lemonade, Item::Ollama, Item::MacHost, Item::GpuVulkan, Item::GpuNvidia]);
     assert_eq!(items_of(Group::AiCoding), [Item::ClaudeCode, Item::Copilot]);
     assert!(Group::Voice.note().contains("pick one or both") && Group::LocalModels.note().contains("pick one or both"));
     for i in Item::ALL {
@@ -287,6 +287,7 @@ fn every_item_has_a_section_a_licence_and_the_pairs_say_pick_one_or_both() {
             assert!(crate::clis::def(id).is_some(), "{id} is in the CLI catalogue (reused, not duplicated)");
         }
     }
+    assert!(!Item::MacHost.runs_as_job() && Item::MacHost.needs().is_empty() && Item::MacHost.licence().contains("nothing is installed by IYAKKI"), "the Mac model host row is a guide, not a job");
     assert!(Item::IndicTts.licence().contains("open owner decision"), "the unclear weights licence is said plainly");
     assert!(Item::Kokoro.licence().contains("Apache-2.0"));
     assert_eq!(order(Item::Kokoro, &|_| false), [Item::K3s, Item::Lemonade, Item::Kokoro]);
@@ -347,11 +348,11 @@ fn kokoro_deploys_lemonade_itself_when_it_is_not_there_waits_for_it_then_pulls_t
     // Lemonade answers already: nothing is applied
     let mut f = Fake::default();
     run_step(Item::Kokoro, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap();
-    assert_eq!(f.calls, ["pull kokoro-v1"]);
+    assert_eq!(f.calls, ["pull kokoro-v1", "after kokoro"], "after the pull the shell is asked to make it the reading voice");
     // not there yet: the cluster is checked, Lemonade deployed and connected, then the model pulled
     let mut f = Fake { k3s: true, lem_after: 1, ..Default::default() };
     run_step(Item::Kokoro, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap();
-    assert_eq!(f.calls, ["apply lemonade", "rollout iyakki-ai/lemonade", "after lemonade", "pull kokoro-v1"]);
+    assert_eq!(f.calls, ["apply lemonade", "rollout iyakki-ai/lemonade", "after lemonade", "pull kokoro-v1", "after kokoro"]);
     // still not answering after the deploy: the wait ends with the port in the message
     let mut f = Fake { k3s: true, lem_after: usize::MAX, ..Default::default() };
     assert!(run_step(Item::Kokoro, &mut f, Duration::from_secs(20), Duration::from_secs(5)).unwrap_err().contains("did not answer"));
@@ -545,4 +546,164 @@ fn the_order_line_names_the_runtimes_the_catalogue_installs_underneath() {
     assert_eq!(titles, ["k3s", "uv", "Python 3", "DuckDB"], "uv then Python, once each, before DuckDB");
     assert_eq!(titles_text(&titles), "1. k3s  \u{2192}  2. uv  \u{2192}  3. Python 3  \u{2192}  4. DuckDB");
     assert_eq!(order_titles_with(&[Item::Node, Item::ClaudeCode], &|_| vec![]), ["Node.js", "Claude Code"]);
+}
+
+#[test]
+fn the_mac_firmware_step_is_its_own_section_runs_as_a_job_with_the_source_on_the_command_line_and_marks_itself_done() {
+    assert_eq!(Item::parse("mac-firmware"), Some(Item::MacFirmware));
+    assert_eq!(Item::MacFirmware.group(), Group::Mac);
+    assert_eq!(items_of(Group::Mac), [Item::MacFirmware, Item::MacCamera]);
+    assert!(Item::MacFirmware.title().contains("Mac Wi-Fi and Bluetooth firmware") && Item::MacFirmware.title().contains("from your Mac"));
+    assert!(Item::MacFirmware.licence().contains("never ships") && Item::MacFirmware.about().contains("never uploaded"));
+    assert!(Item::MacFirmware.runs_as_job() && Item::MacFirmware.needs_now().is_empty() && Item::MacFirmware.cli_id().is_none());
+    let l = Launch { exe: "/usr/bin/iyakki".into(), data: "/var/lib/iyakki".into() };
+    // the quick-install path starts it with Apple's download as the source (the default of the step)
+    assert_eq!(spec(Item::MacFirmware, 1, 1, &l).cmd, Cmd::Argv(vec!["/usr/bin/iyakki".into(), "quick-install".into(), "mac-firmware".into(), "--data".into(), "/var/lib/iyakki".into()]));
+    // the Mac drivers page starts it with the source the person chose
+    let s = mac_firmware_spec(&l, &crate::macfw::Source::Folder("/mnt/usb/iyakki-wifi-firmware".into()));
+    assert_eq!(s.workspace, WORKSPACE);
+    assert_eq!(s.cmd, Cmd::Argv(["/usr/bin/iyakki", "quick-install", "mac-firmware", "--data", "/var/lib/iyakki", "--source", "folder", "--path", "/mnt/usb/iyakki-wifi-firmware"].map(String::from).to_vec()));
+    // a step that finishes leaves its result line as the marker; a failure is the job's failure
+    struct MacOk(bool);
+    impl StepEnv for MacOk {
+        fn dep_state(&mut self, _: Item) -> DepState { DepState::Ready }
+        fn say(&mut self, _: &str) {}
+        fn k3s_present(&mut self) -> bool { false }
+        fn k3s_elsewhere(&mut self) -> Option<String> { None }
+        fn install_k3s(&mut self) -> Result<String, String> { Err("no".into()) }
+        fn request_k3s_start(&mut self) -> Result<(), String> { Ok(()) }
+        fn cluster_ready(&mut self) -> bool { false }
+        fn install_cli(&mut self, _: &str) -> Result<String, String> { Err("no".into()) }
+        fn kubectl_apply(&mut self, _: &str, _: &str) -> Result<String, String> { Err("no".into()) }
+        fn rollout(&mut self, _: &str, _: &str, _: Duration) -> Result<(), String> { Err("no".into()) }
+        fn sleep(&mut self, _: Duration) {}
+        fn mark(&mut self, item: Item, detail: &str) -> Result<(), String> {
+            assert_eq!(item, Item::MacFirmware);
+            assert!(detail.contains("Wi-Fi: wlan0 appeared"));
+            self.0 = true;
+            Ok(())
+        }
+        fn request_after(&mut self, _: &str) -> Result<(), String> { Ok(()) }
+        fn lemonade_ready(&mut self) -> bool { false }
+        fn lemonade_pull(&mut self, _: &str) -> Result<(), String> { Err("no".into()) }
+        fn mac_firmware(&mut self) -> Result<String, String> { Ok("Wi-Fi: wlan0 appeared".into()) }
+    }
+    let mut env = MacOk(false);
+    run_step(Item::MacFirmware, &mut env, Duration::ZERO, Duration::ZERO).unwrap();
+    assert!(env.0, "marked done");
+    // a step environment that cannot do it says so plainly
+    let mut f = Fake::default();
+    assert!(run_step(Item::MacFirmware, &mut f, Duration::ZERO, Duration::ZERO).unwrap_err().contains("not available here"));
+    assert!(f.marks.is_empty());
+    // a bad source is a usage error, not a download
+    assert_eq!(cli_main(&["mac-firmware".into(), "--source".into(), "image".into()]), 2);
+}
+
+fn lem_model(id: &str, kind: crate::lemonade::ModelType, downloaded: bool) -> crate::lemonade::Model {
+    crate::lemonade::Model { id: id.into(), kind, recipe: String::new(), checkpoint: String::new(), labels: vec![], downloaded, loaded: false, suggested: false, size_gb: None, image_defaults: None }
+}
+
+#[test]
+fn lemonade_and_kokoro_status_comes_from_the_server_and_the_marker_is_only_a_fallback() {
+    use crate::lemonade::ModelType;
+    let t = Tmp::new("live-status");
+    let svc = services_here(&t);
+    let none = || None;
+    let with_kokoro = || Some(vec![lem_model("Qwen3-0.6B-GGUF", ModelType::Chat, true), lem_model("kokoro-v1", ModelType::TextToSpeech, true)]);
+    let without_kokoro = || Some(vec![lem_model("Qwen3-0.6B-GGUF", ModelType::Chat, true), lem_model("kokoro-v1", ModelType::TextToSpeech, false)]);
+    // no marker, nothing answers: not installed
+    assert_eq!(presence_with(&svc, Item::Kokoro, &none), Presence::Missing);
+    mark_done(svc.dir(), Item::Kokoro, "kokoro-v1 in Lemonade").unwrap();
+    mark_done(svc.dir(), Item::Lemonade, "lemonade in k3s").unwrap();
+    // marker present but Lemonade does not answer (cluster down or reset): installed earlier, not running
+    for it in [Item::Kokoro, Item::Lemonade] {
+        let p = presence_with(&svc, it, &none);
+        assert!(matches!(p, Presence::Earlier(_)), "{it:?}: {p:?}");
+        assert!(p.word().starts_with("installed earlier, not running"), "{}", p.word());
+    }
+    // answering but kokoro missing (or listed, not downloaded): not installed, even with the marker
+    assert_eq!(presence_with(&svc, Item::Kokoro, &without_kokoro), Presence::Missing);
+    assert_eq!(presence_with(&svc, Item::Kokoro, &|| Some(vec![])), Presence::Missing);
+    // everything present: installed
+    assert!(matches!(presence_with(&svc, Item::Kokoro, &with_kokoro), Presence::Installed(_)));
+    assert!(matches!(presence_with(&svc, Item::Lemonade, &with_kokoro), Presence::Installed(d) if d.contains("13305")));
+    // answering with no marker at all still counts: reality wins over the file
+    std::fs::remove_dir_all(state_dir(svc.dir())).unwrap();
+    assert!(matches!(presence_with(&svc, Item::Kokoro, &with_kokoro), Presence::Installed(_)));
+    assert_eq!(presence_with(&svc, Item::Lemonade, &none), Presence::Missing);
+}
+
+#[test]
+fn the_camera_firmware_job_is_an_item_with_its_own_command_and_is_recognised_while_it_runs() {
+    assert_eq!(Item::parse("mac-camera"), Some(Item::MacCamera), "the Setup tab lists it; the CLI word is the same");
+    assert!(!Item::MacCamera.runs_as_job() && Item::MacCamera.is_hardware() && Item::MacCamera.group() == Group::Mac, "started by start_camera_firmware, not by the installer's order");
+    assert_eq!(Item::MacCamera.id(), CAMERA_JOB);
+    let l = Launch { exe: "/usr/bin/iyakki".into(), data: "/var/lib/iyakki".into() };
+    let s = camera_firmware_spec(&l);
+    assert_eq!(s.workspace, WORKSPACE);
+    assert_eq!(s.cmd, Cmd::Argv(["/usr/bin/iyakki", "quick-install", "mac-camera", "--data", "/var/lib/iyakki"].map(String::from).to_vec()));
+    let mut j = job_of("mac-camera", crate::jobs::State::Running, 1, "");
+    assert!(is_camera_job(&j));
+    j.command = "iyakki quick-install mac-firmware --data /d".into();
+    assert!(!is_camera_job(&j));
+}
+
+#[test]
+fn the_firmware_packs_are_hardware_items_with_their_own_job_licence_and_cli_word() {
+    let packs = [Item::FwQualcommBt, Item::FwRealtekNet, Item::FwBroadcomNet, Item::FwAtheros9170];
+    assert_eq!(items_of(Group::Firmware), packs);
+    assert_eq!(Group::Firmware.title(), "Hardware firmware");
+    for i in packs {
+        let d = i.fw_def().expect("a pack");
+        assert_eq!(Item::parse(i.id()), Some(i), "`iyakki quick-install {}` is the same word", i.id());
+        assert_eq!(i.id(), d.pack_id);
+        assert!(i.is_hardware() && !i.runs_as_job() && i.group() == Group::Firmware && i.needs().is_empty() && i.cli_id().is_none(), "{i:?}: its own job, only where the hardware is");
+        assert!(i.licence().contains(d.licence_note) && i.about().contains("not sure it may redistribute") && i.about().contains("folder or USB stick") && !i.title().is_empty());
+        assert!(i.download_mb() >= 1);
+    }
+    assert!(Item::FwRealtekNet.licence().contains("hexadecimal or equivalent format") && Item::FwQualcommBt.licence().contains("third-party licence terms") && Item::FwAtheros9170.licence().contains("GPL"));
+    assert!(Item::Node.fw_def().is_none());
+    // the job: this program, `quick-install fw-x --data D`, with the folder for the offline route
+    let l = Launch { exe: "/usr/bin/iyakki".into(), data: "/var/lib/iyakki".into() };
+    let s = firmware_pack_spec(&l, Item::FwRealtekNet, None);
+    assert_eq!(s.workspace, WORKSPACE);
+    assert_eq!(s.cmd, Cmd::Argv(["/usr/bin/iyakki", "quick-install", "fw-realtek-net", "--data", "/var/lib/iyakki"].map(String::from).to_vec()));
+    let s = firmware_pack_spec(&l, Item::FwRealtekNet, Some(Path::new("/media/usb/fw")));
+    assert_eq!(s.cmd, Cmd::Argv(["/usr/bin/iyakki", "quick-install", "fw-realtek-net", "--data", "/var/lib/iyakki", "--from", "/media/usb/fw"].map(String::from).to_vec()));
+    assert!(s.label.contains("from a folder"));
+    let j = job_of("fw-realtek-net", crate::jobs::State::Running, 1, "");
+    assert_eq!(item_of(&j), Some(Item::FwRealtekNet));
+}
+
+#[test]
+fn a_firmware_pack_job_starts_only_after_the_licence_was_accepted_and_one_at_a_time() {
+    let t = Tmp::new("fwstart");
+    let jobs = Jobs::new(&t.0.join("jobs"));
+    let l = Launch { exe: fake_program(&t), data: t.0.join("data") };
+    let e = start_firmware_pack(&jobs, "root", Item::FwBroadcomNet, None, &l).unwrap_err();
+    assert!(e.contains("accept the vendor's licence first") && install_jobs(&jobs, "root").is_empty(), "{e}");
+    assert!(start_firmware_pack(&jobs, "root", Item::Node, None, &l).unwrap_err().contains("not a firmware pack"));
+    crate::fwpack::accept(&l.data, Item::FwBroadcomNet.fw_def().unwrap(), "admin", 1).unwrap();
+    // an acceptance of another pack does not count
+    assert!(start_firmware_pack(&jobs, "root", Item::FwRealtekNet, None, &l).is_err());
+    let j = start_firmware_pack(&jobs, "root", Item::FwBroadcomNet, None, &l).unwrap();
+    assert_eq!(item_of(&j), Some(Item::FwBroadcomNet));
+    assert!(start_firmware_pack(&jobs, "root", Item::FwBroadcomNet, None, &l).unwrap_err().contains("being installed already"));
+    jobs.wait("root", &j.id, Duration::from_secs(20)).unwrap();
+}
+
+#[test]
+fn a_firmware_pack_item_reads_as_installed_from_its_driver_pack_record() {
+    let t = Tmp::new("fwpresence");
+    let svc = services_here(&t);
+    assert_eq!(presence(&svc, Item::FwRealtekNet), Presence::Missing);
+    let d = Item::FwRealtekNet.fw_def().unwrap();
+    let (fs, _) = iyakki_drivers::apply::Fs::for_data(svc.dir());
+    let p = crate::fwpack::build_pack(crate::fwpack::table(), d, &[("rtl_nic/rtl8168h-2.fw".into(), vec![1, 2, 3])], &[("LICENSE.r8169".into(), vec![4])]);
+    iyakki_drivers::apply::install_pack(&fs, &iyakki_drivers::run::Dry, d.pack_id, "linux-firmware 1a935bfb33", d.licence_id, "test", "local", &p).unwrap();
+    match presence(&svc, Item::FwRealtekNet) {
+        Presence::Installed(w) => assert!(w.starts_with("1 files"), "{w}: the licence text is not counted as a firmware file"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(presence(&svc, Item::FwQualcommBt), Presence::Missing);
 }

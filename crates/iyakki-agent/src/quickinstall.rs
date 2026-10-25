@@ -42,10 +42,16 @@ pub enum Group {
     Voice,
     LocalModels,
     Media,
+    /// Firmware for Macs (Apple's Wi-Fi and Bluetooth files, read from the person's own Mac or Apple's recovery download).
+    /// Debian and Ubuntu programs in a sandbox (linuxapps.rs, docs/LINUX-APPS.md).
+    Linux,
+    Mac,
+    /// Restricted firmware packs (fwpack.rs): firmware IYAKKI is not sure it may ship, downloaded for the person at their click.
+    Firmware,
 }
 
 impl Group {
-    pub const ALL: [Group; 6] = [Group::Runtimes, Group::Cluster, Group::AiCoding, Group::Voice, Group::LocalModels, Group::Media];
+    pub const ALL: [Group; 9] = [Group::Runtimes, Group::Cluster, Group::AiCoding, Group::Voice, Group::LocalModels, Group::Media, Group::Linux, Group::Mac, Group::Firmware];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -55,6 +61,9 @@ impl Group {
             Group::Voice => "Voice",
             Group::LocalModels => "Local models",
             Group::Media => "Media",
+            Group::Linux => "Linux apps",
+            Group::Mac => "Mac drivers",
+            Group::Firmware => "Hardware firmware",
         }
     }
 
@@ -64,9 +73,12 @@ impl Group {
             Group::Runtimes => "Node.js and Python 3: the coding agents and Python tools need them, and they are installed first when missing",
             Group::Cluster => "k3s is the base; DuckDB, Elasticsearch, Lemonade, Indic-TTS and the local image registry install it first when it is missing",
             Group::AiCoding => "coding agents for the terminal and the AI IDE (Node.js is installed first when it is missing); pick one or both",
-            Group::Voice => "reading voices; pick one or both (Kokoro: English, through Lemonade, which it installs first; Indic-TTS: Indian languages, in k3s)",
-            Group::LocalModels => "model servers on this machine, added to Models when they answer; pick one or both (Lemonade runs in k3s)",
+            Group::Voice => "reading voices; pick one or both (Kokoro: English, through Lemonade, which it installs first; Indic-TTS: Indian languages, in k3s); or Voice: Whisper tiny + Kokoro, which also adds listening and sets both up",
+            Group::LocalModels => "model servers on this machine, added to Models when they answer; pick one or both (Lemonade runs in k3s); or use the GPU of a Mac on your network",
             Group::Media => "the player for video and audio files (MEDIA tile, IYAKKI menu \u{2192} Media player); it needs nothing else",
+            Group::Linux => "Debian and Ubuntu programs (apt) in a sandbox of their own, with a network switch and only the folders you mount; downloaded from the distribution, never shipped (Store \u{2192} Setup \u{2192} Linux apps has the page)",
+            Group::Mac => "T2 Macs only: the Wi-Fi and Bluetooth firmware is Apple's, so it is never shipped; it is read from your own Mac or from Apple's recovery download, when you ask (IYAKKI menu \u{2192} Mac drivers has more ways)",
+            Group::Firmware => "firmware that IYAKKI is not sure it may redistribute is not in the images: shown only when your hardware needs it; you read the vendor's licence, accept it, and it is downloaded from the upstream linux-firmware repository (or read from a folder or stick), checked and installed",
         }
     }
 }
@@ -83,13 +95,38 @@ pub enum Item {
     Copilot,
     Kokoro,
     IndicTts,
+    /// Voice in one click: Whisper tiny (speech to text) and Kokoro (text to speech), both through the machine's Lemonade, then set as
+    /// the engines of Settings \u{2192} Voice and tested ([`crate::voicepack`]).
+    VoicePack,
     Lemonade,
     Ollama,
+    /// Not an install: a guide to using the GPU of a Mac (or another computer) on the network as a model host (modelhost.rs).
+    MacHost,
+    /// Stage 1 of the GPU for local models: Vulkan through Mesa in the pod image, any GPU with a render node (gpu_steps.rs).
+    GpuVulkan,
+    /// Stage 3: NVIDIA's vendor driver (CUDA): open modules from the image, vendor files downloaded at the click (gpu_nvidia.rs).
+    GpuNvidia,
     Ffmpeg,
+    /// Apple's Wi-Fi and Bluetooth firmware for a T2 Mac, installed as driver packs (macfw.rs).
+    MacFirmware,
+    /// A first Debian sandbox named `debian` (linuxapps.rs); the Store \u{2192} Setup \u{2192} Linux apps (Open its page) makes more (Ubuntu, other names, folders).
+    LinuxApps,
+    /// Graphical programs of the Linux apps sandbox in an IYAKKI window: a sandbox named `gui` with TigerVNC's X server, a window manager and a test
+    /// program, installed by apt at the click (linuxwin.rs); the LINUX WINDOW tile shows them.
+    LinuxWindows,
+    /// The FaceTime HD camera of a MacBook: Apple's firmware is fetched from Apple's CDN on the click (camfw.rs). Started by
+    /// [`start_camera_firmware`], not by [`start`]; shown only where the camera (14e4:1570) is.
+    MacCamera,
+    /// Restricted firmware packs (fwpack.rs): Qualcomm Bluetooth, Realtek and Broadcom network, Atheros AR9170. Each has its own job
+    /// ([`start_firmware_pack`]), is shown only where its hardware is, and needs the person to accept the vendor's licence first.
+    FwQualcommBt,
+    FwRealtekNet,
+    FwBroadcomNet,
+    FwAtheros9170,
 }
 
 impl Item {
-    pub const ALL: [Item; 13] = [Item::Node, Item::Python, Item::K3s, Item::DuckDb, Item::Elasticsearch, Item::Registry, Item::ClaudeCode, Item::Copilot, Item::Kokoro, Item::IndicTts, Item::Lemonade, Item::Ollama, Item::Ffmpeg];
+    pub const ALL: [Item; 25] = [Item::Node, Item::Python, Item::K3s, Item::DuckDb, Item::Elasticsearch, Item::Registry, Item::ClaudeCode, Item::Copilot, Item::Kokoro, Item::IndicTts, Item::VoicePack, Item::Lemonade, Item::Ollama, Item::MacHost, Item::GpuVulkan, Item::GpuNvidia, Item::Ffmpeg, Item::MacFirmware, Item::MacCamera, Item::LinuxApps, Item::LinuxWindows, Item::FwQualcommBt, Item::FwRealtekNet, Item::FwBroadcomNet, Item::FwAtheros9170];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -103,9 +140,21 @@ impl Item {
             Item::Copilot => "github-copilot",
             Item::Kokoro => "kokoro",
             Item::IndicTts => "indic-tts",
+            Item::VoicePack => "voice-pack",
             Item::Lemonade => "lemonade",
             Item::Ollama => "ollama",
+            Item::MacHost => "mac-host",
+            Item::GpuVulkan => "gpu-vulkan",
+            Item::GpuNvidia => "gpu-nvidia",
             Item::Ffmpeg => "ffmpeg",
+            Item::MacFirmware => "mac-firmware",
+            Item::MacCamera => CAMERA_JOB,
+            Item::LinuxApps => "linux-apps",
+            Item::LinuxWindows => "linux-windows",
+            Item::FwQualcommBt => "fw-qualcomm-bt",
+            Item::FwRealtekNet => "fw-realtek-net",
+            Item::FwBroadcomNet => "fw-broadcom-net",
+            Item::FwAtheros9170 => "fw-atheros-carl9170",
         }
     }
 
@@ -125,9 +174,18 @@ impl Item {
             Item::Copilot => "GitHub Copilot CLI",
             Item::Kokoro => "Kokoro",
             Item::IndicTts => "Indic-TTS",
+            Item::VoicePack => "Voice: Whisper tiny + Kokoro",
             Item::Lemonade => "Lemonade",
             Item::Ollama => "Ollama",
+            Item::MacHost => "Use a Mac's GPU (Apple Silicon)",
+            Item::GpuVulkan => "GPU for local models (Vulkan)",
+            Item::GpuNvidia => "NVIDIA GPU driver (CUDA)",
             Item::Ffmpeg => "Media player (ffmpeg)",
+            Item::MacFirmware => "Mac Wi-Fi and Bluetooth firmware (from your Mac)",
+            Item::MacCamera => "MacBook FaceTime camera: driver and firmware (firmware from Apple)",
+            Item::LinuxApps => "Linux apps (Debian/Ubuntu)",
+            Item::LinuxWindows => "Linux windows (graphical programs)",
+            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => self.fw_def().map_or("Firmware", |d| d.title),
         }
     }
 
@@ -136,9 +194,12 @@ impl Item {
             Item::Node | Item::Python => Group::Runtimes,
             Item::K3s | Item::DuckDb | Item::Elasticsearch | Item::Registry => Group::Cluster,
             Item::ClaudeCode | Item::Copilot => Group::AiCoding,
-            Item::Kokoro | Item::IndicTts => Group::Voice,
-            Item::Lemonade | Item::Ollama => Group::LocalModels,
+            Item::Kokoro | Item::IndicTts | Item::VoicePack => Group::Voice,
+            Item::Lemonade | Item::Ollama | Item::MacHost | Item::GpuVulkan | Item::GpuNvidia => Group::LocalModels,
             Item::Ffmpeg => Group::Media,
+            Item::MacFirmware | Item::MacCamera => Group::Mac,
+            Item::LinuxApps | Item::LinuxWindows => Group::Linux,
+            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => Group::Firmware,
         }
     }
 
@@ -154,10 +215,22 @@ impl Item {
             Item::ClaudeCode => "Anthropic's coding agent (the claude command); the AI IDE can use it once you sign in (Settings \u{2192} Agents)",
             Item::Copilot => "GitHub's coding agent (the copilot command); needs a Copilot subscription and `copilot login`",
             Item::Kokoro => "English neural reading voice (kokoro-v1, 82M), pulled into Lemonade; Lemonade (and k3s) are installed first when missing",
+            Item::VoicePack => "Listen and speak with one action: Whisper tiny (speech to text, any language it knows) and Kokoro (reading voice, English only), pulled into the Lemonade of this machine (Lemonade and k3s are installed first when missing), set as the engines of Settings \u{2192} Voice and tested. Review first: sizes, licences and what runs where. Remove puts the settings back",
             Item::IndicTts => "Tamil, Telugu, Malayalam, Kannada, Hindi, Bengali, Marathi voices: the Indic voice server in k3s",
             Item::Lemonade => "Local model server (chat, embeddings, images, whisper, Kokoro): one Deployment in k3s (namespace iyakki-ai), reachable on this machine only (127.0.0.1:13305) and added to Models",
             Item::Ollama => "Run language models on this machine; started and added to Models as ollama-local",
+            Item::MacHost => "A guide, not an install: use the GPU of a Mac with Apple Silicon (Metal) or of another computer on your network. Shows what to install ON that computer (you do it), tests the connection with tokens per second, adds it to Models and can publish it to the cluster",
+            Item::GpuVulkan => "Let pods in k3s use this machine's GPU through Vulkan (AMD, Intel, NVIDIA via nouveau): deploys a small device plugin, tests it with an unprivileged pod and gives Lemonade the GPU. Nothing is downloaded by IYAKKI; the cluster pulls the plugin and a llama.cpp image (about 300 MB)",
+            Item::GpuNvidia => "NVIDIA's own driver for CUDA in pods (shown when an NVIDIA GPU is found; Turing or newer): downloads NVIDIA's user-space libraries and GSP firmware for you from download.nvidia.com (about 400 MB, checksum-verified, never part of an image), loads the open kernel modules of this image, deploys NVIDIA's device plugin so pods can ask for nvidia.com/gpu, and tests it with nvidia-smi",
+            Item::MacFirmware => "Downloads Apple's recovery image for this Mac model from Apple (about 1 GB, resumable; for a 2017 MacBook Pro it is the macOS 11 image, the one that keeps the Bluetooth patch), reads the Wi-Fi and Bluetooth firmware out of it with 7-Zip, installs it as a driver pack and loads the drivers. A downloaded image is kept until the files are installed: Retry reads it again and never downloads it twice. The files are Apple's: they stay on this machine, are never uploaded and are not part of IYAKKI. IYAKKI menu \u{2192} Mac drivers also reads them from a folder, a stick or a disk image",
+            Item::MacCamera => "MacBook FaceTime HD camera (Broadcom 14e4:1570): downloads Apple's camera firmware from Apple's update server when you click (about 17.6 MB, only the needed parts, resumable, checked), builds the firmware and sensor files, installs them as a driver pack and loads the camera driver module that is already in the Mac image (no compiler and no restart needed). Apple's files stay on this machine, are never uploaded and are not part of IYAKKI",
+            Item::LinuxWindows => "Show a graphical Linux program in an IYAKKI window (LINUX WINDOW tile): makes a Debian 12 sandbox named gui and installs, with apt, TigerVNC's X server (it draws into memory), a one-window manager, fonts, software OpenGL and the xterm test program (about 250 MB, never part of an image). No graphics card and no sound in the window",
+            Item::LinuxApps => "Run Debian or Ubuntu programs: downloads the official Debian 12 base for you (about 30 MB, checksum-verified, never part of an image) into a sandbox named debian with the network on and no folders mounted; apt installs packages inside it. The Store \u{2192} Setup \u{2192} Linux apps (Open its page) adds Ubuntu, more sandboxes, mounted folders, image apps and the terminal",
             Item::Ffmpeg => "Plays video and audio in IYAKKI (MEDIA tile, camera recordings, Media player). Downloads a static ffmpeg build from its builder (johnvansickle.com), GPLv3, checked with its checksum; about 42 MB",
+            Item::FwQualcommBt => "Bluetooth patch files for newer Qualcomm laptop chips (QCA6390, WCN3950, WCN3988, WCN7850, QCA6698): 20 files, about 1 MB. Not in the images (IYAKKI is not sure it may redistribute them): you read and accept the vendor's licence, then the files are downloaded from the upstream linux-firmware repository at a fixed release, each checked for size and SHA-256, installed as a driver pack that survives restarts, and the driver is loaded again; Reboot to finish appears only when the driver needs it. Also installable from a folder or USB stick.",
+            Item::FwRealtekNet => "Firmware for PCIe Realtek Ethernet chips (RTL8111/8168, RTL8125 and relatives): 30 small files, about 140 KB. Not in the images (IYAKKI is not sure it may redistribute them): you read and accept the vendor's licence, then the files are downloaded from the upstream linux-firmware repository at a fixed release, each checked for size and SHA-256, installed as a driver pack that survives restarts, and the driver is loaded again; Reboot to finish appears only when the driver needs it. Also installable from a folder or USB stick.",
+            Item::FwBroadcomNet => "Firmware for Broadcom wired network chips (Tigon3 tg3, NetXtreme II bnx2, NetXtreme II 10 Gigabit bnx2x): 21 files, about 3 MB. Not in the images (IYAKKI is not sure it may redistribute them): you read and accept the vendor's licence, then the files are downloaded from the upstream linux-firmware repository at a fixed release, each checked for size and SHA-256, installed as a driver pack that survives restarts, and the driver is loaded again; Reboot to finish appears only when the driver needs it. Also installable from a folder or USB stick.",
+            Item::FwAtheros9170 => "Firmware for old Atheros AR9170 USB Wi-Fi sticks (carl9170 driver): one file, 13 KB. GPL-2.0 or later; the source is the carl9170fw project. Not in the images (IYAKKI is not sure it may redistribute them): you read and accept the vendor's licence, then the files are downloaded from the upstream linux-firmware repository at a fixed release, each checked for size and SHA-256, installed as a driver pack that survives restarts, and the driver is loaded again; Reboot to finish appears only when the driver needs it. Also installable from a folder or USB stick.",
         }
     }
 
@@ -173,18 +246,27 @@ impl Item {
             Item::ClaudeCode => "proprietary (Anthropic's commercial terms); your own Anthropic account",
             Item::Copilot => "proprietary (GitHub's terms); needs a GitHub Copilot subscription",
             Item::Kokoro => "Kokoro-82M weights: Apache-2.0 (hexgrad/Kokoro-82M); Lemonade: Apache-2.0",
+            Item::VoicePack => crate::voicepack::LICENCE_SHORT,
             Item::IndicTts => "code: MIT (AI4Bharat Indic-TTS); model weights: NO licence stated by AI4Bharat. Whether IYAKKI may use them is an open owner decision; nothing is bundled, you supply the model files",
             Item::Lemonade => "Apache-2.0; each model you pull has its own licence",
             Item::Ollama => "MIT; each model you pull has its own licence",
+            Item::MacHost => "nothing is installed by IYAKKI. On the Mac you choose: Ollama (MIT), llama.cpp (MIT), MLX-LM (MIT) or LM Studio (free to use, proprietary)",
+            Item::GpuVulkan => "Mesa (MIT) and llama.cpp (MIT) in the pod image; the device plugin is squat/generic-device-plugin (Apache-2.0), pulled by the cluster; IYAKKI ships no GPU driver code of its own",
+            Item::GpuNvidia => "kernel modules: MIT / GPL-2.0 (NVIDIA open GPU kernel modules, in the image). User-space libraries, nvidia-smi and GSP firmware: NVIDIA's proprietary driver licence, downloaded by you from NVIDIA, not shipped. Device plugin: Apache-2.0. Pressing Install accepts NVIDIA's licence for the downloaded files",
+            Item::MacFirmware => "Apple's firmware files: Apple's own licence, no redistribution, so IYAKKI never ships them; they are fetched for your own Mac at your request. 7-Zip (the reader): GNU LGPL with the unRAR restriction, downloaded from its project when needed",
+            Item::MacCamera => "driver: the open facetimehd driver (GPL-2.0, in the Mac image). Firmware and sensor files: Apple's own licence, no redistribution, so IYAKKI never ships them; they are fetched from Apple's CDN for your own Mac at your click",
+            Item::LinuxWindows => "Debian packages, each with its own licence (TigerVNC: GPL-2.0, matchbox: GPL-2.0, Mesa: MIT, xterm: MIT, fonts: free licences), downloaded by apt inside the sandbox at your click, never shipped. \"Debian\" is a registered trademark of Software in the Public Interest, Inc.; IYAKKI does not rebrand it and is not endorsed by it",
+            Item::LinuxApps => "Debian and Ubuntu are free software; every package keeps its own licence (/usr/share/doc/<package>/copyright inside the sandbox). Downloaded from the distribution, not shipped. \"Ubuntu\" and \"Debian\" are trademarks of their owners; IYAKKI does not rebrand them",
             Item::Ffmpeg => "GPLv3 (the static build you download from its builder; IYAKKI does not ship it). H.264 and AAC are patent-licensed formats: decoding them is your choice, as in the browser",
+            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => self.fw_def().map_or("", |d| d.licence_note),
         }
     }
 
     /// What has to be there first.
     pub fn needs(self) -> &'static [Item] {
         match self {
-            Item::DuckDb | Item::Elasticsearch | Item::IndicTts | Item::Lemonade | Item::Registry => &[Item::K3s],
-            Item::Kokoro => &[Item::Lemonade],
+            Item::DuckDb | Item::Elasticsearch | Item::IndicTts | Item::Lemonade | Item::Registry | Item::GpuVulkan | Item::GpuNvidia => &[Item::K3s],
+            Item::Kokoro | Item::VoicePack => &[Item::Lemonade],
             _ => &[],
         }
     }
@@ -217,10 +299,78 @@ impl Item {
         }
     }
 
+    /// About how much is downloaded (megabytes), for the Store's Setup tab and its "Install all recommended" review. Honest
+    /// round numbers from the item texts above; 0 where nothing is downloaded by IYAKKI (a guide, a deploy review).
+    pub fn download_mb(self) -> u32 {
+        match self {
+            Item::Node => 45,
+            Item::Python => 40,
+            Item::K3s => 70,
+            Item::DuckDb => 20,
+            Item::Elasticsearch => 600,
+            Item::Registry => 25,
+            Item::ClaudeCode => 60,
+            Item::Copilot => 40,
+            Item::Kokoro => 350,
+            Item::VoicePack => crate::voicepack::WHISPER_MB + crate::voicepack::KOKORO_MB,
+            Item::IndicTts => 0,
+            Item::Lemonade => 700,
+            Item::Ollama => 300,
+            Item::MacHost => 0,
+            Item::GpuVulkan => 300,
+            Item::GpuNvidia => 400,
+            Item::Ffmpeg => 42,
+            Item::MacFirmware => 1500,
+            Item::MacCamera => 18,
+            Item::LinuxApps => 30,
+            Item::LinuxWindows => 250,
+            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwAtheros9170 => 1,
+            Item::FwBroadcomNet => 3,
+        }
+    }
+
+    /// About how long it takes on a normal connection, in words.
+    pub fn time_text(self) -> &'static str {
+        match self {
+            Item::MacHost => "a few minutes (your steps)",
+            Item::IndicTts => "review first, then minutes",
+            Item::Elasticsearch | Item::Lemonade | Item::Kokoro | Item::VoicePack | Item::MacFirmware | Item::GpuNvidia | Item::GpuVulkan => "5 to 15 minutes",
+            Item::K3s | Item::Ollama => "2 to 5 minutes",
+            _ => "about a minute",
+        }
+    }
+
+    /// A server that keeps running once installed (the Setup tab then says Running, not just Installed).
+    pub fn is_service(self) -> bool {
+        matches!(self, Item::K3s | Item::Elasticsearch | Item::Registry | Item::Lemonade | Item::Ollama | Item::IndicTts)
+    }
+
+    /// Hardware entries: shown only on a machine that has the hardware, and never in cloud mode.
+    pub fn is_hardware(self) -> bool {
+        matches!(self, Item::GpuVulkan | Item::GpuNvidia | Item::MacFirmware | Item::MacCamera) || self.fw_def().is_some()
+    }
+
+    /// Memory (megabytes) a machine should have before this is recommended; 0 = light.
+    pub fn min_ram_mb(self) -> u64 {
+        match self {
+            Item::Elasticsearch => 6000,
+            Item::Lemonade | Item::Ollama | Item::Kokoro | Item::VoicePack | Item::IndicTts | Item::GpuVulkan | Item::GpuNvidia => 7500,
+            _ => 0,
+        }
+    }
+
     /// Installed by a detached job. Indic-TTS is not: it is deployed through the Platform services review (Settings \u{2192} Dev
     /// cluster), which plans, shows and asks before it builds the image and applies the objects.
     pub fn runs_as_job(self) -> bool {
-        self != Item::IndicTts
+        !matches!(self, Item::IndicTts | Item::MacHost | Item::MacCamera) && self.fw_def().is_none()
+    }
+
+    /// The restricted firmware pack this item installs (fwpack.rs), when it is one.
+    pub fn fw_def(self) -> Option<&'static crate::fwpack::Def> {
+        match self {
+            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => crate::fwpack::def_for_pack(self.id()),
+            _ => None,
+        }
     }
 }
 
@@ -284,6 +434,8 @@ pub enum Presence {
     Missing,
     /// Installed (by IYAKKI): a short detail (version, place).
     Installed(String),
+    /// Installed earlier (its marker is there), but what it needs to run does not answer now, so it cannot be checked.
+    Earlier(String),
     /// There, but not IYAKKI's (another cluster on the machine): it counts as present and is never replaced.
     Elsewhere(String),
 }
@@ -297,6 +449,8 @@ impl Presence {
             Presence::Missing => "not installed".into(),
             Presence::Installed(d) if d.is_empty() => "installed".into(),
             Presence::Installed(d) => format!("installed · {d}"),
+            Presence::Earlier(d) if d.is_empty() => "installed earlier, not running".into(),
+            Presence::Earlier(d) => format!("installed earlier, not running · {d}"),
             Presence::Elsewhere(d) => format!("present (not IYAKKI's) · {d}"),
         }
     }
@@ -325,8 +479,36 @@ pub fn marked(data: &Path, item: Item) -> Option<String> {
 /// Where each item stands, from the services (k3s: the managed cluster, or another one on the machine; DuckDB: the CLI tile;
 /// Elasticsearch: the marker its job leaves). Reads files and `/proc` only; call it when the menu opens, not every frame.
 pub fn presence(svc: &crate::services::Services, item: Item) -> Presence {
+    presence_with(svc, item, &crate::lemonade::probe_local_models)
+}
+
+/// [`presence`] with the Lemonade check given (`None` = nothing answers on 127.0.0.1:13305; else its downloaded models).
+/// Lemonade and Kokoro are decided by that answer, with the marker only as the fallback when nothing answers ("installed
+/// earlier, not running"): a marker can outlive a cluster or volume reset, so it never counts as "installed" by itself.
+pub fn presence_with(svc: &crate::services::Services, item: Item, lemonade: &dyn Fn() -> Option<Vec<crate::lemonade::Model>>) -> Presence {
     let data = svc.dir();
     match item {
+        Item::Lemonade | Item::Kokoro => {
+            let earlier = marked(data, item);
+            match lemonade() {
+                Some(models) if item == Item::Lemonade => Presence::Installed(format!("answering on 127.0.0.1:{} ({} model(s))", crate::lemonade::DEFAULT_PORT, models.iter().filter(|m| m.downloaded).count())),
+                Some(models) => match models.iter().find(|m| m.id == "kokoro-v1" && m.downloaded) {
+                    Some(_) => Presence::Installed("kokoro-v1 downloaded in Lemonade".into()),
+                    None => Presence::Missing,
+                },
+                None => earlier.map_or(Presence::Missing, Presence::Earlier),
+            }
+        }
+        Item::VoicePack => {
+            let earlier = marked(data, item);
+            match lemonade() {
+                Some(models) => {
+                    let has = |id: &str| models.iter().any(|m| m.id == id && m.downloaded);
+                    if has(crate::voicepack::WHISPER_MODEL) && has(crate::voicepack::KOKORO_MODEL) { Presence::Installed(format!("{} and {} downloaded in Lemonade", crate::voicepack::WHISPER_MODEL, crate::voicepack::KOKORO_MODEL)) } else { Presence::Missing }
+                }
+                None => earlier.map_or(Presence::Missing, Presence::Earlier),
+            }
+        }
         Item::K3s => {
             if let Some(st) = svc.k3sdev.installed() {
                 return Presence::Installed(format!("{} {} · {}", st.backend.label(), st.version, svc.k3sdev.state().word()));
@@ -337,6 +519,26 @@ pub fn presence(svc: &crate::services::Services, item: Item) -> Presence {
                 None => Presence::Missing,
             }
         }
+        Item::LinuxWindows => {
+            let n = crate::linuxwin::count_ready(data);
+            if n == 0 { Presence::Missing } else { Presence::Installed("Debian 12 sandbox gui with the display server".into()) }
+        }
+        Item::LinuxApps => {
+            let n = crate::linuxapps::count_all(data);
+            if n == 0 { Presence::Missing } else { Presence::Installed(format!("{n} sandbox(es)")) }
+        }
+        Item::MacHost => {
+            let n = crate::modelhost::Hosts::new(data).list().len();
+            if n == 0 { Presence::Missing } else { Presence::Installed(format!("{n} model host(s) in Models")) }
+        }
+        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => match item.fw_def().and_then(|d| crate::fwpack::installed(data, d)) {
+            Some(r) => Presence::Installed(format!("{} files, {}", r.files.iter().filter(|f| !f.starts_with("licences/")).count(), r.version)),
+            None => Presence::Missing,
+        },
+        Item::MacCamera => match crate::camfw::read_outcome(data) {
+            Some(o) if o.installed => Presence::Installed(if o.firmware_version.is_empty() { o.headline } else { format!("firmware {}", o.firmware_version) }),
+            _ => Presence::Missing,
+        },
         Item::IndicTts => {
             // the Platform services keep their instances in `installed-services-<user>.json`
             let deployed = std::fs::read_dir(data).into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().starts_with("installed-services-") && std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains("\"indic-tts\"")));
@@ -439,10 +641,13 @@ pub struct Facts {
     pub runtimes: Vec<(Item, Vec<&'static str>)>,
     /// A runtime used by installed tools (`CliManager::uninstall_warning`).
     pub used_by: Vec<(Item, String)>,
+    /// Rows the menu does not show on this machine (the NVIDIA driver entry when no NVIDIA GPU is found).
+    pub hidden: Vec<Item>,
 }
 
 pub fn gather_facts(svc: &crate::services::Services) -> Facts {
     let mut f = Facts::default();
+    f.hidden = hidden_items(&crate::gpu::detect(Path::new("/")));
     for it in Item::ALL {
         f.presence.push((it, presence(svc, it)));
         if let Some(id) = it.cli_id() {
@@ -459,6 +664,11 @@ pub fn gather_facts(svc: &crate::services::Services) -> Facts {
         }
     }
     f
+}
+
+/// The rows not shown for these GPUs: the NVIDIA driver entry needs an NVIDIA GPU.
+pub fn hidden_items(gpus: &[crate::gpu::Gpu]) -> Vec<Item> {
+    if crate::gpu::has_nvidia(gpus) { Vec::new() } else { vec![Item::GpuNvidia] }
 }
 
 /// What the item's button says: Install, Upgrade to a newer version, or (nothing newer / unknown) Update or Reinstall.
@@ -529,6 +739,86 @@ pub fn spec_with(verb: &str, item: Item, step: usize, total: usize, l: &Launch) 
     Spec {
         label: label_with(verb, item, step, total),
         cmd: Cmd::Argv(vec![l.exe.display().to_string(), "quick-install".into(), item.id().into(), "--data".into(), l.data.display().to_string()]),
+        cwd: l.data.clone(),
+        workspace: WORKSPACE.into(),
+    }
+}
+
+/// The job of the Mac firmware step with a source other than Apple's download (a folder, a stick or a disk image the person picked):
+/// `iyakki quick-install mac-firmware --data D --source folder --path P`.
+pub fn mac_firmware_spec(l: &Launch, source: &crate::macfw::Source) -> Spec {
+    let mut argv: Vec<String> = vec![l.exe.display().to_string(), "quick-install".into(), Item::MacFirmware.id().into(), "--data".into(), l.data.display().to_string()];
+    argv.extend(source.args());
+    Spec { label: format!("Install Mac firmware ({})", source.words()), cmd: Cmd::Argv(argv), cwd: l.data.clone(), workspace: WORKSPACE.into() }
+}
+
+/// Start the Mac firmware job for `source`. Refuses when one is running already.
+pub fn start_mac_firmware(jobs: &Jobs, owner: &str, source: &crate::macfw::Source, l: &Launch) -> Result<Job, String> {
+    if jobs.visible(owner, WORKSPACE).iter().any(|j| j.running() && item_of(j) == Some(Item::MacFirmware)) {
+        return Err("The Mac firmware is being installed already: its progress is beside the clock in the top bar".into());
+    }
+    std::fs::create_dir_all(&l.data).map_err(|e| format!("{}: {e}", l.data.display()))?;
+    jobs.start(owner, &mac_firmware_spec(l, source), &|_: &Path| Ok(()))
+}
+
+/// The job of the camera firmware (FaceTime HD camera of a MacBook, camfw.rs): `iyakki quick-install mac-camera --data D`. Not an [`Item`]
+/// (the Setup tab lists items; this one is started from the Mac drivers page and by hand over SSH).
+pub fn camera_firmware_spec(l: &Launch) -> Spec {
+    Spec {
+        label: "Camera firmware (FaceTime HD)".into(),
+        cmd: Cmd::Argv(vec![l.exe.display().to_string(), "quick-install".into(), CAMERA_JOB.into(), "--data".into(), l.data.display().to_string()]),
+        cwd: l.data.clone(),
+        workspace: WORKSPACE.into(),
+    }
+}
+
+/// The word after `quick-install` of the camera firmware job.
+pub const CAMERA_JOB: &str = "mac-camera";
+
+/// Is this job the camera firmware job?
+pub fn is_camera_job(job: &Job) -> bool {
+    let words: Vec<&str> = job.command.split_whitespace().collect();
+    words.iter().position(|w| *w == "quick-install").and_then(|i| words.get(i + 1)) == Some(&CAMERA_JOB)
+}
+
+/// Start the camera firmware job. Refuses when one is running already.
+pub fn start_camera_firmware(jobs: &Jobs, owner: &str, l: &Launch) -> Result<Job, String> {
+    if jobs.visible(owner, WORKSPACE).iter().any(|j| j.running() && is_camera_job(j)) {
+        return Err("The camera firmware is being installed already: its progress is beside the clock in the top bar".into());
+    }
+    std::fs::create_dir_all(&l.data).map_err(|e| format!("{}: {e}", l.data.display()))?;
+    jobs.start(owner, &camera_firmware_spec(l), &|_: &Path| Ok(()))
+}
+
+/// The job of a restricted firmware pack (fwpack.rs): `iyakki quick-install fw-<name> --data D [--from FOLDER]`. Not a step of the
+/// installer's order: the licence has to be accepted first ([`crate::fwpack::accept`]), and the job refuses without it.
+pub fn firmware_pack_spec(l: &Launch, item: Item, from: Option<&Path>) -> Spec {
+    let mut argv = vec![l.exe.display().to_string(), "quick-install".into(), item.id().into(), "--data".into(), l.data.display().to_string()];
+    if let Some(f) = from {
+        argv.push("--from".into());
+        argv.push(f.display().to_string());
+    }
+    Spec { label: format!("{}{}", item.title(), if from.is_some() { " (from a folder)" } else { "" }), cmd: Cmd::Argv(argv), cwd: l.data.clone(), workspace: WORKSPACE.into() }
+}
+
+/// Start a firmware pack job. Refuses when the item is not a pack, the licence is not accepted, or one is running already.
+pub fn start_firmware_pack(jobs: &Jobs, owner: &str, item: Item, from: Option<&Path>, l: &Launch) -> Result<Job, String> {
+    let Some(def) = item.fw_def() else { return Err(format!("{} is not a firmware pack", item.title())) };
+    if crate::fwpack::accepted(&l.data, def).is_none() {
+        return Err(format!("Read and accept the vendor's licence first ({}); nothing is downloaded or installed before that.", def.title));
+    }
+    if jobs.visible(owner, WORKSPACE).iter().any(|j| j.running() && item_of(j) == Some(item)) {
+        return Err(format!("{} is being installed already: its progress is beside the clock in the top bar", def.title));
+    }
+    std::fs::create_dir_all(&l.data).map_err(|e| format!("{}: {e}", l.data.display()))?;
+    jobs.start(owner, &firmware_pack_spec(l, item, from), &|_: &Path| Ok(()))
+}
+
+/// The job of the GPU page's test prompt: `iyakki quick-install gpu-test`. Its log is the result (tokens per second).
+pub fn gpu_test_spec(l: &Launch) -> Spec {
+    Spec {
+        label: "GPU test prompt".into(),
+        cmd: Cmd::Argv(vec![l.exe.display().to_string(), "quick-install".into(), "gpu-test".into(), "--data".into(), l.data.display().to_string()]),
         cwd: l.data.clone(),
         workspace: WORKSPACE.into(),
     }
@@ -647,7 +937,84 @@ pub fn service_requests(svc: &std::sync::Arc<crate::services::Services>) -> Vec<
         });
         out.push(Ok("Lemonade is running in k3s; it joins Models as lemonade-local when it answers".into()));
     }
+    // Kokoro was pulled into Lemonade: make it the reading voice (TALES, chat replies) when the person has not chosen one
+    if take_after(svc.dir(), "kokoro").is_some() {
+        let me = svc.clone();
+        let _ = std::thread::Builder::new().name("iyakki-kokoro-voice".into()).spawn(move || {
+            for _ in 0..90 {
+                if configure_kokoro_voice(&me) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        });
+        out.push(Ok("Kokoro is installed in Lemonade; it becomes the reading voice for TALES and chat replies unless you chose another voice".into()));
+    }
+    // the voice pack was pulled and tested: set Whisper tiny and Kokoro as the engines of Settings \u{2192} Voice (the old ones are remembered for Undo)
+    if take_after(svc.dir(), "voice-pack").is_some() {
+        let me = svc.clone();
+        let _ = std::thread::Builder::new().name("iyakki-voice-pack".into()).spawn(move || {
+            for _ in 0..90 {
+                if crate::voicepack::configure_when_ready(&me) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        });
+        out.push(Ok("Whisper tiny and Kokoro are installed in Lemonade; they become the speech to text and reading voice of Settings \u{2192} Voice (Remove in the tile's details undoes it)".into()));
+    }
+    // the GPU steps: the cluster restarts once so containerd reads the CDI setting; after a start of IYAKKI the RAM holds nothing of what
+    // they did (CDI specs, the NVIDIA modules and device nodes), so it is put back, once per start for the driver
+    if let Some(user) = take_after(svc.dir(), "k3s-restart") {
+        let me = svc.clone();
+        let _ = std::thread::Builder::new().name("iyakki-gpu-restart".into()).spawn(move || {
+            let _ = me.k3sdev.restart(&user);
+        });
+        out.push(Ok("k3s restarts once so its containerd reads the CDI setting (GPU for local models)".into()));
+    }
+    // put the GPU steps' RAM state back (render-node modes, NVIDIA modules, device nodes, CDI specs) on a thread: loading a module can take
+    // a while, and this runs where the screen is drawn
+    static GPU_RESTORE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    static GPU_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static GPU_DONE: std::sync::Mutex<Vec<Result<String, String>>> = std::sync::Mutex::new(Vec::new());
+    out.extend(std::mem::take(&mut *GPU_DONE.lock().unwrap_or_else(|e| e.into_inner())));
+    if GPU_RESTORE.load(std::sync::atomic::Ordering::Relaxed) < 3 && (marked(svc.dir(), Item::GpuVulkan).is_some() || marked(svc.dir(), Item::GpuNvidia).is_some()) && !GPU_BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let data = svc.dir().to_path_buf();
+        let _ = std::thread::Builder::new().name("iyakki-gpu-restore".into()).spawn(move || {
+            let r = crate::gpu_steps::ensure_runtime(Path::new("/"), &data, &mut |a: &[String]| crate::wsexec::Runner::run(&crate::wsexec::System, Path::new("/"), a, &[], Duration::from_secs(120), 64 * 1024, None));
+            if !r.is_empty() {
+                GPU_RESTORE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                GPU_DONE.lock().unwrap_or_else(|e| e.into_inner()).extend(r);
+            }
+            GPU_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
     out
+}
+
+/// Make Kokoro the reading voice once the local Lemonade answers and lists `kokoro-v1` as downloaded: the Lemonade server joins
+/// Models (as `lemonade-local`) when it is not there yet, its model list is read (so the reading-voice fallback and Settings see the
+/// model), and when no reading voice is set (Settings \u{2192} Voice) `kokoro-v1` becomes it. A voice the person chose is never replaced.
+/// Returns true when it is settled (done, or nothing to do), false to try again.
+pub fn configure_kokoro_voice(svc: &std::sync::Arc<crate::services::Services>) -> bool {
+    let ports = crate::lemonade::local_ports_override().map(|o| o.1).unwrap_or_else(|| crate::lemonade::local_ports().to_vec());
+    let Some((base, version)) = ports.into_iter().find_map(crate::lemonade::probe_local) else { return false };
+    svc.use_local_lemonade(&base, version.as_deref());
+    let want = crate::lemonade::api_base(&base);
+    let id = {
+        let st = svc.settings.lock().unwrap();
+        st.get().providers.iter().find(|p| p.kind == crate::providers::Kind::Lemonade && p.base_url.as_deref().is_some_and(|u| crate::lemonade::api_base(u) == want)).map(|p| p.id.clone())
+    };
+    let Some(id) = id else { return false };
+    match svc.refresh_lemonade(&id) {
+        Ok(list) if list.iter().any(|m| m.id == "kokoro-v1" && m.downloaded) => {}
+        _ => return false,
+    }
+    let chosen = svc.settings.lock().unwrap().get().voice.tts.is_some();
+    if !chosen {
+        let _ = svc.use_lemonade_voice(&id, "kokoro-v1", None);
+    }
+    true
 }
 
 /// The k3s job leaves this after installing: the process that owns the cluster's supervisor (the shell) starts it.
@@ -703,6 +1070,22 @@ pub trait StepEnv {
     fn lemonade_ready(&mut self) -> bool;
     /// Pull a model into the local Lemonade server.
     fn lemonade_pull(&mut self, model: &str) -> Result<(), String>;
+    /// The ids of the models Lemonade has downloaded now (the voice pack pulls only what is missing).
+    fn lemonade_models(&mut self) -> Result<Vec<String>, String> {
+        Err("reading Lemonade's models is not available here".into())
+    }
+    /// Delete a model from Lemonade (taking back what a failed voice pack pulled).
+    fn lemonade_delete(&mut self, _model: &str) -> Result<(), String> {
+        Err("deleting a Lemonade model is not available here".into())
+    }
+    /// The voice pack's self-test (Kokoro speaks, Whisper tiny listens): the plain pass line, or the plain fail line.
+    fn voice_selftest(&mut self) -> Result<String, String> {
+        Err("the voice self-test is not available here".into())
+    }
+    /// Remember the models the voice pack pulled (so Remove deletes only those).
+    fn record_pulled(&mut self, _models: &[String]) -> Result<(), String> {
+        Ok(())
+    }
     /// The registry step was given a cluster of its own (a chosen cluster, not the managed k3s): it does not wait for k3s.
     fn registry_on_other_cluster(&mut self) -> bool {
         false
@@ -712,10 +1095,26 @@ pub trait StepEnv {
     fn link_k3s_tools(&mut self) -> Result<String, String> {
         Ok(String::new())
     }
+    /// The machine side of the GPU steps (files under a root, programs, the vendor download); `None` where there is none.
+    fn gpu(&mut self) -> Option<&mut dyn crate::gpu_steps::GpuEnv> {
+        None
+    }
     /// Create the local image registry in the cluster (`localreg.rs`), saying each step through [`StepEnv::say`]; returns the address
     /// the pods pull it at. Idempotent: a registry that is ready is only reported.
     fn create_registry(&mut self) -> Result<String, String> {
         Err("creating the registry is not available here".into())
+    }
+    /// Install Apple's Wi-Fi and Bluetooth firmware for this T2 Mac from the job's source (`macfw.rs`); returns the plain result line.
+    fn mac_firmware(&mut self) -> Result<String, String> {
+        Err("installing the Mac firmware is not available here".into())
+    }
+    /// Make the first Debian sandbox (`linuxapps.rs`); returns the plain result line.
+    fn linux_apps(&mut self) -> Result<String, String> {
+        Err("making a Linux apps sandbox is not available here".into())
+    }
+    /// Make the `gui` sandbox and install the display server in it (`linuxwin.rs`); returns the plain result line.
+    fn linux_windows(&mut self) -> Result<String, String> {
+        Err("installing Linux windows is not available here".into())
     }
 }
 
@@ -937,6 +1336,26 @@ fn deploy_lemonade(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Res
     env.rollout(LEMONADE_NAMESPACE, "lemonade", Duration::from_secs(1200))
 }
 
+/// Make sure Lemonade answers on this machine: when its own step has not finished (or failed), deploy it here too (applying again changes
+/// nothing); a failure of its own job stops this step at once. Kokoro and the voice pack both start with it.
+pub(crate) fn ensure_lemonade(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Result<(), String> {
+    if !env.lemonade_ready() {
+        deploy_lemonade(env, wait, poll)?;
+        env.request_after("lemonade")?;
+    }
+    env.say("waiting for the Lemonade server");
+    let mut waited = Duration::ZERO;
+    while !env.lemonade_ready() {
+        fail_if_dep_failed(env, Item::Lemonade)?;
+        if waited >= wait {
+            return Err(format!("Lemonade did not answer on port {} after {} minutes; see the Lemonade job's log", crate::lemonade::DEFAULT_PORT, wait.as_secs() / 60));
+        }
+        env.sleep(poll);
+        waited += poll;
+    }
+    Ok(())
+}
+
 /// How a step's prerequisite stands (see [`StepEnv::dep_state`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DepState {
@@ -984,7 +1403,7 @@ fn wait_for_runtime(env: &mut dyn StepEnv, dep: Item, wait: Duration, poll: Dura
 
 /// Wait until the cluster is installed and Ready (a step that needs it). Says how long it has waited about every 30 s. Stops at
 /// once when k3s's own install failed.
-fn wait_for_cluster(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Result<(), String> {
+pub(crate) fn wait_for_cluster(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Result<(), String> {
     let mut waited = Duration::ZERO;
     let mut said = Duration::ZERO;
     loop {
@@ -1099,28 +1518,16 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
         }
         Item::Kokoro => {
             env.say(&format!("[0/3] Kokoro reads through Lemonade: making sure Lemonade runs in k3s (licence: {})", item.licence()));
-            // when Lemonade's own step has not finished (or failed), this step deploys it too; a failure stops this one at once
-            if !env.lemonade_ready() {
-                deploy_lemonade(env, wait, poll)?;
-                env.request_after("lemonade")?;
-            }
-            env.say("waiting for the Lemonade server");
-            let mut waited = Duration::ZERO;
-            while !env.lemonade_ready() {
-                fail_if_dep_failed(env, Item::Lemonade)?;
-                if waited >= wait {
-                    return Err(format!("Lemonade did not answer on port {} after {} minutes; see the Lemonade job's log", crate::lemonade::DEFAULT_PORT, wait.as_secs() / 60));
-                }
-                env.sleep(poll);
-                waited += poll;
-            }
+            ensure_lemonade(env, wait, poll)?;
             env.say("[1/3] Lemonade answers; pulling kokoro-v1 (about 330 MB)");
             env.lemonade_pull("kokoro-v1")?;
             env.mark(Item::Kokoro, "kokoro-v1 in Lemonade")?;
-            env.say("[2/3] kokoro-v1 is downloaded");
-            env.say("[3/3] done: Settings \u{2192} Models \u{2192} lemonade-local \u{2192} kokoro-v1 \u{2192} Use as reading voice");
+            env.say("[2/3] kokoro-v1 is downloaded; asking IYAKKI to make it the reading voice (unless you already chose another one)");
+            env.request_after("kokoro")?;
+            env.say("[3/3] done: Kokoro reads TALES and chat replies. Change it in Settings \u{2192} Voice, or Settings \u{2192} Models \u{2192} lemonade-local \u{2192} kokoro-v1 \u{2192} Use as reading voice");
             Ok(())
         }
+        Item::VoicePack => crate::voicepack::run(env, wait, poll),
         Item::Registry => {
             env.say(&format!("the local image registry runs in the cluster: checking it first (licence: {})", item.licence()));
             if !env.registry_on_other_cluster() {
@@ -1129,6 +1536,28 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
             let pull = env.create_registry()?;
             env.mark(Item::Registry, &format!("pods pull {pull}"))?;
             env.say(&format!("done: the registry is ready; the private store deploy now pushes its image there (pods pull {pull})"));
+            Ok(())
+        }
+        Item::GpuVulkan => crate::gpu_steps::run_vulkan(env, wait, poll),
+        Item::GpuNvidia => crate::gpu_steps::run_nvidia(env, wait, poll),
+        Item::MacFirmware => {
+            let line = env.mac_firmware()?;
+            env.mark(Item::MacFirmware, &line)?;
+            Ok(())
+        }
+        Item::MacCamera => Err("the camera firmware has its own job: `iyakki quick-install mac-camera`".into()),
+        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => Err(format!("this firmware pack has its own job: `iyakki quick-install {}`", item.id())),
+        Item::MacHost => Err("the Mac model host is a guide: open it from Store \u{2192} Setup or Settings \u{2192} Models".into()),
+        Item::LinuxApps => {
+            env.say(crate::linuxapps_dist::LICENCE_NOTE);
+            let line = env.linux_apps()?;
+            env.mark(Item::LinuxApps, &line)?;
+            Ok(())
+        }
+        Item::LinuxWindows => {
+            env.say(crate::linuxwin::NOTE);
+            let line = env.linux_windows()?;
+            env.mark(Item::LinuxWindows, &line)?;
             Ok(())
         }
         Item::IndicTts => Err("Indic-TTS is deployed through the Platform services review (Settings \u{2192} Dev cluster \u{2192} Platform services), not by a job".into()),
@@ -1144,6 +1573,8 @@ pub struct RealEnv {
     streamer: std::sync::Arc<dyn iyakki_proxy::Streamer>,
     /// The registry step's own cluster (`--kubeconfig`), the volume size (`--size`) and NodePort (`--port`).
     registry: RegistryArgs,
+    /// Where the Mac firmware step reads Apple's files from (`--source`, `--path`).
+    mac_source: crate::macfw::Source,
 }
 
 /// What `iyakki quick-install registry` was told besides the data folder.
@@ -1160,7 +1591,7 @@ impl RealEnv {
         let streamer: std::sync::Arc<dyn iyakki_proxy::Streamer> = std::sync::Arc::new(iyakki_proxy::https::UreqStreamer::default());
         clis.set_streamer(streamer.clone());
         let k3s = crate::k3sdev::K3sDev::new(data, clis.clone(), std::sync::Arc::new(crate::wsexec::System));
-        RealEnv { data: data.to_path_buf(), user: user.into(), k3s, clis, streamer, registry: RegistryArgs::default() }
+        RealEnv { data: data.to_path_buf(), user: user.into(), k3s, clis, streamer, registry: RegistryArgs::default(), mac_source: crate::macfw::Source::Download }
     }
 }
 
@@ -1202,13 +1633,85 @@ pub fn link_k3s_tools(bin_dir: &Path, k3s: &Path) -> Result<Vec<String>, String>
     Ok(done)
 }
 
+/// The machine side of the GPU steps on this machine.
+impl crate::gpu_steps::GpuEnv for RealEnv {
+    fn root(&self) -> PathBuf {
+        PathBuf::from("/")
+    }
+    fn data(&self) -> PathBuf {
+        self.data.clone()
+    }
+    fn k3s_data(&self) -> PathBuf {
+        self.k3s.layout().data()
+    }
+    fn dmesg(&mut self) -> String {
+        let o = crate::wsexec::Runner::run(&crate::wsexec::System, Path::new("/"), &["dmesg".to_string()], &[], Duration::from_secs(10), 2 << 20, None);
+        o.stdout
+    }
+    fn run(&mut self, argv: &[String], timeout: Duration) -> crate::wsexec::Out {
+        crate::wsexec::Runner::run(&crate::wsexec::System, Path::new("/"), argv, &[], timeout, 256 * 1024, None)
+    }
+    fn published_checksum(&mut self) -> Option<String> {
+        use std::io::Read;
+        let head = crate::gpu_nvidia::open_run(&*self.streamer, &crate::gpu_nvidia::run_sha_url()).ok()?;
+        let mut t = String::new();
+        head.body.take(4096).read_to_string(&mut t).ok()?;
+        crate::gpu_nvidia::published_sha(&t, &crate::gpu_nvidia::run_file())
+    }
+    fn download_run(&mut self, l: &crate::gpu_nvidia::Layout) -> Result<(), String> {
+        let published = crate::gpu_steps::GpuEnv::published_checksum(self);
+        match &published {
+            Some(p) => println!("NVIDIA publishes the checksum {p}"),
+            None => println!("note: NVIDIA's checksum file could not be fetched; the checksum pinned in IYAKKI still has to match"),
+        }
+        let mut last = u64::MAX;
+        crate::gpu_nvidia::download_run(&*self.streamer, &l.run(), published.as_deref(), &mut |d, t| {
+            let pct = if t > 0 { d * 100 / t } else { 0 };
+            if pct != last {
+                println!("downloading {} MB of {} MB ({pct}%)", d >> 20, t >> 20);
+                last = pct;
+            }
+        })
+    }
+    fn kubectl(&mut self, args: &[&str]) -> crate::wsexec::Out {
+        self.k3s.kubectl(args)
+    }
+    fn request_restart(&mut self) -> Result<(), String> {
+        request_after(&self.data, "k3s-restart", &self.user)
+    }
+}
+
 impl StepEnv for RealEnv {
+    fn gpu(&mut self) -> Option<&mut dyn crate::gpu_steps::GpuEnv> {
+        Some(self)
+    }
     fn link_k3s_tools(&mut self) -> Result<String, String> {
         let l = link_k3s_tools(&self.clis.bin_dir(), &self.k3s.layout().bin())?;
         Ok(if l.is_empty() { String::new() } else { format!("linked {} in {} (terminals and agents can run kubectl; KUBECONFIG points at the dev cluster)", l.join(" and "), self.clis.bin_dir().display()) })
     }
     fn registry_on_other_cluster(&mut self) -> bool {
         self.registry.target.is_some()
+    }
+    fn linux_apps(&mut self) -> Result<String, String> {
+        let exe = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
+        let la = crate::linuxapps::LinuxApps::new(&self.data, &self.user, &exe, std::sync::Arc::new(crate::wsexec::System));
+        if la.get("debian").is_ok() {
+            return Ok("the sandbox debian exists already".into());
+        }
+        let req = crate::linuxapps::CreateReq { name: "debian".into(), release: "debian-12".into(), network: true, mounts: vec![] };
+        let s = la.create(&req, &*self.streamer, &|_, _| Ok(()), &mut |l| println!("{l}"))?;
+        Ok(format!("sandbox {} ({}) is ready", s.name, s.title()))
+    }
+    fn linux_windows(&mut self) -> Result<String, String> {
+        let exe = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
+        let la = crate::linuxapps::LinuxApps::new(&self.data, &self.user, &exe, std::sync::Arc::new(crate::wsexec::System));
+        let streamer = self.streamer.clone();
+        crate::linuxapps::stream(|sink| crate::linuxwin::install(&la, &*streamer, Some(sink), &mut |l| println!("{l}")))
+    }
+    fn mac_firmware(&mut self) -> Result<String, String> {
+        let mut env = crate::macfw::RealEnv::new(&self.data, &self.user, self.clis.clone(), self.streamer.clone());
+        let source = self.mac_source.clone();
+        crate::macfw::run(&mut env, &self.data, &source).map(|o| o.headline)
     }
     fn create_registry(&mut self) -> Result<String, String> {
         let system: std::sync::Arc<dyn crate::wsexec::Runner> = std::sync::Arc::new(crate::wsexec::System);
@@ -1347,6 +1850,19 @@ impl StepEnv for RealEnv {
     fn lemonade_ready(&mut self) -> bool {
         crate::lemonade::local_ports().iter().any(|p| crate::lemonade::probe_local(*p).is_some())
     }
+    fn lemonade_models(&mut self) -> Result<Vec<String>, String> {
+        crate::lemonade::probe_local_models().map(|m| m.into_iter().filter(|m| m.downloaded).map(|m| m.id).collect()).ok_or_else(|| "Lemonade does not answer".to_string())
+    }
+    fn lemonade_delete(&mut self, model: &str) -> Result<(), String> {
+        crate::voicepack::delete_local_model(model)
+    }
+    fn voice_selftest(&mut self) -> Result<String, String> {
+        let base = crate::lemonade::local_ports().iter().find_map(|p| crate::lemonade::probe_local(*p)).map(|b| b.0).ok_or("Self-test failed: Lemonade does not answer")?;
+        crate::voicepack::selftest(&base, std::sync::Arc::new(iyakki_proxy::https::UreqUpstream::with_timeout(Duration::from_secs(300))))
+    }
+    fn record_pulled(&mut self, models: &[String]) -> Result<(), String> {
+        crate::voicepack::record_pulled(&self.data, models)
+    }
     fn lemonade_pull(&mut self, model: &str) -> Result<(), String> {
         let base = crate::lemonade::local_ports().iter().find_map(|p| crate::lemonade::probe_local(*p)).map(|b| b.0).ok_or("Lemonade does not answer")?;
         let up = iyakki_proxy::https::UreqUpstream::with_timeout(Duration::from_secs(3600));
@@ -1425,6 +1941,14 @@ pub fn unmark(data: &Path, item: Item) {
 
 /// `iyakki quick-install <k3s|duckdb|elasticsearch> [--data DIR] [--user NAME]`: one step, as the job runs it. Returns the exit code.
 pub fn cli_main(args: &[String]) -> i32 {
+    // the GPU page's test prompt: not an installable item
+    if args.first().is_some_and(|a| a == "gpu-test") {
+        return gpu_test_main(args);
+    }
+    // the camera firmware: not an installable item either
+    if args.first().is_some_and(|a| a == CAMERA_JOB) {
+        return camera_firmware_main(args);
+    }
     let Some(item) = args.first().and_then(|a| Item::parse(a)) else {
         eprintln!("usage: iyakki quick-install <k3s|duckdb|elasticsearch> [--data DIR] [--user NAME]");
         return 2;
@@ -1432,6 +1956,9 @@ pub fn cli_main(args: &[String]) -> i32 {
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let data = PathBuf::from(flag("--data").unwrap_or_else(|| "/var/lib/iyakki".into()));
     let user = flag("--user").or_else(|| std::env::var("USER").ok()).unwrap_or_else(|| "system".into());
+    if item.fw_def().is_some() {
+        return firmware_pack_main(args, item, &data, &user);
+    }
     let mut env = RealEnv::new(&data, &user);
     if item == Item::Registry {
         env.registry = match registry_args(args) {
@@ -1442,8 +1969,78 @@ pub fn cli_main(args: &[String]) -> i32 {
             }
         };
     }
+    if item == Item::MacFirmware {
+        env.mac_source = match crate::macfw::Source::from_args(args) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("error: {e}");
+                return 2;
+            }
+        };
+    }
     match run_step(item, &mut env, WAIT_FOR_CLUSTER, Duration::from_secs(5)) {
         Ok(()) => 0,
+        Err(e) => {
+            println!("error: {e}");
+            1
+        }
+    }
+}
+
+/// `iyakki quick-install fw-<name> [--data DIR] [--from FOLDER] [--accept-licence] [--force-hardware] [--user NAME]`: a restricted firmware
+/// pack, its log is what the person reads. `--accept-licence` prints the vendor's licence note and records the acceptance for `--user`
+/// (the Setup tile does the same with a click, and writes the audit log line); without an acceptance the job installs nothing.
+fn firmware_pack_main(args: &[String], item: Item, data: &Path, user: &str) -> i32 {
+    let Some(def) = item.fw_def() else { return 2 };
+    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    if args.iter().any(|a| a == "--accept-licence") {
+        println!("licence of {}: {}", def.title, def.licence_note);
+        if let Err(e) = crate::fwpack::accept(data, def, &format!("cli:{user}"), crate::clock::now_unix()) {
+            println!("error: {e}");
+            return 1;
+        }
+        println!("accepted by cli:{user} (recorded in {})", crate::fwpack::work_dir(data, def).display());
+    }
+    let streamer: std::sync::Arc<dyn iyakki_proxy::Streamer> = std::sync::Arc::new(iyakki_proxy::https::UreqStreamer::default());
+    let mut env = crate::fwpack::RealEnv::new(data, streamer);
+    let force = args.iter().any(|a| a == "--force-hardware");
+    let r = match flag("--from") {
+        Some(f) => crate::fwpack::run_folder(&mut env, data, def, force, Path::new(&f)),
+        None => crate::fwpack::run(&mut env, data, def, force),
+    };
+    match r {
+        Ok(_) => 0,
+        Err(e) => {
+            println!("error: {e}");
+            1
+        }
+    }
+}
+
+/// `iyakki quick-install mac-camera [--data DIR]`: the camera firmware job, its log is what the person reads.
+fn camera_firmware_main(args: &[String]) -> i32 {
+    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let data = PathBuf::from(flag("--data").unwrap_or_else(|| "/var/lib/iyakki".into()));
+    let streamer: std::sync::Arc<dyn iyakki_proxy::Streamer> = std::sync::Arc::new(iyakki_proxy::https::UreqStreamer::default());
+    let mut env = crate::camfw::RealEnv::new(&data, streamer);
+    match crate::camfw::run(&mut env, &data) {
+        Ok(_) => 0,
+        Err(e) => {
+            println!("error: {e}");
+            1
+        }
+    }
+}
+
+/// `iyakki quick-install gpu-test [--data DIR]`: the test prompt of the GPU page, as a job (its log is the result).
+fn gpu_test_main(args: &[String]) -> i32 {
+    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let data = PathBuf::from(flag("--data").unwrap_or_else(|| "/var/lib/iyakki".into()));
+    let bases: Vec<String> = crate::gpu_steps::test_endpoints(&crate::lemonade::local_ports().iter().filter_map(|p| crate::lemonade::probe_local(*p).map(|b| b.0)).collect::<Vec<_>>());
+    let up = iyakki_proxy::https::UreqUpstream::with_timeout(Duration::from_secs(600));
+    let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    match crate::gpu_steps::run_test(&data, &bases, &up, &now, &mut |l| println!("{l}")) {
+        Ok(_) => 0,
         Err(e) => {
             println!("error: {e}");
             1

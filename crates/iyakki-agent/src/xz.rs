@@ -1,4 +1,5 @@
-//! An in-house `.xz` reader (LZMA2 only, the filter every `xz` command writes) and an MD5 digest, so IYAKKI can unpack the static
+//! An in-house `.xz` reader (LZMA2, with the branch filters x86, ARM, ARM Thumb, ARM64, PowerPC, SPARC and delta before it, as 7-Zip's
+//! own Linux builds use x86 BCJ; IA-64 and RISC-V are refused) and an MD5 digest, so IYAKKI can unpack the static
 //! ffmpeg build the vendor ships as `.tar.xz` and check it against the `.md5` file next to it, with no extra program or library.
 //!
 //! The reader decodes one or more streams of blocks into any [`Write`]; the check bytes (CRC) are skipped (the caller checks the
@@ -277,6 +278,285 @@ fn lzma_chunk<W: Write>(m: &mut Model, d: &mut Dict<W>, data: &[u8], unpacked: u
     Ok(())
 }
 
+// ------------------------------------------------------------------------------------------------ the simple filters
+
+/// A filter that comes before LZMA2 in an xz block header (the branch converters `xz --x86` and friends, and delta). The decoder
+/// undoes them on the LZMA2 output. IA64 and RISC-V are not supported (an error, not a guess).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Delta(usize),
+    X86,
+    Ppc,
+    Arm,
+    ArmThumb,
+    Sparc,
+    Arm64,
+}
+
+impl Kind {
+    fn from_header(id: u64, props: &[u8]) -> Result<Kind, String> {
+        let no_props = |k: Kind| if props.is_empty() { Ok(k) } else { Err("an xz filter with options that are not supported (a start offset)".to_string()) };
+        match id {
+            0x03 if props.len() == 1 => Ok(Kind::Delta(props[0] as usize + 1)),
+            0x03 => Err("damaged xz header".into()),
+            0x04 => no_props(Kind::X86),
+            0x05 => no_props(Kind::Ppc),
+            0x07 => no_props(Kind::Arm),
+            0x08 => no_props(Kind::ArmThumb),
+            0x09 => no_props(Kind::Sparc),
+            0x0A => no_props(Kind::Arm64),
+            0x06 => Err("an xz file with the IA-64 filter is not supported".into()),
+            0x0B => Err("an xz file with the RISC-V filter is not supported".into()),
+            0x21 => Err("damaged xz header".into()),
+            _ => Err("an xz file with a filter that is not supported".into()),
+        }
+    }
+}
+
+/// Where decoded bytes go, with a last call that lets filters pass on what they held back.
+trait Fin: Write {
+    fn fin(&mut self) -> std::io::Result<()>;
+}
+
+struct Base<'a>(&'a mut dyn Write);
+
+impl Write for Base<'_> {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.write(b)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl Fin for Base<'_> {
+    fn fin(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+struct Stage<'a> {
+    next: Box<dyn Fin + 'a>,
+    kind: Kind,
+    buf: Vec<u8>,
+    pos: u64,
+    // x86 state
+    prev_mask: u32,
+    prev_pos: u32,
+    // delta history
+    hist: [u8; 256],
+    hpos: usize,
+}
+
+fn build_chain<'a>(kinds: &[Kind], out: &'a mut dyn Write) -> Box<dyn Fin + 'a> {
+    // the first filter in the header was applied first when compressing, so it is undone last: it is nearest the output
+    let mut next: Box<dyn Fin + 'a> = Box::new(Base(out));
+    for k in kinds {
+        next = Box::new(Stage { next, kind: k.clone(), buf: Vec::new(), pos: 0, prev_mask: 0, prev_pos: (-5i32) as u32, hist: [0; 256], hpos: 0 });
+    }
+    next
+}
+
+fn rd32le(b: &[u8]) -> u32 {
+    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
+
+fn test86(b: u8) -> bool {
+    b == 0 || b == 0xFF
+}
+
+impl Stage<'_> {
+    /// Decode as much of `self.buf` as can be finished; returns how many bytes are final.
+    fn process(&mut self) -> usize {
+        let now = self.pos as u32;
+        let buf = &mut self.buf[..];
+        let size = buf.len();
+        match self.kind {
+            Kind::Delta(dist) => {
+                for b in buf.iter_mut() {
+                    let v = b.wrapping_add(self.hist[(self.hpos + 256 - dist) & 0xFF]);
+                    self.hist[self.hpos & 0xFF] = v;
+                    self.hpos = (self.hpos + 1) & 0xFF;
+                    *b = v;
+                }
+                size
+            }
+            Kind::X86 => {
+                const ALLOWED: [bool; 8] = [true, true, true, false, true, false, false, false];
+                const BITNO: [u32; 8] = [0, 1, 2, 2, 3, 3, 3, 3];
+                if size < 5 {
+                    return 0;
+                }
+                let (mut prev_mask, mut prev_pos) = (self.prev_mask, self.prev_pos);
+                if now.wrapping_sub(prev_pos) > 5 {
+                    prev_pos = now.wrapping_sub(5);
+                }
+                let limit = size - 5;
+                let mut p = 0usize;
+                while p <= limit {
+                    let mut b = buf[p];
+                    if b != 0xE8 && b != 0xE9 {
+                        p += 1;
+                        continue;
+                    }
+                    let offset = now.wrapping_add(p as u32).wrapping_sub(prev_pos);
+                    prev_pos = now.wrapping_add(p as u32);
+                    if offset > 5 {
+                        prev_mask = 0;
+                    } else {
+                        for _ in 0..offset {
+                            prev_mask &= 0x77;
+                            prev_mask <<= 1;
+                        }
+                    }
+                    b = buf[p + 4];
+                    if test86(b) && ALLOWED[((prev_mask >> 1) & 7) as usize] && (prev_mask >> 1) < 0x10 {
+                        let mut src = (b as u32) << 24 | (buf[p + 3] as u32) << 16 | (buf[p + 2] as u32) << 8 | buf[p + 1] as u32;
+                        let mut dest;
+                        loop {
+                            dest = src.wrapping_sub(now.wrapping_add(p as u32).wrapping_add(5));
+                            if prev_mask == 0 {
+                                break;
+                            }
+                            let i = BITNO[(prev_mask >> 1) as usize];
+                            b = (dest >> (24 - i * 8)) as u8;
+                            if !test86(b) {
+                                break;
+                            }
+                            src = dest ^ ((1u32 << (32 - i * 8)) - 1);
+                        }
+                        buf[p + 4] = !((((dest >> 24) & 1) as u8).wrapping_sub(1));
+                        buf[p + 3] = (dest >> 16) as u8;
+                        buf[p + 2] = (dest >> 8) as u8;
+                        buf[p + 1] = dest as u8;
+                        p += 5;
+                        prev_mask = 0;
+                    } else {
+                        p += 1;
+                        prev_mask |= 1;
+                        if test86(b) {
+                            prev_mask |= 0x10;
+                        }
+                    }
+                }
+                self.prev_mask = prev_mask;
+                self.prev_pos = prev_pos;
+                p
+            }
+            Kind::Arm => {
+                let mut i = 0;
+                while i + 4 <= size {
+                    if buf[i + 3] == 0xEB {
+                        let src = ((buf[i + 2] as u32) << 16 | (buf[i + 1] as u32) << 8 | buf[i] as u32) << 2;
+                        let dest = src.wrapping_sub(now.wrapping_add(i as u32).wrapping_add(8)) >> 2;
+                        buf[i + 2] = (dest >> 16) as u8;
+                        buf[i + 1] = (dest >> 8) as u8;
+                        buf[i] = dest as u8;
+                    }
+                    i += 4;
+                }
+                i
+            }
+            Kind::ArmThumb => {
+                let mut i = 0;
+                while i + 4 <= size {
+                    if (buf[i + 1] & 0xF8) == 0xF0 && (buf[i + 3] & 0xF8) == 0xF8 {
+                        let src = (((buf[i + 1] as u32) & 7) << 19 | (buf[i] as u32) << 11 | ((buf[i + 3] as u32) & 7) << 8 | buf[i + 2] as u32) << 1;
+                        let dest = src.wrapping_sub(now.wrapping_add(i as u32).wrapping_add(4)) >> 1;
+                        buf[i + 1] = 0xF0 | ((dest >> 19) & 7) as u8;
+                        buf[i] = (dest >> 11) as u8;
+                        buf[i + 3] = 0xF8 | ((dest >> 8) & 7) as u8;
+                        buf[i + 2] = dest as u8;
+                        i += 2;
+                    }
+                    i += 2;
+                }
+                i
+            }
+            Kind::Ppc => {
+                let mut i = 0;
+                while i + 4 <= size {
+                    if (buf[i] >> 2) == 0x12 && (buf[i + 3] & 3) == 1 {
+                        let src = ((buf[i] as u32) & 3) << 24 | (buf[i + 1] as u32) << 16 | (buf[i + 2] as u32) << 8 | (buf[i + 3] as u32 & !3);
+                        let dest = src.wrapping_sub(now.wrapping_add(i as u32));
+                        buf[i] = 0x48 | ((dest >> 24) & 3) as u8;
+                        buf[i + 1] = (dest >> 16) as u8;
+                        buf[i + 2] = (dest >> 8) as u8;
+                        buf[i + 3] = (buf[i + 3] & 3) | (dest as u8 & !3);
+                    }
+                    i += 4;
+                }
+                i
+            }
+            Kind::Sparc => {
+                let mut i = 0;
+                while i + 4 <= size {
+                    if (buf[i] == 0x40 && (buf[i + 1] & 0xC0) == 0) || (buf[i] == 0x7F && (buf[i + 1] & 0xC0) == 0xC0) {
+                        let src = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) << 2;
+                        let mut dest = src.wrapping_sub(now.wrapping_add(i as u32)) >> 2;
+                        dest = ((0u32.wrapping_sub((dest >> 22) & 1) << 22) & 0x3FFF_FFFF) | (dest & 0x3F_FFFF) | 0x4000_0000;
+                        buf[i..i + 4].copy_from_slice(&dest.to_be_bytes());
+                    }
+                    i += 4;
+                }
+                i
+            }
+            Kind::Arm64 => {
+                let mut i = 0;
+                while i + 4 <= size {
+                    let pc = now.wrapping_add(i as u32);
+                    let mut instr = rd32le(&buf[i..]);
+                    if (instr >> 26) == 0x25 {
+                        let src = instr;
+                        instr = 0x9400_0000;
+                        let pcw = 0u32.wrapping_sub(pc >> 2);
+                        instr |= src.wrapping_add(pcw) & 0x03FF_FFFF;
+                        buf[i..i + 4].copy_from_slice(&instr.to_le_bytes());
+                    } else if (instr & 0x9F00_0000) == 0x9000_0000 {
+                        let src = ((instr >> 29) & 3) | ((instr >> 3) & 0x001F_FFFC);
+                        if (src.wrapping_add(0x0002_0000) & 0x001C_0000) == 0 {
+                            instr &= 0x9000_001F;
+                            let pcw = 0u32.wrapping_sub(pc >> 12);
+                            let dest = src.wrapping_add(pcw);
+                            instr |= (dest & 3) << 29;
+                            instr |= (dest & 0x0003_FFFC) << 3;
+                            instr |= 0u32.wrapping_sub(dest & 0x0002_0000) & 0x00E0_0000;
+                            buf[i..i + 4].copy_from_slice(&instr.to_le_bytes());
+                        }
+                    }
+                    i += 4;
+                }
+                i
+            }
+        }
+    }
+}
+
+impl Write for Stage<'_> {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        let n = self.process();
+        if n > 0 {
+            self.next.write_all(&self.buf[..n])?;
+            self.buf.drain(..n);
+            self.pos += n as u64;
+        }
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Fin for Stage<'_> {
+    fn fin(&mut self) -> std::io::Result<()> {
+        // what is left (less than one instruction) was never converted by the encoder either
+        let rest = std::mem::take(&mut self.buf);
+        self.next.write_all(&rest)?;
+        self.next.fin()
+    }
+}
+
 fn varint(b: &[u8], i: &mut usize) -> Result<u64, String> {
     let mut r = 0u64;
     for k in 0..9 {
@@ -332,9 +612,7 @@ pub fn decompress<W: Write>(data: &[u8], out: &mut W, limit: u64) -> Result<u64,
             }
             let h = &data[at..at + hsize];
             let flags = h[1];
-            if flags & 0x03 != 0 {
-                return Err("an xz file with more than one filter is not supported".into());
-            }
+            let nfilters = (flags & 0x03) as usize + 1;
             let mut i = 2;
             if flags & 0x40 != 0 {
                 varint(h, &mut i)?;
@@ -342,20 +620,33 @@ pub fn decompress<W: Write>(data: &[u8], out: &mut W, limit: u64) -> Result<u64,
             if flags & 0x80 != 0 {
                 varint(h, &mut i)?;
             }
-            if varint(h, &mut i)? != 0x21 {
-                return Err("an xz file that is not LZMA2 is not supported".into());
+            // the filter chain: any number of simple filters (BCJ, delta), then LZMA2 last
+            let mut kinds: Vec<Kind> = Vec::new();
+            let mut dict = 0usize;
+            for k in 0..nfilters {
+                let id = varint(h, &mut i)?;
+                let plen = varint(h, &mut i)? as usize;
+                let props = h.get(i..i.saturating_add(plen)).ok_or("damaged xz header")?;
+                i += plen;
+                if k + 1 == nfilters {
+                    if id != 0x21 {
+                        return Err("an xz file whose last filter is not LZMA2 is not supported".into());
+                    }
+                    let dbyte = *props.first().ok_or("damaged xz header")? as u32;
+                    if plen != 1 || dbyte > 40 {
+                        return Err("damaged xz header".into());
+                    }
+                    dict = if dbyte == 40 { u32::MAX as usize } else { ((2 | (dbyte & 1)) as usize) << (dbyte / 2 + 11) };
+                } else {
+                    kinds.push(Kind::from_header(id, props)?);
+                }
             }
-            let _props_len = varint(h, &mut i)?;
-            let dbyte = *h.get(i).ok_or("damaged xz header")? as u32;
-            if dbyte > 40 {
-                return Err("damaged xz header".into());
-            }
-            let dict = if dbyte == 40 { u32::MAX as usize } else { ((2 | (dbyte & 1)) as usize) << (dbyte / 2 + 11) };
             if dict > MAX_DICT {
                 return Err(format!("the xz dictionary ({} MB) is larger than allowed", dict >> 20));
             }
             at += hsize;
-            let mut d = Dict { buf: vec![0; dict.max(4096)], pos: 0, full: 0, total: 0, out, pending: Vec::new(), written: total, limit };
+            let mut chain = build_chain(&kinds, &mut *out);
+            let mut d = Dict { buf: vec![0; dict.max(4096)], pos: 0, full: 0, total: 0, out: &mut chain, pending: Vec::new(), written: total, limit };
             let mut m = Model::new();
             loop {
                 let c = *data.get(at).ok_or("the xz file ends early")?;
@@ -415,7 +706,11 @@ pub fn decompress<W: Write>(data: &[u8], out: &mut W, limit: u64) -> Result<u64,
                 }
             }
             d.flush()?;
-            total = d.written;
+            let written = d.written;
+            drop(d);
+            chain.fin().map_err(|e| e.to_string())?;
+            drop(chain);
+            total = written;
             // block padding to four bytes, then the check
             at = ((at + 3) & !3) + check;
         }
@@ -591,6 +886,134 @@ mod tests {
         // the same file cut short is an error, and a tiny limit stops it
         assert!(decompress(&XZ[..XZ.len() / 2], &mut Vec::new(), 1 << 20).is_err());
         assert!(decompress(XZ, &mut Vec::new(), 100).is_err());
+    }
+
+    /// Compress `data` with the `xz` program and the given filter options (`None` when xz or the filter is not on this machine).
+    fn xz_with(args: &[&str], data: &[u8]) -> Option<Vec<u8>> {
+        use std::process::{Command, Stdio};
+        let mut c = Command::new("xz").args(["-c", "-T1", "--check=crc32"]).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+        let mut stdin = c.stdin.take()?;
+        let d = data.to_vec();
+        let t = std::thread::spawn(move || {
+            let _ = stdin.write_all(&d);
+        });
+        let out = c.wait_with_output().ok()?;
+        let _ = t.join();
+        (out.status.success() && !out.stdout.is_empty()).then_some(out.stdout)
+    }
+
+    /// Bytes that look like code for every converter: calls and jumps with small and large offsets, plus text.
+    fn codeish(n: usize) -> Vec<u8> {
+        let mut v = Vec::with_capacity(n);
+        let mut x = 0x1234_5678u32;
+        while v.len() < n {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            match (x >> 24) % 9 {
+                0 => v.extend_from_slice(&[0xE8, (x >> 8) as u8, (x >> 16) as u8, 0x00, 0x00]),
+                1 => v.extend_from_slice(&[0xE9, (x >> 8) as u8, 0xFF, 0xFF, 0xFF]),
+                2 => v.extend_from_slice(&[(x >> 8) as u8, (x >> 16) as u8, (x >> 4) as u8, 0xEB]),
+                3 => v.extend_from_slice(&[0x94, 0x00, (x >> 8) as u8, (x >> 12) as u8]),
+                4 => v.extend_from_slice(&[0x90, 0x01, (x >> 8) as u8, 0xB0]),
+                5 => v.extend_from_slice(&[0x48, (x >> 8) as u8, (x >> 16) as u8, 0x01]),
+                6 => v.extend_from_slice(&[0x40, 0x00, (x >> 8) as u8, (x >> 16) as u8]),
+                7 => v.extend_from_slice(&[(x >> 8) as u8, 0xF0, (x >> 16) as u8, 0xF8]),
+                _ => v.extend_from_slice(b"static 7-Zip program text "),
+            }
+        }
+        v.truncate(n);
+        v
+    }
+
+    #[test]
+    fn every_branch_filter_xz_writes_round_trips_through_our_decoder() {
+        if xz_with(&[], b"x").is_none() {
+            eprintln!("skipped: no xz program");
+            return;
+        }
+        let data = codeish(300_000);
+        let mut ran = 0;
+        for f in ["--x86", "--arm", "--armthumb", "--powerpc", "--sparc", "--arm64", "--delta=dist=4", "--delta"] {
+            let Some(x) = xz_with(&[f, "--lzma2=preset=1"], &data) else {
+                eprintln!("skipped {f}: this xz does not have it");
+                continue;
+            };
+            let mut out = Vec::new();
+            decompress(&x, &mut out, 1 << 24).unwrap_or_else(|e| panic!("{f}: {e}"));
+            assert!(out == data, "{f}: the bytes differ");
+            ran += 1;
+        }
+        assert!(ran >= 4, "at least the common filters ran ({ran})");
+        // two filters in one chain (delta then x86), a filter over several blocks, and a tiny input
+        if let Some(x) = xz_with(&["--x86", "--delta=dist=2", "--lzma2=preset=0"], &data) {
+            let mut out = Vec::new();
+            decompress(&x, &mut out, 1 << 24).unwrap();
+            assert!(out == data, "x86 + delta");
+        }
+        if let Some(x) = xz_with(&["--x86", "--lzma2=preset=1", "--block-size=40000"], &data) {
+            let mut out = Vec::new();
+            decompress(&x, &mut out, 1 << 24).unwrap();
+            assert!(out == data, "x86 over many blocks");
+        }
+        let tiny = [0xE8u8, 1, 2, 0, 0, 7];
+        if let Some(x) = xz_with(&["--x86", "--lzma2=preset=0"], &tiny) {
+            let mut out = Vec::new();
+            decompress(&x, &mut out, 1 << 20).unwrap();
+            assert_eq!(out, tiny);
+        }
+    }
+
+    /// Replace the filter list of the first block header of a plain LZMA2 file (made by `make_xz_stored`) and fix the sizes.
+    fn with_filters(filters: &[u8], count: u8) -> Vec<u8> {
+        // header: size byte, flags, filters..., padding, crc32 (not read)
+        let mut hdr = vec![0u8, count - 1];
+        hdr.extend_from_slice(filters);
+        while (hdr.len() + 4) % 4 != 0 {
+            hdr.push(0);
+        }
+        hdr.extend_from_slice(&[0; 4]);
+        hdr[0] = (hdr.len() / 4 - 1) as u8;
+        let mut x = vec![0xFD, b'7', b'z', b'X', b'Z', 0, 0, 4, 0, 0, 0, 0];
+        x.extend_from_slice(&hdr);
+        x.extend_from_slice(&[1, 0, 4, b'a', b'b', b'c', b'd', b'e', 0]);
+        while x.len() % 4 != 0 {
+            x.push(0);
+        }
+        x.extend_from_slice(&[0; 8]);
+        x.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        x
+    }
+
+    #[test]
+    fn hostile_filter_lists_are_refused_plainly_and_a_good_one_works() {
+        let lz = [0x21u8, 1, 0x16];
+        let mut out = Vec::new();
+        // x86 then LZMA2: fine
+        let ok = with_filters(&[&[0x04u8, 0][..], &lz].concat(), 2);
+        assert_eq!(decompress(&ok, &mut out, 1 << 20).unwrap(), 5);
+        assert_eq!(out, b"abcde");
+        let bad: Vec<(Vec<u8>, u8, &str)> = vec![
+            ([&[0x06u8, 0][..], &lz].concat(), 2, "IA-64"),
+            ([&[0x0Bu8, 0][..], &lz].concat(), 2, "RISC-V"),
+            ([&[0x55u8, 0][..], &lz].concat(), 2, "not supported"),
+            ([&[0x04u8, 4, 1, 2, 3, 4][..], &lz].concat(), 2, "options"),
+            ([&[0x03u8, 0][..], &lz].concat(), 2, "damaged"),
+            ([&[0x04u8, 0][..], &[0x04, 0]].concat(), 2, "last filter"),
+            ([&[0x21u8, 1, 0x16][..], &lz].concat(), 2, "damaged"),
+            ([&[0x04u8, 9][..], &lz].concat(), 2, "damaged"),
+            ([&[0x04u8][..]].concat(), 2, "last filter"),
+        ];
+        for (f, n, why) in bad {
+            let x = with_filters(&f, n);
+            let e = decompress(&x, &mut Vec::new(), 1 << 20).unwrap_err();
+            assert!(e.contains(why), "{why}: {e}");
+        }
+        // a chain cut anywhere never panics
+        for cut in 0..ok.len() {
+            let _ = decompress(&ok[..cut], &mut Vec::new(), 1 << 20);
+        }
+        // the output limit holds through a filter
+        let big = with_filters(&[&[0x04u8, 0][..], &lz].concat(), 2);
+        assert!(decompress(&big, &mut Vec::new(), 2).is_err());
     }
 
     /// Set IYAKKI_XZ_FILE to an .xz file and IYAKKI_XZ_MD5 to the md5 of what it unpacks to.

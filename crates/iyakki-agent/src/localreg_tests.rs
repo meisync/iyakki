@@ -440,5 +440,5 @@ fn the_messages_say_what_is_wrong_and_what_to_do() {
     assert!(crate::platform::deploy_refusal(&p).unwrap().contains("reachable from this machine"));
     p.exists = false;
     assert!(crate::platform::deploy_refusal(&p).unwrap().contains("cannot be read"));
-    assert!(explain_kubectl("kubectl is not installed").contains("Quick install"));
+    assert!(explain_kubectl("kubectl is not installed").contains("Setup"));
 }

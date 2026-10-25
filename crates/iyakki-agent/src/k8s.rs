@@ -8,10 +8,11 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::k8sretry::{Retry, Status, Tracker, Verdict};
 use crate::wsexec::Out;
 
 pub const REQUEST_TIMEOUT_SECS: u64 = 8;
@@ -30,7 +31,12 @@ pub struct Target {
 }
 
 impl Target {
-    fn base_args(&self) -> Vec<String> {
+    pub fn base_args(&self) -> Vec<String> {
+        self.base_args_secs(REQUEST_TIMEOUT_SECS)
+    }
+
+    /// The leading arguments (kubeconfig, context, request timeout) with another request timeout (actions wait up to 30 s).
+    pub fn base_args_secs(&self, secs: u64) -> Vec<String> {
         let mut a = Vec::new();
         if !self.kubeconfig.is_empty() {
             a.push("--kubeconfig".into());
@@ -40,7 +46,7 @@ impl Target {
             a.push("--context".into());
             a.push(self.context.clone());
         }
-        a.push(format!("--request-timeout={REQUEST_TIMEOUT_SECS}s"));
+        a.push(format!("--request-timeout={secs}s"));
         a
     }
 }
@@ -48,6 +54,11 @@ impl Target {
 /// Runs kubectl with these arguments (everything after `kubectl`).
 pub trait Kube: Send + Sync {
     fn run(&self, args: &[String]) -> Out;
+    /// The same with a longer limit (seconds) for the whole call: the explorer's actions wait up to 30 s. A runner that cannot
+    /// change its limit uses its own.
+    fn run_with(&self, args: &[String], _timeout_secs: u64) -> Out {
+        self.run(args)
+    }
 }
 
 /// The real thing.
@@ -167,11 +178,13 @@ pub struct Snapshot {
     pub taken_at: u64,
     /// Plain-English notes about problems found (pods that cannot start and why).
     pub notes: Vec<String>,
+    /// A failed snapshot whose cause may pass (see `k8sretry`): the feed keeps the last good one on screen.
+    pub transient: bool,
 }
 
 impl Snapshot {
     pub fn empty(target: &Target, cluster: Cluster, now: u64) -> Snapshot {
-        Snapshot { cluster, target: target.clone(), context: String::new(), namespaces: vec![], namespace_found: false, workloads: vec![], services: vec![], ingresses: vec![], pods: vec![], configmaps: vec![], secrets: vec![], pvcs: vec![], nodes: vec![], taken_at: now, notes: vec![] }
+        Snapshot { cluster, target: target.clone(), context: String::new(), namespaces: vec![], namespace_found: false, workloads: vec![], services: vec![], ingresses: vec![], pods: vec![], configmaps: vec![], secrets: vec![], pvcs: vec![], nodes: vec![], taken_at: now, notes: vec![], transient: false }
     }
 }
 
@@ -211,7 +224,7 @@ pub struct PodDetail {
 
 // ------------------------------------------------------------------------------------------------------------ helpers
 
-fn at<'a>(v: &'a Value, path: &[&str]) -> &'a Value {
+pub(crate) fn at<'a>(v: &'a Value, path: &[&str]) -> &'a Value {
     let mut c = v;
     for p in path {
         c = &c[*p];
@@ -219,11 +232,11 @@ fn at<'a>(v: &'a Value, path: &[&str]) -> &'a Value {
     c
 }
 
-fn text(v: &Value, path: &[&str]) -> String {
+pub(crate) fn text(v: &Value, path: &[&str]) -> String {
     at(v, path).as_str().unwrap_or("").to_string()
 }
 
-fn int(v: &Value, path: &[&str]) -> i64 {
+pub(crate) fn int(v: &Value, path: &[&str]) -> i64 {
     at(v, path).as_i64().unwrap_or(0)
 }
 
@@ -244,7 +257,7 @@ pub fn parse_time(s: &str) -> u64 {
     (days * 86_400 + h * 3600 + mi * 60 + se).max(0) as u64
 }
 
-fn age_of(v: &Value, now: u64) -> u64 {
+pub(crate) fn age_of(v: &Value, now: u64) -> u64 {
     let t = parse_time(&text(v, &["metadata", "creationTimestamp"]));
     if t == 0 { 0 } else { now.saturating_sub(t) }
 }
@@ -277,7 +290,7 @@ pub fn explain(reason: &str) -> Option<&'static str> {
     })
 }
 
-fn classify_failure(o: &Out) -> Cluster {
+pub(crate) fn classify_failure(o: &Out) -> Cluster {
     if o.missing {
         return Cluster::KubectlMissing;
     }
@@ -289,10 +302,19 @@ fn classify_failure(o: &Out) -> Cluster {
     if e.contains("forbidden") {
         return Cluster::Forbidden(o.stderr.lines().next().unwrap_or("forbidden").chars().take(200).collect());
     }
-    Cluster::Failed(o.combined().lines().next().unwrap_or("kubectl failed").chars().take(200).collect())
+    // the first line that says something: a killed `get -o json` leaves only "{" (or nothing) behind
+    let json_out = matches!(o.stdout.trim_start().chars().next(), Some('{' | '['));
+    let msg = o.stderr.lines().chain(o.stdout.lines().take(if json_out { 0 } else { usize::MAX })).map(str::trim).find(|l| !l.is_empty() && !matches!(*l, "{" | "}" | "[" | "]"));
+    Cluster::Failed(match msg {
+        Some(l) => l.chars().take(200).collect(),
+        None => match o.code {
+            Some(c) => format!("kubectl stopped with exit code {c} and no message"),
+            None => "kubectl was stopped before it finished (the computer may be busy)".to_string(),
+        },
+    })
 }
 
-fn json(o: &Out) -> Option<Value> {
+pub(crate) fn json(o: &Out) -> Option<Value> {
     serde_json::from_str(&o.stdout).ok()
 }
 
@@ -300,7 +322,7 @@ fn names(o: &Out) -> Vec<String> {
     o.stdout.lines().filter_map(|l| l.trim().split_once('/').map(|x| x.1.to_string())).collect()
 }
 
-fn health_pod(phase: &str, reason: &str, ready: bool) -> Health {
+pub(crate) fn health_pod(phase: &str, reason: &str, ready: bool) -> Health {
     match (phase, reason) {
         (_, "CrashLoopBackOff" | "ImagePullBackOff" | "ErrImagePull" | "CreateContainerConfigError" | "OOMKilled" | "Error" | "Evicted" | "InvalidImageName" | "CreateContainerError") => Health::Bad,
         ("Failed", _) => Health::Bad,
@@ -312,7 +334,7 @@ fn health_pod(phase: &str, reason: &str, ready: bool) -> Health {
     }
 }
 
-fn parse_pod(p: &Value, now: u64) -> Pod {
+pub(crate) fn parse_pod(p: &Value, now: u64) -> Pod {
     let statuses = at(p, &["status", "containerStatuses"]).as_array().cloned().unwrap_or_default();
     let total = at(p, &["spec", "containers"]).as_array().map_or(0, |a| a.len());
     let ready_n = statuses.iter().filter(|c| c["ready"].as_bool() == Some(true)).count();
@@ -368,7 +390,7 @@ fn parse_workload(kind: &str, w: &Value, now: u64) -> Workload {
     Workload { kind: kind.to_string(), name: text(w, &["metadata", "name"]), ready, desired, images, age: age_of(w, now), health, status }
 }
 
-fn parse_service(s: &Value, now: u64) -> Service {
+pub(crate) fn parse_service(s: &Value, now: u64) -> Service {
     let ports = at(s, &["spec", "ports"]).as_array().map(|a| {
         a.iter().map(|p| {
             let (port, proto) = (int(p, &["port"]), p["protocol"].as_str().unwrap_or("TCP"));
@@ -393,13 +415,13 @@ fn parse_service(s: &Value, now: u64) -> Service {
     Service { name: text(s, &["metadata", "name"]), kind, cluster_ip: text(s, &["spec", "clusterIP"]), ports, external, node_ports: at(s, &["spec", "ports"]).as_array().map(|a| a.iter().map(|p| int(p, &["nodePort"])).filter(|n| *n > 0).collect()).unwrap_or_default(), age: age_of(s, now) }
 }
 
-fn parse_ingress(i: &Value, now: u64) -> Ingress {
+pub(crate) fn parse_ingress(i: &Value, now: u64) -> Ingress {
     let hosts = at(i, &["spec", "rules"]).as_array().map(|a| a.iter().map(|r| text(r, &["host"])).filter(|h| !h.is_empty()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
     let address = at(i, &["status", "loadBalancer", "ingress"]).as_array().map(|a| a.iter().map(|x| { let ip = text(x, &["ip"]); if ip.is_empty() { text(x, &["hostname"]) } else { ip } }).collect::<Vec<_>>().join(", ")).unwrap_or_default();
     Ingress { name: text(i, &["metadata", "name"]), class: text(i, &["spec", "ingressClassName"]), hosts, address, age: age_of(i, now) }
 }
 
-fn parse_node(n: &Value) -> NodeInfo {
+pub(crate) fn parse_node(n: &Value) -> NodeInfo {
     let ready = at(n, &["status", "conditions"]).as_array().is_some_and(|c| c.iter().any(|x| x["type"] == "Ready" && x["status"] == "True"));
     let roles: Vec<String> = n["metadata"]["labels"].as_object().map(|m| m.keys().filter_map(|k| k.strip_prefix("node-role.kubernetes.io/").map(str::to_string)).collect()).unwrap_or_default();
     NodeInfo { name: text(n, &["metadata", "name"]), ready, roles: if roles.is_empty() { "worker".into() } else { roles.join(",") }, version: text(n, &["status", "nodeInfo", "kubeletVersion"]), cpu: text(n, &["status", "allocatable", "cpu"]), memory: text(n, &["status", "allocatable", "memory"]), ip: at(n, &["status", "addresses"]).as_array().and_then(|a| a.iter().find(|x| x["type"] == "InternalIP")).and_then(|x| x["address"].as_str()).unwrap_or("").to_string() }
@@ -437,19 +459,31 @@ pub fn reachable_lines(snap: &Snapshot) -> Vec<String> {
     out
 }
 
-/// Fetch everything the view shows with a handful of read-only `kubectl get` calls.
+/// Fetch everything the view shows with a handful of read-only `kubectl get` calls (one quick retry for a transient failure).
 pub fn fetch(kube: &dyn Kube, t: &Target, now: u64) -> Snapshot {
+    fetch_with(kube, t, now, &Retry::once())
+}
+
+/// [`fetch`] with the retry policy of the caller (the feed passes its own, with the cancel gate and the cluster log). A snapshot of a
+/// failure says whether it was transient; a refresh that ended because of Refresh is marked transient too.
+pub fn fetch_with(kube: &dyn Kube, t: &Target, now: u64, retry: &Retry) -> Snapshot {
     let base = t.base_args();
     let run = |extra: &[&str]| {
         let mut a = base.clone();
         a.extend(extra.iter().map(|s| s.to_string()));
-        kube.run(&a)
+        retry.run(kube, &a)
     };
-    let ns_out = run(&["get", "namespaces", "-o", "json"]);
+    let failed = |t: &Target, a: &crate::k8sretry::Attempt, c: Cluster| {
+        let mut s = Snapshot::empty(t, c, now);
+        s.transient = a.verdict == Some(Verdict::Transient);
+        s
+    };
+    let ns_try = run(&["get", "namespaces", "-o", "json"]);
+    let ns_out = ns_try.out.clone();
     let ns_json = if ns_out.ok() { json(&ns_out) } else { None };
     let forbidden_ns = !ns_out.ok() && matches!(classify_failure(&ns_out), Cluster::Forbidden(_));
     if !ns_out.ok() && !forbidden_ns {
-        return Snapshot::empty(t, classify_failure(&ns_out), now);
+        return failed(t, &ns_try, classify_failure(&ns_out));
     }
     let mut snap = Snapshot::empty(t, Cluster::Ok, now);
     if let Some(v) = &ns_json {
@@ -460,7 +494,7 @@ pub fn fetch(kube: &dyn Kube, t: &Target, now: u64) -> Snapshot {
         snap.namespace_found = true;
         snap.namespaces = vec![t.namespace.clone()];
     }
-    let ctx = run(&["config", "current-context"]);
+    let ctx = run(&["config", "current-context"]).out;
     snap.context = if ctx.ok() { ctx.stdout.trim().to_string() } else { t.context.clone() };
     if !snap.namespace_found {
         snap.notes.push(format!("The namespace \"{}\" does not exist in this cluster yet. It is created by the deploy flow (docs/K3S-DEV.md), or with kubectl create namespace {}.", t.namespace, t.namespace));
@@ -469,15 +503,20 @@ pub fn fetch(kube: &dyn Kube, t: &Target, now: u64) -> Snapshot {
     let sel: Vec<&str> = if t.selector.is_empty() { vec![] } else { vec!["-l", t.selector.as_str()] };
     let mut main_args = vec!["-n", t.namespace.as_str(), "get", "deployments,statefulsets,daemonsets,jobs,services,ingresses,pods,persistentvolumeclaims", "-o", "json"];
     main_args.extend(sel.iter().copied());
-    let main = run(&main_args);
+    let main_try = run(&main_args);
+    let main = main_try.out.clone();
     if !main.ok() {
         let c = classify_failure(&main);
+        // a busy or restarting API server: no half-filled view, the feed keeps the last good one
+        if main_try.verdict == Some(Verdict::Transient) {
+            return failed(t, &main_try, c);
+        }
         snap.cluster = if matches!(c, Cluster::Failed(_)) && !main.stdout.is_empty() { Cluster::Failed(main.stderr.lines().next().unwrap_or("kubectl failed").to_string()) } else { c };
         // `get` of a kind this cluster lacks (no ingress controller) fails as a whole: try the core kinds alone
         if matches!(snap.cluster, Cluster::Failed(_)) {
             let mut core = vec!["-n", t.namespace.as_str(), "get", "deployments,statefulsets,daemonsets,jobs,services,pods,persistentvolumeclaims", "-o", "json"];
             core.extend(sel.iter().copied());
-            let again = run(&core);
+            let again = run(&core).out;
             if again.ok() {
                 snap.cluster = Cluster::Ok;
                 fill_main(&mut snap, &again, now);
@@ -487,9 +526,9 @@ pub fn fetch(kube: &dyn Kube, t: &Target, now: u64) -> Snapshot {
         fill_main(&mut snap, &main, now);
     }
     // names only, never values
-    snap.configmaps = names(&run(&["-n", t.namespace.as_str(), "get", "configmaps", "-o", "name"]));
-    snap.secrets = names(&run(&["-n", t.namespace.as_str(), "get", "secrets", "-o", "name"]));
-    let nodes = run(&["get", "nodes", "-o", "json"]);
+    snap.configmaps = names(&run(&["-n", t.namespace.as_str(), "get", "configmaps", "-o", "name"]).out);
+    snap.secrets = names(&run(&["-n", t.namespace.as_str(), "get", "secrets", "-o", "name"]).out);
+    let nodes = run(&["get", "nodes", "-o", "json"]).out;
     if let Some(v) = json(&nodes) {
         snap.nodes = at(&v, &["items"]).as_array().map(|a| a.iter().map(parse_node).collect()).unwrap_or_default();
     }
@@ -626,6 +665,8 @@ struct Shared {
     detail: Option<(String, Result<PodDetail, String>)>,
     want_detail: Option<String>,
     fetches: u64,
+    /// How the failures of the list stand (see `k8sretry`).
+    tracker: Tracker,
 }
 
 /// Keeps a [`Snapshot`] fresh on a thread: every `interval` while the view is visible (the UI never waits for kubectl),
@@ -634,35 +675,66 @@ pub struct Feed {
     shared: Arc<Mutex<Shared>>,
     visible: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
+    retry: Retry,
 }
 
 impl Feed {
     pub fn start(kube: Arc<dyn Kube>, target: Target, interval: Duration, log_interval: Duration) -> Feed {
+        Feed::start_with(kube, target, interval, log_interval, Retry::system())
+    }
+
+    /// [`Feed::start`] with another retry policy (tests pass a fake clock). A transient failure keeps the last good snapshot
+    /// until the stale window passes; the next try comes after 2, 4, 8, then 15 s; Refresh cancels the wait.
+    pub fn start_with(kube: Arc<dyn Kube>, target: Target, interval: Duration, log_interval: Duration, retry: Retry) -> Feed {
         let shared = Arc::new(Mutex::new(Shared { target, refresh: true, ..Default::default() }));
         let (visible, alive) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(true)));
-        let (s2, v2, a2) = (shared.clone(), visible.clone(), alive.clone());
+        let (s2, v2, a2, r2) = (shared.clone(), visible.clone(), alive.clone(), retry.clone());
         std::thread::spawn(move || {
-            let (mut last, mut last_log) = (None::<std::time::Instant>, None::<std::time::Instant>);
+            let (mut last, mut last_log) = (None::<u64>, None::<Instant>);
             while a2.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(25));
                 if !v2.load(Ordering::Relaxed) {
                     continue;
                 }
+                let now_ms = r2.timer.now_ms();
                 let (target, due, pod, want_detail) = {
-                    let mut s = s2.lock().unwrap();
-                    let due = s.refresh || last.is_none_or(|t| t.elapsed() >= interval);
+                    let mut s = s2.lock().unwrap_or_else(|e| e.into_inner());
+                    let forced = s.refresh;
+                    if forced {
+                        s.tracker.reset_backoff();
+                    }
+                    let wait = s.tracker.next_delay(interval).as_millis() as u64;
+                    let due = forced || last.is_none_or(|t| now_ms.saturating_sub(t) >= wait);
                     s.refresh = false;
                     (s.target.clone(), due, s.pod.clone(), s.want_detail.take())
                 };
-                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                let now = r2.timer.wall_secs();
                 if due {
-                    let snap = fetch(&*kube, &target, now);
-                    let mut s = s2.lock().unwrap();
-                    if s.target == target {
-                        s.snap = Some(Arc::new(snap));
+                    let epoch = r2.gate.epoch();
+                    let snap = fetch_with(&*kube, &target, now, &r2);
+                    let cancelled = r2.gate.epoch() != epoch;
+                    let done_ms = r2.timer.now_ms();
+                    let mut s = s2.lock().unwrap_or_else(|e| e.into_inner());
+                    if s.target == target && !(cancelled && snap.transient) {
+                        if snap.cluster == Cluster::Ok {
+                            s.tracker.ok(now);
+                            s.snap = Some(Arc::new(snap));
+                        } else {
+                            let verdict = if snap.transient { Verdict::Transient } else { Verdict::Persistent };
+                            let said = match &snap.cluster {
+                                Cluster::Unreachable(m) | Cluster::Forbidden(m) | Cluster::Failed(m) => m.clone(),
+                                _ => String::new(),
+                            };
+                            let starting = r2.hints.starting_now(done_ms);
+                            let keep = s.tracker.failed(done_ms, verdict, &said, starting);
+                            // transient and inside the window: the last good snapshot (or nothing yet) stays
+                            if !keep {
+                                s.snap = Some(Arc::new(snap));
+                            }
+                        }
                         s.fetches += 1;
                     }
-                    last = Some(std::time::Instant::now());
+                    last = Some(done_ms);
                 }
                 if let Some(p) = want_detail {
                     let d = pod_detail(&*kube, &target, &p, now);
@@ -682,7 +754,7 @@ impl Feed {
                 }
             }
         });
-        Feed { shared, visible, alive }
+        Feed { shared, visible, alive, retry }
     }
 
     pub fn set_visible(&self, on: bool) {
@@ -694,13 +766,33 @@ impl Feed {
     pub fn fetches(&self) -> u64 {
         self.shared.lock().unwrap().fetches
     }
+    /// Fetch now: a wait between retries ends at once and the backoff starts over.
     pub fn refresh(&self) {
         self.shared.lock().unwrap().refresh = true;
+        self.retry.gate.bump();
+    }
+    /// How the failures stand: stale data, the banner, when it last worked (none while all is well).
+    pub fn status(&self) -> Status {
+        self.shared.lock().unwrap().tracker.status(self.retry.timer.now_ms(), self.retry.timer.wall_secs())
+    }
+    /// The managed k3s is starting: refused connections are expected and the banner waits longer.
+    pub fn set_starting(&self, on: bool) {
+        self.retry.hints.set_starting(on, self.retry.timer.now_ms());
+    }
+    /// The cluster is the managed k3s of this computer: a refused connection is a restart, not a wrong address.
+    pub fn set_local(&self, on: bool) {
+        self.retry.hints.set_local(on);
+    }
+    /// The cluster log (the last 50 kubectl problems).
+    pub fn cluster_log(&self) -> Arc<crate::k8sretry::ClusterLog> {
+        self.retry.log.clone()
     }
     /// Look at another namespace or selector (the old snapshot is dropped, a new one is fetched at once).
     pub fn set_target(&self, t: Target) {
         let mut s = self.shared.lock().unwrap();
         if s.target != t {
+            self.retry.gate.bump();
+            s.tracker = Tracker::default();
             s.target = t;
             s.snap = None;
             s.refresh = true;
@@ -861,6 +953,27 @@ mod tests {
     use super::*;
 
     const NOW: u64 = 1_790_000_000;
+
+    #[test]
+    fn a_killed_get_never_reports_a_lone_brace_as_the_reason() {
+        // kubectl killed in the middle of `get -o json`: only "{" is left, no exit code
+        let killed = Out { code: None, stdout: "{\n".into(), ..Default::default() };
+        match classify_failure(&killed) {
+            Cluster::Failed(m) => assert!(m.contains("stopped before it finished"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        let silent = Out { code: Some(1), stdout: "{\n  \"items\": [".into(), ..Default::default() };
+        match classify_failure(&silent) {
+            Cluster::Failed(m) => assert!(m.contains("exit code 1") && m.contains("no message"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        // a real message wins, from either stream
+        let real = Out { code: Some(1), stdout: "{".into(), stderr: "error: the server doesn't have a resource type \"ingresses\"".into(), ..Default::default() };
+        match classify_failure(&real) {
+            Cluster::Failed(m) => assert!(m.starts_with("error: the server doesn't have"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
 
     fn target() -> Target {
         Target { namespace: "shop-dev".into(), ..Default::default() }

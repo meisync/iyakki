@@ -252,7 +252,7 @@ fn search_and_filters_find_by_words_price_trust_type_category_and_publisher() {
     assert!(featured(&v).iter().any(|i| i.entry.id == "lang-python"));
     assert!(newest(&v, 5).len() == 5 && newest(&v, 5).iter().all(|i| !i.entry.demo));
     let cats = categories(&v);
-    assert!(cats.iter().any(|c| c.0 == "skills" && c.1 == 18) && cats.iter().any(|c| c.0 == "tools"));
+    assert!(cats.iter().any(|c| c.0 == "skills" && c.1 == 20) && cats.iter().any(|c| c.0 == "tools"));
     let ps = publishers(&v);
     assert_eq!(ps[0].id, "iyakki");
     assert!(ps[0].apps > 20 && ps.iter().any(|p| p.id == "example-studio" && p.level == Level::Community));

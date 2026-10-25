@@ -430,10 +430,17 @@ pub struct Recorder {
     started: Instant,
     reader: Option<std::thread::JoinHandle<()>>,
     stderr: Option<std::thread::JoinHandle<String>>,
+    /// The most seconds kept (`MAX_RECORD_SECS` unless started with [`Recorder::start_max`]).
+    max_secs: usize,
 }
 
 impl Recorder {
     pub fn start(record_cmd: &str) -> Result<Recorder, String> {
+        Recorder::start_max(record_cmd, MAX_RECORD_SECS)
+    }
+
+    /// [`Recorder::start`] with another longest recording (the VOICE tile takes five minutes).
+    pub fn start_max(record_cmd: &str, max_secs: usize) -> Result<Recorder, String> {
         let args = split_command(record_cmd)?;
         let prog = args.first().ok_or("record command is empty")?;
         let mut child = command_for(&args, None)
@@ -446,7 +453,7 @@ impl Recorder {
         let (mut so, mut se) = (child.stdout.take().expect("piped"), child.stderr.take().expect("piped"));
         let b2 = buf.clone();
         let reader = std::thread::spawn(move || {
-            let max = SAMPLE_RATE as usize * 2 * MAX_RECORD_SECS;
+            let max = SAMPLE_RATE as usize * 2 * max_secs;
             let mut chunk = [0u8; 4096];
             while let Ok(n) = so.read(&mut chunk) {
                 if n == 0 {
@@ -464,7 +471,7 @@ impl Recorder {
             let _ = se.by_ref().take(1 << 16).read_to_end(&mut v);
             String::from_utf8_lossy(&v).into_owned()
         });
-        Ok(Recorder { child, buf, started: Instant::now(), reader: Some(reader), stderr: Some(stderr) })
+        Ok(Recorder { child, buf, started: Instant::now(), reader: Some(reader), stderr: Some(stderr), max_secs })
     }
 
     pub fn elapsed(&self) -> Duration {
@@ -472,7 +479,7 @@ impl Recorder {
     }
 
     pub fn is_full(&self) -> bool {
-        self.buf.lock().unwrap().len() >= SAMPLE_RATE as usize * 2 * MAX_RECORD_SECS
+        self.buf.lock().unwrap().len() >= SAMPLE_RATE as usize * 2 * self.max_secs
     }
 
     /// Loudness of the last ~150 ms, 0.0–1.0 (for a level meter).
@@ -521,9 +528,27 @@ pub fn spawn_player(play_cmd: &str) -> Result<Child, String> {
     command_for(&args, None)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("cannot start `{prog}`: {e} (change the play command in Settings → Voice)"))
+}
+
+/// Why a sound player stopped: its own first line of complaint (`aplay: set_params:1462: Unable to install hw params:`), read
+/// from the standard error of a [`spawn_player`] child that has ended or is about to (waits up to 400 ms). Empty when it said
+/// nothing; the child is left to the caller to stop.
+pub fn player_failure(child: &mut Child) -> String {
+    use std::io::Read;
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_millis(400) && matches!(child.try_wait(), Ok(None)) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let Some(mut err) = child.stderr.take() else { return String::new() };
+    if matches!(child.try_wait(), Ok(None)) {
+        return String::new(); // still running: nothing to read without blocking
+    }
+    let mut text = String::new();
+    let _ = err.by_ref().take(4096).read_to_string(&mut text);
+    text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string()
 }
 
 // ------------------------------------------------------------------ media players
@@ -611,7 +636,12 @@ impl Player {
             .spawn()
             .map_err(|e| format!("cannot start `{prog}`: {e} (change the play command in Settings → Voice)"))?;
         if let Some(mut si) = child.stdin.take() {
-            let data = crate::audioout::scale_wav(wav, crate::audioout::gain_for(out, &args));
+            // float or 24/32-bit WAVs (Kokoro answers 32-bit float) become 16-bit first: the output chain converts rates and cannot take float
+            let wav16 = crate::audioout::to_pcm16_wav(wav);
+            let base = wav16.as_deref().unwrap_or(wav);
+            // speech below 44.1 kHz (Kokoro: 24 kHz) is brought to 48 kHz here: the T2 MacBook's chain played it at twice the speed
+            let rated = crate::audioout::resample_low_rate_wav(base);
+            let data = crate::audioout::scale_wav(rated.as_deref().unwrap_or(base), crate::audioout::gain_for(out, &args));
             std::thread::spawn(move || {
                 let _ = si.write_all(&data);
             });
@@ -928,10 +958,18 @@ mod tests {
     fn player_feeds_wav_to_the_command_and_can_be_stopped() {
         let d = tmp("play");
         let out = d.join("played.wav");
-        let wav = encode_wav(&tone(440.0, 200), 16_000);
+        let wav = encode_wav(&tone(440.0, 200), 48_000);
         let mut p = Player::start(&format!("sh -c 'cat > {}'", out.display()), &wav).unwrap();
         assert!(p.wait(Duration::from_secs(5)));
-        assert_eq!(std::fs::read(&out).unwrap(), wav, "the speaker command received exactly the WAV");
+        assert_eq!(std::fs::read(&out).unwrap(), wav, "the speaker command received exactly the WAV (already at the card's rate)");
+        // speech below 44.1 kHz reaches the speaker command at 48 kHz (the T2 MacBook played 24 kHz speech at double speed)
+        let low = encode_wav(&tone(440.0, 200), 16_000);
+        let out2 = d.join("played-low.wav");
+        let mut p2 = Player::start(&format!("sh -c 'cat > {}'", out2.display()), &low).unwrap();
+        assert!(p2.wait(Duration::from_secs(5)));
+        let got = parse_wav(&std::fs::read(&out2).unwrap()).unwrap();
+        assert_eq!((got.rate, got.channels), (48_000, 1));
+        assert_eq!(got.samples.len(), parse_wav(&low).unwrap().samples.len() * 3, "the same time at three times the samples");
         let mut long = Player::start("sleep 30", &wav).unwrap();
         assert!(long.is_playing());
         let t = Instant::now();

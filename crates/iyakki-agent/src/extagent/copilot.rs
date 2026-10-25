@@ -73,13 +73,22 @@ impl ExternalAgent for Copilot {
         if let Some(l) = &self.cfg.vault_login {
             return Auth::SignedIn(format!("{l} (token in your vault)"));
         }
-        let home = self.cfg.env.iter().find(|(k, _)| k == "HOME").map(|(_, v)| v.clone()).or_else(|| std::env::var("HOME").ok());
+        let from_cfg = self.cfg.env.iter().find(|(k, _)| k == "HOME").map(|(_, v)| v.clone());
+        // no home of the person's yet (nobody signed in): the process's own home is `/` on the system, which says nothing
+        let home = from_cfg.or_else(|| std::env::var("HOME").ok().filter(|h| h != "/" && !h.is_empty()));
+        if home.is_none() {
+            return Auth::Unknown;
+        }
         let r = copilot_files_auth(std::env::var("COPILOT_HOME").ok().as_deref(), home.as_deref(), &|k| std::env::var(k).ok());
         // the token may sit in a vault that is locked: then nobody can say
         if r == Auth::SignedOut && self.cfg.vault_locked {
             return Auth::Unknown;
         }
         r
+    }
+    fn auth_files(&self, env: &[(String, String)]) -> Vec<std::path::PathBuf> {
+        let home = env.iter().find(|(k, _)| k == "HOME").map(|(_, v)| v.clone()).or_else(|| std::env::var("HOME").ok());
+        std::env::var("COPILOT_HOME").ok().filter(|h| !h.is_empty()).map(|c| vec![std::path::PathBuf::from(c).join("config.json")]).or_else(|| home.map(|h| vec![std::path::Path::new(&h).join(".copilot").join("config.json")])).unwrap_or_default()
     }
     fn child_env(&self) -> Vec<(String, String)> {
         self.cfg.env.clone()

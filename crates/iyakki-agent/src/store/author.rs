@@ -103,7 +103,8 @@ fn read_in(dir: &Path, rel: &str) -> Result<String, String> {
     if rel.is_empty() || rel.starts_with('/') || rel.split('/').any(|p| p == "..") {
         return Err(format!("{rel:?}: a file inside the project, please"));
     }
-    std::fs::read_to_string(dir.join(rel)).map_err(|e| format!("{rel}: {e}"))
+    let p = dir.join(rel);
+    std::fs::read_to_string(&p).map_err(|e| crate::scope::explain_io(&e, &p, "read"))
 }
 
 /// The store information of a project (`iyakki-app.json`, `README.md`, `CHANGELOG.md`).
@@ -157,7 +158,10 @@ pub fn pack_dir(dir: &Path, key: Option<&SigningKey>) -> Result<(String, Vec<Str
     let text = match kind.as_str() {
         "skill" => pkg::build_skill(&read_in(dir, &entry)?, &version, &license, key),
         "tool" => {
-            let module = std::fs::read(dir.join(s(&v, "module"))).map_err(|e| format!("module: {e}"))?;
+            let module = {
+                let mp = dir.join(s(&v, "module"));
+                std::fs::read(&mp).map_err(|e| crate::scope::explain_io(&e, &mp, "read the module"))?
+            };
             pkg::build_tool(&read_in(dir, &entry)?, &module, key)
         }
         "mcp" => {
@@ -218,13 +222,42 @@ pub fn publish_to_server(up: &dyn iyakki_proxy::Upstream, server: &str, token: &
         return Err("no publish token".into());
     }
     let headers = vec![("Authorization".to_string(), format!("Bearer {}", token.trim())), ("Content-Type".to_string(), "text/plain".to_string())];
-    let r = up.request("POST", &format!("{base}/v1/publish"), &headers, package.as_bytes())?;
+    let r = up.request("POST", &format!("{base}/v1/publish"), &headers, package.as_bytes()).map_err(|e| unreachable_text(&base, &e))?;
     let v: Value = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
     if r.status != 200 {
-        let why = v["error"].as_str().map(str::to_string).unwrap_or_else(|| format!("the store answered {}", r.status));
-        return Err(format!("the store refused it ({}): {why}", r.status));
+        return Err(refusal_text(r.status, v["error"].as_str()));
     }
     Ok(Published { name: s(&v, "name"), version: s(&v, "version"), sha256: s(&v, "sha256"), trust: s(&v, "trust"), serial: v["serial"].as_u64().unwrap_or(0) })
+}
+
+/// A publish that could not even be sent: what happened and the one next step (never the bare transport text alone).
+fn unreachable_text(base: &str, err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    let what = if lower.contains("refused") {
+        "the connection was refused: the store's pod is not running or not ready, or its port is not open"
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "it did not answer in time: the cluster may be stopped or the pod still starting"
+    } else if lower.contains("dns") || lower.contains("resolve") || lower.contains("lookup") {
+        "its name could not be found: check the address in STORE, Settings"
+    } else {
+        "no answer"
+    };
+    format!("Nothing was sent: could not reach the store at {base} ({what}; {err}). If it was just deployed, wait a minute; otherwise open the K8S tile and check the pod private-store, then publish again.")
+}
+
+/// What the store's refusal means and what to do (`why` is the store's own sentence, when it sent one).
+pub fn refusal_text(status: u16, why: Option<&str>) -> String {
+    let said = why.map(|w| format!(": {w}")).unwrap_or_default();
+    match status {
+        403 if why.is_some_and(|w| w.contains("read-only")) => format!("the store is read-only ({status}{said}): it accepts no publishing. Its administrator has to switch read-only off (redeploy or Repair without the Read-only option)."),
+        401 | 403 => format!("the store did not accept the publish token ({status}{said}). The token in your vault is wrong or was replaced: ask the store's administrator for a publisher token and enter it again (STORE, Settings, Private store), or, for a store deployed from this device, use Repair in Private store, Manage."),
+        404 => format!("the store has no publish address ({status}{said}): it is not an IYAKKI private store, or it is an older one. Check the address in STORE, Settings."),
+        409 => format!("the store already has this version ({status}{said}): raise the version and publish again."),
+        413 => format!("the package is too big for this store ({status}{said}): remove large files from the project."),
+        429 => format!("the store is limiting publishes ({status}{said}): wait a minute and try again."),
+        500..=599 => format!("the store had a problem ({status}{said}): check its pod in the K8S tile, then try again. Nothing was listed."),
+        _ => format!("the store refused it ({status}{said})."),
+    }
 }
 
 fn private_host(base: &str) -> bool {

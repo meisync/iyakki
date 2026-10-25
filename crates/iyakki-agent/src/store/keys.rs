@@ -62,18 +62,18 @@ pub fn create(svc: &Services, user: &str, label: &str) -> Result<KeyInfo, String
     }
     {
         use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&d).map_err(|e| e.to_string())?;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&d).map_err(|e| crate::scope::explain_io(&e, &d, "make the folder for your keys in"))?;
     }
     let k = pkg::new_signing_key().map_err(|e| e.to_string())?;
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file).map_err(|e| e.to_string())?;
-        f.write_all(pkg::signing_key_hex(&k).as_bytes()).map_err(|e| e.to_string())?;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file).map_err(|e| crate::scope::explain_io(&e, &file, "write your signing key"))?;
+        f.write_all(pkg::signing_key_hex(&k).as_bytes()).map_err(|e| crate::scope::explain_io(&e, &file, "write your signing key"))?;
     }
     let first = default_label(&d).is_none();
     if first {
-        std::fs::write(d.join("default"), label).map_err(|e| e.to_string())?;
+        std::fs::write(d.join("default"), label).map_err(|e| crate::scope::explain_io(&e, &d.join("default"), "write"))?;
     }
     Ok(info(label, &k, first))
 }
@@ -101,7 +101,7 @@ pub fn set_default(svc: &Services, user: &str, label: &str) -> Result<(), String
     if !d.join(format!("{label}.key")).is_file() {
         return Err(format!("you have no key called {label}"));
     }
-    std::fs::write(d.join("default"), label).map_err(|e| e.to_string())
+    std::fs::write(d.join("default"), label).map_err(|e| crate::scope::explain_io(&e, &d.join("default"), "write"))
 }
 
 /// The key to sign with (named, or the default) and its fingerprint.

@@ -150,7 +150,11 @@ fn detection_reports_installed_version_and_sign_in_state() {
 #[test]
 fn copilot_and_custom_agents_are_detected_and_honest_about_what_they_can_be_held_to() {
     let rig = Rig::new("detect2");
-    let c = Copilot::new(AgentCfg { command: copilot(&rig.dir).display().to_string(), ..Default::default() });
+    // the sign-in check reads $HOME/.copilot: give it a home of its own with an empty .copilot folder (no config.json: "cannot say"),
+    // so the answer does not depend on whoever runs the tests (with no ~/.copilot at all the check says SignedOut)
+    let home = rig.dir.join("copilot-home");
+    std::fs::create_dir_all(home.join(".copilot")).unwrap();
+    let c = Copilot::new(AgentCfg { command: copilot(&rig.dir).display().to_string(), env: vec![("HOME".into(), home.display().to_string())], ..Default::default() });
     let s = detect(&c, &System, &rig.ws);
     assert!(s.installed && s.version.contains("1.0.0") && s.auth == Auth::Unknown && s.mode == Mode::Bridged, "{s:?}");
     assert!(Copilot::new(AgentCfg { advisor_only: true, ..Default::default() }).mode() == Mode::Advisor);
@@ -1084,4 +1088,14 @@ fn switching_the_mode_during_an_external_run_applies_to_the_waiting_card_and_the
     let (id, _, _) = next_approval(&b);
     b.dtx.send((id, Verdict::Deny)).unwrap();
     assert!(h.join().unwrap().is_err());
+}
+
+#[test]
+fn a_failed_agent_run_names_the_lost_drive_only_while_it_is_lost() {
+    let healthy = classify_failure("Claude Code", "Sign in.", "EIO: Input/output error, open '/home/admin/.claude/x'");
+    assert!(healthy.contains("stopped with an error"), "{healthy}");
+    iyakki_storage::loss::set_thread_override(Some(iyakki_storage::loss::Snapshot { state: iyakki_storage::loss::State::Lost, ..Default::default() }));
+    let lost = classify_failure("Claude Code", "Sign in.", "EIO: Input/output error, open '/home/admin/.claude/x'");
+    iyakki_storage::loss::set_thread_override(None);
+    assert!(lost.contains("Claude Code cannot work right now") && lost.contains("drive is not available"), "{lost}");
 }

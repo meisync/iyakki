@@ -203,6 +203,9 @@ pub fn sync_once(servers: &[String], force_back: bool, timeout: Duration, apply:
                     Action::Ask => format!("The clock is {:.0} s ahead of {srv}. It was not changed; choose \"Set the clock to the network time\" to go back.", -r.offset),
                 };
                 let applied = act == Action::Step && msg.starts_with("Clock set");
+                if applied {
+                    crate::clockfloor::save_now(); // the corrected time is the best floor for the next boot
+                }
                 set_status(|s| {
                     s.last_sync = now_f64() as i64;
                     s.server = srv.clone();
@@ -224,22 +227,36 @@ pub fn servers_for(custom: &str) -> Vec<String> {
     if valid_server(custom) { vec![custom.to_string()] } else { DEFAULT_SERVERS.iter().map(|s| s.to_string()).collect() }
 }
 
+/// How long to wait after the `attempt`th failed round (0 = the first): 5, 10, 20, 40 s, then every 60 s until a server answers.
+pub fn retry_delay(attempt: u32) -> Duration {
+    Duration::from_secs((5u64 << attempt.min(4)).min(60))
+}
+
+/// Has a server answered since boot? (The k3s dev cluster waits for this, with a limit, before it starts.)
+pub fn synced() -> bool {
+    status().last_sync > 0
+}
+
 /// Keep the clock right in the background: once now (the network has just come up), then every few hours. `settings`
 /// is asked each round, so turning it off in Settings takes effect. Never blocks the caller.
 pub fn spawn_sync_thread(settings: impl Fn() -> (bool, String) + Send + 'static) {
     let _ = std::thread::Builder::new().name("iyakki-ntp".into()).spawn(move || {
-        let mut first = true;
+        let mut attempt = 0u32;
         loop {
             let (enabled, custom) = settings();
             if enabled {
                 let st = sync_once(&servers_for(&custom), false, Duration::from_secs(4), &set_clock);
                 log::info!("clock: {}", st.message);
-                // no answer yet (the network may still be coming up): try again soon rather than in four hours
+                // no answer yet (the network may still be coming up): try again soon, with a growing wait, rather than in four hours
                 if st.last_sync == 0 || st.message.starts_with("Could not") {
-                    std::thread::sleep(Duration::from_secs(if first { 20 } else { 120 }));
-                    first = false;
+                    std::thread::sleep(retry_delay(attempt));
+                    attempt = attempt.saturating_add(1);
                     continue;
                 }
+                if attempt > 0 {
+                    log::info!("clock: a time server answered after {attempt} failed round(s)");
+                }
+                attempt = 0;
             }
             std::thread::sleep(RESYNC_EVERY);
         }
@@ -350,6 +367,13 @@ mod tests {
         assert!(st.message.starts_with("Clock set"));
         let st = sync_once(&[dead], false, Duration::from_millis(200), &apply);
         assert!(st.message.starts_with("Could not reach"), "{st:?}");
+    }
+
+    #[test]
+    fn the_retry_wait_grows_and_stops_at_a_minute() {
+        let w: Vec<u64> = (0..7).map(|a| retry_delay(a).as_secs()).collect();
+        assert_eq!(w, vec![5, 10, 20, 40, 60, 60, 60]);
+        assert_eq!(retry_delay(u32::MAX).as_secs(), 60);
     }
 
     #[test]

@@ -156,6 +156,12 @@ pub struct StoryOptions {
     /// Allow short video clips as pictures (off by default: they cost time and money).
     #[serde(default)]
     pub video: bool,
+    /// Which scenes get a picture (see [`crate::storyillus::Coverage`]); only looked at when `pictures` is not `Off`.
+    #[serde(default)]
+    pub coverage: crate::storyillus::Coverage,
+    /// The look, quality, model and seed of the pictures made by a picture model.
+    #[serde(default)]
+    pub pic: crate::storyillus::PictureOpts,
 }
 
 impl Default for DrawingMode {
@@ -166,7 +172,7 @@ impl Default for DrawingMode {
 
 impl Default for StoryOptions {
     fn default() -> Self {
-        StoryOptions { topic: String::new(), audience: Audience::Kids, genre: Genre::Bedtime, length: Length::Short, language: "English".into(), tone: Tone::Calm, characters: String::new(), pictures: PictureMode::Auto, style: PictureStyle::Watercolor, drawing: DrawingMode::Auto, video: false }
+        StoryOptions { topic: String::new(), audience: Audience::Kids, genre: Genre::Bedtime, length: Length::Short, language: "English".into(), tone: Tone::Calm, characters: String::new(), pictures: PictureMode::Auto, style: PictureStyle::Watercolor, drawing: DrawingMode::Auto, video: false, coverage: crate::storyillus::Coverage::Chapters, pic: crate::storyillus::PictureOpts::default() }
     }
 }
 
@@ -2084,6 +2090,22 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
 }
 
+/// One more picture of a scene besides the main one: how it was made.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct StoredVariant {
+    pub ext: String,
+    pub bytes: Vec<u8>,
+    /// The style id (`photo`, `storybook`, ...).
+    pub style: String,
+    pub seed: Option<u64>,
+    pub provider: String,
+    pub model: String,
+    pub size: String,
+    /// How long it took to draw, in milliseconds.
+    pub ms: u64,
+    pub prompt: String,
+}
+
 /// A saved picture: where it goes, what it shows, how it was made, and its bytes (`svg`, `png`, `jpg`, `webp`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredPic {
@@ -2098,11 +2120,26 @@ pub struct StoredPic {
     pub bytes: Vec<u8>,
     /// What made it (the model or agent, or `built-in cartoon`), for the manifest.
     pub source: String,
+    /// The size in pixels as `WxH` ("512x512"), or empty when not known (drawings have no fixed size).
+    pub size: String,
+    /// The other pictures of the same scene (other styles or seeds); the picture above is the one chosen as the main one.
+    pub variants: Vec<StoredVariant>,
+    /// How the main picture was made: its style id, seed, provider, model and time in milliseconds.
+    pub look: String,
+    pub seed: Option<u64>,
+    pub provider: String,
+    pub model: String,
+    pub ms: u64,
 }
 
 /// The whole story as one HTML page that needs nothing else: the pictures are inside it as data addresses, there is no script
 /// and no link to anything outside.
 pub fn export_html(story: &Story, o: &StoryOptions, pics: &[StoredPic]) -> String {
+    export_html_with(story, o, pics, false)
+}
+
+/// [`export_html`], and with `all_variants` every other picture of a scene too, each under its style name.
+pub fn export_html_with(story: &Story, o: &StoryOptions, pics: &[StoredPic], all_variants: bool) -> String {
     let base = story.unit_base();
     let title = if story.title.is_empty() { title_from_topic(&o.topic) } else { story.title.clone() };
     let mut body = String::new();
@@ -2112,6 +2149,11 @@ pub fn export_html(story: &Story, o: &StoryOptions, pics: &[StoredPic]) -> Strin
                 body.push_str(&format!("<figure><video muted loop controls playsinline src=\"data:{};base64,{}\"></video></figure>\n", mime_of(&p.ext), base64_encode(&p.bytes)));
             } else {
                 body.push_str(&format!("<figure><img alt=\"{}\" src=\"data:{};base64,{}\"></figure>\n", html_escape(&p.title), mime_of(&p.ext), base64_encode(&p.bytes)));
+            }
+            if all_variants {
+                for v in &p.variants {
+                    body.push_str(&format!("<figure><img alt=\"{t}\" src=\"data:{};base64,{}\"><figcaption>{}</figcaption></figure>\n", mime_of(&v.ext), base64_encode(&v.bytes), html_escape(&v.style), t = html_escape(&p.title)));
+                }
             }
         }
         match b {
@@ -2185,7 +2227,42 @@ struct PicMeta {
     #[serde(default)]
     source: String,
     #[serde(default)]
+    size: String,
+    #[serde(default)]
     saved_at: u64,
+    /// The other pictures of this scene (`01-v1.png`, ...); the file above is the main one.
+    #[serde(default)]
+    variants: Vec<VarMeta>,
+    /// How the main picture was made.
+    #[serde(default)]
+    look: String,
+    #[serde(default)]
+    seed: Option<u64>,
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct VarMeta {
+    file: String,
+    #[serde(default)]
+    style: String,
+    #[serde(default)]
+    seed: Option<u64>,
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    size: String,
+    #[serde(default)]
+    ms: u64,
+    #[serde(default)]
+    prompt: String,
 }
 
 /// The conversation kept beside a story: which version is in use and the messages of the panel (the person's requests, the
@@ -2311,6 +2388,17 @@ impl StoryStore {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// The bytes of every picture file of every story (the global picture cap looks at this).
+    pub fn pictures_bytes(&self) -> u64 {
+        self.ids()
+            .iter()
+            .filter_map(|id| self.check_read(&self.dir.join(id).join("pics")).ok())
+            .filter_map(|p| std::fs::read_dir(p).ok())
+            .flat_map(|rd| rd.flatten())
+            .filter_map(|e| e.metadata().ok().filter(|m| m.is_file()).map(|m| m.len()))
+            .sum()
     }
 
     /// The folder of one story.
@@ -2500,8 +2588,9 @@ impl StoryStore {
             return Err("that is not a story folder".into());
         }
         let _ = std::fs::remove_dir_all(w.join("pics"));
-        let mut files: Vec<String> = ["story.md", "audio.wav", "audio.mp3", "audio.json", "chat.json", "character.json", "pictures.log"].iter().map(|f| f.to_string()).collect();
+        let mut files: Vec<String> = ["story.md", "audio.wav", "audio.mp3", "audio.json", "chat.json", "character.json", "pictures.log", "picture-options.json", "setting.txt"].iter().map(|f| f.to_string()).collect();
         files.extend((1..=self.versions(id)).map(|n| format!("story.v{n}.md")));
+        files.extend(crate::piclog::file_names());
         for f in files {
             let p = w.join(f);
             if p.exists() {
@@ -2575,7 +2664,14 @@ impl StoryStore {
                     "mp4" | "webm" => "video",
                     _ => "image",
                 };
-                metas.push(PicMeta { scene_text: p.scene_text.clone(), file, unit: p.unit, title: p.title.clone(), prompt: p.prompt.clone(), style: p.style.clone(), mode: p.mode.clone(), kind: kind.into(), source: p.source.clone(), saved_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) });
+                let mut vmeta = Vec::new();
+                for (k, v) in p.variants.iter().enumerate() {
+                    let vext = if matches!(v.ext.as_str(), "svg" | "png" | "jpg" | "webp" | "gif") { v.ext.as_str() } else { "png" };
+                    let vfile = format!("{:02}-v{}.{vext}", i + 1, k + 1);
+                    std::fs::write(self.check_write(&pdir.join(&vfile))?, &v.bytes).map_err(|e| format!("could not save a picture: {e}"))?;
+                    vmeta.push(VarMeta { file: vfile, style: v.style.clone(), seed: v.seed, provider: v.provider.clone(), model: v.model.clone(), size: v.size.clone(), ms: v.ms, prompt: v.prompt.clone() });
+                }
+                metas.push(PicMeta { variants: vmeta, look: p.look.clone(), seed: p.seed, provider: p.provider.clone(), model: p.model.clone(), ms: p.ms, scene_text: p.scene_text.clone(), file, unit: p.unit, title: p.title.clone(), prompt: p.prompt.clone(), style: p.style.clone(), mode: p.mode.clone(), kind: kind.into(), source: p.source.clone(), size: p.size.clone(), saved_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) });
             }
             let idx = PicIndex { pics: metas.clone() };
             std::fs::write(self.check_write(&pdir.join("index.json"))?, serde_json::to_string_pretty(&idx).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
@@ -2600,6 +2696,48 @@ impl StoryStore {
         Ok(())
     }
 
+    /// Keep the setting note of a story (`setting.txt`: where and when it happens, one line) so every picture of it looks alike.
+    pub fn save_setting(&self, id: &str, setting: &str) -> Result<(), String> {
+        let dir = self.story_dir(id)?;
+        std::fs::write(self.check_write(&dir.join("setting.txt"))?, setting).map_err(|e| format!("could not save the setting note: {e}"))
+    }
+
+    /// Keep the picture choices of a story (`picture-options.json`: look, quality, model, same-look seed).
+    pub fn save_picture_opts(&self, id: &str, o: &crate::storyillus::PictureOpts) -> Result<(), String> {
+        let dir = self.story_dir(id)?;
+        std::fs::write(self.check_write(&dir.join("picture-options.json"))?, serde_json::to_string_pretty(o).unwrap_or_default()).map_err(|e| format!("could not save the picture options: {e}"))
+    }
+
+    /// The picture choices kept for a story, `None` for a story saved before they existed.
+    pub fn load_picture_opts(&self, id: &str) -> Option<crate::storyillus::PictureOpts> {
+        let p = self.check_read(&self.story_dir(id).ok()?.join("picture-options.json")).ok()?;
+        serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
+    }
+
+    /// Add events to the picture log of a story (`pictures.jsonl`, 1 MB a file, the newest three files kept).
+    pub fn append_picture_log(&self, id: &str, events: &[crate::piclog::PicEvent]) -> Result<(), String> {
+        let dir = self.check_write(&self.story_dir(id)?)?;
+        crate::piclog::append(&dir, events).map_err(|e| format!("could not save the picture log: {e}"))
+    }
+
+    /// The picture log of a story, oldest first.
+    pub fn load_picture_log(&self, id: &str) -> Vec<crate::piclog::PicEvent> {
+        self.story_dir(id).ok().and_then(|d| self.check_read(&d).ok()).map(|d| crate::piclog::read_all(&d)).unwrap_or_default()
+    }
+
+    /// Delete the picture log of a story.
+    pub fn clear_picture_log(&self, id: &str) {
+        if let Some(d) = self.story_dir(id).ok().and_then(|d| self.check_write(&d).ok()) {
+            crate::piclog::clear(&d);
+        }
+    }
+
+    /// The setting note kept for a story.
+    pub fn load_setting(&self, id: &str) -> Option<String> {
+        let p = self.check_read(&self.story_dir(id).ok()?.join("setting.txt")).ok()?;
+        std::fs::read_to_string(p).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+    }
+
     /// The character sheet kept for a story.
     pub fn load_character(&self, id: &str) -> Option<crate::scene::CharacterSheet> {
         let dir = self.story_dir(id).ok()?;
@@ -2618,7 +2756,16 @@ impl StoryStore {
                 let p = self.check_read(&dir.join("pics").join(&m.file)).ok()?;
                 let bytes = std::fs::read(p).ok()?;
                 let ext = m.file.rsplit('.').next().unwrap_or("png").to_string();
-                Some(StoredPic { source: m.source, scene_text: m.scene_text, unit: m.unit, title: m.title, prompt: m.prompt, style: m.style, mode: m.mode, ext, bytes })
+                let variants = m
+                    .variants
+                    .iter()
+                    .filter(|v| valid_var_file(&v.file))
+                    .filter_map(|v| {
+                        let vp = self.check_read(&dir.join("pics").join(&v.file)).ok()?;
+                        Some(StoredVariant { ext: v.file.rsplit('.').next().unwrap_or("png").to_string(), bytes: std::fs::read(vp).ok()?, style: v.style.clone(), seed: v.seed, provider: v.provider.clone(), model: v.model.clone(), size: v.size.clone(), ms: v.ms, prompt: v.prompt.clone() })
+                    })
+                    .collect();
+                Some(StoredPic { variants, look: m.look, seed: m.seed, provider: m.provider, model: m.model, ms: m.ms, size: m.size, source: m.source, scene_text: m.scene_text, unit: m.unit, title: m.title, prompt: m.prompt, style: m.style, mode: m.mode, ext, bytes })
             })
             .collect()
     }
@@ -2705,6 +2852,13 @@ impl StoryStore {
 fn valid_pic_file(f: &str) -> bool {
     let Some((stem, ext)) = f.rsplit_once('.') else { return false };
     !stem.is_empty() && stem.len() <= 6 && stem.chars().all(|c| c.is_ascii_digit()) && matches!(ext, "svg" | "png" | "jpg" | "webp" | "gif" | "mp4" | "webm")
+}
+
+fn valid_var_file(f: &str) -> bool {
+    let Some((stem, ext)) = f.rsplit_once('.') else { return false };
+    let Some((a, b)) = stem.split_once("-v") else { return false };
+    let digits = |x: &str| !x.is_empty() && x.len() <= 4 && x.chars().all(|c| c.is_ascii_digit());
+    digits(a) && digits(b) && matches!(ext, "svg" | "png" | "jpg" | "webp" | "gif")
 }
 
 // ---------------------------------------------------------------------------------------------------------------- tests
@@ -3962,7 +4116,7 @@ mod tests {
         // the pics folder of a story as a link to somewhere outside the home folder
         std::fs::create_dir_all(d.join("elsewhere")).unwrap();
         std::os::unix::fs::symlink(d.join("elsewhere"), s.dir.join("real/pics")).unwrap();
-        let pic = StoredPic { source: String::new(), scene_text: String::new(), unit: 1, title: "t".into(), prompt: "p".into(), style: "s".into(), mode: "drawings".into(), ext: "svg".into(), bytes: b"<svg/>".to_vec() };
+        let pic = StoredPic { variants: Vec::new(), look: String::new(), seed: None, provider: String::new(), model: String::new(), ms: 0, size: String::new(), source: String::new(), scene_text: String::new(), unit: 1, title: "t".into(), prompt: "p".into(), style: "s".into(), mode: "drawings".into(), ext: "svg".into(), bytes: b"<svg/>".to_vec() };
         assert!(s.save_pictures("real", &[pic]).is_err(), "the link leads out of the home folder");
         assert_eq!(std::fs::read_dir(d.join("elsewhere")).unwrap().count(), 0, "nothing was written there");
         let _ = std::fs::remove_dir_all(&d);
@@ -4118,6 +4272,95 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_keeps_its_model_and_size_and_the_store_counts_the_picture_bytes() {
+        let (s, d) = store("picsize");
+        assert_eq!(s.pictures_bytes(), 0, "nothing saved yet");
+        let o = StoryOptions { topic: "owls".into(), ..Default::default() };
+        s.save(&tale("Owls", "One owl.\n\nTwo owls."), &o, 1).unwrap();
+        let png = vec![137u8, 80, 78, 71, 13, 10, 26, 10, 0, 0];
+        let pic = StoredPic { variants: Vec::new(), look: String::new(), seed: None, provider: String::new(), model: String::new(), ms: 0, size: "512x512".into(), source: "images via SD-Turbo".into(), scene_text: "One owl.".into(), unit: 1, title: "Owls".into(), prompt: "an owl".into(), style: "watercolor".into(), mode: "image".into(), ext: "png".into(), bytes: png.clone() };
+        s.save_pictures("owls", &[pic]).unwrap();
+        let back = s.load_pictures("owls");
+        assert_eq!((back[0].size.as_str(), back[0].source.as_str(), back[0].prompt.as_str()), ("512x512", "images via SD-Turbo", "an owl"));
+        assert!(s.pictures_bytes() >= png.len() as u64, "the file and its index are counted");
+        s.save_pictures("owls", &[]).unwrap();
+        assert_eq!(s.pictures_bytes(), 0, "deleting the pictures frees the room");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn story_variants_are_kept_with_the_scene_in_order_old_stories_open_with_one_and_export_uses_the_main_only() {
+        let (s, d) = store("variants");
+        let o = StoryOptions { topic: "owls".into(), ..Default::default() };
+        let e = s.save(&tale("Owls", "One owl.\n\nTwo owls."), &o, 1).unwrap();
+        let png = |b: u8| vec![137, 80, 78, 71, b, 2, 3];
+        let var = |style: &str, b: u8, seed: u64| StoredVariant { ext: "png".into(), bytes: png(b), style: style.into(), seed: Some(seed), provider: "gpu".into(), model: "SDXL-Base-1.0".into(), size: "1024x1024".into(), ms: 4000, prompt: format!("{style} owl") };
+        let mut main = StoredPic { variants: vec![var("photo", 11, 5), var("anime", 12, 6)], look: "storybook".into(), seed: Some(4), provider: "gpu".into(), model: "SDXL-Base-1.0".into(), ms: 5000, size: "1024x1024".into(), source: "images via SDXL-Base-1.0".into(), scene_text: "One owl.".into(), unit: 1, title: "Owls, part 1".into(), prompt: "storybook owl".into(), style: "storybook".into(), mode: "image".into(), ext: "png".into(), bytes: png(10) };
+        let plain = StoredPic { variants: Vec::new(), scene_text: "Two owls.".into(), unit: 2, title: "Owls, part 2".into(), bytes: png(20), ..main.clone() };
+        s.save_pictures(&e.id, &[main.clone(), plain.clone()]).unwrap();
+        let dir = s.story_dir(&e.id).unwrap();
+        assert!(dir.join("pics/01.png").is_file() && dir.join("pics/01-v1.png").is_file() && dir.join("pics/01-v2.png").is_file() && !dir.join("pics/02-v1.png").exists());
+        let back = s.load_pictures(&e.id);
+        assert_eq!(back, vec![main.clone(), plain.clone()], "the variants come back in order with their style, seed, model, size and time");
+        assert_eq!((back[0].variants[0].style.as_str(), back[0].variants[1].seed, back[0].variants[0].ms), ("photo", Some(6), 4000));
+        assert_eq!((back[0].look.as_str(), back[0].seed, back[0].model.as_str(), back[0].ms), ("storybook", Some(4), "SDXL-Base-1.0", 5000), "the main picture's own style, seed, model and time");
+        assert!(s.pictures_bytes() >= 7 * 5, "the variants count towards the story's picture bytes");
+        // the picture lines of the story are the main pictures only
+        let md = std::fs::read_to_string(dir.join("story.md")).unwrap();
+        assert_eq!(md.matches("![").count(), 2, "{md}");
+        // choosing another as the main one: the old main becomes a variant, saved the same way
+        let chosen = main.variants.remove(0);
+        let (old_bytes, old_ext) = (main.bytes.clone(), main.ext.clone());
+        main.bytes = chosen.bytes.clone();
+        main.style = chosen.style.clone();
+        main.variants.insert(0, StoredVariant { bytes: old_bytes, ext: old_ext, style: "storybook".into(), ..chosen });
+        s.save_pictures(&e.id, &[main.clone(), plain.clone()]).unwrap();
+        assert_eq!(s.load_pictures(&e.id)[0].bytes, png(11), "the chosen picture is the main one after a reload");
+        assert_eq!(s.load_pictures(&e.id)[0].variants.len(), 2);
+        // export: the main pictures only, or every variant under its style name
+        let story = s.load(&e.id).unwrap().story;
+        let one = export_html(&story, &o, &s.load_pictures(&e.id));
+        let all = export_html_with(&story, &o, &s.load_pictures(&e.id), true);
+        assert_eq!(one.matches("<img").count(), 2, "main only");
+        assert_eq!(all.matches("<img").count(), 4, "main and the two variants of the first scene");
+        assert!(all.contains("<figcaption>anime</figcaption>") && !one.contains("figcaption>"));
+        // keep only the chosen: no variants, the files go
+        let only: Vec<StoredPic> = s.load_pictures(&e.id).into_iter().map(|p| StoredPic { variants: Vec::new(), ..p }).collect();
+        s.save_pictures(&e.id, &only).unwrap();
+        assert!(!dir.join("pics/01-v1.png").exists() && s.load_pictures(&e.id).iter().all(|p| p.variants.is_empty()));
+        // an old index (no variants key) opens with its one picture as the main one; bad variant names are ignored
+        let idx = std::fs::read_to_string(dir.join("pics/index.json")).unwrap();
+        assert!(!idx.contains("\"file\": \"../"));
+        assert!(valid_var_file("01-v2.png") && !valid_var_file("../01-v2.png") && !valid_var_file("01.png") && !valid_var_file("01-v.png") && !valid_var_file("01-v1.exe"));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn story_piclog_a_story_keeps_its_picture_choices_and_log_and_deletes_them_with_it() {
+        use crate::piclog::{kind, PicEvent};
+        use crate::storyillus::{Look, PictureOpts, Quality};
+        let (s, d) = store("piclog");
+        let o = StoryOptions { topic: "owls".into(), ..Default::default() };
+        let e = s.save(&tale("Owls", "One owl."), &o, 1).unwrap();
+        assert!(s.load_picture_opts(&e.id).is_none(), "a story saved before the choices existed has none");
+        let po = PictureOpts { look: Look::Photo, quality: Quality::Best, model: Some(crate::settings::ModelChoice { provider: "gpu".into(), model: "SDXL".into() }), keep_look: true, seed: Some(9), verbose: true, timeout_min: 30, styles: vec![Look::Photo, Look::Anime], per_style: 2, before_realistic: None };
+        s.save_picture_opts(&e.id, &po).unwrap();
+        assert_eq!(s.load_picture_opts(&e.id), Some(po));
+        let ev = |n: u64| PicEvent { ts: n, kind: kind::REQUEST.into(), story: "Owls".into(), picture: n as usize, ..Default::default() };
+        s.append_picture_log(&e.id, &[ev(1), ev(2)]).unwrap();
+        s.append_picture_log(&e.id, &[ev(3)]).unwrap();
+        assert_eq!(s.load_picture_log(&e.id).iter().map(|x| x.ts).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert!(s.load_picture_log("nothing").is_empty());
+        s.clear_picture_log(&e.id);
+        assert!(s.load_picture_log(&e.id).is_empty(), "clearing empties it");
+        s.append_picture_log(&e.id, &[ev(4)]).unwrap();
+        let dir = s.story_dir(&e.id).unwrap();
+        s.delete(&e.id).unwrap();
+        assert!(!dir.exists(), "the folder goes with its log and options");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
     fn pictures_are_kept_in_the_story_folder_with_their_prompts_and_come_back_in_place() {
         let (s, d) = store("pics");
         let o = StoryOptions { topic: "owls".into(), ..Default::default() };
@@ -4126,8 +4369,8 @@ mod tests {
         assert_eq!((e.pictures, e.id.as_str()), (0, "owls"));
         let svg = sanitize_svg("<svg><rect width='9' height='9'/><circle r='3' cx='4' cy='4'/></svg>").unwrap();
         let pics = vec![
-            StoredPic { source: String::new(), scene_text: String::new(), unit: 1, title: "Owls, part 1".into(), prompt: "watercolor owl".into(), style: "watercolor".into(), mode: "drawings".into(), ext: "svg".into(), bytes: svg.clone().into_bytes() },
-            StoredPic { source: String::new(), scene_text: String::new(), unit: 3, title: "Owls, part 2".into(), prompt: "a [night] owl".into(), style: "night".into(), mode: "image".into(), ext: "png".into(), bytes: vec![137, 80, 78, 71, 1, 2, 3] },
+            StoredPic { variants: Vec::new(), look: String::new(), seed: None, provider: String::new(), model: String::new(), ms: 0, size: String::new(), source: String::new(), scene_text: String::new(), unit: 1, title: "Owls, part 1".into(), prompt: "watercolor owl".into(), style: "watercolor".into(), mode: "drawings".into(), ext: "svg".into(), bytes: svg.clone().into_bytes() },
+            StoredPic { variants: Vec::new(), look: String::new(), seed: None, provider: String::new(), model: String::new(), ms: 0, size: String::new(), source: String::new(), scene_text: String::new(), unit: 3, title: "Owls, part 2".into(), prompt: "a [night] owl".into(), style: "night".into(), mode: "image".into(), ext: "png".into(), bytes: vec![137, 80, 78, 71, 1, 2, 3] },
         ];
         s.save_pictures("owls", &pics).unwrap();
         let dir = s.story_dir("owls").unwrap();
@@ -4164,7 +4407,7 @@ mod tests {
     fn the_exported_page_is_one_self_contained_html_file() {
         let o = StoryOptions { topic: "owls".into(), language: "Tamil".into(), ..Default::default() };
         let story = tale("Owls <&> \"Co\"", "One owl <b>said</b> hi.\n\n## Night\n\nTwo owls.");
-        let pics = vec![StoredPic { source: String::new(), scene_text: String::new(), unit: 1, title: "A \"scene\"".into(), prompt: String::new(), style: String::new(), mode: String::new(), ext: "svg".into(), bytes: b"<svg xmlns='http://www.w3.org/2000/svg'><rect/></svg>".to_vec() }, StoredPic { source: String::new(), scene_text: String::new(), unit: 3, title: "Night".into(), prompt: String::new(), style: String::new(), mode: String::new(), ext: "png".into(), bytes: vec![0, 1, 2, 250, 251] }];
+        let pics = vec![StoredPic { variants: Vec::new(), look: String::new(), seed: None, provider: String::new(), model: String::new(), ms: 0, size: String::new(), source: String::new(), scene_text: String::new(), unit: 1, title: "A \"scene\"".into(), prompt: String::new(), style: String::new(), mode: String::new(), ext: "svg".into(), bytes: b"<svg xmlns='http://www.w3.org/2000/svg'><rect/></svg>".to_vec() }, StoredPic { variants: Vec::new(), look: String::new(), seed: None, provider: String::new(), model: String::new(), ms: 0, size: String::new(), source: String::new(), scene_text: String::new(), unit: 3, title: "Night".into(), prompt: String::new(), style: String::new(), mode: String::new(), ext: "png".into(), bytes: vec![0, 1, 2, 250, 251] }];
         let html = export_html(&story, &o, &pics);
         assert!(html.starts_with("<!doctype html>") && html.contains("<title>Owls &lt;&amp;&gt; &quot;Co&quot;</title>"), "{html}");
         assert!(!html.contains("<script") && !html.contains("<link") && !html.contains("src=\"http") && !html.contains("href="), "no script and nothing outside");

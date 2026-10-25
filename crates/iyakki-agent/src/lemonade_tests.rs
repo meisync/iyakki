@@ -278,3 +278,208 @@ fn chat_streams_with_a_tool_call_embeddings_work_and_load_and_pull_reach_the_ser
     assert_eq!((pulled["model_name"].as_str(), pulled["stream"].as_bool()), (Some("SDXL-Base-1.0"), Some(true)));
     let _ = std::fs::remove_dir_all(d);
 }
+
+#[test]
+fn quick_install_kokoro_becomes_the_reading_voice_only_when_none_was_chosen() {
+    let _g = crate::hostfiles::test_guard();
+    let fake = serve("lemonade");
+    set_local_ports_for_tests(Some((unused_port(), vec![fake.port])));
+    // nothing chosen: Lemonade joins Models, its list is read, kokoro-v1 becomes the reading voice
+    let (s, d) = real_services("kokoro-auto");
+    assert!(s.settings.lock().unwrap().get().voice.tts.is_none());
+    assert!(crate::quickinstall::configure_kokoro_voice(&s), "settled");
+    let st = s.settings.lock().unwrap();
+    let ids: Vec<String> = st.get().providers.iter().map(|p| p.id.clone()).collect();
+    assert!(ids.iter().any(|i| i.starts_with("lemonade-local")), "{ids:?}");
+    let tts = st.get().voice.tts.clone().expect("a reading voice was set");
+    assert!(tts.label().contains("kokoro-v1"), "{}", tts.label());
+    drop(st);
+    // the person's own voice is never replaced
+    let (s2, d2) = real_services("kokoro-keep");
+    let mine = crate::lemonade::tts_engine("http://127.0.0.1:1/api/v1", "other-voice", None, None);
+    s2.settings.lock().unwrap().update(|v| v.voice.tts = Some(mine.clone())).unwrap();
+    assert!(crate::quickinstall::configure_kokoro_voice(&s2));
+    assert_eq!(s2.settings.lock().unwrap().get().voice.tts, Some(mine), "left alone");
+    // nothing answering: try again later
+    set_local_ports_for_tests(Some((unused_port(), vec![unused_port()])));
+    let (s3, d3) = real_services("kokoro-down");
+    assert!(!crate::quickinstall::configure_kokoro_voice(&s3));
+    set_local_ports_for_tests(None);
+    for d in [d, d2, d3] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+// ------------------------------------------------------------------ collections (LMX-Omni) and "Use all parts"
+
+/// The list of a real Lemonade server with an Omni collection, as `GET /models?show_all=true` answers (the extra keys
+/// `models`, `source`, `registry_source`, `update_available` are there too).
+pub(crate) fn omni_json(sd_installed: bool) -> serde_json::Value {
+    serde_json::json!({"object": "list", "data": [
+        {"id": "LMX-Omni-5.5B-Lite", "object": "model", "owned_by": "lemonade", "recipe": "collection.omni", "labels": ["chat"], "size": 9.3, "downloaded": true,
+         "components": ["Qwen3.5-4B-MTP-GGUF", "SD-Turbo", "Whisper-Tiny", "kokoro-v1"], "models": [], "source": "registry", "registry_source": "lemonade", "update_available": false, "system_prompt": "You can draw, listen and speak."},
+        {"id": "LMX-Omni-52B-Halo", "recipe": "collection.omni", "labels": ["chat"], "size": 44.8, "downloaded": false, "components": [], "system_prompt": "x"},
+        {"id": "Qwen3.5-4B-MTP-GGUF", "recipe": "llamacpp", "labels": ["vision", "reasoning"], "size": 3.4, "downloaded": true},
+        {"id": "SD-Turbo", "recipe": "sd-cpp", "labels": ["image"], "size": 2.6, "downloaded": sd_installed},
+        {"id": "Whisper-Tiny", "recipe": "whispercpp", "labels": ["transcription"], "size": 0.075, "downloaded": true},
+        {"id": "kokoro-v1", "recipe": "kokoro", "labels": ["tts"], "size": 0.354, "downloaded": true},
+        {"id": "Qwen3-0.6B-GGUF", "recipe": "llamacpp", "size": 0.38, "downloaded": true, "labels": ["reasoning"]}
+    ]})
+}
+
+/// A Lemonade provider (`lemonade-local`) whose list holds the Omni collection, plus the signed-in user's TALES store.
+fn omni_setup(tag: &str, sd_installed: bool) -> (Arc<Services>, crate::story::StoryStore, Fake) {
+    let fake = serve("lemonade");
+    let (svc, d) = real_services(tag);
+    svc.use_local_lemonade(&fake.base(), Some("2026.42.1"));
+    omni_list(&svc, &fake.base(), omni_json(sd_installed));
+    (svc, omni_store(&d, true), fake)
+}
+
+fn omni_list(svc: &Services, base: &str, v: serde_json::Value) {
+    remember(base, &parse_models(&v, &[]));
+    remember_collections(base, &parse_collections(&v));
+    assert!(svc.provider_is_lemonade("lemonade-local"));
+}
+
+fn omni_store(d: &std::path::Path, writable: bool) -> crate::story::StoryStore {
+    let home = d.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let home = std::fs::canonicalize(&home).unwrap();
+    let mut policy = iyakki_sec::policy::Role::User.template();
+    let roots = if writable { vec![home.to_string_lossy().to_string()] } else { vec![] };
+    policy.fs_write = roots.clone();
+    policy.fs_read = roots;
+    crate::story::StoryStore::open_at(&policy, "amy", d, home)
+}
+
+fn omni_state(svc: &Services, store: &crate::story::StoryStore) -> String {
+    let s = svc.settings.lock().unwrap();
+    let g = s.get();
+    format!("{:?}|{:?}|{:?}|{:?}|{:?}", g.chat, g.voice.stt, g.voice.tts, g.provider("lemonade-local").and_then(|p| p.default_model.clone()), store.load_prefs().picture_model)
+}
+
+#[test]
+fn collections_are_read_with_their_parts_system_prompt_and_every_other_key_and_plain_models_stay_plain() {
+    let v = omni_json(true);
+    let c = parse_collections(&v);
+    assert_eq!(c.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["LMX-Omni-5.5B-Lite", "LMX-Omni-52B-Halo"], "only collections, by name");
+    let lite = c.iter().find(|x| x.id == "LMX-Omni-5.5B-Lite").unwrap();
+    assert_eq!(lite.components, ["Qwen3.5-4B-MTP-GGUF", "SD-Turbo", "Whisper-Tiny", "kokoro-v1"]);
+    assert!(lite.has_system_prompt && lite.recipe == "collection.omni");
+    let halo = c.iter().find(|x| x.id == "LMX-Omni-52B-Halo").unwrap();
+    assert!(halo.components.is_empty(), "components come empty while it is not downloaded");
+    // the typed list keeps the collection as a plain chat entry (labels: chat) and marks it with its recipe
+    let m = parse_models(&v, &[]);
+    let lite_m = m.iter().find(|x| x.id == "LMX-Omni-5.5B-Lite").unwrap();
+    assert!(is_collection(lite_m) && lite_m.kind == ModelType::Chat && lite_m.size_text() == "9.3 GB");
+    assert!(!is_collection(m.iter().find(|x| x.id == "SD-Turbo").unwrap()));
+    // a list without collections (an older server) has none, and an odd `components` is an empty list
+    assert!(parse_collections(&serde_json::from_str(&models_json()).unwrap()).is_empty());
+    let odd = serde_json::json!({"data": [{"id": "R", "recipe": "collection.omni", "components": "nope"}, {"id": "S", "recipe": "collection.omni", "components": ["a b", "ok", "ok", 3]}]});
+    let odd = parse_collections(&odd);
+    assert!(odd[0].components.is_empty() && odd[1].components == ["ok"] && !odd[0].has_system_prompt);
+    // never read: no collections (an old cached list and a provider with only saved types work as before)
+    assert!(collections_cached("http://never-read.invalid:1/api/v1").is_empty());
+}
+
+#[test]
+fn parts_are_resolved_against_the_list_with_their_kind_state_and_size_and_an_unknown_one_counts_as_missing() {
+    let v = omni_json(false);
+    let c = parse_collections(&v).into_iter().find(|x| x.id == "LMX-Omni-5.5B-Lite").unwrap();
+    let plan = UsePlan::new(&c, &parse_models(&v, &[]));
+    assert_eq!(plan.parts_text(), "chat+vision Qwen3.5-4B-MTP-GGUF, pictures SD-Turbo, speech in Whisper-Tiny, speech out kokoro-v1");
+    assert_eq!(plan.parts.iter().map(Part::state).collect::<Vec<_>>(), ["installed", "missing (2.6 GB)", "installed", "installed"]);
+    assert_eq!((plan.missing_ids(), plan.missing_gb()), (vec!["SD-Turbo".to_string()], Some(2.6)));
+    assert!(plan.lacking().is_empty());
+    let mut odd = c.clone();
+    odd.components.push("Mystery-Whisper-X".into());
+    let plan = UsePlan::new(&odd, &parse_models(&v, &[]));
+    let p = plan.parts.last().unwrap();
+    assert!(!p.listed && p.kind == ModelType::SpeechToText && p.state() == "missing (size unknown)", "{p:?}");
+    assert_eq!(plan.missing_gb(), None, "a missing part without a size has no total");
+    let none = UsePlan::new(&Collection { id: "X".into(), ..Default::default() }, &[]);
+    assert_eq!(none.lacking(), ["chat", "pictures", "speech in", "speech out"]);
+}
+
+#[test]
+fn use_all_parts_sets_chat_pictures_speech_in_and_the_reading_voice_and_undo_puts_the_old_ones_back() {
+    let (svc, store, _fake) = omni_setup("omni-ok", true);
+    // something else was in use before
+    svc.settings.lock().unwrap().update(|s| s.chat = Some(crate::settings::ModelChoice { provider: "lemonade-local".into(), model: "Qwen3-0.6B-GGUF".into() })).unwrap();
+    let before = omni_state(&svc, &store);
+    let r = svc.collection_review("lemonade-local", "LMX-Omni-5.5B-Lite").unwrap();
+    assert!(!r.needs_install && r.plan.missing().is_empty());
+    let msg = svc.use_all_parts("lemonade-local", "LMX-Omni-5.5B-Lite", &store).unwrap();
+    assert!(msg.contains("Qwen3.5-4B-MTP-GGUF") && msg.contains("SD-Turbo") && msg.contains("Whisper-Tiny") && msg.contains("kokoro-v1"), "{msg}");
+    {
+        let s = svc.settings.lock().unwrap();
+        let g = s.get();
+        assert_eq!(g.chat.as_ref().map(|c| c.model.as_str()), Some("Qwen3.5-4B-MTP-GGUF"));
+        assert!(matches!(&g.voice.stt, Some(crate::voice::SpeechEngine::Http { url, model, .. }) if url.ends_with("/audio/transcriptions") && model == "Whisper-Tiny"));
+        assert!(matches!(&g.voice.tts, Some(crate::voice::SpeechEngine::Http { url, model, .. }) if url.ends_with("/audio/speech") && model == "kokoro-v1"));
+    }
+    assert_eq!(store.load_prefs().picture_model.map(|m| (m.provider, m.model)), Some(("lemonade-local".into(), "SD-Turbo".into())));
+    assert_eq!(svc.parts_undo_available(), Some(("lemonade-local".into(), "LMX-Omni-5.5B-Lite".into())));
+    svc.undo_all_parts(&store).unwrap();
+    assert_eq!(omni_state(&svc, &store), before, "Undo restores chat, both engines, the provider default and pictures");
+    assert!(svc.parts_undo_available().is_none() && svc.undo_all_parts(&store).is_err());
+}
+
+#[test]
+fn a_missing_part_blocks_use_all_parts_names_it_with_its_size_and_install_pulls_the_collection() {
+    let (svc, store, fake) = omni_setup("omni-missing", false);
+    let before = omni_state(&svc, &store);
+    let r = svc.collection_review("lemonade-local", "LMX-Omni-5.5B-Lite").unwrap();
+    assert!(r.needs_install);
+    assert_eq!(r.missing_lines(), ["pictures SD-Turbo: missing (2.6 GB)"]);
+    let e = svc.use_all_parts("lemonade-local", "LMX-Omni-5.5B-Lite", &store).unwrap_err();
+    assert!(e.contains("SD-Turbo") && e.contains("2.6 GB"), "{e}");
+    assert_eq!(omni_state(&svc, &store), before, "nothing was applied");
+    // a collection that is not downloaded lists no parts: it is installed whole
+    let h = svc.collection_review("lemonade-local", "LMX-Omni-52B-Halo").unwrap();
+    assert!(h.needs_install && h.missing_lines()[0].contains("44.8 GB"), "{:?}", h.missing_lines());
+    // install: the collection id is pulled (Lemonade fetches its parts)
+    let ids = svc.install_missing_parts("lemonade-local", "LMX-Omni-5.5B-Lite").unwrap();
+    assert_eq!(ids, ["LMX-Omni-5.5B-Lite"]);
+    for _ in 0..400 {
+        if svc.pull_status().iter().all(|p| p.done || p.error.is_some()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(fake.bodies("/api/v1/pull")[0].contains("\"model_name\":\"LMX-Omni-5.5B-Lite\""));
+    // a non-collection is not one
+    assert!(svc.collection_review("lemonade-local", "SD-Turbo").unwrap_err().contains("not a collection"));
+}
+
+#[test]
+fn a_step_that_fails_puts_back_the_steps_before_it_and_names_the_part() {
+    let (svc, _, _fake) = omni_setup("omni-fail", true);
+    let d = tmp("omni-fail-ro");
+    let ro = omni_store(&d, false);
+    let before = omni_state(&svc, &ro);
+    let e = svc.use_all_parts("lemonade-local", "LMX-Omni-5.5B-Lite", &ro).unwrap_err();
+    assert!(e.contains("pictures (SD-Turbo) could not be set") && e.contains("Nothing was changed"), "{e}");
+    assert_eq!(omni_state(&svc, &ro), before, "chat and both engines were put back");
+    assert!(svc.parts_undo_available().is_none());
+}
+
+#[test]
+fn a_collection_on_another_machine_needs_the_yes_for_speech_before_anything_is_set() {
+    let (svc, d) = real_services("omni-remote");
+    let base = "http://lemon.example.invalid:13305/api/v1";
+    let mut p = ProviderCfg::new("lemonade-far", Kind::Lemonade);
+    p.base_url = Some(base.into());
+    svc.settings.lock().unwrap().upsert_provider(p).unwrap();
+    let v = omni_json(true);
+    remember(base, &parse_models(&v, &[]));
+    remember_collections(base, &parse_collections(&v));
+    let store = omni_store(&d, true);
+    let before = omni_state(&svc, &store);
+    let e = svc.use_all_parts("lemonade-far", "LMX-Omni-5.5B-Lite", &store).unwrap_err();
+    assert!(e.contains("Say yes") && e.contains("nothing was changed"), "{e}");
+    assert_eq!(omni_state(&svc, &store), before);
+    svc.allow_speech_server(base).unwrap();
+    assert!(svc.use_all_parts("lemonade-far", "LMX-Omni-5.5B-Lite", &store).is_ok());
+}

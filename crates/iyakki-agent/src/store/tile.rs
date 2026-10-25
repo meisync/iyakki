@@ -18,6 +18,8 @@ use iyakki_web::fetch::Response;
 use iyakki_web::{Fetch, Url};
 use serde_json::{json, Value};
 
+use super::tilesdk::{code, SdkError, TileSdk};
+
 pub const MANIFEST: &str = "app.json";
 pub const DEFAULT_GROUP: &str = "My apps";
 pub const MAX_FILES: usize = 64;
@@ -48,13 +50,17 @@ pub struct Caps {
     pub notifications: bool,
     pub files: bool,
     pub agent: bool,
+    /// `iyakki.llm` and `iyakki.models`: a bare model through the person's own provider setup.
+    pub llm: bool,
+    /// `iyakki.speech.say`: reads text aloud.
+    pub speech: bool,
 }
 
 impl Caps {
     /// The store vocabulary: `tile:storage` ... and `net:host`.
     pub fn permissions(&self) -> Vec<String> {
         let mut v = Vec::new();
-        for (on, n) in [(self.storage, "storage"), (self.clipboard, "clipboard"), (self.notifications, "notifications"), (self.files, "files"), (self.agent, "agent")] {
+        for (on, n) in [(self.storage, "storage"), (self.clipboard, "clipboard"), (self.notifications, "notifications"), (self.files, "files"), (self.agent, "agent"), (self.llm, "llm"), (self.speech, "speech")] {
             if on {
                 v.push(format!("tile:{n}"));
             }
@@ -65,11 +71,11 @@ impl Caps {
 
     pub fn from_permissions(perms: &[String]) -> Caps {
         let has = |n: &str| perms.iter().any(|p| p == &format!("tile:{n}"));
-        Caps { storage: has("storage"), clipboard: has("clipboard"), notifications: has("notifications"), files: has("files"), agent: has("agent"), network: perms.iter().filter_map(|p| p.strip_prefix("net:").map(str::to_string)).collect() }
+        Caps { storage: has("storage"), clipboard: has("clipboard"), notifications: has("notifications"), files: has("files"), agent: has("agent"), llm: has("llm"), speech: has("speech"), network: perms.iter().filter_map(|p| p.strip_prefix("net:").map(str::to_string)).collect() }
     }
 
     pub fn all() -> Caps {
-        Caps { storage: true, network: vec![], clipboard: true, notifications: true, files: true, agent: true }
+        Caps { storage: true, network: vec![], clipboard: true, notifications: true, files: true, agent: true, llm: true, speech: true }
     }
 }
 
@@ -120,6 +126,8 @@ impl TileManifest {
                 "notifications" => c.notifications = on()?,
                 "files" => c.files = on()?,
                 "agent" => c.agent = on()?,
+                "llm" => c.llm = on()?,
+                "speech" => c.speech = on()?,
                 "network" => {
                     let a = val.as_array().ok_or("capability \"network\" is a list of host names")?;
                     if a.len() > 8 {
@@ -135,7 +143,7 @@ impl TileManifest {
                 }
                 "vault" => return Err("tile apps may not use the vault: ask the person to type what they need, or keep it in iyakki.storage".into()),
                 "js-eval" | "eval" => return Err("tile apps may not make code from text (eval, new Function): write the code in a script file".into()),
-                other => return Err(format!("unknown capability {other:?}: storage, network, clipboard, notifications, files, agent")),
+                other => return Err(format!("unknown capability {other:?}: storage, network, clipboard, notifications, files, agent, llm, speech")),
             }
         }
         Ok(c)
@@ -162,7 +170,7 @@ impl TileManifest {
 
     pub fn to_json(&self) -> Value {
         let mut caps = serde_json::Map::new();
-        for (on, n) in [(self.caps.storage, "storage"), (self.caps.clipboard, "clipboard"), (self.caps.notifications, "notifications"), (self.caps.files, "files"), (self.caps.agent, "agent")] {
+        for (on, n) in [(self.caps.storage, "storage"), (self.caps.clipboard, "clipboard"), (self.caps.notifications, "notifications"), (self.caps.files, "files"), (self.caps.agent, "agent"), (self.caps.llm, "llm"), (self.caps.speech, "speech")] {
             if on {
                 caps.insert(n.into(), json!(true));
             }
@@ -425,7 +433,7 @@ pub fn lint(b: &Bundle) -> (Vec<String>, Vec<String>) {
         }
     }
     let uses = |needle: &str| b.files.iter().any(|(p, d)| matches!(d, FileData::Text(t) if matches!(ext(p).as_str(), "js" | "mjs" | "html") && t.contains(needle)));
-    for (needle, on, cap) in [("iyakki.storage", m.caps.storage, "storage"), ("iyakki.clipboard", m.caps.clipboard, "clipboard"), ("iyakki.notify", m.caps.notifications, "notifications"), ("iyakki.host", m.caps.files, "files"), ("iyakki.agent", m.caps.agent, "agent")] {
+    for (needle, on, cap) in [("iyakki.storage", m.caps.storage, "storage"), ("iyakki.clipboard", m.caps.clipboard, "clipboard"), ("iyakki.notify", m.caps.notifications, "notifications"), ("iyakki.host", m.caps.files, "files"), ("iyakki.agent", m.caps.agent, "agent"), ("iyakki.llm", m.caps.llm, "llm"), ("iyakki.models", m.caps.llm, "llm"), ("iyakki.speech", m.caps.speech, "speech")] {
         if uses(needle) && !on {
             problems.push(format!("the app calls {needle} but app.json does not declare capabilities.{cap}: the call would be refused"));
         }
@@ -590,7 +598,7 @@ pub struct AppInfo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     pub id: u32,
-    /// `host.openFile`, `host.saveFile`, `clipboard.read`, `clipboard.write`, `agent.ask`.
+    /// `host.openFile`, `host.saveFile`, `clipboard.read`, `clipboard.write`, `agent.ask`, `sdk.approve` (first use of `llm` or `speech`).
     pub kind: String,
     pub args: Value,
 }
@@ -603,7 +611,36 @@ pub struct Outbox {
     pub notices: Vec<(String, String)>,
     /// Calls refused, for the info panel and the audit log.
     pub refused: Vec<String>,
+    /// Answers of slow calls (a model, a voice) waiting to settle their promises on the page; [`TileRuntime::pump`] delivers them.
+    pub done: Vec<Done>,
+    /// Events for stream handles (`iyakki.llm.stream`), delivered by [`TileRuntime::pump`].
+    pub emits: Vec<Emit>,
+    /// (action, detail) lines for the audit log: budget warnings and stops. Never the content of a call.
+    pub audit: Vec<(String, String)>,
     next: u32,
+}
+
+/// A slow call that finished: `value` is JSON when `ok`, else an encoded error (`SdkError::encode`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Done {
+    pub id: u32,
+    pub ok: bool,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Emit {
+    pub handle: u32,
+    pub event: String,
+    pub payload: Value,
+}
+
+impl Outbox {
+    /// A number for a request or a stream handle, unique in this app.
+    pub fn alloc(&mut self) -> u32 {
+        self.next += 1;
+        self.next
+    }
 }
 
 type Clock = Box<dyn Fn() -> u64 + Send>;
@@ -615,12 +652,19 @@ pub struct TileHost {
     out: Arc<Mutex<Outbox>>,
     clock: Clock,
     window: (u64, u32),
+    sdk: Option<Arc<super::tilesdk::TileSdk>>,
 }
 
 impl TileHost {
     pub fn new(info: AppInfo, caps: Caps, storage: TileStorage, out: Arc<Mutex<Outbox>>) -> TileHost {
         let t0 = std::time::Instant::now();
-        TileHost { info, caps, storage, out, clock: Box::new(move || t0.elapsed().as_millis() as u64), window: (0, 0) }
+        TileHost { info, caps, storage, out, clock: Box::new(move || t0.elapsed().as_millis() as u64), window: (0, 0), sdk: None }
+    }
+
+    /// The model, the voice and the numbers behind `llm`, `models` and `speech`. Without them those calls answer `Unavailable`.
+    pub fn with_sdk(mut self, sdk: Arc<super::tilesdk::TileSdk>) -> TileHost {
+        self.sdk = Some(sdk);
+        self
     }
 
     /// A clock for tests.
@@ -645,6 +689,15 @@ impl TileHost {
         } else {
             Err(self.deny(what))
         }
+    }
+
+    /// Like `need` for the SDK calls: the error carries the code `NoCapability`.
+    fn need_code(&self, on: bool, what: &str) -> Result<(), String> {
+        self.need(on, what).map_err(|m| SdkError::new(code::NO_CAPABILITY, m).encode())
+    }
+
+    fn sdk(&self) -> Result<&Arc<TileSdk>, String> {
+        self.sdk.as_ref().ok_or_else(|| SdkError::new(code::UNAVAILABLE, "this build has no model or voice behind the bridge").encode())
     }
 
     fn pending(&self, kind: &str, args: Value) -> Result<Value, String> {
@@ -753,6 +806,36 @@ impl Bridge for TileHost {
                 self.need(self.caps.agent, "the assistant")?;
                 self.pending(op, json!({"q": s(a, "q", 2000)?}))
             }
+            "llm.chat" | "llm.stream" => {
+                self.need_code(self.caps.llm, "the AI model (llm)")?;
+                self.sdk()?.chat(a, op == "llm.stream").map_err(|e| e.encode())
+            }
+            "llm.cancel" => {
+                self.need_code(self.caps.llm, "the AI model (llm)")?;
+                self.sdk()?.cancel(a).map_err(|e| e.encode())
+            }
+            "llm.usage" => {
+                self.need_code(self.caps.llm, "the AI model (llm)")?;
+                self.sdk()?.usage(a).map_err(|e| e.encode())
+            }
+            "models.list" => {
+                self.need_code(self.caps.llm, "the AI model (llm)")?;
+                self.sdk()?.models(a).map_err(|e| e.encode())
+            }
+            "speech.say" => {
+                self.need_code(self.caps.speech, "reading aloud (speech)")?;
+                self.sdk()?.say(a).map_err(|e| e.encode())
+            }
+            "speech.stop" => {
+                self.need_code(self.caps.speech, "reading aloud (speech)")?;
+                self.sdk()?.stop(a).map_err(|e| e.encode())
+            }
+            // the headless harness only: `T.fake.*` (a runtime built with fakes answers, any other refuses like an unknown call)
+            t if t.starts_with("__test.") => match self.sdk.as_ref().filter(|s| s.fakes().is_some()) {
+                Some(_) if t == "__test.notify.sent" => Ok(json!(self.out.lock().map(|o| o.notices.clone()).unwrap_or_default().iter().map(|(t, b)| json!({"title": t, "body": b})).collect::<Vec<_>>())),
+                Some(s) => s.fake_op(&t["__test.".len()..], a),
+                None => Err("no such bridge call: __test".into()),
+            },
             other => Err(format!("no such bridge call: {}", other.chars().take(40).collect::<String>())),
         }
     }
@@ -765,6 +848,8 @@ pub struct TileRuntime {
     pub page: LivePage,
     pub out: Arc<Mutex<Outbox>>,
     pub bundle: Arc<Bundle>,
+    /// The model, voice and numbers of this app (None: a build without them).
+    pub sdk: Option<Arc<TileSdk>>,
     origin: Url,
 }
 
@@ -776,11 +861,20 @@ impl TileRuntime {
     }
 
     pub fn open_with(bundle: Bundle, info: AppInfo, storage: TileStorage, web: Arc<dyn Fetch>, hosts: Vec<String>, clock: Option<Clock>) -> Result<TileRuntime, String> {
+        Self::open_sdk(bundle, info, storage, web, hosts, clock, |_| None)
+    }
+
+    /// [`open_with`](TileRuntime::open_with) with the SDK backends made by `make` from the app's outbox (the real ones for the shell, fakes for tests).
+    pub fn open_sdk(bundle: Bundle, info: AppInfo, storage: TileStorage, web: Arc<dyn Fetch>, hosts: Vec<String>, clock: Option<Clock>, make: impl FnOnce(Arc<Mutex<Outbox>>) -> Option<TileSdk>) -> Result<TileRuntime, String> {
         let origin = Url::parse(&format!("https://{}/", bundle.manifest.origin_host()))?;
         let out = Arc::new(Mutex::new(Outbox::default()));
         let mut host = TileHost::new(info, bundle.manifest.caps.clone(), storage, out.clone());
         if let Some(c) = clock {
             host.clock = c;
+        }
+        let sdk = make(out.clone()).map(Arc::new);
+        if let Some(s) = &sdk {
+            host.sdk = Some(s.clone());
         }
         let html = bundle.text("index.html").ok_or("no index.html")?.to_string();
         let bundle = Arc::new(bundle);
@@ -789,7 +883,7 @@ impl TileRuntime {
         let allow = move |h: &str| h == own || hosts.iter().any(|x| x == h);
         let limits = Limits { memory_bytes: 96 << 20, wall: std::time::Duration::from_secs(5), ..Limits::default() };
         let page = LivePage::load(&html, &origin, fetch, allow, &SiteData::default(), limits, vec![Box::new(BridgeModule::new(Box::new(host)))]).ok_or("the page engine could not start")?;
-        Ok(TileRuntime { page, out, bundle, origin })
+        Ok(TileRuntime { page, out, bundle, sdk, origin })
     }
 
     /// The page as the reader engine lays it out.
@@ -841,8 +935,55 @@ impl TileRuntime {
         self.page.advance(0);
     }
 
+    /// Bring what happened off the page's turn back to it: time limits, answers of slow calls (a model, a voice) and stream events.
+    /// The shell calls this on its ticks; the headless harness after every test file. Returns whether the page was told anything.
+    pub fn pump(&mut self) -> bool {
+        if let Some(s) = &self.sdk {
+            s.tick();
+        }
+        let (done, emits) = match self.out.lock() {
+            Ok(mut o) => (std::mem::take(&mut o.done), std::mem::take(&mut o.emits)),
+            Err(_) => return false,
+        };
+        let any = !done.is_empty() || !emits.is_empty();
+        for d in done {
+            if d.ok {
+                let v = serde_json::to_string(&d.value).unwrap_or_else(|_| "\"null\"".into());
+                let _ = self.page.eval("resolve", &format!("__iyakkiResolve({}, true, JSON.parse({v}))", d.id));
+            } else {
+                let v = serde_json::to_string(&d.value).unwrap_or_else(|_| "\"\"".into());
+                let _ = self.page.eval("resolve", &format!("__iyakkiResolve({}, false, {v})", d.id));
+            }
+        }
+        for e in emits {
+            let p = serde_json::to_string(&e.payload.to_string()).unwrap_or_else(|_| "\"{}\"".into());
+            let ev = serde_json::to_string(&e.event).unwrap_or_default();
+            let _ = self.page.eval("emit", &format!("__iyakkiEmit({}, {ev}, JSON.parse({p}))", e.handle));
+        }
+        if any {
+            self.page.advance(0);
+        }
+        any
+    }
+
+    /// The person answered a first-use card (`sdk.approve`). False when there was no such card.
+    pub fn answer_sdk(&mut self, id: u32, allow: bool) -> bool {
+        let ok = self.sdk.as_ref().is_some_and(|s| s.answer(id, allow));
+        self.pump();
+        ok
+    }
+
     pub fn take_requests(&self) -> Vec<Request> {
         self.out.lock().map(|o| o.requests.clone()).unwrap_or_default()
+    }
+}
+
+impl Drop for TileRuntime {
+    /// Closing the tile stops what it started: streams, readings, calls waiting for an answer.
+    fn drop(&mut self) {
+        if let Some(s) = &self.sdk {
+            s.close();
+        }
     }
 }
 
@@ -862,7 +1003,31 @@ globalThis.T = (function () {
     exists(sel) { return !!document.querySelector(sel); },
     eq(a, b, msg) { if (a !== b) throw new Error((msg || 'expected equal') + ': ' + JSON.stringify(a) + ' !== ' + JSON.stringify(b)); },
     ok(c, msg) { if (!c) throw new Error(msg || 'expected true'); },
-    test(name, fn) { try { fn(); results.push({ name, ok: true }); } catch (e) { results.push({ name, ok: false, error: String((e && e.message) || e) }); } },
+    // a test may return a promise (await iyakki.llm.chat(...)): it passes when the promise does, and fails if it never settles
+    test(name, fn) {
+      const why = (e) => String((e && e.message) || e);
+      try {
+        const r = fn();
+        if (r && typeof r.then === 'function') {
+          const rec = { name, ok: false, error: 'the promise never settled' };
+          results.push(rec);
+          r.then(() => { rec.ok = true; delete rec.error; }, (e) => { rec.error = why(e); });
+        } else results.push({ name, ok: true });
+      } catch (e) { results.push({ name, ok: false, error: why(e) }); }
+    },
+    // the person, the model and the speaker are fakes here; arguments, capabilities, quotas and error codes are the real ones
+    fake: (function () {
+      const f = (op, a) => JSON.parse(__host('iyakki', '__test.' + op, JSON.stringify(a === undefined ? {} : a)));
+      return {
+        llm: { reply: (text) => f('llm.reply', { text }), fail: (code) => f('llm.fail', { code }), usage: (input, output) => f('llm.usage', { input, output }) },
+        models: { set: (models) => f('models.set', { models }) },
+        speech: { busy: (holder) => f('speech.busy', { holder }), said: () => f('speech.said') },
+        notify: { sent: () => f('notify.sent') },
+        approve: (mode) => f('approve.set', { mode }),
+        budget: { set: (b) => f('budget.set', b) },
+        clock: { advance: (ms) => f('clock.advance', { ms }) },
+      };
+    })(),
   };
 })();
 "#;
@@ -896,7 +1061,10 @@ pub fn run_tests(dir: &Path) -> Result<TestReport, String> {
     }
     let info = AppInfo { id: bundle.manifest.id.clone(), name: bundle.manifest.name.clone(), version: bundle.manifest.version.clone(), publisher: "you".into(), trust: "test".into(), dev: true };
     let caps = bundle.manifest.caps.clone();
-    let mut rt = TileRuntime::open_with(bundle, info, TileStorage::memory(), Arc::new(iyakki_web::fetch::NoNetwork), vec![], None)?;
+    let app = bundle.manifest.id.clone();
+    static RUNS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let scratch = std::env::temp_dir().join(format!("iyakki-tile-test-{}-{}-{app}", std::process::id(), RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+    let mut rt = TileRuntime::open_sdk(bundle, info, TileStorage::memory(), Arc::new(iyakki_web::fetch::NoNetwork), vec![], None, |out| Some(TileSdk::fake(&app, out, &scratch)))?;
     let mut rep = TestReport::default();
     for n in rt.page.report.notes.iter().chain(rt.page.report.console.iter().filter(|l| l.level == "error").map(|l| &l.text)) {
         rep.lines.push(format!("page: {n}"));
@@ -910,8 +1078,15 @@ pub fn run_tests(dir: &Path) -> Result<TestReport, String> {
             rep.failed += 1;
             rep.lines.push(format!("FAIL {name}: {e}"));
         }
-        rt.page.advance(50);
+        // timers, then what slow calls and streams brought back, until nothing more arrives
+        for _ in 0..8 {
+            rt.page.advance(50);
+            if !rt.pump() {
+                break;
+            }
+        }
     }
+    let _ = std::fs::remove_dir_all(&scratch);
     let r = rt.page.eval("results", "JSON.stringify(T.results)").map_err(|e| e.to_string())?;
     let list: Vec<Value> = serde_json::from_str(&r).unwrap_or_default();
     for t in list {

@@ -13,6 +13,7 @@ pub const USAGE: &str = "usage: iyakki dev <command>
   pair <address[:port]> [--code CODE] [--name THIS-COMPUTER] [--as DEVICE-NAME] [--fingerprint FP]
                                       pair once with the code and fingerprint the device shows (Settings, Developer mode)
   devices [--default NAME | --forget NAME]   the devices this computer paired with
+  usb [check|authorize|pair|speed|link|gadget]   connect two computers with ONE cable (Thunderbolt/USB4 or a bridge cable), see the steps
   install <pkg.iyp | folder> [--shared] [--open]   install a tile app, skill, MCP server, extension... (Developer (local))
   uninstall <id>                      remove something developer mode installed (kind:name or name)
   list [--all]                        what developer mode installed on the device (--all: everything you can see)
@@ -20,22 +21,43 @@ pub const USAGE: &str = "usage: iyakki dev <command>
   run <id> | open <id>                open the app on the device's screen
   push <folder> [--watch] [--open]    pack and install the folder; with --watch again on every change (live reload)
   screenshot [-o FILE.png]            a picture of the device's screen
-  whoami                              the device, and the account this computer acts as
+  whoami                              the device, the account this computer acts as, and the scopes it holds
+  info | ps | dmesg [--follow] [--grep X] | logs --system | status      look at the device (scope debug)
+  files ls|stat|push|pull|rm|mkdir PATH       copy files to and from the device (scope files)
+  input tap X Y | key NAME | text 'abc' | swipe X1 Y1 X2 Y2           drive the screen (scope input)
+  config list | get KEY | set KEY VALUE | export [FILE] | import FILE      settings through a whitelist (scope config)
+  config provider add ID --kind K [--url U] [--key-file F|--key-env V|--key-stdin] | key ID ... | remove ID     (keys are write-only)
+  config firewall list | allow VALUE [--ports P] [--proto tcp|udp|both] [--minutes N] | remove ID | keep | revert
+  app info|permissions|clear-data|reset APP | app data APP [KEY] | app config APP get|set|rm KEY [VALUE]  tile apps from developer mode
+  shell [--minutes N] [--root] [--reason TEXT] [-- CMD ARGS]    run commands on the device (scope shell + approval on its screen)
+  forward LOCAL:REMOTE                forward 127.0.0.1:LOCAL here to the device's own port REMOTE (scope forward)
+  patch build DIR -o PACK | show PACK | apply PACK [--live|--next-boot] [--shell] | list | remove ID     hot-patch files of the running system (scope update)
+  reboot | poweroff                   restart or switch off the device (approval on its screen)
+  update PAYLOAD|IMAGE.img [--force] [--reboot] | update --status    replace the boot files with a newer IYAKKI (scope update)
+  update-pack IMAGE.img -o DIR [--version V] [--variant NAME]       make the payload from an install image (nothing is written to the image)
+  screenshot [--display N] [--record SECONDS [--fps N]] [-o FILE|DIR]
 options for every command: --device NAME (default: the first paired), --home DIR (default: ~/.config/iyakki/dev or $IYAKKI_DEV_HOME)";
 
-struct Args {
-    pos: Vec<String>,
-    flags: Vec<(String, Option<String>)>,
+pub(super) struct Args {
+    pub(super) pos: Vec<String>,
+    pub(super) flags: Vec<(String, Option<String>)>,
+    /// Everything after a bare `--` (a command to run on the device).
+    pub(super) after: Vec<String>,
 }
 
-const WITH_VALUE: [&str; 9] = ["--code", "--name", "--as", "--fingerprint", "--device", "--home", "-o", "--default", "--forget"];
+const WITH_VALUE: [&str; 31] = ["--code", "--name", "--as", "--fingerprint", "--device", "--home", "-o", "--default", "--forget", "--grep", "-n", "--source", "--display", "--record", "--fps", "--minutes", "--reason", "--lines", "--image", "--set", "--kind", "--url", "--key-file", "--key-env", "--ports", "--proto", "--comment", "--file", "--value", "--version", "--variant"];
 
 impl Args {
-    fn parse(a: &[String]) -> Result<Args, String> {
+    pub(super) fn parse(a: &[String]) -> Result<Args, String> {
         let mut pos = Vec::new();
         let mut flags = Vec::new();
+        let mut after = Vec::new();
         let mut it = a.iter();
         while let Some(x) = it.next() {
+            if x == "--" {
+                after = it.by_ref().cloned().collect();
+                break;
+            }
             if let Some((k, v)) = x.split_once('=').filter(|(k, _)| k.starts_with("--")) {
                 flags.push((k.to_string(), Some(v.to_string())));
             } else if WITH_VALUE.contains(&x.as_str()) {
@@ -46,14 +68,14 @@ impl Args {
                 pos.push(x.clone());
             }
         }
-        Ok(Args { pos, flags })
+        Ok(Args { pos, flags, after })
     }
 
-    fn get(&self, k: &str) -> Option<&str> {
+    pub(super) fn get(&self, k: &str) -> Option<&str> {
         self.flags.iter().find(|(f, _)| f == k).and_then(|(_, v)| v.as_deref())
     }
 
-    fn has(&self, k: &str) -> bool {
+    pub(super) fn has(&self, k: &str) -> bool {
         self.flags.iter().any(|(f, _)| f == k)
     }
 }
@@ -142,8 +164,19 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
     let Some(cmd) = args.pos.first().map(String::as_str) else { return Err(USAGE.into()) };
     let arg1 = args.pos.get(1).map(String::as_str);
     let connect = || -> Result<DevClient, String> { DevClient::new(&home, home.device(args.get("--device"))?) };
+    if let Some(r) = super::cli_adb::run(cmd, &args, &connect, out) {
+        return r;
+    }
+    if let Some(r) = super::cli_patch::run(cmd, &args, &connect, out) {
+        return r;
+    }
     match cmd {
         "help" | "--help" => out(USAGE),
+        "usb" => {
+            // the raw words after `usb`: it has flags of its own (`--fixed-pair on`)
+            let at = a.iter().position(|x| x == "usb").unwrap_or(0);
+            return crate::directlink::cli::run(&a[at + 1..], home.dir(), out);
+        }
         "pair" => {
             let (host, port) = client::split_host(arg1.ok_or("usage: iyakki dev pair <address[:port]> [--code CODE]")?, DEFAULT_PORT)?;
             let (fp, info) = client::hello(&host, port)?;
@@ -181,10 +214,12 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
                 out(&format!("This computer's key: {k}"));
             }
         }
-        "whoami" | "status" => {
+        "whoami" => {
             let c = connect()?;
             let v = c.whoami()?;
             out(&format!("{} ({}:{}): this computer is “{}”, acting as {} ({}); developer mode {}", v["device"].as_str().unwrap_or(""), c.device.host, c.device.port, v["computer"].as_str().unwrap_or(""), v["account"].as_str().unwrap_or(""), v["role"].as_str().unwrap_or(""), v["status"].as_str().unwrap_or("")));
+            let sc: Vec<&str> = v["scopes"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
+            out(&format!("Scopes this computer holds: {} (an administrator grants more on the device: Settings, Developer mode)", if sc.is_empty() { "none".to_string() } else { sc.join(", ") }));
         }
         "install" => {
             let path = Path::new(arg1.ok_or("usage: iyakki dev install <pkg.iyp | folder> [--shared] [--open]")?);

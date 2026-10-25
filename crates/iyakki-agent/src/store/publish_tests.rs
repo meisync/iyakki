@@ -13,7 +13,8 @@ use super::catalog::HttpFetch;
 use super::install::tests::{admin, NOW};
 use super::publishflow::*;
 use super::server::{hash_token, Config, StoreServer};
-use super::{author, keys, tilehub, tile, Store};
+use super::{author, authtools, keys, tilehub, tile, Store};
+use super::install::Actor;
 use crate::pkg::{new_signing_key, signing_key_hex};
 use crate::services::Services;
 use crate::skills::Scope;
@@ -22,9 +23,11 @@ use crate::skills::Scope;
 struct Loop;
 impl Upstream for Loop {
     fn request(&self, method: &str, url: &str, headers: &[(String, String)], body: &[u8]) -> Result<UpstreamResponse, String> {
+        // a store deployed here is recorded as http://localhost:<NodePort>
+        let url = url.replacen("http://localhost:", "http://127.0.0.1:", 1);
         let rest = url.strip_prefix("http://127.0.0.1:").ok_or_else(|| format!("test transport: only the loopback ({url})"))?;
         let (port, path) = rest.split_once('/').map_or((rest, String::new()), |(p, r)| (p, format!("/{r}")));
-        let mut s = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).map_err(|e| e.to_string())?;
+        let mut s = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).map_err(|e| format!("Connection refused: {e}"))?;
         s.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
         let mut req = format!("{method} {} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n", if path.is_empty() { "/" } else { &path }, body.len());
         for (k, v) in headers {
@@ -441,4 +444,231 @@ fn the_agents_tool_list_has_tile_ship_asking_always_and_the_bridge_offers_it() {
     assert!(crate::agent::hard_ask("tile_ship", &serde_json::json!({})).is_some() || d.risk == crate::agent::Risk::Ask);
     assert!(crate::extagent::bridge::offered(d));
     assert!(d.spec.description.contains("Never ask the person for keys"));
+}
+
+// ------------------------------------------------------------------------------------------------ a deployed store that was never added
+
+/// The device of the report: the deploy left the installed record (addresses as `http://localhost:<port>`) and the admin token in the
+/// vault, and nothing in the STORE.
+fn deployed_not_added(w: &World, admin_token: &str) {
+    let base = format!("http://localhost:{}", w.addr.rsplit(':').next().unwrap());
+    let u = |label: &str, url: String, kind: &str| crate::platform::UrlInfo { label: label.into(), url, kind: kind.into() };
+    let rec = crate::platform::installed::Installed {
+        id: "private-store-iyakki-private-store".into(),
+        service: super::privatestore::ID.into(),
+        title: "Private store".into(),
+        namespace: "iyakki-private-store".into(),
+        urls: vec![u("Private store", base.clone(), "web"), u("Catalog", format!("{base}/catalog.json"), "catalog"), u("Publish", format!("{base}/v1/publish"), "api")],
+        vault: vec!["svc.private-store-iyakki-private-store.admin-token".into(), "svc.private-store-iyakki-private-store.catalog-seed".into()],
+        ..Default::default()
+    };
+    crate::platform::installed::upsert(w.svc.dir(), "root", rec).unwrap();
+    w.svc.user_set("root", "svc.private-store-iyakki-private-store.admin-token", admin_token).unwrap();
+}
+
+#[test]
+fn addresses_of_one_store_compare_equal_whatever_the_spelling() {
+    use super::privatepub::{normalise_with, same_location_with};
+    let own = vec!["192.0.2.20".to_string()];
+    let same = ["http://localhost:30300", "http://localhost:30300/", "http://localhost:30300/catalog.json", "http://127.0.0.1:30300/catalog.json", "HTTP://LocalHost:30300/v1/publish", "http://192.0.2.20:30300/catalog.json", "http://[::1]:30300", "http://127.0.1.1:30300/"];
+    for a in same {
+        for b in same {
+            assert!(same_location_with(a, b, &own), "{a} vs {b}: {} / {}", normalise_with(a, &own), normalise_with(b, &own));
+        }
+    }
+    // other stores stay other
+    for other in ["http://localhost:30301", "http://192.0.2.21:30300", "https://localhost:30300", "http://store.example.lan:30300", "http://localhost:30300/team"] {
+        assert!(!same_location_with("http://localhost:30300", other, &own), "{other}");
+    }
+    assert!(same_location_with("https://store.example.lan/catalog.json", "https://STORE.example.lan/", &own));
+    assert!(same_location_with("https://store.example.lan:443", "https://store.example.lan", &own));
+    assert!(same_location_with("http://store.example.lan:80/", "http://store.example.lan", &own));
+    assert!(!same_location_with("http://a.example.lan", "http://b.example.lan", &own));
+}
+
+#[test]
+fn the_deployed_stores_token_is_found_through_localhost_127_and_a_trailing_slash() {
+    let w = world("token-spell");
+    deployed_not_added(&w, "admin-token-for-tests-0123456789");
+    let port = w.addr.rsplit(':').next().unwrap().to_string();
+    let src = |loc: String| super::catalog::SourceCfg { id: "private-x".into(), name: "x".into(), kind: super::catalog::SourceKind::Url, location: loc, enabled: true, pin: "ab".repeat(32) };
+    for loc in [format!("http://localhost:{port}/catalog.json"), format!("http://127.0.0.1:{port}/catalog.json"), format!("http://127.0.0.1:{port}/"), format!("http://LOCALHOST:{port}")] {
+        let t = authtools::publish_token(&w.svc, "root", &src(loc.clone()));
+        assert_eq!(t.as_deref().map(String::as_str), Some("admin-token-for-tests-0123456789"), "{loc}");
+    }
+    assert!(authtools::publish_token(&w.svc, "root", &src("http://localhost:1/catalog.json".into())).is_none(), "another port is another store");
+    assert!(authtools::publish_token(&w.svc, "root", &src("https://store.example.lan/catalog.json".into())).is_none());
+    // the person's own entry still wins
+    w.svc.user_set("root", &authtools::token_entry("private-x"), "the-persons-own-token").unwrap();
+    assert_eq!(authtools::publish_token(&w.svc, "root", &src(format!("http://127.0.0.1:{port}"))).as_deref().map(String::as_str), Some("the-persons-own-token"));
+}
+
+#[test]
+fn the_unadded_store_is_found_added_with_its_key_pinned_and_chosen_and_a_wrong_key_or_account_is_refused() {
+    use super::privatepub::*;
+    let w = world("unadded");
+    deployed_not_added(&w, "admin-token-for-tests-0123456789");
+    // today's dead end: nothing in the STORE to publish to
+    assert!(stores(&w.store).is_empty());
+    let e = authtools::target_for(&w.svc, "root", &w.store, "").unwrap_err();
+    assert!(e.contains("deployed on this device but not added"), "{e}");
+    let o = offer(&w.svc, "root", &w.store, &w.fetch).expect("the unadded store is offered");
+    let p = o.probe.clone().expect("it answers");
+    assert_eq!(p.fingerprint, super::server::fingerprint(&w.srv.catalog_key()));
+    assert!(option_label(&o).starts_with("Private store on this device (not added yet): Private store \u{b7} key "), "{}", option_label(&o));
+    // wrong account: a plain user cannot change the store
+    let user = Actor::from_policy("root", &Role::User.template());
+    let e = add_and_target(&w.store, &user, &w.fetch, &p, "x").unwrap_err();
+    assert!(e.contains("only an administrator"), "{e}");
+    // a key other than the one shown: refused, nothing added
+    let mut shown = p.clone();
+    shown.fingerprint = "0000 0000 0000 0000 0000 0000 0000 0000".into();
+    let e = add_and_target(&w.store, &admin(), &w.fetch, &shown, "x").unwrap_err();
+    assert!(e.contains("nothing was added"), "{e}");
+    assert!(w.store.config().sources.is_empty() && w.store.config().publish_target.is_empty());
+    // the typed fingerprint of the Settings step is refused the same way
+    assert!(w.store.pin_probed(&admin(), "x", &p, "1111 1111").unwrap_err().contains("does not match"));
+    // the right one
+    let src = add_and_target(&w.store, &admin(), &w.fetch, &p, &p.name).unwrap();
+    assert_eq!(super::server::fingerprint(&src.pin), p.fingerprint);
+    assert_eq!(w.store.config().publish_target, src.id);
+    assert!(offer(&w.svc, "root", &w.store, &w.fetch).is_none(), "added through 127.0.0.1 or localhost, it is one store");
+    // the token comes from the vault entry of the deploy
+    assert!(token_present(&w.svc, "root", &src.id));
+    let info = super::privatestore::status_info(w.svc.dir(), "root", &w.store);
+    assert_eq!(info.added.as_ref().map(|a| a.0.as_str()), Some(src.id.as_str()));
+}
+
+#[test]
+fn publishing_to_the_device_own_store_over_plain_http_works_a_remote_one_still_needs_https() {
+    let w = world("plainhttp");
+    deployed_not_added(&w, "admin-token-for-tests-0123456789");
+    let o = super::privatepub::offer(&w.svc, "root", &w.store, &w.fetch).unwrap();
+    let src = super::privatepub::add_and_target(&w.store, &admin(), &w.fetch, o.probe.as_ref().unwrap(), "Private store").unwrap();
+    let d = w.app();
+    let key = w.key();
+    // the review card: plain http to the device itself, said as a warning, with the pod's namespace never needed
+    let (c, text) = card(&w.svc, "root", &d, &src, &key, &w.fetch).unwrap();
+    assert!(!c.https && c.http_warning.is_some() && c.token_present && c.new_key, "{c:?}");
+    let r = publish(&w.svc, "root", &d, &src, Some(&key), &w.fetch, NOW).unwrap();
+    assert_eq!((r.name.as_str(), r.version.as_str()), ("office-clock", "0.1.0"));
+    assert!(w.srv.audit_lines().iter().any(|l| l.contains("office-clock 0.1.0")));
+    assert!(!w.srv.audit_lines().join("\n").contains("admin-token-for-tests"));
+    // install it back from the store
+    let actor = admin();
+    let rev = review_published(&w.svc, &w.store, &actor, &w.fetch, "office-clock", actor.default_scope()).unwrap();
+    assert!(rev.refusal.is_none(), "{:?}", rev.refusal);
+    // the transport rule: a public http address is refused before anything is sent, a private-network one is allowed, https is allowed
+    let up = Loop;
+    let e = author::publish_to_server(&up, "http://store.example.com:30300", "tok-0123456789", &text).unwrap_err();
+    assert!(e.contains("travel unencrypted") && e.contains("https"), "{e}");
+    let e = author::publish_to_server(&up, "http://203.0.113.9:30300", "tok-0123456789", &text).unwrap_err();
+    assert!(e.contains("travel unencrypted"), "{e}");
+    let e = author::publish_to_server(&up, "http://10.1.2.3:30300", "tok-0123456789", &text).unwrap_err();
+    assert!(e.contains("Nothing was sent") && e.contains("could not reach the store at http://10.1.2.3:30300"), "private networks are allowed through, then fail in the test transport: {e}");
+}
+
+#[test]
+fn every_publish_failure_says_what_happened_and_what_to_do_not_a_bare_transport_text() {
+    let w = world("errors");
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let d = w.app();
+    let (text, _) = author::pack_dir(&d, Some(&w.key().0)).unwrap();
+    // nothing listens: refused connection
+    let e = author::publish_to_server(&Loop, &format!("http://localhost:{port}"), "tok-0123456789", &text).unwrap_err();
+    assert!(e.starts_with("Nothing was sent") && e.contains("refused") && e.contains("K8S tile") && e.contains("publish again"), "{e}");
+    // the store answers 401 to a wrong token
+    let e = author::publish_to_server(&Loop, &w.url(), "not-the-token-0123", &text).unwrap_err();
+    assert!(e.contains("did not accept the publish token") && e.contains("401") && e.contains("enter it again"), "{e}");
+    for (status, word) in [(401, "token"), (403, "token"), (404, "not an IYAKKI private store"), (409, "already has this version"), (413, "too big"), (429, "limiting"), (500, "check its pod"), (503, "check its pod"), (418, "refused it (418)")] {
+        let t = author::refusal_text(status, None);
+        assert!(t.contains(word) && !t.to_lowercase().contains("io error"), "{status}: {t}");
+    }
+    assert!(author::refusal_text(403, Some("this store is read-only")).contains("accepts no publishing"));
+    // the review card of a store that does not answer: the pod hint, not a bare error
+    let dead = super::catalog::SourceCfg { id: "private-dead".into(), name: "Dead".into(), kind: super::catalog::SourceKind::Url, location: format!("http://localhost:{port}/catalog.json"), enabled: true, pin: "ab".repeat(32) };
+    let e = card(&w.svc, "root", &d, &dead, &w.key(), &w.fetch).unwrap_err();
+    assert!(e.contains("nothing answers") && e.contains("Nothing was changed") && !e.to_lowercase().contains("io error"), "{e}");
+    deployed_not_added(&w, "admin-token-for-tests-0123456789");
+    let rec = crate::platform::installed::load(w.svc.dir(), "root");
+    let mut r = rec[0].clone();
+    for u in &mut r.urls {
+        u.url = u.url.replace(&w.addr.rsplit(':').next().unwrap().to_string(), &port.to_string());
+    }
+    crate::platform::installed::upsert(w.svc.dir(), "root", r).unwrap();
+    let e = card(&w.svc, "root", &d, &dead, &w.key(), &w.fetch).unwrap_err();
+    assert!(e.contains("pod private-store in namespace iyakki-private-store") && e.contains("K8S tile"), "{e}");
+    // an unwritable project file says which file and what to do
+    std::fs::remove_file(d.join("CHANGELOG.md")).unwrap();
+    std::fs::create_dir(d.join("CHANGELOG.md")).unwrap();
+    let e = add_changelog(&d, "0.2.0", "x", "2026-01-01").unwrap_err();
+    assert!(e.contains("CHANGELOG.md") && e.starts_with("cannot write"), "{e}");
+}
+
+#[test]
+fn the_assistant_adds_the_deployed_store_through_its_own_approval_card_and_publishes() {
+    use super::authtools::{call, describe_for};
+    let w = world("assistant-add");
+    deployed_not_added(&w, "admin-token-for-tests-0123456789");
+    w.app();
+    let args = serde_json::json!({"package_path": "office-clock"});
+    // 1. the first call: no Settings detour; the text carries the fingerprint to pass back
+    let e = call("store_publish", &args, &w.svc, &admin_policy(), "root", &w.ws).unwrap_err();
+    let fp = super::server::fingerprint(&w.srv.catalog_key());
+    assert!(e.contains(&fp) && e.contains("add_deployed_store") && e.contains("Do NOT send the person to Settings"), "{e}");
+    assert!(w.store.config().sources.is_empty(), "describing and failing add nothing");
+    // 2. the approval card shows the address, the key and what follows
+    let with = serde_json::json!({"package_path": "office-clock", "add_deployed_store": fp});
+    let card = describe_for(&w.svc, "root", &w.ws, "store_publish", &with);
+    assert!(card.contains("ADD the private store") && card.contains(&fp) && card.contains("CHOOSE it as the publishing target") && card.contains("PUBLISH"), "{card}");
+    let ship = describe_for(&w.svc, "root", &w.ws, "tile_ship", &with);
+    assert!(ship.contains("ADD the private store") && ship.contains(&fp), "{ship}");
+    assert!(w.store.config().sources.is_empty(), "a card adds nothing");
+    // 3. a wrong fingerprint, or an account that is not an administrator: refused, nothing added
+    let wrong = serde_json::json!({"package_path": "office-clock", "add_deployed_store": "0000 0000 0000 0000"});
+    assert!(call("store_publish", &wrong, &w.svc, &admin_policy(), "root", &w.ws).unwrap_err().contains("is not the key"));
+    assert!(describe_for(&w.svc, "root", &w.ws, "store_publish", &wrong).contains("REFUSED"));
+    let mut user = Role::User.template();
+    user.fs_write = admin_policy().fs_write;
+    let e = call("store_publish", &with, &w.svc, &user, "root", &w.ws).unwrap_err();
+    assert!(e.contains("only an administrator"), "{e}");
+    assert!(w.store.config().sources.is_empty());
+    // 4. approved: added with the key pinned, chosen, published with the token of the deploy
+    let out = call("store_publish", &with, &w.svc, &admin_policy(), "root", &w.ws).unwrap();
+    assert!(out.contains("Published the tile app office-clock 0.1.0 to Private store"), "{out}");
+    let cfg = w.store.config();
+    assert_eq!(cfg.sources.len(), 1);
+    assert_eq!(super::server::fingerprint(&cfg.sources[0].pin), fp);
+    assert_eq!(cfg.publish_target, cfg.sources[0].id);
+    assert!(!out.contains("admin-token-for-tests") && !all_text(&w.ws).contains("admin-token-for-tests"));
+    // the schema offers the argument
+    let defs = super::authtools::defs(&admin_policy());
+    for n in ["store_publish", "tile_ship"] {
+        let d = defs.iter().find(|d| d.spec.name == n).unwrap();
+        assert!(d.spec.schema["properties"]["add_deployed_store"].is_object(), "{n}");
+        assert_eq!(d.risk, crate::agent::Risk::Ask);
+    }
+}
+
+#[test]
+fn the_assistant_says_the_pod_is_not_ready_instead_of_sending_the_person_around() {
+    use super::authtools::call;
+    let w = world("assistant-notready");
+    deployed_not_added(&w, "admin-token-for-tests-0123456789");
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let mut r = crate::platform::installed::load(w.svc.dir(), "root").remove(0);
+    for u in &mut r.urls {
+        u.url = u.url.replace(&w.addr.rsplit(':').next().unwrap().to_string(), &port.to_string());
+    }
+    crate::platform::installed::upsert(w.svc.dir(), "root", r).unwrap();
+    w.app();
+    let e = call("store_publish", &serde_json::json!({"package_path": "office-clock"}), &w.svc, &admin_policy(), "root", &w.ws).unwrap_err();
+    assert!(e.contains("cannot be read now") && e.contains("K8S tile") && e.contains("nothing answers"), "{e}");
+    assert!(w.store.config().sources.is_empty());
 }

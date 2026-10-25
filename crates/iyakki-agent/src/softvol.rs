@@ -62,16 +62,32 @@ pub struct Mix {
     /// Ask for periods of 1024 and a buffer of 8192 frames (about 170 ms at 48 kHz). Devices with fixed periods (the T2
     /// chip's, about 20 ms) are left to choose.
     pub sized: bool,
+    /// The rate the dmix runs at ([`MIX_RATE`], or the only rate a device has: 44100 on the MacBookPro14,1's codec).
+    pub rate: u32,
+    /// Learned from the device ([`crate::soundprobe`]) and different from the default: the file says so and sets the
+    /// softvol's `resolution`. Plain `false` for every long-standing variant, whose text is unchanged.
+    pub probed: bool,
 }
 
 impl Mix {
     /// Stereo 16-bit, what HDMI, USB and ordinary analog devices take.
-    pub const STEREO: Mix = Mix { format: "S16_LE", channels: 2, sized: true };
+    pub const STEREO: Mix = Mix { format: "S16_LE", channels: 2, sized: true, rate: MIX_RATE, probed: false };
     /// The T2 Mac's headphone jack: stereo, 24-bit in 32.
-    pub const T2_STEREO: Mix = Mix { format: "S24_LE", channels: 2, sized: false };
+    pub const T2_STEREO: Mix = Mix { format: "S24_LE", channels: 2, sized: false, rate: MIX_RATE, probed: false };
     /// The T2 Mac's built-in speaker: one channel, 24-bit in 32.
-    pub const T2_MONO: Mix = Mix { format: "S24_LE", channels: 1, sized: false };
+    pub const T2_MONO: Mix = Mix { format: "S24_LE", channels: 1, sized: false, rate: MIX_RATE, probed: false };
+
+    /// More than two channels: a `route` plugin puts the stereo signal on every channel (left on the even ones, right on
+    /// the odd ones), so each speaker of a four-channel codec plays at full level.
+    pub fn fans_out(&self) -> bool {
+        self.channels > 2
+    }
 }
+
+/// The largest software boost, in dB (Settings -> Sound -> Advanced -> Boost). More than this only distorts.
+pub const MAX_BOOST_DB: u32 = 12;
+/// The softvol's volume steps (alsa-lib's default, written out for devices IYAKKI learned about).
+pub const RESOLUTION: u32 = 256;
 
 /// The rate every dmix runs at; players of other rates are converted by `plug` above it.
 pub const MIX_RATE: u32 = 48_000;
@@ -90,6 +106,10 @@ pub enum Plan {
     Mix { card: u32, device: u32, mix: Mix },
     /// The same softvol over the device alone (`plughw`): one program at a time. Used where `dmix` cannot open the device.
     Soft { card: u32, device: u32 },
+    /// The same softvol over `hw` itself (no `plughw` under it): for a device with fixed periods, where `plug > softvol > plughw`
+    /// cannot install its parameters at a rate other than the device's (the T2 Mac's `aaudio`: one-frame periods, 4 channels of
+    /// 24-bit in 32). The `plug` above the volume does every conversion. One program at a time.
+    Direct { card: u32, device: u32, channels: u32 },
     /// The card has a hardware volume: `default` is the output, the hardware control stays.
     Hw { card: u32, device: u32 },
 }
@@ -97,13 +117,22 @@ pub enum Plan {
 impl Plan {
     pub fn card(&self) -> u32 {
         match self {
-            Plan::Mix { card, .. } | Plan::Soft { card, .. } | Plan::Hw { card, .. } => *card,
+            Plan::Mix { card, .. } | Plan::Soft { card, .. } | Plan::Direct { card, .. } | Plan::Hw { card, .. } => *card,
         }
     }
 
     fn device(&self) -> u32 {
         match self {
-            Plan::Mix { device, .. } | Plan::Soft { device, .. } | Plan::Hw { device, .. } => *device,
+            Plan::Mix { device, .. } | Plan::Soft { device, .. } | Plan::Direct { device, .. } | Plan::Hw { device, .. } => *device,
+        }
+    }
+
+    /// What a `Mix` becomes where dmix did not open: a device with fixed periods (`!sized`) gets the volume over `hw` itself, any
+    /// other the exclusive volume over `plughw`.
+    fn exclusive_of(&self) -> Plan {
+        match self {
+            Plan::Mix { card, device, mix } if !mix.sized => Plan::Direct { card: *card, device: *device, channels: mix.channels },
+            p => Plan::Soft { card: p.card(), device: p.device() },
         }
     }
 
@@ -113,9 +142,12 @@ impl Plan {
     }
 }
 
-fn softvol_block(card: u32, slave: &str) -> String {
+fn softvol_block(card: u32, slave: &str, boost_db: u32, resolution: bool) -> String {
+    // 100 % is 0 dB, or +boost dB where the person asked for a boost (it clips, so it may distort)
+    let max_db = MAX_DB + boost_db.min(MAX_BOOST_DB) as f32;
+    let res = if resolution { format!("    resolution {RESOLUTION}\n") } else { String::new() };
     format!(
-        "pcm.{SOFTVOL_PCM} {{\n    type softvol\n    slave.pcm \"{slave}\"\n    control {{\n        name \"{CONTROL}\"\n        card {card}\n    }}\n    min_dB {MIN_DB:.1}\n    max_dB {MAX_DB:.1}\n}}\n\
+        "pcm.{SOFTVOL_PCM} {{\n    type softvol\n    slave.pcm \"{slave}\"\n    control {{\n        name \"{CONTROL}\"\n        card {card}\n    }}\n    min_dB {MIN_DB:.1}\n    max_dB {max_db:.1}\n{res}}}\n\
          pcm.{PCM} {{\n    type plug\n    slave.pcm \"{SOFTVOL_PCM}\"\n}}\n\
          pcm.!default {{\n    type plug\n    slave.pcm \"{SOFTVOL_PCM}\"\n}}\n\
          ctl.!default {{\n    type hw\n    card {card}\n}}\n"
@@ -124,31 +156,93 @@ fn softvol_block(card: u32, slave: &str) -> String {
 
 /// The text of `/etc/asound.conf` for this plan.
 pub fn config_text(plan: &Plan) -> String {
+    config_text_boost(plan, 0)
+}
+
+/// The route plugin that gives every channel of a multi-channel device the stereo signal at full level (weight 1.0):
+/// left on the even channels, right on the odd ones.
+fn fan_route(channels: u32) -> String {
+    let mut t = format!("pcm.iyakkifan {{\n    type route\n    slave {{\n        pcm \"iyakkimix\"\n        channels {channels}\n    }}\n    ttable {{\n");
+    for dst in 0..channels {
+        t.push_str(&format!("        {}.{dst} 1.0\n", dst % 2));
+    }
+    t.push_str("    }\n}\n");
+    // the dmix as it is (all channels apart, quiet test tones go through it); the software volume does not apply
+    t.push_str("pcm.iyakkichan {\n    type plug\n    slave.pcm \"iyakkimix\"\n}\n");
+    t
+}
+
+/// The PCM the web engine plays through on a device whose rate conversion in `plug` is broken (the T2 Mac's `aaudio`: with its
+/// one-frame period, 24, 16, 12 and 32 kHz audio plays at the wrong speed and 32-bit float at 44.1 kHz cannot be set up). It is
+/// built from the plugins that never convert the rate (`linear` for the format, `route` for the channels) over the same
+/// softvol, so the only rate it offers is the device's 48000 Hz and the only formats are integer ones: GStreamer's own
+/// `audioresample` and `audioconvert` do the rest. Client-side name: [`WEB_PCM`], selected for the engine by
+/// [`WEB_ALSA_CONF`].
+fn web_pcm(channels: u32) -> String {
+    if channels < 2 {
+        // unknown (or the unprobed one-channel guess for the T2 speaker): no web PCM, the engine keeps `default`
+        return String::new();
+    }
+    let mut t = format!("pcm.{WEB_PCM}route {{\n    type route\n    slave {{\n        pcm \"{SOFTVOL_PCM}\"\n        channels {channels}\n    }}\n    ttable {{\n");
+    for dst in 0..channels {
+        t.push_str(&format!("        {}.{dst} 1.0\n", dst % 2));
+    }
+    t.push_str(&format!("    }}\n}}\npcm.{WEB_PCM} {{\n    type linear\n    slave {{\n        pcm \"{WEB_PCM}route\"\n        format S24_LE\n    }}\n}}\n"));
+    t
+}
+
+/// The web engine's PCM (see [`web_pcm`]).
+pub const WEB_PCM: &str = "iyakkiweb";
+
+/// The ALSA configuration only the web engine's processes read (`ALSA_CONFIG_PATH`): the system's own, then `default` is
+/// [`WEB_PCM`]. Written next to the web profile by [`crate::webengine`] when `/etc/asound.conf` defines that PCM.
+pub const WEB_ALSA_CONF: &str = "</usr/share/alsa/alsa.conf>\npcm.!default iyakkiweb\n";
+
+/// [`config_text`] with the software boost of the card: the softvol's range ends `boost_db` dB above unity (0 to
+/// [`MAX_BOOST_DB`]; the sound may distort). Nothing changes for 0.
+pub fn config_text_boost(plan: &Plan, boost_db: u32) -> String {
     match plan {
         Plan::Mix { card, device, mix } => {
             let key = ipc_key(*card, *device);
             let sized = if mix.sized { "\n        period_size 1024\n        buffer_size 8192" } else { "" };
             let (route, slave) = if mix.channels == 1 {
                 (format!("pcm.iyakkimono {{\n    type route\n    slave {{\n        pcm \"iyakkimix\"\n        channels 1\n    }}\n    ttable {{\n        0.0 0.5\n        1.0 0.5\n    }}\n}}\n"), "iyakkimono")
+            } else if mix.fans_out() {
+                (fan_route(mix.channels), "iyakkifan")
             } else {
                 (String::new(), "iyakkimix")
+            };
+            let learned = if mix.probed {
+                format!("# The device was asked what it accepts: {} channels, {}, {} Hz.\n", mix.channels, mix.format, mix.rate)
+            } else {
+                String::new()
             };
             format!(
                 "{MARKER}\n\
                  # The output has no hardware volume: {SOFTVOL_PCM} is a software volume (control '{CONTROL}' on card {card}) over a dmix, so\n\
                  # IYAKKI's players and other programs (the web engine) play at once. dmix server key {key}.\n\
-                 pcm.iyakkimix {{\n    type dmix\n    ipc_key {key}\n    ipc_perm 0666\n    slave {{\n        pcm \"hw:{card},{device}\"\n        rate {MIX_RATE}\n        channels {ch}\n        format {fmt}{sized}\n    }}\n}}\n\
+                 {learned}\
+                 pcm.iyakkimix {{\n    type dmix\n    ipc_key {key}\n    ipc_perm 0666\n    slave {{\n        pcm \"hw:{card},{device}\"\n        rate {rate}\n        channels {ch}\n        format {fmt}{sized}\n    }}\n}}\n\
                  {route}{rest}",
+                rate = mix.rate,
                 ch = mix.channels,
                 fmt = mix.format,
-                rest = softvol_block(*card, slave)
+                rest = softvol_block(*card, slave, boost_db, mix.probed)
             )
         }
         Plan::Soft { card, device } => format!(
             "{MARKER}\n\
              # The output has no hardware volume: {SOFTVOL_PCM} is a software volume (control '{CONTROL}' on card {card}); one program at a time.\n\
              {}",
-            softvol_block(*card, &format!("plughw:{card},{device}"))
+            softvol_block(*card, &format!("plughw:{card},{device}"), boost_db, false)
+        ),
+        Plan::Direct { card, device, channels } => format!(
+            "{MARKER}\n\
+             # The output has no hardware volume and fixed periods: {SOFTVOL_PCM} is a software volume (control '{CONTROL}' on card {card}) straight\n\
+             # over the device, the plug above it converts; one program at a time.\n\
+             {}{}",
+            softvol_block(*card, &format!("hw:{card},{device}"), boost_db, false),
+            web_pcm(*channels)
         ),
         Plan::Hw { card, device } => format!(
             "{MARKER}\n\
@@ -166,6 +260,50 @@ pub trait Runner: Send + Sync {
     fn amixer(&self, args: &[String]) -> Result<String, String>;
     /// Open `pcm` once and play a few milliseconds of silence, so softvol creates its control.
     fn prime(&self, pcm: &str) -> Result<(), String>;
+    /// Does the volume control of `card` exist now (`amixer -c C sget IYAKKI`)? Asking never opens the device.
+    /// (Default: unknown, so the device is opened as before.)
+    fn has_control(&self, _card: u32) -> bool {
+        false
+    }
+}
+
+/// Who may veto an open of the speaker. The rules (a prime is an open of the one-owner speaker, so it must never race, or take the
+/// speaker from, the program that plays or is about to):
+/// 1. never open while any playback substream of the card is not `closed` (any state: [`crate::quiet::must_not_open`]), nor while
+///    the web engine has a page that plays audio ([`note_web_media`]);
+/// 2. a refused open is deferred with a backoff of [`BACKOFF`] (0.5 s, then 1, 2, 4 s, never longer), never a tight loop;
+/// 3. an open is made only when the volume control is missing AND the level has to be set (the person moved it, or the saved one
+///    is restored); a control that exists is set without opening anything;
+/// 4. an open holds the device for at most [`PRIME_HOLD`] (10 ms of silence).
+pub trait Gate: Send + Sync {
+    /// Why the card must not be opened now, if it must not.
+    fn refuse(&self, card: u32) -> Option<String>;
+}
+
+/// The delays of a deferred open, in order; the last one repeats.
+pub const BACKOFF: [Duration; 4] = [Duration::from_millis(500), Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(4)];
+/// The longest the agent's own open holds the speaker after it wrote its silence.
+pub const PRIME_HOLD: Duration = Duration::from_millis(150);
+
+static WEB_MEDIA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The browser tells whether the web engine has a page that plays audio (the helper's `AudioPlaying`).
+pub fn note_web_media(on: bool) {
+    WEB_MEDIA.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The real gate: the kernel's stream states under `/proc/asound` and the web engine's flag.
+pub struct ProcGate {
+    pub root: PathBuf,
+}
+
+impl Gate for ProcGate {
+    fn refuse(&self, card: u32) -> Option<String> {
+        if WEB_MEDIA.load(std::sync::atomic::Ordering::SeqCst) {
+            return Some("the web engine is playing audio".into());
+        }
+        crate::quiet::must_not_open(&crate::quiet::playback_streams(&self.root), card)
+    }
 }
 
 /// The real `amixer` and `aplay`.
@@ -184,6 +322,10 @@ impl Runner for System {
         }
     }
 
+    fn has_control(&self, card: u32) -> bool {
+        self.amixer(&["-c".to_string(), card.to_string(), "sget".to_string(), CONTROL.to_string()]).is_ok()
+    }
+
     fn prime(&self, pcm: &str) -> Result<(), String> {
         use std::io::Write;
         let mut child = std::process::Command::new("aplay")
@@ -196,16 +338,23 @@ impl Runner for System {
         if let Some(mut si) = child.stdin.take() {
             let _ = si.write_all(&[0u8; PRIME_BYTES]);
         }
-        let end = Instant::now() + Duration::from_secs(3);
+        // the control exists as soon as the device is open, so nothing waits for the sound to drain: a short hold, then the
+        // player is ended (the speaker is a one-owner device, see [`Gate`])
+        let end = Instant::now() + PRIME_HOLD;
         loop {
             match child.try_wait() {
                 Ok(Some(st)) if st.success() => return Ok(()),
                 Ok(Some(st)) => return Err(format!("aplay -D {pcm} ended with {st} (the device may be busy)")),
-                Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(20)),
+                Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(10)),
                 _ => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!("aplay -D {pcm} did not finish"));
+                    // killed while draining: fine when the device had opened (the control is there)
+                    let card = std::fs::read_to_string(ASOUND_CONF).ok().and_then(|t| t.lines().find_map(|l| l.trim().strip_prefix("slave.pcm \"plughw:").and_then(|r| r.split(',').next()?.parse::<u32>().ok())));
+                    return match card {
+                        Some(c) if self.has_control(c) => Ok(()),
+                        _ => Err(format!("aplay -D {pcm} did not finish")),
+                    };
                 }
             }
         }
@@ -221,6 +370,9 @@ pub struct Synced {
     pub soft_card: Option<u32>,
     /// Why the file is not used, when it is not.
     pub note: Option<String>,
+    /// The file is written but the device could not be opened to create the volume control (another program holds the
+    /// card: `Resource busy`); tried again on the next call.
+    pub busy: bool,
 }
 
 #[derive(Default)]
@@ -233,12 +385,15 @@ struct St {
     level: Option<u32>,
     /// Devices where `dmix` could not be opened: they use the exclusive softvol from then on.
     exclusive: Vec<(u32, u32)>,
+    /// An open was refused: no new try before this time (on the softvol's own clock), and how many refusals in a row.
+    defer_until: Option<Duration>,
+    deferred: usize,
 }
 
 impl St {
     /// Forget the file and the control, but not which devices cannot do dmix.
     fn reset(&mut self) {
-        *self = St { exclusive: std::mem::take(&mut self.exclusive), ..Default::default() };
+        *self = St { exclusive: std::mem::take(&mut self.exclusive), defer_until: self.defer_until, deferred: self.deferred, ..Default::default() };
     }
 }
 
@@ -247,16 +402,64 @@ pub struct Softvol {
     path: PathBuf,
     runner: Box<dyn Runner>,
     st: Mutex<St>,
+    /// The software boost in dB (see [`config_text_boost`]); applies to the next [`sync`](Self::sync).
+    boost: std::sync::atomic::AtomicU32,
+    /// May the speaker be opened now (none: always, as in tests that have no machine).
+    gate: Option<Box<dyn Gate>>,
+    /// Time since the start, replaceable so tests need no sleeping.
+    clock: Box<dyn Fn() -> Duration + Send + Sync>,
 }
 
 impl Softvol {
     pub fn new(path: impl Into<PathBuf>, runner: impl Runner + 'static) -> Softvol {
-        Softvol { path: path.into(), runner: Box::new(runner), st: Mutex::new(St::default()) }
+        let start = Instant::now();
+        Softvol { path: path.into(), runner: Box::new(runner), st: Mutex::new(St::default()), boost: Default::default(), gate: None, clock: Box::new(move || start.elapsed()) }
+    }
+
+    /// Ask `gate` before every open of the speaker (see [`Gate`]).
+    pub fn with_gate(mut self, gate: impl Gate + 'static) -> Softvol {
+        self.gate = Some(Box::new(gate));
+        self
+    }
+
+    /// Use this clock for the backoff.
+    pub fn with_clock(mut self, clock: impl Fn() -> Duration + Send + Sync + 'static) -> Softvol {
+        self.clock = Box::new(clock);
+        self
+    }
+
+    /// May the device be opened now? No while the backoff of an earlier refusal runs or the gate says no (the next try is then
+    /// set later, 0.5 s to 4 s); the first refusal of a row is logged.
+    fn may_open(&self, st: &mut St, card: u32) -> bool {
+        let now = (self.clock)();
+        if st.defer_until.is_some_and(|t| now < t) {
+            return false;
+        }
+        match self.gate.as_ref().and_then(|g| g.refuse(card)) {
+            None => {
+                st.defer_until = None;
+                st.deferred = 0;
+                true
+            }
+            Some(why) => {
+                if st.deferred == 0 {
+                    log::info!("sound: not opening {PCM} to create its volume control ({why}); trying again shortly");
+                }
+                st.defer_until = Some(now + BACKOFF[st.deferred.min(BACKOFF.len() - 1)]);
+                st.deferred += 1;
+                false
+            }
+        }
+    }
+
+    /// The boost of the card in use, 0 to [`MAX_BOOST_DB`] dB.
+    pub fn set_boost(&self, db: u32) {
+        self.boost.store(db.min(MAX_BOOST_DB), std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The real one: `/etc/asound.conf`, `amixer`, `aplay`.
     pub fn system() -> Softvol {
-        Softvol::new(ASOUND_CONF, System)
+        Softvol::new(ASOUND_CONF, System).with_gate(ProcGate { root: PathBuf::from(crate::quiet::ASOUND) })
     }
 
     pub fn path(&self) -> &Path {
@@ -286,7 +489,11 @@ impl Softvol {
         };
         // a device where dmix did not open before is not tried again
         let mut plan = match wanted {
-            Plan::Mix { card, device, .. } if st.exclusive.contains(&(*card, *device)) => Plan::Soft { card: *card, device: *device },
+            p @ Plan::Mix { card, device, .. } if st.exclusive.contains(&(*card, *device)) => p.exclusive_of(),
+            // the T2's aaudio (fixed-period class, `!sized`): dmix spins a whole core on it whatever its settings (measured on a
+            // MacBookPro16,2: 90 % of a core for a stereo stream against 2 % without it, with the real periods of the patched
+            // driver, apple-bce patch 0003), so the volume sits straight over plughw; one program at a time
+            Plan::Mix { card, device, mix } if !mix.sized => Plan::Soft { card: *card, device: *device },
             p => p.clone(),
         };
         let level = level.min(100);
@@ -297,17 +504,25 @@ impl Softvol {
             }
             let card = match plan {
                 Plan::Hw { .. } => return Synced { managed: true, ..Default::default() },
-                Plan::Mix { card, .. } | Plan::Soft { card, .. } => card,
+                Plan::Mix { card, .. } | Plan::Soft { card, .. } | Plan::Direct { card, .. } => card,
             };
+            let mut prime_failed = false;
             if st.level != Some(level) {
+                if !st.primed && self.runner.has_control(card) {
+                    st.primed = true; // the control is there: set it without opening anything
+                }
                 if !st.primed {
+                    if !self.may_open(&mut st, card) {
+                        // someone plays or is about to, or an open was refused a moment ago: the level is set on a later call
+                        return Synced { managed: true, ..Default::default() };
+                    }
                     match self.runner.prime(PCM) {
                         Ok(()) => st.primed = true,
                         Err(e) if plan.is_mix() => {
                             // dmix (or the format it asks of the device) was refused: the exclusive softvol, as before
                             log::info!("sound: dmix on card {card} device {} could not be opened ({e}); using the exclusive software volume", plan.device());
                             st.exclusive.push((card, plan.device()));
-                            plan = Plan::Soft { card, device: plan.device() };
+                            plan = plan.exclusive_of();
                             demoted = true;
                             continue;
                         }
@@ -316,32 +531,47 @@ impl Softvol {
                             log::info!("sound: could not open {PCM} on card {card} either way: {e}");
                             let device = plan.device();
                             st.exclusive.retain(|d| *d != (card, device));
-                            if let Plan::Soft { .. } = plan {
+                            if matches!(plan, Plan::Soft { .. } | Plan::Direct { .. }) {
                                 let back = wanted.clone();
                                 let _ = self.write_plan(&mut st, &back);
                             }
-                            return Synced { managed: true, ..Default::default() };
+                            return Synced { managed: true, busy: true, ..Default::default() };
                         }
-                        Err(e) => log::info!("sound: could not open {PCM} once to create its volume control: {e}"),
+                        Err(e) => {
+                            prime_failed = true;
+                            log::info!("sound: could not open {PCM} once to create its volume control: {e}")
+                        }
                     }
                 }
                 let args = vec!["-q".to_string(), "-c".to_string(), card.to_string(), "sset".to_string(), CONTROL.to_string(), format!("{level}%")];
-                match self.runner.amixer(&args) {
+                let mut set = self.runner.amixer(&args);
+                if set.is_err() && st.primed && self.may_open(&mut st, card) {
+                    // the control was there once and is gone (every stream closed, or the card was reset): open the device
+                    // briefly to create it again, and try once more
+                    log::info!("sound: the volume control {CONTROL} is missing; opening {PCM} to create it");
+                    if self.runner.prime(PCM).is_ok() {
+                        set = self.runner.amixer(&args);
+                    }
+                }
+                match set {
                     Ok(_) => {
                         st.primed = true; // the control is there
                         st.level = Some(level);
                     }
-                    Err(e) => log::info!("sound: could not set the software volume yet: {e}"),
+                    Err(e) => {
+                        st.primed = false; // asked again, and the device opened again, on the next call
+                        log::info!("sound: could not set the software volume yet: {e}");
+                    }
                 }
             }
-            return Synced { managed: true, soft_card: (st.level == Some(level)).then_some(card), note: None };
+            return Synced { managed: true, soft_card: (st.level == Some(level)).then_some(card), note: None, busy: prime_failed && st.level != Some(level) };
         }
     }
 
     /// Make the file say `plan` (a fresh start for the control when it changes).
     fn write_plan(&self, st: &mut St, plan: &Plan) -> Result<(), String> {
         let existing = std::fs::read_to_string(&self.path).ok();
-        let text = config_text(plan);
+        let text = config_text_boost(plan, self.boost.load(std::sync::atomic::Ordering::SeqCst));
         if existing.as_deref() != Some(text.as_str()) {
             if let Err(e) = write_atomic(&self.path, &text) {
                 st.reset();
@@ -389,6 +619,9 @@ pub(crate) mod fake {
     }
 
     impl Runner for Fake {
+        fn has_control(&self, _card: u32) -> bool {
+            !*self.no_amixer.lock().unwrap() && *self.control_exists.lock().unwrap()
+        }
         fn amixer(&self, args: &[String]) -> Result<String, String> {
             self.calls.lock().unwrap().push(format!("amixer {}", args.join(" ")));
             if *self.no_amixer.lock().unwrap() {
@@ -415,6 +648,7 @@ pub(crate) mod fake {
 mod tests {
     use super::fake::Fake;
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     struct Dir(PathBuf);
     impl Drop for Dir {
@@ -472,7 +706,7 @@ mod tests {
         let sv = Softvol::new(&conf, fake.clone());
         let plan = Plan::Soft { card: 1, device: 0 };
         let r = sv.sync(Some(&plan), 30);
-        assert_eq!(r, Synced { managed: true, soft_card: Some(1), note: None });
+        assert_eq!(r, Synced { managed: true, soft_card: Some(1), note: None, busy: false });
         assert_eq!(std::fs::read_to_string(&conf).unwrap(), config_text(&plan));
         assert_eq!(*fake.calls.lock().unwrap(), ["prime iyakki", "amixer -q -c 1 sset IYAKKI 30%"], "opened once before the first volume change");
         fake.calls.lock().unwrap().clear();
@@ -512,11 +746,13 @@ mod tests {
         let t = std::fs::read_to_string(&conf).unwrap();
         assert!(t.contains("plughw:0,3") && t.contains("card 0") && !t.contains("plughw:1"), "{t}");
         let c = fake.calls.lock().unwrap().clone();
-        assert_eq!(c, ["prime iyakki", "amixer -q -c 1 sset IYAKKI 50%", "prime iyakki", "amixer -q -c 1 sset IYAKKI 20%", "prime iyakki", "amixer -q -c 0 sset IYAKKI 70%"]);
+        // the fake's control stays once created, so the later levels are set WITHOUT opening the device (volume applied when the
+        // control exists; before the sound doctor work every file change opened it again)
+        assert_eq!(c, ["prime iyakki", "amixer -q -c 1 sset IYAKKI 50%", "amixer -q -c 1 sset IYAKKI 20%", "amixer -q -c 0 sset IYAKKI 70%"]);
         // a USB card with a hardware volume: a plain plug, no softvol, nothing primed or set
         fake.calls.lock().unwrap().clear();
         let r = sv.sync(Some(&Plan::Hw { card: 2, device: 0 }), 70);
-        assert_eq!(r, Synced { managed: true, soft_card: None, note: None });
+        assert_eq!(r, Synced { managed: true, soft_card: None, note: None, busy: false });
         assert!(!std::fs::read_to_string(&conf).unwrap().contains("type softvol"));
         assert!(fake.calls.lock().unwrap().is_empty(), "the hardware control is left alone");
         // no output any more: IYAKKI's file goes
@@ -554,7 +790,8 @@ mod tests {
         *fake.control_exists.lock().unwrap() = true;
         assert_eq!(sv.sync(Some(&plan), 30).soft_card, Some(1));
         let c = fake.calls.lock().unwrap().clone();
-        assert_eq!(c, ["prime iyakki", "amixer -q -c 1 sset IYAKKI 30%", "prime iyakki", "amixer -q -c 1 sset IYAKKI 30%"]);
+        // the control exists the second time: set without opening the device again
+        assert_eq!(c, ["prime iyakki", "amixer -q -c 1 sset IYAKKI 30%", "amixer -q -c 1 sset IYAKKI 30%"]);
         // without amixer at all the level is never claimed
         let fake = Fake::default();
         *fake.no_amixer.lock().unwrap() = true;
@@ -612,18 +849,18 @@ mod tests {
         let fake = Fake::default();
         let sv = Softvol::new(&conf, fake.clone());
         let hdmi = Plan::Mix { card: 1, device: 3, mix: Mix::STEREO };
-        assert_eq!(sv.sync(Some(&hdmi), 30), Synced { managed: true, soft_card: Some(1), note: None });
+        assert_eq!(sv.sync(Some(&hdmi), 30), Synced { managed: true, soft_card: Some(1), note: None, busy: false });
         assert_eq!(std::fs::read_to_string(&conf).unwrap(), config_text(&hdmi));
         assert_eq!(*fake.calls.lock().unwrap(), ["prime iyakki", "amixer -q -c 1 sset IYAKKI 30%"]);
         // mute and unmute: 0 % and back, nothing else
         sv.sync(Some(&hdmi), 0);
         sv.sync(Some(&hdmi), 30);
         assert_eq!(fake.calls.lock().unwrap()[2..], ["amixer -q -c 1 sset IYAKKI 0%", "amixer -q -c 1 sset IYAKKI 30%"]);
-        // headphones of the T2 card: another dmix server, another key
+        // headphones of the T2 card: no dmix (it spins a core there), the volume over plughw
         let hp = Plan::Mix { card: 0, device: 2, mix: Mix::T2_STEREO };
         assert_eq!(sv.sync(Some(&hp), 30).soft_card, Some(0));
         let t = std::fs::read_to_string(&conf).unwrap();
-        assert!(t.contains("ipc_key 24682") && t.contains("hw:0,2") && !t.contains("hw:1,3"), "{t}");
+        assert!(!t.contains("dmix") && t.contains("plughw:0,2") && !t.contains("hw:1,3"), "{t}");
         // a card with a hardware volume: a plain plug again
         assert!(sv.sync(Some(&Plan::Hw { card: 2, device: 0 }), 30).soft_card.is_none());
         assert!(!std::fs::read_to_string(&conf).unwrap().contains("dmix"));
@@ -639,9 +876,9 @@ mod tests {
         let sv = Softvol::new(&conf, fake.clone());
         let plan = Plan::Mix { card: 0, device: 0, mix: Mix::T2_MONO };
         let r = sv.sync(Some(&plan), 40);
-        assert_eq!(r, Synced { managed: true, soft_card: Some(0), note: None }, "the volume works anyway");
-        assert_eq!(std::fs::read_to_string(&conf).unwrap(), config_text(&Plan::Soft { card: 0, device: 0 }), "the exclusive device, as before");
-        assert_eq!(*fake.calls.lock().unwrap(), ["prime iyakki", "prime iyakki", "amixer -q -c 0 sset IYAKKI 40%"]);
+        assert_eq!(r, Synced { managed: true, soft_card: Some(0), note: None, busy: false }, "the volume works anyway");
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), config_text(&Plan::Soft { card: 0, device: 0 }), "the T2: no dmix, the volume over plughw");
+        assert_eq!(*fake.calls.lock().unwrap(), ["prime iyakki", "amixer -q -c 0 sset IYAKKI 40%"], "a fixed-period device never tries dmix");
         // later calls (every 3 s) do not try dmix again for that device
         fake.calls.lock().unwrap().clear();
         assert_eq!(sv.sync(Some(&plan), 40).soft_card, Some(0));
@@ -650,8 +887,42 @@ mod tests {
         assert!(!std::fs::read_to_string(&conf).unwrap().contains("dmix"));
         // another device still gets its dmix (the headphones may be fine)
         *fake.dmix_fails.lock().unwrap() = false;
-        sv.sync(Some(&Plan::Mix { card: 0, device: 2, mix: Mix::T2_STEREO }), 50);
+        sv.sync(Some(&Plan::Mix { card: 1, device: 3, mix: Mix::STEREO }), 50);
         assert!(std::fs::read_to_string(&conf).unwrap().contains("type dmix"));
+    }
+
+    #[test]
+    fn a_fixed_period_device_gets_a_web_pcm_that_never_converts_the_rate() {
+        // measured on a MacBookPro16,2: through plug the card played 24/16/12/32 kHz at the wrong speed and could not take
+        // F32 at 44.1 kHz; linear (format) over route (channels) offers 48 kHz and integer formats only
+        let t = config_text(&Plan::Direct { card: 0, device: 0, channels: 4 });
+        let want = "pcm.iyakkiwebroute {\n    type route\n    slave {\n        pcm \"iyakkivol\"\n        channels 4\n    }\n    ttable {\n        0.0 1.0\n        1.1 1.0\n        0.2 1.0\n        1.3 1.0\n    }\n}\npcm.iyakkiweb {\n    type linear\n    slave {\n        pcm \"iyakkiwebroute\"\n        format S24_LE\n    }\n}\n";
+        assert!(t.ends_with(want), "{t}");
+        assert_eq!(braces(&t), 0);
+        assert!(!want.contains("plug") && !want.contains("rate"));
+        // other plans and the unprobed one-channel guess are unchanged
+        assert!(!config_text(&Plan::Direct { card: 0, device: 0, channels: 1 }).contains(WEB_PCM));
+        assert!(!config_text(&Plan::Soft { card: 0, device: 0 }).contains(WEB_PCM));
+        assert!(!config_text(&Plan::Hw { card: 0, device: 0 }).contains(WEB_PCM));
+        // the engine's own file: the system's configuration, then the web PCM is the default
+        assert_eq!(WEB_ALSA_CONF, "</usr/share/alsa/alsa.conf>\npcm.!default iyakkiweb\n");
+    }
+
+    #[test]
+    fn the_exclusive_volume_over_a_fixed_period_device_has_no_plughw_under_it_and_other_devices_keep_plughw() {
+        // MacBookPro16,2 (aaudio, period of one frame): plug > softvol > plughw cannot install its parameters (radio and the
+        // story reader were silent); plug > softvol > hw plays at 44.1 kHz stereo.
+        let direct = config_text(&Plan::Direct { card: 0, device: 0, channels: 4 });
+        assert!(direct.starts_with(MARKER) && direct.contains("slave.pcm \"hw:0,0\"") && !direct.contains("plughw") && direct.contains("type softvol") && direct.contains("pcm.!default"), "{direct}");
+        assert_eq!(braces(&direct), 0);
+        let d = dir("direct-vs-soft");
+        let conf = d.0.join("asound.conf");
+        let fake = Fake::default();
+        *fake.conf.lock().unwrap() = Some(conf.clone());
+        *fake.dmix_fails.lock().unwrap() = true;
+        let sv = Softvol::new(&conf, fake.clone());
+        sv.sync(Some(&Plan::Mix { card: 1, device: 3, mix: Mix::STEREO }), 40);
+        assert!(std::fs::read_to_string(&conf).unwrap().contains("slave.pcm \"plughw:1,3\""), "a device with sized periods keeps plughw");
     }
 
     #[test]
@@ -668,5 +939,141 @@ mod tests {
         *fake.busy.lock().unwrap() = false;
         assert_eq!(sv.sync(Some(&plan), 40).soft_card, Some(1));
         assert!(std::fs::read_to_string(&conf).unwrap().contains("type dmix"));
+    }
+
+    struct Closed(Arc<Mutex<Option<String>>>);
+    impl Gate for Closed {
+        fn refuse(&self, _card: u32) -> Option<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    fn gated(d: &Dir, fake: &Fake, why: &Arc<Mutex<Option<String>>>, now: &Arc<Mutex<Duration>>) -> Softvol {
+        let n = now.clone();
+        Softvol::new(d.0.join("asound.conf"), fake.clone()).with_gate(Closed(why.clone())).with_clock(move || *n.lock().unwrap())
+    }
+
+    #[test]
+    fn a_busy_speaker_is_not_opened_and_the_open_is_deferred_with_a_growing_backoff() {
+        let d = dir("gate");
+        let fake = Fake::default();
+        let why = Arc::new(Mutex::new(Some("card0/pcm0p/sub0 is Running (process 9)".to_string())));
+        let now = Arc::new(Mutex::new(Duration::from_secs(10)));
+        let sv = gated(&d, &fake, &why, &now);
+        let plan = Plan::Soft { card: 0, device: 0 };
+        let r = sv.sync(Some(&plan), 40);
+        assert!(r.managed && r.soft_card.is_none() && !r.busy, "deferred quietly, nobody is asked to let go: {r:?}");
+        assert!(fake.calls.lock().unwrap().is_empty(), "nothing opened");
+        // calls inside the backoff do not even ask the gate again; after each wait the delay doubles (0.5, 1, 2, 4, 4 s)
+        let mut waits = Vec::new();
+        let first = sv.st.lock().unwrap().defer_until.unwrap() - *now.lock().unwrap();
+        waits.push(first);
+        for _ in 0..5 {
+            // inside the backoff: no new decision
+            let until = sv.st.lock().unwrap().defer_until.unwrap();
+            *now.lock().unwrap() = until - Duration::from_millis(1);
+            sv.sync(Some(&plan), 40);
+            assert_eq!(sv.st.lock().unwrap().defer_until, Some(until), "the gate is not asked inside the backoff");
+            // after it: refused again, a longer wait
+            *now.lock().unwrap() = until;
+            sv.sync(Some(&plan), 40);
+            waits.push(sv.st.lock().unwrap().defer_until.unwrap() - until);
+        }
+        assert!(fake.calls.lock().unwrap().is_empty(), "still never opened while the gate says no");
+        assert_eq!(waits[..4], BACKOFF, "{waits:?}");
+        assert!(waits[4..].iter().all(|w| *w == BACKOFF[3]), "{waits:?}");
+        assert!(waits.iter().all(|w| *w <= Duration::from_secs(4)), "never longer than 4 s: {waits:?}");
+        // free now: after the backoff the open and the level happen
+        *why.lock().unwrap() = None;
+        *now.lock().unwrap() += Duration::from_secs(10);
+        assert_eq!(sv.sync(Some(&plan), 40).soft_card, Some(0));
+        assert_eq!(*fake.calls.lock().unwrap(), ["prime iyakki", "amixer -q -c 0 sset IYAKKI 40%"]);
+    }
+
+    #[test]
+    fn a_control_that_exists_is_set_without_opening_even_while_the_speaker_is_busy() {
+        let d = dir("gate-exists");
+        let fake = Fake::default();
+        *fake.control_exists.lock().unwrap() = true;
+        let why = Arc::new(Mutex::new(Some("web engine".to_string())));
+        let now = Arc::new(Mutex::new(Duration::ZERO));
+        let sv = gated(&d, &fake, &why, &now);
+        assert_eq!(sv.sync(Some(&Plan::Soft { card: 0, device: 0 }), 55).soft_card, Some(0));
+        assert_eq!(*fake.calls.lock().unwrap(), ["amixer -q -c 0 sset IYAKKI 55%"], "no prime");
+    }
+
+    #[test]
+    fn a_vanished_control_is_not_recreated_while_the_web_engine_or_a_stream_holds_the_card() {
+        let d = dir("gate-vanish");
+        let fake = Fake::default();
+        let why = Arc::new(Mutex::new(None));
+        let now = Arc::new(Mutex::new(Duration::ZERO));
+        let sv = gated(&d, &fake, &why, &now);
+        let plan = Plan::Soft { card: 0, device: 0 };
+        assert_eq!(sv.sync(Some(&plan), 40).soft_card, Some(0));
+        // every stream closed: the control is gone; the person moves the volume while the web page plays
+        *fake.control_exists.lock().unwrap() = false;
+        *why.lock().unwrap() = Some("the web engine is playing audio".into());
+        fake.calls.lock().unwrap().clear();
+        let r = sv.sync(Some(&plan), 60);
+        assert_eq!(r.soft_card, None);
+        assert!(!fake.calls.lock().unwrap().iter().any(|c| c.starts_with("prime")), "{:?}", fake.calls.lock().unwrap());
+    }
+
+    #[test]
+    fn the_web_media_flag_and_open_streams_close_the_real_gate() {
+        let root = std::env::temp_dir().join(format!("softvol-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sub = root.join("card0/pcm0p/sub0");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("status"), "closed\n").unwrap();
+        let g = ProcGate { root: root.clone() };
+        note_web_media(false);
+        assert_eq!(g.refuse(0), None);
+        std::fs::write(sub.join("status"), "state: PREPARED\nowner_pid : 5\n").unwrap();
+        assert!(g.refuse(0).unwrap().contains("Prepared"));
+        std::fs::write(sub.join("status"), "closed\n").unwrap();
+        note_web_media(true);
+        assert!(g.refuse(0).unwrap().contains("web engine"));
+        note_web_media(false);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_prime_holds_the_device_for_a_fraction_of_a_second_at_most() {
+        assert!(PRIME_HOLD <= Duration::from_millis(150));
+        assert_eq!(PRIME_BYTES, 1920, "10 ms of silence");
+    }
+
+    #[test]
+    fn the_long_standing_stereo_config_is_byte_for_byte_what_it_was() {
+        let got = config_text(&Plan::Mix { card: 0, device: 3, mix: Mix::STEREO });
+        let want = format!("{MARKER}\n# The output has no hardware volume: iyakkivol is a software volume (control 'IYAKKI' on card 0) over a dmix, so\n# IYAKKI's players and other programs (the web engine) play at once. dmix server key 24683.\npcm.iyakkimix {{\n    type dmix\n    ipc_key 24683\n    ipc_perm 0666\n    slave {{\n        pcm \"hw:0,3\"\n        rate 48000\n        channels 2\n        format S16_LE\n        period_size 1024\n        buffer_size 8192\n    }}\n}}\npcm.iyakkivol {{\n    type softvol\n    slave.pcm \"iyakkimix\"\n    control {{\n        name \"IYAKKI\"\n        card 0\n    }}\n    min_dB -51.0\n    max_dB 0.0\n}}\npcm.iyakki {{\n    type plug\n    slave.pcm \"iyakkivol\"\n}}\npcm.!default {{\n    type plug\n    slave.pcm \"iyakkivol\"\n}}\nctl.!default {{\n    type hw\n    card 0\n}}\n");
+        assert_eq!(got, want);
+        assert!(config_text(&Plan::Mix { card: 1, device: 0, mix: Mix::T2_MONO }).contains("pcm.iyakkimono"));
+        assert!(!config_text(&Plan::Mix { card: 1, device: 0, mix: Mix::T2_STEREO }).contains("resolution"));
+    }
+
+    #[test]
+    fn the_level_chain_does_not_attenuate_at_100_percent_and_the_steps_are_usable() {
+        let four = Mix { format: "S32_LE", channels: 4, sized: true, rate: 44100, probed: true };
+        let t = config_text(&Plan::Mix { card: 0, device: 0, mix: four });
+        // 100 % is 0 dB, 256 volume steps, every channel gets weight 1.0 (no -6 dB from a mono mix-down)
+        assert!(t.contains("max_dB 0.0") && t.contains("min_dB -51.0") && t.contains("resolution 256"), "{t}");
+        let weights: Vec<&str> = t.lines().filter(|l| l.trim().chars().next().is_some_and(|c| c.is_ascii_digit()) && l.contains('.') && l.trim().split(' ').count() == 2).collect();
+        assert_eq!(weights.len(), 4, "{t}");
+        assert!(weights.iter().all(|l| l.trim().ends_with(" 1.0")), "{weights:?}");
+        assert!(t.contains("rate 44100") && t.contains("format S32_LE") && t.contains("channels 4"));
+        // the softvol maps the slider linearly in dB: a 5 % step is about 2.5 dB, 20 % is 40 dB below 100 %
+        let per_step = (MAX_DB - MIN_DB) * 5.0 / 100.0;
+        assert!((per_step - 2.55).abs() < 0.01, "{per_step}");
+        assert!((MAX_DB - MIN_DB) * 0.8 > 40.0);
+        assert!(RESOLUTION as f32 >= (MAX_DB - MIN_DB) * 2.0, "steps finer than 0.5 dB");
+        // the boost moves the top of the range up; 0 leaves the text alone; it is capped
+        let b = config_text_boost(&Plan::Mix { card: 0, device: 0, mix: four }, 6);
+        assert!(b.contains("max_dB 6.0") && b.contains("min_dB -51.0"), "{b}");
+        assert_eq!(config_text_boost(&Plan::Mix { card: 0, device: 0, mix: four }, 0), t);
+        assert!(config_text_boost(&Plan::Soft { card: 0, device: 0 }, 99).contains("max_dB 12.0"));
+        assert_eq!(braces(&b), 0);
     }
 }

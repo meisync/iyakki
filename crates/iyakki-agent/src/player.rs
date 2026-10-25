@@ -75,7 +75,7 @@ pub fn runs(program: &str) -> bool {
 pub fn plain_reason(text: &str) -> String {
     let l = text.to_ascii_lowercase();
     if l.contains("symbol not found") || l.contains("error relocating") || l.contains("undefined symbol") || l.contains("error loading shared library") || l.contains("cannot open shared object") {
-        "the installed ffmpeg is incomplete (its libraries are missing or do not match, so it cannot start). Install a working one from Quick install, Media".to_string()
+        "the installed ffmpeg is incomplete (its libraries are missing or do not match, so it cannot start). Install a working one from Store \u{2192} Setup (Media tools)".to_string()
     } else {
         text.to_string()
     }
@@ -640,6 +640,14 @@ fn audio_thread(sh: Arc<Shared>, gen: u64, out: Option<std::process::ChildStdout
                 std::thread::sleep(Duration::from_millis(15));
             } else {
                 break;
+            }
+        }
+        // the master volume, when the speaker command is not the softvol chain (gain() is 100 then, and when muted 0)
+        let gain = crate::audioout::global().gain();
+        if gain < 100 {
+            for c in buf[..n].chunks_exact_mut(2) {
+                let v = (i16::from_le_bytes([c[0], c[1]]) as i32 * gain as i32 / 100) as i16;
+                c.copy_from_slice(&v.to_le_bytes());
             }
         }
         let ok = stdin.as_mut().is_some_and(|w| w.write_all(&buf[..n]).is_ok());

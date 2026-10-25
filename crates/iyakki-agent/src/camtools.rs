@@ -61,6 +61,11 @@ pub trait CameraBackend: Send + Sync {
     fn record_stop(&self) -> Result<(Vec<PathBuf>, u64), String>;
     /// The recording going on: its file and how long it has run.
     fn recording(&self) -> Option<(PathBuf, f64)>;
+    /// One settled frame as JPEG bytes, kept in memory only (nothing is written to disk). The LAB tile uses it; a backend that
+    /// cannot do this says so.
+    fn photo_bytes(&self) -> Result<Vec<u8>, String> {
+        Err("this camera cannot give a picture without saving it".into())
+    }
     /// A passport photo for `country` into `dir`; `sheet` is "4x6", "a4" or "none".
     fn passport(&self, dir: &Path, country: &str, sheet: &str) -> Result<PassportOut, String>;
     fn countries(&self) -> Vec<CountryInfo>;
@@ -129,7 +134,8 @@ impl CameraHub {
         self.grants.lock().unwrap_or_else(|e| e.into_inner()).remove(user);
     }
 
-    fn begin(&self, user: &str, what: &str) -> Busy<'_> {
+    /// Mark the camera as in use by `user` for `what` until the guard is dropped (the shell shows the red sign meanwhile).
+    pub fn begin(&self, user: &str, what: &str) -> Busy<'_> {
         *self.busy.lock().unwrap_or_else(|e| e.into_inner()) = Some((user.to_string(), what.to_string()));
         Busy(self)
     }
