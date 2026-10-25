@@ -102,7 +102,7 @@ speech.onResult(fn)    // {id, text}
 ```
 Capability `speech` (`speech.say` only, "reads text aloud") and `microphone` (separate, "listens through the microphone"). Approval: `say` first-use plus the destination line from `voicedesk::consent_text` when text leaves the machine (network/internet engines);
 `listen` **each-call**, with a visible recording bar, the mic name, and a Stop button; only after the person's click. Limits: `say` 20000 chars (`MAX_TEXT_CHARS`), 30 calls/hour/app; `listen` 60 s per call (hard `MAX_RECORD_SECS` is 300), 20 per hour; audio is never returned to the app, only text, and is dropped after transcription (as dictation does today).
-Errors: `Unavailable` ("no microphone: built-in microphones of some laptops are not supported", from `voicedesk::no_mic_text_t2`), `Busy` (speaker in use until the mixer exists), `Blocked`.
+Errors: `Unavailable` ("no microphone: built-in microphones of some laptops are not supported", from `voicedesk::no_mic_text_t2`), `Busy` (speaker in use while Settings -> Sound "Mix sounds from several apps" is off; with it on `say` is mixed as speech and gets no `Busy` for another program, `audiosink::mixing()`), `Blocked`.
 Maps to `voice::synthesize_with`, `voicedesk::Reader`, `voicedesk::transcribe`, `Recorder`. Status: `say` partly (engine and Reader exist, app wrapper and consent card do not); `listen` gap and **blocked on T2 capture**: the apple-bce patch refuses capture streams unless `capture=1`, which hung a MacBookPro16,2 when played at the same time. Ship `listen` first for USB mics and non-T2 hardware, answer `Unavailable` on T2.
 Effort: `say` M (depends on the mixer for overlap; before that `Busy`), `listen` L.
 

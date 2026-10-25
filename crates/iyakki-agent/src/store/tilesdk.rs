@@ -1220,7 +1220,8 @@ impl SpeechBackend for SystemSpeech {
             return Err(SdkError::new(code::BLOCKED, format!("the voice server {} is not allowed to get text yet", d.name)).with("fix", "Allow it once in the VOICE tile or Settings -> Models."));
         }
         let status = crate::audioout::global().status();
-        let shared = status.mix.is_some() || status.device.is_none();
+        // with the IYAKKI mixer on (Settings -> Sound) programs share the speaker: priority and ducking decide, not Busy
+        let shared = status.mix.is_some() || status.device.is_none() || crate::audiosink::mixing();
         let holders = exclusive_holders(Path::new("/proc"), status.device.as_deref(), shared);
         {
             let mut v = VOICES.lock().unwrap_or_else(|e| e.into_inner());

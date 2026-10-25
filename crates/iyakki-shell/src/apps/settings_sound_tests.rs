@@ -345,3 +345,63 @@ fn the_advanced_sound_rows_toggle_with_a_and_the_boost_and_the_hardware_answer_a
     assert_eq!(cx.services.sound_settings().volume_mode_for("PCH"), iyakki_agent::audioout::VolumeMode::Hardware, "Esc changes nothing");
     let _ = std::fs::remove_dir_all(d);
 }
+
+#[test]
+fn the_mixer_switch_is_a_row_with_its_explanation_saved_by_enter_the_button_or_m_and_only_for_administrators() {
+    let cx = admin("snd-mix");
+    let (env, d) = mac_mini("snd-mix", true);
+    let mut a = SettingsApp::new(&cx).with_hardware(env.clone());
+    goto(&mut a, &cx, Tab::Sound);
+    let r = rows(&mut a, &cx);
+    let i = r.iter().position(|r| matches!(r.target, Target::SoundMixer)).expect("the switch is on the Sound page");
+    assert_eq!(r[i].title, "Mix sounds from several apps (experimental)");
+    assert!(r[i].sub.contains("Radio, voice, alarms and notifications can play together") && r[i].sub.contains("web browser's own sound is not mixed yet"), "{}", r[i].sub);
+    assert_eq!(r[i].chips[0].0, "off");
+    assert!(!r.iter().any(|r| r.title == "Mixer status"), "no status line while it is off");
+    assert!(!cx.services.sound_settings().mixer);
+    // keyboard: select the row, Enter
+    select(&mut a, &cx, |r| matches!(r.target, Target::SoundMixer));
+    key(&mut a, &cx, Key::Enter);
+    assert!(cx.services.sound_settings().mixer, "saved through the sound settings");
+    assert!(iyakki_agent::mixer::enabled(), "the agent applied it");
+    assert!(status(&a).contains("mixer on"), "{}", status(&a));
+    let r = rows(&mut a, &cx);
+    let i = r.iter().position(|r| matches!(r.target, Target::SoundMixer)).unwrap();
+    assert_eq!(r[i].chips[0].0, "on");
+    let st = r.iter().find(|r| r.title == "Mixer status").expect("a live status line while it is on");
+    assert!(st.sub.contains("% of a core") && st.sub.contains("underrun"), "{}", st.sub);
+    assert!(matches!(st.chips[0].0.as_str(), "running" | "idle"));
+    // the button and the letter M turn it off and on again
+    let g = draw(&mut a, &cx, 1280, 720);
+    click(&mut a, &cx, &g, "Mix sounds");
+    assert!(!cx.services.sound_settings().mixer && !iyakki_agent::mixer::enabled());
+    key(&mut a, &cx, Key::Char('M'));
+    assert!(cx.services.sound_settings().mixer);
+    key(&mut a, &cx, Key::Char('M'));
+    assert!(!cx.services.sound_settings().mixer);
+    // a person who is not an administrator changes nothing
+    let mut ucx = admin("snd-mixu");
+    ucx.services = cx.services.clone();
+    ucx.session.user = "bob".into();
+    ucx.session.role = iyakki_sec::policy::Role::User;
+    ucx.session.policy = iyakki_sec::policy::Role::User.template();
+    let mut b = SettingsApp::new(&ucx).with_hardware(env);
+    b.tabs.push(Tab::Sound);
+    b.tab = b.tabs.len() - 1;
+    key(&mut b, &ucx, Key::Char('M'));
+    assert!(!cx.services.sound_settings().mixer && status(&b).contains("Only administrators"), "{}", status(&b));
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn the_mixer_setting_survives_a_save_and_a_load_and_old_files_have_it_off() {
+    let cx = admin("snd-mixrt");
+    cx.services.update_sound(|s| s.mixer = true).unwrap();
+    let json = serde_json::to_string(&cx.services.sound_settings()).unwrap();
+    let back: iyakki_agent::audioout::SoundSettings = serde_json::from_str(&json).unwrap();
+    assert!(back.mixer);
+    let old: iyakki_agent::audioout::SoundSettings = serde_json::from_str("{\"volume_pct\":40}").unwrap();
+    assert!(!old.mixer);
+    cx.services.update_sound(|s| s.mixer = false).unwrap();
+    assert!(!iyakki_agent::mixer::enabled());
+}

@@ -95,6 +95,8 @@ pub enum Target {
     SoundPattern(bool),
     /// Show or hide the Advanced rows.
     SoundAdvanced,
+    /// Settings -> Sound: mix the sound of several apps (the IYAKKI mixer, experimental).
+    SoundMixer,
     /// Power a Bluetooth controller (by index) on (`true`) or off.
     BtPower(u16, bool),
     /// Scan for devices for 10 seconds with this controller (proof that it works; never pairs).
@@ -749,7 +751,24 @@ fn sound_rows(s: &Snapshot, prefs: &iyakki_agent::audioout::SoundSettings, advan
     for (c, v) in &s.cards {
         rows.push(card_row(c, v.as_ref(), s.soft_card.or(s.hw_ignored), s.hw_ignored, prefs));
     }
+    rows.extend(mixer_rows(prefs, iyakki_agent::mixer::stats_if_enabled().as_ref()));
     advanced_sound_rows(s, prefs, &choice, advanced, &mut rows);
+    rows
+}
+
+/// What the Sound page says about the experimental mixer: its switch with the explanation and, when it is on, a live status line.
+pub const MIXER_TITLE: &str = "Mix sounds from several apps (experimental)";
+pub const MIXER_HELP: &str = "Radio, voice, alarms and notifications can play together and the others get quieter while one speaks. The web browser's own sound is not mixed yet; if you mostly use the browser, leave this off.";
+
+fn mixer_rows(prefs: &iyakki_agent::audioout::SoundSettings, stats: Option<&iyakki_agent::mixer::Stats>) -> Vec<DevRow> {
+    let mut rows = vec![DevRow::new(MIXER_TITLE, MIXER_HELP, Target::SoundMixer).chip(if prefs.mixer { "on" } else { "off" }, if prefs.mixer { WARN } else { DIM })];
+    if prefs.mixer {
+        let (state, line) = match stats {
+            Some(st) => (if st.sink_open { "running" } else { "idle" }, format!("{} · {} source(s) · {:.1}% of a core · {} underrun(s){}", if st.sink_open { "running" } else { "idle" }, st.sources, st.cpu_percent, st.underruns, st.last_error.as_ref().map(|e| format!(" · last problem: {e}")).unwrap_or_default())),
+            None => ("idle", "idle · 0 source(s) · 0.0% of a core · 0 underrun(s)".to_string()),
+        };
+        rows.push(DevRow::new("Mixer status", line, Target::Nothing).chip(state, if state == "running" { OK } else { DIM }));
+    }
     rows
 }
 
@@ -1019,7 +1038,7 @@ mod tests {
         *fake.volume.lock().unwrap() = Some(iyakki_devctl::Volume { control: "Master".into(), percent: 50, muted: false });
         let (mut p, _, fake) = pane("snd", true, fake);
         let rows = p.rows(DevTab::Sound, 0);
-        assert_eq!(rows.len(), 4, "the output, IYAKKI's volume, the card, the Advanced switch: {rows:?}");
+        assert_eq!(rows.len(), 5, "the output, IYAKKI's volume, the card, the mixer switch, the Advanced switch: {rows:?}");
         let c = rows.iter().position(|r| matches!(r.target, Target::Card(0))).unwrap();
         assert!(rows[c].title.contains("HDA Intel PCH") && rows[c].chips[0].0 == "50%");
         assert_eq!(p.act(DevTab::Sound, c, &Key::Char('+'), 0).unwrap().result.unwrap(), "Volume 55%.");

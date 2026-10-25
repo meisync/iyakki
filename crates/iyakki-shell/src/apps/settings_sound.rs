@@ -20,11 +20,13 @@ impl SettingsApp {
             Key::Char('o') => self.sound_choose(cx),
             Key::Char('t') => self.sound_test(cx, target),
             Key::Char('A') => self.sound_advanced(),
+            Key::Char('M') => self.sound_mixer(cx),
             Key::Enter | Key::Char(' ' | 'e') => match target {
                 Some(Target::SoundChoice) => self.sound_choose(cx),
                 Some(Target::SoundOut(key, _)) => self.sound_set_output(cx, &key),
                 Some(Target::SoftVolume) => self.sound_volume(cx, None),
                 Some(Target::SoundAdvanced) => self.sound_advanced(),
+                Some(Target::SoundMixer) => self.sound_mixer(cx),
                 Some(Target::SoundVolMode(card_id)) => self.sound_cycle_mode(cx, &card_id),
                 Some(Target::SoundHwCheck(card, device, control, card_id)) => self.sound_hw_check(cx, card, device, control, card_id),
                 Some(Target::SoundPattern(walk)) => self.sound_pattern(cx, walk),
@@ -154,6 +156,26 @@ impl SettingsApp {
         };
         cx.audit.record(&cx.session.user, "settings.sound.test", dev.as_deref().unwrap_or("default"));
         self.start("playing a test sound", move || JobOut::Msg(svc.test_sound(dev.as_deref())));
+    }
+}
+
+/// Settings -> Sound: the mixer switch. The setting is the machine's, so only administrators change it; the agent applies it
+/// (no app has a branch for it).
+impl SettingsApp {
+    pub(super) fn sound_mixer(&mut self, cx: &AppCx) {
+        if !self.admin(cx) {
+            return self.fail("Only administrators can change the sound mixer.");
+        }
+        let on = !Self::svc(cx).sound_settings().mixer;
+        match Self::svc(cx).update_sound(|s| s.mixer = on) {
+            Ok(now) => {
+                cx.audit.record(&cx.session.user, "settings.sound.mixer", if on { "on" } else { "off" });
+                self.ok(if on { "Sound mixer on: sounds from several apps can play together. It applies from the next sound." } else { "Sound mixer off: one app at a time, as before. It applies from the next sound." });
+                self.hw.set_sound(now);
+                self.hw.invalidate();
+            }
+            Err(e) => self.fail(e),
+        }
     }
 }
 

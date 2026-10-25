@@ -615,7 +615,9 @@ pub fn kill_child(child: &mut Child) {
 }
 
 pub struct Player {
-    child: Child,
+    /// A host speech engine's own process (`from_speech`); None for sound that goes through [`crate::audiosink`].
+    child: Option<Child>,
+    out: Option<crate::audiosink::Output>,
     /// Run once when it is stopped while still playing (speech-dispatcher keeps talking after its client is killed).
     stop_cmd: Option<Vec<String>>,
     /// A speech process that has not ended by then is killed (an engine that hangs must not hold the speaker forever).
@@ -623,49 +625,40 @@ pub struct Player {
 }
 
 impl Player {
-    /// Start playing a WAV file through the play command (audio is written to its stdin). The output and the volume of
-    /// Settings -> Sound apply (see `audioout`).
+    /// Start playing a WAV file as speech (audio is written to the play command's stdin, or mixed when the mixer is on). The
+    /// output and the volume of Settings -> Sound apply (see `audioout`, `audiosink`).
     pub fn start(play_cmd: &str, wav: &[u8]) -> Result<Player, String> {
-        let out = crate::audioout::global();
-        let args = crate::audioout::route_args(split_command(play_cmd)?, out.device().as_deref());
-        let prog = args.first().ok_or("play command is empty")?;
-        let mut child = command_for(&args, None)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("cannot start `{prog}`: {e} (change the play command in Settings → Voice)"))?;
-        if let Some(mut si) = child.stdin.take() {
-            // float or 24/32-bit WAVs (Kokoro answers 32-bit float) become 16-bit first: the output chain converts rates and cannot take float
-            let wav16 = crate::audioout::to_pcm16_wav(wav);
-            let base = wav16.as_deref().unwrap_or(wav);
-            // speech below 44.1 kHz (Kokoro: 24 kHz) is brought to 48 kHz here: the T2 MacBook's chain played it at twice the speed
-            let rated = crate::audioout::resample_low_rate_wav(base);
-            let data = crate::audioout::scale_wav(rated.as_deref().unwrap_or(base), crate::audioout::gain_for(out, &args));
-            std::thread::spawn(move || {
-                let _ = si.write_all(&data);
-            });
-        }
-        Ok(Player { child, stop_cmd: None, deadline: None })
+        Player::start_as(crate::mixer::SourceKind::Speech, play_cmd, wav)
+    }
+
+    /// The same for another kind of sound (it fixes the priority when sounds are mixed).
+    pub fn start_as(kind: crate::mixer::SourceKind, play_cmd: &str, wav: &[u8]) -> Result<Player, String> {
+        let out = crate::audiosink::play_wav(kind, kind.label(), wav, play_cmd)?;
+        Ok(Player { child: None, out: Some(out), stop_cmd: None, deadline: None })
     }
 
     /// A process that speaks by itself (a host speech engine): the text goes to its standard input, which is then closed.
     /// `stop_cmd` is run, without a shell, when it is stopped while still speaking; `max` is the longest it may take.
+    /// (Its own sound is not mixed: the engine opens the speaker itself.)
     pub fn from_speech(mut child: Child, text: Vec<u8>, stop_cmd: Option<Vec<String>>, max: Duration) -> Player {
         if let Some(mut si) = child.stdin.take() {
             std::thread::spawn(move || {
                 let _ = si.write_all(&text);
             });
         }
-        Player { child, stop_cmd, deadline: Some(Instant::now() + max) }
+        Player { child: Some(child), out: None, stop_cmd, deadline: Some(Instant::now() + max) }
     }
 
     pub fn is_playing(&mut self) -> bool {
-        if self.deadline.is_some_and(|d| Instant::now() > d) && matches!(self.child.try_wait(), Ok(None)) {
+        if let Some(o) = self.out.as_mut() {
+            return o.is_playing();
+        }
+        let Some(child) = self.child.as_mut() else { return false };
+        if self.deadline.is_some_and(|d| Instant::now() > d) && matches!(child.try_wait(), Ok(None)) {
             self.stop();
             return false;
         }
-        matches!(self.child.try_wait(), Ok(None))
+        self.child.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)))
     }
 
     pub fn wait(&mut self, timeout: Duration) -> bool {
@@ -680,12 +673,17 @@ impl Player {
     }
 
     pub fn stop(&mut self) {
-        if let Some(cmd) = self.stop_cmd.take() {
-            if matches!(self.child.try_wait(), Ok(None)) && !cmd.is_empty() {
-                let _ = run_capture(command_for(&cmd, None), None, Duration::from_secs(3));
-            }
+        if let Some(o) = self.out.as_mut() {
+            o.stop();
         }
-        kill_tree(&mut self.child);
+        if let Some(child) = self.child.as_mut() {
+            if let Some(cmd) = self.stop_cmd.take() {
+                if matches!(child.try_wait(), Ok(None)) && !cmd.is_empty() {
+                    let _ = run_capture(command_for(&cmd, None), None, Duration::from_secs(3));
+                }
+            }
+            kill_tree(child);
+        }
     }
 }
 

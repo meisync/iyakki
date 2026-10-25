@@ -247,13 +247,8 @@ impl CueOut for SystemOut {
     }
 
     fn play(&self, wav: &[u8]) -> Result<(), String> {
-        let out = crate::audioout::global();
-        let args = crate::audioout::route_args(voice::split_command(&self.play_cmd)?, out.device().as_deref());
-        if args.is_empty() {
-            return Err("the play command is empty (Settings -> Voice)".into());
-        }
-        let data = crate::audioout::scale_wav(wav, crate::audioout::gain_for(out, &args));
-        voice::run_capture(voice::command_for(&args, None), Some(&data), Duration::from_secs(5)).map(|_| ())
+        // the entry point decides: mixed over what plays (and ducking it), or the play command of Settings -> Voice
+        crate::audiosink::play_wav_blocking(crate::mixer::SourceKind::Notification, "system sound", wav, &self.play_cmd, Duration::from_secs(5))
     }
 }
 

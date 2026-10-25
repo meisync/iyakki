@@ -70,6 +70,8 @@ pub struct SoundSettings {
     pub boosts: std::collections::BTreeMap<String, u32>,
     /// Which volume a card uses (card id → mode); absent = Automatic. Set from Settings -> Sound -> Advanced.
     pub volume_modes: std::collections::BTreeMap<String, VolumeMode>,
+    /// (experimental) mix sounds with the IYAKKI mixer (`sound.mixer`, see `docs/development/AUDIO-MIXER.md`). Off until tested.
+    pub mixer: bool,
 }
 
 /// Which volume control moves the sound of a card that has a hardware one.
@@ -104,12 +106,45 @@ impl VolumeMode {
     }
 }
 
+/// How programs share the chosen output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sharing {
+    /// One program at a time (`plughw`/`hw` under the software volume): the others get `Busy`.
+    #[default]
+    OneAtATime,
+    /// ALSA `dmix` (devices where it is cheap).
+    Dmix,
+    /// IYAKKI's own mixer ([`crate::mixer`]) is the one writer to the device and mixes the programs that use it.
+    IyakkiMixer,
+}
+
+impl Sharing {
+    pub fn label(self) -> &'static str {
+        match self {
+            Sharing::OneAtATime => "one program at a time",
+            Sharing::Dmix => "shared (dmix)",
+            Sharing::IyakkiMixer => "shared (IYAKKI mixer)",
+        }
+    }
+}
+
+/// How the planned ALSA configuration is shared. `dmix` is kept wherever it is the plan; a plan that is exclusive (fixed-period
+/// devices such as the T2's, or a card with a hardware volume) uses the IYAKKI mixer when `sound.mixer` is on.
+pub fn sharing_for(plan: Option<&crate::softvol::Plan>, mixer_on: bool) -> Sharing {
+    use crate::softvol::Plan;
+    match plan {
+        Some(Plan::Mix { mix, .. }) if mix.sized => Sharing::Dmix,
+        Some(_) if mixer_on => Sharing::IyakkiMixer,
+        _ => Sharing::OneAtATime,
+    }
+}
+
 /// At most this many outputs keep their own volume.
 pub const MAX_LEVELS: usize = 32;
 
 impl Default for SoundSettings {
     fn default() -> Self {
-        SoundSettings { output: String::new(), volume_pct: 100, muted: false, levels: Default::default(), boosts: Default::default(), volume_modes: Default::default() }
+        SoundSettings { output: String::new(), volume_pct: 100, muted: false, levels: Default::default(), boosts: Default::default(), volume_modes: Default::default(), mixer: false }
     }
 }
 
@@ -1134,12 +1169,15 @@ pub struct Status {
     pub hw_ignored: Option<u32>,
     /// The sound card is held by another program, so the volume control could not be created: the sentence to show.
     pub busy: Option<String>,
+    /// How programs share the output.
+    pub sharing: Sharing,
 }
 
 impl Status {
     /// One line for the SYSTEM tile and the Devices popover.
     pub fn summary(&self) -> String {
         let vol = if self.prefs.muted { " · muted".to_string() } else if self.prefs.volume_pct < 100 { format!(" · volume {}%", self.prefs.volume_pct) } else { String::new() };
+        let vol = if self.sharing == Sharing::IyakkiMixer { format!("{vol} · IYAKKI mixer") } else { vol };
         match (&self.choice.output, self.sound_server && !self.choice.chosen) {
             (_, true) => format!("chosen by the sound server of this computer{vol}"),
             (Some(o), _) => format!("{} ({}){vol}", o.label(), self.choice.reason.trim_start_matches("automatic: ")),
@@ -1160,6 +1198,7 @@ struct State {
     mix: Option<crate::softvol::Mix>,
     hw_ignored: Option<u32>,
     busy: Option<String>,
+    sharing: Sharing,
     /// The outputs of the last look, to tell a new one from one that was always there.
     seen_keys: Vec<String>,
     /// When a starting card was first seen (the 30 s window of [`STARTING_SECS`]).
@@ -1206,7 +1245,7 @@ impl Selector {
             root: proc_root.into(),
             mixer: Box::new(mixer),
             server: Box::new(server),
-            state: Mutex::new(State { prefs, outputs: vec![], choice: choose(&[], ""), server: false, target: None, device: None, softvol: None, mix: None, hw_ignored: None, busy: None, seen_keys: vec![], starting_since: None, starting_over: false, level_key: None, at: None }),
+            state: Mutex::new(State { prefs, outputs: vec![], choice: choose(&[], ""), server: false, target: None, device: None, softvol: None, mix: None, hw_ignored: None, busy: None, sharing: Sharing::OneAtATime, seen_keys: vec![], starting_since: None, starting_over: false, level_key: None, at: None }),
             generation: AtomicU64::new(0),
             gain: AtomicU32::new(100),
             active: AtomicBool::new(true),
@@ -1313,7 +1352,7 @@ impl Selector {
     }
 
     fn status_of(st: &State) -> Status {
-        Status { outputs: st.outputs.clone(), choice: st.choice.clone(), sound_server: st.server, prefs: st.prefs.clone(), device: st.device.clone(), softvol: st.softvol, mix: st.mix, starting: st.starting_since.map(|_| STARTING_LINE.to_string()), hw_ignored: st.hw_ignored, busy: st.busy.clone() }
+        Status { outputs: st.outputs.clone(), choice: st.choice.clone(), sound_server: st.server, prefs: st.prefs.clone(), device: st.device.clone(), softvol: st.softvol, mix: st.mix, starting: st.starting_since.map(|_| STARTING_LINE.to_string()), hw_ignored: st.hw_ignored, busy: st.busy.clone(), sharing: st.sharing }
     }
 
     /// Decide again from what is known. Returns the settings when the remembered volume of a newly used output replaced
@@ -1343,6 +1382,7 @@ impl Selector {
                 } else {
                     st.choice.output.as_ref().map(|o| if o.uses_hw_volume(st.prefs.volume_mode_for(&o.card_id)) { crate::softvol::Plan::Hw { card: o.card, device: o.device } } else { crate::softvol::Plan::Mix { card: o.card, device: o.device, mix: self.mix_of(o) } })
                 };
+                st.sharing = sharing_for(plan.as_ref(), st.prefs.mixer);
                 st.mix = match &plan {
                     Some(crate::softvol::Plan::Mix { mix, .. }) => Some(*mix),
                     _ => None,
@@ -1540,7 +1580,7 @@ pub fn summary_at(proc_root: &Path) -> String {
     let outputs = outputs_at(proc_root);
     let prefs = global().prefs();
     let choice = choose(&outputs, &prefs.output);
-    Status { outputs, choice, sound_server: false, prefs, device: None, softvol: None, mix: None, starting: None, hw_ignored: None, busy: None }.summary()
+    Status { outputs, choice, sound_server: false, prefs, device: None, softvol: None, mix: None, starting: None, hw_ignored: None, busy: None, sharing: Sharing::OneAtATime }.summary()
 }
 
 /// `amixer -c N contents` (alsa-utils), or None when it is missing or fails.
@@ -1609,6 +1649,7 @@ pub fn master_generation() -> u64 {
 /// Settings -> Sound changed (only reaches the selector once it is installed).
 pub fn apply_prefs(prefs: SoundSettings) {
     MASTER_GEN.fetch_add(1, Ordering::SeqCst);
+    crate::mixer::set_enabled(prefs.mixer);
     let g = global();
     if g.is_active() {
         g.set_prefs(prefs);
@@ -2257,6 +2298,37 @@ mod tests {
         assert_eq!(global().current_key(), None);
         let tone = crate::voice::parse_wav(&test_tone_wav()).unwrap();
         assert!(tone.samples.len() > 8000 && crate::voice::peak(&tone.samples) < 9000, "short and gentle");
+    }
+
+    #[test]
+    fn sharing_follows_the_plan_and_the_mixer_setting() {
+        use crate::softvol::{Mix, Plan};
+        let t2 = Plan::Mix { card: 1, device: 0, mix: Mix::T2_MONO };
+        let hdmi = Plan::Mix { card: 0, device: 3, mix: Mix::STEREO };
+        assert_eq!(sharing_for(Some(&t2), false), Sharing::OneAtATime, "the T2 default: plughw, one program at a time");
+        assert_eq!(sharing_for(Some(&t2), true), Sharing::IyakkiMixer);
+        assert_eq!(sharing_for(Some(&hdmi), true), Sharing::Dmix, "dmix stays where it is cheap");
+        assert_eq!(sharing_for(Some(&Plan::Hw { card: 0, device: 0 }), true), Sharing::IyakkiMixer);
+        assert_eq!(sharing_for(Some(&Plan::Soft { card: 0, device: 0 }), false), Sharing::OneAtATime);
+        assert_eq!(sharing_for(None, true), Sharing::OneAtATime);
+        assert!(!SoundSettings::default().mixer, "off until the owner has tested it");
+        let old: SoundSettings = serde_json::from_str(r#"{"volume_pct":40}"#).unwrap();
+        assert!(!old.mixer);
+    }
+
+    #[test]
+    fn the_selector_reports_the_mixer_for_a_t2_plan_only_when_the_setting_is_on() {
+        let t = tree("sharing-t2");
+        let fake = crate::softvol::fake::Fake::default();
+        let sel = t2_with_softvol(&t, Arc::new(Mutex::new(false)), Arc::new(Mutex::new(false)), fake);
+        sel.set_prefs(SoundSettings::default());
+        assert_eq!(sel.refresh().sharing, Sharing::OneAtATime);
+        sel.set_prefs(SoundSettings { mixer: true, ..Default::default() });
+        let st = sel.refresh();
+        assert_eq!(st.sharing, Sharing::IyakkiMixer);
+        assert!(st.summary().contains("IYAKKI mixer"));
+        let conf = std::fs::read_to_string(t.0.join("asound.conf")).unwrap();
+        assert_eq!(conf, crate::softvol::config_text(&crate::softvol::Plan::Soft { card: 1, device: 0 }), "the mixer writes into the same plughw-based device");
     }
 }
 
