@@ -5,8 +5,9 @@
 //! (`radio_stations`), and the community Radio Browser directory on the internet (`Directory`). The directory is only
 //! asked through an injectable [`Fetcher`] (so tests never need the network), only on hosts the account may reach,
 //! with short timeouts, and results are kept in memory for an hour. Offline, or when the account may not reach the
-//! directory, the built-in and saved stations still work. Only MP3 streams are kept, because that is what the
-//! player can play; dead stations and HLS playlists are dropped.
+//! directory, the built-in and saved stations still work. The directory is asked for MP3 streams only (dead stations
+//! and HLS playlists are dropped); the built-in list also has AAC and HLS stations, which say "needs the audio add-on"
+//! until the person has installed it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -70,6 +71,9 @@ impl Found {
         if !self.language.is_empty() {
             v.push(self.language.clone());
         }
+        if crate::radio_stations::needs_addon(&self.url) && !crate::aacpipe::installed() {
+            v.push("needs the audio add-on (AAC), which RADIO can install".into());
+        }
         if self.kbps > 0 {
             v.push(format!("{} kbps", self.kbps));
         }
@@ -102,13 +106,14 @@ fn clean_name(s: &str) -> String {
     t.chars().take(60).collect()
 }
 
-/// Whether the player can play this address: no HLS playlist, and not a file type it does not decode.
+/// Whether the player can play this address: not a file type it does not decode (AAC and HLS need the audio add-on, which
+/// the station list says).
 fn playable_url(u: &str) -> bool {
     if radio::valid_url(u).is_err() {
         return false;
     }
     let path = u.split(['?', '#']).next().unwrap_or(u).to_ascii_lowercase();
-    ![".m3u8", ".aac", ".ogg", ".opus", ".mp4", ".flac", ".m4a", ".aacp", ".wma"].iter().any(|e| path.ends_with(e))
+    ![".ogg", ".opus", ".mp4", ".flac", ".m4a", ".wma"].iter().any(|e| path.ends_with(e))
 }
 
 fn norm(s: &str) -> String {
@@ -507,7 +512,7 @@ pub fn offered(p: &Policy) -> bool {
 }
 
 pub fn is_radio_tool(name: &str) -> bool {
-    matches!(name, "radio_search" | "radio_play" | "radio_stop" | "radio_pause" | "radio_resume" | "radio_volume" | "radio_save" | "radio_status")
+    matches!(name, "radio_search" | "radio_play" | "radio_stop" | "radio_pause" | "radio_resume" | "radio_volume" | "radio_save" | "radio_add" | "radio_status")
 }
 
 /// The tool definitions for an account (none without the RADIO app).
@@ -520,7 +525,7 @@ pub fn defs(p: &Policy) -> Vec<ToolDef> {
     vec![
         tool(
             "radio_search",
-            "Search internet radio stations: the person's saved stations, IYAKKI's built-in list by language, and the online Radio Browser directory (when there is internet). `query` is free text such as \"tamil\", \"tamil fm\", \"kuthu\", \"news\", \"bbc\" or \"jazz\"; words like fm, radio, online and live are ignored. Optional `language` (Tamil, Hindi, ...), `tag` (a genre such as news or devotional) and `limit` (default 8, at most 10). Returns numbered stations with an id for radio_play. Read-only; only MP3 stations that were working at the last check are listed.",
+            "Search internet radio stations: the person's saved stations, IYAKKI's built-in list by language, and the online Radio Browser directory (when there is internet). `query` is free text such as \"tamil\", \"tamil fm\", \"kuthu\", \"news\", \"bbc\" or \"jazz\"; words like fm, radio, online and live are ignored. Optional `language` (Tamil, Hindi, ...), `tag` (a genre such as news or devotional) and `limit` (default 8, at most 40). Returns numbered stations with an id for radio_play. Read-only; the online directory lists only MP3 stations that were working at the last check; a few built-in AAC/HLS stations are marked when they need the audio add-on (installed from the RADIO app).",
             obj(json!({"query": {"type": "string"}, "language": {"type": "string"}, "tag": {"type": "string"}, "limit": {"type": "integer"}}), &[]),
             true,
         ),
@@ -535,6 +540,7 @@ pub fn defs(p: &Policy) -> Vec<ToolDef> {
         tool("radio_resume", "Carry on with a paused radio.", obj(json!({}), &[]), false),
         tool("radio_volume", "Set the radio volume: `level` 0 to 100, or `change` (for example 10 or -10) from where it is now.", obj(json!({"level": {"type": "integer"}, "change": {"type": "integer"}}), &[]), false),
         tool("radio_status", "What the radio is playing now (station, song title when the station sends one, volume).", obj(json!({}), &[]), true),
+        tool("radio_add", "Add a station the person names or that you found (for example on a radio website) to My stations. `name` is a short name (up to 40 characters) and `url` the direct http(s) stream address of an MP3 or AAC stream. Only hosts the account may reach are accepted. Tell the person which station you added; radio_play can then play it by name.", obj(json!({"name": {"type": "string"}, "url": {"type": "string"}}), &["name", "url"]), false),
         tool("radio_save", "Keep a station in the person's own list (My stations in the RADIO app). `name` is a station name or id from radio_search; leave it out to keep the station that is playing now.", obj(json!({"name": {"type": "string"}}), &[]), false),
     ]
 }
@@ -545,6 +551,7 @@ pub fn describe(name: &str, args: &Value) -> Option<String> {
     match name {
         "radio_play" => Some(format!("play the radio: {}", s("id").or_else(|| s("name")).or_else(|| s("query")).unwrap_or("the best match"))),
         "radio_search" => Some(format!("search radio stations for “{}”", s("query").or_else(|| s("language")).or_else(|| s("tag")).unwrap_or("everything"))),
+        "radio_add" => Some(format!("add the station {} to My stations", s("name").unwrap_or("(no name)"))),
         "radio_save" => Some(format!("keep {} in My stations", s("name").unwrap_or("the playing station"))),
         _ => None,
     }
@@ -559,7 +566,7 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str) ->
     match name {
         "radio_search" => {
             let q = Query::parse(s("query").unwrap_or(""), s("language"), s("tag"));
-            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8).clamp(1, 10) as usize;
+            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8).clamp(1, 40) as usize;
             let (found, note) = search_all(svc, p, user, &q);
             if found.is_empty() {
                 let mut m = format!("No radio station matches “{}”.", q.raw);
@@ -686,6 +693,17 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str) ->
             ),
             RadioState::Failed { station, why } => format!("{} would not play: {why}", clean_name(&station)),
         }),
+        "radio_add" => {
+            let n = radio::valid_name(args.get("name").and_then(Value::as_str).unwrap_or(""))?;
+            let u = radio::valid_url(args.get("url").and_then(Value::as_str).unwrap_or(""))?;
+            let host = radio::host_of(&u);
+            if !p.allows_host(&host) {
+                return Err(format!("your account may not reach {host}"));
+            }
+            let st = StationStore::new(svc.dir(), user).add(&n, &u)?;
+            svc.toollog.record(svc.tool_log_days(), user, "radio.add", &host, true, "");
+            Ok(format!("Added {} to My stations (RADIO app).", st.name))
+        }
         "radio_save" => {
             let target = match s("name") {
                 Some(n) => find_by_id(svc, user, n).or_else(|| find_by_name(svc, user, n)).ok_or_else(|| format!("I do not know a station called “{n}”; run radio_search first"))?,
@@ -857,7 +875,7 @@ mod tests {
     fn tools_exist_only_with_the_radio_app_and_never_ask() {
         let w = world("defs", &["*"], None);
         let defs = w.tools.defs();
-        for n in ["radio_search", "radio_play", "radio_stop", "radio_pause", "radio_resume", "radio_volume", "radio_save", "radio_status"] {
+        for n in ["radio_search", "radio_play", "radio_stop", "radio_pause", "radio_resume", "radio_volume", "radio_save", "radio_add", "radio_status"] {
             let d = defs.iter().find(|d| d.spec.name == n).unwrap_or_else(|| panic!("{n} missing"));
             assert_eq!(d.risk, Risk::Safe, "{n}");
         }
@@ -902,16 +920,33 @@ mod tests {
         assert_eq!(approvals, 0, "radio tools need no approval");
         assert_eq!(results.len(), 2);
         assert!(results[0].1.contains("Sooriyan FM") && results[0].1.contains("[b-tamil-1]") && results[0].1.contains("No internet"), "{}", results[0].1);
-        assert!(!results[0].1.contains(".aac") && !results[0].1.contains("80’s Tamil Hits"), "unplayable AAC stations are not offered: {}", results[0].1);
+        // AAC and HLS stations are offered too, and say when they need the audio add-on
+        let all = builtin_all();
+        for name in ["80’s Tamil Hits"] {
+            let f = all.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("{name} is offered"));
+            assert!(crate::radio_stations::needs_addon(&f.url));
+            assert_eq!(f.facts().contains("needs the audio add-on"), !crate::aacpipe::installed(), "{name}");
+        }
+        assert!(!all.iter().find(|f| f.name == "Sooriyan FM").unwrap().facts().contains("add-on"));
         assert!(results[1].1.starts_with("Playing Sooriyan FM"), "{}", results[1].1);
         assert!(matches!(w.svc.radio.state(), RadioState::Playing { ref station, .. } if station == "Sooriyan FM"), "the shared player plays it: {:?}", w.svc.radio.state());
         w.svc.radio.stop();
     }
 
     #[test]
+    fn the_agent_can_add_a_station_by_name_and_address_and_bad_ones_are_refused() {
+        let w = world("add", &["*"], None);
+        let r = w.tools.call("radio_add", &json!({"name": "Test Tamil FM", "url": "https://radio.example.org/live.mp3"})).unwrap();
+        assert!(r.contains("Added Test Tamil FM"), "{r}");
+        assert!(w.tools.call("radio_search", &json!({"query": "test tamil"})).unwrap().contains("Test Tamil FM"));
+        assert!(w.tools.call("radio_add", &json!({"name": "Bad", "url": "ftp://x.example.org/a"})).is_err());
+        assert!(w.tools.call("radio_add", &json!({"name": "", "url": "https://radio.example.org/a.mp3"})).is_err());
+    }
+
+    #[test]
     fn online_results_are_searched_ranked_cached_and_played_and_the_log_names_the_host_only() {
         let w = world("online", &["*"], Some(FIXTURE));
-        let r = w.tools.call("radio_search", &json!({"query": "tamil", "limit": 10})).unwrap();
+        let r = w.tools.call("radio_search", &json!({"query": "tamil", "limit": 40})).unwrap();
         let online = lines_with(&r, "directory");
         assert_eq!(online.len(), 3, "{r}");
         assert!(online[0].contains("Big Tamil FM") && online[0].contains("128 kbps") && online[1].contains("Down Tamil") && online[2].contains("Low Tamil"), "{r}");

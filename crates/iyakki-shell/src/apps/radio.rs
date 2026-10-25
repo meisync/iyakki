@@ -1,12 +1,15 @@
 //! RADIO: internet radio in a player of its own. Stations come from the person's own list or from ten language
 //! tabs (Tamil, Telugu, Malayalam, English, Hindi and more); one key starts a station and the music goes on in the background
-//! while other apps are used (the launcher shows what plays). MP3 streams over HTTP or HTTPS; the sound goes to the
+//! while other apps are used (the launcher shows what plays). MP3 streams over HTTP or HTTPS and HLS with MP3 play by
+//! themselves; AAC and HLS with AAC need the audio add-on, which the Install button below a failed station fetches from
+//! its vendor (the Store's installer) and then tries the station again. The sound goes to the
 //! system's play command (Settings → Voice), and every address is checked against the account's host policy.
 
 use crate::safeclamp::SafeClamp;
 use std::sync::Arc;
 
 use iyakki_agent::radio::{self, RadioState, Station, StationStore, BANDS, LANGUAGES};
+use iyakki_agent::radio_stations;
 
 use super::widgets::{Form, FormEvent};
 use super::{blink, App, AppCx, Flow};
@@ -36,6 +39,10 @@ pub struct RadioApp {
     nav_top: usize,
     /// The pointer is over the language list (the wheel scrolls it instead of the stations).
     nav_hover: bool,
+    /// The station that could not start for lack of the audio add-on; it is tried again once the add-on is installed.
+    retry: Option<Station>,
+    /// The person pressed "Install audio add-on": the shell opens the installer (`take_request`).
+    install: bool,
 }
 
 fn store(cx: &AppCx) -> StationStore {
@@ -45,7 +52,7 @@ fn store(cx: &AppCx) -> StationStore {
 impl RadioApp {
     pub fn new(cx: &AppCx) -> RadioApp {
         let mine = store(cx).list();
-        RadioApp { tab: if mine.is_empty() { 1.min(TABS - 1) } else { 0 }, mine, sel: 0, mode: Mode::Browse, status: None, peaks: [0.0; BANDS], nav_top: 0, nav_hover: false }
+        RadioApp { tab: if mine.is_empty() { 1.min(TABS - 1) } else { 0 }, mine, sel: 0, mode: Mode::Browse, status: None, peaks: [0.0; BANDS], nav_top: 0, nav_hover: false, retry: None, install: false }
     }
 
     /// The stations on the current tab.
@@ -76,6 +83,7 @@ impl RadioApp {
             self.status = Some((format!("Your account may not reach {host}."), false));
             return;
         }
+        self.retry = None;
         cx.audit.record(&cx.session.user, "radio.play", &host);
         let allow: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(move |h| policy.allows_host(h));
         cx.services.radio.play(st, allow, &cx.services.voice_settings().play_cmd);
@@ -244,6 +252,16 @@ impl App for RadioApp {
                 cx.services.radio.set_volume(((n - 200) * 5) as u8);
                 return Flow::Stay;
             }
+            // "Install audio add-on" under a station that needs it
+            Event::Tab(310) => {
+                if let RadioState::Failed { station, why } = cx.services.radio.state() {
+                    if iyakki_agent::audiofmt::needs_addon(&why) {
+                        self.retry = self.list().into_iter().chain(self.mine.clone()).find(|s| s.name == station);
+                        self.install = true;
+                    }
+                }
+                return Flow::Stay;
+            }
             Event::Tab(300) => {
                 self.keep_selected(cx);
                 return Flow::Stay;
@@ -310,7 +328,19 @@ impl App for RadioApp {
         Flow::Stay
     }
 
+    fn take_request(&mut self) -> Option<(String, String)> {
+        // the Store's Setup page, on the media tools (the same installer as the MEDIA player's)
+        std::mem::take(&mut self.install).then(|| ("quickinstall".to_string(), "ffmpeg".to_string()))
+    }
+
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+        // back from the installer with the add-on in place: the station that waited is tried again
+        if self.retry.is_some() && iyakki_agent::aacpipe::installed() {
+            if let Some(st) = self.retry.take() {
+                self.play_station(&st, cx);
+            }
+        }
+        let addon_missing = !iyakki_agent::aacpipe::installed();
         let x = area.x + 24.0 * s;
         let w = area.w - 48.0 * s;
         let mut y = area.y + 10.0 * s;
@@ -536,6 +566,15 @@ impl App for RadioApp {
             g.text(x, y, 14.0 * s, if *ok { OK } else { ERR }, &m, Face::Sans);
             y += 24.0 * s;
         }
+        // a station that needs the audio add-on: one calm line and the way to get it (the person's click, from the vendor)
+        if let RadioState::Failed { station, why } = &state {
+            if iyakki_agent::audiofmt::needs_addon(why) {
+                let line = g.fit(14.0 * s, &format!("{station} sends AAC audio. RADIO needs the audio add-on (ffmpeg) to play it; it is downloaded from its builder when you ask."), Face::Sans, w);
+                g.text(x, y, 14.0 * s, MUTED, &line, Face::Sans);
+                g.button(x, y + 22.0 * s, 15.0 * s, "Install audio add-on", CYAN, Event::Tab(310));
+                y += 60.0 * s;
+            }
+        }
 
         // ---- the stations on this tab
         let now = match &state {
@@ -575,6 +614,9 @@ impl App for RadioApp {
                 let url = g.fit(12.0 * s, &st.url, Face::Sans, avail);
                 g.text(nx, y + 7.0 * s, 17.0 * s, if on { OK } else { TEXT }, &name, Face::Bold);
                 g.text(nx, y + 31.0 * s, 12.0 * s, DIM, &url, Face::Sans);
+                if addon_missing && radio_stations::needs_addon(&st.url) {
+                    g.text(x + w - 150.0 * s, y + 32.0 * s, 11.0 * s, DIM, "needs audio add-on", Face::Sans);
+                }
                 // remove (My stations) / keep (the presets)
                 if self.tab == 0 {
                     if sel {
@@ -830,6 +872,35 @@ mod tests {
         // the narrow window falls back to tabs
         let g = draw(&mut a, &cx, 640, 480);
         assert!(g.hits.iter().any(|h| matches!(h.ev, Event::Tab(_))));
+    }
+
+    #[test]
+    fn an_aac_station_without_the_add_on_offers_to_install_it() {
+        struct AacOnly;
+        impl Streamer for AacOnly {
+            fn open(&self, _u: &str, _h: &[(String, String)]) -> Result<StreamHead, String> {
+                Ok(StreamHead { status: 200, headers: vec![("content-type".into(), "audio/aacp".into())], body: Box::new(std::io::Cursor::new(vec![0u8; 64])) })
+            }
+        }
+        let (cx, _) = cx("addon");
+        cx.services.radio.set_streamer(Arc::new(AacOnly));
+        cx.services.radio.set_aac_factory(Arc::new(|| Err(iyakki_agent::audiofmt::NEEDS_AUDIO_ADDON.to_string())));
+        let mut a = RadioApp::new(&cx);
+        a.set_tab(1);
+        a.sel = a.station_names().iter().position(|n| n == "80’s Tamil Hits").expect("80’s Tamil Hits is in the Tamil list");
+        a.handle(&Event::Key(Key::Enter), &cx);
+        wait(&cx, |s| matches!(s, RadioState::Failed { why, .. } if iyakki_agent::audiofmt::needs_addon(why)));
+        assert!(a.take_request().is_none(), "nothing is installed without a click");
+        draw(&mut a, &cx, 1100, 720);
+        a.handle(&Event::Tab(310), &cx);
+        assert_eq!(a.take_request(), Some(("quickinstall".to_string(), "ffmpeg".to_string())));
+        assert_eq!(a.retry.as_ref().map(|s| s.name.as_str()), Some("80’s Tamil Hits"), "the station waits to be tried again");
+        assert!(a.take_request().is_none(), "one click, one request");
+        // playing another station forgets the wait
+        a.sel = 0;
+        a.handle(&Event::Key(Key::Enter), &cx);
+        assert!(a.retry.is_none());
+        cx.services.radio.stop();
     }
 
     #[test]

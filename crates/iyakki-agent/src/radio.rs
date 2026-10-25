@@ -1,10 +1,13 @@
 //! Internet radio: stations a person adds (a name and a stream address), and a player that keeps playing in the
-//! background while they use other apps. Streams are MP3 over HTTP or HTTPS (Icecast and Shoutcast); the song title
-//! the station announces is shown. The sound goes to the system's play command (the same one the voice features use),
-//! so a person needs no sound server of their own. Every address is checked against the account's host policy, also
-//! when a station redirects.
+//! background while they use other apps. Streams are MP3 over HTTP or HTTPS (Icecast and Shoutcast), decoded in-house, and
+//! the same MP3 inside HLS playlists (`hls.rs`: playlist follower and transport stream reader, also in-house). AAC (ADTS
+//! streams, AAC+ and HLS with AAC) is decoded by the audio add-on the person installs on request (`aacpipe.rs`, a separate
+//! program); without it the station fails with a plain message the RADIO tile answers with an install button. The
+//! song title the station announces is shown. The sound goes to the system's play command (the same one the voice
+//! features use), so a person needs no sound server of their own. Every address, also in playlists and when a station
+//! redirects, is checked against the account's host policy.
 
-use std::io::{Read, Write};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError};
@@ -12,12 +15,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iyakki_proxy::{StreamHead, Streamer};
+
+use crate::audiofmt::{self, AacDecoder, AacFactory, Codec, Pcm};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_STATIONS: usize = 200;
 
-/// Stations to start from, by language: `(name, MP3 stream address)`. Each answered with MP3 audio when this list was
-/// made (11 October 2026); stations move and disappear, so a failing one says why and the person can add their own.
+/// Stations to start from, by language: `(name, stream address)`: MP3, or AAC / HLS ones that need the audio add-on
+/// (`radio_stations::needs_addon`). Each answered when this list was made (24 October 2026); stations move and disappear, so a failing one says why and the person can add their own.
 pub struct Language {
     pub name: &'static str,
     pub stations: &'static [(&'static str, &'static str)],
@@ -214,6 +219,10 @@ struct Inner {
     streamer: Mutex<Option<Arc<dyn Streamer>>>,
     retry_wait: Mutex<Duration>,
     levels: Mutex<[f32; BANDS]>,
+    /// Where AAC decoders come from (`None`: the installed add-on); tests put a fake here.
+    aac: Mutex<Option<AacFactory>>,
+    /// Divides the waits of the HLS follower (1 in real use).
+    hls_scale: std::sync::atomic::AtomicU32,
 }
 
 /// Reads (`None`) or sets (`Some(percent)`) the master volume; returns the volume in percent.
@@ -229,26 +238,8 @@ type Allow = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 impl Default for RadioPlayer {
     fn default() -> Self {
-        RadioPlayer { inner: Arc::new(Inner { state: Mutex::new(RadioState::Idle), generation: AtomicU64::new(0), paused: std::sync::atomic::AtomicBool::new(false), volume: AtomicU8::new(80), link: Mutex::new(None), streamer: Mutex::new(None), retry_wait: Mutex::new(Duration::from_secs(2)), levels: Mutex::new([0.0; BANDS]) }) }
+        RadioPlayer { inner: Arc::new(Inner { state: Mutex::new(RadioState::Idle), generation: AtomicU64::new(0), paused: std::sync::atomic::AtomicBool::new(false), volume: AtomicU8::new(80), link: Mutex::new(None), streamer: Mutex::new(None), retry_wait: Mutex::new(Duration::from_secs(2)), levels: Mutex::new([0.0; BANDS]), aac: Mutex::new(None), hls_scale: std::sync::atomic::AtomicU32::new(1) }) }
     }
-}
-
-fn wav_header(rate: u32, channels: u16) -> Vec<u8> {
-    let mut h = Vec::with_capacity(44);
-    let data_len: u32 = 0x7FFF_F000;
-    h.extend_from_slice(b"RIFF");
-    h.extend_from_slice(&(data_len + 36).to_le_bytes());
-    h.extend_from_slice(b"WAVEfmt ");
-    h.extend_from_slice(&16u32.to_le_bytes());
-    h.extend_from_slice(&1u16.to_le_bytes());
-    h.extend_from_slice(&channels.to_le_bytes());
-    h.extend_from_slice(&rate.to_le_bytes());
-    h.extend_from_slice(&(rate * channels as u32 * 2).to_le_bytes());
-    h.extend_from_slice(&(channels * 2).to_le_bytes());
-    h.extend_from_slice(&16u16.to_le_bytes());
-    h.extend_from_slice(b"data");
-    h.extend_from_slice(&data_len.to_le_bytes());
-    h
 }
 
 fn resolve(base: &str, loc: &str) -> Option<String> {
@@ -267,6 +258,24 @@ fn resolve(base: &str, loc: &str) -> Option<String> {
 impl RadioPlayer {
     pub fn set_streamer(&self, s: Arc<dyn Streamer>) {
         *self.inner.streamer.lock().unwrap() = Some(s);
+    }
+
+    /// Where AAC decoders come from instead of the installed add-on (tests).
+    pub fn set_aac_factory(&self, f: AacFactory) {
+        *self.inner.aac.lock().unwrap() = Some(f);
+    }
+
+    /// Shortens the HLS follower's waits by this factor (tests).
+    pub fn set_hls_time_scale(&self, n: u32) {
+        self.inner.hls_scale.store(n.max(1), Ordering::Relaxed);
+    }
+
+    fn aac_decoder(&self) -> Result<Box<dyn AacDecoder>, String> {
+        let f = self.inner.aac.lock().unwrap().clone();
+        match f {
+            Some(f) => f(),
+            None => crate::aacpipe::aac_decoder(),
+        }
     }
 
     /// How long to wait before reconnecting a stream that dropped.
@@ -408,9 +417,9 @@ impl RadioPlayer {
         Ok(StreamHead { status: 200, headers: vec![("content-type".into(), "audio/mpeg".into())], body: Box::new(f) })
     }
 
-    fn open(&self, gen: u64, url: &str, allow: &Allow) -> Result<StreamHead, StreamEnd> {
+    fn open(&self, gen: u64, url: &str, allow: &Allow) -> Result<(StreamHead, Codec), StreamEnd> {
         if let Some(path) = url.strip_prefix("file://") {
-            return Self::open_file(path);
+            return Self::open_file(path).map(|h| (h, Codec::Mp3));
         }
         let streamer = self.inner.streamer.lock().unwrap().clone().ok_or_else(|| StreamEnd::Failed("no network connection is set up for the radio".into()))?;
         let mut url = url.to_string();
@@ -432,33 +441,69 @@ impl RadioPlayer {
                 return Err(StreamEnd::Failed(format!("the station answered {}", head.status)));
             }
             let ct = head.header("content-type").unwrap_or("").to_ascii_lowercase();
-            if ct.contains("mpegurl") || ct.contains("scpls") || url.ends_with(".pls") || url.ends_with(".m3u") {
-                let mut text = String::new();
-                let _ = head.body.take(64 * 1024).read_to_string(&mut text);
+            let path = url.split(['?', '#']).next().unwrap_or("");
+            if ct.contains("mpegurl") || ct.contains("scpls") || path.ends_with(".pls") || path.ends_with(".m3u") || path.ends_with(".m3u8") {
+                let mut raw = Vec::new();
+                let _ = head.body.take(crate::hls::MAX_PLAYLIST as u64 + 1).read_to_end(&mut raw);
+                if raw.len() > crate::hls::MAX_PLAYLIST {
+                    return Err(StreamEnd::Failed("the playlist is too large".into()));
+                }
+                let text = String::from_utf8_lossy(&raw).to_string();
+                if crate::hls::is_hls(&text) {
+                    let me = self.clone();
+                    let net = crate::hls::Net { streamer: streamer.clone(), allow: allow.clone(), stop: Arc::new(move || !me.current(gen)), timing: crate::hls::Timing { scale: self.inner.hls_scale.load(Ordering::Relaxed) } };
+                    let reader = crate::hls::HlsReader::start(net, &url, Some(&raw)).map_err(|e| if self.current(gen) { StreamEnd::Failed(e) } else { StreamEnd::Stopped })?;
+                    let codec = reader.codec();
+                    return Ok((StreamHead { status: 200, headers: vec![], body: Box::new(reader) }, codec));
+                }
                 url = playlist_target(&text).ok_or_else(|| StreamEnd::Failed("the playlist has no stream address".into()))?;
                 continue;
             }
-            if ct.contains("aac") || ct.contains("ogg") || ct.contains("opus") || ct.contains("mp4") || ct.contains("x-mpegurl") {
-                return Err(StreamEnd::Failed(format!("this station streams {} and only MP3 is supported so far; many stations offer an MP3 link", ct.split(';').next().unwrap_or(&ct))));
+            let aac_ct = audiofmt::content_type_is_aac(&ct);
+            if !aac_ct && (ct.contains("ogg") || ct.contains("opus") || ct.contains("mp4") || ct.contains("flac")) {
+                return Err(StreamEnd::Failed(format!("this station streams {} and only MP3 and AAC are supported; many stations offer an MP3 link", ct.split(';').next().unwrap_or(&ct))));
             }
-            return Ok(head);
+            // the first bytes tell MP3 from AAC when the station's content type does not (or lies)
+            let mut body = head.body;
+            let mut prefix = Vec::new();
+            let mut chunk = [0u8; 16];
+            while prefix.len() < 16 {
+                match body.read(&mut chunk[..16 - prefix.len()]) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => prefix.extend_from_slice(&chunk[..n]),
+                }
+                if prefix.len() >= 4 && audiofmt::sniff(&prefix).is_some() {
+                    break;
+                }
+            }
+            let codec = audiofmt::sniff(&prefix).unwrap_or(if aac_ct { Codec::Aac } else { Codec::Mp3 });
+            let body: Box<dyn Read + Send> = Box::new(Cursor::new(prefix).chain(body));
+            return Ok((StreamHead { status: head.status, headers: head.headers, body }, codec));
         }
         Err(StreamEnd::Failed("too many redirects".into()))
     }
 
     fn stream_once(&self, gen: u64, station: &Station, allow: &Allow, play_cmd: &str, played: &mut bool) -> Result<(), StreamEnd> {
-        let head = self.open(gen, &station.url, allow)?;
+        let (head, codec) = self.open(gen, &station.url, allow)?;
+        // a missing add-on is reported before anything is read
+        let aac = if codec == Codec::Aac { Some(self.aac_decoder().map_err(StreamEnd::Failed)?) } else { None };
         let interval = head.header("icy-metaint").and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
         let kbps_hint = head.header("icy-br").and_then(|v| v.split(',').next()).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
         let title = Arc::new(Mutex::new(String::new()));
+        let said = Arc::new(Mutex::new(String::new()));
         let mut reader = IcyReader::new(head.body, interval, title.clone());
         // a thread reads the network; this one decodes and plays, and notices when the network goes quiet
         let (tx, rx) = sync_channel::<Vec<u8>>(64);
+        let said2 = said.clone();
         std::thread::spawn(move || {
             let mut chunk = vec![0u8; 8192];
             loop {
                 match reader.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
+                    Err(e) => {
+                        *said2.lock().unwrap() = e.to_string();
+                        break;
+                    }
                     Ok(n) => {
                         if tx.send(chunk[..n].to_vec()).is_err() {
                             break;
@@ -467,28 +512,87 @@ impl RadioPlayer {
                 }
             }
         });
+        let c = Ctx { gen, station, play_cmd, rx, title, kbps_hint, said };
+        let mut sink = Sink { out: None, out_gen: crate::audioout::global().generation() };
+        let result = match aac {
+            Some(d) => self.aac_loop(&c, d, &mut sink, played),
+            None => self.mp3_loop(&c, &mut sink, played),
+        };
+        if let Some((mut out, _, _)) = sink.out.take() {
+            // a file that played to its end: let the sound command play what it has buffered before it is stopped
+            if result.is_ok() {
+                out.finish(Duration::from_secs(4), &|| self.current(gen));
+            } else {
+                out.stop();
+            }
+        }
+        result
+    }
+
+    /// Hands decoded sound (interleaved, `ch` channels) to the play command, starting it again when the format or the sound
+    /// output changed; updates the levels and the state.
+    fn emit(&self, c: &Ctx, sink: &mut Sink, pcm: &[i16], ch: u16, rate: u32, bitrate: u32, played: &mut bool) -> Result<(), StreamEnd> {
+        // the sound output changed (a monitor plugged in or moved, another output chosen): the player starts
+        // again on the new device, after a short gap
+        let sound_gen = crate::audioout::global().generation();
+        if sink.out.as_ref().is_none_or(|o| o.1 != rate || o.2 != ch) || sink.out_gen != sound_gen {
+            if let Some((mut old, _, _)) = sink.out.take() {
+                old.stop();
+            }
+            let out = crate::audiosink::open_output(crate::mixer::SourceKind::Radio, rate, ch, "radio", c.play_cmd).map_err(StreamEnd::Failed)?;
+            sink.out = Some((out, rate, ch));
+            sink.out_gen = sound_gen;
+        }
+        // the radio's own volume (linked to the master volume, the radio adds none of its own); IYAKKI's volume and mute are
+        // applied by the output, once
+        let own = if self.link().is_some() { 100 } else { self.volume() };
+        {
+            let fresh = band_levels(pcm, ch as usize, rate);
+            let mut l = self.inner.levels.lock().unwrap();
+            for (o, f) in l.iter_mut().zip(fresh) {
+                // rises at once, falls away smoothly
+                *o = f.max(*o * 0.86);
+            }
+        }
+        let (out, _, _) = sink.out.as_mut().expect("player started");
+        out.set_volume(own);
+        if let Err(said) = out.write(pcm) {
+            return Err(StreamEnd::Failed(player_stopped_message(&said)));
+        }
+        let t = c.title.lock().unwrap().clone();
+        let kbps = if bitrate > 0 { bitrate } else { c.kbps_hint };
+        *played = true;
+        self.set_state(c.gen, RadioState::Playing { station: c.station.name.clone(), title: t, kbps });
+        Ok(())
+    }
+
+    fn stopped_sending(c: &Ctx) -> String {
+        let said = c.said.lock().unwrap().clone();
+        if said.is_empty() { "the station stopped sending".into() } else { format!("the station stopped sending ({said})") }
+    }
+
+    fn mp3_loop(&self, c: &Ctx, sink: &mut Sink, played: &mut bool) -> Result<(), StreamEnd> {
+        let gen = c.gen;
         let mut dec = nanomp3::Decoder::new();
         let mut pcm = vec![0i16; nanomp3::MAX_SAMPLES_PER_FRAME];
         let mut buf: Vec<u8> = Vec::new();
         let mut eof = false;
-        let mut out: Option<(std::process::Child, std::process::ChildStdin, u32, u16)> = None;
-        let mut out_gen = crate::audioout::global().generation();
         let mut garbage = 0usize;
-        let result = loop {
+        loop {
             if !self.current(gen) {
-                break Err(StreamEnd::Stopped);
+                return Err(StreamEnd::Stopped);
             }
             // paused: nothing is decoded or sent to the speaker until it is resumed or stopped
             while self.inner.paused.load(Ordering::SeqCst) && self.current(gen) {
                 std::thread::sleep(Duration::from_millis(40));
             }
             if !self.current(gen) {
-                break Err(StreamEnd::Stopped);
+                return Err(StreamEnd::Stopped);
             }
             // wait only when there is too little to decode (a frame is trusted once the next one is seen), and
             // otherwise just take whatever has already arrived
             while !eof && buf.len() < 4096 {
-                match rx.recv_timeout(Duration::from_secs(15)) {
+                match c.rx.recv_timeout(Duration::from_secs(15)) {
                     Ok(b) => buf.extend_from_slice(&b),
                     Err(RecvTimeoutError::Timeout) => break,
                     Err(RecvTimeoutError::Disconnected) => eof = true,
@@ -498,17 +602,17 @@ impl RadioPlayer {
                 }
             }
             while !eof && buf.len() < 16 * 1024 {
-                match rx.try_recv() {
+                match c.rx.try_recv() {
                     Ok(b) => buf.extend_from_slice(&b),
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => eof = true,
                 }
             }
             if buf.is_empty() {
-                if eof && *played && station.url.starts_with("file://") {
-                    break Ok(());
+                if eof && *played && c.station.url.starts_with("file://") {
+                    return Ok(());
                 }
-                break if eof { Err(StreamEnd::Failed("the station stopped sending".into())) } else { Err(StreamEnd::Failed("no sound arrived for 15 seconds".into())) };
+                return Err(StreamEnd::Failed(if eof { Self::stopped_sending(c) } else { "no sound arrived for 15 seconds".into() }));
             }
             let (used, frame) = dec.decode(&buf, &mut pcm);
             buf.drain(..used.max(1).min(buf.len()));
@@ -516,74 +620,92 @@ impl RadioPlayer {
                 Ok(info) if info.samples_produced > 0 => {
                     garbage = 0;
                     let ch = info.channels.num() as u16;
-                    // the sound output changed (a monitor plugged in or moved, another output chosen): the player starts
-                    // again on the new device, after a short gap
-                    let sound_gen = crate::audioout::global().generation();
-                    if out.as_ref().is_none_or(|o| o.2 != info.sample_rate || o.3 != ch) || out_gen != sound_gen {
-                        if let Some((mut c, _, _, _)) = out.take() {
-                            crate::voice::kill_child(&mut c);
-                        }
-                        let mut child = crate::voice::spawn_player(play_cmd).map_err(StreamEnd::Failed)?;
-                        let mut stdin = child.stdin.take().ok_or_else(|| StreamEnd::Failed("the player has no input".into()))?;
-                        stdin.write_all(&wav_header(info.sample_rate, ch)).map_err(|_| StreamEnd::Failed("the player stopped".into()))?;
-                        out = Some((child, stdin, info.sample_rate, ch));
-                        out_gen = sound_gen;
-                    }
-                    // the radio's own volume, then IYAKKI's volume and mute (Settings -> Sound; HDMI has no hardware volume)
-                    // (linked to the master volume, the radio adds no attenuation of its own: the master is applied once, by the
-                    // softvol chain or by `gain()`)
-                    let own = if self.link().is_some() { 100 } else { self.volume() as i32 };
-                    let vol = own * crate::audioout::global().gain() as i32 / 100;
                     let n = info.samples_produced * ch as usize;
-                    {
-                        let fresh = band_levels(&pcm[..n], ch as usize, info.sample_rate);
-                        let mut l = self.inner.levels.lock().unwrap();
-                        for (o, f) in l.iter_mut().zip(fresh) {
-                            // rises at once, falls away smoothly
-                            *o = f.max(*o * 0.86);
-                        }
-                    }
-                    let mut bytes = Vec::with_capacity(n * 2);
-                    for s in &pcm[..n] {
-                        bytes.extend_from_slice(&((*s as i32 * vol / 100) as i16).to_le_bytes());
-                    }
-                    let (child, stdin, _, _) = out.as_mut().expect("player started");
-                    if stdin.write_all(&bytes).is_err() {
-                        // say what the player said: the output refusing the format is not a matter of Settings → Voice
-                        let said = crate::voice::player_failure(child);
-                        break Err(StreamEnd::Failed(player_stopped_message(&said)));
-                    }
-                    let t = title.lock().unwrap().clone();
-                    let kbps = if info.bitrate > 0 { info.bitrate } else { kbps_hint };
-                    *played = true;
-                    self.set_state(gen, RadioState::Playing { station: station.name.clone(), title: t, kbps });
+                    self.emit(c, sink, &pcm[..n], ch, info.sample_rate, info.bitrate, played)?;
                 }
                 Ok(_) => {}
                 Err(_) => {
                     // skipped bytes that were not audio; a stream that is all junk is not worth waiting for
                     garbage += used;
                     if garbage > 256 * 1024 {
-                        break Err(StreamEnd::Failed("this does not look like an MP3 stream".into()));
+                        return Err(StreamEnd::Failed("this does not look like an MP3 stream".into()));
                     }
                     if eof && buf.len() < 4 {
-                        break Err(StreamEnd::Failed("the station stopped sending".into()));
+                        return Err(StreamEnd::Failed(Self::stopped_sending(c)));
                     }
                 }
             }
-        };
-        if let Some((mut c, stdin, _, _)) = out.take() {
-            drop(stdin);
-            // a file that played to its end: let the sound command play what it has buffered before it is stopped
-            if result.is_ok() {
-                let t0 = std::time::Instant::now();
-                while t0.elapsed() < Duration::from_secs(4) && self.current(gen) && matches!(c.try_wait(), Ok(None)) {
-                    std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// AAC: the stream goes to the decoder (the audio add-on) and its sound comes back to be played.
+    fn aac_loop(&self, c: &Ctx, mut dec: Box<dyn AacDecoder>, sink: &mut Sink, played: &mut bool) -> Result<(), StreamEnd> {
+        let mut pcm = vec![0i16; 8192];
+        let mut pending: Option<Vec<u8>> = None;
+        let mut eof = false;
+        let mut last_sound = std::time::Instant::now();
+        loop {
+            if !self.current(c.gen) {
+                return Err(StreamEnd::Stopped);
+            }
+            if self.inner.paused.load(Ordering::SeqCst) {
+                while self.inner.paused.load(Ordering::SeqCst) && self.current(c.gen) {
+                    std::thread::sleep(Duration::from_millis(40));
+                }
+                last_sound = std::time::Instant::now();
+                continue;
+            }
+            if !eof {
+                if pending.is_none() {
+                    match c.rx.try_recv() {
+                        Ok(b) => pending = Some(b),
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            eof = true;
+                            dec.finish();
+                        }
+                    }
+                }
+                if let Some(b) = pending.take() {
+                    if !dec.feed(&b).map_err(StreamEnd::Failed)? {
+                        pending = Some(b);
+                    }
                 }
             }
-            crate::voice::kill_child(&mut c);
+            match dec.read(&mut pcm, Duration::from_millis(20)).map_err(StreamEnd::Failed)? {
+                Pcm::Samples(n) => {
+                    last_sound = std::time::Instant::now();
+                    let (rate, ch) = dec.format();
+                    let n = n - n % ch.max(1);
+                    if n > 0 {
+                        self.emit(c, sink, &pcm[..n], ch as u16, rate, 0, played)?;
+                    }
+                }
+                Pcm::Pending => {
+                    if last_sound.elapsed() > Duration::from_secs(15) {
+                        return Err(StreamEnd::Failed("no sound arrived for 15 seconds".into()));
+                    }
+                }
+                Pcm::End => return Err(StreamEnd::Failed(Self::stopped_sending(c))),
+            }
         }
-        result
     }
+}
+
+struct Ctx<'a> {
+    gen: u64,
+    station: &'a Station,
+    play_cmd: &'a str,
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    title: Arc<Mutex<String>>,
+    kbps_hint: u32,
+    said: Arc<Mutex<String>>,
+}
+
+/// The sound output and what it was started for: (output, rate, channels).
+struct Sink {
+    out: Option<(crate::audiosink::Output, u32, u16)>,
+    out_gen: u64,
 }
 
 /// What the radio tells when the sound player ends while it plays: the player's own words when it had any.
@@ -864,6 +986,7 @@ mod tests {
             ("https://b.example.org/real.pls", Box::new(|_| Ok((200, vec![("content-type".into(), "audio/x-scpls".into())], b"[playlist]\nFile1=http://c.example.org:8000/s\n".to_vec())))),
             ("http://c.example.org:8000/s", ok_mp3(40)),
             ("https://aac.example.org/s", Box::new(|_| Ok((200, vec![("content-type".into(), "audio/aacp".into())], vec![0; 100])))),
+            ("https://ogg.example.org/s", Box::new(|_| Ok((200, vec![("content-type".into(), "application/ogg".into())], vec![0; 100])))),
             ("https://junk.example.org/s", Box::new(|_| Ok((200, vec![("content-type".into(), "audio/mpeg".into())], vec![7u8; 400 * 1024])))),
             ("https://evil.example.org/s", ok_mp3(40)),
             ("https://sneaky.example.org/go", Box::new(|_| Ok((302, vec![("location".into(), "https://evil.example.org/s".into())], vec![])))),
@@ -873,9 +996,13 @@ mod tests {
         wait_for(&p, |s| matches!(s, RadioState::Playing { .. }));
         p.stop();
         assert_eq!(f.asked.lock().unwrap()[..3].to_vec(), vec!["https://a.example.org/go", "https://b.example.org/real.pls", "http://c.example.org:8000/s"]);
+        p.set_aac_factory(Arc::new(|| Err(audiofmt::NEEDS_AUDIO_ADDON.to_string())));
         p.play(&st("https://aac.example.org/s"), allow_all(), "tee /dev/null");
         let s = wait_for(&p, |s| matches!(s, RadioState::Failed { .. }));
-        assert!(matches!(&s, RadioState::Failed { why, .. } if why.contains("only MP3")), "{s:?}");
+        assert!(matches!(&s, RadioState::Failed { why, .. } if audiofmt::needs_addon(why)), "AAC without the add-on says so: {s:?}");
+        p.play(&st("https://ogg.example.org/s"), allow_all(), "tee /dev/null");
+        let s = wait_for(&p, |s| matches!(s, RadioState::Failed { why, .. } if why.contains("ogg")));
+        assert!(matches!(&s, RadioState::Failed { why, .. } if why.contains("only MP3 and AAC")), "{s:?}");
         p.play(&st("https://junk.example.org/s"), allow_all(), "tee /dev/null");
         let s = wait_for(&p, |s| matches!(s, RadioState::Failed { .. }));
         assert!(matches!(&s, RadioState::Failed { why, .. } if why.contains("does not look like an MP3")), "{s:?}");
@@ -886,6 +1013,166 @@ mod tests {
         assert!(matches!(&s, RadioState::Failed { why, .. } if why.contains("may not reach evil.example.org")), "{s:?}");
         assert!(!f.asked.lock().unwrap().iter().any(|u| u.contains("evil")), "never contacted");
         let _ = d;
+    }
+
+    /// A stand-in for the audio add-on: remembers what it was fed and answers every feed with 1024 samples of a constant.
+    struct FakeDec {
+        fed: Arc<Mutex<Vec<u8>>>,
+        queue: usize,
+        done: bool,
+    }
+    impl AacDecoder for FakeDec {
+        fn feed(&mut self, bytes: &[u8]) -> Result<bool, String> {
+            self.fed.lock().unwrap().extend_from_slice(bytes);
+            self.queue += 1024;
+            Ok(true)
+        }
+        fn finish(&mut self) {
+            self.done = true;
+        }
+        fn read(&mut self, out: &mut [i16], wait: Duration) -> Result<Pcm, String> {
+            if self.queue > 0 {
+                let n = self.queue.min(out.len());
+                out[..n].fill(1000);
+                self.queue -= n;
+                Ok(Pcm::Samples(n))
+            } else if self.done {
+                Ok(Pcm::End)
+            } else {
+                std::thread::sleep(wait.min(Duration::from_millis(5)));
+                Ok(Pcm::Pending)
+            }
+        }
+        fn format(&self) -> (u32, usize) {
+            (22050, 1)
+        }
+    }
+
+    fn with_fake_decoder(p: &RadioPlayer) -> Arc<Mutex<Vec<u8>>> {
+        let fed = Arc::new(Mutex::new(Vec::new()));
+        let f2 = fed.clone();
+        p.set_aac_factory(Arc::new(move || Ok(Box::new(FakeDec { fed: f2.clone(), queue: 0, done: false }) as Box<dyn AacDecoder>)));
+        fed
+    }
+
+    fn adts_stream(frames: usize) -> Vec<u8> {
+        (0..frames).flat_map(|_| crate::audiofmt::tests::adts_frame(200)).collect()
+    }
+
+    #[test]
+    fn an_aac_stream_goes_to_the_decoder_whatever_its_content_type_says_and_its_sound_is_played() {
+        let d = tmp("aac");
+        let out = d.join("out.wav");
+        let body = adts_stream(30);
+        // the same 30 frames over and over, slowly, with a content type that claims MP3
+        struct Loop(Vec<u8>, usize);
+        impl Read for Loop {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                std::thread::sleep(Duration::from_millis(5));
+                let n = buf.len().min(200).min(self.0.len() - self.1);
+                buf[..n].copy_from_slice(&self.0[self.1..self.1 + n]);
+                self.1 = (self.1 + n) % self.0.len();
+                Ok(n)
+            }
+        }
+        struct LoopStreamer(Vec<u8>);
+        impl Streamer for LoopStreamer {
+            fn open(&self, _u: &str, _h: &[(String, String)]) -> Result<StreamHead, String> {
+                Ok(StreamHead { status: 200, headers: vec![("content-type".into(), "audio/mpeg".into()), ("icy-br".into(), "48".into())], body: Box::new(Loop(self.0.clone(), 0)) })
+            }
+        }
+        let p = RadioPlayer::default();
+        p.set_streamer(Arc::new(LoopStreamer(body.clone())));
+        let fed = with_fake_decoder(&p);
+        p.play(&st("http://r.example.org/hello"), allow_all(), &format!("tee {}", out.display()));
+        let s = wait_for(&p, |s| matches!(s, RadioState::Playing { .. }));
+        assert!(matches!(&s, RadioState::Playing { kbps: 48, .. }), "{s:?}");
+        std::thread::sleep(Duration::from_millis(150));
+        p.stop();
+        assert_eq!(&fed.lock().unwrap()[..body.len()], &body[..], "the decoder got the stream untouched, from its first byte");
+        let wav = std::fs::read(&out).unwrap();
+        assert_eq!(u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]), 22_050);
+        assert_eq!(u16::from_le_bytes([wav[22], wav[23]]), 1);
+        assert!(wav.len() > 44 + 2048 && wav[44..].chunks_exact(2).any(|c| i16::from_le_bytes([c[0], c[1]]) != 0), "sound followed the header");
+    }
+
+    fn hls_world(codec_type: u8, es: impl Fn(u64) -> Vec<u8> + Send + Sync + 'static) -> Arc<crate::hls::testkit::FakeNet> {
+        use crate::hls::testkit::*;
+        let base = "https://cdn.example.org/air/";
+        let net = fake_net(vec![]);
+        {
+            let mut t = net.routes.lock().unwrap();
+            t.insert(format!("{base}master.m3u8"), Box::new(|_| Ok((200, vec![("content-type".into(), "application/vnd.apple.mpegurl".into())], b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=64000,CODECS=\"mp4a.40.2\"\nchunks.m3u8\n".to_vec()))));
+            t.insert(format!("{base}chunks.m3u8"), Box::new(|n| Ok((200, vec![], live_playlist(0, if n < 2 { 4 } else { 6 }, "").into_bytes()))));
+            let es = Arc::new(es);
+            for i in 0..8u64 {
+                let es = es.clone();
+                t.insert(format!("{base}seg{i}.ts"), Box::new(move |_| Ok((200, vec![], build_ts(codec_type, &es(i))))));
+            }
+        }
+        net
+    }
+
+    #[test]
+    fn an_hls_station_with_mp3_segments_plays_without_the_add_on_and_follows_the_live_edge() {
+        let d = tmp("hls-mp3");
+        let out = d.join("out.wav");
+        let net = hls_world(0x03, |_| silence(4));
+        let p = RadioPlayer::default();
+        p.set_streamer(net.clone());
+        p.set_hls_time_scale(2000);
+        p.set_aac_factory(Arc::new(|| Err(audiofmt::NEEDS_AUDIO_ADDON.to_string())));
+        p.play(&st("https://cdn.example.org/air/master.m3u8"), allow_all(), &format!("tee {}", out.display()));
+        wait_for(&p, |s| matches!(s, RadioState::Playing { .. }));
+        wait_for(&p, |_| net.asked.lock().unwrap().iter().any(|u| u.ends_with("seg4.ts")));
+        std::thread::sleep(Duration::from_millis(100));
+        p.stop();
+        let asked = net.asked.lock().unwrap().clone();
+        let ts: Vec<&str> = asked.iter().filter(|u| u.ends_with(".ts")).map(|u| u.rsplit('/').next().unwrap()).collect();
+        assert_eq!(&ts[..3], ["seg1.ts", "seg2.ts", "seg3.ts"], "three back from the live edge, once each: {ts:?}");
+        assert!(ts.contains(&"seg4.ts"));
+        let wav = std::fs::read(&out).unwrap();
+        assert_eq!(u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]), 44_100);
+        assert!(wav.len() > 44 + 4608);
+    }
+
+    #[test]
+    fn an_hls_station_with_aac_segments_needs_the_add_on_and_then_feeds_it_plain_adts() {
+        let net = hls_world(0x0F, |i| (0..10 + i as usize).flat_map(|_| crate::audiofmt::tests::adts_frame(150)).collect());
+        let p = RadioPlayer::default();
+        p.set_streamer(net.clone());
+        p.set_hls_time_scale(2000);
+        p.set_aac_factory(Arc::new(|| Err(audiofmt::NEEDS_AUDIO_ADDON.to_string())));
+        p.play(&st("https://cdn.example.org/air/master.m3u8"), allow_all(), "tee /dev/null");
+        let s = wait_for(&p, |s| matches!(s, RadioState::Failed { .. }));
+        assert!(matches!(&s, RadioState::Failed { why, .. } if audiofmt::needs_addon(why)), "{s:?}");
+        let fed = with_fake_decoder(&p);
+        p.play(&st("https://cdn.example.org/air/master.m3u8"), allow_all(), "tee /dev/null");
+        wait_for(&p, |s| matches!(s, RadioState::Playing { .. }));
+        wait_for(&p, |_| fed.lock().unwrap().len() >= 150 * 10 * 3);
+        p.stop();
+        let got = fed.lock().unwrap().clone();
+        assert!(got.chunks(150).take(30).all(|c| c.len() < 150 || c[0] == 0xFF && c[1] == 0xF1), "ADTS frames, without the transport stream around them");
+    }
+
+    #[test]
+    fn hls_stations_obey_the_host_policy_and_refuse_encryption() {
+        use crate::hls::testkit::*;
+        let net = hls_world(0x03, |_| silence(2));
+        let p = RadioPlayer::default();
+        p.set_streamer(net.clone());
+        p.set_hls_time_scale(2000);
+        // the playlist host is allowed, the segments' host is the same: only the master host is let through, then none
+        let only: Allow = Arc::new(|h| h == "cdn.example.org");
+        net.routes.lock().unwrap().insert("https://cdn.example.org/air/chunks.m3u8".into(), ok(b"#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nhttps://tracker.example.net/seg.ts\n".to_vec()));
+        p.play(&st("https://cdn.example.org/air/master.m3u8"), only, "tee /dev/null");
+        let s = wait_for(&p, |s| matches!(s, RadioState::Failed { .. }));
+        assert!(matches!(&s, RadioState::Failed { why, .. } if why.contains("may not reach tracker.example.net")), "{s:?}");
+        assert!(!net.asked.lock().unwrap().iter().any(|u| u.contains("tracker")));
+        net.routes.lock().unwrap().insert("https://cdn.example.org/air/chunks.m3u8".into(), ok(live_playlist(0, 2, "#EXT-X-KEY:METHOD=AES-128,URI=\"k\"\n").into_bytes()));
+        p.play(&st("https://cdn.example.org/air/master.m3u8"), allow_all(), "tee /dev/null");
+        let s = wait_for(&p, |s| matches!(s, RadioState::Failed { .. }));
+        assert!(matches!(&s, RadioState::Failed { why, .. } if why.contains("encrypted")), "{s:?}");
     }
 
     #[test]
@@ -922,6 +1209,9 @@ mod tests {
         let wav = std::fs::read(&out).unwrap();
         let loud = wav[44..].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs()).max().unwrap_or(0);
         eprintln!("{} bytes written, loudest sample {loud}", wav.len());
+        if let Ok(keep) = std::env::var("IYAKKI_RADIO_KEEP_WAV") {
+            let _ = std::fs::write(keep, &wav);
+        }
         assert!(loud > 500, "there is real sound");
     }
 }

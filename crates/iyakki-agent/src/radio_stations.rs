@@ -1,4 +1,4 @@
-//! Stations to start from, by language: (name, MP3 stream address). Each answered with MP3 audio over HTTPS when this list was made (11 October 2026), the best known ones among the most listened to on the public Radio Browser directory. Stations move and disappear, so a failing one says why and the person can add their own.
+//! Stations to start from, by language: (name, stream address). Most answered with MP3 audio over HTTPS when this list was made (24 October 2026), the best known ones among the most listened to on the public Radio Browser directory. A few send AAC, AAC+ or HLS; `needs_addon` says which, and they play once the person has installed the audio add-on. Stations move and disappear, so a failing one says why and the person can add their own.
 
 use crate::radio::Language;
 
@@ -9,6 +9,17 @@ pub const LANGUAGES: &[Language] = &[
         ("80’s Tamil Hits", "https://stream.zeno.fm/48w230kx8vzuv.aac"),
         ("90’s Tamil Melodies", "https://stream.zeno.fm/tqnws2eafwzuv.aac"),
         ("Kalai Fm-TAMIL", "https://stream.zenolive.com/2vghnwshsqzuv.aac"),
+        ("Big FM Tamil", "https://stream.zeno.fm/r2gn1pgm4qruv"),
+        ("Tamil 80's Radio", "https://psrlive2.listenon.in/80?station=tamil80shitsradio"),
+        ("Vijay FM", "https://vijayfm-prabak78.radioca.st/stream"),
+        ("Mohan Radio", "https://psrlive4.listenon.in/mohan?station=mohanradio"),
+        ("Tamil Panpalai Gold", "https://tamilpanpalai.radioca.st/ind"),
+        ("Tamil Old Hits FM", "https://a9oldhits-a9media.radioca.st/stream"),
+        ("Vasantham FM", "https://cp12.serverse.com/proxy/vasanthamfm?mp=/stream"),
+        ("Vaigai FM", "https://cast1.my-control-panel.com/proxy/geethan3/stream"),
+        ("Sahara FM Tamil", "https://azuracast.vibesounds.in:8000/radio.mp3"),
+        ("Radio Paramankurichi", "https://vpmurugun.radioca.st/stream"),
+        ("Shiva Tattvam (devotional)", "https://radio.shaivam.org/listen/shiva-tattvam/radio.mp3"),
     ] },
     Language { name: "Telugu", stations: &[
         ("SVBC TTD Radio", "https://radio.mslivecdn.com:6278/stream"),
@@ -524,3 +535,13 @@ pub const LANGUAGES: &[Language] = &[
         ("Amapiano FM", "https://stream.zeno.fm/xs6zeac1ts8uv"),
     ] },
 ];
+
+/// Stations whose address does not say that they need the audio add-on (AAC+ over plain HTTP, HLS lists).
+const ADDON_URLS: &[&str] = &[];
+
+/// Whether a station of this list sends AAC (or HLS, whose audio is mostly AAC) and so needs the audio add-on. Addresses the
+/// person added are not asked: the player finds out by looking at the stream.
+pub fn needs_addon(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or("");
+    ADDON_URLS.contains(&url) || path.ends_with(".aac") || path.ends_with(".aacp") || path.ends_with(".m3u8")
+}
