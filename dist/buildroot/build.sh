@@ -5,7 +5,8 @@
 #   macweb: x86_64 only, OPTIONAL: mac + web in one image (Intel Macs that should run YouTube and modern sites). Output in
 #        target/buildroot-macweb. Honours WEB_H264=1 and WEB_IRIS=1 like web, and WEB_CROCUS=1 (Mesa crocus for Intel gen4-7, e.g. Haswell).
 #   web: x86_64 only, OPTIONAL: adds the full web engine (WPE WebKit + the iyakki-webview-helper, Mesa, GStreamer).
-#        Output in target/buildroot-web. WEB_H264=1 also ships H.264/AAC. See docs/FULL-BROWSER.md.
+#        Output in target/buildroot-web. WEB_H264=1 also ships H.264/AAC. WEB_AV_ADDON=0 leaves out the inactive audio and video bridge
+#        (default 1: only the LGPL gst-libav plugin, no FFmpeg; the person downloads the libraries). See docs/FULL-BROWSER.md.
 #   WITH_FFMPEG=1 (any variant): also build ffmpeg + ffprobe (LGPL, no ffplay) into the image: configs/iyakki_media.fragment.
 #   x86_64 (default): BIOS+UEFI hybrid ISO.  aarch64: UEFI disk image for VMs on Apple Silicon Macs / ARM64 boards.
 # Needs: rustup + musl-tools (static iyakki), and Buildroot's host deps (see its manual).
@@ -46,8 +47,11 @@ if [ "$VARIANT" = "web" ] || [ "$VARIANT" = "macweb" ]; then
   # crocus (Intel gen4-7: Haswell Macs) needs the same precompiled-compiler pieces as iris, so WEB_CROCUS=1 implies the iris fragment
   if [ "${WEB_IRIS:-0}" = 1 ] || [ "${WEB_CROCUS:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_iris.fragment" >> "$OUT/defconfig"; fi
   if [ "${WEB_CROCUS:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_crocus.fragment" >> "$OUT/defconfig"; fi
-  if [ "${WEB_H264:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_h264.fragment" >> "$OUT/defconfig"; fi
+  if [ "${WEB_H264:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_h264.fragment" >> "$OUT/defconfig"
+  elif [ "${WEB_AV_ADDON:-1}" = 1 ]; then cat "$HERE/configs/iyakki_web_av_addon.fragment" >> "$OUT/defconfig"; fi
   export IYAKKI_WEB_H264="${WEB_H264:-0}"
+  # the inactive audio and video bridge (default on; WEB_H264=1 ships the whole codec instead)
+  if [ "${WEB_H264:-0}" != 1 ] && [ "${WEB_AV_ADDON:-1}" = 1 ]; then export IYAKKI_WEB_AV_ADDON=1; else export IYAKKI_WEB_AV_ADDON=0; fi
   if [ "${WEB_IRIS:-0}" = 1 ] || [ "${WEB_CROCUS:-0}" = 1 ]; then export IYAKKI_WEB_INTEL_GL=1; else export IYAKKI_WEB_INTEL_GL=0; fi
 fi
 # OPTIONAL, any variant: ffmpeg and ffprobe (LGPL build) for IYAKKI's own media player. docs/MEDIA-PLAYER.md.

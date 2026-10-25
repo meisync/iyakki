@@ -88,8 +88,9 @@ expect "package switched off" "FULL: package(s) switched off" web
 cp "$R/configs/iyakki_web.fragment" "$W/f"; bash "$CH" web --record >/dev/null
 sed -i 's/^BR2_TOOLCHAIN_BUILDROOT_CXX=y/# BR2_TOOLCHAIN_BUILDROOT_CXX is not set/' "$R/configs/iyakki_web.fragment"
 expect "C++ toolchain option changed" "FULL: toolchain" web
-reset_tree; bash "$CH" web --adopt >/dev/null
-WEB_H264=1 expect "H.264 switched on (new fragment)" "PACKAGES" web
+reset_tree; WEB_AV_ADDON=0 bash "$CH" web --adopt >/dev/null
+WEB_AV_ADDON=0 WEB_H264=1 expect "H.264 switched on (new fragment)" "PACKAGES" web
+expect "audio and video bridge switched on (default fragment)" "PACKAGES" web
 echo "# x" >> "$R/external.mk"
 expect "external.mk edited" "FULL: external.mk" web
 echo "# x" >> "$R/external.mk" # keep dirty

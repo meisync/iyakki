@@ -167,6 +167,10 @@ impl Fake {
                     self.navigate_to(&url, true);
                     self.audio = true;
                     self.send(FromHelper::AudioPlaying(true));
+                } else if url == "fake://needs-av" {
+                    // a page whose H.264 video cannot be decoded here (the web engine's media probe reports it)
+                    self.navigate_to(&url, true);
+                    self.send(FromHelper::MediaUnsupported("video".into()));
                 } else if url == "fake://clipboard" {
                     self.send(FromHelper::Clipboard("copied text".into()));
                 } else {

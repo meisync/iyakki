@@ -47,6 +47,8 @@ pub enum Note {
     Trouble(String),
     /// The sound doctor's short note for the browser bar (`Some`), or the end of it (`None`).
     Sound(Option<String>),
+    /// The page tried to play media without a decoder here (the helper's `MediaUnsupported`): `video`, `audio` or `both`.
+    NeedsAv(String),
 }
 
 /// What a view needs the shell to do about a change (see [`Full::redraw_kind`]).
@@ -394,6 +396,10 @@ impl Full {
                     self.script_results.push((id, ok, json));
                 }
                 WvEvent::AudioPlaying(on) => self.sound.set_playing(on),
+                WvEvent::MediaUnsupported(w) => {
+                    self.notes.push(Note::NeedsAv(w));
+                    self.redraw = true;
+                }
                 WvEvent::Crashed(r) => self.notes.push(Note::Trouble(r)),
                 WvEvent::Log(l) => {
                     self.sound.on_log(&l);

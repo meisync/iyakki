@@ -98,7 +98,7 @@ pub const FULL_ENGINE_HELP_HTML: &str = "<html><head><title>The full web engine<
 </ul>\
 <h2>Good to know</h2>\
 <ul>\
-<li>YouTube plays VP9 and Opus on the web images without H.264. Build with WEB_H264=1 for H.264 and AAC.</li>\
+<li>YouTube plays VP9 and Opus on the web images without H.264. For H.264 and AAC (TikTok and similar) the BROWSER offers the optional audio and video add-on, downloaded on your click.</li>\
 <li>Sign-in and video need the clock to be right: a wrong date breaks HTTPS.</li>\
 <li>Details: docs/FULL-BROWSER.md and docs/YOUTUBE-ON-IYAKKI.md in the source tree.</li>\
 </ul></body></html>";
@@ -384,6 +384,12 @@ pub fn helper_env(profile: &Path) -> Option<Vec<(String, String)>> {
         v.extend(web_audio_env(&asound, &dir.join("web-alsa.conf")));
     }
     v.extend(web_autoplay_env(&asound));
+    // the audio and video add-on (H.264 / AAC), only when the person has installed it: avaddon.rs
+    if let Some(data) = crate::avaddon::data_of_profile(profile) {
+        let lib = crate::avaddon::lib_dir(data);
+        let addon = crate::avaddon::detect(data);
+        crate::avaddon::merge_env(&mut v, crate::avaddon::engine_env(&addon, Path::new(crate::avaddon::PLUGIN_DIR), &lib, profile, &crate::avaddon::machine_name()));
+    }
     Some(v)
 }
 

@@ -218,6 +218,7 @@ composites it into the same buffers (GStreamer), so nothing special is needed. U
 | 0x8C | ScriptResult | `u32 id`, `bool ok`, `str json` (protocol 1.1) |
 | 0x8D | Fullscreen | `bool on` (optional, protocol 1.1) |
 | 0x8E | AudioPlaying | `bool on` (optional, protocol 1.1) |
+| 0x8F | MediaUnsupported | `str need` (optional, protocol 1.1) |
 
 * **Ready**: engine name and version for "about" displays (`WPE WebKit` `2.46.3`). Sent once, after Hello.
 * **Title**: the document title; sent when it changes (an empty title is sent as empty).
@@ -235,6 +236,11 @@ composites it into the same buffers (GStreamer), so nothing special is needed. U
   processes and, when the page is loud but none runs for about 3 s, sends **Script** that pauses and plays the playing media elements again
   (so the engine creates its audio sink again); no new request message is needed. A helper that never sends it just gets no doctor. Old shells skip the type (section 2).
   The helper should let GStreamer errors and warnings reach its standard error (`GST_DEBUG=*:1,alsasink:4,autoaudiosink:4` unless set), which the shell logs.
+* **MediaUnsupported** (optional): the page tried to play media the engine has no decoder for and the engine's own `canPlayType` agrees
+  (`need` is `video` for H.264, `audio` for AAC, `both`). The helper injects `media-probe.js` (user script, all frames, document start), which listens for
+  media `error` events (SRC_NOT_SUPPORTED, DECODE), `play()` rejections with `NotSupportedError`, `addSourceBuffer` failures and a video that has
+  metadata but no picture size, and posts to the `iyakkiMedia` message handler; the helper forwards it. Sent at most once per page load and frame.
+  The shell shows one calm bar offering the audio and video add-on (`docs/FULL-BROWSER.md`). An older shell skips the type.
 * **Fullscreen**: the page entered (`on` true) or left (false) DOM fullscreen (a player's button, the F key, `requestFullscreen()`, leaving
   by Esc, by navigating or by closing). The helper **must** install the engine's fullscreen hook (WPE: `wpe_view_backend_set_fullscreen_handler`),
   because without one the engine fails the request and the page drops back out at once. While on, the shell shows the page over its whole

@@ -165,6 +165,24 @@ fn the_page_saying_it_plays_audio_reaches_the_shell_and_a_navigation_ends_it() {
 }
 
 #[test]
+fn a_page_whose_video_cannot_be_decoded_reaches_the_shell_as_a_media_event() {
+    let mut v = WebView::start(config(&["--static"], 200, 100)).unwrap();
+    v.send(ToHelper::Navigate("fake://needs-av".into()));
+    until(&mut v, 10, |_, e| e.contains(&Event::MediaUnsupported("video".into())));
+}
+
+#[test]
+fn the_helper_source_forwards_only_the_three_media_words_from_the_probe() {
+    // helper.c is built by Buildroot (WPE headers are not here): check by reading that the probe and the guard are wired in
+    let src = include_str!("../../../dist/webview/wpe-helper/helper.c");
+    let mk = include_str!("../../../dist/webview/wpe-helper/Makefile");
+    for want in ["iyakkiMedia", "F_MEDIA_UNSUPPORTED", "#include \"media-probe.h\"", "!strcmp(t, \"video\")", "!strcmp(t, \"audio\")", "!strcmp(t, \"both\")"] {
+        assert!(src.contains(want), "helper.c lacks {want}");
+    }
+    assert!(mk.contains("media-probe.h: media-probe.js"));
+}
+
+#[test]
 fn a_crash_is_detected_once_and_a_restart_returns_to_the_last_good_page() {
     let mut v = WebView::start(config(&["--static"], 300, 200)).unwrap();
     v.send(ToHelper::Navigate("https://good.example/page".into()));

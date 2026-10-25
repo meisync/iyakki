@@ -448,10 +448,12 @@ static void on_progress(void) {
     send_bb(F_LOADING, webkit_web_view_is_loading(G.view) ? 1 : 0, p > 100 ? 100 : p);
 }
 
+static char media_need_sent[8];   /* the last MediaUnsupported sent for this page ("" before any) */
+
 static void on_load_changed(WebKitWebView *v, WebKitLoadEvent e, gpointer ud) {
     (void)v; (void)ud;
     if (e == WEBKIT_LOAD_FINISHED) send_bb(F_LOADING, 0, 100);
-    else if (e == WEBKIT_LOAD_STARTED) send_bb(F_LOADING, 1, 0);
+    else if (e == WEBKIT_LOAD_STARTED) { media_need_sent[0] = 0; send_bb(F_LOADING, 1, 0); }
     send_history();
 }
 
@@ -630,6 +632,25 @@ static void on_clip_message(WebKitUserContentManager *m, JSCValue *val, gpointer
     if (!val || !jsc_value_is_string(val)) return;
     char *t = jsc_value_to_string(val);
     if (t && *t) send_str_msg(F_CLIPBOARD, t);
+    g_free(t);
+}
+
+/* ---------------------------------------------------------------------------------------------- media probe
+ * media-probe.js (a user script, built into media-probe.h by the Makefile) posts "video", "audio" or "both" to the iyakkiMedia message
+ * handler when a page's media fails for want of an H.264 / AAC decoder and the engine's canPlayType agrees. Only those three words are
+ * passed on, once per page load and word (the page is untrusted: nothing else it posts reaches the shell). */
+static const char MEDIA_JS[] =
+#include "media-probe.h"
+;
+
+static void on_media_message(WebKitUserContentManager *m, JSCValue *val, gpointer ud) {
+    (void)m; (void)ud;
+    if (!val || !jsc_value_is_string(val)) return;
+    char *t = jsc_value_to_string(val);
+    if (t && (!strcmp(t, "video") || !strcmp(t, "audio") || !strcmp(t, "both")) && strcmp(t, media_need_sent)) {
+        snprintf(media_need_sent, sizeof media_need_sent, "%s", t);
+        send_str_msg(F_MEDIA_UNSUPPORTED, t);
+    }
     g_free(t);
 }
 
@@ -991,6 +1012,11 @@ static void setup_engine(void) {
     WebKitUserScript *us = webkit_user_script_new(CLIP_JS, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
     webkit_user_content_manager_add_script(ucm, us);
     webkit_user_script_unref(us);
+    webkit_user_content_manager_register_script_message_handler(ucm, "iyakkiMedia", NULL);
+    g_signal_connect(ucm, "script-message-received::iyakkiMedia", G_CALLBACK(on_media_message), NULL);
+    WebKitUserScript *mu = webkit_user_script_new(MEDIA_JS, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
+    webkit_user_content_manager_add_script(ucm, mu);
+    webkit_user_script_unref(mu);
     /* The browser tile is a person's browser, not a kiosk of unattended pages: sound and video may start without a gesture, as in
      * window mode. Without this WebKit answers play() with NotAllowedError for any video that has sound. */
     /* IYAKKI_WEBVIEW_AUTOPLAY: allow (default), muted (only media without sound starts by itself) or deny (a click starts everything).

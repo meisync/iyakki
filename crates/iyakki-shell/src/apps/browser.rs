@@ -11,6 +11,7 @@ use std::sync::Arc;
 use iyakki_web::doc::{Control, ControlKind, Doc};
 use iyakki_web::{form_urlencode, Jar, Loaded, Request, Url};
 
+use super::browser_av;
 use super::browser_assist;
 use super::browser_block;
 use super::browser_config::{self, BrowserConfig};
@@ -436,6 +437,12 @@ pub struct BrowserApp {
     full_declined: bool,
     /// The full engine (helper program or cage/cog) is installed; false makes heavy sites show the "needs the full web engine" banner.
     engine_offered: bool,
+    /// The bar over a video the engine cannot decode (H.264 / AAC) and the choices about it (browser_av.rs).
+    av: browser_av::AvState,
+    /// Another tile the shell should open next (Install in the audio and video bar opens Store -> Setup).
+    av_request: Option<(String, String)>,
+    /// When the add-on's libraries were last looked for while waiting for an install.
+    av_checked: Option<std::time::Instant>,
     /// Where the page area was drawn last and the interface scale then (the engine starts at that size).
     view_rect: R,
     ui_scale: f32,
@@ -518,6 +525,9 @@ impl BrowserApp {
             auto_full: !cfg!(test),
             full_declined: false,
             engine_offered: iyakki_agent::webengine::offered(),
+            av: browser_av::AvState::new(browser_av::load(cx)),
+            av_request: None,
+            av_checked: None,
             view_rect: R::new(0.0, 0.0, 1280.0, 600.0),
             ui_scale: 1.0,
             snap_key: String::new(),
@@ -540,6 +550,7 @@ impl BrowserApp {
     fn take_state(&mut self) -> TabState {
         self.clear_selection();
         self.assist = None;
+        self.av.bar = None;
         let mut full = self.full.take();
         if let Some(f) = full.as_mut() {
             f.set_visible(false);
@@ -2310,15 +2321,10 @@ impl BrowserApp {
         }
     }
 
-    fn start_embedded(&mut self, helper: std::path::PathBuf, url: String, host: String, cx: &AppCx) {
-        let profile = match iyakki_agent::webengine::prepare_profile(cx.services.dir(), &cx.session.user) {
-            Ok(p) => p,
-            Err(e) => {
-                self.status = Some((format!("The full web engine's profile folder could not be made: {e}"), false));
-                return;
-            }
-        };
-        let start = Start {
+    /// What the engine is started with: the person's profile folder, the engine's environment, the page area's size and the account's hosts.
+    fn embedded_start(&self, helper: std::path::PathBuf, cx: &AppCx) -> Result<Start, String> {
+        let profile = iyakki_agent::webengine::prepare_profile(cx.services.dir(), &cx.session.user)?;
+        Ok(Start {
             env: iyakki_agent::webengine::helper_env(&profile).map(|mut e| {
                 e.extend(browser_block::prepare_full_engine(cx, &profile));
                 e
@@ -2331,6 +2337,16 @@ impl BrowserApp {
             allow_hosts: cx.session.policy.net_hosts.clone(),
             user_agent: iyakki_agent::webengine::user_agent_suffix(),
             locale: String::new(),
+        })
+    }
+
+    fn start_embedded(&mut self, helper: std::path::PathBuf, url: String, host: String, cx: &AppCx) {
+        let start = match self.embedded_start(helper, cx) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = Some((format!("The full web engine's profile folder could not be made: {e}"), false));
+                return;
+            }
         };
         match Full::start(start) {
             Ok(mut f) => {
@@ -2486,11 +2502,75 @@ impl BrowserApp {
                 break;
             }
         }
+        self.av_poll(cx);
+    }
+
+    /// The helper reported media without a decoder (`word`: video, audio or both) on the engine's page: offer the add-on, once per site.
+    fn offer_av(&mut self, word: &str, host: &str, cx: &AppCx) {
+        let Some(need) = iyakki_agent::avaddon::Need::parse(word) else { return };
+        let addon = iyakki_agent::avaddon::detect(cx.services.dir());
+        if self.av.offer(host, need, addon) {
+            cx.audit.record(&cx.session.user, "browser.av.offer", &browser_av::site_of(host));
+        }
+    }
+
+    /// A press on one of the bar's buttons.
+    fn av_choice(&mut self, tab: usize, cx: &AppCx) {
+        match tab {
+            browser_av::TAB_INSTALL => {
+                // never a download from here: Store -> Setup shows the vendor, the licence and the size, and the person presses its button
+                self.av_request = Some(("store".into(), format!("setup:{}", iyakki_agent::avaddon::INSTALL_ITEM)));
+                self.av.waiting = true;
+                self.av.dismiss();
+                cx.audit.record(&cx.session.user, "browser.av.install.asked", "");
+            }
+            browser_av::TAB_NEVER => {
+                if self.av.never_here() {
+                    browser_av::save(cx, &self.av.prefs);
+                }
+                cx.audit.record(&cx.session.user, "browser.av.never", "");
+            }
+            _ => self.av.dismiss(),
+        }
+    }
+
+    /// After Install: once the add-on's libraries are there, start the engine again (its environment is read at start) on the same page.
+    fn av_poll(&mut self, cx: &AppCx) {
+        if !self.av.waiting || self.full.is_none() {
+            return;
+        }
+        if self.av_checked.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
+            return;
+        }
+        self.av_checked = Some(std::time::Instant::now());
+        if iyakki_agent::avaddon::detect(cx.services.dir()) == iyakki_agent::avaddon::Addon::Ready {
+            self.av.waiting = false;
+            self.restart_full(cx);
+        }
+    }
+
+    /// Stop the engine and start it again on the page it showed, without touching the tab's history.
+    fn restart_full(&mut self, cx: &AppCx) {
+        let Some(f) = self.full.take() else { return };
+        let url = if f.url.is_empty() { f.good_url.clone() } else { f.url.clone() };
+        drop(f);
+        let Some(helper) = iyakki_agent::webengine::embedded_helper() else { return };
+        match self.embedded_start(helper, cx).map(Full::start) {
+            Ok(Ok(mut f)) => {
+                f.navigate(&url);
+                self.full = Some(f);
+                self.av.shown_reset();
+                self.status = Some(("The audio and video add-on is installed: the page is loading again.".into(), true));
+                cx.audit.record(&cx.session.user, "browser.av.reload", "");
+            }
+            Ok(Err(e)) | Err(e) => self.status = Some((format!("The full web engine could not be started again: {e}"), false)),
+        }
     }
 
     fn apply_full_note(&mut self, n: Note, cx: &AppCx) {
         match n {
             Note::Navigated(u) => {
+                self.av.page_moved(&iyakki_sec::url_host(&u).unwrap_or_default());
                 let title = self.full.as_ref().map(|f| f.title.clone()).unwrap_or_default();
                 self.set_full_page(&u, &title);
                 if self.full.as_ref().is_some_and(|f| f.visited != u) {
@@ -2526,6 +2606,11 @@ impl BrowserApp {
                 crate::ui::clipboard::toast("Copied");
             }
             Note::Trouble(r) => self.status = Some((format!("The full web engine reports: {r}"), false)),
+            Note::NeedsAv(w) => {
+                let url = self.full.as_ref().map(|f| f.url.clone()).unwrap_or_default();
+                let host = iyakki_sec::url_host(&url).unwrap_or_default();
+                self.offer_av(&w, &host, cx);
+            }
             Note::Sound(Some(n)) => self.status = Some((n, false)),
             Note::Sound(None) => {
                 if self.status.as_ref().is_some_and(|s| s.0.starts_with("Sound ")) {
@@ -3257,6 +3342,9 @@ impl BrowserApp {
 }
 
 impl App for BrowserApp {
+    fn take_request(&mut self) -> Option<(String, String)> {
+        self.av_request.take()
+    }
     /// `newtab:<address>`: the address in a new tab (the sign-in dialog of Claude Code / Copilot uses it; agent_login.rs).
     fn open_item(&mut self, item: &str, cx: &AppCx) {
         if let Some(url) = item.strip_prefix("newtab:") {
@@ -3489,6 +3577,7 @@ impl App for BrowserApp {
                     8 => self.toggle_bookmark(cx),
                     9 => self.open_full_browser(cx),
                     10 => self.show_engine_help(),
+                    n @ (browser_av::TAB_INSTALL..=browser_av::TAB_NEVER) => self.av_choice(*n, cx),
                     999 => self.popup = None,
                     n if *n >= 1000 => self.pick_option(n - 1000),
                     500 => self.step_find(false),
@@ -3648,6 +3737,10 @@ impl App for BrowserApp {
             self.render_full(g, view, s);
         } else {
             self.render_reader(g, view, s, tick);
+        }
+        // (the bar only exists while the engine shows the page that reported the missing decoder)
+        if let Some(b) = &self.av.bar {
+            browser_av::render(g, view, s, b);
         }
         // the tool bar sits over whatever scrolled under it
         g.gradient_rect(area.x, bar_y, area.w, bar_h, (0.0, bar_y), (0.0, bar_y + bar_h), &[(0.0, rgb(20, 26, 48)), (1.0, BAR_LOW)]);
@@ -5196,6 +5289,85 @@ mod tests {
         } else {
             assert!(st.contains("The full web engine is not installed in this image (see docs/FULL-BROWSER.md)"), "{st}");
         }
+    }
+
+    #[test]
+    fn a_video_without_a_decoder_gets_one_calm_bar_per_site_that_can_be_dismissed() {
+        use iyakki_agent::avaddon::{Addon, Need};
+        let cx = cx_with("av1", site(vec![]));
+        let mut a = BrowserApp::new(&cx);
+        assert!(a.av.offer("www.tiktok.com", Need::Both, Addon::Absent));
+        let g = frame(&mut a, &cx, 1280, 720);
+        let labels: Vec<&str> = g.hits.iter().map(|h| h.label.as_str()).collect();
+        for want in ["Install", "Not now", "Don't ask for this site"] {
+            assert!(labels.contains(&want), "{want} in {labels:?}");
+        }
+        for (w, h) in [(1280u32, 720u32), (1024, 600), (800, 480)] {
+            let g = frame(&mut a, &cx, w, h);
+            for hit in g.hits.iter().filter(|x| ["Install", "Not now", "Don't ask for this site"].contains(&x.label.as_str())) {
+                assert!(hit.rect.x >= 0.0 && hit.rect.x + hit.rect.w <= w as f32 + 0.5 && hit.rect.y + hit.rect.h <= h as f32, "{w}x{h}: {} {:?}", hit.label, hit.rect);
+            }
+        }
+        // Not now: gone, and the same site is not asked again in this session (also under another spelling of the host)
+        a.handle(&Event::Tab(browser_av::TAB_NOT_NOW), &cx);
+        assert!(a.av.bar.is_none());
+        assert!(!a.av.offer("tiktok.com", Need::Video, Addon::Absent));
+        assert!(!frame(&mut a, &cx, 1280, 720).hits.iter().any(|x| x.label == "Not now"));
+        // another site is asked once
+        assert!(a.av.offer("example.org", Need::Audio, Addon::Absent));
+        // moving to another site takes the bar away; staying on the site keeps it
+        a.av.page_moved("example.org");
+        assert!(a.av.bar.is_some());
+        a.av.page_moved("elsewhere.net");
+        assert!(a.av.bar.is_none());
+    }
+
+    #[test]
+    fn dont_ask_for_this_site_is_kept_for_the_person_and_install_only_asks_the_installer() {
+        use iyakki_agent::avaddon::{Addon, Need};
+        let cx = cx_with("av2", site(vec![]));
+        let mut a = BrowserApp::new(&cx);
+        assert!(a.av.offer("tiktok.com", Need::Video, Addon::Absent));
+        a.handle(&Event::Tab(browser_av::TAB_NEVER), &cx);
+        assert!(a.av.bar.is_none() && a.av.prefs.never.contains("tiktok.com"));
+        // a new browser (a new session) for the same person does not ask for that site, but asks for others
+        let mut b = BrowserApp::new(&cx);
+        assert!(!b.av.offer("www.tiktok.com", Need::Video, Addon::Absent));
+        assert!(b.av.offer("other.org", Need::Video, Addon::Absent));
+        // Install: nothing is downloaded here; Store -> Setup is asked for (it shows the vendor, the licence and has its own button)
+        b.handle(&Event::Tab(browser_av::TAB_INSTALL), &cx);
+        assert_eq!(b.take_request(), Some(("store".to_string(), format!("setup:{}", iyakki_agent::avaddon::INSTALL_ITEM))));
+        assert!(b.av.bar.is_none() && b.av.waiting);
+        assert_eq!(b.take_request(), None);
+        // the audit log records the offer, not the page
+        let log = cx.audit.recent(50).join("\n");
+        assert!(log.contains("browser.av.install.asked"), "{log}");
+    }
+
+    #[test]
+    fn the_bar_says_the_right_thing_for_each_state_of_the_add_on() {
+        use iyakki_agent::avaddon::{Addon, Need};
+        let cx = cx_with("av3", site(vec![]));
+        let mut a = BrowserApp::new(&cx);
+        // no bridge in the image: no Install button, a plain statement
+        assert!(a.av.offer("tiktok.com", Need::Video, Addon::NotInImage));
+        let g = frame(&mut a, &cx, 1280, 720);
+        assert!(!g.hits.iter().any(|x| x.label == "Install") && g.hits.iter().any(|x| x.label == "Not now"));
+        assert!(browser_av::bar_message(a.av.bar.as_ref().unwrap()).contains("does not include"));
+        // installed but it still does not play
+        a.av.dismiss();
+        assert!(a.av.offer("b.org", Need::Both, Addon::Ready));
+        let m = browser_av::bar_message(a.av.bar.as_ref().unwrap());
+        assert!(m.contains("still cannot") && m.contains("b.org"), "{m}");
+        assert!(!frame(&mut a, &cx, 1280, 720).hits.iter().any(|x| x.label == "Install"));
+        // the missing add-on: the exact words of the plan
+        a.av.dismiss();
+        a.av.offer("c.org", Need::Video, Addon::Absent);
+        assert_eq!(browser_av::bar_message(a.av.bar.as_ref().unwrap()), "This video needs the audio and video add-on. Install it (your click, downloaded from the vendor, LGPL, licence shown).");
+        // only the three words from the helper count
+        a.offer_av("<script>", "d.org", &cx);
+        a.offer_av("both", "", &cx);
+        assert!(a.av.bar.as_ref().is_some_and(|b| b.site == "c.org"));
     }
 
     #[test]

@@ -110,10 +110,18 @@ for pair in "WEB_IRIS:iyakki_web_iris" "WEB_CROCUS:iyakki_web_crocus"; do
   want="$(eval echo "\${$flag:-0}")"; [ "$flag" = WEB_IRIS ] && [ "${WEB_CROCUS:-0}" = 1 ] && want=1
   [ "$have" = "$want" ] || die "$BASE was built with $flag=$have but this run has $flag=$want: that needs a real build of that option set"
 done
-# H.264 is not a package switch (gst-libav is always built and web-post-build.sh strips it): look at what the base image carries
-if grep -q 'iyakki_web' "$BASE/.config" 2>/dev/null || grep -q '^BR2_PACKAGE_IYAKKI_WEBVIEW_HELPER=y' "$BASE/.config"; then
-  have=0; zstd -dc "$IMG/rootfs.cpio.zst" | cpio -t --quiet 2>/dev/null | grep -q 'libgstlibav' && have=1 || true
+# H.264 is not a package switch (gst-libav is always built and web-post-build.sh strips or parks it): look at what the base image carries.
+# WEB_H264=1: the plugin is active in /usr/lib/gstreamer-1.0. WEB_AV_ADDON=1 (default): it is parked in /usr/lib/iyakki-av (inactive).
+if grep -q 'iyakki_web' "$BASE/.config" 2>/dev/null || grep -q '^BR2_PACKAGE_IYAKKI_WEBVIEW_HELPER=y' "$BASE/.config" 2>/dev/null; then
+  have=0; have_av=0
+  listing="$(zstd -dc "$IMG/rootfs.cpio.zst" | cpio -t --quiet 2>/dev/null || true)"
+  echo "$listing" | grep -q 'usr/lib/gstreamer-1.0/libgstlibav' && have=1 || true
+  echo "$listing" | grep -q 'usr/lib/iyakki-av/gstreamer-1.0/libgstlibav' && have_av=1 || true
   [ "$have" = "${WEB_H264:-0}" ] || die "$BASE was built with WEB_H264=$have but this run has WEB_H264=${WEB_H264:-0}: the codecs differ, do a real build"
+  want_av=0; [ "${WEB_H264:-0}" != 1 ] && [ "${WEB_AV_ADDON:-1}" = 1 ] && want_av=1
+  if [ "$have_av" = 1 ] && [ "$want_av" = 0 ]; then die "$BASE carries the inactive audio and video bridge but this run has WEB_AV_ADDON=0 / WEB_H264=1: a plugin cannot be taken from a finished rootfs, do a real build"; fi
+  # (a base built before WEB_AV_ADDON has no plugin to park: the repack goes on without the bridge and the hook says so; a real build adds it, docs/FULL-BROWSER.md)
+  if [ "$have_av" = 0 ] && [ "$want_av" = 1 ]; then echo "repack: WARNING $BASE has no audio and video bridge (built before WEB_AV_ADDON); this image will not have it either" >&2; fi
 fi
 # the environment build.sh gives the hooks
 export IYAKKI_ARCH=x86_64 BR2_EXTERNAL_IYAKKI_PATH="$HERE" BR2_CONFIG="$BASE/.config"
@@ -123,6 +131,7 @@ export IYAKKI_BUILD_DATE="$(date -u +%Y-%m-%d)"
 export IYAKKI_GIT_DESCRIBE="$(cd "$ROOT" && git describe --tags --always --dirty 2>/dev/null || echo unknown)"
 export IYAKKI_VARIANT="$VARIANT-x86_64"
 export IYAKKI_WEB_H264="${WEB_H264:-0}"
+if [ "${WEB_H264:-0}" != 1 ] && [ "${WEB_AV_ADDON:-1}" = 1 ]; then export IYAKKI_WEB_AV_ADDON=1; else export IYAKKI_WEB_AV_ADDON=0; fi
 if [ "${WEB_IRIS:-0}" = 1 ] || [ "${WEB_CROCUS:-0}" = 1 ]; then export IYAKKI_WEB_INTEL_GL=1; else export IYAKKI_WEB_INTEL_GL=0; fi
 [ -f "$SBIN" ] && export IYAKKI_STORE_SERVER_BIN="$SBIN"
 

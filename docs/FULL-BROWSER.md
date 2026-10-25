@@ -145,7 +145,8 @@ web engine renders in software on a Haswell Mac mini and what to expect: `docs/Y
   it cannot show them, or press F. After the engine stops, or after F leaves it, the shell stops sending sites to it until the BROWSER is reopened.
 * To test the engine alone on a device, use the `probe` example of `iyakki-webview` (see `docs/YOUTUBE-ON-IYAKKI.md`, Google or YouTube
   does not load). On a Mac mini 2018 it loaded Google and YouTube at 1920x1080 with software GL and the real LAN.
-* Video that needs H.264 (TikTok) shows a black player: the codec is not shipped (see below) and the page gives no message.
+* Video that needs H.264 (TikTok): without the audio and video add-on the engine has no decoder. The helper notices the failed player and the
+  shell shows one bar ("This video needs the audio and video add-on. Install it ..."); see *Audio and video add-on* below.
 
 ## MEDIA says "Error relocating ... symbol not found" (or "undefined symbol")
 
@@ -157,14 +158,14 @@ uses an ffmpeg that starts. All GStreamer plugins of the image load (`GST_REGIST
 ## Video does not start
 
 The helper allows autoplay (without it `play()` fails with NotAllowedError and a page waits for a click). VP8/VP9 and Opus/Vorbis play;
-H.264, AAC and AV1 do not, and an H.264-only page shows a black player without a message. Measurements: `docs/YOUTUBE-ON-IYAKKI.md`.
+H.264, AAC and AV1 do not; an H.264-only page now gets the add-on bar instead of a silent black player (below). Measurements: `docs/YOUTUBE-ON-IYAKKI.md`.
 
 ## Codec policy
 
 Shipped by default: VP9 (libvpx), Opus (with opusparse), Vorbis; AV1 is NOT playable (libdav1d is built but GStreamer 1.24 in Buildroot has no dav1d plugin: `MediaSource.isTypeSupported('av01...')` is false); MP4 and WebM demuxing; audio through GStreamer's ALSA sink
 (no PulseAudio/PipeWire). H.264, AAC and MP3 come from FFmpeg through gst-libav; WPE's "multimedia" option selects
-gst-libav, so it is *built*, but `web-post-build.sh` deletes it from the image unless the build is made with `WEB_H264=1`
-(`configs/iyakki_web_h264.fragment`). Without it, YouTube still plays because it offers VP9 to browsers that
+gst-libav, so it is *built*. What the image carries is set by `web-post-build.sh`: by default (`WEB_AV_ADDON=1`) only the inactive, LGPL
+bridge plugin (next section) and no FFmpeg; `WEB_AV_ADDON=0` neither; `WEB_H264=1` (`configs/iyakki_web_h264.fragment`) the whole, active codec. Without it, YouTube still plays because it offers VP9 to browsers that
 announce it (measured); other sites that only have H.264 will not play video. These codecs are patent-encumbered in some
 countries (a separate matter from the copyright licences below); whoever builds and distributes the H.264 variant is
 responsible for that.
@@ -186,9 +187,55 @@ confirm before any image ships these codecs):
   2. *Cisco's OpenH264 binary* (GStreamer's `openh264` plugin loads it at run time). Cisco pays the royalties only for the
      binary downloaded from Cisco's own servers, never for a self-built copy, and it does not cover AAC. Its Linux builds are
      believed to be glibc builds (to verify), which would not load on IYAKKI's musl images.
-  3. *A person-installed full libavcodec*: not possible with the current plugin without a compatible build for musl.
-* **What works today without them:** YouTube (VP9 and Opus), most video platforms that offer WebM, and any H.264 file through
+  3. *A person-installed libavcodec*: this is the route taken, see *Audio and video add-on* below (decision 2026-10-24, after the owner's
+     "go for ffmpeg support"). It needs libraries built for musl and for the FFmpeg version of the image.
+* **What works without any add-on:** YouTube (VP9 and Opus), most video platforms that offer WebM, and any H.264 file through
   the installed ffmpeg in IYAKKI's own player. Sites that only have H.264/AAC do not play video in the browser.
+
+## Audio and video add-on (H.264, AAC, MP3 in the browser)
+
+**What is shipped: nothing of FFmpeg.** The `web` and `macweb` images carry GStreamer's `gst-libav` plugin, which is LGPL-2.1+ glue code
+(it is the part that speaks GStreamer's API; the codecs are in FFmpeg's libraries). `web-post-build.sh` parks it in
+`/usr/lib/iyakki-av/gstreamer-1.0/`, a folder GStreamer does not scan, so it is inactive, and removes every FFmpeg library and program.
+`/usr/share/iyakki/av-addon-abi` lists the sonames the plugin was linked against (FFmpeg 6.1: `libavcodec.so.60`, `libavformat.so.60`,
+`libavutil.so.58`, `libavfilter.so.9`, `libswresample.so.4`, `libswscale.so.7`, `libpostproc.so.57`).
+
+**Why this design (investigated, not built yet).** `gst-libav` hard-links the libraries (DT_NEEDED), it does not `dlopen()` them, so
+there is no switch that makes it load libav* "if present": without the libraries the plugin simply fails to load and GStreamer
+blacklists it. That is acceptable here: the plugin sits outside the scanned path, and `crates/iyakki-agent/src/avaddon.rs` puts three
+things into the engine's environment only when every soname of the ABI file exists in the add-on's library folder
+(`<data>/addons/ffmpeg/lib`, or `IYAKKI_AV_ADDON_DIR`): `GST_PLUGIN_PATH_1_0` (the parked plugin folder), `LD_LIBRARY_PATH` (the library
+folder) and a separate `GST_REGISTRY_1_0` (`cache/gst-registry-av-<hash>.bin`, hashed from the host name and the folder's file names and
+sizes, so the list of plugins with the add-on never mixes with the one without it), plus `GST_PLUGIN_FEATURE_RANK` for `avdec_h264`,
+`avdec_aac`, `avdec_mp3`. Without the add-on the environment is exactly the old one. The decoders run in the web engine's own
+sandboxed WebProcess, as before. The price is an ABI pin: the downloaded libraries must be **FFmpeg 6.1 sonames, built for musl** (the
+images are musl) and with the H.264, AAC and MP3 decoders; a vendor that only offers glibc builds or another major version does not
+work, and the installer's manifest must say which download provides them. The fallback if that pin proves too brittle is a small
+in-house GStreamer element that `dlopen()`s whatever libavcodec the person has through its public C API (more code, no ABI pin of
+the plugin); it is not built.
+
+**The person's side.** When a page's player fails for want of a decoder, `media-probe.js` (injected by the helper into every frame, see
+`docs/WEBVIEW-PROTOCOL.md`, MediaUnsupported) tells the shell, and the BROWSER tile shows a bar over the bottom of the page: "This video
+needs the audio and video add-on. Install it (your click, downloaded from the vendor, LGPL, licence shown)." with **Install**, **Not now**
+and **Don't ask for this site**. It appears once per site and session; the last choice is kept per person (`browser-av-<user>.json`).
+Install does not download anything by itself: it opens Store -> Setup on the add-on's entry (the radio's audio add-on uses the same one),
+where the vendor, the licence and the size are shown and the person presses the button. When the libraries are in place the browser
+starts its engine again on the same page, because the engine reads its environment at start. The probe only reports when the engine's
+own `canPlayType` says the codec is missing, so a broken file never produces the message.
+
+**Patents and licences.** The LGPL libraries are downloaded by the person from their vendor; IYAKKI ships none of them and does not
+redistribute them. H.264 and AAC are patent-licensed formats in some countries: decoding them is the person's matter after their own
+download, as it is with the ffmpeg of Quick install. IYAKKI's own code only calls the public GStreamer API. The legal opinion
+(RELEASE-READINESS item 23, BETA-PLAN decision 15) should cover this route too: shipped inactive LGPL glue plus a user-initiated download.
+
+**Remaining image-build steps** (nothing here needs the Mac): (1) the existing `target/buildroot-web` has no `libgstlibav.so` any more (the
+old hook deleted it from `target/`): run `make -C target/buildroot-web gst1-libav-reinstall ffmpeg-reinstall` so the plugin and the
+libraries are in `target/` again, then `./build.sh web` (or `smart-build.sh`); `repack.sh` cannot add the plugin to a finished rootfs
+and says so (a warning). (2) Check `cpio -t` of `rootfs.cpio.zst`: `usr/lib/iyakki-av/gstreamer-1.0/libgstlibav.so` present, no `libavcodec`,
+`usr/share/iyakki/av-addon-abi` with seven lines. (3) On a device with the add-on folder filled, run `GST_PLUGIN_PATH_1_0=/usr/lib/iyakki-av/gstreamer-1.0
+LD_LIBRARY_PATH=<folder> GST_REGISTRY_1_0=/tmp/r gst-inspect-1.0 avdec_h264` and then open a TikTok video. (4) Make the add-on's installer
+entry (radio side) provide the libraries listed in the ABI file; its id must match `avaddon::INSTALL_ITEM` (`ffmpeg-libs`).
+`dist/buildroot/test-av-addon.sh` checks the hook on a fake rootfs.
 
 ## Licences
 

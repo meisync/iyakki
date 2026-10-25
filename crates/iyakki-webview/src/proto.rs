@@ -160,6 +160,9 @@ pub enum FromHelper {
     /// The page started (true) or stopped (false) playing audio (WebKit `is-playing-audio`). Optional (0x8E): the shell's sound
     /// doctor compares it with the playback streams the engine's processes hold open.
     AudioPlaying(bool),
+    /// The page tried to play media the engine has no decoder for (H.264 video, AAC audio): `"video"`, `"audio"` or `"both"`.
+    /// Optional (0x8F); the shell offers the audio and video add-on (`docs/FULL-BROWSER.md`, Codec policy).
+    MediaUnsupported(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -426,6 +429,7 @@ impl FromHelper {
     pub const SCRIPT_RESULT: u8 = 0x8C;
     pub const FULLSCREEN: u8 = 0x8D;
     pub const AUDIO_PLAYING: u8 = 0x8E;
+    pub const MEDIA_UNSUPPORTED: u8 = 0x8F;
 
     pub fn encode(&self) -> Vec<u8> {
         match self {
@@ -478,6 +482,7 @@ impl FromHelper {
                 w.u8(*on as u8);
                 w.finish()
             }
+            FromHelper::MediaUnsupported(s) => str_msg(Self::MEDIA_UNSUPPORTED, s),
             FromHelper::ScriptResult { id, ok, json } => {
                 let mut w = W::new(Self::SCRIPT_RESULT);
                 w.u32(*id).u8(*ok as u8).str(json);
@@ -513,6 +518,7 @@ impl FromHelper {
             Self::CLIPBOARD => FromHelper::Clipboard(r.str()?),
             Self::FULLSCREEN => FromHelper::Fullscreen(r.bool()?),
             Self::AUDIO_PLAYING => FromHelper::AudioPlaying(r.bool()?),
+            Self::MEDIA_UNSUPPORTED => FromHelper::MediaUnsupported(r.str()?),
             Self::SCRIPT_RESULT => FromHelper::ScriptResult { id: r.u32()?, ok: r.bool()?, json: r.str()? },
             t => return Err(DecodeError::Unknown(t)),
         })
@@ -633,6 +639,7 @@ mod tests {
             FromHelper::Fullscreen(false),
             FromHelper::AudioPlaying(true),
             FromHelper::AudioPlaying(false),
+            FromHelper::MediaUnsupported("video".into()),
         ]
     }
 
@@ -658,6 +665,7 @@ mod tests {
         assert_eq!(ToHelper::LeaveFullscreen.encode(), vec![1, 0, 0, 0, 0x12]);
         assert_eq!(FromHelper::Fullscreen(true).encode(), vec![2, 0, 0, 0, 0x8D, 1]);
         assert_eq!(FromHelper::AudioPlaying(true).encode(), vec![2, 0, 0, 0, 0x8E, 1]);
+        assert_eq!(FromHelper::MediaUnsupported("audio".into()).encode(), vec![10, 0, 0, 0, 0x8F, 5, 0, 0, 0, b'a', b'u', b'd', b'i', b'o']);
         assert_eq!(FromHelper::Frame { slot: 1, w: 2, h: 3, rects: vec![Rect::new(0, 0, 2, 3)] }.encode(), vec![30, 0, 0, 0, 0x82, 1, 2, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0]);
     }
 

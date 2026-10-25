@@ -58,6 +58,8 @@ pub enum Event {
     Fullscreen(bool),
     /// The page started (true) or stopped (false) playing audio.
     AudioPlaying(bool),
+    /// The page tried to play media without a decoder here: `video`, `audio` or `both`.
+    MediaUnsupported(String),
     /// The helper says its engine failed (it may recover by itself).
     Crashed(String),
     Log(String),
@@ -255,6 +257,7 @@ impl WebView {
                     FromHelper::ScriptResult { id, ok, json } => out.push(Event::ScriptResult { id, ok, json }),
                     FromHelper::Fullscreen(on) => out.push(Event::Fullscreen(on)),
                     FromHelper::AudioPlaying(on) => out.push(Event::AudioPlaying(on)),
+                    FromHelper::MediaUnsupported(s) => out.push(Event::MediaUnsupported(s)),
                     FromHelper::Crashed(s) => out.push(Event::Crashed(s)),
                     FromHelper::Log(s) => out.push(Event::Log(s)),
                 },

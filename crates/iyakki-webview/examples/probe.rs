@@ -85,6 +85,7 @@ fn pump(v: &mut WebView, d: Duration, frames: &mut u64) {
                 Event::Clipboard(s) => println!("  clipboard: {s:?}"),
                 Event::Fullscreen(on) => println!("  fullscreen: {on}"),
                 Event::AudioPlaying(on) => println!("  audio playing: {on}"),
+                Event::MediaUnsupported(w) => println!("  media without a decoder: {w}"),
                 Event::ScriptResult { id, ok, json } => println!("  script {id} ok={ok}: {json}"),
                 Event::Cursor(_) => {}
             }

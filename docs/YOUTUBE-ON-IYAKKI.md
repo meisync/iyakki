@@ -38,7 +38,7 @@ Checked against `dist/buildroot/configs/iyakki_web.fragment`, Buildroot 2026.02.
 | Video decoding without H.264 | `libgstvpx` (VP9 through libvpx), `libgstmatroska` (WebM), `libgstisomp4` (MP4 container), `libgstvideoparsersbad`, `libgstvideoconvertscale`. YouTube offers VP9 to browsers that announce it |
 | Audio | `libgstopus` + `libgstopusparse` (needed before MediaSource accepts `audio/webm; codecs=opus`), `libgstaudioconvert`, `libgstaudioresample`, `libgstvolume`, `libgstalsa` (ALSA output, no PulseAudio) |
 | Playback pipeline | `libgstplayback` (playbin3), `libgstapp` (appsink/appsrc), `libgsttypefindfunctions`, `libgstopengl` + `libgstwaylandsink` (GL path), software paths otherwise |
-| H.264 / AAC / MP3 | gst-libav, **removed from the image** unless built with `WEB_H264=1` / `./run.sh build-web --h264` / `./run.sh build-macweb --h264` |
+| H.264 / AAC / MP3 | gst-libav, **inactive in the image** (parked in `/usr/lib/iyakki-av`, no FFmpeg libraries) and switched on by the person's own download of the audio and video add-on (docs/FULL-BROWSER.md); `WEB_H264=1` / `./run.sh build-web --h264` ships the whole, active codec; `WEB_AV_ADDON=0` leaves the bridge out |
 | AV1 | **not playable**: Buildroot 2026.02 has no GStreamer dav1d plugin option (`MediaSource.isTypeSupported('av01...')` is false). YouTube falls back to VP9 |
 | JavaScript speed | JavaScriptCore with JIT on x86_64 (`ENABLE_JIT`, `ENABLE_DFG_JIT`, `ENABLE_FTL_JIT` all ON in the build); `ENABLE_C_LOOP` OFF |
 | HTTPS | `glib-networking` (OpenSSL GIO module) and `ca-certificates` (`/etc/ssl/certs/ca-certificates.crt`); both in the image |

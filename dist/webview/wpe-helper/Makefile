@@ -8,13 +8,17 @@ CFLAGS ?= -O2
 override CFLAGS += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-array-bounds $(shell $(PKG_CONFIG) --cflags $(PKGS))
 LDLIBS += $(shell $(PKG_CONFIG) --libs $(PKGS))
 
-webview-helper: helper.c proto.h
+# media-probe.js becomes a C string (media-probe.h) so the helper needs no data file at run time
+media-probe.h: media-probe.js
+	sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' media-probe.js > $@
+
+webview-helper: helper.c proto.h media-probe.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ helper.c $(LDLIBS)
 
 install: webview-helper
 	install -D -m 0755 webview-helper $(DESTDIR)/usr/libexec/iyakki/webview-helper
 
 clean:
-	rm -f webview-helper
+	rm -f webview-helper media-probe.h
 
 .PHONY: install clean

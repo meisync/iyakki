@@ -1,0 +1,7 @@
+# Default for the web and macweb variants (WEB_AV_ADDON=0 switches it off): the INACTIVE audio and video bridge.
+# gst-libav is GStreamer's LGPL plugin that decodes H.264, AAC and MP3 through FFmpeg's libraries. WPE's "multimedia" option
+# already selects and builds it; this line makes that explicit. web-post-build.sh then moves libgstlibav.so to /usr/lib/iyakki-av
+# (not scanned by GStreamer) and removes every FFmpeg library and program from the image: nothing of FFmpeg is shipped. The person
+# downloads the libraries from their vendor in Store -> Setup and the shell activates the plugin (crates/iyakki-agent/src/avaddon.rs).
+#   WEB_AV_ADDON=0 ./build.sh web      no bridge at all (WEB_H264=1 instead ships the whole codec, the old switch)
+BR2_PACKAGE_GST1_LIBAV=y
