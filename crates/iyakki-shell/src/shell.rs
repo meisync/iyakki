@@ -258,6 +258,7 @@ const TILES: &[Tile] = &[
     Tile { app: PApp::K8s, icon: Icon::Mesh, label: "K8S", sub: "Explore the cluster", accent: crate::apps::k8s_tile::ACCENT, group: Some(Group::System) },
     Tile { app: PApp::LinuxWin, icon: Icon::Cli, label: "LINUX WINDOW", sub: "Linux programs", accent: crate::apps::linuxwin::ACCENT, group: Some(Group::System) },
     Tile { app: PApp::Lab, icon: Icon::Lab, label: "LAB", sub: "Try picture models", accent: crate::apps::lab::ACCENT, group: Some(Group::Work) },
+    Tile { app: PApp::Git, icon: Icon::Git, label: "GIT", sub: "Browse repositories", accent: crate::apps::git_tile::ACCENT, group: Some(Group::Work) },
 ];
 
 /// The home screen section of an app's tile (the tile table's `group` field; `None`: not on the grid).
@@ -1002,6 +1003,7 @@ impl Shell {
             PApp::LinuxWin => Box::new(crate::apps::linuxwin::LinuxWinApp::new(&cx)),
             PApp::Tales => Box::new(crate::apps::story::StoryApp::new(&cx)),
             PApp::Lab => Box::new(crate::apps::lab::LabApp::new(&cx)),
+            PApp::Git => Box::new(crate::apps::git_tile::GitApp::new(&cx)),
             PApp::Inbox => Box::new(crate::apps::inbox::InboxApp::new(&cx)),
         };
         self.env.audit.record(&cx.session.user, "app.open", app.id());
@@ -5974,6 +5976,9 @@ mod voice_tests;
 #[cfg(test)]
 #[path = "shell_k8s_tests.rs"]
 mod k8s_tests;
+#[cfg(test)]
+#[path = "shell_git_tests.rs"]
+mod git_tests;
 #[cfg(test)]
 #[path = "shell_disks_tests.rs"]
 mod disks_tests;

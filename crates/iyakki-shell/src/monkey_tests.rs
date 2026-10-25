@@ -531,7 +531,7 @@ fn monkey_chat_tales_voice_edit() {
 
 #[test]
 fn monkey_data_dash_flows_store() {
-    run_apps("monkey-data", &[Some(PApp::Data), Some(PApp::Dash), Some(PApp::Flows), Some(PApp::Store), Some(PApp::K8s), Some(PApp::Browser)], false);
+    run_apps("monkey-data", &[Some(PApp::Data), Some(PApp::Dash), Some(PApp::Flows), Some(PApp::Store), Some(PApp::K8s), Some(PApp::Git), Some(PApp::Browser)], false);
 }
 
 /// The cluster switchers (the K8S tile's header, the AI IDE's Kubernetes panel, the Store -> Setup popups) with several clusters in the

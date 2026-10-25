@@ -2690,7 +2690,15 @@ impl App for IdeApp {
         self.request.take()
     }
     /// RUNS sent the person back to a task or a row (`task:<id>`, `row:<id>`).
-    fn open_item(&mut self, item: &str, _cx: &AppCx) {
+    fn open_item(&mut self, item: &str, cx: &AppCx) {
+        // the GIT tile's "Open in AI IDE": the clone it registered as a workspace
+        if let Some(id) = item.strip_prefix("ws:") {
+            self.reg.reload();
+            if let Err(e) = self.open_by_id(id, cx) {
+                self.notice = Some((e, false));
+            }
+            return;
+        }
         if let Some(t) = item.strip_prefix("task:") {
             if let Some(w) = self.active_mut() {
                 w.tasks.select_id(t);

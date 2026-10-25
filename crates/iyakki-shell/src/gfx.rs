@@ -70,6 +70,8 @@ pub enum Icon {
     Disks,
     /// The LAB tile: a flask.
     Lab,
+    /// The GIT tile: a branch with three nodes.
+    Git,
 }
 
 type GlyphKey = (char, u32, Face);
@@ -1319,6 +1321,25 @@ impl Gfx {
                     self.pm.fill_path(&d, &p, FillRule::Winding, id, None);
                 }
             }
+            Icon::Git => {
+                // a branch: a trunk with a side branch, a node at each end
+                let mut t = PathBuilder::new();
+                t.move_to(x0 + s * 0.3, y0 + s * 0.2);
+                t.line_to(x0 + s * 0.3, y0 + s * 0.8);
+                t.move_to(x0 + s * 0.3, y0 + s * 0.6);
+                t.line_to(x0 + s * 0.3, y0 + s * 0.52);
+                t.cubic_to(x0 + s * 0.3, y0 + s * 0.38, x0 + s * 0.7, y0 + s * 0.46, x0 + s * 0.7, y0 + s * 0.3);
+                if let Some(b) = t.finish() {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                for (nx, ny) in [(0.3, 0.2), (0.3, 0.8), (0.7, 0.28)] {
+                    let mut d = PathBuilder::new();
+                    d.push_circle(x0 + s * nx, y0 + s * ny, s * 0.08);
+                    if let Some(d) = d.finish() {
+                        self.pm.fill_path(&d, &p, FillRule::Winding, id, None);
+                    }
+                }
+            }
             Icon::Mesh => {
                 // three linked nodes
                 let pts = [(0.5, 0.18), (0.16, 0.78), (0.84, 0.78)];
@@ -1395,7 +1416,7 @@ mod tests {
 
     #[test]
     fn every_icon_draws_something() {
-        for icon in [Icon::Chat, Icon::Rag, Icon::Mcp, Icon::Cli, Icon::Users, Icon::Settings, Icon::Clipboard, Icon::Mic, Icon::Speaker, Icon::Runs, Icon::Edit, Icon::Browser, Icon::Camera, Icon::Mesh, Icon::Radio, Icon::Scan, Icon::Skills, Icon::Usage, Icon::Calendar, Icon::System, Icon::Media, Icon::SrePilot, Icon::Ide, Icon::Data, Icon::Tales, Icon::Bell, Icon::Lock, Icon::Power, Icon::Logout, Icon::Store, Icon::Dash, Icon::Flows, Icon::Devices, Icon::Disks, Icon::Lab] {
+        for icon in [Icon::Chat, Icon::Rag, Icon::Mcp, Icon::Cli, Icon::Users, Icon::Settings, Icon::Clipboard, Icon::Mic, Icon::Speaker, Icon::Runs, Icon::Edit, Icon::Browser, Icon::Camera, Icon::Mesh, Icon::Radio, Icon::Scan, Icon::Skills, Icon::Usage, Icon::Calendar, Icon::System, Icon::Media, Icon::SrePilot, Icon::Ide, Icon::Data, Icon::Tales, Icon::Bell, Icon::Lock, Icon::Power, Icon::Logout, Icon::Store, Icon::Dash, Icon::Flows, Icon::Devices, Icon::Disks, Icon::Lab, Icon::Git] {
             let mut g = Gfx::new(96, 96);
             g.clear(rgb(0, 0, 0));
             g.icon(icon, 48.0, 48.0, 80.0, rgb(255, 255, 255));

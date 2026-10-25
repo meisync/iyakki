@@ -46,10 +46,12 @@ pub enum App {
     LinuxWin,
     /// Model lab: try picture and vision models side by side (`docs/LAB.md`).
     Lab,
+    /// Browse the repositories of the connected Git hosts and of the clones on this computer (`docs/GIT-TILE.md`).
+    Git,
 }
 
 impl App {
-    pub const ALL: [App; 31] = [App::Chat, App::Rag, App::Mcp, App::Cli, App::Users, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab];
+    pub const ALL: [App; 32] = [App::Chat, App::Rag, App::Mcp, App::Cli, App::Users, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -84,6 +86,7 @@ impl App {
             App::Disks => "disks",
             App::LinuxWin => "linuxwin",
             App::Lab => "lab",
+            App::Git => "git",
         }
     }
 
@@ -333,7 +336,7 @@ impl Role {
                 browser_max_minutes: 20,
             },
             Role::Operator => Policy {
-                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab]),
+                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git]),
                 cli: CliLevel::Full,
                 fs_read: strs(&["{home}", "/shared"]),
                 fs_write: strs(&["{home}", "/shared"]),
@@ -356,7 +359,7 @@ impl Role {
                 browser_max_minutes: 20,
             },
             Role::User => Policy {
-                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Radio, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::Lab]),
+                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Radio, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::Lab, App::Git]),
                 cli: CliLevel::Restricted,
                 fs_read: strs(&["{home}", "/shared"]),
                 fs_write: strs(&["{home}"]),

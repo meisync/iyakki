@@ -266,7 +266,7 @@ mod tests {
         for a in [App::Browser, App::Radio, App::Media, App::Camera] {
             assert!(Group::WebMedia.holds(a), "{a:?}");
         }
-        for a in [App::Edit, App::Data, App::Dash, App::Flows, App::Runs, App::SrePilot, App::Lab] {
+        for a in [App::Edit, App::Data, App::Dash, App::Flows, App::Runs, App::SrePilot, App::Lab, App::Git] {
             assert!(Group::Work.holds(a), "{a:?}");
         }
         for a in [App::System, App::Store, App::Users, App::Usage, App::Scan, App::Mesh] {

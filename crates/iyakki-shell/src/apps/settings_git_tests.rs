@@ -468,3 +468,19 @@ fn a_refused_network_policy_is_said_and_no_request_is_made() {
     assert!(a.status.as_ref().is_some_and(|s| !s.1 && s.0.contains("may not reach git.example.org")), "{:?}", a.status);
     assert_eq!(http.requests().len(), n, "nothing was sent");
 }
+
+#[test]
+fn the_git_tile_asks_settings_for_the_page_with_the_wizard_open() {
+    let cx = admin("git-add-item");
+    let mut a = SettingsApp::new(&cx);
+    assert!(!a.git_wizard_open());
+    // "Add connection..." of the GIT tile
+    App::open_item(&mut a, "git:add", &cx);
+    assert_eq!(a.tab(), Tab::GitKeys);
+    assert!(a.git_wizard_open(), "the wizard is open on its first step");
+    // "Edit the connection" of the GIT tile: just the page
+    let mut b = SettingsApp::new(&cx);
+    App::open_item(&mut b, "tab:git", &cx);
+    assert_eq!(b.tab(), Tab::GitKeys);
+    assert!(!b.git_wizard_open());
+}

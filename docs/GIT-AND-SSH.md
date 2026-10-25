@@ -4,6 +4,9 @@ Alpha.2 adds git to the AI IDE: clone several repositories into one workspace, s
 all, and tell IYAKKI which SSH key or token each git site and each workspace uses. Rows F-GIT-01 to F-GIT-04 in
 [FEATURES.md](../FEATURES.md). What is tried and what is not is said at the end.
 
+To **look at** the repositories of your connections (files, commits, branches, issues) and of the clones on this computer without opening the IDE, use the
+GIT tile: [`GIT-TILE.md`](GIT-TILE.md).
+
 ## What you get
 
 * **git in the image.** The web and Mac images carry the `git` program (GPL-2.0, a separate program that IYAKKI starts as a

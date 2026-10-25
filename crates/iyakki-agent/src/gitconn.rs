@@ -562,6 +562,12 @@ pub struct Req {
     pub body: Option<String>,
     /// A certificate file the person chose to trust for this host.
     pub cert: Option<PathBuf>,
+    /// The `Accept` header (none: `application/json`). Browsing repositories asks for diffs and raw files this way.
+    pub accept: Option<String>,
+    /// The most bytes of answer to keep (0: 512 KB).
+    pub max_bytes: usize,
+    /// Seconds before curl gives up (0: 20).
+    pub timeout_s: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -600,6 +606,9 @@ pub trait GitHttp: Send + Sync {
     fn peer_cert(&self, url: &str) -> Result<CertInfo, String>;
 }
 
+/// What [`CurlGit`] says when the answer did not fit the byte limit of the request (the status line at its end was cut off).
+pub const TOO_BIG: &str = "the answer is larger than the limit";
+
 /// curl through the [`Runner`], with the token in a private temp config file.
 pub struct CurlGit {
     pub run: Arc<dyn Runner>,
@@ -634,12 +643,13 @@ impl GitHttp for CurlGit {
         if !(r.url.starts_with("http://") || r.url.starts_with("https://")) {
             return Err(NetErr::Other("only http and https addresses are used".into()));
         }
-        let mut cfg = format!("silent\nshow-error\ninclude\nmax-time = 20\nurl = {}\nrequest = {}\nwrite-out = \"\\n%{{http_code}}\"\n", q(&r.url), q(&r.method));
+        let mut cfg = format!("silent\nshow-error\ninclude\nmax-time = {}\nurl = {}\nrequest = {}\nwrite-out = \"\\n%{{http_code}}\"\n", if r.timeout_s == 0 { 20 } else { r.timeout_s }, q(&r.url), q(&r.method));
         if let Some(t) = &r.token {
             let w = if r.style == Style::Token { "token" } else { "Bearer" };
             cfg.push_str(&format!("header = {}\n", q(&format!("Authorization: {w} {t}"))));
         }
-        cfg.push_str("header = \"Accept: application/json\"\n");
+        let accept = r.accept.as_deref().filter(|a| a.chars().all(|c| c.is_ascii_graphic() || c == ' ')).unwrap_or("application/json");
+        cfg.push_str(&format!("header = {}\n", q(&format!("Accept: {accept}"))));
         if let Some(c) = &r.cert {
             cfg.push_str(&format!("cacert = {}\n", q(&c.display().to_string())));
         }
@@ -647,7 +657,7 @@ impl GitHttp for CurlGit {
             cfg.push_str(&format!("header = \"Content-Type: application/json\"\ndata = {}\n", q(b)));
         }
         let f = crate::platform::secrets::SecretFile::new(&self.tmp, &cfg).map_err(NetErr::Other)?;
-        let o = self.run.run(&std::env::temp_dir(), &["curl".into(), "-K".into(), f.path.display().to_string()], &[], Duration::from_secs(30), 512 * 1024, None);
+        let o = self.run.run(&std::env::temp_dir(), &["curl".into(), "-K".into(), f.path.display().to_string()], &[], Duration::from_secs(30), if r.max_bytes == 0 { 512 * 1024 } else { r.max_bytes }, None);
         drop(f);
         let token = r.token.clone().unwrap_or_default();
         if o.missing {
@@ -655,6 +665,9 @@ impl GitHttp for CurlGit {
         }
         if let Some(resp) = parse_curl(&o.stdout).filter(|x| x.status != 0) {
             return Ok(resp);
+        }
+        if o.truncated {
+            return Err(NetErr::Other(TOO_BIG.into()));
         }
         let why = scrub(o.stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("no answer").trim(), &token);
         match o.code {
@@ -733,7 +746,7 @@ impl GitHttp for FakeGitHttp {
 
 // ------------------------------------------------------------------ the host's API
 
-fn style_of(kind: Kind) -> Style {
+pub fn style_of(kind: Kind) -> Style {
     if kind == Kind::Gitea { Style::Token } else { Style::Bearer }
 }
 
@@ -750,7 +763,7 @@ pub fn api_base(kind: Kind, base: &str) -> String {
 }
 
 fn req(c: &Connection, method: &str, path: &str, token: &str, body: Option<String>, cert: Option<&PathBuf>) -> Req {
-    Req { method: method.into(), url: format!("{}{path}", api_base(c.kind, &c.url)), token: Some(token.to_string()), style: style_of(c.kind), body, cert: cert.cloned() }
+    Req { method: method.into(), url: format!("{}{path}", api_base(c.kind, &c.url)), token: Some(token.to_string()), style: style_of(c.kind), body, cert: cert.cloned(), accept: None, max_bytes: 0, timeout_s: 0 }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

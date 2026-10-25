@@ -179,7 +179,7 @@ fn a_curl_request_keeps_the_token_out_of_the_command_line_and_pins_a_certificate
     let run = Arc::new(FakeRunner::new(&["curl"]));
     run.answer("curl -K", "HTTP/1.1 200 OK\r\n\r\n{\"login\":\"o\"}\n200");
     let h = CurlGit { run: run.clone(), tmp: d.clone() };
-    let r = h.send(&Req { method: "GET".into(), url: "https://git.example.org/api/v1/user".into(), token: Some(FAKE.into()), style: Style::Token, body: None, cert: Some(d.join("c.pem")) }).unwrap();
+    let r = h.send(&Req { method: "GET".into(), url: "https://git.example.org/api/v1/user".into(), token: Some(FAKE.into()), style: Style::Token, body: None, cert: Some(d.join("c.pem")), accept: None, max_bytes: 0, timeout_s: 0 }).unwrap();
     assert_eq!(r.status, 200);
     let calls = run.lines();
     assert_eq!(calls.len(), 1);
@@ -189,12 +189,12 @@ fn a_curl_request_keeps_the_token_out_of_the_command_line_and_pins_a_certificate
     let run = Arc::new(FakeRunner::new(&["curl"]));
     run.fail("curl", 60, &format!("curl: (60) SSL certificate problem: self-signed certificate ({FAKE})"));
     let h = CurlGit { run, tmp: d.clone() };
-    let e = h.send(&Req { method: "GET".into(), url: "https://x.example/".into(), token: Some(FAKE.into()), style: Style::Bearer, body: None, cert: None }).unwrap_err();
+    let e = h.send(&Req { method: "GET".into(), url: "https://x.example/".into(), token: Some(FAKE.into()), style: Style::Bearer, body: None, cert: None, accept: None, max_bytes: 0, timeout_s: 0 }).unwrap_err();
     assert!(matches!(&e, NetErr::Tls(t) if !t.contains("FAKEFAKE")), "{e:?}");
     let run = Arc::new(FakeRunner::new(&["curl"]));
     run.fail("curl", 7, "curl: (7) Failed to connect");
     let h = CurlGit { run, tmp: d };
-    assert!(matches!(h.send(&Req { method: "GET".into(), url: "https://x.example/".into(), token: None, style: Style::Bearer, body: None, cert: None }), Err(NetErr::Unreachable(_))));
+    assert!(matches!(h.send(&Req { method: "GET".into(), url: "https://x.example/".into(), token: None, style: Style::Bearer, body: None, cert: None, accept: None, max_bytes: 0, timeout_s: 0 }), Err(NetErr::Unreachable(_))));
     // the certificate shown for comparison
     let run = Arc::new(FakeRunner::new(&["curl"]));
     run.answer("--certinfo", "Cert:-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n");

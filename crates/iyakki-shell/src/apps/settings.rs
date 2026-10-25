@@ -2466,7 +2466,7 @@ impl SettingsApp {
             Tab::Network => "w joins a WiFi network. m chooses the private MAC address (off, per network, random): it applies on the next connection, a applies it now (reconnects). Off keeps DHCP reservations working.",
             Tab::Bluetooth => "Pairing and audio are not available yet. p powers the controller · s scans (10 s) · l loads a held driver.",
             Tab::Display => "The desktop uses the screen's best mode. Resolution, arrangement and mirroring of several displays are in Settings, Displays.",
-            _ => "o chooses the output (Automatic follows what is connected) · t plays a test chime · the IYAKKI volume is the one master volume: the volume keys, the Devices popover and the radio follow it · A advanced.",
+            _ => "o chooses the output (Automatic follows what is connected) · t plays a test chime · the IYAKKI volume is the one master volume: the volume keys, the Devices popover and the radio follow it · A advanced · M mixes sounds from several apps (experimental).",
         };
         let admin = cx.session.policy.manage_settings;
         if self.tab() == Tab::Sound {
@@ -3034,7 +3034,7 @@ impl App for SettingsApp {
             Tab::Network => "Enter turn on/off · w join a WiFi network · r look again",
             Tab::Bluetooth => "Enter turn on/off · f firmware (Store, Setup) · p power the controller · s scan (10 s) · l load the driver anyway · r look again",
             Tab::Display => "u bigger text · U smaller text · + brighter · − dimmer · r look again",
-            Tab::Sound => "o output · t test sound · + louder · − quieter · m mute · Enter use the selected output · A advanced · r look again",
+            Tab::Sound => "o output · t test sound · + louder · − quieter · m mute · Enter use the selected output · A advanced · M mixer · r look again",
             Tab::Keyboard => "f function keys mode · i ISO layout · o swap Option/Command · d repeat delay · r repeat rate · s scroll speed · y wheel lines · w wheel direction · n trackpad direction · g smooth scrolling · m momentum · b test screen · k test keyboard light · t test sound · Up/Down scroll the key table",
             Tab::SystemSounds => "Up/Down choose · Enter or Space switch on or off · p preview · + louder · − quieter",
             Tab::Cloud => "c change the mode: Automatic, On, Off",
@@ -3071,6 +3071,14 @@ impl App for SettingsApp {
     }
 
     fn open_item(&mut self, item: &str, cx: &AppCx) {
+        // the GIT tile's "Add connection...": Settings, Git, with the wizard open
+        if item == "git:add" {
+            if let Some(i) = self.tabs.iter().position(|x| *x == Tab::GitKeys) {
+                self.tab = i;
+                self.git_open_wizard(cx, None);
+            }
+            return;
+        }
         // `tab:network` and the like: another part of the shell (the Devices popover, the clock) asks for one page
         if let Some(name) = item.strip_prefix("tab:") {
             // `tab:clusters`: the Dev cluster page with the Clusters list open (the cluster switchers' "Manage clusters...")
@@ -3492,7 +3500,7 @@ impl SettingsApp {
                 v
             }
             (Tab::Display, _) => vec![("Brighter", acc, '+'), ("Dimmer", mut_, '-'), ("Look again", mut_, 'r')],
-            (Tab::Sound, _) => vec![("Output", acc, 'o'), ("Test sound", acc, 't'), ("Louder", mut_, '+'), ("Quieter", mut_, '-'), ("Mute", mut_, 'm'), ("Advanced", mut_, 'A'), ("Look again", mut_, 'r')],
+            (Tab::Sound, _) => vec![("Output", acc, 'o'), ("Test sound", acc, 't'), ("Louder", mut_, '+'), ("Quieter", mut_, '-'), ("Mute", mut_, 'm'), ("Mix sounds", mut_, 'M'), ("Advanced", mut_, 'A'), ("Look again", mut_, 'r')],
             (Tab::Storage, _) if self.storage.virtual_disks.is_some() => vec![("New virtual disk", acc, 'n'), ("Delete it", err, 'x'), ("Make data disk", ERR, 'm'), ("Rescan", TEXT, 'r')],
             (Tab::Storage, _) => vec![("Make data disk", ERR, 'm'), ("Rescan", TEXT, 'r'), ("Reboot", TEXT, 'b')],
             (Tab::Skills, _) => {
