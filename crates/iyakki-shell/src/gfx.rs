@@ -66,6 +66,10 @@ pub enum Icon {
     Flows,
     /// The Devices button: a screen on its stand.
     Devices,
+    /// The DISKS tile: a drive with its light.
+    Disks,
+    /// The LAB tile: a flask.
+    Lab,
 }
 
 type GlyphKey = (char, u32, Face);
@@ -1273,6 +1277,48 @@ impl Gfx {
                     }
                 }
             }
+            Icon::Disks => {
+                // a drive: a flat body, a slot and its light
+                if let Some(b) = rrect_path(x0 + s * 0.08, y0 + s * 0.30, s * 0.84, s * 0.44, s * 0.1) {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                let mut slot = PathBuilder::new();
+                slot.move_to(x0 + s * 0.2, y0 + s * 0.52);
+                slot.line_to(x0 + s * 0.56, y0 + s * 0.52);
+                if let Some(l) = slot.finish() {
+                    self.pm.stroke_path(&l, &p, &st, id, None);
+                }
+                let mut led = PathBuilder::new();
+                led.push_circle(x0 + s * 0.76, y0 + s * 0.52, s * 0.06);
+                if let Some(d) = led.finish() {
+                    self.pm.fill_path(&d, &p, FillRule::Winding, id, None);
+                }
+            }
+            Icon::Lab => {
+                // a flask: a narrow neck, a wide body, the liquid line and a bubble
+                let mut f = PathBuilder::new();
+                f.move_to(x0 + s * 0.38, y0 + s * 0.1);
+                f.line_to(x0 + s * 0.38, y0 + s * 0.4);
+                f.line_to(x0 + s * 0.12, y0 + s * 0.84);
+                f.line_to(x0 + s * 0.88, y0 + s * 0.84);
+                f.line_to(x0 + s * 0.62, y0 + s * 0.4);
+                f.line_to(x0 + s * 0.62, y0 + s * 0.1);
+                f.close();
+                if let Some(b) = f.finish() {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                let mut line = PathBuilder::new();
+                line.move_to(x0 + s * 0.28, y0 + s * 0.62);
+                line.line_to(x0 + s * 0.72, y0 + s * 0.62);
+                if let Some(l) = line.finish() {
+                    self.pm.stroke_path(&l, &p, &st, id, None);
+                }
+                let mut dot = PathBuilder::new();
+                dot.push_circle(x0 + s * 0.5, y0 + s * 0.74, s * 0.05);
+                if let Some(d) = dot.finish() {
+                    self.pm.fill_path(&d, &p, FillRule::Winding, id, None);
+                }
+            }
             Icon::Mesh => {
                 // three linked nodes
                 let pts = [(0.5, 0.18), (0.16, 0.78), (0.84, 0.78)];
@@ -1349,7 +1395,7 @@ mod tests {
 
     #[test]
     fn every_icon_draws_something() {
-        for icon in [Icon::Chat, Icon::Rag, Icon::Mcp, Icon::Cli, Icon::Users, Icon::Settings, Icon::Clipboard, Icon::Mic, Icon::Speaker, Icon::Runs, Icon::Edit, Icon::Browser, Icon::Camera, Icon::Mesh, Icon::Radio, Icon::Scan, Icon::Skills, Icon::Usage, Icon::Calendar, Icon::System, Icon::Media, Icon::SrePilot, Icon::Ide, Icon::Data, Icon::Tales, Icon::Bell, Icon::Lock, Icon::Power, Icon::Logout, Icon::Store, Icon::Dash, Icon::Flows, Icon::Devices] {
+        for icon in [Icon::Chat, Icon::Rag, Icon::Mcp, Icon::Cli, Icon::Users, Icon::Settings, Icon::Clipboard, Icon::Mic, Icon::Speaker, Icon::Runs, Icon::Edit, Icon::Browser, Icon::Camera, Icon::Mesh, Icon::Radio, Icon::Scan, Icon::Skills, Icon::Usage, Icon::Calendar, Icon::System, Icon::Media, Icon::SrePilot, Icon::Ide, Icon::Data, Icon::Tales, Icon::Bell, Icon::Lock, Icon::Power, Icon::Logout, Icon::Store, Icon::Dash, Icon::Flows, Icon::Devices, Icon::Disks, Icon::Lab] {
             let mut g = Gfx::new(96, 96);
             g.clear(rgb(0, 0, 0));
             g.icon(icon, 48.0, 48.0, 80.0, rgb(255, 255, 255));

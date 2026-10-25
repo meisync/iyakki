@@ -4,6 +4,7 @@
 //! Sizes are in unscaled units; the IDE draws at `s * metrics.k`, where `s` already carries the window and the person's UI
 //! size (Settings → Display). Compact is the default: about 12-13 px text at 1280x720, 22 px rows, 26 px tabs.
 
+use crate::safeclamp::SafeClamp;
 use crate::fx::{self, with_alpha, Glyph};
 use crate::gfx::{rgb, Face, Gfx};
 use crate::ui::{Event, DIM, MUTED, R, TEXT};
@@ -299,7 +300,7 @@ pub fn tooltip(g: &mut Gfx, anchor: R, s: f32, text: &str, bounds: R) {
     let tw = (g.text_width(sz, text, Face::Sans) + 16.0 * s).min(bounds.w - 8.0 * s).max(20.0);
     let t = g.fit(sz, text, Face::Sans, tw - 16.0 * s);
     let h = 22.0 * s;
-    let x = (anchor.x + anchor.w - tw).clamp(bounds.x + 4.0 * s, (bounds.x + bounds.w - tw - 4.0 * s).max(bounds.x));
+    let x = (anchor.x + anchor.w - tw).clamp_safe(bounds.x + 4.0 * s, (bounds.x + bounds.w - tw - 4.0 * s).max(bounds.x));
     let below = anchor.y + anchor.h + 4.0 * s;
     let y = if below + h <= bounds.y + bounds.h { below } else { anchor.y - h - 4.0 * s };
     g.rrect(x, y, tw, h, 5.0 * s, rgb(34, 40, 66));

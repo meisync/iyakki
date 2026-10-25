@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use iyakki_agent::store::catalog::{HttpFetch, SourceCfg};
 use iyakki_agent::store::install::{Actor, Review};
 use iyakki_agent::devmode as dm;
-use iyakki_agent::store::{keys, publishflow as pf, tile, tilehub, Store};
+use iyakki_agent::store::{keys, privatepub, publishflow as pf, tile, tilehub, Store};
 use iyakki_agent::target::{self as tg, Target as AppTarget};
 
 use super::card::{Action, Card, Tone};
@@ -33,10 +33,15 @@ pub enum CardAction {
     Fix(String),
     /// The review card of a publish: Approve sends it.
     PublishReview,
+    /// A private store deployed on this device, not yet added: Approve adds it with the key shown pinned, chooses it as the publishing
+    /// target and goes on to the publish review.
+    AddStoreThenPublish,
     /// The result of a publish; `Install it here to test` is offered.
     PublishDone,
     /// The install review of the app just published.
     InstallReview(Box<Review>),
+    /// A decision of the git support (a new host key, a pull over local changes, removing a folder): see `ide_git`.
+    Git(super::ide_git::GitCard),
 }
 
 pub struct CardModal {
@@ -53,6 +58,10 @@ pub struct PublishState {
     pub kind: String,
     pub text: Option<String>,
     pub card: Option<pf::Card>,
+    /// The deployed-but-not-added private store the Store choice listed first (the choice list is shifted by one when it is there).
+    pub unadded: Option<privatepub::Offer>,
+    /// The key and address the person is looking at on the "add it" card.
+    pub adding: Option<iyakki_agent::store::Probe>,
 }
 
 impl IdeApp {
@@ -89,7 +98,7 @@ impl IdeApp {
         }
     }
 
-    fn card_modal(&mut self, card: Card, action: CardAction) {
+    pub(super) fn card_modal(&mut self, card: Card, action: CardAction) {
         self.modal = Some(Modal::Card(Box::new(CardModal { card, action })));
     }
 
@@ -250,15 +259,23 @@ impl IdeApp {
         }
         let store = Store::for_services(&cx.services);
         let list = pf::stores(&store);
-        let mut options: Vec<String> = list.iter().map(|s| format!("{}{} · {}{}", if s.is_default { "★ " } else { "" }, s.name, s.address, if s.fingerprint.is_empty() { String::new() } else { format!(" · key {}", s.fingerprint.split(' ').take(2).collect::<Vec<_>>().join(" ")) })).collect();
-        options.push("Deploy a new private store to k3s…".into());
+        let fetch = HttpFetch(cx.services.quick_upstream());
+        // a private store deployed from this device and not yet added comes first: choosing it adds it (key checked) and publishes
+        let offer = privatepub::offer(&cx.services, &cx.session.user, &store, &fetch);
+        let deployed = privatepub::deployed_all(&cx.services, &cx.session.user, &store);
+        let mut options: Vec<String> = offer.iter().map(privatepub::option_label).collect();
+        options.extend(list.iter().map(|s| format!("{}{} · {}{}", if s.is_default { "★ " } else { "" }, s.name, s.address, if s.fingerprint.is_empty() { String::new() } else { format!(" · key {}", s.fingerprint.split(' ').take(2).collect::<Vec<_>>().join(" ")) })));
+        options.push(match deployed.first() {
+            Some(d) => format!("Deploy a new private store to k3s… (already deployed: {}, not redeployed)", d.instance),
+            None => "Deploy a new private store to k3s…".into(),
+        });
         options.push("Export package file (no store)".into());
-        let default_store = list.iter().position(|s| s.is_default && s.private).or_else(|| list.iter().position(|s| s.private)).unwrap_or(options.len() - 2);
+        let off = usize::from(offer.is_some());
+        let default_store = if offer.is_some() { 0 } else { list.iter().position(|s| s.is_default && s.private).or_else(|| list.iter().position(|s| s.private)).unwrap_or(options.len() - 2) };
         // developer mode: this device, and the devices this account paired with (the same install path as `iyakki dev install`)
         options.extend(dev_targets(cx).iter().map(DevTarget::label));
         // the version the store already has decides the suggested bump
-        let fetch = HttpFetch(cx.services.quick_upstream());
-        let remote = list.get(default_store).filter(|s| s.private).and_then(|s| pf::remote_version(&fetch, &s.address, &p.name));
+        let remote = default_store.checked_sub(off).and_then(|i| list.get(i)).filter(|s| s.private).and_then(|s| pf::remote_version(&fetch, &s.address, &p.name));
         let has = remote.as_deref().map(|r| format!(" (the store has {r})")).unwrap_or_default();
         let ahead = remote.as_deref().is_none_or(|r| iyakki_agent::pkg::newer(&p.version, r));
         let b = |k| pf::bumped(&p.version, k).unwrap_or_default();
@@ -271,7 +288,7 @@ impl IdeApp {
             .choice(&format!("Version{has}"), &refs(&vopts), if ahead { 0 } else { 1 })
             .text("Change log line", "", if p.changelog_has_version { "optional: CHANGELOG.md already mentions this version" } else { "one sentence; required when you raise the version" })
             .choice("Signing key", &refs(&kopts), 0);
-        self.publish = Some(PublishState { dir, src: None, key: None, name: p.name, kind: p.kind, text: None, card: None });
+        self.publish = Some(PublishState { dir, src: None, key: None, name: p.name, kind: p.kind, text: None, card: None, unadded: offer, adding: None });
         self.modal = Some(Modal::Form(FormKind::Publish, f));
     }
 
@@ -291,10 +308,30 @@ impl IdeApp {
         };
         let Some(st) = self.publish.as_ref() else { return };
         let dir = st.dir.clone();
+        let offer = st.unadded.clone();
         let store = Store::for_services(&cx.services);
         let list = pf::stores(&store);
-        let sel = f.choice_idx(0);
+        // the deployed-but-not-added private store is the first row when the form listed it; the other rows are shifted by one
+        let off = usize::from(offer.is_some());
+        let raw = f.choice_idx(0);
+        let add_sel = off == 1 && raw == 0;
+        let sel = raw.saturating_sub(off);
         let user = cx.session.user.clone();
+        // what cannot work is said before anything is written (a version bump, a key)
+        if add_sel {
+            if let Some(Err(why)) = offer.as_ref().map(|o| o.probe.clone()) {
+                return fail(self, f, why);
+            }
+            let actor = Actor::from_policy(&user, &cx.session.policy);
+            if !(actor.allowed && actor.admin) {
+                return fail(self, f, privatepub::need_admin_text());
+            }
+        } else if sel == list.len() {
+            if let Some(d) = privatepub::deployed_all(&cx.services, &user, &store).into_iter().next() {
+                let hint = if d.added.is_some() { "it is already added: choose it in the list" } else { "choose it at the top of the list" };
+                return fail(self, f, format!("A private store is already deployed on this device ({}, namespace {}): {hint}. To start over use STORE, Settings, Private store, Manage (Repair or Reset).", d.instance, d.namespace));
+            }
+        }
         // version first: a bump is written to the project and the change log
         let bump = [None, Some(pf::Bump::Patch), Some(pf::Bump::Minor), Some(pf::Bump::Major)][f.choice_idx(1).min(3)];
         let line = f.value(2);
@@ -327,11 +364,32 @@ impl IdeApp {
         };
         let Some(key) = key else { return fail(self, f, "The signing key could not be read.".into()) };
         cx.audit.record(&user, "ide.publish.key", &format!("signing key {}", key.1));
+        if add_sel {
+            // the person looks at the key before anything is trusted: the card shows the fingerprint, and Approve adds and goes on
+            let Some(Ok(p)) = offer.map(|o| o.probe) else { return fail(self, f, "The private store cannot be read now.".into()) };
+            if let Some(st) = self.publish.as_mut() {
+                st.key = Some(key);
+                st.adding = Some(p.clone());
+            }
+            let ns = privatepub::deployed_all(&cx.services, &user, &store).into_iter().next().map(|d| d.namespace).unwrap_or_default();
+            let c = Card::new("Add this private store and publish?", self.accent())
+                .line(&format!("Store: {}", p.name), Tone::Bold)
+                .line(&format!("Address: {}", p.url.trim_end_matches("/catalog.json")), Tone::Normal)
+                .line("Catalog key fingerprint", Tone::Bold)
+                .line(&p.fingerprint, Tone::Bold)
+                .line(&p.trust, Tone::Warn)
+                .line(&format!("It was deployed from this device. The store printed this fingerprint when it started: compare it with the pod log (kubectl logs -n {ns} deploy/private-store) or the store's own page. If it differs, press Cancel."), Tone::Dim)
+                .line("Approving adds it to your STORE with this key pinned, chooses it as the publishing target, and then shows the publish review. Nothing is published yet.", Tone::Dim)
+                .action(Action::new("Add it and publish", Key::Char('y'), OKC))
+                .action(Action::new("Cancel", Key::Esc, MUTE));
+            self.card_modal(c, CardAction::AddStoreThenPublish);
+            return;
+        }
         if sel == list.len() {
             // a new private store first: the platform wizard with the private store ready, and back here afterwards
             self.publish = None;
             self.request = Some(("settings".into(), "platform:private-store".into()));
-            self.notice = Some(("Deploy the private store in the wizard; when it is ready and added in the STORE, press Publish again.".into(), true));
+            self.notice = Some(("Deploy the private store in the wizard; when it is ready, press Publish again: it is listed first, and one approval adds it (with its key checked) and publishes.".into(), true));
             return;
         }
         if sel == list.len() + 1 {
@@ -346,7 +404,7 @@ impl IdeApp {
                             let c = Card::new("Package file written", self.accent()).line(&out.display().to_string(), Tone::Bold).line(&format!("{} bytes, signed with your key {}. {}", text.len(), key.1, notes.join(" ")), Tone::Normal).line("Install it with STORE, Settings, install from a file, or publish it later with the assistant's store_publish.", Tone::Dim).action(Action::new("Close", Key::Esc, CYAN));
                             self.card_modal(c, CardAction::Info);
                         }
-                        Err(e) => return fail(self, f, format!("{}: {e}", out.display())),
+                        Err(e) => return fail(self, f, iyakki_agent::scope::explain_io(&e, &out, "write the package file to")),
                     }
                 }
                 Err(e) => return fail(self, f, e),
@@ -380,12 +438,43 @@ impl IdeApp {
             st.src = Some(src.clone());
             st.key = Some(key);
         }
-        if !pf::token_present(&cx.services, &user, &src.id) {
+        self.token_or_review(cx);
+    }
+
+    /// With the store and key chosen: ask for the publish token when there is none in the vault (a store deployed here has one), else the review.
+    fn token_or_review(&mut self, cx: &AppCx) {
+        let Some(src) = self.publish.as_ref().and_then(|p| p.src.clone()) else { return };
+        if !pf::token_present(&cx.services, &cx.session.user, &src.id) {
             let f = Form::new(&format!("Publish token for {}", src.name)).secret("Token", "from the store's administrator; it goes into your vault and is never shown to the assistant");
             self.modal = Some(Modal::Form(FormKind::PublishToken, f));
             return;
         }
         self.show_publish_review(cx);
+    }
+
+    /// "Add it and publish" was approved on the card with the fingerprint: add the store with that key pinned, make it the target, go on.
+    fn add_store_then_publish(&mut self, cx: &AppCx) {
+        let Some(p) = self.publish.as_ref().and_then(|s| s.adding.clone()) else { return };
+        let store = Store::for_services(&cx.services);
+        let actor = Actor::from_policy(&cx.session.user, &cx.session.policy);
+        let fetch = HttpFetch(cx.services.quick_upstream());
+        match privatepub::add_and_target(&store, &actor, &fetch, &p, &p.name) {
+            Ok(src) => {
+                cx.audit.record(&cx.session.user, "store.pin", &format!("{} {}", p.url, p.fingerprint));
+                cx.audit.record(&cx.session.user, "ide.publish.addstore", &format!("{} added from Publish and chosen as the target", src.name));
+                if let Some(st) = self.publish.as_mut() {
+                    st.src = Some(src);
+                    st.unadded = None;
+                    st.adding = None;
+                }
+                self.token_or_review(cx);
+            }
+            Err(e) => {
+                self.publish = None;
+                let c = Card::new("The store was not added", self.accent()).danger().line(&e, Tone::Bad).line("Nothing was changed.", Tone::Dim).action(Action::new("Close", Key::Esc, MUTE));
+                self.card_modal(c, CardAction::Info);
+            }
+        }
     }
 
     pub fn submit_publish_token(&mut self, f: Form, cx: &AppCx) {
@@ -481,6 +570,9 @@ impl IdeApp {
                 }
                 self.card_modal(card, CardAction::PublishReview);
             }
+            (CardAction::AddStoreThenPublish, Key::Char('y')) => self.add_store_then_publish(cx),
+            (CardAction::AddStoreThenPublish, Key::Esc) => self.publish = None,
+            (CardAction::AddStoreThenPublish, _) => self.card_modal(card, CardAction::AddStoreThenPublish),
             (CardAction::PublishReview, Key::Char('y')) => self.do_publish(cx),
             (CardAction::PublishReview, Key::Esc) => self.publish = None,
             (CardAction::PublishReview, _) => self.card_modal(card, CardAction::PublishReview),
@@ -503,6 +595,7 @@ impl IdeApp {
                 }
             }
             (CardAction::InstallReview(_), _) => {}
+            (CardAction::Git(c), k) => self.git_card_action(c, k, cx),
             _ => {}
         }
         self.redraw = true;

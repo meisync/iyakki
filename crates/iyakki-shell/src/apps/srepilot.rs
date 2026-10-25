@@ -13,6 +13,7 @@
 //! screen and not paused. With `IYAKKI_REDUCED_MOTION=1` the picture is still (a few particles, no movement).
 //! `W` swaps the drawing for the original whiteboard photo with the same particles flowing along the lines of the sketch.
 
+use crate::safeclamp::SafeClamp;
 use std::cell::Cell;
 
 use iyakki_web::image::Bitmap;
@@ -267,7 +268,7 @@ impl Path {
     pub fn at(&self, f: f32) -> (f32, f32, (f32, f32)) {
         let total = self.len().max(0.001);
         let d = f.clamp(0.0, 1.0) * total;
-        let i = self.cum.partition_point(|c| *c < d).clamp(1, self.pts.len().saturating_sub(1).max(1));
+        let i = self.cum.partition_point(|c| *c < d).clamp_safe(1, self.pts.len().saturating_sub(1).max(1));
         if self.pts.len() < 2 {
             let p = self.pts.first().copied().unwrap_or((0.0, 0.0));
             return (p.0, p.1, (1.0, 0.0));
@@ -879,7 +880,7 @@ impl SrePilotApp {
         let c = lay.canvas;
         let key = CacheKey { canvas: (c.x as i32, c.y as i32, c.w as i32, c.h as i32), scale: (s * 100.0) as i32, whiteboard: self.whiteboard, vertical: lay.vertical };
         let (gw, gh) = (g.width() as i32, g.height() as i32);
-        let (x0, y0, x1, y1) = ((c.x as i32).clamp(0, gw), (c.y as i32).clamp(0, gh), ((c.x + c.w) as i32 + 1).clamp(0, gw), ((c.y + c.h) as i32 + 1).clamp(0, gh));
+        let (x0, y0, x1, y1) = ((c.x as i32).clamp_safe(0, gw), (c.y as i32).clamp_safe(0, gh), ((c.x + c.w) as i32 + 1).clamp_safe(0, gw), ((c.y + c.h) as i32 + 1).clamp_safe(0, gh));
         let stride = gw as usize * 4;
         let fresh = self.cache.as_ref().is_some_and(|k| k.key == key && k.rows.len() == (y1 - y0).max(0) as usize * (x1 - x0).max(0) as usize * 4);
         if fresh {

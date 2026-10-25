@@ -5,6 +5,7 @@
 //! line break per line shown, a blank line between separate blocks) and the pixel span to highlight on each line.
 //! Nothing here draws or talks to the clipboard; the views do.
 
+use crate::safeclamp::SafeClamp;
 use crate::gfx::{Face, Gfx};
 
 /// One line of text as drawn. `xs[i]` is the left edge of character `i` and `xs[n]` the right edge of the last one, all
@@ -436,7 +437,7 @@ impl Pane {
     /// Re-extends the selection to the held pointer after the view scrolled by itself.
     pub fn refresh_drag(&mut self) {
         if let (Some((x, y)), Some(a)) = (self.ptr, self.area) {
-            self.sel.drag(&self.doc, x, y.clamp(a.y, a.y + a.h));
+            self.sel.drag(&self.doc, x, y.clamp_safe(a.y, a.y + a.h));
         }
     }
 
@@ -455,7 +456,7 @@ impl Pane {
                     } else {
                         0.0
                     };
-                    self.sel.drag(&self.doc, x, y.clamp(a.y, a.y + a.h));
+                    self.sel.drag(&self.doc, x, y.clamp_safe(a.y, a.y + a.h));
                 } else {
                     self.sel.press(&self.doc, x, y, crate::ui::click_count(), crate::ui::shift_held());
                     self.ptr = Some((x, y));

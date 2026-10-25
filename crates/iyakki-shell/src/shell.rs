@@ -96,7 +96,14 @@ impl ShellEnv {
         services.clis.set_detect_present(true);
         // sound goes to the output that is connected (HDMI/DP, USB, ...), not to ALSA's card 0 device 0
         let t1 = std::time::Instant::now();
-        services.start_sound_output();
+        // cloud mode without sound hardware: no audio probes, no soft volume, no device watcher
+        // (the sound card may appear after the shell started: the MacBookPro14,1's does, about 11 s after boot; then the
+        // output is set up as soon as it is there, whoever is signed in)
+        if iyakki_agent::cloudmode::detect(services.cloud_setting()).audio_services {
+            services.start_sound_output();
+        } else if !services.cloud_setting().eq(&iyakki_agent::cloudmode::Setting::On) {
+            services.start_sound_output_when_ready();
+        }
         let t_sound = t1.elapsed();
         // model downloads report their progress over time, like the radio
         services.set_streamer(Arc::new(iyakki_agent::iyakki_proxy::https::UreqStreamer::default()));
@@ -120,12 +127,28 @@ impl ShellEnv {
             chat,
             mcp_servers,
             services,
-            web: Arc::new(iyakki_web::cache::CachedFetch::new(iyakki_agent::iyakki_proxy::https::BrowserFetch::default(), std::path::Path::new(&p.data).join("cache").join("web"))),
+            web: browser_web(std::path::Path::new(&p.data)),
             hostname: std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()).unwrap_or_else(|_| "iyakki".into()),
             hwcheck: p.hwcheck,
             data_volatile: iyakki_storage::data_location(&iyakki_storage::Roots::real(), std::path::Path::new(&p.data)) == iyakki_storage::DataLocation::Memory,
         })
     }
+}
+
+/// The browser's network: the HTTP client behind connection limits (6 per host, 32 overall, urgent requests first), with one page
+/// cache per person under `cache/web/<user>` (memory tier plus disk tier, sized from the machine, see `apps::browser_speed`).
+/// Requests that do not say who they are (the assistant's web tools) are never cached.
+fn browser_web(data: &std::path::Path) -> Arc<dyn iyakki_web::Fetch> {
+    use iyakki_web::net::{LimitedFetch, Limiter, GLOBAL, PER_HOST};
+    let limited: Arc<dyn iyakki_web::Fetch> = Arc::new(LimitedFetch::new(iyakki_agent::iyakki_proxy::https::BrowserFetch::default(), Arc::new(Limiter::new(PER_HOST, GLOBAL))));
+    let base = data.join("cache").join("web");
+    let budget = crate::apps::browser_speed::budget_for(iyakki_web::net::CacheSize::Auto, &crate::apps::browser_speed::machine(data));
+    let caches = Arc::new(iyakki_web::cache::UserCaches::new(limited, base, budget));
+    // files an older version left directly in the folder belonged to nobody: remove them off the boot path
+    let old = caches.clone();
+    let _ = std::thread::Builder::new().name("iyakki-cache-tidy".into()).spawn(move || old.remove_legacy_files());
+    // the person's ad and tracker filter sits outside the cache: a blocked request is never sent and never cached
+    Arc::new(iyakki_web::blocker_state::FilteredFetch::new(caches, iyakki_web::blocker_state::Filter::global()))
 }
 
 /// Older installs configured chat in ai.conf (`chat.url`, `chat.model`, `chat.key_*`). Carry that over
@@ -200,6 +223,8 @@ struct Tile {
 enum LItem {
     Sys(&'static Tile),
     App(Box<iyakki_agent::store::tilehub::TileEntry>),
+    /// The hint shown in a group of the person's own that has no tiles yet.
+    Empty,
 }
 
 const TILES: &[Tile] = &[
@@ -210,7 +235,7 @@ const TILES: &[Tile] = &[
     Tile { app: PApp::Edit, icon: Icon::Edit, label: "EDIT", sub: "Edit files", accent: rgb(110, 224, 160), group: Some(Group::Work) },
     Tile { app: PApp::Runs, icon: Icon::Runs, label: "RUNS", sub: "Agent history", accent: rgb(255, 196, 94), group: Some(Group::Work) },
     Tile { app: PApp::Users, icon: Icon::Users, label: "USERS", sub: "Accounts", accent: rgb(255, 107, 154), group: Some(Group::System) },
-    Tile { app: PApp::Settings, icon: Icon::Settings, label: "SETTINGS", sub: "Models, vault", accent: rgb(120, 170, 255), group: None },
+    Tile { app: PApp::Settings, icon: Icon::Settings, label: "SETTINGS", sub: "Models, vault", accent: rgb(120, 170, 255), group: Some(Group::Home) },
     Tile { app: PApp::Browser, icon: Icon::Browser, label: "BROWSER", sub: "Read the web", accent: rgb(88, 190, 235), group: Some(Group::WebMedia) },
     Tile { app: PApp::Radio, icon: Icon::Radio, label: "RADIO", sub: "Online stations", accent: rgb(255, 150, 110), group: Some(Group::WebMedia) },
     Tile { app: PApp::Skills, icon: Icon::Skills, label: "SKILLS", sub: "Teach tasks", accent: rgb(255, 170, 90), group: Some(Group::Home) },
@@ -221,18 +246,28 @@ const TILES: &[Tile] = &[
     Tile { app: PApp::Calendar, icon: Icon::Calendar, label: "CALENDAR", sub: "Plans, alarms", accent: rgb(110, 190, 255), group: Some(Group::Home) },
     Tile { app: PApp::Media, icon: Icon::Media, label: "MEDIA", sub: "Music, videos", accent: rgb(240, 120, 220), group: Some(Group::WebMedia) },
     Tile { app: PApp::SrePilot, icon: Icon::SrePilot, label: "SRE PILOT", sub: "Assist · Auto", accent: rgb(60, 235, 200), group: Some(Group::Work) },
-    Tile { app: PApp::Ide, icon: Icon::Ide, label: "AI IDE", sub: "Code with the AI", accent: rgb(100, 230, 255), group: Some(Group::Work) },
+    Tile { app: PApp::Ide, icon: Icon::Ide, label: "AI IDE", sub: "Code with the AI", accent: rgb(100, 230, 255), group: Some(Group::Home) },
     Tile { app: PApp::Data, icon: Icon::Data, label: "DATA", sub: "Tables, CSV", accent: crate::apps::data::ACCENT, group: Some(Group::Work) },
     Tile { app: PApp::Tales, icon: Icon::Tales, label: "TALES", sub: "Read-aloud tales", accent: crate::apps::story::ACCENT, group: Some(Group::Home) },
     Tile { app: PApp::Store, icon: Icon::Store, label: "STORE", sub: "Apps and skills", accent: crate::apps::store::ACCENT, group: Some(Group::System) },
     Tile { app: PApp::Dash, icon: Icon::Dash, label: "DASH", sub: "Graphs, tables", accent: crate::apps::dash::ACCENT, group: Some(Group::Work) },
     Tile { app: PApp::Flows, icon: Icon::Flows, label: "FLOWS", sub: "Workflows, runs", accent: crate::apps::flows::ACCENT, group: Some(Group::Work) },
     Tile { app: PApp::Camera, icon: Icon::Camera, label: "CAMERA", sub: "Photos, video", accent: crate::apps::camera::ACCENT, group: Some(Group::WebMedia) },
+    Tile { app: PApp::Voice, icon: Icon::Speaker, label: "VOICE", sub: "Read, dictate", accent: crate::apps::voice::ACCENT, group: Some(Group::Home) },
+    Tile { app: PApp::Disks, icon: Icon::Disks, label: "DISKS", sub: "Drives, partitions", accent: crate::apps::disks_tile::ACCENT, group: Some(Group::System) },
+    Tile { app: PApp::K8s, icon: Icon::Mesh, label: "K8S", sub: "Explore the cluster", accent: crate::apps::k8s_tile::ACCENT, group: Some(Group::System) },
+    Tile { app: PApp::LinuxWin, icon: Icon::Cli, label: "LINUX WINDOW", sub: "Linux programs", accent: crate::apps::linuxwin::ACCENT, group: Some(Group::System) },
+    Tile { app: PApp::Lab, icon: Icon::Lab, label: "LAB", sub: "Try picture models", accent: crate::apps::lab::ACCENT, group: Some(Group::Work) },
 ];
 
 /// The home screen section of an app's tile (the tile table's `group` field; `None`: not on the grid).
 pub(crate) fn tile_group(app: PApp) -> Option<Group> {
     TILES.iter().find(|t| t.app == app).and_then(|t| t.group)
+}
+
+/// The tiles a person sees on the grid, as (layout key, label, the group the tile is in when left alone), for Settings → Home layout.
+pub(crate) fn layout_tiles(admin: bool, cloud: &iyakki_agent::cloudmode::CloudMode) -> Vec<(String, &'static str, &'static str)> {
+    TILES.iter().filter(|t| t.group.is_some() && (t.app != PApp::Users || admin) && !cloud.hides_app(t.app)).map(|t| (iyakki_agent::layout::sys_key(t.label), t.label, t.group.map_or("", |g| g.id()))).collect()
 }
 
 /// The tiles as (app, label), for tests of other modules.
@@ -265,6 +300,10 @@ pub struct Shell {
     hostdlg: Option<Box<crate::apps::hostfiles::HostDialog>>,
     /// The sign-in dialog of Claude Code / GitHub Copilot (agent_login.rs), over any screen.
     login: Option<Box<crate::agent_login::LoginModal>>,
+    /// "Scan QR" of the clipboard history (clip_scan.rs): the camera, what was read, Copy / Scan again / Cancel.
+    clipscan: Option<Box<crate::clip_scan::ClipScan>>,
+    /// Where the cameras of the scan come from (`None`: the machine's own; tests give made-up ones).
+    scan_src: Option<std::sync::Arc<crate::scan_core::CamSource>>,
     drag_over: bool,
     /// The right-click menu (ctxmenu.rs), and the text fields the last frame drew (it needs them to know what is under the pointer).
     ctx: Option<crate::ctxmenu::Menu>,
@@ -285,6 +324,11 @@ pub struct Shell {
     sel: usize,
     /// The launcher group shown (remembered per person).
     group: Group,
+    /// The id of the person's own group being shown, when it is one (else `group` is).
+    cgroup: Option<String>,
+    /// The person's layout (groups they made, tiles they moved) and the menus and cards that change it (`shell_layout.rs`).
+    layout: iyakki_agent::layout::Layout,
+    lay: layout_impl::LayoutUi,
     mouse: (i32, i32),
     tick: u64,
     toast: Option<(String, u64, bool)>,
@@ -293,6 +337,10 @@ pub struct Shell {
     probes: Vec<R>,
     /// Something happened that changes the picture (see [`Shell::take_stale`]).
     stale: bool,
+    /// The open app's live picture changed and nothing else did (see [`Shell::live_update`], `shell_live.rs`).
+    live: bool,
+    /// The front end paints the live picture on its own ([`Shell::live_update`]): else a new picture makes the scene stale as before.
+    live_paint: bool,
     /// The window should ask the system clipboard for its current text (opening the queue does), and until which tick
     /// the answer, when it comes, belongs to the queue rather than to a field.
     want_host_paste: bool,
@@ -313,6 +361,8 @@ pub struct Shell {
     stash: Option<(Box<dyn App>, PApp)>,
     /// What the bell shows: unread notifications, approvals waiting, overdue tasks.
     badge: Badge,
+    /// System sounds: what has been seen so far (see `cues`).
+    cues: crate::cues::CueState,
     /// The clock in the top bar, and the rectangle whose hover shows its tooltip this frame.
     clock: crate::clockbar::ClockState,
     clock_tip: Option<R>,
@@ -320,24 +370,39 @@ pub struct Shell {
     clock_ready: bool,
     /// The Devices popover (button next to the screenshot icon, F8).
     devpop: crate::devpop::DevPop,
+    /// The login screens' top bar and power card, and whether this shell is a remote (browser) session (`loginbar.rs`).
+    lbar: crate::loginbar::LoginBar,
     /// Replaces the machine the popover looks at (tests).
     devprobe: Option<crate::devpop::Probe>,
     /// The IYAKKI menu (a click on the name in the launcher's top bar, F10): About, Quick install, Media player, Mac drivers.
     brand: crate::brandmenu::BrandMenu,
     /// The installer indicator beside the clock and the list of installs it opens.
     installs: crate::installpop::InstallPop,
+    /// The battery indicator of a laptop, its popup and the low-battery cards (`batterybar.rs`, `shell_battery.rs`).
+    battery: crate::batterybar::BatteryBar,
+    /// The banner shown while the drive the data lives on is lost or failing (`lossbar.rs`, `shell_loss.rs`).
+    loss: crate::lossbar::LossBar,
     /// Replaces the program Quick install runs as its jobs (tests).
     quick_launch: Option<iyakki_agent::quickinstall::Launch>,
     /// "DEV" (or "DEV · pairing") while Developer mode is on, read every second.
-    dev_sign: Option<&'static str>,
-    /// The answer of the background lookup of newer versions for Quick install (taken into the menu when it arrives).
-    latest_slot: Arc<Mutex<Option<Vec<(iyakki_agent::quickinstall::Item, iyakki_agent::quickinstall::Latest)>>>>,
-    /// The answer of the background reading of what is installed (taken into the menu when it arrives).
-    facts_slot: Arc<Mutex<Option<iyakki_agent::quickinstall::Facts>>>,
+    dev_sign: Option<String>,
     /// The USB cameras: the CAMERA tile is greyed while there is none (looked at again every two seconds).
     camera: crate::camera::Presence,
     /// The "camera in use by the assistant" sign was on in the last frame.
     cam_sign: bool,
+    /// Media and Fn keys: the on-screen display, held keys, the power card (`shell_fnkeys.rs`).
+    fnk: crate::fnkeys::FnState,
+    /// The Touch Bar strip of a T2 MacBook (`shell_touchbar.rs`).
+    tbar: touchbar_impl::TbState,
+    /// Cloud mode: what is hidden because this machine has no local screen, sound or camera (`iyakki_agent::cloudmode`).
+    cloud: iyakki_agent::cloudmode::CloudMode,
+    /// Panes: several apps side by side on one display (`shell_panes.rs`).
+    panes: panes_impl::PanesUi,
+    /// The screen saver and screen off (`shell_saver.rs`, `saver.rs`).
+    saver: saver_impl::SaverUi,
+    /// The part of a wheel notch left over when pixel scrolling is turned into whole notches (`shell_scroll.rs`), and when.
+    scroll_rem: f32,
+    scroll_rem_at: u64,
 }
 
 /// The numbers behind the bell.
@@ -417,6 +482,7 @@ pub(crate) fn scale_for(w: u32, h: u32) -> f32 {
 
 impl Shell {
     pub fn new(env: ShellEnv) -> Shell {
+        crate::crashlog::install();
         let first_run = env.store.lock().map(|s| s.is_empty()).unwrap_or(false);
         let screen = if env.hwcheck {
             Screen::HwCheck(Box::new(crate::hwcheck::HwCheck::new()))
@@ -425,7 +491,13 @@ impl Shell {
         } else {
             Screen::Login(Form::login_for(last_user(&env).as_deref()))
         };
-        Shell { env, hits: Vec::new(), clip: None, hostdlg: None, login: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), quick_launch: None, dev_sign: None, latest_slot: Default::default(), facts_slot: Default::default(), camera: if cfg!(test) { crate::camera::Presence::none() } else { crate::camera::Presence::system() }, cam_sign: false }
+        // tests run as a desktop unless one asks for cloud mode (`set_cloud_for_test`)
+        let cloud = if cfg!(test) { iyakki_agent::cloudmode::CloudMode::desktop() } else { iyakki_agent::cloudmode::detect(env.services.cloud_setting()) };
+        let mut sh = Shell { env, hits: Vec::new(), clip: None, hostdlg: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, camera: if cfg!(test) || !cloud.camera_watch { crate::camera::Presence::none() } else { crate::camera::Presence::system() }, cam_sign: false, fnk: Default::default(), tbar: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
+        if cloud.on {
+            sh.apply_cloud(cloud);
+        }
+        sh
     }
 
     pub fn screen_name(&self) -> String {
@@ -463,6 +535,9 @@ impl Shell {
     pub fn pointer(&self) -> crate::ui::Pointer {
         use crate::ui::Pointer;
         let (x, y) = self.mouse;
+        if self.screen_stage().covers() {
+            return Pointer::Hidden; // a still arrow on the saver would burn in
+        }
         if self.help || self.clip.is_some() || self.ctx.is_some() {
             return Pointer::Default;
         }
@@ -522,6 +597,32 @@ impl Shell {
         self.stale = true;
     }
 
+    /// Open an app the way a tile does (tests and the monkey test).
+    pub(crate) fn open_for_test(&mut self, app: PApp) {
+        self.open(app);
+    }
+
+    /// The services and session an app gets (tests that build an app by hand).
+    pub(crate) fn cx_for_test(&self) -> Option<AppCx> {
+        self.cx()
+    }
+
+    /// Back to the launcher (tests and the monkey test).
+    pub(crate) fn launcher_for_test(&mut self) {
+        self.screen = Screen::Launcher;
+    }
+
+    /// Mark this shell as a remote (browser) session: the login screens then show no power button and refuse the power action.
+    pub fn set_remote(&mut self, remote: bool) {
+        self.lbar.remote = remote;
+        self.saver_set_remote(remote);
+    }
+
+    /// Where the login bar's pieces were drawn last frame, and the Power button (tests and tools).
+    pub fn login_bar_layout(&self) -> (&[(crate::loginbar::Chip, R)], Option<R>) {
+        (&self.lbar.last, self.lbar.power_rect)
+    }
+
     pub fn hits(&self) -> &[crate::ui::Hit] {
         &self.hits
     }
@@ -542,42 +643,107 @@ impl Shell {
     /// Tiles visible to the current user: the four core apps always, Users only for admins.
     fn visible_tiles(&self) -> Vec<&'static Tile> {
         let admin = self.session.as_ref().is_some_and(|s| s.policy.manage_users);
-        TILES.iter().filter(|t| t.group.is_some() && (t.app != PApp::Users || admin)).collect()
+        TILES.iter().filter(|t| t.group.is_some() && (t.app != PApp::Users || admin) && !self.cloud.hides_app(t.app)).collect()
     }
 
-    /// The section tabs for this person: each section that has a tile for them.
-    fn groups(&self) -> Vec<Group> {
-        let apps: Vec<PApp> = self.visible_tiles().iter().map(|t| t.app).collect();
-        let custom: Vec<Group> = self.custom.iter().map(|e| launcher::group_of_custom(&e.group)).collect();
-        launcher::groups_with(&apps, &custom)
+    /// Take a Cloud mode decision into the shell and the menus that follow it.
+    /// Cloud mode decided again from what the machine has now: true when it changed. A sound card that registers late (the
+    /// MacBookPro14,1's CS8409 about 11 s after boot, after an automatic sign-in) would otherwise leave RADIO, MEDIA, TALES and
+    /// VOICE hidden for the whole session, because "no sound card" makes automatic Cloud mode hide them.
+    fn refresh_cloud(&mut self, c: iyakki_agent::cloudmode::CloudMode) -> bool {
+        if c == self.cloud {
+            return false;
+        }
+        self.apply_cloud(c);
+        true
+    }
+
+    fn apply_cloud(&mut self, c: iyakki_agent::cloudmode::CloudMode) {
+        self.devpop.set_hidden(c.hidden_device_rows.clone());
+        self.devpop.invalidate();
+        self.brand.set_cloud(c.clone());
+        self.cloud = c;
+        self.stale = true;
+    }
+
+    /// Cloud mode as decided for this machine.
+    pub fn cloud(&self) -> &iyakki_agent::cloudmode::CloudMode {
+        &self.cloud
+    }
+
+    /// Pretend to be another machine (tests).
+    #[cfg(test)]
+    pub(crate) fn set_cloud_for_test(&mut self, c: iyakki_agent::cloudmode::CloudMode) {
+        if !c.camera_watch {
+            self.camera = crate::camera::Presence::none();
+        }
+        self.apply_cloud(c);
+    }
+
+    /// The section tabs for this person: each built-in section that has a tile for them, then the groups they made (shown even
+    /// when empty, so they can fill them).
+    fn groups(&self) -> Vec<GroupRef> {
+        let mut v: Vec<GroupRef> = Group::CHIPS
+            .into_iter()
+            .filter(|g| self.visible_tiles().iter().any(|t| self.tile_gid(t) == g.id()) || self.custom.iter().any(|e| self.app_gid(e) == g.id()))
+            .map(GroupRef::from)
+            .collect();
+        v.extend(self.layout.groups.iter().map(|g| GroupRef { id: g.id.clone(), name: g.label.clone() }));
+        v
     }
 
     /// The section being shown (the first one, Home, when the remembered one has nothing for this person).
-    fn current_group(&self) -> Group {
+    fn current_group(&self) -> GroupRef {
         let gs = self.groups();
-        if gs.contains(&self.group) {
-            self.group
-        } else {
-            gs.first().copied().unwrap_or(Group::Home)
+        if let Some(c) = self.cgroup.as_ref().and_then(|c| gs.iter().find(|g| g.id == *c)) {
+            return c.clone();
         }
+        let b = GroupRef::from(self.group);
+        if gs.contains(&b) {
+            b
+        } else {
+            gs.first().cloned().unwrap_or_else(|| Group::Home.into())
+        }
+    }
+
+    /// The group a built-in tile is in for this person: where they moved it, else its own.
+    fn tile_gid(&self, t: &Tile) -> String {
+        let own = t.group.map_or("", |g| g.id());
+        self.layout.group_of(&iyakki_agent::layout::sys_key(t.label), own)
+    }
+
+    /// The group a Store app is in for this person: where they moved it, else what its app.json asks, else Work.
+    fn app_gid(&self, e: &iyakki_agent::store::tilehub::TileEntry) -> String {
+        let own = self.layout.app_default(&e.name, &e.group).0;
+        self.layout.group_of(&iyakki_agent::layout::app_key(&e.name), &own)
     }
 
     /// The tiles of the shown group, in launcher order; pages are cut from this list.
     fn group_tiles(&self) -> Vec<&'static Tile> {
         let g = self.current_group();
-        self.visible_tiles().into_iter().filter(|t| g.holds(t.app)).collect()
+        self.visible_tiles().into_iter().filter(|t| self.tile_gid(t) == g.id).collect()
     }
 
     /// The custom apps in the shown group (they follow the system tiles).
     fn group_custom(&self) -> Vec<iyakki_agent::store::tilehub::TileEntry> {
         let g = self.current_group();
-        self.custom.iter().filter(|e| launcher::group_of_custom(&e.group) == g).cloned().collect()
+        self.custom.iter().filter(|e| self.app_gid(e) == g.id).cloned().collect()
     }
 
-    /// Everything the launcher shows in the shown group: the system tiles, then the custom apps.
+    /// Everything the launcher shows in the shown group: the system tiles, then the custom apps, in the person's order when
+    /// they set one; a group of their own with nothing in it shows a hint.
     fn group_items(&self) -> Vec<LItem> {
         let mut v: Vec<LItem> = self.group_tiles().into_iter().map(LItem::Sys).collect();
         v.extend(self.group_custom().into_iter().map(|e| LItem::App(Box::new(e))));
+        let gid = self.current_group().id;
+        if self.layout.order.contains_key(&gid) {
+            let keys: Vec<String> = v.iter().map(layout_impl::item_key).collect();
+            let order = self.layout.ordered(&gid, keys);
+            v.sort_by_key(|it| order.iter().position(|k| *k == layout_impl::item_key(it)));
+        }
+        if v.is_empty() {
+            v.push(LItem::Empty);
+        }
         v
     }
 
@@ -595,22 +761,30 @@ impl Shell {
     }
 
     /// Show a group (from its chip, Tab or a test) and remember it for this person.
-    fn set_group(&mut self, g: Group) {
+    fn set_group(&mut self, g: impl Into<GroupRef>) {
+        let g: GroupRef = g.into();
         if !self.groups().contains(&g) {
             return;
         }
-        self.group = g;
+        match Group::from_id(&g.id) {
+            Some(b) => {
+                self.group = b;
+                self.cgroup = None;
+            }
+            None => self.cgroup = Some(g.id.clone()),
+        }
         self.sel = 0;
         if let Some(sess) = &self.session {
-            crate::uisize::save_group(self.env.services.dir(), &sess.user, g.id());
+            crate::uisize::save_group(self.env.services.dir(), &sess.user, &g.id);
         }
     }
 
     fn step_group(&mut self, back: bool) {
         let gs = self.groups();
-        let i = gs.iter().position(|g| *g == self.current_group()).unwrap_or(0);
+        let cur = self.current_group();
+        let i = gs.iter().position(|g| *g == cur).unwrap_or(0);
         let n = gs.len();
-        self.set_group(gs[if back { (i + n - 1) % n } else { (i + 1) % n }]);
+        self.set_group(gs[if back { (i + n - 1) % n } else { (i + 1) % n }].clone());
     }
 
     fn cx(&self) -> Option<AppCx> {
@@ -633,8 +807,18 @@ impl Shell {
         })
     }
 
+    /// An app panicked (the panic was caught): tell the person, keep the note of where in the audit log, and leave everything
+    /// else running. Opening the app again starts it afresh.
+    pub(crate) fn app_crashed(&mut self, name: &str) {
+        let note = crate::crashlog::take_last();
+        let user = self.session.as_ref().map(|s| s.user.clone()).unwrap_or_default();
+        self.env.audit.record(&user, "app.crash", &format!("{name}: {note}"));
+        self.say(format!("{name} stopped because of an internal error. Details are in the system log. Open it again to restart it."));
+    }
+
     fn say(&mut self, s: impl Into<String>) {
-        self.toast = Some((s.into(), self.tick + 120, false));
+        // a failure caused by a lost drive says so (iyakki_storage::loss::reword leaves every other message alone)
+        self.toast = Some((iyakki_storage::loss::reword(&s.into()), self.tick + 120, false));
     }
 
     fn say_info(&mut self, s: impl Into<String>) {
@@ -642,6 +826,11 @@ impl Shell {
     }
 
     fn sign_in(&mut self, s: Session, password: &str) {
+        // the Cloud mode setting may have changed since the last sign-in (Settings -> Cloud mode)
+        if !cfg!(test) {
+            let c = iyakki_agent::cloudmode::detect(self.env.services.cloud_setting());
+            self.refresh_cloud(c);
+        }
         self.env.audit.record(&s.user, "login", s.role.name());
         // a local model is loaded in the background now, so the first question is not the slow one
         if s.policy.agent {
@@ -663,6 +852,12 @@ impl Shell {
         {
             let audit = self.env.audit.clone();
             self.env.services.k3sdev.set_audit(Arc::new(move |u, a, d| audit.record(u, a, d)));
+        }
+        // shares marked "keep running" start again for this person (everything else in Settings -> Shared folders stays stopped)
+        {
+            let (audit, user) = (self.env.audit.clone(), s.user.clone());
+            let allow = iyakki_agent::sharedfolder::allow_fn(s.policy.clone(), &s.user, self.env.services.dir());
+            iyakki_agent::sharedfolder::for_user(self.env.services.dir(), &s.user, Arc::new(move |e, d| audit.record(&user, e, d)), allow).restore();
         }
         if let VaultState::Locked(why) = &report.user_vault {
             self.env.audit.record(&s.user, "vault.user.locked", why);
@@ -687,12 +882,20 @@ impl Shell {
         // examples to try (once, for administrators): an MCP server, documents and skills
         crate::samples::seed(&self.env, &s.user, &s.policy);
         crate::uisize::apply(Some(crate::uisize::load(self.env.services.dir(), &s.user)));
+        crate::filepicker::set_session(Some((&s.user, &s.policy, self.env.services.dir())));
         self.session = Some(s);
         self.load_clipboard_limit();
         self.sel = 0;
-        self.group = crate::uisize::load_group(self.env.services.dir(), &self.session.as_ref().map_or(String::new(), |s| s.user.clone())).and_then(|id| Group::from_id(&id)).unwrap_or(Group::Home);
+        let remembered = crate::uisize::load_group(self.env.services.dir(), &self.session.as_ref().map_or(String::new(), |s| s.user.clone()));
+        self.group = remembered.as_deref().and_then(Group::from_id).unwrap_or(Group::Home);
+        self.lay_sign_in(remembered.as_deref());
         self.screen = Screen::Launcher;
+        self.panes_reset();
+        self.refresh_gate();
+        self.cues.badge_seen = false;
         self.refresh_badge();
+        // the sign-in sound plays by itself while the home screen appears
+        let _ = crate::cues::start(&self.env.services, &self.cloud, iyakki_agent::syssounds::Cue::Login);
     }
 
     /// Start signed in as a person whose password has just been checked elsewhere (the browser sign-in).
@@ -701,20 +904,42 @@ impl Shell {
     }
 
     fn sign_out(&mut self) {
+        // the sign-out sound starts first and plays while the rest is done; the screen changes when it is over, or after
+        // `LOGOUT_WAIT` at the latest (a slow or stuck output never holds sign-out back)
+        let cue = self.session.is_some().then(|| crate::cues::start(&self.env.services, &self.cloud, iyakki_agent::syssounds::Cue::Logout));
         crate::uisize::apply(None);
+        crate::filepicker::set_session(None);
+        self.lay_sign_out();
+        self.panes_reset();
         self.stash = None;
         self.badge = Badge::default();
         self.brand = Default::default();
         self.installs = Default::default();
+        // drives open in this person's home: left alone (and said so) unless the Settings switch asks for them to be closed
+        let mut drives_note = None;
+        if let Some(s) = &self.session {
+            let mut who = iyakki_agent::disks::Actor::new(&s.user, s.role);
+            who.home = iyakki_agent::scope::home_root(&s.user, std::path::Path::new("/var/lib/iyakki")).display().to_string();
+            let (audit, user) = (self.env.audit.clone(), s.user.clone());
+            drives_note = iyakki_agent::disks::Disks::real().at_sign_out(&who, &|a, d| audit.record(&user, a, d));
+        }
         if let Some(s) = self.session.take() {
             self.env.audit.record(&s.user, "logout", "");
             iyakki_agent::flows::FlowEnv::stop_for_logout(&self.env.services, &s.user);
+            iyakki_agent::sharedfolder::on_logout(&s.user);
             self.env.services.on_logout(&s.user, s.policy.manage_settings);
             iyakki_agent::kubeprofiles::set_resolver(None);
             // the assistant's browser tab goes with the session (jobs still running are answered)
             crate::apps::web_agent::close(&self.env.services, &s.user);
         }
+        self.cues.badge_seen = false;
+        if let Some(c) = cue {
+            let _ = c.wait(iyakki_agent::syssounds::LOGOUT_WAIT);
+        }
         self.screen = Screen::Login(Form::login_for(last_user(&self.env).as_deref()));
+        if let Some(m) = drives_note {
+            self.say(m);
+        }
     }
 
     /// Whether the CAMERA tile is usable (looks first when it has not looked yet).
@@ -733,9 +958,17 @@ impl Shell {
 
     fn open(&mut self, app: PApp) {
         let Some(cx) = self.cx() else { return };
+        // cloud mode: a hidden app has no shortcut, no F-key and no jump that opens it
+        if self.cloud.hides_app(app) {
+            return;
+        }
         if !cx.session.policy.allows_app(app) {
             self.env.audit.record(&cx.session.user, "app.denied", app.id());
             self.say(format!("Your role ({}) can't open {}", cx.session.role.name(), app.id().to_uppercase()));
+            return;
+        }
+        if self.ws_active() && !self.panes_room_for(app) {
+            self.say("Low memory: close an app or use a smaller layout");
             return;
         }
         let boxed: Box<dyn App> = match app {
@@ -744,7 +977,7 @@ impl Shell {
             PApp::Mcp => Box::new(McpApp::new(&cx)),
             PApp::Cli => Box::new(CliApp::new(&cx)),
             PApp::Users => Box::new(UsersApp::new()),
-            PApp::Settings => Box::new(SettingsApp::new(&cx)),
+            PApp::Settings => Box::new(SettingsApp::new(&cx).with_cloud(self.cloud.clone())),
             PApp::Runs => Box::new(RunsApp::new(&cx)),
             PApp::Edit => Box::new(EditApp::new(&cx)),
             PApp::Browser => Box::new(crate::apps::browser::BrowserApp::new(&cx)),
@@ -763,7 +996,12 @@ impl Shell {
             PApp::Dash => Box::new(crate::apps::dash::DashApp::new(&cx)),
             PApp::Flows => Box::new(crate::apps::flows::FlowsApp::new(&cx)),
             PApp::Camera => Box::new(crate::apps::camera::CameraApp::new(&cx)),
+            PApp::Voice => Box::new(crate::apps::voice::VoiceApp::new(&cx)),
+            PApp::K8s => Box::new(crate::apps::k8s_tile::K8sApp::new(&cx)),
+            PApp::Disks => Box::new(crate::apps::disks_tile::DisksApp::new(&cx)),
+            PApp::LinuxWin => Box::new(crate::apps::linuxwin::LinuxWinApp::new(&cx)),
             PApp::Tales => Box::new(crate::apps::story::StoryApp::new(&cx)),
+            PApp::Lab => Box::new(crate::apps::lab::LabApp::new(&cx)),
             PApp::Inbox => Box::new(crate::apps::inbox::InboxApp::new(&cx)),
         };
         self.env.audit.record(&cx.session.user, "app.open", app.id());
@@ -813,12 +1051,40 @@ impl Shell {
                 match j {
                     crate::devpop::Jump::Settings(page) => self.jump_to("settings", &format!("tab:{page}")),
                     crate::devpop::Jump::Drivers => self.jump_to("store", "drivers"),
+                    crate::devpop::Jump::Setup(id) => self.jump_to("store", &format!("setup:{id}")),
+                    crate::devpop::Jump::MacDrivers => {
+                        // the IYAKKI menu, opened on its Mac drivers page
+                        self.toggle_brand();
+                        if self.brand.open {
+                            let out = self.brand.open_page(crate::brandmenu::Page::Mac);
+                            if let crate::brandmenu::Outcome::Opened(p) = out {
+                                self.brand_opened(p);
+                            }
+                        }
+                    }
                     crate::devpop::Jump::None => {}
                 }
             }
+            Outcome::Act(crate::devpop::Act::FirewallOff) => {
+                let admin = self.session.as_ref().is_some_and(|x| x.policy.manage_settings);
+                if !admin {
+                    self.say("Only administrators can switch the firewall off.".to_string());
+                } else {
+                    let user = self.session.as_ref().map(|x| x.user.clone()).unwrap_or_default();
+                    let r = iyakki_fw::service::engine().disable_now(&format!("{user} (Devices list)"));
+                    match r {
+                        Ok(()) => {
+                            self.env.audit.record(&user, "firewall.disable", "emergency off from the Devices list");
+                            self.say_info("The firewall is off. Switch it on again in Settings -> Firewall.".to_string());
+                        }
+                        Err(e) => self.say(format!("Could not switch the firewall off: {e}")),
+                    }
+                }
+                self.devpop.invalidate();
+            }
             Outcome::Act(crate::devpop::Act::ToggleSoundMute) => {
                 // IYAKKI's software volume carries the output's volume: mute it in Settings -> Sound (the level is kept)
-                match self.env.services.update_sound(|s| s.muted = !s.muted) {
+                match self.env.services.master_toggle_mute().map(|m| iyakki_agent::audioout::SoundSettings { volume_pct: m.percent, muted: m.muted, ..Default::default() }) {
                     Ok(now) if now.muted => self.say_info("Muted.".to_string()),
                     Ok(now) => self.say_info(format!("Sound on, volume {}%.", now.volume_pct)),
                     Err(e) => self.say(e),
@@ -876,36 +1142,14 @@ impl Shell {
     fn brand_opened(&mut self, page: crate::brandmenu::Page) {
         use crate::brandmenu::Page;
         match page {
-            Page::Install => {
+            Page::Gpu => {
+                // the files at once; the kernel log and the cluster's pods arrive on a thread and are merged while the page is drawn
                 let svc = self.env.services.clone();
-                // what is installed, what cannot run, what the catalogue installs underneath: programs are started for their versions,
-                // so off the screen's thread (the page says "checking..." until it arrives); tests read it at once
-                self.brand.presence.clear();
-                #[cfg(test)]
-                self.brand.set_facts(iyakki_agent::quickinstall::gather_facts(&svc));
+                self.brand.set_gpu(iyakki_agent::gpu_steps::quick_report(std::path::Path::new("/"), svc.dir()));
                 #[cfg(not(test))]
-                {
-                    let slot = self.facts_slot.clone();
-                    *slot.lock().unwrap() = None;
-                    let _ = std::thread::Builder::new().name("iyakki-install-facts".into()).spawn(move || {
-                        let f = iyakki_agent::quickinstall::gather_facts(&svc);
-                        *slot.lock().unwrap() = Some(f);
-                    });
-                }
-                self.brand.window = iyakki_agent::webengine::host_session();
-                // what the vendors publish as newer (network: on a thread of its own, the page shows it when it arrives)
-                #[cfg(not(test))]
-                {
-                    let (slot, svc) = (self.latest_slot.clone(), self.env.services.clone());
-                    *slot.lock().unwrap() = None;
-                    let _ = std::thread::Builder::new().name("iyakki-upgrade-check".into()).spawn(move || {
-                        let r = iyakki_agent::quickinstall::check_upgrades(&svc);
-                        *slot.lock().unwrap() = Some(r);
-                    });
-                }
-                self.brand.latest.clear();
-                self.brand.failed = iyakki_agent::quickinstall::failed_items(self.installs.jobs());
+                iyakki_agent::gpu_steps::refresh_async(svc);
             }
+            Page::Linux => self.refresh_linux(),
             Page::Media => {
                 iyakki_agent::player::register_dir(self.env.services.clis.bin_dir());
                 self.brand.players = crate::brandmenu::players_found(&crate::brandmenu::on_path);
@@ -914,6 +1158,9 @@ impl Shell {
                 let p = self.dev_probe();
                 self.devpop.refresh_in_background(&p);
                 self.brand.mac = self.devpop.snapshot();
+                self.brand.mac_model = std::fs::read_to_string("/sys/class/dmi/id/product_name").map(|m| m.trim().to_string()).unwrap_or_default();
+                self.brand.mac_board = std::fs::read_to_string("/sys/class/dmi/id/board_name").map(|m| m.trim().to_string()).unwrap_or_default();
+                self.refresh_mac_firmware();
             }
             _ => {}
         }
@@ -929,6 +1176,7 @@ impl Shell {
             Outcome::Nothing => {}
             Outcome::Close => self.brand.close(),
             Outcome::Opened(p) => self.brand_opened(p),
+            Outcome::GpuTest => self.gpu_test(),
             Outcome::Install(item) => self.quick_install(item),
             Outcome::ShowInstalls => {
                 self.brand.close();
@@ -937,6 +1185,14 @@ impl Shell {
                     self.toggle_installs();
                 }
             }
+            Outcome::MacFirmware(source) => self.mac_firmware(source),
+            Outcome::Linux(a) => self.linux_action(a),
+            Outcome::MacClean => {
+                let freed = iyakki_agent::macfw::delete_leftovers(self.env.services.dir());
+                self.brand.note = Some((format!("Deleted the kept download: {} MB freed.", freed >> 20), true));
+                self.refresh_mac_firmware();
+            }
+            Outcome::MacBtLoad => self.mac_bt_load(),
             Outcome::Play(path) => self.brand_play(&path),
             Outcome::StopMedia => {
                 iyakki_agent::media::shared().stop();
@@ -952,6 +1208,65 @@ impl Shell {
             }
         }
         self.stale = true;
+    }
+
+    /// What the Mac drivers page shows about the firmware job: the last result and whether one is running.
+    fn refresh_mac_firmware(&mut self) {
+        use iyakki_agent::quickinstall as qi;
+        self.brand.mac_last = iyakki_agent::macfw::read_outcome(self.env.services.dir());
+        self.brand.mac_leftover = iyakki_agent::macfw::leftovers(self.env.services.dir());
+        self.brand.mac_cache = iyakki_agent::macfw::card_status(self.env.services.dir());
+        self.brand.mac_bt_held = iyakki_agent::macfw::bluetooth_held(std::path::Path::new("/lib/modules"));
+        self.brand.mac_busy = self.installs.jobs().iter().any(|j| j.running() && qi::item_of(j) == Some(qi::Item::MacFirmware));
+    }
+
+    /// "Load the Bluetooth driver anyway" (administrators): give the held drivers back and load them in the background (a driver that finds
+    /// no firmware can take a few seconds); Settings -> Bluetooth then shows the controller.
+    fn mac_bt_load(&mut self) {
+        let Some(sess) = self.session.clone() else { return };
+        if !sess.policy.manage_settings {
+            self.brand.note = Some((format!("Only an administrator can load drivers for the whole machine (your role is {}).", sess.role.name()), false));
+            return;
+        }
+        self.env.audit.record(&sess.user, "bluetooth.load-anyway", "held drivers given back");
+        let data = self.env.services.dir().to_path_buf();
+        std::thread::spawn(move || {
+            let _ = iyakki_agent::macfw::load_bluetooth_anyway(&data);
+        });
+        self.brand.mac_bt_held = false;
+        self.brand.note = Some(("Loading the Bluetooth drivers without a firmware file. Settings \u{2192} Bluetooth shows the controller in a few seconds; pairing and audio are not available yet.".into(), true));
+    }
+
+    /// Start the job that installs Apple's Wi-Fi and Bluetooth firmware from `source` (administrators; the click is the person's request).
+    fn mac_firmware(&mut self, source: iyakki_agent::macfw::Source) {
+        use iyakki_agent::quickinstall as qi;
+        let Some(sess) = self.session.clone() else { return };
+        if !sess.policy.manage_settings {
+            self.brand.note = Some((format!("Only an administrator can install drivers for the whole machine (your role is {}).", sess.role.name()), false));
+            return;
+        }
+        let svc = self.env.services.clone();
+        let launch = match self.quick_launch.clone() {
+            Some(l) => l,
+            None => match qi::Launch::this_program(svc.dir()) {
+                Ok(l) => l,
+                Err(e) => {
+                    self.brand.note = Some((e, false));
+                    return;
+                }
+            },
+        };
+        match qi::start_mac_firmware(&svc.jobs, &sess.user, &source, &launch) {
+            Ok(job) => {
+                self.env.audit.record(&sess.user, "macfirmware.start", &source.words());
+                self.brand.note = Some((format!("Started: {}. Progress is beside the clock; the files are Apple's and stay on this machine.", job.label), true));
+                if let Some(cx) = self.cx() {
+                    self.installs.poll(&cx, true);
+                }
+                self.refresh_mac_firmware();
+            }
+            Err(e) => self.brand.note = Some((e, false)),
+        }
     }
 
     /// Start the jobs of a Quick install (administrators), in dependency order.
@@ -973,7 +1288,18 @@ impl Shell {
                 }
             },
         };
-        let present: Vec<qi::Item> = self.brand.presence.iter().filter(|(_, p)| p.present()).map(|(i, _)| *i).collect();
+        // only what the item needs is looked at (the Media page's player button needs nothing)
+        let present: Vec<qi::Item> = {
+            let mut need: Vec<qi::Item> = Vec::new();
+            let mut todo = item.needs_now();
+            while let Some(n) = todo.pop() {
+                if !need.contains(&n) {
+                    need.push(n);
+                    todo.extend(n.needs_now());
+                }
+            }
+            need.into_iter().filter(|i| qi::presence(&svc, *i).present()).collect()
+        };
         // Indic-TTS is deployed through the Platform services review once k3s is there
         if item == qi::Item::IndicTts && present.contains(&qi::Item::K3s) {
             self.env.audit.record(&sess.user, "quickinstall.handoff", "indic-tts");
@@ -994,6 +1320,41 @@ impl Shell {
                 let steps: Vec<String> = started.iter().map(|j| j.label.clone()).collect();
                 self.env.audit.record(&sess.user, "quickinstall.start", &format!("{} ({})", item.id(), steps.join(", ")));
                 self.brand.note = Some((format!("Started: {}. Progress is beside the clock.", steps.join(", then ")), true));
+                if let Some(cx) = self.cx() {
+                    self.installs.poll(&cx, true);
+                }
+            }
+            Err(e) => self.brand.note = Some((e, false)),
+        }
+    }
+
+    /// The GPU page's test prompt: a detached job of the installer workspace (its log is the answer and the tokens per second).
+    fn gpu_test(&mut self) {
+        use iyakki_agent::quickinstall as qi;
+        let Some(sess) = self.session.clone() else { return };
+        if !sess.policy.manage_settings {
+            self.brand.note = Some((format!("Only an administrator can run the test prompt (your role is {}).", sess.role.name()), false));
+            return;
+        }
+        let svc = self.env.services.clone();
+        let launch = match self.quick_launch.clone() {
+            Some(l) => l,
+            None => match qi::Launch::this_program(svc.dir()) {
+                Ok(l) => l,
+                Err(e) => {
+                    self.brand.note = Some((e, false));
+                    return;
+                }
+            },
+        };
+        if svc.jobs.visible(&sess.user, qi::WORKSPACE).iter().any(|j| j.running() && j.label == "GPU test prompt") {
+            self.brand.note = Some(("The test prompt is running already: its answer is in the installer runs beside the clock.".into(), false));
+            return;
+        }
+        match svc.jobs.start(&sess.user, &qi::gpu_test_spec(&launch), &|_: &std::path::Path| Ok(())) {
+            Ok(_) => {
+                self.env.audit.record(&sess.user, "gpu.testprompt", "");
+                self.brand.note = Some(("Test prompt started: press Installer runs (or look beside the clock) for the answer and the tokens per second.".into(), true));
                 if let Some(cx) = self.cx() {
                     self.installs.poll(&cx, true);
                 }
@@ -1048,6 +1409,7 @@ impl Shell {
     /// Open an app and ask it to show one thing (`tab:network` in Settings, `drivers` in the Store).
     fn jump_to(&mut self, app: &str, item: &str) {
         self.open_linked(app);
+        self.store_launch(app);
         if let (Some(cx), Screen::App(a, _)) = (self.cx(), &mut self.screen) {
             a.open_item(item, &cx);
         }
@@ -1088,6 +1450,8 @@ impl Shell {
     /// Back out of the current app: to the app that was kept aside, or the launcher.
     fn leave_app(&mut self) {
         self.ctx = None;
+        // Settings → Home layout may have changed the layout
+        self.lay_reload();
         self.custom_open = None;
         self.custom_at = 0;
         self.screen = match self.stash.take() {
@@ -1100,6 +1464,43 @@ impl Shell {
     /// An app asked for another one (the IDE opens a table in DATA). The asking app is kept aside, still running, and
     /// comes back with Back; apps other than DATA replace it, as before.
     fn open_linked_from_app(&mut self, app: &str) {
+        // the VOICE tile's "Set up Kokoro": the Store on its Setup tab, with the app kept where it is (Back returns to it)
+        if app == "quickinstall" {
+            let prev = std::mem::replace(&mut self.screen, Screen::Launcher);
+            match prev {
+                Screen::App(a, pa) if pa != PApp::Store => {
+                    if self.stash.is_none() {
+                        self.stash = Some((a, pa));
+                    }
+                }
+                other => self.screen = other,
+            }
+            self.open_linked("store");
+            self.store_launch("store");
+            return;
+        }
+        // Store -> Setup cards that open a page of the IYAKKI menu, and the installer list
+        if let Some(page) = app.strip_prefix("brand:") {
+            self.toggle_brand();
+            if self.brand.open {
+                let p = match page {
+                    "gpu" => crate::brandmenu::Page::Gpu,
+                    "mac" => crate::brandmenu::Page::Mac,
+                    _ => crate::brandmenu::Page::Linux,
+                };
+                if let crate::brandmenu::Outcome::Opened(p) = self.brand.open_page(p) {
+                    self.brand_opened(p);
+                }
+            }
+            return;
+        }
+        if app == "installs" {
+            self.toggle_installs();
+            if !self.installs.open {
+                self.toggle_installs();
+            }
+            return;
+        }
         // the IDE's Run for a tile app (a folder, looked at live as an unsigned dev app) and Open for an installed one
         if let Some(rest) = app.strip_prefix("tile-preview:").or_else(|| app.strip_prefix("tile-open:")) {
             let preview = app.starts_with("tile-preview:");
@@ -1152,6 +1553,16 @@ impl Shell {
         self.open_linked(app);
     }
 
+    /// Hand the Store the stand-in program for the install jobs (tests and the screenshot tool); normally there is none.
+    fn store_launch(&mut self, app: &str) {
+        if app != "store" {
+            return;
+        }
+        if let (Some(l), Some(cx), Screen::App(a, _)) = (self.quick_launch.clone(), self.cx(), &mut self.screen) {
+            a.open_item(&format!("launch:{}\n{}", l.exe.display(), l.data.display()), &cx);
+        }
+    }
+
     fn open_linked(&mut self, app: &str) {
         if let Some(pa) = PApp::ALL.into_iter().find(|a| a.id() == app) {
             if pa != PApp::Inbox {
@@ -1199,6 +1610,13 @@ impl Shell {
             }
             None => Badge::default(),
         };
+        // a new notification (the count of unread ones went up) has a sound; the first count after signing in does not
+        if self.session.is_some() {
+            if self.cues.badge_seen && !self.cues.quiet && b.unread > self.badge.unread {
+                let _ = crate::cues::start(&self.env.services, &self.cloud, iyakki_agent::syssounds::Cue::Notify);
+            }
+            self.cues.badge_seen = true;
+        }
         if b != self.badge {
             self.badge = b;
             self.stale = true;
@@ -1209,7 +1627,11 @@ impl Shell {
     /// the note opens the Jobs list. The chat that started the job shows its own event; this is for the person who is elsewhere.
     pub fn announce_finished_jobs(&mut self) {
         let Some(user) = self.session.as_ref().map(|s| s.user.clone()) else { return };
+        let (mut any, mut ok) = (false, false);
+        self.cues.quiet = true;
         for j in self.env.services.jobs.take_finished_all(&user, iyakki_agent::jobs::Channel::Inbox) {
+            any = true;
+            ok |= j.state == iyakki_agent::jobs::State::Succeeded;
             let (kind, word) = match j.state {
                 iyakki_agent::jobs::State::Succeeded => (iyakki_agent::inbox::Kind::Agent, "finished"),
                 iyakki_agent::jobs::State::Stopped => (iyakki_agent::inbox::Kind::Info, "was stopped"),
@@ -1218,6 +1640,12 @@ impl Shell {
             let _ = self.env.services.notify(&user, kind, &format!("Job “{}” {word}", j.label), &iyakki_agent::jobs::Jobs::finish_line(&j), Some(iyakki_agent::inbox::Link::new("runs", "jobs")));
             self.refresh_badge();
             self.stale = true;
+        }
+        self.cues.quiet = false;
+        if any {
+            // one sound for the batch: "done" when something finished well, the notification chime when none did
+            let cue = if ok { iyakki_agent::syssounds::Cue::JobDone } else { iyakki_agent::syssounds::Cue::Notify };
+            let _ = crate::cues::start(&self.env.services, &self.cloud, cue);
         }
     }
 
@@ -1281,21 +1709,53 @@ impl Shell {
 
     /// Entry point for every input event.
     pub fn handle(&mut self, ev: &Event) {
+        if let Event::ScrollPx(px) = ev {
+            return self.scroll_px(*px); // the scroll engine's pixel steps (`shell_scroll.rs`)
+        }
+        if !self.saver_intercept(ev) {
+            self.handle_awake(ev);
+        }
+        self.saver_after();
+    }
+
+    /// The event for a screen that is on (the saver has already seen it).
+    fn handle_awake(&mut self, ev: &Event) {
         use crate::ui::clipboard;
         let (prev_mouse, prev_sel) = (self.mouse, self.sel);
+        if !matches!(ev, Event::Tick | Event::MouseMove(..)) {
+            crate::filepicker::clear_path_field_note(); // drawn again with the next frame if a path field is still there
+        }
         if let Some((agent, logout)) = crate::agent_login::take_request() {
             self.login_request(agent, logout);
         }
         if let Event::MouseMove(x, y) = ev {
             self.mouse = (*x, *y);
         }
+        // the Devices popover's tooltip sees every event first, whoever takes the click (a press that closes or opens a
+        // row included), and asks for a new picture itself when it appears or goes away
+        if self.devpop.open {
+            self.devpop.tip_event(ev);
+            if self.devpop.tip_changed() {
+                self.stale = true;
+            }
+        }
         if let Screen::HwCheck(h) = &mut self.screen {
             h.note(ev); // the live tester sees every event, whatever else handles it
         }
+        if !matches!(ev, Event::Tick) {
+            self.tbar_activity();
+        }
+        // volume, brightness and media keys, and the power card they can open, are the shell's: no app sees them
+        if self.handle_fn_event(ev) {
+            return;
+        }
         if matches!(ev, Event::Tick) {
             self.tick += 1;
+            self.fn_tick();
+            self.tbar_tick();
             self.check_alarms(iyakki_agent::clock::now_unix());
             self.tick_stash();
+            self.panes_tick();
             // developer mode: a paired computer asked for an app on the screen (`iyakki dev run`); it waits for someone to sign in
             if self.tick % 10 == 3 && self.session.is_some() {
                 for name in iyakki_agent::devmode::take_open(self.env.services.dir()) {
@@ -1304,14 +1764,35 @@ impl Shell {
                     }
                 }
             }
+            // developer mode: keys and taps a paired computer sent (`iyakki dev input`), as the shell's own events; the shell says
+            // whether a password field has focus so the device can refuse them
+            {
+                let dd = self.env.services.dir().to_path_buf();
+                iyakki_agent::devmode::input::set_secret_focus(&dd, self.fields.iter().any(|f| f.focused && f.secret));
+                for e in iyakki_agent::devmode::input::take(&dd) {
+                    self.saver.injecting = true; // it wakes the screen and still reaches the app
+                    for ev in crate::devinput::events(&e) {
+                        self.handle(&ev);
+                    }
+                    self.saver.injecting = false;
+                    self.stale = true;
+                }
+            }
             // the assistant's browser tab (the engine behind the browser_* tools) is serviced whichever app is open
             if let Some(sess) = &self.session {
                 crate::apps::web_agent::tick(&self.env.services, &self.env.audit, sess);
             }
+            self.login_bar_tick();
+            if self.tick % 15 == 7 {
+                self.battery_tick();
+            }
+            if self.tick % 15 == 3 {
+                self.loss_tick();
+            }
             if self.tick % 15 == 0 {
                 self.refresh_badge();
                 // the clock changes the picture only when what it shows changes
-                if self.session.is_some() {
+                if self.session.is_some() || self.on_auth_screen() {
                     let t = clock_time_text(&self.clock);
                     if t != self.clock_text {
                         self.clock_text = t;
@@ -1327,6 +1808,7 @@ impl Shell {
                 if self.devpop.take_fresh() {
                     self.stale = true;
                     if self.brand.open && self.brand.page == crate::brandmenu::Page::Mac {
+                        self.refresh_mac_firmware();
                         self.brand.mac = self.devpop.snapshot();
                     }
                 }
@@ -1334,55 +1816,38 @@ impl Shell {
                 let busy = self.installs.open || matches!(self.installs.badge(), crate::installpop::Badge::Running { .. });
                 if self.tick % 30 == 0 || (busy && self.tick % 10 == 0) {
                     if let Some(cx) = self.cx() {
+                        let before = self.installs.badge();
                         if self.installs.poll(&cx, false) {
                             self.stale = true;
+                        }
+                        // an install that was running has ended: the "done" sound
+                        let ended = match (before, self.installs.badge()) {
+                            (crate::installpop::Badge::Running { count: a, .. }, crate::installpop::Badge::Done { .. }) => a > 0,
+                            (crate::installpop::Badge::Running { count: a, .. }, crate::installpop::Badge::Running { count: b, .. }) => b < a,
+                            _ => false,
+                        };
+                        if ended {
+                            let _ = crate::cues::start(&self.env.services, &self.cloud, iyakki_agent::syssounds::Cue::JobDone);
                         }
                     }
                 }
                 if self.installs.frame_due() {
                     self.stale = true;
                 }
-                // Quick install: who is signed in to Claude Code and Copilot (from the remembered status; no program runs here)
-                if self.brand.open && self.brand.page == crate::brandmenu::Page::Install && (self.tick % 30 == 11 || self.brand.signin.is_empty()) {
-                    if let Some(cx) = self.cx() {
-                        let now: Vec<_> = [iyakki_agent::quickinstall::Item::ClaudeCode, iyakki_agent::quickinstall::Item::Copilot]
-                            .into_iter()
-                            .filter_map(|it| {
-                                let agent = it.cli_id().and_then(crate::agent_login::agent_of_cli)?;
-                                Some((it, crate::agent_login::state(&cx, agent, it.cli_id().is_some_and(|c| cx.services.clis.is_installed(c).is_some()))))
-                            })
-                            .collect();
-                        if now != self.brand.signin {
-                            self.brand.signin = now;
-                            self.stale = true;
-                        }
-                    }
-                }
-                // Quick install: which items' last install failed (Retry), and newer versions found
-                if self.brand.open && self.brand.page == crate::brandmenu::Page::Install {
-                    let failed = iyakki_agent::quickinstall::failed_items(self.installs.jobs());
-                    if failed != self.brand.failed {
-                        self.brand.failed = failed;
-                        self.stale = true;
-                    }
-                }
-                if self.brand.open && self.brand.page == crate::brandmenu::Page::Install {
-                    if let Some(f) = self.facts_slot.lock().ok().and_then(|mut x| x.take()) {
-                        self.brand.set_facts(f);
-                        self.stale = true;
-                    }
-                }
-                // newer versions found for Quick install
-                if self.brand.open && self.brand.page == crate::brandmenu::Page::Install {
-                    if let Some(l) = self.latest_slot.lock().ok().and_then(|mut x| x.take()) {
-                        self.brand.latest = l;
-                        self.stale = true;
-                    }
+                // Linux apps: answers of the cluster actions and the jobs' count while the page is open
+                if self.brand.open && self.brand.page == crate::brandmenu::Page::Linux && self.tick % 15 == 5 {
+                    self.linux_poll();
                 }
                 // Developer mode's sign in the top bar
                 if self.tick % 30 == 3 {
                     let d = iyakki_agent::devmode::DevMode::open(self.env.services.dir());
-                    let sign = d.is_on().then(|| if d.pairing().is_some() { "DEV \u{00b7} pairing" } else { "DEV" });
+                    let sign = d.is_on().then(|| match d.shell_banner() {
+                        Some(b) => format!("DEV \u{00b7} {b}"),
+                        None if d.pairing().is_some() => "DEV \u{00b7} pairing".to_string(),
+                        None => "DEV".to_string(),
+                    });
+                    // a system update that did not finish is told whatever developer mode says (the boot menu keeps the old version)
+                    let sign = if iyakki_agent::devmode::update::interrupted(self.env.services.dir()).is_some() { Some("UPDATE INTERRUPTED \u{00b7} choose \"previous version\" at boot".to_string()) } else { sign };
                     if sign != self.dev_sign {
                         self.dev_sign = sign;
                         self.stale = true;
@@ -1404,6 +1869,12 @@ impl Shell {
             }
             if self.tick % 90 == 0 {
                 self.check_new_devices();
+            }
+            if self.tick % 30 == 15 {
+                // a sound card that came up after the start (the built-in speakers of a MacBook take about 11 s)
+                for line in iyakki_agent::audioout::global().take_notices() {
+                    self.say_info(line);
+                }
             }
             if self.tick % 60 == 0 {
                 self.check_cluster_alerts();
@@ -1429,6 +1900,10 @@ impl Shell {
                     m.refresh_clip_offer();
                 }
             }
+            crate::ui::clipboard::tick();
+            if self.clipscan.as_mut().is_some_and(|c| self.tick % 3 == 0 && c.tick()) {
+                self.stale = true;
+            }
             if self.login.is_some() && self.tick % 3 == 0 {
                 if let Some(cx) = self.cx() {
                     if self.login.as_mut().is_some_and(|m| m.tick(&cx)) {
@@ -1445,6 +1920,10 @@ impl Shell {
                     }
                 }
             }
+        }
+        if self.panes_intercept(ev) {
+            self.stale = true;
+            return;
         }
         match ev {
             Event::MouseDown(x, y) => self.click(*x, *y),
@@ -1485,8 +1964,14 @@ impl Shell {
         match ev {
             // the radio's display moves with the music: draw every tick while it is on screen and playing
             Event::Tick => {
+                self.scroll_sync();
+                // hardware that shows up after the shell started (a slow sound card) changes Cloud mode: look again every 10 s
+                if !cfg!(test) && self.tick % 75 == 0 {
+                    let c = iyakki_agent::cloudmode::detect(self.env.services.cloud_setting());
+                    self.refresh_cloud(c);
+                }
                 // a camera plugged in or pulled out changes the CAMERA tile within two seconds
-                if matches!(self.screen, Screen::Launcher) && (self.tick % 60 == 0 || !self.camera.scanned()) && self.camera.scan() {
+                if matches!(self.screen, Screen::Launcher) && self.cloud.camera_watch && (self.tick % 60 == 0 || !self.camera.scanned()) && self.camera.scan() {
                     self.stale = true;
                 }
                 // the "camera in use by the assistant" sign comes and goes (and its time moves) on every screen
@@ -1514,8 +1999,11 @@ impl Shell {
                 }
                 // an app that shows live pictures (the browser's full engine) says when a new one has arrived
                 if let Screen::App(app, _) = &mut self.screen {
-                    if app.wants_redraw() {
-                        self.stale = true;
+                    match app.redraw_kind() {
+                        crate::apps::browser_full::Redraw::Full => self.stale = true,
+                        crate::apps::browser_full::Redraw::Live if self.live_paint => self.live = true,
+                        crate::apps::browser_full::Redraw::Live => self.stale = true,
+                        crate::apps::browser_full::Redraw::None => {}
                     }
                 }
             }
@@ -1528,6 +2016,7 @@ impl Shell {
             }
             _ => self.stale = true,
         }
+        self.panes_after(ev, prev_mouse);
     }
 
     /// True when events since the last call changed what should be on screen (a plain pointer move that crosses
@@ -1542,6 +2031,8 @@ impl Shell {
         match ev {
             // a ringing alarm takes every key and click until it is dismissed or snoozed
             _ if self.ring.is_some() && !matches!(ev, Event::Tick | Event::MouseMove(..)) => self.handle_ring(ev),
+            // the clipboard's QR scan takes every key and click while it is open
+            _ if self.clipscan.is_some() && !matches!(ev, Event::Tick | Event::MouseMove(..) | Event::MouseUp(..) | Event::FocusAt(..)) => self.handle_clipscan(ev),
             // the sign-in dialog takes every key, click and pasted text
             _ if self.login.as_ref().is_some_and(|m| !m.hidden()) && !matches!(ev, Event::Tick | Event::MouseMove(..) | Event::MouseUp(..) | Event::FocusAt(..)) => self.handle_login(ev),
             // a Login or Logout button of any screen
@@ -1556,6 +2047,13 @@ impl Shell {
             _ if matches!(self.shot, Shot::Select { .. } | Shot::Review { .. }) => self.handle_shot(ev),
             // F12 (or Print Screen) starts a screenshot anywhere after sign-in
             Event::Key(Key::F(12)) if self.session.is_some() && self.clip.is_none() => self.start_shot(),
+            // the drive banner's buttons answer on every screen, signed in or not
+            Event::Tab(n) if crate::lossbar::is_click(*n) => self.loss_event(*n),
+            // the battery's countdown and plug-in cards answer on every screen; F4 (or the chip) opens the battery popup
+            Event::Tab(crate::batterybar::CANCEL) | Event::Tab(crate::batterybar::CARD_OK) => self.battery_card_event(ev),
+            Event::Key(Key::Esc) if self.battery.card_visible() => self.battery_card_event(ev),
+            Event::Key(Key::F(crate::batterybar::KEY)) if self.session.is_some() && self.clip.is_none() && !self.battery.open => self.toggle_battery(),
+            Event::Key(_) | Event::Tab(_) if self.battery.open && self.session.is_some() && self.clip.is_none() && !self.help => self.handle_battery(ev),
             // F8 (or the Devices button) opens the devices popover; F7 (or the clock) opens Settings, Time
             Event::Key(Key::F(8)) if self.session.is_some() && self.clip.is_none() => self.toggle_devices(),
             Event::Key(Key::F(7)) if self.session.is_some() && self.clip.is_none() => {
@@ -1586,6 +2084,13 @@ impl Shell {
                     self.help = false;
                 }
             }
+            // panes: the Ctrl+Alt chords, the buttons of the pane strips and the bar, the memory card and the layout picker
+            Event::Layout(k) if self.session.is_some() && self.clip.is_none() => self.panes_key(*k),
+            Event::Tab(n) if self.panes.card.is_none() && self.panes_owns_tab(*n) => self.panes_tab(*n),
+            Event::Key(_) | Event::Tab(_) | Event::Scroll(_) if self.panes.card.is_some() && self.session.is_some() => self.panes_card_event(ev),
+            Event::Key(_) | Event::Tab(_) | Event::Scroll(_) if self.panes.picker.is_some() && self.session.is_some() && self.clip.is_none() => self.panes_picker_key(ev),
+            // the launcher's own menus and cards (move a tile, make or delete a group) and the keys that open them
+            _ if self.layout_intercept(ev) => {}
             // the context menu takes every key and click while it is open (heartbeats, releases and clipboard text pass)
             _ if self.ctx.is_some() && !matches!(ev, Event::Tick | Event::MouseUp(..) | Event::Paste(_)) => self.handle_ctx(ev),
             // the answer to the queue's request for the system clipboard: it joins the queue and is not pasted anywhere
@@ -1607,7 +2112,7 @@ impl Shell {
                 self.route(ev);
             }
             // Ctrl+V pastes the most recent clipboard entry; Ctrl+Shift+V opens the history; a right click opens the context menu
-            Event::Key(Key::Ctrl('v')) if self.clip.is_none() => match clipboard::latest() {
+            Event::Key(Key::Ctrl('v')) if self.clip.is_none() => match clipboard::paste() {
                 Some(t) => self.route(&Event::Paste(t)),
                 None => self.say_info("The clipboard is empty"),
             },
@@ -1615,6 +2120,7 @@ impl Shell {
                 self.ctx = None;
                 self.open_clipboard_picker()
             }
+            Event::MouseRight(x, y) if self.clip.is_none() && self.layout_right_click(*x, *y) => {}
             Event::MouseRight(x, y) if self.clip.is_none() => self.open_context_menu(*x, *y),
             Event::MouseRight(..) => self.open_clipboard_picker(),
             _ if self.clip.is_some() => self.handle_clip_overlay(ev),
@@ -1781,6 +2287,44 @@ impl Shell {
         std::mem::take(&mut self.want_host_paste)
     }
 
+    /// "Scan QR" was chosen in the clipboard history: the history closes and the camera question opens.
+    fn open_clipscan(&mut self) {
+        self.clip = None;
+        let src = self.scan_src.clone().unwrap_or_else(crate::scan_core::CamSource::system);
+        self.clipscan = Some(Box::new(crate::clip_scan::ClipScan::open(src)));
+        self.stale = true;
+    }
+
+    /// Use made-up cameras for the clipboard scan (tests).
+    pub fn set_scan_camera(&mut self, src: std::sync::Arc<crate::scan_core::CamSource>) {
+        self.scan_src = Some(src);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn audit_log_path(&self) -> std::path::PathBuf {
+        self.env.audit.path().to_path_buf()
+    }
+
+    pub fn clipboard_scan(&self) -> Option<&crate::clip_scan::ClipScan> {
+        self.clipscan.as_deref()
+    }
+
+    fn handle_clipscan(&mut self, ev: &Event) {
+        let Some(c) = self.clipscan.as_mut() else { return };
+        match c.handle(ev) {
+            crate::clip_scan::Out::Stay => {}
+            crate::clip_scan::Out::Close => self.clipscan = None,
+            crate::clip_scan::Out::Copied { chars, secret } => {
+                self.clipscan = None;
+                // only the fact: never the text
+                if let Some(s) = &self.session {
+                    self.env.audit.record(&s.user, "clipboard.scan", &format!("clipboard scan: {chars} characters, secret {}", if secret { "yes" } else { "no" }));
+                }
+            }
+        }
+        self.stale = true;
+    }
+
     fn handle_clip_overlay(&mut self, ev: &Event) {
         // the + and − buttons change how many copies are kept (saved for this person)
         if let Event::Tab(n @ (910 | 911)) = ev {
@@ -1789,6 +2333,11 @@ impl Shell {
             crate::ui::clipboard::set_limit(next);
             self.save_clipboard_limit();
             self.build_clipboard_picker();
+            return;
+        }
+        // Scan QR: copy text by holding a QR code up to the camera
+        if matches!(ev, Event::Tab(912) | Event::Key(Key::Ctrl('k' | 'K'))) {
+            self.open_clipscan();
             return;
         }
         // Save on a picture's row writes it to a file
@@ -1959,6 +2508,14 @@ impl Shell {
             self.say("Dropped files can only be imported in the desktop window");
             return;
         }
+        // a form with a path field on screen: the dropped path fills the field instead of opening the import dialog
+        if crate::filepicker::path_field_on_screen() {
+            if let Some(ev) = crate::filepicker::drop_event(&paths) {
+                self.dispatch(&ev);
+                self.stale = true;
+                return;
+            }
+        }
         let Some(cx) = self.cx() else { return };
         let action = match &mut self.screen {
             Screen::App(app, _) => app.on_drop(&paths, &cx),
@@ -1993,10 +2550,22 @@ impl Shell {
             self.handle_ctx(&Event::MouseDown(x, y));
             return;
         }
+        if self.lay.menu.is_some() && self.ring.is_none() && !self.help && matches!(self.shot, Shot::Off) {
+            self.layout_intercept(&Event::MouseDown(x, y));
+            return;
+        }
         if self.hostdlg.is_some() {
             if let Some(h) = hit {
                 if h.label != "backdrop" {
                     self.handle_hostdlg(&h.ev);
+                }
+            }
+            return;
+        }
+        if self.clipscan.is_some() {
+            if let Some(h) = hit {
+                if h.label != "backdrop" {
+                    self.handle_clipscan(&h.ev);
                 }
             }
             return;
@@ -2031,6 +2600,15 @@ impl Shell {
             }
             return;
         }
+        // the battery popup: its own regions answer, a click outside closes it
+        if self.battery.open && self.clip.is_none() && !self.help {
+            match hit {
+                Some(h) => self.dispatch(&h.ev),
+                None => self.battery.close(),
+            }
+            self.stale = true;
+            return;
+        }
         // the IYAKKI menu and the installs list: their own regions answer, a click outside closes them
         if (self.brand.open || self.installs.open) && self.clip.is_none() {
             match hit {
@@ -2060,8 +2638,21 @@ impl Shell {
             }
             return;
         }
+        // the layout picker and the memory card: their own regions answer; a click outside closes the picker
+        if (self.panes.picker.is_some() || self.panes.card.is_some()) && self.session.is_some() && self.clip.is_none() {
+            match hit {
+                Some(h) if h.label != "backdrop" => self.dispatch(&h.ev),
+                _ => {
+                    if self.panes.card.is_none() {
+                        self.panes.picker = None;
+                    }
+                }
+            }
+            self.stale = true;
+            return;
+        }
         // the header's Back button always leaves the app, even with a dialog open
-        if matches!(self.screen, Screen::App(..)) && back_rect(w, s).contains(x, y) {
+        if matches!(self.screen, Screen::App(..)) && self.panes.ws.is_none() && back_rect(w, s).contains(x, y) {
             self.leave_app();
             return;
         }
@@ -2096,12 +2687,16 @@ impl Shell {
     }
 
     /// Deliver an event to the current screen.
-    fn route(&mut self, ev: &Event) {
+    fn route_inner(&mut self, ev: &Event) {
         let (w, h) = self.size;
         let s = scale_for(w, h);
         let _ = (h, s);
         match &mut self.screen {
             Screen::Setup(_) | Screen::Login(_) => {
+                // the power card (Ctrl+P or the Power button, local console only) takes every key first
+                if self.login_power_event(ev) {
+                    return;
+                }
                 let is_setup = matches!(self.screen, Screen::Setup(_));
                 let (Screen::Setup(f) | Screen::Login(f)) = &mut self.screen else { return };
                 match ev {
@@ -2167,7 +2762,7 @@ impl Shell {
                 }
             }
             Screen::App(..) => {
-                let back_click = matches!(ev, Event::MouseDown(x, y) if back_rect(w, s).contains(*x, *y));
+                let back_click = self.panes.ws.is_none() && matches!(ev, Event::MouseDown(x, y) if back_rect(w, s).contains(*x, *y));
                 let cx = self.cx();
                 // a bug inside one app must not take the whole shell down: the app is closed and the person is told
                 let mut crashed = None;
@@ -2190,7 +2785,7 @@ impl Shell {
                     _ => Flow::Back,
                 };
                 if let Some(name) = crashed {
-                    self.say(format!("{name} stopped because of an internal error. Details are in the system log."));
+                    self.app_crashed(name);
                 }
                 if let Some((name, bytes)) = host_save {
                     self.host_save(&name, &bytes);
@@ -2225,6 +2820,7 @@ impl Shell {
             LItem::Sys(t) if t.app == PApp::Camera && !self.camera_ready() => self.say(self.camera.hint()),
             LItem::Sys(t) => self.open(t.app),
             LItem::App(e) => self.open_custom((**e).clone()),
+            LItem::Empty => self.say_info("Nothing here yet: select a tile in another group and press m to move it here"),
         }
     }
 
@@ -2305,6 +2901,7 @@ impl Shell {
                 }
                 'o' | 'q' => self.sign_out(),
                 'p' if power => self.screen = Screen::PowerMenu,
+                // m, g, u, [ and ]: move the tile, the group's menu, undo, reorder (`shell_layout.rs`; handled before this point)
                 _ => {}
             },
             Event::Key(Key::Esc) => self.sign_out(),
@@ -2315,13 +2912,13 @@ impl Shell {
             }
             Event::MouseDown(x, y) => {
                 let groups = self.groups();
-                let labels: Vec<&str> = groups.iter().map(|g| g.label()).collect();
+                let row = self.chip_row();
                 let nav = launcher::page_nav(w, h, s, pages);
                 if let Some(i) = rects.iter().position(|r| r.contains(*x, *y)) {
                     self.sel = first + i;
                     self.open_item(&tiles[first + i]);
-                } else if let Some(i) = launcher::chip_rects(s, &labels).iter().position(|r| r.contains(*x, *y)) {
-                    self.set_group(groups[i]);
+                } else if let Some(i) = row.chips.iter().find(|(_, r)| r.contains(*x, *y)).map(|(i, _)| *i) {
+                    self.set_group(groups[i].clone());
                 } else if pages > 1 && nav.prev.contains(*x, *y) {
                     self.go_page(page.wrapping_sub(1), pages, cap);
                 } else if pages > 1 && nav.next.contains(*x, *y) {
@@ -2349,6 +2946,9 @@ impl Shell {
     // ------------------------------------------------------------------ drawing
 
     pub fn render(&mut self, g: &mut Gfx) {
+        if self.saver_render(g) {
+            return;
+        }
         self.size = (g.width(), g.height());
         let (w, h) = self.size;
         let s = scale_for(w, h);
@@ -2359,14 +2959,21 @@ impl Shell {
         crate::camera::set_zone(time_settings.as_ref().map(|t| t.zone.clone()));
         self.clock_ready = self.session.is_some();
         self.clock_tip = None;
+        self.live = false; // a whole scene is drawn: nothing is pending
         g.hits.clear();
         g.clear_probes();
-        g.mouse = self.mouse;
+        g.mouse = self.disp_mouse(self.panes_active_display());
         crate::ctxmenu::start_frame();
         crate::fx::background(g);
         let tick = self.tick;
         let mut crashed_title: Option<&'static str> = None;
+        // several panes: the bar, the panes and the dividers take the place of the one screen
+        let panes_drawn = self.ws_active() && {
+            self.draw_panes(g, w, h, s);
+            true
+        };
         match &mut self.screen {
+            _ if panes_drawn => {}
             Screen::HwCheck(c) => c.render(g, w, h, s, tick, &self.env.hostname),
             Screen::Setup(f) => draw_auth(g, w, h, s, f, true, tick, &self.env.hostname, self.env.data_volatile),
             Screen::Login(f) => draw_auth(g, w, h, s, f, false, tick, &self.env.hostname, self.env.data_volatile),
@@ -2393,22 +3000,29 @@ impl Shell {
                     g.hits.truncate(hits_before);
                     self.clock_tip = clock_box;
                     // the installer indicator sits left of the clock while installs run (or just ended)
-                    let clock_left = clock_box.map_or(bell_rect(w, s).x, |b| b.x);
+                    let clock_left = clock_box.map_or(bell_rect(w, s).x - if panes_impl::layout_slot() { 40.0 * s } else { 0.0 }, |b| b.x);
+                    // the battery chip (laptops only) sits left of the clock, with the room the app's name needs kept free
+                    let bat_plan = self.battery.plan(g, s, clock_left - 6.0 * s, 300.0 * s, 8.0 * s, 30.0 * s, 13.0 * s);
+                    let bar_left = bat_plan.as_ref().map_or(clock_left, |p| p.rect.x);
                     let ind_w = self.installs.indicator_width(g, s);
-                    let title_limit = if ind_w > 0.0 && clock_left - ind_w - 6.0 * s > 300.0 * s { clock_left - ind_w - 6.0 * s } else { clock_left };
+                    let title_limit = if ind_w > 0.0 && bar_left - ind_w - 6.0 * s > 300.0 * s { bar_left - ind_w - 6.0 * s } else { bar_left };
                     crate::fx::app_header(g, w as f32, hh, s, app.title(), sub, app.icon(), app.accent(), tick, title_limit - 12.0 * s);
                     if clock_box.is_some() {
                         app_clock(g, w, s, &self.clock);
                     }
-                    let mut dev_right = clock_left - 4.0 * s;
-                    if title_limit < clock_left {
-                        if let Some(b) = self.installs.draw_indicator(g, clock_left - 4.0 * s, 8.0 * s + 15.0 * s, s, tick) {
+                    match &bat_plan {
+                        Some(p) => self.battery.draw_chip(g, p, s),
+                        None => self.battery.anchor = None,
+                    }
+                    let mut dev_right = bar_left - 4.0 * s;
+                    if title_limit < bar_left {
+                        if let Some(b) = self.installs.draw_indicator(g, bar_left - 4.0 * s, 8.0 * s + 15.0 * s, s, tick) {
                             dev_right = b.x - 6.0 * s;
                         }
                     } else {
                         self.installs.anchor = None;
                     }
-                    if let Some(sign) = self.dev_sign {
+                    if let Some(sign) = self.dev_sign.as_deref() {
                         draw_dev_sign(g, dev_right, 8.0 * s + 15.0 * s, s, sign, 300.0 * s);
                     }
                     let acc = app.accent();
@@ -2420,6 +3034,9 @@ impl Shell {
                     if self.session.as_ref().is_some_and(|x| x.policy.allows_app(PApp::Inbox)) {
                         draw_bell(g, bell_rect(w, s), 8.0 * s, s, self.badge, matches!(self.screen, Screen::App(_, PApp::Inbox)));
                     }
+                    if self.panes_button() {
+                        panes_impl::draw_layout_button(g, panes_impl::layout_btn_rect(w, s), s, acc);
+                    }
                     let sr = shot_rect(w, s);
                     let hot = g.hovered(sr);
                     crate::fx::chrome_button(g, sr, s, hot, acc);
@@ -2429,6 +3046,10 @@ impl Shell {
                     let hot = g.hovered(dr) || self.devpop.open;
                     crate::fx::chrome_button(g, dr, s, hot, acc);
                     g.icon(Icon::Devices, dr.x + dr.w / 2.0, dr.y + dr.h / 2.0, 20.0 * s, MUTED);
+                    // the firewall is wanted but not in force: a red dot on the Devices button (its popover says why)
+                    if iyakki_fw::service::alert() {
+                        g.rrect(dr.x + dr.w - 11.0 * s, dr.y - 2.0 * s, 12.0 * s, 12.0 * s, 6.0 * s, rgb(214, 48, 64));
+                    }
                     g.hit(dr, Event::Key(Key::F(8)), "devices");
                     let hr = help_rect(w, s);
                     let hot = g.hovered(hr);
@@ -2444,7 +3065,7 @@ impl Shell {
         }
         if let Some(name) = crashed_title {
             self.screen = Screen::Launcher;
-            self.say(format!("{name} stopped because of an internal error. Details are in the system log."));
+            self.app_crashed(name);
         }
         if matches!(self.shot, Shot::Snap) {
             self.shot = Shot::Select { snap: g.pm.clone(), first: None };
@@ -2485,14 +3106,24 @@ impl Shell {
         }
         if self.session.is_some() {
             self.devpop.render(g, w, h, s);
+            self.battery.render(g, w, h, s);
             self.installs.render(g, w, h, s, tick);
             self.brand.render(g, w, h, s, tick);
         }
         if let (Some(m), true) = (self.login.as_mut(), self.session.is_some()) {
             m.render(g, R::new(0.0, 0.0, w as f32, h as f32), s, tick);
         }
+        self.battery.render_cards(g, w, h, s);
+        self.loss_render(g, w, h, s);
         if let Some((t, _, info)) = &self.toast {
             crate::fx::toast(g, w as f32, h as f32, s, t, *info);
+        }
+        if let Some(o) = &self.fnk.osd {
+            crate::fnkeys::draw_osd(g, w as f32, h as f32, s, o);
+        }
+        self.draw_login_bar(g, w, h, s);
+        if self.fnk.power_card {
+            draw_power_menu(g, w, h, s);
         }
         // the assistant is using the camera: a red sign on every screen, bottom left, while it lasts
         if let Some(what) = self.env.services.camera.in_use() {
@@ -2518,6 +3149,12 @@ impl Shell {
             let label = format!("keeps the last {}", crate::ui::clipboard::limit());
             let lw = g.text_width(13.0 * s, &label, Face::Sans);
             let bx = px + pw - 26.0 * s - 100.0 * s - 28.0 * s - lw - 2.0 * 40.0 * s;
+            g.button(px + 26.0 * s, by, 14.0 * s, "Scan QR  (Ctrl+K)", ACCENT_QR, Event::Tab(912));
+            if let Some((n, secs)) = crate::ui::clipboard::secret_waiting() {
+                let t = format!("a secret is waiting ({n} characters): Ctrl+V pastes it once, gone in {secs} s");
+                let t = g.fit(12.0 * s, &t, Face::Sans, pw - 52.0 * s);
+                g.text(px + 26.0 * s, by - 20.0 * s, 12.0 * s, OK, &t, Face::Sans);
+            }
             g.button(bx, by, 14.0 * s, "−", MUTED, Event::Tab(910));
             g.text(bx + 46.0 * s, by + 8.0 * s, 13.0 * s, DIM, &label, Face::Sans);
             g.button(bx + 46.0 * s + lw + 10.0 * s, by, 14.0 * s, "+", MUTED, Event::Tab(911));
@@ -2532,6 +3169,11 @@ impl Shell {
             let nw = g.text_width(12.0 * s, &note, Face::Sans);
             g.text(px + pw - 26.0 * s - nw, py + 54.0 * s, 12.0 * s, if matches!(self.clip_note, ClipNote::Got(_)) { OK } else { DIM }, &note, Face::Sans);
         }
+        if let Some(c) = self.clipscan.as_mut() {
+            c.render(g, R::new(0.0, 0.0, w as f32, h as f32), s, self.tick);
+        }
+        self.draw_layout_ui(g, w, h, s);
+        self.draw_panes_overlays(g, w, h, s);
         if let Some(m) = &self.ctx {
             let accent = match &self.screen {
                 Screen::App(app, _) => app.accent(),
@@ -2582,14 +3224,14 @@ impl Shell {
         // ask the system for what it holds: text copied in other programs makes Paste usable
         self.want_host_paste = true;
         self.host_sync_until = self.tick + 90;
-        self.ctx = Some(Menu::open(items, (x, y), (w, h), s, crate::ui::clipboard::latest().is_some()));
+        self.ctx = Some(Menu::open(items, (x, y), (w, h), s, crate::ui::clipboard::can_paste()));
     }
 
     /// The menu is open: keys move over it, a click chooses, anything else closes it.
     fn handle_ctx(&mut self, ev: &Event) {
         use crate::ctxmenu::Outcome;
         let Some(m) = self.ctx.as_mut() else { return };
-        m.set_clip_text(crate::ui::clipboard::latest().is_some());
+        m.set_clip_text(crate::ui::clipboard::can_paste());
         let before = m.sel;
         let out = match ev {
             Event::Key(k) => m.key(k),
@@ -2634,7 +3276,7 @@ impl Shell {
             CUT => self.route(&Event::Key(Key::Ctrl('x'))),
             COPY => self.route(&Event::Key(Key::Ctrl('c'))),
             SELECT_ALL => self.route(&Event::Key(Key::Ctrl('a'))),
-            PASTE => match crate::ui::clipboard::latest() {
+            PASTE => match crate::ui::clipboard::paste() {
                 Some(t) => self.route(&Event::Paste(t)),
                 None => self.say_info("The clipboard is empty"),
             },
@@ -2740,7 +3382,7 @@ impl Shell {
             Screen::App(app, _) => (app.title().to_string(), app.help()),
             _ => (
                 "Home".to_string(),
-                vec!["← → ↑ ↓ · choose an app (moving past the last one on a page turns it)".to_string(), "Tab / Shift+Tab or click a chip · switch group (All, Assistant, Web & Media, Work, System)".to_string(), "PageUp / PageDown, mouse wheel or the dots · turn the page".to_string(), "1-9 · open the Nth app of the All list".to_string(), "Enter or click · open it".to_string(), "o · sign out".to_string(), "p · power menu (if your role allows it)".to_string()],
+                vec!["← → ↑ ↓ · choose an app (moving past the last one on a page turns it)".to_string(), "Tab / Shift+Tab or click a chip · switch group (Home, Web & Media, Work, System, and any group you made)".to_string(), "m · move the selected tile to another group (or right-click it); g · this group's menu (new, rename, delete); + chip · new group; u · undo the last move; [ and ] · move the tile earlier or later in its group".to_string(), "PageUp / PageDown, mouse wheel or the dots · turn the page".to_string(), "1-9 · open the Nth app of the All list (the order of the tile table, whichever group you moved it to)".to_string(), "Enter or click · open it".to_string(), "o · sign out".to_string(), "p · power menu (if your role allows it)".to_string()],
             ),
         };
         lines.push(String::new());
@@ -2751,7 +3393,11 @@ impl Shell {
 
     fn draw_launcher(&mut self, g: &mut Gfx, w: u32, h: u32, s: f32) {
         let Some(sess) = self.session.clone() else { return };
-        // top bar
+        let power = sess.policy.power;
+        // top bar (a launcher in a pane has the pane's title strip instead)
+        let top_bar = !self.panes.compact;
+        let lay = top_bar && self.panes_button();
+        if top_bar {
         let name_w = g.text_width(30.0 * s, "IYAKKI", Face::Bold);
         // the name opens the IYAKKI menu (About, Quick install, Media player, Mac drivers)
         let name_box = R::new(30.0 * s, 18.0 * s, name_w + 20.0 * s, 56.0 * s);
@@ -2763,9 +3409,8 @@ impl Shell {
         g.hit(name_box, Event::Key(Key::F(10)), "IYAKKI menu");
         let chip = account_label(&sess.user, sess.role.name());
         let cw = g.text_width(16.0 * s, &chip, Face::Bold) + 36.0 * s;
-        let power = sess.policy.power;
         let bell = sess.policy.allows_app(PApp::Inbox);
-        let right = w as f32 - 40.0 * s - (header_button(w, s, 0).w + 12.0 * s) * (if power { 5.0 } else { 4.0 } + if bell { 1.0 } else { 0.0 });
+        let right = w as f32 - 40.0 * s - (header_button(w, s, 0).w + 12.0 * s) * (if power { 5.0 } else { 4.0 } + if bell { 1.0 } else { 0.0 } + if lay { 1.0 } else { 0.0 });
         crate::fx::glass(g, right - cw, 24.0 * s, cw, 44.0 * s, 22.0 * s, crate::fx::CYAN);
         g.text(right - cw + 18.0 * s, 35.0 * s, 16.0 * s, TEXT, &chip, Face::Bold);
         // sign out, power (when allowed), the camera, then the clipboard queue, from the right
@@ -2779,7 +3424,16 @@ impl Shell {
         let title_end = 40.0 * s + name_w;
         self.clock_tip = launcher_clock(g, s, right - cw - 18.0 * s, title_end + 24.0 * s, &self.clock);
         // the installer indicator, left of the clock (when there is room)
-        let ind_right = self.clock_tip.map_or(right - cw - 18.0 * s, |b| b.x) - 8.0 * s;
+        let mut ind_right = self.clock_tip.map_or(right - cw - 18.0 * s, |b| b.x) - 8.0 * s;
+        // the battery chip (laptops only), left of the clock
+        let bat_plan = self.battery.plan(g, s, ind_right, title_end + 24.0 * s, 24.0 * s, 44.0 * s, 15.0 * s);
+        match &bat_plan {
+            Some(p) => {
+                self.battery.draw_chip(g, p, s);
+                ind_right = p.rect.x - 8.0 * s;
+            }
+            None => self.battery.anchor = None,
+        }
         let mut dev_right = ind_right;
         if ind_right - self.installs.indicator_width(g, s) > title_end + 24.0 * s {
             if let Some(b) = self.installs.draw_indicator(g, ind_right, 46.0 * s, s, self.tick) {
@@ -2788,35 +3442,43 @@ impl Shell {
         } else {
             self.installs.anchor = None;
         }
-        if let Some(sign) = self.dev_sign {
+        if let Some(sign) = self.dev_sign.as_deref() {
             draw_dev_sign(g, dev_right, 46.0 * s, s, sign, title_end + 24.0 * s);
         }
         if bell {
             let r = header_button(w, s, buttons.len());
             draw_bell(g, r, 22.0 * s, s, self.badge, false);
         }
+        if lay {
+            let r = header_button(w, s, buttons.len() + usize::from(bell));
+            panes_impl::draw_layout_button(g, r, s, crate::fx::CYAN);
+        }
+        }
         // tiles
         if self.tick.saturating_sub(self.custom_at) > 60 || self.custom_at == 0 {
             self.refresh_custom();
         }
+        self.lay_poll();
         let tiles = self.group_items();
         self.sel = self.sel.min(tiles.len() - 1);
         let cap = launcher::per_page(w, h, s);
         let (pages, page) = (launcher::page_count(tiles.len(), cap), self.sel / cap);
         let rects = launcher::page_rects(w, h, s, tiles.len(), page);
-        // group chips
+        // group chips, then `…` (the groups that do not fit) and `+` (a new group)
         let groups = self.groups();
         let cur = self.current_group();
-        let labels: Vec<&str> = groups.iter().map(|g| g.label()).collect();
-        for (gr, r) in groups.iter().zip(launcher::chip_rects(s, &labels)) {
+        let row = self.chip_row();
+        for (i, r) in &row.chips {
+            let gr = &groups[*i];
             let on = *gr == cur;
-            let hover = g.hovered(r);
-            crate::fx::row_at(g, r.x, r.y, r.w, r.h, r.h / 2.0, on, hover, crate::fx::CYAN);
+            let hover = g.hovered(*r);
+            crate::fx::row_at(g, r.x, r.y, r.w, r.h, r.h / 2.0, on, hover, if self.lay.carry.is_some() && hover { crate::ui::OK } else { crate::fx::CYAN });
             let label = g.fit(15.0 * s, gr.label(), Face::Bold, r.w - 16.0 * s);
             let lw = g.text_width(15.0 * s, &label, Face::Bold);
             g.text(r.x + (r.w - lw) / 2.0, r.y + (r.h - 15.0 * s) / 2.0 - s, 15.0 * s, if on { TEXT } else { MUTED }, &label, Face::Bold);
-            g.hit(r, Event::MouseDown((r.x + r.w / 2.0) as i32, (r.y + r.h / 2.0) as i32), &format!("group {}", gr.label()));
+            g.hit(*r, Event::MouseDown((r.x + r.w / 2.0) as i32, (r.y + r.h / 2.0) as i32), &format!("group {}", gr.label()));
         }
+        self.draw_extra_chips(g, &row, s);
         let first = page * cap;
         for (k, r) in rects.iter().enumerate() {
             let (i, item) = (first + k, &tiles[first + k]);
@@ -2824,6 +3486,10 @@ impl Shell {
                 LItem::Sys(t) => t,
                 LItem::App(e) => {
                     draw_custom_tile(g, e, *r, s, i == self.sel, tilehub_allowed(&sess.policy));
+                    continue;
+                }
+                LItem::Empty => {
+                    layout_impl::draw_empty_hint(g, *r, s, &self.current_group().name);
                     continue;
                 }
             };
@@ -2877,7 +3543,8 @@ impl Shell {
                 g.hit(r, Event::MouseDown(cx as i32, cy as i32), if glyph == "<" { "previous page" } else { "next page" });
             }
         }
-        let hint = "←/→ choose · Tab group · PgUp/PgDn page · Enter open · o sign out".to_string() + if power { " · p power" } else { "" };
+        if top_bar {
+        let hint = "←/→ choose · Tab group · m move · PgUp/PgDn page · Enter open · o sign out".to_string() + if power { " · p power" } else { "" };
         let hw = g.text_width(14.0 * s, &hint, Face::Sans);
         g.text((w as f32 - hw) / 2.0, h as f32 - 36.0 * s, 14.0 * s, DIM, &hint, Face::Sans);
         let host = format!("{}  ·  {}", self.env.hostname, self.env.host.detect_env());
@@ -2895,6 +3562,7 @@ impl Shell {
             let lw = g.text_width(14.0 * s, &line, Face::Sans);
             g.text(w as f32 - lw - 40.0 * s, h as f32 - 60.0 * s, 14.0 * s, OK, &line, Face::Sans);
         }
+        }
     }
 }
 
@@ -2908,7 +3576,7 @@ fn with_alpha(c: [u8; 4], a: u8) -> [u8; 4] {
 /// The clock in the app header, left of the bell: the time, with the short date when there is room. Returns its box (for
 /// the tooltip and the click).
 fn app_clock(g: &mut Gfx, w: u32, s: f32, clock: &crate::clockbar::ClockState) -> Option<R> {
-    let right = bell_rect(w, s).x - 12.0 * s;
+    let right = bell_rect(w, s).x - 12.0 * s - if panes_impl::layout_slot() { 40.0 * s } else { 0.0 };
     let (time, date) = (clock_time_text(clock), clock.date_text());
     let (tw, dw) = (g.text_width(15.0 * s, &time, Face::Bold), g.text_width(13.0 * s, &date, Face::Sans));
     // keep room for the app's name on the left
@@ -2970,7 +3638,8 @@ fn draw_dev_sign(g: &mut Gfx, right: f32, cy: f32, s: f32, sign: &str, left_limi
     if b.x < left_limit {
         return;
     }
-    let amber = rgb(255, 196, 94);
+    // a shell grant is the dangerous state: red, never amber
+    let amber = if sign.contains("SHELL ACCESS") || sign.contains("INTERRUPTED") { rgb(255, 99, 99) } else { rgb(255, 196, 94) };
     g.rrect(b.x, b.y, b.w, b.h, 6.0 * s, crate::fx::with_alpha(amber, 40));
     g.rrect_outline(b.x, b.y, b.w, b.h, 6.0 * s, 1.0, amber);
     g.text(b.x + 7.0 * s, cy - g.line_height(11.5 * s, Face::Bold) / 2.0, 11.5 * s, amber, sign, Face::Bold);
@@ -3037,6 +3706,8 @@ fn dev_rect(w: u32, s: f32) -> R {
 }
 
 /// The clipboard queue button, left of the Devices button.
+const ACCENT_QR: [u8; 4] = rgb(255, 184, 77);
+
 fn clip_rect(w: u32, s: f32) -> R {
     R::new(w as f32 - 226.0 * s - 120.0 * s, 8.0 * s, 32.0 * s, 30.0 * s)
 }
@@ -3115,7 +3786,8 @@ fn back_rect(w: u32, s: f32) -> R {
 fn auth_card(w: u32, h: u32, s: f32, n_fields: usize) -> R {
     let cw = (440.0 * s).min(w as f32 - 40.0 * s);
     let ch = (290.0 + 66.0 * n_fields as f32) * s;
-    R::new((w as f32 - cw) / 2.0, ((h as f32 - ch) / 2.0).max(10.0), cw, ch)
+    // the card never reaches up into the top bar
+    R::new((w as f32 - cw) / 2.0, ((h as f32 - ch) / 2.0).max(crate::loginbar::bar_h(s) + 8.0), cw, ch)
 }
 
 fn auth_field_rect(w: u32, h: u32, s: f32, i: usize, n: usize) -> R {
@@ -3628,7 +4300,8 @@ pub(crate) mod tests {
             // every dev skill insists on bugs as their own B- rows with captured logs
             assert!(k.body.contains("B- id") && k.body.contains("bug_report") && k.body.contains("never F-"), "{name} has the bug rule");
         }
-        assert!(svc.skills.select("alice", "deploy my node app to k3s", 3).iter().any(|s| s.name == "k3s-dev-best-practices"));
+        assert!(svc.skills.select("alice", "deploy my node app to k3s", 3).iter().any(|s| s.name == "k3s-dev-best-practices" || s.name == "k3s-build-and-deploy"));
+        assert!(svc.skills.select("alice", "build and deploy this app to k3s", 3).iter().any(|s| s.name == "k3s-build-and-deploy"));
         for (file, _) in crate::samples::DOCS {
             assert!(docs.join("shared").join(file).is_file(), "{file}");
         }
@@ -3936,11 +4609,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_ai_ide_tile_is_one_tile_in_the_work_group_for_every_role_but_guest() {
+    fn the_ai_ide_tile_is_one_tile_on_home_for_every_role_but_guest() {
         assert_eq!(TILES.iter().filter(|t| t.app == PApp::Ide).count(), 1);
         let t = TILES.iter().find(|t| t.app == PApp::Ide).unwrap();
         assert_eq!((t.label, t.sub), ("AI IDE", "Code with the AI"));
-        assert_eq!(Group::of(PApp::Ide), Some(Group::Work));
+        assert_eq!(Group::of(PApp::Ide), Some(Group::Home));
         assert_eq!((PApp::Ide.id(), PApp::Ide.label().as_str()), ("ide", "AI IDE"));
         for r in [Role::Admin, Role::Operator, Role::User] {
             assert!(r.template().apps.contains(&PApp::Ide), "{r:?}");
@@ -3951,9 +4624,9 @@ pub(crate) mod tests {
         let (mut sh, _) = shell_with_users("ide-tile");
         login(&mut sh, "root", "rootpass12");
         assert_eq!(sh.visible_tiles().iter().filter(|t| t.app == PApp::Ide).count(), 1);
-        sh.set_group(Group::Work);
-        let work: Vec<PApp> = sh.group_tiles().iter().map(|t| t.app).collect();
-        assert!(work.contains(&PApp::Ide) && work.contains(&PApp::Edit) && work.contains(&PApp::Data), "{work:?}");
+        sh.set_group(Group::Home);
+        let home: Vec<PApp> = sh.group_tiles().iter().map(|t| t.app).collect();
+        assert!(home.contains(&PApp::Ide) && home.contains(&PApp::Settings), "{home:?}");
         assert!(sh.open_for_demo("ide"));
         assert_eq!(sh.screen_name(), "app:ide");
     }
@@ -4073,9 +4746,9 @@ pub(crate) mod tests {
         let mut all: Vec<&str> = TILES.iter().filter(|t| t.group.is_some()).map(|t| t.label).collect();
         all.sort();
         assert_eq!(seen, all, "each tile is in exactly one section");
-        assert!(!seen.contains(&"SETTINGS"), "Settings left the grid (it is in the IYAKKI menu)");
+        assert!(seen.contains(&"SETTINGS"), "Settings is a tile on Home (and stays in the IYAKKI menu)");
         sh.set_group(Group::Home);
-        assert_eq!(names(&sh), vec!["CHAT", "RAG", "MCP", "CLI", "SKILLS", "CALENDAR", "TALES"]);
+        assert_eq!(names(&sh), vec!["CHAT", "RAG", "MCP", "CLI", "SETTINGS", "SKILLS", "CALENDAR", "AI IDE", "TALES", "VOICE"]);
         sh.set_group(Group::WebMedia);
         assert_eq!(names(&sh), vec!["BROWSER", "RADIO", "MEDIA", "CAMERA"]);
         sh.set_group(Group::System);
@@ -4108,12 +4781,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn settings_is_reachable_from_the_iyakki_menu_f7_and_the_clock_but_not_the_grid() {
+    fn settings_is_reachable_from_the_iyakki_menu_f7_and_the_clock_and_sits_on_home() {
         let (mut sh, _) = shell_with_users("grp-set");
         let mut g = Gfx::new(1280, 720);
         login(&mut sh, "root", "rootpass12");
         sh.render(&mut g);
-        assert!(!sh.visible_tiles().iter().any(|t| t.app == PApp::Settings));
+        assert!(sh.visible_tiles().iter().any(|t| t.app == PApp::Settings), "a Settings tile on Home");
         key(&mut sh, Key::F(10));
         sh.render(&mut g);
         let entry = sh.hits().iter().find(|h| h.label == "Settings").map(|h| h.rect).expect("a Settings entry in the menu");
@@ -4151,7 +4824,7 @@ pub(crate) mod tests {
         at(&mut sh, &mut g, r);
         assert_eq!(sh.current_group(), Group::Work);
         let work: Vec<&str> = TILES.iter().filter(|t| Group::Work.holds(t.app)).map(|t| t.label).collect();
-        assert!(work.contains(&"DATA") && work.contains(&"AI IDE"), "{work:?}");
+        assert!(work.contains(&"DATA") && !work.contains(&"AI IDE"), "{work:?}");
         assert_eq!(names(&sh), work);
         assert!(sh.hits().iter().any(|h| h.label == "group Work"), "chips are clickable regions");
         // a tile click in the group opens that app
@@ -4254,7 +4927,7 @@ pub(crate) mod tests {
             let mut g = Gfx::new(w, h);
             login(&mut sh, "root", "rootpass12");
             for gr in sh.groups() {
-                sh.set_group(gr);
+                sh.set_group(gr.clone());
                 let s = scale_for(w, h);
                 let n = sh.group_tiles().len();
                 for p in 0..launcher::page_count(n, launcher::per_page(w, h, s)) {
@@ -4303,8 +4976,8 @@ pub(crate) mod tests {
         let b = back_rect(1280, scale_for(1280, 720));
         sh.handle(&Event::MouseDown((b.x + 5.0) as i32, (b.y + 5.0) as i32));
         assert_eq!(sh.screen_name(), "launcher");
-        // for a plain user: 5 = Edit, 6 = Runs, 7 = Browser, 8 = Radio (no Users tile exists for them; Settings is not on the grid)
-        key(&mut sh, Key::Char('8'));
+        // for a plain user: 5 = Edit, 6 = Runs, 7 = Settings, 8 = Browser, 9 = Radio (no Users tile exists for them)
+        key(&mut sh, Key::Char('9'));
         assert_eq!(sh.screen_name(), "app:radio");
         key(&mut sh, Key::Esc);
         assert_eq!(sh.screen_name(), "launcher");
@@ -4315,20 +4988,23 @@ pub(crate) mod tests {
         assert_eq!(sh.screen_name(), "app:runs");
         key(&mut sh, Key::Esc);
         key(&mut sh, Key::Char('7'));
+        assert_eq!(sh.screen_name(), "app:settings");
+        key(&mut sh, Key::Esc);
+        key(&mut sh, Key::Char('8'));
         assert_eq!(sh.screen_name(), "app:browser");
         key(&mut sh, Key::Esc);
-        // Settings: the IYAKKI menu's gear entry (or F7)
+        // Settings also: the IYAKKI menu's gear entry (or F7)
         key(&mut sh, Key::F(10));
         key(&mut sh, Key::Char('s'));
         assert_eq!(sh.screen_name(), "app:settings");
         key(&mut sh, Key::Esc);
         key(&mut sh, Key::Char('o'));
         login(&mut sh, "root", "rootpass12");
-        // for an admin: 5 = Edit, 6 = Runs, 7 = Users, 8 = Browser
+        // for an admin: 5 = Edit, 6 = Runs, 7 = Users, 8 = Settings, 9 = Browser
         key(&mut sh, Key::Char('7'));
         assert_eq!(sh.screen_name(), "app:users");
         key(&mut sh, Key::Esc);
-        key(&mut sh, Key::Char('8'));
+        key(&mut sh, Key::Char('9'));
         assert_eq!(sh.screen_name(), "app:browser");
     }
 
@@ -4368,7 +5044,7 @@ pub(crate) mod tests {
                 let fit = r.w - 24.0 * s;
                 assert!(g.text_width(10.0 * s, t.label, Face::Bold) <= fit, "{} at {w}x{h}", t.label);
                 assert!(g.text_width(8.0 * s, t.sub, Face::Sans) <= fit, "{} caption at {w}x{h}", t.label);
-                assert!(t.sub.chars().count() <= 16, "captions stay short: {}", t.sub);
+                assert!(t.sub.chars().count() <= 19, "captions stay short: {}", t.sub);
             }
         }
     }
@@ -4524,6 +5200,8 @@ pub(crate) mod tests {
         click(&mut sh, &mut g, "Sign in");
         open_tile(&mut sh, &mut g, PApp::Settings); // through the IYAKKI menu
         assert_eq!(sh.screen_name(), "app:settings");
+        assert!(has(&mut sh, &mut g, "Join WiFi"), "Settings opens on the Overview, with its common things");
+        click(&mut sh, &mut g, "Models");
         assert!(has(&mut sh, &mut g, "Add"), "Models tab shows its buttons");
         click(&mut sh, &mut g, "RAG");
         assert!(has(&mut sh, &mut g, "Reindex") && has(&mut sh, &mut g, "Add backend"), "RAG tab");
@@ -4551,6 +5229,7 @@ pub(crate) mod tests {
         typ(&mut sh, "rootpass12");
         click(&mut sh, &mut g, "Sign in");
         open_tile(&mut sh, &mut g, PApp::Settings);
+        click(&mut sh, &mut g, "Models");
         click(&mut sh, &mut g, "Add");
         assert!(has(&mut sh, &mut g, "Save") && has(&mut sh, &mut g, "Cancel"));
         // the tabs behind the dialog must not react to clicks: aim at where the RAG tab is drawn
@@ -5277,8 +5956,27 @@ mod jobs_tests;
 mod tile_tests;
 
 #[cfg(test)]
+#[path = "shell_tile_sdk_tests.rs"]
+mod tile_sdk_tests;
+
+#[cfg(test)]
 #[path = "shell_camera_tests.rs"]
 mod camera_tests;
+
+#[cfg(test)]
+#[path = "shell_cloud_tests.rs"]
+mod cloud_tests;
+
+#[cfg(test)]
+#[path = "shell_voice_tests.rs"]
+mod voice_tests;
+
+#[cfg(test)]
+#[path = "shell_k8s_tests.rs"]
+mod k8s_tests;
+#[cfg(test)]
+#[path = "shell_disks_tests.rs"]
+mod disks_tests;
 
 #[cfg(test)]
 #[path = "shell_header_tests.rs"]
@@ -5287,6 +5985,89 @@ mod header_tests;
 #[cfg(test)]
 #[path = "shell_brand_tests.rs"]
 mod brand_tests;
+
+#[cfg(test)]
+#[path = "shell_devadb_tests.rs"]
+mod devadb_tests;
+
+#[path = "shell_fnkeys.rs"]
+mod fnkeys_impl;
+
+#[path = "shell_scroll.rs"]
+mod scroll_impl;
+
+#[path = "shell_touchbar.rs"]
+mod touchbar_impl;
+
+#[path = "shell_battery.rs"]
+mod battery_impl;
+#[path = "shell_saver.rs"]
+mod saver_impl;
+#[path = "shell_loss.rs"]
+mod loss_impl;
+
+#[path = "shell_live.rs"]
+mod live_impl;
+#[cfg(test)]
+#[path = "shell_live_tests.rs"]
+mod live_tests;
+
+#[path = "shell_linux.rs"]
+mod linux_impl;
+
+#[cfg(test)]
+#[path = "shell_linux_tests.rs"]
+mod linux_tests;
+
+#[path = "shell_panes.rs"]
+mod panes_impl;
+
+#[path = "shell_layout.rs"]
+mod layout_impl;
+use layout_impl::GroupRef;
+
+#[cfg(test)]
+#[path = "shell_layout_tests.rs"]
+mod layout_tests;
+
+#[cfg(test)]
+#[path = "shell_panes_tests.rs"]
+mod panes_tests;
+
+#[cfg(test)]
+#[path = "shell_panes_tabs_tests.rs"]
+mod panes_tabs_tests;
+
+#[cfg(test)]
+#[path = "shell_displays_tests.rs"]
+mod displays_tests;
+
+#[cfg(test)]
+#[path = "shell_fnkeys_tests.rs"]
+mod fnkeys_tests;
+
+#[cfg(test)]
+#[path = "shell_scroll_tests.rs"]
+mod scroll_tests;
+
+#[cfg(test)]
+#[path = "shell_touchbar_tests.rs"]
+mod touchbar_tests;
+
+#[cfg(test)]
+#[path = "shell_battery_tests.rs"]
+mod battery_tests;
+#[cfg(test)]
+#[path = "shell_loss_tests.rs"]
+mod loss_tests;
+
+#[cfg(test)]
+#[path = "shell_saver_tests.rs"]
+mod saver_tests;
+
+#[cfg(test)]
+#[path = "shell_loginbar_tests.rs"]
+mod loginbar_tests;
 
 /// The red "Camera in use by the assistant" sign, bottom left of every screen.
 pub(crate) fn draw_camera_sign(g: &mut Gfx, h: u32, s: f32, what: &str) -> R {
@@ -5300,3 +6081,7 @@ pub(crate) fn draw_camera_sign(g: &mut Gfx, h: u32, s: f32, what: &str) -> R {
     g.text(r.x + 30.0 * s, r.y + 7.0 * s, 14.0 * s, TEXT, &text, Face::Bold);
     r
 }
+
+#[cfg(test)]
+#[path = "shell_overlap_tests.rs"]
+mod overlap_tests;

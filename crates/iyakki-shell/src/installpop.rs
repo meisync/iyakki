@@ -9,6 +9,7 @@
 //!
 //! The jobs are read about once a second while one runs and every few seconds otherwise; nothing animates when nothing runs.
 
+use crate::safeclamp::SafeClamp;
 use std::time::{Duration, Instant};
 
 use crate::apps::jobs_ui::JobsUi;
@@ -180,7 +181,7 @@ impl InstallPop {
         let top = self.anchor.map_or(56.0 * s, |a| a.y + a.h + 8.0 * s);
         let right = self.anchor.map_or(w as f32 - 12.0 * s, |a| a.x + a.w + 40.0 * s);
         let ph = (if self.ui.log_open() { 560.0 } else { 120.0 + 74.0 * self.ui.jobs().len().clamp(1, 5) as f32 } * s).min(h as f32 - top - 12.0 * s);
-        let x = (right - pw).clamp(12.0 * s, (w as f32 - pw - 12.0 * s).max(12.0 * s));
+        let x = (right - pw).clamp_safe(12.0 * s, (w as f32 - pw - 12.0 * s).max(12.0 * s));
         R::new(x, top, pw, ph)
     }
 
@@ -207,7 +208,7 @@ impl InstallPop {
         let foot = 46.0 * s;
         let body = R::new(p.x + 14.0 * s, p.y + 54.0 * s, p.w - 28.0 * s, p.h - 54.0 * s - foot);
         if self.ui.jobs().is_empty() {
-            crate::fx::empty_state(g, body, s, crate::gfx::Icon::Cli, "No installs yet", "Quick install is in the IYAKKI menu (click the name in the top bar, or F10).", ACCENT);
+            crate::fx::empty_state(g, body, s, crate::gfx::Icon::Cli, "No installs yet", "Installs start in Store \u{2192} Setup (the IYAKKI menu has a shortcut to it).", ACCENT);
         } else if self.ui.log_open() {
             let list_h = (JobsUi::row_height(fs, s) + 4.0 * s).min(body.h * 0.3);
             self.ui.draw_list(g, R::new(body.x, body.y, body.w, list_h), fs, s, tick);

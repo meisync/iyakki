@@ -3,6 +3,7 @@
 //! at 10" in the chat shows up here, and an alarm set here can be read by the assistant. The calendar can show or hide
 //! the alarm schedule; alarms ring anywhere in the system while it is running.
 
+use crate::safeclamp::SafeClamp;
 use iyakki_agent::calendar::{parse_days, parse_hm, parse_local, Alarm, Repeat};
 use iyakki_agent::clock::{civil, days_from_civil, Zone};
 
@@ -405,7 +406,7 @@ impl CalendarApp {
         let first = days_from_civil(y, m, 1);
         let grid0 = first - weekday_mon0(first) as i64;
         let rows = 6;
-        let ch = ((body.h - 46.0 * s - 24.0 * s) / rows as f32).clamp(40.0 * s, 90.0 * s);
+        let ch = ((body.h - 46.0 * s - 24.0 * s) / rows as f32).clamp_safe(40.0 * s, 90.0 * s);
         let (from, to) = (self.day_start(grid0), self.day_start(grid0 + 42));
         let events = cx.services.calendar.events_in(&cx.session.user, from, to, &self.zone);
         let alarms = if self.show_alarms { cx.services.calendar.alarms_in(&cx.session.user, from, to, &self.zone) } else { vec![] };

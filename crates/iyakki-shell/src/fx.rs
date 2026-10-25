@@ -486,6 +486,9 @@ pub fn empty_state(g: &mut Gfx, r: R, s: f32, icon: Icon, title: &str, hint: &st
 /// The answer to the last action, one line: a coloured dot and the text.
 pub fn status_line(g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, text: &str, ok: bool) {
     let c = if ok { OK } else { ERR };
+    // every app's failure line: an I/O error caused by a lost boot drive names the drive (iyakki_storage::loss, healthy: unchanged)
+    let text = if ok { text.to_string() } else { iyakki_storage::loss::reword(text) };
+    let text = text.as_str();
     g.circle(x + 5.0 * s, y + 8.0 * s, 4.0 * s, c);
     g.circle(x + 5.0 * s, y + 8.0 * s, 7.0 * s, with_alpha(c, 40));
     let t = g.fit(14.0 * s, text, Face::Sans, w - 20.0 * s);

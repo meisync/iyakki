@@ -1,5 +1,6 @@
 //! Modal forms, a filterable picker, and a small drop-down select (closed box and open list), shared by the apps.
 
+use crate::safeclamp::SafeClamp;
 use crate::gfx::{rgb, Face, Gfx};
 use crate::ui::{Event, Key, TextField, DIM, ERR, MUTED, R, TEXT};
 
@@ -9,6 +10,8 @@ pub enum FieldKind {
     /// Shown as bullets; the value is never echoed back after saving.
     Secret,
     Choice(Vec<String>),
+    /// A path: a text box with a Browse button and a live chip (exists / file / folder), see `filepicker.rs`.
+    Path(crate::filepicker::PathKind, Vec<String>),
 }
 
 #[derive(Clone, Debug)]
@@ -43,11 +46,15 @@ pub struct Form {
     pub fields: Vec<FormField>,
     pub focus: usize,
     pub error: Option<String>,
+    /// The file picker opened from a path field (it takes every event while open).
+    pub picker: std::cell::RefCell<Option<Box<crate::filepicker::FilePicker>>>,
+    /// The last check of each path field: (the text checked, the answer).
+    pcache: std::cell::RefCell<Vec<Option<(String, crate::filepicker::Check)>>>,
 }
 
 impl Form {
     pub fn new(title: &str) -> Form {
-        Form { title: title.into(), fields: vec![], focus: 0, error: None }
+        Form { title: title.into(), fields: vec![], focus: 0, error: None, picker: Default::default(), pcache: Default::default() }
     }
 
     pub fn text(mut self, label: &str, init: &str, hint: &str) -> Form {
@@ -56,6 +63,52 @@ impl Form {
         tf.max = 4096;
         self.fields.push(FormField { label: label.into(), kind: FieldKind::Text, tf, choice: 0, hint: hint.into(), chips: vec![], chip_sel: 0 });
         self
+    }
+
+    /// A path field: the text box of [`Form::text`] plus Browse and a live check. `exts` limits files (empty: any).
+    pub fn path(mut self, label: &str, init: &str, hint: &str, kind: crate::filepicker::PathKind, exts: &[&str]) -> Form {
+        self = self.text(label, init, hint);
+        if let Some(f) = self.fields.last_mut() {
+            f.kind = FieldKind::Path(kind, exts.iter().map(|e| e.to_string()).collect());
+        }
+        self
+    }
+
+    /// The check of path field `i` for what it holds now (looked at again only when the text changed).
+    pub fn path_check(&self, i: usize) -> Option<crate::filepicker::Check> {
+        let f = self.fields.get(i)?;
+        let FieldKind::Path(kind, exts) = &f.kind else { return None };
+        let mut cache = self.pcache.borrow_mut();
+        if cache.len() <= i {
+            cache.resize(i + 1, None);
+        }
+        if let Some((t, c)) = &cache[i] {
+            if *t == f.tf.value {
+                return Some(c.clone());
+            }
+        }
+        let c = crate::filepicker::check(&crate::filepicker::current_scope(), *kind, exts, &f.tf.value);
+        cache[i] = Some((f.tf.value.clone(), c.clone()));
+        Some(c)
+    }
+
+    /// Open the picker for path field `i`, starting where the box points.
+    pub fn browse(&mut self, i: usize) {
+        let Some(f) = self.fields.get(i) else { return };
+        let FieldKind::Path(kind, exts) = &f.kind else { return };
+        self.focus = i;
+        let title = match kind {
+            crate::filepicker::PathKind::Folder => "Choose a folder",
+            crate::filepicker::PathKind::File => "Choose a file",
+            crate::filepicker::PathKind::Save => "Save as",
+        };
+        *self.picker.get_mut() = Some(Box::new(crate::filepicker::FilePicker::new(*kind, exts, title, f.tf.value.trim(), crate::filepicker::current_scope())));
+    }
+
+    /// Fill path field `i` (a drop, or the picker's answer) and forget the old check.
+    fn fill_path(&mut self, i: usize, p: &str) {
+        self.fields[i].tf.set(p);
+        self.focus = i;
     }
 
     pub fn secret(mut self, label: &str, hint: &str) -> Form {
@@ -136,11 +189,47 @@ impl Form {
 
     /// Keyboard, paste and mouse events for the dialog.
     pub fn handle_event(&mut self, ev: &Event) -> FormEvent {
+        if let Some(p) = self.picker.get_mut().as_mut() {
+            match p.handle_event(ev) {
+                crate::filepicker::PickOut::Stay => {}
+                crate::filepicker::PickOut::Cancel => *self.picker.get_mut() = None,
+                crate::filepicker::PickOut::Chosen(path) => {
+                    *self.picker.get_mut() = None;
+                    let i = self.focus.min(self.fields.len().saturating_sub(1));
+                    if self.fields.get(i).is_some() {
+                        self.fill_path(i, &path.to_string_lossy());
+                        return FormEvent::Changed(i);
+                    }
+                }
+            }
+            return FormEvent::None;
+        }
+        if let Some(d) = crate::filepicker::dropped_text(ev) {
+            // a dropped file or folder fills the path field that has the keyboard, or the first one
+            let at = if matches!(self.fields.get(self.focus).map(|f| &f.kind), Some(FieldKind::Path(..))) { Some(self.focus) } else { self.fields.iter().position(|f| matches!(f.kind, FieldKind::Path(..))) };
+            if let Some(i) = at {
+                let mut text = d.to_string();
+                if matches!(self.fields[i].kind, FieldKind::Path(crate::filepicker::PathKind::Folder, _)) && std::path::Path::new(&text).is_file() {
+                    text = std::path::Path::new(&text).parent().map_or(text.clone(), |p| p.to_string_lossy().into_owned());
+                }
+                self.fill_path(i, &text);
+                return FormEvent::Changed(i);
+            }
+            return FormEvent::None;
+        }
         match ev {
+            Event::Tab(n) if (crate::filepicker::BROWSE_TAB..crate::filepicker::BROWSE_TAB + 100).contains(n) => {
+                self.browse(*n - crate::filepicker::BROWSE_TAB);
+                FormEvent::None
+            }
+            Event::Key(Key::Ctrl('o')) if matches!(self.fields.get(self.focus).map(|f| &f.kind), Some(FieldKind::Path(..))) => {
+                self.browse(self.focus);
+                FormEvent::None
+            }
             Event::Key(k) => self.handle(k),
             Event::Paste(t) => {
                 if let Some(f) = self.fields.get_mut(self.focus) {
-                    if matches!(f.kind, FieldKind::Text | FieldKind::Secret) {
+                    if matches!(f.kind, FieldKind::Text | FieldKind::Secret | FieldKind::Path(..)) {
                         f.tf.paste(t);
                     }
                 }
@@ -149,7 +238,7 @@ impl Form {
             Event::FocusAt(i, x) => {
                 if *i < self.fields.len() {
                     self.focus = *i;
-                    if matches!(self.fields[*i].kind, FieldKind::Text | FieldKind::Secret) {
+                    if matches!(self.fields[*i].kind, FieldKind::Text | FieldKind::Secret | FieldKind::Path(..)) {
                         self.fields[*i].tf.click(*x);
                     }
                 }
@@ -212,7 +301,7 @@ impl Form {
             }
             other => {
                 if let Some(f) = self.fields.get_mut(self.focus) {
-                    if f.kind != FieldKind::Text && f.kind != FieldKind::Secret {
+                    if !matches!(f.kind, FieldKind::Text | FieldKind::Secret | FieldKind::Path(..)) {
                         return FormEvent::None;
                     }
                     f.tf.max = 4096;
@@ -286,9 +375,26 @@ impl Form {
                     g.hit(R::new(r.x, r.y, r.w / 2.0, r.h), Event::Tab(i * 2), "choice-prev");
                     g.hit(R::new(r.x + r.w / 2.0, r.y, r.w / 2.0, r.h), Event::Tab(i * 2 + 1), "choice-next");
                 }
+                FieldKind::Path(kind, _) => {
+                    // the box, a Browse button at its right, and the live check on the label's line
+                    crate::filepicker::note_path_field();
+                    let bw = g.text_width(13.0 * s, "Browse…", Face::Bold) + 24.0 * s;
+                    let bw = bw.min((r.w / 2.0).max(0.0));
+                    let tr = R::new(r.x, r.y, (r.w - bw - 6.0 * s).max(0.0), r.h);
+                    f.tf.render(g, tr, focused, s, blink, Face::Sans, i);
+                    let br = R::new(tr.x + tr.w + 6.0 * s, r.y, bw, r.h);
+                    let hot = g.hovered(br);
+                    crate::fx::pill(g, br, s, accent, hot, true);
+                    let lbl = g.fit(13.0 * s, "Browse…", Face::Bold, (bw - 8.0 * s).max(0.0));
+                    g.text(br.x + 12.0 * s, br.y + (br.h - g.line_height(13.0 * s, Face::Bold)) / 2.0, 13.0 * s, TEXT, &lbl, Face::Bold);
+                    g.hit(br, Event::Tab(crate::filepicker::BROWSE_TAB + i), "Browse");
+                    if let Some(c) = self.path_check(i) {
+                        crate::filepicker::draw_chip(g, r.x + r.w, fy + 1.0 * s, s, &c, *kind);
+                    }
+                }
                 _ => f.tf.render(g, r, focused, s, blink, Face::Sans, i),
             }
-            if focused && !f.hint.is_empty() && f.tf.value.is_empty() && matches!(f.kind, FieldKind::Text | FieldKind::Secret) {
+            if focused && !f.hint.is_empty() && f.tf.value.is_empty() && matches!(f.kind, FieldKind::Text | FieldKind::Secret | FieldKind::Path(..)) {
                 let hint = g.fit(14.0 * s, &f.hint, Face::Sans, r.w - 60.0 * s);
                 g.text(r.x + 14.0 * s, r.y + 9.0 * s, 14.0 * s, DIM, &hint, Face::Sans);
             }
@@ -323,9 +429,13 @@ impl Form {
         let sw = g.button(x + w - 26.0 * s - 90.0 * s, by, 14.0 * s, "Save", accent, Event::Key(Key::Ctrl('s')));
         let _ = sw;
         g.button(x + w - 26.0 * s - 90.0 * s - 100.0 * s, by, 14.0 * s, "Cancel", MUTED, Event::Key(Key::Esc));
-        let help = if self.fields.get(self.focus).is_some_and(|f| !f.chips.is_empty()) { "Tab/click to move · click an example or Ctrl+←/→ then Ctrl+E · Ctrl+V paste" } else { "Tab/click to move · Ctrl+V paste · Ctrl+Shift+V history" };
+        let help = if self.fields.get(self.focus).is_some_and(|f| !f.chips.is_empty()) { "Tab/click to move · click an example or Ctrl+←/→ then Ctrl+E · Ctrl+V paste" } else { if self.fields.get(self.focus).is_some_and(|f| matches!(f.kind, FieldKind::Path(..))) { "Tab/click to move · Ctrl+V paste or drop a file · Ctrl+O browse" } else { "Tab/click to move · Ctrl+V paste · Ctrl+Shift+V history" } };
         let help = g.fit(12.0 * s, help, Face::Sans, w - 52.0 * s - 210.0 * s);
         g.text(x + 26.0 * s, by + 8.0 * s, 12.0 * s, DIM, &help, Face::Sans);
+        // the file picker, when Browse opened it, sits on top of the whole form
+        if let Some(p) = self.picker.borrow_mut().as_mut() {
+            p.render(g, area, s, accent, blink);
+        }
     }
 }
 
@@ -443,7 +553,7 @@ impl Picker {
             }
             Event::Scroll(d) => {
                 let n = self.visible().len();
-                self.sel = (self.sel as i32 - *d).clamp(0, n.saturating_sub(1) as i32) as usize;
+                self.sel = (self.sel as i32 - *d).clamp_safe(0, n.saturating_sub(1) as i32) as usize;
                 PickEvent::None
             }
             // a click on row `i` chooses it

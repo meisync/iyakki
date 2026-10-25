@@ -2,6 +2,7 @@
 //! runs the schedules will start, and the history as a table. Click a run to open it in RUN; Shift+click selects several for the
 //! bulk actions (run again, cancel).
 
+use crate::safeclamp::SafeClamp;
 use iyakki_flow::model::*;
 
 use super::flows::*;
@@ -94,7 +95,7 @@ impl FlowsApp {
         let wide = inner.w >= 900.0 * s;
         let blink = super::blink(self.tick);
         let on = self.focus == Focus::BoardSearch;
-        let sw = (inner.w * 0.34).clamp(160.0 * s, 300.0 * s);
+        let sw = (inner.w * 0.34).clamp_safe(160.0 * s, 300.0 * s);
         let field = R::new(inner.x, inner.y, sw, 32.0 * s);
         super::with_caret(on, || self.board.search.render(g, field, on, s, blink, Face::Sans, fid::BOARD_SEARCH));
         let lanes = self.board_lanes();
@@ -162,7 +163,7 @@ impl FlowsApp {
         }
         if bottom_h > 0.0 {
             let br = R::new(avail.x, avail.y + avail.h - bottom_h, avail.w, bottom_h);
-            let nw = (br.w * 0.34).clamp(240.0 * s, 380.0 * s);
+            let nw = (br.w * 0.34).clamp_safe(240.0 * s, 380.0 * s);
             self.draw_next(g, R::new(br.x, br.y, nw, br.h), s, now);
             self.draw_history(g, R::new(br.x + nw + 8.0 * s, br.y, br.w - nw - 8.0 * s, br.h), s, now);
         } else if !wide && self.board.lane == 0 && !self.board.next.is_empty() {

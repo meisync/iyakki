@@ -112,6 +112,8 @@ pub(super) struct Dc {
     health_busy: Arc<AtomicBool>,
     /// Platform services (Gitea, the private store): while it is open it owns every key and click of this page.
     pub(super) platform: Option<crate::apps::platform_services::PlatformPanel>,
+    /// Settings -> Clusters (the cluster registry): owns every key and click of this page while open.
+    pub(super) clusters: Option<crate::apps::clusters_panel::ClustersPanel>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -175,11 +177,35 @@ impl SettingsApp {
     }
 
     pub(super) fn dc_platform_open(&self) -> bool {
-        self.dc.platform.as_ref().is_some_and(|p| p.is_open())
+        self.dc.platform.as_ref().is_some_and(|p| p.is_open()) || self.dc.clusters.as_ref().is_some_and(|p| p.is_open())
+    }
+
+    /// Open the Clusters page (the registry of local and remote clusters).
+    pub fn dc_open_clusters(&mut self, cx: &AppCx) {
+        let (dir, user) = Self::dc_ids(cx);
+        let svc = cx.services.clone();
+        let (v_svc, v_user) = (svc.clone(), user.clone());
+        let panel = crate::apps::clusters_panel::ClustersPanel::new(svc.fleet(), dir, &user, cx.session.role)
+            .with_streamer(svc.streamer())
+            .with_vault_delete(Arc::new(move |reference: &str| {
+                let result = match reference.split_once(':') {
+                    Some(("uvault", name)) => v_svc.user_delete(&v_user, name),
+                    Some(("vault", name)) => v_svc.system_delete(name),
+                    _ => return Ok(()),
+                };
+                result.map_err(|e| format!("the vault entry was not deleted: {e}"))
+            }));
+        self.dc.clusters = Some(panel);
     }
 
     /// Every event while Platform services is open (the panel is the only keyboard owner). Closing drops it, secrets included.
     pub(super) fn dc_platform_event(&mut self, ev: &Event) {
+        if let Some(c) = self.dc.clusters.as_mut() {
+            if !c.handle(ev) {
+                self.dc.clusters = None;
+            }
+            return;
+        }
         let Some(p) = self.dc.platform.as_mut() else { return };
         let open = p.handle(ev);
         let wants = p.take_wants();
@@ -402,6 +428,7 @@ impl SettingsApp {
             Key::Char('V') => return self.dc_vault_remove(),
             Key::Char('g') => return self.dc_registry_form(cx),
             Key::Char('P') => return self.dc_open_platform(cx, None),
+            Key::Char('C') => return self.dc_open_clusters(cx),
             _ => {}
         }
         // the machine's own cluster: administrators only
@@ -961,6 +988,10 @@ impl SettingsApp {
 
     pub(super) fn render_devcluster(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
         self.dc_prepare(cx);
+        if let Some(p) = self.dc.clusters.as_mut() {
+            p.draw(g, a, s);
+            return;
+        }
         if let Some(p) = self.dc.platform.as_mut() {
             p.draw(g, a, s);
             return;
@@ -996,7 +1027,7 @@ impl SettingsApp {
             let chips: Vec<(&str, [u8; 4])> = r.chips.iter().take(4).map(|(t, c)| (t.as_str(), *c)).collect();
             let chips_w: f32 = chips.iter().map(|(t, _)| g.text_width(12.0 * s, t, Face::Bold) + 24.0 * s).sum();
             let title = g.fit(17.0 * s, &r.title, Face::Bold, (a.w - 36.0 * s - chips_w).max(80.0 * s));
-            row(g, i, a.x, y, a.w, rh, s, i == sel, &title, &r.sub, &chips);
+            row(g, &mut self.tip, i, a.x, y, a.w, rh, s, i == sel, &title, &r.sub, &chips);
             y += rh + gap;
         }
         if n > visible {

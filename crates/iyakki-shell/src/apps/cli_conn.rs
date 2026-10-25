@@ -3,6 +3,7 @@
 //! secret; the file of connections lists names only. There is no terminal emulator yet, so Connect runs the default command (or a
 //! quick check) without a prompt and streams its output into the Terminal tab (docs/CLI-SSH.md, docs/ALPHA-SCOPE.md).
 
+use crate::safeclamp::SafeClamp;
 use std::sync::{Arc, Mutex};
 
 use iyakki_agent::ssh::{self, Connection, Env, HostKey, Mode};
@@ -447,7 +448,7 @@ impl Conns {
         let list = env.connections().list();
         self.sel = self.sel.min(list.len().saturating_sub(1));
         let client = cx.services.clis.system_status("ssh");
-        let list_w = (w * 0.34).clamp(220.0 * s, 360.0 * s);
+        let list_w = (w * 0.34).clamp_safe(220.0 * s, 360.0 * s);
         let (rh, gap) = (46.0 * s, 5.0 * s);
         let bottom = area.y + area.h;
         let slots = (((bottom - y) / (rh + gap)).floor() as usize).max(1);
@@ -574,7 +575,7 @@ impl Conns {
         let p = crate::fx::modal(g, area, s, 660.0 * s, 480.0 * s, ACCENT, false);
         let y0 = crate::fx::modal_title(g, p, s, if editing { "Edit connection" } else { "New connection" }, ACCENT);
         let foot = 64.0 * s;
-        let rh = ((p.y + p.h - foot - y0) / FIELDS.len() as f32).clamp(30.0 * s, 46.0 * s);
+        let rh = ((p.y + p.h - foot - y0) / FIELDS.len() as f32).clamp_safe(30.0 * s, 46.0 * s);
         let (lw, fx) = (96.0 * s, p.x + 26.0 * s + 100.0 * s);
         let fw = p.x + p.w - 26.0 * s - fx;
         for (i, (label, _)) in FIELDS.iter().enumerate() {

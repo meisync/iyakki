@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use iyakki_webview::blit::{bgra_to_rgba_opaque, blit_region, blit_region_x2, stretch_for, uncovered};
 use iyakki_webview::keys;
 use iyakki_webview::proto::{self, Hello, MouseKind, Rect, ToHelper};
 use iyakki_webview::{Config, Event as WvEvent, WebView};
@@ -20,6 +21,13 @@ pub const AREA_FULL: usize = 902;
 const START_TIMEOUT: Duration = Duration::from_secs(25);
 /// A wheel notch in the protocol (1/120 notch units).
 const NOTCH: i32 = 120;
+/// A pixel step of the shell's scroll engine (positive = up) as the protocol's wheel units (positive = down, 120 a notch).
+pub(super) fn wheel_units(px: i32) -> i32 {
+    (-(px as f32) * NOTCH as f32 / crate::scrolleng::NOTCH_PX).round() as i32
+}
+
+/// Rows at the top of the page area that the browser's own chrome draws over (see `Full::draw_pending`).
+const CHROME_ROWS: i32 = 1;
 
 /// What the view found out that the browser must act on (it owns the history, the policy and the downloads).
 #[derive(Clone, Debug, PartialEq)]
@@ -37,6 +45,17 @@ pub enum Note {
     Gone(String),
     /// The engine reported a problem but is still running.
     Trouble(String),
+    /// The sound doctor's short note for the browser bar (`Some`), or the end of it (`None`).
+    Sound(Option<String>),
+}
+
+/// What a view needs the shell to do about a change (see [`Full::redraw_kind`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Redraw {
+    None,
+    /// Only the engine's picture changed: [`Full::draw_pending`] can paint just that part.
+    Live,
+    Full,
 }
 
 pub struct Full {
@@ -52,12 +71,23 @@ pub struct Full {
     pub cursor: u8,
     /// Keys go to the page (else the browser's own shortcuts get them).
     pub page_focus: bool,
+    /// The page is in DOM fullscreen: the browser shows only the page, over the whole pane, until the page leaves (or Esc asks it to).
+    pub fullscreen: bool,
     /// Where the page area was drawn last (screen pixels), for turning absolute mouse positions into page ones.
     rect: R,
     /// The left button is held down inside the page (a drag), so moves arrive as presses repeated by the shell.
     pub pressed: bool,
     last_mouse: Option<(i32, i32)>,
     redraw: bool,
+    /// The part of the picture (picture pixels) that changed since it was last drawn on the screen.
+    tile_pending: Option<Rect>,
+    /// The picture size at the last full draw, and how many screen pixels one picture pixel took then (1, or 2 when smooth).
+    drawn_size: (i32, i32),
+    up: i32,
+    /// "Smooth": the engine draws at half the width and height (a quarter of the pixels) and the shell stretches the picture.
+    smooth: bool,
+    /// The UI scale at the last `send_zoom` (kept so a change of the smooth setting can send the zoom again).
+    scale_now: f32,
     /// The last address that was allowed (what to return to after a refused one).
     pub good_url: String,
     /// The last address recorded in the history (so a title arriving later does not count a second visit).
@@ -76,6 +106,8 @@ pub struct Full {
     /// Answers to `eval` scripts not yet taken: `(id, ok, json or error text)`.
     script_results: Vec<(u32, bool, String)>,
     next_script: u32,
+    /// The sound doctor: is the page playing, and is the sound connected (see `browser_sound.rs`).
+    sound: super::browser_sound::SoundWatch,
 }
 
 pub struct Start {
@@ -127,10 +159,16 @@ impl Full {
             can_forward: false,
             cursor: proto::cursor::DEFAULT,
             page_focus: true,
+            fullscreen: false,
             rect: R::new(0.0, 0.0, w as f32, h as f32),
             pressed: false,
             last_mouse: None,
             redraw: true,
+            tile_pending: None,
+            drawn_size: (0, 0),
+            up: 1,
+            smooth: false,
+            scale_now: st.scale.max(0.1),
             good_url: String::new(),
             visited: String::new(),
             scale_hello: st.scale.max(0.1),
@@ -145,14 +183,35 @@ impl Full {
             log: Default::default(),
             script_results: Vec::new(),
             next_script: 1,
+            sound: super::browser_sound::SoundWatch::new(),
         };
         f.send_zoom(st.scale);
         f.view.send(ToHelper::Focus(true));
         Ok(f)
     }
 
+    /// Smooth: draw the page at half the width and height and stretch it (about four times fewer pixels for the engine to paint,
+    /// at the price of softer text). The page keeps its layout: the engine's zoom is halved to make up for the smaller picture.
+    pub fn set_smooth(&mut self, on: bool) {
+        if self.smooth != on {
+            self.smooth = on;
+            self.redraw = true;
+            let s = self.scale_now;
+            self.send_zoom(s);
+        }
+    }
+
+    fn div(&self) -> u32 {
+        if self.smooth {
+            2
+        } else {
+            1
+        }
+    }
+
     fn send_zoom(&mut self, scale_now: f32) {
-        let pct = ((self.zoom_pct as f32) * scale_now.max(0.1) / self.scale_hello).round().clamp(25.0, 500.0) as u32;
+        self.scale_now = scale_now.max(0.1);
+        let pct = ((self.zoom_pct as f32) * scale_now.max(0.1) / self.scale_hello / self.div() as f32).round().clamp(25.0, 500.0) as u32;
         if pct != self.zoom_sent {
             self.zoom_sent = pct;
             self.view.send(ToHelper::Zoom(pct));
@@ -209,6 +268,14 @@ impl Full {
         self.send_zoom(s);
     }
 
+    /// Esc in fullscreen: ask the page to leave (it answers with `Fullscreen(false)`, which restores the bars). The bars stay
+    /// hidden until it does, so the page never sits in a half state.
+    pub fn leave_fullscreen(&mut self) {
+        if self.fullscreen {
+            self.view.send(ToHelper::LeaveFullscreen);
+        }
+    }
+
     pub fn set_focus(&mut self, on: bool) {
         self.page_focus = on;
         self.view.send(ToHelper::Focus(on));
@@ -235,7 +302,12 @@ impl Full {
 
     /// A new picture or state arrived since the last call (the shell then draws again).
     pub fn take_redraw(&mut self) -> bool {
-        std::mem::take(&mut self.redraw)
+        let kind = self.redraw_kind();
+        if kind != Redraw::None {
+            // the caller draws the whole view in answer: nothing stays pending (a view nobody draws must not ask again at every beat)
+            self.tile_pending = None;
+        }
+        kind != Redraw::None
     }
 
     pub fn frame_size(&self) -> (u32, u32) {
@@ -304,6 +376,15 @@ impl Full {
                     self.redraw = true;
                 }
                 WvEvent::Cursor(k) => self.cursor = k,
+                WvEvent::Fullscreen(on) => {
+                    if self.fullscreen != on {
+                        self.fullscreen = on;
+                        self.page_focus = true; // the page has the keys in fullscreen (the browser's bars are gone)
+                        self.view.send(ToHelper::Focus(true));
+                        self.last_mouse = None;
+                        self.redraw = true;
+                    }
+                }
                 WvEvent::Download { url, name } => self.notes.push(Note::Download { url, name }),
                 WvEvent::Clipboard(t) => self.notes.push(Note::Clipboard(t)),
                 WvEvent::ScriptResult { id, ok, json } => {
@@ -312,8 +393,10 @@ impl Full {
                     }
                     self.script_results.push((id, ok, json));
                 }
+                WvEvent::AudioPlaying(on) => self.sound.set_playing(on),
                 WvEvent::Crashed(r) => self.notes.push(Note::Trouble(r)),
                 WvEvent::Log(l) => {
+                    self.sound.on_log(&l);
                     log::debug!("webview: {l}");
                     if self.log.len() >= 60 {
                         self.log.pop_front();
@@ -327,11 +410,30 @@ impl Full {
                 }
             }
         }
+        self.sound_tick();
         if !self.ready && self.gone.is_none() && self.started.elapsed() > START_TIMEOUT {
             let why = "the web engine did not start in time".to_string();
             self.gone = Some(why.clone());
             self.notes.push(Note::Gone(why));
             self.redraw = true;
+        }
+    }
+
+    /// The sound doctor: while the page plays audio, compare it with the kernel's playback streams and recover (see `browser_sound.rs`).
+    fn sound_tick(&mut self) {
+        let Some(helper) = self.view.pid() else { return };
+        let actions = self.sound.tick(helper, std::path::Path::new(iyakki_agent::quiet::ASOUND), std::path::Path::new("/proc"), std::process::id());
+        for a in actions {
+            match a {
+                iyakki_agent::sounddoctor::Action::Note(n) => self.notes.push(Note::Sound(Some(n))),
+                iyakki_agent::sounddoctor::Action::Clear => self.notes.push(Note::Sound(None)),
+                iyakki_agent::sounddoctor::Action::CloseHolder(p) => {
+                    iyakki_agent::sounddoctor::close_holder(p, std::process::id());
+                }
+                iyakki_agent::sounddoctor::Action::Reconnect => {
+                    self.eval(iyakki_agent::sounddoctor::RECONNECT_JS, 2000);
+                }
+            }
         }
     }
 
@@ -352,7 +454,8 @@ impl Full {
         }
         if let Some(r) = self.view.take_dirty() {
             self.copy_rect(r);
-            self.redraw = true;
+            let r = r.clip(w, h);
+            self.tile_pending = Some(self.tile_pending.map_or(r, |p| p.union(r)));
         }
     }
 
@@ -368,22 +471,15 @@ impl Full {
         for y in r.y..r.y + r.h {
             let a = ((y * w + r.x) * 4) as usize;
             let b = a + (r.w * 4) as usize;
-            for (d, s) in dst[a..b].chunks_exact_mut(4).zip(src[a..b].chunks_exact(4)) {
-                let alpha = s[3];
-                if alpha == 255 {
-                    d.copy_from_slice(&[s[2], s[1], s[0], 255]);
-                } else {
-                    let rest = 255 - alpha;
-                    d.copy_from_slice(&[s[2].saturating_add(rest), s[1].saturating_add(rest), s[0].saturating_add(rest), 255]);
-                }
-            }
+            bgra_to_rgba_opaque(&src[a..b], &mut dst[a..b]);
         }
     }
 
     /// Draw the page into `view` (screen pixels) and tell the helper when the area's size or scale changed.
     pub fn draw(&mut self, g: &mut Gfx, view: R, s: f32) {
         self.rect = view;
-        let want = ((view.w.max(64.0)) as u32, (view.h.max(64.0)) as u32);
+        let div = self.div();
+        let want = (((view.w.max(64.0)) as u32 / div).max(32), ((view.h.max(64.0)) as u32 / div).max(32));
         if want != self.view.size_wanted() {
             self.view.send(ToHelper::Resize { w: want.0, h: want.1 });
         }
@@ -391,30 +487,64 @@ impl Full {
         let (vx, vy) = (view.x.round() as i32, view.y.round() as i32);
         let (vw, vh) = (view.w as i32, view.h as i32);
         let (gw, gh) = (g.width() as i32, g.height() as i32);
-        // the page's own white where no picture has arrived yet (or the area grew and the helper has not caught up)
-        g.rect(view.x, view.y, view.w, view.h, [255, 255, 255, 255]);
-        let Some(pm) = &self.pm else { return };
-        let (pw, ph) = (pm.width() as i32, pm.height() as i32);
-        let cols = pw.min(vw).min(gw - vx).max(0);
-        if cols == 0 {
+        // the page's own white where no picture has arrived yet (or the area grew and the helper has not caught up): only the part
+        // the picture does not cover (the picture is drawn over the rest, so filling it first would write the whole area twice)
+        let Some(pm) = &self.pm else {
+            g.rect(view.x, view.y, view.w, view.h, [255, 255, 255, 255]);
             return;
+        };
+        let (pw, ph) = (pm.width() as i32, pm.height() as i32);
+        let up = stretch_for(self.smooth, pw, vw);
+        for r in uncovered(vx, vy, vw, vh, pw * up, ph * up) {
+            g.rect(r.0 as f32, r.1 as f32, r.2 as f32, r.3 as f32, [255, 255, 255, 255]);
         }
-        let rows = ph.min(vh);
-        let src = pm.data();
-        let dst = g.pm.data_mut();
-        for y in 0..rows {
-            let dy = vy + y;
-            if dy < 0 || dy >= gh {
-                continue;
-            }
-            let (sx0, dx0) = if vx < 0 { (-vx, 0) } else { (0, vx) };
-            let n = (cols - sx0).max(0);
-            if n == 0 {
-                continue;
-            }
-            let a = ((y * pw + sx0) * 4) as usize;
-            let b = ((dy * gw + dx0) * 4) as usize;
-            dst[b..b + (n * 4) as usize].copy_from_slice(&src[a..a + (n * 4) as usize]);
+        self.tile_pending = None;
+        self.drawn_size = (pw, ph);
+        self.up = up;
+        if up == 2 {
+            blit_region_x2(pm.data(), pw, ph, g.pm.data_mut(), gw, gh, (vx, vy, vw, vh), (0, 0, pw, ph));
+        } else {
+            blit_region(pm.data(), pw, ph, g.pm.data_mut(), gw, gh, (vx, vy, vw, vh), (0, 0, pw, ph));
+        }
+    }
+
+    /// Draw only what changed in the picture since it was last drawn, in place over the scene the last full draw left in `g`
+    /// (the shell does this between full redraws when nothing else on screen changed). Returns the screen rectangle written, or
+    /// `None` when there is nothing to draw or the area changed size (a full draw is needed).
+    pub fn draw_pending(&mut self, g: &mut Gfx) -> Option<(i32, i32, i32, i32)> {
+        let r = self.tile_pending?;
+        let pm = self.pm.as_ref()?;
+        let (pw, ph) = (pm.width() as i32, pm.height() as i32);
+        let view = self.rect;
+        let (vx, vy) = (view.x.round() as i32, view.y.round() as i32);
+        let (vw, vh) = (view.w as i32, view.h as i32);
+        if (pw, ph) != self.drawn_size || stretch_for(self.smooth, pw, vw) != self.up {
+            return None; // the picture is not the size the last full draw laid out
+        }
+        self.tile_pending = None;
+        let (gw, gh) = (g.width() as i32, g.height() as i32);
+        // the browser's tool bar draws one translucent row over the page's first row (the accent line's faint underline): that row
+        // is left for the next whole redraw, which draws the bar over the picture again
+        let top = (r.y as i32).max(if self.fullscreen { 0 } else { CHROME_ROWS });
+        let region = (r.x as i32, top, r.w as i32, (r.y as i32 + r.h as i32 - top).max(0));
+        if region.3 == 0 {
+            return Some((0, 0, 0, 0));
+        }
+        if self.up == 2 {
+            blit_region_x2(pm.data(), pw, ph, g.pm.data_mut(), gw, gh, (vx, vy, vw, vh), region)
+        } else {
+            blit_region(pm.data(), pw, ph, g.pm.data_mut(), gw, gh, (vx, vy, vw, vh), region)
+        }
+    }
+
+    /// What the view needs from the shell: a full redraw (chrome, state or size changed), only the picture (frames arrived), or nothing.
+    pub fn redraw_kind(&mut self) -> Redraw {
+        if std::mem::take(&mut self.redraw) {
+            Redraw::Full
+        } else if self.tile_pending.is_some() {
+            Redraw::Live
+        } else {
+            Redraw::None
         }
     }
 
@@ -426,12 +556,19 @@ impl Full {
         (px >= 0 && py >= 0 && (px as f32) < self.rect.w && (py as f32) < self.rect.h).then_some((px, py))
     }
 
+    /// A position in screen pixels relative to the page area as the engine's picture pixels (they differ when smooth is on).
+    fn dev(&self, x: i32, y: i32) -> (i32, i32) {
+        let u = self.up.max(1);
+        (x / u, y / u)
+    }
+
     pub fn mouse_move(&mut self, x: i32, y: i32) {
         if let Some((px, py)) = self.to_page(x, y) {
             if self.last_mouse != Some((px, py)) {
                 self.last_mouse = Some((px, py));
                 let buttons = if self.pressed { proto::HELD_LEFT } else { 0 };
-                self.view.send(ToHelper::Mouse { kind: MouseKind::Move, x: px, y: py, button: 0, buttons, mods: 0, clicks: 0 });
+                let (dx, dy) = self.dev(px, py);
+                self.view.send(ToHelper::Mouse { kind: MouseKind::Move, x: dx, y: dy, button: 0, buttons, mods: 0, clicks: 0 });
             }
         } else {
             self.last_mouse = None;
@@ -442,6 +579,7 @@ impl Full {
     pub fn mouse_down(&mut self, x: i32, y: i32, clicks: u8) {
         self.last_mouse = Some((x, y));
         self.pressed = true;
+        let (x, y) = self.dev(x, y);
         self.view.send(ToHelper::Mouse { kind: MouseKind::Move, x, y, button: 0, buttons: 0, mods: 0, clicks: 0 });
         self.view.send(ToHelper::Mouse { kind: MouseKind::Down, x, y, button: proto::BUTTON_LEFT, buttons: proto::HELD_LEFT, mods: 0, clicks: clicks.clamp(1, 3) });
     }
@@ -450,6 +588,7 @@ impl Full {
     pub fn mouse_drag(&mut self, x: i32, y: i32) {
         if self.last_mouse != Some((x, y)) {
             self.last_mouse = Some((x, y));
+            let (x, y) = self.dev(x, y);
             self.view.send(ToHelper::Mouse { kind: MouseKind::Move, x, y, button: 0, buttons: proto::HELD_LEFT, mods: 0, clicks: 0 });
         }
     }
@@ -457,7 +596,7 @@ impl Full {
     pub fn mouse_up(&mut self, x: i32, y: i32) {
         if self.pressed {
             self.pressed = false;
-            let (px, py) = (x - self.rect.x.round() as i32, y - self.rect.y.round() as i32);
+            let (px, py) = self.dev(x - self.rect.x.round() as i32, y - self.rect.y.round() as i32);
             self.view.send(ToHelper::Mouse { kind: MouseKind::Up, x: px, y: py, button: proto::BUTTON_LEFT, buttons: 0, mods: 0, clicks: 1 });
         }
     }
@@ -465,7 +604,18 @@ impl Full {
     /// A wheel step: `notches` > 0 scrolls up (as the shell's `Event::Scroll`). Goes where the pointer last was in the page.
     pub fn wheel(&mut self, notches: i32) -> bool {
         let Some((x, y)) = self.last_mouse else { return false };
+        let (x, y) = self.dev(x, y);
         self.view.send(ToHelper::Wheel { x, y, dx: 0, dy: -notches * NOTCH, mods: 0 });
+        true
+    }
+
+    /// A smooth wheel step in pixels of a nominal screen (`px` > 0 scrolls up; [`crate::scrolleng::NOTCH_PX`] is a notch). It goes to
+    /// the page engine as a fraction of a notch (the protocol counts 1/120 of one), once, without easing here: the engine's own
+    /// pictures are the smoothness.
+    pub fn wheel_px(&mut self, px: i32) -> bool {
+        let Some((x, y)) = self.last_mouse else { return false };
+        let (x, y) = self.dev(x, y);
+        self.view.send(ToHelper::Wheel { x, y, dx: 0, dy: wheel_units(px), mods: 0 });
         true
     }
 
@@ -542,6 +692,19 @@ mod tests {
             ToHelper::Key { down: true, keysym, mods, text } => (keysym, mods, text),
             m => panic!("{m:?}"),
         }
+    }
+
+    #[test]
+    fn smooth_pixel_steps_become_fractions_of_a_notch_in_the_protocols_units() {
+        // 54 nominal pixels are one notch (120 units); positive pixels scroll up, positive units scroll down
+        assert_eq!(wheel_units(54), -120);
+        assert_eq!(wheel_units(-54), 120);
+        assert_eq!(wheel_units(27), -60);
+        assert_eq!(wheel_units(3), -7, "a 3 px step is a small fraction, not a whole notch");
+        assert_eq!(wheel_units(0), 0);
+        // nothing is lost over a click delivered as steps: 9 steps of 6 px = one notch (within rounding)
+        let sum: i32 = (0..9).map(|_| wheel_units(6)).sum();
+        assert!((sum + 120).abs() <= 5, "{sum}");
     }
 
     #[test]

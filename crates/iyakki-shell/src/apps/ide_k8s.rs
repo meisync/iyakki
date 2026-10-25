@@ -4,6 +4,7 @@
 //! Restart run the approved steps of `ide_deploy`.
 //! The cluster is polled on a background thread (`iyakki_agent::k8s::Feed`) only while this view is drawn.
 
+use crate::safeclamp::SafeClamp;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,6 +23,8 @@ use crate::ui::{Event, Key, DIM, ERR, MUTED, OK, R, TEXT};
 
 pub const TAB_BASE: usize = 9_300_000;
 pub const NS_BASE: usize = 9_310_000;
+/// The cluster switcher of the header owns the codes from here (its list rows follow).
+pub const SWITCH_BASE: usize = 9_320_000;
 pub const ROW_BASE: usize = 200_000;
 /// `Event::Sub` code of this view's buttons and keys.
 pub const SUB: u8 = 31;
@@ -59,6 +62,10 @@ pub enum Want {
     OpenUrl(String),
     /// Open Platform services (Gitea, the private store); `connect` goes straight to connecting this workspace to a git service.
     Services { connect: bool },
+    /// The switcher chose another cluster (already saved): the workspace's own pin is dropped and the cluster is found again.
+    ClusterSwitched,
+    /// "Manage clusters..." in the switcher: open Settings -> Clusters.
+    ManageClusters,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,7 +170,12 @@ pub fn table(snap: &Snapshot, kind: Kind) -> Table {
 
 /// What the view says when it has no cluster data, in plain English.
 pub fn banner(snap: &Snapshot) -> Option<(String, String)> {
-    match &snap.cluster {
+    banner_for(&snap.cluster)
+}
+
+/// The same plain-English text for a cluster state (shared with the K8S tile).
+pub fn banner_for(cluster: &Cluster) -> Option<(String, String)> {
+    match cluster {
         Cluster::Ok => None,
         Cluster::KubectlMissing => Some(("kubectl was not found".into(), "Install kubectl (or the k3s bundle: CLI → CLIs → k3s), then press r. Cluster profiles live in Settings → Dev cluster; the plan is in docs/K3S-DEV.md.".into())),
         Cluster::Unreachable(m) => Some(("The cluster is not reachable".into(), format!("{m}. Check that the cluster is running (k3s status), that the VPN or SSH tunnel is up, and that the kubeconfig points at it (the profile in .iyakki/project.json or $KUBECONFIG). Settings → Dev cluster and docs/K3S-DEV.md explain the profiles. Press r to try again."))),
@@ -197,6 +209,8 @@ pub struct K8sView {
     pub flow: Option<Flow>,
     pub wants: Vec<Want>,
     cluster_picker: Option<Picker>,
+    /// The cluster switcher (hidden with one cluster); created by the owner, which knows the account.
+    pub host: Option<super::cluster_host::ClusterHost>,
     teardown_picker: Option<Picker>,
     /// Why Deploy and Restart are off (no cluster, read-only workspace, no terminal rights); `None`: they work.
     pub deploy_block: Option<String>,
@@ -212,7 +226,7 @@ impl K8sView {
         let feed = Feed::start(kube, target, Duration::from_secs(5), Duration::from_secs(2));
         let mut detail = ScrollLog::default();
         detail.pane = textsel::Pane::new(DETAIL_AREA);
-        let mut v = K8sView { feed, kind: Kind::Workloads, sel: 0, scroll: 0, drawer: Drawer::None, detail, picker: None, last_draw: None, visible_rows: 10, status: None, detail_fresh: false, slot: None, flow: None, wants: vec![], cluster_picker: None, teardown_picker: None, deploy_block: Some("no cluster is connected yet".into()), reg: Arc::new(Mutex::new(None)), flow_pane: textsel::Pane::new(FLOW_AREA), flow_key: None };
+        let mut v = K8sView { feed, kind: Kind::Workloads, sel: 0, scroll: 0, drawer: Drawer::None, detail, picker: None, last_draw: None, visible_rows: 10, status: None, detail_fresh: false, slot: None, flow: None, wants: vec![], cluster_picker: None, host: None, teardown_picker: None, deploy_block: Some("no cluster is connected yet".into()), reg: Arc::new(Mutex::new(None)), flow_pane: textsel::Pane::new(FLOW_AREA), flow_key: None };
         v.wants.push(Want::RegistryProbe);
         v
     }
@@ -229,6 +243,9 @@ impl K8sView {
     pub fn tick(&mut self) {
         let vis = self.last_draw.is_some_and(|t| t.elapsed() < Duration::from_millis(500));
         self.feed.set_visible(vis);
+        if let Some(h) = self.host.as_mut() {
+            h.tick(&|_| None);
+        }
         if let Drawer::Logs(p) = &self.drawer {
             if let Some((name, res)) = self.feed.logs() {
                 if &name == p {
@@ -501,6 +518,22 @@ impl K8sView {
 
     /// Keys for the view. Returns true when the key was used.
     pub fn handle(&mut self, ev: &Event) -> bool {
+        // the cluster switcher: its codes, and every key while its list is open
+        if let Some(h) = self.host.as_mut() {
+            let mine = matches!(ev, Event::Tab(n) if (SWITCH_BASE..SWITCH_BASE + 1000).contains(n)) || (h.owns_keys() && matches!(ev, Event::Key(_)));
+            if mine {
+                match h.handle(ev, &|_| None) {
+                    super::cluster_host::HostOut::Switched(e) => {
+                        self.status = Some(format!("Working against {}.", e.phrase()));
+                        self.wants.push(Want::ClusterSwitched);
+                    }
+                    super::cluster_host::HostOut::Refused(why) => self.status = Some(why),
+                    super::cluster_host::HostOut::Manage => self.wants.push(Want::ManageClusters),
+                    super::cluster_host::HostOut::None => {}
+                }
+                return true;
+            }
+        }
         if let Some(p) = self.teardown_picker.as_mut() {
             match p.handle_event(ev) {
                 PickEvent::Cancel => self.teardown_picker = None,
@@ -609,7 +642,7 @@ impl K8sView {
                 if self.has_drawer() {
                     self.detail.scroll_by(*d * 3);
                 } else {
-                    self.scroll = (self.scroll as i32 - d * 2).clamp(0, n.saturating_sub(self.visible_rows) as i32) as usize;
+                    self.scroll = (self.scroll as i32 - d * 2).clamp_safe(0, n.saturating_sub(self.visible_rows) as i32) as usize;
                 }
                 return true;
             }
@@ -692,6 +725,9 @@ impl K8sView {
     pub fn draw(&mut self, g: &mut Gfx, r: R, s: f32, focused: bool, accent: [u8; 4], tick: u64, ws_name: &str, extra_warning: Option<&str>) {
         self.draw_body(g, r, s, focused, accent, tick, ws_name, extra_warning);
         // the choosers are drawn last, over whatever the body showed
+        if let Some(h) = self.host.as_mut() {
+            h.draw_popup(g, r, s, accent);
+        }
         if let Some(p) = &self.picker {
             p.render(g, r, s, accent);
         }
@@ -789,6 +825,15 @@ impl K8sView {
         let rowh = super::ide_chrome::tool(s);
         let y = r.y + 3.0 * s;
         let cs = s * 0.85;
+        // the cluster switcher first (it shows the active cluster's name; nothing with one cluster)
+        if let Some(h) = self.host.as_mut() {
+            if h.visible() {
+                let w = h.width(g, s).min(r.w * 0.34);
+                if let Some(b) = h.draw(g, x, y, w, s, accent) {
+                    x = b.x + b.w + 6.0 * s;
+                }
+            }
+        }
         if let Some((chip, ok)) = self.profile_chip() {
             let shown = g.fit(11.0 * cs, &chip, Face::Bold, (r.w * 0.4).max(100.0 * s));
             x += fx::chip(g, x, y + 1.0 * s, cs, &shown, if ok { OK } else { ERR }, ok) + 5.0 * s;
@@ -896,6 +941,11 @@ impl K8sView {
             self.draw_flow(g, body, s, accent);
             return;
         }
+        // the last data stays while the cluster does not answer (shared code with the K8S tile: iyakki_agent::k8sretry)
+        let st = self.feed.status();
+        if st.failing && !st.banner {
+            g.text(body.x + 4.0 * s, body.y + body.h + 3.0 * s, 12.0 * s, DIM, &iyakki_agent::k8sretry::stale_line(&st), Face::Sans);
+        }
         let Some(snap) = snap else {
             let msg = if self.feed.fetches() == 0 { "Asking the cluster…" } else { "No answer yet" };
             let t = format!("{msg} (kubectl, read-only)");
@@ -903,7 +953,7 @@ impl K8sView {
             return;
         };
         let problem = self.cluster_problem();
-        if let Some((title, text)) = problem.map(|t| ("No cluster is connected".to_string(), t)).filter(|_| !matches!(snap.cluster, Cluster::Ok)).or_else(|| banner(&snap)) {
+        if let Some((title, text)) = problem.map(|t| ("No cluster is connected".to_string(), t)).filter(|_| !matches!(snap.cluster, Cluster::Ok)).or_else(|| banner(&snap).map(|(t, b)| (t, if st.failing { format!("{b} {}", iyakki_agent::k8sretry::banner_tail(&st)) } else { b }))) {
             let w = body.w.min(720.0 * s);
             let lines = g.wrap(13.0 * s, &text, Face::Sans, w - 40.0 * s);
             let h = (64.0 + lines.len() as f32 * 19.0) * s;
@@ -1392,5 +1442,102 @@ mod tests {
         g.clear(rgb(8, 11, 26));
         v.draw(&mut g, R::new(0.0, 0.0, 900.0, 500.0), 1.0, true, CYAN, 1, "Shop", None);
         assert!(v.snapshot().is_some_and(|s| s.cluster == Cluster::KubectlMissing));
+    }
+    // ------------------------------------------------------------------------------------------------ the cluster switcher
+
+    fn switch_cx(tag: &str) -> crate::apps::AppCx {
+        let cx = crate::apps::tests::cx_with_admin_store(tag);
+        let (dir, user) = (cx.services.dir().to_path_buf(), cx.session.user.clone());
+        let mut r = iyakki_agent::clusters::Registry::load(&dir, &user);
+        r.add_remote("gpu-box", iyakki_agent::clusters::Kind::Remote, "/fake/gpu.yaml", "", "").unwrap();
+        r.save(&dir, &user).unwrap();
+        cx
+    }
+
+    fn switch_hits(g: &Gfx) -> Vec<(String, R)> {
+        g.hits.iter().filter(|h| matches!(h.ev, Event::Tab(n) if (SWITCH_BASE..SWITCH_BASE + 1000).contains(&n))).map(|h| (h.label.clone(), h.rect)).collect()
+    }
+
+    #[test]
+    fn the_switcher_is_in_the_k8s_header_at_every_size_and_pane_without_overlapping_the_chips_or_buttons() {
+        let cx = switch_cx("ide-k8s-switch");
+        for (w, h, s, x0) in [(360.0f32, 740.0f32, 1.0f32, 0.0f32), (800.0, 480.0, 1.0, 0.0), (1280.0, 720.0, 1.0, 0.0), (1920.0, 1080.0, 1.5, 0.0), (2560.0, 1600.0, 2.0, 0.0), (900.0, 520.0, 1.0, 300.0)] {
+            let mut v = K8sView::new(Arc::new(sample_cluster(NOW)), Target { namespace: "shop-dev".into(), ..Default::default() });
+            v.host = Some(crate::apps::cluster_host::ClusterHost::new(SWITCH_BASE, &cx, "Shop"));
+            let area = R::new(x0, 20.0, w, h);
+            let mut g = Gfx::new((w + x0) as u32, (h + 20.0) as u32);
+            v.draw(&mut g, area, s, true, CYAN, 1, "Shop", None);
+            let sw = switch_hits(&g);
+            assert_eq!(sw.len(), 1, "{w}x{h}: {sw:?}");
+            let b = sw[0].1;
+            assert!(b.x >= area.x - 0.5 && b.x + b.w <= area.x + area.w + 0.5 && b.y >= area.y - 0.5 && b.y + b.h <= area.y + area.h + 0.5, "{w}x{h}: {b:?} inside {area:?}");
+            for o in g.hits.iter().filter(|o| !matches!(o.ev, Event::Tab(n) if (SWITCH_BASE..SWITCH_BASE + 1000).contains(&n))) {
+                let c = o.rect;
+                let hit = b.x < c.x + c.w - 1.0 && c.x < b.x + b.w - 1.0 && b.y < c.y + c.h - 1.0 && c.y < b.y + b.h - 1.0;
+                // a button the header draws on the same row never sits under the switcher
+                assert!(!(hit && c.y < b.y + b.h && c.h < b.h * 1.6 && o.label != "close the cluster list"), "{w}x{h}: `{}` {c:?} overlaps the switcher {b:?}", o.label);
+            }
+            // open: the list and "Manage clusters..." stay inside the pane
+            v.handle(&Event::Tab(SWITCH_BASE));
+            g.clear_hits();
+            v.draw(&mut g, area, s, true, CYAN, 2, "Shop", None);
+            assert!(g.hits.iter().any(|h| h.label == "Manage clusters..."), "{w}x{h}");
+            for hh in switch_hits(&g) {
+                let r = hh.1;
+                assert!(r.x >= area.x - 0.5 && r.y >= area.y - 0.5 && r.x + r.w <= area.x + area.w + 0.5 && r.y + r.h <= area.y + area.h + 0.5, "{w}x{h}: `{}` {r:?} outside {area:?}", hh.0);
+            }
+        }
+    }
+
+    #[test]
+    fn with_one_cluster_the_header_is_unchanged_and_switching_asks_the_owner_to_find_the_cluster_again() {
+        let cx = crate::apps::tests::cx_with_admin_store("ide-k8s-switch-one");
+        let mut v = K8sView::new(Arc::new(sample_cluster(NOW)), Target { namespace: "shop-dev".into(), ..Default::default() });
+        v.host = Some(crate::apps::cluster_host::ClusterHost::new(SWITCH_BASE, &cx, "Shop"));
+        let mut g = Gfx::new(1280, 720);
+        v.draw(&mut g, R::new(0.0, 0.0, 1280.0, 720.0), 1.0, true, CYAN, 1, "Shop", None);
+        assert!(switch_hits(&g).is_empty(), "one cluster: nothing of the switcher");
+        assert!(!v.handle(&Event::Tab(SWITCH_BASE)) || v.host.as_ref().is_some_and(|h| !h.sw.open), "the code does nothing with one cluster");
+        // several: choosing a row switches (saved, audited), asks the owner to re-resolve, and Manage asks for Settings -> Clusters
+        let cx = switch_cx("ide-k8s-switch-two");
+        let mut v = K8sView::new(Arc::new(sample_cluster(NOW)), Target { namespace: "shop-dev".into(), ..Default::default() });
+        v.host = Some(crate::apps::cluster_host::ClusterHost::new(SWITCH_BASE, &cx, "Shop"));
+        v.draw(&mut g, R::new(0.0, 0.0, 1280.0, 720.0), 1.0, true, CYAN, 1, "Shop", None);
+        v.handle(&Event::Tab(SWITCH_BASE));
+        g.clear_hits();
+        v.draw(&mut g, R::new(0.0, 0.0, 1280.0, 720.0), 1.0, true, CYAN, 2, "Shop", None);
+        let row = g.hits.iter().find(|h| h.label.starts_with("gpu-box (")).expect("a row for gpu-box").ev.clone();
+        assert!(v.handle(&row));
+        assert!(v.wants.contains(&Want::ClusterSwitched));
+        let reg = iyakki_agent::clusters::Registry::load(cx.services.dir(), &cx.session.user);
+        assert_eq!(reg.effective("Shop").id, "gpu-box");
+        assert_eq!(iyakki_agent::clusters::phrase_for(cx.services.dir(), &cx.session.user, "Shop"), "cluster \"gpu-box\" (remote)");
+        assert_eq!(iyakki_agent::clusters::remembered_for(cx.services.dir(), &cx.session.user, "Shop").map(|c| c.kubeconfig), Some("/fake/gpu.yaml".to_string()), "resolve is given the effective cluster");
+        v.handle(&Event::Tab(SWITCH_BASE));
+        g.clear_hits();
+        v.draw(&mut g, R::new(0.0, 0.0, 1280.0, 720.0), 1.0, true, CYAN, 3, "Shop", None);
+        let m = g.hits.iter().find(|h| h.label == "Manage clusters...").unwrap().ev.clone();
+        v.handle(&m);
+        assert!(v.wants.contains(&Want::ManageClusters));
+    }
+
+    #[test]
+    fn a_workspace_with_its_own_cluster_switches_that_one_and_the_accounts_stays() {
+        let cx = switch_cx("ide-k8s-switch-ws");
+        let (dir, user) = (cx.services.dir().to_path_buf(), cx.session.user.clone());
+        iyakki_agent::clusters::switch_workspace(&dir, &user, cx.session.role, "Shop", Some("local")).unwrap();
+        let mut v = K8sView::new(Arc::new(sample_cluster(NOW)), Target { namespace: "shop-dev".into(), ..Default::default() });
+        v.host = Some(crate::apps::cluster_host::ClusterHost::new(SWITCH_BASE, &cx, "Shop"));
+        let mut g = Gfx::new(1280, 720);
+        v.draw(&mut g, R::new(0.0, 0.0, 1280.0, 720.0), 1.0, true, CYAN, 1, "Shop", None);
+        v.handle(&Event::Tab(SWITCH_BASE));
+        g.clear_hits();
+        v.draw(&mut g, R::new(0.0, 0.0, 1280.0, 720.0), 1.0, true, CYAN, 2, "Shop", None);
+        let row = g.hits.iter().find(|h| h.label.starts_with("gpu-box (")).unwrap().ev.clone();
+        v.handle(&row);
+        let reg = iyakki_agent::clusters::Registry::load(&dir, &user);
+        assert_eq!(reg.effective("Shop").id, "gpu-box");
+        assert_eq!(reg.active_entry().id, "local", "the account's own cluster did not move");
+        assert_eq!(reg.effective("Other").id, "local");
     }
 }

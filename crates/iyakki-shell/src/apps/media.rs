@@ -9,6 +9,7 @@
 //! lives with the shared player, so the assistant's media tools and this app see the same one. Music goes on when the app is
 //! left. The built-in samples (`/usr/share/iyakki/samples`) are listed as the read-only folder "IYAKKI samples".
 
+use crate::safeclamp::SafeClamp;
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 
@@ -147,7 +148,7 @@ pub enum VideoRoute {
 }
 
 /// The message when a video cannot be played at all.
-pub const VIDEO_NEEDS: &str = "Install the media player: IYAKKI menu \u{2192} Quick install \u{2192} Media";
+pub const VIDEO_NEEDS: &str = "Install the media player: Store \u{2192} Setup \u{2192} Media tools";
 
 /// A video playing in the embedded engine: the engine's view, and the loopback server that gives it the one file.
 struct VideoView {
@@ -1480,6 +1481,22 @@ impl App for MediaApp {
         self.video.as_mut().is_some_and(|v| v.full.take_redraw())
     }
 
+    fn media_key(&mut self, k: crate::fnkeys::FnKey, _cx: &AppCx) -> bool {
+        use crate::fnkeys::FnKey;
+        let Some(n) = &mut self.native else { return false };
+        let key = match k {
+            FnKey::PlayPause => Key::Char(' '),
+            FnKey::Next => Key::Up, // 30 seconds on
+            FnKey::Prev => Key::Down, // 30 seconds back
+            FnKey::Stop => Key::Esc,
+            _ => return false,
+        };
+        if n.event(&Event::Key(key)) == super::mediaplay::Out::Close {
+            self.native = None;
+        }
+        true
+    }
+
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
         if matches!(ev, Event::Tick) {
             self.poll_scan();
@@ -1715,7 +1732,7 @@ impl App for MediaApp {
                 self.mode = Mode::Form(Form::new("New playlist").text("Name", "", "e.g. Evening"), FormFor::NewPlaylist);
             }
             Key::Char('n') if self.page == Page::Folders => {
-                self.mode = Mode::Form(Form::new("Add a folder").text("Folder", "", "/home/me/Music"), FormFor::Folder);
+                self.mode = Mode::Form(Form::new("Add a folder").path("Folder", "", "/home/me/Music", crate::filepicker::PathKind::Folder, &[]), FormFor::Folder);
             }
             Key::Char('r') if self.page == Page::Playlists => {
                 let name = match (&self.drill, self.selected()) {
@@ -1819,7 +1836,7 @@ impl App for MediaApp {
         y += 40.0 * s;
 
         // ---- search, what it understood, sort and download
-        let sw = (w * 0.4).clamp(160.0 * s, 380.0 * s);
+        let sw = (w * 0.4).clamp_safe(160.0 * s, 380.0 * s);
         let sr = R::new(x, y, sw, 36.0 * s);
         if self.query.value.is_empty() && !self.searching {
             self.query.placeholder = "/ search: kutthu song, melody above 4 stars…".into();
@@ -2080,7 +2097,7 @@ impl MediaApp {
         }
 
         // the level display, on the right of the card
-        let lw = (card.w * 0.30).clamp(120.0 * s, 360.0 * s);
+        let lw = (card.w * 0.30).clamp_safe(120.0 * s, 360.0 * s);
         let lx = card.x + card.w - lw - 24.0 * s;
         if lw > 0.0 && tx + 330.0 * s < lx {
             level_bars(g, lx, card.y + 106.0 * s, lw, 70.0 * s, s, &visualizer(tick, playing), accent, MAGENTA);
@@ -2200,7 +2217,7 @@ fn draw_download_row(g: &mut Gfx, r: R, d: &View, row: &Row, i: usize, is_sel: b
         Status::Queued => button(g, "Cancel", Event::Tab(6000 + i), MUTED, &mut rx),
         Status::Downloading => {
             button(g, "Cancel", Event::Tab(6000 + i), MUTED, &mut rx);
-            let bw = (r.w * 0.22).clamp(70.0 * s, 220.0 * s);
+            let bw = (r.w * 0.22).clamp_safe(70.0 * s, 220.0 * s);
             let bar = R::new(rx - bw, r.y + 20.0 * s, bw, 9.0 * s);
             g.rrect(bar.x, bar.y, bar.w, bar.h, 4.5 * s, rgb(28, 36, 62));
             let frac = if d.total > 0 { (d.bytes as f32 / d.total as f32).clamp(0.0, 1.0) } else { ((tick % 60) as f32 / 60.0) * 0.3 + 0.1 };
@@ -3283,7 +3300,7 @@ mod tests {
         a.set_video_route(Some(VideoRoute::Missing));
         key(&mut a, &cx, Key::Enter);
         assert!(!a.video_playing());
-        assert_eq!(a.status_text(), Some("Install the media player: IYAKKI menu \u{2192} Quick install \u{2192} Media."), "{:?}", a.status_text());
+        assert_eq!(a.status_text(), Some("Install the media player: Store \u{2192} Setup \u{2192} Media tools."), "{:?}", a.status_text());
         assert!(fake.launched.lock().unwrap().is_empty());
         let _ = draw(&mut a, &cx, 1280, 720);
         // with an installed player the video goes to it, and an audio file is not a video at all

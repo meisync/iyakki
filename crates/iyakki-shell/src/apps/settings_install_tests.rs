@@ -42,9 +42,7 @@ fn settle(a: &mut SettingsApp, cx: &AppCx) {
     panic!("job did not finish");
 }
 fn goto_install(a: &mut SettingsApp, cx: &AppCx) {
-    while a.tab() != Tab::Install {
-        key(a, cx, Key::Right);
-    }
+    a.go_to(Tab::Install);
 }
 fn draw(a: &mut SettingsApp, cx: &AppCx, w: u32, h: u32) -> Gfx {
     let mut g = Gfx::new(w, h);

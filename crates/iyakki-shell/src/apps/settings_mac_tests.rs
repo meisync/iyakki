@@ -31,9 +31,7 @@ fn status(a: &SettingsApp) -> String {
     a.status().map(|s| s.0.clone()).unwrap_or_default()
 }
 fn goto(a: &mut SettingsApp, cx: &AppCx, t: Tab) {
-    while a.tab() != t {
-        key(a, cx, Key::Right);
-    }
+    a.go_to(t);
 }
 fn settle(a: &mut SettingsApp, cx: &AppCx) {
     for _ in 0..2000 {

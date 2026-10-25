@@ -128,7 +128,7 @@ impl SkillsApp {
     }
 
     fn file_form(&self, cx: &AppCx) -> Form {
-        let f = Form::new("Load a skill or package from a file").text("File path", "", "/home/you/skills/notes.md  or  a signed package (.iyp)");
+        let f = Form::new("Load a skill or package from a file").path("File path", "", "/home/you/skills/notes.md  or  a signed package (.iyp)", crate::filepicker::PathKind::File, &["md", "iyp"]);
         if Self::can_shared(cx) { f.choice("For", &["Me only", "Everyone"], usize::from(self.shared)) } else { f.choice("For", &["Me only"], 0) }
     }
 }

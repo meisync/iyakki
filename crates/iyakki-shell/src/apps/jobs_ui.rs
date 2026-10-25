@@ -6,6 +6,7 @@
 //! Nothing here runs a job: the engine is `iyakki_agent::jobs`. This module reads it about once a second while there is
 //! something to show, and says it is animating only while a job runs, so an idle shell stays idle.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -432,7 +433,7 @@ impl JobsUi {
         // second line: the bar and the last line of output (or how it ended)
         let y2 = y1 + bh + 3.0 * s;
         let lh2 = fs * 1.3;
-        let bw = (row.w * 0.26).clamp(70.0 * s, 170.0 * s);
+        let bw = (row.w * 0.26).clamp_safe(70.0 * s, 170.0 * s);
         let bar = R::new(row.x + pad + 2.0 * s, y2 + (lh2 - 7.0 * s) / 2.0, bw, 7.0 * s);
         let mut after = bar.x + bar.w + 8.0 * s;
         if running {

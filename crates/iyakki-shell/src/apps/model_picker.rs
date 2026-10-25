@@ -56,6 +56,18 @@ pub(crate) struct ModelList {
     pub hint: String,
     pub current: Current,
     top: Option<TopRow>,
+    /// "This machine: fits: 7B Q4, 13B Q4. Add one in Settings, Models." (docs/AI-HARDWARE.md): what local models would suit this machine.
+    /// A hint only: no model that is configured is ever left out of the list because of it.
+    pub fits: Option<String>,
+}
+
+/// The hint line under the chooser's own hint: the AI hardware profile's `fits` line, and what to do about it.
+pub(crate) fn fits_hint(p: &iyakki_agent::aiprofile::AiProfile) -> String {
+    if p.capable() || p.unknown() {
+        format!("This machine: {}. Add one in Settings, Models.", p.fits_line())
+    } else {
+        format!("This machine: {}; the models above run on another computer or in the cloud.", p.fits_line())
+    }
 }
 
 /// What the person chose.
@@ -134,7 +146,8 @@ pub(crate) fn build(cx: &AppCx, plain: Vec<(String, String)>, top: Option<TopRow
     if items.len() == offset {
         return None;
     }
-    Some(ModelList { items, sel, rows, custom: None, title: title.to_string(), hint: hint.to_string(), current, top })
+    let fits = Some(fits_hint(&iyakki_agent::aiprofile::this_machine(iyakki_agent::modelhost::Hosts::new(cx.services.dir()).list().len())));
+    Some(ModelList { items, sel, rows, custom: None, title: title.to_string(), hint: hint.to_string(), current, top, fits })
 }
 
 /// Remember a typed model id for the agent so it is a line of the list next time (administrators only: it is a system setting).
@@ -232,9 +245,13 @@ pub(crate) fn draw(g: &mut Gfx, area: R, s: f32, cx: &AppCx, m: &ModelList) {
     };
     // the typed id, if any, takes the bottom of the panel; the rows scroll above it
     let typing = m.custom.is_some();
-    let (rh, top) = (34.0 * s, py0 + 70.0 * s);
+    let (rh, top) = (34.0 * s, py0 + 78.0 * s);
     let foot = if typing { 52.0 * s } else { 0.0 };
-    let rows = (((ph - 90.0 * s - foot) / rh) as usize).max(1);
+    let rows = (((ph - 98.0 * s - foot) / rh) as usize).max(1);
+    if let Some(f) = &m.fits {
+        let f = g.fit(12.0 * s, f, Face::Sans, pw - 40.0 * s);
+        g.text(px + 20.0 * s, py0 + 58.0 * s, 12.0 * s, crate::ui::DIM, &f, Face::Sans);
+    }
     let first = m.sel.saturating_sub(rows - 1);
     for (n, (prov, model)) in m.items.iter().enumerate().skip(first).take(rows) {
         let y = top + (n - first) as f32 * rh;
@@ -449,6 +466,56 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+    fn fake_profile(tag: &str, ram_gb: u64, card: Option<(&str, &str)>) -> iyakki_agent::aiprofile::AiProfile {
+        let r = std::env::temp_dir().join(format!("iyakki-mp-{}-{:?}-{tag}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&r);
+        std::fs::create_dir_all(r.join("proc")).unwrap();
+        std::fs::create_dir_all(r.join("sys/class/dmi/id")).unwrap();
+        std::fs::write(r.join("proc/meminfo"), format!("MemTotal: {} kB\n", ram_gb * 1024 * 1024)).unwrap();
+        std::fs::write(r.join("sys/class/dmi/id/product_name"), "PC").unwrap();
+        if let Some((v, d)) = card {
+            let c = r.join("sys/bus/pci/devices/0000:01:00.0");
+            std::fs::create_dir_all(&c).unwrap();
+            for (f, t) in [("class", "0x030000"), ("vendor", v), ("device", d)] {
+                std::fs::write(c.join(f), t).unwrap();
+            }
+        }
+        let p = iyakki_agent::aiprofile::detect(&r);
+        let _ = std::fs::remove_dir_all(&r);
+        p
+    }
+
+    #[test]
+    fn the_fits_hint_says_what_local_models_suit_this_machine_in_the_profiles_words() {
+        let gpu = fake_profile("rtx", 32, Some(("0x10de", "0x2503")));
+        assert_eq!(fits_hint(&gpu), format!("This machine: {}. Add one in Settings, Models.", gpu.fits_line()));
+        assert!(fits_hint(&gpu).contains("7B Q4, 13B Q4"), "{}", fits_hint(&gpu));
+        let cpu = fake_profile("cpu", 4, None);
+        let h = fits_hint(&cpu);
+        assert!(h.starts_with("This machine: fits: no model of useful size") && h.contains("run on another computer or in the cloud"), "{h}");
+    }
+
+    #[test]
+    fn the_picker_carries_the_hint_hides_nothing_and_draws_it_at_every_size_inside_the_panel() {
+        let (cx, _d) = with_models("pickfits", 6);
+        let mut m = build(&cx, plain(&cx), top(), true, Current { same: true, ..Default::default() }, "Choose the model", "hint").unwrap();
+        assert!(m.fits.as_ref().is_some_and(|f| f.starts_with("This machine: ")), "{:?}", m.fits);
+        // every configured model is still in the list, whatever the hint says (a 6-model provider and the top line)
+        assert_eq!(m.items.iter().zip(&m.rows).filter(|(_, r)| **r == MRow::Plain).count(), 6);
+        for (w, h) in [(360u32, 740u32), (800, 480), (1280, 720), (1920, 1080), (2560, 1600)] {
+            let s = crate::shell::scale_for(w, h);
+            m.fits = None;
+            let (g0, _) = draw_list(&cx, &m, w, h, s);
+            m.fits = Some(fits_hint(&fake_profile("sz", 32, Some(("0x10de", "0x2503")))));
+            let (g1, area) = draw_list(&cx, &m, w, h, s);
+            assert_ne!(g0.rgba(), g1.rgba(), "{w}x{h}: the hint is drawn");
+            let panel_bottom = area.y + 8.0 * s + (area.h - 24.0 * s);
+            for r in g1.hits.iter().filter(|x| x.label == "model") {
+                assert!(r.rect.y >= area.y + 8.0 * s + 78.0 * s - 0.5 && r.rect.y + r.rect.h <= panel_bottom + 0.5, "{w}x{h}: {:?}", r.rect);
+            }
+            assert!(g1.hits.iter().any(|x| x.label == "model"), "{w}x{h}: lines remain");
         }
     }
 }

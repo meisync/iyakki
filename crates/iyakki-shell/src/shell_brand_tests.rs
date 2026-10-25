@@ -1,5 +1,5 @@
 //! The IYAKKI menu and the installer indicator through the shell: the name opens the menu, keys and clicks work and close it,
-//! Quick install starts detached jobs (a stand-in script, never the real `iyakki`, no network), the indicator appears beside the
+//! Quick install (now Store -> Setup) starts detached jobs (a stand-in script, never the real `iyakki`, no network), the indicator appears beside the
 //! clock in the launcher and in an app's header without covering anything, and it opens the list of installs with live logs.
 
 use super::tests::*;
@@ -24,6 +24,23 @@ fn press(sh: &mut Shell, r: R) {
     let (x, y) = center(&r);
     sh.handle(&Event::MouseMove(x, y));
     sh.handle(&Event::MouseDown(x, y));
+}
+
+/// In the Store's Setup tab: search for `word`, open the first tile's popup, and the primary button of `item` (None when it is not offered).
+fn setup_button(sh: &mut Shell, g: &mut Gfx, word: &str, item: iyakki_agent::quickinstall::Item) -> Option<Event> {
+    use crate::apps::store::setup::PRIMARY;
+    sh.render(g);
+    key(sh, Key::Char('/'));
+    for c in word.chars() {
+        key(sh, Key::Char(c));
+    }
+    key(sh, Key::Enter);
+    sh.render(g);
+    // Enter on the tile opens its popup, where the buttons are
+    key(sh, Key::Enter);
+    sh.render(g);
+    let idx = iyakki_agent::quickinstall::Item::ALL.iter().position(|i| *i == item).unwrap();
+    sh.hits().iter().find(|h| h.ev == Event::Tab(PRIMARY + idx)).map(|h| h.ev.clone())
 }
 
 /// A stand-in for `iyakki quick-install`: prints steps like the real one, then waits a little.
@@ -61,9 +78,9 @@ fn the_name_in_the_top_bar_opens_the_menu_and_esc_a_click_outside_and_f10_close_
     assert!(hit(&sh, "IYAKKI menu").is_none(), "while open only the menu takes clicks");
     // keys: Down, Enter opens a page, Esc back, Esc closes
     key(&mut sh, Key::Down);
+    key(&mut sh, Key::Down);
     key(&mut sh, Key::Enter);
-    assert_eq!(sh.brand.page, crate::brandmenu::Page::Install);
-    assert!(!sh.brand.presence.is_empty(), "opening Quick install read what is installed");
+    assert_eq!(sh.brand.page, crate::brandmenu::Page::Media);
     key(&mut sh, Key::Esc);
     assert!(sh.brand.open && sh.brand.page == crate::brandmenu::Page::Menu);
     key(&mut sh, Key::Esc);
@@ -95,18 +112,21 @@ fn quick_install_starts_jobs_the_indicator_shows_them_beside_the_clock_and_opens
     assert!(indicator(&sh).is_none(), "no indicator while nothing installs");
     key(&mut sh, Key::F(10));
     key(&mut sh, Key::Char('q'));
+    assert!(!sh.brand.open, "the entry hands over to the Store");
+    assert_eq!(sh.screen_name(), "app:store");
     // Claude Code (its runtime, Node.js, first when the machine has none)
-    let row = iyakki_agent::quickinstall::Item::ALL.iter().position(|i| *i == iyakki_agent::quickinstall::Item::ClaudeCode).unwrap();
-    sh.handle(&Event::Tab(crate::brandmenu::IROW + row));
-    key(&mut sh, Key::Enter);
-    let note = sh.brand.note.clone().unwrap();
-    assert!(note.1 && note.0.contains("Claude Code ("), "the job says what it installs (after Node.js when that is missing): {note:?}");
+    let ev = setup_button(&mut sh, &mut g, "claude", iyakki_agent::quickinstall::Item::ClaudeCode).expect("an Install button for Claude Code");
+    sh.handle(&ev);
+    let jobs = iyakki_agent::quickinstall::install_jobs(&sh.env.services.jobs, "root");
+    assert!(jobs.iter().any(|j| j.label.starts_with("Install Claude Code (")), "the job says what it installs (after Node.js when that is missing): {:?}", jobs.iter().map(|j| j.label.clone()).collect::<Vec<_>>());
     assert!(sh.env.audit.recent(5).iter().any(|l| l.contains("quickinstall.start") && l.contains("claude-code")));
-    // a second start of the same thing is refused while it runs
-    key(&mut sh, Key::Enter);
-    assert!(sh.brand.note.as_ref().is_some_and(|n| !n.1 && n.0.contains("being installed already")), "{:?}", sh.brand.note);
+    // while it runs the card's button is the log, which opens the installer list in the top bar
+    sh.render(&mut g);
+    let ev = sh.hits().iter().find(|h| h.label == "View log").map(|h| h.ev.clone()).expect("the card now offers the log");
+    sh.handle(&ev);
+    assert!(sh.installs.open, "View log opens the installer list");
     key(&mut sh, Key::Esc);
-    key(&mut sh, Key::Esc);
+    assert!(!sh.installs.open);
     // the indicator, beside the clock, apart from it and from the name
     sh.render(&mut g);
     let ind = indicator(&sh).expect("the indicator");
@@ -158,12 +178,12 @@ fn the_indicator_fits_with_every_header_control_at_four_sizes() {
     let (mut sh, _) = shell_with_users("brand-fit");
     login(&mut sh, "root", "rootpass12");
     sh.quick_launch = Some(fake_launch("fit", "20"));
+    let mut g0 = Gfx::new(1280, 720);
     key(&mut sh, Key::F(10));
     key(&mut sh, Key::Char('q'));
-    let row = iyakki_agent::quickinstall::Item::ALL.iter().position(|i| *i == iyakki_agent::quickinstall::Item::Copilot).unwrap();
-    sh.handle(&Event::Tab(crate::brandmenu::IROW + row));
-    key(&mut sh, Key::Char('i'));
-    key(&mut sh, Key::F(10));
+    let ev = setup_button(&mut sh, &mut g0, "copilot", iyakki_agent::quickinstall::Item::Copilot).expect("Install");
+    sh.handle(&ev);
+    sh.open_for_demo("launcher");
     if let Some(cx) = sh.cx() {
         sh.installs.poll(&cx, true);
     }
@@ -191,16 +211,19 @@ fn the_indicator_fits_with_every_header_control_at_four_sizes() {
 }
 
 #[test]
-fn an_ordinary_account_cannot_quick_install_and_the_media_page_checks_the_file() {
+fn an_ordinary_account_cannot_install_from_store_setup_and_the_media_page_checks_the_file() {
     let (mut sh, _) = shell_with_users("brand-user");
     login(&mut sh, "alice", "alicepass1");
     sh.quick_launch = Some(fake_launch("user", "1"));
+    let mut g = Gfx::new(1280, 720);
     key(&mut sh, Key::F(10));
     key(&mut sh, Key::Char('q'));
-    key(&mut sh, Key::Enter);
-    assert!(sh.brand.note.as_ref().is_some_and(|n| !n.1 && n.0.contains("administrator")), "{:?}", sh.brand.note);
+    assert_eq!(sh.screen_name(), "app:store");
+    assert!(setup_button(&mut sh, &mut g, "claude", iyakki_agent::quickinstall::Item::ClaudeCode).is_none(), "no Install button for an ordinary account: the popup is read-only");
     assert!(iyakki_agent::quickinstall::install_jobs(&sh.env.services.jobs, "alice").is_empty());
-    key(&mut sh, Key::Esc);
+    assert!(!sh.hits().iter().any(|h| h.ev == Event::Tab(crate::apps::store::setup::INSTALL_ALL)));
+    sh.open_for_demo("launcher");
+    key(&mut sh, Key::F(10));
     key(&mut sh, Key::Char('m'));
     assert_eq!(sh.brand.page, crate::brandmenu::Page::Media);
     for c in "/no/such/file.mp4".chars() {
@@ -236,4 +259,26 @@ fn the_clock_is_visible_in_an_app_header_not_painted_over_by_the_header_band() {
         }
     }
     assert!(bright > 30, "the time's text is drawn on top: {bright} bright pixels");
+}
+
+#[test]
+fn the_menu_entry_quick_install_and_its_key_open_the_store_on_the_setup_tab() {
+    let (mut sh, _) = shell_with_users("brand-redirect");
+    let mut g = Gfx::new(1280, 720);
+    login(&mut sh, "root", "rootpass12");
+    for how in ["key", "click"] {
+        sh.open_for_demo("launcher");
+        key(&mut sh, Key::F(10));
+        sh.render(&mut g);
+        if how == "key" {
+            key(&mut sh, Key::Char('q'));
+        } else {
+            let r = hit(&sh, "Quick install").expect("the entry is still in the menu");
+            press(&mut sh, r);
+        }
+        assert!(!sh.brand.open && sh.screen_name() == "app:store", "{how}");
+        sh.render(&mut g);
+        // the Setup tab is showing: its search box and filter chips are on screen, and its tab is there
+        assert!(hit(&sh, "Setup").is_some() && hit(&sh, "Not installed").is_some(), "{how}: the Setup tab is open");
+    }
 }

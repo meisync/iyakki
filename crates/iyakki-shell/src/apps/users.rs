@@ -2,6 +2,7 @@
 //! set resource limits and network/MCP scopes, and review the audit log. Every change is made
 //! through `UserStore`, which re-checks the actor's permission, and is written to the audit log.
 
+use crate::safeclamp::SafeClamp;
 use iyakki_sec::policy::{App as PApp, PolicyOverride, Role};
 
 use super::widgets::{render_confirm, Form, FormEvent};
@@ -242,7 +243,7 @@ impl App for UsersApp {
                 }
                 Event::Scroll(d) => {
                     let n = cx.store.lock().map_or(0, |s| s.list().len());
-                    self.sel = (self.sel as i32 - d).clamp(0, n.saturating_sub(1) as i32) as usize;
+                    self.sel = (self.sel as i32 - d).clamp_safe(0, n.saturating_sub(1) as i32) as usize;
                 }
                 _ => {}
             },

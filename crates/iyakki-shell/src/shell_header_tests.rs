@@ -330,3 +330,80 @@ fn the_popover_takes_its_own_keys_and_gives_the_rest_back_when_closed() {
     key(&mut sh, Key::Char('o'));
     assert_eq!(sh.screen_name(), "login", "and work again once it is closed");
 }
+
+/// The MacBookPro14,1 case: the buffer is 2880x1800 but the monitor shows its top-left 2560x1600. The shell lays out for the
+/// visible part, so Back, the clock and the other controls are on screen, and the rest of the buffer stays black.
+#[test]
+fn a_shell_for_the_visible_part_of_a_larger_buffer_keeps_back_on_screen_and_the_rest_clear() {
+    let (mut sh, _) = signed_in("hdr-visible");
+    let (bw, bh, vw, vh) = (2880usize, 1800usize, 2560usize, 1600usize);
+    let mut mem = vec![0xABu8; bw * bh * 4];
+    crate::display::clear_outside(&mut mem, bw * 4, bh, vw, vh, 4);
+    // the rest of the buffer is black at once; the visible part is untouched until drawn
+    assert!(mem[(vw * 4)..(bw * 4)].iter().all(|b| *b == 0), "right strip of the first row cleared");
+    assert!(mem[vh * bw * 4..].iter().all(|b| *b == 0), "rows below the visible part cleared");
+    assert!(mem[..vw * 4].iter().all(|b| *b == 0xAB), "visible part left alone");
+    let mut fb = crate::fb::Framebuffer::in_memory_visible(&mut mem, (bw as u32, bh as u32), (vw as u32, vh as u32));
+    let (w, h) = (fb.width, fb.height);
+    assert_eq!((w, h), (2560, 1600));
+    let mut g = Gfx::new(w, h);
+    sh.screen = Screen::Launcher;
+    assert!(sh.open_for_demo("settings"));
+    sh.render(&mut g);
+    let s = scale_for(w, h);
+    for (name, r) in [("back", back_rect(w, s)), ("devices", dev_rect(w, s)), ("help", help_rect(w, s)), ("screenshot", shot_rect(w, s))] {
+        assert!(r.x >= 0.0 && r.x + r.w <= vw as f32 && r.y >= 0.0 && r.y + r.h <= vh as f32, "{name} {r:?} inside the visible 2560x1600");
+    }
+    let clock = hit_rect(&sh, "clock").expect("clock");
+    assert!(clock.x + clock.w <= vw as f32);
+    let mut old = Vec::new();
+    fb.present_banded(g.rgba(), &mut old).unwrap();
+    // the Back button's pixels differ from the cleared black and are inside the visible rectangle
+    let b = back_rect(w, s);
+    let (bx, by) = ((b.x + b.w / 2.0) as usize, (b.y + b.h / 2.0) as usize);
+    let at = (by * bw + bx) * 4;
+    assert!(mem[at..at + 3].iter().any(|v| *v != 0), "Back is drawn at ({bx},{by})");
+    assert!(mem[(vw * 4)..(bw * 4)].iter().all(|v| *v == 0), "nothing drawn right of the visible part");
+    assert!(mem[vh * bw * 4..].iter().all(|v| *v == 0), "nothing drawn below it");
+    // Esc leaves the app, with the pointer or without
+    sh.handle(&Event::Key(Key::Esc));
+    assert_eq!(sh.screen_name(), "launcher", "Esc is the keyboard way back");
+}
+
+#[test]
+fn the_shell_feeds_the_devices_popover_tooltip_and_redraws_when_it_appears() {
+    let (mut sh, mut g) = signed_in("hdr-tip");
+    let (w, h) = (2560u32, 1600u32);
+    resize(&mut g, w, h);
+    sh.size = (w, h);
+    key(&mut sh, Key::F(8));
+    assert!(sh.devpop.open);
+    wait_for_devices(&mut sh);
+    // a made-up reading with a row whose detail the popover has to cut
+    let detail = "wlan0 · a-rather-long-network-name-at-home-and-more · signal -43 dBm (excellent) · 192.168.50.76 · hardware address aa:bb:cc:dd:ee:ff · channel 36 (5 GHz) · 866 Mb/s link · connected for 3 hours";
+    let item = crate::devpop::Item { title: "Wi-Fi".into(), detail: detail.into(), level: crate::devpop::Level::Ok, jump: crate::devpop::Jump::None, acts: Vec::new() };
+    sh.devpop.set_snapshot(crate::devpop::Snapshot { items: vec![item], driver_help: Vec::new(), at: 9 });
+    sh.render(&mut g);
+    let row = sh.hits().iter().find(|x| x.label.starts_with("Wi-Fi: ")).map(|x| x.rect).expect("the row");
+    let (x, y) = ((row.x + row.w * 0.3) as i32, (row.y + row.h / 2.0) as i32);
+    sh.handle(&Event::MouseMove(x, y));
+    sh.render(&mut g);
+    let _ = sh.take_stale();
+    for i in 0..crate::tooltip::POINTER_DELAY {
+        sh.handle(&Event::Tick);
+        if i + 1 < crate::tooltip::POINTER_DELAY {
+            sh.render(&mut g);
+            assert!(sh.devpop.tip_text().is_none(), "not before the delay (tick {i})");
+        }
+    }
+    assert!(sh.take_stale(), "the shell is told to draw again with no further input");
+    sh.render(&mut g);
+    assert_eq!(sh.devpop.tip_text(), Some(format!("Wi-Fi\n{detail}").as_str()));
+    let t = sh.devpop.tip_rect.unwrap();
+    assert!(t.x >= 0.0 && t.y >= 0.0 && t.x + t.w <= w as f32 && t.y + t.h <= h as f32);
+    // a move hides it and asks for a redraw
+    sh.handle(&Event::MouseMove(x + 3, y));
+    assert!(sh.take_stale());
+    sh.render(&mut g);
+    assert!(sh.devpop.tip_text().is_none());
+}

@@ -1,5 +1,6 @@
 //! CHAT: talk to the configured model. Requests run on a worker thread so the UI never freezes.
 
+use crate::safeclamp::SafeClamp;
 use std::sync::mpsc::{channel, Receiver};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -838,7 +839,8 @@ impl ChatApp {
             let may_run = cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full && (profile.as_ref().is_none_or(|pr| pr.local) || cx.session.policy.allows_host("*"));
             if let (Some(c), Some(pr), true) = (&p.cluster, profile, may_run) {
                 let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
-                let k = iyakki_agent::k8stools::K8sTools::new(c.runner.clone(), pr, &c.namespace, &p.name, &p.root, Arc::new(move |a, d| audit.record(&user, &format!("k8s.{a}"), d)));
+                let mut k = iyakki_agent::k8stools::K8sTools::new(c.runner.clone(), pr, &c.namespace, &p.name, &p.root, Arc::new(move |a, d| audit.record(&user, &format!("k8s.{a}"), d)));
+                k.cluster_phrase = iyakki_agent::clusters::phrase_for(cx.services.dir(), &cx.session.user, &p.name);
                 k8s = Some(Arc::new(k));
                 // platform services (Gitea, a private store) are offered with the cluster tools; they always ask
                 let env = if cfg!(test) { iyakki_agent::devcluster::Env::default() } else { iyakki_agent::devcluster::Env::real() };
@@ -1372,7 +1374,7 @@ impl ChatApp {
         self.view.reading = Some(mark);
         if new_piece {
             let max_off = self.max_off;
-            self.scroll_px = self.view.scroll_for_reading(log_h, self.scroll_px).clamp(0.0, max_off);
+            self.scroll_px = self.view.scroll_for_reading(log_h, self.scroll_px).clamp_safe(0.0, max_off);
         }
     }
 
@@ -1937,6 +1939,10 @@ impl App for ChatApp {
     fn accent(&self) -> [u8; 4] {
         ACCENT
     }
+    fn touchbar_state(&self) -> (bool, bool) {
+        (self.run.is_some() || self.pending.is_some(), self.approval.is_some())
+    }
+
     fn hint(&self) -> String {
         if self.editor.is_some() {
             "Edit mode: Ctrl+T switch chat/editor · Ctrl+E close editor · ask for changes, then y/n on each suggestion · Esc back".into()
@@ -1983,6 +1989,21 @@ impl App for ChatApp {
             crate::ui::clipboard::copy(&t);
         }
         Flow::Stay
+    }
+
+    /// Smooth wheel steps move the conversation by pixels; the chat list, the message box and every dialog keep whole notches.
+    fn scroll_px(&mut self, px: i32, _cx: &AppCx) -> bool {
+        let busy = self.links.card.is_some() || self.secret.is_some() || self.save.is_some() || self.models.is_some() || self.picker.is_some() || self.grants_open || self.jobs_ui.log_open();
+        if busy || self.input.wheel_taken() || self.nav_hover {
+            return false;
+        }
+        let before = self.scroll_px;
+        self.scroll_px = (self.scroll_px + px as f32 / crate::scrolleng::NOTCH_PX * 40.0).max(0.0);
+        if self.scroll_px == before && px < 0 {
+            crate::scrolleng::note_bound(); // at the newest message: momentum stops
+        }
+        self.maybe_load_older();
+        true
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
@@ -2761,11 +2782,14 @@ impl ChatApp {
         self.max_off = max_off;
         self.sync_reading(cx, log.h);
         if total <= 0.0 {
-            let configured = cx.services.settings.lock().unwrap().get().chat.is_some();
-            let msg = if configured { "Ask anything." } else { "No chat model selected yet. Open Settings → Models, add a provider and pick a model." };
+            let (msg, login) = self.empty_note(cx);
             let (fsz, lstep) = if in_ide { (15.5 * s, 21.0 * s) } else { (18.0 * s, 24.0 * s) };
-            for (i, l) in g.wrap(fsz, msg, Face::Sans, log.w).iter().take(4).enumerate() {
+            let lines = g.wrap(fsz, &msg, Face::Sans, log.w);
+            for (i, l) in lines.iter().take(4).enumerate() {
                 g.text(log.x, log.y + 8.0 * s + i as f32 * lstep, fsz, MUTED, l, Face::Sans);
+            }
+            if let Some(i) = login.and_then(|a| crate::agent_login::AGENTS.iter().position(|x| *x == a)) {
+                g.button(log.x, log.y + 8.0 * s + lines.len().min(4) as f32 * lstep + 6.0 * s, 14.0 * s, "Login", OK, Event::Tab(crate::agent_login::LOGIN_TAB + i));
             }
         }
         // nothing of the transcript lands outside its own rectangle, however tall a block is or how far it is scrolled
@@ -2881,7 +2905,8 @@ impl ChatApp {
             let i = g.fit(15.0 * s, i, Face::Sans, area.w - 2.0 * side);
             g.text(area.x + side, sy, 15.0 * s, OK, &i, Face::Sans);
         } else if let Some(e) = &self.error {
-            let e = g.fit(15.0 * s, e, Face::Sans, area.w - 2.0 * side);
+            let e = iyakki_storage::loss::reword(e);
+            let e = g.fit(15.0 * s, &e, Face::Sans, area.w - 2.0 * side);
             g.text(area.x + side, sy, 15.0 * s, ERR, &e, Face::Sans);
         } else if self.run.is_some() && self.approval.is_none() {
             let lead = match (self.autopilot, self.ext_choice.clone().flatten()) {
@@ -2900,7 +2925,7 @@ impl ChatApp {
             // idle: show which model is answering
             let label = match self.ext_footer(cx) {
                 Some(f) => f,
-                None => cx.services.settings.lock().unwrap().get().chat.as_ref().map_or("no model selected (Settings → Models)".to_string(), |c| format!("model: {} · {}", c.provider, c.model)),
+                None => cx.services.settings.lock().unwrap().get().chat.as_ref().map_or("no model selected (Settings → Models, or sign in to Claude Code)".to_string(), |c| format!("model: {} · {}", c.provider, c.model)),
             };
             let mut extra = self.ctx.summary();
             if !self.usage_text().is_empty() {
@@ -3067,7 +3092,7 @@ impl ChatApp {
             let (rh, fs) = (30.0 * s, 13.5 * s);
             let shown = list.len().min(8);
             let ph = 88.0 * s + shown as f32 * rh + if list.len() > shown { 22.0 * s } else { 0.0 } + 44.0 * s;
-            let pw = (area.w - 2.0 * side).clamp(280.0 * s, 480.0 * s).min(area.w - 16.0 * s);
+            let pw = (area.w - 2.0 * side).clamp_safe(280.0 * s, 480.0 * s).min(area.w - 16.0 * s);
             let px = (area.x + area.w - side - pw).max(area.x + 8.0 * s);
             let py0 = (bty - ph - 8.0 * s).max(area.y + 8.0 * s);
             g.rrect(px, py0, pw, ph, 14.0 * s, rgb(16, 20, 36));
@@ -3789,7 +3814,15 @@ mod tests {
         // Ctrl+O switches it on; the next reply is synthesised and sent to the speaker command
         app.handle(&Event::Key(Key::Ctrl('o')), &cx);
         send(&mut app, "again");
-        assert_eq!(std::fs::read(rig.p("played.wav")).unwrap(), std::fs::read(rig.p("canned.wav")).unwrap(), "the speaker received the synthesised WAV");
+        // the speaker receives the synthesised WAV, brought to 48 kHz when it was below 44.1 kHz (the T2 card played low rates too fast)
+        let (played, canned) = (std::fs::read(rig.p("played.wav")).unwrap(), std::fs::read(rig.p("canned.wav")).unwrap());
+        let (pw, cw) = (iyakki_agent::voice::parse_wav(&played).unwrap(), iyakki_agent::voice::parse_wav(&canned).unwrap());
+        if cw.rate >= 44_100 {
+            assert_eq!(played, canned, "the speaker received the synthesised WAV");
+        } else {
+            assert_eq!((pw.rate, pw.channels), (48_000, cw.channels), "low-rate speech reaches the speaker at 48 kHz");
+            assert_eq!(pw.samples.len(), cw.samples.len() * 48_000 / cw.rate as usize, "the same time, at the speaker's rate");
+        }
         assert!(cx.audit.recent(20).iter().any(|l| l.contains("voice.speak")));
         // a long utterance can be stopped with Ctrl+K / the Stop button
         rig.configure(&cx, |v| v.play_cmd = "sh -c 'cat >/dev/null; sleep 30'".into());

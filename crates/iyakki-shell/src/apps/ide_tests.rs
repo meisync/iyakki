@@ -174,8 +174,8 @@ fn ide_is_in_the_app_list_once_and_for_the_roles_that_can_edit_and_use_the_agent
         assert!(r.template().apps.contains(&PApp::Ide), "{r:?}");
     }
     assert!(!PRole::Guest.template().apps.contains(&PApp::Ide));
-    assert_eq!(crate::launcher::Group::of(PApp::Ide), Some(crate::launcher::Group::Work));
-    assert!(crate::launcher::Group::Work.holds(PApp::Ide));
+    assert_eq!(crate::launcher::Group::of(PApp::Ide), Some(crate::launcher::Group::Home));
+    assert!(crate::launcher::Group::Home.holds(PApp::Ide));
 }
 
 // ------------------------------------------------------------------------------------------------------ registry
@@ -254,18 +254,16 @@ fn ide_registry_add_open_rename_pin_remove_and_never_deletes_files() {
 }
 
 #[test]
-fn ide_clone_is_a_stub_that_says_what_to_do() {
+fn ide_the_switcher_c_key_opens_the_clone_repositories_dialog_for_a_new_workspace() {
+    // the full flows are in `ide_git_tests`; here: the switcher's key reaches the dialog and Esc closes it
     let w = world("clone");
     let mut app = IdeApp::new(&w.cx);
     key(&mut app, &w.cx, Key::Char('w'));
     key(&mut app, &w.cx, Key::Char('c'));
-    let Some(Modal::Form(_, f)) = &mut app.modal else { panic!() };
-    f.set_value(0, "https://example.com/x.git");
-    key(&mut app, &w.cx, Key::Ctrl('s'));
-    let Some(Modal::Info(title, msg)) = &app.modal else { panic!("{:?}", app.notice) };
-    assert_eq!(title, "Clone from a URL");
-    assert!(msg.contains("Open existing folder") || msg.contains("git is not installed"), "{msg}");
-    key(&mut app, &w.cx, Key::Enter);
+    assert!(matches!(&app.modal, Some(Modal::Git(_))), "the clone dialog opens");
+    let g = render(&mut app, &w.cx, 1280, 720);
+    assert!(g.hits.iter().any(|h| h.label == "Cancel" || h.label == "Close"));
+    key(&mut app, &w.cx, Key::Esc);
     assert!(app.modal.is_none());
 }
 
@@ -2152,7 +2150,7 @@ fn ide_controls_never_overlap_or_leave_the_screen_in_any_density_and_size() {
     let mut bad: Vec<String> = Vec::new();
     for density in Density::ALL {
         app.set_density(density);
-        for (wd, ht) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (1825, 968), (2738, 1452)] {
+        for (wd, ht) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (1825, 968), (2738, 1452), (2560, 1600), (2880, 1800)] {
             for (main, bottom, chat_open) in [(MainTab::Editor, BTab::Terminal, true), (MainTab::Board, BTab::Problems, true), (MainTab::K8s, BTab::K8s, true), (MainTab::K8s, BTab::Search, false)] {
                 app.show_main(main);
                 app.show_bottom(bottom);
@@ -2957,3 +2955,6 @@ fn ide_chat_approval_chip_and_indicator_fit_at_every_size() {
         }
     }
 }
+
+#[path = "ide_chatbox_tests.rs"]
+mod chatbox;

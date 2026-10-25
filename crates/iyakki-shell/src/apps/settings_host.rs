@@ -34,6 +34,11 @@ impl SettingsApp {
     }
 
     /// Keys and clicks for a dialog opened from this page; true when one is open (it takes everything).
+    /// A Host access dialog is open (it takes every key, click and wheel step).
+    pub(super) fn host_dialog_open(&self) -> bool {
+        self.host.dlg.is_some()
+    }
+
     pub(super) fn host_dialog_event(&mut self, ev: &Event) -> bool {
         let Some(d) = self.host.dlg.as_mut() else { return false };
         match d.handle(ev) {
@@ -161,7 +166,7 @@ impl SettingsApp {
             let mode = if m.write { "read-write" } else { "read-only" };
             let status = if *ok { "available" } else { "unplugged or moved" };
             let col = if !*ok { ERR } else if m.write { rgb(255, 196, 94) } else { OK };
-            row(g, i, a.x, y, a.w, 58.0 * s, s, i == sel, &format!("host:{}", m.name), &format!("{} · {size}", m.path), &[(mode, col), (status, if *ok { OK } else { ERR })]);
+            row(g, &mut self.tip, i, a.x, y, a.w, 58.0 * s, s, i == sel, &format!("host:{}", m.name), &format!("{} · {size}", m.path), &[(mode, col), (status, if *ok { OK } else { ERR })]);
             y += 66.0 * s;
         }
     }

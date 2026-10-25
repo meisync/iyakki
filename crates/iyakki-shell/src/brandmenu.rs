@@ -3,8 +3,8 @@
 //!
 //! * **About IYAKKI**: version, build, variant, kernel, IYAKKI's licence (Apache-2.0) and a scrollable list of the licences of
 //!   everything inside (the Rust crates and the programs of the system images; [`crate::about`]).
-//! * **Quick install**: k3s, and DuckDB and Elasticsearch on top of it, in dependency order, as detached jobs
-//!   ([`iyakki_agent::quickinstall`]); "Installer runs" opens the top bar's installer list.
+//! * **Quick install** (key q): no page of its own any more; it opens the Store on its Setup tab (`apps/store_setup.rs`), where the
+//!   installs are cards. The jobs are still [`iyakki_agent::quickinstall`]'s.
 //! * **Media player**: which player this image has (ffplay, mpv, VLC, mplayer; MP3 plays in IYAKKI itself), a file to play, Stop,
 //!   and MEDIA for the library.
 //! * **Mac drivers**: Wi-Fi firmware (the script for macOS, then "Install from folder or USB"), T2 audio, Bluetooth and the USB
@@ -13,19 +13,27 @@
 //! Keys: Up/Down and Enter, the underlined letters, Esc goes back a page and closes on the first page, F10 closes. A click
 //! outside the panel closes it. The menu only says what it wants ([`Outcome`]); the shell does it (jobs, the player, jumps).
 
+use crate::safeclamp::SafeClamp;
 use crate::gfx::{rgb, Face, Gfx, Icon};
 use crate::ui::{Event, Key, TextField, DIM, ERR, MUTED, OK, R, TEXT};
-use iyakki_agent::quickinstall::{self, Item, Latest, Presence};
+use iyakki_agent::quickinstall::Item;
+
+#[path = "brandmenu_gpu.rs"]
+mod gpu_page;
+#[path = "brandmenu_linux.rs"]
+mod linux_page;
+pub use linux_page::{BoxRow, ImageRow, LView, LinuxAction, LinuxFacts, LinuxPage};
+/// The ids of the Linux apps page's controls (tests).
+pub mod linux_page_ids {
+    pub use super::linux_page::{L_CREATE as CREATE, L_TERMINAL as TERMINAL};
+}
+pub use gpu_page::{GPU_INSTALL, GPU_PAGE, GPU_REFRESH, GPU_TEST};
 
 pub const BASE: usize = 1_200_000;
 pub const CLOSE: usize = BASE;
 pub const BACK: usize = BASE + 1;
 /// A menu entry: `ENTRY + index`.
 pub const ENTRY: usize = BASE + 10;
-/// A Quick install row: `IROW + index`.
-pub const IROW: usize = BASE + 100;
-pub const INSTALL_BTN: usize = BASE + 30;
-pub const RUNS_BTN: usize = BASE + 31;
 pub const PLAY: usize = BASE + 40;
 pub const STOP: usize = BASE + 41;
 pub const OPEN_MEDIA: usize = BASE + 42;
@@ -34,6 +42,16 @@ pub const PATH_FIELD: usize = BASE + 43;
 pub const INSTALL_PLAYER: usize = BASE + 44;
 pub const DRIVERS: usize = BASE + 50;
 pub const DEVICES: usize = BASE + 51;
+/// Mac drivers page: Download from Apple, from the folder or stick in the field, from the disk image in the field, copy the prompt, the field.
+pub const MAC_DOWNLOAD: usize = BASE + 70;
+pub const MAC_FOLDER: usize = BASE + 71;
+pub const MAC_IMAGE: usize = BASE + 72;
+pub const MAC_PROMPT: usize = BASE + 73;
+pub const MAC_PATH: usize = BASE + 74;
+/// Mac drivers page: delete the kept download and unpacked folder.
+pub const MAC_CLEAN: usize = BASE + 75;
+/// Mac drivers page: "Load the Bluetooth driver anyway".
+pub const MAC_BTLOAD: usize = BASE + 76;
 pub const SCROLL: usize = BASE + 60;
 
 const ACCENT: [u8; 4] = crate::fx::CYAN;
@@ -43,9 +61,15 @@ const AMBER: [u8; 4] = rgb(255, 196, 94);
 pub enum Page {
     Menu,
     About,
-    Install,
+    /// Not a page: the entry opens the Store on its Setup tab (the long Quick install page moved there).
+    Setup,
     Media,
     Mac,
+    /// Linux apps: Debian and Ubuntu sandboxes and image apps (`brandmenu_linux.rs`, `docs/LINUX-APPS.md`).
+    Linux,
+    /// GPU for local models: the GPUs found, their drivers, the pods that use them, the test prompt (`brandmenu_gpu.rs`). Not an entry of the
+    /// first page: the GPU cards of Store -> Setup open it ("Open its page").
+    Gpu,
     /// Not a page: the entry opens Settings.
     Settings,
     /// Not a page: Settings → Developer mode (administrators only).
@@ -53,14 +77,24 @@ pub enum Page {
 }
 
 /// The entries of the first page: page, title, what it is, the key that opens it.
-pub const ENTRIES: [(Page, &str, &str, char); 6] = [
+pub const ENTRIES: [(Page, &str, &str, char); 7] = [
     (Page::About, "About IYAKKI", "Version, build, kernel, and the licences of everything inside", 'a'),
-    (Page::Install, "Quick install", "Cluster, AI coding agents, voices and local model servers, as background jobs", 'q'),
+    (Page::Setup, "Quick install", "Opens Store \u{2192} Setup: cluster, AI servers, voices, coding agents, drivers", 'q'),
     (Page::Media, "Media player", "Play a video or audio file", 'm'),
+    (Page::Linux, "Linux apps", "Debian and Ubuntu programs in a sandbox, and ready-made image apps", 'l'),
     (Page::Mac, "Mac drivers", "Wi-Fi firmware, T2 audio, Bluetooth and the USB camera", 'd'),
     (Page::Settings, "Settings", "Network, sound, display, time, models, accounts and more", 's'),
     (Page::Developer, "Developer mode", "Let a paired computer install, run and watch apps here (administrators)", 'v'),
 ];
+
+/// The name the Cloud mode table (`iyakki_agent::cloudmode::MENU_ENTRIES`) knows a page under ("" for the ones that need no hardware).
+fn cloud_id(p: Page) -> &'static str {
+    match p {
+        Page::Media => "media",
+        Page::Mac => "mac",
+        Page::Menu | Page::About | Page::Setup | Page::Gpu | Page::Linux | Page::Settings | Page::Developer | Page::Setup => "",
+    }
+}
 
 /// What a key or click asks the shell to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,8 +108,18 @@ pub enum Outcome {
     ShowInstalls,
     Play(String),
     StopMedia,
+    /// Run the GPU page's test prompt (a detached job).
+    GpuTest,
     /// Open an app at an item (`("store", "drivers")`, `("media", "")`).
     Jump(&'static str, String),
+    /// Install Apple's Wi-Fi and Bluetooth firmware from this source (Mac drivers page): a detached job.
+    MacFirmware(iyakki_agent::macfw::Source),
+    /// Delete the downloaded recovery image and the unpacked folder the firmware job kept.
+    MacClean,
+    /// "Load the Bluetooth driver anyway": give the held drivers back and load them without firmware (the shell does it).
+    MacBtLoad,
+    /// A button of the Linux apps page (the shell starts the job, opens the terminal, asks the cluster).
+    Linux(LinuxAction),
 }
 
 /// The media players looked for, in the order MEDIA uses them, with the arguments that keep them quiet.
@@ -95,7 +139,7 @@ pub fn on_path(prog: &str) -> Option<String> {
 /// What the Media page says about the players (the explanation when there is none).
 pub fn players_text(found: &[(String, String)]) -> (String, bool) {
     if found.is_empty() {
-        ("Install the media player: IYAKKI menu \u{2192} Quick install \u{2192} Media (a static ffmpeg build from its builder, GPLv3, checked with its checksum). Until then MP3 plays in IYAKKI itself; video needs the player (or the web image, whose MEDIA plays video in the page engine).".into(), false)
+        ("Install the media player: Store \u{2192} Setup \u{2192} Media tools (a static ffmpeg build from its builder, GPLv3, checked with its checksum). Until then MP3 plays in IYAKKI itself; video needs the player (or the web image, whose MEDIA plays video in the page engine).".into(), false)
     } else if found[0].0 == "ffmpeg" {
         (format!("Player: IYAKKI's own, decoding with ffmpeg ({}) \u{b7} plays video and sound, with the output of Settings \u{2192} Sound", found[0].1), true)
     } else {
@@ -114,6 +158,11 @@ pub struct MacRow {
 
 /// The Mac drivers page from a Devices reading: Wi-Fi, T2 audio (the Sound row and the T2 driver entry), Bluetooth, the camera.
 pub fn mac_rows(snap: Option<&crate::devpop::Snapshot>) -> Vec<MacRow> {
+    mac_rows_for(snap, true)
+}
+
+/// The same for a Mac with (`t2`) or without a T2 chip: the explanations differ (a Mac without one already has Wi-Fi, with limits).
+pub fn mac_rows_for(snap: Option<&crate::devpop::Snapshot>, t2: bool) -> Vec<MacRow> {
     use crate::devpop::Level;
     let item = |title: &str| snap.and_then(|s| s.items.iter().find(|i| i.title == title).cloned());
     let help = |words: &[&str]| snap.and_then(|s| s.driver_help.iter().find(|(n, _)| words.iter().any(|w| n.to_lowercase().contains(w))).map(|(n, w)| format!("{n}: {w}")));
@@ -123,17 +172,30 @@ pub fn mac_rows(snap: Option<&crate::devpop::Snapshot>) -> Vec<MacRow> {
             None if snap.is_none() => ("looking...".to_string(), Level::Absent),
             None => ("not found".to_string(), Level::Missing),
         };
-        if let Some(e) = extra {
+        if let Some(e) = extra.filter(|e| !state.contains(e.as_str())) {
             state = format!("{state} · {e}");
         }
         MacRow { title, state, level, how }
     };
     vec![
-        row("Wi-Fi firmware", item("Wi-Fi"), help(&["wi-fi", "wifi"]), "On the Mac's own macOS run dist/drivers/mac-wifi-firmware-from-macos.sh: it copies the Broadcom firmware to a USB stick. Then STORE \u{2192} Drivers \u{2192} the Wi-Fi entry \u{2192} Install from folder or USB."),
+        row("Wi-Fi firmware", item("Wi-Fi"), help(&["wi-fi", "wifi"]), if t2 { "Apple's firmware is not shipped. Install it below: from Apple's download for this Mac, or from a folder, a stick or a disk image you have (or run dist/drivers/mac-wifi-firmware-from-macos.sh in macOS first)." } else { "This Mac has no T2 chip: Wi-Fi works without Apple's files (the generic firmware is on the image), with limits such as fewer channels. Download fetches only this Mac's Wi-Fi NVRAM and CLM files, from Apple, when you press it." }),
         row("T2 audio", item("Sound"), help(&["t2", "audio"]), "T2 Macs (2018 and later) play through the apple-bce driver of the Mac image; this page only reports what the system sees (Settings \u{2192} Sound picks the output)."),
-        row("Bluetooth", item("Bluetooth"), help(&["bluetooth"]), "Broadcom Bluetooth needs its .hcd firmware: STORE \u{2192} Drivers \u{2192} Bluetooth firmware \u{2192} Install from folder or USB."),
-        row("USB webcam", item("Camera"), help(&["camera", "facetime"]), "A USB (UVC) camera works when plugged in. The built-in FaceTime HD camera needs the Mac image and Apple's firmware file (STORE \u{2192} Drivers \u{2192} Extract firmware)."),
+        row("Bluetooth", item("Bluetooth"), help(&["bluetooth"]), if t2 { "The same install brings the Bluetooth patch file when macOS has one. The Mac mini 2018's chip (BCM4364) has none in macOS: its controller runs in its ROM state (limited); a USB Bluetooth adapter is the reliable option." } else { "The same download also brings the Bluetooth patch file for the UART chip when macOS has one; without it the controller runs in its ROM state (limited); a USB Bluetooth adapter is the reliable option." }),
+        row("USB webcam", item("Camera"), help(&["camera", "facetime"]), "A USB (UVC) camera works when plugged in. The built-in FaceTime HD camera of a MacBook needs the Mac image and Apple's camera firmware: STORE \u{2192} Setup \u{2192} Hardware \u{2192} MacBook FaceTime camera: Install camera driver and firmware (the driver is in the image; about 17.6 MB, from Apple, on your click)."),
     ]
+}
+
+/// The notice at the foot of the Mac drivers page: whose files these are, and what the download would ask Apple for on this model.
+pub fn mac_notice(model: &str, board_name: &str) -> String {
+    let r = iyakki_drivers::macboard::resolve(model, board_name);
+    let t2 = if r.t2 || model.is_empty() { "" } else { " This Mac has no T2 chip." };
+    let m = match (r.table, &r.board_id) {
+        (Some(b), Some(id)) => format!(" This Mac: {} ({}), board id {id}{}.{t2}", b.model, b.name, if r.verified { "" } else { ", not yet tried on a real one" }),
+        (None, Some(id)) => format!(" This Mac: {model} is not on IYAKKI's verified list; Download asks Apple for this Mac's own board id {id} and Apple's service decides.{t2}"),
+        (_, None) if model.is_empty() => String::new(),
+        (_, None) => format!(" This Mac: {model} is not in IYAKKI's table and its board id could not be read, so Download is not offered; use a folder, a stick or a disk image.{t2}"),
+    };
+    format!("{}{m}", iyakki_agent::macfw::NOTICE)
 }
 
 pub struct BrandMenu {
@@ -146,34 +208,38 @@ pub struct BrandMenu {
     /// The About page's wrapped lines for the width they were made for.
     wrapped: Option<(u32, Vec<(String, crate::about::Style)>)>,
     about: Option<Vec<(String, crate::about::Style)>>,
-    /// What is installed (the shell fills it when Quick install opens).
-    pub presence: Vec<(Item, Presence)>,
-    /// What the vendors publish as newer, for the installed ones (looked up in the background when Quick install opens).
-    pub latest: Vec<(Item, Latest)>,
-    /// Items whose last install failed (Retry is offered on them).
-    pub failed: Vec<Item>,
-    /// A desktop window: IYAKKI never installs a cluster there (the dev cluster's rule).
-    pub window: bool,
     pub players: Vec<(String, String)>,
     pub path: TextField,
     pub mac: Option<crate::devpop::Snapshot>,
+    /// The Mac drivers page: the path typed for "from a folder or stick" / "from a disk image" (click the field to type).
+    pub mac_path: TextField,
+    mac_focus: bool,
+    /// What the last firmware run said (read from the data folder when the page opens and while it is open).
+    pub mac_last: Option<iyakki_agent::macfw::Outcome>,
+    /// A firmware job is running (the shell fills it).
+    pub mac_busy: bool,
+    /// Bytes the firmware job keeps on the data volume (a downloaded image after a failure, the unpacked folder).
+    pub mac_leftover: u64,
+    /// What the firmware job keeps and what Retry does (`macfw::card_status`); empty when nothing is kept.
+    pub mac_cache: String,
+    /// The Bluetooth drivers are set aside until firmware exists (the shell fills it): "Load the Bluetooth driver anyway" is offered.
+    pub mac_bt_held: bool,
+    /// The DMI product name, for the sentence about the download ("Macmini8,1: board id ...").
+    pub mac_model: String,
+    /// The DMI board name (`Mac-B4831CEBD52A0C4C`): the board id Apple's service is asked for.
+    pub mac_board: String,
     /// A line under the page: what just happened (good or not).
     pub note: Option<(String, bool)>,
     /// Where the panel hangs from (the name in the top bar), set by the shell.
     pub anchor: (f32, f32),
     /// The person is an administrator (Developer mode is listed only then).
     pub admin: bool,
-    /// Node.js is on this machine (npm tools then need nothing first).
-    /// Installed by IYAKKI but not runnable, with the plain reason (Reinstall is offered).
-    pub unhealthy: Vec<(Item, String)>,
-    /// Claude Code / GitHub Copilot: whether each is signed in (the shell fills it from the remembered status; see agent_login.rs).
-    pub signin: Vec<(Item, crate::agent_login::State)>,
-    /// What the catalogue installs before an item (uv, then Python 3; Node.js), for the order line.
-    pub runtimes: Vec<(Item, Vec<&'static str>)>,
-    /// A runtime that installed tools use (the sentence to show before replacing it).
-    pub used_by: Vec<(Item, String)>,
-    /// An item found on the machine (put there by hand): the first press asked whether to install IYAKKI's own copy, the second does.
-    confirm_own: Option<Item>,
+    /// The GPU page's facts (the shell fills them when the page opens).
+    pub gpu: Option<iyakki_agent::gpu::Report>,
+    /// The Linux apps page (`brandmenu_linux.rs`).
+    pub linux: LinuxPage,
+    /// Cloud mode: entries left out of the menu and the About row (`set_cloud`).
+    cloud: iyakki_agent::cloudmode::CloudMode,
 }
 
 impl Default for BrandMenu {
@@ -184,7 +250,7 @@ impl Default for BrandMenu {
 
 impl BrandMenu {
     pub fn new() -> BrandMenu {
-        BrandMenu { open: false, page: Page::Menu, sel: 0, scroll: 0, visible: 10, wrapped: None, about: None, presence: Vec::new(), latest: Vec::new(), failed: Vec::new(), window: false, players: Vec::new(), path: TextField::new("/path/to/a/video-or-audio-file", false), mac: None, note: None, anchor: (24.0, 76.0), admin: false, unhealthy: Vec::new(), signin: Vec::new(), runtimes: Vec::new(), used_by: Vec::new(), confirm_own: None }
+        BrandMenu { open: false, page: Page::Menu, sel: 0, scroll: 0, visible: 10, wrapped: None, about: None, players: Vec::new(), path: TextField::new("/path/to/a/video-or-audio-file", false), mac: None, mac_path: TextField::new("/mnt/usb/iyakki-wifi-firmware  or  /mnt/usb/macOS.dmg", false), mac_focus: false, mac_last: None, mac_busy: false, mac_leftover: 0, mac_cache: String::new(), mac_bt_held: false, mac_model: String::new(), mac_board: String::new(), note: None, anchor: (24.0, 76.0), admin: false, gpu: None, linux: LinuxPage::new(), cloud: iyakki_agent::cloudmode::CloudMode::desktop() }
     }
 
     pub fn toggle(&mut self) {
@@ -210,7 +276,14 @@ impl BrandMenu {
 
     /// The entries of the first page for this person (Developer mode only for administrators).
     pub fn shown(&self) -> Vec<(Page, &'static str, &'static str, char)> {
-        ENTRIES.iter().copied().filter(|e| e.0 != Page::Developer || self.admin).collect()
+        ENTRIES.iter().copied().filter(|e| (e.0 != Page::Developer || self.admin) && !self.cloud.hides_menu(cloud_id(e.0))).collect()
+    }
+
+    /// Cloud mode for this machine: hidden entries are neither listed nor reachable by key or jump.
+    pub fn set_cloud(&mut self, c: iyakki_agent::cloudmode::CloudMode) {
+        self.cloud = c;
+        self.about = None;
+        self.wrapped = None;
     }
 
     /// The About lines (made once; tests may give their own).
@@ -220,7 +293,8 @@ impl BrandMenu {
     }
 
     fn about_lines(&mut self) -> &Vec<(String, crate::about::Style)> {
-        self.about.get_or_insert_with(crate::about::this_machine)
+        let cloud = self.cloud.clone();
+        self.about.get_or_insert_with(|| crate::about::this_machine_with(Some(&cloud)))
     }
 
     pub fn open_page(&mut self, p: Page) -> Outcome {
@@ -230,10 +304,20 @@ impl BrandMenu {
         if p == Page::Developer {
             return Outcome::Jump("settings", "tab:developer".into());
         }
+        // the old Quick install page is gone: the entry (and its key q) opens the Store on its Setup tab
+        if p == Page::Setup {
+            return Outcome::Jump("store", "setup".into());
+        }
+        if self.cloud.hides_menu(cloud_id(p)) {
+            return Outcome::Nothing;
+        }
         self.page = p;
         self.sel = 0;
         self.scroll = 0;
         self.note = None;
+        if p == Page::Linux {
+            self.linux_reset();
+        }
         if p == Page::About {
             self.about_lines();
         }
@@ -241,6 +325,9 @@ impl BrandMenu {
     }
 
     fn back(&mut self) -> Outcome {
+        if self.page == Page::Gpu {
+            return Outcome::Jump("store", "setup".into());
+        }
         if self.page == Page::Menu {
             Outcome::Close
         } else {
@@ -254,53 +341,89 @@ impl BrandMenu {
     fn rows(&self) -> usize {
         match self.page {
             Page::Menu => self.shown().len(),
-            Page::Install => Item::ALL.len(),
+            Page::Linux => self.linux_rows(),
             _ => 0,
         }
-    }
-
-    /// The order the selected Quick install row would run in.
-    pub fn install_order(&self) -> Vec<Item> {
-        let target = Item::ALL[self.sel.min(Item::ALL.len() - 1)];
-        let present = |i: Item| self.presence.iter().any(|(x, p)| *x == i && p.present());
-        quickinstall::order(target, &present)
     }
 
     fn scroll_by(&mut self, d: i32) {
         let total = self.wrapped.as_ref().map_or(0, |w| w.1.len());
         let max = total.saturating_sub(self.visible.max(1));
-        self.scroll = (self.scroll as i32 + d).clamp(0, max as i32) as usize;
+        self.scroll = (self.scroll as i32 + d).clamp_safe(0, max as i32) as usize;
     }
 
-    /// What Quick install learnt about this machine (read off the screen's thread).
-    pub fn set_facts(&mut self, f: quickinstall::Facts) {
-        self.presence = f.presence;
-        self.unhealthy = f.unhealthy;
-        self.runtimes = f.runtimes;
-        self.used_by = f.used_by;
-        self.confirm_own = None;
+    // ---- Mac drivers page
+
+    fn mac_blocked(&mut self) -> bool {
+        if self.mac_busy {
+            self.note = Some(("The Mac firmware is being installed already: its progress is beside the clock in the top bar.".into(), false));
+            return true;
+        }
+        false
     }
 
-    fn install_selected(&mut self) -> Outcome {
-        let target = Item::ALL[self.sel.min(Item::ALL.len() - 1)];
-        // something found on the machine (put there by hand) is left as it is unless asked twice
-        let elsewhere = self.presence.iter().any(|(x, p)| *x == target && matches!(p, Presence::Elsewhere(_))) && target.cli_id().is_some();
-        if elsewhere && self.confirm_own != Some(target) {
-            self.confirm_own = Some(target);
-            self.note = Some((format!("{} is already on this machine and works; IYAKKI leaves it alone. Press Install again to put IYAKKI's own copy next to it (it replaces the links in the tools folder).", target.title()), false));
+    fn mac_download(&mut self) -> Outcome {
+        if self.mac_blocked() {
             return Outcome::Nothing;
         }
-        self.confirm_own = None;
-        if self.window && (target == Item::K3s || target.needs().contains(&Item::K3s)) {
-            self.note = Some(("In a desktop window IYAKKI never installs a cluster: this computer manages its own. Use Quick install on the IYAKKI machine itself.".into(), false));
+        self.note = None;
+        Outcome::MacFirmware(iyakki_agent::macfw::Source::Download)
+    }
+
+    /// `Enter` in the field and the `f` key: a folder is read as a folder, a file as a disk image.
+    fn mac_from_path(&mut self) -> Outcome {
+        let p = self.mac_path.value.trim().to_string();
+        let is_dir = std::path::Path::new(&p).is_dir();
+        self.mac_path_source(!is_dir)
+    }
+
+    fn mac_path_source(&mut self, image: bool) -> Outcome {
+        if self.mac_blocked() {
             return Outcome::Nothing;
         }
-        Outcome::Install(Item::ALL[self.sel.min(Item::ALL.len() - 1)])
+        let p = self.mac_path.value.trim().to_string();
+        if p.is_empty() {
+            self.mac_focus = true;
+            self.note = Some(("Click the field and type where the files are: a folder or stick (the one the macOS script wrote, or a copy of usr/share/firmware) or a macOS disk image file.".into(), false));
+            return Outcome::Nothing;
+        }
+        let path = std::path::Path::new(&p);
+        if image && !path.is_file() {
+            self.note = Some((format!("{p} is not a file. For a folder press From a folder or stick."), false));
+            return Outcome::Nothing;
+        }
+        if !image && !path.is_dir() {
+            self.note = Some((format!("{p} is not a folder. For a disk image file press From a disk image."), false));
+            return Outcome::Nothing;
+        }
+        self.mac_focus = false;
+        self.note = None;
+        Outcome::MacFirmware(if image { iyakki_agent::macfw::Source::Image(p.into()) } else { iyakki_agent::macfw::Source::Folder(p.into()) })
+    }
+
+    fn mac_bt_load(&mut self) -> Outcome {
+        if !self.mac_bt_held {
+            self.note = Some(("No Bluetooth driver is set aside on this machine: nothing to load.".into(), false));
+            return Outcome::Nothing;
+        }
+        Outcome::MacBtLoad
+    }
+
+    fn mac_copy_prompt(&mut self) -> Outcome {
+        crate::ui::clipboard::copy(iyakki_agent::macfw::CHAT_PROMPT);
+        self.note = Some(("Copied. Paste it into Claude Code, Copilot CLI (AI IDE tile) or the CHAT tile: each command still asks you first.".into(), true));
+        Outcome::Nothing
     }
 
     pub fn handle_key(&mut self, k: &Key) -> Outcome {
         if matches!(k, Key::F(10)) {
             return Outcome::Close;
+        }
+        // the Linux apps page: its own keys and fields first
+        if self.page == Page::Linux {
+            if let Some(o) = self.linux_key(k) {
+                return o;
+            }
         }
         // the Media page's field takes what is typed
         if self.page == Page::Media {
@@ -320,15 +443,29 @@ impl BrandMenu {
                 }
             }
         }
+        // the Mac page's path field takes what is typed once it has been clicked; Esc lets go of it
+        if self.page == Page::Mac && self.mac_focus {
+            match k {
+                Key::Esc => {
+                    self.mac_focus = false;
+                    return Outcome::Nothing;
+                }
+                Key::Enter => return self.mac_from_path(),
+                other => {
+                    self.mac_path.handle(other);
+                    return Outcome::Nothing;
+                }
+            }
+        }
         let n = self.rows();
         match k {
             Key::Esc | Key::Backspace | Key::Left => self.back(),
             Key::Down | Key::Tab if n > 0 => {
-                self.sel = (self.sel + 1) % n;
+                self.sel = self.step_sel(1, n);
                 Outcome::Nothing
             }
             Key::Up | Key::BackTab if n > 0 => {
-                self.sel = (self.sel + n - 1) % n;
+                self.sel = self.step_sel(-1, n);
                 Outcome::Nothing
             }
             Key::Down => {
@@ -362,7 +499,8 @@ impl BrandMenu {
                     let e = self.shown();
                     self.open_page(e[self.sel.min(e.len() - 1)].0)
                 }
-                Page::Install => self.install_selected(),
+                Page::Gpu => Outcome::GpuTest,
+                Page::Mac if self.mac_focus => self.mac_from_path(),
                 Page::Mac => Outcome::Jump("store", "drivers".into()),
                 _ => Outcome::Nothing,
             },
@@ -376,10 +514,15 @@ impl BrandMenu {
                         }
                         None => Outcome::Nothing,
                     },
-                    Page::Install if c == 'i' => self.install_selected(),
-                    Page::Install if c == 'r' => Outcome::ShowInstalls,
+                    Page::Gpu if c == 't' => Outcome::GpuTest,
+                    Page::Gpu if c == 'r' => Outcome::Opened(Page::Gpu),
+                    Page::Gpu if c == 'i' => Outcome::Jump("store", "setup".into()),
                     Page::Mac if c == 'd' => Outcome::Jump("store", "drivers".into()),
                     Page::Mac if c == 'v' => Outcome::Jump("devices", String::new()),
+                    Page::Mac if c == 'a' => self.mac_download(),
+                    Page::Mac if c == 'f' => self.mac_from_path(),
+                    Page::Mac if c == 'c' => self.mac_copy_prompt(),
+                    Page::Mac if c == 'l' => self.mac_bt_load(),
                     _ => Outcome::Nothing,
                 }
             }
@@ -389,6 +532,11 @@ impl BrandMenu {
 
     /// A click on one of the panel's own regions.
     pub fn handle_hit(&mut self, ev: &Event) -> Outcome {
+        if self.page == Page::Linux {
+            if let Some(o) = self.linux_hit(ev) {
+                return o;
+            }
+        }
         match ev {
             Event::Tab(CLOSE) => Outcome::Close,
             Event::Tab(BACK) => self.back(),
@@ -396,19 +544,28 @@ impl BrandMenu {
                 self.sel = n - ENTRY;
                 self.open_page(self.shown()[self.sel].0)
             }
-            Event::Tab(n) if (IROW..IROW + Item::ALL.len()).contains(n) => {
-                self.sel = n - IROW;
-                self.note = None;
-                Outcome::Nothing
-            }
-            Event::Tab(INSTALL_BTN) => self.install_selected(),
-            Event::Tab(RUNS_BTN) => Outcome::ShowInstalls,
             Event::Tab(PLAY) => self.handle_key(&Key::Enter),
             Event::Tab(STOP) => Outcome::StopMedia,
             Event::Tab(OPEN_MEDIA) => Outcome::Jump("media", String::new()),
             Event::Tab(INSTALL_PLAYER) => Outcome::Install(Item::Ffmpeg),
             Event::Tab(DRIVERS) => Outcome::Jump("store", "drivers".into()),
             Event::Tab(DEVICES) => Outcome::Jump("devices", String::new()),
+            Event::Tab(GPU_TEST | GPU_REFRESH | GPU_INSTALL | GPU_PAGE) => self.gpu_hit(ev).unwrap_or(Outcome::Nothing),
+            Event::Tab(MAC_DOWNLOAD) => self.mac_download(),
+            Event::Tab(MAC_FOLDER) => self.mac_path_source(false),
+            Event::Tab(MAC_IMAGE) => self.mac_path_source(true),
+            Event::Tab(MAC_PROMPT) => self.mac_copy_prompt(),
+            Event::Tab(MAC_BTLOAD) if self.mac_bt_held => Outcome::MacBtLoad,
+            Event::Tab(MAC_CLEAN) if self.mac_leftover > 0 && !self.mac_busy => Outcome::MacClean,
+            Event::FocusAt(MAC_PATH, x) => {
+                self.mac_focus = true;
+                self.mac_path.click(*x);
+                Outcome::Nothing
+            }
+            Event::Paste(t) if self.page == Page::Mac && self.mac_focus => {
+                self.mac_path.paste(t);
+                Outcome::Nothing
+            }
             Event::FocusAt(PATH_FIELD, x) => {
                 self.path.click(*x);
                 Outcome::Nothing
@@ -418,8 +575,11 @@ impl BrandMenu {
                 Outcome::Nothing
             }
             Event::Scroll(d) => {
-                if self.page == Page::About {
-                    self.scroll_by(-*d * 3);
+                match self.page {
+                    Page::About => self.scroll_by(-*d * 3),
+                    // the sandbox / image-app list follows its selection: a notch moves it by a row (up is towards the start)
+                    Page::Linux => self.linux_wheel(*d),
+                    _ => {}
                 }
                 Outcome::Nothing
             }
@@ -435,12 +595,11 @@ impl BrandMenu {
         let pw = (if self.page == Page::Menu { 470.0 } else { 600.0 } * s).min(w as f32 - 24.0 * s);
         let want = match self.page {
             Page::Menu => (66.0 + 62.0 * self.shown().len() as f32 + 34.0) * s,
-            Page::Install => 660.0 * s,
             Page::Media => 380.0 * s,
             _ => 640.0 * s,
         };
         let ph = want.min(h as f32 - ay - 12.0 * s).max(160.0 * s);
-        let x = ax.clamp(12.0 * s, (w as f32 - pw - 12.0 * s).max(12.0 * s));
+        let x = ax.clamp_safe(12.0 * s, (w as f32 - pw - 12.0 * s).max(12.0 * s));
         R::new(x, ay, pw, ph)
     }
 
@@ -453,7 +612,7 @@ impl BrandMenu {
         let p = self.panel(w, h, s);
         crate::fx::modal_panel(g, p, s, ACCENT, false);
         // the header: the name (with its colour strip) or Back and the page's title, and Close
-        let title = ENTRIES.iter().find(|e| e.0 == self.page).map_or("IYAKKI", |e| e.1);
+        let title = if self.page == Page::Gpu { "GPU for local models" } else { ENTRIES.iter().find(|e| e.0 == self.page).map_or("IYAKKI", |e| e.1) };
         let mut tx = p.x + 20.0 * s;
         if self.page != Page::Menu {
             let b = R::new(p.x + 10.0 * s, p.y + 10.0 * s, 34.0 * s, 32.0 * s);
@@ -481,10 +640,11 @@ impl BrandMenu {
         match self.page {
             Page::Menu => self.draw_menu(g, body, s),
             Page::About => self.draw_about(g, body, s),
-            Page::Install => self.draw_install(g, body, s),
             Page::Media => self.draw_media(g, body, s, tick),
-            Page::Mac => self.draw_mac(g, body, s),
-            Page::Settings | Page::Developer => {}
+            Page::Mac => self.draw_mac(g, body, s, tick),
+            Page::Gpu => self.draw_gpu(g, body, s),
+            Page::Linux => self.draw_linux(g, body, s, tick),
+            Page::Settings | Page::Developer | Page::Setup => {}
         }
         // the foot: what just happened, else the keys
         let (foot, col) = match &self.note {
@@ -493,10 +653,11 @@ impl BrandMenu {
                 match self.page {
                     Page::Menu => "Up/Down and Enter, or the letter · Esc or F10 closes",
                     Page::About => "Up/Down, PageUp/PageDown or the wheel scroll · Esc back",
-                    Page::Install => "Up/Down choose · Enter installs · r installer runs · Esc back",
                     Page::Media => "Type a path · Enter plays · Esc back",
-                    Page::Mac => "Enter or d: STORE \u{2192} Drivers · v: Devices · Esc back",
-                    Page::Settings | Page::Developer => "",
+                    Page::Gpu => "t or Enter: test prompt · r: refresh · i: Store \u{2192} Setup · Esc back",
+                    Page::Linux => self.linux_foot(),
+                    Page::Mac => "a: download from Apple · f: from the path · l: load Bluetooth anyway · c: copy the prompt · d: STORE \u{2192} Drivers · v: Devices · Esc back",
+                    Page::Settings | Page::Developer | Page::Setup => "",
                 }
                 .to_string(),
                 DIM,
@@ -517,10 +678,11 @@ impl BrandMenu {
             crate::fx::row_at(g, r.x, r.y, r.w, r.h, 12.0 * s, i == self.sel, hot, ACCENT);
             let icon = match page {
                 Page::About => Icon::System,
-                Page::Install => Icon::Cli,
+                Page::Setup => Icon::Store,
                 Page::Media => Icon::Media,
                 Page::Mac => Icon::Devices,
                 Page::Developer => Icon::Ide,
+                Page::Linux => Icon::Cli,
                 _ => Icon::Settings,
             };
             let d = 36.0 * s;
@@ -595,145 +757,6 @@ impl BrandMenu {
         crate::fx::scrollbar(g, R::new(body.x + body.w + 6.0 * s, body.y, 4.0 * s, body.h), s, self.scroll, self.visible, lines.len(), ACCENT);
     }
 
-    fn draw_install(&mut self, g: &mut Gfx, body: R, s: f32) {
-        // the list: a title per section, then its items; the detail of the chosen one below
-        let detail_h = 172.0 * s;
-        let list = R::new(body.x, body.y, body.w, (body.h - detail_h).max(80.0 * s));
-        let (hh, rh) = (26.0 * s, 46.0 * s);
-        let mut lines: Vec<(Option<quickinstall::Group>, Option<usize>)> = Vec::new();
-        for gr in quickinstall::Group::ALL {
-            lines.push((Some(gr), None));
-            for it in quickinstall::items_of(gr) {
-                lines.push((None, Item::ALL.iter().position(|x| *x == it)));
-            }
-        }
-        let height = |l: &(Option<quickinstall::Group>, Option<usize>)| if l.0.is_some() { hh } else { rh };
-        // keep the chosen row in view
-        let sel_line = lines.iter().position(|l| l.1 == Some(self.sel)).unwrap_or(0);
-        let mut first = self.scroll.min(sel_line.saturating_sub(1));
-        loop {
-            let used: f32 = lines[first..=sel_line].iter().map(height).sum();
-            if used <= list.h || first >= sel_line {
-                break;
-            }
-            first += 1;
-        }
-        self.scroll = first;
-        let mut y = list.y;
-        for l in lines.iter().skip(first) {
-            if y + height(l) > list.y + list.h + 0.5 {
-                break;
-            }
-            match l {
-                (Some(gr), _) => {
-                    g.text(list.x, y + 5.0 * s, 13.0 * s, ACCENT, gr.title(), Face::Bold);
-                    let tw = g.text_width(13.0 * s, gr.title(), Face::Bold);
-                    let note = g.fit(11.5 * s, gr.note(), Face::Sans, list.w - tw - 12.0 * s);
-                    g.text(list.x + tw + 10.0 * s, y + 7.0 * s, 11.5 * s, DIM, &note, Face::Sans);
-                    y += hh;
-                }
-                (None, Some(i)) => {
-                    let (i, it) = (*i, Item::ALL[*i]);
-                    let r = R::new(list.x - 6.0 * s, y, list.w + 12.0 * s, rh - 4.0 * s);
-                    let hot = g.hovered(r);
-                    crate::fx::row_at(g, r.x, r.y, r.w, r.h, 10.0 * s, i == self.sel, hot, ACCENT);
-                    let pres = self.presence.iter().find(|(x, _)| *x == it).map(|(_, p)| p.clone());
-                    let dot = match &pres {
-                        Some(Presence::Installed(_)) => OK,
-                        Some(Presence::Elsewhere(_)) => AMBER,
-                        _ => DIM,
-                    };
-                    g.circle(r.x + 14.0 * s, r.y + r.h / 2.0, 4.5 * s, dot);
-                    let tx = r.x + 28.0 * s;
-                    g.text(tx, r.y + 4.0 * s, 14.0 * s, TEXT, it.title(), Face::Bold);
-                    let lat = self.latest.iter().find(|(x, _)| *x == it).map(|(_, l)| l);
-                    let mut state = pres.clone().map_or("checking...".to_string(), |p| quickinstall::state_text(&p, lat));
-                    if self.failed.contains(&it) {
-                        state = format!("last install failed · {state}");
-                    } else if self.unhealthy.iter().any(|(x, _)| *x == it) {
-                        state = format!("installed but not runnable · {state}");
-                    }
-                    // an installed coding agent says who is signed in, or that nobody is
-                    if let (Some(Presence::Installed(_)), Some((_, st))) = (&pres, self.signin.iter().find(|(x, _)| *x == it)) {
-                        match st {
-                            crate::agent_login::State::SignedIn(who) => state = format!("signed in as {who} · {state}"),
-                            crate::agent_login::State::SignedOut => state = format!("not signed in · {state}"),
-                            _ => {}
-                        }
-                    }
-                    let state = g.fit(11.5 * s, &state, Face::Sans, r.w * 0.42);
-                    let sw = g.text_width(11.5 * s, &state, Face::Sans);
-                    g.text(r.x + r.w - sw - 12.0 * s, r.y + 6.0 * s, 11.5 * s, dot, &state, Face::Sans);
-                    let ab = g.fit(11.5 * s, it.about(), Face::Sans, r.w - 40.0 * s);
-                    g.text(tx, r.y + 6.0 * s + g.line_height(14.0 * s, Face::Bold), 11.5 * s, MUTED, &ab, Face::Sans);
-                    g.hit(r, Event::Tab(IROW + i), it.title());
-                    y += rh;
-                }
-                _ => {}
-            }
-        }
-        // the detail: order, licence, buttons
-        let target = Item::ALL[self.sel.min(Item::ALL.len() - 1)];
-        let mut y = list.y + list.h + 6.0 * s;
-        let order = self.install_order();
-        let runtimes = self.runtimes.clone();
-        let titles = quickinstall::order_titles_with(&order, &|i: Item| runtimes.iter().find(|(x, _)| *x == i).map(|(_, v)| v.clone()).unwrap_or_default());
-        let t = format!("Order: {}", quickinstall::titles_text(&titles));
-        let t = g.fit(13.5 * s, &t, Face::Bold, body.w);
-        g.text(body.x, y, 13.5 * s, TEXT, &t, Face::Bold);
-        y += 20.0 * s;
-        let lic = format!("Licence: {}", target.licence());
-        let unclear = target.licence().contains("open owner decision");
-        for l in g.wrap(12.0 * s, &lic, Face::Sans, body.w).iter().take(3) {
-            g.text(body.x, y, 12.0 * s, if unclear { AMBER } else { MUTED }, l, Face::Sans);
-            y += 16.0 * s;
-        }
-        // what to know before pressing: not runnable, found on the machine, used by other tools
-        let bad = self.unhealthy.iter().find(|(x, _)| *x == target).map(|(_, m)| m.clone());
-        let mut warn: Vec<(String, [u8; 4])> = Vec::new();
-        if let Some(m) = &bad {
-            warn.push((format!("Installed but not runnable: {m}"), ERR));
-        }
-        if let Some((_, Presence::Elsewhere(d))) = self.presence.iter().find(|(x, _)| *x == target) {
-            if target.cli_id().is_some() {
-                warn.push((format!("Found on this machine, left as it is: {d}"), MUTED));
-            }
-        }
-        if let Some((_, w)) = self.used_by.iter().find(|(x, _)| *x == target) {
-            warn.push((w.clone(), AMBER));
-        }
-        for (t, c) in warn.iter().take(2) {
-            if let Some(l) = g.wrap(12.0 * s, t, Face::Sans, body.w).first() {
-                g.text(body.x, y, 12.0 * s, *c, l, Face::Sans);
-                y += 16.0 * s;
-            }
-        }
-        y += 6.0 * s;
-        let pres = self.presence.iter().find(|(x, _)| *x == target).map(|(_, p)| p.clone()).unwrap_or(Presence::Missing);
-        let lat = self.latest.iter().find(|(x, _)| *x == target).map(|(_, l)| l);
-        let label = if target == Item::IndicTts {
-            "Deploy Indic-TTS (review)".to_string()
-        } else if self.failed.contains(&target) {
-            format!("Retry {}", target.title())
-        } else if bad.is_some() {
-            format!("Reinstall {} (repair)", target.title())
-        } else {
-            quickinstall::action_label(target, &pres, lat)
-        };
-        let bw = if self.window && target.needs().contains(&Item::K3s) || self.window && target == Item::K3s { g.button_off(body.x, y, 14.0 * s, &label) } else { g.button(body.x, y, 14.0 * s, &label, ACCENT, Event::Tab(INSTALL_BTN)) };
-        let rw = g.button(body.x + bw + 10.0 * s, y, 14.0 * s, "Installer runs", MUTED, Event::Tab(RUNS_BTN));
-        // Claude Code and Copilot, once installed: Login (and Logout) with the account
-        if let (Some(Presence::Installed(_)), Some(agent)) = (self.presence.iter().find(|(x, _)| *x == target).map(|(_, p)| p), target.cli_id().and_then(crate::agent_login::agent_of_cli)) {
-            let st = self.signin.iter().find(|(x, _)| *x == target).map_or(crate::agent_login::State::Unknown("checking…".into()), |(_, s)| s.clone());
-            // on the row of the install button when there is room, else on the row below
-            let (bx, by) = if body.x + bw + rw + 30.0 * s + 330.0 * s < body.x + body.w { (body.x + bw + rw + 30.0 * s, y) } else { (body.x, y + 36.0 * s) };
-            let used = crate::agent_login::buttons(g, bx, by, 14.0 * s, agent, &st);
-            let (t, col) = crate::agent_login::chip(&st);
-            let t = g.fit(12.0 * s, &t, Face::Sans, (body.x + body.w - bx - used).max(40.0 * s));
-            g.text(bx + used, by + 8.0 * s, 12.0 * s, col, &t, Face::Sans);
-        }
-    }
-
     fn draw_media(&mut self, g: &mut Gfx, body: R, s: f32, tick: u64) {
         let mut y = body.y;
         let (txt, ok) = players_text(&self.players);
@@ -767,13 +790,51 @@ impl BrandMenu {
         }
     }
 
-    fn draw_mac(&mut self, g: &mut Gfx, body: R, s: f32) {
+    fn draw_mac(&mut self, g: &mut Gfx, body: R, s: f32, tick: u64) {
         use crate::devpop::Level;
-        let rows = mac_rows(self.mac.as_ref());
+        let rows = mac_rows_for(self.mac.as_ref(), self.mac_model.is_empty() || iyakki_drivers::macboard::is_t2(&self.mac_model));
+        // the buttons, laid out in lines that wrap at the panel's width; the page keeps them at the bottom whatever the size
+        let size = 14.0 * s;
+        let bh = size * 2.1 + 6.0 * s;
+        let gap = 10.0 * s;
+        let layout = |g: &mut Gfx, labels: &[&str]| -> Vec<(f32, f32)> {
+            let (mut x, mut line) = (0.0f32, 0.0f32);
+            labels
+                .iter()
+                .map(|l| {
+                    let w = g.text_width(size, l, Face::Bold) + size * 1.7;
+                    if x > 0.0 && x + w > body.w {
+                        x = 0.0;
+                        line += 1.0;
+                    }
+                    let at = (x, line);
+                    x += w + gap;
+                    at
+                })
+                .collect()
+        };
+        let mut actions: Vec<(String, [u8; 4], usize)> = vec![((if self.mac_cache.is_empty() { "Download from Apple" } else { "Retry (no new download)" }).into(), ACCENT, MAC_DOWNLOAD), ("From a folder or stick".into(), ACCENT, MAC_FOLDER), ("From a disk image".into(), ACCENT, MAC_IMAGE), ("Copy the prompt for Claude/Copilot".into(), MUTED, MAC_PROMPT)];
+        if self.mac_bt_held {
+            actions.push(("Load the Bluetooth driver anyway".into(), AMBER, MAC_BTLOAD));
+        }
+        if self.mac_leftover > 0 && !self.mac_busy {
+            actions.push((format!("Delete download ({} MB)", self.mac_leftover >> 20), ERR, MAC_CLEAN));
+        }
+        let nav: [(&str, [u8; 4], usize); 2] = [("STORE \u{2192} Drivers", MUTED, DRIVERS), ("Devices", MUTED, DEVICES)];
+        let act_pos = layout(g, &actions.iter().map(|a| a.0.as_str()).collect::<Vec<_>>());
+        let nav_pos = layout(g, &nav.iter().map(|a| a.0).collect::<Vec<_>>());
+        let act_lines = act_pos.last().map_or(0.0, |p| p.1 + 1.0);
+        let nav_lines = nav_pos.last().map_or(0.0, |p| p.1 + 1.0);
+        let notice_size = 11.5 * s;
+        let notice = g.wrap(notice_size, &mac_notice(&self.mac_model, &self.mac_board), Face::Sans, body.w);
+        let notice_lines = notice.len().min(3) as f32;
+        let field_h = 36.0 * s;
+        let fixed = nav_lines * bh + act_lines * bh + field_h + 8.0 * s + notice_lines * 15.0 * s + 6.0 * s;
+        let top_end = body.y + body.h - fixed;
+        // ---- the status rows and the last result, as far as they fit above
         let mut y = body.y;
-        let bottom = body.y + body.h - 44.0 * s;
         for r in &rows {
-            if y > bottom - 40.0 * s {
+            if y + 40.0 * s > top_end {
                 break;
             }
             let col = match r.level {
@@ -783,20 +844,52 @@ impl BrandMenu {
                 Level::Absent => DIM,
             };
             g.circle(body.x + 6.0 * s, y + 9.0 * s, 5.0 * s, col);
-            g.text(body.x + 20.0 * s, y, 15.0 * s, TEXT, r.title, Face::Bold);
-            y += 21.0 * s;
-            let st = g.fit(12.5 * s, &r.state, Face::Sans, body.w - 20.0 * s);
-            g.text(body.x + 20.0 * s, y, 12.5 * s, col, &st, Face::Sans);
-            y += 18.0 * s;
-            for l in g.wrap(12.0 * s, r.how, Face::Sans, body.w - 20.0 * s).iter().take(3) {
-                g.text(body.x + 20.0 * s, y, 12.0 * s, MUTED, l, Face::Sans);
-                y += 16.0 * s;
+            g.text(body.x + 20.0 * s, y, 14.0 * s, TEXT, r.title, Face::Bold);
+            y += 19.0 * s;
+            let st = g.fit(12.0 * s, &r.state, Face::Sans, body.w - 20.0 * s);
+            g.text(body.x + 20.0 * s, y, 12.0 * s, col, &st, Face::Sans);
+            y += 17.0 * s;
+            // what to do: only for the two rows this page can fix, and only while there is room
+            if matches!(r.title, "Wi-Fi firmware" | "Bluetooth") && y + 32.0 * s < top_end {
+                for l in g.wrap(11.5 * s, r.how, Face::Sans, body.w - 20.0 * s).iter().take(2) {
+                    g.text(body.x + 20.0 * s, y, 11.5 * s, MUTED, l, Face::Sans);
+                    y += 15.0 * s;
+                }
             }
-            y += 10.0 * s;
+            y += 6.0 * s;
         }
-        let by = (y + 4.0 * s).min(bottom);
-        let bw = g.button(body.x, by, 14.0 * s, "STORE \u{2192} Drivers", ACCENT, Event::Tab(DRIVERS));
-        g.button(body.x + bw + 10.0 * s, by, 14.0 * s, "Devices", MUTED, Event::Tab(DEVICES));
+        if let Some(o) = &self.mac_last {
+            if y + 34.0 * s <= top_end {
+                let (col, head) = if o.installed { (OK, o.headline.clone()) } else { (AMBER, o.headline.clone()) };
+                for (i, l) in g.wrap(12.0 * s, &format!("Last run: {head}"), Face::Sans, body.w).iter().take(2).enumerate() {
+                    g.text(body.x, y + i as f32 * 16.0 * s, 12.0 * s, col, l, Face::Sans);
+                }
+            }
+            if !self.mac_cache.is_empty() && y + 34.0 * s + 32.0 * s <= top_end {
+                for (i, l) in g.wrap(11.5 * s, &self.mac_cache, Face::Sans, body.w).iter().take(3).enumerate() {
+                    g.text(body.x, y + 36.0 * s + i as f32 * 15.0 * s, 11.5 * s, MUTED, l, Face::Sans);
+                }
+            }
+        } else if self.mac_busy && y + 18.0 * s <= top_end {
+            g.text(body.x, y, 12.0 * s, ACCENT, "Installing the firmware: progress is beside the clock.", Face::Sans);
+        }
+        // ---- the foot: notice, field, source buttons, navigation
+        let mut y = top_end;
+        for l in notice.iter().take(3) {
+            g.text(body.x, y, notice_size, DIM, l, Face::Sans);
+            y += 15.0 * s;
+        }
+        y += 6.0 * s;
+        let fr = R::new(body.x, y, body.w, field_h);
+        self.mac_path.render(g, fr, self.mac_focus, s, (tick / 15) % 2 == 0, Face::Mono, MAC_PATH);
+        y += field_h + 8.0 * s;
+        for (a, p) in actions.iter().zip(&act_pos) {
+            g.button(body.x + p.0, y + p.1 * bh, size, &a.0, a.1, Event::Tab(a.2));
+        }
+        y += act_lines * bh;
+        for (a, p) in nav.iter().zip(&nav_pos) {
+            g.button(body.x + p.0, y + p.1 * bh, size, a.0, a.1, Event::Tab(a.2));
+        }
     }
 }
 

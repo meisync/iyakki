@@ -2,6 +2,7 @@
 //! `iyakki_agent::store::lifecycle`), and arranging it the way the person likes (tags, groups, display titles, drag and drop;
 //! `iyakki_agent::store::organize`). It is a child of `store.rs` so it can use the tile's own state.
 
+use crate::safeclamp::SafeClamp;
 use iyakki_agent::store::installed::{Entry as IEntry, Status, Type as IType};
 use iyakki_agent::store::lifecycle::{Life, LifeError, RemoveOpts, RemovePlan, Report, UpdatePlan};
 use iyakki_agent::store::organize::{self as org, Org, COLOURS};
@@ -432,7 +433,7 @@ impl StoreApp {
             None => nav.iter().position(|n| *n == Nav2::Item(self.sel[1])),
         }
         .unwrap_or(0);
-        let to = (here as i32 + delta).clamp(0, nav.len() as i32 - 1) as usize;
+        let to = (here as i32 + delta).clamp_safe(0, nav.len() as i32 - 1) as usize;
         match &nav[to] {
             Nav2::Head(h) => self.on_head = Some(h.clone()),
             Nav2::Item(i) => {

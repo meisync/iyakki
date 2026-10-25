@@ -5,6 +5,7 @@
 //! switch for the live picture, and brightness and contrast when the camera has them. Everything goes through
 //! [`crate::camera`]; no picture leaves the machine.
 
+use crate::safeclamp::SafeClamp;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
@@ -308,7 +309,9 @@ impl CameraApp {
     }
 
     fn say(&mut self, t: impl Into<String>, ok: bool) {
-        self.status = Some((t.into(), ok));
+        let t: String = t.into();
+        // a photo that cannot be saved because the boot drive is gone says that (iyakki_storage::loss)
+        self.status = Some((if ok { t } else { iyakki_storage::loss::reword(&t) }, ok));
     }
 
     /// A folder the account may write to, made when missing.
@@ -1240,8 +1243,8 @@ impl App for CameraApp {
 
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, _cx: &AppCx, _tick: u64) {
         let pad = 14.0 * s;
-        let side_w = (area.w * 0.28).clamp(200.0 * s, 320.0 * s).min(area.w * 0.45);
-        let strip_h = (area.h * 0.13).clamp(36.0 * s, 84.0 * s);
+        let side_w = (area.w * 0.28).clamp_safe(200.0 * s, 320.0 * s).min(area.w * 0.45);
+        let strip_h = (area.h * 0.13).clamp_safe(36.0 * s, 84.0 * s);
         let status_h = 22.0 * s;
         let pv = R::new(area.x + pad, area.y + pad, (area.w - side_w - 3.0 * pad).max(40.0), (area.h - 2.0 * pad - strip_h - status_h - 2.0 * 8.0 * s).max(40.0));
         self.draw_preview(g, pv, s);

@@ -2,6 +2,7 @@
 //! call them. Servers are host processes configured by an admin; the list shown here is already
 //! filtered by the user's policy.
 
+use crate::safeclamp::SafeClamp;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -301,8 +302,8 @@ impl App for McpApp {
             }
             Event::Scroll(d) => {
                 match self.stage {
-                    Stage::Servers => self.sel = (self.sel as i32 - d).clamp(0, self.servers.len().saturating_sub(1) as i32) as usize,
-                    Stage::Tools => self.tsel = (self.tsel as i32 - d).clamp(0, self.tools.len().saturating_sub(1) as i32) as usize,
+                    Stage::Servers => self.sel = (self.sel as i32 - d).clamp_safe(0, self.servers.len().saturating_sub(1) as i32) as usize,
+                    Stage::Tools => self.tsel = (self.tsel as i32 - d).clamp_safe(0, self.tools.len().saturating_sub(1) as i32) as usize,
                     _ => {}
                 }
                 return Flow::Stay;

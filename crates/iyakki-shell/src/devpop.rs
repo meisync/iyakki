@@ -7,6 +7,7 @@
 //! thread ([`DevPop::tick`]) so drawing never waits for `/sys`, `amixer` or `iw`; every missing file is just "not there".
 //! [`gather`] is a plain function over a [`Probe`] (the paths and the seams), so tests feed it a made-up `/sys`.
 
+use crate::safeclamp::SafeClamp;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -42,25 +43,43 @@ pub enum Jump {
     Settings(&'static str),
     /// STORE -> Drivers.
     Drivers,
+    /// IYAKKI menu -> Mac drivers (a T2 Mac whose Wi-Fi or Bluetooth needs Apple's firmware).
+    MacDrivers,
+    /// STORE -> Setup on one card, by its installer id (`mac-firmware`: the Bluetooth patch file a Mac needs).
+    Setup(&'static str),
+}
+
+/// A Wi-Fi or Bluetooth row whose driver help says it needs firmware leads to the Mac drivers page, where the install is.
+fn firmware_jump(why: &str) -> Jump {
+    if why.contains("needs firmware:") { Jump::MacDrivers } else { Jump::Drivers }
 }
 
 /// A small action on a row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
     BluetoothScan,
+    /// "Load the Bluetooth driver anyway" (a T2 Mac keeps the drivers set aside until firmware exists).
+    BluetoothLoad,
     TestSound,
     ToggleMute(u32),
     /// Mute or unmute IYAKKI's volume (Settings -> Sound): the output's card has no hardware volume and IYAKKI's software
     /// volume carries it. The shell carries it out (it needs the settings).
     ToggleSoundMute,
+    /// Stop every shared folder at once (Settings -> Shared folders).
+    StopSharing,
+    /// The firewall emergency switch (administrators; the shell carries it out): take the rules out until switched on again.
+    FirewallOff,
 }
 
 impl Act {
     pub fn label(&self) -> &'static str {
         match self {
             Act::BluetoothScan => "Scan",
+            Act::BluetoothLoad => "Load",
             Act::TestSound => "Test",
             Act::ToggleMute(_) | Act::ToggleSoundMute => "Mute",
+            Act::StopSharing => "Stop",
+            Act::FirewallOff => "Off",
         }
     }
 }
@@ -227,13 +246,20 @@ pub fn gather(p: &Probe) -> Snapshot {
         if wifis.is_empty() {
             let why = driver_reason(&driver_help, &["wi-fi", "wifi", "wireless"]);
             let base = if rf.iter().any(|k| k.kind == "wlan") { "a radio is there but no driver has taken it (it may need firmware)" } else { "no Wi-Fi interface found" };
-            items.push(Item::new("Wi-Fi", tag(why.map_or(base.to_string(), |w| format!("{base} · {w}"))), Level::Missing, Jump::Drivers));
+            let jump = why.as_deref().map_or(Jump::Drivers, firmware_jump);
+            items.push(Item::new("Wi-Fi", tag(why.map_or(base.to_string(), |w| format!("{base} · {w}"))), Level::Missing, jump));
         }
         if eth.is_empty() {
             items.push(Item::new("Ethernet", "no Ethernet adapter found", Level::Absent, Jump::Settings("network")));
         }
     } else {
         items.push(Item::new("Network", format!("host name {} · {no_os}", p.hostname), Level::Absent, Jump::None));
+    }
+
+    // ---- shared folders (only while something is shared)
+    let shared = iyakki_agent::sharedfolder::running_total();
+    if shared > 0 {
+        items.push(Item::new("Sharing", format!("{shared} shared folder(s) can be opened from the network"), Level::Warn, Jump::Settings("shares")).with_act(Act::StopSharing));
     }
 
     // ---- Bluetooth
@@ -250,7 +276,28 @@ pub fn gather(p: &Probe) -> Snapshot {
             };
             let level = if blocked { Level::Warn } else { Level::Ok };
             let mut it = Item::new("Bluetooth", format!("{name} · {} · {pair_text}", if blocked { "switched off" } else { "powered on" }), level, Jump::Settings("bluetooth"));
-            if !blocked {
+            // what the kernel's management interface says (works where sysfs has no address file): chip, address, power and the reason
+            let mgmt = p.dev.ctl.bt_controllers().ok().and_then(|c| c.into_iter().next());
+            if let Some(c) = &mgmt {
+                let fw = p.dev.ctl.bt_firmware_file();
+                let product = read(p.dev.roots.sys.join("class/dmi/id/product_name")).unwrap_or_default();
+                it.detail = iyakki_devctl::btview::short(c, iyakki_agent::macfw::uart_chip(&product), fw);
+                if !c.addr_state().valid() {
+                    it.level = Level::Warn;
+                    it.detail.push_str(" · pairing and audio are not available yet");
+                }
+                // a Mac controller that is listed but has no patch file: say so first and lead to the Setup card, not to a device list
+                let mac = product.starts_with("Mac") || product.starts_with("iMac") || product.starts_with("Xserve");
+                if mac && iyakki_devctl::btview::needs_firmware(c, fw) {
+                    it.level = Level::Missing;
+                    it.detail = format!("{} \u{b7} {}", iyakki_devctl::btview::NEEDS_FIRMWARE, it.detail);
+                    it.jump = Jump::Setup(iyakki_agent::quickinstall::Item::MacFirmware.id());
+                }
+            }
+            if p.dev.ctl.bt_held() {
+                it = it.with_act(Act::BluetoothLoad);
+            }
+            if !blocked && mgmt.is_none() {
                 if p.can_scan {
                     it = it.with_act(Act::BluetoothScan);
                 } else {
@@ -260,10 +307,20 @@ pub fn gather(p: &Probe) -> Snapshot {
             items.push(it);
         } else if bt.usb_present {
             let why = driver_reason(&driver_help, &["bluetooth"]).unwrap_or_else(|| "it may need a driver or firmware".into());
-            items.push(Item::new("Bluetooth", format!("an adapter is plugged in but no driver has taken it · {why}"), Level::Missing, Jump::Drivers));
+            let jump = firmware_jump(&why);
+            items.push(Item::new("Bluetooth", format!("an adapter is plugged in but no driver has taken it · {why}"), Level::Missing, jump));
         } else {
             let why = driver_reason(&driver_help, &["bluetooth"]).unwrap_or_else(|| "no adapter driver or firmware".into());
-            items.push(Item::new("Bluetooth", format!("no adapter found · {why}"), Level::Missing, Jump::Drivers));
+            let jump = firmware_jump(&why);
+            let mut it = Item::new("Bluetooth", format!("no adapter found · {why}"), Level::Missing, jump);
+            if p.dev.ctl.bt_held() {
+                // a T2 Mac keeps the drivers set aside until firmware exists: nothing is loaded, so no controller appeared
+                let product = read(p.dev.roots.sys.join("class/dmi/id/product_name")).unwrap_or_default();
+                let chip = if iyakki_agent::macfw::uart_chip(&product).is_some() { format!(" · {}", iyakki_agent::macfw::NO_BCM4364_FILE) } else { String::new() };
+                it.detail = format!("no adapter yet · the Bluetooth drivers are set aside until firmware exists{chip}");
+                it = it.with_act(Act::BluetoothLoad);
+            }
+            items.push(it);
         }
     } else {
         items.push(Item::new("Bluetooth", no_os, Level::Absent, Jump::None));
@@ -338,7 +395,10 @@ pub fn gather(p: &Probe) -> Snapshot {
             seen.push(c);
         }
     }
-    if seen.is_empty() {
+    if seen.is_empty() && linux && crate::camera::detect::has_facetime_pci(&r.sys) {
+        // a MacBook's built-in camera is there, but without Apple's firmware its driver has no device to offer
+        items.push(Item::new("Camera", "built-in FaceTime HD camera needs Apple's firmware (STORE, Setup, Hardware, Camera firmware)", Level::Warn, Jump::None));
+    } else if seen.is_empty() {
         items.push(Item::new("Camera", if linux { "none found" } else { no_os }, Level::Absent, Jump::None));
     } else {
         items.push(Item::new("Camera", seen.join(", "), Level::Ok, Jump::None));
@@ -375,6 +435,25 @@ pub fn gather(p: &Probe) -> Snapshot {
     let drives = if disks.is_empty() { "no drives listed".to_string() } else { format!("{} drive{}: {}", disks.len(), if disks.len() == 1 { "" } else { "s" }, disks.iter().take(3).map(|d| format!("{} {}", d.0, gb(d.1))).collect::<Vec<_>>().join(", ")) };
     items.push(Item::new("Storage", [Some(drives), data].into_iter().flatten().collect::<Vec<_>>().join(" · "), if p.volatile { Level::Warn } else { Level::Ok }, Jump::Settings("storage")));
 
+    // ---- firewall (only where boot applied it; a window on someone else's computer has none to show)
+    if linux {
+        if let Some(e) = iyakki_fw::service::try_engine().filter(|e| e.managed()) {
+            use iyakki_fw::Status;
+            let (level, detail) = match e.status() {
+                Status::On => (Level::Ok, "on · incoming connections are blocked unless allowed".to_string()),
+                Status::Pending { secs_left } => (Level::Warn, format!("waiting for you to keep the new rules ({secs_left} s)")),
+                Status::Off => (Level::Warn, "off · incoming connections are not blocked".to_string()),
+                Status::OffThisBoot => (Level::Warn, "off for this boot (iyakki.firewall=off)".to_string()),
+                Status::NotProtected(m) => (Level::Warn, format!("NOT PROTECTED · {m}")),
+                Status::Unavailable(m) => (Level::Warn, format!("NOT PROTECTED · {m}")),
+            };
+            let in_force = e.status().protected() || matches!(e.status(), Status::NotProtected(_));
+            let item = Item::new("Firewall", detail, level, Jump::Settings("firewall"));
+            // the emergency switch: F8, choose the row, press its button (administrators; docs/FIREWALL.md)
+            items.push(if in_force { item.with_act(Act::FirewallOff) } else { item });
+        }
+    }
+
     // ---- battery and power
     let ps = r.sys.join("class/power_supply");
     let mut battery = None;
@@ -393,7 +472,7 @@ pub fn gather(p: &Probe) -> Snapshot {
     if let Some((cap, status)) = battery {
         let pct = cap.map_or("level unknown".to_string(), |c| format!("{c}%"));
         let level = if cap.is_some_and(|c| c <= 15) && status != "charging" { Level::Warn } else { Level::Ok };
-        items.push(Item::new("Battery", format!("{pct} · {}{}", if status.is_empty() { "unknown" } else { &status }, if mains { " · mains power connected" } else { "" }), level, Jump::None));
+        items.push(Item::new("Battery", format!("{pct} · {}{}", if status.is_empty() { "unknown" } else { &status }, if mains { " · mains power connected" } else { "" }), level, Jump::Settings("battery")));
     }
 
     Snapshot { items, driver_help, at: iyakki_agent::clock::now_unix() }
@@ -418,6 +497,8 @@ pub fn paired_devices(dir: &std::path::Path) -> Vec<String> {
 /// Carry out a row's small action. Quick ones return a message to show; slow ones (a scan, a tone) run in the background.
 pub fn run_act(p: &Probe, act: &Act) -> Result<String, String> {
     match act {
+        Act::StopSharing => Ok(format!("Stopped {} shared folder(s).", iyakki_agent::sharedfolder::stop_everything())),
+        Act::FirewallOff => Err("the firewall is switched off by the shell (administrators only)".into()),
         Act::ToggleSoundMute => Err("IYAKKI's mute is switched by the shell (it changes Settings -> Sound)".into()),
         Act::ToggleMute(card) => p.dev.ctl.change_volume(*card, None).map(|v| if v.muted { "Muted.".to_string() } else { format!("Sound on, volume {}%.", v.percent) }),
         Act::TestSound => {
@@ -441,6 +522,7 @@ pub fn run_act(p: &Probe, act: &Act) -> Result<String, String> {
                 None => "Playing a short tone.".into(),
             })
         }
+        Act::BluetoothLoad => p.dev.ctl.bt_load_anyway(),
         Act::BluetoothScan => {
             if !p.can_scan {
                 return Err("Scanning needs the Bluetooth service, which this image does not have yet.".into());
@@ -524,6 +606,18 @@ pub struct DevPop {
     seen: i64,
     /// Rows that fit, from the last drawing (for keeping the selection in view).
     visible: usize,
+    /// Cloud mode: rows (by title) that describe hardware this machine does not have.
+    hide: Vec<&'static str>,
+    /// The tooltip with a row's whole text (a cut detail line, the address in it), fed by [`DevPop::tip_event`].
+    tip: crate::tooltip::Tooltip,
+    /// Where the tooltip was drawn last frame.
+    pub tip_rect: Option<R>,
+}
+
+/// Take the rows named in `hide` out of a reading.
+pub fn without_rows(mut s: Snapshot, hide: &[&str]) -> Snapshot {
+    s.items.retain(|i| !hide.contains(&i.title.as_str()));
+    s
 }
 
 const REFRESH_EVERY: Duration = Duration::from_secs(3);
@@ -536,7 +630,12 @@ impl Default for DevPop {
 
 impl DevPop {
     pub fn new() -> DevPop {
-        DevPop { open: false, sel: 0, scroll: 0, snap: Arc::new(Mutex::new(None)), busy: Arc::new(AtomicBool::new(false)), last: None, seen: 0, visible: 6 }
+        DevPop { open: false, sel: 0, scroll: 0, snap: Arc::new(Mutex::new(None)), busy: Arc::new(AtomicBool::new(false)), last: None, seen: 0, visible: 6, hide: Vec::new(), tip: crate::tooltip::Tooltip::new(), tip_rect: None }
+    }
+
+    /// Cloud mode: leave these rows (hardware rows by title) out of every reading from now on.
+    pub fn set_hidden(&mut self, rows: Vec<&'static str>) {
+        self.hide = rows;
     }
 
     pub fn toggle(&mut self) {
@@ -544,6 +643,39 @@ impl DevPop {
         self.sel = 0;
         self.scroll = 0;
         self.last = None; // look again as soon as it opens
+        self.tip = crate::tooltip::Tooltip::new();
+        self.tip_rect = None;
+    }
+
+    /// Every event the shell sees while the popover is open (movement, press, release, wheel, keys, the heartbeat): the
+    /// tooltip needs them even when a click region takes the click.
+    pub fn tip_event(&mut self, ev: &Event) {
+        if self.open {
+            self.tip.event(ev);
+        }
+    }
+
+    /// The tooltip appeared or went away since the last call: the shell draws again without further input.
+    pub fn tip_changed(&mut self) -> bool {
+        self.open && self.tip.take_changed()
+    }
+
+    /// The text of the tooltip drawn last frame, if there was one.
+    pub fn tip_text(&self) -> Option<&str> {
+        self.tip.shown.as_deref()
+    }
+
+    /// Put a reading in without the background thread (tests).
+    #[cfg(test)]
+    pub fn set_snapshot(&mut self, s: Snapshot) {
+        // let a reading in flight finish, and keep new ones away for a while, so the made-up one stays
+        while self.busy.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        self.last = Some(Instant::now() + Duration::from_secs(3600));
+        if let Ok(mut slot) = self.snap.lock() {
+            *slot = Some(s);
+        }
     }
 
     /// Read again at the next tick (after an action changed something).
@@ -559,6 +691,11 @@ impl DevPop {
         self.snap.lock().ok().and_then(|s| s.clone())
     }
 
+    /// The last reading is old (or there is none), open or not: the login screens' top bar keeps its chips fresh with it.
+    pub fn wants_refresh_idle(&self) -> bool {
+        self.last.is_none_or(|t| t.elapsed() >= REFRESH_EVERY) && !self.busy.load(Ordering::Relaxed)
+    }
+
     /// The popover is open and the last reading is old (or there is none): the shell should call
     /// [`DevPop::refresh_in_background`].
     pub fn wants_refresh(&self) -> bool {
@@ -569,9 +706,9 @@ impl DevPop {
     pub fn refresh_in_background(&mut self, probe: &Probe) {
         self.last = Some(Instant::now());
         self.busy.store(true, Ordering::Relaxed);
-        let (probe, snap, busy) = (probe.clone(), self.snap.clone(), self.busy.clone());
+        let (probe, snap, busy, hide) = (probe.clone(), self.snap.clone(), self.busy.clone(), self.hide.clone());
         let spawned = std::thread::Builder::new().name("iyakki-devices".into()).spawn(move || {
-            let s = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gather(&probe))).ok();
+            let s = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| without_rows(gather(&probe), &hide))).ok();
             if let (Some(s), Ok(mut slot)) = (s, snap.lock()) {
                 *slot = Some(s);
             }
@@ -592,7 +729,7 @@ impl DevPop {
 
     /// Read the machine now, on this thread (tests, and the first open when there is nothing to show yet).
     pub fn refresh_now(&mut self, probe: &Probe) {
-        let s = gather(probe);
+        let s = without_rows(gather(probe), &self.hide);
         if let Ok(mut slot) = self.snap.lock() {
             *slot = Some(s);
         }
@@ -670,7 +807,7 @@ impl DevPop {
     pub fn scroll_by(&mut self, d: i32) {
         let n = self.count();
         let max = n.saturating_sub(self.visible.max(1));
-        self.scroll = (self.scroll as i32 + d).clamp(0, max as i32) as usize;
+        self.scroll = (self.scroll as i32 + d).clamp_safe(0, max as i32) as usize;
     }
 
     /// The panel's rectangle at this size: under the top bar, at the right.
@@ -682,12 +819,24 @@ impl DevPop {
         R::new(w as f32 - pw - 12.0 * s, top, pw, ph)
     }
 
+    /// The pointer is on one of the row's buttons (they sit at the right end of the row, as drawn below).
+    fn on_button(&self, g: &Gfx, r: R, widths: &[f32], s: f32) -> bool {
+        let mut bx = r.x + r.w - 10.0 * s;
+        widths.iter().any(|bw| {
+            bx -= bw;
+            let br = R::new(bx, r.y + (r.h - 32.0 * s) / 2.0, *bw, 32.0 * s);
+            bx -= 8.0 * s;
+            br.contains(g.mouse.0, g.mouse.1)
+        })
+    }
+
     /// Draw the popover. Registers its own click regions and clears the others (a click outside it closes it).
     pub fn render(&mut self, g: &mut Gfx, w: u32, h: u32, s: f32) {
         if !self.open {
             return;
         }
         g.clear_hits();
+        self.tip_rect = None;
         let snap = self.snapshot();
         let rows = snap.as_ref().map_or(2, |x| x.items.len().max(1));
         let p = Self::panel(w, h, s, rows);
@@ -730,9 +879,15 @@ impl DevPop {
             let tx = r.x + 32.0 * s;
             let avail = r.w - 32.0 * s - 14.0 * s - btn_total;
             g.text(tx, r.y + 6.0 * s, 15.0 * s, TEXT, &it.title, Face::Bold);
-            let d = g.fit(13.0 * s, &it.detail, Face::Sans, avail);
+            // the address (Wi-Fi, Ethernet) is the part that is never cut; the name before it gives way first
+            let d = crate::tooltip::fit_keep_ip(g, 13.0 * s, &it.detail, Face::Sans, avail);
             g.text(tx, r.y + 6.0 * s + g.line_height(15.0 * s, Face::Bold) + 1.0 * s, 13.0 * s, MUTED, &d, Face::Sans);
             g.hit(r, Event::Tab(ROW + k), &format!("{}: {}", it.title, it.detail));
+            // a cut detail line has its whole text in a tooltip, but not while the pointer is on one of the row's buttons
+            // (the tooltip would sit on it)
+            if d != it.detail && !self.on_button(g, r, &widths, s) {
+                self.tip.offer(g, r, k == self.sel, &format!("{}\n{}", it.title, it.detail));
+            }
             let mut bx = r.x + r.w - 10.0 * s;
             for (j, (a, bw)) in it.acts.iter().zip(&widths).enumerate() {
                 bx -= bw;
@@ -757,10 +912,15 @@ impl DevPop {
             crate::fx::row_at(g, br.x, br.y, br.w, br.h, 10.0 * s, false, hot, rgb(255, 196, 94));
             g.text(br.x + 16.0 * s, br.y + 4.0 * s, 15.0 * s, TEXT, &label, Face::Bold);
             let why = snap.driver_help.first().map(|(n, w)| format!("{n}: {w}")).unwrap_or_else(|| "something is missing: open STORE -> Drivers".to_string());
-            let why = g.fit(12.0 * s, &why, Face::Sans, br.w - 32.0 * s);
+            let all = if n > 1 { snap.driver_help.iter().map(|(n, w)| format!("{n}: {w}")).collect::<Vec<_>>().join("\n") } else { why.clone() };
+            let why = crate::tooltip::fit_keep_ip(g, 12.0 * s, &why, Face::Sans, br.w - 32.0 * s);
             g.text(br.x + 16.0 * s, br.y + 4.0 * s + g.line_height(15.0 * s, Face::Bold), 12.0 * s, MUTED, &why, Face::Sans);
             g.hit(br, Event::Tab(HELP_BTN), "Driver help");
+            if n > 1 || why.ends_with('…') {
+                self.tip.offer(g, br, false, &format!("{label}\n{all}"));
+            }
         }
+        self.tip_rect = self.tip.draw(g, s);
     }
 }
 

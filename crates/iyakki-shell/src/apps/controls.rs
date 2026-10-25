@@ -3,6 +3,7 @@
 //! page already understands, a click on a slider's track arrives as `Event::AreaAt(id, x, y)` and [`value_at`] turns the
 //! position into a value).
 
+use crate::safeclamp::SafeClamp;
 use crate::gfx::{rgb, Face, Gfx};
 use crate::ui::{Event, CARD_HOVER, DIM, MUTED, R, TEXT};
 
@@ -34,7 +35,7 @@ pub fn value_at(x: f32, width: f32, min: i64, max: i64, step: i64) -> i64 {
     let raw = min as f64 + frac * (max - min) as f64;
     let step = step.max(1);
     let snapped = min + ((raw - min as f64) / step as f64).round() as i64 * step;
-    snapped.clamp(min, max)
+    snapped.clamp_safe(min, max)
 }
 
 /// How far along its track a value sits, 0.0 to 1.0.

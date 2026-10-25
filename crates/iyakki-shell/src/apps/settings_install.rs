@@ -241,7 +241,7 @@ impl SettingsApp {
             if refusal.is_some() {
                 chips.push(("refused", ERR));
             }
-            row(g, i, a.x, y, a.w, row_h, s, i == sel, &d.drive.path, &sub, &chips);
+            row(g, &mut self.tip, i, a.x, y, a.w, row_h, s, i == sel, &d.drive.path, &sub, &chips);
             y += row_h + 6.0 * s;
         }
         if !self.inst.plan.lines.is_empty() {

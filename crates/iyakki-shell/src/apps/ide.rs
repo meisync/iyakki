@@ -326,7 +326,7 @@ impl Ws {
     /// Look for the cluster again on a background thread (`test_all`: test every candidate, for the chooser).
     pub fn start_resolve(&mut self, dir: &Path, user: &str, test_all: bool) {
         let Some((run, env)) = cluster_world() else { return };
-        let remembered = devcluster::Choice::load(dir, user);
+        let remembered = iyakki_agent::clusters::remembered_for(dir, user, &self.meta.name);
         let hidden = devcluster::hidden_load(dir, user);
         devcluster::resolve_in_background(&self.cluster, run, env, self.cfg.k8s.clone(), remembered, self.cfg.namespace(&self.meta.name), test_all, hidden);
     }
@@ -368,6 +368,7 @@ impl Ws {
         let (run, _) = cluster_world()?;
         let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
         let mut t = K8sTools::new(run, p, &self.cfg.namespace(&self.meta.name), &self.meta.name, &self.root(), Arc::new(move |a, d| audit.record(&user, &format!("k8s.{a}"), d)));
+        t.cluster_phrase = iyakki_agent::clusters::phrase_for(cx.services.dir(), &cx.session.user, &self.meta.name);
         t.registry_setting = self.cfg.k8s.registry.clone();
         t.registry_pull = self.cfg.k8s.registry_pull.clone();
         t.registry_kind = self.cfg.k8s.registry_kind.clone();
@@ -424,6 +425,8 @@ pub enum FormKind {
     Publish,
     /// The publish token, typed once into a masked field and kept in the vault.
     PublishToken,
+    /// A form of the git support (commands of a repository, the typed confirmation of a removal, a key's passphrase).
+    Git(super::ide_git::GitForm),
 }
 
 pub enum Confirm {
@@ -453,6 +456,8 @@ pub enum Modal {
     Browse(Box<Form>, PathBuf, super::widgets::Picker),
     /// A card with text and buttons (publish review and result, the target plan, checks): see `ide_tile`.
     Card(Box<super::ide_tile::CardModal>),
+    /// The Clone dialog and the Repositories panel: see `ide_git`.
+    Git(Box<super::ide_git::GitModal>),
 }
 
 pub struct IdeApp {
@@ -497,6 +502,8 @@ pub struct IdeApp {
     pub last_hint: Option<String>,
     /// Platform services (opened by the K8S panel's Services button): while open it owns every key and click.
     platform: Option<super::platform_services::PlatformPanel>,
+    /// Git: the batches of clones, fetches and pulls per workspace, and the repositories' state (see `ide_git`).
+    pub git: super::ide_git::GitUi,
 }
 
 fn session_id() -> String {
@@ -513,7 +520,8 @@ impl IdeApp {
     pub fn new(cx: &AppCx) -> IdeApp {
         let reg = Registry::load(cx.services.dir(), &cx.session.user);
         super::ide_bottom::set_cli_bin(cx.services.clis.bin_dir());
-        let mut app = IdeApp { reg, ws: vec![], active: None, session: session_id(), modal: None, layout: None, area: R::new(0.0, 0.0, 1280.0, 674.0), scale: 1.0, base_scale: 1.0, chat_scale: 1.0, density: super::ide_chrome::Density::from_index(crate::uisize::load_ide_density(cx.services.dir(), &cx.session.user)), mouse: (-1, -1), drag_div: None, redraw: true, ticks: 0, notice: None, last_fetches: 0, dir: cx.services.dir().to_path_buf(), user: cx.session.user.clone(), ctx_row: None, ctx_k8s: false, ctx_tasks: false, top_overflow: vec![], top_overflow_open: false, request: None, publish: None, last_target_chip: None, last_hint: None, platform: None };
+        iyakki_agent::linuxapps::set_ide_context(cx.services.dir(), &cx.session.user);
+        let mut app = IdeApp { reg, ws: vec![], active: None, session: session_id(), modal: None, layout: None, area: R::new(0.0, 0.0, 1280.0, 674.0), scale: 1.0, base_scale: 1.0, chat_scale: 1.0, density: super::ide_chrome::Density::from_index(crate::uisize::load_ide_density(cx.services.dir(), &cx.session.user)), mouse: (-1, -1), drag_div: None, redraw: true, ticks: 0, notice: None, last_fetches: 0, dir: cx.services.dir().to_path_buf(), user: cx.session.user.clone(), ctx_row: None, ctx_k8s: false, ctx_tasks: false, top_overflow: vec![], top_overflow_open: false, request: None, publish: None, last_target_chip: None, last_hint: None, platform: None, git: Default::default() };
         if let Some(id) = app.reg.last.clone() {
             if let Err(e) = app.open_by_id(&id, cx) {
                 app.notice = Some((e, false));
@@ -522,6 +530,9 @@ impl IdeApp {
         if app.active.is_none() && !app.reg.items.is_empty() {
             app.modal = Some(Modal::Switcher { sel: 0 });
         }
+        // git is a separate program: when it is missing (the libre image) the IDE says so once, plainly
+        #[cfg(not(test))]
+        app.git_announce_missing(cx);
         app
     }
 
@@ -944,6 +955,15 @@ impl IdeApp {
             w.main_tab = MainTab::Editor;
             return;
         }
+        // a file inside a cloned repository that has its own run command runs that, inside the repository's folder
+        let in_repo = w.editor.path().map(|p| workspace::rel_of(&w.root(), p)).and_then(|rel| w.cfg.repos.iter().filter(|r| !r.run.trim().is_empty() && (rel == r.path || rel.starts_with(&format!("{}/", r.path)))).max_by_key(|r| r.path.len()).cloned());
+        if let Some(r) = in_repo {
+            w.bottom_tab = BTab::Terminal;
+            w.prefs.bottom_open = true;
+            w.term.cwd = r.path.clone();
+            w.term.run_line(r.run.trim());
+            return;
+        }
         let cmd = w.cfg.commands.run.trim().to_string();
         if cmd.is_empty() {
             w.say("No run command: add \"commands\": {\"run\": \"…\"} to .iyakki/project.json (Settings ⚙ in the top bar). Press T in the panel to run the tests.", false);
@@ -989,7 +1009,18 @@ impl IdeApp {
         }
         let allowed = cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full;
         let Some(w) = self.active_mut() else { return };
-        w.problems.command = w.cfg.commands.test.clone();
+        // a file inside a cloned repository that has its own test command: that command, run inside the repository's folder
+        let in_repo = w.editor.path().map(|p| workspace::rel_of(&w.root(), p)).and_then(|rel| w.cfg.repos.iter().filter(|r| !r.test.trim().is_empty() && (rel == r.path || rel.starts_with(&format!("{}/", r.path)))).max_by_key(|r| r.path.len()).cloned());
+        match &in_repo {
+            Some(r) => {
+                w.problems.command = r.test.trim().to_string();
+                w.problems.root = w.root().join(&r.path);
+            }
+            None => {
+                w.problems.command = w.cfg.commands.test.clone();
+                w.problems.root = w.root();
+            }
+        }
         match w.problems.run(allowed) {
             Ok(()) => {
                 w.bottom_tab = BTab::Problems;
@@ -1219,7 +1250,7 @@ impl IdeApp {
         let f = Form::new("New workspace")
             .text("Name", "", "the product, e.g. Shop Front")
             .text("Parent folder (Ctrl+O browse · Ctrl+U default)", &parent, "the folder is created inside it")
-            .choice("Start a git repository", &["yes, if git is installed", "no"], 0);
+            .choice("Start a git repository", &["yes, if git is installed", "no", "no: clone repositories into it next"], 0);
         self.modal = Some(Modal::Form(FormKind::NewWs, f));
     }
 
@@ -1255,17 +1286,16 @@ impl IdeApp {
     }
 
     pub fn open_existing_form(&mut self) {
-        let f = Form::new("Open an existing folder").text("Folder", "", "a folder inside your file scope").text("Name", "", "shown in the list (default: the folder's name)");
+        let f = Form::new("Open an existing folder").path("Folder", "", "a folder inside your file scope", crate::filepicker::PathKind::Folder, &[]).text("Name", "", "shown in the list (default: the folder's name)");
         self.modal = Some(Modal::Form(FormKind::OpenFolder, f));
     }
 
-    fn open_clone_form(&mut self) {
-        let f = Form::new("Clone from a URL").text("Repository URL", "", "https://… or git@…");
-        self.modal = Some(Modal::Form(FormKind::Clone, f));
+    fn open_clone_form(&mut self, cx: &AppCx) {
+        self.open_clone_dialog(self.active.is_none(), cx);
     }
 
     /// Platform services over the IDE: the list, or (G) straight into connecting this workspace to a git service.
-    fn open_platform(&mut self, i: usize, connect: bool, cx: &AppCx) {
+    pub(super) fn open_platform(&mut self, i: usize, connect: bool, cx: &AppCx) {
         let (run, env) = cluster_world().unwrap_or_else(|| (Arc::new(iyakki_agent::wsexec::FakeRunner::new(&[])), ClusterEnv::default()));
         let pl = Arc::new(super::platform_services::platform_for(cx, run, env));
         let mut p = super::platform_services::PlatformPanel::new(pl).with_services(cx.services.clone());
@@ -1357,6 +1387,20 @@ impl IdeApp {
                 w.start_resolve(&dir, &user, true);
                 w.say("Disconnected: this workspace falls back to this machine's own k3s.", true);
             }
+            Want::ClusterSwitched => {
+                // the switcher saved the choice (the account's active cluster, or this workspace's own); a pin in project.json would
+                // still win over it, so the pin goes (the cluster's kubeconfig stays where it was)
+                let Some(w) = self.ws.get_mut(i) else { return };
+                if w.ro.is_none() && (!w.cfg.k8s.kubeconfig.is_empty() || !w.cfg.k8s.profile.is_empty()) {
+                    w.sync_registry();
+                    w.cfg.k8s.kubeconfig.clear();
+                    w.cfg.k8s.profile.clear();
+                    let _ = w.cfg.save(&w.root());
+                }
+                w.start_resolve(&dir, &user, true);
+                w.say(format!("Working against {}: looking at it\u{2026}", iyakki_agent::clusters::phrase_for(&dir, &user, &w.meta.name)), true);
+            }
+            Want::ManageClusters => self.request = Some((super::cluster_host::MANAGE_REQUEST.0.into(), super::cluster_host::MANAGE_REQUEST.1.into())),
             Want::Deploy => self.open_deploy_form(i),
             Want::Registry => self.open_registry_form(i),
             Want::Stop | Want::Start | Want::RegistryImages => {
@@ -1422,6 +1466,8 @@ impl IdeApp {
         let root = w.root();
         let ns = w.cfg.namespace(&w.meta.name);
         let chip = w.chosen_profile().map(|p| p.chip()).unwrap_or_default();
+        let on = iyakki_agent::clusters::phrase_for(&self.dir, &self.user, &w.meta.name);
+        let chip = if on.is_empty() { chip } else { format!("{chip} \u{b7} {on}") };
         // the folder with a Dockerfile: the root, else the first folder that has one
         let dir = if root.join("Dockerfile").is_file() || root.join("Containerfile").is_file() {
             ".".to_string()
@@ -1472,7 +1518,7 @@ impl IdeApp {
             .text("Kubernetes namespace", &c.k8s.namespace, &format!("default {}", c.namespace(&w.meta.name)))
             .text("Label selector", &c.k8s.selector, "e.g. app=web (optional)")
             .text("Cluster profile (kubeconfig context)", &c.k8s.profile, "empty: the current context")
-            .text("Kubeconfig file", &c.k8s.kubeconfig, "empty: $KUBECONFIG or the default")
+            .path("Kubeconfig file", &c.k8s.kubeconfig, "empty: $KUBECONFIG or the default", crate::filepicker::PathKind::File, &[])
             .text("Features file", &c.features_file, "default FEATURES.md")
             .text("Test command", &c.commands.test, "e.g. cargo test")
             .text("Run command", &c.commands.run, "F5 runs this when the open file is not a script")
@@ -1489,8 +1535,10 @@ impl IdeApp {
         match kind.clone() {
             FormKind::NewWs => {
                 let (name, parent) = (f.value(0), f.value(1));
-                if let Err(e) = self.create_workspace(&name, Path::new(parent.trim()), f.choice_idx(2) == 0, cx) {
-                    fail(self, kind, f, e);
+                match self.create_workspace(&name, Path::new(parent.trim()), f.choice_idx(2) == 0, cx) {
+                    Err(e) => fail(self, kind, f, e),
+                    Ok(()) if f.choice_idx(2) == 2 => self.open_clone_dialog(false, cx),
+                    Ok(()) => {}
                 }
             }
             FormKind::OpenFolder => {
@@ -1501,14 +1549,8 @@ impl IdeApp {
                     fail(self, kind, f, e);
                 }
             }
-            FormKind::Clone => {
-                let msg = if iyakki_agent::wsexec::git_available() {
-                    "Cloning needs credentials and network approvals that the IDE does not handle yet. Clone the repository with the terminal tab or the CLI app (git clone <url> into a folder of your scope), then use Open existing folder.".to_string()
-                } else {
-                    "git is not installed on this machine, so a repository cannot be cloned. Install git, or copy the folder in and use Open existing folder.".to_string()
-                };
-                self.modal = Some(Modal::Info("Clone from a URL".into(), msg));
-            }
+            FormKind::Clone => self.open_clone_dialog(false, cx),
+            FormKind::Git(g) => self.git_submit_form(g, f, cx),
             FormKind::RenameWs(id) => {
                 if let Err(e) = self.reg.rename(&id, &f.value(0)) {
                     fail(self, kind, f, e);
@@ -1820,6 +1862,7 @@ impl IdeApp {
                     }
                 }
             }
+            Modal::Git(gm) => self.git_modal_event(*gm, ev, cx),
             Modal::Info(t, m) => {
                 if !matches!(ev, Event::Key(Key::Enter | Key::Esc | Key::Char(' ')) | Event::Sub(SUB, _)) {
                     self.modal = Some(Modal::Info(t, m));
@@ -1910,7 +1953,7 @@ impl IdeApp {
                     }
                     (_, Some(Key::Char('n'))) => self.open_new_workspace_form(cx),
                     (_, Some(Key::Char('o'))) => self.open_existing_form(),
-                    (_, Some(Key::Char('c'))) => self.open_clone_form(),
+                    (_, Some(Key::Char('c'))) => self.open_clone_form(cx),
                     (_, Some(Key::Char('r'))) => {
                         if let Some(w) = order.get(sel) {
                             let f = Form::new("Rename workspace").text("Name", &w.name, "");
@@ -1947,6 +1990,7 @@ impl IdeApp {
             self.refresh_target();
         }
         self.ticks += 1;
+        self.git_tick(cx);
         self.browser_tick(cx);
         // a link the person clicked in the chat: the Browser tab, a new tab of the BROWSER tile, or the editor
         let outs: Vec<(usize, super::chat::LinkOut)> = self.ws.iter_mut().enumerate().filter_map(|(i, w)| w.chat.take_link_out().map(|o| (i, o))).collect();
@@ -2042,6 +2086,9 @@ impl IdeApp {
             w.term.kube = w.chosen_profile().filter(|p| p.readable).map(|p| (p.kubeconfig, p.context, p.server, w.meta.name.clone()));
             if let Some(k) = w.k8s.as_mut() {
                 k.deploy_block = block;
+                if k.host.is_none() {
+                    k.host = Some(super::cluster_host::ClusterHost::new(super::ide_k8s::SWITCH_BASE, cx, &w.meta.name));
+                }
                 k.tick();
                 let f = k.feed.fetches();
                 if f != self.last_fetches {
@@ -2467,6 +2514,9 @@ impl IdeApp {
             Event::Tab(T_RAIL_ADD) => self.modal = Some(Modal::Switcher { sel: 0 }),
             Event::Tab(n) if (T_TOP..T_TOP + 100).contains(n) => match n - T_TOP {
                 9 => self.top_overflow_open = !self.top_overflow_open,
+                19 => self.open_clone_dialog(self.active.is_none(), cx),
+                20 => self.open_repos_panel(cx),
+                21 => self.open_connect_flow(None, cx),
                 10 => {
                     let d = self.density;
                     self.set_density(if d == super::ide_chrome::Density::Dense { super::ide_chrome::Density::Comfortable } else { d.step(true) });
@@ -2887,7 +2937,7 @@ impl App for IdeApp {
                     w.set_focus(Pane::Main);
                     w.k8s_view().handle(ev);
                 }
-                Event::Tab(n) if (super::ide_k8s::TAB_BASE..super::ide_k8s::NS_BASE + 1000).contains(n) => {
+                Event::Tab(n) if (super::ide_k8s::TAB_BASE..super::ide_k8s::NS_BASE + 1000).contains(n) || (super::ide_k8s::SWITCH_BASE..super::ide_k8s::SWITCH_BASE + 1000).contains(n) => {
                     w.set_focus(Pane::Main);
                     w.k8s_view().handle(ev);
                 }
@@ -3077,7 +3127,7 @@ impl App for IdeApp {
                 let row = w.tree.row_at(x, y);
                 self.ctx_row = row;
                 let has = row.is_some();
-                vec![Item::new("tree.new", "New file", "n"), Item::new("tree.newdir", "New folder", "N"), Item::separator(), Item::new("tree.open", "Open", "Enter").enabled(has), Item::new("tree.rename", "Rename", "F2").enabled(has), Item::new("tree.delete", "Delete…", "Del").enabled(has), Item::separator(), Item::new("tree.refresh", "Refresh", ""), Item::new("tree.heavy", "Show hidden folders", "h")]
+                vec![Item::new("tree.new", "New file", "n"), Item::new("tree.newdir", "New folder", "N"), Item::separator(), Item::new("tree.open", "Open", "Enter").enabled(has), Item::new("tree.rename", "Rename", "F2").enabled(has), Item::new("tree.delete", "Delete…", "Del").enabled(has), Item::separator(), Item::new("tree.share", "Share this folder…", ""), Item::separator(), Item::new("tree.refresh", "Refresh", ""), Item::new("tree.heavy", "Show hidden folders", "h")]
             }
             Pane::Main | Pane::Chat | Pane::Bottom => {
                 let mut v = vec![Item::new("ide.sendchat", "Send selection to the chat", "Ctrl+Shift+A"), Item::new("ide.quick", "Open file…", "Ctrl+P"), Item::new("ide.search", "Search the project…", "Ctrl+Shift+F")];
@@ -3138,6 +3188,11 @@ impl App for IdeApp {
             "tree.delete" => {
                 let a = self.ws[i].tree.key(&Key::Delete);
                 self.tree_act(a, cx);
+            }
+            "tree.share" => {
+                // Settings -> Shared folders opens its form with this folder filled in (the person decides there)
+                let abs = self.ws[i].root().join(self.ws[i].tree.target_dir());
+                self.request = Some(("settings".into(), format!("share:{}", abs.display())));
             }
             "tree.refresh" => self.ws[i].tree.refresh(),
             "tree.heavy" => {

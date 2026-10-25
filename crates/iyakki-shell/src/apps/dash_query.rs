@@ -1,6 +1,7 @@
 //! A small multi-line text box for queries (PromQL, SQL, Elasticsearch JSON): the text engine of the editor
 //! (`iyakki_edit::Buffer`: cursor, selection, undo, brackets) and a plain monospace drawing of it. No files, no dialogs.
 
+use crate::safeclamp::SafeClamp;
 use iyakki_edit::{Buffer, Move};
 
 use crate::fx::{self, with_alpha};
@@ -113,7 +114,7 @@ impl QueryBox {
                 }
             }
             Event::Scroll(d) => {
-                self.scroll = (self.scroll as i32 - d * 3).clamp(0, self.buf.line_count().saturating_sub(1) as i32) as usize;
+                self.scroll = (self.scroll as i32 - d * 3).clamp_safe(0, self.buf.line_count().saturating_sub(1) as i32) as usize;
             }
             _ => return false,
         }

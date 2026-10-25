@@ -281,8 +281,14 @@ pub struct Framebuffer {
     pub id: String,
     map: *mut u8,
     len: usize,
+    /// The part of the buffer the monitor shows (top-left); the shell lays out and draws for this size.
     pub width: u32,
     pub height: u32,
+    /// The whole buffer, which can be larger than the visible part (see `display`).
+    pub buffer_width: u32,
+    pub buffer_height: u32,
+    /// Why `width` x `height` was chosen ("eDP-1 preferred mode").
+    pub visible_source: String,
     pub pitch: usize,
     pub format: PixelFormat,
     /// What the kernel reported, for the boot log.
@@ -294,6 +300,11 @@ pub struct Framebuffer {
 }
 
 impl Framebuffer {
+    /// The one display line for the log: "display: buffer 2880x1800, visible 2560x1600 (eDP-1 preferred mode)".
+    pub fn display_line(&self) -> String {
+        format!("display: buffer {}x{}, visible {}x{} ({})", self.buffer_width, self.buffer_height, self.width, self.height, self.visible_source)
+    }
+
     /// One line for the boot log: "simpledrm 2560x1440 32 bpp stride 10240 (R16/8 G8/8 B0/8)".
     pub fn describe(&self) -> String {
         let f = self.format;
@@ -347,7 +358,8 @@ pub fn identify(path: &str) -> Result<Identity, String> {
     let file = std::fs::OpenOptions::new().read(true).open(path).map_err(|e| format!("{path}: {e}"))?;
     let (info, id) = query(&file, path)?;
     let geo = geometry(&info).map_err(|e| format!("{path}: {e}"))?;
-    Ok(Identity { id, width: geo.width, height: geo.height, pitch: geo.pitch })
+    let vis = crate::display::visible_now((geo.width, geo.height), (info.xres, info.yres));
+    Ok(Identity { id, width: vis.width, height: vis.height, pitch: geo.pitch })
 }
 
 /// What sysfs says about the screen behind `path` (`/dev/fbN` -> `<sys_graphics>/fbN`): the driver's name, the size, the
@@ -368,7 +380,7 @@ impl Framebuffer {
     /// screen, another mode)? Asks sysfs when it can (see [`sysfs_signature`]), else the device itself.
     pub fn screen_changed(&self, path: &str) -> bool {
         match (&self.signature, sysfs_signature(std::path::Path::new("/sys/class/graphics"), path)) {
-            (Some(was), Some(now)) => *was != now,
+            (Some(was), Some(now)) => *was != format!("{now} | {}", crate::display::signature(std::path::Path::new("/sys/class/drm"))),
             _ => identify(path).is_ok_and(|now| now != self.identity()),
         }
     }
@@ -387,12 +399,22 @@ impl Framebuffer {
     /// Like [`Framebuffer::in_memory`], with another stride and pixel layout.
     #[cfg(test)]
     pub(crate) fn in_memory_as(mem: &mut [u8], width: u32, height: u32, pitch: usize, format: PixelFormat) -> Framebuffer {
-        Framebuffer { _file: std::fs::File::open("/dev/null").ok(), id: "test".into(), map: mem.as_mut_ptr(), len: mem.len(), width, height, pitch, format, info: ScreenInfo::default(), notes: vec![], signature: None }
+        Framebuffer { _file: std::fs::File::open("/dev/null").ok(), id: "test".into(), map: mem.as_mut_ptr(), len: mem.len(), width, height, pitch, format, info: ScreenInfo::default(), notes: vec![], signature: None, buffer_width: width, buffer_height: height, visible_source: "test".into() }
+    }
+
+    /// A buffer of `buf` pixels (32 bpp, packed rows) of which the monitor shows the top-left `vis`, in ordinary memory.
+    #[cfg(test)]
+    pub(crate) fn in_memory_visible(mem: &mut [u8], buf: (u32, u32), vis: (u32, u32)) -> Framebuffer {
+        let mut fb = Framebuffer::in_memory_as(mem, buf.0, buf.1, buf.0 as usize * 4, PixelFormat { bpp: 32, r: (16, 8), g: (8, 8), b: (0, 8) });
+        fb.width = vis.0;
+        fb.height = vis.1;
+        fb.visible_source = "test".into();
+        fb
     }
 
     pub fn open(path: &str) -> Result<Framebuffer, String> {
         // read before opening: if the screen changes in between, the next [`Framebuffer::screen_changed`] notices
-        let signature = sysfs_signature(std::path::Path::new("/sys/class/graphics"), path);
+        let signature = sysfs_signature(std::path::Path::new("/sys/class/graphics"), path).map(|s| format!("{s} | {}", crate::display::signature(std::path::Path::new("/sys/class/drm"))));
         let file = std::fs::OpenOptions::new().read(true).write(true).open(path).map_err(|e| format!("{path}: {e}"))?;
         let fd = file.as_raw_fd();
         let (info, id) = query(&file, path)?;
@@ -403,19 +425,35 @@ impl Framebuffer {
         if map == libc::MAP_FAILED {
             return Err(format!("{path}: mmap failed ({})", std::io::Error::last_os_error()));
         }
+        let vis = crate::display::visible_now((geo.width, geo.height), (info.xres, info.yres));
+        let mut notes = geo.notes;
+        if vis.smaller_than((geo.width, geo.height)) {
+            notes.push(format!("monitor shows {}x{} of the {}x{} buffer", vis.width, vis.height, geo.width, geo.height));
+            // SAFETY: the mapping above is `len` bytes long and ours.
+            let mem = unsafe { std::slice::from_raw_parts_mut(map.cast::<u8>(), len) };
+            crate::display::clear_outside(mem, geo.pitch, geo.height as usize, vis.width as usize, vis.height as usize, (geo.format.bpp / 8) as usize);
+        }
         Ok(Framebuffer {
             _file: Some(file),
             id,
             map: map.cast(),
             len,
-            width: geo.width,
-            height: geo.height,
+            width: vis.width,
+            height: vis.height,
+            buffer_width: geo.width,
+            buffer_height: geo.height,
+            visible_source: vis.source,
             pitch: geo.pitch,
             format: geo.format,
             info,
-            notes: geo.notes,
+            notes,
             signature,
         })
+    }
+
+    /// The open device's file descriptor (`None` after [`Framebuffer::release`]): for the blank call of `panel.rs`.
+    pub fn raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        self._file.as_ref().map(|f| f.as_raw_fd())
     }
 
     /// The mapped screen memory (empty after [`Framebuffer::release`], so a write then fails instead of crashing).
@@ -470,6 +508,14 @@ impl Framebuffer {
     /// thread each (a 4K frame is 33 MB, and writing video memory is slow), and `old` is brought up to date with
     /// the rows that were written. With an `old` of another size every row is written. Returns the rows written.
     pub fn present_banded(&mut self, new: &[u8], old: &mut Vec<u8>) -> Result<usize, String> {
+        let h = self.height as usize;
+        self.present_banded_rows(new, old, 0, h)
+    }
+
+    /// [`Framebuffer::present_banded`] for the rows `y0..y1` only (the rest of the frame is known to be unchanged, as when only
+    /// the browser's page rectangle was painted): nothing outside them is compared or written, and a small band count uses fewer
+    /// threads. With an `old` of another size every row is written. Returns the rows written.
+    pub fn present_banded_rows(&mut self, new: &[u8], old: &mut Vec<u8>, y0: usize, y1: usize) -> Result<usize, String> {
         let (w, h) = (self.width as usize, self.height as usize);
         let row = w * 4;
         if new.len() < row * h || h == 0 {
@@ -482,11 +528,16 @@ impl Framebuffer {
         if full {
             *old = new.to_vec();
         }
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 8);
-        let band = h.div_ceil(threads);
+        let (y0, y1) = if full { (0, h) } else { (y0.min(h), y1.min(h)) };
+        if y1 <= y0 {
+            return Ok(0);
+        }
+        let rows_all = y1 - y0;
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 8).min(rows_all.div_ceil(48)).max(1);
+        let band = rows_all.div_ceil(threads);
         let (fmt, pitch) = (self.format, self.pitch);
-        let dst = self.bytes();
-        let jobs: Vec<_> = dst.chunks_mut(band * pitch).zip(old.chunks_mut(band * row)).zip(new.chunks(band * row)).collect();
+        let Some(dst) = self.bytes().get_mut(y0 * pitch..) else { return Err("screen memory smaller than the frame".into()) };
+        let jobs: Vec<_> = dst.chunks_mut(band * pitch).zip(old[y0 * row..y1 * row].chunks_mut(band * row)).zip(new[y0 * row..y1 * row].chunks(band * row)).collect();
         let results: Vec<Result<usize, String>> = std::thread::scope(|sc| {
             let handles: Vec<_> = jobs
                 .into_iter()
@@ -579,7 +630,7 @@ mod tests {
         // SAFETY: mapping the 4096-byte test file shared and writable.
         let map = unsafe { libc::mmap(std::ptr::null_mut(), 4096, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, file.as_raw_fd(), 0) };
         assert_ne!(map, libc::MAP_FAILED);
-        let mut fb = Framebuffer { _file: Some(file), id: "test".into(), map: map.cast(), len: 4096, width: 4, height: 4, pitch: 16, format: XRGB, info: ScreenInfo::default(), notes: vec![], signature: None };
+        let mut fb = Framebuffer { _file: Some(file), id: "test".into(), map: map.cast(), len: 4096, width: 4, height: 4, buffer_width: 4, buffer_height: 4, visible_source: String::new(), pitch: 16, format: XRGB, info: ScreenInfo::default(), notes: vec![], signature: None };
         let frame = vec![200u8; 4 * 4 * 4];
         assert!(fb.present(&frame).is_ok());
         assert!(!fb.is_released());
@@ -660,7 +711,7 @@ mod tests {
     fn banded_presenting_writes_the_changed_rows_and_updates_the_old_frame() {
         let (w, h) = (4usize, 10usize);
         let mut fbmem = vec![0xEEu8; w * 4 * h];
-        let fb_new = |mem: &mut Vec<u8>| Framebuffer { _file: Some(std::fs::File::open("/dev/null").unwrap()), id: String::new(), map: mem.as_mut_ptr(), len: mem.len(), width: w as u32, height: h as u32, pitch: w * 4, format: XRGB, info: ScreenInfo::default(), notes: vec![], signature: None };
+        let fb_new = |mem: &mut Vec<u8>| Framebuffer { _file: Some(std::fs::File::open("/dev/null").unwrap()), id: String::new(), map: mem.as_mut_ptr(), len: mem.len(), width: w as u32, height: h as u32, buffer_width: w as u32, buffer_height: h as u32, visible_source: String::new(), pitch: w * 4, format: XRGB, info: ScreenInfo::default(), notes: vec![], signature: None };
         let mut new = vec![10u8; w * 4 * h];
         let mut old: Vec<u8> = Vec::new();
         assert_eq!(fb_new(&mut fbmem).present_banded(&new, &mut old).unwrap(), h, "no old frame: everything is written");
@@ -672,6 +723,42 @@ mod tests {
         assert_eq!(old, new, "the old frame follows");
         assert_eq!(fbmem[0], 0xEE, "other rows are untouched");
         assert_ne!(fbmem[w * 4 * 7], 0xEE);
+    }
+
+    #[test]
+    fn presenting_a_row_range_equals_presenting_the_whole_frame_and_touches_nothing_else() {
+        // tall enough that several bands (threads) are used for the range
+        let (w, h) = (6usize, 400usize);
+        let mk = |mem: &mut Vec<u8>| Framebuffer { _file: Some(std::fs::File::open("/dev/null").unwrap()), id: String::new(), map: mem.as_mut_ptr(), len: mem.len(), width: w as u32, height: h as u32, buffer_width: w as u32, buffer_height: h as u32, visible_source: String::new(), pitch: w * 4, format: XRGB, info: ScreenInfo::default(), notes: vec![], signature: None };
+        let mut seed = 12345u32;
+        let mut rnd = move || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 24) as u8
+        };
+        let first: Vec<u8> = (0..w * 4 * h).map(|_| rnd()).collect();
+        let (mut mem_a, mut mem_b) = (vec![0u8; w * 4 * h], vec![0u8; w * 4 * h]);
+        let (mut old_a, mut old_b) = (Vec::new(), Vec::new());
+        mk(&mut mem_a).present_banded(&first, &mut old_a).unwrap();
+        mk(&mut mem_b).present_banded(&first, &mut old_b).unwrap();
+        for (y0, y1) in [(100usize, 300usize), (0, 1), (399, 400), (50, 50), (390, 900), (7, 130)] {
+            let mut next = old_a.clone();
+            for y in y0.min(h)..y1.min(h) {
+                for b in &mut next[y * w * 4..(y + 1) * w * 4] {
+                    *b = rnd();
+                }
+            }
+            let rows = mk(&mut mem_a).present_banded_rows(&next, &mut old_a, y0, y1).unwrap();
+            assert!(rows <= y1.min(h).saturating_sub(y0.min(h)), "{y0}..{y1}: only rows of the range are written, got {rows}");
+            mk(&mut mem_b).present_banded(&next, &mut old_b).unwrap();
+            assert!(mem_a == mem_b, "{y0}..{y1}: the screen is the same as after a whole-frame present");
+            assert!(old_a == next && old_b == next, "{y0}..{y1}: the old frame follows");
+        }
+        // rows outside the range are not even looked at: a change there stays unwritten until a present that covers it
+        let mut changed = old_a.clone();
+        changed[0] ^= 0xFF;
+        let before = mem_a.clone();
+        assert_eq!(mk(&mut mem_a).present_banded_rows(&changed, &mut old_a, 100, 120).unwrap(), 0);
+        assert!(mem_a == before && old_a[0] != changed[0]);
     }
 
     fn info(w: u32, h: u32, bpp: u32, stride: u32) -> ScreenInfo {

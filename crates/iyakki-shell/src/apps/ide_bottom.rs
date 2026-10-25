@@ -4,6 +4,7 @@
 //! Commands are run without a shell (a program and its arguments, see `iyakki_agent::wsexec`), one at a time, with a
 //! time limit and a cap on the output, in the workspace folder. `cd` stays inside the workspace.
 
+use crate::safeclamp::SafeClamp;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
@@ -150,6 +151,14 @@ impl Runner {
             let _ = tx.send(Out { code: Some(126), stderr: why, ..Default::default() });
             return;
         }
+        // a workspace that chose a Linux apps sandbox (project.json "sandbox", the terminal's `sandbox <name>`) runs its commands there
+        let argv = match iyakki_agent::linuxapps::ide_wrap(&cwd, argv) {
+            Ok(a) => a,
+            Err(why) => {
+                let _ = tx.send(Out { code: Some(126), stderr: why, ..Default::default() });
+                return;
+            }
+        };
         let env = path_env();
         let _ = std::thread::Builder::new().name("iyakki-ide-run".into()).spawn(move || {
             let _ = tx.send(wsexec::run_argv(&cwd, &argv, &env, timeout, MAX_OUTPUT));
@@ -238,6 +247,26 @@ impl Term {
         format!("{}$", if self.cwd.is_empty() { "~".to_string() } else { format!("~/{}", self.cwd) })
     }
 
+    /// The terminal's `sandbox` builtin (Linux apps, `docs/LINUX-APPS.md`): (text, ok).
+    fn sandbox_builtin(&self, arg: Option<&str>) -> (String, bool) {
+        let Some(root) = iyakki_agent::linuxapps::workspace_root_of(&self.root) else { return ("this folder is not a workspace".into(), false) };
+        let current = iyakki_agent::workspace::ProjectConfig::load(&root).map(|c| c.sandbox).unwrap_or_default();
+        let Some(arg) = arg else {
+            return (if current.is_empty() { "commands run on this machine. `sandbox <name>` runs them in a Linux apps sandbox (IYAKKI menu \u{2192} Linux apps makes one).".into() } else { format!("commands run in the sandbox {current} (the workspace is mounted at {}). `sandbox off` goes back to this machine.", iyakki_agent::linuxapps::WORKSPACE_MOUNT) }, true);
+        };
+        if !self.allowed {
+            return ("running commands in a sandbox needs the full command-line permission for your account.".into(), false);
+        }
+        let Some((data, user)) = iyakki_agent::linuxapps::ide_context() else { return ("the sandbox list is not available here".into(), false) };
+        let Ok(exe) = std::env::current_exe() else { return ("cannot find this program".into(), false) };
+        let la = iyakki_agent::linuxapps::LinuxApps::new(&data, &user, &exe, std::sync::Arc::new(wsexec::System));
+        let r = if arg == "off" { iyakki_agent::linuxapps::set_workspace_sandbox(&la, &root, None) } else { iyakki_agent::linuxapps::set_workspace_sandbox(&la, &root, Some(arg)) };
+        match r {
+            Ok(t) => (t, true),
+            Err(e) => (e, false),
+        }
+    }
+
     pub fn run_line(&mut self, line: &str) {
         let line = line.trim();
         if line.is_empty() {
@@ -255,7 +284,13 @@ impl Term {
                 return;
             }
             Some("help") => {
-                self.log.push("Runs one program with its arguments in the workspace folder (no pipes or shell syntax). Built in: cd <folder> · pwd · clear · help. Up/Down recall earlier commands.", DIM);
+                self.log.push("Runs one program with its arguments in the workspace folder (no pipes or shell syntax). Built in: cd <folder> · pwd · sandbox [<name>|off] · clear · help. Up/Down recall earlier commands.", DIM);
+                return;
+            }
+            Some("sandbox") => {
+                // `sandbox` shows where commands run; `sandbox <name>` runs this workspace's commands in that Linux apps sandbox; `sandbox off` on the machine
+                let msg = self.sandbox_builtin(argv.get(1).map(String::as_str));
+                self.log.push(msg.0, if msg.1 { DIM } else { ERR });
                 return;
             }
             Some("pwd") => {
@@ -513,7 +548,7 @@ impl Problems {
                 self.sel = (r - PROBLEM_ROW).min(n.saturating_sub(1));
                 return self.selected_loc();
             }
-            Event::Scroll(d) => self.scroll = (self.scroll as i32 - d * 3).clamp(0, n.saturating_sub(self.visible) as i32) as usize,
+            Event::Scroll(d) => self.scroll = (self.scroll as i32 - d * 3).clamp_safe(0, n.saturating_sub(self.visible) as i32) as usize,
             _ => {}
         }
         if self.sel < self.scroll {
@@ -669,7 +704,7 @@ impl SearchPanel {
                 self.sel = (r - SEARCH_ROW).min(n.saturating_sub(1));
                 return self.hits.get(self.sel).map(|h| (h.file.clone(), h.line));
             }
-            Event::Scroll(d) => self.scroll = (self.scroll as i32 - d * 3).clamp(0, n.saturating_sub(self.visible) as i32) as usize,
+            Event::Scroll(d) => self.scroll = (self.scroll as i32 - d * 3).clamp_safe(0, n.saturating_sub(self.visible) as i32) as usize,
             _ => {}
         }
         if self.sel < self.scroll {

@@ -1,6 +1,7 @@
 //! FLOWS, drawing the shared parts and the DESIGN tab: the top bar, the flows list, the designer (palette, canvas, properties,
 //! minimap), the list editor for small windows, the text view, the status line, the dialogs and the assistant pane.
 
+use crate::safeclamp::SafeClamp;
 use iyakki_flow::kinds::{KindStatus, Level};
 use iyakki_flow::model::*;
 
@@ -110,7 +111,7 @@ impl FlowsApp {
             return (area, None, false);
         }
         if area.w >= 1000.0 && area.w / s >= 980.0 {
-            let cw = (area.w * 0.32).clamp(340.0 * s, 520.0 * s);
+            let cw = (area.w * 0.32).clamp_safe(340.0 * s, 520.0 * s);
             (R::new(area.x, area.y, area.w - cw, area.h), Some(R::new(area.x + area.w - cw, area.y, cw, area.h)), false)
         } else {
             (area, Some(area), true)
@@ -375,7 +376,7 @@ impl FlowsApp {
         }
         let pal_w = if inner.w >= 960.0 * s { 176.0 * s } else { 0.0 };
         let want_props = (self.sel.len() == 1 || self.sel_edge.is_some()) && inner.w >= 640.0 * s;
-        let prop_w = if want_props { (inner.w * 0.27).clamp(250.0 * s, 330.0 * s) } else { 0.0 };
+        let prop_w = if want_props { (inner.w * 0.27).clamp_safe(250.0 * s, 330.0 * s) } else { 0.0 };
         let gap = 8.0 * s;
         let canvas = R::new(inner.x + if pal_w > 0.0 { pal_w + gap } else { 0.0 }, inner.y, inner.w - pal_w - prop_w - if pal_w > 0.0 { gap } else { 0.0 } - if prop_w > 0.0 { gap } else { 0.0 }, inner.h);
         if pal_w > 0.0 {
@@ -450,7 +451,7 @@ impl FlowsApp {
         // the whole list is taller than the panel in a small window: it scrolls (wheel), and the search narrows it
         let (head_h, row_h) = (15.0 * s, 30.0 * s);
         let total: f32 = kinds.iter().enumerate().map(|(i, k)| row_h + if i == 0 || kinds[i - 1].2 != k.2 { head_h } else { 0.0 }).sum();
-        self.pal_scroll = self.pal_scroll.clamp(0.0, (total - body.h).max(0.0));
+        self.pal_scroll = self.pal_scroll.clamp_safe(0.0, (total - body.h).max(0.0));
         y -= self.pal_scroll;
         let scroll = self.pal_scroll;
         g.clipped(body, |g| {

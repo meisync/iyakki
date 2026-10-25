@@ -7,6 +7,7 @@
 //! [`DataViewParams`] (a file and a first filter). [`DataApp`] is the tile that hosts one and adds the app chrome.
 //! Everything slow (opening, paging, sorting, statistics, exporting) runs on a worker thread; the screen never waits.
 
+use crate::safeclamp::SafeClamp;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
@@ -631,7 +632,7 @@ impl DataView {
         }
         let stem = Path::new(&self.path).file_stem().map_or("table".to_string(), |s| s.to_string_lossy().into_owned());
         let dir = Path::new(&self.path).parent().map(Path::to_path_buf).filter(|d| (self.env.can_write)(&d.to_string_lossy())).unwrap_or_else(|| self.env.roots().home);
-        let f = Form::new("Export as CSV").text("File path", &format!("{}/{stem}-view.csv", dir.display()), "the rows now shown (filter and sort applied), as CSV");
+        let f = Form::new("Export as CSV").path("File path", &format!("{}/{stem}-view.csv", dir.display()), "the rows now shown (filter and sort applied), as CSV", crate::filepicker::PathKind::Save, &[]);
         self.modal = Some(Modal::Path(f, PathFor::Export));
         self.dirty = true;
     }
@@ -731,7 +732,7 @@ impl DataView {
                 PickEvent::None => self.modal = Some(Modal::Open { picker, dir }),
                 PickEvent::Chosen(item) => {
                     if item == "Type a path…" {
-                        let f = Form::new("Open a table").text("File path", &format!("{}/", dir.display()), "a CSV, TSV or JSON-lines file inside your home folder (~ is your home folder)");
+                        let f = Form::new("Open a table").path("File path", &format!("{}/", dir.display()), "a CSV, TSV or JSON-lines file inside your home folder (~ is your home folder)", crate::filepicker::PathKind::File, &["csv", "tsv", "jsonl", "json"]);
                         self.modal = Some(Modal::Path(f, PathFor::Open));
                     } else if let Some(link) = item.strip_prefix("★ ") {
                         let to = self.quick_links().into_iter().find(|(l, _)| l == link).map(|l| l.1);
@@ -864,8 +865,8 @@ impl DataView {
 
     fn move_cursor(&mut self, dr: i64, dc: i64, extend: bool) {
         let ncols = self.info.as_ref().map_or(1, |i| i.columns.len()).max(1);
-        let r = (self.cursor.0 as i64 + dr).clamp(0, self.total.saturating_sub(1) as i64) as u64;
-        let c = (self.cursor.1 as i64 + dc).clamp(0, ncols as i64 - 1) as usize;
+        let r = (self.cursor.0 as i64 + dr).clamp_safe(0, self.total.saturating_sub(1) as i64) as u64;
+        let c = (self.cursor.1 as i64 + dc).clamp_safe(0, ncols as i64 - 1) as usize;
         if extend {
             self.anchor.get_or_insert(self.cursor);
         } else {
@@ -899,7 +900,7 @@ impl DataView {
 
     fn scroll_rows(&mut self, d: i64) {
         let max = self.total.saturating_sub(self.rows_in_view().min(self.total));
-        self.top = (self.top as i64 + d).clamp(0, max as i64) as u64;
+        self.top = (self.top as i64 + d).clamp_safe(0, max as i64) as u64;
         self.dirty = true;
     }
 
@@ -1167,7 +1168,7 @@ impl DataView {
                     }
                 }
             }
-            self.widths[i] = w.clamp(MIN_COL + 24.0, 300.0);
+            self.widths[i] = w.clamp_safe(MIN_COL + 24.0, 300.0);
         }
     }
 
@@ -1235,7 +1236,7 @@ impl DataView {
         }
 
         // the summary pane takes the right side when open
-        let sum_w = if self.show_summary { (w * 0.36).clamp(260.0 * s, 460.0 * s).min(w * 0.6) } else { 0.0 };
+        let sum_w = if self.show_summary { (w * 0.36).clamp_safe(260.0 * s, 460.0 * s).min(w * 0.6) } else { 0.0 };
         let table_w = w - if self.show_summary { sum_w + 12.0 * s } else { 0.0 };
         let status_h = 28.0 * s;
         let table_h = (area.y + area.h - y - status_h).max(60.0 * s);
@@ -1287,7 +1288,7 @@ impl DataView {
         }
         let content_w = cx;
         let max_hx = ((content_w - body.w) / s).max(0.0);
-        self.hx = self.hx.clamp(0.0, max_hx);
+        self.hx = self.hx.clamp_safe(0.0, max_hx);
         self.geo = Geo { body: Some(body), row_h, rows: vis, cols: cols.clone(), scale: s };
         self.top = self.top.min(self.total.saturating_sub(vis.min(self.total)));
         self.ensure_window();

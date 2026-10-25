@@ -26,7 +26,39 @@ impl ChatApp {
             };
             self.ext_choice = Some(id.filter(|id| cfg.agent(id).is_some()));
         }
-        self.ext_choice.clone().flatten()
+        self.ext_choice.clone().flatten().or_else(|| self.auto_agent(cx))
+    }
+
+    /// No provider model is set and exactly one external agent is installed and ready: it answers (a fresh install with only
+    /// Claude Code signed in just works). Looked at each time, so it follows the status as it arrives; never when the person
+    /// has a provider model.
+    pub(super) fn auto_agent(&self, cx: &AppCx) -> Option<String> {
+        if cx.services.settings.lock().unwrap_or_else(|e| e.into_inner()).get().chat.is_some() || cx.session.policy.cli != iyakki_sec::policy::CliLevel::Full {
+            return None;
+        }
+        let cfg = cx.services.agents_cfg();
+        let all = extagent::entries(&cfg, &cx.services.ext_status);
+        if all.iter().any(|e| cx.services.ext_status.get(&e.id).is_none()) {
+            if !cx.services.ext_status.busy() {
+                cx.services.ext_status.refresh(cfg);
+            }
+            return None;
+        }
+        let ready: Vec<_> = all.iter().filter(|e| e.ready && cx.services.ext_status.get(&e.id).is_some_and(|s| s.installed)).collect();
+        (ready.len() == 1).then(|| ready[0].id.clone())
+    }
+
+    /// What the empty chat says, and whether a Login button goes with it: the real reason when the chosen agent is not ready.
+    pub(super) fn empty_note(&mut self, cx: &AppCx) -> (String, Option<&'static str>) {
+        let configured = cx.services.settings.lock().unwrap_or_else(|e| e.into_inner()).get().chat.is_some();
+        match self.ext_id(cx) {
+            Some(id) => {
+                let label = cx.services.agents_cfg().agent(&id).map_or(id.clone(), |a| a.label());
+                let st = cx.services.ext_status.get(&id);
+                empty_text(&label, &id, st.as_ref())
+            }
+            None => (if configured { "Ask anything.".to_string() } else { "No chat model selected yet. Open Settings → Models, add a provider and pick a model, or install and sign in to Claude Code (CLI tile).".to_string() }, None),
+        }
     }
 
     /// The model used with `agent` in this chat: the one chosen here, else the agent's own setting (empty: the CLI chooses).
@@ -199,4 +231,16 @@ pub(in crate::apps) fn task_executor(cx: &AppCx, id: &str, tools: Arc<dyn iyakki
             }
         }
     })
+}
+
+/// The words of an empty chat that an external agent answers: ready, or the real reason (`label: chip` and the fix), and the agent
+/// to offer a Login button for when it is signed out.
+pub(super) fn empty_text(label: &str, id: &str, st: Option<&extagent::Status>) -> (String, Option<&'static str>) {
+    match st {
+        Some(s) if !s.ready() => {
+            let login = (s.installed && s.chip == "sign in").then(|| crate::agent_login::AGENTS.iter().copied().find(|a| *a == id)).flatten();
+            (format!("{label}: {}. {}", s.chip, s.fix), login)
+        }
+        _ => (format!("Ask anything. {label} answers."), None),
+    }
 }

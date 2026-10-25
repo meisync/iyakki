@@ -1,6 +1,7 @@
 //! The left side of Settings: a search box over a scrollable list of pages, grouped. Typing narrows the list to the pages
 //! whose name, group or keywords contain every word typed ("wifi" finds Network, "volume" finds Sound).
 
+use crate::safeclamp::SafeClamp;
 use crate::gfx::{rgb, Face, Gfx};
 use crate::ui::{Event, TextField, CARD_HOVER, CARD_SEL, DIM, MUTED, R, TEXT};
 
@@ -26,10 +27,50 @@ const ROW_H: f32 = 34.0;
 const GROUP_H: f32 = 30.0;
 const SEARCH_H: f32 = 48.0;
 
-/// Does the page answer to what was typed? Every word must appear in its name, group or keywords.
+/// Plain words people type that no page uses itself: what to look for instead. Each right-hand word is in some page's keywords.
+const SYNONYMS: &[(&str, &[&str])] = &[
+    ("dark", &["brightness"]),
+    ("darker", &["brightness"]),
+    ("night", &["brightness"]),
+    ("theme", &["brightness", "text size"]),
+    ("sleep", &["screen", "brightness"]),
+    ("screensaver", &["screen", "brightness"]),
+    ("mouse", &["bluetooth", "keyboard"]),
+    ("touchpad", &["bluetooth", "keyboard"]),
+    ("trackpad", &["bluetooth", "keyboard"]),
+    ("backup", &["storage"]),
+    ("restore", &["storage"]),
+    ("restart", &["storage"]),
+    ("reboot", &["storage"]),
+    ("shutdown", &["storage"]),
+    ("name", &["host name", "account"]),
+    ("language", &["voice", "keyboard"]),
+    ("security", &["firewall", "vault", "account"]),
+    ("privacy", &["firewall", "vault", "browser"]),
+    ("safe", &["firewall", "vault"]),
+    ("protect", &["firewall", "vault"]),
+    ("assistant", &["ai", "model"]),
+    ("chatgpt", &["ai", "model"]),
+    ("gpt", &["ai", "model"]),
+    ("online", &["network", "internet"]),
+    ("offline", &["network", "internet"]),
+    ("lan", &["network"]),
+    ("speakers", &["sound"]),
+    ("loud", &["sound", "volume"]),
+    ("zoom", &["text size"]),
+    ("battery", &["time", "bluetooth"]),
+    ("slow", &["memory"]),
+    ("update", &["install"]),
+];
+
+/// Does the page answer to what was typed? Every word must appear in its name, group or keywords, or one of its plain-word
+/// synonyms must (so "dark", "sleep", "mouse" and "backup" lead somewhere sensible).
 pub fn matches(query: &str, item: &Item) -> bool {
     let hay = format!("{} {} {}", item.label, item.group, item.keywords).to_lowercase();
-    query.split_whitespace().all(|w| hay.contains(&w.to_lowercase()))
+    query.split_whitespace().all(|w| {
+        let w = w.to_lowercase();
+        hay.contains(&w) || SYNONYMS.iter().any(|(k, alts)| *k == w && alts.iter().any(|a| hay.contains(a)))
+    })
 }
 
 /// The list to show: pages that match, each group only if one of its pages does.
@@ -69,7 +110,7 @@ pub fn view_height(h: f32, s: f32) -> f32 {
 }
 
 pub fn clamp_scroll(scroll: f32, entries: &[Entry], h: f32, s: f32) -> f32 {
-    scroll.clamp(0.0, (content_height(entries, s) - view_height(h, s)).max(0.0))
+    scroll.clamp_safe(0.0, (content_height(entries, s) - view_height(h, s)).max(0.0))
 }
 
 /// The smallest scroll that shows the row of `tab` (a group header above it too when it is the first of its group).
@@ -98,7 +139,7 @@ pub fn step_tab(entries: &[Entry], tab: usize, d: i32) -> Option<usize> {
     let tabs: Vec<usize> = entries.iter().filter_map(|e| if let Entry::Item { tab, .. } = e { Some(*tab) } else { None }).collect();
     let pos = tabs.iter().position(|t| *t == tab);
     match pos {
-        Some(p) => tabs.get((p as i32 + d).clamp(0, tabs.len() as i32 - 1) as usize).copied(),
+        Some(p) => tabs.get((p as i32 + d).clamp_safe(0, tabs.len() as i32 - 1) as usize).copied(),
         None => tabs.first().copied(),
     }
 }
@@ -120,7 +161,8 @@ pub fn draw(g: &mut Gfx, r: R, s: f32, entries: &[Entry], selected: usize, scrol
         let ry = list_top + top;
         match e {
             Entry::Group(name) => {
-                g.text(r.x + 18.0 * s, ry + 10.0 * s, 12.0 * s, DIM, &name.to_uppercase(), Face::Bold);
+                let head = g.fit(12.0 * s, &name.to_uppercase(), Face::Bold, r.w - 36.0 * s);
+                g.text(r.x + 18.0 * s, ry + 10.0 * s, 12.0 * s, DIM, &head, Face::Bold);
             }
             Entry::Item { tab, label } => {
                 let row = R::new(r.x + 8.0 * s, ry + 2.0 * s, r.w - 16.0 * s, eh - 4.0 * s);
@@ -134,13 +176,20 @@ pub fn draw(g: &mut Gfx, r: R, s: f32, entries: &[Entry], selected: usize, scrol
                 }
                 let lh = g.line_height(15.0 * s, Face::Bold);
                 g.text(row.x + 18.0 * s, row.y + (row.h - lh) / 2.0, 15.0 * s, if on { TEXT } else { MUTED }, label, if on { Face::Bold } else { Face::Sans });
-                g.hit(row, Event::Tab(*tab), label);
+                // only the part of the row inside the list is clickable (a half-visible row must not reach off the screen)
+                let (hy0, hy1) = (row.y.max(list_top), (row.y + row.h).min(list_top + view));
+                if hy1 > hy0 {
+                    g.hit(R::new(row.x, hy0, row.w, hy1 - hy0), Event::Tab(*tab), label);
+                }
             }
         }
     }
     if entries.is_empty() {
         let msg = g.fit(14.0 * s, &format!("Nothing matches “{}”.", query.value), Face::Sans, r.w - 36.0 * s);
         g.text(r.x + 18.0 * s, list_top + 12.0 * s, 14.0 * s, DIM, &msg, Face::Sans);
+        for (i, l) in g.wrap(13.0 * s, "Try one simple word, such as wifi, sound, password or time. Esc clears the search.", Face::Sans, r.w - 36.0 * s).iter().take(4).enumerate() {
+            g.text(r.x + 18.0 * s, list_top + (38.0 + i as f32 * 18.0) * s, 13.0 * s, DIM, l, Face::Sans);
+        }
     }
     // a scroll bar when the list is longer than the box
     let total = content_height(entries, s);

@@ -2,6 +2,7 @@
 //! a selection, a height that grows from a few lines to a larger most and then scrolls inside the box (wheel, arrows, typing),
 //! and a limit on the characters that is never reached silently: a notice with the counts says what was left out.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::HashMap;
 
 use super::blink;
@@ -404,7 +405,7 @@ impl MultiLine {
     /// How many lines the box shows: `min_rows` at least, growing with the text up to `max_rows`.
     pub fn rows(&self) -> usize {
         let min = self.min_rows.max(1);
-        self.lay.len().clamp(min, self.max_rows.max(min))
+        self.lay.len().clamp_safe(min, self.max_rows.max(min))
     }
     /// The position nearest to a press `x` px from the left of the text and on visual line `line`.
     pub fn pos_at(&self, x: f32, line: usize) -> usize {
@@ -431,6 +432,10 @@ impl MultiLine {
             self.follow = true;
         }
     }
+    /// The wheel would be taken by the box now (the pointer is over it and its text is longer than it shows).
+    pub fn wheel_taken(&self) -> bool {
+        self.hover && self.lay.len() > self.rows()
+    }
     /// The wheel over the box moves its lines (two per notch; positive is up). True when the box took it.
     pub fn wheel(&mut self, d: i32) -> bool {
         let rows = self.rows();
@@ -438,7 +443,7 @@ impl MultiLine {
             return false;
         }
         let max_top = self.lay.len() - rows;
-        self.top = (self.top as i32 - d * 2).clamp(0, max_top as i32) as usize;
+        self.top = (self.top as i32 - d * 2).clamp_safe(0, max_top as i32) as usize;
         self.follow = false;
         true
     }

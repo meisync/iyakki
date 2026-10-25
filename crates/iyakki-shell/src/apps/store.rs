@@ -4,6 +4,7 @@
 //! (docs/STORE.md). Nothing here touches the network on the UI thread: a look at the network and the download of a
 //! package run on a background thread and report back through a slot the drawing polls.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -25,6 +26,8 @@ use crate::ui::{clipboard, Event, Key, TextField, DIM, ERR, MUTED, OK, R, TEXT};
 
 #[path = "store_manage.rs"]
 mod manage;
+#[path = "store_setup.rs"]
+pub mod setup;
 use manage::{Drag, EditState, MenuState, Press, RemoveUi, TagsState, View, Zone};
 
 pub const ACCENT: [u8; 4] = rgb(214, 236, 80);
@@ -37,9 +40,11 @@ enum Section {
     Installed,
     Publishers,
     Settings,
+    /// Setup: the system's building blocks as tiles with a popup each (the old Quick install page of the IYAKKI menu), `store_setup.rs`.
+    Setup,
 }
 
-const SECTIONS: [(Section, &str); 4] = [(Section::Discover, "Discover"), (Section::Installed, "Installed"), (Section::Publishers, "Publishers"), (Section::Settings, "Settings")];
+const SECTIONS: [(Section, &str); 5] = [(Section::Discover, "Discover"), (Section::Installed, "Installed"), (Section::Publishers, "Publishers"), (Section::Settings, "Settings"), (Section::Setup, "Setup")];
 
 enum Row {
     Head(String),
@@ -65,6 +70,8 @@ enum FormKind {
     DriverFile(String),
     /// Look at a private store's key before pinning it (the address form).
     PrivateStore,
+    /// A restricted firmware pack of Setup (fwpack.rs): the vendor's licence, "I accept", and a folder or stick for the offline route.
+    FwPack(iyakki_agent::quickinstall::Item),
 }
 
 enum Ask {
@@ -80,6 +87,8 @@ enum Ask {
     RemoveInstalled(Box<IEntry>),
     /// Pin this private store's key: the person compares the fingerprint first.
     PinStore(Box<store::Probe>, String),
+    /// Restart the machine so a driver picks up the firmware just installed (Setup's "Reboot to finish").
+    Reboot,
 }
 
 enum Mode {
@@ -134,8 +143,8 @@ pub struct StoreApp {
     filter: Filter,
     query: TextField,
     searching: bool,
-    sel: [usize; 4],
-    first: [usize; 4],
+    sel: [usize; 5],
+    first: [usize; 5],
     detail: Option<(String, String)>,
     text: ScrollLog,
     text_for: Option<(String, String, String)>,
@@ -179,6 +188,8 @@ pub struct StoreApp {
     drag: Option<Drag>,
     zones: Vec<Zone>,
     host_save: Option<(String, Vec<u8>)>,
+    /// The Setup tab (cards for what the system can install).
+    pub setup: setup::Setup,
 }
 
 /// The dialog that shows a private store's key fingerprint: the person compares it with the one the store's administrator gave.
@@ -355,8 +366,8 @@ impl StoreApp {
             filter: Filter::default(),
             query: TextField::new("/ search skills, tools, servers…", false),
             searching: false,
-            sel: [0; 4],
-            first: [0; 4],
+            sel: [0; 5],
+            first: [0; 5],
             detail: None,
             text: ScrollLog::default(),
             text_for: None,
@@ -392,6 +403,7 @@ impl StoreApp {
             drag: None,
             zones: vec![],
             host_save: None,
+            setup: setup::Setup::new(),
         };
         a.text.nowrap = false;
         let off = a.store.enforce_revocations(&cx.services);
@@ -605,13 +617,14 @@ impl StoreApp {
             Section::Installed => self.ifiltered().len(),
             Section::Publishers => store::publishers(&self.items).len(),
             Section::Settings => self.settings_rows(None).len(),
+            Section::Setup => self.setup.stops().len(),
         }
     }
 
     fn move_sel(&mut self, delta: i32) {
         let n = self.count();
         let i = self.section as usize;
-        self.sel[i] = (self.sel[i] as i32 + delta).clamp(0, n.saturating_sub(1) as i32) as usize;
+        self.sel[i] = (self.sel[i] as i32 + delta).clamp_safe(0, n.saturating_sub(1) as i32) as usize;
     }
 
     // ------------------------------------------------------------------------------------------ actions
@@ -899,7 +912,7 @@ impl StoreApp {
             }
             Key::Char('f') => {
                 if admin {
-                    self.mode = Mode::Form(Form::new("Add a folder or USB stick").text("Name", "", "for example My stick").text("Folder", "/mnt/", "/mnt/usb/iyakki-store"), FormKind::SourceFolder);
+                    self.mode = Mode::Form(Form::new("Add a folder or USB stick").text("Name", "", "for example My stick").path("Folder", "/mnt/", "/mnt/usb/iyakki-store", crate::filepicker::PathKind::Folder, &[]), FormKind::SourceFolder);
                 } else {
                     need(self);
                 }
@@ -978,8 +991,8 @@ impl StoreApp {
                     need(self);
                 }
             }
-            Key::Char('i') => self.mode = Mode::Form(Form::new("Install from a file").text("File path", "", "/mnt/usb/notes.iyp").choice("For", &["Me only", "Everyone"], usize::from(self.shared && self.actor(cx).can_shared)), FormKind::FromFile),
-            Key::Char('l') => self.mode = Mode::Form(Form::new("Add a licence").text("File path", "", "a licence file, or leave empty to use what you copied"), FormKind::License),
+            Key::Char('i') => self.mode = Mode::Form(Form::new("Install from a file").path("File path", "", "/mnt/usb/notes.iyp", crate::filepicker::PathKind::File, &[]).choice("For", &["Me only", "Everyone"], usize::from(self.shared && self.actor(cx).can_shared)), FormKind::FromFile),
+            Key::Char('l') => self.mode = Mode::Form(Form::new("Add a licence").path("File path", "", "a licence file, or leave empty to use what you copied", crate::filepicker::PathKind::File, &[]), FormKind::License),
             Key::Char('t') => {
                 if admin {
                     self.mode = Mode::Form(Form::new("Trust a publisher key").text("Public key (64 hex characters)", "", "from the publisher").text("Name", "", "who it is"), FormKind::TrustKey);
@@ -1075,6 +1088,22 @@ impl StoreApp {
                         return true;
                     }
                     Err(e) => Err(e),
+                }
+            }
+            FormKind::FwPack(item) => {
+                if form.choice_idx(1) != 1 {
+                    Err("The licence was not accepted, so nothing was downloaded or installed.".to_string())
+                } else {
+                    let folder = form.value(0);
+                    let from = (!folder.is_empty()).then(|| std::path::PathBuf::from(folder));
+                    match self.setup.firmware_accept_and_start(cx, *item, from) {
+                        Ok(m) => {
+                            self.say(m, true);
+                            self.mode = Mode::Browse;
+                            return true;
+                        }
+                        Err(e) => Err(e),
+                    }
                 }
             }
             FormKind::DriverFile(id) if id != "mac-facetimehd" => Err(format!("{id} does not take an Apple driver file")),
@@ -1182,6 +1211,7 @@ impl StoreApp {
                     }
                 }
                 Section::Settings => self.settings_key(cx, Key::Enter),
+                Section::Setup => {}
             },
             Key::Char('i') | Key::Char('u') if matches!(sec, Section::Discover | Section::Installed) => {
                 let purpose = if matches!(self.current().map(|i| &i.state), Some(State::Update(_))) { Purpose::Update } else { Purpose::Install };
@@ -1225,7 +1255,7 @@ impl StoreApp {
     }
 
     fn sections(&self) -> Vec<Section> {
-        if self.catalog { vec![Section::Installed, Section::Discover, Section::Publishers, Section::Settings] } else { vec![Section::Installed, Section::Settings] }
+        if self.catalog { vec![Section::Installed, Section::Discover, Section::Publishers, Section::Setup, Section::Settings] } else { vec![Section::Installed, Section::Setup, Section::Settings] }
     }
 
     fn back_mode(&self) -> Mode {
@@ -1297,11 +1327,11 @@ impl StoreApp {
                         None => self.do_install(cx, &rv),
                     }
                 } else if rv.review.locked {
-                    self.mode = Mode::Form(Form::new("Add a licence").text("File path", "", "a licence file, or leave empty to use what you copied"), FormKind::License);
+                    self.mode = Mode::Form(Form::new("Add a licence").path("File path", "", "a licence file, or leave empty to use what you copied", crate::filepicker::PathKind::File, &[]), FormKind::License);
                 }
             }
             Key::Char('l') if rv.review.locked => {
-                self.mode = Mode::Form(Form::new("Add a licence").text("File path", "", "a licence file, or leave empty to use what you copied"), FormKind::License);
+                self.mode = Mode::Form(Form::new("Add a licence").path("File path", "", "a licence file, or leave empty to use what you copied", crate::filepicker::PathKind::File, &[]), FormKind::License);
             }
             _ => {}
         }
@@ -1327,6 +1357,7 @@ impl App for StoreApp {
             (Mode::Browse, Section::Installed) => "↑↓ choose · Enter details · u update · U update all · b go back · p pin · r remove · m group · t tags · e title · v group by · g organise · / search".into(),
             (Mode::Detail, _) => "i install · u update · r remove · d turn off · s other store · Esc back".into(),
             (_, Section::Settings) => "↑↓ choose · Enter change · a add · c check · Tab section".into(),
+            (_, Section::Setup) => self.setup.hint(),
             _ => "↑↓ choose · Enter open · / search · s store · f t k g filter · i install · c check · Tab section".into(),
         }
     }
@@ -1348,6 +1379,7 @@ impl App for StoreApp {
             "On an app's page: b shows that buying is not available yet; l adds a licence you were given",
             "Settings (administrators): a add a catalog address, f add a folder or USB stick, u find sticks, o the daily check, i install from a file, t trust a publisher key",
             "Badges: Official = made by IYAKKI; Verified = identity checked by IYAKKI; Trusted = a key your administrator chose; Community = signed by someone unknown; Unsigned = anyone could have written it; Revoked = withdrawn",
+            "Setup: what the system can install for itself, as tiles of apps (a tick for installed, a green dot for running, UPDATE when a newer version is out, a star for recommended). Click or press Enter on a tile for its popup: what it is, size, licence, what it needs and the buttons that make sense now (Install, Upgrade, Open, Start, Stop, Retry). Arrows move between tiles, / search, f filter (All, Installed, Not installed, Recommended, Updates), c category, a install all recommended, l installer list, PageUp / PageDown / the wheel / the scroll bar scroll. Administrators install; everyone else sees the tiles read-only.",
             "Select text with the pointer and Ctrl+C to copy it.",
         ]
         .iter()
@@ -1368,6 +1400,22 @@ impl App for StoreApp {
         // the Devices popover's "Driver help": the Drivers chip
         if item == "drivers" {
             self.handle(&Event::Tab(226), cx);
+            return;
+        }
+        // a stand-in program for the install jobs (tests, the screenshot tool): `launch:<exe>\n<data>`
+        if let Some(rest) = item.strip_prefix("launch:") {
+            if let Some((exe, data)) = rest.split_once('\n') {
+                self.setup.launch = Some(iyakki_agent::quickinstall::Launch { exe: exe.into(), data: data.into() });
+            }
+            return;
+        }
+        // the Setup tab: `setup` or `setup:<item>`, and a bare Quick install item id (the VOICE tile's "Set up Kokoro")
+        if item == "setup" || item.starts_with("setup:") || iyakki_agent::quickinstall::Item::parse(item).is_some() {
+            self.switch(Section::Setup);
+            self.setup.enter(cx);
+            if let Some(it) = iyakki_agent::quickinstall::Item::parse(item.strip_prefix("setup:").unwrap_or(item)) {
+                self.setup.focus_item(it);
+            }
             return;
         }
         let Some(id) = item.strip_prefix("installed:") else { return };
@@ -1391,6 +1439,9 @@ impl App for StoreApp {
         if std::mem::take(&mut self.redraw) {
             return true;
         }
+        if self.section == Section::Setup && self.setup.wants_redraw() {
+            return true;
+        }
         if self.job.is_some() {
             self.spin += 1;
             if self.job.as_ref().is_some_and(|j| j.slot.lock().unwrap_or_else(|e| e.into_inner()).is_some()) {
@@ -1404,7 +1455,33 @@ impl App for StoreApp {
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
         if matches!(ev, Event::Tick) {
             self.apply_job(cx);
+            if self.section == Section::Setup && self.setup.tick(cx) {
+                self.redraw = true;
+            }
             return Flow::Stay;
+        }
+        // the Setup tab owns its keys, clicks, wheel and scroll bar (Tab and the section tabs stay the Store's)
+        if self.section == Section::Setup && matches!(self.mode, Mode::Browse) {
+            if let Some(f) = self.setup.handle(ev, cx) {
+                if self.setup.request.is_some() {
+                    self.request = self.setup.request.take();
+                }
+                // a firmware pack's Install asks for the vendor's licence first; its Reboot asks "restart now?"
+                if let Some(item) = self.setup.fw_ask.take() {
+                    if let Some(def) = item.fw_def() {
+                        self.mode = Mode::Form(
+                            Form::new(&format!("{}: licence and install", def.title))
+                                .path("Folder or USB stick with the files (empty: download them from the upstream repository)", "", "/media/usb/firmware  (made with restricted-firmware.sh fetch)", crate::filepicker::PathKind::Folder, &[])
+                                .choice(&format!("{} licence (the card's Details show it; the texts are kept next to the files)", def.vendor), &["I do not accept", "I have read the licence and accept"], 0),
+                            FormKind::FwPack(item),
+                        );
+                    }
+                }
+                if std::mem::take(&mut self.setup.reboot_ask) {
+                    self.mode = Mode::Confirm(Ask::Reboot);
+                }
+                return f;
+            }
         }
         // a key ends any drag in progress
         if matches!(ev, Event::Key(_)) {
@@ -1565,6 +1642,13 @@ impl App for StoreApp {
                             }
                             self.reload(cx);
                         }
+                        Ask::Reboot => {
+                            self.mode = Mode::Browse;
+                            match self.setup.reboot_now(cx) {
+                                Ok(m) => self.say(m, true),
+                                Err(e) => self.say(e, false),
+                            }
+                        }
                         Ask::RemoveSource(id) => {
                             let id = id.clone();
                             let r = self.store.remove_source(&self.actor(cx), &id);
@@ -1599,7 +1683,7 @@ impl App for StoreApp {
             return Flow::Stay;
         }
         match ev {
-            Event::Tab(n) if *n < 4 => {
+            Event::Tab(n) if *n < SECTIONS.len() => {
                 self.switch(SECTIONS[*n].0);
                 return Flow::Stay;
             }
@@ -1743,7 +1827,7 @@ impl App for StoreApp {
         let check = "Check (c)";
         let cw = g.text_width(13.0 * s, check, Face::Bold) + 13.0 * 1.7 * s;
         let mut right = x + w;
-        if x + w - cw > x + sw + 12.0 * s {
+        if self.section != Section::Setup && x + w - cw > x + sw + 12.0 * s {
             g.button(x + w - cw, y, 13.0 * s, check, ACCENT, Event::Tab(306));
             right = x + w - cw - 8.0 * s;
         }
@@ -1775,12 +1859,14 @@ impl App for StoreApp {
             (_, Section::Installed) => self.render_installed(g, body, s, tick),
             (_, Section::Publishers) => self.render_publishers(g, body, s),
             (_, Section::Settings) => self.render_settings(g, body, s, cx),
+            (_, Section::Setup) => self.setup.render(g, body, s, cx, tick),
         }
         match &self.mode {
             Mode::Form(f, _) => f.render(g, area, s, ACCENT, blink(tick)),
             Mode::Confirm(Ask::Remove { title, .. }) => render_confirm(g, area, s, &format!("Remove “{title}”?"), "Remove"),
             Mode::Confirm(Ask::PinStore(p, name)) => render_pin_confirm(g, area, s, p, name),
             Mode::Confirm(Ask::RemoveSource(_)) => render_confirm(g, area, s, "Remove this catalog?", "Remove"),
+            Mode::Confirm(Ask::Reboot) => render_confirm(g, area, s, "Restart this machine now?", "Restart"),
             Mode::Confirm(Ask::RemoveInstalled(e)) => render_confirm(g, area, s, &format!("Remove “{}”?", e.title), "Remove"),
             Mode::Confirm(Ask::RemovePlan(ui)) => manage::render_remove(g, area, s, ui, tick),
             Mode::Confirm(Ask::UpdateAll(rows)) => manage::render_update_all(g, area, s, rows),
@@ -2016,7 +2102,7 @@ impl StoreApp {
 
     fn render_discover(&mut self, g: &mut Gfx, body: R, s: f32, tick: u64) {
         let (x, mut y, w) = (body.x, body.y, body.w);
-        let sr = R::new(x, y, (w * 0.42).clamp(200.0 * s, 420.0 * s), 36.0 * s);
+        let sr = R::new(x, y, (w * 0.42).clamp_safe(200.0 * s, 420.0 * s), 36.0 * s);
         self.query.render(g, sr, self.searching && matches!(self.mode, Mode::Browse), s, blink(tick), Face::Sans, SEARCH_ID);
         let chips_x = sr.x + sr.w + 14.0 * s;
         let ch = self.filter_chips(g, chips_x, y + 2.0 * s, (x + w - chips_x).max(100.0 * s), s);
@@ -2499,11 +2585,11 @@ impl StoreApp {
             },
             Some(DOut::InstallFolder(id)) => {
                 let title = iyakki_drivers::known::by_id(&id).map_or(id.clone(), |k| k.title.to_string());
-                self.mode = Mode::Form(Form::new(&format!("{title}: install from a folder or USB stick")).text("Folder", "/mnt/", "/mnt/usb/firmware"), FormKind::DriverFolder(id));
+                self.mode = Mode::Form(Form::new(&format!("{title}: install from a folder or USB stick")).path("Folder", "/mnt/", "/mnt/usb/firmware", crate::filepicker::PathKind::Folder, &[]), FormKind::DriverFolder(id));
             }
             Some(DOut::InstallExtract(id)) => {
                 self.mode = Mode::Form(
-                    Form::new("Extract the camera firmware from Apple's driver file").text("File (AppleCameraInterface)", "/mnt/", "/mnt/usb/AppleCameraInterface").choice("Apple's licence (read it under Why)", &["I do not accept", "I accept"], 0),
+                    Form::new("Extract the camera firmware from Apple's driver file").path("File (AppleCameraInterface)", "/mnt/", "/mnt/usb/AppleCameraInterface", crate::filepicker::PathKind::File, &[]).choice("Apple's licence (read it under Why)", &["I do not accept", "I accept"], 0),
                     FormKind::DriverFile(id),
                 );
             }
@@ -2823,7 +2909,7 @@ impl StoreApp {
             return;
         }
         // the search box, the order, the grouping and the tags
-        let sr = R::new(x, y, (w * 0.34).clamp(180.0 * s, 380.0 * s), 36.0 * s);
+        let sr = R::new(x, y, (w * 0.34).clamp_safe(180.0 * s, 380.0 * s), 36.0 * s);
         self.iquery.render(g, sr, self.isearching && matches!(self.mode, Mode::Browse), s, blink(tick), Face::Sans, SEARCH_ID);
         let mut px = sr.x + sr.w + 12.0 * s;
         let mut py = y + 5.0 * s;
@@ -3873,7 +3959,7 @@ mod tests {
         seed(&cx);
         let mut a = StoreApp::new(&cx);
         assert_eq!(a.section, Section::Installed);
-        assert!(!a.catalog && a.sections() == vec![Section::Installed, Section::Settings]);
+        assert!(!a.catalog && a.sections() == vec![Section::Installed, Section::Setup, Section::Settings], "Installed, Setup, Settings (the catalog tabs are off)");
         for (w, h) in SIZES {
             let g = draw(&mut a, &cx, w, h);
             let labels: Vec<&str> = g.hits.iter().map(|h| h.label.as_str()).collect();
@@ -4138,16 +4224,18 @@ mod tests {
         assert!(rows.iter().any(|r| r.0 == "Show the catalog (coming soon)" && r.1.starts_with("off")));
         assert!(!a.items.iter().any(|i| i.entry.demo));
         key(&mut a, &cx, Key::Char('g'));
-        assert!(a.catalog && a.sections().len() == 4, "{:?}", a.status_text());
+        assert!(a.catalog && a.sections().len() == 5, "{:?}", a.status_text());
         assert!(a.items.iter().any(|i| i.entry.demo), "the demo apps exist only while the catalog is on");
         let g = draw(&mut a, &cx, 800, 480);
         let labels: Vec<&str> = g.hits.iter().map(|h| h.label.as_str()).collect();
         assert!(labels.contains(&"Discover") && labels.contains(&"Publishers"));
         a.switch(Section::Discover);
         assert_eq!(a.section, Section::Discover);
-        // Tab cycles through the four pages
+        // Tab cycles through the five pages (Setup sits before Settings)
         key(&mut a, &cx, Key::Tab);
         assert_eq!(a.section, Section::Publishers);
+        key(&mut a, &cx, Key::Tab);
+        assert_eq!(a.section, Section::Setup);
         key(&mut a, &cx, Key::Tab);
         assert_eq!(a.section, Section::Settings);
         key(&mut a, &cx, Key::Tab);
@@ -4155,7 +4243,7 @@ mod tests {
         // off again: back to the installed page
         a.switch(Section::Settings);
         key(&mut a, &cx, Key::Char('g'));
-        assert!(!a.catalog && a.sections().len() == 2);
+        assert!(!a.catalog && a.sections().len() == 3);
         assert!(!a.items.iter().any(|i| i.entry.demo));
         // adding a catalog (a folder) switches it on by itself, and removing it switches it off again
         let k = new_signing_key().unwrap();
@@ -4593,5 +4681,130 @@ mod tests {
         key(&mut b, &user, Key::Char('a'));
         assert!(matches!(b.mode, Mode::Browse) && b.status_text().unwrap().contains("administrators"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    // ---- restricted firmware packs (fwpack.rs, docs/RESTRICTED-FIRMWARE.md): the licence step, the audit, the offline folder, the restart
+
+    fn fw_rig(tag: &str, role: Role, item: iyakki_agent::quickinstall::Item) -> (StoreApp, AppCx, std::sync::Arc<crate::apps::tests::MockHost>) {
+        use super::setup::Machine;
+        use iyakki_agent::quickinstall::{self as qi, Facts, Presence};
+        let mut cx = cx(tag, role);
+        let host = std::sync::Arc::new(crate::apps::tests::MockHost::default());
+        cx.host = host.clone();
+        let mut a = StoreApp::new(&cx);
+        a.setup.set_machine(Machine { ram_mb: 16_000, fw: vec![item], ..Default::default() });
+        let mut f = Facts::default();
+        for it in qi::Item::ALL {
+            f.presence.push((it, Presence::Missing));
+        }
+        a.setup.set_facts(f);
+        a.setup.launch = Some(qi::Launch { exe: "/usr/bin/true".into(), data: cx.services.dir().join("qi") });
+        a.handle(&Event::Tab(4), &cx);
+        a.setup.enter(&cx);
+        (a, cx, host)
+    }
+
+    fn press_tile(a: &mut StoreApp, cx: &AppCx, item: iyakki_agent::quickinstall::Item) {
+        let n = iyakki_agent::quickinstall::Item::ALL.iter().position(|x| *x == item).unwrap();
+        a.setup.open_popup(item);
+        a.handle(&Event::Tab(super::setup::PRIMARY + n), cx);
+    }
+
+    fn take_form(a: &mut StoreApp) -> (Form, FormKind) {
+        match std::mem::replace(&mut a.mode, Mode::Browse) {
+            Mode::Form(f, k) => (f, k),
+            _ => panic!("the licence form should be open"),
+        }
+    }
+
+    #[test]
+    fn a_firmware_tile_asks_for_the_licence_first_nothing_runs_until_i_accept_and_the_acceptance_is_audited() {
+        use iyakki_agent::quickinstall::{self as qi, Item as QItem};
+        let item = QItem::FwRealtekNet;
+        let def = item.fw_def().unwrap();
+        let (mut a, cx, _host) = fw_rig("st-fw-licence", Role::Admin, item);
+        let card = a.setup.card(item);
+        assert_eq!(card.label, "Read the licence and install", "{card:?}");
+        assert!(card.notes.iter().any(|(n, _)| n.starts_with("Without it:") && n.contains("unable to load firmware patch")), "what degrades is on the card: {:?}", card.notes);
+        press_tile(&mut a, &cx, item);
+        let (mut form, kind) = take_form(&mut a);
+        assert!(matches!(kind, FormKind::FwPack(QItem::FwRealtekNet)) && form.fields.len() == 2, "the licence form opens; nothing has started");
+        assert!(qi::install_jobs(&cx.services.jobs, &cx.session.user).is_empty() && iyakki_agent::fwpack::accepted(&cx.services.dir().join("qi"), def).is_none());
+        // "I do not accept" (the default) installs and downloads nothing
+        assert!(!a.submit_form(&cx, &mut form, &kind));
+        assert!(qi::install_jobs(&cx.services.jobs, &cx.session.user).is_empty() && iyakki_agent::fwpack::accepted(&cx.services.dir().join("qi"), def).is_none());
+        assert!(!cx.audit.recent(20).iter().any(|l| l.contains("firmware.accept")), "no acceptance in the audit log");
+        // a folder that is not there refuses before anything is recorded
+        form.fields[1].choice = 1;
+        form.set_value(0, "/no/such/folder");
+        assert!(!a.submit_form(&cx, &mut form, &kind));
+        assert!(iyakki_agent::fwpack::accepted(&cx.services.dir().join("qi"), def).is_none());
+        // "I accept": the record, the audit line, and the job
+        form.set_value(0, "");
+        assert!(a.submit_form(&cx, &mut form, &kind), "{:?}", a.status_text());
+        let acc = iyakki_agent::fwpack::accepted(&cx.services.dir().join("qi"), def).expect("the acceptance is on the data volume");
+        assert_eq!(acc.by, "root");
+        let log = cx.audit.recent(20);
+        assert!(log.iter().any(|l| l.contains("firmware.accept") && l.contains("fw-realtek-net") && l.contains("LicenseRef-Realtek-r8169")), "{log:?}");
+        assert!(log.iter().any(|l| l.contains("quickinstall.start") && l.contains("fw-realtek-net")), "{log:?}");
+        assert_eq!(qi::install_jobs(&cx.services.jobs, &cx.session.user).iter().filter_map(qi::item_of).collect::<Vec<_>>(), vec![item]);
+        assert_eq!(cx.audit.verify().is_ok(), true, "the chain is intact");
+    }
+
+    #[test]
+    fn the_offline_folder_route_starts_the_job_with_from_and_only_administrators_may_install() {
+        use iyakki_agent::quickinstall::{self as qi, Item as QItem};
+        let item = QItem::FwBroadcomNet;
+        let (mut a, cx, _h) = fw_rig("st-fw-folder", Role::Admin, item);
+        let stick = temp_dir("st-fw-stick");
+        press_tile(&mut a, &cx, item);
+        let (mut form, kind) = take_form(&mut a);
+        form.fields[1].choice = 1;
+        form.set_value(0, &stick.display().to_string());
+        assert!(a.submit_form(&cx, &mut form, &kind), "{:?}", a.status_text());
+        let jobs = qi::install_jobs(&cx.services.jobs, &cx.session.user);
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].command.contains("quick-install fw-broadcom-net") && jobs[0].command.contains(&format!("--from {}", stick.display())), "{}", jobs[0].command);
+        // another role cannot even get the form to start anything
+        let (mut b, ucx, _h) = fw_rig("st-fw-user", Role::User, item);
+        b.setup.admin = false;
+        press_tile(&mut b, &ucx, item);
+        assert!(matches!(b.mode, Mode::Browse), "no form for a role that cannot install");
+        assert!(b.setup.note.as_ref().is_some_and(|n| n.0.contains("administrator")), "{:?}", b.setup.note);
+        let mut form = Form::new("x").path("Folder", "", "", crate::filepicker::PathKind::Folder, &[]).choice("l", &["no", "yes"], 1);
+        assert!(!b.submit_form(&ucx, &mut form, &FormKind::FwPack(item)));
+        assert!(iyakki_agent::fwpack::accepted(&ucx.services.dir().join("qi"), item.fw_def().unwrap()).is_none(), "nothing was recorded for a user");
+        assert!(qi::install_jobs(&ucx.services.jobs, &ucx.session.user).is_empty());
+        let _ = std::fs::remove_dir_all(&stick);
+    }
+
+    #[test]
+    fn reboot_to_finish_asks_first_and_restarts_only_after_a_yes() {
+        use iyakki_agent::quickinstall::{self as qi, Item as QItem};
+        let item = QItem::FwQualcommBt;
+        let (mut a, cx, host) = fw_rig("st-fw-reboot", Role::Admin, item);
+        let mut f = qi::Facts::default();
+        for it in qi::Item::ALL {
+            f.presence.push((it, if it == item { qi::Presence::Installed("20 files".into()) } else { qi::Presence::Missing }));
+        }
+        a.setup.set_facts(f);
+        let now = iyakki_agent::clock::now_unix();
+        // installed, and a restart is wanted: the button says so
+        a.setup.uptime = 600;
+        a.setup.fw_outcomes = vec![(item, iyakki_agent::fwpack::Outcome { at: now - 10, installed: true, reboot_needed: true, headline: "Qualcomm Bluetooth firmware installed. Reboot to finish.".into(), ..Default::default() })];
+        let card = a.setup.card(item);
+        assert_eq!(card.label, "Reboot to finish");
+        assert!(card.notes.iter().any(|(n, _)| n.contains("Reboot to finish")));
+        press_tile(&mut a, &cx, item);
+        assert!(matches!(a.mode, Mode::Confirm(Ask::Reboot)), "it asks first");
+        assert!(host.powered_off.lock().unwrap().is_none(), "nothing restarted without the yes");
+        key(&mut a, &cx, Key::Char('n'));
+        assert!(host.powered_off.lock().unwrap().is_none() && matches!(a.mode, Mode::Browse));
+        press_tile(&mut a, &cx, item);
+        key(&mut a, &cx, Key::Char('y'));
+        assert_eq!(*host.powered_off.lock().unwrap(), Some("reboot".to_string()), "the normal restart path");
+        assert!(cx.audit.recent(5).iter().any(|l| l.contains("power.reboot")));
+        // once the machine has started since the run, the wish is over
+        a.setup.uptime = 5;
+        assert_ne!(a.setup.card(item).label, "Reboot to finish");
     }
 }

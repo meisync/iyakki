@@ -8,6 +8,7 @@
 //! server. The models are checked against built-in SHA-256 sums; they stay on this device. See `iyakki_agent::indic` and
 //! docs/VOICE.md. Default: off.
 
+use crate::safeclamp::SafeClamp;
 use super::*;
 use iyakki_agent::indic::{self, models};
 use std::path::PathBuf;
@@ -122,7 +123,7 @@ impl SettingsApp {
                 if matches!(models::pins(&root, lang), None) {
                     return self.fail(format!("This build has no bundle for {}; nothing can be installed from a folder either.", Self::indic_name(lang)));
                 }
-                self.open_form(FormKind::IndicFolder(lang.to_string()), Form::new(&format!("Install {} from a folder or USB stick", Self::indic_name(lang))).text("Folder (the stick's mount point, or the folder holding fastpitch.onnx, hifigan.onnx and vocab.json)", "", "/media/usb/indic"));
+                self.open_form(FormKind::IndicFolder(lang.to_string()), Form::new(&format!("Install {} from a folder or USB stick", Self::indic_name(lang))).path("Folder (the stick's mount point, or the folder holding fastpitch.onnx, hifigan.onnx and vocab.json)", "", "/media/usb/indic", crate::filepicker::PathKind::Folder, &[]));
             }
             Key::Char('b') => {
                 let cur = models::source(&root);
@@ -303,7 +304,7 @@ impl SettingsApp {
     pub(super) fn render_indic(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
         self.indic_tick();
         let root = self.indic_root(cx);
-        let warn = rgb(255, 196, 94);
+        let warn = crate::fx::AMBER;
         let compact = a.h < 340.0 * s;
         let label_w = (130.0 * s).min(a.w * 0.3);
         let mut y = a.y;
@@ -347,7 +348,7 @@ impl SettingsApp {
         let note_h = note_n as f32 * 16.0 * s + 4.0 * s;
         let row_h = 54.0 * s;
         let avail = (a.y + a.h - note_h - y).max(row_h);
-        let visible = ((avail / row_h) as usize).clamp(1, indic::LANGS.len());
+        let visible = ((avail / row_h) as usize).clamp_safe(1, indic::LANGS.len());
         let sel = self.sel().min(indic::LANGS.len() - 1);
         let first = sel.saturating_sub(visible - 1).min(indic::LANGS.len() - visible);
         let first = if sel < first { sel } else { first };
@@ -361,7 +362,7 @@ impl SettingsApp {
                 models::Status::Damaged(w) => (w.clone(), ("damaged", ERR)),
                 models::Status::NoBundle => (format!("No bundle for this language in this build · AI4Bharat checkpoint {}", models::human(l.zip_bytes)), ("no bundle", DIM)),
             };
-            row(g, i, a.x, y, a.w, row_h - 4.0 * s, s, i == sel, &format!("{} · {}", l.name, l.native), &sub, &[chip]);
+            row(g, &mut self.tip, i, a.x, y, a.w, row_h - 4.0 * s, s, i == sel, &format!("{} · {}", l.name, l.native), &sub, &[chip]);
             y += row_h;
         }
         let mut ny = a.y + a.h - note_h;

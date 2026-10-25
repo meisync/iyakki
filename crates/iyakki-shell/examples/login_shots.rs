@@ -140,7 +140,7 @@ fn main() {
     sh.handle(&Event::Key(Key::Esc));
     ticks(&mut sh, 800);
     sh.handle(&Event::Key(Key::Esc));
-    // Quick install lists the same buttons
+    // Store -> Setup (the menu's Quick install opens it) lists the same buttons
     sh.handle(&Event::Key(Key::F(10)));
     sh.handle(&Event::Key(Key::Char('q')));
     ticks(&mut sh, 1000);

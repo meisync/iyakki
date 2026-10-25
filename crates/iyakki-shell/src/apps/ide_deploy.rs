@@ -103,13 +103,13 @@ impl Flow {
     /// Build → load → apply → verify.
     pub fn deploy(tools: Arc<K8sTools>, plan: Plan) -> Flow {
         let name = app_name(&plan.image);
-        let titles = [("deploy_build", format!("Build {}", plan.image)), ("deploy_load", "Get the image to the cluster".to_string()), ("k8s_apply", format!("Apply {} to namespace {}", if plan.manifest.is_empty() { "a starter Deployment and Service".to_string() } else { plan.manifest.clone() }, tools.ns)), ("deploy_status", "Check the rollout".to_string())];
+        let titles = [("deploy_build", format!("Build {}", plan.image)), ("deploy_load", "Get the image to the cluster".to_string()), ("k8s_apply", format!("Apply {} to namespace {} on {}", if plan.manifest.is_empty() { "a starter Deployment and Service".to_string() } else { plan.manifest.clone() }, tools.ns, tools.cluster_label())), ("deploy_status", "Check the rollout".to_string())];
         let steps: Vec<Step> = titles.iter().map(|(t, title)| Step { tool: t, title: title.clone(), state: St::Pending, summary: String::new(), detail: String::new(), output: String::new() }).collect();
         let shared = Arc::new(Mutex::new(Shared { steps, ..Default::default() }));
         let (tx, rx) = channel();
         let live: Sink = Arc::new(Mutex::new(String::new()));
         let (sh, lv, tl) = (shared.clone(), live.clone(), tools.clone());
-        let title = format!("Deploy {} to {}", plan.image, tools.ns);
+        let title = format!("Deploy {} to {} on {}", plan.image, tools.ns, tools.cluster_label());
         std::thread::spawn(move || {
             let mut all = plan.approve_all;
             let (mut built, mut cluster_ref) = (String::new(), String::new());
@@ -243,7 +243,7 @@ impl Flow {
         let (tx, rx) = channel();
         let (sh, lv, tl) = (shared.clone(), Arc::new(Mutex::new(String::new())), tools.clone());
         let live = lv.clone();
-        let title = title.to_string();
+        let title = format!("{title} on {}", tools.cluster_label());
         std::thread::spawn(move || {
             let summary = tl.describe(tool, &args);
             let detail = tl.preview(tool, &args).unwrap_or_default();
@@ -361,6 +361,21 @@ mod tests {
         r.answer("get configmaps", "");
         r.answer("get secrets", "");
         r.answer("get nodes", "{}");
+    }
+
+    #[test]
+    fn the_flow_titles_name_the_cluster_the_deploy_goes_to() {
+        let (t, r, _root) = tools("names-cluster");
+        answers(&r);
+        let mut t = Arc::try_unwrap(t).ok().expect("the only owner");
+        let f = Flow::deploy(Arc::new(K8sTools::new(t.run.clone(), t.profile.clone(), "shop-dev", "Shop", &t.root, Arc::new(|_, _| {}))), Plan { image: "web".into(), dir: "app".into(), manifest: String::new(), port: 8080, approve_all: false });
+        until(|| f.asking() == Some(0));
+        assert_eq!(f.title, "Deploy web to shop-dev on cluster \"k3s\"", "the resolved profile's name when the registry has one cluster");
+        assert!(f.steps()[2].title.ends_with("to namespace shop-dev on cluster \"k3s\""), "{}", f.steps()[2].title);
+        t.cluster_phrase = "cluster \"gpu-box\" (remote)".into();
+        let f = Flow::deploy(Arc::new(t), Plan { image: "web".into(), dir: "app".into(), manifest: "deploy/app.yaml".into(), port: 8080, approve_all: false });
+        assert_eq!(f.title, "Deploy web to shop-dev on cluster \"gpu-box\" (remote)");
+        assert_eq!(f.steps()[2].title, "Apply deploy/app.yaml to namespace shop-dev on cluster \"gpu-box\" (remote)");
     }
 
     #[test]

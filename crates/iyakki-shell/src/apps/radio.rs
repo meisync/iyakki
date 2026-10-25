@@ -3,6 +3,7 @@
 //! while other apps are used (the launcher shows what plays). MP3 streams over HTTP or HTTPS; the sound goes to the
 //! system's play command (Settings → Voice), and every address is checked against the account's host policy.
 
+use crate::safeclamp::SafeClamp;
 use std::sync::Arc;
 
 use iyakki_agent::radio::{self, RadioState, Station, StationStore, BANDS, LANGUAGES};
@@ -160,6 +161,25 @@ impl App for RadioApp {
         .collect()
     }
 
+    fn media_key(&mut self, k: crate::fnkeys::FnKey, cx: &AppCx) -> bool {
+        use crate::fnkeys::FnKey;
+        if !matches!(self.mode, Mode::Browse) {
+            return false;
+        }
+        match k {
+            FnKey::PlayPause => {
+                if !cx.services.radio.resume() && !cx.services.radio.pause() {
+                    self.play_selected(cx);
+                }
+            }
+            FnKey::Next => self.step(1, cx),
+            FnKey::Prev => self.step(-1, cx),
+            FnKey::Stop => cx.services.radio.stop(),
+            _ => return false,
+        }
+        true
+    }
+
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
         if let Mode::Form(form) = &mut self.mode {
             match form.handle_event(ev) {
@@ -196,7 +216,7 @@ impl App for RadioApp {
                 return Flow::Stay;
             }
             Event::Scroll(d) => {
-                self.sel = (self.sel as i32 - d).clamp(0, self.list().len().saturating_sub(1) as i32) as usize;
+                self.sel = (self.sel as i32 - d).clamp_safe(0, self.list().len().saturating_sub(1) as i32) as usize;
                 return Flow::Stay;
             }
             // the tabs, the transport buttons and the volume bars
@@ -374,7 +394,7 @@ impl App for RadioApp {
         };
 
         // ---- the player
-        let ch = (area.y + area.h - y - 250.0 * s).clamp(286.0 * s, 310.0 * s);
+        let ch = (area.y + area.h - y - 250.0 * s).clamp_safe(286.0 * s, 310.0 * s);
         let card = R::new(x, y, w, ch);
         let glow = if playing { 0.35 + 0.65 * energy.min(1.0) } else { 0.15 };
         glow_card(g, card, s, CYAN, MAGENTA, glow);
@@ -472,7 +492,7 @@ impl App for RadioApp {
         // volume: 20 bars you can click
         let vol = cx.services.radio.volume() as usize;
         let vx = bx + 18.0 * s;
-        let vw = (card.x + card.w - vx - 26.0 * s).clamp(80.0 * s, 260.0 * s);
+        let vw = (card.x + card.w - vx - 26.0 * s).clamp_safe(80.0 * s, 260.0 * s);
         g.text(vx, by - 2.0 * s, 12.0 * s, DIM, &format!("VOLUME {vol}%"), Face::Bold);
         let seg = vw / 20.0;
         for i in 0..20usize {

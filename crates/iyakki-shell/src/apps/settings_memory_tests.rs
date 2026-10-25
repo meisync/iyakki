@@ -73,9 +73,7 @@ fn overlaps(a: R, b: R) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 fn goto_memory(a: &mut SettingsApp, cx: &AppCx) {
-    while a.tab() != Tab::Memory {
-        key(a, cx, Key::Right);
-    }
+    a.go_to(Tab::Memory);
 }
 
 /// A made-up machine: 4 GiB of RAM, zram0 in use (2 GiB, zstd) with 1 MiB stored.

@@ -6,6 +6,7 @@
 //! as highlighted hunks you accept or reject one by one, and even accepted hunks only change the
 //! in-memory text until you save.
 
+use crate::safeclamp::SafeClamp;
 use std::path::{Path, PathBuf};
 
 use iyakki_edit::diff::{apply_hunks, diff_hunks, summary};
@@ -577,7 +578,7 @@ impl EditApp {
 
     /// Show the cursor at a 1-based line.
     pub fn goto_line(&mut self, line: usize) {
-        self.buf.goto_line(line.clamp(1, self.buf.line_count().max(1)));
+        self.buf.goto_line(line.clamp_safe(1, self.buf.line_count().max(1)));
         self.follow = true;
     }
 
@@ -784,7 +785,7 @@ impl EditApp {
 
     fn open_save_as(&mut self) {
         let start = self.path.as_ref().map_or_else(|| format!("{}/", self.dir.display()), |p| p.display().to_string());
-        let f = Form::new("Save as").text("File path", &start, "where to save (you need write access there)");
+        let f = Form::new("Save as").path("File path", &start, "where to save (you need write access there)", crate::filepicker::PathKind::Save, &[]);
         self.modal = Some(Modal::PathForm(f, true));
     }
 
@@ -1225,7 +1226,7 @@ impl EditApp {
                 PickEvent::None => self.modal = Some(Modal::Open { picker, dir }),
                 PickEvent::Chosen(item) => {
                     if item == "Type a path…" {
-                        let f = Form::new("Open file").text("File path", &format!("{}/", dir.display()), "an absolute path you may read");
+                        let f = Form::new("Open file").path("File path", &format!("{}/", dir.display()), "an absolute path you may read", crate::filepicker::PathKind::File, &[]);
                         self.modal = Some(Modal::PathForm(f, false));
                     } else if item == "../" {
                         let parent = dir.parent().map_or(dir.clone(), Path::to_path_buf);
@@ -1417,7 +1418,7 @@ impl EditApp {
         if tabs_h > 0.0 {
             let titles = self.doc_titles();
             let n = titles.len();
-            let tw = ((w - 4.0 * s) / n as f32).clamp(if ide { 80.0 * s } else { 90.0 * s }, 240.0 * s);
+            let tw = ((w - 4.0 * s) / n as f32).clamp_safe(if ide { 80.0 * s } else { 90.0 * s }, 240.0 * s);
             let mut tx = x;
             for (i, t) in titles.iter().enumerate() {
                 let on = i == self.active;
@@ -1542,7 +1543,7 @@ impl EditApp {
         let top_off = if ide { tool_h + 6.0 * s } else { 44.0 * s };
         let top = area.y + tabs_h + top_off;
         // the result of running the file takes some of the room under the text
-        let out_h = if self.output.is_some() && !self.embedded { (area.h * 0.28).clamp(80.0 * s, 240.0 * s) } else { 0.0 };
+        let out_h = if self.output.is_some() && !self.embedded { (area.h * 0.28).clamp_safe(80.0 * s, 240.0 * s) } else { 0.0 };
         let body = R::new(x, top, w, area.h - tabs_h - top_off - bar_h - find_h - 6.0 * s - out_h);
         self.rows_visible = ((body.h / lh) as usize).max(1);
         if self.review.is_some() {
@@ -1789,6 +1790,10 @@ impl App for EditApp {
         self.host_save.take()
     }
 
+    fn take_request(&mut self) -> Option<(String, String)> {
+        iyakki_agent::sharedfolder::take_share_ask().map(|f| ("settings".into(), format!("share:{f}")))
+    }
+
     fn context_items(&mut self, _x: i32, _y: i32) -> Vec<crate::ctxmenu::Item> {
         use crate::ctxmenu::{Item, COPY, CUT, PASTE, SELECT_ALL};
         let sel = self.buf.selection().is_some();
@@ -1796,6 +1801,10 @@ impl App for EditApp {
         if self.hl.lang().line_comment().is_some() {
             v.push(Item::separator());
             v.push(Item::new("comment", "Comment line", "Ctrl+L"));
+        }
+        if self.path.as_ref().is_some_and(|p| p.parent().is_some_and(|d| d.is_dir())) {
+            v.push(Item::separator());
+            v.push(Item::new("share", "Share this file's folder…", ""));
         }
         if iyakki_agent::hostfiles::enabled() {
             v.push(Item::separator());
@@ -1807,6 +1816,12 @@ impl App for EditApp {
     fn context_pick(&mut self, id: &str, cx: &AppCx) -> Flow {
         if id == "comment" {
             return self.handle(&Event::Key(Key::Ctrl('l')), cx);
+        }
+        if id == "share" {
+            if let Some(d) = self.path.as_ref().and_then(|p| p.parent()) {
+                iyakki_agent::sharedfolder::ask_share(&d.to_string_lossy());
+            }
+            return Flow::Stay;
         }
         if id == "hostsave" {
             return self.handle(&Event::Key(Key::Ctrl('H')), cx);
@@ -1851,7 +1866,7 @@ impl App for EditApp {
                 Event::Key(k) => self.review_key(k, cx),
                 Event::Scroll(d) => {
                     if let Some(r) = self.review.as_mut() {
-                        r.scroll = (r.scroll as i32 - d * 3).clamp(0, r.rows.len().saturating_sub(1) as i32) as usize;
+                        r.scroll = (r.scroll as i32 - d * 3).clamp_safe(0, r.rows.len().saturating_sub(1) as i32) as usize;
                     }
                 }
                 Event::AreaAt(AREA_REVIEW, _, y) => {
@@ -2039,7 +2054,7 @@ impl App for EditApp {
             }
             Event::Scroll(d) => {
                 self.follow = false;
-                self.scroll = (self.scroll as i32 - d * 3).clamp(0, self.buf.line_count().saturating_sub(1) as i32) as usize;
+                self.scroll = (self.scroll as i32 - d * 3).clamp_safe(0, self.buf.line_count().saturating_sub(1) as i32) as usize;
             }
             Event::AreaAt(AREA_TEXT, x, y) => self.click_text(*x, *y),
             _ => {}
@@ -2204,7 +2219,7 @@ mod tests {
         let mut code = app_with(&cx, &home, "m.rs", "fn main() {}\n");
         let items = code.context_items(10, 10);
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, vec!["cut", "copy", "paste", "selall", "", "comment"]);
+        assert_eq!(ids, vec!["cut", "copy", "paste", "selall", "", "comment", "", "share"], "the last entry shares the file's folder (shared folders)");
         assert!(!items[0].enabled && !items[1].enabled, "no selection yet");
         assert!(items[2].needs_clip && items[3].enabled);
         // after Select all, Cut and Copy are usable; "Comment line" runs the editor's own Ctrl+L

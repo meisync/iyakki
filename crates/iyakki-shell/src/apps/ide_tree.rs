@@ -2,6 +2,7 @@
 //! dependency folders stay hidden (unless asked for), files that are open are marked, and everything the tree does
 //! (create, rename, delete) goes through `iyakki_agent::workspace`, which never leaves the workspace root.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -48,6 +49,8 @@ pub struct Tree {
     seen: Vec<(Option<std::time::SystemTime>, usize)>,
     visible_rows: usize,
     row_rects: Vec<(R, usize)>,
+    /// A short state text per folder (a git repository: `main ↑1 ✎3`), drawn at the right of the row.
+    pub badges: std::collections::HashMap<String, String>,
 }
 
 fn join(dir: &str, name: &str) -> String {
@@ -56,7 +59,7 @@ fn join(dir: &str, name: &str) -> String {
 
 impl Tree {
     pub fn new(root: &Path) -> Tree {
-        let mut t = Tree { root: root.into(), expanded: BTreeSet::new(), rows: vec![], sel: 0, scroll: 0, show_heavy: false, found: None, seen: vec![], visible_rows: 20, row_rects: vec![] };
+        let mut t = Tree { root: root.into(), expanded: BTreeSet::new(), rows: vec![], sel: 0, scroll: 0, show_heavy: false, found: None, seen: vec![], visible_rows: 20, row_rects: vec![], badges: Default::default() };
         t.refresh();
         t
     }
@@ -175,7 +178,7 @@ impl Tree {
 
     pub fn scroll_by(&mut self, d: i32) {
         let max = self.len().saturating_sub(self.visible_rows);
-        self.scroll = (self.scroll as i32 - d * 3).clamp(0, max as i32) as usize;
+        self.scroll = (self.scroll as i32 - d * 3).clamp_safe(0, max as i32) as usize;
     }
 
     /// Select row `i` (a click).
@@ -345,11 +348,19 @@ impl Tree {
             let tx = x + 30.0 * s;
             let color = if escapes || heavy { super::ide_chrome::dim() } else if selected { TEXT } else { rgb(205, 212, 232) };
             let marker = mark(&rel);
-            let reserve = if marker.is_some() { 14.0 * s } else { 0.0 };
+            let badge = if is_dir && self.found.is_none() { self.badges.get(&rel).cloned() } else { None };
+            let bsz = fsz * 0.8;
+            let badge_w = badge.as_ref().map_or(0.0, |b| g.text_width(bsz, b, Face::Mono).min(rect.w * 0.45) + 8.0 * s);
+            let reserve = if marker.is_some() { 14.0 * s } else { 0.0 } + badge_w;
             let label = if escapes { format!("{name}  (link leaves the workspace)") } else if self.found.is_some() { rel.clone() } else { name.clone() };
             let face = if is_dir { Face::Bold } else { Face::Sans };
             let t = g.fit(fsz, &label, face, rect.x + rect.w - tx - reserve - 4.0 * s);
             g.text(tx, cy - lh / 2.0, fsz, color, &t, face);
+            if let Some(b) = &badge {
+                let b = g.fit(bsz, b, Face::Mono, badge_w - 4.0 * s);
+                let bx = rect.x + rect.w - badge_w - if marker.is_some() { 14.0 * s } else { 0.0 } + 4.0 * s;
+                g.text(bx, cy - g.line_height(bsz, Face::Mono) / 2.0, bsz, if b.contains('✎') || b.contains('↓') { fx::AMBER } else { super::ide_chrome::dim() }, &b, Face::Mono);
+            }
             if let Some(dirty) = marker {
                 g.circle(rect.x + rect.w - 8.0 * s, cy, 3.0 * s, if dirty { fx::AMBER } else { CYAN });
             }
@@ -502,5 +513,21 @@ mod tests {
         assert!(g.hits.iter().filter(|h| matches!(h.ev, Event::Row(_))).count() >= 4);
         assert!(g.hits.iter().any(|h| h.label == "new file"));
         assert_eq!(t.row_at(30, 40), Some(0));
+    }
+
+    #[test]
+    fn a_folder_row_carries_the_repository_badge_inside_its_row_at_any_width() {
+        let d = world("badge");
+        let mut t = Tree::new(&d);
+        t.badges.insert("src".into(), "main ↑1 ↓2 ✎3 +1".into());
+        for w in [140.0f32, 260.0, 520.0] {
+            let mut g = Gfx::new(600, 400);
+            g.clear(rgb(8, 11, 26));
+            t.draw(&mut g, R::new(0.0, 0.0, w, 400.0), 1.0, true, CYAN, &|_| None);
+            for h in g.hits.iter().filter(|h| matches!(h.ev, Event::Row(_))) {
+                assert!(h.rect.x + h.rect.w <= w + 0.5, "row {} fits {w}", h.label);
+            }
+            assert!(g.hits.iter().any(|h| matches!(h.ev, Event::Row(_)) && h.label == "src"), "the folder row is there at width {w}");
+        }
     }
 }

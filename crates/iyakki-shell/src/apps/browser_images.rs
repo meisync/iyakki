@@ -33,7 +33,6 @@ const MAX_SIDE: u32 = 2048;
 /// At most this many pictures per page, and this many bytes in all.
 pub const MAX_IMAGES: usize = 60;
 const MAX_BYTES: usize = 14 << 20;
-const WORKERS: usize = 4;
 
 pub type Msg = (u64, usize, Result<Pic, String>);
 
@@ -171,7 +170,8 @@ fn shrink(pm: Pixmap) -> Pixmap {
 pub fn spawn_loader(page: Url, jobs: Vec<(usize, String)>, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> bool + Send + Sync + Clone + 'static, cookies: Arc<Mutex<CookieStore>>, serial: u64, tx: Sender<Msg>) {
     let queue = Arc::new(Mutex::new(jobs.into_iter().take(MAX_IMAGES).collect::<VecDeque<_>>()));
     let budget = Arc::new(AtomicUsize::new(0));
-    for _ in 0..WORKERS {
+    let workers = super::browser_speed::image_workers(&super::browser_speed::machine(std::path::Path::new("/")));
+    for _ in 0..workers {
         let (queue, budget, page, web, allow, cookies, tx) = (queue.clone(), budget.clone(), page.clone(), web.clone(), allow.clone(), cookies.clone(), tx.clone());
         let _ = std::thread::Builder::new().name("iyakki-browser-image".into()).stack_size(16 << 20).spawn(move || loop {
             let Some((idx, src)) = queue.lock().ok().and_then(|mut q| q.pop_front()) else { return };
@@ -198,6 +198,7 @@ fn fetch_one(page: &Url, src: &str, web: &dyn Fetch, allow: &dyn Fn(&str) -> boo
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let mut req = Request::get(&url);
     req.referer = page.to_string();
+    req.priority = iyakki_web::net::IMAGE;
     let (_, r) = iyakki_web::fetch_following(web, req, allow, Some(Jar { store: cookies, now }))?;
     if r.status >= 400 {
         return Err(format!("the server answered {}", r.status));

@@ -172,9 +172,11 @@ fn run_opens_the_tile_app_as_an_unsigned_dev_app_and_add_tile_needs_an_administr
 struct Loop;
 impl Upstream for Loop {
     fn request(&self, method: &str, url: &str, headers: &[(String, String)], body: &[u8]) -> Result<UpstreamResponse, String> {
+        // the deployed store's address is http://localhost:<NodePort>; the test server listens on 127.0.0.1
+        let url = url.replacen("http://localhost:", "http://127.0.0.1:", 1);
         let rest = url.strip_prefix("http://127.0.0.1:").ok_or_else(|| format!("test transport: only the loopback ({url})"))?;
         let (port, path) = rest.split_once('/').map_or((rest, String::new()), |(p, r)| (p, format!("/{r}")));
-        let mut s = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).map_err(|e| e.to_string())?;
+        let mut s = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).map_err(|e| format!("could not reach {port}: Connection refused ({e})"))?;
         s.set_read_timeout(Some(Duration::from_secs(10))).ok();
         let mut req = format!("{method} {} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n", if path.is_empty() { "/" } else { &path }, body.len());
         for (k, v) in headers {
@@ -210,6 +212,13 @@ impl Drop for StoreWorld {
 }
 
 fn store_world(w: &World, tag: &str) -> StoreWorld {
+    store_world_with(w, tag, true)
+}
+
+/// The store server on a loopback socket and a device. `add`: the store is also added as a catalog source and chosen as the target (the
+/// person did Settings, Add this store); not added is the device of the report: only the platform's installed-services record and the
+/// vault entries of the deploy exist (see [`record_deploy`]).
+fn store_world_with(w: &World, tag: &str, add: bool) -> StoreWorld {
     let dir = w.base.join(format!("server-{tag}"));
     let mut cfg = Config::new(&dir);
     cfg.writes_per_min = 1000;
@@ -229,9 +238,11 @@ fn store_world(w: &World, tag: &str) -> StoreWorld {
     let fetch = HttpFetch(Arc::new(Loop));
     let store = Store::for_services(&cx.services);
     let admin = Actor::from_policy(&cx.session.user, &cx.session.policy);
-    let probe = store.probe_private(&fetch, &format!("http://{addr}")).unwrap();
-    let id = store.add_private_source(&admin, &fetch, "Office store", &format!("http://{addr}"), &probe.fingerprint).unwrap();
-    store.set_publish_target(&admin, &id).unwrap();
+    if add {
+        let probe = store.probe_private(&fetch, &format!("http://{addr}")).unwrap();
+        let id = store.add_private_source(&admin, &fetch, "Office store", &format!("http://{addr}"), &probe.fingerprint).unwrap();
+        store.set_publish_target(&admin, &id).unwrap();
+    }
     StoreWorld { addr, stop, th, ptoken, cx, srv }
 }
 
@@ -471,4 +482,273 @@ fn publish_offers_this_device_in_developer_mode_and_installs_through_the_same_pa
     }
     let acts = iyakki_agent::devmode::DevMode::open(cx.services.dir()).activity(10);
     assert!(acts.iter().any(|a| a.action == "dev.install" && a.ok && a.who == "this-device-ide"), "logged like a remote install");
+}
+
+// ------------------------------------------------------------------------------------------------------------ publish to the private store deployed on this device
+
+/// The six sizes of the owner's devices and the usual windows.
+const SIZES6: [(u32, u32); 6] = [(360, 740), (800, 480), (1280, 720), (1920, 1080), (2560, 1600), (1024, 600)];
+const INSTANCE: &str = "private-store-iyakki-private-store";
+
+/// What the Platform deploy leaves on the device: the installed-services record with its three addresses and the two vault entries (the
+/// admin token is the real one of the test server). No catalog source, no pinned key, no publishing target.
+fn record_deploy(cx: &AppCx, base: &str) {
+    use iyakki_agent::platform::{Installed, UrlInfo};
+    let url = |label: &str, u: String, kind: &str| UrlInfo { label: label.into(), url: u, kind: kind.into() };
+    let rec = Installed {
+        id: INSTANCE.into(),
+        service: "private-store".into(),
+        title: "Private store".into(),
+        version: "1.0.0".into(),
+        namespace: "iyakki-private-store".into(),
+        urls: vec![url("Private store", base.into(), "web"), url("Catalog", format!("{base}/catalog.json"), "catalog"), url("Publish", format!("{base}/v1/publish"), "api")],
+        vault: vec![format!("svc.{INSTANCE}.admin-token"), format!("svc.{INSTANCE}.catalog-seed")],
+        ..Default::default()
+    };
+    iyakki_agent::platform::installed::upsert(cx.services.dir(), &cx.session.user, rec).unwrap();
+    cx.services.user_set(&cx.session.user, &format!("svc.{INSTANCE}.admin-token"), "admin-token-for-tests-0123456789").unwrap();
+    cx.services.user_set(&cx.session.user, &format!("svc.{INSTANCE}.catalog-seed"), "seed-seed-seed-seed-seed-seed-00").unwrap();
+}
+
+fn tile_project(w: &World, name: &str) -> PathBuf {
+    let d = project(w, name, &[]);
+    iyakki_agent::store::author::scaffold("tile", "office-clock", &d, "").unwrap();
+    let app_dir = d.join("office-clock");
+    std::fs::write(app_dir.join("CHANGELOG.md"), "# Changelog\n\n## 0.1.0 - first\n- first\n").unwrap();
+    let t = std::fs::read_to_string(app_dir.join("iyakki-app.json")).unwrap().replace("A tile app for the IYAKKI launcher.", "A clock for the office wall.");
+    std::fs::write(app_dir.join("iyakki-app.json"), t).unwrap();
+    tg::write(&d, "Alpha", AppTarget::IyakkiTile).unwrap();
+    d
+}
+
+fn publish_choices(app: &IdeApp) -> Vec<String> {
+    let Some(Modal::Form(FormKind::Publish, f)) = &app.modal else { panic!("the publish form: {:?} {:?}", card_text(app), app.notice) };
+    match &f.fields[0].kind {
+        crate::apps::widgets::FieldKind::Choice(o) => o.clone(),
+        _ => panic!(),
+    }
+}
+
+fn form_error(app: &IdeApp) -> String {
+    match &app.modal {
+        Some(Modal::Form(_, f)) => f.error.clone().unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+fn fits_all(app: &mut IdeApp, cx: &AppCx, what: &str) {
+    for (wd, ht) in SIZES6 {
+        let g = render(app, cx, wd, ht);
+        for h in g.hits.iter().filter(|h| h.label != "backdrop") {
+            assert!(h.rect.x >= -0.5 && h.rect.y >= -0.5 && h.rect.x + h.rect.w <= wd as f32 + 0.5 && h.rect.y + h.rect.h <= ht as f32 + 0.5, "{what} {wd}x{ht}: {} {:?}", h.label, h.rect);
+        }
+        if modal_card(app).is_some() {
+            card_fits(app, wd, ht, what);
+        }
+    }
+}
+
+#[test]
+fn a_deployed_private_store_that_was_never_added_is_listed_first_and_one_approval_adds_pins_targets_and_publishes() {
+    let w = world("pub-unadded");
+    let sw = store_world_with(&w, "unadded", false);
+    let cx = sw.cx.clone();
+    record_deploy(&cx, &format!("http://localhost:{}", sw.addr.rsplit(':').next().unwrap()));
+    let d = tile_project(&w, "alpha");
+    let store = Store::for_services(&cx.services);
+
+    // the report: the old form was built from the stores added on the device, and there are none; the person's only rows were Deploy and Export
+    assert!(iyakki_agent::store::publishflow::stores(&store).is_empty(), "no store was added: this is what used to leave Deploy and Export only");
+    assert!(store.config().publish_target.is_empty() && store.config().sources.is_empty());
+    let info = iyakki_agent::store::privatestore::status_info(cx.services.dir(), "tester", &store);
+    assert!(info.instance.is_some() && info.added.is_none(), "{info:?}");
+
+    let mut app = IdeApp::new(&cx);
+    open(&mut app, &cx, "Alpha", &d);
+    app.handle(&Event::Tab(T_TOP + 14), &cx);
+    let opts = publish_choices(&app);
+    assert!(opts[0].starts_with("Private store on this device (not added yet): Private store \u{b7} key "), "{opts:?}");
+    assert!(opts[1].starts_with("Deploy a new private store to k3s") && opts[1].contains("already deployed") && opts[2].starts_with("Export package file"), "{opts:?}");
+    let Some(Modal::Form(_, f)) = &app.modal else { panic!() };
+    assert_eq!(f.choice_idx(0), 0, "the unadded store is the default choice");
+    fits_all(&mut app, &cx, "publish form with the unadded store");
+
+    // choosing it: a key is made, nothing is added yet, the card shows the fingerprint and asks
+    key(&mut app, &cx, Key::Ctrl('s'));
+    let t = card_text(&app);
+    let fp = store.probe_private(&HttpFetch(Arc::new(Loop)), &format!("http://{}", sw.addr)).unwrap().fingerprint;
+    assert!(t.contains("Add this private store and publish?") && t.contains(&fp) && t.contains("Catalog key fingerprint") && t.contains("kubectl logs -n iyakki-private-store"), "{t}");
+    let labels: Vec<String> = modal_card(&app).unwrap().card.actions.iter().map(|a| a.label.clone()).collect();
+    assert_eq!(labels, vec!["Add it and publish", "Cancel"]);
+    assert!(store.config().sources.is_empty(), "nothing is trusted before the approval");
+    assert!(sw.srv.audit_lines().iter().all(|l| !l.contains(" publish ")));
+    fits_all(&mut app, &cx, "add-it card");
+
+    // approve: the source is added with the key pinned, it is the target, and the publish review follows with no token question (the vault has it)
+    key(&mut app, &cx, Key::Char('y'));
+    let cfg = store.config();
+    assert_eq!(cfg.sources.len(), 1, "{:?}", card_text(&app));
+    assert!(!cfg.sources[0].pin.is_empty() && cfg.publish_target == cfg.sources[0].id);
+    assert_eq!(iyakki_agent::store::server::fingerprint(&cfg.sources[0].pin), fp, "the key that was shown is the key that is pinned");
+    let t = card_text(&app);
+    assert!(t.contains("Publish office-clock 0.1.0 to Private store?") && t.contains("Server: http://"), "{t}");
+    assert!(sw.srv.audit_lines().iter().all(|l| !l.contains(" publish ")), "still nothing sent");
+    fits_all(&mut app, &cx, "review card");
+    key(&mut app, &cx, Key::Char('y'));
+    let t = card_text(&app);
+    assert!(t.contains("Published") && t.contains("office-clock 0.1.0 is listed in Private store"), "{t}");
+    assert!(modal_card(&app).unwrap().card.actions.iter().any(|a| a.label == "Install it here to test"));
+    assert!(sw.srv.audit_lines().iter().any(|l| l.contains("office-clock 0.1.0")));
+    assert!(!sw.srv.audit_lines().join("\n").contains("admin-token-for-tests"), "the token is never logged");
+    // the next time the store is an ordinary row and the deploy row says it is deployed
+    key(&mut app, &cx, Key::Esc);
+    app.handle(&Event::Tab(T_TOP + 14), &cx);
+    let opts = publish_choices(&app);
+    assert!(opts[0].starts_with("\u{2605} Private store") && !opts.iter().any(|o| o.contains("not added yet")), "{opts:?}");
+}
+
+#[test]
+fn a_key_that_is_not_the_one_shown_is_refused_and_nothing_is_added() {
+    let w = world("pub-wrongkey");
+    let sw = store_world_with(&w, "wrongkey", false);
+    let cx = sw.cx.clone();
+    record_deploy(&cx, &format!("http://localhost:{}", sw.addr.rsplit(':').next().unwrap()));
+    let d = tile_project(&w, "alpha");
+    let mut app = IdeApp::new(&cx);
+    open(&mut app, &cx, "Alpha", &d);
+    app.handle(&Event::Tab(T_TOP + 14), &cx);
+    key(&mut app, &cx, Key::Ctrl('s'));
+    assert!(card_text(&app).contains("Add this private store and publish?"));
+    // a store whose key changed between looking and approving
+    app.publish.as_mut().unwrap().adding.as_mut().unwrap().fingerprint = "0000 0000 0000 0000 0000 0000 0000 0000".into();
+    key(&mut app, &cx, Key::Char('y'));
+    let t = card_text(&app);
+    assert!(t.contains("The store was not added") && t.contains("nothing was added"), "{t}");
+    let store = Store::for_services(&cx.services);
+    assert!(store.config().sources.is_empty() && store.config().publish_target.is_empty());
+    assert!(app.publish.is_none());
+    // Cancel on the first card also leaves everything as it was
+    app.handle(&Event::Tab(T_TOP + 14), &cx);
+    key(&mut app, &cx, Key::Ctrl('s'));
+    key(&mut app, &cx, Key::Esc);
+    assert!(app.modal.is_none() && store.config().sources.is_empty());
+}
+
+#[test]
+fn a_deployed_store_whose_pod_is_not_ready_says_so_with_the_next_step_and_changes_nothing() {
+    let w = world("pub-notready");
+    let sw = store_world_with(&w, "notready", false);
+    let cx = sw.cx.clone();
+    // the NodePort answers nothing: the record points at a port nobody listens on
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = dead.local_addr().unwrap().port();
+    drop(dead);
+    record_deploy(&cx, &format!("http://localhost:{port}"));
+    let d = tile_project(&w, "alpha");
+    let mut app = IdeApp::new(&cx);
+    open(&mut app, &cx, "Alpha", &d);
+    app.handle(&Event::Tab(T_TOP + 14), &cx);
+    let opts = publish_choices(&app);
+    assert!(opts[0].contains("not added yet") && opts[0].contains("not answering yet"), "{opts:?}");
+    let keys_before = keys::list(&cx.services, "tester").len();
+    let before = std::fs::read_to_string(d.join("office-clock/iyakki-app.json")).unwrap();
+    key(&mut app, &cx, Key::Ctrl('s'));
+    let e = form_error(&app);
+    assert!(e.contains("is deployed") && e.contains("nothing answers") && e.contains("K8S tile") && e.contains("pod private-store") && e.contains("iyakki-private-store") && !e.contains("io error"), "{e}");
+    assert_eq!(keys::list(&cx.services, "tester").len(), keys_before, "no key was made for a publish that cannot go");
+    assert_eq!(std::fs::read_to_string(d.join("office-clock/iyakki-app.json")).unwrap(), before);
+    assert!(Store::for_services(&cx.services).config().sources.is_empty());
+    fits_all(&mut app, &cx, "form with the not-ready message");
+}
+
+#[test]
+fn deploying_again_when_a_private_store_is_already_deployed_is_refused_with_the_way_forward() {
+    let w = world("pub-already");
+    let sw = store_world_with(&w, "already", true);
+    let cx = sw.cx.clone();
+    record_deploy(&cx, &format!("http://localhost:{}", sw.addr.rsplit(':').next().unwrap()));
+    let d = tile_project(&w, "alpha");
+    let mut app = IdeApp::new(&cx);
+    open(&mut app, &cx, "Alpha", &d);
+    app.handle(&Event::Tab(T_TOP + 14), &cx);
+    let opts = publish_choices(&app);
+    // added through the address 127.0.0.1 and deployed as localhost: still one store, so nothing is offered to add twice
+    assert!(!opts.iter().any(|o| o.contains("not added yet")), "{opts:?}");
+    let i = opts.iter().position(|o| o.starts_with("Deploy a new private store")).unwrap();
+    assert!(opts[i].contains("already deployed: private-store-iyakki-private-store") && opts[i].contains("not redeployed"), "{opts:?}");
+    let Some(Modal::Form(_, f)) = &mut app.modal else { panic!() };
+    f.set_choice(0, i);
+    key(&mut app, &cx, Key::Ctrl('s'));
+    let e = form_error(&app);
+    assert!(e.contains("already deployed") && e.contains("already added") && e.contains("Manage"), "{e}");
+    assert!(app.request.is_none(), "the wizard was not opened");
+}
+
+#[test]
+fn read_only_workspaces_and_accounts_that_cannot_change_the_store_are_told_what_to_do() {
+    let w = world("pub-roles");
+    let sw = store_world_with(&w, "roles", false);
+    let cx = sw.cx.clone();
+    record_deploy(&cx, &format!("http://localhost:{}", sw.addr.rsplit(':').next().unwrap()));
+    let d = tile_project(&w, "alpha");
+    let mut app = IdeApp::new(&cx);
+    open(&mut app, &cx, "Alpha", &d);
+    // a workspace someone else holds: read-only, no form
+    app.ws[0].ro = Some(iyakki_agent::workspace::LockInfo { user: "other".into(), session: "s".into(), pid: 1, host: "h".into(), time: 0, opened: 0 });
+    app.handle(&Event::Tab(T_TOP + 14), &cx);
+    assert!(app.modal.is_none() && app.notice.as_ref().unwrap().0.contains("read-only for you"), "{:?}", app.notice);
+    app.ws[0].ro = None;
+    // an ordinary account may publish (own packages) but may not add a store to the device: said at once, before a version or key is written
+    let mut refused = 0;
+    for role in [iyakki_sec::policy::Role::User, iyakki_sec::policy::Role::Operator] {
+        let mut plain = cx.clone();
+        plain.session.policy = role.template();
+        plain.session.policy.fs_write = vec![w.base.display().to_string()];
+        plain.session.policy.fs_read = vec![w.base.display().to_string()];
+        app.modal = None;
+        app.handle(&Event::Tab(T_TOP + 14), &plain);
+        if !matches!(app.modal, Some(Modal::Form(FormKind::Publish, _))) {
+            continue; // an account without the STORE gets no form at all
+        }
+        if !publish_choices(&app)[0].contains("not added yet") {
+            continue;
+        }
+        let before = keys::list(&plain.services, "tester").len();
+        key(&mut app, &plain, Key::Ctrl('s'));
+        let admin = Actor::from_policy("tester", &plain.session.policy).admin;
+        if !admin {
+            refused += 1;
+            assert!(form_error(&app).contains("only an administrator"), "{:?}", form_error(&app));
+            assert_eq!(keys::list(&plain.services, "tester").len(), before);
+            assert!(Store::for_services(&plain.services).config().sources.is_empty());
+        }
+    }
+    assert!(refused >= 1, "at least one ordinary account reached the refusal");
+    // a guest: no STORE, nothing offered to add
+    let mut guest = cx.clone();
+    guest.session.policy = iyakki_sec::policy::Role::Guest.template();
+    let a = Actor::from_policy("tester", &guest.session.policy);
+    let store = Store::for_services(&guest.services);
+    let err = iyakki_agent::store::privatepub::add_and_target(&store, &a, &HttpFetch(Arc::new(Loop)), &store.probe_private(&HttpFetch(Arc::new(Loop)), &format!("http://{}", sw.addr)).unwrap(), "x").unwrap_err();
+    assert!(err.contains("only an administrator"), "{err}");
+    assert!(store.config().sources.is_empty());
+}
+
+#[test]
+fn the_publish_dialogs_stay_inside_the_window_with_the_chat_pane_open_at_every_size() {
+    let w = world("pub-panes");
+    let sw = store_world_with(&w, "panes", false);
+    let cx = sw.cx.clone();
+    record_deploy(&cx, &format!("http://localhost:{}", sw.addr.rsplit(':').next().unwrap()));
+    let d = tile_project(&w, "alpha");
+    let mut app = IdeApp::new(&cx);
+    open(&mut app, &cx, "Alpha", &d);
+    cur_mut(&mut app).prefs.chat_open = true;
+    app.handle(&Event::Tab(T_TOP + 14), &cx);
+    fits_all(&mut app, &cx, "form in panes");
+    key(&mut app, &cx, Key::Ctrl('s'));
+    fits_all(&mut app, &cx, "add card in panes");
+    key(&mut app, &cx, Key::Char('y'));
+    fits_all(&mut app, &cx, "review card in panes");
+    key(&mut app, &cx, Key::Esc);
 }

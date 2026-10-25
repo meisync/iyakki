@@ -97,7 +97,7 @@ fn main() {
     // the IYAKKI menu and its pages
     key(&mut sh, Key::F(10));
     save(&mut sh, &mut g, &dir, "menu-1-iyakki");
-    for (k, name) in [('a', "menu-2-about"), ('q', "menu-3-quick-install"), ('m', "menu-4-media-player"), ('d', "menu-5-mac-drivers")] {
+    for (k, name) in [('a', "menu-2-about"), ('m', "menu-4-media-player"), ('d', "menu-5-mac-drivers")] {
         key(&mut sh, Key::Char(k));
         save(&mut sh, &mut g, &dir, name);
         key(&mut sh, Key::Esc);
@@ -108,13 +108,17 @@ fn main() {
     std::fs::write(&fake, "#!/bin/sh\necho \"[0/2] installing $2 from the CLI catalogue\"\nsleep 1\necho \"[1/2] downloading 48%\"\nsleep 60\n").unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     sh.set_quick_launch_for_demo(iyakki_agent::quickinstall::Launch { exe: fake, data: data.clone() });
+    // the menu's Quick install entry opens the Store on its Setup tab: search for Node.js, press its button
     key(&mut sh, Key::Char('q'));
-    for _ in 0..3 {
-        key(&mut sh, Key::Down);
+    save(&mut sh, &mut g, &dir, "menu-3-quick-install");
+    key(&mut sh, Key::Char('/'));
+    for c in "node.js".chars() {
+        key(&mut sh, Key::Char(c));
     }
     key(&mut sh, Key::Enter);
-    key(&mut sh, Key::Esc);
-    key(&mut sh, Key::Esc);
+    key(&mut sh, Key::Down);
+    key(&mut sh, Key::Enter);
+    sh.open_for_demo("launcher");
     std::thread::sleep(std::time::Duration::from_millis(1500));
     for _ in 0..40 {
         sh.handle(&Event::Tick);

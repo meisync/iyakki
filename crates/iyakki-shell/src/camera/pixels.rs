@@ -2,6 +2,8 @@
 //! part of a picture, mirroring, and PNG files that carry their print size (the `pHYs` chunk, so a 300 dpi passport photo
 //! prints at 35×45 mm).
 
+use crate::safeclamp::SafeClamp;
+
 /// One video line of YUYV 4:2:2 (Y0 U Y1 V for every two pixels, BT.601 studio range) to straight RGBA.
 pub fn yuyv_to_rgba(w: u32, h: u32, data: &[u8]) -> Vec<u8> {
     let (w, h) = (w as usize, h as usize);
@@ -65,8 +67,8 @@ pub fn crop_scale(sw: u32, sh: u32, rgba: &[u8], r: RectF, ow: u32, oh: u32, mir
     let (fx, fy) = (r.w / ow as f32, r.h / oh as f32);
     let n = (fx.max(fy).ceil() as usize).clamp(1, 4);
     let sample = |x: f32, y: f32| -> [f32; 4] {
-        let x = x.clamp(0.0, swu as f32 - 1.0);
-        let y = y.clamp(0.0, shu as f32 - 1.0);
+        let x = x.clamp_safe(0.0, swu as f32 - 1.0);
+        let y = y.clamp_safe(0.0, shu as f32 - 1.0);
         let (x0, y0) = (x.floor() as usize, y.floor() as usize);
         let (x1, y1) = ((x0 + 1).min(swu - 1), (y0 + 1).min(shu - 1));
         let (tx, ty) = (x - x0 as f32, y - y0 as f32);

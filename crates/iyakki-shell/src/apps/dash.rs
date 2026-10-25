@@ -7,6 +7,7 @@
 //! move and resize) and the chat pane. Credentials never pass through here: a source names a vault entry and the connector
 //! reads it when it asks.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -1617,7 +1618,7 @@ impl DashApp {
                 self.modal = Some(Modal::Name(f, NameFor::New));
             }
             Key::Char('i') => {
-                self.modal = Some(Modal::Name(Form::new("Import a dashboard").text("File", "", "path of a dashboard .json in your home folder"), NameFor::Import));
+                self.modal = Some(Modal::Name(Form::new("Import a dashboard").path("File", "", "path of a dashboard .json in your home folder", crate::filepicker::PathKind::File, &["json"]), NameFor::Import));
             }
             Key::Char('s') => self.screen = Screen::Sources,
             Key::Delete | Key::Char('x') => {
@@ -1949,7 +1950,7 @@ impl DashApp {
                 self.modal = Some(Modal::Name(Form::new("New dashboard").text("Title", "New dashboard", ""), NameFor::New));
             }
             id::IMPORT => {
-                self.modal = Some(Modal::Name(Form::new("Import a dashboard").text("File", "", "path of a dashboard .json in your home folder"), NameFor::Import));
+                self.modal = Some(Modal::Name(Form::new("Import a dashboard").path("File", "", "path of a dashboard .json in your home folder", crate::filepicker::PathKind::File, &["json"]), NameFor::Import));
             }
             id::OPEN => self.open_list_item(cx),
             id::DELETE => {
@@ -2548,7 +2549,7 @@ impl DashApp {
             return (area, None, false);
         }
         if area.w >= 1000.0 && area.w / s >= 980.0 {
-            let cw = (area.w * 0.32).clamp(340.0 * s, 520.0 * s);
+            let cw = (area.w * 0.32).clamp_safe(340.0 * s, 520.0 * s);
             (R::new(area.x, area.y, area.w - cw, area.h), Some(R::new(area.x + area.w - cw, area.y, cw, area.h)), false)
         } else {
             (area, Some(area), true)
@@ -2665,7 +2666,7 @@ impl DashApp {
         self.geo.col_w = col_w;
         self.geo.row_h = row_h;
         let total = self.d.rows() as f32 * row_h + pad;
-        self.scroll = self.scroll.clamp(0.0, (total - board.h).max(0.0));
+        self.scroll = self.scroll.clamp_safe(0.0, (total - board.h).max(0.0));
         if self.d.panels.is_empty() {
             let hint = if self.sources.is_empty() { "Add a data source (Prometheus, Elasticsearch, ClickHouse or DuckDB) with Sources, then add panels. Or ask the assistant." } else { "Add a panel with + Panel, start from a template in Dashboards, or ask the assistant to build one." };
             fx::empty_state(g, board, s, Icon::Dash, "This dashboard has no panels yet", hint, ACCENT);
@@ -2710,7 +2711,7 @@ impl DashApp {
             }
             _ => return None,
         };
-        let g = if size { Grid::new(orig.x, orig.y, (orig.w + dx).max(2), (orig.h + dy).max(2)) } else { Grid::new((orig.x + dx).clamp(0, GRID_COLS - orig.w), (orig.y + dy).max(0), orig.w, orig.h) };
+        let g = if size { Grid::new(orig.x, orig.y, (orig.w + dx).max(2), (orig.h + dy).max(2)) } else { Grid::new((orig.x + dx).clamp_safe(0, GRID_COLS - orig.w), (orig.y + dy).max(0), orig.w, orig.h) };
         Some(R::new(board.x + pad + g.x as f32 * col_w + 4.0, board.y + g.y as f32 * row_h - self.scroll + 6.0, g.w as f32 * col_w - 8.0, g.h as f32 * row_h - 8.0))
     }
 
@@ -3021,9 +3022,9 @@ impl DashApp {
         // the three areas: setup (fields), query + schema, preview
         let (setup, qbox, schema, preview);
         if wide {
-            let lw = (content.w * 0.30).clamp(250.0 * s, 360.0 * s);
+            let lw = (content.w * 0.30).clamp_safe(250.0 * s, 360.0 * s);
             let rest = R::new(content.x + lw + 10.0 * s, content.y, content.w - lw - 10.0 * s, content.h);
-            let qh = (rest.h * 0.38).clamp(110.0 * s, 260.0 * s);
+            let qh = (rest.h * 0.38).clamp_safe(110.0 * s, 260.0 * s);
             setup = Some(R::new(content.x, content.y, lw, content.h));
             qbox = Some(R::new(rest.x, rest.y + 20.0 * s + qt, rest.w, qh));
             schema = Some(R::new(content.x, content.y, lw, content.h)); // below the fields; placed after they are drawn
@@ -3042,7 +3043,7 @@ impl DashApp {
                 }
                 1 => {
                     setup = None;
-                    let lw = (page.w * 0.34).clamp(150.0 * s, 260.0 * s);
+                    let lw = (page.w * 0.34).clamp_safe(150.0 * s, 260.0 * s);
                     schema = Some(R::new(page.x, page.y, lw, page.h));
                     qbox = Some(R::new(page.x + lw + 8.0 * s, page.y + 20.0 * s + qt, page.w - lw - 8.0 * s, (page.h * 0.62 - qt).max(56.0)));
                     preview = None;
@@ -3493,6 +3494,7 @@ impl DashApp {
             Some(Modal::Source { form, .. }) => form.fields.iter().map(|f| match f.kind {
                 super::widgets::FieldKind::Secret => "secret",
                 super::widgets::FieldKind::Choice(_) => "choice",
+                super::widgets::FieldKind::Path(..) => "path",
                 super::widgets::FieldKind::Text => "text",
             }.to_string()).collect(),
             _ => vec![],

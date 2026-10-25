@@ -258,6 +258,16 @@ fn formats(fd: &Fd) -> Vec<u32> {
 }
 
 /// Sizes the camera offers for a format; a stepwise range is offered as the usual sizes inside it.
+/// The usual picture sizes inside a stepwise range (the FaceTime HD camera of a MacBook answers one: widths in steps of 8, up to its
+/// sensor, 1280x720 on a MacBookPro14,1). A size counts when it is in the range and on the steps.
+pub fn stepwise_sizes(minw: u32, maxw: u32, stepw: u32, minh: u32, maxh: u32, steph: u32) -> Vec<(u32, u32)> {
+    let on = |v: u32, min: u32, step: u32| step <= 1 || (v - min) % step == 0;
+    [(320, 240), (640, 480), (800, 600), (1280, 720), (1920, 1080), (2560, 1440)]
+        .into_iter()
+        .filter(|(w, h)| (minw..=maxw).contains(w) && (minh..=maxh).contains(h) && on(*w, minw, stepw) && on(*h, minh, steph))
+        .collect()
+}
+
 fn sizes(fd: &Fd, format: u32) -> Vec<(u32, u32)> {
     let mut out = Vec::new();
     for i in 0..128 {
@@ -270,12 +280,7 @@ fn sizes(fd: &Fd, format: u32) -> Vec<(u32, u32)> {
         if f.type_ == FRMSIZE_TYPE_DISCRETE {
             out.push((f.size[0], f.size[1]));
         } else {
-            let (minw, maxw, minh, maxh) = (f.size[0], f.size[1], f.size[3], f.size[4]);
-            for (w, h) in [(320, 240), (640, 480), (800, 600), (1280, 720), (1920, 1080), (2560, 1440)] {
-                if (minw..=maxw).contains(&w) && (minh..=maxh).contains(&h) {
-                    out.push((w, h));
-                }
-            }
+            out.extend(stepwise_sizes(f.size[0], f.size[1], f.size[2], f.size[3], f.size[4], f.size[5]));
             break;
         }
     }
@@ -452,6 +457,23 @@ impl Opener for V4l2Opener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the facetimehd driver of the MacBook's built-in camera reports (read from its source): one pixel format, YUYV, with a stepwise
+    /// size range; no MJPEG. Checks the camera picks 640x480 YUYV by default and offers the sizes the sensor can do.
+    #[test]
+    fn the_facetime_hd_camera_offers_yuyv_only_with_a_stepwise_range_and_gets_vga_by_default() {
+        let sizes = stepwise_sizes(320, 1280, 8, 240, 720, 1);
+        assert_eq!(sizes, [(320, 240), (640, 480), (800, 600), (1280, 720)]);
+        let modes: Vec<Mode> = sizes.iter().map(|(w, h)| Mode { pix: pix_of(FMT_YUYV).unwrap(), width: *w, height: *h }).collect();
+        assert_eq!(default_mode(&modes), Some(Mode { pix: Pix::Yuyv, width: 640, height: 480 }));
+        // the 12-inch MacBook's sensor is smaller: nothing past 848x588 (800x600 is too tall)
+        assert_eq!(stepwise_sizes(320, 848, 8, 240, 588, 1), [(320, 240), (640, 480)]);
+        // sizes that are off the steps are not offered
+        assert!(stepwise_sizes(321, 1280, 8, 240, 720, 1).is_empty());
+        // the driver's other formats (NV16, YVYU) are not ones this camera app reads
+        assert_eq!(pix_of(fourcc(b"NV16")), None);
+        assert_eq!(pix_of(fourcc(b"YVYU")), None);
+    }
 
     #[test]
     fn structures_and_request_numbers_match_the_kernel_headers() {

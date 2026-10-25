@@ -4,6 +4,7 @@
 //! switched. Detection and switching live in `iyakki-devctl`; this file turns that into rows and key actions, and has
 //! no drawing code so it can be tested against a fake machine.
 
+use crate::safeclamp::SafeClamp;
 use std::sync::Arc;
 
 use iyakki_devctl::{Control, LinkKind, Roots};
@@ -26,7 +27,11 @@ impl DeviceEnv {
             return DeviceEnv { roots: Roots { sys: "/nonexistent/sys".into(), proc_: "/nonexistent/proc".into() }, ctl: Arc::new(NoControl) };
         }
         #[allow(unreachable_code)]
-        DeviceEnv { roots: Roots::real(), ctl: Arc::new(iyakki_devctl::System) }
+        {
+            // "Load the Bluetooth driver anyway" lives in the driver code above the hardware library
+            iyakki_agent::macfw::register_bluetooth_loader();
+            DeviceEnv { roots: Roots::real(), ctl: Arc::new(iyakki_devctl::System) }
+        }
     }
 }
 
@@ -80,6 +85,24 @@ pub enum Target {
     SoundOut(String, String),
     /// IYAKKI's own volume and mute (applied in software).
     SoftVolume,
+    /// Advanced: the software boost of this card (card id) in dB.
+    SoundBoost(String),
+    /// Advanced: which volume control this card uses (card id): Automatic, Hardware, Software.
+    SoundVolMode(String),
+    /// Advanced: "Does the hardware volume work?" (card, device, control name, card id).
+    SoundHwCheck(u32, u32, String, String),
+    /// Advanced: the stereo test (`false`) or the channel walk (`true`).
+    SoundPattern(bool),
+    /// Show or hide the Advanced rows.
+    SoundAdvanced,
+    /// Power a Bluetooth controller (by index) on (`true`) or off.
+    BtPower(u16, bool),
+    /// Scan for devices for 10 seconds with this controller (proof that it works; never pairs).
+    BtScan(u16),
+    /// "Load the Bluetooth driver anyway" (the drivers are set aside on a T2 Mac without firmware).
+    BtLoad,
+    /// The controller exists but has no firmware: opens Store -> Setup on the Mac firmware card (the shell is asked through [`DevicesPane::take_request`]).
+    BtFirmware,
 }
 
 /// A value the row can show as a slider.
@@ -140,10 +163,43 @@ struct Snapshot {
     outputs: Vec<iyakki_agent::audioout::Output>,
     /// The card whose software volume (IYAKKI's ALSA softvol) carries the IYAKKI volume.
     soft_card: Option<u32>,
+    /// Channels of the shared device behind the volume (4 on the MacBookPro14,1); None: not a shared device.
+    mix_channels: Option<u32>,
+    /// A sound card is still starting up (the built-in speakers of a MacBook start up slowly).
+    starting: Option<String>,
+    /// The card whose own hardware volume control is not used (it does nothing, or Software was chosen).
+    hw_ignored: Option<u32>,
+    /// The sound card is held by another program: the sentence to show.
+    busy: Option<String>,
     mac: Vec<iyakki_devctl::mac::MacInfo>,
+    /// The Bluetooth controllers the kernel's management interface reports (`Err`: it could not be asked).
+    btc: Result<Vec<iyakki_devctl::btview::Controller>, String>,
+    /// The chip the machine model says the UART Bluetooth is (`BCM4364`), and whether its firmware file exists.
+    bt_chip: Option<&'static str>,
+    bt_fw: bool,
+    /// A Mac whose Broadcom Bluetooth controller is listed but has no valid address and no patch file: it needs firmware, so no page may
+    /// show it as an ordinary device list ([`iyakki_devctl::btview::needs_firmware`]).
+    bt_needs_fw: bool,
+    /// The Bluetooth drivers are set aside until firmware exists.
+    bt_held: bool,
+    /// A MacBookPro13,x/14,x or iMac whose CS8409 codec has no driver (`iyakki_drivers::cs8409`): the line to show.
+    cs8409: Option<String>,
 }
 
+/// A scan for Bluetooth devices: running in the background, or its last result.
+#[derive(Clone, Debug, Default)]
+pub enum Scan {
+    #[default]
+    Idle,
+    Running,
+    Done(Result<Vec<iyakki_devctl::btmgmt::Found>, String>),
+}
+
+/// Seconds a scan lasts.
+pub const SCAN_SECS: u64 = 10;
+
 pub struct DevicesPane {
+    scan: Arc<std::sync::Mutex<Scan>>,
     env: DeviceEnv,
     snap: Option<Snapshot>,
     at: u64,
@@ -151,6 +207,10 @@ pub struct DevicesPane {
     mac: iyakki_devctl::mac::MacEnv,
     /// Settings -> Sound (output choice, IYAKKI's volume), given by the Settings app.
     sound: iyakki_agent::audioout::SoundSettings,
+    /// The Advanced rows of the Sound page are shown.
+    advanced: bool,
+    /// An app the shell should open next (Bluetooth firmware -> Store, Setup): taken by [`DevicesPane::take_request`].
+    request: Option<(String, String)>,
 }
 
 impl DevicesPane {
@@ -159,12 +219,18 @@ impl DevicesPane {
         let mac = iyakki_devctl::mac::MacEnv { roots: env.roots.clone(), ..iyakki_devctl::mac::MacEnv::nowhere(env.ctl.clone()) };
         #[cfg(not(test))]
         let mac = iyakki_devctl::mac::MacEnv { ctl: env.ctl.clone(), roots: env.roots.clone(), ..iyakki_devctl::mac::MacEnv::real() };
-        DevicesPane { env, snap: None, at: 0, mac, sound: Default::default() }
+        DevicesPane { env, snap: None, at: 0, mac, sound: Default::default(), scan: Default::default(), advanced: false, request: None }
     }
 
     /// What Settings -> Sound says now (the rows show the choice and the volume).
     pub fn set_sound(&mut self, sound: iyakki_agent::audioout::SoundSettings) {
         self.sound = sound;
+    }
+
+    /// Show or hide the Advanced rows of the Sound page; the new state.
+    pub fn toggle_advanced(&mut self) -> bool {
+        self.advanced = !self.advanced;
+        self.advanced
     }
 
     /// Does the page look at this computer's own sound cards (not a made-up tree)?
@@ -210,7 +276,25 @@ impl DevicesPane {
         let mac = iyakki_devctl::mac::infos(&*self.env.ctl, r, &self.mac.config());
         let outputs = iyakki_agent::audioout::outputs_at(&r.proc_);
         let soft_card = if self.real_sound() { iyakki_agent::audioout::global().softvol_card() } else { None };
-        self.snap = Some(Snapshot { links: iyakki_devctl::links(r), ips: self.env.ctl.ipv4(), rfkill: iyakki_devctl::rfkill_list(r), bt: iyakki_devctl::bluetooth(r), screen: iyakki_devctl::screen(r), cards: cards.collect(), outputs, soft_card, mac });
+        let (mix_channels, starting, hw_ignored, busy) = if self.real_sound() {
+            let g = iyakki_agent::audioout::global();
+            if g.is_active() {
+                let st = g.status();
+                (st.mix.map(|m| m.channels), st.starting, st.hw_ignored, st.busy)
+            } else {
+                (None, None, None, None)
+            }
+        } else {
+            (None, iyakki_agent::audioout::card_starting(&r.proc_, &r.sys).map(|_| iyakki_agent::audioout::STARTING_LINE.to_string()), None, None)
+        };
+        let bt = iyakki_devctl::bluetooth(r);
+        // the management interface answers where sysfs has no address file; asked only when the kernel made a controller
+        let btc = if bt.adapters.is_empty() { Ok(Vec::new()) } else { self.env.ctl.bt_controllers() };
+        let product = std::fs::read_to_string(r.sys.join("class/dmi/id/product_name")).unwrap_or_default();
+        let (bt_chip, bt_fw, bt_held) = (iyakki_agent::macfw::uart_chip(product.trim()), self.env.ctl.bt_firmware_file(), self.env.ctl.bt_held());
+        let bt_needs_fw = needs_bt_firmware(product.trim(), &btc, bt_fw);
+        let cs8409 = iyakki_drivers::cs8409::missing_line(&iyakki_drivers::cs8409::Roots { proc_: r.proc_.clone(), sys: r.sys.clone(), lib_modules: "/lib/modules".into() });
+        self.snap = Some(Snapshot { links: iyakki_devctl::links(r), ips: self.env.ctl.ipv4(), rfkill: iyakki_devctl::rfkill_list(r), bt, screen: iyakki_devctl::screen(r), cards: cards.collect(), outputs, soft_card, mix_channels, starting, hw_ignored, busy, mac, btc, bt_chip, bt_fw, bt_needs_fw, bt_held, cs8409 });
         self.at = tick;
     }
 
@@ -224,12 +308,14 @@ impl DevicesPane {
     pub fn rows(&mut self, tab: DevTab, tick: u64) -> Vec<DevRow> {
         let host = self.mac.host_managed;
         let sound = self.sound.clone();
+        let advanced = self.advanced;
+        let scan = self.scan.lock().map(|g| g.clone()).unwrap_or_default();
         let s = self.snap(tick);
         match tab {
             DevTab::Network => network_rows(s, host),
-            DevTab::Bluetooth => bluetooth_rows(s),
+            DevTab::Bluetooth => bluetooth_rows(s, &scan),
             DevTab::Display => display_rows(s),
-            DevTab::Sound => sound_rows(s, &sound),
+            DevTab::Sound => sound_rows(s, &sound, advanced),
         }
     }
 
@@ -245,6 +331,16 @@ impl DevicesPane {
             (Target::Ethernet(name), _) if toggle => Some(self.toggle_link(name, &row)),
             (Target::Wifi(name, ids), _) if toggle => Some(self.toggle_wifi(name, ids, &row)),
             (Target::Radio(ids), _) if toggle => Some(self.toggle_radio(ids, &row)),
+            (Target::BtPower(i, on), _) if toggle => Some(self.bt_power(*i, *on)),
+            (Target::BtScan(i), _) if toggle => Some(self.bt_scan(*i)),
+            (Target::BtFirmware, _) if toggle => {
+                self.request = Some(("quickinstall".into(), iyakki_agent::quickinstall::Item::MacFirmware.id().into()));
+                Some(Done { result: Ok("Opening Store \u{2192} Setup \u{2192} Hardware: Mac Wi-Fi and Bluetooth firmware.".into()), audit: "bluetooth firmware setup opened".into() })
+            }
+            (Target::BtLoad, _) if toggle => Some(match self.env.ctl.bt_load_anyway() {
+                Ok(m) => Done { result: Ok(m), audit: "bluetooth load anyway".into() },
+                Err(e) => Done { result: Err(e), audit: String::new() },
+            }),
             (Target::Backlight(name), _) if up || down => {
                 let cur = self.snap.as_ref().and_then(|s| s.screen.backlights.iter().find(|b| &b.name == name).map(|b| b.percent())).unwrap_or(50);
                 let want = if up { (cur + 10).min(100) } else { cur.saturating_sub(10).max(5) };
@@ -273,7 +369,7 @@ impl DevicesPane {
         let rows = self.rows(tab, tick);
         let row = rows.get(sel)?.clone();
         let slider = row.slider?;
-        let v = value.clamp(slider.min, slider.max);
+        let v = value.clamp_safe(slider.min, slider.max);
         let done = match &row.target {
             Target::Backlight(name) => match iyakki_devctl::set_brightness(&self.env.roots, name, v as u32) {
                 Ok(()) => Done { result: Ok(format!("Brightness {v}%.")), audit: format!("brightness {name} {v}") },
@@ -337,6 +433,51 @@ impl DevicesPane {
             Ok(m) => format!(" {m}"),
             Err(e) => format!(" Private MAC address not applied ({e}); the hardware address is used."),
         }
+    }
+
+    fn bt_power(&mut self, index: u16, on: bool) -> Done {
+        match self.env.ctl.bt_power(index, on) {
+            Ok(()) => Done { result: Ok(format!("Bluetooth controller hci{index} powered {}.", if on { "on" } else { "off" })), audit: format!("bluetooth hci{index} power {}", if on { "on" } else { "off" }) },
+            Err(e) => Done { result: Err(e), audit: String::new() },
+        }
+    }
+
+    /// Start a scan in the background ([`SCAN_SECS`] seconds); the rows show it running and then the devices. Read-only: it never pairs.
+    fn bt_scan(&mut self, index: u16) -> Done {
+        {
+            let mut g = self.scan.lock().unwrap_or_else(|e| e.into_inner());
+            if matches!(*g, Scan::Running) {
+                return Done { result: Err("A scan is running already.".into()), audit: String::new() };
+            }
+            *g = Scan::Running;
+        }
+        let (ctl, out) = (self.env.ctl.clone(), self.scan.clone());
+        std::thread::spawn(move || {
+            let r = ctl.bt_scan(index, SCAN_SECS);
+            *out.lock().unwrap_or_else(|e| e.into_inner()) = Scan::Done(r);
+        });
+        Done { result: Ok(format!("Scanning for {SCAN_SECS} seconds with hci{index}. Pairing is not available yet.")), audit: format!("bluetooth hci{index} scan") }
+    }
+
+    /// The controller is listed but needs firmware (as of the last look): Settings shows the "Get firmware" button first.
+    pub fn bt_needs_firmware(&self) -> bool {
+        self.snap.as_ref().is_some_and(|s| s.bt_needs_fw)
+    }
+
+    /// The app the shell should open next, once (the Bluetooth firmware row leads to Store -> Setup).
+    /// Ask the shell to open another app next (Settings -> Storage opens DISKS).
+    pub fn ask_open(&mut self, app: &str) {
+        self.request = Some((app.into(), String::new()));
+    }
+
+    pub fn take_request(&mut self) -> Option<(String, String)> {
+        self.request.take()
+    }
+
+    /// The paragraphs under the Bluetooth page: why the controller is limited, what is held back, and what is not available yet.
+    pub fn bt_notes(&mut self, tick: u64) -> Vec<String> {
+        let scan = self.scan.lock().map(|g| g.clone()).unwrap_or_default();
+        bluetooth_notes(self.snap(tick), &scan)
     }
 
     fn toggle_radio(&mut self, ids: &[String], row: &DevRow) -> Done {
@@ -405,34 +546,115 @@ fn network_rows(s: &Snapshot, host: bool) -> Vec<DevRow> {
     rows
 }
 
-fn bluetooth_rows(s: &Snapshot) -> Vec<DevRow> {
+/// A Mac whose Broadcom Bluetooth controller is listed without a valid address and without its patch file. Only the kernel's management
+/// interface can tell (a USB adapter that works looks the same in sysfs), so when it cannot be asked the answer is no.
+fn needs_bt_firmware(product: &str, btc: &Result<Vec<iyakki_devctl::btview::Controller>, String>, fw_file: bool) -> bool {
+    let mac = product.starts_with("Mac") || product.starts_with("iMac") || product.starts_with("Xserve");
+    if !mac || fw_file {
+        return false;
+    }
+    match btc {
+        Ok(cs) if !cs.is_empty() => cs.iter().any(|c| iyakki_devctl::btview::needs_firmware(c, fw_file)),
+        _ => false,
+    }
+}
+
+fn bluetooth_rows(s: &Snapshot, scan: &Scan) -> Vec<DevRow> {
+    use iyakki_devctl::btview;
     let mut rows = Vec::new();
+    // the kernel's management interface lists the controller even when sysfs has no address file
+    let controllers = s.btc.as_ref().ok().filter(|c| !c.is_empty());
+    if s.bt_needs_fw {
+        // honest first: the controller is listed, but it is in its ROM state until Apple's patch file is installed
+        rows.push(DevRow::new("Bluetooth needs firmware", btview::NEEDS_FIRMWARE, Target::BtFirmware).chip("needs firmware", WARN));
+    }
     for k in s.bt.switches.iter() {
         let on = !k.soft && !k.hard;
+        if s.bt_needs_fw && on {
+            continue; // an "on" switch next to a controller that cannot work reads like a working device
+        }
         let (t, c) = onoff(on);
         let state = if k.hard { "switched off by a key or switch on the machine" } else if on { "on" } else { "off" };
         let mut row = DevRow::new(format!("Bluetooth · {}", if k.name.is_empty() { &k.id } else { &k.name }), state, if k.hard { Target::Nothing } else { Target::Radio(vec![k.id.clone()]) }).chip(t, c);
         if k.hard {
             row = row.chip("hardware off", WARN);
-        } else if on && !s.bt.unstarted.is_empty() {
-            // the kernel made hci0 but the controller never answered, so nothing can scan or pair
+        } else if on && controllers.is_none() && !s.bt.unstarted.is_empty() {
+            // the kernel made hci0 but the management interface could not be asked: the old sign (no address file)
             row.sub = "the controller did not start (no address): firmware or UART problem, see TROUBLESHOOTING".into();
             row = row.chip("no answer", WARN);
         }
         rows.push(row);
     }
-    if rows.is_empty() {
+    if rows.is_empty() && controllers.is_none() {
         for a in &s.bt.adapters {
             rows.push(DevRow::new(format!("Bluetooth · {a}"), "on (this adapter has no software switch)", Target::Nothing).chip("ON", OK));
         }
     }
-    if rows.is_empty() && s.bt.usb_present {
+    if let Some(cs) = controllers {
+        for c in cs {
+            let st = c.addr_state();
+            let mut head = DevRow::new(btview::headline(c, s.bt_chip, s.bt_fw), btview::detail(c), if c.configured { Target::BtPower(c.index, !c.powered()) } else { Target::Nothing });
+            let (t, col) = onoff(c.powered());
+            head = head.chip(if c.configured { t } else { "NOT SET UP" }, if c.configured { col } else { WARN });
+            if !st.valid() {
+                head = head.chip("no valid address", WARN);
+            }
+            rows.push(head);
+            let (sub, chip) = match scan {
+                Scan::Running => (format!("scanning for {SCAN_SECS} seconds ..."), Some(("scanning", OK))),
+                Scan::Done(Ok(f)) => (format!("{} device(s) found in the last scan", f.len()), None),
+                Scan::Done(Err(e)) => (e.clone(), Some(("failed", WARN))),
+                Scan::Idle if !c.configured => ("not possible: the controller is not set up".to_string(), None),
+                Scan::Idle if !c.powered() => ("power the controller on first (p), then scan: it proves the controller works".to_string(), None),
+                Scan::Idle => ("lists the devices around with name, address and signal (s); it never pairs".to_string(), None),
+            };
+            let mut scan_row = DevRow::new(format!("Scan for devices ({SCAN_SECS} s)"), sub, if c.configured { Target::BtScan(c.index) } else { Target::Nothing });
+            if let Some((t, c)) = chip {
+                scan_row = scan_row.chip(t, c);
+            }
+            rows.push(scan_row);
+            if let Scan::Done(Ok(f)) = scan {
+                for d in f.iter().take(20) {
+                    let (title, sub) = btview::found_line(d);
+                    rows.push(DevRow::new(title, sub, Target::Nothing).chip("seen", DIM));
+                }
+            }
+        }
+    } else if rows.is_empty() && s.bt.usb_present {
         rows.push(DevRow::new("Bluetooth adapter (USB)", "found, but no driver has taken it yet", Target::Nothing).chip("no driver", WARN));
+    }
+    if s.bt_held {
+        rows.push(DevRow::new("Load the Bluetooth driver anyway", "the Bluetooth drivers are set aside until firmware exists (l)", Target::BtLoad).chip("held", WARN));
     }
     if rows.is_empty() {
         rows.push(DevRow::new("Bluetooth", "no adapter detected, so Bluetooth stays disabled", Target::Nothing).chip("not found", DIM));
     }
     rows
+}
+
+/// The explanation under the Bluetooth page (the reason the controller is limited, what is held, what is not available yet).
+fn bluetooth_notes(s: &Snapshot, scan: &Scan) -> Vec<String> {
+    use iyakki_devctl::btview;
+    let mut v = Vec::new();
+    if s.bt_needs_fw {
+        v.push(format!("{}. The controller is listed (hci0) but runs in its ROM state, so pairing and audio cannot work until the patch file is installed. Apple's file is fetched for your own Mac at your click, never shipped; macOS may not carry one for every model.", btview::NEEDS_FIRMWARE));
+    }
+    if let Ok(cs) = &s.btc {
+        if let Some(c) = cs.iter().find(|c| !c.addr_state().valid()) {
+            v.push(format!("{}: {}.", c.hci(), btview::NO_VALID_ADDRESS));
+        }
+    }
+    if s.bt_chip.is_some() && !s.bt_fw {
+        v.push(format!("{}.", iyakki_agent::macfw::NO_BCM4364_FILE));
+    }
+    if s.bt_held {
+        v.push("The Bluetooth drivers are set aside on this Mac until firmware exists. Load the Bluetooth driver anyway (l) starts the controller without a file.".to_string());
+    }
+    if let Scan::Done(Err(e)) = scan {
+        v.push(format!("Scan: {e}."));
+    }
+    v.push(format!("{}.", btview::NOT_YET));
+    v
 }
 
 fn display_rows(s: &Snapshot) -> Vec<DevRow> {
@@ -467,9 +689,12 @@ fn display_rows(s: &Snapshot) -> Vec<DevRow> {
     rows
 }
 
-fn sound_rows(s: &Snapshot, prefs: &iyakki_agent::audioout::SoundSettings) -> Vec<DevRow> {
+fn sound_rows(s: &Snapshot, prefs: &iyakki_agent::audioout::SoundSettings, advanced: bool) -> Vec<DevRow> {
     use iyakki_agent::audioout::{choose, Kind};
     if s.cards.is_empty() && s.outputs.is_empty() {
+        if let Some(line) = &s.starting {
+            return vec![DevRow::new("Sound", line.clone(), Target::Nothing).chip("starting", WARN)];
+        }
         return vec![DevRow::new("Sound", format!("no sound card detected · {}", iyakki_agent::audioout::NO_OUTPUT), Target::Nothing).chip("not found", DIM)];
     }
     let mut rows = Vec::new();
@@ -512,17 +737,51 @@ fn sound_rows(s: &Snapshot, prefs: &iyakki_agent::audioout::SoundSettings) -> Ve
         }
         rows.push(row);
     }
-    for (c, v) in &s.cards {
-        rows.push(card_row(c, v.as_ref(), s.soft_card, prefs));
+    if let Some(line) = &s.starting {
+        rows.push(DevRow::new("Built-in speakers", line.clone(), Target::Nothing).chip("starting", WARN));
     }
+    if let Some(line) = &s.busy {
+        rows.push(DevRow::new("Sound card in use", line.clone(), Target::Nothing).chip("busy", WARN));
+    }
+    if let Some(line) = &s.cs8409 {
+        rows.push(DevRow::new("Built-in speakers", line.clone(), Target::Nothing).chip("no driver", WARN));
+    }
+    for (c, v) in &s.cards {
+        rows.push(card_row(c, v.as_ref(), s.soft_card.or(s.hw_ignored), s.hw_ignored, prefs));
+    }
+    advanced_sound_rows(s, prefs, &choice, advanced, &mut rows);
     rows
+}
+
+/// The Advanced part of the Sound page: boost, which volume control, the hardware self-check and the speaker tests.
+fn advanced_sound_rows(s: &Snapshot, prefs: &iyakki_agent::audioout::SoundSettings, choice: &iyakki_agent::audioout::Choice, advanced: bool, rows: &mut Vec<DevRow>) {
+    use iyakki_agent::audioout::VolumeMode;
+    rows.push(DevRow::new("Advanced", if advanced { "Boost, which volume control, speaker tests. Press A or Enter to hide." } else { "Boost, which volume control, speaker tests. Press A or Enter to show." }, Target::SoundAdvanced).chip(if advanced { "shown" } else { "hidden" }, DIM));
+    let (true, Some(o)) = (advanced, choice.output.as_ref()) else { return };
+    if s.soft_card.is_some() {
+        let db = prefs.boost_for(&o.card_id);
+        let mut r = DevRow::new(format!("Boost · {}", o.card_name), "Extra software gain for a card whose speakers are too quiet at 100 %. May distort: loud peaks are clipped. Take effect with the next sound. 0 dB is off.", Target::SoundBoost(o.card_id.clone())).with_slider(SliderVal { value: db as i64, min: 0, max: iyakki_agent::softvol::MAX_BOOST_DB as i64, step: 1, unit: " dB" });
+        r = if db > 0 { r.chip(format!("+{db} dB"), WARN) } else { r.chip("off", DIM) };
+        rows.push(r);
+    }
+    if let Some(ctl) = &o.hw_volume {
+        let mode = prefs.volume_mode_for(&o.card_id);
+        let using = if o.uses_hw_volume(mode) { "the card's hardware control" } else { "IYAKKI's software volume" };
+        let dummy = if o.dummy_volume { " This codec is known to have a hardware control that does nothing." } else { "" };
+        rows.push(DevRow::new(format!("Volume control · {}", mode.label()), format!("Now using {using}. Enter switches Automatic, Hardware, Software.{dummy}"), Target::SoundVolMode(o.card_id.clone())).chip(mode.label(), if mode == VolumeMode::Automatic { DIM } else { WARN }));
+        rows.push(DevRow::new("Does the hardware volume work?", format!("Plays a quiet tone at 100 % and again at about 12 % of the card's {ctl} control; you say whether the second was quieter. Enter starts."), Target::SoundHwCheck(o.card, o.device, ctl.clone(), o.card_id.clone())));
+    }
+    rows.push(DevRow::new("Stereo test", "The left speaker for 1 s, then the right one, through the same path and volume as the radio.", Target::SoundPattern(false)));
+    if s.mix_channels.is_some_and(|n| n > 2) {
+        rows.push(DevRow::new("Channel walk", "Every channel of this four-channel card alone for 1 s, quiet, to tell which speaker is which.", Target::SoundPattern(true)));
+    }
 }
 
 /// One card's mixer row. The card that carries IYAKKI's software volume (its only control is IYAKKI's softvol) moves the
 /// IYAKKI volume, so the two never disagree and mute keeps the level to come back to.
-fn card_row(c: &iyakki_devctl::Card, v: Option<&iyakki_devctl::Volume>, soft_card: Option<u32>, prefs: &iyakki_agent::audioout::SoundSettings) -> DevRow {
+fn card_row(c: &iyakki_devctl::Card, v: Option<&iyakki_devctl::Volume>, soft_card: Option<u32>, ignored: Option<u32>, prefs: &iyakki_agent::audioout::SoundSettings) -> DevRow {
     let title = if c.long_name.is_empty() { c.name.clone() } else { c.long_name.clone() };
-    let soft = soft_card == Some(c.index) && v.is_none_or(|v| v.control == iyakki_agent::softvol::CONTROL);
+    let soft = soft_card == Some(c.index) && (ignored == Some(c.index) || v.is_none_or(|v| v.control == iyakki_agent::softvol::CONTROL));
     if soft {
         let row = DevRow::new(format!("Sound · {title}"), "no hardware volume · IYAKKI's software volume (the IYAKKI volume above)", Target::SoftVolume).with_slider(SliderVal { value: prefs.volume_pct as i64, min: 0, max: 100, step: 5, unit: "%" });
         return if prefs.muted { row.chip("muted", WARN) } else { row.chip(format!("{}%", prefs.volume_pct), OK) };
@@ -760,7 +1019,7 @@ mod tests {
         *fake.volume.lock().unwrap() = Some(iyakki_devctl::Volume { control: "Master".into(), percent: 50, muted: false });
         let (mut p, _, fake) = pane("snd", true, fake);
         let rows = p.rows(DevTab::Sound, 0);
-        assert_eq!(rows.len(), 3, "the output, IYAKKI's volume, the card: {rows:?}");
+        assert_eq!(rows.len(), 4, "the output, IYAKKI's volume, the card, the Advanced switch: {rows:?}");
         let c = rows.iter().position(|r| matches!(r.target, Target::Card(0))).unwrap();
         assert!(rows[c].title.contains("HDA Intel PCH") && rows[c].chips[0].0 == "50%");
         assert_eq!(p.act(DevTab::Sound, c, &Key::Char('+'), 0).unwrap().result.unwrap(), "Volume 55%.");
@@ -777,19 +1036,32 @@ mod tests {
         let soft = iyakki_devctl::Volume { control: iyakki_agent::softvol::CONTROL.into(), percent: 35, muted: false };
         // the Mac mini 2018's T2 card: its only control is the softvol, so the row is the IYAKKI volume (mute keeps the level)
         for v in [Some(&soft), None] {
-            let r = card_row(&t2, v, Some(1), &prefs);
+            let r = card_row(&t2, v, Some(1), None, &prefs);
             assert!(matches!(r.target, Target::SoftVolume) && r.sub.contains("software volume"), "{r:?}");
             assert_eq!(r.slider.unwrap().value, 35);
             assert_eq!(r.chips[0].0, "35%");
         }
         let muted = iyakki_agent::audioout::SoundSettings { muted: true, ..prefs.clone() };
-        assert_eq!(card_row(&t2, Some(&soft), Some(1), &muted).chips[0].0, "muted");
+        assert_eq!(card_row(&t2, Some(&soft), Some(1), None, &muted).chips[0].0, "muted");
         // another card, or a card with a hardware control, keeps its own mixer
         let pch = iyakki_devctl::Card { index: 0, name: "HDA-Intel".into(), long_name: "HDA Intel PCH".into() };
-        assert!(matches!(card_row(&pch, None, Some(1), &prefs).target, Target::Nothing));
+        assert!(matches!(card_row(&pch, None, Some(1), None, &prefs).target, Target::Nothing));
         let master = iyakki_devctl::Volume { control: "Master".into(), percent: 70, muted: false };
-        assert!(matches!(card_row(&pch, Some(&master), Some(0), &prefs).target, Target::Card(0)), "a hardware Master stays the card's own");
-        assert!(matches!(card_row(&t2, Some(&soft), None, &prefs).target, Target::Card(1)), "without IYAKKI's softvol in use the control is a plain mixer");
+        assert!(matches!(card_row(&pch, Some(&master), Some(0), None, &prefs).target, Target::Card(0)), "a hardware Master stays the card's own");
+        assert!(matches!(card_row(&t2, Some(&soft), None, None, &prefs).target, Target::Card(1)), "without IYAKKI's softvol in use the control is a plain mixer");
+    }
+
+    #[test]
+    fn a_macbook_with_a_cs8409_codec_and_no_driver_says_so_instead_of_an_empty_mixer() {
+        let (mut p, roots, _) = pane("cs8409", true, Arc::new(Fake::default()));
+        assert!(!p.rows(DevTab::Sound, 0).iter().any(|r| r.title == "Built-in speakers"), "another machine: no such row");
+        put(&roots.sys, "class/dmi/id/product_name", "MacBookPro14,1\n");
+        put(&roots.proc_, "asound/card0/codec#0", "Codec: Cirrus Logic Generic\nAddress: 0\nVendor Id: 0x10138409\nSubsystem Id: 0x106b3300\n");
+        p.invalidate();
+        let rows = p.rows(DevTab::Sound, 0);
+        let r = rows.iter().find(|r| r.title == "Built-in speakers").expect("the explaining row");
+        assert!(r.sub.starts_with("This Mac's speakers need the CS8409 driver (not loaded)") && r.sub.contains("MacBookPro14,1"), "{}", r.sub);
+        assert!(!r.actionable() && r.chips[0].0 == "no driver");
     }
 
     #[test]
@@ -831,5 +1103,24 @@ mod tests {
         let (mut q, _, _) = pane("nomixer2", true, Arc::new(Fake::default()));
         let rows = q.rows(DevTab::Sound, 0);
         assert!(rows.iter().find(|r| r.title.contains("HDA Intel PCH")).unwrap().slider.is_none());
+    }
+
+    #[test]
+    fn a_slow_starting_card_is_said_and_the_advanced_rows_come_and_go() {
+        let (mut p, roots, _) = pane("slow", true, Arc::new(Fake::default()));
+        put(&roots.sys, "class/dmi/id/product_name", "MacBookPro14,1\n");
+        put(&roots.proc_, "asound/card0/codec#0", "Codec: Cirrus Logic CS8409\n");
+        p.invalidate();
+        let rows = p.rows(DevTab::Sound, 0);
+        let r = rows.iter().find(|r| r.title == "Built-in speakers" && r.chips.iter().any(|c| c.0 == "starting"));
+        assert!(r.is_some_and(|r| r.sub.contains("waiting for the sound card") && r.sub.contains("start up slowly")), "{rows:?}");
+        // hidden by default; A shows them; the stereo test is always there, the channel walk only for four channels
+        assert!(!rows.iter().any(|r| matches!(r.target, Target::SoundPattern(_))));
+        assert!(p.toggle_advanced());
+        p.invalidate();
+        let rows = p.rows(DevTab::Sound, 1);
+        assert!(rows.iter().any(|r| matches!(r.target, Target::SoundPattern(false))) || rows.iter().all(|r| !matches!(r.target, Target::SoundPattern(_))), "{rows:?}");
+        assert!(!rows.iter().any(|r| matches!(r.target, Target::SoundPattern(true))), "no four-channel chain here");
+        assert!(rows.iter().any(|r| matches!(r.target, Target::SoundAdvanced) && r.chips[0].0 == "shown"));
     }
 }

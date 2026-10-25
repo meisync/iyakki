@@ -365,7 +365,7 @@ impl SettingsApp {
                 chips.push(("hidden", DIM));
             }
             let sub_fit = g.fit(13.0 * s, &sub, Face::Sans, a.w - 200.0 * s);
-            row(g, i, a.x, y, a.w, 58.0 * s, s, i == sel, &ag.label(), &sub_fit, &chips);
+            row(g, &mut self.tip, i, a.x, y, a.w, 58.0 * s, s, i == sel, &ag.label(), &sub_fit, &chips);
             y += 66.0 * s;
         }
         // the selected agent's details: what to do, and the rules it runs under

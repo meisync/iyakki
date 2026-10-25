@@ -8,6 +8,7 @@
 //! and click of its host. Nothing runs without the person's approval on a review screen; no secret is ever drawn except in the masked
 //! reveal dialog, which shows it once.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -577,7 +578,7 @@ impl PlatformPanel {
 
     fn move_sel(sel: &mut usize, d: i32, len: usize) {
         if len > 0 {
-            *sel = (*sel as i32 + d).clamp(0, len as i32 - 1) as usize;
+            *sel = (*sel as i32 + d).clamp_safe(0, len as i32 - 1) as usize;
         }
     }
 
@@ -957,7 +958,7 @@ impl PlatformPanel {
             let profiles = platform::list_profiles(pl);
             let choice = devcluster::Choice::load(&pl.dir, &pl.user);
             let pick = profiles.iter().filter(|l| l.refusal.is_none()).find(|l| choice.as_ref().is_some_and(|c| c.kubeconfig == l.profile.kubeconfig)).or_else(|| profiles.iter().find(|l| l.refusal.is_none()));
-            let Some(l) = pick else { return Done::RegState(Err("No cluster is reachable. Start the dev cluster (Quick install \u{2192} k3s) or choose one in Settings \u{2192} Dev cluster.".into())) };
+            let Some(l) = pick else { return Done::RegState(Err("No cluster is reachable. Start the dev cluster (Store \u{2192} Setup \u{2192} k3s) or choose one in Settings \u{2192} Dev cluster.".into())) };
             let t = Target::from_profile(&l.profile);
             let st = localreg::inspect(&pl.run, &iyakki_agent::ocipush::TcpHttp::default(), &t);
             let dep = localreg::check_dependency(&pl.run, &t);
@@ -2321,7 +2322,7 @@ impl PlatformPanel {
         let visible = ((list.h / rh).floor().max(1.0)) as usize;
         let sel = w.osel;
         let first = sel.saturating_sub(visible - 1).min(w.fields.len().saturating_sub(visible));
-        let label_w = (list.w * 0.30).clamp(110.0 * s, 240.0 * s);
+        let label_w = (list.w * 0.30).clamp_safe(110.0 * s, 240.0 * s);
         let mut y = list.y;
         for i in first..(first + visible).min(w.fields.len()) {
             let f = &w.fields[i];

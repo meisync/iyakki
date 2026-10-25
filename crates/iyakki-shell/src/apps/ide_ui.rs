@@ -228,6 +228,11 @@ impl IdeApp {
         hidden.push(("→ Chat".to_string(), 8, MAGENTA));
         hidden.push(("New app, MCP server or skill…".to_string(), 12, CYAN));
         hidden.push(("Change target…".to_string(), 16, CYAN));
+        hidden.push(("Clone repositories…".to_string(), 19, CYAN));
+        hidden.push(("Connect Git / Gitea…".to_string(), 21, CYAN));
+        if !w.cfg.repos.is_empty() {
+            hidden.push(("Repositories…".to_string(), 20, CYAN));
+        }
         if target.is_some_and(|t| t.is_package()) {
             hidden.push(("Validate and test app…".to_string(), 15, AMBER));
         }
@@ -292,6 +297,19 @@ impl IdeApp {
                 self.last_target_chip = Some(R::new(x - cw - 6.0 * s, y, cw, bh));
             } else {
                 self.last_target_chip = None;
+            }
+        }
+        // the project's git: who it is connected to, or the prompt to connect it (click: the panel, or the connect flow)
+        if let Some(head) = self.git_head() {
+            let (label, n, col, loud) = match &head.origin {
+                Some(_) => (format!("git: {}", head.conn.clone().unwrap_or_else(|| head.host.clone())), 20, CYAN, false),
+                None => ("Connect Git / Gitea".to_string(), 21, AMBER, true),
+            };
+            let need = { let sz = fx::size::CAPTION * s * 0.85; g.text_width(sz, &label, Face::Bold) + sz * 1.4 + 6.0 * s };
+            if right - x > need + prio + 60.0 * s {
+                let cw = fx::chip(g, x, y + 1.0 * s, s * 0.85, &label, col, loud);
+                g.hit(R::new(x, y, cw, bh), Event::Tab(T_TOP + n), if loud { "Connect Git / Gitea" } else { "Git: the repositories panel" });
+                x += cw + 6.0 * s;
             }
         }
         if let Some(h) = hint.as_ref().filter(|h| { let sz = fx::size::CAPTION * s * 0.85; right - x > g.text_width(sz, h, Face::Bold) + sz * 1.4 + 130.0 * s + prio }) {
@@ -652,8 +670,25 @@ impl IdeApp {
             cm.card.render(g, area, s);
             return;
         }
+        if matches!(self.modal, Some(Modal::Git(_))) {
+            let (rows, _) = self.repo_rows();
+            let note = if self.git.note.is_empty() {
+                self.active_ws().map(|w| w.cfg.git_keys.iter().map(|(h, k)| format!("{h} → {k}")).collect::<Vec<_>>().join(", ")).filter(|s| !s.is_empty()).map(|s| format!("Keys for this workspace: {s}")).unwrap_or_default()
+            } else {
+                self.git.note.clone()
+            };
+            let head = self.git_head();
+            if let Some(Modal::Git(gm)) = &mut self.modal {
+                if let super::ide_git::GitModal::Repos(p) = &mut **gm {
+                    p.head = head;
+                }
+                gm.render(g, area, s, accent, blink, &rows, &note);
+            }
+            return;
+        }
         let Some(m) = &self.modal else { return };
         match m {
+            Modal::Git(_) => {}
             Modal::Form(_, f) => f.render(g, area, s, accent, blink),
             Modal::Browse(_, _, p) => p.render(g, area, s, accent),
             Modal::Card(_) => {}

@@ -55,6 +55,12 @@ pub fn parse_caps(b: &[u8]) -> Option<Caps> {
     Some(Caps { driver: cstr(&b[..16]), card: cstr(&b[16..48]), bus: cstr(&b[48..80]), caps: if all & CAP_DEVICE_CAPS != 0 { dev } else { all } })
 }
 
+/// Is the Broadcom FaceTime HD camera (PCI 14e4:1570, a MacBook's built-in camera) among the PCI devices?
+pub fn has_facetime_pci(sys: &Path) -> bool {
+    let rd = |d: &Path, f: &str| std::fs::read_to_string(d.join(f)).map(|s| s.trim().to_ascii_lowercase()).unwrap_or_default();
+    std::fs::read_dir(sys.join("bus/pci/devices")).into_iter().flatten().flatten().any(|e| rd(&e.path(), "vendor") == "0x14e4" && rd(&e.path(), "device") == "0x1570")
+}
+
 /// A camera found on the machine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CamDevice {
@@ -74,6 +80,8 @@ pub struct Presence {
     /// node -> (its `dev` number, the camera when it is one)
     known: BTreeMap<String, (String, Option<CamDevice>)>,
     apple: bool,
+    /// The Broadcom FaceTime HD camera (PCI 14e4:1570) of a MacBook is on this machine.
+    facetime_pci: bool,
     scanned: bool,
 }
 
@@ -89,7 +97,8 @@ impl Presence {
 
     pub fn with(roots: Roots, query: Query) -> Presence {
         let apple = std::fs::read_to_string(roots.sys.join("class/dmi/id/sys_vendor")).is_ok_and(|v| v.contains("Apple"));
-        Presence { roots, query, known: BTreeMap::new(), apple, scanned: false }
+        let facetime_pci = has_facetime_pci(&roots.sys);
+        Presence { roots, query, known: BTreeMap::new(), apple, facetime_pci, scanned: false }
     }
 
     /// Nothing at all: no camera, never looks (the tests' default).
@@ -152,7 +161,9 @@ impl Presence {
 
     /// What to say when the greyed tile is chosen.
     pub fn hint(&self) -> &'static str {
-        if self.apple {
+        if self.apple && self.facetime_pci {
+            "No camera found. The built-in FaceTime HD camera needs Apple's firmware, which IYAKKI never ships: open STORE, Setup, Hardware and press Install camera driver and firmware (the driver is in this image; the firmware is downloaded from Apple for this Mac). A USB camera works at once."
+        } else if self.apple {
             "No camera found. Connect a USB camera: a Mac mini has none built in, and the built-in camera of a Mac with a T2 chip is not reachable from IYAKKI."
         } else if !self.known.is_empty() {
             "No camera found: the video devices here do not take pictures. Connect a USB camera."
@@ -298,6 +309,28 @@ pub(crate) mod tests {
         std::fs::remove_file(m.roots.dev.join("video0")).unwrap();
         p.scan();
         assert!(!p.available());
+    }
+
+    #[test]
+    fn a_facetime_hd_camera_is_a_normal_video_node_and_without_its_firmware_the_hint_points_to_the_camera_firmware() {
+        let m = FakeMachine::new("facetime");
+        let w = |rel: &str, s: &str| {
+            let p = m.roots.sys.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, s).unwrap();
+        };
+        w("class/dmi/id/sys_vendor", "Apple Inc.\n");
+        w("bus/pci/devices/0000:03:00.0/vendor", "0x14e4\n");
+        w("bus/pci/devices/0000:03:00.0/device", "0x1570\n");
+        let mut p = m.presence();
+        p.scan();
+        assert!(!p.available() && p.hint().contains("FaceTime HD") && p.hint().contains("camera driver and firmware") && p.hint().contains("USB camera"));
+        // the driver's node: capture + read/write + streaming, device_caps given (what fthd_v4l2_ioctl_querycap sets), card "Apple Facetime HD"
+        let caps = CAP_VIDEO_CAPTURE | CAP_STREAMING | 0x0100_0000 /* READWRITE */;
+        m.plug("video0", "81:0", "Apple Facetime HD", Some(raw_caps("facetimehd", "Apple Facetime HD", caps | CAP_DEVICE_CAPS, caps)));
+        assert!(p.scan() && p.available());
+        let c = &p.cameras()[0];
+        assert_eq!((c.node.as_str(), c.name.as_str(), c.caps.driver.as_str()), ("video0", "Apple Facetime HD", "facetimehd"));
     }
 
     #[test]

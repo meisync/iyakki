@@ -2,6 +2,7 @@
 //! draws with `Gfx`: anti-aliased lines, layered gradient areas, axes with nice ticks, a crosshair with a tooltip. The maths is
 //! pure so it is tested without a screen.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::BTreeMap;
 
 use iyakki_agent::dash::frame::{format_time, ColType, Frame};
@@ -348,7 +349,7 @@ fn draw_line_series(g: &mut Gfx, p: &Plot, l: &Line, fill: bool, s: f32, glow: b
     if pts.is_empty() {
         return;
     }
-    let xy: Vec<(f32, f32)> = pts.iter().map(|q| (p.x(q.0).clamp(p.r.x, p.r.x + p.r.w), p.y_on(l.axis, q.1).clamp(p.r.y - 2.0, p.r.y + p.r.h + 2.0))).collect();
+    let xy: Vec<(f32, f32)> = pts.iter().map(|q| (p.x(q.0).clamp_safe(p.r.x, p.r.x + p.r.w), p.y_on(l.axis, q.1).clamp_safe(p.r.y - 2.0, p.r.y + p.r.h + 2.0))).collect();
     let base = if l.axis == 0 { p.y(p.y0.max(0.0).min(p.y1)) } else { p.y_on(1, p.ry0.max(0.0).min(p.ry1)) };
     if fill && xy.len() > 1 {
         // a gradient: layers of the same polygon, each clipped at a lower level
@@ -490,7 +491,7 @@ pub fn draw_xy(g: &mut Gfx, body: R, s: f32, m: &Model, visual: Visual, o: &Opti
     }
     // zoom drag
     if let Some((a, b)) = ptr.drag {
-        let (x0, x1) = (a.min(b).clamp(plot_r.x, plot_r.x + plot_r.w), a.max(b).clamp(plot_r.x, plot_r.x + plot_r.w));
+        let (x0, x1) = (a.min(b).clamp_safe(plot_r.x, plot_r.x + plot_r.w), a.max(b).clamp_safe(plot_r.x, plot_r.x + plot_r.w));
         g.rect(x0, plot_r.y, (x1 - x0).max(1.0), plot_r.h, with_alpha(CYAN, 38));
         g.rect(x0, plot_r.y, 1.0, plot_r.h, with_alpha(CYAN, 160));
         g.rect(x1, plot_r.y, 1.0, plot_r.h, with_alpha(CYAN, 160));
@@ -502,7 +503,7 @@ pub fn draw_xy(g: &mut Gfx, body: R, s: f32, m: &Model, visual: Visual, o: &Opti
             g.rect(x, plot_r.y, 1.0, plot_r.h, with_alpha(TEXT, 90));
             for (li, _, v) in &vals {
                 if visual.is_timeseries() {
-                    let yy = p.y_on(m.lines[*li].axis, *v).clamp(plot_r.y, plot_r.y + plot_r.h);
+                    let yy = p.y_on(m.lines[*li].axis, *v).clamp_safe(plot_r.y, plot_r.y + plot_r.h);
                     g.circle(x, yy, 3.4 * s, m.lines[*li].color);
                     g.ring(x, yy, 5.5 * s, 1.2, with_alpha(m.lines[*li].color, 120));
                 }
@@ -575,7 +576,7 @@ pub fn draw_tooltip(g: &mut Gfx, t: &Tooltip, s: f32, screen: R) {
     if x + w > screen.x + screen.w {
         x = t.x - w - 14.0 * s;
     }
-    let y = (t.y - h / 2.0).clamp(screen.y, (screen.y + screen.h - h).max(screen.y));
+    let y = (t.y - h / 2.0).clamp_safe(screen.y, (screen.y + screen.h - h).max(screen.y));
     let x = x.max(screen.x);
     g.rrect(x + 2.0, y + 3.0, w, h, 8.0 * s, rgb(2, 4, 12));
     g.rrect(x, y, w, h, 8.0 * s, rgb(14, 19, 40));
@@ -614,7 +615,7 @@ pub fn draw_stat(g: &mut Gfx, body: R, s: f32, f: &Frame, o: &Options, base: [u8
     let text = format_value(v, o.unit, o.decimals);
     let spark_h = if f.series.first().is_some_and(|s| s.points.len() > 3) { body.h * 0.34 } else { 0.0 };
     let avail = (body.w - 16.0 * s).max(30.0);
-    let mut size = ((body.h - spark_h) * 0.55).clamp(16.0 * s, 64.0 * s);
+    let mut size = ((body.h - spark_h) * 0.55).clamp_safe(16.0 * s, 64.0 * s);
     while size > 12.0 * s && g.text_width(size, &text, Face::Bold) > avail {
         size -= 2.0 * s;
     }
@@ -698,7 +699,7 @@ pub fn draw_pie(g: &mut Gfx, body: R, s: f32, m: &Model, o: &Options, donut: boo
         g.text(body.x + 8.0 * s, body.y + 8.0 * s, 13.0 * s, DIM, "no data", Face::Sans);
         return;
     }
-    let legend_w = (body.w * 0.4).clamp(90.0 * s, 220.0 * s).min(body.w * 0.5);
+    let legend_w = (body.w * 0.4).clamp_safe(90.0 * s, 220.0 * s).min(body.w * 0.5);
     let radius = ((body.w - legend_w).min(body.h) / 2.0 - 6.0 * s).max(10.0);
     let (cx, cy) = (body.x + (body.w - legend_w) / 2.0, body.y + body.h / 2.0);
     let vals: Vec<f64> = m.slices.iter().map(|x| x.1).collect();

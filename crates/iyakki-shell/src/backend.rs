@@ -1,6 +1,6 @@
 //! Event loop tying the shell to the framebuffer and evdev devices.
 
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -8,7 +8,9 @@ use crate::fb::Framebuffer;
 use crate::gfx::{rgb, Gfx};
 use crate::input::{poll_devices, scan_devices, BackgroundScan, Device, InputState};
 use crate::shell::Shell;
+use crate::pointer_sprites::{shape_from_u8, shape_to_u8, sprite};
 use crate::ui::Event;
+use crate::ui::Pointer as Shape;
 
 /// The input thread only reads devices and paints a small rectangle.
 const INPUT_STACK: usize = 8 * 1024 * 1024;
@@ -32,7 +34,7 @@ pub fn draw_cursor(g: &mut Gfx, x: i32, y: i32) {
 
 /// While alive, the kernel text console stops drawing on the screen (no blinking cursor, no stray
 /// kernel messages over our UI). Restored on drop. Best effort: needs a VT and permission.
-struct GraphicsMode(Option<std::fs::File>);
+pub(crate) struct GraphicsMode(Option<std::fs::File>);
 
 impl GraphicsMode {
     const KDSETMODE: libc::c_ulong = 0x4B3A;
@@ -61,7 +63,7 @@ impl GraphicsMode {
         None
     }
 
-    fn enter() -> GraphicsMode {
+    pub(crate) fn enter() -> GraphicsMode {
         use std::os::fd::AsRawFd;
         for path in ["/dev/tty0", "/dev/console"] {
             if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(path) {
@@ -90,42 +92,58 @@ pub fn cursor_scale(w: u32, h: u32) -> usize {
     ((w as f32 / 1280.0).min(h as f32 / 720.0).round() as usize).clamp(1, 3)
 }
 
-/// The on-screen rectangle (clipped to the screen) covered by the pointer drawn at (`x`, `y`).
-pub fn cursor_rect(x: i32, y: i32, k: usize, w: usize, h: usize) -> Option<(usize, usize, usize, usize)> {
-    let (cw, ch) = (12 * k as i32, 17 * k as i32);
-    let (x0, y0) = (x.max(0), y.max(0));
-    let (x1, y1) = ((x + cw).min(w as i32), (y + ch).min(h as i32));
+/// Where the sprite of `shape` drawn for a pointer at (`x`, `y`) starts on the screen (its top-left corner, may be
+/// negative: the hotspot sits on the pointer position) and its size, both in screen pixels. `None` for a hidden pointer.
+fn sprite_box(shape: Shape, x: i32, y: i32, k: usize) -> Option<(i64, i64, i64, i64)> {
+    let s = sprite(shape)?;
+    let k = k.max(1) as i64;
+    Some((x as i64 - s.hot.0 as i64 * k, y as i64 - s.hot.1 as i64 * k, s.w as i64 * k, s.h as i64 * k))
+}
+
+/// The on-screen rectangle (clipped to the screen) covered by the pointer of `shape` drawn at (`x`, `y`).
+pub fn cursor_rect(shape: Shape, x: i32, y: i32, k: usize, w: usize, h: usize) -> Option<(usize, usize, usize, usize)> {
+    let (ox, oy, cw, ch) = sprite_box(shape, x, y, k)?;
+    let (x0, y0) = (ox.max(0), oy.max(0));
+    let (x1, y1) = ((ox + cw).min(w as i64), (oy + ch).min(h as i64));
     if x1 <= x0 || y1 <= y0 { None } else { Some((x0 as usize, y0 as usize, (x1 - x0) as usize, (y1 - y0) as usize)) }
 }
 
 /// A small RGBA patch of the scene under the pointer with the pointer painted on top, and where it goes.
-pub fn cursor_patch(scene: &[u8], w: usize, h: usize, x: i32, y: i32, k: usize) -> Option<((usize, usize, usize, usize), Vec<u8>)> {
-    let r = cursor_rect(x, y, k, w, h)?;
+pub fn cursor_patch(scene: &[u8], w: usize, h: usize, shape: Shape, x: i32, y: i32, k: usize) -> Option<((usize, usize, usize, usize), Vec<u8>)> {
+    if scene.len() < w.checked_mul(h)?.checked_mul(4)? {
+        return None;
+    }
+    let r = cursor_rect(shape, x, y, k, w, h)?;
     let (rx, ry, rw, rh) = r;
     let mut patch = Vec::with_capacity(rw * rh * 4);
     for row in ry..ry + rh {
         patch.extend_from_slice(&scene[(row * w + rx) * 4..(row * w + rx + rw) * 4]);
     }
-    paint_cursor(&mut patch, rw, rh, (rx as i32, ry as i32), x, y, k);
+    paint_cursor(&mut patch, rw, rh, (rx as i32, ry as i32), shape, x, y, k);
     Some((r, patch))
 }
 
-/// Paint the pointer (tip at screen position `x`, `y`) into `frame`, a `fw` x `fh` buffer whose top-left
+/// Paint the pointer of `shape` (hotspot at screen position `x`, `y`) into `frame`, a `fw` x `fh` buffer whose top-left
 /// corner is at screen position `origin`.
-pub fn paint_cursor(frame: &mut [u8], fw: usize, fh: usize, origin: (i32, i32), x: i32, y: i32, k: usize) {
-    for (row, line) in CURSOR.iter().enumerate() {
+pub fn paint_cursor(frame: &mut [u8], fw: usize, fh: usize, origin: (i32, i32), shape: Shape, x: i32, y: i32, k: usize) {
+    let (Some(sp), Some((ox, oy, _, _))) = (sprite(shape), sprite_box(shape, x, y, k)) else { return };
+    let k = k.max(1) as i64;
+    let (ox, oy) = (ox - origin.0 as i64, oy - origin.1 as i64);
+    for (row, line) in sp.rows.iter().enumerate() {
         for (col, ch) in line.chars().enumerate() {
             let rgb = match ch {
                 'X' => [0, 0, 0, 255],
                 '.' => [255, 255, 255, 255],
                 _ => continue,
             };
-            for dy in 0..k as i32 {
-                for dx in 0..k as i32 {
-                    let (px, py) = (x + (col * k) as i32 + dx - origin.0, y + (row * k) as i32 + dy - origin.1);
+            for dy in 0..k {
+                for dx in 0..k {
+                    let (px, py) = (ox + col as i64 * k + dx, oy + row as i64 * k + dy);
                     if px >= 0 && py >= 0 && (px as usize) < fw && (py as usize) < fh {
                         let i = (py as usize * fw + px as usize) * 4;
-                        frame[i..i + 4].copy_from_slice(&rgb);
+                        if let Some(dst) = frame.get_mut(i..i + 4) {
+                            dst.copy_from_slice(&rgb);
+                        }
                     }
                 }
             }
@@ -198,6 +216,7 @@ fn splash_loop(fb_path: &str) -> Result<(), String> {
     use crate::splash::{self, LogTail, View};
     let mut fb = Framebuffer::open(fb_path)?;
     splash::note(&format!("drawing on {fb_path}: {}", fb.describe()));
+    splash::note(&fb.display_line());
     // leave the text console off for good (the shell that follows keeps it so too): switching back to text would make
     // the console set its mode again, which on some GPUs is a full mode change and a dark screen
     std::mem::forget(GraphicsMode::enter());
@@ -215,8 +234,8 @@ fn splash_loop(fb_path: &str) -> Result<(), String> {
     let mut failures = 0u32;
     while !splash::is_done() {
         let frame_start = Instant::now();
-        for (raw, abs) in poll_devices(&mut devs, 1) {
-            for ev in input.feed(raw, abs) {
+        for (raw, abs, pad) in poll_devices(&mut devs, 1) {
+            for ev in (match pad { Some(range) => input.feed_pad(raw, &range), None => input.feed(raw, abs) }) {
                 match ev {
                     Event::Key(crate::ui::Key::Char('l' | 'L')) => show_log = !show_log,
                     Event::MouseDown(_, y) if (y as f32) >= splash::hint_zone(fb.width, fb.height).0 => show_log = !show_log,
@@ -237,6 +256,7 @@ fn splash_loop(fb_path: &str) -> Result<(), String> {
                         None => "no console",
                     };
                     splash::note(&format!("screen changed ({} -> {}), following it; {console}", fb.describe(), now.describe()));
+                    splash::note(&now.display_line());
                     canvas.follow(now.width, now.height);
                     input = InputState::new(now.width, now.height);
                     keep_open(std::mem::replace(&mut fb, now));
@@ -296,6 +316,8 @@ fn splash_loop(fb_path: &str) -> Result<(), String> {
 struct FrameStats {
     since: Instant,
     frames: u32,
+    /// How many of `frames` painted only the live picture (the browser's page area) instead of the whole scene.
+    live: u32,
     render: Duration,
     present: Duration,
     worst: Duration,
@@ -303,7 +325,13 @@ struct FrameStats {
 
 impl FrameStats {
     fn new() -> FrameStats {
-        FrameStats { since: Instant::now(), frames: 0, render: Duration::ZERO, present: Duration::ZERO, worst: Duration::ZERO }
+        FrameStats { since: Instant::now(), frames: 0, live: 0, render: Duration::ZERO, present: Duration::ZERO, worst: Duration::ZERO }
+    }
+
+    /// A frame that painted only the live picture: `draw` is the time to copy it into the scene.
+    fn live_frame(&mut self, draw: Duration, present: Duration) {
+        self.live += 1;
+        self.frame(draw, present);
     }
 
     fn frame(&mut self, render: Duration, present: Duration) {
@@ -316,12 +344,13 @@ impl FrameStats {
             let ms = |d: Duration| d.as_secs_f64() * 1000.0;
             let sys = |p: &str| std::fs::read_to_string(p).map(|s| s.trim().to_string()).unwrap_or_else(|_| "?".into());
             log::info!(
-                "shell: {} frames in {:.0}s, draw {:.1} ms, screen write {:.1} ms, slowest {:.0} ms; cpu0 {} kHz, governor {}",
+                "shell: {} frames in {:.0}s, draw {:.1} ms, screen write {:.1} ms, slowest {:.0} ms, {} tile-only; cpu0 {} kHz, governor {}",
                 self.frames,
                 self.since.elapsed().as_secs_f64(),
                 ms(self.render) / n as f64,
                 ms(self.present) / n as f64,
                 ms(self.worst),
+                self.live,
                 sys("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"),
                 sys("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"),
             );
@@ -336,30 +365,34 @@ struct Screen {
     /// The last rendered scene (without the pointer): what is on screen apart from the pointer.
     scene: Vec<u8>,
     pointer_at: Option<(i32, i32)>,
+    /// The shape drawn at `pointer_at` (what to erase when it moves or changes).
+    shape: Shape,
     k: usize,
 }
 
 impl Screen {
-    /// Erase the pointer from the screen, then draw it at `to`.
-    fn move_pointer(&mut self, to: Option<(i32, i32)>) -> Result<(), String> {
-        if self.scene.is_empty() || to == self.pointer_at {
+    /// Erase the pointer from the screen (the rectangle of the shape drawn before), then draw `shape` at `to`.
+    /// Does nothing when neither the position nor the shape changed.
+    fn move_pointer(&mut self, to: Option<(i32, i32)>, shape: Shape) -> Result<(), String> {
+        if self.scene.is_empty() || (to == self.pointer_at && shape == self.shape) {
             return Ok(());
         }
         let (wu, hu) = (self.fb.width as usize, self.fb.height as usize);
         self.take_pointer_off()?;
         if let Some((x, y)) = to {
-            if let Some((r, patch)) = cursor_patch(&self.scene, wu, hu, x, y, self.k) {
+            if let Some((r, patch)) = cursor_patch(&self.scene, wu, hu, shape, x, y, self.k) {
                 self.fb.present_patch(&patch, r)?;
             }
         }
         self.pointer_at = to;
+        self.shape = shape;
         Ok(())
     }
 
     fn take_pointer_off(&mut self) -> Result<(), String> {
         let (wu, hu) = (self.fb.width as usize, self.fb.height as usize);
         if let Some((x, y)) = self.pointer_at.take() {
-            if let Some(r) = cursor_rect(x, y, self.k, wu, hu) {
+            if let Some(r) = cursor_rect(self.shape, x, y, self.k, wu, hu) {
                 self.fb.present_rect(&self.scene, r)?;
             }
         }
@@ -376,9 +409,15 @@ struct Pointer {
     x: AtomicI32,
     y: AtomicI32,
     seen: AtomicBool,
+    /// The shape the shell wants (a `pointer_sprites::shape_to_u8` byte), set by the drawing thread.
+    shape: AtomicU8,
 }
 
 impl Pointer {
+    fn shape(&self) -> Shape {
+        shape_from_u8(self.shape.load(Ordering::Relaxed))
+    }
+
     fn get(&self) -> Option<(i32, i32)> {
         self.seen.load(Ordering::Relaxed).then(|| (self.x.load(Ordering::Relaxed), self.y.load(Ordering::Relaxed)))
     }
@@ -391,6 +430,10 @@ impl Pointer {
 /// events, re-renders the scene only when something changed (or every 100 ms for animations), and writes the
 /// changed rows to the framebuffer, spread over all CPU cores.
 pub fn run_fb(shell: &mut Shell, fb_path: &str, stop: &AtomicBool) -> Result<(), String> {
+    // two or more displays on a machine that may use them: the shell drives them itself (`backend_kms.rs`); otherwise on as before
+    if let crate::backend_kms::Outcome::Ran(r) = crate::backend_kms::maybe_run(shell, stop) {
+        return r;
+    }
     // a full-screen program (the optional full web engine) may ask for the screen: see `external`
     crate::external::set_supported(true);
     struct NotSupported;
@@ -401,7 +444,9 @@ pub fn run_fb(shell: &mut Shell, fb_path: &str, stop: &AtomicBool) -> Result<(),
     }
     let _not_supported_after = NotSupported;
     let remode = AtomicBool::new(false);
+    shell.set_live_paint(true);
     let r = run_fb_once(shell, fb_path, stop, &remode);
+    shell.set_live_paint(false);
     if r.is_ok() && remode.load(Ordering::SeqCst) && !stop.load(Ordering::Relaxed) {
         log::info!("shell: the screen mode changed while the full browser ran; starting the display again");
         return run_fb(shell, fb_path, stop);
@@ -451,6 +496,18 @@ fn hand_over(screen: &Mutex<Screen>, paused: &AtomicBool, idle: &AtomicBool, fb_
     (result, same && reopened)
 }
 
+/// Make the blank calls the shell asked for (the screen saver's screen-off stage and the wake), in order. Failures are logged:
+/// the scene is black anyway, and waking never depends on them.
+fn apply_blanks(shell: &mut Shell, screen: &Mutex<Screen>) {
+    for off in shell.take_blank_requests() {
+        let mut s = lock(screen);
+        match crate::panel::blank_screen(&mut s.fb, off) {
+            Ok(()) => log::info!("screen: framebuffer {}", if off { "powered down" } else { "unblanked" }),
+            Err(e) => log::warn!("screen: {e}"),
+        }
+    }
+}
+
 fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &AtomicBool) -> Result<(), String> {
     let t_start = Instant::now();
     let fb = Framebuffer::open(fb_path)?;
@@ -466,6 +523,7 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
         Some(graphics)
     };
     let (w, h) = (fb.width, fb.height);
+    log::info!("shell: {}", fb.display_line());
     let mut gfx = Gfx::new(w, h);
     let t_gfx = t_start.elapsed();
     // The first scan of the input devices is done by the input thread right after the first picture is on the screen: opening an
@@ -474,9 +532,19 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
     let mut devs: Vec<Device> = Vec::new();
     let t_scan = t_start.elapsed();
     log::info!("shell: {}x{} framebuffer, {} input device(s) so far (scanned in the background), {} CPU thread(s); display set up in {} ms (open {} ms, console mode {} ms, drawing surface {} ms, input scan {} ms)", w, h, devs.len(), std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1), t_scan.as_millis(), t_open.as_millis(), (t_mode - t_open).as_millis(), (t_gfx - t_mode).as_millis(), (t_scan - t_gfx).as_millis());
-    let screen = Mutex::new(Screen { fb, scene: Vec::new(), pointer_at: None, k: cursor_scale(w, h) });
-    let pointer = Pointer { x: AtomicI32::new(0), y: AtomicI32::new(0), seen: AtomicBool::new(false) };
+    let screen = Mutex::new(Screen { fb, scene: Vec::new(), pointer_at: None, shape: Shape::Default, k: cursor_scale(w, h) });
+    // the machine's own screen: the saver may switch the backlight and the framebuffer's blank state; a screen a crashed shell left
+    // dark is switched back on here
+    shell.enable_panel_control();
+    {
+        let mut s = lock(&screen);
+        if let Err(e) = crate::panel::blank_screen(&mut s.fb, false) {
+            log::debug!("shell: unblank at start: {e}");
+        }
+    }
+    let pointer = Pointer { x: AtomicI32::new(0), y: AtomicI32::new(0), seen: AtomicBool::new(false), shape: AtomicU8::new(0) };
     let failed: Mutex<Option<String>> = Mutex::new(None);
+    let screen_changed = AtomicBool::new(false);
     let quit = AtomicBool::new(false);
     let (paused, idle) = (AtomicBool::new(false), AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<Event>();
@@ -488,6 +556,7 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
     std::thread::scope(|sc| {
         let input_thread = std::thread::Builder::new().name("iyakki-input".into()).stack_size(INPUT_STACK).spawn_scoped(sc, || {
             let mut input = InputState::new(w, h);
+            let mut repeat = crate::input::RepeatApplier::default();
             // due at once: the first scan of the input devices happens here, not before the first picture
             let mut last_scan = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);
             while !stop.load(Ordering::Relaxed) && !quit.load(Ordering::Relaxed) {
@@ -503,17 +572,22 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                     input = InputState::new(w, h); // no key looks held down
                     last_scan = Instant::now();
                 }
-                for (raw, abs) in poll_devices(&mut devs, 10) {
-                    for ev in input.feed(raw, abs) {
+                repeat.tick(&devs);
+                for (raw, abs, pad) in poll_devices(&mut devs, 10) {
+                    for ev in (match pad { Some(range) => input.feed_pad(raw, &range), None => input.feed(raw, abs) }) {
                         if matches!(ev, Event::MouseMove(..) | Event::MouseDown(..)) {
                             pointer.seen.store(true, Ordering::Relaxed);
                         }
                         let _ = tx.send(ev);
                     }
                 }
+                // the smooth scroll steps due now (about 60 a second while a scroll goes on, none once it settles)
+                for ev in input.scroll_tick() {
+                    let _ = tx.send(ev);
+                }
                 pointer.x.store(input.x, Ordering::Relaxed);
                 pointer.y.store(input.y, Ordering::Relaxed);
-                if let Err(e) = lock(&screen).move_pointer(pointer.get()) {
+                if let Err(e) = lock(&screen).move_pointer(pointer.get(), pointer.shape()) {
                     fail(e);
                 }
                 if last_scan.elapsed() > Duration::from_secs(2) {
@@ -531,6 +605,7 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
         let mut first = true;
         let mut first_picture = true;
         let mut stats = FrameStats::new();
+        let mut last_look = Instant::now();
         while !stop.load(Ordering::Relaxed) && !quit.load(Ordering::Relaxed) {
             let mut dirty = false;
             // wait for the next event, but wake for the tick
@@ -547,13 +622,38 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                 // an app with live pictures (the browser's full engine) asks for a redraw on the heartbeat
                 dirty |= shell.take_stale();
             }
+            // the screen saver's power steps: the screen goes dark or comes back before anything is drawn (see `panel.rs`)
+            apply_blanks(shell, &screen);
+            // the shape the pointer should have (a hand over a link, ...): the input thread draws it; when it changes under a
+            // still pointer, repaint just the pointer's rectangle here (the screen lock is held for that patch only)
+            let want = shape_to_u8(shell.pointer());
+            if pointer.shape.swap(want, Ordering::Relaxed) != want {
+                if let Err(e) = lock(&screen).move_pointer(pointer.get(), shape_from_u8(want)) {
+                    fail(e);
+                }
+            }
             if let Some(job) = crate::external::take() {
+                // another program takes the screen: it must not find it dark
+                shell.panel_shutdown();
+                apply_blanks(shell, &screen);
                 let (result, same_size) = hand_over(&screen, &paused, &idle, fb_path, (w, h), &job, stop);
                 while rx.try_recv().is_ok() {} // whatever was typed before the hand-over
                 crate::external::finish(result);
                 shell.handle(&Event::Tick); // lets the app report how it went
                 first = true;
                 if !same_size {
+                    remode.store(true, Ordering::SeqCst);
+                    break;
+                }
+            }
+            // a monitor plugged in or out, a mode change or a GPU driver taking over changes what is visible: start the display
+            // again for the new size (sysfs only, no device access; once a second)
+            if last_look.elapsed() >= Duration::from_secs(1) {
+                last_look = Instant::now();
+                let changed = lock(&screen).fb.screen_changed(fb_path);
+                if changed {
+                    log::info!("shell: the screen changed ({}); starting the display again", lock(&screen).fb.display_line());
+                    screen_changed.store(true, Ordering::SeqCst);
                     remode.store(true, Ordering::SeqCst);
                     break;
                 }
@@ -566,7 +666,30 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                 drop(s);
                 first = true;
             }
-            if dirty || first || last_render.elapsed() >= Duration::from_millis(100) {
+            // only the open app's live picture changed (a page scrolled or a video playing): paint just that rectangle
+            let timed = last_render.elapsed() >= Duration::from_millis(shell.redraw_interval_ms());
+            let mut tried_live = false;
+            if !(dirty || first || timed) && shell.live_pending() && !lock(&screen).scene.is_empty() {
+                tried_live = true;
+                let t0 = Instant::now();
+                if let Some((_, y, _, rh)) = shell.live_update(&mut gfx) {
+                    let t1 = Instant::now();
+                    let mut s = lock(&screen);
+                    let (y0, y1) = (y.max(0) as usize, (y + rh).max(0) as usize);
+                    let res = s.take_pointer_off().and_then(|_| {
+                        let Screen { fb, scene, .. } = &mut *s;
+                        fb.present_banded_rows(gfx.rgba(), scene, y0, y1).map(|_| ())
+                    });
+                    let res = res.and_then(|_| s.move_pointer(pointer.get(), pointer.shape()));
+                    drop(s);
+                    stats.live_frame(t1 - t0, t1.elapsed());
+                    if let Err(e) = res {
+                        fail(e);
+                    }
+                    continue;
+                }
+            }
+            if dirty || first || timed || tried_live {
                 first = false;
                 let t0 = Instant::now();
                 shell.render(&mut gfx);
@@ -585,7 +708,7 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                     }
                     Ok(())
                 });
-                let res = res.and_then(|_| s.move_pointer(pointer.get()));
+                let res = res.and_then(|_| s.move_pointer(pointer.get(), pointer.shape()));
                 drop(s);
                 last_render = Instant::now();
                 if first_picture {
@@ -601,6 +724,13 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
         }
         quit.store(true, Ordering::Relaxed);
     });
+    // leaving: the backlight is put back and the screen switched on whatever stage it was in
+    shell.panel_shutdown();
+    apply_blanks(shell, &screen);
+    if screen_changed.load(Ordering::SeqCst) {
+        // never closed: it may be the firmware's screen a GPU driver just unplugged (see `keep_open`)
+        std::mem::forget(screen);
+    }
     let err = failed.lock().unwrap_or_else(|p| p.into_inner()).take();
     err.map_or(Ok(()), Err)
 }
@@ -741,32 +871,228 @@ mod tests {
         assert_eq!(cursor_scale(7680, 4320), 3, "capped");
     }
 
+    use crate::pointer_sprites::{sprite, ALL};
+
     #[test]
     fn the_pointer_rectangle_is_clipped_to_the_screen() {
-        assert_eq!(cursor_rect(10, 10, 1, 100, 100), Some((10, 10, 12, 17)));
-        assert_eq!(cursor_rect(95, 95, 1, 100, 100), Some((95, 95, 5, 5)));
-        assert_eq!(cursor_rect(-5, -5, 1, 100, 100), Some((0, 0, 7, 12)));
-        assert_eq!(cursor_rect(100, 50, 1, 100, 100), None, "fully off to the right");
-        assert_eq!(cursor_rect(10, 10, 3, 1000, 1000), Some((10, 10, 36, 51)));
+        let a = Shape::Default;
+        assert_eq!(cursor_rect(a, 10, 10, 1, 100, 100), Some((10, 10, 12, 17)));
+        assert_eq!(cursor_rect(a, 95, 95, 1, 100, 100), Some((95, 95, 5, 5)));
+        assert_eq!(cursor_rect(a, -5, -5, 1, 100, 100), Some((0, 0, 7, 12)));
+        assert_eq!(cursor_rect(a, 100, 50, 1, 100, 100), None, "fully off to the right");
+        assert_eq!(cursor_rect(a, 10, 10, 3, 1000, 1000), Some((10, 10, 36, 51)));
+        assert_eq!(cursor_rect(Shape::Hidden, 10, 10, 1, 100, 100), None, "a hidden pointer covers nothing");
     }
 
     #[test]
     fn a_patch_has_the_scene_with_the_pointer_on_top() {
         let (w, h) = (40usize, 40usize);
         let scene = vec![50u8; w * h * 4];
-        let (r, patch) = cursor_patch(&scene, w, h, 5, 5, 1).unwrap();
+        let (r, patch) = cursor_patch(&scene, w, h, Shape::Default, 5, 5, 1).unwrap();
         assert_eq!(r, (5, 5, 12, 17));
         assert_eq!(patch.len(), 12 * 17 * 4);
         assert_eq!(&patch[0..4], &[0, 0, 0, 255], "the tip is the outline colour");
         let transparent = &patch[(0 * 12 + 11) * 4..(0 * 12 + 11) * 4 + 4];
         assert_eq!(transparent, &[50, 50, 50, 50], "pixels outside the arrow keep the scene");
         // scaled pointer paints k x k blocks
-        let (r3, p3) = cursor_patch(&scene, w, h, 0, 0, 2).unwrap();
+        let (r3, p3) = cursor_patch(&scene, w, h, Shape::Default, 0, 0, 2).unwrap();
         assert_eq!(r3, (0, 0, 24, 34));
         assert_eq!(&p3[0..4], &[0, 0, 0, 255]);
         assert_eq!(&p3[(1 * 24 + 1) * 4..(1 * 24 + 1) * 4 + 4], &[0, 0, 0, 255], "the first sprite pixel is 2x2");
         // a pointer near the edge still produces a clipped patch
-        let (r2, p2) = cursor_patch(&scene, w, h, 36, 36, 1).unwrap();
+        let (r2, p2) = cursor_patch(&scene, w, h, Shape::Default, 36, 36, 1).unwrap();
         assert_eq!((r2, p2.len()), ((36, 36, 4, 4), 4 * 4 * 4));
+        assert!(cursor_patch(&scene[..10], w, h, Shape::Hand, 5, 5, 1).is_none(), "a scene that is too short is never indexed");
+    }
+
+    #[test]
+    fn every_sprite_is_well_formed() {
+        for shape in ALL {
+            let Some(sp) = sprite(shape) else {
+                assert_eq!(shape, Shape::Hidden, "only the hidden pointer has no sprite");
+                continue;
+            };
+            assert_eq!(sp.h as usize, sp.rows.len(), "{shape:?}");
+            assert!((7..=20).contains(&sp.w) && (7..=20).contains(&sp.h), "{shape:?}: about 16-20 px, not {}x{}", sp.w, sp.h);
+            let widest = sp.rows.iter().map(|r| r.chars().count()).max().unwrap_or(0) as i32;
+            assert!(widest <= sp.w && sp.w <= widest + 1, "{shape:?}: width {} vs rows {}", sp.w, widest);
+            for r in sp.rows {
+                assert!(r.chars().all(|c| matches!(c, 'X' | '.' | ' ')), "{shape:?}: stray character in {r:?}");
+            }
+            assert!(sp.hot.0 >= 0 && sp.hot.0 < sp.w && sp.hot.1 >= 0 && sp.hot.1 < sp.h, "{shape:?}: hotspot inside the sprite");
+            assert!(sp.rows.iter().any(|r| r.contains('X')) && sp.rows.iter().any(|r| r.contains('.')), "{shape:?}: outline and fill");
+        }
+        // the arrow is exactly today's sprite, tip on the hotspot
+        assert_eq!(CURSOR.to_vec(), sprite(Shape::Default).unwrap().rows.to_vec());
+        assert_eq!(sprite(Shape::Default).unwrap().hot, (0, 0));
+    }
+
+    #[test]
+    fn the_shape_byte_is_total_and_round_trips() {
+        for (i, shape) in ALL.iter().enumerate() {
+            assert_eq!(shape_to_u8(*shape) as usize, i);
+            assert_eq!(shape_from_u8(shape_to_u8(*shape)), *shape);
+        }
+        for b in 0..=255u8 {
+            let s = shape_from_u8(b);
+            if (b as usize) < ALL.len() { assert_eq!(shape_to_u8(s), b) } else { assert_eq!(s, Shape::Default, "unknown bytes are the arrow") }
+        }
+    }
+
+    #[test]
+    fn the_rectangle_of_every_shape_follows_its_hotspot_at_every_scale_and_edge() {
+        let (w, h) = (200usize, 120usize);
+        for shape in ALL {
+            let Some(sp) = sprite(shape) else { continue };
+            for k in 1..=3usize {
+                let ki = k as i32;
+                for (x, y) in [(100, 60), (0, 0), (w as i32 - 1, h as i32 - 1), (0, h as i32 - 1), (w as i32 - 1, 0), (-3, -3), (-200, 50), (w as i32 + 5, 50), (i32::MAX, i32::MIN)] {
+                    let got = cursor_rect(shape, x, y, k, w, h);
+                    // brute force: the screen pixels the sprite box covers
+                    let (ox, oy) = (x as i64 - (sp.hot.0 * ki) as i64, y as i64 - (sp.hot.1 * ki) as i64);
+                    let (x0, y0) = (ox.max(0), oy.max(0));
+                    let (x1, y1) = ((ox + (sp.w * ki) as i64).min(w as i64), (oy + (sp.h * ki) as i64).min(h as i64));
+                    let want = (x1 > x0 && y1 > y0).then(|| (x0 as usize, y0 as usize, (x1 - x0) as usize, (y1 - y0) as usize));
+                    assert_eq!(got, want, "{shape:?} k={k} at ({x},{y})");
+                    if let Some((rx, ry, rw, rh)) = got {
+                        assert!(rx + rw <= w && ry + rh <= h);
+                    }
+                }
+                // the hotspot pixel is the one under the pointer
+                let r = cursor_rect(shape, 100, 60, k, w, h).unwrap();
+                assert!(r.0 as i32 <= 100 && 100 < (r.0 + r.2) as i32 && r.1 as i32 <= 60 && 60 < (r.1 + r.3) as i32, "{shape:?} k={k}: hotspot inside the rectangle");
+            }
+        }
+    }
+
+    #[test]
+    fn tiny_screens_and_odd_numbers_never_panic() {
+        for shape in ALL {
+            for (w, h) in [(0usize, 0usize), (1, 1), (3, 40), (40, 3), (7, 7)] {
+                let scene = vec![9u8; w * h * 4];
+                for (x, y) in [(0, 0), (-5, 4), (2, 2), (i32::MAX, 0), (0, i32::MIN)] {
+                    for k in [0usize, 1, 3] {
+                        let _ = cursor_rect(shape, x, y, k, w, h);
+                        if let Some((r, patch)) = cursor_patch(&scene, w, h, shape, x, y, k) {
+                            assert_eq!(patch.len(), r.2 * r.3 * 4);
+                        }
+                    }
+                }
+            }
+        }
+        let mut small = vec![0u8; 4 * 4 * 4];
+        paint_cursor(&mut small, 4, 4, (0, 0), Shape::Move, 2, 2, 3);
+        paint_cursor(&mut small, 100, 100, (0, 0), Shape::Move, 2, 2, 3); // a frame buffer shorter than it says: skipped, not a panic
+    }
+
+    /// The colour (r, g, b) of screen pixel (x, y) of a BGRX screen memory.
+    fn px(mem: &[u8], w: usize, x: usize, y: usize) -> [u8; 3] {
+        let i = (y * w + x) * 4;
+        [mem[i + 2], mem[i + 1], mem[i]]
+    }
+
+    #[test]
+    fn the_pixel_under_the_hotspot_is_the_same_for_every_shape() {
+        let (w, h) = (120usize, 90usize);
+        let scene = vec![50u8; w * h * 4];
+        for shape in ALL {
+            let Some(sp) = sprite(shape) else { continue };
+            for k in 1..=3usize {
+                let (x, y) = (60i32, 45i32);
+                let (r, patch) = cursor_patch(&scene, w, h, shape, x, y, k).unwrap();
+                // the sprite pixel at the hotspot lands on the pointer position (its k x k block starts there)
+                let ch = sp.rows[sp.hot.1 as usize].chars().nth(sp.hot.0 as usize).unwrap_or(' ');
+                let i = ((y as usize - r.1) * r.2 + (x as usize - r.0)) * 4;
+                let want: &[u8] = match ch {
+                    'X' => &[0, 0, 0, 255],
+                    '.' => &[255, 255, 255, 255],
+                    _ => &[50, 50, 50, 50],
+                };
+                assert_eq!(&patch[i..i + 4], want, "{shape:?} k={k}: pixel under the hotspot");
+            }
+        }
+    }
+
+    /// A screen over memory, with a scene of one flat colour on it and no pointer.
+    fn screen_over(mem: &mut [u8], w: u32, h: u32, k: usize) -> Screen {
+        let mut fb = Framebuffer::in_memory(mem, w, h);
+        let scene = vec![50u8; (w * h * 4) as usize];
+        fb.present_rect(&scene, (0, 0, w as usize, h as usize)).unwrap();
+        Screen { fb, scene, pointer_at: None, shape: Shape::Default, k }
+    }
+
+    #[test]
+    fn a_shape_change_under_a_still_pointer_erases_the_old_and_paints_the_new_pixel_exactly() {
+        let (w, h) = (64u32, 48u32);
+        for k in 1..=3usize {
+            for at in [(30, 20), (0, 0), (-4, 10), (63, 47), (60, 3)] {
+                let mut mem = vec![0u8; (w * h * 4) as usize];
+                let (ptr, len) = (mem.as_ptr(), mem.len());
+                let mut s = screen_over(&mut mem, w, h, k);
+                for shape in [Shape::Default, Shape::Hand, Shape::Text, Shape::Hidden, Shape::NotAllowed, Shape::Wait, Shape::Default] {
+                    s.move_pointer(Some(at), shape).unwrap();
+                    // expected: the scene with only this shape on top (nothing of the one before)
+                    let mut want = vec![50u8; (w * h * 4) as usize];
+                    paint_cursor(&mut want, w as usize, h as usize, (0, 0), shape, at.0, at.1, k);
+                    // SAFETY: `mem` is alive and only the framebuffer (which points into it) wrote to it
+                    let got = unsafe { std::slice::from_raw_parts(ptr, len) };
+                    for y in 0..h as usize {
+                        for x in 0..w as usize {
+                            let i = (y * w as usize + x) * 4;
+                            assert_eq!(px(got, w as usize, x, y), [want[i], want[i + 1], want[i + 2]], "{shape:?} k={k} at {at:?}: pixel ({x}, {y})");
+                        }
+                    }
+                }
+                // moving to another place with another shape leaves nothing of the old one
+                s.move_pointer(Some((10, 10)), Shape::Move).unwrap();
+                s.move_pointer(None, Shape::Move).unwrap();
+                let got = unsafe { std::slice::from_raw_parts(ptr, len) };
+                assert!(got.chunks_exact(4).all(|p| p[..3] == [50, 50, 50]), "k={k}: pointer taken off, the scene alone is left");
+            }
+        }
+    }
+
+    #[test]
+    fn the_hand_over_a_link_in_the_browser_reaches_the_screen_as_a_hand() {
+        // the whole path without the shell: a shape byte is what the input thread reads, and a hand is not an arrow
+        let (w, h) = (80u32, 60u32);
+        let mut mem = vec![0u8; (w * h * 4) as usize];
+        let (ptr, len) = (mem.as_ptr(), mem.len());
+        let mut s = screen_over(&mut mem, w, h, 1);
+        let shared = Pointer { x: AtomicI32::new(30), y: AtomicI32::new(30), seen: AtomicBool::new(true), shape: AtomicU8::new(0) };
+        s.move_pointer(shared.get(), shared.shape()).unwrap();
+        let arrow: Vec<u8> = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+        shared.shape.store(shape_to_u8(Shape::Hand), Ordering::Relaxed);
+        s.move_pointer(shared.get(), shared.shape()).unwrap();
+        let hand: Vec<u8> = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+        assert_ne!(arrow, hand, "the picture changed without a mouse move");
+        // the finger tip is on the click point
+        let hot = sprite(Shape::Hand).unwrap().hot;
+        assert_eq!(hot, (4, 0));
+        assert_eq!(px(&hand, w as usize, 30, 30), [0, 0, 0], "the outline of the finger tip is at the pointer");
+    }
+
+    /// A picture of every pointer at 1x, 2x and 3x on a grey scene and a white one: `IYAKKI_PICTURES=/some/folder cargo test -p iyakki-shell --lib backend::tests::pictures -- --ignored`.
+    #[test]
+    #[ignore]
+    fn pictures() {
+        let Ok(dir) = std::env::var("IYAKKI_PICTURES") else { return };
+        let (cell, w, h) = (64usize, 12 * 64 * 2, 3 * 80usize);
+        let mut img = vec![0u8; w * h * 4];
+        for (i, p) in img.chunks_exact_mut(4).enumerate() {
+            let left = (i % w) < w / 2;
+            p.copy_from_slice(if left { &[70, 90, 130, 255] } else { &[240, 240, 240, 255] });
+        }
+        for (n, shape) in ALL.iter().enumerate() {
+            for k in 1..=3usize {
+                for half in 0..2 {
+                    let x = (n * cell + cell / 2 + half * w / 2) as i32;
+                    paint_cursor(&mut img, w, h, (0, 0), *shape, x, ((k - 1) * 80 + 30) as i32, k);
+                }
+            }
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = crate::camera::pixels::png_with_dpi(w as u32, h as u32, &img, 96.0).unwrap();
+        std::fs::write(std::path::Path::new(&dir).join("pointers.png"), png).unwrap();
     }
 }

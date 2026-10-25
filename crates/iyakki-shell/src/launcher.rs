@@ -6,12 +6,13 @@ use iyakki_sec::policy::App;
 use crate::ui::R;
 
 /// A section of the home screen, shown as a tab at the top. Every tile is in exactly one: the section is the `group` field of its
-/// entry in the shell's tile table (Settings has none: it is in the IYAKKI menu, not on the grid). Custom apps go where their
+/// entry in the shell's tile table (the inbox has none: it is the bell; Settings is on Home and in the IYAKKI menu). Custom apps go where their
 /// app.json's `group` says, else Work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Group {
-    /// The assistant: CHAT, RAG, TALES, CALENDAR, MCP, SKILLS, CLI.
+    /// The assistant: CHAT, RAG, TALES, VOICE, CALENDAR, MCP, SKILLS, CLI.
     Home,
+    /// BROWSER, RADIO, MEDIA, CAMERA.
     WebMedia,
     Work,
     System,
@@ -164,6 +165,61 @@ pub fn chip_rects(s: f32, labels: &[&str]) -> Vec<R> {
         .collect()
 }
 
+/// The chip row with its two extra chips: `+` (a new group) at the end and, when the groups do not all fit the width, `…`
+/// (the rest, in a menu) before it. The shown group's chip is always visible.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChipRow {
+    /// (index into the labels, rectangle) of the chips shown, left to right.
+    pub chips: Vec<(usize, R)>,
+    /// The `…` chip, when some groups are hidden behind it.
+    pub more: Option<R>,
+    /// The indexes of the hidden groups.
+    pub hidden: Vec<usize>,
+    pub plus: R,
+}
+
+/// Lay out the chips for a screen `w` wide. With room for everything the chips sit where [`chip_rects`] puts them.
+pub fn chip_row(w: u32, s: f32, labels: &[&str], current: usize) -> ChipRow {
+    let (x0, limit, gap) = (40.0 * s, w as f32 - 40.0 * s, 10.0 * s);
+    let ws: Vec<f32> = labels.iter().map(|l| chip_width(l, s)).collect();
+    let extra = chip_width("+", s);
+    let used = |idx: &[usize]| idx.iter().map(|i| ws[*i]).sum::<f32>() + gap * idx.len().saturating_sub(1) as f32;
+    let all: Vec<usize> = (0..labels.len()).collect();
+    let (shown, more) = if x0 + used(&all) + gap + extra <= limit || labels.len() <= 1 {
+        (all, false)
+    } else {
+        // as many from the left as fit beside `…` and `+`, the shown group's chip taking the last place when it is further right
+        let mut pick = Vec::new();
+        for k in (1..labels.len()).rev() {
+            let mut v: Vec<usize> = (0..k).collect();
+            if current >= k {
+                v[k - 1] = current;
+            }
+            if x0 + used(&v) + 2.0 * (gap + extra) <= limit {
+                pick = v;
+                break;
+            }
+        }
+        if pick.is_empty() {
+            pick = vec![current.min(labels.len() - 1)];
+        }
+        (pick, true)
+    };
+    let mut x = x0;
+    let mut chips = Vec::new();
+    for i in &shown {
+        chips.push((*i, R::new(x, 84.0 * s, ws[*i], 36.0 * s)));
+        x += ws[*i] + gap;
+    }
+    let hidden: Vec<usize> = (0..labels.len()).filter(|i| !shown.contains(i)).collect();
+    let more_r = more.then(|| {
+        let r = R::new(x, 84.0 * s, extra, 36.0 * s);
+        x += extra + gap;
+        r
+    });
+    ChipRow { chips, more: more_r, hidden, plus: R::new(x, 84.0 * s, extra, 36.0 * s) }
+}
+
 /// The page controls: previous arrow, one dot per page, next arrow, centred above the hint line.
 pub struct PageNav {
     pub prev: R,
@@ -185,10 +241,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_tile_app_is_in_exactly_one_section_and_the_inbox_and_settings_in_none() {
+    fn every_tile_app_is_in_exactly_one_section_and_the_inbox_in_none() {
         for a in App::ALL {
             let n = Group::CHIPS.iter().filter(|g| g.holds(a)).count();
-            assert_eq!(n, if matches!(a, App::Inbox | App::Settings) { 0 } else { 1 }, "{a:?}");
+            assert_eq!(n, if matches!(a, App::Inbox) { 0 } else { 1 }, "{a:?}");
         }
         for g in Group::CHIPS {
             assert_eq!(Group::from_id(g.id()), Some(g));
@@ -206,11 +262,11 @@ mod tests {
         let of = |g: Group| -> Vec<App> { App::ALL.into_iter().filter(|a| g.holds(*a)).collect() };
         let mut home = of(Group::Home);
         home.sort_by_key(|a| a.id());
-        assert_eq!(home, [App::Calendar, App::Chat, App::Cli, App::Mcp, App::Rag, App::Skills, App::Tales]);
+        assert_eq!(home, [App::Calendar, App::Chat, App::Cli, App::Ide, App::Mcp, App::Rag, App::Settings, App::Skills, App::Tales, App::Voice]);
         for a in [App::Browser, App::Radio, App::Media, App::Camera] {
             assert!(Group::WebMedia.holds(a), "{a:?}");
         }
-        for a in [App::Ide, App::Edit, App::Data, App::Dash, App::Flows, App::Runs, App::SrePilot] {
+        for a in [App::Edit, App::Data, App::Dash, App::Flows, App::Runs, App::SrePilot, App::Lab] {
             assert!(Group::Work.holds(a), "{a:?}");
         }
         for a in [App::System, App::Store, App::Users, App::Usage, App::Scan, App::Mesh] {
@@ -277,5 +333,42 @@ mod tests {
             assert!(tiles.iter().all(|t| t.y + t.h <= nav.dots[0].y));
             assert_eq!(nav.dots.len(), 3);
         }
+    }
+
+    #[test]
+    fn the_chip_row_scrolls_into_a_more_chip_and_always_fits_and_shows_the_current_group() {
+        let long: Vec<String> = (0..12).map(|i| format!("Group number {i:02}")).collect();
+        let sets: Vec<Vec<&str>> = vec![vec!["Home", "Web & Media", "Work", "System"], long.iter().map(|s| s.as_str()).collect(), vec!["Home", "Web & Media", "Work", "System", "Games", "Reading", "Kids", "A 16 chars label"]];
+        for (w, h) in [(360u32, 740u32), (390, 844), (800, 480), (1280, 720), (1920, 1080)] {
+            let s = crate::shell::scale_for(w, h);
+            for labels in &sets {
+                for cur in 0..labels.len() {
+                    let row = chip_row(w, s, labels, cur);
+                    let mut rects: Vec<R> = row.chips.iter().map(|(_, r)| *r).collect();
+                    rects.extend(row.more);
+                    rects.push(row.plus);
+                    for r in &rects {
+                        assert!(r.x >= 0.0 && r.x + r.w <= w as f32, "{w}x{h} {cur}: {r:?} outside the screen");
+                    }
+                    for pair in rects.windows(2) {
+                        assert!(pair[0].x + pair[0].w <= pair[1].x, "{w}x{h}: overlap {pair:?}");
+                    }
+                    assert!(row.chips.iter().any(|(i, _)| *i == cur), "{w}x{h}: the shown group {cur} is visible");
+                    assert_eq!(row.chips.len() + row.hidden.len(), labels.len(), "every group is shown or in the more menu");
+                    assert_eq!(row.more.is_some(), !row.hidden.is_empty());
+                    assert!(rects.iter().all(|r| r.h >= 20.0), "tappable");
+                }
+            }
+        }
+        // the four built-in groups and `+` fit even a phone, with no `…`; with room the chips sit where chip_rects puts them
+        let four = ["Home", "Web & Media", "Work", "System"];
+        for (w, h) in [(360u32, 740u32), (390, 844)] {
+            assert!(chip_row(w, crate::shell::scale_for(w, h), &four, 0).more.is_none(), "{w}x{h}");
+        }
+        let s = crate::shell::scale_for(1280, 720);
+        let row = chip_row(1280, s, &four, 2);
+        assert_eq!(row.chips.iter().map(|(_, r)| *r).collect::<Vec<_>>(), chip_rects(s, &four));
+        // many groups on a phone: a `…` chip appears
+        assert!(chip_row(360, crate::shell::scale_for(360, 740), &sets[1], 0).more.is_some());
     }
 }

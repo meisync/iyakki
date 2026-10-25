@@ -6,6 +6,7 @@
 //! canvas in `flows_canvas`, the painter in `flows_paint`, the properties form in `flows_props`. Nothing here blocks: the engine runs
 //! on its own threads and this reads snapshots; a node test runs on a worker thread.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -1106,7 +1107,7 @@ impl FlowsApp {
                 } else if self.cur.is_some() && self.geo.canvas.contains(mx, my) {
                     self.view.zoom_at(self.geo.canvas, mx as f32, my as f32, 1.12f32.powi(d));
                 } else if self.cur.is_none() {
-                    self.list_sel = (self.list_sel as i32 - d).clamp(0, self.flows.len().saturating_sub(1) as i32) as usize;
+                    self.list_sel = (self.list_sel as i32 - d).clamp_safe(0, self.flows.len().saturating_sub(1) as i32) as usize;
                 } else if self.geo.props.is_some_and(|r| r.contains(mx, my)) {
                     self.props.scroll = (self.props.scroll - d as f32 * 40.0).max(0.0);
                 } else if self.geo.palette.is_some_and(|r| r.contains(mx, my)) {

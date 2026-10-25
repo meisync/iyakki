@@ -4,6 +4,7 @@
 //! One keyboard owner: the tab's letters are shortcuts (it has no text field); every text input (new task, follow-up) is an IDE
 //! dialog. Git work (the diff, the dry run of a merge) runs on a worker thread, never in a frame.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -579,7 +580,7 @@ impl TasksView {
         self.sel = self.sel.min(tasks.len().saturating_sub(1));
         let narrow = r.w < 560.0 * s;
         self.narrow = narrow;
-        let list_w = if narrow { r.w } else { (r.w * 0.38).clamp(230.0 * s, 430.0 * s) };
+        let list_w = if narrow { r.w } else { (r.w * 0.38).clamp_safe(230.0 * s, 430.0 * s) };
         let show_list = !narrow || !self.page;
         let show_detail = !narrow || self.page;
         if show_list {

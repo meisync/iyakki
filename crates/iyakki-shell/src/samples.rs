@@ -42,7 +42,7 @@ pub const SKILLS: [(&str, &str); 3] = [
 
 /// Skills that ship with IYAKKI (unlike the samples they are meant to be kept). Each is added once per name for an account that
 /// manages the system: a marker file per skill means one the person deleted does not come back.
-pub const BUILTIN_SKILLS: [(&str, &str); 15] = [
+pub const BUILTIN_SKILLS: [(&str, &str); 17] = [
     ("k3s-dev-best-practices", include_str!("../../../dist/skills/k3s-dev-best-practices.md")),
     ("lang-python", include_str!("../../../dist/skills/lang-python.md")),
     ("lang-javascript", include_str!("../../../dist/skills/lang-javascript.md")),
@@ -58,6 +58,8 @@ pub const BUILTIN_SKILLS: [(&str, &str); 15] = [
     ("iyakki-mcp-author", include_str!("../../../dist/skills/iyakki-mcp-author.md")),
     ("iyakki-skill-author", include_str!("../../../dist/skills/iyakki-skill-author.md")),
     ("iyakki-tile-author", include_str!("../../../dist/skills/iyakki-tile-author.md")),
+    ("k3s-build-and-deploy", include_str!("../../../dist/skills/k3s-build-and-deploy.md")),
+    ("k3s-dockerfile-patterns", include_str!("../../../dist/skills/k3s-dockerfile-patterns.md")),
 ];
 
 /// Puts the examples in place once. Only for accounts that manage the system (they own the shared things).

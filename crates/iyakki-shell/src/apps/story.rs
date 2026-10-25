@@ -9,11 +9,13 @@
 //! writes (checked and rebuilt from safe parts only) or come from a picture model. With neither, the story is still
 //! written, shown and saved.
 
+use crate::safeclamp::SafeClamp;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use iyakki_agent::chat::{ChatBackend, Message, ToolCall};
 use iyakki_agent::settings::ModelChoice;
@@ -21,7 +23,9 @@ use iyakki_agent::hostengines;
 use iyakki_agent::hostvoice::{self, HostVoice};
 use iyakki_agent::voice::{Highlight, SpeechEngine};
 use iyakki_agent::scene::{self, CharacterSheet};
-use iyakki_agent::story::{self as st, Hints, ModelPlan, Audience, Block, Chunk, Genre, Length, PictureMode, PictureStyle, Reader, Status, Story, StoryEntry, StoryOptions, StoryStore, StoredPic, Tone, TtsStatus, LANGUAGES};
+use iyakki_agent::story::{self as st, Hints, ModelPlan, Audience, Block, Chunk, Genre, Length, PictureMode, PictureStyle, Reader, Status, Story, StoryEntry, StoryOptions, StoryStore, StoredPic, StoredVariant, Tone, TtsStatus, LANGUAGES};
+use iyakki_agent::piclog::{self, kind as plk, PicEvent};
+use iyakki_agent::storyillus::{self as illus, Coverage, Readiness};
 use iyakki_agent::voice::SpeakOpts;
 
 use super::chat_view::{self, ChatView, NoPics, TOGGLE_BASE};
@@ -100,6 +104,31 @@ const T_LIB_FAV: usize = 302;
 const T_LIB_DELETE: usize = 303;
 const T_LIB_EXPORT: usize = 304;
 const T_PIC_REDO: usize = 400; // + picture index
+const T_PIC_DELETE: usize = 420; // + picture index
+const T_COVERAGE: usize = 143;
+const T_PICS_GO: usize = 215;
+const T_PICS_SKIP: usize = 216;
+const T_PICS_CANCEL: usize = 217;
+const T_LOOK: usize = 144;
+const T_QUALITY: usize = 145;
+const T_STORYMODEL: usize = 146;
+const T_KEEPLOOK: usize = 147;
+const T_PICLOG: usize = 148;
+const T_LOG_COPY: usize = 149;
+const T_LOG_CLEAR: usize = 150;
+const T_LOG_VERBOSE: usize = 151;
+const T_LOG_CLOSE: usize = 152;
+const T_PIC_INSTALL: usize = 153;
+const T_TIMEOUT: usize = 154;
+const T_PERSTYLE: usize = 155;
+const T_REALISTIC: usize = 156;
+const T_REAL_INSTALL: usize = 157;
+const T_KEEP_ONLY: usize = 158;
+const T_STYLE: usize = 160; // + index of the style
+const T_CHOICE_INSTALL: usize = 170; // + index of the picture model in the list
+const T_ALT_PICK: usize = 700; // + scene * 24 + index of the extra picture
+const T_ALT_DEL: usize = 860; // + scene * 24 + index
+const T_ALT_MORE: usize = 1010; // + scene
 
 const SUGGESTIONS: [&str; 6] = ["A little fox who is afraid of the dark", "The moon lost its silver mitten", "A robot who learns to laugh", "The kindest dragon in the valley", "A rainy day treasure hunt", "A tiny seed that wanted to touch the sky"];
 const SPEEDS: [f32; 6] = [0.8, 0.9, 1.0, 1.1, 1.25, 1.5];
@@ -166,6 +195,21 @@ enum Modal {
     Export(Picker, Option<String>),
     /// The model chooser (Ctrl+P or the Model chip).
     Model(TalesPick),
+    /// The picture log (the button Picture log, or g).
+    PicLog(PicLogView),
+}
+
+/// The picture log window: how far it is scrolled (in wrapped lines) and what the last drawing measured.
+struct PicLogView {
+    /// The first line shown; `usize::MAX` is "the end" (the latest events), made real when it is drawn.
+    top: Cell<usize>,
+    /// The view is at the latest events and stays there as new ones come.
+    at_end: Cell<bool>,
+    /// How many wrapped lines the log has and how many fit, as drawn last.
+    total: Cell<usize>,
+    rows: Cell<usize>,
+    /// Clear log was pressed once and waits for a second press.
+    confirm_clear: bool,
 }
 
 /// The model chooser of the tile: the chat's own list (see model_picker.rs) with "Same as chat" first.
@@ -262,6 +306,40 @@ struct Pic {
     log: String,
     /// What the person asked to change about this picture ("make the sky pink"), used when it is drawn again.
     feedback: String,
+    /// `WxH` of a picture model's image, kept with the story.
+    size: String,
+    /// How the main picture was made: its style, seed, model, provider and time (ms).
+    look: illus::Look,
+    seed: Option<u64>,
+    provider: String,
+    model: String,
+    ms: u64,
+    /// The other pictures of this scene (other styles or seeds); the picture above is the one chosen as the main one.
+    alts: Vec<Alt>,
+}
+
+/// One more picture of a scene.
+#[derive(Clone)]
+struct Alt {
+    look: illus::Look,
+    seed: Option<u64>,
+    provider: String,
+    model: String,
+    size: String,
+    ms: u64,
+    ext: String,
+    bytes: Arc<Vec<u8>>,
+    prompt: String,
+    /// The cache key of its thumbnail.
+    key: u64,
+}
+
+/// A picture still to be drawn besides the main one of its scene: scene, style, and which picture of that style (from 0).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AltJob {
+    idx: usize,
+    look: illus::Look,
+    n: u32,
 }
 
 /// One who can draw: a text backend, whether it is strong enough for a rich SVG, and its name.
@@ -284,12 +362,39 @@ struct PicOut {
     log: String,
     /// The character sheet the thread made for this story, when there was none yet.
     sheet: Option<CharacterSheet>,
+    /// The setting note the thread made for this story, when there was none yet.
+    setting: Option<String>,
+    size: String,
+    /// How it was made (set for a picture model's image).
+    made: Option<(illus::Look, Option<u64>, String, String, u64)>,
+}
+
+/// The picture model the server does not have: what to say and what to download.
+struct MissingModel {
+    provider: String,
+    model: String,
+    size: String,
+    text: String,
+}
+
+/// The offer to download the picture model, and how far the download is.
+struct Install {
+    provider: String,
+    model: String,
+    size: String,
+    started: bool,
 }
 
 struct PicMsg {
     gen: u64,
+    /// Set when this was one of the extra pictures of a scene, not its main one.
+    alt: Option<AltJob>,
+    /// The picture model is not on the server: nothing was asked of it.
+    missing: Option<MissingModel>,
     idx: usize,
     res: Result<PicOut, String>,
+    /// What the picture log learned in the thread (the request and its answer).
+    events: Vec<PicEvent>,
 }
 
 /// The idea box: the shared multi-line input (grows from three lines, wraps, a caret and a selection, scrolls when long).
@@ -510,6 +615,34 @@ pub struct StoryApp {
     /// The character sheet of this story (made once, used by every picture, saved with the story).
     sheet: Option<CharacterSheet>,
     pic_gen: u64,
+    /// Picture log events not yet in the story's folder (the story is not saved yet).
+    pic_pending: Vec<PicEvent>,
+    /// The extra pictures still to be drawn (scene by scene, style by style), the one being drawn, and each scene's seed.
+    alt_jobs: std::collections::VecDeque<AltJob>,
+    alt_running: Option<usize>,
+    scene_seed: HashMap<usize, u64>,
+    /// A job estimated to take longer than this many seconds asks first (tests change it).
+    confirm_secs: f64,
+    /// The gallery of the scenes as last drawn: where each thumbnail is and what a click on it does.
+    gal_hits: Vec<(R, usize, String)>,
+    /// The picture model that is not downloaded, with the Install button.
+    install: Option<Install>,
+    /// When each picture being drawn was asked for, and from which provider and model.
+    pic_started: HashMap<usize, Instant>,
+    pic_target: Option<(String, String)>,
+    health_tx: Sender<Result<(String, Vec<String>), String>>,
+    health_rx: Receiver<Result<(String, Vec<String>), String>>,
+    health_busy: bool,
+    health_last: Option<Instant>,
+    /// What the server said about itself while a picture is being drawn.
+    server_state: String,
+    last_wait_log: Option<Instant>,
+    /// The line about the picture being drawn now (time so far, server state); shown when there is no other notice.
+    wait_text: Option<String>,
+    /// Tests shorten the time limit and the polling and logging intervals.
+    test_timing: Option<(Duration, Duration, Duration)>,
+    /// How many times each picture was asked for (`attempt` in the log).
+    pic_attempts: HashMap<usize, u32>,
     pic_tx: Sender<PicMsg>,
     pic_rx: Receiver<PicMsg>,
     pic_cache: PicCache,
@@ -596,6 +729,13 @@ pub struct StoryApp {
     bar_rect: Option<R>,
     /// The buttons on the pictures (Draw again, Try again), drawn after the text area is registered so they are on top of it.
     pic_buttons: Vec<(R, &'static str, usize, [u8; 4])>,
+    /// The pictures are made but waiting for the person's yes (Pictures: ask me each time).
+    held: bool,
+    /// The one line about where and when the story happens, kept so the pictures look alike.
+    setting: Option<String>,
+    /// Tests: the machine's memory instead of the real one.
+    #[cfg(test)]
+    test_memory: Option<iyakki_agent::sysinfo::Memory>,
     idea_geo: Option<(f32, f32)>,
     last_status: Status,
     /// A story was just asked for and may start reading by itself once there is something to read.
@@ -620,6 +760,7 @@ impl StoryApp {
         let mut search = TextField::new("search your stories", false);
         search.max = 80;
         let (pic_tx, pic_rx) = channel();
+        let (health_tx, health_rx) = channel();
         let mut app = StoryApp {
             page: Page::Story,
             focus: Focus::Idea,
@@ -648,6 +789,24 @@ impl StoryApp {
             pics: Vec::new(),
             sheet: None,
             pic_gen: 0,
+            pic_pending: Vec::new(),
+            alt_jobs: std::collections::VecDeque::new(),
+            alt_running: None,
+            scene_seed: HashMap::new(),
+            confirm_secs: illus::CONFIRM_SECS,
+            gal_hits: Vec::new(),
+            install: None,
+            pic_started: HashMap::new(),
+            pic_target: None,
+            health_tx,
+            health_rx,
+            health_busy: false,
+            health_last: None,
+            server_state: String::new(),
+            last_wait_log: None,
+            wait_text: None,
+            test_timing: None,
+            pic_attempts: HashMap::new(),
             pic_tx,
             pic_rx,
             pic_cache: PicCache::default(),
@@ -713,6 +872,10 @@ impl StoryApp {
             dirty: true,
             bar_rect: None,
             pic_buttons: Vec::new(),
+            held: false,
+            setting: None,
+            #[cfg(test)]
+            test_memory: None,
             idea_geo: None,
             last_status: Status::Idle,
             auto_pending: false,
@@ -1099,6 +1262,211 @@ impl StoryApp {
         }
     }
 
+    // ------------------------------------------------------------------------------------------------ variants and the gallery
+
+    /// Queue the extra pictures of the scenes in `idxs`: one per further style and per further picture of a style, scene by
+    /// scene, style by style. The first picture of the first style is the scene's main picture and is not queued here.
+    fn queue_alts(&mut self, idxs: &[usize]) {
+        let pic = self.story_opts.pic.clone();
+        let (styles, count) = (pic.styles_list(), pic.count());
+        for &idx in idxs {
+            if self.pics.get(idx).is_none_or(|p| p.mode != PictureMode::ImageModel) {
+                continue;
+            }
+            for (si, look) in styles.iter().enumerate() {
+                for n in 0..count {
+                    if si == 0 && n == 0 {
+                        continue;
+                    }
+                    self.alt_jobs.push_back(AltJob { idx, look: *look, n });
+                }
+            }
+        }
+    }
+
+    /// How many pictures the job makes for `scenes` scenes and the estimated seconds in all (0.0 when the model's steps are not
+    /// known, so no estimate is made).
+    fn job_totals(&self, cx: &AppCx, scenes: usize) -> (usize, f64) {
+        let pic = self.pic_now();
+        let cpu_only = !iyakki_agent::aiprofile::this_machine(0).capable();
+        let mut total = 0.0;
+        for look in pic.styles_list() {
+            match self.resolved_look(&pic, look, cx).and_then(|r| r.steps.map(|st| illus::est_secs(r.width, r.height, st, cpu_only))) {
+                Some(each) => total += each * pic.count() as f64 * scenes as f64,
+                None => return (illus::job_estimate(scenes, pic.styles_list().len(), pic.count(), 0.0).0, 0.0),
+            }
+        }
+        (illus::job_estimate(scenes, pic.styles_list().len(), pic.count(), 0.0).0, total)
+    }
+
+    /// The total line for the job, before it starts.
+    fn job_line(&self, cx: &AppCx, scenes: usize) -> Option<String> {
+        let (n, total) = self.job_totals(cx, scenes);
+        let pic = self.pic_now();
+        (total > 0.0 && n > 0).then(|| illus::job_text(scenes, pic.styles_list().len(), pic.count(), total / n as f64))
+    }
+
+    /// Make extra picture `k` of scene `idx` its main picture (the reader, the cover and the export use the main one); the old
+    /// main picture takes its place in the gallery.
+    fn choose_main(&mut self, idx: usize, k: usize) {
+        let Some(p) = self.pics.get_mut(idx) else { return };
+        if k >= p.alts.len() || p.state != PicState::Ready {
+            return;
+        }
+        let a = p.alts[k].clone();
+        let old = Alt { look: p.look, seed: p.seed, provider: p.provider.clone(), model: p.model.clone(), size: p.size.clone(), ms: p.ms, ext: p.ext.clone(), bytes: p.bytes.clone().unwrap_or_default(), prompt: p.prompt.clone(), key: p.key };
+        (p.look, p.seed, p.provider, p.model, p.ms) = (a.look, a.seed, a.provider.clone(), a.model.clone(), a.ms);
+        (p.size, p.ext, p.prompt, p.key, p.bytes) = (a.size.clone(), a.ext.clone(), a.prompt.clone(), a.key, Some(a.bytes.clone()));
+        p.how = format!("images via {}", a.model);
+        p.alts[k] = old;
+        if self.saved.is_some() {
+            self.persist_pictures();
+        }
+        self.note = Some((format!("The {} picture is now the main one of scene {}.", a.look.label(), idx + 1), true));
+        self.dirty = true;
+    }
+
+    fn delete_alt(&mut self, idx: usize, k: usize) {
+        if self.pics.get(idx).is_none_or(|p| k >= p.alts.len()) {
+            return;
+        }
+        self.pics[idx].alts.remove(k);
+        if self.saved.is_some() {
+            self.persist_pictures();
+        }
+        self.note = Some(("That picture was deleted; the others are as they were.".into(), true));
+        self.dirty = true;
+    }
+
+    /// Remove every picture that is not the chosen main one of its scene.
+    fn keep_only_chosen(&mut self) {
+        let n: usize = self.pics.iter().map(|p| p.alts.len()).sum();
+        for p in &mut self.pics {
+            p.alts.clear();
+        }
+        self.alt_jobs.clear();
+        if self.saved.is_some() {
+            self.persist_pictures();
+        }
+        self.note = Some((format!("Kept only the chosen picture of each scene ({n} removed)."), true));
+        self.dirty = true;
+    }
+
+    /// Draw one more picture of scene `idx` in the next style (a new seed), without redrawing the others.
+    fn more_alt(&mut self, idx: usize, cx: &AppCx) {
+        let Some(p) = self.pics.get(idx) else { return };
+        if p.state != PicState::Ready || p.mode != PictureMode::ImageModel {
+            return;
+        }
+        let styles = self.story_opts.pic.styles_list();
+        let look = styles[(p.alts.len() + 1) % styles.len()];
+        let n = (p.alts.iter().filter(|a| a.look == look).count() + usize::from(p.look == look)) as u32;
+        self.alt_jobs.push_back(AltJob { idx, look, n });
+        self.held = false;
+        self.pump_pictures(cx);
+        self.dirty = true;
+    }
+
+    /// The height of the gallery under the picture of scene `pi` (0 when the scene has only its main picture).
+    fn gallery_h(&self, pi: usize, slot_w: f32, s: f32) -> f32 {
+        let n = self.pics.get(pi).map_or(0, |p| p.alts.len());
+        if n == 0 {
+            return 0.0;
+        }
+        let per_row = ((slot_w / (118.0 * s)) as usize).max(1);
+        ((n + 1).div_ceil(per_row)) as f32 * 104.0 * s + 34.0 * s
+    }
+
+    /// The row of thumbnails under a scene's picture: the main one (outlined) and the others with their style, model and time.
+    /// A click on another picture makes it the main one.
+    fn draw_gallery(&mut self, g: &mut Gfx, slot: R, s: f32, idx: usize) {
+        let h = self.gallery_h(idx, slot.w, s);
+        if h <= 0.0 {
+            return;
+        }
+        let (tw, th) = (110.0 * s, 62.0 * s);
+        let per_row = ((slot.w / (118.0 * s)) as usize).max(1);
+        let items: Vec<(Option<usize>, illus::Look, String, u64, u64, Arc<Vec<u8>>)> = {
+            let p = &self.pics[idx];
+            let mut v = vec![(None, p.look, p.model.clone(), p.ms, p.key, p.bytes.clone().unwrap_or_default())];
+            v.extend(p.alts.iter().enumerate().map(|(k, a)| (Some(k), a.look, a.model.clone(), a.ms, a.key, a.bytes.clone())));
+            v
+        };
+        let y0 = slot.y + slot.h + 6.0 * s;
+        for (i, (alt, look, model, ms, key, bytes)) in items.iter().enumerate() {
+            let r = R::new(slot.x + (i % per_row) as f32 * 118.0 * s, y0 + (i / per_row) as f32 * 104.0 * s, tw, th);
+            g.rrect(r.x, r.y, r.w, r.h, 8.0 * s, rgb(14, 18, 36));
+            if let Ok(rd) = self.pic_cache.draw_bytes(g, *key, bytes, tw, s) {
+                let (pw, ph) = (rd.pm.width() as f32, rd.pm.height() as f32);
+                let k = (tw / pw).min(th / ph);
+                let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
+                g.pm.draw_pixmap(0, 0, rd.pm.as_ref().as_ref(), &paint, tiny_skia::Transform::from_translate(r.x + (tw - pw * k) / 2.0, r.y + (th - ph * k) / 2.0).pre_scale(k, k), None);
+            }
+            g.rrect_outline(r.x, r.y, r.w, r.h, 8.0 * s, if alt.is_none() { 2.2 * s } else { 1.0 }, if alt.is_none() { ACCENT } else { with_alpha(MUTED, 120) });
+            let cap = format!("{}{}", if alt.is_none() { "main \u{b7} " } else { "" }, look.label());
+            let cap = g.fit(11.0 * s, &cap, Face::Bold, tw);
+            g.text(r.x, r.y + th + 2.0 * s, 11.0 * s, if alt.is_none() { ACCENT } else { TEXT }, &cap, Face::Bold);
+            let sub = g.fit(10.0 * s, &format!("{model} \u{b7} {} s", ms / 1000), Face::Sans, tw);
+            g.text(r.x, r.y + th + 2.0 * s + g.line_height(11.0 * s, Face::Bold), 10.0 * s, MUTED, &sub, Face::Sans);
+            if let Some(k) = alt {
+                self.gal_hits.push((r, T_ALT_PICK + idx * 24 + k, format!("Make the {} picture the main one", look.label())));
+                let x = R::new(r.x + r.w - 18.0 * s, r.y + 2.0 * s, 16.0 * s, 16.0 * s);
+                g.rrect(x.x, x.y, x.w, x.h, 8.0 * s, [6, 8, 20, 210]);
+                g.text(x.x + 4.5 * s, x.y + 1.0 * s, 11.0 * s, ERR, "x", Face::Bold);
+                self.gal_hits.push((x, T_ALT_DEL + idx * 24 + k, format!("Delete this {} picture", look.label())));
+            }
+        }
+        let styles = self.story_opts.pic.styles_list();
+        let next = styles[(self.pics[idx].alts.len() + 1) % styles.len()];
+        let rows = items.len().div_ceil(per_row);
+        let by = y0 + rows as f32 * 104.0 * s - 2.0 * s;
+        if self.gen.is_none() && self.alt_running.is_none() {
+            self.gal_hits.push((R::new(slot.x, by, 0.0, 0.0), T_ALT_MORE + idx, format!("Draw another in {}", next.label())));
+        }
+    }
+
+    /// The picture log window: the events of the story, newest at the bottom, scrolling, with Copy log, Clear log and Verbose.
+    fn draw_pic_log(&self, g: &mut Gfx, area: R, s: f32) {
+        let Some(Modal::PicLog(v)) = &self.modal else { return };
+        let p = fx::modal(g, area, s, 920.0 * s, area.h - 24.0 * s, ACCENT, false);
+        let events = self.pic_log_events();
+        let top = fx::modal_title(g, p, s, &format!("Picture log · {}", self.story_name()), ACCENT);
+        let sub = format!("{} event{} · stays on this computer (it holds your story text) · the key is never written · g, Esc or Close leaves · Up, Down, PageUp, PageDown scroll", events.len(), if events.len() == 1 { "" } else { "s" });
+        let sub = g.fit(12.0 * s, &sub, Face::Sans, p.w - 52.0 * s);
+        g.text(p.x + 26.0 * s, top - 2.0 * s, 12.0 * s, MUTED, &sub, Face::Sans);
+        let (bsz, by) = (13.0 * s, top + 20.0 * s);
+        let mut bx = p.x + 26.0 * s;
+        let verbose = self.pic_now().verbose;
+        let clear = if v.confirm_clear { "Press again to clear" } else { "Clear log" };
+        for (label, code, col) in [("Copy log".to_string(), T_LOG_COPY, ACCENT), (clear.to_string(), T_LOG_CLEAR, if v.confirm_clear { ERR } else { MUTED }), (format!("Verbose: {}", if verbose { "on" } else { "off" }), T_LOG_VERBOSE, if verbose { ACCENT } else { MUTED }), ("Close".to_string(), T_LOG_CLOSE, MUTED)] {
+            bx += g.button(bx, by, bsz, &label, col, Event::Tab(code)) + 8.0 * s;
+        }
+        let inner = R::new(p.x + 26.0 * s, by + bsz * 2.1 + 12.0 * s, p.w - 52.0 * s - 10.0 * s, p.y + p.h - (by + bsz * 2.1 + 12.0 * s) - 16.0 * s);
+        let (sz, face) = (11.5 * s, Face::Mono);
+        let lh = g.line_height(sz, face);
+        let text = if events.is_empty() { "Nothing yet. Every picture request, skip, cap and fall back to SVG is written here.".to_string() } else { piclog::log_text(&events) };
+        let mut lines: Vec<String> = Vec::new();
+        for l in text.split('\n') {
+            if l.is_empty() {
+                lines.push(String::new());
+            } else {
+                lines.extend(g.wrap(sz, l, face, inner.w));
+            }
+        }
+        let rows = ((inner.h / lh) as usize).max(1);
+        let max = lines.len().saturating_sub(rows);
+        let at = if v.at_end.get() { max } else { v.top.get().min(max) };
+        v.top.set(at);
+        v.total.set(lines.len());
+        v.rows.set(rows);
+        g.clipped(inner, |g| {
+            for (i, l) in lines.iter().skip(at).take(rows + 1).enumerate() {
+                g.text(inner.x, inner.y + i as f32 * lh, sz, if l.starts_with("20") { TEXT } else { MUTED }, l, face);
+            }
+        });
+        fx::scrollbar(g, R::new(p.x + p.w - 22.0 * s, inner.y, 6.0 * s, inner.h), s, at, rows, lines.len(), ACCENT);
+    }
+
     fn draw_model_pick(&self, g: &mut Gfx, area: R, s: f32, cx: &AppCx) {
         let Some(Modal::Model(m)) = &self.modal else { return };
         model_picker::draw(g, area, s, cx, &m.list);
@@ -1469,12 +1837,15 @@ impl StoryApp {
     fn reconcile_pictures(&mut self, old: Vec<Pic>, all_new: bool, cx: &AppCx) {
         self.pics.clear();
         self.pic_gen += 1;
+        self.held = false;
+        self.alt_jobs.clear();
+        self.alt_running = None;
         if self.story_opts.pictures == PictureMode::Off {
             return;
         }
         let o = self.story_opts.clone();
         let title = if self.story.title.is_empty() { st::title_from_topic(&o.topic) } else { self.story.title.clone() };
-        let scenes = st::scenes(&self.story, st::MAX_PICTURES);
+        let scenes = illus::pick_scenes(st::scenes(&self.story, st::MAX_PICTURES), o.coverage);
         let old_scenes: Vec<st::Scene> = old.iter().map(|p| if p.state == PicState::Ready { p.scene.clone() } else { st::Scene { text: String::new(), ..p.scene.clone() } }).collect();
         let reuse = if all_new { vec![None; scenes.len()] } else { st::reuse_pictures(&old_scenes, &scenes) };
         let mut kept = 0;
@@ -1494,13 +1865,25 @@ impl StoryApp {
                         _ => format!("SVG drawing: {}", st::image_prompt(&title, &o, &sc)),
                     };
                     fresh.push(self.pics.len());
-                    self.pics.push(Pic { scene: sc, state: PicState::Queued, bytes: None, ext: "svg".into(), prompt, mode: o.pictures, style: o.style, key: self.pic_gen, call: None, how: String::new(), log: String::new(), feedback: String::new() });
+                    self.pics.push(Pic { scene: sc, state: PicState::Queued, bytes: None, ext: "svg".into(), prompt, mode: o.pictures, style: o.style, key: self.pic_gen, call: None, how: String::new(), log: String::new(), feedback: String::new(), size: String::new(), look: o.pic.styles_list()[0], seed: None, provider: String::new(), model: String::new(), ms: 0, alts: Vec::new() });
                 }
             }
         }
         if kept > 0 {
             let c = self.step("Keep", &format!("{kept} picture{}", if kept == 1 { "" } else { "s" }));
             self.step_done(&c, true, &format!("{kept} picture{} still fit{} the new text and {} kept; {} drawn again.", if kept == 1 { "" } else { "s" }, if kept == 1 { "s" } else { "" }, if kept == 1 { "is" } else { "are" }, fresh.len()));
+        }
+        self.queue_alts(&fresh);
+        let job = if o.pictures == PictureMode::ImageModel { self.job_line(cx, fresh.len()) } else { None };
+        let (_, secs) = self.job_totals(cx, fresh.len());
+        let long = o.pictures == PictureMode::ImageModel && secs > self.confirm_secs && !fresh.is_empty();
+        if (o.coverage == Coverage::Ask || long) && !fresh.is_empty() {
+            // nothing is drawn until the person says yes: the text is complete and readable meanwhile
+            self.held = true;
+            let n = fresh.len();
+            let total = job.unwrap_or_else(|| self.timing_line(cx, n));
+            self.convo.push(Message::assistant(format!("I can draw {n} picture{} for this story. {total} Press \"Make the pictures\" to start, or \"No pictures\" to cancel.", if n == 1 { "" } else { "s" })));
+            return;
         }
         self.push_draw_calls(&fresh);
         self.pump_pictures(cx);
@@ -1562,6 +1945,8 @@ impl StoryApp {
             style: PictureStyle::default(),
             drawing: st::DrawingMode::default(),
             video: false,
+            coverage: self.opts.coverage,
+            pic: self.store.load_picture_opts(&e.id).unwrap_or_else(|| illus::PictureOpts { seed: None, ..self.opts.pic.clone() }),
         }
     }
 
@@ -1607,6 +1992,8 @@ impl StoryApp {
         self.lay.clear();
         self.pics.clear();
         self.sheet = None;
+        self.setting = None;
+        self.held = false;
         self.pic_gen += 1;
         if let Some(j) = self.audio_job.take() {
             j.cancel.store(true, Ordering::SeqCst);
@@ -1625,6 +2012,8 @@ impl StoryApp {
         self.rev = None;
         self.thinking.clear();
         self.scroll_px = 0.0;
+        self.pic_pending.clear();
+        self.pic_attempts.clear();
         self.clear_view();
     }
 
@@ -1790,6 +2179,11 @@ impl StoryApp {
         self.persist_chat();
     }
 
+    /// The other pictures of a scene as the store keeps them.
+    fn stored_variants(p: &Pic) -> Vec<StoredVariant> {
+        p.alts.iter().map(|a| StoredVariant { ext: a.ext.clone(), bytes: a.bytes.as_ref().clone(), style: a.look.id().into(), seed: a.seed, provider: a.provider.clone(), model: a.model.clone(), size: a.size.clone(), ms: a.ms, prompt: a.prompt.clone() }).collect()
+    }
+
     /// Keep the pictures that are ready next to the saved story (their places are those of the saved text).
     fn persist_pictures(&mut self) -> usize {
         let Some(id) = self.saved_id() else { return 0 };
@@ -1801,6 +2195,13 @@ impl StoryApp {
             .filter(|p| p.state == PicState::Ready)
             .filter_map(|p| {
                 Some(StoredPic {
+                    variants: Self::stored_variants(p),
+                    look: p.look.id().into(),
+                    seed: p.seed,
+                    provider: p.provider.clone(),
+                    model: p.model.clone(),
+                    ms: p.ms,
+                    size: p.size.clone(),
                     source: p.how.clone(),
                     scene_text: p.scene.text.clone(),
                     unit: p.scene.place_before + shift,
@@ -1817,7 +2218,12 @@ impl StoryApp {
         for (i, p) in self.pics.iter().enumerate().filter(|(_, p)| !p.log.is_empty()) {
             log.push_str(&format!("######## Picture {} ({}): {}\nstyle {} · made as: {}\n{}\n", i + 1, p.scene.title, p.how, p.style.id(), p.ext, p.log));
         }
+        self.flush_pic_log();
+        let _ = self.store.save_picture_opts(&id, &self.story_opts.pic);
         let _ = self.store.save_notes(&id, self.sheet.as_ref().map(|c| c.to_json()).as_deref(), &log);
+        if let Some(t) = &self.setting {
+            let _ = self.store.save_setting(&id, t);
+        }
         match self.store.save_pictures(&id, &list) {
             Ok(()) => list.len(),
             Err(e) => {
@@ -1856,28 +2262,98 @@ impl StoryApp {
     }
 
     fn pump_pictures(&mut self, cx: &AppCx) {
-        if self.pics.iter().any(|p| p.state == PicState::Working) {
+        if self.held || self.alt_running.is_some() || self.pics.iter().any(|p| p.state == PicState::Working) {
             return;
         }
-        let Some(idx) = self.pics.iter().position(|p| p.state == PicState::Queued) else { return };
-        self.pics[idx].state = PicState::Working;
+        // the main pictures first; then the extra ones (other styles and seeds), scene by scene
+        let mut alt: Option<AltJob> = None;
+        let idx = match self.pics.iter().position(|p| p.state == PicState::Queued) {
+            Some(i) => i,
+            None => {
+                while let Some(j) = self.alt_jobs.pop_front() {
+                    if self.pics.get(j.idx).is_some_and(|p| p.state == PicState::Ready && p.mode == PictureMode::ImageModel) {
+                        alt = Some(j);
+                        break;
+                    }
+                }
+                let Some(j) = alt else { return };
+                j.idx
+            }
+        };
+        if self.pics[idx].mode == PictureMode::ImageModel {
+            if let Some(why) = self.low_memory(cx) {
+                // no picture job starts while the machine is short of memory; the text is untouched and Try again works later
+                let mut evs = Vec::new();
+                for i in 0..self.pics.len() {
+                    if self.pics[i].state == PicState::Queued && self.pics[i].mode == PictureMode::ImageModel {
+                        self.pics[i].state = PicState::Failed(why.clone());
+                        self.pic_result(i, false, &why);
+                        evs.push(self.pic_decision(plk::SKIPPED, i, &format!("skipped: free memory low. {why}")));
+                    }
+                }
+                if alt.is_some() {
+                    evs.push(self.pic_decision(plk::SKIPPED, idx, &format!("skipped (another picture of this scene): free memory low. {why}")));
+                    self.alt_jobs.clear();
+                }
+                self.log_pic_events(evs);
+                self.note = Some((why, false));
+                self.dirty = true;
+                return;
+            }
+        }
+        if alt.is_none() {
+            self.pics[idx].state = PicState::Working;
+        } else {
+            self.alt_running = Some(idx);
+        }
         let (gen, tx) = (self.pic_gen, self.pic_tx.clone());
         let title = if self.story.title.is_empty() { st::title_from_topic(&self.story_opts.topic) } else { self.story.title.clone() };
         let (mut o, scene, mode) = (self.story_opts.clone(), self.pics[idx].scene.clone(), self.pics[idx].mode);
         o.style = self.pics[idx].style;
+        let (look, variant_n) = alt.map_or((self.pics[idx].look, 0), |j| (j.look, j.n));
+        o.pic.look = look;
         let svc = cx.services.clone();
         let drawers = self.drawers(cx);
         let workdir = cx.services.dir().join("tales-agent");
-        let (story_text, known_sheet, feedback) = (self.story.plain(), self.sheet.clone(), self.pics[idx].feedback.clone());
-        let picture_model = match self.picture_plan(cx) {
-            ModelPlan::Chosen(c) => Some((c.provider, c.model)),
-            ModelPlan::SameAsChat { .. } => None,
+        let (story_text, known_sheet, feedback, known_setting) = (self.story.plain(), self.sheet.clone(), if alt.is_some() { String::new() } else { self.pics[idx].feedback.clone() }, self.setting.clone());
+        // the model that draws is named (the chosen one, else the first found) so its name is kept with the picture
+        let resolved = self.resolved_look(&o.pic, look, cx);
+        let picture_model = resolved.as_ref().map(|r| (r.provider.clone(), r.model.clone()));
+        let family = illus::Family::of(&resolved.as_ref().map_or(String::new(), |r| r.model.clone()));
+        // a new seed for every picture, or the story's own when it keeps one look (made with the first picture and kept)
+        let attempt = {
+            let n = self.pic_attempts.entry(idx).or_insert(0);
+            *n += 1;
+            *n
         };
+        // one seed family per scene: every style of it starts from the same seed, each further picture of a style from another
+        let base = match self.scene_seed.get(&idx).copied().filter(|_| alt.is_some()) {
+            Some(b) => b,
+            None => {
+                let b = illus::seed_for(&o.pic, illus::fresh_seed(idx as u64 * 31 + attempt as u64));
+                self.scene_seed.insert(idx, b);
+                b
+            }
+        };
+        let seed = illus::PictureOpts::variant_seed(base, variant_n);
+        let (rsteps, rsize, rguid) = resolved.as_ref().map_or((None, None, None), |r| (r.steps, Some((r.width, r.height)), r.guidance));
+        let realistic = o.pic.is_realistic();
+        if o.pic.keep_look && self.story_opts.pic.seed.is_none() {
+            self.story_opts.pic.seed = Some(base);
+            if let Some(id) = self.saved_id() {
+                let _ = self.store.save_picture_opts(&id, &self.story_opts.pic);
+            }
+        }
+        let story_name = title.clone();
+        self.pic_started.insert(idx, Instant::now());
+        self.pic_target = picture_model.clone();
+        self.last_wait_log = None;
         cx.audit.record(&cx.session.user, "story.picture", &format!("{} scene {}", mode.id(), idx + 1));
         std::thread::spawn(move || {
             // the character sheet is made once per story, by the first drawer, and kept
             let mut sheet = known_sheet;
             let mut made_sheet = None;
+            let mut made_setting: Option<String> = None;
             let mut need_sheet = |drawer: &Drawer| -> CharacterSheet {
                 if let Some(s) = &sheet {
                     return s.clone();
@@ -1887,16 +2363,67 @@ impl StoryApp {
                 sheet = Some(s.clone());
                 s
             };
+            let mut events: Vec<PicEvent> = Vec::new();
+            let mut missing: Option<MissingModel> = None;
             let res: Result<PicOut, String> = match mode {
-                PictureMode::ImageModel => {
+                PictureMode::ImageModel => 'img: {
+                    // ask the server now whether the model is on it: a call for a model that is not downloaded would start a
+                    // download of several GB inside the call, with no progress and no end in sight
+                    if let Some((p, m)) = &picture_model {
+                        if svc.provider_is_lemonade(p) {
+                            let size = match svc.lemonade_live_model(p, m) {
+                                Ok(Some(info)) if !info.downloaded => Some(info.size_text()),
+                                Ok(None) => Some("size unknown".to_string()),
+                                _ => None,
+                            };
+                            if let Some(size) = size {
+                                let text = illus::not_downloaded_text(m, p, &size);
+                                let mut ev = piclog::decision_event(now_secs(), plk::NOT_DOWNLOADED, &story_name, idx + 1, &scene.title, &format!("{text} Nothing was asked of the server."));
+                                (ev.provider, ev.model, ev.attempt) = (p.clone(), m.clone(), attempt);
+                                events.push(ev);
+                                missing = Some(MissingModel { provider: p.clone(), model: m.clone(), size, text: text.clone() });
+                                break 'img Err(text);
+                            }
+                        }
+                    }
                     let sh = need_sheet(&drawers[0]);
-                    let prompt = st::image_prompt_with(&title, &o, &scene, &sh, &feedback);
+                    // the story model writes the setting note once and a short visual brief for this scene; when it cannot,
+                    // the scene's own text is used, so a picture is never lost to this step
+                    let setting = known_setting.clone().or_else(|| {
+                        let n = drawers[0].chat.complete(&illus::setting_messages(&title, &o, &story_text)).ok().and_then(|t| illus::clean_description(&t));
+                        made_setting = n.clone();
+                        n
+                    });
+                    let brief = drawers[0].chat.complete(&illus::visual_messages_for(&title, &o, &scene, &sh, setting.as_deref().unwrap_or(""), Some(family))).ok().and_then(|t| illus::clean_description(&t));
+                    let mut desc = brief.unwrap_or_else(|| scene.text.chars().take(300).collect());
+                    if !feedback.trim().is_empty() {
+                        desc.push_str(&format!(" Change requested by the person: {}.", feedback.trim()));
+                    }
+                    let built = illus::compose(&o, &scene, Some(&desc), &sh, setting.as_deref().unwrap_or(""), Some(family));
+                    let prompt = built.prompt.clone();
+                    let (fw, fh) = family.fallback_size();
+                    let params = iyakki_agent::providers::ImageParams { seed: Some(seed), negative: illus::API_TAKES_NEGATIVE_PROMPT.then(|| built.negative.clone()), verbose: o.pic.verbose, steps: rsteps, size: rsize, guidance: rguid };
+                    let (r, trace) = svc.generate_image_traced(picture_model.as_ref().map(|(p, m)| (p.as_str(), m.as_str())), &prompt, &format!("{fw}x{fh}"), &params);
                     // what the picture model sends is judged by its first bytes, never by its claimed type: size caps, a pixel
                     // cap from the header, a real decode, metadata stripped
-                    svc.generate_image(picture_model.as_ref().map(|(p, m)| (p.as_str(), m.as_str())), &prompt, "1024x1024").and_then(|(_, _, bytes, _)| {
-                        let f = scene::reply::validate(bytes, o.video, "the picture model")?;
-                        Ok(PicOut { bytes: f.bytes, ext: f.ext.to_string(), prompt: prompt.clone(), how: "image".into(), who: picture_model.as_ref().map_or("the picture model".into(), |m| m.1.clone()), note: None, log: format!("=== image model ===\nPROMPT\n{prompt}\nRESULT: {} accepted\n", f.ext), sheet: None })
-                    })
+                    let mut rejected = None;
+                    let out = match r {
+                        Ok((_, _, bytes, _)) => match scene::reply::validate(bytes, o.video, "the picture model") {
+                            Ok(f) => {
+                                let size = scene::reply::dimensions(&f.bytes, f.ext).map(|(w, h)| format!("{w}x{h}")).unwrap_or_default();
+                                let log = format!("=== image model ===\nPROMPT\n{prompt}\nNEGATIVE (sent: {})\n{}\nSEED {seed}\nRESULT: {} accepted\n", built.negative_sent, built.negative, f.ext);
+                                Ok(PicOut { bytes: f.bytes, ext: f.ext.to_string(), prompt: prompt.clone(), how: "image".into(), who: picture_model.as_ref().map_or("the picture model".into(), |m| m.1.clone()), note: None, log, sheet: None, setting: None, size, made: Some((look, Some(seed), trace.provider.clone(), trace.model.clone(), trace.ms)) })
+                            }
+                            Err(e) => {
+                                rejected = Some(e.clone());
+                                Err(e)
+                            }
+                        },
+                        Err(e) => Err(e),
+                    };
+                    let info = piclog::RequestInfo { ts: now_secs(), story: &story_name, picture: idx + 1, scene: &scene.title, attempt, prompt: &prompt, negative: &built.negative, negative_sent: built.negative_sent, verbose: o.pic.verbose, style: look.id(), variant: variant_n + 1, realistic, guidance: rguid };
+                    events.push(piclog::request_event(&trace, &info, rejected.as_deref(), ""));
+                    out
                 }
                 _ => {
                     // the writer draws (a rich SVG when it is strong, else it picks a scene for the built-in cartoon); when the
@@ -1907,7 +2434,7 @@ impl StoryApp {
                         let sh = need_sheet(d);
                         match scene::draw_picture(d.chat.as_ref(), &title, &o, &scene, &sh, &scene::DrawCfg { strong: d.strong, story_text: &story_text, feedback: &feedback, workdir: Some(workdir.as_path()), allow_video: o.video }) {
                             Ok(x) => {
-                                out = Some(PicOut { bytes: x.bytes, ext: x.ext.into(), prompt: x.prompt, how: x.how.into(), who: d.who.clone(), note: x.note, log: x.log, sheet: None });
+                                out = Some(PicOut { bytes: x.bytes, ext: x.ext.into(), prompt: x.prompt, how: x.how.into(), who: d.who.clone(), note: x.note, log: x.log, sheet: None, setting: None, size: String::new(), made: None });
                                 break;
                             }
                             Err(e) => last = format!("{}: {e}", d.who),
@@ -1918,9 +2445,10 @@ impl StoryApp {
             };
             let res = res.map(|mut r| {
                 r.sheet = made_sheet.take();
+                r.setting = made_setting.take();
                 r
             });
-            let _ = tx.send(PicMsg { gen, idx, res });
+            let _ = tx.send(PicMsg { gen, alt, idx, res, events, missing });
         });
     }
 
@@ -1947,13 +2475,75 @@ impl StoryApp {
     }
 
     fn poll_pictures(&mut self, cx: &AppCx) {
+        self.poll_install(cx);
+        self.update_wait(cx);
         let mut changed = false;
-        while let Ok(m) = self.pic_rx.try_recv() {
+        while let Ok(mut m) = self.pic_rx.try_recv() {
+            // the log keeps what was asked even when the answer comes after a cancel
+            let evs = std::mem::take(&mut m.events);
+            self.log_pic_events(evs);
             if m.gen != self.pic_gen || m.idx >= self.pics.len() {
+                continue;
+            }
+            self.pic_started.remove(&m.idx);
+            if m.missing.is_some() {
+                self.alt_running = None;
+                self.alt_jobs.clear();
+            }
+            if let Some(miss) = m.missing.take() {
+                for i in 0..self.pics.len() {
+                    if (m.alt.is_none() && i == m.idx) || (self.pics[i].state == PicState::Queued && self.pics[i].mode == PictureMode::ImageModel) {
+                        self.pics[i].state = PicState::Failed(miss.text.clone());
+                        self.pic_result(i, false, &miss.text);
+                    }
+                }
+                self.note = Some((miss.text.clone(), false));
+                self.install = Some(Install { provider: miss.provider, model: miss.model, size: miss.size, started: false });
+                changed = true;
+                continue;
+            }
+            // one more picture of a scene (another style or seed): it goes into the scene's gallery, never over the main one
+            if let Some(job) = m.alt {
+                self.alt_running = None;
+                match m.res {
+                    Ok(out) => match self.cap_error_alt(out.bytes.len() as u64) {
+                        Ok(()) => {
+                            let (look, seed, provider, model, ms) = out.made.clone().unwrap_or((job.look, None, String::new(), out.who.clone(), 0));
+                            let key = hash(&format!("{}{}{}{}", self.pic_gen, m.idx, job.look.id(), out.bytes.len())) ^ out.bytes.len() as u64;
+                            self.pics[m.idx].alts.push(Alt { look, seed, provider, model, size: out.size.clone(), ms, ext: out.ext.clone(), prompt: out.prompt.clone(), key, bytes: Arc::new(out.bytes) });
+                            self.note = Some((format!("Another picture of scene {} is ready ({}).", m.idx + 1, look.label()), true));
+                        }
+                        Err(e) => {
+                            // the limit: nothing that exists is dropped; the rest of the job stops, and it says so
+                            let left = self.alt_jobs.len();
+                            self.alt_jobs.clear();
+                            let ev = self.pic_decision(plk::NOT_KEPT, m.idx, &format!("not kept: {e}. The {left} pictures still to be drawn were stopped."));
+                            self.log_pic_events(vec![ev]);
+                            self.note = Some((format!("Stopped: {e}. Your pictures are all still there; {left} more were not drawn."), false));
+                        }
+                    },
+                    Err(e) => self.note = Some((format!("Another picture of scene {} could not be drawn: {e}", m.idx + 1), false)),
+                }
+                changed = true;
                 continue;
             }
             match m.res {
                 Ok(out) => {
+                    if let Err(e) = self.cap_error(m.idx, out.bytes.len() as u64) {
+                        let why = format!("Not kept: {e}.");
+                        let ev = self.pic_decision(plk::NOT_KEPT, m.idx, &format!("not kept: {e}"));
+                        self.log_pic_events(vec![ev]);
+                        self.pics[m.idx].state = PicState::Failed(why.clone());
+                        self.pic_result(m.idx, false, &why);
+                        changed = true;
+                        continue;
+                    }
+                    if self.setting.is_none() && out.setting.is_some() {
+                        self.setting = out.setting.clone();
+                        if let Some(id) = self.saved_id() {
+                            let _ = self.store.save_setting(&id, self.setting.as_deref().unwrap_or(""));
+                        }
+                    }
                     if self.sheet.is_none() {
                         self.sheet = out.sheet.clone();
                     }
@@ -1973,6 +2563,10 @@ impl StoryApp {
                     p.ext = out.ext;
                     p.prompt = out.prompt;
                     p.how = how;
+                    p.size = out.size;
+                    if let Some((look, seed, provider, model, ms)) = out.made {
+                        (p.look, p.seed, p.provider, p.model, p.ms) = (look, seed, provider, model, ms);
+                    }
                     p.log = out.log;
                     p.state = PicState::Ready;
                     self.pic_result(m.idx, true, &said);
@@ -1980,7 +2574,11 @@ impl StoryApp {
                 Err(e) if self.pic_auto && self.pics[m.idx].mode == PictureMode::ImageModel => {
                     // images are preferred; when they do not work this scene and the rest are drawn as SVG, said once
                     self.pic_auto = false;
+                    self.alt_jobs.clear();
                     self.pic_result(m.idx, false, &format!("image generation did not work: {e}"));
+                    let mut ev = self.pic_decision(plk::SVG_FALLBACK, m.idx, "this picture and the rest are drawn as SVG");
+                    ev.svg_fallback = format!("image generation did not work: {e}");
+                    self.log_pic_events(vec![ev]);
                     let title = if self.story.title.is_empty() { st::title_from_topic(&self.story_opts.topic) } else { self.story.title.clone() };
                     let mut again = Vec::new();
                     for i in 0..self.pics.len() {
@@ -2022,8 +2620,366 @@ impl StoryApp {
             return;
         }
         p.state = PicState::Queued;
+        self.held = false;
         self.push_draw_calls(&[idx]);
         self.pump_pictures(cx);
+    }
+
+    /// Stop the picture job: the one being made is dropped when it comes back, the waiting ones are not started. The text and
+    /// the finished pictures stay; a cancelled picture can be tried again.
+    fn cancel_pictures(&mut self) {
+        self.pic_gen += 1;
+        self.held = false;
+        self.alt_jobs.clear();
+        self.alt_running = None;
+        let mut evs = Vec::new();
+        for i in 0..self.pics.len() {
+            if matches!(self.pics[i].state, PicState::Working | PicState::Queued) {
+                evs.push(self.pic_decision(plk::SKIPPED, i, if self.pics[i].state == PicState::Working { "cancelled while it was being drawn (an answer that comes later is only logged)" } else { "cancelled before it started" }));
+                self.pics[i].state = PicState::Failed("cancelled".into());
+                self.pic_result(i, false, "cancelled");
+            }
+        }
+        self.log_pic_events(evs);
+        if self.saved.is_some() {
+            self.persist_pictures();
+        }
+        self.persist_chat();
+        self.note = Some(("The pictures were cancelled; the story is as it was.".into(), true));
+        self.dirty = true;
+    }
+
+    /// Remove one picture from the story (and from its folder when saved).
+    fn delete_picture(&mut self, idx: usize) {
+        if idx >= self.pics.len() {
+            return;
+        }
+        if self.pics.iter().any(|p| p.state == PicState::Working) {
+            self.note = Some(("Wait for the picture being drawn, or press Cancel pictures, then delete.".into(), false));
+            return;
+        }
+        self.pics.remove(idx);
+        if self.saved.is_some() {
+            self.persist_pictures();
+        }
+        self.note = Some(("The picture was deleted.".into(), true));
+        self.dirty = true;
+    }
+
+    // ------------------------------------------------------------------------------------------------ waiting, time limit, install
+
+    /// The time limit for one picture, the pause between health calls and between "waiting" lines of the log.
+    fn timing(&self) -> (Duration, Duration, Duration) {
+        self.test_timing.unwrap_or((Duration::from_secs(60 * self.pic_now().limit_min() as u64), Duration::from_secs(5), Duration::from_secs(30)))
+    }
+
+    fn secs_text(d: Duration) -> String {
+        let s = d.as_secs();
+        if s >= 120 { format!("{} min {} s", s / 60, s % 60) } else { format!("{s} s") }
+    }
+
+    /// While a picture is being drawn: how long it has taken, what the server says (asked every few seconds), a line in the log
+    /// now and then, and the time limit.
+    fn update_wait(&mut self, cx: &AppCx) {
+        while let Ok(r) = self.health_rx.try_recv() {
+            self.health_busy = false;
+            let target = self.pic_target.as_ref().map_or(String::new(), |t| t.1.clone());
+            self.server_state = match r {
+                Ok((text, loaded)) => format!("server: {text}; {target} is {}", if loaded.iter().any(|m| *m == target) { "loaded" } else { "not loaded yet (loading, or downloading)" }),
+                Err(e) => format!("server: its health call failed ({e})"),
+            };
+        }
+        let Some(idx) = self.pics.iter().position(|p| p.state == PicState::Working).or(self.alt_running) else {
+            self.wait_text = None;
+            self.server_state.clear();
+            return;
+        };
+        let Some(t0) = self.pic_started.get(&idx).copied() else { return };
+        let el = t0.elapsed();
+        let (limit, every, log_every) = self.timing();
+        if el >= limit {
+            self.time_out(idx, el, limit);
+            return;
+        }
+        if let Some((p, _)) = self.pic_target.clone().filter(|(p, _)| cx.services.provider_is_lemonade(p)) {
+            if !self.health_busy && self.health_last.is_none_or(|l| l.elapsed() >= every) {
+                self.health_busy = true;
+                self.health_last = Some(Instant::now());
+                let (svc, tx) = (cx.services.clone(), self.health_tx.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(svc.lemonade_health(&p));
+                });
+            }
+        }
+        let state = if self.server_state.is_empty() { String::new() } else { format!(" ({})", self.server_state) };
+        let text = format!("Drawing picture {}: {} so far. The model is loading or generating; on a CPU this can take minutes. The limit is {}; Cancel pictures stops it{state}.", idx + 1, Self::secs_text(el), Self::secs_text(limit));
+        self.wait_text = Some(text);
+        if self.last_wait_log.is_none_or(|l| l.elapsed() >= log_every) && el >= log_every.min(Duration::from_secs(30)) {
+            self.last_wait_log = Some(Instant::now());
+            let mut ev = self.pic_decision(plk::WAITING, idx, &format!("waiting {}{}", Self::secs_text(el), if self.server_state.is_empty() { String::new() } else { format!(" · {}", self.server_state) }));
+            if let Some((p, m)) = &self.pic_target {
+                (ev.provider, ev.model) = (p.clone(), m.clone());
+            }
+            self.log_pic_events(vec![ev]);
+        }
+        self.dirty = true;
+    }
+
+    /// The picture took longer than the limit: stop waiting for it (an answer that comes later is dropped, and only logged).
+    fn time_out(&mut self, idx: usize, el: Duration, limit: Duration) {
+        let why = format!("Stopped after {} (the time limit for a picture is {}). The server may still be working on it; try again, choose a smaller picture model, or raise the limit in Options.", Self::secs_text(el), Self::secs_text(limit));
+        let mut evs = vec![self.pic_decision(plk::TIMEOUT, idx, &format!("timeout after {}: {}", Self::secs_text(el), if self.server_state.is_empty() { "no server state" } else { &self.server_state }))];
+        if let Some((p, m)) = &self.pic_target {
+            (evs[0].provider, evs[0].model) = (p.clone(), m.clone());
+        }
+        self.pic_gen += 1;
+        self.held = false;
+        self.alt_jobs.clear();
+        self.alt_running = None;
+        for i in 0..self.pics.len() {
+            if matches!(self.pics[i].state, PicState::Working | PicState::Queued) {
+                self.pics[i].state = PicState::Failed(why.clone());
+                self.pic_result(i, false, &why);
+            }
+        }
+        self.pic_started.clear();
+        self.log_pic_events(std::mem::take(&mut evs));
+        if self.saved.is_some() {
+            self.persist_pictures();
+        }
+        self.persist_chat();
+        self.note = Some((why, false));
+        self.dirty = true;
+    }
+
+    /// Start the download of the picture model that is not on the server (the same download as Settings → Models, with progress).
+    fn start_install(&mut self, cx: &AppCx) {
+        let Some((p, m, size)) = self.install.as_ref().filter(|i| !i.started).map(|i| (i.provider.clone(), i.model.clone(), i.size.clone())) else { return };
+        match cx.services.pull_model(&p, &m) {
+            Ok(()) => {
+                if let Some(i) = self.install.as_mut() {
+                    i.started = true;
+                }
+                let mut ev = piclog::decision_event(now_secs(), plk::PULL, &self.story_name(), 0, "", &format!("pull started: {m} on {p} ({size})"));
+                (ev.provider, ev.model) = (p, m);
+                self.log_pic_events(vec![ev]);
+                cx.audit.record(&cx.session.user, "story.picture_install", &self.pic_log_name());
+            }
+            Err(e) => self.note = Some((format!("The download could not start: {e}"), false)),
+        }
+    }
+
+    /// Follow the download: progress as a note, then, when it is there, the waiting pictures are drawn.
+    fn poll_install(&mut self, cx: &AppCx) {
+        let Some((p, m, started)) = self.install.as_ref().map(|i| (i.provider.clone(), i.model.clone(), i.started)) else { return };
+        if !started {
+            return;
+        }
+        let Some(st) = cx.services.pull_status().into_iter().find(|s| s.provider == p && s.model == m) else { return };
+        let mut log = |a: &mut StoryApp, d: String| {
+            let mut ev = piclog::decision_event(now_secs(), plk::PULL, &a.story_name(), 0, "", &d);
+            (ev.provider, ev.model) = (p.clone(), m.clone());
+            a.log_pic_events(vec![ev]);
+        };
+        if let Some(e) = &st.error {
+            self.install = self.install.take().map(|i| Install { started: false, ..i });
+            log(self, format!("pull failed: {e}"));
+            self.note = Some((format!("The download of {m} failed: {e}"), false));
+        } else if st.done {
+            self.install = None;
+            self.image_models = cx.services.image_models();
+            log(self, "pull finished".into());
+            self.note = Some((format!("{m} is installed. Drawing the pictures now."), true));
+            let again: Vec<usize> = (0..self.pics.len()).filter(|&i| self.pics[i].mode == PictureMode::ImageModel && matches!(&self.pics[i].state, PicState::Failed(w) if w.contains("is not downloaded"))).collect();
+            for &i in &again {
+                self.pics[i].state = PicState::Queued;
+            }
+            self.held = false;
+            self.push_draw_calls(&again);
+            self.pump_pictures(cx);
+        } else {
+            let pct = if st.total > 0 { format!(" {}%", st.completed * 100 / st.total) } else { String::new() };
+            self.note = Some((format!("Downloading {m}{pct}: {}", st.describe()), true));
+        }
+        self.dirty = true;
+    }
+
+    /// The picture choices in force: the story's when one is on the page, else the defaults.
+    fn pic_now(&self) -> illus::PictureOpts {
+        if self.story.is_empty() && self.gen.is_none() { self.opts.pic.clone() } else { self.story_opts.pic.clone() }
+    }
+
+    /// The picture models that are there, as (provider, model).
+    fn found_images(&self, cx: &AppCx) -> Vec<(String, String)> {
+        if self.image_models.is_empty() { cx.services.image_models() } else { self.image_models.clone() }
+    }
+
+    /// The picture model that `pic` leads to (the story's own choice, Quality, the selected one) with its size and steps.
+    fn resolved_for(&self, pic: &illus::PictureOpts, cx: &AppCx) -> Option<illus::Resolved> {
+        self.resolved_look(pic, pic.styles_list()[0], cx)
+    }
+
+    /// [`Self::resolved_for`] for drawing in `look` (the Photorealistic style takes the most realistic installed model).
+    fn resolved_look(&self, pic: &illus::PictureOpts, look: illus::Look, cx: &AppCx) -> Option<illus::Resolved> {
+        let cands = cx.services.picture_choices(&self.found_images(cx));
+        let avail = self.memory_now().filter(|m| m.total > 0).map(|m| m.available >> 20);
+        illus::resolve_for(pic, look, self.prefs.picture_model.as_ref(), &cands, avail)
+    }
+
+    /// Change a picture choice for the defaults and for the story on the page, and keep it (with the story when it is saved).
+    fn set_pic(&mut self, f: impl Fn(&mut illus::PictureOpts)) {
+        f(&mut self.opts.pic);
+        self.opts.pic.seed = None;
+        if !self.story.is_empty() {
+            f(&mut self.story_opts.pic);
+            if !self.story_opts.pic.keep_look {
+                self.story_opts.pic.seed = None;
+            }
+            if let Some(id) = self.saved_id() {
+                let _ = self.store.save_picture_opts(&id, &self.story_opts.pic);
+            }
+        }
+        self.save_prefs();
+        self.dirty = true;
+    }
+
+    /// The next picture model for this story: automatic, then each picture model of every provider, round and round.
+    fn cycle_story_model(&mut self, cx: &AppCx) {
+        let found: Vec<(String, String)> = cx.services.picture_choices(&self.found_images(cx)).into_iter().map(|c| (c.provider, c.model)).collect();
+        let cur = self.pic_now().model;
+        let at = cur.and_then(|c| found.iter().position(|(p, m)| *p == c.provider && *m == c.model));
+        let next = match at {
+            None if self.pic_now().model.is_none() => found.first(),
+            None => None,
+            Some(i) => found.get(i + 1),
+        };
+        let next = next.map(|(p, m)| ModelChoice { provider: p.clone(), model: m.clone() });
+        self.set_pic(move |o| o.model = next.clone());
+    }
+
+    /// Note picture log events; they go to the story's folder as soon as the story is saved.
+    fn log_pic_events(&mut self, evs: Vec<PicEvent>) {
+        if evs.is_empty() {
+            return;
+        }
+        self.pic_pending.extend(evs);
+        self.flush_pic_log();
+    }
+
+    fn flush_pic_log(&mut self) {
+        let Some(id) = self.saved_id() else {
+            let n = self.pic_pending.len();
+            if n > 500 {
+                self.pic_pending.drain(..n - 500);
+            }
+            return;
+        };
+        if !self.pic_pending.is_empty() && self.store.append_picture_log(&id, &self.pic_pending).is_ok() {
+            self.pic_pending.clear();
+        }
+    }
+
+    fn pic_log_name(&self) -> String {
+        self.install.as_ref().map_or(String::new(), |i| format!("{} {}", i.provider, i.model))
+    }
+
+    fn story_name(&self) -> String {
+        if self.story.title.is_empty() { st::title_from_topic(&self.story_opts.topic) } else { self.story.title.clone() }
+    }
+
+    /// A decision about picture `idx` for the log (skipped, not kept, cancelled).
+    fn pic_decision(&self, kind: &str, idx: usize, decision: &str) -> PicEvent {
+        piclog::decision_event(now_secs(), kind, &self.story_name(), idx + 1, self.pics.get(idx).map_or("", |p| p.scene.title.as_str()), decision)
+    }
+
+    /// Every picture log event of the story on the page, oldest first.
+    fn pic_log_events(&self) -> Vec<PicEvent> {
+        let mut v = self.saved_id().map(|id| self.store.load_picture_log(&id)).unwrap_or_default();
+        v.extend(self.pic_pending.iter().cloned());
+        v
+    }
+
+    fn open_pic_log(&mut self) {
+        self.menu = None;
+        self.focus = Focus::None;
+        self.modal = Some(Modal::PicLog(PicLogView { top: Cell::new(usize::MAX), at_end: Cell::new(true), total: Cell::new(0), rows: Cell::new(0), confirm_clear: false }));
+    }
+
+    /// Scroll the picture log by `d` wrapped lines (negative: towards the oldest).
+    fn log_scroll(&mut self, d: i64) {
+        if let Some(Modal::PicLog(v)) = &self.modal {
+            let max = v.total.get().saturating_sub(v.rows.get());
+            let at = v.top.get().min(max) as i64;
+            let to = (at + d).clamp(0, max as i64) as usize;
+            v.top.set(to);
+            v.at_end.set(to == max);
+            self.dirty = true;
+        }
+    }
+
+    /// The machine's memory now (tests set their own).
+    fn memory_now(&self) -> Option<iyakki_agent::sysinfo::Memory> {
+        #[cfg(test)]
+        return self.test_memory;
+        #[cfg(not(test))]
+        Some(iyakki_agent::sysinfo::memory(&iyakki_agent::sysinfo::SysRoots::real()))
+    }
+
+    /// The picture model that would be used: the chosen one, else the first found, with its Lemonade entry when it has one.
+    fn picture_info(&self, cx: &AppCx) -> Option<iyakki_agent::lemonade::Model> {
+        let r = self.resolved_for(&self.pic_now(), cx)?;
+        cx.services.lemonade_model(&r.provider, &r.model)
+    }
+
+    /// Whether the picture step can run now, and why not.
+    fn readiness(&self, cx: &AppCx) -> Readiness {
+        let found = self.found_images(cx);
+        // the memory of this computer matters only for a model that loads on this computer
+        let remote = self.resolved_for(&self.pic_now(), cx).is_some_and(|r| r.remote);
+        illus::readiness(&found, &cx.services.lemonade_images_missing(), self.picture_info(cx).as_ref(), if remote { None } else { self.memory_now() }.as_ref())
+    }
+
+    /// The sentence about memory when a picture job must wait, else `None`.
+    fn low_memory(&self, cx: &AppCx) -> Option<String> {
+        match self.readiness(cx) {
+            r @ Readiness::LowMemory { .. } => illus::reason(&r),
+            _ => None,
+        }
+    }
+
+    /// The honest timing line for `n` pictures with the picture model that would be used.
+    fn timing_line(&self, cx: &AppCx, n: usize) -> String {
+        let info = self.picture_info(cx);
+        let name = self.resolved_for(&self.pic_now(), cx).map_or("The picture model".to_string(), |r| r.model);
+        let cpu_only = !iyakki_agent::aiprofile::this_machine(0).capable();
+        illus::timing_text(&name, info.and_then(|m| m.image_defaults), n, cpu_only)
+    }
+
+    /// May a picture of `new` bytes be kept (the story's cap and the cap over all stories)?
+    fn cap_error(&self, idx: usize, new: u64) -> Result<(), String> {
+        // every picture of the story counts, the extra ones of a scene too (the one being replaced does not)
+        let story: u64 = self.story_pic_bytes(Some(idx));
+        let all = if self.saved.is_some() { self.store.pictures_bytes().max(story) } else { story };
+        illus::check_caps(story, all, new)
+    }
+
+    /// May one more picture of `new` bytes be kept beside the others?
+    fn cap_error_alt(&self, new: u64) -> Result<(), String> {
+        let story = self.story_pic_bytes(None);
+        let all = if self.saved.is_some() { self.store.pictures_bytes().max(story) } else { story };
+        illus::check_caps(story, all, new)
+    }
+
+    /// The bytes of the pictures of the story on the page: main and extra ones, without the main one of `skip`.
+    fn story_pic_bytes(&self, skip: Option<usize>) -> u64 {
+        self.pics
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let main = if Some(i) != skip && p.state == PicState::Ready { p.bytes.as_ref().map_or(0, |b| b.len() as u64) } else { 0 };
+                main + p.alts.iter().map(|a| a.bytes.len() as u64).sum::<u64>()
+            })
+            .sum()
     }
 
     // ------------------------------------------------------------------------------------------------ reading
@@ -2266,7 +3222,7 @@ impl StoryApp {
         match self.store.load_chat(id) {
             Some(c) if !c.messages.is_empty() => {
                 self.convo = c.messages;
-                self.ver = c.version.clamp(1, self.ver_count);
+                self.ver = c.version.clamp_safe(1, self.ver_count);
             }
             _ => {
                 self.ver = self.ver_count;
@@ -2277,11 +3233,13 @@ impl StoryApp {
         self.tool_ok = self.convo.iter().filter(|m| m.role == iyakki_agent::chat::Role::Tool).filter_map(|m| m.tool_call_id.clone().map(|id| (id, !m.content.starts_with("Failed:")))).collect();
         // the pictures that were kept, in their places
         self.sheet = self.store.load_character(id);
+        self.setting = self.store.load_setting(id);
         for p in self.store.load_pictures(id) {
             let mode = PictureMode::from_id(&p.mode).unwrap_or(PictureMode::Drawings);
             let style = PictureStyle::from_id(&p.style).unwrap_or_default();
             let key = hash(&format!("{id}{}{}", p.title, p.bytes.len()));
-            self.pics.push(Pic { scene: st::Scene { place_before: p.unit, title: p.title, text: p.scene_text }, state: PicState::Ready, bytes: Some(Arc::new(p.bytes)), ext: p.ext, prompt: p.prompt, mode, style, key, call: None, how: String::new(), log: String::new(), feedback: String::new() });
+            let alts: Vec<Alt> = p.variants.iter().map(|v| Alt { look: illus::Look::from_id(&v.style).unwrap_or_default(), seed: v.seed, provider: v.provider.clone(), model: v.model.clone(), size: v.size.clone(), ms: v.ms, ext: v.ext.clone(), key: hash(&format!("{id}{}{}{}", p.title, v.style, v.bytes.len())), bytes: Arc::new(v.bytes.clone()), prompt: v.prompt.clone() }).collect();
+            self.pics.push(Pic { scene: st::Scene { place_before: p.unit, title: p.title, text: p.scene_text }, state: PicState::Ready, bytes: Some(Arc::new(p.bytes)), ext: p.ext, prompt: p.prompt, mode, style, key, call: None, how: String::new(), log: String::new(), feedback: String::new(), size: p.size, look: illus::Look::from_id(&p.look).unwrap_or_default(), seed: p.seed, provider: p.provider.clone(), model: p.model.clone(), ms: p.ms, alts });
         }
         self.story_opts.style = self.pics.first().map_or_else(|| st::auto_style(self.story_opts.audience, self.story_opts.genre), |p| p.style);
         self.chunks = st::chunks_for(&self.story.units(), 0, st::MAX_CHUNK_CHARS);
@@ -2335,7 +3293,14 @@ impl StoryApp {
             self.note = Some(("There is no story to export yet.".into(), false));
             return;
         }
-        let items = vec!["Page with pictures (.html)".to_string(), "Text (.md)".to_string(), "Audio (.wav)".to_string()];
+        let mut items = vec!["Page with pictures (.html)".to_string(), "Text (.md)".to_string(), "Audio (.wav)".to_string()];
+        let has_alts = match &id {
+            Some(i) => self.store.load_pictures(i).iter().any(|p| !p.variants.is_empty()),
+            None => self.pics.iter().any(|p| !p.alts.is_empty()),
+        };
+        if has_alts {
+            items.push("Page with every picture variant (.html)".to_string());
+        }
         self.modal = Some(Modal::Export(Picker::new("Export to the computer", items), id));
     }
 
@@ -2359,7 +3324,7 @@ impl StoryApp {
                     .pics
                     .iter()
                     .filter(|p| p.state == PicState::Ready)
-                    .filter_map(|p| Some(StoredPic { source: p.how.clone(), scene_text: p.scene.text.clone(), unit: p.scene.place_before + shift * 0, title: p.scene.title.clone(), prompt: p.prompt.clone(), style: p.style.id().into(), mode: p.mode.id().into(), ext: p.ext.clone(), bytes: p.bytes.as_ref()?.as_ref().clone() }))
+                    .filter_map(|p| Some(StoredPic { variants: Self::stored_variants(p), look: p.look.id().into(), seed: p.seed, provider: p.provider.clone(), model: p.model.clone(), ms: p.ms, size: p.size.clone(), source: p.how.clone(), scene_text: p.scene.text.clone(), unit: p.scene.place_before + shift * 0, title: p.scene.title.clone(), prompt: p.prompt.clone(), style: p.style.id().into(), mode: p.mode.id().into(), ext: p.ext.clone(), bytes: p.bytes.as_ref()?.as_ref().clone() }))
                     .collect();
                 Ok((self.story.clone(), self.story_opts.clone(), pics, self.saved_id()))
             }
@@ -2380,6 +3345,7 @@ impl StoryApp {
         });
         match what {
             0 => self.host_save = Some((format!("{name}.html"), st::export_html(&story, &opts, &pics).into_bytes())),
+            3 => self.host_save = Some((format!("{name}-all-pictures.html"), st::export_html_with(&story, &opts, &pics, true).into_bytes())),
             1 => {
                 // a saved story goes out as it is stored (with its picture lines); one not saved yet, as it is on the screen
                 let md = saved.as_deref().and_then(|i| self.store.raw_markdown(i).ok()).unwrap_or_else(|| story.markdown());
@@ -2457,7 +3423,7 @@ impl StoryApp {
     }
 
     fn animating(&self) -> bool {
-        self.gen.is_some() || self.audio_job.is_some() || self.level > 0.01 || self.pics.iter().any(|p| matches!(p.state, PicState::Working | PicState::Queued)) || matches!(self.reader.status(), Status::Playing | Status::Buffering)
+        self.gen.is_some() || self.audio_job.is_some() || self.level > 0.01 || self.pics.iter().any(|p| matches!(p.state, PicState::Working | PicState::Queued)) || self.alt_running.is_some() || !self.alt_jobs.is_empty() || matches!(self.reader.status(), Status::Playing | Status::Buffering)
     }
 
     // ------------------------------------------------------------------------------------------------ clicks and keys
@@ -2532,6 +3498,87 @@ impl StoryApp {
                 self.opts.pictures = if self.opts.pictures == PictureMode::Off { PictureMode::Auto } else { PictureMode::Off };
                 self.save_prefs();
             }
+            // which scenes get a picture: every chapter, the cover only, or ask each time (chosen before Send, kept with the story)
+            T_COVERAGE => {
+                self.opts.coverage = self.opts.coverage.next();
+                self.save_prefs();
+            }
+            n if (T_STYLE..T_STYLE + illus::Look::ALL.len()).contains(&n) => {
+                let l = illus::Look::ALL[n - T_STYLE];
+                self.set_pic(move |o| o.toggle_style(l));
+            }
+            T_PERSTYLE => self.set_pic(|o| o.next_count()),
+            T_REALISTIC => {
+                let on = !self.pic_now().is_realistic();
+                self.set_pic(move |o| o.set_realistic(on));
+            }
+            T_REAL_INSTALL => {
+                let pic = self.pic_now();
+                let cands = cx.services.picture_choices(&self.found_images(cx));
+                if let Some((p, m, size)) = illus::realism_info(&pic, self.prefs.picture_model.as_ref(), &cands, None).install {
+                    self.install = Some(Install { provider: p, model: m, size, started: false });
+                    self.start_install(cx);
+                }
+            }
+            n if (T_CHOICE_INSTALL..T_CHOICE_INSTALL + 10).contains(&n) => {
+                let cands = cx.services.picture_choices(&self.found_images(cx));
+                if let Some(c) = cands.get(n - T_CHOICE_INSTALL).filter(|c| !c.downloaded) {
+                    let size = c.line().split(", ").nth(1).map_or("size unknown".to_string(), str::to_string);
+                    self.install = Some(Install { provider: c.provider.clone(), model: c.model.clone(), size, started: false });
+                    self.start_install(cx);
+                }
+            }
+            T_KEEP_ONLY => self.keep_only_chosen(),
+            n if (T_ALT_PICK..T_ALT_PICK + 6 * 24).contains(&n) => self.choose_main((n - T_ALT_PICK) / 24, (n - T_ALT_PICK) % 24),
+            n if (T_ALT_DEL..T_ALT_DEL + 6 * 24).contains(&n) => self.delete_alt((n - T_ALT_DEL) / 24, (n - T_ALT_DEL) % 24),
+            n if (T_ALT_MORE..T_ALT_MORE + 6).contains(&n) => self.more_alt(n - T_ALT_MORE, cx),
+            T_QUALITY => self.set_pic(|o| o.quality = o.quality.next()),
+            T_KEEPLOOK => self.set_pic(|o| o.keep_look = !o.keep_look),
+            T_STORYMODEL => self.cycle_story_model(cx),
+            T_PICLOG => self.open_pic_log(),
+            T_PIC_INSTALL => self.start_install(cx),
+            T_TIMEOUT => self.set_pic(|o| o.timeout_min = match o.limit_min() { 5 => 15, 15 => 30, 30 => 60, _ => 5 }),
+            T_LOG_VERBOSE => self.set_pic(|o| o.verbose = !o.verbose),
+            T_LOG_CLOSE => self.modal = None,
+            T_LOG_COPY => {
+                let t = piclog::log_text(&self.pic_log_events());
+                if t.is_empty() {
+                    self.note = Some(("The picture log is empty.".into(), false));
+                } else {
+                    crate::ui::clipboard::copy(&t);
+                    self.note = Some(("The picture log is copied.".into(), true));
+                }
+            }
+            T_LOG_CLEAR => {
+                if let Some(Modal::PicLog(v)) = self.modal.as_mut() {
+                    if v.confirm_clear {
+                        v.confirm_clear = false;
+                        v.top.set(0);
+                        if let Some(id) = self.saved_id() {
+                            self.store.clear_picture_log(&id);
+                        }
+                        self.pic_pending.clear();
+                        self.note = Some(("The picture log was cleared.".into(), true));
+                    } else {
+                        v.confirm_clear = true;
+                    }
+                }
+            }
+            T_PICS_GO => {
+                self.held = false;
+                let queued: Vec<usize> = (0..self.pics.len()).filter(|&i| self.pics[i].state == PicState::Queued).collect();
+                self.push_draw_calls(&queued);
+                self.pump_pictures(cx);
+            }
+            T_PICS_SKIP => {
+                self.held = false;
+                self.alt_jobs.clear();
+                self.pics.retain(|p| p.state == PicState::Ready);
+                self.pic_gen += 1;
+                self.persist_pictures();
+                self.note = Some(("No pictures for this story.".into(), true));
+            }
+            T_PICS_CANCEL => self.cancel_pictures(),
             // how drawings are made: automatic (by the model), a rich SVG by the model, or the built-in cartoon
             T_DRAWMODE => {
                 let all = st::DrawingMode::ALL;
@@ -2612,6 +3659,7 @@ impl StoryApp {
                 }
             }
             n if (T_PIC_REDO..T_PIC_REDO + 16).contains(&n) => self.redo_picture(n - T_PIC_REDO, cx),
+            n if (T_PIC_DELETE..T_PIC_DELETE + 16).contains(&n) => self.delete_picture(n - T_PIC_DELETE),
             _ => {}
         }
     }
@@ -2628,20 +3676,42 @@ impl StoryApp {
 
     fn scroll_by(&mut self, delta: f32) {
         match self.page {
-            Page::Story if self.menu == Some(Menu::Options) => self.cscroll = (self.cscroll + delta).clamp(0.0, self.cmax),
+            Page::Story if self.menu == Some(Menu::Options) => self.cscroll = (self.cscroll + delta).clamp_safe(0.0, self.cmax),
             Page::Story => {
-                self.tscroll = (self.tscroll + delta).clamp(0.0, self.tmax);
+                self.tscroll = (self.tscroll + delta).clamp_safe(0.0, self.tmax);
                 self.stick_bottom = self.tscroll >= self.tmax - 2.0;
                 self.manual_unit = Some(self.reader.snapshot().unit);
             }
             Page::Library => {
                 let d = if delta > 0.0 { 1 } else { -1 };
-                self.lib_sel = (self.lib_sel as i32 + d).clamp(0, self.lib.len().saturating_sub(1) as i32) as usize;
+                self.lib_sel = (self.lib_sel as i32 + d).clamp_safe(0, self.lib.len().saturating_sub(1) as i32) as usize;
             }
         }
     }
 
     fn key(&mut self, k: &Key, cx: &AppCx) -> Flow {
+        if matches!(self.modal, Some(Modal::PicLog(_))) {
+            let page = self.modal.as_ref().map_or(1, |m| if let Modal::PicLog(v) = m { v.rows.get().max(2) as i64 - 1 } else { 1 });
+            match k {
+                Key::Esc | Key::Char('q') | Key::Char('g') => self.modal = None,
+                Key::Up => self.log_scroll(-1),
+                Key::Down => self.log_scroll(1),
+                Key::PageUp => self.log_scroll(-page),
+                Key::PageDown => self.log_scroll(page),
+                Key::Home => self.log_scroll(i64::MIN / 2),
+                Key::End => self.log_scroll(i64::MAX / 2),
+                Key::Char('c') | Key::Ctrl('c') => self.click(T_LOG_COPY, cx),
+                Key::Char('x') => self.click(T_LOG_CLEAR, cx),
+                Key::Char('v') => self.click(T_LOG_VERBOSE, cx),
+                _ => {}
+            }
+            if !matches!(k, Key::Char('x')) {
+                if let Some(Modal::PicLog(v)) = self.modal.as_mut() {
+                    v.confirm_clear = false;
+                }
+            }
+            return Flow::Stay;
+        }
         if let Some(Modal::ConfirmDelete(id, _)) = &self.modal {
             let id = id.clone();
             if *k == Key::Char('y') {
@@ -2713,7 +3783,7 @@ impl StoryApp {
                 match r {
                     PickEvent::Chosen(label) => {
                         self.modal = None;
-                        let what = if label.starts_with("Page") { 0 } else if label.starts_with("Text") { 1 } else { 2 };
+                        let what = if label.starts_with("Page with every") { 3 } else if label.starts_with("Page") { 0 } else if label.starts_with("Text") { 1 } else { 2 };
                         self.do_export(what, id);
                     }
                     PickEvent::Cancel => self.modal = None,
@@ -2747,7 +3817,7 @@ impl StoryApp {
                 },
                 Key::Up | Key::Down | Key::PageUp | Key::PageDown if self.page == Page::Library => {
                     let d = if matches!(k, Key::Up | Key::PageUp) { -1 } else { 1 };
-                    self.lib_sel = (self.lib_sel as i32 + d).clamp(0, self.lib.len().saturating_sub(1) as i32) as usize;
+                    self.lib_sel = (self.lib_sel as i32 + d).clamp_safe(0, self.lib.len().saturating_sub(1) as i32) as usize;
                 }
                 Key::PageUp => self.cscroll = (self.cscroll - 120.0).max(0.0),
                 Key::PageDown => self.cscroll = (self.cscroll + 120.0).min(self.cmax),
@@ -2825,6 +3895,7 @@ impl StoryApp {
                 (_, Some('n')) => self.open_form(cx),
                 (_, Some('l')) => self.go(Page::Library, cx),
                 (_, Some('o')) => self.click(T_OPTIONS, cx),
+                (_, Some('g')) => self.click(T_PICLOG, cx),
                 (Key::Up, _) => self.scroll_by(-40.0),
                 (Key::Down, _) => self.scroll_by(40.0),
                 (Key::PageUp, _) => self.scroll_by(-240.0),
@@ -3038,7 +4109,7 @@ impl StoryApp {
         match self.opts.pictures.resolve(!self.image_models.is_empty()) {
             PictureMode::Off => "Pictures: off".into(),
             PictureMode::ImageModel if self.image_models.is_empty() && self.prefs.picture_model.is_none() => "Pictures: images (no picture model set up)".into(),
-            PictureMode::ImageModel => format!("Pictures: images via {}", picture_name()),
+            PictureMode::ImageModel => format!("Pictures: images via {}", self.resolved_for(&self.pic_now(), cx).map_or_else(picture_name, |r| r.model)),
             _ => {
                 let (rich, who) = self.draws_rich(cx);
                 if rich { format!("Pictures: rich SVG by {who}") } else { "Pictures: cartoon (built-in)".into() }
@@ -3133,8 +4204,10 @@ impl StoryApp {
     }
 
     fn banner(&mut self, g: &mut Gfx, x: f32, y: f32, w: f32, s: f32) -> f32 {
-        if let Some((m, ok)) = &self.note {
-            let lines = g.wrap(13.0 * s, m, Face::Sans, w - 24.0 * s);
+        let shown = self.note.clone().or_else(|| self.wait_text.clone().map(|t| (t, true)));
+        if let Some((m, ok)) = &shown {
+            let m = if *ok { m.clone() } else { iyakki_storage::loss::reword(m) };
+            let lines = g.wrap(13.0 * s, &m, Face::Sans, w - 24.0 * s);
             let lh = g.line_height(13.0 * s, Face::Sans);
             let h = lines.len().min(3) as f32 * lh + 12.0 * s;
             g.rrect(x, y, w, h, 10.0 * s, if *ok { fx::over(WELL, with_alpha(OK, 30)) } else { fx::over(WELL, with_alpha(ERR, 34)) });
@@ -3376,7 +4449,7 @@ impl StoryApp {
             self.view.prepare(g, &self.convo, &bctx, log.w, s, &mut NoPics)
         };
         self.max_off = (total - log.h).max(0.0);
-        self.scroll_px = self.scroll_px.clamp(0.0, self.max_off);
+        self.scroll_px = self.scroll_px.clamp_safe(0.0, self.max_off);
         if total <= 0.0 {
             let lines = ["Describe a story and press Send.", "Say it in words if you like: a 5-minute funny story in Tamil about a fox who is afraid of the dark.", "Then tell me what to change: shorter, a different name, funnier, another language, or redraw picture 2 as a comic."];
             let mut y = log.y + 8.0 * s;
@@ -3413,8 +4486,25 @@ impl StoryApp {
         }
         y += super::ide_chrome::tool(s) + gap;
         y += section(g, x, y, w, s, "Pictures", draw);
-        let mut chips = vec![("Pictures off".to_string(), self.opts.pictures == PictureMode::Off, Event::Tab(T_PICMODE))];
         let images = !self.image_models.is_empty();
+        let mut chips: Vec<(String, bool, Event)> = Vec::new();
+        let mut real_lines: Vec<(String, [u8; 4])> = Vec::new();
+        if self.opts.pictures != PictureMode::Off && images {
+            // the one visible choice for real-looking pictures, with the model and server it will use
+            let pic = self.pic_now();
+            let on = pic.is_realistic();
+            chips.push((format!("{} Realistic pictures (photo style, people look real)", if on { "\u{2611}" } else { "\u{2610}" }), on, Event::Tab(T_REALISTIC)));
+            let cands = cx.services.picture_choices(&self.found_images(cx));
+            let info = illus::realism_info(&pic, self.prefs.picture_model.as_ref(), &cands, self.memory_now().filter(|m| m.total > 0).map(|m| m.available >> 20).as_ref().copied());
+            real_lines.push((format!("{}{}", info.uses, if on { "" } else { " (when ticked)" }), MUTED));
+            if let Some(w) = &info.warning {
+                real_lines.push((w.clone(), fx::AMBER));
+            }
+            if let Some((p, m, size)) = &info.install {
+                chips.push((format!("Install {m} on {p} ({size})"), false, Event::Tab(T_REAL_INSTALL)));
+            }
+        }
+        chips.push(("Pictures off".to_string(), self.opts.pictures == PictureMode::Off, Event::Tab(T_PICMODE)));
         let mut pnote = None;
         if images && self.opts.pictures != PictureMode::Off {
             let (pl, pn) = self.picture_label(cx);
@@ -3422,16 +4512,66 @@ impl StoryApp {
             pnote = pn;
         }
         if self.opts.pictures != PictureMode::Off {
+            chips.push((format!("Pictures: {}", self.opts.coverage.label()), self.opts.coverage != Coverage::Chapters, Event::Tab(T_COVERAGE)));
+            if images {
+                let pic = self.pic_now();
+                let styles = pic.styles_list();
+                for (i, l) in illus::Look::ALL.iter().enumerate() {
+                    let on = styles.contains(l);
+                    chips.push((format!("Style {}: {}", if on { "\u{2611}" } else { "\u{2610}" }, l.label()), on, Event::Tab(T_STYLE + i)));
+                }
+                chips.push((format!("Pictures per style: {}", pic.count()), pic.count() > 1, Event::Tab(T_PERSTYLE)));
+                chips.push((format!("Quality: {}", pic.quality.label()), pic.quality != illus::Quality::Selected, Event::Tab(T_QUALITY)));
+                let choices = cx.services.picture_choices(&self.found_images(cx));
+                let mname = pic.model.as_ref().map_or("automatic".to_string(), |c| {
+                    let state = choices.iter().find(|x| x.provider == c.provider && x.model == c.model).map_or(String::new(), |x| format!(" ({}{})", if x.downloaded { "installed" } else { "not downloaded" }, x.size_gb.map_or(String::new(), |g| format!(", {g:.1} GB"))));
+                    format!("{}{state}", Self::model_name(c))
+                });
+                chips.push((format!("Model for this story: {mname}"), pic.model.is_some(), Event::Tab(T_STORYMODEL)));
+                chips.push((format!("Time limit per picture: {} min", pic.limit_min()), pic.limit_min() != 15, Event::Tab(T_TIMEOUT)));
+                chips.push((format!("Same look for all pictures: {}", if pic.keep_look { "on" } else { "off" }), pic.keep_look, Event::Tab(T_KEEPLOOK)));
+            }
+            chips.push(("Picture log (g)".to_string(), false, Event::Tab(T_PICLOG)));
             chips.push((format!("Drawing: {}", self.opts.drawing.label()), self.opts.drawing != st::DrawingMode::Auto, Event::Tab(T_DRAWMODE)));
             chips.push((format!("Allow short video clips: {}", if self.opts.video { "on" } else { "off" }), self.opts.video, Event::Tab(T_VIDEO)));
         }
         y += flow(g, x, y, w, s, &chips, draw) + 6.0 * s;
+        for (t, col) in &real_lines {
+            for l in g.wrap(12.0 * s, t, Face::Sans, w) {
+                if draw {
+                    g.text(x, y, 12.0 * s, *col, &l, Face::Sans);
+                }
+                y += g.line_height(12.0 * s, Face::Sans);
+            }
+        }
+        // the picture models that are not installed, with their size and an Install button
+        if images && self.opts.pictures != PictureMode::Off {
+            let missing: Vec<(String, bool, Event)> = cx.services.picture_choices(&self.found_images(cx)).iter().enumerate().filter(|(_, c)| !c.downloaded).take(10).map(|(i, c)| (format!("Install {} on {} ({})", c.model, c.provider, c.line().split(", ").nth(1).unwrap_or("size unknown")), false, Event::Tab(T_CHOICE_INSTALL + i))).collect();
+            if !missing.is_empty() {
+                y += 4.0 * s + flow(g, x, y, w, s, &missing, draw) + 2.0 * s;
+            }
+        }
         let hint = match (self.opts.pictures, images) {
             (PictureMode::Off, _) => "No pictures: the story is text only.".to_string(),
             (_, true) => "Pictures are automatic: each scene is drawn as a real image by the picture model; if that fails the rest are drawn as SVG. The style follows the kind of story (say \"comic style\" or \"pixel art\" in your idea to change it).".to_string(),
             (_, false) => "Pictures are automatic: no picture model is set up (Settings → Models), so the writer draws each scene: a strong model or agent (Claude, GPT class) draws a rich SVG itself, a small model picks a scene for the built-in cartoon (Drawing ▸ Auto, Rich SVG or Built-in cartoon). Realistic or photo pictures need a picture model; the built-in drawings are cartoons. The style follows the kind of story (say \"comic style\" or \"pixel art\" in your idea to change it).".to_string(),
         };
-        let hint = pnote.unwrap_or(hint);
+        let mut hint = pnote.unwrap_or(hint);
+        // one plain line about the picture model: why it is not used, or what it costs in time (an estimate, said so)
+        if self.opts.pictures != PictureMode::Off {
+            let r = self.readiness(cx);
+            match illus::reason(&r) {
+                Some(why) => hint = format!("{why} {hint}"),
+                None if images => {
+                    let using = self.resolved_for(&self.pic_now(), cx).map_or(String::new(), |r| format!("Using {}. ", r.summary()));
+                    let list: Vec<String> = cx.services.picture_choices(&self.found_images(cx)).iter().map(|c| c.line()).collect();
+                    let missing = self.resolved_for(&self.pic_now(), cx).filter(|r| !r.downloaded).map_or(String::new(), |r| format!("{} ", illus::not_downloaded_text(&r.model, &r.provider, "see the list"))) ;
+                    let job = self.job_line(cx, 1).filter(|_| self.pic_now().styles_list().len() > 1 || self.pic_now().count() > 1).map_or(String::new(), |j| format!(" For one scene: {j}"));
+                    hint = format!("{missing}{using}{} {hint}{job} {} Picture models: {}.", self.timing_line(cx, 1), illus::advice(cx.services.gpu_lemonade().as_deref()), list.join(" \u{b7} "));
+                }
+                None => {}
+            }
+        }
         let lh = g.line_height(12.0 * s, Face::Sans);
         for l in g.wrap(12.0 * s, &hint, Face::Sans, w) {
             if draw {
@@ -3455,7 +4595,7 @@ impl StoryApp {
         let h = (content_h + head + 12.0 * s).min(area.h - 16.0 * s);
         let x = (panel.x - w - 6.0 * s).max(area.x + 8.0 * s);
         let anchor = self.anchors[2];
-        let y = (anchor.y + anchor.h - h).clamp(area.y + 8.0 * s, (area.y + area.h - h - 8.0 * s).max(area.y + 8.0 * s));
+        let y = (anchor.y + anchor.h - h).clamp_safe(area.y + 8.0 * s, (area.y + area.h - h - 8.0 * s).max(area.y + 8.0 * s));
         let r = R::new(x, y, w, h);
         g.hit(area, Event::Tab(T_MENU_CLOSE), "close the menu");
         g.rrect(r.x, r.y, r.w, r.h, 14.0 * s, rgb(16, 20, 36));
@@ -3468,7 +4608,7 @@ impl StoryApp {
         g.button(r.x + r.w - cw - pad, r.y + 5.0 * s, sz, "Close", MUTED, Event::Tab(T_MENU_CLOSE));
         let vp = R::new(r.x + pad, r.y + head, r.w - 2.0 * pad - 8.0 * s, r.h - head - 8.0 * s);
         self.cmax = (content_h - vp.h).max(0.0);
-        self.cscroll = self.cscroll.clamp(0.0, self.cmax);
+        self.cscroll = self.cscroll.clamp_safe(0.0, self.cmax);
         let top = vp.y - self.cscroll;
         g.clipped(vp, |g| {
             self.options_content(g, vp.x, top, vp.w, s, cx, true);
@@ -3534,7 +4674,7 @@ impl StoryApp {
             }
         });
         self.cmax = (total - inner.h).max(0.0);
-        self.cscroll = self.cscroll.clamp(0.0, self.cmax);
+        self.cscroll = self.cscroll.clamp_safe(0.0, self.cmax);
         let sz = 14.0 * s;
         let cw = g.text_width(sz, "Close", Face::Bold) + sz * 1.7;
         g.button(p.x + p.w - 26.0 * s - cw, p.y + p.h - 48.0 * s, sz, "Close", MUTED, Event::Tab(T_MENU_CLOSE));
@@ -3633,6 +4773,13 @@ impl StoryApp {
             } else {
                 btns.push(("Save story".into(), T_SAVE, ACCENT, true));
             }
+            if self.held {
+                btns.push(("Make the pictures".into(), T_PICS_GO, ACCENT, true));
+                btns.push(("No pictures".into(), T_PICS_SKIP, MUTED, true));
+            } else if self.pics.iter().any(|p| matches!(p.state, PicState::Working | PicState::Queued)) || self.alt_running.is_some() || !self.alt_jobs.is_empty() {
+                let done = self.pics.iter().filter(|p| matches!(p.state, PicState::Ready | PicState::Failed(_))).count();
+                btns.push((format!("Cancel pictures {done}/{}", self.pics.len()), T_PICS_CANCEL, ERR, true));
+            }
             if let Some(j) = &self.audio_job {
                 btns.push((format!("Cancel audio {}/{}", j.done.load(Ordering::SeqCst), j.total), T_CANCEL_AUDIO, ERR, true));
             } else {
@@ -3641,6 +4788,15 @@ impl StoryApp {
             }
             if self.ver_count > 1 && self.saved.is_some() {
                 btns.push((format!("Version {} ▾", self.ver), T_VERSION_MENU, ACCENT, true));
+            }
+            if let Some(i) = &self.install {
+                btns.push((if i.started { format!("Downloading {}…", i.model) } else { format!("Install {} ({})", i.model, i.size) }, T_PIC_INSTALL, ACCENT, !i.started));
+            }
+            if self.pics.iter().any(|p| !p.alts.is_empty()) {
+                btns.push(("Keep only the chosen".into(), T_KEEP_ONLY, MUTED, true));
+            }
+            if !self.pics.is_empty() {
+                btns.push(("Picture log (g)".into(), T_PICLOG, MUTED, true));
             }
             btns.push(("Export…".into(), T_EXPORT, MUTED, true));
             if let Some(e) = &self.saved {
@@ -3731,7 +4887,10 @@ impl StoryApp {
             let bsz = 12.0 * s;
             let bw = g.text_width(bsz, label, Face::Bold) + bsz * 1.7;
             self.pic_buttons.push((R::new(slot.x + slot.w - bw - 8.0 * s, slot.y + slot.h - bsz * 2.1 - 8.0 * s, bw, bsz * 2.1), label, idx, col));
+            let dw = g.text_width(bsz, "Delete", Face::Bold) + bsz * 1.7;
+            self.pic_buttons.push((R::new(slot.x + slot.w - bw - dw - 14.0 * s, slot.y + slot.h - bsz * 2.1 - 8.0 * s, dw, bsz * 2.1), "Delete", idx + 100, ERR));
         }
+        self.draw_gallery(g, slot, s, idx);
     }
 
     fn story_view(&mut self, g: &mut Gfx, area: R, s: f32, tick: u64) {
@@ -3792,7 +4951,7 @@ impl StoryApp {
             g.rect(tx + fs * 0.2, ty + r.h - 2.0 * s, hw - fs * 0.4, 1.0, if hot { ACCENT } else { with_alpha(CYAN, 120) });
             g.hit(r, Event::Tab(T_HOW), "How");
         }
-        let hh = (area.h * 0.19).clamp(72.0 * s, 150.0 * s);
+        let hh = (area.h * 0.19).clamp_safe(72.0 * s, 150.0 * s);
         let hero = R::new(x, y, w, hh);
         self.hero(g, hero, s, if reading { Some(snap.unit) } else { None });
         y += hh + 10.0 * s;
@@ -3825,7 +4984,7 @@ impl StoryApp {
             for (pi, p) in self.pics.iter().enumerate() {
                 if p.scene.place_before == i {
                     slots.push((pi, total));
-                    total += slot_h + gap;
+                    total += slot_h + self.gallery_h(pi, slot_w, s) + gap;
                 }
             }
             tops.push(total);
@@ -3846,7 +5005,7 @@ impl StoryApp {
                     // follow the word when there is one (a long sentence wraps over several lines), else the sentence
                     let a = cur_word.map_or(a, |w| w.0);
                     let k = l.lines.iter().rposition(|(_, st0)| *st0 <= a).unwrap_or(0);
-                    let target = (tops[u] + k as f32 * lh - area_txt.h * 0.3).clamp(0.0, self.tmax);
+                    let target = (tops[u] + k as f32 * lh - area_txt.h * 0.3).clamp_safe(0.0, self.tmax);
                     self.tscroll += (target - self.tscroll) * 0.25;
                     if (target - self.tscroll).abs() < 1.0 {
                         self.tscroll = target;
@@ -3856,7 +5015,7 @@ impl StoryApp {
         } else if self.stick_bottom && self.gen.is_some() {
             self.tscroll = self.tmax;
         }
-        self.tscroll = self.tscroll.clamp(0.0, self.tmax);
+        self.tscroll = self.tscroll.clamp_safe(0.0, self.tmax);
         let scroll = self.tscroll;
         let lay = std::mem::take(&mut self.lay);
         self.pane.begin(area_txt);
@@ -3869,6 +5028,7 @@ impl StoryApp {
             self.word_vis = None;
         }
         self.pic_buttons.clear();
+        self.gal_hits.clear();
         let mut ypos = area_txt.y - scroll;
         let base_y = area_txt.y - scroll;
         g.clipped(area_txt, |g| {
@@ -3956,10 +5116,20 @@ impl StoryApp {
         self.lay = lay;
         self.pane.end(g, ACCENT);
         // the buttons of the pictures go on top of the text area's press region
+        let gal = std::mem::take(&mut self.gal_hits);
+        g.clipped(area_txt, |g| {
+            for (r, code, label) in &gal {
+                if *code >= T_ALT_MORE {
+                    g.button(r.x, r.y, 12.0 * s, label, ACCENT, Event::Tab(*code));
+                } else {
+                    g.hit(*r, Event::Tab(*code), label);
+                }
+            }
+        });
         let btns = std::mem::take(&mut self.pic_buttons);
         g.clipped(area_txt, |g| {
             for (r, label, idx, col) in &btns {
-                g.button(r.x, r.y, 12.0 * s, label, *col, Event::Tab(T_PIC_REDO + idx));
+                g.button(r.x, r.y, 12.0 * s, label, *col, Event::Tab(if *idx >= 100 { T_PIC_DELETE + idx - 100 } else { T_PIC_REDO + idx }));
             }
         });
         if let Some(e) = &self.error {
@@ -4051,7 +5221,7 @@ impl StoryApp {
         }
         // waveform
         let bars = 18usize;
-        let ww = (r.w * 0.11).clamp(60.0 * s, 150.0 * s);
+        let ww = (r.w * 0.11).clamp_safe(60.0 * s, 150.0 * s);
         let wavex = rx - ww;
         if wavex > x + 160.0 * s {
             let maxh = r.h * 0.6;
@@ -4117,7 +5287,7 @@ impl StoryApp {
         self.scale = s;
         self.panel_hover = false;
         let show = self.wide || self.pane_open;
-        let pw = (self.panel_w * s).clamp(270.0 * s, area.w * if self.wide { 0.6 } else { 0.65 });
+        let pw = (self.panel_w * s).clamp_safe(270.0 * s, area.w * if self.wide { 0.6 } else { 0.65 });
         let (main, panel) = if show { (R::new(area.x, area.y, area.w - pw, area.h), R::new(area.x + area.w - pw, area.y, pw, area.h)) } else { (area, R::new(area.x + area.w, area.y, 0.0, area.h)) };
         self.story_view(g, main, s, tick);
         if show {
@@ -4138,6 +5308,7 @@ impl StoryApp {
         }
         self.draw_menus(g, area, panel, s, cx);
         self.draw_model_pick(g, area, s, cx);
+        self.draw_pic_log(g, area, s);
     }
 
     // ---------------------------------------------------------------------------------------------- library page
@@ -4245,12 +5416,15 @@ impl StoryApp {
                 super::widgets::render_confirm(g, area, s, &format!("Delete \"{shown}\" and everything saved with it?"), "Delete");
             }
             Some(Modal::Export(p, _)) => p.render(g, area, s, ACCENT),
-            Some(Modal::Model(_)) | None => {}
+            Some(Modal::Model(_)) | Some(Modal::PicLog(_)) | None => {}
         }
     }
 }
 
 impl App for StoryApp {
+    fn keeps_screen_on(&self) -> bool {
+        matches!(self.reader.status(), Status::Playing | Status::Buffering)
+    }
     fn take_request(&mut self) -> Option<(String, String)> {
         self.request.take()
     }
@@ -4333,7 +5507,7 @@ impl App for StoryApp {
                 match p.handle_event(ev) {
                     PickEvent::Chosen(label) => {
                         self.modal = None;
-                        let what = if label.starts_with("Page") { 0 } else if label.starts_with("Text") { 1 } else { 2 };
+                        let what = if label.starts_with("Page with every") { 3 } else if label.starts_with("Page") { 0 } else if label.starts_with("Text") { 1 } else { 2 };
                         self.do_export(what, id);
                     }
                     PickEvent::Cancel => self.modal = None,
@@ -4357,7 +5531,7 @@ impl App for StoryApp {
                 }
                 let (area, s) = (self.area_rect, self.scale);
                 let pos = self.drag_o.unwrap_or(self.div_rect.x) + *x;
-                self.panel_w = (((area.x + area.w - pos) / s).clamp(270.0, (area.w / s * 0.6).max(270.0))).round();
+                self.panel_w = (((area.x + area.w - pos) / s).clamp_safe(270.0, (area.w / s * 0.6).max(270.0))).round();
             }
             Event::Tab(n) if *n >= TOGGLE_BASE => self.view.toggle_index(*n - TOGGLE_BASE),
             Event::AreaAt(IDEA_AREA, x, y) => {
@@ -4389,6 +5563,7 @@ impl App for StoryApp {
                     self.reload_library();
                 }
             }
+            Event::Scroll(d) if matches!(self.modal, Some(Modal::PicLog(_))) => self.log_scroll(-*d as i64 * 3),
             Event::Scroll(d) if self.idea.wheel(*d) => {}
             Event::Scroll(d) => self.scroll_by(-*d as f32 * 48.0),
             Event::Row(i) => {
@@ -4501,6 +5676,12 @@ mod tests {
     impl ChatBackend for Shared {
         fn complete(&self, h: &[Message]) -> Result<String, String> {
             self.0.seen.lock().unwrap().push((h.to_vec(), 0));
+            if h[0].content.contains("picture brief") {
+                return Ok("A small fox sits by a quiet river as the moon rises.".into());
+            }
+            if h[0].content.contains("where and when a story happens") {
+                return Ok("a river meadow at dusk, soft blue light".into());
+            }
             if h[0].content.contains("small illustration") || h[0].content.contains("children's-book illustrator") {
                 if let Some(e) = self.0.draw_error.lock().unwrap().clone() {
                     return Err(e);
@@ -4535,8 +5716,12 @@ mod tests {
     }
 
     fn make(tag: &str, teller: &Arc<Teller>) -> (StoryApp, AppCx, PathBuf) {
+        make_up(tag, teller, Arc::new(Offline))
+    }
+
+    fn make_up(tag: &str, teller: &Arc<Teller>, up: Arc<dyn iyakki_agent::iyakki_proxy::Upstream>) -> (StoryApp, AppCx, PathBuf) {
         let (mut cx, d) = cx_with_backend(tag, Shared(teller.clone()));
-        cx.services = services_in(&temp_dir(&format!("{tag}-svc")), Arc::new(Offline));
+        cx.services = services_in(&temp_dir(&format!("{tag}-svc")), up);
         let home = d.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let home = std::fs::canonicalize(home).unwrap();
@@ -4579,7 +5764,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("timed out waiting for: {what}; story page {:?}, error {:?}, reader {:?}", a.page_name(), a.error, a.reader.status());
+        panic!("timed out waiting for: {what}; story page {:?}, error {:?}, reader {:?}, pictures {:?}, note {:?}", a.page_name(), a.error, a.reader.status(), a.pics.iter().map(|p| p.state.clone()).collect::<Vec<_>>(), a.note);
     }
 
     fn write_story(a: &mut StoryApp, cx: &AppCx, topic: &str) {
@@ -6862,6 +8047,816 @@ mod tests {
 
     fn all_pictures_ready(a: &mut StoryApp) -> bool {
         a.pics.iter().all(|p| p.state == PicState::Ready)
+    }
+
+    // ------------------------------------------------------------------ illustrations by the picture model
+
+    /// A tiny real PNG (8x8).
+    fn tiny_png() -> Vec<u8> {
+        let hex = "89504e470d0a1a0a0000000d49484452000000080000000808020000004b6d29dc0000001c74455874436f6d6d656e7400736563726574206c6f636174696f6e206461746154e84f540000002a49444154789c63d4883ab1e0510203034382dc026406e3091b0d4c5106060626aca209720b1807d22800fc713f4fb3c21d830000000049454e44ae426082";
+        (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap()).collect()
+    }
+
+    /// A picture server that is never reached over a network: it answers the image calls with a tiny PNG (or an error), after
+    /// an optional delay, and remembers what it was asked.
+    struct FakeImages {
+        asked: Mutex<Vec<String>>,
+        delay_ms: u64,
+        fail: bool,
+    }
+
+    impl FakeImages {
+        fn new(delay_ms: u64, fail: bool) -> Arc<FakeImages> {
+            Arc::new(FakeImages { asked: Mutex::new(vec![]), delay_ms, fail })
+        }
+        fn count(&self) -> usize {
+            self.asked.lock().unwrap().len()
+        }
+    }
+
+    struct ImgUp(Arc<FakeImages>);
+
+    impl iyakki_agent::iyakki_proxy::Upstream for ImgUp {
+        fn request(&self, _m: &str, u: &str, _h: &[(String, String)], b: &[u8]) -> Result<iyakki_agent::iyakki_proxy::UpstreamResponse, String> {
+            let this = &self.0;
+            if !(u.ends_with("/api/generate") || u.ends_with("/images/generations")) {
+                return Err("offline".into());
+            }
+            this.asked.lock().unwrap().push(String::from_utf8_lossy(b).into_owned());
+            if this.delay_ms > 0 {
+                std::thread::sleep(Duration::from_millis(this.delay_ms));
+            }
+            if this.fail {
+                return Ok(iyakki_agent::iyakki_proxy::UpstreamResponse { status: 500, body: b"{\"error\":\"the picture model fell over\"}".to_vec() });
+            }
+            let body = serde_json::json!({ "images": [st::base64_encode(&tiny_png())] }).to_string().into_bytes();
+            Ok(iyakki_agent::iyakki_proxy::UpstreamResponse { status: 200, body })
+        }
+    }
+
+    fn with_images(tag: &str, delay_ms: u64, fail: bool) -> (StoryApp, AppCx, PathBuf, Arc<Teller>, Arc<FakeImages>) {
+        let t = Teller::new(STORY);
+        let fake = FakeImages::new(delay_ms, fail);
+        let (mut a, cx, home) = make_up(tag, &t, Arc::new(ImgUp(fake.clone())));
+        add_providers(&cx, &["llama3", "flux"]);
+        a.refresh_tts(&cx);
+        (a, cx, home, t, fake)
+    }
+
+    fn lots_of_memory() -> iyakki_agent::sysinfo::Memory {
+        iyakki_agent::sysinfo::Memory { total: 32 << 30, available: 24 << 30, swap_total: 0, swap_free: 0 }
+    }
+
+    #[test]
+    fn tales_illustrations_are_offered_with_a_plain_reason_and_no_error_when_there_is_no_picture_model() {
+        let t = Teller::new(STORY);
+        let (mut a, cx, _) = make("tales-illus-none", &t);
+        assert_eq!(a.readiness(&cx), Readiness::NoModel);
+        let why = illus::reason(&a.readiness(&cx)).unwrap();
+        assert!(why.contains("No picture model is selected") && why.contains("Settings") && why.contains("Models"), "{why}");
+        // the option is on the page (it cycles) and the story is written with drawings and no error
+        assert_eq!(find_in_form(&mut a, &cx, 1920, 1080, "Pictures: every chapter").as_deref(), Some("Pictures: every chapter"));
+        write_story(&mut a, &cx, "a fox");
+        assert!(a.error.is_none() && !a.story.is_empty());
+        assert!(a.pics.iter().all(|p| p.mode == PictureMode::Drawings), "drawings, not the picture model");
+        // a Lemonade picture model that is not downloaded is offered as Install first, not as a failure
+        let mut l = iyakki_agent::providers::ProviderCfg::new("lemon", iyakki_agent::providers::Kind::Lemonade);
+        l.base_url = Some("http://lemonade-tales-test.invalid:8000".into());
+        cx.services.settings.lock().unwrap().upsert_provider(l).unwrap();
+        let m = iyakki_agent::lemonade::Model { id: "SDXL-Base-1.0".into(), kind: iyakki_agent::lemonade::ModelType::Image, recipe: "sd-cpp".into(), checkpoint: String::new(), labels: vec!["image".into()], downloaded: false, loaded: false, suggested: false, size_gb: Some(6.9), image_defaults: None };
+        iyakki_agent::lemonade::remember(&iyakki_agent::lemonade::api_base("http://lemonade-tales-test.invalid:8000"), &[m]);
+        let r = a.readiness(&cx);
+        assert_eq!(r, Readiness::NotDownloaded { model: "SDXL-Base-1.0".into(), size: "6.9 GB".into() });
+        assert!(illus::reason(&r).unwrap().contains("Install first"));
+    }
+
+    #[test]
+    fn tales_illustrations_cover_only_every_chapter_and_ask_me_each_time_with_the_prompt_notes_and_metadata_kept() {
+        // every chapter (the default): a picture per scene by the picture model
+        let (mut a, cx, _home, t, fake) = with_images("tales-illus-all", 0, false);
+        a.test_memory = Some(lots_of_memory());
+        assert_eq!(a.opts.coverage, Coverage::Chapters);
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the pictures", all_pictures_ready);
+        assert_eq!(a.pics.len(), 2);
+        assert_eq!(fake.count(), 2, "one request per picture, one at a time");
+        let asked = fake.asked.lock().unwrap().join("\n");
+        assert!(asked.contains(PictureStyle::Watercolor.phrase()), "the one style line is in every prompt: {asked}");
+        assert!(asked.contains("A small fox sits by a quiet river") && asked.contains("Setting: a river meadow at dusk"), "the brief from the story model and the setting note: {asked}");
+        assert_eq!(a.setting.as_deref(), Some("a river meadow at dusk, soft blue light"), "the note is made once per story");
+        assert_eq!(t.seen.lock().unwrap().iter().filter(|c| c.0[0].content.contains("where and when a story happens")).count(), 1);
+        assert!(a.pics.iter().all(|p| p.size == "8x8" && p.how == "images via flux"));
+        // kept with the story: the file, its prompt, the model and the size, and the setting note
+        click(&mut a, &cx, T_SAVE);
+        let id = a.saved_id().unwrap();
+        let kept = a.store.load_pictures(&id);
+        assert_eq!(kept.len(), 2);
+        assert_eq!((kept[0].size.as_str(), kept[0].source.as_str(), kept[0].mode.as_str()), ("8x8", "images via flux", "image"));
+        assert!(kept[0].prompt.contains("river meadow") && kept[0].bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+        assert_eq!(a.store.load_setting(&id).as_deref(), Some("a river meadow at dusk, soft blue light"));
+        // cover only: exactly one picture
+        let (mut b, cx2, _h, _t, fake2) = with_images("tales-illus-cover", 0, false);
+        b.test_memory = Some(lots_of_memory());
+        click(&mut b, &cx2, T_COVERAGE);
+        assert_eq!(b.opts.coverage, Coverage::Cover);
+        assert_eq!(b.store.load_prefs().options.coverage, Coverage::Cover, "remembered");
+        write_story(&mut b, &cx2, "a fox");
+        until(&mut b, &cx2, "the cover", all_pictures_ready);
+        assert_eq!((b.pics.len(), fake2.count()), (1, 1));
+        // ask me each time: nothing is drawn until the person says so; the text is there meanwhile
+        let (mut c, cx3, _h, _t, fake3) = with_images("tales-illus-ask", 0, false);
+        c.test_memory = Some(lots_of_memory());
+        click(&mut c, &cx3, T_COVERAGE);
+        click(&mut c, &cx3, T_COVERAGE);
+        assert_eq!(c.opts.coverage, Coverage::Ask);
+        write_story(&mut c, &cx3, "a fox");
+        assert!(c.held && !c.story.is_empty() && fake3.count() == 0 && c.pics.len() == 2);
+        for _ in 0..20 {
+            c.handle(&Event::Tick, &cx3);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(fake3.count(), 0, "still waiting for the yes");
+        let (g, _) = draw(&mut c, &cx3, 1280, 720, 0);
+        assert!(g.hits.iter().any(|h| h.label == "Make the pictures") && g.hits.iter().any(|h| h.label == "No pictures"));
+        click(&mut c, &cx3, T_PICS_GO);
+        until(&mut c, &cx3, "the pictures after the yes", all_pictures_ready);
+        assert_eq!(fake3.count(), 2);
+        // and a no keeps the text and draws nothing
+        let (mut d, cx4, _h, _t, fake4) = with_images("tales-illus-no", 0, false);
+        click(&mut d, &cx4, T_COVERAGE);
+        click(&mut d, &cx4, T_COVERAGE);
+        write_story(&mut d, &cx4, "a fox");
+        let words = d.story.words();
+        click(&mut d, &cx4, T_PICS_SKIP);
+        assert!(!d.held && d.pics.is_empty() && fake4.count() == 0 && d.story.words() == words);
+    }
+
+
+    // ------------------------------------------------------------------ picture look, quality, model, seed and the picture log
+
+    fn img_model(id: &str, gb: f64, w: u32, steps: u32) -> iyakki_agent::lemonade::Model {
+        iyakki_agent::lemonade::Model { id: id.into(), kind: iyakki_agent::lemonade::ModelType::Image, recipe: "sd-cpp".into(), checkpoint: String::new(), labels: vec!["image".into()], downloaded: true, loaded: false, suggested: false, size_gb: Some(gb), image_defaults: Some(iyakki_agent::lemonade::ImageDefaults { width: Some(w), height: Some(w), steps: Some(steps) }) }
+    }
+
+    /// A Lemonade server on this computer with SD-Turbo and SDXL, and one on another computer with FLUX.
+    fn with_two_lemonades(tag: &str, delay_ms: u64, fail: bool) -> (StoryApp, AppCx, PathBuf, Arc<FakeImages>) {
+        let t = Teller::new(STORY);
+        let fake = FakeImages::new(delay_ms, fail);
+        let (mut a, cx, home) = make_up(tag, &t, Arc::new(ImgUp(fake.clone())));
+        let (local, remote) = (format!("http://127.0.0.1:{}", 20000 + hash(tag) % 20000), format!("http://{tag}.gpu-box.invalid:13305"));
+        for (id, base) in [("home", &local), ("gpu", &remote)] {
+            let mut l = iyakki_agent::providers::ProviderCfg::new(id, iyakki_agent::providers::Kind::Lemonade);
+            l.base_url = Some(base.clone());
+            cx.services.settings.lock().unwrap().upsert_provider(l).unwrap();
+        }
+        iyakki_agent::lemonade::remember(&iyakki_agent::lemonade::api_base(&local), &[img_model("SD-Turbo", 2.0, 512, 4), img_model("SDXL-Base-1.0", 6.9, 1024, 20)]);
+        iyakki_agent::lemonade::remember(&iyakki_agent::lemonade::api_base(&remote), &[img_model("FLUX-Dev", 23.0, 1024, 28)]);
+        a.refresh_tts(&cx);
+        a.test_memory = Some(lots_of_memory());
+        a.confirm_secs = f64::MAX;
+        (a, cx, home, fake)
+    }
+
+    fn bodies(f: &FakeImages) -> Vec<serde_json::Value> {
+        f.asked.lock().unwrap().iter().map(|b| serde_json::from_str(b).unwrap()).collect()
+    }
+
+    #[test]
+    fn tales_picture_style_quality_model_and_seed_are_options_kept_per_story_and_as_default() {
+        let (mut a, cx, _home, fake) = with_two_lemonades("tales-pic-opts", 0, false);
+        assert_eq!(cx.services.gpu_lemonade().as_deref(), Some("gpu"), "a Lemonade server that is not this computer is the GPU one");
+        assert_eq!(a.pic_now(), illus::PictureOpts::default(), "the old defaults");
+        // the chips are on the page, with the provider named, the model's own size and steps and the plain advice
+        let l = find_in_form(&mut a, &cx, 1920, 1080, "Style \u{2611}: storybook illustration").unwrap();
+        assert!(!l.is_empty());
+        for want in ["Quality: as selected", "Model for this story: automatic", "Same look for all pictures: off", "Picture log (g)"] {
+            assert!(find_in_form(&mut a, &cx, 1920, 1080, want).is_some(), "{want}");
+        }
+        let (g, _) = draw(&mut a, &cx, 1920, 1080, 1);
+        assert!(g.hits.len() > 5);
+        // the styles are ticked one by one and remembered as the default; the last one cannot be unticked
+        click(&mut a, &cx, T_STYLE + 1);
+        assert_eq!(a.opts.pic.styles_list(), vec![illus::Look::Storybook, illus::Look::Watercolor]);
+        click(&mut a, &cx, T_STYLE);
+        click(&mut a, &cx, T_STYLE + 1);
+        assert_eq!(a.opts.pic.styles_list(), vec![illus::Look::Watercolor], "the last style stays ticked");
+        click(&mut a, &cx, T_REALISTIC);
+        assert_eq!(a.opts.pic.styles_list(), vec![illus::Look::Photo], "one style ticked: Realistic replaces it");
+        click(&mut a, &cx, T_REALISTIC);
+        assert_eq!(a.opts.pic.styles_list(), vec![illus::Look::Watercolor], "unticking brings the styles back");
+        click(&mut a, &cx, T_STYLE + 2);
+        click(&mut a, &cx, T_STYLE + 1);
+        assert_eq!(a.opts.pic.styles_list(), vec![illus::Look::Photo]);
+        assert_eq!(a.store.load_prefs().options.pic.styles_list(), vec![illus::Look::Photo]);
+        click(&mut a, &cx, T_QUALITY);
+        click(&mut a, &cx, T_QUALITY);
+        click(&mut a, &cx, T_QUALITY);
+        assert_eq!(a.opts.pic.quality, illus::Quality::Best);
+        let r = a.resolved_for(&a.pic_now(), &cx).unwrap();
+        assert_eq!((r.provider.as_str(), r.model.as_str(), r.steps, r.width), ("gpu", "FLUX-Dev", Some(35), 1024), "Best picks the largest model, here on the other computer, with more steps");
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the pictures", all_pictures_ready);
+        let sent = bodies(&fake);
+        assert_eq!(sent.len(), 2);
+        for b in &sent {
+            assert_eq!((b["model"].as_str(), b["steps"].as_u64(), b["size"].as_str()), (Some("FLUX-Dev"), Some(35), Some("1024x1024")), "the steps of Quality Best inside what the model has");
+            assert_eq!(b["cfg_scale"].as_f64(), Some(6.0), "photo style asks a model that is not Turbo for guidance");
+            let prompt = b["prompt"].as_str().unwrap();
+            assert!(prompt.starts_with("a realistic photograph, shot on a 50mm lens") && prompt.contains("A small fox sits by a quiet river") && prompt.chars().count() <= illus::Family::Long.cap(), "{prompt}");
+            assert!(prompt.contains("Avoid: cartoon, illustration") && b.get("negative_prompt").is_none(), "the images API is not known to take a negative prompt: {prompt}");
+        }
+        assert_ne!(sent[0]["seed"], sent[1]["seed"], "a new random seed for every picture");
+        // saved with the story: its own file, back when it is opened, whatever the defaults are now
+        click(&mut a, &cx, T_SAVE);
+        let id = a.saved_id().unwrap();
+        let kept = a.store.load_picture_opts(&id).unwrap();
+        assert_eq!((kept.styles_list(), kept.quality), (vec![illus::Look::Photo], illus::Quality::Best));
+        click(&mut a, &cx, T_STYLE + 3);
+        click(&mut a, &cx, T_QUALITY);
+        assert!(a.story_opts.pic.styles_list().contains(&illus::Look::Cinematic) && a.store.load_picture_opts(&id).unwrap().styles_list().contains(&illus::Look::Cinematic), "changing it on the page changes the story's choice too");
+        a.opts.pic = illus::PictureOpts::default();
+        let e = a.store.list().into_iter().find(|e| e.id == id).unwrap();
+        assert!(a.options_of(&e).pic.styles_list().contains(&illus::Look::Cinematic), "opened later, the story keeps its own styles");
+        // a model for this story: a model of any provider, named with its provider; wins over Quality
+        let (mut b, cx2, _h, fake2) = with_two_lemonades("tales-pic-model", 0, false);
+        click(&mut b, &cx2, T_QUALITY);
+        assert_eq!(b.resolved_for(&b.pic_now(), &cx2).unwrap().model, "SD-Turbo");
+        click(&mut b, &cx2, T_STORYMODEL);
+        let first = b.opts.pic.model.clone().unwrap();
+        assert!(b.found_images(&cx2).contains(&(first.provider.clone(), first.model.clone())));
+        while b.opts.pic.model.as_ref().map(|m| m.model.as_str()) != Some("FLUX-Dev") {
+            click(&mut b, &cx2, T_STORYMODEL);
+        }
+        assert_eq!(find_in_form(&mut b, &cx2, 1920, 1080, "Model for this story: FLUX-Dev \u{b7} gpu").is_some(), true, "the provider is shown");
+        assert_eq!(b.resolved_for(&b.pic_now(), &cx2).unwrap().why, "chosen for this story");
+        click(&mut b, &cx2, T_STORYMODEL);
+        assert!(b.opts.pic.model.is_none(), "after the last model it is automatic again");
+        b.opts.pic.model = Some(ModelChoice { provider: "gpu".into(), model: "FLUX-Dev".into() });
+        write_story(&mut b, &cx2, "a fox");
+        until(&mut b, &cx2, "the pictures", all_pictures_ready);
+        assert!(bodies(&fake2).iter().all(|x| x["model"] == "FLUX-Dev"));
+        // keep the same look: one seed for the whole story, kept with it
+        let (mut c, cx3, _h, fake3) = with_two_lemonades("tales-pic-seed", 0, false);
+        click(&mut c, &cx3, T_KEEPLOOK);
+        assert!(c.opts.pic.keep_look && c.opts.pic.seed.is_none());
+        write_story(&mut c, &cx3, "a fox");
+        until(&mut c, &cx3, "the pictures", all_pictures_ready);
+        let seeds: Vec<_> = bodies(&fake3).iter().map(|x| x["seed"].clone()).collect();
+        assert!(seeds.len() == 2 && seeds[0] == seeds[1] && seeds[0].is_u64(), "{seeds:?}");
+        let id = c.saved_id().unwrap();
+        assert_eq!(c.store.load_picture_opts(&id).unwrap().seed, seeds[0].as_u64(), "the story keeps its seed");
+        assert!(c.opts.pic.seed.is_none(), "the default never holds a seed");
+    }
+
+    #[test]
+    fn tales_picture_log_keeps_every_request_skip_and_fallback_in_order_without_secrets() {
+        let (mut a, cx, _home, _fake) = with_two_lemonades("tales-piclog", 0, false);
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the pictures", all_pictures_ready);
+        let id = a.saved_id().unwrap();
+        let ev = a.store.load_picture_log(&id);
+        assert_eq!(ev.len(), 2, "{ev:?}");
+        let e = &ev[0];
+        assert_eq!((e.kind.as_str(), e.story.as_str(), e.picture, e.attempt), ("request", "The Brave Little Fox", 1, 1));
+        assert_eq!((e.provider.as_str(), e.model.as_str(), e.size.as_str(), e.steps, e.status, e.format.as_str()), ("home", "SD-Turbo", "512x512", Some(4), Some(200), "png"), "{e:?}");
+        assert!(e.seed.is_some() && e.bytes > 0 && !e.prompt.is_empty() && e.negative.contains("extra fingers") && e.verbose.is_none(), "verbose is off by default: {e:?}");
+        assert_eq!(e.negative_sent, "not sent", "no room for the avoid-words in a short SD-Turbo prompt");
+        assert!(e.prompt.chars().count() <= illus::Family::Turbo.cap(), "SD-Turbo gets a short prompt: {}", e.prompt);
+        assert_eq!(ev[1].picture, 2);
+        // Try again is a new attempt of the same picture, logged after the others
+        click(&mut a, &cx, T_PIC_REDO);
+        until(&mut a, &cx, "the redraw", |a| a.pics[0].state == PicState::Ready && a.store.load_picture_log(&id).len() == 3);
+        assert_eq!(a.store.load_picture_log(&id)[2].attempt, 2);
+        // the view: opened by the button and by g, newest at the bottom, copy gives the whole text
+        let (g, _) = draw(&mut a, &cx, 1280, 720, 0);
+        click_hit(&mut a, &cx, &g, "Picture log (g)");
+        assert!(matches!(a.modal, Some(Modal::PicLog(_))));
+        let (g, _) = draw(&mut a, &cx, 1280, 720, 0);
+        for l in ["Copy log", "Clear log", "Verbose: off", "Close"] {
+            assert!(g.hits.iter().any(|h| h.label == l), "{l}");
+        }
+        click(&mut a, &cx, T_LOG_COPY);
+        let all = piclog::log_text(&a.pic_log_events());
+        assert_eq!(crate::ui::clipboard::latest().as_deref(), Some(all.as_str()), "Copy log copies the whole text");
+        assert!(all.contains("SD-Turbo on home") && all.contains("HTTP 200") && all.contains("attempt 2 (retries 1)"));
+        // verbose is a switch, off by default, kept
+        click(&mut a, &cx, T_LOG_VERBOSE);
+        assert!(a.pic_now().verbose && a.store.load_picture_opts(&id).unwrap().verbose);
+        click(&mut a, &cx, T_LOG_VERBOSE);
+        assert!(!a.pic_now().verbose);
+        // scrolling: many events, the latest at the bottom, keys and the wheel move it, it stays inside the log
+        let many: Vec<PicEvent> = (0..80).map(|n| piclog::decision_event(1_792_000_000 + n, plk::SKIPPED, "S", 1, "A", &format!("skipped number {n}"))).collect();
+        a.log_pic_events(many);
+        let (_g, _) = draw(&mut a, &cx, 1280, 720, 0);
+        let (total, rows, top) = if let Some(Modal::PicLog(v)) = &a.modal { (v.total.get(), v.rows.get(), v.top.get()) } else { unreachable!() };
+        assert!(total > rows * 2 && top == total - rows, "it opens at the latest events: {total} {rows} {top}");
+        key(&mut a, &cx, Key::Up);
+        key(&mut a, &cx, Key::PageUp);
+        let now = if let Some(Modal::PicLog(v)) = &a.modal { v.top.get() } else { 0 };
+        assert_eq!(now, top - 1 - (rows - 1));
+        a.handle(&Event::Scroll(-2), &cx);
+        let up = if let Some(Modal::PicLog(v)) = &a.modal { v.top.get() } else { 0 };
+        assert_eq!(up, now + 6, "the wheel scrolls the log (down), not the story");
+        key(&mut a, &cx, Key::Home);
+        let (_g, _) = draw(&mut a, &cx, 1280, 720, 0);
+        assert_eq!(if let Some(Modal::PicLog(v)) = &a.modal { v.top.get() } else { 9 }, 0);
+        key(&mut a, &cx, Key::End);
+        key(&mut a, &cx, Key::PageDown);
+        assert_eq!(if let Some(Modal::PicLog(v)) = &a.modal { v.top.get() } else { 0 }, total - rows);
+        // clear asks twice, then the log is empty on disk too
+        click(&mut a, &cx, T_LOG_CLEAR);
+        assert!(!a.store.load_picture_log(&id).is_empty(), "one press only asks");
+        click(&mut a, &cx, T_LOG_CLEAR);
+        assert!(a.store.load_picture_log(&id).is_empty() && a.pic_log_events().is_empty());
+        key(&mut a, &cx, Key::Esc);
+        assert!(a.modal.is_none());
+        key(&mut a, &cx, Key::Char('g'));
+        assert!(matches!(a.modal, Some(Modal::PicLog(_))), "g opens it");
+    }
+
+    #[test]
+    fn tales_picture_log_names_the_server_error_the_svg_fallback_the_memory_skip_and_the_cancel() {
+        // the picture model fails: its status and text are logged, and the rest of the story falls back to SVG, said once
+        let (mut a, cx, _home, _fake) = with_two_lemonades("tales-piclog-fail", 0, true);
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the drawings", all_pictures_ready);
+        let id = a.saved_id().unwrap();
+        let ev = a.store.load_picture_log(&id);
+        let req = ev.iter().find(|e| e.kind == plk::REQUEST).unwrap();
+        assert_eq!(req.status, Some(500));
+        assert!(req.error.contains("fell over") && req.format.is_empty(), "{req:?}");
+        let fb = ev.iter().find(|e| e.kind == plk::SVG_FALLBACK).unwrap();
+        assert!(fb.svg_fallback.contains("fell over"), "{fb:?}");
+        assert!(ev.iter().position(|e| e.kind == plk::REQUEST) < ev.iter().position(|e| e.kind == plk::SVG_FALLBACK), "in order");
+        // low memory: nothing is asked, and the decision is logged
+        let (mut b, cx2, _h, fake2) = with_two_lemonades("tales-piclog-mem", 0, false);
+        b.test_memory = Some(iyakki_agent::sysinfo::Memory { total: 8 << 30, available: 200 << 20, swap_total: 0, swap_free: 0 });
+        write_story(&mut b, &cx2, "a fox");
+        until(&mut b, &cx2, "the pictures to wait", |b| b.pics.iter().all(|p| matches!(p.state, PicState::Failed(_))));
+        assert_eq!(fake2.count(), 0);
+        let ev = b.pic_log_events();
+        assert!(ev.iter().any(|e| e.kind == plk::SKIPPED && e.decision.starts_with("skipped: free memory low") && e.decision.contains("200 MB free")), "{ev:?}");
+        // cancelled while being drawn: the late answer is still logged
+        let (mut c, cx3, _h, fake3) = with_two_lemonades("tales-piclog-cancel", 300, false);
+        write_story(&mut c, &cx3, "a fox");
+        until(&mut c, &cx3, "the first request", |_| fake3.count() >= 1);
+        click(&mut c, &cx3, T_PICS_CANCEL);
+        assert!(c.pic_log_events().iter().any(|e| e.decision.starts_with("cancelled")));
+        until(&mut c, &cx3, "the late answer in the log", |c| c.pic_log_events().iter().any(|e| e.kind == plk::REQUEST));
+        // a story that is not saved yet keeps the events in memory and writes them when it is saved
+        let (mut d, cx4, _h, _f) = with_two_lemonades("tales-piclog-unsaved", 0, false);
+        d.prefs.auto_save = false;
+        write_story(&mut d, &cx4, "a fox");
+        until(&mut d, &cx4, "the pictures", all_pictures_ready);
+        assert!(d.saved_id().is_none() && d.pic_pending.len() == 2);
+        click(&mut d, &cx4, T_SAVE);
+        let id = d.saved_id().unwrap();
+        assert!(d.pic_pending.is_empty() && d.store.load_picture_log(&id).len() == 2);
+    }
+
+
+    /// A Lemonade server that is never reached over a network: its model list says whether SDXL is downloaded (a download
+    /// makes it so), its health lists a busy model, and its picture call is slow when asked to be.
+    struct LiveUp {
+        sdxl_downloaded: std::sync::atomic::AtomicBool,
+        delay_ms: u64,
+        gens: AtomicUsize,
+        health_calls: AtomicUsize,
+        pulls: AtomicUsize,
+    }
+
+    impl LiveUp {
+        fn new(downloaded: bool, delay_ms: u64) -> Arc<LiveUp> {
+            Arc::new(LiveUp { sdxl_downloaded: std::sync::atomic::AtomicBool::new(downloaded), delay_ms, gens: AtomicUsize::new(0), health_calls: AtomicUsize::new(0), pulls: AtomicUsize::new(0) })
+        }
+    }
+
+    struct LiveNet(Arc<LiveUp>);
+
+    impl iyakki_agent::iyakki_proxy::Upstream for LiveNet {
+        fn request(&self, _m: &str, u: &str, _h: &[(String, String)], _b: &[u8]) -> Result<iyakki_agent::iyakki_proxy::UpstreamResponse, String> {
+            let t = &self.0;
+            let ok = |v: serde_json::Value| Ok(iyakki_agent::iyakki_proxy::UpstreamResponse { status: 200, body: v.to_string().into_bytes() });
+            if u.ends_with("/models?show_all=true") {
+                let dl = t.sdxl_downloaded.load(Ordering::SeqCst);
+                return ok(serde_json::json!({"data": [
+                    {"id": "SD-Turbo", "recipe": "sd-cpp", "labels": ["image"], "size": 2.0, "downloaded": true, "image_defaults": {"steps": 4, "width": 512, "height": 512}},
+                    {"id": "SDXL-Base-1.0", "recipe": "sd-cpp", "labels": ["image"], "size": 6.94, "downloaded": dl, "image_defaults": {"steps": 20, "width": 1024, "height": 1024}}
+                ]}));
+            }
+            if u.ends_with("/health") {
+                t.health_calls.fetch_add(1, Ordering::SeqCst);
+                return ok(serde_json::json!({"status": "ok", "all_models_loaded": [{"model_name": "kokoro-v1"}]}));
+            }
+            if u.ends_with("/images/generations") {
+                t.gens.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(t.delay_ms));
+                return ok(serde_json::json!({ "data": [{"b64_json": st::base64_encode(&tiny_png())}] }));
+            }
+            Err("offline".into())
+        }
+    }
+
+    impl iyakki_agent::iyakki_proxy::Streamer for LiveNet {
+        fn open(&self, _u: &str, _h: &[(String, String)]) -> Result<iyakki_agent::iyakki_proxy::StreamHead, String> {
+            Err("not used".into())
+        }
+        fn post(&self, _u: &str, _h: &[(String, String)], _b: &[u8]) -> Result<iyakki_agent::iyakki_proxy::StreamHead, String> {
+            self.0.pulls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(100));
+            self.0.sdxl_downloaded.store(true, Ordering::SeqCst);
+            let body = "data: {\"bytes_downloaded\": 100, \"bytes_total\": 200, \"file\": \"sdxl.gguf\"}\nevent: complete\ndata: {}\n";
+            Ok(iyakki_agent::iyakki_proxy::StreamHead { status: 200, headers: vec![], body: Box::new(std::io::Cursor::new(body.as_bytes().to_vec())) })
+        }
+    }
+
+    /// An app whose only Lemonade server says SDXL is downloaded in its saved list (stale) and the live truth is `downloaded`;
+    /// SDXL is chosen for the story.
+    fn with_live_lemonade(tag: &str, downloaded: bool, delay_ms: u64) -> (StoryApp, AppCx, Arc<LiveUp>) {
+        let t = Teller::new(STORY);
+        let live = LiveUp::new(downloaded, delay_ms);
+        let (mut a, cx, _home) = make_up(tag, &t, Arc::new(LiveNet(live.clone())));
+        cx.services.set_streamer(Arc::new(LiveNet(live.clone())));
+        let base = format!("http://127.0.0.1:{}", 20000 + hash(tag) % 20000);
+        let mut l = iyakki_agent::providers::ProviderCfg::new("home", iyakki_agent::providers::Kind::Lemonade);
+        l.base_url = Some(base.clone());
+        cx.services.settings.lock().unwrap().upsert_provider(l).unwrap();
+        iyakki_agent::lemonade::remember(&iyakki_agent::lemonade::api_base(&base), &[img_model("SD-Turbo", 2.0, 512, 4), img_model("SDXL-Base-1.0", 6.94, 1024, 20)]);
+        a.refresh_tts(&cx);
+        a.test_memory = Some(lots_of_memory());
+        a.confirm_secs = f64::MAX;
+        a.opts.pic.model = Some(ModelChoice { provider: "home".into(), model: "SDXL-Base-1.0".into() });
+        (a, cx, live)
+    }
+
+    #[test]
+    fn tales_picture_that_is_not_downloaded_is_not_called_and_offers_install() {
+        let (mut a, cx, live) = with_live_lemonade("tales-notdl", false, 0);
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the pictures to stop", |a| a.pics.iter().all(|p| matches!(p.state, PicState::Failed(_))) && a.install.is_some());
+        assert_eq!(live.gens.load(Ordering::SeqCst), 0, "the picture call was never made");
+        let PicState::Failed(why) = a.pics[0].state.clone() else { unreachable!() };
+        assert!(why.contains("SDXL-Base-1.0 is not downloaded on home (6.9 GB)"), "{why}");
+        assert!(a.pics.iter().all(|p| p.mode == PictureMode::ImageModel), "no fall back to SVG for this");
+        let ev = a.pic_log_events();
+        assert!(ev.iter().any(|e| e.kind == plk::NOT_DOWNLOADED && e.model == "SDXL-Base-1.0" && e.decision.contains("Nothing was asked")), "{ev:?}");
+        assert!(!ev.iter().any(|e| e.kind == plk::REQUEST || e.kind == plk::SVG_FALLBACK));
+        let (g, _) = draw(&mut a, &cx, 1280, 720, 0);
+        assert!(g.hits.iter().any(|h| h.label == "Install SDXL-Base-1.0 (6.9 GB)"), "{:?}", g.hits.iter().map(|h| &h.label).collect::<Vec<_>>());
+        // the story's model list says which models are installed, and their size
+        let list = cx.services.picture_choices(&a.found_images(&cx)).iter().map(|c| c.line()).collect::<Vec<_>>().join("|");
+        assert!(list.contains("SD-Turbo on home: installed, 2.0 GB, 512x512, 4 steps") && list.contains("SDXL-Base-1.0 on home: not downloaded, 6.9 GB, 1024x1024, 20 steps"), "{list}");
+        assert!(find_in_form(&mut a, &cx, 1920, 1080, "Model for this story: SDXL-Base-1.0 \u{b7} home (not downloaded, 6.9 GB)").is_some());
+    }
+
+    #[test]
+    fn tales_picture_install_pulls_with_progress_and_then_draws_the_waiting_pictures() {
+        let (mut a, cx, live) = with_live_lemonade("tales-pull", false, 0);
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the offer", |a| a.install.is_some() && a.pics.iter().all(|p| matches!(p.state, PicState::Failed(_))));
+        click(&mut a, &cx, T_PIC_INSTALL);
+        assert!(a.install.as_ref().is_some_and(|i| i.started));
+        until(&mut a, &cx, "the pictures after the download", all_pictures_ready);
+        assert_eq!(live.pulls.load(Ordering::SeqCst), 1);
+        assert_eq!(live.gens.load(Ordering::SeqCst), 2, "drawn after the pull, one call each");
+        assert!(a.install.is_none());
+        let ev = a.pic_log_events();
+        let at = |f: &dyn Fn(&PicEvent) -> bool| ev.iter().position(|e| f(e)).unwrap_or_else(|| panic!("missing in {ev:?}"));
+        let (nd, start, fin, req) = (at(&|e| e.kind == plk::NOT_DOWNLOADED), at(&|e| e.decision.starts_with("pull started")), at(&|e| e.decision == "pull finished"), at(&|e| e.kind == plk::REQUEST));
+        assert!(nd < start && start < fin && fin < req, "in order: {nd} {start} {fin} {req}");
+        assert!(ev.iter().filter(|e| e.kind == plk::REQUEST).all(|e| e.model == "SDXL-Base-1.0" && e.status == Some(200)), "{ev:?}");
+    }
+
+    #[test]
+    fn tales_picture_that_is_slow_shows_elapsed_time_and_the_server_state_and_logs_the_wait() {
+        let (mut a, cx, live) = with_live_lemonade("tales-slow", true, 900);
+        a.test_timing = Some((Duration::from_secs(60), Duration::from_millis(40), Duration::from_millis(100)));
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "a wait line with the server state", |a| a.wait_text.as_ref().is_some_and(|n| n.contains("so far") && n.contains("server: loaded models: kokoro-v1")));
+        let n = a.wait_text.clone().unwrap();
+        assert!(n.contains("Drawing picture 1") && n.contains("The model is loading or generating; on a CPU this can take minutes") && n.contains("SDXL-Base-1.0 is not loaded yet") && n.contains("Cancel pictures"), "{n}");
+        assert!(live.health_calls.load(Ordering::SeqCst) >= 1, "the health is polled while it waits");
+        until(&mut a, &cx, "the pictures", all_pictures_ready);
+        let ev = a.pic_log_events();
+        let w = ev.iter().find(|e| e.kind == plk::WAITING).unwrap_or_else(|| panic!("{ev:?}"));
+        assert!(w.decision.starts_with("waiting") && w.decision.contains("kokoro-v1") && w.model == "SDXL-Base-1.0", "{w:?}");
+        a.handle(&Event::Tick, &cx);
+        assert!(a.wait_text.is_none(), "the wait line goes when the picture is done");
+    }
+
+    #[test]
+    fn tales_picture_stops_after_the_time_limit_says_so_and_logs_it() {
+        let (mut a, cx, live) = with_live_lemonade("tales-limit", true, 1200);
+        a.test_timing = Some((Duration::from_millis(300), Duration::from_millis(40), Duration::from_secs(30)));
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the time limit", |a| a.pics.iter().all(|p| matches!(p.state, PicState::Failed(_))));
+        let PicState::Failed(why) = a.pics[0].state.clone() else { unreachable!() };
+        assert!(why.starts_with("Stopped after") && why.contains("time limit") && why.contains("may still be working"), "{why}");
+        assert_eq!(live.gens.load(Ordering::SeqCst), 1, "the waiting picture was not started");
+        let ev = a.pic_log_events();
+        assert!(ev.iter().any(|e| e.kind == plk::TIMEOUT && e.decision.starts_with("timeout after")), "{ev:?}");
+        // the late answer is only logged: the picture stays failed
+        until(&mut a, &cx, "the late answer in the log", |a| a.pic_log_events().iter().any(|e| e.kind == plk::REQUEST));
+        assert!(a.pics.iter().all(|p| matches!(p.state, PicState::Failed(_))));
+        // the limit is an option, kept
+        click(&mut a, &cx, T_TIMEOUT);
+        assert_eq!((a.opts.pic.limit_min(), a.story_opts.pic.limit_min()), (30, 30));
+        assert_eq!(illus::PictureOpts::default().limit_min(), 15, "15 minutes unless chosen");
+    }
+
+    #[test]
+    fn tales_picture_memory_guard_names_the_remedy_and_does_not_apply_to_another_computer() {
+        let (mut a, cx, live) = with_live_lemonade("tales-ram", true, 0);
+        a.test_memory = Some(iyakki_agent::sysinfo::Memory { total: 16 << 30, available: 3 << 30, swap_total: 0, swap_free: 0 });
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the wait for memory", |a| a.pics.iter().all(|p| matches!(p.state, PicState::Failed(_))));
+        let PicState::Failed(why) = a.pics[0].state.clone() else { unreachable!() };
+        assert!(why.contains("3072 MB free") && why.contains("SD-Turbo-GGUF") && why.contains("graphics card"), "{why}");
+        assert_eq!(live.gens.load(Ordering::SeqCst), 0, "nothing was asked while memory is that low");
+    }
+
+
+    /// One Lemonade server per entry of `servers`: (provider id, on another computer?, its picture models as (name, GB, size, steps,
+    /// downloaded)).
+    fn with_servers(tag: &str, servers: &[(&str, bool, &[(&str, f64, u32, u32, bool)])]) -> (StoryApp, AppCx, Arc<FakeImages>) {
+        let t = Teller::new(STORY);
+        let fake = FakeImages::new(0, false);
+        let (mut a, cx, _home) = make_up(tag, &t, Arc::new(ImgUp(fake.clone())));
+        for (id, remote, models) in servers {
+            let base = if *remote { format!("http://{tag}-{id}.gpu-box.invalid:13305") } else { format!("http://127.0.0.1:{}", 20000 + hash(&format!("{tag}{id}")) % 20000) };
+            let mut l = iyakki_agent::providers::ProviderCfg::new(id, iyakki_agent::providers::Kind::Lemonade);
+            l.base_url = Some(base.clone());
+            cx.services.settings.lock().unwrap().upsert_provider(l).unwrap();
+            let list: Vec<_> = models.iter().map(|(m, gb, w, steps, dl)| iyakki_agent::lemonade::Model { downloaded: *dl, ..img_model(m, *gb, *w, *steps) }).collect();
+            iyakki_agent::lemonade::remember(&iyakki_agent::lemonade::api_base(&base), &list);
+        }
+        a.refresh_tts(&cx);
+        a.test_memory = Some(lots_of_memory());
+        a.confirm_secs = f64::MAX;
+        (a, cx, fake)
+    }
+
+    #[test]
+    fn tales_picture_realistic_checkbox_with_one_base_model_uses_photo_words_guidance_and_quality_steps() {
+        // only SDXL Base is installed (on the GPU server): the checkbox works with it
+        let (mut a, cx, fake) = with_servers("tales-real-one", &[("gpu", true, &[("SDXL-Base-1.0", 6.9, 1024, 20, true)])]);
+        assert!(!a.pic_now().is_realistic(), "off by default");
+        assert!(find_in_form(&mut a, &cx, 1920, 1080, "\u{2610} Realistic pictures (photo style, people look real)").is_some(), "the checkbox is the first thing of the Pictures options");
+        click(&mut a, &cx, T_REALISTIC);
+        assert!(a.opts.pic.is_realistic() && a.store.load_prefs().options.pic.is_realistic(), "remembered as the default");
+        assert!(find_in_form(&mut a, &cx, 1920, 1080, "\u{2611} Realistic pictures (photo style, people look real)").is_some());
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the pictures", all_pictures_ready);
+        let b = &bodies(&fake)[0];
+        assert_eq!((b["model"].as_str(), b["steps"].as_u64(), b["size"].as_str(), b["cfg_scale"].as_f64()), (Some("SDXL-Base-1.0"), Some(20), Some("1024x1024"), Some(6.0)));
+        let prompt = b["prompt"].as_str().unwrap();
+        assert!(prompt.starts_with("a realistic photograph") && prompt.chars().count() <= illus::Family::Sdxl.cap(), "{prompt}");
+        // Quality changes the steps and the size of that one model, inside what it has
+        click(&mut a, &cx, T_QUALITY);
+        click(&mut a, &cx, T_PIC_REDO);
+        until(&mut a, &cx, "the redraw", |a| fake.count() == 3 && all_pictures_ready(a));
+        let fast = &bodies(&fake)[2];
+        assert_eq!((fast["steps"].as_u64(), fast["size"].as_str()), (Some(12), Some("768x768")), "Fast: 12 steps at 768");
+        click(&mut a, &cx, T_QUALITY);
+        click(&mut a, &cx, T_QUALITY);
+        click(&mut a, &cx, T_PIC_REDO);
+        until(&mut a, &cx, "the redraw", |a| fake.count() == 4 && all_pictures_ready(a));
+        assert_eq!(bodies(&fake)[3]["steps"].as_u64(), Some(32), "Best: 32 steps");
+        // the picture log says realistic mode was on, the style, the model and the parameters
+        click(&mut a, &cx, T_SAVE);
+        let ev = a.pic_log_events();
+        let e = ev.iter().find(|e| e.kind == plk::REQUEST).unwrap();
+        assert!(e.realistic && e.style == "photo" && e.model == "SDXL-Base-1.0" && e.guidance == Some(6.0) && e.steps == Some(20), "{e:?}");
+        assert!(piclog::event_text(e).join("\n").contains("realistic pictures: on"));
+        // unticking brings the old style back, for the next pictures too
+        click(&mut a, &cx, T_REALISTIC);
+        assert_eq!(a.story_opts.pic.styles_list(), vec![illus::Look::Storybook]);
+        assert_eq!(a.store.load_picture_opts(&a.saved_id().unwrap()).unwrap().styles_list(), vec![illus::Look::Storybook]);
+    }
+
+    #[test]
+    fn tales_picture_realistic_with_only_a_turbo_model_says_so_offers_the_install_and_never_sends_guidance() {
+        let (mut a, cx, fake) = with_servers("tales-real-turbo", &[("home", false, &[("SD-Turbo", 2.0, 512, 4, true)]), ("gpu", true, &[("SDXL-Base-1.0", 6.9, 1024, 20, false)])]);
+        click(&mut a, &cx, T_REALISTIC);
+        let cands = cx.services.picture_choices(&a.found_images(&cx));
+        let info = illus::realism_info(&a.pic_now(), None, &cands, None);
+        assert_eq!(info.uses, "Uses SD-Turbo on home");
+        assert!(info.warning.as_deref().is_some_and(|w| w.contains("Only SD-Turbo is installed: pictures will stay painterly; install SDXL-Base-1.0 on the GPU server")), "{info:?}");
+        let label = find_in_form(&mut a, &cx, 1920, 1080, "Install SDXL-Base-1.0 on gpu (6.9 GB)").unwrap();
+        assert!(!label.is_empty(), "the install button is beside the checkbox");
+        // the list of models shows the one that is not installed too, with an Install button
+        assert!(find_in_form(&mut a, &cx, 1920, 1080, "Install SDXL-Base-1.0 on gpu").is_some());
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the pictures", all_pictures_ready);
+        let b = &bodies(&fake)[0];
+        assert_eq!((b["model"].as_str(), b["steps"].as_u64(), b["size"].as_str()), (Some("SD-Turbo"), Some(4), Some("512x512")));
+        assert!(b.get("cfg_scale").is_none(), "no guidance for a Turbo model");
+        assert!(b["prompt"].as_str().unwrap().starts_with("a realistic photo, 50mm lens"), "{}", b["prompt"]);
+    }
+
+    #[test]
+    fn tales_picture_several_styles_and_pictures_per_style_make_a_gallery_the_chosen_one_is_main_and_keep_only_the_chosen_removes_the_rest() {
+        let (mut a, cx, fake) = with_servers("tales-variants", &[("home", false, &[("SD-Turbo", 2.0, 512, 4, true), ("SDXL-Base-1.0", 6.9, 1024, 20, true)]), ("gpu", true, &[("FLUX-Dev", 23.0, 1024, 28, true)])]);
+        click(&mut a, &cx, T_REALISTIC);
+        click(&mut a, &cx, T_STYLE);
+        assert_eq!(a.opts.pic.styles_list(), vec![illus::Look::Photo, illus::Look::Storybook]);
+        click(&mut a, &cx, T_PERSTYLE);
+        assert_eq!(a.opts.pic.count(), 2);
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the main pictures and the extra ones", |a| all_pictures_ready(a) && a.alt_jobs.is_empty() && a.alt_running.is_none() && a.pics.iter().all(|p| p.alts.len() == 3));
+        assert_eq!(a.pics.len(), 2);
+        let sent = bodies(&fake);
+        assert_eq!(sent.len(), 8, "2 scenes x 2 styles x 2 pictures");
+        let photo = |b: &serde_json::Value| b["prompt"].as_str().unwrap().starts_with("a realistic photograph");
+        assert!(photo(&sent[0]) && photo(&sent[1]), "the two main pictures come first, in the first style");
+        let order: Vec<bool> = sent[2..5].iter().map(photo).collect();
+        assert_eq!(order, vec![true, false, false], "then the extra ones of scene 1, style by style: photo 2, storybook 1 and 2");
+        assert_eq!(sent[0]["model"], "FLUX-Dev", "the photo style takes the most realistic installed model");
+        assert_eq!(sent[3]["model"], "SD-Turbo", "the other style follows the usual choice");
+        // one seed family per scene: the same starting seed in each style, another for the second picture of a style
+        assert_eq!(sent[0]["seed"], sent[3]["seed"], "photo 1 and storybook 1 of scene 1");
+        assert_ne!(sent[0]["seed"], sent[2]["seed"], "photo 1 and photo 2");
+        assert_ne!(sent[0]["seed"], sent[1]["seed"], "another scene, another seed");
+        // each variant is in the log with its style, seed, model and time
+        let ev = a.pic_log_events();
+        let req: Vec<&PicEvent> = ev.iter().filter(|e| e.kind == plk::REQUEST).collect();
+        assert_eq!(req.len(), 8);
+        assert!(req.iter().all(|e| e.seed.is_some() && !e.style.is_empty() && e.variant >= 1 && e.model != "" && e.realistic));
+        assert_eq!(req.iter().filter(|e| e.style == "storybook").count(), 4);
+        // the gallery is on the page with the style, model and time on each thumbnail, and Draw another
+        let (g, _) = draw(&mut a, &cx, 1920, 1080, 0);
+        let labels: Vec<&String> = g.hits.iter().map(|h| &h.label).collect();
+        assert!(g.hits.iter().any(|h| h.label.starts_with("Make the ") && h.label.ends_with(" picture the main one")), "{labels:?}");
+        assert!(g.hits.iter().any(|h| h.label.starts_with("Draw another in ")), "{labels:?}");
+        assert!(g.hits.iter().any(|h| h.label == "Keep only the chosen"), "{labels:?}");
+        // click one: it is the main picture of the scene, the old main takes its place; saved that way
+        click(&mut a, &cx, T_SAVE);
+        let id = a.saved_id().unwrap();
+        let (main_before, alt_look, alt_bytes) = (a.pics[0].look, a.pics[0].alts[1].look, a.pics[0].alts[1].bytes.len());
+        click(&mut a, &cx, T_ALT_PICK + 1);
+        assert_eq!((a.pics[0].look, a.pics[0].alts[1].look, a.pics[0].alts.len()), (alt_look, main_before, 3));
+        let kept = a.store.load_pictures(&id);
+        assert_eq!((kept[0].look.as_str(), kept[0].variants.len(), kept[0].bytes.len()), (alt_look.id(), 3, alt_bytes));
+        assert_eq!(kept.len(), 2, "the story's picture lines are the main pictures only");
+        // opened later: the chosen main and the variants come back
+        a.new_story(&cx);
+        a.open_saved(&id, false, &cx);
+        assert_eq!((a.pics[0].look, a.pics[0].alts.len()), (alt_look, 3));
+        // export: the chosen main pictures only, or every variant
+        a.do_export(0, None);
+        let one = String::from_utf8(a.take_host_save().unwrap().1).unwrap();
+        a.do_export(3, None);
+        let all = String::from_utf8(a.take_host_save().unwrap().1).unwrap();
+        assert_eq!(one.matches("<img").count(), 2);
+        assert_eq!(all.matches("<img").count(), 8);
+        // delete one extra picture, then keep only the chosen
+        click(&mut a, &cx, T_ALT_DEL);
+        assert_eq!(a.pics[0].alts.len(), 2);
+        click(&mut a, &cx, T_KEEP_ONLY);
+        assert!(a.pics.iter().all(|p| p.alts.is_empty()) && a.store.load_pictures(&id).iter().all(|p| p.variants.is_empty()));
+        let dir = a.store.story_dir(&id).unwrap();
+        assert!(!dir.join("pics/01-v1.png").exists() && dir.join("pics/01.png").is_file());
+        // draw another in a style on demand: one more picture, the others untouched
+        let before = fake.count();
+        click(&mut a, &cx, T_ALT_MORE);
+        until(&mut a, &cx, "the extra picture", |a| a.pics[0].alts.len() == 1 && a.alt_running.is_none());
+        assert_eq!((fake.count(), a.pics[1].alts.len()), (before + 1, 0));
+    }
+
+    #[test]
+    fn tales_picture_the_job_is_estimated_first_and_asks_when_long_and_the_caps_stop_it_cleanly() {
+        let (mut a, cx, fake) = with_servers("tales-confirm", &[("home", false, &[("SD-Turbo", 2.0, 512, 4, true)])]);
+        a.confirm_secs = 1.0;
+        click(&mut a, &cx, T_STYLE + 1);
+        click(&mut a, &cx, T_PERSTYLE);
+        write_story(&mut a, &cx, "a fox");
+        assert!(a.held && fake.count() == 0, "a long job waits for the yes");
+        let say = a.convo.iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
+        assert!(say.contains("2 scenes x 2 styles x 2 each = 8 pictures") && say.contains("an estimate, not measured") && say.contains("\"No pictures\" to cancel"), "{say}");
+        let (g, _) = draw(&mut a, &cx, 1280, 720, 0);
+        assert!(g.hits.iter().any(|h| h.label == "Make the pictures") && g.hits.iter().any(|h| h.label == "No pictures"));
+        click(&mut a, &cx, T_PICS_GO);
+        until(&mut a, &cx, "all eight", |a| fake.count() == 8 && all_pictures_ready(a) && a.alt_jobs.is_empty() && a.alt_running.is_none());
+        // a short job does not ask
+        let (mut b, cx2, _f) = with_servers("tales-noask", &[("home", false, &[("SD-Turbo", 2.0, 512, 4, true)])]);
+        write_story(&mut b, &cx2, "a fox");
+        assert!(!b.held);
+        // the cap: counting every variant; when it would be passed the rest stops, nothing is dropped
+        until(&mut b, &cx2, "the pictures", all_pictures_ready);
+        b.set_pic(|o| o.toggle_style(illus::Look::Anime));
+        b.alt_jobs.push_back(AltJob { idx: 0, look: illus::Look::Anime, n: 0 });
+        b.alt_jobs.push_back(AltJob { idx: 1, look: illus::Look::Anime, n: 0 });
+        let filler = Alt { look: illus::Look::Pencil, seed: None, provider: String::new(), model: String::new(), size: String::new(), ms: 0, ext: "png".into(), bytes: Arc::new(vec![0u8; illus::MAX_STORY_BYTES as usize - 10]), prompt: String::new(), key: 1 };
+        b.pics[0].alts.push(filler);
+        assert!(b.cap_error_alt(1000).unwrap_err().contains("this story's pictures"), "extra pictures count towards the story's limit");
+        b.alt_running = Some(0);
+        let out = PicOut { bytes: tiny_png(), ext: "png".into(), prompt: "p".into(), how: "image".into(), who: "SD-Turbo".into(), note: None, log: String::new(), sheet: None, setting: None, size: "8x8".into(), made: None };
+        b.pic_tx.send(PicMsg { gen: b.pic_gen, alt: Some(AltJob { idx: 0, look: illus::Look::Anime, n: 0 }), idx: 0, res: Ok(out), events: vec![], missing: None }).unwrap();
+        b.handle(&Event::Tick, &cx2);
+        assert!(b.alt_jobs.is_empty() && b.alt_running.is_none(), "the job stopped");
+        assert_eq!(b.pics[0].alts.len(), 1, "nothing that exists was dropped, nothing was added");
+        assert!(b.note.as_ref().is_some_and(|n| n.0.starts_with("Stopped:") && n.0.contains("are all still there")), "{:?}", b.note);
+        assert!(b.pic_log_events().iter().any(|e| e.kind == plk::NOT_KEPT && e.decision.contains("were stopped")));
+    }
+
+    #[test]
+    fn tales_picture_an_old_story_opens_with_its_one_picture_as_main_and_the_choices_of_the_story() {
+        let t = Teller::new(STORY);
+        let (mut a, cx, home) = make("tales-old-story", &t);
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the drawings", all_pictures_ready);
+        click(&mut a, &cx, T_SAVE);
+        let id = a.saved_id().unwrap();
+        // an index written before variants existed has no such keys
+        let idx = home.join(format!("Stories/{id}/pics/index.json"));
+        let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&idx).unwrap()).unwrap();
+        let mut j = j;
+        for p in j["pics"].as_array_mut().unwrap() {
+            for k in ["variants", "look", "seed", "provider", "model", "ms"] {
+                p.as_object_mut().unwrap().remove(k);
+            }
+        }
+        std::fs::write(&idx, j.to_string()).unwrap();
+        let _ = std::fs::remove_file(home.join(format!("Stories/{id}/picture-options.json")));
+        a.new_story(&cx);
+        a.open_saved(&id, false, &cx);
+        let b = &a;
+        assert!(!b.pics.is_empty() && b.pics.iter().all(|p| p.alts.is_empty() && p.state == PicState::Ready), "one picture each, the main one");
+        assert_eq!(b.story_opts.pic.styles_list(), vec![illus::Look::Storybook], "the defaults for a story saved before the choices");
+    }
+
+    #[test]
+    fn tales_illustrations_can_be_cancelled_regenerated_and_deleted_one_by_one() {
+        let (mut a, cx, _home, _t, fake) = with_images("tales-illus-cancel", 400, false);
+        a.test_memory = Some(lots_of_memory());
+        write_story(&mut a, &cx, "a fox");
+        let words = a.story.words();
+        until(&mut a, &cx, "the first picture to be asked for", |_| fake.count() >= 1);
+        let (g, _) = draw(&mut a, &cx, 1280, 720, 0);
+        assert!(g.hits.iter().any(|h| h.label.starts_with("Cancel pictures")), "progress and a cancel button while pictures are made");
+        click(&mut a, &cx, T_PICS_CANCEL);
+        assert!(a.pics.iter().all(|p| p.state == PicState::Failed("cancelled".into())));
+        assert_eq!(a.story.words(), words, "the text is untouched");
+        std::thread::sleep(Duration::from_millis(600));
+        a.handle(&Event::Tick, &cx);
+        assert!(a.pics.iter().all(|p| matches!(p.state, PicState::Failed(_))), "the late answer is ignored");
+        assert_eq!(fake.count(), 1, "the waiting picture was never started");
+        // try again (regenerate) works, then delete removes one picture
+        click(&mut a, &cx, T_PIC_REDO);
+        until(&mut a, &cx, "the picture again", |a| a.pics[0].state == PicState::Ready);
+        let before = fake.count();
+        click(&mut a, &cx, T_PIC_REDO);
+        until(&mut a, &cx, "a second drawing of the same picture", |a| a.pics[0].state == PicState::Ready && fake.count() > before);
+        click(&mut a, &cx, T_PIC_REDO + 1);
+        until(&mut a, &cx, "the other picture", all_pictures_ready);
+        click(&mut a, &cx, T_SAVE);
+        let id = a.saved_id().unwrap();
+        assert_eq!(a.store.load_pictures(&id).len(), 2);
+        click(&mut a, &cx, T_PIC_DELETE);
+        assert_eq!(a.pics.len(), 1);
+        assert_eq!(a.store.load_pictures(&id).len(), 1, "gone from the story's folder too");
+        assert_eq!(a.story.words(), words);
+    }
+
+    #[test]
+    fn tales_illustrations_failure_and_low_memory_leave_the_text_and_wait_for_the_person() {
+        // the picture model fails and drawings are not allowed to take over: placeholders with the reason, text kept
+        let (mut a, cx, _home, _t, fake) = with_images("tales-illus-fail", 0, true);
+        a.test_memory = Some(lots_of_memory());
+        a.opts.drawing = st::DrawingMode::Image;
+        write_story(&mut a, &cx, "a fox");
+        let words = a.story.words();
+        until(&mut a, &cx, "the failures", |a| a.pics.iter().all(|p| matches!(p.state, PicState::Failed(_))));
+        assert!(fake.count() >= 1 && a.story.words() == words && a.error.is_none());
+        // low memory: no picture job starts at all, and it says so
+        let (mut b, cx2, _h, _t, fake2) = with_images("tales-illus-mem", 0, false);
+        b.test_memory = Some(iyakki_agent::sysinfo::Memory { total: 8 << 30, available: 200 << 20, swap_total: 0, swap_free: 0 });
+        write_story(&mut b, &cx2, "a fox");
+        until(&mut b, &cx2, "the pictures to wait", |b| b.pics.iter().all(|p| matches!(p.state, PicState::Failed(_))));
+        assert_eq!(fake2.count(), 0, "no request while the machine is short of memory");
+        let PicState::Failed(why) = b.pics[0].state.clone() else { unreachable!() };
+        assert!(why.contains("Not enough free memory") && why.contains("200 MB free"), "{why}");
+        assert!(!b.story.is_empty() && b.error.is_none(), "the text is kept");
+        // memory comes back: Try again draws it
+        b.test_memory = Some(lots_of_memory());
+        click(&mut b, &cx2, T_PIC_REDO);
+        until(&mut b, &cx2, "the picture", |b| b.pics[0].state == PicState::Ready);
+        assert_eq!(fake2.count(), 1);
+    }
+
+    #[test]
+    fn tales_illustrations_respect_the_per_story_and_global_caps() {
+        let t = Teller::new(STORY);
+        let (mut a, cx, _) = make("tales-illus-caps", &t);
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the drawings", all_pictures_ready);
+        assert!(a.cap_error(0, 1000).is_ok());
+        // a story that already holds almost the cap refuses the next big picture, with a reason
+        a.pics[1].bytes = Some(Arc::new(vec![0u8; illus::MAX_STORY_BYTES as usize - 10]));
+        let e = a.cap_error(0, 1000).unwrap_err();
+        assert!(e.contains("this story's pictures") && e.contains("limit"), "{e}");
+        // replacing the big one is fine
+        assert!(a.cap_error(1, 1000).is_ok());
     }
 
     fn written_and_corrected(tag: &str) -> (StoryApp, AppCx, PathBuf, Arc<Teller>, String) {

@@ -48,9 +48,7 @@ fn settle(a: &mut SettingsApp, cx: &AppCx) {
     panic!("job did not finish");
 }
 fn goto(a: &mut SettingsApp, cx: &AppCx) {
-    while a.tab() != Tab::IndicVoices {
-        key(a, cx, Key::Right);
-    }
+    a.go_to(Tab::IndicVoices);
 }
 fn draw(a: &mut SettingsApp, cx: &AppCx, w: u32, h: u32) -> Gfx {
     let mut g = Gfx::new(w, h);

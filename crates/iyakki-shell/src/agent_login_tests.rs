@@ -493,3 +493,373 @@ fn settle_status_for(cx: &AppCx, agent: &str, want: impl Fn(&State) -> bool) -> 
         }
     }
 }
+
+// ------------------------------------------------------------------------------------------------ the QR size
+
+use crate::agent_login_scan::tests as scantest;
+
+/// The QR size is remembered for the session in one place, so the tests that change it take turns and put it back.
+static QR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn the_qr_layout_math_is_at_least_twice_as_big_when_asked_and_leaves_room_for_the_text() {
+    for s in [0.7f32, 1.0, 1.5, 2.0] {
+        let (w, h) = (1280.0 * s.max(1.0), 720.0 * s.max(1.0));
+        let (pw, ph) = ((1240.0 * s).min(w - 40.0 * s), (860.0 * s).min(h - 16.0 * s));
+        // today's sizes
+        let one = qr_layout(s, 1280.0, 600.0 * s, 980.0 * s, false, false);
+        assert_eq!((one.side, one.relay, one.big), (250.0 * s, 0.0, false));
+        let two = qr_layout(s, 1280.0, 600.0 * s, 980.0 * s, true, false);
+        assert_eq!((two.side, two.relay), (170.0 * s, 170.0 * s));
+        // a wide screen: a bit larger by default, not twice
+        let wide = qr_layout(s, 2560.0, 680.0 * s, 980.0 * s, false, false);
+        assert!(wide.side > one.side && wide.side < 1.5 * one.side, "{s}: {wide:?}");
+        assert_eq!(qr_layout(s, WIDE_SCREEN, 600.0 * s, 980.0 * s, false, false).side, one.side, "exactly 2000 is not wider than 2000");
+        // asked for: at least twice the normal size when the screen has the height, nearly the whole dialog height, text keeps room
+        let big = qr_layout(s, 1280.0, ph, pw, false, true);
+        assert!(big.big && big.relay == 0.0);
+        if ph >= 624.0 * s {
+            assert!(big.side >= 2.0 * one.side, "{s}: {} vs {}", big.side, one.side);
+        }
+        assert!(big.side <= ph - 124.0 * s + 0.01 || big.side == 250.0 * s, "{s}: fits the dialog height with its caption and buttons");
+        assert!(big.side >= 0.8 * (ph - 124.0 * s) || ph < 624.0 * s, "{s}: nearly the whole height");
+        assert!(pw - 56.0 * s - big.side >= 350.0 * s - 0.01 || big.side == 250.0 * s, "{s}: room left for the text");
+        // with the second code, the big view still shows one code big (the other is one button away)
+        assert_eq!(qr_layout(s, 1280.0, ph, pw, true, true).side, big.side);
+    }
+    // a dialog too small for twice the size still gives the normal size at least
+    assert_eq!(qr_layout(1.0, 800.0, 300.0, 600.0, false, true).side, 250.0);
+}
+
+#[test]
+fn qr_modules_are_whole_pixels_with_a_quiet_zone_of_four_on_white() {
+    for size in [21usize, 25, 29, 41, 57, 77] {
+        for side in [120.0f32, 250.0, 340.5, 500.0, 580.0, 900.0] {
+            let (m, total) = qr_metrics(side, size);
+            assert!(m >= 1.0 && m == m.floor(), "{size} in {side}: module {m} is whole pixels");
+            assert_eq!(total, m * (size + 8) as f32, "the white square holds the symbol and 4 modules on every side");
+            assert!(total <= side.max(m * (size + 8) as f32) && side - total < (size + 8) as f32 || m == 1.0, "{size} in {side}: as big as whole pixels allow");
+        }
+    }
+    // drawn: pixel by pixel
+    let q = iyakki_agent::qr::encode(b"https://example.test/login/abc").unwrap();
+    let mut g = Gfx::new(700, 700);
+    g.clear(rgb(40, 40, 60));
+    let sq = draw_qr(&mut g, R::new(13.0, 11.0, 600.0, 600.0), &q);
+    let (m, total) = qr_metrics(600.0, q.size);
+    assert_eq!((sq.w, sq.h, sq.x, sq.y), (total, total, sq.x.round(), 11.0), "a whole-pixel square");
+    let px = |x: f32, y: f32| {
+        let p = g.pm.pixel(x as u32, y as u32).unwrap();
+        (p.red(), p.green(), p.blue())
+    };
+    let white = (255, 255, 255);
+    // the quiet zone: four modules of white all around (the first and the last pixel of it), and the table outside
+    for k in [0.0, m * 4.0 - 1.0] {
+        assert_eq!(px(sq.x + k, sq.y + k), white);
+        assert_eq!(px(sq.x + total - 1.0 - k, sq.y + total - 1.0 - k), white);
+    }
+    assert_ne!(px(sq.x - 1.0, sq.y + 5.0), white);
+    assert_ne!(px(sq.x + 5.0, sq.y + total), white);
+    // every module is one flat square of its own colour from edge to edge: nothing is blurred
+    for my in 0..q.size {
+        for mx in 0..q.size {
+            let want = if q.get(mx, my) { (0, 0, 0) } else { white };
+            let (x0, y0) = (sq.x + (mx + 4) as f32 * m, sq.y + (my + 4) as f32 * m);
+            for (dx, dy) in [(0.0, 0.0), (m - 1.0, 0.0), (0.0, m - 1.0), (m - 1.0, m - 1.0), ((m / 2.0).floor(), (m / 2.0).floor())] {
+                assert_eq!(px(x0 + dx, y0 + dy), want, "module {mx},{my}");
+            }
+        }
+    }
+}
+
+fn big_qr_dialog(tag: &str) -> (AppCx, LoginModal, std::path::PathBuf) {
+    let (cx, d, tools) = setup_picky(tag);
+    let home = d.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut m = LoginModal::new(extagent::CLAUDE_CODE).with_home(&home);
+    m.handle(&Event::Key(Key::Enter), &cx);
+    pump(&mut m, &cx, "the prompt", |m| m.snapshot().is_some_and(|s| s.url.is_some() && s.wants_input));
+    (cx, m, tools)
+}
+
+#[test]
+fn the_bigger_qr_button_and_key_toggle_it_and_the_choice_is_remembered_for_the_session() {
+    let _lock = QR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    set_qr_big(false);
+    let (cx, mut m, _t) = big_qr_dialog("alog-big1");
+    let g = draw(&mut m);
+    let normal = m.last_qr.expect("a QR was drawn");
+    let modules = m.qr.as_ref().unwrap().1.as_ref().unwrap().size;
+    let (_, total) = qr_metrics(250.0, modules);
+    assert_eq!((normal.w, normal.h), (total, total), "today's size at 1280x720");
+    let bigger = hit_label(&g, Event::Tab(T_BIGGER)).expect("a clearly labelled button");
+    assert!(bigger.contains("bigger") || g.hits.iter().any(|h| h.ev == Event::Tab(T_BIGGER)), "{bigger}");
+    // the key
+    m.handle(&Event::Key(Key::Ctrl('b')), &cx);
+    assert!(qr_big());
+    let g = draw(&mut m);
+    let big = m.last_qr.unwrap();
+    assert!(big.w >= 2.0 * normal.w - 2.0 * 45.0, "at least about twice as big: {} vs {}", big.w, normal.w);
+    assert!(big.h <= 704.0 && big.y >= 0.0 && big.y + big.h <= 720.0, "inside the screen: {big:?}");
+    assert!(g.hits.iter().any(|h| h.ev == Event::Tab(T_BIGGER)), "the way back is there");
+    // the text controls are all still there and on screen
+    for (ev, what) in [(Tab(T_COPY_URL), "Copy address"), (Tab(T_COPY_CODE), "Copy code"), (Tab(T_SEND), "Send"), (Tab(T_PASTE), "Paste"), (Tab(T_CANCEL), "Cancel"), (Tab(T_SCAN), "Scan with camera"), (Tab(T_OPEN), "Open in browser")] {
+        if matches!(ev, Event::Tab(T_COPY_CODE)) {
+            continue; // this program shows no device code
+        }
+        let h = g.hits.iter().find(|h| h.ev == ev).unwrap_or_else(|| panic!("{what} is missing in the big view"));
+        assert!(h.rect.x >= 0.0 && h.rect.y >= 0.0 && h.rect.x + h.rect.w <= 1280.0 && h.rect.y + h.rect.h <= 720.0, "{what} off screen: {:?}", h.rect);
+        // and never under the big code
+        let (r, q) = (h.rect, big);
+        assert!(r.x + r.w <= q.x || r.x >= q.x + q.w || r.y + r.h <= q.y || r.y >= q.y + q.h, "{what} {:?} is covered by the QR {q:?}", r);
+    }
+    // a new dialog starts big: the choice outlives the dialog
+    m.handle(&Event::Key(Key::Esc), &cx);
+    pump(&mut m, &cx, "the end", |m| m.snapshot().is_some_and(|s| s.phase.finished()));
+    let (cx2, mut m2, _t2) = big_qr_dialog("alog-big2");
+    draw(&mut m2);
+    assert!(m2.last_qr.unwrap().w >= 2.0 * normal.w - 2.0 * 45.0, "remembered");
+    // the button toggles it back
+    m2.handle(&Event::Tab(T_BIGGER), &cx2);
+    assert!(!qr_big());
+    draw(&mut m2);
+    assert_eq!(m2.last_qr.unwrap().w, normal.w);
+    m2.handle(&Event::Key(Key::Esc), &cx2);
+    set_qr_big(false);
+}
+
+use Event::Tab;
+
+#[test]
+fn with_the_phone_relay_the_big_view_switches_between_the_two_codes_and_both_stay_reachable() {
+    let _lock = QR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    set_qr_big(false);
+    let (cx, mut m, _t) = big_qr_dialog("alog-big3");
+    m.set_relay_for_demo("https://192.168.1.5:8443/login/0123456789abcdef0123456789abcdef");
+    // normal view: both are drawn side by side and there is no switch
+    let g = draw(&mut m);
+    assert!(!g.hits.iter().any(|h| h.ev == Event::Tab(T_QR_NEXT)));
+    m.handle(&Event::Key(Key::Ctrl('b')), &cx);
+    let g = draw(&mut m);
+    assert!(g.hits.iter().any(|h| h.ev == Event::Tab(T_QR_NEXT)), "a way to the second code");
+    let first = m.last_qr.unwrap();
+    assert!(!m.show_relay);
+    m.handle(&Event::Key(Key::Ctrl('n')), &cx);
+    assert!(m.show_relay);
+    draw(&mut m);
+    let second = m.last_qr.unwrap();
+    assert!(second.w >= 2.0 * 250.0 - 2.0 * 45.0, "the second code is big too: {}", second.w);
+    assert_ne!(first, second, "a different symbol, a different size of white square");
+    m.handle(&Event::Tab(T_QR_NEXT), &cx);
+    assert!(!m.show_relay);
+    m.handle(&Event::Key(Key::Esc), &cx);
+    set_qr_big(false);
+}
+
+#[test]
+fn the_dialog_draws_in_the_big_view_at_small_and_large_sizes_and_on_wide_screens() {
+    let _lock = QR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (cx, mut m, _t) = big_qr_dialog("alog-big4");
+    m.set_relay_for_demo("https://192.168.1.5:8443/login/0123456789abcdef0123456789abcdef");
+    for big in [false, true] {
+        set_qr_big(big);
+        for (w, h, sc) in [(800u32, 600u32, 0.7f32), (1280, 720, 1.0), (1920, 1080, 1.5), (2560, 1440, 1.5), (3840, 2160, 2.0)] {
+            let mut g = Gfx::new(w, h);
+            g.clear(rgb(0, 0, 0));
+            m.render(&mut g, R::new(0.0, 0.0, w as f32, h as f32), sc, 5);
+            for want in [T_CANCEL, T_SEND, T_PASTE, T_SCAN, T_BIGGER] {
+                assert!(g.hits.iter().any(|x| x.ev == Event::Tab(want)), "{want} missing at {w}x{h} big={big}");
+            }
+            for hit in g.hits.iter().filter(|x| x.label != "backdrop") {
+                assert!(hit.rect.x >= -1.0 && hit.rect.y >= -1.0 && hit.rect.x + hit.rect.w <= w as f32 + 1.0 && hit.rect.y + hit.rect.h <= h as f32 + 1.0, "{} is off screen at {w}x{h} big={big}: {:?}", hit.label, hit.rect);
+            }
+            let q = m.last_qr.unwrap();
+            assert!(q.x >= 0.0 && q.y >= 0.0 && q.x + q.w <= w as f32 && q.y + q.h <= h as f32, "the QR is on screen at {w}x{h}: {q:?}");
+            if w > 2000 && !big {
+                let narrow = (qr_layout(sc, 1280.0, 0.0, 0.0, true, false).side, qr_layout(sc, w as f32, 0.0, 0.0, true, false).side);
+                assert!(narrow.1 > narrow.0, "wide screens default to a larger code");
+            }
+        }
+    }
+    set_qr_big(false);
+    m.handle(&Event::Key(Key::Esc), &cx);
+}
+
+// ------------------------------------------------------------------------------------------------ the camera scan in the dialog
+
+fn scan_dialog(tag: &str, st: &scantest::Stage, camera: bool, limit: Duration) -> (AppCx, LoginModal, std::path::PathBuf, crate::camera::detect::tests::FakeMachine) {
+    let (cx, d, tools) = setup_picky(tag);
+    let home = d.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let machine = crate::camera::detect::tests::FakeMachine::new(&format!("dlg-{tag}"));
+    if camera {
+        machine.plug_webcam(0, "FaceTime HD Camera");
+    }
+    let src = crate::agent_login_scan::CamSource::with(machine.presence(), st.opener());
+    let mut m = LoginModal::new(extagent::CLAUDE_CODE).with_home(&home).with_camera(src, limit);
+    m.handle(&Event::Key(Key::Enter), &cx);
+    pump(&mut m, &cx, "the prompt", |m| m.snapshot().is_some_and(|s| s.wants_input));
+    (cx, m, tools, machine)
+}
+
+fn wait_closed(st: &scantest::Stage) {
+    let t0 = Instant::now();
+    while !st.closed.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "the camera was not closed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn scanning_a_qr_code_with_the_camera_fills_in_the_code_and_only_enter_sends_it() {
+    let _lock = QR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    set_qr_big(false);
+    let st = scantest::Stage::new("");
+    let (cx, mut m, tools, _machine) = scan_dialog("alog-scan1", &st, true, Duration::from_secs(60));
+    let g = draw(&mut m);
+    assert!(g.hits.iter().any(|h| h.ev == Event::Tab(T_SCAN)), "the button is in the code step");
+    // the key asks; the camera is still off and the card asks first
+    m.handle(&Event::Key(Key::Ctrl('k')), &cx);
+    assert_eq!(m.scan().step(), crate::agent_login_scan::Step::Asking);
+    assert_eq!(st.opens.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let g = draw(&mut m);
+    for want in [T_SCAN_ALLOW, T_SCAN_DENY] {
+        assert!(g.hits.iter().any(|h| h.ev == Event::Tab(want)));
+    }
+    assert!(!g.hits.iter().any(|h| h.ev == Event::Tab(T_SEND) || h.ev == Event::Tab(T_PASTE)), "only the question is clickable");
+    // a no
+    m.handle(&Event::Tab(T_SCAN_DENY), &cx);
+    assert_eq!((m.scan().on(), st.opens.load(std::sync::atomic::Ordering::SeqCst)), (false, 0));
+    assert!(m.running(), "the sign-in goes on");
+    // a yes
+    m.handle(&Event::Tab(T_SCAN), &cx);
+    m.handle(&Event::Tab(T_SCAN_ALLOW), &cx);
+    assert!(m.scan().on());
+    let g = draw(&mut m);
+    assert!(g.hits.iter().any(|h| h.ev == Event::Tab(T_SCAN_STOP)), "a Stop button");
+    assert!(!g.hits.iter().any(|h| h.ev == Event::Tab(T_SEND)), "the dialog behind is not clickable while the camera is on");
+    // a wrong thing first: an address is refused and nothing is filled in or opened
+    st.show("https://claude.example.test/oauth/authorize?code=true&state=abc");
+    let t0 = Instant::now();
+    while m.scan().said().is_none() {
+        m.tick(&cx);
+        assert!(t0.elapsed() < Duration::from_secs(30), "no refusal");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert_eq!(m.field_text(), "", "an address never goes into the field");
+    assert!(m.scan().on());
+    draw(&mut m);
+    // then the right code
+    st.show(scantest::CODE);
+    pump(&mut m, &cx, "the scanned code", |m| !m.field_text().is_empty());
+    assert_eq!(m.field_text(), scantest::CODE);
+    assert!(!m.scan().on(), "the camera is off as soon as the code is read");
+    wait_closed(&st);
+    assert!(!tools.join("state/received").exists(), "nothing is sent by itself");
+    let g = draw(&mut m);
+    assert!(g.hits.iter().any(|h| h.ev == Event::Tab(T_SEND)), "the dialog is back");
+    // the person checks it and presses Enter
+    m.handle(&Event::Key(Key::Enter), &cx);
+    pump(&mut m, &cx, "the end", |m| m.snapshot().is_some_and(|s| s.phase.finished()));
+    assert_eq!(m.snapshot().unwrap().phase, Phase::Succeeded);
+    assert!(std::fs::read_to_string(tools.join("state/received")).unwrap().lines().any(|l| l == scantest::CODE));
+    let a = audit_text(&cx);
+    assert!(!a.contains("AbCdEfGh") && !a.contains("claude.example") && !a.to_lowercase().contains("camera") && !a.contains("qr"), "the audit holds only the facts of the login: {a}");
+}
+
+#[test]
+fn escape_closing_and_hiding_the_dialog_all_turn_the_camera_off() {
+    let st = scantest::Stage::new("");
+    // Esc: the camera, not the sign-in
+    let (cx, mut m, _t, _machine) = scan_dialog("alog-scan2", &st, true, Duration::from_secs(60));
+    m.handle(&Event::Key(Key::Ctrl('k')), &cx);
+    m.handle(&Event::Key(Key::Esc), &cx);
+    assert!(!m.scan().on() && m.scan().step() == crate::agent_login_scan::Step::Off, "Esc at the question says no");
+    assert!(m.running(), "and does not cancel the sign-in");
+    assert_eq!(st.opens.load(std::sync::atomic::Ordering::SeqCst), 0);
+    m.handle(&Event::Tab(T_SCAN), &cx);
+    m.handle(&Event::Key(Key::Enter), &cx);
+    assert!(m.scan().on(), "Enter at the question says yes");
+    m.handle(&Event::Key(Key::Esc), &cx);
+    assert!(!m.scan().on(), "Esc turns the camera off");
+    wait_closed(&st);
+    assert!(m.running(), "the sign-in is still going");
+    // hiding the dialog (the browser tile opens) turns it off
+    m.handle(&Event::Tab(T_SCAN), &cx);
+    m.handle(&Event::Tab(T_SCAN_ALLOW), &cx);
+    assert!(m.scan().on());
+    m.hide();
+    assert!(!m.scan().on());
+    wait_closed(&st);
+    m.show_hidden_again_for_shell();
+    // closing the dialog (Cancel ends the program, then Close) while it is on
+    m.handle(&Event::Tab(T_SCAN), &cx);
+    m.handle(&Event::Tab(T_SCAN_ALLOW), &cx);
+    assert!(m.scan().on());
+    drop(m);
+    wait_closed(&st);
+    assert_eq!(st.opens.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[test]
+fn the_camera_turns_off_at_the_time_limit_when_the_program_ends_and_with_no_camera_the_person_is_told() {
+    // the time limit, in the dialog
+    let st = scantest::Stage::new("");
+    let (cx, mut m, _t, _machine) = scan_dialog("alog-scan3", &st, true, Duration::from_millis(600));
+    m.handle(&Event::Tab(T_SCAN), &cx);
+    m.handle(&Event::Tab(T_SCAN_ALLOW), &cx);
+    let t0 = Instant::now();
+    while m.scan().on() {
+        m.tick(&cx);
+        draw(&mut m);
+        assert!(t0.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert!(m.scan().said().unwrap().0.contains("No code was read"));
+    let g = draw(&mut m);
+    assert!(g.hits.iter().any(|h| h.ev == Event::Tab(T_SEND)), "the dialog is back, with the message under the field");
+    wait_closed(&st);
+    // the program ends while the camera is on (Cancel is pressed elsewhere): the camera goes with it
+    let st2 = scantest::Stage::new("");
+    let (cx2, mut m2, _t2, _m2) = scan_dialog("alog-scan4", &st2, true, Duration::from_secs(60));
+    m2.handle(&Event::Tab(T_SCAN), &cx2);
+    m2.handle(&Event::Tab(T_SCAN_ALLOW), &cx2);
+    assert!(m2.scan().on());
+    m2.sess.as_ref().unwrap().cancel();
+    pump(&mut m2, &cx2, "the end", |m| !m.scan().on());
+    wait_closed(&st2);
+    // no camera
+    let st3 = scantest::Stage::new(scantest::CODE);
+    let (cx3, mut m3, _t3, _m3) = scan_dialog("alog-scan5", &st3, false, Duration::from_secs(60));
+    m3.handle(&Event::Key(Key::Ctrl('k')), &cx3);
+    assert_eq!(m3.scan().step(), crate::agent_login_scan::Step::Off);
+    assert!(m3.scan().said().unwrap().0.contains("no camera"));
+    let g = draw(&mut m3);
+    assert!(g.hits.iter().any(|h| h.ev == Event::Tab(T_SEND)), "no card: the dialog stays usable");
+    assert_eq!(st3.opens.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // the camera card draws at small and large sizes with its picture
+    let st4 = scantest::Stage::new(scantest::CODE);
+    *st4.text.lock().unwrap() = String::new();
+    let (cx4, mut m4, _t4, _m4) = scan_dialog("alog-scan6", &st4, true, Duration::from_secs(60));
+    m4.handle(&Event::Tab(T_SCAN), &cx4);
+    for (w, h, sc) in [(800u32, 600u32, 0.7f32), (1280, 720, 1.0), (1920, 1080, 1.5)] {
+        let mut g = Gfx::new(w, h);
+        g.clear(rgb(0, 0, 0));
+        m4.render(&mut g, R::new(0.0, 0.0, w as f32, h as f32), sc, 5);
+        assert!(g.hits.iter().any(|x| x.ev == Event::Tab(T_SCAN_ALLOW)), "the question at {w}x{h}");
+    }
+    m4.handle(&Event::Tab(T_SCAN_ALLOW), &cx4);
+    let t0 = Instant::now();
+    while m4.scan().preview().is_none() {
+        assert!(t0.elapsed() < Duration::from_secs(20), "no picture");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    for (w, h, sc) in [(800u32, 600u32, 0.7f32), (1280, 720, 1.0), (1920, 1080, 1.5)] {
+        let mut g = Gfx::new(w, h);
+        g.clear(rgb(0, 0, 0));
+        m4.render(&mut g, R::new(0.0, 0.0, w as f32, h as f32), sc, 5);
+        let stop = g.hits.iter().find(|x| x.ev == Event::Tab(T_SCAN_STOP)).unwrap_or_else(|| panic!("Stop at {w}x{h}"));
+        assert!(stop.rect.x >= 0.0 && stop.rect.y >= 0.0 && stop.rect.x + stop.rect.w <= w as f32 && stop.rect.y + stop.rect.h <= h as f32);
+    }
+    m4.handle(&Event::Key(Key::Esc), &cx4);
+}

@@ -3,6 +3,7 @@
 //! the camera firmware from a file the person supplies), Remove, Why. It only draws and reports what was asked
 //! (`Out`); the store tile does the installing through the normal review (`iyakki_agent::store::drivers`, docs/MAC-HARDWARE.md).
 
+use crate::safeclamp::SafeClamp;
 use iyakki_agent::store::drivers::Drivers;
 use iyakki_drivers::{apply, known, Availability, Delivery, Status};
 
@@ -195,7 +196,7 @@ impl Pane {
             Event::Tab(WHY_REMOVE) => return self.act(self.why?, ACT_REMOVE),
             Event::Tab(n) if (BASE..BASE + 400).contains(n) => return self.act((*n - BASE) / 4, (*n - BASE) % 4),
             Event::Row(i) if self.why.is_none() => self.open_why(*i),
-            Event::Scroll(d) if self.why.is_none() => self.sel = (self.sel as i32 - *d).clamp(0, self.rows.len().saturating_sub(1) as i32) as usize,
+            Event::Scroll(d) if self.why.is_none() => self.sel = (self.sel as i32 - *d).clamp_safe(0, self.rows.len().saturating_sub(1) as i32) as usize,
             Event::Key(k) => match (k, self.why) {
                 (Key::Esc | Key::Left, Some(_)) => self.why = None,
                 (Key::Up, None) => self.sel = self.sel.saturating_sub(1),

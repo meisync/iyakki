@@ -4,6 +4,7 @@
 //! Wide windows (1280x720 and up) show a workspace rail, the file tree, the editor with a bottom panel, and the chat side by
 //! side. Narrow ones (about 1024x600) show one pane at a time with a strip of pane tabs.
 
+use crate::safeclamp::SafeClamp;
 use serde::{Deserialize, Serialize};
 
 use crate::ui::R;
@@ -178,17 +179,17 @@ impl Prefs {
         match d {
             Div::Side => {
                 let max = (body_w - if self.chat_open { self.chat_w * s } else { 0.0 } - MIN_MAIN * s).max(MIN_SIDEBAR * s);
-                self.sidebar_w = ((pos - body_x).clamp(MIN_SIDEBAR * s, max)) / s;
+                self.sidebar_w = ((pos - body_x).clamp_safe(MIN_SIDEBAR * s, max)) / s;
             }
             Div::Chat => {
                 let right = body_x + body_w;
                 let max = (body_w - if self.sidebar_open { self.sidebar_w * s } else { 0.0 } - MIN_MAIN * s).max(MIN_CHAT * s);
-                self.chat_w = ((right - pos).clamp(MIN_CHAT * s, max)) / s;
+                self.chat_w = ((right - pos).clamp_safe(MIN_CHAT * s, max)) / s;
             }
             Div::Bottom => {
                 let bottom = area.y + area.h - m.status_h * s;
                 let max = (area.h - m.top_h * s - m.status_h * s - MIN_MAIN_H * s).max(MIN_BOTTOM * s);
-                self.bottom_h = ((bottom - pos).clamp(MIN_BOTTOM * s, max)) / s;
+                self.bottom_h = ((bottom - pos).clamp_safe(MIN_BOTTOM * s, max)) / s;
             }
         }
     }

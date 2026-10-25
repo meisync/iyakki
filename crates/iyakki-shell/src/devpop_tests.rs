@@ -183,6 +183,36 @@ fn a_mac_mini_gets_the_reason_from_the_driver_list() {
 }
 
 #[test]
+fn a_t2_mac_without_apples_firmware_is_told_which_files_it_needs_and_leads_to_the_mac_drivers_page() {
+    let r = tmp("t2");
+    std::fs::create_dir_all(r.join("sys/class")).unwrap();
+    let dr = tmp("t2-drv");
+    // a Mac mini 2018: the Wi-Fi chip is there (14e4:4464), nothing is loaded for it (the hold-back), no Bluetooth controller
+    for (rel, c) in [("sys/class/dmi/id/sys_vendor", "Apple Inc.\n"), ("sys/class/dmi/id/product_name", "Macmini8,1\n"), ("proc/sys/kernel/osrelease", "6.12.112\n"), ("proc/modules", "apple_bce 1 0 - Live 0x0\n"), ("sys/bus/pci/devices/0000:02:00.0/vendor", "0x14e4\n"), ("sys/bus/pci/devices/0000:02:00.0/device", "0x4464\n")] {
+        put(&dr, rel, c);
+    }
+    let mut p = probe_at(&r);
+    p.drivers = Some(iyakki_agent::store::drivers::Drivers::for_data(&dr.join("data")).with_roots(iyakki_drivers::Roots { sys: dr.join("sys"), proc: dr.join("proc") }));
+    let s = gather(&p);
+    let bt = item(&s, "Bluetooth");
+    assert!(bt.detail.contains("needs firmware: brcm/BCM.hcd"), "{bt:?}");
+    assert_eq!((bt.level, bt.jump.clone()), (Level::Missing, Jump::MacDrivers));
+    let wifi = item(&s, "Wi-Fi");
+    assert!(wifi.detail.contains("needs firmware: brcm/brcmfmac"), "{wifi:?}");
+    assert_eq!(wifi.jump, Jump::MacDrivers);
+    // the Mini 2014's Wi-Fi (no open driver) still leads to the Store, not to the firmware page
+    let r2 = tmp("mini14");
+    std::fs::create_dir_all(r2.join("sys/class")).unwrap();
+    let dr2 = tmp("mini14-drv");
+    for (rel, c) in [("sys/class/dmi/id/sys_vendor", "Apple Inc.\n"), ("sys/class/dmi/id/product_name", "Macmini7,1\n"), ("proc/sys/kernel/osrelease", "6.12.112\n"), ("sys/bus/pci/devices/0000:03:00.0/vendor", "0x14e4\n"), ("sys/bus/pci/devices/0000:03:00.0/device", "0x43a0\n")] {
+        put(&dr2, rel, c);
+    }
+    let mut p2 = probe_at(&r2);
+    p2.drivers = Some(iyakki_agent::store::drivers::Drivers::for_data(&dr2.join("data")).with_roots(iyakki_drivers::Roots { sys: dr2.join("sys"), proc: dr2.join("proc") }));
+    assert_eq!(item(&gather(&p2), "Wi-Fi").jump, Jump::Drivers);
+}
+
+#[test]
 fn a_computer_with_no_sys_still_answers_and_says_what_it_cannot_see() {
     let r = tmp("mac");
     let mut p = probe_at(&r);
@@ -374,4 +404,371 @@ fn the_sound_row_shows_and_mutes_iyakkis_software_volume_when_it_carries_the_car
     assert_eq!(sound_volume_view(0, None, None, &prefs), ("volume unknown".to_string(), None));
     // the popover cannot change Settings itself: the shell carries this one out
     assert!(run_act(&probe_at(&tmp("softmute")), &Act::ToggleSoundMute).is_err());
+}
+
+/// A Mac mini 2018 in the ROM state: the kernel lists hci0 with an all-zero address; the Bluetooth drivers may be held back.
+struct MiniBt {
+    held: bool,
+    loads: std::sync::Mutex<u32>,
+}
+
+impl Control for MiniBt {
+    fn set_link(&self, _: &str, _: bool) -> Result<(), String> {
+        Err("no".into())
+    }
+    fn ipv4(&self) -> Vec<(String, String)> {
+        vec![]
+    }
+    fn volume(&self, _: u32) -> Option<iyakki_devctl::Volume> {
+        None
+    }
+    fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_devctl::Volume, String> {
+        Err("no".into())
+    }
+    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_devctl::Volume, String> {
+        Err("no".into())
+    }
+    fn dhcp(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn bt_controllers(&self) -> Result<Vec<iyakki_devctl::btview::Controller>, String> {
+        Ok(vec![iyakki_devctl::btview::Controller { index: 0, configured: true, address: "00:00:00:00:00:00".into(), version: Some(6), manufacturer: 15, supported: 0, current: 0, name: String::new() }])
+    }
+    fn bt_held(&self) -> bool {
+        self.held
+    }
+    fn bt_load_anyway(&self) -> Result<String, String> {
+        *self.loads.lock().unwrap() += 1;
+        Ok("Bluetooth: 2 driver file(s) given back".into())
+    }
+}
+
+fn mini_probe(tag: &str, hci: bool, held: bool) -> Probe {
+    let r = tmp(tag);
+    put(&r, "sys/class/dmi/id/product_name", "Macmini8,1\n");
+    if hci {
+        put(&r, "sys/class/bluetooth/hci0/x", "");
+        put(&r, "sys/class/rfkill/rfkill1/name", "hci0\n");
+        put(&r, "sys/class/rfkill/rfkill1/type", "bluetooth\n");
+        put(&r, "sys/class/rfkill/rfkill1/soft", "0\n");
+        put(&r, "sys/class/rfkill/rfkill1/hard", "0\n");
+    }
+    std::fs::create_dir_all(r.join("proc")).unwrap();
+    let mut p = probe_at(&r);
+    p.dev = DeviceEnv { roots: p.dev.roots.clone(), ctl: Arc::new(MiniBt { held, loads: Default::default() }) };
+    p
+}
+
+#[test]
+fn the_popover_shows_the_rom_state_controller_with_its_reason_and_offers_load_anyway_while_held() {
+    let p = mini_probe("mini-hci", true, true);
+    let s = gather(&p);
+    let bt = item(&s, "Bluetooth");
+    assert!(bt.detail.contains("Controller hci0: BCM4364 (ROM state, no firmware file)"), "{}", bt.detail);
+    assert!(bt.detail.contains("no valid address") && bt.detail.contains("powered off") && bt.detail.contains("pairing and audio are not available yet"), "{}", bt.detail);
+    // a Mac controller without its patch file is not an ordinary device row: it says it needs firmware and leads to Store -> Setup
+    assert_eq!(bt.level, Level::Missing);
+    assert!(bt.detail.starts_with(iyakki_devctl::btview::NEEDS_FIRMWARE), "{}", bt.detail);
+    assert_eq!(bt.jump, Jump::Setup("mac-firmware"));
+    assert_eq!(bt.acts, vec![Act::BluetoothLoad], "no bluetoothctl scan offered when the kernel answers; the load button while held");
+    assert_eq!(run_act(&p, &Act::BluetoothLoad).unwrap(), "Bluetooth: 2 driver file(s) given back");
+    // not held any more: no button
+    let s = gather(&mini_probe("mini-hci2", true, false));
+    assert!(item(&s, "Bluetooth").acts.is_empty());
+}
+
+#[test]
+fn with_the_drivers_held_and_no_controller_yet_the_popover_says_so_and_offers_the_button() {
+    let s = gather(&mini_probe("mini-none", false, true));
+    let bt = item(&s, "Bluetooth");
+    assert!(bt.detail.contains("set aside until firmware exists") && bt.detail.contains("ROM state (limited)") && bt.detail.contains("USB Bluetooth adapter is the reliable option"), "{}", bt.detail);
+    assert_eq!(bt.acts, vec![Act::BluetoothLoad]);
+    assert_eq!(Act::BluetoothLoad.label(), "Load");
+    // nothing held and no controller: the old line
+    let s = gather(&mini_probe("mini-none2", false, false));
+    assert!(item(&s, "Bluetooth").detail.starts_with("no adapter found"));
+}
+
+#[test]
+fn a_macbooks_facetime_camera_without_its_firmware_is_a_warning_and_with_the_driver_it_is_listed_by_name() {
+    let r = tmp("facetime");
+    std::fs::create_dir_all(r.join("sys/class")).unwrap();
+    put(&r, "sys/bus/pci/devices/0000:03:00.0/vendor", "0x14e4\n");
+    put(&r, "sys/bus/pci/devices/0000:03:00.0/device", "0x1570\n");
+    let s = gather(&probe_at(&r));
+    let cam = item(&s, "Camera");
+    assert_eq!(cam.level, Level::Warn, "{cam:?}");
+    assert!(cam.detail.contains("FaceTime HD") && cam.detail.contains("Camera firmware"), "{cam:?}");
+    // the driver loaded: its video node (name "Apple Facetime HD") is the camera
+    put(&r, "sys/class/video4linux/video0/name", "Apple Facetime HD\n");
+    let s = gather(&probe_at(&r));
+    let cam = item(&s, "Camera");
+    assert_eq!((cam.level, cam.detail.as_str()), (Level::Ok, "Apple Facetime HD"));
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+/// A controller the kernel lists, as a made-up machine reports it.
+struct OneBt {
+    address: &'static str,
+    manufacturer: u16,
+    file: bool,
+}
+
+impl Control for OneBt {
+    fn set_link(&self, _: &str, _: bool) -> Result<(), String> {
+        Err("no".into())
+    }
+    fn ipv4(&self) -> Vec<(String, String)> {
+        vec![]
+    }
+    fn volume(&self, _: u32) -> Option<iyakki_devctl::Volume> {
+        None
+    }
+    fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_devctl::Volume, String> {
+        Err("no".into())
+    }
+    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_devctl::Volume, String> {
+        Err("no".into())
+    }
+    fn dhcp(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn bt_controllers(&self) -> Result<Vec<iyakki_devctl::btview::Controller>, String> {
+        Ok(vec![iyakki_devctl::btview::Controller { index: 0, configured: true, address: self.address.into(), version: Some(6), manufacturer: self.manufacturer, supported: 0, current: 1, name: String::new() }])
+    }
+    fn bt_firmware_file(&self) -> bool {
+        self.file
+    }
+}
+
+fn one_bt_probe(tag: &str, product: &str, ctl: OneBt) -> Probe {
+    let r = tmp(tag);
+    put(&r, "sys/class/dmi/id/product_name", product);
+    put(&r, "sys/class/bluetooth/hci0/x", "");
+    put(&r, "sys/class/rfkill/rfkill1/name", "hci0\n");
+    put(&r, "sys/class/rfkill/rfkill1/type", "bluetooth\n");
+    put(&r, "sys/class/rfkill/rfkill1/soft", "0\n");
+    put(&r, "sys/class/rfkill/rfkill1/hard", "0\n");
+    std::fs::create_dir_all(r.join("proc")).unwrap();
+    let mut p = probe_at(&r);
+    p.dev = DeviceEnv { roots: p.dev.roots.clone(), ctl: Arc::new(ctl) };
+    p
+}
+
+#[test]
+fn bluetooth_needs_firmware_only_for_a_broadcom_controller_without_address_or_file_and_working_ones_stay_listed() {
+    // the MacBookPro14,1 case: Broadcom, placeholder address, no patch file
+    let s = gather(&one_bt_probe("bt-mbp", "MacBookPro14,1\n", OneBt { address: "AA:AA:AA:AA:AA:AA", manufacturer: 15, file: false }));
+    let bt = item(&s, "Bluetooth");
+    assert_eq!((bt.level, bt.jump.clone()), (Level::Missing, Jump::Setup("mac-firmware")));
+    assert!(bt.detail.starts_with("Bluetooth needs firmware: Store \u{2192} Setup \u{2192} Hardware"), "{}", bt.detail);
+    // a controller with a real address works: the normal row, to Settings
+    let s = gather(&one_bt_probe("bt-ok", "MacBookPro14,1\n", OneBt { address: "A4:83:E7:11:22:33", manufacturer: 15, file: false }));
+    let bt = item(&s, "Bluetooth");
+    assert_eq!((bt.jump.clone(), bt.level), (Jump::Settings("bluetooth"), Level::Ok), "{bt:?}");
+    assert!(!bt.detail.contains("needs firmware"));
+    // the file is there: not this message
+    let s = gather(&one_bt_probe("bt-file", "MacBookPro14,1\n", OneBt { address: "00:00:00:00:00:00", manufacturer: 15, file: true }));
+    assert!(!item(&s, "Bluetooth").detail.contains("needs firmware"));
+    // an Intel controller on a PC, and a Broadcom one on a non-Mac, are never told to fetch Apple's file
+    let s = gather(&one_bt_probe("bt-intel", "ThinkPad X1\n", OneBt { address: "00:00:00:00:00:00", manufacturer: 2, file: false }));
+    assert!(!item(&s, "Bluetooth").detail.contains("needs firmware"));
+    let s = gather(&one_bt_probe("bt-pc-bcm", "OptiPlex 7010\n", OneBt { address: "00:00:00:00:00:00", manufacturer: 15, file: false }));
+    assert_eq!(item(&s, "Bluetooth").jump, Jump::Settings("bluetooth"));
+}
+
+#[test]
+fn the_bluetooth_firmware_row_jumps_to_setup_by_key_and_by_click_and_fits_at_every_size() {
+    for (w, h) in [(360u32, 740u32), (800, 480), (1024, 600), (1280, 720), (1920, 1080)] {
+        let p = one_bt_probe(&format!("bt-hit-{w}"), "MacBookPro14,1\n", OneBt { address: "AA:AA:AA:AA:AA:AA", manufacturer: 15, file: false });
+        let s = crate::shell::scale_for(w, h);
+        let mut d = DevPop::new();
+        d.toggle();
+        d.refresh_now(&p);
+        let idx = d.snapshot().unwrap().items.iter().position(|i| i.title == "Bluetooth").unwrap();
+        // walk down to the row so that a small screen has it on the page
+        for _ in 0..idx {
+            d.handle_key(&Key::Down);
+        }
+        let mut g = Gfx::new(w, h);
+        d.render(&mut g, w, h, s);
+        let row = g.hits.iter().find(|x| x.label.starts_with("Bluetooth: Bluetooth needs firmware")).unwrap_or_else(|| panic!("{w}x{h}: the row is on the popover: {:?}", g.hits.iter().map(|x| &x.label).collect::<Vec<_>>()));
+        let r = row.rect;
+        assert!(r.w > 0.0 && r.h > 0.0 && r.x >= -0.5 && r.y >= -0.5 && r.x + r.w <= w as f32 + 0.5 && r.y + r.h <= h as f32 + 0.5, "{w}x{h}: {r:?}");
+        let id = match row.ev { Event::Tab(n) => n, ref e => panic!("{e:?}") };
+        assert_eq!(id, ROW + idx);
+        // a click on the row, and Enter on it, lead to Store -> Setup on the Mac firmware card
+        assert_eq!(d.handle_hit(id), Outcome::Jump(Jump::Setup("mac-firmware")), "{w}x{h}");
+        assert_eq!(d.handle_key(&Key::Enter), Outcome::Jump(Jump::Setup("mac-firmware")), "{w}x{h}");
+    }
+}
+
+// ---- the tooltip with a row's whole text ----
+
+const WIFI_DETAIL: &str = "wlan0 · a-rather-long-network-name-at-home-and-more · signal -43 dBm (excellent) · 192.168.50.76";
+const SOUND_DETAIL: &str = "output Built-in speaker (Apple T2 Audio) (and a second long device name that cannot fit) · volume 40%";
+
+fn tip_snapshot() -> Snapshot {
+    let wifi = Item::new("Wi-Fi", WIFI_DETAIL, Level::Ok, Jump::Settings("network"));
+    let sound = Item::new("Sound", SOUND_DETAIL, Level::Ok, Jump::Settings("sound")).with_act(Act::ToggleSoundMute);
+    let short = Item::new("Display", "1 screen", Level::Ok, Jump::None);
+    let help = vec![("Fan and temperature sensors (applesmc)".to_string(), "this kernel has no driver for it yet, so the fan speed cannot be read".to_string()), ("Camera".to_string(), "needs the FaceTime firmware".to_string())];
+    Snapshot { items: vec![wifi, sound, short], driver_help: help, at: 1 }
+}
+
+fn open_pop() -> DevPop {
+    let mut d = DevPop::new();
+    d.toggle();
+    d.set_snapshot(tip_snapshot());
+    d
+}
+
+fn hit_of(g: &Gfx, id: usize) -> R {
+    g.hits.iter().find(|h| h.ev == Event::Tab(id)).unwrap().rect
+}
+
+fn wait(d: &mut DevPop, n: u32) {
+    for _ in 0..n {
+        d.tip_event(&Event::Tick);
+    }
+}
+
+fn point(d: &mut DevPop, g: &mut Gfx, x: i32, y: i32) {
+    g.mouse = (x, y);
+    d.tip_event(&Event::MouseMove(x, y));
+}
+
+#[test]
+fn resting_on_a_row_shows_its_whole_text_after_the_delay_and_it_hides_on_move_click_and_esc() {
+    for (w, h) in [(2560u32, 1600u32), (1280, 800)] {
+        let s = crate::shell::scale_for(w, h);
+        let (mut d, mut g) = (open_pop(), Gfx::new(w, h));
+        d.render(&mut g, w, h, s);
+        let r = hit_of(&g, ROW);
+        let (x, y) = ((r.x + r.w * 0.4) as i32, (r.y + r.h / 2.0) as i32);
+        point(&mut d, &mut g, x, y);
+        wait(&mut d, crate::tooltip::POINTER_DELAY - 1);
+        d.render(&mut g, w, h, s);
+        assert!(d.tip_rect.is_none(), "{w}x{h}: not before the delay");
+        wait(&mut d, 1);
+        assert!(d.tip_changed(), "{w}x{h}: the shell is asked to draw again");
+        d.render(&mut g, w, h, s);
+        let t = d.tip_rect.unwrap_or_else(|| panic!("{w}x{h}: the tooltip is up"));
+        assert!(t.x >= 0.0 && t.y >= 0.0 && t.x + t.w <= w as f32 && t.y + t.h <= h as f32, "{w}x{h}: inside the screen {t:?}");
+        assert_eq!(d.tip_text(), Some(format!("Wi-Fi\n{WIFI_DETAIL}").as_str()), "{w}x{h}: the whole row, address included");
+        // movement hides it; it needs a new rest
+        point(&mut d, &mut g, x + 5, y);
+        assert!(d.tip_changed());
+        d.render(&mut g, w, h, s);
+        assert!(d.tip_rect.is_none() && d.tip_text().is_none(), "{w}x{h}: hidden on move");
+        // a click hides it, Esc hides it
+        for ev in [Event::MouseDown(x, y), Event::Key(Key::Esc)] {
+            point(&mut d, &mut g, x + 9, y);
+            wait(&mut d, crate::tooltip::POINTER_DELAY);
+            d.render(&mut g, w, h, s);
+            assert!(d.tip_rect.is_some(), "{w}x{h}: up again after a rest");
+            d.tip_event(&ev);
+            d.render(&mut g, w, h, s);
+            assert!(d.tip_rect.is_none(), "{w}x{h}: hidden by {ev:?}");
+        }
+    }
+}
+
+#[test]
+fn the_tooltip_does_not_cover_the_pointer_or_a_row_button_it_is_on() {
+    for (w, h) in [(2560u32, 1600u32), (1280, 800)] {
+        let s = crate::shell::scale_for(w, h);
+        let (mut d, mut g) = (open_pop(), Gfx::new(w, h));
+        d.render(&mut g, w, h, s);
+        // on the Mute button of the Sound row: no tooltip at all, so nothing sits on the button
+        let b = hit_of(&g, ACT + 2);
+        point(&mut d, &mut g, (b.x + b.w / 2.0) as i32, (b.y + b.h / 2.0) as i32);
+        wait(&mut d, crate::tooltip::HOLD_DELAY + 5);
+        d.render(&mut g, w, h, s);
+        assert!(d.tip_rect.is_none(), "{w}x{h}: nothing while the pointer is on a button");
+        // on the row beside the button: the tooltip is up and the pointer is not under it
+        let r = hit_of(&g, ROW + 1);
+        let (x, y) = ((r.x + 60.0 * s) as i32, (r.y + r.h / 2.0) as i32);
+        point(&mut d, &mut g, x, y);
+        wait(&mut d, crate::tooltip::POINTER_DELAY);
+        d.render(&mut g, w, h, s);
+        let t = d.tip_rect.expect("up on the row");
+        assert!(!t.contains(x, y), "{w}x{h}: the pointer is not under the tooltip");
+        assert_eq!(d.tip_text(), Some(format!("Sound\n{SOUND_DETAIL}").as_str()));
+    }
+}
+
+#[test]
+fn keyboard_selection_shows_the_tooltip_after_the_longer_wait() {
+    for (w, h) in [(2560u32, 1600u32), (1280, 800)] {
+        let s = crate::shell::scale_for(w, h);
+        let (mut d, mut g) = (open_pop(), Gfx::new(w, h));
+        d.render(&mut g, w, h, s);
+        for k in [Key::Down, Key::Up] {
+            d.handle_key(&k);
+            d.tip_event(&Event::Key(k));
+        }
+        wait(&mut d, crate::tooltip::HOLD_DELAY - 1);
+        d.render(&mut g, w, h, s);
+        assert!(d.tip_rect.is_none(), "{w}x{h}: not yet");
+        wait(&mut d, 1);
+        d.render(&mut g, w, h, s);
+        let t = d.tip_rect.expect("up on the selected row");
+        assert!(t.x >= 0.0 && t.y >= 0.0 && t.x + t.w <= w as f32 && t.y + t.h <= h as f32, "{w}x{h}: {t:?}");
+        assert!(d.tip_text().unwrap().contains("192.168.50.76"));
+        // the next row is selected: its own text, after its own wait
+        d.handle_key(&Key::Down);
+        d.tip_event(&Event::Key(Key::Down));
+        wait(&mut d, crate::tooltip::HOLD_DELAY);
+        d.render(&mut g, w, h, s);
+        assert!(d.tip_text().unwrap().starts_with("Sound\n"));
+    }
+}
+
+#[test]
+fn a_long_press_on_a_row_shows_the_tooltip_and_the_driver_help_sentence_is_whole() {
+    let (w, h) = (1280u32, 800u32);
+    let s = crate::shell::scale_for(w, h);
+    let (mut d, mut g) = (open_pop(), Gfx::new(w, h));
+    d.render(&mut g, w, h, s);
+    let r = hit_of(&g, ROW);
+    g.mouse = ((r.x + 80.0 * s) as i32, (r.y + r.h / 2.0) as i32);
+    d.tip_event(&Event::MouseDown(g.mouse.0, g.mouse.1));
+    wait(&mut d, crate::tooltip::HOLD_DELAY);
+    d.render(&mut g, w, h, s);
+    assert!(d.tip_text().unwrap().contains("192.168.50.76"), "held: the whole row");
+    // the Driver help button: every reason, not only the first one cut to a line
+    let b = hit_of(&g, HELP_BTN);
+    point(&mut d, &mut g, (b.x + 40.0 * s) as i32, (b.y + b.h / 2.0) as i32);
+    wait(&mut d, crate::tooltip::POINTER_DELAY);
+    d.render(&mut g, w, h, s);
+    let text = d.tip_text().expect("tooltip on Driver help").to_string();
+    assert!(text.starts_with("Driver help (2)\n") && text.contains("the fan speed cannot be read") && text.contains("Camera: needs the FaceTime firmware"), "{text}");
+}
+
+#[test]
+fn the_wifi_address_survives_a_narrow_popover() {
+    for (w, h) in [(360u32, 740u32), (800, 480), (1280, 800)] {
+        let s = crate::shell::scale_for(w, h);
+        let (mut d, mut g) = (open_pop(), Gfx::new(w, h));
+        d.render(&mut g, w, h, s);
+        // the line as drawn is the plain cut when the address would have been cut off; ask the same function the popover uses
+        let r = hit_of(&g, ROW);
+        let avail = r.w - 46.0 * s;
+        let line = crate::tooltip::fit_keep_ip(&mut g, 13.0 * s, WIFI_DETAIL, Face::Sans, avail);
+        assert!(line.contains("192.168.50.76"), "{w}x{h}: {line}");
+        assert!(g.text_width(13.0 * s, &line, Face::Sans) <= avail + 1.0, "{w}x{h}: fits");
+    }
+}
+
+#[test]
+fn every_list_in_the_header_popover_uses_the_tooltip_and_the_shell_feeds_it() {
+    let pop = include_str!("devpop.rs");
+    // the rows and the Driver help button offer their full text and keep the address when they cut a line
+    assert!(pop.matches("self.tip.offer(").count() >= 2, "rows and Driver help offer a tooltip");
+    assert!(pop.contains("self.tip.draw(") && pop.contains("tooltip::fit_keep_ip("));
+    assert!(!pop.contains("g.fit(13.0 * s, &it.detail"), "a row's detail is cut with fit_keep_ip, not the plain cut");
+    // the shell hands the popover every event, whoever takes the click, and redraws when the tooltip changes
+    let shell = include_str!("shell.rs");
+    assert!(shell.contains("self.devpop.tip_event(ev)") && shell.contains("self.devpop.tip_changed()"));
 }

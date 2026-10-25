@@ -13,6 +13,7 @@ use iyakki_agent::extagent::relay;
 use iyakki_agent::extagent::{self, Auth};
 use iyakki_agent::qr;
 
+use crate::agent_login_scan::{CamSource, Scan, Step};
 use crate::apps::AppCx;
 use crate::fx;
 use crate::gfx::{rgb, Face, Gfx};
@@ -37,6 +38,12 @@ pub(crate) const T_OPEN: usize = 1_400_125;
 pub(crate) const T_PASTE: usize = 1_400_126;
 pub(crate) const T_PASTE_OFFER: usize = 1_400_127;
 pub(crate) const T_SEND_OFFER: usize = 1_400_128;
+pub(crate) const T_BIGGER: usize = 1_400_129;
+pub(crate) const T_SCAN: usize = 1_400_130;
+pub(crate) const T_SCAN_ALLOW: usize = 1_400_131;
+pub(crate) const T_SCAN_DENY: usize = 1_400_132;
+pub(crate) const T_SCAN_STOP: usize = 1_400_133;
+pub(crate) const T_QR_NEXT: usize = 1_400_134;
 
 /// The tool of the CLI list (`claude-code`, `github-copilot`) as an agent id.
 pub fn agent_of_cli(cli: &str) -> Option<&'static str> {
@@ -125,6 +132,53 @@ pub fn buttons(g: &mut Gfx, x: f32, y: f32, size: f32, agent: &str, st: &State) 
     w
 }
 
+// ------------------------------------------------------------------------------------------------ the QR size
+
+static QR_BIG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The big-QR choice, kept for the session (not on disk): the dialog is made new every time it opens.
+pub fn qr_big() -> bool {
+    QR_BIG.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_qr_big(on: bool) {
+    QR_BIG.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Screens wider than this many pixels get a somewhat larger QR code without being asked.
+pub(crate) const WIDE_SCREEN: f32 = 2000.0;
+
+/// How big the QR codes are drawn: `side` is the square the first one (the sign-in address) gets, `relay` the square of the
+/// second one beside it (0 when it is not drawn beside: big view, or no relay).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct QrLayout {
+    pub side: f32,
+    pub relay: f32,
+    pub big: bool,
+}
+
+/// The dialog's QR sizes. Normal: 250 (170 each when the phone relay's code is beside it) times the scale, and a third more on a
+/// wide screen. Big: up to nearly the dialog's height (`panel_h`, room kept for the title, the caption and the buttons under it) and
+/// never so wide that the text beside it has less than 350 units; never smaller than twice the normal size when the dialog is tall
+/// enough for that (a screen at least 624 units high).
+pub(crate) fn qr_layout(s: f32, screen_w: f32, panel_h: f32, panel_w: f32, two: bool, big: bool) -> QrLayout {
+    let base = if two { 170.0 } else { 250.0 } * s * if screen_w > WIDE_SCREEN { 1.3 } else { 1.0 };
+    if !big {
+        return QrLayout { side: base, relay: if two { base } else { 0.0 }, big: false };
+    }
+    let normal = 250.0 * s;
+    let side = (panel_h - 124.0 * s).min(panel_w - 56.0 * s - 350.0 * s).max(normal);
+    QrLayout { side, relay: 0.0, big: true }
+}
+
+/// Whole-pixel size of one module when a symbol of `modules` x `modules` plus the 4-module quiet zone on every side is fitted in
+/// `side`, and the side of the white square that really gets drawn. Whole pixels keep every module sharp at any scale.
+pub(crate) fn qr_metrics(side: f32, modules: usize) -> (f32, f32) {
+    let n = (modules + 8) as f32;
+    let m = (side / n).floor().max(1.0);
+    (m, m * n)
+}
+
 // ------------------------------------------------------------------------------------------------ the dialog
 
 enum Stage {
@@ -164,6 +218,14 @@ pub struct LoginModal {
     home: Option<std::path::PathBuf>,
     started: bool,
     finished_audited: bool,
+    /// Reading the code from a QR code on the person's phone with the camera (agent_login_scan.rs).
+    scan: Scan,
+    /// With the second QR (phone relay) up and the big view on: show the relay's code in the big slot.
+    show_relay: bool,
+    /// The width of the screen the dialog was last drawn on (the QR default depends on it).
+    screen_w: f32,
+    /// The white square of the first QR code as last drawn (tests).
+    last_qr: Option<R>,
 }
 
 pub enum Out {
@@ -185,12 +247,24 @@ impl LoginModal {
     pub fn new(agent: &'static str) -> LoginModal {
         let mut field = TextField::new("", false);
         field.max = 4096;
-        LoginModal { agent, stage: if agent == extagent::CLAUDE_CODE { Stage::Choose } else { Stage::Running }, method: 0, sess: None, snap: None, field, qr: None, relay: None, relay_tried: false, said: None, hidden: false, ended_away: false, clip_offer: None, after: None, home: None, started: false, finished_audited: false }
+        LoginModal { agent, stage: if agent == extagent::CLAUDE_CODE { Stage::Choose } else { Stage::Running }, method: 0, sess: None, snap: None, field, qr: None, relay: None, relay_tried: false, said: None, hidden: false, ended_away: false, clip_offer: None, after: None, home: None, started: false, finished_audited: false, scan: Scan::new(CamSource::system()), show_relay: false, screen_w: 0.0, last_qr: None }
     }
 
     pub fn with_home(mut self, home: &std::path::Path) -> LoginModal {
         self.home = Some(home.to_path_buf());
         self
+    }
+
+    /// Use another camera source (tests: a camera made up in software).
+    pub fn with_camera(mut self, src: std::sync::Arc<CamSource>, limit: std::time::Duration) -> LoginModal {
+        let scan = Scan::new(src).with_limit(limit);
+        // a busy test machine must not make the decoder give up on a frame
+        self.scan = if cfg!(test) { scan.with_budget(std::time::Duration::from_secs(10)) } else { scan };
+        self
+    }
+
+    pub fn scan(&self) -> &Scan {
+        &self.scan
     }
 
     pub fn agent(&self) -> &'static str {
@@ -235,6 +309,7 @@ impl LoginModal {
 
     /// The browser tile was opened with the address: step aside (the program goes on running).
     pub fn hide(&mut self) {
+        self.scan.stop(None);
         self.hidden = true;
     }
 
@@ -281,6 +356,7 @@ impl LoginModal {
             relay::finish();
         }
         self.relay_tried = false;
+        self.scan.stop(None);
         self.sess = Some(LoginSession::start(&spec));
         self.snap = None;
         self.qr = None;
@@ -309,9 +385,10 @@ impl LoginModal {
 
     /// Look at the program's output (called on every heartbeat). True when the picture changed.
     pub fn tick(&mut self, cx: &AppCx) -> bool {
-        let Some(s) = &self.sess else { return false };
+        let scanned = self.tick_scan();
+        let Some(s) = &self.sess else { return scanned };
         let sn = s.snapshot();
-        let mut changed = false;
+        let mut changed = scanned;
         // a code that arrived from the phone goes to the program as if typed
         if let Some(raw) = self.relay.as_ref().and_then(|_| relay::take_submitted()) {
             cx.audit.record(&cx.session.user, "agent.login.relay", "used");
@@ -365,6 +442,29 @@ impl LoginModal {
         true
     }
 
+    /// The program waits for a code (not a yes/no question) and is not finished: the only time the camera may be on.
+    fn waiting_for_code(&self) -> bool {
+        self.snap.as_ref().is_some_and(|s| s.wants_input && s.question.is_none() && !s.phase.finished())
+    }
+
+    /// Watch the camera: stop it when the code is no longer wanted, put a valid code read from a QR code into the field (never sent
+    /// without Enter). True when the picture changed.
+    fn tick_scan(&mut self) -> bool {
+        if self.scan.step() == Step::Off {
+            return false;
+        }
+        if self.scan.step() == Step::On && (!self.waiting_for_code() || self.hidden) {
+            self.scan.stop(Some("The camera is off."));
+            return true;
+        }
+        if let Some(code) = self.scan.poll(self.agent == extagent::CLAUDE_CODE) {
+            self.field.set(&code);
+            self.said = None;
+            self.clip_offer = None;
+        }
+        true
+    }
+
     /// The check of what is in the field, for the code a program waits for (not for a yes/no question).
     fn check(&self) -> Option<login::CodeCheck> {
         let sn = self.snap.as_ref()?;
@@ -393,7 +493,21 @@ impl LoginModal {
         }
     }
 
+    /// While the camera question or the camera is up, the dialog behind it does not react: Esc and the buttons end the scan.
+    fn handle_scan(&mut self, ev: &Event) -> Out {
+        match (self.scan.step(), ev) {
+            (Step::Asking, Event::Tab(T_SCAN_ALLOW)) | (Step::Asking, Event::Key(Key::Enter)) => self.scan.allow(),
+            (Step::Asking, Event::Tab(T_SCAN_DENY)) | (Step::Asking, Event::Key(Key::Esc)) | (Step::Asking, Event::Tab(T_CANCEL)) => self.scan.deny(),
+            (Step::On, Event::Tab(T_SCAN_STOP)) | (Step::On, Event::Key(Key::Esc)) | (Step::On, Event::Tab(T_CANCEL)) => self.scan.stop(Some("The camera is off.")),
+            _ => {}
+        }
+        Out::Stay
+    }
+
     pub fn handle(&mut self, ev: &Event, cx: &AppCx) -> Out {
+        if self.scan.step() != Step::Off && !matches!(ev, Event::Tick) {
+            return self.handle_scan(ev);
+        }
         let finished = self.snap.as_ref().is_some_and(|s| s.phase.finished());
         match (&self.stage, ev) {
             (_, Event::Tab(T_CANCEL)) | (_, Event::Key(Key::Esc)) => {
@@ -406,6 +520,18 @@ impl LoginModal {
                     relay::finish();
                 }
                 return Out::Close;
+            }
+            // the QR size and the camera: Ctrl+B and Ctrl+K, because plain letters belong to the code field
+            (Stage::Running, Event::Tab(T_BIGGER)) | (Stage::Running, Event::Key(Key::Ctrl('b'))) | (Stage::Running, Event::Key(Key::Ctrl('B'))) => set_qr_big(!qr_big()),
+            (Stage::Running, Event::Tab(T_QR_NEXT)) | (Stage::Running, Event::Key(Key::Ctrl('n'))) | (Stage::Running, Event::Key(Key::Ctrl('N'))) => {
+                if self.relay.is_some() {
+                    self.show_relay = !self.show_relay;
+                }
+            }
+            (Stage::Running, Event::Tab(T_SCAN)) | (Stage::Running, Event::Key(Key::Ctrl('k'))) | (Stage::Running, Event::Key(Key::Ctrl('K'))) => {
+                if self.waiting_for_code() {
+                    self.scan.ask();
+                }
             }
             (Stage::Choose, Event::Key(Key::Up)) => self.method = (self.method + Method::ALL.len() - 1) % Method::ALL.len(),
             (Stage::Choose, Event::Key(Key::Down)) => self.method = (self.method + 1) % Method::ALL.len(),
@@ -461,12 +587,18 @@ impl LoginModal {
             return;
         }
         let name = name_of(self.agent);
-        let p = fx::modal(g, area, s, 980.0 * s, 600.0 * s, ACCENT, false);
+        self.screen_w = area.w;
+        // the big QR needs a taller and wider dialog; a wide screen gets a little more height for its larger default
+        let (mw, mh) = if qr_big() && matches!(self.stage, Stage::Running) { (1240.0, 860.0) } else if area.w > WIDE_SCREEN { (980.0, 680.0) } else { (980.0, 600.0) };
+        let p = fx::modal(g, area, s, mw * s, mh * s, ACCENT, false);
         let y0 = fx::modal_title(g, p, s, &format!("Sign in to {name}"), ACCENT);
         let (x, w) = (p.x + 28.0 * s, p.w - 56.0 * s);
         match self.stage {
             Stage::Choose => self.render_choose(g, p, x, y0, w, s),
             Stage::Running => self.render_running(g, p, x, y0, w, s, tick),
+        }
+        if self.scan.step() != Step::Off {
+            self.render_scan(g, p, s, tick);
         }
     }
 
@@ -501,8 +633,9 @@ impl LoginModal {
         let finished = snap.phase.finished();
         // the right side: the QR code of the address (step 1) and, when the phone relay is up, a second one for the code (step 2)
         let two = self.relay.is_some() && !finished;
-        let qr_w = if two { 170.0 * s } else { 250.0 * s };
-        let right_w = if two { qr_w * 2.0 + 16.0 * s } else { qr_w };
+        let lay = qr_layout(s, self.screen_w, p.h, p.w, two, qr_big());
+        let (qr_w, big) = (lay.side, lay.big);
+        let right_w = if two && !big { qr_w + lay.relay + 16.0 * s } else { qr_w };
         let left_w = w - right_w - 20.0 * s;
         let mut y = y0 + 4.0 * s;
         if snap.phase == Phase::Succeeded {
@@ -552,41 +685,69 @@ impl LoginModal {
                 }
             }
         }
+        let mut drawn: Option<R> = None;
         if !finished {
             let qx = x + left_w + 20.0 * s;
-            if let Some((_, Some(q))) = &self.qr {
-                draw_qr(g, R::new(qx, y0 + 4.0 * s, qr_w, qr_w), q);
-                g.text(qx, y0 + 10.0 * s + qr_w, 12.0 * s, DIM, if two { "1  Sign in" } else { "Scan with a phone camera" }, Face::Bold);
-            } else if matches!(&self.qr, Some((_, None))) {
-                g.text(qx, y0 + 8.0 * s, 12.0 * s, DIM, "(the address is too long for a QR code; copy it)", Face::Sans);
-            }
-            if let Some(r) = &self.relay {
-                let rx = qx + qr_w + 16.0 * s;
-                if let Some(q) = &r.qr {
-                    draw_qr(g, R::new(rx, y0 + 4.0 * s, qr_w, qr_w), q);
+            let qy = y0 + 4.0 * s;
+            if big {
+                // one big code at a time; with the phone relay up, a button switches to the other
+                let relay_now = self.show_relay && self.relay.is_some();
+                let q = if relay_now { self.relay.as_ref().and_then(|r| r.qr.as_ref()) } else { self.qr.as_ref().and_then(|(_, q)| q.as_ref()) };
+                match q {
+                    Some(q) => drawn = Some(draw_qr(g, R::new(qx, qy, qr_w, qr_w), q)),
+                    None => {
+                        g.text(qx, qy + 4.0 * s, 12.0 * s, DIM, "(too long for a QR code; copy the address)", Face::Sans);
+                    }
                 }
-                g.text(rx, y0 + 10.0 * s + qr_w, 12.0 * s, DIM, "2  Send the code", Face::Bold);
-                // the short address of the second step, for a person who types it instead
-                let host = r.url.split("/login/").next().unwrap_or("");
-                let cap = g.fit(11.0 * s, &format!("{host}/login/…"), Face::Mono, qr_w);
-                g.text(rx, y0 + 28.0 * s + qr_w, 11.0 * s, DIM, &cap, Face::Mono);
-                let note = g.wrap(11.0 * s, "Open it on the phone you signed in with and paste the code there. Your browser will warn about the certificate: the device made its own.", Face::Sans, qr_w);
-                for (i, l) in note.into_iter().take(5).enumerate() {
-                    g.text(rx, y0 + 44.0 * s + qr_w + i as f32 * 14.0 * s, 11.0 * s, DIM, &l, Face::Sans);
+                let cap = if two { if relay_now { "2  Send the code" } else { "1  Sign in" } } else { "Scan with a phone camera" };
+                g.text(qx, qy + qr_w + 4.0 * s, 12.0 * s, DIM, cap, Face::Bold);
+                let by = qy + qr_w + 24.0 * s;
+                let b1 = g.button(qx, by, 13.0 * s, "- smaller QR  (Ctrl+B)", TEXT, Event::Tab(T_BIGGER));
+                if two {
+                    g.button(qx + b1 + 8.0 * s, by, 13.0 * s, if relay_now { "Show code 1  (Ctrl+N)" } else { "Show code 2  (Ctrl+N)" }, ACCENT, Event::Tab(T_QR_NEXT));
+                }
+            } else {
+                if let Some((_, Some(q))) = &self.qr {
+                    drawn = Some(draw_qr(g, R::new(qx, qy, qr_w, qr_w), q));
+                    g.text(qx, y0 + 10.0 * s + qr_w, 12.0 * s, DIM, if two { "1  Sign in" } else { "Scan with a phone camera" }, Face::Bold);
+                } else if matches!(&self.qr, Some((_, None))) {
+                    g.text(qx, y0 + 8.0 * s, 12.0 * s, DIM, "(the address is too long for a QR code; copy it)", Face::Sans);
+                }
+                if self.qr.is_some() {
+                    g.button(qx, y0 + 28.0 * s + qr_w, 13.0 * s, "+ bigger QR  (Ctrl+B)", TEXT, Event::Tab(T_BIGGER));
+                }
+                if let Some(r) = &self.relay {
+                    let (rx, rw) = (qx + qr_w + 16.0 * s, lay.relay);
+                    if let Some(q) = &r.qr {
+                        let _ = draw_qr(g, R::new(rx, qy, rw, rw), q);
+                    }
+                    g.text(rx, y0 + 10.0 * s + rw, 12.0 * s, DIM, "2  Send the code", Face::Bold);
+                    // the short address of the second step, for a person who types it instead
+                    let host = r.url.split("/login/").next().unwrap_or("");
+                    let cap = g.fit(11.0 * s, &format!("{host}/login/…"), Face::Mono, rw);
+                    g.text(rx, y0 + 28.0 * s + rw, 11.0 * s, DIM, &cap, Face::Mono);
+                    let note = g.wrap(11.0 * s, "Open it on the phone you signed in with and paste the code there. Your browser will warn about the certificate: the device made its own.", Face::Sans, rw);
+                    for (i, l) in note.into_iter().take(5).enumerate() {
+                        g.text(rx, y0 + 44.0 * s + rw + i as f32 * 14.0 * s, 11.0 * s, DIM, &l, Face::Sans);
+                    }
                 }
             }
         }
-        // the field for what the browser shows (or a yes/no): large monospace, a Paste button, and the check before sending
-        let fy = p.y + p.h - 196.0 * s;
+        self.last_qr = drawn;
+        // the field for what the browser shows (or a yes/no): large monospace, a Paste button, and the check before sending. With the
+        // big QR the column of text is narrower, so the buttons go under the field.
+        let tw = if big { left_w } else { w };
+        let fy = p.y + p.h - if big { 268.0 } else { 196.0 } * s;
         if snap.wants_input && !finished {
             let label = snap.question.clone().unwrap_or_else(|| "Code from the page (paste it here, then Enter)".to_string());
-            let label = g.fit(13.0 * s, &label, Face::Bold, w);
+            let label = g.fit(13.0 * s, &label, Face::Bold, tw);
             g.text(x, fy, 13.0 * s, TEXT, &label, Face::Bold);
-            let r = R::new(x, fy + 20.0 * s, w - 250.0 * s, 44.0 * s);
+            let r = R::new(x, fy + 20.0 * s, if big { tw } else { w - 250.0 * s }, 44.0 * s);
             self.field.render(g, r, true, s, (tick / 15) % 2 == 0, Face::Mono, 0);
-            let mut bx = r.x + r.w + 12.0 * s;
-            bx += g.button(bx, r.y + 4.0 * s, 14.0 * s, "Paste", TEXT, Event::Tab(T_PASTE)) + 8.0 * s;
-            g.button(bx, r.y + 4.0 * s, 14.0 * s, "Send", OK, Event::Tab(T_SEND));
+            let (mut bx, by) = if big { (x, r.y + r.h + 8.0 * s) } else { (r.x + r.w + 12.0 * s, r.y + 4.0 * s) };
+            bx += g.button(bx, by, 14.0 * s, "Paste", TEXT, Event::Tab(T_PASTE)) + 8.0 * s;
+            g.button(bx, by, 14.0 * s, "Send", OK, Event::Tab(T_SEND));
+            let below = if big { r.y + r.h + 44.0 * s } else { r.y + r.h + 4.0 * s };
             // what is in the field: its length and whether it looks right, before anything is sent
             let (msg, col) = match self.check() {
                 Some(c) => match (&c.problem, &c.warning) {
@@ -594,17 +755,26 @@ impl LoginModal {
                     (None, Some(wn)) => (wn.clone(), AMBER),
                     (None, None) => (format!("{} characters{}. Looks right: press Enter to send.", c.len, if c.from_url { ", taken from the address you pasted" } else { "" }), OK),
                 },
-                None => match &self.said {
+                None => match self.scan.said().or(self.said.as_ref()) {
                     Some((m, ok)) => (m.clone(), if *ok { OK } else { ERR }),
                     None => (String::new(), DIM),
                 },
             };
+            // a code that came from the camera says so
+            let from_cam = !self.field.value.is_empty() && self.scan.said().is_some_and(|(m, ok)| *ok && m.starts_with("Code read"));
+            let msg = if from_cam && col == OK { format!("{msg} (read from the QR code)") } else { msg };
             if !msg.is_empty() {
-                let msg = g.fit(12.5 * s, &msg, Face::Sans, w);
-                g.text(x, r.y + r.h + 4.0 * s, 12.5 * s, col, &msg, Face::Sans);
+                let msg = g.fit(12.5 * s, &msg, Face::Sans, tw);
+                g.text(x, below, 12.5 * s, col, &msg, Face::Sans);
             }
+            // the second row: the clipboard offer and the camera
+            let row = below + 20.0 * s;
+            let mut rx = x;
             if let (Some(n), true) = (self.clip_offer, self.field.value.is_empty()) {
-                g.button(x, r.y + r.h + 24.0 * s, 14.0 * s, &format!("Paste the copied code ({n} characters)"), OK, Event::Tab(T_PASTE_OFFER));
+                rx += g.button(rx, row, 14.0 * s, &format!("Paste the copied code ({n} characters)"), OK, Event::Tab(T_PASTE_OFFER)) + 10.0 * s;
+            }
+            if snap.question.is_none() {
+                g.button(rx, row, 14.0 * s, "Scan with camera  (Ctrl+K)", ACCENT, Event::Tab(T_SCAN));
             }
         }
         // the live status line and the buttons
@@ -616,7 +786,7 @@ impl LoginModal {
             _ => (format!("{}{}", snap.line.trim_end_matches('…'), if snap.line.ends_with('…') { dots.as_str() } else { "" }), true),
         };
         let col = if matches!(snap.phase, Phase::Failed(_)) || snap.note.is_some() { ERR } else if ok { MUTED } else { AMBER };
-        for (i, l) in g.wrap(13.0 * s, &line, Face::Sans, w).into_iter().take(2).enumerate() {
+        for (i, l) in g.wrap(13.0 * s, &line, Face::Sans, tw).into_iter().take(2).enumerate() {
             g.text(x, ly + i as f32 * 17.0 * s, 13.0 * s, col, &l, Face::Sans);
         }
         let by = p.y + p.h - 52.0 * s;
@@ -628,6 +798,22 @@ impl LoginModal {
         } else {
             g.button(x, by, 15.0 * s, "Cancel", ERR, Event::Tab(T_CANCEL));
         }
+    }
+}
+
+impl LoginModal {
+    /// The camera question and the live camera, as a card over the dialog: what the camera is for, a clear "camera is on" mark, the
+    /// small live picture with a frame to hold the code in, the time left and a Stop button. Only this card is clickable while it is up.
+    fn render_scan(&mut self, g: &mut Gfx, p: R, s: f32, tick: u64) {
+        let card = crate::scan_core::Card {
+            ask_title: "Turn on the camera?",
+            ask_body: "IYAKKI will use the camera only to read one QR code: show the code on your phone to it. The pictures are looked at in memory, never saved and never sent. The camera turns off as soon as a code is read, when you press Esc, when this dialog closes, and after one minute.",
+            hold_note: "Hold the QR code of the sign-in code on your phone inside the corners, about 20 cm from the camera. Nothing is saved.",
+            allow: T_SCAN_ALLOW,
+            deny: T_SCAN_DENY,
+            stop: T_SCAN_STOP,
+        };
+        crate::scan_core::draw_card(g, p, s, tick, &self.scan, &card);
     }
 }
 
@@ -666,11 +852,10 @@ fn wrap_url(g: &mut Gfx, size: f32, url: &str, w: f32, rows: usize) -> Vec<Strin
 }
 
 /// The QR code, dark on white with the quiet zone the standard asks for, centred in `r` with whole-pixel modules.
-fn draw_qr(g: &mut Gfx, r: R, q: &qr::Qr) {
-    let n = q.size + 8;
-    let m = (r.w.min(r.h) / n as f32).floor().max(1.0);
-    let side = m * n as f32;
-    let (x0, y0) = (r.x + (r.w - side) / 2.0, r.y);
+fn draw_qr(g: &mut Gfx, r: R, q: &qr::Qr) -> R {
+    let (m, side) = qr_metrics(r.w.min(r.h), q.size);
+    // the corner lands on a whole pixel too, so no module edge is blurred
+    let (x0, y0) = ((r.x + (r.w - side) / 2.0).round(), r.y.round());
     g.rect(x0, y0, side, side, [255, 255, 255, 255]);
     for y in 0..q.size {
         let mut x = 0;
@@ -686,6 +871,7 @@ fn draw_qr(g: &mut Gfx, r: R, q: &qr::Qr) {
             }
         }
     }
+    R::new(x0, y0, side, side)
 }
 
 // ------------------------------------------------------------------------------------------------ requests from other screens

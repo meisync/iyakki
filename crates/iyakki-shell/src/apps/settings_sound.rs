@@ -7,6 +7,7 @@
 //! IYAKKI's players. Each output keeps its last volume. The
 //! rows come from `devices::sound_rows`; the card mixers below them keep working as before.
 
+use crate::safeclamp::SafeClamp;
 use super::*;
 use iyakki_agent::audioout;
 
@@ -18,12 +19,25 @@ impl SettingsApp {
         match k {
             Key::Char('o') => self.sound_choose(cx),
             Key::Char('t') => self.sound_test(cx, target),
+            Key::Char('A') => self.sound_advanced(),
             Key::Enter | Key::Char(' ' | 'e') => match target {
                 Some(Target::SoundChoice) => self.sound_choose(cx),
                 Some(Target::SoundOut(key, _)) => self.sound_set_output(cx, &key),
                 Some(Target::SoftVolume) => self.sound_volume(cx, None),
+                Some(Target::SoundAdvanced) => self.sound_advanced(),
+                Some(Target::SoundVolMode(card_id)) => self.sound_cycle_mode(cx, &card_id),
+                Some(Target::SoundHwCheck(card, device, control, card_id)) => self.sound_hw_check(cx, card, device, control, card_id),
+                Some(Target::SoundPattern(walk)) => self.sound_pattern(cx, walk),
                 _ => return false,
             },
+            // + − on the boost row move the boost
+            Key::Char('+' | '=' | '-') if matches!(target, Some(Target::SoundBoost(_))) => {
+                if let Some(Target::SoundBoost(card_id)) = target {
+                    let cur = Self::svc(cx).sound_settings().boost_for(&card_id) as i32;
+                    let next = (cur + if matches!(k, Key::Char('-')) { -1 } else { 1 }).clamp_safe(0, iyakki_agent::softvol::MAX_BOOST_DB as i32);
+                    self.sound_set_boost(cx, &card_id, next as u32);
+                }
+            }
             // + − m change IYAKKI's volume everywhere but on a card's own mixer row
             Key::Char('+' | '=' | '-' | 'm') if !matches!(target, Some(Target::Card(_))) => {
                 let delta = match k {
@@ -140,5 +154,91 @@ impl SettingsApp {
         };
         cx.audit.record(&cx.session.user, "settings.sound.test", dev.as_deref().unwrap_or("default"));
         self.start("playing a test sound", move || JobOut::Msg(svc.test_sound(dev.as_deref())));
+    }
+}
+
+/// Settings -> Sound -> Advanced: boost, which volume control, the hardware self-check and the speaker tests.
+impl SettingsApp {
+    fn sound_advanced(&mut self) {
+        let on = self.hw.toggle_advanced();
+        self.hw.invalidate();
+        self.ok(if on { "Advanced sound rows shown." } else { "Advanced sound rows hidden." });
+    }
+
+    pub(super) fn sound_set_boost(&mut self, cx: &AppCx, card_id: &str, db: u32) {
+        if !self.admin(cx) {
+            return self.fail("Only administrators can change the boost.");
+        }
+        let id = card_id.to_string();
+        match Self::svc(cx).update_sound(|s| s.set_boost(&id, db)) {
+            Ok(now) => {
+                cx.audit.record(&cx.session.user, "settings.sound.boost", &format!("{card_id} {db}"));
+                self.ok(if db == 0 { "Boost off.".to_string() } else { format!("Boost +{db} dB. Loud sound may distort. It applies from the next sound.") });
+                self.hw.set_sound(now);
+                self.hw.invalidate();
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
+    fn sound_cycle_mode(&mut self, cx: &AppCx, card_id: &str) {
+        if !self.admin(cx) {
+            return self.fail("Only administrators can change the volume control.");
+        }
+        let id = card_id.to_string();
+        let next = Self::svc(cx).sound_settings().volume_mode_for(card_id).next();
+        match Self::svc(cx).update_sound(|s| s.set_volume_mode(&id, next)) {
+            Ok(now) => {
+                cx.audit.record(&cx.session.user, "settings.sound.volume_control", &format!("{card_id} {}", next.label()));
+                self.ok(format!("Volume control: {}.", next.label()));
+                self.hw.set_sound(now);
+                self.hw.invalidate();
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
+    fn sound_hw_check(&mut self, cx: &AppCx, card: u32, device: u32, control: String, card_id: String) {
+        if !self.admin(cx) {
+            return self.fail("Only administrators can change the volume control.");
+        }
+        let svc = Self::svc(cx).clone();
+        cx.audit.record(&cx.session.user, "settings.sound.hwcheck", &card_id);
+        self.start("playing two tones", move || {
+            let r = svc.hw_volume_check(card, device, &control);
+            JobOut::HwCheck(card_id, r)
+        });
+    }
+
+    /// The two tones were played: ask which one was quieter.
+    pub(super) fn hw_check_done(&mut self, card_id: String, r: Result<String, String>) {
+        match r {
+            Ok(m) => {
+                self.ok(m);
+                self.modal = Some(Modal::Confirm(ConfirmKind::SoundHwWorks(card_id), "Did the second tone sound quieter than the first? Press y for Yes: the card's hardware volume works and is used. Press n for No: it does nothing, so IYAKKI uses its own software volume for this card. Esc leaves the setting as it is.".into()));
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
+    /// The answer to "Did the second tone sound quieter?".
+    pub(super) fn sound_hw_answer(&mut self, cx: &AppCx, kind: &ConfirmKind, quieter: bool) {
+        let ConfirmKind::SoundHwWorks(card_id) = kind else { return };
+        let (id, mode) = (card_id.clone(), if quieter { audioout::VolumeMode::Hardware } else { audioout::VolumeMode::Software });
+        match Self::svc(cx).update_sound(|s| s.set_volume_mode(&id, mode)) {
+            Ok(now) => {
+                cx.audit.record(&cx.session.user, "settings.sound.volume_control", &format!("{card_id} {}", mode.label()));
+                self.ok(if quieter { "The hardware volume is used for this card." } else { "This card's hardware volume does nothing: IYAKKI's software volume is used." });
+                self.hw.set_sound(now);
+                self.hw.invalidate();
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
+    fn sound_pattern(&mut self, cx: &AppCx, walk: bool) {
+        let svc = Self::svc(cx).clone();
+        cx.audit.record(&cx.session.user, "settings.sound.pattern", if walk { "channel walk" } else { "stereo test" });
+        self.start(if walk { "playing the channel walk" } else { "playing the stereo test" }, move || JobOut::Msg(svc.test_pattern(walk)));
     }
 }

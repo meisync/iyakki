@@ -7,6 +7,7 @@
 //! What the page can use is what the reader engine draws: real `<button>`, `<input>`, `<select>`, `<textarea>` and `<a>` elements, text,
 //! tables, boxes and colours from CSS. There is no canvas and plain elements do not take clicks (docs/APP-AUTHORING.md, "Tile apps").
 
+use crate::safeclamp::SafeClamp;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -55,6 +56,8 @@ enum Dialog {
     Open(Request, Picker, Vec<std::path::PathBuf>),
     Save(Request, Card),
     Clip(Request, Card),
+    /// First use of the AI model or of reading aloud (`iyakki.llm`, `iyakki.speech`): allowed once, kept until revoked.
+    Sdk(Request, Card),
 }
 
 pub struct TileApp {
@@ -122,7 +125,7 @@ impl TileApp {
     /// The text of the panel that is open, if any (tests).
     pub fn card_text(&self) -> String {
         match &self.dialog {
-            Dialog::Info(c) | Dialog::Remove(c) | Dialog::Ask(_, c) | Dialog::Save(_, c) | Dialog::Clip(_, c) => format!("{}\n{}", c.title, c.lines.iter().map(|l| l.0.clone()).collect::<Vec<_>>().join("\n")),
+            Dialog::Info(c) | Dialog::Remove(c) | Dialog::Ask(_, c) | Dialog::Save(_, c) | Dialog::Clip(_, c) | Dialog::Sdk(_, c) => format!("{}\n{}", c.title, c.lines.iter().map(|l| l.0.clone()).collect::<Vec<_>>().join("\n")),
             _ => String::new(),
         }
     }
@@ -130,7 +133,7 @@ impl TileApp {
     /// Where the open panel and its buttons were drawn (tests).
     pub fn card_geometry(&self) -> Option<(R, Vec<R>)> {
         match &self.dialog {
-            Dialog::Info(c) | Dialog::Remove(c) | Dialog::Ask(_, c) | Dialog::Save(_, c) | Dialog::Clip(_, c) => Some((c.last_panel, c.last_buttons.clone())),
+            Dialog::Info(c) | Dialog::Remove(c) | Dialog::Ask(_, c) | Dialog::Save(_, c) | Dialog::Clip(_, c) | Dialog::Sdk(_, c) => Some((c.last_panel, c.last_buttons.clone())),
             _ => None,
         }
     }
@@ -185,10 +188,15 @@ impl TileApp {
 
     fn rt_note(&mut self, cx: &AppCx) {
         let Some(rt) = self.rt.as_mut() else { return };
-        let (toasts, title, notices, reqs) = {
+        // answers of slow calls (a model, a voice), stream events and the SDK's time limits
+        rt.pump();
+        let (toasts, title, notices, reqs, audit) = {
             let mut o = rt.out.lock().unwrap_or_else(|e| e.into_inner());
-            (std::mem::take(&mut o.toasts), o.title.take(), std::mem::take(&mut o.notices), o.requests.clone())
+            (std::mem::take(&mut o.toasts), o.title.take(), std::mem::take(&mut o.notices), o.requests.clone(), std::mem::take(&mut o.audit))
         };
+        for (action, detail) in audit {
+            cx.audit.record(&self.user, &action, &detail);
+        }
         if let Some(t) = toasts.last() {
             self.toast = Some((t.clone(), self.ticks + 90));
         }
@@ -215,6 +223,18 @@ impl TileApp {
                 let q = r.args["q"].as_str().unwrap_or("").to_string();
                 let card = Card::new("An app asks the assistant", AMBER).line(&format!("{who} would like to ask the assistant this question. The assistant sees only the question, not your files or other apps."), Tone::Normal).line("", Tone::Normal).line(&q, Tone::Bold).action(Action::new("Allow and ask", Key::Char('y'), OK)).action(Action::new("Don't ask", Key::Esc, MUTED));
                 Dialog::Ask(r, card)
+            }
+            "sdk.approve" => {
+                let a = &r.args;
+                let card = if a["ns"] == "speech" {
+                    Card::new("An app wants to read aloud", AMBER).line(&format!("{who} would like to read text aloud with your voice settings. You are asked once; you can take this back later."), Tone::Normal).line(a["where"].as_str().unwrap_or(""), Tone::Bold)
+                } else {
+                    let place = a["where"].as_str().unwrap_or("this computer");
+                    let leaves = if a["leaves"] == true { format!("The text it sends goes to {} on {place}, so it leaves this computer.", a["provider"].as_str().unwrap_or("your provider")) } else { "The model runs on this computer: nothing leaves it.".to_string() };
+                    let cap = a["cap"].as_u64().map_or("There is no daily limit for a model on this computer.".to_string(), |c| format!("It may use up to {c} tokens a day; you are told at 80 percent."));
+                    Card::new("An app wants to use your AI model", AMBER).line(&format!("{who} would like to ask {} its own questions. It gets plain answers: no tools, no files, no memory of your chats.", a["model"].as_str().unwrap_or("the model")), Tone::Normal).line(&leaves, Tone::Bold).line(&cap, Tone::Normal).line("You are asked once; you can take this back later.", Tone::Dim)
+                };
+                Dialog::Sdk(r, card.action(Action::new("Allow", Key::Char('y'), OK)).action(Action::new("Don't allow", Key::Esc, MUTED)))
             }
             "host.saveFile" => {
                 let name = r.args["name"].as_str().unwrap_or("file.txt").to_string();
@@ -269,6 +289,9 @@ impl TileApp {
             if let Ok(x) = iyakki_agent::store::manifest::Permission::parse(&p) {
                 c = c.line(&format!("- {}", x.words(&self.user)), Tone::Normal);
             }
+        }
+        if let Some(line) = self.rt.as_ref().and_then(|rt| rt.sdk.as_ref()).filter(|_| e.caps.llm).and_then(|s| s.summary()) {
+            c = c.line(&line, Tone::Normal);
         }
         c = c.line("It can never use your vault, other apps or tiles, the shell, or any file you did not hand to it.", Tone::Dim);
         if let Some(rt) = &self.rt {
@@ -502,6 +525,27 @@ impl TileApp {
                 }
                 _ => {}
             },
+            Dialog::Sdk(r, c) => match c.handle(ev) {
+                Some(Key::Char('y')) => {
+                    let (id, ns) = (r.id, r.args["ns"].as_str().unwrap_or("").to_string());
+                    cx.audit.record(&self.user, "tile.sdk.allow", &format!("{} may use {ns}", self.entry.name));
+                    if let Some(rt) = self.rt.as_mut() {
+                        rt.answer_sdk(id, true);
+                    }
+                    self.dirty = true;
+                    keep = false;
+                }
+                Some(Key::Esc) => {
+                    let (id, ns) = (r.id, r.args["ns"].as_str().unwrap_or("").to_string());
+                    cx.audit.record(&self.user, "tile.sdk.deny", &format!("{} was refused {ns}", self.entry.name));
+                    if let Some(rt) = self.rt.as_mut() {
+                        rt.answer_sdk(id, false);
+                    }
+                    self.dirty = true;
+                    keep = false;
+                }
+                _ => {}
+            },
             Dialog::Open(r, p, files) => match p.handle_event(ev) {
                 PickEvent::Chosen(name) => {
                     let id = r.id;
@@ -659,7 +703,7 @@ impl App for TileApp {
                 self.activate(n - CONTROL_BASE, cx);
                 self.edit.click(*x);
             }
-            Event::Scroll(d) => self.scroll = (self.scroll - *d as f32 * 48.0).clamp(0.0, (self.content_h - self.view_h).max(0.0)),
+            Event::Scroll(d) => self.scroll = (self.scroll - *d as f32 * 48.0).clamp_safe(0.0, (self.content_h - self.view_h).max(0.0)),
             Event::Key(Key::Ctrl('r')) | Event::Key(Key::F(5)) => {
                 self.start(cx);
             }
@@ -776,7 +820,7 @@ impl App for TileApp {
                 g.rect(view.x, view.y, view.w, view.h, c);
             }
             self.content_h = l.height + 24.0 * s;
-            self.scroll = self.scroll.clamp(0.0, (self.content_h - view.h).max(0.0));
+            self.scroll = self.scroll.clamp_safe(0.0, (self.content_h - view.h).max(0.0));
             let top = view.y + 12.0 * s;
             let light = l.canvas.is_some_and(|c| super::browser_dark::is_light_color(c));
             let (scroll, focus) = (self.scroll, self.focus);
@@ -845,7 +889,7 @@ impl App for TileApp {
         // dialogs on top
         match &mut self.dialog {
             Dialog::None => {}
-            Dialog::Info(c) | Dialog::Remove(c) | Dialog::Ask(_, c) | Dialog::Save(_, c) | Dialog::Clip(_, c) => c.render(g, area, s),
+            Dialog::Info(c) | Dialog::Remove(c) | Dialog::Ask(_, c) | Dialog::Save(_, c) | Dialog::Clip(_, c) | Dialog::Sdk(_, c) => c.render(g, area, s),
             Dialog::DeleteData(tf) => {
                 let p = crate::fx::modal(g, area, s, 520.0 * s, 190.0 * s, ERR, true);
                 let y = crate::fx::modal_title(g, p, s, "Delete its data too?", ERR);

@@ -3,6 +3,7 @@
 //!
 //! The head rules are the published ones as of 2026 (crown to chin); authorities change them, so the app says to check.
 
+use crate::safeclamp::SafeClamp;
 use super::pixels::RectF;
 
 /// Print resolution of every passport file.
@@ -36,8 +37,8 @@ pub fn crop_rect(s: &Spec, fw: u32, fh: u32, zoom: f32, cx: f32, cy: f32) -> Rec
     let z = zoom.clamp(0.2, 1.0);
     w *= z;
     h *= z;
-    let x = (cx * fw - w / 2.0).clamp(0.0, fw - w);
-    let y = (cy * fh - h / 2.0).clamp(0.0, fh - h);
+    let x = (cx * fw - w / 2.0).clamp_safe(0.0, fw - w);
+    let y = (cy * fh - h / 2.0).clamp_safe(0.0, fh - h);
     RectF { x, y, w, h }
 }
 
@@ -220,8 +221,8 @@ pub fn digital_jpeg(d: &Digital, w: u32, h: u32, rgba: &[u8]) -> Result<(u32, u3
     let (wf, hf) = (w.max(1) as f32, h.max(1) as f32);
     let lo = (d.min_px.0 as f32 / wf).max(d.min_px.1 as f32 / hf);
     let hi = (d.max_px.0 as f32 / wf).min(d.max_px.1 as f32 / hf);
-    let mut k = 1.0f32.clamp(lo.min(hi), hi.max(lo));
-    let fit = |k: f32| ((wf * k).round().clamp(d.min_px.0 as f32, d.max_px.0 as f32) as u32, (hf * k).round().clamp(d.min_px.1 as f32, d.max_px.1 as f32) as u32);
+    let mut k = 1.0f32.clamp_safe(lo.min(hi), hi.max(lo));
+    let fit = |k: f32| ((wf * k).round().clamp_safe(d.min_px.0 as f32, d.max_px.0 as f32) as u32, (hf * k).round().clamp_safe(d.min_px.1 as f32, d.max_px.1 as f32) as u32);
     let (max_b, min_b) = (d.max_kb as usize * 1024, d.min_kb as usize * 1024);
     let mut grown = false;
     for _ in 0..16 {

@@ -52,7 +52,7 @@ impl FlowsApp {
     }
 
     fn import_form(&mut self) {
-        self.modal = Some(Modal::Import(Form::new("Import a flow").text("File", "", "a flow file (JSON) in one of your folders, for example Documents/check.flow.json")));
+        self.modal = Some(Modal::Import(Form::new("Import a flow").path("File", "", "a flow file (JSON) in one of your folders, for example Documents/check.flow.json", crate::filepicker::PathKind::File, &["json"])));
     }
 
     fn zoom_button(&mut self, f: f32) {

@@ -2,6 +2,7 @@
 //! width. The result is a flat list of drawing pieces ([`Prim`]) with positions relative to the column's top left, plus
 //! where each link and control ended up, so the browser can draw, scroll, outline and click without laying out again.
 
+use crate::safeclamp::SafeClamp;
 use iyakki_web::css::{Gradient, Length, Rgba};
 use iyakki_web::doc::{Block, BoxStyle, Control, ControlKind, Doc, ImageRef, InlineBox, RowBlock, Span, Table, TextBlock};
 use iyakki_web::style::{contrast, luminance, over, Align, Clear, Fit, Float, Justify, Pos, VAlign};
@@ -204,8 +205,8 @@ struct Anc {
 pub fn control_size(g: &mut Gfx, c: &Control, size: f32, s: f32, max_w: f32) -> (f32, f32) {
     let field_h = size * 1.95;
     let (w, h) = match c.kind {
-        ControlKind::Text | ControlKind::Password => ((c.size as f32 * size * 0.52).clamp(130.0 * s, 900.0 * s), field_h),
-        ControlKind::Textarea => ((c.size as f32 * size * 0.52).clamp(220.0 * s, 700.0 * s), c.rows as f32 * size * 1.45 + 14.0 * s),
+        ControlKind::Text | ControlKind::Password => ((c.size as f32 * size * 0.52).clamp_safe(130.0 * s, 900.0 * s), field_h),
+        ControlKind::Textarea => ((c.size as f32 * size * 0.52).clamp_safe(220.0 * s, 700.0 * s), c.rows as f32 * size * 1.45 + 14.0 * s),
         ControlKind::Checkbox | ControlKind::Radio => (size * 1.25, size * 1.25),
         ControlKind::Submit | ControlKind::Button => (g.text_width(size, &c.label, Face::Bold) + size * 2.0, field_h),
         ControlKind::Select => {
@@ -1391,7 +1392,7 @@ fn row_block(g: &mut Gfx, r: &RowBlock, env: &Env, ox: f32, width: f32, y: f32, 
             r.grid_cols as usize
         } else {
             let min = (r.grid_min * s).max(80.0 * s);
-            (((width + gap) / (min + gap)).floor() as usize).clamp(1, n.max(1))
+            (((width + gap) / (min + gap)).floor() as usize).clamp_safe(1, n.max(1))
         }
         .min(n.max(1));
         // never so many columns that each is too narrow to read

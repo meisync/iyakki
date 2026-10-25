@@ -100,6 +100,10 @@ impl CameraBackend for AgentCamera {
         Ok(path)
     }
 
+    fn photo_bytes(&self) -> Result<Vec<u8>, String> {
+        self.grab()?.to_jpeg()
+    }
+
     fn record_start(&self, dir: &Path, max_secs: u32) -> Result<PathBuf, String> {
         let live = self.open()?;
         let path = super::unique(dir, &format!("video-{}", super::stamp()), "avi");

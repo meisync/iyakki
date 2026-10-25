@@ -2,6 +2,8 @@
 //! JPEG frames ([`jpeg`]), pixel work and PNG print sizes ([`pixels`]), MJPEG/AVI recording ([`avi`]), passport photos
 //! and print sheets ([`passport`]), and the threads that keep a live picture coming while the app draws ([`live`]).
 
+use crate::safeclamp::SafeClamp;
+
 pub mod avi;
 pub mod detect;
 pub mod jpeg;
@@ -128,7 +130,7 @@ impl Control {
     pub fn stepped(&self, up: bool) -> i32 {
         let span = (self.max - self.min).max(1);
         let s = ((span / 20) / self.step.max(1)).max(1) * self.step.max(1);
-        (if up { self.value + s } else { self.value - s }).clamp(self.min, self.max)
+        (if up { self.value + s } else { self.value - s }).clamp_safe(self.min, self.max)
     }
     /// Where the value sits, 0..=1.
     pub fn fraction(&self) -> f32 {

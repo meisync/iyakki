@@ -19,6 +19,7 @@ pub(crate) mod model_picker;
 pub mod chatpic;
 pub mod browser;
 pub mod browser_assist;
+pub mod browser_block;
 pub mod browser_config;
 pub mod browser_dark;
 pub mod browser_data;
@@ -27,6 +28,8 @@ pub mod web_agent;
 pub mod browser_consent;
 pub mod browser_devtools;
 pub mod browser_images;
+pub mod browser_sound;
+pub mod browser_speed;
 pub mod browser_typo;
 pub mod browser_logins;
 pub mod browser_persist;
@@ -61,6 +64,11 @@ pub mod skills;
 pub mod store;
 pub(crate) mod store_drivers;
 pub mod usage;
+pub mod voice;
+mod voice_ui;
+pub mod lab;
+mod lab_pic;
+mod lab_ui;
 pub mod srepilot;
 pub mod story;
 pub mod system;
@@ -79,7 +87,19 @@ pub mod ide_bottom;
 pub mod ide_chrome;
 pub mod ide_deploy;
 pub mod ide_k8s;
+pub mod k8s_tile;
+pub mod disks_tile;
+mod disks_tile_ui;
+pub mod cluster_host;
+pub mod cluster_switch;
+pub mod clusters_panel;
+pub mod linuxwin;
+mod k8s_tile_ui;
 pub mod platform_services;
+pub mod ide_git;
+pub mod ide_git_ui;
+pub mod git_wizard;
+pub mod ide_git_connect;
 pub mod ide_notes;
 pub mod ide_tasks;
 pub mod ide_tile;
@@ -138,9 +158,33 @@ pub trait App {
         self.hint().split(" · ").map(str::to_string).collect()
     }
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow;
+    /// A smooth scroll step of `px` pixels of a nominal screen (positive = up; [`crate::scrolleng::NOTCH_PX`] is one wheel click) while
+    /// nothing is drawn over this app. True when something under the pointer scrolled by it; false (the default) makes the shell send
+    /// whole [`Event::Scroll`] notches instead, which every app understands.
+    fn scroll_px(&mut self, _px: i32, _cx: &AppCx) -> bool {
+        false
+    }
+    /// The app draws its own smooth pictures (the browser's full engine): the shell's wheel steps are not eased again for it.
+    fn scroll_raw(&self) -> bool {
+        false
+    }
+    /// A media key (play/pause, next, previous, stop) pressed while this app is open: true when the app took it. The shell does
+    /// the rest (the radio keeps playing in the background, so it answers the keys when no app does).
+    fn media_key(&mut self, _k: crate::fnkeys::FnKey, _cx: &AppCx) -> bool {
+        false
+    }
     /// An app the shell should open next (the INBOX opens the app a notification points to): its id and the item in it.
     fn take_request(&mut self) -> Option<(String, String)> {
         None
+    }
+    /// Something the person is watching or listening to goes on in this app (a story being read aloud): the screen stays on
+    /// (`shell_saver.rs`). The default says no.
+    fn keeps_screen_on(&self) -> bool {
+        false
+    }
+    /// For the Touch Bar's AI strip: (an agent run is going, a tool call waits for a decision). Only the chat knows.
+    fn touchbar_state(&self) -> (bool, bool) {
+        (false, false)
     }
     /// The shell opened this app because another one asked for a particular thing in it (`platform:private-store` in Settings).
     fn open_item(&mut self, _item: &str, _cx: &AppCx) {}
@@ -148,6 +192,22 @@ pub trait App {
     /// Asked after every heartbeat; true once per change.
     fn wants_redraw(&mut self) -> bool {
         false
+    }
+    /// Like [`App::wants_redraw`], but says how much: an app whose live picture is a rectangle of the screen (the browser's full
+    /// engine) answers `Live` when only that picture changed, so the shell can paint just it ([`App::live_draw`]) instead of the
+    /// whole scene. The default is `Full` whenever `wants_redraw` says so.
+    fn redraw_kind(&mut self) -> browser_full::Redraw {
+        if self.wants_redraw() {
+            browser_full::Redraw::Full
+        } else {
+            browser_full::Redraw::None
+        }
+    }
+    /// Paint only the changed live picture over the scene drawn last (after `redraw_kind` said `Live`, and only when the shell
+    /// knows nothing else on screen changed or overlaps it). Returns the screen rectangle `(x, y, w, h)` written; `None` makes
+    /// the shell draw the whole scene instead.
+    fn live_draw(&mut self, _g: &mut Gfx) -> Option<(i32, i32, i32, i32)> {
+        None
     }
     /// The pointer shape the app wants at (x, y) when the shell's own hit regions have no opinion (an embedded engine
     /// draws its own page and knows what is under the pointer).
@@ -295,6 +355,10 @@ pub fn with_caret<T>(on: bool, f: impl FnOnce() -> T) -> T {
     crate::ui::with_input_focus(on, f)
 }
 
+#[cfg(test)]
+mod disks_tile_tests;
+#[cfg(test)]
+mod linuxwin_tests;
 #[cfg(test)]
 mod ide_tests;
 #[cfg(test)]

@@ -6,6 +6,7 @@
 //! typing (`wants_text`). The notes are re-read when `.iyakki/notes.json` changes, so a note an agent adds shows up within a second
 //! and is marked "new by agent" until it is reviewed.
 
+use crate::safeclamp::SafeClamp;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -488,7 +489,7 @@ impl NotesView {
             }
             Event::Scroll(d) => {
                 if self.narrow && !self.page || !self.narrow && self.hover_list {
-                    self.scroll = (self.scroll as i32 - d).clamp(0, self.shown().len().saturating_sub(self.visible) as i32) as usize;
+                    self.scroll = (self.scroll as i32 - d).clamp_safe(0, self.shown().len().saturating_sub(self.visible) as i32) as usize;
                 } else {
                     self.detail_scroll = (self.detail_scroll as i32 - d * 2).max(0) as usize;
                 }
@@ -634,7 +635,7 @@ impl NotesView {
         }
         let top = self.draw_header(g, r, s, accent, narrow);
         let body = R::new(r.x, r.y + top, r.w, (r.h - top).max(0.0));
-        let list_w = if narrow { body.w } else { (body.w * 0.40).clamp(240.0 * s, 460.0 * s) };
+        let list_w = if narrow { body.w } else { (body.w * 0.40).clamp_safe(240.0 * s, 460.0 * s) };
         // in a narrow pane the form is a page of its own
         let page = self.page || self.edit.is_some();
         let show_list = !narrow || !page;
@@ -693,7 +694,7 @@ impl NotesView {
             ('f', format!("pinned: {}", if self.filter.pinned_only { "only" } else { "any" }), self.filter.pinned_only),
             ('v', format!("show: {}", self.filter.status.map_or("active", |st| st.key())), self.filter.status.is_some()),
         ];
-        let search_room = if narrow { 0.0 } else { (r.w * 0.22).clamp(0.0, 220.0 * s) };
+        let search_room = if narrow { 0.0 } else { (r.w * 0.22).clamp_safe(0.0, 220.0 * s) };
         for (c, label, on) in filters {
             let label = g.fit(m.font_small * s, &label, Face::Bold, 150.0 * s);
             let w = g.text_width(m.font_small * s, &label, Face::Bold) + 16.0 * s;

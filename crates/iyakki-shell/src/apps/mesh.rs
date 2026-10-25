@@ -3,6 +3,7 @@
 //! token goes into the system vault, never into a file); every request is checked against the signed-in account's host
 //! policy, and changes to the key/value store are written to the audit log.
 
+use crate::safeclamp::SafeClamp;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
@@ -434,7 +435,7 @@ impl App for MeshApp {
             }
             Event::Scroll(d) => {
                 let n = self.rows().len();
-                self.sel = (self.sel as i32 - d).clamp(0, n.saturating_sub(1) as i32) as usize;
+                self.sel = (self.sel as i32 - d).clamp_safe(0, n.saturating_sub(1) as i32) as usize;
                 return Flow::Stay;
             }
             _ => {}

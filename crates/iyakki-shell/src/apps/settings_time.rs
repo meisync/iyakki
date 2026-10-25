@@ -289,14 +289,14 @@ impl SettingsApp {
         for (label, value, warn) in self.time_rows(cx) {
             if label.is_empty() {
                 for l in g.wrap(13.0 * s, &value, Face::Sans, a.w - label_w) {
-                    g.text(a.x + label_w, y, 13.0 * s, if warn { rgb(255, 196, 94) } else { MUTED }, &l, Face::Sans);
+                    g.text(a.x + label_w, y, 13.0 * s, if warn { crate::fx::AMBER } else { MUTED }, &l, Face::Sans);
                     y += 18.0 * s;
                 }
                 continue;
             }
             g.text(a.x, y, 14.0 * s, MUTED, label, Face::Sans);
             let t = g.fit(14.0 * s, &value, Face::Bold, a.w - label_w);
-            g.text(a.x + label_w, y, 14.0 * s, if warn { rgb(255, 196, 94) } else { TEXT }, &t, Face::Bold);
+            g.text(a.x + label_w, y, 14.0 * s, if warn { crate::fx::AMBER } else { TEXT }, &t, Face::Bold);
             y += 24.0 * s;
         }
     }
@@ -382,10 +382,10 @@ impl SettingsApp {
         let saved = crate::hostname::saved(&self.hn.conf);
         row(g, &mut y, "Kept for next boots", saved.as_deref().unwrap_or("not set (the image's own name)"), TEXT);
         if let Some(d) = &self.hn.draft {
-            row(g, &mut y, "Typed, not applied", d, rgb(255, 196, 94));
+            row(g, &mut y, "Typed, not applied", d, crate::fx::AMBER);
         }
         if let Some(n) = self.hn_locked() {
-            row(g, &mut y, "Locked", &format!("by the boot option iyakki.hostname={n}"), rgb(255, 196, 94));
+            row(g, &mut y, "Locked", &format!("by the boot option iyakki.hostname={n}"), crate::fx::AMBER);
         }
         y += 6.0 * s;
         for l in g.wrap(13.0 * s, crate::hostname::HINT, Face::Sans, a.w) {

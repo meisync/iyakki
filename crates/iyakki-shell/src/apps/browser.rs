@@ -4,6 +4,7 @@
 //! host (including redirect targets) is checked against the signed-in user's policy, and only the host of each visit is
 //! written to the audit log.
 
+use crate::safeclamp::SafeClamp;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 
@@ -11,14 +12,16 @@ use iyakki_web::doc::{Control, ControlKind, Doc};
 use iyakki_web::{form_urlencode, Jar, Loaded, Request, Url};
 
 use super::browser_assist;
+use super::browser_block;
 use super::browser_config::{self, BrowserConfig};
 use super::browser_dark;
 use super::browser_devtools;
 use super::browser_typo;
-use super::browser_full::{Full, Note, Start, AREA_FULL};
+use super::browser_full::{Full, Note, Redraw, Start, AREA_FULL};
 use super::browser_data::{self, Data, Suggestion};
 use super::browser_logins::{self, Cred};
 use super::browser_persist;
+use super::browser_speed;
 use super::browser_images::{spawn_loader, ImgState, Msg, Pic, MAX_IMAGES};
 use super::browser_layout::{key_of, layout, Focus, ImgInfo, Kind, Layout, Prim};
 use tiny_skia::{FilterQuality, PixmapPaint, Transform};
@@ -364,6 +367,8 @@ pub struct BrowserApp {
     serial_next: u64,
     /// The page just shown still has pictures to ask for.
     images_due: bool,
+    /// The early fetches of the page being loaded or just shown (cancelled when another page is asked for).
+    preload: Option<Arc<iyakki_web::preload::Preloader>>,
     layout: Option<Layout>,
     /// What the last frame measured, for scrolling keys.
     view_h: f32,
@@ -405,6 +410,8 @@ pub struct BrowserApp {
     assist: Option<browser_assist::Assist>,
     /// The developer panel's network list (c cycles notes, network, closed) and what it shows.
     show_net: bool,
+    /// The list of requests the filter lists blocked on this page (B opens it).
+    show_blocked: bool,
     net_log: browser_devtools::Log,
     /// An open drop-down list: the control and the highlighted option.
     popup: Option<(usize, usize)>,
@@ -472,6 +479,7 @@ impl BrowserApp {
             img_rx,
             serial_next: 1,
             images_due: false,
+            preload: None,
             layout: None,
             view_h: 400.0,
             status: None,
@@ -495,6 +503,7 @@ impl BrowserApp {
             find: None,
             assist: None,
             show_net: false,
+            show_blocked: false,
             net_log: Default::default(),
             popup: None,
             pending_cred: None,
@@ -838,6 +847,7 @@ impl BrowserApp {
     }
 
     fn go_request(&mut self, req: Request, how: How, cx: &AppCx) {
+        let req = Request { priority: iyakki_web::net::DOCUMENT, ..req };
         if self.full.is_some() {
             self.go_full(&req, cx);
             return;
@@ -862,13 +872,31 @@ impl BrowserApp {
             }
             _ => req,
         };
+        // the person's ad and tracker blocking (switch, allowed sites, lists) is read before anything is requested
+        browser_block::apply(cx);
+        browser_block::weekly_refresh(cx);
         let url = req.url.clone();
         let policy = cx.session.policy.clone();
         // a new page load starts a new network list (pictures and reloads add to the list of the page they belong to)
         if let Ok(mut l) = self.net_log.lock() {
             l.clear();
         }
-        let web: Arc<dyn iyakki_web::Fetch> = Arc::new(browser_devtools::Recording::new(cx.web.clone(), self.net_log.clone()));
+        // this person's own cache; its sizes follow the machine's free memory (re-read every few seconds)
+        let user_web = cx.web.for_user(&cx.session.user).unwrap_or_else(|| cx.web.clone());
+        let cfg_now = browser_config::load(cx);
+        browser_speed::refresh(user_web.as_ref(), cx.services.dir(), cfg_now.cache);
+        let wire: Arc<dyn iyakki_web::Fetch> = Arc::new(browser_devtools::Recording::new(user_web, self.net_log.clone()));
+        // style sheets and scripts the page names start loading together as soon as its HTML is in hand
+        let mach = browser_speed::machine(cx.services.dir());
+        let preloader = {
+            let policy = policy.clone();
+            let jar = if cfg_now.cookies { Some(self.sites.cookies.clone()) } else { None };
+            iyakki_web::preload::Preloader::new(wire, &url, Arc::new(move |h: &str| policy.allows_host(h)), jar, browser_speed::preload_workers(&mach))
+        };
+        if let Some(old) = self.preload.replace(preloader.clone()) {
+            old.cancel();
+        }
+        let web: Arc<dyn iyakki_web::Fetch> = preloader.clone();
         let (tx, rx) = channel();
         let target = url.clone();
         // Settings may have changed since the last page
@@ -889,7 +917,7 @@ impl BrowserApp {
             let store = if cfg.cookies { &sites.cookies } else { &no_cookies };
             // style sheets come through the same checks as the page: the account's hosts, cookies, a size limit
             let sheet = |u: &Url| -> Option<String> {
-                let (_, r) = iyakki_web::fetch_following(web.as_ref(), Request::get(u), &allow, Some(Jar { store, now })).ok()?;
+                let (_, r) = iyakki_web::fetch_following(web.as_ref(), Request { priority: iyakki_web::net::BLOCKING, ..Request::get(u) }, &allow, Some(Jar { store, now })).ok()?;
                 let ct = r.content_type.to_ascii_lowercase();
                 (r.status < 400 && r.body.len() <= iyakki_web::style::MAX_SHEET_BYTES && (ct.is_empty() || ct.contains("css") || ct.contains("text/plain"))).then(|| String::from_utf8_lossy(&r.body).into_owned())
             };
@@ -909,6 +937,7 @@ impl BrowserApp {
             };
             // scripts run only for sites the user has allowed (checked again for where redirects end up)
             let render = |u: &Url, html: &str| -> (Doc, Vec<String>) {
+                preloader.start(&iyakki_web::preload::scan(html, u, iyakki_web::preload::Wants { styles: cfg.styles, scripts: cfg.scripts_for(&u.host), images: cfg.images }));
                 if cfg.scripts_for(&u.host) {
                     let mut data = sites.for_origin(u);
                     if !cfg.cookies {
@@ -930,6 +959,7 @@ impl BrowserApp {
             };
             let jar = Jar { store, now };
             let r = iyakki_web::load_request(web.as_ref(), req, &allow, &render, Some(jar));
+            preloader.release_unused();
             let _ = target;
             let _ = tx.send(r);
         });
@@ -1102,7 +1132,7 @@ impl BrowserApp {
                     }
                     let policy = cx.session.policy.clone();
                     let jar = if self.cfg.cookies { self.sites.cookies.clone() } else { Arc::new(std::sync::Mutex::new(iyakki_web::CookieStore::new())) };
-                    spawn_loader(page.url.clone(), jobs, cx.web.clone(), move |h: &str| policy.allows_host(h), jar, e.serial, self.img_tx.clone());
+                    spawn_loader(page.url.clone(), jobs, browser_speed::image_fetch(cx, self.preload.as_ref(), &page.url),  move |h: &str| policy.allows_host(h), jar, e.serial, self.img_tx.clone());
                 }
             }
         }
@@ -1277,7 +1307,7 @@ impl BrowserApp {
         };
         let (tx, rx) = channel();
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (flag, web, url) = (cancel.clone(), cx.web.clone(), url);
+        let (flag, web, url) = (cancel.clone(), cx.web.for_user(&cx.session.user).unwrap_or_else(|| cx.web.clone()), url);
         let name = match name.map(|n| sanitize_file_name(&n)).filter(|n| !n.is_empty()) {
             Some(n) => n,
             None => download_name(&url.to_string(), &ctype),
@@ -1971,7 +2001,7 @@ impl BrowserApp {
             Ok(mut u) => {
                 cx.audit.record(&cx.session.user, "browser.form", &u.host);
                 if f.post {
-                    self.go_request(Request { url: u, method: "POST".into(), body: body.into_bytes(), content_type: "application/x-www-form-urlencoded".into(), cookie: String::new(), referer: page.url.to_string() }, How::Push, cx);
+                    self.go_request(Request { url: u, method: "POST".into(), body: body.into_bytes(), content_type: "application/x-www-form-urlencoded".into(), cookie: String::new(), referer: page.url.to_string(), ..Default::default() }, How::Push, cx);
                 } else {
                     u.query = (!body.is_empty()).then_some(body);
                     u.fragment = None;
@@ -2189,6 +2219,8 @@ impl BrowserApp {
             Key::Char('r') => self.reload(cx),
             Key::Char('h') => self.home(),
             Key::Char('j') => self.toggle_js(cx),
+            Key::Char('a') => self.toggle_block_allow(cx),
+            Key::Char('B') => self.show_blocked = !self.show_blocked,
             Key::Char('p') if self.page().is_some_and(|p| p.media) => self.play_media(cx),
             Key::Char('c') => {
                 // closed → notes → network → closed
@@ -2287,7 +2319,10 @@ impl BrowserApp {
             }
         };
         let start = Start {
-            env: iyakki_agent::webengine::helper_env(&profile),
+            env: iyakki_agent::webengine::helper_env(&profile).map(|mut e| {
+                e.extend(browser_block::prepare_full_engine(cx, &profile));
+                e
+            }),
             helper,
             profile,
             size: (self.view_rect.w.max(64.0) as u32, self.view_rect.h.max(64.0) as u32),
@@ -2362,6 +2397,14 @@ impl BrowserApp {
     /// everything goes to the engine; Esc hands the keyboard back to the browser (its letters work again), and then F or Esc
     /// returns to the built-in reader. Tabs, bookmarks, history and the address bar keep their Ctrl shortcuts.
     fn full_key(&mut self, k: &Key, cx: &AppCx) -> bool {
+        // fullscreen page: no bars, so no browser shortcuts; Esc asks the page to leave, everything else is the page's
+        if let Some(f) = self.full.as_mut().filter(|f| f.fullscreen) {
+            match k {
+                Key::Esc => f.leave_fullscreen(),
+                other => f.key(other),
+            }
+            return true;
+        }
         if self.full.is_none() || self.addr_focus || self.popup.is_some() || self.assist.is_some() {
             return false;
         }
@@ -2415,6 +2458,7 @@ impl BrowserApp {
         // tabs in the background keep their title and address up to date
         for t in self.tabs.iter_mut().flatten() {
             let Some(f) = t.full.as_mut() else { continue };
+            f.set_smooth(browser_config::smooth_now());
             f.pump(&allow);
             let (notes, title, url) = (f.take_notes(), f.title.clone(), f.url.clone());
             let mut gone = false;
@@ -2434,6 +2478,7 @@ impl BrowserApp {
             }
         }
         let Some(f) = self.full.as_mut() else { return };
+        f.set_smooth(browser_config::smooth_now());
         f.pump(&allow);
         for n in f.take_notes() {
             self.apply_full_note(n, cx);
@@ -2481,6 +2526,12 @@ impl BrowserApp {
                 crate::ui::clipboard::toast("Copied");
             }
             Note::Trouble(r) => self.status = Some((format!("The full web engine reports: {r}"), false)),
+            Note::Sound(Some(n)) => self.status = Some((n, false)),
+            Note::Sound(None) => {
+                if self.status.as_ref().is_some_and(|s| s.0.starts_with("Sound ")) {
+                    self.status = None;
+                }
+            }
             Note::Gone(why) => {
                 let url = self.full.as_ref().map(|f| if f.url.is_empty() { f.good_url.clone() } else { f.url.clone() }).unwrap_or_default();
                 self.full = None;
@@ -2565,6 +2616,27 @@ impl BrowserApp {
             Ok(()) => self.status = Some((format!("Opened in {}.", argv[0].rsplit('/').next().unwrap_or("the player")), true)),
             Err(e) => self.status = Some((e, false)),
         }
+    }
+
+    /// A: blocking of ads and trackers off (or on again) for the site of the page. Also the one click on the page that says a
+    /// filter list blocked it.
+    fn toggle_block_allow(&mut self, cx: &AppCx) {
+        let Some(host) = self.current_url().map(|u| u.host.clone()) else {
+            self.status = Some(("Open a page first; blocking can be switched off site by site.".into(), false));
+            return;
+        };
+        if !browser_block::load(cx).enabled {
+            self.status = Some(("Blocking is off everywhere (Settings → Browser → Block ads and trackers).".into(), false));
+            return;
+        }
+        let allowed = browser_block::toggle_allow(cx, &host);
+        browser_block::apply(cx);
+        cx.audit.record(&cx.session.user, if allowed { "browser.block.allow" } else { "browser.block.resume" }, &host);
+        let note = if self.full.is_some() { " (the full engine uses the new choice when it is opened again)" } else { "" };
+        if self.full.is_none() {
+            self.reload(cx);
+        }
+        self.status = Some((if allowed { format!("Ads and trackers are allowed on {host}{note}.") } else { format!("Blocking is back on for {host}{note}.") }, true));
     }
 
     fn toggle_js(&mut self, cx: &AppCx) {
@@ -3128,6 +3200,26 @@ impl BrowserApp {
                 g.rrect(view.x + view.w - 8.0 * s, by, 5.0 * s, bh, 2.5 * s, [ACCENT[0], ACCENT[1], ACCENT[2], 150]);
             }
         }
+        // what the filter lists blocked on this page
+        if self.show_blocked {
+            let f = iyakki_web::blocker_state::Filter::global();
+            let log = f.page_log();
+            let ph = (view.h * 0.4).min(260.0 * s);
+            let (px, py) = (view.x + 20.0 * s, view.y + view.h - ph - 8.0 * s);
+            g.rrect(px, py, view.w - 40.0 * s, ph, 10.0 * s, [8, 11, 24, 238]);
+            g.rrect_outline(px, py, view.w - 40.0 * s, ph, 10.0 * s, 1.5 * s, [ACCENT[0], ACCENT[1], ACCENT[2], 110]);
+            let size = 13.0 * s;
+            let lh = g.line_height(size, Face::Mono) + 3.0 * s;
+            let rows = (((ph - 20.0 * s) / lh) as usize).max(1);
+            let n = f.page_blocked().1;
+            let head = if !f.enabled() { "Blocked · blocking is off".to_string() } else { format!("Blocked · {n} on this page (A allows this site, B closes)") };
+            let head = g.fit(size, &head, Face::Bold, view.w - 70.0 * s);
+            g.text(px + 12.0 * s, py + 6.0 * s, size, ACCENT, &head, Face::Bold);
+            for (i, b) in log.iter().rev().take(rows.saturating_sub(1)).enumerate() {
+                let l = g.fit(size, &format!("{:<7} {}   {}", b.kind.label(), b.url, b.rule), Face::Mono, view.w - 70.0 * s);
+                g.text(px + 12.0 * s, py + 10.0 * s + (i + 1) as f32 * lh, size, MUTED, &l, Face::Mono);
+            }
+        }
         // the developer panel: script errors and what was skipped
         if self.show_net {
             let lines: Vec<String> = self.net_log.lock().map(|l| l.iter().map(|n| n.text()).collect()).unwrap_or_default();
@@ -3219,6 +3311,28 @@ impl App for BrowserApp {
         .iter()
         .map(|s| s.to_string())
         .collect()
+    }
+
+    fn scroll_px(&mut self, px: i32, _cx: &AppCx) -> bool {
+        if self.agent_view {
+            return false;
+        }
+        match self.full.as_mut() {
+            Some(f) => f.wheel_px(px),
+            None => {
+                let before = self.scroll;
+                self.scroll_by(-(px as f32) / crate::scrolleng::NOTCH_PX * 60.0);
+                if self.scroll == before {
+                    crate::scrolleng::note_bound();
+                }
+                true
+            }
+        }
+    }
+
+    /// The full engine makes its own smooth pictures: the wheel's steps go to it once, not eased a second time.
+    fn scroll_raw(&self) -> bool {
+        self.full.is_some()
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
@@ -3398,11 +3512,34 @@ impl App for BrowserApp {
     }
 
     fn wants_redraw(&mut self) -> bool {
+        // the caller answers with a whole redraw (panes, other displays): a live picture needs nothing more than that
+        match self.redraw_kind() {
+            Redraw::None => false,
+            Redraw::Live => {
+                self.full.as_mut().is_some_and(|f| f.take_redraw()) || self.agent_view
+            }
+            Redraw::Full => true,
+        }
+    }
+
+    fn redraw_kind(&mut self) -> Redraw {
         if self.agent_view {
             // the assistant's tab shows a live picture, and its banner changes with what it does
-            return true;
+            return Redraw::Full;
         }
-        self.full.as_mut().is_some_and(|f| f.take_redraw())
+        match self.full.as_mut().map(|f| f.redraw_kind()) {
+            // a popup, the assistant's panel or the address suggestions are drawn over the page: they need the whole scene
+            Some(Redraw::Live) if self.popup.is_some() || self.assist.is_some() || !self.suggest.is_empty() => Redraw::Full,
+            Some(k) => k,
+            None => Redraw::None,
+        }
+    }
+
+    fn live_draw(&mut self, g: &mut Gfx) -> Option<(i32, i32, i32, i32)> {
+        if self.agent_view || self.popup.is_some() || self.assist.is_some() || !self.suggest.is_empty() {
+            return None;
+        }
+        self.full.as_mut()?.draw_pending(g)
     }
 
     fn context_items(&mut self, _x: i32, _y: i32) -> Vec<crate::ctxmenu::Item> {
@@ -3500,6 +3637,13 @@ impl App for BrowserApp {
         self.view_h = view.h;
         self.view_rect = view;
         self.ui_scale = s;
+        // a fullscreen page gets the whole pane: no tabs, bars or status line
+        if self.full.as_ref().is_some_and(|f| f.fullscreen) {
+            self.view_h = area.h;
+            self.view_rect = area;
+            self.render_full(g, area, s);
+            return;
+        }
         if self.full.is_some() {
             self.render_full(g, view, s);
         } else {
@@ -3593,7 +3737,16 @@ impl App for BrowserApp {
         } else {
             (String::new(), DIM)
         };
-        let chip = if (self.zoom() - 1.0).abs() > 0.01 { format!("{}%", (self.zoom() * 100.0).round()) } else { String::new() };
+        let blocked_here = {
+            let (page, n) = iyakki_web::blocker_state::Filter::global().page_blocked();
+            if n > 0 && self.current_url().is_some_and(|u| u.host.eq_ignore_ascii_case(&page)) { n } else { 0 }
+        };
+        let zoom_chip = if (self.zoom() - 1.0).abs() > 0.01 { format!("{}%", (self.zoom() * 100.0).round()) } else { String::new() };
+        let chip = match (blocked_here, zoom_chip.is_empty()) {
+            (0, _) => zoom_chip,
+            (n, true) => format!("{n} blocked"),
+            (n, false) => format!("{n} blocked · {zoom_chip}"),
+        };
         let chip_w = if chip.is_empty() { 0.0 } else { g.text_width(14.0 * s, &chip, Face::Bold) + 24.0 * s };
         let text = g.fit(14.0 * s, &text, Face::Sans, area.w - 40.0 * s - chip_w);
         g.text(area.x + 20.0 * s, sy + 6.0 * s, 14.0 * s, color, &text, Face::Sans);
@@ -3609,7 +3762,7 @@ impl App for BrowserApp {
             // the assistant's own tab, while it exists or is acting
             let assistant = cx.session.policy.browser_agent != iyakki_sec::policy::BrowserAgent::Off && (super::web_agent::alive(&cx.session.user) || cx.services.browser.control_view(&cx.session.user).active);
             let ass_w = if assistant { 150.0 * s } else { 0.0 };
-            let tw = ((area.w - 16.0 * s - plus_w - ass_w) / n as f32).clamp(70.0 * s, 230.0 * s);
+            let tw = ((area.w - 16.0 * s - plus_w - ass_w) / n as f32).clamp_safe(70.0 * s, 230.0 * s);
             let mut x = area.x + 8.0 * s;
             for (i, title) in titles.iter().enumerate() {
                 let r = R::new(x, area.y + 4.0 * s, tw - 4.0 * s, tabs_h - 4.0 * s);
@@ -4988,7 +5141,7 @@ mod tests {
         // everything off
         let srv = server(routes());
         let cx = cx_server("br40", srv.clone());
-        browser_config::save(&cx, &BrowserConfig { js_all: false, images: false, styles: true, cookies: false, js_sites: Default::default(), search: Default::default(), player: String::new() });
+        browser_config::save(&cx, &BrowserConfig { js_all: false, images: false, styles: true, cookies: false, js_sites: Default::default(), search: Default::default(), player: String::new(), cache: Default::default(), smooth: false });
         let mut a = BrowserApp::new(&cx);
         a.open_url("s.org", &cx);
         settle(&mut a, &cx);
@@ -4997,7 +5150,7 @@ mod tests {
         assert!(matches!(&a.history[a.pos].images[0], ImgState::Failed(e) if e.contains("turned off")), "pictures are off");
         assert_eq!(srv.seen.lock().unwrap().len(), 1, "only the page was asked for");
         // scripts everywhere, pictures on, cookies on: the change applies to the next page without restarting
-        browser_config::save(&cx, &BrowserConfig { js_all: true, images: true, styles: true, cookies: true, js_sites: Default::default(), search: Default::default(), player: String::new() });
+        browser_config::save(&cx, &BrowserConfig { js_all: true, images: true, styles: true, cookies: true, js_sites: Default::default(), search: Default::default(), player: String::new(), cache: Default::default(), smooth: false });
         a.reload(&cx);
         settle(&mut a, &cx);
         settle_images(&mut a, &cx);
@@ -5012,7 +5165,7 @@ mod tests {
         // cookies off: nothing set by the server is kept or sent
         let srv2 = server(routes());
         let cx2 = cx_server("br41", srv2.clone());
-        browser_config::save(&cx2, &BrowserConfig { js_all: true, images: false, styles: true, cookies: false, js_sites: Default::default(), search: Default::default(), player: String::new() });
+        browser_config::save(&cx2, &BrowserConfig { js_all: true, images: false, styles: true, cookies: false, js_sites: Default::default(), search: Default::default(), player: String::new(), cache: Default::default(), smooth: false });
         let mut b = BrowserApp::new(&cx2);
         b.open_url("s.org", &cx2);
         settle(&mut b, &cx2);
@@ -6064,6 +6217,8 @@ mod tests {
     }
 
     /// Run heartbeats until `done` (the helper answers in its own time).
+    include!("browser_block_ui_tests.rs");
+
     fn pump(a: &mut BrowserApp, cx: &AppCx, what: &str, mut done: impl FnMut(&mut BrowserApp) -> bool) {
         for _ in 0..2000 {
             a.handle(&Event::Tick, cx);
@@ -6154,6 +6309,119 @@ mod tests {
         a.change_zoom(Some(true), &cx);
         let z = a.full.as_ref().unwrap().log.iter().any(|l| l.contains("Zoom"));
         pump(&mut a, &cx, "the zoom", |a| a.full.as_ref().is_some_and(|f| f.log.iter().any(|l| l.contains("Zoom("))) || z);
+    }
+
+    #[test]
+    fn a_page_in_fullscreen_gets_the_whole_pane_with_no_bars_and_esc_asks_the_page_to_leave() {
+        let (_fake, cx, mut a, _g) = in_full("full_fs", "--static");
+        let normal = a.view_rect;
+        let area = R::new(0.0, 72.0, 1280.0, 720.0 - 72.0);
+        assert!(normal.h < area.h, "the bars take room from the page normally");
+        a.full.as_mut().unwrap().navigate("fake://fullscreen");
+        pump(&mut a, &cx, "the page entering fullscreen", |a| a.full.as_ref().is_some_and(|f| f.fullscreen));
+        let g = frame(&mut a, &cx, 1280, 720);
+        assert_eq!(a.view_rect, area, "the page area is the whole pane");
+        assert!(!g.hits.iter().any(|h| h.label == "close tab" || h.label == "new tab"), "the bars are not drawn or clickable");
+        assert!(g.hits.iter().any(|h| h.label == "page" && h.ev == Event::Area(AREA_FULL)));
+        let want = (area.w as u32, area.h as u32);
+        pump(&mut a, &cx, "the engine resized to the pane", |a| {
+            frame(a, &cx, 1280, 720);
+            a.full.as_ref().is_some_and(|f| f.frame_size() == want)
+        });
+        // keys other than Esc are the page's own (the F key must not switch back to the reader, a letter is typed in the page)
+        key(&mut a, &cx, Key::Char('F'));
+        assert!(a.full.as_ref().unwrap().fullscreen);
+        pump(&mut a, &cx, "the key reaching the page", |a| a.full.as_ref().is_some_and(|f| f.log.iter().any(|l| l.contains("Key {") && l.contains("keysym: 70,"))));
+        // Esc asks the page to leave; the bars come back only when the page says it has
+        key(&mut a, &cx, Key::Esc);
+        assert!(a.full.is_some(), "Esc in fullscreen does not close the engine");
+        pump(&mut a, &cx, "the page leaving fullscreen", |a| a.full.as_ref().is_some_and(|f| !f.fullscreen));
+        assert!(a.full.as_ref().unwrap().log.iter().any(|l| l.contains("LeaveFullscreen")));
+        frame(&mut a, &cx, 1280, 720);
+        assert_eq!(a.view_rect, normal, "the normal layout is back");
+        let want = (normal.w as u32, normal.h as u32);
+        pump(&mut a, &cx, "the engine resized back", |a| {
+            frame(a, &cx, 1280, 720);
+            a.full.as_ref().is_some_and(|f| f.frame_size() == want)
+        });
+        // a navigation that ends fullscreen on its own restores the layout too
+        a.full.as_mut().unwrap().navigate("fake://fullscreen");
+        pump(&mut a, &cx, "fullscreen again", |a| a.full.as_ref().is_some_and(|f| f.fullscreen));
+        a.full.as_mut().unwrap().navigate("https://b.org/x");
+        pump(&mut a, &cx, "fullscreen ended by the navigation", |a| a.full.as_ref().is_some_and(|f| !f.fullscreen));
+    }
+
+    #[test]
+    fn smooth_pages_ask_the_engine_for_half_the_pixels_stretch_them_and_clicks_still_land_under_the_pointer() {
+        let (_fake, cx, mut a, _g) = in_full("full_smooth", "--static");
+        let view = a.view_rect;
+        assert_eq!(a.full.as_ref().unwrap().frame_size(), (view.w as u32, view.h as u32), "sharp by default: one picture pixel per screen pixel");
+        // the person switches Smooth pages on: the next heartbeat tells the engine half the width and height, and half the zoom
+        browser_config::save(&cx, &BrowserConfig { smooth: true, ..BrowserConfig::default() });
+        a.handle(&Event::Tick, &cx);
+        frame(&mut a, &cx, 1280, 720);
+        let half = ((view.w as u32) / 2, (view.h as u32) / 2);
+        pump(&mut a, &cx, "the half size picture", |a| a.full.as_ref().is_some_and(|f| f.frame_size() == half));
+        let log = &a.full.as_ref().unwrap().log;
+        assert!(log.iter().any(|l| l.contains("Zoom(50)")), "the zoom is halved so the page keeps its layout: {log:?}");
+        // the page area still shows the whole picture, stretched: the fake's top-left quarter is red, top right green
+        let g = frame(&mut a, &cx, 1280, 720);
+        assert_eq!(px(&g, view.x + 100.0, view.y + 100.0), [220, 40, 40, 255]);
+        assert!(px(&g, view.x + view.w - 100.0, view.y + 100.0)[1] >= 200, "top right is still green");
+        // a pointer position on the screen reaches the engine in its own (half size) pixels
+        a.handle(&Event::MouseMove((view.x + 300.0) as i32, (view.y + 200.0) as i32), &cx);
+        pump(&mut a, &cx, "the move in half size pixels", |a| full_title(a).contains("mouse 150,100 move"));
+        a.handle(&Event::AreaAt(AREA_FULL, 400.0, 80.0), &cx);
+        pump(&mut a, &cx, "the press in half size pixels", |a| full_title(a).contains("mouse 200,40 down buttons 1"));
+        // and back to sharp
+        browser_config::save(&cx, &BrowserConfig::default());
+        a.handle(&Event::Tick, &cx);
+        frame(&mut a, &cx, 1280, 720);
+        let full = (view.w as u32, view.h as u32);
+        pump(&mut a, &cx, "the full size picture", |a| a.full.as_ref().is_some_and(|f| f.frame_size() == full));
+        assert!(a.full.as_ref().unwrap().log.iter().any(|l| l.contains("Zoom(100)")), "the zoom is back");
+    }
+
+    #[test]
+    fn a_new_picture_alone_is_painted_in_place_and_looks_exactly_like_a_whole_redraw() {
+        for smooth in [false, true] {
+            let (_fake, cx, mut a, mut g) = in_full(&format!("full_live{smooth}"), "--fps 30");
+            browser_config::save(&cx, &BrowserConfig { smooth, ..BrowserConfig::default() });
+            let view = a.view_rect;
+            let (w, h) = (g.width(), g.height());
+            let mut painted = None;
+            for _ in 0..600 {
+                a.handle(&Event::Tick, &cx);
+                match a.redraw_kind() {
+                    Redraw::Full => g = frame(&mut a, &cx, w, h), // chrome or size changed (the smooth switch resizes the picture)
+                    Redraw::Live => {
+                        // the whole scene is current but for the new picture: paint just that
+                        painted = a.live_draw(&mut g);
+                        if painted.is_some() {
+                            break;
+                        }
+                    }
+                    Redraw::None => {}
+                }
+                std::thread::sleep(std::time::Duration::from_millis(4));
+            }
+            let (x, y, rw, rh) = painted.unwrap_or_else(|| panic!("smooth {smooth}: a picture arrived and was painted in place"));
+            assert!(rw > 0 && rh > 0 && x >= view.x as i32 - 1 && y >= view.y as i32 - 1 && (x + rw) as f32 <= view.x + view.w + 1.0 && (y + rh) as f32 <= view.y + view.h + 1.0, "the rectangle {x},{y} {rw}x{rh} is inside the page area {view:?}");
+            // a whole redraw of the same state gives the same page area, pixel for pixel
+            let whole = frame(&mut a, &cx, w, h);
+            let (vx, vy, vw, vh) = (view.x as usize, view.y as usize, view.w as usize, view.h as usize);
+            let stride = w as usize * 4;
+            // the page's first row is the tool bar's (it draws a faint line over it) and is left to the next whole redraw
+            for row in vy + 1..vy + vh {
+                let (a_row, b_row) = (&g.pm.data()[row * stride + vx * 4..row * stride + (vx + vw) * 4], &whole.pm.data()[row * stride + vx * 4..row * stride + (vx + vw) * 4]);
+                if a_row != b_row {
+                    let first = a_row.iter().zip(b_row).position(|(x, y)| x != y).unwrap_or(0);
+                    let n = a_row.iter().zip(b_row).filter(|(x, y)| x != y).count();
+                    panic!("smooth {smooth}: row {row} of the page area differs between the in-place paint and a whole redraw: first byte {first}, {n} bytes; view {view:?}, painted {painted:?}, in place {:?} whole {:?}", &a_row[first..first + 8], &b_row[first..first + 8]);
+                }
+            }
+            assert_eq!(a.redraw_kind(), Redraw::None, "a whole redraw consumed the pending picture");
+        }
     }
 
     #[test]

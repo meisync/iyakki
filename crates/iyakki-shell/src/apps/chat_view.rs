@@ -7,6 +7,7 @@
 //! kept, so a redraw only paints, and a new message lays out just itself. Blocks that hold more than they show
 //! (a tool call, the reasoning text) open with a click or with Up/Down then Enter.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -1112,7 +1113,7 @@ impl ChatView {
         let next = match (cur, dir) {
             (None, d) if d < 0 => n - 1,
             (None, _) => 0,
-            (Some(c), d) => (c as i32 + d).clamp(0, n - 1),
+            (Some(c), d) => (c as i32 + d).clamp_safe(0, n - 1),
         };
         self.focus = Some(self.toggle_keys[next as usize].clone());
         self.reveal = true;
@@ -1304,7 +1305,7 @@ impl ChatView {
         } else {
             0.0
         };
-        let (x, y) = self.doc_point(xr, yr.clamp(0.0, h));
+        let (x, y) = self.doc_point(xr, yr.clamp_safe(0.0, h));
         self.sel.drag(&self.doc, x, y);
     }
 
@@ -1414,7 +1415,7 @@ impl ChatView {
     pub fn autoscroll(&mut self, scroll_px: &mut f32, max_off: f32) -> bool {
         let (Some((xr, yr)), true) = (self.ptr, self.auto != 0.0) else { return false };
         let Some(log) = self.geo.get().log else { return false };
-        let next = (*scroll_px + self.auto).clamp(0.0, max_off.max(0.0));
+        let next = (*scroll_px + self.auto).clamp_safe(0.0, max_off.max(0.0));
         if next == *scroll_px {
             return false;
         }
@@ -1422,7 +1423,7 @@ impl ChatView {
         let mut g = self.geo.get();
         g.top = self.top(log, next);
         self.geo.set(g);
-        let (x, y) = self.doc_point(xr, yr.clamp(0.0, log.h));
+        let (x, y) = self.doc_point(xr, yr.clamp_safe(0.0, log.h));
         self.sel.drag(&self.doc, x, y);
         true
     }

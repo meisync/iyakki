@@ -51,6 +51,9 @@ pub enum Event {
     MouseUp(i32, i32),
     /// Positive = scroll up (towards older content).
     Scroll(i32),
+    /// A smooth scroll step in pixels of a nominal screen (positive = up), from the scroll engine (`scrolleng.rs`). The shell takes
+    /// it and gives the open tile pixels or whole [`Event::Scroll`] notches (`shell_scroll.rs`): tiles never see this one.
+    ScrollPx(i32),
     /// ~30 Hz heartbeat for animation and background results.
     Tick,
     /// Text to insert into the focused field (from the host clipboard or the clipboard picker).
@@ -69,6 +72,10 @@ pub enum Event {
     Area(usize),
     /// A key meant for an embedded component (the editor inside the chat) rather than its host.
     Sub(u8, Key),
+    /// A media, volume, brightness or other Fn key (true = pressed, false = released). The shell takes it before any app sees it.
+    Fn(crate::fnkeys::FnKey, bool),
+    /// A Ctrl+Alt chord for panes and displays (`panes.rs`).
+    Layout(crate::panes::LayoutKey),
 }
 
 /// A clickable region registered while drawing. Later registrations sit on top of earlier ones.
@@ -160,7 +167,7 @@ pub const ERR: [u8; 4] = rgb(255, 120, 120);
 pub const OK: [u8; 4] = rgb(110, 224, 160);
 pub const FIELD: [u8; 4] = rgb(16, 20, 36);
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct R {
     pub x: f32,
     pub y: f32,
@@ -210,6 +217,123 @@ pub mod clipboard {
         host_image: bool,
         /// How many copies to keep (0: the default).
         limit: usize,
+        /// A secret copied once to be pasted once: never in `items`, gone after its first paste or when its time is up.
+        secret: Option<Secret>,
+        /// The system clipboard still holds the secret's text (nothing was copied after it): it is overwritten when the secret goes.
+        host_has_secret: bool,
+    }
+
+    struct Secret {
+        text: String,
+        expires_ms: u64,
+    }
+
+    /// How long a secret lives.
+    pub const SECRET_SECS: u64 = 60;
+
+    thread_local! {
+        /// A clock made up by a test (milliseconds); `None`: the real one.
+        static FAKE_NOW: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// Milliseconds on a clock that only goes forward.
+    fn now_ms() -> u64 {
+        if let Some(t) = FAKE_NOW.with(|c| c.get()) {
+            return t;
+        }
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+    }
+
+    /// Tests: use a clock that stands still at `ms` until [`advance_clock`] moves it.
+    pub fn use_fake_clock(ms: u64) {
+        FAKE_NOW.with(|c| c.set(Some(ms)));
+    }
+
+    pub fn advance_clock(ms: u64) {
+        FAKE_NOW.with(|c| c.set(c.get().map(|t| t + ms)));
+    }
+
+    /// Back to the real clock.
+    pub fn use_real_clock() {
+        FAKE_NOW.with(|c| c.set(None));
+    }
+
+    /// Drop a secret whose time is up and ask the host to overwrite its copy of it.
+    fn expire(s: &mut State) {
+        if s.secret.as_ref().is_some_and(|x| now_ms() >= x.expires_ms) {
+            end_secret(s);
+        }
+    }
+
+    fn end_secret(s: &mut State) {
+        s.secret = None;
+        if std::mem::take(&mut s.host_has_secret) {
+            s.host_out = Some(String::new());
+        }
+    }
+
+    /// Run on every heartbeat: a secret that is too old goes (and the system clipboard is overwritten) even if nobody pastes.
+    pub fn tick() {
+        S.with(|s| expire(&mut s.borrow_mut()));
+    }
+
+    /// Copy a secret: it is *not* put in the history list, it pastes once (`paste`) and goes after that or after [`SECRET_SECS`]
+    /// seconds. The system clipboard gets the text once, so it can be pasted into a program on the host; when the secret goes
+    /// (pasted or too old) that text is overwritten with an empty one, unless something else was copied inside IYAKKI since. A
+    /// copy made in another program meanwhile cannot be seen, so a secret that expires may overwrite it: that is the price of
+    /// not leaving a secret on the system clipboard.
+    pub fn copy_secret(text: &str) {
+        let t: String = text.chars().take(MAX_BYTES).collect();
+        if t.is_empty() {
+            return;
+        }
+        forget(&t);
+        S.with(|s| {
+            let mut s = s.borrow_mut();
+            s.host_out = Some(t.clone());
+            s.host_has_secret = true;
+            s.secret = Some(Secret { text: t, expires_ms: now_ms() + SECRET_SECS * 1000 });
+            s.toast = Some("Copied as a secret: pastes once, gone in 60 seconds".into());
+        });
+    }
+
+    /// A secret is waiting: how many characters it has and how many seconds it has left.
+    pub fn secret_waiting() -> Option<(usize, u64)> {
+        S.with(|s| {
+            let mut s = s.borrow_mut();
+            expire(&mut s);
+            s.secret.as_ref().map(|x| (x.text.chars().count(), x.expires_ms.saturating_sub(now_ms()).div_ceil(1000)))
+        })
+    }
+
+    /// What a plain paste inserts: a waiting secret first (and it is gone), else the newest text copy.
+    pub fn paste() -> Option<String> {
+        let secret = S.with(|s| {
+            let mut s = s.borrow_mut();
+            expire(&mut s);
+            let t = s.secret.as_ref().map(|x| x.text.clone());
+            if t.is_some() {
+                end_secret(&mut s);
+            }
+            t
+        });
+        secret.or_else(latest)
+    }
+
+    /// Is there anything a paste would insert?
+    pub fn can_paste() -> bool {
+        secret_waiting().is_some() || latest().is_some()
+    }
+
+    /// Does this text look like a secret: a long token-like string, `sk-`, or a word like key, token, password?
+    pub fn looks_secret(text: &str) -> bool {
+        let t = text.trim();
+        let lower = t.to_ascii_lowercase();
+        let one_word = !t.is_empty() && !t.chars().any(char::is_whitespace) && !lower.contains("://") && !lower.starts_with("www.");
+        (one_word && t.chars().count() >= 20 && t.chars().any(|c| c.is_ascii_digit()) && t.chars().any(|c| c.is_ascii_alphabetic()))
+            || lower.contains("sk-")
+            || ["key", "token", "passw", "passwd", "pwd", "secret", "bearer", "credential", "private"].iter().any(|w| lower.contains(w))
     }
 
     thread_local! {
@@ -254,6 +378,7 @@ pub mod clipboard {
         S.with(|s| {
             let mut s = s.borrow_mut();
             s.host_out = Some(text.chars().take(MAX_BYTES).collect());
+            s.host_has_secret = false;
             s.toast = Some("Copied to clipboard".into());
         });
     }
@@ -908,6 +1033,48 @@ mod tests {
         assert_eq!(f.value, "new12");
         assert!(!f.paste("   "), "whitespace-only paste does nothing");
         assert!(!f.paste(""));
+    }
+
+    #[test]
+    fn a_secret_goes_after_one_paste_or_after_sixty_seconds_on_a_clock_the_test_moves() {
+        clipboard::clear();
+        clipboard::use_fake_clock(1_000);
+        clipboard::copy("normal note");
+        clipboard::copy_secret("hunter2-token-value");
+        assert_eq!(clipboard::history(), vec!["normal note"], "not in the list");
+        assert_eq!(clipboard::take_host_copy().as_deref(), Some("hunter2-token-value"), "the host gets it once");
+        assert_eq!(clipboard::secret_waiting(), Some((19, 60)));
+        clipboard::advance_clock(59_000);
+        assert_eq!(clipboard::secret_waiting().map(|s| s.1), Some(1), "one second left");
+        clipboard::advance_clock(1_000);
+        assert_eq!(clipboard::secret_waiting(), None, "gone at 60 s");
+        assert_eq!(clipboard::take_host_copy().as_deref(), Some(""), "the host's copy is overwritten");
+        assert_eq!(clipboard::paste().as_deref(), Some("normal note"), "the history is untouched");
+        // the first paste takes it
+        clipboard::copy_secret("another-secret-123");
+        let _ = clipboard::take_host_copy();
+        assert_eq!(clipboard::paste().as_deref(), Some("another-secret-123"));
+        assert_eq!(clipboard::paste().as_deref(), Some("normal note"), "the second paste is the history again");
+        assert_eq!(clipboard::take_host_copy().as_deref(), Some(""));
+        // something copied after it keeps the host's text: no overwrite
+        clipboard::copy_secret("third-secret-456");
+        clipboard::copy("newer");
+        let _ = clipboard::take_host_copy();
+        clipboard::advance_clock(61_000);
+        clipboard::tick();
+        assert_eq!(clipboard::secret_waiting(), None);
+        assert_eq!(clipboard::take_host_copy(), None, "a newer copy is not overwritten");
+        clipboard::use_real_clock();
+    }
+
+    #[test]
+    fn what_looks_like_a_secret_is_recognised() {
+        for s in ["sk-ant-abc", "my api key is x", "the token", "Password1", "k9Xq2LmVb7TzR4wYc1HdN8sPfJ6gUe3A", "db_passwd=z"] {
+            assert!(clipboard::looks_secret(s), "{s}");
+        }
+        for s in ["meeting at 10", "https://example.test/a", "hello world, how are you today", "abcdefghijklmnopqrstuvwxyz", ""] {
+            assert!(!clipboard::looks_secret(s), "{s}");
+        }
     }
 
     #[test]

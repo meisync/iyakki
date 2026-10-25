@@ -121,9 +121,7 @@ fn rig(tag: &str) -> Rig {
 
 impl Rig {
     fn open(&mut self) {
-        while self.a.tab() != Tab::DevCluster {
-            key(&mut self.a, &self.cx, Key::Right);
-        }
+        self.a.go_to(Tab::DevCluster);
         until(&mut self.a, &self.cx, "the profiles are listed", |a| a.dc.rows.len() >= 2);
     }
     fn row(&self, id: &Path) -> Row {
@@ -641,9 +639,7 @@ fn this_pods_service_account_is_listed_as_in_cluster_with_what_its_role_allows()
     r.run.answer(&format!("--kubeconfig {} --context in-cluster --request-timeout=6s auth can-i --list", kc.display()), "Resources   Non-Resource URLs   Resource Names   Verbs\npods   []   []   [get list watch]\ndeployments.apps   []   []   [get list watch create]\n");
     let env = ClusterEnv { home: r.dir.join("nohome"), extra: vec![(Source::InCluster, kc.clone())], ..Default::default() };
     r.a = SettingsApp::new(&r.cx).with_cluster(r.run.clone(), env);
-    while r.a.tab() != Tab::DevCluster {
-        key(&mut r.a, &r.cx, Key::Right);
-    }
+    r.a.go_to(Tab::DevCluster);
     until(&mut r.a, &r.cx, "listed", |a| !a.dc.rows.is_empty());
     let row = r.row(&kc);
     let c = chips(&row);

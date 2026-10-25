@@ -9,6 +9,7 @@ iyakki-agent = { path = "../iyakki-agent" }
 iyakki-sec.workspace = true
 iyakki-storage.workspace = true
 iyakki-zram.workspace = true
+iyakki-fw.workspace = true
 iyakki-usb = { path = "../iyakki-usb" }
 iyakki-edit.workspace = true
 iyakki-hwinfo.workspace = true
@@ -18,6 +19,7 @@ iyakki-web.workspace = true
 iyakki-js.workspace = true
 iyakki-netscan.workspace = true
 iyakki-webview.workspace = true
+iyakki-rfb.workspace = true
 iyakki-ledger.workspace = true
 iyakki-data.workspace = true
 iyakki-flow.workspace = true

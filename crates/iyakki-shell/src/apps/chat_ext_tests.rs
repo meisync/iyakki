@@ -475,3 +475,110 @@ fn an_installed_agent_that_is_not_signed_in_says_sign_in_first_with_a_login_butt
     let help = cx.services.agents_cfg().agent("claude-code").unwrap().login_help();
     assert!(help.starts_with("Sign in first") && help.contains("Login") && help.contains("auth login"), "{help}");
 }
+
+// ------------------------------------------------------------------------------------------------ the empty chat and the footer
+
+fn fresh(tag: &str) -> (ChatApp, AppCx) {
+    let (cx, _d) = cx_with_backend(tag, iyakki_agent::chat::Unconfigured);
+    let mut cx = cx;
+    cx.session.policy.manage_settings = true;
+    cx.session.policy.cli = iyakki_sec::policy::CliLevel::Full;
+    (ChatApp::new(), cx)
+}
+
+fn provider_model(cx: &AppCx) {
+    let mut p = iyakki_agent::providers::ProviderCfg::new("nvidia_ollama", iyakki_agent::providers::Kind::Ollama);
+    p.models = vec!["qwen3:8b".into()];
+    cx.services.settings.lock().unwrap().upsert_provider(p).unwrap();
+    cx.services.settings.lock().unwrap().set_chat(Some(iyakki_agent::settings::ModelChoice { provider: "nvidia_ollama".into(), model: "qwen3:8b".into() })).unwrap();
+}
+
+fn set_both(cx: &AppCx, claude: Status, copilot: Status) {
+    cx.services.ext_status.set("claude-code", claude);
+    cx.services.ext_status.set("copilot", copilot);
+}
+
+#[test]
+fn chat_state_matrix_the_empty_chat_and_the_footer_follow_the_agent_not_only_the_provider_model() {
+    let none = || status(false, Auth::Unknown);
+    // neither a provider model nor a usable agent
+    let (mut app, cx) = fresh("matrix1");
+    set_both(&cx, none(), none());
+    let (msg, login) = app.empty_note(&cx);
+    assert!(msg.starts_with("No chat model selected yet") && msg.contains("Claude Code") && login.is_none(), "{msg}");
+    assert_eq!(app.ext_footer(&cx), None);
+
+    // a fresh install with only Claude Code installed and signed in: it answers, and the footer says so
+    let (mut app, cx) = fresh("matrix2");
+    set_both(&cx, status(true, Auth::SignedIn("claude.ai".into())), none());
+    assert_eq!(app.ext_id(&cx).as_deref(), Some("claude-code"));
+    let (msg, login) = app.empty_note(&cx);
+    assert!(msg.starts_with("Ask anything.") && msg.contains("Claude Code") && login.is_none(), "{msg}");
+    assert!(app.ext_footer(&cx).unwrap().starts_with("agent: Claude Code · Default"), "{:?}", app.ext_footer(&cx));
+    // two ready agents: no guess
+    set_both(&cx, status(true, Auth::SignedIn("claude.ai".into())), status(true, Auth::Unknown));
+    assert_eq!(ChatApp::new().ext_id(&cx), None);
+
+    // a provider model only: the old behaviour, no agent
+    let (mut app, cx) = fresh("matrix3");
+    set_both(&cx, status(true, Auth::SignedIn("claude.ai".into())), none());
+    provider_model(&cx);
+    assert_eq!(app.ext_id(&cx), None, "a provider model is never replaced by a guess");
+    assert_eq!(app.empty_note(&cx).0, "Ask anything.");
+
+    // an agent chosen but signed out: the real reason and a Login button
+    let (mut app, cx) = fresh("matrix4");
+    set_both(&cx, status(true, Auth::SignedOut), none());
+    app.choose_agent(&cx, "claude-code".into());
+    let (msg, login) = app.empty_note(&cx);
+    assert!(msg.starts_with("Claude Code: sign in.") && msg.contains("claude auth login"), "{msg}");
+    assert_eq!(login, Some("claude-code"));
+    assert!(app.ext_footer(&cx).unwrap().contains("· sign in ·"), "{:?}", app.ext_footer(&cx));
+    let g = render_with(&mut app, &cx, 1100, 650);
+    assert!(g.hits.iter().any(|h| h.ev == Event::Tab(crate::agent_login::LOGIN_TAB)), "the Login button is on the empty chat");
+
+    // an agent chosen but not installed: the install hint
+    let (mut app, cx) = fresh("matrix5");
+    set_both(&cx, none(), none());
+    app.choose_agent(&cx, "claude-code".into());
+    let (msg, login) = app.empty_note(&cx);
+    assert!(msg.starts_with("Claude Code: not installed.") && msg.contains("npm install -g @anthropic-ai/claude-code") && login.is_none(), "{msg}");
+
+    // both: the agent chosen for the chat wins over the provider model
+    let (mut app, cx) = fresh("matrix6");
+    set_both(&cx, status(true, Auth::SignedIn("claude.ai".into())), none());
+    provider_model(&cx);
+    app.choose_agent(&cx, "claude-code".into());
+    assert_eq!(app.ext_id(&cx).as_deref(), Some("claude-code"));
+    assert!(app.empty_note(&cx).0.contains("Claude Code answers"));
+}
+
+#[test]
+fn choosing_claude_code_sonnet_in_the_picker_with_no_provider_model_leaves_no_generic_message_and_send_runs_it() {
+    let (mut app, cx) = fresh("matrix7");
+    let bin = std::env::temp_dir().join(format!("iyakki-matrix7-{}", std::process::id()));
+    std::fs::create_dir_all(&bin).unwrap();
+    let claude = fake_claude(&bin);
+    cx.services.settings.lock().unwrap().update(|s| s.agents.claude.command = claude.display().to_string()).unwrap();
+    set_both(&cx, status(true, Auth::SignedIn("claude.ai".into())), status(false, Auth::Unknown));
+    app.handle(&Event::Key(Key::Ctrl('p')), &cx);
+    let sonnet = app.models.as_ref().unwrap().items.iter().position(|(p, m)| p == "agent:claude-code" && m == "sonnet").expect("a Sonnet entry");
+    app.handle(&Event::Row(sonnet), &cx);
+    assert_eq!(app.ext_id(&cx).as_deref(), Some("claude-code"));
+    assert!(app.ext_footer(&cx).unwrap().starts_with("agent: Claude Code · Sonnet"), "{:?}", app.ext_footer(&cx));
+    let g = render_with(&mut app, &cx, 1100, 650);
+    assert!(!app.empty_note(&cx).0.contains("No chat model selected"));
+    let _ = g;
+    app.agent = true;
+    app.start_run(&cx, "say something".into());
+    assert!(app.error.is_none() && app.run.is_some(), "Send starts the agent run: {:?}", app.error);
+    for _ in 0..600 {
+        app.poll_run(&cx);
+        if app.run.is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(app.msgs.iter().any(|m| m.content.contains("All done here.")));
+    let _ = std::fs::remove_dir_all(&bin);
+}

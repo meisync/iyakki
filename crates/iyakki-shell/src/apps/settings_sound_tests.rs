@@ -21,9 +21,7 @@ fn status(a: &SettingsApp) -> String {
     a.status().map(|s| s.0.clone()).unwrap_or_default()
 }
 fn goto(a: &mut SettingsApp, cx: &AppCx, t: Tab) {
-    while a.tab() != t {
-        key(a, cx, Key::Right);
-    }
+    a.go_to(t);
 }
 fn settle(a: &mut SettingsApp, cx: &AppCx) {
     for _ in 0..2000 {
@@ -315,5 +313,35 @@ fn the_sound_page_fits_and_its_buttons_rows_and_list_are_clickable_at_four_scree
         settle(&mut a, &cx);
         assert!(status(&a).starts_with("Played a short chime on plughw:0,3"), "{what}: {}", status(&a));
     }
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn the_advanced_sound_rows_toggle_with_a_and_the_boost_and_the_hardware_answer_are_saved_per_card() {
+    let cx = admin("snd-adv");
+    let (env, d) = mac_mini("snd-adv", true);
+    let mut a = SettingsApp::new(&cx).with_hardware(env);
+    goto(&mut a, &cx, Tab::Sound);
+    assert!(!rows(&mut a, &cx).iter().any(|r| matches!(r.target, Target::SoundPattern(false))));
+    key(&mut a, &cx, Key::Char('A'));
+    assert!(rows(&mut a, &cx).iter().any(|r| matches!(r.target, Target::SoundPattern(false))), "the stereo test is under Advanced");
+    // boost: saved per card, capped, audited; 0 removes it
+    a.sound_set_boost(&cx, "PCH", 6);
+    assert_eq!(cx.services.sound_settings().boost_for("PCH"), 6);
+    a.sound_set_boost(&cx, "PCH", 40);
+    assert_eq!(cx.services.sound_settings().boost_for("PCH"), iyakki_agent::softvol::MAX_BOOST_DB);
+    a.sound_set_boost(&cx, "PCH", 0);
+    assert!(cx.services.sound_settings().boosts.is_empty());
+    // "Did the second tone sound quieter?": y keeps the hardware control, n chooses the software volume
+    a.hw_check_done("PCH".into(), Ok("Played.".into()));
+    assert!(matches!(a.modal, Some(Modal::Confirm(ConfirmKind::SoundHwWorks(_), _))));
+    a.handle(&Event::Key(Key::Char('n')), &cx);
+    assert_eq!(cx.services.sound_settings().volume_mode_for("PCH"), iyakki_agent::audioout::VolumeMode::Software);
+    a.hw_check_done("PCH".into(), Ok("Played.".into()));
+    a.handle(&Event::Key(Key::Char('y')), &cx);
+    assert_eq!(cx.services.sound_settings().volume_mode_for("PCH"), iyakki_agent::audioout::VolumeMode::Hardware);
+    a.hw_check_done("PCH".into(), Ok("Played.".into()));
+    a.handle(&Event::Key(Key::Esc), &cx);
+    assert_eq!(cx.services.sound_settings().volume_mode_for("PCH"), iyakki_agent::audioout::VolumeMode::Hardware, "Esc changes nothing");
     let _ = std::fs::remove_dir_all(d);
 }

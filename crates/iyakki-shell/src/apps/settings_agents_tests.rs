@@ -43,9 +43,7 @@ fn status(a: &SettingsApp) -> String {
     a.status().map(|s| s.0.clone()).unwrap_or_default()
 }
 fn goto_agents(a: &mut SettingsApp, cx: &AppCx) {
-    while a.tab() != Tab::Agents {
-        key(a, cx, Key::Right);
-    }
+    a.go_to(Tab::Agents);
 }
 fn draw(a: &mut SettingsApp, cx: &AppCx, w: u32, h: u32) -> Gfx {
     let mut g = Gfx::new(w, h);
@@ -87,8 +85,9 @@ fn cfg(cx: &AppCx) -> iyakki_agent::extagent::AgentsCfg {
 fn the_agents_page_is_for_administrators_and_sits_next_to_models() {
     let cx = admin("agp1");
     let a = SettingsApp::new(&cx);
-    assert_eq!(&a.tabs()[..2], &[Tab::Models, Tab::Agents]);
-    assert_eq!(Tab::Agents.group(), "Assistant");
+    let m = a.tabs().iter().position(|t| *t == Tab::Models).unwrap();
+    assert_eq!(a.tabs()[m + 1], Tab::Agents, "Agents sits right after Models");
+    assert_eq!(Tab::Agents.group(), "Apps & AI");
     let mut user = admin("agp1b");
     user.session.user = "amy".into();
     user.session.role = iyakki_sec::policy::Role::User;
@@ -124,7 +123,7 @@ fn the_page_lists_the_agents_with_status_chips_and_every_button_is_on_screen() {
     // Detect (d) looks at the programs: --version and the sign-in status only
     press(&mut a, &cx, 'd');
     for _ in 0..400 {
-        if cx.services.ext_status.get("claude-code").is_some() && cx.services.ext_status.get("copilot").is_some() {
+        if cx.services.ext_status.get("claude-code").is_some_and(|c| c.installed) && cx.services.ext_status.get("copilot").is_some() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));

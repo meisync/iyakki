@@ -215,7 +215,8 @@ fn nothing_overlaps_or_leaves_the_screen_for_the_launcher_tile_the_app_bar_and_t
         sh.leave_app();
         sh.set_group(Group::Work);
         sh.render(&mut g);
-        let labels: Vec<&str> = sh.groups().iter().map(|x| x.label()).collect();
+        let gs = sh.groups();
+        let labels: Vec<&str> = gs.iter().map(|x| x.label()).collect();
         let chips = launcher::chip_rects(s, &labels);
         assert!(chips.last().unwrap().x + chips.last().unwrap().w <= w as f32 - 20.0 * s, "{w}x{h} chips {chips:?}");
         let items = sh.group_items();

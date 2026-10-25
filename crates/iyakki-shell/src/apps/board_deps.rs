@@ -5,6 +5,7 @@
 //! What a row waits for is `iyakki_agent::boarddeps`; who works on what is `iyakki_agent::assign` (`.iyakki/board-assignments.json`, never
 //! FEATURES.md). This module only draws them and turns clicks and keys into [`BoardAct`]s; the IDE owns the task manager that acts on them.
 
+use crate::safeclamp::SafeClamp;
 use std::time::{Instant, SystemTime};
 
 use iyakki_agent::assign::{self, AState, AgentRun, Choice, StepKind};
@@ -82,7 +83,7 @@ impl Ext {
             graph: Graph::default(),
             doc: assign::Doc::default(),
             doc_stamp: None,
-            doc_polled: Instant::now() - std::time::Duration::from_secs(10),
+            doc_polled: Instant::now().checked_sub(std::time::Duration::from_secs(10)).unwrap_or_else(Instant::now),
             agent_filter: AgentFilter::All,
             drill: None,
             drill_scroll: 0,
@@ -574,7 +575,7 @@ impl BoardView {
             g.dependants.get(&cur).and_then(|d| d.iter().find(|x| layers.get(li + 1).is_some_and(|l| l.contains(x))).or(d.first())).cloned()
         } else {
             let l = &layers[li];
-            let np = (pos as i32 + dy).clamp(0, l.len() as i32 - 1) as usize;
+            let np = (pos as i32 + dy).clamp_safe(0, l.len() as i32 - 1) as usize;
             l.get(np).cloned()
         };
         if let Some(t) = target {

@@ -6,6 +6,7 @@
 //! person's folders under their write scope. The transcript (chat_view.rs) shows the picture and keeps the long text
 //! folded away.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -366,16 +367,16 @@ pub struct Rendered {
 }
 
 /// Averages blocks of pixels down to `nw` x `nh` (the pixmap is premultiplied, so averaging is right).
-fn resize_box(pm: &Pixmap, nw: u32, nh: u32) -> Option<Pixmap> {
+pub(crate) fn resize_box(pm: &Pixmap, nw: u32, nh: u32) -> Option<Pixmap> {
     let (w, h) = (pm.width() as usize, pm.height() as usize);
     let mut out = Pixmap::new(nw, nh)?;
     let src = pm.data();
     let (sx, sy) = (w as f32 / nw as f32, h as f32 / nh as f32);
     let dst = out.data_mut();
     for y in 0..nh as usize {
-        let (y0, y1) = ((y as f32 * sy) as usize, (((y + 1) as f32 * sy).ceil() as usize).clamp(1, h));
+        let (y0, y1) = ((y as f32 * sy) as usize, (((y + 1) as f32 * sy).ceil() as usize).clamp_safe(1, h));
         for x in 0..nw as usize {
-            let (x0, x1) = ((x as f32 * sx) as usize, (((x + 1) as f32 * sx).ceil() as usize).clamp(1, w));
+            let (x0, x1) = ((x as f32 * sx) as usize, (((x + 1) as f32 * sx).ceil() as usize).clamp_safe(1, w));
             let mut acc = [0u32; 4];
             let mut n = 0u32;
             for yy in y0..y1.max(y0 + 1).min(h) {

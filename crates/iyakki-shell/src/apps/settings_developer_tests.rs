@@ -89,3 +89,58 @@ fn only_administrators_have_the_page_and_it_switches_on_pairs_revokes_and_switch
     assert!(!d.is_on() && d.pairing().is_none());
     assert!(d.activity(20).iter().any(|x| x.action == "devmode.off"));
 }
+
+#[test]
+fn the_page_grants_and_takes_away_scopes_per_computer_answers_shell_requests_and_disconnects() {
+    use iyakki_agent::devmode::scopes::Scope;
+    let cx = admin("devset-scopes");
+    let d = DevMode::open(cx.services.dir());
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Developer);
+    key(&mut a, &cx, Key::Char('e'));
+    // the pairing card says what the new computer will be allowed, and the administrator can change it before it pairs
+    key(&mut a, &cx, Key::Char('p'));
+    assert_eq!(d.pairing().unwrap().scopes, vec!["install"]);
+    key(&mut a, &cx, Key::Char('s')); // the cursor moves from install to debug
+    key(&mut a, &cx, Key::Char('g'));
+    assert_eq!(d.pairing().unwrap().scopes, vec!["install", "debug"]);
+    let _ = draw(&mut a, &cx, 1280, 800);
+    let p = d.pairing().unwrap();
+    let k = iyakki_agent::pkg::new_signing_key().unwrap();
+    let pubhex = iyakki_agent::pkg::public_key_hex(&k);
+    let fp = "AA:BB";
+    d.complete_pairing(fp, "laptop", &pubhex, &dm::auth::pair_proof(&dm::auth::pair_key(&p.code, fp).unwrap(), fp, &pubhex, "laptop")).unwrap();
+    assert_eq!(d.keys()[0].scope_text(), "install, debug");
+    // per computer: space turns the scope under the cursor on and off
+    key(&mut a, &cx, Key::Char('s')); // files
+    key(&mut a, &cx, Key::Char(' '));
+    assert!(d.keys()[0].has(Scope::Files), "{:?}", a.status());
+    key(&mut a, &cx, Key::Char(' '));
+    assert!(!d.keys()[0].has(Scope::Files));
+    for _ in 0..5 {
+        key(&mut a, &cx, Key::Char('s'));
+    }
+    key(&mut a, &cx, Key::Char(' ')); // the cursor is on shell
+    assert!(d.keys()[0].has(Scope::Shell));
+    let g = draw(&mut a, &cx, 1280, 800);
+    assert!(g.hits.iter().any(|h| h.label == "Approve shell"));
+    assert!(cx.audit.recent(20).iter().any(|l| l.contains("devmode.scope.grant")));
+    // a shell request appears on the page; the administrator approves it for ten minutes, and the bar text follows
+    let laptop = d.keys()[0].clone();
+    d.shell_request(&laptop, false, 30, "debug audio").unwrap();
+    let _ = draw(&mut a, &cx, 1280, 800);
+    key(&mut a, &cx, Key::Char('a'));
+    assert!(d.shell_grant("laptop").is_some(), "{:?}", a.status());
+    assert_eq!(d.shell_banner().as_deref(), Some("SHELL ACCESS by laptop"));
+    assert!(cx.audit.recent(20).iter().any(|l| l.contains("devmode.shell")));
+    // a request nobody made cannot be answered
+    key(&mut a, &cx, Key::Char('d'));
+    assert!(a.status().is_some());
+    // disconnect ends the grant and the sessions
+    let g = dm::sessions::open(cx.services.dir(), "laptop", "root", Scope::Shell, "shell", d.now()).unwrap();
+    key(&mut a, &cx, Key::Char('k'));
+    assert!(g.ended() && d.shell_grant("laptop").is_none());
+    for (w, h) in [(1280, 720), (1024, 600), (800, 480)] {
+        let _ = draw(&mut a, &cx, w, h);
+    }
+}

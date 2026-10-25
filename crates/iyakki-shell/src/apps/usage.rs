@@ -2,6 +2,7 @@
 //! month, three months and year. Counts are the provider's own when it reports them, otherwise estimates (about four
 //! characters per token), of what was sent to a model and what came back, for everything the assistant does: chat, documents, agent runs. Only totals are kept.
 
+use crate::safeclamp::SafeClamp;
 use iyakki_agent::clock::Zone;
 use iyakki_agent::usage::{Range, Series};
 
@@ -150,7 +151,7 @@ impl App for UsageApp {
         }
         y += 74.0 * s;
         // chart and legend
-        let legend_w = (w * 0.26).clamp(170.0 * s, 300.0 * s);
+        let legend_w = (w * 0.26).clamp_safe(170.0 * s, 300.0 * s);
         let chart = R::new(x, y, w - legend_w - 16.0 * s, area.y + area.h - y - 56.0 * s);
         crate::fx::panel(g, chart, s, ACCENT);
         let (pl, pr, pt, pb) = (54.0 * s, 16.0 * s, 16.0 * s, 30.0 * s);

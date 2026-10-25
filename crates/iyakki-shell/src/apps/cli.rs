@@ -1,6 +1,7 @@
 //! CLI: a terminal. All commands run through `iyakki_agent::cli::Cli`, which enforces the
 //! signed-in user's policy.
 
+use crate::safeclamp::SafeClamp;
 use iyakki_agent::cli::{Action, Cli};
 
 use iyakki_agent::clis::{self, CATALOG};
@@ -288,7 +289,7 @@ impl CliApp {
             y += 24.0 * s;
         }
         let installed = cx.services.clis.installed();
-        let list_w = (w * 0.34).clamp(220.0 * s, 360.0 * s);
+        let list_w = (w * 0.34).clamp_safe(220.0 * s, 360.0 * s);
         let rh = 46.0 * s;
         let gap = 5.0 * s;
         let slots = (((area.y + area.h - y) / (rh + gap)).floor() as usize).max(1);
@@ -536,6 +537,14 @@ impl CliApp {
 impl App for CliApp {
     fn title(&self) -> &'static str {
         "CLI"
+    }
+    /// The IYAKKI menu's Linux apps page: `sandbox:<name>` opens the terminal inside that sandbox (`linux use <name>`).
+    fn open_item(&mut self, item: &str, cx: &AppCx) {
+        if let Some(name) = item.strip_prefix("sandbox:") {
+            self.tab = Tab::Terminal;
+            self.input.set(&format!("linux use {name}"));
+            let _ = self.run_line(cx);
+        }
     }
     fn icon(&self) -> Icon {
         Icon::Cli

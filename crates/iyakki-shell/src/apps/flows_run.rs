@@ -2,6 +2,7 @@
 //! counters like "2/4 · next in 400 ms"), a timing waterfall, the selected step's output, input, log and attempts as selectable
 //! text, and the fix card the assistant made when a step failed for good.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -164,7 +165,7 @@ impl FlowsApp {
         let wide = avail.w >= 1000.0 * s;
         let stacked = avail.w < 760.0 * s;
         let list_w = if wide { 190.0 * s } else { 0.0 };
-        let detail_w = if stacked { 0.0 } else { (avail.w * 0.34).clamp(300.0 * s, 460.0 * s) };
+        let detail_w = if stacked { 0.0 } else { (avail.w * 0.34).clamp_safe(300.0 * s, 460.0 * s) };
         let gap = 8.0 * s;
         let mid_x = avail.x + if list_w > 0.0 { list_w + gap } else { 0.0 };
         let mid_w = avail.w - if list_w > 0.0 { list_w + gap } else { 0.0 } - if detail_w > 0.0 { detail_w + gap } else { 0.0 };
@@ -254,7 +255,7 @@ impl FlowsApp {
         let bar = R::new(inner.x + label_w, inner.y + 14.0 * s, inner.w - label_w, inner.h - 14.0 * s);
         g.text(inner.x, inner.y, 10.0 * s, DIM, &format!("timing · {}", dur_text(t1 - t0)), Face::Bold);
         let started: Vec<(&String, &NodeRun)> = run.flow.nodes.iter().filter_map(|n| run.nodes.get(&n.id).map(|nr| (&n.id, nr))).filter(|(_, nr)| nr.started_ms > 0).collect();
-        let rowh = (bar.h / started.len().max(1) as f32).clamp(8.0 * s, 16.0 * s);
+        let rowh = (bar.h / started.len().max(1) as f32).clamp_safe(8.0 * s, 16.0 * s);
         let mut rows = Vec::new();
         g.clipped(inner, |g| {
             for (i, (id_, nr)) in started.iter().enumerate() {

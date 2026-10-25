@@ -3,6 +3,7 @@
 //! other services show their address to copy. Scans stay on private addresses, ask only public questions and can be
 //! stopped; every scan is written to the audit log.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +17,7 @@ use iyakki_netscan::{net, Event as ScanEvent, HostInfo, Kind, Options, Service};
 use super::widgets::{Form, FormEvent};
 use super::{blink, App, AppCx, Flow};
 use crate::gfx::{rgb, Face, Gfx, Icon};
+use crate::tooltip::{fit_keep_ip, Tooltip};
 use crate::ui::{clipboard, Event, Key, DIM, ERR, MUTED, OK, R, TEXT};
 
 const ACCENT: [u8; 4] = rgb(120, 220, 140);
@@ -83,13 +85,15 @@ pub struct ScanApp {
     /// The list of devices seen on the network (new-device alerts) instead of the scan's machines.
     devices: bool,
     dev_sel: usize,
+    /// The whole text of a row whose lines were cut to the width.
+    tip: Tooltip,
 }
 
 impl ScanApp {
     pub fn new(_cx: &AppCx) -> ScanApp {
         let mut nets: Vec<Network> = net::local_subnets().into_iter().map(|s| Network { label: format!("{}  {}  ({} addresses)", s.iface, s.cidr(), net::hosts_of(&s).len()), targets: net::hosts_of(&s) }).collect();
         nets.push(Network { label: "This machine (127.0.0.1)".into(), targets: vec![Ipv4Addr::LOCALHOST] });
-        ScanApp { nets, net_sel: 0, hosts: BTreeMap::new(), filter: 0, sel: 0, svc_sel: 0, running: false, cancel: Arc::new(AtomicBool::new(false)), rx: None, progress: (0, 0), summary: None, mode: Mode::Browse, status: None, ports: None, devices: false, dev_sel: 0 }
+        ScanApp { nets, net_sel: 0, hosts: BTreeMap::new(), filter: 0, sel: 0, svc_sel: 0, running: false, cancel: Arc::new(AtomicBool::new(false)), rx: None, progress: (0, 0), summary: None, mode: Mode::Browse, status: None, ports: None, devices: false, dev_sel: 0, tip: Tooltip::new() }
     }
 
     pub fn is_running(&self) -> bool {
@@ -247,6 +251,7 @@ impl ScanApp {
         if list.is_empty() {
             g.text(x, y + 6.0 * s, 15.0 * s, DIM, "No devices seen yet. The list fills from this machine's own network neighbours, and from a scan.", Face::Sans);
         }
+        let mut cut: Option<String> = None;
         for (i, d) in list.iter().enumerate().skip(first).take(fit) {
             let r = R::new(x, y, w, rh);
             let on_row = i == sel;
@@ -254,16 +259,30 @@ impl ScanApp {
             g.hit(r, Event::Row(i), "device");
             g.rect(x, y + 10.0 * s, 4.0 * s, rh - 20.0 * s, if d.trusted { OK } else { WARN });
             let title = if d.name.is_empty() { d.mac.clone() } else { format!("{} · {}", d.name, d.mac) };
-            let title = g.fit(16.0 * s, &title, Face::Bold, w - 190.0 * s);
-            g.text(x + 16.0 * s, y + 6.0 * s, 16.0 * s, TEXT, &title, Face::Bold);
+            let shown = g.fit(16.0 * s, &title, Face::Bold, w - 190.0 * s);
+            g.text(x + 16.0 * s, y + 6.0 * s, 16.0 * s, TEXT, &shown, Face::Bold);
             let ago = |t: i64| iyakki_agent::sysinfo::human_duration((now - t).max(0) as u64);
-            g.text(x + 16.0 * s, y + 30.0 * s, 12.0 * s, MUTED, &format!("{} on {} · first seen {} ago · last seen {} ago", d.ip, d.iface, ago(d.first_seen), ago(d.last_seen)), Face::Sans);
+            let line = format!("{} on {} · first seen {} ago · last seen {} ago", d.ip, d.iface, ago(d.first_seen), ago(d.last_seen));
+            let line_shown = fit_keep_ip(g, 12.0 * s, &line, Face::Sans, w - 32.0 * s);
+            g.text(x + 16.0 * s, y + 30.0 * s, 12.0 * s, MUTED, &line_shown, Face::Sans);
+            if shown != title || line_shown != line {
+                let full = format!("{title}\n{line}");
+                self.tip.offer(g, r, on_row, &full);
+                if on_row {
+                    cut = Some(format!("{title} · {line}"));
+                }
+            }
             let (chip, col) = if d.trusted { ("trusted", OK) } else { ("NEW", WARN) };
             let cw = g.text_width(12.0 * s, chip, Face::Bold) + 17.0 * s;
             crate::fx::chip(g, r.x + r.w - cw - 12.0 * s, y + 14.0 * s, s, chip, col, !d.trusted);
             y += rh + 6.0 * s;
         }
         let by = area.y + area.h - 40.0 * s;
+        // the keyboard's way to the tooltip: the whole text of the selected device above the buttons when its lines were cut
+        if let Some(full) = cut {
+            let t = fit_keep_ip(g, 12.0 * s, &full, Face::Sans, w);
+            g.text(x, by - 22.0 * s, 12.0 * s, TEXT, &t, Face::Sans);
+        }
         let mut bx = x;
         for (label, col, ev) in [("Trust (t)", OK, Event::Tab(112)), ("Trust all (T)", MUTED, Event::Tab(113)), ("Name (r)", MUTED, Event::Key(Key::Char('r'))), ("Forget (x)", ERR, Event::Tab(114)), (if on { "Stop watching (w)" } else { "Watch (w)" }, MUTED, Event::Tab(115)), ("Back (d)", ACCENT, Event::Tab(111))] {
             bx += g.button(bx, by, 13.0 * s, label, col, ev) + 8.0 * s;
@@ -438,7 +457,12 @@ impl App for ScanApp {
         .collect()
     }
 
+    fn wants_redraw(&mut self) -> bool {
+        self.tip.take_changed()
+    }
+
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        self.tip.event(ev);
         if matches!(ev, Event::Tick) {
             self.poll(cx);
             return Flow::Stay;
@@ -514,7 +538,7 @@ impl App for ScanApp {
                 return Flow::Stay;
             }
             Event::Scroll(d) => {
-                self.sel = (self.sel as i32 - d).clamp(0, self.shown().len().saturating_sub(1) as i32) as usize;
+                self.sel = (self.sel as i32 - d).clamp_safe(0, self.shown().len().saturating_sub(1) as i32) as usize;
                 self.svc_sel = 0;
                 return Flow::Stay;
             }
@@ -609,6 +633,7 @@ impl App for ScanApp {
             if let Mode::Form(f, _) = &self.mode {
                 f.render(g, area, s, ACCENT, blink(tick));
             }
+            self.tip.draw(g, s);
             return;
         }
         // filters
@@ -645,11 +670,16 @@ impl App for ScanApp {
             let k = h.main_kind();
             g.rect(x, ry + 10.0 * s, 4.0 * s, rh - 20.0 * s, kind_color(k));
             let head = format!("{}{}", h.ip, h.name.as_ref().map(|n| format!("  {n}")).unwrap_or_default());
-            let head = g.fit(16.0 * s, &head, Face::Bold, list_w - 60.0 * s);
-            g.text(x + 16.0 * s, ry + 6.0 * s, 16.0 * s, TEXT, &head, Face::Bold);
+            let head_shown = fit_keep_ip(g, 16.0 * s, &head, Face::Bold, list_w - 60.0 * s);
+            g.text(x + 16.0 * s, ry + 6.0 * s, 16.0 * s, TEXT, &head_shown, Face::Bold);
             let summary: Vec<String> = h.services.iter().take(4).map(|s| if s.kind == Kind::Web || s.kind == Kind::Other { format!(":{}", s.port) } else { s.kind.label().to_string() }).collect();
             let sub = g.fit(12.0 * s, &summary.join(" · "), Face::Sans, list_w - 60.0 * s);
             g.text(x + 16.0 * s, ry + 30.0 * s, 12.0 * s, kind_color(k), &sub, Face::Sans);
+            if head_shown != head || sub != summary.join(" · ") {
+                // the list is narrow; the right-hand panel has the same facts for the selected machine, and the tooltip for any other
+                let all: Vec<String> = h.services.iter().map(|s| format!("{}/{} {}", s.port, s.proto, s.name)).collect();
+                self.tip.offer(g, r, sel, &format!("{head}\n{}{}", h.mac.as_deref().map(|m| format!("hardware address {m}\n")).unwrap_or_default(), all.join(", ")));
+            }
             if h.risky() {
                 g.text(r.x + r.w - 26.0 * s, ry + 14.0 * s, 18.0 * s, WARN, "⚠", Face::Bold);
             }
@@ -710,6 +740,7 @@ impl App for ScanApp {
             Mode::Form(f, _) => f.render(g, area, s, ACCENT, blink(tick)),
             Mode::Browse => {}
         }
+        self.tip.draw(g, s);
     }
 }
 
@@ -717,6 +748,7 @@ impl App for ScanApp {
 mod tests {
     use super::*;
     use crate::apps::tests::{cx_with_admin_store, services_in, temp_dir, Offline};
+    use crate::tooltip::POINTER_DELAY;
     use iyakki_sec::policy::Role;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -1011,5 +1043,49 @@ mod tests {
         u.handle(&Event::Key(Key::Char('d')), &cx2);
         u.handle(&Event::Key(Key::Char('T')), &cx2);
         assert!(u.status_text().unwrap().contains("Only administrators"));
+    }
+
+    #[test]
+    fn a_narrow_machine_list_keeps_the_address_and_a_tooltip_has_all_of_the_row() {
+        let cx = admin_cx("scan-tip");
+        let mut a = ScanApp::new(&cx);
+        let ip = Ipv4Addr::new(192, 168, 100, 200);
+        let mut h = HostInfo::new(ip);
+        h.name = Some("living-room-television-with-a-very-long-friendly-name".into());
+        h.mac = Some("aa:bb:cc:dd:ee:ff".into());
+        a.hosts.insert(ip, h);
+        let area = R::new(0.0, 46.0, 520.0, 674.0);
+        let mut g = Gfx::new(520, 720);
+        let draw = |a: &mut ScanApp, g: &mut Gfx| {
+            g.clear(rgb(9, 11, 20));
+            a.render(g, area, 1.0, &cx, 5);
+        };
+        draw(&mut a, &mut g);
+        let row = g.hits.iter().find(|h| h.label == "192.168.100.200").expect("the row").rect;
+        // the line is cut for the width, yet the address is whole
+        let head = format!("{ip}  {}", a.hosts[&ip].name.clone().unwrap());
+        let cut = fit_keep_ip(&mut g, 16.0, &head, Face::Bold, row.w - 60.0);
+        assert!(cut != head && cut.starts_with("192.168.100.200"), "{cut}");
+        let plain = g.rgba().to_vec();
+        // the pointer rests on it: nothing for half a second, then the tooltip, which asks for a new picture
+        let (mx, my) = ((row.x + 20.0) as i32, (row.y + 10.0) as i32);
+        g.mouse = (mx, my);
+        a.handle(&Event::MouseMove(mx, my), &cx);
+        for _ in 0..POINTER_DELAY - 1 {
+            a.handle(&Event::Tick, &cx);
+        }
+        draw(&mut a, &mut g);
+        let hovered = g.rgba().to_vec();
+        for _ in 0..2 {
+            a.handle(&Event::Tick, &cx);
+        }
+        assert!(a.wants_redraw(), "the tooltip appears");
+        draw(&mut a, &mut g);
+        assert_ne!(hovered, g.rgba(), "the tooltip is drawn");
+        assert_ne!(plain, g.rgba());
+        // a key press puts it away at once
+        a.handle(&Event::Key(Key::Down), &cx);
+        draw(&mut a, &mut g);
+        assert!(a.wants_redraw());
     }
 }
