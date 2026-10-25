@@ -14,6 +14,9 @@ USAGE:
 
 IMAGE is the .iso (PC) or .img (VM) file. Without it, an image in the current folder is used.
 
+  sudo iyakki-usb --plan [IMAGE]     install next to another system, in free space, or on partitions you choose, with a plan to
+                                     confirm first (--plan --help for the options; docs/INSTALLER.md)
+
 OPTIONS:
   --install          install IYAKKI on the stick: a real partitioned system with a FAT boot partition and a data
                      partition that fills the rest of the stick, bootable on legacy BIOS and UEFI PCs

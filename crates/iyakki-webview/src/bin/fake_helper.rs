@@ -42,6 +42,9 @@ struct Fake {
     visible: bool,
     animate: bool,
     hung: bool,
+    fs: bool,
+    /// The page is playing audio (`fake://audio`).
+    audio: bool,
     spam: u32,
 }
 
@@ -101,6 +104,12 @@ impl Fake {
             self.history.push(url.to_string());
             self.idx = self.history.len() - 1;
         }
+        if std::mem::take(&mut self.fs) {
+            self.send(FromHelper::Fullscreen(false)); // a navigation ends fullscreen, as in the engine
+        }
+        if std::mem::take(&mut self.audio) {
+            self.send(FromHelper::AudioPlaying(false)); // and stops the page's sound
+        }
         self.send(FromHelper::Loading { loading: true, progress: 30 });
         self.send(FromHelper::Url(url.to_string()));
         self.send(FromHelper::Title(format!("fake page {url}")));
@@ -149,6 +158,15 @@ impl Fake {
                         let _ = e.write_all(b"\xff\xfe not utf-8 \n");
                         let _ = e.write_all(format!("line {i} {}\n", "x".repeat(300)).as_bytes());
                     }
+                } else if url == "fake://fullscreen" {
+                    // the page asks for fullscreen (a player's button); it stays until the shell or the page leaves
+                    self.fs = true;
+                    self.send(FromHelper::Fullscreen(true));
+                } else if url == "fake://audio" {
+                    // the page starts playing audio (a video element), as `notify::is-playing-audio` would say
+                    self.navigate_to(&url, true);
+                    self.audio = true;
+                    self.send(FromHelper::AudioPlaying(true));
                 } else if url == "fake://clipboard" {
                     self.send(FromHelper::Clipboard("copied text".into()));
                 } else {
@@ -219,6 +237,11 @@ impl Fake {
                 } else {
                     let head: String = js.chars().take(60).collect();
                     self.send(FromHelper::ScriptResult { id, ok: true, json: format!("{:?}", head) });
+                }
+            }
+            ToHelper::LeaveFullscreen => {
+                if std::mem::take(&mut self.fs) {
+                    self.send(FromHelper::Fullscreen(false));
                 }
             }
             ToHelper::Quit => return false,
@@ -301,7 +324,7 @@ fn main() {
             }
         }
     };
-    let mut f = Fake { stream: stream.try_clone().unwrap(), shm, w: 0, h: 0, img: Vec::new(), bar: 0, mouse: (-100, -100), history: Vec::new(), idx: 0, busy: [false; 2], next_slot: 0, dirty: None, visible: true, animate, hung: false, spam: 0, hello: hello.clone() };
+    let mut f = Fake { stream: stream.try_clone().unwrap(), shm, w: 0, h: 0, img: Vec::new(), bar: 0, mouse: (-100, -100), history: Vec::new(), idx: 0, busy: [false; 2], next_slot: 0, dirty: None, visible: true, animate, hung: false, fs: false, audio: false, spam: 0, hello: hello.clone() };
     f.send(FromHelper::Ready { version: proto::VERSION, engine: "fake".into(), engine_version: "1".into() });
     f.resize(hello.w, hello.h);
     f.log(format!("got Hello {hello:?}"));

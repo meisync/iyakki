@@ -1,0 +1,8 @@
+    meta nfproto ipv4 ip saddr 198.51.100.7 accept  # rule 1
+    meta nfproto ipv6 ip6 saddr 2001:db8::7 accept  # rule 2
+    meta nfproto ipv4 ip saddr 198.51.100.10-198.51.100.20 accept  # rule 3
+    meta nfproto ipv6 ip6 saddr 2001:db8::10-2001:db8::20 accept  # rule 4
+    meta nfproto ipv4 ip saddr 203.0.113.0/24 accept  # rule 5
+    meta nfproto ipv6 ip6 saddr 2001:db8:1::/48 accept  # rule 6
+    meta nfproto ipv4 ip saddr 203.0.113.5/32 accept  # rule 7
+    meta nfproto ipv4 ip saddr 10.0.0.0/13 accept  # rule 8

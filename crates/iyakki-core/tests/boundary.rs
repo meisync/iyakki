@@ -108,9 +108,10 @@ fn upstream_sources_are_never_patched() {
     let doc = std::fs::read_to_string(root().join("BOUNDARY.md")).unwrap();
     let bad: Vec<&String> = found.iter().filter(|p| !Path::new(p).file_name().is_some_and(|n| doc.contains(&*n.to_string_lossy()))).collect();
     assert!(bad.is_empty(), "patch files under dist/ that BOUNDARY.md rule 3 does not list: {bad:?}");
-    // the Mac variant's four kernel patches (0001 IYAKKI's CDCLK fix, 0002-0004 pinned T2 MacBook backports) and the two
-    // patches of its out-of-tree apple-bce package, and the one Secure Boot lockdown patch of every x86-64 image (patches-sb)
-    assert!(found.len() <= 7, "more than the seven listed patches: {found:?}");
+    // the Mac variant's four kernel patches (0001 IYAKKI's CDCLK fix, 0002-0004 pinned T2 MacBook backports) and the three
+    // patches of its out-of-tree apple-bce package (now four: 0004 silences the speaker on shutdown), and the one Secure Boot lockdown patch of every
+    // x86-64 image (patches-sb), and the snd-hda-macbookpro diff
+    assert!(found.len() <= 10, "more than the ten listed patches: {found:?}");
 }
 
 #[test]

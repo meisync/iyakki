@@ -131,6 +131,8 @@ pub enum ToHelper {
     SetVisible(bool),
     /// Evaluate JavaScript in the top-level page and answer with `ScriptResult` carrying the same `id` (protocol 1.1, optional).
     Script { id: u32, js: String, timeout_ms: u32 },
+    /// Ask the page to leave fullscreen (the shell's Esc); the helper answers with `Fullscreen(false)` when it has. Optional (0x12).
+    LeaveFullscreen,
     /// The shell has copied the pixels of this slot; the helper may draw into it again.
     Ack(u8),
     Quit,
@@ -153,6 +155,11 @@ pub enum FromHelper {
     Clipboard(String),
     /// The answer to `Script`: `ok` false means the script threw or timed out and `json` is the error text.
     ScriptResult { id: u32, ok: bool, json: String },
+    /// The page entered (true) or left (false) fullscreen; the shell shows the page area over the whole screen while it is on. Optional (0x8D).
+    Fullscreen(bool),
+    /// The page started (true) or stopped (false) playing audio (WebKit `is-playing-audio`). Optional (0x8E): the shell's sound
+    /// doctor compares it with the playback streams the engine's processes hold open.
+    AudioPlaying(bool),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -263,6 +270,7 @@ impl ToHelper {
     pub const ACK: u8 = 0x0F;
     pub const QUIT: u8 = 0x10;
     pub const SCRIPT: u8 = 0x11;
+    pub const LEAVE_FULLSCREEN: u8 = 0x12;
 
     /// The whole framed message, ready to write to the socket.
     pub fn encode(&self) -> Vec<u8> {
@@ -346,6 +354,7 @@ impl ToHelper {
                 w.finish()
             }
             ToHelper::Quit => W::new(Self::QUIT).finish(),
+            ToHelper::LeaveFullscreen => W::new(Self::LEAVE_FULLSCREEN).finish(),
             ToHelper::Script { id, js, timeout_ms } => {
                 let mut w = W::new(Self::SCRIPT);
                 w.u32(*id).u32(*timeout_ms).str(js);
@@ -392,6 +401,7 @@ impl ToHelper {
             Self::SET_VISIBLE => ToHelper::SetVisible(r.bool()?),
             Self::ACK => ToHelper::Ack(r.u8()?),
             Self::QUIT => ToHelper::Quit,
+            Self::LEAVE_FULLSCREEN => ToHelper::LeaveFullscreen,
             Self::SCRIPT => {
                 let (id, timeout_ms) = (r.u32()?, r.u32()?);
                 ToHelper::Script { id, js: r.str()?, timeout_ms }
@@ -414,6 +424,8 @@ impl FromHelper {
     pub const LOG: u8 = 0x8A;
     pub const CLIPBOARD: u8 = 0x8B;
     pub const SCRIPT_RESULT: u8 = 0x8C;
+    pub const FULLSCREEN: u8 = 0x8D;
+    pub const AUDIO_PLAYING: u8 = 0x8E;
 
     pub fn encode(&self) -> Vec<u8> {
         match self {
@@ -456,6 +468,16 @@ impl FromHelper {
             FromHelper::Crashed(s) => str_msg(Self::CRASHED, s),
             FromHelper::Log(s) => str_msg(Self::LOG, s),
             FromHelper::Clipboard(s) => str_msg(Self::CLIPBOARD, s),
+            FromHelper::Fullscreen(on) => {
+                let mut w = W::new(Self::FULLSCREEN);
+                w.u8(*on as u8);
+                w.finish()
+            }
+            FromHelper::AudioPlaying(on) => {
+                let mut w = W::new(Self::AUDIO_PLAYING);
+                w.u8(*on as u8);
+                w.finish()
+            }
             FromHelper::ScriptResult { id, ok, json } => {
                 let mut w = W::new(Self::SCRIPT_RESULT);
                 w.u32(*id).u8(*ok as u8).str(json);
@@ -489,6 +511,8 @@ impl FromHelper {
             Self::CRASHED => FromHelper::Crashed(r.str()?),
             Self::LOG => FromHelper::Log(r.str()?),
             Self::CLIPBOARD => FromHelper::Clipboard(r.str()?),
+            Self::FULLSCREEN => FromHelper::Fullscreen(r.bool()?),
+            Self::AUDIO_PLAYING => FromHelper::AudioPlaying(r.bool()?),
             Self::SCRIPT_RESULT => FromHelper::ScriptResult { id: r.u32()?, ok: r.bool()?, json: r.str()? },
             t => return Err(DecodeError::Unknown(t)),
         })
@@ -586,6 +610,7 @@ mod tests {
             ToHelper::Ack(1),
             ToHelper::Quit,
             ToHelper::Script { id: 7, js: "document.title".into(), timeout_ms: 5000 },
+            ToHelper::LeaveFullscreen,
         ]
     }
 
@@ -604,6 +629,10 @@ mod tests {
             FromHelper::Log("hello".into()),
             FromHelper::Clipboard("copied".into()),
             FromHelper::ScriptResult { id: 7, ok: true, json: "\"ünï\"".into() },
+            FromHelper::Fullscreen(true),
+            FromHelper::Fullscreen(false),
+            FromHelper::AudioPlaying(true),
+            FromHelper::AudioPlaying(false),
         ]
     }
 
@@ -626,6 +655,9 @@ mod tests {
         assert_eq!(ToHelper::Quit.encode(), vec![1, 0, 0, 0, 0x10]);
         assert_eq!(ToHelper::Script { id: 1, js: "1".into(), timeout_ms: 2 }.encode(), vec![14, 0, 0, 0, 0x11, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, b'1']);
         assert_eq!(FromHelper::ScriptResult { id: 1, ok: true, json: "2".into() }.encode(), vec![11, 0, 0, 0, 0x8C, 1, 0, 0, 0, 1, 1, 0, 0, 0, b'2']);
+        assert_eq!(ToHelper::LeaveFullscreen.encode(), vec![1, 0, 0, 0, 0x12]);
+        assert_eq!(FromHelper::Fullscreen(true).encode(), vec![2, 0, 0, 0, 0x8D, 1]);
+        assert_eq!(FromHelper::AudioPlaying(true).encode(), vec![2, 0, 0, 0, 0x8E, 1]);
         assert_eq!(FromHelper::Frame { slot: 1, w: 2, h: 3, rects: vec![Rect::new(0, 0, 2, 3)] }.encode(), vec![30, 0, 0, 0, 0x82, 1, 2, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0]);
     }
 

@@ -79,13 +79,76 @@ pub fn format_log(level: log::Level, args: &std::fmt::Arguments) -> String {
     format!("[iyakki {:5}] {}", level, args)
 }
 
-/// Print panics where a person can see them, then let the normal unwinding continue.
+/// At most this many panics get a backtrace in the log per minute (a crash loop must not flood the log).
+pub const BACKTRACE_PER_MINUTE: usize = 5;
+/// Frames of our own crates that are logged for one panic.
+pub const BACKTRACE_FRAMES: usize = 20;
+
+/// Allows `max` events per `window_s` seconds.
+#[derive(Default)]
+pub struct RateLimit {
+    stamps: Vec<u64>,
+}
+
+impl RateLimit {
+    pub fn allow(&mut self, now_s: u64, max: usize, window_s: u64) -> bool {
+        self.stamps.retain(|t| now_s.saturating_sub(*t) < window_s);
+        if self.stamps.len() >= max {
+            return false;
+        }
+        self.stamps.push(now_s);
+        true
+    }
+}
+
+/// The frames of our own crates (`iyakki_*`) in a rendered backtrace, one line each ("#3 iyakki_shell::textsel::drag at
+/// crates/iyakki-shell/src/textsel.rs:439:21"), at most `max`.
+pub fn backtrace_lines(bt: &str, max: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut lines = bt.lines().peekable();
+    while let Some(l) = lines.next() {
+        let t = l.trim();
+        let Some((idx, name)) = t.split_once(": ") else { continue };
+        if idx.is_empty() || !idx.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let at = lines.peek().map(|n| n.trim()).filter(|n| n.starts_with("at ")).map(|n| n[3..].to_string());
+        if !(name.starts_with("iyakki_") || name.starts_with("<iyakki_") || name.contains("::iyakki_")) {
+            continue;
+        }
+        // the panic machinery itself is not interesting
+        if name.contains("::console::install_panic_hook") {
+            continue;
+        }
+        out.push(match at {
+            Some(a) => format!("#{idx} {name} at {a}"),
+            None => format!("#{idx} {name}"),
+        });
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}
+
+static PANIC_LIMIT: std::sync::Mutex<Option<RateLimit>> = std::sync::Mutex::new(None);
+
+/// Print panics where a person can see them, then let the normal unwinding continue. The first panics of each minute also
+/// log where they happened (the frames of our own crates), so a crash on a real device can be traced.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let thread = std::thread::current();
         let msg = format!("PANIC in thread '{}': {}", thread.name().unwrap_or("?"), info);
         kmsg(2, &msg);
         err_write(&format!("{msg}\n"));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let allowed = PANIC_LIMIT.lock().map_or(false, |mut g| g.get_or_insert_with(RateLimit::default).allow(now, BACKTRACE_PER_MINUTE, 60));
+        if allowed {
+            let bt = std::backtrace::Backtrace::force_capture().to_string();
+            for l in backtrace_lines(&bt, BACKTRACE_FRAMES) {
+                kmsg(2, &format!("PANIC at {l}"));
+            }
+        }
     }));
 }
 
@@ -118,6 +181,24 @@ mod tests {
     fn log_levels_map_to_kernel_levels_and_lines_are_formatted() {
         assert_eq!([log::Level::Error, log::Level::Warn, log::Level::Info, log::Level::Debug].map(level_to_kernel), [3, 4, 6, 7]);
         assert_eq!(format_log(log::Level::Info, &format_args!("supervisor up")), "[iyakki INFO ] supervisor up");
+    }
+
+    #[test]
+    fn backtraces_keep_only_our_frames_with_their_places_and_are_bounded() {
+        let bt = "   0: std::backtrace::Backtrace::force_capture\n   1: iyakki_core::console::install_panic_hook::{{closure}}\n             at ./crates/iyakki-core/src/console.rs:99:9\n   2: core::panicking::panic_fmt\n   3: iyakki_shell::textsel::drag\n             at ./crates/iyakki-shell/src/textsel.rs:439:21\n   4: <iyakki_shell::apps::ide::IdeApp as iyakki_shell::apps::App>::render\n   5: std::rt::lang_start\n";
+        let v = backtrace_lines(bt, 20);
+        assert_eq!(v, vec!["#3 iyakki_shell::textsel::drag at ./crates/iyakki-shell/src/textsel.rs:439:21".to_string(), "#4 <iyakki_shell::apps::ide::IdeApp as iyakki_shell::apps::App>::render".to_string()]);
+        assert_eq!(backtrace_lines(bt, 1).len(), 1);
+        assert!(backtrace_lines("", 20).is_empty());
+    }
+
+    #[test]
+    fn at_most_five_panics_per_minute_get_a_backtrace() {
+        let mut r = RateLimit::default();
+        let ok = (0..8).filter(|i| r.allow(100 + i, BACKTRACE_PER_MINUTE, 60)).count();
+        assert_eq!(ok, 5);
+        assert!(!r.allow(159, 5, 60));
+        assert!(r.allow(161, 5, 60), "the window moves on");
     }
 
     #[test]

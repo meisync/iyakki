@@ -1,8 +1,10 @@
 //! The listener: one thread per connection, TLS when an identity is given, a handful of routes, and the WebSocket that
 //! carries the screen.
 
+use crate::adapt::{Choice, Controller};
+use crate::codec::{Caps, Level, Opts, Streamer};
 use crate::http::{self, Parse, Request, Response};
-use crate::input;
+use crate::input::{self, Input};
 use crate::page;
 use crate::screen::{Gate, LoginError};
 use crate::session::{self, RateLimit, Sessions, COOKIE};
@@ -200,6 +202,7 @@ fn route(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
     let session = req.cookie(COOKIE).and_then(|t| sh.sessions.find(t));
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/") => Response::html(page::INDEX),
+        ("GET", "/decoder.js") => Response::new(200, "text/javascript; charset=utf-8", page::DECODER_JS),
         ("GET", "/healthz") => Response::new(200, "text/plain", "ok"),
         ("GET", "/api/session") => match session {
             Some(s) => Response::json(200, &serde_json::json!({ "user": s.user, "csrf": s.csrf })),
@@ -279,15 +282,33 @@ fn websocket(mut conn: Conn, req: &Request, sh: &Shared) {
     }
 }
 
+/// Protocol version 2 state of one connection (present once the page said `hello`).
+struct V2 {
+    ctl: Controller,
+    st: Streamer,
+    caps: Caps,
+    armed: bool,
+    last_stats: u64,
+    last_level: Level,
+    last_pong: u64,
+}
+
+/// What the server speaks: the page's `hello` may ask for less, never for more.
+const PROTOCOL_VERSION: u32 = 2;
+
 /// Carry one person's screen over the connection until it closes. True when the person signed out.
 fn serve_screen(conn: &mut Conn, screen: &mut dyn crate::screen::Screen, sh: &Shared) -> bool {
     let mut parser = Parser::new(MAX_WS_MESSAGE);
     let mut buf = vec![0u8; 16 * 1024];
-    let send = |conn: &mut Conn, bytes: Vec<u8>| conn.write_all(&bytes).and_then(|_| conn.flush()).is_ok();
+    let t0 = Instant::now();
+    let mut v2: Option<V2> = None;
+    // everything one pass of the loop wants to say goes out in one write (small messages are batched, one packet)
+    let mut outbox: Vec<u8> = Vec::new();
     loop {
         if sh.stop.load(Ordering::Relaxed) {
             return false;
         }
+        let now = t0.elapsed().as_millis() as u64;
         match conn.read(&mut buf) {
             Ok(0) => return false,
             Ok(n) => parser.push(&buf[..n]),
@@ -297,16 +318,61 @@ fn serve_screen(conn: &mut Conn, screen: &mut dyn crate::screen::Screen, sh: &Sh
         loop {
             match parser.next() {
                 Ok(Some(Message::Text(t))) => {
-                    if let Some(i) = input::parse(&t) {
-                        screen.input(i);
+                    let Some(i) = input::parse(&t) else { continue };
+                    match i {
+                        Input::Hello { v, deflate } => {
+                            let version = v.min(PROTOCOL_VERSION);
+                            if version >= 2 && v2.is_none() {
+                                let ctl = Controller::new(now);
+                                let level = ctl.level();
+                                v2 = Some(V2 { ctl, st: Streamer::new(), caps: Caps { deflate }, armed: false, last_stats: now, last_level: level, last_pong: 0 });
+                                screen.set_stream(true);
+                            }
+                            let m = serde_json::json!({ "t": "hello_ok", "v": if v2.is_some() { version } else { 1 }, "tile": crate::codec::TILE, "levels": Level::ALL.map(|l| l.name()), "max_message": MAX_WS_MESSAGE });
+                            outbox.extend(ws::text_frame(&m.to_string()));
+                        }
+                        Input::Ack(n) => {
+                            if let Some(v) = v2.as_mut() {
+                                v.ctl.on_ack(n, now);
+                            }
+                        }
+                        Input::Quality { level, saver } => {
+                            if let Some(v) = v2.as_mut() {
+                                v.ctl.set_choice(level.map_or(Choice::Auto, Choice::Fixed), saver);
+                            }
+                        }
+                        Input::Ping { ts, rtt } => {
+                            // at most about twenty answers a second: a flood of pings costs the server little
+                            if now.saturating_sub(v2.as_ref().map_or(0, |v| v.last_pong)) >= 50 || v2.is_none() {
+                                if let Some(v) = v2.as_mut() {
+                                    v.last_pong = now;
+                                    if let Some(r) = rtt {
+                                        v.ctl.on_rtt(r);
+                                    }
+                                }
+                                outbox.extend(ws::text_frame(&format!(r#"{{"t":"pong","ts":{ts}}}"#)));
+                            }
+                        }
+                        Input::Full => {
+                            if let Some(v) = v2.as_mut() {
+                                v.st.reset();
+                            }
+                            screen.input(Input::Full);
+                        }
+                        other => {
+                            if let (Some(v), Input::Event(e)) = (v2.as_mut(), &other) {
+                                use iyakki_shell::ui::Event;
+                                if matches!(e, Event::Key(_) | Event::MouseDown(..) | Event::MouseUp(..) | Event::MouseRight(..) | Event::Scroll(_) | Event::Paste(_)) {
+                                    v.ctl.on_input();
+                                }
+                            }
+                            screen.input(other);
+                        }
                     }
                 }
-                Ok(Some(Message::Ping(p))) => {
-                    if !send(conn, ws::pong_frame(&p)) {
-                        return false;
-                    }
-                }
+                Ok(Some(Message::Ping(p))) => outbox.extend(ws::pong_frame(&p)),
                 Ok(Some(Message::Close)) => {
+                    let _ = flush(conn, &mut outbox);
                     let _ = send(conn, ws::close_frame());
                     return false;
                 }
@@ -318,37 +384,77 @@ fn serve_screen(conn: &mut Conn, screen: &mut dyn crate::screen::Screen, sh: &Sh
                 }
             }
         }
-        if let Some(frame) = screen.step() {
-            if !send(conn, ws::binary_frame(&frame.to_message())) {
-                return false;
+        // the picture: PNG pieces for a page that did not say hello, otherwise tiles of the difference
+        let legacy = screen.step();
+        match v2.as_mut() {
+            None => {
+                if let Some(frame) = legacy {
+                    outbox.extend(ws::binary_frame(&frame.to_message()));
+                }
+            }
+            Some(v) => {
+                v.ctl.tick(now);
+                if let Some(p) = screen.take_pixels() {
+                    v.armed = false;
+                    v.st.set_source(p.w as usize, p.h as usize, p.rgba);
+                }
+                if v.ctl.can_send(now) {
+                    if v.st.wants_encode(now) {
+                        let o = Opts { level: v.ctl.level(), caps: v.caps, budget: v.ctl.budget(), now_ms: now };
+                        if let Some(e) = v.st.encode(&o) {
+                            v.ctl.on_send(e.seq, e.msg.len(), now);
+                            outbox.extend(ws::binary_frame(&e.msg));
+                        }
+                    }
+                }
+                if !v.armed && v.ctl.can_send(now) {
+                    v.armed = true;
+                    screen.arm();
+                }
+                let level = v.ctl.level();
+                if level != v.last_level || now.saturating_sub(v.last_stats) >= 1000 {
+                    v.last_level = level;
+                    v.last_stats = now;
+                    outbox.extend(ws::text_frame(&v.ctl.stats_json().to_string()));
+                }
             }
         }
         if let Some(c) = screen.take_cursor() {
-            let m = serde_json::json!({ "t": "cursor", "c": c }).to_string();
-            if !send(conn, ws::text_frame(&m)) {
-                return false;
-            }
+            outbox.extend(ws::text_frame(&serde_json::json!({ "t": "cursor", "c": c }).to_string()));
         }
         for m in screen.take_speech() {
-            if !send(conn, ws::text_frame(&m)) {
-                return false;
-            }
+            outbox.extend(ws::text_frame(&m));
         }
         if screen.take_clip_request() {
-            if !send(conn, ws::text_frame(r#"{"t":"readclip"}"#)) {
-                return false;
-            }
+            outbox.extend(ws::text_frame(r#"{"t":"readclip"}"#));
         }
         if let Some(text) = screen.take_copy() {
-            let m = serde_json::json!({ "t": "copy", "s": text }).to_string();
-            if !send(conn, ws::text_frame(&m)) {
-                return false;
-            }
+            outbox.extend(ws::text_frame(&serde_json::json!({ "t": "copy", "s": text }).to_string()));
         }
-        if screen.finished() {
-            let _ = send(conn, ws::text_frame(r#"{"t":"bye"}"#));
-            let _ = send(conn, ws::close_frame());
+        let done = screen.finished();
+        if done {
+            outbox.extend(ws::text_frame(r#"{"t":"bye"}"#));
+            outbox.extend(ws::close_frame());
+        }
+        if !flush(conn, &mut outbox) {
+            return false;
+        }
+        if done {
             return true;
         }
     }
+}
+
+fn send(conn: &mut Conn, bytes: Vec<u8>) -> bool {
+    conn.write_all(&bytes).and_then(|_| conn.flush()).is_ok()
+}
+
+/// Write everything waiting in one go.
+fn flush(conn: &mut Conn, outbox: &mut Vec<u8>) -> bool {
+    if outbox.is_empty() {
+        return true;
+    }
+    let r = conn.write_all(outbox).and_then(|_| conn.flush()).is_ok();
+    outbox.clear();
+    r
 }

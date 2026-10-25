@@ -4,15 +4,25 @@
 //!
 //! Used by the boot code (`apply_boot`, before the network and sound drivers load) and by the store.
 
+pub mod appfw;
+pub mod applespi;
 pub mod apply;
 pub mod b64;
 pub mod camquirk;
+pub mod cs8409;
 pub mod detect;
 pub mod facetime;
+pub mod ihex;
 pub mod known;
+pub mod macboard;
 pub mod modinfo;
 pub mod pack;
 pub mod run;
+pub mod t2hold;
+pub mod t2input;
+pub mod touchbar;
+#[cfg(target_os = "linux")]
+pub mod usbfs;
 
 pub use apply::{active_ids, apply_boot, firmware_present, install_pack, installed, remove_pack, Fs, Record, Report};
 pub use detect::{Machine, Roots};

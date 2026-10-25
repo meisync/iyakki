@@ -6,6 +6,10 @@
 //! * [`doc`] turns the tree into blocks.
 //! * [`fetch`] loads a page through any transport, follows redirects and checks every hop against a host policy.
 
+pub mod blocker;
+pub mod blocker_json;
+pub mod blocker_lists;
+pub mod blocker_state;
 pub mod cache;
 pub mod cookies;
 pub mod css;
@@ -17,6 +21,9 @@ pub mod html;
 pub mod image;
 pub mod jpeg;
 pub mod media;
+pub mod net;
+pub mod preload;
+pub mod netstats;
 pub mod reader;
 pub mod style;
 pub mod svg;

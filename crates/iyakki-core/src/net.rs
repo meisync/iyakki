@@ -56,6 +56,10 @@ pub fn list_ifaces(sys_class_net: &Path) -> Vec<Iface> {
             } else if is_t2_internal_link(&read("address")) {
                 // the T2 chip's own USB network link (apple-bce, cdc_ncm): it leads into the T2, never to a network
                 IfaceKind::Other
+            } else if iyakki_devctl::direct::is_direct_link(&name, &std::fs::read_link(p.join("device/driver")).ok().and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_default()) {
+                // a Thunderbolt/USB4 cable or a host-to-host USB bridge cable to another computer: no DHCP server there; the link
+                // manager (`iyakki_agent::directlink`) gives it a link-local address instead of a DHCP client running here
+                IfaceKind::Other
             } else if read("type") == "1" &&!["veth", "docker", "br-", "virbr", "cni", "flannel", "tun", "tap"].iter().any(|x| name.starts_with(x)) {
                 IfaceKind::Ethernet
             } else {
@@ -298,7 +302,86 @@ pub fn bring_up_with(conf_path: &Path, sys_class_net: &Path, known: &Path) -> Re
         Err(_) => NetConfig::default(),
     };
     cfg.wifi_known = iyakki_devctl::wifi::KnownStore::new(known).list();
-    Ok(execute(&plan(&cfg, &list_ifaces(sys_class_net))))
+    let ifaces = list_ifaces(sys_class_net);
+    remember(&ifaces);
+    Ok(execute(&plan(&cfg, &ifaces)))
+}
+
+/// Interfaces that were set up (at boot or later) and what they are, so a hot-plug event never starts a second DHCP client.
+static SET_UP: std::sync::Mutex<Option<std::collections::HashMap<String, IfaceKind>>> = std::sync::Mutex::new(None);
+
+/// Boot has set the network up: from now on [`bring_up_new`] acts on interfaces that appear.
+pub static NETWORK_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn remember(ifaces: &[Iface]) {
+    let mut g = SET_UP.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(Default::default);
+    for i in ifaces.iter().filter(|i| matches!(i.kind, IfaceKind::Ethernet | IfaceKind::Wifi)) {
+        m.insert(i.name.clone(), i.kind);
+    }
+}
+
+/// What [`bring_up_new`] did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct NewIfaces {
+    /// Names of the interfaces that were set up now.
+    pub started: Vec<String>,
+}
+
+/// Set up the Ethernet and Wi-Fi interfaces that exist but were not set up yet (`only`: just that one), the way boot does:
+/// link up, private address, DHCP or the static address from the file; a Wi-Fi adapter joins the saved network only when no other
+/// Wi-Fi adapter is already doing it. Called when an adapter is plugged in later and once boot has finished.
+pub fn bring_up_new(conf_path: &Path, sys_class_net: &Path, known: &Path, only: Option<&str>) -> Result<NewIfaces, NetError> {
+    let mut cfg = match std::fs::read_to_string(conf_path) {
+        Ok(t) => parse_config(&t)?,
+        Err(_) => NetConfig::default(),
+    };
+    cfg.wifi_known = iyakki_devctl::wifi::KnownStore::new(known).list();
+    let (todo, wifi_busy) = {
+        let g = SET_UP.lock().unwrap_or_else(|e| e.into_inner());
+        let done = g.as_ref();
+        let todo: Vec<Iface> = list_ifaces(sys_class_net)
+            .into_iter()
+            .filter(|i| matches!(i.kind, IfaceKind::Ethernet | IfaceKind::Wifi))
+            .filter(|i| only.is_none_or(|o| o == i.name))
+            .filter(|i| !done.is_some_and(|m| m.contains_key(&i.name)))
+            .collect();
+        (todo, done.is_some_and(|m| m.values().any(|k| *k == IfaceKind::Wifi)))
+    };
+    if todo.is_empty() {
+        return Ok(NewIfaces::default());
+    }
+    if wifi_busy {
+        // another adapter already joined the network: this one is only switched on
+        cfg.wifi_ssid = None;
+        cfg.wifi_psk = None;
+        cfg.wifi_known.clear();
+    }
+    remember(&todo);
+    for e in execute(&plan(&cfg, &todo)) {
+        log::warn!("net: {e}");
+    }
+    Ok(NewIfaces { started: todo.into_iter().map(|i| i.name).collect() })
+}
+
+/// An interface is gone (the adapter was unplugged): forget it and stop the clients that were started for it, so the same
+/// name is set up afresh when an adapter comes back.
+pub fn interface_gone(name: &str) {
+    let known = SET_UP.lock().unwrap_or_else(|e| e.into_inner()).as_mut().is_some_and(|m| m.remove(name).is_some());
+    if !known {
+        return;
+    }
+    for pidfile in [format!("/run/udhcpc-{name}.pid")] {
+        if let Some(pid) = std::fs::read_to_string(&pidfile).ok().and_then(|t| t.trim().parse::<u32>().ok()) {
+            // only a process that really is the DHCP client of this interface
+            let line = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            let line = String::from_utf8_lossy(&line);
+            if line.contains("udhcpc") && line.contains(name) {
+                let _ = Command::new("kill").arg(pid.to_string()).status();
+            }
+            let _ = std::fs::remove_file(&pidfile);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -310,6 +393,34 @@ mod tests {
     }
     fn wifi(n: &str) -> Iface {
         Iface { name: n.into(), kind: IfaceKind::Wifi }
+    }
+
+    fn fake_net(tag: &str, names: &[&str]) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("net-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for n in names {
+            std::fs::create_dir_all(d.join(n)).unwrap();
+            std::fs::write(d.join(n).join("type"), "1\n").unwrap();
+            std::fs::write(d.join(n).join("address"), "9c:eb:e8:00:00:01\n").unwrap();
+        }
+        d
+    }
+
+    #[test]
+    fn an_interface_that_appears_later_is_set_up_once_and_again_after_it_went_away() {
+        let d = fake_net("late", &["ethlate0"]);
+        let none = d.join("no-such-file");
+        // the commands run for real here (`ip`, `udhcpc` are absent or fail on a build machine: only log lines)
+        let first = bring_up_new(&none, &d, &none, Some("ethlate0")).unwrap();
+        assert_eq!(first.started, vec!["ethlate0"]);
+        let again = bring_up_new(&none, &d, &none, Some("ethlate0")).unwrap();
+        assert!(again.started.is_empty(), "no second DHCP client for an interface that is already set up");
+        interface_gone("ethlate0");
+        let back = bring_up_new(&none, &d, &none, Some("ethlate0")).unwrap();
+        assert_eq!(back.started, vec!["ethlate0"], "the same name comes up again when the adapter returns");
+        let other = bring_up_new(&none, &d, &none, Some("ethother9")).unwrap();
+        assert!(other.started.is_empty(), "only the named interface");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

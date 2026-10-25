@@ -44,7 +44,7 @@ impl FetchModule {
         }
         self.requests += 1;
         let head = method == "HEAD";
-        let mut req = Request { url: self.base.join(target)?.without_fragment(), method: method.to_string(), body: body.as_bytes().to_vec(), content_type: content_type.to_string(), cookie: String::new(), referer: self.base.to_string() };
+        let mut req = Request { url: self.base.join(target)?.without_fragment(), method: method.to_string(), body: body.as_bytes().to_vec(), content_type: content_type.to_string(), cookie: String::new(), referer: self.base.to_string(), ..Default::default() };
         for _ in 0..=MAX_REDIRECTS {
             let url = req.url.clone();
             if !(self.allow)(&url.host) {
@@ -67,7 +67,7 @@ impl FetchModule {
             if (300..400).contains(&r.status) {
                 let loc = r.location.as_deref().filter(|l| !l.trim().is_empty()).ok_or("a redirect with nowhere to go")?;
                 let keep = matches!(r.status, 307 | 308);
-                req = Request { url: url.join(loc)?.without_fragment(), method: if keep { req.method.clone() } else { "GET".into() }, body: if keep { req.body.clone() } else { Vec::new() }, content_type: if keep { req.content_type.clone() } else { String::new() }, cookie: String::new(), referer: url.to_string() };
+                req = Request { url: url.join(loc)?.without_fragment(), method: if keep { req.method.clone() } else { "GET".into() }, body: if keep { req.body.clone() } else { Vec::new() }, content_type: if keep { req.content_type.clone() } else { String::new() }, cookie: String::new(), referer: url.to_string(), ..Default::default() };
                 continue;
             }
             self.bytes += r.body.len();

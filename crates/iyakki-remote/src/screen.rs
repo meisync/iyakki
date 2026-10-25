@@ -32,6 +32,14 @@ impl Frame {
     }
 }
 
+/// The whole picture, as RGBA (protocol version 2 codes the difference to what the page has itself).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pixels {
+    pub w: u32,
+    pub h: u32,
+    pub rgba: Vec<u8>,
+}
+
 /// What the web server needs from a person's screen (a fake one stands in for it in the server's tests).
 pub trait Screen: Send {
     fn user(&self) -> String;
@@ -52,6 +60,15 @@ pub trait Screen: Send {
     }
     /// The mouse pointer's CSS name when it changed since last asked (`pointer`, `text`, `default`...).
     fn take_cursor(&mut self) -> Option<&'static str> {
+        None
+    }
+    /// Protocol version 2: from now on deliver whole pictures through [`Screen::take_pixels`] (and nothing through
+    /// [`Screen::step`]), or go back to PNG pieces.
+    fn set_stream(&mut self, _on: bool) {}
+    /// Protocol version 2: the connection can take a picture now. It is delivered as soon as something changed (or after a
+    /// moment of stillness), once per call; nothing is produced or queued without it.
+    fn arm(&mut self) {}
+    fn take_pixels(&mut self) -> Option<Pixels> {
         None
     }
     /// The person signed out.
@@ -111,10 +128,13 @@ impl Gate for ShellGate {
 enum Cmd {
     In(Input),
     Viewing(bool),
+    Stream(bool),
+    Arm,
 }
 
 enum Out {
     Frame(Frame),
+    Pixels(Pixels),
     Copy(String),
     Cursor(&'static str),
     /// The shell wants the text on the person's clipboard (the page reads it and sends it back as a paste).
@@ -131,6 +151,7 @@ pub struct ShellScreen {
     copied: Option<String>,
     cursor: Option<&'static str>,
     read_clip: bool,
+    pixels: Option<Pixels>,
     /// Messages for the page's speech synthesis; a channel of its own so a slow page never makes one get lost like a frame.
     speech: std::sync::mpsc::Receiver<String>,
 }
@@ -147,6 +168,7 @@ impl ShellScreen {
         std::thread::Builder::new().name("iyakki-web-shell".into()).stack_size(32 * 1024 * 1024).spawn(move || {
             let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut shell = Shell::new(env);
+                shell.set_remote(true); // a browser session never gets the login screen's power button
                 shell.sign_in_checked(session, &password);
                 drop(password);
                 shell_loop(shell, cmds, out, speech_tx, &flag);
@@ -156,7 +178,7 @@ impl ShellScreen {
             }
             flag.store(true, Ordering::Relaxed);
         })?;
-        Ok(ShellScreen { tx, rx, user, done, copied: None, cursor: None, read_clip: false, speech })
+        Ok(ShellScreen { tx, rx, user, done, copied: None, cursor: None, read_clip: false, pixels: None, speech })
     }
 }
 
@@ -184,6 +206,8 @@ fn shell_loop(mut shell: Shell, cmds: std::sync::mpsc::Receiver<Cmd>, out: std::
     let mut gfx = Gfx::new(1280, 720);
     let mut last: Vec<u8> = Vec::new();
     let (mut need_full, mut dirty, mut viewing) = (true, true, false);
+    // protocol version 2: whole pictures, only when the connection has armed us
+    let (mut stream, mut armed) = (false, false);
     let (mut last_tick, mut last_render) = (Instant::now(), Instant::now());
     let mut last_cursor = "default";
     loop {
@@ -209,10 +233,18 @@ fn shell_loop(mut shell: Shell, cmds: std::sync::mpsc::Receiver<Cmd>, out: std::
                 }
                 Cmd::In(Input::Shift(on)) => iyakki_shell::ui::set_shift_held(on),
                 Cmd::In(Input::Speech(e)) => voice.event(e),
+                // the connection answers these itself; they never reach the shell
+                Cmd::In(Input::Hello { .. } | Input::Ack(_) | Input::Quality { .. } | Input::Ping { .. }) => {}
                 Cmd::In(Input::Full) => {
                     need_full = true;
                     dirty = true;
                 }
+                Cmd::Stream(on) => {
+                    stream = on;
+                    armed = false;
+                    dirty = true;
+                }
+                Cmd::Arm => armed = stream,
                 Cmd::Viewing(v) => {
                     // the page is the person's speaker only while it is connected: it announces what it can do on connecting
                     if v {
@@ -221,6 +253,7 @@ fn shell_loop(mut shell: Shell, cmds: std::sync::mpsc::Receiver<Cmd>, out: std::
                         voice.disconnect();
                     }
                     viewing = v;
+                    armed &= v;
                     need_full |= v;
                     dirty |= v;
                 }
@@ -252,7 +285,19 @@ fn shell_loop(mut shell: Shell, cmds: std::sync::mpsc::Receiver<Cmd>, out: std::
                     log::debug!("web: a copied text was dropped (the page is slow)");
                 }
             }
-            if dirty || last_render.elapsed() >= Duration::from_millis(150) {
+            if stream {
+                if armed && (dirty || last_render.elapsed() >= Duration::from_millis(500)) {
+                    dirty = false;
+                    last_render = Instant::now();
+                    shell.render(&mut gfx);
+                    let p = Pixels { w: gfx.width(), h: gfx.height(), rgba: gfx.rgba().to_vec() };
+                    if out.try_send(Out::Pixels(p)).is_ok() {
+                        armed = false;
+                    } else {
+                        dirty = true;
+                    }
+                }
+            } else if dirty || last_render.elapsed() >= Duration::from_millis(150) {
                 dirty = false;
                 last_render = Instant::now();
                 shell.render(&mut gfx);
@@ -334,10 +379,26 @@ impl Screen for ShellScreen {
         v
     }
 
+    fn set_stream(&mut self, on: bool) {
+        let _ = self.tx.send(Cmd::Stream(on));
+    }
+
+    fn arm(&mut self) {
+        let _ = self.tx.send(Cmd::Arm);
+    }
+
+    fn take_pixels(&mut self) -> Option<Pixels> {
+        self.pixels.take()
+    }
+
     fn step(&mut self) -> Option<Frame> {
         // wait a moment for the next piece so the server's loop is not a busy one
         match self.rx.recv_timeout(Duration::from_millis(10)) {
             Ok(Out::Frame(f)) => Some(f),
+            Ok(Out::Pixels(p)) => {
+                self.pixels = Some(p);
+                None
+            }
             Ok(Out::Copy(t)) => {
                 self.copied = Some(t);
                 None

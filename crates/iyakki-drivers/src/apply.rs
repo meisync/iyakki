@@ -287,6 +287,17 @@ pub fn activate(fs: &Fs, run: &dyn Runner, id: &str) -> Result<Report, String> {
             Err(e) => rep.lines.push(format!("module {name} skipped: {e}")),
         }
     }
+    // a T2 Mac keeps its Wi-Fi and Bluetooth drivers' files aside until the firmware is here (t2hold.rs): give back what this pack loads
+    let wanted: Vec<String> = rec.reload.iter().chain(&rec.load).cloned().collect();
+    let back = crate::t2hold::release(&fs.lib_modules, &wanted);
+    if back > 0 {
+        rep.lines.push(format!("{back} driver file(s) given back (they were held until the firmware existed)"));
+    }
+    // a Bluetooth pack (whatever files it has) gives back the whole Bluetooth group: hci_uart binds the BCM4364 UART controller of the
+    // Mac mini 2018 even when the pack only has the PCIe chip's files
+    if rec.id == BT_PACK && !is_disabled(fs, &rec.id) {
+        rep.lines.extend(give_back_bluetooth(fs, run, &wanted, "a Bluetooth driver pack is installed"));
+    }
     let loaded = fs.loaded_modules();
     for m in &rec.reload {
         if loaded.iter().any(|l| l == m) {
@@ -307,6 +318,50 @@ pub fn activate(fs: &Fs, run: &dyn Runner, id: &str) -> Result<Report, String> {
     Ok(rep)
 }
 
+/// The id of the Bluetooth driver pack (`macfw::PACK_BT`).
+pub const BT_PACK: &str = "mac-bt-broadcom";
+
+/// Give every held Bluetooth driver file back (`btbcm`, `hci_uart`, `hci_bcm4377`; nothing happens when none is held: a machine that
+/// is not a T2 Mac, or one whose firmware exists) and load them in dependency order. The modules in `skip` are only given back: the
+/// caller loads them itself. Returns log lines.
+pub fn give_back_bluetooth(fs: &Fs, run: &dyn Runner, skip: &[String], why: &str) -> Vec<String> {
+    let group: Vec<String> = crate::t2hold::BT_GROUP.iter().map(|s| s.to_string()).collect();
+    let back = crate::t2hold::release_names(&fs.lib_modules, &group);
+    if back.is_empty() {
+        return vec![];
+    }
+    let mut lines = vec![format!("Bluetooth: {} driver file(s) given back ({why}): {}", back.len(), back.join(", "))];
+    let loaded = fs.loaded_modules();
+    // btbcm first (the Broadcom part the others use), then the UART and PCIe drivers
+    for m in crate::t2hold::BT_GROUP {
+        let wanted = back.iter().any(|b| b == m) || (*m == "btbcm");
+        if !wanted || loaded.iter().any(|l| l == m) || skip.iter().any(|k| k.replace('-', "_") == *m) {
+            continue;
+        }
+        match run.run("modprobe", &[m]) {
+            Ok(()) => lines.push(format!("driver {m} loaded")),
+            Err(e) => lines.push(format!("driver {m} did not load: {e}")),
+        }
+    }
+    lines
+}
+
+/// The person chose "Load the Bluetooth driver anyway": give the held Bluetooth drivers back and load them even though no firmware
+/// file exists (the controller then runs in its ROM state). The choice is remembered on the data volume, so it is applied again at
+/// every start ([`apply_boot`]). Nothing is written when nothing is held (not a T2 Mac, or the firmware exists).
+pub fn load_bluetooth_anyway(fs: &Fs, run: &dyn Runner) -> Vec<String> {
+    let lines = give_back_bluetooth(fs, run, &[], "chosen: load anyway");
+    if lines.is_empty() {
+        return vec!["Nothing was held back: the Bluetooth drivers are not set aside on this machine.".into()];
+    }
+    let mark = fs.data.join(crate::t2hold::LOAD_ANYWAY_MARK);
+    if let Some(d) = mark.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let _ = std::fs::write(&mark, b"the person chose to load the Bluetooth drivers without firmware\n");
+    lines
+}
+
 /// At every boot, after the data volume is mounted and before the network, sound and Bluetooth drivers load.
 /// Returns log lines. `reload` of already-loaded drivers is skipped here (they have not loaded yet in late boot).
 pub fn apply_boot(fs: &Fs, run: &dyn Runner) -> Vec<String> {
@@ -320,6 +375,10 @@ pub fn apply_boot(fs: &Fs, run: &dyn Runner) -> Vec<String> {
             Ok(r) => log.push(format!("driver pack {}: {} file(s) linked{}", rec.id, rec.files.len(), if r.lines.is_empty() { String::new() } else { format!("; {}", r.lines.join("; ")) })),
             Err(e) => log.push(format!("driver pack {}: {e}", rec.id)),
         }
+    }
+    // the person chose "Load the Bluetooth driver anyway" earlier: the RAM root set the files aside again at this boot
+    if fs.data.join(crate::t2hold::LOAD_ANYWAY_MARK).exists() {
+        log.extend(give_back_bluetooth(fs, run, &[], "chosen earlier: load anyway"));
     }
     log
 }
@@ -377,29 +436,69 @@ pub fn pack_from_folder(known: &crate::known::Known, dir: &Path) -> Result<(Pack
         }
     }
     found.sort();
-    let mut pack = Pack { v: 1, matches: known.match_rules(), why: known.why.into(), ..Default::default() };
-    let mut taken = Vec::new();
+    let mut named = Vec::new();
     for p in found {
         let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let Some((_, sub)) = known.accept.iter().find(|(pat, _)| glob(pat, &name)) else { continue };
-        let rel = format!("{sub}/{name}");
-        if !pack::safe_rel_path(&rel) || pack.files.iter().any(|f| f.path == rel) {
+        if !known.accept.iter().any(|(pat, _)| glob(pat, &name)) {
             continue;
         }
         let meta = std::fs::metadata(&p).map_err(|e| format!("{}: {e}", p.display()))?;
         if meta.len() == 0 || meta.len() as usize > pack::MAX_FILE_BYTES {
             continue;
         }
-        let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-        taken.push(format!("{rel} ({} bytes, sha256 {})", bytes.len(), &pack::sha256_hex(&bytes)[..16]));
-        pack.files.push(pack::FwFile { path: rel, data: b64::encode(&bytes), sha256: pack::sha256_hex(&bytes) });
+        named.push((name, std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?));
+    }
+    pack_from_named(known, &named, &dir.display().to_string())
+}
+
+/// Build a local pack from files already in memory (`(file name, bytes)`: a folder's files, or what `appfw` extracted), accepting
+/// only the names the entry lists. `from` says where they came from, for the error text.
+pub fn pack_from_named(known: &crate::known::Known, files: &[(String, Vec<u8>)], from: &str) -> Result<(Pack, Vec<String>), String> {
+    if known.accept.is_empty() {
+        return Err(format!("{} does not take files from a folder", known.title));
+    }
+    let mut pack = Pack { v: 1, matches: known.match_rules(), why: known.why.into(), ..Default::default() };
+    let mut taken = Vec::new();
+    for (name, bytes) in files {
+        let Some((_, sub)) = known.accept.iter().find(|(pat, _)| glob(pat, name)) else { continue };
+        let rel = format!("{sub}/{name}");
+        if !pack::safe_rel_path(&rel) || pack.files.iter().any(|f| f.path == rel) || bytes.is_empty() || bytes.len() > pack::MAX_FILE_BYTES {
+            continue;
+        }
+        taken.push(format!("{rel} ({} bytes, sha256 {})", bytes.len(), &pack::sha256_hex(bytes)[..16]));
+        pack.files.push(pack::FwFile { path: rel, data: b64::encode(bytes), sha256: pack::sha256_hex(bytes) });
     }
     if pack.files.is_empty() {
-        return Err(format!("no file that {} accepts was found in {} (looking for {})", known.title, dir.display(), known.accept.iter().map(|a| a.0).collect::<Vec<_>>().join(", ")));
+        return Err(format!("no file that {} accepts was found in {from} (looking for {})", known.title, known.accept.iter().map(|a| a.0).collect::<Vec<_>>().join(", ")));
     }
-    pack.reload = known.drivers.iter().map(|d| (*d).to_string()).take(1).collect();
+    pack.reload = reload_for(known, &pack);
     pack.validate()?;
     Ok((pack, taken))
+}
+
+/// The drivers to load again once the firmware is in place. The first driver of the entry, except for the Bluetooth entry,
+/// where it depends on the files: `brcm/BCM.hcd` is what the UART Bluetooth of the BCM4364 asks for (`hci_uart`), `brcmbt*`
+/// what the PCIe one asks for (`hci_bcm4377`); a T2 Mac holds those two back until then (`t2hold.rs`).
+pub fn reload_for(known: &crate::known::Known, pack: &Pack) -> Vec<String> {
+    if known.id == "mac-bt-broadcom" {
+        let mut v: Vec<String> = Vec::new();
+        // a .hcd without the USB ids in its name (`BCM.hcd`, `BCM4350C0.hcd`) is a UART controller's; with `-vvvv-pppp` it is a USB one's
+        let usb_shaped = |p: &str| {
+            let b = p.trim_end_matches(".hcd").rsplit('-').take(2).collect::<Vec<_>>();
+            b.len() == 2 && b.iter().all(|x| x.len() == 4 && x.chars().all(|c| c.is_ascii_hexdigit()))
+        };
+        if pack.files.iter().any(|f| f.path.ends_with(".hcd") && !usb_shaped(&f.path)) {
+            v.push("hci_uart".into());
+        }
+        if pack.files.iter().any(|f| f.path.starts_with("brcm/brcmbt")) {
+            v.push("hci_bcm4377".into());
+        }
+        if pack.files.iter().any(|f| f.path.ends_with(".hcd") && usb_shaped(&f.path)) {
+            v.push("btusb".into());
+        }
+        return v;
+    }
+    known.drivers.iter().map(|d| (*d).to_string()).take(1).collect()
 }
 
 #[cfg(test)]
@@ -576,5 +675,119 @@ mod tests {
         std::fs::create_dir_all(&empty).unwrap();
         assert!(pack_from_folder(known, &empty).unwrap_err().contains("no file"));
         assert!(pack_from_folder(crate::known::by_id("mac-t2").unwrap(), &stick).is_err());
+    }
+
+    // ---- the T2 hold-back and the Bluetooth group
+
+    const MODS: [&str; 5] = ["kernel/drivers/net/wireless/broadcom/brcm80211/brcmfmac/brcmfmac.ko", "kernel/drivers/bluetooth/hci_uart.ko", "kernel/drivers/bluetooth/btbcm.ko", "kernel/drivers/bluetooth/hci_bcm4377.ko", "kernel/drivers/bluetooth/btusb.ko"];
+
+    /// A fake machine: module files under lib/modules, held back the way boot does it for this DMI product.
+    fn t2_fs(tag: &str, product: &str) -> (Fs, PathBuf) {
+        let (f, root) = fs(tag);
+        for m in MODS {
+            let p = f.lib_modules.join("6.12.112").join(m);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"ko").unwrap();
+        }
+        hold(&f, &root, product);
+        (f, root)
+    }
+
+    fn hold(f: &Fs, root: &Path, product: &str) {
+        std::fs::write(root.join("product_name"), product).unwrap();
+        crate::t2hold::apply(&root.join("product_name"), &f.fw_root, &f.modprobe_d, &f.lib_modules);
+    }
+
+    fn file(f: &Fs, name: &str) -> (bool, bool) {
+        let dir = f.lib_modules.join("6.12.112/kernel/drivers");
+        let p = ["bluetooth", "net/wireless/broadcom/brcm80211/brcmfmac"].iter().map(|d| dir.join(d).join(name)).find(|p| p.exists() || PathBuf::from(format!("{}{}", p.display(), crate::t2hold::HELD_SUFFIX)).exists()).unwrap();
+        (p.exists(), PathBuf::from(format!("{}{}", p.display(), crate::t2hold::HELD_SUFFIX)).exists())
+    }
+
+    fn pack_of(path: &str, reload: &[&str]) -> Pack {
+        Pack { v: 1, files: vec![pack::FwFile { path: path.into(), data: b64::encode(b"FW"), sha256: String::new() }], reload: reload.iter().map(|s| s.to_string()).collect(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_wifi_only_install_gives_back_wifi_and_keeps_the_bluetooth_drivers_held() {
+        let (f, _) = t2_fs("held-wifi", "Macmini8,1");
+        assert_eq!(file(&f, "hci_uart.ko"), (false, true));
+        let run = Recorder::default();
+        install_pack(&f, &run, "mac-wifi-brcmfmac", "1", "x", "usb", "local", &pack_of("brcm/brcmfmac4364b2-pcie.apple,lanai-HRPN-u-7.5-X0.bin", &["brcmfmac"])).unwrap();
+        assert_eq!(file(&f, "brcmfmac.ko"), (true, false), "the Wi-Fi driver is back");
+        assert_eq!(file(&f, "hci_uart.ko"), (false, true), "no Bluetooth pack and nothing chosen: still held");
+        assert_eq!(file(&f, "hci_bcm4377.ko"), (false, true));
+        assert_eq!(run.calls.lock().unwrap().clone(), vec!["modprobe brcmfmac"]);
+    }
+
+    #[test]
+    fn a_bluetooth_pack_gives_back_the_uart_driver_and_btbcm_even_when_its_files_are_for_the_pcie_chip() {
+        let (f, _) = t2_fs("held-bt", "Macmini8,1");
+        let run = Recorder::default();
+        // the Mac mini case from the real machine: the pack has brcmbt files (hci_bcm4377 reloaded) but no BCM.hcd
+        let rep = install_pack(&f, &run, "mac-bt-broadcom", "1", "x", "usb", "local", &pack_of("brcm/brcmbt4377b3-apple,formosa-m.bin", &["hci_bcm4377"])).unwrap();
+        assert_eq!(file(&f, "hci_uart.ko"), (true, false), "hci_uart binds this Mac's UART controller");
+        assert_eq!(file(&f, "hci_bcm4377.ko"), (true, false));
+        assert_eq!(file(&f, "brcmfmac.ko"), (false, true), "Wi-Fi has no firmware yet: still held");
+        assert_eq!(run.calls.lock().unwrap().clone(), vec!["modprobe btbcm", "modprobe hci_uart", "modprobe hci_bcm4377"], "dependency order");
+        assert!(rep.lines.iter().any(|l| l.contains("hci_uart") && l.contains("given back")), "{:?}", rep.lines);
+    }
+
+    #[test]
+    fn load_anyway_gives_back_and_loads_in_order_and_is_applied_again_at_the_next_boot() {
+        let (f, root) = t2_fs("held-anyway", "Macmini8,1");
+        let run = Recorder::default();
+        install_pack(&f, &run, "mac-wifi-brcmfmac", "1", "x", "usb", "local", &pack_of("brcm/brcmfmac4364b2-pcie.apple,lanai-HRPN-u-7.5-X0.bin", &["brcmfmac"])).unwrap();
+        run.calls.lock().unwrap().clear();
+        let lines = load_bluetooth_anyway(&f, &run);
+        assert!(lines.iter().any(|l| l.contains("hci_uart")), "{lines:?}");
+        assert_eq!(run.calls.lock().unwrap().clone(), vec!["modprobe btbcm", "modprobe hci_uart", "modprobe hci_bcm4377"]);
+        assert!(!crate::t2hold::bluetooth_held(&f.lib_modules) && f.data.join(crate::t2hold::LOAD_ANYWAY_MARK).exists());
+        // a second press has nothing left to do
+        assert!(load_bluetooth_anyway(&f, &Recorder::default())[0].contains("Nothing was held"));
+        // the next boot: the RAM root is fresh and holds the files again; after the data volume is mounted the choice is applied
+        hold(&f, &root, "Macmini8,1");
+        assert!(crate::t2hold::bluetooth_held(&f.lib_modules));
+        let run2 = Recorder::default();
+        let log = apply_boot(&f, &run2);
+        assert!(!crate::t2hold::bluetooth_held(&f.lib_modules), "{log:?}");
+        assert!(run2.calls.lock().unwrap().iter().any(|c| c == "modprobe hci_uart"));
+    }
+
+    #[test]
+    fn a_failing_modprobe_is_reported_and_other_machines_are_untouched() {
+        let (f, _) = t2_fs("held-fail", "Macmini8,1");
+        let run = Recorder { fail: Some("modprobe hci_uart".into()), ..Default::default() };
+        let lines = load_bluetooth_anyway(&f, &run);
+        assert!(lines.iter().any(|l| l.contains("hci_uart did not load")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("hci_bcm4377 loaded")), "the others still load");
+        // not a T2 Mac: nothing was set aside, nothing is loaded, no marker
+        let (g, _) = t2_fs("held-other", "ThinkPad X1");
+        let run = Recorder::default();
+        let lines = load_bluetooth_anyway(&g, &run);
+        assert_eq!(lines.len(), 1);
+        assert!(run.calls.lock().unwrap().is_empty() && !g.data.join(crate::t2hold::LOAD_ANYWAY_MARK).exists());
+        assert_eq!(file(&g, "hci_uart.ko"), (true, false));
+        // and a Bluetooth pack on such a machine loads only what it asks for
+        let run = Recorder::default();
+        install_pack(&g, &run, "mac-bt-broadcom", "1", "x", "usb", "local", &pack_of("brcm/BCM.hcd", &["hci_uart"])).unwrap();
+        assert_eq!(run.calls.lock().unwrap().clone(), vec!["modprobe hci_uart"]);
+    }
+
+    #[test]
+    fn a_hcd_without_usb_ids_reloads_the_uart_driver_and_one_with_them_reloads_btusb() {
+        let k = crate::known::by_id("mac-bt-broadcom").unwrap();
+        let pack_with = |names: &[&str]| {
+            let files: Vec<(String, Vec<u8>)> = names.iter().map(|n| (n.to_string(), b"x".to_vec())).collect();
+            pack_from_named(k, &files, "t").unwrap().0
+        };
+        assert_eq!(reload_for(k, &pack_with(&["BCM.hcd"])), vec!["hci_uart"]);
+        assert_eq!(reload_for(k, &pack_with(&["BCM4350C0.hcd"])), vec!["hci_uart"]);
+        assert_eq!(reload_for(k, &pack_with(&["BCM20702A1-05ac-8289.hcd"])), vec!["btusb"]);
+        assert_eq!(reload_for(k, &pack_with(&["BCM.hcd", "brcmbt4377b3-apple,formosa-m.bin"])), vec!["hci_uart", "hci_bcm4377"]);
+        // a Wi-Fi board file with a space in its name is accepted by the Wi-Fi entry
+        let w = crate::known::by_id("mac-wifi-brcmfmac").unwrap();
+        let (p, _) = pack_from_named(w, &[("brcmfmac4350c2-pcie.Apple Inc.-MacBookPro14,1.txt".into(), b"x".to_vec())], "t").unwrap();
+        assert_eq!(p.files[0].path, "brcm/brcmfmac4350c2-pcie.Apple Inc.-MacBookPro14,1.txt");
     }
 }

@@ -15,6 +15,7 @@ USAGE:
   iyakki detect                         print detected host environment
   iyakki hwreport                       hardware report: firmware, display, keyboard/mouse/touch, network, …
   iyakki storage                        where data lives now and which disks could hold it
+  iyakki storage status|reattach        the drive's health; reconnect it after a USB loss
   iyakki persist <disk> [--force]       make a disk the IYAKKI data volume (erases it)
   iyakki run <module.wasm|.wat> [opts]  run a guest in the sandbox
       --entry <name>   exported function to call (default: _start)
@@ -29,9 +30,13 @@ USAGE:
                                       add an account (no screen needed); iyakki user list
   iyakki release keygen FILE | sign DIR --key FILE | verify DIR --pubkey HEX
                                       sums and signs the images of a release, writes the download page, checks a download
+  iyakki firewall off|status            the emergency way out of a firewall lockout, from a console or SSH: off removes the rules and keeps
+                                      the firewall off until it is switched on in Settings (docs/FIREWALL.md); status shows the settings and the kernel
   iyakki top [N]                        what the machine is doing: load, memory and the N busiest processes (default 15)
   iyakki quick-install k3s|duckdb|elasticsearch [--data DIR]
-                                      one Quick install step (the IYAKKI menu runs it as a detached job)
+                                      one Quick install step (Store -> Setup runs it as a detached job)
+  iyakki linux-apps --data DIR --user NAME create|install|remove|upgrade|update|run|import ...
+                                      the Linux apps (Debian/Ubuntu sandbox) steps the IYAKKI menu runs as detached jobs (docs/LINUX-APPS.md)
   iyakki store-manage reset|remove --kubeconfig FILE --namespace NS [--delete-data] [--wait SECS] [--force]
                                       the cluster side of resetting or removing the private store (run as a detached job)
   iyakki web [ADDR]                     only the browser front end (no screen needed): ADDR is a port, host:port,
@@ -54,6 +59,8 @@ USAGE:
   iyakki dev <pair|devices|install|uninstall|list|logs|run|push|screenshot|whoami>
                                       from a developer's computer: pair once with a device in developer mode, then install, upgrade,
                                       remove, open and watch apps on it, push a folder on every change (docs/DEVELOPER-MODE.md)
+  iyakki sdk <init|doctor|docs>         start a tile/skill/MCP/service project with agent instructions and typings, check this computer for
+                                      the device loop, read the guides offline (dist/sdk/README.md); the emulator is specified, not built
 ";
 
 /// `println!` that never panics (see `iyakki_core::console`).
@@ -70,6 +77,11 @@ macro_rules! out_raw {
 }
 
 fn main() -> ExitCode {
+    // the inside of a Linux apps sandbox (docs/LINUX-APPS.md): it forks, so it runs before anything starts a thread
+    if std::env::args().nth(1).as_deref() == Some(iyakki_agent::linuxapps_init::SUBCOMMAND) {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        return ExitCode::from(iyakki_agent::linuxapps_init::main(&args).clamp(0, 255) as u8);
+    }
     iyakki_core::console::install_panic_hook();
     match iyakki_core::console::run_with_big_stack(real_main) {
         Ok(code) => code,
@@ -104,6 +116,10 @@ fn real_main() -> ExitCode {
     #[cfg(feature = "shell")]
     if std::env::args().nth(1).as_deref() == Some("--mcp-tools") {
         let code = iyakki_agent::extagent::bridge::relay_stdio(&std::env::args().nth(2).unwrap_or_default());
+        return if code == 0 { ExitCode::SUCCESS } else { ExitCode::from(code as u8) };
+    }
+    // git's GIT_ASKPASS: this program started under the name iyakki-git-askpass answers git's prompt from the IDE (docs/GIT-AND-SSH.md)
+    if let Some(code) = iyakki_agent::gitagent::maybe_askpass(&std::env::args().next().unwrap_or_default(), &std::env::args().skip(1).collect::<Vec<_>>()) {
         return if code == 0 { ExitCode::SUCCESS } else { ExitCode::from(code as u8) };
     }
     init_logger();
@@ -141,7 +157,7 @@ fn real_main() -> ExitCode {
             },
             _ => fail("usage: iyakki net <up|status|mac>".into()),
         },
-        "storage" => storage_cmd(),
+        "storage" => storage_cmd(&args[1..]),
         "hwreport" => {
             out_raw!("{}", iyakki_hwinfo::collect(&iyakki_hwinfo::Roots::real()).to_text());
             ExitCode::SUCCESS
@@ -150,6 +166,13 @@ fn real_main() -> ExitCode {
         // install to this computer's disk from the booted USB stick (docs/ZRAM-AND-INSTALL.md)
         "install" => ExitCode::from(iyakki_usb::install_cli::run(&args[1..]).clamp(0, 255) as u8),
         "mem" => mem_cmd(&args[1..]),
+        // the kernel log kept on the data volume across crashes, and the list of sessions (docs/TROUBLESHOOTING.md)
+        "log" => {
+            let boot = iyakki_core::crashlog::current_session().map(|s| s.boot_id).unwrap_or_else(|| std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default().trim().replace('-', "").chars().take(8).collect());
+            let (text, ok) = iyakki_core::crashlog::cli(&args[1..], std::path::Path::new(iyakki_core::boot::DATA_DIR), &boot);
+            print!("{text}");
+            if ok { ExitCode::SUCCESS } else { ExitCode::from(1) }
+        }
         // keys, packages, certificates, catalogs, revocation lists and licences for the app store (works offline)
         #[cfg(feature = "shell")]
         "pkg" => match iyakki_agent::store::publish::run(&args[1..]) {
@@ -169,6 +192,12 @@ fn real_main() -> ExitCode {
         // developer mode, the computer's side: talks to a paired device over its TLS (docs/DEVELOPER-MODE.md)
         #[cfg(feature = "shell")]
         "dev" => match iyakki_agent::devmode::cli::run(&args[1..], &mut |s| out!("{s}")) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(e),
+        },
+        // the SDK, the computer's side: start a project, check this computer, read the guides (dist/sdk/README.md; works offline)
+        #[cfg(feature = "shell")]
+        "sdk" => match iyakki_agent::sdkcli::run(&args[1..], &mut |s| out!("{s}")) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => fail(e),
         },
@@ -206,8 +235,10 @@ fn real_main() -> ExitCode {
         }
         #[cfg(feature = "shell")]
         "quick-install" => ExitCode::from(iyakki_agent::quickinstall::cli_main(&args[1..]).clamp(0, 255) as u8),
+        "linux-apps" => ExitCode::from(iyakki_agent::linuxapps::cli_main(&args[1..]).clamp(0, 255) as u8),
         "store-manage" => ExitCode::from(iyakki_agent::store::privatemanage::cli_main(&args[1..]).clamp(0, 255) as u8),
         "hostname" => hostname_cmd(&args[1..]),
+        "firewall" => firewall_cmd(&args[1..]),
         "ledger-verify" => match args.get(1).map(std::fs::read) {
             Some(Ok(b)) => match iyakki_ledger::Ledger::from_bytes(&b) {
                 Ok(l) => {
@@ -260,6 +291,15 @@ fn real_main() -> ExitCode {
                         if let Some(plan) = plan {
                             iyakki_core::boot::late_boot(plan);
                         }
+                    }
+                }
+                // install mode (GRUB entry "IYAKKI - Install to a disk", docs/INSTALLER.md): the installer's pages on the console
+                // instead of the desktop; when it ends the machine restarts. Nothing else (shell, web, supervisor) is started.
+                if iyakki_core::boot::install_mode(&cmdline) {
+                    iyakki_core::boot::run_install_console();
+                    iyakki_core::boot::reboot();
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(3600));
                     }
                 }
                 // two-boot persistence test: persist1 turns the disk named by iyakki.disk into the data volume
@@ -317,7 +357,7 @@ fn real_main() -> ExitCode {
                         let dir = std::path::Path::new(iyakki_core::boot::DATA_DIR);
                         out!("IYAKKI-SELFTEST persist2 location {:?}", iyakki_storage::data_location(&iyakki_storage::Roots::real(), dir));
                         out!("IYAKKI-SELFTEST persist2 marker {:?}", std::fs::read_to_string(dir.join("marker")).unwrap_or_else(|e| format!("missing: {e}")));
-                        storage_cmd();
+                        storage_cmd(&[]);
                         out!("IYAKKI-SELFTEST persist2 end");
                         iyakki_core::boot::power_off();
                     }
@@ -327,6 +367,12 @@ fn real_main() -> ExitCode {
                     selftest();
                     iyakki_core::boot::power_off();
                 }
+                // hot patches (iyakki dev patch): once the system has been up for a while this start counts as good, so the first stage's
+                // start counter is cleared (after repeated starts that never get here it stops using patches)
+                let _ = std::thread::Builder::new().name("iyakki-patch-ok".into()).spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    iyakki_agent::devmode::patch::mark_boot_good(std::path::Path::new(iyakki_core::boot::DATA_DIR));
+                });
                 #[cfg(feature = "shell")]
                 if iyakki_core::boot::cmdline_param(&cmdline, "iyakki.shell") != Some("0") {
                     start_shell_thread();
@@ -427,8 +473,26 @@ fn run(a: &[String]) -> ExitCode {
     }
 }
 
-/// `iyakki storage`: where data lives now, and the disks that could hold it.
-fn storage_cmd() -> ExitCode {
+/// `iyakki storage`: where data lives now, and the disks that could hold it. `iyakki storage status` and `iyakki storage reattach`
+/// are about the drive being lost and coming back (docs/STORAGE-LOSS.md).
+fn storage_cmd(args: &[String]) -> ExitCode {
+    match args.first().map(String::as_str) {
+        Some("status") => {
+            out_raw!("{}", iyakki_core::storageloss::cli_status());
+            return ExitCode::SUCCESS;
+        }
+        Some("reattach") => {
+            return match iyakki_core::storageloss::cli_reattach(std::time::Duration::from_secs(60)) {
+                Ok(t) => {
+                    out!("{t}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            };
+        }
+        Some(other) => return fail(format!("usage: iyakki storage [status|reattach] (not {other})")),
+        None => {}
+    }
     let roots = iyakki_storage::Roots::real();
     let dir = std::path::Path::new(iyakki_core::boot::DATA_DIR);
     match iyakki_storage::data_location(&roots, dir) {
@@ -556,6 +620,30 @@ fn mem_report(stage: &str) {
 
 /// `iyakki hostname [NAME]`: show the host name, or set it (needs root): applied now, written to /etc/hostname and kept in
 /// `system.conf` for the next boots. The boot option `iyakki.hostname=` locks it.
+fn firewall_cmd(args: &[String]) -> ExitCode {
+    let conf = std::path::Path::new(iyakki_fw::service::CONF_PATH);
+    match args.first().map(String::as_str) {
+        Some("off") => match iyakki_fw::service::emergency_off(conf, std::path::Path::new(iyakki_fw::service::OFF_NOTE)) {
+            Ok(m) => {
+                out!("{m}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                err!("{e}");
+                ExitCode::from(1)
+            }
+        },
+        Some("status") => {
+            out_raw!("{}", iyakki_fw::service::status_text(conf));
+            ExitCode::SUCCESS
+        }
+        _ => {
+            err!("usage: iyakki firewall off|status");
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn hostname_cmd(a: &[String]) -> ExitCode {
     let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
     let conf = std::path::Path::new(iyakki_zram::CONF_PATH);
@@ -706,8 +794,23 @@ fn build_shell_env() -> Result<iyakki_shell::shell::ShellEnv, String> {
     let hwcheck = iyakki_core::boot::cmdline_param(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default(), "iyakki.hwcheck") == Some("1");
     let paths = iyakki_shell::shell::ShellPaths { hwcheck, ..Default::default() };
     let env = iyakki_shell::shell::ShellEnv::from_paths(&paths, host).map_err(|e| e.to_string())?;
+    // firewall changes (and what happened at boot) go into the audit log
+    {
+        let audit = env.audit.clone();
+        // a session that ended without a clean shutdown is written to the audit log once (crashlog.rs)
+        {
+            let a = env.audit.clone();
+            iyakki_core::crashlog::audit_pending(&std::path::Path::new(iyakki_core::boot::DATA_DIR).join(iyakki_core::crashlog::LOG_SUBDIR), &move |event, detail| a.record("system", event, detail));
+        }
+        iyakki_fw::service::set_audit(std::sync::Arc::new(move |event, detail| audit.record("system", event, detail)));
+    }
     // As the machine's first process, keep its clock right from the network (a machine with a flat clock battery starts
     // at 1970). The settings are read every round, so Settings -> Time takes effect without a restart.
+    if std::process::id() == 1 {
+        // one-cable links to another computer (Thunderbolt/USB4, a USB bridge cable, a gadget port): link-local addresses without
+        // DHCP, the peer beacon, and the firewall's "direct link" zone (`iyakki dev usb`, docs/DEVELOPER-MODE.md)
+        iyakki_agent::directlink::manager::start_system(std::path::Path::new(iyakki_core::boot::DATA_DIR), std::sync::Arc::new(|ifaces, more| iyakki_fw::service::set_direct_links(ifaces, more)));
+    }
     if std::process::id() == 1 {
         let svc = env.services.clone();
         iyakki_agent::ntp::spawn_sync_thread(move || svc.settings.lock().map(|s| (!s.get().time.no_ntp, s.get().time.ntp_server.clone())).unwrap_or((true, String::new())));
@@ -754,30 +857,37 @@ fn start_shell_thread() {
         log::info!("boot: display found");
         let fb = fb_path.to_string_lossy().to_string();
         let fb = fb.as_str();
-        for attempt in 1..=5 {
-            let run = std::panic::catch_unwind(|| match shell_env() {
+        // the same shell is run again after a panic, so the signed-in person and the open app survive; one that crashes again at once
+        // is rebuilt (see `iyakki_core::keepalive`)
+        let outcome = iyakki_core::keepalive::run_kept(
+            || match shell_env() {
                 Ok(env) => {
                     let t_new = std::time::Instant::now();
-                    let mut sh = iyakki_shell::shell::Shell::new(env);
+                    let sh = iyakki_shell::shell::Shell::new(env);
                     log::info!("boot: shell constructed in {} ms", t_new.elapsed().as_millis());
-                    let stop = std::sync::atomic::AtomicBool::new(false);
-                    // the boot screen lets go of the display before the desktop draws on it
-                    iyakki_core::boot::finish_boot_screen();
-                    // a monitor that woke up during boot but was not seen: one more look (in the background)
-                    iyakki_core::display::probe_once_in_background("the desktop started", iyakki_core::boot::screen_found);
-                    if let Err(e) = iyakki_shell::backend::run_fb(&mut sh, fb, &stop) {
-                        log::error!("shell: {e}");
-                    }
+                    Some(sh)
                 }
-                Err(e) => log::error!("shell: {e}"),
-            });
-            match run {
-                Ok(()) => return,
-                Err(_) => {
-                    log::error!("shell: crashed (attempt {attempt} of 5), restarting");
-                    std::thread::sleep(std::time::Duration::from_secs(2));
+                Err(e) => {
+                    log::error!("shell: {e}");
+                    None
                 }
-            }
+            },
+            |sh| {
+                let stop = std::sync::atomic::AtomicBool::new(false);
+                // the boot screen lets go of the display before the desktop draws on it
+                iyakki_core::boot::finish_boot_screen();
+                // a monitor that woke up during boot but was not seen: one more look (in the background)
+                iyakki_core::display::probe_once_in_background("the desktop started", iyakki_core::boot::screen_found);
+                if let Err(e) = iyakki_shell::backend::run_fb(sh, fb, &stop) {
+                    log::error!("shell: {e}");
+                }
+            },
+            5,
+            std::time::Duration::from_secs(1),
+            |attempt, kept| log::error!("shell: crashed (attempt {attempt} of 5), restarting {}", if kept { "on the same session" } else { "with a fresh shell" }),
+        );
+        if outcome == iyakki_core::keepalive::Outcome::Finished {
+            return;
         }
         log::error!("shell: giving up after repeated crashes; the supervisor keeps running");
     });

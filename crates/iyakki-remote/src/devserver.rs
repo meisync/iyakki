@@ -11,10 +11,10 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use iyakki_agent::devmode::{auth, ops, DevMode};
+use iyakki_agent::devmode::{api, auth, debug, ops, DevMode};
 use iyakki_agent::store::install::Actor;
 use iyakki_agent::store::Store;
 use iyakki_shell::shell::ShellEnv;
@@ -42,6 +42,23 @@ struct Shared {
     open: AtomicUsize,
     stop: AtomicBool,
     screenshot_wait: Duration,
+    /// Where /proc, /sys and the logs are read from (a made-up machine in tests).
+    paths: debug::Paths,
+    /// A home folder to use for every account instead of the usual one (tests only).
+    home: Option<PathBuf>,
+    /// The firewall engine `config firewall` talks to (the process-wide one; tests give their own).
+    cfg_opts: Mutex<crate::devconfig::Options>,
+    /// The port this listener really has (a forward to it is refused).
+    port: u16,
+    update_opts: Mutex<UpdateOpts>,
+}
+
+/// What system updates talk to; the defaults are the real boot partition and `/etc/iyakki-release` (tests give their own).
+#[derive(Clone, Default)]
+pub struct UpdateOpts {
+    pub boot: Option<Arc<dyn iyakki_agent::devmode::update::BootMount>>,
+    pub release: Option<String>,
+    pub data_free: Option<u64>,
 }
 
 /// A running listener; it stops when dropped.
@@ -53,6 +70,11 @@ pub struct DevServer {
 impl DevServer {
     /// Listen on `addr` with the TLS identity `id` (its fingerprint is what computers pin).
     pub fn start(env: ShellEnv, addr: &str, id: &crate::tls::Identity) -> std::io::Result<DevServer> {
+        Self::start_with_paths(env, addr, id, debug::Paths::real(), None)
+    }
+
+    /// [`DevServer::start`] reading `/proc`, `/sys` and the logs from `paths`, and using `home` as every account's home folder (tests).
+    pub fn start_with_paths(env: ShellEnv, addr: &str, id: &crate::tls::Identity, paths: debug::Paths, home: Option<PathBuf>) -> std::io::Result<DevServer> {
         let listener = TcpListener::bind(addr)?;
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
@@ -68,10 +90,25 @@ impl DevServer {
             open: AtomicUsize::new(0),
             stop: AtomicBool::new(false),
             screenshot_wait: Duration::from_secs(10),
+            paths,
+            home,
+            cfg_opts: Mutex::new(Default::default()),
+            port: addr.port(),
+            update_opts: Mutex::new(UpdateOpts::default()),
         });
         let s = shared.clone();
         std::thread::Builder::new().name("iyakki-dev-accept".into()).spawn(move || accept_loop(listener, s))?;
         Ok(DevServer { shared, addr })
+    }
+
+    /// Use another boot partition, release text and data-partition size for system updates (tests).
+    pub fn use_update_options(&self, o: UpdateOpts) {
+        *self.shared.update_opts.lock().unwrap_or_else(|e| e.into_inner()) = o;
+    }
+
+    /// Use another firewall engine and host name file (tests).
+    pub fn use_config_options(&self, o: crate::devconfig::Options) {
+        *self.shared.cfg_opts.lock().unwrap_or_else(|e| e.into_inner()) = o;
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -220,10 +257,31 @@ fn signed(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
     let store = Store::for_services(svc);
     let audit = |action: &str, detail: &str| sh.env.audit.record(&k.account, action, &format!("{} (developer computer): {detail}", k.name));
     let q = |n: &str| req.query.get(n).map(String::as_str).unwrap_or("");
+    // the routes of the scopes beyond install (debug, files, input, config, shell, ...): the scope is checked first, in one place
+    {
+        let ext = crate::devconfig::ShellConfig::new(svc.dir().to_path_buf(), sh.env.hostname.clone(), sh.cfg_opts.lock().unwrap_or_else(|e| e.into_inner()).clone());
+        let power = |reboot: bool| {
+            let host = sh.env.host.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(1500));
+                if reboot { host.reboot() } else { host.power_off() }
+            });
+        };
+        let ub = sh.update_opts.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let boot: Option<Arc<dyn iyakki_agent::devmode::update::BootMount>> = Some(ub.boot.clone().unwrap_or_else(|| Arc::new(iyakki_agent::devmode::bootmount::SysBoot::real(svc.dir()))));
+        let release = ub.release.clone().unwrap_or_else(|| std::fs::read_to_string(iyakki_agent::relinfo::RELEASE_FILE).unwrap_or_default());
+        let audit_fn = |a: &str, d: &str| audit(a, d);
+        let tail = |n: usize| { let mut v = sh.env.audit.recent(n); v.reverse(); v };
+        let cx = api::Ctx { dm: &sh.dm, key: &k, policy: &policy, role: &role, hostname: &sh.env.hostname, paths: &sh.paths, audit_tail: &tail, audit: &audit_fn, firewall_file: svc.dir().join("firewall.json"), home: sh.home.clone(), svc: Some(svc.as_ref()), ext: Some(&ext), own_port: sh.port, power: &power, boot: boot.as_deref(), release: &release, volatile: sh.env.data_volatile, data_free: ub.data_free };
+        let qs = |n: &str| q(n).to_string();
+        if let Some(o) = api::handle(&cx, &req.method, &req.path, &qs, &req.body) {
+            return Response::new(o.status, o.ctype, o.body);
+        }
+    }
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/v1/dev/whoami") => {
             sh.dm.log(&k.name, &k.account, "dev.whoami", "", true);
-            Response::json(200, &json!({ "device": sh.env.hostname, "computer": k.name, "account": k.account, "role": role, "status": sh.dm.status_text() }))
+            Response::json(200, &json!({ "device": sh.env.hostname, "computer": k.name, "account": k.account, "role": role, "status": sh.dm.status_text(), "scopes": k.scopes }))
         }
         ("POST", "/v1/dev/install") => match ops::install(svc, &store, &sh.dm, &actor, &who, req.body.clone(), q("scope") == "shared") {
             Ok(r) => {
@@ -280,6 +338,10 @@ fn signed(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
             audit("devmode.open", id);
             let msg = if svc.screen.present() { format!("Asked the device to open {id}: it opens on the screen of the person signed in (if they have it).") } else { format!("Queued {id}: no screen is drawing on the device right now; it opens when someone signs in.") };
             Response::json(200, &json!({ "queued": true, "message": msg }))
+        }
+        ("GET", "/v1/dev/screenshot") if !matches!(q("display"), "" | "0") => {
+            sh.dm.log(&k.name, &k.account, "dev.screenshot", &format!("refused: display {}", q("display")), false);
+            Response::error(422, "this device draws on one screen (display 0); other displays are not available yet")
         }
         ("GET", "/v1/dev/screenshot") => match svc.screen.request(SCREEN_USER, sh.screenshot_wait) {
             Ok(f) => {

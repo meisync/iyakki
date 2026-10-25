@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 
 pub const LABEL: &str = "IYAKKI-DATA";
 
+pub mod crashlog;
 pub mod gpt;
+pub mod loss;
 pub mod virt;
 
 /// Written at the start of a data partition created by the installer (`iyakki-usb`): "format me on first boot".

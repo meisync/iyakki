@@ -1,0 +1,17 @@
+table inet iyakki_fw {
+  chain input {
+    type filter hook input priority filter; policy drop;
+    ct state established,related accept  # replies to connections this machine started
+    ct state invalid drop  # broken packets
+    iifname "lo" accept  # this machine talking to itself
+    meta nfproto ipv4 meta l4proto igmp accept  # group membership queries
+    meta nfproto ipv4 meta l4proto udp th dport 68 accept  # DHCP replies
+    meta nfproto ipv6 meta l4proto icmpv6 icmpv6 type 130-137 accept  # IPv6 neighbour discovery and multicast listener
+    meta nfproto ipv6 meta l4proto icmpv6 icmpv6 type 143 accept  # IPv6 multicast listener report
+    meta nfproto ipv6 ip6 saddr fe80::/10 meta l4proto udp th dport 546 accept  # DHCPv6 replies
+    meta nfproto ipv4 meta l4proto icmp icmp type 8 accept  # ping
+    meta nfproto ipv6 meta l4proto icmpv6 icmpv6 type 128 accept  # ping
+    meta pkttype host ct state new counter  # count blocked attempts
+    meta pkttype host ct state new limit rate 10/second burst 5 packets log group 217  # log blocked attempts (rate limited)
+  }
+}

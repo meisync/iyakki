@@ -17,6 +17,11 @@ pub struct Request {
     /// The `Cookie` header, empty for none.
     pub cookie: String,
     pub referer: String,
+    /// How urgent the answer is, for transports that queue requests (see [`crate::net`]). 0 means "not said".
+    pub priority: u8,
+    /// Revalidation of a kept answer: sent as `If-None-Match` and `If-Modified-Since` (empty for none).
+    pub if_none_match: String,
+    pub if_modified_since: String,
 }
 
 impl Request {
@@ -40,10 +45,34 @@ pub struct Response {
     pub content_length: Option<u64>,
     /// Seconds the server says the answer stays fresh (`Cache-Control: max-age`), `None` when it did not say or forbade storing.
     pub max_age: Option<u64>,
+    /// The caching headers as the server sent them (empty when absent), so a cache can decide for itself.
+    pub cache_control: String,
+    pub etag: String,
+    pub last_modified: String,
+    pub vary: String,
+    pub expires: String,
+    /// The `Age` header in seconds (how long a shared cache already held the answer).
+    pub age: u64,
 }
 
 pub trait Fetch: Send + Sync {
     fn get(&self, url: &Url) -> Result<Response, String>;
+
+    /// A transport that keeps a separate cache per person returns the one for `user` (`None`: this transport has no such split).
+    fn for_user(&self, _user: &str) -> Option<std::sync::Arc<dyn Fetch>> {
+        None
+    }
+
+    /// What the cache of `user` (or this transport's only cache) holds; `None` when there is no cache.
+    fn cache_stats(&self, _user: &str) -> Option<crate::cache::CacheStats> {
+        None
+    }
+
+    /// Empty the cache of `user`.
+    fn clear_cache(&self, _user: &str) {}
+
+    /// Set the cache sizes (the browser does this from the machine's memory, so the memory gate can take cache back).
+    fn set_cache_budget(&self, _b: crate::net::Budget) {}
 
     /// Any request. A transport that only reads answers GETs and refuses the rest.
     fn send(&self, req: &Request) -> Result<Response, String> {
@@ -198,6 +227,9 @@ pub fn fetch_following(f: &dyn Fetch, req: Request, allow: &dyn Fn(&str) -> bool
                 body: if keep { req.body.clone() } else { Vec::new() },
                 content_type: if keep { req.content_type.clone() } else { String::new() },
                 cookie: String::new(),
+                priority: req.priority,
+                if_none_match: String::new(),
+                if_modified_since: String::new(),
                 url: next,
             };
             continue;

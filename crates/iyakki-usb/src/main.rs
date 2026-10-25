@@ -116,6 +116,10 @@ use iyakki_storage::Mounter as _;
 
 fn run() -> Result<ExitCode, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // the partition planner: install next to other systems, choose partitions, plan files (docs/INSTALLER.md)
+    if args.iter().any(|a| a == "--plan" || a == "--apply-plan") {
+        return Ok(ExitCode::from(iyakki_usb::plan_cli::run(&args).clamp(0, 255) as u8));
+    }
     let o = parse_args(&args)?;
     if o.help {
         print!("{HELP}");

@@ -32,7 +32,9 @@ OPTIONS:
                                mbr otherwise
   --source <disk>      the IYAKKI boot disk to copy from (default: found automatically)
   --template <file>    copy from an install template file (iyakki-install-x86_64.img) instead
-  --free-space         install next to another system: PLANNED, refused for now
+  --free-space         install next to another system: same as --plan --mode free-space
+  --plan ...           the partition planner: free space, chosen partitions, dual boot with the existing EFI System
+                       Partition, a plan to confirm, --plan-file, --dry-run (iyakki install --plan --help)
   --dry-run            print the plan, write nothing
   -h, --help           this text
 
@@ -166,13 +168,15 @@ pub fn run(args: &[String]) -> i32 {
 }
 
 fn run_inner(args: &[String]) -> Result<i32, String> {
+    // the partition planner takes over for everything but the classic whole-disk questions
+    if args.iter().any(|a| matches!(a.as_str(), "--plan" | "--free-space" | "--mode" | "--apply-plan")) {
+        let mapped: Vec<String> = args.iter().flat_map(|a| if a == "--free-space" { vec!["--mode".to_string(), "free-space".to_string()] } else { vec![a.clone()] }).collect();
+        return Ok(crate::plan_cli::run(&mapped));
+    }
     let o = parse(args)?;
     if o.help {
         print!("{HELP}");
         return Ok(0);
-    }
-    if o.free_space {
-        return Err("installing next to another system (\"free space\" mode) is planned and not available in this release. Nothing was changed. This installer erases the whole disk you choose.".into());
     }
     let (sys, dev) = (Path::new("/sys"), Path::new("/dev"));
     let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
@@ -275,16 +279,18 @@ mod tests {
         assert!(parse(&s(&["--disk"])).unwrap_err().contains("needs"));
         assert!(parse(&s(&["--frob"])).unwrap_err().contains("unknown"));
         assert!(parse(&s(&["-h"])).unwrap().help);
-        assert!(HELP.contains("--dry-run") && HELP.contains("PLANNED") && HELP.contains("--table") && HELP.contains("4096"));
+        assert!(HELP.contains("--dry-run") && HELP.contains("--table") && HELP.contains("4096"));
         assert_eq!(parse(&s(&["--table", "gpt"])).unwrap().table.as_deref(), Some("gpt"));
         assert!(parse(&s(&["--table", "ntfs"])).unwrap_err().contains("auto, gpt or mbr"));
         assert!(parse(&s(&["--table"])).unwrap_err().contains("needs"));
     }
 
     #[test]
-    fn free_space_mode_is_refused_clearly() {
-        let e = run_inner(&s(&["--free-space"])).unwrap_err();
-        assert!(e.contains("planned") && e.contains("Nothing was changed"), "{e}");
+    fn free_space_now_belongs_to_the_planner() {
+        assert!(HELP.contains("--free-space") && HELP.contains("--plan"));
+        // the planner's own parser accepts what --free-space maps to
+        let o = crate::plan_cli::parse(&s(&["--mode", "free-space", "--dry-run"])).unwrap();
+        assert_eq!(o.mode.as_deref(), Some("free-space"));
     }
 
     #[test]

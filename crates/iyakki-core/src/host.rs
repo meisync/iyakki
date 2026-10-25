@@ -68,6 +68,10 @@ impl HostApi for CoreHost {
         Ok(if log.is_empty() { tail } else { format!("{log}\n{tail}") })
     }
 
+    fn can_power(&self) -> bool {
+        is_root()
+    }
+
     fn power_off(&self) {
         if is_root() {
             crate::boot::power_off();

@@ -36,9 +36,14 @@ fn mount(src: &str, target: &str, fstype: &str, flags: u64, data: &str) -> Resul
 }
 
 /// Collect `modalias` strings from sysfs devices; each names the driver module to load.
+/// How deep under `/sys/devices` the scan looks for `modalias` files.
+pub const MAX_SYSFS_DEPTH: u32 = 16;
+
 pub fn collect_modaliases(sys_devices: &Path) -> Vec<String> {
     fn walk(dir: &Path, out: &mut Vec<String>, depth: u32) {
-        if depth > 8 {
+        // A device behind a bridge chain and the T2's virtual USB host is 10 levels down (PCI root, bridge, bridge, BCE, apple-bce,
+        // bce-vhci, usb5, port, interface, HID device): the old limit of 8 never reached the Mac's keyboard.
+        if depth > MAX_SYSFS_DEPTH {
             return;
         }
         let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -75,10 +80,59 @@ pub fn progress(percent: u32, stage: &str) {
 #[cfg(not(feature = "shell"))]
 pub fn progress(_percent: u32, _stage: &str) {}
 
+/// Boot option `iyakki.install=1`: start the installer instead of the desktop.
+pub fn install_mode(cmdline: &str) -> bool {
+    cmdline_param(cmdline, "iyakki.install") == Some("1")
+}
+
+/// The installer on the console (`/dev/tty0`, the kernel's text console on the screen, with the keyboard). Returns when the
+/// person is done; the caller restarts the machine.
+#[cfg(target_os = "linux")]
+pub fn run_install_console() -> i32 {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    // the node appears when mdev has run; wait a little for the console and the keyboard driver
+    let mut tty = None;
+    for _ in 0..100 {
+        tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty0").ok();
+        if tty.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let Some(tty) = tty else {
+        log::error!("install mode: no /dev/tty0");
+        return 1;
+    };
+    // SAFETY: dup2 onto the standard descriptors; KDSETMODE (0x4B3A) with KD_TEXT (0) takes an integer argument.
+    unsafe {
+        libc::dup2(tty.as_raw_fd(), 0);
+        libc::dup2(tty.as_raw_fd(), 1);
+        libc::dup2(tty.as_raw_fd(), 2);
+        libc::ioctl(tty.as_raw_fd(), 0x4B3A as _, 0);
+    }
+    // no screen blanking while someone reads the plan
+    print!("\x1b[9;0]\x1b[2J\x1b[H");
+    let _ = std::io::stdout().flush();
+    let code = iyakki_usb::plan_cli::run_boot();
+    println!("\nRemove the installation USB stick, then press Enter to restart.");
+    let mut l = String::new();
+    let _ = std::io::stdin().read_line(&mut l);
+    code
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn run_install_console() -> i32 {
+    eprintln!("install mode needs the IYAKKI image");
+    1
+}
+
 /// Show the boot screen on the framebuffer the kernel started with, until [`finish_boot_screen`].
 #[cfg(feature = "shell")]
 fn start_boot_screen() {
-    if cmdline_param(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default(), "iyakki.shell") == Some("0") {
+    let cmd = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    // install mode draws text on the console: the boot screen would paint over it
+    if cmdline_param(&cmd, "iyakki.shell") == Some("0") || install_mode(&cmd) {
         return;
     }
     iyakki_shell::splash::mark_started();
@@ -176,6 +230,34 @@ fn load_aliases(aliases: &[String], what: &str, from: u32, to: u32) {
     }
 }
 
+/// Repeat the coldplug scan after a batch of drivers loaded: aliases of new devices that are needed at once are loaded here, the
+/// ones that wait for the sign-in screen are appended to `deferred`. Logs one line when something was found.
+fn coldplug_settle(seen: &mut crate::coldplug::Seen, deferred: &mut Vec<String>) {
+    use crate::coldplug as cp;
+    let res = cp::settle(Path::new("/sys/devices"), seen, cp::MAX_EXTRA_PASSES, cp::BUDGET, |new| {
+        let (later, now): (Vec<String>, Vec<String>) = new.iter().cloned().partition(|a| is_deferred(a));
+        deferred.extend(later);
+        if !now.is_empty() {
+            load_aliases(&now, "Starting hardware drivers", 66, 67);
+        }
+    }, || std::thread::sleep(cp::PAUSE));
+    if res.passes > 0 {
+        log::info!("coldplug: {} more device aliases appeared after drivers loaded ({} extra passes), e.g. {}", res.found.len(), res.passes, res.found.first().map(String::as_str).unwrap_or(""));
+    }
+}
+
+/// The Apple SPI keyboard and trackpad (MacBook8,1 .. MacBookPro14,3): load the chain of drivers by name as well (see
+/// `iyakki_drivers::applespi`). Any other machine: one DMI read.
+fn apple_spi_keyboard() {
+    let product = std::fs::read_to_string("/sys/class/dmi/id/product_name").unwrap_or_default();
+    let n = iyakki_drivers::applespi::load(&product, |m| {
+        let _ = Command::new("modprobe").arg("-b").arg(m).stderr(std::process::Stdio::null()).status();
+    });
+    if n > 0 {
+        log::info!("Apple SPI keyboard: loaded {}", iyakki_drivers::applespi::MODULES.join(", "));
+    }
+}
+
 /// Load drivers for all present hardware, in one go.
 pub fn coldplug() -> usize {
     let aliases = collect_modaliases(Path::new("/sys/devices"));
@@ -183,8 +265,32 @@ pub fn coldplug() -> usize {
     aliases.len()
 }
 
-/// Mandatory "always load" modules that have no modalias (crypto for WiFi/WPA, RNG, etc).
-pub const ALWAYS_LOAD: &[&str] = &["af_packet", "cfg80211", "mac80211", "ccm", "gcm", "cmac", "arc4", "ctr", "sha256_generic", "tun", "vfat", "nls_cp437", "nls_iso8859_1"];
+/// MacBookPro13,x/14,x and 2017-2019 iMacs: the Cirrus CS8409 codec needs the image's snd-hda-codec-cs8409 module (package
+/// snd-hda-macbookpro), or the generic driver binds and the speakers stay silent. The module is normally loaded by the codec's
+/// alias during the coldplug above; this checks, and when the codec ended up on the generic driver loads the module and re-binds the
+/// sound controller. One log line. Any other machine: one DMI read.
+fn cs8409_sound() {
+    use iyakki_drivers::cs8409::{self, RealSys, Roots};
+    let r = Roots::real();
+    if !cs8409::model_applies(&std::fs::read_to_string("/sys/class/dmi/id/product_name").unwrap_or_default()) {
+        return;
+    }
+    // the sound controller is probed in the background: wait (at most 5 s) for its codec to be listed
+    for _ in 0..25 {
+        if cs8409::status(&r).is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    if let Some(l) = cs8409::ensure(&r, &iyakki_drivers::run::System, &RealSys, &|| std::thread::sleep(std::time::Duration::from_millis(500))) {
+        log::info!("{l}");
+    }
+}
+
+/// Mandatory "always load" modules that have no modalias (crypto for WiFi/WPA, RNG, etc). `thunderbolt` and `thunderbolt_net` are
+/// here as well as being found by their aliases (PCI ids, `tbsvc:`): a one-cable link to another computer (`iyakki dev usb`) must not
+/// depend on the alias table. A kernel without them (not a Mac or PC image) ignores the failed modprobe.
+pub const ALWAYS_LOAD: &[&str] = &["af_packet", "cfg80211", "mac80211", "ccm", "gcm", "cmac", "arc4", "ctr", "sha256_generic", "tun", "vfat", "nls_cp437", "nls_iso8859_1", "thunderbolt", "thunderbolt_net"];
 /// The part of [`ALWAYS_LOAD`] that login needs (reading the boot partition); the rest is for the network.
 pub const LOGIN_LOAD: &[&str] = &["vfat", "nls_cp437", "nls_iso8859_1"];
 
@@ -240,6 +346,8 @@ pub fn mount_pseudo_filesystems() {
 /// What is left to do after login is possible.
 pub struct LatePlan {
     deferred: Vec<String>,
+    /// Every alias handed to a loader so far (the repeated coldplug only loads what is new).
+    seen: crate::coldplug::Seen,
     tl: Timeline,
 }
 
@@ -258,13 +366,29 @@ pub fn early_boot_critical() -> LatePlan {
     // The kernel starts PID 1 with no PATH; without this, modprobe/ip/udhcpc/mdev are never found.
     std::env::set_var("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
     mount_pseudo_filesystems();
+    // The kernel drops all but about 10 lines per 5 seconds that a program writes to its log (`printk.devkmsg=ratelimit`, the default), so the
+    // boot lines that follow (and the timeline `lean-check.sh` reads) went missing. Switch the limit off; the lean first stage does the same.
+    let _ = std::fs::write("/proc/sys/kernel/printk_devkmsg", "on\n");
     tl.mark("mounts");
+    // A clock that starts in the past (a Mac's RTC reads 2024) is lifted to the image's build time first, so nothing
+    // that makes or checks certificates sees a date before the image existed; the saved time follows the data mount.
+    clock_floor_early();
     // Before anything can load the camera or USB sound driver by alias (mdev below, the coldplug): IYAKKI loads those
     // itself, so a camera that needs a uvcvideo quirk gets it on its first probe (see camera.rs).
     crate::camera::block_autoload();
+    // A T2 Mac's Wi-Fi and Bluetooth drivers fail noisily without Apple's firmware (and a Bluetooth chip started that way keeps no
+    // address), so they wait: the driver pack that brings the firmware loads them by name in `late_boot`, once its files are linked.
+    let held = iyakki_drivers::t2hold::apply(Path::new("/sys/class/dmi/id/product_name"), Path::new("/lib/firmware"), Path::new("/etc/modprobe.d"), Path::new("/lib/modules"));
+    if !held.is_empty() {
+        log::info!("T2 Mac: {} wait for Apple's firmware (Mac drivers page)", held.join(", "));
+    }
+    iyakki_drivers::t2input::apply(Path::new("/sys/class/dmi/id/product_name"), Path::new("/etc/modprobe.d"));
     // Hotplug: let the kernel call mdev for new devices (creates nodes, loads modules).
     let _ = std::fs::write("/proc/sys/kernel/hotplug", "/sbin/mdev\n");
     let _ = Command::new("mdev").arg("-s").status();
+    // mdev makes device nodes but loads no drivers; this loads them for every device that appears from now on (a T2 Mac's keyboard
+    // behind apple-bce, a USB network adapter plugged in later) and sets up a new network interface
+    crate::hotplug::start();
     tl.mark("device nodes");
     start_boot_screen();
     // a monitor the GPU driver does not see at first (a DP->HDMI converter, a monitor still waking up) is probed again
@@ -278,13 +402,30 @@ pub fn early_boot_critical() -> LatePlan {
     let (deferred, critical): (Vec<String>, Vec<String>) = all.into_iter().partition(|a| is_deferred(a));
     log::info!("coldplug: {} device aliases now, {} (network, sound, ...) after the sign-in screen", critical.len(), deferred.len());
     load_aliases(&critical, "Starting hardware drivers", 12, 66);
+    let mut seen = crate::coldplug::Seen::new();
+    seen.add_all(&critical);
+    seen.add_all(&deferred);
+    let mut deferred = deferred;
+    // Drivers that create child devices (Intel LPSS: the SPI/I2C controllers; MFD cells) leave devices the first scan could not
+    // see: scan again, load what is new (the keyboard and trackpad of a 2016-2017 MacBook sit behind such a child).
+    coldplug_settle(&mut seen, &mut deferred);
+    apple_spi_keyboard();
     tl.mark("drivers");
     progress(68, "Setting up devices");
     let _ = Command::new("mdev").arg("-s").status(); // nodes for devices whose drivers just loaded
     progress(72, "Opening your storage");
     mount_data_volume();
+    clock_floor_after_data();
+    // crash forensics: follow the kernel log into /var/lib/iyakki/log from here on (normal and lean boot alike; docs/TROUBLESHOOTING.md)
+    if dir_is_mount_point(&std::fs::read_to_string("/proc/mounts").unwrap_or_default(), DATA_DIR) {
+        if let Some(u) = crate::crashlog::start(Path::new(DATA_DIR)) {
+            log::warn!("crashlog: the last session ended unexpectedly (up {} s, last line: {}); its kernel log is kept as {}", u.uptime_s, u.last_line, u.file);
+        }
+    }
     progress(86, HOME_STAGE);
     bind_home_on_data();
+    // watch the drive the data lives on: a lost USB drive is noticed, explained and (when safe) reconnected (docs/STORAGE-LOSS.md)
+    crate::storageloss::start();
     tl.mark("storage");
     memory_setup();
     tl.mark("memory");
@@ -300,13 +441,16 @@ pub fn early_boot_critical() -> LatePlan {
     }
     progress(94, "Almost ready");
     log::info!("{}", tl.summary(kernel_secs).replace("boot:", "boot (to login):"));
-    LatePlan { deferred, tl: Timeline::new() }
+    LatePlan { deferred, seen, tl: Timeline::new() }
 }
 
 static KERNEL_SECS: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
 
 /// The rest of boot: drivers for network, sound and Bluetooth, the network itself, remote diagnostics.
 pub fn late_boot(mut plan: LatePlan) {
+    // The firewall goes up before any network service listens: the interfaces are not configured yet (the network is
+    // brought up further down), so nothing is reachable without it. A failure is loud (top bar, audit log), never silent.
+    firewall_boot();
     swapfile_setup();
     // Driver packs from the data volume (firmware links, modprobe options, matching prebuilt modules) go in before the
     // network, sound and Bluetooth drivers load, so those drivers find their firmware the first time.
@@ -320,6 +464,13 @@ pub fn late_boot(mut plan: LatePlan) {
     // by name (they are blacklisted for alias loading); the quirk binds and later hot plugs run in a background thread.
     crate::camera::prepare_boot();
     load_aliases(&plan.deferred, "Starting network and sound", 70, 90);
+    // children created by the network, sound and Bluetooth drivers (a Wi-Fi chip's Bluetooth function, a codec behind a bridge)
+    {
+        let mut more = Vec::new();
+        coldplug_settle(&mut plan.seen, &mut more);
+        load_aliases(&more, "Starting network and sound", 88, 90);
+    }
+    cs8409_sound();
     let _ = Command::new("mdev").arg("-s").status();
     crate::camera::start();
     plan.tl.mark("late drivers");
@@ -327,12 +478,52 @@ pub fn late_boot(mut plan: LatePlan) {
         Ok(errs) => errs.iter().for_each(|e| log::warn!("net: {e}")),
         Err(e) => log::error!("net config: {e}"),
     }
+    // addresses exist now: look host names up and apply again
+    iyakki_fw::service::network_changed();
+    crate::hotplug::boot_done();
+    touchbar_retry();
     let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
     if cmdline_param(&cmdline, "iyakki.ssh") == Some("1") {
         start_remote_diagnostics();
     }
     plan.tl.mark("network");
     log::info!("{}", plan.tl.summary(None).replace("boot: iyakki took", "boot (after login): iyakki took"));
+}
+
+/// A T2 MacBook's Touch Bar often times out when the kernel configures it at boot (`can't set config #1, error -110`). One background
+/// thread brings it up with the careful sequence of `iyakki_drivers::touchbar::bring_up` (a first try of 2 then 1, then at most one reset of
+/// that one device and one more write, with long waits; never a loop). Any other machine: one directory read.
+#[cfg(not(target_os = "linux"))]
+fn touchbar_retry() {}
+
+#[cfg(target_os = "linux")]
+fn touchbar_retry() {
+    let usb = Path::new("/sys/bus/usb/devices");
+    let Some(found) = iyakki_drivers::touchbar::find_devices(usb).into_iter().find(|f| f.configured.is_none()) else { return };
+    let _ = std::thread::Builder::new().name("iyakki-touchbar".into()).spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let mut port = iyakki_drivers::usbfs::SysPort::new(found, "/dev".into());
+        match iyakki_drivers::touchbar::bring_up(&mut port, &iyakki_drivers::touchbar::Policy::default()) {
+            iyakki_drivers::touchbar::Outcome::Configured { rounds } => log::info!("Touch Bar: configured (round {rounds})"),
+            iyakki_drivers::touchbar::Outcome::AlreadyConfigured => {}
+            iyakki_drivers::touchbar::Outcome::Absent => log::info!("Touch Bar: the device went away"),
+            iyakki_drivers::touchbar::Outcome::GaveUp { rounds } => log::info!("Touch Bar: the T2 did not accept its USB configuration after {rounds} rounds (left alone until a restart; the keyboard's Fn row is not affected)"),
+        }
+    });
+}
+
+/// Apply the firewall from the machine settings (`iyakki.firewall=off` skips it for this boot).
+pub fn firewall_boot() {
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    iyakki_fw::service::boot(&cmdline);
+    let st = iyakki_fw::service::engine().status();
+    match st {
+        iyakki_fw::Status::On | iyakki_fw::Status::Pending { .. } => log::info!("firewall: on (incoming connections blocked unless allowed)"),
+        iyakki_fw::Status::Off => log::warn!("firewall: off (switched off in Settings)"),
+        iyakki_fw::Status::OffThisBoot => log::warn!("firewall: OFF for this boot (iyakki.firewall=off)"),
+        iyakki_fw::Status::NotProtected(e) => log::error!("firewall: NOT PROTECTED: {e}"),
+        iyakki_fw::Status::Unavailable(e) => log::error!("firewall: NOT PROTECTED: {e}"),
+    }
 }
 
 /// Where the image keeps the public keys allowed to log in for remote diagnostics (installed by the image build).
@@ -516,6 +707,34 @@ fn swapfile_setup() {
 
 pub const DATA_DIR: &str = "/var/lib/iyakki";
 
+/// The clock floor (docs/K3S-DEV.md, "wrong date at boot"): see `iyakki_agent::clockfloor`. Only as the first process.
+fn clock_floor_early() {
+    #[cfg(feature = "shell")]
+    if std::process::id() == 1 {
+        iyakki_agent::clockfloor::apply_early();
+    }
+}
+
+fn clock_floor_after_data() {
+    #[cfg(feature = "shell")]
+    if std::process::id() == 1 {
+        let on_disk = matches!(iyakki_storage::data_location(&iyakki_storage::Roots::real(), Path::new(DATA_DIR)), iyakki_storage::DataLocation::Disk(_));
+        iyakki_agent::clockfloor::apply_after_data(on_disk);
+    }
+}
+
+/// Stop the speakers before the final sync (the T2 sound chip loops its buffer until the power is gone): see `iyakki_agent::quiet`.
+fn quiet_sound() {
+    #[cfg(feature = "shell")]
+    iyakki_agent::quiet::quiet_for_shutdown();
+}
+
+/// Save the time for the next boot's floor (before the disks are flushed at shutdown).
+fn clock_floor_save() {
+    #[cfg(feature = "shell")]
+    iyakki_agent::clockfloor::save_now();
+}
+
 /// `/home` lives on the data volume (see `homebind`): before the sign-in, so nothing writes user files into RAM.
 fn bind_home_on_data() {
     #[cfg(target_os = "linux")]
@@ -531,6 +750,20 @@ pub fn mount_data_volume() {
     let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
     if cmdline_param(&cmdline, "iyakki.data") == Some("ram") {
         log::info!("data: kept in RAM (iyakki.data=ram)");
+        return;
+    }
+    // The lean boot layout (docs/BOOT-SPEED.md): the first stage read the system from the data volume and left it mounted here.
+    if dir_is_mount_point(&std::fs::read_to_string("/proc/mounts").unwrap_or_default(), DATA_DIR) {
+        log::info!("data: the volume under {DATA_DIR} was mounted by the first stage (lean boot)");
+        crate::console::out_write(&format!("IYAKKI-BOOT data: persistent volume mounted at {DATA_DIR} (by the first stage)\n"));
+        // a copy of the kernel log on the volume, so a start that stops before the sign-in screen can be read on another computer
+        crate::bootlog::start(Path::new(DATA_DIR).join("boot-lean.log"));
+        // the same private mode `iyakki_storage::mount_data` gives a volume it mounts itself
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(DATA_DIR, std::fs::Permissions::from_mode(0o700));
+        }
         return;
     }
     let roots = iyakki_storage::Roots::real();
@@ -597,6 +830,11 @@ pub fn mount_data_volume() {
     }
 }
 
+/// Is `dir` the mount point of something in this `/proc/mounts` text?
+pub fn dir_is_mount_point(mounts: &str, dir: &str) -> bool {
+    mounts.lines().any(|l| l.split_whitespace().nth(1) == Some(dir))
+}
+
 /// The boot screen's line while /home is set up on the data volume.
 pub const HOME_STAGE: &str = "Setting up your home folder…";
 /// The boot screen's line while the desktop is built, until its first picture.
@@ -639,6 +877,9 @@ pub fn reboot() {
 
 #[cfg(target_os = "linux")]
 pub fn reboot() {
+    quiet_sound();
+    clock_floor_save();
+    crate::crashlog::finish_clean(Path::new(DATA_DIR));
     // SAFETY: as for `power_off`.
     unsafe {
         libc::sync();
@@ -654,6 +895,9 @@ pub fn power_off() {
 
 #[cfg(target_os = "linux")]
 pub fn power_off() {
+    quiet_sound();
+    clock_floor_save();
+    crate::crashlog::finish_clean(Path::new(DATA_DIR));
     // SAFETY: sync/reboot take no pointers; reboot(2) with POWER_OFF is the documented shutdown path.
     unsafe {
         libc::sync();
@@ -663,6 +907,28 @@ pub fn power_off() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_scan_reaches_a_t2_macs_keyboard_ten_levels_down() {
+        let root = std::env::temp_dir().join(format!("depth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dev = root.join("pci0000:00/0000:00:1c.4/0000:e6:00.1/apple-bce/apple-bce/bce-vhci/usb5/5-5/5-5:1.1/0003:05AC:027E.0007");
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(dev.join("modalias"), "hid:b0003g0001v000005ACp0000027E\n").unwrap();
+        std::fs::write(dev.parent().unwrap().join("modalias"), "usb:v05ACp027Ed0933dc00dsc00dp00ic03isc01ip01in01\n").unwrap();
+        let found = crate::boot::collect_modaliases(&root);
+        assert!(found.iter().any(|a| a.starts_with("hid:b0003g0001v000005ACp0000027E")), "{found:?}");
+        assert!(found.iter().any(|a| a.starts_with("usb:v05ACp027E")), "{found:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn install_mode_is_read_from_the_command_line() {
+        assert!(super::install_mode("console=tty0 quiet iyakki.install=1"));
+        assert!(!super::install_mode("console=tty0 quiet"));
+        assert!(!super::install_mode("iyakki.install=0"));
+        assert!(!super::install_mode("iyakki.installer=1"));
+    }
+
     #[test]
     fn ssh_login_shells_get_the_tools_folder_and_the_cluster_kubeconfig() {
         let p = super::tools_profile("/var/lib/iyakki");
@@ -745,6 +1011,51 @@ mod tests {
     }
 
     #[test]
+    fn a_t2_macs_wifi_and_bluetooth_drivers_are_held_before_the_first_coldplug_and_loaded_by_the_packs_later() {
+        let src = include_str!("boot.rs");
+        let early = src.split("pub fn early_boot_critical").nth(1).unwrap();
+        assert!(early.find("t2hold::apply").unwrap() < early.find("load_aliases(&critical").unwrap(), "held before the hardware drivers load");
+        let late = src.split("pub fn late_boot").nth(1).unwrap();
+        assert!(late.find("apply_boot").unwrap() < late.find("load_aliases(&plan.deferred").unwrap(), "the packs load their drivers before the deferred coldplug");
+    }
+
+    #[test]
+    fn the_cs8409_check_runs_after_the_deferred_coldplug_loaded_the_sound_drivers() {
+        let src = include_str!("boot.rs");
+        let late = src.split("pub fn late_boot").nth(1).unwrap();
+        assert!(late.find("load_aliases(&plan.deferred").unwrap() < late.find("cs8409_sound()").unwrap(), "after the hdaudio aliases had their chance");
+        assert!(late.find("cs8409_sound()").unwrap() < late.find("net::bring_up").unwrap());
+    }
+
+    #[test]
+    fn the_coldplug_scans_again_after_each_batch_and_the_apple_spi_modules_follow_the_first_one() {
+        let src = include_str!("boot.rs");
+        let early = src.split("pub fn early_boot_critical").nth(1).unwrap().split("pub fn late_boot").next().unwrap();
+        let first = early.find("load_aliases(&critical").unwrap();
+        let again = early.find("coldplug_settle(&mut seen, &mut deferred)").expect("second pass in the critical path");
+        let spi = early.find("apple_spi_keyboard()").unwrap();
+        assert!(first < again && again < spi, "scan again after the first batch, then the by-name list");
+        assert!(early.find("seen.add_all(&deferred)").unwrap() < again, "the deferred aliases count as seen: no double load");
+        let late = src.split("pub fn late_boot").nth(1).unwrap();
+        assert!(late.find("load_aliases(&plan.deferred").unwrap() < late.find("coldplug_settle(&mut plan.seen").unwrap());
+        assert!(late.find("coldplug_settle(&mut plan.seen").unwrap() < late.find("cs8409_sound()").unwrap());
+    }
+
+    #[test]
+    fn the_firewall_is_applied_first_in_late_boot_and_again_once_the_network_is_up() {
+        let src = include_str!("boot.rs");
+        let late = src.split("pub fn late_boot").nth(1).unwrap().split("pub const SSH_KEYS_SRC").next().unwrap();
+        let fw = late.find("firewall_boot()").expect("late boot starts the firewall");
+        let net = late.find("net::bring_up").expect("and brings the network up");
+        let ssh = late.find("start_remote_diagnostics()").unwrap();
+        assert!(fw < net && fw < ssh, "before the network is configured and before SSH listens");
+        assert!(late.find("iyakki_fw::service::network_changed()").unwrap() > net, "applied again after the network is up");
+        assert!(late.find("mount_data_volume").is_none(), "the settings come from the data volume, which early boot has mounted");
+        let early = src.split("pub fn early_boot_critical").nth(1).unwrap().split("static KERNEL_SECS").next().unwrap();
+        assert!(early.find("mount_data_volume()").is_some(), "the data volume (firewall.json) is there before late boot starts");
+    }
+
+    #[test]
     fn the_boot_timeline_reads_as_one_line() {
         let mut t = super::Timeline::new();
         t.marks.push(("mounts", 20));
@@ -822,6 +1133,37 @@ mod tests {
         // and the splash is up by then: it starts right after the device nodes, before drivers and storage
         let early = src.split("pub fn early_boot_critical").nth(1).unwrap();
         assert!(early.find("start_boot_screen();").unwrap() < early.find("mount_data_volume();").unwrap());
+    }
+
+    #[test]
+    fn a_data_volume_mounted_by_the_first_stage_is_recognised() {
+        let m = "rootfs / rootfs rw 0 0\n/dev/sda2 /var/lib/iyakki ext4 rw,nosuid 0 0\n";
+        assert!(dir_is_mount_point(m, "/var/lib/iyakki"));
+        assert!(!dir_is_mount_point(m, "/var/lib"));
+        assert!(!dir_is_mount_point("", DATA_DIR));
+    }
+
+    #[test]
+    fn the_kernels_log_rate_limit_is_off_before_the_boot_lines_are_written() {
+        // `printk.devkmsg=ratelimit` (the default) drops all but about 10 program-written log lines per 5 s: the boot timeline lost its lines
+        let src = include_str!("boot.rs");
+        let body = src.split("pub fn early_boot_critical").nth(1).unwrap();
+        let off = body.find("/proc/sys/kernel/printk_devkmsg").expect("the limit is switched off");
+        assert!(off < body.find("clock_floor_early();").unwrap() && body[..off].contains("mount_pseudo_filesystems();"), "right after /proc is mounted, before the first line");
+        // and a data volume mounted by the first stage is kept private like one this code mounts
+        assert!(src.split("pub fn mount_data_volume").nth(1).unwrap().split("let roots = iyakki_storage::Roots::real();").next().unwrap().contains("from_mode(0o700)"));
+    }
+
+    #[test]
+    fn crash_forensics_start_after_the_data_mount_and_the_power_paths_mark_the_end() {
+        let boot = include_str!("boot.rs");
+        let early = boot.split("pub fn early_boot_critical").nth(1).unwrap().split("static KERNEL_SECS").next().unwrap();
+        assert!(early.find("mount_data_volume();").unwrap() < early.find("crate::crashlog::start(").unwrap(), "after the data mount");
+        assert!(early.find("crate::crashlog::start(").unwrap() < early.find("crate::storageloss::start();").unwrap());
+        for f in ["pub fn reboot", "pub fn power_off"] {
+            let body = boot.split(f).nth(1).unwrap().split("\n}\n").next().unwrap();
+            assert!(body.contains("crashlog::finish_clean(") || body.contains("eprintln"), "{f} marks the session clean before it syncs");
+        }
     }
 
     #[test]

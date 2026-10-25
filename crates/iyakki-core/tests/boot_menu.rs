@@ -30,7 +30,7 @@ fn entries(cfg: &str) -> Vec<(String, String)> {
 fn every_x86_boot_entry_has_the_quiet_flicker_free_command_line() {
     let cfg = read("board/iyakki/grub.cfg");
     let e = entries(&cfg);
-    assert!(e.len() >= 7, "{e:?}");
+    assert!(e.len() >= 9, "{e:?}");
     for (t, args) in &e {
         let a: Vec<&str> = args.split_whitespace().collect();
         assert!(a.contains(&"console=tty0"), "{t}");
@@ -45,6 +45,10 @@ fn every_x86_boot_entry_has_the_quiet_flicker_free_command_line() {
     assert!(safe.contains("nomodeset") && safe.contains("modprobe.blacklist=i915,"), "{safe}");
     assert!(e.iter().any(|(t, a)| t == "IYAKKI - remote diagnostics (SSH, keys only)" && a.contains("iyakki.ssh=1")));
     assert!(e.iter().any(|(t, a)| t == "IYAKKI - show boot messages" && !a.contains("quiet")), "one entry shows the kernel's text");
+    // install mode: boots the live system and runs the installer's pages (PID 1 reads iyakki.install=1)
+    let inst = e.iter().find(|(t, _)| t == "IYAKKI - Install to a disk").expect("the install entry");
+    assert!(inst.1.split_whitespace().any(|a| a == "iyakki.install=1"), "{}", inst.1);
+    assert!(e.iter().filter(|(_, a)| a.contains("iyakki.install=1")).count() == 1, "only the install entry starts the installer");
     // the graphical menu comes before the first entry and keeps the screen mode for the kernel
     let first = cfg.find("menuentry").unwrap();
     for want in ["set gfxpayload=keep", "insmod gfxterm", "themes/iyakki/theme.txt", "iyakki-bg.png"] {
@@ -133,9 +137,10 @@ fn the_grub_modules_cover_every_command_the_menu_uses() {
 #[test]
 fn every_boot_entry_says_it_is_loading() {
     let cfg = read("board/iyakki/grub.cfg");
-    assert!(cfg.contains("function iyakki_loading") && cfg.contains("Loading IYAKKI from USB"));
+    assert!(cfg.contains("function iyakki_loading") && cfg.contains("Loading IYAKKI... (this takes a few seconds"));
     let entries = cfg.matches("menuentry \"").count();
-    assert_eq!(cfg.matches("\tiyakki_loading\n\tlinux ").count(), entries, "each entry prints the message before GRUB reads the kernel");
+    let loading = cfg.lines().map(str::trim).collect::<Vec<_>>().windows(2).filter(|w| w[0] == "iyakki_loading" && w[1].starts_with("linux ")).count();
+    assert_eq!(loading, entries, "each entry prints the message before GRUB reads the kernel");
 }
 
 /// Run board/iyakki/prune-firmware.sh with the Mac keep list on a made-up firmware tree: the files Macs need stay (also the
@@ -173,4 +178,142 @@ fn the_mac_firmware_list_keeps_what_macs_need_and_drops_the_rest() {
     // wired into the Mac variants only
     let pb = read("board/iyakki/post-build.sh");
     assert!(pb.contains("mac-*|macweb-*)") && pb.contains("prune-firmware.sh"));
+}
+
+/// `iyakki dev update` keeps the version it replaces on the DATA partition (ext4, label IYAKKI-DATA) and adds a menu entry that
+/// loads it from there: GRUB must be able to find the volume by its label and read ext4 in both the BIOS and the EFI build, and
+/// the entry is copied from the normal one, which must therefore exist with a `linux` and an `initrd` line.
+#[test]
+fn the_previous_version_entry_of_a_system_update_needs_only_what_the_grub_build_has() {
+    let def = read("configs/iyakki_x86_64_defconfig");
+    let list = |key: &str| -> Vec<String> { def.lines().find(|l| l.starts_with(key)).unwrap().split('"').nth(1).unwrap().split_whitespace().map(str::to_string).collect() };
+    for (name, mods) in [("PC", list("BR2_TARGET_GRUB2_BUILTIN_MODULES_PC=")), ("EFI", list("BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI="))] {
+        for m in ["search", "search_label", "ext2", "linux", "echo", "part_gpt", "part_msdos"] {
+            assert!(mods.iter().any(|x| x == m), "the {name} GRUB build lacks `{m}`, which the previous-version entry of a system update needs");
+        }
+    }
+    let cfg = read("board/iyakki/grub.cfg");
+    let e = entries(&cfg);
+    let normal = e.iter().find(|(t, _)| t == "IYAKKI").expect("the normal entry");
+    assert!(normal.1.contains("quiet") && cfg.contains("linux __KERNEL_PATH__ console=tty0") && cfg.contains("initrd __INITRD_PATH__"), "{}", normal.1);
+    // the image says which IYAKKI its boot files are, for `iyakki dev update-pack` and the next update
+    assert!(read("board/iyakki/post-image.sh").contains("boot/iyakki-release"));
+}
+
+/// The compatible USB mode (no UAS, docs/STORAGE-LOSS.md): an optional entry, and a variable every entry reads that is empty unless
+/// Settings wrote the file on the boot partition, so nothing changes by default.
+#[test]
+fn the_compatible_usb_mode_entry_and_file_are_in_the_menu_and_change_nothing_by_default() {
+    let cfg = read("board/iyakki/grub.cfg");
+    let e = entries(&cfg);
+    let compat = e.iter().find(|(t, _)| t == "IYAKKI - compatible USB mode (no UAS)").expect("the optional entry");
+    assert!(compat.1.contains("usb-storage.quirks=04e8:4001:u") && compat.1.contains("quiet"), "{}", compat.1);
+    // only that entry names a quirk itself; the default entry does not
+    assert_eq!(e.iter().filter(|(_, a)| a.contains("usb-storage.quirks=")).count(), 2, "the compatible entry and its lean twin");
+    let first = cfg.find("menuentry").unwrap();
+    let head = &cfg[..first];
+    assert!(head.contains("set iyakki_usbq=\"\"") && head.contains("source $prefix/iyakki-usb-compat.cfg"), "the variable is empty unless the file exists");
+    assert!(head.find("set iyakki_usbq=\"\"").unwrap() < head.find("source $prefix/iyakki-usb-compat.cfg").unwrap());
+    // every other entry reads the variable, right after the kernel path (the rest of each command line is unchanged)
+    for (t, a) in &e {
+        if !t.contains("compatible USB mode (no UAS)") {
+            assert!(a.starts_with("$iyakki_usbq console=tty0"), "{t}: {a}");
+        }
+    }
+    // the file Settings writes is the one GRUB sources
+    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../iyakki-storage/src/loss.rs")).unwrap();
+    assert!(src.contains("pub const COMPAT_FILE: &str = \"iyakki-usb-compat.cfg\"") && src.contains("set iyakki_usbq="));
+}
+
+/// The fast start (lean boot, docs/BOOT-SPEED.md): two entries that appear only when `boot/initrd-lean` exists, in front of the normal entry
+/// (so they are the first and the default), with the normal command lines and the small RAM disk; the first stage's failure marker makes the
+/// full boot the default again.
+#[test]
+fn the_fast_start_entries_come_first_when_installed_and_the_full_boot_is_the_fallback() {
+    let cfg = read("board/iyakki/grub.cfg");
+    assert!(cfg.contains("set default=\"0\""), "the first entry is the default");
+    let e = entries(&cfg);
+    let titles: Vec<&str> = e.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(&titles[..3], ["IYAKKI - fast start (lean boot)", "IYAKKI - fast start + remote diagnostics (SSH, keys only)", "IYAKKI"], "the fast start first, then the full boot");
+    let (lean, lean_ssh, normal) = (&e[0].1, &e[1].1, &e[2].1);
+    assert_eq!(lean, normal, "the fast start has exactly the normal entry's command line");
+    let diag = &e.iter().find(|(t, _)| t == "IYAKKI - remote diagnostics (SSH, keys only)").unwrap().1;
+    assert_eq!(lean_ssh, diag, "the fast start with diagnostics has the diagnostics entry's command line (iyakki.ssh=1)");
+    assert!(lean_ssh.contains("iyakki.ssh=1") && lean.starts_with("$iyakki_usbq console=tty0") && lean.contains("quiet"));
+    // the entries read the small RAM disk and are guarded by its existence; the normal ones still read the full one
+    let guard = cfg.find("if [ -f __INITRD_PATH__-lean ]; then").expect("hidden unless the lean initrd is on the volume");
+    let end = cfg[guard..].find("\nfi\n").expect("closed") + guard;
+    let block = &cfg[guard..end];
+    assert_eq!(block.matches("initrd __INITRD_PATH__-lean").count(), 2);
+    assert_eq!(block.matches("menuentry \"").count(), 2);
+    assert!(!block.contains("initrd __INITRD_PATH__\n"));
+    // the failure marker of the first stage (crates/iyakki-stage1) puts the full boot back as the default
+    assert!(block.contains("[ -f $prefix/iyakki-lean-failed ]") && block.contains("set default=\"IYAKKI\""));
+    let stage1 = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../iyakki-stage1/src/main.rs")).unwrap();
+    assert!(stage1.contains("/s/boot/boot/grub/iyakki-lean-failed"), "the first stage writes the file GRUB looks for");
+    // the lean entries sit between the markers the install scripts use, in front of the normal entry
+    let (b1, b2, n) = (cfg.find("# BEGIN lean-boot").unwrap(), cfg.find("# END lean-boot").unwrap(), cfg.find("menuentry \"IYAKKI\" {").unwrap());
+    assert!(b1 < guard && guard < b2 && b2 < n);
+    assert!(cfg[..guard].contains("insmod test"), "`[ -f` needs GRUB's test module, loaded before");
+    // the paths are filled in the same way as the others (post-image.sh replaces __INITRD_PATH__, the suffix stays)
+    let filled = cfg.replace("__KERNEL_PATH__", "/boot/bzImage").replace("__INITRD_PATH__", "/boot/initrd");
+    assert!(filled.contains("initrd /boot/initrd-lean") && filled.contains("[ -f /boot/initrd-lean ]"));
+    let nouas = &e.iter().find(|(t, _)| t == "IYAKKI - fast start, compatible USB mode (no UAS)").expect("the fast start with the plain USB driver").1;
+    assert!(nouas.contains("usb-storage.quirks=04e8:4001:u") && nouas.contains("quiet") && !nouas.contains("iyakki.ssh"), "{nouas}");
+    // the installer script and the first stage agree on the names
+    let sh = read("lean-install.sh");
+    assert!(sh.contains("initrd-lean") && sh.contains("IYAKKI-BOOT") && sh.contains("IYAKKI-DATA") && sh.contains("iyakki/root"));
+}
+
+/// The first screen stays short: the rarely needed starts are in one submenu.
+#[test]
+fn the_first_menu_screen_is_short_and_the_rare_starts_are_in_one_submenu() {
+    let cfg = read("board/iyakki/grub.cfg");
+    let sub = cfg.find("submenu \"More options...\" {").expect("the submenu");
+    assert_eq!(cfg.matches("submenu \"").count(), 1);
+    let top: Vec<&str> = cfg[..sub].lines().filter_map(|l| l.strip_prefix("menuentry \"")).filter_map(|r| r.split('"').next()).collect();
+    assert_eq!(top, ["IYAKKI", "IYAKKI - safe graphics (simple framebuffer, no GPU drivers)", "IYAKKI - Install to a disk"], "plus the two fast starts when installed");
+    let rest = &cfg[sub..];
+    for t in ["IYAKKI - remote diagnostics (SSH, keys only)", "IYAKKI - compatible USB mode (no UAS)", "IYAKKI - show boot messages", "IYAKKI - hardware check", "IYAKKI (verbose, boot self-test, power off)", "IYAKKI - NVIDIA driver", "IYAKKI - also in a browser"] {
+        assert!(rest.contains(&format!("menuentry \"{t}")), "{t} belongs in the submenu");
+        assert!(!cfg[..sub].contains(&format!("menuentry \"{t}")), "{t} is not on the first screen");
+    }
+    // a bigger menu font is applied by the image step when it can build one; the theme keeps the working default otherwise
+    let post = read("board/iyakki/post-image.sh");
+    assert!(post.contains("grub-mkfont") && post.contains("iyakki-menu.pf2"));
+    assert!(cfg.contains("loadfont $prefix/fonts/iyakki-menu.pf2") && cfg.contains("loadfont $prefix/fonts/iyakki-term.pf2"));
+    // GRUB finds fonts by the name inside the .pf2; "Unifont Regular 16" is not a match for "GNU Unifont Regular 16" and GRUB then uses
+    // the font loaded last (big letters on a narrow grid: the gap-between-letters bug), so the theme must use the full name
+    let theme = read("board/iyakki/grub/theme.txt");
+    assert!(!theme.contains("\"Unifont Regular 16\"") && theme.contains("terminal-font: \"GNU Unifont Regular 16\""));
+    assert!(post.contains("DejaVu Sans Mono Regular 24") && post.contains("--no-hinting"));
+}
+
+#[test]
+fn the_lean_install_script_refuses_wrong_drives_and_copies_safely() {
+    if std::process::Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("no python3: skipped");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("iyakki-leantest-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = std::process::Command::new("bash").arg(board().join("lean-install-test.sh")).env("TMPDIR", &dir).output().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("all lean-install tests passed"));
+}
+
+/// Crash behaviour of every entry: a kernel panic restarts the machine after 20 seconds (a hung blank screen after a panic helps nobody on a
+/// desktop that boots from a stick); no `oops=panic` (an oops in one driver, say sound, should not take the session down), no softlockup or
+/// hung-task panics (they would turn a slow disk into a reboot). docs/TROUBLESHOOTING.md explains the choice.
+#[test]
+fn every_entry_restarts_after_a_kernel_panic_and_nothing_stricter() {
+    let cfg = read("board/iyakki/grub.cfg");
+    let e = entries(&cfg);
+    assert!(e.len() >= 12);
+    for (t, a) in &e {
+        let w: Vec<&str> = a.split_whitespace().collect();
+        assert!(w.contains(&"panic=20"), "{t}: {a}");
+        assert!(!a.contains("oops=panic") && !a.contains("softlockup_panic") && !a.contains("hung_task_panic"), "{t}");
+    }
 }

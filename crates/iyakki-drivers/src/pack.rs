@@ -109,12 +109,13 @@ pub fn valid_module_name(n: &str) -> bool {
     (1..=56).contains(&n.len()) && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// A path that stays inside the firmware directory: relative, plain characters, no `..`, no hidden names.
+/// A path that stays inside the firmware directory: relative, plain characters, no `..`, no hidden names. A single space is
+/// allowed inside a name (not at its ends): the kernel asks for `brcmfmac4350c2-pcie.Apple Inc.-MacBookPro14,1.txt`.
 pub fn safe_rel_path(p: &str) -> bool {
     !p.is_empty()
         && p.len() <= 160
         && !p.starts_with('/')
-        && p.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && !c.starts_with('.') && c.chars().all(|ch| ch.is_ascii_alphanumeric() || "-_.,+".contains(ch)))
+        && p.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && !c.starts_with('.') && !c.starts_with(' ') && !c.ends_with(' ') && !c.contains("  ") && c.chars().all(|ch| ch.is_ascii_alphanumeric() || "-_.,+ ".contains(ch)))
 }
 
 pub fn valid_modprobe_line(l: &str) -> bool {
@@ -240,11 +241,12 @@ mod tests {
 
     #[test]
     fn paths_that_could_escape_or_hide_are_refused() {
-        for bad in ["../x", "/etc/passwd", "a//b", "a/./b", ".hidden", "a/.b", "", "a b", "a;b", "brcm/../../x"] {
+        for bad in ["../x", "/etc/passwd", "a//b", "a/./b", ".hidden", "a/.b", "", "a  b", "brcm/ a", "brcm/a ", "a\tb", "a;b", "brcm/../../x"] {
             let mut p = base();
             p.files[0].path = bad.into();
             assert!(p.validate().is_err(), "{bad:?}");
         }
+        assert!(safe_rel_path("brcm/brcmfmac4350c2-pcie.Apple Inc.-MacBookPro14,1.txt"), "one space inside a name is allowed");
         assert!(safe_rel_path("facetimehd/firmware.bin") && safe_rel_path("brcm/brcmfmac43602-pcie.bin"));
     }
 

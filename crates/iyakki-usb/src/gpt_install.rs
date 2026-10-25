@@ -203,18 +203,20 @@ const BOOT_START_OFFSET: usize = 0x5C; // GRUB_BOOT_MACHINE_KERNEL_SECTOR: where
 const BLOCKLIST_OFFSET: usize = 512 - 12; // the core image's first sector ends with {start: u64, len: u16, segment: u16}
 
 pub fn grub_bits(source: &SourceInfo, core_lba: u64, part_bytes: u64) -> Result<GrubBits, String> {
-    let gap = source.p1_start.saturating_sub(1) * 512;
+    // the core image's place in the source: the gap after sector 0 (template) or the BIOS boot partition (GPT stick)
+    let (gap_off, gap) = source.bios.unwrap_or((512, source.p1_start.saturating_sub(1) * 512));
+    let first_sector = gap_off / 512;
     if gap < 4096 || gap > part_bytes {
         return Err(format!("the template's GRUB gap ({gap} bytes) does not fit the BIOS boot partition ({part_bytes} bytes)"));
     }
     let mut f = std::fs::File::open(&source.path).map_err(|e| format!("{}: {e}", source.path.display()))?;
     let mut core = vec![0u8; part_bytes as usize];
-    f.seek(SeekFrom::Start(512)).and_then(|_| f.read_exact(&mut core[..gap as usize])).map_err(|e| format!("reading GRUB from {}: {e}", source.path.display()))?;
+    f.seek(SeekFrom::Start(gap_off)).and_then(|_| f.read_exact(&mut core[..gap as usize])).map_err(|e| format!("reading GRUB from {}: {e}", source.path.display()))?;
     let mut code = source.sector0[..440].to_vec();
     let boot_start = u64::from_le_bytes(code[BOOT_START_OFFSET..BOOT_START_OFFSET + 8].try_into().unwrap());
     let list_start = u64::from_le_bytes(core[BLOCKLIST_OFFSET..BLOCKLIST_OFFSET + 8].try_into().unwrap());
     let list_len = u16::from_le_bytes(core[BLOCKLIST_OFFSET + 8..BLOCKLIST_OFFSET + 10].try_into().unwrap());
-    if boot_start != 1 || list_start != 2 || list_len == 0 || list_len as u64 * 512 > gap {
+    if boot_start != first_sector || list_start != first_sector + 1 || list_len == 0 || list_len as u64 * 512 > gap {
         return Err(format!("the template's GRUB is laid out differently than expected (boot sector points to sector {boot_start}, block list {list_start}+{list_len}); rebuild the image"));
     }
     code[BOOT_START_OFFSET..BOOT_START_OFFSET + 8].copy_from_slice(&core_lba.to_le_bytes());

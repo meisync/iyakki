@@ -83,6 +83,8 @@ fn pump(v: &mut WebView, d: Duration, frames: &mut u64) {
                 Event::Crashed(r) | Event::Exited(r) => println!("  GONE: {r}"),
                 Event::Log(l) => println!("  log: {l}"),
                 Event::Clipboard(s) => println!("  clipboard: {s:?}"),
+                Event::Fullscreen(on) => println!("  fullscreen: {on}"),
+                Event::AudioPlaying(on) => println!("  audio playing: {on}"),
                 Event::ScriptResult { id, ok, json } => println!("  script {id} ok={ok}: {json}"),
                 Event::Cursor(_) => {}
             }
@@ -98,6 +100,12 @@ fn main() {
         std::process::exit(2);
     }
     let helper = args.remove(0);
+    if helper == "--bench" {
+        // `probe --bench W,H`: only the pixel work benchmark, no engine
+        let (w, h) = args[0].split_once(',').map_or((2560, 1400), |(a, b)| (a.parse().unwrap_or(2560), b.parse().unwrap_or(1400)));
+        bench(w, h);
+        return;
+    }
     let url = args.remove(0);
     let mut hello = Hello { w: 1280, h: 720, max_w: 3840, max_h: 2160, user_agent: "IYAKKI/0.1".into(), ..Hello::default() };
     let mut steps = Vec::new();
@@ -198,6 +206,21 @@ fn main() {
                 let (w, h) = xy(arg);
                 v.send(ToHelper::Resize { w: w as u32, h: h as u32 });
             }
+            "bench" => {
+                // bench:W,H  the per-frame pixel work of the shell's page area at that size (nothing is drawn on the screen)
+                let (w, h) = xy(if arg.is_empty() { "2560,1400" } else { arg });
+                bench(w, h);
+            }
+            "measure" => {
+                // measure:SECS  or  measure:SECS,WHEEL_DY,STEP_MS (a wheel notch of DY every STEP_MS, turning round every 2 s)
+                let p: Vec<&str> = arg.split(',').collect();
+                let secs: f32 = p.first().and_then(|s| s.parse().ok()).unwrap_or(10.0);
+                let wheel = match (p.get(1).and_then(|s| s.parse::<i32>().ok()), p.get(2).and_then(|s| s.parse::<u64>().ok())) {
+                    (Some(dy), Some(ms)) => Some((dy, ms.max(1))),
+                    _ => None,
+                };
+                measure(&mut v, secs, wheel, &mut frames);
+            }
             "eval" => {
                 // the answer is printed by `pump` as `script ID ok=...: JSON`
                 v.send(ToHelper::Script { id: 1, js: arg.to_string(), timeout_ms: 8000 });
@@ -210,6 +233,183 @@ fn main() {
         }
     }
     println!("frames: {}", v.frames_received());
+}
+
+/// Time the shell's per-frame work on a page area of `pw` x `ph` pixels (the screen is 2560x1600): channel swap, white fill, 1:1 copy
+/// of the whole picture and of a 1 % rectangle, and the 2x smooth stretch of a quarter-size picture. Milliseconds per call.
+fn bench(pw: i32, ph: i32) {
+    use iyakki_webview::blit::{bgra_to_rgba_opaque, blit_region, blit_region_x2};
+    let mut seed = 1u64;
+    let mut next = move || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 33) as u8
+    };
+    let src: Vec<u8> = (0..pw * ph * 4).map(|i| if i % 4 == 3 { 255 } else { next() }).collect();
+    let mut pm = vec![0u8; src.len()];
+    let (gw, gh) = (2560i32.max(pw), 1600i32.max(ph + 100));
+    let mut screen = vec![0u8; (gw * gh * 4) as usize];
+    let mut time = |name: &str, f: &mut dyn FnMut()| {
+        f();
+        let t = Instant::now();
+        for _ in 0..20 {
+            f();
+        }
+        println!("  bench {name:<52} {:8.3} ms", t.elapsed().as_secs_f64() * 50.0);
+    };
+    time("channel swap, loop as it was (before)", &mut || {
+        for (d, s) in pm.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+            if s[3] == 255 {
+                d.copy_from_slice(&[s[2], s[1], s[0], 255]);
+            } else {
+                let rest = 255 - s[3];
+                d.copy_from_slice(&[s[2].saturating_add(rest), s[1].saturating_add(rest), s[0].saturating_add(rest), 255]);
+            }
+        }
+    });
+    time("channel swap, the shipped function, row by row", &mut || {
+        for (d, s) in pm.chunks_mut(pw as usize * 4).zip(src.chunks(pw as usize * 4)) {
+            bgra_to_rgba_opaque(s, d);
+        }
+    });
+    time("channel swap, the shipped function, one call (after)", &mut || {
+        bgra_to_rgba_opaque(&src, &mut pm);
+    });
+    time("channel swap, loop as it was (before, again)", &mut || {
+        for (d, s) in pm.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+            if s[3] == 255 {
+                d.copy_from_slice(&[s[2], s[1], s[0], 255]);
+            } else {
+                let rest = 255 - s[3];
+                d.copy_from_slice(&[s[2].saturating_add(rest), s[1].saturating_add(rest), s[0].saturating_add(rest), 255]);
+            }
+        }
+    });
+    time("channel swap, the shipped function, row by row", &mut || {
+        for (d, s) in pm.chunks_mut(pw as usize * 4).zip(src.chunks(pw as usize * 4)) {
+            bgra_to_rgba_opaque(s, d);
+        }
+    });
+    time("channel swap, the shipped function, one call (after, again)", &mut || {
+        bgra_to_rgba_opaque(&src, &mut pm);
+    });
+    time("white fill of the whole area (before, every frame)", &mut || {
+        for p in screen[..(pw * ph * 4) as usize].chunks_exact_mut(4) {
+            p.copy_from_slice(&[255, 255, 255, 255]);
+        }
+        std::hint::black_box(&mut screen);
+    });
+    time("copy the whole picture 1:1 into the scene", &mut || {
+        blit_region(&pm, pw, ph, &mut screen, gw, gh, (0, 100, pw, ph), (0, 0, pw, ph));
+    });
+    time("copy a 1 % rectangle 1:1 (a tile-only update)", &mut || {
+        blit_region(&pm, pw, ph, &mut screen, gw, gh, (0, 100, pw, ph), (pw / 10, ph / 10, pw / 10, ph / 10));
+    });
+    let (hw, hh) = (pw / 2, ph / 2);
+    time("smooth: stretch a half-size picture to 2x (whole)", &mut || {
+        blit_region_x2(&pm, hw, hh, &mut screen, gw, gh, (0, 100, pw, ph), (0, 0, hw, hh));
+    });
+}
+
+/// (pid, name, parent, cpu ticks, rss kB) of every process, from /proc (empty where there is none).
+fn proc_table() -> Vec<(u32, String, u32, u64, u64)> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir("/proc") else { return out };
+    for e in rd.flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+        let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else { continue };
+        let name = stat[open + 1..close].to_string();
+        let f: Vec<&str> = stat[close + 2..].split(' ').collect();
+        let get = |i: usize| f.get(i).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        let rss_pages = get(21);
+        out.push((pid, name, get(1) as u32, get(11) + get(12), rss_pages * 4));
+    }
+    out
+}
+
+/// (thread id, name, cpu ticks) of every thread of a process.
+fn thread_table(pid: u32) -> Vec<(u32, String, u64)> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(format!("/proc/{pid}/task")) else { return out };
+    for e in rd.flatten() {
+        let Some(tid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/stat")) else { continue };
+        let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else { continue };
+        let f: Vec<&str> = stat[close + 2..].split(' ').collect();
+        let get = |i: usize| f.get(i).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        out.push((tid, stat[open + 1..close].to_string(), get(11) + get(12)));
+    }
+    out
+}
+
+/// Run for `secs`, optionally sending wheel steps, and print the frame rate, the pixels the frames carried and the CPU of the engine's processes.
+fn measure(v: &mut WebView, secs: f32, wheel: Option<(i32, u64)>, frames: &mut u64) {
+    let hz = 100.0; // USER_HZ
+    let before = proc_table();
+    // the busiest engine process is also looked at thread by thread (what a video or a scroll spends its cores on)
+    let busiest: Option<u32> = before.iter().filter(|p| p.1.contains("WPEWebProcess")).max_by_key(|p| p.3).map(|p| p.0);
+    let threads_before = busiest.map(thread_table).unwrap_or_default();
+    let (f0, t0) = (v.frames_received(), Instant::now());
+    let (mut px, mut gaps, mut last, mut worst) = (0u64, 0u32, Instant::now(), Duration::ZERO);
+    let mut next_wheel = Instant::now();
+    let (cx, cy) = hello_center(v);
+    while t0.elapsed().as_secs_f32() < secs {
+        if let Some((dy, ms)) = wheel {
+            if Instant::now() >= next_wheel {
+                let dir = if (t0.elapsed().as_millis() / 2000) % 2 == 1 { -1 } else { 1 };
+                v.send(ToHelper::Wheel { x: cx, y: cy, dx: 0, dy: dy * dir, mods: 0 });
+                next_wheel += Duration::from_millis(ms);
+            }
+        }
+        let n0 = v.frames_received();
+        for e in v.poll() {
+            if let Event::Frame = e {
+                *frames += 1;
+            }
+        }
+        if v.frames_received() != n0 {
+            let gap = last.elapsed();
+            worst = worst.max(gap);
+            if gap > Duration::from_millis(100) {
+                gaps += 1;
+            }
+            last = Instant::now();
+            if let Some(r) = v.take_dirty() {
+                px += r.w as u64 * r.h as u64;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let el = t0.elapsed().as_secs_f64();
+    let n = v.frames_received() - f0;
+    let (fw, fh) = v.frame_size();
+    println!(
+        "  measure: {:.1} fps ({n} frames in {el:.1}s), worst gap {} ms, {gaps} gaps over 100 ms, dirty area per frame {:.0}% of {fw}x{fh} (union of each poll)",
+        n as f64 / el,
+        worst.as_millis(),
+        if n > 0 && fw > 0 && fh > 0 { px as f64 * 100.0 / (n as f64 * fw as f64 * fh as f64) } else { 0.0 }
+    );
+    let after = proc_table();
+    let mut total = 0.0;
+    for (pid, name, _ppid, ticks, rss) in &after {
+        let b = before.iter().find(|x| x.0 == *pid).map_or(0, |x| x.3);
+        let cpu = (ticks.saturating_sub(b)) as f64 / hz / el * 100.0;
+        if cpu >= 1.0 || name.contains("WPE") || name.contains("webview") {
+            println!("  cpu {cpu:6.1}%  rss {:6} MB  pid {pid} {name}", rss / 1024);
+            total += cpu;
+        }
+    }
+    if let Some(pid) = busiest {
+        let mut rows: Vec<(f64, String)> = thread_table(pid)
+            .into_iter()
+            .map(|(tid, name, t)| (t.saturating_sub(threads_before.iter().find(|x| x.0 == tid).map_or(0, |x| x.2)) as f64 / hz / el * 100.0, name))
+            .filter(|r| r.0 >= 3.0)
+            .collect();
+        rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let top: Vec<String> = rows.iter().take(14).map(|(c, n)| format!("{n} {c:.0}%")).collect();
+        println!("  threads of the busiest web process (>= 3 %): {}", top.join(", "));
+    }
+    println!("  cpu total (processes shown): {total:.0}% of {} cores", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
 }
 
 fn hello_center(v: &WebView) -> (i32, i32) {

@@ -1,0 +1,14 @@
+[package]
+name = "iyakki-stage1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The tiny first-stage init of the lean boot layout: finds the real root (an image or an extracted tree on the stick), puts a RAM-backed overlay over it and switches to it. Nothing else; no process is started."
+
+[dependencies]
+libc = "0.2"
+
+[[bin]]
+name = "iyakki-stage1"
+path = "src/main.rs"
+

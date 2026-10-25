@@ -2280,10 +2280,13 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "iyakki-agent"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "aes",
  "argon2",
  "chacha20poly1305",
+ "ctr",
  "ed25519-dalek",
  "iyakki-data",
+ "iyakki-devctl",
  "iyakki-drivers",
  "iyakki-edit",
  "iyakki-flow",
@@ -2293,6 +2296,9 @@ dependencies = [
  "iyakki-netscan",
  "iyakki-proxy",
  "iyakki-sec",
+ "iyakki-stage1",
+ "iyakki-storage",
+ "iyakki-usb",
  "iyakki-vfs",
  "iyakki-wasm",
  "iyakki-web",
@@ -2317,6 +2323,7 @@ dependencies = [
  "iyakki-agent",
  "iyakki-devctl",
  "iyakki-drivers",
+ "iyakki-fw",
  "iyakki-hwinfo",
  "iyakki-ledger",
  "iyakki-proxy",
@@ -2362,6 +2369,7 @@ name = "iyakki-drivers"
 version = "0.1.0-alpha.1"
 dependencies = [
  "iyakki-hwinfo",
+ "libc",
  "miniz_oxide 0.8.9",
  "serde",
  "serde_json",
@@ -2376,6 +2384,16 @@ version = "0.1.0-alpha.1"
 name = "iyakki-flow"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "iyakki-fw"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "libc",
+ "log",
  "serde",
  "serde_json",
 ]
@@ -2403,6 +2421,7 @@ dependencies = [
 name = "iyakki-js"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "iyakki-proxy",
  "iyakki-web",
  "serde_json",
  "wasmtime",
@@ -2453,15 +2472,25 @@ name = "iyakki-remote"
 version = "0.1.0-alpha.1"
 dependencies = [
  "iyakki-agent",
+ "iyakki-fw",
  "iyakki-sec",
  "iyakki-shell",
  "iyakki-web",
  "log",
+ "miniz_oxide 0.8.9",
  "rcgen",
  "rustls",
  "serde_json",
  "sha2 0.10.9",
  "tiny-skia",
+]
+
+[[package]]
+name = "iyakki-rfb"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-agent",
+ "miniz_oxide 0.8.9",
 ]
 
 [[package]]
@@ -2485,10 +2514,12 @@ dependencies = [
  "iyakki-drivers",
  "iyakki-edit",
  "iyakki-flow",
+ "iyakki-fw",
  "iyakki-hwinfo",
  "iyakki-js",
  "iyakki-ledger",
  "iyakki-netscan",
+ "iyakki-rfb",
  "iyakki-sec",
  "iyakki-storage",
  "iyakki-usb",
@@ -2503,6 +2534,13 @@ dependencies = [
  "thiserror 2.0.21",
  "tiny-skia",
  "unicode-bidi",
+]
+
+[[package]]
+name = "iyakki-stage1"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

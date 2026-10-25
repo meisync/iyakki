@@ -25,6 +25,8 @@ pub const INDEX_NONE: u16 = 0xffff;
 pub const OP_READ_INDEX_LIST: u16 = 0x0003;
 pub const OP_READ_INFO: u16 = 0x0004;
 pub const OP_SET_POWERED: u16 = 0x0005;
+pub const OP_READ_CONFIG_INFO: u16 = 0x0037;
+pub const OP_READ_EXT_INDEX_LIST: u16 = 0x003c;
 pub const OP_SET_DISCOVERABLE: u16 = 0x0006;
 pub const OP_SET_CONNECTABLE: u16 = 0x0007;
 pub const OP_SET_BONDABLE: u16 = 0x0009;
@@ -272,6 +274,30 @@ pub struct ControllerInfo {
     pub name: String,
     pub supported: u32,
     pub current: u32,
+    /// HCI version of the controller (6 = Bluetooth 4.0, 9 = 5.0 ...), as the kernel read it.
+    pub version: u8,
+    /// Company id from the controller (15 = Broadcom).
+    pub manufacturer: u16,
+    pub short_name: String,
+}
+
+/// The reply of Read Controller Information (`mgmt_rp_read_info`, 280 bytes): address 6, version 1, manufacturer 2, supported settings 4,
+/// current settings 4, class 3, name 249, short name 11. Shorter replies are refused; longer ones are read as far as the layout goes.
+pub fn parse_info(index: u16, r: &[u8]) -> Result<ControllerInfo, Error> {
+    if r.len() < 280 {
+        return Err(Error::Protocol("controller info"));
+    }
+    let text = |b: &[u8]| String::from_utf8_lossy(b).split('\0').next().unwrap_or("").to_string();
+    Ok(ControllerInfo {
+        index,
+        address: addr_string(&r[0..6]),
+        name: text(&r[20..20 + 249]),
+        supported: u32::from_le_bytes([r[9], r[10], r[11], r[12]]),
+        current: u32::from_le_bytes([r[13], r[14], r[15], r[16]]),
+        version: r[6],
+        manufacturer: u16::from_le_bytes([r[7], r[8]]),
+        short_name: text(&r[269..280]),
+    })
 }
 
 impl ControllerInfo {
@@ -375,7 +401,7 @@ pub fn classify(class: Option<u32>, appearance: Option<u16>, services: &[u16]) -
     Kind::Other
 }
 
-fn parse_found(p: &[u8]) -> Option<Found> {
+pub fn parse_found(p: &[u8]) -> Option<Found> {
     if p.len() < 14 {
         return None;
     }
@@ -418,6 +444,11 @@ pub struct Mgmt<T: Transport> {
 impl<T: Transport> Mgmt<T> {
     pub fn new(t: T) -> Mgmt<T> {
         Mgmt { t, events: VecDeque::new(), timeout: Duration::from_secs(5) }
+    }
+
+    /// The transport (tests look at what was sent).
+    pub fn transport(&self) -> &T {
+        &self.t
     }
 
     /// Sends a command and waits for its Command Complete; other events are kept in `events`.
@@ -470,17 +501,7 @@ impl<T: Transport> Mgmt<T> {
 
     pub fn info(&mut self, index: u16) -> Result<ControllerInfo, Error> {
         let r = self.command(OP_READ_INFO, index, &[])?;
-        if r.len() < 280 {
-            return Err(Error::Protocol("controller info"));
-        }
-        let name = String::from_utf8_lossy(&r[20..20 + 249]).split('\0').next().unwrap_or("").to_string();
-        Ok(ControllerInfo {
-            index,
-            address: addr_string(&r[0..6]),
-            name,
-            supported: u32::from_le_bytes([r[9], r[10], r[11], r[12]]),
-            current: u32::from_le_bytes([r[13], r[14], r[15], r[16]]),
-        })
+        parse_info(index, &r)
     }
 
     fn set(&mut self, op: u16, index: u16, params: &[u8]) -> Result<u32, Error> {
@@ -528,7 +549,25 @@ impl<T: Transport> Mgmt<T> {
 
     /// Scans for `dur` (classic and low energy) and returns the devices seen, strongest signal first.
     pub fn scan(&mut self, index: u16, dur: Duration) -> Result<Vec<Found>, Error> {
-        self.command(OP_START_DISCOVERY, index, &[7])?;
+        self.scan_types(index, dur, 7)
+    }
+
+    /// The discovery address types (1 classic, 2 LE public, 4 LE random) this controller can search now: classic and/or low energy,
+    /// turning on the radio types it supports and has off (a setting of the controller, not a pairing). Errors on unsupported bits are ignored.
+    pub fn discovery_types(&mut self, index: u16) -> Result<u8, Error> {
+        let info = self.info(index)?;
+        for (op, bit) in [(OP_SET_BREDR, SET_BREDR), (OP_SET_LE, SET_LE)] {
+            if info.supported & bit != 0 && info.current & bit == 0 {
+                let _ = self.set(op, index, &[1]);
+            }
+        }
+        let cur = self.info(index)?.current;
+        Ok((if cur & SET_BREDR != 0 { 1 } else { 0 }) | (if cur & SET_LE != 0 { 6 } else { 0 }))
+    }
+
+    /// [`scan`](Self::scan) for the given address types.
+    pub fn scan_types(&mut self, index: u16, dur: Duration, types: u8) -> Result<Vec<Found>, Error> {
+        self.command(OP_START_DISCOVERY, index, &[types])?;
         let mut found: Vec<Found> = Vec::new();
         let deadline = Instant::now() + dur;
         loop {
@@ -568,7 +607,7 @@ impl<T: Transport> Mgmt<T> {
             }
         }
         // the kernel may already have stopped it (finished or error); that is fine
-        let _ = self.command(OP_STOP_DISCOVERY, index, &[7]);
+        let _ = self.command(OP_STOP_DISCOVERY, index, &[types]);
         found.sort_by(|a, b| b.rssi.cmp(&a.rssi));
         Ok(found)
     }

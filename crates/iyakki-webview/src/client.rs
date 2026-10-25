@@ -54,6 +54,10 @@ pub enum Event {
     Clipboard(String),
     /// The answer to a `ToHelper::Script` (protocol 1.1).
     ScriptResult { id: u32, ok: bool, json: String },
+    /// The page entered (true) or left (false) fullscreen.
+    Fullscreen(bool),
+    /// The page started (true) or stopped (false) playing audio.
+    AudioPlaying(bool),
     /// The helper says its engine failed (it may recover by itself).
     Crashed(String),
     Log(String),
@@ -134,6 +138,11 @@ fn clamp_size(w: u32, h: u32, hello: &Hello) -> (u32, u32) {
 }
 
 impl WebView {
+    /// The helper program's process id while it runs (the engine's web processes are its descendants).
+    pub fn pid(&self) -> Option<u32> {
+        self.child.as_ref().map(|c| c.id())
+    }
+
     /// Start the helper and send it the `Hello`. Returns at once; [`WebView::poll`] delivers `Ready` when it is up.
     pub fn start(mut cfg: Config) -> Result<WebView, String> {
         cfg.hello.w = cfg.hello.w.clamp(1, MAX_DIM);
@@ -244,6 +253,8 @@ impl WebView {
                     FromHelper::Download { url, name } => out.push(Event::Download { url, name }),
                     FromHelper::Clipboard(s) => out.push(Event::Clipboard(s)),
                     FromHelper::ScriptResult { id, ok, json } => out.push(Event::ScriptResult { id, ok, json }),
+                    FromHelper::Fullscreen(on) => out.push(Event::Fullscreen(on)),
+                    FromHelper::AudioPlaying(on) => out.push(Event::AudioPlaying(on)),
                     FromHelper::Crashed(s) => out.push(Event::Crashed(s)),
                     FromHelper::Log(s) => out.push(Event::Log(s)),
                 },

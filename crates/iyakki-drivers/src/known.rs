@@ -97,15 +97,15 @@ pub const KNOWN: &[Known] = &[
     Known {
         id: "mac-wifi-brcmfmac",
         title: "Broadcom Wi-Fi firmware (Mac, brcmfmac)",
-        summary: "Macs whose Wi-Fi chip brcmfmac supports (BCM43602; T2 Macs: BCM4364, BCM4377): the driver is in the kernel, the firmware is not.",
+        summary: "Macs with a BCM43602, BCM4350 or T2 (BCM4364, BCM4377) Wi-Fi chip: the driver is in the kernel, Apple's board files are not.",
         availability: Availability::AfterPack,
         delivery: Delivery::Folder,
-        matches: &[("", "Apple*", "14e4:43ba", ""), ("", "Apple*", "14e4:43bb", ""), ("", "Apple*", "14e4:43bc", ""), ("", "Apple*", "14e4:aa52", ""), ("", "Apple*", "14e4:4464", ""), ("", "Apple*", "14e4:4488", ""), ("", "Apple*", "14e4:43dc", "")],
+        matches: &[("", "Apple*", "14e4:43ba", ""), ("", "Apple*", "14e4:43bb", ""), ("", "Apple*", "14e4:43bc", ""), ("", "Apple*", "14e4:aa52", ""), ("", "Apple*", "14e4:4464", ""), ("", "Apple*", "14e4:4488", ""), ("", "Apple*", "14e4:43dc", ""), ("", "Apple*", "14e4:43a3", "")],
         drivers: &["brcmfmac"],
         firmware_probe: &["brcm/brcmfmac"],
         accept: &[("brcmfmac*.bin", "brcm"), ("brcmfmac*.txt", "brcm"), ("brcmfmac*.clm_blob", "brcm"), ("brcmfmac*.txcap_blob", "brcm")],
         license: "Broadcom firmware: redistributable only as part of linux-firmware under its licence; Apple board files (.txt) come from your own Mac",
-        why: "brcmfmac is the open Broadcom driver in the Linux kernel. It needs a firmware file for your exact chip (brcmfmac43602-pcie.bin for BCM43602) and, on Apple boards, a board file. The `hw` image variant carries the linux-firmware files; the standard `libre` image carries none. IYAKKI does not ship them in the pack: copy them from the linux-firmware repository (git.kernel.org) or from another Linux installation to a USB stick and install from the stick. T2 Macs (BCM4364 in the Mac mini 2018 and most 2018-2019 MacBook Pros, BCM4377 in the MacBookPro15,4, MacBookPro16,3 and MacBookAir9,1) use Apple's own firmware, which only macOS has: run dist/drivers/mac-wifi-firmware-from-macos.sh in macOS on the same Mac; it writes the files under the names brcmfmac asks for onto a USB stick.",
+        why: "brcmfmac is the open Broadcom driver in the Linux kernel. It needs a firmware file for your exact chip (brcmfmac43602-pcie.bin for BCM43602) and, on Apple boards, a board file. The `hw` image variant carries the linux-firmware files; the standard `libre` image carries none. IYAKKI does not ship them in the pack: copy them from the linux-firmware repository (git.kernel.org) or from another Linux installation to a USB stick and install from the stick. T2 Macs (BCM4364 in the Mac mini 2018 and most 2018-2019 MacBook Pros, BCM4377 in the MacBookPro15,4, MacBookPro16,3 and MacBookAir9,1) use Apple's own firmware, which only macOS has: run dist/drivers/mac-wifi-firmware-from-macos.sh in macOS on the same Mac; it writes the files under the names brcmfmac asks for onto a USB stick. Or let IYAKKI do it: IYAKKI menu, Mac drivers (download from Apple for your Mac model, or read a folder, a stick or a disk image); the files are Apple's, stay on your machine and are never uploaded.",
         supply: "Firmware files named brcmfmac<chip>-pcie.bin (and .txt / .clm_blob / .txcap_blob if present) from linux-firmware, or for a T2 Mac the folder iyakki-wifi-firmware that dist/drivers/mac-wifi-firmware-from-macos.sh wrote in macOS, in a folder or on a USB stick.",
         guide: "",
     },
@@ -130,28 +130,28 @@ pub const KNOWN: &[Known] = &[
         summary: "btusb is in the kernel; the Broadcom patch-RAM file (.hcd) for your Bluetooth chip must be supplied.",
         availability: Availability::AfterPack,
         delivery: Delivery::Folder,
-        matches: &[("", "Apple*", "", "0a5c:*"), ("", "Apple*", "", "05ac:82*"), ("", "Apple*", "14e4:5fa0", "")],
+        matches: &[("", "Apple*", "", "0a5c:*"), ("", "Apple*", "", "05ac:82*"), ("", "Apple*", "14e4:5fa0", ""), ("MacBookPro14,1", "", "", ""), ("MacBookPro15,*", "", "", ""), ("MacBookPro16,*", "", "", ""), ("MacBookAir8,*", "", "", ""), ("MacBookAir9,*", "", "", ""), ("iMac20,*", "", "", ""), ("iMacPro1,1", "", "", ""), ("Macmini8,1", "", "", ""), ("MacPro7,1", "", "", "")],
         drivers: &["btusb", "btbcm", "hci_bcm4377", "hci_uart"],
         firmware_probe: &["brcm/BCM20702", "brcm/BCM2045", "brcm/BCM43", "brcm/BCM4", "brcm/brcmbt"],
         accept: &[("*.hcd", "brcm"), ("brcmbt*.bin", "brcm"), ("brcmbt*.ptb", "brcm")],
         license: "Broadcom firmware, no redistribution grant: supply your own",
-        why: "The BCM20702 Bluetooth chip in the Mac mini 2014 starts from a small built-in firmware and the kernel can load a newer patch-RAM file (.hcd) over it. The kernel asks for brcm/BCM20702A1-<usb vendor>-<usb product>.hcd; the file is Broadcom's and is not in linux-firmware. Without it the adapter may still work in a limited way. IYAKKI cannot ship it: take it from a Boot Camp / Windows driver package you own (converted from .hex to .hcd) or a community collection you trust, put it on a USB stick and install it here. The BCM4377 of the MacBookPro15,4, MacBookPro16,3 and MacBookAir9,1 is a PCIe device (driver hci_bcm4377, Mac image) that needs brcm/brcmbt4377b3-apple,formosa-<vendor>.bin and .ptb from macOS Monterey or later: dist/drivers/mac-wifi-firmware-from-macos.sh copies them together with the Wi-Fi files. The BCM4364 of the Mac mini 2018 and the 2018/2019 MacBook Pros is not USB or PCIe: its Bluetooth is on a UART (driver hci_uart with hci_bcm, Mac image) and runs from its built-in ROM without any file; if macOS has a BCM4364 patch file, the same script copies it as BCM.hcd (the name the kernel asks for).",
+        why: "The BCM20702 Bluetooth chip in the Mac mini 2014 starts from a small built-in firmware and the kernel can load a newer patch-RAM file (.hcd) over it. The kernel asks for brcm/BCM20702A1-<usb vendor>-<usb product>.hcd; the file is Broadcom's and is not in linux-firmware. Without it the adapter may still work in a limited way. IYAKKI cannot ship it: take it from a Boot Camp / Windows driver package you own (converted from .hex to .hcd) or a community collection you trust, put it on a USB stick and install it here. The BCM4377 of the MacBookPro15,4, MacBookPro16,3 and MacBookAir9,1 is a PCIe device (driver hci_bcm4377, Mac image) that needs brcm/brcmbt4377b3-apple,formosa-<vendor>.bin and .ptb from macOS Monterey or later: dist/drivers/mac-wifi-firmware-from-macos.sh copies them together with the Wi-Fi files. The BCM4364 of the Mac mini 2018 and the 2018/2019 MacBook Pros is not USB or PCIe: its Bluetooth is on a UART (driver hci_uart with hci_bcm, Mac image) and runs from its built-in ROM without any file; if macOS has a BCM4364 patch file, the same script copies it as BCM.hcd (the name the kernel asks for). IYAKKI menu, Mac drivers does the same from Apple's download or from your folder, stick or disk image; if the controller still has no address afterwards, that is a known limit and a USB Bluetooth adapter works.",
         supply: "A BCM20702A1-<vid>-<pid>.hcd file (the exact name is in the kernel log: `dmesg | grep -i firmware`), or for a BCM4377 Mac the brcmbt*.bin and .ptb files the macOS script wrote.",
         guide: "",
     },
     Known {
         id: "mac-facetimehd",
         title: "FaceTime HD camera (facetimehd)",
-        summary: "Out-of-tree driver plus firmware extracted from Apple's driver: needs the Mac image variant and your own Apple file.",
+        summary: "Out-of-tree driver (in the Mac image) plus Apple's firmware, downloaded from Apple on this machine at your request.",
         availability: Availability::NeedsMacImage,
         delivery: Delivery::Extract,
         matches: &[("", "Apple*", "14e4:1570", "")],
         drivers: &["facetimehd"],
         firmware_probe: &["facetimehd/firmware.bin"],
         accept: &[],
-        license: "Driver bcwc_pcie: GPL-2.0 (out of tree). Firmware: Apple's, extracted on your machine, never redistributed by IYAKKI",
-        why: "The camera of most MacBooks since about 2013 is a PCIe device (Broadcom 720p FaceTime HD) that the kernel does not support. The community driver facetimehd (bcwc_pcie) is out of tree: the Mac image variant would have to build it with the kernel. It also needs a firmware file that is part of Apple's macOS driver. Apple's licence does not allow us to ship it, so you supply Apple's AppleCameraInterface file and IYAKKI extracts the firmware with checksums, in this tile, on the device. The Mac mini 2014 has no camera.",
-        supply: "The file AppleCameraInterface from a macOS install (from /System/Library/Extensions/AppleCameraInterface.kext/Contents/MacOS/) on a USB stick.",
+        license: "Driver facetimehd (patjak): GPL-2.0, out of tree, built into the Mac image. Firmware: Apple's, downloaded from Apple onto your machine and never redistributed by IYAKKI",
+        why: "The camera of most MacBooks since about 2013 is a PCIe device (Broadcom 720p FaceTime HD, PCI 14e4:1570) that the kernel does not support. The community driver facetimehd is out of tree: the Mac image variant builds it with the kernel. It also needs a firmware file that is part of Apple's macOS driver. Apple's licence does not allow us to ship it, so IYAKKI downloads the few megabytes it needs from Apple's own update server when you press Camera firmware (IYAKKI menu, Mac drivers), checks them against published checksums and installs the firmware on this machine; alternatively you can give Apple's AppleCameraInterface file yourself. Without the sensor calibration files the picture may be off in colour. The Mac mini 2014 has no camera. Tried on no real MacBook yet.",
+        supply: "Nothing: the Camera firmware button downloads it from Apple (about 17 MB). Or the file AppleCameraInterface from a macOS install (from /System/Library/Extensions/AppleCameraInterface.kext/Contents/MacOS/) on a USB stick.",
         guide: "",
     },
     Known {
@@ -252,6 +252,15 @@ pub struct Row {
     pub detail: String,
 }
 
+/// What a T2 Mac's row says when its Apple firmware is not there: the file names, and where the files come from.
+fn t2_detail(id: &str) -> Option<&'static str> {
+    match id {
+        "mac-wifi-brcmfmac" => Some("needs firmware: brcm/brcmfmac<chip>-pcie.apple,<model>-*.bin, .txt and .clm_blob (Apple's files). IYAKKI menu \u{2192} Mac drivers installs them from your Mac or Apple's download"),
+        "mac-bt-broadcom" => Some("needs firmware: brcm/BCM.hcd (BCM4364) or brcm/brcmbt4377*.bin and .ptb (BCM4377) (Apple's files). IYAKKI menu \u{2192} Mac drivers installs them"),
+        _ => None,
+    }
+}
+
 /// The "Drivers for this machine" list: every known entry whose rules match, with its status. A generic PC gets an empty list.
 /// `fw_present(prefix)` says whether a firmware file with that path prefix exists; `installed` holds the ids of installed packs.
 pub fn for_machine(m: &Machine, fw_present: &dyn Fn(&str) -> bool, installed: &BTreeSet<String>) -> Vec<Row> {
@@ -280,6 +289,7 @@ pub fn for_machine(m: &Machine, fw_present: &dyn Fn(&str) -> bool, installed: &B
         } else {
             (Status::NoDriver, "no driver is bound to it".to_string())
         };
+        let detail = if status != Status::Working && crate::macboard::is_t2(&m.product) { t2_detail(k.id).map(str::to_string).unwrap_or(detail) } else { detail };
         rows.push(Row { known: k, status, devices, installed: is_installed, detail });
     }
     rows

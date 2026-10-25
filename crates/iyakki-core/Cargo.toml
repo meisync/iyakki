@@ -27,6 +27,7 @@ iyakki-sec.workspace = true
 iyakki-devctl.workspace = true
 iyakki-storage.workspace = true
 iyakki-zram.workspace = true
+iyakki-fw.workspace = true
 iyakki-usb = { path = "../iyakki-usb" }
 iyakki-hwinfo.workspace = true
 iyakki-drivers.workspace = true

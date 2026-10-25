@@ -176,6 +176,8 @@ pub struct SourceInfo {
     pub p2_start: u64,
     /// MBR, gap and partition 1: this many bytes are copied.
     pub copy_bytes: u64,
+    /// A GPT stick keeps GRUB's core image in its BIOS boot partition: (byte offset, length). `None`: the gap after sector 0.
+    pub bios: Option<(u64, u64)>,
 }
 
 fn entry(s0: &[u8], i: usize) -> (u8, u8, u64, u64) {
@@ -183,7 +185,8 @@ fn entry(s0: &[u8], i: usize) -> (u8, u8, u64, u64) {
     (s0[e], s0[e + 4], u32::from_le_bytes(s0[e + 8..e + 12].try_into().unwrap()) as u64, u32::from_le_bytes(s0[e + 12..e + 16].try_into().unwrap()) as u64)
 }
 
-/// Is `path` (a disk or a template file) an IYAKKI boot area? Checks the MBR layout and the FAT label "IYAKKI-BOOT".
+/// Is `path` (a disk or a template file) an IYAKKI boot area? Checks the MBR layout (the install template) or the GPT layout (a
+/// stick made with `--table gpt`), and the FAT label "IYAKKI-BOOT".
 pub fn read_source(path: &Path) -> Result<SourceInfo, String> {
     let mut f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut s0 = vec![0u8; 512];
@@ -191,9 +194,29 @@ pub fn read_source(path: &Path) -> Result<SourceInfo, String> {
     if s0[510..512] != [0x55, 0xAA] {
         return Err(format!("{} has no partition table", path.display()));
     }
-    let (_, t1, p1_start, p1_sectors) = entry(&s0, 0);
-    let (_, t2, p2_start, _) = entry(&s0, 1);
-    if t1 != 0xEF || t2 != 0x83 || p1_start == 0 || p1_sectors == 0 || p2_start < p1_start + p1_sectors {
+    let (_, t1, mut p1_start, mut p1_sectors) = entry(&s0, 0);
+    let (_, t2, mut p2_start, _) = entry(&s0, 1);
+    let mut bios = None;
+    if (0..4).any(|i| s0[446 + 16 * i + 4] == 0xEE) {
+        // a GPT stick: the boot volume, the data partition and GRUB's BIOS boot partition by their names
+        let size = f.seek(SeekFrom::End(0)).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut found = None;
+        for ss in [512u32, 4096] {
+            if let Ok(p) = gptfmt::read_gpt(&mut f, ss, size / ss as u64) {
+                found = Some((ss as u64, p.table));
+                break;
+            }
+        }
+        let (ss, t) = found.ok_or_else(|| format!("{} is not an IYAKKI boot disk (the GPT cannot be read)", path.display()))?;
+        let by = |name: &str| t.entries.iter().find(|e| e.name == name);
+        let (Some(boot), Some(data)) = (by(crate::gpt_install::NAME_BOOT), by(crate::gpt_install::NAME_DATA)) else {
+            return Err(format!("{} is not an IYAKKI boot disk (expected partitions named IYAKKI-BOOT and IYAKKI-DATA)", path.display()));
+        };
+        p1_start = boot.first_lba * ss / 512;
+        p1_sectors = boot.sectors() * ss / 512;
+        p2_start = data.first_lba * ss / 512;
+        bios = by(crate::gpt_install::NAME_BIOS).filter(|_| ss == 512).map(|b| (b.first_lba * ss, b.sectors() * ss));
+    } else if t1 != 0xEF || t2 != 0x83 || p1_start == 0 || p1_sectors == 0 || p2_start < p1_start + p1_sectors {
         return Err(format!("{} is not an IYAKKI boot disk (expected a FAT boot partition then a data partition)", path.display()));
     }
     let mut bs = vec![0u8; 512];
@@ -202,7 +225,7 @@ pub fn read_source(path: &Path) -> Result<SourceInfo, String> {
     if bs[510..512] != [0x55, 0xAA] || (label(71) != "IYAKKI-BOOT" && label(43) != "IYAKKI-BOOT") {
         return Err(format!("{}: the first partition is not the IYAKKI-BOOT volume", path.display()));
     }
-    Ok(SourceInfo { path: path.into(), sector0: s0, p1_start, p1_sectors, p2_start, copy_bytes: (p1_start + p1_sectors) * 512 })
+    Ok(SourceInfo { path: path.into(), sector0: s0, p1_start, p1_sectors, p2_start, copy_bytes: (p1_start + p1_sectors) * 512, bios })
 }
 
 /// The certificate a Secure Boot image carries on its boot partition (`dist/buildroot/secureboot.sh`, `docs/SECURE-BOOT.md`).
@@ -578,7 +601,7 @@ pub(crate) mod tests {
         assert!(has_mok_cert(["/EFI", "/efi/iyakki/IYAKKI-MOK.CER"].into_iter()));
         assert!(!has_mok_cert(["/EFI/BOOT/bootx64.efi"].into_iter()));
         assert!(SECURE_BOOT_NOTE.contains("Enroll key from disk") && SECURE_BOOT_NOTE.contains("iyakki-mok.cer"));
-        let junk = SourceInfo { path: "/nonexistent/template.img".into(), sector0: vec![], p1_start: 1, p1_sectors: 1, p2_start: 2, copy_bytes: 512 };
+        let junk = SourceInfo { path: "/nonexistent/template.img".into(), sector0: vec![], p1_start: 1, p1_sectors: 1, p2_start: 2, copy_bytes: 512, bios: None };
         assert!(!is_secure_boot_image(&junk));
     }
 

@@ -18,10 +18,23 @@ pub enum Input {
     Shift(bool),
     /// The page's speech synthesis speaking (browser voice, `docs/REMOTE-PROTOCOL.md`).
     Speech(iyakki_agent::hostvoice::FromClient),
+    /// The page speaks protocol version `v` (2 or more) and says whether it can inflate deflate-raw itself.
+    Hello { v: u32, deflate: bool },
+    /// The page has drawn the picture message with this number.
+    Ack(u32),
+    /// The person's choice of quality: `None` is automatic; `saver` is "data saver".
+    Quality { level: Option<crate::codec::Level>, saver: bool },
+    /// The page's own round-trip probe: `ts` is echoed back; `rtt` is the last round trip the page measured, in ms.
+    Ping { ts: u64, rtt: Option<f64> },
 }
 
 fn int(v: &Value, k: &str) -> Option<i32> {
     v.get(k)?.as_f64().filter(|n| n.is_finite() && n.abs() < 100_000.0).map(|n| n as i32)
+}
+
+/// A non-negative whole number the page may send as a JSON number (an acknowledgement counter, a timestamp).
+fn count(v: &Value, k: &str, max: f64) -> Option<u64> {
+    v.get(k)?.as_f64().filter(|n| n.is_finite() && *n >= 0.0 && *n <= max).map(|n| n as u64)
 }
 
 fn key(name: &str, ctrl: bool, shift: bool) -> Option<Key> {
@@ -80,6 +93,12 @@ pub fn parse(text: &str) -> Option<Input> {
         "key" => {
             let k = v.get("key")?.as_str()?;
             let flag = |n: &str| v.get(n).and_then(Value::as_bool).unwrap_or(false);
+            // Ctrl+Alt chords for panes and displays travel by the physical key (`code`), so a layout with AltGr still works
+            if flag("ctrl") && flag("alt") {
+                if let Some(c) = v.get("code").and_then(Value::as_str).and_then(|c| iyakki_shell::panes::chord_from_name(c, flag("shift"))) {
+                    return Some(Input::Event(Event::Layout(c)));
+                }
+            }
             Input::Event(Event::Key(key(k, flag("ctrl"), flag("shift"))?))
         }
         "paste" => {
@@ -87,6 +106,19 @@ pub fn parse(text: &str) -> Option<Input> {
             Input::Event(Event::Paste(t))
         }
         "full" => Input::Full,
+        "hello" => Input::Hello {
+            v: count(&v, "v", 1000.0)? as u32,
+            deflate: v.get("caps").unwrap_or(&Value::Null).get("deflate").and_then(Value::as_bool).unwrap_or(false),
+        },
+        "ack" => Input::Ack(count(&v, "n", u32::MAX as f64)? as u32),
+        "quality" => {
+            let level = match v.get("level").and_then(Value::as_str)? {
+                "auto" => None,
+                name => Some(crate::codec::Level::parse(name)?),
+            };
+            Input::Quality { level, saver: v.get("saver").and_then(Value::as_bool).unwrap_or(false) }
+        }
+        "ping" => Input::Ping { ts: count(&v, "ts", 9.0e15)?, rtt: v.get("rtt").and_then(Value::as_f64).filter(|r| r.is_finite() && (0.0..=60_000.0).contains(r)) },
         "shift" => Input::Shift(v.get("on").and_then(Value::as_bool).unwrap_or(false)),
         t if t.starts_with("sp_") => Input::Speech(iyakki_agent::hostvoice::FromClient::decode(text)?),
         _ => return None,
@@ -137,6 +169,19 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_alt_chords_reach_the_shell_as_layout_events_by_physical_key() {
+        use iyakki_shell::panes::{LayoutKey, Side};
+        assert_eq!(ev(r#"{"t":"key","key":"ArrowLeft","code":"ArrowLeft","ctrl":true,"alt":true}"#), Some(Event::Layout(LayoutKey::Snap(Side::Left))));
+        assert_eq!(ev(r#"{"t":"key","key":"\u00a1","code":"Digit1","ctrl":true,"alt":true}"#), Some(Event::Layout(LayoutKey::Apply(1))), "AltGr layouts send another character");
+        assert_eq!(ev(r#"{"t":"key","key":"Tab","code":"Tab","ctrl":true,"alt":true,"shift":true}"#), Some(Event::Layout(LayoutKey::Cycle { back: true })));
+        assert_eq!(ev(r#"{"t":"key","key":"ArrowRight","code":"ArrowRight","ctrl":true,"alt":true,"shift":true}"#), Some(Event::Layout(LayoutKey::Nudge(Side::Right))));
+        // without Alt the same keys are what they were
+        assert_eq!(ev(r#"{"t":"key","key":"ArrowLeft","code":"ArrowLeft","ctrl":true}"#), Some(Event::Key(Key::Nav { nav: Nav::Left, shift: false, ctrl: true })));
+        // Ctrl+Alt with a key that is no chord is not turned into a layout event
+        assert_eq!(ev(r#"{"t":"key","key":"x","code":"KeyX","ctrl":true,"alt":true}"#), Some(Event::Key(Key::Ctrl('x'))));
+    }
+
+    #[test]
     fn size_is_kept_within_sane_bounds_and_other_messages_work() {
         assert_eq!(parse(r#"{"t":"size","w":1,"h":1}"#), Some(Input::Size(MIN_W, MIN_H)));
         assert_eq!(parse(r#"{"t":"size","w":99999,"h":99999}"#), Some(Input::Size(MAX_W, MAX_H)));
@@ -147,6 +192,17 @@ mod tests {
         assert_eq!(parse(r#"{"t":"sp_end"}"#), None, "a speech event without an id is ignored");
         assert_eq!(parse(r#"{"t":"sp_bogus","id":1}"#), None);
         assert_eq!(parse("not json"), None);
+        assert_eq!(parse(r#"{"t":"hello","v":2,"caps":{"deflate":true}}"#), Some(Input::Hello { v: 2, deflate: true }));
+        assert_eq!(parse(r#"{"t":"hello","v":2}"#), Some(Input::Hello { v: 2, deflate: false }));
+        assert_eq!(parse(r#"{"t":"hello"}"#), None);
+        assert_eq!(parse(r#"{"t":"ack","n":4000000000}"#), Some(Input::Ack(4_000_000_000)));
+        assert_eq!(parse(r#"{"t":"ack","n":-1}"#), None);
+        assert_eq!(parse(r#"{"t":"ack","n":1e30}"#), None);
+        assert_eq!(parse(r#"{"t":"quality","level":"auto","saver":true}"#), Some(Input::Quality { level: None, saver: true }));
+        assert_eq!(parse(r#"{"t":"quality","level":"low"}"#), Some(Input::Quality { level: Some(crate::codec::Level::Low), saver: false }));
+        assert_eq!(parse(r#"{"t":"quality","level":"ultra"}"#), None);
+        assert_eq!(parse(r#"{"t":"ping","ts":12,"rtt":40.5}"#), Some(Input::Ping { ts: 12, rtt: Some(40.5) }));
+        assert_eq!(parse(r#"{"t":"ping","ts":12,"rtt":-3}"#), Some(Input::Ping { ts: 12, rtt: None }));
         assert_eq!(parse(r#"{"t":"reboot"}"#), None);
         assert_eq!(parse(r#"{"x":1}"#), None);
     }

@@ -1,11 +1,17 @@
 //! IYAKKI supervisor core: host detection, logging, signals, agent task running.
 
 pub mod boot;
+pub mod bootlog;
+pub use iyakki_storage::crashlog;
+pub mod coldplug;
 pub mod homebind;
 pub mod display;
 pub mod camera;
+pub mod hotplug;
+pub mod storageloss;
 pub mod web;
 pub mod console;
+pub mod keepalive;
 #[cfg(feature = "shell")]
 pub mod host;
 #[cfg(feature = "shell")]

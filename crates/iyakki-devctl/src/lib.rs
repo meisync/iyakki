@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 
 pub mod btmgmt;
+pub mod btview;
+pub mod direct;
 pub mod mac;
 pub mod wifi;
 
@@ -647,12 +649,62 @@ pub trait Control: Send + Sync {
     fn set_mac(&self, _name: &str, _mac: &str) -> Result<(), String> {
         Err("changing the MAC address is not available here".into())
     }
+    /// The Bluetooth controllers as the kernel's management interface reports them (works without an `address` file in sysfs).
+    fn bt_controllers(&self) -> Result<Vec<btview::Controller>, String> {
+        Err("not available here".into())
+    }
+    /// Power a Bluetooth controller on or off (management interface).
+    fn bt_power(&self, _index: u16, _on: bool) -> Result<(), String> {
+        Err("not available here".into())
+    }
+    /// Scan for `secs` seconds; the controller must be on. Never pairs.
+    fn bt_scan(&self, _index: u16, _secs: u64) -> Result<Vec<btmgmt::Found>, String> {
+        Err("not available here".into())
+    }
+    /// The patch file the kernel asks for (`brcm/BCM.hcd`) exists.
+    fn bt_firmware_file(&self) -> bool {
+        false
+    }
+    /// "Load the Bluetooth driver anyway": give the held drivers back and load them (a function the program registers, see [`set_bt_loader`]).
+    fn bt_load_anyway(&self) -> Result<String, String> {
+        Err("not available here".into())
+    }
+    /// The Bluetooth drivers are set aside until firmware exists (a T2 Mac), so "Load the Bluetooth driver anyway" has something to do.
+    fn bt_held(&self) -> bool {
+        false
+    }
+}
+
+static BT_LOADER: std::sync::OnceLock<(fn() -> bool, fn() -> Result<String, String>)> = std::sync::OnceLock::new();
+
+/// The program registers what "Load the Bluetooth driver anyway" does and how to tell that a driver is held back (the driver packs live
+/// in a crate above this one).
+pub fn set_bt_loader(held: fn() -> bool, load: fn() -> Result<String, String>) {
+    let _ = BT_LOADER.set((held, load));
 }
 
 /// The real machine.
 pub struct System;
 
 impl Control for System {
+    fn bt_controllers(&self) -> Result<Vec<btview::Controller>, String> {
+        btview::controllers()
+    }
+    fn bt_power(&self, index: u16, on: bool) -> Result<(), String> {
+        btview::set_powered(index, on)
+    }
+    fn bt_scan(&self, index: u16, secs: u64) -> Result<Vec<btmgmt::Found>, String> {
+        btview::scan(index, secs)
+    }
+    fn bt_firmware_file(&self) -> bool {
+        Path::new("/lib/firmware/brcm/BCM.hcd").exists()
+    }
+    fn bt_load_anyway(&self) -> Result<String, String> {
+        BT_LOADER.get().map(|f| (f.1)()).unwrap_or_else(|| Err("not available here".into()))
+    }
+    fn bt_held(&self) -> bool {
+        BT_LOADER.get().is_some_and(|f| (f.0)())
+    }
     fn set_link(&self, name: &str, up: bool) -> Result<(), String> {
         set_link(name, up)
     }

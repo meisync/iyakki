@@ -140,6 +140,31 @@ fn navigation_state_flows_back() {
 }
 
 #[test]
+fn fullscreen_is_reported_and_the_shell_can_ask_the_page_to_leave() {
+    let mut v = WebView::start(config(&["--static"], 200, 100)).unwrap();
+    v.send(ToHelper::Navigate("https://a.org/".into()));
+    until(&mut v, 10, |_, e| e.contains(&Event::Url("https://a.org/".into())));
+    v.send(ToHelper::Navigate("fake://fullscreen".into()));
+    until(&mut v, 10, |_, e| e.contains(&Event::Fullscreen(true)));
+    v.send(ToHelper::LeaveFullscreen);
+    until(&mut v, 10, |_, e| e.contains(&Event::Fullscreen(false)));
+    // a navigation ends it as well
+    v.send(ToHelper::Navigate("fake://fullscreen".into()));
+    until(&mut v, 10, |_, e| e.contains(&Event::Fullscreen(true)));
+    v.send(ToHelper::Navigate("https://a.org/next".into()));
+    until(&mut v, 10, |_, e| e.contains(&Event::Fullscreen(false)));
+}
+
+#[test]
+fn the_page_saying_it_plays_audio_reaches_the_shell_and_a_navigation_ends_it() {
+    let mut v = WebView::start(config(&["--static"], 200, 100)).unwrap();
+    v.send(ToHelper::Navigate("fake://audio".into()));
+    until(&mut v, 10, |_, e| e.contains(&Event::AudioPlaying(true)));
+    v.send(ToHelper::Navigate("https://a.org/next".into()));
+    until(&mut v, 10, |_, e| e.contains(&Event::AudioPlaying(false)));
+}
+
+#[test]
 fn a_crash_is_detected_once_and_a_restart_returns_to_the_last_good_page() {
     let mut v = WebView::start(config(&["--static"], 300, 200)).unwrap();
     v.send(ToHelper::Navigate("https://good.example/page".into()));
@@ -286,8 +311,94 @@ fn a_huge_window_size_is_clamped_not_a_panic_and_stale_files_of_dead_shells_are_
 /// Measured on a Mac mini: without this policy WebKit answers `play()` with NotAllowedError for a video that has sound, so YouTube's
 /// watch page sat paused at 0:00 until someone clicked. The C helper cannot run in `cargo test`, so its source is checked.
 #[test]
-fn the_wpe_helper_allows_autoplay_like_window_mode() {
+fn the_wpe_helper_allows_autoplay_like_window_mode_unless_the_agent_says_deny() {
     let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/webview/wpe-helper/helper.c")).expect("helper source");
-    assert!(src.contains("webkit_website_policies_new_with_policies(\"autoplay\", WEBKIT_AUTOPLAY_ALLOW"), "autoplay policy");
+    assert!(src.contains("#define IYAKKI_AUTOPLAY_DEFAULT \"allow\""), "autoplay is allowed unless told otherwise");
+    assert!(src.contains("getenv(\"IYAKKI_WEBVIEW_AUTOPLAY\")") && src.contains("WEBKIT_AUTOPLAY_DENY"), "the agent can deny it");
+    assert!(src.contains("webkit_website_policies_new_with_policies(\"autoplay\", ap"), "autoplay policy");
     assert!(src.contains("\"website-policies\", wpol"), "the policy is given to the view");
+}
+
+/// Without a fullscreen handler WPE treats the page's fullscreen request as failed and leaves it again at once (YouTube's button "does not
+/// stick"). The C helper cannot run in `cargo test`, so its source is checked.
+#[test]
+fn the_wpe_helper_handles_fullscreen_and_tells_the_shell() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/webview/wpe-helper/helper.c")).expect("helper source");
+    assert!(src.contains("wpe_view_backend_set_fullscreen_handler(G.backend, fullscreen_handler"), "the handler is installed");
+    assert!(src.contains("send_fullscreen(G.fullscreen)"), "the shell is told");
+    assert!(src.contains("wpe_view_backend_dispatch_request_exit_fullscreen"), "the shell can ask the page to leave");
+    assert!(src.contains("case T_LEAVE_FULLSCREEN"));
+}
+
+/// The sound doctor needs to know when the page plays audio, and the engine's GStreamer messages must reach stderr (evidence for a
+/// silent session). The C helper cannot run in `cargo test`, so its source is checked.
+#[test]
+fn the_wpe_helper_reports_when_the_page_plays_audio_and_lets_gstreamer_errors_through() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/webview/wpe-helper/helper.c")).expect("helper source");
+    let hdr = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/webview/wpe-helper/proto.h")).expect("proto.h");
+    assert!(hdr.contains("F_AUDIO_PLAYING"), "message type 0x8E");
+    assert!(src.contains("g_signal_connect(v, \"notify::is-playing-audio\", G_CALLBACK(on_audio_playing)"));
+    assert!(src.contains("webkit_web_view_is_playing_audio(G.view)") && src.contains("send_msg(F_AUDIO_PLAYING"));
+    assert!(src.contains("setenv(\"GST_DEBUG\", \"*:1,alsasink:4,autoaudiosink:4\", 0)"), "errors and sink opens reach stderr unless the owner set GST_DEBUG");
+}
+
+/// The engine's processes can run a little below the shell when IYAKKI_WEBVIEW_NICE asks (off by default; docs/BROWSER-SPEED.md,
+/// "Interactive performance"): the helper lowers its own priority before it starts any thread or child, only ever lowers it, bounds the value and says so when the call fails. The C helper
+/// cannot run in `cargo test`, so its source is checked.
+#[test]
+fn the_wpe_helper_can_run_the_engine_below_the_shell_and_only_lowers_the_priority() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/webview/wpe-helper/helper.c")).expect("helper source");
+    for needle in ["#include <sys/resource.h>", "getenv(\"IYAKKI_WEBVIEW_NICE\")", "nice_env ? atoi(nice_env) : 0", "nice_v > 0 && nice_v <= 19 && setpriority(PRIO_PROCESS, 0, nice_v) != 0", "could not lower the engine's priority"] {
+        assert!(src.contains(needle), "helper.c lacks {needle}");
+    }
+    // before the engine exists: the call comes before the Hello is read and before the engine is set up
+    let at = src.find("setpriority(PRIO_PROCESS").expect("setpriority");
+    assert!(at < src.find("read_hello()").expect("read_hello"), "the priority is lowered before the conversation starts");
+    assert!(at < src.rfind("setup_engine()").expect("setup_engine"), "and before the engine is started");
+    // no negative value anywhere (raising the priority is never asked for)
+    assert!(!src.contains("setpriority(PRIO_PROCESS, 0, -"), "never raised");
+}
+
+/// Content blocking in the full engine (docs/CONTENT-BLOCKING.md): the helper loads the person's rule list through WebKit's filter
+/// store, holds the first page until it is in (with a time limit) and never fails closed. The C helper cannot run in `cargo test`,
+/// so its source is checked.
+#[test]
+fn the_wpe_helper_loads_the_content_filter_and_fails_open() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/webview/wpe-helper/helper.c")).expect("helper source");
+    for needle in [
+        "IYAKKI_WEBVIEW_FILTER\"",
+        "IYAKKI_WEBVIEW_FILTER_ID\"",
+        "webkit_user_content_filter_store_new(",
+        "webkit_user_content_filter_store_load(",
+        "webkit_user_content_filter_store_save_from_file(",
+        "webkit_user_content_manager_add_filter(",
+        "g_timeout_add_seconds(20, filter_timeout",
+        "G.pending_nav",
+    ] {
+        assert!(src.contains(needle), "helper.c lacks {needle}");
+    }
+    // every failure path calls filter_done, which opens the waiting page without a filter
+    let fails = src.matches("filter_done();").count();
+    assert!(fails >= 3, "failure paths all release the first page ({fails})");
+    assert!(src.contains("if (!G.filter_wait) return;"), "filter_done is safe to call twice");
+    // an id that is not plain letters and digits is refused before it reaches a file name
+    assert!(src.contains("g_ascii_isalnum"), "the identifier is checked");
+    // the first navigation waits only while a filter is being loaded
+    assert!(src.contains("else if (G.filter_wait)"), "navigation is held while the filter loads");
+}
+
+#[test]
+fn a_sub_notch_wheel_step_reaches_the_helper_exactly_and_the_c_helper_dispatches_it_as_a_precise_axis_event() {
+    // the shell's smooth scrolling sends fractions of a notch (1/120 each) in the same Wheel message: no protocol change was needed
+    let mut v = WebView::start(config(&["--static"], 400, 300)).unwrap();
+    until(&mut v, 10, |_, e| e.contains(&Event::Frame));
+    for dy in [7, -7, 1, 240] {
+        v.send(ToHelper::Wheel { x: 3, y: 4, dx: 0, dy, mods: 0 });
+    }
+    let ev = until(&mut v, 10, |_, e| has_title(e, "wheel 3,4 0,240"));
+    assert!(has_title(&ev, "wheel 3,4 0,7") || has_title(&ev, "wheel 3,4 0,240"), "fractions arrive unchanged");
+    // the C helper turns the units into CSS pixels of a smooth (precise) 2D axis event, not whole notches
+    let src = include_str!("../../../dist/webview/wpe-helper/helper.c");
+    assert!(src.contains("wpe_input_axis_event_type_motion_smooth") && src.contains("wpe_input_axis_event_type_mask_2d"));
+    assert!(src.contains("(double)dy * 53.0 / 120.0"), "the pixel amount follows the units exactly");
 }

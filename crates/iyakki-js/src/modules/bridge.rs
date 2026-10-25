@@ -28,8 +28,27 @@ impl BridgeModule {
 
 const PRELUDE: &str = r#"(function (g) { 'use strict';
   const raw = g.__host;
-  const call = (op, a) => JSON.parse(raw('iyakki', op, JSON.stringify(a === undefined ? {} : a)));
+  // the host's refusals carry a code (`NoCapability`, `BudgetStop`, ...): the page gets an Error with `.code` and the code's extra fields
+  const coded = (m) => {
+    m = String(m);
+    const at = m.indexOf('iyakki-error:');
+    if (at >= 0) {
+      try {
+        const j = JSON.parse(m.slice(at + 13));
+        const e = new Error(j.message);
+        for (const k of Object.keys(j)) if (k !== 'message') e[k] = j[k];
+        return e;
+      } catch (x) { /* not ours */ }
+    }
+    return new Error(m);
+  };
+  const call = (op, a) => {
+    let r;
+    try { r = raw('iyakki', op, JSON.stringify(a === undefined ? {} : a)); } catch (e) { throw coded(e && e.message !== undefined ? e.message : e); }
+    return JSON.parse(r);
+  };
   const pending = new Map();
+  const streams = new Map();
   const KEY = /^[A-Za-z0-9._:-]{1,64}$/;
   const key = (k) => need(typeof k === 'string' && KEY.test(k), 'a key is 1 to 64 letters, digits and . _ : -');
   const need = (ok, what) => { if (!ok) throw new TypeError('iyakki: ' + what); };
@@ -39,8 +58,61 @@ const PRELUDE: &str = r#"(function (g) { 'use strict';
     try { r = call(op, a); } catch (e) { reject(e); return; }
     if (r !== null && typeof r === 'object' && typeof r.pending === 'number') pending.set(r.pending, [resolve, reject]); else resolve(r);
   });
+  const ROLES = ['system', 'user', 'assistant'];
+  const opt = (v, t, what) => { if (v !== undefined && v !== null) need(typeof v === t, what + ' must be a ' + t); return v; };
+  // chat({messages, model?, max_tokens?, stream?}) or chat(messages, opts)
+  const chatArgs = (a, o) => {
+    const r = Array.isArray(a) ? Object.assign({}, o || {}, { messages: a }) : Object.assign({}, a || {});
+    need(Array.isArray(r.messages) && r.messages.length >= 1 && r.messages.length <= 64, 'messages is a list of 1 to 64 {role, content}');
+    let n = 0;
+    for (const m of r.messages) {
+      need(m !== null && typeof m === 'object' && ROLES.indexOf(m.role) >= 0, 'a message role is system, user or assistant');
+      n += str(m.content, 'a message content', 100000).length;
+    }
+    need(n <= 100000, 'the messages are longer than 100000 characters in all');
+    if (r.maxTokens !== undefined && r.max_tokens === undefined) r.max_tokens = r.maxTokens;
+    delete r.maxTokens;
+    opt(r.model, 'string', 'model');
+    opt(r.stream, 'boolean', 'stream');
+    if (r.max_tokens !== undefined && r.max_tokens !== null) need(Number.isInteger(r.max_tokens) && r.max_tokens >= 1 && r.max_tokens <= 4096, 'max_tokens is a whole number from 1 to 4096');
+    return r;
+  };
+  const openStream = (r) => {
+    const res = call('llm.stream', r);
+    const on = {};
+    const h = {
+      on: (ev, fn) => { need(['text', 'done', 'error', 'dropped'].indexOf(ev) >= 0, 'events are text, done, error and dropped'); need(typeof fn === 'function', 'a handler must be a function'); (on[ev] = on[ev] || []).push(fn); return h; },
+      off: (ev, fn) => { on[ev] = (on[ev] || []).filter((f) => f !== fn); return h; },
+      cancel: () => { call('llm.cancel', { handle: res.handle }); },
+    };
+    streams.set(res.handle, on);
+    return h;
+  };
+  const say = (text, o) => {
+    o = o === undefined || o === null ? {} : o;
+    need(typeof o === 'object', 'the options are an object');
+    const r = { text: str(text, 'the text', 20000) };
+    for (const k of Object.keys(o)) {
+      need(['voice', 'lang', 'speed'].indexOf(k) >= 0, 'unknown option ' + k);
+      if (o[k] !== undefined) r[k] = o[k];
+    }
+    if (r.voice !== undefined) str(r.voice, 'the voice', 80);
+    if (r.lang !== undefined) str(r.lang, 'the language', 16);
+    if (r.speed !== undefined) need(typeof r.speed === 'number' && r.speed >= 0.7 && r.speed <= 1.5, 'speed is a number from 0.7 to 1.5');
+    return r;
+  };
   const api = {
     app: { info: () => call('app.info') },
+    llm: {
+      chat: (a, o) => { const r = chatArgs(a, o); return r.stream ? openStream(r) : wait('llm.chat', r); },
+      stream: (a, o) => openStream(chatArgs(a, o)),
+      usage: (o) => wait('llm.usage', o === undefined ? {} : o),
+    },
+    models: { list: (o) => wait('models.list', o === undefined ? {} : o) },
+    speech: {
+      say: (text, o) => wait('speech.say', say(text, o)),
+      stop: (id) => wait('speech.stop', id === undefined ? {} : { id }),
+    },
     storage: {
       get: (k) => { key(k); return call('storage.get', { k }); },
       set: (k, v) => { key(k); call('storage.set', { k, v: str(v, 'a value', 65536) }); },
@@ -64,7 +136,16 @@ const PRELUDE: &str = r#"(function (g) { 'use strict';
   };
   const freeze = (o) => { for (const k of Object.keys(o)) if (o[k] && typeof o[k] === 'object') freeze(o[k]); return Object.freeze(o); };
   Object.defineProperty(g, 'iyakki', { value: freeze(api), enumerable: true, writable: false, configurable: false });
-  Object.defineProperty(g, '__iyakkiResolve', { value: (id, ok, v) => { const p = pending.get(id); if (!p) return false; pending.delete(id); (ok ? p[0] : p[1])(ok ? v : new Error(String(v))); return true; }, enumerable: false, writable: false, configurable: false });
+  Object.defineProperty(g, '__iyakkiResolve', { value: (id, ok, v) => { const p = pending.get(id); if (!p) return false; pending.delete(id); (ok ? p[0] : p[1])(ok ? v : coded(v)); return true; }, enumerable: false, writable: false, configurable: false });
+  // events of a stream: the host calls this on the page's next turn, one event at a time
+  Object.defineProperty(g, '__iyakkiEmit', { value: (id, ev, payload) => {
+    const on = streams.get(id);
+    if (!on) return false;
+    const arg = ev === 'error' ? coded('iyakki-error:' + JSON.stringify(payload)) : payload;
+    for (const f of (on[ev] || []).slice()) { try { f(arg); } catch (x) { /* a handler's mistake is its own */ } }
+    if (ev === 'done' || ev === 'error') streams.delete(id);
+    return true;
+  }, enumerable: false, writable: false, configurable: false });
   // no code made from text, in any of its forms
   const blocked = function () { throw new EvalError('this app may not make code from text'); };
   Object.defineProperty(g, 'eval', { value: blocked, writable: false, configurable: false });

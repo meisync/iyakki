@@ -28,8 +28,11 @@ members = [
     "crates/iyakki-drivers",
     "crates/iyakki-flow",
     "crates/iyakki-zram",
+    "crates/iyakki-fw",
     "crates/iyakki-relcheck",
     "crates/iyakki-store-server",
+    "crates/iyakki-stage1",
+    "crates/iyakki-rfb",
 ]
 
 [workspace.package]
@@ -42,6 +45,7 @@ iyakki-sec = { path = "crates/iyakki-sec" }
 iyakki-devctl = { path = "crates/iyakki-devctl" }
 iyakki-web = { path = "crates/iyakki-web" }
 iyakki-webview = { path = "crates/iyakki-webview" }
+iyakki-rfb = { path = "crates/iyakki-rfb" }
 iyakki-js = { path = "crates/iyakki-js" }
 iyakki-vfs = { path = "crates/iyakki-vfs" }
 iyakki-wasm = { path = "crates/iyakki-wasm" }
@@ -57,6 +61,7 @@ iyakki-data = { path = "crates/iyakki-data" }
 iyakki-drivers = { path = "crates/iyakki-drivers" }
 iyakki-flow = { path = "crates/iyakki-flow" }
 iyakki-zram = { path = "crates/iyakki-zram" }
+iyakki-fw = { path = "crates/iyakki-fw" }
 thiserror = "2"
 log = "0.4"
 wasmtime = { version = "*", default-features = false, features = ["runtime", "cranelift", "wat", "std"] }

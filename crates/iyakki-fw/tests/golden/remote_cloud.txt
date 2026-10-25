@@ -1,0 +1,2 @@
+    meta l4proto tcp th dport 8443 accept  # preset: remote desktop / web mode
+    meta l4proto tcp th dport 9443 accept  # preset: remote desktop / web mode (chosen port)

@@ -4,6 +4,7 @@
 //! offscreen. The shell and the helper talk over a Unix socket (framed messages, [`proto`]) and the pixels travel through a
 //! shared file ([`client`]). Nothing here links a web engine, and nothing here has dependencies.
 
+pub mod blit;
 pub mod client;
 pub mod keys;
 pub mod proto;

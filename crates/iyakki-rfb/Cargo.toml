@@ -1,0 +1,14 @@
+[package]
+name = "iyakki-rfb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "IYAKKI's own RFB (VNC) client: the protocol as a state machine without I/O (raw, CopyRect, Hextile, ZRLE with an in-house inflate), and a small threaded link over a Unix socket. No dependencies."
+
+[dependencies]
+
+[dev-dependencies]
+# tests only: makes the zlib streams a real server would send
+miniz_oxide = "0.8"
+# the ignored real-run test starts a sandbox
+iyakki-agent.workspace = true
