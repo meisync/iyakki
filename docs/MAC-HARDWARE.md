@@ -29,12 +29,30 @@ is not stated as fact elsewhere.
 * **Camera on a Mac mini:** no Mac mini has a built-in camera; plug in a USB webcam (UVC, driver `uvcvideo`). Some cheap ones
   need a driver quirk, which IYAKKI applies by itself (section 6, *Mac mini 2018: USB webcam*).
 * **T2 Macs:** the Mac image variant builds t2linux's apple-bce module: the built-in speaker and the headphone jack of a Mac mini
-  2018 played a tone with it (section 6). Not possible on the standard image or with a driver pack.
+  2018 played a tone with it (section 6). Not possible on the standard image or with a driver pack. The T2 speaker has no `dmix`
+  (one program at a time), so IYAKKI never opens it just to test it while a stream is open or a page plays, and the browser's
+  sound doctor reconnects a page whose sound sink did not open (docs/TROUBLESHOOTING.md, Sound).
 * **Apple Silicon:** a separate effort (Asahi-class). Documented only (section 7).
 
 * **Running IYAKKI as a window on macOS (any Mac, no booting):** the code compiles for macOS (`./run.sh check-macos`, compile check only,
   never run on a Mac yet) but everything in this document about drivers, firmware and booting from a stick is Linux-only and does not apply
   to the window: see `MACOS.md` for what works on macOS and what does not.
+
+### What needs firmware on a Mac (plain table)
+
+"Firmware" here means a file the chip is given at start. The licence of every file the image carries is audited in [`FIRMWARE-LICENCES.md`](FIRMWARE-LICENCES.md); Apple's files are never in an image.
+
+| Part | Needs a file? | Which file, and where it comes from | In the image? | Licence |
+|---|---|---|---|---|
+| **Wi-Fi** (MacBookPro14,1: Broadcom BCM4350) | yes | `brcm/brcmfmac4350c2-pcie.bin`, the generic Broadcom blob from linux-firmware (the BCM43602 Macs: `brcmfmac43602-pcie.bin`). Works with it; Apple's board files (`.txt` NVRAM, `.clm_blob`) are optional extras the Mac drivers page fetches from Apple at your click | yes (linux-firmware) | Broadcom's `LICENCE.broadcom_bcm43xx`: redistributable unmodified for Broadcom chips; text in `/usr/share/doc/linux-firmware/` |
+| **Wi-Fi** (T2 Macs: BCM4364 and newer) | yes | `brcmfmac4364b2-pcie.apple,*.bin/.txt/.clm_blob`: Apple's, cut out of Apple's macOS recovery image on your Mac at your click | **no, never** | Apple's |
+| **Bluetooth** (UART chips: MacBookPro14,1 BCM4350C0, Mac mini 2018 BCM4364) | yes: without it the controller (`hci0`) is listed but stays in its ROM state, no valid address | the Broadcom patch file, named `brcm/BCM.hcd` (the only name the kernel asks for on these chips). Source: the single `BCM4350C0*.hcd` / `BCM4364*.hcd` in Apple's macOS image, if macOS has one. **Mac mini 2018: macOS has none (checked), so Bluetooth stays limited there; use a USB adapter (macOS 11 keeps `BCM4364B0` patches as hex files, in two builds: not used, see the setup guide). MacBookPro14,1 (checked 2026-10-23 on real Apple images): there is no `.hcd`, but macOS 11 (11.6 and 11.5.2 recovery images) has the patch as Intel HEX, `IOBluetooth.framework/.../BCM4350-Updater.hex`; the job converts it to `BCM.hcd` (not yet tried on the Mac)** | **no, never** (linux-firmware has no `.hcd` for these chips) | Broadcom/Apple: no redistribution grant |
+| **Bluetooth** (T2 Macs with PCIe Bluetooth) | yes | `brcmbt*.bin` / `.ptb` from the same macOS image | **no, never** | Apple's |
+| **Sound** (CS8409 on MacBookPro13,x/14,x) | no | none: the kernel module `snd-hda-codec-cs8409` (GPL-2.0) drives it | module in the image | GPL-2.0 |
+| **Camera** (FaceTime HD) | yes | `facetimehd/firmware.bin` and sensor files, Apple's, made on your Mac by the Camera firmware job | **no, never** (the driver module is in the image) | Apple's |
+| **Keyboard and trackpad** (`applespi`) | no | none | module in the image | GPL-2.0 |
+
+How you get the files you need: **Store, Setup, Hardware**, card "Mac Wi-Fi and Bluetooth firmware (from your Mac)" (it downloads Apple's recovery image for your model, reads the files out of it with 7-Zip, installs them as a driver pack on your data volume and deletes the image; the IYAKKI menu's Mac drivers page reads them from a folder or stick instead), and the "MacBook FaceTime camera" card next to it. `Settings, Bluetooth` and the Devices popover show "Bluetooth needs firmware: Store → Setup → Hardware" with a Firmware button that jumps to that card whenever a Broadcom controller on a Mac is listed without an address and without the file; a controller with a valid address keeps the normal list. Details and what is verified: [`MAC-WIFI-BLUETOOTH-SETUP.md`](MAC-WIFI-BLUETOOTH-SETUP.md).
 
 ## 2. Why the Debian script cannot be used
 
@@ -164,18 +182,223 @@ The camera of many MacBooks since about 2013 is a PCIe device, Broadcom 1570 ("7
 Linux driver is the community `facetimehd` (`bcwc_pcie`): out of tree, **GPL-2.0**, experimental. It needs a firmware
 file that comes from Apple's macOS driver.
 
-* The standard image cannot use it: no driver. The **Mac image variant** would need a build step that compiles
-  `facetimehd` against the image's kernel (not written yet; section 8).
+* The standard image cannot use it: no driver. The **Mac image variant** builds `facetimehd` (patjak, pinned commit,
+  package `dist/buildroot/package/facetimehd`) with the kernel; it compiled against the 6.12.112 tree without a patch and
+  needs no kernel rebuild (the package also builds the kernel's `videobuf2-dma-sg` module).
+* **Measured** on a MacBookPro14,1 (2017 13-inch, no T2): the camera is PCI `0000:03:00.0`, `14e4:1570`, class `0x0480`; no
+  driver bound, no `/dev/video*`, no camera module loaded.
 * **Firmware.** `patjak/facetimehd-firmware` documents the recipe: the firmware is a gzip stream inside Apple's
   `AppleCameraInterface` file, at a fixed offset, accepted only if the file's SHA-256 is a known build and the result's
-  SHA-256 is a known firmware. Most Macs need firmware 1.43.0 (OS X 10.11.5 driver); the 12-inch MacBooks (MacBook8,1,
-  9,1, 10,1) need 5.60.0 (macOS 10.12.6). IYAKKI implements this in Rust (`crates/iyakki-drivers/src/facetime.rs`).
-  **You supply the file.** The device does not download from Apple: the file Apple serves is a multi-gigabyte update
-  disk image (xar + pbzx + cpio layers) that the upstream tool unpacks with seven helper programs, and IYAKKI has no
-  such unpacker yet. Take `AppleCameraInterface` out of the image on another computer (7-Zip can do it), put it on a
-  USB stick, and give the path in Store, Drivers. Before anything is read, the tile shows Apple's licence situation
-  and you must accept it.
+  SHA-256 is a known firmware. The 2017 MacBooks take 5.60.0 (macOS 10.12.6; 1.43.0 from OS X 10.11.5 for the older ones).
+  IYAKKI implements this in Rust (`crates/iyakki-drivers/src/facetime.rs`, checked against the raw upstream script and
+  Apple's real bytes on 2026-10-22). **The device downloads it** (`iyakki quick-install mac-camera`, `camfw.rs`): three
+  byte ranges (17.6 MB) of Apple's 10.12.6 update from Apple's CDN, not the 1.9 GB image; the files stay on this machine.
+  You can still supply `AppleCameraInterface` yourself in Store, Drivers. Full description and the real-device checklist:
+  [MAC-CAMERA.md](MAC-CAMERA.md).
 * The Mac mini 2014 does not have this camera; the Store does not recommend it there.
+
+### Display: buffer larger than the panel (MacBookPro14,1, 13-inch 2017)
+
+The firmware's screen is 2880x1800 but the panel's only mode is 2560x1600. With i915 the framebuffer can stay at 2880x1800 while
+the display engine shows its top-left 2560x1600, so a shell laid out for 2880x1800 had its right and bottom edges (the **Back**
+button, the clock, the icons) off screen. IYAKKI now reads the active mode and lays out for the **visible** size:
+
+* `dmesg | grep display:` shows one line, for example `display: buffer 2880x1800, visible 2560x1600 (eDP-1 preferred mode)`.
+* Rule: the connected connectors in `/sys/class/drm/card*-*` (those `enabled` when any is) give the preferred mode (first line of
+  `modes`). The built-in panel (eDP, LVDS, DSI) is the one used; with only external screens the smallest. The mode is used only when it
+  fits inside the buffer; otherwise, or when nothing can be read, the buffer size stays. Nothing is rotated.
+* The same buffer is shown on every connected screen, so a larger external screen shows the desktop in its top-left corner.
+* The rest of the buffer is cleared to black. The screen is looked at once a second, so plugging a monitor in or out, or a mode
+  change, starts the display again at the new size. The pointer, F12 screenshots and the remote desktop use the visible size too.
+* If a screen is still cut off, **Esc** goes back in an app and F1 lists the keys (F9 inbox, F10 IYAKKI menu, F12 screenshot);
+  send `dmesg | grep -E "display:|splash:"` and `cat /sys/class/drm/card*-*/{status,modes}`.
+* Not yet confirmed on the real MacBook.
+
+### MacBookPro13,x / 14,x (and 2017-2019 iMacs): sound through the CS8409 driver
+
+Seen on a MacBookPro14,1 (13-inch 2017, not T2) over SSH: sound card 0 `HDA Intel PCH`, codec `Cirrus Logic Generic`, vendor id
+`0x10138409` (CS8409), subsystem id `0x106b3300`, bound to `snd_hda_codec_generic`. The generic driver finds no controls on this
+codec (`amixer` shows only `IEC958` and the mic), so the speakers are silent at 100 %. The kernel's own CS8409 driver is not built in
+this kernel, and would not help: it knows Dell's laptops only; for an Apple subsystem id it picks no fixup.
+
+What the Mac image does about it:
+
+* **Package `snd-hda-macbookpro`** (`dist/buildroot/package/snd-hda-macbookpro`): davidjo's `snd_hda_macbookpro` (GPL-2.0), pinned by
+  commit and sha256. It is not a standalone driver but three diffs against the kernel's `patch_cs8409.c/.h` plus Apple's codec setup
+  (`patch_cirrus_apple.h`: the CS8409 programmed over its vendor node 0x47 for the MAX98706 / SSM3515 / TAS5764L speaker amplifiers,
+  pin sense for the headphone jack). The package copies the three kernel files from the image's own kernel tree, applies the diffs
+  (they apply to 6.12.112 with line offsets only; no source change was needed) and builds `snd-hda-codec-cs8409.ko` into
+  `/lib/modules/<ver>/updates/`. IYAKKI's changes: our own `Kbuild` (the project's Makefile wants `CONFIG_SND_HDA_CODEC_CS8409`) with
+  `-Wno-empty-body` (its debug macros expand to an empty `if` body, an error in kernel builds).
+* **How it is picked.** The module carries the alias `hdaudio:v10138409r*a01*`. When the sound controller creates the codec, the
+  kernel asks `modprobe` for that alias before it falls back to the generic driver, so with a current `modules.dep` nothing else is
+  needed. For a CS8409 whose subsystem id is not Apple's the module returns `-ENODEV` ("UNKNOWN subsystem id") and the generic
+  driver binds as before (Dell laptops are unaffected). The driver knows the subsystem ids `0x106b3300` (MacBookPro13,1 and 14,1),
+  `0x106b3600` (14,2), `0x106b3900` (14,3) and `0x106b0e00`, `0f00`, `1000` (iMac 18,1-18,3, 19,1).
+* **Boot check** (`iyakki-drivers::cs8409`, one call in `late_boot` after the sound drivers had their chance): on a listed model
+  (MacBookPro13,1-3, 14,1-3, iMac18,1-3, iMac19,1) with a CS8409 codec that is not bound to `snd_hda_codec_cs8409`, it loads the module
+  and unbinds and binds the PCI sound controller (the codec itself cannot be re-bound: the kernel keeps its generic choice). The log
+  has one line starting `CS8409 sound:`.
+* **Settings -> Sound** (and the Devices Sound tab) shows `Built-in speakers: This Mac's speakers need the CS8409 driver (not loaded)`
+  with the model when the driver is missing, instead of only an empty mixer.
+* **What works, by the project's own README:** speaker and headphone output (a fixed 44.1 kHz, 24-bit, 4-channel hardware format; other
+  formats and rates work through ALSA's default device, which converts). **What does not:** the microphone (no input is connected), sleep and resume (untested, "everything
+  is permanently powered on"), and the direct hardware devices `hw:0,0` / `plughw:0,0` have no volume control and are very loud: use the
+  default device. IYAKKI's own software volume (Settings -> Sound) applies on top. Only the MAX98706, SSM3515 and TAS5764L amplifiers are
+  programmed; which one the 14,1 has is not known to us.
+* **Not heard yet.** The module was compiled for the 6.12.112 Mac kernel configuration and its alias and dependencies were checked; nothing
+  has been played through it. The project's author tests on 6.8; forks break on 6.17+; 6.12 is untested by us.
+
+Test on the MacBook over SSH (after the next macweb image with the module, or after copying `snd-hda-codec-cs8409.ko` to
+`/lib/modules/$(uname -r)/updates/` and running `depmod -a`):
+
+```
+dmesg | grep -i -E "cs8409|snd_hda_intel|hda-codec"      # the module's own lines start with "cs8409:" (see below)
+cat /proc/asound/card0/codec#0 | head -8                 # Codec line, Vendor Id 0x10138409, Subsystem Id 0x106b3300
+ls -l /sys/bus/hdaudio/devices/hdaudioC0D0/driver        # ... -> snd_hda_codec_cs8409 (not snd_hda_codec_generic)
+amixer -c 0 scontrols                                    # Master / Speaker / Headphone controls now exist
+speaker-test -c 2 -t sine -f 440 -l 1                    # or the radio at a low volume first
+# by hand, if the driver is in /lib/modules but the codec still uses the generic driver:
+modprobe snd-hda-codec-cs8409
+echo 0000:00:1f.3 > /sys/bus/pci/drivers/snd_hda_intel/unbind; sleep 1; echo 0000:00:1f.3 > /sys/bus/pci/drivers/snd_hda_intel/bind
+```
+
+If it prints `UNKNOWN subsystem id` in `dmesg`, send the line: that subsystem id needs adding to the driver.
+
+**First result on the 14,1 (module built, bound, still silent).** `dmesg`: `snd_hda_intel: Primary patch_cs8409`, then
+`autoconfig for CS8409: line_outs=2 (0x24/0x25/...) type:speaker, hp_outs=1 (0x2c), inputs Internal Mic=0x44 Mic=0x3c`. Those are Apple's
+node numbers, but `aplay -l` lists only HDMI 0/1/2, `amixer -c 0 scontrols` only IEC958, `/proc/asound/card0/codec#0` says
+`Codec: Cirrus Logic CS8409` (Apple's code renames the codec `CS8409/CS42L83` once it is through) and Settings -> Sound shows no output.
+Reading the source (no hardware needed): the module's entry point runs the Dell path first, `snd_hda_pick_fixup` finds nothing for
+0x106b3300 (the in-tree table lists Dell ids only), and `fixup_id == HDA_FIXUP_ID_NOT_SET` sends it on to the Apple code
+(`patch_cs8409_apple`). So the Apple branch should run; the unchanged codec name says it did not get as far as renaming the codec, or
+did not run. We could not tell which from the first log. The next build therefore:
+
+* tests the Apple subsystem ids **first** and calls the Apple code directly (`iyakki-apple-ssid-first.diff` in the package, applied after
+  the project's three diffs), so the path no longer depends on the fixup table;
+* logs with `pr_info`, once each: `cs8409: Apple path for SSID 0x106b3300 (PCI SSID ....)`, `cs8409: Apple parse: gen_parse_auto_config=N
+  line_outs= speaker_outs= hp_outs= num_dacs= adcs= no_analog=`, `cs8409: Apple boot setup returned N`, `cs8409: Apple PCM #0 "..." device N`,
+  `cs8409: Apple build_pcms=N, M PCM(s)`, `cs8409: Apple build_controls=N`, `cs8409: Apple path finished with N (chip name now "...")`;
+* builds with the project's own `-DMYSOUNDDEBUG` trace (path dumps, node lists) while this is brought up.
+
+Reading guide: `num_dacs=0` means the generic parser found no output path to a DAC (then there is no playback PCM, and `arecord -l` may
+still list the microphone); `boot setup returned -1` or `UNKNOWN subsystem id` means the amplifier set-up refused the machine; a PCM line
+followed by silence means the amplifier programming (MAX98706 / SSM3515 / TAS5764L over I2C through vendor node 0x47) is the problem.
+Note that by design the Apple path creates **no playback volume controls** (the project's README: "the hardware device has no volume
+control"; the volume is applied by the sound server), so an empty `amixer` list alone is not the failure; the missing analog PCM is.
+
+Manual test sequence for the next image (ssh as root):
+
+```
+uname -r; cat /sys/class/dmi/id/product_name
+dmesg | grep -E "cs8409:|snd_hda_intel|hdaudio|snd_hda_codec" | head -60     # send this whole block
+ls -l /sys/bus/hdaudio/devices/hdaudioC0D0/driver                           # -> snd_hda_codec_cs8409
+head -8 /proc/asound/card0/codec#0                                          # Codec: Cirrus Logic CS8409/CS42L83 if the Apple path completed
+aplay -l; arecord -l                                                        # an analog device 0 next to HDMI 3/7/8
+cat /proc/asound/pcm
+speaker-test -D plughw:0,0 -c 2 -t sine -f 440 -l 1                         # quiet system volume first: hw devices have no volume
+modprobe -r snd_hda_codec_cs8409 2>/dev/null; modprobe snd_hda_codec_cs8409 # only to see the log lines again (re-bind the controller after)
+echo 0000:00:1f.3 > /sys/bus/pci/drivers/snd_hda_intel/unbind; sleep 1; echo 0000:00:1f.3 > /sys/bus/pci/drivers/snd_hda_intel/bind
+```
+
+### MacBookPro14,1: what the CS8409 sound card accepts, and what was measured
+
+Measured by the owner on a MacBookPro14,1 (13-inch 2017, no T2) with the Apple-path CS8409 module. Card 0 `HDA Intel PCH`; its analog
+PCM 0 `CS8409/CS42L83 Analog` appears about 11 s after boot, because the Apple codec setup takes about 8 s (HDMI 0/1/2 are there at once).
+
+| Fact | Result |
+|---|---|
+| `aplay -D hw:0,0 --dump-hw-params file` | ACCESS MMAP_INTERLEAVED RW_INTERLEAVED; FORMAT **S24_LE S32_LE** only; SAMPLE_BITS 32; CHANNELS **[2 4]**; RATE **44100** only; PERIOD_SIZE [8 262144]; PERIODS [2 32] |
+| plain 16-bit stereo to `hw:0,0` | refused (*Sample format non available*) |
+| 4-channel 32-bit 44.1 kHz tones straight to `hw:0,0`, one channel at a time | every channel clearly audible and **loud** ("all tones were nice", "much louder"): the amplifiers and speakers work |
+| `PCM Playback Volume` (numid 33, 0-255, dB scale: 255 = 0.00 dB, 128 = -25.40 dB, 51 = -40.80 dB, 13 = -48.40 dB) | **does nothing**: one tone at 255, 128, 51 and 13 sounded identical. It looks like an attenuator and is a dummy |
+| Settings -> Sound *Test sound* (16 kHz mono chime through a `plug` converter, stereo upmixed to four channels) | audible only with an ear next to the laptop at 100 % |
+| radio on the raw card (no `/etc/asound.conf` written because the card did not exist when the shell started) | *io error*: 16-bit 48 kHz refused |
+| radio after the card came up (4.x build) | loud, but the IYAKKI slider changed nothing (the dummy `PCM` control was moved: `Plan::Hw`) |
+
+What IYAKKI does with this (`soundprobe.rs`, `softvol.rs`, `audioout.rs`):
+
+* **Constraints are asked, not assumed.** For an analog card that is not the T2's, `aplay -D hw:C,D --dump-hw-params /dev/zero` is parsed
+  once per card and the dmix is opened accordingly: S16_LE when supported (then the old text is written, byte for byte), else S32_LE, S24_LE,
+  S24_3LE; 2 channels when supported, else the smallest count; 48000 Hz, or the only rate (44100 here). A card that needs more than two
+  channels gets a `route` plugin (`iyakkifan`) with `ttable` weight **1.0** from left to every even channel and right to every odd one, so every
+  speaker plays the stereo signal at full level (no -6 dB mono mix-down). HDMI, USB and T2 are written as before.
+* **The volume is IYAKKI's softvol.** The CS8409 hardware `PCM` control is ignored (`hw_volume_is_dummy`: the codec file says
+  *Cirrus Logic CS8409*), so `Plan::Mix` with a softvol of -51..0 dB is used; 100 % is 0 dB (nothing is taken away), 5 % of the slider is
+  about 2.55 dB, 20 % is about 41 dB below 100 %, the control has `resolution 256` (steps finer than 0.25 dB). The Test sound, the stereo test
+  and the radio use the same `iyakki` device and the same volume.
+* **Settings -> Sound -> Advanced** (press `A`): *Boost* (0 to +12 dB, per card, for a fixed-gain amplifier that is too quiet; implemented as the softvol
+  range ending above 0 dB, **may distort**: loud peaks are clipped, there is no limiter; it applies from the next sound), *Volume control*
+  (Automatic / Hardware / Software per card), *Does the hardware volume work?* (two quiet tones on the card at 100 % and about 12 %; *y* =
+  the second was quieter, the hardware control is kept; *n* = it does nothing, the software volume is used; the answer is stored for that
+  card, so another machine with a dummy control can be fixed without a code change), *Stereo test* (left 1 s, right 1 s) and, when the chain
+  uses four channels, *Channel walk* (each channel alone, quiet, through `iyakkichan`, which skips the volume).
+* **Late cards.** The watcher compares `/proc/asound/cards` and `/proc/asound/pcm` every 2 s for the first minute after boot and looks at
+  once when they change. A new analog output that wins in Automatic is written to `/etc/asound.conf`, becomes the output (a playing radio restarts
+  its player; streams that are open are not touched) and a toast says *Sound output ready: ...*. While a MacBookPro13/14 or iMac18/19 card with
+  the CS8409 codec shows only HDMI devices, Settings -> Sound says *waiting for the sound card (the built-in speakers of this Mac start up
+  slowly)* for at most 30 s.
+
+* **Why the file was never written on the first real boot.** The shell decided once, at its start (about 2 s), whether the machine
+  has a sound card (`/sys/class/sound/card*`). The Apple CS8409 card registers only after the codec setup, about 11 s after boot,
+  so at 2 s there was none: `start_sound_output` was skipped, no watcher ran, and sign-in (which re-detects hardware for the tiles)
+  never started it either. Now the real front end waits for the first card in `/proc/asound/cards` and installs the sound output
+  then, whoever is signed in. When the card cannot be asked (busy), the measured CS8409 constraints (S32_LE, 44100 Hz, 4 channels)
+  are used; the codec name may be `Cirrus Logic CS8409` or `CS8409/CS42L83`.
+Test on the MacBook (over SSH): `cat /etc/asound.conf` (expect `format S32_LE`, `rate 44100`, `pcm.iyakkimix` with 2 channels, or 4 with `iyakkifan`),
+`amixer -c 0 sget IYAKKI`, `aplay -D iyakki /usr/share/sounds/alsa/Front_Center.wav`, then move the slider (100 % loud, 20 % clearly quieter)
+and try the Advanced rows. Not yet heard on the machine.
+
+### MacBook (2015-2017) and MacBookPro13,x/14,x: keyboard and trackpad on SPI
+
+These models have no USB or I2C keyboard: keyboard and trackpad sit on an SPI bus behind an Intel LPSS controller. The chain of
+drivers is `intel_lpss_pci` (a PCI function; it **creates** the SPI controller as a child platform device `pxa2xx-spi.N`) ->
+`spi_pxa2xx_platform` (alias `platform:pxa2xx-spi`; pulls in `spi_pxa2xx_core`) -> `applespi` (alias `acpi*:APP000D:*`; registers
+`Apple SPI Keyboard`, the backlight `spi::kbd_backlight` and `Apple SPI Touchpad`). Kernel options: `CONFIG_SPI=y`, `SPI_PXA2XX=m`,
+`SPI_PXA2XX_PCI=m`, `KEYBOARD_APPLESPI=m` (`configs/iyakki_mac.fragment`).
+
+Measured on the MacBookPro14,1 (owner, ssh): after boot `lsmod` had `intel_lpss_pci` and `applespi` but no `spi_pxa2xx_*`,
+`/sys/bus/spi/devices` was empty and there was no keyboard or trackpad. Cause: the coldplug read the device aliases once, before
+`intel_lpss_pci` had created the child `pxa2xx-spi.3` (under PCI 0000:00:1e.3), and nothing looked again. After
+`modprobe spi_pxa2xx_platform; modprobe spi_pxa2xx_pci` by hand: `pxa2xx-spi pxa2xx-spi.3: no DMA channels available, using PIO`,
+`input: Apple SPI Keyboard`, `input: Apple SPI Touchpad`, `applespi spi-APP000D:00: modeswitch done.`. (`spi_pxa2xx_pci` has no alias for
+this machine's PCH function; `spi_pxa2xx_platform` is the one that binds.)
+
+What the image does now: (1) the boot's coldplug scans `/sys/devices` again after each batch of drivers (at most 3 extra passes, 3 s;
+F-BOOT-27); (2) on the listed models (MacBook8,1, 9,1, 10,1, MacBookPro12,1, 13,1-3, 14,1-3; DMI product name) the three modules are
+also loaded by name in the order above (`iyakki-drivers::applespi`). Boot log lines: `coldplug: N more device aliases appeared ...` and
+`Apple SPI keyboard: loaded ...`.
+
+* **`Received corrupted packet (invalid message length 8 - num-fingers 0, tp-len 48)`** (3 times at start): from `applespi.c`, the
+  touchpad branch compares the message length with `struct_size(tp, fingers, number_of_fingers)`; a touchpad message of 8 bytes with
+  no fingers (a status message, not a touch report) cannot match the 48 bytes of an empty report and is dropped with a rate-limited
+  warning. Touch reports (the ones with fingers) have the right length and are processed. We take it as harmless when the pointer moves
+  (it is not documented by the driver's author; we could not test it without the hardware).
+* **Function keys.** `applespi`'s own parameter `/sys/module/applespi/parameters/fnmode`: 0 disabled, 1 (default) media keys first
+  ("fkeyslast"), 2 F-keys first ("fkeysfirst"); there is no automatic mode. Settings -> Keyboard writes it like `hid_apple`'s `fnmode`
+  ("Function keys": media = 1, fkeys = 2, auto leaves it); `iso_layout` is written as well. The keyboard light is the LED class
+  `spi::kbd_backlight` (found by the keyboard-light code like `apple::kbd_backlight`).
+* **Trackpad.** `Apple SPI Touchpad` is a multi-touch device: `PROP=5` (pointer + button pad), `KEY` BTN_LEFT, BTN_TOUCH, BTN_TOOL_FINGER to
+  QUINTTAP, `ABS` X, Y, MT slot, touch/width major/minor, orientation, MT position, tracking id. It also *declares* REL_X/REL_Y but the
+  driver never reports relative events (no `input_report_rel` in `applespi.c`): the pointer has to be made from finger positions, and
+  IYAKKI did not do that: its input scan dropped every device with finger tools, so the keyboard worked and the trackpad did not.
+  Now `iyakki-shell::touchpad` handles it: one finger moves the pointer (with acceleration), tap = left click, two-finger tap = right
+  click, two fingers scroll, physical click = left click (right with two fingers or in the bottom-right corner), palm (contact size above
+  half of the axis range) and the first 40 ms ignored. Settings -> Keyboard: "Trackpad tap" and "Trackpad scroll" (natural). Touch
+  screens (`INPUT_PROP_DIRECT`) keep their old handling. Not done: tap-and-drag, three-finger gestures.
+
+Manual test (ssh as root, next image):
+
+```
+lsmod | grep -E "spi_pxa2xx|applespi|intel_lpss"        # all three, spi_pxa2xx_core too
+ls /sys/bus/spi/devices                                  # spi-APP000D:00
+dmesg | grep -E "pxa2xx|applespi|Apple SPI"             # modeswitch done.; no "no DMA" error is expected: PIO is fine
+grep -A8 "Apple SPI" /proc/bus/input/devices            # Keyboard and Touchpad, Handlers=event...
+cat /sys/module/applespi/parameters/fnmode               # 1; after Settings -> Keyboard -> Function keys it follows
+ls /sys/class/leds | grep kbd_backlight                  # spi::kbd_backlight
+journalctl 2>/dev/null | head -0; grep -E "coldplug|Apple SPI" /var/log/iyakki*.log 2>/dev/null | head
+# at the screen: move a finger (pointer moves), tap (click), two-finger tap (right click), two-finger drag (scroll), press the pad
+```
 
 ## 6. T2 Macs
 
@@ -224,11 +447,17 @@ further patches. What IYAKKI does with it:
   Master 30%` after one play, was verified on the Mac mini 2018 (2026-10-18); IYAKKI's own writing of it is unit-tested only. Settings -> Sound picks, in Automatic: headphones in the jack, then a monitor with speakers on
   HDMI/DP, then a USB (then Bluetooth) audio device, then the built-in speaker. Without the module the HDMI behaviour below
   is unchanged.
+* **Sound at shutdown:** `aaudio` plays a 16640-frame ring in a loop until the T2 is told to stop, so a stream left running at power-off or
+  restart repeated its last samples until the machine was really off. Two layers fix it: userland (`iyakki_agent::quiet::quiet_for_shutdown`,
+  called by `boot::power_off` and `boot::reboot`, so every power path) sets the `IYAKKI` volume to 0, ends the owners of open playback
+  substreams (`/proc/asound/card*/pcm*p/sub*/status`), kills the stubborn ones and plays a moment of silence, all within about 2 s; and
+  patch `0004-aaudio-silence-on-shutdown` gives the aaudio PCI driver a `.shutdown` (and first thing in `remove`) that sends stop-IO and zeroes
+  the ring of every started playback stream. Compiles; not yet confirmed on hardware.
 * **The T2's network link:** apple-bce also brings up a USB network device of the T2 itself (`cdc_ncm`, `eth1`, MAC
   `ac:de:48:00:11:22`). It leads into the T2, not to a network; IYAKKI leaves it down and starts no DHCP client on it.
 * **T2 MacBooks:** the keyboard, trackpad and Touch Bar keys are built into the Mac image (not tried yet); see
   "MacBook Pro 2019" below.
-* **Not covered:** custom Touch Bar drawing (appletbdrm + tiny-dfr), fan control on T2 (the t2linux applesmc patches), the
+* **Not covered:** custom Touch Bar drawing through the kernel's appletbdrm (IYAKKI draws it itself from user space instead: [`TOUCH-BAR.md`](TOUCH-BAR.md)), fan control on T2 (the t2linux applesmc patches), the
   `apple-bce` suspend path. Wi-Fi and Bluetooth firmware on these Macs come from macOS.
 
 **Mac mini 2018 (Macmini8,1) on real hardware, 2026-10-18** (image: Mac variant, Linux 6.12.112, booted from the USB stick;
@@ -250,7 +479,30 @@ Buildroot output; the build step is the command above), loading at boot by coldp
 (`Codec Output Jack` read `off` with nothing plugged in), IYAKKI's sound selector on the real card (tested against a copy of
 the card's `/proc/asound` shape), and suspend/resume.
 
-**Bluetooth on the Mac mini 2018 (kernel side starts, the controller stays silent; checked live 2026-10-18).** The BCM4364's
+**Bluetooth on the Mac mini 2018 (newest check, live 2026-10-20: the controller answers and asks for a patch file).** With the same
+kernel options the UART Bluetooth now behaves differently from the 2026-10-18 account below: `hci_uart`/`btbcm` bind `BCM2E7C`, the
+chip **answers** (`BCM4364B0 ... Maui Olympic GEN`, chip id 123, build 0343), the kernel asks for `brcm/BCM.hcd` (not found) and
+reports `failed to write update baudrate (-16)`; `hci0` exists but has **no address** (so no `address` file). What that means:
+the controller is alive and wants its patch-RAM file from macOS (`BCM.hcd`; the macOS script and the Mac drivers page write it
+only when macOS has exactly one BCM4364 `.hcd`). Whether the file is enough to give `hci0` an address is **not verified**; if it
+is not, that is the known limit F-NET-11 and a USB Bluetooth adapter is the fallback. The Mac drivers page installs the file
+(IYAKKI menu, Mac drivers, `MAC-WIFI-BLUETOOTH-SETUP.md`) and reports plainly what the controller does afterwards. Because
+Bluetooth started without the file keeps no address, a T2 Mac now holds `hci_uart`, `hci_bcm4377` and `brcmfmac` back until
+the firmware is installed (`t2hold.rs`, one `blacklist` file written at every boot), which also removes the repeated
+`Direct firmware load ... failed` and `__flush_work` lines.
+
+**Bluetooth on the Mac mini 2018 (measured 2026-10-21: ROM state, no firmware file in macOS).** The BCM4364B0 (chip id 123, build 0343)
+on the UART `serial0-0` (ACPI `BCM2E7C`) is bound by `hci_uart` with `btbcm`. Both macOS recovery images (the latest and the other
+version Apple offers) contain no BCM4364 patch file, and there is no legal source, so none is invented. Loaded anyway the controller
+registers (`BCM: chip id 123`, `Patch file not found: brcm/BCM.hcd`, `failed to write update baudrate (-16)`); `hci0` exists without an
+`address` file. IYAKKI reads it through the kernel's Bluetooth management channel (`iyakki-devctl::btview`): Settings → Bluetooth
+shows the controller, its address (all zero or `AA:AA:AA:AA:AA:AA` is "no valid address"), power, `Power` and `Scan for devices (10 s)`,
+and says "Pairing and audio are not available yet" (they need a Bluetooth stack, docs/BETA-PLAN.md). The drivers wait (renamed to
+`*.ko.iyakki-held`) until a Bluetooth pack is installed or the person presses "Load the Bluetooth driver anyway"; the whole group is
+then given back and loaded `btbcm`, `hci_uart`, `hci_bcm4377`. This Mac's Bluetooth chip has no firmware file in macOS: the controller
+runs in its ROM state (limited); a USB Bluetooth adapter is the reliable option (docs/MAC-WIFI-BLUETOOTH-SETUP.md). F-NET-11, F-NET-12.
+
+**Earlier state (2026-10-18, a silent controller; kept for the record, it no longer describes this Mac).** The BCM4364's
 Bluetooth is on a UART, not USB: ACPI `\_SB_.PCI0.URT0.BLTH` (`BCM2E7C:00`, status 15) on the Intel LPSS UART `0000:00:1e.0`
 (`8086:a328`, `dw-apb-uart.0`, `ttyS0` at `0x4000100000`), powered through Apple's ACPI methods `BTPU`, `BTPD` and `BTLP` (in the
 DSDT, they set a bit in the embedded controller). With the kernel options of `board/iyakki/linux-mac.fragment` the Mac image
@@ -275,7 +527,7 @@ T2 Mac running a distribution kernel (`dmesg | grep -i bluetooth`). To retry wit
 modprobe hci_uart; dmesg | tail` (it takes about 30 s; the first lines show the baudrate command), and
 `/usr/bin/btctl list` (built from `crates/iyakki-devctl/examples/btctl.rs`) lists controllers that came up.
 
-**Installing the patch file (`brcm/BCM.hcd`) and the Wi-Fi firmware:** step-by-step routes, verification lines and rollback are in [`MAC-WIFI-BLUETOOTH-SETUP.md`](MAC-WIFI-BLUETOOTH-SETUP.md). The newest check (see `KNOWN-ISSUES.md`) is that the controller now answers and asks for `brcm/BCM.hcd`; the account above describes the earlier, silent state.
+**Installing the patch file (`brcm/BCM.hcd`) and the Wi-Fi firmware:** step-by-step routes, verification lines and rollback are in [`MAC-WIFI-BLUETOOTH-SETUP.md`](MAC-WIFI-BLUETOOTH-SETUP.md). The newest check (see `KNOWN-ISSUES.md`) is that the controller now answers and asks for `brcm/BCM.hcd`; the account above ("Earlier state") describes the silent state of 2026-10-18.
 
 **Bluetooth software (IYAKKI, no BlueZ).** `iyakki-devctl::btmgmt` is a client for the kernel's management interface (raw HCI
 socket, control channel, root): controller info, power, discoverable/connectable/bondable, scan with names and device kinds,
@@ -311,6 +563,26 @@ above, `scp -O` it to `/tmp`, `modprobe snd-pcm; insmod /tmp/apple-bce.ko`, then
   Settings -> Sound shows `HDMI: <monitor name>` in use automatically, plays on the next port when the monitor moves, and with no
   monitor and no T2 card says *no sound output: connect a monitor with speakers over HDMI/DP or a USB audio device; built-in
   speakers on T2 Macs need the apple-bce driver of the Mac image*. A USB audio device works too (`snd-usb-audio`).
+
+### Thunderbolt networking between two Macs (one cable, developer mode over it)
+
+`iyakki dev usb` (`docs/DEVELOPER-MODE.md`, section 10) uses the kernel's `thunderbolt` and `thunderbolt-net`: two Macs joined by a **Thunderbolt 3 or USB4 cable** get
+a network interface `thunderbolt0` (10 to 20 Gbit/s), take link-local addresses, find each other by a beacon and then pair and deploy like over a LAN. A plain USB-C cable
+does not work (both ports are USB hosts); a charge-only cable shows nothing.
+
+* Which Macs: Thunderbolt 3 is on the Intel Macs of 2016 and later (MacBookPro13,x to 16,x including the MacBookPro16,2, and the 2018 Mac mini Macmini8,1). The Mac mini 2014
+  (Macmini7,1) has Thunderbolt 2 (mini DisplayPort connector); the same driver exists for it, but a Thunderbolt 2 to Thunderbolt 3 pairing needs Apple's adapter and
+  none of this was tried. The images have `CONFIG_USB4=m` since the Mac fragment; `CONFIG_USB4_NET=m` is new and needs a kernel rebuild (a Mac image built before it has no `thunderbolt0`).
+* Check from the Mac's own terminal, in this order: `ls /sys/bus/thunderbolt/devices` (a `domain0` means the controller works), `lsmod | grep thunderbolt`
+  (`thunderbolt` and `thunderbolt_net`), plug the cable in both Macs, `ls /sys/bus/thunderbolt/devices` again (a second entry such as `0-1` is the other Mac),
+  `ip addr show thunderbolt0` (`ip` may not exist: `iyakki dev usb` prints the same facts), then `iyakki dev usb`.
+* Security level: the firmware sets it (`cat /sys/bus/thunderbolt/devices/domain0/security`). Host-to-host links need no approval per the kernel documentation; a dock or drive at
+  level `user` or `secure` does (the page's Authorize button).
+* Unverified, from memory of what t2linux users report, not reproduced here: on T2 Macs the Thunderbolt controller is set up by the firmware and hot-plugging behind it is
+  unreliable; if `domain0` never appears or `thunderbolt0` does not come up, kernel command-line options people try are `thunderbolt.host_reset=false` (do not reset the
+  controller the firmware set up) and, on some models, `pcie_ports=native` or `pci=realloc`. None is set by IYAKKI. Try one at a time on the boot menu entry (`e`) and
+  write down what changed here.
+* Not known for any Mac: whether the Mac's firmware leaves the controller usable for host-to-host links with Linux on both ends, and the real speed.
 
 ### Mac mini 2018 (Macmini8,1): blank screen and flicker at start
 
@@ -409,6 +681,17 @@ has). Why the first version's quirk bind came only after about 120 s is not prov
 bind blocked in the kernel on the camera's 5-second USB timeouts. Now no driver touches the camera before its microphone is off and
 its video is held back, and nothing is retried after `-110`. If the camera stops answering anyway, unplug it and plug it in again.
 
+### MacBook batteries (T2 and 2015 to 2017 models): ACPI PNP0C0A
+
+Every Intel MacBook has an ACPI control-method battery (`PNP0C0A`, a `BAT0` in `/sys/class/power_supply`) and the adapter
+(`ADP1`). The Mac image's kernel had no `CONFIG_ACPI_BATTERY`, so a **MacBookPro16,2 (2020, T2)** showed only `ADP1`
+(`ACPI: AC: AC Adapter [ADP1] (off-line)` in dmesg, `PNP0C0A:00` under `/sys/bus/acpi/devices`, no `BAT0`); the MacBookPro14,1
+(2017) and the other MacBooks will have been the same. `linux.fragment` now sets `CONFIG_ACPI_BATTERY=y` (with `ACPI_AC`,
+`POWER_SUPPLY`, `ACPI_SBS`; the Mac fragment includes it), and the top bar shows the battery, with a clear note on images built
+before. Needs a kernel rebuild of the Mac image; **not tried on a MacBook**. How to check, what is shown and the warnings:
+[`BATTERY.md`](BATTERY.md). `applesmc` and `apple-gmux` do not provide the battery; the Apple Silicon MacBooks use the SMC
+charger driver of the Asahi kernel (`CHARGER_MACSMC`).
+
 ### MacBook Pro 2019 (T2): what the next Mac image carries
 
 Prepared 2026-10-18 for the owner's 2019 MacBook Pro with an i7 and a **Touch Bar** (exact model not known yet). Same Mac image
@@ -438,7 +721,7 @@ the 6.18 branch, main), the kernel sources 6.12.112 and 6.18.56. **Nothing below
 | 16" with 5300M | t2linux fix for "SMU: I'm not done with your previous command" at boot, only for PCI 1002:7340 subsystem 106b:0219 | `0004-drm-amd-pm-fix-boot-of-the-Radeon-Pro-5300M-in-MacBookPro16-1.patch` (16 lines, rebased onto 6.12's code) | applies, compiles |
 | 13" screen | i915 (Coffee Lake GT3); our CDCLK patch 0001 applies to it too (display version 9) | nothing new | — |
 | Wi-Fi | brcmfmac (BCM4364 `14e4:4464`, BCM4377 `14e4:4488`), firmware from macOS | `dist/drivers/mac-wifi-firmware-from-macos.sh` now also copies `C-4377__s-*` and `C-4355__s-*`, writes `.txcap_blob` (was wrongly `.txcb`) and cleans spaces in the NVRAM file | `bash -n`, run on a made-up firmware tree |
-| Bluetooth, BCM4364 | UART, hci_bcm (in the Mac fragment); runs from ROM, no file needed (t2linux); optional single macOS patch file copied as `BCM.hcd` | — | binds and powers on; the controller does not answer yet (section 6) |
+| Bluetooth, BCM4364 | UART, hci_bcm (in the Mac fragment); t2linux says it runs from ROM, but on the Mac mini 2018 the kernel asks for `brcm/BCM.hcd` (the single macOS patch file, copied by the script / the Mac drivers page) | — | binds, the controller answers and asks for `BCM.hcd`; no address yet (section 6, F-NET-11) |
 | Bluetooth, BCM4377 (15,4) | PCIe function `14e4:5fa0`, driver hci_bcm4377 (board `apple,formosa`); needs `brcm/brcmbt4377b3-apple,formosa-<m or u>.bin` and `.ptb` from macOS Monterey or later | `BT_HCIBCM4377=m`; the macOS script copies and renames them (Asahi/t2linux naming) | kconfig, compiles |
 | Store | `mac-wifi-brcmfmac` matches BCM4364/4377/4355 and accepts `.txcap_blob`; `mac-bt-broadcom` matches `14e4:5fa0` and accepts `brcmbt*.bin`/`.ptb`; folder patterns with a `*` in the middle (`brcmfmac*.bin`) now match (before, they matched only the literal name, so the Wi-Fi folder install found nothing) | `crates/iyakki-drivers` | unit tests |
 
@@ -449,9 +732,10 @@ Settings or by the Store's keyboard pack.
 
 **Documented only (not in the build):**
 
-* **Touch Bar drawing** (appletbdrm, `DRM_APPLETBDRM`, and tiny-dfr in userspace): not needed for the keyboard mode; the
-  T2 draws the keys itself. Would need a 520-line DRM driver backport plus a vsprintf FOURCC change, and tiny-dfr (Rust,
-  Cairo/librsvg) in the image.
+* **Touch Bar drawing through the kernel** (appletbdrm, `DRM_APPLETBDRM`, and tiny-dfr): not carried. IYAKKI drives the display from
+  user space instead (usbfs, its own protocol code written from the description of `appletbdrm.c`, no code copied): see
+  [`TOUCH-BAR.md`](TOUCH-BAR.md). The touch panel of the bar needs the Apple Touch Bar class of `hid-multitouch` (kernel 6.18, not
+  6.12), which is not carried either, so the strip is display only for now.
 * **Switching the 15"/16" panel to the Intel GPU** (t2linux `2009-apple-gmux-allow-switching-to-igpu-at-probe` plus the
   apple-set-os EFI loader so the firmware leaves the iGPU on; and `2008-i915-4-lane-quirk-for-mbp15-1`): not done, amdgpu
   drives the panel. The t2linux state page lists AMD GPUs as partially working: changing resolution can crash them;
@@ -513,6 +797,50 @@ Boot IYAKKI:
 Send back: the output of 4, 5, 9, 11, 12 and what worked in 6-8 and 10.
 ```
 
+### MacBookPro16,2 (13-inch 2020, T2, Touch ID, Touch Bar): measured 2026-10-23
+
+Booted from the stick with the remote-diagnostics entry on the owner's Mac (Intel i5, board `Mac-5F9802EFE386AA28`, kernel 6.12.112).
+Everything below was read on the machine unless it says otherwise.
+
+| Part | State | Why |
+|---|---|---|
+| Keyboard | Works once `hid-apple` is loaded | apple-bce's virtual USB host offers `05ac:027e` (keyboard and trackpad, interfaces 1.0, 1.1, 1.3, 1.4 are HID). `hid-generic` leaves these ids to `hid-apple`, which nothing loaded: the coldplug scan stopped 8 levels below `/sys/devices` and the HID device is 10 down; BusyBox `mdev` has no rule that loads a module on hot plug. Fixed in the source (depth 16, `hotplug.rs`); needs an image rebuild |
+| Trackpad | Pointer works (owner) with `bcm5974` loaded | Interface 1.2 (boot mouse class) has no other driver; the carried patch 0003 knows `0x027e`. Each short 8-byte report makes `bcm5974` print `bad trackpad package, length: 8` at its debug level (58 lines at registration, 156 after a few minutes of use); `echo 0 > /sys/module/bcm5974/parameters/debug` stopped them at once, and `options bcm5974 debug=0` is written at every boot on a T2 Mac. Not checked: tap, two-finger scroll, gestures, palm rejection; no use of `hid-multitouch` (it is in the image but the pad's multi-touch data is on the bcm5974 endpoint, not on a HID interface: hidraw7 and hidraw8 are vendor-defined 64-byte and 107-byte reports of the keyboard controller) |
+| Touch Bar keys | Works after a retry (seen once) | `hid-appletb-bl` gave `appletb_backlight`. The Touch Bar (`05ac:8302`) fails its USB configuration at boot (`can't set config #1, error -110`), so there is nothing for `hid-appletb-kbd` to bind. Writing 2 and then 1 to `bConfigurationValue` later configured it and `Apple Inc. Touch Bar Display` appeared with `hid-appletb-kbd` (key mode: Esc, F-keys or media keys, drawn by the T2). After a failed write the device stayed unconfigured (every further write timed out) until a restart. The boot now tries again in the background with a careful sequence (`iyakki_drivers::touchbar::bring_up`: 2 then 1, then one reset of that device and one more write after waits, at most three rounds, [`TOUCH-BAR.md`](TOUCH-BAR.md) section 7) |
+| Touch Bar drawing | Written, not yet run on the device | `appletbdrm` is not in the 6.12 kernel and `tiny-dfr` is not shipped; IYAKKI draws a strip itself through usbfs ([`TOUCH-BAR.md`](TOUCH-BAR.md)): fakes only, display only (touch needs a later kernel's `hid-multitouch`) |
+| Touch ID | Not available | The fingerprint sensor is behind the T2's Secure Enclave; there is no Linux driver and no way to reach it |
+| Camera | Works | `uvcvideo` on `05ac:8514` |
+| Ethernet adapter (USB, `0bda:8153`) | Worked when present at boot; not when plugged in later | Reproduced: unauthorize, unload the drivers and authorize again gave no driver and no `eth0`; after `modprobe r8153_ecm` the interface existed but stayed down with no address (nothing brings a new interface up). Fixed in the source (`hotplug.rs`, `net::bring_up_new`) |
+| Sound | The sound test works, radio and TALES were silent | Card 0 is `Apple T2 Audio` (Speaker device 0, Codec Output 2, Bridge Loopback 4), card 1 the HDMI. The device takes only S24_LE (32 bits), 4 channels, 48000 Hz and a period of one frame (buffer 16640). The sound test plays through `plughw:0,0`, which converts and works. The volume file used `plug > softvol > plughw` after `dmix` failed to play (it underruns on one-frame periods), and `aplay` on that chain fails with `Unable to install hw params`; `plug > softvol > hw` plays (card showed S24_LE, 4 channels, 48000, RUNNING). Fixed in the source (`softvol::Plan::Direct`); the radio now quotes the player's own message |
+| Wi-Fi | Works with Apple's files | The chip is BCM4364 stepping B3 (PCI `14e4:4464`), board `apple,trinidad`; brcmfmac asks for `brcm/brcmfmac4364b3-pcie.apple,trinidad-HRPN-u-7.7-X0.bin` and the shorter names after it. Apple's recovery image for this board (macOS 15.4.1) has them in `wifi/C-4364__s-B3/` (`trinidad.trx` is a link to `borneo.trx`). The job's code, run on the real image folder, wrote the set and with it `modprobe brcmfmac` gave `wlan0` (firmware 9.30.514.0.32.5.94, TxCap blob loaded) and a scan found 46 networks. Not associated with an access point |
+| Bluetooth | `hci0` exists, no address yet | BCM4364B3 (chip id 150) on the Intel UART (`hci_uart_bcm`), asks for `brcm/BCM.hcd`. macOS 15 has no patch for it; macOS 11 has `BCM4364B3ID2-Updater.hex` and `BCM4364B3ID3-Updater.hex` (and a minidriver) and which one this chip needs is not known, so the job does not pick one |
+
+**T2 sound: what really works (measured on a MacBookPro16,2, kernel 6.12.112).** `hw:0,0` takes only S24_LE (32-bit containers), 4 channels, 48000 Hz,
+one-frame periods (buffer 16640 frames). Through `default` (`plug > softvol > hw:0,0`) a 3 s tone took: 44.1 kHz 3.1 s and 48 kHz 3.3 s (right), but 24 kHz
+2.0 s, 32 kHz 2.3 s, 16 kHz 1.2 s and 12 kHz 1.1 s (wrong speed: the voice "parrot" bug), and `alsasink` with 32-bit float at 44.1 kHz fails
+(`Unable to set hw params`, which also stops Vorbis/Ogg playback in GStreamer). With a period of one frame ALSA's `plug`/`rate` layers cannot
+size their periods, so the cure is in two places. (1) **Web engine**: when the sound output is the T2's, `/etc/asound.conf` also defines `iyakkiweb`
+(`softvol.rs`, `linear` over `route` over the same softvol: it never converts the rate and offers integer formats only), and the engine's
+processes get `ALSA_CONFIG_PATH=<data>/web-profile/web-alsa.conf` (the system configuration, then `pcm.!default iyakkiweb`), so GStreamer's own
+`audioresample`/`audioconvert` do the conversion. Measured with `ALSA_CONFIG_PATH` by hand: wav at 24000/44100/48000, Opus/WebM and Vorbis/Ogg all
+played 3.0 s without errors. (2) **Driver, patch 0003** (`dist/buildroot/package/apple-bce`): the PCM advertises periods of 256 frames up to a
+quarter of the ring (the ring is the whole buffer, the periods divide it) instead of one frame (`apple-bce.one_frame_period=1` brings the old
+behaviour back), the unfreed backup buffer of `aaudio_pcm_start` is freed, and **capture streams are refused unless
+`/sys/module/apple_bce/parameters/capture` is 1**. It compiles against the image's kernel; it has not run on a Mac yet.
+**Never capture from this card** (`arecord -D hw:0,4`, the "Bridge Loopback", or the codec input and the digital mic) **while playing**: on one MacBookPro16,2
+that hung the shell and the computer reset (no log survived). The Voice tile hides the T2 card's inputs for that reason (`voicedesk::t2_card_numbers`) and says the
+built-in microphone is not supported yet; use a USB microphone. The web engine keeps the sound device open (PREPARED) while a page has a media element,
+which blocks the radio, the voice and the sound test (`Resource busy`): when the sound watcher finds the device busy it asks idle web processes (device
+not RUNNING) to let go (`audioout::release_idle_web`; the page reloads), a playing page is never touched.
+
+**The firmware job.** The owner's run ended with `chunk 1 of 85 does not match Apple's chunk list (at byte 0)`. With the current code the same request (board `Mac-5F9802EFE386AA28`, `os=default`, zero serial part) returned product 696-28424, 884,317,790 bytes, 85 chunks of 10 MiB; the first chunk matched, and the whole image downloaded in 90 seconds and verified (ignored tests `live_first_chunk_of_the_real_image_matches_apple_chunk_list` and `live_whole_image_downloads_and_verifies`, run by hand). So the failure is not in the protocol or the chunk list. What could still produce it is a part of another image on the volume (resumed and appended) or a damaged write; the job now removes a part whose marker names another image, fetches the whole image again once when the check fails, and says what the file starts with (text from the server or bytes). The Wi-Fi set is chosen by model: `MacBookPro16,2` takes only `trinidad` of chip 4364.
+
+**What needs a rebuild.** Only IYAKKI itself (core: `hotplug.rs`, scan depth, `t2input`, `net`; agent: `softvol`, `radio`, `macrecovery`; drivers: `appfw`, `macboard`). **No kernel change:** `hid-apple`, `bcm5974`, `hid-appletb-bl`, `hid-appletb-kbd`, `hid-multitouch` and `uhid` are already modules in the image's `/lib/modules/6.12.112/kernel/drivers/hid` and `input/mouse`; nothing in `linux-mac.fragment` changes and no out-of-tree module is needed.
+
+### MacBookPro14,1 (13-inch 2017, no T2): Wi-Fi board files and Bluetooth patch
+
+Read from the real machine on 2026-10-21: `board_name` `Mac-B4831CEBD52A0C4C`, Wi-Fi PCIe BCM4350 (stepping C2, `brcmfmac4350c2-pcie`; the generic `.bin` from linux-firmware loads and `wlan0` exists; the NVRAM `.txt` and the `.clm_blob` are missing), Bluetooth BCM4350C0 on a UART (`hci_uart_bcm`, asks only for `brcm/BCM.hcd`, `hci0` in ROM state). It has no T2 chip, so the T2 hold-back does not apply to it. Measured on 2026-10-23 (real Apple images, see the setup guide "Where the BCM4350 files really are"): the image Apple sends for this board's own id (macOS 13) has **neither** the Wi-Fi extra files **nor** a Bluetooth patch, and no macOS recovery image of any version has Wi-Fi extra files for the BCM4350 (**so Wi-Fi stays on the generic linux-firmware blob: fewer channels and country settings, no way around it from Apple's recovery service**). The Bluetooth patch exists only in the macOS 11 recovery images, as `BCM4350-Updater.hex` (Intel HEX). So the Mac drivers page asks Apple for the macOS 11 image instead (about 640 MB, kept on the data volume until installed; a retry never downloads it twice), converts the hex to `brcm/BCM.hcd` in Rust, installs it as the driver pack `mac-bt-broadcom` and reloads `hci_uart`. If Apple's macOS versions ever stop serving a file, the job says so plainly: Wi-Fi with the generic firmware, Bluetooth through a USB adapter. What is and is not verified: [`MAC-WIFI-BLUETOOTH-SETUP.md`](MAC-WIFI-BLUETOOTH-SETUP.md), section "Macs without a T2 chip".
+
 ## 7. Apple Silicon (aarch64): VM works today; bare metal planned for M1/M2/M3 only
 
 Apple Silicon Macs are not supported by the standard `aarch64` image on the bare metal; it targets generic UEFI ARM64 machines and VMs,
@@ -555,9 +883,14 @@ has not been run through kconfig (it needs the kernel source). Treat the first b
 
 ## 9. Driver packs in the Store
 
-**From the top bar.** The IYAKKI menu (click the name IYAKKI, or F10) has a **Mac drivers** page: Wi-Fi firmware (run
-`dist/drivers/mac-wifi-firmware-from-macos.sh` on the Mac's own macOS, then STORE, Drivers, Install from folder or USB), T2 audio,
-Bluetooth and the USB camera as the Devices reader sees them (status only), and a button to STORE, Drivers.
+**From the top bar.** The IYAKKI menu (click the name IYAKKI, or F10) has a **Mac drivers** page: Wi-Fi, T2 audio, Bluetooth and
+the USB camera as the Devices reader sees them, the notice that Apple's files are never shipped, and the install buttons for a T2
+Mac's Wi-Fi and Bluetooth firmware: **Download from Apple** (the recovery image of this Mac's model, read with 7-Zip), **From a
+folder or stick** (the macOS script's output or a copy of `usr/share/firmware`), **From a disk image**, **Copy the prompt for
+Claude/Copilot**, and STORE, Drivers. The code: `iyakki-drivers::appfw` (the Rust twin of the macOS script), `macboard` (model to
+board id), `t2hold` (the hold-back), `iyakki-agent::macrecovery` (Apple's recovery protocol) and `macfw` (the job); the guide with
+what is verified is `MAC-WIFI-BLUETOOTH-SETUP.md`. The two packs it writes are the Store entries `mac-wifi-brcmfmac` and
+`mac-bt-broadcom` (`pack.json`, linked at every boot).
 
 A driver pack is an `extension` package with `ext_kind: driver` and `target: system` (docs/STORE.md section 12). Payload:
 
@@ -612,9 +945,9 @@ A driver pack is an `extension` package with `ext_kind: driver` and `target: sys
 | Entry | Standard image | Status |
 |---|---|---|
 | `mac-gpu-intel` Intel graphics | works with the standard image | information |
-| `mac-wifi-brcmfmac` Broadcom Wi-Fi firmware (BCM43602-class) | works after installing the pack (you supply the firmware, or use the `hw`/`mac` image) | folder |
+| `mac-wifi-brcmfmac` Broadcom Wi-Fi firmware (BCM43602-class; T2 Macs BCM4364/BCM4377) | works after installing the pack (you supply the firmware, or use the `hw`/`mac` image; on T2 Macs the Mac drivers page downloads or reads Apple's) | folder, Mac drivers page |
 | `mac-wifi-bcm4360` BCM4360 (Mac mini 2014) | works with a locally built non-free driver pack (you build `wl`, never shipped) | folder (a signed `.iyp` from the folder or USB stick) |
-| `mac-bt-broadcom` Bluetooth firmware | works after installing the pack (you supply the `.hcd`) | folder |
+| `mac-bt-broadcom` Bluetooth firmware | works after installing the pack (you supply the `.hcd`; on T2 Macs the Mac drivers page brings it) | folder, Mac drivers page |
 | `mac-facetimehd` FaceTime HD camera | needs the Mac image variant (and the build step for the driver), plus your Apple file | extract |
 | `mac-t2` T2 Macs | needs the Mac image variant (apple-bce: built-in speaker, headphone jack; MacBook keyboard, trackpad, Touch Bar keys; section 6) | information |
 | `mac-fan-sensors` fan and sensors | needs the Mac image variant | information |
@@ -679,9 +1012,9 @@ What was done (all on paper-measured sizes; nothing rebuilt or booted on a Mac y
 | Step | Effect | Where |
 |---|---|---|
 | Firmware kept to what Macs need | `/lib/firmware` 357 MB to 45 MB (385 files); compressed in the cpio 74 MB to 8 MB; the initramfs 119 MB to about 64 MB. Estimated GRUB wait ~20 s to ~11 s | `board/iyakki/mac-firmware.keep` (the one list), `prune-firmware.sh`, called by `post-build.sh` for `mac` and `macweb` only; a test keeps the required files matched |
-| A message under the logo | "Loading IYAKKI from USB. Please wait 30 seconds to 1 minute: the screen stays on this logo, then the boot animation starts." printed by every entry before GRUB reads the kernel | `grub.cfg` (function `iyakki_loading`) |
+| A message under the logo | "Loading IYAKKI... (this takes a few seconds; from a USB stick on a Mac up to 30 seconds)" and "The screen stays on this logo until the boot animation starts." printed by every entry before GRUB reads the kernel | `grub.cfg` (function `iyakki_loading`) |
 
-Kept: i915 (skl, kbl, cml, icl), amdgpu (Tonga, Polaris, Vega, Navi 10/12/14/21/23, Southern Islands) and radeon, brcmfmac PCIe (BCM43602, BCM4350) and brcmsmac, tg3, Realtek Ethernet, MT7612U, MT7921AU (with its Bluetooth), MT7601U, AR9271/AR7010, AR9170, RT2870-family and the RTL8761B Bluetooth dongles. Dropped: iwlwifi and Intel Bluetooth, ath10k/ath12k, rtw88/rtw89/rtlwifi, bnx2/bnx2x/ice/e100, Marvell, Broadcom SDIO and Cypress, other GPUs. A Mac with a dropped card uses the `hw` image or a driver pack. The `hw` image is unchanged (a PC may have any of those cards); the same list approach could trim it too, but its audience is unknown, so that is the owner's call.
+Kept: i915 (skl, kbl, cml, icl), amdgpu (Tonga, Polaris, Vega, Navi 10/12/14/21/23, Southern Islands) and radeon, brcmfmac PCIe (BCM43602, BCM4350) and brcmsmac, Realtek USB Ethernet (RTL8153/RTL8156), MT7612U, MT7921AU (with its Bluetooth), MT7601U, AR9271/AR7010, the old AR9170 files, RT2870-family and the RTL8761B Bluetooth dongles. Dropped: iwlwifi and Intel Bluetooth, ath10k/ath12k, rtw88/rtw89/rtlwifi, bnx2/bnx2x/ice/e100, Marvell, Broadcom SDIO and Cypress, other GPUs. **Since 2026-10-23 the Tigon3 files (`tigon/*`, the BCM57766 of the Mac mini 2014), the PCIe Realtek files (`rtl_nic/rtl81xx`, `rtl8125*`: a dock with an RTL8111/RTL8125) and `carl9170-1.fw` are no longer in any image** (policy: when in doubt it is not shipped; `RESTRICTED-FIRMWARE.md`). The Mac mini 2014 keeps working over Ethernet: tg3 starts without its file, with Energy-Efficient Ethernet off on the BCM57766 (from the driver's behaviour; not checked on a device). Install the "Broadcom Tigon3 network firmware" or "Realtek network firmware" tile in Store, Setup, Hardware to add them. A Mac with a dropped card uses the `hw` image or a driver pack. The `hw` image is unchanged (a PC may have any of those cards); the same list approach could trim it too, but its audience is unknown, so that is the owner's call.
 
 **Compression.** zstd -19 versus xz -9e on the trimmed cpio (241 MB): 64.2 MB versus 57.6 MB. Decompression on one core, measured on a Ryzen 9 7940HS: zstd 0.4 s, xz 1.4 s (an i7 is roughly 2 to 3 times slower: ~1 s versus ~3-4 s). xz saves 6.6 MB, about 1.1 s of USB reading, and costs about 2 s more decompression, so no gain: zstd stays.
 
@@ -730,13 +1063,16 @@ stick.
 |---|---|---|
 | Linux kernel and its drivers (i915, tg3, btusb, hid_apple, applesmc, snd-hda, brcmfmac, ...) | GPL-2.0 | yes, in the image |
 | `facetimehd` (`bcwc_pcie`) | GPL-2.0, out of tree | only in a future Mac image build, never as a pack the device compiles |
-| linux-firmware blobs (brcmfmac43602, i915, tigon, ...) | redistributable, not open source (see LICENSING.md) | only in `hw` and `mac` |
+| linux-firmware blobs (brcmfmac43602, i915, ...) | redistributable, not open source (see LICENSING.md); the doubtful ones (tigon, PCIe Realtek, carl9170, Qualcomm `LICENSE.qcom` Bluetooth) are not shipped: `RESTRICTED-FIRMWARE.md` | only in `hw` and `mac` |
 | Broadcom Bluetooth `.hcd` files | Broadcom's; no redistribution grant known | **no**: you supply |
+| Apple's Wi-Fi and Bluetooth firmware for T2 Macs (`brcmfmac4364b2-pcie.apple,*`, `BCM.hcd`, `brcmbt*`) | Apple's; no redistribution | **no, never**: copied or downloaded to your machine at your request (the Mac drivers page), never uploaded, not in any image |
+| 7-Zip (`7zz`, reads Apple's recovery image) | GNU LGPL with the unRAR restriction (7-zip.org) | **no**: the project's own static build is downloaded to the data folder when you ask (CLI list entry `7zip`) |
 | Broadcom `wl` (broadcom-sta) | proprietary with a binary-only component | **no**, never: `dist/drivers/build-wl-pack.sh` downloads it from Broadcom and builds it on the owner's PC for the owner's machine; `dist/drivers/out/` and `*.ko` are in `.gitignore` |
 | Debian's kernel-compatibility patches for broadcom-sta | downloaded at build time (pinned checksum), not stored in this repository | **no** |
 | Apple's camera firmware | Apple's licence | **no**: extracted on your machine from your file |
 | apple-bce (t2linux, out-of-tree module) and IYAKKI's two patches to it | GPL-2.0 (`MODULE_LICENSE("GPL")`; kernel code, source in `legal-info/`) | only in the Mac image variant (`package/apple-bce`) |
 | Kernel patches 0002-0004 of the Mac variant: Touch Bar drivers hid-appletb-kbd/-bl (upstream Linux v6.18 files; Ronald Tschalär, Kerem Karabay, Aditya Garg), bcm5974 T2 trackpad (t2linux, Aun-Ali Zaidi), Radeon Pro 5300M fix (t2linux, Atharva Tiwari) | GPL-2.0 (kernel code; source in `legal-info/` with the kernel) | only in the Mac image variant; source URL and commit in each patch header |
+| snd_hda_macbookpro (davidjo; the kernel's `patch_cs8409` with Apple's CS8409 setup, out-of-tree module `snd-hda-codec-cs8409`) | GPL-2.0 (`MODULE_LICENSE("GPL")`; source in `legal-info/`) | only in the Mac image variant (`package/snd-hda-macbookpro`); no firmware |
 | other t2linux kernel patches (appletbdrm, T2 applesmc, gmux switching, hid-magicmouse trackpad, ...) | GPL-2.0 | no |
 | This repository's driver packs and tables | Apache-2.0 | yes |
 
@@ -763,6 +1099,7 @@ Said plainly so nobody builds on it by accident.
   ("Broadcom 1570").
 * The list of T2 product names (`MacBookPro15,*`, `16,*`, `MacBookAir8,*`, `9,*`, `iMac20,*`, `iMacPro1,1`, `Macmini8,1`,
   `MacPro7,1`) is from general knowledge of which models have the T2, not from Apple's list in this session.
+* MacBookPro14,1 (section 6, non-T2 Wi-Fi/Bluetooth files): opened on 2026-10-23: no recovery image has `wifi/C-4350__s-C2/` (so the `PlatformConfig.plist` question is moot for this chip), and the Bluetooth patch is only in the macOS 11 images as `BCM4350-Updater.hex`. Still open: that the BCM4350C0 of the real Mac accepts the `.hcd` built from it (commands in the setup guide).
 * The Bluetooth USB id match `05ac:82*` is a guess at the family; the Mac mini's `05ac:8289` is verified.
 * Thunderbolt 2 behaviour, the EFI quirks in section 4, and whether the image boots on the Mac at all: not tested.
 * The Mac image variant has not been run through kconfig or built; the option names are for 6.12.
@@ -774,3 +1111,8 @@ Said plainly so nobody builds on it by accident.
 * `modprobe -r` of a driver that something still uses fails; the pack then reports it and the driver loads at the next
   restart.
 * Nothing in this document was tried on a Mac. Section 10 is how to find out.
+* The on-device Apple firmware path (Mac drivers page, `MAC-WIFI-BLUETOOTH-SETUP.md`): the protocol client, the extractor and the
+  job are tested with fakes only. Not verified on a real Mac: Apple's service answering the request, 7-Zip reading the recovery
+  image and finding `usr/share/firmware` in it, the Bluetooth file names in macOS, the board ids other than the Mac mini 2018's
+  (`macboard.rs`), the 7-Zip download from its GitHub release (no checksum is published), and whether `BCM.hcd` gives the
+  BCM4364 an address (F-NET-11).

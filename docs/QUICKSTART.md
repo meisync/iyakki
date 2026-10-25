@@ -15,7 +15,7 @@ Steps 5 and 7 need extra software (podman or docker, a local k3s, a speech engin
 Run `./run.sh window`. On first launch the setup screen asks for an administrator name and a password (8+ characters,
 twice). Press Tab between fields and Enter to continue.
 
-**Expected:** the launcher with a grid of tiles and chips (All, Assistant, Web & Media, Work, System). The first sign-in
+**Expected:** the launcher with a grid of tiles and chips (Home, Web & Media, Work, System, and any group you make with the **+** chip; `m` moves the selected tile to another group). The first sign-in
 of an administrator adds a few samples (an MCP server, documents, skills). `F1` explains any screen; `o` signs out.
 
 ## 2. Connect a model

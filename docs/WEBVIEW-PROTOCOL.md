@@ -94,6 +94,7 @@ The helper may receive any shell message at any time after Hello, including befo
 | 0x0F | Ack | `u8 slot` |
 | 0x10 | Quit | (empty) |
 | 0x11 | Script | `u32 id`, `u32 timeout_ms`, `str js` (protocol 1.1) |
+| 0x12 | LeaveFullscreen | (empty; optional, protocol 1.1) |
 
 **Hello.** `version` is the protocol version (1; a helper that does not know it exits with status 2 after writing a line to
 stderr). `w`,`h`: the size of the picture in *device pixels* (the size of the page area on the shell's screen). `scale_pct`: the
@@ -115,7 +116,9 @@ replaces the load. Other schemes are not sent.
 
 **Resize.** Make the picture `w` x `h` device pixels (same scale factor). The helper then draws frames of the new size (the next
 Frame carries the new `w`,`h` and a rectangle covering the whole picture). Frames of the old size may still arrive for a short time;
-the shell copes. `w`,`h` >= 1 and <= max_w,max_h.
+the shell copes. With "Smooth pages" on (Settings -> Browser) the shell sends **half** of the page area's width and height here and halves the
+**Zoom** it sends, so the page keeps its layout (the engine's device scale ends up at half), and stretches the picture 2x on its own
+screen; nothing in the protocol changed for it, and a helper need not know. Pointer positions then arrive in the picture's own pixels. `w`,`h` >= 1 and <= max_w,max_h.
 
 **Mouse.** Position `x`,`y` in *device pixels relative to the top-left of the picture* (may be negative or beyond the size during a
 drag that left the area; the helper clamps only if its engine requires it). `kind` 0 = pointer moved (also sent while a button is held:
@@ -126,7 +129,9 @@ for double and triple click (or count itself). The shell sends a move to the pre
 
 **Wheel.** Pointer position as in Mouse. `dx`,`dy` are in 1/120 of a wheel notch: 120 is one notch. `dy > 0` scrolls the page down
 (content moves up, like `deltaY > 0` in DOM `wheel` events); `dx > 0` scrolls to the right. The helper turns one notch into what a
-normal wheel does in its engine (3 lines, about 53 CSS px in WPE).
+normal wheel does in its engine (3 lines, about 53 CSS px in WPE). The shell's smooth scrolling sends many small `Wheel` messages with
+fractions of a notch (a few units each, at up to 60 a second) instead of whole notches; the helper must apply each one as a
+pixel-precise (smooth) axis event of `units * 53 / 120` pixels and must not round it to a notch or ease it again. No new field is needed.
 
 **Key.** One key press (`down` true) or release (false). `keysym` is an X11 keysym (section 8). `mods` modifier bits. `text`: the text the key
 types, UTF-8 (empty for keys that type nothing, such as arrows, function keys, and every key with Ctrl or Alt held; "\r" for Return, "\t"
@@ -159,6 +164,10 @@ converted to JSON text (`undefined` and `null` become `null`; a string becomes a
 skips it (section 2) and the shell's own timeout ends the wait, so the protocol version stays 1: the shell only needs Script
 for the assistant's tab. The shell never logs script text (it may carry a typed secret); a helper must not either. Screenshots need
 no message: the shell keeps the latest Frame.
+
+**LeaveFullscreen** (optional). The person pressed Esc while the page is fullscreen: ask the page to leave (WPE:
+`wpe_view_backend_dispatch_request_exit_fullscreen`, plus `document.exitFullscreen()`). The helper answers with **Fullscreen**(false)
+when the page has left; the shell keeps showing the page fullscreen until then. Ignored when not fullscreen. A helper that does not know it skips it.
 
 ## 5. Pixels: the shared file and the frame handshake
 
@@ -207,6 +216,8 @@ composites it into the same buffers (GStreamer), so nothing special is needed. U
 | 0x8A | Log | `str line` |
 | 0x8B | Clipboard | `str text` |
 | 0x8C | ScriptResult | `u32 id`, `bool ok`, `str json` (protocol 1.1) |
+| 0x8D | Fullscreen | `bool on` (optional, protocol 1.1) |
+| 0x8E | AudioPlaying | `bool on` (optional, protocol 1.1) |
 
 * **Ready**: engine name and version for "about" displays (`WPE WebKit` `2.46.3`). Sent once, after Hello.
 * **Title**: the document title; sent when it changes (an empty title is sent as empty).
@@ -219,6 +230,17 @@ composites it into the same buffers (GStreamer), so nothing special is needed. U
 * **Download**: the page started a download (`Content-Disposition: attachment`, an unsupported type, a user click on a download link). The helper
   **cancels** the download and reports `url` (the address to fetch) and `name` (the suggested file name; empty if unknown). The shell's own
   download code decides whether to fetch and where to save (account policy, folder, never overwrite). The helper never writes the file.
+* **AudioPlaying** (optional): the page started (`on` true) or stopped (false) playing audio (WPE: `notify::is-playing-audio`,
+  `webkit_web_view_is_playing_audio`); sent on changes only. The shell's sound doctor compares it with the playback streams of the engine's
+  processes and, when the page is loud but none runs for about 3 s, sends **Script** that pauses and plays the playing media elements again
+  (so the engine creates its audio sink again); no new request message is needed. A helper that never sends it just gets no doctor. Old shells skip the type (section 2).
+  The helper should let GStreamer errors and warnings reach its standard error (`GST_DEBUG=*:1,alsasink:4,autoaudiosink:4` unless set), which the shell logs.
+* **Fullscreen**: the page entered (`on` true) or left (false) DOM fullscreen (a player's button, the F key, `requestFullscreen()`, leaving
+  by Esc, by navigating or by closing). The helper **must** install the engine's fullscreen hook (WPE: `wpe_view_backend_set_fullscreen_handler`),
+  because without one the engine fails the request and the page drops back out at once. While on, the shell shows the page over its whole
+  pane (no tabs, bars or status line) and sends **Resize** for that size; when off it restores its layout and sends **Resize** again. The
+  helper sends it on every change only (not repeated) and **refuses** the request (the page stays as it was, no message) when it cannot
+  honour it, for example while the tab is hidden. Hiding the tab (SetVisible false) ends fullscreen. An older shell skips the message.
 * **Crashed**: the *engine* inside the helper failed (the web process crashed) but the helper is alive and has started recovering (for
   example reloading). The shell shows `reason` and goes on. If the helper cannot recover it should exit instead.
 * **Log**: a diagnostic line (kept by the shell for diagnosis; not shown to the person).

@@ -30,10 +30,11 @@
 |---|---|---|
 | **Try it in 10 minutes** (Linux desktop) | `./run.sh window` (needs the Rust toolchain; first run asks you to create the administrator) | [`docs/INSTALL.md`](docs/INSTALL.md#1-window-mode-linux), then [`docs/QUICKSTART.md`](docs/QUICKSTART.md) |
 | **Boot it on a PC from a USB stick** | `cargo build --release -p iyakki-usb`, then `sudo target/release/iyakki-usb --install iyakki-install-x86_64.img` (pick the drive, type its name to confirm; **the stick is erased**); turn Secure Boot off | [`docs/INSTALL.md`](docs/INSTALL.md#2-usb-stick) |
+| **Install next to Windows or Linux, or on partitions you choose** | Boot the stick and pick *IYAKKI - Install to a disk* (or `sudo target/release/iyakki-usb --plan IMAGE`, or the `iyakki-installer` window): free space only, chosen partitions, or custom sizes; a plan table and a confirmation screen (Install button; a plan that erases data needs a ticked box too) come first; existing filesystems are never shrunk | [`docs/INSTALLER.md`](docs/INSTALLER.md) |
 | **Run it in a virtual machine** | `./run.sh build` once (30-40 min), then `./run.sh vm` or `./run.sh vm-disk` (QEMU) | [`docs/INSTALL.md`](docs/INSTALL.md#4-virtual-machine) |
 | **Serve it in a browser / on Kubernetes** | `iyakki web`, or `kubectl apply -f dist/k3s-web.yaml` | [`docs/ADMIN-GUIDE.md`](docs/ADMIN-GUIDE.md#network-exposure) |
 
-Chat needs a model: **SETTINGS -> Models** (Ollama, OpenAI-compatible, OpenAI, OpenRouter, Anthropic, Gemini). Something wrong?
+Linux programs (Debian or Ubuntu with `apt`) run in a sandbox: **IYAKKI menu -> Linux apps** (`docs/LINUX-APPS.md`; downloaded at your click, nothing shipped; alpha, untried on a device). Chat needs a model: **SETTINGS -> Models** (Ollama, OpenAI-compatible, OpenAI, OpenRouter, Anthropic, Gemini; or the GPU of a Mac or another computer on your network: *Mac / GPU host*, `docs/MAC-MODEL-HOST.md`). Something wrong?
 [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) and [`docs/FAQ.md`](docs/FAQ.md).
 
 **All documentation** is listed in [`docs/INDEX.md`](docs/INDEX.md): start here ([`INSTALL`](docs/INSTALL.md),
@@ -79,7 +80,7 @@ After signing in you get a launcher with tiles. Each tile is an app, locked or u
 
 **Look.** Every app shares one futuristic design language (dark glass cards, a cyan/magenta neon palette, an accent colour per app, small animated highlights only; set `IYAKKI_REDUCED_MOTION=1` to freeze them): the pieces live in `crates/iyakki-shell/src/fx.rs` and are described in `docs/DESIGN.md`.
 
-**Launcher groups.** The tiles are sorted into named groups shown as chips under the title: *All*, *Assistant* (CHAT, RAG, MCP, RUNS, SKILLS), *Web & Media* (BROWSER, RADIO, MEDIA, TALES), *Work* (CLI, EDIT, AI IDE, CALENDAR, DATA, DASH) and *System* (USERS, SETTINGS, NET SCAN, MESH, USAGE, SYSTEM, SRE PILOT, STORE); a group with nothing for your role is hidden. Click a chip or press Tab / Shift+Tab to switch; IYAKKI remembers your last group. When a group has more tiles than fit the window (it depends on the window and text size) the rest continue on the next page: PageUp/PageDown, the mouse wheel, the dots and arrows at the bottom, or simply arrow past the last tile. The number keys 1-9 still open the Nth app of the *All* list from any group.
+**Launcher groups.** The tiles are sorted into four named groups shown as chips under the title: *Home* (CHAT, RAG, MCP, CLI, SETTINGS, SKILLS, CALENDAR, AI IDE, TALES, VOICE), *Web & Media* (BROWSER, RADIO, MEDIA, CAMERA), *Work* (EDIT, RUNS, SRE PILOT, DATA, DASH, FLOWS) and *System* (USERS, NET SCAN, MESH, USAGE, SYSTEM, STORE, K8S), plus any groups you make yourself (the **+** chip; up to 12, names up to 16 characters). A group with nothing for your role is hidden (one of yours stays, empty, until you fill or delete it). Click a chip or press Tab / Shift+Tab to switch; IYAKKI remembers your last group. **Move a tile** with `m` (a list of groups and *New group…*), a right-click on the tile, or *Pick up* and a click on a chip; a notice offers *Undo* (`u`), and *Reset layout* puts everything back. A Store app whose app.json names a group goes there, or asks once whether to create it. The layout is yours alone and changes only where a tile is listed, never what an app may do. When a group has more tiles than fit the window the rest continue on the next page: PageUp/PageDown, the mouse wheel, the dots and arrows at the bottom, or simply arrow past the last tile. The number keys 1-9 open the Nth app of the fixed tile order from any group, wherever you moved it.
 
 | Tile | What it is |
 |---|---|
@@ -104,6 +105,9 @@ After signing in you get a launcher with tiles. Each tile is an app, locked or u
 | **AI IDE** | One workspace per product: editor, terminal, feature board, Browser tab, Kubernetes view and approved Deploy flow |
 | **DATA** | Open CSV/TSV/JSON-lines tables of any size, sort, filter, summarise, export |
 | **TALES** | AI story teller: a conversation beside the story, automatic pictures, versions, reads aloud |
+| **VOICE** | Read pasted text aloud with Kokoro or any set-up voice (voice, speed, lit sentence, where the text goes), and dictate: record, speech to text, copy the transcript. Plus quiet system sounds for sign-in and sign-out |
+| **K8S** | Pick a cluster (the managed dev k3s, or a saved kubeconfig profile) and a namespace and explore it: pods, deployments, services, events, nodes and more, YAML (Secret values masked), related objects and pod logs. Read-only until an administrator turns on Allow changes ([`docs/K8S-TILE.md`](docs/K8S-TILE.md)) |
+| **DISKS** | See every drive, mount and unmount partitions, eject USB drives and SD cards safely, and (administrators, behind Advanced) change partitions with name, size and serial confirmations; the system drive is never touched; only fakes tested so far ([docs/DISKS.md](docs/DISKS.md)) |
 | **STORE** | Find, install and remove skills, tools, MCP servers, themes, driver packs; every app wears a trust badge; a Store switcher and your own private store |
 | **DASH** | Dashboards over Prometheus, Elasticsearch/OpenSearch, ClickHouse and DuckDB, read-only, with an assistant |
 | **FLOWS** | Design, schedule and watch workflows; the assistant examines failed runs and proposes fixes you approve |
@@ -405,7 +409,7 @@ Two different relationships with Kubernetes are worth keeping apart:
 **The desktop in a browser.** A container or a cloud machine has no screen, so IYAKKI serves its desktop to a web browser
 instead: `iyakki web` (or `iyakki serve --web`, the environment `IYAKKI_WEB=1`, or the boot option `iyakki.web=1`) starts an
 HTTPS and WebSocket server written for IYAKKI, people sign in with the accounts of the machine, and the browser shows
-their own shell on a canvas (only the changed part of the picture is sent) and sends keys, mouse and paste back. Every
+their own shell on a canvas (only the changed tiles are sent, coded to suit the content, with a quality level that follows the speed of the link, a data saver and touch support for phones; `docs/REMOTE-PROTOCOL.md`) and sends keys, mouse and paste back. Every
 tile works at once because the browser only sees pixels, and the same role limits apply. With no screen there is no
 first-run setup, so create the first account from the command line:
 
@@ -437,14 +441,21 @@ The full, grouped map is [`docs/INDEX.md`](docs/INDEX.md). The core files:
 | [`docs/MACOS.md`](docs/MACOS.md) | IYAKKI on a Mac: the window, Ollama on the Mac, and a VM |
 | [`docs/MAC-HARDWARE.md`](docs/MAC-HARDWARE.md) | IYAKKI on Mac hardware: what works per model, driver packs in the Store, the Mac image variant, the Mac mini 2014 test checklist |
 | [`docs/MEDIA-SEARCH.md`](docs/MEDIA-SEARCH.md) | The media catalog index, the search grammar, downloads, and keeping credentials in vaults |
+| [`docs/BATTERY.md`](docs/BATTERY.md) | Laptop battery and charging: the top-bar indicator and popup, warnings and the clean shutdown at the critical level, where the data comes from, the kernel options (rebuild needed), what is not supported yet |
+| [`docs/KEYBOARD-AND-FN-KEYS.md`](docs/KEYBOARD-AND-FN-KEYS.md) | Volume, brightness, keyboard light, media, WiFi and power keys with the on-screen bar; Apple Fn-key mode and key repeat in Settings, Keyboard; per-machine notes, key codes, known gaps (Touch Bar display, DDC/CI), real-device checklist |
+| [`docs/MULTI-DISPLAY.md`](docs/MULTI-DISPLAY.md) | Layouts (50:50, 30:70, 2x2 ... panes with several apps at once), the keys, the memory gate, and the design and test plan for several displays |
+| [`docs/CLOUD-MODE.md`](docs/CLOUD-MODE.md) | Cloud mode: for servers, cloud VMs and remote-desktop-only machines, hides the tiles, Settings pages, Devices rows and keys that need a local screen, speakers or camera; Automatic / On / Off, `iyakki.mode=cloud` |
 | [`docs/MEDIA-PLAYER.md`](docs/MEDIA-PLAYER.md) | IYAKKI's own video and sound player (ffmpeg decodes), installing ffmpeg, controls, what the image options do |
 | [`docs/STORY.md`](docs/STORY.md) | The TALES story teller: the prompt and its safety rules, reading aloud, the library, and what the image needs for speech |
 | [`docs/VOICE.md`](docs/VOICE.md) | Reading aloud with no setup: the speech engines found on the computer, the browser voice and the voice helper, what is GPL and not shipped, bare-metal options |
 | [`docs/CLI-SSH.md`](docs/CLI-SSH.md) | The SSH client in the CLI tile: host keys, vault keys, saved connections, rules for the assistant |
 | [`docs/JOBS.md`](docs/JOBS.md) | Detached jobs: long commands that outlive the chat, the Jobs strip, `job_start` for the assistant and Claude Code |
 | [`docs/PLATFORM-SERVICES.md`](docs/PLATFORM-SERVICES.md) | Gitea and the private store deployed into a k3s cluster you pick, with an approved plan |
+| [`docs/SHARED-FOLDERS.md`](docs/SHARED-FOLDERS.md) | Share a folder over HTTP on the local network (files or a website), secret link or password, off by default, read-only by default |
+| [`docs/FIREWALL.md`](docs/FIREWALL.md) | Incoming connections blocked by default; allow by host name, IP, range or network, presets, a 60-second Keep so a wrong rule cannot lock you out |
 | [`docs/STORE.md`](docs/STORE.md) · [`docs/APP-AUTHORING.md`](docs/APP-AUTHORING.md) | Signed packages, the private store, several stores and the portal; making and publishing apps |
 | [`docs/ZRAM-AND-INSTALL.md`](docs/ZRAM-AND-INSTALL.md) · [`docs/HARDWARE.md`](docs/HARDWARE.md) | Compressed swap and the on-device installer; which machines run it |
+| [`docs/INSTALLER.md`](docs/INSTALLER.md) | Install next to another system: free space, chosen partitions, dual boot, the plan file, boot-menu install mode, the window installer, recovery |
 | [`docs/OWNER-CHECKLIST.md`](docs/OWNER-CHECKLIST.md) · [`ALPHA-GATE.md`](ALPHA-GATE.md) | What the owner must do before tagging; the release gate with evidence |
 | [`docs/DASHBOARD.md`](docs/DASHBOARD.md) | The DASH tile: connectors, the security model, how to add a connector, why DuckDB runs as a command |
 
@@ -572,7 +583,7 @@ audio, UVC cameras, TPM, watchdog, RTC and VM guest drivers. Ethernet and a WiFi
 ## Status
 
 Everything listed in `FEATURES.md` as *done* has unit tests; the file is checked by a test, so a row cannot claim a
-test that does not exist. At the time of writing: **286 features done, 204 partial, 59 planned**.
+test that does not exist. At the time of writing: **311 features done, 301 partial, 65 planned**.
 
 **Verified in this repo**
 * `cargo test --workspace` (3,845 tests passed on 2026-10-18), licence audit for both workspaces (`cargo deny`), the third-party licence file
@@ -582,7 +593,7 @@ test that does not exist. At the time of writing: **286 features done, 204 parti
   (`dist/buildroot/qemu-test.sh`, `qemu-persist-test.sh`). Power-on to the sign-in screen: about 1.6 s in QEMU
   (`dist/buildroot/boot-time.py`).
 * On real hardware (one machine, a Mac mini 2018, Macmini8,1, T2, 2026-10-18/19): booting the install image from a USB SSD, persistent
-  `/home`, HDMI and built-in audio, a USB webcam, the k3s dev cluster and Quick install, Claude Code and Copilot CLI sign-in, and the full web
+  `/home`, HDMI and built-in audio, a USB webcam, the k3s dev cluster and Store → Setup (formerly Quick install), Claude Code and Copilot CLI sign-in, and the full web
   engine opening Google and YouTube (VP9 video plays).
 * Last full `cargo test --workspace` (2026-10-18): 3,845 passed, 0 failed, 59 ignored; a final run precedes the tag.
 * Against the real services: Ollama (list, chat, pulling a model, and installing and starting the real server), all eleven CLI

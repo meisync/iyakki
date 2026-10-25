@@ -1,6 +1,6 @@
 # TALES: stories that are read aloud
 
-The TALES tile (launcher group *Web & Media*) writes a story on a topic you give it and reads it to you. The model is the one
+The TALES tile (launcher group *Home*; you can move it to another group with `m`) writes a story on a topic you give it and reads it to you. The model is the one
 CHAT uses unless you choose another one inside TALES (see *Choosing the model*); the voice is the speech engine of Settings → Voice. Both are optional in the sense that matters: with no speech
 engine the story is still written, shown and saved as text, and the page says exactly how to turn reading on.
 
@@ -170,6 +170,77 @@ type Lemonade gives them, so TALES draws with them like any other picture model;
 a model → *Use as TALES picture model* chooses one directly. They are asked at their own size (SD-Turbo 512x512) and the answer is
 checked like every picture (magic bytes, a real decode). Lemonade has **no video models**, so *Allow short video clips* never gets a
 clip from it.
+
+### Illustrations by the picture model: how many, and when
+
+Options → Pictures has a chip **Pictures: every chapter / cover only / ask me each time** (click to cycle; *Pictures off* is the
+"none" choice). It is chosen before Send and kept with the story and in the remembered options (`story::StoryOptions::coverage`,
+logic in `agent/src/storyillus.rs`).
+
+* **every chapter** draws one picture per chapter or scene (at most six, as before); **cover only** draws the first scene only; **ask me
+  each time** writes the story, shows the pictures as waiting, and starts nothing until you press **Make the pictures** (or **No pictures**
+  to keep the text only). The conversation says how many pictures it would draw and the honest time (below).
+* **The prompt.** The story's own model first writes a short visual brief for the scene (at most 50 words, no real people or brands, only the
+  story text) and, once per story, a one-line **setting note** (kept as `setting.txt` beside `character.json`). The prompt sent to the
+  picture model is: the one style line of the story, the brief, the character sheet, the setting note, "no text, no letters, no watermark", and
+  the audience's safety words. If the story model cannot write the brief, the scene text is used; the picture is never lost to that step.
+* **Not selected or not ready (never an error).** With no picture model the Options text says "No picture model is selected ... Add or select one
+  in Settings → Models" and the story gets drawings as before. A Lemonade picture model that is not downloaded says "Install first:
+  Settings → Models → Lemonade → Download". While the machine has too little free memory for the model (its list size and a half again;
+  4 GB when unknown; a model already loaded is not refused) no picture job starts: the pictures show the reason and **Try again** when memory is free.
+* **Progress and cancel.** While pictures are made the toolbar shows **Cancel pictures n/m**; the waiting ones are not started, the one being made
+  is dropped when it returns, the text and finished pictures stay.
+* **Each picture** has **Draw again** (or **Try again**) and **Delete**. They are shown in the reader and in Export as before.
+* **Kept with the story:** `pics/NN.png` and `pics/index.json` with, for each, the prompt, the model name (`source`, "images via flux"), the size
+  as read from the file (`8x8`, `512x512`), the style and the time.
+* **Caps.** Per story 24 MB of pictures and over all stories 512 MB (`storyillus::check_caps`; the global figure is read from the disk with
+  `StoryStore::pictures_bytes`); over a cap the picture is not kept and says why; one picture is at most 8 MB and 36 million pixels as before.
+* **Timing text.** The Options text gives the model's own size and steps from Lemonade's list ("SD-Turbo draws 512x512 pictures in 4 steps")
+  and then an estimate that says it is one ("Estimate, not measured: about 40 seconds each on this CPU"); it is a rule of thumb from steps and pixels, not a measurement.
+### Look, quality, model, variants and the picture log
+
+All of these are in Options → Pictures, remembered per story (`Stories/<id>/picture-options.json`) and as the default for new stories
+(`storyillus::PictureOpts`, inside `StoryOptions::pic`). Stories saved before they existed open with the old defaults.
+
+* **Realistic pictures (photo style, people look real)** is a checkbox at the top, off by default. Ticked, it makes the Photorealistic style the
+  style (added to the others when more than one is ticked; unticking brings the old styles back) and, for that style, takes the most
+  realistic **installed** model of any provider (FLUX / Z-Image / Qwen-Image style, then SDXL Base, then SDXL Turbo, then SD-Turbo; a model on
+  another computer before this one; never one that is not downloaded; the story's own model choice still wins). People of the story are
+  written in photo words from the character sheet ("Candid photograph of ..., shot on a 35 mm lens, natural light, shallow depth of
+  field"). Beside it: "Uses SDXL-Base-1.0 on <provider>", or, with only a small model, "Only SD-Turbo is installed: pictures will stay
+  painterly; install SDXL-Base-1.0 on the GPU server for realism" and an **Install** button (the same download as Settings → Models, with progress).
+* **Styles to draw** (tick any; at least one stays): storybook illustration (the look of every earlier story), watercolor, photorealistic,
+  cinematic, anime, pencil sketch. Each has a style line (and a short one for SD-Turbo) and a negative prompt (`Look::phrase`, `Look::negative`). The
+  Lemonade images API is **not known to take `negative_prompt`** (`API_TAKES_NEGATIVE_PROMPT` is false), so the words to avoid go into the prompt as
+  "Avoid: ..." when there is room. Prompts are capped by model family (SD-Turbo 230 characters, SDXL 330, other 500, FLUX style 900) and the story
+  model is asked for a shorter brief for small models.
+* **Quality** (as selected / Fast / Balanced / Best) picks the model among the installed ones (smallest, middle, largest that fits the memory; on a
+  tie the other computer) and its steps and size inside what the model supports: an SDXL Base model gets 12 steps at up to 768 (Fast), 22 (Balanced)
+  and 32 (Best) at up to 1024; a Turbo model keeps its own 1 to 4 steps and never gets guidance; the photo style asks other models for guidance 6
+  (`cfg_scale`; the model list shows it as a default, whether the images call takes it is not verified). Size, steps and the time (labelled an
+  estimate) are shown. **Model for this story** lists every picture model of every provider with its provider, installed or not, size, size and
+  steps; the models that are not installed have an **Install** button.
+* **Seed:** a new random seed for every picture, or **Same look for all pictures** (one story seed, kept with the story). The seed is sent as `seed`.
+* **Several variants.** With more than one style ticked, or **Pictures per style** 2 or 3, every scene (or the cover only) is drawn once per style and
+  picture: the main pictures first, then the extra ones scene by scene. One seed family per scene (every style starts from the same seed, the further
+  pictures of a style from others). Under each scene a **gallery** shows the main picture (outlined) and the others with style, model and time; click one to make it the
+  main one (reader, cover and export use the main one), **x** deletes one, **Draw another in <style>** adds one, **Keep only the chosen** removes the rest. Export
+  uses the main pictures; *Page with every picture variant* adds the others under their style names. Variants are kept as `pics/NN-vK.png` with their style,
+  seed, model, provider, size and time in `pics/index.json` (old indexes without these keys open with one picture as main). All variants count for the caps; at the cap the
+  rest of the job stops and says so, nothing is removed.
+  Before a multi-picture job starts, its total is shown ("3 scenes x 2 styles x 2 each = 12 pictures, about 8 minutes (an estimate)") and, over about 2 minutes, **Make the pictures / No pictures** asks first.
+* **Before a picture call** TALES asks the server live whether the model is downloaded; if not it makes no call, says "SDXL-Base-1.0 is not downloaded on <provider> (6.9 GB)" and
+  offers **Install**; when the download finishes the waiting pictures are drawn. While a call runs the page shows the seconds so far, the server state (`GET /health`, every 5 s),
+  "the model is loading or generating; on a CPU this can take minutes" and Cancel; after the **Time limit per picture** (default 15 minutes, in Options) it stops and says so (the server may still be working; the late answer is only logged).
+  Memory: the free-memory guard applies only to a model on this computer, and the message suggests SD-Turbo-GGUF or a GPU server.
+* **Picture log** (button **Picture log (g)**, key `g`): one JSON line per event in `Stories/<id>/pictures.jsonl` (the older `pictures.log` is kept as it was; 1 MB a file, the newest
+  three files kept; `piclog.rs`). Per request: time, story and scene, provider, model, size, steps, guidance, seed, style, picture of the style, realistic on or off, the exact prompt and negative prompt (and how
+  the negative went), call time, HTTP status, the server's error text, attempt (retries), bytes, whether the picture was a valid PNG/JPEG/WebP, the reason for an SVG fallback; and the decisions: skipped for low memory, not kept (cap),
+  cancelled, not downloaded, pull started/finished/failed, waiting n s with the server state, timeout. **Verbose** (off by default) adds the request line and headers (secrets replaced by `***`, the key is never written)
+  and the server health (loaded models, `backend_url`); response headers are not available (the transport returns status and body). The window scrolls (keys and wheel), has **Copy log** (the whole text) and **Clear log** (asks twice). The log stays on this computer and holds your story text.
+
+* Not verified: a real picture model, real timings, and how the chip and the toolbar look on a real screen (tests use a fake image server
+  that returns an 8x8 PNG; no network).
 
 ## Choosing the model
 

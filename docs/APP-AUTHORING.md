@@ -73,12 +73,15 @@ If you ask the assistant for "a calculator app for iyakki", this is what it buil
 
 ```json
 {"id": "calc", "name": "Calculator", "version": "1.0.0", "icon": "🧮", "group": "My apps",
- "capabilities": {"storage": true, "network": ["api.example.com"], "clipboard": false, "notifications": false, "files": false, "agent": false}}
+ "capabilities": {"storage": true, "network": ["api.example.com"], "clipboard": false, "notifications": false, "files": false, "agent": false, "llm": false, "speech": false}}
 ```
 
 `id` is the package name and the app's private origin (`https://tile-<id>.iyakki.invalid/`); `icon` is one emoji or a small `.png`/`.svg` in the app (the
-launcher tile shows the first letter of the name in the app's colour, the icon appears in the info panel); `group` is a home screen section (Home, Web & Media,
-Work, System; "Assistant" means Home) or anything else, which puts the tile in **Work**. Everything is off unless declared. `vault` and `js-eval` are refused by name.
+launcher tile shows the first letter of the name in the app's colour, the icon appears in the info panel); `group` is a home screen group: one of the built-in four (Home, Web & Media,
+Work, System; "Assistant" means Home) or a group the person made, matched in any capitals; leave it out for **Work**. A name that matches no group is not created
+silently: the first time the person sees the app they are asked *This app wants to be in the group “X”. Create it?* (**Create** / **Put it in Work**, remembered
+per app and per name; names are 1 to 16 characters, so a longer one falls back to Work). If the person moves the tile themselves, their choice wins over `group`
+on updates, and moving never changes the app's permissions. `tile_ship` and the other publishing tools do not change. Everything is off unless declared. `vault` and `js-eval` are refused by name.
 
 **What the page can draw.** The reader engine's layout: text, headings, lists, tables, boxes, colours and sizes from CSS, simple flex rows, real form controls.
 There is no canvas, and plain elements take no clicks: use `<button>`, `<input>`, `<select>` (a click moves to the next choice), `<textarea>`, checkboxes and `<a>`.
@@ -96,8 +99,20 @@ Use a table for a keypad. `localStorage` exists but lives only while the app is 
 | `iyakki.clipboard.read()`, `write(text)` | `clipboard` | promises; each asks the person |
 | `iyakki.notify.show(title, body)` | `notifications` | a note in the person's inbox (5 per run) |
 | `iyakki.agent.ask(question)` | `agent` | a promise; the person sees the question and must allow it **every time**; the assistant gets only the question |
+| `iyakki.llm.chat({messages, model?, max_tokens?, stream?})` (or `chat(messages, options)`) | `llm` | a promise `{text, usage: {input, output, estimated}, model}`: a bare model of the person's choice, no tools, no files, no memory. The person is asked **once per app** (the card names the provider and whether text leaves the computer) and can take it back. Messages: 1 to 64, roles `system`/`user`/`assistant`, 100000 characters in all; `max_tokens` 1 to 4096 (default 1024); 20 calls a minute; 60 seconds. With `stream: true` it returns the handle of `llm.stream` |
+| `iyakki.llm.stream(messages, options)` | `llm` | a handle `{on(event, fn), off, cancel()}`; events `text` `{text}`, `done` (the reply), `error` (an Error with `.code`), `dropped`; delivered on the page's next turn, at most 50 waiting; one stream at a time |
+| `iyakki.llm.usage({since?})` | `llm` | a promise with **this app's own** numbers: `today`, `range`, `limits`, `remaining`, `resetsAt`, `byDay`. Money is never claimed (`priced: false`) |
+| `iyakki.models.list({kind?})` | `llm` | a promise `[{id, label, kind, where: 'this computer'|'network'|'internet', free}]`; never the provider, its address or its key |
+| `iyakki.speech.say(text, {voice?, lang?, speed?})`, `iyakki.speech.stop(id?)` | `speech` | read text aloud with the person's voice settings (20000 characters, 30 an hour, speed 0.7 to 1.5); resolves `{id}` when the sound starts; asked once, with the line that says where the text goes; `Busy` (with `.holder`) when the speaker cannot be shared |
 
 Calls without the capability throw with the words "this app did not ask for …"; the refusals are listed in Info. At most four requests wait for the person at once.
+
+**Errors of `llm`, `models` and `speech`** have a stable `.code` (docs/development/SDK-API.md, section 3): `NoCapability`, `Denied` (the person said no, or did not answer in 120 s),
+`BadArgument` (`.field`), `QuotaExceeded` (`.limit`), `BudgetStop` (`.resets_at`: the app used its daily tokens; the person sets the limit in Info, never the app), `Unavailable` (`.fix`:
+no model or voice set up), `Busy` (`.holder`), `Timeout`, `Blocked`, `Failed`. A model that is not on this computer has a default limit of 200000 tokens a day; one that is has none.
+Every call is written to the usage log with the app's id, its outcome and its time (never what was said); Info shows "Today: N calls, K tokens". The headless tests run these calls
+against fakes: `T.fake.llm.reply('text')`, `.fail('Unavailable')`, `.usage(in, out)`, `T.fake.models.set([...])`, `T.fake.speech.busy('the radio')`, `.said()`, `T.fake.approve('allow'|'deny'|'ask')`,
+`T.fake.budget.set({tokensPerDay})`, `T.fake.clock.advance(ms)`, `T.fake.notify.sent()`; `T.test(name, async () => {...})` may return a promise. Arguments, capabilities, quotas and codes are the real ones.
 
 **Security.** The app's origin is its own, so it shares nothing with a site, the shell or another app (each person's saved data is separate too). Its page gets the
 standard web modules and the bridge, nothing else: no vault, no other tile, no `file:` address. Its network is **only the hosts it declared that the person's host policy

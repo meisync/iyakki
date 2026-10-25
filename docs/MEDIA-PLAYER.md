@@ -6,7 +6,7 @@ sound itself and uses **`ffmpeg` only as a decoder**.
 
 ## Using it
 
-1. **Install ffmpeg once.** IYAKKI menu (F10) -> Quick install -> *Media* -> **Media player (ffmpeg)**, or IYAKKI menu ->
+1. **Install ffmpeg once.** Store -> Setup -> *Media tools* -> **Media player (ffmpeg)** (also reachable from the IYAKKI menu, F10 -> Quick install, which opens it), or IYAKKI menu ->
    Media player -> **Install the media player**, or the CLI tile (`ffmpeg`). It downloads a static build from
    johnvansickle.com, checks it against the MD5 file the builder publishes, unpacks it into the data folder and links `ffmpeg`
    and `ffprobe` (no sudo, nothing written outside the data folder). About 42 MB to download on x86-64 (19 MB on ARM64) and

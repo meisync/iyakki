@@ -19,8 +19,8 @@ What each still lacks is written on its row in `FEATURES.md`.
 1. **CJK and emoji fonts** (the rest of F-BROW-26), autofill of names and addresses.
 2. **Video inside pages** with permissive decoders (now served by the full web engine, F-BROW-50 and F-BROW-43); this is also what YouTube and TikTok need.
 3. **Layout sizes and responsive pages** for scripts (F-BROW-28).
-4. **Safe browsing**, the rest: certificate details, permissions, blockers (F-BROW-34).
-5. **Speed**: cache, script caching, engine snapshot (F-BROW-36).
+4. **Safe browsing**, the rest: certificate details, permissions. Ad and tracker blocking: first cut done (own filter-list engine, reader and full engine, F-BROW-52 to F-BROW-55, [`CONTENT-BLOCKING.md`](CONTENT-BLOCKING.md)); not done: a counter for the full engine, regular-expression rules, scriptlets, YouTube-specific rules (F-BROW-34).
+5. **Speed** (the full engine's measured state and what needs a rebuild: Mesa without iris, no Brotli, no WOFF2, F-BROW-56, [`BROWSER-SPEED.md`](BROWSER-SPEED.md) "Full engine (WPE)"): preload scanner, memory and disk cache with revalidation, per-person cache and Settings page done (F-BROW-51, measurements and what is not done in [`BROWSER-SPEED.md`](BROWSER-SPEED.md)); engine snapshot, HTTP/2, style and layout CPU (F-BROW-36) and the full engine's own speed on Macs still open.
 
 ## Then (P1)
 Canvas/SVG/WebP (29), real form controls (30), persistent storage and cookies in the vault (31), real-time web (32), a checked

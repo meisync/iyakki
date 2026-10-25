@@ -163,8 +163,8 @@ fixed; log trimming can drop a few bytes written at the instant of the rewrite.
 
 ## Installer jobs (Quick install)
 
-The IYAKKI menu's Quick install runs every step as a job of the workspace `iyakki-install`: the job is
-`iyakki quick-install <k3s|duckdb|elasticsearch|claude-code|github-copilot|kokoro|lemonade|ollama> --data <folder>`
+Store → Setup (formerly the IYAKKI menu's Quick install page) runs every step as a job of the workspace `iyakki-install`: the job is
+`iyakki quick-install <k3s|duckdb|elasticsearch|claude-code|github-copilot|kokoro|voice-pack|lemonade|ollama> --data <folder>`
 (`crates/iyakki-agent/src/quickinstall.rs`), which prints `[n/m]` steps the engine reads as progress. Those jobs are what the
 installer indicator beside the clock counts and lists (with the same Log view as the chat's strip); they are not in a chat's
 strip. Servers Quick install starts afterwards (Lemonade) run as jobs of `iyakki-services`; k3s and Ollama are started by their

@@ -18,13 +18,15 @@ Contents: [Global keys](#global-keys-and-the-help-overlay) · [Launcher](#the-la
 |---|---|
 | **F1** | Help for the current screen, then the keys that work everywhere |
 | **F8** or the Devices button | The Devices popover (next to the screenshot icon): network, Bluetooth, screens, sound, camera, keyboard and pointer, storage and battery at a glance; see [The top bar](#the-top-bar-clock-and-devices) |
+| **Volume, brightness, keyboard light, media and power keys** | Work anywhere on the IYAKKI screen with a bar at the bottom centre; the key never reaches the open app. Hold to repeat. The Power key opens a Power off / Restart card and does nothing until you choose. Settings, Keyboard has the Function keys choice for Apple keyboards, key repeat, the detected controls and a key-code finder; see [`KEYBOARD-AND-FN-KEYS.md`](KEYBOARD-AND-FN-KEYS.md) |
+| **Cloud mode** | On a server, cloud machine or any computer with no screen, sound or camera of its own, IYAKKI hides MEDIA, RADIO, TALES, VOICE and CAMERA, the Sound, System sounds, Display, Keyboard and Bluetooth pages and the Fn keys. The number keys 1 to 9 then count only the tiles shown. Administrators choose Automatic, On or Off in Settings, Cloud mode; About says why it is on; see [`CLOUD-MODE.md`](CLOUD-MODE.md) |
 | **F7** or the clock | Settings, Time |
-| **F10** or a click on the name IYAKKI | The IYAKKI menu: About, Quick install, Media player, Mac drivers, Settings; see [The IYAKKI menu](#the-iyakki-menu) |
+| **F10** or a click on the name IYAKKI | The IYAKKI menu: About, Quick install (opens Store → Setup), Media player, Linux apps, Mac drivers, Settings; see [The IYAKKI menu](#the-iyakki-menu) |
 | **F9** or the bell | Open or close the INBOX from anywhere (the app you left keeps running) |
 | **F12** or Print Screen | Screenshot to the clipboard: click two corners, or Enter for the whole screen, then save a PNG or close. Saved to `~/Pictures` if your account may write there, else the data folder's `screenshots` |
 | **Esc** | Back (leaves a text field first) |
 | **Ctrl+V** | Paste the latest copy |
-| **Ctrl+Shift+V** or right-click | Clipboard history |
+| **Ctrl+Shift+V** or right-click | Clipboard history; its **Scan QR** button (Ctrl+K) copies text from a QR code held up to the camera (see below) |
 | `o` (launcher) | Sign out |
 | `p` (launcher) | Power menu, if your role allows |
 
@@ -33,7 +35,28 @@ a word, triple-click a paragraph, Shift+click to extend), then **Ctrl+C**. A pla
 or code block for its copy button. **Right-click** opens a menu (Cut/Copy/Paste/Select all over a text field, the app's own
 entries, always "Clipboard history..."). In window mode the clipboard is shared with your system.
 
+**Copy from a QR code.** To get a secret or any text onto this computer without a remote channel, make a QR code of the text on a phone or another computer (any QR-code maker will do), open the clipboard history and press **Scan QR** (Ctrl+K). IYAKKI asks first whether the camera may turn on, then shows **CAMERA IS ON**, a live picture and a frame to hold the code in. When a code is read the camera turns off and you see what it holds *before* anything is copied: long text is cut on screen (all of it is copied), and text that looks like a secret (a long token-like string, `sk-`, key, token, password) is hidden behind dots with a **Show** button. Choose **Copy**, **Scan again** or **Cancel**. The box **Secret: keep out of the history and clear after paste or in 60 seconds** starts ticked for hidden text: such a copy is not listed in the history, pastes once with Ctrl+V and is gone after that or after 60 seconds. The system clipboard gets the text once (so you can paste it on the Mac) and is overwritten with an empty text when the secret goes, unless you copied something else in IYAKKI since. A copy made in another program in between cannot be seen and would be overwritten at the 60 seconds. A web address read this way is only copied as text, never opened. Nothing read is logged, saved or sent; the audit says only "clipboard scan: n characters, secret yes/no". With no camera the dialog says so.
+
 ## The top bar: clock and Devices
+
+**The login screen's top bar and Power button.** On the machine's own screen, the sign-in screen and the first-run setup screen
+have a slim bar at the top: the host name, the network (*Wi-Fi: NetworkName*, *Ethernet connected* or *no network*), the battery
+when there is one, the time and the date, and a red **Power** button at the right end. The bar only shows things; nothing in it
+opens Settings before you sign in. **Power** (or **Ctrl+P**, or the keyboard's power key) opens a card with **Power off**,
+**Restart** and **Cancel**: Left/Right/Tab move the highlight, **Enter** or **y** does the highlighted choice, **Esc** or any other key closes the card
+and nothing happens. No password is asked, because someone at the machine can pull the plug anyway; the audit log records
+*power.off* or *power.reboot* by "login screen". When the bar is too narrow (a small or phone-sized screen) the date, then the battery, network and host name drop out first; Power and the time stay.
+A session in the browser (remote desktop) never shows the bar or the button, and the power key and Ctrl+P do nothing there before sign-in, so nobody on the network can switch the machine off from the login page.
+Where the system cannot power off (the window mode on a development computer), the card says *This system cannot power off from here*.
+
+**The battery (laptops only).** A laptop shows a small battery next to the clock: green, amber under 20 %, red under 10 %, a white
+bolt while it charges, a plug when the adapter is in and the battery is full or protecting itself, a question mark when the level
+is not known, and the percentage beside it. Click it or press **F4** for the percentage bar, the status in plain words, the time
+left, the battery's health and the power adapter; **Battery settings** (or Enter) opens Settings, Battery. A desktop, a virtual
+machine and a Mac mini show nothing. At 20 % and 10 % a short message appears once, at 5 % a **Plug in now** card, and at 3 % a
+30 second countdown card with **Cancel shutdown** (Esc); plugging in cancels it. Then the computer shuts down cleanly. In
+Settings, Battery: *Show the percentage in the top bar*, *Low battery warnings* and (administrators) *Shut down at the critical
+level*. See [`BATTERY.md`](BATTERY.md).
 
 **The clock.** Every screen after sign-in shows the time (24-hour by default, `14:05`) at the top, with a short date beside it
 when there is room (`Sat 17 Oct`). Point at it for the full date, the time zone and, when needed, a warning; click it (or press
@@ -62,7 +85,9 @@ only offers the 12/24-hour and seconds choices.
 | Ethernet, Wi-Fi | link state, address, speed; for Wi-Fi the network name and signal (`-48 dBm (excellent)`); the first row also shows the host name | Settings, Network |
 | Bluetooth | adapter present and powered, paired devices; **Scan** when the Bluetooth service exists | Settings, Bluetooth |
 | Display | each connected output with monitor name, resolution, refresh rate and the interface size | Settings, Display |
-| Sound | output card, volume, microphone; **Test** plays a short tone, **Mute** toggles (`m`) | Settings, Sound |
+| Sound | output, **one master volume** and mute, test chime; `A` shows Advanced (boost, volume control, stereo test, channel walk) | Settings, Sound |
+
+**One master volume.** The volume keys, the mute key, Settings, Sound (slider, Louder, Quieter, Mute), the Mute button in the Devices popover and the volume bars of the Radio all change the same value and the same mute switch, and each shows it within a frame. The level is kept in the settings file across restarts. It is applied once: by IYAKKI's sound control (`IYAKKI`, an ALSA software volume that the radio, media player and any `aplay`-based player go through), and only where there is none (a card with a working hardware volume, or no `/etc/asound.conf`) do the players scale their own samples. Mute keeps the level; a louder or quieter step while muted unmutes. If the sound control is not ready (the card still starting, or another program holds the card) the volume key says *Volume control not ready* instead of showing a bar.
 | Camera, Keyboard and pointer | what the kernel found | |
 | Storage | drives and free space on the data volume | Settings, Storage |
 | Battery | level and charging, only when there is one | |
@@ -72,7 +97,7 @@ the line gives the plain-words reason from the Drivers list. **Driver help** (bu
 Enter, `a` the row's first button, `r` read again, Esc or F8 closes. On macOS or a desktop window the rows it cannot see say "not
 available on this OS". Everything is read from `/sys` and `/proc`; a missing file is just "not there".
 
-**Installs.** While Quick install is installing something, a small turning ring with the number of installs sits left of the
+**Installs.** While Store → Setup (or the `iyakki quick-install` command) is installing something, a small turning ring with the number of installs sits left of the
 clock (filled to the progress when the installs report one); for ten minutes after the last one ended it shows a check or a
 cross. Click it to see every running and recent install with its bar and last line, **Log** for the live output (it follows the
 end; scroll up to read, Esc closes it), **Stop**, **Dismiss**, and *All jobs in RUNS*.
@@ -86,16 +111,20 @@ entry; Esc goes back a page and closes; a click outside closes.
   IYAKKI's licence (Apache-2.0), a short *Licence boundary* in plain words (the base OS runs as separate programs and is never
   linked; GPL kernel code on the Mac image; firmware; Apple firmware never shipped; sources in the image's legal-info) and,
   scrollable, every licence inside: the Rust crates linked into the program grouped by licence, and the programs of the images.
-* **Quick install** (`q`, administrators): four sections, each item with its state and its licence; the order is shown before
-  Install. *Cluster*: k3s, and DuckDB, Elasticsearch, Indic-TTS and the Local image registry (a registry pod with a volume in the cluster, for images built on this device such as the private store's server; no cluster restart) which install k3s first. *AI coding*: Claude Code, GitHub
-  Copilot CLI (Node.js needed). *Media*: the media player (a static ffmpeg, downloaded from its builder and checked with its checksum). *Voice* (pick one or both): Kokoro (English, pulled into Lemonade, which is installed first)
-  and Indic-TTS (Indian languages, in k3s; the model weights have **no stated licence**, an open decision, so nothing is
-  bundled and you supply the models). *Local models* (pick one or both): Lemonade, Ollama; both are started and added to
-  Settings, Models when they answer. Every step runs as a background job you can follow beside the clock; Indic-TTS opens the
-  Platform services deploy review once k3s is there. A desktop window never installs a cluster.
+* **Quick install** (`q`): no page of its own any more. The entry (and its key, so old habits keep working) opens the **Store on its
+  Setup tab**, described in [Store -> Setup](#store--setup). Everything the long Quick install page did is there, as cards.
 * **Media player** (`m`): which player the image has, a file to play, Stop, and MEDIA. Video and sound (the camera's `.avi`
-  recordings too) play in IYAKKI's own player once the media player is installed (Quick install, Media; the page has an
+  recordings too) play in IYAKKI's own player once the media player is installed (Store → Setup → Media tools; the Media page has an
   Install button); without it the page says so. See [`MEDIA-PLAYER.md`](MEDIA-PLAYER.md).
+* **Linux apps** (`l`): Debian and Ubuntu programs in a sandbox of their own. Make a sandbox (Debian 12/13, Ubuntu 22.04/24.04; the base is
+  downloaded and checked, never shipped), open a terminal in it (CLI tile, `linux use <name>`), install packages with `apt` as a background job,
+  mount folders (read-only unless you choose), switch its network on or off, delete it by typing its name. Third tab: ready-made **image apps** for
+  the dev cluster. Needs the full command-line permission. See [`LINUX-APPS.md`](LINUX-APPS.md) and [`BUILD-YOUR-OWN-IMAGE-APP.md`](BUILD-YOUR-OWN-IMAGE-APP.md).
+* **Linux windows** (tile **LINUX WINDOW**, System section; Store → Setup → Linux apps → *Linux windows*): a graphical program of a Debian sandbox in an
+  IYAKKI window. One click installs a display server and a test program with `apt` (about 250 MB, an administrator's click); then choose a program in the tile,
+  press Start, click into the window to use it (keys, mouse, wheel). The strip shows CPU and memory of the sandbox; Stop or closing the tile ends everything.
+  The clipboard is shared only by the *Paste into window* and *Copy from window* buttons, as text. No graphics card and no sound. Needs the full command-line
+  permission. See [`LINUX-WINDOWS.md`](LINUX-WINDOWS.md).
 * **Mac drivers** (`d`): Wi-Fi firmware (run `dist/drivers/mac-wifi-firmware-from-macos.sh` on the Mac's macOS, then STORE,
   Drivers, Install from folder or USB), T2 audio, Bluetooth and the USB camera as the system sees them, with STORE, Drivers.
 * **Settings** (`s`): Settings is no longer a tile; open it here, with F7 or by clicking the clock.
@@ -104,13 +133,71 @@ entry; Esc goes back a page and closes; a click outside closes.
 
 ## The launcher
 
-Tiles are sorted into four sections shown as tabs at the top: **Home** (CHAT, RAG, MCP, CLI, SKILLS, CALENDAR, TALES), **Web & Media**
-(BROWSER, RADIO, MEDIA, CAMERA), **Work** (EDIT, RUNS, SRE PILOT, AI IDE, DATA, DASH, FLOWS) and **System**
-(USERS, NET SCAN, MESH, USAGE, SYSTEM, STORE). Custom apps go to the section their app.json names, else Work. Arrow keys
-choose, Enter opens, **Tab / Shift+Tab** (or clicking a tab) switches section (your last section is remembered),
-**PageUp/PageDown**, the wheel or the dots turn the page when a section has more tiles than fit, **1-9** open the Nth tile of
-the whole list. A tile with a DEMO ribbon (SRE PILOT) shows sample data only.
-Tiles your role may not use are locked: a message names your role.
+Tiles are sorted into four built-in sections shown as tabs at the top: **Home** (CHAT, RAG, MCP, CLI, SETTINGS, SKILLS, CALENDAR, AI IDE, TALES, VOICE),
+**Web & Media** (BROWSER, RADIO, MEDIA, CAMERA), **Work** (EDIT, RUNS, SRE PILOT, DATA, DASH, FLOWS, LAB) and **System**
+(USERS, NET SCAN, MESH, USAGE, SYSTEM, STORE, K8S, DISKS), plus the groups you make yourself. Custom apps go to the group their app.json names, else Work.
+Arrow keys choose, Enter opens, **Tab / Shift+Tab** (or clicking a tab) switches section (your last section is remembered),
+**PageUp/PageDown**, the wheel or the dots turn the page when a section has more tiles than fit. **1-9** open the Nth tile of the fixed tile table
+(the order of the sections as shipped: CHAT, RAG, MCP, CLI, ...), whichever group a tile has been moved to. A tile with a DEMO ribbon (SRE PILOT)
+shows sample data only. Tiles your role may not use are locked: a message names your role.
+
+### Moving tiles and making groups
+
+The layout is yours: other accounts keep theirs, and it changes only where a tile is *listed*, never what the app may do (that comes from your role).
+
+* **Move a tile.** Select it and press `m` for a list of groups (and *New group…*); or right-click it for *Move to group…*, *Pick up, then click a
+  group* (click a chip to drop it, Enter drops it in the shown group, Esc cancels) and *Reset position*. A notice says what moved and offers
+  **Undo** (a button, or `u`; one step). `[` and `]` put the selected tile earlier or later in its group.
+* **Make a group.** The **+** chip at the end of the row, *New group…* in the move list, or `g` for the group's menu. The name is 1 to 16
+  characters and cannot repeat any group (any capitals), built-in or yours. You can have 12 of your own. An empty group of yours stays on the row with a
+  hint, so you can fill it; an empty built-in one is hidden as before.
+* **Rename, put in order, delete.** Right-click a chip of yours, or press `g` while it is shown. *Delete group…* opens a card that says how many
+  tiles go back to their own default group; nothing is uninstalled. The built-in groups have no such entries and cannot be renamed or deleted.
+* **Too many chips for the width** (a phone, many groups): the row ends with a **…** chip that lists the rest; the shown group always has its chip.
+* **Settings → Home layout** does the same with lists: every group (rename, delete, earlier/later), every tile with the group it is in (Move tile,
+  Put tile back) and *Reset layout* (tiles back, your groups stay).
+* **Apps that name a group.** A Store app's app.json may say `"group": "Games"`. If that is a group you have (any capitals) the app goes there. If not, a
+  card asks once: *This app wants to be in the group “Games”. Create it?* **Create** or **Put it in Work**; the answer is remembered for that app. If you
+  move the app yourself, your choice wins over the app's `group` on later updates.
+* Not there yet: dragging a tile with the pointer (use *Pick up*), a touch long-press menu, and an administrator's default layout for new accounts.
+
+## Layouts and displays
+
+Put two, three or four apps side by side on one screen. Nothing changes until you choose a layout: IYAKKI starts with one app
+on the whole screen, as always.
+
+* **LAYOUT button** (a small grid, left of the bell in the top bar) or **Ctrl+Alt+0** opens the picker: every layout with a
+  small picture (50:50 side by side or stacked, 30:70, 70:30, 25:75, 75:25, 40:60, 60:40, three equal parts, a 2x2 grid, and 70:30
+  with the right side stacked). Click one, or press its number, or move with the arrows and press Enter.
+* **Ctrl+Alt+1 to 9** apply a layout straight away (1 is a single app). **Ctrl+Alt+arrow** snaps the open app to that side:
+  from one app it makes a 50:50 layout and puts the app there; in a layout it swaps the app with its neighbour.
+  **Ctrl+Alt+Tab** moves to the next pane (with Shift, the previous one). **Ctrl+Alt+Shift+arrow** moves the divider.
+* Every pane has a **title strip** with **Move**, **Layout**, **Back** (show this pane's launcher) and **Close** (one pane fewer).
+  **Move** picks the pane up; click the pane you want it swapped with (Esc cancels). Windows cannot be dragged: a click opens
+  things at once in IYAKKI, so *pick up, then click the target* does the job.
+* Drag a **divider** to change the sizes; it snaps to 25, 30, 33, 40, 50, 60, 67, 70 and 75 % and stops where an app would get
+  too small. A pane that is still too small for its app says so instead of drawing it half.
+* Keys and the mouse wheel go to the pane you are working in (the one with the bright frame); a click in another pane makes it
+  the working pane. Apps in other panes keep running.
+* A pane with no app shows the launcher at its size. The F-keys, F1 help, the right-click menu and the clipboard work on the
+  working pane. Cards and dialogs of an app stay inside its pane; the power card, the sign-in dialog, alarms and screenshots cover
+  the whole screen.
+* **Memory.** Layouts are used only when the computer has the memory for them: 1 GB machines stay with one app; around 2 GB
+  allows two panes; 4 GB and more allows four panes and several displays. The picker shows what applies ("Layouts: available
+  (4 GB, 2.9 GB free)", "limited to 2 panes (2 GB)", "single screen only (1 GB)") and why. If free memory falls, the layout
+  becomes smaller after a card says so, and comes back when memory is free again. An administrator can set *Screen features* to
+  Automatic, Always on (may be slow or run out of memory) or Off (as if layouts did not exist).
+* In a remote desktop (browser) the same layouts work at the browser's size. Some browsers or desktops keep Ctrl+Alt+arrows for
+  themselves; the LAYOUT button always works.
+* **Several displays.** With a second monitor plugged in (and memory for it), each display gets its own bar and panes. The pointer
+  moves from one display to the next across the edge; a click makes that display the working one. **Ctrl+Alt+M** moves the open
+  app to the next display; **Ctrl+Alt+arrow** does it when there is no pane that way and a display lies that way; **Move** on a
+  pane, then a click on a pane of the other display swaps the two. Pop-ups and cards appear on the working display only.
+  **Settings -> Displays** lists the displays: **r** resolution, **p** main display, **a** which side, **m** mirror or extend,
+  **i** identify (a number on each screen), **y** apply. A new arrangement is tried for 15 seconds and goes back by itself unless you
+  press **k** (keep). Each display remembers its layout. If the shell cannot drive the displays (one display, too little memory,
+  another program holds the screen) the page says why and the monitors show the same picture, as before. Details and a test
+  list: `docs/MULTI-DISPLAY.md`.
 
 ## Approvals: Ask first, Auto-approve safe, Autopilot
 
@@ -175,6 +262,11 @@ the assistant's tool runs and jobs start in your home folder and use it as `HOME
 (*SYSTEM -> Storage* says "RAM") loses these files at power-off: save or persist the disk first. Other people's home folders
 are private to them (mode 0700).
 
+**If the drive disconnects.** A red card on every screen says "The IYAKKI drive was disconnected for a moment, so saving is not possible right now. Check the USB-C cable."
+Apps then say "The IYAKKI drive is not available" instead of "I/O error". When the drive is back IYAKKI reconnects it by itself after a few seconds and shows "Drive reconnected, everything is saved again."
+(**Reconnect now** does it at once, **Minimise** shrinks the card, **Restart** restarts). Anything that was being saved at that moment may be lost. Settings, Storage shows how fast the drive is connected
+and warns about a USB 2 link or a hub. More: [STORAGE-LOSS.md](STORAGE-LOSS.md), [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
 ## Tiles
 
 ### CHAT
@@ -230,15 +322,15 @@ the machine rather than downloaded, and a third tab, **Connections**: saved host
 fingerprint you confirm the first time, and keys made into your vault. `ssh`, `scp`, `sftp`, `sshtrust`, `sshhosts` and `sshforget`
 also work in the Terminal tab. See [`CLI-SSH.md`](CLI-SSH.md).
 
-**Login for Claude Code and GitHub Copilot.** When one of them is installed, the CLIs list, Settings → Agents, Quick install (the
+**Login for Claude Code and GitHub Copilot.** When one of them is installed, the CLIs list, Settings → Agents, Store → Setup (the
 IYAKKI menu) and the chat's model list (Ctrl+P) show a **Login** button and what is signed in ("signed in as you@example.com" or
 "not signed in"); an agent that is installed but not signed in says **Sign in first**. Login opens a dialog: for Claude Code you
 choose *Claude subscription* (the usual), *Anthropic Console (API billing)* or *SSO*; then the dialog shows the sign-in address
 (with **Copy address** and a QR code you can scan with a phone) and, for GitHub Copilot, a one-time code to enter at
 github.com/login/device (**Copy code**). Open the address on any device, sign in, and for Claude Code type the code the browser
-shows into the dialog's field and press Enter. To avoid typing the long code of Claude: press **Open in browser** (the dialog hides, you sign in in the BROWSER tile, copy the code, press Back, and tap **Paste the copied code**), or scan the **second QR code** with the phone you signed in with and paste the code there. For GitHub Copilot your token is kept in your vault, not in a plain file (unlock your vault if the dialog says it is locked). The dialog says **Signed in** when it is done; **Cancel** stops it. **Logout**
+shows into the dialog's field and press Enter. To avoid typing the long code of Claude: press **Open in browser** (the dialog hides, you sign in in the BROWSER tile, copy the code, press Back, and tap **Paste the copied code**), or scan the **second QR code** with the phone you signed in with and paste the code there. For GitHub Copilot your token is kept in your vault, not in a plain file (unlock your vault if the dialog says it is locked). **A bigger QR code.** The button **+ bigger QR** (or Ctrl+B) makes the sign-in QR code at least twice as large, up to nearly the height of the dialog, drawn dark on white with the quiet border a phone needs and with every square on whole pixels so it stays sharp; **- smaller QR** (or Ctrl+B again) brings it back. The choice is kept until you restart. With the second QR code (the phone relay) up, the big view shows one code at a time and **Show code 2** (Ctrl+N) switches between them. On screens wider than 2000 pixels the QR code is a little larger from the start. **Scan the code back with the camera.** In the step that waits for the code, **Scan with camera** (Ctrl+K) lets you show the code on your phone to the computer's camera (for example a MacBook's FaceTime camera): on the phone, make a QR code of the code the sign-in page showed (any QR-code maker on the phone will do) and hold it inside the corners of the small live picture. IYAKKI first asks whether the camera may turn on, and the card shows **CAMERA IS ON** with a live picture, a frame to hold the code in and the seconds left. It reads the QR code, puts the text in the field only if it has the shape of a sign-in code, turns the camera off at once and waits for you to check it and press Enter: nothing is sent by itself. A QR code that holds a web address is refused (never put in the field and never opened), and so is anything else that does not look like a code, each with a plain message. Esc, **Stop camera**, closing the dialog, the sign-in ending, or one minute without a code also turn the camera off. If there is no camera the dialog says so. The pictures are looked at in memory only: they are not saved, not sent anywhere and not written to the audit log. (Plain letters go to the code field, which is why these two shortcuts use Ctrl.) The dialog says **Signed in** when it is done; **Cancel** stops it. **Logout**
 (Claude Code) signs out. Your login is kept by the vendor's program in your own home folder and survives a restart; IYAKKI never
-sees your password or token and records only that a login started or finished. Details: [`EXTERNAL-AGENTS.md`](EXTERNAL-AGENTS.md).
+sees your password or token and records only that a login started or finished. In the CHAT tile and the AI IDE assistant (the same chat) the footer shows the answering agent (`agent: Claude Code · Sonnet`); an agent that is not ready is explained in the empty chat with a Login button or the install command instead of "No chat model selected". With no provider model set and exactly one agent installed and signed in, that agent answers without any choice. After a restart the status is looked up again when you sign in to IYAKKI. Details: [`EXTERNAL-AGENTS.md`](EXTERNAL-AGENTS.md).
 
 ### EDIT
 An editor written in-house (11 languages highlighted). `Ctrl+S` save · `Ctrl+O` open · `Ctrl+N` new tab · `Ctrl+W` close tab ·
@@ -252,12 +344,45 @@ check, the time, a sliding or filled progress bar, the last output line, **Log**
 running when the chat ends; the same rows also show in the chat and the AI IDE's chat pane ([`JOBS.md`](JOBS.md)).
 
 ### SETTINGS
-Pages in a list grouped Assistant (Models, Agents, RAG, Skills, Voice), Apps (Browser, Host access, Dev cluster), Security
-(Vault, Secret providers, Account) and Devices (Network, Bluetooth, Display, Sound, Storage) and System (Memory, **Host name**, **Time**, Install to disk, **Developer mode**). **Dev cluster** (administrators) holds the cluster profiles, the registry, the local cluster setup, and the **Platform services** page (`P`): Gitea and the private store deployed to a cluster you choose after you approve an exact plan ([`PLATFORM-SERVICES.md`](PLATFORM-SERVICES.md)). Settings, **System** has **Memory** (zram swap and swap file, administrators; [`ZRAM-AND-INSTALL.md`](ZRAM-AND-INSTALL.md)) and, on a booted IYAKKI stick, **Install to disk**. `Ctrl+F` or `/` searches
-pages. Hardware pages and most changes are administrator-only. Keys per page are shown in the header and F1: Models
+Settings opens on **Overview**: a **Needs attention** list (the firewall is open, no AI model is chosen, the clock looks wrong,
+Bluetooth needs firmware, your data is kept in memory only), each line with a **Fix it** button that opens the page that solves it, and
+**Common things** (Join WiFi, Change my password, Bigger text, Choose the AI model, Sound and volume, Time zone and clock, Firewall,
+Name of this computer, Where my data is kept). After a crash or a power cut it also says **The last session ended unexpectedly**, with a button to **Last session log** (an administrator's page under System: the last 200 lines of the kernel log kept on the stick, "I have seen it" clears the note; see docs/TROUBLESHOOTING.md). Nothing to fix says "Everything looks fine." You only see lines about pages your role has.
+
+The list on the left has eight headings, in this order, and the pages under them:
+**Overview** · **Account & people** (Account, Vault, Secret providers) · **Apps & AI** (Models, Agents, Skills, RAG, Voice, Indic voices,
+Browser, Host access) · **Network & sharing** (Network, Firewall, Shared folders) · **Display & sound** (Display, Displays, Screen saver, Home layout,
+Sound, System sounds) · **Devices** (Bluetooth, Keyboard) · **System** (Time, Host name, Memory, Storage, Install to disk, Cloud mode) ·
+**Developer** (Developer mode, Dev cluster, Git and SSH keys). The left and right arrow keys walk the pages in that order.
+
+**Finding a setting.** Type in the search box (`/` or Ctrl+F) in your own words: "wifi", "password", "dark", "font", "sleep", "mouse",
+"backup", "restart", "security" and "assistant" all lead to a page (for example "dark" leads to Display, where brightness is, and "sleep" or "screen off" to Screen saver;
+there is no dark theme and no sleep (suspend) timer yet). Enter opens the first match, Esc clears the text. If nothing matches, the list says to try one simple word.
+
+Hardware pages and most changes are administrator-only. Keys per page are shown in the header and F1: Models
 `a e d t m b k x c`; Vault `n d Tab l f`; Network `Enter`, `w` join Wi-Fi, `m` private MAC address, `a` apply it now, `r`; Display `u U + -`; Sound `o t + - m Enter`; Voice
-`s v c m p t y`; Storage `m` make data disk (erases it); Account `p` change password, `u U` text size. Details:
+`s v c m p t y`; Storage `m` make data disk (erases it), `u` compatible USB mode (no UAS); Account `p` change password, `u U` text size; Firewall `1 2 3 a d A`. Details:
 [`ADMIN-GUIDE.md`](ADMIN-GUIDE.md).
+
+**Firewall (Settings, Network & sharing, Firewall; administrators).** It opens on a simple page: the big state (FIREWALL ON, OPEN or NOT
+PROTECTED), three ways to run it, and the short list **Allowed on this computer**.
+**Standard** (the default) blocks everything coming in except what you allow; **Open** blocks nothing and asks first; **Locked down** (also
+blocking what goes out) is shown but not available yet, and says so. **Add...** offers Web server, SSH, File sharing, Remote desktop,
+Kubernetes (k3s), a custom port, or a computer by name or address (paste a host name, an IP address, a range or a network). **Remove** takes
+the selected line away; removing SSH or Remote desktop asks first because it may be how you are connected. Every change waits 60 seconds for
+**Keep**; do nothing and it is undone, so a mistake cannot lock you out for good. **Advanced...** opens the full page: every rule, presets,
+ping, host-name lookups, the log of blocked attempts, import and export ([`FIREWALL.md`](FIREWALL.md)).
+
+**Models page with a Lemonade server.** Pick the Lemonade provider and its models are listed under the provider card. The
+heading says how many are installed and how many are available ("1 installed · 117 available"); the provider card says the
+same instead of a model count (a provider that has not been read yet says "models not read yet: press Test or All models").
+**Installed** comes first: every model the server has downloaded or loaded, of any type, each chip with its type
+("kokoro-v1 · tts"); click one to use it (a chat model, embeddings, the TALES picture model, the reading voice, speech-to-text)
+or to load or unload it. Below it, one section per type lists only what is not downloaded yet, as "pull 337 MB" chips (a click
+asks first, naming the size). The list scrolls: the mouse wheel over it, PageUp and PageDown (Home and End), and Up and Down
+once the list has been used; a thin bar on the right shows where you are. The search box at the top right of the list (press
+`/`, or click it) filters while you type by name, type word (chat, vision, tts, stt, embeddings, rerank, image) and label;
+the heading then says "12 of 117 shown", Esc clears the text, and clicks keep acting on the model you see.
 
 **Host name (Settings, System, Host name; administrators).** The name your network and the terminal prompt use. It was chosen
 in the installer or defaults to the image's own; here `e` types a new one (lower-case letters `a-z`, digits and `-`, up to 63
@@ -301,6 +426,16 @@ this site · `c` developer panel · `+ - 0` zoom · `R` reader · `U` view sourc
 **`F` the full web engine** (WebKit, needs its helper, [`FULL-BROWSER.md`](FULL-BROWSER.md)) · `Q` ask / `S` summarise / `T`
 translate / `M` keep in knowledge (asks each time). **Searching:** words typed in the bar are searched on Bing's plain results page (Settings, Browser: DuckDuckGo, Brave Search or Wikipedia); if that page is busy or asks for a check, the next one is tried and a note says so. Google's own results page only answers with "enable JavaScript", so Google searches are run on your chosen engine too. A name that does not exist (`youtub.com`) shows "Couldn't find ..." with a search for it and, for near misses of popular sites, "Did you mean youtube.com?". YouTube, Gmail, Google sign-in and similar apps need the full engine: the `web` or `macweb` image (the Mac image with the web engine). **In the full engine** click a box and type; the keyboard goes to the page (Esc gives it back to the browser, Ctrl+L is the address bar, Ctrl+T/Ctrl+W tabs); Ctrl+C/Ctrl+V and a page's own Copy button use IYAKKI's clipboard; use a mouse (touchpads are not read). **Limits:** no video, canvas or IndexedDB in the built-in engine; CJK
 and emoji show as boxes; heavy web apps need `F`. Honest list: [`BROWSER-ROADMAP.md`](BROWSER-ROADMAP.md).
+
+**Page fullscreen** (full web engine): a video player's fullscreen button, the `F` key or a double click in the page shows the page over the whole tile, without tabs, bars or status line. **Esc** asks the page to leave fullscreen (the bars come back when it has); leaving by the player's button or by going to another page works too. While a page is fullscreen every other key goes to the page.
+
+**Pointer shapes:** on the desktop window, the remote screen and the framebuffer (a real screen) the pointer follows what is under it: a hand over links and buttons, a text bar over fields, a four-way or resize arrow, a slashed circle, a question mark or a crosshair where the full web engine asks for it; the arrow elsewhere.
+
+**Speed and memory** (Settings, Browser): the browser keeps pages, pictures, styles and scripts so the next visit is faster, separately for each person. **`k`** cycles the cache size (Auto, Large, Small); the page shows how much memory and disk are in use, how many requests it saved and a **Clear cache (`x`)** button. The sizes follow the computer's free memory and shrink by themselves when it runs short. Pages of the built-in reader load their style sheets and scripts together; YouTube and Google open in the full engine, which has its own cache ([`BROWSER-SPEED.md`](BROWSER-SPEED.md)).
+
+**Smooth pages** (Settings, Browser, key **`m`**; off by default): on a computer whose graphics driver the web engine cannot use (the Intel Macs in the standard images), YouTube and other big pages can scroll and play video slowly in the full engine, because every picture is made on the processor. Smooth pages draws them at half the width and height (a quarter of the pixels) and stretches the picture to fit: a 720p video that played at 6 to 8 pictures a second then played at about 27 with no dropped frames, and scrolling uses a third less processor, at the price of softer text and pictures. It applies at once to open pages and can be switched back with the same key. If YouTube still stutters at 1080p, choose a lower quality once in the player's own menu (the gear): YouTube remembers it. On a small window the page shows only a line with the key instead of the switch.
+
+**Ads and trackers** (Settings, Browser, Ads and trackers): **`b`** switches blocking on or off (on by default; it blocks nothing until you have a list). **`l`** downloads EasyList and EasyPrivacy from easylist.to (the page shows their licence), **`n`** updates the lists, **`u`** adds a list by address, **`o`** from a file, **`r`** removes them. Lists are other people's work and are never part of IYAKKI; each shows its licence, age and a hash. In the browser, the bottom bar shows **"N blocked"** for the page, **`B`** lists what was blocked and by which rule, and **`A`** switches blocking off (and on again) for the site you are on. A page a list blocks is never hidden: you see which rule did it and press **`A`** to open it anyway. YouTube's video ads are not promised to go ([`CONTENT-BLOCKING.md`](CONTENT-BLOCKING.md)).
 
 ![Browser](media/shots/browser.png)
 
@@ -383,6 +518,21 @@ Finds Ollama servers, cameras, media servers and other services on private addre
 Consul service view: Services, Nodes, Key/Value, Setup (`1-4`). `r` reload, `n` new key, `e` change value, `d` delete, `c` connection
 (admins), `t` test. Needs a Consul to talk to.
 
+**Shared folders (Settings, Devices, Shared folders).** Share a folder of yours with a phone or laptop on the same network: `n` makes a share
+(name, folder, Files or Website, who can open it, read-only or uploads, hidden files, how long, port), `s` starts and stops it, `c` copies the
+link, `q` shows a QR code, `e` edits, `t` gives the link a new secret, `d` deletes, `x` stops all sharing. Nothing is shared until you start a share;
+a share is read-only unless you allow uploads; the safest way to open it is the **secret link**; a password is sent in clear over plain HTTP; shares
+stop when you sign out. In the AI IDE, right-click a folder in the tree and choose **Share this folder…** to look at a website you are building on
+another device. Details and limits: [`SHARED-FOLDERS.md`](SHARED-FOLDERS.md).
+
+**Firewall (Settings, Security, Firewall; administrators).** New incoming connections are blocked unless you allow them; replies to what this
+machine started, loopback, DHCP and the cluster networks always work. `a` allows a host name, IP address, range or network (with ports, a protocol, an
+interface and an end time), `p` opens the presets (SSH, remote desktop, shared folders, Kubernetes, DNS service, ping), `y` applies your changes: you then
+have **60 seconds** to press `k` (keep) or `v` (revert), and if you press nothing the old rules come back, so a wrong rule cannot lock you out. `z` or
+the **Off** button on the Firewall row of the Devices list (F8) switches it off at once; from a console or SSH use `iyakki firewall off`; the boot
+parameter `iyakki.firewall=off` skips it for one boot. The page shows ON, OFF or **NOT PROTECTED** and the last blocked attempts. Details, the
+defaults and the DNS-name caveat: [`FIREWALL.md`](FIREWALL.md).
+
 ### USERS (administrators)
 Accounts, roles and per-user limits. See the next section and [`ADMIN-GUIDE.md`](ADMIN-GUIDE.md#accounts-roles-and-policy).
 
@@ -396,7 +546,15 @@ board (reads and writes `FEATURES.md`; rows can wait for other rows, a Graph vie
 (Build, Get the image to the cluster, Apply, Check the rollout; every step approved). Keys: `Ctrl+Shift+W` workspaces ·
 `Ctrl+P` open file · `Ctrl+Shift+F` search project · `Ctrl+B`/`Ctrl+J` tree/panel · `Ctrl+Shift+E D C T` focus tree/editor/chat/terminal
 · `Ctrl+Shift+B/G/Y/O/K` board/tasks/context/browser/cluster · `F5` run · `Ctrl+Shift+R` project settings · `Ctrl+=` / `Ctrl+-` density · `F1`.
-A lock stops a second window from editing the same workspace (Take over, Open read-only, Cancel). Details:
+A lock stops a second window from editing the same workspace (Take over, Open read-only, Cancel).
+**Connect Git or Gitea:** *Settings → Git and SSH keys → Add connection* (or the IDE's amber *Connect Git / Gitea* chip, the `⋯` menu, the Repositories
+panel) walks five steps: the kind (GitHub, GitLab, Gitea / Forgejo, other), where (the Gitea on your cluster, or an address), how you sign in (a token
+you paste, kept in your vault and never shown again, or an SSH key), a test against the host, and the name and email for commits. Cancel at any step
+keeps nothing. In the IDE you can then create a repository on that host (a review first, private by default), connect to one you have, push (its own
+review), fetch, pull, or disconnect (asks first). See [`GIT-AND-SSH.md`](GIT-AND-SSH.md).
+**Git:** the `⋯` menu has *Clone repositories…* (one address per line, `#branch` after it; into this workspace or a new one) and *Repositories…*
+(state, Fetch all, Pull all, retry, remove). Keys and tokens for git sites are in **Settings → Git and SSH keys** (make or import an ed25519 key, copy
+the public half to GitHub or Gitea, choose which key each site uses). Details: [`GIT-AND-SSH.md`](GIT-AND-SSH.md),
 [`AI-IDE.md`](AI-IDE.md), [`K3S-DEV.md`](K3S-DEV.md), [`PARALLEL-TASKS.md`](PARALLEL-TASKS.md).
 
 ![AI IDE](media/shots/ide-01-main.png)
@@ -428,18 +586,58 @@ webhook triggers are planned, not built. [`FLOWS.md`](FLOWS.md).
 
 ![Flows](media/shots/flows.png)
 
+### VOICE
+Read text aloud, and speak to type. Two areas, **READ ALOUD** and **DICTATE** (`F2` and `F3`, or `r` and `d` when no box has the keyboard).
+It uses the voices and the speech-to-text you already set up (Settings -> Models, Settings -> Voice, Store -> Setup); it adds none.
+
+**READ ALOUD.** Paste (`Ctrl+V`, or **Paste**), type, or open a text file (`Ctrl+O`, **Open file**: only files your account may read) in the
+box; it takes 20,000 characters and says with the counts when more was pasted. Choose the **voice** from the drop-down (`v`): the voice
+set in Settings -> Voice, every Lemonade text-to-speech model with Kokoro's usual voices (`af_heart`, `am_adam`, ...), other providers'
+text-to-speech models and the speech engines found on this computer. The **speed** slider (0.7x to 1.5x, `+` `-`) is there when the voice
+takes a speed. **Play** (`Ctrl+Enter` or `Space`), **Pause**, **Stop** (`Esc`); the sentence being read is lit in the box and the bar under
+it shows how far it is (click it to jump). Select some text and press **Read selection** to read only that. Under the box a line says what
+the text looks like (a warning when the chosen voice cannot read it: Kokoro reads English only) and **where the text goes**: *Text is sent
+to lemonade-local at localhost:13305 (this computer)*. A server on your network or the internet asks first, on a card, once per server
+(the same yes as Settings -> Models, kept in the settings file); No sends nothing. With no voice at all the page says so and
+**Set up Kokoro** opens Store → Setup on Kokoro's card; with no sound output it says *No sound output: choose where sound plays in Settings -> Sound*; a
+server that does not answer says so with its address.
+
+**DICTATE.** **Record** starts only when you press it (never by itself); a red **RECORDING** line with the time against the five minute
+limit and a level meter shows while it runs. **Stop** turns what was said into text with the speech-to-text of Settings -> Voice, or a
+Lemonade whisper model, and puts it in a box you can edit (a second recording is added below). The sound stays in memory and is never
+saved to disk; `Esc` while recording cancels and keeps nothing. A server on another machine asks first, like reading. Choose the
+**microphone** (`m`) if there are several; USB microphones are marked. **Copy to clipboard** (`c`), **Copy and clear** (`x`), **Read it
+back** (`b`, switches to READ ALOUD with the text) and **Clear**. With no microphone the page says: *USB microphones work: plug one in*,
+and that the built-in microphones of some laptops are not supported yet (the MacBookPro14,1 microphone has no driver). The tile is
+hidden in cloud mode when the computer has no sound output. Not sent to the AI: only to the speech server. [`VOICE.md`](VOICE.md).
+
 ### TALES
 An AI story teller that writes, draws and reads aloud, as a conversation. The story is on the left; on the right is a chat panel
 like the AI IDE's. Type an idea of up to 4000 characters in the idea box (three lines tall, it grows to ten and then scrolls; you can say it in words: *a 5-minute funny story in Tamil about a fox*) and press `Enter` or
 **Send** (`Ctrl+J` makes a new line; a longer idea is cut with a notice that gives the counts); choose who it is for (Kids, Teens, Adults), the kind and tone (drop-downs), one **Model: …** chip (`Ctrl+P`, `Ctrl+G` too) that opens the same chooser as the chat: *Same as chat* first, then the models of your providers, then Claude Code, Copilot and the other agents with their models and *Custom model id…* (an agent never gets tools here); **Options ▾** (`Ctrl+O`) has the length, the language,
-*Pictures off* and the reading and saving switches. Pictures are automatic (real images when a picture model is set up, otherwise drawings by the writer, or the built-in cartoon composer for small models; **Options -> Drawing** chooses, and the chip says what drew each picture; a character sheet keeps the characters looking the same). Then keep talking: *make it shorter*, *change the goat's name to Beeru*, *translate it to Tamil*, *redraw picture 2 as a
+*Pictures off* and the reading and saving switches. Pictures are automatic (real images when a picture model is set up, otherwise drawings by the writer, or the built-in cartoon composer for small models; **Options -> Drawing** chooses, and the chip says what drew each picture; a character sheet keeps the characters looking the same). **Options -> Pictures: every chapter / cover only / ask me each time** chooses how many pictures the picture model draws (with no picture model selected it says so and points to Settings -> Models; a Lemonade picture model not yet downloaded says *Install first*; pictures wait while memory is short; **Cancel pictures**, **Draw again** and **Delete** work per picture; the time shown is an estimate). Then keep talking: *make it shorter*, *change the goat's name to Beeru*, *translate it to Tamil*, *redraw picture 2 as a
 comic*. Each correction is a new **Version** (the earlier ones stay, choose them from *Version ▾*); **Stop** keeps what was written;
 a message sent while it writes steers it. The conversation is saved with the story. `Space`/`p` play-pause, `s` stop, `r` replay,
 `v` voice, `+ -` speed, `Ctrl+S` save to `Stories/<title>/`, `e` export (.html, .md, audio), `f` favourite, `l` saved stories, `n` a
-new story. Reading aloud needs a voice: open IYAKKI in a browser, or Settings -> Voice (the hint under the player has a **How**).
+new story. **Pictures** (Options): tick **Realistic pictures (photo style, people look real)** for photo-like pictures with the most realistic installed model (a small model such as SD-Turbo stays painterly; a GPU Lemonade server with SDXL-Base looks far better, and the page offers to install it); tick several **Styles** and set **Pictures per style** to get a gallery under each scene where you click the one you like (**Keep only the chosen** removes the rest); **Quality** and **Model for this story** choose speed against looks; **Picture log (g)** shows exactly what was asked of the picture model and what came back. new story. Reading aloud needs a voice: open IYAKKI in a browser, or Settings -> Voice (the hint under the player has a **How**).
 While it reads, the sentence and the word being said are lit and the page follows; click a sentence to read from there (Settings -> Voice -> Highlight chooses *Sentence + word*, *Sentence only* or *Off*). The model runs with no tools and strict child-safety rules. [`STORY.md`](STORY.md).
 
 ![Tales](media/shots/tales.png)
+
+### LAB
+Try picture and vision models and compare them (Work section). Three tabs, `F2` / `F3` / `F4`, and a **log** at the bottom of each (time, provider,
+model, a request summary without secrets, HTTP status, duration, bytes, errors, notes; **Copy log**, **Clear log**).
+**PICTURE**: choose a picture model (every provider's, with its size and its own size and steps), type a prompt (the TALES looks are **Style** buttons),
+a negative prompt (only where the server takes one), size, steps and seed (filled from the model, kept in bounds), **Generate** (progress, **Cancel**).
+The result shows the time, bytes, size, seed, model and provider; **Save picture** puts it in Pictures, **Copy prompt**; **Compare** draws the same prompt with a
+second model after the first (one after the other, both shown with their times). **VISION**: choose a vision model (or **any chat model**, with a warning),
+a picture from a file, the camera (asks every time, red sign), the screen (asks every time) or the clipboard; pictures over 1024 pixels are made smaller and
+the size sent is shown; ask a question (quick ones: describe, read the text, what is wrong with this screenshot, list the objects); the answer streams in with
+time and tokens when the provider says them; a model that cannot take pictures says so. **VIDEO**: pick a video and 4 to 16 frames, evenly spaced or every k
+seconds; the frames are taken with ffmpeg (you install it: Store -> Setup -> Media tools; without it the tab says so and offers the setup) and sent with your
+question to a vision model. Video generation appears only if a provider lists a video model; none does today and the tab says so. A provider on another
+computer asks once per session before anything is sent; the button area always says where a run goes. Nothing is saved except **Save picture**.
+`Ctrl+Enter` runs, `Esc` cancels. [`LAB.md`](LAB.md).
 
 ### Custom apps (your own tiles)
 Apps made for IYAKKI appear as tiles in the section they name (else **Work**) after the system tiles, with the label *custom app*. Open one and it fills the screen; the bar
@@ -448,6 +646,37 @@ Install them from the STORE (the sample calculator, notes and converter are in t
 administrator can add a workspace folder as an **unsigned dev app** (marked DEV). An app installed from a paired developer computer in
 developer mode is marked DEV too and labelled **Developer (local)**; a new build pushed from that computer reloads it while it is open
 ([`DEVELOPER-MODE.md`](DEVELOPER-MODE.md)). Accounts that may not use the browser do not get custom apps.
+
+### K8S
+*System group. For administrators, operators and users; not guests.* Pick a cluster at the top, a namespace on the left, and look at it.
+
+* **Cluster**: the managed dev k3s (a chip says *Running*, *Starting*, *Waiting for the network* or *Stopped*; **Start** starts it) or one of your saved kubeconfig profiles (added in Settings, Dev cluster; the kubeconfig stays in the vault and is never shown). IYAKKI remembers your last cluster, and for each cluster the namespace and the kind.
+* **Namespaces**: *All namespaces* and each namespace with a pod-count badge and a red dot when something fails. `n` jumps to the list, `/` filters it, Esc clears the filter.
+* **Kinds**: Pods, Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs, CronJobs, Services, Ingresses, ConfigMaps, Secrets, PersistentVolumeClaims, Events, Nodes, Namespaces, ServiceAccounts and Custom resources (`k`). Click a column title to sort, `/` to filter. The line over the table counts (`12 pods · 2 not ready`). Lists refresh every 5 s while the tile is on screen.
+* **Details**: Summary, YAML (read-only; Secret values are dots until you press *Reveal (asks first)*), Events, Related and, for a pod, **Logs** (container, previous run, last 100/500/2000 lines, follow, pause, wrap, search, copy, save). `c` copies what is shown; *Copy exec command* gives you the `kubectl exec` line to paste into CLI (the tile has no terminal).
+* **Changes** are off. An administrator can turn on **Allow changes** (remembered per cluster) to restart or scale a workload, delete a pod, cordon a node or delete another resource (type its name); every change asks first, is recorded and shows its output.
+* Keys: arrows, PageUp/PageDown, Home/End, Enter to open, `/`, `n`, `k`, `l` logs, `y` YAML, `r` refresh, Esc back. The wheel and two-finger scrolling work on the list under the pointer. On a phone-sized window it shows one page at a time with *Back*.
+
+* **Several clusters.** If you have more than one cluster (Settings, Clusters), the K8S tile, the AI IDE's K8s panel and the Store's Setup popups for the items that go into a cluster (Registry, Lemonade, Indic-TTS, DuckDB, Elasticsearch) show the **cluster name** with a small switcher: a list with a coloured dot (green running, grey stopped, red unreachable, amber not checked recently), *local* or *remote*, a GPU badge when known, and *Manage clusters...*. Choosing one only changes where things go; nothing is moved or deleted, and every deploy says the cluster in its question (`Deploy Lemonade to cluster "gpu-box" (remote)`). With one cluster you see no switcher. Setup installs these items into this machine's own cluster only (Indic-TTS's review follows the active one): if another cluster is active, Setup says so and asks you to choose *This machine* in the same popup first. The GPU badge (for example *GPU 2 x NVIDIA GeForce RTX 4090 (24 GB each)*, or *(last known)* when the cluster did not answer the last time) is read from the cluster's nodes in the background; the screen never waits for it.
+
+Details, limits and what is not done: [`K8S-TILE.md`](K8S-TILE.md).
+
+### DISKS
+*System group. For administrators, operators and users; not guests; hidden in Cloud mode.* Every drive of the machine, and what is on it.
+
+* **Left:** the drives, with an icon for how each is connected (USB stick, NVMe chip, SATA drive, SD card), its name and size, a bar for how full its open partitions are, a green dot when something on it is open, and an **eject** button. The drive that holds the running system says SYSTEM and has none. `/` filters.
+* **Right:** the chosen drive: a bar with one segment per partition, a table (file system, size, free space, where it is open), and **Mount**, **Unmount**, **Open** (copies the folder's path for a file picker), **Eject**, **Properties**. A grey button has its reason written under the buttons ("This system has no ntfs3 driver...", "Encrypted (BitLocker): unlock needs the key.").
+* **Safe by default:** drives open with programs switched off; **Read-only** opens a drive for reading only; administrators have **Allow running programs**. A busy drive is never forced: the message names what is using it. Eject flushes, closes every partition, switches a USB drive off and says *You can remove it now.*
+* **Roles:** administrators and operators: any drive that is not the system drive. Users: removable drives (USB, SD cards). Guests: none.
+* **Windows and Mac drives:** NTFS opens read and write when the kernel has the driver and Windows shut the drive down cleanly, otherwise read-only with a plain warning. BitLocker and LUKS drives are shown as *Encrypted: unlock needs the key* (not built). Mac APFS is shown and cannot be opened; HFS+ opens read-only when the kernel has the driver.
+* **Advanced: change partitions** (administrators, closed until you open it): new GPT or MBR table, add, delete, format (ext4, FAT32), rename; resize, exFAT and NTFS formatting say *not supported yet*. Every change shows its plan, shows the drive's name, size and serial, asks you to type the name (or the last 4 characters of the serial) and needs a second press. The system drive and any mounted or busy drive are refused.
+* Keys: arrows, Right or Enter to the partitions, `m` mount, `u` unmount, `e` eject, `o` open, `p` properties, `r` refresh, `/` filter, `a` Advanced (then `n`, `a`, `d`, `f`, `r`, `l`), Esc back. A phone-sized screen shows the list, then the drive, with a *Drives* button back.
+* Settings, Storage lists the open drives and `d` opens DISKS; a file picker's **Drives** button goes to your own `media` folder.
+
+Details, the file system table and what is not done: [`DISKS.md`](DISKS.md). Nothing here has been run on a real drive yet.
+
+### Clusters (Settings)
+*Settings, Clusters (the old Dev cluster page; press `C` on it). Administrators and operators change the list; users switch among the clusters they may see; guests see none.* One list of the clusters you can work against: **This machine** (the k3s IYAKKI manages), extra **local** clusters you add (each a complete k3s: about 2 GB of memory and CPU cores while it runs; two are allowed, *Advanced* allows four) and **remote** clusters (a kubeconfig file chosen with Browse, or a vault entry; kinds remote, tunnel, cloud-cli). Each row shows a status dot, the kind, *active*, *autostart*, a GPU badge when known, and the version, nodes ready and last error. Keys and buttons: Enter *Set active*, `a` add remote, `l` add local, `r` rename, `t` test (read-only), `b`/`o` start/stop a local cluster (asks with its name), `s` set up an extra local cluster, `x` remove (a local cluster asks and keeps its data unless you choose *Also delete data*; a remote cluster is only forgotten, its vault entry only if you ask), `u` autostart for an extra local cluster (only This machine starts by itself by default), `v` visible to users, `A` Advanced. A second local cluster is refused when the memory is not there, with the numbers. See [`K3S-DEV.md`](K3S-DEV.md), "Clusters".
 
 ### STORE
 Find, install, update and remove skills, WASM tools, MCP servers, themes, driver packs and CLI tools. Opens on **Installed**.
@@ -495,7 +724,94 @@ remove · `d` turn off/on · `o` open where it lives.
   it again; the old apps are gone) and **Remove** (choose *keep my published apps*, the default, or *delete everything*; the image registry is asked about
   separately). Anything that deletes needs the namespace typed. See [`STORE.md`](STORE.md) section 13.2.
 
+### Store → Setup
+
+The tab that replaces the old **Quick install** page of the IYAKKI menu. Open it from the STORE tile (tab **Setup**), or from the
+IYAKKI menu (**Quick install**, key `q`, which now simply opens it). **Why "Setup":** people come to the Store to get things onto the
+machine, and these are the building blocks that set the machine up (a cluster, runtimes, model servers, voices, coding agents,
+drivers); the word is short enough for a 360 px wide tab strip.
+
+Setup is a page of **tiles**, like an app store: one tile for every app, tool or driver, with a click for the details.
+
+* **The tiles.** Each tile has an icon in its category's colour, the name, the category, one line of what it is and its markers:
+  a **green tick** when it is installed, a **green dot and "Running"** for a server that is up (k3s, the image registry, Lemonade, Kokoro,
+  Elasticsearch), an amber **Update** pill with an arrow when a newer version is out, a **bar** while it installs, a red **warning** when the
+  last install failed, a small **star** when it is recommended for this machine. Nothing is folded away: everything this machine can
+  install is on the page. The tiles fill the width (one column on a phone, up to six on a big screen) and the page scrolls.
+* **Categories.** The bar under the search box: **All**, *Get started* (Node.js, Python 3, k3s), *AI and models* (Lemonade, Ollama,
+  *Use a Mac's GPU* guide), *Voices* (Kokoro, Indic-TTS, **Voice: Whisper tiny + Kokoro**), *Coding agents* (Claude Code, GitHub Copilot), *Data* (DuckDB, Elasticsearch,
+  local image registry), *Media* (ffmpeg), *Hardware* (GPU for local models (Vulkan), NVIDIA driver, Mac Wi-Fi and Bluetooth firmware,
+  the MacBook camera: shown only when the machine has the hardware, never in cloud mode) and *Linux apps*. Click one to see only
+  its tiles; `c` goes to the next one.
+* **Click a tile** (or press Enter on it) and a **popup** opens: what it is, its status (*Installed v1.37 · Running · Update available
+  v1.38*, *Not installed*, *Failed* ...), the size and time ("about 45 MB · about a minute"), the licence, where it goes, what it needs
+  ("Installs k3s first") and what needs it ("Needed by Lemonade, DuckDB ..."), the memory it wants, and warnings (not enough memory, not
+  runnable, found on the machine and left alone, used by other tools). **One main button** does the sensible thing: **Install**,
+  **Upgrade to x**, **Open**, **Start** (a stopped k3s), **Retry**, **Reinstall**, **Sign in**, **Install own copy**, **Review and deploy** or
+  **View log**. Next to it only what applies: **Stop** (a running k3s), **Open its page**, **Install all in this category** (it shows the
+  steps, sizes and total first, like Install all recommended), **View log** (the installer list beside the clock), **Details** and
+  **Close**. Esc or a click outside closes the popup. On a small screen the text scrolls inside the popup and the buttons stay in place.
+* **Search and filter.** `/` focuses the search box (live, `Esc` clears, "N of M shown"); the chips **All · Installed · Not installed ·
+  Recommended · Updates** (`f` cycles). They work together with the category.
+* **Recommended for this machine** (the star, and the *Recommended* chip) comes from what the machine has: no k3s recommends k3s; a GPU
+  recommends the GPU entries; a Mac model recommends the Mac firmware; too little memory keeps the heavy ones (Lemonade, Ollama, Kokoro,
+  Indic-TTS, Elasticsearch, the GPU entries) out of the recommendations and puts a plain note in their popup; cloud mode hides the hardware
+  tiles; a desktop window never recommends a cluster (and never installs one: the popup says so). **Install all recommended** opens a review
+  (every step in order, its size, the total download); `y` or *Install all* starts the jobs.
+* **Who may install.** The same people as before: administrators (installing, upgrading, starting and stopping). Everyone else who has the
+  Store sees the tiles and popups read-only (the main button says "Ask an administrator"); *Open*, *Details*, search and filters work for
+  everyone. Remote sessions are the same as local ones.
+* **Keys.** Arrow keys move between tiles (Up and Down go by rows), Enter or Space opens the popup, `i` presses a tile's main button
+  without opening it, `d` details, `o` open, `l` installer list, `a` install all recommended, `/` search, `f` filter, `c` category,
+  PageUp/PageDown scroll, Home/End first and last tile, Tab changes the Store's tab, Esc steps back (popup, search, filter, category,
+  then leaves). In the popup: Enter is the main button, `a` installs all in the category, `s` stops a running k3s, Esc closes.
+* **Scrolling.** The mouse wheel over the page, a trackpad two-finger scroll (direction, speed, smoothness and momentum are the choices of
+  Settings → Keyboard, *Scrolling*, with a Scroll test list to try them on), the scroll bar (click the track or drag the thumb) and the keys all scroll the same page.
+* **Other places.** *Open its page* on the GPU, Mac firmware and Linux apps tiles opens the GPU page, the Mac drivers page and the Linux apps
+  page of the IYAKKI menu, which stay where they are. *Open* on k3s opens the K8S tile. The command `iyakki quick-install ITEM` is
+  unchanged: it is what every button runs as a job. The VOICE tile's **Set up Kokoro** opens the Store on Setup with Kokoro's popup open;
+  Back returns to VOICE.
+* **Voice: Whisper tiny + Kokoro.** One tile that gives you listening and a reading voice. It is recommended (the star) when no speech engine is set up in Settings → Voice. Its button opens a review you scroll through: what is downloaded (about 75 MB and about 330 MB, estimates), that it runs in this machine's Lemonade on the CPU, the memory it wants, that Kokoro reads English only, and the licence texts (MIT, Apache-2.0) with a note that Kokoro's phonemizer may be espeak-ng (GPL), which is never shipped with IYAKKI and only downloaded at your click. After you confirm, it downloads the missing models, tests them (Kokoro speaks, Whisper tiny listens; the log says pass or fail), and sets Settings → Voice. If anything fails nothing stays installed. **Remove (undo)** in its popup puts your old engines back and deletes what it downloaded. It needs Lemonade, which is installed first when missing; with another cluster active Setup asks you to switch to "This machine".
+* **Removing.** Setup installs; it does not remove (except the voice pack's Remove (undo)). Command-line tools are removed in the CLI tile, store packages in Installed.
+
 ![Store](media/shots/store.png)
+
+## AI tools and your hardware
+
+Store -> Setup shows the AI tools that make sense for this machine: Apple Silicon (M1 to M6), or a PC with an NVIDIA, AMD or Intel Arc GPU
+that has at least 6 GB of memory a model can use (the screen's share is kept free), or a remote cluster with such a GPU. A machine
+without one does not see Lemonade, Ollama or the GPU runtime; a card explains why ("Hidden because this machine has no GPU with 6 GB
+or more ..."). Settings -> Cloud mode says what IYAKKI found ("NVIDIA GeForce RTX 3060, 12 GB: about 10.5 GB usable for models") and has
+the administrator switch **Show all AI tools** (press A), which lists every tool again as "not recommended". Details:
+[AI-HARDWARE.md](AI-HARDWARE.md).
+
+## Choosing a file or a folder
+
+Wherever IYAKKI asks for a file or a folder (installing from a file, adding a licence or a USB folder, opening or saving a table or a document, importing a dashboard or a flow, a shared folder, a key file) the box still takes a typed or pasted path (`Ctrl+V`), and beside it is a **Browse...** button (`Ctrl+O` does the same). A small chip above the box tells you at once what is there: *file found*, *folder found*, *does not exist*, *that is a folder, not a file*, *needs a csv file*, *your account may not use it*, *new file* or *replaces an existing file*.
+
+**Browse** opens a list of the folder you are in: a clickable path at the top (jump to any part), **Up**, **Home**, the location line (type or paste a path there and press `Enter`), a filter box (just start typing), **Hidden** to show dot files, and **New folder** where your account may write. Click a column heading to sort by name, size or date; click again to reverse. Double click or `Enter` opens a folder or chooses a file; `Backspace` goes up; arrows, `Home`, `End`, `PageUp` and `PageDown` move, and the wheel or two-finger scroll moves the list. **Open**, **Select folder** or **Save** answers; `Esc` or **Cancel** closes the browser and leaves the box as it was. You see only what your account may read; a guest sees nothing.
+
+**Drag and drop.** In the desktop window, drop a file or folder from your computer onto a dialog that has a path box and the box is filled in. Inside the browser you can drag a row onto the location line. Only the first dropped item is used.
+
+## Web mode: the desktop in a browser
+
+On a machine started with `iyakki web` (or `iyakki serve --web`, `IYAKKI_WEB=1`, or the boot option `iyakki.web=1`) open
+`https://<machine name or address>:8443/` in any current browser (8443 is the default port). The
+machine makes its own certificate, so the browser warns once; check the fingerprint the machine logs, or give it a certificate of your
+own. Without TLS the password crosses the network unprotected, so use it only on a network you trust.
+
+Sign in with a name and password of an account on the machine (create the first with `iyakki user add NAME --role admin`). You get
+your own desktop; closing the tab leaves it running and the next sign-in finds it as it was. One window per account at a time.
+
+* **Display settings:** the small tab at the right edge of the page (or Ctrl+Alt+Q). *Picture quality* is Automatic by default: the
+  page and the machine measure the link and choose Lossless, Balanced, Low bandwidth or Very low (half-size picture, five pictures a
+  second) by themselves. Pick a level to fix it. **Data saver** never uses better than Low bandwidth.
+* **Statistics:** Ctrl+Alt+S shows the level, bytes per second, pictures per second and the round trip.
+* **Text and interface stay sharp** at every level; only photographs and video are blurred while they move, and become exact again a
+  moment after they stop.
+* **Phone or tablet:** tap to click, hold for a right click, drag with one finger, scroll with two, pinch to zoom (two fingers move
+  the view while zoomed; *Reset zoom* undoes it). *Keyboard* in the settings opens the phone's keyboard; *Full screen* hides the browser bars.
+* Copy and paste go through the browser's clipboard (the browser may ask permission to read it).
 
 ## Roles and what you see
 
@@ -507,6 +823,19 @@ remove · `d` turn off/on · `o` open where it lives.
 | guest | CHAT, SRE PILOT, INBOX only; no terminal, no files, no network |
 
 An administrator can switch tiles and limits per person in USERS. You cannot do more than your role, and neither can the assistant.
+
+## Touch Bar (MacBook Pro with a Touch Bar)
+
+The Touch Bar shows Esc and F-keys or media keys by itself (the T2 chip draws them); IYAKKI acts on what they send: volume,
+brightness, play/pause and so on, with the bar at the bottom of the screen. **Fn** switches between the two layers while held.
+Settings -> Keyboard -> *Function keys* chooses which layer is first.
+
+On a T2 MacBook IYAKKI can also draw its own strip on the bar (default; Settings -> Keyboard -> *Touch Bar*: default, strip, keys,
+off): **System** (volume and brightness sliders, play/pause, clock), **Recent** (your last six apps), **AI** (Claude Code's state,
+Chat, Ask, Stop agent, Approve and Deny) and **App** (shortcuts of the app in front). Esc is at the left; the chip next to it
+cycles the strips. **Today the strip is display only**: the kernel in this image does not expose the bar's touch panel, so
+buttons and sliders cannot be pressed (the keys on the keyboard still work). If the strip cannot be used for any reason, the T2's
+own keys come back by themselves. Details, the test plan and the safety rules: [`TOUCH-BAR.md`](TOUCH-BAR.md).
 
 ## Sound
 
@@ -530,9 +859,35 @@ Devices popover show the output in use, or why there is none. A play command in 
 Automatic leaves the choice to that sound server. Engines that speak by themselves (espeak-ng or speech-dispatcher speaking
 directly) use the system's default device; engines that make a WAV (piper, espeak-ng to a file, HTTP) go to the chosen output.
 
+## System sounds
+
+Short quiet cues, made in code (no sound files): a soft rising two-note when you **sign in**, a soft falling two-note when you **sign out**
+(the logout sound is played before the screen changes, and sign-out never waits for it more than 0.7 s), a chime for a **new
+notification** and a three-note **done** for a finished job (a background job, or an install in the top bar). They go through the same
+output and volume as everything else (Settings -> Sound) and are **12 dB quieter than IYAKKI's volume** by default so they never startle;
+they are silent when sound is muted, when there is no output, and in cloud mode without sound hardware.
+
+**Settings -> System sounds** (administrators; next to Sound): the master switch (on by default), the **level** (-30 to 0 dB, slider or
+`+` `-`), a switch for each of Signing in, Signing out, New notification and A job finished, and a **Preview** button on each (it plays
+even when the switches are off; `p` previews the selected one). The choice is the machine's and is kept in the settings file.
+
+## Screen saver and screen off
+
+**Settings -> Display & sound -> Screen saver** (everyone; your own choices): after the idle time you choose (standard: 10 minutes; 1, 2, 5,
+10, 15, 30 or Never) the screen shows the **IYAKKI logo** drifting slowly on black (or the logo with the time, a small dim logo for OLED
+screens, or a breathing logo), and after more minutes (standard: 10) the screen **turns off**; you can also choose to turn it off directly
+or to do nothing. A laptop dims first (standard: to half) and, on the battery, every time is halved (switch it off if you like). Press a key,
+click, move the pointer or touch to wake it: **the first key or click only wakes the screen** and is not passed on, so a stray click does
+not press a button. Music, the radio, a tale being read, a waiting approval, an alarm, the low-battery card and the drive banner keep the
+screen on, and sound is never stopped. **Preview** shows the saver for 5 seconds. Administrators also set the sign-in screen (standard: saver
+after 5 minutes, off 10 minutes later). There is no lock screen yet (sign out to protect a session). Details, what is not built and what to
+do if the screen stays black: [SCREEN-SAVER.md](SCREEN-SAVER.md).
+
 ## Voice
 
-Dictation (`Ctrl+R` in chat) and read-aloud (`Ctrl+O`, TALES) use the engines in Settings -> Voice. **Reading aloud needs no setup when
+
+**Omni collections.** A Lemonade collection (such as `LMX-Omni-5.5B-Lite`) shows in Settings -> Models as "omni collection" with its parts. **Use all parts** (administrators) sets chat, TALES pictures, speech-to-text and the reading voice to its parts in one step, all or none, and **Undo Use all parts** puts the old choices back; missing parts are listed with their size and installed with **Install missing parts**. See VOICE.md.
+Dictation (`Ctrl+R` in chat, or the VOICE tile) and read-aloud (`Ctrl+O`, TALES, or the VOICE tile) use the engines in Settings -> Voice. **Reading aloud needs no setup when
 the computer already has a speech engine**: IYAKKI looks once in the background (piper, espeak-ng, speech-dispatcher, festival, and the
 system voices of macOS and Windows) and uses what it finds, unless an administrator chose something else. Settings -> Voice lists each
 engine with its voices, whether it speaks your language and can save audio, and for the others why not (for example "piper has no voice

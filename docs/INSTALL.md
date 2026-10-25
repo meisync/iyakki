@@ -137,7 +137,27 @@ An installer that runs **on** the target machine from the USB stick is described
 **Partition table: Auto / GPT / MBR** choice, shows the table the disk has now and the layout it will get, and verifies both
 copies of a GPT after writing. GPT installs were booted in QEMU under legacy BIOS (SeaBIOS) and UEFI (OVMF), also with
 4096-byte sectors under UEFI; no real computer has been tried yet.
-Dual-boot is not supported: the disk is used whole.
+
+**Next to another system, or on partitions you choose.** Instead of burning an image over a whole disk you can partition,
+choose partitions, format and install from three places, all with the same plan table and the same confirmation: a summary with an **Install** button (a plan that erases data also
+needs a ticked box and the button says `Erase <drive> (<size>) and install`). Since 2026-10-24 this is not typed any more (owner's
+decision: it relaxes the earlier rule of typing the drive name and size; the reasons and the rules that stay are in
+[`INSTALLER.md`](INSTALLER.md), rule 2):
+
+* **At boot**: start the stick and pick **IYAKKI - Install to a disk** in the boot menu; choose the target disk, then *Free space
+  only* (adds IYAKKI in unallocated space and touches nothing else), *Use existing partitions* (you pick which partition becomes
+  BOOT and which DATA; only those are formatted), *Custom sizes*, or *Whole disk*. For dual boot with Windows or Linux keep the
+  disk's EFI System Partition (`e`): only the folder `EFI/IYAKKI` and a UEFI boot entry are added. The stick you booted from is
+  never offered as a target.
+* **In a terminal on any Linux computer**: `sudo iyakki-usb --plan iyakki-install-x86_64.img`, or without the pages
+  `sudo iyakki-usb --plan --disk sdb --mode free-space --dry-run --plan-file plan.json iyakki-install-x86_64.img`.
+* **In a window**: `iyakki-installer` (Linux desktop; pages Image, Drive, Mode, Plan, Confirm, Progress, Done; the image can be a
+  file or a download with a checksum check; the administrator prompt is polkit's, the window never sees a password).
+
+Existing filesystems are never shrunk: make free space first with the other system's own tool. After installing, restart and
+choose **IYAKKI** in the firmware's boot menu (F12, F10, Esc or Option); the other system stays the default. Alpha: tested on disk
+images only; try a spare USB stick as the target before an internal disk. Legacy-BIOS boot of a shared disk and Windows/macOS hosts
+for the window installer are planned.
 
 ## 4. Virtual machine
 

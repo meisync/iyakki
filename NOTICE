@@ -34,3 +34,6 @@ Optional full web engine (only in the separate "web" image variant, never in the
 LICENSING.md item 9): WPE WebKit (LGPL-2.1+ / BSD-2-Clause), Cog (MIT), cage (MIT), wlroots (MIT), Mesa (MIT), GStreamer (LGPL-2.1+)
 and the libraries around them are separate programs and dynamically linked shared libraries started by IYAKKI, not part of it. They keep their
 own licences; the web image's legal-info/ directory carries their source and licence texts.
+
+The boot menu's larger font is built at image time from DejaVu Sans Bold (Bitstream Vera licence with the DejaVu changes, public domain
+additions; free to use, copy and redistribute, the font itself may not be sold alone): https://dejavu-fonts.github.io/License.html

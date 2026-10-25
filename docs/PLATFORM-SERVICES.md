@@ -148,6 +148,12 @@ as *connected*: IYAKKI deploys, stops and removes nothing for it (Remove only fo
 
 ## Connect a workspace to Gitea
 
+There are now three ways in, all ending in the same `platform/connect.rs` review and approval: IDE → K8S panel → *Git*; Services → *Connect workspace*;
+and the unified **Connect Git / Gitea** flow (IDE top bar chip, `⋯` menu, Repositories panel; Settings → Git and SSH keys → *Add connection* →
+*The Gitea running on my cluster*, which lists the instances installed here and, when there is none, offers *Open Platform services*). The unified
+flow's connection for the cluster's Gitea points at the vault entry this service already keeps and calls `plan_connect` / `connect` for *Create a new
+repository*; see [`GIT-AND-SSH.md`](GIT-AND-SSH.md), "Connect Git or Gitea".
+
 IDE → K8S panel → *Git* (or Services → *Connect workspace*): 1. the review shows the repository name (from the workspace, lowercased), the
 privacy (**private by default**), the origin change and warnings (plain http is called out); approve → IYAKKI asks the service who the token
 belongs to, creates the repository through the API (an existing one is reused), and sets `origin` to the repository's HTTPS address (the

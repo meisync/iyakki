@@ -109,6 +109,8 @@ the main area. The bottom panel's **K8S** tab is only a one-line status (cluster
 with an "Open K8s view" button (Enter does the same); it keeps the cluster polled while shown, but has no table, so no letter
 shortcut. The bottom panel never draws a second copy of the view, in any size.
 
+**The same view without a workspace.** The **K8S** tile (System group) is a stand-alone explorer for the managed dev cluster and your saved kubeconfig profiles: any namespace, sixteen kinds of resources, YAML with masked Secrets, related objects and pod logs, read-only by default ([`K8S-TILE.md`](K8S-TILE.md)). It shares this view's cluster client, failure texts and pod parsing.
+
 ## Layout and keys
 
 Wide windows (1280x720 and up) show: rail, tree, editor (with its tab strip Editor | Board | Tasks | Context | Browser | K8s) over a bottom panel, and the chat
@@ -183,13 +185,40 @@ Created on first use of a folder. Every field is optional.
   "k8s": { "profile": "", "namespace": "", "selector": "app=shop", "kubeconfig": "" },
   "features_file": "FEATURES.md",
   "commands": { "test": "cargo test", "run": "cargo run", "build": "" },
-  "preview": { "url": "http://192.168.1.69:30929/attendence" }
+  "preview": { "url": "http://192.168.1.69:30929/attendence" },
+  "repos": [
+    { "url": "https://git.example.org/team/api.git", "path": "api", "branch": "main", "key": "token", "test": "cargo test" },
+    { "url": "git@github.com:octo/web.git", "path": "web", "key": "work", "depth": 1, "run": "npm start" }
+  ],
+  "git_keys": { "github.com": "work" }
 }
 ```
 
 `k8s.namespace` defaults to `<workspace name slug>-dev`, so two products do not collide; when two workspaces point at the same
 context and namespace each shows a warning. `profile` is a kubeconfig context name, `kubeconfig` a file in the account's file
 scope (empty means `$KUBECONFIG` or the default). `preview.url` is the page the Browser tab showed last (the query and fragment are dropped, they may carry tokens; the field is absent until a page was shown). The settings dialog (top bar gear, Ctrl+Shift+R) edits these.
+
+`repos` is written by the Clone dialog (below): one entry per repository, each in its own folder of the workspace; `key` is the id of the SSH key
+used (or `token`), never a secret; `test` and `run` are that repository's own commands. `git_keys` is this workspace's own choice of SSH key per git
+host, overriding the person's table in Settings → Git and SSH keys. All of it is plain text that can be committed.
+
+## Git: several repositories in one workspace
+
+The top bar's **⋯ menu → Clone repositories…** (also `c` in the workspace switcher, and "no: clone repositories into it next" in the new-workspace
+form) opens a dialog with a text area (one address per line, `#branch` after an address; `@gitea-name/owner/repo` for a repository of the platform
+services' Gitea), a compact table (branch, depth, folder per repository, and which key or token each will use), and the target: this workspace or a
+new one. **Ctrl+S** clones: each repository is a detached job (the installer indicator and live log), at most two at a time, each in its own subfolder
+of the workspace, never outside it and never over a folder that has files. **Repositories…** (⋯ menu) lists them with git's last message, a Retry button
+for a failure, **Fetch all**, **Pull all** (fast-forward only; a card asks first when a repository has local changes), commands per repository
+(`e`), per-workspace keys (`k`) and a typed-name **Remove**. The tree shows `main ↑1 ↓2 ✎3` next to each repository folder. The assistant and the
+external agents see every repository in the PROJECT STATE. Keys, tokens, known hosts and the key service: [`GIT-AND-SSH.md`](GIT-AND-SSH.md).
+
+**Connect Git / Gitea.** A project with no `origin` shows an amber **Connect Git / Gitea** chip in the top bar (once connected the chip names the
+connection and opens the Repositories panel); the same action is in the `⋯` menu and, as *Connect to Git or Gitea*, in the Repositories panel, whose
+header also shows the connection, host, remote and branch with Fetch, Pull, Push… and a confirmed Disconnect. Choose one of your connections (made
+in Settings → Git, or *Add connection…* here, in place), then *Create a new repository* (private by default; a review first; `git init`, the first
+commit and `origin` as listed there) or *Connect to an existing repository* (the host's list, or type an address). Pushing is a second review, then
+a normal git job. Details and the safety rules: [`GIT-AND-SSH.md`](GIT-AND-SSH.md), "Connect Git or Gitea".
 
 ## Targets: what the workspace is for
 
@@ -198,7 +227,10 @@ Ctrl+Shift+N) offers *IYAKKI tile app* first and by default, then *Web service o
 `target: …` (under ⋯, *Change target…*, on a narrow window). A tile workspace: **Run** (F5) opens the app live as an unsigned dev app (Back returns here), **Tests** runs its headless
 tests, **Add tile** puts it on your launcher (administrators), **Publish** starts the guided publish flow. Changing a k3s workspace such as a calculator with `server.js`, a Dockerfile and deploy
 rows to a tile app shows the plan and asks the assistant to convert it; the old dev namespace can then be removed with the teardown tool, which always asks. The assistant's rules and the
-publish walk-through are in docs/APP-AUTHORING.md.
+publish walk-through are in docs/APP-AUTHORING.md. **Publish** lists a private store that was deployed on this device but never added first
+("Private store on this device (not added yet)"); one card shows its key fingerprint and **Add it and publish** adds it with the key pinned,
+makes it the target and shows the review (docs/STORE.md, section 17.1). The assistant does the same with `store_publish` / `tile_ship` and
+`add_deployed_store`, through one approval card.
 
 ## The Browser tab: test the app you just deployed
 
@@ -307,6 +339,10 @@ The manifest check (`iyakki_agent::deploylint`) rejects privileged containers, `
 capabilities, `runAsUser: 0`, cluster-scoped kinds, Secrets with literal values and other namespaces, and sets
 `imagePullPolicy: IfNotPresent` for images that were loaded into the local cluster (saying why); it warns about `:latest`, unknown
 registries, missing resource limits and root.
+
+### Which cluster (several clusters)
+
+The K8s panel's header shows the **cluster name** and, when the account has more than one cluster, a switcher (status dots, local or remote, GPU badge, *Manage clusters...*); Deploy, Registry and Services are in the same panel and work against that cluster. The cluster is the account's **active** one; a workspace can override it (`clusters::switch_workspace`, stored in the account's cluster list, not in `project.json`), so one workspace deploys to `gpu-box` while the others use This machine: when the workspace has its own cluster the switcher changes that one, otherwise the account's. The cluster resolution is given the workspace's effective cluster (`clusters::remembered_for`); a kubeconfig pinned in `project.json` still wins, and choosing a cluster in the switcher removes that pin. The deploy form, the deploy flow's title and its apply step, and the assistant's audit lines (`k8s.<tool> ... on cluster "gpu-box" (remote)`) name the cluster, and a production-looking cluster stays read-only for the assistant. With one cluster nothing is added to the header. See [`K3S-DEV.md`](K3S-DEV.md), "Clusters".
 
 ### The assistant's cluster tools
 
@@ -587,6 +623,10 @@ Pick the next unfinished row.* A goal such as "continue" adopts the rows already
   `composer.json`, `CMakeLists.txt` / `Makefile` with C or C++ files (the root and one folder down). Set it yourself in **Settings → Stack** (`stack` in
   `.iyakki/project.json`: Go, JavaScript, TypeScript, Python, Java, Rust, C#, PHP, C, C++); the footer shows the one in use.
 * **Skills.** The language skill of the stack and, when the project has a Dockerfile or `deploy/` (or the request is about deploying), the k3s practices are always
-  included, before the one skill chosen by what the request resembles.
+  included, before the one skill chosen by what the request resembles (at most three are pinned). Three built-in skills cover k3s: `k3s-dev-best-practices` (the full
+  14-step playbook, pinned for any deploy-related request or project), `k3s-build-and-deploy` (the short happy path for "build this and deploy it" / "ship it": detect the
+  project, test image, runtime image, load, manifest, apply, verify, rollback, cluster rules, failure table, definition of done; pinned together with the broad one
+  when the request says build and deploy, deploy to k3s, ship or Kubernetes, or the project has a Dockerfile or `deploy/`) and `k3s-dockerfile-patterns` (a ready
+  multi-stage non-root Dockerfile per language, found by its own trigger words when a Dockerfile is needed). Each body stays under 3950 characters.
 * **Footer.** The status line of the chat shows `stack: Go · board 3/10 done · 1 bug`.
 

@@ -88,6 +88,19 @@ file says so and the Mac firmware pruning is applied again. Output: `target/buil
 with `--fast-zstd`, and booted to the supervisor and DHCP in QEMU). It checks that the web base carries the same Mesa Intel and H.264
 choice as this run (`WEB_IRIS`, `WEB_CROCUS`, `WEB_H264`) and refuses otherwise.
 
+### The PC image: the same combine with the whole firmware set
+
+```
+./run.sh build-pc-layered        # = repack.sh pc --base target/buildroot-web --kernel-from target/buildroot-mac --graft git --cargo
+```
+
+Variant `pc` is `macweb` for ordinary x86-64 PCs. The kernel, modules and web userland are the same donors. The difference is
+`/lib/firmware`: `--firmware-from DIR` (default: the `build/linux-firmware-*` tree of the `--kernel-from` build) runs that tree's own
+`copy-firmware.sh` into the unpacked root, and the post-build hook of `pc-x86_64` prunes it with `board/iyakki/pc-firmware.keep` (all GPUs,
+common Wi-Fi, Bluetooth and Ethernet; about 420 MB before compression, against 46 MB for the Mac image; the install template gets a 512 MB boot volume because the initial RAM disk is about 260 MB). Output goes to its own folder,
+`target/buildroot-pc/`; `/etc/iyakki-release` says `VARIANT=pc-x86_64`. Nothing is built or written to a drive. The NVIDIA open modules
+(`IYAKKI_NVIDIA_OPEN=1 ./run.sh build-mac`, a kernel donor rebuild) are optional; `docs/GPU-K3S.md`.
+
 Why this is correct: `macweb` = `web` + `iyakki_firmware.fragment` + `iyakki_mac.fragment`, and `mac` = `libre` + the same two. The
 fragments add a kernel patch directory, a kernel fragment, `apple-bce` and linux-firmware packages. Nothing in the web userland depends
 on them, and the kernel/modules/firmware of `mac` are the ones `macweb` would build (same version, same fragments). Risks:
@@ -100,6 +113,26 @@ on them, and the kernel/modules/firmware of `mac` are the ones `macweb` would bu
   `macweb` tree is the authority, and a real `build-macweb` is needed;
 * it is an assembled image, not a Buildroot tree: `legal-info/` of the layered image is the union of the two builds' (copy both);
 * boot-test it in QEMU (`qemu-test.sh`-style) and on the Mac before a release, like any image.
+
+## Adding a package to an existing image: `--graft` (git)
+
+A package built alone in the base tree can go into an image without a full build. The example is git (F-GIT-01):
+
+```
+export PATH=$HOME/.cache/iyakki-scratch/bin:$PATH TMPDIR=$HOME/.cache/iyakki-tmp   # the `install` shim of earlier builds
+make -C target/buildroot-web BR2_JLEVEL=5 -j5 git iyakki-git-ssh                     # the packages only: a plain `make` needs IYAKKI_BIN etc.
+dist/buildroot/repack.sh macweb --base target/buildroot-web --kernel-from target/buildroot-mac --graft git
+```
+
+(`./run.sh build-macweb-layered` already passes `--graft git`.) `repack.sh --graft NAME` (repeatable, or `IYAKKI_GRAFT="git"`) runs
+`dist/buildroot/graft.sh NAME <base>/target <unpacked root>` after the unpack and before the overlays and hooks. The files come from
+`dist/buildroot/graft/NAME.list`: one path or glob per line relative to `target/`, a leading `-` removes matches. The script keeps hard
+links (git's 150 command names are one file), skips files that start with a perl or python shebang, and refuses when a shared library of a
+copied program is not in the image (it names the library). `--dry-run` checks the graft before anything is unpacked.
+`dist/buildroot/test-graft.sh` tests it on fake folders (21 checks). The graft is idempotent, and a full `build-web` / `build-macweb` has the
+same files because `iyakki_web.fragment` selects the packages. What git adds: 163 files, about 14.3 MB in the file system and 3.4 MB packed.
+`make legal-info` in the base tree lists git, libcurl and the SSH helper with their sources; copy it with the others (as for the layered
+macweb image). Details: [`GIT-AND-SSH.md`](GIT-AND-SSH.md).
 
 ## Shared compiler cache (ccache) for the next full builds
 

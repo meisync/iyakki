@@ -208,6 +208,77 @@ holds the catalogs, trusted keys, the daily check (off), installing from a file 
 opens, Esc goes back, `/` searches, `i` installs from the catalog, `r` removes, `u` updates, `o` opens, `c` checks for news,
 Tab changes page.
 
+### 6.1 The Setup tab (the system's own building blocks)
+
+Tabs: **Installed**, Discover and Publishers (when the catalog is on), **Setup**, **Settings**. Setup is the former *Quick install* page of the
+IYAKKI menu (the menu's *Quick install* entry, key `q`, now opens it; the page itself no longer exists). It lists what the system can
+install for itself, from the engine in `iyakki_agent::quickinstall` (unchanged; the command `iyakki quick-install ITEM` is still what
+every button runs as a detached job of the workspace `iyakki-install`, shown beside the clock and in the installer list). The screen is
+`crates/iyakki-shell/src/apps/store_setup.rs` (what a tile is and does) and `store_setup_view.rs` (the picture: tiles and popup).
+
+Since 2026-10-23 Setup is a page of **tiles**, like an app store: one tile per app, tool or driver, and a click opens a popup for it.
+(The first version was a list of cards under folded headings. It hid things: with k3s installed nothing was "recommended", so every
+heading was folded, and the installed and running k3s was not on the screen at all. Nothing folds any more.)
+
+* **Name.** "Setup": short, says what it does (sets the machine up), fits a 360 px wide tab strip; "Essentials" implies everything is
+  needed, "Tools & services" is long and overlaps the CLI tile.
+* **The page.** A search box, a **category bar** (*All*, *Get started*, *AI and models*, *Voices*, *Coding agents*, *Data*, *Media*,
+  *Hardware*, *Linux apps*: only the categories this machine has), the filter chips (*All*, *Installed*, *Not installed*, *Recommended*,
+  *Updates*) and **Install all recommended**. Below them the tiles, in sections with a plain heading each (title, what it holds, how many
+  are installed). Every item is on the page once, in its own category; nothing is folded. Columns follow the width: one on a phone
+  (360 px), three at 800 px, four at 1280, up to six on a big screen (`view::grid`); tiles never overlap or leave the rectangle, also in
+  a 50:50 or 30:70 pane. The page scrolls with the wheel, the trackpad, the scroll bar and the keys (`scrolllist.rs`).
+* **A tile** has a badge (the item's icon in the colour of its category: the same icons and colours the launcher tiles use, no palette
+  of its own), the name, the category, one line of purpose, and the markers:
+  * a **tick** (green) when it is installed; a **green dot and "Running"** for a service that is up (k3s from the supervisor's state,
+    read each frame; Lemonade, Kokoro, the registry, Elasticsearch and Indic-TTS while they are installed, as before);
+  * an **Update** pill with an up arrow when a newer version exists (the engine's upgrade lookup, `quickinstall::check_upgrades`, run
+    once on a thread of its own when the tab opens and again after an install finished; the drawing never waits for the network);
+  * a **bar** (and a ring) while it installs, a red **warning** triangle when the last install failed, an amber ring for "installed
+    earlier, not running" and "found on this machine", a small **star** when it is recommended for this machine.
+  The status line says it in words: *Running · v1.31.4*, *Installed · v26*, *Update to 1.38*, *Stopped*, *Not installed*,
+  *Installing 40 %*, *Failed*.
+* **The popup** (a click or Enter on a tile; Esc, the close mark or a click outside closes it): the badge, the name, the category, the
+  status line (*Installed v1.37 · Running · Update available v1.38*), what it is, and a table: *Size and time*, *Licence*, *Where it goes*,
+  *Needs* ("Installs k3s first"), *Needed by* (what depends on it), *Memory*, then the notes (heavy for this machine, not runnable, found
+  on the machine and left alone, used by other tools, a desktop window never installs a cluster). **One main button**: Install, Upgrade
+  to x, Open, **Start** (a stopped cluster), Retry, Reinstall, Sign in, Install own copy, Review and deploy, View log. Beside it, only
+  what makes sense now: **Stop** (a running cluster, administrators; it asks the dev cluster supervisor, `K3sDev::stop`, on a thread of its
+  own), Open its page, **Install all in this category (n)** (the same review as Install all recommended), **View log**, **Details**
+  (state on this machine, item id, installer steps, the equivalent command), Delete download (the camera driver), Log out (a signed-in
+  coding agent), **Remove (undo)** (only the voice pack, below) and Close. The body scrolls inside the popup when it is longer than the screen;
+  the buttons stay. There is no Remove for a cluster or a server.
+* **Recommended** is computed from facts the engine and the machine already have (`Machine::recommend`): no k3s, a GPU, an NVIDIA GPU, a
+  Mac model; too little memory (the heavy items' `min_ram_mb`) keeps heavy items out and says why in the popup; a desktop window never
+  recommends a cluster. A recommended tile stays in its own category and carries the star; the *Recommended* filter lists them.
+  **Install all recommended** shows every step (dependencies first), its size and the total download, and starts the jobs on `y`.
+* **Who**: the same rule as the old page, `manage_settings` (administrators) for everything that changes the machine (installing,
+  upgrading, starting, stopping); others see read-only tiles and popups (the main button reads "Ask an administrator" and cannot be
+  pressed). Open, Details, search and filters are for everyone who has the Store.
+* **Keys**: arrows move between tiles (Up and Down by rows, across the category headings), Enter or Space opens the popup, `i` presses a
+  tile's main button without the popup, `d` details, `o` open, `l` the installer list, `/` search, `f` filter, `c` category, `a` install
+  all recommended, PageUp/PageDown scroll, Home/End first and last tile, Esc steps back (popup, then search, filter, category, note, leave).
+  In the popup: Enter the main button, `d`, `a` (all in this category), `l`, `o`, `s` (stop a running cluster), Esc.
+* **Clusters and the AI profile.** The popup of an item that goes into a cluster (Registry, Lemonade, the voice pack, Indic-TTS, DuckDB, Elasticsearch; not Ollama, which installs on this machine) shows a *Deploys to* row with the confirmation text (`Deploy Lemonade to cluster "This machine" (local)`) and, with more than one cluster, the **cluster switcher** under the close mark (`apps/cluster_host.rs`; *Manage clusters...* opens Settings → Clusters). The installers run in this machine's own cluster: with another cluster active Setup refuses to start them and says how to go on (the Indic-TTS review, which goes through Platform services, follows the active cluster); the review of several items names where the cluster items go; the start and the hand-off are audited with the cluster. Under the filters the page shows the machine's facts line (`This machine: ...`) and, when the AI profile hides tools, "N AI tools are hidden because ..." with the **Show all AI tools** link (administrators; audited like Settings → Cloud mode, key A). See docs/AI-HARDWARE.md.
+* **Voice: Whisper tiny + Kokoro** (*Voices*, `voicepack.rs`, docs/VOICE.md "Voice in one click"): recommended only where Settings → Voice has no speech engine (`Machine::voice_engines`). Its button opens a scrolling **review** instead of starting at once: what is downloaded (about 75 MB and about 330 MB, estimates), where it runs (this machine's Lemonade in the cluster, on the CPU), memory, languages (Kokoro English only), and the full MIT and Apache-2.0 texts with the espeak-ng (GPL) note and "Not shipped with IYAKKI; downloaded at your click"; `y` or the button confirms, Esc cancels. It deploys to the cluster on this machine like Lemonade (with another cluster active Setup refuses), pulls only the missing models, tests them, sets the speech engines and offers **Remove (undo)**.
+* **The VOICE tile's "Set up Kokoro"** opens the Store on Setup with Kokoro's popup open.
+* **Not here**: removing (the CLI tile removes tools, *Installed* removes packages); there is no remove for a cluster or a server (only the voice pack has Remove (undo)). The
+  restricted firmware packs (`fwpack.rs`) have tiles only where their hardware is, but their licence step has its own page: the tile
+  says where the pack stands and its button is not pressable here yet.
+* **Tests**: `store::setup::tests` (fake presence and facts, stand-in install program): the grid at 360x740 to 2880x1800 and in panes,
+  every marker as pixels, the popup per state, category, search, keys, scrolling, roles, the camera tile; the Setup tab is in the monkey
+  tests (`monkey_store_setup_tab`); `IYAKKI_PICTURES=/some/folder cargo test -p iyakki-shell --lib store::setup::tests::pictures -- --ignored`
+  writes pictures to look at.
+
+**What else could leave the IYAKKI menu (an owner decision; nothing was removed except the Quick install page).** The menu keeps
+About, *Quick install* (now only a way into Store → Setup, kept so that the old key `q` and old habits work), Media player, Linux apps,
+Mac drivers, Settings and, for administrators, Developer mode. Candidates to remove later, with what already covers them: *Quick install*
+(the Store's Setup tab; the STORE tile), *Media player* (the MEDIA tile; its page only adds a typed path and the install button, which
+Setup also has), *Settings* and *Developer mode* (both are plain jumps to the Settings tile; Developer mode is also Settings →
+Developer mode), *Mac drivers* (Setup's Mac firmware card "Open its page", Settings → Devices and the Devices popover reach it) and
+*Linux apps* (Setup's "Linux apps" card "Open its page" reaches it). *About* has no other home. Removing any of them means deleting its
+`ENTRIES` line in `brandmenu.rs` and the tests that name it; the pages themselves stay reachable from their cards.
+
 ## 7. Publisher guide (offline)
 
 The tool is `iyakki pkg`, runnable on any machine without a network:
@@ -278,6 +349,8 @@ whole machine, so Auto and Autopilot cannot run it. Section 12.
 * **Where the official catalog is hosted** (the project's Gitea releases or a mirror) and the default URL.
 * **Refund policy** and what happens to a subscription app after expiry (grace period).
 * **Full WASM apps** with a UI surface: the `app` kind is reserved until that surface is designed.
+
+Which AI cards a machine shows (GPU runtime, model servers, the Mac host) follows its AI hardware profile: [AI-HARDWARE.md](AI-HARDWARE.md). An administrator can switch on Show all AI tools in Settings -> Cloud mode.
 
 ## 12. Driver packs (bare-metal hardware)
 
@@ -398,7 +471,7 @@ now, read-only, trusted keys only.
 If the cluster has none, the deploy review says so in plain words and shows **Create registry** instead of failing. Pressing it shows what will be created
 (namespace `iyakki-registry`; the CNCF Distribution `registry:2`, Apache-2.0, which the *cluster* pulls from Docker Hub once, IYAKKI does not ship it; a volume of
 5, 10, 20 or 50 Gi on the cluster's default StorageClass such as local-path; a NodePort Service on 30500 or the next free port), then runs as a detached job
-(the installer ring beside the clock, the log in JOBS, also Quick install → Cluster → Local image registry). When it is ready the deploy plans again and continues
+(the installer ring beside the clock, the log in JOBS, also Store → Setup → Data services → Local image registry). When it is ready the deploy plans again and continues
 by itself. It needs the cluster to answer, a Ready node and a StorageClass; otherwise one sentence says which is missing and nothing is created. Pods and the node pull
 `localhost:<port>/...` (containerd allows plain HTTP for localhost and a NodePort answers on every node), so **no `registries.yaml`, no node restart and no root**: the cluster is not restarted.
 IYAKKI pushes the image itself over the registry v2 API (`ocipush.rs`: a one-file image, so no docker, podman or curl is needed). A second click only reports
@@ -620,6 +693,39 @@ of section 15; removing asks what to do with the app's saved data (kept by defau
 server takes the `tile` kind by default. The IDE's **Publish** button runs the whole route (checks, version, store, signing key, token,
 review card, publish, install back to test): docs/APP-AUTHORING.md, "Publish to a private store from the IDE". A withdrawal by the store's
 administrator stops new installs but does not remove copies already installed (section 13, Limits).
+
+### 17.1 Publishing from the IDE into the private store deployed on this device
+
+Deploying the private store (the Platform wizard, or the IDE's "Deploy a new private store to k3s…") records the instance and keeps its admin
+token in your vault, but it does not add the store to this device's STORE: adding means looking at the catalog key's fingerprint. The
+Publish form closes that gap. When a private store is recorded on this device (running or not) and is not yet a catalog, the **Store**
+choice lists it first and selects it:
+
+`Private store on this device (not added yet): <name> · key <first words of the fingerprint>`
+
+* Choosing it makes (or reuses) your signing key, then shows one card: the store, its address, the **full catalog key fingerprint** read from
+  its `catalog.json`, and where to compare it (the store prints it when it starts: `kubectl logs -n <namespace> deploy/private-store`, and its
+  home page shows it). Nothing is added before you press **Add it and publish**. That button runs the same step as Settings, Private store,
+  Add this store: the catalog is read again and a key that differs from the one shown is refused; then the source is added with the key
+  pinned, chosen as the publishing target, and the normal review card follows (server, package, permissions, trust, files). The token is
+  the vault entry `svc.<instance>.admin-token`, found whether the address was recorded as `localhost`, `127.0.0.1` or the device's own
+  address, with or without a trailing slash or `/catalog.json`. Only an administrator can add a store; other accounts are told so before
+  anything is written.
+* A plain `http://` address is accepted only for this device itself, a private network or a loopback; a public address still needs `https`
+  (the review card says "plain http" as a warning). A remote store is never added without its key pinned.
+* When the store is deployed but its pod is not ready (or the NodePort does not answer), the form says so and names the one next step (wait a
+  minute, or open the K8S tile and check pod `private-store` in the namespace); no key is made and no version is raised.
+* When a private store is already deployed, the "Deploy a new private store" row reads "already deployed: <instance>, not redeployed" and
+  choosing it explains the way forward (Manage, Repair or Reset). Once added, the store is an ordinary row, starred when it is the target.
+* The assistant does the same through its own approval card: `store_publish` and `tile_ship` answer "deployed but not added" with the key
+  fingerprint and ask to be called again with `add_deployed_store` set to it; the approval card then reads "ADD the private store … key
+  fingerprint … and CHOOSE it as the publishing target; then PUBLISH …". A different fingerprint, or an account that is not an administrator,
+  is refused and nothing is added.
+* Failures say what happened and what to do: a refused connection (pod not ready), 401/403 (token wrong), 404 (not a private store), 409
+  (version already there), 413 (too big), 429 (slow down), 5xx (check the pod), a project file or key folder that cannot be written (the
+  drive-aware wording of `scope::explain_io`).
+
+Status: tested with a real store server on a loopback socket and recorded deploys only; not yet run against a real cluster NodePort.
 
 ## 18. Developer mode: installing from a developer's computer
 

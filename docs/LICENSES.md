@@ -61,6 +61,8 @@ licence texts in `target/buildroot-libre/legal-info/`. Ship that folder (or a wr
 
 Also in every image but not in this table because it is permissive: Dropbear 2026.91 (MIT, BSD-2-Clause, public domain), one multi-call program that is the diagnostics server (`dropbear`) and the SSH client of the CLI tile (`dbclient`, `ssh`, `scp`, `dropbearkey`; [`CLI-SSH.md`](CLI-SSH.md)). OpenSSH (BSD/ISC) is not bundled; on a computer the CLI tile uses the one the system has.
 
+The `web` and Mac images also carry **git 2.53** (GPL-2.0, parts LGPL-2.1+), **libcurl 8** (curl licence) and OpenSSH's **`ssh`** client alone (BSD/ISC; installed as `/usr/libexec/iyakki/git-ssh`, not the CLI tile's `ssh`) for the AI IDE's repositories ([`GIT-AND-SSH.md`](GIT-AND-SSH.md)); git is a separate program IYAKKI starts through an argument array, so the Apache-2.0 licence of IYAKKI is unaffected, and its source is in `legal-info/` like the rest (`make legal-info` was run for these three packages: git `COPYING` and `LGPL-2.1`, OpenSSH `LICENCE`, curl `COPYING`, with sources). About 14.3 MB in the file system, 3.4 MB packed. The libre image has none of them.
+
 The optional `web` image adds LGPL libraries (WPE WebKit, GStreamer, glib, libsoup, libgcrypt, ffmpeg, ...); the dynamic linking keeps them
 replaceable. `ffmpeg`/H.264 can have patent implications in some countries (`WEB_H264=1` is off by default). Its `legal-info/` is produced the
 same way (`target/buildroot-web/legal-info/`).

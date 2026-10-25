@@ -194,7 +194,7 @@ data folder (`~/.local/bin`, `~/.local/share/claude`), and the Claude one update
 ## Login and Logout buttons
 
 Once Claude Code or GitHub Copilot is installed, a **Login** button and a status chip sit next to it in four places: the CLI
-list (detail pane), Settings → Agents (keys `l` and `o`, and the buttons), Quick install (IYAKKI menu, F10) and the chat's model
+list (detail pane), Settings → Agents (keys `l` and `o`, and the buttons), Store → Setup and the chat's model
 list (Ctrl+P), where an agent that is installed but not signed in says **Sign in first** with the same Login button. The chip
 reads "signed in as <account>", "not signed in" or, when the program cannot say, why. Nothing is asked on the interface thread:
 the chip comes from the cached status (`extagent::StatusCache`, refreshed after an install, after a login or logout, and by

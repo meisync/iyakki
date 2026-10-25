@@ -106,6 +106,8 @@ for i, line in enumerate(open(sys.argv[1], encoding="utf-8")):
 print(f"intact ({n} entries)")
 ```
 
+A clock that is corrected while the system runs (the network time arrives about 30 s after boot on a computer with no usable hardware clock, or the clock floor lifts it at the start) does not break the chain: `ts` is part of the hashed text, not an ordering the check relies on, so two neighbouring entries may show a big step (or, after a manual set-back, a step backwards) in `ts` and still verify. Entries before the first correction carry the floor time (`docs/K3S-DEV.md`, "The clock at boot").
+
 ### What a BROKEN report means now
 
 * **Fixed for one process.** Inside one running IYAKKI (the window, the console shell or `iyakki web`), every write takes a lock: it reads the

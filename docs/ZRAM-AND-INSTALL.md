@@ -204,3 +204,7 @@ are installed, has them check the result; a missing tool is skipped.
 3. `iyakki install --list`, then `iyakki install --dry-run --disk <name>` to read the plan.
 4. `iyakki install` (or Settings, System, Install to disk).
 5. Remove the stick, reboot, create the first account, then `cat /proc/swaps` and Settings, System, Memory.
+
+## Install next to another system
+
+The classic installer above uses a whole disk. Free-space, chosen-partition and dual-boot installs, the boot-menu entry *IYAKKI - Install to a disk*, plan files and the window installer are described in [`INSTALLER.md`](INSTALLER.md); `iyakki install --free-space` and `iyakki install --plan ...` start that planner.

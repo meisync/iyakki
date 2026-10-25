@@ -53,6 +53,46 @@ offers "Use kokoro-v1 on lemonade-local" as a one-click engine. Because the answ
 real length of the sound, and with a whisper model on a Lemonade server the words are timed from the sound itself (see *Word
 timing from the sound* below).
 
+### Voice in one click: Whisper tiny + Kokoro (Store → Setup)
+
+Store → Setup → *Voices* has **Voice: Whisper tiny + Kokoro** (`iyakki quick-install voice-pack`, `voicepack.rs`). It adds listening
+and a reading voice together and sets both up. It is **recommended** (the star) only where Settings → Voice has no speech engine yet.
+
+* **Route.** Through this machine's **Lemonade** in k3s (it already runs whisper.cpp and Kokoro, and the engines of Settings → Voice
+  already speak to it), not a separate server and not a local program: the item needs Lemonade (the order is k3s, Lemonade, then this;
+  what is there is not installed again), pulls `Whisper-Tiny` and `kokoro-v1` into it, and nothing is added to the image. It goes to the
+  cluster on this machine; with another cluster active Setup refuses and says how to switch back (the *Deploys to* rule of Setup).
+* **Review first.** The button never starts it directly: a review opens (it scrolls: arrows, Page keys, the wheel) with what is
+  downloaded (Whisper tiny about 75 MB, Kokoro about 330 MB, both estimates), where it runs (the CPU, `127.0.0.1:13305` only), the memory
+  (about 8 GB on the machine for Lemonade and k3s, about 1 GB more for the two models, estimates), the languages (Whisper tiny is
+  multilingual and the smallest Whisper, so expect more mistakes outside English; **Kokoro reads English only**, other languages need
+  Indic-TTS), what is set up, and the **licence texts** (MIT for Whisper, code and weights, and whisper.cpp; Apache-2.0 for the Kokoro-82M
+  weights and Lemonade). The button reads "I have read the licences: install"; Esc starts nothing. *Install all recommended* shows the same
+  review.
+* **espeak-ng.** Kokoro turns text into sounds with a phonemizer that commonly is **espeak-ng (GPL-3.0-or-later)**. It would run only
+  inside the downloaded Lemonade image, as a separate program; IYAKKI never links it and never ships it. The review says *Not shipped with
+  IYAKKI; downloaded at your click*. (What the Lemonade image really contains was not inspected here.)
+* **What it sets.** After the self-test passes, Settings → Voice gets speech to text = `Whisper-Tiny` and reading voice = `kokoro-v1`
+  (voice `af_sky`), both on `lemonade-local`, through the same paths as *Use as speech-to-text* and *Use as reading voice*
+  (`Services::use_lemonade_stt`, `use_lemonade_voice`). Unlike the plain Kokoro tile (which keeps a voice you chose) this replaces the
+  engines set now, because you asked for it after reading the review; the old ones are written down.
+* **Self-test.** Kokoro speaks "This is the IYAKKI voice test." and Whisper tiny transcribes that sound; it passes when at least half of the
+  words were heard (a tiny model may miss "IYAKKI"). The log says *Self-test passed* or *Self-test failed* with what was heard. A recording
+  is not bundled (nobody could record one that is licensed for this), so the sound is Kokoro's own; the microphone and the speaker are not
+  used.
+* **Nothing half installed.** Only models that are missing are pulled (a second run downloads nothing twice). When a pull or the self-test
+  fails, the models this run pulled are deleted again and the log says so; models that were in Lemonade before are never touched; a model
+  that cannot be deleted is named. No marker and no settings change are left.
+* **Undo.** The popup of an installed pack has **Remove (undo)** (administrators, audited as `quickinstall.voicepack.remove`): the engines
+  that were set before come back (only the ones that are still the pack's: a change you made since is kept) and the models the pack pulled
+  are deleted from Lemonade. The record is `<data>/quick-install/voice-pack.json`.
+* **Tests** (fakes only): `voicepack::tests` (the review and its texts, the order and the item facts, the step and its idempotence, failed
+  pull and failed self-test with rollback, the self-test with a fake speech server, the settings written and remembered, Remove, presence)
+  and `store::setup::voice_tests` (recommended only without engines, the review before anything starts, the cluster and role refusals,
+  Remove). **Not verified:** a real download, the real model ids on a real Lemonade (`Whisper-Tiny` is taken from Lemonade's model list in
+  its documentation), a real Whisper tiny hearing real speech, Lemonade's `delete` call (read from its API description), what Kokoro in the
+  Lemonade image uses to phonemize, and any sound from a real speaker or any sound into a real microphone.
+
 **Without choosing anything**: when Settings → Voice has no text-to-speech engine and a Lemonade on this computer has a downloaded
 text-to-speech model, it reads English (Kokoro's voices are English) before the engines found on this computer; other languages
 keep those engines. A server that does not answer is tried once more, then left alone for a minute while the engine of this
@@ -349,6 +389,48 @@ regulator (`repeat_interleave`), which a runtime without data-dependent shapes w
 FastPitch in two. Before adding `tract` (Apache-2.0 / MIT) to the build, measure it against onnxruntime on the Haswell Mac mini; a result
 under real time with a margin for the vocoder is what would justify it.
 
+## The VOICE tile and the system sounds
+
+The VOICE tile (Home) is a place to try the voices: paste text and have it read, or speak and copy what was heard. It adds no engine of
+its own; it uses what Settings -> Models, Settings -> Voice and Store -> Setup set up. The logic is `voicedesk.rs`; the screens are
+`apps/voice.rs` and `apps/voice_ui.rs`.
+
+**Which voices are listed** (`voicedesk::read_voices`): the voice set in Settings -> Voice; for every enabled Lemonade provider each
+downloaded text-to-speech model, with Kokoro's usual twelve voices (`af_sky`, `af_heart`, `am_adam`, ...: Lemonade has no call that lists
+them, so the table in `lemonade.rs` is used); text-to-speech models of other providers (model kind `tts`); and the engines found on this
+computer (espeak-ng, piper, ...). The Indic voices are used when Settings -> Voice has them set. A chosen voice is used for this
+reading only: Settings -> Voice is not changed.
+
+**What is asked.** Each sentence is one request, `POST <base>/audio/speech` with `{"model": "kokoro-v1", "voice": "af_heart", "input":
+"<the sentence>", "response_format": "wav"}` and `"speed"` only when it is not 1.0. Up to two sentences are made ahead of the one that
+plays (the same reader as TALES: `story::Reader`), so a long text starts quickly and a stop is immediate. The text box takes 20,000
+characters; longer text is cut with a notice that says how much was left out. Sentences with nothing to say (an address, marks) are
+skipped. The speech goes to the chosen output through the play command of Settings -> Voice (Settings -> Sound applies).
+
+**Where the text goes.** The page always says: `Text is sent to <provider> at <address> (this computer | your network | the internet)`,
+or that it stays on this computer. A server that is not this computer asks first, on a card that names the provider, the host and
+where it is; Yes is stored (`remote_ok` in the settings file, `Services::allow_speech_server`) the same way Settings -> Models stores
+it, so one yes covers reading, listening and TALES for that server. No sends nothing and remembers nothing. The audit log records that
+a reading happened with which voice and how many characters, never the text.
+
+**Dictation.** `Recorder` (arecord by default) runs only after a click or key and for at most five minutes; the samples are kept in
+memory and handed to the speech-to-text of Settings -> Voice (or the first Lemonade whisper model) as a WAV in a multipart request
+(`model`, `response_format=json`, `file=audio.wav`), then dropped. Nothing is written to disk and there is no debug switch for it.
+Microphones are the capture devices of `/proc/asound/pcm` (USB ones marked from `/proc/asound/cards`); the choice is put in the record
+command as `-D plughw:C,D`, unless the command names a device itself. Without any, the page explains that USB microphones work and that
+the built-in microphones of some laptops are not supported yet; on a MacBookPro13,x/14,x it names the model (the CS8409 codec has no
+driver, F-DRIVERS-27).
+
+**System sounds** (`syssounds.rs`). Four cues (login, logout, notification, job done) are made as PCM in code: two or three sine notes
+with a little decaying FM, a soft attack and an exponential decay, scaled so the loudest sample is 60 percent of full scale and then
+lowered by the level (-12 dB by default), 44.1 kHz mono, first and last sample zero. They are written as a WAV to the play command
+(`audioout::route_args`, the software volume of Settings -> Sound, `voice::run_capture`), exactly as the test chime is. `start` returns
+at once with a handle; sign-out starts the logout cue first and waits for the handle for at most 700 ms just before the screen changes.
+Nothing plays when the master switch or the cue's own switch is off, when Sound is muted, when `audioout` says there is no output
+(`NO OUTPUT`), or in cloud mode without sound. The notification cue follows the bell's unread count going up (the first count after
+signing in is not new); the done cue follows a finished job (once for a batch) and the top-bar installer indicator going from running
+to done. Settings -> System sounds has the switches, the level and a Preview for each cue.
+
 ## What was verified and what was not
 
 Tested with fake engine scripts on a temporary PATH (each engine kind: detection, voice lists, command lines, hostile text,
@@ -377,3 +459,45 @@ plays, and the yes card for a server on another machine. What Lemonade sends was
 lemonade-sdk/Kokoros, ggml-org/whisper.cpp `examples/server`, October 2026). **Not verified:** a real Lemonade, a real whisper
 (how well its word times follow Kokoro's voice, and how often it hears Tamil well enough to match), and how the aligned highlight
 looks and sounds together.
+
+**The VOICE tile and the system sounds.** Verified against a fake Lemonade on loopback (the real request bodies of `audio/speech` and
+`audio/transcriptions`), a fake speaker, a fake recorder and a fake output: the request (model, voice, input, `response_format`, speed),
+the sentence lit while reading, pause, resume and stop, 20,000 characters cut into pieces, the consent card for a server on another
+machine, a server that does not answer, no voice, no sound output, no microphone, a silent recording, a microphone that disappears, the
+five minute limit, that nothing is recorded without a click and nothing is written to disk, the transcript copied to the clipboard, the
+cues (length, level, no clipping, zero at both ends, rising and falling pitch), that a slow output never holds sign-out back, the
+switches and the level of Settings -> System sounds, and both VOICE areas at 360x740, 800x480, 1280x720 and 1920x1080. **Not
+verified:** any of it with a real microphone or speakers (nobody listened to the cues or to Kokoro through this page, and the level of
+the cues next to the radio was not compared), a real Lemonade or whisper, the Store → Setup hand-off on a device, and a recording of the
+full five minutes.
+
+## Omni collections: Use all parts
+
+Lemonade can serve a *collection* (`recipe: "collection.omni"`), a bundle such as `LMX-Omni-5.5B-Lite` (9.3 GB: chat and vision
+`Qwen3.5-4B-MTP-GGUF`, pictures `SD-Turbo`, speech in `Whisper-Tiny`, speech out `kokoro-v1`). In Settings -> Models the collection
+is a chip marked "omni collection". Click it to see its parts with their state (installed, or missing with the size) and:
+
+- **Use all parts** (administrators): a card says where it runs (provider, host, this computer or another machine) because chat,
+  pictures, what the microphone hears and what is read aloud then go to that provider. On yes it sets the chat model, the TALES
+  picture model, speech-to-text and the reading voice to the parts, all four or none: a step that fails puts the earlier ones back and
+  names the part. For a server on another machine the yes also allows sending speech there.
+- **Install missing parts**: when a part (or the whole collection) is not on the server, Use all parts changes nothing and offers this
+  instead. It pulls the collection id (Lemonade fetches the parts) with streamed progress; if that download failed before, it pulls
+  the missing parts one by one. Press Use all parts again when it is done.
+- **Undo Use all parts**: puts back the previous chat model, both speech engines, the provider default and the picture model.
+
+The chat model is set to the collection's chat part. Whether Lemonade also serves chat through the collection's own id (routing tool
+calls to the parts) was not established from this code, so the plain part is used; it works either way.
+
+### Trying LMX-Omni-5.5B-Lite
+
+1. In Settings -> Models pull `LMX-Omni-5.5B-Lite` and `SD-Turbo` (Install missing parts does both), then press **Use all parts**.
+2. Chat with a picture (vision): attach a screenshot and ask what is on it.
+3. Ask the assistant to draw a picture.
+4. Dictate a question (Voice) and have the answer read aloud.
+5. Make one TALES story with pictures.
+6. The model lab Vision and Picture tabs once they exist.
+
+Record for each: wall-clock time (first call includes loading), quality (good, poor, wrong), and the server's memory use while the
+parts are loaded (for example with `free -h` or the Lemonade log) and any part that Lemonade unloads to make room. Press Undo
+afterwards if the old setup should come back.
