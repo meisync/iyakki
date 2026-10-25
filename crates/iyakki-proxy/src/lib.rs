@@ -179,6 +179,9 @@ fn redact_phrases(s: &str) -> String {
 #[cfg(feature = "https")]
 pub mod https {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::Instant;
 
     /// Real HTTP/HTTPS transport (rustls, Mozilla root store). Does not follow redirects, so a
     /// redirect cannot bounce a request (and its injected credentials) to a non-allow-listed host.
@@ -358,18 +361,68 @@ pub mod https {
     /// How much of a video or audio file is read to describe it.
     pub const MEDIA_HEAD: u64 = 512 * 1024;
 
+    /// Idle connections kept for reuse: a browser opens up to six to one host and keeps them for the next page's files, so the
+    /// pool must hold at least that many per host (ureq's own default is 3, which closed half of them after every burst and made
+    /// the next burst pay the TLS handshake again) and enough overall for a page that uses many hosts.
+    pub const POOL_PER_HOST: usize = 8;
+    pub const POOL_TOTAL: usize = 64;
+
+    /// Names looked up recently, so that the next connection to the same host does not ask the resolver again (a lookup is
+    /// 5 to 300 ms and a page opens several connections per host). Entries expire after a minute; failures are not kept.
+    #[derive(Debug, Default)]
+    struct CachingResolver {
+        inner: ureq::unversioned::resolver::DefaultResolver,
+        cache: Mutex<HashMap<String, (Instant, ureq::unversioned::resolver::ResolvedSocketAddrs)>>,
+    }
+
+    const DNS_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+    const DNS_MAX: usize = 512;
+
+    impl ureq::unversioned::resolver::Resolver for CachingResolver {
+        fn resolve(&self, uri: &ureq::http::Uri, config: &ureq::config::Config, timeout: ureq::unversioned::transport::NextTimeout) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+            let key = format!("{}|{}", uri.scheme_str().unwrap_or(""), uri.authority().map(|a| a.as_str()).unwrap_or(""));
+            if let Some((at, addrs)) = self.cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+                if at.elapsed() < DNS_TTL {
+                    return Ok(addrs);
+                }
+            }
+            let addrs = self.inner.resolve(uri, config, timeout)?;
+            if let Ok(mut c) = self.cache.lock() {
+                if c.len() >= DNS_MAX {
+                    c.retain(|_, (at, _)| at.elapsed() < DNS_TTL);
+                    if c.len() >= DNS_MAX {
+                        c.clear();
+                    }
+                }
+                c.insert(key, (Instant::now(), addrs.clone()));
+            }
+            Ok(addrs)
+        }
+    }
+
+    fn browser_agent(user_agent: &str, timeout_secs: u64) -> ureq::Agent {
+        let config = ureq::Agent::config_builder()
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
+            .user_agent(user_agent)
+            .max_idle_connections(POOL_TOTAL)
+            .max_idle_connections_per_host(POOL_PER_HOST)
+            .max_idle_age(std::time::Duration::from_secs(60))
+            .build();
+        ureq::Agent::with_parts(config, ureq::unversioned::transport::DefaultConnector::default(), CachingResolver::default())
+    }
+
     impl Default for BrowserFetch {
         fn default() -> Self {
-            let agent = ureq::Agent::config_builder().max_redirects(0).http_status_as_error(false).timeout_global(Some(std::time::Duration::from_secs(25))).user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Iyakki/0.1").build().new_agent();
-            Self { agent }
+            Self { agent: browser_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Iyakki/0.1", 25) }
         }
     }
 
     impl BrowserFetch {
         /// The same transport with its own `User-Agent` and time limit (the assistant's web tools say who they are).
         pub fn with_options(user_agent: &str, timeout_secs: u64) -> BrowserFetch {
-            let agent = ureq::Agent::config_builder().max_redirects(0).http_status_as_error(false).timeout_global(Some(std::time::Duration::from_secs(timeout_secs))).user_agent(user_agent).build().new_agent();
-            BrowserFetch { agent }
+            BrowserFetch { agent: browser_agent(user_agent, timeout_secs) }
         }
     }
 
@@ -389,6 +442,12 @@ pub mod https {
                 if !req.referer.is_empty() {
                     r = r.header("Referer", &req.referer);
                 }
+                if !req.if_none_match.is_empty() {
+                    r = r.header("If-None-Match", &req.if_none_match);
+                }
+                if !req.if_modified_since.is_empty() {
+                    r = r.header("If-Modified-Since", &req.if_modified_since);
+                }
                 r
             };
             let without = |mut r: ureq::RequestBuilder<ureq::typestate::WithoutBody>| {
@@ -398,6 +457,12 @@ pub mod https {
                 }
                 if !req.referer.is_empty() {
                     r = r.header("Referer", &req.referer);
+                }
+                if !req.if_none_match.is_empty() {
+                    r = r.header("If-None-Match", &req.if_none_match);
+                }
+                if !req.if_modified_since.is_empty() {
+                    r = r.header("If-Modified-Since", &req.if_modified_since);
                 }
                 r
             };
@@ -414,7 +479,10 @@ pub mod https {
             let (location, content_type) = (header("location"), header("content-type").unwrap_or_default());
             let set_cookies: Vec<String> = resp.headers().get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).map(str::to_string).collect();
             let status = resp.status().as_u16();
-            let max_age = header("cache-control").and_then(|v| iyakki_web::cache::max_age(&v));
+            let cache_control = header("cache-control").unwrap_or_default();
+            let max_age = iyakki_web::cache::max_age(&cache_control);
+            let (etag, last_modified, vary, expires) = (header("etag").unwrap_or_default(), header("last-modified").unwrap_or_default(), header("vary").unwrap_or_default(), header("expires").unwrap_or_default());
+            let age = header("age").and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
             let announced = header("content-length").and_then(|v| v.trim().parse::<u64>().ok());
             let ct = content_type.to_ascii_lowercase();
             // a video or a song is not read to the end (it can be gigabytes): the start says what it is
@@ -424,14 +492,14 @@ pub mod https {
                 let mut body = Vec::new();
                 let _ = resp.body_mut().as_reader().take(MEDIA_HEAD).read_to_end(&mut body);
                 let content_length = announced.or(Some(body.len() as u64));
-                return Ok(iyakki_web::Response { status, location, content_type, set_cookies, body, content_length, max_age: None });
+                return Ok(iyakki_web::Response { status, location, content_type, set_cookies, body, content_length, max_age: None, ..Default::default() });
             }
             let gzip = header("content-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("gzip"));
             let mut body = resp.body_mut().with_config().limit(MAX_PAGE).read_to_vec().map_err(|e| format!("the page could not be read completely ({e}); pages over {} MB are not opened", MAX_PAGE >> 20))?;
             if gzip {
                 body = gunzip(&body, MAX_PAGE as usize).map_err(|e| format!("the page was compressed and could not be unpacked ({e})"))?;
             }
-            Ok(iyakki_web::Response { status, location, content_type, set_cookies, body, content_length: None, max_age })
+            Ok(iyakki_web::Response { status, location, content_type, set_cookies, body, content_length: None, max_age, cache_control, etag, last_modified, vary, expires, age })
         }
     }
 }
