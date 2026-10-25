@@ -360,7 +360,7 @@ Sound, System sounds) · **Devices** (Bluetooth, Keyboard) · **System** (Time, 
 there is no dark theme and no sleep (suspend) timer yet). Enter opens the first match, Esc clears the text. If nothing matches, the list says to try one simple word.
 
 Hardware pages and most changes are administrator-only. Keys per page are shown in the header and F1: Models
-`a e d t m b k x c`; Vault `n d Tab l f`; Network `Enter`, `w` join Wi-Fi, `m` private MAC address, `a` apply it now, `r`; Display `u U + -`; Sound `o t + - m Enter`; Voice
+`a e d t m b k x c`; Vault `n d Tab l f`; Network `Enter`, `w` join Wi-Fi, `m` private MAC address, `a` apply it now, `r`; Display `u U + -`; Sound `o t + - m M Enter`; Voice
 `s v c m p t y`; Storage `m` make data disk (erases it), `u` compatible USB mode (no UAS); Account `p` change password, `u U` text size; Firewall `1 2 3 a d A`. Details:
 [`ADMIN-GUIDE.md`](ADMIN-GUIDE.md).
 
@@ -427,6 +427,8 @@ this site · `c` developer panel · `+ - 0` zoom · `R` reader · `U` view sourc
 translate / `M` keep in knowledge (asks each time). **Searching:** words typed in the bar are searched on Bing's plain results page (Settings, Browser: DuckDuckGo, Brave Search or Wikipedia); if that page is busy or asks for a check, the next one is tried and a note says so. Google's own results page only answers with "enable JavaScript", so Google searches are run on your chosen engine too. A name that does not exist (`youtub.com`) shows "Couldn't find ..." with a search for it and, for near misses of popular sites, "Did you mean youtube.com?". YouTube, Gmail, Google sign-in and similar apps need the full engine: the `web` or `macweb` image (the Mac image with the web engine). **In the full engine** click a box and type; the keyboard goes to the page (Esc gives it back to the browser, Ctrl+L is the address bar, Ctrl+T/Ctrl+W tabs); Ctrl+C/Ctrl+V and a page's own Copy button use IYAKKI's clipboard; use a mouse (touchpads are not read). **Limits:** no video, canvas or IndexedDB in the built-in engine; CJK
 and emoji show as boxes; heavy web apps need `F`. Honest list: [`BROWSER-ROADMAP.md`](BROWSER-ROADMAP.md).
 
+**Video that needs H.264 or AAC** (TikTok and similar, full web engine): the image carries no video codec, so such a page used to show a black player. Now a bar over the bottom of the page says "This video needs the audio and video add-on" with **Install**, **Not now** and **Don't ask for this site**. Install opens Store, Setup, where the vendor, the licence (LGPL) and the size are shown and the download starts only when you press its button; afterwards the browser loads the page again. The bar shows once per site and session. H.264 and AAC are patent-licensed formats in some countries; decoding them is your own choice after your own download ([`FULL-BROWSER.md`](FULL-BROWSER.md), Audio and video add-on).
+
 **Page fullscreen** (full web engine): a video player's fullscreen button, the `F` key or a double click in the page shows the page over the whole tile, without tabs, bars or status line. **Esc** asks the page to leave fullscreen (the bars come back when it has); leaving by the player's button or by going to another page works too. While a page is fullscreen every other key goes to the page.
 
 **Pointer shapes:** on the desktop window, the remote screen and the framebuffer (a real screen) the pointer follows what is under it: a hand over links and buttons, a text bar over fields, a four-way or resize arrow, a slashed circle, a question mark or a crosshair where the full web engine asks for it; the arrow elsewhere.
@@ -442,8 +444,15 @@ and emoji show as boxes; heavy web apps need `F`. Honest list: [`BROWSER-ROADMAP
 ### RADIO
 Internet radio in many languages (My stations, Tamil, Telugu, Malayalam, English, Hindi, Spanish, French, Arabic,
 Portuguese, Russian, Chinese, Bengali). Left/Right language, Up/Down station, `Enter` play, `Space`/`s` stop, `[ ]` previous/next,
-`+ -` volume, `a` keep, `n` add your own (name and MP3 stream address), `d` delete. Plays MP3 streams only. Esc leaves; the
-music keeps playing.
+`+ -` volume, `a` keep, `n` add your own (name and stream address), `d` delete. Esc leaves; the music keeps playing.
+MP3 streams, and HLS stations (`.m3u8` playlists) whose segments carry MP3, play with nothing extra. **AAC** stations (AAC+
+such as Hello FM 106.4, HLS stations with AAC such as AIR Kodaikanal) need the **audio add-on**, a separate decoder program
+(ffmpeg, installed from the Store's Setup page). Without it the station says so in one calm line and offers **Install audio
+add-on**; that opens the same installer as the MEDIA player's (the download comes from the vendor, only when you click, with its
+source and licence shown), and the station you chose is tried again afterwards. Stations that need it are marked "needs audio
+add-on" until it is installed. HLS lists are followed live (the newest few segments first, new ones as they appear); encrypted
+HLS (AES-128, SAMPLE-AES) and fragmented-MP4 HLS are not played. AAC+ (HE-AAC) plays through the add-on's own decoder. Every playlist and
+segment address is checked against your account's host policy, and a list may not step down from https to http.
 
 ### MEDIA
 Your music, videos and pictures from folders your account may read. `Tab` pages (Tracks, Artists, Albums, Videos, Playlists,
@@ -661,6 +670,16 @@ developer mode is marked DEV too and labelled **Developer (local)**; a new build
 
 Details, limits and what is not done: [`K8S-TILE.md`](K8S-TILE.md).
 
+### GIT
+*Work group. For administrators, operators and users; not guests; stays in Cloud mode.* Browse the repositories of your Git hosts without cloning them.
+
+* **Connection** (`c`): each host of Settings, Git with its status dot, kind, address and where its data lives (*this computer*, *on the network*, *on the cluster*, *on the internet*), **Local clones** (the repositories on this computer, in your Repositories folder) and **Add connection...** (opens Settings, Git). With no connection the tile says how to start and still lists your local clones.
+* **Repositories**: name, description, default branch, private or public, age, stars and size; a green dot means a clone is on this computer. Click a title or `o`/`O` to sort, `/` to filter, *Load more* (`m`) for the next 50. If the host stops answering, the last list stays and the tile tries again; if it asks you to slow down, the line says for how long.
+* **Open one** (Enter): **Files** (folders open as you go; text with line numbers up to 512 KB, the README first and rendered, pictures, and name/size/type for binary or large files), **Commits** (the last 50, with the message and a coloured diff), **Branches** (and tags), **Issues/PRs** (read-only) and **Info** (clone addresses with Copy). `1` to `5` switch tabs, `g` chooses a branch or tag, Esc steps back.
+* **Actions**, each asking first where it changes something: `C` clone into your Repositories folder, `I` open in the AI IDE (offers the clone first if there is none), `F` fetch, `P` pull (asks if the clone has changes of its own), `U` push (its own review), `y` copy the clone address, `w` open the page in the BROWSER (after a yes). Nothing is changed on the host: no delete, rename, settings or issue writing.
+
+Details, limits and what is not done: [`GIT-TILE.md`](GIT-TILE.md).
+
 ### DISKS
 *System group. For administrators, operators and users; not guests; hidden in Cloud mode.* Every drive of the machine, and what is on it.
 
@@ -858,6 +877,13 @@ Devices popover show the output in use, or why there is none. A play command in 
 (`aplay -D hw:1,0`) is left as it is; other players (`pw-play`, `play`) are not changed. On a computer with PulseAudio or PipeWire,
 Automatic leaves the choice to that sound server. Engines that speak by themselves (espeak-ng or speech-dispatcher speaking
 directly) use the system's default device; engines that make a WAV (piper, espeak-ng to a file, HTTP) go to the chosen output.
+
+**Mix sounds from several apps (experimental; administrators).** A switch on the Sound page (`M`, button **Mix sounds**, or `Enter` on
+its row), off by default. Normally one program plays at a time. With it on, the radio, reading aloud, alarms and notification sounds
+play together, and the others get quieter while one speaks (alarm, then speech, then notifications, then media and radio, from most to
+least important). While it is on the page shows whether the mixer is running or idle, how much of one processor core it uses and how
+many underruns (small gaps) it had. The browser's own sound is not mixed yet: if you mostly use the browser, leave this off. The
+change applies from the next sound, and no app needs to know about it; apps that read aloud through the SDK stop getting *Busy*.
 
 ## System sounds
 

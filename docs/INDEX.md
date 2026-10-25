@@ -22,6 +22,7 @@
 | [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | Problems we hit, with fixes, and what to send in a report |
 | [`AI-IDE.md`](AI-IDE.md) | The AI IDE: workspaces, board, Browser tab, Kubernetes view, Autopilot |
 | [`K8S-TILE.md`](K8S-TILE.md) | The K8S tile: pick a cluster and a namespace and explore it (YAML, events, related objects, pod logs); read-only unless an administrator allows changes |
+| [`GIT-TILE.md`](GIT-TILE.md) | The GIT tile: browse the repositories of your Git connections and the clones on this computer (files, commits and diffs, branches, issues and pull requests, read-only), clone, open in the AI IDE, fetch, pull, push with their reviews; limits, retries and what is not done |
 | [`DISKS.md`](DISKS.md) | The DISKS tile: see every drive, mount, unmount and safely eject, change partitions (administrators, with confirmations); safety rules, file system table, what is not built |
 | [`LAB.md`](LAB.md) | The LAB tile: try picture-making and vision models, compare two on the same prompt or picture, sample a video into frames for a vision model; the log, the caps, what goes to a remote provider |
 | [`REMOTE-PROTOCOL.md`](REMOTE-PROTOCOL.md) | The browser front end's WebSocket messages, including browser speech |
@@ -62,6 +63,7 @@
 | [`../BOUNDARY.md`](../BOUNDARY.md) | Every place our code touches the base OS; the rules |
 | [`../FEATURES.md`](../FEATURES.md) | The feature matrix: status, progress and tests per feature |
 | [`development/SDK-API.md`](development/SDK-API.md) | The developer SDK API (design): bridge, local HTTP, MCP, embedding, usage budgets, the remote debug loop |
+| [`development/AUDIO-MIXER.md`](development/AUDIO-MIXER.md) | The in-house audio mixer (several sounds share the T2 speaker, ducking, priorities, `sound.mixer`); what reaches it and what does not |
 
 ## Design and deep dives
 
