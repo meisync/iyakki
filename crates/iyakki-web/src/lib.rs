@@ -17,6 +17,7 @@ pub mod doc;
 pub mod domtree;
 pub mod fetch;
 pub mod gif;
+pub mod headerfetch;
 pub mod html;
 pub mod image;
 pub mod jpeg;
@@ -32,5 +33,5 @@ pub mod webp;
 
 pub use cookies::{Cookie, CookieStore};
 pub use doc::{Block, Control, ControlKind, Doc, Form, ImageRef, SelectOption, Span, Style, TextBlock};
-pub use fetch::{fetch_following, load, load_request, load_with, Fetch, Jar, Loaded, Renderer, Request, Response};
+pub use fetch::{fetch_following, load, load_request, load_with, Fetch, Jar, ExtraHeaders, Loaded, Renderer, Request, Response};
 pub use url::{form_urlencode, SearchEngine, Url};

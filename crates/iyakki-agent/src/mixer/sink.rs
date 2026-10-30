@@ -16,7 +16,24 @@ pub trait Sink: Send {
     fn is_open(&self) -> bool;
     /// For the doctor and the Devices popover.
     fn name(&self) -> String;
+    /// Buffer sizes in use, for the status line (empty: nothing to say).
+    fn detail(&self) -> String {
+        String::new()
+    }
+    /// How much audio the device itself holds before the speaker when it is full, ms (0: nothing to say). The device does not
+    /// start before it is full, so a sample written at the mixer's time `t` is heard at `t` plus what this holds beyond the lead.
+    fn latency_ms(&self) -> u32 {
+        0
+    }
 }
+
+/// The pipe to aplay holds at least this much (the default 64 KB is 340 ms of 48 kHz stereo, hardly more than the mixer's lead).
+pub const PIPE_BYTES: i32 = 256 * 1024;
+/// aplay's own ring buffer and period, in microseconds. The period is inside what the T2's patched driver takes (256 to 4096 frames).
+pub const APLAY_BUFFER_US: u32 = 500_000;
+pub const APLAY_PERIOD_US: u32 = 50_000;
+/// What the T2's card holds with aplay's own defaults (347 ms, measured earlier), when the 500 ms request is refused.
+pub const DEFAULT_BUFFER_MS: u32 = 347;
 
 /// `aplay -q -D <iyakki output> -t raw -f S16_LE -r RATE -c CHANNELS -`, fed through its standard input.
 pub struct AplaySink {
@@ -26,18 +43,53 @@ pub struct AplaySink {
     device: Box<dyn Fn() -> Option<String> + Send>,
     child: Option<Child>,
     label: String,
+    /// `--buffer-time`/`--period-time` were accepted by the device (else aplay runs with its own defaults).
+    tuned: bool,
+    pipe_bytes: i32,
 }
 
 impl AplaySink {
     /// The real one: the device is whatever Settings -> Sound chose, looked at each time the sink opens.
     pub fn system() -> AplaySink {
-        AplaySink { program: crate::player::find_program("aplay"), device: Box::new(|| crate::audioout::global().device()), child: None, label: String::new() }
+        AplaySink { program: crate::player::find_program("aplay"), device: Box::new(|| crate::audioout::global().device()), child: None, label: String::new(), tuned: false, pipe_bytes: 0 }
     }
 
     /// The command for these parameters (public for tests).
     pub fn command(program: &str, device: Option<&str>, rate: u32, channels: usize) -> Vec<String> {
-        let args: Vec<String> = [program, "-q", "-t", "raw", "-f", "S16_LE", "-r", &rate.to_string(), "-c", &channels.to_string(), "-"].iter().map(|s| s.to_string()).collect();
-        crate::audioout::route_args(args, device)
+        Self::command_with(program, device, rate, channels, false)
+    }
+
+    /// The same, asking aplay for a 500 ms buffer in 50 ms periods when `tuned`.
+    pub fn command_with(program: &str, device: Option<&str>, rate: u32, channels: usize, tuned: bool) -> Vec<String> {
+        let (b, p) = (format!("--buffer-time={APLAY_BUFFER_US}"), format!("--period-time={APLAY_PERIOD_US}"));
+        let mut v = vec![program, "-q"];
+        if tuned {
+            v.extend([b.as_str(), p.as_str()]);
+        }
+        let (r, c) = (rate.to_string(), channels.to_string());
+        v.extend(["-t", "raw", "-f", "S16_LE", "-r", &r, "-c", &c, "-"]);
+        crate::audioout::route_args(v.iter().map(|s| s.to_string()).collect(), device)
+    }
+
+    fn spawn(args: &[String]) -> Result<Child, String> {
+        let mut child = Command::new(&args[0]).args(&args[1..]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e| format!("cannot start aplay: {e}"))?;
+        // an aplay that cannot open the device ends within a moment: wait a little to turn that into an error now
+        std::thread::sleep(Duration::from_millis(60));
+        let st = iyakki_core_api::child_status(&mut child);
+        if st.is_over() {
+            let why = crate::voice::player_failure(&mut child);
+            return Err(format!("aplay ended with {}{}", st.describe(), if why.is_empty() { String::new() } else { format!(": {why}") }));
+        }
+        Ok(child)
+    }
+
+    /// A bigger pipe, so the mixer's lead fits and a write blocks only when the card is really behind. Returns the size got.
+    fn grow_pipe(child: &Child) -> i32 {
+        use std::os::fd::AsRawFd;
+        let Some(si) = child.stdin.as_ref() else { return 0 };
+        // SAFETY: fcntl on a pipe descriptor we own; the result is only a size
+        let got = unsafe { libc::fcntl(si.as_raw_fd(), libc::F_SETPIPE_SZ, PIPE_BYTES) };
+        if got > 0 { got } else { unsafe { libc::fcntl(si.as_raw_fd(), libc::F_GETPIPE_SZ) }.max(0) }
     }
 }
 
@@ -45,15 +97,18 @@ impl Sink for AplaySink {
     fn open(&mut self, rate: u32, channels: usize) -> Result<(), String> {
         let Some(prog) = self.program.clone() else { return Err("no sound player was found (aplay is missing)".into()) };
         let dev = (self.device)();
-        let args = Self::command(&prog, dev.as_deref(), rate, channels);
-        self.label = dev.unwrap_or_else(|| "default".into());
-        let mut child = Command::new(&args[0]).args(&args[1..]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e| format!("cannot start aplay: {e}"))?;
-        // an aplay that cannot open the device ends within a moment: wait a little to turn that into an error now
-        std::thread::sleep(Duration::from_millis(60));
-        if let Ok(Some(st)) = child.try_wait() {
-            let why = crate::voice::player_failure(&mut child);
-            return Err(format!("aplay ended with {st}{}", if why.is_empty() { String::new() } else { format!(": {why}") }));
-        }
+        self.label = dev.clone().unwrap_or_else(|| "default".into());
+        // the device chain is unchanged (plug > softvol > plughw); only aplay's buffer is asked for. A device that refuses those
+        // sizes gets aplay's own defaults, the known-good path
+        let (child, tuned) = match Self::spawn(&Self::command_with(&prog, dev.as_deref(), rate, channels, true)) {
+            Ok(c) => (c, true),
+            Err(first) => {
+                log::info!("mixer: aplay with a 500 ms buffer did not start ({first}); trying its defaults");
+                (Self::spawn(&Self::command(&prog, dev.as_deref(), rate, channels))?, false)
+            }
+        };
+        self.tuned = tuned;
+        self.pipe_bytes = Self::grow_pipe(&child);
         self.child = Some(child);
         Ok(())
     }
@@ -76,8 +131,8 @@ impl Sink for AplaySink {
             drop(child.stdin.take());
             let end = Instant::now() + Duration::from_millis(600);
             loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
+                match iyakki_core_api::child_status(&mut child) {
+                    s if s.is_over() => break,
                     _ if Instant::now() >= end => {
                         let _ = child.kill();
                         let _ = child.wait();
@@ -91,6 +146,20 @@ impl Sink for AplaySink {
 
     fn is_open(&self) -> bool {
         self.child.is_some()
+    }
+
+    fn detail(&self) -> String {
+        format!("pipe {} KB, aplay {}", self.pipe_bytes / 1024, if self.tuned { "buffer 500 ms / period 50 ms" } else { "default buffer" })
+    }
+
+    fn latency_ms(&self) -> u32 {
+        if self.child.is_none() {
+            0
+        } else if self.tuned {
+            APLAY_BUFFER_US / 1000
+        } else {
+            DEFAULT_BUFFER_MS
+        }
     }
 
     fn name(&self) -> String {

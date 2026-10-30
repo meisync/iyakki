@@ -4,7 +4,6 @@
 //! host (including redirect targets) is checked against the signed-in user's policy, and only the host of each visit is
 //! written to the audit log.
 
-use crate::safeclamp::SafeClamp;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 
@@ -12,12 +11,17 @@ use iyakki_web::doc::{Control, ControlKind, Doc};
 use iyakki_web::{form_urlencode, Jar, Loaded, Request, Url};
 
 use super::browser_av;
+use super::browser_chrome as chrome;
+use super::browser_groups::{self, Groups};
 use super::browser_assist;
 use super::browser_block;
+use super::browser_headers;
 use super::browser_config::{self, BrowserConfig};
 use super::browser_dark;
+use super::browser_devpanel::{self, Act as DevAct};
 use super::browser_devtools;
 use super::browser_typo;
+use super::browser_media::{self, MediaPerms};
 use super::browser_full::{Full, Note, Redraw, Start, AREA_FULL};
 use super::browser_data::{self, Data, Suggestion};
 use super::browser_logins::{self, Cred};
@@ -123,6 +127,8 @@ struct TabState {
     sug_sel: Option<usize>,
     start_links: Vec<String>,
     full: Option<Full>,
+    /// A tab brought back from the saved groups: its address is in the field and loads when the tab is first shown.
+    lazy: bool,
 }
 
 pub const MAX_TABS: usize = 20;
@@ -320,11 +326,15 @@ impl TabState {
             sug_sel: None,
             start_links: Vec::new(),
             full: None,
+            lazy: false,
         }
     }
 
     /// The name shown on the tab.
     fn title(&self) -> String {
+        if self.lazy {
+            return browser_data::host_of(&self.field.value).to_string();
+        }
         match self.history.get(self.pos) {
             Some(Entry { page: Some(p), .. }) => {
                 if p.doc.title.trim().is_empty() { p.url.host.clone() } else { p.doc.title.trim().to_string() }
@@ -401,6 +411,25 @@ pub struct BrowserApp {
     /// The tabs; the one in use (`active`) is `None` here because its state is in the fields above.
     tabs: Vec<Option<TabState>>,
     active: usize,
+    /// The tab groups (`of_tab` is parallel to `tabs`).
+    groups: Groups,
+    /// The tab in use came back from the saved groups and has not been opened yet.
+    lazy: bool,
+    /// The group's name / colour popup under the strip.
+    group_edit: Option<GroupEdit>,
+    /// The tab overview over the page area: its search box.
+    overview: Option<TextField>,
+    /// A page that could not be loaded: its address and why, shown as a card with Retry until the next load.
+    failed: Option<(Url, String)>,
+    /// What the groups looked like when they were last saved (so they are saved only when they change), and the ticks since.
+    groups_saved: String,
+    groups_clock: u32,
+    /// When the built-in reader's current load began (for the "taking long" card).
+    load_started: std::time::Instant,
+    /// The Scripts chip's plain-words explanation while the pointer is on it (shown in the status line).
+    hover_hint: Option<String>,
+    /// Where the strip drew each group's chip (right-click on one edits the group).
+    chip_rects: Vec<(u32, R)>,
     /// Addresses of tabs that were closed, newest last, for reopening.
     closed: Vec<String>,
     /// Where to scroll once the page has been laid out again (after a zoom change).
@@ -414,6 +443,14 @@ pub struct BrowserApp {
     /// The list of requests the filter lists blocked on this page (B opens it).
     show_blocked: bool,
     net_log: browser_devtools::Log,
+    /// The Developer tools panel (F12, Ctrl+Shift+I): `browser_devpanel.rs`.
+    dev: browser_devpanel::Panel,
+    /// The panel or its button changed without a key or click (new console lines arrived): draw the whole scene again.
+    dev_dirty: bool,
+    /// The last pointer position, for the wheel over the panel.
+    mouse: (i32, i32),
+    /// The counters of the toolbar button last drawn, for the next change check.
+    dev_counts: (usize, usize),
     /// An open drop-down list: the control and the highlighted option.
     popup: Option<(usize, usize)>,
     /// The sign-in just sent from a form (kept until the next page shows whether it worked), and the one now offered for saving.
@@ -443,6 +480,32 @@ pub struct BrowserApp {
     av_request: Option<(String, String)>,
     /// When the add-on's libraries were last looked for while waiting for an install.
     av_checked: Option<std::time::Instant>,
+    /// "Radio is playing. Stop it so the browser can play?" (soundask.rs), shown when the page plays and the speaker is held.
+    sound_ask: Option<super::soundask::Ask>,
+    /// "Allow this site to use your camera?" (browser_media.rs) for the page in front, and what the person chose before.
+    media_ask: Option<browser_media::Ask>,
+    media: Option<MediaPerms>,
+    /// The microphones found when a microphone question opened, the chooser over that question, and where /proc is (tests move it).
+    media_mics: Vec<iyakki_agent::voicedesk::Mic>,
+    media_mic_pick: Option<super::widgets::Picker>,
+    /// The cameras the person has not hidden (listed when a camera question opens), the chooser over that question, and what the person
+    /// decided about devices (`browserdev`): the default camera and the hidden cameras and microphones.
+    media_cams: Vec<iyakki_agent::browserdev::Cam>,
+    media_cam_pick: Option<super::widgets::Picker>,
+    devprefs: Option<iyakki_agent::browserdev::DevicePrefs>,
+    pub(super) mic_proc: std::path::PathBuf,
+    /// Where the cameras are read from (`/sys`; tests move it).
+    pub(super) cam_sys: std::path::PathBuf,
+    pub(super) mic_dir: std::path::PathBuf,
+    /// The last microphone failure the web engine's plugin reported and the person was told about; when it was last looked for.
+    mic_told: String,
+    /// The saved choice (voice settings), read when the question opens.
+    mic_saved: String,
+    mic_checked: Option<std::time::Instant>,
+    /// What this browser last told the shell's sign about (`browser_media::publish_capture`).
+    published: u8,
+    /// After a stop: when the page's media is told to open its sound again.
+    sound_reconnect: Option<std::time::Instant>,
     /// Where the page area was drawn last and the interface scale then (the engine starts at that size).
     view_rect: R,
     ui_scale: f32,
@@ -466,6 +529,7 @@ impl BrowserApp {
         if let Some(u) = OPEN_NEXT.with(|o| o.borrow_mut().take()) {
             app.open_url(&u, cx);
         }
+        app.restore_groups(cx);
         app
     }
 
@@ -505,6 +569,16 @@ impl BrowserApp {
             download: None,
             tabs: vec![None],
             active: 0,
+            groups: Groups::default(),
+            lazy: false,
+            group_edit: None,
+            overview: None,
+            failed: None,
+            groups_saved: String::new(),
+            groups_clock: 0,
+            load_started: std::time::Instant::now(),
+            hover_hint: None,
+            chip_rects: Vec::new(),
             closed: Vec::new(),
             pending_scroll: None,
             find: None,
@@ -512,6 +586,10 @@ impl BrowserApp {
             show_net: false,
             show_blocked: false,
             net_log: Default::default(),
+            dev: Default::default(),
+            dev_dirty: false,
+            mouse: (0, 0),
+            dev_counts: (0, 0),
             popup: None,
             pending_cred: None,
             offer: None,
@@ -528,6 +606,22 @@ impl BrowserApp {
             av: browser_av::AvState::new(browser_av::load(cx)),
             av_request: None,
             av_checked: None,
+            sound_ask: None,
+            media_ask: None,
+            media: None,
+            media_mics: Vec::new(),
+            media_mic_pick: None,
+            media_cams: Vec::new(),
+            media_cam_pick: None,
+            devprefs: None,
+            mic_proc: iyakki_agent::voicedesk::proc_root(),
+            mic_dir: iyakki_agent::voicedesk::mic_share_dir(),
+            cam_sys: iyakki_agent::browserdev::sys_root(),
+            mic_told: String::new(),
+            mic_saved: String::new(),
+            mic_checked: None,
+            published: 0,
+            sound_reconnect: None,
             view_rect: R::new(0.0, 0.0, 1280.0, 600.0),
             ui_scale: 1.0,
             snap_key: String::new(),
@@ -537,6 +631,8 @@ impl BrowserApp {
             embedded: false,
             want_full: None,
         };
+        // a panel that was open when the last browser tile closed left collecting on: it is not open now
+        cx.services.devtools.set_panel(&cx.session.user, false);
         if app.cfg.js_all || !app.cfg.js_sites.is_empty() {
             iyakki_js::warm_up();
         }
@@ -574,6 +670,7 @@ impl BrowserApp {
             sug_sel: self.sug_sel.take(),
             start_links: std::mem::take(&mut self.start_links),
             full,
+            lazy: std::mem::take(&mut self.lazy),
         }
     }
 
@@ -595,6 +692,8 @@ impl BrowserApp {
         self.suggest = t.suggest;
         self.sug_sel = t.sug_sel;
         self.start_links = t.start_links;
+        self.lazy = t.lazy;
+        self.failed = None;
         self.full = t.full;
         if let Some(f) = self.full.as_mut() {
             f.set_visible(true);
@@ -631,6 +730,7 @@ impl BrowserApp {
         if i >= self.tabs.len() || i == self.active {
             return;
         }
+        self.media_void();
         let cur = self.take_state();
         self.tabs[self.active] = Some(cur);
         if let Some(next) = self.tabs[i].take() {
@@ -645,9 +745,11 @@ impl BrowserApp {
             self.status = Some((format!("At most {MAX_TABS} tabs."), false));
             return;
         }
+        self.media_void();
         let cur = self.take_state();
         self.tabs[self.active] = Some(cur);
         self.tabs.push(None);
+        self.groups.push_tab();
         self.active = self.tabs.len() - 1;
         self.put_state(TabState::blank());
     }
@@ -656,6 +758,7 @@ impl BrowserApp {
         if i >= self.tabs.len() {
             return;
         }
+        self.media_void();
         if i == self.active {
             if let Some(u) = self.current_url().map(|u| u.to_string()) {
                 self.closed.push(u);
@@ -663,11 +766,13 @@ impl BrowserApp {
             }
             if self.tabs.len() == 1 {
                 self.put_state(TabState::blank());
+                self.groups.reset();
                 return;
             }
             // leave the one in use: show its neighbour, then drop its slot
             let _gone = self.take_state();
             self.tabs.remove(i);
+            self.groups.remove_tab(i);
             let next = if i < self.tabs.len() { i } else { self.tabs.len() - 1 };
             if let Some(t) = self.tabs[next].take() {
                 self.put_state(t);
@@ -681,6 +786,7 @@ impl BrowserApp {
                 }
             }
             self.tabs.remove(i);
+            self.groups.remove_tab(i);
             if i < self.active {
                 self.active -= 1;
             }
@@ -885,6 +991,7 @@ impl BrowserApp {
         };
         // the person's ad and tracker blocking (switch, allowed sites, lists) is read before anything is requested
         browser_block::apply(cx);
+        browser_headers::apply(cx);
         browser_block::weekly_refresh(cx);
         let url = req.url.clone();
         let policy = cx.session.policy.clone();
@@ -977,15 +1084,89 @@ impl BrowserApp {
         match spawned {
             Ok(_) => {
                 self.status = None;
+                self.failed = None;
+                self.load_started = std::time::Instant::now();
                 self.nav = Nav::Loading { url, rx, how };
             }
             Err(e) => self.status = Some((format!("could not start loading: {e}"), false)),
         }
     }
 
+    // ------------------------------------------------------------------------------------------------ developer tools panel
+
+    fn dev_ctx(&self) -> browser_devpanel::Ctx {
+        browser_devpanel::Ctx { full: self.full.is_some(), offered: self.engine_offered }
+    }
+
+    /// F12, Ctrl+Shift+I, the toolbar button: opens the panel (collecting starts for this person, memory only) or closes it
+    /// (collecting stops, what it collected is forgotten unless the chat agent's switch is on).
+    fn toggle_devpanel(&mut self, cx: &AppCx) {
+        if self.embedded {
+            return;
+        }
+        let (dt, user) = (&cx.services.devtools, cx.session.user.as_str());
+        if self.dev.open {
+            self.dev.close(dt, user);
+            cx.audit.record(user, "browser.devtools.panel", "closed");
+        } else {
+            self.dev.open(dt, user);
+            cx.audit.record(user, "browser.devtools.panel", "opened");
+            // the panel has the keyboard now: not the page, the address bar or the suggestions
+            self.addr_focus = false;
+            self.suggest.clear();
+            self.sug_sel = None;
+            if let Some(f) = self.full.as_mut() {
+                f.set_focus(false);
+                dt.set_page(user, &f.url);
+            }
+        }
+        self.dev_dirty = true;
+        self.dev_tick(cx);
+    }
+
+    /// New lines or counts since the last heartbeat: draw again. Cheap: one counter is compared, the buffers are copied only
+    /// when it moved.
+    fn dev_tick(&mut self, cx: &AppCx) {
+        let (dt, user) = (&cx.services.devtools, cx.session.user.as_str());
+        let reader_len = self.net_log.lock().map_or(0, |l| l.len());
+        let mut dirty = self.dev.refresh(dt, user, reader_len);
+        let sum = if dt.collecting(user) { dt.summary(user) } else { Default::default() };
+        if (sum.failed, sum.console_errors) != self.dev_counts {
+            self.dev_counts = (sum.failed, sum.console_errors);
+            dirty = true;
+        }
+        if dirty {
+            self.dev_dirty = true;
+        }
+    }
+
+    /// What the panel asked the browser to do.
+    fn dev_act(&mut self, a: DevAct, cx: &AppCx) {
+        match a {
+            DevAct::Done => {}
+            DevAct::Close => self.toggle_devpanel(cx),
+            DevAct::Copy => {
+                let reader: Vec<browser_devtools::NetLine> = self.net_log.lock().map(|l| l.clone()).unwrap_or_default();
+                let text = self.dev.report(self.dev_ctx(), &reader);
+                crate::ui::clipboard::copy(&text);
+                crate::ui::clipboard::toast("Copied the developer tools report");
+            }
+        }
+        self.dev_dirty = true;
+    }
+
     fn poll(&mut self, cx: &AppCx) {
+        self.groups_tick(cx);
+        if self.lazy {
+            self.lazy = false;
+            let u = self.field.value.clone();
+            self.open_url(&u, cx);
+        }
         self.full_browser_result();
         self.poll_full(cx);
+        self.capture_tick(cx);
+        self.mic_failure_tick();
+        self.dev_tick(cx);
         self.poll_images(cx);
         self.poll_download(cx);
         let Nav::Loading { rx, how, .. } = &self.nav else { return };
@@ -1084,6 +1265,7 @@ impl BrowserApp {
                     return;
                 }
                 self.status = Some((friendly_error(&asked.host, &e), false));
+                self.failed = Some((asked.clone(), e.clone()));
                 self.addr_focus = true;
             }
         }
@@ -2098,6 +2280,10 @@ impl BrowserApp {
             Key::Ctrl('t') => self.new_tab(),
             Key::Ctrl('w') => self.close_tab(self.active),
             Key::Ctrl('T') => self.reopen_closed(cx),
+            Key::Ctrl('G') => self.new_group_from(self.active),
+            Key::Ctrl('U') => self.ungroup(self.active),
+            Key::Ctrl('O') => self.open_overview(),
+            Key::F(2) if !self.embedded => self.open_group_edit(self.active),
             Key::Nav { nav: super::super::ui::Nav::PageDown, ctrl: true, .. } => self.step_tab(true),
             Key::Nav { nav: super::super::ui::Nav::PageUp, ctrl: true, .. } => self.step_tab(false),
             Key::Ctrl('f') => self.open_find(),
@@ -2115,6 +2301,59 @@ impl BrowserApp {
     }
 
     fn handle_key(&mut self, k: &Key, cx: &AppCx) -> Flow {
+        // the microphone chooser over the question has the keyboard first
+        if self.media_mic_pick.is_some() {
+            self.mic_pick_event(&Event::Key(k.clone()), cx);
+            return Flow::Stay;
+        }
+        if self.media_cam_pick.is_some() {
+            self.cam_pick_event(&Event::Key(k.clone()), cx);
+            return Flow::Stay;
+        }
+        // the camera / microphone question has the keyboard while it is open
+        if self.media_ask.is_some() {
+            if matches!(k, Key::Char('m') | Key::Char('M')) && self.media_ask_is_mic() {
+                self.open_mic_pick();
+                return Flow::Stay;
+            }
+            if matches!(k, Key::Char('c') | Key::Char('C')) && self.media_ask_is_cam() {
+                self.open_cam_pick();
+                return Flow::Stay;
+            }
+            if let Some(a) = browser_media::answer_for_key(k, self.media_ask.as_ref().is_some_and(|a| a.is_screen())) {
+                self.media_answer(a, cx);
+            }
+            return Flow::Stay;
+        }
+        // the sound dialog has the keyboard while it is open
+        if self.sound_ask.is_some() {
+            if let Some(a) = super::soundask::answer_for_key(k) {
+                self.sound_answer(a, cx);
+            }
+            return Flow::Stay;
+        }
+        // the developer tools panel: its own keys anywhere, and every key but the Ctrl shortcuts while it has the keyboard
+        if matches!(k, Key::F(12) | Key::Ctrl('I')) && !self.full.as_ref().is_some_and(|f| f.fullscreen) {
+            self.toggle_devpanel(cx);
+            return Flow::Stay;
+        }
+        if self.dev.open && self.dev.focus && self.popup.is_none() && self.assist.is_none() && !matches!(k, Key::Ctrl(_) | Key::Nav { .. }) {
+            let a = self.dev.key(k);
+            self.dev_act(a, cx);
+            return Flow::Stay;
+        }
+        if self.overview.is_some() {
+            if matches!(k, Key::Ctrl('O')) {
+                self.overview = None;
+            } else {
+                self.overview_key(k);
+            }
+            return Flow::Stay;
+        }
+        if self.group_edit.is_some() {
+            self.group_edit_key(k);
+            return Flow::Stay;
+        }
         if self.full_key(k, cx) {
             return Flow::Stay;
         }
@@ -2348,6 +2587,7 @@ impl BrowserApp {
                 return;
             }
         };
+        self.share_devices("", 0, cx);
         match Full::start(start) {
             Ok(mut f) => {
                 f.navigate(&url);
@@ -2482,6 +2722,11 @@ impl BrowserApp {
                 match n {
                     Note::Refused { host, .. } => cx.audit.record(&cx.session.user, "browser.full.refused", &host),
                     Note::Gone(_) => gone = true,
+                    // a tab in the background never gets a device and is not asked about one
+                    Note::Media { id, kinds, origin } => {
+                        f.answer_permission(id, false);
+                        browser_media::audit(cx, "browser.media.deny", &origin, kinds, "tab in the background");
+                    }
                     _ => {}
                 }
             }
@@ -2503,6 +2748,7 @@ impl BrowserApp {
             }
         }
         self.av_poll(cx);
+        self.sound_ask_poll(cx);
     }
 
     /// The helper reported media without a decoder (`word`: video, audio or both) on the engine's page: offer the add-on, once per site.
@@ -2511,6 +2757,67 @@ impl BrowserApp {
         let addon = iyakki_agent::avaddon::detect(cx.services.dir());
         if self.av.offer(host, need, addon) {
             cx.audit.record(&cx.session.user, "browser.av.offer", &browser_av::site_of(host));
+        }
+    }
+
+    /// An answer to the sound dialog.
+    fn sound_answer(&mut self, a: super::soundask::Answer, cx: &AppCx) {
+        use super::soundask::{audit, start_stop_real, Answer};
+        let Some(ask) = self.sound_ask.as_mut() else { return };
+        if ask.stopping() {
+            return;
+        }
+        match a {
+            Answer::Stop => {
+                audit(cx, "browser.sound.stop", &ask.found.clone(), "asked");
+                start_stop_real(ask, std::time::Duration::from_secs(3));
+            }
+            Answer::Keep => {
+                audit(cx, "browser.sound.keep", &ask.found.clone(), "kept");
+                self.sound_ask = None;
+            }
+            Answer::Cancel => {
+                audit(cx, "browser.sound.cancel", &ask.found.clone(), "cancelled");
+                self.sound_ask = None;
+                if let Some(f) = self.full.as_mut() {
+                    f.sound_ask_cancelled();
+                }
+            }
+        }
+        self.sound_redraw();
+    }
+
+    fn sound_redraw(&mut self) {
+        if let Some(f) = self.full.as_mut() {
+            f.want_redraw();
+        }
+    }
+
+    /// While the stop runs and after it: the result on the status line, then the page's media opens its sound again.
+    fn sound_ask_poll(&mut self, cx: &AppCx) {
+        if let Some(ask) = self.sound_ask.as_mut() {
+            if let Some(r) = ask.poll() {
+                let found = ask.found.clone();
+                self.sound_ask = None;
+                match r {
+                    Ok(m) => {
+                        super::soundask::audit(cx, "browser.sound.stopped", &found, &m);
+                        self.status = Some((format!("{} {m} The page's sound will connect in a moment.", found.says), true));
+                        self.sound_reconnect = Some(std::time::Instant::now() + std::time::Duration::from_millis(2000));
+                    }
+                    Err(e) => {
+                        super::soundask::audit(cx, "browser.sound.stopfailed", &found, &e);
+                        self.status = Some((format!("{} {e}", found.says), false));
+                    }
+                }
+                self.sound_redraw();
+            }
+        }
+        if self.sound_reconnect.is_some_and(|t| std::time::Instant::now() >= t) {
+            self.sound_reconnect = None;
+            if let Some(f) = self.full.as_mut() {
+                f.reconnect_sound();
+            }
         }
     }
 
@@ -2555,6 +2862,7 @@ impl BrowserApp {
         let url = if f.url.is_empty() { f.good_url.clone() } else { f.url.clone() };
         drop(f);
         let Some(helper) = iyakki_agent::webengine::embedded_helper() else { return };
+        self.share_devices("", 0, cx);
         match self.embedded_start(helper, cx).map(Full::start) {
             Ok(Ok(mut f)) => {
                 f.navigate(&url);
@@ -2571,6 +2879,7 @@ impl BrowserApp {
         match n {
             Note::Navigated(u) => {
                 self.av.page_moved(&iyakki_sec::url_host(&u).unwrap_or_default());
+                self.media_page_moved(&u);
                 let title = self.full.as_ref().map(|f| f.title.clone()).unwrap_or_default();
                 self.set_full_page(&u, &title);
                 if self.full.as_ref().is_some_and(|f| f.visited != u) {
@@ -2595,7 +2904,11 @@ impl BrowserApp {
             Note::Refused { url, host } => {
                 cx.audit.record(&cx.session.user, "browser.full.refused", &host);
                 let _ = url;
-                self.status = Some((format!("Your account may not open pages from {host}; the full browser went back."), false));
+                self.status = Some((format!("Your account may not open pages from {host} (the sites an account may open are set by an administrator in Users); the full browser went back to the page before."), false));
+            }
+            Note::NoAddress { scheme } => {
+                let what = if scheme.is_empty() { "this page has no web address".to_string() } else { format!("this page has no web address ({scheme}:)") };
+                self.status = Some((format!("The full browser reported a page it cannot name: {what}. The tab stays as it is."), false));
             }
             Note::Download { url, name } => match Url::parse(&url) {
                 Ok(u) => self.start_download_of(u, String::new(), Some(name), cx),
@@ -2610,6 +2923,26 @@ impl BrowserApp {
                 let url = self.full.as_ref().map(|f| f.url.clone()).unwrap_or_default();
                 let host = iyakki_sec::url_host(&url).unwrap_or_default();
                 self.offer_av(&w, &host, cx);
+            }
+            Note::Dev(line) => {
+                // kept (scrubbed) only while the person's Developer tools panel is open or their switch for the chat agent is on; otherwise dropped here
+                let dt = &cx.services.devtools;
+                if self.dev.open || dt.enabled(&cx.session.user) {
+                    if let Some(f) = &self.full {
+                        dt.set_page(&cx.session.user, &f.url);
+                    }
+                    dt.record_line(&cx.session.user, &line);
+                }
+            }
+            Note::Media { id, kinds, origin } => self.media_request(id, kinds, origin, cx),
+            Note::SoundAsk(found) => {
+                if self.sound_ask.is_none() {
+                    super::soundask::audit(cx, "browser.sound.ask", &found, "asked");
+                    self.sound_ask = Some(super::soundask::Ask::new(found, "the browser"));
+                    if let Some(f) = self.full.as_mut() {
+                        f.want_redraw();
+                    }
+                }
             }
             Note::Sound(Some(n)) => self.status = Some((n, false)),
             Note::Sound(None) => {
@@ -2630,6 +2963,327 @@ impl BrowserApp {
                 }
                 self.status = Some((format!("The full web engine stopped ({why}); the page is shown by the built-in reader."), false));
             }
+        }
+    }
+
+    /// A page in front asked for the camera / microphone / screen: the policy answers, or the person is asked about one kind at a time.
+    fn media_request(&mut self, id: u32, kinds: u8, origin: String, cx: &AppCx) {
+        if self.media_ask.is_some() {
+            if let Some(f) = self.full.as_mut() {
+                f.answer_permission(id, false);
+            }
+            browser_media::audit(cx, "browser.media.deny", &origin, kinds, "another question is open");
+            return;
+        }
+        self.media_decide(id, kinds, origin, 0, cx);
+    }
+
+    /// Decide (or ask about) the next kind of request `id`; `granted` are the kinds already answered "this time only".
+    fn media_decide(&mut self, id: u32, kinds: u8, origin: String, granted: u8, cx: &AppCx) {
+        use browser_media::Decision;
+        let perms = self.media.get_or_insert_with(|| browser_media::load(cx));
+        match perms.decide(&origin, kinds, true, granted) {
+            Decision::Allow => {
+                self.media_grant(id, kinds, &origin, "allowed", cx);
+            }
+            Decision::Deny(why) => {
+                if let Some(f) = self.full.as_mut() {
+                    f.answer_permission(id, false);
+                }
+                browser_media::audit(cx, "browser.media.deny", &origin, kinds, why);
+            }
+            Decision::Ask(k) => {
+                browser_media::audit(cx, "browser.media.ask", &origin, k, "asked");
+                self.media_ask = Some(browser_media::Ask::new(id, kinds, k, granted, &origin));
+                if k == iyakki_webview::proto::media_kind::MICROPHONE || k == iyakki_webview::proto::media_kind::CAMERA {
+                    self.load_devices(cx);
+                }
+                if let Some(f) = self.full.as_mut() {
+                    f.want_redraw();
+                }
+            }
+        }
+    }
+
+    /// Every kind of the request is allowed: tell the engine; a screen share also starts the shell's feed of its own screen.
+    fn media_grant(&mut self, id: u32, kinds: u8, origin: &str, how: &str, cx: &AppCx) {
+        self.share_devices(origin, kinds, cx);
+        if kinds & iyakki_webview::proto::media_kind::SCREEN != 0 {
+            let path = browser_media::new_feed_path();
+            browser_media::set_feed_path(Some(path.clone()));
+            if let Some(f) = self.full.as_mut() {
+                f.send_screen_source(&path.to_string_lossy());
+            }
+        }
+        if let Some(f) = self.full.as_mut() {
+            f.answer_permission(id, true);
+        }
+        browser_media::audit(cx, "browser.media.allow", origin, kinds, how);
+    }
+
+    fn media_answer(&mut self, a: browser_media::Answer, cx: &AppCx) {
+        let Some(ask) = self.media_ask.take() else { return };
+        let perms = self.media.get_or_insert_with(|| browser_media::load(cx));
+        let yes = perms.apply(&ask.origin, ask.asking, a);
+        if yes && a == browser_media::Answer::Always && (ask.asking == iyakki_webview::proto::media_kind::CAMERA || ask.asking == iyakki_webview::proto::media_kind::MICROPHONE) {
+            // "Always allow this site" also remembers the device the person is looking at, for this site
+            let id = self.device_now(ask.asking);
+            let host = ask.host.clone();
+            if let Some(perms) = self.media.as_mut() {
+                perms.set_site_device(&host, ask.asking, &id);
+            }
+        }
+        let perms = self.media.get_or_insert_with(|| browser_media::load(cx));
+        if matches!(a, browser_media::Answer::Always | browser_media::Answer::Block) {
+            browser_media::save(cx, perms);
+        }
+        let what = match a {
+            browser_media::Answer::Once => "allowed once",
+            browser_media::Answer::WhileOpen => "allowed while the site is open",
+            browser_media::Answer::Always => "always allowed",
+            browser_media::Answer::Block => "blocked",
+            browser_media::Answer::NotNow => "not now",
+        };
+        browser_media::audit(cx, if yes { "browser.media.allow" } else { "browser.media.deny" }, &ask.origin, ask.asking, what);
+        if yes {
+            // the next kind of the same request (the answers "once" are carried along; the others are in the store)
+            self.media_decide(ask.id, ask.kinds, ask.origin, ask.granted | ask.asking, cx);
+        } else if let Some(f) = self.full.as_mut() {
+            f.answer_permission(ask.id, false);
+            f.want_redraw();
+        }
+    }
+
+    fn media_ask_is_mic(&self) -> bool {
+        self.media_ask.as_ref().is_some_and(|a| a.asking == iyakki_webview::proto::media_kind::MICROPHONE)
+    }
+
+    /// The microphone the next recording uses, as the chooser shows it: the person's choice, else the first one found.
+    fn mic_line(&self) -> String {
+        let chosen = self.cx_mic_choice();
+        match iyakki_agent::voicedesk::pick_mic(&self.media_mics, &chosen) {
+            Some(m) => {
+                if chosen.is_empty() || chosen != m.id { format!("Automatic: {}", m.label) } else { m.label.clone() }
+            }
+            None => "No microphone found".to_string(),
+        }
+    }
+
+    fn cx_mic_choice(&self) -> String {
+        self.mic_saved.clone()
+    }
+
+    fn media_ask_is_cam(&self) -> bool {
+        self.media_ask.as_ref().is_some_and(|a| a.asking == iyakki_webview::proto::media_kind::CAMERA)
+    }
+
+    fn devprefs_path(cx: &AppCx) -> std::path::PathBuf {
+        browser_media::devprefs_path(cx)
+    }
+
+    fn prefs(&mut self, cx: &AppCx) -> &mut iyakki_agent::browserdev::DevicePrefs {
+        self.devprefs.get_or_insert_with(|| iyakki_agent::browserdev::DevicePrefs::load(&Self::devprefs_path(cx)))
+    }
+
+    fn save_prefs(&mut self, cx: &AppCx) {
+        let path = Self::devprefs_path(cx);
+        if let Some(p) = &self.devprefs {
+            if let Err(e) = p.save(&path) {
+                self.status = Some((format!("The device choice could not be saved: {e}"), false));
+            }
+        }
+    }
+
+    /// The microphones and cameras now plugged in, without the ones the person marked "don't use".
+    fn load_devices(&mut self, cx: &AppCx) {
+        let sys = self.cam_sys.clone();
+        let prefs = self.prefs(cx).clone();
+        self.media_mics = iyakki_agent::voicedesk::list_mics(&self.mic_proc).into_iter().filter(|m| !prefs.hidden_mics.contains(&m.id)).collect();
+        self.media_cams = iyakki_agent::browserdev::list_cameras(&sys).into_iter().filter(|c| !prefs.hidden_cams.contains(&c.id)).collect();
+        self.mic_saved = cx.services.voice_settings().mic;
+    }
+
+    /// The id of the device the person is looking at in the question for `kind` (the choice, else the first one found).
+    fn device_now(&self, kind: u8) -> String {
+        use iyakki_webview::proto::media_kind::{CAMERA, MICROPHONE};
+        if kind == MICROPHONE {
+            iyakki_agent::voicedesk::pick_mic(&self.media_mics, &self.mic_saved).map(|m| m.id.clone()).unwrap_or_default()
+        } else if kind == CAMERA {
+            let want = self.devprefs.as_ref().map(|p| p.cam.clone()).unwrap_or_default();
+            let prefs = self.devprefs.clone().unwrap_or_default();
+            prefs.pick_cam(&self.media_cams, &want).map(|c| c.id.clone()).unwrap_or_default()
+        } else {
+            String::new()
+        }
+    }
+
+    /// Hand the choices to the engine's plugins: the hidden devices, and the camera and microphone to use first for this site (a device the
+    /// site was given with "Always allow" while it is still plugged in and not hidden, else the defaults). Called before the engine starts and
+    /// before every allow, so a choice made in the question counts for the very request it was made for.
+    fn share_devices(&mut self, origin: &str, kinds: u8, cx: &AppCx) {
+        use iyakki_webview::proto::media_kind::{CAMERA, MICROPHONE};
+        self.load_devices(cx);
+        let host = browser_media::secure_host(origin).unwrap_or_default();
+        let (site_cam, site_mic) = match (&self.media, host.is_empty()) {
+            (Some(m), false) => (m.site_device(&host, CAMERA), m.site_device(&host, MICROPHONE)),
+            _ => (String::new(), String::new()),
+        };
+        let prefs = self.prefs(cx).clone();
+        let cam = if kinds & CAMERA != 0 && self.media_cams.iter().any(|c| c.id == site_cam) { site_cam } else { prefs.cam.clone() };
+        let mic = if kinds & MICROPHONE != 0 && self.media_mics.iter().any(|m| m.id == site_mic) { site_mic } else { self.mic_saved.clone() };
+        iyakki_agent::browserdev::share_all(&self.mic_dir, &prefs, &cam, &mic);
+    }
+
+    /// The camera the next picture uses, as the chooser shows it.
+    fn cam_line(&self) -> String {
+        let prefs = self.devprefs.clone().unwrap_or_default();
+        match prefs.pick_cam(&self.media_cams, &prefs.cam) {
+            Some(c) if prefs.cam.is_empty() || prefs.cam != c.id => format!("Automatic: {}", c.label),
+            Some(c) => c.label.clone(),
+            None => "No camera found".to_string(),
+        }
+    }
+
+    fn open_cam_pick(&mut self) {
+        let mut items = vec!["Automatic".to_string()];
+        let labels: Vec<String> = self.media_cams.iter().map(|c| c.label.clone()).collect();
+        items.extend(labels.clone());
+        self.media_cam_pick = Some(super::widgets::Picker::new("Camera", items).with_deletable(labels, "Delete: don't use this camera"));
+    }
+
+    fn open_mic_pick(&mut self) {
+        let mut items = vec!["Automatic".to_string()];
+        let labels: Vec<String> = self.media_mics.iter().map(|m| m.label.clone()).collect();
+        items.extend(labels.clone());
+        self.media_mic_pick = Some(super::widgets::Picker::new("Microphone", items).with_deletable(labels, "Delete: don't use this microphone"));
+    }
+
+    /// The chooser over the camera question: the choice is the default camera of this person; Delete marks a camera "don't use".
+    fn cam_pick_event(&mut self, ev: &Event, cx: &AppCx) {
+        let Some(mut p) = self.media_cam_pick.take() else { return };
+        let ended = p.handle_event(ev);
+        if let Some(label) = p.take_removed() {
+            if let Some(id) = self.media_cams.iter().find(|c| c.label == label).map(|c| c.id.clone()) {
+                self.prefs(cx).hide_cam(&id);
+                self.save_prefs(cx);
+                cx.audit.record(&cx.session.user, "browser.media.camera.hidden", "one camera");
+                self.load_devices(cx);
+                self.share_devices("", 0, cx);
+                self.open_cam_pick();
+                return;
+            }
+        }
+        match ended {
+            super::widgets::PickEvent::Chosen(label) => {
+                let id = self.media_cams.iter().find(|c| c.label == label).map(|c| c.id.clone()).unwrap_or_default();
+                self.prefs(cx).cam = id.clone();
+                self.save_prefs(cx);
+                self.share_devices("", 0, cx);
+                cx.audit.record(&cx.session.user, "browser.media.camera", if id.is_empty() { "automatic" } else { "chosen" });
+            }
+            super::widgets::PickEvent::Cancel => {}
+            super::widgets::PickEvent::None => self.media_cam_pick = Some(p),
+        }
+    }
+
+    /// The chooser over the microphone question: the choice is saved in the voice settings (the Voice tile shows the same one) and handed
+    /// to the web engine, so it counts for the next getUserMedia; Delete marks a microphone "don't use" (a defective one).
+    fn mic_pick_event(&mut self, ev: &Event, cx: &AppCx) {
+        let Some(mut p) = self.media_mic_pick.take() else { return };
+        let ended = p.handle_event(ev);
+        if let Some(label) = p.take_removed() {
+            if let Some(id) = self.media_mics.iter().find(|m| m.label == label).map(|m| m.id.clone()) {
+                self.prefs(cx).hide_mic(&id);
+                self.save_prefs(cx);
+                if self.mic_saved == id {
+                    let _ = cx.services.set_voice_mic("");
+                }
+                cx.audit.record(&cx.session.user, "browser.media.microphone.hidden", "one microphone");
+                self.load_devices(cx);
+                self.share_devices("", 0, cx);
+                self.open_mic_pick();
+                return;
+            }
+        }
+        match ended {
+            super::widgets::PickEvent::Chosen(label) => {
+                let id = self.media_mics.iter().find(|m| m.label == label).map(|m| m.id.clone()).unwrap_or_default();
+                match cx.services.set_voice_mic(&id) {
+                    Ok(()) => {
+                        self.mic_saved = id.clone();
+                        cx.audit.record(&cx.session.user, "browser.media.microphone", if id.is_empty() { "automatic" } else { &id });
+                    }
+                    Err(e) => self.status = Some((format!("The microphone choice could not be saved: {e}"), false)),
+                }
+            }
+            super::widgets::PickEvent::Cancel => {}
+            super::widgets::PickEvent::None => self.media_mic_pick = Some(p),
+        }
+    }
+
+    /// Now and then: did the web engine's microphone plugin report a microphone that could not be opened? Said once, in plain words.
+    fn mic_failure_tick(&mut self) {
+        if self.mic_checked.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(1000)) {
+            return;
+        }
+        self.mic_checked = Some(std::time::Instant::now());
+        match iyakki_agent::voicedesk::browser_mic_failure(&self.mic_dir) {
+            Some((name, why)) => {
+                let key = format!("{name}\t{why}");
+                if key != self.mic_told {
+                    self.status = Some((iyakki_agent::voicedesk::mic_failure_text(&name, &why), true));
+                    self.mic_told = key;
+                }
+            }
+            None => self.mic_told.clear(),
+        }
+    }
+
+    /// Every beat: tell the shell what the pages capture (for its sign on every screen), obey its "stop" click, end the screen feed when no share is on.
+    fn capture_tick(&mut self, cx: &AppCx) {
+        use iyakki_webview::proto::media_kind::SCREEN;
+        let mut bits = self.full.as_ref().map_or(0, |f| f.capture);
+        for t in self.tabs.iter().flatten() {
+            bits |= t.full.as_ref().map_or(0, |f| f.capture);
+        }
+        if browser_media::take_stop() && bits != 0 {
+            for f in self.tabs.iter_mut().flatten().filter_map(|t| t.full.as_mut()).chain(self.full.as_mut()) {
+                f.stop_capture(bits);
+            }
+            if let Some(m) = self.media.as_mut() {
+                m.end_session();
+            }
+            cx.audit.record(&cx.session.user, "browser.media.stopped", &browser_media::kinds_words(bits));
+        }
+        if bits != self.published {
+            if self.published & SCREEN != 0 && bits & SCREEN == 0 {
+                browser_media::set_feed_path(None);
+                if let Some(f) = self.full.as_mut() {
+                    f.send_screen_source("");
+                }
+            }
+            self.published = bits;
+            browser_media::publish_capture(bits);
+        }
+    }
+
+    /// The person left the tab with a question open: it is answered no (the page can ask again when it is in front).
+    fn media_void(&mut self) {
+        if let Some(ask) = self.media_ask.take() {
+            if let Some(f) = self.full.as_mut() {
+                f.answer_permission(ask.id, false);
+            }
+        }
+    }
+
+    /// The page moved: a question about the old page is void (the helper denies it), and "while this site is open" ends elsewhere.
+    fn media_page_moved(&mut self, url: &str) {
+        let host = browser_media::secure_host(url).unwrap_or_default();
+        if self.media_ask.as_ref().is_some_and(|a| a.host != host) {
+            self.media_ask = None;
+        }
+        if let Some(m) = self.media.as_mut() {
+            m.page_moved(&host);
         }
     }
 
@@ -2664,14 +3318,19 @@ impl BrowserApp {
     }
 
     /// The page area while the full engine shows the page.
-    fn render_full(&mut self, g: &mut Gfx, view: R, s: f32) {
+    fn render_full(&mut self, g: &mut Gfx, view: R, s: f32, tick: u64) {
         g.hit(view, Event::Area(AREA_FULL), "page");
         let Some(f) = self.full.as_mut() else { return };
         f.draw(g, view, s);
-        if !f.is_ready() {
-            let msg = "Starting the web engine…";
-            let tw = g.text_width(18.0 * s, msg, Face::Sans);
-            g.text(view.x + (view.w - tw) / 2.0, view.y + view.h / 2.0 - 10.0 * s, 18.0 * s, rgb(90, 90, 90), msg, Face::Sans);
+        if !f.is_ready() || !f.has_picture() {
+            let host = iyakki_sec::url_host(&f.url).unwrap_or_default();
+            let msg_host = if f.is_ready() { host.as_str() } else { "" };
+            chrome::draw_placeholder(g, view, s, tick, msg_host, ACCENT);
+            if !f.is_ready() {
+                let msg = "Starting the web engine…";
+                let tw = g.text_width(15.0 * s, msg, Face::Sans);
+                g.text(view.x + (view.w - tw) / 2.0, view.y + view.h * 0.42 + 56.0 * s, 15.0 * s, DIM, msg, Face::Sans);
+            }
         }
     }
 
@@ -3372,11 +4031,11 @@ impl App for BrowserApp {
         } else if self.full.as_ref().is_some_and(|f| f.page_focus) {
             "typing goes to the page · Esc leave it · Ctrl+L address · Ctrl+T tab".into()
         } else if self.full.is_some() {
-            "F or Esc built-in reader · b back · f forward · r reload · g address · click the page to type".into()
+            "F or Esc built-in reader · b back · f forward · r reload · g address · F12 dev tools · click the page to type".into()
         } else if self.focus_ctl.is_some() {
             "type · Enter send the form · Tab next · Esc leave the field".into()
         } else {
-            "g address · Tab link/field · b back · f forward · r reload · R reader · Q ask · j JavaScript · c notes".into()
+            "g address · Tab link/field · b back · f forward · r reload · R reader · Q ask · j JavaScript · c notes · F12 dev tools".into()
         }
     }
 
@@ -3391,6 +4050,7 @@ impl App for BrowserApp {
             "Ctrl+K fill the saved sign-in · Ctrl+S keep one · Ctrl+G make a password · Ctrl+F find · Y copy a link",
             "j · allow JavaScript for this site (Settings → Browser for all)",
             "c · developer panel: notes about what was blocked or failed, then the network list",
+            "F12 or Ctrl+Shift+I · Developer tools: console, network, timings (1 2 3 or Tab switch, / filter, f failed only, s sort, l level, x clear, y copy, d dock, + - size, Esc close)",
             "Up / Down / PgUp / PgDn · scroll      + / − / 0 · zoom this site      R · reader view (just the article)      U · view source      X · forget this site's cookies and data      N · night colours",
             "F · show this page with the full web engine (WebKit, drawn in this page area; needs its helper program, see docs/FULL-BROWSER.md). With it on: typing, clicks and the wheel go to the page, Esc hands the keyboard back, then F or Esc returns to the built-in reader",
             "Q · ask the assistant about the page or the selection    S · summarise    T · translate to English    M · keep it in your knowledge (RAG)",
@@ -3418,17 +4078,20 @@ impl App for BrowserApp {
         }
     }
 
-    /// The full engine makes its own smooth pictures: the wheel's steps go to it once, not eased a second time.
-    fn scroll_raw(&self) -> bool {
-        self.full.is_some()
-    }
-
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
         if matches!(ev, Event::Tick) {
             super::web_agent::tick(&cx.services, &cx.audit, &cx.session);
         }
         if matches!(ev, Event::Tab(super::web_agent::TAB_OPEN)) {
             self.agent_view = true;
+            return Flow::Stay;
+        }
+        if self.media_mic_pick.is_some() && !matches!(ev, Event::Tick | Event::Key(_)) {
+            self.mic_pick_event(ev, cx);
+            return Flow::Stay;
+        }
+        if self.media_cam_pick.is_some() && !matches!(ev, Event::Tick | Event::Key(_)) {
+            self.cam_pick_event(ev, cx);
             return Flow::Stay;
         }
         if self.agent_view && !matches!(ev, Event::Tick) {
@@ -3449,7 +4112,31 @@ impl App for BrowserApp {
                 self.publish_snapshot(cx);
                 Flow::Stay
             }
+            Event::Tab(n) if browser_devpanel::is_tab(*n) => {
+                if *n == browser_devpanel::TAB_TOGGLE {
+                    self.toggle_devpanel(cx);
+                } else {
+                    let a = self.dev.click(*n);
+                    self.dev_act(a, cx);
+                }
+                Flow::Stay
+            }
+            Event::AreaAt(browser_devpanel::AREA_BODY, ..) => {
+                self.dev.focus = true;
+                self.addr_focus = false;
+                Flow::Stay
+            }
+            Event::AreaAt(browser_devpanel::AREA_SPLIT, x, y) => {
+                self.dev.drag(*x, *y, crate::ui::dragging());
+                self.dev_dirty = true;
+                Flow::Stay
+            }
             Event::Key(k) => self.handle_key(k, cx),
+            Event::Paste(t) if self.dev.open && self.dev.editing => {
+                self.dev.paste(t);
+                self.dev_dirty = true;
+                Flow::Stay
+            }
             Event::Paste(t) if self.assist.is_some() => {
                 if let Some(a) = &mut self.assist {
                     a.paste(t);
@@ -3488,6 +4175,7 @@ impl App for BrowserApp {
                 Flow::Stay
             }
             Event::AreaAt(AREA_FULL, x, y) => {
+                self.dev.focus = false;
                 self.addr_focus = false;
                 self.suggest.clear();
                 if let Some(f) = self.full.as_mut() {
@@ -3503,12 +4191,14 @@ impl App for BrowserApp {
                 Flow::Stay
             }
             Event::MouseMove(x, y) => {
+                self.mouse = (*x, *y);
                 if let Some(f) = self.full.as_mut().filter(|f| !f.pressed) {
                     f.mouse_move(*x, *y);
                 }
                 Flow::Stay
             }
             Event::MouseUp(x, y) => {
+                self.dev.drag_end();
                 if let Some(f) = self.full.as_mut() {
                     f.mouse_up(*x, *y);
                 }
@@ -3551,6 +4241,11 @@ impl App for BrowserApp {
                 }
                 Flow::Stay
             }
+            Event::Scroll(d) if self.dev.open && self.dev.rect.contains(self.mouse.0, self.mouse.1) => {
+                self.dev.scroll_by(-*d * 3);
+                self.dev_dirty = true;
+                Flow::Stay
+            }
             Event::Scroll(d) => {
                 match self.full.as_mut() {
                     Some(f) => {
@@ -3578,6 +4273,67 @@ impl App for BrowserApp {
                     9 => self.open_full_browser(cx),
                     10 => self.show_engine_help(),
                     n @ (browser_av::TAB_INSTALL..=browser_av::TAB_NEVER) => self.av_choice(*n, cx),
+                    &browser_media::TAB_MIC if self.media_ask.is_some() => self.open_mic_pick(),
+                    &browser_media::TAB_CAM if self.media_ask.is_some() => self.open_cam_pick(),
+                    n @ (browser_media::TAB_ONCE..=browser_media::TAB_NOT_NOW) => {
+                        if let Some(a) = browser_media::answer_for_tab(*n) {
+                            self.media_answer(a, cx);
+                        }
+                    }
+                    n @ (super::soundask::TAB_STOP..=super::soundask::TAB_CANCEL) => {
+                        if let Some(a) = super::soundask::answer_for_tab(*n) {
+                            self.sound_answer(a, cx);
+                        }
+                    }
+                    x if *x == TAB_STOP => self.stop_loading(),
+                    x if *x == TAB_RETRY => self.retry_failed(cx),
+                    x if *x == TAB_OVERVIEW => {
+                        if self.overview.is_some() {
+                            self.overview = None;
+                        } else {
+                            self.open_overview();
+                        }
+                    }
+                    n @ TAB_CHIP..=639 => {
+                        if let Some(g) = self.groups.list.get(n - TAB_CHIP).map(|g| g.id) {
+                            self.groups.toggle_collapse(g);
+                        }
+                    }
+                    n @ TAB_COLOR..=659 => {
+                        if let Some(e) = &self.group_edit {
+                            self.groups.set_color(e.gid, n - TAB_COLOR);
+                        }
+                    }
+                    x if *x == TAB_UNGROUP => {
+                        if let Some(e) = self.group_edit.take() {
+                            for t in self.groups.members(e.gid) {
+                                self.groups.assign(t, None);
+                            }
+                            self.regroup();
+                        }
+                    }
+                    x if *x == TAB_EDIT_DONE => self.commit_group_edit(),
+                    n @ TAB_CARD..=739 => {
+                        self.overview = None;
+                        self.switch_to(n - TAB_CARD);
+                    }
+                    n @ TAB_CARD_CLOSE..=779 => self.close_tab(n - TAB_CARD_CLOSE),
+                    n @ TAB_CARD_GROUP..=819 => self.cycle_tab_group(n - TAB_CARD_GROUP),
+                    n @ TAB_NEW_GROUP..=859 => {
+                        let t = n - TAB_NEW_GROUP;
+                        if let Some(g) = self.groups.new_group(t) {
+                            let _ = g;
+                            self.regroup();
+                        }
+                    }
+                    860 => {}
+                    n @ 861..=880 => {
+                        let first = self.groups.list.get(n - 861).and_then(|g| self.groups.members(g.id).first().copied());
+                        if let Some(t) = first {
+                            self.overview = None;
+                            self.open_group_edit(t);
+                        }
+                    }
                     999 => self.popup = None,
                     n if *n >= 1000 => self.pick_option(n - 1000),
                     500 => self.step_find(false),
@@ -3600,6 +4356,10 @@ impl App for BrowserApp {
         }
     }
 
+    fn claims_f12(&self) -> bool {
+        !self.embedded
+    }
+
     fn wants_redraw(&mut self) -> bool {
         // the caller answers with a whole redraw (panes, other displays): a live picture needs nothing more than that
         match self.redraw_kind() {
@@ -3612,12 +4372,19 @@ impl App for BrowserApp {
     }
 
     fn redraw_kind(&mut self) -> Redraw {
+        if std::mem::take(&mut self.dev_dirty) {
+            return Redraw::Full;
+        }
         if self.agent_view {
             // the assistant's tab shows a live picture, and its banner changes with what it does
             return Redraw::Full;
         }
         match self.full.as_mut().map(|f| f.redraw_kind()) {
             // a popup, the assistant's panel or the address suggestions are drawn over the page: they need the whole scene
+            // a question to the person (camera, sound) is drawn over the page with a scrim: a partial repaint of the page would
+            // show it through for a frame (the flicker), so the page layer is frozen under the dialog (the whole scene is drawn
+            // on the shell's own timer, scrim and dialog last, in one present)
+            Some(Redraw::Live) if self.modal_open() => Redraw::None,
             Some(Redraw::Live) if self.popup.is_some() || self.assist.is_some() || !self.suggest.is_empty() => Redraw::Full,
             Some(k) => k,
             None => Redraw::None,
@@ -3625,7 +4392,7 @@ impl App for BrowserApp {
     }
 
     fn live_draw(&mut self, g: &mut Gfx) -> Option<(i32, i32, i32, i32)> {
-        if self.agent_view || self.popup.is_some() || self.assist.is_some() || !self.suggest.is_empty() {
+        if self.agent_view || self.popup.is_some() || self.assist.is_some() || !self.suggest.is_empty() || self.modal_open() {
             return None;
         }
         self.full.as_mut()?.draw_pending(g)
@@ -3718,8 +4485,8 @@ impl App for BrowserApp {
             super::web_agent::render(g, area, s, &cx.services, &cx.session.user);
             return;
         }
-        let bar_h = 46.0 * s;
-        let tabs_h = 34.0 * s;
+        let bar_h = chrome::BAR_H * s;
+        let tabs_h = chrome::TABS_H * s;
         let status_h = 30.0 * s;
         let bar_y = area.y + tabs_h;
         let view = R::new(area.x, bar_y + bar_h, area.w, area.h - tabs_h - bar_h - status_h);
@@ -3730,102 +4497,166 @@ impl App for BrowserApp {
         if self.full.as_ref().is_some_and(|f| f.fullscreen) {
             self.view_h = area.h;
             self.view_rect = area;
-            self.render_full(g, area, s);
+            self.render_full(g, area, s, tick);
             return;
         }
+        // the developer tools panel takes its share of the page area; the page is drawn (and the engine resized) in what is left
+        let total_view = view;
+        let mut dev_panel: Option<(R, browser_devpanel::Dock)> = None;
+        let view = if self.dev.open {
+            let dock = self.dev.dock_side(view, s);
+            let sp = browser_devpanel::split(view, s, dock, self.dev.frac);
+            dev_panel = Some((sp.panel, dock));
+            self.view_h = sp.page.h;
+            self.view_rect = sp.page;
+            sp.page
+        } else {
+            view
+        };
         if self.full.is_some() {
-            self.render_full(g, view, s);
+            self.render_full(g, view, s, tick);
         } else {
             self.render_reader(g, view, s, tick);
+        }
+        if let Some((rect, dock)) = dev_panel {
+            let reader: Vec<browser_devtools::NetLine> = self.net_log.lock().map(|l| l.clone()).unwrap_or_default();
+            let total = if dock == browser_devpanel::Dock::Bottom { total_view.h } else { total_view.w };
+            let ctx = self.dev_ctx();
+            self.dev.render(g, rect, total, dock, s, ctx, &reader);
         }
         // (the bar only exists while the engine shows the page that reported the missing decoder)
         if let Some(b) = &self.av.bar {
             browser_av::render(g, view, s, b);
         }
+        // the "taking long" card and the page-error card sit over the page, under the bars
+        if self.overview.is_none() {
+            self.draw_page_notices(g, total_view, s, tick);
+        }
+        if self.overview.is_some() {
+            self.draw_overview(g, total_view, s, tick);
+        }
         // the tool bar sits over whatever scrolled under it
         g.gradient_rect(area.x, bar_y, area.w, bar_h, (0.0, bar_y), (0.0, bar_y + bar_h), &[(0.0, rgb(20, 26, 48)), (1.0, BAR_LOW)]);
-        let (mut bx, by) = (area.x + 20.0 * s, bar_y + 7.0 * s);
         let can_back = self.pos > 0 || self.full.as_ref().is_some_and(|f| f.can_back);
         let can_fwd = match &self.full {
             Some(f) => f.can_forward,
             None => self.pos + 1 < self.history.len(),
         };
-        for (i, (icon, on)) in [("←", can_back), ("→", can_fwd), ("⟳", self.page().is_some()), ("⌂", true)].into_iter().enumerate() {
-            let r = R::new(bx, by, 36.0 * s, 32.0 * s);
-            let hot = on && g.hovered(r);
-            crate::fx::row_at(g, r.x, r.y, r.w, r.h, 10.0 * s, false, hot, ACCENT);
-            if on {
-                g.hit(r, Event::Tab(i), ["Back", "Forward", "Reload", "Start page"][i]);
-            }
-            let tw = g.text_width(20.0 * s, icon, Face::Bold);
-            g.text(r.x + (r.w - tw) / 2.0, r.y + 4.0 * s, 20.0 * s, if on { TEXT } else { DIM }, icon, Face::Bold);
-            bx += 42.0 * s;
-        }
-        let go_w = 74.0 * s;
-        let star_w = if self.page().is_some() { 42.0 * s } else { 0.0 };
-        let js_w = 62.0 * s;
         let in_full = self.full.is_some();
+        let has_page = self.page().is_some();
         let notes_n = if in_full { 0 } else { self.page().map_or(0, |p| p.notes.len()) };
-        let notes_w = if notes_n > 0 { 96.0 * s } else { 0.0 };
-        let play_w = if !in_full && self.page().is_some_and(|p| p.media) { 70.0 * s } else { 0.0 };
         // the way back to the reader shows while a page is in the full engine; there is no button to go in (it opens by itself, F too)
         let full_on = iyakki_agent::webengine::offered() && self.full.is_some();
-        let full_w = if full_on { 138.0 * s } else { 0.0 };
         let badge: Option<(&str, [u8; 4])> = self.page().filter(|p| !p.url.host.is_empty()).map(|p| if p.url.https { ("Secure", OK) } else { ("Not secure", rgb(255, 176, 70)) });
-        let badge_w = badge.map_or(0.0, |(t, _)| g.text_width(13.0 * s, t, Face::Bold) + 22.0 * s);
-        let fw = area.x + area.w - 20.0 * s - go_w - js_w - notes_w - play_w - full_w - star_w - badge_w - 20.0 * s - bx;
-        if let Some((t, c)) = badge {
-            let r = R::new(bx, by, badge_w - 6.0 * s, 32.0 * s);
-            crate::fx::chip(g, r.x, r.y + 3.0 * s, s, t, c, false);
-            bx += badge_w;
-        }
-        self.field.render(g, R::new(bx, by - 1.0 * s, fw, 34.0 * s), self.addr_focus, s, blink(tick), Face::Sans, 0);
-        let mut rx = bx + fw + 10.0 * s;
-        if let Some(p) = self.page() {
-            let starred = self.data.is_bookmarked(&p.url.to_string());
-            let r = R::new(rx, by, 34.0 * s, 32.0 * s);
-            let hot = g.hovered(r);
-            crate::fx::row_at(g, r.x, r.y, r.w, r.h, 10.0 * s, false, hot, ACCENT);
-            g.hit(r, Event::Tab(8), if starred { "Remove bookmark" } else { "Bookmark this page" });
-            let star = if starred { "★" } else { "☆" };
-            let tw = g.text_width(20.0 * s, star, Face::Bold);
-            g.text(r.x + (r.w - tw) / 2.0, r.y + 4.0 * s, 20.0 * s, if starred { rgb(255, 205, 90) } else { MUTED }, star, Face::Bold);
-            rx += star_w;
-        }
+        let lock_w = badge.map_or(0.0, |(t, _)| chrome::lock_width(g, s, t));
+        let cap_text = self.full.as_ref().and_then(|f| browser_media::indicator(f.capture));
+        let cap_w = cap_text.as_ref().map_or(0.0, |t| g.text_width(13.0 * s, &format!("● {t}"), Face::Bold) + 28.0 * s);
+        let collecting = cx.services.devtools.collecting(&cx.session.user);
+        let dev_label = browser_devpanel::button_label(self.dev.open, collecting, self.dev_counts.0, self.dev_counts.1);
+        let dev_txt = chrome::dev_text(self.dev.open, self.dev_counts.0, self.dev_counts.1, collecting);
         let js_on = self.current_url().is_some_and(|u| self.cfg.scripts_for(&u.host));
-        if self.page().is_some() && !in_full {
-            g.button(rx, by, 15.0 * s, "JS", if js_on { OK } else { MUTED }, Event::Tab(5));
-        }
-        rx += js_w;
-        if !in_full && self.page().is_some_and(|p| p.media) {
-            g.button(rx, by, 15.0 * s, "Play", OK, Event::Tab(7));
-            rx += 70.0 * s;
-        }
+        let js_label = if js_on { "Scripts on" } else { "Scripts off" };
+        let show_js = has_page && !in_full;
+        let show_play = !in_full && self.page().is_some_and(|p| p.media);
+        let notes_label = format!("Notes {notes_n}");
+        let mut chips: Vec<(chrome::Chip, f32)> = Vec::new();
         if full_on {
-            g.button(rx, by, 15.0 * s, "Reader", OK, Event::Tab(9));
-            rx += full_w;
+            chips.push((chrome::Chip::Reader, chrome::chip_width(g, s, "Reader", false)));
         }
         if notes_n > 0 {
-            g.button(rx, by, 15.0 * s, &format!("Notes {notes_n}"), if self.show_notes { ACCENT } else { MUTED }, Event::Tab(6));
-            rx += notes_w;
+            chips.push((chrome::Chip::Notes, chrome::chip_width(g, s, &notes_label, false)));
         }
-        g.button(rx, by, 15.0 * s, "Go", ACCENT, Event::Tab(4));
+        if show_js {
+            chips.push((chrome::Chip::Scripts, chrome::chip_width(g, s, js_label, true)));
+        }
+        if show_play {
+            chips.push((chrome::Chip::Play, chrome::chip_width(g, s, "Play", false)));
+        }
+        if !self.embedded {
+            chips.push((chrome::Chip::Dev, chrome::chip_width(g, s, &dev_txt, false)));
+        }
+        let go_w = g.text_width(14.5 * s, "Go", Face::Bold) + 28.0 * s;
+        let geo = chrome::bar_layout(area.x, bar_y, area.w, s, &chrome::BarIn { cap_w, lock_w, star: has_page, go_w, chips });
+        for (i, (icon, on)) in [("←", can_back), ("→", can_fwd), ("⟳", has_page), ("⌂", true)].into_iter().enumerate() {
+            chrome::draw_nav_button(g, geo.nav[i], icon, on, ACCENT, s);
+            if on {
+                g.hit(geo.nav[i], Event::Tab(i), ["Back", "Forward", "Reload", "Start page"][i]);
+            }
+        }
+        if let (Some(r), Some(t)) = (geo.cap, &cap_text) {
+            // the page is using the camera or the microphone: always visible, never hideable by the page
+            crate::fx::chip(g, r.x, r.y + 4.0 * s, s, &format!("● {t}"), ERR, true);
+        }
+        self.field.render_inset(g, geo.field, self.addr_focus, s, blink(tick), Face::Sans, 0, geo.inset);
+        if let (Some(r), Some((t, c))) = (geo.lock, badge) {
+            chrome::draw_lock(g, r, t, c, s);
+        }
+        if let (Some(r), Some(p)) = (geo.star, self.page()) {
+            let starred = self.data.is_bookmarked(&p.url.to_string());
+            chrome::draw_star(g, r, starred, s);
+            g.hit(r, Event::Tab(8), if starred { "Remove bookmark" } else { "Bookmark this page" });
+        }
+        chrome::draw_go(g, geo.go, ACCENT, s);
+        g.hit(geo.go, Event::Tab(4), "Go");
+        let mut hover_hint = None;
+        for (c, r) in &geo.chips {
+            match c {
+                chrome::Chip::Reader => {
+                    chrome::draw_chip(g, *r, s, "Reader", None, OK, false);
+                    g.hit(*r, Event::Tab(9), "Reader");
+                }
+                chrome::Chip::Notes => {
+                    chrome::draw_chip(g, *r, s, &notes_label, None, if self.show_notes { ACCENT } else { MUTED }, self.show_notes);
+                    g.hit(*r, Event::Tab(6), &notes_label);
+                }
+                chrome::Chip::Scripts => {
+                    let (col, tip) = if js_on {
+                        (OK, "Scripts allowed on this site. Click to block them: pages load faster and stay safer, but some sites stop working.")
+                    } else {
+                        (MUTED, "Scripts blocked on this site. Click to allow them: video, maps, mail and other web apps need them.")
+                    };
+                    chrome::draw_chip(g, *r, s, js_label, Some(js_on), col, js_on);
+                    g.hit(*r, Event::Tab(5), tip);
+                    if g.hovered(*r) {
+                        hover_hint = Some(tip.to_string());
+                    }
+                }
+                chrome::Chip::Play => {
+                    chrome::draw_chip(g, *r, s, "Play", None, OK, true);
+                    g.hit(*r, Event::Tab(7), "Play");
+                }
+                chrome::Chip::Dev => {
+                    let (col, strong) = chrome::dev_color(self.dev.open, self.dev_counts.0, self.dev_counts.1, collecting, ACCENT);
+                    chrome::draw_chip(g, *r, s, &dev_txt, None, col, strong);
+                    g.hit(*r, Event::Tab(browser_devpanel::TAB_TOGGLE), &dev_label);
+                }
+            }
+        }
+        self.hover_hint = hover_hint;
+        // the thin progress bar under the tool bar: slides while the length is unknown, fills when the engine reports it
         crate::fx::accent_line(g, area.x, bar_y + bar_h - 2.0 * s, area.w, 2.0 * s, ACCENT, 0, s);
+        if self.loading_now() {
+            let pr = self.full.as_ref().filter(|f| f.loading && f.progress > 0).map(|f| f.progress);
+            chrome::draw_progress(g, area.x, bar_y + bar_h - 3.0 * s, area.w, s, pr, tick, ACCENT);
+        }
+        let (bx, fw) = (geo.field.x, geo.field.w);
         // the line under the page: loading, errors, the address under the pointer, or the title
         let sy = area.y + area.h - status_h;
         g.gradient_rect(area.x, sy, area.w, status_h, (0.0, sy), (0.0, sy + status_h), &[(0.0, rgb(17, 22, 42)), (1.0, rgb(10, 13, 26))]);
         g.rect(area.x, sy, area.w, 1.0, [ACCENT[0], ACCENT[1], ACCENT[2], 80]);
-        let (text, color) = if let Nav::Loading { url, .. } = &self.nav {
+        let (text, color) = if let Some(h) = &self.hover_hint {
+            (h.clone(), MUTED)
+        } else if let Nav::Loading { url, .. } = &self.nav {
             (format!("Loading {}{}", url.host, ".".repeat(1 + (tick / 10 % 3) as usize)), MUTED)
         } else if let Some((m, ok)) = &self.status {
             (m.clone(), if *ok { MUTED } else { ERR })
         } else if let Some(f) = self.full.as_ref().filter(|f| f.loading || !f.is_ready()) {
             let host = iyakki_sec::url_host(&f.url).unwrap_or_default();
-            if f.is_ready() { (format!("Loading {host} {}%", f.progress), MUTED) } else { ("Starting the web engine…".to_string(), MUTED) }
+            if f.is_ready() && f.progress > 0 { (format!("Loading {host} {}%", f.progress), MUTED) } else if f.is_ready() { (format!("Opening {host}…"), MUTED) } else { ("Starting the web engine…".to_string(), MUTED) }
         } else if let (Some(l), Some(p)) = (self.hovered_link.or(self.focus_link), self.page()) {
             (p.doc.links.get(l).and_then(|h| p.url.join(h).ok()).map_or_else(String::new, |u| u.to_string()), MUTED)
         } else if let Some(p) = self.page() {
-            let js = if self.cfg.scripts_for(&p.url.host) { "  ·  JavaScript on" } else { "" };
+            let js = if self.cfg.scripts_for(&p.url.host) { "  ·  Scripts allowed" } else { "" };
             (if p.doc.title.is_empty() { format!("{}{js}", p.url.host) } else { format!("{}  ·  {}{js}", p.doc.title, p.url.host) }, DIM)
         } else {
             (String::new(), DIM)
@@ -3848,52 +4679,45 @@ impl App for BrowserApp {
         }
         // the tab strip
         {
-            g.rect(area.x, area.y, area.w, tabs_h, rgb(10, 13, 26));
+            g.rect(area.x, area.y, area.w, tabs_h, chrome::STRIP_BG);
             let titles = self.tab_titles();
-            let n = titles.len();
-            let plus_w = 34.0 * s;
             // the assistant's own tab, while it exists or is acting
             let assistant = cx.session.policy.browser_agent != iyakki_sec::policy::BrowserAgent::Off && (super::web_agent::alive(&cx.session.user) || cx.services.browser.control_view(&cx.session.user).active);
             let ass_w = if assistant { 150.0 * s } else { 0.0 };
-            let tw = ((area.w - 16.0 * s - plus_w - ass_w) / n as f32).clamp_safe(70.0 * s, 230.0 * s);
-            let mut x = area.x + 8.0 * s;
-            for (i, title) in titles.iter().enumerate() {
-                let r = R::new(x, area.y + 4.0 * s, tw - 4.0 * s, tabs_h - 4.0 * s);
+            let items = self.groups.items(self.active);
+            let chip_ws: Vec<(u32, f32)> = self.groups.list.iter().map(|gr| (gr.id, chrome::group_chip_w(g, s, &gr.name, self.groups.members(gr.id).len()))).collect();
+            let geo = chrome::strip_layout(R::new(area.x, area.y, area.w, tabs_h), s, &items, self.active, &|id| chip_ws.iter().find(|c| c.0 == id).map_or(0.0, |c| c.1), ass_w + 4.0 * s);
+            self.chip_rects = geo.chips.clone();
+            for (gid, r) in &geo.chips {
+                if let Some(k) = self.groups.list.iter().position(|gr| gr.id == *gid) {
+                    let gr = &self.groups.list[k];
+                    chrome::draw_group_chip(g, *r, &gr.name, self.groups.members(gr.id).len(), browser_groups::COLORS[gr.color % browser_groups::COLORS.len()], gr.collapsed, s);
+                    g.hit(*r, Event::Tab(TAB_CHIP + k), &format!("group {}", gr.name));
+                }
+            }
+            for tg in &geo.tabs {
+                let i = tg.idx;
                 let on = i == self.active;
-                let hot = g.hovered(r);
-                g.rrect(r.x, r.y, r.w, r.h + 8.0 * s, 9.0 * s, if on { crate::fx::over(rgb(20, 26, 48), [ACCENT[0], ACCENT[1], ACCENT[2], 36]) } else if hot { rgb(22, 28, 52) } else { rgb(16, 20, 38) });
-                if on {
-                    g.rrect_outline(r.x, r.y, r.w, r.h + 8.0 * s, 9.0 * s, 1.2 * s, [ACCENT[0], ACCENT[1], ACCENT[2], 150]);
-                    g.rect(r.x + 10.0 * s, r.y + 1.0, r.w - 20.0 * s, 2.0 * s, ACCENT);
+                let loading = if on { self.loading_now() } else { self.tabs[i].as_ref().is_some_and(|t| t.loading() || t.full.as_ref().is_some_and(|f| f.loading)) };
+                chrome::draw_tab(g, tg, titles.get(i).map_or("", |t| t.as_str()), on, loading, tick, self.groups.color_of(i), ACCENT, s);
+                g.hit(tg.tab, Event::Tab(200 + i), "tab");
+                if tg.close.w > 0.0 {
+                    g.hit(tg.close, Event::Tab(300 + i), "close tab");
                 }
-                g.hit(r, Event::Tab(200 + i), "tab");
-                let loading = if on { self.is_loading() } else { self.tabs[i].as_ref().is_some_and(|t| t.loading()) };
-                let label = if loading { format!("… {title}") } else { title.clone() };
-                let label = g.fit(14.0 * s, &label, if on { Face::Bold } else { Face::Sans }, r.w - 40.0 * s);
-                g.text(r.x + 10.0 * s, r.y + 7.0 * s, 14.0 * s, if on { TEXT } else { MUTED }, &label, if on { Face::Bold } else { Face::Sans });
-                if n > 1 || on {
-                    let cr = R::new(r.x + r.w - 26.0 * s, r.y + 4.0 * s, 22.0 * s, 22.0 * s);
-                    if g.hovered(cr) {
-                        g.rrect(cr.x, cr.y, cr.w, cr.h, 6.0 * s, rgb(52, 60, 96));
-                    }
-                    g.hit(cr, Event::Tab(300 + i), "close tab");
-                    g.text(cr.x + 6.5 * s, cr.y + 2.0 * s, 15.0 * s, MUTED, "×", Face::Sans);
-                }
-                x += tw;
             }
-            if n < MAX_TABS {
-                let r = R::new(x + 2.0 * s, area.y + 6.0 * s, plus_w - 6.0 * s, 24.0 * s);
-                let hot = g.hovered(r);
-                crate::fx::row_at(g, r.x, r.y, r.w, r.h, 8.0 * s, false, hot, ACCENT);
-                g.hit(r, Event::Tab(400), "new tab");
-                g.text(r.x + 9.0 * s, r.y + 1.0 * s, 18.0 * s, MUTED, "+", Face::Bold);
+            if self.tabs.len() < MAX_TABS {
+                chrome::draw_plus(g, geo.plus, s);
+                g.hit(geo.plus, Event::Tab(400), "new tab");
             }
+            chrome::draw_overview_button(g, geo.overview, self.overview.is_some(), ACCENT, s);
+            g.hit(geo.overview, Event::Tab(TAB_OVERVIEW), "tab overview");
             if assistant {
                 let acting = cx.services.browser.control_view(&cx.session.user).active;
-                let r = R::new(area.x + area.w - ass_w - 4.0 * s, area.y + 5.0 * s, ass_w, tabs_h - 8.0 * s);
+                let r = R::new(area.x + area.w - ass_w - 4.0 * s, area.y + 4.0 * s, ass_w, tabs_h - 8.0 * s);
                 crate::fx::row_at(g, r.x, r.y, r.w, r.h, 8.0 * s, acting, g.hovered(r), rgb(255, 150, 60));
                 g.hit(r, Event::Tab(super::web_agent::TAB_OPEN), "assistant tab");
-                g.text(r.x + 10.0 * s, r.y + 3.0 * s, 14.0 * s, if acting { rgb(255, 170, 80) } else { MUTED }, if acting { "● Assistant tab" } else { "Assistant tab" }, Face::Bold);
+                let lh = g.line_height(14.0 * s, Face::Bold);
+                g.text(r.x + 10.0 * s, r.y + (r.h - lh) / 2.0, 14.0 * s, if acting { rgb(255, 170, 80) } else { MUTED }, if acting { "● Assistant tab" } else { "Assistant tab" }, Face::Bold);
             }
         }
         // what the address bar offers for the text typed, over the page
@@ -3917,6 +4741,7 @@ impl App for BrowserApp {
                 g.text(r.x + 10.0 * s, r.y + 21.0 * s, 13.0 * s, MUTED, &url, Face::Sans);
             }
         }
+        self.draw_group_edit(g, area, tabs_h, s, tick);
         if let Some((ci, hi)) = self.popup {
             let opts: Vec<String> = self.control(ci).map(|(c, _)| c.options.iter().map(|o| o.label.clone()).collect()).unwrap_or_default();
             if opts.is_empty() {
@@ -3947,8 +4772,400 @@ impl App for BrowserApp {
         if let Some(a) = &mut self.assist {
             a.render(g, view, s, cx, tick);
         }
+        if let Some(ask) = &self.media_ask {
+            let dev = if self.media_ask_is_mic() { Some(self.mic_line()) } else if self.media_ask_is_cam() { Some(self.cam_line()) } else { None };
+            browser_media::render(g, area, s, ask, dev.as_deref(), self.media_mic_pick.is_some() || self.media_cam_pick.is_some());
+        }
+        if let Some(p) = &self.media_mic_pick {
+            p.render(g, area, s, crate::gfx::rgb(255, 170, 70));
+        }
+        if let Some(p) = &self.media_cam_pick {
+            p.render(g, area, s, crate::gfx::rgb(255, 170, 70));
+        }
+        if let Some(ask) = &self.sound_ask {
+            use super::soundask::{TAB_CANCEL, TAB_KEEP, TAB_STOP};
+            super::soundask::render(g, area, s, ask, Event::Tab(TAB_STOP), Event::Tab(TAB_KEEP), Event::Tab(TAB_CANCEL));
+        }
     }
 }
+
+/// The group popup under the strip: the name being typed and the group it belongs to.
+struct GroupEdit {
+    gid: u32,
+    field: TextField,
+}
+
+/// Ids of the clicks the tab strip, the group popup and the overview send (`Event::Tab`).
+const TAB_STOP: usize = 22;
+const TAB_RETRY: usize = 23;
+const TAB_OVERVIEW: usize = 24;
+const TAB_CHIP: usize = 600;
+const TAB_COLOR: usize = 640;
+const TAB_UNGROUP: usize = 660;
+const TAB_EDIT_DONE: usize = 661;
+const TAB_CARD: usize = 700;
+const TAB_CARD_CLOSE: usize = 740;
+const TAB_CARD_GROUP: usize = 780;
+const TAB_NEW_GROUP: usize = 820;
+
+impl BrowserApp {
+    fn lazy_state(url: &str) -> TabState {
+        let mut t = TabState::blank();
+        t.field.set(url);
+        t.addr_focus = false;
+        t.lazy = true;
+        t
+    }
+
+    /// The address of tab `i` (what is kept for a group).
+    fn tab_url(&self, i: usize) -> String {
+        if i == self.active {
+            return if self.lazy { self.field.value.clone() } else { self.current_url().map(|u| u.to_string()).unwrap_or_default() };
+        }
+        match self.tabs.get(i) {
+            Some(Some(t)) if t.lazy => t.field.value.clone(),
+            Some(Some(t)) => t.history.get(t.pos).and_then(|e| e.page.as_ref()).map(|p| p.url.to_string()).unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    fn groups_json(&self) -> String {
+        let urls: Vec<String> = (0..self.tabs.len()).map(|i| self.tab_url(i)).collect();
+        self.groups.saved_json(&urls)
+    }
+
+    fn restore_groups(&mut self, cx: &AppCx) {
+        if self.embedded {
+            return;
+        }
+        for (name, color, collapsed, urls) in browser_groups::load(cx) {
+            let mut gid = None;
+            for u in urls {
+                if self.tabs.len() >= MAX_TABS {
+                    break;
+                }
+                self.tabs.push(Some(Self::lazy_state(&u)));
+                self.groups.push_tab();
+                let i = self.tabs.len() - 1;
+                match gid {
+                    None => gid = self.groups.new_group(i),
+                    Some(g) => self.groups.assign(i, Some(g)),
+                }
+            }
+            if let Some(g) = gid {
+                self.groups.rename(g, &name);
+                self.groups.set_color(g, color);
+                if collapsed {
+                    self.groups.toggle_collapse(g);
+                }
+            }
+        }
+        self.groups_saved = self.groups_json();
+    }
+
+    /// Keep the groups on disk when they (or the addresses in them) changed; looked at twice a second.
+    fn groups_tick(&mut self, cx: &AppCx) {
+        self.groups_clock += 1;
+        if self.embedded || self.groups_clock % 15 != 0 {
+            return;
+        }
+        let now = self.groups_json();
+        if now != self.groups_saved {
+            browser_groups::save(cx, &now);
+            self.groups_saved = now;
+        }
+    }
+
+    /// Make every group's tabs sit together again after a change of membership.
+    fn regroup(&mut self) {
+        let order = self.groups.contiguous_order();
+        if order.iter().enumerate().all(|(a, b)| a == *b) {
+            return;
+        }
+        let mut old = std::mem::take(&mut self.tabs);
+        self.tabs = order.iter().map(|&i| old[i].take()).collect();
+        self.active = order.iter().position(|&i| i == self.active).unwrap_or(0);
+        self.groups.apply_order(&order);
+    }
+
+    /// Ctrl+Shift+G: the tab in use starts a group of its own (named Group N); the name can be typed at once.
+    fn new_group_from(&mut self, tab: usize) {
+        if self.groups.of(tab).is_some() {
+            self.open_group_edit(tab);
+            return;
+        }
+        if let Some(g) = self.groups.new_group(tab) {
+            self.regroup();
+            let name = self.groups.get(g).map(|g| g.name.clone()).unwrap_or_default();
+            let mut field = TextField::new("Group name", false);
+            field.set(&name);
+            self.group_edit = Some(GroupEdit { gid: g, field });
+            self.addr_focus = false;
+        }
+    }
+
+    fn ungroup(&mut self, tab: usize) {
+        self.groups.assign(tab, None);
+        self.group_edit = None;
+        self.regroup();
+    }
+
+    fn open_group_edit(&mut self, tab: usize) {
+        let Some(g) = self.groups.of(tab) else {
+            self.status = Some(("This tab is not in a group yet. Ctrl+Shift+G starts one.".into(), true));
+            return;
+        };
+        let mut field = TextField::new("Group name", false);
+        field.set(&g.name);
+        self.group_edit = Some(GroupEdit { gid: g.id, field });
+        self.addr_focus = false;
+    }
+
+    fn commit_group_edit(&mut self) {
+        if let Some(e) = self.group_edit.take() {
+            self.groups.rename(e.gid, &e.field.value);
+        }
+    }
+
+    fn group_edit_key(&mut self, k: &Key) {
+        match k {
+            Key::Enter => self.commit_group_edit(),
+            Key::Esc => self.group_edit = None,
+            Key::Left | Key::Right | Key::Backspace | Key::Delete | Key::Char(_) | Key::Home | Key::End | Key::Nav { .. } => {
+                if let Some(e) = &mut self.group_edit {
+                    e.field.handle(k);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The card button: step the tab through the groups (and out of them again).
+    fn cycle_tab_group(&mut self, tab: usize) {
+        let next = self.groups.next_for(tab);
+        self.groups.assign(tab, next);
+        self.regroup();
+    }
+
+    fn open_overview(&mut self) {
+        let mut f = TextField::new("Search my tabs", false);
+        f.set("");
+        self.overview = Some(f);
+        self.addr_focus = false;
+        self.group_edit = None;
+    }
+
+    /// The tabs the overview shows for what is typed in its box: words that all appear in the title or address, in strip order.
+    fn overview_matches(&self) -> Vec<usize> {
+        let q: Vec<String> = self.overview.as_ref().map(|f| f.value.split_whitespace().map(str::to_lowercase).collect()).unwrap_or_default();
+        let titles = self.tab_titles();
+        (0..self.tabs.len())
+            .filter(|&i| {
+                let hay = format!("{} {}", titles.get(i).cloned().unwrap_or_default(), self.tab_url(i)).to_lowercase();
+                let gname = self.groups.of(i).map(|g| g.name.to_lowercase()).unwrap_or_default();
+                q.iter().all(|w| hay.contains(w) || gname.contains(w))
+            })
+            .collect()
+    }
+
+    fn overview_key(&mut self, k: &Key) {
+        match k {
+            Key::Esc => self.overview = None,
+            Key::Enter => {
+                if let Some(i) = self.overview_matches().first().copied() {
+                    self.overview = None;
+                    self.switch_to(i);
+                }
+            }
+            _ => {
+                if let Some(f) = &mut self.overview {
+                    f.handle(k);
+                }
+            }
+        }
+    }
+
+    /// Stop what is loading (the "taking long" card's Stop).
+    fn stop_loading(&mut self) {
+        match self.full.as_mut() {
+            Some(f) => f.stop(),
+            None => self.nav = Nav::Idle,
+        }
+        self.status = Some(("Stopped.".into(), true));
+    }
+
+    fn retry_failed(&mut self, cx: &AppCx) {
+        if let Some((u, _)) = self.failed.take() {
+            self.go(u, How::Push, cx);
+        } else if let Nav::Loading { url, .. } = &self.nav {
+            let u = url.clone();
+            self.nav = Nav::Idle;
+            self.go(u, How::Replace, cx);
+        } else if self.full.is_some() {
+            self.reload(cx);
+        }
+    }
+
+    /// The "taking long" card (Stop and Retry) while a load runs past [`chrome::SLOW_SECS`], and the page-error card (a plain
+    /// sentence, the address and Retry) for a page that could not be loaded.
+    fn draw_page_notices(&mut self, g: &mut Gfx, view: R, s: f32, _tick: u64) {
+        if let (Some((u, why)), false) = (&self.failed, self.loading_now()) {
+            let (title, body) = chrome::explain_failure(&u.host, why);
+            let e = chrome::draw_error(g, view, s, &title, &body, &u.to_string(), ACCENT);
+            g.hit(e.retry, Event::Tab(TAB_RETRY), "Retry");
+            return;
+        }
+        if self.load_secs().is_some_and(|t| t >= chrome::SLOW_SECS) {
+            let h = chrome::draw_hint(g, view, s, "This is taking a while. The site or the network may be slow.", ACCENT);
+            g.hit(h.stop, Event::Tab(TAB_STOP), "Stop");
+            g.hit(h.retry, Event::Tab(TAB_RETRY), "Retry");
+        }
+    }
+
+    /// The group popup under the strip: the name, the six colours, "Ungroup all" and Done.
+    fn draw_group_edit(&mut self, g: &mut Gfx, area: R, tabs_h: f32, s: f32, tick: u64) {
+        let Some(e) = &self.group_edit else { return };
+        let Some(grp) = self.groups.get(e.gid) else { return };
+        let anchor = self.chip_rects.iter().find(|c| c.0 == e.gid).map_or(area.x + 10.0 * s, |c| c.1.x);
+        let w = (320.0 * s).min(area.w - 16.0 * s);
+        let card = R::new(anchor.min(area.x + area.w - w - 8.0 * s).max(area.x + 8.0 * s), area.y + tabs_h - 2.0 * s, w, 170.0 * s);
+        g.rrect_glow(card.x, card.y, card.w, card.h, 12.0 * s, 6.0 * s, [ACCENT[0], ACCENT[1], ACCENT[2], 60]);
+        g.rrect(card.x, card.y, card.w, card.h, 12.0 * s, rgb(16, 21, 40));
+        g.rrect_outline(card.x, card.y, card.w, card.h, 12.0 * s, 1.2 * s, [ACCENT[0], ACCENT[1], ACCENT[2], 150]);
+        g.hit(card, Event::Tab(860), "group");
+        let field = R::new(card.x + 14.0 * s, card.y + 14.0 * s, card.w - 28.0 * s, 40.0 * s);
+        e.field.render(g, field, true, s, blink(tick), Face::Sans, 1);
+        let dot = 32.0 * s;
+        for (i, c) in browser_groups::COLORS.iter().enumerate() {
+            let r = R::new(card.x + 14.0 * s + i as f32 * (dot + 6.0 * s), field.y + field.h + 12.0 * s, dot, dot);
+            g.circle(r.x + dot / 2.0, r.y + dot / 2.0, dot / 2.0 - 3.0 * s, *c);
+            if i == grp.color % browser_groups::COLORS.len() {
+                g.rrect_outline(r.x, r.y, r.w, r.h, dot / 2.0, 2.0 * s, rgb(240, 244, 255));
+            }
+            g.hit(r, Event::Tab(TAB_COLOR + i), browser_groups::COLOR_NAMES[i]);
+        }
+        let by = card.y + card.h - 14.0 * s - 40.0 * s;
+        let done_w = chrome::button_width(g, s, "Done");
+        let ung_w = chrome::button_width(g, s, "Ungroup all");
+        let done = R::new(card.x + card.w - 14.0 * s - done_w, by, done_w, 40.0 * s);
+        let ung = R::new(done.x - 8.0 * s - ung_w, by, ung_w, 40.0 * s);
+        chrome::draw_button(g, ung, "Ungroup all", MUTED, s);
+        g.hit(ung, Event::Tab(TAB_UNGROUP), "Ungroup all");
+        chrome::draw_button(g, done, "Done", ACCENT, s);
+        g.hit(done, Event::Tab(TAB_EDIT_DONE), "Done");
+    }
+
+    /// The tab overview over the page area: a search box, then every tab as a card, the tabs of a group under their group's header.
+    fn draw_overview(&mut self, g: &mut Gfx, view: R, s: f32, tick: u64) {
+        let matches = self.overview_matches();
+        let order: Vec<(usize, Option<u32>)> = matches.iter().map(|&i| (i, self.groups.of(i).map(|gr| gr.id))).collect();
+        let geo = chrome::overview_layout(view, s, &order);
+        let titles = self.tab_titles();
+        let p = geo.panel;
+        g.rect(view.x, view.y, view.w, view.h, chrome::PLACEHOLDER);
+        g.rrect(p.x, p.y, p.w, p.h, 14.0 * s, rgb(16, 21, 40));
+        g.rrect_outline(p.x, p.y, p.w, p.h, 14.0 * s, 1.2 * s, [ACCENT[0], ACCENT[1], ACCENT[2], 140]);
+        g.hit(p, Event::Tab(860), "tab overview");
+        if let Some(f) = &self.overview {
+            f.render(g, geo.search, true, s, blink(tick), Face::Sans, 2);
+        }
+        chrome::draw_button(g, geo.done, "Done", ACCENT, s);
+        g.hit(geo.done, Event::Tab(TAB_OVERVIEW), "Done");
+        for (gid, r) in &geo.headers {
+            if let Some(k) = self.groups.list.iter().position(|gr| gr.id == *gid) {
+                let gr = &self.groups.list[k];
+                let col = browser_groups::COLORS[gr.color % browser_groups::COLORS.len()];
+                g.circle(r.x + 8.0 * s, r.y + r.h / 2.0, 5.0 * s, col);
+                let t = g.fit(15.0 * s, &format!("{}  ·  {} tabs", gr.name, self.groups.members(gr.id).len()), Face::Bold, r.w - 24.0 * s);
+                let lh = g.line_height(15.0 * s, Face::Bold);
+                g.text(r.x + 22.0 * s, r.y + (r.h - lh) / 2.0, 15.0 * s, TEXT, &t, Face::Bold);
+                g.hit(*r, Event::Tab(861 + k), "rename group");
+            }
+        }
+        if geo.cards.is_empty() {
+            let msg = "No tab matches.";
+            let tw = g.text_width(16.0 * s, msg, Face::Sans);
+            g.text(p.x + (p.w - tw) / 2.0, geo.search.y + geo.search.h + 40.0 * s, 16.0 * s, MUTED, msg, Face::Sans);
+        }
+        for c in &geo.cards {
+            let i = c.idx;
+            let on = i == self.active;
+            let hot = g.hovered(c.card);
+            let fill = if on { crate::fx::over(rgb(30, 40, 72), [ACCENT[0], ACCENT[1], ACCENT[2], 26]) } else if hot { rgb(27, 34, 60) } else { rgb(20, 25, 46) };
+            g.rrect(c.card.x, c.card.y, c.card.w, c.card.h, 12.0 * s, fill);
+            if on {
+                g.rrect_outline(c.card.x, c.card.y, c.card.w, c.card.h, 12.0 * s, 1.4 * s, [ACCENT[0], ACCENT[1], ACCENT[2], 190]);
+            }
+            let gcol = self.groups.color_of(i);
+            if let Some(col) = gcol {
+                g.rrect(c.card.x, c.card.y + 10.0 * s, 4.0 * s, c.card.h - 20.0 * s, 2.0 * s, col);
+            }
+            g.hit(c.card, Event::Tab(TAB_CARD + i), "tab card");
+            let title = titles.get(i).cloned().unwrap_or_default();
+            let t = g.fit(15.0 * s, &title, Face::Bold, c.card.w - 24.0 * s - 40.0 * s);
+            g.text(c.card.x + 14.0 * s, c.card.y + 12.0 * s, 15.0 * s, TEXT, &t, Face::Bold);
+            let host = browser_data::host_of(&self.tab_url(i)).to_string();
+            let h = g.fit(13.0 * s, if host.is_empty() { "New tab" } else { &host }, Face::Sans, c.card.w - 24.0 * s - 40.0 * s);
+            g.text(c.card.x + 14.0 * s, c.card.y + 34.0 * s, 13.0 * s, MUTED, &h, Face::Sans);
+            let chot = g.hovered(c.close);
+            if chot {
+                g.rrect(c.close.x, c.close.y, c.close.w, c.close.h, 8.0 * s, rgb(58, 66, 104));
+            }
+            let (cx, cy, d) = (c.close.x + c.close.w / 2.0, c.close.y + c.close.h / 2.0, 5.0 * s);
+            g.line(cx - d, cy - d, cx + d, cy + d, 1.7 * s, if chot { TEXT } else { MUTED });
+            g.line(cx - d, cy + d, cx + d, cy - d, 1.7 * s, if chot { TEXT } else { MUTED });
+            g.hit(c.close, Event::Tab(TAB_CARD_CLOSE + i), "close tab");
+            let (label, col) = match self.groups.of(i) {
+                Some(gr) => (gr.name.clone(), browser_groups::COLORS[gr.color % browser_groups::COLORS.len()]),
+                None => ("Add to group".to_string(), MUTED),
+            };
+            let gl = g.fit(13.0 * s, &label, Face::Bold, (c.group.w - 20.0 * s).max(0.0));
+            let hotg = g.hovered(c.group);
+            g.rrect(c.group.x, c.group.y, c.group.w, c.group.h, 10.0 * s, if hotg { rgb(40, 50, 86) } else { rgb(26, 32, 58) });
+            g.rrect_outline(c.group.x, c.group.y, c.group.w, c.group.h, 10.0 * s, 1.0 * s, [col[0], col[1], col[2], 160]);
+            let lh = g.line_height(13.0 * s, Face::Bold);
+            g.text(c.group.x + 10.0 * s, c.group.y + (c.group.h - lh) / 2.0, 13.0 * s, crate::fx::readable(col, rgb(26, 32, 58), 4.5), &gl, Face::Bold);
+            g.hit(c.group, Event::Tab(TAB_CARD_GROUP + i), "add to group");
+            let hotn = g.hovered(c.new_group);
+            g.rrect(c.new_group.x, c.new_group.y, c.new_group.w, c.new_group.h, 10.0 * s, if hotn { rgb(40, 50, 86) } else { rgb(26, 32, 58) });
+            let (px, py, d) = (c.new_group.x + c.new_group.w / 2.0, c.new_group.y + c.new_group.h / 2.0, 5.0 * s);
+            g.line(px - d, py, px + d, py, 1.7 * s, MUTED);
+            g.line(px, py - d, px, py + d, 1.7 * s, MUTED);
+            g.hit(c.new_group, Event::Tab(TAB_NEW_GROUP + i), "new group");
+        }
+    }
+
+    /// True while a load runs, in either engine.
+    fn loading_now(&self) -> bool {
+        self.is_loading() || self.full.as_ref().is_some_and(|f| f.loading)
+    }
+
+    /// Seconds the current load has been going, when it has been going a while.
+    fn load_secs(&self) -> Option<f32> {
+        self.full.as_ref().and_then(|f| f.loading_secs()).or_else(|| self.is_loading().then_some(self.load_started.elapsed().as_secs_f32()))
+    }
+}
+
+impl BrowserApp {
+    /// A question (camera, microphone, screen, sound) is open over the page.
+    fn modal_open(&self) -> bool {
+        self.media_ask.is_some() || self.sound_ask.is_some()
+    }
+}
+
+impl Drop for BrowserApp {
+    fn drop(&mut self) {
+        // the shell's sign and the screen feed belong to the pages this browser holds
+        if self.published != 0 {
+            browser_media::publish_capture(0);
+            browser_media::set_feed_path(None);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "browser_look_tests.rs"]
+mod look_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4295,13 +5512,26 @@ mod tests {
     const SCRIPTED: &str = "<title>S</title><p id=a>no scripts</p><script>document.getElementById('a').textContent = 'scripts ran'; fetch('/data').then(r => r.text()).then(t => { document.getElementById('a').textContent += ' + ' + t; });</script>";
 
     #[test]
-    fn scripts_run_only_for_sites_the_user_allows_and_the_choice_is_remembered() {
+    fn scripts_run_on_every_site_by_default() {
         let web = site(vec![("https://a.org/", html(SCRIPTED)), ("https://a.org/data", Response { status: 200, content_type: "text/plain".into(), body: b"fetched".to_vec(), ..Response::default() })]);
-        let cx = cx_with("br11", web);
+        let cx = cx_with("br11d", web);
         let mut a = BrowserApp::new(&cx);
         a.open_url("a.org", &cx);
         settle(&mut a, &cx);
-        assert_eq!(first_text(&a), "no scripts", "scripts are off until the user turns them on");
+        assert_eq!(first_text(&a), "scripts ran + fetched", "owner decision 2026-10-28: scripts are on by default");
+        assert!(a.js_allowed_for("a.org") && a.js_allowed_for("b.org"));
+    }
+
+    #[test]
+    fn scripts_run_only_for_sites_the_user_allows_and_the_choice_is_remembered() {
+        let web = site(vec![("https://a.org/", html(SCRIPTED)), ("https://a.org/data", Response { status: 200, content_type: "text/plain".into(), body: b"fetched".to_vec(), ..Response::default() })]);
+        let cx = cx_with("br11", web);
+        // scripts run everywhere by default; this is a person who switched them off and allows chosen sites
+        browser_config::save(&cx, &BrowserConfig { js_all: false, ..BrowserConfig::default() });
+        let mut a = BrowserApp::new(&cx);
+        a.open_url("a.org", &cx);
+        settle(&mut a, &cx);
+        assert_eq!(first_text(&a), "no scripts", "scripts are off for a person who switched them off, until they allow the site");
         assert!(a.page().unwrap().notes.is_empty());
         a.handle(&Event::Key(Key::Char('j')), &cx);
         settle(&mut a, &cx);
@@ -6388,8 +7618,11 @@ mod tests {
         }
     }
 
-    /// Run heartbeats until `done` (the helper answers in its own time).
     include!("browser_block_ui_tests.rs");
+    include!("browser_devpanel_tests.rs");
+    include!("browser_media_tests.rs");
+    include!("browser_consent_live_tests.rs");
+    include!("browser_navpolicy_tests.rs");
 
     fn pump(a: &mut BrowserApp, cx: &AppCx, what: &str, mut done: impl FnMut(&mut BrowserApp) -> bool) {
         for _ in 0..2000 {
@@ -6610,11 +7843,19 @@ mod tests {
         // moving over the page (absolute positions) arrives relative to the page
         a.handle(&Event::MouseMove((view.x + 222.0) as i32, (view.y + 111.0) as i32), &cx);
         pump(&mut a, &cx, "the move", |a| full_title(a).contains("mouse 222,111 move"));
-        // the wheel: 2 notches up is -240 (down is positive) at the pointer
+        // the wheel: 2 notches up are negative units (down is positive) at the pointer
         a.handle(&Event::Scroll(2), &cx);
-        pump(&mut a, &cx, "the wheel", |a| full_title(a).contains("wheel 222,111 0,-240"));
+        // the shell's scroll engine eases a notch into several smaller wheel events (F-SHELL-50), so the SUM of what reached the page counts
+        let wheel_sum = |a: &BrowserApp| -> i32 {
+            a.full.as_ref().map(|f| f.log.iter().filter(|l| l.starts_with("got Wheel")).filter_map(|l| l.split("dy: ").nth(1)?.split(',').next()?.trim().parse::<i32>().ok()).sum()).unwrap_or(0)
+        };
+        let before = wheel_sum(&a);
+        // a notch moves the page by the same screen distance as the Settings lists (scroll match), not 120 units: derive the units
+        let unit = crate::apps::browser_full::wheel_units_f(crate::scrolleng::NOTCH_PX, 1.0);
+        let near = |got: i32, want: f32| (got as f32 - want).abs() <= 1.5;
+        pump(&mut a, &cx, "the wheel", |a| full_title(a).contains("wheel 222,111") && near(wheel_sum(a) - before, 2.0 * unit));
         a.handle(&Event::Scroll(-1), &cx);
-        pump(&mut a, &cx, "the wheel down", |a| full_title(a).contains("wheel 222,111 0,120"));
+        pump(&mut a, &cx, "the wheel down", |a| near(wheel_sum(a) - before, 2.0 * unit - unit));
         // with the pointer outside the page (over the browser's own bar) the wheel and the pointer are not the page's
         let count = |a: &BrowserApp, what: &str| a.full.as_ref().unwrap().log.iter().filter(|l| l.contains(what)).count();
         let (moves, wheels) = (count(&a, "got Mouse"), count(&a, "got Wheel"));

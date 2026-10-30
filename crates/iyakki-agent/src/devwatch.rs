@@ -52,10 +52,22 @@ pub struct Device {
     pub name: String,
 }
 
+/// `devices.json` of the network watch. Schema 1 stamps the alpha.1 layout. A damaged file is moved aside: starting again from an
+/// empty list would take the next look as "what is normally here" and trust every stranger on the network.
+pub const SCHEMA: iyakki_schema::Spec = iyakki_schema::Spec { name: "network devices", current: 1, migrations: &[iyakki_schema::Migration { to: 1, what: "stamp the alpha.1 layout", run: |_| {} }] };
+
 #[derive(Serialize, Deserialize, Default)]
 struct State {
+    #[serde(default)]
+    schema: u32,
+    /// Fields a newer release wrote: kept, and written back.
+    #[serde(flatten)]
+    extra: iyakki_schema::Extra,
     /// The first look has been taken.
     learned: bool,
+    /// The first NET SCAN after install has been taken as "what is normally here" too (a sweep finds many machines at once).
+    #[serde(default)]
+    scan_learned: bool,
     #[serde(default = "yes")]
     enabled: bool,
     devices: BTreeMap<String, Device>,
@@ -74,22 +86,25 @@ pub struct DeviceWatch {
 
 impl DeviceWatch {
     pub fn open(path: &Path) -> DeviceWatch {
-        let state = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(State { learned: false, enabled: true, devices: BTreeMap::new() });
+        let blank = || State { schema: 1, extra: Default::default(), learned: false, scan_learned: false, enabled: true, devices: BTreeMap::new() };
+        let out = iyakki_schema::open(&SCHEMA, path, iyakki_schema::now_secs());
+        if let Some(n) = out.note(&SCHEMA, path) {
+            iyakki_schema::report(n);
+        }
+        let state = match out {
+            iyakki_schema::Outcome::Current(v) | iyakki_schema::Outcome::Migrated { value: v, .. } | iyakki_schema::Outcome::Newer { value: v, .. } => serde_json::from_value(v).unwrap_or_else(|_| {
+                // not the shape of this store at all: keep it, start again
+                iyakki_schema::move_aside(path, iyakki_schema::now_secs());
+                blank()
+            }),
+            _ => blank(),
+        };
         DeviceWatch { path: path.into(), state: Mutex::new(state), fresh: Mutex::new(Vec::new()) }
     }
 
+    /// Best effort (a failed save is retried by the next change); never replaces a file from a newer release.
     fn save(&self, st: &State) {
-        use std::os::unix::fs::OpenOptionsExt;
-        use std::io::Write;
-        if let Some(d) = self.path.parent() {
-            let _ = std::fs::create_dir_all(d);
-        }
-        let tmp = self.path.with_extension("tmp");
-        if let Ok(json) = serde_json::to_string(st) {
-            if std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).and_then(|mut f| f.write_all(json.as_bytes())).is_ok() {
-                let _ = std::fs::rename(&tmp, &self.path);
-            }
-        }
+        let _ = iyakki_schema::save_typed(&SCHEMA, &self.path, st, 0o600);
     }
 
     pub fn enabled(&self) -> bool {
@@ -105,12 +120,25 @@ impl DeviceWatch {
     /// Take in what is on the network now. Returns the devices that are new since the last look (none on the very first look,
     /// which is taken as what is normally here).
     pub fn observe(&self, seen: &[Neighbor], now: i64) -> Vec<Device> {
+        self.observe_as(seen, now, false)
+    }
+
+    /// The result of a NET SCAN. The first one after install is taken as what is normally here, like the very first look: a
+    /// sweep of the whole network finds every machine in the house at once, and none of them is a stranger.
+    pub fn observe_scan(&self, seen: &[Neighbor], now: i64) -> Vec<Device> {
+        self.observe_as(seen, now, true)
+    }
+
+    fn observe_as(&self, seen: &[Neighbor], now: i64, scan: bool) -> Vec<Device> {
         let mut st = self.state.lock().unwrap();
         if !st.enabled {
             return Vec::new();
         }
-        let first_look = !st.learned;
+        let first_look = !st.learned || (scan && !st.scan_learned);
         st.learned = true;
+        if scan {
+            st.scan_learned = true;
+        }
         let mut new = Vec::new();
         for n in seen {
             match st.devices.get_mut(&n.mac) {
@@ -243,6 +271,13 @@ mod tests {
         let w2 = DeviceWatch::open(&path);
         assert_eq!(w2.list().len(), 3);
         assert_eq!(w2.observe(&[n("192.168.1.77", "11:22:33:44:55:66")], 600).len(), 1);
+        // the first scan after install is a baseline too; the next scan's strangers are new
+        let w3 = DeviceWatch::open(&d.join("scan.json"));
+        assert!(w3.observe(&[n("192.168.1.1", "aa:bb:cc:00:00:01")], 1).is_empty());
+        let sweep: Vec<Neighbor> = (2..40).map(|i| n(&format!("192.168.1.{i}"), &format!("aa:bb:cc:00:01:{i:02x}"))).collect();
+        assert!(w3.observe_scan(&sweep, 2).is_empty(), "the first scan finds the household, not strangers");
+        assert_eq!(w3.untrusted_count(), 0);
+        assert_eq!(w3.observe_scan(&[n("192.168.1.200", "de:ad:be:ef:00:09")], 3).len(), 1, "later scans find strangers");
         // switched off: nothing is recorded or alerted
         w2.set_enabled(false);
         assert!(w2.observe(&[n("192.168.1.78", "11:22:33:44:55:77")], 700).is_empty());

@@ -12,6 +12,9 @@ pub const MOUNTS: &[(&str, &str, &str, u64, &str)] = &[
     ("sysfs", "/sys", "sysfs", 0, ""),
     ("devtmpfs", "/dev", "devtmpfs", 0, "mode=0755"),
     ("devpts", "/dev/pts", "devpts", 0, "mode=0620,gid=5"),
+    // POSIX shared memory (shm_open) and the shell/plugin hand-over files (camera and microphone choices, the screen share); systemd mounts it
+    // the same way: nosuid (2) and nodev (4), sticky and world-writable, the default size of half the memory
+    ("tmpfs", "/dev/shm", "tmpfs", 2 | 4, "mode=1777"),
     ("tmpfs", "/run", "tmpfs", 0, "mode=0755"),
     ("tmpfs", "/tmp", "tmpfs", 0, "mode=1777"),
     ("cgroup2", "/sys/fs/cgroup", "cgroup2", 0, ""),
@@ -905,8 +908,86 @@ pub fn power_off() {
     }
 }
 
+/// Where the kernel lists the sleep states it can enter.
+pub const SLEEP_STATES: &str = "/sys/power/state";
+
+/// Pick the sleep state to write from the text of `/sys/power/state` (for example `freeze mem disk`). `freeze` (suspend to
+/// idle) is preferred because it works on more hardware; `mem` is the fallback. `disk` (hibernate) is never chosen.
+pub fn choose_sleep_state(listing: &str) -> Option<&'static str> {
+    let has = |w: &str| listing.split_whitespace().any(|t| t == w);
+    if has("freeze") {
+        Some("freeze")
+    } else if has("mem") {
+        Some("mem")
+    } else {
+        None
+    }
+}
+
+/// The state to use, read from the file at `path`; None when the file is missing or offers nothing usable.
+pub fn sleep_state_at(path: &Path) -> Option<&'static str> {
+    choose_sleep_state(&std::fs::read_to_string(path).ok()?)
+}
+
+/// True when this kernel offers a sleep state.
+pub fn sleep_state_available() -> bool {
+    sleep_state_at(Path::new(SLEEP_STATES)).is_some()
+}
+
+/// Suspend the machine and return after it wakes. The session is not marked clean (the program keeps running).
+#[cfg(not(target_os = "linux"))]
+pub fn sleep() {
+    eprintln!("sleep is not available on this OS");
+}
+
+#[cfg(target_os = "linux")]
+pub fn sleep() {
+    let Some(state) = sleep_state_at(Path::new(SLEEP_STATES)) else {
+        log::warn!("sleep: the kernel offers no sleep state");
+        return;
+    };
+    quiet_sound();
+    clock_floor_save();
+    // SAFETY: sync takes no arguments.
+    unsafe { libc::sync() };
+    // the write blocks while the machine sleeps and returns after it wakes
+    if let Err(e) = std::fs::write(SLEEP_STATES, state) {
+        log::warn!("sleep: writing {state} failed: {e}");
+    }
+    // the wall clock may have jumped while asleep: take the saved floor again
+    clock_floor_early();
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sleep_state_prefers_freeze_then_mem_and_never_disk() {
+        use super::choose_sleep_state as c;
+        assert_eq!(c("freeze mem disk\n"), Some("freeze"));
+        assert_eq!(c("mem disk"), Some("mem"));
+        assert_eq!(c("disk"), None);
+        assert_eq!(c(""), None);
+        assert_eq!(c("memory freezer"), None);
+    }
+
+    #[test]
+    fn sleep_state_is_read_from_a_file() {
+        let d = std::env::temp_dir().join(format!("iyakki-sleep-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("state");
+        assert_eq!(super::sleep_state_at(&f), None);
+        std::fs::write(&f, "mem disk\n").unwrap();
+        assert_eq!(super::sleep_state_at(&f), Some("mem"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn sleep_does_not_mark_the_session_clean() {
+        let boot = include_str!("boot.rs");
+        let body = boot.split("pub fn sleep() {").nth(2).unwrap().split("\n}\n").next().unwrap();
+        assert!(!body.contains("finish_clean"), "sleep resumes; it must not end the session");
+    }
+
     #[test]
     fn the_scan_reaches_a_t2_macs_keyboard_ten_levels_down() {
         let root = std::env::temp_dir().join(format!("depth-{}", std::process::id()));
@@ -1196,5 +1277,8 @@ mod tests {
         // /dev must be mounted before /dev/pts
         let pos = |t: &str| MOUNTS.iter().position(|m| m.1 == t).unwrap();
         assert!(pos("/dev") < pos("/dev/pts") && pos("/sys") < pos("/sys/fs/cgroup"));
+        // /dev/shm is a tmpfs on top of /dev, sticky and world-writable, with nosuid and nodev
+        let shm = MOUNTS.iter().find(|m| m.1 == "/dev/shm").expect("/dev/shm is mounted");
+        assert!(pos("/dev") < pos("/dev/shm") && shm.2 == "tmpfs" && shm.4.contains("mode=1777") && shm.3 & 2 != 0 && shm.3 & 4 != 0);
     }
 }

@@ -151,5 +151,5 @@ fn a_failed_cluster_shows_its_reason_and_raises_an_alert() {
     assert!(g.hits.iter().any(|h| h.ev == Event::Tab(93)));
     // the failure is also an alert for the administrators' INBOX
     let alerts = k.take_alerts();
-    assert!(alerts.iter().any(|a| a.title_body().0.contains("went down") && a.title_body().1.contains("boom")), "{alerts:?}");
+    assert!(alerts.iter().any(|a| a.title_body().0.contains("stopped and was restarted") && a.title_body().1.contains("boom")), "{alerts:?}");
 }

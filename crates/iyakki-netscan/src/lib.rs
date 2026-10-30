@@ -9,6 +9,7 @@
 //! * It is slow on purpose: a limited number of probes at once, short timeouts, and a stop switch.
 
 pub mod discover;
+pub mod mdns;
 pub mod model;
 pub mod net;
 pub mod probe;

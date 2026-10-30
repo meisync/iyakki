@@ -4,8 +4,8 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::resample::Resampler;
 
@@ -60,8 +60,15 @@ pub struct EngineCfg {
     pub channels: usize,
     /// Frames in a period (960 = 20 ms at 48 kHz).
     pub period_frames: usize,
-    /// A source starts sounding once it has this much queued (or has ended).
+    /// A notification or alarm starts sounding once it has this much queued (or has ended); also where it resumes after running dry.
     pub prebuffer_ms: u32,
+    /// Radio and media: queued before the source starts mixing (network and decoder jitter budget) ...
+    pub media_prefill_ms: u32,
+    /// ... and queued again before it resumes after it ran dry (it is silent, with a short fade, until then).
+    pub media_resume_ms: u32,
+    /// Speech: the same two numbers.
+    pub speech_prefill_ms: u32,
+    pub speech_resume_ms: u32,
     /// How long a source keeps ducking others after its last audible sample (bridges the gaps between sentences).
     pub hang_ms: u32,
     /// Ducking goes down in this time ...
@@ -72,13 +79,30 @@ pub struct EngineCfg {
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { rate: 48_000, channels: 2, period_frames: 960, prebuffer_ms: 40, hang_ms: 300, attack_ms: 30, release_ms: 400 }
+        EngineCfg { rate: 48_000, channels: 2, period_frames: 960, prebuffer_ms: 40, media_prefill_ms: 800, media_resume_ms: 400, speech_prefill_ms: 250, speech_resume_ms: 250, hang_ms: 300, attack_ms: 30, release_ms: 400 }
     }
 }
 
 impl EngineCfg {
     pub fn period(&self) -> Duration {
         Duration::from_micros(self.period_frames as u64 * 1_000_000 / self.rate.max(1) as u64)
+    }
+    /// Every source starts at once (tests, and callers that do their own buffering).
+    pub fn no_prefill(mut self) -> EngineCfg {
+        self.prebuffer_ms = 0;
+        self.media_prefill_ms = 0;
+        self.media_resume_ms = 0;
+        self.speech_prefill_ms = 0;
+        self.speech_resume_ms = 0;
+        self
+    }
+    /// (first start, restart after running dry) in ms for a kind of source.
+    pub fn prefill_ms(&self, kind: SourceKind) -> (u32, u32) {
+        match kind {
+            SourceKind::Radio | SourceKind::Media => (self.media_prefill_ms, self.media_resume_ms),
+            SourceKind::Speech => (self.speech_prefill_ms, self.speech_resume_ms),
+            SourceKind::Notification | SourceKind::Alarm => (self.prebuffer_ms, self.prebuffer_ms),
+        }
     }
     fn period_ms(&self) -> f32 {
         self.period_frames as f32 * 1000.0 / self.rate.max(1) as f32
@@ -87,10 +111,30 @@ impl EngineCfg {
 
 /// Below this a source counts as silent (about -80 dBFS).
 pub const AUDIBLE: f32 = 1e-4;
-/// Seconds of audio a source may queue before a write waits.
+/// Milliseconds of audio a notification or alarm may queue before a write waits.
 pub const RING_MS: u32 = 500;
 
+/// How much a source of this kind may queue before a write waits (a live stream needs room for its jitter buffer plus slack).
+pub fn ring_ms(kind: SourceKind) -> u32 {
+    match kind {
+        SourceKind::Radio | SourceKind::Media => 6_000,
+        SourceKind::Speech => 2_000,
+        SourceKind::Notification | SourceKind::Alarm => RING_MS,
+    }
+}
+
+/// A source that runs dry fades out, and fades in again when it resumes, over this many frames (about 5 ms at 48 kHz).
+const FADE_FRAMES: usize = 240;
+
+/// Microseconds since the first call (a clock all mixer parts share).
+pub(crate) fn now_us() -> u64 {
+    static BASE: OnceLock<Instant> = OnceLock::new();
+    BASE.get_or_init(Instant::now).elapsed().as_micros() as u64
+}
+
 pub(crate) struct Wake {
+    /// When the period being mixed will have been played, on [`now_us`] (0: the card is closed).
+    pub end_us: AtomicU64,
     pub sleeping: AtomicBool,
     pub m: Mutex<()>,
     pub cv: Condvar,
@@ -98,7 +142,7 @@ pub(crate) struct Wake {
 
 impl Wake {
     pub fn new() -> Arc<Wake> {
-        Arc::new(Wake { sleeping: AtomicBool::new(false), m: Mutex::new(()), cv: Condvar::new() })
+        Arc::new(Wake { end_us: AtomicU64::new(0), sleeping: AtomicBool::new(false), m: Mutex::new(()), cv: Condvar::new() })
     }
     pub fn notify(&self) {
         if self.sleeping.load(Ordering::SeqCst) {
@@ -131,13 +175,17 @@ pub(crate) struct SourceShared {
     evicted: AtomicBool,
     epoch: AtomicU64,
     underruns: AtomicU64,
+    /// Microseconds of this source that were mixed (at the output rate, so a stall of the source does not count).
+    supplied_us: AtomicU64,
+    /// When the last audio of this source reaches the speaker, on [`now_us`].
+    heard_end_us: AtomicU64,
     pub frames_in: AtomicU64,
     pub wake: Arc<Wake>,
 }
 
 impl SourceShared {
     pub(crate) fn new(id: u64, kind: SourceKind, label: &str, rate: u32, channels: usize, exclusive: bool, wake: Arc<Wake>) -> Arc<SourceShared> {
-        let cap = (rate as usize * channels * RING_MS as usize / 1000).max(channels * 64);
+        let cap = (rate as usize * channels * ring_ms(kind) as usize / 1000).max(channels * 64);
         Arc::new(SourceShared {
             id,
             kind,
@@ -154,6 +202,8 @@ impl SourceShared {
             evicted: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
+            supplied_us: AtomicU64::new(0),
+            heard_end_us: AtomicU64::new(0),
             frames_in: AtomicU64::new(0),
             wake,
         })
@@ -165,6 +215,13 @@ impl SourceShared {
 
     pub(crate) fn buffered_ms(&self) -> u32 {
         (self.queued_samples() / self.channels * 1000 / self.rate.max(1) as usize) as u32
+    }
+
+    /// How much of this source has been heard, ms: what was mixed minus what is still on its way to the speaker (the mixer's lead
+    /// and the pipe). It stops when the source runs dry, and is 0 until the first sound is audible.
+    pub(crate) fn played_ms(&self) -> u64 {
+        let in_flight = self.heard_end_us.load(Ordering::SeqCst).saturating_sub(now_us());
+        self.supplied_us.load(Ordering::SeqCst).saturating_sub(in_flight) / 1000
     }
 
     pub(crate) fn gain(&self) -> f32 {
@@ -220,10 +277,20 @@ impl SourceWriter {
         if self.s.is_gone() || self.s.is_closed() {
             return 0;
         }
-        let mut r = self.s.ring.lock().unwrap_or_else(|e| e.into_inner());
-        let n = (r.cap - r.data.len()).min(pcm.len()) / self.s.channels * self.s.channels;
-        r.data.extend(pcm[..n].iter().copied());
-        drop(r);
+        // the lock is held for at most about 90 ms of audio at a time, so the mixer thread never waits long for it
+        let step = 8192 / self.s.channels * self.s.channels;
+        let mut done = 0;
+        while done < pcm.len() {
+            let mut r = self.s.ring.lock().unwrap_or_else(|e| e.into_inner());
+            let n = (r.cap - r.data.len()).min(pcm.len() - done).min(step) / self.s.channels * self.s.channels;
+            if n == 0 {
+                break;
+            }
+            r.data.extend(pcm[done..done + n].iter().copied());
+            drop(r);
+            done += n;
+        }
+        let n = done;
         self.s.frames_in.fetch_add((n / self.s.channels) as u64, Ordering::Relaxed);
         self.s.wake.notify();
         n
@@ -279,6 +346,11 @@ impl SourceWriter {
     pub fn finish(&self) {
         self.s.closed.store(true, Ordering::SeqCst);
         self.s.wake.notify();
+    }
+    /// Milliseconds of this source that have been heard (not just handed over or mixed): the lead of the mixer and the pipe
+    /// are subtracted, and it stands still while the source is starved. Drives word highlighting.
+    pub fn played_ms(&self) -> u64 {
+        self.s.played_ms()
     }
     /// Milliseconds queued.
     pub fn buffered_ms(&self) -> u32 {
@@ -379,6 +451,9 @@ struct Slot {
     hang_ms: f32,
     epoch: u64,
     underruns: u64,
+    /// The source ran dry and waits for its resume level; it fades in when it sounds again.
+    resuming: bool,
+    fade_in: bool,
 }
 
 /// One period's result.
@@ -402,19 +477,21 @@ pub struct Engine {
     master_prev: f32,
     acc: Vec<f32>,
     pub underruns: u64,
+    /// Underruns by source kind (index = `SourceKind::priority()`).
+    pub starved: [u64; 5],
     pub clipped: u64,
     pub periods: u64,
 }
 
 impl Engine {
     pub fn new(cfg: EngineCfg) -> Engine {
-        Engine { cfg, slots: Vec::new(), master_prev: 1.0, acc: Vec::new(), underruns: 0, clipped: 0, periods: 0 }
+        Engine { cfg, slots: Vec::new(), master_prev: 1.0, acc: Vec::new(), underruns: 0, starved: [0; 5], clipped: 0, periods: 0 }
     }
 
     pub(crate) fn add(&mut self, s: Arc<SourceShared>) {
         let rs = (s.rate != self.cfg.rate).then(|| Resampler::new(s.rate, self.cfg.rate, s.channels));
         let epoch = s.epoch.load(Ordering::SeqCst);
-        self.slots.push(Slot { s, rs, ready: Vec::new(), scratch: Vec::new(), started: false, gain_prev: 1.0, duck: 1.0, duck_prev: 1.0, hang_ms: 0.0, epoch, underruns: 0 });
+        self.slots.push(Slot { s, rs, ready: Vec::new(), scratch: Vec::new(), started: false, gain_prev: 1.0, duck: 1.0, duck_prev: 1.0, hang_ms: 0.0, epoch, underruns: 0, resuming: false, fade_in: false });
         if let Some(sl) = self.slots.last_mut() {
             sl.gain_prev = f32::from_bits(sl.s.gain.load(Ordering::SeqCst));
         }
@@ -437,7 +514,10 @@ impl Engine {
         self.acc.clear();
         self.acc.resize(n * ch, 0.0);
         let mut info = PeriodInfo::default();
-        let pre_frames = |s: &SourceShared| (s.rate as usize * cfg.prebuffer_ms as usize / 1000).max(1) * s.channels;
+        let pre_frames = |s: &SourceShared, resuming: bool| {
+            let (first, again) = cfg.prefill_ms(s.kind);
+            (s.rate as usize * (if resuming { again } else { first }) as usize / 1000).max(1) * s.channels
+        };
         // 1. pull
         let mut supplied = vec![0usize; self.slots.len()];
         let mut audible = vec![false; self.slots.len()];
@@ -447,6 +527,7 @@ impl Engine {
                 sl.epoch = ep;
                 sl.ready.clear();
                 sl.started = false;
+                sl.resuming = false;
                 if sl.rs.is_some() {
                     sl.rs = Some(Resampler::new(sl.s.rate, cfg.rate, sl.s.channels));
                 }
@@ -455,8 +536,9 @@ impl Engine {
                 continue;
             }
             if !sl.started {
-                if sl.s.queued_samples() >= pre_frames(&sl.s) || (sl.s.is_closed() && sl.s.queued_samples() > 0) || !sl.ready.is_empty() {
+                if sl.s.queued_samples() >= pre_frames(&sl.s, sl.resuming) || (sl.s.is_closed() && sl.s.queued_samples() > 0) || !sl.ready.is_empty() {
                     sl.started = true;
+                    sl.fade_in = std::mem::take(&mut sl.resuming);
                 } else {
                     continue;
                 }
@@ -480,6 +562,18 @@ impl Engine {
             let got = (sl.ready.len() / ch).min(n);
             supplied[i] = got;
             if got > 0 {
+                sl.s.heard_end_us.store(sl.s.wake.end_us.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+            sl.s.supplied_us.fetch_add(got as u64 * 1_000_000 / cfg.rate.max(1) as u64, Ordering::SeqCst);
+            if got > 0 && sl.fade_in {
+                sl.fade_in = false;
+                let k = got.min(FADE_FRAMES);
+                for f in 0..k {
+                    let g = (f as f32 + 1.0) / k as f32;
+                    sl.ready[f * ch..(f + 1) * ch].iter_mut().for_each(|v| *v *= g);
+                }
+            }
+            if got > 0 {
                 info.supplying += 1;
                 let peak = sl.ready[..got * ch].iter().fold(0.0f32, |m, v| m.max(v.abs()));
                 audible[i] = peak > AUDIBLE;
@@ -489,7 +583,16 @@ impl Engine {
                 sl.underruns += 1;
                 sl.s.underruns.fetch_add(1, Ordering::Relaxed);
                 info.underruns += 1;
-                sl.started = false; // refill the prebuffer before it sounds again
+                self.starved[sl.s.kind.priority() as usize] += 1;
+                sl.started = false; // refill to the resume level before it sounds again
+                sl.resuming = true;
+                // what is left of the stream fades out instead of stopping with a click
+                let k = got.min(FADE_FRAMES);
+                for f in 0..k {
+                    let g = 1.0 - (f as f32 + 1.0) / k as f32;
+                    let at = (got - k + f) * ch;
+                    sl.ready[at..at + ch].iter_mut().for_each(|v| *v *= g);
+                }
             }
         }
         // 2. who is sounding (with a hang so speech does not pump between sentences)
@@ -577,6 +680,24 @@ impl Engine {
 impl Engine {
     /// Some source has audio waiting (so the sink must be open before the next period is mixed).
     pub fn wants_sink(&self) -> bool {
-        self.slots.iter().any(|s| !s.s.paused.load(Ordering::SeqCst) && (!s.ready.is_empty() || s.s.queued_samples() > 0))
+        let cfg = self.cfg;
+        self.slots.iter().any(|s| {
+            if s.s.paused.load(Ordering::SeqCst) {
+                return false;
+            }
+            let q = s.s.queued_samples();
+            if !s.ready.is_empty() || (s.started && q > 0) {
+                return true;
+            }
+            // a source still filling its jitter buffer does not open the card (it would be reopened and closed again and again)
+            let (first, again) = cfg.prefill_ms(s.s.kind);
+            let need = (s.s.rate as usize * (if s.resuming { again } else { first }) as usize / 1000).max(1) * s.s.channels;
+            q >= need || (s.s.is_closed() && q > 0)
+        })
+    }
+
+    /// The least queued time (ms) among the live streams that are sounding: how close the nearest underrun is. 0 with none.
+    pub fn buffered_ms(&self) -> u32 {
+        self.slots.iter().filter(|s| s.started && !s.s.is_closed()).map(|s| s.s.buffered_ms()).min().unwrap_or(0)
     }
 }

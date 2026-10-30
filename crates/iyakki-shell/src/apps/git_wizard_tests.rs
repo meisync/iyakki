@@ -41,7 +41,7 @@ pub(crate) fn fx(tag: &str) -> Fx {
 
 impl Fx {
     pub fn env_with(&self, http: Arc<dyn GitHttp>) -> WizEnv {
-        WizEnv { keys: self.keys.clone(), http, dir: self.dir.join("svc"), user: "alice".into(), egress: Arc::new(|_| Ok(())) }
+        WizEnv { keys: self.keys.clone(), http, dir: self.dir.join("svc"), user: "alice".into(), egress: Arc::new(|_| Ok(())), kube: Arc::new(|_| iyakki_agent::pvcguard::KOut::default()) }
     }
     pub fn env(&self) -> WizEnv {
         self.env_with(self.http.clone())
@@ -107,14 +107,15 @@ fn the_wizard_walks_five_steps_by_keyboard_and_stores_the_token_in_the_vault_onl
     let r = w.report.clone().unwrap();
     assert!(r.ok && r.account == "octo", "{r:?}");
     assert_eq!(w.step, Step::Test);
-    // the commit step is prefilled from the account
+    // the commit step is NOT prefilled from the account (its profile may hold a placeholder): empty unless the person types one
     assert!(press(&mut w, Key::Enter) == WizOut::None);
     assert_eq!(w.step, Step::Commits);
-    assert_eq!((w.text("idname").as_str(), w.text("email").as_str()), ("Octo Cat", "octo@example.org"));
+    assert_eq!((w.text("idname").as_str(), w.text("email").as_str()), ("", ""));
     assert!(w.make_default, "the first connection is the default");
     let out = press(&mut w, Key::Ctrl('s'));
     let WizOut::Done(c) = out else { panic!("{out:?} {:?}", w.error) };
-    assert_eq!((c.name.as_str(), c.account.as_str(), c.token_vault.as_str(), c.identity_email.as_str(), c.default), ("Home Gitea", "octo", "git.conn.home-gitea.token", "octo@example.org", true));
+    assert_eq!((c.name.as_str(), c.account.as_str(), c.token_vault.as_str(), c.identity_email.as_str(), c.default), ("Home Gitea", "octo", "git.conn.home-gitea.token", "", true));
+    assert_eq!(c.identity_name, "", "no made-up identity is saved");
     assert!(c.last_test.as_ref().is_some_and(|t| t.ok));
     assert_eq!(f.store.get("git.conn.home-gitea.token").unwrap().as_str(), TOK);
     assert_eq!(w.text("token"), "", "the token left the field");
@@ -540,4 +541,90 @@ fn the_wizard_is_drawn_at_four_sizes_on_every_step_and_the_buttons_are_there() {
         let g = draw(&mut w);
         assert!(g.hits.iter().any(|h| h.label == "Save"), "{:?}", w.step);
     }
+}
+
+// ------------------------------------------------------------------------------------------------ a Gitea found on the cluster
+
+fn gitea_json(ns: &str, ready: u32) -> String {
+    format!(r#"{{"items":[{{"metadata":{{"namespace":"{ns}","name":"gitea"}},"spec":{{"replicas":1}},"status":{{"readyReplicas":{ready}}}}}]}}"#)
+}
+
+fn env_kube(f: &Fx, out: &'static str, ok: bool) -> WizEnv {
+    let mut e = f.env();
+    e.kube = Arc::new(move |a: &[&str]| {
+        assert_eq!(a, ["get", "deployments", "-A", "-o", "json"], "read-only");
+        iyakki_agent::pvcguard::KOut { ok, stdout: out.to_string(), text: out.to_string() }
+    });
+    e
+}
+
+#[test]
+fn a_gitea_found_on_the_cluster_is_listed_says_what_is_missing_and_offers_one_action() {
+    let f = fx("found");
+    let json: &'static str = Box::leak(gitea_json("iyakki-gitea", 1).into_boxed_str());
+    let mut w = GitWizard::new(env_kube(&f, json, true));
+    w.wait();
+    assert_eq!(w.cluster.len(), 1);
+    assert!(w.cluster[0].found && w.cluster[0].title.contains("found on your cluster") && w.cluster[0].namespace == "iyakki-gitea");
+    assert!(f.log.lock().unwrap().iter().any(|l| l == "git.discover.cluster found iyakki-gitea"), "{:?}", f.log.lock().unwrap());
+    press(&mut w, Key::Enter);
+    assert_eq!(w.mode, 0, "the cluster's Gitea is offered first");
+    assert!(w.cluster_hint().is_none());
+    press(&mut w, Key::Ctrl('s'));
+    assert!(w.error.as_deref().unwrap().contains("no address on this computer") && w.error.as_deref().unwrap().contains("no token"), "{:?}", w.error);
+    assert_eq!(w.step, Step::Where);
+    // drawn: the row and the one action
+    let mut g = Gfx::new(1280, 720);
+    g.clear(rgb(0, 0, 0));
+    w.render(&mut g, R::new(0.0, 0.0, 1280.0, 720.0), crate::shell::scale_for(1280, 720), rgb(110, 160, 255), true);
+    assert!(g.hits.iter().any(|h| h.label.contains("found on your cluster")), "the row");
+    assert!(g.hits.iter().any(|h| h.label == "Set it up (Quick install: Gitea)"), "the action");
+    assert_eq!(w.event(&Event::Tab(WIZ_BASE + 8)), WizOut::QuickInstallGitea);
+    nothing_kept(&f);
+}
+
+#[test]
+fn a_record_for_the_same_namespace_wins_and_nothing_is_listed_twice() {
+    let f = fx("found-dup");
+    install_gitea(&f, "NodePort");
+    // the record has no namespace set in this fixture: give it the one the cluster reports
+    let svc = f.dir.join("svc");
+    let mut recs = iyakki_agent::platform::installed::load(&svc, "alice");
+    recs[0].namespace = "iyakki-gitea".into();
+    iyakki_agent::platform::installed::save(&svc, "alice", &recs).unwrap();
+    let json: &'static str = Box::leak(gitea_json("iyakki-gitea", 1).into_boxed_str());
+    let mut w = GitWizard::new(env_kube(&f, json, true));
+    w.wait();
+    assert_eq!(w.cluster.len(), 1);
+    assert!(!w.cluster[0].found);
+    // no action for a record
+    let mut g = Gfx::new(1280, 720);
+    press(&mut w, Key::Enter);
+    w.render(&mut g, R::new(0.0, 0.0, 1280.0, 720.0), 1.0, rgb(110, 160, 255), true);
+    assert!(!g.hits.iter().any(|h| h.label.contains("Quick install")));
+}
+
+#[test]
+fn not_ready_none_and_a_kubectl_error_leave_the_wizard_as_it_was() {
+    for (json, ok) in [(gitea_json("iyakki-gitea", 0), true), (r#"{"items":[]}"#.to_string(), true), ("refused".to_string(), false)] {
+        let f = fx("found-none");
+        let json: &'static str = Box::leak(json.into_boxed_str());
+        let mut w = GitWizard::new(env_kube(&f, json, ok));
+        w.wait();
+        assert!(w.cluster.is_empty());
+        press(&mut w, Key::Enter);
+        w.mode = 0;
+        assert!(w.cluster_hint().unwrap().contains("No Gitea is installed"));
+        assert!(w.error.is_none());
+        assert!(!f.log.lock().unwrap().iter().any(|l| l.contains("discover")));
+    }
+}
+
+#[test]
+fn two_instances_are_both_listed() {
+    let f = fx("found-two");
+    let json: &'static str = r#"{"items":[{"metadata":{"namespace":"a","name":"gitea"},"status":{"readyReplicas":1}},{"metadata":{"namespace":"b","name":"gitea"},"status":{"readyReplicas":1}}]}"#;
+    let mut w = GitWizard::new(env_kube(&f, json, true));
+    w.wait();
+    assert_eq!(w.cluster.iter().map(|g| g.namespace.as_str()).collect::<Vec<_>>(), ["a", "b"]);
 }

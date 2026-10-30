@@ -60,6 +60,12 @@ pub enum Event {
     AudioPlaying(bool),
     /// The page tried to play media without a decoder here: `video`, `audio` or `both`.
     MediaUnsupported(String),
+    /// One developer-tools line from the page (see `FromHelper::DevEvent`).
+    DevEvent(String),
+    /// The page asks for the camera / microphone / screen (see `FromHelper::PermissionRequest`); answer with `ToHelper::PermissionAnswer`.
+    PermissionRequest { id: u32, kinds: u8, origin: String },
+    /// Which devices the page captures now (`proto::media_kind` bits).
+    CaptureState(u8),
     /// The helper says its engine failed (it may recover by itself).
     Crashed(String),
     Log(String),
@@ -258,6 +264,9 @@ impl WebView {
                     FromHelper::Fullscreen(on) => out.push(Event::Fullscreen(on)),
                     FromHelper::AudioPlaying(on) => out.push(Event::AudioPlaying(on)),
                     FromHelper::MediaUnsupported(s) => out.push(Event::MediaUnsupported(s)),
+                    FromHelper::DevEvent(s) => out.push(Event::DevEvent(s)),
+                    FromHelper::PermissionRequest { id, kinds, origin } => out.push(Event::PermissionRequest { id, kinds, origin }),
+                    FromHelper::CaptureState(k) => out.push(Event::CaptureState(k)),
                     FromHelper::Crashed(s) => out.push(Event::Crashed(s)),
                     FromHelper::Log(s) => out.push(Event::Log(s)),
                 },
@@ -298,8 +307,9 @@ impl WebView {
         }
         if self.dead.is_none() {
             if let Some(c) = &mut self.child {
-                if let Ok(Some(status)) = c.try_wait() {
-                    self.dead = Some(format!("the helper program stopped ({status})"));
+                let life = crate::childstate::child_status(c);
+                if life.is_over() {
+                    self.dead = Some(format!("the helper program stopped ({})", life.describe()));
                 }
             }
         }
@@ -310,18 +320,17 @@ impl WebView {
             if let Some(c) = &mut self.child {
                 let t = Instant::now();
                 loop {
-                    match c.try_wait() {
-                        Ok(Some(st)) => {
-                            status = Some(st.to_string());
+                    match crate::childstate::child_status(c) {
+                        st if st.is_over() => {
+                            status = Some(st.describe());
                             break;
                         }
-                        Err(_) => break,
-                        Ok(None) if t.elapsed() > Duration::from_millis(200) => {
+                        _ if t.elapsed() > Duration::from_millis(200) => {
                             let _ = c.kill();
                             let _ = c.wait();
                             break;
                         }
-                        Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+                        _ => std::thread::sleep(Duration::from_millis(5)),
                     }
                 }
             }
@@ -494,7 +503,7 @@ impl WebView {
             std::thread::spawn(move || {
                 let t = Instant::now();
                 while t.elapsed() < Duration::from_secs(2) {
-                    if matches!(child.try_wait(), Ok(Some(_))) {
+                    if crate::childstate::child_status(&mut child).is_over() {
                         return;
                     }
                     std::thread::sleep(Duration::from_millis(20));

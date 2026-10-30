@@ -145,6 +145,16 @@ web engine renders in software on a Haswell Mac mini and what to expect: `docs/Y
   it cannot show them, or press F. After the engine stops, or after F leaves it, the shell stops sending sites to it until the BROWSER is reopened.
 * To test the engine alone on a device, use the `probe` example of `iyakki-webview` (see `docs/YOUTUBE-ON-IYAKKI.md`, Google or YouTube
   does not load). On a Mac mini 2018 it loaded Google and YouTube at 1920x1080 with software GL and the real LAN.
+* **No sound while the radio, TALES or another program is playing.** On a card that one program holds at a time (the T2 Mac's) the
+  engine's sound cannot open it. When a page plays and a named player or an outside program holds the card, the browser shows a dialog
+  ("Radio is playing. Stop it so the browser can play?") with **Stop it**, **Keep it** and **Cancel** (`y`/Enter, `n`, Esc). Stop it ends
+  IYAKKI's own player cleanly, or an outside program through the same guarded stop the power-off uses (only the owner of an open playback
+  stream, never init or the shell; SIGTERM, then SIGKILL), and then the page's media reconnects its sound. Keep it leaves things as they are.
+  Every answer is in the audit log (`browser.sound.*`). The other way round, a radio station that starts while the page plays asks the
+  same question. See `docs/development/AUDIO-MIXER.md`.
+* **Browser sound through the mixer (experimental).** Settings -> Sound has a switch (`W`, off by default, needs the mixer, applies the
+  next time the engine starts) that sends the engine's sound through a named pipe into IYAKKI's mixer so it can play with the radio.
+  It is not proven on real hardware; if the browser goes silent with it on, turn it off. Its status row says what it is doing.
 * Video that needs H.264 (TikTok): without the audio and video add-on the engine has no decoder. The helper notices the failed player and the
   shell shows one bar ("This video needs the audio and video add-on. Install it ..."); see *Audio and video add-on* below.
 
@@ -159,6 +169,16 @@ uses an ffmpeg that starts. All GStreamer plugins of the image load (`GST_REGIST
 
 The helper allows autoplay (without it `play()` fails with NotAllowedError and a page waits for a click). VP8/VP9 and Opus/Vorbis play;
 H.264, AAC and AV1 do not; an H.264-only page now gets the add-on bar instead of a silent black player (below). Measurements: `docs/YOUTUBE-ON-IYAKKI.md`.
+
+## Camera and microphone (getUserMedia)
+
+State on 2026-10-25: **a page cannot use the camera or microphone in the web image**, because the engine is built without media-stream
+(`BR2_PACKAGE_WPEWEBKIT_MEDIA_STREAM` is not set in `iyakki_web.fragment`, so `-DENABLE_MEDIA_STREAM=OFF`; `-DENABLE_WEB_RTC=OFF` is fixed
+by Buildroot's package) and the image has no `v4l2` GStreamer plugin. The shell side is in place and tested with the fake helper: the helper
+passes the page's request to the shell (`PermissionRequest` / `PermissionAnswer`, [`WEBVIEW-PROTOCOL.md`](WEBVIEW-PROTOCOL.md)), the browser
+asks the person (Allow once / while this site is open / always / block), remembers the choice per person and shows a red **Camera on** chip
+while a page captures. The helper turns the setting on and denies on silence. Causes, the Buildroot change, cost and decisions:
+[`development/BROWSER-MEDIA-DEVICES.md`](development/BROWSER-MEDIA-DEVICES.md).
 
 ## Codec policy
 
@@ -191,6 +211,8 @@ confirm before any image ships these codecs):
      "go for ffmpeg support"). It needs libraries built for musl and for the FFmpeg version of the image.
 * **What works without any add-on:** YouTube (VP9 and Opus), most video platforms that offer WebM, and any H.264 file through
   the installed ffmpeg in IYAKKI's own player. Sites that only have H.264/AAC do not play video in the browser.
+* **MP3 in the browser (2026-10-28):** the image carries its own MP3 decoder, the GStreamer element `iyakkimp3dec` (`dist/webview/wpe-helper/mp3dec.c`, built around minimp3, CC0 / public domain, the C original of the `nanomp3` crate the radio uses; `crates/iyakki-agent/tests/mp3dec_match.rs` checks both give the same samples). MP3 patents expired in 2017, so it ships in the image, with no download. Found on the Mac: a recorder site whose only format is MP3 stalled on "Processing..." because the engine had no MP3 decoder. The boot self-test decodes a sample through it (`path mp3-decoder`). Only the Mac can say that real pages play.
+* **AAC and H.264 still need the add-on, and the add-on has no download yet (2026-10-28):** `avaddon.rs` expects a Store item `ffmpeg-libs` (FFmpeg 6.1 shared libraries built for musl); `legal/downloads-manifest.json` has none (only `cli:ffmpeg`, a static program the radio uses). Until the owner picks a build, the add-on cannot be installed.
 
 ## Audio and video add-on (H.264, AAC, MP3 in the browser)
 
@@ -222,6 +244,29 @@ Install does not download anything by itself: it opens Store -> Setup on the add
 where the vendor, the licence and the size are shown and the person presses the button. When the libraries are in place the browser
 starts its engine again on the same page, because the engine reads its environment at start. The probe only reports when the engine's
 own `canPlayType` says the codec is missing, so a broken file never produces the message.
+
+**Developer tools for the chat agent.** A second injected script, `dev-probe.js`, reports failed requests, slow resources, console errors
+and warnings and page load timings (protocol message 0x90 `DevEvent`, `docs/WEBVIEW-PROTOCOL.md`). The shell stores them, scrubbed and in
+bounded ring buffers, only while the person has turned on *Developer tools for the chat agent* in Settings -> Browser (default off, audited),
+and the chat tools `browser_failed_requests`, `browser_timings` and `browser_console` read them (`docs/BROWSER-AGENT.md`). The helper source
+(`helper.c`, `dev-probe.js`, `Makefile`) builds only in the full web image: **not compiled or run** in the development checks.
+
+**Developer tools panel (for the person).** F12, Ctrl+Shift+I or the small `</>` chip in the BROWSER tile's tool bar (its click label is still "Dev tools F12"; grey, amber with failed requests, red with errors) opens a panel
+with Console, Network and Timings (Esc, the Close button or the same keys close it). It docks at the bottom (about 35 % of the page area)
+or, on very wide windows or with `d`, at the right; the page and the engine are resized to what is left, so nothing is drawn over the page.
+The divider can be dragged and `+` / `-` resize it. It reads the same buffers as the chat agent's tools (`iyakki_agent::devtools`, through
+`DevTools::seq` and `snapshot`, so a heartbeat costs one comparison): **Console** (errors and warnings with level colour, time, source and
+line; filter by text and level, Clear), **Network** (failed and slow requests with address, status or error and time; Failed only, sort by
+newest or slowest, filter, Clear) and **Timings** (first response, DOMContentLoaded and load as a bar of the load phases, and the slowest
+resources). **Copy as text** puts the rows the filters leave (scrubbed, no query strings) on the clipboard. Opening the panel starts
+collecting for this person for as long as it is open, **without** changing the saved *Developer tools for the chat agent* switch (the chat
+tools still follow that switch only); closing it stops collecting and forgets what was collected, unless the switch is on. Nothing is
+written to disk. The toolbar button shows the counts of failed requests and console errors while something is collecting. Lines from before
+the panel was opened are not kept: reload the page to see its start. There is **no JavaScript console input and no Elements tab**: the
+web view protocol has no safe way to run a script and return a result, so none was added. The panel needs the full web build for the
+`dev-probe.js` probe and says so when no probe line has arrived. In the built-in reader the panel's Network tab lists the reader's own
+requests (addresses scrubbed). F12 is also the shell's screenshot key: the tile answers `App::claims_f12`, but the shell must consult it before starting a
+screenshot (not wired yet, so for now Ctrl+Shift+I and the button are the working ways in; Print Screen still takes screenshots). Not run against real pages.
 
 **Patents and licences.** The LGPL libraries are downloaded by the person from their vendor; IYAKKI ships none of them and does not
 redistribute them. H.264 and AAC are patent-licensed formats in some countries: decoding them is the person's matter after their own

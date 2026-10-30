@@ -4,6 +4,7 @@
 //!
 //! * `fake://crash` exits at once (a crashing engine); `fake://hang` stops answering,
 //! * `fake://download/NAME` reports a download of `https://example.org/files/NAME`,
+//! * `fake://report/ADDRESS` reports a navigation event for exactly ADDRESS (may be empty, `about:blank`, `data:...`),
 //! * `fake://goto/HOST` reports a top-level navigation to `https://HOST/landed` (a redirect the shell must vet),
 //! * `fake://clipboard` reports a copy; any other address becomes the current page (title `fake page ADDRESS`).
 //!
@@ -46,6 +47,9 @@ struct Fake {
     /// The page is playing audio (`fake://audio`).
     audio: bool,
     spam: u32,
+    /// The kinds of the open permission request (`fake://media/...`), and what the "page" captures after an allow.
+    asked: u8,
+    capturing: u8,
 }
 
 fn paint(img: &mut [u8], w: u32, h: u32, r: Rect, bar: u32, mouse: (i32, i32)) {
@@ -107,6 +111,9 @@ impl Fake {
         if std::mem::take(&mut self.fs) {
             self.send(FromHelper::Fullscreen(false)); // a navigation ends fullscreen, as in the engine
         }
+        if std::mem::take(&mut self.capturing) != 0 {
+            self.send(FromHelper::CaptureState(0)); // and stops the page's camera, microphone and screen share
+        }
         if std::mem::take(&mut self.audio) {
             self.send(FromHelper::AudioPlaying(false)); // and stops the page's sound
         }
@@ -132,6 +139,9 @@ impl Fake {
             ToHelper::Navigate(url) => {
                 if let Some(name) = url.strip_prefix("fake://download/") {
                     self.send(FromHelper::Download { url: format!("https://example.org/files/{name}"), name: name.to_string() });
+                } else if let Some(raw) = url.strip_prefix("fake://report/") {
+                    // a navigation event with exactly this address, the page itself unchanged (about:blank, data:, blob:, empty ...)
+                    self.send(FromHelper::Url(raw.to_string()));
                 } else if let Some(host) = url.strip_prefix("fake://goto/") {
                     let u = format!("https://{host}/landed");
                     self.navigate_to(&u, true);
@@ -171,6 +181,23 @@ impl Fake {
                     // a page whose H.264 video cannot be decoded here (the web engine's media probe reports it)
                     self.navigate_to(&url, true);
                     self.send(FromHelper::MediaUnsupported("video".into()));
+                } else if url == "fake://dev" {
+                    // a page with a failed request, a console error and page timings, as the injected dev probe reports them
+                    self.navigate_to(&url, true);
+                    for l in ["F\u{1f}GET\u{1f}404\u{1f}120\u{1f}https://a.org/missing.js?token=abc\u{1f}", "C\u{1f}error\u{1f}12\u{1f}3\u{1f}https://a.org/app.js\u{1f}TypeError: x is undefined", "P\u{1f}80\u{1f}300\u{1f}900\u{1f}https://a.org/\u{1f}"] {
+                        self.send(FromHelper::DevEvent(l.into()));
+                    }
+                } else if let Some(rest) = url.strip_prefix("fake://media/") {
+                    // a page that asks for devices: `fake://media/KINDS/ORIGIN-HOST` (KINDS = media_kind bits); the page
+                    // is then "https://ORIGIN-HOST/"; the answer arrives as ToHelper::PermissionAnswer and is logged.
+                    let (k, host) = rest.split_once('/').unwrap_or((rest, "meet.example"));
+                    let u = format!("https://{host}/");
+                    self.navigate_to(&u, true);
+                    self.asked = k.parse().unwrap_or(1);
+                    self.send(FromHelper::PermissionRequest { id: 1, kinds: self.asked, origin: u });
+                } else if let Some(k) = url.strip_prefix("fake://capture/") {
+                    self.capturing = k.parse().unwrap_or(0);
+                    self.send(FromHelper::CaptureState(self.capturing));
                 } else if url == "fake://clipboard" {
                     self.send(FromHelper::Clipboard("copied text".into()));
                 } else {
@@ -248,6 +275,21 @@ impl Fake {
                     self.send(FromHelper::Fullscreen(false));
                 }
             }
+            ToHelper::PermissionAnswer { allow, .. } => {
+                // already logged as `got PermissionAnswer {..}`; an allow starts the capture the page asked for, as the engine would
+                let bits = std::mem::take(&mut self.asked) & 7;
+                if allow && bits != 0 {
+                    self.capturing |= bits;
+                    self.send(FromHelper::CaptureState(self.capturing));
+                }
+            }
+            ToHelper::StopCapture { kinds } => {
+                if self.capturing & kinds != 0 {
+                    self.capturing &= !kinds;
+                    self.send(FromHelper::CaptureState(self.capturing));
+                }
+            }
+            ToHelper::ScreenSource(_) => {} // logged only
             ToHelper::Quit => return false,
         }
         true
@@ -328,7 +370,7 @@ fn main() {
             }
         }
     };
-    let mut f = Fake { stream: stream.try_clone().unwrap(), shm, w: 0, h: 0, img: Vec::new(), bar: 0, mouse: (-100, -100), history: Vec::new(), idx: 0, busy: [false; 2], next_slot: 0, dirty: None, visible: true, animate, hung: false, fs: false, audio: false, spam: 0, hello: hello.clone() };
+    let mut f = Fake { stream: stream.try_clone().unwrap(), shm, w: 0, h: 0, img: Vec::new(), bar: 0, mouse: (-100, -100), history: Vec::new(), idx: 0, busy: [false; 2], next_slot: 0, dirty: None, visible: true, animate, hung: false, fs: false, audio: false, spam: 0, asked: 0, capturing: 0, hello: hello.clone() };
     f.send(FromHelper::Ready { version: proto::VERSION, engine: "fake".into(), engine_version: "1".into() });
     f.resize(hello.w, hello.h);
     f.log(format!("got Hello {hello:?}"));

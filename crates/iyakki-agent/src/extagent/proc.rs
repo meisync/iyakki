@@ -109,7 +109,7 @@ pub fn kill_group(child: &mut Child, grace: Duration) {
     }
     let end = Instant::now() + grace;
     while Instant::now() < end {
-        if matches!(child.try_wait(), Ok(Some(_))) {
+        if iyakki_core_api::child_status(child).is_over() {
             // the leader is gone; members that ignore TERM are killed below
             break;
         }

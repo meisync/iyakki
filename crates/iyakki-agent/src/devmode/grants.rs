@@ -109,6 +109,18 @@ impl DevMode {
         if let Some(g) = st.grants.iter().find(|g| g.computer == k.name) {
             return Ok(ShellStatus::Granted(g.clone()));
         }
+        // a computer the administrator chose to trust for a while gets a plain shell grant without a card; never as root, never for
+        // power or patching (those keep their own approvals)
+        if kind == "shell" && !(as_root && k.account == "root") && k.has(super::scopes::Scope::Shell) && self.shell_auto_active(&k.name) {
+            let now = self.now();
+            let g = ShellGrant { kind: "shell".into(), computer: k.name.clone(), account: k.account.clone(), as_root: false, once: false, expires: now + minutes.clamp(1, MAX_MINUTES) as i64 * 60, by: "automatic approval".into(), since: now };
+            st.denied.retain(|(c, _)| c != &k.name);
+            st.pending.retain(|r| r.computer != k.name);
+            st.grants.push(g.clone());
+            self.shell_write(&st)?;
+            self.log(&k.name, &k.account, "dev.shell.auto", &format!("shell grant for {} min given by the automatic approval", minutes.clamp(1, MAX_MINUTES)), true);
+            return Ok(ShellStatus::Granted(g));
+        }
         st.denied.retain(|(c, _)| c != &k.name);
         st.pending.retain(|r| r.computer != k.name);
         if st.pending.len() >= 8 {
@@ -224,10 +236,12 @@ impl DevMode {
     pub(super) fn shell_forget(&self, computer: &str) {
         self.shell_drop(computer);
         self.patch_untrust(computer);
+        self.auto_forget(computer);
     }
 
     pub(super) fn shell_forget_all(&self) {
         let _one_at_a_time = super::keys_lock();
+        let _ = std::fs::remove_file(self.dir().join("shell-auto.json"));
         let _ = std::fs::remove_file(self.dir().join("shell.json"));
         let _ = std::fs::remove_file(self.dir().join("patch-trust.json"));
     }
@@ -240,6 +254,64 @@ impl DevMode {
             return Some(if st.grants.len() > 1 { format!("{word} ACCESS by {} computers", st.grants.len()) } else { format!("{word} ACCESS by {}", g.computer) });
         }
         st.pending.first().map(|r| format!("{} REQUEST from {}", word_of(&r.kind), r.computer))
+    }
+}
+
+/// A computer whose shell requests the administrator chose to approve automatically for a while.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AutoShell {
+    pub computer: String,
+    pub until: i64,
+    pub by: String,
+}
+
+/// The longest the automatic approval may be switched on for, and what the card offers.
+pub const AUTO_MAX_HOURS: u32 = 24;
+pub const AUTO_DEFAULT_HOURS: u32 = 4;
+
+impl DevMode {
+    /// The computers whose shell requests are approved automatically right now.
+    pub fn shell_auto_list(&self) -> Vec<AutoShell> {
+        let now = self.now();
+        self.read::<Vec<AutoShell>>("shell-auto.json").into_iter().filter(|a| a.until > now).collect()
+    }
+
+    /// Is `computer` trusted for shell requests right now? Developer mode must be on; the paired key must still hold `shell`.
+    pub fn shell_auto_active(&self, computer: &str) -> bool {
+        self.is_on() && self.shell_auto_list().iter().any(|a| a.computer == computer)
+    }
+
+    /// Approve this computer's shell requests by themselves for `hours` (1 to 24). Administrators, at the device. A plain shell only:
+    /// never as root, never power or patching. It ends by itself, when the computer is revoked or developer mode goes off.
+    pub fn shell_auto_on(&self, policy: &Policy, user: &str, computer: &str, hours: u32) -> Result<AutoShell, String> {
+        Self::need_admin(policy)?;
+        let _one_at_a_time = super::keys_lock();
+        let key = self.keys().into_iter().find(|k| k.name == computer).ok_or("that computer is not paired")?;
+        if !key.has(super::scopes::Scope::Shell) {
+            return Err(format!("{computer} does not hold the shell scope"));
+        }
+        let a = AutoShell { computer: computer.into(), until: self.now() + hours.clamp(1, AUTO_MAX_HOURS) as i64 * 3600, by: user.into() };
+        let mut v = self.shell_auto_list();
+        v.retain(|x| x.computer != computer);
+        v.push(a.clone());
+        self.write("shell-auto.json", &v)?;
+        self.log(user, user, "devmode.shell.auto_on", &format!("{computer}: shell requests are approved automatically for {} h", hours.clamp(1, AUTO_MAX_HOURS)), true);
+        Ok(a)
+    }
+
+    /// Back to asking each time.
+    pub fn shell_auto_off(&self, policy: &Policy, user: &str, computer: &str) -> Result<(), String> {
+        Self::need_admin(policy)?;
+        self.auto_forget(computer);
+        self.log(user, user, "devmode.shell.auto_off", &format!("{computer}: shell requests need approval again"), true);
+        Ok(())
+    }
+
+    fn auto_forget(&self, computer: &str) {
+        let _one_at_a_time = super::keys_lock();
+        let mut v = self.shell_auto_list();
+        v.retain(|x| x.computer != computer);
+        let _ = self.write("shell-auto.json", &v);
     }
 }
 

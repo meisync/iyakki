@@ -87,27 +87,6 @@ project does not redistribute firmware it has no licence to redistribute**, and 
 kubectl, k3s, aws, gcloud, Ollama, container images and other CLIs installed from the CLIs tab or pulled by deploy tools are downloaded from
 their vendors at your request and keep their own licences. They are not part of IYAKKI or of the images.
 
-## Voice models (Indic neural voices): not shipped, not fetched by IYAKKI
-
-Settings -> Indic voices can use AI4Bharat Indic-TTS voices. **Nothing of them is in the source, the images or the window tarball**;
-models and exports are kept out of the repository (`.gitignore`: `*.onnx`, `*.pth`, `tts/indic/`, `iyakki-tts/`) and the download
-cache of the experiments lives outside it (`~/.cache/iyakki-tts`). IYAKKI downloads nothing by itself: an administrator confirms each
-download on a card that names the host and the size, or copies a bundle from a folder or USB stick. Checked on the source pages on
-2026-10-18:
-
-| Part | Licence | Where it was verified | Status |
-|---|---|---|---|
-| AI4Bharat/Indic-TTS code (and its `inference`, `main.py`) | MIT, "Copyright (c) 2023 AI4Bhārat" | `LICENSE.txt` in the repository; GitHub's licence field | clear. Only the idea of the pipeline is used; IYAKKI's own server and frontend are original code |
-| The model files (`v1-checkpoints-release`: FastPitch and HiFi-GAN per language) | **none stated** | repository README, the release page ("Just creating a release to upload checkpoints."), the paper (arXiv 2211.09536: "We open-source all models on the Bhashini platform"). A third-party Hugging Face repository labels copies MIT; that is not AI4Bharat's statement | **unclear: nothing is bundled or shipped; the engine is off by default; ask AI4Bharat to confirm before redistributing any export** |
-| IIT Madras Indic TTS database (training data) | the IITM End User Licence Agreement (`iitm.ac.in/donlab/indictts/downloads/license.pdf`): perpetual, worldwide, royalty-free, sub-licensable; derivative works belong to the licensee and may be distributed; the copyright notice must be kept; a third party who buys a derivative work may not resell or sub-license it | the PDF, read in full | permissive but with a resale restriction downstream; not copyleft, not non-commercial. Required notice: "COPYRIGHT 2016 TTS Consortium, TDIL, Meity represented by Hema A Murthy & S Umesh, DEPARTMENT OF Computer Science and Engineering and Electrical Engineering, IIT Madras. ALL RIGHTS RESERVED" |
-| AI4Bharat's Coqui TTS fork (`gokulkarthik/TTS`, used only to export on a PC) | MPL-2.0 (file-level copyleft; `setup.py`) | its `setup.py` | not linked into or shipped with IYAKKI; only the person who runs the exporter has it |
-| PyTorch (exporter only) | BSD-3-Clause | | not shipped |
-| numpy, onnxruntime (voice server only) | BSD-3-Clause, MIT | | the server image installs pinned wheels at build time on the builder's machine; not part of IYAKKI's images |
-| `dist/tts-indic/server.py`, `tools/*.py`, the `indic` Rust module | Apache-2.0 (IYAKKI) | | original |
-
-The dependency licence gate is unchanged: `indic` adds **no crate** (it uses `sha2`, `serde_json` and the HTTP client already in the
-workspace); `cargo deny check licenses` is run after the change.
-
 ## Trademarks and branding
 
 IYAKKI is the name of this project. Do not use the names or logos of **Claude, Anthropic, GitHub, Apple, Microsoft, Google, OpenAI, Docker,

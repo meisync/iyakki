@@ -74,7 +74,7 @@ impl SettingsApp {
             g.text(a.x + 4.0 * s, y, 13.0 * s, MUTED, &t, Face::Sans);
             y += 20.0 * s;
         }
-        y - y0
+        y + 14.0 * s - y0
     }
 
     /// Keys of the section; true when `k` was one of them.

@@ -133,6 +133,14 @@ pub enum ToHelper {
     Script { id: u32, js: String, timeout_ms: u32 },
     /// Ask the page to leave fullscreen (the shell's Esc); the helper answers with `Fullscreen(false)` when it has. Optional (0x12).
     LeaveFullscreen,
+    /// The person's answer to a `PermissionRequest` with the same `id`: `allow` true lets the page use the camera / microphone.
+    /// Optional (0x13). A helper that gets no answer in time (or an unknown id) denies.
+    PermissionAnswer { id: u32, allow: bool },
+    /// Stop what the page captures now: `kinds` is a set of [`media_kind`] bits (the shell's "stop sharing" click). Optional (0x14).
+    StopCapture { kinds: u8 },
+    /// The file the shell writes its screen into for a granted screen share (see `docs/development/BROWSER-MEDIA-DEVICES.md`,
+    /// "Screen share"); an empty path ends it. Optional (0x15).
+    ScreenSource(String),
     /// The shell has copied the pixels of this slot; the helper may draw into it again.
     Ack(u8),
     Quit,
@@ -163,6 +171,26 @@ pub enum FromHelper {
     /// The page tried to play media the engine has no decoder for (H.264 video, AAC audio): `"video"`, `"audio"` or `"both"`.
     /// Optional (0x8F); the shell offers the audio and video add-on (`docs/FULL-BROWSER.md`, Codec policy).
     MediaUnsupported(String),
+    /// One developer-tools line from the page (a failed request, a slow resource, a console message or the page timings), as the
+    /// injected `dev-probe.js` formats it: six fields separated by U+001F, the first a kind letter. Optional (0x90); the shell
+    /// parses, scrubs and stores it only when the person turned developer tools for the chat agent on (`docs/WEBVIEW-PROTOCOL.md`).
+    DevEvent(String),
+    /// The page asks to use the camera, the microphone or the screen (`getUserMedia`, `getDisplayMedia`, `enumerateDevices`).
+    /// `kinds` is a set of [`media_kind`] bits, `origin` the address of the top-level page. The helper waits for a
+    /// `PermissionAnswer` with the same `id` and denies on silence. Optional (0x91).
+    PermissionRequest { id: u32, kinds: u8, origin: String },
+    /// Which devices the page is capturing now, a set of [`media_kind`] bits (0 = none): the engine's `camera-capture-state` and
+    /// `microphone-capture-state` and `display-capture-state` (bits 1, 2 and 4). The shell shows its indicator from it. Optional (0x92).
+    CaptureState(u8),
+}
+
+/// Bits of the `kinds` byte of `PermissionRequest` and `CaptureState`.
+pub mod media_kind {
+    pub const MICROPHONE: u8 = 1;
+    pub const CAMERA: u8 = 2;
+    pub const SCREEN: u8 = 4;
+    /// Only the device list (`enumerateDevices` asking to see device names), no capture.
+    pub const DEVICE_LIST: u8 = 8;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -274,6 +302,9 @@ impl ToHelper {
     pub const QUIT: u8 = 0x10;
     pub const SCRIPT: u8 = 0x11;
     pub const LEAVE_FULLSCREEN: u8 = 0x12;
+    pub const PERMISSION_ANSWER: u8 = 0x13;
+    pub const STOP_CAPTURE: u8 = 0x14;
+    pub const SCREEN_SOURCE: u8 = 0x15;
 
     /// The whole framed message, ready to write to the socket.
     pub fn encode(&self) -> Vec<u8> {
@@ -358,6 +389,21 @@ impl ToHelper {
             }
             ToHelper::Quit => W::new(Self::QUIT).finish(),
             ToHelper::LeaveFullscreen => W::new(Self::LEAVE_FULLSCREEN).finish(),
+            ToHelper::PermissionAnswer { id, allow } => {
+                let mut w = W::new(Self::PERMISSION_ANSWER);
+                w.u32(*id).u8(*allow as u8);
+                w.finish()
+            }
+            ToHelper::StopCapture { kinds } => {
+                let mut w = W::new(Self::STOP_CAPTURE);
+                w.u8(*kinds);
+                w.finish()
+            }
+            ToHelper::ScreenSource(p) => {
+                let mut w = W::new(Self::SCREEN_SOURCE);
+                w.str(p);
+                w.finish()
+            }
             ToHelper::Script { id, js, timeout_ms } => {
                 let mut w = W::new(Self::SCRIPT);
                 w.u32(*id).u32(*timeout_ms).str(js);
@@ -405,6 +451,9 @@ impl ToHelper {
             Self::ACK => ToHelper::Ack(r.u8()?),
             Self::QUIT => ToHelper::Quit,
             Self::LEAVE_FULLSCREEN => ToHelper::LeaveFullscreen,
+            Self::PERMISSION_ANSWER => ToHelper::PermissionAnswer { id: r.u32()?, allow: r.bool()? },
+            Self::STOP_CAPTURE => ToHelper::StopCapture { kinds: r.u8()? },
+            Self::SCREEN_SOURCE => ToHelper::ScreenSource(r.str()?),
             Self::SCRIPT => {
                 let (id, timeout_ms) = (r.u32()?, r.u32()?);
                 ToHelper::Script { id, js: r.str()?, timeout_ms }
@@ -430,6 +479,9 @@ impl FromHelper {
     pub const FULLSCREEN: u8 = 0x8D;
     pub const AUDIO_PLAYING: u8 = 0x8E;
     pub const MEDIA_UNSUPPORTED: u8 = 0x8F;
+    pub const DEV_EVENT: u8 = 0x90;
+    pub const PERMISSION_REQUEST: u8 = 0x91;
+    pub const CAPTURE_STATE: u8 = 0x92;
 
     pub fn encode(&self) -> Vec<u8> {
         match self {
@@ -483,6 +535,17 @@ impl FromHelper {
                 w.finish()
             }
             FromHelper::MediaUnsupported(s) => str_msg(Self::MEDIA_UNSUPPORTED, s),
+            FromHelper::DevEvent(s) => str_msg(Self::DEV_EVENT, s),
+            FromHelper::PermissionRequest { id, kinds, origin } => {
+                let mut w = W::new(Self::PERMISSION_REQUEST);
+                w.u32(*id).u8(*kinds).str(origin);
+                w.finish()
+            }
+            FromHelper::CaptureState(k) => {
+                let mut w = W::new(Self::CAPTURE_STATE);
+                w.u8(*k);
+                w.finish()
+            }
             FromHelper::ScriptResult { id, ok, json } => {
                 let mut w = W::new(Self::SCRIPT_RESULT);
                 w.u32(*id).u8(*ok as u8).str(json);
@@ -519,6 +582,9 @@ impl FromHelper {
             Self::FULLSCREEN => FromHelper::Fullscreen(r.bool()?),
             Self::AUDIO_PLAYING => FromHelper::AudioPlaying(r.bool()?),
             Self::MEDIA_UNSUPPORTED => FromHelper::MediaUnsupported(r.str()?),
+            Self::DEV_EVENT => FromHelper::DevEvent(r.str()?),
+            Self::PERMISSION_REQUEST => FromHelper::PermissionRequest { id: r.u32()?, kinds: r.u8()?, origin: r.str()? },
+            Self::CAPTURE_STATE => FromHelper::CaptureState(r.u8()?),
             Self::SCRIPT_RESULT => FromHelper::ScriptResult { id: r.u32()?, ok: r.bool()?, json: r.str()? },
             t => return Err(DecodeError::Unknown(t)),
         })
@@ -617,6 +683,9 @@ mod tests {
             ToHelper::Quit,
             ToHelper::Script { id: 7, js: "document.title".into(), timeout_ms: 5000 },
             ToHelper::LeaveFullscreen,
+            ToHelper::PermissionAnswer { id: 3, allow: true },
+            ToHelper::StopCapture { kinds: media_kind::CAMERA | media_kind::SCREEN },
+            ToHelper::ScreenSource("/dev/shm/iyakki-screen-1.raw".into()),
         ]
     }
 
@@ -640,6 +709,9 @@ mod tests {
             FromHelper::AudioPlaying(true),
             FromHelper::AudioPlaying(false),
             FromHelper::MediaUnsupported("video".into()),
+            FromHelper::DevEvent("F\u{1f}GET\u{1f}404\u{1f}120\u{1f}https://a.org/x.js\u{1f}".into()),
+            FromHelper::PermissionRequest { id: 3, kinds: media_kind::MICROPHONE | media_kind::CAMERA, origin: "https://meet.example".into() },
+            FromHelper::CaptureState(media_kind::CAMERA),
         ]
     }
 
@@ -662,7 +734,13 @@ mod tests {
         assert_eq!(ToHelper::Quit.encode(), vec![1, 0, 0, 0, 0x10]);
         assert_eq!(ToHelper::Script { id: 1, js: "1".into(), timeout_ms: 2 }.encode(), vec![14, 0, 0, 0, 0x11, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, b'1']);
         assert_eq!(FromHelper::ScriptResult { id: 1, ok: true, json: "2".into() }.encode(), vec![11, 0, 0, 0, 0x8C, 1, 0, 0, 0, 1, 1, 0, 0, 0, b'2']);
+        assert_eq!(FromHelper::DevEvent("C".into()).encode(), vec![6, 0, 0, 0, 0x90, 1, 0, 0, 0, b'C']);
         assert_eq!(ToHelper::LeaveFullscreen.encode(), vec![1, 0, 0, 0, 0x12]);
+        assert_eq!(ToHelper::PermissionAnswer { id: 1, allow: true }.encode(), vec![6, 0, 0, 0, 0x13, 1, 0, 0, 0, 1]);
+        assert_eq!(ToHelper::StopCapture { kinds: 6 }.encode(), vec![2, 0, 0, 0, 0x14, 6]);
+        assert_eq!(ToHelper::ScreenSource("p".into()).encode(), vec![6, 0, 0, 0, 0x15, 1, 0, 0, 0, b'p']);
+        assert_eq!(FromHelper::CaptureState(3).encode(), vec![2, 0, 0, 0, 0x92, 3]);
+        assert_eq!(FromHelper::PermissionRequest { id: 2, kinds: 1, origin: "o".into() }.encode(), vec![11, 0, 0, 0, 0x91, 2, 0, 0, 0, 1, 1, 0, 0, 0, b'o']);
         assert_eq!(FromHelper::Fullscreen(true).encode(), vec![2, 0, 0, 0, 0x8D, 1]);
         assert_eq!(FromHelper::AudioPlaying(true).encode(), vec![2, 0, 0, 0, 0x8E, 1]);
         assert_eq!(FromHelper::MediaUnsupported("audio".into()).encode(), vec![10, 0, 0, 0, 0x8F, 5, 0, 0, 0, b'a', b'u', b'd', b'i', b'o']);

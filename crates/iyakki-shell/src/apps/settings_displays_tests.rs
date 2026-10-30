@@ -26,7 +26,7 @@ fn press(a: &mut SettingsApp, cx: &AppCx, c: char) {
     a.handle(&Event::Key(Key::Char(c)), cx);
 }
 
-fn goto(a: &mut SettingsApp, cx: &AppCx) {
+fn goto(a: &mut SettingsApp, _cx: &AppCx) {
     a.go_to(Tab::Displays);
 }
 
@@ -184,4 +184,37 @@ fn the_page_draws_with_the_memory_line_the_rows_and_the_arrangement_at_four_size
     assert!(line.starts_with("Layouts:") || line.contains("Screen features"), "{line}");
     assert_eq!(sw, crate::memgate::Switch::Auto);
     assert_eq!(a.hint().is_empty(), false);
+}
+
+#[test]
+fn the_page_lists_the_touch_screens_changes_their_display_and_starts_the_calibration() {
+    let _guard = crate::touchmap::SHARED_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let cx = admin("sd-touch");
+    let k = card();
+    publish(&k);
+    let dev = std::sync::Arc::new(crate::touchmap::TouchDev { key: "27c0:0859@usb-test".into(), id: "27c0:0859".into(), name: "TouchScreen".into(), usb: true, mt: true, x: (0, 32767), y: (0, 32767) });
+    let outs = crate::touchmap::outs_of_plan(k.plan());
+    crate::touchmap::refresh(&[dev.clone()], &outs, &mut Vec::new());
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx);
+    draw(&mut a, &cx, 1280, 720);
+    // matched automatically to the external display
+    let line = crate::touchmap::shared().lines()[0].clone();
+    assert_eq!((line.display.as_deref(), line.saved.clone()), (Some("HDMI-A-1"), None));
+    // t chooses the first display, again the next, again back to automatic
+    press(&mut a, &cx, 't');
+    assert_eq!(crate::touchmap::shared().saved(), &[(dev.key.clone(), "eDP-1".to_string())]);
+    press(&mut a, &cx, 't');
+    assert_eq!(crate::touchmap::shared().saved(), &[(dev.key.clone(), "HDMI-A-1".to_string())]);
+    press(&mut a, &cx, 't');
+    assert!(crate::touchmap::shared().saved().is_empty());
+    assert!(status(&a).contains("matched automatically"), "{}", status(&a));
+    // the calibration asks the first display; pressing c again stops it
+    press(&mut a, &cx, 'c');
+    assert_eq!(crate::touchmap::shared().calibrating(), Some("eDP-1"));
+    draw(&mut a, &cx, 1280, 720);
+    press(&mut a, &cx, 'c');
+    assert_eq!(crate::touchmap::shared().calibrating(), None);
+    assert!(a.displays_buttons().iter().any(|b| b.2 == 't') && a.displays_buttons().iter().any(|b| b.2 == 'c'));
+    crate::touchmap::refresh(&[], &outs, &mut Vec::new());
 }

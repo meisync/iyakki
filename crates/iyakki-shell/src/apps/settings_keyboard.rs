@@ -5,6 +5,7 @@
 //! The choices are the machine's (administrators), kept in the settings file (`keyboard`) and written to the kernel at once and
 //! again at every start (`iyakki_agent::keyboard`, `Shell::fn_sync_keyboard`). Nothing here runs a program.
 
+use crate::safeclamp::SafeClamp;
 use super::*;
 use crate::fnkeys;
 use iyakki_agent::keyboard::{self, KeyboardSettings};
@@ -327,7 +328,7 @@ impl SettingsApp {
         y = y.max(test_bottom) + 6.0 * s; // the table starts below the column
         if !wide {
             let room = a.y + a.h - y - 90.0 * s;
-            y = self.render_scroll_test(g, a, y, s, (a.h * 0.26).clamp(80.0 * s, 190.0 * s).min(room));
+            y = self.render_scroll_test(g, a, y, s, (a.h * 0.26).clamp_safe(80.0 * s, 190.0 * s).min(room));
         }
         g.text(a.x, y, 14.0 * s, ACCENT, "Keys IYAKKI reacts to (Up/Down scroll)", Face::Bold);
         y += 24.0 * s;

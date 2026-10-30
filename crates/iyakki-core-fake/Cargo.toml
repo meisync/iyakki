@@ -1,0 +1,13 @@
+[package]
+name = "iyakki-core-fake"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "In-memory implementation of the IYAKKI core API for tests: canned data, recorded calls, no IO."
+
+[dependencies]
+iyakki-core-api = { path = "../iyakki-core-api" }
+iyakki-sec.workspace = true
+
+[dev-dependencies]
+serde_json = "1"

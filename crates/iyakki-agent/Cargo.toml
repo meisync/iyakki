@@ -4,9 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[dev-dependencies]
+iyakki-core-fake = { workspace = true }
+iyakki-proxy = { path = "../iyakki-proxy", features = ["testcerts"] }
+
 [dependencies]
 log.workspace = true
 iyakki-sec.workspace = true
+iyakki-core-api.workspace = true
 iyakki-edit.workspace = true
 iyakki-vfs.workspace = true
 iyakki-wasm.workspace = true
@@ -19,6 +24,7 @@ iyakki-webview.workspace = true
 iyakki-data.workspace = true
 iyakki-drivers.workspace = true
 iyakki-devctl.workspace = true
+iyakki-hwinfo.workspace = true
 # hot patches: the same id/layer rules as the first-stage init that mounts them (iyakki dev patch)
 iyakki-stage1 = { path = "../iyakki-stage1" }
 # update-pack reads the boot partition of an install image with the installer's own FAT reader
@@ -26,6 +32,11 @@ iyakki-usb = { path = "../iyakki-usb" }
 # DISKS: the partition-table reader and writer (GPT), human sizes
 iyakki-storage.workspace = true
 iyakki-flow.workspace = true
+# VPN profiles: importers, route and guard plans, WireGuard netlink messages (vpn_mgr.rs)
+iyakki-vpn = { path = "../iyakki-vpn" }
+# the guard and DNS-redirect tables go through the Firewall's own netlink writer (vpn_nft.rs); the images ship no nft
+iyakki-fw.workspace = true
+iyakki-schema.workspace = true
 iyakki-js.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -44,3 +55,5 @@ ctr = "0.9"
 # developer mode's client (`devmode::client`): the same TLS library and features as the web front end (iyakki-remote)
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 libc = "0.2"
+# the web service makes its own self-signed certificate (same crate and features as iyakki-remote)
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }

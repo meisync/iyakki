@@ -15,6 +15,8 @@ pub mod resample;
 pub mod sink;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod stress_tests;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -59,15 +61,18 @@ pub struct MixerCfg {
     pub engine: EngineCfg,
     /// No audio from any source for this long: the sink is closed so the card can sleep.
     pub idle_ms: u32,
-    /// Periods written ahead of the clock (absorbs scheduling jitter; adds this much latency to ducking).
+    /// Periods of mixed audio kept written ahead of the card (absorbs scheduling stalls; adds this much latency to ducking and
+    /// to a new source). 15 periods are 300 ms.
     pub lead_periods: u32,
+    /// Ask for a higher scheduling priority for the mixer thread (failure is ignored and noted in the status).
+    pub raise_priority: bool,
     /// Sleep to the period clock. Tests turn this off to mix faster than real time.
     pub realtime: bool,
 }
 
 impl Default for MixerCfg {
     fn default() -> Self {
-        MixerCfg { engine: EngineCfg::default(), idle_ms: 1500, lead_periods: 2, realtime: true }
+        MixerCfg { engine: EngineCfg::default(), idle_ms: 1500, lead_periods: 15, raise_priority: true, realtime: true }
     }
 }
 
@@ -80,7 +85,22 @@ pub struct Stats {
     pub sink: String,
     pub sources: usize,
     pub periods: u64,
+    /// Times a source ran dry while sounding (network, decoder or TTS too slow). Silent and faded, never a click.
     pub underruns: u64,
+    /// The same by kind (index = `SourceKind::priority()`: radio, media, notification, speech, alarm).
+    pub starved: [u64; 5],
+    /// Times the mixer thread came too late: the card had run out of mixed audio (a scheduling stall longer than the lead).
+    pub sink_late: u64,
+    /// The least queued time among the streams that are sounding, ms (how close the nearest underrun is).
+    pub buffered_ms: u32,
+    /// Mixed audio written ahead of the card, ms (by the mixer's clock).
+    pub ahead_ms: u32,
+    /// What the mixer thread itself used, percent of one core (mixing, resampling, writing).
+    pub thread_cpu_percent: f32,
+    /// How the thread was prioritised: "realtime 10", "nice -10", "normal (not permitted)".
+    pub priority: String,
+    /// Buffer sizes of the sink.
+    pub sink_detail: String,
     pub clipped: u64,
     /// Time spent mixing, as a share of the time the periods cover (percent of one core, mixing only).
     pub cpu_percent: f32,
@@ -97,11 +117,42 @@ impl Stats {
     pub fn line(&self) -> String {
         let state = if self.sink_open { "playing" } else if self.running { "waiting" } else { "idle" };
         let mut s = format!("mixer {state}: {} source(s), {:.1}% of a core, {} underrun(s)", self.sources, self.cpu_percent, self.underruns);
+        if self.sink_late > 0 {
+            s.push_str(&format!(", {} late period(s)", self.sink_late));
+        }
         if self.ducking {
             s.push_str(", ducking");
         }
         if let Some(e) = &self.last_error {
             s.push_str(&format!("; last problem: {e}"));
+        }
+        s
+    }
+}
+
+impl Stats {
+    /// The longer text of Settings -> Sound: the line above with the numbers that tell a starved source from a late mixer.
+    pub fn detail(&self) -> String {
+        let k = |i: usize| self.starved[i];
+        let mut s = format!(
+            "{} source(s) · {:.1}% of a core · {} underrun(s) from sources (radio {}, media {}, speech {}, other {}) · {} late period(s) · {} ms buffered, {} ms ahead · mixer thread {:.1}% CPU",
+            self.sources,
+            self.cpu_percent,
+            self.underruns,
+            k(0),
+            k(1),
+            k(3),
+            k(2) + k(4),
+            self.sink_late,
+            self.buffered_ms,
+            self.ahead_ms,
+            self.thread_cpu_percent
+        );
+        if !self.priority.is_empty() {
+            s.push_str(&format!(" · priority {}", self.priority));
+        }
+        if !self.sink_detail.is_empty() {
+            s.push_str(&format!(" · {}", self.sink_detail));
         }
         s
     }
@@ -286,13 +337,49 @@ fn set_error(inner: &Inner, e: Option<String>) {
     inner.stats.lock().unwrap_or_else(|x| x.into_inner()).last_error = e;
 }
 
+/// The thread's CPU time, ns.
+fn thread_cpu_ns() -> u64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime writes the timespec we pass
+    if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } != 0 {
+        return 0;
+    }
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
+/// Nice -10 and, if permitted, round-robin real time at a low priority, for the calling thread. Returns what worked.
+fn raise_thread_priority() -> String {
+    // SAFETY: plain scheduling calls on the calling thread
+    unsafe {
+        let mut what = String::from("normal (not permitted)");
+        if libc::setpriority(libc::PRIO_PROCESS, 0, -10) == 0 {
+            what = "nice -10".into();
+        }
+        let mut sp: libc::sched_param = std::mem::zeroed();
+        sp.sched_priority = 10;
+        if libc::sched_setscheduler(0, libc::SCHED_RR, &sp) == 0 {
+            what = "realtime 10".into();
+        }
+        what
+    }
+}
+
 fn run(inner: Arc<Inner>, mut sink: Box<dyn Sink>) {
     let cfg = inner.cfg;
+    let priority = if cfg.raise_priority { raise_thread_priority() } else { "normal".into() };
+    log::info!("mixer: thread priority {priority}");
+    inner.stats.lock().unwrap_or_else(|e| e.into_inner()).priority = priority;
     let mut engine = Engine::new(cfg.engine);
     let period = cfg.engine.period();
     let period_ms = period.as_secs_f32() * 1000.0;
+    let lead = period * cfg.lead_periods;
     let mut out: Vec<i16> = Vec::with_capacity(cfg.engine.period_frames * cfg.engine.channels);
-    let mut next = Instant::now();
+    // the card's timeline: it began playing at `anchor` and has been given `written` of audio since
+    let mut anchor = Instant::now();
+    let mut written = Duration::ZERO;
+    let mut late = 0u64;
+    let mut cpu_win = (Instant::now(), thread_cpu_ns());
+    let mut thread_cpu = 0.0f32;
     let mut idle_ms = 0.0f32;
     let mut retry_at: Option<Instant> = None;
     let nap = |inner: &Inner, d: Duration| {
@@ -314,15 +401,17 @@ fn run(inner: Arc<Inner>, mut sink: Box<dyn Sink>) {
             if sink.is_open() {
                 sink.close();
             }
+            inner.wake.end_us.store(0, Ordering::SeqCst);
             {
                 let mut st = inner.stats.lock().unwrap_or_else(|e| e.into_inner());
                 st.running = false;
                 st.sink_open = false;
                 st.sources = 0;
                 st.ducking = false;
+                st.buffered_ms = 0;
+                st.ahead_ms = 0;
             }
             nap(&inner, Duration::from_millis(250));
-            next = Instant::now();
             idle_ms = 0.0;
             continue;
         }
@@ -332,10 +421,24 @@ fn run(inner: Arc<Inner>, mut sink: Box<dyn Sink>) {
                 match sink.open(cfg.engine.rate, cfg.engine.channels) {
                     Ok(()) => {
                         retry_at = None;
-                        next = Instant::now();
+                        // pre-roll: the whole lead is written at once as silence, so the card never starts empty and the sources
+                        // (some may hold less than the lead) are drained at the pace of the clock from the first sound on
+                        anchor = Instant::now();
+                        written = Duration::ZERO;
+                        if cfg.realtime {
+                            let zeros = vec![0i16; cfg.engine.period_frames * cfg.engine.channels];
+                            for _ in 0..cfg.lead_periods {
+                                if sink.write(&zeros).is_err() {
+                                    break;
+                                }
+                                written += period;
+                            }
+                        }
                         idle_ms = 0.0;
                         set_error(&inner, None);
-                        inner.stats.lock().unwrap_or_else(|e| e.into_inner()).sink_opens += 1;
+                        let mut st = inner.stats.lock().unwrap_or_else(|e| e.into_inner());
+                        st.sink_opens += 1;
+                        st.sink_detail = sink.detail();
                     }
                     Err(e) => {
                         log::info!("mixer: cannot open the sound device: {e}");
@@ -349,7 +452,30 @@ fn run(inner: Arc<Inner>, mut sink: Box<dyn Sink>) {
                 continue;
             }
         }
+        // pace by what the card has in hand: stay `lead` ahead of it, no further (the sources are drained as late as possible,
+        // so ducking and new sources are heard soon); a thread that was stalled mixes the periods it missed back to back
+        if cfg.realtime && sink.is_open() {
+            let elapsed = anchor.elapsed();
+            if written > Duration::ZERO && elapsed > written {
+                // the card ran out of mixed audio before this period was ready
+                late += 1;
+                if late <= 5 {
+                    log::info!("mixer: late by {} ms (the mixer thread was not scheduled in time)", (elapsed - written).as_millis());
+                }
+                anchor = Instant::now().checked_sub(written).unwrap_or_else(Instant::now);
+            } else if written > elapsed + lead {
+                std::thread::sleep(written - elapsed - lead);
+                if inner.shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+        }
         let master = inner.master.lock().unwrap_or_else(|e| e.into_inner()).clone().map_or_else(|| f32::from_bits(inner.master_fixed.load(Ordering::SeqCst)), |f| f());
+        // when the end of this period is heard: the mixer's own clock says `written + period` after the anchor, and the card starts only
+        // once its buffer is full, so what it holds beyond the lead is a delay the clock does not know
+        let card_extra_us = (sink.latency_ms() as u64 * 1000).saturating_sub(lead.as_micros() as u64);
+        let end = if sink.is_open() { engine::now_us() + (written + period).saturating_sub(anchor.elapsed()).as_micros() as u64 + card_extra_us } else { 0 };
+        inner.wake.end_us.store(end, Ordering::SeqCst);
         let t0 = Instant::now();
         let info = engine.mix_period(master, &mut out);
         let spent = t0.elapsed();
@@ -358,48 +484,52 @@ fn run(inner: Arc<Inner>, mut sink: Box<dyn Sink>) {
         } else {
             idle_ms += period_ms;
         }
+        if sink.is_open() {
+            if idle_ms >= cfg.idle_ms as f32 {
+                // nothing to play for a while: let the card sleep (the sources stay registered)
+                sink.close();
+                inner.wake.end_us.store(0, Ordering::SeqCst);
+            } else if let Err(e) = sink.write(&out) {
+                log::info!("mixer: the sound device stopped: {e}");
+                sink.close();
+                inner.wake.end_us.store(0, Ordering::SeqCst);
+                set_error(&inner, Some(e));
+                retry_at = Some(Instant::now() + OPEN_RETRY);
+            } else {
+                written += period;
+            }
+        }
+        if cpu_win.0.elapsed() >= Duration::from_secs(1) {
+            let ns = thread_cpu_ns();
+            thread_cpu = ((ns.saturating_sub(cpu_win.1)) as f64 / cpu_win.0.elapsed().as_nanos().max(1) as f64 * 100.0) as f32;
+            cpu_win = (Instant::now(), ns);
+        }
+        let is_open = sink.is_open();
+        let ahead = if is_open && cfg.realtime { written.saturating_sub(anchor.elapsed()).as_millis() as u32 } else { 0 };
+        let name = sink.name();
         {
             let mut st = inner.stats.lock().unwrap_or_else(|e| e.into_inner());
             st.running = true;
             st.sources = info.sources;
             st.periods = engine.periods;
             st.underruns = engine.underruns;
+            st.starved = engine.starved;
+            st.sink_late = late;
+            st.buffered_ms = engine.buffered_ms();
+            st.ahead_ms = ahead;
+            st.thread_cpu_percent = thread_cpu;
             st.clipped = engine.clipped;
             st.mix_ns += spent.as_nanos() as u64;
             st.mix_us_last = spent.as_micros() as u32;
             st.cpu_percent = (st.mix_ns as f64 / (st.periods.max(1) as f64 * period.as_nanos() as f64) * 100.0) as f32;
             st.ducking = info.ducking;
             st.peak = info.peak;
-            st.sink_open = sink.is_open();
-            st.sink = sink.name();
+            st.sink_open = is_open;
+            st.sink = name;
         }
-        if sink.is_open() {
-            if idle_ms >= cfg.idle_ms as f32 {
-                // nothing to play for a while: let the card sleep (the sources stay registered)
-                sink.close();
-                inner.stats.lock().unwrap_or_else(|e| e.into_inner()).sink_open = false;
-            } else if let Err(e) = sink.write(&out) {
-                log::info!("mixer: the sound device stopped: {e}");
-                sink.close();
-                set_error(&inner, Some(e));
-                retry_at = Some(Instant::now() + OPEN_RETRY);
-            }
-        }
-        if !sink.is_open() {
+        if !is_open {
             // nothing is playing: do not tick at the period rate
             nap(&inner, Duration::from_millis(50));
-            next = Instant::now();
-            continue;
-        }
-        if cfg.realtime {
-            next += period;
-            let now = Instant::now();
-            let target = next.checked_sub(period * cfg.lead_periods).unwrap_or(next);
-            if target > now {
-                std::thread::sleep(target - now);
-            } else if now > next + period * 4 {
-                next = now; // fell behind (a long write): do not burst to catch up
-            }
         }
     }
     sink.close();
@@ -427,6 +557,10 @@ pub fn global() -> &'static Mixer {
 
 /// `sound.mixer` of Settings -> Sound.
 pub fn set_enabled(on: bool) {
+    // a test holding [`exclusive_route`] owns the switch: other tests' settings changes do not reach it
+    if !may_change_switches() {
+        return;
+    }
     ENABLED.store(on, Ordering::SeqCst);
     if let Some(m) = GLOBAL.get() {
         m.set_enabled(on);
@@ -434,7 +568,53 @@ pub fn set_enabled(on: bool) {
 }
 
 pub fn enabled() -> bool {
-    ENABLED.load(Ordering::SeqCst)
+    PINNED_OFF.load(Ordering::SeqCst) == 0 && ENABLED.load(Ordering::SeqCst)
+}
+
+// Test isolation. The switch is process-wide and any test that changes sound settings flips it, so tests that need a known
+// route say so: many can pin it off together (players use the play command), or one can own it (and assert what it set).
+// Nothing in the product calls these.
+static ROUTE_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+static PINNED_OFF: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static OWNER: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
+
+/// False while another thread's test owns the sound switches ([`exclusive_route`]).
+pub(crate) fn may_change_switches() -> bool {
+    OWNER.lock().unwrap_or_else(|e| e.into_inner()).is_none_or(|o| o == std::thread::current().id())
+}
+
+/// While alive, the mixer is off for every thread, whatever other tests set: sounds go to the play command.
+#[doc(hidden)]
+pub struct CommandRoute(#[allow(dead_code)] std::sync::RwLockReadGuard<'static, ()>);
+
+#[doc(hidden)]
+pub fn pin_command_route() -> CommandRoute {
+    let g = ROUTE_GATE.read().unwrap_or_else(|e| e.into_inner());
+    PINNED_OFF.fetch_add(1, Ordering::SeqCst);
+    CommandRoute(g)
+}
+
+impl Drop for CommandRoute {
+    fn drop(&mut self) {
+        PINNED_OFF.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// While alive, no pinned test runs and only this thread's [`set_enabled`] changes the switch.
+#[doc(hidden)]
+pub struct ExclusiveRoute(#[allow(dead_code)] std::sync::RwLockWriteGuard<'static, ()>);
+
+#[doc(hidden)]
+pub fn exclusive_route() -> ExclusiveRoute {
+    let g = ROUTE_GATE.write().unwrap_or_else(|e| e.into_inner());
+    *OWNER.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
+    ExclusiveRoute(g)
+}
+
+impl Drop for ExclusiveRoute {
+    fn drop(&mut self) {
+        *OWNER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
 }
 
 /// The global mixer when the setting is on, else None (callers then use their old path).

@@ -163,6 +163,9 @@ CONFIG_UNIX=y
 CONFIG_INET=y
 CONFIG_IPV6=y
 CONFIG_TUN=y
+# Settings -> Network -> VPN: WireGuard, configured by IYAKKI over generic netlink (crates/iyakki-vpn). A module, loaded when the first
+# profile is enabled; selects the ChaCha20-Poly1305/Curve25519 library code and NET_UDP_TUNNEL. GPL-2.0 kernel code, source via legal-info/.
+CONFIG_WIREGUARD=m
 CONFIG_VETH=m
 CONFIG_BRIDGE=y
 CONFIG_VLAN_8021Q=m
@@ -317,6 +320,10 @@ CONFIG_ACPI=y
 # Without CONFIG_ACPI_BATTERY a laptop's ACPI battery device (PNP0C0A) has no driver and no BAT0 appears (seen on a 2020 MacBook
 # Pro: only the AC adapter showed up). Built in, so no module loading is needed. ACPI_PROCFS_POWER is the old /proc interface: off.
 CONFIG_PM=y
+# ---- sleep (the Sleep choice on the power cards): /sys/power/state offers freeze (s2idle) and mem only with these. ACPI_SLEEP
+# has no prompt: it turns on by itself on x86 with ACPI and SUSPEND, so it is not listed. Hibernate is left off.
+CONFIG_SUSPEND=y
+CONFIG_PM_SLEEP=y
 CONFIG_POWER_SUPPLY=y
 CONFIG_POWER_SUPPLY_HWMON=y
 CONFIG_ACPI_AC=y

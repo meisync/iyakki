@@ -68,3 +68,31 @@ fn queued_taps_reach_the_shell_and_the_bar_shows_shell_access_while_a_grant_is_i
     ticks(&mut sh, 30);
     assert_eq!(sh.dev_sign.as_deref(), Some("DEV"));
 }
+
+#[test]
+fn a_frame_is_captured_only_while_a_computer_asks_and_comes_back_as_texts_and_buttons() {
+    use iyakki_agent::devmode::state;
+    let (mut sh, _) = shell_with_users("devstate");
+    let mut g = Gfx::new(1280, 720);
+    login(&mut sh, "root", "rootpass12");
+    sh.render(&mut g);
+    let dir = sh.env.services.dir().to_path_buf();
+    assert!(g.text_cap.is_none(), "nobody asked: nothing is kept");
+    assert!(state::alive(&dir), "the shell reports that it draws");
+    // a computer asks (nothing to wait for yet); the next beat redraws and the frame is handed over
+    let _ = state::fetch(&dir, 0);
+    ticks(&mut sh, 1);
+    assert!(sh.take_stale(), "the picture is redrawn for it");
+    sh.render(&mut g);
+    let snap = state::fetch(&dir, 500).expect("a frame");
+    assert_eq!(snap.app, "Home");
+    assert!(!snap.lines.is_empty() && !snap.buttons.is_empty(), "the home screen has texts and tiles: {} lines, {} buttons", snap.lines.len(), snap.buttons.len());
+    assert!(snap.buttons.iter().any(|b| b.label == "IYAKKI menu"));
+    assert!(g.text_cap.is_none(), "capture is off again after the frame");
+    // a button found by its label is the same place a tap would press
+    let (x, y, name) = snap.target("iyakki menu").unwrap();
+    assert_eq!(name, "IYAKKI menu");
+    input::push(&dir, &[InputEv::Tap(x, y)]).unwrap();
+    ticks(&mut sh, 2);
+    assert!(sh.brand.open, "the click by label opened the menu");
+}

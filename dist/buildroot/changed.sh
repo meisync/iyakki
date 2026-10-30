@@ -7,7 +7,7 @@
 #   changed.sh <variant> --explain            also print every input group with its hash
 #
 # <variant> is what build.sh takes: libre|hw|mac|web|macweb (ARCH=aarch64 for the ARM image, like build.sh). The same environment
-# switches count (WEB_H264, WEB_AV_ADDON, WEB_IRIS, WEB_CROCUS, WITH_FFMPEG, IYAKKI_PROFILE), because they change the composed defconfig.
+# switches count (WEB_H264, WEB_AV_ADDON, WEB_MEDIA, WEB_IRIS, WEB_CROCUS, WITH_FFMPEG, IYAKKI_PROFILE), because they change the composed defconfig.
 #
 # First line of the output is exactly one of
 #   NOTHING             the images are up to date: reuse them
@@ -58,6 +58,7 @@ compose() {
     [ "${WEB_CROCUS:-0}" = 1 ] && cat "$CFG/iyakki_web_crocus.fragment"
     if [ "${WEB_H264:-0}" = 1 ]; then cat "$CFG/iyakki_web_h264.fragment"
     elif [ "${WEB_AV_ADDON:-1}" = 1 ]; then cat "$CFG/iyakki_web_av_addon.fragment"; fi
+    if [ "${WEB_MEDIA:-0}" = 1 ]; then cat "$CFG/iyakki_web_media.fragment"; fi
   fi
   [ "${WITH_FFMPEG:-0}" = 1 ] && cat "$CFG/iyakki_media.fragment"
   return 0
@@ -99,12 +100,12 @@ pkgdir_sums > "$WORK/g.pkgdirs"
 # everything that only lands in the root file system or the boot menu: a repack covers it
 {
   echo "overlay $(hash_files "$BOARD/iyakki/overlay" $( [ "$VARIANT" = web ] || [ "$VARIANT" = macweb ] && echo "$BOARD/iyakki-web/overlay" ))"
-  echo "hooks $(hash_files "$BOARD/iyakki/post-build.sh" "$BOARD/iyakki/prune-firmware.sh" "$BOARD/iyakki/mac-firmware.keep" "$BOARD/iyakki/pc-firmware.keep" "$BOARD/iyakki/restricted-firmware.sh" "$BOARD/iyakki/restricted-firmware.table" $( [ "$VARIANT" = web ] || [ "$VARIANT" = macweb ] && echo "$BOARD/iyakki-web/web-post-build.sh" ))"
+  echo "hooks $(hash_files "$BOARD/iyakki/post-build.sh" "$BOARD/iyakki/prune-firmware.sh" "$BOARD/iyakki/mac-firmware.keep" "$BOARD/iyakki/pc-firmware.keep" "$BOARD/iyakki/restricted-firmware.sh" "$BOARD/iyakki/restricted-firmware.table" "$BOARD/iyakki/release-profile.sh" "$BOARD/iyakki/release-firmware.keep" "$BOARD/iyakki/release" $( [ "$VARIANT" = web ] || [ "$VARIANT" = macweb ] && echo "$BOARD/iyakki-web/web-post-build.sh" ))"
   echo "boot $(hash_files "$BOARD/iyakki/grub.cfg" "$BOARD/iyakki/grub" "$BOARD/iyakki/post-image.sh" "$BOARD/iyakki/genimage-install.cfg" "$HERE/secureboot.sh" "$BOARD/iyakki-aarch64/grub.cfg" "$BOARD/iyakki-aarch64/genimage.cfg" "$BOARD/iyakki-aarch64/post-image.sh")"
   echo "docs $(hash_files "$ROOT/LICENSE" "$ROOT/NOTICE" "$ROOT/LICENSING.md" "$ROOT/THIRD_PARTY_LICENSES.txt")"
   echo "samples $(hash_files "$ROOT/dist/samples/Music" "$ROOT/dist/samples/Videos" "$ROOT/dist/samples/README.md" "$ROOT/dist/samples/LICENSE")"
   if [ "$VARIANT" = web ] || [ "$VARIANT" = macweb ]; then echo "fonts $(hash_files "$ROOT"/crates/iyakki-shell/assets/NotoSans*.ttf "$ROOT/crates/iyakki-shell/assets/NOTO-OFL-LICENSE.txt")"; fi
-  echo "env h264=${WEB_H264:-0} av=${WEB_AV_ADDON:-1} intel=${WEB_IRIS:-0}${WEB_CROCUS:-0} restricted=${IYAKKI_INCLUDE_RESTRICTED_FIRMWARE:-0}"
+  echo "env h264=${WEB_H264:-0} av=${WEB_AV_ADDON:-1} media=${WEB_MEDIA:-0} intel=${WEB_IRIS:-0}${WEB_CROCUS:-0} restricted=${IYAKKI_INCLUDE_RESTRICTED_FIRMWARE:-0} profile=${IYAKKI_IMAGE_PROFILE:-}"
 } | sed 's/ /\t/' > "$WORK/g.rootfs"
 # the iyakki program and the private store server (cargo output; absent when cargo has not run yet)
 BIN="$ROOT/target/$RUST_TARGET/$PROFILE/iyakki"; SBIN="$ROOT/target/$RUST_TARGET/$PROFILE/iyakki-store-server"

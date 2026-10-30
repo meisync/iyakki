@@ -39,7 +39,7 @@ fn click_label(sh: &mut Shell, g: &mut Gfx, label: &str) {
 
 /// Click a custom app's tile in the launcher (tiles take clicks by their rectangles, as the system tiles do).
 fn open_tile(sh: &mut Shell, g: &mut Gfx, title: &str) {
-    sh.set_group(Group::Work);
+    sh.set_group(Group::Apps);
     sh.render(g);
     let items = sh.group_items();
     let i = items.iter().position(|it| matches!(it, LItem::App(e) if e.title == title)).unwrap_or_else(|| panic!("no tile {title}"));
@@ -58,12 +58,12 @@ fn installed_tile_apps_get_their_own_tiles_in_my_apps_and_each_person_sees_only_
     let (mut sh, _) = shell_with_users("tiles-launch");
     let mut g = Gfx::new(1280, 720);
     login(&mut sh, "root", "rootpass12");
-    assert_eq!(sh.groups(), Group::CHIPS.to_vec(), "four sections, no My apps tab");
+    assert_eq!(sh.groups(), Group::CHIPS[..5].to_vec(), "five sections, no Apps tab while nothing is installed");
     install(&sh, "calculator", true);
     install(&sh, "notes", false);
     sh.refresh_custom();
-    // apps that declare no section land in Work, after the system tiles
-    sh.set_group(Group::Work);
+    // apps that declare no section land in Apps
+    sh.set_group(Group::Apps);
     assert_eq!(sh.group_custom().iter().map(|e| e.title.as_str()).collect::<Vec<_>>(), vec!["Calculator", "Notes and to-dos"]);
     sh.render(&mut g);
     assert_eq!(sh.group_items().len(), sh.group_tiles().len() + 2);
@@ -177,7 +177,7 @@ fn a_dev_app_is_added_by_an_administrator_only_marked_unsigned_and_reloads_when_
     let e = iyakki_agent::store::tilehub::add_dev(&svc, &iyakki_sec::policy::Role::Admin.template(), "root", &dir).unwrap();
     assert!(e.dev && e.trust == "unsigned dev app");
     sh.refresh_custom();
-    sh.set_group(Group::Work);
+    sh.set_group(Group::Apps);
     sh.render(&mut g);
     open_tile(&mut sh, &mut g, "Clock dev");
     sh.render(&mut g);
@@ -211,9 +211,9 @@ fn nothing_overlaps_or_leaves_the_screen_for_the_launcher_tile_the_app_bar_and_t
         let mut g = Gfx::new(w, h);
         sh.resize_for_test(w, h);
         let s = scale_for(w, h);
-        // the launcher, section Work: the chips fit and the tiles are inside the screen and apart
+        // the launcher, section Apps: the chips fit and the tiles are inside the screen and apart
         sh.leave_app();
-        sh.set_group(Group::Work);
+        sh.set_group(Group::Apps);
         sh.render(&mut g);
         let gs = sh.groups();
         let labels: Vec<&str> = gs.iter().map(|x| x.label()).collect();

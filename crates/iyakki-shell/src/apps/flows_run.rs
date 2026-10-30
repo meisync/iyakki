@@ -133,7 +133,7 @@ impl FlowsApp {
         let status_h = 24.0 * s;
         let inner = R::new(body.x + pad, body.y, body.w - 2.0 * pad, body.h - status_h - 4.0 * s);
         let Some(run) = self.run.clone() else {
-            fx::empty_state(g, inner, s, Icon::Runs, "No run to show", "Start the flow with Run in DESIGN, wait for its schedule, or ask the assistant to run it. The newest run appears here by itself.", ACCENT);
+            fx::empty_state(g, inner, s, Icon::Runs, "No run to show yet - press Esc to go back, or r in the flow to run it", "Run (r) in the flow starts a run, or wait for its schedule, or ask the assistant to run it. The newest run appears here by itself, with its result and a Run again button.", ACCENT);
             self.draw_status(g, R::new(inner.x, inner.y + inner.h + 4.0 * s, inner.w, status_h), s);
             return;
         };
@@ -156,11 +156,14 @@ impl FlowsApp {
             g.hit(R::new(hx, inner.y, w, 20.0 * s), Event::Tab(id::R_TAB_PICS), "Browser session");
             hx += w + 8.0 * s;
         }
-        let line = format!("{} · {} v{} · {} · started {} · took {}{}", run.id, run.flow.name, run.version(), run.trigger.kind, if run.started_ms == 0 { "not yet".to_string() } else { ago_text(now - run.started_ms) }, dur_text(run.duration_ms(now)), if run.blocked.is_empty() { String::new() } else { format!(" · {}", run.blocked) });
+        let line = format!("{} · {} v{} · {} · started {} · {} {}{}", run.id, run.flow.name, run.version(), run.trigger.kind, if run.started_ms == 0 { "not yet".to_string() } else { ago_text(now - run.started_ms) }, if run.ended_ms > 0 { "took" } else if run.status == RunStatus::Blocked { "waiting for you" } else { "running" }, dur_text(run.duration_ms(now)), if run.blocked.is_empty() { String::new() } else { format!(" · {}", run.blocked) });
         let t = g.fit(12.0 * s, &line, Face::Sans, inner.w - (hx - inner.x));
         g.text(hx, inner.y + 3.0 * s, 12.0 * s, if run.blocked.is_empty() { MUTED } else { MAGENTA }, &t, Face::Sans);
-        let top = inner.y + head_h + 4.0 * s;
-        let avail = R::new(inner.x, top, inner.w, inner.y + inner.h - top);
+        let mut top = inner.y + head_h + 4.0 * s;
+        // how the run is going or ended, and what to do next (Run again, Open log, Stop, the assistant when it failed)
+        let banner = self.run_banner(&run, now);
+        top += super::flows_fail::draw_banner(g, R::new(inner.x, top, inner.w, 0.0), s, &banner) + 6.0 * s;
+        let avail = R::new(inner.x, top, inner.w, (inner.y + inner.h - top).max(60.0));
         // columns: runs (wide windows), graph + waterfall, detail
         let wide = avail.w >= 1000.0 * s;
         let stacked = avail.w < 760.0 * s;
@@ -193,6 +196,8 @@ impl FlowsApp {
             let p = Paint { flow: &run.flow, reg: &self.reg, view: self.rv.view, rect: canvas, selected: &sel, sel_edge: None, hover: &hover, issues: &issues, run: Some(&rp), connecting: None, rubber: None, tick, s };
             paint::draw_graph(g, &p);
         }
+        let rv = self.rv.view;
+        self.offer_node_tips(g, canvas, rv, &run.flow, Some((&run, now)), &sel, s);
         // the zoom buttons
         let zb = 24.0 * s;
         let zx = canvas.x + canvas.w - zb - 8.0 * s;
@@ -253,7 +258,7 @@ impl FlowsApp {
         let pad = 8.0 * s;
         let inner = R::new(r.x + pad, r.y + 6.0 * s, r.w - 2.0 * pad, r.h - 12.0 * s);
         let bar = R::new(inner.x + label_w, inner.y + 14.0 * s, inner.w - label_w, inner.h - 14.0 * s);
-        g.text(inner.x, inner.y, 10.0 * s, DIM, &format!("timing · {}", dur_text(t1 - t0)), Face::Bold);
+        g.text(inner.x, inner.y, 10.0 * s, DIM, &format!("timing · {}{}", dur_text(t1 - t0), if run.ended_ms > 0 { "" } else { " so far (a step's own bar ends when the step ended)" }), Face::Bold);
         let started: Vec<(&String, &NodeRun)> = run.flow.nodes.iter().filter_map(|n| run.nodes.get(&n.id).map(|nr| (&n.id, nr))).filter(|(_, nr)| nr.started_ms > 0).collect();
         let rowh = (bar.h / started.len().max(1) as f32).clamp_safe(8.0 * s, 16.0 * s);
         let mut rows = Vec::new();
@@ -484,6 +489,8 @@ impl FlowsApp {
         let w = r.w - 20.0 * s;
         let mut lines: Vec<(String, [u8; 4], f32)> = Vec::new();
         let state = match card.state {
+            CardState::Proposed if card.patch.is_none() && card.note == iyakki_flow::driver::CONSENT_NOTE => "Needs your permission".to_string(),
+            CardState::Proposed if card.patch.is_none() && card.note == iyakki_flow::driver::CHOICE_NOTE => "Needs your choice".to_string(),
             CardState::Proposed if card.patch.is_none() && card.note == "investigate" => "The assistant has not looked yet".to_string(),
             CardState::Proposed if card.patch.is_none() => "The assistant could not fix this by itself".to_string(),
             CardState::Proposed => "The assistant proposes a fix".to_string(),
@@ -535,6 +542,13 @@ impl FlowsApp {
                 g.button(x, by, 11.5 * s, "Reject", ERR, Event::Tab(id::CARD_REJECT));
             } else {
                 let mut x = r.x + 10.0 * s;
+                if card.note == iyakki_flow::driver::CONSENT_NOTE {
+                    x += g.button(x, by, 11.5 * s, "Open flow settings", MAGENTA, Event::Tab(id::CARD_SETTINGS)) + 6.0 * s;
+                }
+                if card.note == iyakki_flow::driver::CHOICE_NOTE {
+                    x += g.button(x, by, 11.5 * s, "Open Settings -> Models", MAGENTA, Event::Tab(id::CARD_MODELS)) + 6.0 * s;
+                    x += g.button(x, by, 11.5 * s, "Refresh models", CYAN, Event::Tab(id::CARD_REFRESH)) + 6.0 * s;
+                }
                 if card.note == "investigate" {
                     x += g.button(x, by, 11.5 * s, "Ask the assistant", MAGENTA, Event::Tab(id::CARD_ASK)) + 6.0 * s;
                 }

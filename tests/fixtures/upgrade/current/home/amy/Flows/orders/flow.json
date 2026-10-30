@@ -1,0 +1,51 @@
+{
+  "id": "orders",
+  "name": "Orders digest",
+  "description": "synthetic flow, draft edit",
+  "nodes": [
+    {
+      "id": "a",
+      "kind": "set",
+      "name": "Start",
+      "config": {
+        "values": {
+          "x": 1
+        }
+      }
+    },
+    {
+      "id": "b",
+      "kind": "set",
+      "name": "Then",
+      "config": {
+        "values": {
+          "y": 2
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "port": "out",
+      "to": "b",
+      "when": ""
+    }
+  ],
+  "inputs": [],
+  "outputs": [],
+  "triggers": [],
+  "defaults": {},
+  "vars": {},
+  "production": false,
+  "meta": {
+    "version": 0,
+    "base_version": 1,
+    "label": "first",
+    "author": "amy",
+    "created_ms": 1700000000000,
+    "changelog": "first version",
+    "modified_by": [],
+    "hash": "0000000000000000"
+  }
+}

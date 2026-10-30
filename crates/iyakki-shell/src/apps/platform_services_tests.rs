@@ -38,6 +38,7 @@ fn answers(r: &FakeRunner, server: &str) {
     r.answer("get deployments,pods", r#"{"items":[{"kind":"Deployment","metadata":{"name":"gitea"},"spec":{"replicas":1,"template":{"spec":{"containers":[{"image":"docker.io/gitea/gitea:1.24.5-rootless"}]}}},"status":{"readyReplicas":1}}]}"#);
     r.fail("get namespace iyakki-gitea", 1, "Error from server (NotFound): namespaces not found");
     r.fail("get service registry", 1, "Error from server (NotFound): services \"registry\" not found");
+    r.fail("get pvc gitea-data", 1, "Error from server (NotFound): persistentvolumeclaims \"gitea-data\" not found");
     r.fail("get secret gitea-admin", 1, "Error from server (NotFound): secrets not found");
     for (k, v) in [("create namespace", "ok"), ("label namespace", "ok"), ("create secret generic", "ok"), ("label secret", "ok"), ("apply -f", "ok"), ("rollout status", "ok"), ("user create", "created"), ("generate-access-token", TOKEN)] {
         r.answer(k, v);
@@ -128,7 +129,7 @@ fn type_text(p: &mut PlatformPanel, t: &str) {
 fn the_wizard_pages_fit_and_do_not_overlap_at_every_size_and_the_click_path_deploys_gitea() {
     for (w, h) in SIZES {
         let mut r = rig(&format!("wiz-{w}"), "https://127.0.0.1:6443");
-        r.http.answer("GET http://localhost:30301/api/healthz", 200, "{}");
+        r.http.answer("GET http://127.0.0.1:3300/api/healthz", 200, "{}");
         r.p.open_list();
         until(&mut r.p, "the list", |p| p.page() == &Page::List && p.rows.len() >= 3 && !p.is_busy());
         let g = draw(&mut r.p, w, h);
@@ -175,7 +176,7 @@ fn the_wizard_pages_fit_and_do_not_overlap_at_every_size_and_the_click_path_depl
         assert!(r.run.lines().iter().all(|l| !l.contains("create namespace iyakki") && !l.contains("apply -f")), "{:?}", r.run.lines());
         click(&mut r.p, w, h, "Approve and deploy");
         until(&mut r.p, "the result", |p| p.page() == &Page::Result);
-        assert!(r.p.text().contains("DEPLOYED") && r.p.text().contains("http://localhost:30301"), "{}", r.p.text());
+        assert!(r.p.text().contains("DEPLOYED") && r.p.text().contains("http://127.0.0.1:3300"), "{}", r.p.text());
         assert!(!r.p.text().contains(PLANTED));
         // the masked reveal
         assert!(r.p.reveal_open());
@@ -416,6 +417,7 @@ fn store_rig_with(tag: &str, nodes: &str, build: Option<Vec<String>>, no_registr
     if !no_registry {
         run.answer("get service registry", r#"{"spec":{"ports":[{"nodePort":30500}]}}"#);
     }
+    run.fail("get pvc", 1, "Error from server (NotFound): persistentvolumeclaims not found");
     run.fail("get namespace iyakki-private-store", 1, "Error from server (NotFound): namespaces not found");
     run.fail("get secret private-store", 1, "Error from server (NotFound): secrets not found");
     run.answer("rustup target list --installed", &format!("{}\n", Arch::host().triple()));

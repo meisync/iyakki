@@ -28,7 +28,7 @@ done is in the backlog at the end, in priority order.
 |---|---|
 | Overview | Overview |
 | Account & people | Account, Vault, Secret providers |
-| Apps & AI | Models, Agents, Skills, RAG, Voice, Indic voices, Browser, Host access |
+| Apps & AI | Models, Agents, Skills, RAG, Voice, Browser, Host access |
 | Network & sharing | Network, Firewall, Shared folders |
 | Display & sound | Display, Displays, Home layout, Sound, System sounds |
 | Devices | Bluetooth, Keyboard |
@@ -55,7 +55,6 @@ Roles: **A** administrators, **all** every signed-in account (a user, operator o
 | Skills | Reusable instructions | policy | typed Markdown in a form (Instructions field) | none | a larger text area |
 | RAG | Document search tuning | all | the name "RAG" means nothing to most people | keywords "search knowledge documents" already find it | rename "Documents" with RAG in the blurb |
 | Voice | Speech to text, text to speech, tests | A, or policy.voice | one very long page with 10+ buttons; engine names | none | split "Basics" and "Engines" |
-| Indic voices | Neural voices for Indian languages | A | a download needs a typed address for the source and server | uses the file picker for folders already | one "Download" per language, addresses under Advanced |
 | Browser | What the web browser may do | all | switches: fine | none | none |
 | Host access | Folders of the host computer a window may use | all | empty in a real machine, with a reason; fine | none | none |
 | Network | Ethernet and WiFi, join, private MAC | A | "Private MAC" in the main button row | none | fold MAC under "More" |
@@ -84,7 +83,7 @@ Roles: **A** administrators, **all** every signed-in account (a user, operator o
   letters. Mouse and touch users have the buttons; keyboard users have the letters; both work. The weak point is wording that says
   "press k": it is meaningless to a touch user. The firewall's simple view uses button names in its sentences. **Deferred:** the same on the
   other pages.
-* **Typed values where a choice would do.** Found: Memory (size, compressor, swappiness), Time server, Host name rules, Indic addresses, the
+* **Typed values where a choice would do.** Found: Memory (size, compressor, swappiness), Time server, Host name rules, the
   rule form of the firewall (Advanced). Paths already use the file picker (`Form::path`). **Deferred** except the firewall.
 * **Risky actions.** Erasing a disk, resetting the vault, deleting a share and the dev cluster all ask for a typed word. New: the firewall
   asks before Open and before removing SSH or Remote desktop, and every firewall change keeps its 60-second undo.

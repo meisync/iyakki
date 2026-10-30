@@ -210,7 +210,7 @@ fn preset_rules(p: Preset, ctx: &Ctx, out: &mut Vec<RuleSpec>) {
         Preset::SharedFolders => allow("preset: shared folders", &local, Proto::Tcp, &[PortRange { lo: SHARE_PORTS.0, hi: SHARE_PORTS.1 }], None, out),
         Preset::K3sApi => allow("preset: Kubernetes API", &local, Proto::Tcp, &one(6443), None, out),
         Preset::NodePorts => allow("preset: Kubernetes NodePorts", &local, Proto::Both, &[PortRange { lo: 30000, hi: 32767 }], None, out),
-        Preset::StoreNodePort => allow("preset: private store", &local, Proto::Tcp, &one(30300), None, out),
+        Preset::StoreNodePort => allow("preset: private store", &local, Proto::Tcp, &one(30301), None, out),
         Preset::DnsService => allow("preset: DNS service", &local, Proto::Both, &one(53), None, out),
         Preset::WebServer => allow("preset: web server", &local, Proto::Tcp, &[PortRange { lo: 80, hi: 80 }, PortRange { lo: 443, hi: 443 }], None, out),
     }
@@ -413,7 +413,7 @@ impl Packet {
     }
 }
 
-fn in_addr(a: &Addr, ip: IpAddr) -> bool {
+pub fn in_addr(a: &Addr, ip: IpAddr) -> bool {
     fn n(i: IpAddr) -> u128 {
         match i {
             IpAddr::V4(a) => u32::from(a) as u128,

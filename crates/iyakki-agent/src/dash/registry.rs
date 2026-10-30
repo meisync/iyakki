@@ -7,7 +7,7 @@ use super::connector::*;
 
 /// Every kind this build offers, in the order the form shows them.
 pub fn kinds() -> Vec<KindInfo> {
-    vec![super::prom::info(), super::es::info(), super::clickhouse::info(), super::duckdb::info()]
+    vec![super::prom::info(), super::es::info(), super::clickhouse::info(), super::duckdb::info(), super::neo4j::info(), super::kube::info()]
 }
 
 pub fn kind(name: &str) -> Option<KindInfo> {
@@ -26,12 +26,14 @@ pub fn build(cfg: &SourceConfig, d: &Deps) -> Result<Box<dyn DataSource>, DashEr
         "elasticsearch" => Box::new(super::es::Elastic::new(cfg, d)?),
         "clickhouse" => Box::new(super::clickhouse::ClickHouse::new(cfg, d)?),
         "duckdb" => Box::new(super::duckdb::DuckDb::new(cfg, d)?),
+        "neo4j" => Box::new(super::neo4j::Neo4j::new(cfg, d)?),
+        "kube" => Box::new(super::kube::Kube::new(cfg, d)?),
         other => return Err(DashError::config(format!("the kind `{other}` has no connector in this build"))),
     })
 }
 
 /// Kinds that are designed for but not built yet (shown in the docs and as "coming" in the form).
-pub const PLANNED: &[&str] = &["postgres", "mysql", "sqlite", "loki", "influxdb", "opensearch-sql", "grafana-json", "files (iyakki-data)", "kubernetes-metrics", "http-json"];
+pub const PLANNED: &[&str] = &["postgres", "mysql", "sqlite", "loki", "influxdb", "opensearch-sql", "grafana-json", "files (iyakki-data)", "http-json"];
 
 #[cfg(test)]
 mod tests {
@@ -50,6 +52,9 @@ mod tests {
             match k.kind.as_str() {
                 "duckdb" => {
                     c.values.insert("files".into(), "/home/amy/a.csv".into());
+                }
+                "kube" => {
+                    c.values.insert("cluster".into(), "local".into());
                 }
                 _ => {
                     c.values.insert("url".into(), "http://h:1".into());

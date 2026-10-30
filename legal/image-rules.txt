@@ -1,0 +1,130 @@
+# Review file for the image content scan (`iyakki-relcheck image-scan` / `licence-check`). Paths are matched in lower case, without a leading
+# slash; `*` matches any run of characters including `/`.
+#   own       | glob | reason            IYAKKI's own files (Apache-2.0), owned by no Buildroot package
+#   generated | glob | reason            produced at build time from licensed inputs (indexes, caches, links, copied licence texts)
+#   deny      | glob | reason            must never be in an image (vendor blobs, patent-encumbered codecs, restricted fonts); `font:` in front
+#                                         limits the pattern to font files
+#   except    | glob | reason | date     a reviewed exception to a deny row
+#   accept    | package | reason | date  a package whose licence is not provable from legal-info or its recipe but was reviewed
+#   require   | path | reason            a root file system must contain this file (licence and notice texts travel with the image)
+# Every row needs a reason of a sentence; except / accept also a date.
+
+# ---- never in an image (docs/RESTRICTED-FIRMWARE.md, LICENSING.md items 7, 10, 11, 13, 17)
+deny | lib/firmware/brcm/*apple* | Apple's Wi-Fi/Bluetooth firmware for T2 Macs is never shipped (LICENSING.md item 13)
+deny | lib/firmware/brcm/bcm.hcd | Apple's Bluetooth patch RAM is never shipped (LICENSING.md item 13)
+deny | lib/firmware/brcm/brcmbt*apple* | Apple's Bluetooth firmware is never shipped (LICENSING.md item 13)
+deny | lib/firmware/apple/* | Apple firmware is never shipped
+deny | lib/firmware/facetimehd/* | Apple FaceTime HD camera firmware and sensor files are never shipped (LICENSING.md item 17)
+deny | lib/firmware/nvidia/* | NVIDIA GSP/booter firmware blobs: vendor binaries; listed as a doubtful item for the owner (release gate point 7, decision 6)
+deny | usr/lib/libnvidia* | NVIDIA's proprietary user-space driver is downloaded by the person, never shipped (LICENSING.md item 14)
+deny | usr/bin/nvidia-* | NVIDIA's proprietary tools are downloaded by the person, never shipped
+deny | *nvidia-linux-*.run | NVIDIA's proprietary installer is downloaded by the person, never shipped
+deny | usr/lib/libcuda* | proprietary CUDA runtime is never shipped
+deny | *.dmg | Apple disk images (macOS recovery) are never shipped (LICENSING.md item 13)
+deny | *libwidevine* | Widevine is a proprietary DRM module and is never shipped
+deny | usr/bin/claude | Claude Code is a proprietary vendor CLI, downloaded at the person's click, never shipped
+deny | usr/local/bin/claude | Claude Code is a proprietary vendor CLI, downloaded at the person's click, never shipped
+deny | *github-copilot* | the Copilot CLI is a proprietary vendor CLI, downloaded at the person's click, never shipped
+deny | usr/bin/ffmpeg | ffmpeg is downloaded by the person; the image ships no ffmpeg unless built with WITH_FFMPEG=1 as an LGPL build (LICENSING.md item 10)
+deny | usr/bin/ffprobe | ffprobe is downloaded by the person (LICENSING.md item 10)
+deny | *libavcodec* | FFmpeg's codec library is not shipped; downloaded by the person (LICENSING.md items 10, 11)
+deny | *libavformat* | FFmpeg's demuxer library is not shipped (LICENSING.md item 11)
+deny | *libavutil* | FFmpeg's utility library is not shipped (LICENSING.md item 11)
+deny | *libavfilter* | FFmpeg's filter library is not shipped (LICENSING.md item 11)
+deny | *libswscale* | FFmpeg's scaler library is not shipped (LICENSING.md item 11)
+deny | *libswresample* | FFmpeg's resampler library is not shipped (LICENSING.md item 11)
+deny | *libx264* | x264 (H.264 encoder, GPL) is never shipped
+deny | *libx265* | x265 (HEVC encoder, GPL) is never shipped
+deny | *libopenh264* | OpenH264 is a patent-encumbered codec, never shipped
+deny | *libde265* | libde265 (HEVC) is a patent-encumbered codec, never shipped
+deny | *libfdk* | fdk-aac is a non-free codec, never shipped
+deny | *libfaad* | FAAD2 (AAC, GPL) is never shipped
+deny | *libgstlibav* | the gst-libav bridge (H.264/AAC through FFmpeg) is only allowed parked and inactive, see the except row
+deny | *libgstx264* | GStreamer x264 plugin: never shipped
+deny | *libgstx265* | GStreamer x265 plugin: never shipped
+deny | *libgstopenh264* | GStreamer OpenH264 plugin: never shipped
+deny | *libgstfaad* | GStreamer FAAD plugin: never shipped
+deny | *libgstfdkaac* | GStreamer fdk-aac plugin: never shipped
+deny | font:*arial* | Arial is a restricted font (Monotype)
+deny | font:*helvetica* | Helvetica is a restricted font
+deny | font:*timesnewroman* | Times New Roman is a restricted font
+deny | font:*times new roman* | Times New Roman is a restricted font
+deny | font:*calibri* | Calibri is a restricted font (Microsoft)
+deny | font:*cambria* | Cambria is a restricted font (Microsoft)
+deny | font:*consolas* | Consolas is a restricted font (Microsoft)
+deny | font:*segoe* | Segoe UI is a restricted font (Microsoft)
+deny | font:*verdana* | Verdana is a restricted font (Microsoft)
+deny | font:*tahoma* | Tahoma is a restricted font (Microsoft)
+deny | font:*georgia* | Georgia is a restricted font (Microsoft)
+deny | font:*trebuchet* | Trebuchet is a restricted font (Microsoft)
+deny | font:*couriernew* | Courier New is a restricted font (Monotype)
+deny | font:*comic*sans* | Comic Sans is a restricted font (Microsoft)
+deny | font:*sf-pro* | San Francisco is Apple's restricted font
+deny | font:*sfpro* | San Francisco is Apple's restricted font
+deny | font:*sfns* | San Francisco is Apple's restricted font
+deny | font:*applecoloremoji* | Apple Color Emoji is a restricted font
+deny | font:*apple-color-emoji* | Apple Color Emoji is a restricted font
+deny | font:*menlo* | Menlo is Apple's restricted font
+deny | font:*lucida* | Lucida is a restricted font
+except | usr/lib/iyakki-av/gstreamer-1.0/libgstlibav.so | the INACTIVE bridge parked outside GStreamer's scan path by web-post-build.sh; the person downloads the FFmpeg libraries at the click (LICENSING.md item 11, docs/FULL-BROWSER.md codec policy) | 2026-10-26
+
+# ---- required notice files (GPL/LGPL notices travel with the image)
+require | usr/share/doc/iyakki/LICENSE | the Apache-2.0 text must travel with every image
+require | usr/share/doc/iyakki/NOTICE | the NOTICE file must travel with every image
+require | usr/share/doc/iyakki/THIRD_PARTY_LICENSES.txt | the Rust dependencies' licence texts must travel with every image
+require | usr/share/doc/iyakki/LICENSING.md | the licensing statement and source offer must travel with every image
+
+# ---- IYAKKI's own files
+own | usr/bin/iyakki | the IYAKKI program (Apache-2.0)
+own | usr/bin/iyakki-* | IYAKKI programs (Apache-2.0)
+own | usr/libexec/iyakki/* | IYAKKI helper programs (Apache-2.0)
+own | usr/lib/gstreamer-1.0/libgstiyakkicamshare.so | IYAKKI's shared-camera GStreamer plugin (dist/webview/wpe-helper/camshare.c, Apache-2.0)
+own | usr/lib/gstreamer-1.0/libgstiyakkimic.so | IYAKKI's microphone GStreamer plugin (dist/webview/wpe-helper/micshare.c, Apache-2.0)
+own | usr/lib/gstreamer-1.0/libgstiyakkiwebsink.so | IYAKKI's web engine sound output GStreamer plugin (dist/webview/wpe-helper/websink.c, Apache-2.0)
+own | usr/lib/gstreamer-1.0/libgstiyakkimp3.so | IYAKKI's MP3 decoder GStreamer plugin (dist/webview/wpe-helper/mp3dec.c, Apache-2.0, with minimp3, CC0 / public domain)
+own | usr/share/iyakki/* | IYAKKI data folder: samples (CC0), manifests, AV add-on ABI list
+own | usr/share/doc/iyakki/* | IYAKKI's licence, notice and licensing texts
+own | etc/iyakki/* | IYAKKI configuration written by the image build
+own | etc/iyakki-release | IYAKKI release marker
+own | var/lib/iyakki* | IYAKKI state folder
+own | init | the image's init entry
+own | etc/hostname | image configuration written by the build
+own | etc/os-release | image identity written by the build
+own | usr/lib/os-release | image identity written by the build
+own | etc/fonts/local.conf | IYAKKI fontconfig snippet
+own | etc/shells | image configuration written by the build
+own | usr/share/fonts/noto/* | Noto Sans fonts (SIL OFL-1.1) copied from crates/iyakki-shell/assets, text in NOTO-OFL-LICENSE.txt, inventory in legal/assets.txt
+own | boot/grub/grub.cfg | IYAKKI boot menu configuration
+own | boot/grub/themes/iyakki/* | IYAKKI boot menu theme (background listed in legal/assets.txt)
+
+# ---- generated at build time from licensed inputs
+generated | dev/console | device node made by the image build
+generated | etc/machine-id | placeholder written by the image build
+generated | etc/ssl/certs/ca-certificates.crt | bundle made from the ca-certificates package (MPL-2.0 data)
+generated | lib/udev/hwdb.bin | udev hardware database compiled from hwdata (GPL-2.0+)
+generated | lib/modules/*/modules.* | module indexes written by depmod from the kernel's modules
+generated | usr/share/doc/linux-firmware/* | licence texts of linux-firmware copied next to the firmware by the image build
+generated | usr/lib/iyakki-av/* | gst-libav moved here by web-post-build.sh; inactive, see the except row
+generated | usr/bin/analyze-build | scan-build-py helper script of the clang package; source read 2026-10-27 in target/buildroot-web/build/clang-21.1.8/tools/scan-build-py/bin: header "Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions"; Buildroot's file list does not name it (cause not investigated)
+generated | usr/bin/hmaptool | clang package helper script, source clang-21.1.8/utils/hmaptool/hmaptool (installed by that tree's CMake `install(PROGRAMS hmaptool)`); the file has no licence header of its own, the LLVM tree's licence (Apache-2.0 with LLVM exceptions) applies; not named in Buildroot's file list
+generated | usr/bin/intercept-build | scan-build-py helper script of the clang package, LLVM licence header as analyze-build (read 2026-10-27)
+generated | usr/bin/scan-build-py | scan-build-py helper script of the clang package, installed from tools/scan-build-py/bin/scan-build (read 2026-10-27)
+generated | usr/lib/libear/* | scan-build-py support files of the clang package (tools/scan-build-py/lib in the clang source tree, LLVM licence)
+generated | usr/lib/libscanbuild/* | scan-build-py support files of the clang package: all 8 .py files of libscanbuild carry the LLVM licence header (read 2026-10-27)
+generated | usr/libexec/analyze-* | scan-build-py wrappers of the clang package (tools/scan-build-py/libexec, LLVM licence)
+generated | usr/libexec/intercept-* | scan-build-py wrappers of the clang package (tools/scan-build-py/libexec, LLVM licence)
+generated | boot/bzimage | the Linux kernel image (GPL-2.0) built by Buildroot
+generated | boot/initrd | the root file system archive of this image, scanned separately as rootfs.cpio
+generated | efi/boot/bootx64.efi | GRUB EFI image (GPL-3.0+) built from the grub2 package by post-image.sh; with Secure Boot the signed shim/GRUB set replaces it
+generated | boot/grub/fonts/unicode.pf2 | GRUB's Unicode font (GNU Unifont as .pf2) copied from the build machine's grub2-common or the Buildroot host tree by post-image.sh; since 2026-10-27 the licence statement (GPL-2.0-or-later with font embedding exception, or OFL-1.1: the authors', NOT re-read from the package) and the source path and sha256 travel with it in boot/grub/fonts/FONTS-LICENSE.txt; the owner decides whether to accept it
+generated | boot/grub/fonts/iyakki-menu.pf2 | menu font made by grub-mkfont from the repository's crates/iyakki-shell/assets/DejaVuSans-Bold.ttf (Bitstream Vera licence with DejaVu public-domain changes, text DEJAVU-LICENSE.txt, legal/assets.txt) since 2026-10-27; the build machine's DejaVu is a fallback for development images only, never for a release image
+generated | boot/grub/fonts/iyakki-term.pf2 | terminal font made by grub-mkfont from the repository's crates/iyakki-shell/assets/DejaVuSansMono.ttf (same licence and record as iyakki-menu.pf2)
+
+# ---- packages that have neither a legal-info row nor a licence in a recipe
+accept | dejavu | DejaVu fonts: the package's LICENSE file (target/buildroot-web/build/dejavu-2.37/LICENSE, read 2026-10-27) is the Bitstream Vera Fonts licence, DejaVu changes in the public domain, and the Arev glyphs (c) Tavmjong Bah under the same kind of permission; Buildroot's recipe declares no licence string, only DEJAVU_LICENSE_FILES; same text as crates/iyakki-shell/assets/DEJAVU-LICENSE.txt | 2026-10-27
+accept | skeleton-init-common | Buildroot's own skeleton (configuration templates): the recipe declares no licence (legal-info prints "unknown"); it is part of the Buildroot tree, whose own row in host-manifest.csv and COPYING say GPL-2.0-or-later with exceptions for individual files; recorded 2026-10-27, no per-package licence exists to read | 2026-10-27
+accept | ifupdown-scripts | Buildroot's own network scripts: the recipe declares no licence; part of the Buildroot tree, GPL-2.0-or-later as the tree's COPYING and host-manifest row say; recorded 2026-10-27, no per-package licence exists to read | 2026-10-27
+own | boot/iyakki-release | IYAKKI release marker in the install tree
+own | boot/grub/fonts/fonts-license.txt | licence record of the boot fonts, written by post-image.sh from dist/buildroot/board/iyakki/grub/FONTS-LICENSE.txt and the repository's DejaVu licence text (2026-10-27)
+own | etc/modprobe.d/iyakki-release.conf | modprobe rules of the RELEASE image profile (dist/buildroot/board/iyakki/release/), Apache-2.0
+accept | gst1-plugins-bad | Buildroot marks the licence "UNKNOWN" because mpegtsdemux (selected by WPE WebKit, package/wpewebkit/Config.in:93, cannot be turned off) is on; read 2026-10-27 in target/buildroot-web/build/gst1-plugins-bad-1.24.13: all 13 files of gst/mpegtsdemux and all 23 of gst-libs/gst/mpegts state LGPL-2.0-or-later; the other enabled plugins (debugutils 27 of 27 files, subenc 5 of 5, codectimestamper 7 of 7, opus 5 of 5, wayland 2 of 2 and gst-libs wayland 19 of 19, wpe 11 of 12, videoparsers 29 of 31) state LGPL; not provable from the files: dirac_parse.c/.h (no header), gstwpevideosrc.h, gsttranscoder.h, tools/utils.c/.h (no header), codecparsers vp8/vp9 helpers (WebM BSD-style licence in the header), sctp meta files (BSD-2-Clause by Collabora). The release set is fixed by configs/iyakki_release.fragment; `release-image-check` fails when it changes | 2026-10-27

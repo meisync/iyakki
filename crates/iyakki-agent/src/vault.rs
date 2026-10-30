@@ -502,10 +502,8 @@ mod tests {
     use iyakki_proxy::UpstreamResponse;
 
     fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("iyakki-vault-{}-{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        // one folder per call: tests run in parallel and several of them ask for the same tag
+        crate::testdir::unique("iyakki-vault", tag)
     }
 
     #[test]

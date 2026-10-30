@@ -18,6 +18,8 @@ pub(super) struct DispPanel {
     /// What was in force when `draft` was taken, to notice a change made elsewhere.
     base: DisplayConfig,
     pub(super) started: bool,
+    /// The touch screen the 't' key changes (index into the list the input thread publishes).
+    pub(super) touch_sel: usize,
 }
 
 /// The distinct resolutions of an output, the biggest first.
@@ -132,6 +134,37 @@ impl SettingsApp {
                 self.disp.draft.mirror = !self.disp.draft.mirror;
                 self.ok(if self.disp.draft.mirror { "Mirror: every display shows the same picture (not applied yet)." } else { "Extend: every display has its own picture (not applied yet)." });
             }
+            Key::Char('d') => {
+                let n = crate::touchmap::shared().lines().len();
+                self.disp.touch_sel = if n == 0 { 0 } else { (self.disp.touch_sel + 1) % n };
+                self.ok("Next touch screen selected.");
+            }
+            Key::Char('t') => {
+                // Match automatically -> display 1 -> display 2 -> ... -> Match automatically (kept at once, per device)
+                let names: Vec<String> = st.outputs.iter().filter(|o| o.connected).map(|o| o.name.clone()).collect();
+                let mut m = crate::touchmap::shared();
+                let Some(line) = m.lines().get(self.disp.touch_sel.min(m.lines().len().saturating_sub(1))).cloned() else { return self.fail("No touch screen was found.") };
+                let kept = m.saved().iter().find(|s| s.0 == line.key).map(|s| s.1.clone()); // the file's word, not the published line (it lags a beat)
+                let next = match kept.as_ref().and_then(|s| names.iter().position(|n| n == s)) {
+                    None => names.first().cloned(),
+                    Some(i) => names.get(i + 1).cloned(),
+                };
+                m.set_choice(&line.key, next.as_deref());
+                match next {
+                    Some(d) => self.ok(format!("Touch screen {}: shows on {d}.", line.name)),
+                    None => self.ok(format!("Touch screen {}: matched automatically.", line.name)),
+                }
+            }
+            Key::Char('c') => {
+                let names: Vec<String> = st.outputs.iter().filter(|o| o.connected).map(|o| o.name.clone()).collect();
+                let mut m = crate::touchmap::shared();
+                if m.calibrating().is_some() {
+                    m.cancel_calibration();
+                    return self.ok("Touch calibration stopped.");
+                }
+                m.start_calibration(names, crate::touchmap::now_ms());
+                self.ok("Touch the highlighted screen with the touch screen that belongs to it (Esc skips a display).");
+            }
             Key::Char('y') | Key::Enter => {
                 if !self.disp_dirty() {
                     return self.ok("Nothing has changed.");
@@ -145,7 +178,7 @@ impl SettingsApp {
 
     pub(super) fn displays_buttons(&self) -> Vec<Btn> {
         let (acc, mut_, err) = (ACCENT, TEXT, ERR);
-        let mut v = vec![("Resolution", mut_, 'r'), ("Main display", mut_, 'p'), ("Side", mut_, 'a'), ("Mirror / Extend", mut_, 'm'), ("Identify", acc, 'i'), ("Apply", acc, 'y')];
+        let mut v = vec![("Resolution", mut_, 'r'), ("Main display", mut_, 'p'), ("Side", mut_, 'a'), ("Mirror / Extend", mut_, 'm'), ("Identify", acc, 'i'), ("Touch screen", mut_, 't'), ("Next touch screen", mut_, 'd'), ("Touch calibration", acc, 'c'), ("Apply", acc, 'y')];
         if hub().status().trial_secs.is_some() {
             v.push(("Keep", acc, 'k'));
             v.push(("Go back", err, 'v'));
@@ -227,6 +260,27 @@ impl SettingsApp {
                 }
                 y += box_h + 6.0 * s;
             }
+        }
+        // the touch screens and the display each one belongs to
+        let lines = crate::touchmap::shared().lines().to_vec();
+        if !lines.is_empty() {
+            y += 4.0 * s;
+            g.text(a.x, y, 14.0 * s, TEXT, "Touch screens  (d next, t changes its display, c calibrates)", Face::Bold);
+            y += 22.0 * s;
+            let at = self.disp.touch_sel.min(lines.len() - 1);
+            for (i, l) in lines.iter().enumerate() {
+                let to = match (&l.saved, &l.display) {
+                    (Some(_), Some(d)) => format!("{d} (chosen)"),
+                    (None, Some(d)) => format!("{d} (Match automatically)"),
+                    (_, None) => "no display".to_string(),
+                };
+                let t = g.fit(13.0 * s, &format!("Touch screen: {} {} -> {}", l.id, l.name, to), Face::Sans, a.w - 16.0 * s);
+                g.text(a.x + 8.0 * s, y, 13.0 * s, if i == at { TEXT } else { MUTED }, &t, Face::Sans);
+                y += 18.0 * s;
+            }
+        }
+        if let Some(d) = crate::touchmap::shared().calibrating() {
+            wrap(g, &format!("Touch calibration: touch the highlighted screen ({d}). Esc on the keyboard skips it."), 13.0 * s, crate::fx::AMBER, &mut y);
         }
         for n in st.notes.iter() {
             wrap(g, n, 13.0 * s, crate::fx::AMBER, &mut y);

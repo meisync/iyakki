@@ -87,7 +87,7 @@ impl Env for System {
         }
         let mut waited = Duration::ZERO;
         while waited < max {
-            if matches!(child.try_wait(), Ok(Some(_))) {
+            if iyakki_core_api::child_status(&mut child).is_over() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -290,6 +290,45 @@ pub fn quiet_with(env: &dyn Env, root: &Path) -> Quieted {
     q
 }
 
+/// What [`stop_owner`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stopped {
+    /// The program ended after SIGTERM.
+    Ended,
+    /// It had to be killed (SIGKILL).
+    Killed,
+}
+
+/// End ONE program that holds a playback stream open, at the person's request (the browser's "Stop it" dialog, `soundhold.rs`).
+/// The same rules as the shutdown: only the owner of a stream that is open right now (`owner_pid` in the status files), never pid 1
+/// and never this process; SIGTERM first, SIGKILL if its stream is still open after [`TERM_WAIT`]. Bounded by
+/// [`TERM_WAIT`] + [`KILL_WAIT`]; touches no mixer and no volume.
+pub fn stop_owner(env: &dyn Env, root: &Path, pid: u32) -> Result<Stopped, String> {
+    if pid <= 1 || pid == env.own_pid() {
+        return Err("that program cannot be stopped from here".into());
+    }
+    let holds = |root: &Path| open_playback(root).iter().any(|s| s.owner == Some(pid));
+    if !holds(root) {
+        return Err("that program no longer holds the sound card".into());
+    }
+    env.signal(pid, libc::SIGTERM);
+    let mut waited = Duration::ZERO;
+    while holds(root) && waited < TERM_WAIT {
+        env.sleep(POLL);
+        waited += POLL;
+    }
+    if !holds(root) {
+        return Ok(Stopped::Ended);
+    }
+    env.signal(pid, libc::SIGKILL);
+    let mut waited = Duration::ZERO;
+    while holds(root) && waited < KILL_WAIT {
+        env.sleep(POLL);
+        waited += POLL;
+    }
+    if holds(root) { Err("that program did not let go of the sound card".into()) } else { Ok(Stopped::Killed) }
+}
+
 /// Called right before a restart or power-off. Bounded (about 2 s at most), never panics, does nothing without a card.
 pub fn quiet_for_shutdown() {
     let r = std::panic::catch_unwind(|| quiet_with(&System, Path::new(ASOUND)));
@@ -308,7 +347,6 @@ mod tests {
     #[derive(Clone, Default)]
     struct Fake {
         calls: Arc<Mutex<Vec<String>>>,
-        root: PathBuf,
         /// pids whose streams close on SIGTERM / on SIGKILL; (stream dir, pid) pairs
         on_term: Arc<Mutex<Vec<(PathBuf, u32)>>>,
         on_kill: Arc<Mutex<Vec<(PathBuf, u32)>>>,
@@ -366,8 +404,44 @@ mod tests {
         format!("state: RUNNING\nowner_pid   : {pid}\ntrigger_time: 1.0\n")
     }
 
-    fn fake(root: &Path) -> Fake {
-        Fake { root: root.to_path_buf(), ..Fake::default() }
+    fn fake(_root: &Path) -> Fake {
+        Fake::default()
+    }
+
+    #[test]
+    fn one_owner_is_ended_politely_then_killed_and_never_init_or_ourselves_or_a_program_without_a_stream() {
+        let r = tree("owner");
+        let a = stream(&r, 0, "pcm0p", &running(700));
+        let b = stream(&r, 0, "pcm1p", &running(800));
+        let fake = Fake::default();
+        fake.on_term.lock().unwrap().push((a.clone(), 700));
+        assert_eq!(stop_owner(&fake, &r, 700), Ok(Stopped::Ended));
+        assert_eq!(*fake.calls.lock().unwrap(), vec!["signal 700 15".to_string()]);
+        // the other program was not touched
+        assert!(std::fs::read_to_string(b.join("status")).unwrap().contains("RUNNING"));
+        // a stubborn one
+        let fake = Fake::default();
+        fake.on_kill.lock().unwrap().push((b.clone(), 800));
+        assert_eq!(stop_owner(&fake, &r, 800), Ok(Stopped::Killed));
+        assert_eq!(*fake.calls.lock().unwrap(), vec!["signal 800 15".to_string(), "signal 800 9".to_string()]);
+        assert!(*fake.slept.lock().unwrap() >= TERM_WAIT);
+        // not a holder, init, ourselves: refused, nothing signalled
+        let fake = Fake::default();
+        for pid in [0, 1, 4242, 999] {
+            assert!(stop_owner(&fake, &r, pid).is_err(), "{pid}");
+        }
+        assert!(fake.calls.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&r);
+    }
+
+    #[test]
+    fn a_stream_that_never_closes_is_reported_not_claimed_stopped() {
+        let r = tree("owner-stuck");
+        stream(&r, 0, "pcm0p", &running(700));
+        let fake = Fake::default();
+        assert!(stop_owner(&fake, &r, 700).is_err());
+        assert_eq!(fake.calls.lock().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&r);
     }
 
     #[test]

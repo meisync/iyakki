@@ -168,6 +168,8 @@ pub struct DataView {
     /// After this file has been written, offer it to the host's save dialog.
     host_export_after: Option<PathBuf>,
     ticks: u64,
+    /// Size and change time of the file when it was opened, to notice that it was changed elsewhere (the assistant appended).
+    stamp: Option<(u64, std::time::SystemTime)>,
 }
 
 fn thousands(v: u64) -> String {
@@ -222,6 +224,7 @@ impl DataView {
             show_hidden: false,
             host_export_after: None,
             ticks: 0,
+            stamp: None,
         };
         if let Some(p) = params.path {
             v.pending_filter = params.filter;
@@ -435,6 +438,7 @@ impl DataView {
                     self.total = info.rows;
                     self.say(format!("{} · {} rows × {} columns · {} engine", info.source, thousands(info.rows), info.columns.len(), info.engine), true);
                     self.info = Some(info);
+                    self.stamp = self.file_stamp();
                     self.ver += 1;
                     if let Some(f) = self.pending_filter.take().filter(|f| !f.trim().is_empty()) {
                         self.filter.set(&f);
@@ -839,6 +843,23 @@ impl DataView {
         }
     }
 
+    fn file_stamp(&self) -> Option<(u64, std::time::SystemTime)> {
+        std::fs::metadata(&self.path).ok().and_then(|m| Some((m.len(), m.modified().ok()?)))
+    }
+
+    /// The open file was replaced or grown by someone else (the assistant added rows): open it again, keeping the filter.
+    /// Returns true when a reload started.
+    pub fn reload_if_changed(&mut self) -> bool {
+        if self.info.is_none() || self.jobs > 0 || self.stamp.is_none() || self.file_stamp().is_none_or(|now| Some(now) == self.stamp) {
+            return false;
+        }
+        let (path, filter) = (self.path.clone(), self.filter_applied.clone());
+        self.open_path(&path);
+        self.pending_filter = Some(filter);
+        self.say(format!("{path} changed, so it was reloaded."), true);
+        true
+    }
+
     /// The open file must still be somewhere the person may read; when a shared folder is withdrawn the table is closed.
     fn recheck_access(&mut self) {
         if self.info.is_none() {
@@ -918,6 +939,7 @@ impl DataView {
             self.ticks += 1;
             if self.ticks % 30 == 0 {
                 self.recheck_access();
+                self.reload_if_changed();
             }
             if let Some(Modal::Host(d)) = self.modal.as_mut() {
                 let out = d.handle(ev);
@@ -1472,12 +1494,26 @@ pub fn request_open(path: &str, filter: Option<&str>) {
 
 pub struct DataApp {
     view: DataView,
+    user: String,
+    /// The table last told to the assistant (file, column names).
+    told: Option<(String, Vec<String>)>,
 }
 
 impl DataApp {
     pub fn new(cx: &AppCx) -> DataApp {
         let params = OPEN_NEXT.with(|o| o.borrow_mut().take()).unwrap_or_default();
-        DataApp { view: DataView::new(DataEnv::from_cx(cx), params) }
+        DataApp { view: DataView::new(DataEnv::from_cx(cx), params), user: cx.session.user.clone(), told: None }
+    }
+
+    /// Tell the chat assistant which table is shown (file and column names only), so "this table" means it.
+    fn tell_assistant(&mut self) {
+        let (Some(path), Some(_)) = (self.view.path(), self.view.info()) else { return };
+        let cols = self.view.column_names();
+        if self.told.as_ref().is_some_and(|t| t.0 == path && t.1 == cols) {
+            return;
+        }
+        iyakki_agent::datatools::set_tab_table(&self.user, path, &cols);
+        self.told = Some((path.to_string(), cols));
     }
 
     pub fn view(&mut self) -> &mut DataView {
@@ -1515,7 +1551,11 @@ impl App for DataApp {
         Flow::Stay
     }
     fn handle(&mut self, ev: &Event, _cx: &AppCx) -> Flow {
-        match self.view.handle(ev) {
+        let out = self.view.handle(ev);
+        if matches!(ev, Event::Tick) {
+            self.tell_assistant();
+        }
+        match out {
             Out::Close => Flow::Back,
             Out::Stay => Flow::Stay,
         }
@@ -1836,6 +1876,54 @@ mod tests {
             assert!(!g.hits.is_empty());
         }
         assert_eq!(v.handle(&Event::Key(Key::Esc)), Out::Close, "Esc with nothing to dismiss asks the host to close it");
+    }
+
+    fn writer(d: &Path) -> iyakki_sec::policy::Policy {
+        let mut p = iyakki_sec::policy::Role::User.template();
+        p.fs_read = vec![d.display().to_string()];
+        p.fs_write = vec![d.display().to_string()];
+        p
+    }
+
+    #[test]
+    fn a_table_the_assistant_creates_is_listed_without_a_restart_and_an_append_reloads_the_open_table() {
+        let d = std::fs::canonicalize(temp_dir("dv-agent-writes")).unwrap();
+        let f = sample(&d, 5);
+        let mut v = DataView::new(env_for(&d), DataViewParams { path: Some(f), filter: None });
+        v.settle();
+        v.show_open_dialog();
+        let Some(Modal::Open { picker, .. }) = &v.modal else { panic!() };
+        assert!(!picker.visible().into_iter().any(|i| i == "made.csv"));
+        v.handle(&Event::Key(Key::Esc));
+        let (p, u) = (writer(&d), "tester-dv-agent");
+        let args = serde_json::json!({"name": "made.csv", "folder": d.display().to_string(), "columns": ["a", "b"], "rows": [[1, "x"], [2, "y"]]});
+        iyakki_agent::datatools::call("data_create", &args, &p, u, &d, &d).unwrap();
+        v.show_open_dialog();
+        let Some(Modal::Open { picker, .. }) = &v.modal else { panic!() };
+        assert!(picker.visible().into_iter().any(|i| i == "made.csv"), "the dialog reads the folder each time it opens");
+        v.handle(&Event::Key(Key::Esc));
+        // rows added to the open file by the assistant: the open table reloads by itself
+        assert_eq!(v.total(), 5);
+        assert!(!v.reload_if_changed(), "nothing changed yet");
+        let row = serde_json::json!({"path": d.join("sample.csv").display().to_string(), "rows": [[5, "user 5", "g0", 1.5, true]]});
+        iyakki_agent::datatools::call("data_append", &row, &p, u, &d, &d).unwrap();
+        assert!(v.reload_if_changed());
+        v.settle();
+        assert_eq!(v.total(), 6);
+        iyakki_agent::datatools::forget(u);
+    }
+
+    #[test]
+    fn the_assistant_is_told_the_open_table_by_file_and_column_names_never_cells() {
+        let (mut v, _d, f) = view("dv-tell", 5);
+        v.settle();
+        let mut app = DataApp { view: v, user: "tester-dv-tell".into(), told: None };
+        assert!(iyakki_agent::datatools::tab_context("tester-dv-tell").is_none());
+        app.tell_assistant();
+        let c = iyakki_agent::datatools::tab_context("tester-dv-tell").unwrap();
+        assert!(c.contains(&f) && c.contains("id, name, group, score, paid"), "{c}");
+        assert!(!c.contains("user 0") && !c.contains("g1"), "no cell values: {c}");
+        iyakki_agent::datatools::forget("tester-dv-tell");
     }
 
     #[test]

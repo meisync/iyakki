@@ -300,6 +300,53 @@ pub struct BrowserSessionInfo {
     pub engine: String,
 }
 
+/// One picture from the camera for a `cam_photo` node. The engine has already checked the flow's camera permission; the host
+/// checks it again and adds its own rules (the account, a camera that is there and free).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CamPhotoRequest {
+    pub flow_id: String,
+    pub run_id: String,
+    pub node_id: String,
+    /// A camera by name (empty: the one the shell uses).
+    pub device: String,
+    /// Keep the picture after the run (in the run's private folder); default is to delete it when the run ends.
+    pub keep: bool,
+    /// The person allowed this flow to use the camera, and whether also for runs nobody started by hand.
+    pub allowed: bool,
+    pub unattended: bool,
+    /// The run was started by the person (by hand or from the chat).
+    pub attended: bool,
+    /// A later step of the flow shows this picture to a model: the host refuses before taking it when the chosen model cannot see
+    /// pictures.
+    pub needs_vision: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CamPhotoResult {
+    /// The picture file (a JPEG in the run's private folder).
+    pub path: String,
+    /// Unix seconds.
+    pub taken_at: i64,
+    pub device: String,
+    /// Lines for the node's log (for example the warning that the model is a cloud service).
+    pub log: Vec<String>,
+}
+
+/// A step stopped for want of a permission only the person can give: the host asks them (popup, inbox) and never decides itself.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PermissionNeed {
+    pub flow_id: String,
+    pub flow_name: String,
+    pub run_id: String,
+    pub node_id: String,
+    pub node_title: String,
+    /// `camera` or `camera_unattended`.
+    pub permission: String,
+    pub message: String,
+    /// The flow already says "Block": do not ask.
+    pub blocked: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AgentRequest {
     pub prompt: String,
@@ -319,6 +366,8 @@ pub struct AgentRequest {
 pub struct AgentResult {
     pub text: String,
     pub cents: u64,
+    /// Lines for the node's log (which vision model looked at the picture, that it had to be loaded first).
+    pub log: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -341,6 +390,22 @@ pub struct Notice {
     pub run_id: String,
     /// The note links to this run when it needs the person (`needs_you`).
     pub needs_you: bool,
+}
+
+/// A request to also tell the person through a messaging channel (today `matrix`). The engine only carries the shape and checks it;
+/// the host does the sending (docs/development/MESSAGING-CONNECTORS-PLAN.md, section 7).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChannelNotice {
+    /// Lower-case channel names other than `inbox`.
+    pub channels: Vec<String>,
+    /// The name of one of the person's saved rooms (empty: their only or main room).
+    pub room: String,
+    /// A picture of this run (the camera step's file); empty: none.
+    pub attach: String,
+    /// Render and check everything, send nothing.
+    pub dry_run: bool,
+    /// The same key never sends twice.
+    pub dedupe_key: String,
 }
 
 /// What the healing agent is asked, already redacted and compact.
@@ -401,6 +466,14 @@ pub trait Host: Send + Sync {
     fn browser_session(&self, _run_id: &str) -> Option<BrowserSessionInfo> {
         None
     }
+    /// Take one picture with the camera into the run's private folder.
+    fn cam_photo(&self, _req: &CamPhotoRequest, _cancel: &Cancel) -> Result<CamPhotoResult, NodeError> {
+        na("the camera")
+    }
+    /// A step stopped for want of a permission the person can give by answering a request.
+    fn permission_needed(&self, _n: &PermissionNeed) {}
+    /// The run is over: delete its camera pictures (those of nodes that did not ask to keep them).
+    fn cam_end(&self, _run_id: &str) {}
     fn agent(&self, _req: &AgentRequest, _cancel: &Cancel) -> Result<AgentResult, NodeError> {
         na("the assistant")
     }
@@ -409,6 +482,10 @@ pub trait Host: Send + Sync {
     }
     fn notify(&self, _n: &Notice) -> Result<(), String> {
         Ok(())
+    }
+    /// Tell the person through the channels too. Returns one plain line per channel; an `Err` is one plain sentence and does not fail the run.
+    fn notify_channels(&self, _n: &Notice, _c: &ChannelNotice) -> Result<Vec<String>, String> {
+        Err("no messaging account is set up on this computer (Settings, Notifications, Matrix account)".into())
     }
     /// A vault secret by name (never logged: the engine registers it with the redactor).
     fn secret(&self, name: &str) -> Result<String, String> {
@@ -455,10 +532,17 @@ pub struct FakeHost {
     pub browser_ops: Mutex<Vec<BrowserOp>>,
     pub browser_op_fn: Mutex<Option<BrowserOpFn>>,
     pub browser_ended: Arc<Mutex<Vec<String>>>,
+    pub cam_calls: Mutex<Vec<CamPhotoRequest>>,
+    pub cam_results: Mutex<VecDeque<Result<CamPhotoResult, NodeError>>>,
+    pub cam_ended: Mutex<Vec<String>>,
+    pub permission_needs: Mutex<Vec<PermissionNeed>>,
     pub agent_results: Mutex<VecDeque<Result<AgentResult, NodeError>>>,
     pub agent_calls: Mutex<Vec<AgentRequest>>,
     pub script_results: Mutex<VecDeque<Result<Value, NodeError>>>,
     pub notices: Mutex<Vec<Notice>>,
+    /// What `notify` asked of the channels, and the answer to give (none: the default refusal).
+    pub channel_calls: Mutex<Vec<ChannelNotice>>,
+    pub channel_result: Mutex<Option<Result<Vec<String>, String>>>,
     pub secrets: Mutex<BTreeMap<String, String>>,
     pub audits: Mutex<Vec<String>>,
     pub clis: Mutex<BTreeMap<String, CliInfo>>,
@@ -561,9 +645,19 @@ impl Host for FakeHost {
     fn browser_end(&self, run_id: &str) {
         self.browser_ended.lock().unwrap().push(run_id.to_string());
     }
+    fn cam_photo(&self, req: &CamPhotoRequest, _c: &Cancel) -> Result<CamPhotoResult, NodeError> {
+        self.cam_calls.lock().unwrap().push(req.clone());
+        self.cam_results.lock().unwrap().pop_front().unwrap_or_else(|| Ok(CamPhotoResult { path: "/photos/one.jpg".into(), taken_at: 1_700_000_000, device: "video0".into(), log: vec![] }))
+    }
+    fn cam_end(&self, run_id: &str) {
+        self.cam_ended.lock().unwrap().push(run_id.to_string());
+    }
+    fn permission_needed(&self, n: &PermissionNeed) {
+        self.permission_needs.lock().unwrap().push(n.clone());
+    }
     fn agent(&self, req: &AgentRequest, _c: &Cancel) -> Result<AgentResult, NodeError> {
         self.agent_calls.lock().unwrap().push(req.clone());
-        self.agent_results.lock().unwrap().pop_front().unwrap_or_else(|| Ok(AgentResult { text: "done".into(), cents: 1 }))
+        self.agent_results.lock().unwrap().pop_front().unwrap_or_else(|| Ok(AgentResult { text: "done".into(), cents: 1, log: vec![] }))
     }
     fn script(&self, _r: &ScriptRequest, _c: &Cancel) -> Result<Value, NodeError> {
         self.script_results.lock().unwrap().pop_front().unwrap_or(Ok(Value::Null))
@@ -571,6 +665,10 @@ impl Host for FakeHost {
     fn notify(&self, n: &Notice) -> Result<(), String> {
         self.notices.lock().unwrap().push(n.clone());
         Ok(())
+    }
+    fn notify_channels(&self, _n: &Notice, c: &ChannelNotice) -> Result<Vec<String>, String> {
+        self.channel_calls.lock().unwrap().push(c.clone());
+        self.channel_result.lock().unwrap().clone().unwrap_or_else(|| Err("no messaging account is set up on this computer (Settings, Notifications, Matrix account)".into()))
     }
     fn secret(&self, name: &str) -> Result<String, String> {
         self.secrets.lock().unwrap().get(name).cloned().ok_or_else(|| format!("there is no secret `{name}` in your vault"))

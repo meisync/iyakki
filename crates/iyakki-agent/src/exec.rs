@@ -170,15 +170,14 @@ pub fn run_prepared(mut cmd: Command, program: &str, seconds: u64, sink: Option<
     let limit = Duration::from_secs(seconds.clamp(1, MAX_SECONDS));
     let start = Instant::now();
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break Some(s),
-            Ok(None) if start.elapsed() >= limit => {
+        match iyakki_core_api::child_status(&mut child) {
+            s if s.is_over() => break Some(s),
+            _ if start.elapsed() >= limit => {
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(e) => return Err(e.to_string()),
+            _ => std::thread::sleep(Duration::from_millis(20)),
         }
     };
     // a program a stopped one started may still hold the pipes open; do not wait for them
@@ -192,6 +191,8 @@ pub fn run_prepared(mut cmd: Command, program: &str, seconds: u64, sink: Option<
     match status {
         None => Err(format!("stopped after {} seconds\n{text}", limit.as_secs())),
         Some(s) if s.success() => Ok(if text.trim().is_empty() { "(no output, exit status 0)".into() } else { text }),
+        // another reaper took the status: the output is complete, how it ended is unknown
+        Some(iyakki_core_api::ChildState::Gone) => Ok(if text.trim().is_empty() { "(no output, the exit status is not available)".into() } else { text }),
         Some(s) => Err(format!("exit status {}\n{text}", s.code().map_or("signal".into(), |c| c.to_string()))),
     }
 }

@@ -164,6 +164,12 @@ impl ConnectFlow {
         self.begin_push();
     }
 
+    /// The IDE's "Put this project under version control on Local Gitea": the connection is chosen already, go straight to making the
+    /// repository (name, private, first commit, all shown in a review; the push is a second review). The caller picked the connection.
+    pub fn start_create(&mut self) {
+        self.begin_create();
+    }
+
     pub fn set_name(&mut self, n: &str) {
         self.name.set(n);
     }

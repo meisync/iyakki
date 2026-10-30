@@ -13,6 +13,25 @@ fn microphones_are_the_devices_with_a_capture_stream_and_usb_ones_are_marked() {
     assert!(parse_mics(CARDS, "00-03: HDMI 0 : HDMI 0 : playback 1\n").is_empty());
 }
 
+/// The 2020 MacBook Pro (T2), as read from the machine: card 0 is `AppleT2x4` with the capture streams "Digital Mic" (device 1), "Codec Input"
+/// (3) and "Bridge Loopback" (4); card 1 is the webcam's USB microphone. Dictation records through `plughw:C,D` of the first microphone (the
+/// route the browser's microphone plugin uses too), never through `default` (which is the playback-only softvol device of IYAKKI's sound).
+#[test]
+fn the_t2_macbook_dictation_uses_plughw_of_the_digital_mic_and_never_the_loopback() {
+    let cards = " 0 [AppleT2x4      ]: AppleT2x4 - Apple T2 Audio\n                      Apple T2 Audio\n 1 [Nova           ]: USB-Audio - EMEET SmartCam Nova 4K\n                      EMEET SmartCam Nova 4K at usb-0000:00:14.0-2, high speed\n 2 [PCH            ]: HDA-Intel - HDA Intel PCH\n                      HDA Intel PCH at 0x600c110000 irq 140\n";
+    let pcm = "00-00: Speaker : Speaker : playback 1\n00-01: Digital Mic : Digital Mic : capture 1\n00-02: Headphones : Headphones : playback 1\n00-03: Codec Input : Codec Input : capture 1\n00-04: Bridge Loopback : Bridge Loopback : playback 1 : capture 1\n01-00: USB Audio : USB Audio : playback 1 : capture 1\n02-03: HDMI 0 : HDMI 0 : playback 1\n";
+    // the capture switch of the driver is off: only the USB microphone
+    let off = parse_mics_with(cards, pcm, false);
+    assert_eq!(off.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["plughw:1,0"]);
+    // on: the built-in ones, never the loopback
+    let on = parse_mics_with(cards, pcm, true);
+    assert_eq!(on.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["plughw:0,1", "plughw:0,3", "plughw:1,0"], "{on:?}");
+    assert_eq!(record_cmd_for("arecord -q -f S16_LE -r 16000 -c 1 -t raw", on.first()), "arecord -D plughw:0,1 -q -f S16_LE -r 16000 -c 1 -t raw");
+    // other machines: digital captures and loopback cards are no microphones either
+    let pc = parse_mics(" 0 [PCH            ]: HDA-Intel - HDA Intel PCH\n", "00-00: ALC3246 Analog : ALC3246 Analog : playback 1 : capture 1\n00-01: ALC3246 Digital : ALC3246 Digital (IEC958) : playback 1 : capture 1\n01-00: Loopback PCM : Loopback PCM : playback 8 : capture 8\n");
+    assert_eq!(pc.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["plughw:0,0"]);
+}
+
 #[test]
 fn the_record_command_is_aimed_at_the_chosen_microphone_unless_it_names_one() {
     let usb = Mic { id: "plughw:1,0".into(), label: "USB".into(), usb: true };
@@ -74,7 +93,7 @@ fn a_t2_macs_inputs_are_hidden_because_recording_there_can_hang_the_computer_unl
     let ids: Vec<String> = parse_mics(cards, pcm).into_iter().map(|m| m.id).collect();
     assert_eq!(ids, ["plughw:2,0"], "only the USB microphone");
     let all: Vec<String> = parse_mics_with(cards, pcm, true).into_iter().map(|m| m.id).collect();
-    assert_eq!(all, ["plughw:0,1", "plughw:0,4", "plughw:2,0"]);
+    assert_eq!(all, ["plughw:0,1", "plughw:2,0"], "the Bridge Loopback is no microphone");
     let d = std::env::temp_dir().join(format!("iyakki-t2cap-{}", std::process::id()));
     std::fs::create_dir_all(d.join("module/apple_bce/parameters")).unwrap();
     assert!(!t2_capture_allowed(&d));
@@ -86,4 +105,32 @@ fn a_t2_macs_inputs_are_hidden_because_recording_there_can_hang_the_computer_unl
     let t = no_mic_text_t2("MacBookPro16,2", true);
     assert!(t.contains("microphone of this MacBookPro16,2 is not supported yet") && t.contains("USB microphone") && t.contains("apple_bce/parameters/capture"), "{t}");
     assert_eq!(no_mic_text_t2("Dell XPS", false), no_mic_text("Dell XPS"));
+}
+
+#[test]
+fn the_chosen_microphone_wins_when_present_else_the_first_and_the_choice_is_handed_to_the_web_engine() {
+    let m = |id: &str| Mic { id: id.into(), label: id.into(), usb: false };
+    let list = vec![m("plughw:0,1"), m("plughw:1,0")];
+    assert_eq!(pick_mic(&list, "plughw:1,0").unwrap().id, "plughw:1,0");
+    assert_eq!(pick_mic(&list, "plughw:9,9").unwrap().id, "plughw:0,1", "a device that is gone: the first one");
+    assert_eq!(pick_mic(&list, "").unwrap().id, "plughw:0,1");
+    assert!(pick_mic(&[], "plughw:1,0").is_none());
+    let d = std::env::temp_dir().join(format!("iyakki-micshare-{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    share_mic_choice(&d, "plughw:1,0");
+    assert_eq!(std::fs::read_to_string(d.join(BROWSER_MIC_CHOICE)).unwrap(), "plughw:1,0\n");
+    share_mic_choice(&d, "");
+    assert!(!d.join(BROWSER_MIC_CHOICE).exists(), "automatic removes the file");
+    assert!(browser_mic_failure(&d).is_none());
+    std::fs::write(d.join(BROWSER_MIC_STATUS), "Digital Mic\tDevice or resource busy\n").unwrap();
+    assert_eq!(browser_mic_failure(&d), Some(("Digital Mic".into(), "Device or resource busy".into())));
+    let t = mic_failure_text("Digital Mic", "Device or resource busy");
+    assert!(t.contains("Digital Mic") && t.contains("another program is using it"), "{t}");
+    assert!(mic_failure_text("X", "weird").contains("the sound system said: weird"));
+    let mut v = crate::voice::VoiceSettings::default();
+    v.mic = "plughw:1,0".into();
+    assert!(v.validate().is_ok() && serde_json::from_str::<crate::voice::VoiceSettings>("{}").unwrap().mic.is_empty(), "old settings files have no mic");
+    v.mic = "rm -rf /".into();
+    assert!(v.validate().is_err());
+    let _ = std::fs::remove_dir_all(&d);
 }

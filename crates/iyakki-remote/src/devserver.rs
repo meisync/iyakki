@@ -51,6 +51,10 @@ struct Shared {
     /// The port this listener really has (a forward to it is refused).
     port: u16,
     update_opts: Mutex<UpdateOpts>,
+    /// The typed core contract over this channel (off until an administrator switches it on): per-computer call limits, and the
+    /// one-time hookup of its audit lines to the system audit log.
+    core_gate: iyakki_agent::devmode::contract::Gate,
+    core_wired: std::sync::Once,
 }
 
 /// What system updates talk to; the defaults are the real boot partition and `/etc/iyakki-release` (tests give their own).
@@ -95,6 +99,8 @@ impl DevServer {
             cfg_opts: Mutex::new(Default::default()),
             port: addr.port(),
             update_opts: Mutex::new(UpdateOpts::default()),
+            core_gate: iyakki_agent::devmode::contract::Gate::standard(),
+            core_wired: std::sync::Once::new(),
         });
         let s = shared.clone();
         std::thread::Builder::new().name("iyakki-dev-accept".into()).spawn(move || accept_loop(listener, s))?;
@@ -211,6 +217,8 @@ fn pair(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
     match sh.dm.complete_pairing(&sh.fp, name, key, proof) {
         Ok((k, answer)) => {
             sh.env.audit.record(&k.account, "devmode.pair", &format!("{} ({}) from {}", k.name, k.short(), peer.ip()));
+            // the pairing is over (its one-time firewall rule goes with it); this computer's own address is what the firewall opens now
+            sh.dm.note_key_addr(&k.key, &peer.ip().to_string());
             Response::json(200, &json!({ "ok": true, "device": sh.env.hostname, "account": k.account, "answer": answer }))
         }
         Err(e) => Response::error(403, &e),
@@ -245,6 +253,7 @@ fn signed(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
     };
     let Some(k) = sh.dm.find_key(&key) else { return Response::error(403, "not paired") };
     sh.dm.touch_key(&key);
+    sh.dm.note_key_addr(&key, &ip);
     let (actor, policy, role) = match actor_of(sh, &k.account) {
         Ok(x) => x,
         Err(e) => {
@@ -257,6 +266,19 @@ fn signed(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
     let store = Store::for_services(svc);
     let audit = |action: &str, detail: &str| sh.env.audit.record(&k.account, action, &format!("{} (developer computer): {detail}", k.name));
     let q = |n: &str| req.query.get(n).map(String::as_str).unwrap_or("");
+    // the typed core contract (opt-in; its own scopes, granted per computer on the device): /v1/dev/core/...
+    if iyakki_agent::devmode::contract::is_route(&req.method, &req.path) {
+        let core = iyakki_agent::contract_local::core_for(svc);
+        sh.core_wired.call_once(|| {
+            let log = sh.env.audit.clone();
+            core.audit_to(Arc::new(move |line: &str| log.record("core", "core.contract", line)));
+        });
+        let audit_fn = |a: &str, d: &str| audit(a, d);
+        let cx = iyakki_agent::devmode::contract::CoreCx { dm: &sh.dm, key: &k, policy: &policy, core: &core, gate: &sh.core_gate, hostname: &sh.env.hostname, audit: &audit_fn };
+        if let Some(o) = iyakki_agent::devmode::contract::handle(&cx, &req.method, &req.path, &req.body) {
+            return Response::new(o.status, o.ctype, o.body);
+        }
+    }
     // the routes of the scopes beyond install (debug, files, input, config, shell, ...): the scope is checked first, in one place
     {
         let ext = crate::devconfig::ShellConfig::new(svc.dir().to_path_buf(), sh.env.hostname.clone(), sh.cfg_opts.lock().unwrap_or_else(|e| e.into_inner()).clone());
@@ -272,7 +294,8 @@ fn signed(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
         let release = ub.release.clone().unwrap_or_else(|| std::fs::read_to_string(iyakki_agent::relinfo::RELEASE_FILE).unwrap_or_default());
         let audit_fn = |a: &str, d: &str| audit(a, d);
         let tail = |n: usize| { let mut v = sh.env.audit.recent(n); v.reverse(); v };
-        let cx = api::Ctx { dm: &sh.dm, key: &k, policy: &policy, role: &role, hostname: &sh.env.hostname, paths: &sh.paths, audit_tail: &tail, audit: &audit_fn, firewall_file: svc.dir().join("firewall.json"), home: sh.home.clone(), svc: Some(svc.as_ref()), ext: Some(&ext), own_port: sh.port, power: &power, boot: boot.as_deref(), release: &release, volatile: sh.env.data_volatile, data_free: ub.data_free };
+        let kube = iyakki_agent::devmode::kube::SvcKube(svc.as_ref());
+        let cx = api::Ctx { dm: &sh.dm, key: &k, policy: &policy, role: &role, hostname: &sh.env.hostname, paths: &sh.paths, audit_tail: &tail, audit: &audit_fn, firewall_file: svc.dir().join("firewall.json"), home: sh.home.clone(), svc: Some(svc.as_ref()), ext: Some(&ext), own_port: sh.port, power: &power, boot: boot.as_deref(), release: &release, volatile: sh.env.data_volatile, data_free: ub.data_free, kube: Some(&kube) };
         let qs = |n: &str| q(n).to_string();
         if let Some(o) = api::handle(&cx, &req.method, &req.path, &qs, &req.body) {
             return Response::new(o.status, o.ctype, o.body);
@@ -367,8 +390,11 @@ pub fn watch(env: ShellEnv, tls_dir: PathBuf) -> std::io::Result<std::thread::Jo
         let dm = DevMode::open(env.services.dir());
         let mut running: Option<(DevServer, u16)> = None;
         let mut last_error = String::new();
+        let mut last_fw_error = String::new();
+        dm.fw_start_reset();
         loop {
             let on = dm.is_on();
+            crate::devfw::tick(&dm, &iyakki_fw::service::Handle::Global, &|a, d| env.audit.record("system", a, d), &mut last_fw_error);
             let port = dm.state().port();
             if running.as_ref().is_some_and(|(_, p)| !on || *p != port) {
                 running = None;

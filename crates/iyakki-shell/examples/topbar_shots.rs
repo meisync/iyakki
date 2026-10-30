@@ -10,7 +10,6 @@ use iyakki_shell::gfx::Gfx;
 use iyakki_shell::shell::{Shell, ShellEnv};
 use iyakki_shell::ui::{Event, Key};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 struct Offline;
 impl Upstream for Offline {

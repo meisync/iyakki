@@ -1,0 +1,16 @@
+{
+  "config": {
+    "version": 1,
+    "enabled": true,
+    "rules": [],
+    "presets": ["remote-desktop"],
+    "ping": "local",
+    "trust_containers": true,
+    "refresh_minutes": 5,
+    "next_id": 1
+  },
+  "resolved": {
+    "addrs": {},
+    "at": {}
+  }
+}

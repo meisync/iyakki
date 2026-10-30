@@ -4,8 +4,10 @@ The AI IDE can run several isolated pieces of work at the same time, the way the
 each **task** has its own copy of the workspace, its own chat session, its own budgets and its own status. You watch them on
 one screen (the **Tasks** tab next to Board), answer their questions in one queue, and **review and merge** what each one made.
 
-Code: `crates/iyakki-agent/src/tasks.rs` (isolation, scheduler, review, merge; no UI, no model), `tasktools.rs` (the assistant's
-`task_spawn`), `crates/iyakki-shell/src/apps/ide_tasks.rs` (the tab). Tests: `tasks_tests.rs`, `ide_tasks_tests.rs`.
+Code: `crates/iyakki-agent/src/tasks.rs` (isolation, scheduler, review, merge; no UI, no model), `tasks/plan.rs` (plan fan-out,
+memory-aware cap, lead summary), `tasktools.rs` (the assistant's `task_spawn`, `task_plan`, `task_status`),
+`crates/iyakki-shell/src/apps/ide_tasks.rs` (the tab). Tests: `tasks_tests.rs` (module `fanout` for the three parts below),
+`ide_tasks_tests.rs`.
 
 ## What a task is
 
@@ -71,8 +73,8 @@ and puts the row back as it was when the task is discarded.
 
 ## Running
 
-The **scheduler** keeps at most *N* tasks running (default 3, hard cap 6, setting `max_concurrency`); the rest wait as
-`queued` in creation order. Each task runs the Autopilot machinery on its own worker thread with its own `Context`, `Executor`,
+The **scheduler** keeps at most *N* tasks running (default 3, hard cap 6, setting `max_concurrency`, the `−` `+` control in the
+tab); the rest wait as `queued` in creation order. The number that really runs is also limited by free memory (next section). Each task runs the Autopilot machinery on its own worker thread with its own `Context`, `Executor`,
 budgets (steps, minutes, tokens, cost; the Autopilot defaults, overridable per task and capped by the account's budget) and
 honest summary. A task that goes over a budget is stopped and shown `failed` with the reason; **Retry** re-queues it, **Pause**
 saves its place (Autopilot's pause) and **Resume** continues from it, **Stop** ends it.
@@ -85,6 +87,57 @@ decision channel). Auto approves only what Auto approves anywhere (per-agent Aut
 State is saved to `.iyakki/tasks/<id>/task.json` after every change. When the IDE closes (or a workspace is closed) while tasks run,
 **running tasks are stopped** (their place is saved; this waits a few seconds) and a restart shows them as `interrupted` with
 **Resume**; a window that died without closing is recovered the same way. The IDE does not ask first when it closes (not built).
+
+## Memory-aware cap
+
+Builds and tests of several tasks share one machine, so the scheduler reads `MemAvailable` from `/proc/meminfo` every time it
+decides (and the tab nudges it every 5 seconds while something is queued). It keeps a **reserve of 2 GB** for the system and
+assumes each task needs **1500 MB** (setting `task_memory_mb`, 100 to 64000, in `.iyakki/tasks/config.json`). The tasks allowed at
+once are `running + (free − reserve) / task_mb`, never more than the setting `max_concurrency` (and 6), never fewer than 1 (one
+task may always run). A running task is never stopped by the cap. If the free memory cannot be read, at most 2 run. Queued tasks
+that wait for memory say so on their card (`waiting for memory (1.3 GB free; each task is expected to need 1500 MB)`) and the top
+of the tab shows `max 3 · now 1` while the cap is lowered. Owner: set the maximum with `−` `+` (kept per workspace); tune
+`task_memory_mb` in `config.json` for heavy builds (for example 4000).
+
+## Plan fan-out
+
+The lead assistant's `task_plan {steps: [{title, goal, files, depends_on}]}` (Ask, every time; at most 12 steps) splits a plan:
+
+* A step lists the **files or folders it changes** (required; absolute paths and `..` are dropped). `depends_on` lists the step
+  numbers (from 1) whose result it needs.
+* `split_plan` puts steps with no dependency and **disjoint scopes** in the first wave. A step that depends on another, or whose
+  scope meets another step's (the same path, or a folder holding the other path), goes to a later wave. A circle of dependencies
+  is refused. The approval card shows the waves and the reason a step waits.
+* On approval each first-wave step becomes a task in its **own worktree** (the scheduler and the memory cap decide how many run
+  at once; the rest queue). Each task's prompt names its scope.
+* The next wave starts **by itself when every task of the wave before is merged** (so it starts from the merged result); a
+  discarded task stops the plan and says so in the inbox. State is kept in `.iyakki/tasks/plan.json` and survives a restart.
+  One plan runs at a time. `task_spawn` is still there for independent work without a plan.
+
+## Lead summary
+
+When no task is running, waiting or queued any more and at least one is `done` or `failed`, the manager writes one summary
+(once per set of results) and puts it in the inbox (`Parallel tasks finished: what to merge`); the assistant's `task_status`
+appends it. It lists for each task: id, title, the files it changed, the test result, the first line of what it reported or why it
+failed; then **Overlap** (a file two tasks changed), **Conflict** (the dry run against the main branch lists conflicting files),
+**Blocked** (uncommitted changes of yours in a file the task changed), the **merge order** (clean and separate first, tasks that
+overlap or need a rebase last) and how many plan steps start after the merge. It is text built from facts (git and the task
+records), not written by a model, so it cannot invent a result. The merge itself stays your button.
+
+## Running it live (owner)
+
+No test here calls a real model. To check the whole path once on a machine with a model or a coding-agent login:
+
+1. Open a small git repository in the AI IDE (a few files, a test command, at least 4 GB of free memory), choose a model in the
+   chat. Make sure the account has the full command-line permission.
+2. In the IDE chat ask: "Split this into independent tasks and run them in parallel: add a README section A in docs/a.md, a
+   section B in docs/b.md, and a third file docs/index.md that links to both." The lead should call `task_plan` with three steps
+   (the third depends on the first two). Approve the card: expect two tasks running and `max 3 · now N` in the Tasks tab.
+3. Watch the cards; when both are done, wait for the inbox item "Parallel tasks finished" and compare it with the Diff tab of each
+   task. Press Merge for each in the order it gives. After the second merge the third task starts by itself; merge it.
+4. To see the cap act: run `stress-ng --vm 1 --vm-bytes 80%` (or open a heavy program) so that free memory drops below about
+   3.5 GB, start two tasks and expect one to say `waiting for memory`; stop the load and it starts within about 5 seconds.
+5. Record what happened (model, time, anything that surprised you) in `docs/project/NEXT-PLAN.md` item 13 (e).
 
 ## Review and merge
 
@@ -124,7 +177,8 @@ Select all, Copy all). On the Board, right-click: **Run selected row as a task**
 
 ## Limits and what is not built
 
-* No live model or vendor run has been exercised: tests use scripted models and a fake runner.
+* No live model or vendor run has been exercised: tests use scripted models, a fake runner and a fake memory reading; the steps to run one are above.
+* The plan's dependencies are between steps; the board's `Depends` column is not filled by `task_plan`. The lead summary is shown in the inbox and by `task_status`, not as a panel of the tab. The memory estimate per task is one number for all tasks.
 * The transcript in the detail pane is the task's event log (steps, tool results, approvals), not an embedded chat app; the
   follow-up box is the only input.
 * The main workspace is not readable from a task; read-only reference access is not built.
@@ -138,7 +192,7 @@ Select all, Copy all). On the Board, right-click: **Run selected row as a task**
 
 * Writes are confined to the task tree twice (the IYAKKI tools and the external-agent bridge); symlinks are resolved first.
 * Nothing is merged, deleted or deployed without a confirmation; the lead assistant has no merge or discard tool, only
-  `task_spawn` (Ask) and the read-only `task_status`.
+  `task_spawn` and `task_plan` (Ask, every time) and the read-only `task_status`.
 * Row and board writes go through one lock and one writer; task ids and branch names are generated by IYAKKI (a slug of
   letters, digits and dashes), never taken from model text, so a title cannot inject a git option or a path.
 * Every git call is made with fixed arguments and `--` before paths; branch names are checked before use.

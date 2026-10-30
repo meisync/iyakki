@@ -87,6 +87,18 @@ impl HostApi for CoreHost {
             log::warn!("reboot requested but not running as root; ignoring");
         }
     }
+
+    fn can_sleep(&self) -> bool {
+        is_root() && crate::boot::sleep_state_available()
+    }
+
+    fn sleep(&self) {
+        if is_root() {
+            crate::boot::sleep();
+        } else {
+            log::warn!("sleep requested but not running as root; ignoring");
+        }
+    }
 }
 
 #[cfg(test)]

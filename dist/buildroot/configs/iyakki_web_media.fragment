@@ -1,0 +1,38 @@
+# OPTIONAL for the web and macweb variants (WEB_MEDIA=1; default OFF until the owner approves the WPE WebKit rebuild):
+# camera, microphone, screen-share requests and WebRTC calls in the full web engine. docs/development/BROWSER-MEDIA-DEVICES.md.
+#   WEB_MEDIA=1 ./build.sh web
+# Changing these options rebuilds WPE WebKit (about 9 h without ccache, docs/BUILD-INCREMENTAL.md). build.sh also exports
+# IYAKKI_WEB_MEDIA=1, which external.mk turns into -DENABLE_WEB_RTC=ON (Buildroot's wpewebkit package hard-codes OFF).
+# Nothing here is a codec with patents: Opus and VP8 (already in the image) and MJPEG (libjpeg) only; no H.264 encoder.
+
+# ---- the engine: getUserMedia / enumerateDevices / getDisplayMedia (selects gst-plugins-base videorate)
+BR2_PACKAGE_WPEWEBKIT_MEDIA_STREAM=y
+
+# ---- capture: USB webcams (V4L2, MJPEG) and the mock devices of the test mode (IYAKKI_WEBVIEW_MOCK_MEDIA=1)
+BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_V4L2=y
+BR2_PACKAGE_GST1_PLUGINS_GOOD_JPEG=y
+BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_VIDEORATE=y
+BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_AUDIORATE=y
+BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_VIDEOTESTSRC=y
+BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_AUDIOTESTSRC=y
+
+# ---- microphone: WebKit's audio capture and Web Audio paths build `deinterleave` (gst-plugins-good "interleave") and `audiomixer`
+# (gst-plugins-base). Without them the element is NULL and the web process crashes in gst_element_link_pads_full ("page process
+# stopped (media device problem)" on Google "Search by voice", 2026-10-28). LGPL plugins, small; no WebKit rebuild.
+BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_INTERLEAVE=y
+BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_AUDIOMIXER=y
+
+# ---- WebRTC through GStreamer's webrtcbin (the webrtc plugin selects libnice, dtls (OpenSSL), sctp (bundled usrsctp), srtp (libsrtp))
+BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_WEBRTC=y
+BR2_PACKAGE_LIBNICE=y
+BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_RTP=y
+BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_RTPMANAGER=y
+BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_UDP=y
+
+# ---- NOT enabled yet (real screen share, step 9 of the plan): the engine reads the screen only through the desktop portal and PipeWire.
+# Uncomment when the in-house portal service and the frame feeder exist (docs/development/BROWSER-MEDIA-DEVICES.md, section 5):
+# BR2_PACKAGE_PIPEWIRE=y
+# BR2_PACKAGE_PIPEWIRE_GSTREAMER=y
+
+# ---- MediaRecorder (audio/webm, audio/ogg): encodebin; the transcode plugin of gst-plugins-bad is switched on in package/iyakki-web-media
+BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_ENCODING=y

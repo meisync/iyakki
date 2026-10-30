@@ -357,7 +357,9 @@ impl Cluster {
             {
                 let mut c = self.child.lock().unwrap();
                 if let Some(ch) = c.as_mut() {
-                    if let Ok(Some(status)) = ch.try_wait() {
+                    let life = iyakki_core_api::child_status(ch);
+                    if life.is_over() {
+                        let status = life.describe();
                         *c = None;
                         drop(c);
                         if self.current(gen) {
@@ -408,17 +410,16 @@ impl Cluster {
         unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM) };
         let t = Instant::now();
         loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if t.elapsed() > Duration::from_secs(30) => {
+            match iyakki_core_api::child_status(&mut child) {
+                s if s.is_over() => break,
+                _ if t.elapsed() > Duration::from_secs(30) => {
                     // SAFETY: as above.
                     unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
                     let _ = child.kill();
                     let _ = child.wait();
                     break;
                 }
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(_) => break,
+                _ => std::thread::sleep(Duration::from_millis(50)),
             }
         }
         let _ = std::fs::remove_file(self.kubeconfig());
@@ -773,3 +774,36 @@ pub(crate) mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod gone_tests {
+    use super::*;
+
+    #[test]
+    fn a_k3s_whose_exit_status_was_taken_by_the_reaper_is_seen_as_exited() {
+        let d = crate::archive::tests::tmp("cl-gone");
+        let c = Cluster::new(&d.join("cluster"), Arc::new(CliManager::new(&d.join("cli"))));
+        let ch = std::process::Command::new("true").spawn().unwrap();
+        iyakki_core_api::steal_status(ch.id());
+        *c.child.lock().unwrap() = Some(ch);
+        c.set_state(ClusterState::Starting);
+        c.monitor(0);
+        match c.state() {
+            ClusterState::Failed(why) => assert!(why.contains("k3s exited") && why.contains("not available"), "{why}"),
+            s => panic!("a dead k3s was not noticed: {s:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_does_not_hang_on_a_k3s_whose_status_was_taken() {
+        let d = crate::archive::tests::tmp("cl-gone-stop");
+        let c = Cluster::new(&d.join("cluster"), Arc::new(CliManager::new(&d.join("cli"))));
+        let ch = std::process::Command::new("true").spawn().unwrap();
+        iyakki_core_api::steal_status(ch.id());
+        *c.child.lock().unwrap() = Some(ch);
+        let t = Instant::now();
+        assert!(c.stop().is_ok());
+        assert!(t.elapsed() < Duration::from_secs(2));
+        assert_eq!(c.state(), ClusterState::Stopped);
+    }
+}

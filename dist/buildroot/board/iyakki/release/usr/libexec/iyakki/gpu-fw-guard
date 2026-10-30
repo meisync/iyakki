@@ -1,0 +1,47 @@
+#!/bin/sh
+# Release image profile: load a GPU kernel driver only when the firmware it needs is on this computer.   gpu-fw-guard MODULE
+#
+# Why: amdgpu, radeon, nouveau (Turing and newer), i915 (newest generations) and xe stop at probe time when their firmware files are
+# missing. Before they stop they have already taken the screen over from the firmware's framebuffer (EFI GOP / simpledrm), so a failed
+# probe can leave a BLACK screen. The release image carries no vendor firmware (docs/development/RELEASE-IMAGE-PROFILE.md), so on a
+# fresh install these drivers must not start; the screen then stays on the firmware's framebuffer (a fixed mode, software rendering) and
+# the first-boot notice tells the person to install the hardware firmware. After "Hardware firmware" has put the files in /lib/firmware
+# (it links them at every boot) this script lets the driver load.
+#
+# Called by /etc/modprobe.d/iyakki-release.conf:   install amdgpu /usr/libexec/iyakki/gpu-fw-guard amdgpu
+# modprobe runs the command INSTEAD of loading the module; this script loads it with `--ignore-install` when allowed.
+#
+# Off switch: kernel command line `iyakki.gpu_fw_guard=0` loads the driver without looking (for a machine known to work without firmware).
+# Test hooks (not for normal use): IYAKKI_FW_DIR (default /lib/firmware), IYAKKI_MODPROBE (default /sbin/modprobe),
+# IYAKKI_CMDLINE_FILE (default /proc/cmdline), IYAKKI_GUARD_LOG (default /dev/kmsg).
+set -u
+MOD="${1:-}"
+FW="${IYAKKI_FW_DIR:-/lib/firmware}"
+MP="${IYAKKI_MODPROBE:-/sbin/modprobe}"
+CMD="${IYAKKI_CMDLINE_FILE:-/proc/cmdline}"
+LOG="${IYAKKI_GUARD_LOG:-/dev/kmsg}"
+[ -n "$MOD" ] || { echo "usage: gpu-fw-guard MODULE" >&2; exit 2; }
+say() { echo "iyakki-gpu-fw-guard: $*" >> "$LOG" 2>/dev/null || echo "iyakki-gpu-fw-guard: $*" >&2; }
+
+# the folders that hold this driver's files (any file there counts: the Hardware firmware item installs only what this computer asks for)
+case "$MOD" in
+  amdgpu)  DIRS="amdgpu" ;;
+  radeon)  DIRS="radeon" ;;
+  nouveau) DIRS="nvidia" ;;
+  i915)    DIRS="i915" ;;
+  xe)      DIRS="xe i915" ;;
+  *)       say "$MOD is not a guarded driver; loading it"; exec "$MP" --ignore-install "$MOD" ;;
+esac
+
+if grep -qw 'iyakki.gpu_fw_guard=0' "$CMD" 2>/dev/null; then
+  say "guard switched off on the command line; loading $MOD"
+  exec "$MP" --ignore-install "$MOD"
+fi
+for d in $DIRS; do
+  if [ -d "$FW/$d" ] && [ -n "$(find "$FW/$d" \( -type f -o -type l \) 2>/dev/null | head -n 1)" ]; then
+    exec "$MP" --ignore-install "$MOD"
+  fi
+done
+say "$MOD not loaded: no firmware in $FW/{$(echo $DIRS | tr ' ' ',')}. The screen stays on the firmware framebuffer. Install it: Store -> Setup -> Hardware firmware."
+# exit 0: modprobe treats the module as handled, so the device-id scan does not retry in a loop
+exit 0

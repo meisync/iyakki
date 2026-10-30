@@ -102,7 +102,6 @@ struct Fake {
     /// Images (by name) whose BCM4350 patch is the macOS 11 hex file instead of a .hcd.
     hex_in: Vec<String>,
     unpack_calls: Vec<bool>,
-    lib_modules_free: Option<u64>,
     fs: apply::Fs,
     run: Recorder,
     looks: Mutex<Vec<Seen>>,
@@ -147,7 +146,6 @@ impl Fake {
             id_asks: vec![],
             hex_in: vec![],
             unpack_calls: vec![],
-            lib_modules_free: None,
             fs,
             run: Recorder::default(),
             looks: Mutex::new(vec![Seen { wifi: vec!["wlan0".into()], bt_controller: true, bt_address: Some("AA:BB:CC:00:11:22".into()) }]),

@@ -143,6 +143,11 @@ fn cfg_err(m: impl Into<String>) -> NodeError {
     NodeError::config(m)
 }
 
+/// A refusal only the person can lift (trust, the host list, the account's browser setting): never handed to the fixing agent.
+fn consent_err(m: impl Into<String>) -> NodeError {
+    NodeError::consent(m)
+}
+
 /// An error text from the driver as a node error: timeouts and navigation trouble can be retried, the rest cannot.
 fn driver_err(e: String) -> NodeError {
     if e == "cancelled" {
@@ -228,11 +233,11 @@ impl AgentHost {
                 }
                 Ok(Some(_)) => {
                     self.audit_to("flow.browser.denied", &req.run_id);
-                    return Err(cfg_err("You did not allow this flow to use a browser session, so the browser steps did not run. Mark the flow trusted in its settings to skip the question."));
+                    return Err(consent_err("You did not allow this flow to use a browser session, so the browser steps did not run. Mark the flow trusted in its settings to skip the question."));
                 }
-                Ok(None) => return Err(cfg_err("Nobody answered the question about the browser session in time, so the browser steps did not run (a scheduled or webhook run needs a trusted flow). Approve it in the INBOX and run again.")),
+                Ok(None) => return Err(consent_err("Nobody answered the question about the browser session in time, so the browser steps did not run (a scheduled or webhook run needs a trusted flow). Approve it in the INBOX and run again.")),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) if Instant::now() < end => {}
-                Err(_) => return Err(cfg_err("the question about the browser session ended without an answer")),
+                Err(_) => return Err(consent_err("the question about the browser session ended without an answer")),
             }
         }
     }
@@ -323,10 +328,10 @@ impl AgentHost {
             return Err(cfg_err("that address has no host"));
         }
         if !loopback(&host) && !self.policy.allows_host(&host) {
-            return Err(cfg_err(format!("Your account may not open pages from {host} (host policy).")));
+            return Err(consent_err(format!("Your account may not open pages from {host} (host policy).")));
         }
         if !s.trusted && !loopback(&host) && !s.hosts.iter().any(|h| domain_of(h) == domain_of(&host)) {
-            return Err(cfg_err(format!("{host} is not one of the sites this run was approved for ({}). Mark the flow trusted, or give the address in an Open URL step.", if s.hosts.is_empty() { "none named".to_string() } else { s.hosts.join(", ") })));
+            return Err(consent_err(format!("{host} is not one of the sites this run was approved for ({}). Mark the flow trusted, or give the address in an Open URL step.", if s.hosts.is_empty() { "none named".to_string() } else { s.hosts.join(", ") })));
         }
         Ok(())
     }
@@ -382,10 +387,10 @@ impl AgentHost {
         }
         // what the account's browser setting allows
         if INTERACTIVE.contains(&req.op.as_str()) && self.policy.browser_agent != BrowserAgent::Interactive {
-            return Err(cfg_err(format!("`{}` acts on the page, and your account's browser setting is `{}`: an administrator can set it to `interactive` (Settings, Users).", req.op, self.policy.browser_agent.name())));
+            return Err(consent_err(format!("`{}` acts on the page, and your account's browser setting is `{}`: an administrator can set it to `interactive` (Settings, Users).", req.op, self.policy.browser_agent.name())));
         }
         if req.op == "js" && !(self.policy.manage_settings && self.policy.browser_agent == BrowserAgent::Interactive) {
-            return Err(cfg_err("Run JavaScript is for administrators only (it needs the permission to change settings and an interactive browser setting)."));
+            return Err(consent_err("Run JavaScript is for administrators only (it needs the permission to change settings and an interactive browser setting)."));
         }
         let session = match self.browser_sessions.get(&req.run_id) {
             Some(s) => s,

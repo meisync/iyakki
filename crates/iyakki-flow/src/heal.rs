@@ -151,6 +151,22 @@ pub fn version_ge(have: &str, want: &str) -> bool {
     true
 }
 
+/// Words in a setting's name that mark consent, trust, reach or timing: a patch never touches them, whatever the model says.
+const CONSENT_WORDS: [&str; 15] = ["camera", "allowed", "unattended", "trusted", "trust", "consent", "permission", "profile", "channel", "room", "schedule", "trigger", "runner", "hosts", "approval"];
+
+/// The settings a patch sets in the node's config: (the path as written, its top-level key).
+pub fn set_settings(patch: &Patch) -> Vec<(String, String)> {
+    patch.ops.iter().filter_map(|o| match o {
+        PatchOp::SetConfig { path, .. } => Some((path.clone(), path.split('.').next().unwrap_or("").to_string())),
+        _ => None,
+    }).collect()
+}
+
+fn consent_setting(path: &str) -> bool {
+    let l = path.to_ascii_lowercase();
+    l.starts_with("defaults") || l.split(['.', '_', '-']).any(|w| CONSENT_WORDS.contains(&w))
+}
+
 pub fn classify(patch: &Patch, flow: &Flow, failing: &str, env: &ClassifyEnv) -> Classification {
     let mut worst = Class::Simple;
     let mut reasons: Vec<String> = Vec::new();
@@ -177,6 +193,17 @@ pub fn classify(patch: &Patch, flow: &Flow, failing: &str, env: &ClassifyEnv) ->
     let Some(node) = flow.node(&patch.node) else {
         return Classification { class: Class::Refused, reasons: vec![format!("there is no node `{}`", patch.node)] };
     };
+    // consent and trust are the person's: a proposal that sets or removes one is refused outright, never offered
+    for op in &patch.ops {
+        let path = match op {
+            PatchOp::SetConfig { path, .. } | PatchOp::RemoveConfig { path } => path.as_str(),
+            PatchOp::SetRunner { .. } => "runner",
+            _ => "",
+        };
+        if consent_setting(path) && !matches!(op, PatchOp::SetConfig { path, .. } if path == "url" || path.starts_with("headers.") || path == "timeout_ms") {
+            raise(Class::Refused, format!("`{path}` is a consent, trust or permission setting: only you can change it, in the flow's settings"), &mut worst, &mut reasons);
+        }
+    }
     for op in &patch.ops {
         match op {
             PatchOp::SetTimeout { ms } => {
@@ -527,7 +554,6 @@ mod tests {
             (patch("fetch", vec![PatchOp::SetConfig { path: "extract".into(), value: json!({}) }]), "output"),
             (patch("fetch", vec![PatchOp::SetConfig { path: "something_else".into(), value: json!(1) }]), "not on the list"),
             (patch("fetch", vec![PatchOp::SetEnvRef { name: "TOKEN".into(), reference: "svc.t".into() }]), "only you"),
-            (patch("fetch", vec![PatchOp::SetRunner { runner: RunnerKind::K3sJob }]), "where"),
             (patch("job", vec![PatchOp::CliUpgrade { cli: "kubectl".into(), to: "1.30".into() }]), "requires"),
             (patch("job", vec![PatchOp::CliUpgrade { cli: "grpcurl".into(), to: "1.7.0".into() }]), "older"),
             (patch("job", vec![PatchOp::SetConfig { path: "command".into(), value: json!(["grpcurl", "-plaintext", "y:2"]) }]), "command"),
@@ -545,6 +571,17 @@ mod tests {
             patch("job", vec![PatchOp::CliUpgrade { cli: "madeup".into(), to: "1".into() }]),
             patch("fetch", vec![PatchOp::Other { what: "delete the old rows".into() }]),
             patch("fetch", vec![]),
+            // consent, trust and reach belong to the person: refused, never offered
+            patch("fetch", vec![PatchOp::SetRunner { runner: RunnerKind::K3sJob }]),
+            patch("fetch", vec![PatchOp::SetConfig { path: "camera_allowed".into(), value: json!(true) }]),
+            patch("fetch", vec![PatchOp::SetConfig { path: "defaults.camera.allowed".into(), value: json!(true) }]),
+            patch("fetch", vec![PatchOp::SetConfig { path: "camera.unattended".into(), value: json!(true) }]),
+            patch("fetch", vec![PatchOp::SetConfig { path: "trusted".into(), value: json!(true) }]),
+            patch("fetch", vec![PatchOp::SetConfig { path: "browser.profile".into(), value: json!("person") }]),
+            patch("fetch", vec![PatchOp::SetConfig { path: "channels.room".into(), value: json!("all") }]),
+            patch("fetch", vec![PatchOp::SetConfig { path: "schedule".into(), value: json!("* * * * *") }]),
+            patch("fetch", vec![PatchOp::SetConfig { path: "hosts".into(), value: json!(["*"]) }]),
+            patch("fetch", vec![PatchOp::RemoveConfig { path: "trusted".into() }]),
         ];
         for p in &refused {
             assert_eq!(cls(p).class, Class::Refused, "{p:?}");
@@ -624,7 +661,7 @@ mod tests {
 
     #[test]
     fn the_context_is_compact_and_mentions_consumers() {
-        let mut run = Run { id: "r1".into(), flow_id: "f".into(), flow: flow(), trigger: TriggerInfo::default(), status: RunStatus::Healing, inputs: Value::Null, outputs: Value::Null, nodes: Default::default(), edges: Default::default(), created_ms: 0, scheduled_ms: None, started_ms: 0, ended_ms: 0, error: String::new(), blocked: String::new(), idempotency_key: None, parent: None, heal: vec![], patches: vec![], heal_spent: 0, heal_cents: 0, pending_updates: Default::default(), log: vec![], rev: 0, runner_note: String::new() };
+        let mut run = Run { grants: vec![], id: "r1".into(), flow_id: "f".into(), flow: flow(), trigger: TriggerInfo::default(), status: RunStatus::Healing, inputs: Value::Null, outputs: Value::Null, nodes: Default::default(), edges: Default::default(), created_ms: 0, scheduled_ms: None, started_ms: 0, ended_ms: 0, error: String::new(), blocked: String::new(), idempotency_key: None, parent: None, heal: vec![], patches: vec![], heal_spent: 0, heal_cents: 0, pending_updates: Default::default(), log: vec![], rev: 0, runner_note: String::new() };
         let mut nr = NodeRun::default();
         for n in 1..=5 {
             nr.attempts.push(Attempt { n, error: format!("HTTP 503 try {n}"), class: "retryable".into(), logs: vec!["line".into(); 30], ..Default::default() });

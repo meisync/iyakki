@@ -39,9 +39,6 @@ pub enum Kind {
     Pico,
     Festival,
     Espeak,
-    /// AI4Bharat Indic-TTS neural voices behind a local OpenAI-compatible server (`indic`). Not found by [`detect`]: it is chosen
-    /// on the Indic voices page, and its `program` is the server's address.
-    IndicTts,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,12 +74,11 @@ impl Kind {
             Kind::Pico => "pico2wave",
             Kind::Festival => "festival",
             Kind::Espeak => "espeak",
-            Kind::IndicTts => crate::indic::ENGINE_ID,
         }
     }
 
     pub fn from_id(id: &str) -> Option<Kind> {
-        Kind::ALL.into_iter().chain([Kind::IndicTts]).find(|k| k.id() == id)
+        Kind::ALL.into_iter().find(|k| k.id() == id)
     }
 
     pub fn label(self) -> &'static str {
@@ -95,7 +91,6 @@ impl Kind {
             Kind::Pico => "SVOX pico (pico2wave)",
             Kind::Festival => "festival",
             Kind::Espeak => "espeak",
-            Kind::IndicTts => "Indic neural voice (local)",
         }
     }
 
@@ -104,7 +99,6 @@ impl Kind {
         match self {
             Kind::Sapi => "powershell",
             Kind::Festival => "text2wave",
-            Kind::IndicTts => "the Indic voice server",
             other => other.id(),
         }
     }
@@ -113,7 +107,7 @@ impl Kind {
         match self {
             Kind::MacSay => os == Os::Mac,
             Kind::Sapi => os == Os::Windows,
-            Kind::Piper | Kind::EspeakNg | Kind::Espeak | Kind::IndicTts => true,
+            Kind::Piper | Kind::EspeakNg | Kind::Espeak => true,
             Kind::SpdSay | Kind::Pico | Kind::Festival => os == Os::Linux,
         }
     }
@@ -139,7 +133,6 @@ impl Kind {
             Kind::Pico => "install libttspico-utils (Debian and Ubuntu: non-free) for pico2wave",
             Kind::Festival => "install festival with your package manager",
             Kind::Espeak => "install espeak with your package manager",
-            Kind::IndicTts => "download the voices in Settings → Indic voices and start the voice server (dist/tts-indic, docs/VOICE.md)",
         }
     }
 }
@@ -452,12 +445,6 @@ const SAPI_LIST_SCRIPT: &str = "Add-Type -AssemblyName System.Speech; $s = New-O
 /// Text goes in on standard input; voice, rate and output file come in the environment, never in the script text.
 const SAPI_SPEAK_SCRIPT: &str = "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; if ($env:IYAKKI_VOICE) { $s.SelectVoice($env:IYAKKI_VOICE) }; $s.Rate = [int]$env:IYAKKI_RATE; if ($env:IYAKKI_OUT) { $s.SetOutputToWaveFile($env:IYAKKI_OUT) }; $t = [Console]::In.ReadToEnd(); $s.Speak($t); $s.Dispose()";
 
-/// The voices of the Indic voice server at `base`, as engine voices.
-fn indic_voices(base: &str) -> Result<Vec<HVoice>, String> {
-    let base = if base.is_empty() { crate::indic::DEFAULT_URL } else { base };
-    crate::indic::cached_voices(base).map(|v| v.iter().map(|x| HVoice { id: x.id.clone(), name: x.label(), langs: vec![x.lang.clone()] }).collect()).map_err(|e| e.line())
-}
-
 fn run_list(argv: &[String], extra_env: &[(String, String)]) -> Result<String, String> {
     let mut c = voice::command_for(argv, None);
     c.envs(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
@@ -473,7 +460,6 @@ fn list_voices(kind: Kind, program: &Path, env: &Env) -> Result<Vec<HVoice>, Str
         Kind::MacSay => run_list(&[p, "-v".into(), "?".into()], &[]).map(|o| parse_say_voices(&o)),
         Kind::Sapi => run_list(&[p, "-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), SAPI_LIST_SCRIPT.into()], &[]).map(|o| parse_sapi_voices(&o)),
         Kind::Piper => Ok(scan_piper(&env.piper_dirs)),
-        Kind::IndicTts => indic_voices(&p),
         Kind::Pico => Ok(PICO_VOICES.iter().map(|(c, n)| HVoice::new(c, n, &[c])).collect()),
         // text2wave has no list of its own; the voices are those of the festival program next to it
         Kind::Festival => {
@@ -711,9 +697,6 @@ pub fn validate_host(engine: &str, program: Option<&str>, voice: Option<&str>) -
         if p.is_empty() || p.contains('\0') || p.contains('\n') || p.len() > 400 {
             return Err("the engine's program path is not valid".into());
         }
-        if engine == crate::indic::ENGINE_ID {
-            crate::indic::validate_url(p).map_err(|e| format!("the Indic voice server: {e}"))?;
-        }
     }
     if let Some(v) = voice.filter(|v| !v.is_empty()) {
         validate_voice(v)?;
@@ -728,7 +711,6 @@ impl Spec {
         let kind = Kind::from_id(engine).ok_or("unknown speech engine")?;
         let program = match program.filter(|p| !p.is_empty()) {
             Some(p) => p.to_string(),
-            None if kind == Kind::IndicTts => crate::indic::DEFAULT_URL.to_string(),
             None => {
                 let env = Env::current(&[]);
                 let found = match kind {
@@ -872,7 +854,6 @@ pub fn plan(spec: &Spec, lang: Option<&str>, speed: f32, text: &str, out: Option
                 env.push(("IYAKKI_OUT".into(), o(p)));
             }
         }
-        Kind::IndicTts => return Err("the Indic voices run no program here: they speak through their server (see indic)".into()),
     }
     Ok(Plan { argv, stdin: input, env, stop })
 }
@@ -897,14 +878,14 @@ pub fn clear_voice_cache() {
 /// The voices of an engine (kept after the first listing, per program and piper folders).
 fn voices_of(spec: &Spec) -> Arc<Vec<HVoice>> {
     let key = (spec.kind.id().to_string(), spec.program.clone());
-    if spec.kind != Kind::Piper && spec.kind != Kind::IndicTts {
+    if spec.kind != Kind::Piper {
         if let Some(v) = VOICES.lock().ok().and_then(|g| g.as_ref().and_then(|m| m.get(&key).cloned())) {
             return v;
         }
     }
     let env = Env::current(&[]);
     let list = Arc::new(list_voices(spec.kind, Path::new(&spec.program), &env).unwrap_or_default());
-    if spec.kind != Kind::Piper && spec.kind != Kind::IndicTts {
+    if spec.kind != Kind::Piper {
         if let Ok(mut g) = VOICES.lock() {
             g.get_or_insert_with(HashMap::new).insert(key, list.clone());
         }
@@ -914,10 +895,6 @@ fn voices_of(spec: &Spec) -> Arc<Vec<HVoice>> {
 
 /// The spec with its voice chosen for `lang` (a voice named in the spec is kept).
 pub fn resolve(spec: &Spec, lang: Option<&str>) -> (Spec, Pick) {
-    // the Indic engine chooses language and voice itself, from the story language, in `indic`
-    if spec.kind == Kind::IndicTts {
-        return (spec.clone(), Pick::Auto);
-    }
     if spec.voice.is_some() || matches!(spec.kind, Kind::Pico) && lang.is_none() {
         return (spec.clone(), Pick::Auto);
     }
@@ -945,9 +922,6 @@ pub fn resolve(spec: &Spec, lang: Option<&str>) -> (Spec, Pick) {
 
 /// Make a WAV file of `text` (the engine writes it; nothing is spoken).
 pub fn synth_wav(spec: &Spec, text: &str, lang: Option<&str>, speed: f32) -> Result<Vec<u8>, String> {
-    if spec.kind == Kind::IndicTts {
-        return synth_indic(spec, text, lang, speed);
-    }
     let (spec, _) = resolve(spec, lang);
     let dir = voice::private_tempdir("hosttts")?;
     let out = dir.join("speech.wav");
@@ -964,53 +938,6 @@ pub fn synth_wav(spec: &Spec, text: &str, lang: Option<&str>, speed: f32) -> Res
     })();
     let _ = std::fs::remove_dir_all(&dir);
     result
-}
-
-static FALLBACK_REPORT: Mutex<Option<(Instant, Arc<Report>)>> = Mutex::new(None);
-
-/// The engines of this computer, looked for at most once in two minutes (a fallback should not start a search every piece).
-fn fallback_report() -> Arc<Report> {
-    if let Some(r) = FALLBACK_REPORT.lock().ok().and_then(|g| g.as_ref().filter(|(t, _)| t.elapsed() < Duration::from_secs(120)).map(|(_, r)| r.clone())) {
-        return r;
-    }
-    let r = Arc::new(detect(&Env::current(&[])));
-    if let Ok(mut g) = FALLBACK_REPORT.lock() {
-        *g = Some((Instant::now(), r.clone()));
-    }
-    r
-}
-
-/// The Indic neural voices. When the server cannot make the reading (a language that is not installed, a server that is down),
-/// the next engine of this computer reads instead, and one line says why (`indic::last_note`).
-fn synth_indic(spec: &Spec, text: &str, lang: Option<&str>, speed: f32) -> Result<Vec<u8>, String> {
-    synth_indic_with(spec, text, lang, speed, &|| fallback_report())
-}
-
-pub(crate) fn synth_indic_with(spec: &Spec, text: &str, lang: Option<&str>, speed: f32, others: &dyn Fn() -> Arc<Report>) -> Result<Vec<u8>, String> {
-    let fail = match crate::indic::synth_wav(&spec.program, spec.voice.as_deref(), lang, text, speed) {
-        Ok(w) => return Ok(w),
-        Err(f) => f,
-    };
-    if fail == crate::indic::Fail::Other("stopped".into()) {
-        return Err(fail.line());
-    }
-    let reason = fail.line();
-    let report = others();
-    let next = report.engines.iter().filter(|e| e.usable() && e.kind.can_file()).find(|e| lang.is_some_and(|l| e.speaks(l))).or_else(|| report.engines.iter().find(|e| e.usable() && e.kind.can_file()));
-    match next {
-        Some(e) => {
-            let note = format!("{reason}; read with {} instead.", e.kind.label());
-            log::info!("{note}");
-            crate::indic::set_note(&note);
-            let alt = Spec { kind: e.kind, program: e.program.to_string_lossy().to_string(), voice: None };
-            synth_wav(&alt, text, lang, speed)
-        }
-        None => {
-            let note = format!("{reason}, and no other speech engine was found on this computer.");
-            crate::indic::set_note(&note);
-            Err(note)
-        }
-    }
 }
 
 /// Start speaking `text` on the speaker. Engines that speak by themselves do; the others make a WAV that `play_cmd` (or

@@ -42,7 +42,7 @@ fn the_voice_tile_is_one_tile_in_home_for_everyone_but_guests() {
     assert_eq!((PApp::Voice.id(), PApp::Voice.label().as_str()), ("voice", "VOICE"));
     assert_eq!(Group::of(PApp::Voice), Some(Group::Home));
     assert_eq!(TILES.len(), PApp::ALL.len() - 1, "every app but the inbox has a tile");
-    assert_eq!(PApp::ALL.len(), 32, "GIT, LAB, DISKS, LINUX WINDOW, VOICE and K8S are the newest tiles");
+    assert_eq!(PApp::ALL.len(), 35, "LEARN, CHECK-UP, DOCTOR, GIT, LAB, DISKS, LINUX WINDOW, VOICE and K8S are the newest tiles");
     for r in [Role::Admin, Role::Operator, Role::User] {
         assert!(r.template().apps.contains(&PApp::Voice), "{r:?}");
     }
@@ -174,13 +174,13 @@ fn a_new_notification_chimes_once_and_what_was_unread_at_sign_in_does_not() {
     let out = fake::reset(0);
     let (mut sh, _) = shell_with_users("cue-notify");
     let svc = sh.services_for_demo().clone();
-    svc.notify("root", iyakki_agent::inbox::Kind::Info, "Waiting for you", "from before", None).unwrap();
+    svc.notify("root", iyakki_agent::inbox::Kind::Warning, "Waiting for you", "from before", None).unwrap();
     login(&mut sh, "root", "rootpass12");
     assert_eq!(played(1), vec![wav_len(Cue::Login)]);
     sh.refresh_badge();
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(out.played.lock().unwrap().len(), 1, "an unread note from before is not new");
-    svc.notify("root", iyakki_agent::inbox::Kind::Info, "A new one", "just now", None).unwrap();
+    svc.notify("root", iyakki_agent::inbox::Kind::Warning, "A new one", "just now", None).unwrap();
     sh.refresh_badge();
     assert_eq!(played(2), vec![wav_len(Cue::Login), wav_len(Cue::Notify)]);
     sh.refresh_badge();

@@ -15,7 +15,7 @@ use crate::gfx::{Gfx, Icon};
 use crate::ui::{Event, Key, Nav, Pointer, R};
 
 impl FlowsApp {
-    fn set_tab(&mut self, t: Tab) {
+    pub(super) fn set_tab(&mut self, t: Tab) {
         self.commit_props();
         self.tab = t;
         self.focus = Focus::Canvas;
@@ -92,7 +92,12 @@ impl FlowsApp {
         let who = self.env.who();
         let r = match what {
             "approve" => self.env.engine.card_decide(&run, &card.id, CardDecision::Approve { by: who }),
-            "reject" => self.env.engine.card_decide(&run, &card.id, CardDecision::Reject { by: who, note: String::new() }),
+            "reject" => {
+                // dismissing the card of a step that needs a permission withdraws the request (popup and INBOX entry)
+                let user = self.env.user.clone();
+                self.env.svc.browser.consent.withdraw_permissions(&user, &run);
+                self.env.engine.card_decide(&run, &card.id, CardDecision::Reject { by: who, note: String::new() })
+            }
             "ask" => self.env.engine.card_decide(&run, &card.id, CardDecision::Investigate { by: who }),
             _ => {
                 let Some(p) = &card.patch else { return };
@@ -155,12 +160,28 @@ impl FlowsApp {
                 self.focus = Focus::Canvas;
             }
             id::CHAT_PANE => self.focus = Focus::Chat,
-            id::FLOWS => {
+            id::FLOWS | id::CLOSE => {
                 self.commit_props();
                 if self.tab != Tab::Design {
                     self.tab = Tab::Design;
                 }
-                self.close_flow();
+                if self.cur.is_some() {
+                    self.request_close();
+                } else {
+                    self.close_flow();
+                }
+            }
+            id::R_BACK => self.leave_run(),
+            id::R_AGAIN => self.run_again(),
+            id::OFFER => self.toggle_offer(),
+            id::SUG_OPEN => self.open_suggestions(),
+            id::ASSIST_ROLLBACK => self.assist_rollback(),
+            id::ASSIST_PAUSE => self.assist_toggle_pause(),
+            id::FAIL_FIX => self.fix_requested = true,
+            id::FAIL_DISMISS => self.dismiss_fail(),
+            id::FAIL_LOG => {
+                let run = self.fail.as_ref().map(|f| f.run_id.clone()).filter(|_| self.tab != Tab::Run);
+                self.open_log(run);
             }
             id::NEW | id::B_NEW => {
                 self.tab = Tab::Design;
@@ -243,6 +264,9 @@ impl FlowsApp {
             id::CARD_REJECT => self.card_action("reject"),
             id::CARD_EDIT => self.card_action("edit"),
             id::CARD_ASK => self.card_action("ask"),
+            id::CARD_SETTINGS => self.open_flow_settings(),
+            id::CARD_MODELS => self.jump = Some(("settings".into(), "tab:models".into())),
+            id::CARD_REFRESH => self.refresh_models_and_retry(),
             _ if (id::B_LANE..id::B_LANE + 5).contains(&n) => self.board.lane = n - id::B_LANE,
             id::B_FLOW => self.cycle_flow_filter(),
             id::B_RUN_AGAIN => self.bulk(false),
@@ -347,6 +371,14 @@ impl FlowsApp {
             }
             _ => {}
         }
+        if self.tab != Tab::Board && self.cur.is_some() {
+            if let Some(f) = self.assist_key(k) {
+                return f;
+            }
+            if let Some(f) = self.fail_key(k) {
+                return f;
+            }
+        }
         match self.tab {
             Tab::Design if self.cur.is_none() => self.list_key(k),
             Tab::Design => self.design_key(k),
@@ -368,9 +400,11 @@ impl FlowsApp {
             Key::Char('n') => self.name_form(NameFor::NewFlow),
             Key::Char('t') => self.template_picker(),
             Key::Char('i') => self.import_form(),
+            Key::Char('o') => self.toggle_offer(),
             Key::Delete | Key::Char('d') => {
                 if let Some(f) = self.flows.get(self.list_sel) {
-                    self.modal = Some(Modal::Confirm(format!("Delete the flow `{}`? Its versions go; its runs stay in the history.", f.name), Confirmed::DeleteFlow(f.id.clone())));
+                    let n = self.env.store.versions(&f.id).len();
+                    self.modal = Some(Modal::Confirm(format!("Delete the flow \"{}\" ({})? Its draft and {n} published version(s) are lost; its runs stay. Press y to delete, Esc or Enter keeps it.", f.name, f.id), Confirmed::DeleteFlow(f.id.clone())));
                 }
             }
             Key::Esc => return AppFlow::Back,
@@ -388,7 +422,7 @@ impl FlowsApp {
                     self.sel_edge = None;
                     self.props = Props::default();
                 } else {
-                    self.close_flow();
+                    self.request_close();
                 }
             }
             Key::Delete | Key::Backspace => self.delete_selection(),
@@ -434,11 +468,13 @@ impl FlowsApp {
             Key::Ctrl('s') => self.say("Saved: a flow saves itself after every change. Publish makes a version.", true),
             Key::F(2) => self.name_form(NameFor::Rename),
             Key::Char('a') => self.add_picker(),
+            Key::Char('s') => self.open_flow_settings(),
             Key::Char('f') => self.fit_button(),
             Key::Char('+') | Key::Char('=') => self.zoom_button(1.25),
             Key::Char('-') => self.zoom_button(0.8),
             Key::Char('g') => self.arrange(),
             Key::Char('t') => self.toggle_text(),
+            Key::Char('?') => self.tip.show_now(),
             Key::Char('r') => self.run_flow(false),
             Key::Char('p') => self.open_publish(),
             Key::Char('h') => self.open_history(),
@@ -461,7 +497,8 @@ impl FlowsApp {
 
     fn run_key(&mut self, k: &Key) -> AppFlow {
         match k {
-            Key::Esc => return AppFlow::Back,
+            Key::Esc => self.leave_run(),
+            Key::Char('a') => self.run_again(),
             Key::Left => self.step_run(false),
             Key::Right => self.step_run(true),
             Key::Tab | Key::BackTab => {
@@ -481,7 +518,8 @@ impl FlowsApp {
             }
             Key::Char('o') => self.rv.tab = RunTab::Output,
             Key::Char('i') => self.rv.tab = RunTab::Input,
-            Key::Char('l') => self.rv.tab = RunTab::Log,
+            Key::Char('l') => self.open_log(None),
+            Key::Char('?') => self.tip.show_now(),
             Key::Char('t') => self.rv.tab = RunTab::Attempts,
             Key::Char('p') if self.run_has_browser() => {
                 self.rv.tab = RunTab::Pictures;
@@ -584,6 +622,21 @@ impl FlowsApp {
                 FormEvent::Cancel => {}
                 _ => self.modal = Some(Modal::Import(form)),
             },
+            Some(Modal::RunInputs(mut form, draft, params)) => match form.handle_event(ev) {
+                FormEvent::Submit => {
+                    let missing = params.iter().enumerate().find(|(i, p)| p.required && p.default.is_none() && (if p.ty == "secret" { form.raw(*i) } else { form.value(*i) }).is_empty()).map(|(i, p)| (i, p.name.clone()));
+                    match missing {
+                        Some((i, n)) => {
+                            form.focus = i;
+                            form.error = Some(format!("`{n}` is needed to run this flow."));
+                            self.modal = Some(Modal::RunInputs(form, draft, params));
+                        }
+                        None => self.run_inputs_submit(&form, draft, &params),
+                    }
+                }
+                FormEvent::Cancel => self.say("Not started.", true),
+                _ => self.modal = Some(Modal::RunInputs(form, draft, params)),
+            },
             Some(Modal::Templates(mut p, ids)) => match p.handle_event(ev) {
                 PickEvent::Chosen(_) => {
                     if let Some(i) = p.selected_index() {
@@ -605,8 +658,19 @@ impl FlowsApp {
                 _ => self.modal = Some(Modal::AddNode(p, ids)),
             },
             Some(Modal::Confirm(text, what)) => match ev {
+                // deleting and dropping are never confirmed by Enter: the default is to keep everything
+                Event::Key(Key::Enter) if matches!(what, Confirmed::DeleteFlow(_) | Confirmed::DropVersion(_) | Confirmed::CloseFlow) => {}
                 Event::Key(Key::Char('y' | 'Y') | Key::Enter) => match what {
+                    Confirmed::DropVersion(v) => {
+                        if let Some(id) = self.cur.clone() {
+                            match self.env.drop_version(&id, v) {
+                                Ok(()) => self.say(format!("Dropped version {v} of `{id}`."), true),
+                                Err(e) => self.say(e, false),
+                            }
+                        }
+                    }
                     Confirmed::DeleteFlow(id) => self.delete_flow(&id),
+                    Confirmed::CloseFlow => self.finish_close(),
                     Confirmed::AllowProgram(p) => match self.env.allow_program(&p) {
                         Ok(()) => {
                             if let (Some(r), Some(n)) = (self.run_id.clone(), self.run_node.clone()) {
@@ -624,6 +688,7 @@ impl FlowsApp {
                                         self.flow = f;
                                     }
                                     self.revalidate();
+                                    self.assist_rolled_back();
                                     self.say(format!("Rolled back to v{v}: published as v{nv}."), true);
                                 }
                                 Err(e) => self.say(e, false),
@@ -661,6 +726,7 @@ impl FlowsApp {
                 }
                 self.modal = Some(Modal::Publish(f));
             }
+            Some(Modal::Suggestions(v)) => self.suggestions_event(v, ev),
             Some(Modal::History(mut h)) => {
                 let mut keep = true;
                 match ev {
@@ -676,6 +742,15 @@ impl FlowsApp {
                     Event::Row(i) => {
                         h.sel = (*i).min(h.entries.len() - 1);
                         self.fill_diff(&mut h);
+                    }
+                    Event::Key(Key::Char('x')) => {
+                        let v = h.entries[h.sel].version;
+                        let cur = self.cur.clone().unwrap_or_default();
+                        let published = self.env.store.meta_of(&cur).published;
+                        keep = false;
+                        let name = self.flow.name.clone();
+                        let note = if v == published { " This is the CURRENT published version: it will be refused; roll back to another version first." } else { "" };
+                        self.modal = Some(Modal::Confirm(format!("Drop version {v} of \"{name}\" ({cur})? Its content is lost for good; runs keep their own copy.{note} Press y to drop, Esc or Enter keeps it."), Confirmed::DropVersion(v)));
                     }
                     Event::Key(Key::Char('r')) => {
                         let v = h.entries[h.sel].version;
@@ -729,6 +804,10 @@ impl FlowsApp {
 }
 
 impl App for FlowsApp {
+    fn take_jump(&mut self) -> Option<(String, String)> {
+        self.jump.take()
+    }
+
     fn title(&self) -> &'static str {
         "FLOWS"
     }
@@ -742,17 +821,15 @@ impl App for FlowsApp {
     }
 
     fn hint(&self) -> String {
-        match (self.tab, self.cur.is_some()) {
-            (Tab::Design, true) => "a add step · drag to move · drag a port to connect · Del remove · Ctrl+Z undo · t text · r run · p publish · Ctrl+I assistant".into(),
-            (Tab::Design, false) => "Enter open · n new · t templates · i import · d delete · Ctrl+I assistant".into(),
-            (Tab::Run, _) => "Tab step · o i l t output input log attempts · p q pictures report (browser runs) · r retry · s skip · R rerun from here · Left Right runs".into(),
-            (Tab::Board, _) => "arrows move · Enter open · Space select · a run again · c cancel · / search · f flow".into(),
-        }
+        self.footer_hint()
     }
 
     fn help(&self) -> Vec<String> {
         vec![
             "1 2 3: DESIGN, RUN, BOARD".into(),
+            "Esc: one step back. In a flow it deselects, then closes the flow (everything is saved; only text that was refused asks first). In a run it returns to where you came from. On the list or the board it leaves FLOWS".into(),
+            "Run: r in DESIGN (a flow with required inputs asks for them first) · RUN: c stop · a run again · l open the log".into(),
+            "A failed last run: a card offers F ask the agent to fix (it opens the assistant on this flow with the failure loaded; edits and runs still ask you; three attempts) · L open the log · x dismiss · o on the list turns the offer on or off".into(),
             "Ctrl+I: show or hide the assistant · F6: move the keyboard between the flow and the assistant".into(),
             "DESIGN: a add a step · f fit · + - zoom · g arrange · t text view · / search steps · Tab next step".into(),
             "DESIGN: arrows nudge the selection (Shift: 5 grid steps; none selected: pan) · Del remove".into(),
@@ -771,7 +848,8 @@ impl App for FlowsApp {
     }
 
     fn wants_redraw(&mut self) -> bool {
-        std::mem::take(&mut self.redraw)
+        let tip = self.tip.take_changed();
+        std::mem::take(&mut self.redraw) || tip
     }
 
     fn pointer_hint(&self, x: i32, y: i32) -> Option<Pointer> {

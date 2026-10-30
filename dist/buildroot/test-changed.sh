@@ -91,6 +91,11 @@ expect "C++ toolchain option changed" "FULL: toolchain" web
 reset_tree; WEB_AV_ADDON=0 bash "$CH" web --adopt >/dev/null
 WEB_AV_ADDON=0 WEB_H264=1 expect "H.264 switched on (new fragment)" "PACKAGES" web
 expect "audio and video bridge switched on (default fragment)" "PACKAGES" web
+reset_tree; bash "$CH" web --adopt >/dev/null
+WEB_MEDIA=1 expect "camera, microphone and WebRTC switched on (media fragment)" "PACKAGES" web
+expect "media off again matches the baseline" "NOTHING" web
+echo "# x" >> "$R/package/iyakki-web-media/iyakki-web-media.mk"
+expect "the WebRTC setting file alone is no trigger and no full build (the media fragment is the trigger)" "NOTHING" web
 echo "# x" >> "$R/external.mk"
 expect "external.mk edited" "FULL: external.mk" web
 echo "# x" >> "$R/external.mk" # keep dirty

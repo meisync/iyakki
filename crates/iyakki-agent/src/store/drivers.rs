@@ -262,7 +262,13 @@ pub fn catalog_items() -> Vec<Built> {
                 package = Some(text);
             } else {
                 e.action = Some(Action { open: "drivers".into(), id: k.id.into() });
-                e.license = "-".into();
+                // the short licence of what the entry is about (the long text is in the description); nothing here is shipped
+                e.license = match k.id {
+                    "mac-wifi-brcmfmac" | "mac-bt-broadcom" => "LicenseRef-Broadcom-firmware-supplied-by-you",
+                    "mac-wifi-bcm4360" => "LicenseRef-Broadcom-wl-NON-FREE",
+                    _ => "GPL-2.0-only",
+                }
+                .into();
             }
             e.featured = matches!(k.id, "mac-bt-broadcom" | "mac-facetimehd");
             Built { entry: e, package }

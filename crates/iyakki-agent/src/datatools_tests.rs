@@ -158,3 +158,35 @@ fn the_file_tools_reach_a_shared_host_folder_only_within_its_mode_and_only_while
     crate::hostfiles::set_host_home(None);
     crate::hostfiles::set_enabled(false);
 }
+
+#[test]
+fn the_model_creates_a_csv_of_five_rows_after_approval_then_queries_it() {
+    let d = tmp("create");
+    let rows: Vec<Value> = (1..=5).map(|i| json!([i, format!("item {i}"), i * 10])).collect();
+    let (ev, offered) = run(
+        vec![
+            call("c1", "data_create", json!({"name": "items.csv", "folder": d.display().to_string(), "columns": ["id", "item", "qty"], "rows": rows})),
+            call("c2", "data_query", json!({"handle": "d1", "filter": "qty >= 30", "sort_by": "qty", "descending": true})),
+            say("Three items have 30 or more."),
+        ],
+        &d,
+        "make a table of 5 items and show the big ones",
+        true,
+    );
+    let r = results(&ev);
+    assert_eq!(r.len(), 2, "{ev:?}");
+    assert!(r[0].1 && r[0].2.contains("5 rows, 3 columns") && r[0].2.contains("Opened as d1"), "{}", r[0].2);
+    assert!(r[1].1 && r[1].2.contains("Rows 1-3 of 3") && r[1].2.contains("item 5"), "{}", r[1].2);
+    let asked: Vec<(&str, &str)> = ev.iter().filter_map(|e| if let RunEvent::Approval { name, summary, .. } = e { Some((name.as_str(), summary.as_str())) } else { None }).collect();
+    assert_eq!(asked.len(), 1, "{ev:?}");
+    assert!(asked[0].1.contains("items.csv") && asked[0].1.contains("id, item, qty") && asked[0].1.contains("5 rows") && !asked[0].1.contains("item 3"), "{}", asked[0].1);
+    assert!(offered[0].iter().any(|t| t == "data_create") && offered[0].iter().any(|t| t == "data_append"));
+    assert!(std::fs::read_to_string(d.join("items.csv")).unwrap().starts_with("id,item,qty\n1,item 1,10\n"));
+}
+
+#[test]
+fn a_refused_create_writes_nothing() {
+    let d = tmp("create-deny");
+    let (ev, _) = run(vec![call("c1", "data_create", json!({"name": "x.csv", "folder": d.display().to_string(), "columns": ["a"], "rows": [[1]]})), say("ok")], &d, "make it", false);
+    assert!(!d.join("x.csv").exists(), "{ev:?}");
+}

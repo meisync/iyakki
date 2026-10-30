@@ -22,6 +22,7 @@ pub(super) struct CrashPanel {
 }
 
 impl SettingsApp {
+    #[cfg(test)]
     pub(crate) fn with_crash_dir(mut self, dir: std::path::PathBuf) -> SettingsApp {
         self.crash.dir = Some(dir);
         self
@@ -109,8 +110,10 @@ impl SettingsApp {
                 y += 22.0 * s;
             }
             None => {
-                g.text(a.x, y, 14.0 * s, MUTED, "No session ended unexpectedly since you last cleared the note.", Face::Sans);
-                y += 22.0 * s;
+                for w in g.wrap(14.0 * s, "No session ended unexpectedly since you last cleared the note.", Face::Sans, a.w) {
+                    g.text(a.x, y, 14.0 * s, MUTED, &w, Face::Sans);
+                    y += 22.0 * s;
+                }
             }
         }
         let head = if self.crash.name.is_empty() { format!("Showing {what}: no kernel log is kept for it.") } else { format!("Showing {what}: last {} lines of {}", self.crash.lines.len(), self.crash.name) };

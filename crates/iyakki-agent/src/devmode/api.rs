@@ -35,6 +35,11 @@ pub const ROUTES: &[(&str, &str, Option<Scope>)] = &[
     ("GET", "/v1/dev/dmesg", Some(Scope::Debug)),
     ("GET", "/v1/dev/syslog", Some(Scope::Debug)),
     ("GET", "/v1/dev/status", Some(Scope::Debug)),
+    ("GET", "/v1/dev/state", Some(Scope::Debug)),
+    ("GET", "/v1/dev/inbox", Some(Scope::Debug)),
+    ("GET", "/v1/dev/diag", Some(Scope::Debug)),
+    ("POST", "/v1/dev/kube", Some(Scope::Kube)),
+    ("POST", "/v1/dev/click", Some(Scope::Input)),
     ("GET", "/v1/dev/files/ls", Some(Scope::Files)),
     ("GET", "/v1/dev/files/stat", Some(Scope::Files)),
     ("GET", "/v1/dev/files/get", Some(Scope::Files)),
@@ -145,6 +150,8 @@ pub struct Ctx<'a> {
     pub volatile: bool,
     /// Bytes free on the data partition, when it is not to be read from the file system (tests).
     pub data_free: Option<u64>,
+    /// The device's managed `kubectl` (scope `kube`); None where there is no cluster (some tests).
+    pub kube: Option<&'a dyn super::kube::Kubectl>,
 }
 
 impl Ctx<'_> {
@@ -233,6 +240,7 @@ pub fn handle(cx: &Ctx, method: &str, path: &str, q: &dyn Fn(&str) -> String, bo
             cx.log(&action, "", true);
             Some(Out::json(200, &v))
         }
+        "/v1/dev/state" | "/v1/dev/inbox" | "/v1/dev/diag" | "/v1/dev/kube" | "/v1/dev/click" => Some(super::api_diag::route(cx, &action, path, q, body)),
         p if p.starts_with("/v1/dev/files/") => Some(files_route(cx, &action, p, q, body)),
         "/v1/dev/input" => Some(input_route(cx, &action, body)),
         "/v1/dev/grant/ask" => Some(grant_route(cx, &action, body)),

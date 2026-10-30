@@ -34,8 +34,7 @@ struct World {
 }
 
 fn world(tag: &str) -> World {
-    let base = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("igit-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
+    let base = iyakki_agent::testdir::short("igit", tag);
     std::fs::create_dir_all(base.join("bin")).unwrap();
     let (mut cx, _d) = cx_with_backend(&format!("igit-{tag}"), Plain);
     cx.session.policy.fs_read = vec![base.display().to_string()];
@@ -1031,5 +1030,46 @@ fn the_gitea_of_my_cluster_is_connected_through_the_platform_services_connect_st
     assert!(c.flow().message.as_deref().unwrap().contains("admin/demo-app"));
     assert!(c.audit().contains("git.repo.create") && c.audit().contains("10.0.0.5 admin/demo-app") && !c.audit().contains("FAKEFAKE"));
     let _ = conn;
+    cleanup(c.w);
+}
+
+#[test]
+fn the_panel_offers_local_gitea_only_without_a_remote_and_names_store_setup_when_it_is_not_installed() {
+    let mut c = cworld("local-gitea-none", true, None, 2, 0);
+    c.wait_head();
+    c.app.open_repos_panel(&c.w.cx);
+    let g = render(&mut c.app, &c.w.cx, 1280, 720);
+    let label = format!("{}  l", iyakki_agent::quickinstall::gitea::OFFER_LABEL);
+    assert!(g.hits.iter().any(|h| h.label == label), "no remote: the offer is there");
+    // Gitea is not installed: a plain message that names Store -> Setup, and no flow opens
+    press(&mut c.app, &c.w.cx, Key::Char('l'));
+    assert!(matches!(&c.app.modal, Some(Modal::Git(g)) if !matches!(**g, GitModal::Connect(_))), "the flow does not open");
+    assert!(c.app.git.note.contains("Store") && c.app.git.note.contains("Setup") && c.app.git.note.contains("Gitea (versioning for your work)"), "{}", c.app.git.note);
+    cleanup(c.w);
+    // a project that has a remote is not offered it, and the key says so instead of doing anything
+    let mut d = cworld("local-gitea-remote", true, Some("https://git.example.org/octo/demo-app.git"), 2, 0);
+    d.wait_head();
+    d.app.open_repos_panel(&d.w.cx);
+    let g = render(&mut d.app, &d.w.cx, 1280, 720);
+    assert!(!g.hits.iter().any(|h| h.label == label), "a remote exists: no offer");
+    press(&mut d.app, &d.w.cx, Key::Char('l'));
+    assert!(d.app.git.note.contains("already has a remote"), "{}", d.app.git.note);
+    assert!(matches!(&d.app.modal, Some(Modal::Git(g)) if !matches!(**g, GitModal::Connect(_))));
+    cleanup(d.w);
+}
+
+#[test]
+fn with_local_gitea_installed_the_offer_opens_the_new_repository_review_on_that_connection() {
+    let mut c = cworld("local-gitea-ready", true, None, 2, 0);
+    c.wait_head();
+    // the connection the Gitea item adds: cluster instance named, the platform's own token entry, no copy of the token
+    let conn = c.app.git_keys(&c.w.cx).conns().add(Connection { name: "Local Gitea".into(), kind: Kind::Gitea, url: "http://127.0.0.1:3300".into(), cluster: "gitea-iyakki-gitea".into(), token_vault: "svc.gitea-iyakki-gitea.token".into(), ..Default::default() }, None).unwrap();
+    c.app.open_repos_panel(&c.w.cx);
+    press(&mut c.app, &c.w.cx, Key::Char('l'));
+    assert_eq!(c.flow().stage, Stage::CreateReview, "straight to the review of the new repository: nothing is made or pushed yet");
+    assert_eq!(c.flow().chosen.as_ref().map(|x| x.id.as_str()), Some(conn.id.as_str()));
+    let review = c.flow().create_review().join("\n");
+    assert!(review.contains("on your cluster") && review.contains("plain http"), "{review}");
+    assert!(c.git.lines().iter().all(|l| !l.starts_with("remote add") && !l.starts_with("push") && !l.starts_with("commit")), "{:?}", c.git.lines());
     cleanup(c.w);
 }

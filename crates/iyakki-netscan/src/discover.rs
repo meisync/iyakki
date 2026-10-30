@@ -106,7 +106,7 @@ pub fn parse_ws_discovery(data: &[u8], ip: Ipv4Addr) -> Option<Announcement> {
 
 // ---------------------------------------------------------------------------------------------------------- mDNS
 
-const MDNS_NAMES: &[&str] = &["_services._dns-sd._udp.local", "_rtsp._tcp.local", "_ipp._tcp.local", "_printer._tcp.local", "_googlecast._tcp.local", "_airplay._tcp.local", "_http._tcp.local", "_hap._tcp.local", "_homekit._tcp.local", "_smb._tcp.local", "_ssh._tcp.local"];
+const MDNS_NAMES: &[&str] = &["_services._dns-sd._udp.local", "_rtsp._tcp.local", "_ipp._tcp.local", "_printer._tcp.local", "_googlecast._tcp.local", "_airplay._tcp.local", "_http._tcp.local", "_hap._tcp.local", "_homekit._tcp.local", "_smb._tcp.local", "_ssh._tcp.local", "_iyakki-dev._tcp.local", "_iyakki-web._tcp.local"];
 
 fn dns_query(name: &str) -> Vec<u8> {
     let mut q = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
@@ -179,7 +179,7 @@ pub fn parse_mdns(msg: &[u8], ip: Ipv4Addr) -> Option<Announcement> {
     if all.is_empty() {
         return None;
     }
-    let (kind, label) = if all.contains("_rtsp.") || all.contains("camera") { (Kind::Camera, "RTSP video") } else if all.contains("_ipp.") || all.contains("_printer.") { (Kind::Printer, "printer (mDNS)") } else if all.contains("_googlecast.") || all.contains("_airplay.") { (Kind::Media, "casting device (mDNS)") } else if all.contains("_hap.") || all.contains("_homekit.") { (Kind::SmartHome, "HomeKit device (mDNS)") } else if all.contains("_smb.") { (Kind::Access, "file sharing (mDNS)") } else if all.contains("_ssh.") { (Kind::Access, "SSH (mDNS)") } else { (Kind::Other, "device announcing itself (mDNS)") };
+    let (kind, label) = if all.contains("_iyakki-dev.") || all.contains("_iyakki-web.") { (Kind::Device, "IYAKKI device (developer mode / web service)") } else if all.contains("_rtsp.") || all.contains("camera") { (Kind::Camera, "RTSP video") } else if all.contains("_ipp.") || all.contains("_printer.") { (Kind::Printer, "printer (mDNS)") } else if all.contains("_googlecast.") || all.contains("_airplay.") { (Kind::Media, "casting device (mDNS)") } else if all.contains("_hap.") || all.contains("_homekit.") { (Kind::SmartHome, "HomeKit device (mDNS)") } else if all.contains("_smb.") { (Kind::Access, "file sharing (mDNS)") } else if all.contains("_ssh.") { (Kind::Access, "SSH (mDNS)") } else { (Kind::Other, "device announcing itself (mDNS)") };
     let mut s = Service::new(srv_port.unwrap_or(5353), kind, label);
     s.proto = "udp";
     s.confidence = Confidence::Medium;
@@ -232,6 +232,16 @@ mod tests {
         let a = parse_mdns(&m, Ipv4Addr::new(192, 168, 1, 40)).unwrap();
         assert_eq!(a.service.kind, Kind::Printer);
         assert!(a.service.detail.contains("Office Printer"));
+        // an IYAKKI device announcing its developer port
+        let mut d = vec![0, 0, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+        d.extend(name("_iyakki-dev._tcp.local"));
+        d.extend([0, 12, 0, 1, 0, 0, 0x11, 0x94]);
+        let inst = name("iyakki-0a1b2c._iyakki-dev._tcp.local");
+        d.extend((inst.len() as u16).to_be_bytes());
+        d.extend(inst);
+        let found = parse_mdns(&d, Ipv4Addr::new(192, 168, 1, 41)).unwrap();
+        assert_eq!(found.service.kind, Kind::Device);
+        assert!(found.service.name.contains("IYAKKI") && found.service.detail.contains("iyakki-0a1b2c"));
         // a query (not an answer), truncated and random data
         assert!(parse_mdns(&dns_query("_ipp._tcp.local"), Ipv4Addr::LOCALHOST).is_none());
         for cut in 0..m.len() {

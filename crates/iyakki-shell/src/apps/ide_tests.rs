@@ -46,7 +46,7 @@ impl ChatBackend for Router {
 }
 
 /// Tests that put a fake cluster in the global slot take turns.
-static KUBE_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static KUBE_LOCK: Mutex<()> = Mutex::new(());
 
 struct FakeGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
 
@@ -174,8 +174,8 @@ fn ide_is_in_the_app_list_once_and_for_the_roles_that_can_edit_and_use_the_agent
         assert!(r.template().apps.contains(&PApp::Ide), "{r:?}");
     }
     assert!(!PRole::Guest.template().apps.contains(&PApp::Ide));
-    assert_eq!(crate::launcher::Group::of(PApp::Ide), Some(crate::launcher::Group::Home));
-    assert!(crate::launcher::Group::Home.holds(PApp::Ide));
+    assert_eq!(crate::launcher::Group::of(PApp::Ide), Some(crate::launcher::Group::Work));
+    assert!(crate::launcher::Group::Work.holds(PApp::Ide));
 }
 
 // ------------------------------------------------------------------------------------------------------ registry
@@ -1490,6 +1490,7 @@ fn registry_answers(r: &iyakki_agent::wsexec::FakeRunner) {
     r.answer("get services -A", r#"{"items":[]}"#);
     r.fail("get namespace iyakki-registry", 1, "Error from server (NotFound): namespaces \"iyakki-registry\" not found");
     r.answer("create namespace iyakki-registry", "namespace/iyakki-registry created");
+    r.fail("get pvc", 1, "Error from server (NotFound): persistentvolumeclaims not found");
     r.answer("apply -f", "deployment.apps/registry created\nservice/registry created\n");
     r.answer("rollout status", "deployment \"registry\" successfully rolled out\n");
     r.answer("/v2/", "{}");
@@ -1541,7 +1542,7 @@ fn ide_k8s_registry_strip_dialog_and_approved_setup_of_the_in_cluster_registry()
     app.modal = Some(Modal::Form(FormKind::Registry, f.clone()));
     key(&mut app, &w.cx, Key::Ctrl('s'));
     let Some(Modal::Form(_, f)) = &app.modal else { panic!("still the dialog") };
-    assert!(f.error.as_deref().is_some_and(|e| e.contains("NodePort")), "{:?}", f.error);
+    assert!(f.error.as_deref().is_some_and(|e| e.contains("The port is a number")), "{:?}", f.error);
     let mut ok = f.clone();
     ok.error = None;
     ok.set_value(3, "");
@@ -1551,7 +1552,7 @@ fn ide_k8s_registry_strip_dialog_and_approved_setup_of_the_in_cluster_registry()
     // the approval step shows the exact plan; nothing has run
     until(&mut app, &w.cx, "the approval", |a| a.ws[0].k8s.as_ref().and_then(|k| k.flow.as_ref()).and_then(|f| f.asking()) == Some(0));
     let step = cur_mut(&mut app).k8s_view().flow.as_ref().unwrap().steps()[0].clone();
-    assert!(step.detail.contains("create namespace iyakki-registry") && step.detail.contains("nodePort: 30500") && step.detail.contains("Root: not needed"), "{}", step.detail);
+    assert!(step.detail.contains("create namespace iyakki-registry") && step.detail.contains("hostPort: 30500") && step.detail.contains("Root: not needed"), "{}", step.detail);
     assert!(!r.lines().iter().any(|l| l.contains("create namespace iyakki") || l.contains("apply -f")), "nothing before the approval: {:?}", r.lines());
     let g = render(&mut app, &w.cx, 1280, 720);
     assert!(g.hits.iter().any(|h| h.label.starts_with("Approve")) && g.hits.iter().any(|h| h.label.starts_with("Cancel")));
@@ -2834,6 +2835,9 @@ fn typ_into_everything(app: &mut IdeApp, cx: &AppCx) {
 
 #[path = "ide_browser_tests.rs"]
 mod browser_tests;
+
+#[path = "ide_gitview_tests.rs"]
+mod gitview_tests;
 
 #[test]
 fn ide_a_file_dropped_on_the_window_goes_into_the_tree_folder_and_opens_a_table_in_data() {

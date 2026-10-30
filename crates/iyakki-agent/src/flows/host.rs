@@ -49,6 +49,8 @@ pub struct AgentHost {
     pub ask_browser: bool,
     /// The browser sessions of running flows (one per run), see `flows/browser.rs`.
     pub browser_sessions: super::browser::BrowserSessions,
+    /// The camera pictures of running flows, deleted with the run, see `flows/camera.rs`.
+    pub(super) cam_runs: super::camera::CamRuns,
 }
 
 /// A zone for cron triggers, from the system's zone files.
@@ -109,6 +111,7 @@ impl AgentHost {
             default_image: Mutex::new(String::new()),
             ask_browser: true,
             browser_sessions: Default::default(),
+            cam_runs: Default::default(),
         }
     }
 
@@ -148,8 +151,8 @@ impl AgentHost {
     }
 
     /// Ask the model in a helper thread so the node's time limit and a cancel are honoured.
-    fn ask_model(&self, history: Vec<Message>, timeout_ms: u64, cancel: &Cancel) -> Result<String, NodeError> {
-        let backend = self.model();
+    fn ask_model(&self, history: Vec<Message>, timeout_ms: u64, cancel: &Cancel, backend: Option<Arc<dyn ChatBackend>>) -> Result<String, NodeError> {
+        let backend = backend.unwrap_or_else(|| self.model());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(backend.complete(&history));
@@ -398,6 +401,18 @@ impl Host for AgentHost {
         self.browser_session_info_impl(run_id)
     }
 
+    fn cam_photo(&self, req: &CamPhotoRequest, cancel: &Cancel) -> Result<CamPhotoResult, NodeError> {
+        self.cam_photo_impl(req, cancel)
+    }
+
+    fn permission_needed(&self, n: &PermissionNeed) {
+        self.permission_needed_impl(n)
+    }
+
+    fn cam_end(&self, run_id: &str) {
+        self.cam_end_impl(run_id)
+    }
+
     fn agent(&self, req: &AgentRequest, cancel: &Cancel) -> Result<AgentResult, NodeError> {
         if !req.tools.is_empty() {
             return Err(NodeError::config("tools in an agent step are planned: leave the tool list empty"));
@@ -411,11 +426,18 @@ impl Host for AgentHost {
             sys.push_str(&format!(" Reply with one JSON object only{}.", if keys.is_empty() { String::new() } else { format!(" with the keys {}", keys.join(", ")) }));
         }
         let mut shown: Vec<Vec<u8>> = Vec::new();
+        let mut vision: Option<(crate::visionmodel::Pick, bool)> = None;
+        let mut notes: Vec<String> = Vec::new();
         if !req.images.is_empty() {
-            let (_, model, _) = self.chat_info();
-            if !crate::providers::model_sees_pictures(&model) {
-                return Err(NodeError::config(format!("this step shows pictures to the model, and the selected model ({}) is not one that can look at pictures: choose a vision-capable model in SETTINGS, or take the pictures out of the step", if model.is_empty() { "none selected".to_string() } else { model })));
+            // the model that looks at the picture: the person's Vision model, the chat model if it can see, else one picked from the
+            // providers' lists (never a cloud one on its own). None found: the person is asked to choose, the fixing agent is not.
+            let pick = self.svc.vision_model(None).map_err(|e| NodeError::choice(e.message()))?;
+            let loaded = self.svc.lemonade_model(&pick.provider, &pick.model).is_none_or(|m| m.loaded);
+            notes.push(pick.line());
+            if !loaded {
+                notes.push("Loading the vision model (first use): this can take a while.".into());
             }
+            vision = Some((pick, loaded));
             for p in req.images.iter().take(4) {
                 let path = Path::new(p);
                 if !self.path_ok(path) && !path.starts_with(&self.data) {
@@ -434,12 +456,23 @@ impl Host for AgentHost {
         if req.max_tokens > 0 && tokens_in > req.max_tokens * 8 {
             return Err(NodeError::config(format!("the prompt is about {tokens_in} tokens, far more than the step's budget of {} tokens", req.max_tokens)));
         }
-        let text = self.ask_model(hist, req.timeout_ms, cancel)?;
+        // an injected backend (tests) answers for the chat model; otherwise a picked vision model gets its own backend. A model the server
+        // has to load first gets a generous time to answer.
+        let (backend, timeout_ms) = match &vision {
+            Some((p, loaded)) if p.how != crate::visionmodel::How::Chat && self.backend.lock().unwrap_or_else(|e| e.into_inner()).is_none() => (Some(self.svc.chat_backend_for(p.choice())), if *loaded { req.timeout_ms } else { req.timeout_ms.max(300_000) }),
+            Some((_, false)) => (None, req.timeout_ms.max(300_000)),
+            _ => (None, req.timeout_ms),
+        };
+        let text = self.ask_model(hist, timeout_ms, cancel, backend)?;
         let out_tokens = (text.len() as u64) / 4;
-        let (provider, model, price) = self.chat_info();
+        let (mut provider, mut model, price) = self.chat_info();
+        if let Some((p, _)) = &vision {
+            provider = p.provider.clone();
+            model = p.model.clone();
+        }
         self.svc.usage.record(&self.user, &provider, &model, tokens_in, out_tokens);
         self.audit_to("flow.agent", &format!("{}/{} {} tokens in, {} out", req.run_id, req.node_id, tokens_in, out_tokens));
-        Ok(AgentResult { text, cents: crate::agent::cost_cents(tokens_in + out_tokens, price).ceil() as u64 })
+        Ok(AgentResult { text, cents: crate::agent::cost_cents(tokens_in + out_tokens, price).ceil() as u64, log: notes })
     }
 
     fn script(&self, req: &ScriptRequest, _cancel: &Cancel) -> Result<Value, NodeError> {
@@ -472,6 +505,10 @@ impl Host for AgentHost {
         self.svc.notify(&self.user, kind, &clip(&n.title, 120), &clip(&n.body, 600), Some(link))
     }
 
+    fn notify_channels(&self, n: &Notice, c: &iyakki_flow::host::ChannelNotice) -> Result<Vec<String>, String> {
+        self.send_through_channels(n, c)
+    }
+
     fn secret(&self, name: &str) -> Result<String, String> {
         if let Some(sys) = name.strip_prefix("vault:") {
             return self.svc.secrets.resolve(&format!("vault:{sys}"), None).map(|z| z.to_string()).map_err(|_| format!("there is no secret `{name}` in the system vault"));
@@ -492,7 +529,7 @@ impl Host for AgentHost {
     fn propose_patch(&self, req: &HealRequest, cancel: &Cancel) -> Result<HealProposal, String> {
         let hist = vec![Message::system("You repair failed steps of automated workflows. You reply with one JSON object and nothing else."), Message::user(req.context.clone())];
         let tokens_in = crate::agent::estimate_tokens(&hist);
-        let text = self.ask_model(hist, 120_000, cancel).map_err(|e| e.message)?;
+        let text = self.ask_model(hist, 120_000, cancel, None).map_err(|e| e.message)?;
         let (provider, model, price) = self.chat_info();
         let out_tokens = text.len() as u64 / 4;
         self.svc.usage.record(&self.user, &provider, &model, tokens_in, out_tokens);

@@ -36,20 +36,13 @@ pub const KOKORO_MB: u32 = 330;
 pub const SELFTEST_SENTENCE: &str = "This is the IYAKKI voice test.";
 
 /// The licence line of the Setup card (the review has the texts).
-pub const LICENCE_SHORT: &str = "Whisper (code and weights): MIT, OpenAI; whisper.cpp: MIT. Kokoro-82M weights: Apache-2.0 (hexgrad); Lemonade: Apache-2.0. Kokoro's phonemizer may be espeak-ng (GPL-3.0-or-later), a separate program inside the downloaded Lemonade image; not shipped with IYAKKI; downloaded at your click. The full texts are in the review";
-
-/// The MIT licence as OpenAI publishes it for Whisper (code and model weights).
-pub const MIT_WHISPER: &str = "MIT License\n\nCopyright (c) 2022 OpenAI\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.";
-
-/// The Apache License 2.0 (the standard text; Kokoro-82M's weights and Lemonade are under it). It is the text of this project's own
-/// LICENSE file, so the review shows exactly what is on disk.
-pub const APACHE_2: &str = include_str!("../../../LICENSE");
+pub const LICENCE_SHORT: &str = "IYAKKI provides integration code only. Lemonade (Apache-2.0) is the separate server this item uses; the Whisper and Kokoro models are pulled by Lemonade at your click, under their own licences, which Lemonade or each model's page states. They are not shipped with IYAKKI; downloaded at your click, and IYAKKI gives no guarantee about them.";
 
 /// The review the person reads before the item starts (and the Details of the tile): one string per line. `lemonade_there` says
 /// whether Lemonade answers on this machine now (the line about it changes; nothing else does).
 pub fn review_lines(lemonade_there: bool) -> Vec<String> {
     let total = WHISPER_MB + KOKORO_MB;
-    let mut v: Vec<String> = vec![
+    let v: Vec<String> = vec![
         "Voice: Whisper tiny + Kokoro: listening and a reading voice in one action".into(),
         String::new(),
         "What is downloaded (sizes are estimates, from the projects' own figures)".into(),
@@ -69,7 +62,7 @@ pub fn review_lines(lemonade_there: bool) -> Vec<String> {
         String::new(),
         "Languages".into(),
         "  Whisper tiny understands many languages, but it is the smallest Whisper model: expect more mistakes outside English (estimate, not measured here).".into(),
-        "  Kokoro reads English only (American and British voices). Tamil, Hindi and other languages need Indic-TTS; the voice test warns when a text is not English.".into(),
+        "  Kokoro reads English only (American and British voices). Other languages need another voice; the voice test warns when a text is not English.".into(),
         String::new(),
         "What is set up".into(),
         format!("  Settings \u{2192} Voice: speech to text = {WHISPER_MODEL}, reading voice = {KOKORO_MODEL} (voice {}), both on lemonade-local.", crate::lemonade::DEFAULT_KOKORO_VOICE),
@@ -77,25 +70,19 @@ pub fn review_lines(lemonade_there: bool) -> Vec<String> {
         "  Then a self-test: Kokoro says a short sentence, Whisper tiny listens to it, and the result is plain pass or fail. On fail nothing stays installed.".into(),
         "  The sentence is spoken by Kokoro itself; a recording is not bundled. The microphone and the speaker are not used by the test.".into(),
         String::new(),
-        "Licences (the texts are below; read them before you confirm)".into(),
-        "  Whisper, code and model weights: MIT, Copyright (c) 2022 OpenAI. whisper.cpp (runs it): MIT.".into(),
-        "  Kokoro-82M weights: Apache-2.0 (hexgrad/Kokoro-82M). Lemonade, which runs both: Apache-2.0.".into(),
-        "  Not permissive: Kokoro turns text into sounds with a phonemizer that commonly is espeak-ng (GPL-3.0-or-later). It would run only inside the downloaded Lemonade image, as a separate program. IYAKKI never links it and never ships it.".into(),
+        "Licences and who provides what".into(),
+        "  IYAKKI provides integration code only. It ships and downloads no model weights and no engine of its own for this item.".into(),
+        "  Lemonade (Apache-2.0) is a separate server; when you confirm, Lemonade pulls the models above itself. Model weights and engines that Lemonade or you download keep their own licences, which Lemonade or each model's page states. IYAKKI never redistributes them and gives no guarantee about them.".into(),
+        "  Some voices use a phonemizer such as espeak-ng (GPL-3.0-or-later) inside Lemonade's own image, as a separate program. IYAKKI never links it and never ships it.".into(),
         "  Not shipped with IYAKKI; downloaded at your click. Nothing of this is in the image.".into(),
-        String::new(),
-        "MIT License text (Whisper, whisper.cpp)".into(),
     ];
-    v.extend(MIT_WHISPER.lines().map(|l| format!("  {l}")));
-    v.push(String::new());
-    v.push("Apache License 2.0 text (Kokoro-82M weights, Lemonade)".into());
-    v.extend(APACHE_2.lines().map(|l| l.trim_end().to_string()));
     v
 }
 
 /// Does the review carry what the person must see before confirming? (Used by the tests and by a debug check; the lines are fixed text.)
 pub fn review_has_required(lines: &[String]) -> bool {
     let t = lines.join("\n");
-    ["MIT License", "Apache License", "espeak-ng", "GPL-3.0", "Not shipped with IYAKKI; downloaded at your click", "English only", "estimates"].iter().all(|k| t.contains(k))
+    ["integration code only", "own licences", "espeak-ng", "GPL-3.0", "Not shipped with IYAKKI; downloaded at your click", "English only", "estimates"].iter().all(|k| t.contains(k))
 }
 
 // ------------------------------------------------------------------------------------------------ the record

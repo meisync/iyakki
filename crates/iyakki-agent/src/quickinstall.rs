@@ -24,12 +24,38 @@ use crate::jobs::{Cmd, Job, Jobs, Spec};
 pub const WORKSPACE: &str = "iyakki-install";
 /// Where the Elasticsearch Deployment goes.
 pub const NAMESPACE: &str = "iyakki-data";
-/// The Elasticsearch image (pinned).
-pub const ES_IMAGE: &str = "docker.elastic.co/elasticsearch/elasticsearch:8.15.3";
+/// The Elasticsearch image, by tag AND digest (the manifest list of 8.15.3 from docker.elastic.co, read from the registry API on 2026-10-27).
+pub const ES_IMAGE: &str = "docker.elastic.co/elasticsearch/elasticsearch:8.15.3@sha256:01c1732062b4a846c5ca687b0094b89bad0bfed00c6d71626db32fb8f3131a78";
+/// Where the Prometheus Deployment goes (its own namespace: the read-only cluster role belongs to it alone).
+pub const PROM_NAMESPACE: &str = "iyakki-monitoring";
+/// The Prometheus image, by tag AND digest (the vendor's registry, quay.io; the digest is the manifest list of the tag v3.5.0, read from the
+/// registry API on 2026-10-27). Change the tag and the digest here only, and verify the digest against the registry.
+pub const PROM_IMAGE: &str = "quay.io/prometheus/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996";
+/// The id of the DASH source the Prometheus step registers.
+pub const PROM_SOURCE_ID: &str = "prometheus-cluster";
+/// The DASH source of the in-cluster Elasticsearch.
+pub const ES_SOURCE_ID: &str = "elasticsearch-cluster";
+/// The graph database image (Neo4j Community, GPL-3.0; pinned by tag AND digest, the digest is the index of both architectures, verified
+/// against Docker Hub on 2026-10-26, docs/development/GRAPH-DB-CHOICE.md). Change the tag and the digest here only.
+pub const GRAPH_IMAGE: &str = "docker.io/library/neo4j:2026.10.1-community@sha256:f238979f3c80da6f383f2e4fe91be4dc3580d7ee3b7edec83d0b8783c53b74a4";
+/// The id of the DASH source the graph database step registers.
+pub const GRAPH_SOURCE_ID: &str = "graphdb-cluster";
+/// The graph database as DASH and the AI reach it (a Service of the cluster, looked up at every connect).
+pub const GRAPH_DASH_URL: &str = "cluster://iyakki-data/graphdb:7474";
+/// The Kubernetes Secret that holds the administrator password for the pod (keys `NEO4J_AUTH` and `password`).
+pub const GRAPH_SECRET: &str = "graphdb-auth";
+/// The vault entry (the person's own vault) that holds the same password for DASH.
+pub const GRAPH_VAULT_NAME: &str = "svc.graphdb";
+/// The user name of the administrator (the only one Neo4j Community has).
+pub const GRAPH_USER: &str = "neo4j";
+/// How DASH names the in-cluster Services: looked up in the cluster at every connect, so a new cluster IP never goes stale.
+pub const PROM_DASH_URL: &str = "cluster://iyakki-monitoring/prometheus:9090";
+pub const ES_DASH_URL: &str = "cluster://iyakki-data/elasticsearch:9200";
 /// Where the Lemonade Deployment goes.
 pub const LEMONADE_NAMESPACE: &str = "iyakki-ai";
-/// The Lemonade server image (pinned; the project publishes amd64 only).
-pub const LEMONADE_IMAGE: &str = "ghcr.io/lemonade-sdk/lemonade-server:v2026.42.1";
+/// The Lemonade server image, by tag AND digest (the OCI index of v2026.42.1 from ghcr.io, read from the registry API on 2026-10-27; the project
+/// publishes amd64 only).
+pub const LEMONADE_IMAGE: &str = "ghcr.io/lemonade-sdk/lemonade-server:v2026.42.1@sha256:bd4b89738ca57a90ce3276ddf9270c317d369dc4bc4eded94568d37b88c2bc0d";
 /// How long a step that needs the cluster waits for it to be installed and Ready.
 pub const WAIT_FOR_CLUSTER: Duration = Duration::from_secs(25 * 60);
 
@@ -71,9 +97,9 @@ impl Group {
     pub fn note(self) -> &'static str {
         match self {
             Group::Runtimes => "Node.js and Python 3: the coding agents and Python tools need them, and they are installed first when missing",
-            Group::Cluster => "k3s is the base; DuckDB, Elasticsearch, Lemonade, Indic-TTS and the local image registry install it first when it is missing",
+            Group::Cluster => "k3s is the base; DuckDB, Elasticsearch, Lemonade and the local image registry install it first when it is missing",
             Group::AiCoding => "coding agents for the terminal and the AI IDE (Node.js is installed first when it is missing); pick one or both",
-            Group::Voice => "reading voices; pick one or both (Kokoro: English, through Lemonade, which it installs first; Indic-TTS: Indian languages, in k3s); or Voice: Whisper tiny + Kokoro, which also adds listening and sets both up",
+            Group::Voice => "reading voices; pick one or both (Kokoro: English, through Lemonade, which it installs first); or Voice: Whisper tiny + Kokoro, which also adds listening and sets both up",
             Group::LocalModels => "model servers on this machine, added to Models when they answer; pick one or both (Lemonade runs in k3s); or use the GPU of a Mac on your network",
             Group::Media => "the player for video and audio files (MEDIA tile, IYAKKI menu \u{2192} Media player); it needs nothing else",
             Group::Linux => "Debian and Ubuntu programs (apt) in a sandbox of their own, with a network switch and only the folders you mount; downloaded from the distribution, never shipped (Store \u{2192} Setup \u{2192} Linux apps has the page)",
@@ -90,11 +116,28 @@ pub enum Item {
     K3s,
     DuckDb,
     Elasticsearch,
+    /// OpenSearch (Apache-2.0) in the managed cluster: the open-source search engine next to Elasticsearch; one unprivileged pod,
+    /// ClusterIP only; DASH gets it through its Elasticsearch connector (the `opensearch` submodule).
+    OpenSearch,
+    /// Prometheus (metrics) in the managed cluster: one Deployment with read-only RBAC, ClusterIP only; DASH gets a source for it.
+    Prometheus,
+    /// A graph database for the AI (Neo4j Community, GPL-3.0) in the managed cluster: one unprivileged pod, ClusterIP only, a generated
+    /// password kept in a Secret and in the vault; DASH gets a Cypher source for it, read-only.
+    GraphDb,
+    /// ClickHouse (Apache-2.0) in the managed cluster for DASH: one pod, ClusterIP only, a generated password kept in a Secret and in
+    /// the vault; DASH gets the shared source `clickhouse-cluster` (the `clickhouse` submodule).
+    ClickHouse,
+    /// Gitea (MIT) in the managed cluster to keep your work versioned: one unprivileged rootless pod, SQLite on a volume, published on
+    /// this machine's loopback only. Reuses the Platform services' Gitea objects; the administrator password and an API token go to the
+    /// person's vault and a Git connection "Local Gitea" is added (the `gitea` submodule).
+    Gitea,
+    /// Tuwunel (Apache-2.0), a small Matrix homeserver, in the managed cluster for chat of your own: its own namespace, ClusterIP only,
+    /// registration closed without a generated token that goes to the vault, federation off (the `matrix` submodule).
+    Matrix,
     Registry,
     ClaudeCode,
     Copilot,
     Kokoro,
-    IndicTts,
     /// Voice in one click: Whisper tiny (speech to text) and Kokoro (text to speech), both through the machine's Lemonade, then set as
     /// the engines of Settings \u{2192} Voice and tested ([`crate::voicepack`]).
     VoicePack,
@@ -123,10 +166,13 @@ pub enum Item {
     FwRealtekNet,
     FwBroadcomNet,
     FwAtheros9170,
+    /// "Hardware firmware" (fwextra.rs): the vendor firmware files this computer asks for and lacks, from the pinned linux-firmware release,
+    /// at the person's click ([`start_hardware_firmware`]). The images carry none of them. Shown on every computer.
+    FwHardware,
 }
 
 impl Item {
-    pub const ALL: [Item; 25] = [Item::Node, Item::Python, Item::K3s, Item::DuckDb, Item::Elasticsearch, Item::Registry, Item::ClaudeCode, Item::Copilot, Item::Kokoro, Item::IndicTts, Item::VoicePack, Item::Lemonade, Item::Ollama, Item::MacHost, Item::GpuVulkan, Item::GpuNvidia, Item::Ffmpeg, Item::MacFirmware, Item::MacCamera, Item::LinuxApps, Item::LinuxWindows, Item::FwQualcommBt, Item::FwRealtekNet, Item::FwBroadcomNet, Item::FwAtheros9170];
+    pub const ALL: [Item; 31] = [Item::Node, Item::Python, Item::K3s, Item::DuckDb, Item::Elasticsearch, Item::OpenSearch, Item::Prometheus, Item::ClickHouse, Item::GraphDb, Item::Gitea, Item::Matrix, Item::Registry, Item::ClaudeCode, Item::Copilot, Item::Kokoro, Item::VoicePack, Item::Lemonade, Item::Ollama, Item::MacHost, Item::GpuVulkan, Item::GpuNvidia, Item::Ffmpeg, Item::MacFirmware, Item::MacCamera, Item::LinuxApps, Item::LinuxWindows, Item::FwQualcommBt, Item::FwRealtekNet, Item::FwBroadcomNet, Item::FwAtheros9170, Item::FwHardware];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -135,11 +181,16 @@ impl Item {
             Item::K3s => "k3s",
             Item::DuckDb => "duckdb",
             Item::Elasticsearch => "elasticsearch",
+            Item::OpenSearch => "opensearch",
+            Item::Prometheus => "prometheus",
+            Item::GraphDb => "graph-db",
+            Item::ClickHouse => "clickhouse",
+            Item::Gitea => "gitea",
+            Item::Matrix => "matrix",
             Item::Registry => "registry",
             Item::ClaudeCode => "claude-code",
             Item::Copilot => "github-copilot",
             Item::Kokoro => "kokoro",
-            Item::IndicTts => "indic-tts",
             Item::VoicePack => "voice-pack",
             Item::Lemonade => "lemonade",
             Item::Ollama => "ollama",
@@ -155,6 +206,7 @@ impl Item {
             Item::FwRealtekNet => "fw-realtek-net",
             Item::FwBroadcomNet => "fw-broadcom-net",
             Item::FwAtheros9170 => "fw-atheros-carl9170",
+            Item::FwHardware => crate::fwextra::PACK_ID,
         }
     }
 
@@ -169,11 +221,16 @@ impl Item {
             Item::K3s => "k3s",
             Item::DuckDb => "DuckDB",
             Item::Elasticsearch => "Elasticsearch",
+            Item::OpenSearch => "OpenSearch (search engine, open source)",
+            Item::Prometheus => "Prometheus (metrics)",
+            Item::GraphDb => "Graph database (for AI)",
+            Item::ClickHouse => "ClickHouse (analytics database)",
+            Item::Gitea => "Gitea (versioning for your work)",
+            Item::Matrix => "Matrix server (chat of your own)",
             Item::Registry => "Local image registry",
             Item::ClaudeCode => "Claude Code",
             Item::Copilot => "GitHub Copilot CLI",
             Item::Kokoro => "Kokoro",
-            Item::IndicTts => "Indic-TTS",
             Item::VoicePack => "Voice: Whisper tiny + Kokoro",
             Item::Lemonade => "Lemonade",
             Item::Ollama => "Ollama",
@@ -186,20 +243,21 @@ impl Item {
             Item::LinuxApps => "Linux apps (Debian/Ubuntu)",
             Item::LinuxWindows => "Linux windows (graphical programs)",
             Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => self.fw_def().map_or("Firmware", |d| d.title),
+            Item::FwHardware => "Hardware firmware (Wi-Fi, Bluetooth, graphics, ...)",
         }
     }
 
     pub fn group(self) -> Group {
         match self {
             Item::Node | Item::Python => Group::Runtimes,
-            Item::K3s | Item::DuckDb | Item::Elasticsearch | Item::Registry => Group::Cluster,
+            Item::K3s | Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::Registry => Group::Cluster,
             Item::ClaudeCode | Item::Copilot => Group::AiCoding,
-            Item::Kokoro | Item::IndicTts | Item::VoicePack => Group::Voice,
+            Item::Kokoro | Item::VoicePack => Group::Voice,
             Item::Lemonade | Item::Ollama | Item::MacHost | Item::GpuVulkan | Item::GpuNvidia => Group::LocalModels,
             Item::Ffmpeg => Group::Media,
             Item::MacFirmware | Item::MacCamera => Group::Mac,
             Item::LinuxApps | Item::LinuxWindows => Group::Linux,
-            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => Group::Firmware,
+            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwHardware => Group::Firmware,
         }
     }
 
@@ -210,13 +268,18 @@ impl Item {
             Item::Python => "Python 3 with venv and pip (python3), installed through uv into the data folder (no sudo)",
             Item::K3s => "Lightweight Kubernetes on this machine: the managed dev cluster, inside the data partition, checksum-verified",
             Item::DuckDb => "SQL on CSV and Parquet files: the duckdb command (DASH uses it), set up together with the cluster",
-            Item::Elasticsearch => "Search engine: one single-node Deployment in the cluster (namespace iyakki-data, port 9200 inside the cluster)",
-            Item::Registry => "Where images built on this device go (the private store's server): one registry:2 pod with a volume in the cluster, created in one step, no cluster restart. Anyone who can reach this machine's port 30500 can push to it",
-            Item::ClaudeCode => "Anthropic's coding agent (the claude command); the AI IDE can use it once you sign in (Settings \u{2192} Agents)",
-            Item::Copilot => "GitHub's coding agent (the copilot command); needs a Copilot subscription and `copilot login`",
+            Item::Elasticsearch => "Search engine: one single-node Deployment in the cluster (namespace iyakki-data, port 9200 inside the cluster). Elasticsearch is source-available, not open source: the cluster pulls the image from Elastic when you click Install, IYAKKI does not ship it. OpenSearch (Apache-2.0, in this list) is the open-source choice",
+            Item::OpenSearch => opensearch::ABOUT,
+            Item::Prometheus => "Metrics for the cluster: one Prometheus pod (namespace iyakki-monitoring, ClusterIP only, 7 days kept, 5 GB volume) that scrapes the nodes and the pods that ask for it, with read-only access to the cluster. It is added to DASH as a metrics source",
+            Item::ClickHouse => clickhouse::ABOUT,
+            Item::Matrix => matrix::ABOUT,
+            Item::Gitea => "Keeps your projects versioned on this machine: a Gitea git service (rootless, one pod in the cluster, namespace iyakki-gitea, 10 GB volume, about 300 MB of memory) that this machine reaches at http://127.0.0.1:3300 (no other computer can). A first administrator with a generated password and an API token are kept in your vault, and a Git connection called \"Local Gitea\" is added, so the GIT tile and the AI IDE (Git, Connect Git, Put this project under version control) use it at once",
+            Item::GraphDb => "A graph database the AI can query (Neo4j Community): one pod in the cluster (namespace iyakki-data, ClusterIP only, 5 GB volume, about 500 MB of memory), with a password generated for you and kept in your vault. It is added to DASH as a read-only Cypher source, so the assistant can ask it for relations between things instead of reading everything",
+            Item::Registry => "Where images built on this device go (the private store's server): one registry:2 pod with a volume in the cluster, created in one step, no cluster restart. It has no sign-in, so it listens on this machine only (127.0.0.1:30500): no other computer can reach it",
+            Item::ClaudeCode => "Anthropic's coding agent (the claude command); the AI IDE can use it once you sign in (Settings \u{2192} Agents). Proprietary software: downloaded from Anthropic at your request, never shipped by IYAKKI",
+            Item::Copilot => "GitHub's coding agent (the copilot command); needs a Copilot subscription and `copilot login`. Proprietary software: downloaded from GitHub at your request, never shipped by IYAKKI",
             Item::Kokoro => "English neural reading voice (kokoro-v1, 82M), pulled into Lemonade; Lemonade (and k3s) are installed first when missing",
             Item::VoicePack => "Listen and speak with one action: Whisper tiny (speech to text, any language it knows) and Kokoro (reading voice, English only), pulled into the Lemonade of this machine (Lemonade and k3s are installed first when missing), set as the engines of Settings \u{2192} Voice and tested. Review first: sizes, licences and what runs where. Remove puts the settings back",
-            Item::IndicTts => "Tamil, Telugu, Malayalam, Kannada, Hindi, Bengali, Marathi voices: the Indic voice server in k3s",
             Item::Lemonade => "Local model server (chat, embeddings, images, whisper, Kokoro): one Deployment in k3s (namespace iyakki-ai), reachable on this machine only (127.0.0.1:13305) and added to Models",
             Item::Ollama => "Run language models on this machine; started and added to Models as ollama-local",
             Item::MacHost => "A guide, not an install: use the GPU of a Mac with Apple Silicon (Metal) or of another computer on your network. Shows what to install ON that computer (you do it), tests the connection with tokens per second, adds it to Models and can publish it to the cluster",
@@ -227,6 +290,7 @@ impl Item {
             Item::LinuxWindows => "Show a graphical Linux program in an IYAKKI window (LINUX WINDOW tile): makes a Debian 12 sandbox named gui and installs, with apt, TigerVNC's X server (it draws into memory), a one-window manager, fonts, software OpenGL and the xterm test program (about 250 MB, never part of an image). No graphics card and no sound in the window",
             Item::LinuxApps => "Run Debian or Ubuntu programs: downloads the official Debian 12 base for you (about 30 MB, checksum-verified, never part of an image) into a sandbox named debian with the network on and no folders mounted; apt installs packages inside it. The Store \u{2192} Setup \u{2192} Linux apps (Open its page) adds Ubuntu, more sandboxes, mounted folders, image apps and the terminal",
             Item::Ffmpeg => "Plays video and audio in IYAKKI (MEDIA tile, camera recordings, Media player). Downloads a static ffmpeg build from its builder (johnvansickle.com), GPLv3, checked with its checksum; about 42 MB",
+            Item::FwHardware => "The vendor firmware this computer asks for and does not have (Wi-Fi, Bluetooth, graphics, network cards): IYAKKI images do not carry it. The card lists exactly which files your hardware needs and what each vendor's licence says, then downloads only those from the upstream linux-firmware release (kernel.org, a fixed release, every file checked), installs them as a driver pack that survives restarts, and reloads the drivers where that is safe; Restart appears only when needed. A Wi-Fi chip without its firmware needs a wired or USB-C connection, a USB stick or another computer to get it.",
             Item::FwQualcommBt => "Bluetooth patch files for newer Qualcomm laptop chips (QCA6390, WCN3950, WCN3988, WCN7850, QCA6698): 20 files, about 1 MB. Not in the images (IYAKKI is not sure it may redistribute them): you read and accept the vendor's licence, then the files are downloaded from the upstream linux-firmware repository at a fixed release, each checked for size and SHA-256, installed as a driver pack that survives restarts, and the driver is loaded again; Reboot to finish appears only when the driver needs it. Also installable from a folder or USB stick.",
             Item::FwRealtekNet => "Firmware for PCIe Realtek Ethernet chips (RTL8111/8168, RTL8125 and relatives): 30 small files, about 140 KB. Not in the images (IYAKKI is not sure it may redistribute them): you read and accept the vendor's licence, then the files are downloaded from the upstream linux-firmware repository at a fixed release, each checked for size and SHA-256, installed as a driver pack that survives restarts, and the driver is loaded again; Reboot to finish appears only when the driver needs it. Also installable from a folder or USB stick.",
             Item::FwBroadcomNet => "Firmware for Broadcom wired network chips (Tigon3 tg3, NetXtreme II bnx2, NetXtreme II 10 Gigabit bnx2x): 21 files, about 3 MB. Not in the images (IYAKKI is not sure it may redistribute them): you read and accept the vendor's licence, then the files are downloaded from the upstream linux-firmware repository at a fixed release, each checked for size and SHA-256, installed as a driver pack that survives restarts, and the driver is loaded again; Reboot to finish appears only when the driver needs it. Also installable from a folder or USB stick.",
@@ -242,13 +306,18 @@ impl Item {
             Item::K3s => "Apache-2.0",
             Item::DuckDb => "MIT",
             Item::Registry => "Apache-2.0 (CNCF Distribution registry:2). The cluster pulls the image from Docker Hub when you click Create; IYAKKI does not ship it",
-            Item::Elasticsearch => "Elastic License 2.0 or SSPL (the vendor's choice for this image; free to run yourself, not OSI open source)",
+            Item::Prometheus => "Apache-2.0 (Prometheus). The cluster pulls the image from quay.io when you click Install; IYAKKI does not ship it",
+            Item::ClickHouse => clickhouse::LICENCE,
+            Item::Matrix => matrix::LICENCE,
+            Item::Gitea => "Gitea is MIT licensed (checked in the LICENSE file of the pinned release 1.24.5; its dependencies keep their own licences). It runs as its own pod and IYAKKI only talks to it over HTTP; the cluster pulls the image from Docker Hub when you click Install, IYAKKI does not ship it",
+            Item::GraphDb => "Neo4j Community Edition is GPL-3.0 (free software with copyleft; commercial editions exist and are not used). It runs as its own pod and IYAKKI only talks to it over HTTP; the cluster pulls the image from Docker Hub when you click Install, IYAKKI does not ship it",
+            Item::Elasticsearch => "Elastic License 2.0 or SSPL-1.0 (your choice; the pinned release 8.15.3 predates Elastic's AGPL-3.0 option, per its LICENSE.txt). Source-available, not open source. The cluster pulls the image from Elastic's registry when you click Install and runs it for you; it is downloaded by you, never shipped by IYAKKI",
+            Item::OpenSearch => opensearch::LICENCE,
             Item::ClaudeCode => "proprietary (Anthropic's commercial terms); your own Anthropic account",
             Item::Copilot => "proprietary (GitHub's terms); needs a GitHub Copilot subscription",
-            Item::Kokoro => "Kokoro-82M weights: Apache-2.0 (hexgrad/Kokoro-82M); Lemonade: Apache-2.0",
+            Item::Kokoro => "IYAKKI provides integration code only. Lemonade (Apache-2.0) pulls the Kokoro model at your click under the model's own licence, which Lemonade or the model's page states; IYAKKI ships no weights and gives no guarantee about them",
             Item::VoicePack => crate::voicepack::LICENCE_SHORT,
-            Item::IndicTts => "code: MIT (AI4Bharat Indic-TTS); model weights: NO licence stated by AI4Bharat. Whether IYAKKI may use them is an open owner decision; nothing is bundled, you supply the model files",
-            Item::Lemonade => "Apache-2.0; each model you pull has its own licence",
+            Item::Lemonade => "Apache-2.0 (the Lemonade server image, pulled by the cluster at your click, not shipped); models and engines that Lemonade or you download have their own licences, outside IYAKKI",
             Item::Ollama => "MIT; each model you pull has its own licence",
             Item::MacHost => "nothing is installed by IYAKKI. On the Mac you choose: Ollama (MIT), llama.cpp (MIT), MLX-LM (MIT) or LM Studio (free to use, proprietary)",
             Item::GpuVulkan => "Mesa (MIT) and llama.cpp (MIT) in the pod image; the device plugin is squat/generic-device-plugin (Apache-2.0), pulled by the cluster; IYAKKI ships no GPU driver code of its own",
@@ -259,13 +328,14 @@ impl Item {
             Item::LinuxApps => "Debian and Ubuntu are free software; every package keeps its own licence (/usr/share/doc/<package>/copyright inside the sandbox). Downloaded from the distribution, not shipped. \"Ubuntu\" and \"Debian\" are trademarks of their owners; IYAKKI does not rebrand them",
             Item::Ffmpeg => "GPLv3 (the static build you download from its builder; IYAKKI does not ship it). H.264 and AAC are patent-licensed formats: decoding them is your choice, as in the browser",
             Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => self.fw_def().map_or("", |d| d.licence_note),
+            Item::FwHardware => "Various per file: each vendor's own licence (listed from WHENCE before you click, texts kept next to the files). Free to redistribute with notice for most; some are restricted to the vendor's hardware (MediaTek, Marvell, Qualcomm, Broadcom, NVIDIA). Not in the images: downloaded for you from the upstream linux-firmware repository, never shipped.",
         }
     }
 
     /// What has to be there first.
     pub fn needs(self) -> &'static [Item] {
         match self {
-            Item::DuckDb | Item::Elasticsearch | Item::IndicTts | Item::Lemonade | Item::Registry | Item::GpuVulkan | Item::GpuNvidia => &[Item::K3s],
+            Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::Lemonade | Item::Registry | Item::GpuVulkan | Item::GpuNvidia => &[Item::K3s],
             Item::Kokoro | Item::VoicePack => &[Item::Lemonade],
             _ => &[],
         }
@@ -308,12 +378,17 @@ impl Item {
             Item::K3s => 70,
             Item::DuckDb => 20,
             Item::Elasticsearch => 600,
+            Item::OpenSearch => 1000,
+            Item::Prometheus => 120,
+            Item::GraphDb => 190,
+            Item::ClickHouse => 220,
+            Item::Gitea => 110,
+            Item::Matrix => 36,
             Item::Registry => 25,
             Item::ClaudeCode => 60,
             Item::Copilot => 40,
             Item::Kokoro => 350,
             Item::VoicePack => crate::voicepack::WHISPER_MB + crate::voicepack::KOKORO_MB,
-            Item::IndicTts => 0,
             Item::Lemonade => 700,
             Item::Ollama => 300,
             Item::MacHost => 0,
@@ -326,6 +401,7 @@ impl Item {
             Item::LinuxWindows => 250,
             Item::FwQualcommBt | Item::FwRealtekNet | Item::FwAtheros9170 => 1,
             Item::FwBroadcomNet => 3,
+            Item::FwHardware => 5,
         }
     }
 
@@ -333,8 +409,7 @@ impl Item {
     pub fn time_text(self) -> &'static str {
         match self {
             Item::MacHost => "a few minutes (your steps)",
-            Item::IndicTts => "review first, then minutes",
-            Item::Elasticsearch | Item::Lemonade | Item::Kokoro | Item::VoicePack | Item::MacFirmware | Item::GpuNvidia | Item::GpuVulkan => "5 to 15 minutes",
+            Item::Elasticsearch | Item::OpenSearch | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::Lemonade | Item::Kokoro | Item::VoicePack | Item::MacFirmware | Item::GpuNvidia | Item::GpuVulkan => "5 to 15 minutes",
             Item::K3s | Item::Ollama => "2 to 5 minutes",
             _ => "about a minute",
         }
@@ -342,27 +417,31 @@ impl Item {
 
     /// A server that keeps running once installed (the Setup tab then says Running, not just Installed).
     pub fn is_service(self) -> bool {
-        matches!(self, Item::K3s | Item::Elasticsearch | Item::Registry | Item::Lemonade | Item::Ollama | Item::IndicTts)
+        matches!(self, Item::K3s | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::Registry | Item::Lemonade | Item::Ollama)
     }
 
     /// Hardware entries: shown only on a machine that has the hardware, and never in cloud mode.
     pub fn is_hardware(self) -> bool {
-        matches!(self, Item::GpuVulkan | Item::GpuNvidia | Item::MacFirmware | Item::MacCamera) || self.fw_def().is_some()
+        matches!(self, Item::GpuVulkan | Item::GpuNvidia | Item::MacFirmware | Item::MacCamera | Item::FwHardware) || self.fw_def().is_some()
     }
 
     /// Memory (megabytes) a machine should have before this is recommended; 0 = light.
     pub fn min_ram_mb(self) -> u64 {
         match self {
             Item::Elasticsearch => 6000,
-            Item::Lemonade | Item::Ollama | Item::Kokoro | Item::VoicePack | Item::IndicTts | Item::GpuVulkan | Item::GpuNvidia => 7500,
+            Item::OpenSearch => 3000,
+            Item::GraphDb => 3000,
+            Item::ClickHouse => 3000,
+            Item::Gitea => 1500,
+            Item::Matrix => 1500,
+            Item::Lemonade | Item::Ollama | Item::Kokoro | Item::VoicePack | Item::GpuVulkan | Item::GpuNvidia => 7500,
             _ => 0,
         }
     }
 
-    /// Installed by a detached job. Indic-TTS is not: it is deployed through the Platform services review (Settings \u{2192} Dev
-    /// cluster), which plans, shows and asks before it builds the image and applies the objects.
+    /// Installed by a detached job (the Mac host and the firmware items have their own steps).
     pub fn runs_as_job(self) -> bool {
-        !matches!(self, Item::IndicTts | Item::MacHost | Item::MacCamera) && self.fw_def().is_none()
+        !matches!(self, Item::MacHost | Item::MacCamera | Item::FwHardware) && self.fw_def().is_none()
     }
 
     /// The restricted firmware pack this item installs (fwpack.rs), when it is one.
@@ -535,15 +614,15 @@ pub fn presence_with(svc: &crate::services::Services, item: Item, lemonade: &dyn
             Some(r) => Presence::Installed(format!("{} files, {}", r.files.iter().filter(|f| !f.starts_with("licences/")).count(), r.version)),
             None => Presence::Missing,
         },
+        Item::FwHardware => match crate::fwextra::installed(data) {
+            Some(r) => Presence::Installed(format!("{} files, {}", r.files.iter().filter(|f| !f.starts_with("licences/")).count(), r.version)),
+            None => Presence::Missing,
+        },
         Item::MacCamera => match crate::camfw::read_outcome(data) {
             Some(o) if o.installed => Presence::Installed(if o.firmware_version.is_empty() { o.headline } else { format!("firmware {}", o.firmware_version) }),
             _ => Presence::Missing,
         },
-        Item::IndicTts => {
-            // the Platform services keep their instances in `installed-services-<user>.json`
-            let deployed = std::fs::read_dir(data).into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().starts_with("installed-services-") && std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains("\"indic-tts\"")));
-            if deployed { Presence::Installed("deployed in the cluster (Platform services)".into()) } else { Presence::Missing }
-        }
+        Item::Gitea => gitea::presence(data),
         other => match other.cli_id() {
             // installed by IYAKKI (its record), else put on the machine by hand (the tools folder, the search path): shown as
             // installed with the version it reports and where, and left alone (never replaced unless asked twice)
@@ -643,6 +722,43 @@ pub struct Facts {
     pub used_by: Vec<(Item, String)>,
     /// Rows the menu does not show on this machine (the NVIDIA driver entry when no NVIDIA GPU is found).
     pub hidden: Vec<Item>,
+    /// Cluster items whose Deployment has all its replicas ready right now (read from the cluster, not from a job): such an item is
+    /// installed and running whatever an older (or a repeated) job said.
+    pub healthy: Vec<Item>,
+    /// Items whose password waits for the person's vault ([`crate::vaultpending`]).
+    pub waiting: Vec<Item>,
+}
+
+/// The Deployment each cluster item runs as: `(namespace, name)`.
+pub fn cluster_object(item: Item) -> Option<(&'static str, &'static str)> {
+    Some(match item {
+        Item::Elasticsearch => (NAMESPACE, "elasticsearch"),
+        Item::GraphDb => (NAMESPACE, "graphdb"),
+        Item::Prometheus => (PROM_NAMESPACE, "prometheus"),
+        Item::OpenSearch => (opensearch::NS, "opensearch"),
+        Item::ClickHouse => (clickhouse::NS, "clickhouse"),
+        Item::Matrix => (matrix::NS, "matrix"),
+        Item::Gitea => (gitea::NAMESPACE, "gitea"),
+        _ => return None,
+    })
+}
+
+/// The cluster items that `kubectl get deployments -A -o json` shows with every replica ready (and at least one wanted).
+pub fn healthy_from(deployments_json: &str) -> Vec<Item> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(deployments_json) else { return Vec::new() };
+    let Some(items) = v["items"].as_array() else { return Vec::new() };
+    Item::ALL
+        .into_iter()
+        .filter(|it| {
+            let Some((ns, name)) = cluster_object(*it) else { return false };
+            items.iter().any(|d| {
+                d["metadata"]["namespace"].as_str() == Some(ns) && d["metadata"]["name"].as_str() == Some(name) && {
+                    let want = d["spec"]["replicas"].as_u64().unwrap_or(1);
+                    want > 0 && d["status"]["readyReplicas"].as_u64().unwrap_or(0) >= want
+                }
+            })
+        })
+        .collect()
 }
 
 pub fn gather_facts(svc: &crate::services::Services) -> Facts {
@@ -660,6 +776,21 @@ pub fn gather_facts(svc: &crate::services::Services) -> Facts {
             }
             if let Some(w) = svc.clis.uninstall_warning(id) {
                 f.used_by.push((it, w));
+            }
+        }
+    }
+    f.waiting = crate::vaultpending::list(svc.dir()).iter().filter_map(|p| Item::parse(&p.item)).collect();
+    // the cluster's own word on the items that run in it (one read, only while the cluster answers)
+    if svc.k3sdev.state() == crate::k3sdev::Svc::Running {
+        let o = svc.k3sdev.kubectl(&["get", "deployments", "-A", "-o", "json"]);
+        if o.code == Some(0) {
+            f.healthy = healthy_from(&o.stdout);
+            for it in &f.healthy {
+                if let Some((_, p)) = f.presence.iter_mut().find(|(x, _)| x == it) {
+                    if *p == Presence::Missing {
+                        *p = Presence::Installed("running in the cluster".into());
+                    }
+                }
             }
         }
     }
@@ -814,6 +945,45 @@ pub fn start_firmware_pack(jobs: &Jobs, owner: &str, item: Item, from: Option<&P
     jobs.start(owner, &firmware_pack_spec(l, item, from), &|_: &Path| Ok(()))
 }
 
+/// How the hardware-firmware job gets its files (fwextra.rs).
+#[derive(Clone, Debug, Default)]
+pub struct HwFirmwareOpts {
+    /// A folder or stick (a `firmware-extra` folder, an unpacked release, the release tarball, or the staging folder of the developer link).
+    pub from: Option<PathBuf>,
+    /// Separate licence groups the person included (`nvidia`).
+    pub with: Vec<String>,
+    /// Use the other computer's internet over this cable interface for the job only (fwextra_net.rs).
+    pub link: Option<String>,
+}
+
+/// The job of "Hardware firmware": `iyakki quick-install fw-hardware --data D [--from FOLDER] [--with nvidia] [--link IFACE]`.
+pub fn hardware_firmware_spec(l: &Launch, o: &HwFirmwareOpts) -> Spec {
+    let mut argv = vec![l.exe.display().to_string(), "quick-install".into(), Item::FwHardware.id().into(), "--data".into(), l.data.display().to_string()];
+    if let Some(f) = &o.from {
+        argv.push("--from".into());
+        argv.push(f.display().to_string());
+    }
+    for w in &o.with {
+        argv.push("--with".into());
+        argv.push(w.clone());
+    }
+    if let Some(i) = &o.link {
+        argv.push("--link".into());
+        argv.push(i.clone());
+    }
+    let how = if o.from.is_some() { " (from a folder)" } else if o.link.is_some() { " (over the cable)" } else { "" };
+    Spec { label: format!("Hardware firmware{how}"), cmd: Cmd::Argv(argv), cwd: l.data.clone(), workspace: WORKSPACE.into() }
+}
+
+/// Start the hardware-firmware job. Refuses when the licence list the job will use is not accepted, or one is running already.
+pub fn start_hardware_firmware(jobs: &Jobs, owner: &str, o: &HwFirmwareOpts, l: &Launch) -> Result<Job, String> {
+    if jobs.visible(owner, WORKSPACE).iter().any(|j| j.running() && item_of(j) == Some(Item::FwHardware)) {
+        return Err("Hardware firmware is being installed already: its progress is beside the clock in the top bar".into());
+    }
+    std::fs::create_dir_all(&l.data).map_err(|e| format!("{}: {e}", l.data.display()))?;
+    jobs.start(owner, &hardware_firmware_spec(l, o), &|_: &Path| Ok(()))
+}
+
 /// The job of the GPU page's test prompt: `iyakki quick-install gpu-test`. Its log is the result (tokens per second).
 pub fn gpu_test_spec(l: &Launch) -> Spec {
     Spec {
@@ -909,6 +1079,9 @@ pub fn take_after(data: &Path, what: &str) -> Option<String> {
     Some(if who.trim().is_empty() { "system".to_string() } else { who.trim().to_string() })
 }
 
+/// What the graph database's password handoff thread found out (drained by [`service_requests`]).
+static GRAPH_DONE: std::sync::Mutex<Vec<Result<String, String>>> = std::sync::Mutex::new(Vec::new());
+
 /// Called by the shell every few seconds: start and connect what Quick install jobs asked for. k3s starts under the cluster's
 /// supervisor; Ollama under its own (and becomes `ollama-local` in Models when it answers); Lemonade already runs in k3s, so it is only
 /// added to Models as `lemonade-local` once it answers. Returns one line per thing done.
@@ -963,6 +1136,79 @@ pub fn service_requests(svc: &std::sync::Arc<crate::services::Services>) -> Vec<
         });
         out.push(Ok("Whisper tiny and Kokoro are installed in Lemonade; they become the speech to text and reading voice of Settings \u{2192} Voice (Remove in the tile's details undoes it)".into()));
     }
+    // the graph database was installed: its password goes from the cluster's Secret into the person's vault (on a thread: kubectl and the vault wait)
+    if let Some(user) = take_after(svc.dir(), "graph-vault") {
+        let me = svc.clone();
+        let _ = std::thread::Builder::new().name("iyakki-graph-vault".into()).spawn(move || {
+            if let Some(r) = wait_for_unlock(&me, &pending_of(Item::GraphDb, &user)) {
+                GRAPH_DONE.lock().unwrap_or_else(|e| e.into_inner()).push(r);
+                return;
+            }
+            let read = || -> Result<zeroize::Zeroizing<String>, String> {
+                let out = me.k3sdev.kubectl(&["-n", NAMESPACE, "get", "secret", GRAPH_SECRET, "-o", "go-template={{index .data \"password\" | base64decode}}"]);
+                let pw = zeroize::Zeroizing::new(out.stdout.clone());
+                if out.code == Some(0) { Ok(pw) } else { Err(out.stderr.trim().lines().last().unwrap_or("kubectl failed").to_string()) }
+            };
+            let store = |pw: &str| me.user_set(&user, GRAPH_VAULT_NAME, pw).map_err(|e| e.to_string());
+            let r = graph_vault_handoff(&read, &store, &|d| std::thread::sleep(d), 40, Duration::from_secs(3));
+            let r = settle_handoff(&me, pending_of(Item::GraphDb, &user), 40, r);
+            GRAPH_DONE.lock().unwrap_or_else(|e| e.into_inner()).push(r);
+        });
+    }
+    // ClickHouse was installed: its password goes from the cluster's Secret into the person's vault (on a thread, like the graph database's)
+    if let Some(user) = take_after(svc.dir(), clickhouse::REQUEST) {
+        let me = svc.clone();
+        let _ = std::thread::Builder::new().name("iyakki-clickhouse-vault".into()).spawn(move || {
+            if let Some(r) = wait_for_unlock(&me, &pending_of(Item::ClickHouse, &user)) {
+                GRAPH_DONE.lock().unwrap_or_else(|e| e.into_inner()).push(r);
+                return;
+            }
+            let read = || -> Result<zeroize::Zeroizing<String>, String> {
+                let out = me.k3sdev.kubectl(&["-n", NAMESPACE, "get", "secret", clickhouse::SECRET, "-o", "go-template={{index .data \"password\" | base64decode}}"]);
+                let pw = zeroize::Zeroizing::new(out.stdout.clone());
+                if out.code == Some(0) { Ok(pw) } else { Err(out.stderr.trim().lines().last().unwrap_or("kubectl failed").to_string()) }
+            };
+            let store = |pw: &str| me.user_set(&user, clickhouse::VAULT_NAME, pw).map_err(|e| e.to_string());
+            let r = vault_handoff(&clickhouse::handoff(), &read, &store, &|d| std::thread::sleep(d), 40, Duration::from_secs(3));
+            let r = settle_handoff(&me, pending_of(Item::ClickHouse, &user), 40, r);
+            GRAPH_DONE.lock().unwrap_or_else(|e| e.into_inner()).push(r);
+        });
+    }
+    // Gitea was installed: its password and API token go from the cluster's Secrets into the person's vault and the Git connection
+    // "Local Gitea" is added (on a thread: kubectl and the vault wait)
+    if let Some(user) = take_after(svc.dir(), gitea::REQUEST) {
+        let me = svc.clone();
+        let _ = std::thread::Builder::new().name("iyakki-gitea-vault".into()).spawn(move || {
+            if let Some(r) = wait_for_unlock(&me, &pending_of(Item::Gitea, &user)) {
+                GRAPH_DONE.lock().unwrap_or_else(|e| e.into_inner()).push(r);
+                return;
+            }
+            let r = gitea::finish(&me, &user);
+            let r = settle_handoff(&me, pending_of(Item::Gitea, &user), 40, r);
+            GRAPH_DONE.lock().unwrap_or_else(|e| e.into_inner()).push(r);
+        });
+    }
+    // the Matrix server was installed: its registration token goes from the cluster's Secret into the person's vault (on a thread)
+    if let Some(user) = take_after(svc.dir(), matrix::REQUEST) {
+        let me = svc.clone();
+        let _ = std::thread::Builder::new().name("iyakki-matrix-vault".into()).spawn(move || {
+            if let Some(r) = wait_for_unlock(&me, &pending_of(Item::Matrix, &user)) {
+                GRAPH_DONE.lock().unwrap_or_else(|e| e.into_inner()).push(r);
+                return;
+            }
+            let read = || -> Result<zeroize::Zeroizing<String>, String> {
+                let out = me.k3sdev.kubectl(&["-n", matrix::NS, "get", "secret", matrix::SECRET, "-o", "go-template={{index .data \"token\" | base64decode}}"]);
+                let t = zeroize::Zeroizing::new(out.stdout.clone());
+                if out.code == Some(0) { Ok(t) } else { Err(out.stderr.trim().lines().last().unwrap_or("kubectl failed").to_string()) }
+            };
+            let store = |t: &str| me.user_set(&user, matrix::VAULT_NAME, t).map_err(|e| e.to_string());
+            let r = matrix::handoff(&read, &store, &|d| std::thread::sleep(d), 40, Duration::from_secs(3));
+            let r = settle_handoff(&me, pending_of(Item::Matrix, &user), 40, r);
+            GRAPH_DONE.lock().unwrap_or_else(|e| e.into_inner()).push(r);
+        });
+    }
+    // passwords that waited for a locked vault: work them off as soon as the person's vault is open (no new install)
+    pending_vault_retry(svc);
     // the GPU steps: the cluster restarts once so containerd reads the CDI setting; after a start of IYAKKI the RAM holds nothing of what
     // they did (CDI specs, the NVIDIA modules and device nodes), so it is put back, once per start for the driver
     if let Some(user) = take_after(svc.dir(), "k3s-restart") {
@@ -978,6 +1224,7 @@ pub fn service_requests(svc: &std::sync::Arc<crate::services::Services>) -> Vec<
     static GPU_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static GPU_DONE: std::sync::Mutex<Vec<Result<String, String>>> = std::sync::Mutex::new(Vec::new());
     out.extend(std::mem::take(&mut *GPU_DONE.lock().unwrap_or_else(|e| e.into_inner())));
+    out.extend(std::mem::take(&mut *GRAPH_DONE.lock().unwrap_or_else(|e| e.into_inner())));
     if GPU_RESTORE.load(std::sync::atomic::Ordering::Relaxed) < 3 && (marked(svc.dir(), Item::GpuVulkan).is_some() || marked(svc.dir(), Item::GpuNvidia).is_some()) && !GPU_BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
         let data = svc.dir().to_path_buf();
         let _ = std::thread::Builder::new().name("iyakki-gpu-restore".into()).spawn(move || {
@@ -990,6 +1237,88 @@ pub fn service_requests(svc: &std::sync::Arc<crate::services::Services>) -> Vec<
         });
     }
     out
+}
+
+/// Where an item's password is read from, for the pending list.
+pub fn pending_of(item: Item, user: &str) -> crate::vaultpending::Pending {
+    use crate::vaultpending::Pending;
+    let p = |what: &str, ns: &str, secret: &str, key: &str, vault: &str, source: &str| Pending { item: item.id().into(), user: user.into(), what: what.into(), namespace: ns.into(), secret: secret.into(), key: key.into(), vault: vault.into(), source: source.into() };
+    match item {
+        Item::GraphDb => p("graph database", NAMESPACE, GRAPH_SECRET, "password", GRAPH_VAULT_NAME, "Cluster graph database"),
+        Item::ClickHouse => p("ClickHouse", NAMESPACE, clickhouse::SECRET, "password", clickhouse::VAULT_NAME, "Cluster ClickHouse"),
+        Item::Matrix => p("Matrix registration token", matrix::NS, matrix::SECRET, "token", matrix::VAULT_NAME, ""),
+        _ => p("Gitea", gitea::NAMESPACE, crate::platform::gitea::ADMIN_SECRET, "password", "svc.gitea.admin-password", "Git connection \"Local Gitea\""),
+    }
+}
+
+/// Run `f` with the real hooks of this machine (kubectl, the person's vault, the audit, the job log, the inbox).
+fn with_real_hooks<R>(svc: &std::sync::Arc<crate::services::Services>, f: impl FnOnce(&crate::vaultpending::Hooks) -> R) -> R {
+    let unlocked = |u: &str| svc.user_vault_unlocked(u);
+    let move_one = |p: &crate::vaultpending::Pending| -> Result<String, String> {
+        if p.item == Item::Gitea.id() {
+            return gitea::finish(svc, &p.user);
+        }
+        let read = |p: &crate::vaultpending::Pending| -> Result<zeroize::Zeroizing<String>, String> {
+            let out = svc.k3sdev.kubectl(&["-n", &p.namespace, "get", "secret", &p.secret, "-o", &format!("go-template={{{{index .data \"{}\" | base64decode}}}}", p.key)]);
+            let v = zeroize::Zeroizing::new(out.stdout.clone());
+            if out.code == Some(0) { Ok(v) } else { Err(out.stderr.trim().lines().last().unwrap_or("kubectl failed").to_string()) }
+        };
+        let store = |u: &str, n: &str, v: &str| svc.user_set(u, n, v).map_err(|e| e.to_string());
+        let has = |u: &str, n: &str| svc.user_names(u).is_ok_and(|x| x.iter().any(|y| y == n));
+        crate::vaultpending::move_secret(p, &read, &store, &has)
+    };
+    let audit = |u: &str, a: &str, d: &str| svc.k3sdev.audit_line(u, a, d);
+    let joblog = |p: &crate::vaultpending::Pending, line: &str| {
+        let newest = svc.jobs.visible_all(&p.user).into_iter().filter(|j| item_of(j).is_some_and(|i| i.id() == p.item)).max_by_key(|j| j.started_ms);
+        if let Some(j) = newest {
+            let _ = svc.jobs.append_log(&p.user, &j.id, line);
+        }
+    };
+    f(&crate::vaultpending::Hooks { unlocked: &unlocked, move_one: &move_one, audit: &audit, joblog: &joblog })
+}
+
+/// The end of a handoff thread: success is logged; a give-up is remembered (where the password is, never the password), logged in the
+/// job's log, the audit and the shell log, left in the inbox, and the toast says what waits and what to do.
+pub fn settle_handoff(svc: &std::sync::Arc<crate::services::Services>, p: crate::vaultpending::Pending, tries: u32, r: Result<String, String>) -> Result<String, String> {
+    with_real_hooks(svc, |h| match r {
+        Ok(m) => {
+            crate::vaultpending::record_stored(svc.dir(), &p, h);
+            Ok(m)
+        }
+        Err(e) => {
+            let words = crate::vaultpending::record_waiting(svc.dir(), p.clone(), tries, &e, h);
+            let title = format!("The {} password is waiting for your vault", p.what);
+            if !svc.inbox.list(&p.user).iter().any(|n| !n.read && n.title == title) {
+                let _ = svc.inbox.add(&p.user, crate::inbox::Kind::Warning, &title, &format!("{words}. The service works; its password is safe in the cluster Secret {} and moves into your vault on its own once the vault is open.", p.secret), "quick install", None, crate::clock::now_unix());
+            }
+            Err(words)
+        }
+    })
+}
+
+/// The person's vault is locked when a hand-off would start: there is nothing to retry (the vault opens only with the password typed at
+/// sign-in or Settings → Vault → Unlock), so the 40 tries are skipped. The wait is recorded at once, in words, and the
+/// pending list moves the password into the vault as soon as it opens. `None` means the vault is open and the hand-off runs.
+pub(crate) fn wait_for_unlock(svc: &std::sync::Arc<crate::services::Services>, p: &crate::vaultpending::Pending) -> Option<Result<String, String>> {
+    if svc.user_vault_unlocked(&p.user) {
+        return None;
+    }
+    Some(settle_handoff(svc, p.clone(), 0, Err("your vault is locked: it opens when you sign in with your password, or with Settings \u{2192} Vault \u{2192} Unlock".into())))
+}
+
+/// Work off the pending passwords whose vault is open now (on a thread; one at a time). Lines go to the shell like any other result.
+fn pending_vault_retry(svc: &std::sync::Arc<crate::services::Services>) {
+    static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let waiting = crate::vaultpending::list(svc.dir());
+    if waiting.is_empty() || !waiting.iter().any(|p| svc.user_vault_unlocked(&p.user)) || BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let me = svc.clone();
+    let _ = std::thread::Builder::new().name("iyakki-vault-pending".into()).spawn(move || {
+        let done = with_real_hooks(&me, |h| crate::vaultpending::finish_all(me.dir(), h));
+        GRAPH_DONE.lock().unwrap_or_else(|e| e.into_inner()).extend(done);
+        BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
 }
 
 /// Make Kokoro the reading voice once the local Lemonade answers and lists `kokoro-v1` as downloaded: the Lemonade server joins
@@ -1108,6 +1437,63 @@ pub trait StepEnv {
     fn mac_firmware(&mut self) -> Result<String, String> {
         Err("installing the Mac firmware is not available here".into())
     }
+    /// Add (or replace, by id) a DASH source (the in-cluster Prometheus and Elasticsearch).
+    fn register_dash_source(&mut self, _cfg: crate::dash::connector::SourceConfig) -> Result<(), String> {
+        Ok(())
+    }
+    /// Create the Secret with the graph database's administrator password in [`NAMESPACE`] when it is not there yet (the password is
+    /// generated here, written to a 0600 file for the one `kubectl create secret` and removed at once, and shown nowhere). `Ok(true)`:
+    /// created now; `Ok(false)`: it was there and is kept (the database only reads the password the first time it starts).
+    fn graph_secret(&mut self) -> Result<bool, String> {
+        Err("creating the graph database's Secret is not available here".into())
+    }
+    /// Create the Secret with ClickHouse's `default` user password in [`NAMESPACE`] when it is not there yet (same rules as
+    /// [`StepEnv::graph_secret`]: generated here, via a 0600 file, never shown). `Ok(true)`: created now; `Ok(false)`: kept.
+    fn clickhouse_secret(&mut self) -> Result<bool, String> {
+        Err("creating ClickHouse's Secret is not available here".into())
+    }
+    /// Create the Secret with the Matrix server's registration token in its namespace when it is not there yet (generated here, via a 0600
+    /// file, never shown). `Ok(true)`: created now; `Ok(false)`: kept.
+    fn matrix_secret(&mut self) -> Result<bool, String> {
+        Err("creating the Matrix server's Secret is not available here".into())
+    }
+    // ---- Gitea (the `gitea` submodule): nothing here ever returns, prints or stores a password or token except into a Secret
+    /// The managed cluster as a platform service record names it.
+    fn cluster_ref(&mut self) -> Result<crate::platform::installed::ClusterRef, String> {
+        Err("naming the cluster is not available here".into())
+    }
+    /// The person's installed platform services (`installed-services-<user>.json`).
+    fn service_records(&mut self) -> Vec<crate::platform::installed::Installed> {
+        vec![]
+    }
+    fn save_service(&mut self, _rec: crate::platform::installed::Installed) -> Result<(), String> {
+        Err("recording the service is not available here".into())
+    }
+    /// Nothing on this machine listens on that loopback port.
+    fn port_free(&mut self, _port: u16) -> bool {
+        true
+    }
+    /// A Gitea that is in the cluster (Deployment `gitea` and PVC `gitea-data` in the Gitea namespace) whatever the records say.
+    fn live_gitea(&mut self) -> Option<gitea::LiveGitea> {
+        None
+    }
+    /// The HTTP status of a GET (no credentials) from this machine.
+    fn http_status(&mut self, _url: &str) -> Result<u16, String> {
+        Err("asking an address is not available here".into())
+    }
+    /// Create the Secret `name` in `ns` with a generated password under `key` (and the labels of the platform instance) when it is not
+    /// there yet; `Ok(true)` created now, `Ok(false)` kept. The password is shown nowhere.
+    fn generated_secret(&mut self, _ns: &str, _name: &str, _key: &str, _instance: &str) -> Result<bool, String> {
+        Err("creating a Secret is not available here".into())
+    }
+    /// Put a value into a Secret (replacing it) through a 0600 file; the value is shown nowhere.
+    fn put_secret(&mut self, _ns: &str, _name: &str, _key: &str, _value: &str, _instance: &str) -> Result<(), String> {
+        Err("creating a Secret is not available here".into())
+    }
+    /// `kubectl exec deploy/<deploy> -c <container> -- sh -c <script> [arg0]`: its output, or the plain reason it failed.
+    fn pod_exec(&mut self, _ns: &str, _deploy: &str, _container: &str, _script: &str, _arg0: &str) -> Result<String, String> {
+        Err("running a command in a pod is not available here".into())
+    }
     /// Make the first Debian sandbox (`linuxapps.rs`); returns the plain result line.
     fn linux_apps(&mut self) -> Result<String, String> {
         Err("making a Linux apps sandbox is not available here".into())
@@ -1213,6 +1599,444 @@ spec:
         ns = NAMESPACE,
         img = ES_IMAGE
     )
+}
+
+/// The namespace of the data services, labelled as IYAKKI's (applied before the Secret is made; the same text as in the Elasticsearch objects).
+pub fn data_namespace_manifest() -> String {
+    format!(
+        "apiVersion: v1
+kind: Namespace
+metadata:
+  name: {ns}
+  labels:
+    app.kubernetes.io/managed-by: iyakki
+",
+        ns = NAMESPACE
+    )
+}
+
+/// The graph database objects: a volume claim, one unprivileged Deployment and a ClusterIP Service. The password is NOT here: the pod reads
+/// it from the Secret [`GRAPH_SECRET`] by reference. Non-root (7474), read-only root file system (the writable places are the volume and
+/// `emptyDir`s), no capabilities, no privilege escalation, no service account token, no hostPath; telemetry off; the memory is cut to
+/// 256 MB heap and 64 MB page cache, about 490 MiB measured idle, limit 1 GiB.
+pub fn graphdb_manifest() -> String {
+    format!(
+        "apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: graphdb-data
+  namespace: {ns}
+  labels:
+    app.kubernetes.io/managed-by: iyakki
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: graphdb
+  namespace: {ns}
+  labels:
+    app.kubernetes.io/name: graphdb
+    app.kubernetes.io/managed-by: iyakki
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: graphdb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: graphdb
+        app.kubernetes.io/managed-by: iyakki
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 7474
+        runAsGroup: 7474
+        fsGroup: 7474
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: graphdb
+          image: {img}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: NEO4J_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {secret}
+                  key: NEO4J_AUTH
+            - name: NEO4J_server_memory_heap_initial__size
+              value: 128m
+            - name: NEO4J_server_memory_heap_max__size
+              value: 256m
+            - name: NEO4J_server_memory_pagecache_size
+              value: 64m
+            - name: NEO4J_dbms_usage__report_enabled
+              value: \"false\"
+          ports:
+            - containerPort: 7474
+            - containerPort: 7687
+          resources:
+            requests:
+              cpu: 100m
+              memory: 640Mi
+            limits:
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 7474
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: logs
+              mountPath: /logs
+            - name: tmp
+              mountPath: /tmp
+            - name: conf
+              mountPath: /var/lib/neo4j/conf
+            - name: run
+              mountPath: /var/lib/neo4j/run
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: graphdb-data
+        - name: logs
+          emptyDir: {{}}
+        - name: tmp
+          emptyDir: {{}}
+        - name: conf
+          emptyDir: {{}}
+        - name: run
+          emptyDir: {{}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: graphdb
+  namespace: {ns}
+  labels:
+    app.kubernetes.io/managed-by: iyakki
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: graphdb
+  ports:
+    - name: http
+      port: 7474
+      targetPort: 7474
+    - name: bolt
+      port: 7687
+      targetPort: 7687
+",
+        ns = NAMESPACE,
+        img = GRAPH_IMAGE,
+        secret = GRAPH_SECRET
+    )
+}
+
+/// The DASH source of the in-cluster graph database: Cypher over the Query API at its stable cluster address, basic sign-in as
+/// [`GRAPH_USER`] with the password taken from the person's vault entry [`GRAPH_VAULT_NAME`] (a reference, never the value).
+pub fn graphdb_source() -> crate::dash::connector::SourceConfig {
+    let mut values = std::collections::BTreeMap::new();
+    values.insert("url".to_string(), GRAPH_DASH_URL.to_string());
+    values.insert("auth".to_string(), "basic".to_string());
+    values.insert("username".to_string(), GRAPH_USER.to_string());
+    values.insert("database".to_string(), "neo4j".to_string());
+    let mut secrets = std::collections::BTreeMap::new();
+    secrets.insert("password".to_string(), format!("uvault:{GRAPH_VAULT_NAME}"));
+    crate::dash::connector::SourceConfig { id: GRAPH_SOURCE_ID.into(), kind: "neo4j".into(), name: "Cluster graph database".into(), values, secrets }
+}
+
+/// A new password: 24 characters of letters and digits, drawn from the system's random source without bias.
+pub fn new_graph_password() -> Result<zeroize::Zeroizing<String>, String> {
+    const A: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut out = zeroize::Zeroizing::new(String::new());
+    while out.len() < 24 {
+        let mut b = zeroize::Zeroizing::new([0u8; 32]);
+        iyakki_sec::random_fill(&mut b[..]).map_err(|e| format!("no random numbers for the password: {e}"))?;
+        for x in b.iter() {
+            if *x < 248 && out.len() < 24 {
+                out.push(A[(*x % 62) as usize] as char);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The shell's half of the password handoff: the job made the Secret and left a request; the shell, which holds the person's unlocked
+/// vault, reads the password from the cluster and stores it as [`GRAPH_VAULT_NAME`]. Tries up to `tries` times, `wait` apart (the vault may
+/// be locked for a moment, the cluster busy). Returns a plain line; neither line holds the password.
+pub fn graph_vault_handoff(read: &dyn Fn() -> Result<zeroize::Zeroizing<String>, String>, store: &dyn Fn(&str) -> Result<(), String>, sleep: &dyn Fn(Duration), tries: u32, wait: Duration) -> Result<String, String> {
+    vault_handoff(&VaultNames { what: "graph database", vault_name: GRAPH_VAULT_NAME, source: "Cluster graph database", secret: GRAPH_SECRET }, read, store, sleep, tries, wait)
+}
+
+/// What a password handoff names in its two result lines.
+pub struct VaultNames {
+    pub what: &'static str,
+    pub vault_name: &'static str,
+    pub source: &'static str,
+    pub secret: &'static str,
+}
+
+/// The handoff of one service (see [`graph_vault_handoff`]).
+pub fn vault_handoff(h: &VaultNames, read: &dyn Fn() -> Result<zeroize::Zeroizing<String>, String>, store: &dyn Fn(&str) -> Result<(), String>, sleep: &dyn Fn(Duration), tries: u32, wait: Duration) -> Result<String, String> {
+    let mut last = String::from("not tried");
+    for n in 0..tries.max(1) {
+        if n > 0 {
+            sleep(wait);
+        }
+        let pw = match read() {
+            Ok(p) if !p.trim().is_empty() => p,
+            Ok(_) => {
+                last = "the Secret holds no password".into();
+                continue;
+            }
+            Err(e) => {
+                last = format!("could not read the password from the cluster: {e}");
+                continue;
+            }
+        };
+        match store(pw.trim()) {
+            Ok(()) => return Ok(format!("the {} password is in your vault as {}; DASH uses it for the source \"{}\"", h.what, h.vault_name, h.source)),
+            Err(e) => last = format!("could not put the password in your vault: {e}"),
+        }
+    }
+    Err(format!("{last}. The database works; unlock your vault (sign in again) and press Install on the {} again, or read the password with kubectl -n {NAMESPACE} get secret {} and save it as {}", h.what, h.secret, h.vault_name))
+}
+
+/// The Prometheus objects: a namespace, a service account with a read-only cluster role, the scrape configuration, a volume claim, one
+/// unprivileged Deployment (read-only root file system, no capabilities, limits set) and a ClusterIP Service. No hostPath, no NodePort.
+pub fn prometheus_manifest() -> String {
+    format!(
+        "apiVersion: v1
+kind: Namespace
+metadata:
+  name: {ns}
+  labels:
+    app.kubernetes.io/managed-by: iyakki
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: {ns}
+  labels:
+    app.kubernetes.io/managed-by: iyakki
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: iyakki-prometheus
+  labels:
+    app.kubernetes.io/managed-by: iyakki
+rules:
+  - apiGroups: [\"\"]
+    resources: [nodes, nodes/metrics, services, endpoints, pods]
+    verbs: [get, list, watch]
+  - nonResourceURLs: [/metrics]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: iyakki-prometheus
+  labels:
+    app.kubernetes.io/managed-by: iyakki
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: iyakki-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: {ns}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: {ns}
+  labels:
+    app.kubernetes.io/managed-by: iyakki
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 30s
+      evaluation_interval: 30s
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets: [\"localhost:9090\"]
+      - job_name: kubelet
+        scheme: https
+        authorization:
+          credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          insecure_skip_verify: true
+        kubernetes_sd_configs:
+          - role: node
+      - job_name: cadvisor
+        scheme: https
+        metrics_path: /metrics/cadvisor
+        authorization:
+          credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          insecure_skip_verify: true
+        kubernetes_sd_configs:
+          - role: node
+      - job_name: pods
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: \"true\"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\\d+)?;(\\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: {ns}
+  labels:
+    app.kubernetes.io/managed-by: iyakki
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: {ns}
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/managed-by: iyakki
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: prometheus
+        app.kubernetes.io/managed-by: iyakki
+    spec:
+      serviceAccountName: prometheus
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+      containers:
+        - name: prometheus
+          image: {img}
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=7d
+            - --storage.tsdb.retention.size=4GB
+            - --web.listen-address=:9090
+          ports:
+            - containerPort: 9090
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+              readOnly: true
+            - name: data
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: prometheus-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: {ns}
+  labels:
+    app.kubernetes.io/managed-by: iyakki
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: prometheus
+  ports:
+    - port: 9090
+      targetPort: 9090
+",
+        ns = PROM_NAMESPACE,
+        img = PROM_IMAGE
+    )
+}
+
+/// The DASH source of the in-cluster Prometheus, by its stable cluster address.
+pub fn prometheus_source() -> crate::dash::connector::SourceConfig {
+    let mut values = std::collections::BTreeMap::new();
+    values.insert("url".to_string(), PROM_DASH_URL.to_string());
+    crate::dash::connector::SourceConfig { id: PROM_SOURCE_ID.into(), kind: "prometheus".into(), name: "Cluster Prometheus".into(), values, secrets: Default::default() }
+}
+
+/// The DASH source of the in-cluster Elasticsearch (single node, no sign-in), by its stable cluster address.
+pub fn elasticsearch_source() -> crate::dash::connector::SourceConfig {
+    let mut values = std::collections::BTreeMap::new();
+    values.insert("url".to_string(), ES_DASH_URL.to_string());
+    crate::dash::connector::SourceConfig { id: ES_SOURCE_ID.into(), kind: "elasticsearch".into(), name: "Cluster Elasticsearch".into(), values, secrets: Default::default() }
 }
 
 /// The Lemonade objects: a namespace labelled as IYAKKI's, a volume claim, one Deployment and a ClusterIP Service. The port is published on
@@ -1477,11 +2301,81 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
             env.say(&format!("[2/4] waiting for the pod (the first start pulls {ES_IMAGE}, about 600 MB)"));
             env.rollout(NAMESPACE, "elasticsearch", Duration::from_secs(900))?;
             env.say("[3/4] Elasticsearch is running");
-            let detail = format!("http://elasticsearch.{NAMESPACE}.svc:9200 inside the cluster");
+            let detail = format!("http://elasticsearch.{NAMESPACE}.svc:9200 inside the cluster; DASH source \"Cluster Elasticsearch\" at {ES_DASH_URL}");
+            match env.register_dash_source(elasticsearch_source()) {
+                Ok(()) => env.say(&format!("  added to DASH as the source \"Cluster Elasticsearch\" ({ES_DASH_URL}: IYAKKI looks the Service up each time, nothing listens on localhost)")),
+                Err(e) => env.say(&format!("  could not add it to DASH ({e}); add an Elasticsearch source with {ES_DASH_URL} yourself")),
+            }
             env.mark(Item::Elasticsearch, &detail)?;
-            env.say(&format!("[4/4] done: {detail} (kubectl -n {NAMESPACE} port-forward svc/elasticsearch 9200 to reach it from here)"));
+            env.say(&format!("[4/4] done: {detail} (kubectl -n {NAMESPACE} port-forward svc/elasticsearch 9200 to reach it from a program of your own)"));
             Ok(())
         }
+        Item::Prometheus => {
+            env.say(&format!("[0/5] Prometheus runs in k3s: checking the cluster first (licence: {})", item.licence()));
+            wait_for_cluster(env, wait, poll)?;
+            env.say(&format!("[1/5] k3s is Ready; applying the Prometheus objects in namespace {PROM_NAMESPACE} (read-only access to the cluster, ClusterIP only)"));
+            let out = env.kubectl_apply("prometheus", &prometheus_manifest())?;
+            for l in out.lines().filter(|l| !l.trim().is_empty()).take(12) {
+                env.say(&format!("  {}", l.trim()));
+            }
+            env.say(&format!("[2/5] waiting for the pod (the first start pulls {PROM_IMAGE} from quay.io, about 120 MB)"));
+            env.rollout(PROM_NAMESPACE, "prometheus", Duration::from_secs(600))?;
+            env.say("[3/5] Prometheus is running");
+            let in_cluster = format!("http://prometheus.{PROM_NAMESPACE}.svc:9090");
+            let detail = match env.register_dash_source(prometheus_source()) {
+                Ok(()) => {
+                    env.say(&format!("[4/5] added to DASH as the source \"Cluster Prometheus\" ({PROM_DASH_URL}: IYAKKI looks the Service up each time)"));
+                    format!("{in_cluster} inside the cluster; DASH source at {PROM_DASH_URL}")
+                }
+                Err(e) => {
+                    env.say(&format!("[4/5] could not add it to DASH ({e}); add a Prometheus source with {PROM_DASH_URL} yourself"));
+                    format!("{in_cluster} inside the cluster")
+                }
+            };
+            env.mark(Item::Prometheus, &detail)?;
+            env.say(&format!("[5/5] done: {detail}"));
+            Ok(())
+        }
+        Item::GraphDb => {
+            env.say(&format!("[0/7] the graph database runs in k3s: checking the cluster first (licence: {})", item.licence()));
+            wait_for_cluster(env, wait, poll)?;
+            env.say(&format!("[1/7] k3s is Ready; making the namespace {NAMESPACE}"));
+            let out = env.kubectl_apply("data-namespace", &data_namespace_manifest())?;
+            for l in out.lines().filter(|l| !l.trim().is_empty()).take(4) {
+                env.say(&format!("  {}", l.trim()));
+            }
+            match env.graph_secret()? {
+                true => env.say(&format!("[2/7] made the administrator password and the Secret {GRAPH_SECRET} (the password is not shown; it goes into your vault as {GRAPH_VAULT_NAME})")),
+                false => env.say(&format!("[2/7] the Secret {GRAPH_SECRET} is there already; its password is kept")),
+            }
+            env.say("[3/7] applying the graph database objects (unprivileged, ClusterIP only, 5 GB volume)");
+            let out = env.kubectl_apply("graphdb", &graphdb_manifest())?;
+            for l in out.lines().filter(|l| !l.trim().is_empty()).take(8) {
+                env.say(&format!("  {}", l.trim()));
+            }
+            env.say("[4/7] waiting for the pod (the first start pulls the Neo4j image, about 190 MB)");
+            env.rollout(NAMESPACE, "graphdb", Duration::from_secs(900))?;
+            env.say("[5/7] the graph database is running");
+            let in_cluster = format!("http://graphdb.{NAMESPACE}.svc:7474");
+            let detail = match env.register_dash_source(graphdb_source()) {
+                Ok(()) => {
+                    env.say(&format!("[6/7] added to DASH as the source \"Cluster graph database\" ({GRAPH_DASH_URL}; every query is a read transaction)"));
+                    format!("{in_cluster} inside the cluster; DASH source at {GRAPH_DASH_URL}")
+                }
+                Err(e) => {
+                    env.say(&format!("[6/7] could not add it to DASH ({e}); add a Neo4j source with {GRAPH_DASH_URL} yourself"));
+                    format!("{in_cluster} inside the cluster")
+                }
+            };
+            env.request_after("graph-vault")?;
+            env.mark(Item::GraphDb, &detail)?;
+            env.say(&format!("[7/7] done: {detail}. IYAKKI is putting the password into your vault as {GRAPH_VAULT_NAME}"));
+            Ok(())
+        }
+        Item::ClickHouse => clickhouse::run(env, wait, poll),
+        Item::OpenSearch => opensearch::run(env, wait, poll),
+        Item::Gitea => gitea::run(env, wait, poll),
+        Item::Matrix => matrix::run(env, wait, poll),
         Item::Node | Item::Python | Item::ClaudeCode | Item::Copilot | Item::Ollama | Item::Ffmpeg => {
             let id = item.cli_id().unwrap_or_default();
             let server = item == Item::Ollama;
@@ -1545,6 +2439,7 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
             env.mark(Item::MacFirmware, &line)?;
             Ok(())
         }
+        Item::FwHardware => Err("the hardware firmware has its own job: `iyakki quick-install fw-hardware`".into()),
         Item::MacCamera => Err("the camera firmware has its own job: `iyakki quick-install mac-camera`".into()),
         Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => Err(format!("this firmware pack has its own job: `iyakki quick-install {}`", item.id())),
         Item::MacHost => Err("the Mac model host is a guide: open it from Store \u{2192} Setup or Settings \u{2192} Models".into()),
@@ -1560,7 +2455,6 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
             env.mark(Item::LinuxWindows, &line)?;
             Ok(())
         }
-        Item::IndicTts => Err("Indic-TTS is deployed through the Platform services review (Settings \u{2192} Dev cluster \u{2192} Platform services), not by a job".into()),
     }
 }
 
@@ -1592,6 +2486,46 @@ impl RealEnv {
         clis.set_streamer(streamer.clone());
         let k3s = crate::k3sdev::K3sDev::new(data, clis.clone(), std::sync::Arc::new(crate::wsexec::System));
         RealEnv { data: data.to_path_buf(), user: user.into(), k3s, clis, streamer, registry: RegistryArgs::default(), mac_source: crate::macfw::Source::Download }
+    }
+
+    /// `kubectl create secret generic` from 0600 files in a 0700 folder (one per `(key, value)`), removed at once, then the labels. The
+    /// values are in no argument, no log and no manifest; `redact` are scrubbed from any error text.
+    fn secret_from_values(&mut self, ns: &str, name: &str, values: &[(&str, &str)], labels: &[(&str, &str)], redact: &[&str]) -> Result<(), String> {
+        let dir = state_dir(&self.data).join("secret-tmp");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let scrub = |t: String| redact.iter().fold(t, |t, r| if r.is_empty() { t } else { t.replace(r, "[redacted]") });
+        let result = (|| {
+            use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+            let mut froms: Vec<String> = Vec::new();
+            for (i, (key, value)) in values.iter().enumerate() {
+                let p = dir.join(format!("v{i}"));
+                let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+                f.write_all(value.as_bytes()).map_err(|e| e.to_string())?;
+                froms.push(format!("--from-file={key}={}", p.display()));
+            }
+            let mut args: Vec<&str> = vec!["-n", ns, "create", "secret", "generic", name];
+            args.extend(froms.iter().map(String::as_str));
+            let out = self.k3s.kubectl(&args);
+            if out.code != Some(0) {
+                return Err(format!("kubectl create secret failed: {}", scrub(out.combined()).trim()));
+            }
+            if !labels.is_empty() {
+                let l: Vec<String> = labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                let mut la: Vec<&str> = vec!["-n", ns, "label", "secret", name, "--overwrite"];
+                la.extend(l.iter().map(String::as_str));
+                let out = self.k3s.kubectl(&la);
+                if out.code != Some(0) {
+                    return Err(format!("created the Secret {name} but could not label it: {}", out.combined().trim()));
+                }
+            }
+            Ok(())
+        })();
+        // the files hold the values: gone whatever happened
+        let _ = std::fs::remove_dir_all(&dir);
+        result
     }
 }
 
@@ -1814,13 +2748,113 @@ impl StepEnv for RealEnv {
         }
         Ok(self.clis.installed().into_iter().find(|i| i.id == id).map(|i| i.version).unwrap_or_default())
     }
+    fn register_dash_source(&mut self, cfg: crate::dash::connector::SourceConfig) -> Result<(), String> {
+        crate::dash::store::Sources::open(&self.data, &self.user).save(cfg)
+    }
     fn kubectl_apply(&mut self, name: &str, manifest: &str) -> Result<String, String> {
         let dir = state_dir(&self.data);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let file = dir.join(format!("{name}.yaml"));
-        std::fs::write(&file, manifest).map_err(|e| e.to_string())?;
-        let out = self.k3s.kubectl(&["apply", "-f", &file.display().to_string()]);
-        if out.code == Some(0) { Ok(out.stdout) } else { Err(format!("kubectl apply failed: {}", out.combined().trim())) }
+        let k3s = &self.k3s;
+        let kube = |a: &[&str]| {
+            let o = k3s.kubectl(a);
+            crate::pvcguard::KOut { ok: o.code == Some(0), stdout: o.stdout.clone(), text: o.combined() }
+        };
+        crate::pvcguard::guarded_apply(manifest, None, &kube, &|m: &str| {
+            std::fs::write(&file, m).map_err(|e| e.to_string())?;
+            let out = k3s.kubectl(&["apply", "-f", &file.display().to_string()]);
+            if out.code == Some(0) { Ok(out.stdout) } else { Err(format!("kubectl apply failed: {}", out.combined().trim())) }
+        })
+    }
+    fn graph_secret(&mut self) -> Result<bool, String> {
+        let there = self.k3s.kubectl(&["-n", NAMESPACE, "get", "secret", GRAPH_SECRET, "-o", "name"]);
+        if there.code == Some(0) {
+            return Ok(false);
+        }
+        let pw = new_graph_password()?;
+        let auth = zeroize::Zeroizing::new(format!("{GRAPH_USER}/{}", pw.as_str()));
+        self.secret_from_values(NAMESPACE, GRAPH_SECRET, &[("NEO4J_AUTH", &auth), ("password", &pw)], &[], &[pw.as_str()])?;
+        Ok(true)
+    }
+    fn clickhouse_secret(&mut self) -> Result<bool, String> {
+        let there = self.k3s.kubectl(&["-n", NAMESPACE, "get", "secret", clickhouse::SECRET, "-o", "name"]);
+        if there.code == Some(0) {
+            return Ok(false);
+        }
+        let pw = new_graph_password()?;
+        self.secret_from_values(NAMESPACE, clickhouse::SECRET, &[("CLICKHOUSE_PASSWORD", &pw), ("password", &pw)], &[], &[pw.as_str()])?;
+        Ok(true)
+    }
+    fn matrix_secret(&mut self) -> Result<bool, String> {
+        let there = self.k3s.kubectl(&["-n", matrix::NS, "get", "secret", matrix::SECRET, "-o", "name"]);
+        if there.code == Some(0) {
+            return Ok(false);
+        }
+        let t = new_graph_password()?;
+        self.secret_from_values(matrix::NS, matrix::SECRET, &[("TUWUNEL_REGISTRATION_TOKEN", &t), ("token", &t)], &[], &[t.as_str()])?;
+        Ok(true)
+    }
+    fn cluster_ref(&mut self) -> Result<crate::platform::installed::ClusterRef, String> {
+        let run: std::sync::Arc<dyn crate::wsexec::Runner> = std::sync::Arc::new(crate::wsexec::System);
+        let p = crate::devcluster::inspect(&run, &self.k3s.layout().kubeconfig(), crate::devcluster::Source::K3s, "default", false);
+        let mut c = crate::platform::installed::ClusterRef::of(&p);
+        if c.name.is_empty() {
+            c.name = "k3s".into();
+        }
+        Ok(c)
+    }
+    fn service_records(&mut self) -> Vec<crate::platform::installed::Installed> {
+        crate::platform::installed::load(&self.data, &self.user)
+    }
+    fn save_service(&mut self, rec: crate::platform::installed::Installed) -> Result<(), String> {
+        crate::platform::installed::upsert(&self.data, &self.user, rec)
+    }
+    fn port_free(&mut self, port: u16) -> bool {
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+    }
+    fn live_gitea(&mut self) -> Option<gitea::LiveGitea> {
+        let ns = gitea::NAMESPACE;
+        let there = |kind: &str, name: &str| self.k3s.kubectl(&["-n", ns, "get", kind, name, "-o", "name"]).code == Some(0);
+        if !there("deployment", "gitea") || !there("pvc", "gitea-data") {
+            return None;
+        }
+        let svc = |name: &str| {
+            let o = self.k3s.kubectl(&["-n", ns, "get", "service", name, "-o", "jsonpath={.spec.type} {.spec.ports[*].nodePort}"]);
+            if o.code != Some(0) {
+                return (String::new(), 0u16);
+            }
+            let mut w = o.stdout.split_whitespace();
+            (w.next().unwrap_or("").to_string(), w.next().and_then(|p| p.parse().ok()).unwrap_or(0))
+        };
+        let (http_type, http_node_port) = svc("gitea-http");
+        let (_, ssh_node_port) = svc("gitea-ssh");
+        Some(gitea::LiveGitea { exposure: http_type, http_node_port, ssh_node_port })
+    }
+    fn http_status(&mut self, url: &str) -> Result<u16, String> {
+        let up = iyakki_proxy::https::UreqUpstream::with_timeout(Duration::from_secs(5));
+        iyakki_proxy::Upstream::request(&up, "GET", url, &[], &[]).map(|r| r.status)
+    }
+    fn generated_secret(&mut self, ns: &str, name: &str, key: &str, instance: &str) -> Result<bool, String> {
+        let there = self.k3s.kubectl(&["-n", ns, "get", "secret", name, "-o", "name"]);
+        if there.code == Some(0) {
+            return Ok(false);
+        }
+        let pw = new_graph_password()?;
+        self.secret_from_values(ns, name, &[(key, &pw)], &[("iyakki.dev/instance", instance)], &[pw.as_str()])?;
+        Ok(true)
+    }
+    fn put_secret(&mut self, ns: &str, name: &str, key: &str, value: &str, instance: &str) -> Result<(), String> {
+        let _ = self.k3s.kubectl(&["-n", ns, "delete", "secret", name, "--ignore-not-found"]);
+        self.secret_from_values(ns, name, &[(key, value)], &[("iyakki.dev/instance", instance)], &[value])
+    }
+    fn pod_exec(&mut self, ns: &str, deploy: &str, container: &str, script: &str, arg0: &str) -> Result<String, String> {
+        let target = format!("deploy/{deploy}");
+        let mut args: Vec<&str> = vec!["-n", ns, "exec", &target, "-c", container, "--", "sh", "-c", script];
+        if !arg0.is_empty() {
+            args.push(arg0);
+        }
+        let out = self.k3s.kubectl(&args);
+        if out.code == Some(0) { Ok(out.stdout) } else { Err(out.combined().trim().to_string()) }
     }
     fn rollout(&mut self, namespace: &str, name: &str, timeout: Duration) -> Result<(), String> {
         let deadline = std::time::Instant::now() + timeout;
@@ -1945,12 +2979,25 @@ pub fn cli_main(args: &[String]) -> i32 {
     if args.first().is_some_and(|a| a == "gpu-test") {
         return gpu_test_main(args);
     }
+    // passwords waiting for the vault: say which (names only). The running shell saves them by itself as soon as the person's vault is
+    // open (sign in with the password, or Settings > Vault > Unlock); this process holds no vault.
+    if args.first().is_some_and(|a| a == "--finish-vault") {
+        let data = PathBuf::from(args.iter().position(|a| a == "--data").and_then(|i| args.get(i + 1)).cloned().unwrap_or_else(|| "/var/lib/iyakki".into()));
+        let waiting = crate::vaultpending::list(&data);
+        if waiting.is_empty() {
+            println!("no password is waiting for a vault");
+        }
+        for p in &waiting {
+            println!("{} (for {}): {}; it will be saved as {} from the cluster Secret {}", p.item, p.user, crate::vaultpending::waiting_words(p), p.vault, p.secret);
+        }
+        return 0;
+    }
     // the camera firmware: not an installable item either
     if args.first().is_some_and(|a| a == CAMERA_JOB) {
         return camera_firmware_main(args);
     }
     let Some(item) = args.first().and_then(|a| Item::parse(a)) else {
-        eprintln!("usage: iyakki quick-install <k3s|duckdb|elasticsearch> [--data DIR] [--user NAME]");
+        eprintln!("usage: iyakki quick-install <k3s|duckdb|elasticsearch|clickhouse|graph-db|gitea|matrix> [--data DIR] [--user NAME]");
         return 2;
     };
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
@@ -1958,6 +3005,9 @@ pub fn cli_main(args: &[String]) -> i32 {
     let user = flag("--user").or_else(|| std::env::var("USER").ok()).unwrap_or_else(|| "system".into());
     if item.fw_def().is_some() {
         return firmware_pack_main(args, item, &data, &user);
+    }
+    if item == Item::FwHardware {
+        return crate::fwextra_cli::hardware_main(args, &data, &user);
     }
     let mut env = RealEnv::new(&data, &user);
     if item == Item::Registry {
@@ -2055,3 +3105,39 @@ mod tests;
 #[cfg(test)]
 #[path = "quickinstall_registry_tests.rs"]
 mod registry_tests;
+
+#[cfg(test)]
+#[path = "quickinstall_prometheus_tests.rs"]
+mod prometheus_tests;
+
+#[cfg(test)]
+#[path = "quickinstall_graph_tests.rs"]
+mod graph_tests;
+
+/// The ClickHouse item: one pod and a ClusterIP Service in `iyakki-data`, a generated password, the shared DASH source `clickhouse-cluster`.
+#[path = "quickinstall_clickhouse.rs"]
+pub mod clickhouse;
+/// The OpenSearch item: one pod and a ClusterIP Service in `iyakki-data`, the shared DASH source `opensearch-cluster` (Elasticsearch connector).
+#[path = "quickinstall_opensearch.rs"]
+pub mod opensearch;
+#[cfg(test)]
+#[path = "quickinstall_opensearch_tests.rs"]
+mod opensearch_tests;
+/// The Matrix server item: Tuwunel in its own namespace, a generated registration token for the vault, federation off.
+#[path = "quickinstall_matrix.rs"]
+pub mod matrix;
+#[cfg(test)]
+#[path = "quickinstall_matrix_tests.rs"]
+mod matrix_tests;
+
+#[cfg(test)]
+#[path = "quickinstall_clickhouse_tests.rs"]
+mod clickhouse_tests;
+
+/// The Gitea item: Platform services' Gitea objects deployed by a Quick install job, with the vault handoff and the Git connection.
+#[path = "quickinstall_gitea.rs"]
+pub mod gitea;
+
+#[cfg(test)]
+#[path = "quickinstall_gitea_tests.rs"]
+mod gitea_tests;

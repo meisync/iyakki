@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-core-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The contract between IYAKKI apps and IYAKKI core: traits, serde request/response types, ApiError, Capabilities, Identity. No IO."
+
+[dependencies]
+iyakki-sec.workspace = true
+thiserror.workspace = true
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

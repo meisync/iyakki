@@ -71,14 +71,14 @@ fn setup(tag: &str) -> (World, IdeApp) {
 
 #[test]
 fn browser_is_a_main_tab_between_board_and_k8s_with_a_globe_and_a_shortcut() {
-    assert_eq!(MainTab::ALL, [MainTab::Editor, MainTab::Board, MainTab::Tasks, MainTab::Notes, MainTab::Browser, MainTab::K8s]);
-    assert_eq!(MainTab::ALL.iter().map(|t| t.label()).collect::<Vec<_>>(), ["Editor", "Board", "Tasks", "Context", "Browser", "K8s"]);
+    assert_eq!(MainTab::ALL, [MainTab::Editor, MainTab::Board, MainTab::Tasks, MainTab::Notes, MainTab::Browser, MainTab::K8s, MainTab::Git]);
+    assert_eq!(MainTab::ALL.iter().map(|t| t.label()).collect::<Vec<_>>(), ["Editor", "Board", "Tasks", "Context", "Browser", "K8s", "Git"]);
     assert_eq!(super::super::ide_ui::main_glyph(MainTab::Browser), crate::fx::Glyph::Globe);
     let (w, mut app) = setup("tab");
     for (wd, ht) in [(1280u32, 720u32), (1920, 1080), (1024, 600)] {
         let g = render(&mut app, &w.cx, wd, ht);
-        let tabs: Vec<(&str, f32)> = (0..6).filter_map(|i| g.hits.iter().find(|h| h.ev == Event::Tab(T_MAIN + i)).map(|h| (h.label.as_str(), h.rect.x))).collect();
-        assert_eq!(tabs.iter().map(|t| t.0.split(' ').next().unwrap()).collect::<Vec<_>>(), ["Editor", "Board", "Tasks", "Context", "Browser", "K8s"], "{wd}x{ht}");
+        let tabs: Vec<(&str, f32)> = (0..7).filter_map(|i| g.hits.iter().find(|h| h.ev == Event::Tab(T_MAIN + i)).map(|h| (h.label.as_str(), h.rect.x))).collect();
+        assert_eq!(tabs.iter().map(|t| t.0.split(' ').next().unwrap()).collect::<Vec<_>>(), ["Editor", "Board", "Tasks", "Context", "Browser", "K8s", "Git"], "{wd}x{ht}");
         assert!(tabs.windows(2).all(|p| p[0].1 < p[1].1), "left to right in that order: {tabs:?}");
     }
     // clicking the tab shows it; Ctrl+Shift+O toggles it and Esc-less: the second press goes back to the editor

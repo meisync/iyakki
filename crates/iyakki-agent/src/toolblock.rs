@@ -27,12 +27,24 @@ pub enum Group {
     Pictures,
     Vault,
     System,
+    /// The flows the person builds (`flow_*`).
+    Flows,
+    /// Dashboards and their data sources (`dash_*`).
+    Dash,
+    /// CSV/TSV tables (`data_*`).
+    Data,
+    /// The connected cluster and platform services (`k8s_*`, `deploy_*`, `platform_*`, registry).
+    Cluster,
+    /// The AI IDE workspace: board, notes, background jobs.
+    Workspace,
+    /// Writing and publishing IYAKKI apps (tiles, drivers, the store as an author).
+    Build,
     /// Tool packages, MCP servers and anything newer than this table: never hidden.
     Extra,
 }
 
 impl Group {
-    pub const ALL: [Group; 10] = [Group::Web, Group::Browser, Group::Media, Group::Radio, Group::Files, Group::Calendar, Group::Pictures, Group::Vault, Group::System, Group::Extra];
+    pub const ALL: [Group; 16] = [Group::Web, Group::Browser, Group::Media, Group::Radio, Group::Files, Group::Calendar, Group::Pictures, Group::Vault, Group::System, Group::Flows, Group::Dash, Group::Data, Group::Cluster, Group::Workspace, Group::Build, Group::Extra];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -45,6 +57,12 @@ impl Group {
             Group::Pictures => "pictures",
             Group::Vault => "vault",
             Group::System => "system",
+            Group::Flows => "flows",
+            Group::Dash => "dash",
+            Group::Data => "data",
+            Group::Cluster => "cluster",
+            Group::Workspace => "workspace",
+            Group::Build => "build",
             Group::Extra => "extra",
         }
     }
@@ -56,10 +74,16 @@ impl Group {
             Group::Media => "the person's music/videos/pictures library and downloads",
             Group::Radio => "internet radio",
             Group::Files => "files, documents, read-only terminal",
-            Group::Calendar => "calendar, alarms, tasks, inbox notes",
+            Group::Calendar => "calendar, alarms, tasks, inbox notes, study plans and quizzes",
             Group::Pictures => "show or draw pictures, screen capture",
             Group::Vault => "ask the person a question (ask_user), or to store a secret",
-            Group::System => "command-line tools, containers, models",
+            Group::System => "command-line tools, containers, models, the app store",
+            Group::Flows => "build, run and fix flows",
+            Group::Dash => "dashboards and data sources",
+            Group::Data => "CSV/TSV tables",
+            Group::Cluster => "the connected cluster: deploy, logs, services",
+            Group::Workspace => "the workspace board, notes, background jobs",
+            Group::Build => "write and publish IYAKKI apps (tiles, drivers)",
             Group::Extra => "installed packages and connected servers",
         }
     }
@@ -71,7 +95,7 @@ impl Group {
 
     /// Offered on every request, whatever was asked.
     pub fn always(self) -> bool {
-        matches!(self, Group::Web | Group::Files | Group::Pictures | Group::Vault | Group::Extra)
+        matches!(self, Group::Web | Group::Files | Group::Vault | Group::Extra)
     }
 }
 
@@ -79,17 +103,26 @@ pub fn group_of(name: &str) -> Group {
     match name {
         "now" | "web_research" | "web_search" | "web_fetch" | "web_feed" | "web_links" | "weather" | "stock_quote" | "fetch_url" | "http_request" | "browser_page" => Group::Web,
         "list_dir" | "read_file" | "write_file" | "search_documents" | "terminal" => Group::Files,
-        n if n.starts_with("data_") => Group::Files,
+        n if n.starts_with("data_") => Group::Data,
+        n if n.starts_with("flow_") => Group::Flows,
+        n if n.starts_with("dash_") => Group::Dash,
+        "cluster_setup_plan" | "git_service_status" | "registry_setup" | "registry_setup_help" => Group::Cluster,
+        n if n.starts_with("k8s_") || n.starts_with("deploy_") || n.starts_with("platform_") => Group::Cluster,
+        "task_spawn" | "task_status" | "task_plan" | "bug_report" | "history_search" => Group::Workspace,
+        n if n.starts_with("board_") || n.starts_with("note_") || n.starts_with("context_") || n.starts_with("job_") => Group::Workspace,
+        "app_scaffold" | "app_preflight" | "app_bump_version" | "publisher_keys" | "store_validate" | "store_publish" | "store_server_status" | "driver_status" | "driver_install" => Group::Build,
+        n if n.starts_with("tile_") => Group::Build,
+        n if n.starts_with("ssh_tunnel_") => Group::System,
         "show_svg" | "show_image" | "generate_image" | "screen_capture" => Group::Pictures,
         n if n.starts_with("camera_") => Group::Pictures,
-        "vault_request" | "ask_user" => Group::Vault,
+        "vault_request" | "ask_user" | "ask_form" => Group::Vault,
         "play_media" | "pause_media" | "resume_media" | "stop_media" => Group::Media,
-        "run_command" | "run_wasm" | "sandbox_run" | "list_clis" | "install_cli" | "remove_cli" | "cluster_status" | "cluster_start" | "cluster_stop" | "list_models" | "pull_model" | "store_search" | "store_info" | "store_install" | "store_outdated" | "store_update" | "store_remove" | "store_rollback" | "app_scaffold" | "store_validate" | "store_publish" | "store_server_status" | "tile_scaffold" | "tile_validate" | "tile_test" | "tile_install_dev" | "tile_pack" | "tile_ship" | "app_preflight" | "app_bump_version" | "publisher_keys" | "driver_status" | "driver_install" => Group::System,
+        "run_command" | "run_wasm" | "sandbox_run" | "list_clis" | "install_cli" | "remove_cli" | "cluster_status" | "cluster_start" | "cluster_stop" | "list_models" | "pull_model" | "store_search" | "store_info" | "store_install" | "store_outdated" | "store_update" | "store_remove" | "store_rollback" | "tile_scaffold" | "tile_validate" | "tile_test" | "tile_install_dev" | "tile_pack" | "tile_ship" => Group::System,
         "notify" => Group::Calendar,
         n if n.starts_with("browser_") => Group::Browser,
         n if n.starts_with("media_") => Group::Media,
         n if n.starts_with("radio_") => Group::Radio,
-        n if n.starts_with("calendar_") || n.starts_with("alarm_") || n.starts_with("task_") => Group::Calendar,
+        n if n.starts_with("calendar_") || n.starts_with("alarm_") || n.starts_with("task_") || n.starts_with("study_") || n.starts_with("quiz_") => Group::Calendar,
         _ => Group::Extra,
     }
 }
@@ -111,13 +144,61 @@ pub fn intent_groups(text: &str) -> BTreeSet<Group> {
     if has(&t, &["radio", " fm", "fm ", "station", "tune in", "bbc", "play"]) {
         g.insert(Group::Radio);
     }
-    if has(&t, &["remind", "calendar", "schedule", "alarm", "appointment", "meeting", "task", "todo", "to-do", "wake me", "event", "tomorrow", "inbox"]) {
+    if has(&t, &["remind", "calendar", "schedule", "alarm", "appointment", "meeting", "task", "todo", "to-do", "wake me", "event", "tomorrow", "inbox", "plan", "lesson", "learn", "study", "quiz", "course", "yoga", "syllabus", "practice", "revision", "days"]) {
         g.insert(Group::Calendar);
     }
     if has(&t, &["install", "app store", "the store", "skill for", "plugin", "extension", "cluster", "kubectl", "k3s", "iyakki", "tile", "launcher", "publish", "docker", "container", "run code", "python", "node ", "ssh", "aws", "gcloud", "command", "script", "ollama", "model", "pull "]) {
         g.insert(Group::System);
     }
+    if has(&t, &["draw", "picture", "image", "diagram", "svg", "chart", "logo", "icon", "camera", "photo", "screen", "plot", "illustrat", "sketch"]) {
+        g.insert(Group::Pictures);
+    }
+    if has(&t, &["flow", "pipeline", "automation", "automate", "self-heal", "heal policy"]) {
+        g.insert(Group::Flows);
+    }
+    if has(&t, &["dashboard", "panel", "metric", "prometheus", "elasticsearch", "clickhouse", "kibana", "grafana", "time series"]) {
+        g.insert(Group::Dash);
+    }
+    if has(&t, &["table", "csv", "tsv", "spreadsheet", "dataset", "column", "rows", "excel", "pivot", "group by"]) {
+        g.insert(Group::Data);
+    }
+    if has(&t, &["k8s", "kubernetes", "cluster", "deploy", " pod", "namespace", "registry", "helm", "gitea", "rollout", "manifest", "platform"]) {
+        g.insert(Group::Cluster);
+    }
+    if has(&t, &["board", "feature row", "backlog", "bug", "background job", "notebook"]) {
+        g.insert(Group::Workspace);
+    }
+    if has(&t, &["tile", "scaffold", "publish", "driver", "sdk", "build an app", "make an app", "new app", "iyakki app"]) {
+        g.insert(Group::Build);
+    }
     g
+}
+
+/// The groups the last few messages of the conversation point at (the person's words, and the tools already used), so a
+/// follow-up such as "yes, do it" keeps the topic.
+pub fn topic_groups(history: &[crate::chat::Message]) -> BTreeSet<Group> {
+    use crate::chat::Role;
+    let mut g = BTreeSet::new();
+    let users: Vec<&crate::chat::Message> = history.iter().filter(|m| m.role == Role::User && !m.content.starts_with("[IYAKKI]")).collect();
+    for m in users.iter().rev().take(3) {
+        g.extend(intent_groups(&m.content));
+    }
+    let from = history.len().saturating_sub(24);
+    for m in &history[from..] {
+        for c in &m.tool_calls {
+            let gr = group_of(&c.name);
+            if !gr.always() {
+                g.insert(gr);
+            }
+        }
+    }
+    g
+}
+
+/// The groups offered with the first request of a run: the always-on core, what the conversation points at, and what the
+/// context the chat was opened from needs (`context`: Flows tile, a dashboard, an IDE workspace, an open browser page).
+pub fn initial_groups(history: &[crate::chat::Message], context: &BTreeSet<Group>) -> BTreeSet<Group> {
+    Group::ALL.into_iter().filter(|g| g.always()).chain(topic_groups(history)).chain(context.iter().copied()).collect()
 }
 
 /// The groups present in a registry, with their tool names.
@@ -155,7 +236,15 @@ pub struct ReminderCtx {
 
 /// The tool specs to send: every tool of an offered group.
 pub fn select_specs(defs: &[ToolDef], loaded: &BTreeSet<Group>) -> Vec<ToolSpec> {
-    defs.iter().filter(|d| loaded.contains(&group_of(&d.spec.name))).map(|d| d.spec.clone()).collect()
+    // the always-on core first, so that the start of the list stays the same when a group is added (provider prompt caches)
+    let (core, rest): (Vec<&ToolDef>, Vec<&ToolDef>) = defs.iter().filter(|d| loaded.contains(&group_of(&d.spec.name))).partition(|d| group_of(&d.spec.name).always());
+    let all: Vec<&ToolDef> = core.into_iter().chain(rest).collect();
+    // inside FLOWS the registry leads with the flow tools (the person's workflow comes first): keep them first
+    if defs.first().is_some_and(|d| group_of(&d.spec.name) == Group::Flows) {
+        let (flows, others): (Vec<&ToolDef>, Vec<&ToolDef>) = all.into_iter().partition(|d| group_of(&d.spec.name) == Group::Flows);
+        return flows.into_iter().chain(others).map(|d| d.spec.clone()).collect();
+    }
+    all.into_iter().map(|d| d.spec.clone()).collect()
 }
 
 const MAX_NAMES_PER_GROUP: usize = 10;
@@ -209,7 +298,7 @@ RULES\n\
 1. Real-time or changing facts (weather, prices, news, scores, today's events) are never answered from memory: call weather, stock_quote (ticker or company name), web_research (news and \"latest on X\"), or web_search then web_fetch. Never say you cannot access websites or the internet. If one source is blocked, say so and use another. Answer with the date, short bullet points and numbered sources [1] [2] with addresses, say which sources failed, and that figures may be delayed.\n\
 2. \"Summarise this page\" or \"what is on my screen in the browser\": browser_page. A picture of the person's IYAKKI screen: screen_capture (they are asked every time).\n\
 3. Radio: radio_play with the query (\"play a tamil online fm\"); if several match play the top one and say which. The person's own songs, videos and pictures: media_search, then media_play with the id it gave; never invent ids. Also stop/pause/resume tools exist.\n\
-4. Plan and remind with calendar_add, alarm_set, task_add. Draw with show_svg (SVG markup) or generate_image; show pictures with show_image; never tell the person to save a file and open it elsewhere.\n\
+4. Plan and remind with calendar_add, alarm_set, task_add. Study plans and quizzes: study_plan_create (exactly the session count the code asks for; ask before study_plan_to_calendar), quiz_create (verify each answer number), quiz_next then quiz_answer one question at a time in the chat, quiz_open for the LEARN tile, study_lesson_open for the written lesson of one day of a plan. Draw with show_svg (SVG markup) or generate_image; show pictures with show_image; never tell the person to save a file and open it elsewhere.\n\
 5. Browser tools drive the person's own tab: snapshot before acting, use element ids from the latest snapshot only, clicking and typing need their approval, never type secrets (browser_login uses a vault name), never look for a way around an approval; if the person did not answer an approval, say so and ask them to approve and retry.\n\
 6. To ask the person something (a choice, or permission to go on) call ask_user with short options instead of writing the question in prose: the chat shows a button for each option.\n\
 7. CREDENTIALS: never ask for a password, key or token in the chat; call vault_request. Refer to secrets as vault:<name> or uvault:<name>.\n\

@@ -18,7 +18,7 @@ use crate::services::Services;
 pub const MAX_CHARS: usize = 6000;
 
 pub fn is_flow_tool(name: &str) -> bool {
-    matches!(name, "flow_list" | "flow_get" | "flow_runs" | "flow_run_status" | "flow_logs" | "flow_explain_failure" | "flow_create" | "flow_edit" | "flow_run" | "flow_cancel" | "flow_publish" | "flow_rollback" | "flow_apply_to_runs" | "flow_set_heal_policy")
+    matches!(name, "flow_list" | "flow_get" | "flow_runs" | "flow_run_status" | "flow_logs" | "flow_explain_failure" | "flow_create" | "flow_edit" | "flow_run" | "flow_cancel" | "flow_publish" | "flow_rollback" | "flow_apply_to_runs" | "flow_set_heal_policy" | "flow_delete" | "flow_drop_version")
 }
 
 pub fn offered(p: &Policy) -> bool {
@@ -33,7 +33,7 @@ fn obj(props: Value, req: &[&str]) -> Value {
     json!({"type": "object", "properties": props, "required": req})
 }
 
-const NODE_HELP: &str = "A node: {id, kind, name?, config, retry?, timeout_ms?, runner?, heal?, on_error?}. Kinds and their config: http {method,url,headers,body,expect_status,extract}; cli {command:[program,args...] (never a shell), cwd, env, parse (text|json|lines|regex), retry_exit_codes, retry_patterns, cli:{id,min_version}}; grpc {address,method,data,plaintext,metadata,deadline_ms} (uses grpcurl); browser {steps,allow_domains,level (read_only|interactive),extract}; agent {prompt,output_schema,max_cents} (no tools yet); script {lang:js|wasm,source|package,args}; condition {expr} (ports true/false); switch {value,cases}; delay {seconds}; approval {message,timeout_s}; notify {title,body,level}; subflow {flow,inputs}; foreach {items,flow,max_items}; remote {url,auth:{kind,secret}}. BROWSER QA kinds (one private browser session per run, closed when the run ends; selectors are CSS; secrets only as `vault:NAME` in text fields; put `defaults.browser` {trusted,profile:isolated|person,max_actions,max_minutes} on the flow): br_open {url,wait:load|idle|none}; br_screenshot {name,selector?,index?,full_page?} (output.path is a PNG file); br_dom {mode:page|outer_html|text|attributes|summary,selector?,max_bytes,console,links,failures}; br_assert {check: exists|not_exists|count|text_equals|text_contains|text_matches|attr_equals|attr_contains|value_equals|visible|hidden|enabled|disabled|checked|url_equals|url_contains|title_equals|title_contains|no_console_errors|page_contains|page_not_contains, selector?, expected?, attribute?, soft?, wait_ms} (output.passed, output.message); br_click {selector,native?}; br_type {selector,text,clear,press_enter}; br_fill {fields:{selector:value},submit?}; br_submit {selector?}; br_key {key,selector?}; br_hover; br_scroll {to:selector|top|bottom|down|up}; br_select {selector,option,by}; br_wait {for:selector|selector_gone|text|text_gone|url|time,value,ms}; br_extract {fields:{name:selector|{selector,attr,all}},rows:{selector,columns}}; br_js {expression,args} (administrators only); br_frame {action:frame|parent|main|tabs,selector}; br_viewport {preset|width,height}; br_storage {kind:cookie|local_storage|session_storage,name,value}; br_download {name_contains,save_in}; br_compare {name,threshold,tolerance,update} (baseline picture, saved on the first run). An agent step can show screenshots to a vision-capable model with `images: [\"{{ nodes.shot.output.path }}\"]`. Use {{ nodes.<id>.output.<field> }} and {{ inputs.<name> }} in config; credentials only as {{secret.NAME}} (a vault secret the person stores, never a value). thrift is planned and cannot run. retry: {attempts, backoff:{kind:fixed,delay_ms} | {kind:exponential,base_ms,factor,max_ms,jitter} | {kind:list,steps:[{timeout_ms,delay_ms}]}}.";
+const NODE_HELP: &str = "A node: {id, kind, name?, config, retry?, timeout_ms?, runner?, heal?, on_error?}. Kinds and their config: http {method,url,headers,body,expect_status,extract}; cli {command:[program,args...] (never a shell), cwd, env, parse (text|json|lines|regex), retry_exit_codes, retry_patterns, cli:{id,min_version}}; grpc {address,method,data,plaintext,metadata,deadline_ms} (uses grpcurl); browser {steps,allow_domains,level (read_only|interactive),extract}; agent {prompt,output_schema,max_cents} (no tools yet); script {lang:js|wasm,source|package,args}; condition {expr} (ports true/false); switch {value,cases}; delay {seconds}; approval {message,timeout_s}; notify {title,body,level}; subflow {flow,inputs}; foreach {items,flow,max_items}; remote {url,auth:{kind,secret}}. BROWSER QA kinds (one private browser session per run, closed when the run ends; selectors are CSS; secrets only as `vault:NAME` in text fields; put `defaults.browser` {trusted,profile:isolated|person,max_actions,max_minutes} on the flow): br_open {url,wait:load|idle|none}; br_screenshot {name,selector?,index?,full_page?} (output.path is a PNG file); br_dom {mode:page|outer_html|text|attributes|summary,selector?,max_bytes,console,links,failures}; br_assert {check: exists|not_exists|count|text_equals|text_contains|text_matches|attr_equals|attr_contains|value_equals|visible|hidden|enabled|disabled|checked|url_equals|url_contains|title_equals|title_contains|no_console_errors|page_contains|page_not_contains, selector?, expected?, attribute?, soft?, wait_ms} (output.passed, output.message); br_click {selector,native?}; br_type {selector,text,clear,press_enter}; br_fill {fields:{selector:value},submit?}; br_submit {selector?}; br_key {key,selector?}; br_hover; br_scroll {to:selector|top|bottom|down|up}; br_select {selector,option,by}; br_wait {for:selector|selector_gone|text|text_gone|url|time,value,ms}; br_extract {fields:{name:selector|{selector,attr,all}},rows:{selector,columns}}; br_js {expression,args} (administrators only); br_frame {action:frame|parent|main|tabs,selector}; br_viewport {preset|width,height}; br_storage {kind:cookie|local_storage|session_storage,name,value}; br_download {name_contains,save_in}; br_compare {name,threshold,tolerance,update} (baseline picture, saved on the first run). CAMERA kind: cam_photo {device?,keep?} takes one picture (output.path is a JPEG, output.taken_at) and runs only when the person switched on `defaults.camera` (Camera allowed; you cannot); the picture is deleted when the run ends unless keep is on; show it to a vision model with an agent step `images`. An agent step can show screenshots to a vision-capable model with `images: [\"{{ nodes.shot.output.path }}\"]`. Use {{ nodes.<id>.output.<field> }} and {{ inputs.<name> }} in config; credentials only as {{secret.NAME}} (a vault secret the person stores, never a value). thrift is planned and cannot run. retry: {attempts, backoff:{kind:fixed,delay_ms} | {kind:exponential,base_ms,factor,max_ms,jitter} | {kind:list,steps:[{timeout_ms,delay_ms}]}}.";
 
 pub fn defs(p: &Policy) -> Vec<ToolDef> {
     if !offered(p) {
@@ -54,6 +54,8 @@ pub fn defs(p: &Policy) -> Vec<ToolDef> {
         tool("flow_publish", "Publish the draft as the next immutable version, with an optional `label` and a `changelog` line. The person always approves, also in Auto mode, and approves any change the agent made.", obj(json!({"flow": flow_arg.clone(), "label": {"type": "string"}, "changelog": {"type": "string"}}), &["changelog"]), Risk::Ask, false),
         tool("flow_rollback", "Publish an older version's content as a new version. The person always approves.", obj(json!({"flow": flow_arg.clone(), "version": {"type": "integer"}}), &["version"]), Risk::Ask, false),
         tool("flow_apply_to_runs", "Give scheduled and running runs the latest published definition of one node: `scope` scheduled (now), running (at the node's next boundary, never mid-node) or both. Incompatible changes (other ports or output names) are refused unless `allow_incompatible`. The person always approves.", obj(json!({"flow": flow_arg.clone(), "node": {"type": "string"}, "scope": {"type": "string", "enum": ["scheduled", "running", "both"]}, "allow_incompatible": {"type": "boolean"}}), &["node", "scope"]), Risk::Ask, false),
+        tool("flow_delete", "Delete a whole flow: its draft and every published version go; its runs stay in the history. Refused while the flow has runs that are running or scheduled. The person always confirms, with the flow named.", obj(json!({"flow": flow_arg.clone()}), &[]), Risk::Ask, false),
+        tool("flow_drop_version", "Drop one published version of a flow (its content is lost; runs keep their own copy). The current published version is never dropped: publish or roll back to another first. Refused while an active run uses that version. The person always confirms, with the flow and version named.", obj(json!({"flow": flow_arg.clone(), "version": {"type": "integer"}}), &["version"]), Risk::Ask, false),
         tool("flow_set_heal_policy", "Set who may fix failed steps: `mode` off, suggest (the agent proposes, the person approves), auto_fix_simple (simple fixes are applied by themselves), always_ask. Optional `node` for one node, `max_per_run`, `max_per_day`, `cost_cap_cents`, `auto_publish_simple`. Anything but `off` always asks the person.", obj(json!({"flow": flow_arg, "node": {"type": "string"}, "mode": {"type": "string", "enum": ["off", "suggest", "auto_fix_simple", "always_ask"]}, "max_per_run": {"type": "integer"}, "max_per_day": {"type": "integer"}, "cost_cap_cents": {"type": "integer"}, "auto_publish_simple": {"type": "boolean"}}), &["mode"]), Risk::Ask, false),
     ]
 }
@@ -68,6 +70,8 @@ pub fn describe(name: &str, args: &Value) -> String {
         "flow_cancel" => format!("cancel run {}", s("run")),
         "flow_publish" => format!("PUBLISH the draft of {flow} as the next version: {}", s("changelog")),
         "flow_rollback" => format!("ROLL BACK {flow} to version {}, published as a new version", args.get("version").and_then(Value::as_i64).unwrap_or(0)),
+        "flow_delete" => format!("DELETE {flow} with all its versions (this cannot be undone)"),
+        "flow_drop_version" => format!("DROP version {} of {flow} (its content is lost)", args.get("version").and_then(Value::as_i64).unwrap_or(0)),
         "flow_apply_to_runs" => format!("give {} runs of {flow} the newest definition of step {}", s("scope"), s("node")),
         "flow_set_heal_policy" => format!("let the agent {} for {}{}", match s("mode").as_str() { "off" => "not fix anything".to_string(), "suggest" => "propose fixes you approve".to_string(), "auto_fix_simple" => "apply simple fixes by itself".to_string(), "always_ask" => "ask you before every fix".to_string(), o => o.to_string() }, flow, if s("node").is_empty() { String::new() } else { format!(", step {}", s("node")) }),
         other => format!("{other} {}", s("flow")),
@@ -236,7 +240,9 @@ impl FlowEnv {
                 self.save_edit(&f, AGENT, &done.join("; "), touched)?;
                 self.host_audit("flow.edit", &format!("{id} by {AGENT}: {}", done.join("; ")));
                 let issues = self.issue_lines(&f);
-                Ok(format!("Changed the draft of `{id}` (marked as the agent's): {}.{}", done.join("; "), if issues.is_empty() { " No problems found.".into() } else { format!("\nProblems:\n{}", issues.join("\n")) }))
+                let d = store::diff(&before, &f);
+                let what = if d.is_empty() { String::new() } else { format!("\nWhat changed (steps added, changed, removed):\n{}", d.text()) };
+                Ok(format!("Changed the draft of `{id}` (marked as the agent's; publishing it makes the next version): {}.{what}{}", done.join("; "), if issues.is_empty() { " No problems found.".into() } else { format!("\nProblems:\n{}", issues.join("\n")) }))
             }
             "flow_run" => {
                 let id = self.flow_id(args, open)?;
@@ -245,6 +251,14 @@ impl FlowEnv {
                 req.inputs = args.get("inputs").filter(|v| v.is_object()).cloned().unwrap_or_else(|| json!({}));
                 req.at_ms = at;
                 req.draft = args.get("draft").and_then(Value::as_bool).unwrap_or(false);
+                // a missing required input is asked for with a form, not guessed
+                if let Some(f) = self.store.published(&id).or_else(|| self.store.get_draft(&id)) {
+                    let fields = askform::fields_for_missing(&f.inputs, &req.inputs);
+                    if !fields.is_empty() {
+                        let names: Vec<String> = fields.iter().filter_map(|x| x["name"].as_str().map(String::from)).collect();
+                        return Err(format!("the flow needs {} before it can run. Call ask_form with title \"Inputs for {}\" and these fields, then call flow_run again with the answers as `inputs`: {}", names.join(", "), f.name, serde_json::to_string(&fields).unwrap_or_default()));
+                    }
+                }
                 if !s(args, "key").is_empty() {
                     req.idempotency_key = Some(s(args, "key").to_string());
                 }
@@ -260,6 +274,7 @@ impl FlowEnv {
                 // the person approved this call, so the agent's changes in the draft are approved with it
                 let v = self.store.publish(&id, &PublishReq { by: &self.who(), label: s(args, "label"), changelog: s(args, "changelog"), approved_by: Some(&self.who()) })?;
                 self.host_audit("flow.publish", &format!("{id} v{v} by {} (approved)", self.who()));
+                self.assist_after_publish(&id, v);
                 let ups = self.engine.node_updates(&id);
                 Ok(format!("Published `{id}` as version {v}.{}", if ups.is_empty() { String::new() } else { format!(" {} step(s) have runs on an older definition; flow_apply_to_runs can move them over.", ups.len()) }))
             }
@@ -268,7 +283,19 @@ impl FlowEnv {
                 let to = args.get("version").and_then(Value::as_u64).ok_or("give `version`")? as u32;
                 let v = self.store.rollback(&id, to, &self.who())?;
                 self.host_audit("flow.rollback", &format!("{id} to v{to} as v{v} by {}", self.who()));
+                self.assist_after_publish(&id, v);
                 Ok(format!("Rolled `{id}` back to version {to}; published as version {v}."))
+            }
+            "flow_delete" => {
+                let id = self.flow_id(args, open)?;
+                let name = self.delete_flow(&id)?;
+                Ok(format!("Deleted flow `{id}` (\"{name}\") with all its versions. Its runs stay in the history."))
+            }
+            "flow_drop_version" => {
+                let id = self.flow_id(args, open)?;
+                let v = args.get("version").and_then(Value::as_u64).ok_or("give `version`")? as u32;
+                self.drop_version(&id, v)?;
+                Ok(format!("Dropped version {v} of `{id}`."))
             }
             "flow_apply_to_runs" => {
                 let id = self.flow_id(args, open)?;
@@ -333,6 +360,18 @@ impl FlowEnv {
                 let agent: Vec<String> = d.meta.modified_by.iter().filter(|c| c.by_agent()).map(|c| format!("- {}", c.summary)).collect();
                 Some(format!("{text}{}", if agent.is_empty() { String::new() } else { format!("\nChanges made by the agent in this draft:\n{}", agent.join("\n")) }))
             }
+            "flow_delete" => {
+                let id = self.flow_id(args, open).ok()?;
+                let f = self.store.get_draft(&id)?;
+                Some(format!("Flow `{id}` \"{}\": {} published version(s) and the draft are lost for good. Runs stay in the history.{}", f.name, self.store.versions(&id).len(), self.active_runs_text(&id, None)))
+            }
+            "flow_drop_version" => {
+                let id = self.flow_id(args, open).ok()?;
+                let v = args.get("version")?.as_u64()? as u32;
+                let f = self.store.get_draft(&id)?;
+                let cur = self.store.meta_of(&id).published;
+                Some(format!("Flow `{id}` \"{}\": version {v} is lost for good{}.{}", f.name, if cur == v { " (it is the CURRENT published version, so this will be refused)" } else { "" }, self.active_runs_text(&id, Some(v))))
+            }
             "flow_rollback" => {
                 let id = self.flow_id(args, open).ok()?;
                 let to = args.get("version")?.as_u64()? as u32;
@@ -342,6 +381,42 @@ impl FlowEnv {
             }
             _ => None,
         }
+    }
+
+    /// Runs of the flow that are not finished (optionally only those on one version): ids, for the refusal and the card.
+    fn active_run_ids(&self, id: &str, version: Option<u32>) -> Vec<String> {
+        self.engine.summaries().iter().filter(|r| r.flow_id == id && !r.status.is_terminal() && version.is_none_or(|v| r.version == v)).map(|r| r.id.clone()).collect()
+    }
+
+    fn active_runs_text(&self, id: &str, version: Option<u32>) -> String {
+        let a = self.active_run_ids(id, version);
+        if a.is_empty() { String::new() } else { format!(" REFUSED while these runs are unfinished: {}.", a.join(", ")) }
+    }
+
+    /// Delete a flow after the person confirmed. Refused while it has runs that are running or scheduled. Audited by id and name.
+    pub fn delete_flow(&self, id: &str) -> Result<String, String> {
+        let f = self.store.get_draft(id).ok_or_else(|| format!("there is no flow `{id}`"))?;
+        let a = self.active_run_ids(id, None);
+        if !a.is_empty() {
+            return Err(format!("`{id}` has runs that are not finished ({}): cancel them first, then delete the flow", a.iter().take(5).cloned().collect::<Vec<_>>().join(", ")));
+        }
+        self.store.delete(id)?;
+        if super::last_flow(self).is_some_and(|(l, _)| l == id) {
+            super::clear_last_flow(&self.svc, &self.user);
+        }
+        self.host_audit("flow.delete", &format!("{id} \"{}\" by {}", f.name, self.who()));
+        Ok(f.name)
+    }
+
+    /// Drop one published version after the person confirmed. Never the current version; refused while an unfinished run uses it.
+    pub fn drop_version(&self, id: &str, version: u32) -> Result<(), String> {
+        let a = self.active_run_ids(id, Some(version));
+        if !a.is_empty() {
+            return Err(format!("version {version} of `{id}` is used by runs that are not finished ({}): wait for them or cancel them first", a.iter().take(5).cloned().collect::<Vec<_>>().join(", ")));
+        }
+        self.store.drop_version(id, version)?;
+        self.host_audit("flow.version.drop", &format!("{id} v{version} by {}", self.who()));
+        Ok(())
     }
 
     fn host_audit(&self, action: &str, detail: &str) {
@@ -381,20 +456,37 @@ impl FlowTools {
     }
 }
 
+/// Tools that build an IYAKKI tile app or a web service. FLOWS does not offer them: "create" means a flow here.
+pub fn is_app_creation_tool(name: &str) -> bool {
+    matches!(name, "app_scaffold" | "app_preflight" | "app_bump_version" | "tile_scaffold" | "tile_validate" | "tile_test" | "tile_install_dev" | "tile_pack" | "tile_ship")
+}
+
+const APP_REFUSAL: &str = "App building is not available in FLOWS. Make a flow instead (flow_create), or tell the person to open the AI IDE if they really want an app.";
+
 /// The rules for the model inside the FLOWS tile (kept short).
-pub const PROMPT_RULES: &str = "\nYou work in FLOWS, the person's workflow tile (what is open is described below, refreshed with every message). To build or change a flow use flow_create and flow_edit: they make DRAFTS, shown on the canvas at once, marked as yours, and the person publishes them. Never publish by yourself: ask with flow_publish only when the person says to, and it will ask them. Look before you change: flow_get first, then edit step by step (ids, ports and `{{ nodes.<id>.output.<field> }}` references must match). For \"why did run N fail\" call flow_explain_failure and quote its numbers; do not invent causes. Retry settings go in the node's `retry` (attempts, and backoff fixed, exponential or a per-attempt list of timeout and pause). Commands are a list of arguments, never a shell string. Credentials: never ask for, repeat or write one; use {{secret.NAME}} and, when the secret is missing, call vault_request so the person types it into their vault. You cannot approve your own fix: when a run needs the person, say so and point them to the card. Board and feature-row rules do not apply here.";
+pub const PROMPT_RULES: &str = "\nYou work in FLOWS, the person's workflow tile (what is open is described below, refreshed with every message). Work on workflows first: prefer the flow_* tools (list, read, create, edit, run, explain a flow, its runs and failures) over every general tool. When a flow is OPEN ON SCREEN, requests to change, add to or update a flow apply to THAT flow: use flow_edit on it (leave `flow` out), step by step, and summarise what changed; call flow_create only when no flow is open or the person asks for a new one by name. Whatever the person asks you to create, make, build or automate here, the answer is a FLOW (flow_create): never an IYAKKI tile app, a web service, a Dockerfile or a deployment, and those tools are not offered. Only if the person explicitly asks for an app, say that apps are built in the AI IDE. When a flow needs a value you do not have (flow_run lists the missing required inputs), call ask_form with those fields instead of guessing or asking in prose; secrets go in a secret field, which stores them in the vault so you never see them. To build or change a flow use flow_create and flow_edit: they make DRAFTS, shown on the canvas at once, marked as yours, and the person publishes them. Never publish by yourself: ask with flow_publish only when the person says to, and it will ask them. Look before you change: flow_get first, then edit step by step (ids, ports and `{{ nodes.<id>.output.<field> }}` references must match). For \"why did run N fail\" call flow_explain_failure and quote its numbers; do not invent causes. Retry settings go in the node's `retry` (attempts, and backoff fixed, exponential or a per-attempt list of timeout and pause). Commands are a list of arguments, never a shell string. Credentials: never ask for, repeat or write one; use {{secret.NAME}} and, when the secret is missing, call vault_request so the person types it into their vault. You cannot approve your own fix: when a run needs the person, say so and point them to the card. A message that starts with FLOW FAILURE REQUEST asks you to fix a failed run of the open flow: read it with flow_explain_failure and flow_get, explain the cause in plain words, propose ONE fix with flow_edit on the open flow (the person approves it), never run, publish or roll back on your own, never ask for a credential, and when it says this is the last attempt and the cause is still unclear, stop and say why. Board and feature-row rules do not apply here.";
 
 impl Tools for FlowTools {
     fn defs(&self) -> Vec<ToolDef> {
-        let mut v = self.inner.defs();
-        v.retain(|d| !is_flow_tool(&d.spec.name));
-        v.extend(defs(&self.env.policy));
+        // the flow tools lead; app creation is not offered here (a flow is the default thing to make in FLOWS)
+        let mut v = defs(&self.env.policy);
+        if !v.is_empty() {
+            v.push(tool("ask_form", super::askform::def_description(), obj(json!({"title": {"type": "string"}, "fields": {"type": "array", "items": {"type": "object"}}}), &["fields"]), Risk::Safe, false));
+        }
+        v.extend(self.inner.defs().into_iter().filter(|d| !is_flow_tool(&d.spec.name) && d.spec.name != "ask_form" && !is_app_creation_tool(&d.spec.name)));
         v
     }
     fn call(&self, name: &str, args: &Value) -> Result<String, String> {
+        if name == "ask_form" {
+            return super::askform::parse(args).map(|f| format!("The form ({} fields) is shown to the person. Stop now: the filled values arrive as the next message.", f.fields.len()));
+        }
+        if is_app_creation_tool(name) {
+            return Err(APP_REFUSAL.into());
+        }
         if is_flow_tool(name) { self.env.call(name, args, Some(&self.open)) } else { self.inner.call(name, args) }
     }
     fn describe(&self, name: &str, args: &Value) -> String {
+        if name == "ask_form" { return format!("ask you to fill in a form: {}", args.get("title").and_then(Value::as_str).unwrap_or("a few details").chars().take(100).collect::<String>()); }
         if is_flow_tool(name) { describe(name, args) } else { self.inner.describe(name, args) }
     }
     fn preview(&self, name: &str, args: &Value) -> Option<String> {
@@ -408,7 +500,7 @@ impl Tools for FlowTools {
     }
     fn approved_always(&self, name: &str) -> bool {
         // publishing and the other hard-ask calls are decided each time
-        if is_flow_tool(name) { !matches!(name, "flow_publish" | "flow_rollback" | "flow_apply_to_runs" | "flow_set_heal_policy") } else { self.inner.approved_always(name) }
+        if is_flow_tool(name) { !matches!(name, "flow_publish" | "flow_rollback" | "flow_apply_to_runs" | "flow_set_heal_policy" | "flow_delete" | "flow_drop_version") } else { self.inner.approved_always(name) }
     }
     fn grant_blocker(&self, name: &str, args: &Value) -> Option<String> {
         self.inner.grant_blocker(name, args)

@@ -58,13 +58,29 @@ pub fn installed() -> bool {
     crate::player::find_program(HELPER).is_some_and(|p| crate::player::runs(&p)) || crate::player::available()
 }
 
+/// Start a program, trying again for a moment on "text file busy": a program written a moment ago can still be open for writing
+/// in a child that another thread forked and that has not run its `exec` yet. It passes within milliseconds.
+pub(crate) fn spawn_retry(cmd: &mut Command) -> std::io::Result<Child> {
+    let mut tries = 0;
+    loop {
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(26) && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            r => return r,
+        }
+    }
+}
+
 impl PipeDecoder {
     pub fn spawn(program: &str, kind: Kind) -> Result<PipeDecoder, String> {
         let mut cmd = Command::new(program);
         if kind == Kind::Ffmpeg {
             cmd.args(FFMPEG_ARGS);
         }
-        let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("cannot start the audio decoder: {e}"))?;
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = spawn_retry(&mut cmd).map_err(|e| format!("cannot start the audio decoder: {e}"))?;
         let mut stdin = child.stdin.take().ok_or("the audio decoder has no input")?;
         let mut stdout = child.stdout.take().ok_or("the audio decoder has no output")?;
         let mut stderr = child.stderr.take().ok_or("the audio decoder has no error output")?;
@@ -147,9 +163,12 @@ impl AacDecoder for PipeDecoder {
                 Ok(b) => self.carry.extend_from_slice(&b),
                 Err(RecvTimeoutError::Timeout) => return Ok(Pcm::Pending),
                 Err(RecvTimeoutError::Disconnected) => {
-                    return match self.child.try_wait() {
-                        Ok(Some(s)) if s.success() => Ok(Pcm::End),
-                        Ok(None) | Err(_) if self.tx.is_none() => Ok(Pcm::End),
+                    // `Gone` (the status was taken by another reaper) is an end of unknown result: the stream is over, so it is
+                    // taken as the end unless the player was never told to finish (then it died early)
+                    return match iyakki_core_api::child_status(&mut self.child) {
+                        s if s.success() => Ok(Pcm::End),
+                        _ if self.tx.is_none() => Ok(Pcm::End),
+                        iyakki_core_api::ChildState::Gone => Ok(Pcm::End),
                         _ => Err(self.failure()),
                     };
                 }

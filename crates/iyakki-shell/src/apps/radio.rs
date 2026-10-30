@@ -8,7 +8,8 @@
 use crate::safeclamp::SafeClamp;
 use std::sync::Arc;
 
-use iyakki_agent::radio::{self, RadioState, Station, StationStore, BANDS, LANGUAGES};
+use iyakki_agent::iyakki_proxy::certinfo;
+use iyakki_agent::radio::{self, CertProblem, RadioState, Station, StationStore, BANDS, LANGUAGES};
 use iyakki_agent::radio_stations;
 
 use super::widgets::{Form, FormEvent};
@@ -25,6 +26,11 @@ enum Mode {
     Browse,
     Form(Form),
     ConfirmDelete(String),
+    /// A station waits for the answer to "Browser is playing. Stop it so the radio can play?" (soundask.rs).
+    Hold(Station, super::soundask::Ask),
+    /// The person is asked whether to trust a station's server certificate. `focus` 0 is Cancel (where the dialog starts), 1 is Trust.
+    /// Nothing is stored unless the person chooses Trust.
+    Trust { problem: CertProblem, focus: usize },
 }
 
 pub struct RadioApp {
@@ -35,6 +41,12 @@ pub struct RadioApp {
     status: Option<(String, bool)>,
     /// What the level display shows: the real levels with a slower fall and a held peak.
     peaks: [f32; BANDS],
+    /// The first station shown on the right (the wheel moves it; the chosen station follows it only when keys move the choice).
+    top: usize,
+    /// How many station rows fit (set when drawn).
+    fit: usize,
+    /// The choice the list last made room for: a click selects without moving the list, a key that moves the choice scrolls to it.
+    seen_sel: usize,
     /// The first row shown in the language list on the left.
     nav_top: usize,
     /// The pointer is over the language list (the wheel scrolls it instead of the stations).
@@ -43,6 +55,10 @@ pub struct RadioApp {
     retry: Option<Station>,
     /// The person pressed "Install audio add-on": the shell opens the installer (`take_request`).
     install: bool,
+    /// Whether the mixer shares the speaker between players (tests set it; it decides whether another player is in the way).
+    mixing: fn() -> bool,
+    /// Where the players announce themselves (the process-wide registry; tests have their own).
+    reg: Arc<iyakki_agent::soundhold::Registry>,
 }
 
 fn store(cx: &AppCx) -> StationStore {
@@ -52,7 +68,48 @@ fn store(cx: &AppCx) -> StationStore {
 impl RadioApp {
     pub fn new(cx: &AppCx) -> RadioApp {
         let mine = store(cx).list();
-        RadioApp { tab: if mine.is_empty() { 1.min(TABS - 1) } else { 0 }, mine, sel: 0, mode: Mode::Browse, status: None, peaks: [0.0; BANDS], nav_top: 0, nav_hover: false, retry: None, install: false }
+        RadioApp { tab: if mine.is_empty() { 1.min(TABS - 1) } else { 0 }, mine, sel: 0, top: 0, fit: 6, seen_sel: 0, mode: Mode::Browse, status: None, peaks: [0.0; BANDS], nav_top: 0, nav_hover: false, retry: None, install: false, mixing: iyakki_agent::audiosink::mixing, reg: iyakki_agent::soundhold::global() }
+    }
+
+    /// The dialog about the speaker is open: its answers, and the end of the stop.
+    fn hold_event(&mut self, ev: &Event, cx: &AppCx) {
+        use super::soundask::{audit, answer_for_key, start_stop_real, Answer};
+        let Mode::Hold(st, ask) = &mut self.mode else { return };
+        if let Event::Key(k) = ev {
+            if let (Some(a), false) = (answer_for_key(k), ask.stopping()) {
+                let found = ask.found.clone();
+                match a {
+                    Answer::Stop => {
+                        audit(cx, "radio.sound.stop", &found, "asked");
+                        start_stop_real(ask, std::time::Duration::from_secs(3));
+                    }
+                    Answer::Keep => {
+                        audit(cx, "radio.sound.keep", &found, "kept");
+                        self.status = Some((format!("{} The radio was not started.", found.says), false));
+                        self.mode = Mode::Browse;
+                    }
+                    Answer::Cancel => {
+                        audit(cx, "radio.sound.cancel", &found, "cancelled");
+                        self.mode = Mode::Browse;
+                    }
+                }
+                return;
+            }
+        }
+        if let Some(r) = ask.poll() {
+            let (found, station) = (ask.found.clone(), st.clone());
+            self.mode = Mode::Browse;
+            match r {
+                Ok(m) => {
+                    audit(cx, "radio.sound.stopped", &found, &m);
+                    self.start_station(&station, cx);
+                }
+                Err(e) => {
+                    audit(cx, "radio.sound.stopfailed", &found, &e);
+                    self.status = Some((format!("{} {e}", found.says), false));
+                }
+            }
+        }
     }
 
     /// The stations on the current tab.
@@ -60,7 +117,7 @@ impl RadioApp {
         if self.tab == 0 {
             self.mine.clone()
         } else {
-            LANGUAGES[self.tab - 1].stations.iter().map(|(n, u)| Station { name: n.to_string(), url: u.to_string() }).collect()
+            LANGUAGES[self.tab - 1].stations.iter().map(|(n, u)| Station::new(n, u)).collect()
         }
     }
 
@@ -83,6 +140,99 @@ impl RadioApp {
             self.status = Some((format!("Your account may not reach {host}."), false));
             return;
         }
+        // another player of IYAKKI holds the speaker and would lock this one out (or the browser's page plays): ask first
+        if let Some(found) = self.reg.conflict_for_new_player("radio", (self.mixing)()) {
+            super::soundask::audit(cx, "radio.sound.ask", &found, "asked");
+            self.mode = Mode::Hold(st.clone(), super::soundask::Ask::with_registry(self.reg.clone(), found, "the radio"));
+            return;
+        }
+        self.start_station(st, cx);
+    }
+
+    /// The station as it is kept in My stations: with the certificate its owner approved, when there is one.
+    fn with_pin(&self, st: &Station) -> Station {
+        match self.mine.iter().find(|m| m.name == st.name && m.url == st.url) {
+            Some(m) => Station { cert_pin: m.cert_pin.clone(), ..st.clone() },
+            None => st.clone(),
+        }
+    }
+
+    /// The station a certificate question is about (kept ones first, then the presets).
+    fn station_named(&self, name: &str) -> Option<Station> {
+        self.mine.iter().cloned().chain(LANGUAGES.iter().flat_map(|l| l.stations.iter().map(|(n, u)| Station::new(n, u)))).find(|s| s.name == name)
+    }
+
+    /// The certificate question of the station that failed, if that is why it did.
+    fn open_trust(&mut self, cx: &AppCx) {
+        if let (RadioState::Failed { station, .. }, Some(problem)) = (cx.services.radio.state(), cx.services.radio.cert_problem()) {
+            if problem.station == station && problem.trustable {
+                self.mode = Mode::Trust { problem, focus: 0 };
+            }
+        }
+    }
+
+    /// The person chose Trust: the exact certificate is kept with the station, and the station starts again.
+    fn confirm_trust(&mut self, problem: &CertProblem, cx: &AppCx) {
+        self.mode = Mode::Browse;
+        let Some(base) = self.station_named(&problem.station) else {
+            self.status = Some(("That station is not in your lists any more.".into(), false));
+            return;
+        };
+        match store(cx).trust(&base, problem) {
+            Ok(st) => {
+                cx.audit.record(&cx.session.user, "radio.trust", &format!("{} sha256 {}", problem.host, certinfo::short_fingerprint(&problem.sha256)));
+                self.reload(cx);
+                self.start_station(&st, cx);
+                self.status = Some((format!("Trusting the certificate of {} for {} only. It is asked about again when the certificate is renewed.", problem.host, st.name), true));
+            }
+            Err(e) => self.status = Some((e, false)),
+        }
+    }
+
+    /// Forget the approved certificate of the chosen station.
+    fn forget_trust(&mut self, cx: &AppCx) {
+        let Some(st) = self.list().get(self.sel).cloned() else { return };
+        let pinned = self.with_pin(&st).cert_pin;
+        let Some(pin) = pinned else { return };
+        match store(cx).forget_trust(&st.name) {
+            Ok(_) => {
+                cx.audit.record(&cx.session.user, "radio.trust.revoked", &format!("{} sha256 {}", pin.host, certinfo::short_fingerprint(&pin.sha256)));
+                self.reload(cx);
+                self.status = Some((format!("{} no longer trusts the certificate of {}.", st.name, pin.host), true));
+            }
+            Err(e) => self.status = Some((e, false)),
+        }
+    }
+
+    fn trust_event(&mut self, ev: &Event, cx: &AppCx) {
+        let Mode::Trust { problem, focus } = &mut self.mode else { return };
+        let answer = match ev {
+            Event::Tab(321) | Event::Key(Key::Esc) => Some(false),
+            Event::Tab(322) => Some(true),
+            Event::Key(Key::Enter) => Some(*focus == 1),
+            Event::Key(Key::Left) | Event::Key(Key::Right) | Event::Key(Key::Tab) | Event::Key(Key::Up) | Event::Key(Key::Down) => {
+                *focus = 1 - *focus;
+                None
+            }
+            _ => None,
+        };
+        match answer {
+            Some(true) => {
+                let problem = problem.clone();
+                self.confirm_trust(&problem, cx);
+            }
+            Some(false) => {
+                self.mode = Mode::Browse;
+                self.status = Some(("Nothing was trusted.".into(), true));
+            }
+            None => {}
+        }
+    }
+
+    fn start_station(&mut self, st: &Station, cx: &AppCx) {
+        let st = &self.with_pin(st);
+        let policy = cx.session.policy.clone();
+        let host = radio::host_of(&st.url);
         self.retry = None;
         cx.audit.record(&cx.session.user, "radio.play", &host);
         let allow: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(move |h| policy.allows_host(h));
@@ -118,6 +268,8 @@ impl RadioApp {
     fn set_tab(&mut self, t: usize) {
         self.tab = t.min(TABS - 1);
         self.sel = 0;
+        self.top = 0;
+        self.seen_sel = 0;
     }
 
     /// Keep the chosen preset in My stations.
@@ -161,6 +313,8 @@ impl App for RadioApp {
             "+ and − (or = and -) · volume; click the bars under the dial too",
             "a · keep the chosen station in My stations (in My stations: add your own)",
             "n · add your own station: a name and an MP3 stream address",
+            "t · when a station fails on its server's certificate: review it and decide whether to trust it (asks first)",
+            "f · forget the certificate you trusted for the chosen station",
             "d · delete the chosen station from My stations (asks first)",
             "Esc · back to the apps; the music keeps playing in the background",
         ]
@@ -189,6 +343,14 @@ impl App for RadioApp {
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        if let Mode::Hold(..) = &self.mode {
+            self.hold_event(ev, cx);
+            return Flow::Stay;
+        }
+        if let Mode::Trust { .. } = &self.mode {
+            self.trust_event(ev, cx);
+            return Flow::Stay;
+        }
         if let Mode::Form(form) = &mut self.mode {
             match form.handle_event(ev) {
                 FormEvent::Cancel => self.mode = Mode::Browse,
@@ -216,7 +378,9 @@ impl App for RadioApp {
         }
         match ev {
             Event::Row(i) => {
+                // a click chooses the row where it is: the list stays put
                 self.sel = (*i).min(self.list().len().saturating_sub(1));
+                self.seen_sel = self.sel;
                 return Flow::Stay;
             }
             Event::Scroll(d) if self.nav_hover => {
@@ -224,7 +388,9 @@ impl App for RadioApp {
                 return Flow::Stay;
             }
             Event::Scroll(d) => {
-                self.sel = (self.sel as i32 - d).clamp_safe(0, self.list().len().saturating_sub(1) as i32) as usize;
+                // the wheel moves the list, not the choice
+                let most = self.list().len().saturating_sub(self.fit.max(1)) as i32;
+                self.top = (self.top as i32 - d * 3).clamp_safe(0, most.max(0)) as usize;
                 return Flow::Stay;
             }
             // the tabs, the transport buttons and the volume bars
@@ -260,6 +426,15 @@ impl App for RadioApp {
                         self.install = true;
                     }
                 }
+                return Flow::Stay;
+            }
+            // "Review the certificate" under a station that failed on its server's certificate, and "Forget trust"
+            Event::Tab(320) => {
+                self.open_trust(cx);
+                return Flow::Stay;
+            }
+            Event::Tab(323) => {
+                self.forget_trust(cx);
                 return Flow::Stay;
             }
             Event::Tab(300) => {
@@ -317,6 +492,8 @@ impl App for RadioApp {
             Key::Char('+') | Key::Char('=') => cx.services.radio.set_volume(cx.services.radio.volume().saturating_add(5)),
             Key::Char('-') | Key::Char('_') => cx.services.radio.set_volume(cx.services.radio.volume().saturating_sub(5)),
             Key::Char('a') => self.keep_selected(cx),
+            Key::Char('t') => self.open_trust(cx),
+            Key::Char('f') => self.forget_trust(cx),
             Key::Char('n') => self.mode = Mode::Form(Self::new_form()),
             Key::Char('d') if self.tab == 0 => {
                 if let Some(s) = self.mine.get(self.sel) {
@@ -454,7 +631,10 @@ impl App for RadioApp {
             RadioState::Idle => ("Nothing is playing".to_string(), format!("{} · press Enter on a station", self.tab_name()), MUTED),
             RadioState::Connecting(n) => (n.clone(), "tuning in…".to_string(), CYAN),
             RadioState::Playing { station, title, kbps } => (station.clone(), if title.is_empty() { format!("on air{}", if *kbps > 0 { format!(" · {kbps} kbit/s") } else { String::new() }) } else { title.clone() }, OK),
-            RadioState::Failed { station, why } => (format!("{station} did not play"), why.clone(), ERR),
+            RadioState::Failed { station, why } => {
+                let waiting = cx.services.radio.cert_problem().is_some_and(|c| &c.station == station);
+                (format!("{station} did not play"), if waiting { "The server did not send its full certificate chain. Review its certificate below.".to_string() } else { why.clone() }, ERR)
+            }
         };
         g.text(tx, card.y + 22.0 * s, 12.0 * s, if playing { MAGENTA } else { DIM }, if playing && cx.services.radio.is_paused() { "❚❚ PAUSED" } else if playing { "● ON AIR" } else if active { "◌ TUNING" } else { "○ STANDBY" }, Face::Bold);
         let head = g.fit(28.0 * s, &head, Face::Bold, tw);
@@ -566,6 +746,22 @@ impl App for RadioApp {
             g.text(x, y, 14.0 * s, if *ok { OK } else { ERR }, &m, Face::Sans);
             y += 24.0 * s;
         }
+        // a station whose server's certificate could not be checked: what it showed, and the person's decision
+        if let (RadioState::Failed { station, .. }, Some(c)) = (&state, cx.services.radio.cert_problem()) {
+            if &c.station == station {
+                let lines = g.wrap(14.0 * s, &c.message, Face::Sans, w);
+                for l in lines.iter().take(4) {
+                    g.text(x, y, 14.0 * s, MUTED, l, Face::Sans);
+                    y += 20.0 * s;
+                }
+                if c.trustable {
+                    g.button(x, y + 4.0 * s, 15.0 * s, if c.changed { "Review the new certificate (t)" } else { "Review certificate… (t)" }, CYAN, Event::Tab(320));
+                } else {
+                    g.text(x, y + 4.0 * s, 14.0 * s, ERR, "This certificate cannot be trusted: it is not for this server's name or not within its dates.", Face::Sans);
+                }
+                y += 48.0 * s;
+            }
+        }
         // a station that needs the audio add-on: one calm line and the way to get it (the person's click, from the vendor)
         if let RadioState::Failed { station, why } = &state {
             if iyakki_agent::audiofmt::needs_addon(why) {
@@ -589,7 +785,18 @@ impl App for RadioApp {
         } else {
             let rh = 52.0 * s;
             let fit = (((area.y + area.h - y - 8.0 * s) / (rh + 6.0 * s)).floor() as usize).max(1);
-            let start = self.sel.saturating_sub(fit - 1);
+            self.fit = fit;
+            if self.sel != self.seen_sel {
+                // the choice moved by a key (or a new tab): show it
+                if self.sel < self.top {
+                    self.top = self.sel;
+                } else if self.sel >= self.top + fit {
+                    self.top = self.sel + 1 - fit;
+                }
+                self.seen_sel = self.sel;
+            }
+            self.top = self.top.min(list.len().saturating_sub(fit));
+            let start = self.top;
             let kept: Vec<&str> = self.mine.iter().map(|m| m.url.as_str()).collect();
             for (i, st) in list.iter().enumerate().skip(start).take(fit) {
                 let rect = R::new(x, y, w, rh);
@@ -617,6 +824,13 @@ impl App for RadioApp {
                 if addon_missing && radio_stations::needs_addon(&st.url) {
                     g.text(x + w - 150.0 * s, y + 32.0 * s, 11.0 * s, DIM, "needs audio add-on", Face::Sans);
                 }
+                let pinned = self.with_pin(st).cert_pin.is_some();
+                if pinned {
+                    g.text(x + w - 150.0 * s, y + 32.0 * s, 11.0 * s, OK, "trusted certificate", Face::Sans);
+                    if sel {
+                        g.button(x + w - 290.0 * s, y + 9.0 * s, 13.0 * s, "Forget trust (f)", MUTED, Event::Tab(323));
+                    }
+                }
                 // remove (My stations) / keep (the presets)
                 if self.tab == 0 {
                     if sel {
@@ -635,15 +849,60 @@ impl App for RadioApp {
         match &self.mode {
             Mode::Form(f) => f.render(g, area, s, CYAN, blink(tick)),
             Mode::ConfirmDelete(n) => super::widgets::render_confirm(g, area, s, &format!("Remove {n}?"), "Remove"),
+            Mode::Trust { problem, focus } => render_trust(g, area, s, problem, *focus),
+            Mode::Hold(_, ask) => super::soundask::render(g, area, s, ask, Event::Key(Key::Char('y')), Event::Key(Key::Char('n')), Event::Key(Key::Esc)),
             Mode::Browse => {}
         }
     }
+}
+
+/// The question before a server certificate is trusted: everything the person can compare, a plain warning, Cancel first.
+fn render_trust(g: &mut Gfx, area: R, s: f32, c: &CertProblem, focus: usize) {
+    let p = crate::fx::modal(g, area, s, 680.0 * s, 470.0 * s, ERR, true);
+    let title = if c.changed { "The certificate changed. Trust the new one?" } else { "Trust this station's certificate?" };
+    let mut y = crate::fx::modal_title(g, p, s, title, ERR) + 6.0 * s;
+    let x = p.x + 26.0 * s;
+    let iw = p.w - 52.0 * s;
+    let row = |g: &mut Gfx, label: &str, value: &str, y: &mut f32| {
+        g.text(x, *y, 12.0 * s, DIM, label, Face::Bold);
+        let v = g.fit(15.0 * s, value, Face::Sans, iw - 120.0 * s);
+        g.text(x + 120.0 * s, *y - 2.0 * s, 15.0 * s, TEXT, &v, Face::Sans);
+        *y += 25.0 * s;
+    };
+    row(g, "STATION", &c.station, &mut y);
+    row(g, "SERVER", &format!("{}:{}", c.host, c.port), &mut y);
+    row(g, "CERTIFICATE FOR", &c.subject, &mut y);
+    row(g, "ISSUED BY", &c.issuer, &mut y);
+    row(g, "VALID UNTIL", &c.expiry(), &mut y);
+    g.text(x, y, 12.0 * s, DIM, "SHA-256", Face::Bold);
+    let groups: Vec<String> = certinfo::fingerprint_groups(&c.sha256).split(' ').map(str::to_string).collect();
+    for half in groups.chunks(4) {
+        g.text(x + 120.0 * s, y - 2.0 * s, 15.0 * s, TEXT, &half.join("  "), Face::Mono);
+        y += 22.0 * s;
+    }
+    y += 8.0 * s;
+    let warn = if c.changed {
+        "This station showed a different certificate than the one you trusted. A renewed certificate looks like this, and so does someone pretending to be the station. Trust the new one only if you know the station."
+    } else {
+        "Only trust this if you know the station; someone on your network could pretend to be it. IYAKKI will then accept exactly this certificate for this station's server, nothing else, and ask again when it is renewed."
+    };
+    for l in g.wrap(14.0 * s, warn, Face::Sans, iw).iter().take(4) {
+        g.text(x, y, 14.0 * s, ERR, l, Face::Sans);
+        y += 20.0 * s;
+    }
+    let by = p.y + p.h - 58.0 * s;
+    let w1 = g.button(x, by, 14.0 * s, "Cancel", MUTED, Event::Tab(321));
+    let w2 = g.button(x + w1 + 14.0 * s, by, 14.0 * s, "Trust this certificate", ERR, Event::Tab(322));
+    let (fx, fw) = if focus == 0 { (x, w1) } else { (x + w1 + 14.0 * s, w2) };
+    g.rrect_outline(fx - 3.0 * s, by - 3.0 * s, fw + 6.0 * s, 14.0 * s * 2.1 + 6.0 * s, 16.0 * s, 2.0 * s, TEXT);
+    g.text(x + w1 + w2 + 34.0 * s, by + 8.0 * s, 12.0 * s, DIM, "← → choose · Enter · Esc cancels", Face::Sans);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::apps::tests::{cx_with_admin_store, services_in, temp_dir};
+    use crate::apps::tile_harness::TileHarness;
     use iyakki_agent::iyakki_proxy::{StreamHead, Streamer};
     use iyakki_sec::policy::Role;
     use std::sync::Mutex;
@@ -697,6 +956,56 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("{:?}", cx.services.radio.state());
+    }
+
+    #[test]
+    fn a_station_waits_for_the_answer_when_the_browser_plays_and_starts_after_stop_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (cx, fake) = cx("radio-hold");
+        let mut a = RadioApp::new(&cx);
+        a.mixing = || false;
+        a.reg = Arc::new(iyakki_agent::soundhold::Registry::default());
+        a.handle(&Event::Tab(1), &cx);
+        // another player holds the speaker
+        let on = Arc::new(AtomicBool::new(true));
+        let (h, st) = (on.clone(), on.clone());
+        a.reg.announce("tales", Arc::new(move || h.load(Ordering::SeqCst).then(|| "TALES is reading".to_string())), Arc::new(move || st.store(false, Ordering::SeqCst)));
+        a.handle(&Event::Key(Key::Enter), &cx);
+        assert!(matches!(&a.mode, Mode::Hold(_, ask) if ask.question() == "TALES is reading. Stop it so the radio can play?"));
+        assert_eq!(cx.services.radio.state(), RadioState::Idle, "nothing starts before the answer");
+        let g = draw(&mut a, &cx, 1280, 720);
+        for l in ["Stop it", "Keep it", "Cancel"] {
+            assert!(g.hits.iter().any(|h| h.label == l), "{l}");
+        }
+        // Keep it: nothing starts, the other player goes on
+        a.handle(&Event::Key(Key::Char('n')), &cx);
+        assert!(matches!(a.mode, Mode::Browse) && on.load(Ordering::SeqCst));
+        assert!(a.status_text().unwrap().contains("TALES is reading") && cx.services.radio.state() == RadioState::Idle);
+        // Cancel
+        a.handle(&Event::Key(Key::Enter), &cx);
+        a.handle(&Event::Key(Key::Esc), &cx);
+        assert!(matches!(a.mode, Mode::Browse) && on.load(Ordering::SeqCst));
+        // Stop it: the other player is stopped cleanly, then the station starts
+        a.handle(&Event::Key(Key::Enter), &cx);
+        a.handle(&Event::Key(Key::Char('y')), &cx);
+        let t0 = std::time::Instant::now();
+        while matches!(a.mode, Mode::Hold(..)) {
+            assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            a.handle(&Event::Tick, &cx);
+        }
+        assert!(!on.load(Ordering::SeqCst), "TALES was stopped");
+        wait(&cx, |s| matches!(s, RadioState::Playing { .. }));
+        assert!(!fake.0.lock().unwrap().is_empty());
+        cx.services.radio.stop();
+        // with the mixer on, a player that goes through it is no conflict
+        on.store(true, Ordering::SeqCst);
+        a.mixing = || true;
+        a.handle(&Event::Key(Key::Enter), &cx);
+        assert!(matches!(a.mode, Mode::Browse));
+        wait(&cx, |s| matches!(s, RadioState::Playing { .. }));
+        cx.services.radio.stop();
+        a.reg.forget("tales");
     }
 
     #[test]
@@ -817,6 +1126,50 @@ mod tests {
     }
 
     #[test]
+    fn the_wheel_scrolls_the_stations_and_a_click_chooses_a_row_without_moving_the_list() {
+        let (cx, _d) = crate::apps::tests::cx_with_backend("radiowheel", iyakki_agent::chat::Unconfigured);
+        let mut a = RadioApp::new(&cx);
+        a.handle(&Event::Tab(1), &cx);
+        // a window small enough that the tab's stations do not all fit
+        let g = draw(&mut a, &cx, 1280, 720);
+        let total = a.list().len();
+        assert!(a.fit < total, "{} stations, {} fit", total, a.fit);
+        assert_eq!((a.top, a.sel), (0, 0));
+        let first_rows: Vec<usize> = g.hits.iter().filter_map(|h| if let Event::Row(i) = h.ev { Some(i) } else { None }).collect();
+        assert_eq!(first_rows.first(), Some(&0));
+        // the wheel moves the list and leaves the choice alone
+        a.handle(&Event::Scroll(-1), &cx);
+        let g = draw(&mut a, &cx, 1280, 720);
+        assert_eq!((a.top, a.sel), (3, 0), "three rows down, the choice stays");
+        let rows: Vec<usize> = g.hits.iter().filter_map(|h| if let Event::Row(i) = h.ev { Some(i) } else { None }).collect();
+        assert_eq!(rows.first(), Some(&3));
+        // a click chooses that row and the list does not shift under the pointer
+        let clicked = rows[1];
+        a.handle(&Event::Row(clicked), &cx);
+        let g = draw(&mut a, &cx, 1280, 720);
+        assert_eq!((a.top, a.sel), (3, clicked), "the same rows are shown after the click");
+        let after: Vec<usize> = g.hits.iter().filter_map(|h| if let Event::Row(i) = h.ev { Some(i) } else { None }).collect();
+        assert_eq!(after, rows);
+        // the wheel stops at both ends
+        for _ in 0..40 {
+            a.handle(&Event::Scroll(-1), &cx);
+        }
+        draw(&mut a, &cx, 1280, 720);
+        assert_eq!(a.top, total - a.fit);
+        for _ in 0..40 {
+            a.handle(&Event::Scroll(1), &cx);
+        }
+        assert_eq!(a.top, 0);
+        // keys still bring the choice into view
+        a.handle(&Event::Tab(1), &cx);
+        for _ in 0..a.fit + 1 {
+            a.handle(&Event::Key(Key::Down), &cx);
+        }
+        draw(&mut a, &cx, 1280, 720);
+        assert!(a.top > 0 && a.sel >= a.top && a.sel < a.top + a.fit, "top {} sel {} fit {}", a.top, a.sel, a.fit);
+    }
+
+    #[test]
     fn the_language_list_is_on_the_left_a_station_is_added_by_name_and_address_and_removed_from_my_stations_with_a_button() {
         let (cx, _d) = {
             let (cx, d) = crate::apps::tests::cx_with_backend("radiolist", iyakki_agent::chat::Unconfigured);
@@ -885,21 +1238,21 @@ mod tests {
         let (cx, _) = cx("addon");
         cx.services.radio.set_streamer(Arc::new(AacOnly));
         cx.services.radio.set_aac_factory(Arc::new(|| Err(iyakki_agent::audiofmt::NEEDS_AUDIO_ADDON.to_string())));
-        let mut a = RadioApp::new(&cx);
-        a.set_tab(1);
-        a.sel = a.station_names().iter().position(|n| n == "80’s Tamil Hits").expect("80’s Tamil Hits is in the Tamil list");
-        a.handle(&Event::Key(Key::Enter), &cx);
+        let mut t = TileHarness::new(RadioApp::new(&cx), cx.clone());
+        t.app.set_tab(1);
+        t.app.sel = t.app.station_names().iter().position(|n| n == "80’s Tamil Hits").expect("80’s Tamil Hits is in the Tamil list");
+        t.key(Key::Enter);
         wait(&cx, |s| matches!(s, RadioState::Failed { why, .. } if iyakki_agent::audiofmt::needs_addon(why)));
-        assert!(a.take_request().is_none(), "nothing is installed without a click");
-        draw(&mut a, &cx, 1100, 720);
-        a.handle(&Event::Tab(310), &cx);
-        assert_eq!(a.take_request(), Some(("quickinstall".to_string(), "ffmpeg".to_string())));
-        assert_eq!(a.retry.as_ref().map(|s| s.name.as_str()), Some("80’s Tamil Hits"), "the station waits to be tried again");
-        assert!(a.take_request().is_none(), "one click, one request");
+        assert!(t.app.take_request().is_none(), "nothing is installed without a click");
+        t.draw_at(1100, 720);
+        t.click_label("Install audio add-on");
+        assert_eq!(t.app.take_request(), Some(("quickinstall".to_string(), "ffmpeg".to_string())));
+        assert_eq!(t.app.retry.as_ref().map(|s| s.name.as_str()), Some("80’s Tamil Hits"), "the station waits to be tried again");
+        assert!(t.app.take_request().is_none(), "one click, one request");
         // playing another station forgets the wait
-        a.sel = 0;
-        a.handle(&Event::Key(Key::Enter), &cx);
-        assert!(a.retry.is_none());
+        t.app.sel = 0;
+        t.key(Key::Enter);
+        assert!(t.app.retry.is_none());
         cx.services.radio.stop();
     }
 
@@ -928,6 +1281,111 @@ mod tests {
         assert!(b.status_text().unwrap().contains("may not reach"), "{:?}", b.status_text());
         assert!(fake.0.lock().unwrap().is_empty());
         assert!(!b.help().is_empty());
+    }
+
+    /// A server that sends its leaf only: the usual check fails, the exact certificate approved by a person plays.
+    struct NoChain(Vec<u8>, Mutex<Vec<String>>);
+    impl Streamer for NoChain {
+        fn open(&self, url: &str, _h: &[(String, String)]) -> Result<StreamHead, String> {
+            self.1.lock().unwrap().push(format!("open {url}"));
+            Err("io: invalid peer certificate: UnknownIssuer".into())
+        }
+        fn open_tls(&self, url: &str, h: &[(String, String)], mode: &iyakki_agent::iyakki_proxy::TlsMode) -> Result<StreamHead, String> {
+            self.1.lock().unwrap().push(format!("tls {url}"));
+            match mode {
+                iyakki_agent::iyakki_proxy::TlsMode::Pin(fp) if certinfo::norm_fingerprint(fp) == certinfo::norm_fingerprint(&certinfo::fingerprint(&self.0)) => Fake(Mutex::new(vec![])).open(url, h),
+                _ => Err("io: invalid peer certificate: UnknownIssuer".into()),
+            }
+        }
+        fn peer_chain(&self, _: &str, _: u16) -> Result<Vec<Vec<u8>>, String> {
+            Ok(vec![self.0.clone()])
+        }
+    }
+
+    fn chain_world(tag: &str, years: Option<(i32, i32)>) -> (AppCx, Arc<NoChain>, String) {
+        let (cx, _) = cx(tag);
+        let leaf = iyakki_agent::iyakki_proxy::testcerts::leaf_der(&["radios.example.org"], years, None);
+        let fp = certinfo::fingerprint(&leaf);
+        let net = Arc::new(NoChain(leaf, Mutex::new(vec![])));
+        cx.services.radio.set_streamer(net.clone());
+        store(&cx).add("Hello FM", "https://radios.example.org:8002/3").unwrap();
+        (cx, net, fp)
+    }
+
+    fn pin_of(cx: &AppCx) -> Option<radio::CertPin> {
+        store(cx).list().iter().find(|s| s.name == "Hello FM").and_then(|s| s.cert_pin.clone())
+    }
+
+    fn audit_has(cx: &AppCx, what: &str) -> bool {
+        cx.audit.recent(50).iter().any(|l| l.contains(what))
+    }
+
+    #[test]
+    fn a_certificate_is_trusted_only_after_the_person_confirms_and_can_be_forgotten() {
+        let (cx, net, fp) = chain_world("radio-trust", None);
+        let mut t = TileHarness::new(RadioApp::new(&cx), cx.clone());
+        t.key(Key::Enter);
+        wait(&cx, |s| matches!(s, RadioState::Failed { .. }));
+        t.draw_at(1280, 800);
+        assert!(t.shows("did not send its full certificate chain"), "{:?}", t.texts());
+        assert!(t.has_button("Review certificate… (t)"));
+        assert!(pin_of(&cx).is_none() && !t.shows("trusted certificate"));
+        // the question: what the server showed, a plain warning, Cancel is where it starts
+        t.click_label("Review certificate… (t)");
+        assert!(matches!(t.app.mode, Mode::Trust { focus: 0, .. }));
+        for needle in ["radios.example.org:8002", "Hello FM", "someone on your network could pretend to be it", &certinfo::fingerprint_groups(&fp)[..8]] {
+            assert!(t.shows(needle), "{needle}: {:?}", t.texts());
+        }
+        assert!(t.has_button("Cancel") && t.has_button("Trust this certificate"));
+        // letters do not answer it; Enter on the first button, Esc and Cancel store nothing
+        t.key(Key::Char('y'));
+        t.key(Key::Char('t'));
+        assert!(matches!(t.app.mode, Mode::Trust { .. }) && pin_of(&cx).is_none());
+        t.key(Key::Enter);
+        assert!(matches!(t.app.mode, Mode::Browse) && pin_of(&cx).is_none(), "Enter on the default Cancel");
+        t.key(Key::Char('t'));
+        t.key(Key::Esc);
+        assert!(matches!(t.app.mode, Mode::Browse) && pin_of(&cx).is_none());
+        t.key(Key::Char('t'));
+        t.click_label("Cancel");
+        assert!(pin_of(&cx).is_none() && !audit_has(&cx, "radio.trust"), "cancelling stores and audits nothing");
+        assert!(!matches!(cx.services.radio.state(), RadioState::Playing { .. }));
+        assert!(!net.1.lock().unwrap().iter().any(|l| l.starts_with("tls ")), "no unchecked connection was made");
+        // confirming: the exact certificate is kept with the station, audited in short form, and the station plays
+        t.key(Key::Char('t'));
+        t.key(Key::Right);
+        assert!(matches!(t.app.mode, Mode::Trust { focus: 1, .. }));
+        t.key(Key::Enter);
+        let pin = pin_of(&cx).expect("kept after the confirmation");
+        assert_eq!((pin.host.as_str(), pin.port, pin.sha256.as_str()), ("radios.example.org", 8002, fp.as_str()));
+        assert!(audit_has(&cx, &format!("radio.trust")) && audit_has(&cx, &certinfo::short_fingerprint(&fp)) && !cx.audit.recent(50).iter().any(|l| l.contains(&fp)));
+        wait(&cx, |s| matches!(s, RadioState::Playing { .. }));
+        t.draw_at(1280, 800);
+        assert!(t.shows("trusted certificate") && t.has_button("Forget trust (f)"));
+        // forgetting
+        t.click_label("Forget trust (f)");
+        assert!(pin_of(&cx).is_none() && audit_has(&cx, "radio.trust.revoked"));
+        cx.services.radio.stop();
+        // and the other button of the question also works
+        t.key(Key::Enter);
+        wait(&cx, |s| matches!(s, RadioState::Failed { .. }));
+        t.draw_at(1280, 800);
+        t.click_label("Review certificate… (t)");
+        t.click_label("Trust this certificate");
+        assert!(pin_of(&cx).is_some());
+        cx.services.radio.stop();
+    }
+
+    #[test]
+    fn a_certificate_that_cannot_work_is_shown_but_cannot_be_trusted() {
+        let (cx, _net, _) = chain_world("radio-trust-old", Some((2019, 2020)));
+        let mut t = TileHarness::new(RadioApp::new(&cx), cx.clone());
+        t.key(Key::Enter);
+        wait(&cx, |s| matches!(s, RadioState::Failed { .. }));
+        t.draw_at(1280, 800);
+        assert!(t.shows("expired") && !t.has_button("Review certificate… (t)") && t.shows("cannot be trusted"), "{:?}", t.texts());
+        t.key(Key::Char('t'));
+        assert!(matches!(t.app.mode, Mode::Browse) && pin_of(&cx).is_none());
     }
 
     /// `IYAKKI_SHOT=/path.png cargo test -p iyakki-shell --lib radio_picture -- --ignored`: the player drawn while a live station plays.

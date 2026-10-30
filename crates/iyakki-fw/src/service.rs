@@ -37,9 +37,16 @@ impl Store for FileStore {
         match std::fs::read_to_string(&self.path) {
             Ok(t) => match serde_json::from_str::<Saved>(&t) {
                 Ok(s) if s.config.version == crate::model::CONFIG_VERSION => Ok(Some(s)),
-                Ok(s) => Err(format!("settings version {}", s.config.version)),
+                Ok(s) => {
+                    iyakki_schema::report(format!("firewall {}: settings version {} is not this release's ({}); the file is left as it is, the safe defaults are used and nothing is saved over it", self.path.display(), s.config.version, crate::model::CONFIG_VERSION));
+                    Err(format!("settings version {}", s.config.version))
+                }
                 Err(e) => {
-                    let _ = std::fs::rename(&self.path, self.path.with_extension("json.bad"));
+                    // kept for inspection: `.bad`, or a numbered name when an earlier damaged file is still there
+                    let bad = self.path.with_extension("json.bad");
+                    let to = if bad.exists() { iyakki_schema::sibling(&self.path, &format!("corrupt-{}", iyakki_schema::now_secs())) } else { bad };
+                    let moved = std::fs::rename(&self.path, &to).is_ok();
+                    iyakki_schema::report(format!("firewall {}: damaged ({e}); {} and started with the safe defaults", self.path.display(), if moved { format!("moved to {}", to.display()) } else { "could not be moved aside".into() }));
                     Err(e.to_string())
                 }
             },
@@ -49,6 +56,10 @@ impl Store for FileStore {
     }
     fn save(&self, s: &Saved) -> Result<(), String> {
         use std::io::Write;
+        // a file written by a release with another settings version is never replaced
+        if let Some(n) = std::fs::read(&self.path).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).and_then(|v| v["config"]["version"].as_u64()).filter(|n| *n > crate::model::CONFIG_VERSION as u64) {
+            return Err(format!("The firewall settings were written by a newer IYAKKI (version {n}; this one reads version {}). They are kept as they are; update IYAKKI first.", crate::model::CONFIG_VERSION));
+        }
         let text = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
         if let Some(d) = self.path.parent() {
             let _ = std::fs::create_dir_all(d);

@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "pins": [
+    "shell:ls",
+    "k8s_get:default"
+  ]
+}

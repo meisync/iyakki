@@ -19,13 +19,14 @@ impl SettingsApp {
             return 22.0 * s;
         }
         let mut y = y0 + controls::section_title(g, a.x, y0, s, "Speed and memory");
-        let btn_w = 150.0 * s;
+        let size = 15.0 * s;
+        let btn_w = ["Change (k)", "Clear cache (x)"].iter().map(|l| g.text_width(size, l, Face::Bold) + size * 1.7).fold(0.0, f32::max);
         let info_w = (a.w - btn_w - 10.0 * s).max(120.0 * s);
         let m = super::super::browser_speed::machine(cx.services.dir());
         let b = super::super::browser_speed::budget_for(c.cache, &m);
         let help = format!("The browser keeps pages, pictures, styles and scripts so the next visit is faster: up to {} in memory and {} on disk right now. It shrinks by itself when the computer is short of memory.", iyakki_web::net::human(b.mem), iyakki_web::net::human(b.disk));
         controls::info_row(g, R::new(a.x, y, info_w, 58.0 * s), s, &format!("Cache size: {}", c.cache.label()), &help);
-        g.button(a.x + a.w - btn_w, y + 8.0 * s, 15.0 * s, "Change (k)", ACCENT, Event::Key(Key::Char('k')));
+        g.button(a.x + a.w - btn_w, y + 8.0 * s, size, "Change (k)", ACCENT, Event::Key(Key::Char('k')));
         y += 66.0 * s;
         let stats = cx.web.cache_stats(&cx.session.user);
         let lines = super::super::browser_speed::numbers(stats, iyakki_web::net::snapshot());
@@ -33,7 +34,7 @@ impl SettingsApp {
             controls::info_row(g, R::new(a.x, y, info_w, 44.0 * s), s, &title, &text);
             y += 50.0 * s;
         }
-        g.button(a.x + a.w - btn_w, y - 44.0 * s, 15.0 * s, "Clear cache (x)", ACCENT, Event::Key(Key::Char('x')));
+        g.button(a.x + a.w - btn_w, y - 44.0 * s, size, "Clear cache (x)", ACCENT, Event::Key(Key::Char('x')));
         y += 8.0 * s;
         y - y0
     }

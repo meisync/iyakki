@@ -24,7 +24,8 @@ impl ConsentDialog {
     /// The answer a key stands for: 1, 2, 3 choose by position; Esc is the "no" (Deny or Cancel) of the question.
     pub fn answer_of(&self, k: &Key) -> Option<Answer> {
         match k {
-            Key::Char(c @ '1'..='3') => self.req.choices.get(*c as usize - '1' as usize).map(|c| c.answer),
+            Key::Char(c @ '1'..='4') => self.req.choices.get(*c as usize - '1' as usize).map(|c| c.answer),
+            Key::Esc if self.req.kind == ConsentKind::Permission => Some(Answer::NotNow),
             Key::Esc => self.req.choices.iter().find(|c| c.answer == Answer::Deny).map(|c| c.answer),
             _ => None,
         }
@@ -33,6 +34,19 @@ impl ConsentDialog {
     /// Give the answer to the waiting tool; audited by what it allows, never by the page's content.
     pub fn answer(&self, cx: &AppCx, a: Answer) -> Result<(), String> {
         let r = cx.services.browser.consent.resolve(&cx.session.user, &self.req.id, a);
+        if r.is_ok() && self.req.kind == ConsentKind::Permission {
+            // the person's own answer to a flow's permission request: carried out by the flows engine (audited there, without secrets)
+            return match iyakki_agent::flows::FlowEnv::open(&cx.services, &cx.session.user, &cx.session.policy).and_then(|env| env.answer_permission(&self.req, a)) {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    // nothing was done: the request comes back so the person can answer again
+                    if a != Answer::NotNow {
+                        let _ = cx.services.browser.consent.create_permission(&self.req.user, &self.req.domain, &self.req.title, &self.req.text, &self.req.payload, self.req.since);
+                    }
+                    Err(e)
+                }
+            };
+        }
         if r.is_ok() {
             let what = match (self.req.kind, a) {
                 (ConsentKind::Look, Answer::Allow) => "look allowed for 5 minutes",
@@ -45,6 +59,7 @@ impl ConsentDialog {
                 (ConsentKind::Step, _) => "action denied",
                 (ConsentKind::Handover, Answer::Continue) => "handed back after the person's step",
                 (ConsentKind::Handover, _) => "hand-over cancelled",
+                (ConsentKind::Permission, _) => "permission answered",
             };
             cx.audit.record(&cx.session.user, "browser.agent.answer", &format!("{} {}", self.req.domain, what));
         }
@@ -56,7 +71,11 @@ impl ConsentDialog {
             ConsentKind::Look => rgb(110, 190, 255),
             ConsentKind::Interact | ConsentKind::Step => AMBER,
             ConsentKind::Handover => rgb(167, 116, 255),
+            ConsentKind::Permission => rgb(255, 120, 200),
         };
+        if self.req.kind == ConsentKind::Permission {
+            return self.render_permission(g, area, s, accent);
+        }
         let p = crate::fx::modal(g, area, s, 640.0 * s, 330.0 * s, accent, false);
         let y = crate::fx::modal_title(g, p, s, &self.req.title, accent);
         let mut y = y + 6.0 * s;
@@ -88,6 +107,37 @@ impl ConsentDialog {
     }
 }
 
+impl ConsentDialog {
+    /// A flow's permission request: the exact text of the permission, the flow and step, the model, and four answers.
+    fn render_permission(&self, g: &mut Gfx, area: R, s: f32, accent: [u8; 4]) {
+        let p = crate::fx::modal(g, area, s, 760.0 * s, 580.0 * s, accent, false);
+        let y = crate::fx::modal_title(g, p, s, &self.req.title, accent);
+        let mut y = y + 4.0 * s;
+        let buttons_h = 2.0 * 42.0 * s + 40.0 * s;
+        let limit = p.y + p.h - buttons_h;
+        'text: for line in self.req.text.lines() {
+            for l in g.wrap(14.0 * s, line, Face::Sans, p.w - 52.0 * s) {
+                if y + 19.0 * s > limit {
+                    g.text(p.x + 26.0 * s, y, 14.0 * s, MUTED, "…", Face::Sans);
+                    break 'text;
+                }
+                g.text(p.x + 26.0 * s, y, 14.0 * s, TEXT, &l, Face::Sans);
+                y += 19.0 * s;
+            }
+            y += 4.0 * s;
+        }
+        let colw = (p.w - 52.0 * s - 12.0 * s) / 2.0;
+        let by = p.y + p.h - buttons_h + 8.0 * s;
+        for (i, c) in self.req.choices.iter().enumerate() {
+            let (col, row) = (i % 2, i / 2);
+            let block = c.answer == Answer::Block;
+            let label = format!("{}  {}", i + 1, g.fit(14.0 * s, &c.label, Face::Bold, colw - 60.0 * s));
+            g.button(p.x + 26.0 * s + col as f32 * (colw + 12.0 * s), by + row as f32 * 42.0 * s, 14.0 * s, &label, if block { ERR } else { accent }, Event::Key(Key::Char((b'1' + i as u8) as char)));
+        }
+        g.text(p.x + 26.0 * s, p.y + p.h - 28.0 * s, 12.0 * s, DIM, "Press 1 to 4. Esc is Not now. Only you can answer this, on this device.", Face::Sans);
+    }
+}
+
 /// The row text for the Approvals list.
 pub fn row_summary(r: &ConsentRequest) -> String {
     match r.kind {
@@ -95,6 +145,7 @@ pub fn row_summary(r: &ConsentRequest) -> String {
         ConsentKind::Interact => r.text.clone(),
         ConsentKind::Step => r.text.clone(),
         ConsentKind::Handover => r.text.clone(),
+        ConsentKind::Permission => format!("{}. Open it to read what it allows and to answer.", r.title),
     }
 }
 

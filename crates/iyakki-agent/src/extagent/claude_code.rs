@@ -19,12 +19,23 @@ pub const TOOL_PREFIX: &str = "mcp__iyakki__";
 /// (`k8s_*`, `deploy_*`, `run_command`), which know the dev cluster, the namespace and the approval rules.
 pub const DENIED_BASH: [&str; 18] = ["kubectl", "k3s", "kubeadm", "minikube", "kind", "helm", "docker rm", "docker rmi", "docker system", "docker kill", "docker stop", "podman rm", "podman rmi", "podman system", "podman kill", "podman stop", "sudo", "su"];
 
+/// Foreground commands that usually take over about 30 seconds: with IYAKKI's job tools offered (the MCP bridge is there) the
+/// raw shell refuses them, and the refusal is where the agent turns to `mcp__iyakki__job_start` (its instructions say so).
+/// Only `--disallowedTools` rules (a documented flag) are used. The settings-file hook that would point to `job_start` in the
+/// refusal text is NOT generated: its vendor setting names are unconfirmed (KNOWN-ISSUES KI-025).
+pub const LONG_BASH: [&str; 17] = ["cargo build", "cargo test", "cargo check", "cargo install", "npm install", "npm ci", "npm run build", "npm test", "pip install", "pip3 install", "docker build", "podman build", "make", "apt install", "apt-get install", "gradle build", "mvn package"];
+
 /// Claude Code's own tools, all refused for a story (names from the CLI's documentation).
 pub const ALL_OWN_TOOLS: [&str; 10] = ["Bash", "Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Glob", "Grep", "WebFetch", "WebSearch"];
 
 impl ClaudeCode {
     pub fn new(cfg: AgentCfg) -> ClaudeCode {
         ClaudeCode { cfg }
+    }
+
+    /// [`Self::disallowed`] plus the long-running programs that belong in a job ([`LONG_BASH`]).
+    pub fn disallowed_with_jobs() -> String {
+        format!("{},{}", Self::disallowed(), LONG_BASH.iter().map(|p| format!("Bash({p} *)")).collect::<Vec<_>>().join(","))
     }
 
     /// `--disallowedTools` rules for the raw shell. Pattern form `Bash(prog *)` (a space before `*` matches whole words).
@@ -142,7 +153,9 @@ impl ExternalAgent for ClaudeCode {
         a.extend(["--setting-sources".into(), "project".into()]);
         a.extend(["--permission-mode".into(), "default".into()]);
         a.extend(["--max-turns".into(), p.max_turns.max(1).to_string()]);
-        a.push(format!("--disallowedTools={}", if p.no_tools { format!("{},{}", Self::disallowed(), ALL_OWN_TOOLS.join(",")) } else { Self::disallowed() }));
+        // the job tools are only there when the MCP bridge is: then long foreground commands are refused in favour of them
+        let raw = if p.mcp_config.is_some() { Self::disallowed_with_jobs() } else { Self::disallowed() };
+        a.push(format!("--disallowedTools={}", if p.no_tools { format!("{raw},{}", ALL_OWN_TOOLS.join(",")) } else { raw }));
         if let Some(cfg) = p.mcp_config {
             a.extend(["--mcp-config".into(), cfg.display().to_string(), "--strict-mcp-config".into()]);
             a.extend(["--permission-prompt-tool".into(), APPROVE_TOOL.into()]);

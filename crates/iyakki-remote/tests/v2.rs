@@ -1,7 +1,7 @@
 //! Protocol version 2 over a real socket: negotiation (new and old pages), tiles that decode to the screen, backpressure with a
 //! slow page, level changes, no extensions in the handshake, hostile messages.
 
-use iyakki_remote::codec::{decode_frame, Canvas, Level};
+use iyakki_remote::codec::{decode_frame, Canvas};
 use iyakki_remote::input::Input;
 use iyakki_remote::screen::{Frame, Gate, LoginError, Pixels, Screen};
 use iyakki_remote::server::{Config, Server};

@@ -1,0 +1,51 @@
+# Programs that production code starts (Command::new, Runner argv[0]) and where they come from. Read by
+# crates/iyakki-agent/tests/image_programs.rs (./run.sh image-programs): a program the scan finds that is not listed here FAILS the test,
+# so a new dependency on a program the image does not ship (the `curl` bug, 2026-10-27) cannot arrive unnoticed.
+#
+#   image    <program> busybox | <BR2_PACKAGE_SYMBOL>   shipped; the symbol must appear in dist/buildroot/configs
+#   optional <program> <why>   not in the default image: downloaded at the person's click, a later add-on, or only run after has() says it exists
+#   host     <program> <why>   a developer machine, macOS or Windows path; never runs on the image
+#   gap      <program> <why>   used on a real image path although the image lacks it: a known open item (the test prints these)
+#   exempt   <path-part> <why>  a source file whose literal "curl"/"jq"/"python3"/"perl" is a command-policy list, advice text or the like
+#
+# busybox in the image is Buildroot's default applet set.
+image /bin/sh busybox
+image sh busybox
+image env busybox
+image ip BR2_PACKAGE_IPROUTE2
+image kill busybox
+image ps busybox
+image dmesg busybox
+image mknod busybox
+image modprobe busybox
+image mdev busybox
+image udhcpc busybox
+image amixer BR2_PACKAGE_ALSA_UTILS_AMIXER
+image aplay BR2_PACKAGE_ALSA_UTILS_APLAY
+image arecord BR2_PACKAGE_ALSA_UTILS
+image git BR2_PACKAGE_GIT
+image ssh BR2_PACKAGE_DROPBEAR_CLIENT
+optional kubectl downloaded with the k3s program at the person's click; callers ask has("kubectl") first
+optional k3s downloaded at the person's click (docs/K3S-DEV.md)
+optional podman only in the cluster fragment (iyakki_cluster.fragment), not in the default image
+optional docker a developer machine's engine, never in the image
+host npx developer machine (coverage runs)
+host xdg-open a desktop session only (webengine::host_session); the image uses its own browser
+host rustc developer machine
+host rustup developer machine
+host apt-cache Debian or Ubuntu desktop (Linux apps tile)
+exempt cli.rs the restricted command shell's own "curl" built-in
+exempt grants.rs command-policy list (programs that are never auto-approved)
+exempt autopilot.rs command-policy list (programs the autopilot knows)
+exempt boardtrack.rs words that classify a task, not a spawn
+exempt devcluster.rs command-policy text: what a command would download
+exempt flows/programs.rs allowed-program list of flow steps; a flow step reports a missing program itself
+exempt linuxapps_init.rs installs curl inside a Debian guest, not on the image
+exempt dockerlint.rs advice text about Dockerfiles
+exempt clis.rs known-CLI catalogue (names to look for on the person's PATH)
+exempt coverage.rs developer machine only
+exempt boardtools.rs words that classify a task
+exempt store/author.rs text for the person who writes a store entry
+exempt regsetup.rs advice text: a command to run on the node
+optional gst-launch-1.0 only run by the boot self-test when the web engine's MP3 plugin file exists (web images ship it)
+optional gst-inspect-1.0 only run by the boot self-test (web-recorder) when the web engine's MP3 plugin file exists (web images ship it)

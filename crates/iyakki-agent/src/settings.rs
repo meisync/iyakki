@@ -87,9 +87,17 @@ impl Default for SigninSaver {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// The layout of this file (see `iyakki-schema`): 0 = alpha.1, which had no such field.
+    pub schema: u32,
+    /// Fields a newer release wrote that this one does not know: kept, and written back.
+    #[serde(flatten)]
+    pub extra: iyakki_schema::Extra,
     pub time: TimeSettings,
     pub providers: Vec<ProviderCfg>,
     pub chat: Option<ModelChoice>,
+    /// The model that looks at pictures (Settings -> Models -> Vision model); `None` = the chat model if it can see, else one is picked
+    /// from the providers (see `visionmodel`).
+    pub vision: Option<ModelChoice>,
     /// `None` = built-in hashed embeddings (no model needed).
     pub embedding: Option<ModelChoice>,
     pub rag: RagSettings,
@@ -121,10 +129,15 @@ pub struct Settings {
     pub silence_limit_secs: u32,
     /// Turn the workspace history off (it is on by default: Autopilot steps and summaries are kept in the workspace's own knowledge base).
     pub no_workspace_history: bool,
+    /// Settings → Models → Tool routing: off offers the model every tool on every request (on by default: only the groups the chat needs; `more_tools` loads the rest).
+    pub no_tool_routing: bool,
     /// External coding agents (Claude Code, GitHub Copilot, custom commands): Settings → Agents.
     pub agents: crate::extagent::AgentsCfg,
     /// Settings → Cloud mode → "Show all AI tools": show the AI tools the machine's hardware profile would hide (docs/AI-HARDWARE.md).
     pub show_all_ai: bool,
+    /// Settings -> Network -> "Announce this device on the local network" (mDNS name `iyakki-<id>.local`, `devname`): `None` is the
+    /// default (on on a desktop, off in cloud mode), `Some` is the person's choice.
+    pub announce_name: Option<bool>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -217,23 +230,38 @@ impl Settings {
     }
 }
 
+/// `settings.json`: schema 1 stamps the alpha.1 layout (every field added since has a serde default).
+pub const SCHEMA: iyakki_schema::Spec = iyakki_schema::Spec { name: "settings", current: 1, migrations: &[iyakki_schema::Migration { to: 1, what: "stamp the alpha.1 layout", run: |_| {} }] };
+
 pub struct SettingsStore {
     path: PathBuf,
     current: Settings,
+    /// Set when the file cannot be written without losing something (written by a newer release, or unreadable): every save says why.
+    read_only: Option<String>,
 }
 
 impl SettingsStore {
+    /// Opens the file. An older layout is lifted (the old file is kept as `settings.json.pre-v1`); a file from a newer release is
+    /// read but never written; a file that is not JSON is moved aside (`.corrupt-<time>`) and the defaults are used, with a line for
+    /// the audit log. A file that parses but breaks the rules (`validate`) is still refused loudly and left untouched.
     pub fn open(path: &Path) -> Result<SettingsStore, SettingsError> {
-        let current = match std::fs::read_to_string(path) {
-            Ok(t) => {
-                let s: Settings = serde_json::from_str(&t).map_err(|e| SettingsError::Storage(format!("corrupt settings file: {e}")))?;
-                s.validate()?;
-                s
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
-            Err(e) => return Err(SettingsError::Storage(e.to_string())),
-        };
-        Ok(SettingsStore { path: path.into(), current })
+        let (out, mut current, _) = iyakki_schema::load_typed::<Settings>(&SCHEMA, path, iyakki_schema::now_secs());
+        let mut read_only = None;
+        match &out {
+            iyakki_schema::Outcome::Newer { found, .. } => read_only = Some(iyakki_schema::newer_message(&SCHEMA, *found)),
+            iyakki_schema::Outcome::Corrupt { moved_to: None, reason } => read_only = Some(format!("The settings file cannot be read ({reason}); it is left as it is.")),
+            iyakki_schema::Outcome::Current(_) | iyakki_schema::Outcome::Migrated { .. } => current.validate()?,
+            _ => {}
+        }
+        if read_only.is_none() {
+            current.schema = SCHEMA.current;
+        }
+        Ok(SettingsStore { path: path.into(), current, read_only })
+    }
+
+    /// Why this store cannot be changed (a newer release wrote the file), if so.
+    pub fn read_only(&self) -> Option<&str> {
+        self.read_only.as_deref()
     }
 
     pub fn get(&self) -> &Settings {
@@ -241,17 +269,10 @@ impl SettingsStore {
     }
 
     fn save(&self) -> Result<(), SettingsError> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let io = |e: std::io::Error| SettingsError::Storage(e.to_string());
-        if let Some(d) = self.path.parent() {
-            std::fs::create_dir_all(d).map_err(io)?;
+        if let Some(why) = &self.read_only {
+            return Err(SettingsError::Storage(why.clone()));
         }
-        let tmp = self.path.with_extension("tmp");
-        let json = serde_json::to_vec_pretty(&self.current).map_err(|e| SettingsError::Storage(e.to_string()))?;
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).map_err(io)?;
-        f.write_all(&json).and_then(|_| f.sync_all()).map_err(io)?;
-        std::fs::rename(&tmp, &self.path).map_err(io)
+        iyakki_schema::save_typed(&SCHEMA, &self.path, &self.current, 0o600).map_err(SettingsError::Storage)
     }
 
     /// Apply a change atomically: it takes effect only if the result validates and saves.
@@ -454,7 +475,7 @@ mod tests {
     fn corrupt_or_invalid_files_fail_loudly() {
         let p = tmp("corrupt");
         std::fs::write(&p, "not json").unwrap();
-        assert!(matches!(SettingsStore::open(&p), Err(SettingsError::Storage(_))));
+        assert!(SettingsStore::open(&p).unwrap().get().providers.is_empty(), "a damaged file is moved aside and the defaults are used (tests/upgrade_tests.rs checks the rest)");
         std::fs::write(&p, r#"{"chat":{"provider":"ghost","model":"m"}}"#).unwrap();
         assert!(matches!(SettingsStore::open(&p), Err(SettingsError::Invalid(_))), "a hand-edited file that breaks the rules is not silently accepted");
         // unknown future fields don't break loading

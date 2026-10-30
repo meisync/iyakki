@@ -5,6 +5,8 @@
 pub mod adapt;
 pub mod codec;
 pub mod devconfig;
+pub mod devfw;
+pub mod devname;
 pub mod devserver;
 pub mod http;
 pub mod input;

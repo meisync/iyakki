@@ -368,6 +368,21 @@ pub fn plan_waiting(pl: &Platform, def: &dyn ServiceDef, profile: &ClusterProfil
 
 /// Plan one deployment: check the options and the cluster, build and check the manifest. `Err` only for a refused cluster, bad
 /// options or an unreadable cluster; everything the person can fix in the cluster is a blocker in the plan, shown with the preview.
+/// A Gitea that exists already keeps how it is reachable when the person did not choose an exposure: from IYAKKI's record of it, else from
+/// the Service `gitea-http` the cluster has in the namespace. Returns the exposure and the options that go with it (the loopback port).
+pub fn kept_gitea_exposure(records: &[Installed], facts: &ClusterFacts, ns: &str) -> Option<(String, Vec<(String, String)>)> {
+    if let Some(r) = records.iter().find(|r| r.service == "gitea" && !r.connected && r.namespace == ns) {
+        let e = r.options.get("exposure").to_string();
+        if !e.is_empty() {
+            let lb = r.options.get(super::gitea::LOOPBACK_OPTION).to_string();
+            let o = if e == "ClusterIP" && !lb.is_empty() { vec![(super::gitea::LOOPBACK_OPTION.to_string(), lb)] } else { vec![] };
+            return Some((e, o));
+        }
+    }
+    let t = facts.services.iter().find(|s| s.0 == ns && s.1 == "gitea-http").map(|s| s.2.clone())?;
+    Exposure::ALL.iter().find(|e| e.word().eq_ignore_ascii_case(&t)).map(|e| (e.word().to_string(), vec![]))
+}
+
 pub fn plan(pl: &Platform, def: &dyn ServiceDef, profile: &ClusterProfile, given: &Options) -> Result<Plan, String> {
     if let Some(r) = deploy_refusal(profile) {
         return Err(r);
@@ -375,18 +390,58 @@ pub fn plan(pl: &Platform, def: &dyn ServiceDef, profile: &ClusterProfile, given
     if devcluster::hidden_load(&pl.dir, &pl.user).iter().any(|h| *h == profile.kubeconfig) {
         return Err(format!("refused: the kubeconfig {} is hidden in IYAKKI", profile.kubeconfig));
     }
-    let opts = validate_options(def, given)?;
+    let mut opts = validate_options(def, given)?;
     let ns = opts.get("namespace").to_string();
     let version = opts.get("version").to_string();
-    let exposure = Exposure::parse(opts.get("exposure"))?;
+    let mut exposure = Exposure::parse(opts.get("exposure"))?;
     let cluster = ClusterRef::of(profile);
     let existing_records = installed::load(&pl.dir, &pl.user);
     let instance = installed::instance_id(def.id(), &ns, &format!("{}#{}", cluster.kubeconfig, cluster.context), &existing_records);
     let kc = Kc::new(pl.run.clone(), &profile.kubeconfig, &profile.context);
     let facts = probe(&kc, profile, &ns, &instance)?;
+    let mut kept_exposure: Option<String> = None;
+    // Gitea: the Services that are open on the network now (NodePort), if any
+    let open_ports: Vec<u16> = if def.id() == "gitea" { facts.services.iter().filter(|s| s.0 == ns && s.1.starts_with("gitea-") && s.2 == "NodePort").flat_map(|s| s.3.iter().copied()).collect() } else { vec![] };
+    let mut narrowing = false;
+    if def.id() == "gitea" && given.get("exposure").trim().is_empty() {
+        if let Some((e, o)) = kept_gitea_exposure(&existing_records, &facts, &ns) {
+            let mut g = given.clone();
+            // a redeploy never changes how it is reachable by itself; narrowing is the person's explicit choice (the close option)
+            if e == "NodePort" && opts.flag(super::gitea::CLOSE_OPTION) {
+                g.set("exposure", "ClusterIP");
+                narrowing = true;
+            } else {
+                g.set("exposure", &e);
+                kept_exposure = Some(e);
+            }
+            for (k, v) in o {
+                if g.get(&k).trim().is_empty() {
+                    g.set(&k, &v);
+                }
+            }
+            opts = validate_options(def, &g)?;
+            exposure = Exposure::parse(opts.get("exposure"))?;
+        }
+    } else if def.id() == "gitea" && exposure == Exposure::ClusterIP && !open_ports.is_empty() {
+        narrowing = true;
+    }
+    if def.id() == "gitea" && exposure == Exposure::ClusterIP && opts.get(super::gitea::LOOPBACK_OPTION).is_empty() {
+        opts.set(super::gitea::LOOPBACK_OPTION, &super::gitea::DEFAULT_LOOPBACK.to_string());
+    }
     let mut blockers: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
+    if let Some(e) = &kept_exposure {
+        notes.push(format!("A Gitea is installed in {ns} already with the exposure {e}: it is kept, nothing about who can reach it changes. To close its network ports tick \"Close the open NodePorts\" (a NodePort Gitea only); to change it otherwise remove it first (its data is kept) and deploy again."));
+    }
+    if narrowing {
+        opts.set(super::gitea::CLOSE_OPTION, "false");
+        let list = open_ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
+        warnings.push(format!("THIS CLOSES the NodePort{} {list} that Gitea has open on your network now: afterwards only this machine (127.0.0.1) and the cluster reach it. Other computers, and Git connections or clone URLs that use the old address, stop working until you change them. Approve only if that is what you want.", if open_ports.len() == 1 { "" } else { "s" }));
+    }
+    if def.id() == "gitea" && exposure == Exposure::NodePort && kept_exposure.is_none() {
+        warnings.push("NodePort OPENS Gitea's ports on every network address of this machine (your LAN) because you chose it. The default keeps it on this machine only (ClusterIP with 127.0.0.1).".into());
+    }
 
     // nodes and capacity
     let ready: Vec<&NodeFact> = facts.nodes.iter().filter(|n| n.ready).collect();
@@ -443,7 +498,7 @@ pub fn plan(pl: &Platform, def: &dyn ServiceDef, profile: &ClusterProfile, given
     let own = |suffix: &str| facts.own_ports.iter().find(|(n, _)| n.ends_with(suffix)).map(|x| x.1);
     let (mut http_port, mut ssh_port) = (0u16, 0u16);
     if exposure == Exposure::NodePort {
-        match pick_port(opts.get("http_node_port"), own("http"), &facts.taken_ports, 30300, &[]) {
+        match pick_port(opts.get("http_node_port"), own("http"), &facts.taken_ports, def.first_node_port(), &[]) {
             Ok(p) => http_port = p,
             Err(e) => blockers.push(e),
         }
@@ -547,6 +602,11 @@ pub fn plan(pl: &Platform, def: &dyn ServiceDef, profile: &ClusterProfile, given
     let builtin = def.id() == "gitea";
     let mut notes_lint = Vec::new();
     for w in &lint.warnings {
+        if builtin && w.contains("hostPort") && built.manifest.contains("hostIP: 127.0.0.1") {
+            // Gitea's own loopback publication (ClusterIP plus a port on 127.0.0.1 of the node): by design, and said in the notes
+            notes_lint.push("hostPort on 127.0.0.1 only: the node's loopback address, so no other computer can reach it".to_string());
+            continue;
+        }
         if builtin {
             return Err(format!("the manifest of {} did not pass the manifest check cleanly:\n{}", def.title(), lint.report()));
         }
@@ -851,11 +911,25 @@ pub fn apply_with(pl: &Platform, plan: &Plan, approved: bool, progress: &mut dyn
         std::fs::write(&plan.manifest_path, &lint.text).map_err(|e| format!("{}: {e}", plan.manifest_path.display()))?;
         progress("applying the manifest");
         let f = plan.manifest_path.display().to_string();
-        let o = kc.kubectl(&["apply", "-f", &f, "-n", &ns], 30, 120);
-        if !o.ok() {
-            return Err(format!("kubectl apply failed: {}", o.combined().trim()));
+        // a volume that exists is never part of the apply (its spec is immutable); a new one gets its StorageClass written out
+        let kube = |args: &[&str]| {
+            let o = kc.read(args);
+            crate::pvcguard::KOut { ok: o.ok(), stdout: o.stdout.clone(), text: o.combined() }
+        };
+        let printed = crate::pvcguard::guard(&lint.text, Some(&ns), &kube)?;
+        for n in &printed.notes {
+            a.done.push(n.clone());
         }
-        a.done.push(format!("applied the manifest to {ns}"));
+        if printed.manifest.trim().is_empty() {
+            a.done.push("every object of the manifest was a volume that exists already, so nothing was applied".into());
+        } else {
+            std::fs::write(&plan.manifest_path, &printed.manifest).map_err(|e| format!("{}: {e}", plan.manifest_path.display()))?;
+            let o = kc.kubectl(&["apply", "-f", &f, "-n", &ns], 30, 120);
+            if !o.ok() {
+                return Err(format!("kubectl apply failed: {}", crate::pvcguard::explain_apply_error(o.combined().trim())));
+            }
+            a.done.push(format!("applied the manifest to {ns}"));
+        }
     }
     // 5. wait
     let workloads = def.workloads();

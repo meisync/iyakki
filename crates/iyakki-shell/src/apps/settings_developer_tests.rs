@@ -144,3 +144,58 @@ fn the_page_grants_and_takes_away_scopes_per_computer_answers_shell_requests_and
         let _ = draw(&mut a, &cx, w, h);
     }
 }
+
+struct FwClock;
+impl iyakki_fw::engine::Clock for FwClock {
+    fn now(&self) -> i64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    }
+}
+struct FwNoDns;
+impl iyakki_fw::engine::Resolver for FwNoDns {
+    fn resolve(&self, _: &str) -> Result<Vec<std::net::IpAddr>, String> {
+        Err("none".into())
+    }
+}
+struct FwMem;
+impl iyakki_fw::engine::Store for FwMem {
+    fn load(&self) -> Result<Option<iyakki_fw::engine::Saved>, String> {
+        Ok(None)
+    }
+    fn save(&self, _: &iyakki_fw::engine::Saved) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[test]
+fn the_page_says_when_the_firewall_blocks_the_developer_port_and_f_and_n_ask_for_the_rules() {
+    let cx = admin("devset-fw");
+    let d = DevMode::open(cx.services.dir());
+    let mut e = iyakki_fw::Engine::new(Box::new(iyakki_fw::backend::FakeBackend::default()), Box::new(FwClock), Box::new(FwNoDns), Box::new(FwMem));
+    e.boot(false);
+    let mut a = SettingsApp::new(&cx);
+    a.fw.handle = iyakki_fw::service::Handle::Own(Arc::new(std::sync::Mutex::new(e)));
+    goto(&mut a, &cx, Tab::Developer);
+    // developer mode off: no hint
+    assert!(a.dev_fw_hint(&d).is_none());
+    key(&mut a, &cx, Key::Char('e'));
+    assert!(d.is_on());
+    assert_eq!(a.dev_fw_hint(&d).as_deref(), Some("the firewall blocks the developer port 7979: Allow"));
+    let g = draw(&mut a, &cx, 1280, 800);
+    assert!(g.hits.iter().any(|h| h.label == "Allow in the firewall") && g.hits.iter().any(|h| h.label == "Whole network on/off"));
+    // f without a code on the screen and without a blocked computer: nothing to allow
+    key(&mut a, &cx, Key::Char('f'));
+    assert_eq!(d.fw_want().pair_until, 0);
+    // with a pairing code: the one-time request (consumed when the pairing ends)
+    key(&mut a, &cx, Key::Char('p'));
+    key(&mut a, &cx, Key::Char('f'));
+    assert!(d.fw_want().pair_until > 0);
+    d.cancel_pairing();
+    assert_eq!(d.fw_want().pair_until, 0);
+    // the opt-in is off by default and n turns it on and off
+    assert!(!d.network_wide());
+    key(&mut a, &cx, Key::Char('n'));
+    assert!(d.network_wide());
+    key(&mut a, &cx, Key::Char('n'));
+    assert!(!d.network_wide());
+}

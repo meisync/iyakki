@@ -202,6 +202,9 @@ impl NodeKind for AgentKind {
         };
         cx.log(format!("agent step ({} tools, up to {} tokens, {} cents)", req.tools.len(), req.max_tokens, req.max_cents));
         let r = cx.host.agent(&req, cx.cancel)?;
+        for l in r.log.iter().take(5) {
+            cx.log(l);
+        }
         let mut out = Map::new();
         out.insert("text".into(), json!(r.text));
         out.insert("cents".into(), json!(r.cents));

@@ -24,6 +24,7 @@ fn deps() -> Deps {
         runner: Arc::new(System),
         path_ok: Arc::new(|_| true),
         work_dir: std::env::temp_dir(),
+        cluster: std::sync::Arc::new(crate::dash::cluster::NoCluster),
     }
 }
 

@@ -289,9 +289,7 @@ mod tests {
 
     #[test]
     fn explains_errors_and_creates_parents() {
-        let d = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("iyakki-scope2-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::testdir::unique("iyakki-scope2", "main");
         std::fs::write(d.join("deploy"), "").unwrap();
         std::fs::write(d.join("full"), "data").unwrap();
         let e = resolve_for_write(&d, "deploy/registry.yaml").unwrap_err();
@@ -314,7 +312,8 @@ mod tests {
         let eio = std::io::Error::from_raw_os_error(5);
         assert!(explain_io(&eio, Path::new("/home/admin/Pictures/a.jpg"), "write").contains("drive is not available"));
         assert!(explain_io(&std::io::Error::from_raw_os_error(2), Path::new("/var/lib/iyakki/x"), "read").contains("drive is not available"));
-        assert!(!explain_io(&std::io::Error::from_raw_os_error(2), &d.join("zz/x"), "read").contains("drive is not available"), "a path elsewhere keeps its own wording");
+        // a path outside /home and /var/lib/iyakki (the test folder itself may be below /home, as target/tmp is)
+        assert!(!explain_io(&std::io::Error::from_raw_os_error(2), Path::new("/srv/elsewhere/zz/x"), "read").contains("drive is not available"), "a path elsewhere keeps its own wording");
         iyakki_storage::loss::set_thread_override(None);
         assert!(!explain_io(&eio, Path::new("/home/admin/Pictures/a.jpg"), "write").contains("drive is not available"));
         assert!(looks_like_folder_name(Path::new("/x/deploy")) && !looks_like_folder_name(Path::new("/x/a.txt")) && !looks_like_folder_name(Path::new("/x/Dockerfile")));

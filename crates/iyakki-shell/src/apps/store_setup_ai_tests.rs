@@ -32,7 +32,7 @@ fn machine(p: Option<aiprofile::AiProfile>, show_all: bool, gpus: usize, nvidia:
 #[test]
 fn no_profile_hides_nothing_and_cloud_mode_keeps_its_own_rules() {
     let m = machine(None, false, 0, false);
-    assert!(Item::ALL.into_iter().filter(|i| i.fw_def().is_none() && !matches!(i, Item::GpuVulkan | Item::GpuNvidia | Item::MacFirmware | Item::MacCamera)).all(|i| m.shows(i)));
+    assert!(Item::ALL.into_iter().filter(|i| i.fw_def().is_none() && *i != Item::FwHardware && !matches!(i, Item::GpuVulkan | Item::GpuNvidia | Item::MacFirmware | Item::MacCamera)).all(|i| m.shows(i)));
     assert_eq!(m.ai_line(), None);
     assert_eq!(m.hidden_ai_note(), None);
     // cloud: the profile is not consulted, Lemonade stays as before
@@ -48,7 +48,7 @@ fn a_cpu_only_machine_hides_the_model_servers_with_a_reason_and_show_anyway_brin
         assert!(!m.shows(i), "{i:?}");
         assert!(!m.eligible_for_test().contains(&i));
     }
-    assert!(m.shows(Item::Kokoro) && m.shows(Item::IndicTts) && m.shows(Item::K3s) && m.shows(Item::MacHost));
+    assert!(m.shows(Item::Kokoro) && m.shows(Item::K3s) && m.shows(Item::MacHost));
     let note = m.hidden_ai_note().unwrap();
     assert!(note.starts_with("2 AI tools are hidden because this machine has no GPU with 6 GB or more; local models would run on the CPU and be very slow."), "{note}");
     assert!(note.contains("Show all AI tools"));

@@ -254,6 +254,13 @@ pub struct NodeError {
     /// The step needs a command-line tool that is missing or too old: `(cli id, minimum version, version found or empty)`.
     #[serde(default)]
     pub needs_cli: Option<(String, String, String)>,
+    /// Only the person can fix this: a permission, consent or trust setting is off (camera not allowed, a browser session not
+    /// approved). The agent is never asked to fix it and no fix attempt is spent; the card tells the person what to switch on.
+    #[serde(default)]
+    pub needs_person: bool,
+    /// The permission to ask the person for (`camera`, `camera_unattended`), empty when there is nothing to ask.
+    #[serde(default)]
+    pub permission: String,
 }
 
 impl NodeError {
@@ -262,6 +269,19 @@ impl NodeError {
     }
     pub fn config(message: impl Into<String>) -> NodeError {
         NodeError { message: message.into(), config: true, ..Default::default() }
+    }
+    /// A refusal that only the person can lift (a consent or trust setting). It is a configuration error that the agent never gets to "fix".
+    pub fn consent(message: impl Into<String>) -> NodeError {
+        NodeError { message: message.into(), config: true, needs_person: true, ..Default::default() }
+    }
+    /// A step that needs the person to make a choice (no vision model is available, say): like a consent failure, never sent to the
+    /// fixing agent, and no permission request is made for it.
+    pub fn choice(message: impl Into<String>) -> NodeError {
+        NodeError { message: message.into(), config: true, needs_person: true, permission: "choice".into(), ..Default::default() }
+    }
+    /// A consent failure the person can settle by answering a permission request.
+    pub fn consent_for(permission: &str, message: impl Into<String>) -> NodeError {
+        NodeError { message: message.into(), config: true, needs_person: true, permission: permission.into(), ..Default::default() }
     }
     pub fn timeout(message: impl Into<String>) -> NodeError {
         NodeError { message: message.into(), timed_out: true, ..Default::default() }

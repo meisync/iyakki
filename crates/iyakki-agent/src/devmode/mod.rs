@@ -19,11 +19,18 @@ use iyakki_sec::policy::Policy;
 use serde::{Deserialize, Serialize};
 
 pub mod api;
+pub mod api_diag;
+pub mod diag;
+pub mod kube;
+pub mod state;
 pub mod app;
 pub mod auth;
 pub mod bootmount;
+pub mod centre;
 pub mod cli;
+pub mod cli_diag;
 pub mod config;
+pub mod contract;
 pub mod cli_adb;
 pub mod debug;
 pub mod files;
@@ -46,7 +53,15 @@ mod tests_adb;
 #[cfg(test)]
 mod tests_update;
 #[cfg(test)]
+mod tests_centre;
+#[cfg(test)]
+mod tests_update_safety;
+#[cfg(test)]
 mod tests_patch;
+#[cfg(test)]
+mod tests_diag;
+#[cfg(test)]
+mod tests_fw;
 
 /// The "user" a developer screenshot is asked for: the shell answers it with whatever it is drawing (`*` is never in an account name).
 pub const SCREEN_ANY: &str = "*developer*";
@@ -103,6 +118,42 @@ impl DevKey {
     /// `ab12 cd34 …`: the first 16 hex characters, for lists.
     pub fn short(&self) -> String {
         self.key.chars().take(16).collect::<Vec<_>>().chunks(4).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join(" ")
+    }
+}
+
+/// What the firewall is asked for (see `iyakki_fw::devrules::Want`, which the caller fills from this).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FwWant {
+    pub on: bool,
+    pub until: i64,
+    pub port: u16,
+    pub peers: Vec<String>,
+    pub pair_until: i64,
+    pub network_wide: bool,
+}
+
+/// `fwallow.json`: the addresses paired computers connected from, and what the person chose on the Developer mode page.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
+struct FwState {
+    #[serde(default)]
+    pair_until: i64,
+    #[serde(default)]
+    extra: Vec<String>,
+    #[serde(default)]
+    network_wide: bool,
+    #[serde(default)]
+    key_addrs: std::collections::BTreeMap<String, String>,
+}
+
+/// How long "Allow a computer to pair" lasts at most.
+pub const FW_PAIR_SECS: i64 = 600;
+
+/// A private, link-local or unique-local address (never a public one).
+pub fn is_local_ip(s: &str) -> bool {
+    match s.parse::<std::net::IpAddr>().map(|a| a.to_canonical()) {
+        Ok(std::net::IpAddr::V4(a)) => a.is_private() || a.is_link_local(),
+        Ok(std::net::IpAddr::V6(a)) => (a.segments()[0] & 0xfe00) == 0xfc00 || (a.segments()[0] & 0xffc0) == 0xfe80,
+        Err(_) => false,
     }
 }
 
@@ -216,12 +267,26 @@ impl DevMode {
         &self.data
     }
 
+    /// A state file of this folder. One that cannot be read is moved aside (`<file>.corrupt-<time>`, with a line for the audit log)
+    /// and the defaults are used: the next write must not silently replace what was there (paired keys, the Wi-Fi grant, ...).
     fn read<T: for<'a> Deserialize<'a> + Default>(&self, f: &str) -> T {
-        std::fs::read(self.dir.join(f)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        let p = self.dir.join(f);
+        let Ok(b) = std::fs::read(&p) else { return T::default() };
+        serde_json::from_slice(&b).unwrap_or_else(|e| {
+            let moved = iyakki_schema::move_aside(&p, iyakki_schema::now_secs());
+            iyakki_schema::report(format!("developer mode {}: damaged ({e}); {} and started with the defaults", p.display(), moved.map(|m| format!("moved to {}", m.display())).unwrap_or_else(|| "could not be moved aside".into())));
+            T::default()
+        })
     }
 
+    /// Writes whole and atomically; refuses to replace a file that a newer release marked with a newer `schema`.
     fn write<T: Serialize>(&self, f: &str, v: &T) -> Result<(), String> {
-        write_private(&self.dir.join(f), &serde_json::to_vec_pretty(v).unwrap_or_default())
+        let p = self.dir.join(f);
+        const SPEC: iyakki_schema::Spec = iyakki_schema::Spec { name: "developer mode state", current: 0, migrations: &[] };
+        if let Some(n) = iyakki_schema::on_disk_is_newer(&SPEC, &p) {
+            return Err(iyakki_schema::newer_message(&SPEC, n));
+        }
+        write_private(&p, &serde_json::to_vec_pretty(v).unwrap_or_default())
     }
 
     // ---------------------------------------------------------------------------------------- on and off
@@ -242,6 +307,7 @@ impl DevMode {
             self.cancel_pairing();
             sessions::end_all(&self.data);
             self.shell_forget_all();
+            self.fw_clear();
             self.log("system", "", "devmode.off", "switched off automatically: its time was up", true);
             return false;
         }
@@ -266,6 +332,26 @@ impl DevMode {
         Ok(st)
     }
 
+    /// Push the automatic switch-off `hours` further away (administrators, on the device): from the time it would have switched off, or
+    /// from now when that has passed. Refused while it is off and when it has no switch-off time ("until switched off"). The result never
+    /// goes beyond [`MAX_AUTO_OFF_HOURS`] from now.
+    pub fn extend(&self, policy: &Policy, user: &str, hours: u32) -> Result<State, String> {
+        Self::need_admin(policy)?;
+        if !self.is_on() {
+            return Err("developer mode is off: switch it on first".into());
+        }
+        let st = self.state();
+        if st.until == 0 {
+            return Err("developer mode has no switch-off time (it stays on until switched off): nothing to extend".into());
+        }
+        let now = self.now();
+        let until = (st.until.max(now) + hours as i64 * 3600).min(now + MAX_AUTO_OFF_HOURS as i64 * 3600);
+        let st = State { until, ..st };
+        self.write("state.json", &st)?;
+        self.log(user, user, "devmode.extend", &format!("switch-off moved {hours} h further"), true);
+        Ok(st)
+    }
+
     /// Switch off (administrators). Also closes an open pairing.
     pub fn disable(&self, policy: &Policy, user: &str) -> Result<(), String> {
         Self::need_admin(policy)?;
@@ -274,6 +360,7 @@ impl DevMode {
         self.cancel_pairing();
         sessions::end_all(&self.data);
         self.shell_forget_all();
+        self.fw_clear();
         self.log(user, user, "devmode.off", "switched off", true);
         Ok(())
     }
@@ -324,6 +411,7 @@ impl DevMode {
             return Err(format!("{MAX_KEYS} computers are paired already: revoke one first"));
         }
         let p = Pairing { code: auth::new_code()?, expires: self.now() + PAIR_SECS, account: account.into(), tries: 0, by: Some(user.into()), scopes: scopes::default_scopes() };
+        self.fw_consume_pair();
         self.write("pairing.json", &p)?;
         self.log(user, account, "devmode.pair.open", &format!("a pairing code is on the screen (the computer will act as {account})"), true);
         Ok(p)
@@ -337,6 +425,15 @@ impl DevMode {
 
     pub fn cancel_pairing(&self) {
         let _ = std::fs::remove_file(self.dir.join("pairing.json"));
+        self.fw_consume_pair();
+    }
+
+    /// The firewall request of a pairing is used up when that pairing ends (completed, cancelled) or a new one opens.
+    fn fw_consume_pair(&self) {
+        let f = self.fw_state();
+        if f.pair_until != 0 {
+            let _ = self.write("fwallow.json", &FwState { pair_until: 0, ..f });
+        }
     }
 
     /// A computer sent its key and its proof of the code. `fp` is this device's certificate fingerprint. On success the key is kept and
@@ -400,6 +497,101 @@ impl DevMode {
             k.last_used = now;
             let _ = self.write("keys.json", &keys);
         }
+    }
+
+    // ---------------------------------------------------------------------------------------- the firewall
+
+    /// What the firewall needs from developer mode right now (the firewall side is `iyakki_fw::devrules`).
+    pub fn fw_want(&self) -> FwWant {
+        let on = self.is_on();
+        let st = self.state();
+        let f = self.fw_state();
+        let keys = self.keys();
+        let mut peers: Vec<String> = f.key_addrs.iter().filter(|(k, _)| keys.iter().any(|x| &x.key == *k)).map(|(_, a)| a.clone()).collect();
+        peers.extend(f.extra.iter().cloned());
+        peers.retain(|p| is_local_ip(p));
+        peers.sort();
+        peers.dedup();
+        // the pairing request only counts while the pairing it was made for is open (a pairing that completed or ran out consumes it)
+        let pair_until = if f.pair_until > self.now() && self.pairing().is_some() { f.pair_until } else { 0 };
+        FwWant { on, until: st.until, port: st.port(), peers, pair_until, network_wide: f.network_wide }
+    }
+
+    fn fw_state(&self) -> FwState {
+        self.read("fwallow.json")
+    }
+
+    /// Developer mode went off (or the device started): nothing the firewall was asked for survives.
+    pub fn fw_clear(&self) {
+        let f = self.fw_state();
+        let _ = self.write("fwallow.json", &FwState { key_addrs: f.key_addrs, ..Default::default() });
+    }
+
+    /// The device started: a pairing request from before does not count (the other choices stay while developer mode is on).
+    pub fn fw_start_reset(&self) {
+        let f = self.fw_state();
+        if f.pair_until != 0 {
+            let _ = self.write("fwallow.json", &FwState { pair_until: 0, ..f });
+        }
+        if !self.is_on() {
+            self.fw_clear();
+        }
+    }
+
+    /// Remember the address a paired computer connected from (private addresses only; it is what the firewall rule is made for).
+    pub fn note_key_addr(&self, key_hex: &str, addr: &str) {
+        if !is_local_ip(addr) {
+            return;
+        }
+        let mut f = self.fw_state();
+        if f.key_addrs.get(key_hex).map(String::as_str) != Some(addr) {
+            f.key_addrs.insert(key_hex.to_string(), addr.to_string());
+            let _ = self.write("fwallow.json", &f);
+        }
+    }
+
+    /// "Allow a computer to pair": for ten minutes (or until the first pairing) the firewall lets the local network reach the developer port.
+    pub fn allow_pairing_through_firewall(&self, policy: &Policy, user: &str) -> Result<i64, String> {
+        Self::need_admin(policy)?;
+        if !self.is_on() {
+            return Err("Switch developer mode on first.".into());
+        }
+        if self.pairing().is_none() {
+            return Err("Open a pairing first (the code on the screen), then allow the computer.".into());
+        }
+        let until = self.now() + crate::devmode::FW_PAIR_SECS;
+        let f = self.fw_state();
+        self.write("fwallow.json", &FwState { pair_until: until, ..f })?;
+        self.log(user, user, "devmode.firewall.request", "the firewall may let the local network reach the developer port for ten minutes or until a computer has paired", true);
+        Ok(until)
+    }
+
+    /// "Allow" on the hint: a computer at this private address may reach the developer port while developer mode is on.
+    pub fn allow_peer(&self, policy: &Policy, user: &str, addr: &str) -> Result<(), String> {
+        Self::need_admin(policy)?;
+        if !is_local_ip(addr) {
+            return Err(format!("{addr} is not an address of the local network: the firewall is never opened to the internet for developer mode"));
+        }
+        let mut f = self.fw_state();
+        if !f.extra.iter().any(|a| a == addr) && f.extra.len() < 8 {
+            f.extra.push(addr.to_string());
+        }
+        self.write("fwallow.json", &f)?;
+        self.log(user, user, "devmode.firewall.request", &format!("the firewall may let {addr} reach the developer port while developer mode is on"), true);
+        Ok(())
+    }
+
+    /// Opt-in "Allow paired computers on this network": the rule covers the whole /24 of each paired computer (only paired keys can act).
+    pub fn set_network_wide(&self, policy: &Policy, user: &str, on: bool) -> Result<(), String> {
+        Self::need_admin(policy)?;
+        let f = self.fw_state();
+        self.write("fwallow.json", &FwState { network_wide: on, ..f })?;
+        self.log(user, user, "devmode.firewall.network", if on { "whole network of the paired computers" } else { "only the address of each paired computer" }, true);
+        Ok(())
+    }
+
+    pub fn network_wide(&self) -> bool {
+        self.fw_state().network_wide
     }
 
     /// Take a computer's key away (administrators): by name or by key. Its next request is refused.

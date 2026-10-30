@@ -276,6 +276,13 @@ pub struct AuditLog {
     path: PathBuf,
 }
 
+/// One writer at a time: reading the last hash and appending must be atomic, or two events in the same second share a `prev`.
+static AUDIT_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn user_of_system() -> &'static str {
+    "system"
+}
+
 #[derive(Serialize, Deserialize)]
 struct AuditLine {
     ts: u64,
@@ -310,12 +317,56 @@ impl AuditLog {
     }
 
     pub fn record(&self, user: &str, event: &str, detail: &str) {
-        use std::os::unix::fs::OpenOptionsExt;
         // One writer at a time: reading the last hash and appending must be atomic,
         // or two events in the same second share a `prev` and the chain reads as broken.
-        static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = self.read().last().map_or_else(|| "0".repeat(64), |l| l.hash.clone());
+        let _guard = AUDIT_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // what the data stores had to say while they loaded (an upgrade, a file moved aside) goes into the chain first
+        for note in iyakki_schema::drain_notes() {
+            self.append(user_of_system(), "data.store", &note);
+        }
+        self.append(user, event, detail);
+    }
+
+    /// Write the sentences the data stores left while they loaded (see `iyakki_schema::report`), if any. The shell calls it at start.
+    pub fn flush_notes(&self) {
+        let _g = AUDIT_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for note in iyakki_schema::drain_notes() {
+            self.append(user_of_system(), "data.store", &note);
+        }
+    }
+
+    /// Append one chained line. The whole of "read the last hash, write the line, flush it to disk" happens under an exclusive
+    /// advisory lock (`flock`) on the log file itself, so two processes (the shell, the core, the command line) cannot both take the
+    /// same `prev`. The last line is read again under the lock, never remembered from before. The line format is unchanged.
+    fn append(&self, user: &str, event: &str, detail: &str) {
+        use std::io::{Read, Seek, SeekFrom};
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::io::AsRawFd;
+        if let Some(d) = self.path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let Ok(mut f) = std::fs::OpenOptions::new().create(true).read(true).append(true).mode(0o600).open(&self.path) else {
+            return;
+        };
+        // The lock goes when `f` is closed (or by LOCK_UN below). If locking is impossible (a file system without flock) the append
+        // still happens: the in-process mutex of `record` keeps threads apart, as before.
+        let fd = f.as_raw_fd();
+        let locked = loop {
+            // SAFETY: `fd` is the open descriptor of `f`, valid for the whole function.
+            if unsafe { libc::flock(fd, libc::LOCK_EX) } == 0 {
+                break true;
+            }
+            if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                break false;
+            }
+        };
+        let mut raw = Vec::new();
+        let _ = f.seek(SeekFrom::Start(0));
+        let _ = f.read_to_end(&mut raw);
+        let text = String::from_utf8_lossy(&raw);
+        let prev = text.lines().filter_map(|l| serde_json::from_str::<AuditLine>(l).ok()).last().map_or_else(|| "0".repeat(64), |l| l.hash);
+        // a line cut short by a power loss must not swallow this one
+        let cut = !raw.is_empty() && raw.last() != Some(&b'\n');
         let mut l = AuditLine {
             ts: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()),
             user: user.into(),
@@ -325,12 +376,38 @@ impl AuditLog {
             hash: String::new(),
         };
         l.hash = line_hash(&l);
-        if let Some(d) = self.path.parent() {
-            let _ = std::fs::create_dir_all(d);
+        // one write call for the whole line, then to disk before the lock is let go
+        let out = format!("{}{}\n", if cut { "\n" } else { "" }, serde_json::to_string(&l).unwrap_or_default());
+        if f.write_all(out.as_bytes()).is_ok() {
+            let _ = f.sync_data();
         }
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&self.path) {
-            let _ = writeln!(f, "{}", serde_json::to_string(&l).unwrap_or_default());
+        if locked {
+            // SAFETY: as above.
+            unsafe { libc::flock(fd, libc::LOCK_UN) };
         }
+    }
+
+    /// Start a new log after the chain reads BROKEN: the old file is kept beside it as `audit.log.broken-<time>` (nothing is deleted)
+    /// and the new chain begins with a line that names it. Under the same file lock as an append, so a writer in another process
+    /// either finishes before the move or writes into the new file. Refused while the chain is intact (nothing to repair).
+    pub fn start_new_log(&self) -> Result<PathBuf, String> {
+        use std::os::unix::io::AsRawFd;
+        let _guard = AUDIT_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if self.verify().is_ok() {
+            return Err("the audit log chain is intact: there is nothing to start over".into());
+        }
+        let f = std::fs::OpenOptions::new().read(true).append(true).open(&self.path).map_err(|e| e.to_string())?;
+        // SAFETY: `f` is open for the whole function; the lock goes when it is closed.
+        unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+        let ts = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let mut kept = self.path.clone().into_os_string();
+        kept.push(format!(".broken-{ts}"));
+        let kept = PathBuf::from(kept);
+        std::fs::rename(&self.path, &kept).map_err(|e| e.to_string())?;
+        drop(f);
+        let name = kept.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        self.append(user_of_system(), "audit.restart", &format!("a new log was started; the broken one is kept as {name}"));
+        Ok(kept)
     }
 
     /// Verify the chain; returns the number of entries.
@@ -460,6 +537,111 @@ mod tests {
         }
         // even the right password is refused during the lockout
         assert!(matches!(s.authenticate("root", "correct horse"), Err(AccountError::Throttled(n)) if n >= 1));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// Not a test of its own: the child processes of `two_processes_and_two_threads_...` run this one (the test binary itself, told by
+    /// the environment which log to append to). Without the variables it does nothing.
+    #[test]
+    fn audit_append_helper_process() {
+        let (Ok(path), Ok(n), Ok(who)) = (std::env::var("IYAKKI_AUDIT_TEST_LOG"), std::env::var("IYAKKI_AUDIT_TEST_N"), std::env::var("IYAKKI_AUDIT_TEST_WHO")) else {
+            return;
+        };
+        let a = AuditLog::new(Path::new(&path));
+        for i in 0..n.parse::<usize>().unwrap() {
+            a.record(&who, "race.test", &format!("{who} {i}"));
+        }
+    }
+
+    #[test]
+    fn a_broken_chain_is_kept_aside_and_a_new_log_starts_that_names_it() {
+        let d = tmp("newlog");
+        let log = AuditLog::new(&d.join("audit.log"));
+        log.record("root", "login", "admin");
+        assert!(log.start_new_log().is_err(), "an intact chain is not started over");
+        log.record("root", "login", "admin");
+        // damage the first line the way an old race did
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        let damaged = text.replacen("\"login\"", "\"logout\"", 1);
+        std::fs::write(log.path(), &damaged).unwrap();
+        assert!(log.verify().is_err());
+        let kept = log.start_new_log().unwrap();
+        assert!(kept.file_name().unwrap().to_string_lossy().starts_with("audit.log.broken-") && kept.exists(), "the old log is kept");
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), damaged, "unchanged");
+        assert_eq!(log.verify(), Ok(1), "a new, intact chain with one line");
+        assert!(log.recent(1)[0].contains("audit.restart") && log.recent(1)[0].contains("audit.log.broken-"));
+        log.record("root", "login", "admin");
+        assert_eq!(log.verify(), Ok(2));
+    }
+
+    #[test]
+    fn two_processes_and_two_threads_appending_at_once_keep_one_unbroken_chain() {
+        let d = tmp("audit-race");
+        let path = d.join("audit.log");
+        let exe = std::env::current_exe().unwrap();
+        // two child processes, 750 lines each
+        let mut kids: Vec<std::process::Child> = ["procA", "procB"]
+            .iter()
+            .map(|who| {
+                std::process::Command::new(&exe)
+                    .args(["accounts::tests::audit_append_helper_process", "--exact", "--test-threads=1"])
+                    .env("IYAKKI_AUDIT_TEST_LOG", &path)
+                    .env("IYAKKI_AUDIT_TEST_N", "750")
+                    .env("IYAKKI_AUDIT_TEST_WHO", who)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        // and two threads in this process, each with its own handle, calling `append` directly: that skips the in-process mutex,
+        // so only the file lock keeps them (and the children) apart
+        let threads: Vec<_> = ["threadA", "threadB"]
+            .iter()
+            .map(|who| {
+                let path = path.clone();
+                let who = who.to_string();
+                std::thread::spawn(move || {
+                    let a = AuditLog::new(&path);
+                    for i in 0..250 {
+                        a.append(&who, "race.test", &format!("{who} {i}"));
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        for k in &mut kids {
+            assert!(k.wait().unwrap().success());
+        }
+        let a = AuditLog::new(&path);
+        assert_eq!(a.verify(), Ok(2000), "every append is in the chain, none shares a prev");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 2000);
+        for who in ["procA", "procB"] {
+            assert_eq!(text.lines().filter(|l| l.contains(&format!("\"user\":\"{who}\""))).count(), 750, "{who}");
+        }
+        for who in ["threadA", "threadB"] {
+            assert_eq!(text.lines().filter(|l| l.contains(&format!("\"user\":\"{who}\""))).count(), 250, "{who}");
+        }
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_line_cut_short_by_a_power_loss_does_not_break_the_next_append_under_the_lock() {
+        let d = tmp("audit-cut");
+        let path = d.join("audit.log");
+        let a = AuditLog::new(&path);
+        a.record("root", "login", "ok");
+        a.record("root", "logout", "ok");
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str("{\"ts\":1,\"user\":\"root\",\"ev");
+        std::fs::write(&path, text).unwrap();
+        a.record("root", "login", "again");
+        assert_eq!(a.verify(), Ok(3), "the cut line is skipped, the new line chains to the last whole one");
         let _ = std::fs::remove_dir_all(d);
     }
 

@@ -495,23 +495,28 @@ fn last_lines(s: &str, n: usize) -> String {
     lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
-/// Run a program, wait at most `limit`, return its output.
-fn run_bounded(prog: &str, args: &[&str], limit: Duration) -> Result<String, String> {
-    use std::io::Read;
-    let mut child = std::process::Command::new(prog).args(args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+/// Wait for the child to end, at most `limit` (then it is killed). A status taken by the PID-1 reaper (`Gone`) is an end like
+/// any other: the output is still in the pipes.
+fn wait_ended(child: &mut std::process::Child, limit: Duration) -> Result<(), String> {
     let start = std::time::Instant::now();
     loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if start.elapsed() < limit => std::thread::sleep(Duration::from_millis(100)),
-            Ok(None) => {
+        match iyakki_core_api::child_status(child) {
+            s if s.is_over() => return Ok(()),
+            _ if start.elapsed() < limit => std::thread::sleep(Duration::from_millis(100)),
+            _ => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err("it took too long and was stopped".into());
             }
-            Err(e) => return Err(e.to_string()),
         }
     }
+}
+
+/// Run a program, wait at most `limit`, return its output.
+fn run_bounded(prog: &str, args: &[&str], limit: Duration) -> Result<String, String> {
+    use std::io::Read;
+    let mut child = std::process::Command::new(prog).args(args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    wait_ended(&mut child, limit)?;
     let mut out = String::new();
     if let Some(mut o) = child.stdout.take() {
         let _ = o.read_to_string(&mut out);
@@ -525,6 +530,19 @@ fn run_bounded(prog: &str, args: &[&str], limit: Duration) -> Result<String, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_child_whose_status_was_taken_by_the_reaper_is_seen_as_ended_and_its_output_is_kept() {
+        let mut c = std::process::Command::new("echo").arg("kept").stdout(std::process::Stdio::piped()).spawn().unwrap();
+        iyakki_core_api::steal_status(c.id());
+        assert!(c.try_wait().is_err(), "std alone reports ECHILD here");
+        assert!(wait_ended(&mut c, Duration::from_secs(5)).is_ok());
+        let mut o = String::new();
+        std::io::Read::read_to_string(&mut c.stdout.take().unwrap(), &mut o).unwrap();
+        assert_eq!(o.trim(), "kept");
+        let mut slow = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        assert!(wait_ended(&mut slow, Duration::from_millis(150)).is_err());
+    }
 
     #[test]
     fn the_watcher_part_of_this_file_spawns_no_process() {

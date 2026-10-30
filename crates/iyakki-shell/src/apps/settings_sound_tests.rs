@@ -20,7 +20,7 @@ fn key(a: &mut SettingsApp, cx: &AppCx, k: Key) {
 fn status(a: &SettingsApp) -> String {
     a.status().map(|s| s.0.clone()).unwrap_or_default()
 }
-fn goto(a: &mut SettingsApp, cx: &AppCx, t: Tab) {
+fn goto(a: &mut SettingsApp, _cx: &AppCx, t: Tab) {
     a.go_to(t);
 }
 fn settle(a: &mut SettingsApp, cx: &AppCx) {
@@ -348,14 +348,18 @@ fn the_advanced_sound_rows_toggle_with_a_and_the_boost_and_the_hardware_answer_a
 
 #[test]
 fn the_mixer_switch_is_a_row_with_its_explanation_saved_by_enter_the_button_or_m_and_only_for_administrators() {
+    let _route = iyakki_agent::mixer::exclusive_route(); // asserts what the process-wide switch is
     let cx = admin("snd-mix");
+    // the mixer is ON by default (owner decision 2026-10-28); this test is about the switch of a person who turned it off
+    assert!(cx.services.sound_settings().mixer, "on by default");
+    cx.services.update_sound(|s| s.mixer = false).unwrap();
     let (env, d) = mac_mini("snd-mix", true);
     let mut a = SettingsApp::new(&cx).with_hardware(env.clone());
     goto(&mut a, &cx, Tab::Sound);
     let r = rows(&mut a, &cx);
     let i = r.iter().position(|r| matches!(r.target, Target::SoundMixer)).expect("the switch is on the Sound page");
     assert_eq!(r[i].title, "Mix sounds from several apps (experimental)");
-    assert!(r[i].sub.contains("Radio, voice, alarms and notifications can play together") && r[i].sub.contains("web browser's own sound is not mixed yet"), "{}", r[i].sub);
+    assert!(r[i].sub.contains("Radio, voice, alarms and notifications can play together") && r[i].sub.contains("web browser's own sound is not mixed unless"), "{}", r[i].sub);
     assert_eq!(r[i].chips[0].0, "off");
     assert!(!r.iter().any(|r| r.title == "Mixer status"), "no status line while it is off");
     assert!(!cx.services.sound_settings().mixer);
@@ -395,13 +399,100 @@ fn the_mixer_switch_is_a_row_with_its_explanation_saved_by_enter_the_button_or_m
 
 #[test]
 fn the_mixer_setting_survives_a_save_and_a_load_and_old_files_have_it_off() {
+    let _route = iyakki_agent::mixer::exclusive_route(); // asserts what the process-wide switch is
     let cx = admin("snd-mixrt");
     cx.services.update_sound(|s| s.mixer = true).unwrap();
     let json = serde_json::to_string(&cx.services.sound_settings()).unwrap();
     let back: iyakki_agent::audioout::SoundSettings = serde_json::from_str(&json).unwrap();
     assert!(back.mixer);
     let old: iyakki_agent::audioout::SoundSettings = serde_json::from_str("{\"volume_pct\":40}").unwrap();
-    assert!(!old.mixer);
+    assert!(old.mixer, "old files get the default, which is on");
+    let off: iyakki_agent::audioout::SoundSettings = serde_json::from_str("{\"volume_pct\":40,\"mixer\":false}").unwrap();
+    assert!(!off.mixer, "a person who switched it off keeps it off");
     cx.services.update_sound(|s| s.mixer = false).unwrap();
     assert!(!iyakki_agent::mixer::enabled());
+}
+
+#[test]
+fn the_browser_route_switch_is_off_by_default_says_what_is_true_needs_the_mixer_and_is_for_administrators() {
+    let _route = iyakki_agent::mixer::exclusive_route(); // asserts what the process-wide switch is
+    let cx = admin("snd-webmix");
+    // the route is off by default and needs the mixer; this test starts from a mixer that was switched off
+    cx.services.update_sound(|s| s.mixer = false).unwrap();
+    let (env, d) = mac_mini("snd-webmix", true);
+    let mut a = SettingsApp::new(&cx).with_hardware(env.clone());
+    goto(&mut a, &cx, Tab::Sound);
+    let r = rows(&mut a, &cx);
+    let i = r.iter().position(|r| matches!(r.target, Target::SoundWebMix)).expect("the row is on the Sound page");
+    assert_eq!(r[i].title, "Browser sound through the mixer (experimental)");
+    assert!(r[i].sub.contains("Not tested on real hardware"), "{}", r[i].sub);
+    assert_eq!(r[i].chips[0].0, "off");
+    assert!(!cx.services.sound_settings().web_mix && !iyakki_agent::webmix::wanted(), "off by default");
+    let st = r.iter().find(|r| r.title == "Browser sound status").unwrap();
+    assert!(st.sub.starts_with("off"), "{}", st.sub);
+    // on with the mixer off: saved, honest about doing nothing
+    select(&mut a, &cx, |r| matches!(r.target, Target::SoundWebMix));
+    key(&mut a, &cx, Key::Enter);
+    assert!(cx.services.sound_settings().web_mix && iyakki_agent::webmix::wanted());
+    assert!(status(&a).contains("does nothing until the mixer"), "{}", status(&a));
+    let r = rows(&mut a, &cx);
+    assert!(r.iter().find(|r| r.title == "Browser sound status").unwrap().sub.contains("does nothing while the mixer"));
+    // with the mixer on it says it applies at the next engine start and that it is untested
+    key(&mut a, &cx, Key::Char('M'));
+    assert!(cx.services.sound_settings().mixer);
+    key(&mut a, &cx, Key::Char('W'));
+    key(&mut a, &cx, Key::Char('W'));
+    assert!(status(&a).contains("untested on real hardware"), "{}", status(&a));
+    let r = rows(&mut a, &cx);
+    assert!(r.iter().find(|r| r.title == "Browser sound status").unwrap().sub.contains("untested"));
+    // off again, and old files have it off
+    key(&mut a, &cx, Key::Char('W'));
+    key(&mut a, &cx, Key::Char('M'));
+    assert!(!cx.services.sound_settings().web_mix && !cx.services.sound_settings().mixer);
+    let old: iyakki_agent::audioout::SoundSettings = serde_json::from_str("{\"volume_pct\":40,\"mixer\":true}").unwrap();
+    assert!(!old.web_mix);
+    // a person who is not an administrator changes nothing
+    let mut ucx = admin("snd-webmixu");
+    ucx.services = cx.services.clone();
+    ucx.session.user = "bob".into();
+    ucx.session.role = iyakki_sec::policy::Role::User;
+    ucx.session.policy = iyakki_sec::policy::Role::User.template();
+    let mut b = SettingsApp::new(&ucx).with_hardware(env);
+    b.tabs.push(Tab::Sound);
+    b.tab = b.tabs.len() - 1;
+    key(&mut b, &ucx, Key::Char('W'));
+    assert!(!cx.services.sound_settings().web_mix && status(&b).contains("Only administrators"), "{}", status(&b));
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn the_highlight_timing_offset_is_an_advanced_row_stepped_by_plus_and_minus_set_to_zero_by_enter_and_kept_within_500_ms() {
+    let cx = admin("snd-hl");
+    let (env, d) = mac_mini("snd-hl", true);
+    let mut a = SettingsApp::new(&cx).with_hardware(env);
+    goto(&mut a, &cx, Tab::Sound);
+    assert!(!rows(&mut a, &cx).iter().any(|r| matches!(r.target, Target::SoundHighlightOffset)), "under Advanced");
+    key(&mut a, &cx, Key::Char('A'));
+    let r = rows(&mut a, &cx);
+    let row = r.iter().find(|r| matches!(r.target, Target::SoundHighlightOffset)).expect("the row");
+    assert_eq!(row.title, "Highlight timing offset");
+    assert_eq!(row.chips[0].0, "0 ms");
+    assert_eq!(cx.services.sound_settings().highlight_offset_ms, 0);
+    select(&mut a, &cx, |r| matches!(r.target, Target::SoundHighlightOffset));
+    key(&mut a, &cx, Key::Char('-'));
+    key(&mut a, &cx, Key::Char('-'));
+    assert_eq!(cx.services.sound_settings().highlight_offset_ms, -50);
+    assert_eq!(iyakki_agent::audiosink::highlight_offset_ms(), -50, "the agent applied it");
+    assert!(status(&a).contains("-50 ms") && status(&a).contains("earlier"), "{}", status(&a));
+    assert_eq!(rows(&mut a, &cx).iter().find(|r| matches!(r.target, Target::SoundHighlightOffset)).unwrap().chips[0].0, "-50 ms");
+    a.sound_set_highlight_offset(&cx, 9999);
+    assert_eq!(cx.services.sound_settings().highlight_offset_ms, 500);
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(cx.services.sound_settings().highlight_offset_ms, 0);
+    assert_eq!(iyakki_agent::audiosink::highlight_offset_ms(), 0);
+    // an old settings file has 0; a value outside the range is refused
+    let old: iyakki_agent::audioout::SoundSettings = serde_json::from_str("{}").unwrap();
+    assert_eq!(old.highlight_offset_ms, 0);
+    assert!(iyakki_agent::audioout::SoundSettings { highlight_offset_ms: 900, ..Default::default() }.validate().is_err());
+    let _ = std::fs::remove_dir_all(d);
 }

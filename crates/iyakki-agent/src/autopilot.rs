@@ -935,6 +935,7 @@ fn drive_run(backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, base: Vec<Mes
                         emit(RunEvent::Usage { tokens: tokens_shown + tokens, cost_cents: if ctx.executor.is_some() { cost_total + cost_cents } else { cost_cents }, files: f, seconds });
                     }
                     RunEvent::Timing { .. } => {}
+                    RunEvent::Budget { .. } => {}
                     RunEvent::ToolResult { id, name, ok, text } => {
                         if !ok {
                             last_error = format!("{name}: {}", text.lines().next().unwrap_or(""));

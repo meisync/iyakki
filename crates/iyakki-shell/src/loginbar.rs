@@ -29,7 +29,7 @@ pub fn bar_h(s: f32) -> f32 {
 pub struct LoginBar {
     /// The session came through the browser (remote desktop): no bar, no power.
     pub remote: bool,
-    /// The power card is open; the highlighted choice (0 Power off, 1 Restart, 2 Cancel).
+    /// The power card is open; the highlighted choice (0 Power off, 1 Restart, 2 Sleep when offered, then Cancel).
     pub card: Option<usize>,
     /// Where the pieces were drawn last frame (tests and tools).
     pub last: Vec<(Chip, R)>,
@@ -184,50 +184,61 @@ pub fn draw(g: &mut Gfx, w: u32, s: f32, bar: &Bar, power: bool) -> Vec<(Chip, R
     placed
 }
 
-/// The card's panel and its three buttons: (panel, [Power off, Restart, Cancel]). Buttons wrap onto a second row when the
-/// panel is too narrow, and everything stays inside the screen.
-pub fn card_rects(w: f32, h: f32, s: f32, widths: [f32; 3]) -> (R, [R; 3]) {
+/// The card's panel and its buttons (Power off, Restart, [Sleep], Cancel; three or four). Buttons wrap onto further rows when
+/// the panel is too narrow, and everything stays inside the screen.
+pub fn card_rects(w: f32, h: f32, s: f32, widths: &[f32]) -> (R, Vec<R>) {
     let bw = (500.0 * s).min(w - 16.0);
     let size = 15.0 * s;
     let bh_btn = size * 2.1;
     let inner = bw - 56.0 * s;
     let gap = 10.0 * s;
-    let one_row = widths.iter().sum::<f32>() + 2.0 * gap <= inner;
-    let bh = (170.0 * s + if one_row { 0.0 } else { bh_btn + gap }).min(h - 8.0);
+    let mut rows = 1usize;
+    let mut used = 0.0f32;
+    let mut place: Vec<(usize, f32)> = vec![];
+    for wd in widths {
+        if used > 0.0 && used + gap + wd > inner {
+            rows += 1;
+            used = 0.0;
+        }
+        place.push((rows - 1, used));
+        used += wd + gap;
+    }
+    let extra = (rows - 1) as f32 * (bh_btn + gap);
+    let bh = (170.0 * s + extra).min(h - 8.0);
     let (x, y) = ((w - bw) / 2.0, (h - bh) / 2.0);
-    let by = y + bh - 38.0 * s - bh_btn - if one_row { 0.0 } else { bh_btn + gap };
+    let by = y + bh - 38.0 * s - bh_btn - extra;
     let bx = x + 28.0 * s;
-    let r0 = R::new(bx, by, widths[0], bh_btn);
-    let r1 = R::new(bx + widths[0] + gap, by, widths[1], bh_btn);
-    let r2 = if one_row { R::new(bx + widths[0] + widths[1] + 2.0 * gap, by, widths[2], bh_btn) } else { R::new(bx, by + bh_btn + gap, widths[2], bh_btn) };
-    (R::new(x, y, bw, bh), [r0, r1, r2])
+    let rects = widths.iter().zip(&place).map(|(wd, (row, off))| R::new(bx + off, by + *row as f32 * (bh_btn + gap), *wd, bh_btn)).collect();
+    (R::new(x, y, bw, bh), rects)
 }
 
-/// The power card over the login screen. `sel` is the highlighted choice; `can` false adds the "cannot power off" line.
-/// Returns the panel and the button rectangles.
-pub fn draw_card(g: &mut Gfx, w: u32, h: u32, s: f32, sel: usize, can: bool) -> (R, [R; 3]) {
+/// The power card over the login screen. `sel` is the highlighted choice; `can` false adds the "cannot power off" line;
+/// `sleep` adds the Sleep choice (before Cancel). Returns the panel and the button rectangles.
+pub fn draw_card(g: &mut Gfx, w: u32, h: u32, s: f32, sel: usize, can: bool, sleep: bool) -> (R, Vec<R>) {
     g.clear_hits();
     g.rect(0.0, 0.0, w as f32, h as f32, [0, 0, 0, 200]);
     g.hit(R::new(0.0, 0.0, w as f32, h as f32), Event::Key(Key::Esc), "backdrop-cancel");
     let size = 15.0 * s;
-    let labels = ["Power off", "Restart", "Cancel"];
-    let widths = [0, 1, 2].map(|i| g.text_width(size, labels[i], Face::Bold) + size * 1.7);
-    let (panel, rects) = card_rects(w as f32, h as f32, s, widths);
+    let mut items = vec![("Power off", ERR, Event::Key(Key::Char('o'))), ("Restart", TEXT, Event::Key(Key::Char('r')))];
+    if sleep {
+        items.push(("Sleep", TEXT, Event::Key(Key::Char('s'))));
+    }
+    items.push(("Cancel", MUTED, Event::Key(Key::Esc)));
+    let widths: Vec<f32> = items.iter().map(|i| g.text_width(size, i.0, Face::Bold) + size * 1.7).collect();
+    let (panel, rects) = card_rects(w as f32, h as f32, s, &widths);
     g.hit(panel, Event::Tick, "backdrop");
     crate::fx::modal_panel(g, panel, s, ERR, true);
     g.icon(Icon::Power, panel.x + 56.0 * s, panel.y + 52.0 * s, 44.0 * s, ERR);
     g.text(panel.x + 100.0 * s, panel.y + 26.0 * s, 24.0 * s, TEXT, "Power", Face::Bold);
-    let sub = if can { "Shut down or restart this machine." } else { CANNOT };
+    let sub = if !can { CANNOT } else if sleep { "Shut down, restart or sleep this machine." } else { "Shut down or restart this machine." };
     let sub = g.fit(14.0 * s, sub, Face::Sans, panel.w - 112.0 * s);
     g.text(panel.x + 100.0 * s, panel.y + 62.0 * s, 14.0 * s, if can { MUTED } else { rgb(255, 196, 94) }, &sub, Face::Sans);
-    let accents = [ERR, TEXT, MUTED];
-    let evs = [Event::Key(Key::Char('o')), Event::Key(Key::Char('r')), Event::Key(Key::Esc)];
-    for i in 0..3 {
+    for (i, (label, accent, ev)) in items.iter().enumerate() {
         let r = rects[i];
         if i == sel {
             g.rrect_outline(r.x - 3.0 * s, r.y - 3.0 * s, r.w + 6.0 * s, r.h + 6.0 * s, r.h / 2.0 + 3.0 * s, 2.0, rgb(120, 170, 255));
         }
-        g.button(r.x, r.y, size, labels[i], accents[i], evs[i].clone());
+        g.button(r.x, r.y, size, label, *accent, ev.clone());
     }
     let hint = "Enter or y: the highlighted choice  ·  Esc: cancel";
     let hint = g.fit(12.0 * s, hint, Face::Sans, panel.w - 40.0 * s);

@@ -111,7 +111,7 @@ fn view(r: &Rig) -> View {
 #[test]
 fn only_administrators_get_the_page_and_it_is_not_hidden_in_cloud_mode() {
     let (a, cx, _r) = app("fw-tab");
-    assert!(a.tabs().len() <= 32, "the page index table has room: {}", a.tabs().len());
+    assert!(a.tabs().len() <= 64, "page ids stay below the extra control ids (77 and up), with room: {}", a.tabs().len());
     let mut user = cx.clone();
     user.session.user = "gus".into();
     user.session.policy = iyakki_sec::policy::Role::User.template();

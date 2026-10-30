@@ -126,7 +126,7 @@ impl Props {
     }
 
     /// The flow's own settings, shown when no step is selected.
-    pub(super) fn for_flow(f: &Flow) -> Props {
+    pub(super) fn for_flow(f: &Flow, vision_line: &str) -> Props {
         let d = &f.defaults;
         let overlap = f.triggers.iter().find(|t| matches!(t.kind, TriggerKind::Cron { .. } | TriggerKind::Interval { .. })).map_or(Overlap::Skip, |t| t.overlap);
         let heal = match d.heal.mode { HealMode::Off => 0, HealMode::Suggest => 1, HealMode::AutoFixSimple => 2, HealMode::AlwaysAsk => 3 };
@@ -141,6 +141,16 @@ impl Props {
             mk("#image", "Sandbox image", "The container image sandbox steps use unless a step names its own.", PKind::Setting, false, &d.sandbox.image, 0),
             mk("#btrust", "Browser steps: ask at each run", "ask: each run asks once, listing the sites its browser steps will open. trusted: no question (the account's host list and the limits below still apply; scheduled runs need this). Only you can set it, never the assistant.", ch(&["ask", "trusted"]), false, "", usize::from(d.browser.trusted)),
             mk("#bprofile", "Browser profile", "isolated: a fresh private browser that is thrown away at the end of the run. my profile: your own browser profile with your sign-ins; always asked at every run, trusted or not.", ch(&["isolated", "my profile"]), false, "", usize::from(d.browser.profile == "person")),
+            mk("#camallow", "Camera allowed", &format!("{}\n{vision_line}", iyakki_flow::kinds::camera::ALLOW_TEXT), ch(&["no", "yes, I allow it"]), false, "", usize::from(d.camera.allowed)),
+            mk("#camunatt", "Camera also when nobody is there", "no: the camera step runs only when you start the flow (by hand or from the chat). yes: also for runs a schedule or an event starts, when nobody can see the camera-in-use sign. Only matters when Camera allowed is on.", ch(&["no", "yes"]), false, "", usize::from(d.camera.unattended)),
+            mk("#assist", "Assist: an agent that fixes and upgrades this flow", "off: it does nothing by itself. copilot: after a failed run the configured agent drafts a fix and shows it in a strip on this flow; you approve and publish it. autopilot: it drafts and tests by itself, and publishes only if the switch below is on and every check passes. Takes effect when you publish. Only you can change this; the assistant cannot.", ch(&["off", "copilot", "autopilot"]), false, "", match d.assist.mode { AssistMode::Off => 0, AssistMode::Copilot => 1, AssistMode::Autopilot => 2 }),
+            mk("#assistauto", "Assist: autopilot may publish a tested fix", "no: autopilot drafts and tests, and asks you before it publishes. yes: it publishes a small fix of the failing step by itself when the checks pass (the draft passes validation and a read-only trial, nothing protected is touched, no new host or effect), tells you, and rolls it back when its first runs fail.", ch(&["no, ask me", "yes, within the limits"]), false, "", usize::from(d.assist.auto_publish)),
+            mk("#assistfix", "Assist: fixes after a failed run", "The agent may draft a fix of the failing step.", ch(&["no", "yes"]), false, "", usize::from(d.assist.allow_fix)),
+            mk("#assistup", "Assist: upgrades", "The agent may suggest newer versions of shared steps (never published by itself).", ch(&["no", "yes"]), false, "", usize::from(d.assist.allow_upgrade)),
+            mk("#assistpub", "Assist: automatic publishes per day (0 to 20)", "Most versions autopilot may publish for this flow in 24 hours. The account has a limit too.", PKind::Setting, true, &d.assist.max_publish_per_day.to_string(), 0),
+            mk("#assistcents", "Assist: most it may spend per day, in cents (0 to 10000)", "What the model calls for this flow may cost in 24 hours; at the limit the agent stops asking the model.", PKind::Setting, true, &d.assist.max_cents_per_day.to_string(), 0),
+            mk("#assistdiff", "Assist: most steps an automatic publish may touch (1 to 10)", "A bigger change is shown to you instead of being published.", PKind::Setting, true, &d.assist.max_diff_nodes.to_string(), 0),
+            mk("#camblock", "Camera permission requests", "ask: when a step stops for want of the camera permission you get a popup and an INBOX entry with the choices. blocked: this flow stops asking (you chose Block); switch back to ask to be asked again.", ch(&["ask", "blocked"]), false, "", usize::from(d.camera.blocked)),
             mk("#bactions", "Browser actions per run (0: account limit)", "Most browser steps (and waits) one run may do; at most 1000.", PKind::Setting, false, &d.browser.max_actions.to_string(), 0),
             mk("#bminutes", "Browser minutes per run (0: account limit)", "Longest one run may keep its browser session open; at most 180.", PKind::Setting, false, &d.browser.max_minutes.to_string(), 0),
         ];
@@ -228,7 +238,14 @@ impl FlowsApp {
         self.props = match (&self.sel_edge, self.sel.len()) {
             (Some(i), _) => self.flow.edges.get(*i).map(|e| Props::for_edge(*i, e)).unwrap_or_default(),
             (None, 1) => self.sel.iter().next().and_then(|id| self.flow.node(id)).map(|n| Props::for_node(n, &self.reg)).unwrap_or_default(),
-            _ if want == "flow" => Props::for_flow(&self.flow),
+            _ if want == "flow" => {
+                // where a camera picture would go is said from the provider's real address, never guessed
+                let line = match self.env.svc.vision_model(None) {
+                    Ok(p) => p.line(),
+                    Err(e) => format!("No vision model is available yet: {}", e.message()),
+                };
+                Props::for_flow(&self.flow, &line)
+            }
             _ => Props::default(),
         };
     }
@@ -397,6 +414,16 @@ impl FlowsApp {
                 "#image" => Ok(Box::new(move |f: &mut Flow| f.defaults.sandbox.image = t)),
                 "#btrust" => Ok(Box::new(move |f: &mut Flow| f.defaults.browser.trusted = sel == 1)),
                 "#bprofile" => Ok(Box::new(move |f: &mut Flow| f.defaults.browser.profile = if sel == 1 { "person".to_string() } else { String::new() })),
+                "#camallow" => Ok(Box::new(move |f: &mut Flow| f.defaults.camera.allowed = sel == 1)),
+                "#camblock" => Ok(Box::new(move |f: &mut Flow| f.defaults.camera.blocked = sel == 1)),
+                "#camunatt" => Ok(Box::new(move |f: &mut Flow| f.defaults.camera.unattended = sel == 1)),
+                "#assist" => Ok(Box::new(move |f: &mut Flow| f.defaults.assist.mode = [AssistMode::Off, AssistMode::Copilot, AssistMode::Autopilot][sel.min(2)])),
+                "#assistauto" => Ok(Box::new(move |f: &mut Flow| f.defaults.assist.auto_publish = sel == 1)),
+                "#assistfix" => Ok(Box::new(move |f: &mut Flow| f.defaults.assist.allow_fix = sel == 1)),
+                "#assistup" => Ok(Box::new(move |f: &mut Flow| f.defaults.assist.allow_upgrade = sel == 1)),
+                "#assistpub" => num(0, 20, "automatic publishes").map(|v| Box::new(move |f: &mut Flow| f.defaults.assist.max_publish_per_day = v as u32) as Box<dyn FnOnce(&mut Flow)>),
+                "#assistcents" => num(0, 10_000, "cents").map(|v| Box::new(move |f: &mut Flow| f.defaults.assist.max_cents_per_day = v) as Box<dyn FnOnce(&mut Flow)>),
+                "#assistdiff" => num(1, 10, "steps").map(|v| Box::new(move |f: &mut Flow| f.defaults.assist.max_diff_nodes = v as u32) as Box<dyn FnOnce(&mut Flow)>),
                 "#bactions" => num(0, 1000, "browser actions").map(|v| Box::new(move |f: &mut Flow| f.defaults.browser.max_actions = v as u32) as Box<dyn FnOnce(&mut Flow)>),
                 "#bminutes" => num(0, 180, "browser minutes").map(|v| Box::new(move |f: &mut Flow| f.defaults.browser.max_minutes = v as u32) as Box<dyn FnOnce(&mut Flow)>),
                 _ => return,
@@ -601,12 +628,27 @@ impl FlowsApp {
             g.text(inner.x, y, 11.0 * s, DIM, &l, Face::Sans);
             y += 14.0 * s;
         }
+        // the flow's settings pane lists every problem and warning in full (the badge on a step only counts them)
+        if self.props.key == "flow" {
+            for i in self.issues.iter().take(8) {
+                let c = if i.level == iyakki_flow::kinds::Level::Error { ERR } else { AMBER };
+                let text = match &i.node {
+                    Some(n) => format!("{n}: {}", i.msg),
+                    None => i.msg.clone(),
+                };
+                for l in g.wrap(11.0 * s, &text, Face::Sans, inner.w - 10.0 * s).into_iter().take(4) {
+                    g.circle(inner.x + 3.0 * s, y + 7.0 * s, 2.5 * s, c);
+                    g.text(inner.x + 10.0 * s, y, 11.0 * s, c, &l, Face::Sans);
+                    y += 14.0 * s;
+                }
+            }
+        }
         // problems of this step, and the agent's change
         if let Some(id) = self.props.key.strip_prefix("node:") {
             let id = id.to_string();
             for i in self.issues.iter().filter(|i| i.node.as_deref() == Some(id.as_str())).take(3) {
                 let c = if i.level == iyakki_flow::kinds::Level::Error { ERR } else { AMBER };
-                for l in g.wrap(11.0 * s, &i.msg, Face::Sans, inner.w - 10.0 * s).into_iter().take(2) {
+                for l in g.wrap(11.0 * s, &i.msg, Face::Sans, inner.w - 10.0 * s).into_iter().take(5) {
                     g.circle(inner.x + 3.0 * s, y + 7.0 * s, 2.5 * s, c);
                     g.text(inner.x + 10.0 * s, y, 11.0 * s, c, &l, Face::Sans);
                     y += 14.0 * s;

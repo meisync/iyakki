@@ -61,6 +61,7 @@ impl UsbPanel {
     pub(super) fn report(&self) -> Option<checks::Report> {
         self.lock().report.clone()
     }
+    #[cfg(test)]
     pub(super) fn note(&self) -> Option<(bool, String)> {
         self.lock().note.clone()
     }

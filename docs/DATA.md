@@ -89,6 +89,19 @@ approval) and `data_export` (asks first). They take the structured steps above, 
 capped at 50 rows and about 6,000 characters. Each person has their own service, so handles cannot be guessed across
 accounts, at most eight stay open, and everything is dropped at sign-out. File contents are not written to the tool log.
 
+Making and extending tables: `data_create` writes a new `.csv` or `.tsv` from columns (optionally with a type: text,
+int, float, bool, date; cells are checked against it) and rows, into your home folder or a `folder` inside your file
+scopes, and opens it (the call returns the handle to query next). At most 5,000 rows x 50 columns and about 2 MB go in one
+call; more goes in batches with `data_append`, which adds rows to the file of an open table (or a `path`) and checks the
+cells against the header, or places them by column name. Both ask first; the card names the file, the columns and the row
+count, never the cells. An existing file is not replaced unless `overwrite` is true, a table in a read-only host folder is
+refused, and files are written as a temporary file renamed into place, so one is never half-written. CSV quoting is done for
+the assistant, and text that begins with `=`, `+`, `-` or `@` (a number such as `-5` stays a number) is stored with a leading
+apostrophe so a spreadsheet does not run it as a formula. After an append the table is reopened and the call returns its
+new handle. Editing and deleting rows are not offered. New files show in the Open dialog at once, and a table open in the
+tab that changes on disk reloads within a few seconds (the filter is kept). The chat is told which table the DATA tab showed
+last (file and column names only, never cells), so "this table" means that file.
+
 ## Cost of Polars
 
 See the figures in the change report; in short, Polars is a build-time and size cost for the desktop only. The

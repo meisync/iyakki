@@ -88,6 +88,8 @@ impl ShellEnv {
         let quick: Arc<dyn iyakki_agent::iyakki_proxy::Upstream> = Arc::new(UreqUpstream::with_timeout(std::time::Duration::from_secs(10)));
         let slow: Arc<dyn iyakki_agent::iyakki_proxy::Upstream> = Arc::new(UreqUpstream::with_timeout(std::time::Duration::from_secs(300)));
         let services = Services::open(std::path::Path::new(&p.data), quick, slow).map_err(AccountError::Storage)?;
+        // the web engine's own messages are kept next to the crash log (`enginelog.rs`)
+        iyakki_agent::enginelog::set_dir(&std::path::Path::new(&p.data).join("log"));
         let t_services = t0.elapsed();
         services.radio.set_streamer(Arc::new(iyakki_agent::iyakki_proxy::https::UreqStreamer::default()));
         // what is installed from the CLI list is found everywhere (jobs, the terminal, agents) without links in /usr/bin, and a program
@@ -119,9 +121,11 @@ impl ShellEnv {
         let t2 = std::time::Instant::now();
         let store = UserStore::open(std::path::Path::new(&p.users))?;
         log::info!("boot: shell environment took {} ms (services {}, sound {}, accounts {})", t0.elapsed().as_millis(), t_services.as_millis(), t_sound.as_millis(), t2.elapsed().as_millis());
+        let audit = Arc::new(AuditLog::new(std::path::Path::new(&p.audit)));
+        audit.flush_notes();
         Ok(ShellEnv {
             store: Arc::new(Mutex::new(store)),
-            audit: Arc::new(AuditLog::new(std::path::Path::new(&p.audit))),
+            audit,
             host,
             cfg,
             chat,
@@ -143,6 +147,9 @@ fn browser_web(data: &std::path::Path) -> Arc<dyn iyakki_web::Fetch> {
     let limited: Arc<dyn iyakki_web::Fetch> = Arc::new(LimitedFetch::new(iyakki_agent::iyakki_proxy::https::BrowserFetch::default(), Arc::new(Limiter::new(PER_HOST, GLOBAL))));
     let base = data.join("cache").join("web");
     let budget = crate::apps::browser_speed::budget_for(iyakki_web::net::CacheSize::Auto, &crate::apps::browser_speed::machine(data));
+    // the person's custom request headers (Settings -> Browser -> Custom headers) are added here, on the way to the network, for the requests
+    // whose address matches a rule; a redirect is judged again at every hop
+    let limited: Arc<dyn iyakki_web::Fetch> = Arc::new(iyakki_web::headerfetch::HeaderFetch::new(limited, iyakki_agent::browserheaders::provider()));
     let caches = Arc::new(iyakki_web::cache::UserCaches::new(limited, base, budget));
     // files an older version left directly in the folder belonged to nobody: remove them off the boot path
     let old = caches.clone();
@@ -215,7 +222,7 @@ struct Tile {
     label: &'static str,
     sub: &'static str,
     accent: [u8; 4],
-    /// The home screen section the tile is in; `None` keeps it off the grid (Settings: the IYAKKI menu and F7 lead there).
+    /// The home screen section the tile is in; `None` keeps it off the grid (Settings: an icon in the top bar, the IYAKKI menu and F7 lead there too).
     group: Option<Group>,
 }
 
@@ -230,35 +237,38 @@ enum LItem {
 const TILES: &[Tile] = &[
     Tile { app: PApp::Chat, icon: Icon::Chat, label: "CHAT", sub: "Talk to the AI", accent: rgb(79, 140, 255), group: Some(Group::Home) },
     Tile { app: PApp::Rag, icon: Icon::Rag, label: "RAG", sub: "Ask your files", accent: rgb(61, 214, 163), group: Some(Group::Home) },
-    Tile { app: PApp::Mcp, icon: Icon::Mcp, label: "MCP", sub: "Tools, servers", accent: rgb(167, 116, 255), group: Some(Group::Home) },
-    Tile { app: PApp::Cli, icon: Icon::Cli, label: "CLI", sub: "Terminal, tools", accent: rgb(255, 184, 77), group: Some(Group::Home) },
+    Tile { app: PApp::Mcp, icon: Icon::Mcp, label: "MCP", sub: "Tools, servers", accent: rgb(167, 116, 255), group: Some(Group::Work) },
+    Tile { app: PApp::Cli, icon: Icon::Cli, label: "CLI", sub: "Terminal, tools", accent: rgb(255, 184, 77), group: Some(Group::Work) },
     Tile { app: PApp::Edit, icon: Icon::Edit, label: "EDIT", sub: "Edit files", accent: rgb(110, 224, 160), group: Some(Group::Work) },
     Tile { app: PApp::Runs, icon: Icon::Runs, label: "RUNS", sub: "Agent history", accent: rgb(255, 196, 94), group: Some(Group::Work) },
     Tile { app: PApp::Users, icon: Icon::Users, label: "USERS", sub: "Accounts", accent: rgb(255, 107, 154), group: Some(Group::System) },
-    Tile { app: PApp::Settings, icon: Icon::Settings, label: "SETTINGS", sub: "Models, vault", accent: rgb(120, 170, 255), group: Some(Group::Home) },
+    Tile { app: PApp::Settings, icon: Icon::Settings, label: "SETTINGS", sub: "Models, vault", accent: rgb(120, 170, 255), group: None },
     Tile { app: PApp::Browser, icon: Icon::Browser, label: "BROWSER", sub: "Read the web", accent: rgb(88, 190, 235), group: Some(Group::WebMedia) },
     Tile { app: PApp::Radio, icon: Icon::Radio, label: "RADIO", sub: "Online stations", accent: rgb(255, 150, 110), group: Some(Group::WebMedia) },
     Tile { app: PApp::Skills, icon: Icon::Skills, label: "SKILLS", sub: "Teach tasks", accent: rgb(255, 170, 90), group: Some(Group::Home) },
     Tile { app: PApp::Scan, icon: Icon::Scan, label: "NET SCAN", sub: "Find services", accent: rgb(120, 220, 140), group: Some(Group::System) },
     Tile { app: PApp::Mesh, icon: Icon::Mesh, label: "MESH", sub: "Consul, services", accent: rgb(86, 204, 196), group: Some(Group::System) },
-    Tile { app: PApp::Usage, icon: Icon::Usage, label: "USAGE", sub: "Tokens by model", accent: rgb(255, 130, 170), group: Some(Group::System) },
+    Tile { app: PApp::Usage, icon: Icon::Usage, label: "USAGE", sub: "Tokens by model", accent: rgb(255, 130, 170), group: Some(Group::Data) },
     Tile { app: PApp::System, icon: Icon::System, label: "SYSTEM", sub: "Load, agents", accent: rgb(176, 226, 92), group: Some(Group::System) },
     Tile { app: PApp::Calendar, icon: Icon::Calendar, label: "CALENDAR", sub: "Plans, alarms", accent: rgb(110, 190, 255), group: Some(Group::Home) },
     Tile { app: PApp::Media, icon: Icon::Media, label: "MEDIA", sub: "Music, videos", accent: rgb(240, 120, 220), group: Some(Group::WebMedia) },
     Tile { app: PApp::SrePilot, icon: Icon::SrePilot, label: "SRE PILOT", sub: "Assist · Auto", accent: rgb(60, 235, 200), group: Some(Group::Work) },
-    Tile { app: PApp::Ide, icon: Icon::Ide, label: "AI IDE", sub: "Code with the AI", accent: rgb(100, 230, 255), group: Some(Group::Home) },
-    Tile { app: PApp::Data, icon: Icon::Data, label: "DATA", sub: "Tables, CSV", accent: crate::apps::data::ACCENT, group: Some(Group::Work) },
+    Tile { app: PApp::Ide, icon: Icon::Ide, label: "AI IDE", sub: "Code with the AI", accent: rgb(100, 230, 255), group: Some(Group::Work) },
+    Tile { app: PApp::Data, icon: Icon::Data, label: "DATA", sub: "Tables, CSV", accent: crate::apps::data::ACCENT, group: Some(Group::Data) },
     Tile { app: PApp::Tales, icon: Icon::Tales, label: "TALES", sub: "Read-aloud tales", accent: crate::apps::story::ACCENT, group: Some(Group::Home) },
     Tile { app: PApp::Store, icon: Icon::Store, label: "STORE", sub: "Apps and skills", accent: crate::apps::store::ACCENT, group: Some(Group::System) },
-    Tile { app: PApp::Dash, icon: Icon::Dash, label: "DASH", sub: "Graphs, tables", accent: crate::apps::dash::ACCENT, group: Some(Group::Work) },
+    Tile { app: PApp::Dash, icon: Icon::Dash, label: "DASH", sub: "Graphs, tables", accent: crate::apps::dash::ACCENT, group: Some(Group::Data) },
     Tile { app: PApp::Flows, icon: Icon::Flows, label: "FLOWS", sub: "Workflows, runs", accent: crate::apps::flows::ACCENT, group: Some(Group::Work) },
     Tile { app: PApp::Camera, icon: Icon::Camera, label: "CAMERA", sub: "Photos, video", accent: crate::apps::camera::ACCENT, group: Some(Group::WebMedia) },
     Tile { app: PApp::Voice, icon: Icon::Speaker, label: "VOICE", sub: "Read, dictate", accent: crate::apps::voice::ACCENT, group: Some(Group::Home) },
     Tile { app: PApp::Disks, icon: Icon::Disks, label: "DISKS", sub: "Drives, partitions", accent: crate::apps::disks_tile::ACCENT, group: Some(Group::System) },
-    Tile { app: PApp::K8s, icon: Icon::Mesh, label: "K8S", sub: "Explore the cluster", accent: crate::apps::k8s_tile::ACCENT, group: Some(Group::System) },
+    Tile { app: PApp::K8s, icon: Icon::Mesh, label: "K8S", sub: "Explore the cluster", accent: crate::apps::k8s_tile::ACCENT, group: Some(Group::Work) },
     Tile { app: PApp::LinuxWin, icon: Icon::Cli, label: "LINUX WINDOW", sub: "Linux programs", accent: crate::apps::linuxwin::ACCENT, group: Some(Group::System) },
-    Tile { app: PApp::Lab, icon: Icon::Lab, label: "LAB", sub: "Try picture models", accent: crate::apps::lab::ACCENT, group: Some(Group::Work) },
+    Tile { app: PApp::Lab, icon: Icon::Lab, label: "LAB", sub: "Try picture models", accent: crate::apps::lab::ACCENT, group: Some(Group::Home) },
     Tile { app: PApp::Git, icon: Icon::Git, label: "GIT", sub: "Browse repositories", accent: crate::apps::git_tile::ACCENT, group: Some(Group::Work) },
+    Tile { app: PApp::Doctor, icon: Icon::Doctor, label: "DOCTOR", sub: "Find and fix", accent: crate::apps::doctor::ACCENT, group: Some(Group::System) },
+    Tile { app: PApp::Learn, icon: Icon::Learn, label: "LEARN", sub: "Study and quiz", accent: crate::apps::learn::ACCENT, group: Some(Group::Home) },
+    Tile { app: PApp::Checkup, icon: Icon::Checkup, label: "CHECK-UP", sub: "Test the hardware", accent: crate::apps::checkup::ACCENT, group: Some(Group::System) },
 ];
 
 /// The home screen section of an app's tile (the tile table's `group` field; `None`: not on the grid).
@@ -299,6 +309,8 @@ pub struct Shell {
     /// Host files (window mode): the import dialog shown over any screen for dropped files, and whether files are being
     /// dragged over the window right now.
     hostdlg: Option<Box<crate::apps::hostfiles::HostDialog>>,
+    /// A flow's permission request, shown over every screen until it is answered, dismissed or ten minutes old (it stays in the INBOX).
+    permpop: Option<crate::apps::browser_consent::ConsentDialog>,
     /// The sign-in dialog of Claude Code / GitHub Copilot (agent_login.rs), over any screen.
     login: Option<Box<crate::agent_login::LoginModal>>,
     /// "Scan QR" of the clipboard history (clip_scan.rs): the camera, what was read, Copy / Scan again / Cancel.
@@ -342,6 +354,11 @@ pub struct Shell {
     live: bool,
     /// The front end paints the live picture on its own ([`Shell::live_update`]): else a new picture makes the scene stale as before.
     live_paint: bool,
+    /// The rectangles the last [`Shell::live_update`] painted when the app named them (else the bounding one only), the longest
+    /// time the backend may leave between whole redraws while the app paints live, and until which tick that holds.
+    live_rects: Vec<(i32, i32, i32, i32)>,
+    live_every_ms: u64,
+    live_until: u64,
     /// The window should ask the system clipboard for its current text (opening the queue does), and until which tick
     /// the answer, when it comes, belongs to the queue rather than to a field.
     want_host_paste: bool,
@@ -387,10 +404,16 @@ pub struct Shell {
     quick_launch: Option<iyakki_agent::quickinstall::Launch>,
     /// "DEV" (or "DEV · pairing") while Developer mode is on, read every second.
     dev_sign: Option<String>,
+    /// A paired computer waits for the administrator to allow commands: pulse, banner and the inline card (`devask.rs`, `shell_devask.rs`).
+    devask: crate::devask::DevAsk,
     /// The USB cameras: the CAMERA tile is greyed while there is none (looked at again every two seconds).
     camera: crate::camera::Presence,
     /// The "camera in use by the assistant" sign was on in the last frame.
     cam_sign: bool,
+    /// The top bar's speaker: its slider and press (`shell_volbar.rs`).
+    vol: volbar_impl::VolUi,
+    /// What is still starting after boot: the Home strip, its list and the sign-in line (`shell_startup.rs`).
+    startup: startup_impl::StartupUi,
     /// Media and Fn keys: the on-screen display, held keys, the power card (`shell_fnkeys.rs`).
     fnk: crate::fnkeys::FnState,
     /// The Touch Bar strip of a T2 MacBook (`shell_touchbar.rs`).
@@ -409,9 +432,12 @@ pub struct Shell {
 /// The numbers behind the bell.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Badge {
+    /// Unread entries that need the person: errors, warnings, reminders, an assistant waiting (the other kinds are not counted).
     pub unread: usize,
     pub approvals: usize,
     pub overdue: usize,
+    /// Unread entries of the other kinds (information, new devices, finished jobs): a small dot, never a number.
+    pub other: usize,
 }
 
 impl Badge {
@@ -484,6 +510,8 @@ pub(crate) fn scale_for(w: u32, h: u32) -> f32 {
 impl Shell {
     pub fn new(env: ShellEnv) -> Shell {
         crate::crashlog::install();
+        #[cfg(test)]
+        crate::testmem::start();
         let first_run = env.store.lock().map(|s| s.is_empty()).unwrap_or(false);
         let screen = if env.hwcheck {
             Screen::HwCheck(Box::new(crate::hwcheck::HwCheck::new()))
@@ -494,7 +522,7 @@ impl Shell {
         };
         // tests run as a desktop unless one asks for cloud mode (`set_cloud_for_test`)
         let cloud = if cfg!(test) { iyakki_agent::cloudmode::CloudMode::desktop() } else { iyakki_agent::cloudmode::detect(env.services.cloud_setting()) };
-        let mut sh = Shell { env, hits: Vec::new(), clip: None, hostdlg: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, camera: if cfg!(test) || !cloud.camera_watch { crate::camera::Presence::none() } else { crate::camera::Presence::system() }, cam_sign: false, fnk: Default::default(), tbar: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
+        let mut sh = Shell { env, hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, devask: Default::default(), camera: if cfg!(test) || !cloud.camera_watch { crate::camera::Presence::none() } else { crate::camera::Presence::system() }, cam_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
         if cloud.on {
             sh.apply_cloud(cloud);
         }
@@ -599,16 +627,19 @@ impl Shell {
     }
 
     /// Open an app the way a tile does (tests and the monkey test).
+    #[cfg(test)]
     pub(crate) fn open_for_test(&mut self, app: PApp) {
         self.open(app);
     }
 
     /// The services and session an app gets (tests that build an app by hand).
+    #[cfg(test)]
     pub(crate) fn cx_for_test(&self) -> Option<AppCx> {
         self.cx()
     }
 
     /// Back to the launcher (tests and the monkey test).
+    #[cfg(test)]
     pub(crate) fn launcher_for_test(&mut self) {
         self.screen = Screen::Launcher;
     }
@@ -860,6 +891,24 @@ impl Shell {
             let allow = iyakki_agent::sharedfolder::allow_fn(s.policy.clone(), &s.user, self.env.services.dir());
             iyakki_agent::sharedfolder::for_user(self.env.services.dir(), &s.user, Arc::new(move |e, d| audit.record(&user, e, d)), allow).restore();
         }
+        // SSH tunnels the person left enabled start again (their keys are in the vault that was just opened)
+        {
+            let (audit, user) = (self.env.audit.clone(), s.user.clone());
+            iyakki_agent::sshtunnel_mgr::start_for_login(&self.env.services, &s.user, Arc::new(move |a, d| audit.record(&user, a, d)));
+        }
+        // a VPN the person left enabled connects again (its keys are in the vault that was just opened); leftovers of a crash go first
+        {
+            let (audit, user) = (self.env.audit.clone(), s.user.clone());
+            iyakki_agent::vpn_mgr::start_for_login(&self.env.services, &s.user, Arc::new(move |a, d| audit.record(&user, a, d)));
+        }
+        match &report.browser_data {
+            iyakki_agent::profilestore::SignIn::Off => {}
+            iyakki_agent::profilestore::SignIn::Opened { from_backup } => self.env.audit.record(&s.user, "browser.data.opened", if *from_backup { "from the backup copy" } else { "" }),
+            iyakki_agent::profilestore::SignIn::Locked(why) => {
+                self.env.audit.record(&s.user, "browser.data.locked", why);
+                self.say("Your protected browser data could not be opened (see Settings -> Browser).");
+            }
+        }
         if let VaultState::Locked(why) = &report.user_vault {
             self.env.audit.record(&s.user, "vault.user.locked", why);
             let _ = self.env.services.notify_once(&s.user, iyakki_agent::inbox::Kind::Warning, "Your personal vault is locked", "It could not be opened with the password you typed. See Settings → Vault.", Some(iyakki_agent::inbox::Link::new("settings", "")));
@@ -928,10 +977,18 @@ impl Shell {
             self.env.audit.record(&s.user, "logout", "");
             iyakki_agent::flows::FlowEnv::stop_for_logout(&self.env.services, &s.user);
             iyakki_agent::sharedfolder::on_logout(&s.user);
+            iyakki_agent::sshtunnel_mgr::on_logout(&self.env.services, &s.user);
+            iyakki_agent::vpn_mgr::on_logout(&self.env.services, &s.user);
             self.env.services.on_logout(&s.user, s.policy.manage_settings);
             iyakki_agent::kubeprofiles::set_resolver(None);
             // the assistant's browser tab goes with the session (jobs still running are answered)
             crate::apps::web_agent::close(&self.env.services, &s.user);
+            // protected browser data is written back and the decrypted copy wiped (a failure keeps it and is audited)
+            match iyakki_agent::profilestore::on_sign_out(self.env.services.dir(), &s.user) {
+                Ok(true) => self.env.audit.record(&s.user, "browser.data.sealed", ""),
+                Ok(false) => {}
+                Err(e) => self.env.audit.record(&s.user, "browser.data.seal.failed", &e.to_string()),
+            }
         }
         self.cues.badge_seen = false;
         if let Some(c) = cue {
@@ -1004,6 +1061,9 @@ impl Shell {
             PApp::Tales => Box::new(crate::apps::story::StoryApp::new(&cx)),
             PApp::Lab => Box::new(crate::apps::lab::LabApp::new(&cx)),
             PApp::Git => Box::new(crate::apps::git_tile::GitApp::new(&cx)),
+            PApp::Doctor => Box::new(crate::apps::doctor::DoctorApp::new(&cx)),
+            PApp::Checkup => Box::new(crate::apps::checkup::CheckupApp::new(&cx)),
+            PApp::Learn => Box::new(crate::apps::learn::LearnApp::new(&cx)),
             PApp::Inbox => Box::new(crate::apps::inbox::InboxApp::new(&cx)),
         };
         self.env.audit.record(&cx.session.user, "app.open", app.id());
@@ -1302,22 +1362,7 @@ impl Shell {
             }
             need.into_iter().filter(|i| qi::presence(&svc, *i).present()).collect()
         };
-        // Indic-TTS is deployed through the Platform services review once k3s is there
-        if item == qi::Item::IndicTts && present.contains(&qi::Item::K3s) {
-            self.env.audit.record(&sess.user, "quickinstall.handoff", "indic-tts");
-            self.brand.close();
-            self.jump_to("settings", "platform:indic-tts");
-            return;
-        }
         match qi::start(&svc.jobs, &sess.user, item, &|i| present.contains(&i), &launch) {
-            Ok(started) if item == qi::Item::IndicTts => {
-                let steps: Vec<String> = started.iter().map(|j| j.label.clone()).collect();
-                self.env.audit.record(&sess.user, "quickinstall.start", &format!("indic-tts ({})", steps.join(", ")));
-                self.brand.note = Some((format!("Started: {}. When k3s is Ready, choose Indic-TTS again: its deploy review opens (Platform services).", steps.join(", ")), true));
-                if let Some(cx) = self.cx() {
-                    self.installs.poll(&cx, true);
-                }
-            }
             Ok(started) => {
                 let steps: Vec<String> = started.iter().map(|j| j.label.clone()).collect();
                 self.env.audit.record(&sess.user, "quickinstall.start", &format!("{} ({})", item.id(), steps.join(", ")));
@@ -1607,8 +1652,12 @@ impl Shell {
     pub fn refresh_badge(&mut self) {
         let b = match &self.session {
             Some(s) => {
+                if !self.cues.badge_seen {
+                    // first count after signing in: group an older inbox file and drop what is past its keeping time
+                    let _ = self.env.services.inbox.maintain(&s.user, iyakki_agent::clock::now_unix());
+                }
                 let c = self.env.services.inbox.counts(&s.user, iyakki_agent::clock::now_unix());
-                Badge { unread: c.unread, approvals: self.env.services.approvals(&s.user).len() + self.env.services.secret_requests.pending(&s.user).len() + self.env.services.browser.consent.pending(&s.user).len(), overdue: c.overdue }
+                Badge { unread: c.attention, other: c.other, approvals: self.env.services.approvals(&s.user).len() + self.env.services.secret_requests.pending(&s.user).len() + self.env.services.browser.consent.pending(&s.user).len(), overdue: c.overdue }
             }
             None => Badge::default(),
         };
@@ -1730,6 +1779,12 @@ impl Shell {
         if let Some((agent, logout)) = crate::agent_login::take_request() {
             self.login_request(agent, logout);
         }
+        // the click on the red sign "a page is using your camera / microphone / screen" stops it (the browser obeys at its next beat)
+        if matches!(ev, Event::Tab(913)) {
+            crate::apps::browser_media::ask_stop();
+            self.stale = true;
+            return;
+        }
         if let Event::MouseMove(x, y) = ev {
             self.mouse = (*x, *y);
         }
@@ -1771,11 +1826,15 @@ impl Shell {
             {
                 let dd = self.env.services.dir().to_path_buf();
                 iyakki_agent::devmode::input::set_secret_focus(&dd, self.fields.iter().any(|f| f.focused && f.secret));
+                self.dev_state_tick();
                 for e in iyakki_agent::devmode::input::take(&dd) {
                     self.saver.injecting = true; // it wakes the screen and still reaches the app
+                    // a permission is the person's own: developer-mode input cannot answer a flow's permission request
+                    self.env.services.browser.consent.set_synthetic(true);
                     for ev in crate::devinput::events(&e) {
                         self.handle(&ev);
                     }
+                    self.env.services.browser.consent.set_synthetic(false);
                     self.saver.injecting = false;
                     self.stale = true;
                 }
@@ -1785,12 +1844,17 @@ impl Shell {
                 crate::apps::web_agent::tick(&self.env.services, &self.env.audit, sess);
             }
             self.login_bar_tick();
+            if self.tick % 5 == 1 {
+                self.permpop_tick();
+            }
+            self.startup_tick();
             if self.tick % 15 == 7 {
                 self.battery_tick();
             }
             if self.tick % 15 == 3 {
                 self.loss_tick();
             }
+            self.devask_tick();
             if self.tick % 15 == 0 {
                 self.refresh_badge();
                 // the clock changes the picture only when what it shows changes
@@ -2000,14 +2064,7 @@ impl Shell {
                     self.stale = true;
                 }
                 // an app that shows live pictures (the browser's full engine) says when a new one has arrived
-                if let Screen::App(app, _) = &mut self.screen {
-                    match app.redraw_kind() {
-                        crate::apps::browser_full::Redraw::Full => self.stale = true,
-                        crate::apps::browser_full::Redraw::Live if self.live_paint => self.live = true,
-                        crate::apps::browser_full::Redraw::Live => self.stale = true,
-                        crate::apps::browser_full::Redraw::None => {}
-                    }
-                }
+                self.app_redraw();
             }
             // a pointer that only moves changes the picture when it crosses the edge of something that reacts
             Event::MouseMove(..) => {
@@ -2019,6 +2076,45 @@ impl Shell {
             _ => self.stale = true,
         }
         self.panes_after(ev, prev_mouse);
+    }
+
+    /// Ask the open app whether it wants a frame, and of which kind (the heartbeat and [`Shell::poll_live`] both do).
+    fn app_redraw(&mut self) {
+        let jump = if let Screen::App(app, _) = &mut self.screen { app.take_jump() } else { None };
+        if let Some((to, item)) = jump {
+            self.jump_to(&to, &item);
+            return;
+        }
+        if let Screen::App(app, _) = &mut self.screen {
+            match app.redraw_kind() {
+                crate::apps::browser_full::Redraw::Full => self.stale = true,
+                crate::apps::browser_full::Redraw::Live if self.live_paint => {
+                    self.live = true;
+                    // an app that repaints small rectangles may ask for the whole scene less often (see `redraw_interval_ms`)
+                    self.live_every_ms = app.live_full_every_ms().max(100);
+                    self.live_until = self.tick + 15;
+                }
+                crate::apps::browser_full::Redraw::Live => self.stale = true,
+                crate::apps::browser_full::Redraw::None => {}
+            }
+        }
+    }
+
+    /// True while the open app wants to be polled between heartbeats (the word being read aloud): the backend waits only a few ms
+    /// then and calls [`Shell::poll_live`].
+    pub fn fast_poll(&self) -> bool {
+        matches!(&self.screen, Screen::App(app, _) if app.wants_fast_poll())
+    }
+
+    /// Between heartbeats: the app says whether something changed that needs a frame now; if so the usual (live or whole) frame
+    /// is requested. Returns true when the whole scene is stale.
+    pub fn poll_live(&mut self) -> bool {
+        if let Screen::App(app, _) = &mut self.screen {
+            if app.poll_redraw_due() {
+                self.app_redraw();
+            }
+        }
+        self.take_stale()
     }
 
     /// True when events since the last call changed what should be on screen (a plain pointer move that crosses
@@ -2043,14 +2139,19 @@ impl Shell {
                     self.login_request(agent, logout);
                 }
             }
+            // a flow's permission request takes every key and click until it is answered
+            _ if self.permpop.is_some() && !matches!(ev, Event::Tick | Event::MouseMove(..) | Event::MouseUp(..) | Event::FocusAt(..)) => self.handle_permpop(ev),
             // the host-files dialog (files dropped on the window) takes every key and click
             _ if self.hostdlg.is_some() && !matches!(ev, Event::MouseMove(..)) => self.handle_hostdlg(ev),
             // a screenshot being framed takes every key and click
             _ if matches!(self.shot, Shot::Select { .. } | Shot::Review { .. }) => self.handle_shot(ev),
             // F12 (or Print Screen) starts a screenshot anywhere after sign-in
-            Event::Key(Key::F(12)) if self.session.is_some() && self.clip.is_none() => self.start_shot(),
+            Event::Key(Key::F(12)) if self.session.is_some() && self.clip.is_none() && !self.app_claims_f12() => self.start_shot(),
             // the drive banner's buttons answer on every screen, signed in or not
             Event::Tab(n) if crate::lossbar::is_click(*n) => self.loss_event(*n),
+            // the developer-mode approval card: its buttons answer on every screen after sign-in
+            Event::Tab(n) if crate::devask::is_click(*n) && self.session.is_some() => self.devask_event(*n),
+            Event::Key(Key::Esc) if self.devask.open && self.session.is_some() => self.devask_event(crate::devask::CLOSE),
             // the battery's countdown and plug-in cards answer on every screen; F4 (or the chip) opens the battery popup
             Event::Tab(crate::batterybar::CANCEL) | Event::Tab(crate::batterybar::CARD_OK) => self.battery_card_event(ev),
             Event::Key(Key::Esc) if self.battery.card_visible() => self.battery_card_event(ev),
@@ -2068,7 +2169,13 @@ impl Shell {
             // F10 (or a click on the name in the launcher's top bar) opens the IYAKKI menu; the indicator beside the clock the installs
             Event::Key(Key::F(10)) if self.session.is_some() && self.clip.is_none() => self.toggle_brand(),
             Event::Tab(crate::installpop::INDICATOR) if self.session.is_some() && self.clip.is_none() => self.toggle_installs(),
+            Event::Tab(DEV_SIGN) if self.session.is_some() && self.clip.is_none() && self.devask.pending.is_some() => self.devask_event(crate::devask::OPEN),
             Event::Tab(DEV_SIGN) if self.session.is_some() && self.clip.is_none() => self.jump_to("settings", "tab:developer"),
+            // the Home icon and F11: back to the tiles from any app; the gear: Settings (the app you were in is kept aside)
+            Event::Tab(volbar_impl::HOME_TAB) | Event::Key(Key::F(11)) if self.session.is_some() && self.clip.is_none() => self.go_home(),
+            Event::Tab(volbar_impl::GEAR_TAB) if self.session.is_some() && self.clip.is_none() => self.open_settings_from_bar(),
+            // the startup strip and its list
+            Event::Tab(n) if startup_impl::is_tab(*n) && self.session.is_some() && self.clip.is_none() => self.startup_tab(*n),
             // the menu takes its keys, clicks, pasted text and the wheel while it is open
             Event::Key(_) | Event::Tab(_) | Event::Scroll(_) | Event::Paste(_) | Event::FocusAt(..) if self.brand.open && self.session.is_some() && self.clip.is_none() && !self.help => self.handle_brand(ev),
             Event::Key(_) | Event::Tab(_) | Event::Scroll(_) | Event::AreaAt(..) | Event::MouseUp(..) if self.installs.open && self.session.is_some() && self.clip.is_none() && !self.help => self.handle_installs(ev),
@@ -2091,6 +2198,8 @@ impl Shell {
             Event::Tab(n) if self.panes.card.is_none() && self.panes_owns_tab(*n) => self.panes_tab(*n),
             Event::Key(_) | Event::Tab(_) | Event::Scroll(_) if self.panes.card.is_some() && self.session.is_some() => self.panes_card_event(ev),
             Event::Key(_) | Event::Tab(_) | Event::Scroll(_) if self.panes.picker.is_some() && self.session.is_some() && self.clip.is_none() => self.panes_picker_key(ev),
+            // the speaker icon of an app's header: click, wheel, drag and its slider (the home screen handles these itself)
+            _ if self.session.is_some() && self.clip.is_none() && matches!(self.screen, Screen::App(..)) && self.vol_event(ev) => {}
             // the launcher's own menus and cards (move a tile, make or delete a group) and the keys that open them
             _ if self.layout_intercept(ev) => {}
             // the context menu takes every key and click while it is open (heartbeats, releases and clipboard text pass)
@@ -2144,10 +2253,16 @@ impl Shell {
     /// Tell an administrator about devices that appeared on the network since the last look.
     fn check_new_devices(&mut self) {
         let Some(user) = self.session.as_ref().filter(|s| s.policy.manage_settings).map(|s| s.user.clone()) else { return };
-        for d in self.env.services.devwatch.take_fresh() {
+        // one toast for the whole batch; the inbox collects them into one entry ("12 new devices on your network")
+        let fresh = self.env.services.devwatch.take_fresh();
+        for d in &fresh {
             self.env.audit.record(&user, "netsec.new_device", &format!("{} {}", d.ip, d.mac));
             let _ = self.env.services.notify(&user, iyakki_agent::inbox::Kind::Device, "New device on your network", &format!("{} ({}) appeared. NET SCAN → Devices lets you trust it.", d.ip, d.mac), Some(iyakki_agent::inbox::Link::new("scan", &d.mac)));
-            self.say(format!("New device on your network: {} ({}). NET SCAN → Devices to trust it.", d.ip, d.mac));
+        }
+        match fresh.as_slice() {
+            [] => {}
+            [d] => self.say(format!("New device on your network: {} ({}). NET SCAN → Devices to trust it.", d.ip, d.mac)),
+            more => self.say(format!("{} new devices on your network. Open the inbox to see them.", more.len())),
         }
     }
 
@@ -2208,6 +2323,51 @@ impl Shell {
             }
             self.stale = true;
         }
+    }
+
+    /// Show a flow's permission request over the screen when someone is signed in and it is fresh; take it down when it is answered
+    /// elsewhere (the INBOX), dismissed or older than ten minutes. The INBOX entry never depends on this.
+    fn permpop_tick(&mut self) {
+        let Some(user) = self.session.as_ref().map(|s| s.user.clone()) else {
+            if self.permpop.take().is_some() {
+                self.stale = true;
+            }
+            return;
+        };
+        let now = iyakki_agent::clock::now_unix();
+        let consent = &self.env.services.browser.consent;
+        let fresh = |r: &iyakki_agent::browserconsent::ConsentRequest| r.kind == iyakki_agent::browserconsent::ConsentKind::Permission && !r.quiet && now - r.since < iyakki_agent::flows::permission::POPUP_SECS;
+        if let Some(d) = &self.permpop {
+            if !consent.get(&user, &d.req.id).is_some_and(|r| fresh(&r)) {
+                self.permpop = None;
+                self.stale = true;
+            }
+            return;
+        }
+        if let Some(r) = consent.pending(&user).into_iter().find(|r| fresh(r)) {
+            self.permpop = Some(crate::apps::browser_consent::ConsentDialog::new(r));
+            self.stale = true;
+        }
+    }
+
+    fn handle_permpop(&mut self, ev: &Event) {
+        let Some(d) = self.permpop.clone() else { return };
+        let Event::Key(k) = ev else { return };
+        let Some(a) = d.answer_of(k) else { return };
+        let Some(cx) = self.cx() else { return };
+        match d.answer(&cx, a) {
+            Ok(()) => {
+                self.permpop = None;
+                self.say_info(match a {
+                    iyakki_agent::browserconsent::Answer::AllowOnce => "Allowed for this run",
+                    iyakki_agent::browserconsent::Answer::AlwaysAllow => "Allowed for this flow",
+                    iyakki_agent::browserconsent::Answer::Block => "Blocked: the flow will not ask again",
+                    _ => "Not now. The request stays in the INBOX.",
+                });
+            }
+            Err(e) => self.say(e),
+        }
+        self.stale = true;
     }
 
     fn handle_ring(&mut self, ev: &Event) {
@@ -2556,6 +2716,14 @@ impl Shell {
             self.layout_intercept(&Event::MouseDown(x, y));
             return;
         }
+        if self.permpop.is_some() {
+            if let Some(h) = hit {
+                if h.label != "backdrop" {
+                    self.handle_permpop(&h.ev);
+                }
+            }
+            return;
+        }
         if self.hostdlg.is_some() {
             if let Some(h) = hit {
                 if h.label != "backdrop" {
@@ -2758,6 +2926,11 @@ impl Shell {
                             self.env.audit.record(&user, "power.reboot", "");
                             self.env.host.reboot();
                         }
+                        Key::Char('s') if self.env.host.can_sleep() => {
+                            // locks (signs out) first, so the screen asks for the password on wake
+                            self.sleep_now(&user, "");
+                            return;
+                        }
                         _ => {}
                     }
                     self.screen = Screen::Launcher;
@@ -2853,6 +3026,9 @@ impl Shell {
     }
 
     fn handle_launcher(&mut self, ev: &Event) {
+        if self.startup_event(ev) || self.vol_event(ev) {
+            return;
+        }
         if self.tick.saturating_sub(self.custom_at) > 60 || self.custom_at == 0 {
             self.refresh_custom();
         }
@@ -2901,6 +3077,7 @@ impl Shell {
                         self.open(t.app);
                     }
                 }
+                's' => self.open_settings_from_bar(),
                 'o' | 'q' => self.sign_out(),
                 'p' if power => self.screen = Screen::PowerMenu,
                 // m, g, u, [ and ]: move the tile, the group's menu, undo, reorder (`shell_layout.rs`; handled before this point)
@@ -2927,6 +3104,8 @@ impl Shell {
                     self.go_page(page + 1, pages, cap);
                 } else if let Some(p) = nav.dots.iter().position(|r| pages > 1 && r.contains(*x, *y)) {
                     self.go_page(p, pages, cap);
+                } else if self.settings_rect().is_some_and(|r| r.contains(*x, *y)) {
+                    self.open_settings_from_bar();
                 } else if header_button(w, s, 0).contains(*x, *y) {
                     self.sign_out();
                 } else if power && header_button(w, s, 1).contains(*x, *y) {
@@ -2951,6 +3130,8 @@ impl Shell {
         if self.saver_render(g) {
             return;
         }
+        // developer mode's `iyakki dev state`: this frame is kept as text when a computer is asking
+        let dev_state = self.dev_state_begin(g);
         self.size = (g.width(), g.height());
         let (w, h) = self.size;
         let s = scale_for(w, h);
@@ -2964,6 +3145,8 @@ impl Shell {
         self.live = false; // a whole scene is drawn: nothing is pending
         g.hits.clear();
         g.clear_probes();
+        let drawing = self.panes_drawing_display();
+        self.vol.rects.retain(|p| p.disp != drawing);
         g.mouse = self.disp_mouse(self.panes_active_display());
         crate::ctxmenu::start_frame();
         crate::fx::background(g);
@@ -2982,11 +3165,16 @@ impl Shell {
             Screen::Launcher | Screen::PowerMenu => {
                 self.draw_launcher(g, w, h, s);
                 if matches!(self.screen, Screen::PowerMenu) {
-                    draw_power_menu(g, w, h, s);
+                    draw_power_menu(g, w, h, s, self.env.host.can_sleep());
                 }
             }
             Screen::App(..) => {
                 let cx = self.cx();
+                // Home, the speaker and Settings stand left of the bell (and the LAYOUT button); the clock makes room for them
+                let cluster_left = bell_rect(w, s).x - if panes_impl::layout_slot() { 40.0 * s } else { 0.0 };
+                let extras = self.place_extras(cluster_left - 8.0 * s, 230.0 * s, 110.0 * s, 32.0 * s, 8.0 * s, true);
+                let bar_edge = extras.first().map_or(cluster_left, |e| e.1);
+                let mut accent_after = None;
                 if let (Screen::App(app, pa), Some(cx)) = (&mut self.screen, cx) {
                     let hh = HEADER_H * s;
                     let area = R::new(0.0, hh, w as f32, h as f32 - hh);
@@ -2998,11 +3186,11 @@ impl Shell {
                     // where the clock goes (measured first so the title stops before it; drawn again after the header band,
                     // which would otherwise paint over it)
                     let hits_before = g.hits.len();
-                    let clock_box = app_clock(g, w, s, &self.clock);
+                    let clock_box = app_clock(g, w, s, &self.clock, bar_edge);
                     g.hits.truncate(hits_before);
                     self.clock_tip = clock_box;
                     // the installer indicator sits left of the clock while installs run (or just ended)
-                    let clock_left = clock_box.map_or(bell_rect(w, s).x - if panes_impl::layout_slot() { 40.0 * s } else { 0.0 }, |b| b.x);
+                    let clock_left = clock_box.map_or(bar_edge, |b| b.x);
                     // the battery chip (laptops only) sits left of the clock, with the room the app's name needs kept free
                     let bat_plan = self.battery.plan(g, s, clock_left - 6.0 * s, 300.0 * s, 8.0 * s, 30.0 * s, 13.0 * s);
                     let bar_left = bat_plan.as_ref().map_or(clock_left, |p| p.rect.x);
@@ -3010,7 +3198,7 @@ impl Shell {
                     let title_limit = if ind_w > 0.0 && bar_left - ind_w - 6.0 * s > 300.0 * s { bar_left - ind_w - 6.0 * s } else { bar_left };
                     crate::fx::app_header(g, w as f32, hh, s, app.title(), sub, app.icon(), app.accent(), tick, title_limit - 12.0 * s);
                     if clock_box.is_some() {
-                        app_clock(g, w, s, &self.clock);
+                        app_clock(g, w, s, &self.clock, bar_edge);
                     }
                     match &bat_plan {
                         Some(p) => self.battery.draw_chip(g, p, s),
@@ -3025,7 +3213,7 @@ impl Shell {
                         self.installs.anchor = None;
                     }
                     if let Some(sign) = self.dev_sign.as_deref() {
-                        draw_dev_sign(g, dev_right, 8.0 * s + 15.0 * s, s, sign, 300.0 * s);
+                        draw_dev_sign(g, dev_right, 8.0 * s + 15.0 * s, s, sign, 300.0 * s, self.devask.pulse(self.tick));
                     }
                     let acc = app.accent();
                     let cr = clip_rect(w, s);
@@ -3062,8 +3250,31 @@ impl Shell {
                     let hot = g.hovered(br);
                     crate::fx::chrome_button(g, br, s, hot, acc);
                     g.text(br.x + 14.0 * s, br.y + 6.0 * s, 15.0 * s, TEXT, "← Back", Face::Bold);
+                    accent_after = Some(acc);
+                }
+                if let Some(acc) = accent_after {
+                    for (e, x) in &extras {
+                        self.draw_extra(g, *e, R::new(*x, 8.0 * s, 32.0 * s, 30.0 * s), s, acc, 20.0 * s);
+                    }
+                    self.draw_bar_overlay(g, s);
                 }
             }
+        }
+        // what is still starting: the strip on Home, the line under the sign-in card
+        if !panes_drawn {
+            match self.screen {
+                Screen::Launcher => self.draw_startup_home(g, w, h, s),
+                Screen::Login(_) | Screen::Setup(_) => self.draw_startup_login(g, w, h, s),
+                _ => {}
+            }
+        }
+        if !matches!(self.screen, Screen::Launcher) || panes_drawn {
+            self.startup.strip = None;
+            self.startup.panel = None;
+            self.startup.open = false;
+        }
+        if !matches!(self.screen, Screen::Login(_) | Screen::Setup(_)) {
+            self.startup.login_line = None;
         }
         if let Some(name) = crashed_title {
             self.screen = Screen::Launcher;
@@ -3093,6 +3304,9 @@ impl Shell {
         if let Some(d) = self.hostdlg.as_mut() {
             d.render(g, R::new(0.0, 0.0, w as f32, h as f32), s, tick);
         }
+        if let (Some(d), true) = (&self.permpop, self.session.is_some()) {
+            d.render(g, R::new(0.0, 0.0, w as f32, h as f32), s);
+        }
         if self.drag_over && self.session.is_some() {
             let dest = match &self.screen {
                 Screen::App(_, PApp::Data) => "the DATA viewer",
@@ -3117,6 +3331,9 @@ impl Shell {
         }
         self.battery.render_cards(g, w, h, s);
         self.loss_render(g, w, h, s);
+        if self.session.is_some() {
+            crate::devask::render(&mut self.devask, g, w, h, s, self.tick);
+        }
         if let Some((t, _, info)) = &self.toast {
             crate::fx::toast(g, w as f32, h as f32, s, t, *info);
         }
@@ -3125,11 +3342,19 @@ impl Shell {
         }
         self.draw_login_bar(g, w, h, s);
         if self.fnk.power_card {
-            draw_power_menu(g, w, h, s);
+            draw_power_menu(g, w, h, s, self.env.host.can_sleep());
         }
         // the assistant is using the camera: a red sign on every screen, bottom left, while it lasts
         if let Some(what) = self.env.services.camera.in_use() {
             draw_camera_sign(g, h, s, &what);
+        }
+        // a web page is using the camera, the microphone or the screen: a red sign on every screen, above the assistant's one, a click stops it
+        let cap = crate::apps::browser_media::capture_now();
+        // the Browser tile shows its own "Camera on" mark in its tool bar: the sign does not cover the page there
+        let in_browser = matches!(self.screen, Screen::App(_, PApp::Browser));
+        if cap != 0 && !in_browser {
+            let r = draw_capture_sign(g, h, s, cap, self.cam_sign);
+            g.hit(r, Event::Tab(913), "Stop what the page is capturing");
         }
         if self.help {
             let (title, lines) = self.help_lines();
@@ -3186,6 +3411,9 @@ impl Shell {
         self.fields = crate::ctxmenu::fields();
         self.hits = std::mem::take(&mut g.hits);
         self.probes = g.probes();
+        if dev_state {
+            self.dev_state_end(g);
+        }
     }
 
     // ------------------------------------------------------------------ context menu
@@ -3384,12 +3612,12 @@ impl Shell {
             Screen::App(app, _) => (app.title().to_string(), app.help()),
             _ => (
                 "Home".to_string(),
-                vec!["← → ↑ ↓ · choose an app (moving past the last one on a page turns it)".to_string(), "Tab / Shift+Tab or click a chip · switch group (Home, Web & Media, Work, System, and any group you made)".to_string(), "m · move the selected tile to another group (or right-click it); g · this group's menu (new, rename, delete); + chip · new group; u · undo the last move; [ and ] · move the tile earlier or later in its group".to_string(), "PageUp / PageDown, mouse wheel or the dots · turn the page".to_string(), "1-9 · open the Nth app of the All list (the order of the tile table, whichever group you moved it to)".to_string(), "Enter or click · open it".to_string(), "o · sign out".to_string(), "p · power menu (if your role allows it)".to_string()],
+                vec!["← → ↑ ↓ · choose an app (moving past the last one on a page turns it)".to_string(), "Tab / Shift+Tab or click a chip · switch group (Ask & Create, Build, Media, Data, Devices & System, Apps, and any group you made)".to_string(), "m · move the selected tile to another group (or right-click it); g · this group's menu (new, rename, delete); + chip · new group; u · undo the last move; [ and ] · move the tile earlier or later in its group".to_string(), "PageUp / PageDown, mouse wheel or the dots · turn the page".to_string(), "1-9 · open the Nth app of the All list (the order of the tile table, whichever group you moved it to)".to_string(), "Enter or click · open it".to_string(), "o · sign out".to_string(), "p · power menu (if your role allows it)".to_string()],
             ),
         };
         lines.push(String::new());
         lines.push("Everywhere".to_string());
-        lines.extend(["F1 · this help".to_string(), "F9 or the bell · your inbox (notifications, tasks, approvals)".to_string(), "F10 or a click on the name IYAKKI · the IYAKKI menu (About, Quick install, Media player, Mac drivers)".to_string(), "F12 or Print Screen · screenshot to the clipboard (click two corners, or Enter for the whole screen), then save a file or close".to_string(), "Esc · back".to_string(), "Ctrl+V · paste".to_string(), "Ctrl+Shift+V or right-click · clipboard history".to_string()]);
+        lines.extend(["F1 · this help".to_string(), "F11 or the Home icon · back to the tiles from any app (the gear opens Settings, the speaker sets the volume)".to_string(), "F9 or the bell · your inbox (notifications, tasks, approvals)".to_string(), "F10 or a click on the name IYAKKI · the IYAKKI menu (About, Quick install, Media player, Mac drivers)".to_string(), "F12 or Print Screen · screenshot to the clipboard (click two corners, or Enter for the whole screen), then save a file or close".to_string(), "Esc · back".to_string(), "Ctrl+V · paste".to_string(), "Ctrl+Shift+V or right-click · clipboard history".to_string()]);
         (format!("Help — {title}"), lines)
     }
 
@@ -3412,9 +3640,17 @@ impl Shell {
         let chip = account_label(&sess.user, sess.role.name());
         let cw = g.text_width(16.0 * s, &chip, Face::Bold) + 36.0 * s;
         let bell = sess.policy.allows_app(PApp::Inbox);
-        let right = w as f32 - 40.0 * s - (header_button(w, s, 0).w + 12.0 * s) * (if power { 5.0 } else { 4.0 } + if bell { 1.0 } else { 0.0 } + if lay { 1.0 } else { 0.0 });
-        crate::fx::glass(g, right - cw, 24.0 * s, cw, 44.0 * s, 22.0 * s, crate::fx::CYAN);
-        g.text(right - cw + 18.0 * s, 35.0 * s, 16.0 * s, TEXT, &chip, Face::Bold);
+        // the icons run from the right edge: sign out, power, camera, devices, clipboard, bell, panes, then the speaker and Settings
+        let count = self.bar_slots().count;
+        let right = header_button(w, s, count.saturating_sub(1)).x - (header_slot(w, s) - header_button(w, s, 0).w);
+        let title_end = 40.0 * s + name_w;
+        // the account chip gives way on a screen too narrow for it beside the name
+        let chip_shown = right - cw >= title_end + 24.0 * s;
+        if chip_shown {
+            crate::fx::glass(g, right - cw, 24.0 * s, cw, 44.0 * s, 22.0 * s, crate::fx::CYAN);
+            g.text(right - cw + 18.0 * s, 35.0 * s, 16.0 * s, TEXT, &chip, Face::Bold);
+        }
+        let chip_left = if chip_shown { right - cw } else { right };
         // sign out, power (when allowed), the camera, then the clipboard queue, from the right
         let buttons: Vec<Icon> = if power { vec![Icon::Logout, Icon::Power, Icon::Camera, Icon::Devices, Icon::Clipboard] } else { vec![Icon::Logout, Icon::Camera, Icon::Devices, Icon::Clipboard] };
         for (i, ic) in buttons.iter().enumerate() {
@@ -3423,10 +3659,9 @@ impl Shell {
             crate::fx::chrome_button(g, r, s * 2.5, hover, crate::fx::CYAN);
             g.icon(*ic, r.x + r.w / 2.0, r.y + r.h / 2.0, 22.0 * s, if *ic == Icon::Devices && self.devpop.open { crate::fx::CYAN } else { MUTED });
         }
-        let title_end = 40.0 * s + name_w;
-        self.clock_tip = launcher_clock(g, s, right - cw - 18.0 * s, title_end + 24.0 * s, &self.clock);
+        self.clock_tip = launcher_clock(g, s, chip_left - 18.0 * s, title_end + 24.0 * s, &self.clock);
         // the installer indicator, left of the clock (when there is room)
-        let mut ind_right = self.clock_tip.map_or(right - cw - 18.0 * s, |b| b.x) - 8.0 * s;
+        let mut ind_right = self.clock_tip.map_or(chip_left - 18.0 * s, |b| b.x) - 8.0 * s;
         // the battery chip (laptops only), left of the clock
         let bat_plan = self.battery.plan(g, s, ind_right, title_end + 24.0 * s, 24.0 * s, 44.0 * s, 15.0 * s);
         match &bat_plan {
@@ -3445,7 +3680,7 @@ impl Shell {
             self.installs.anchor = None;
         }
         if let Some(sign) = self.dev_sign.as_deref() {
-            draw_dev_sign(g, dev_right, 46.0 * s, s, sign, title_end + 24.0 * s);
+            draw_dev_sign(g, dev_right, 46.0 * s, s, sign, title_end + 24.0 * s, self.devask.pulse(self.tick));
         }
         if bell {
             let r = header_button(w, s, buttons.len());
@@ -3455,6 +3690,7 @@ impl Shell {
             let r = header_button(w, s, buttons.len() + usize::from(bell));
             panes_impl::draw_layout_button(g, r, s, crate::fx::CYAN);
         }
+        self.draw_bar_extras(g, s);
         }
         // tiles
         if self.tick.saturating_sub(self.custom_at) > 60 || self.custom_at == 0 {
@@ -3546,10 +3782,16 @@ impl Shell {
             }
         }
         if top_bar {
-        let hint = "←/→ choose · Tab group · m move · PgUp/PgDn page · Enter open · o sign out".to_string() + if power { " · p power" } else { "" };
-        let hw = g.text_width(14.0 * s, &hint, Face::Sans);
-        g.text((w as f32 - hw) / 2.0, h as f32 - 36.0 * s, 14.0 * s, DIM, &hint, Face::Sans);
+        let hint = "←/→ choose · Tab group · m move · PgUp/PgDn page · Enter open · s settings · v volume · o sign out".to_string() + if power { " · p power" } else { "" };
         let host = format!("{}  ·  {}", self.env.hostname, self.env.host.detect_env());
+        let host_w = g.text_width(14.0 * s, &host, Face::Sans);
+        // the key hint sits in the middle when there is room between the host name and the right edge, otherwise it is shortened to the room
+        // there is (it used to run over the host name on narrow windows and at the large text sizes)
+        let room = (w as f32 - 40.0 * s) - (40.0 * s + host_w + 24.0 * s);
+        let hint = g.fit(14.0 * s, &hint, Face::Sans, room.max(0.0));
+        let hw = g.text_width(14.0 * s, &hint, Face::Sans);
+        let hx = ((w as f32 - hw) / 2.0).max(40.0 * s + host_w + 24.0 * s);
+        g.text(hx, h as f32 - 36.0 * s, 14.0 * s, DIM, &hint, Face::Sans);
         g.text(40.0 * s, h as f32 - 36.0 * s, 14.0 * s, DIM, &host, Face::Sans);
         // what the radio is playing in the background
         if let iyakki_agent::radio::RadioState::Playing { station, title, .. } = self.env.services.radio.state() {
@@ -3564,6 +3806,7 @@ impl Shell {
             let lw = g.text_width(14.0 * s, &line, Face::Sans);
             g.text(w as f32 - lw - 40.0 * s, h as f32 - 60.0 * s, 14.0 * s, OK, &line, Face::Sans);
         }
+        self.draw_bar_overlay(g, s);
         }
     }
 }
@@ -3577,8 +3820,8 @@ fn with_alpha(c: [u8; 4], a: u8) -> [u8; 4] {
 
 /// The clock in the app header, left of the bell: the time, with the short date when there is room. Returns its box (for
 /// the tooltip and the click).
-fn app_clock(g: &mut Gfx, w: u32, s: f32, clock: &crate::clockbar::ClockState) -> Option<R> {
-    let right = bell_rect(w, s).x - 12.0 * s - if panes_impl::layout_slot() { 40.0 * s } else { 0.0 };
+fn app_clock(g: &mut Gfx, _w: u32, s: f32, clock: &crate::clockbar::ClockState, bar_edge: f32) -> Option<R> {
+    let right = bar_edge - 12.0 * s;
     let (time, date) = (clock_time_text(clock), clock.date_text());
     let (tw, dw) = (g.text_width(15.0 * s, &time, Face::Bold), g.text_width(13.0 * s, &date, Face::Sans));
     // keep room for the app's name on the left
@@ -3634,7 +3877,7 @@ fn clock_time_text(clock: &crate::clockbar::ClockState) -> String {
 
 /// The small amber "DEV" sign while Developer mode is on, right edge at `right`, centred on `cy`; skipped when it would cross
 /// `left_limit`. A click opens Settings → Developer mode.
-fn draw_dev_sign(g: &mut Gfx, right: f32, cy: f32, s: f32, sign: &str, left_limit: f32) {
+fn draw_dev_sign(g: &mut Gfx, right: f32, cy: f32, s: f32, sign: &str, left_limit: f32, pulse: f32) {
     let tw = g.text_width(11.5 * s, sign, Face::Bold);
     let b = R::new(right - tw - 14.0 * s, cy - 10.0 * s, tw + 14.0 * s, 20.0 * s);
     if b.x < left_limit {
@@ -3642,7 +3885,11 @@ fn draw_dev_sign(g: &mut Gfx, right: f32, cy: f32, s: f32, sign: &str, left_limi
     }
     // a shell grant is the dangerous state: red, never amber
     let amber = if sign.contains("SHELL ACCESS") || sign.contains("INTERRUPTED") { rgb(255, 99, 99) } else { rgb(255, 196, 94) };
-    g.rrect(b.x, b.y, b.w, b.h, 6.0 * s, crate::fx::with_alpha(amber, 40));
+    if pulse > 0.0 {
+        // a request waits for the administrator: the sign swells and glows
+        g.rrect_glow(b.x, b.y, b.w, b.h, 6.0 * s, (3.0 + 9.0 * pulse) * s, crate::fx::with_alpha(amber, (60.0 + 160.0 * pulse) as u8));
+    }
+    g.rrect(b.x, b.y, b.w, b.h, 6.0 * s, crate::fx::with_alpha(amber, (40.0 + 120.0 * pulse) as u8));
     g.rrect_outline(b.x, b.y, b.w, b.h, 6.0 * s, 1.0, amber);
     g.text(b.x + 7.0 * s, cy - g.line_height(11.5 * s, Face::Bold) / 2.0, 11.5 * s, amber, sign, Face::Bold);
     g.hit(b, Event::Tab(DEV_SIGN), "developer mode on");
@@ -3672,9 +3919,15 @@ fn draw_clock_tip(g: &mut Gfx, w: u32, h: u32, s: f32, anchor: R, lines: &[(Stri
     }
 }
 
+/// The space one top-bar icon takes, gap included: 56 at scale 1, less on a narrow screen so that eight icons take at most 60% of the width.
+fn header_slot(w: u32, s: f32) -> f32 {
+    (56.0 * s).min(w as f32 * 0.6 / 8.0)
+}
+
 fn header_button(w: u32, s: f32, i: usize) -> R {
-    let d = 44.0 * s;
-    R::new(w as f32 - 40.0 * s - d - i as f32 * (d + 12.0 * s), 24.0 * s, d, d)
+    let slot = header_slot(w, s);
+    let d = slot * 44.0 / 56.0;
+    R::new(w as f32 - 40.0 * s - d - i as f32 * slot, 24.0 * s, d, d)
 }
 
 /// The bell, left of the clipboard queue button.
@@ -3682,12 +3935,13 @@ fn bell_rect(w: u32, s: f32) -> R {
     R::new(w as f32 - 226.0 * s - 160.0 * s, 8.0 * s, 32.0 * s, 30.0 * s)
 }
 
-/// The bell with its count: red when something waits for an answer, amber for the rest.
+/// The bell with its count: red when something waits for an answer, amber for errors and warnings. Routine items (information,
+/// new devices, finished jobs) never add to the number; they show as a small blue dot.
 fn draw_bell(g: &mut Gfx, r: R, radius: f32, s: f32, b: Badge, open: bool) {
     let hover = g.hovered(r);
     crate::fx::chrome_button(g, r, radius / 8.0, hover || open, crate::fx::CYAN);
     let n = b.total();
-    let ink = if b.approvals > 0 { rgb(255, 120, 120) } else if n > 0 { rgb(255, 196, 94) } else { MUTED };
+    let ink = if b.approvals > 0 { rgb(255, 120, 120) } else if n > 0 { rgb(255, 196, 94) } else if b.other > 0 { rgb(170, 190, 215) } else { MUTED };
     g.icon(Icon::Bell, r.x + r.w / 2.0, r.y + r.h / 2.0, r.h * 0.62, ink);
     if n > 0 {
         let label = if n > 99 { "99+".to_string() } else { n.to_string() };
@@ -3698,6 +3952,10 @@ fn draw_bell(g: &mut Gfx, r: R, radius: f32, s: f32, b: Badge, open: bool) {
         let (bx, by) = (r.x + r.w - bw * 0.72, r.y - bh * 0.18);
         g.rrect(bx, by, bw, bh, bh / 2.0, if b.approvals > 0 { rgb(214, 48, 64) } else { rgb(214, 130, 20) });
         g.text(bx + (bw - tw) / 2.0, by + (bh - g.line_height(size, Face::Bold)) / 2.0, size, rgb(255, 255, 255), &label, Face::Bold);
+    } else if b.other > 0 {
+        // only routine items are unread: a small dot, no number
+        let d = (r.h * 0.26).max(7.0 * s);
+        g.rrect(r.x + r.w - d * 1.1, r.y + d * 0.1, d, d, d / 2.0, rgb(110, 150, 200));
     }
     g.hit(r, Event::Key(Key::F(9)), "inbox");
 }
@@ -3969,21 +4227,48 @@ fn draw_ring(g: &mut Gfx, w: u32, h: u32, s: f32, r: &Ring, tick: u64) {
     g.button(x + 28.0 * s + w1 + 12.0 * s, by, 15.0 * s, "Snooze 5 min (S)", MUTED, Event::Key(Key::Char('s')));
 }
 
-fn draw_power_menu(g: &mut Gfx, w: u32, h: u32, s: f32) {
+fn draw_power_menu(g: &mut Gfx, w: u32, h: u32, s: f32, sleep: bool) {
     g.clear_hits();
     g.rect(0.0, 0.0, w as f32, h as f32, [0, 0, 0, 200]);
     g.hit(R::new(0.0, 0.0, w as f32, h as f32), Event::Key(Key::Esc), "backdrop-cancel");
-    let (bw, bh) = (500.0 * s, 210.0 * s);
+    // the choices; Sleep only where the machine can sleep (no dead button)
+    let mut items: Vec<(&str, [u8; 4], char)> = vec![("Power off", ERR, 'y'), ("Restart", TEXT, 'r')];
+    if sleep {
+        items.push(("Sleep", TEXT, 's'));
+    }
+    items.push(("Cancel", MUTED, '\u{1b}'));
+    let size = 15.0 * s;
+    let (gap, row_h) = (10.0 * s, size * 2.1 + 10.0 * s);
+    let bw = (500.0 * s).min(w as f32 - 16.0);
+    let inner = bw - 56.0 * s;
+    let widths: Vec<f32> = items.iter().map(|i| g.text_width(size, i.0, Face::Bold) + size * 1.7).collect();
+    // flow the buttons onto as many rows as the card's width needs
+    let mut rows = 1usize;
+    let mut used = 0.0f32;
+    let mut place: Vec<(usize, f32)> = vec![];
+    for wd in &widths {
+        if used > 0.0 && used + gap + wd > inner {
+            rows += 1;
+            used = 0.0;
+        }
+        place.push((rows - 1, used));
+        used += wd + gap;
+    }
+    let bh = (210.0 * s + (rows - 1) as f32 * row_h).min(h as f32 - 8.0);
     let (x, y) = ((w as f32 - bw) / 2.0, (h as f32 - bh) / 2.0);
     g.hit(R::new(x, y, bw, bh), Event::Tick, "backdrop");
     crate::fx::modal_panel(g, R::new(x, y, bw, bh), s, ERR, true);
     g.icon(Icon::Power, x + 60.0 * s, y + 60.0 * s, 52.0 * s, ERR);
     g.text(x + 110.0 * s, y + 34.0 * s, 24.0 * s, TEXT, "Power", Face::Bold);
-    g.text(x + 110.0 * s, y + 70.0 * s, 15.0 * s, MUTED, "Shut down or restart this machine.", Face::Sans);
-    let by = y + bh - 62.0 * s;
-    let w1 = g.button(x + 28.0 * s, by, 15.0 * s, "Power off", ERR, Event::Key(Key::Char('y')));
-    let w2 = g.button(x + 28.0 * s + w1 + 10.0 * s, by, 15.0 * s, "Restart", TEXT, Event::Key(Key::Char('r')));
-    g.button(x + 28.0 * s + w1 + w2 + 20.0 * s, by, 15.0 * s, "Cancel", MUTED, Event::Key(Key::Esc));
+    let sub = if sleep { "Shut down, restart or sleep this machine." } else { "Shut down or restart this machine." };
+    let sub = g.fit(15.0 * s, sub, Face::Sans, bw - 130.0 * s);
+    g.text(x + 110.0 * s, y + 70.0 * s, 15.0 * s, MUTED, &sub, Face::Sans);
+    let by = y + bh - 62.0 * s - (rows - 1) as f32 * row_h;
+    for (i, (label, accent, k)) in items.iter().enumerate() {
+        let (row, off) = place[i];
+        let ev = if *k == '\u{1b}' { Event::Key(Key::Esc) } else { Event::Key(Key::Char(*k)) };
+        g.button(x + 28.0 * s + off, by + row as f32 * row_h, size, label, *accent, ev);
+    }
 }
 
 #[cfg(test)]
@@ -4412,20 +4697,20 @@ pub(crate) mod tests {
         let on_launcher = bell_hit(&sh).expect("a bell on the launcher");
         assert_eq!(on_launcher.ev, Event::Key(Key::F(9)));
         assert_eq!(sh.badge(), Badge::default());
-        // unread notes, an overdue task and a waiting approval all count
+        // unread warnings, an overdue task and a waiting approval all count
         let svc = sh.env.services.clone();
         let now = iyakki_agent::clock::now_unix();
-        svc.notify("alice", iyakki_agent::inbox::Kind::Info, "one", "", None).unwrap();
-        svc.notify("alice", iyakki_agent::inbox::Kind::Info, "two", "", None).unwrap();
+        svc.notify("alice", iyakki_agent::inbox::Kind::Warning, "one", "", None).unwrap();
+        svc.notify("alice", iyakki_agent::inbox::Kind::Warning, "two", "", None).unwrap();
         svc.inbox.add_task("alice", "late", "", Some(now - 60), iyakki_agent::inbox::Priority::Normal, "user", now - 100).unwrap();
-        svc.notify("bob", iyakki_agent::inbox::Kind::Info, "not mine", "", None).unwrap();
+        svc.notify("bob", iyakki_agent::inbox::Kind::Warning, "not mine", "", None).unwrap();
         sh.handle(&Event::MouseMove(5, 5)); // any event refreshes nothing; a key does
         key(&mut sh, Key::Right);
-        assert_eq!(sh.badge(), Badge { unread: 2, approvals: 0, overdue: 1 });
+        assert_eq!(sh.badge(), Badge { unread: 2, approvals: 0, overdue: 1, other: 0 });
         assert_eq!(sh.badge().total(), 3);
         sh.render(&mut g);
         // a ticking clock picks up changes made elsewhere within half a second
-        svc.notify("alice", iyakki_agent::inbox::Kind::Info, "three", "", None).unwrap();
+        svc.notify("alice", iyakki_agent::inbox::Kind::Warning, "three", "", None).unwrap();
         for _ in 0..16 {
             sh.handle(&Event::Tick);
         }
@@ -4460,6 +4745,55 @@ pub(crate) mod tests {
         assert_eq!(sh.badge(), Badge::default());
         key(&mut sh, Key::F(9));
         assert_eq!(sh.screen_name(), "login", "no inbox before sign-in");
+    }
+
+    #[test]
+    fn routine_items_never_add_to_the_bells_number_and_99_plus_needs_real_counts() {
+        let (mut sh, _) = shell_with_users("bell4");
+        login(&mut sh, "alice", "alicepass1");
+        let svc = sh.env.services.clone();
+        let now = iyakki_agent::clock::now_unix();
+        // 130 routine items, like the Mac that showed 99+: new devices, finished jobs, information
+        for i in 0..79 {
+            svc.inbox.add("alice", iyakki_agent::inbox::Kind::Device, "New device on your network", &format!("10.0.0.{i} (m{i}) appeared."), "scan", None, now).unwrap();
+        }
+        for i in 0..51 {
+            svc.inbox.add("alice", iyakki_agent::inbox::Kind::Info, &format!("note {i}"), "", &format!("src{}", i % 5), None, now).unwrap();
+        }
+        sh.refresh_badge();
+        let b = sh.badge();
+        assert_eq!((b.total(), b.unread, b.approvals, b.overdue), (0, 0, 0, 0), "no number: {b:?}");
+        assert!(b.other > 0, "a dot instead");
+        // layout at the four sizes with each state: nothing, the dot, a number, 99+
+        let sizes = [(1280u32, 720u32), (1024, 600), (800, 480), (480, 600)];
+        let check = |sh: &mut Shell, label: &str| {
+            for (w, h) in sizes {
+                sh.resize_for_test(w, h);
+                let mut g = Gfx::new(w, h);
+                sh.render(&mut g);
+                let r = bell_hit(sh).unwrap_or_else(|| panic!("no bell at {w}x{h} ({label})")).rect;
+                assert!(r.x >= 0.0 && r.y >= 0.0 && r.x + r.w <= w as f32 && r.y + r.h <= h as f32, "{label} {w}x{h}: {r:?}");
+                let others: Vec<_> = sh.hits().iter().filter(|x| x.label != "inbox" && x.rect.y < 46.0 && x.rect.w > 0.0 && x.rect.w < 200.0).collect();
+                for o in others {
+                    let (ox, oy) = (o.rect.x.max(r.x) < (o.rect.x + o.rect.w).min(r.x + r.w), o.rect.y.max(r.y) < (o.rect.y + o.rect.h).min(r.y + r.h));
+                    assert!(!(ox && oy), "{label} {w}x{h}: the bell overlaps `{}`", o.label);
+                }
+            }
+        };
+        check(&mut sh, "dot");
+        let e = |i: usize| svc.inbox.add("alice", iyakki_agent::inbox::Kind::Error, &format!("Flow {i} failed"), &format!("reason {i}"), &format!("s{}", i % 5), None, now).unwrap();
+        for i in 0..3 {
+            e(i);
+        }
+        sh.refresh_badge();
+        assert_eq!((sh.badge().unread, sh.badge().total()), (3, 3));
+        check(&mut sh, "three");
+        for i in 3..120 {
+            e(i);
+        }
+        sh.refresh_badge();
+        assert!(sh.badge().total() > 99, "{:?}", sh.badge());
+        check(&mut sh, "99+");
     }
 
     #[test]
@@ -4611,11 +4945,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_ai_ide_tile_is_one_tile_on_home_for_every_role_but_guest() {
+    fn the_ai_ide_tile_is_one_tile_in_build_for_every_role_but_guest() {
         assert_eq!(TILES.iter().filter(|t| t.app == PApp::Ide).count(), 1);
         let t = TILES.iter().find(|t| t.app == PApp::Ide).unwrap();
         assert_eq!((t.label, t.sub), ("AI IDE", "Code with the AI"));
-        assert_eq!(Group::of(PApp::Ide), Some(Group::Home));
+        assert_eq!(Group::of(PApp::Ide), Some(Group::Work));
         assert_eq!((PApp::Ide.id(), PApp::Ide.label().as_str()), ("ide", "AI IDE"));
         for r in [Role::Admin, Role::Operator, Role::User] {
             assert!(r.template().apps.contains(&PApp::Ide), "{r:?}");
@@ -4626,9 +4960,9 @@ pub(crate) mod tests {
         let (mut sh, _) = shell_with_users("ide-tile");
         login(&mut sh, "root", "rootpass12");
         assert_eq!(sh.visible_tiles().iter().filter(|t| t.app == PApp::Ide).count(), 1);
-        sh.set_group(Group::Home);
-        let home: Vec<PApp> = sh.group_tiles().iter().map(|t| t.app).collect();
-        assert!(home.contains(&PApp::Ide) && home.contains(&PApp::Settings), "{home:?}");
+        sh.set_group(Group::Work);
+        let build: Vec<PApp> = sh.group_tiles().iter().map(|t| t.app).collect();
+        assert!(build.contains(&PApp::Ide) && !build.contains(&PApp::Settings), "{build:?}");
         assert!(sh.open_for_demo("ide"));
         assert_eq!(sh.screen_name(), "app:ide");
     }
@@ -4737,8 +5071,8 @@ pub(crate) mod tests {
         let mut g = Gfx::new(1280, 720);
         login(&mut sh, "root", "rootpass12");
         sh.render(&mut g);
-        assert_eq!(sh.groups().iter().map(|x| x.label()).collect::<Vec<_>>(), vec!["Home", "Web & Media", "Work", "System"]);
-        assert_eq!(sh.current_group(), Group::Home, "Home is shown first");
+        assert_eq!(sh.groups().iter().map(|x| x.label()).collect::<Vec<_>>(), vec!["Ask & Create", "Build", "Media", "Data", "Devices & System"]);
+        assert_eq!(sh.current_group(), Group::Home, "Ask & Create is shown first");
         let mut seen = Vec::new();
         for gr in sh.groups() {
             sh.set_group(gr);
@@ -4748,9 +5082,9 @@ pub(crate) mod tests {
         let mut all: Vec<&str> = TILES.iter().filter(|t| t.group.is_some()).map(|t| t.label).collect();
         all.sort();
         assert_eq!(seen, all, "each tile is in exactly one section");
-        assert!(seen.contains(&"SETTINGS"), "Settings is a tile on Home (and stays in the IYAKKI menu)");
+        assert!(!seen.contains(&"SETTINGS"), "Settings is an icon in the top bar, not a tile");
         sh.set_group(Group::Home);
-        assert_eq!(names(&sh), vec!["CHAT", "RAG", "MCP", "CLI", "SETTINGS", "SKILLS", "CALENDAR", "AI IDE", "TALES", "VOICE"]);
+        assert_eq!(names(&sh), vec!["CHAT", "RAG", "SKILLS", "CALENDAR", "TALES", "VOICE", "LAB", "LEARN"]);
         sh.set_group(Group::WebMedia);
         assert_eq!(names(&sh), vec!["BROWSER", "RADIO", "MEDIA", "CAMERA"]);
         sh.set_group(Group::System);
@@ -4783,12 +5117,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn settings_is_reachable_from_the_iyakki_menu_f7_and_the_clock_and_sits_on_home() {
+    fn settings_is_reachable_from_the_iyakki_menu_f7_and_the_clock_and_the_top_bar_but_is_no_tile() {
         let (mut sh, _) = shell_with_users("grp-set");
         let mut g = Gfx::new(1280, 720);
         login(&mut sh, "root", "rootpass12");
         sh.render(&mut g);
-        assert!(sh.visible_tiles().iter().any(|t| t.app == PApp::Settings), "a Settings tile on Home");
+        assert!(!sh.visible_tiles().iter().any(|t| t.app == PApp::Settings), "no Settings tile on the grid");
         key(&mut sh, Key::F(10));
         sh.render(&mut g);
         let entry = sh.hits().iter().find(|h| h.label == "Settings").map(|h| h.rect).expect("a Settings entry in the menu");
@@ -4811,26 +5145,29 @@ pub(crate) mod tests {
         login(&mut sh, "alice", "alicepass1");
         sh.render(&mut g);
         assert_eq!(sh.current_group(), Group::Home);
-        key(&mut sh, Key::Tab);
-        assert_eq!(sh.current_group(), Group::WebMedia);
+        let order: Vec<GroupRef> = sh.groups();
+        assert_eq!(order[..3], [GroupRef::from(Group::Home), Group::Work.into(), Group::WebMedia.into()], "the tabs follow the order of the groups");
         key(&mut sh, Key::Tab);
         assert_eq!(sh.current_group(), Group::Work);
-        key(&mut sh, Key::BackTab);
+        key(&mut sh, Key::Tab);
         assert_eq!(sh.current_group(), Group::WebMedia);
+        key(&mut sh, Key::BackTab);
+        assert_eq!(sh.current_group(), Group::Work);
         key(&mut sh, Key::BackTab);
         assert_eq!(sh.current_group(), Group::Home);
         key(&mut sh, Key::BackTab);
-        assert_eq!(sh.current_group(), Group::System, "Shift+Tab wraps round");
+        assert_eq!(sh.current_group(), order.last().unwrap().clone(), "Shift+Tab wraps round");
         // clicking a chip
-        let r = chip(&sh, &g, "Work");
+        let r = chip(&sh, &g, "Build");
         at(&mut sh, &mut g, r);
         assert_eq!(sh.current_group(), Group::Work);
         let work: Vec<&str> = TILES.iter().filter(|t| Group::Work.holds(t.app)).map(|t| t.label).collect();
-        assert!(work.contains(&"DATA") && !work.contains(&"AI IDE"), "{work:?}");
+        assert!(work.contains(&"AI IDE") && !work.contains(&"DATA"), "{work:?}");
         assert_eq!(names(&sh), work);
-        assert!(sh.hits().iter().any(|h| h.label == "group Work"), "chips are clickable regions");
+        assert!(sh.hits().iter().any(|h| h.label == "group Build"), "chips are clickable regions");
         // a tile click in the group opens that app
-        let r0 = launcher::tile_rects(1280, 720, 1.0, work.len())[1];
+        let at_runs = work.iter().position(|l| *l == "RUNS").unwrap();
+        let r0 = launcher::tile_rects(1280, 720, 1.0, work.len())[at_runs];
         at(&mut sh, &mut g, r0);
         assert_eq!(sh.screen_name(), "app:runs");
         key(&mut sh, Key::Esc);
@@ -4877,7 +5214,7 @@ pub(crate) mod tests {
         assert_eq!((page(&sh), sh.sel), (1, cap));
         key(&mut sh, Key::Enter);
         assert_eq!(sh.screen_name(), format!("app:{}", sh.group_tiles()[cap].app.id()));
-        key(&mut sh, Key::Esc);
+        sh.leave_app(); // some tiles keep Esc for themselves (the IDE, K8S)
         assert_eq!(page(&sh), 1, "the page is kept after an app");
         // and Left back
         key(&mut sh, Key::Left);
@@ -4913,7 +5250,7 @@ pub(crate) mod tests {
         let r = launcher::page_rects(w, h, s, n, 1)[0];
         at(&mut sh, &mut g, r);
         assert_eq!(sh.screen_name(), format!("app:{}", sh.group_tiles()[cap].app.id()));
-        key(&mut sh, Key::Esc);
+        sh.leave_app(); // some tiles keep Esc for themselves (the IDE, K8S)
         // a small section is a single page: no dots, and the wheel does nothing
         sh.set_group(Group::WebMedia);
         sh.render(&mut g);
@@ -4966,11 +5303,11 @@ pub(crate) mod tests {
         let (mut sh, _) = shell_with_users("sh5");
         let mut g = Gfx::new(1280, 720);
         login(&mut sh, "alice", "alicepass1");
-        sh.set_group(Group::Home);
+        sh.set_group(Group::Work);
         sh.render(&mut g);
         let rects = tile_rects(1280, 720, scale_for(1280, 720), names(&sh).len());
-        assert_eq!(names(&sh)[3], "CLI");
-        let c = rects[3];
+        assert_eq!(names(&sh)[1], "CLI");
+        let c = rects[1];
         sh.handle(&Event::MouseMove((c.x + 10.0) as i32, (c.y + 10.0) as i32));
         sh.handle(&Event::MouseDown((c.x + 10.0) as i32, (c.y + 10.0) as i32));
         assert_eq!(sh.screen_name(), "app:cli");
@@ -4978,9 +5315,9 @@ pub(crate) mod tests {
         let b = back_rect(1280, scale_for(1280, 720));
         sh.handle(&Event::MouseDown((b.x + 5.0) as i32, (b.y + 5.0) as i32));
         assert_eq!(sh.screen_name(), "launcher");
-        // for a plain user: 5 = Edit, 6 = Runs, 7 = Settings, 8 = Browser, 9 = Radio (no Users tile exists for them)
+        // for a plain user: 5 = Edit, 6 = Runs, 7 = Browser, 8 = Radio, 9 = Skills (no Users tile and no Settings tile)
         key(&mut sh, Key::Char('9'));
-        assert_eq!(sh.screen_name(), "app:radio");
+        assert_eq!(sh.screen_name(), "app:skills");
         key(&mut sh, Key::Esc);
         assert_eq!(sh.screen_name(), "launcher");
         key(&mut sh, Key::Char('5'));
@@ -4990,10 +5327,10 @@ pub(crate) mod tests {
         assert_eq!(sh.screen_name(), "app:runs");
         key(&mut sh, Key::Esc);
         key(&mut sh, Key::Char('7'));
-        assert_eq!(sh.screen_name(), "app:settings");
+        assert_eq!(sh.screen_name(), "app:browser");
         key(&mut sh, Key::Esc);
         key(&mut sh, Key::Char('8'));
-        assert_eq!(sh.screen_name(), "app:browser");
+        assert_eq!(sh.screen_name(), "app:radio");
         key(&mut sh, Key::Esc);
         // Settings also: the IYAKKI menu's gear entry (or F7)
         key(&mut sh, Key::F(10));
@@ -5002,11 +5339,11 @@ pub(crate) mod tests {
         key(&mut sh, Key::Esc);
         key(&mut sh, Key::Char('o'));
         login(&mut sh, "root", "rootpass12");
-        // for an admin: 5 = Edit, 6 = Runs, 7 = Users, 8 = Settings, 9 = Browser
+        // for an admin: 5 = Edit, 6 = Runs, 7 = Users, 8 = Browser, 9 = Radio
         key(&mut sh, Key::Char('7'));
         assert_eq!(sh.screen_name(), "app:users");
         key(&mut sh, Key::Esc);
-        key(&mut sh, Key::Char('9'));
+        key(&mut sh, Key::Char('8'));
         assert_eq!(sh.screen_name(), "app:browser");
     }
 
@@ -5417,6 +5754,50 @@ pub(crate) mod tests {
         sh.handle(&Event::MouseDown(x, y));
         click(&mut sh, &mut g, "Restart");
         assert_eq!(*host.powered_off.lock().unwrap(), Some("reboot".into()));
+    }
+
+    #[test]
+    fn power_menu_sleep_is_hidden_when_impossible_and_locks_the_session_first() {
+        let sign_in = |tag: &str, can: bool| {
+            let (mut sh, host) = shell_with_users(tag);
+            *host.sleepable.lock().unwrap() = can;
+            let mut g = Gfx::new(1280, 720);
+            click_field(&mut sh, &mut g, 0);
+            typ(&mut sh, "oscar");
+            click_field(&mut sh, &mut g, 1);
+            typ(&mut sh, "operpass12");
+            click(&mut sh, &mut g, "Sign in");
+            (sh, host, g)
+        };
+        // not possible: no button, and `s` does nothing but close the menu
+        let (mut sh, host, mut g) = sign_in("sl1", false);
+        sh.screen = Screen::PowerMenu;
+        sh.render(&mut g);
+        assert!(!sh.hits().iter().any(|h| h.label == "Sleep"));
+        sh.handle(&Event::Key(Key::Char('s')));
+        assert_eq!(*host.slept.lock().unwrap(), 0);
+        assert!(sh.session.is_some());
+        // possible: the button shows; Esc cancels; `s` locks and sleeps once
+        let (mut sh, host, mut g) = sign_in("sl2", true);
+        sh.screen = Screen::PowerMenu;
+        sh.render(&mut g);
+        assert!(sh.hits().iter().any(|h| h.label == "Sleep"));
+        sh.handle(&Event::Key(Key::Esc));
+        assert_eq!(*host.slept.lock().unwrap(), 0);
+        assert!(sh.session.is_some() && sh.screen_name() == "launcher");
+        sh.screen = Screen::PowerMenu;
+        sh.handle(&Event::Key(Key::Char('s')));
+        assert_eq!(*host.slept.lock().unwrap(), 1);
+        assert!(sh.session.is_none(), "the session is locked (signed out) before the machine sleeps");
+        assert_eq!(sh.screen_name(), "login");
+        assert!(host.powered_off.lock().unwrap().is_none());
+        // clicking the button does the same
+        let (mut sh, host, mut g) = sign_in("sl3", true);
+        sh.screen = Screen::PowerMenu;
+        sh.render(&mut g);
+        click(&mut sh, &mut g, "Sleep");
+        assert_eq!(*host.slept.lock().unwrap(), 1);
+        assert!(sh.session.is_none());
     }
 
     #[test]
@@ -5980,6 +6361,21 @@ mod k8s_tests;
 #[path = "shell_git_tests.rs"]
 mod git_tests;
 #[cfg(test)]
+#[path = "shell_doctor_tests.rs"]
+mod doctor_tests;
+#[cfg(test)]
+#[path = "shell_checkup_tests.rs"]
+mod checkup_tests;
+#[cfg(test)]
+#[path = "shell_learn_tests.rs"]
+mod learn_tests;
+#[cfg(test)]
+#[path = "shell_flows_chat_tests.rs"]
+mod flows_chat_tests;
+#[cfg(test)]
+#[path = "shell_perm_tests.rs"]
+mod perm_tests;
+#[cfg(test)]
 #[path = "shell_disks_tests.rs"]
 mod disks_tests;
 
@@ -5995,8 +6391,25 @@ mod brand_tests;
 #[path = "shell_devadb_tests.rs"]
 mod devadb_tests;
 
+#[cfg(test)]
+#[path = "shell_nosignin_tests.rs"]
+mod nosignin_tests;
+
 #[path = "shell_fnkeys.rs"]
 mod fnkeys_impl;
+#[path = "shell_topbar_tests.rs"]
+#[cfg(test)]
+mod topbar_tests;
+#[path = "shell_volbar.rs"]
+mod volbar_impl;
+#[path = "shell_startup.rs"]
+mod startup_impl;
+#[cfg(test)]
+#[path = "shell_startup_tests.rs"]
+mod startup_tests;
+#[cfg(test)]
+#[path = "shell_volbar_tests.rs"]
+mod volbar_tests;
 
 #[path = "shell_scroll.rs"]
 mod scroll_impl;
@@ -6008,8 +6421,15 @@ mod touchbar_impl;
 mod battery_impl;
 #[path = "shell_saver.rs"]
 mod saver_impl;
+#[path = "shell_devstate.rs"]
+mod devstate_impl;
 #[path = "shell_loss.rs"]
 mod loss_impl;
+#[path = "shell_devask.rs"]
+mod devask_impl;
+#[cfg(test)]
+#[path = "shell_devask_tests.rs"]
+mod devask_tests;
 
 #[path = "shell_live.rs"]
 mod live_impl;
@@ -6084,6 +6504,22 @@ pub(crate) fn draw_camera_sign(g: &mut Gfx, h: u32, s: f32, what: &str) -> R {
     g.rrect_outline(r.x, r.y, r.w, r.h, r.h / 2.0, 1.5 * s, rgb(255, 90, 100));
     g.circle(r.x + 17.0 * s, r.y + r.h / 2.0, 6.0 * s, rgb(255, 60, 70));
     g.text(r.x + 30.0 * s, r.y + 7.0 * s, 14.0 * s, TEXT, &text, Face::Bold);
+    r
+}
+
+/// The red "A page is using your camera / microphone / screen. Click to stop." sign, bottom left of every screen, above the assistant's
+/// camera sign when that is shown. Returns its rectangle (the click target).
+pub(crate) fn draw_capture_sign(g: &mut Gfx, h: u32, s: f32, bits: u8, above_assistant_sign: bool) -> R {
+    let what = crate::apps::browser_media::kinds_words(bits);
+    let text = format!("A page is using your {what}. Click to stop.");
+    let tw = g.text_width(15.0 * s, &text, Face::Bold) + 48.0 * s;
+    let y = h as f32 - 64.0 * s - if above_assistant_sign { 44.0 * s } else { 0.0 };
+    let r = R::new(16.0 * s, y, tw, 34.0 * s);
+    g.rrect_glow(r.x, r.y, r.w, r.h, r.h / 2.0, 8.0 * s, [255, 40, 50, 130]);
+    g.rrect(r.x, r.y, r.w, r.h, r.h / 2.0, rgb(110, 12, 22));
+    g.rrect_outline(r.x, r.y, r.w, r.h, r.h / 2.0, 2.0 * s, rgb(255, 90, 100));
+    g.circle(r.x + 18.0 * s, r.y + r.h / 2.0, 7.0 * s, rgb(255, 60, 70));
+    g.text(r.x + 34.0 * s, r.y + 8.0 * s, 15.0 * s, TEXT, &text, Face::Bold);
     r
 }
 

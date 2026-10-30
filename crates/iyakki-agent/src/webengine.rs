@@ -124,6 +124,10 @@ pub fn profile_dir(data: &Path, user: &str) -> PathBuf {
 pub fn prepare_profile(data: &Path, user: &str) -> Result<PathBuf, String> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let dir = profile_dir(data, user);
+    // protected browser data that is not open: never start beside it with a fresh plain profile (`profilestore.rs`)
+    if let Some(why) = crate::profilestore::engine_blocked(data, user) {
+        return Err(why);
+    }
     for d in [dir.parent().map(Path::to_path_buf).unwrap_or_default(), dir.clone(), dir.join("data"), dir.join("config"), dir.join("cache")] {
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&d).map_err(|e| format!("{}: {e}", d.display()))?;
         std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).map_err(|e| format!("{}: {e}", d.display()))?;
@@ -242,7 +246,7 @@ fn stop_group(child: &mut Child, grace: Duration) {
     unsafe { libc::kill(-pgid, libc::SIGTERM) };
     let t = Instant::now();
     while t.elapsed() < grace {
-        if matches!(child.try_wait(), Ok(Some(_))) {
+        if iyakki_core_api::child_status(child).is_over() {
             // the compositor is gone; make sure nothing it started is left holding the display
             unsafe { libc::kill(-pgid, libc::SIGKILL) };
             return;
@@ -277,14 +281,12 @@ pub fn run(data: &Path, user: &str, url: &str, stop: &std::sync::atomic::AtomicB
     let mut child = cmd.spawn().map_err(|e| format!("could not start cage: {e}"))?;
     log::info!("webengine: started cage (pid {}) for {}", child.id(), iyakki_sec::url_host(&url).unwrap_or_default());
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                // cage exits when cog does; anything still alive in the group is stopped
-                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-                return Ok(status.code().unwrap_or(-1));
-            }
-            Ok(None) => {}
-            Err(e) => return Err(format!("waiting for cage: {e}")),
+        let life = iyakki_core_api::child_status(&mut child);
+        if life.is_over() {
+            // cage exits when cog does; anything still alive in the group is stopped. `Gone` (the PID-1 reaper took the exit
+            // status) is a normal end of unknown code: the person left it
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            return Ok(life.code().unwrap_or(if life == iyakki_core_api::ChildState::Gone { 0 } else { -1 }));
         }
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
             stop_group(&mut child, Duration::from_secs(3));
@@ -380,10 +382,16 @@ pub fn helper_env(profile: &Path) -> Option<Vec<(String, String)>> {
     v.extend(tuned);
     // sound: where the sound output is a T2 Mac's, the engine plays through its own PCM (softvol.rs), see web_audio_env
     let asound = std::fs::read_to_string(ASOUND_CONF).unwrap_or_default();
-    if let Some(dir) = profile.parent() {
-        v.extend(web_audio_env(&asound, &dir.join("web-alsa.conf")));
+    // the experimental route through the mixer (webmix.rs) replaces the usual one; the card is then shared, so autoplay is not denied
+    let mixed = profile.parent().map(crate::webmix::engine_env).unwrap_or_default();
+    if mixed.is_empty() {
+        if let Some(dir) = profile.parent() {
+            v.extend(web_audio_env(&asound, &dir.join("web-alsa.conf")));
+        }
+        v.extend(web_autoplay_env(&asound));
+    } else {
+        v.extend(mixed);
     }
-    v.extend(web_autoplay_env(&asound));
     // the audio and video add-on (H.264 / AAC), only when the person has installed it: avaddon.rs
     if let Some(data) = crate::avaddon::data_of_profile(profile) {
         let lib = crate::avaddon::lib_dir(data);
@@ -438,7 +446,7 @@ pub fn llvmpipe_threads(cores: usize) -> usize {
 /// the shipped binary; which one is faster on a given Mac has to be measured there.
 pub fn tuning_env(mode: &str, cores: usize) -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> = Vec::new();
-    let mut push = |v: &mut Vec<(String, String)>, k: &str, val: String| {
+    let push = |v: &mut Vec<(String, String)>, k: &str, val: String| {
         v.retain(|(name, _)| name != k);
         v.push((k.to_string(), val));
     };

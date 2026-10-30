@@ -367,12 +367,12 @@ fn a_server_with_no_chat_model_installed_says_so_in_the_chat_section() {
     let mut l = big_catalog(40);
     l.retain(|m| m.id != "Qwen3-0.6B-GGUF");
     lemonade::remember(&lemonade::api_base(&base), &l);
-    let mut g = draw(&mut a, &cx, 1920, 1080);
+    draw(&mut a, &cx, 1920, 1080);
     let mut found = false;
     for _ in 0..30 {
         found |= a.has_text("no chat model installed: pick one below to pull");
         a.handle(&Event::Key(Key::PageDown), &cx);
-        g = draw(&mut a, &cx, 1920, 1080);
+        draw(&mut a, &cx, 1920, 1080);
     }
     assert!(found, "the chat section explains itself");
 }

@@ -40,6 +40,9 @@ impl ChatBackend for Router {
 struct World {
     cx: AppCx,
     base: PathBuf,
+    /// The IDE looks for a cluster through process-wide slots that the cluster tests fill with fakes (an ambiguous pair of clusters
+    /// switches the IDE to the cluster page and opens a chooser): these tests take turns with them.
+    _cluster_slot: std::sync::MutexGuard<'static, ()>,
 }
 
 impl Drop for World {
@@ -52,6 +55,7 @@ impl Drop for World {
 }
 
 fn world(tag: &str) -> World {
+    let slot = crate::apps::ide_tests::KUBE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let base = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("iyakki-jobsui-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
@@ -60,7 +64,7 @@ fn world(tag: &str) -> World {
     cx.session.policy.fs_write = vec![base.display().to_string()];
     cx.session.policy.cli = CliLevel::Full;
     cx.session.policy.agent = true;
-    World { cx, base }
+    World { cx, base, _cluster_slot: slot }
 }
 
 fn project(w: &World, name: &str) -> PathBuf {
@@ -226,6 +230,12 @@ fn the_ide_asks_for_frames_only_while_a_job_runs() {
             usize::from(app.wants_redraw())
         }).sum()
     };
+    // opening the workspace starts background work (file tree, cluster lookup, git); on a busy machine it can still be running
+    // after the first beats and asks for frames until it is done. Measure only once a whole second of beats is quiet.
+    let t0 = Instant::now();
+    while count(&mut app, 30) > 2 {
+        assert!(t0.elapsed() < Duration::from_secs(90), "the IDE never went quiet after opening a workspace");
+    }
     let baseline = count(&mut app, 90);
     assert!(baseline <= 4, "the IDE refreshes about once a second when idle: {baseline}");
     // a running job: about every third heartbeat on top of that

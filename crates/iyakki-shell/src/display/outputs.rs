@@ -121,7 +121,7 @@ pub struct Plan {
     pub notes: Vec<String>,
 }
 
-fn is_internal(name: &str) -> bool {
+pub(crate) fn is_internal(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     n.contains("edp") || n.contains("lvds") || n.contains("dsi")
 }

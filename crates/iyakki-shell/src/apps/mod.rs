@@ -21,15 +21,21 @@ pub mod browser;
 pub mod browser_assist;
 pub mod browser_av;
 pub mod browser_block;
+pub mod browser_chrome;
+pub mod browser_groups;
+pub mod browser_headers;
 pub mod browser_config;
 pub mod browser_dark;
 pub mod browser_data;
 pub mod browser_full;
+pub mod browser_media;
 pub mod web_agent;
 pub mod browser_consent;
+pub mod browser_devpanel;
 pub mod browser_devtools;
 pub mod browser_images;
 pub mod browser_sound;
+pub mod soundask;
 pub mod browser_speed;
 pub mod browser_typo;
 pub mod browser_logins;
@@ -40,9 +46,14 @@ pub mod controls;
 pub mod dash;
 pub mod dash_charts;
 pub mod dash_query;
+pub mod dash_repair;
 pub mod flows;
+pub mod flows_assist;
 pub mod flows_board;
 pub mod flows_canvas;
+pub mod flows_fail;
+pub mod flows_icons;
+pub mod flows_tip;
 pub mod flows_keys;
 pub mod flows_paint;
 pub mod flows_props;
@@ -66,6 +77,8 @@ pub mod store;
 pub(crate) mod store_drivers;
 pub mod usage;
 pub mod voice;
+mod voice_rec;
+mod voice_rec_ui;
 mod voice_ui;
 pub mod lab;
 mod lab_pic;
@@ -87,14 +100,23 @@ pub mod ide_browser;
 pub mod ide_bottom;
 pub mod ide_chrome;
 pub mod ide_deploy;
+pub mod ide_gitview;
 pub mod ide_k8s;
 pub mod k8s_tile;
 pub mod git_tile;
+pub mod learn;
+mod learn_lesson;
+mod learn_ui;
 mod git_tile_repo;
 mod git_tile_repo_ui;
 mod git_tile_ui;
 pub mod disks_tile;
 mod disks_tile_ui;
+pub mod checkup;
+mod checkup_ui;
+pub mod doctor;
+mod doctor_facts;
+mod doctor_ui;
 pub mod cluster_host;
 pub mod cluster_switch;
 pub mod clusters_panel;
@@ -153,6 +175,10 @@ pub struct AppCx {
 
 pub trait App {
     fn title(&self) -> &'static str;
+    /// The page or tab that is showing, when the app has them (developer mode's `iyakki dev state` tells it).
+    fn page(&self) -> String {
+        String::new()
+    }
     fn icon(&self) -> Icon;
     fn accent(&self) -> [u8; 4];
     /// One-line key help shown in the header.
@@ -169,7 +195,13 @@ pub trait App {
     fn scroll_px(&mut self, _px: i32, _cx: &AppCx) -> bool {
         false
     }
-    /// The app draws its own smooth pictures (the browser's full engine): the shell's wheel steps are not eased again for it.
+    /// The app wants F12 for itself (the browser's Developer tools) instead of the shell's screenshot key. The shell checks this
+    /// before it starts a screenshot; Print Screen still takes one. The default says no.
+    fn claims_f12(&self) -> bool {
+        false
+    }
+    /// The app draws its own smooth pictures and wants the wheel's raw clicks: the shell's wheel steps are not eased for it. No tile does
+    /// now (the browser's engine takes the shell's eased steps as precise deltas, so it feels like the other tiles).
     fn scroll_raw(&self) -> bool {
         false
     }
@@ -190,6 +222,10 @@ pub trait App {
     /// For the Touch Bar's AI strip: (an agent run is going, a tool call waits for a decision). Only the chat knows.
     fn touchbar_state(&self) -> (bool, bool) {
         (false, false)
+    }
+    /// This app wants another app opened on one thing (`settings`, `tab:models`): taken by the shell once.
+    fn take_jump(&mut self) -> Option<(String, String)> {
+        None
     }
     /// The shell opened this app because another one asked for a particular thing in it (`platform:private-store` in Settings).
     fn open_item(&mut self, _item: &str, _cx: &AppCx) {}
@@ -213,6 +249,30 @@ pub trait App {
     /// the shell draw the whole scene instead.
     fn live_draw(&mut self, _g: &mut Gfx) -> Option<(i32, i32, i32, i32)> {
         None
+    }
+    /// The rectangles `(x, y, w, h)` the last [`App::live_draw`] painted, when it painted several small ones (the screen write
+    /// then copies only these, not whole rows). Empty: just the one rectangle `live_draw` returned.
+    fn live_rects(&self) -> Vec<(i32, i32, i32, i32)> {
+        Vec::new()
+    }
+    /// How rarely (ms) the shell has to draw the whole scene while this app paints live; the shell draws it at least every 100 ms
+    /// otherwise. An app that checks itself what else changed on screen may ask for longer.
+    fn live_full_every_ms(&self) -> u64 {
+        100
+    }
+    /// How often (ms) the shell has to draw the whole scene while nothing in this app moves (no overlay is open, the pointer is
+    /// below the header). The default is the shell's 100 ms safety net; an app whose screen only changes on events may ask for more.
+    fn idle_redraw_ms(&self) -> u64 {
+        100
+    }
+    /// True while the app wants to be asked between the 33 ms heartbeats whether something changed (the word being read aloud):
+    /// the backend then wakes every few ms and calls [`App::poll_redraw_due`], so a change is on screen within a few ms.
+    fn wants_fast_poll(&self) -> bool {
+        false
+    }
+    /// Asked between heartbeats while [`App::wants_fast_poll`]: true once when something changed that needs a frame now.
+    fn poll_redraw_due(&mut self) -> bool {
+        false
     }
     /// The pointer shape the app wants at (x, y) when the shell's own hit regions have no opinion (an embedded engine
     /// draws its own page and knows what is under the pointer).
@@ -361,11 +421,19 @@ pub fn with_caret<T>(on: bool, f: impl FnOnce() -> T) -> T {
 }
 
 #[cfg(test)]
+mod learn_tests;
+#[cfg(test)]
 mod disks_tile_tests;
+#[cfg(test)]
+mod checkup_tests;
+#[cfg(test)]
+mod doctor_tests;
 #[cfg(test)]
 mod linuxwin_tests;
 #[cfg(test)]
 mod ide_tests;
+#[cfg(test)]
+pub(crate) mod ide_fakeprobe_tests;
 #[cfg(test)]
 mod jobs_screens_tests;
 #[cfg(test)]
@@ -374,6 +442,8 @@ mod dash_tests;
 mod flows_tests;
 #[cfg(test)]
 pub(crate) mod lemonade_fake;
+#[cfg(test)]
+pub(crate) mod tile_harness;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -383,6 +453,9 @@ pub(crate) mod tests {
     #[derive(Default)]
     pub struct MockHost {
         pub powered_off: Mutex<Option<String>>,
+        /// Whether the host says it can sleep (tests set it) and how many times `sleep` was called.
+        pub sleepable: Mutex<bool>,
+        pub slept: Mutex<u32>,
     }
     impl HostApi for MockHost {
         fn detect_env(&self) -> String {
@@ -400,13 +473,18 @@ pub(crate) mod tests {
         fn reboot(&self) {
             *self.powered_off.lock().unwrap() = Some("reboot".into());
         }
+        fn can_sleep(&self) -> bool {
+            *self.sleepable.lock().unwrap()
+        }
+        fn sleep(&self) {
+            *self.slept.lock().unwrap() += 1;
+        }
     }
 
     pub fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("iyakki-shell-{}-{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        crate::testmem::start();
+        // one folder per call (parallel tests ask for the same tags) and a short path (sockets live below it)
+        iyakki_agent::testdir::short("iyakki-shell", tag)
     }
 
     /// An admin session (user "tester") with a store containing only that admin.
@@ -437,6 +515,17 @@ pub(crate) mod tests {
             services: services_in(&d, Arc::new(Offline)),
             web: Arc::new(iyakki_web::fetch::NoNetwork),
         }
+    }
+
+    /// Point HOME at a fresh temporary folder for the whole test process, so tests that open the FLOWS environment of an account
+    /// (`FlowEnv::open`) keep their flows out of the developer's own home. Safe to call from any test.
+    pub fn isolated_home() {
+        static HOME: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        HOME.get_or_init(|| {
+            let d = std::env::temp_dir().join(format!("iyakki-test-home-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&d);
+            std::env::set_var("HOME", &d);
+        });
     }
 
     pub fn cx_with_backend(tag: &str, backend: impl ChatBackend + 'static) -> (AppCx, std::path::PathBuf) {

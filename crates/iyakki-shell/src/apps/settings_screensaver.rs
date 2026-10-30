@@ -106,7 +106,7 @@ impl SettingsApp {
 
     /// Put every card in place for the room `a`: cards that do not fit are left out (the selected one always comes into view),
     /// and buttons that would fall outside `a` are not placed.
-    pub(super) fn ss_layout(&self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) -> Vec<SsBox> {
+    pub(super) fn ss_layout(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) -> Vec<SsBox> {
         let rows = Self::ss_rows(cx.session.policy.manage_settings);
         let sel = self.sel().min(rows.len().saturating_sub(1));
         let (pad, chip_h, gap) = (12.0 * s, 30.0 * s, 8.0 * s);
@@ -131,12 +131,10 @@ impl SettingsApp {
             heights.push(pad + 22.0 * s + help_n as f32 * 17.0 * s + 6.0 * s + lines as f32 * (chip_h + gap) + pad * 0.5);
             chip_w.push(ws);
         }
-        // the first card shown: as late as it can be while the selected one still fits
+        // the first card shown: a click leaves the cards where they are, a key scrolls to the selected one, the wheel scrolls
         let gap_rows = 8.0 * s;
-        let mut first = 0usize;
-        while first < sel && (first..=sel).map(|i| heights[i] + gap_rows).sum::<f32>() > a.h {
-            first += 1;
-        }
+        let steps: Vec<f32> = heights.iter().map(|h| h + gap_rows).collect();
+        let first = self.win[self.tab].layout(sel, &steps, a.h + gap_rows);
         let mut out = Vec::new();
         let mut y = a.y;
         for i in first..rows.len() {

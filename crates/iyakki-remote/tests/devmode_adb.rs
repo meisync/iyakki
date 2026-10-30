@@ -13,7 +13,7 @@ use iyakki_agent::devmode::cli_adb;
 use iyakki_agent::devmode::{self, cli, DevMode};
 use iyakki_agent::iyakki_proxy::{Upstream, UpstreamResponse};
 use iyakki_agent::HostApi;
-use iyakki_remote::devserver::{DevServer, SCREEN_USER};
+use iyakki_remote::devserver::DevServer;
 use iyakki_sec::policy::{Policy, Role};
 use iyakki_shell::accounts::{AuditLog, UserStore};
 use iyakki_shell::shell::ShellEnv;
@@ -126,10 +126,6 @@ fn tile_dir(f: &Fx, id: &str, version: &str, text: &str) -> PathBuf {
     d
 }
 
-fn status_of(f: &Fx, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> (u16, String) {
-    let r = client::https("127.0.0.1", port(f), Some(f.server.fingerprint()), method, path, headers, body, Duration::from_secs(20)).unwrap();
-    (r.status, r.json()["error"].as_str().unwrap_or("").to_string())
-}
 
 
 fn run(h: &Home, args: &[&str]) -> Result<Vec<String>, String> {

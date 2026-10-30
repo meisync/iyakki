@@ -42,7 +42,7 @@ fn settle(a: &mut SettingsApp, cx: &AppCx) {
 fn status(a: &SettingsApp) -> String {
     a.status().map(|s| s.0.clone()).unwrap_or_default()
 }
-fn goto_agents(a: &mut SettingsApp, cx: &AppCx) {
+fn goto_agents(a: &mut SettingsApp, _cx: &AppCx) {
     a.go_to(Tab::Agents);
 }
 fn draw(a: &mut SettingsApp, cx: &AppCx, w: u32, h: u32) -> Gfx {

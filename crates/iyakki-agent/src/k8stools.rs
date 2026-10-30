@@ -103,6 +103,9 @@ pub struct K8sTools {
     pub registry_pull: String,
     /// `k8s.registry_kind`: none, in-cluster, system or remote (empty: not chosen).
     pub registry_kind: String,
+    /// Test hook for callers outside this crate (the real probe is `netprobe`, whose fake is private to the agent's own tests): when set,
+    /// it answers "is the system registry up" instead of the network.
+    pub registry_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     state: Mutex<State>,
 }
 
@@ -194,7 +197,7 @@ pub fn content_tag(dir: &Path) -> String {
 
 impl K8sTools {
     pub fn new(run: Arc<dyn Runner>, profile: ClusterProfile, ns: &str, ws: &str, root: &Path, audit: Arc<dyn Fn(&str, &str) + Send + Sync>) -> K8sTools {
-        K8sTools { run, profile, ns: ns.into(), ws: ws.into(), root: root.into(), audit, registries_yaml: "/etc/rancher/k3s/registries.yaml".into(), cluster_phrase: String::new(), registry_setting: String::new(), registry_pull: String::new(), registry_kind: String::new(), state: Mutex::new(State::default()) }
+        K8sTools { run, profile, ns: ns.into(), ws: ws.into(), root: root.into(), audit, registries_yaml: "/etc/rancher/k3s/registries.yaml".into(), cluster_phrase: String::new(), registry_setting: String::new(), registry_pull: String::new(), registry_kind: String::new(), registry_probe: None, state: Mutex::new(State::default()) }
     }
 
     pub fn handles(name: &str) -> bool {
@@ -281,11 +284,11 @@ impl K8sTools {
             t("deploy_status", "Is the deployment healthy (read-only): `name` of a deployment to wait for its rollout (up to 20 s), or nothing for the namespace overview. Pods that cannot start come with a plain-English reason.".into(), obj(json!({"name": {"type": "string"}}), &[]), Risk::Safe, true),
             t("deploy_run_job", format!("Run an INTEGRATION-TEST image as a Kubernetes Job in namespace \"{ns}\" after the rollout, wait for it, and return pass/fail (from the Job status), the pod logs, the pass/fail counts and coverage found in them; the Job is deleted afterwards unless `keep` is true. `image` is the integration-test image (deploy_build it from tests/integration, then deploy_load and use the name it returns; on a remote cluster a bare localhost/ name cannot be pulled), optional `name`, `command` (list), `env` (object; BASE_URL defaults to the cluster DNS name of the single Service), `timeout_seconds` (default 300, at most 1800), `keep`, `allow_root` (default false: the Job runs as non-root). A timeout reports why it is not finishing (ImagePullBackOff, Pending…). Only the workspace namespace; the person approves."), obj(json!({"image": {"type": "string"}, "name": {"type": "string"}, "command": {"type": "array", "items": {"type": "string"}}, "env": {"type": "object"}, "timeout_seconds": {"type": "integer"}, "keep": {"type": "boolean"}, "allow_root": {"type": "boolean"}}), &["image"]), Risk::Ask, false),
             t("registry_setup_help", "Read-only: for the registry this cluster pulls from (the project's, the cluster's own, or `registry` host:port), the cause and ready-to-copy fix when nodes cannot pull (plain HTTP registry: /etc/rancher/k3s/registries.yaml, the commands, and the restart of k3s / k3s-agent on EACH node). IYAKKI never edits /etc or logs in to nodes: tell the person to run it. Never suggest Docker Hub.".into(), obj(json!({"registry": {"type": "string"}}), &[]), Risk::Safe, false),
-            t("cluster_setup_plan", "Read-only plan text for the registry option of a k3s setup: `option` none | in-cluster (A: a registry pod in namespace iyakki-registry with a NodePort, optional `node_port`; no root, no node changes; recommended) | system (B: a registry:2 container on localhost:5000, only for a cluster on this machine) | remote (C: `registry` host:port, `scheme` http or https, `insecure`). Shows the exact objects, registries.yaml, the commands (root ones for the person to run), which parts need root and the project setting it would record. Nothing is changed.".into(), obj(json!({"option": {"type": "string"}, "registry": {"type": "string"}, "node_port": {"type": "integer"}, "scheme": {"type": "string"}, "insecure": {"type": "boolean"}}), &["option"]), Risk::Safe, false),
+            t("cluster_setup_plan", "Read-only plan text for the registry option of a k3s setup: `option` none | in-cluster (A: a registry pod in namespace iyakki-registry published on 127.0.0.1 of the node only (a hostPort, no NodePort: it has no sign-in), optional `node_port` as the loopback port; this machine only; no root, no node changes; recommended) | system (B: a registry:2 container on localhost:5000, only for a cluster on this machine) | remote (C: `registry` host:port, `scheme` http or https, `insecure`). Shows the exact objects, registries.yaml, the commands (root ones for the person to run), which parts need root and the project setting it would record. Nothing is changed.".into(), obj(json!({"option": {"type": "string"}, "registry": {"type": "string"}, "node_port": {"type": "integer"}, "scheme": {"type": "string"}, "insecure": {"type": "boolean"}}), &["option"]), Risk::Safe, false),
             t("k8s_stop_env", format!("Stop or start the workspace's dev environment in namespace \"{ns}\": `action` stop (scale every Deployment and StatefulSet to 0, keeping the previous replica counts in the annotation iyakki.dev/replicas; Services, ConfigMaps, Secrets and PVC data stay) or start (scale back). Only the namespace IYAKKI created for this workspace (labelled managed-by=iyakki). The person approves."), obj(json!({"action": {"type": "string"}}), &[]), Risk::Ask, false),
             t("k8s_teardown", format!("REMOVE ALL: delete the namespace \"{ns}\" and EVERYTHING in it (deployments, services, pods, PVCs and their DATA, configmaps, secrets), then wait for it to disappear and report leftovers. Only the namespace IYAKKI created for this workspace (labels managed-by=iyakki and iyakki.dev/workspace); default, kube-*, iyakki-registry and unlabelled namespaces are refused. ALWAYS asks, in every approval mode: the card lists exactly what goes. `confirm` must be the namespace name typed by the person (ask them with ask_user; never fill it in yourself). Use this to clean up when the dev task is done; never run kubectl delete namespace by hand and never try k8s_delete kind=all."), obj(json!({"confirm": {"type": "string"}}), &["confirm"]), Risk::Ask, false),
             t("k8s_registry_cleanup", format!("Delete the images pushed for this workspace (repositories under \"{ns}/\") from the registry IYAKKI uses. Optional, separate from k8s_teardown, always asks. It needs a registry that allows deletion; it never changes the registry's settings."), obj(json!({}), &[]), Risk::Ask, false),
-            t("registry_setup", "Set up the registry the cluster pulls images from, as chosen by the person (same arguments as cluster_setup_plan; call that first and show the plan). `in-cluster` creates the namespace iyakki-registry (cluster-scoped: the person's approval covers it) and a registry:2 Deployment, PVC and NodePort Service with kubectl; `system` starts a registry:2 container with podman/docker; `remote` records an existing registry. It never uses sudo: a registries.yaml that needs root is returned as commands for the person to run. Records the choice in project.json so deploy_load uses it. The person approves.".into(), obj(json!({"option": {"type": "string"}, "registry": {"type": "string"}, "node_port": {"type": "integer"}, "scheme": {"type": "string"}, "insecure": {"type": "boolean"}}), &["option"]), Risk::Ask, false),
+            t("registry_setup", "Set up the registry the cluster pulls images from, as chosen by the person (same arguments as cluster_setup_plan; call that first and show the plan). `in-cluster` creates the namespace iyakki-registry (cluster-scoped: the person's approval covers it) and a registry:2 Deployment, PVC and ClusterIP Service (loopback hostPort) with kubectl; `system` starts a registry:2 container with podman/docker; `remote` records an existing registry. It never uses sudo: a registries.yaml that needs root is returned as commands for the person to run. Records the choice in project.json so deploy_load uses it. The person approves.".into(), obj(json!({"option": {"type": "string"}, "registry": {"type": "string"}, "node_port": {"type": "integer"}, "scheme": {"type": "string"}, "insecure": {"type": "boolean"}}), &["option"]), Risk::Ask, false),
         ]
     }
 
@@ -1088,7 +1091,10 @@ impl K8sTools {
     }
 
     fn registry_up(&self) -> bool {
-        self.run.has("curl") && self.run.run(&std::env::temp_dir(), &["curl".into(), "-fsS".into(), "--max-time".into(), "2".into(), format!("http://{REGISTRY}/v2/")], &[], Duration::from_secs(5), 4096, None).ok()
+        match &self.registry_probe {
+            Some(p) => p(),
+            None => crate::netprobe::get_ok(&format!("http://{REGISTRY}/v2/"), 2),
+        }
     }
 
     fn mirror(&self) -> Mirror {
@@ -1214,14 +1220,9 @@ impl K8sTools {
                 _ => return Err(format!("{}this cluster is not on this machine, so there is no shared image store to import into, and no registry was found: offer the person registry_setup (A, a registry pod inside the cluster, needs no root; K8S panel \u{2192} Registry\u{2026}), or set \"registry\" (host:port) under \"k8s\" in .iyakki/project.json", self.registry_hint())),
             }
         };
-        if !self.run.has("curl") {
-            return Ok(reg);
-        }
-        let probe = self.run.run(&std::env::temp_dir(), &["curl".into(), "-fsS".into(), "--max-time".into(), "4".into(), format!("http://{reg}/v2/")], &[], Duration::from_secs(8), 4096, None);
-        if probe.ok() {
-            Ok(reg)
-        } else {
-            Err(format!("the registry {reg} did not answer GET /v2/ from this machine ({}); check that it is reachable, or set \"registry\" under \"k8s\" in .iyakki/project.json", first_line(&Self::out_text(&probe))))
+        match crate::netprobe::get_body(&format!("http://{reg}/v2/"), 4, 4096) {
+            Ok(_) => Ok(reg),
+            Err(why) => Err(format!("the registry {reg} did not answer GET /v2/ from this machine ({why}); check that it is reachable, or set \"registry\" under \"k8s\" in .iyakki/project.json"))
         }
     }
 
@@ -1441,7 +1442,7 @@ mod tests {
 
     fn rig(tag: &str, k3s: bool) -> Rig {
         let root = tmp(tag);
-        let r = Arc::new(FakeRunner::new(&["kubectl", "podman", "docker", "k3s", "curl"]));
+        let r = Arc::new(FakeRunner::new(&["kubectl", "podman", "docker", "k3s"]));
         let audited = Arc::new(Mutex::new(vec![]));
         let a2 = audited.clone();
         let mut t = K8sTools::new(r.clone(), profile(k3s), "shop-dev", "Shop", &root, Arc::new(move |a, d| a2.lock().unwrap().push(format!("k8s.{a} {d}"))));
@@ -1673,7 +1674,7 @@ mod tests {
         let g = rig("registry", true);
         std::fs::write(&g.t.registries_yaml, "mirrors:\n  \"localhost:5000\":\n    endpoint:\n      - \"http://localhost:5000\"\n").unwrap();
         g.r.answer("podman image exists", "");
-        g.r.answer("curl -fsS", "{}");
+        crate::netprobe::fake("/v2/", 200, &[], "{}");
         g.r.answer("podman tag", "");
         g.r.answer("podman push", "Writing manifest to image destination");
         let d = g.t.describe("deploy_load", &json!({"image": "localhost/web:abc"}));
@@ -1693,7 +1694,7 @@ mod tests {
         // registry up but k3s does not mirror it: import
         let g = rig("nomirror", true);
         g.r.answer("podman image exists", "");
-        g.r.answer("curl -fsS", "{}");
+        crate::netprobe::fake("/v2/", 200, &[], "{}");
         g.r.answer("podman save", "");
         g.r.answer("k3s ctr images import", "ok");
         let out = g.t.call("deploy_load", &json!({"image": "localhost/web:abc"})).unwrap();
@@ -1723,7 +1724,7 @@ mod tests {
         g.r.answer("podman image exists", "");
         g.r.answer("get services -A", SVCS);
         g.r.answer("get nodes", NODES);
-        g.r.answer("curl -fsS", "{}");
+        crate::netprobe::fake("/v2/", 200, &[], "{}");
         g.r.answer("podman tag", "");
         g.r.answer("podman push", "done");
         let d = g.t.describe("deploy_load", &json!({"image": "localhost/web:abc"}));
@@ -1736,7 +1737,6 @@ mod tests {
         let lines = g.r.lines();
         assert!(lines.contains(&format!("podman tag localhost/web:abc {want}")), "{lines:?}");
         assert!(lines.contains(&format!("podman push --tls-verify=false {want}")), "{lines:?}");
-        assert!(lines.iter().any(|l| l.contains("http://192.168.1.68:30500/v2/")));
         // the linter accepts the pushed reference and keeps IfNotPresent
         g.r.answer("diff -f", "");
         g.r.answer("get namespace shop-dev", "namespace/shop-dev");
@@ -1750,12 +1750,12 @@ mod tests {
         let mut g = remote("remotesetting");
         g.t.registry_setting = "10.0.0.5:5000".into();
         g.r.answer("docker image inspect", "");
-        g.r.answer("curl -fsS", "{}");
+        crate::netprobe::fake("/v2/", 200, &[], "{}");
         g.r.answer("docker tag", "");
         g.r.fail("docker push", 1, "Get \"https://10.0.0.5:5000/v2/\": http: server gave HTTP response to HTTPS client");
         // docker only: podman is not installed here
-        let r2 = Arc::new(FakeRunner::new(&["kubectl", "docker", "curl"]));
-        for (k, v) in [("docker image inspect", ""), ("curl -fsS", "{}"), ("docker tag", "")] {
+        let r2 = Arc::new(FakeRunner::new(&["kubectl", "docker"]));
+        for (k, v) in [("docker image inspect", ""), ("docker tag", "")] {
             r2.answer(k, v);
         }
         r2.fail("docker push", 1, "Get \"https://10.0.0.5:5000/v2/\": http: server gave HTTP response to HTTPS client");
@@ -1766,11 +1766,11 @@ mod tests {
         assert!(e.contains("insecure-registries") && e.contains("10.0.0.5:5000") && e.contains("/etc/docker/daemon.json"), "{e}");
         assert!(!r2.lines().iter().any(|l| l.contains("get services")), "the setting wins over discovery");
         // an unreachable registry and a cluster without one
+        crate::netprobe::fake_reset();
         let g = remote("remotedown");
         g.r.answer("podman image exists", "");
         g.r.answer("get services -A", SVCS);
-        g.r.fail("curl -fsS", 7, "connection refused");
-        let e = g.t.call("deploy_load", &json!({"image": "localhost/web:abc"})).unwrap_err();
+                let e = g.t.call("deploy_load", &json!({"image": "localhost/web:abc"})).unwrap_err();
         assert!(e.contains("did not answer GET /v2/"), "{e}");
         assert_eq!(find_registry_port("{\"items\":[{\"metadata\":{\"name\":\"web\"},\"spec\":{\"type\":\"NodePort\",\"ports\":[{\"nodePort\":1}]}}]}"), None);
         assert_eq!(server_host("https://[::1]:6443"), "[::1]");
@@ -1785,8 +1785,9 @@ mod tests {
             return;
         }
         let reg = t.remote_registry().expect("registry");
-        let o = t.run.run(&std::env::temp_dir(), &["curl".into(), "-fsS".into(), "--max-time".into(), "5".into(), format!("http://{reg}/v2/_catalog")], &[], Duration::from_secs(8), 65536, None);
-        assert!(o.ok(), "{}", o.combined());
+        crate::netprobe::real_network();
+        let o = crate::netprobe::get_body(&format!("http://{reg}/v2/_catalog"), 5, 65536);
+        assert!(o.is_ok(), "{o:?}");
     }
 
     #[test]
@@ -1985,6 +1986,7 @@ mod tests {
         r.answer("get services -A", r#"{"items":[]}"#);
         r.fail("get namespace iyakki-registry", 1, "Error from server (NotFound): namespaces \"iyakki-registry\" not found");
         r.answer("create namespace iyakki-registry", "namespace/iyakki-registry created");
+        r.fail("get pvc", 1, "Error from server (NotFound): persistentvolumeclaims not found");
         r.answer("apply -f", "deployment.apps/registry created");
         r.answer("rollout status", "successfully rolled out");
         r.answer("/v2/", "{}");
@@ -1998,7 +2000,7 @@ mod tests {
         assert!(K8sTools::handles("registry_setup"));
         let args = json!({"option": "in-cluster"});
         let pv = g.t.preview("registry_setup", &args).unwrap();
-        assert!(pv.contains("create namespace iyakki-registry") && pv.contains("nodePort: 30500") && pv.contains("Root: not needed"), "{pv}");
+        assert!(pv.contains("create namespace iyakki-registry") && pv.contains("hostPort: 30500") && !pv.contains("nodePort") && pv.contains("Root: not needed"), "{pv}");
         assert!(g.t.describe("registry_setup", &args).contains("Root: not needed"));
         let plan = g.t.call("cluster_setup_plan", &args).unwrap();
         assert!(plan.contains("plan only") && plan.contains("namespace iyakki-registry"), "{plan}");
@@ -2020,6 +2022,7 @@ mod tests {
         let cfg = crate::workspace::ProjectConfig::load(&g.root).unwrap();
         assert_eq!((cfg.k8s.registry.as_str(), cfg.k8s.registry_kind.as_str()), ("localhost:30500", "in-cluster"));
         assert!(g.audited.lock().unwrap().iter().any(|a| a.starts_with("k8s.registry_setup ") && a.contains(":ok ")));
+        crate::netprobe::fake("/v2/", 200, &[], "{}");
         g.r.answer("podman image exists", "");
         g.r.answer("get nodes", NODES);
         g.r.answer("podman tag", "");
@@ -2035,25 +2038,13 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_cluster_with_the_in_cluster_registry_pushes_to_the_api_host_and_pods_pull_localhost() {
-        let mut g = remote("regsetup-remote");
+    fn a_remote_cluster_is_refused_the_in_cluster_registry_because_it_listens_on_loopback_only() {
+        let g = remote("regsetup-remote");
         in_cluster_answers(&g.r);
-        g.r.answer("podman image exists", "");
-        g.r.answer("get nodes", NODES);
-        g.r.answer("podman tag", "");
-        g.r.answer("podman push", "done");
-        let out = g.t.call("registry_setup", &json!({"option": "in-cluster"})).unwrap();
-        assert!(out.contains("pushes to 192.168.1.68:30500") && out.contains("localhost:30500/<namespace>"), "{out}");
-        let cfg = crate::workspace::ProjectConfig::load(&g.root).unwrap();
-        assert_eq!((cfg.k8s.registry.as_str(), cfg.k8s.registry_pull.as_str()), ("192.168.1.68:30500", "localhost:30500"));
-        // a fresh tools object reads the saved values the way the IDE hands them over
-        g.t.registry_setting = cfg.k8s.registry;
-        g.t.registry_pull = cfg.k8s.registry_pull;
-        g.t.registry_kind = cfg.k8s.registry_kind;
-        let fresh = g.t;
-        let o = fresh.call("deploy_load", &json!({"image": "localhost/web:abc"})).unwrap();
-        assert!(o.contains("Use image: localhost:30500/shop-dev/web:abc"), "{o}");
-        assert!(g.r.lines().contains(&"podman push --tls-verify=false 192.168.1.68:30500/shop-dev/web:abc".to_string()), "{:?}", g.r.lines());
+        let e = g.t.call("registry_setup", &json!({"option": "in-cluster"})).unwrap_err();
+        assert!(e.contains("127.0.0.1") && e.contains("192.168.1.68") && e.contains("another computer"), "{e}");
+        assert!(!g.r.lines().iter().any(|l| l.contains("apply -f") || l.contains("create namespace")), "{:?}", g.r.lines());
+        assert!(!crate::workspace::ProjectConfig::load(&g.root).map(|c| c.k8s.registry_kind == "in-cluster").unwrap_or(false));
     }
 
     #[test]
@@ -2068,7 +2059,7 @@ mod tests {
         c.t.registry_setting = "10.0.0.5:5000".into();
         c.t.registry_kind = "remote".into();
         c.r.answer("podman image exists", "");
-        c.r.answer("curl -fsS", "{}");
+        crate::netprobe::fake("/v2/", 200, &[], "{}");
         c.r.answer("podman tag", "");
         c.r.answer("podman push", "done");
         let o = c.t.call("deploy_load", &json!({"image": "localhost/web:abc"})).unwrap();
@@ -2199,8 +2190,8 @@ mod tests {
         g.r.answer("get secrets", "secret/shop-db\nsecret/registry-pull\n");
         g.r.answer("wait --for=delete", "namespace/shop-dev condition met");
         g.r.answer("delete namespace", "namespace \"shop-dev\" deleted");
-        g.r.answer("_catalog", r#"{"repositories":["shop-dev/web","other-dev/x"]}"#);
-        g.r.answer("tags/list", r#"{"name":"shop-dev/web","tags":["abc"]}"#);
+        crate::netprobe::fake("/v2/_catalog", 200, &[], r#"{"repositories":["shop-dev/web","other-dev/x"]}"#);
+        crate::netprobe::fake("tags/list", 200, &[], r#"{"name":"shop-dev/web","tags":["abc"]}"#);
         let pv = g.t.preview("k8s_teardown", &json!({})).unwrap();
         for want in ["REMOVE ALL", "Deployments (1): web (replicas 2)", "Services (1): web (NodePort)", "Ingresses (1): web", "Pods (1): web-1 (Running)", "data (5Gi, Bound)", "ConfigMaps (1): app-config", "Secrets, names only (2): shop-db, registry-pull", "DELETED", "typed"] {
             assert!(pv.contains(want), "{want} in {pv}");
@@ -2243,10 +2234,10 @@ mod tests {
         let mut h = h;
         h.t.registry_setting = "localhost:30500".into();
         h.t.registry_kind = "in-cluster".into();
-        h.r.answer("_catalog", r#"{"repositories":["shop-dev/web"]}"#);
-        h.r.answer("tags/list", r#"{"tags":["a","b"]}"#);
-        h.r.answer("-I", "HTTP/1.1 200 OK\nDocker-Content-Digest: sha256:aaa\n");
-        h.r.answer("-X DELETE", "202");
+        crate::netprobe::fake("/v2/_catalog", 200, &[], r#"{"repositories":["shop-dev/web"]}"#);
+        crate::netprobe::fake("tags/list", 200, &[], r#"{"tags":["a","b"]}"#);
+        crate::netprobe::fake("GET http://localhost:30500/v2/shop-dev/web/manifests/", 200, &[("docker-content-digest", "sha256:aaa")], "{}");
+        crate::netprobe::fake("DELETE ", 202, &[], "");
         let pv = h.t.preview("k8s_registry_cleanup", &json!({})).unwrap();
         assert!(pv.contains("shop-dev/web: a, b") && pv.contains("garbage collection"), "{pv}");
         let o = h.t.call("k8s_registry_cleanup", &json!({})).unwrap();
@@ -2255,10 +2246,11 @@ mod tests {
         let mut d = rig("regclean-off", true);
         d.t.registry_setting = "localhost:30500".into();
         d.t.registry_kind = "in-cluster".into();
-        d.r.answer("_catalog", r#"{"repositories":["shop-dev/web"]}"#);
-        d.r.answer("tags/list", r#"{"tags":["a"]}"#);
-        d.r.answer("-I", "Docker-Content-Digest: sha256:aaa\n");
-        d.r.answer("-X DELETE", "405");
+        crate::netprobe::fake_reset();
+        crate::netprobe::fake("/v2/_catalog", 200, &[], r#"{"repositories":["shop-dev/web"]}"#);
+        crate::netprobe::fake("tags/list", 200, &[], r#"{"tags":["a"]}"#);
+        crate::netprobe::fake("GET http://localhost:30500/v2/shop-dev/web/manifests/", 200, &[("docker-content-digest", "sha256:aaa")], "{}");
+        crate::netprobe::fake("DELETE ", 405, &[], "");
         let e = d.t.call("k8s_registry_cleanup", &json!({})).unwrap_err();
         assert!(e.contains("REGISTRY_STORAGE_DELETE_ENABLED=true") && e.contains("does not change"), "{e}");
     }
@@ -2521,7 +2513,7 @@ mod tests {
         g.r.answer("podman image exists", "");
         g.r.answer("get services -A", SVCS);
         g.r.answer("get nodes", NODES);
-        g.r.answer("curl -fsS", "{}");
+        crate::netprobe::fake("/v2/", 200, &[], "{}");
         g.r.answer("podman tag", "");
         g.r.answer("podman push", "done");
         let d = g.t.describe("deploy_load", &json!({"image": "localhost/web:abc"}));

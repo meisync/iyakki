@@ -5,7 +5,7 @@
 //! speech-to-text engine of Settings -> Voice, else a Lemonade whisper model. Text and sound go to another machine only after
 //! the person said yes to that machine (`Services::allow_speech_server`, the decision Settings -> Models stores).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,7 +56,6 @@ fn providers(svc: &Services) -> Vec<crate::providers::ProviderCfg> {
 pub fn engine_url(e: &SpeechEngine) -> Option<String> {
     match e {
         SpeechEngine::Http { url, .. } => Some(url.clone()),
-        SpeechEngine::Host { engine, program, .. } if engine == crate::indic::ENGINE_ID => Some(program.clone().filter(|p| !p.is_empty()).unwrap_or_else(|| crate::indic::DEFAULT_URL.to_string())),
         _ => None,
     }
 }
@@ -269,7 +268,7 @@ pub fn detect_language(text: &str) -> Option<Hint> {
 pub fn language_warning(text: &str, v: Option<&ReadVoice>) -> Option<String> {
     let h = detect_language(text)?;
     let v = v?;
-    (v.english_only && h.tag != "en-US").then(|| format!("This text looks like {}. {} reads English only: pick an Indic voice (Settings -> Indic voices) or another voice for {}.", h.name, v.label.split(" · ").next().unwrap_or("This voice"), h.name))
+    (v.english_only && h.tag != "en-US").then(|| format!("This text looks like {}. {} reads English only: pick another voice for {}.", h.name, v.label.split(" · ").next().unwrap_or("This voice"), h.name))
 }
 
 // ------------------------------------------------------------------------------------------------------------ microphones
@@ -332,6 +331,11 @@ pub fn parse_mics_with(cards: &str, pcm: &str, allow_t2: bool) -> Vec<Mic> {
             continue;
         }
         let name = parts.first().copied().filter(|n| !n.is_empty()).unwrap_or("Microphone");
+        // not microphones: loopbacks (the T2 "Bridge Loopback", snd-aloop) and digital outputs read back (IEC958, S/PDIF)
+        let low = rest.to_ascii_lowercase();
+        if ["loopback", "bridge", "iec958", "spdif", "s/pdif", "hdmi", "displayport"].iter().any(|w| low.contains(w)) {
+            continue;
+        }
         let is_usb = usb.contains(&c);
         out.push(Mic { id: format!("plughw:{c},{d}"), label: if is_usb { format!("{name} (USB)") } else { name.to_string() }, usb: is_usb });
     }
@@ -361,6 +365,69 @@ pub fn record_cmd_for(base: &str, mic: Option<&Mic>) -> String {
     a.insert(1, m.id.clone());
     a.insert(1, "-D".to_string());
     crate::audioout::join_command(&a)
+}
+
+/// The microphone to use: the person's choice (`VoiceSettings::mic`) when that device is still there, else the first one found (the list is
+/// ordered by card and device, the built-in microphone before a USB one; loopbacks and digital outputs are never in it).
+pub fn pick_mic<'a>(mics: &'a [Mic], chosen: &str) -> Option<&'a Mic> {
+    if !chosen.is_empty() {
+        if let Some(m) = mics.iter().find(|m| m.id == chosen) {
+            return Some(m);
+        }
+    }
+    mics.first()
+}
+
+/// File names shared with the web engine's microphone plugin (`dist/webview/wpe-helper/micscan.h`): the shell writes the choice, the plugin
+/// writes why a microphone could not be opened.
+pub const BROWSER_MIC_CHOICE: &str = "iyakki-browser-mic";
+pub const BROWSER_MIC_STATUS: &str = "iyakki-browser-mic-status";
+
+/// The folder both sides use: `IYAKKI_MIC_DIR` when set (tests, the plugin reads the same variable), else the shared memory folder.
+pub fn mic_share_dir() -> PathBuf {
+    match std::env::var("IYAKKI_MIC_DIR") {
+        Ok(d) if !d.is_empty() => PathBuf::from(d),
+        _ => crate::sysinfo::shared_memory_dir(),
+    }
+}
+
+/// Hand the person's choice to the web engine (`dir` is the shared memory folder; an empty choice removes the file: automatic).
+pub fn share_mic_choice(dir: &Path, id: &str) {
+    let f = dir.join(BROWSER_MIC_CHOICE);
+    if id.is_empty() {
+        let _ = std::fs::remove_file(&f);
+    } else {
+        let _ = std::fs::write(&f, format!("{id}\n"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644));
+        }
+    }
+}
+
+/// What the plugin last reported: (device name, reason), when a microphone failed and has not delivered sound since.
+pub fn browser_mic_failure(dir: &Path) -> Option<(String, String)> {
+    let t = std::fs::read_to_string(dir.join(BROWSER_MIC_STATUS)).ok()?;
+    let (name, why) = t.trim().split_once('\t')?;
+    (!name.is_empty()).then(|| (name.to_string(), why.trim().to_string()))
+}
+
+/// The reason in plain words, with the device name.
+pub fn mic_failure_text(name: &str, why: &str) -> String {
+    let w = why.to_ascii_lowercase();
+    let cause = if w.contains("busy") {
+        "another program is using it".to_string()
+    } else if w.contains("no such") || w.contains("not found") || w.contains("enodev") || w.contains("no device") {
+        "the computer does not offer it (the sound driver may have it switched off)".to_string()
+    } else if w.contains("permission") || w.contains("denied") {
+        "this account may not use it".to_string()
+    } else if w.contains("rate") || w.contains("negotiat") {
+        "it does not take the sound format the page asked for".to_string()
+    } else {
+        format!("the sound system said: {}", why.trim().trim_end_matches('.'))
+    };
+    format!("The microphone {name} could not be used: {cause}. Choose another microphone in the question or in the Voice tile.")
 }
 
 /// What to tell the person when no microphone was found.
@@ -473,3 +540,13 @@ pub fn transcribe(svc: &Services, engine: &SpeechEngine, pcm: &[i16]) -> Result<
 #[cfg(test)]
 #[path = "voicedesk_tests.rs"]
 mod tests;
+
+/// Where the kernel's process and sound tables live (a function so tiles ask core instead of naming a kernel path themselves).
+pub fn proc_root() -> std::path::PathBuf {
+    std::path::PathBuf::from("/proc")
+}
+
+/// A storage error in words a person can act on (a function so tiles ask core instead of using the storage crate).
+pub fn reword_storage_error(msg: &str) -> String {
+    iyakki_storage::loss::reword(msg)
+}

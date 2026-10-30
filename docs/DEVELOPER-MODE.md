@@ -59,6 +59,27 @@ Paired: this computer is "laptop" on 192.168.1.20 and acts as the account root. 
 * The new key acts as the **account of the administrator who opened the pairing**. (`DevMode::start_pairing_as` pairs it for another
   account; the Settings page uses the administrator's own account.)
 
+### If the device has its firewall on
+
+The firewall blocks incoming connections, so your computer may get no answer on port 7979 (ping can still work). On the device, with the pairing code on screen, press **Allow in the firewall** (`f`): the local network (private addresses only, never the internet) may reach port 7979 for ten minutes or until the first computer has paired; the code and the fingerprint remain the protection. After pairing, only your computer's address is let in, for as long as developer mode is on. If your computer's address changes and the page shows "the firewall blocks the developer port ...: Allow", press `f` (or open a new pairing). **Whole network on/off** (`n`) lets the /24 of each paired computer in: any computer there could then reach the port, but only paired keys can act. Everything is removed when developer mode goes off. See `docs/FIREWALL.md`.
+
+### The device's name: it keeps working when the address changes
+
+A device announces itself on the local network as `iyakki-<six hex digits>.local` (for example `iyakki-0a1b2c.local`). The digits are random, made once and kept in `<data>/device-id`; they never come from your name, an account or the host name (the host name in Settings stays separate). Pair by name and the computer remembers the name, the last address and the certificate fingerprint:
+
+```
+iyakki dev scan                          # name, address and services of every announcing device
+iyakki dev pair iyakki-0a1b2c.local      # looks the name up with IYAKKI's own resolver (not the system's), then pairs as usual
+iyakki dev whoami                        # if the address changed: "device moved: 192.168.50.67 -> 192.168.50.66"
+```
+
+When the saved address does not answer (or answers with another device's certificate) `iyakki dev` asks the network for the name (two seconds at most), tries each address it gets against the pinned fingerprint, saves the one that passes and says so. The fingerprint stays the security anchor: a forged answer can send your computer to the wrong address but cannot pass the TLS check, and nothing is changed when it fails. A device paired by address behaves as before.
+
+* **On the device:** Settings, Network, `n` "Announce this device on the local network" (on by default; off by default in cloud mode). It reveals a random name, that this is an IYAKKI device, and that developer mode (the `_iyakki-dev._tcp` service, only while developer mode is on) or the web service is on; not who you are. While it is on the firewall list shows the rule `device name (mDNS)` (UDP 5353 from the private networks only). Removing that rule switches the announcing off. `iyakki dev diag` prints the announced name.
+* **Name conflicts:** at start the device checks that nobody else uses the name (three probes) and adds a suffix (`iyakki-0a1b2c-2`) if somebody does (two machines made from one copied disk image). A stranger claiming the name of a running device does not rename it.
+* **Your computer's own mDNS program:** `iyakki dev` asks from an ordinary port and the answer comes back to it directly (RFC 6762 section 6.7), so it does not need port 5353 and does not disturb avahi, mDNSResponder or a browser. It does not use `nss-mdns`; `ping iyakki-0a1b2c.local` works only if your own system resolves it.
+* **Limits:** some Wi-Fi access points block multicast between devices ("client isolation"); then the name is not found and the address is needed. IPv4 carries the messages; IPv6 addresses are announced only for unique-local ones. Not tried yet on a real network.
+
 ## 3. Commands
 
 Every command takes `--device NAME` (default: the first paired device, or the one set with `devices --default`) and `--home DIR`.
@@ -77,7 +98,7 @@ Every command takes `--device NAME` (default: the first paired device, or the on
 | `iyakki dev info` | Device model (DMI vendor and product), image variant and version, kernel and its taint flags, loaded modules, uptime, memory, disks and mounts, network addresses, GPU drivers and connected outputs, sound cards, UEFI or BIOS, and the firmware files the kernel could not load. (`debug`) |
 | `iyakki dev ps` | Processes (all for an administrator account, the account's own otherwise). (`debug`) |
 | `iyakki dev dmesg [--follow] [--grep X] [-n N]` | The kernel log, from `/dev/kmsg`; credentials in a line are hidden. (`debug`, administrators) |
-| `iyakki dev logs --system [--source shell\|boot\|audit] [-n N]` | The shell and agent lines (kernel log records tagged `[iyakki `), the boot log `/var/log/iyakki-boot.log` and the audit log tail. (`debug`, administrators) |
+| `iyakki dev logs --system [--source shell\|boot\|audit\|engine] [-n N]` | The shell and agent lines (kernel log records tagged `[iyakki `), the boot log `/var/log/iyakki-boot.log`, the audit log tail and the web engine's kept messages (`engine`, the last ~200 KB, page addresses and content never written; `docs/DOCTOR.md`). (`debug`, administrators) |
 | `iyakki dev status` | A plain table of k3s, Lemonade, Ollama, firewall, shared folders, sound, sound server, graphics and the shell. (`debug`) |
 | `iyakki dev files ls\|stat\|mkdir\|rm [-r]\|push LOCAL REMOTE [--force]\|pull REMOTE [LOCAL]` | Copy files to and from the device, in 4 MiB chunks, resumable, checked with SHA-256 at the end, folders too (at most 5000 files). Allowed places: the account's home, its workspaces and `/tmp/iyakki-dev`; `~` is the home. (`files`) |
 | `iyakki dev input tap X Y\|key NAME\|text 'abc'\|swipe X1 Y1 X2 Y2 [MS]` | Taps, keys and text for the shell on the screen, as the shell's own events. Refused while a password field has focus unless the computer also holds `input:password`. (`input`) |
@@ -166,6 +187,13 @@ developer mode off ends that computer's open sessions at once.
 | `power` | `reboot`, `poweroff` | administrators | needs an approval on the device's screen each time |
 | `update` | `update` (the boot files) | administrators | section 7 |
 | `forward` | `forward` to ports of the device's own loopback | administrators | never to another machine, never to the developer-mode port |
+| `kube` | `kube get/describe/logs/top/events/api-resources/version/auth can-i` | administrators | read only, Secrets blocked, section 6b |
+
+`debug` also covers `state`, `inbox` and `diag`; `input` also covers `input click "LABEL"` (section 6b). `iyakki dev whoami` lists every
+scope with a one-line explanation and whether this computer holds it. In Settings → Developer mode the selected computer shows the same
+list; **Grant all diagnostic scopes** (`G`) adds `debug`, `files`, `input`, `kube` and `shell` (a shell still needs your approval each
+time) and never `update`, `power`, `forward`, `files:system`, `input:password` or `config`. **Extend 4 h** (`t`) moves the switch-off time
+4 hours further (up to 30 days from now); `h` starts the timer again from now. All of it is audited.
 
 **The shell grant.** Holding `shell` only lets a computer *ask*. `iyakki dev shell` files a request; the device shows it
 (Settings → Developer mode, and `SHELL REQUEST from <computer>` in the top bar); the administrator approves it for 10 minutes (`a`) or
@@ -176,6 +204,42 @@ itself. Every command line goes to the activity log and the audit log (a credent
 grant ends by itself when its time is up, and a command still running is killed with its whole process group; the same when the
 administrator presses `k`, the computer is revoked or developer mode switches off. An idle session closes after ten minutes. There is
 no terminal (no pty): the CLI tile has none either, so the shell is a line mode; programs that need a terminal do not work in it.
+
+### 6c. The typed core contract over the channel (off by default)
+
+A second, separate switch lets a paired computer use the typed core contract (`docs/development/CORE-CONTRACT.md`): `hello` with version
+negotiation, settings, the vault's status and "use a secret for a named action", flows and the questions waiting for a person. It is
+**off** until an administrator switches it on for the device, and a computer holds **no** contract scope until an administrator grants it on
+the device (`settings:read`, `settings:write`, `vault:status`, `vault:lock`, `vault:use`, `flows:read`, `flows:run`, `flows:approve`,
+`consent:read`; they are separate from the scopes above and nothing in a request can add one). Routes: `POST /v1/dev/core/hello`,
+`POST /v1/dev/core/call`, `POST /v1/dev/core/stream/read`, `POST /v1/dev/core/stream/close`. A remote computer can never unlock the vault or
+answer a question: those answer `needs_consent` and the question appears on the device's screen. No call returns a secret, a password or a
+token; every call is in the activity log and every change in the audit log with the call's name and never its values. The switch and the
+grants are not on a Settings page yet (the functions `DevMode::set_core_enabled` and `DevMode::set_core_scope` are what a page will call); this
+is a proof of the transport, not a feature to rely on.
+
+### 6b. Diagnosing without a root shell
+
+* `iyakki dev kube get pods -A`, `kube describe pod NAME -n NS`, `kube logs POD -n NS [-c C] [--previous] [--tail N]`, `kube top nodes`,
+  `kube events -A`. The device runs its managed `kubectl`; the kubeconfig stays root-only. Only the verbs above run; `exec`, `cp`,
+  `port-forward`, `apply`, `delete`, `edit`, `patch`, `create`, `run`, `scale`, `rollout`, `drain` and the rest are refused, as are flags
+  that choose another cluster or identity (`--kubeconfig`, `--server`, `--token`, `--as`...), files (`-f`), streaming (`-w`, `-f`) and
+  `--raw`. **Secrets are never shown**: any kind with "secret" in its name is refused, and `-o yaml/json/jsonpath/go-template` of
+  ConfigMaps is refused (use plain `get` or `describe`). Every line passes the credential filter, the answer is at most 64 KiB, `logs`
+  defaults to `--tail=200` (at most 2000), `kubectl` has 20 s. The audit line holds the verb and the kind (`get pods`), nothing else.
+  There is no write mode.
+* `iyakki dev state [--json]` prints what the screen shows now: the open app, its page or tab, the focused field, the texts and the
+  buttons with their places. Text in secret fields, masks (`••••`) and anything that looks like a credential is `[hidden]`; in the chat,
+  inbox, terminal, browser and editors **no text is given at all**, only button names; at most 400 lines and 300 buttons. The shell
+  draws the text only while a computer is asking.
+* `iyakki dev input click "Use cluster address"` presses a button by its name (exact, else a part if only one matches). It is refused for
+  a button over a secret field, for a covered or ambiguous name, and while a password field has focus (unless `input:password`).
+* `iyakki dev inbox [--bodies] [--json]` gives counts by kind and source and the newest 100 titles. Bodies need `files:system` too.
+* `iyakki dev diag [-o FILE]` is one bundle to hand to an assistant: version, device, uptime, memory, disks, network, sound, services,
+  the cluster's node and pod names and status (needs `kube`), the open app, the shell's frame lines, recent errors and the audit tail
+  (the logs are for administrator accounts). No command line of the kernel, no settings values, no file contents.
+* `iyakki dev shell` commands start with the standard device nodes (`/dev/null`, `zero`, `full`, `random`, `urandom`, `tty`) made usable by
+  everyone, so `2>/dev/null` works; this is done by the device process when it is root and is logged (`dev.shell.devnodes`).
 
 ## 7. System update: replace the boot files, keep the way back
 
@@ -237,7 +301,7 @@ when, by whom, last use; mode 0600), `pairing.json` (the open code, deleted when
 
 ## 9. Limits (alpha) and what was not tried
 
-* **Discovery:** there is no LAN discovery for developer mode yet; type the device's address (shown on the Settings page). NET SCAN finds
+* **Discovery:** `iyakki dev scan` and `iyakki dev pair <name>.local` find a device that announces its name (see above; not tried on a real network yet); otherwise type the device's address (shown on the Settings page). NET SCAN finds
   devices on the network if you need the address. Over ONE cable between two IYAKKI computers the peer is found by a beacon (section 10).
 * **The desktop window** (`iyakki-desktop`) does not start the listener; developer mode works on the booted image, `iyakki shell`,
   `iyakki web` and `iyakki serve`. Only tested over loopback in the test suite: no real network, device or second machine was used.
@@ -360,3 +424,23 @@ the same usbnet drivers and `USB4`/`USB4_NET`, plus `CONFIG_CONFIGFS_FS`, `CONFI
   but nothing announces it.
 * Forwarding is switched off per interface (input side): the kernel does not forward packets that arrive on the cable. Nothing NATs.
 * Linux to Linux only: macOS and Windows have their own Thunderbolt networking; IYAKKI's page does not manage them.
+
+### 10.6 Internet over the cable, for the "Hardware firmware" download
+
+A computer whose Wi-Fi chip has no firmware has no network. If the cable (USB-C to USB-C, Thunderbolt, a USB network link) joins it to another computer, that computer can share its internet.
+
+* **On the other computer (Linux)**: `iyakki usb share-internet [--device NAME] [--uplink IFACE]` prints the exact commands (address 10.77.0.1/30 on the cable, `net.ipv4.ip_forward=1`, one nftables table `iyakki_share` that forwards and masquerades the cable only) and changes nothing. With `--apply` it runs them, as root only (it never calls sudo; without root it says so). `--undo` removes the table, the address and restores `ip_forward`. For DNS the device asks 9.9.9.9 and 1.1.1.1 through the cable; a dnsmasq line is printed as an option.
+* **macOS** (by hand): System Settings, General, Sharing, Internet Sharing: share the Wi-Fi/Ethernet connection to the cable's interface. **Windows** (by hand): properties of the adapter that has the internet, Sharing tab, allow other network users, choose the cable's adapter (Internet Connection Sharing, 192.168.137.1). These are documented, not tried here; IYAKKI does not change those systems.
+* **On the device**: Store, Setup, Hardware firmware shows "Use the other computer's internet through the cable (this session only)". After the click (and the licence accept) the job adds the address 10.77.0.2/30 on the cable, host routes for git.kernel.org and the two resolvers via 10.77.0.1, and a marked line in the hosts file. There is **no default route** unless the job is started with `--link-everything`. It is removed when the job ends or fails, on Stop, and at restart (nothing is written to disk but the hosts line, which carries the marker `# iyakki-firmware-session` and is removed with it). Audit lines `firmware.link-internet start/stop`.
+* **Fallback without internet**: `iyakki firmware fetch --for NAME --usb-link` on the other computer downloads and verifies the files and pushes them (`iyakki dev files push`) into `~/firmware-extra` on the device; the device verifies again and installs only after the click on its own screen.
+* **Not verified**: that the device's direct-link firewall zone (developer mode, beacon and ping by default) lets the download through; real traffic over `thunderbolt0` or `usb0`; resolver behaviour on the device; macOS and Windows sharing.
+
+## 11. Check a VPN profile file without sharing it: `iyakki vpn inspect FILE`
+
+If you have an `.ovpn` or a WireGuard `.conf` and do not know what is in it (or whether it needs a user name and password), run this on the computer that holds the file. It works offline, needs no root, no device and no network, saves nothing and connects nothing.
+
+```
+iyakki vpn inspect ~/Downloads/my-profile.ovpn
+```
+
+It prints, in plain words and safe to paste into a chat: (1) the kind it recognised; (2) whether a user name and password (`auth-user-pass` without a file) or a private-key passphrase are needed; (3) a table of every setting **name** with the verdict ACCEPTED, IGNORED (harmless, with the reason) or REFUSED (with the reason and what you can do, usually "remove this line"); (4) whether IYAKKI would accept the profile as it is, and what FULL and HYBRID mode would route; (5) how many inline blocks (`ca`, `cert`, `key`, `tls-crypt`, ...) there are, counted and never shown; (6) the cipher, digest, TLS version and compression settings by name, only when the value is a known algorithm name. It never prints a value (server, port, address, route, user name), a key, a certificate, a file name or a path; a setting name it does not know is shown as "(unknown directive)". Exit code: 0 the profile would be accepted, 1 it would not, 2 usage or read error. Nothing in your own VPN profile is bundled or sent anywhere: IYAKKI ships no VPN provider, no server list and no account.

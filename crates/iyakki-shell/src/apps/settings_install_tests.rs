@@ -41,7 +41,7 @@ fn settle(a: &mut SettingsApp, cx: &AppCx) {
     }
     panic!("job did not finish");
 }
-fn goto_install(a: &mut SettingsApp, cx: &AppCx) {
+fn goto_install(a: &mut SettingsApp, _cx: &AppCx) {
     a.go_to(Tab::Install);
 }
 fn draw(a: &mut SettingsApp, cx: &AppCx, w: u32, h: u32) -> Gfx {
@@ -206,7 +206,13 @@ fn installing_needs_the_typed_name_and_size_then_writes_the_disk_with_the_choice
     assert!(!a.has_modal(), "{}", status(&a));
     settle(&mut a, &cx);
     assert!(status(&a).contains("IYAKKI is installed on"), "{}", status(&a));
-    let disk = std::fs::read(m.root.join("dev/vdb")).unwrap();
+    // only the first part of the disk is read: the install makes the file as long as the drive (8.2 GB, sparse), and reading all of it would take 8.2 GB of memory
+    let disk = {
+        use std::io::Read;
+        let mut v = Vec::new();
+        std::fs::File::open(m.root.join("dev/vdb")).unwrap().take(10240 * 512 + 65536).read_to_end(&mut v).unwrap();
+        v
+    };
     let copy = 10240 * 512;
     assert_eq!(&disk[512..copy], &m.tpl[512..copy], "the boot area is the stick's");
     assert_eq!(&disk[..440], &m.tpl[..440]);

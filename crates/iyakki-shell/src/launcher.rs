@@ -5,38 +5,49 @@ use iyakki_sec::policy::App;
 
 use crate::ui::R;
 
-/// A section of the home screen, shown as a tab at the top. Every tile is in exactly one: the section is the `group` field of its
-/// entry in the shell's tile table (the inbox has none: it is the bell; Settings is on Home and in the IYAKKI menu). Custom apps go where their
-/// app.json's `group` says, else Work.
+/// A built-in section of the home screen, shown as a tab at the top. Every tile is in exactly one: the section is the `group` field of
+/// its entry in the shell's tile table (the inbox has none: it is the bell; Settings has none either: it is an icon in the top bar).
+/// The ids are those of the first four-group layout (`home`, `web-media`, `work`, `system`) so saved layouts keep working.
+/// Custom and Store apps go where their app.json's `group` says, else Apps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Group {
-    /// The assistant: CHAT, RAG, TALES, VOICE, CALENDAR, MCP, SKILLS, CLI.
+    /// Ask & Create: the assistant and what it makes (CHAT, RAG, SKILLS, CALENDAR, TALES, VOICE, LAB).
     Home,
-    /// BROWSER, RADIO, MEDIA, CAMERA.
-    WebMedia,
+    /// Build: AI IDE, GIT, FLOWS, K8S, EDIT, CLI, MCP, RUNS, SRE PILOT.
     Work,
+    /// Media: BROWSER, RADIO, MEDIA, CAMERA.
+    WebMedia,
+    /// Data: DATA, DASH, USAGE.
+    Data,
+    /// Devices & System: SYSTEM, DISKS, NET SCAN, MESH, USERS, STORE, LINUX WINDOW.
     System,
+    /// Tiles installed later (custom tile apps, Store apps) until the person moves them.
+    Apps,
 }
 
 impl Group {
     /// Tab order on the home screen.
-    pub const CHIPS: [Group; 4] = [Group::Home, Group::WebMedia, Group::Work, Group::System];
+    pub const CHIPS: [Group; 6] = [Group::Home, Group::Work, Group::WebMedia, Group::Data, Group::System, Group::Apps];
 
     pub fn id(self) -> &'static str {
         match self {
             Group::Home => "home",
             Group::WebMedia => "web-media",
             Group::Work => "work",
+            Group::Data => "data",
             Group::System => "system",
+            Group::Apps => "apps",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Group::Home => "Home",
-            Group::WebMedia => "Web & Media",
-            Group::Work => "Work",
-            Group::System => "System",
+            Group::Home => "Ask & Create",
+            Group::Work => "Build",
+            Group::WebMedia => "Media",
+            Group::Data => "Data",
+            Group::System => "Devices & System",
+            Group::Apps => "Apps",
         }
     }
 
@@ -48,7 +59,7 @@ impl Group {
         Group::CHIPS.into_iter().find(|g| g.id() == id)
     }
 
-    /// The section an app's tile is in (`None` for apps without a tile on the grid: the inbox has the bell, Settings the menu).
+    /// The section an app's tile is in (`None` for apps without a tile on the grid: the inbox has the bell, Settings the top bar).
     pub fn of(app: App) -> Option<Group> {
         crate::shell::tile_group(app)
     }
@@ -58,14 +69,16 @@ impl Group {
     }
 }
 
-/// The section a custom app's `group` (from its app.json) puts it in: a built-in one when the name is one of theirs
-/// ("Assistant" means Home), else Work.
+/// The section a custom app's `group` (from its app.json) puts it in: a built-in one when the name is one of theirs (or an old
+/// name: "Assistant" and "Home" mean Ask & Create, "Web & Media" Media), else Apps.
 pub fn group_of_custom(name: &str) -> Group {
     let n = name.trim().to_lowercase();
-    if n == "assistant" {
-        return Group::Home;
+    match n.as_str() {
+        "assistant" => return Group::Home,
+        "web & media" => return Group::WebMedia,
+        _ => {}
     }
-    Group::CHIPS.into_iter().find(|g| g.label().to_lowercase() == n || g.id() == n).unwrap_or(Group::Work)
+    Group::CHIPS.into_iter().find(|g| g.label().to_lowercase() == n || g.id() == n).unwrap_or(Group::Apps)
 }
 
 /// Apps whose tile wears the DEMO ribbon: they show sample data only and touch no real system.
@@ -241,57 +254,81 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_tile_app_is_in_exactly_one_section_and_the_inbox_in_none() {
+    fn every_tile_app_is_in_exactly_one_section_and_the_inbox_and_settings_in_none() {
         for a in App::ALL {
             let n = Group::CHIPS.iter().filter(|g| g.holds(a)).count();
-            assert_eq!(n, if matches!(a, App::Inbox) { 0 } else { 1 }, "{a:?}");
+            assert_eq!(n, if matches!(a, App::Inbox | App::Settings) { 0 } else { 1 }, "{a:?}");
         }
         for g in Group::CHIPS {
             assert_eq!(Group::from_id(g.id()), Some(g));
+            assert!(iyakki_agent::layout::is_builtin(g.id()) && iyakki_agent::layout::BUILTIN.iter().any(|(i, l)| *i == g.id() && *l == g.label()), "{g:?}: the layout and the launcher agree on the built-in groups");
         }
+        assert_eq!(Group::CHIPS.len(), iyakki_agent::layout::BUILTIN.len());
         assert_eq!(Group::from_id("assistant"), Some(Group::Home), "the old name of Home");
         assert_eq!(Group::from_id("all"), None);
         assert_eq!(Group::from_id("nope"), None);
-        assert_eq!(group_of_custom("My apps"), Group::Work, "no declared section: Work");
+        assert_eq!(group_of_custom("My apps"), Group::Apps, "no declared section: Apps");
         assert_eq!(group_of_custom("web & media"), Group::WebMedia);
+        assert_eq!(group_of_custom("Media"), Group::WebMedia);
+        assert_eq!(group_of_custom("Work"), Group::Work);
         assert_eq!(group_of_custom("Assistant"), Group::Home);
+        assert_eq!(group_of_custom(""), Group::Apps);
     }
 
     #[test]
-    fn the_sections_hold_the_tiles_the_owner_listed() {
+    fn the_default_groups_hold_the_tiles_the_owner_listed() {
         let of = |g: Group| -> Vec<App> { App::ALL.into_iter().filter(|a| g.holds(*a)).collect() };
         let mut home = of(Group::Home);
         home.sort_by_key(|a| a.id());
-        assert_eq!(home, [App::Calendar, App::Chat, App::Cli, App::Ide, App::Mcp, App::Rag, App::Settings, App::Skills, App::Tales, App::Voice]);
+        assert_eq!(home, [App::Calendar, App::Chat, App::Lab, App::Learn, App::Rag, App::Skills, App::Tales, App::Voice]);
+        for a in [App::Chat, App::Tales, App::Voice] {
+            assert!(Group::Home.holds(a), "Ask & Create: {a:?}");
+        }
+        for a in [App::Ide, App::Git, App::Flows, App::K8s, App::Edit] {
+            assert!(Group::Work.holds(a), "Build: {a:?}");
+        }
         for a in [App::Browser, App::Radio, App::Media, App::Camera] {
-            assert!(Group::WebMedia.holds(a), "{a:?}");
+            assert!(Group::WebMedia.holds(a), "Media: {a:?}");
         }
-        for a in [App::Edit, App::Data, App::Dash, App::Flows, App::Runs, App::SrePilot, App::Lab, App::Git] {
-            assert!(Group::Work.holds(a), "{a:?}");
+        for a in [App::Data, App::Dash] {
+            assert!(Group::Data.holds(a), "Data: {a:?}");
         }
-        for a in [App::System, App::Store, App::Users, App::Usage, App::Scan, App::Mesh] {
-            assert!(Group::System.holds(a), "{a:?}");
+        for a in [App::System, App::Store, App::Users, App::Scan, App::Mesh, App::Disks, App::Doctor] {
+            assert!(Group::System.holds(a), "Devices & System: {a:?}");
         }
+        assert!(of(Group::Apps).is_empty(), "Apps holds nothing built in: installed tiles land there");
     }
 
     #[test]
-    fn the_four_section_tabs_fit_a_phone_wide_browser() {
-        for (w, h) in [(360u32, 740u32), (390, 844), (800, 480)] {
+    fn the_section_tabs_fit_a_phone_wide_browser_beside_plus_and_more() {
+        for (w, h) in [(360u32, 740u32), (390, 844), (800, 480), (480, 600)] {
             let s = crate::shell::scale_for(w, h);
             let labels: Vec<&str> = Group::CHIPS.iter().map(|g| g.label()).collect();
-            let r = chip_rects(s, &labels);
-            let last = r.last().unwrap();
-            assert!(last.x + last.w <= w as f32 - 8.0, "{w}x{h}: {r:?}");
-            assert!(r.iter().all(|c| c.h >= 20.0), "{w}x{h}: tappable");
+            for cur in 0..labels.len() {
+                let row = chip_row(w, s, &labels, cur);
+                let mut rects: Vec<R> = row.chips.iter().map(|(_, r)| *r).collect();
+                rects.extend(row.more);
+                rects.push(row.plus);
+                assert!(rects.last().unwrap().x + rects.last().unwrap().w <= w as f32 - 8.0, "{w}x{h}: {rects:?}");
+                assert!(rects.iter().all(|c| c.h >= 20.0), "{w}x{h}: tappable");
+                assert!(row.chips.iter().any(|(i, _)| *i == cur), "{w}x{h}: the shown group is visible");
+                assert_eq!(row.chips.len() + row.hidden.len(), labels.len(), "every group is a chip or in the more menu");
+            }
+        }
+        // the six groups and `+` fit a laptop screen with no `…`
+        let labels: Vec<&str> = Group::CHIPS.iter().map(|g| g.label()).collect();
+        for (w, h) in [(1280u32, 720u32), (1024, 600)] {
+            assert!(chip_row(w, crate::shell::scale_for(w, h), &labels, 0).more.is_none(), "{w}x{h}");
         }
     }
 
     #[test]
     fn empty_groups_are_hidden() {
         assert_eq!(groups_of(&[App::Chat, App::Rag]), vec![Group::Home]);
-        assert_eq!(groups_of(&[App::Radio, App::Edit]), vec![Group::WebMedia, Group::Work]);
+        assert_eq!(groups_of(&[App::Radio, App::Edit]), vec![Group::Work, Group::WebMedia]);
         assert_eq!(groups_of(&[]), Vec::<Group>::new());
-        assert_eq!(groups_of(&App::ALL).len(), 4);
+        assert_eq!(groups_of(&App::ALL).len(), 5, "Apps has no built-in tile: it shows with the first installed one");
+        assert_eq!(groups_with(&App::ALL, &[Group::Apps]).len(), 6);
     }
 
     #[test]
@@ -302,7 +339,8 @@ mod tests {
         assert_eq!(page_count(3, small), 1);
         // bigger text, fewer tiles per page
         assert!(per_page(1280, 720, 2.0) < per_page(1280, 720, 1.0));
-        for (w, h, s) in [(1024u32, 600u32, 0.8f32), (1280, 720, 1.0), (1920, 1080, 1.5), (1024, 768, 0.8)] {
+        for (w, h) in [(1024u32, 600u32), (1280, 720), (1920, 1080), (1024, 768), (800, 480), (480, 600)] {
+            let s = crate::shell::scale_for(w, h);
             let cap = per_page(w, h, s);
             let n = cap * 2 + 1;
             let mut seen = 0;
@@ -324,7 +362,7 @@ mod tests {
     #[test]
     fn chips_and_dots_do_not_overlap_each_other_or_the_tiles() {
         let labels: Vec<&str> = Group::CHIPS.iter().map(|g| g.label()).collect();
-        for (w, h, s) in [(1024u32, 600u32, 0.8f32), (1920, 1080, 1.5)] {
+        for (w, h, s) in [(1280u32, 720u32, 1.0f32), (1920, 1080, 1.5)] {
             let chips = chip_rects(s, &labels);
             assert!(chips.last().unwrap().x + chips.last().unwrap().w < w as f32 - 40.0 * s);
             let nav = page_nav(w, h, s, 3);
@@ -338,7 +376,7 @@ mod tests {
     #[test]
     fn the_chip_row_scrolls_into_a_more_chip_and_always_fits_and_shows_the_current_group() {
         let long: Vec<String> = (0..12).map(|i| format!("Group number {i:02}")).collect();
-        let sets: Vec<Vec<&str>> = vec![vec!["Home", "Web & Media", "Work", "System"], long.iter().map(|s| s.as_str()).collect(), vec!["Home", "Web & Media", "Work", "System", "Games", "Reading", "Kids", "A 16 chars label"]];
+        let sets: Vec<Vec<&str>> = vec![vec!["Ask & Create", "Build", "Media", "Data", "Devices & System", "Apps"], long.iter().map(|s| s.as_str()).collect(), vec!["Ask & Create", "Build", "Media", "Data", "Devices & System", "Apps", "Games", "Reading", "A 16 chars label"]];
         for (w, h) in [(360u32, 740u32), (390, 844), (800, 480), (1280, 720), (1920, 1080)] {
             let s = crate::shell::scale_for(w, h);
             for labels in &sets {
@@ -360,14 +398,11 @@ mod tests {
                 }
             }
         }
-        // the four built-in groups and `+` fit even a phone, with no `…`; with room the chips sit where chip_rects puts them
-        let four = ["Home", "Web & Media", "Work", "System"];
-        for (w, h) in [(360u32, 740u32), (390, 844)] {
-            assert!(chip_row(w, crate::shell::scale_for(w, h), &four, 0).more.is_none(), "{w}x{h}");
-        }
+        // with room the chips sit where chip_rects puts them
+        let six = ["Ask & Create", "Build", "Media", "Data", "Devices & System", "Apps"];
         let s = crate::shell::scale_for(1280, 720);
-        let row = chip_row(1280, s, &four, 2);
-        assert_eq!(row.chips.iter().map(|(_, r)| *r).collect::<Vec<_>>(), chip_rects(s, &four));
+        let row = chip_row(1280, s, &six, 2);
+        assert_eq!(row.chips.iter().map(|(_, r)| *r).collect::<Vec<_>>(), chip_rects(s, &six));
         // many groups on a phone: a `…` chip appears
         assert!(chip_row(360, crate::shell::scale_for(360, 740), &sets[1], 0).more.is_some());
     }

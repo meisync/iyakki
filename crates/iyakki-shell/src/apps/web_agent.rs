@@ -447,7 +447,7 @@ mod tests {
     fn temp_dir_audit(cx: &crate::apps::AppCx) -> PathBuf {
         // the audit log of the test context lives next to its users file
         let _ = cx;
-        std::env::temp_dir().join(format!("iyakki-shell-{}-webagent1", std::process::id())).join("audit.log")
+        iyakki_agent::testdir::find("iyakki-shell", "webagent1").join("audit.log")
     }
 
     #[test]

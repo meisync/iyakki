@@ -885,7 +885,8 @@ impl SrePilotApp {
         let fresh = self.cache.as_ref().is_some_and(|k| k.key == key && k.rows.len() == (y1 - y0).max(0) as usize * (x1 - x0).max(0) as usize * 4);
         if fresh {
             let k = self.cache.as_ref().unwrap();
-            let rw = (x1 - x0) as usize * 4;
+            // (an empty or inverted canvas, as in a 1 x 1 window, has no rows: a negative width must not become a huge usize)
+            let rw = (x1 - x0).max(0) as usize * 4;
             let dst = g.pm.data_mut();
             for (i, row) in k.rows.chunks(rw.max(1)).enumerate() {
                 let o = (y0 as usize + i) * stride + x0 as usize * 4;

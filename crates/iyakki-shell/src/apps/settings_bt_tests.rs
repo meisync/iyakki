@@ -28,7 +28,7 @@ fn key(a: &mut SettingsApp, cx: &AppCx, k: Key) {
     a.handle(&Event::Key(k), cx);
 }
 
-fn goto(a: &mut SettingsApp, cx: &AppCx, t: Tab) {
+fn goto(a: &mut SettingsApp, _cx: &AppCx, t: Tab) {
     a.go_to(t);
 }
 

@@ -6,14 +6,22 @@
 //! Everything is capped (counts and sizes), written atomically with owner-only permissions, and validated: a user name
 //! that could climb out of the directory is refused.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-pub const MAX_NOTIFICATIONS: usize = 300;
+/// The most entries kept per person (a group of similar notes is one entry).
+pub const MAX_NOTIFICATIONS: usize = 200;
+/// The most entries kept from one source.
+pub const MAX_PER_SOURCE: usize = 60;
+/// The most detail lines kept inside one group.
+pub const MAX_ITEMS: usize = 100;
+/// Flow failures with the same flow and the same error within this long are one entry with a counter.
+pub const FAILURE_WINDOW: i64 = 3600;
+const DAY: i64 = 86_400;
 pub const MAX_TASKS: usize = 300;
 pub const MAX_TITLE: usize = 160;
 pub const MAX_BODY: usize = 2000;
@@ -86,13 +94,132 @@ pub struct Notification {
     /// Hidden (and not counted) until this instant.
     #[serde(default)]
     pub snoozed_until: i64,
+    /// What similar notes are collected under (empty: a note of its own). See [`auto_group`].
+    #[serde(default)]
+    pub group: String,
+    /// How many notes this entry stands for (1 for a single note).
+    #[serde(default = "one")]
+    pub count: u32,
+    /// The title once there are several, `{n}` standing for the count ("{n} new devices on your network").
+    #[serde(default)]
+    pub plural: String,
+    /// The notes inside a group, oldest first (the newest [`MAX_ITEMS`]).
+    #[serde(default)]
+    pub items: Vec<Item>,
+}
+
+fn one() -> u32 {
+    1
+}
+
+/// One note inside a group.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Item {
+    pub time: i64,
+    pub text: String,
+    /// What it points at in the linked app (a device's hardware address, a run's id).
+    #[serde(default)]
+    pub id: String,
 }
 
 impl Notification {
     pub fn is_snoozed(&self, now: i64) -> bool {
         self.snoozed_until > now
     }
+    /// Several notes collected in one entry.
+    pub fn is_group(&self) -> bool {
+        self.count > 1 || self.items.len() > 1
+    }
+    /// Something that needs the person (counted in the bell's number): warnings, errors, reminders that rang and assistants
+    /// that are waiting for them. Information, finished jobs, downloads and new devices are not.
+    pub fn needs_attention(&self) -> bool {
+        match self.kind {
+            Kind::Warning | Kind::Error | Kind::Reminder => true,
+            Kind::Agent => self.title.contains("needs you") || self.title.starts_with("Approval needed"),
+            _ => false,
+        }
+    }
 }
+
+/// How long a note is kept (flagged ones are kept until the person removes them).
+pub fn retention_secs(kind: Kind, source: &str) -> i64 {
+    match kind {
+        Kind::Info | Kind::Device | Kind::Download | Kind::System => 7 * DAY,
+        Kind::Agent if source == "runs" => 14 * DAY,
+        Kind::Agent | Kind::Reminder => 14 * DAY,
+        Kind::Warning | Kind::Error => 30 * DAY,
+    }
+}
+
+/// Which notes are collected into one entry: `(key, plural title, text of the item, merge into a read entry within)`.
+/// Everything else stays a note of its own.
+pub fn auto_group(kind: Kind, source: &str, title: &str, body: &str) -> Option<(String, String, i64)> {
+    if kind == Kind::Device && source == "scan" && title == "New device on your network" {
+        return Some(("scan:new-devices".into(), "{n} new devices on your network".into(), 0));
+    }
+    if kind == Kind::Agent && source == "runs" {
+        if title.starts_with("Job \u{201c}") && title.ends_with("finished") {
+            return Some(("runs:jobs-finished".into(), "{n} setup jobs finished".into(), 0));
+        }
+        if title.starts_with("Finished: ") {
+            return Some(("runs:runs-finished".into(), "{n} assistant runs finished".into(), 0));
+        }
+    }
+    if source == "flows" && matches!(kind, Kind::Error | Kind::Warning) {
+        let head: String = body.chars().take(80).collect();
+        return Some((format!("flows:{kind:?}:{title}:{head}"), format!("{title} (x{{n}})"), FAILURE_WINDOW));
+    }
+    None
+}
+
+/// How much of a source's notes the person wants to see. Chosen per person in Settings -> Notifications.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    /// Normal: counted in the bell by kind.
+    Show,
+    /// Kept in the inbox, but never in the bell (no number, no dot, no sound).
+    Quiet,
+    /// Not kept at all.
+    Off,
+}
+
+impl Level {
+    pub fn name(self) -> &'static str {
+        match self {
+            Level::Show => "show",
+            Level::Quiet => "quiet",
+            Level::Off => "off",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Level::Show => "Show",
+            Level::Quiet => "Quiet (panel only)",
+            Level::Off => "Off",
+        }
+    }
+    pub fn next(self) -> Level {
+        match self {
+            Level::Show => Level::Quiet,
+            Level::Quiet => Level::Off,
+            Level::Off => Level::Show,
+        }
+    }
+}
+
+/// The sources that raise notes, for the Settings page (any other source that has left a note is added to the list).
+pub const SOURCES: [(&str, &str); 9] = [
+    ("scan", "New devices on the network"),
+    ("runs", "Finished assistant runs and jobs"),
+    ("flows", "Flows"),
+    ("calendar", "Reminders and alarms"),
+    ("media", "Downloads"),
+    ("tasks", "Tasks"),
+    ("assistant", "What assistants leave for you"),
+    ("settings", "Warnings about the system"),
+    ("system", "Other system notes"),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -220,7 +347,12 @@ pub struct TaskPatch {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counts {
+    /// Every unread entry that is not snoozed.
     pub unread: usize,
+    /// Unread entries that need the person (the bell's number): see [`Notification::needs_attention`]. Quiet sources excluded.
+    pub attention: usize,
+    /// Unread entries of the other kinds (the bell's dot). Quiet sources excluded.
+    pub other: usize,
     pub flagged: usize,
     pub open_tasks: usize,
     pub overdue: usize,
@@ -232,7 +364,23 @@ struct Data {
     notifications: Vec<Notification>,
     #[serde(default)]
     tasks: Vec<Task>,
+    /// 0: a file from before notes were grouped.
+    #[serde(default)]
+    version: u32,
+    /// Per source: show, quiet or off.
+    #[serde(default)]
+    levels: BTreeMap<String, Level>,
+    /// Said once in the panel (what the tidy-up on first open did).
+    #[serde(default)]
+    notice: String,
+    /// Fields a newer release wrote: kept and written back.
+    #[serde(flatten)]
+    extra: iyakki_schema::Extra,
 }
+
+/// 2 = notes grouped (the layout since alpha.1's first tidy-up). The field is called `version` here (older than `iyakki-schema`),
+/// and the same rules apply: a newer file is never written, a damaged one is moved aside, unknown fields are kept.
+const VERSION: u32 = 2;
 
 pub struct Inbox {
     dir: PathBuf,
@@ -258,6 +406,74 @@ fn clean(s: &str, max: usize, keep_newlines: bool) -> String {
     }
 }
 
+/// Drop what is past its retention, then the oldest read entries of a source over its cap, then the oldest over the hard cap.
+/// Flagged entries stay. Returns how many went.
+fn prune(d: &mut Data, now: i64) -> usize {
+    let before = d.notifications.len();
+    d.notifications.retain(|n| n.flagged || now - n.time <= retention_secs(n.kind, &n.source));
+    let sources: Vec<String> = d.notifications.iter().map(|n| n.source.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    for src in sources {
+        while d.notifications.iter().filter(|n| n.source == src).count() > MAX_PER_SOURCE {
+            match oldest_droppable(&d.notifications, |n| n.source == src) {
+                Some(i) => {
+                    d.notifications.remove(i);
+                }
+                None => break,
+            }
+        }
+    }
+    while d.notifications.len() > MAX_NOTIFICATIONS {
+        let i = oldest_droppable(&d.notifications, |_| true).or_else(|| d.notifications.iter().enumerate().min_by_key(|(_, x)| x.time).map(|(i, _)| i)).unwrap_or(0);
+        d.notifications.remove(i);
+    }
+    before - d.notifications.len()
+}
+
+/// The oldest read unflagged entry, else the oldest unflagged one, among those that match.
+fn oldest_droppable(v: &[Notification], pick: impl Fn(&Notification) -> bool) -> Option<usize> {
+    v.iter().enumerate().filter(|(_, x)| pick(x) && x.read && !x.flagged).min_by_key(|(_, x)| x.time).or_else(|| v.iter().enumerate().filter(|(_, x)| pick(x) && !x.flagged).min_by_key(|(_, x)| x.time)).map(|(i, _)| i)
+}
+
+/// Collect the single notes of an older file that [`auto_group`] would have collected (read and unread ones apart).
+fn regroup(d: &mut Data) {
+    let old = std::mem::take(&mut d.notifications);
+    let mut out: Vec<Notification> = Vec::new();
+    let mut at: BTreeMap<(String, String, bool), usize> = BTreeMap::new();
+    let mut old = old;
+    old.sort_by_key(|n| n.time);
+    for mut n in old {
+        let rule = if n.group.is_empty() && !n.flagged && n.snoozed_until == 0 { auto_group(n.kind, &n.source, &n.title, &n.body) } else { None };
+        let Some((key, plural, _)) = rule else {
+            out.push(n);
+            continue;
+        };
+        let text = if n.kind == Kind::Device || n.kind == Kind::Error || n.kind == Kind::Warning { if n.body.is_empty() { n.title.clone() } else { n.body.clone() } } else { n.title.clone() };
+        let item = Item { time: n.time, text: clean(&text, 300, false), id: n.link.as_ref().map(|l| l.id.clone()).unwrap_or_default() };
+        match at.get(&(key.clone(), n.source.clone(), n.read)) {
+            Some(&i) => {
+                let e = &mut out[i];
+                e.count = e.count.saturating_add(1);
+                e.time = n.time;
+                e.body = n.body;
+                e.link = n.link;
+                e.title = e.plural.replace("{n}", &e.count.to_string());
+                e.items.push(item);
+                if e.items.len() > MAX_ITEMS {
+                    e.items.remove(0);
+                }
+            }
+            None => {
+                n.group = key.clone();
+                n.plural = plural;
+                n.items = vec![item];
+                at.insert((key, n.source.clone(), n.read), out.len());
+                out.push(n);
+            }
+        }
+    }
+    d.notifications = out;
+}
+
 impl Inbox {
     pub fn new(dir: &std::path::Path) -> Inbox {
         Inbox { dir: dir.into(), lock: Mutex::new(()), agent_log: Mutex::new(HashMap::new()) }
@@ -268,8 +484,17 @@ impl Inbox {
     }
 
     fn load(&self, user: &str) -> Result<Data, String> {
-        match std::fs::read(self.path(user)?) {
-            Ok(b) => serde_json::from_slice(&b).map_err(|e| format!("the inbox file is damaged: {e}")),
+        let path = self.path(user)?;
+        match std::fs::read(&path) {
+            Ok(b) => match serde_json::from_slice::<Data>(&b) {
+                Ok(d) => Ok(d),
+                Err(e) => {
+                    // never lose it, never block the inbox: keep the damaged file next to the new one, say so in the audit log
+                    let moved = iyakki_schema::move_aside(&path, iyakki_schema::now_secs());
+                    iyakki_schema::report(format!("inbox {}: damaged ({e}); {} and started an empty inbox", path.display(), moved.map(|m| format!("moved to {}", m.display())).unwrap_or_else(|| "could not be moved aside".into())));
+                    Ok(Data::default())
+                }
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Data::default()),
             Err(e) => Err(e.to_string()),
         }
@@ -279,6 +504,9 @@ impl Inbox {
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
         let path = self.path(user)?;
+        if let Some(n) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).and_then(|v| v.get("version").and_then(|n| n.as_u64())).filter(|n| *n > VERSION as u64) {
+            return Err(format!("The inbox file was written by a newer IYAKKI (version {n}; this one reads up to {VERSION}). It is kept as it is; update IYAKKI first."));
+        }
         let tmp = path.with_extension("tmp");
         {
             let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).map_err(|e| e.to_string())?;
@@ -303,37 +531,145 @@ impl Inbox {
         if title.is_empty() {
             return Err("a notification needs a title".into());
         }
-        let n = Notification {
+        let (body, source) = (clean(body, MAX_BODY, true), clean(source, 40, false));
+        let link = link.map(|l| Link { app: clean(&l.app, 24, false), id: clean(&l.id, 64, false) });
+        let grouping = auto_group(kind, &source, &title, &body);
+        let item_text = if kind == Kind::Device || kind == Kind::Error || kind == Kind::Warning { if body.is_empty() { title.clone() } else { body.clone() } } else { title.clone() };
+        let item = Item { time: now, text: clean(&item_text, 300, false), id: link.as_ref().map(|l| l.id.clone()).unwrap_or_default() };
+        let mut n = Notification {
             id: new_id(),
             time: now,
             kind,
             title,
-            body: clean(body, MAX_BODY, true),
-            source: clean(source, 40, false),
-            link: link.map(|l| Link { app: clean(&l.app, 24, false), id: clean(&l.id, 64, false) }),
+            body,
+            source,
+            link,
             read: false,
             flagged: false,
             snoozed_until: 0,
+            group: String::new(),
+            count: 1,
+            plural: String::new(),
+            items: Vec::new(),
         };
+        if let Some((key, plural, _)) = &grouping {
+            n.group = key.clone();
+            n.plural = plural.clone();
+            n.items = vec![item.clone()];
+        }
         self.edit(user, |d| {
-            d.notifications.push(n.clone());
-            // over the cap: the oldest read, unflagged ones go first, then the oldest of all
-            while d.notifications.len() > MAX_NOTIFICATIONS {
-                let drop = d
-                    .notifications
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, x)| x.read && !x.flagged)
-                    .min_by_key(|(_, x)| x.time)
-                    .or_else(|| d.notifications.iter().enumerate().filter(|(_, x)| !x.flagged).min_by_key(|(_, x)| x.time))
-                    .or_else(|| d.notifications.iter().enumerate().min_by_key(|(_, x)| x.time))
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                d.notifications.remove(drop);
+            if d.levels.get(&n.source) == Some(&Level::Off) {
+                return Err(format!("notifications from {} are turned off", if n.source.is_empty() { "this source" } else { &n.source }));
             }
+            if let Some((key, _, window)) = &grouping {
+                // one more of the same: into the entry that is still open (unread, or read a moment ago for repeated failures)
+                if let Some(e) = d.notifications.iter_mut().filter(|e| e.group == *key && e.source == n.source && !e.flagged).filter(|e| !e.read || now - e.time < *window).max_by_key(|e| e.time) {
+                    e.count = e.count.saturating_add(1);
+                    e.time = now;
+                    e.body = n.body.clone();
+                    e.link = n.link.clone();
+                    e.title = e.plural.replace("{n}", &e.count.to_string());
+                    e.items.push(item.clone());
+                    if e.items.len() > MAX_ITEMS {
+                        e.items.remove(0);
+                    }
+                    n = e.clone();
+                    prune(d, now);
+                    return Ok(());
+                }
+            }
+            d.notifications.push(n.clone());
+            prune(d, now);
             Ok(())
         })?;
         Ok(n)
+    }
+
+    /// Tidy a person's file: group the notes of an older file, drop what is past its retention. Saves only when something
+    /// changed; the first time on an older file it leaves a notice for the panel to say once ([`Inbox::take_notice`]).
+    pub fn maintain(&self, user: &str, now: i64) -> Result<(), String> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut d = self.load(user)?;
+        let before = d.notifications.len();
+        let migrating = d.version < VERSION;
+        if migrating {
+            regroup(&mut d);
+        }
+        let grouped_to = d.notifications.len();
+        let pruned = prune(&mut d, now);
+        if !migrating && pruned == 0 {
+            return Ok(());
+        }
+        if migrating && (grouped_to < before || pruned > 0) {
+            let mut m = format!("Your inbox was tidied: {before} notifications are now {} entries, similar ones grouped (open one to see them all).", d.notifications.len());
+            if pruned > 0 {
+                m.push_str(&format!(" {pruned} old {} past {} keeping time {} removed (information 7 days, jobs 14, errors 30).", if pruned == 1 { "one" } else { "ones" }, if pruned == 1 { "its" } else { "their" }, if pruned == 1 { "was" } else { "were" }));
+            }
+            m.push_str(" Nothing else was removed.");
+            d.notice = m;
+        }
+        if migrating {
+            // the file as the older release left it, kept once
+            if let Ok(p) = self.path(user) {
+                let b = iyakki_schema::sibling(&p, &format!("pre-v{VERSION}"));
+                if p.exists() && !b.exists() && std::fs::copy(&p, &b).is_ok() {
+                    iyakki_schema::report(format!("inbox {}: upgraded to version {VERSION} (old file kept as {})", p.display(), b.display()));
+                }
+            }
+        }
+        d.version = VERSION;
+        self.save(user, &d)
+    }
+
+    /// What the tidy-up did, once (then it is forgotten).
+    pub fn take_notice(&self, user: &str) -> Option<String> {
+        self.edit(user, |d| Ok(std::mem::take(&mut d.notice))).ok().filter(|m| !m.is_empty())
+    }
+
+    /// Delete every entry of a group key or source: "Clear this group". Flagged entries stay. Returns how many went.
+    pub fn clear_source(&self, user: &str, source: &str) -> Result<usize, String> {
+        self.edit(user, |d| {
+            let before = d.notifications.len();
+            d.notifications.retain(|n| n.source != source || n.flagged);
+            Ok(before - d.notifications.len())
+        })
+    }
+
+    pub fn level(&self, user: &str, source: &str) -> Level {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.load(user).ok().and_then(|d| d.levels.get(source).copied()).unwrap_or(Level::Show)
+    }
+
+    pub fn levels(&self, user: &str) -> BTreeMap<String, Level> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.load(user).map(|d| d.levels).unwrap_or_default()
+    }
+
+    /// Show, quiet or off for one source (per person; `Show` forgets the choice).
+    pub fn set_level(&self, user: &str, source: &str, level: Level) -> Result<(), String> {
+        let source = clean(source, 40, false);
+        if source.is_empty() {
+            return Err("a source needs a name".into());
+        }
+        self.edit(user, |d| {
+            if level == Level::Show {
+                d.levels.remove(&source);
+            } else {
+                d.levels.insert(source, level);
+            }
+            Ok(())
+        })
+    }
+
+    /// The sources a person can choose for: the known ones and any other that has left a note.
+    pub fn sources(&self, user: &str) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = SOURCES.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        for n in self.list(user) {
+            if !n.source.is_empty() && !v.iter().any(|(s, _)| *s == n.source) {
+                v.push((n.source.clone(), format!("Notes from {}", n.source)));
+            }
+        }
+        v
     }
 
     /// Newest first (snoozed ones included; see [`Notification::is_snoozed`]).
@@ -482,8 +818,12 @@ impl Inbox {
     pub fn counts(&self, user: &str, now: i64) -> Counts {
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let Ok(d) = self.load(user) else { return Counts::default() };
+        let live = |n: &&Notification| !n.read && !n.is_snoozed(now);
+        let shown = |n: &&Notification| d.levels.get(&n.source).copied().unwrap_or(Level::Show) == Level::Show;
         Counts {
-            unread: d.notifications.iter().filter(|n| !n.read && !n.is_snoozed(now)).count(),
+            unread: d.notifications.iter().filter(live).count(),
+            attention: d.notifications.iter().filter(live).filter(shown).filter(|n| n.needs_attention()).count(),
+            other: d.notifications.iter().filter(live).filter(shown).filter(|n| !n.needs_attention()).count(),
             flagged: d.notifications.iter().filter(|n| n.flagged).count(),
             open_tasks: d.tasks.iter().filter(|t| t.status.is_open()).count(),
             overdue: d.tasks.iter().filter(|t| t.is_overdue(now)).count(),
@@ -527,7 +867,7 @@ mod tests {
         assert_eq!(s.counts("amy", 1000).unread, 2);
         s.mark_read("amy", &a.id, true).unwrap();
         s.flag("amy", &a.id, true).unwrap();
-        assert_eq!(s.counts("amy", 1000), Counts { unread: 1, flagged: 1, open_tasks: 0, overdue: 0 });
+        assert_eq!(s.counts("amy", 1000), Counts { unread: 1, attention: 1, other: 0, flagged: 1, open_tasks: 0, overdue: 0 });
         // snoozed ones are not counted until the time passes, then they are unread again
         s.snooze("amy", &b.id, 5000).unwrap();
         assert_eq!(s.counts("amy", 1000).unread, 0);
@@ -553,6 +893,179 @@ mod tests {
         assert_eq!(std::fs::metadata(s.dir.join("amy.json")).unwrap().permissions().mode() & 0o777, 0o600);
     }
 
+    const NEWDEV: &str = "New device on your network";
+
+    #[test]
+    fn new_devices_collapse_into_one_entry_with_the_list_inside() {
+        let s = store("g1");
+        for i in 0..79 {
+            s.add("amy", Kind::Device, NEWDEV, &format!("10.0.0.{i} (aa:bb:cc:00:00:{i:02x}) appeared."), "scan", Some(Link::new("scan", &format!("aa:bb:cc:00:00:{i:02x}"))), 1000 + i).unwrap();
+        }
+        let l = s.list("amy");
+        assert_eq!(l.len(), 1);
+        assert_eq!((l[0].count, l[0].title.as_str(), l[0].items.len()), (79, "79 new devices on your network", 79));
+        assert_eq!(l[0].items[3].id, "aa:bb:cc:00:00:03");
+        // looked at: the next device starts a new entry (only what is new since the last look)
+        s.mark_read("amy", &l[0].id, true).unwrap();
+        s.add("amy", Kind::Device, NEWDEV, "10.0.0.200 (x) appeared.", "scan", None, 5000).unwrap();
+        let l = s.list("amy");
+        assert_eq!((l.len(), l[0].count, l[0].title.as_str()), (2, 1, NEWDEV));
+        // a different source with the same title is not collapsed into it
+        s.add("amy", Kind::Device, NEWDEV, "b", "other", None, 5001).unwrap();
+        assert_eq!(s.list("amy").len(), 3);
+    }
+
+    #[test]
+    fn finished_jobs_are_one_group_and_flow_failures_count_repeats_inside_a_window() {
+        let s = store("g2");
+        for i in 0..41 {
+            s.add("amy", Kind::Agent, &format!("Job \u{201c}Install {i}\u{201d} finished"), "done", "runs", Some(Link::new("runs", "jobs")), 100 + i).unwrap();
+        }
+        let l = s.list("amy");
+        assert_eq!((l.len(), l[0].count, l[0].title.as_str()), (1, 41, "41 setup jobs finished"));
+        // one flow, one error: a counter and the last time, even after it was read
+        let f = |t| s.add("amy", Kind::Error, "Health check failed", "https://example.com/health is not answering", "flows", Some(Link::new("flows", "f1")), t).unwrap();
+        f(1000);
+        let n = f(1100);
+        assert_eq!((n.count, n.title.as_str(), n.time), (2, "Health check failed (x2)", 1100));
+        s.mark_read("amy", &n.id, true).unwrap();
+        let n2 = f(1200);
+        assert_eq!((n2.id.as_str(), n2.count, n2.read), (n.id.as_str(), 3, true), "inside the window it only counts");
+        // after the window, or for another error, it is a new entry
+        let n3 = f(1200 + FAILURE_WINDOW + 5);
+        assert_ne!(n3.id, n.id);
+        s.add("amy", Kind::Error, "Health check failed", "a different error", "flows", None, 1300).unwrap();
+        assert_eq!(s.list("amy").iter().filter(|x| x.source == "flows").count(), 3);
+        // unrelated notes stay single
+        s.add("amy", Kind::Info, "Hello", "", "x", None, 1).unwrap();
+        s.add("amy", Kind::Info, "Hello", "", "x", None, 2).unwrap();
+        assert_eq!(s.list("amy").iter().filter(|x| x.title == "Hello").count(), 2);
+    }
+
+    #[test]
+    fn the_bell_counts_only_what_needs_the_person() {
+        let s = store("g3");
+        s.add("amy", Kind::Device, NEWDEV, "a", "scan", None, 10).unwrap();
+        s.add("amy", Kind::Info, "fyi", "", "x", None, 10).unwrap();
+        s.add("amy", Kind::Download, "got it", "", "media", None, 10).unwrap();
+        s.add("amy", Kind::Agent, "Job \u{201c}x\u{201d} finished", "", "runs", None, 10).unwrap();
+        let c = s.counts("amy", 20);
+        assert_eq!((c.attention, c.other, c.unread), (0, 4 - 0, 4), "routine items never add to the number: {c:?}");
+        s.add("amy", Kind::Error, "Store Writer failed", "", "flows", None, 11).unwrap();
+        s.add("amy", Kind::Warning, "Vault locked", "", "settings", None, 12).unwrap();
+        s.add("amy", Kind::Reminder, "Reminder: x", "", "calendar", None, 13).unwrap();
+        s.add("amy", Kind::Agent, "The assistant needs you", "", "assistant", None, 14).unwrap();
+        assert_eq!(s.counts("amy", 20).attention, 4);
+        // 130 routine items still make no number
+        let t = store("g3b");
+        for i in 0..130 {
+            t.add("amy", Kind::Info, &format!("i{i}"), "", &format!("s{}", i % 5), None, 10 + i).unwrap();
+        }
+        let c = t.counts("amy", 200);
+        assert_eq!(c.attention, 0);
+        assert!(c.other > 0);
+    }
+
+    #[test]
+    fn levels_hide_from_the_bell_or_drop_a_source_per_person_and_persist() {
+        let s = store("g4");
+        s.set_level("amy", "scan", Level::Quiet).unwrap();
+        s.set_level("amy", "flows", Level::Off).unwrap();
+        s.add("amy", Kind::Error, "boom", "", "flows", None, 10).unwrap_err();
+        s.add("amy", Kind::Warning, "quiet warn", "", "scan", None, 10).unwrap();
+        s.add("amy", Kind::Warning, "loud warn", "", "settings", None, 10).unwrap();
+        let c = s.counts("amy", 20);
+        assert_eq!((c.attention, c.other, c.unread), (1, 0, 2), "a quiet source is in the panel only");
+        // bob is not affected, and a restart keeps it
+        assert_eq!(s.level("bob", "scan"), Level::Show);
+        s.add("bob", Kind::Error, "boom", "", "flows", None, 10).unwrap();
+        let again = Inbox::new(&s.dir);
+        assert_eq!((again.level("amy", "scan"), again.level("amy", "flows")), (Level::Quiet, Level::Off));
+        assert_eq!(again.levels("amy").len(), 2);
+        again.set_level("amy", "scan", Level::Show).unwrap();
+        assert_eq!(again.levels("amy").len(), 1);
+        assert_eq!((Level::Show.next(), Level::Quiet.next(), Level::Off.next()), (Level::Quiet, Level::Off, Level::Show));
+        assert!(again.sources("amy").iter().any(|(k, _)| k == "scan"));
+    }
+
+    #[test]
+    fn retention_drops_old_entries_by_kind_per_source_and_in_total_but_keeps_flagged() {
+        let s = store("g5");
+        let day = 86_400;
+        let now = 100 * day;
+        let old_info = s.add("amy", Kind::Info, "old info", "", "x", None, now - 8 * day).unwrap();
+        s.add("amy", Kind::Info, "fresh info", "", "x", None, now - 6 * day).unwrap();
+        s.add("amy", Kind::Agent, "Done: a", "", "runs", None, now - 15 * day).unwrap();
+        s.add("amy", Kind::Agent, "Done: b", "", "runs", None, now - 13 * day).unwrap();
+        s.add("amy", Kind::Error, "error 29 d", "", "flows", None, now - 29 * day).unwrap();
+        s.add("amy", Kind::Error, "error 31 d", "", "flows", None, now - 31 * day).unwrap();
+        let keep = s.add("amy", Kind::Info, "flagged old", "", "x", None, now - 90 * day).unwrap();
+        s.flag("amy", &keep.id, true).unwrap();
+        s.maintain("amy", now).unwrap();
+        let mut t: Vec<String> = s.list("amy").into_iter().map(|n| n.title).collect();
+        t.sort();
+        assert_eq!(t, vec!["Done: b", "error 29 d", "flagged old", "fresh info"]);
+        assert!(!s.list("amy").iter().any(|n| n.id == old_info.id));
+        // per source: the oldest go first
+        let u = store("g5b");
+        for i in 0..MAX_PER_SOURCE + 10 {
+            u.add("amy", Kind::Info, &format!("n{i}"), "", "one", None, now + i as i64).unwrap();
+        }
+        let l = u.list("amy");
+        assert_eq!(l.len(), MAX_PER_SOURCE);
+        assert!(l.iter().all(|n| n.title != "n0") && l.iter().any(|n| n.title == format!("n{}", MAX_PER_SOURCE + 9)));
+    }
+
+    #[test]
+    fn an_older_file_loads_is_grouped_once_and_says_so_without_losing_anything_else() {
+        let s = store("g6");
+        let now = 100 * 86_400;
+        // the shape found on a real machine: single notes, all unread
+        let mut notes = Vec::new();
+        let mut push = |kind: &str, source: &str, title: &str, body: &str, time: i64| {
+            notes.push(serde_json::json!({"id": format!("id{}", notes.len()), "time": time, "kind": kind, "title": title, "body": body, "source": source, "link": {"app": source, "id": "z"}, "read": false, "flagged": false, "snoozed_until": 0}));
+        };
+        for i in 0..79 {
+            push("device", "scan", NEWDEV, &format!("10.0.0.{i} (m{i}) appeared."), now - 3600 + i);
+        }
+        for i in 0..41 {
+            push("agent", "runs", &format!("Job \u{201c}Install Python 3.12 ({i}/12)\u{201d} finished"), "ok", now - 7200 + i);
+        }
+        for _ in 0..4 {
+            push("error", "flows", "Health flow failed", "https://example.com/health is not answering", now - 600);
+        }
+        push("error", "flows", "Store Writer failed", "disk", now - 500);
+        push("error", "flows", "Store Writer failed", "disk", now - 400);
+        push("reminder", "calendar", "Reminder: Standup", "", now - 300);
+        push("info", "system", "Welcome", "", now - 20 * 86_400);
+        std::fs::create_dir_all(&s.dir).unwrap();
+        std::fs::write(s.dir.join("amy.json"), serde_json::to_vec(&serde_json::json!({"notifications": notes, "tasks": []})).unwrap()).unwrap();
+        // it loads as it is, and the bell already counts by kind
+        assert_eq!(s.list("amy").len(), 79 + 41 + 4 + 2 + 1 + 1);
+        assert_eq!(s.counts("amy", now).attention, 4 + 2 + 1);
+        s.maintain("amy", now).unwrap();
+        let l = s.list("amy");
+        let titles: Vec<&str> = l.iter().map(|n| n.title.as_str()).collect();
+        assert!(titles.contains(&"79 new devices on your network") && titles.contains(&"41 setup jobs finished"), "{titles:?}");
+        assert!(titles.contains(&"Health flow failed (x4)") && titles.contains(&"Store Writer failed (x2)"), "{titles:?}");
+        assert_eq!(l.len(), 5, "the 20-day-old info note was past its 7 days: {titles:?}");
+        assert_eq!(l.iter().find(|n| n.count == 79).unwrap().items.len(), 79);
+        let notice = s.take_notice("amy").expect("said once");
+        assert!(notice.contains("128") && notice.contains("tidied") && notice.contains("1 old one past its"), "{notice}");
+        assert!(s.take_notice("amy").is_none());
+        // a second run changes nothing
+        s.maintain("amy", now).unwrap();
+        assert_eq!(s.list("amy").len(), 5);
+        assert!(s.take_notice("amy").is_none());
+        // old files with none of the new fields still load, and a flagged or snoozed note is left alone
+        let f = store("g6b");
+        std::fs::create_dir_all(&f.dir).unwrap();
+        std::fs::write(f.dir.join("amy.json"), r#"{"notifications":[{"id":"a","time":5,"kind":"device","title":"New device on your network","source":"scan","flagged":true},{"id":"b","time":6,"kind":"device","title":"New device on your network","source":"scan"}],"tasks":[]}"#).unwrap();
+        f.maintain("amy", 100).unwrap();
+        assert_eq!(f.list("amy").len(), 2);
+        assert!(f.take_notice("amy").is_none(), "nothing changed, nothing to say");
+    }
+
     #[test]
     fn caps_sizes_and_path_tricks() {
         let s = store("b");
@@ -564,7 +1077,7 @@ mod tests {
         s.flag("amy", &keep.id, true).unwrap();
         s.mark_read("amy", &n.id, true).unwrap();
         for i in 0..MAX_NOTIFICATIONS + 5 {
-            s.add("amy", Kind::Info, &format!("n{i}"), "", "", None, 10 + i as i64).unwrap();
+            s.add("amy", Kind::Info, &format!("n{i}"), "", &format!("s{}", i % 10), None, 10 + i as i64).unwrap();
         }
         let l = s.list("amy");
         assert_eq!(l.len(), MAX_NOTIFICATIONS);
@@ -590,7 +1103,7 @@ mod tests {
         assert_eq!(ids(s.tasks("amy", TaskSort::Due)), vec!["Water plants", "Pay rent", "Call mum"]);
         assert_eq!(ids(s.tasks("amy", TaskSort::Priority)), vec!["Call mum", "Pay rent", "Water plants"]);
         assert_eq!(ids(s.tasks("amy", TaskSort::Created)), vec!["Water plants", "Call mum", "Pay rent"]);
-        assert_eq!(s.counts("amy", 400), Counts { unread: 0, flagged: 0, open_tasks: 3, overdue: 1 });
+        assert_eq!(s.counts("amy", 400), Counts { open_tasks: 3, overdue: 1, ..Default::default() });
         assert_eq!(s.counts("amy", 600).overdue, 2);
         // pending → doing → done, and back
         let t = s.move_task("amy", &c.id, Status::Pending.next(), 40).unwrap();
@@ -598,7 +1111,7 @@ mod tests {
         assert_eq!(s.move_task("amy", &c.id, Status::Doing.next(), 41).unwrap().status, Status::Done);
         assert_eq!(Status::Done.prev(), Status::Doing);
         assert_eq!(Status::Pending.prev(), Status::Pending);
-        assert_eq!(s.counts("amy", 600), Counts { unread: 0, flagged: 0, open_tasks: 2, overdue: 1 }, "done tasks are not open or overdue");
+        assert_eq!(s.counts("amy", 600), Counts { open_tasks: 2, overdue: 1, ..Default::default() }, "done tasks are not open or overdue");
         // edit
         let t = s.update_task("amy", &a.id, TaskPatch { title: Some("Pay the rent".into()), due: Some(None), priority: Some(Priority::High), ..Default::default() }, 50).unwrap();
         assert_eq!((t.title.as_str(), t.due, t.priority), ("Pay the rent", None, Priority::High));

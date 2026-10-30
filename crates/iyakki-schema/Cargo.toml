@@ -1,0 +1,10 @@
+[package]
+name = "iyakki-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Versioned JSON files on the data volume: a schema number, a registry of migrations, atomic writes, a backup before the first change, and the refusal to overwrite a file written by a newer release."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -576,3 +576,42 @@ fn curl_asks_for_the_accept_type_and_time_limit_of_the_request_and_says_when_the
     assert!(std::fs::read_dir(&d).unwrap().next().is_none(), "... which is removed afterwards");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ------------------------------------------------------------------ the working copy (AI IDE Git tab)
+
+const PORCELAIN: &str = "# branch.oid 1234\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +2 -1\n1 .M N... 100644 100644 100644 aaa bbb src/a b.rs\n1 A. N... 000000 100644 100644 000 ccc new.txt\n1 D. N... 100644 000000 000000 ddd 000 old.txt\n2 R. N... 100644 100644 100644 eee fff R100 moved.rs\tbefore.rs\nu UU N... 100644 100644 100644 100644 a b c conflict.rs\n? notes.md\n";
+
+#[test]
+fn working_copy_changes_are_parsed_with_status_and_staging() {
+    let v = parse_changes(PORCELAIN);
+    assert_eq!(v.len(), 6);
+    let by = |p: &str| v.iter().find(|c| c.path == p).unwrap_or_else(|| panic!("{p}"));
+    assert_eq!((by("src/a b.rs").kind, by("src/a b.rs").staged, by("src/a b.rs").unstaged), (ChangeKind::Modified, false, true), "a path with a space stays whole");
+    assert_eq!((by("new.txt").kind, by("new.txt").staged), (ChangeKind::Added, true));
+    assert_eq!(by("old.txt").kind, ChangeKind::Deleted);
+    assert_eq!((by("moved.rs").kind, by("moved.rs").from.as_str()), (ChangeKind::Renamed, "before.rs"));
+    assert_eq!(by("conflict.rs").kind, ChangeKind::Conflicted);
+    assert_eq!((by("notes.md").kind.letter(), by("notes.md").kind.word()), ('?', "new, not tracked"));
+    assert!(v.windows(2).all(|w| w[0].path <= w[1].path), "sorted by path");
+    assert!(parse_changes("# branch.head main\n").is_empty());
+}
+
+#[test]
+fn working_reads_status_once_and_diff_head_reads_one_file_without_writing() {
+    let run = Arc::new(FakeRunner::new(&["git"]));
+    run.answer("status --porcelain=v2", PORCELAIN);
+    run.answer("diff HEAD", "diff --git a/new.txt b/new.txt\nindex 1..2 100644\n--- a/new.txt\n+++ b/new.txt\n@@ -1 +1,2 @@\n a\n+b\n");
+    let l = local(&run);
+    let w = l.working().unwrap();
+    assert_eq!((w.status.branch.as_str(), w.status.ahead, w.status.behind, w.changes.len(), w.more), ("main", 2, 1, 6, 0));
+    let d = l.diff_head("new.txt").unwrap();
+    assert_eq!((d.files.len(), d.files[0].added), (1, 1));
+    assert!(l.diff_head("../etc/passwd").is_err() && l.diff_head("").is_err());
+    for line in run.lines() {
+        assert!(!line.contains(" commit") && !line.contains(" push") && !line.contains(" checkout") && !line.contains(" pull"), "{line}");
+        assert!(line.contains("GIT") || line.starts_with("git"), "{line}");
+    }
+    let bad = Arc::new(FakeRunner::new(&["git"]));
+    bad.fail("status", 128, "fatal: not a git repository (or any of the parent directories): .git");
+    assert!(local(&bad).working().unwrap_err().text().contains("not a git repository"));
+}

@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 
+use iyakki_agent::gitdiscover::{self, Found};
+use iyakki_agent::pvcguard::KOut;
 use iyakki_agent::gitconn::{self, CertInfo, ClusterGitea, Conns, Connection, GitHttp, Kind, Method, Placement, TestReport, Tls};
 use iyakki_agent::gitkeys::{GitKeys, KeyInfo};
 
@@ -30,6 +32,8 @@ pub struct WizEnv {
     pub user: String,
     /// May this account reach this host at all (the network policy)? `Err` says why not.
     pub egress: Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>,
+    /// Read-only `kubectl` against the dev cluster (not ok when the cluster is not running); called off the UI thread.
+    pub kube: Arc<dyn Fn(&[&str]) -> KOut + Send + Sync>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,12 +92,18 @@ pub enum WizOut {
     Done(Box<Connection>),
     /// "Open Platform services" (no Gitea is installed on the cluster): the wizard is closed and nothing is kept.
     OpenPlatform,
+    /// "Set it up (Quick install: Gitea)" for a Gitea found on the cluster: the wizard is closed, nothing is kept, and the host starts the
+    /// existing Quick install item.
+    QuickInstallGitea,
 }
 
 enum Msg {
     Report(Box<TestReport>),
     Cert(Result<CertInfo, String>),
 }
+
+/// The cluster's own answer about Gitea (see `gitdiscover`).
+type Seen = Vec<Found>;
 
 pub struct GitWizard {
     env: WizEnv,
@@ -104,6 +114,8 @@ pub struct GitWizard {
     /// 0: the Gitea of my cluster, 1: an existing server.
     pub mode: usize,
     pub cluster: Vec<ClusterGitea>,
+    records: Vec<ClusterGitea>,
+    disc_rx: Option<Receiver<Seen>>,
     pub cluster_sel: usize,
     pub method: Method,
     keys: Vec<KeyInfo>,
@@ -136,7 +148,7 @@ impl GitWizard {
         let conns = env.keys.conns();
         let cluster = gitconn::cluster_gitea(&env.dir, &env.user);
         let first = conns.list().is_empty();
-        GitWizard {
+        let mut w = GitWizard {
             keys: env.keys.keys(),
             env,
             step: Step::Kind,
@@ -144,7 +156,9 @@ impl GitWizard {
             kind: 2,
             kind_default_url: String::new(),
             mode: 1,
+            records: cluster.clone(),
             cluster,
+            disc_rx: None,
             cluster_sel: 0,
             method: Method::Token,
             key_sel: 0,
@@ -161,6 +175,36 @@ impl GitWizard {
             staged: None,
             forced: false,
             done: false,
+        };
+        w.discover();
+        w
+    }
+
+    /// Asks the cluster for a Gitea of its own (in the background); the list is merged when the answer comes.
+    pub fn discover(&mut self) {
+        if self.disc_rx.is_some() {
+            return;
+        }
+        let kube = self.env.kube.clone();
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(gitdiscover::discover(&*kube));
+        });
+        self.disc_rx = Some(rx);
+    }
+
+    fn poll_discovery(&mut self) {
+        let Some(rx) = &self.disc_rx else { return };
+        let Ok(found) = rx.try_recv() else { return };
+        self.disc_rx = None;
+        let keep = self.cluster.get(self.cluster_sel).map(|g| g.instance.clone());
+        self.cluster = gitdiscover::merge(self.records.clone(), &found);
+        if let Some(i) = keep.and_then(|k| self.cluster.iter().position(|g| g.instance == k)) {
+            self.cluster_sel = i;
+        }
+        self.cluster_sel = self.cluster_sel.min(self.cluster.len().saturating_sub(1));
+        for g in self.cluster.iter().filter(|g| g.found) {
+            self.env.keys.conns().audit("discover.cluster", &format!("found {}", g.namespace));
         }
     }
 
@@ -401,14 +445,8 @@ impl GitWizard {
                 } else if !ok {
                     self.error = Some("The test did not pass. Fix the problem and test again (r), or press s to save the connection anyway.".into());
                 } else {
-                    if self.tf[F_IDNAME].value.is_empty() {
-                        let n = self.report.as_ref().map(|r| if r.name.is_empty() { r.account.clone() } else { r.name.clone() }).unwrap_or_default();
-                        self.tf[F_IDNAME].set(&n);
-                    }
-                    if self.tf[F_EMAIL].value.is_empty() {
-                        let e = self.report.as_ref().map(|r| r.email.clone()).unwrap_or_default();
-                        self.tf[F_EMAIL].set(&e);
-                    }
+                    // the commit name and email are the person's to give: nothing is copied from the server's account (its profile can
+                    // hold a test or placeholder address); the account's own values are only shown as a hint
                     self.go(Step::Commits);
                 }
             }
@@ -494,6 +532,7 @@ impl GitWizard {
 
     /// Collects the answer of the test (call on every tick).
     pub fn poll(&mut self) {
+        self.poll_discovery();
         let Some(rx) = &self.rx else { return };
         let Ok(m) = rx.try_recv() else { return };
         self.rx = None;
@@ -514,7 +553,7 @@ impl GitWizard {
     pub fn wait(&mut self) {
         for _ in 0..400 {
             self.poll();
-            if self.rx.is_none() {
+            if self.rx.is_none() && self.disc_rx.is_none() {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -666,6 +705,7 @@ impl GitWizard {
                     self.done = true;
                     WizOut::OpenPlatform
                 }
+                8 => self.quick_install_gitea(),
                 _ => WizOut::None,
             },
             Event::Tab(t) if *t >= WIZ_BASE + 100 && *t < WIZ_BASE + 200 => {
@@ -675,6 +715,16 @@ impl GitWizard {
             Event::Key(k) => self.key(k),
             _ => WizOut::None,
         }
+    }
+
+    /// The one action for a Gitea found on the cluster that this computer cannot use yet.
+    fn quick_install_gitea(&mut self) -> WizOut {
+        if !self.cluster.get(self.cluster_sel).is_some_and(|g| g.found) {
+            return WizOut::None;
+        }
+        self.cleanup();
+        self.done = true;
+        WizOut::QuickInstallGitea
     }
 
     /// A click on row `i` of the list of the current step.
@@ -782,6 +832,8 @@ impl GitWizard {
                     self.cluster_sel -= 1;
                 }
             }
+            (Step::Where, Some(Slot::Cluster), Key::Char('r')) => self.discover(),
+            (Step::Where, Some(Slot::Cluster), Key::Char('s')) => return self.quick_install_gitea(),
             (Step::Where, Some(Slot::Cluster), Key::Down) => self.cluster_sel = (self.cluster_sel + 1).min(self.cluster.len().saturating_sub(1)),
             (Step::SignIn, Some(Slot::Method), Key::Left | Key::Right | Key::Char(' ')) => self.method = if self.method == Method::Token { Method::Ssh } else { Method::Token },
             (Step::SignIn, Some(Slot::Method), Key::Down) => self.focus = 1,
@@ -921,10 +973,16 @@ impl GitWizard {
                 g.button(x, *y + 6.0 * s, 13.0 * s, "Open Platform services", accent, Event::Tab(WIZ_BASE + 7));
             }
             for (k, c) in self.cluster.iter().enumerate().take(3) {
-                let sub = if c.problem.is_empty() { format!("{} · {}", c.url, gitconn::placement_of(&c.url, true).label()) } else { format!("{} · {}", c.url, c.problem) };
-                self.row(g, x, *y, w, s, accent, k == self.cluster_sel, Event::Tab(WIZ_BASE + 100 + k), &format!("{} ({})", c.title, c.instance), &sub);
+                let sub = if c.problem.is_empty() { format!("{} · {}", c.url, gitconn::placement_of(&c.url, true).label()) } else if c.url.is_empty() { c.problem.clone() } else { format!("{} · {}", c.url, c.problem) };
+                let title = if c.found { format!("{} · namespace {}", c.title, c.namespace) } else { format!("{} ({})", c.title, c.instance) };
+                self.row(g, x, *y, w, s, accent, k == self.cluster_sel, Event::Tab(WIZ_BASE + 100 + k), &title, &sub);
                 *y += 52.0 * s;
             }
+            if self.cluster.get(self.cluster_sel).is_some_and(|c| c.found) {
+                g.button(x, *y + 4.0 * s, 13.0 * s, gitdiscover::ACTION, accent, Event::Tab(WIZ_BASE + 8));
+                *y += 36.0 * s;
+            }
+            g.text(x, *y + 4.0 * s, 12.0 * s, DIM, if self.disc_rx.is_some() { "Looking at your cluster..." } else { "R looks at your cluster again." }, Face::Sans);
         } else {
             self.field(g, x, y, w, s, accent, blink, if self.kind_value() == Kind::Gitea { "Address of the server" } else { "Address of the host (change it for an Enterprise or self-hosted server)" }, F_URL, cur == Some(Slot::Url));
             let u = self.tf[F_URL].value.trim();
@@ -1075,6 +1133,13 @@ impl GitWizard {
             g.text(x, *y, 13.0 * s, MUTED, &l, Face::Sans);
             *y += 18.0 * s;
         }
+        if let Some(r) = self.report.as_ref().filter(|r| !r.name.is_empty() || !r.email.is_empty()) {
+            let hint = format!("Your account on the server shows {} {}. Type them below if you want to commit as that; nothing is filled in for you.", if r.name.is_empty() { r.account.clone() } else { r.name.clone() }, if r.email.is_empty() { String::new() } else { format!("<{}>", r.email) });
+            for l in g.wrap(12.0 * s, hint.trim(), Face::Sans, w) {
+                g.text(x, *y + 4.0 * s, 12.0 * s, MUTED, &l, Face::Sans);
+                *y += 16.0 * s;
+            }
+        }
         *y += 6.0 * s;
         self.field(g, x, y, w, s, accent, blink, "Name", F_IDNAME, cur == Some(Slot::IdName));
         self.field(g, x, y, w, s, accent, blink, "Email", F_EMAIL, cur == Some(Slot::Email));
@@ -1095,18 +1160,42 @@ pub fn dot_color(c: &Connection) -> [u8; 4] {
     }
 }
 
+/// Starts the existing Quick install item "Gitea" (it keeps existing volumes and hands the token to the vault). Returns the plain line.
+pub fn start_quick_install_gitea(cx: &super::AppCx) -> Result<String, String> {
+    use iyakki_agent::quickinstall as qi;
+    if !cx.session.policy.manage_settings {
+        return Err(format!("Only an administrator can install software for the whole machine (your role is {}).", cx.session.role.name()));
+    }
+    let launch = qi::Launch::this_program(cx.services.dir())?;
+    let svc = &cx.services;
+    let present = |i: qi::Item| qi::presence(svc, i).present();
+    let started = qi::start(&svc.jobs, &cx.session.user, qi::Item::Gitea, &present, &launch)?;
+    cx.audit.record(&cx.session.user, "quickinstall.start", &format!("{} (from the Git wizard)", qi::Item::Gitea.id()));
+    Ok(format!("Started the Quick install for Gitea ({} step{}). Your existing Gitea data is kept. Progress is beside the clock; when it finishes, the token waits for your vault (unlock it) and Add connection will offer it.", started.len(), if started.len() == 1 { "" } else { "s" }))
+}
+
 impl WizEnv {
     /// The real thing for the signed-in person: curl through the system runner, the person's policy for the network.
     /// `http` replaces the network in tests.
     pub fn real(cx: &super::AppCx, keys: Arc<GitKeys>, http: Option<Arc<dyn GitHttp>>) -> WizEnv {
         let policy = cx.session.policy.clone();
-        let http: Arc<dyn GitHttp> = http.unwrap_or_else(|| Arc::new(gitconn::CurlGit { run: Arc::new(iyakki_agent::wsexec::System), tmp: iyakki_agent::kubeprofiles::temp_dir().unwrap_or_else(std::env::temp_dir) }));
+        let http: Arc<dyn GitHttp> = http.unwrap_or_else(|| Arc::new(iyakki_agent::gitnet::NetGit::default()));
         WizEnv {
             keys,
             http,
             dir: cx.services.dir().to_path_buf(),
             user: cx.session.user.clone(),
             egress: Arc::new(move |h| if policy.allows_host(h) { Ok(()) } else { Err(format!("Your account may not reach {h} (the network policy of this account).")) }),
+            kube: {
+                let k3s = cx.services.k3sdev.clone();
+                Arc::new(move |a: &[&str]| {
+                    if k3s.state() != iyakki_agent::k3sdev::Svc::Running {
+                        return KOut::default();
+                    }
+                    let o = k3s.kubectl(a);
+                    KOut { ok: o.code == Some(0), stdout: o.stdout.clone(), text: o.combined() }
+                })
+            },
         }
     }
 }

@@ -147,7 +147,7 @@ pub fn query(server: &str, timeout: Duration) -> Result<Reply, String> {
 /// Set the system clock to `unix` seconds (root only).
 #[cfg(unix)]
 pub fn set_clock(unix: f64) -> Result<(), String> {
-    let ts = libc::timespec { tv_sec: unix.floor() as libc::time_t, tv_nsec: ((unix - unix.floor()) * 1e9) as _ };
+    let ts = libc::timespec { tv_sec: unix.floor() as _, tv_nsec: ((unix - unix.floor()) * 1e9) as _ };
     // SAFETY: `ts` is a valid timespec that lives for the call.
     let rc = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
     if rc == 0 { Ok(()) } else { Err(format!("could not set the clock: {}", std::io::Error::last_os_error())) }
@@ -176,6 +176,14 @@ static STATUS: Mutex<Option<Status>> = Mutex::new(None);
 
 pub fn status() -> Status {
     STATUS.lock().ok().and_then(|s| s.clone()).unwrap_or_default()
+}
+
+/// Puts the status back to "never asked" (a test that draws the Time page, so the text on it does not depend on what other tests asked).
+#[doc(hidden)]
+pub fn reset_status() {
+    if let Ok(mut s) = STATUS.lock() {
+        *s = None;
+    }
 }
 
 fn set_status(f: impl FnOnce(&mut Status)) {

@@ -26,6 +26,10 @@ impl SettingsApp {
     pub(super) fn handle_sysnd(&mut self, k: &Key, cx: &AppCx) {
         let sel = self.sel();
         match k {
+            Key::Up => self.move_sel(-1, ROWS),
+            Key::Down => self.move_sel(1, ROWS),
+            Key::Home => self.sel[self.tab] = 0,
+            Key::End => self.sel[self.tab] = ROWS - 1,
             Key::Enter | Key::Char(' ' | 'e') => self.sysnd_toggle(sel, cx),
             Key::Char('p') => self.sysnd_preview(sel, cx),
             Key::Char('+' | '=') => self.sysnd_level(STEP_DB, cx),
@@ -108,10 +112,8 @@ impl SettingsApp {
         let low = a.y + a.h - 44.0 * s;
         let step = |i: usize| if i == 1 { 90.0 * s } else { 64.0 * s };
         let sel = self.sel().min(ROWS - 1);
-        let mut first = 0;
-        while first < sel && a.y + (first..sel).map(step).sum::<f32>() + step(sel) > low {
-            first += 1;
-        }
+        let steps: Vec<f32> = (0..ROWS).map(step).collect();
+        let first = self.win[self.tab].layout(sel, &steps, low - a.y + 8.0 * s);
         let mut y = a.y;
         for i in first..ROWS {
             if y + if i == 1 { 82.0 * s } else { 58.0 * s } > low + 8.0 * s {

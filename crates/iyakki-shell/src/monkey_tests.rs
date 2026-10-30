@@ -139,7 +139,7 @@ pub fn run_case(sh: &mut Shell, app: Option<PApp>, size: (u32, u32), seed: u64, 
     CAUGHT.with(|c| *c.borrow_mut() = Some(Vec::new()));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut log: Vec<String> = Vec::new();
-        let mut render = |sh: &mut Shell, g: &mut Gfx, idx: usize, log: &mut Vec<String>| -> Option<String> {
+        let render = |sh: &mut Shell, g: &mut Gfx, idx: usize, log: &mut Vec<String>| -> Option<String> {
             let t0 = std::time::Instant::now();
             sh.render(g);
             if t0.elapsed().as_millis() > 400 && std::env::var("IYAKKI_MONKEY_VERBOSE").is_ok() {
@@ -161,7 +161,7 @@ pub fn run_case(sh: &mut Shell, app: Option<PApp>, size: (u32, u32), seed: u64, 
             let (w, h) = size;
             let hits: Vec<R> = sh.hits().iter().map(|x| x.rect).collect();
             // where to point: a control (most of the time) or anywhere, edges included
-            let mut point = |r: &mut Rng| -> (i32, i32) {
+            let point = |r: &mut Rng| -> (i32, i32) {
                 if !hits.is_empty() && r.below(10) < 7 {
                     let b = hits[r.below(hits.len() as u64) as usize];
                     (b.x as i32 + r.range(0, b.w.max(1.0) as i32), b.y as i32 + r.range(0, b.h.max(1.0) as i32))
@@ -531,7 +531,7 @@ fn monkey_chat_tales_voice_edit() {
 
 #[test]
 fn monkey_data_dash_flows_store() {
-    run_apps("monkey-data", &[Some(PApp::Data), Some(PApp::Dash), Some(PApp::Flows), Some(PApp::Store), Some(PApp::K8s), Some(PApp::Git), Some(PApp::Browser)], false);
+    run_apps("monkey-data", &[Some(PApp::Data), Some(PApp::Dash), Some(PApp::Flows), Some(PApp::Store), Some(PApp::K8s), Some(PApp::Git), Some(PApp::Doctor), Some(PApp::Learn), Some(PApp::Browser)], false);
 }
 
 /// The cluster switchers (the K8S tile's header, the AI IDE's Kubernetes panel, the Store -> Setup popups) with several clusters in the
@@ -599,4 +599,327 @@ fn monkey_replay() {
     if let Err(e) = run_case(&mut sh, app, size, seed, events, 5) {
         panic!("{e}");
     }
+}
+
+// ---- the overflow detector (KI-015): every tile and page at the largest text size and the small windows -------------------------------
+
+/// The window sizes people actually have small screens at (a phone in a browser, a small tablet, a laptop).
+const OVERFLOW_SIZES: [(u32, u32); 3] = [(360, 740), (800, 480), (1366, 768)];
+/// "Huge" in Settings -> Display, the largest text-size setting.
+fn largest_text_size() -> f32 {
+    crate::uisize::LEVELS[crate::uisize::LEVELS.len() - 1].1
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct Overflow {
+    pub what: &'static str,
+    pub text: String,
+    pub other: String,
+    /// Where it is, for a person looking for it: the text box and the box it ran out of.
+    pub at: String,
+}
+
+fn intersect(a: R, b: R) -> Option<R> {
+    let (x0, y0, x1, y1) = (a.x.max(b.x), a.y.max(b.y), (a.x + a.w).min(b.x + b.w), (a.y + a.h).min(b.y + b.h));
+    (x1 > x0 && y1 > y0).then(|| R::new(x0, y0, x1 - x0, y1 - y0))
+}
+
+fn covers(outer: R, inner: R) -> bool {
+    outer.x <= inner.x + 0.5 && outer.y <= inner.y + 0.5 && outer.x + outer.w >= inner.x + inner.w - 0.5 && outer.y + outer.h >= inner.y + inner.h - 0.5
+}
+
+/// Checks one drawn frame (`g.layout_log`, `hits`) for text that does not fit where it was put:
+/// * `window`: a text that starts on the screen and ends beyond the right or bottom edge;
+/// * `control`: a text that starts inside a clickable control (button, tab, row) and ends beyond the control's right edge;
+/// * `clip`: a short label (no more than 40 characters) that starts inside a clipped area (a pane, a scroll view) and ends beyond it;
+/// * `overlap`: two different texts whose boxes cross by more than a quarter of the smaller one, with no opaque fill drawn between them
+///   (a popup over a page is such a fill, so it is not reported).
+/// Texts that start outside the screen or outside their clip are scrolled-away content and are not looked at.
+pub(crate) fn find_overflows(g: &Gfx, hits: &[R]) -> Vec<Overflow> {
+    let (w, h) = (g.width() as f32, g.height() as f32);
+    let log = &g.layout_log;
+    let mut out = Vec::new();
+    let mut add = |what, t: &str, o: &str, at: String| {
+        let f = Overflow { what, text: t.chars().take(40).collect(), other: o.chars().take(40).collect(), at };
+        if !out.iter().any(|x: &Overflow| x.what == f.what && x.text == f.text && x.other == f.other) {
+            out.push(f);
+        }
+    };
+    let bx = |r: R| format!("{:.0},{:.0} {:.0}x{:.0}", r.x, r.y, r.w, r.h);
+    for (_, r, clip, s) in &log.texts {
+        let (px, py) = (r.x + 1.0, r.y + r.h / 2.0);
+        if clip.is_some_and(|c| !c.contains(px as i32, py as i32)) || px < 0.0 || py < 0.0 || px >= w || py >= h {
+            continue;
+        }
+        // what can be seen: a text cut by its clip is judged against the clip, not the window
+        let right = clip.map_or(r.x + r.w, |c| (r.x + r.w).min(c.x + c.w));
+        let bottom = clip.map_or(r.y + r.h, |c| (r.y + r.h).min(c.y + c.h));
+        if right > w + 1.0 || bottom > h + 1.0 {
+            add("window", s, "", bx(*r));
+        }
+        // a control made for this text (not a whole row or pane): the text must end inside it
+        if let Some(c) = hits.iter().filter(|c| c.contains(px as i32, py as i32) && c.w > 4.0 && c.h > 4.0 && c.h <= r.h * 2.5).min_by(|a, b| (a.w * a.h).total_cmp(&(b.w * b.h))) {
+            if right > c.x + c.w + 2.0 {
+                add("control", s, "", format!("text {} in {}", bx(*r), bx(*c)));
+            }
+        }
+        if let Some(c) = clip {
+            if s.chars().count() <= 40 && r.x + r.w > c.x + c.w + 1.0 {
+                add("clip", s, "", format!("text {} in {}", bx(*r), bx(*c)));
+            }
+        }
+    }
+    for (i, (sa, ra, ca, a)) in log.texts.iter().enumerate() {
+        for (sb, rb, cb, b) in log.texts.iter().skip(i + 1) {
+            // two clock readings in one place are the same clock read on both sides of a minute change, not two texts
+            let clock = |t: &str| t.len() == 5 && t.as_bytes()[2] == b':' && t.bytes().enumerate().all(|(i, c)| i == 2 || c.is_ascii_digit());
+            if a == b || ra.w < 2.0 || rb.w < 2.0 || (clock(a) && clock(b)) {
+                continue;
+            }
+            let Some(x) = intersect(*ra, *rb) else { continue };
+            if x.w * x.h <= 0.25 * (ra.w * ra.h).min(rb.w * rb.h) {
+                continue;
+            }
+            // one text drawn beyond the visible part of its clip, or hidden by a fill drawn between the two
+            if ca.is_some_and(|c| intersect(c, x).is_none()) || cb.is_some_and(|c| intersect(c, x).is_none()) {
+                continue;
+            }
+            if log.fills.iter().any(|(sf, f)| sf > sa && sf < sb && covers(*f, x)) {
+                continue;
+            }
+            add("overlap", a, b, format!("{} and {}", bx(*ra), bx(*rb)));
+        }
+    }
+    out
+}
+
+/// What is drawn when `app` (`None` = the launcher; `tab` is sent as a tab key first) is open at `size`: the findings of the last frame.
+fn overflow_case(sh: &mut Shell, g: &mut Gfx, app: Option<PApp>, store_setup: bool, tab: usize, size: (u32, u32)) -> Vec<Overflow> {
+    sh.resize_for_test(size.0, size.1);
+    match app {
+        Some(PApp::Ide) => open_ide_with_workspace(sh),
+        Some(PApp::Store) if store_setup => open_store_setup(sh),
+        Some(a) => sh.open_for_test(a),
+        None => sh.launcher_for_test(),
+    }
+    if tab > 0 {
+        sh.handle(&Event::Tab(tab));
+    }
+    // twice: the first frame lets lazy state (sizes, lists) settle
+    for n in 0..2 {
+        g.layout_log = Default::default();
+        g.text_log.clear();
+        let t0 = std::time::Instant::now();
+        sh.render(g);
+        if std::env::var("IYAKKI_OVERFLOW_REPORT").is_ok() {
+            eprintln!("  frame {n}: {:?}, {} texts", t0.elapsed(), g.layout_log.texts.len());
+        }
+    }
+    let hits: Vec<R> = sh.hits().iter().map(|x| x.rect).collect();
+    find_overflows(g, &hits)
+}
+
+/// The cases the detector walks: (name, app, Store Setup, tab).
+fn overflow_cases() -> Vec<(String, Option<PApp>, bool, usize)> {
+    let mut v: Vec<(String, Option<PApp>, bool, usize)> = vec![("launcher".into(), None, false, 0), ("store-setup".into(), Some(PApp::Store), true, 0)];
+    // Settings has a page per tab, named by its label ("settings/Models"), not by its place in the list: a new page cannot shift the known lists
+    let settings_cx = crate::apps::tests::cx_with_admin_store("overflow-cases");
+    let pages: Vec<&'static str> = crate::apps::settings::SettingsApp::new(&settings_cx).tabs().iter().map(|t| t.label()).collect();
+    for a in PApp::ALL {
+        if a == PApp::Settings {
+            for (tab, label) in pages.iter().enumerate() {
+                v.push((format!("settings/{label}"), Some(a), false, tab));
+            }
+        } else {
+            v.push((a.id().to_string(), Some(a), false, 0));
+        }
+    }
+    v
+}
+
+/// Known findings (KNOWN-ISSUES.md KI-015): (case name, "WxH"). The test fails for any finding not listed here; when one is fixed, take it out of
+/// the list (the test prints the ones that did not show).
+#[rustfmt::skip]
+const KNOWN_OVERFLOWS: &[(&str, &str)] = &[
+    ("launcher", "800x480"), ("launcher", "360x740"), ("chat", "800x480"), ("chat", "1366x768"), ("rag", "360x740"),
+    ("mcp", "360x740"), ("users", "360x740"), ("users", "800x480"), ("users", "1366x768"),
+    ("settings/Overview", "360x740"), ("settings/Account", "360x740"), ("settings/Account", "800x480"), ("settings/Notifications", "360x740"),
+    ("settings/Notifications", "800x480"), ("settings/Vault", "360x740"), ("settings/Vault", "800x480"), 
+    ("settings/Secret providers", "360x740"), ("settings/Secret providers", "800x480"), ("settings/Models", "360x740"),
+    ("settings/Models", "800x480"), ("settings/Models", "1366x768"), ("settings/Agents", "360x740"), ("settings/Agents", "800x480"),
+    ("settings/Agents", "1366x768"), ("settings/Skills", "360x740"), ("settings/Skills", "800x480"), ("settings/RAG", "360x740"), ("settings/RAG", "800x480"), ("settings/RAG", "1366x768"), ("settings/Voice", "360x740"),
+    ("settings/Voice", "800x480"), ("settings/Voice", "1366x768"), ("settings/Browser", "360x740"), ("settings/Browser", "800x480"),
+    ("settings/Browser", "1366x768"), ("settings/Host access", "360x740"), ("settings/Network", "360x740"), ("settings/Network", "800x480"),
+    ("settings/Firewall", "360x740"), ("settings/Shared folders", "360x740"), ("settings/Shared folders", "800x480"), ("settings/Display", "360x740"), ("settings/Display", "800x480"), ("settings/Displays", "360x740"), ("settings/Displays", "800x480"),
+    ("settings/Screen saver", "360x740"), ("settings/Home layout", "360x740"), ("settings/Home layout", "800x480"), ("settings/Sound", "360x740"),
+    ("settings/System sounds", "360x740"), ("settings/Bluetooth", "360x740"), ("settings/Bluetooth", "800x480"), ("settings/Keyboard", "360x740"),
+    ("settings/Keyboard", "800x480"), ("settings/Keyboard", "1366x768"), ("settings/Time", "360x740"), ("settings/Time", "800x480"),
+    ("settings/Time", "1366x768"), ("settings/Host name", "360x740"), ("settings/Host name", "800x480"), ("settings/Last session log", "360x740"),
+    ("settings/Startup", "360x740"), ("settings/Memory", "360x740"), ("settings/Memory", "800x480"),
+    ("settings/Storage", "360x740"), ("settings/Storage", "800x480"), ("settings/Cloud mode", "360x740"), ("settings/Cloud mode", "800x480"),
+    ("settings/Developer mode", "360x740"), ("settings/Developer mode", "800x480"), ("settings/Developer mode", "1366x768"), ("mesh", "360x740"),
+    ("radio", "360x740"), ("radio", "800x480"), ("scan", "360x740"), ("scan", "800x480"),
+    ("skills", "360x740"), ("usage", "360x740"),
+    ("usage", "800x480"), ("usage", "1366x768"), ("calendar", "360x740"), ("system", "360x740"),
+    ("system", "800x480"), ("system", "1366x768"), ("media", "360x740"), ("media", "800x480"),
+    ("srepilot", "360x740"), ("inbox", "800x480"), ("tales", "800x480"), ("dash", "360x740"),
+    ("camera", "360x740"), ("camera", "1366x768"), ("lab", "360x740"), ("lab", "800x480"),
+    ("lab", "1366x768"),
+    // pages the test did not reach before the list was keyed by name (the old loop stopped at 31 pages): not new breakage
+    ("settings/Clusters", "360x740"), ("settings/Clusters", "800x480"), ("settings/Clusters", "1366x768"),
+    ("settings/Git and SSH keys", "360x740"), ("settings/Git and SSH keys", "800x480"), ("settings/Git and SSH keys", "1366x768"),
+    // the left page list takes the width at 360: the same cause as every other Settings page at this size
+    ("settings/SSH tunnels", "360x740"), ("settings/VPN", "360x740"),
+    ("settings/Backup and restore", "360x740"), ("settings/System update", "360x740"),
+];
+
+/// Known findings at the other window and text sizes (KNOWN-ISSUES.md KI-015): (case name, "WxH@N%").
+#[rustfmt::skip]
+const KNOWN_OVERFLOWS_MATRIX: &[(&str, &str)] = &[
+    ("settings/Models", "1280x720@150%"), ("settings/Agents", "1280x720@150%"), ("settings/RAG", "1280x720@150%"), ("settings/Voice", "1280x720@150%"),
+    ("settings/Keyboard", "1280x720@150%"),
+];
+
+/// The name a window size and text size are listed under: "WxH" at the largest text size (the original list), "WxH@100%" otherwise.
+fn overflow_size_name(size: (u32, u32), text: f32) -> String {
+    if text == largest_text_size() {
+        format!("{}x{}", size.0, size.1)
+    } else {
+        format!("{}x{}@{}%", size.0, size.1, (text * 100.0).round() as u32)
+    }
+}
+
+/// Every case of [`overflow_cases`] at every window size in `sizes` and every text size in `texts`: (case, size name, findings).
+/// `IYAKKI_OVERFLOW_ONLY=settings/Vault` keeps one case.
+fn overflow_matrix(sizes: &[(u32, u32)], texts: &[f32]) -> Vec<(String, String, Vec<Overflow>)> {
+    install_hook();
+    let mut sh = signed("overflow");
+    let mut all = Vec::new();
+    let only = std::env::var("IYAKKI_OVERFLOW_ONLY").ok();
+    let verbose = std::env::var("IYAKKI_OVERFLOW_REPORT").is_ok();
+    // one Gfx per size, kept: loading the fonts and warming the glyph cache is most of the cost of a frame
+    let mut gfx: Vec<Gfx> = sizes.iter().map(|z| Gfx::new(z.0, z.1)).collect();
+    for &text in texts {
+        crate::ui::set_ui_size(text);
+        for (name, app, setup, tab) in overflow_cases() {
+            if only.as_deref().is_some_and(|o| o != name) {
+                continue;
+            }
+            for (si, size) in sizes.iter().copied().enumerate() {
+                let t0 = std::time::Instant::now();
+                // the Time page prints what the last time-server probe said, kept for the whole process: other tests that ask a (fake) server leave their words there
+                iyakki_agent::ntp::reset_status();
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| overflow_case(&mut sh, &mut gfx[si], app, setup, tab, size)));
+                if verbose {
+                    eprintln!("overflow case {name} {}: {:?}", overflow_size_name(size, text), t0.elapsed());
+                }
+                if let Ok(f) = r {
+                    if !f.is_empty() {
+                        all.push((name.clone(), overflow_size_name(size, text), f));
+                    }
+                }
+            }
+        }
+    }
+    crate::ui::set_ui_size(1.0);
+    all
+}
+
+fn overflow_report() -> Vec<(String, String, Vec<Overflow>)> {
+    overflow_matrix(&OVERFLOW_SIZES, &[largest_text_size()])
+}
+
+/// Settings pages by name (the case names are "settings/<page>"), for a report a person can read.
+fn overflow_page_label(case: &str) -> String {
+    match case.strip_prefix("settings/") {
+        Some(label) => format!("Settings -> {label}"),
+        None => case.to_string(),
+    }
+}
+
+/// The findings as a table (page, size, kind, text), one line each: what goes into KNOWN-ISSUES.md KI-015.
+fn overflow_table(found: &[(String, String, Vec<Overflow>)]) -> String {
+    let mut labels: std::collections::HashMap<String, String> = Default::default();
+    let mut out = String::from("| page | size | kind | text |\n|---|---|---|---|\n");
+    for (name, size, items) in found {
+        let page = labels.entry(name.clone()).or_insert_with(|| overflow_page_label(name)).clone();
+        for o in items {
+            let text = if o.other.is_empty() { o.text.clone() } else { format!("{} / {}", o.text, o.other) };
+            out.push_str(&format!("| {page} | {size} | {} | {} |\n", o.what, text.replace('|', "/")));
+        }
+    }
+    out
+}
+
+/// The detector itself finds a text that runs out of its button, off the window, out of its pane, and into its neighbour -- and leaves a popup over a page alone.
+#[test]
+fn overflow_detector_finds_what_it_should_and_nothing_else() {
+    let mut g = Gfx::new(200, 100);
+    let face = crate::gfx::Face::Sans;
+    g.layout_log = Default::default();
+    g.text(150.0, 5.0, 16.0, [255; 4], "far too long for the window", face);
+    g.text(5.0, 30.0, 16.0, [255; 4], "long label in a small button", face);
+    g.clipped(R::new(5.0, 55.0, 60.0, 20.0), |g| {
+        g.text(8.0, 57.0, 14.0, [255; 4], "label wider than the pane", face);
+    });
+    g.text(100.0, 80.0, 14.0, [255; 4], "overlapping", face);
+    g.text(110.0, 80.0, 14.0, [255; 4], "texts here", face);
+    // a popup over a page: page text, an opaque panel, text on the panel at the same place
+    g.text(5.0, 10.0, 14.0, [255; 4], "page text behind", face);
+    g.rect(0.0, 0.0, 140.0, 28.0, [10, 10, 10, 255]);
+    g.text(5.0, 10.0, 14.0, [255; 4], "popup text", face);
+    let f = find_overflows(&g, &[R::new(5.0, 30.0, 40.0, 20.0)]);
+    let kinds: Vec<(&str, &str)> = f.iter().map(|o| (o.what, o.text.as_str())).collect();
+    assert!(kinds.contains(&("window", "far too long for the window")), "{kinds:?}");
+    assert!(kinds.contains(&("control", "long label in a small button")), "{kinds:?}");
+    assert!(kinds.contains(&("clip", "label wider than the pane")), "{kinds:?}");
+    assert!(kinds.iter().any(|k| k.0 == "overlap" && k.1 == "overlapping"), "{kinds:?}");
+    assert!(!kinds.iter().any(|k| k.1.contains("popup") || k.1.contains("page text")), "a popup over a page is not an overlap: {kinds:?}");
+}
+
+/// Every tile and page at the largest text size in four small window sizes: no text leaves its control, pane or the window, and no two texts
+/// run into each other. Failures that are not fixed yet are in `KNOWN_OVERFLOWS` and in KNOWN-ISSUES.md.
+/// `IYAKKI_OVERFLOW_REPORT=1 cargo test -p iyakki-shell --lib overflow_every_tile -- --nocapture` prints everything found.
+#[test]
+fn overflow_every_tile_at_the_largest_text_size() {
+    assert_known_overflows(&overflow_report(), KNOWN_OVERFLOWS);
+}
+
+/// Fails for a finding that is not in `known` and prints the table of everything found with `IYAKKI_OVERFLOW_REPORT=1`.
+fn assert_known_overflows(found: &[(String, String, Vec<Overflow>)], known: &[(&str, &str)]) {
+    if std::env::var("IYAKKI_OVERFLOW_REPORT").is_ok() {
+        for (n, s, f) in found {
+            eprintln!("OVERFLOW {n} {s}: {f:?}");
+        }
+        eprintln!("{}", overflow_table(found));
+    }
+    let keys: Vec<(String, String)> = found.iter().map(|(n, s, _)| (n.clone(), s.clone())).collect();
+    let new: Vec<String> = found.iter().filter(|(n, s, _)| !known.iter().any(|(kn, ks)| kn == n && ks == s)).map(|(n, s, f)| format!("{n} {s}: {f:?}")).collect();
+    let gone: Vec<String> = known.iter().filter(|(kn, ks)| !keys.iter().any(|(n, s)| n == kn && s == ks)).map(|(n, s)| format!("{n} {s}")).collect();
+    assert!(new.is_empty(), "text does not fit (fix it, or list it in KNOWN_OVERFLOWS and KNOWN-ISSUES.md KI-015):\n{}", new.join("\n"));
+    // not an error: some findings depend on the machine's live numbers (load, memory), so a listed case may come and go
+    if !gone.is_empty() {
+        eprintln!("these known overflows did not show this time (remove them from the list and from KNOWN-ISSUES.md if they stay away): {gone:?}");
+    }
+}
+
+/// The screens most people have, at the text sizes most people use: a 1280x720 window at Normal and Larger text and a 2560x1600 one at the same two.
+/// (The small windows at the largest text are the test above; every size at every text size is the ignored test below.)
+#[test]
+fn overflow_every_tile_at_laptop_and_large_screens() {
+    let mut found = overflow_matrix(&[(1280, 720)], &[1.0, 1.5]);
+    // the big screen is the slow part: two text sizes here, the others in the ignored test
+    found.extend(overflow_matrix(&[(2560, 1600)], &[1.0, 1.5]));
+    assert_known_overflows(&found, KNOWN_OVERFLOWS_MATRIX);
+}
+
+/// The whole matrix, minutes long: `cargo test -p iyakki-shell --lib overflow_every_tile_at_every -- --ignored`.
+#[test]
+#[ignore]
+fn overflow_every_tile_at_every_size_and_text_size() {
+    let texts: Vec<f32> = crate::uisize::LEVELS.iter().map(|l| l.1).collect();
+    let mut found = overflow_matrix(&[(360, 740), (800, 480), (1366, 768), (1280, 720), (2560, 1600)], &texts);
+    // the sizes the other tests own are judged by their lists
+    found.retain(|(n, s, _)| !KNOWN_OVERFLOWS.iter().any(|(kn, ks)| kn == n && ks == s));
+    assert_known_overflows(&found, KNOWN_OVERFLOWS_MATRIX);
 }

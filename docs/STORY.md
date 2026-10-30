@@ -294,6 +294,19 @@ mirrored). Selecting and copying work as before. **Settings -> Voice -> Highligh
 *Sentence only* or *Off* (nothing is lit; the page still scrolls along). Frames are asked for only while reading (about ten a
 second, as for the jobs strip); paused, the highlight stands still, and stop clears it.
 
+**Keeping the lit word on the voice (2026-10-25).** The reader polls the speaker's heard position every 15 ms into the word clock
+(`wordtime::HeardFollower`), which goes to that position at once, forward as far as it is (a stall that ends is caught up in one
+step) and never steps back for a wobble under 25 ms; a position that stands still for 60 ms stops the clock. Nothing is
+subtracted any more for "the sound card's buffer" (the old fixed 350 ms made the word lag by more than a word at fast speech): the
+mixer's own heard-position model now adds what its sink reports the card holds beyond the 300 ms lead (aplay's 500 ms buffer starts
+only when full: +200 ms), and the rest is left to **Settings -> Sound -> Advanced -> Highlight timing offset** (-500 to 500 ms, 0 by
+default, the machine's setting: positive lights the word later, negative earlier; keys `+` and `-` step 25 ms, Enter sets 0). Words
+are timed over the speech only: the silence the engine pads the sound with (measured from the 20 ms envelope, `story::speech_edges`)
+is taken out of the fit, so the later words are no longer late by up to the padding. While reading, a frame is drawn at the
+very next 33 ms heartbeat after the lit word changed (before: every third heartbeat, up to 100 ms late). Each sentence writes one
+log line (`dev dmesg`): `reading: sentence N of M: sound X ms, heard Y ms, word clock at Z ms, clock behind the sound by at most
+.. ms and ahead by at most .. ms, longest gap between polls .. ms, highlight offset .. ms`.
+
 Where the word comes from, best first (`wordtime`, pure and unit-tested):
 
 1. **Exact: the browser voice.** The page reports each word's start (`boundary` events, `charIndex`); the reader maps it to the
@@ -321,6 +334,19 @@ OpenAI's six (alloy, echo, fable, onyx, nova, shimmer) when the endpoint is Open
 (for example `1.25`) and `{length_scale}` (`1 / speed`, what piper's `--length_scale` takes); a command without those words has
 neither chip. Changing either while reading starts the current piece again with the new voice. The choice is remembered
 per account.
+
+### What it costs to draw while reading aloud
+
+The story screen is cheap to draw, also while it is read (measured at 2880x1800 with a 3000-word story and a 1344x768 picture: a
+whole frame about 16 ms where it took about 85 ms, the frames of the reading animation about 1 ms). Three things make it so:
+the picture is scaled once to the size of its slot and kept (a frame is then a plain copy); the wrapped text is kept per unit and
+per column width, and only a changed paragraph is wrapped again; and between two whole frames the screen repaints only what
+moves: the lines of the sentence and word that were lit and are lit now, the player bar, and the glow of the text card when the
+sound level changed it. These parts are rectangles that the shell hands to the screen write (`App::live_rects`,
+`Framebuffer::present_rects`), a few percent of the screen. A whole frame is drawn instead when anything else changes (the page
+scrolls to a word on a new line, a note, an error, a menu, a selection, a picture being made, the caret of the idea box
+blinking) and at least every 1.5 seconds. The frame log of the shell counts the partial frames as "tile-only". Not measured on
+a real screen yet.
 
 ### When there is no speech engine
 

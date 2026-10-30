@@ -51,7 +51,7 @@ fn audit(cx: &AppCx) -> String {
     std::fs::read_to_string(cx.audit.path()).unwrap_or_default().replace("\\\"", "\"")
 }
 
-const CLUSTER_ITEMS: [Item; 5] = [Item::Registry, Item::Lemonade, Item::IndicTts, Item::DuckDb, Item::Elasticsearch];
+const CLUSTER_ITEMS: [Item; 4] = [Item::Registry, Item::Lemonade, Item::DuckDb, Item::Elasticsearch];
 
 #[test]
 fn with_one_cluster_no_popup_shows_a_switcher_and_the_deploy_text_names_this_machine() {
@@ -134,14 +134,6 @@ fn choosing_a_cluster_in_the_popup_switches_it_names_it_and_setup_installs_only_
     assert!(!audit(&cx).contains("quickinstall.start"));
     // Indic-TTS goes through Platform services, which follow the active cluster: the hand-off is audited with the cluster
     a.setup.popup = None;
-    let (mut b, cx2) = rig("ssc-indic", Role::Admin, Machine { ram_mb: 16_000, ..Default::default() }, &[Item::K3s], true);
-    iyakki_agent::clusters::switch(cx2.services.dir(), cx2.services.dir(), &cx2.session.user, Role::Admin, "gpu-box").unwrap();
-    b.setup.enter(&cx2);
-    draw(&mut b, &cx2, 1280, 800);
-    b.setup.open_popup(Item::IndicTts);
-    b.setup.press(Item::IndicTts, &cx2);
-    assert_eq!(b.setup.request, Some(("settings".to_string(), "platform:indic-tts".to_string())));
-    assert!(audit(&cx2).contains("quickinstall.handoff") && audit(&cx2).contains("Deploy Indic-TTS to cluster \"gpu-box\" (remote)"), "{}", audit(&cx2));
 }
 
 #[test]

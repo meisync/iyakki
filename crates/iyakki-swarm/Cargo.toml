@@ -6,7 +6,16 @@ license.workspace = true
 
 [dependencies]
 iyakki-wasm.workspace = true
-libp2p = { version = "0.57", default-features = false, features = ["tokio", "tcp", "noise", "yamux", "mdns", "request-response", "cbor", "macros"] }
+# The individual libp2p crates, not the `libp2p` umbrella: the umbrella's weak optional dependency on
+# libp2p-upnp (-> igd-next -> attohttpc, MPL-2.0) puts those crates in Cargo.lock even though we never build them.
+libp2p-core = "0.44"
+libp2p-identity = { version = "0.3", features = ["ed25519", "rand"] }
+libp2p-swarm = { version = "0.48", features = ["tokio", "macros"] }
+libp2p-tcp = { version = "0.45", features = ["tokio"] }
+libp2p-noise = "0.47"
+libp2p-yamux = "0.48"
+libp2p-mdns = { version = "0.49", features = ["tokio"] }
+libp2p-request-response = { version = "0.30", features = ["cbor"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 futures = "0.3"

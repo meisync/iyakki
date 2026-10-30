@@ -150,40 +150,46 @@ pub fn draw(g: &mut Gfx, r: R, s: f32, entries: &[Entry], selected: usize, scrol
     g.rrect(r.x, r.y, r.w, r.h, 16.0 * s, rgb(16, 21, 40));
     let list_top = r.y + (SEARCH_H + 10.0) * s;
     let view = view_height(r.h, s);
-    let mut y = 0.0;
-    for e in entries {
-        let eh = entry_height(e, s);
-        let (top, bottom) = (y - scroll, y - scroll + eh);
-        y += eh;
-        if bottom < 0.0 || top > view {
-            continue;
-        }
-        let ry = list_top + top;
-        match e {
-            Entry::Group(name) => {
-                let head = g.fit(12.0 * s, &name.to_uppercase(), Face::Bold, r.w - 36.0 * s);
-                g.text(r.x + 18.0 * s, ry + 10.0 * s, 12.0 * s, DIM, &head, Face::Bold);
+    // a row half out of the list is cut at its edge, not drawn over the page's border or off the window
+    g.clipped(R::new(r.x, list_top, r.w, view), |g| {
+        let mut y = 0.0;
+        for e in entries {
+            let eh = entry_height(e, s);
+            let (top, bottom) = (y - scroll, y - scroll + eh);
+            y += eh;
+            if bottom < 0.0 || top > view {
+                continue;
             }
-            Entry::Item { tab, label } => {
-                let row = R::new(r.x + 8.0 * s, ry + 2.0 * s, r.w - 16.0 * s, eh - 4.0 * s);
-                let on = *tab == selected;
-                let hot = g.hovered(row);
-                if on || hot {
-                    g.rrect(row.x, row.y, row.w, row.h, 10.0 * s, if on { CARD_SEL } else { CARD_HOVER });
+            let ry = list_top + top;
+            match e {
+                Entry::Group(name) => {
+                    let head = g.fit(12.0 * s, &name.to_uppercase(), Face::Bold, r.w - 36.0 * s);
+                    g.text(r.x + 18.0 * s, ry + 10.0 * s, 12.0 * s, DIM, &head, Face::Bold);
                 }
-                if on {
-                    g.rrect(row.x, row.y + 7.0 * s, 4.0 * s, row.h - 14.0 * s, 2.0 * s, accent);
-                }
-                let lh = g.line_height(15.0 * s, Face::Bold);
-                g.text(row.x + 18.0 * s, row.y + (row.h - lh) / 2.0, 15.0 * s, if on { TEXT } else { MUTED }, label, if on { Face::Bold } else { Face::Sans });
-                // only the part of the row inside the list is clickable (a half-visible row must not reach off the screen)
-                let (hy0, hy1) = (row.y.max(list_top), (row.y + row.h).min(list_top + view));
-                if hy1 > hy0 {
-                    g.hit(R::new(row.x, hy0, row.w, hy1 - hy0), Event::Tab(*tab), label);
+                Entry::Item { tab, label } => {
+                    let row = R::new(r.x + 8.0 * s, ry + 2.0 * s, r.w - 16.0 * s, eh - 4.0 * s);
+                    let on = *tab == selected;
+                    let hot = g.hovered(row);
+                    if on || hot {
+                        g.rrect(row.x, row.y, row.w, row.h, 10.0 * s, if on { CARD_SEL } else { CARD_HOVER });
+                    }
+                    if on {
+                        g.rrect(row.x, row.y + 7.0 * s, 4.0 * s, row.h - 14.0 * s, 2.0 * s, accent);
+                    }
+                    let lh = g.line_height(15.0 * s, Face::Bold);
+                    let face = if on { Face::Bold } else { Face::Sans };
+                    // a page name longer than the list is wide is cut with an ellipsis (the hit region below still carries the whole name)
+                    let shown = g.fit(15.0 * s, label, face, row.w - 26.0 * s);
+                    g.text(row.x + 18.0 * s, row.y + (row.h - lh) / 2.0, 15.0 * s, if on { TEXT } else { MUTED }, &shown, face);
+                    // only the part of the row inside the list is clickable (a half-visible row must not reach off the screen)
+                    let (hy0, hy1) = (row.y.max(list_top), (row.y + row.h).min(list_top + view));
+                    if hy1 > hy0 {
+                        g.hit(R::new(row.x, hy0, row.w, hy1 - hy0), Event::Tab(*tab), label);
+                    }
                 }
             }
         }
-    }
+    });
     if entries.is_empty() {
         let msg = g.fit(14.0 * s, &format!("Nothing matches “{}”.", query.value), Face::Sans, r.w - 36.0 * s);
         g.text(r.x + 18.0 * s, list_top + 12.0 * s, 14.0 * s, DIM, &msg, Face::Sans);

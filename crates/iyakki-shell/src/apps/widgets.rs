@@ -514,6 +514,10 @@ pub struct Picker {
     sel: usize,
     /// A small picture for items that are pictures (same order as `items`).
     thumbs: Vec<Option<std::rc::Rc<tiny_skia::Pixmap>>>,
+    /// Items that Delete may mark ("don't use this one"), the text that says so in the footer, and the item marked last (`take_removed`).
+    deletable: Vec<String>,
+    delete_hint: String,
+    removed: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -525,7 +529,7 @@ pub enum PickEvent {
 
 impl Picker {
     pub fn new(title: &str, items: Vec<String>) -> Picker {
-        Picker { title: title.into(), items, filter: String::new(), sel: 0, thumbs: Vec::new() }
+        Picker { title: title.into(), items, filter: String::new(), sel: 0, thumbs: Vec::new(), deletable: Vec::new(), delete_hint: String::new(), removed: None }
     }
 
     /// Show a thumbnail beside the items that have one, with a Save button (`Event::Tab(1000 + n)` for the item whose label
@@ -533,6 +537,19 @@ impl Picker {
     pub fn with_thumbs(mut self, thumbs: Vec<Option<std::rc::Rc<tiny_skia::Pixmap>>>) -> Picker {
         self.thumbs = thumbs;
         self
+    }
+
+    /// Let Delete mark the highlighted item when it is one of `items` (the footer shows `hint`). The chooser stays open; the caller reads
+    /// the marked item with [`Picker::take_removed`] after every event.
+    pub fn with_deletable(mut self, items: Vec<String>, hint: &str) -> Picker {
+        self.deletable = items;
+        self.delete_hint = hint.to_string();
+        self
+    }
+
+    /// The item Delete marked since the last call, if any.
+    pub fn take_removed(&mut self) -> Option<String> {
+        self.removed.take()
     }
 
     pub fn visible(&self) -> Vec<&String> {
@@ -589,6 +606,13 @@ impl Picker {
                 self.filter.pop();
                 self.sel = 0;
             }
+            Key::Delete => {
+                if let Some(i) = self.visible().get(self.sel) {
+                    if self.deletable.contains(*i) {
+                        self.removed = Some((*i).clone());
+                    }
+                }
+            }
             Key::Char(c) if !c.is_control() => {
                 self.filter.push(*c);
                 self.sel = 0;
@@ -638,7 +662,7 @@ impl Picker {
         if vis.is_empty() {
             g.text(x + 26.0 * s, y + 90.0 * s, 15.0 * s, MUTED, "nothing matches", Face::Sans);
         }
-        g.text(x + 26.0 * s, y + h - 34.0 * s, 12.0 * s, DIM, &format!("{} of {} · click or Enter to select", vis.len(), self.items.len()), Face::Sans);
+        g.text(x + 26.0 * s, y + h - 34.0 * s, 12.0 * s, DIM, &format!("{} of {} · click or Enter to select{}", vis.len(), self.items.len(), if self.delete_hint.is_empty() { String::new() } else { format!(" · {}", self.delete_hint) }), Face::Sans);
         g.button(x + w - 26.0 * s - 90.0 * s, y + h - 50.0 * s, 14.0 * s, "Cancel", MUTED, Event::Key(Key::Esc));
     }
 }

@@ -596,6 +596,8 @@ fn running_tasks_are_agents_on_the_board_that_can_be_opened_paused_messaged_and_
     board_click(&mut app, &w.cx, "agent Agent 2");
     board_click(&mut app, &w.cx, "agent Stop");
     until(&mut app, &w.cx, "stopped", |a| cur(a).tasks.mgr.list().iter().any(|t| t.title == "Third" && t.status == Status::Failed));
+    // the agent's record follows the task's status a moment later (another thread writes it): wait for it, then check it
+    until(&mut app, &w.cx, "the agent record says failed", |_| iyakki_agent::assign::load(&d).by_name("Agent 2").is_some_and(|a| a.state == iyakki_agent::assign::AState::Failed));
     assert_eq!(iyakki_agent::assign::load(&d).by_name("Agent 2").unwrap().state, iyakki_agent::assign::AState::Failed);
     // Open run hands the task's run log to RUNS (the shell keeps the IDE aside); the log was recorded with the task, row and agent
     let run = iyakki_agent::assign::load(&d).by_name("Agent 2").unwrap().run_id.clone();
@@ -721,6 +723,68 @@ fn the_board_at_the_four_sizes_with_agents_dependencies_and_a_panel_never_leaves
         }
     }
     cur_mut(&mut app).board.ext.drill = None;
+    hold.store(false, Ordering::SeqCst);
+    assert!(bad.is_empty(), "{} problems:\n{}", bad.len(), bad.iter().take(40).cloned().collect::<Vec<_>>().join("\n"));
+}
+
+#[test]
+fn the_tab_with_low_memory_shows_the_lowered_cap_and_a_waiting_task_at_the_four_sizes_without_overlap() {
+    use super::super::ide_chrome::Density;
+    let hold = Arc::new(AtomicBool::new(true));
+    let h2 = hold.clone();
+    let _r = fake(Arc::new(move |_, _, _, _| {
+        while h2.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }));
+    let w = world("tasks-lowmem");
+    let d = git_project(&w, "alpha");
+    let mut app = IdeApp::new(&w.cx);
+    open(&mut app, &w.cx, "Alpha", &d);
+    // 2.5 GB free: the reserve and one task, so only one of the three runs although the maximum is 3
+    cur(&app).tasks.mgr.set_memory_source(Some(Arc::new(|| Some((2u64 << 30) + (1 << 29)))));
+    for i in 0..3 {
+        new_task(&mut app, &w.cx, &format!("Task {i}"), "goal", "");
+    }
+    until(&mut app, &w.cx, "one running, two waiting", |a| cur(a).tasks.mgr.counts() == (1, 0, 2));
+    let mgr = cur(&app).tasks.mgr.clone();
+    assert_eq!((mgr.concurrency(), mgr.effective_concurrency()), (3, 1));
+    assert!(mgr.list().iter().any(|t| t.last.starts_with("waiting for memory")), "{:?}", mgr.list().iter().map(|t| t.last.clone()).collect::<Vec<_>>());
+    let mut bad: Vec<String> = Vec::new();
+    for density in [Density::ALL[0], Density::ALL[Density::ALL.len() - 1]] {
+        app.set_density(density);
+        for (wd, ht) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+            app.show_main(MainTab::Tasks);
+            cur_mut(&mut app).tasks.page = false;
+            ticks(&mut app, &w.cx, 2);
+            let g = render_at(&mut app, &w.cx, wd, ht);
+            let tag = format!("{} {wd}x{ht}", density.name());
+            let hits: Vec<_> = g.hits.iter().filter(|h| h.label != "divider" && h.rect.w > 0.0 && h.rect.h > 0.0).collect();
+            for h in &hits {
+                let r = h.rect;
+                if r.x < -0.5 || r.y < -0.5 || r.x + r.w > wd as f32 + 0.5 || r.y + r.h > ht as f32 + 0.5 {
+                    bad.push(format!("{tag}: {:?} leaves the screen ({:?})", h.label, r));
+                }
+            }
+            let less = hits.iter().find(|h| h.label == "fewer at once");
+            let more = hits.iter().find(|h| h.label == "more at once");
+            match (less, more) {
+                (Some(a), Some(b)) => {
+                    if partly_overlap(&a.rect, &b.rect) || b.rect.x < a.rect.x + a.rect.w {
+                        bad.push(format!("{tag}: the cap buttons overlap or are out of order ({:?} {:?})", a.rect, b.rect));
+                    }
+                    // the label "max 3 · now 1" sits between them: room for it
+                    if b.rect.x - (a.rect.x + a.rect.w) < 40.0 {
+                        bad.push(format!("{tag}: no room between the cap buttons for 'max 3 · now 1'"));
+                    }
+                }
+                _ => bad.push(format!("{tag}: the cap buttons are missing")),
+            }
+        }
+    }
+    // the stepper still changes the setting, and the effective cap never exceeds it
+    key(&mut app, &w.cx, Key::Char('-'));
+    assert_eq!((mgr.concurrency(), mgr.effective_concurrency()), (2, 1));
     hold.store(false, Ordering::SeqCst);
     assert!(bad.is_empty(), "{} problems:\n{}", bad.len(), bad.iter().take(40).cloned().collect::<Vec<_>>().join("\n"));
 }

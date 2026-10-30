@@ -1,4 +1,4 @@
-//! The K8S tile on the home screen: in the System group, for administrators, operators and users (the roles that have the AI IDE and
+//! The K8S tile on the home screen: in the Build group, for administrators, operators and users (the roles that have the AI IDE and
 //! so its cluster tab), not for guests, remote-safe in Cloud mode, and opening the app. The shell's tests never reach a cluster: the
 //! tile gets the offline rig there.
 
@@ -8,11 +8,11 @@ use iyakki_agent::cloudmode::{self, Class, Facts, Setting};
 use iyakki_sec::policy::Role;
 
 #[test]
-fn the_k8s_tile_is_registered_once_in_the_system_group_for_the_roles_that_have_the_ide() {
+fn the_k8s_tile_is_registered_once_in_the_build_group_for_the_roles_that_have_the_ide() {
     assert_eq!(TILES.iter().filter(|t| t.app == PApp::K8s).count(), 1);
     let t = TILES.iter().find(|t| t.app == PApp::K8s).unwrap();
     assert_eq!((t.label, t.sub), ("K8S", "Explore the cluster"));
-    assert_eq!(Group::of(PApp::K8s), Some(Group::System));
+    assert_eq!(Group::of(PApp::K8s), Some(Group::Work));
     assert_eq!(PApp::K8s.id(), "k8s");
     assert_eq!(PApp::K8s.label(), "K8S");
     for r in [Role::Admin, Role::Operator, Role::User] {
@@ -38,7 +38,7 @@ fn the_tile_shows_for_each_role_and_opens_the_app() {
         // a guest is limited to the apps of its policy: the tile is listed but opening it is refused by the policy
         if shown {
             assert!(has, "{user}");
-            sh.set_group(Group::System);
+            sh.set_group(Group::Work);
             assert!(sh.group_tiles().iter().any(|t| t.app == PApp::K8s), "{user}: in the System group");
             let i = sh.group_items().iter().position(|it| matches!(it, LItem::Sys(t) if t.app == PApp::K8s)).unwrap();
             sh.sel = i;
@@ -59,7 +59,7 @@ fn the_tile_shows_for_each_role_and_opens_the_app() {
 fn the_tile_draws_inside_the_shell_at_the_supported_sizes() {
     let (mut sh, _) = shell_with_users("k8s-tile-sizes");
     login(&mut sh, "root", "rootpass12");
-    sh.set_group(Group::System);
+    sh.set_group(Group::Work);
     let i = sh.group_items().iter().position(|it| matches!(it, LItem::Sys(t) if t.app == PApp::K8s)).unwrap();
     sh.sel = i;
     sh.handle(&Event::Key(Key::Enter));

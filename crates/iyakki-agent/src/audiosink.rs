@@ -11,6 +11,20 @@
 //! * mixer off: exactly the old behaviour. The play command is started with a pipe, the output of Settings -> Sound is given to it,
 //!   the software volume plan and `gain()` apply, and a second program finds the device busy.
 
+/// How far the highlight of read-aloud words is moved against the heard position of the sound, ms (Settings -> Sound "Highlight
+/// timing offset", -500..500, default 0). Positive lights the words later, negative earlier. The mixer reports where the sound is
+/// in the speaker by its own model of the pipe, the card cannot say how much it holds, so the person tunes what is left over.
+pub fn highlight_offset_ms() -> i32 {
+    HIGHLIGHT_OFFSET_MS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set by the agent when the sound settings change (see `audioout::apply_prefs`).
+pub fn set_highlight_offset_ms(ms: i32) {
+    HIGHLIGHT_OFFSET_MS.store(ms.clamp(-500, 500), std::sync::atomic::Ordering::Relaxed);
+}
+
+static HIGHLIGHT_OFFSET_MS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
 use std::io::Write;
 use std::process::{Child, ChildStdin};
 use std::time::{Duration, Instant};
@@ -36,8 +50,13 @@ pub fn mixing() -> bool {
     route() == Route::Mixer
 }
 
+#[path = "audiosink_stream.rs"]
+mod stream;
+
 enum Imp {
     Mixed(SourceWriter),
+    /// A sentence in the long-lived player of a reading (mixer off).
+    Stream(stream::Piece),
     Cmd { child: Child, stdin: Option<ChildStdin> },
 }
 
@@ -97,6 +116,16 @@ fn play_wav_via(mixer: Option<&Mixer>, kind: SourceKind, label: &str, wav: &[u8]
         }
     }
     play_wav_command(kind, wav, play_cmd)
+}
+
+/// Like [`play_wav`], for the sentences of one reading: with the mixer off they all go to ONE play process (header once, PCM
+/// after), so the card is not closed and primed again at every sentence. The output reports itself finished a little before its
+/// sound ends ([`stream::HANDOFF`]) so the caller queues the next sentence in time; stopping a finished output cuts nothing.
+pub fn play_wav_streamed(kind: SourceKind, label: &str, wav: &[u8], play_cmd: &str) -> Result<Output, String> {
+    if let Some(m) = crate::mixer::global_if_enabled() {
+        return play_wav_via(Some(m), kind, label, wav, play_cmd);
+    }
+    Ok(Output { kind, imp: Imp::Stream(stream::queue(wav, play_cmd)?), volume: 100 })
 }
 
 /// A short sound (a cue, a chime) played to its end; returns when it has been played, for at most `max` on the play command.
@@ -168,6 +197,7 @@ impl Output {
     pub fn write(&mut self, pcm: &[i16]) -> Result<(), String> {
         match &mut self.imp {
             Imp::Mixed(s) => s.write_i16_wait(pcm, Duration::from_secs(30)),
+            Imp::Stream(_) => Err("a sentence of a reading is complete when it is queued".into()),
             Imp::Cmd { child, stdin } => {
                 // the output's own volume, then IYAKKI's volume and mute (HDMI has no hardware volume)
                 let vol = self.volume as i32 * crate::audioout::global().gain() as i32 / 100;
@@ -185,10 +215,21 @@ impl Output {
         }
     }
 
+    /// How much of this sound has been heard so far, ms (the mixer's lead and pipe subtracted, by its own model; it stands still while the sound
+    /// is starved). None on the play-command path, which reports nothing.
+    pub fn played_ms(&self) -> Option<u64> {
+        match &self.imp {
+            Imp::Mixed(s) => Some(s.played_ms()),
+            Imp::Stream(p) => Some(p.played_ms()),
+            Imp::Cmd { .. } => None,
+        }
+    }
+
     /// Why the sound stopped, in the player's own words when it had any (empty: it said nothing).
     pub fn failure(&mut self) -> String {
         match &mut self.imp {
             Imp::Mixed(_) => String::new(),
+            Imp::Stream(p) => p.failure(),
             Imp::Cmd { child, .. } => crate::voice::player_failure(child),
         }
     }
@@ -204,10 +245,11 @@ impl Output {
                     std::thread::sleep(Duration::from_millis(25));
                 }
             }
+            Imp::Stream(p) => p.finish(max, keep_waiting),
             Imp::Cmd { child, stdin } => {
                 drop(stdin.take());
                 let t0 = Instant::now();
-                while t0.elapsed() < max && keep_waiting() && matches!(child.try_wait(), Ok(None)) {
+                while t0.elapsed() < max && keep_waiting() && iyakki_core_api::child_status(child).is_running() {
                     std::thread::sleep(Duration::from_millis(25));
                 }
             }
@@ -222,6 +264,7 @@ impl Output {
                 s.flush();
                 s.finish();
             }
+            Imp::Stream(p) => p.stop(),
             Imp::Cmd { child, stdin } => {
                 drop(stdin.take());
                 crate::voice::kill_child(child);
@@ -233,7 +276,8 @@ impl Output {
     pub fn is_playing(&mut self) -> bool {
         match &mut self.imp {
             Imp::Mixed(s) => !s.is_done(),
-            Imp::Cmd { child, .. } => matches!(child.try_wait(), Ok(None)),
+            Imp::Stream(p) => p.is_playing(),
+            Imp::Cmd { child, .. } => iyakki_core_api::child_status(child).is_running(),
         }
     }
 }

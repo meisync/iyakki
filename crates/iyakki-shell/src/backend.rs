@@ -234,8 +234,8 @@ fn splash_loop(fb_path: &str) -> Result<(), String> {
     let mut failures = 0u32;
     while !splash::is_done() {
         let frame_start = Instant::now();
-        for (raw, abs, pad) in poll_devices(&mut devs, 1) {
-            for ev in (match pad { Some(range) => input.feed_pad(raw, &range), None => input.feed(raw, abs) }) {
+        for (raw, abs, pad, touch) in poll_devices(&mut devs, 1) {
+            for ev in match (pad, touch) { (Some(range), _) => input.feed_pad(raw, &range), (None, Some(t)) => input.feed_touch_full(raw, &t), _ => input.feed(raw, abs) } {
                 match ev {
                     Event::Key(crate::ui::Key::Char('l' | 'L')) => show_log = !show_log,
                     Event::MouseDown(_, y) if (y as f32) >= splash::hint_zone(fb.width, fb.height).0 => show_log = !show_log,
@@ -321,16 +321,19 @@ struct FrameStats {
     render: Duration,
     present: Duration,
     worst: Duration,
+    /// The slowest of the tile-only frames (`worst` is the slowest of all): tells a hitch of the whole-scene draw from the live paint.
+    worst_live: Duration,
 }
 
 impl FrameStats {
     fn new() -> FrameStats {
-        FrameStats { since: Instant::now(), frames: 0, live: 0, render: Duration::ZERO, present: Duration::ZERO, worst: Duration::ZERO }
+        FrameStats { since: Instant::now(), frames: 0, live: 0, render: Duration::ZERO, present: Duration::ZERO, worst: Duration::ZERO, worst_live: Duration::ZERO }
     }
 
     /// A frame that painted only the live picture: `draw` is the time to copy it into the scene.
     fn live_frame(&mut self, draw: Duration, present: Duration) {
         self.live += 1;
+        self.worst_live = self.worst_live.max(draw + present);
         self.frame(draw, present);
     }
 
@@ -344,12 +347,13 @@ impl FrameStats {
             let ms = |d: Duration| d.as_secs_f64() * 1000.0;
             let sys = |p: &str| std::fs::read_to_string(p).map(|s| s.trim().to_string()).unwrap_or_else(|_| "?".into());
             log::info!(
-                "shell: {} frames in {:.0}s, draw {:.1} ms, screen write {:.1} ms, slowest {:.0} ms, {} tile-only; cpu0 {} kHz, governor {}",
+                "shell: {} frames in {:.0}s, draw {:.1} ms, screen write {:.1} ms, slowest {:.0} ms (tile-only {:.0} ms), {} tile-only; cpu0 {} kHz, governor {}",
                 self.frames,
                 self.since.elapsed().as_secs_f64(),
                 ms(self.render) / n as f64,
                 ms(self.present) / n as f64,
                 ms(self.worst),
+                ms(self.worst_live),
                 self.live,
                 sys("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"),
                 sys("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"),
@@ -573,8 +577,8 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                     last_scan = Instant::now();
                 }
                 repeat.tick(&devs);
-                for (raw, abs, pad) in poll_devices(&mut devs, 10) {
-                    for ev in (match pad { Some(range) => input.feed_pad(raw, &range), None => input.feed(raw, abs) }) {
+                for (raw, abs, pad, touch) in poll_devices(&mut devs, 10) {
+                    for ev in match (pad, touch) { (Some(range), _) => input.feed_pad(raw, &range), (None, Some(t)) => input.feed_touch_full(raw, &t), _ => input.feed(raw, abs) } {
                         if matches!(ev, Event::MouseMove(..) | Event::MouseDown(..)) {
                             pointer.seen.store(true, Ordering::Relaxed);
                         }
@@ -609,7 +613,9 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
         while !stop.load(Ordering::Relaxed) && !quit.load(Ordering::Relaxed) {
             let mut dirty = false;
             // wait for the next event, but wake for the tick
-            let wait = Duration::from_millis(33).saturating_sub(last_tick.elapsed());
+            // (while the open app wants to know about changes between the beats, such as the word being read aloud, only a few ms)
+            let fast = shell.fast_poll();
+            let wait = Duration::from_millis(if fast { 6 } else { 33 }).min(Duration::from_millis(33).saturating_sub(last_tick.elapsed()));
             let mut next = rx.recv_timeout(wait).ok();
             while let Some(ev) = next {
                 shell.handle(&ev);
@@ -621,6 +627,8 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                 shell.handle(&Event::Tick);
                 // an app with live pictures (the browser's full engine) asks for a redraw on the heartbeat
                 dirty |= shell.take_stale();
+            } else if fast {
+                dirty |= shell.poll_live();
             }
             // the screen saver's power steps: the screen goes dark or comes back before anything is drawn (see `panel.rs`)
             apply_blanks(shell, &screen);
@@ -674,15 +682,23 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                 let t0 = Instant::now();
                 if let Some((_, y, _, rh)) = shell.live_update(&mut gfx) {
                     let t1 = Instant::now();
+                    let rects = shell.take_live_rects();
                     let mut s = lock(&screen);
                     let (y0, y1) = (y.max(0) as usize, (y + rh).max(0) as usize);
                     let res = s.take_pointer_off().and_then(|_| {
                         let Screen { fb, scene, .. } = &mut *s;
-                        fb.present_banded_rows(gfx.rgba(), scene, y0, y1).map(|_| ())
+                        if !rects.is_empty() {
+                            // several small rectangles (the highlighted words and the progress bar of a story): each is compared
+                            // and copied over its own columns, not over whole rows
+                            fb.present_rects(gfx.rgba(), scene, &rects).map(|_| ())
+                        } else {
+                            fb.present_banded_rows(gfx.rgba(), scene, y0, y1).map(|_| ())
+                        }
                     });
                     let res = res.and_then(|_| s.move_pointer(pointer.get(), pointer.shape()));
                     drop(s);
                     stats.live_frame(t1 - t0, t1.elapsed());
+                    crate::apps::browser_media::feed_screen(gfx.width(), gfx.height(), gfx.rgba());
                     if let Err(e) = res {
                         fail(e);
                     }
@@ -717,6 +733,7 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                     log::info!("shell: first picture on screen ({}x{}, first frame took {} ms, {} ms after the display was opened)", w, h, (t1 - t0).as_millis(), t_start.elapsed().as_millis());
                 }
                 stats.frame(t1 - t0, last_render - t1);
+                crate::apps::browser_media::feed_screen(gfx.width(), gfx.height(), gfx.rgba());
                 if let Err(e) = res {
                     fail(e);
                 }

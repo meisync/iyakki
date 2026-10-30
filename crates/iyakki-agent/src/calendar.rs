@@ -111,7 +111,7 @@ pub fn parse_days(s: &str) -> Result<u8, String> {
     }
     let mut m = 0u8;
     for p in t.split([',', ' ', '/']).filter(|p| !p.is_empty()) {
-        let i = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"].iter().position(|d| p.starts_with(d)).ok_or_else(|| format!("`{p}` is not a weekday; use daily, weekdays, weekends, once, or names like mon,wed,fri"))?;
+        let i = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"].iter().position(|d| p.starts_with(d)).ok_or_else(|| if p.chars().all(|c| c.is_ascii_digit()) { format!("`{p}` is a number, but `days` takes weekdays, not how many days: use daily, weekdays, weekends, once, or names like mon,wed,fri") } else { format!("`{p}` is not a weekday; use daily, weekdays, weekends, once, or names like mon,wed,fri") })?;
         m |= 1 << i;
     }
     Ok(m)
@@ -582,6 +582,8 @@ mod tests {
         assert!(parse_hm("24:00").is_none() && parse_hm("7").is_none() && parse_hm("13pm").is_none() && parse_hm("x").is_none());
         assert_eq!((parse_days("daily"), parse_days("weekdays"), parse_days("weekends"), parse_days("once"), parse_days("mon,wed,fri"), parse_days("Sat Sun")), (Ok(0x7f), Ok(0b0111110), Ok(0b1000001), Ok(0), Ok(0b0101010), Ok(0b1000001)));
         assert!(parse_days("funday").is_err());
+        let e = parse_days("23").unwrap_err();
+        assert!(e.contains("not how many days") && e.contains("daily"), "a count of days is explained, not just refused: {e}");
         assert!(Repeat::parse("weekly").is_ok() && Repeat::parse("sometimes").is_err());
     }
 

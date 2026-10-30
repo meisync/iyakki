@@ -30,6 +30,7 @@ impl Shell {
             && !self.devpop.open
             && !self.brand.open
             && !self.installs.open
+            && !self.startup.open
             && !self.battery.open
             && self.loss.card_until.is_none()
             && iyakki_storage::loss::snapshot().state.healthy()
@@ -48,7 +49,19 @@ impl Shell {
             return None;
         }
         let Screen::App(app, _) = &mut self.screen else { return None };
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.live_draw(g))).ok().flatten()
+        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.live_draw(g).map(|bound| (bound, app.live_rects(), app.live_full_every_ms())))).ok().flatten();
+        let (bound, rects, every) = done?;
+        self.live_rects = rects;
+        // an app that repaints only small rectangles says how rarely the whole scene needs drawing as a safety net: half a
+        // second after its last live frame the usual 100 ms applies again
+        self.live_every_ms = every.max(100);
+        self.live_until = self.tick + 15;
+        Some(bound)
+    }
+
+    /// The rectangles `(x, y, w, h)` painted by the last successful [`Shell::live_update`] when the app named them (empty: only the bounding rectangle it returned): the screen write copies only these.
+    pub fn take_live_rects(&mut self) -> Vec<(i32, i32, i32, i32)> {
+        std::mem::take(&mut self.live_rects)
     }
 
     /// The front end calls [`Shell::live_update`] between whole redraws (the framebuffer display does; the remote display, the window and

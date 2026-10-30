@@ -16,7 +16,22 @@ use crate::kinds::{NodeCx, NodeKind, NodeOutput, WaitFor};
 use crate::model::*;
 use crate::retry::{hash_parts, ErrClass, NodeError};
 
+/// The first line of `s` cut at a word boundary to at most `n` characters, with an ellipsis when something was left out.
+pub fn clip_words(s: &str, n: usize) -> String {
+    let line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    if line.chars().count() <= n && s.trim().lines().count() <= 1 {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(n).collect();
+    let cut = if line.chars().count() > n { cut.rsplit_once(char::is_whitespace).map_or(cut.as_str(), |x| x.0).to_string() } else { cut };
+    format!("{}\u{2026}", cut.trim_end_matches([',', ';', ':', ' ', '.']))
+}
+
 pub(crate) const AGENT_WHO: &str = "agent:assistant";
+/// The note of a card that only the person can settle (a consent or trust setting): the screen shows "Open flow settings" for it.
+pub const CONSENT_NOTE: &str = "needs-your-permission";
+/// The note of a card that waits for the person's choice (a vision model, say): the screen offers Settings -> Models and Refresh models.
+pub const CHOICE_NOTE: &str = "needs-your-choice";
 
 pub(crate) enum Final {
     Ok(NodeOutput),
@@ -377,12 +392,40 @@ impl Driver {
                             nr.error = msg.clone();
                             nr.ended_ms = now;
                             nr.port.clear();
+                            nr.needs_person = err.needs_person;
+                            nr.permission = err.permission.clone();
                         }
                     });
-                    self.begin_heal(node_id, &msg);
+                    if err.needs_person {
+                        if !err.permission.is_empty() && err.permission != "choice" {
+                            let (fname, ntitle) = (run.flow.name.clone(), node.title().to_string());
+                            let blocked = run.flow.defaults.camera.blocked;
+                            self.inner.host.permission_needed(&crate::host::PermissionNeed { flow_id: run.flow_id.clone(), flow_name: fname, run_id: self.id.clone(), node_id: node_id.to_string(), node_title: ntitle, permission: err.permission.clone(), message: msg.clone(), blocked });
+                        }
+                        self.consent_card(node_id, &msg, err.permission == "choice");
+                    } else {
+                        self.begin_heal(node_id, &msg);
+                    }
                 }
             }
         }
+    }
+
+    /// A refusal that only the person can lift (a consent or trust setting is off). The agent is not asked, no fix attempt or budget is
+    /// spent and no change is proposed: the card says plainly what to switch on, and the screen offers to open the flow's settings.
+    fn consent_card(&mut self, node_id: &str, msg: &str, choice: bool) {
+        // with the agent's help off the run just fails, as for any other error (the failure card names the setting)
+        if self.run().and_then(|r| r.flow.node(node_id).map(|n| r.flow.heal_of(n).mode)).is_none_or(|m| m == HealMode::Off) {
+            return;
+        }
+        if choice {
+            self.add_card(node_id, CardState::Proposed, format!("`{node_id}` needs your choice: {msg}"), CHOICE_NOTE);
+            self.inner.host.audit("flow.heal.choice", &format!("{}/{node_id}: needs the person's choice, no agent fix tried", self.id));
+            return;
+        }
+        self.add_card(node_id, CardState::Proposed, format!("`{node_id}` needs your permission: {msg}"), CONSENT_NOTE);
+        self.inner.host.audit("flow.heal.consent", &format!("{}/{node_id}: needs the person, no agent fix tried", self.id));
+        // the request itself (popup and inbox entry) is made by the host in `permission_needed`; no second note here
     }
 
     fn wait_state(&mut self, node_id: &str, w: WaitFor) {
@@ -545,7 +588,7 @@ impl Driver {
                 let c = r.heal.iter().find(|c| c.state == CardState::Proposed).unwrap();
                 (RunStatus::Blocked, match &c.patch {
                     Some(p) => format!("A fix is proposed for `{}`: {}", c.node, p.summary()),
-                    None => format!("`{}` failed and needs you: {}", c.node, c.diagnosis.chars().take(120).collect::<String>()),
+                    None => format!("`{}` failed and needs you: {}", c.node, clip_words(&c.diagnosis, 120)),
                 })
             } else if let Some(i) = interrupted.first() {
                 (RunStatus::Blocked, format!("The program restarted while `{i}` was running: retry it, skip it or cancel the run"))
@@ -625,6 +668,14 @@ impl Driver {
         // the run's browser session (if its nodes opened one) ends with the run, whatever the way it ended, and before the run
         // is seen as finished
         inner.host.browser_end(&self.id);
+        // the run's camera pictures are deleted with it (a node that asked to keep its picture keeps it)
+        inner.host.cam_end(&self.id);
+        // the failure notice goes out BEFORE the run reads as finished: whoever waits for the end (a caller, a test) then sees the notice already posted
+        if status == RunStatus::Failed {
+            if let Some(r) = self.run() {
+                let _ = inner.host.notify(&Notice { title: format!("{} failed", r.flow.name), body: error.clone(), level: "error".into(), flow_id: r.flow_id.clone(), run_id: self.id.clone(), needs_you: false });
+            }
+        }
         inner.update(&self.id, |r| {
             r.status = status;
             r.ended_ms = now;
@@ -645,7 +696,6 @@ impl Driver {
         let run = self.run();
         if let Some(r) = &run {
             if status == RunStatus::Failed {
-                let _ = inner.host.notify(&Notice { title: format!("{} failed", r.flow.name), body: error, level: "error".into(), flow_id: r.flow_id.clone(), run_id: self.id.clone(), needs_you: false });
                 if r.parent.is_none() {
                     fire_on_failure(&inner, r);
                 }
@@ -675,6 +725,24 @@ impl Driver {
                 id
             })
             .unwrap_or_default()
+    }
+
+    /// The classifier's verdict, plus what only the engine knows: a step setting that the kind does not have is refused (so a made-up key
+    /// such as `camera_allowed` is never written into a step), and so is any change to a consent or trust setting.
+    fn classify_checked(&self, patch: &heal::Patch, flow: &Flow, failing: &str) -> heal::Classification {
+        let inner = &self.inner;
+        let mut cl = heal::classify(patch, flow, failing, &ClassifyEnv { in_catalog: &|c| inner.host.cli_known(c) });
+        let node = flow.node(&patch.node);
+        let keys: Option<Vec<&'static str>> = node.and_then(|n| inner.reg.get(&n.kind)).map(|k| k.schema().iter().map(|f| f.key).collect());
+        if let Some(keys) = keys {
+            for (path, top) in heal::set_settings(patch) {
+                if !top.is_empty() && !keys.contains(&top.as_str()) {
+                    cl.class = heal::Class::Refused;
+                    cl.reasons.push(format!("`{path}` is not a setting of this kind of step"));
+                }
+            }
+        }
+        cl
     }
 
     fn begin_heal(&mut self, node_id: &str, msg: &str) {
@@ -756,7 +824,7 @@ impl Driver {
             Ok(p) => {
                 let diag = red.text(&p.diagnosis);
                 let patch = p.patch.clone();
-                let class = patch.as_ref().map(|pt| heal::classify(pt, &run.flow, node_id, &ClassifyEnv { in_catalog: &|c| inner.host.cli_known(c) }));
+                let class = patch.as_ref().map(|pt| self.classify_checked(pt, &run.flow, node_id));
                 let mode = run.flow.node(node_id).map(|n| run.flow.heal_of(n).mode).unwrap_or(HealMode::Off);
                 let auto = mode == HealMode::AutoFixSimple && class.as_ref().is_some_and(|c| c.is_simple()) && !run.flow.production && patch.is_some();
                 inner.update(&self.id, |r| {
@@ -767,6 +835,9 @@ impl Driver {
                         c.patch = patch.clone();
                         c.class = class.clone();
                         c.cost_cents = p.cents;
+                        if patch.is_some() {
+                            c.note = "proposed by the assistant, not applied until you approve".into();
+                        }
                     }
                 });
                 match (&patch, &class) {
@@ -824,7 +895,7 @@ impl Driver {
                 self.apply_card(card_id, &by, false);
             }
             CardDecision::Edit { by, patch } => {
-                let cl = heal::classify(&patch, &run.flow, &card.node, &ClassifyEnv { in_catalog: &|c| inner.host.cli_known(c) });
+                let cl = self.classify_checked(&patch, &run.flow, &card.node);
                 if cl.class == heal::Class::Refused {
                     inner.log(&self.id, &card.node, &format!("your edited fix was refused: {}", cl.reasons.join("; ")));
                     return;
@@ -955,7 +1026,16 @@ impl Driver {
     }
 
     fn rerun_node(&mut self, node_id: &str, by: &str, summary: &str, rev: u32) {
-        let note = format!("fixed by {by}: {summary}{}", if rev > 0 { format!(" (draft r{rev})") } else { String::new() });
+        // who proposed it and who decided are two different things: an assistant's proposal is "approved by" the person, never "fixed by" them
+        let edited = self.run().is_some_and(|r| r.heal.iter().rev().find(|c| c.node == node_id).is_some_and(|c| c.note.starts_with("edited by")));
+        let who = if by == AGENT_WHO {
+            format!("fixed by {by}")
+        } else if edited {
+            format!("proposed by the assistant, edited and approved by {by}")
+        } else {
+            format!("proposed by the assistant, approved by {by}")
+        };
+        let note = format!("{who}: {summary}{}", if rev > 0 { format!(" (draft r{rev})") } else { String::new() });
         self.inner.update(&self.id, |r| {
             if let Some(nr) = r.nodes.get_mut(node_id) {
                 let attempts = std::mem::take(&mut nr.attempts);

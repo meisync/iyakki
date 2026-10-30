@@ -154,7 +154,7 @@ fn every_screen_fits_the_four_sizes_with_the_assistant_open_and_closed() {
     open_flow(&mut f, two_steps());
     // a run, so RUN and BOARD have something to show
     f.env.store.publish("check", &PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
-    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480), (480, 600)] {
         for chat in [false, true] {
             for (tab, sel, list) in [(Tab::Design, false, true), (Tab::Design, false, false), (Tab::Design, true, false), (Tab::Run, false, false), (Tab::Board, false, false)] {
                 f.app.chat_open = chat;
@@ -232,8 +232,8 @@ fn make_a_flow_add_steps_connect_by_dragging_and_undo() {
     let mut f = fx("design");
     // the list is empty; New flow asks for a name
     let g = draw(&mut f);
-    assert!(has_hit(&g, "New flow"));
-    click(&mut f, "New flow");
+    assert!(has_hit(&g, "New flow (n)"));
+    click(&mut f, "New flow (n)");
     assert!(f.app.modal.is_some());
     types(&mut f, "Nightly check");
     key(&mut f, Key::Enter);
@@ -478,7 +478,7 @@ fn the_assistants_edits_appear_on_the_canvas_with_a_badge_and_undo() {
 fn publishing_shows_the_changes_blocks_on_problems_and_makes_a_version() {
     let mut f = fx("publish");
     let id = open_flow(&mut f, two_steps());
-    click(&mut f, "Publish");
+    click(&mut f, "Publish (p)");
     let Some(Modal::Publish(p)) = &f.app.modal else { panic!("no publish dialog") };
     assert!(p.blockers.is_empty() && p.summary[0].contains("First version"), "{:?}", p.summary);
     types(&mut f, "first cut");
@@ -489,17 +489,17 @@ fn publishing_shows_the_changes_blocks_on_problems_and_makes_a_version() {
     draw(&mut f);
     // a flow with a problem cannot be published: the dialog says which
     f.app.edit("break it", |fl| fl.nodes[1].config = json!({"url": "ftp://x"}));
-    click(&mut f, "Publish");
+    click(&mut f, "Publish (p)");
     let Some(Modal::Publish(p)) = &f.app.modal else { panic!("no publish dialog") };
     assert!(p.blockers.iter().any(|b| b.contains("http://")), "{:?}", p.blockers);
     key(&mut f, Key::Esc);
     // history with the diff, and rolling back asks first
     f.app.edit("fix it", |fl| fl.nodes[1].config = json!({"url": "https://z.example/a"}));
-    click(&mut f, "Publish");
+    click(&mut f, "Publish (p)");
     types(&mut f, "second");
     key(&mut f, Key::Ctrl('s'));
     assert_eq!(f.env.store.meta_of(&id).published, 2);
-    click(&mut f, "History");
+    click(&mut f, "History (h)");
     let Some(Modal::History(h)) = &f.app.modal else { panic!("no history") };
     assert_eq!(h.entries.len(), 2);
     assert!(h.diff.iter().any(|l| l.contains("config.url")), "{:?}", h.diff);
@@ -519,7 +519,7 @@ fn a_run_lights_the_graph_and_a_blocked_run_waits_for_you_on_the_board() {
     let spec = json!({"name": "Gate", "nodes": [{"id": "say", "kind": "notify", "config": {"title": "start"}}, {"id": "ok", "kind": "approval", "config": {"message": "Go on?"}}, {"id": "done", "kind": "notify", "config": {"title": "done"}}], "edges": [{"from": "start", "to": "say"}, {"from": "say", "to": "ok"}, {"from": "ok", "to": "done", "port": "approved"}]});
     let id = open_flow(&mut f, spec);
     f.env.store.publish(&id, &PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
-    click(&mut f, "Run");
+    click(&mut f, "Run (r)");
     assert_eq!(f.app.tab, Tab::Run, "starting a run shows it");
     let run = f.app.run_id.clone().unwrap();
     f.env.engine.wait_for(&run, Duration::from_secs(5), |r| r.status == RunStatus::Blocked).unwrap();
@@ -578,7 +578,7 @@ fn the_fix_card_appears_in_the_run_view_and_its_buttons_reach_the_engine() {
     let spec = json!({"name": "Broken", "nodes": [{"id": "call", "kind": "http", "config": {"url": "http://127.0.0.1:1/x"}}], "defaults": {"heal": {"mode": "suggest"}}});
     let id = open_flow(&mut f, spec);
     f.env.store.publish(&id, &PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
-    click(&mut f, "Run");
+    click(&mut f, "Run (r)");
     let run = f.app.run_id.clone().unwrap();
     f.env.engine.wait_for(&run, Duration::from_secs(10), |r| r.heal.iter().any(|c| c.state == CardState::Proposed) || r.status.is_terminal()).unwrap();
     tick(&mut f, 12);
@@ -702,7 +702,7 @@ fn flows_are_listed_exported_imported_and_deleted() {
 #[test]
 fn a_template_makes_a_quiet_draft_from_the_picker() {
     let mut f = fx("tpl");
-    click(&mut f, "From template");
+    click(&mut f, "From template (t)");
     assert!(matches!(f.app.modal, Some(Modal::Templates(..))));
     let g = draw(&mut f);
     assert!(g.rgba().len() > 0);
@@ -742,7 +742,7 @@ fn nothing_the_user_sees_in_the_tile_holds_a_secret() {
     f.cx.services.user_set(&f.cx.session.user, "svc.shop", "S3CRET-NEVER-SHOWN-ANYWHERE").unwrap();
     let id = open_flow(&mut f, json!({"name": "Sec", "nodes": [{"id": "h", "kind": "http", "config": {"url": "http://127.0.0.1:1/", "headers": {"Authorization": "Bearer {{secret.shop}}"}}}]}));
     f.env.store.publish(&id, &PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
-    click(&mut f, "Run");
+    click(&mut f, "Run (r)");
     let run = f.app.run_id.clone().unwrap();
     f.env.engine.wait_for(&run, Duration::from_secs(10), |r| r.status.is_terminal()).unwrap();
     tick(&mut f, 12);
@@ -926,7 +926,7 @@ fn a_step_refused_for_its_program_offers_an_admin_one_click_allow_after_a_confir
     let spec = json!({"name": "Odd", "nodes": [{"id": "x", "kind": "cli", "config": {"command": ["frobnicate-tool", "--now"]}}], "edges": [{"from": "start", "to": "x"}], "defaults": {"retry": {"attempts": 1}}});
     let id = open_flow(&mut f, spec);
     f.env.store.publish(&id, &PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
-    click(&mut f, "Run");
+    click(&mut f, "Run (r)");
     let run = f.app.run_id.clone().unwrap();
     f.env.engine.wait_for(&run, Duration::from_secs(10), |r| r.status.is_terminal()).unwrap();
     tick(&mut f, 12);
@@ -1022,7 +1022,7 @@ fn the_add_step_list_and_the_palette_reach_every_browser_step_at_each_size() {
     open_flow(&mut f, two_steps());
     let kinds: Vec<String> = iyakki_flow::kinds::browser_qa::KINDS.iter().map(|k| k.to_string()).collect();
     assert_eq!(kinds.len(), 20);
-    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480), (480, 600)] {
         f.app.pal_scroll = 0.0;
         f.app.sel.clear();
         let g = draw_at(&mut f, w, h);
@@ -1111,7 +1111,7 @@ fn the_form_of_a_check_step_fits_every_size_and_its_many_choices_and_fields_comm
     let mut f = fx("insp");
     open_flow(&mut f, json!({"name": "Check page", "nodes": [{"id": "c", "kind": "br_assert", "config": {"check": "exists", "selector": "h1"}}, {"id": "f", "kind": "br_fill", "config": {"fields": {"#a": "x"}}}]}));
     f.app.select_node("c");
-    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480), (480, 600)] {
         let g = draw_at(&mut f, w, h);
         let (a, _) = area(w, h);
         let ctx = format!("{w}x{h}");
@@ -1167,6 +1167,87 @@ fn the_form_of_a_check_step_fits_every_size_and_its_many_choices_and_fields_comm
 }
 
 #[test]
+fn a_step_stopped_by_the_camera_permission_offers_the_flow_settings_and_never_the_assistant() {
+    let mut f = fx("camcard");
+    let script = Arc::new(Script(Mutex::new(vec!["{}".into(), "{}".into(), "{}".into()])));
+    *f.env.host.backend.lock().unwrap() = Some(script.clone());
+    let spec = json!({"name": "Look", "nodes": [{"id": "shot", "kind": "cam_photo", "config": {}}], "defaults": {"heal": {"mode": "suggest"}}});
+    let id = open_flow(&mut f, spec);
+    f.env.store.publish(&id, &PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
+    click(&mut f, "Run (r)");
+    let run = f.app.run_id.clone().unwrap();
+    f.env.engine.wait_for(&run, Duration::from_secs(10), |r| r.status == RunStatus::Blocked || r.status.is_terminal()).unwrap();
+    tick(&mut f, 12);
+    let r = f.env.engine.get_run(&run).unwrap();
+    assert_eq!(r.status, RunStatus::Blocked, "{:?}", r.heal);
+    assert_eq!(script.0.lock().unwrap().len(), 3, "the assistant was not asked");
+    assert_eq!(r.heal_spent, 0);
+    let g = draw(&mut f);
+    assert!(has_hit(&g, "Open flow settings"), "{:?}", g.hits.iter().map(|h| h.label.clone()).collect::<Vec<_>>());
+    assert!(!has_hit(&g, "Approve") && !has_hit(&g, "Ask the assistant"));
+    assert!(f.app.open_card().unwrap().diagnosis.contains("Camera allowed"));
+    f.app.tab_click(id::CARD_SETTINGS);
+    draw(&mut f);
+    assert_eq!(f.app.tab, Tab::Design);
+    assert_eq!(f.app.props.key, "flow", "the flow's settings are open");
+    let ci = f.app.props.fields.iter().position(|x| x.key == "#camallow").expect("the camera switch is there");
+    assert!(f.app.props.fields[ci].help.contains("is sent only to the vision model") && f.app.props.fields[ci].help.contains("cloud service") && (f.app.props.fields[ci].help.contains("Using ") || f.app.props.fields[ci].help.contains("No vision model")), "{}", f.app.props.fields[ci].help);
+    assert!(!f.app.flow.defaults.camera.allowed);
+    f.app.tab_click(id::P_CHOICE + ci * id::P_CHOICE_STRIDE + 1);
+    assert!(f.app.flow.defaults.camera.allowed, "the person chose it");
+    assert!(f.env.store.get_draft(&id).unwrap().defaults.camera.allowed, "saved");
+}
+
+#[test]
+fn with_nothing_selected_the_flow_settings_are_drawn_at_every_size_and_a_toolbar_button_and_s_reach_them() {
+    let mut f = fx("settings-reach");
+    let id = open_flow(&mut f, two_steps());
+    for (w, h) in [(1024u32, 768u32), (1280, 720), (1920, 1080), (2560, 1600), (3840, 2160)] {
+        f.app.sel.clear();
+        f.app.sel_edge = None;
+        f.app.sync_props();
+        let g = draw_at(&mut f, w, h);
+        assert_eq!(f.app.props.key, "flow", "{w}x{h}");
+        let pr = f.app.geo.props.unwrap_or_else(|| panic!("{w}x{h}: the flow settings panel is not drawn with nothing selected"));
+        assert!(pr.w > 150.0 && pr.x + pr.w <= w as f32 + 0.5 && pr.y + pr.h <= h as f32 + 0.5, "{w}x{h}: {pr:?}");
+        assert!(has_hit(&g, "Flow settings (s)"), "{w}x{h}: the toolbar button");
+        // the first fields of the panel are real controls inside it
+        let ci = f.app.props.fields.iter().position(|x| x.key == "#camallow" && x.label == "Camera allowed").expect("Camera allowed is a flow setting");
+        let first = f.app.props.fields.iter().position(|x| x.key == "#heal").unwrap();
+        assert!(g.hits.iter().any(|h| h.ev == Event::Tab(id::P_CHOICE + first * id::P_CHOICE_STRIDE + 1) && h.rect.x >= pr.x - 1.0 && h.rect.x + h.rect.w <= pr.x + pr.w + 1.0), "{w}x{h}: a setting of the panel can be clicked");
+        // on a tall window the camera switch itself is on screen and clickable
+        if h >= 1080 {
+            assert!(g.hits.iter().any(|h| h.ev == Event::Tab(id::P_CHOICE + ci * id::P_CHOICE_STRIDE + 1) && h.rect.x >= pr.x - 1.0 && h.rect.x + h.rect.w <= pr.x + pr.w + 1.0 && h.rect.y + h.rect.h <= pr.y + pr.h + 1.0), "{w}x{h}: the Camera allowed switch");
+        }
+    }
+    // from a selected step, the button (and the key s) bring the flow's settings back
+    f.app.sel.insert("a".to_string());
+    f.app.sync_props();
+    draw(&mut f);
+    assert_eq!(f.app.props.key, "node:a");
+    click(&mut f, "Flow settings (s)");
+    draw(&mut f);
+    assert!(f.app.sel.is_empty() && f.app.props.key == "flow");
+    f.app.sel.insert("b".to_string());
+    f.app.sync_props();
+    key(&mut f, Key::Char('s'));
+    draw(&mut f);
+    assert!(f.app.sel.is_empty() && f.app.props.key == "flow");
+    let _ = id;
+}
+
+#[test]
+fn a_waiting_run_banner_keeps_its_instruction_and_clips_a_long_message_at_a_word_with_an_ellipsis() {
+    use iyakki_flow::driver::clip_words;
+    let long = "The error message explicitly states that 'Camera allowed' must be switched on in the flow settings before this step can take a picture, and nothing else was changed";
+    let c = clip_words(long, 60);
+    assert!(c.ends_with('\u{2026}') && c.chars().count() <= 61 && !c.contains("Camer'"), "{c}");
+    assert!(c.starts_with("The error message explicitly states that") && c.split(' ').all(|w| long.contains(w.trim_end_matches('\u{2026}'))), "{c}");
+    assert_eq!(clip_words("short", 60), "short");
+    assert_eq!(clip_words("one\ntwo", 60), "one\u{2026}");
+}
+
+#[test]
 fn only_the_person_marks_a_flow_trusted_and_the_budget_fields_check_their_numbers() {
     let mut f = fx("trust");
     open_flow(&mut f, two_steps());
@@ -1198,7 +1279,7 @@ fn only_the_person_marks_a_flow_trusted_and_the_budget_fields_check_their_number
     key(&mut f, Key::Ctrl('z'));
     assert_eq!(f.app.flow.defaults.browser.max_actions, 0);
     // the screen at the four sizes
-    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480), (480, 600)] {
         let g = draw_at(&mut f, w, h);
         let (a, _) = area(w, h);
         for hit in g.hits.iter().filter(|x| x.label != "slot-mark") {
@@ -1309,7 +1390,7 @@ fn a_run_with_browser_steps_shows_its_session_live_its_pictures_and_a_report_tha
     // a picture outside the program's own folder is never read for the screen or the report
     assert!(!f.app.own_picture("/etc/hostname"));
     // at every size the run view with these tabs stays inside the window
-    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480), (480, 600)] {
         for tab in [RunTab::Pictures, RunTab::Report] {
             f.app.rv.tab = tab;
             let g = draw_at(&mut f, w, h);
@@ -1320,4 +1401,806 @@ fn a_run_with_browser_steps_shows_its_session_live_its_pictures_and_a_report_tha
             }
         }
     }
+}
+
+#[test]
+fn deleting_a_flow_and_dropping_a_version_ask_first_default_to_keeping_and_are_refused_while_running() {
+    let mut f = fx("delask");
+    let id = open_flow(&mut f, json!({"name": "Keep me", "nodes": [{"id": "a", "kind": "notify", "config": {"title": "x"}}]}));
+    f.env.store.publish(&id, &PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
+    f.app.edit("second", |fl| fl.nodes[1].config = json!({"title": "y"}));
+    f.env.store.publish(&id, &PublishReq { by: "user:root", label: "", changelog: "v2", approved_by: Some("user:root") }).unwrap();
+    // drop: the history names the flow and what is lost; Enter keeps; the current version is refused
+    click(&mut f, "History (h)");
+    key(&mut f, Key::Char('x'));
+    let Some(Modal::Confirm(t, Confirmed::DropVersion(v))) = &f.app.modal else { panic!("no confirm") };
+    assert!(t.contains("Keep me") && t.contains("lost") && t.contains("CURRENT"), "{t}");
+    assert_eq!(*v, 2);
+    key(&mut f, Key::Enter);
+    assert!(f.app.modal.is_none(), "Enter does not confirm a drop");
+    assert_eq!(f.env.store.versions(&id).len(), 2);
+    click(&mut f, "History (h)");
+    key(&mut f, Key::Char('x'));
+    key(&mut f, Key::Char('y'));
+    assert_eq!(f.env.store.versions(&id).len(), 2, "the current version is not dropped");
+    click(&mut f, "History (h)");
+    key(&mut f, Key::Up);
+    key(&mut f, Key::Char('x'));
+    key(&mut f, Key::Char('y'));
+    assert_eq!(f.env.store.versions(&id).len(), 1);
+    assert!(f.env.store.get_version(&id, 1).is_none());
+    // delete: Esc and Enter keep it
+    f.app.close_flow();
+    f.app.reload_flows();
+    f.app.list_sel = f.app.flows.iter().position(|x| x.id == id).unwrap();
+    key(&mut f, Key::Delete);
+    let Some(Modal::Confirm(t, Confirmed::DeleteFlow(_))) = &f.app.modal else { panic!("no confirm") };
+    assert!(t.contains("Keep me") && t.contains(&id));
+    key(&mut f, Key::Enter);
+    assert!(f.env.store.exists(&id), "Enter keeps it");
+    key(&mut f, Key::Delete);
+    key(&mut f, Key::Esc);
+    assert!(f.env.store.exists(&id));
+    // a run that is not finished refuses the delete
+    f.env.engine.start_run(StartRequest::new(&id)).unwrap();
+    key(&mut f, Key::Delete);
+    key(&mut f, Key::Char('y'));
+    assert!(f.env.store.exists(&id), "refused while a run is unfinished");
+    // finished: confirm removes
+    let rid = f.env.engine.summaries()[0].id.clone();
+    f.env.engine.cancel(&rid).unwrap();
+    f.env.engine.wait_for(&rid, Duration::from_secs(5), |r| r.status.is_terminal()).unwrap();
+    key(&mut f, Key::Delete);
+    key(&mut f, Key::Char('y'));
+    assert!(!f.env.store.exists(&id));
+}
+
+// ---------------------------------------------------------------------------------------------------------------- closing, results, failure card
+
+/// A flow whose one step cannot succeed, published and run once; the run is waited for. Returns (flow id, run id).
+fn failed_run(f: &mut Fx, name: &str, inputs: serde_json::Value) -> (String, String) {
+    let spec = json!({"name": name, "inputs": [{"name": "api", "type": "text", "required": false}], "nodes": [{"id": "call", "kind": "http", "name": "Call the site", "config": {"url": "http://127.0.0.1:1/x"}, "retry": {"attempts": 1}}], "edges": [{"from": "start", "to": "call"}]});
+    let flow = f.env.create_draft(build_flow(&spec).unwrap(), "user:root").unwrap();
+    f.env.store.publish(&flow.id, &PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
+    let mut req = StartRequest::new(&flow.id).trigger("cron", "scheduler");
+    req.inputs = inputs;
+    let run = f.env.engine.start_run(req).unwrap().run_id;
+    f.env.engine.wait_for(&run, Duration::from_secs(10), |r| r.status.is_terminal()).unwrap();
+    assert_eq!(f.env.engine.get_run(&run).unwrap().status, RunStatus::Failed);
+    f.app.reload_flows();
+    f.app.refresh_runs();
+    (flow.id, run)
+}
+
+fn fits(f: &mut Fx, w: u32, h: u32, ctx: &str) -> Gfx {
+    let g = draw_at(f, w, h);
+    let (a, s) = area(w, h);
+    for hit in g.hits.iter().filter(|h| h.label != "slot-mark") {
+        let r = hit.rect;
+        assert!(r.x >= a.x - 1.0 && r.x + r.w <= a.x + a.w + 1.0 && r.y >= a.y - 1.0 && r.y + r.h <= a.y + a.h + 1.0, "{ctx} {w}x{h}: `{}` {r:?} is outside {a:?}", hit.label);
+    }
+    let buttons: Vec<_> = g.hits.iter().filter(|h| matches!(h.ev, Event::Tab(n) if (id::TAB..id::B_NEW + 1).contains(&n)) && h.rect.h < 45.0 * s && h.rect.w < 420.0 * s && h.label != "chat pane").collect();
+    for (i, p) in buttons.iter().enumerate() {
+        for q in &buttons[i + 1..] {
+            let (a1, b1) = (p.rect, q.rect);
+            let ov = a1.x < b1.x + b1.w - 0.5 && b1.x < a1.x + a1.w - 0.5 && a1.y < b1.y + b1.h - 0.5 && b1.y < a1.y + a1.h - 0.5;
+            assert!(!ov, "{ctx} {w}x{h}: `{}` {a1:?} and `{}` {b1:?} overlap", p.label, q.label);
+        }
+    }
+    g
+}
+
+#[test]
+fn esc_closes_the_open_flow_and_the_run_view_one_step_back_and_only_refused_text_asks_first() {
+    let mut f = fx("close");
+    let id = open_flow(&mut f, two_steps());
+    f.env.store.publish(&id, &PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
+    // visible controls with their keys
+    let g = draw(&mut f);
+    assert!(has_hit(&g, "Close (Esc)") && has_hit(&g, "Run (r)") && has_hit(&g, "Publish (p)"));
+    // Esc with nothing selected closes the flow, says nothing was lost, and stays in FLOWS
+    f.app.edit("change", |fl| fl.name = "Renamed".into());
+    f.app.select_node("a");
+    assert!(matches!(f.app.handle(&Event::Key(Key::Esc), &f.cx), crate::apps::Flow::Stay));
+    assert!(f.app.cur.is_some(), "the first Esc only deselects");
+    assert!(matches!(f.app.handle(&Event::Key(Key::Esc), &f.cx), crate::apps::Flow::Stay));
+    assert!(f.app.cur.is_none(), "the second closes the flow");
+    assert!(f.app.status.as_ref().is_some_and(|s| s.0.contains("Closed") && s.0.contains("saved")), "{:?}", f.app.status);
+    assert_eq!(f.env.store.get_draft(&id).unwrap().name, "Renamed", "the edit is in the draft");
+    // Esc on the list leaves FLOWS
+    assert!(matches!(f.app.handle(&Event::Key(Key::Esc), &f.cx), crate::apps::Flow::Back));
+    // text that was refused asks before it is dropped; Enter keeps editing, y closes
+    f.app.open_flow(&id);
+    draw(&mut f);
+    f.app.toggle_text();
+    f.app.text.as_mut().unwrap().set_text("{ not a flow");
+    f.app.text_changed();
+    assert!(!f.app.text_err.is_empty());
+    f.app.tab_click(id::CLOSE);
+    assert!(matches!(&f.app.modal, Some(Modal::Confirm(t, Confirmed::CloseFlow)) if t.contains("Renamed")));
+    key(&mut f, Key::Enter);
+    assert!(f.app.cur.is_some() && f.app.modal.is_none(), "Enter keeps editing");
+    f.app.tab_click(id::CLOSE);
+    key(&mut f, Key::Char('y'));
+    assert!(f.app.cur.is_none());
+    assert_eq!(f.env.store.get_draft(&id).unwrap().name, "Renamed", "the last valid draft is untouched");
+    // the run view: Esc goes back to the screen it came from, never out of FLOWS
+    f.app.open_flow(&id);
+    click(&mut f, "Run (r)");
+    assert_eq!(f.app.tab, Tab::Run);
+    let g = draw(&mut f);
+    assert!(has_hit(&g, "Close (Esc)"));
+    assert!(matches!(f.app.handle(&Event::Key(Key::Esc), &f.cx), crate::apps::Flow::Stay));
+    assert_eq!(f.app.tab, Tab::Design);
+    assert!(f.app.cur.is_some(), "back in the editor");
+    click(&mut f, "BOARD");
+    let run = f.app.board_rows().first().cloned().unwrap();
+    f.app.select_run(&run, true);
+    assert_eq!(f.app.tab, Tab::Run);
+    key(&mut f, Key::Esc);
+    assert_eq!(f.app.tab, Tab::Board, "a run opened from the board closes back to it");
+}
+
+#[test]
+fn a_run_with_required_inputs_asks_for_them_and_a_finished_run_says_how_it_ended_and_what_next() {
+    let mut f = fx("inputs");
+    let spec = json!({"name": "Needs input", "inputs": [{"name": "site", "type": "text", "required": true}, {"name": "count", "type": "number", "required": false}], "nodes": [{"id": "n", "kind": "notify", "config": {"title": "{{ inputs.site }}"}}], "edges": [{"from": "start", "to": "n"}]});
+    let id = open_flow(&mut f, spec);
+    f.env.store.publish(&id, &PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
+    key(&mut f, Key::Char('r'));
+    assert!(matches!(f.app.modal, Some(Modal::RunInputs(..))), "the required input is asked for");
+    assert!(f.app.run_id.is_none());
+    key(&mut f, Key::Enter);
+    key(&mut f, Key::Enter);
+    assert!(matches!(f.app.modal, Some(Modal::RunInputs(..))), "an empty required value keeps the form open");
+    draw(&mut f);
+    types(&mut f, "x");
+    for _ in 0..4 {
+        if f.app.modal.is_none() {
+            break;
+        }
+        key(&mut f, Key::Enter);
+    }
+    assert!(f.app.modal.is_none(), "{:?}", f.app.status);
+    let run = f.app.run_id.clone().unwrap();
+    f.env.engine.wait_for(&run, Duration::from_secs(5), |r| r.status.is_terminal()).unwrap();
+    tick(&mut f, 12);
+    assert_eq!(f.app.tab, Tab::Run);
+    assert_eq!(f.env.engine.get_run(&run).unwrap().inputs["site"], "x");
+    // the result is stated, with Run again and the log
+    let g = draw(&mut f);
+    assert!(has_hit(&g, "Run again (a)") && has_hit(&g, "Open log (l)") && has_hit(&g, "Close (Esc)"), "{:?}", g.hits.iter().map(|h| h.label.clone()).collect::<Vec<_>>());
+    assert!(f.app.run_banner(f.app.run.as_ref().unwrap(), f.app.now()).text.starts_with("Succeeded"));
+    assert!(f.app.fail.is_none(), "no failure card after a success");
+    click(&mut f, "Run again (a)");
+    assert_ne!(f.app.run_id.as_deref(), Some(run.as_str()), "a new run");
+    let again = f.app.run_id.clone().unwrap();
+    assert_eq!(f.env.engine.get_run(&again).unwrap().inputs["site"], "x", "with the same inputs");
+    // Open log shows the log tab
+    f.env.engine.wait_for(&again, Duration::from_secs(5), |r| r.status.is_terminal()).unwrap();
+    tick(&mut f, 12);
+    click(&mut f, "Open log (l)");
+    assert_eq!(f.app.rv.tab, RunTab::Log);
+}
+
+#[test]
+fn a_running_run_shows_progress_and_a_stop_button() {
+    let mut f = fx("stop");
+    let spec = json!({"name": "Waits", "nodes": [{"id": "w", "kind": "delay", "config": {"seconds": 30}}], "edges": [{"from": "start", "to": "w"}]});
+    let id = open_flow(&mut f, spec);
+    f.env.store.publish(&id, &PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
+    click(&mut f, "Run (r)");
+    let run = f.app.run_id.clone().unwrap();
+    f.env.engine.wait_for(&run, Duration::from_secs(5), |r| r.status == RunStatus::Running).unwrap();
+    tick(&mut f, 12);
+    let g = draw(&mut f);
+    assert!(has_hit(&g, "Stop run (c)"), "{:?}", g.hits.iter().map(|h| h.label.clone()).collect::<Vec<_>>());
+    let b = f.app.run_banner(f.app.run.as_ref().unwrap(), f.app.now());
+    assert!(b.text.contains("steps done"), "{}", b.text);
+    key(&mut f, Key::Char('c'));
+    f.env.engine.wait_for(&run, Duration::from_secs(10), |r| r.status.is_terminal()).unwrap();
+    tick(&mut f, 12);
+    let g = draw(&mut f);
+    assert!(has_hit(&g, "Run again (a)"));
+    assert!(f.app.fail.is_none(), "a run the person stopped is not a failure");
+}
+
+#[test]
+fn a_failed_last_run_shows_the_card_on_open_dismiss_persists_and_a_success_shows_none() {
+    let mut f = fx("card2");
+    let (flow, run) = failed_run(&mut f, "Site check", json!({}));
+    // a flow that succeeds has no card
+    let ok = open_flow(&mut f, json!({"name": "Fine", "nodes": [{"id": "n", "kind": "notify", "config": {"title": "x"}}], "edges": [{"from": "start", "to": "n"}]}));
+    f.env.store.publish(&ok, &PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
+    let r2 = f.env.engine.start_run(StartRequest::new(&ok)).unwrap().run_id;
+    f.env.engine.wait_for(&r2, Duration::from_secs(5), |r| r.status.is_terminal()).unwrap();
+    f.app.refresh_runs();
+    f.app.open_flow(&ok);
+    assert!(f.app.fail.is_none());
+    assert!(!has_hit(&draw(&mut f), "Ask the agent to fix (F)"));
+    // the list marks the failed flow
+    f.app.close_flow();
+    f.app.reload_flows();
+    draw(&mut f);
+    // opening the failed flow shows the card at once, with the step and the reason
+    f.app.open_flow(&flow);
+    let fail = f.app.fail.clone().expect("the card");
+    assert_eq!((fail.run_id.as_str(), fail.step.as_str()), (run.as_str(), "call"));
+    assert!(fail.headline().starts_with("Run failed at step Call the site:"), "{}", fail.headline());
+    let g = draw(&mut f);
+    for l in ["Ask the agent to fix (F)", "Open log (L)", "Dismiss (x)"] {
+        assert!(has_hit(&g, l), "{l}");
+    }
+    assert!(f.app.footer_hint().starts_with("F ask the agent to fix"));
+    // it fits every size, in the editor, the list editor and the run view, with the assistant open or closed
+    for (w, h) in [(1280u32, 720u32), (1024, 600), (800, 480), (480, 600)] {
+        for chat in [false, true] {
+            f.app.chat_open = chat;
+            f.app.tab = Tab::Design;
+            let g = fits(&mut f, w, h, &format!("design chat={chat}"));
+            if w >= 1000 {
+                assert!(has_hit(&g, "Ask the agent to fix (F)"));
+            }
+            f.app.tab = Tab::Run;
+            f.app.select_run(&run, false);
+            fits(&mut f, w, h, &format!("run chat={chat}"));
+            f.app.tab = Tab::Design;
+        }
+    }
+    f.app.chat_open = false;
+    // the list tags it
+    f.app.close_flow();
+    let g = fits(&mut f, 1280, 720, "list");
+    assert!(g.rgba().len() > 0);
+    f.app.open_flow(&flow);
+    // Dismiss: gone now, and it does not come back on the next open or after a restart
+    click(&mut f, "Dismiss (x)");
+    assert!(f.app.fail.is_none());
+    f.app.close_flow();
+    f.app.open_flow(&flow);
+    assert!(f.app.fail.is_none(), "dismissed for this run");
+    let mut again = FlowsApp::with_env(&f.cx, f.env.clone());
+    again.open_flow(&flow);
+    assert!(again.fail.is_none(), "dismiss is remembered");
+    // a new failed run is a new card
+    let mut req = StartRequest::new(&flow).trigger("cron", "scheduler");
+    req.inputs = json!({});
+    let run2 = f.env.engine.start_run(req).unwrap().run_id;
+    f.env.engine.wait_for(&run2, Duration::from_secs(10), |r| r.status.is_terminal()).unwrap();
+    f.app.refresh_runs();
+    assert_eq!(f.app.fail.as_ref().map(|x| x.run_id.clone()), Some(run2));
+    // the setting: off means no card
+    f.app.tab_click(id::OFFER);
+    assert!(f.app.fail.is_none() && !f.app.book.offer());
+    f.app.tab_click(id::OFFER);
+    assert!(f.app.fail.is_some());
+}
+
+#[test]
+fn opening_a_failed_flow_with_the_assistant_open_makes_it_offer_once_and_never_edits() {
+    let mut f = fx("offer");
+    let (flow, run) = failed_run(&mut f, "Offer me", json!({}));
+    let before = f.env.store.get_draft(&flow).unwrap();
+    // chat closed: only the card, no message
+    f.app.open_flow(&flow);
+    tick(&mut f, 4);
+    assert!(f.app.fail.is_some() && f.app.pending_note.is_none());
+    assert!(!f.app.chat.messages().iter().any(|m| m.content.contains("Want me to")));
+    f.app.close_flow();
+    // chat open: a short message appears in the thread, with Yes and Not now beside it
+    f.app.chat_open = true;
+    f.app.open_flow(&flow);
+    tick(&mut f, 6);
+    let said: Vec<_> = f.app.chat.messages().iter().filter(|m| m.content.contains("Want me to look into it")).collect();
+    assert_eq!(said.len(), 1, "{:?}", f.app.chat.messages().iter().map(|m| m.content.clone()).collect::<Vec<_>>());
+    assert!(said[0].content.contains("failed at step Call the site"));
+    assert!(f.app.book.announced(&run));
+    let g = draw(&mut f);
+    assert!(has_hit(&g, "Yes, fix it") && has_hit(&g, "Not now"));
+    // once per failed run: closing and opening again does not repeat it
+    f.app.close_flow();
+    tick(&mut f, 2);
+    f.app.open_flow(&flow);
+    tick(&mut f, 6);
+    let n = f.app.chat.messages().iter().filter(|m| m.content.contains("Want me to look into it")).count();
+    assert!(n <= 1, "said {n} times");
+    assert!(f.app.pending_note.is_none());
+    // nothing was changed or run by the offer
+    assert_eq!(f.env.store.get_draft(&flow).unwrap(), before);
+    assert_eq!(f.env.engine.runs_of(&flow).len(), 1);
+    // Not now dismisses it for this run
+    click(&mut f, "Not now");
+    assert!(f.app.fail.is_none());
+}
+
+#[test]
+fn ask_the_agent_to_fix_loads_the_failure_without_secrets_is_bounded_and_changes_nothing() {
+    let mut f = fx("fix");
+    let token = format!("{}{}", "ghp_", "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2");
+    let (flow, run) = failed_run(&mut f, "Fix me", json!({"api": token}));
+    let before = f.env.store.get_draft(&flow).unwrap();
+    f.app.open_flow(&flow);
+    assert!(f.app.fail.is_some());
+    assert!(f.cx.session.policy.agent, "the test account has the assistant");
+    for n in 1..=3u32 {
+        // wait for a turn that is still going
+        for _ in 0..600 {
+            f.app.handle(&Event::Tick, &f.cx);
+            if !f.app.chat.is_running() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!f.app.chat.is_running());
+        f.app.tab_click(id::FAIL_FIX);
+        f.app.handle(&Event::Tick, &f.cx);
+        // the click is handled with the event, as the shell does
+        if f.app.fix_requested {
+            f.app.handle(&Event::Key(Key::Char('F')), &f.cx);
+        }
+        assert_eq!(f.app.book.attempts(&flow), n, "attempt {n}");
+        assert!(f.app.chat_open && f.app.focus == Focus::Chat, "the assistant opens on the flow");
+        // the request is in the thread: flow, run, step, input names only
+        let asked: Vec<String> = f.app.chat.messages().iter().filter(|m| m.content.starts_with("FLOW FAILURE REQUEST")).map(|m| m.content.clone()).collect();
+        assert!(asked.last().unwrap().contains(&format!("attempt {n} of 3")) && asked.last().unwrap().contains(&flow) && asked.last().unwrap().contains(&run) && asked.last().unwrap().contains("step `call`"));
+        f.app.focus = Focus::Canvas;
+    }
+    let all: String = f.app.chat.messages().iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
+    assert!(!all.contains(&token), "no input value reaches the conversation");
+    assert!(all.contains("api"), "the input's name does");
+    // the fourth is refused, with the reason, and spends nothing
+    for _ in 0..600 {
+        f.app.handle(&Event::Tick, &f.cx);
+        if !f.app.chat.is_running() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    f.app.tab_click(id::FAIL_FIX);
+    f.app.handle(&Event::Key(Key::Char('F')), &f.cx);
+    assert_eq!(f.app.book.attempts(&flow), 3);
+    assert!(f.app.status.as_ref().is_some_and(|s| !s.1 && s.0.contains("already tried 3 times")), "{:?}", f.app.status);
+    let b = f.app.fail_banner().unwrap();
+    assert!(b.buttons[0].0 == "No fix attempts left" && !b.buttons[0].3, "the button is off when no attempt is left");
+    draw(&mut f);
+    // nothing was edited or re-run on its own, and no change waits unseen
+    assert_eq!(f.env.store.get_draft(&flow).unwrap(), before);
+    assert_eq!(f.env.engine.runs_of(&flow).len(), 1);
+    // a successful run starts the count again
+    let ok = f.env.store.get_draft(&flow).unwrap();
+    assert_eq!(ok.id, flow);
+    f.app.book.reset(&flow);
+    assert_eq!(f.app.book.attempts_left(&flow), 3);
+}
+
+#[test]
+fn every_screen_has_a_key_hint_and_the_empty_states_say_what_to_do_next() {
+    let mut f = fx("hints");
+    // the empty list
+    let g = draw(&mut f);
+    assert!(f.app.footer_hint().contains("n New") && f.app.footer_hint().contains("Esc leave"));
+    assert!(g.hits.iter().any(|h| h.label == "New flow (n)"));
+    let id = open_flow(&mut f, json!({"name": "Hint", "nodes": [{"id": "n", "kind": "notify", "config": {"title": "x"}}]}));
+    let h = f.app.footer_hint();
+    assert!(h.contains("r Run") && h.contains("Esc Close") && h.contains("p Publish"), "{h}");
+    f.app.add_step("notify");
+    let h = f.app.footer_hint();
+    assert!(h.contains("Enter edit settings") && h.contains("Esc deselect"), "{h}");
+    f.app.sel.clear();
+    f.app.focus = Focus::Props;
+    assert!(f.app.footer_hint().contains("Esc undo"));
+    f.app.focus = Focus::Text;
+    assert!(f.app.footer_hint().contains("Esc back to the canvas"));
+    f.app.focus = Focus::Chat;
+    f.app.chat_open = true;
+    assert!(f.app.footer_hint().contains("Enter send"));
+    f.app.chat_open = false;
+    f.app.focus = Focus::Canvas;
+    f.app.tab = Tab::Run;
+    assert!(f.app.footer_hint().contains("Esc Close") && f.app.footer_hint().contains("c Stop"));
+    f.app.tab = Tab::Board;
+    assert!(f.app.footer_hint().contains("Esc leave"));
+    // the hint is the app's hint (the shell shows it and F1 lists it) and is drawn on every screen at every size
+    use super::App;
+    assert_eq!(f.app.hint(), f.app.footer_hint());
+    let _ = id;
+    for (w, hh) in [(1280u32, 720u32), (1024, 600), (800, 480), (480, 600)] {
+        for tab in [Tab::Design, Tab::Run, Tab::Board] {
+            f.app.tab = tab;
+            fits(&mut f, w, hh, &format!("{tab:?}"));
+        }
+    }
+    // the empty list and the empty flow say what to do
+    f.app.close_flow();
+    f.app.tab = Tab::Design;
+    f.app.status = None;
+    fits(&mut f, 800, 480, "empty list");
+}
+
+// ------------------------------------------------------------------------------------------------ Assist (copilot and autopilot)
+
+/// A published flow with Assist set as given and one failed run; the scripted model answers with a fix of the address.
+fn assisted_failure(f: &mut Fx, name: &str, mode: AssistMode) -> String {
+    let spec = json!({"name": name, "nodes": [{"id": "call", "kind": "http", "name": "Call the site", "config": {"url": "http://127.0.0.1:1/x"}, "retry": {"attempts": 1}}], "edges": [{"from": "start", "to": "call"}]});
+    let flow = f.env.create_draft(build_flow(&spec).unwrap(), "user:root").unwrap();
+    let mut d = f.env.store.get_draft(&flow.id).unwrap();
+    d.defaults.assist.mode = mode;
+    f.env.store.save_draft(&d, None).unwrap();
+    f.env.store.publish(&flow.id, &PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
+    let run = f.env.engine.start_run(StartRequest::new(&flow.id).trigger("cron", "scheduler")).unwrap().run_id;
+    f.env.engine.wait_for(&run, Duration::from_secs(10), |r| r.status.is_terminal()).unwrap();
+    *f.env.host.backend.lock().unwrap() = Some(Arc::new(Script(Mutex::new(vec![r#"{"diagnosis": "the path moved", "patch": {"node": "call", "reason": "moved", "ops": [{"op": "set_config", "path": "url", "value": "http://127.0.0.1:1/y"}]}}"#.into()]))));
+    f.app.reload_flows();
+    f.app.refresh_runs();
+    flow.id
+}
+
+#[test]
+fn the_assist_settings_are_in_the_flow_settings_and_only_the_person_changes_them() {
+    let mut f = fx("assist-set");
+    let id = open_flow(&mut f, two_steps());
+    f.app.sel.clear();
+    f.app.sync_props();
+    let labels: Vec<String> = f.app.props.fields.iter().map(|x| x.label.clone()).collect();
+    for want in ["Assist: an agent that fixes and upgrades this flow", "Assist: autopilot may publish a tested fix", "Assist: fixes after a failed run", "Assist: upgrades", "Assist: automatic publishes per day (0 to 20)"] {
+        assert!(labels.iter().any(|l| l == want), "{want}: {labels:?}");
+    }
+    // a flow starts with Assist off
+    assert_eq!(f.app.flow.defaults.assist.mode, AssistMode::Off);
+    // the person picks copilot and a number; a wrong number is refused with the range
+    let idx = f.app.props.fields.iter().position(|x| x.key == "#assist").unwrap();
+    f.app.choose(idx, 1);
+    assert_eq!(f.app.flow.defaults.assist.mode, AssistMode::Copilot);
+    let pidx = f.app.props.fields.iter().position(|x| x.key == "#assistpub").unwrap();
+    f.app.props.focus = pidx;
+    f.app.props.fields[pidx].tf.set("99");
+    f.app.commit_field(pidx);
+    assert!(f.app.props.fields[pidx].err.as_ref().is_some_and(|e| e.contains("0 to 20")), "{:?}", f.app.props.fields[pidx].err);
+    assert_eq!(f.app.flow.defaults.assist.max_publish_per_day, 1);
+    f.app.props.focus = pidx;
+    f.app.props.fields[pidx].tf.set("2");
+    f.app.commit_field(pidx);
+    assert_eq!(f.app.flow.defaults.assist.max_publish_per_day, 2);
+    let _ = id;
+}
+
+#[test]
+fn a_failed_run_in_copilot_shows_a_strip_the_list_approve_goes_through_publish_and_reject_leaves_the_draft() {
+    let mut f = fx("assist-copilot");
+    let id = assisted_failure(&mut f, "Copilot flow", AssistMode::Copilot);
+    f.app.open_flow(&id);
+    // the fail card is there, and no suggestion yet: nothing runs the agent until the pass
+    let g = draw(&mut f);
+    assert!(has_hit(&g, "Ask the agent to fix (F)"));
+    assert!(!has_hit(&g, "Review (S)"));
+    let lines = f.env.assist_tick();
+    assert!(lines.iter().any(|l| l.contains("suggestion s1")), "{lines:?}");
+    tick(&mut f, 40);
+    let g = draw(&mut f);
+    assert!(has_hit(&g, "Review (S)"), "the strip offers the list: {:?}", g.hits.iter().map(|h| h.label.clone()).collect::<Vec<_>>());
+    // the draft is untouched until the person decides
+    assert_eq!(f.env.store.get_draft(&id).unwrap().node("call").unwrap().config["url"], "http://127.0.0.1:1/x");
+    click(&mut f, "Review (S)");
+    assert!(matches!(f.app.modal, Some(Modal::Suggestions(_))));
+    let g = draw(&mut f);
+    assert!(has_hit(&g, "Approve and publish (a)") && has_hit(&g, "Reject (x)") && has_hit(&g, "Close (Esc)"));
+    // Reject first on a copy of the flow's list: nothing was changed
+    click(&mut f, "Reject (x)");
+    assert!(f.app.modal.is_none(), "the list closes when it is empty");
+    assert!(f.env.open_suggestions(&id).is_empty());
+    assert_eq!(f.env.store.get_draft(&id).unwrap().node("call").unwrap().config["url"], "http://127.0.0.1:1/x");
+    // a second failure and suggestion; this time approve
+    *f.env.host.backend.lock().unwrap() = Some(Arc::new(Script(Mutex::new(vec![r#"{"diagnosis": "the path moved again", "patch": {"node": "call", "reason": "moved", "ops": [{"op": "set_config", "path": "url", "value": "http://127.0.0.1:1/z"}]}}"#.into()]))));
+    let run = f.env.engine.start_run(StartRequest::new(&id).trigger("cron", "scheduler")).unwrap().run_id;
+    f.env.engine.wait_for(&run, Duration::from_secs(10), |r| r.status.is_terminal()).unwrap();
+    f.env.assist_tick();
+    f.app.refresh_runs();
+    tick(&mut f, 40);
+    click(&mut f, "Review (S)");
+    click(&mut f, "Approve and publish (a)");
+    // the change is in the draft and the ordinary Publish dialog is open: nothing is published yet
+    assert!(matches!(f.app.modal, Some(Modal::Publish(_))), "publishing stays the person's confirmation");
+    assert_eq!(f.env.store.published(&id).unwrap().meta.version, 1);
+    assert_eq!(f.app.flow.node("call").unwrap().config["url"], "http://127.0.0.1:1/z");
+    key(&mut f, Key::Ctrl('s'));
+    assert_eq!(f.env.store.published(&id).unwrap().meta.version, 2);
+    f.app.update_assist();
+    assert!(f.app.assist.sugs.is_empty(), "the suggestion is settled by the publish");
+    let book = f.env.assist_store();
+    assert!(book.list(&id).iter().any(|s| s.status == iyakki_flow::assist_store::Status::Approved && s.published_version == 2));
+}
+
+#[test]
+fn the_watch_strip_has_a_one_click_rollback_and_a_pause() {
+    let mut f = fx("assist-watch");
+    let id = assisted_failure(&mut f, "Watched", AssistMode::Autopilot);
+    // as if autopilot had published version 2: a watch on it
+    let mut d = f.env.store.get_draft(&id).unwrap();
+    d.nodes.iter_mut().find(|n| n.id == "call").unwrap().config["url"] = json!("http://127.0.0.1:1/y");
+    f.env.store.save_draft(&d, None).unwrap();
+    f.env.store.publish(&id, &PublishReq { by: "agent:assist", label: "", changelog: "autopilot fix", approved_by: Some("policy:autopilot") }).unwrap();
+    let book = f.env.assist_store();
+    book.set_watch(&id, Some(iyakki_flow::assist_store::Watch { version: 2, previous: 1, since_ms: 1, suggestion: "s9".into() })).unwrap();
+    f.app.open_flow(&id);
+    f.app.update_assist();
+    let g = draw(&mut f);
+    assert!(has_hit(&g, "Roll back to v1 (B)") && has_hit(&g, "Pause autopilot (U)"), "{:?}", g.hits.iter().map(|h| h.label.clone()).collect::<Vec<_>>());
+    click(&mut f, "Pause autopilot (U)");
+    assert!(book.paused(&id));
+    assert!(has_hit(&draw(&mut f), "Resume autopilot (U)"));
+    key(&mut f, Key::Char('U'));
+    assert!(!book.paused(&id));
+    click(&mut f, "Roll back to v1 (B)");
+    assert!(matches!(f.app.modal, Some(Modal::Confirm(..))), "the ordinary confirmation follows");
+    key(&mut f, Key::Char('y'));
+    assert_eq!(f.env.store.published(&id).unwrap().node("call").unwrap().config["url"], "http://127.0.0.1:1/x");
+    assert!(book.watch(&id).is_none() && book.paused(&id), "after a rollback the watch ends and autopilot pauses");
+}
+
+#[test]
+fn the_suggestion_strip_list_and_settings_fit_at_every_size_with_the_assistant_open_and_closed() {
+    let mut f = fx("assist-geo");
+    let id = assisted_failure(&mut f, "Geometry flow", AssistMode::Copilot);
+    f.env.assist_tick();
+    // a second waiting suggestion, and a watch, so every strip is up
+    let book = f.env.assist_store();
+    let mut s = book.list(&id)[0].clone();
+    s.id = String::new();
+    s.run_id = "other".into();
+    s.summary = "a long summary of a change that is shown in the list and must be cut to the width of the row it is drawn in".into();
+    book.add(s).unwrap();
+    book.set_watch(&id, Some(iyakki_flow::assist_store::Watch { version: 1, previous: 1, since_ms: 1, suggestion: "s1".into() })).unwrap();
+    f.app.open_flow(&id);
+    f.app.update_assist();
+    assert_eq!(f.app.assist.sugs.len(), 2);
+    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480), (480, 600)] {
+        for chat in [false, true] {
+            f.app.chat_open = chat;
+            f.app.modal = None;
+            f.app.sel.clear();
+            let g = fits(&mut f, w, h, &format!("strips chat={chat}"));
+            // a small window gives the whole screen to the assistant when it is open; the strips are then not on screen
+            let covered = f.app.geo.chat.is_some_and(|c| c.w >= area(w, h).0.w - 1.0);
+            if !covered {
+                assert!(has_hit(&g, "Review (S)"), "{w}x{h} chat={chat}");
+                // the strips never overlap each other
+                let strips: Vec<_> = g.hits.iter().filter(|x| matches!(x.ev, Event::Tab(n) if [id::FAIL_FIX, id::FAIL_LOG, id::FAIL_DISMISS, id::SUG_OPEN, id::ASSIST_ROLLBACK, id::ASSIST_PAUSE].contains(&n))).collect();
+                assert!(strips.len() >= 5, "{w}x{h}: {}", strips.len());
+                for (i, p) in strips.iter().enumerate() {
+                    for q in &strips[i + 1..] {
+                        let (a1, b1) = (p.rect, q.rect);
+                        let ov = a1.x < b1.x + b1.w - 0.5 && b1.x < a1.x + a1.w - 0.5 && a1.y < b1.y + b1.h - 0.5 && b1.y < a1.y + a1.h - 0.5;
+                        assert!(!ov, "{w}x{h} chat={chat}: `{}` {a1:?} and `{}` {b1:?} overlap", p.label, q.label);
+                    }
+                }
+            }
+            // the list dialog
+            f.app.chat_open = false;
+            f.app.open_suggestions();
+            let g = fits(&mut f, w, h, "suggestions");
+            let (a, _s) = area(w, h);
+            for l in ["Approve and publish (a)", "Reject (x)", "Close (Esc)"] {
+                let hit = g.hits.iter().find(|x| x.label == l).unwrap_or_else(|| panic!("{w}x{h}: no `{l}`"));
+                assert!(hit.rect.x >= a.x && hit.rect.x + hit.rect.w <= a.x + a.w && hit.rect.y + hit.rect.h <= a.y + a.h, "{w}x{h}: `{l}` {:?} outside {a:?}", hit.rect);
+            }
+            let btn: Vec<_> = ["Approve and publish (a)", "Reject (x)", "Close (Esc)"].iter().map(|l| g.hits.iter().find(|x| x.label == *l).unwrap().rect).collect();
+            for (i, a1) in btn.iter().enumerate() {
+                for b1 in &btn[i + 1..] {
+                    let ov = a1.x < b1.x + b1.w - 0.5 && b1.x < a1.x + a1.w - 0.5 && a1.y < b1.y + b1.h - 0.5 && b1.y < a1.y + a1.h - 0.5;
+                    assert!(!ov, "{w}x{h}: dialog buttons overlap {a1:?} {b1:?}");
+                }
+            }
+            assert!(g.hits.iter().filter(|x| matches!(x.ev, Event::Row(_))).count() >= 2, "{w}x{h}: both suggestions are rows");
+            key(&mut f, Key::Esc);
+            assert!(f.app.modal.is_none());
+        }
+        // the settings page with the Assist fields
+        f.app.sel.clear();
+        f.app.sync_props();
+        fits(&mut f, w, h, "settings");
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ icons and the node tooltip
+
+const FIVE: [(u32, u32); 5] = [(1024, 768), (1280, 720), (1920, 1080), (2560, 1600), (3840, 2160)];
+
+fn sample_flow(f: &mut Fx, template: &str) -> String {
+    let t = iyakki_flow::templates::get(template).unwrap();
+    let flow = f.env.create_draft(iyakki_flow::templates::instantiate(&t, template, ""), "user:root").unwrap();
+    f.app.reload_flows();
+    f.app.open_flow(&flow.id);
+    draw(f);
+    flow.id
+}
+
+/// Draw with the pointer at `m` (the shell sets it before every frame).
+fn draw_m(f: &mut Fx, w: u32, h: u32, m: (i32, i32)) -> Gfx {
+    let mut g = Gfx::new(w, h);
+    g.mouse = m;
+    crate::fx::background(&mut g);
+    let (a, s) = area(w, h);
+    f.app.render(&mut g, a, s, &f.cx, 7);
+    g
+}
+
+fn node_center(f: &Fx, id: &str) -> (i32, i32) {
+    let n = f.app.flow.node(id).unwrap();
+    let (x, y) = f.app.view.to_screen(f.app.geo.canvas, (n.pos.x + NODE_W / 2.0, n.pos.y + NODE_H / 2.0));
+    (x as i32, y as i32)
+}
+
+#[test]
+fn every_node_kind_has_an_icon_that_draws_and_every_run_state_has_its_own_badge() {
+    use super::flows_icons::*;
+    let reg = iyakki_flow::Registry::builtin();
+    for id in reg.ids() {
+        assert!(has_icon(&id), "{id} has no icon");
+        let mut g = Gfx::new(48, 48);
+        g.clear([10, 12, 24, 255]);
+        let blank = g.rgba().to_vec();
+        draw_kind(&mut g, &id, 24.0, 24.0, 30.0, crate::ui::TEXT);
+        assert_ne!(g.rgba(), &blank[..], "{id}: the icon draws something");
+    }
+    assert!(KINDS.iter().all(|k| reg.get(k).is_some()), "no icon for a kind that does not exist");
+    let states = [NodeState::Pending, NodeState::Running, NodeState::Retrying, NodeState::Waiting, NodeState::Succeeded, NodeState::Failed, NodeState::Skipped, NodeState::Interrupted, NodeState::Cancelled];
+    let mut pictures: Vec<(NodeState, Vec<u8>)> = vec![];
+    for st in states {
+        let mut g = Gfx::new(32, 32);
+        g.clear([10, 12, 24, 255]);
+        let blank = g.rgba().to_vec();
+        draw_state(&mut g, st, 16.0, 16.0, 22.0, 3);
+        assert_ne!(g.rgba(), &blank[..], "{st:?} draws a badge");
+        assert!(!state_words(st).is_empty());
+        pictures.push((st, g.rgba().to_vec()));
+    }
+    // the tick, the cross, the hand, the dot and the dash look different from one another
+    for i in 0..pictures.len() {
+        for j in i + 1..pictures.len() {
+            if matches!((pictures[i].0, pictures[j].0), (NodeState::Failed, NodeState::Cancelled) | (NodeState::Cancelled, NodeState::Failed)) {
+                continue;
+            }
+            assert_ne!(pictures[i].1, pictures[j].1, "{:?} and {:?} must not look alike", pictures[i].0, pictures[j].0);
+        }
+    }
+}
+
+#[test]
+fn a_node_card_shows_the_whole_short_name_at_every_size_and_keeps_its_ports_where_they_were() {
+    let mut f = fx("cardtitle");
+    for tpl in ["cam-sleep-check", "cam-person-check"] {
+        sample_flow(&mut f, tpl);
+        for (w, h) in FIVE {
+            let mut g = draw_at(&mut f, w, h);
+            let s = crate::shell::scale_for(w, h);
+            f.app.view.zoom = 1.0;
+            for n in f.app.flow.nodes.clone() {
+                if n.kind == "start" || n.kind == "end" || n.title().len() > 20 {
+                    continue;
+                }
+                let shown = super::flows_paint::card_title(&mut g, &n, s, 1.0);
+                assert_eq!(shown, n.title(), "{tpl} {w}x{h}: `{}` is cut to `{shown}` although it fits", n.title());
+            }
+            // the card has no second line of cut text: the subtitle is not drawn (checked by the card's pixel rows below the title)
+        }
+        // the ports are where the geometry always put them
+        let n = f.app.flow.node("shot").unwrap().clone();
+        let (ins, outs, _) = node_ports(&f.app.reg, &n);
+        assert_eq!(port_world(&n, Side::In, &ins[0], &ins, &outs), (n.pos.x, n.pos.y + NODE_H / 2.0));
+        assert_eq!(port_world(&n, Side::Out, &outs[0], &ins, &outs), (n.pos.x + NODE_W, n.pos.y + NODE_H / 2.0));
+        assert_eq!((NODE_W, NODE_H), (176.0, 64.0));
+    }
+}
+
+#[test]
+fn the_tooltip_card_of_a_node_appears_after_a_rest_stays_inside_the_window_and_goes_when_the_pointer_moves() {
+    let mut f = fx("nodetip");
+    sample_flow(&mut f, "cam-person-check");
+    for (w, h) in FIVE {
+        let _ = draw_at(&mut f, w, h);
+        let (x, y) = node_center(&f, "ask");
+        f.app.handle(&Event::MouseMove(x, y), &f.cx);
+        draw_m(&mut f, w, h, (x, y));
+        assert!(f.app.tip_rect.is_none(), "{w}x{h}: nothing before the rest");
+        for _ in 0..12 {
+            f.app.handle(&Event::Tick, &f.cx);
+        }
+        draw_m(&mut f, w, h, (x, y));
+        let r = f.app.tip_rect.unwrap_or_else(|| panic!("{w}x{h}: no tooltip after resting on the node"));
+        assert!(r.x >= 0.0 && r.y >= 0.0 && r.x + r.w <= w as f32 && r.y + r.h <= h as f32, "{w}x{h}: the card is outside the window: {r:?}");
+        let text = f.app.tip.shown.clone().unwrap();
+        assert!(text.starts_with("Look at the picture") && text.contains("Agent") && text.contains("id ask"), "{text}");
+        // a move hides it; resting again shows it again
+        f.app.handle(&Event::MouseMove(x + 3, y + 3), &f.cx);
+        draw_m(&mut f, w, h, (x + 3, y + 3));
+        assert!(f.app.tip_rect.is_none(), "{w}x{h}: hidden on a move");
+    }
+    // the corner of the window: still inside
+    let _ = draw_at(&mut f, 1280, 720);
+    let (x, y) = node_center(&f, "ask");
+    f.app.handle(&Event::MouseMove(x, y), &f.cx);
+    for _ in 0..12 {
+        f.app.handle(&Event::Tick, &f.cx);
+    }
+    draw_m(&mut f, 1280, 720, (x, y));
+    assert!(f.app.tip_rect.is_some());
+    // Esc puts it away, a click puts it away
+    key(&mut f, Key::Esc);
+    draw_m(&mut f, 1280, 720, (x, y));
+    assert!(f.app.tip_rect.is_none());
+}
+
+#[test]
+fn a_long_press_and_the_question_mark_key_show_the_card_for_touch_and_keyboard() {
+    let mut f = fx("tipkeys");
+    sample_flow(&mut f, "cam-person-check");
+    let (x, y) = node_center(&f, "shot");
+    // a finger held on the node
+    f.app.handle(&Event::MouseDown(x, y), &f.cx);
+    for _ in 0..8 {
+        f.app.handle(&Event::Tick, &f.cx);
+    }
+    draw_m(&mut f, 1280, 720, (x, y));
+    assert!(f.app.tip_rect.is_none(), "not yet");
+    for _ in 0..14 {
+        f.app.handle(&Event::Tick, &f.cx);
+    }
+    draw_m(&mut f, 1280, 720, (x, y));
+    assert!(f.app.tip.shown.as_deref().is_some_and(|t| t.starts_with("Take the picture")), "{:?}", f.app.tip.shown);
+    f.app.handle(&Event::MouseUp(x, y), &f.cx);
+    // the keyboard: the selected node, on the ? key
+    f.app.sel.clear();
+    f.app.sel.insert("check".to_string());
+    f.app.sync_props();
+    key(&mut f, Key::Char('?'));
+    draw(&mut f);
+    assert!(f.app.tip.shown.as_deref().is_some_and(|t| t.starts_with("Is it the case?")), "{:?}", f.app.tip.shown);
+}
+
+#[test]
+fn a_nodes_problems_are_in_its_tooltip_in_full() {
+    let mut f = fx("tipwarn");
+    sample_flow(&mut f, "cam-person-check");
+    let (x, y) = node_center(&f, "shot");
+    f.app.handle(&Event::MouseMove(x, y), &f.cx);
+    for _ in 0..12 {
+        f.app.handle(&Event::Tick, &f.cx);
+    }
+    draw_m(&mut f, 1280, 720, (x, y));
+    let t = f.app.tip.shown.clone().unwrap();
+    assert!(t.contains("Warning: the camera is not allowed for this flow yet") && t.contains("Flow settings"), "{t}");
+}
+
+#[test]
+fn in_a_run_the_tooltip_says_the_state_the_time_and_the_error_and_the_corner_badge_has_its_own_words() {
+    let mut f = fx("runtip");
+    let spec = json!({"name": "Broken", "nodes": [{"id": "call", "kind": "http", "name": "Call the site", "config": {"url": "http://127.0.0.1:1/x"}}]});
+    let id = open_flow(&mut f, spec);
+    f.env.store.publish(&id, &PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
+    click(&mut f, "Run (r)");
+    let run = f.app.run_id.clone().unwrap();
+    f.env.engine.wait_for(&run, Duration::from_secs(10), |r| r.status.is_terminal()).unwrap();
+    tick(&mut f, 12);
+    let _ = draw(&mut f);
+    let canvas = f.app.geo.canvas;
+    let n = f.app.run.as_ref().unwrap().flow.node("call").unwrap().pos;
+    let (px, py) = f.app.rv.view.to_screen(canvas, (n.x + NODE_W / 2.0, n.y + NODE_H / 2.0));
+    f.app.handle(&Event::MouseMove(px as i32, py as i32), &f.cx);
+    for _ in 0..12 {
+        f.app.handle(&Event::Tick, &f.cx);
+    }
+    draw_m(&mut f, 1280, 720, (px as i32, py as i32));
+    let t = f.app.tip.shown.clone().expect("a tooltip in the run view");
+    assert!(t.starts_with("Call the site") && t.contains("Failed") && t.contains("Error:"), "{t}");
+    // the corner badge: its own small card
+    let z = f.app.rv.view.zoom;
+    let s = crate::shell::scale_for(1280, 720);
+    let _ = s;
+    let (bx, by) = ((px + NODE_W / 2.0 * z - 3.0 * z) as i32, (py - NODE_H / 2.0 * z + 3.0 * z) as i32);
+    f.app.handle(&Event::MouseMove(bx, by), &f.cx);
+    for _ in 0..12 {
+        f.app.handle(&Event::Tick, &f.cx);
+    }
+    draw_m(&mut f, 1280, 720, (bx, by));
+    assert!(f.app.tip.shown.as_deref().is_some_and(|t| t.contains("Call the site: Failed")), "{:?}", f.app.tip.shown);
 }

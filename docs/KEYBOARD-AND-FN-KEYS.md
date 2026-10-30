@@ -28,6 +28,10 @@ that. Rows `F-KBD-01` to `F-KBD-09` in `FEATURES.md` say what is partial and wha
 | Calculator (140) | A notice: there is no calculator app. |
 | Home page (172) | From the launcher: opens the browser. |
 
+The speaker icon in the home screen's top bar moves the same volume with the mouse: a click mutes or unmutes, the wheel over it changes it
+5 % a notch, pressing and holding (or dragging) shows a slider, and `v` on the home screen opens the slider for the keyboard (Up/Down, `m` mutes,
+Esc closes). Each change shows the same volume bar as the keys.
+
 The same table is in Settings, Keyboard (scroll with Up/Down). Without a sound output the volume keys say "No sound output".
 Without a backlight they say "No brightness control on this display". IYAKKI has no software dimming.
 
@@ -60,6 +64,10 @@ Ctrl+Alt+M moves the open app to the next display (with several displays). Ctrl 
   list stops it). Saved under `keyboard` (`scroll_speed_pct`, `wheel_lines`, `wheel_natural`, `trackpad_natural`, `scroll_smooth`,
   `scroll_momentum`; also `iyakki dev config`). The **Scroll test** list on the page is a tall list to feel the choices on.
   While a scroll goes on the shell draws up to 60 pictures a second; it returns to its low idle rate when the scroll settles.
+* **Long lists of rows** (the Settings pages Network, Bluetooth, Display, Sound, System sounds and Screen saver; `crates/iyakki-shell/src/listwindow.rs`).
+  A click chooses the row where it is and the list does not move, so the next click lands on the row it shows. A key that moves the choice
+  (Up, Down, Home, End) scrolls only as far as needed to show it. The wheel scrolls the rows (3 a click) and leaves the choice where it is;
+  the next key brings the list back to the choice.
   Tiles that scroll by pixels (Settings lists, the chat conversation, DISKS, the page list, the plain browser, the Scroll test) move
   smoothly; other tiles receive the same movement as whole wheel clicks. The browser's full engine receives each step once,
   as a fraction of a click (the protocol counts 1/120), un-eased, so its own smooth scrolling is not doubled.

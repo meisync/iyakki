@@ -179,6 +179,121 @@ pub fn sql_read_only(sql: &str, dialect: Dialect) -> Result<(), String> {
     Ok(())
 }
 
+/// Words that write, load code or files, change users or the server, or call a procedure (in Cypher). A property named like one
+/// (`n.set`) is fine; a quoted name or a string is never looked at.
+const CYPHER_FORBIDDEN: &[&str] = &[
+    "create", "merge", "delete", "detach", "set", "remove", "drop", "foreach", "load", "call", "grant", "deny", "revoke", "alter", "rename", "start", "stop", "terminate", "dbms", "apoc", "use", "enable", "disable", "reallocate", "dryrun", "csv", "copy", "yield", "profile",
+];
+
+/// `Ok` when `text` is one read-only Cypher query: it starts with MATCH, OPTIONAL MATCH, WITH, UNWIND, RETURN, SHOW or EXPLAIN and holds none of
+/// [`CYPHER_FORBIDDEN`]. Cypher has no `--` comment (`(a)--(b)` is a relationship), only `//` and `/* */`, so this has its own scanner.
+/// The server is asked for a read transaction as well (`accessMode: Read`); this check is the second guard and refuses when in doubt.
+pub fn cypher_read_only(text: &str) -> Result<(), String> {
+    let c: Vec<char> = text.chars().collect();
+    let (mut i, mut words, mut word) = (0usize, Vec::<(String, bool)>::new(), String::new());
+    let mut statements = 0usize;
+    let mut after_dot = false;
+    let mut prev_sig = ' ';
+    let mut seen_any = false;
+    let flush = |word: &mut String, words: &mut Vec<(String, bool)>, after_dot: bool| {
+        if !word.is_empty() {
+            words.push((word.to_ascii_lowercase(), after_dot));
+            word.clear();
+        }
+    };
+    while i < c.len() {
+        let ch = c[i];
+        match ch {
+            '/' if c.get(i + 1) == Some(&'/') => {
+                flush(&mut word, &mut words, after_dot);
+                while i < c.len() && c[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            '/' if c.get(i + 1) == Some(&'*') => {
+                flush(&mut word, &mut words, after_dot);
+                i += 2;
+                while i < c.len() && !(c[i] == '*' && c.get(i + 1) == Some(&'/')) {
+                    i += 1;
+                }
+                if i >= c.len() {
+                    return Err("a /* comment is never closed".into());
+                }
+                i += 2;
+                continue;
+            }
+            '\'' | '"' | '`' => {
+                flush(&mut word, &mut words, after_dot);
+                let q = ch;
+                i += 1;
+                let mut closed = false;
+                while i < c.len() {
+                    if c[i] == '\\' && q != '`' && i + 1 < c.len() {
+                        i += 2;
+                    } else if c[i] == q {
+                        if q == '`' && c.get(i + 1) == Some(&'`') {
+                            i += 2;
+                        } else {
+                            closed = true;
+                            i += 1;
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+                if !closed {
+                    return Err(format!("a {q} quote is never closed"));
+                }
+                seen_any = true;
+                prev_sig = q;
+                after_dot = false;
+                continue;
+            }
+            ';' => {
+                flush(&mut word, &mut words, after_dot);
+                if seen_any {
+                    statements += 1;
+                    seen_any = false;
+                    if statements > 0 && c[i + 1..].iter().any(|x| !x.is_whitespace() && *x != ';') {
+                        return Err("only one query can be run at a time (a second statement after `;` is refused)".into());
+                    }
+                }
+            }
+            x if x.is_alphanumeric() || x == '_' || x == '$' => {
+                if word.is_empty() {
+                    after_dot = prev_sig == '.';
+                }
+                word.push(x);
+                seen_any = true;
+            }
+            x => {
+                flush(&mut word, &mut words, after_dot);
+                if !x.is_whitespace() {
+                    prev_sig = x;
+                }
+            }
+        }
+        if ch.is_alphanumeric() || ch == '_' || ch == '$' {
+            prev_sig = 'a';
+        }
+        i += 1;
+    }
+    flush(&mut word, &mut words, after_dot);
+    let Some((first, _)) = words.first() else { return Err("the query is empty".into()) };
+    let starts = ["match", "optional", "with", "unwind", "return", "show", "explain"];
+    if !starts.contains(&first.as_str()) {
+        return Err(format!("only read queries are allowed (MATCH, OPTIONAL MATCH, WITH, UNWIND, RETURN, SHOW, EXPLAIN); this one starts with `{first}`"));
+    }
+    for (w, dotted) in &words {
+        if CYPHER_FORBIDDEN.contains(&w.as_str()) && !dotted {
+            return Err(format!("`{w}` is not allowed: the graph is only read"));
+        }
+    }
+    Ok(())
+}
+
 /// Elasticsearch / OpenSearch: only these (method, path) pairs are ever sent.
 pub fn es_request_ok(method: &str, path: &str) -> Result<(), String> {
     let m = method.to_ascii_uppercase();

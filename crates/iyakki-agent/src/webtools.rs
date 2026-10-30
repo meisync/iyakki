@@ -87,6 +87,26 @@ impl Services {
 
 // ------------------------------------------------------------------ the web client
 
+/// One request of [`WebClient::header_chain`].
+#[derive(Clone, Debug)]
+pub struct HeaderHop {
+    pub url: Url,
+    /// What was sent: `HEAD` or the GET fallback.
+    pub how: &'static str,
+    pub status: u16,
+    pub location: Option<String>,
+    /// As sent by the server, not scrubbed.
+    pub headers: Vec<(String, String)>,
+    pub content_type: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct HeaderChain {
+    pub hops: Vec<HeaderHop>,
+    /// Why the chain stopped before an answer that is not a redirect.
+    pub error: Option<String>,
+}
+
 /// Looks up the addresses a host name leads to (empty when it cannot be resolved).
 pub type Resolver = Arc<dyn Fn(&str) -> Vec<IpAddr> + Send + Sync>;
 
@@ -211,6 +231,50 @@ impl WebClient {
             return Ok((url, r));
         }
         Err(format!("too many redirects (more than {MAX_REDIRECTS})"))
+    }
+
+    /// The response headers of an address, one request per hop: HEAD, or when the server refuses HEAD a GET asking for one byte
+    /// (`Range: bytes=0-0`). Same checks as [`WebClient::get`] (host policy, no local addresses, rate limit, at most
+    /// [`MAX_REDIRECTS`] redirects followed by hand, each hop checked), no cookies and no credentials are sent, bodies are dropped.
+    /// A refusal or an error part-way is returned with the hops that were made.
+    pub fn header_chain(&self, p: &Policy, url: &str) -> HeaderChain {
+        let mut hops: Vec<HeaderHop> = Vec::new();
+        let mut url = match Url::parse(url) {
+            Ok(u) => u.without_fragment(),
+            Err(e) => return HeaderChain { hops, error: Some(e) },
+        };
+        let fetch = self.fetch.lock().unwrap().clone();
+        for _ in 0..=MAX_REDIRECTS {
+            if let Err(e) = self.check(&url, p).and_then(|_| self.rate()) {
+                return HeaderChain { hops, error: Some(e) };
+            }
+            let mut req = iyakki_web::Request::get(&url);
+            req.method = "HEAD".into();
+            let mut how = "HEAD";
+            let mut r = fetch.send(&req);
+            if r.as_ref().map_or(true, |x| matches!(x.status, 400 | 403 | 405 | 501)) {
+                if let Err(e) = self.rate() {
+                    return HeaderChain { hops, error: Some(e) };
+                }
+                req.method = "GET".into();
+                req.range = "bytes=0-0".into();
+                how = "GET with Range: bytes=0-0";
+                r = fetch.send(&req);
+            }
+            let r = match r {
+                Ok(r) => r,
+                Err(e) => return HeaderChain { hops, error: Some(format!("{} could not be reached: {e}", url.host)) },
+            };
+            let location = r.location.clone().map(|l| l.trim().to_string()).filter(|l| !l.is_empty());
+            let next = if (300..400).contains(&r.status) { location.as_deref().map(|l| url.join(l)) } else { None };
+            hops.push(HeaderHop { url: url.clone(), how, status: r.status, location: location.clone(), headers: r.headers.clone(), content_type: r.content_type.clone() });
+            match next {
+                Some(Ok(u)) => url = u.without_fragment(),
+                Some(Err(e)) => return HeaderChain { hops, error: Some(format!("the redirect from {} is not usable: {e}", url.host)) },
+                None => return HeaderChain { hops, error: None },
+            }
+        }
+        HeaderChain { hops, error: Some(format!("too many redirects (more than {MAX_REDIRECTS})")) }
     }
 
     /// The text of an answer from an API (any status; the caller judges it).

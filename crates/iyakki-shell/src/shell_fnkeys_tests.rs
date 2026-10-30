@@ -196,6 +196,23 @@ fn the_display_is_drawn_without_stealing_focus_and_the_screen_stays_the_same() {
 }
 
 #[test]
+fn the_fn_power_card_sleeps_on_s_only_when_possible() {
+    let (mut sh, host) = shell_with_users("fn-sleep");
+    login(&mut sh, "root", "rootpass12");
+    press(&mut sh, FnKey::Power);
+    sh.handle(&Event::Key(Key::Char('s')));
+    assert!(!sh.fnk.power_card && *host.slept.lock().unwrap() == 0 && sh.session.is_some(), "not possible: nothing happens");
+    *host.sleepable.lock().unwrap() = true;
+    press(&mut sh, FnKey::Power);
+    sh.handle(&Event::Key(Key::Esc));
+    assert_eq!(*host.slept.lock().unwrap(), 0);
+    press(&mut sh, FnKey::Power);
+    sh.handle(&Event::Key(Key::Char('s')));
+    assert_eq!(*host.slept.lock().unwrap(), 1);
+    assert!(sh.session.is_none(), "locked before sleeping");
+}
+
+#[test]
 fn the_power_card_opens_on_the_key_and_acts_only_on_a_choice() {
     let (mut sh, host) = {
         let (mut sh, host) = shell_with_users("fn-power");

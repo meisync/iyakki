@@ -53,6 +53,10 @@ pub enum Source {
     /// Already on the machine (OpenSSH on a computer, Dropbear's client on an IYAKKI image): detected, never downloaded, and
     /// updated by the system's own package manager.
     System,
+    /// The download address is not built in: it is a setting (the key named here) that the person or the image maker gives, because
+    /// the vendor publishes no build that runs on every IYAKKI image. Until it is set, installing stops with the reason and nothing
+    /// is fetched (OpenVPN, `docs/development/VPN-CONNECTOR-PLAN.md`).
+    Setting(&'static str),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -65,6 +69,9 @@ pub enum Checksum {
     Manifest(&'static str),
     /// A file holding an MD5 digest (`md5  name`), the only digest some vendors publish (checked with IYAKKI's own MD5, `xz.rs`).
     Md5(&'static str),
+    /// SHA-256 values read from the vendor's release metadata (GitHub's asset digests) when the pinned version was chosen:
+    /// (name of the downloaded file, hex digest). Moves with `pin`.
+    Fixed(&'static [(&'static str, &'static str)]),
 }
 
 pub struct CliDef {
@@ -72,6 +79,11 @@ pub struct CliDef {
     pub name: &'static str,
     pub about: &'static str,
     pub home: &'static str,
+    /// The licence of the program, shown on its store entry and in the CLI tile (SPDX where there is one).
+    pub license: &'static str,
+    /// An exact version this release of IYAKKI installs (empty: the vendor's newest, checked at download when the vendor publishes a checksum).
+    /// Set for every tool that has no vendor checksum, so a moving "latest" is never fetched unverified.
+    pub pin: &'static str,
     pub version: VersionFrom,
     pub source: Source,
     pub checksum: Option<Checksum>,
@@ -87,6 +99,25 @@ pub struct CliDef {
 }
 
 impl CliDef {
+    /// For a tool the vendor publishes no checksum for: what IYAKKI can and cannot prove about the download, shown on the item's screen.
+    pub fn integrity_warning(&self) -> Option<String> {
+        if self.checksum.is_some() || matches!(self.source, Source::System) {
+            return None;
+        }
+        let why = match self.source {
+            Source::Pip(_) => "PyPI lists a SHA-256 for each file, but this release carries no hash values for it (the signed downloads manifest can: `pip --require-hashes`), so pip runs without a hash lock and the package's own dependencies are not pinned",
+            Source::Npm(_) => "npm checks the registry's integrity value, but the package's own dependencies are not pinned",
+            Source::Python(_) => "uv checks each Python build against the SHA-256 table built into uv, which is the only check",
+            _ => match self.id {
+                "aws-cli" if pgp_key_pinned(self.id) => return None,
+                "aws-cli" => "Amazon publishes only a PGP signature for this file, and the Amazon public key is not yet pinned in this IYAKKI release (legal/aws-cli-pgp.asc), so the signature is not checked",
+                "gcloud" => "Google publishes no checksum file for this download",
+                _ => "the vendor publishes no checksum for this download",
+            },
+        };
+        Some(format!("Warning: IYAKKI cannot prove this download is the vendor's file: {why}. Version {} is pinned in this IYAKKI release and fetched over HTTPS only.", self.pin))
+    }
+
     /// The most that may be downloaded and the most that may be unpacked from it: the same for every tool except the ones
     /// that carry large libraries (Ollama is a download of over a gigabyte).
     pub fn limits(&self) -> (u64, u64) {
@@ -121,6 +152,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "kubectl",
         about: "Talk to a Kubernetes cluster: pods, deployments, logs.",
         home: "https://kubernetes.io/docs/reference/kubectl/",
+        license: "Apache-2.0",
+        pin: "",
         version: VersionFrom::Text("https://dl.k8s.io/release/stable.txt"),
         source: Source::File("https://dl.k8s.io/release/{v}/bin/linux/{arch}/kubectl"),
         checksum: Some(Checksum::Single("https://dl.k8s.io/release/{v}/bin/linux/{arch}/kubectl.sha256")),
@@ -135,6 +168,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "k3s",
         about: "Lightweight Kubernetes: the k3s program (it also carries kubectl as `k3s kubectl`).",
         home: "https://k3s.io",
+        license: "Apache-2.0",
+        pin: "",
         version: VersionFrom::Redirect("https://github.com/k3s-io/k3s/releases/latest/download/k3s"),
         source: Source::File("https://github.com/k3s-io/k3s/releases/download/{ve}/k3s{k3s_suffix}"),
         checksum: Some(Checksum::Lines("https://github.com/k3s-io/k3s/releases/download/{ve}/sha256sum-{arch}.txt")),
@@ -149,6 +184,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "Helm",
         about: "The Kubernetes package manager: install and upgrade charts.",
         home: "https://helm.sh",
+        license: "Apache-2.0",
+        pin: "",
         version: VersionFrom::Text("https://get.helm.sh/helm-latest-version"),
         source: Source::TarGz("https://get.helm.sh/helm-{v}-linux-{arch}.tar.gz"),
         checksum: Some(Checksum::Single("https://get.helm.sh/helm-{v}-linux-{arch}.tar.gz.sha256sum")),
@@ -163,6 +200,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "Terraform",
         about: "Describe infrastructure as files and apply it to a cloud.",
         home: "https://developer.hashicorp.com/terraform",
+        license: "BUSL-1.1 (source-available, not open source)",
+        pin: "",
         version: VersionFrom::Json("https://checkpoint-api.hashicorp.com/v1/check/terraform", "/current_version"),
         source: Source::Zip("https://releases.hashicorp.com/terraform/{vn}/terraform_{vn}_linux_{arch}.zip"),
         checksum: Some(Checksum::Lines("https://releases.hashicorp.com/terraform/{vn}/terraform_{vn}_SHA256SUMS")),
@@ -170,13 +209,31 @@ pub const CATALOG: &[CliDef] = &[
         hosts: &["hashicorp.com"],
         net_host: None,
         version_args: &["version"],
-        note: "",
+        note: "Terraform has been under the Business Source Licence (BUSL-1.1) since version 1.6: source-available, not open source. IYAKKI does not ship it; you download it yourself from HashiCorp at your request, under HashiCorp's terms. OpenTofu (in this list) is the open-source fork that reads the same files.",
+    },
+    CliDef {
+        id: "opentofu",
+        name: "OpenTofu",
+        about: "Describe infrastructure as files and apply it to a cloud (the open-source fork of Terraform; the `tofu` command).",
+        home: "https://opentofu.org",
+        license: "MPL-2.0",
+        pin: "",
+        version: VersionFrom::Redirect("https://github.com/opentofu/opentofu/releases/latest"),
+        source: Source::TarGz("https://github.com/opentofu/opentofu/releases/download/{v}/tofu_{vn}_linux_{arch}.tar.gz"),
+        checksum: Some(Checksum::Lines("https://github.com/opentofu/opentofu/releases/download/{v}/tofu_{vn}_SHA256SUMS")),
+        bins: &[("tofu", "tofu")],
+        hosts: &["github.com", "githubusercontent.com"],
+        net_host: None,
+        version_args: &["version"],
+        note: "Mozilla Public License 2.0 (a Linux Foundation project). Downloaded from the project's GitHub releases at your request and checked against its SHA256SUMS file; IYAKKI does not ship it.",
     },
     CliDef {
         id: "gh",
         name: "GitHub CLI",
         about: "Repositories, issues and pull requests from the command line.",
         home: "https://cli.github.com",
+        license: "MIT",
+        pin: "",
         version: VersionFrom::Redirect("https://github.com/cli/cli/releases/latest"),
         source: Source::TarGz("https://github.com/cli/cli/releases/download/{v}/gh_{vn}_linux_{arch}.tar.gz"),
         checksum: Some(Checksum::Lines("https://github.com/cli/cli/releases/download/{v}/gh_{vn}_checksums.txt")),
@@ -191,8 +248,10 @@ pub const CATALOG: &[CliDef] = &[
         name: "AWS CLI",
         about: "Amazon Web Services from the command line (the `aws` command).",
         home: "https://aws.amazon.com/cli/",
+        license: "Apache-2.0",
+        pin: "2.38.6",
         version: VersionFrom::Latest,
-        source: Source::Zip("https://awscli.amazonaws.com/awscli-exe-linux-{arch2}.zip"),
+        source: Source::Zip("https://awscli.amazonaws.com/awscli-exe-linux-{arch2}-{v}.zip"),
         checksum: None,
         bins: &[("aws", "aws/dist/aws"), ("aws_completer", "aws/dist/aws_completer")],
         hosts: &["amazonaws.com"],
@@ -205,8 +264,10 @@ pub const CATALOG: &[CliDef] = &[
         name: "Google Cloud CLI",
         about: "Google Cloud from the command line (`gcloud` and `gsutil`).",
         home: "https://cloud.google.com/sdk",
+        license: "Apache-2.0 (Google Cloud terms apply to the services)",
+        pin: "590.0.1",
         version: VersionFrom::Latest,
-        source: Source::TarGz("https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-{arch3}.tar.gz"),
+        source: Source::TarGz("https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-{v}-linux-{arch3}.tar.gz"),
         checksum: None,
         bins: &[("gcloud", "google-cloud-sdk/bin/gcloud"), ("gsutil", "google-cloud-sdk/bin/gsutil")],
         hosts: &["google.com", "googleapis.com"],
@@ -219,6 +280,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "Arduino CLI",
         about: "Build and upload Arduino and ESP32/ESP8266 sketches: boards, libraries, compile, upload.",
         home: "https://arduino.github.io/arduino-cli/",
+        license: "GPL-3.0",
+        pin: "",
         version: VersionFrom::Redirect("https://github.com/arduino/arduino-cli/releases/latest"),
         source: Source::TarGz("https://github.com/arduino/arduino-cli/releases/download/{v}/arduino-cli_{vn}_{arduino}.tar.gz"),
         checksum: Some(Checksum::Lines("https://github.com/arduino/arduino-cli/releases/download/{v}/{vn}-checksums.txt")),
@@ -233,6 +296,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "esptool (ESP32/ESP8266)",
         about: "Espressif's tool to flash firmware to, read and erase ESP32 and ESP8266 chips over USB (`esptool`, `espefuse`, `espsecure`).",
         home: "https://docs.espressif.com/projects/esptool/",
+        license: "GPL-2.0-or-later",
+        pin: "5.6.0",
         version: VersionFrom::Latest,
         source: Source::Pip("esptool"),
         checksum: None,
@@ -247,9 +312,15 @@ pub const CATALOG: &[CliDef] = &[
         name: "espflash (ESP32)",
         about: "A fast ESP32 flasher and serial monitor written in Rust (`espflash`).",
         home: "https://github.com/esp-rs/espflash",
+        license: "MIT OR Apache-2.0",
+        pin: "v4.6.0",
         version: VersionFrom::Redirect("https://github.com/esp-rs/espflash/releases/latest"),
         source: Source::Zip("https://github.com/esp-rs/espflash/releases/download/{v}/espflash-{arch2}-unknown-linux-{libc_triple}.zip"),
-        checksum: None,
+        checksum: Some(Checksum::Fixed(&[
+            ("espflash-x86_64-unknown-linux-gnu.zip", "c4fcfa32ddc3155608f003a230e6f3c184eff9641ec9cfa8eb54f1b515d403e7"),
+            ("espflash-x86_64-unknown-linux-musl.zip", "d515ee13ae44ba913c31a2ca58dc5fd72d3362994ee1d7487a16b289dfbb6e4a"),
+            ("espflash-aarch64-unknown-linux-gnu.zip", "560c690ce28c7fe2b31709eeaf1fcc6717cfa832798b68287dddca1e3a3b65d6"),
+        ])),
         bins: &[("espflash", "espflash")],
         hosts: &["github.com", "githubusercontent.com"],
         net_host: Some("-"),
@@ -261,6 +332,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "Azure CLI",
         about: "Microsoft Azure from the command line (the `az` command).",
         home: "https://learn.microsoft.com/cli/azure/",
+        license: "MIT",
+        pin: "2.91.0",
         version: VersionFrom::Latest,
         source: Source::Pip("azure-cli"),
         checksum: None,
@@ -275,6 +348,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "Node.js",
         about: "The JavaScript runtime with npm (`node`, `npm`, `npx`). Installed by itself when an npm tool (Claude Code, Copilot CLI, Codex, Gemini CLI) needs it and the machine has no Node.js 22 or newer.",
         home: "https://nodejs.org",
+        license: "MIT",
+        pin: "",
         version: VersionFrom::NodeLts("https://{node_dist}/index.json"),
         source: Source::TarGz("https://{node_dist}/{v}/node-{v}-linux-{node_arch}{node_libc}.tar.gz"),
         checksum: Some(Checksum::Lines("https://{node_dist}/{v}/SHASUMS256.txt")),
@@ -289,6 +364,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "uv",
         about: "A fast Python package and version manager (`uv`, `uvx`). It is how Python is installed here.",
         home: "https://docs.astral.sh/uv/",
+        license: "MIT OR Apache-2.0",
+        pin: "",
         version: VersionFrom::Redirect("https://github.com/astral-sh/uv/releases/latest"),
         source: Source::TarGz("https://github.com/astral-sh/uv/releases/download/{v}/uv-{arch2}-unknown-linux-musl.tar.gz"),
         checksum: Some(Checksum::Single("https://github.com/astral-sh/uv/releases/download/{v}/uv-{arch2}-unknown-linux-musl.tar.gz.sha256")),
@@ -303,8 +380,10 @@ pub const CATALOG: &[CliDef] = &[
         name: "Python 3",
         about: "Python 3 with venv and pip (`python3`, `python`). Installed by itself when a Python tool (Aider, esptool, the Azure CLI) needs it and the machine has none.",
         home: "https://www.python.org",
+        license: "PSF-2.0",
+        pin: "3.12.16",
         version: VersionFrom::Latest,
-        source: Source::Python("3.12"),
+        source: Source::Python("3.12.16"),
         checksum: None,
         bins: &[("python3", "*/bin/python3"), ("python", "*/bin/python")],
         hosts: &["github.com", "githubusercontent.com", "pypi.org"],
@@ -317,6 +396,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "Claude Code",
         about: "Anthropic's coding agent. Once installed and signed in, it can answer the AI IDE's chat (Settings → Agents).",
         home: "https://code.claude.com/docs/en/setup",
+        license: "Proprietary (Anthropic terms)",
+        pin: "",
         version: VersionFrom::Text("https://downloads.claude.ai/claude-code-releases/latest"),
         source: Source::File("https://downloads.claude.ai/claude-code-releases/{v}/{cplatform}/claude"),
         checksum: Some(Checksum::Manifest("https://downloads.claude.ai/claude-code-releases/{v}/manifest.json")),
@@ -331,6 +412,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "GitHub Copilot CLI",
         about: "GitHub's coding agent in the terminal. Once installed and signed in, it can answer the AI IDE's chat as a read-only advisor (Settings → Agents).",
         home: "https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli",
+        license: "Proprietary (GitHub Copilot CLI licence)",
+        pin: "",
         version: VersionFrom::Redirect("https://github.com/github/copilot-cli/releases/latest"),
         source: Source::TarGz("https://github.com/github/copilot-cli/releases/download/{v}/copilot-linux{musl}-{arch4}.tar.gz"),
         checksum: Some(Checksum::Lines("https://github.com/github/copilot-cli/releases/download/{v}/SHA256SUMS.txt")),
@@ -345,6 +428,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "OpenAI Codex CLI",
         about: "OpenAI's coding agent in the terminal. Use it from the terminal, or add it as a custom agent in Settings → Agents.",
         home: "https://github.com/openai/codex",
+        license: "Apache-2.0",
+        pin: "0.164.0",
         version: VersionFrom::Latest,
         source: Source::Npm("@openai/codex"),
         checksum: None,
@@ -359,6 +444,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "Gemini CLI",
         about: "Google's coding agent in the terminal. Use it from the terminal, or add it as a custom agent in Settings → Agents.",
         home: "https://github.com/google-gemini/gemini-cli",
+        license: "Apache-2.0",
+        pin: "0.65.0",
         version: VersionFrom::Latest,
         source: Source::Npm("@google/gemini-cli"),
         checksum: None,
@@ -373,6 +460,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "Aider",
         about: "A coding assistant in the terminal that edits files in a git repository. Add it as a custom agent in Settings → Agents.",
         home: "https://aider.chat/docs/install.html",
+        license: "Apache-2.0",
+        pin: "0.86.2",
         version: VersionFrom::Latest,
         source: Source::Pip("aider-chat"),
         checksum: None,
@@ -387,6 +476,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "Ollama",
         about: "Run language models on this machine's own processor or graphics card, and use them from the chat.",
         home: "https://ollama.com",
+        license: "MIT",
+        pin: "",
         version: VersionFrom::Redirect("https://github.com/ollama/ollama/releases/latest"),
         source: Source::TarZst("https://github.com/ollama/ollama/releases/download/{v}/ollama-linux-{arch}.tar.zst"),
         checksum: Some(Checksum::Lines("https://github.com/ollama/ollama/releases/download/{v}/sha256sum.txt")),
@@ -401,6 +492,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "ffmpeg (media player)",
         about: "Decodes video and audio. IYAKKI's own player (MEDIA tile, IYAKKI menu \u{2192} Media player) uses it to play almost any video or sound file, including the camera's recordings (the `ffmpeg` and `ffprobe` commands).",
         home: "https://johnvansickle.com/ffmpeg/",
+        license: "GPL-3.0 (static build)",
+        pin: "",
         version: VersionFrom::Latest,
         source: Source::TarXz("https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-{arch}-static.tar.xz"),
         checksum: Some(Checksum::Md5("https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-{arch}-static.tar.xz.md5")),
@@ -415,9 +508,16 @@ pub const CATALOG: &[CliDef] = &[
         name: "7-Zip (reads disk images)",
         about: "Opens archives and disk images (DMG, HFS+, APFS, ISO, ZIP, tar and more): the `7zz` command. IYAKKI uses it to read Apple's Wi-Fi and Bluetooth firmware out of a Mac's recovery image or a macOS disk image (IYAKKI menu \u{2192} Mac drivers).",
         home: "https://www.7-zip.org/",
+        license: "LGPL-2.1+ with unRAR restriction, parts BSD",
+        pin: "26.05",
         version: VersionFrom::Redirect("https://github.com/ip7z/7zip/releases/latest"),
         source: Source::TarXz("https://github.com/ip7z/7zip/releases/download/{v}/7z{v7}-linux-{arch7}.tar.xz"),
-        checksum: None,
+        checksum: Some(Checksum::Fixed(&[
+            ("7z2605-linux-x64.tar.xz", "22cf82fcc6eb7474f1d5bb4f02c0f8ebd573a718089d6833dc30f8350a3b232e"),
+            ("7z2605-linux-arm64.tar.xz", "0b71f6cfc34669b3bf69f2347efd3429f77020665003a13b9cdc53b784270421"),
+            ("7z2605-linux-arm.tar.xz", "fcc6744c35f5af3dda0d57de379e885626b2c0fca2ac8a33410eba17d1d94954"),
+            ("7z2605-linux-x86.tar.xz", "e8d8b762a4ee97fffa36a35b9831bbd0a7bb4645e5fafad839f9c22e297587a8"),
+        ])),
         bins: &[("7zz", "7zzs")],
         hosts: &["github.com", "githubusercontent.com"],
         net_host: Some("-"),
@@ -429,6 +529,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "DuckDB",
         about: "Run SQL on CSV and Parquet files or a database file (the `duckdb` command); the DASH tile uses it for its DuckDB source.",
         home: "https://duckdb.org",
+        license: "MIT",
+        pin: "1.3.2",
         version: VersionFrom::Latest,
         source: Source::Pip("duckdb"),
         checksum: None,
@@ -443,6 +545,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "grpcurl",
         about: "Call gRPC services from the command line, with JSON in and out (the `grpcurl` command); the FLOWS tile's gRPC node uses it.",
         home: "https://github.com/fullstorydev/grpcurl",
+        license: "MIT",
+        pin: "",
         version: VersionFrom::Redirect("https://github.com/fullstorydev/grpcurl/releases/latest"),
         source: Source::TarGz("https://github.com/fullstorydev/grpcurl/releases/download/{v}/grpcurl_{vn}_linux_{grpc}.tar.gz"),
         checksum: Some(Checksum::Lines("https://github.com/fullstorydev/grpcurl/releases/download/{v}/grpcurl_{vn}_checksums.txt")),
@@ -457,6 +561,8 @@ pub const CATALOG: &[CliDef] = &[
         name: "SSH client (OpenSSH)",
         about: "Log in to other machines, run a command there, copy files (`ssh`, `scp`, `sftp`) and make keys (`ssh-keygen`). Host keys and private keys are kept by IYAKKI; see the Connections tab for saved hosts.",
         home: "https://www.openssh.com",
+        license: "BSD / ISC (OpenSSH)",
+        pin: "",
         version: VersionFrom::Latest,
         source: Source::System,
         checksum: None,
@@ -465,6 +571,22 @@ pub const CATALOG: &[CliDef] = &[
         net_host: None,
         version_args: &["-V"],
         note: "Not downloaded: it is found on this machine. The IYAKKI images carry Dropbear's client (`dbclient`, also named `ssh`; BSD/MIT licence; it has `scp` but no `sftp`). New host keys are trusted only after you confirm the fingerprint; a changed key is refused. The assistant needs your approval for every call and can use only keys kept in your vault.",
+    },
+    CliDef {
+        id: "openvpn",
+        name: "OpenVPN (for .ovpn profiles)",
+        about: "Connects the OpenVPN profiles you import in Settings -> Network -> VPN. IYAKKI starts it only with a fixed argument list (no scripts, routes and DNS applied by IYAKKI's own checks), never through a shell.",
+        home: "https://openvpn.net/community/",
+        license: "GPL-2.0 with OpenSSL exception",
+        pin: "from-setting",
+        version: VersionFrom::Latest,
+        source: Source::Setting("vpn.openvpn_download"),
+        checksum: None,
+        bins: &[("openvpn", "openvpn")],
+        hosts: &["openvpn.net"],
+        net_host: Some("-"),
+        version_args: &["--version"],
+        note: "GNU GPL version 2: IYAKKI does not ship it; you download it here, after reading the licence, and it is checked against the SHA-256 you give with the address. The OpenVPN project publishes source tarballs and distribution packages but no build for IYAKKI's musl images, so no address is built in and none is invented: until `vpn.openvpn_download` is set, this entry explains the gap and fetches nothing. WireGuard profiles need no download.",
     },
 ];
 
@@ -537,6 +659,8 @@ pub struct CliManager {
     jobs: Mutex<HashMap<String, Job>>,
     state_lock: Mutex<()>,
     python: Mutex<String>,
+    /// Tests: a PGP key file used for `(id, key)` instead of the one pinned in legal/.
+    pgp_override: Mutex<Option<(String, Vec<u8>)>>,
     /// The programs an npm install uses (tests use stand-ins).
     npm: Mutex<String>,
     node: Mutex<String>,
@@ -594,6 +718,23 @@ fn resolve(base: &str, loc: &str) -> Option<String> {
     let (scheme, rest) = base.split_once("://")?;
     let authority = rest.split('/').next()?;
     if loc.starts_with('/') { Some(format!("{scheme}://{authority}{loc}")) } else { None }
+}
+
+/// The published SHA-256 of `file` in a [`Checksum::Fixed`] table (tests can stand in a value for a file they build themselves).
+fn fixed_hash(table: &[(&str, &str)], file: &str) -> Option<String> {
+    #[cfg(test)]
+    if let Some((_, h)) = TEST_FIXED.lock().unwrap().iter().find(|(n, _)| n == file) {
+        return Some(h.clone());
+    }
+    table.iter().find(|(n, _)| *n == file).map(|(_, h)| h.to_string())
+}
+
+#[cfg(test)]
+static TEST_FIXED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// The npm install argument: `package@version` for a pinned tool.
+fn pinned_npm(d: &CliDef, pkg: &str) -> String {
+    if d.pin.is_empty() { pkg.to_string() } else { format!("{pkg}@{}", d.pin) }
 }
 
 fn pct_decode(s: &str) -> String {
@@ -662,7 +803,7 @@ pub(crate) fn extract_hash(text: &str, file: &str) -> Option<String> {
 
 impl CliManager {
     pub fn new(root: &Path) -> CliManager {
-        CliManager { root: root.into(), streamer: Mutex::new(None), jobs: Mutex::new(HashMap::new()), state_lock: Mutex::new(()), python: Mutex::new("python3".into()), npm: Mutex::new("npm".into()), node: Mutex::new("node".into()), on_installed: Mutex::new(None), system: Mutex::new(HashMap::new()), search: Mutex::new(None), parents: Mutex::new(HashMap::new()), target: Mutex::new(None), detect_present: Mutex::new(false) }
+        CliManager { root: root.into(), streamer: Mutex::new(None), jobs: Mutex::new(HashMap::new()), state_lock: Mutex::new(()), python: Mutex::new("python3".into()), pgp_override: Mutex::new(None), npm: Mutex::new("npm".into()), node: Mutex::new("node".into()), on_installed: Mutex::new(None), system: Mutex::new(HashMap::new()), search: Mutex::new(None), parents: Mutex::new(HashMap::new()), target: Mutex::new(None), detect_present: Mutex::new(false) }
     }
 
     pub fn set_streamer(&self, s: Arc<dyn Streamer>) {
@@ -744,6 +885,19 @@ impl CliManager {
         }
     }
 
+    /// The PGP key file for a tool's download signature: the one pinned in `legal/` (not yet present while it says `unset`), or a test's.
+    fn pgp_key(&self, id: &str) -> Option<Vec<u8>> {
+        if let Some((i, k)) = &*self.pgp_override.lock().unwrap() {
+            return (i == id).then(|| k.clone());
+        }
+        pgp_key_file(id).map(|k| k.as_bytes().to_vec())
+    }
+
+    /// Tests: use this key file for `id`'s signature check.
+    pub fn set_pgp_key(&self, id: &str, key: &[u8]) {
+        *self.pgp_override.lock().unwrap() = Some((id.into(), key.to_vec()));
+    }
+
     /// Which Python makes the environment for Python-packaged tools (tests use a stand-in).
     pub fn set_python(&self, p: &str) {
         *self.python.lock().unwrap() = p.into();
@@ -799,7 +953,8 @@ impl CliManager {
 
     /// The folder an npm tool is installed into (its own `npm_config_prefix`).
     pub fn npm_prefix(&self, id: &str) -> PathBuf {
-        self.pkg_dir(id).join("latest")
+        // the version folder the install uses: the pin, or "latest" for a tool that follows the vendor
+        self.pkg_dir(id).join(def(id).map(|d| d.pin).filter(|p| !p.is_empty()).unwrap_or("latest"))
     }
 
     /// The program to run for `name`: the one the manager was told to use, or (when it was not told) the catalogue's copy if one is
@@ -866,14 +1021,20 @@ impl CliManager {
                     Ok(m) if m >= 22 => format!(" Node.js {m} was found."),
                     _ => first(&self.missing_needs(d)),
                 };
-                Some(format!("Run `npm install -g {pkg}` with the install folder set to {} (npm_config_prefix for that one command only; no sudo, your shell files are untouched). npm downloads from {}.{node}", self.npm_prefix(id).display(), d.hosts.join(", ")))
+                Some(format!("Run `npm install -g {}` with the install folder set to {} (npm_config_prefix for that one command only; no sudo, your shell files are untouched). npm downloads from {}.{node}{}", pinned_npm(d, pkg), self.npm_prefix(id).display(), d.hosts.join(", "), d.integrity_warning().map(|w| format!(" {w}")).unwrap_or_default()))
             }
-            Source::Pip(pkg) => Some(format!("Create a Python environment in {} and run `pip install {pkg}` in it (no sudo). pip downloads from {}.{}", self.pkg_dir(id).display(), d.hosts.join(", "), first(&self.missing_needs(d)))),
+            Source::Pip(pkg) => Some(format!("Create a Python environment in {} and run `pip install {}` in it (no sudo). pip downloads from {}.{}{}", self.pkg_dir(id).display(), if d.pin.is_empty() { pkg.to_string() } else { format!("{pkg}=={}", d.pin) }, d.hosts.join(", "), first(&self.missing_needs(d)), d.integrity_warning().map(|w| format!(" {w}")).unwrap_or_default())),
             Source::File(_) if d.id == "claude-code" => Some(format!("Download Anthropic's own build of Claude Code for this machine from downloads.claude.ai (no Node.js, no sudo): the version is read from Anthropic's release bucket, and the program is checked against the SHA-256 in Anthropic's release manifest before it is kept in {}. If that download cannot be fetched and Node.js is on the machine, `npm install -g @anthropic-ai/claude-code` is run instead (npm_config_prefix for that one command only).", self.pkg_dir(id).display())),
             Source::TarGz(_) if d.id == "github-copilot" => Some(format!("Download GitHub's own standalone build of the Copilot CLI for this machine from github.com/github/copilot-cli/releases (no Node.js, no sudo) and check it against the release's SHA256SUMS.txt before it is kept in {}.", self.pkg_dir(id).display())),
-            Source::Python(v) => Some(format!("Run `uv python install {v}` with the install folder set to {} (no sudo). uv downloads Python from github.com.{}", self.pkg_dir(id).display(), first(&self.missing_needs(d)))),
-            _ => None,
+            Source::Setting(key) => Some(format!("Nothing can be downloaded yet: the vendor publishes no build that runs on IYAKKI's images and the address is the setting `{key}`, which is empty until you or the image maker give one (https only, with its SHA-256). Nothing is fetched until then.")),
+            Source::Python(v) => Some(format!("Run `uv python install {v}` with the install folder set to {} (no sudo). uv downloads Python from github.com.{}{}", self.pkg_dir(id).display(), first(&self.missing_needs(d)), d.integrity_warning().map(|w| format!(" {w}")).unwrap_or_default())),
+            _ => d.integrity_warning(),
         }
+    }
+
+    /// Where the signed downloads manifest keeps its last good copy and its check state.
+    pub fn manifest_dir(&self) -> PathBuf {
+        self.root.join("dlmanifest")
     }
 
     /// The folder holding a link to every installed program; the chat and the terminal look here first.
@@ -1034,6 +1195,13 @@ impl CliManager {
     }
 
     pub(crate) fn latest_version(&self, d: &CliDef, st: &dyn Streamer) -> Result<String, String> {
+        if !d.pin.is_empty() {
+            return Ok(d.pin.to_string());
+        }
+        // a signed downloads manifest (docs/development/DOWNLOADS-MANIFEST.md) may name the version; only for the items wired to it so far
+        if let Some(v) = crate::dlmanifest::version_override(&self.manifest_dir(), d.id) {
+            return Ok(v);
+        }
         match d.version {
             VersionFrom::Text(u) => {
                 let v = self.small(st, u, d.hosts)?.trim().to_string();
@@ -1109,7 +1277,18 @@ impl CliManager {
                     if d.id == "duckdb" {
                         args.push("--only-binary=:all:");
                     }
-                    args.push(pkgname);
+                    // hash values in the signed manifest for this exact version: every file pip installs must match one (including dependencies)
+                    let lock_file = target.join("requirements.lock");
+                    let lock = if d.pin.is_empty() { None } else { crate::dlmanifest::pins::pip_lock(&self.manifest_dir(), d.id, pkgname, d.pin) };
+                    let lock_arg = lock_file.display().to_string();
+                    let spec = if d.pin.is_empty() { pkgname.to_string() } else { format!("{pkgname}=={}", d.pin) };
+                    if let Some(text) = &lock {
+                        std::fs::write(&lock_file, text).map_err(|e| e.to_string())?;
+                        args.extend(["--require-hashes", "-r", lock_arg.as_str()]);
+                        verified = true;
+                    } else {
+                        args.push(&spec);
+                    }
                     run_quiet(&target.join("venv/bin/pip").display().to_string(), &args, 1800)?;
                     if d.id == "duckdb" {
                         write_duckdb_shim(&target)?;
@@ -1124,7 +1303,8 @@ impl CliManager {
                     run_quiet_env(&uv, &["python", "install", spec], &env, 900)?;
                 }
                 Source::System => return Err(format!("{} comes with the system and is not downloaded", d.name)),
-                Source::Npm(pkgname) => self.npm_install(d, pkgname, &target, &tmp)?,
+                Source::Setting(key) => return Err(format!("{} has no download address yet: the OpenVPN project publishes source and distribution packages but no build that runs on IYAKKI's musl images, and IYAKKI does not invent one. Set `{key}` (an https address of a build you trust, with its SHA-256) to enable the download. Nothing was fetched.", d.name)),
+                Source::Npm(pkgname) => self.npm_install(d, &pinned_npm(d, pkgname), &target, &tmp)?,
                 Source::File(u) | Source::TarGz(u) | Source::Zip(u) | Source::TarZst(u) | Source::TarXz(u) => {
                     let url = self.tpl(u, &version)?;
                     let file = pct_decode(url.rsplit('/').next().unwrap_or("download"));
@@ -1149,6 +1329,18 @@ impl CliManager {
                     let mut out = std::io::BufWriter::new(std::fs::File::create(&dl).map_err(|e| e.to_string())?);
                     let (mut hasher, mut body, mut got) = (Sha256::new(), head.body, 0u64);
                     let mut md5 = matches!(d.checksum, Some(Checksum::Md5(_))).then(crate::xz::Md5::new);
+                    // a detached PGP signature (aws-cli): fetched before the large download, checked against the key pinned in legal/
+                    let pgp_key = self.pgp_key(d.id);
+                    let mut pgp = match &pgp_key {
+                        Some(_) => {
+                            self.set_job(d.id, |j| j.phase = "reading the vendor's signature".into());
+                            let (sig, _) = self.open_follow(st, &format!("{url}.sig"), d.hosts)?;
+                            let mut raw = Vec::new();
+                            sig.body.take(64 * 1024).read_to_end(&mut raw).map_err(|e| format!("could not read the signature: {e}"))?;
+                            Some(crate::openpgp::Hasher::start(&raw).map_err(|e| format!("the vendor's signature file cannot be used: {e}"))?)
+                        }
+                        None => None,
+                    };
                     let mut buf = vec![0u8; 128 * 1024];
                     loop {
                         let n = body.read(&mut buf).map_err(|e| format!("the download broke off: {e}"))?;
@@ -1162,6 +1354,9 @@ impl CliManager {
                         hasher.update(&buf[..n]);
                         if let Some(m) = &mut md5 {
                             m.update(&buf[..n]);
+                        }
+                        if let Some(p) = &mut pgp {
+                            p.update(&buf[..n]);
                         }
                         out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
                         self.set_job(d.id, |j| j.done = got);
@@ -1178,6 +1373,7 @@ impl CliManager {
                                 let text = self.small(st, &self.tpl(u, &version)?, d.hosts)?;
                                 extract_hash(&text, &file).ok_or("the vendor's checksum file has no entry for this download")?
                             }
+                            (Checksum::Fixed(table), _) => fixed_hash(table, &file).ok_or("this pinned release has no published checksum for this machine's build")?,
                             (Checksum::Md5(u), _) => {
                                 let text = self.small(st, &self.tpl(u, &version)?, d.hosts)?;
                                 let want = crate::xz::md5_from(&text, &file).ok_or("the vendor's checksum file has no entry for this download")?;
@@ -1193,6 +1389,18 @@ impl CliManager {
                         if want != got_hash {
                             return Err(format!("the download does not match the vendor's checksum (expected {}…, got {}…); nothing was installed", &want[..12], &got_hash[..12]));
                         }
+                        verified = true;
+                    }
+                    // our own SHA-256 in the signed manifest (for this exact version and file name) must match too
+                    if let Some(want) = crate::dlmanifest::pins::sha256_for(&self.manifest_dir(), d.id, &version, &file) {
+                        if want != got_hash {
+                            return Err(format!("the download does not match the SHA-256 pinned by IYAKKI (expected {}…, got {}…); nothing was installed", &want[..12], &got_hash[..12]));
+                        }
+                        verified = true;
+                    }
+                    if let (Some(p), Some(key)) = (pgp.take(), &pgp_key) {
+                        self.set_job(d.id, |j| j.phase = "checking the vendor's signature".into());
+                        p.finish().and_then(|f| f.check(key)).map_err(|e| format!("the download does not match the vendor's PGP signature ({e}); nothing was installed"))?;
                         verified = true;
                     }
                     self.set_job(d.id, |j| j.phase = "unpacking".into());
@@ -1219,7 +1427,7 @@ impl CliManager {
                         Source::TarXz(_) => {
                             crate::xz::untar_xz(&dl, &target, &tmp, max_unpacked)?;
                         }
-                        Source::Pip(_) | Source::Npm(_) | Source::Python(_) | Source::System => {}
+                        Source::Pip(_) | Source::Npm(_) | Source::Python(_) | Source::System | Source::Setting(_) => {}
                     }
                     let _ = std::fs::remove_file(&dl);
                     if d.id == "nodejs" {
@@ -1486,6 +1694,10 @@ impl CliManager {
         if matches!(d.source, Source::System) {
             return Err(format!("{} comes with the system and is updated by its package manager, not from here.", d.name));
         }
+        if !d.pin.is_empty() {
+            // this release of IYAKKI installs one exact version (see `CliDef::pin`); a newer one arrives with a newer IYAKKI
+            return Ok(d.pin.to_string());
+        }
         if matches!(d.version, VersionFrom::Latest) {
             // no number from the vendor's own address, but the registry the tool installs from has one
             let lookup = match d.source {
@@ -1665,6 +1877,21 @@ pub(crate) fn runnable_check(path: &Path) -> Result<(), String> {
     } else {
         Err(format!("it needs {interp}, which this system does not have."))
     }
+}
+
+/// The Amazon public key pinned in the repository for the AWS CLI's `.sig` file (`unset` until the owner adds it).
+const AWS_CLI_PGP_KEY: &str = include_str!("../../../legal/aws-cli-pgp.asc");
+
+fn pgp_key_file(id: &str) -> Option<&'static str> {
+    let k = match id {
+        "aws-cli" => AWS_CLI_PGP_KEY,
+        _ => return None,
+    };
+    k.trim_start().starts_with("-----BEGIN PGP PUBLIC KEY BLOCK-----").then_some(k)
+}
+
+fn pgp_key_pinned(id: &str) -> bool {
+    pgp_key_file(id).is_some()
 }
 
 /// DuckDB's `duckdb` command: a shell wrapper that runs our small Python program with the environment's Python.
@@ -1903,8 +2130,8 @@ mod tests {
                 assert!(names.insert(*n), "{n} is provided twice");
                 assert!(!n.contains('/') && !n.starts_with('.') && !n.is_empty());
             }
-            let urls: Vec<&str> = match d.source { Source::File(u) | Source::TarGz(u) | Source::Zip(u) | Source::TarZst(u) | Source::TarXz(u) => vec![u], Source::Pip(_) | Source::Npm(_) | Source::Python(_) | Source::System => vec![] };
-            for u in urls.into_iter().chain(match d.checksum { Some(Checksum::Single(u)) | Some(Checksum::Lines(u)) | Some(Checksum::Manifest(u)) | Some(Checksum::Md5(u)) => Some(u), None => None }) {
+            let urls: Vec<&str> = match d.source { Source::File(u) | Source::TarGz(u) | Source::Zip(u) | Source::TarZst(u) | Source::TarXz(u) => vec![u], Source::Pip(_) | Source::Npm(_) | Source::Python(_) | Source::System | Source::Setting(_) => vec![] };
+            for u in urls.into_iter().chain(match d.checksum { Some(Checksum::Single(u)) | Some(Checksum::Lines(u)) | Some(Checksum::Manifest(u)) | Some(Checksum::Md5(u)) => Some(u), Some(Checksum::Fixed(_)) | None => None }) {
                 let url = template(u, "v1.2.3").unwrap();
                 assert!(host_ok(&url, d.hosts).is_ok(), "{} {url}", d.id);
                 assert!(!url.contains('{'), "unfilled placeholder in {url}");
@@ -2030,14 +2257,46 @@ mod tests {
         // aws: a zip with no published checksum, version read from the program
         let (_, a2, _) = super::arch().unwrap();
         let zip = make_zip(&[("aws/dist/aws", "#!/bin/sh\necho 'aws-cli/2.17.0 Python/3.12 Linux'\n", 0o100755, true), ("aws/dist/aws_completer", "#!/bin/sh\n", 0o100755, false)]);
-        let st = fake(vec![(format!("https://awscli.amazonaws.com/awscli-exe-linux-{a2}.zip"), ok(&zip))]);
+        let st = fake(vec![(format!("https://awscli.amazonaws.com/awscli-exe-linux-{a2}-{}.zip", def("aws-cli").unwrap().pin), ok(&zip))]);
         let m = manager("aws", st);
         m.install("aws-cli", "root").unwrap();
         assert!(wait(&m, "aws-cli").error.is_none());
         let i = m.is_installed("aws-cli").unwrap();
         assert!(!i.verified, "no checksum was available");
-        assert_eq!(i.version, "2.17.0", "{i:?}");
+        assert_eq!(i.version, def("aws-cli").unwrap().pin, "{i:?}");
         assert_eq!(m.extras().iter().find(|x| x.name == "aws").unwrap().host.as_deref(), Some("amazonaws.com"));
+    }
+
+    #[test]
+    fn aws_cli_with_a_pinned_pgp_key_must_carry_a_valid_signature() {
+        let key: &[u8] = include_bytes!("../tests/fixtures/openpgp/test-key.asc");
+        let payload: &[u8] = include_bytes!("../tests/fixtures/openpgp/payload.bin");
+        let good_sig: &[u8] = include_bytes!("../tests/fixtures/openpgp/payload.bin.sha256.sig");
+        let (_, a2, _) = super::arch().unwrap();
+        let url = format!("https://awscli.amazonaws.com/awscli-exe-linux-{a2}-{}.zip", def("aws-cli").unwrap().pin);
+        // the signature belongs to another file: refused, nothing installed
+        let mut other = payload.to_vec();
+        other[0] ^= 1;
+        let st = fake(vec![(url.clone(), ok(&other)), (format!("{url}.sig"), ok(good_sig))]);
+        let m = manager("awspgp-bad", st);
+        m.set_pgp_key("aws-cli", key);
+        m.install("aws-cli", "root").unwrap();
+        let j = wait(&m, "aws-cli");
+        assert!(j.error.as_deref().is_some_and(|e| e.contains("PGP signature") && e.contains("nothing was installed")), "{j:?}");
+        assert!(m.is_installed("aws-cli").is_none());
+        // no signature file at all: refused too
+        let st = fake(vec![(url.clone(), ok(payload))]);
+        let m = manager("awspgp-none", st);
+        m.set_pgp_key("aws-cli", key);
+        m.install("aws-cli", "root").unwrap();
+        assert!(wait(&m, "aws-cli").error.is_some());
+        // the right file passes the signature check (and then fails later, because the stand-in is not a zip)
+        let st = fake(vec![(url.clone(), ok(payload)), (format!("{url}.sig"), ok(good_sig))]);
+        let m = manager("awspgp-good", st);
+        m.set_pgp_key("aws-cli", key);
+        m.install("aws-cli", "root").unwrap();
+        let j = wait(&m, "aws-cli");
+        assert!(!j.error.as_deref().unwrap_or("").contains("PGP"), "{j:?}");
     }
 
     #[test]
@@ -2047,13 +2306,13 @@ mod tests {
         // arduino-cli: a tar.gz whose program is at the top, with a checksum file named like the release's
         let tar = gzip(&make_tar(&[("arduino-cli", b'0', "#!/bin/sh\necho 'arduino-cli  Version: 1.5.1 Commit: x'\n", 0o755), ("LICENSE.txt", b'0', "gpl", 0o644)]));
         let name = format!("arduino-cli_1.5.1_{ard}.tar.gz");
-        // espflash: a zip holding one program, no checksum
+        // espflash: a zip holding one program, pinned with the digest GitHub shows for the release asset
         let zip = make_zip(&[("espflash", "#!/bin/sh\necho 'espflash 4.6.0'\n", 0o100755, true)]);
+        TEST_FIXED.lock().unwrap().push((format!("espflash-{a2}-unknown-linux-gnu.zip"), sha(&zip)));
         let st = fake(vec![
             ("https://github.com/arduino/arduino-cli/releases/latest".into(), (302, vec![("location".into(), "https://github.com/arduino/arduino-cli/releases/tag/v1.5.1".into())], vec![])),
             (format!("https://github.com/arduino/arduino-cli/releases/download/v1.5.1/{name}"), ok(&tar)),
             ("https://github.com/arduino/arduino-cli/releases/download/v1.5.1/1.5.1-checksums.txt".into(), ok(format!("{}  {name}\n", sha(&tar)).as_bytes())),
-            ("https://github.com/esp-rs/espflash/releases/latest".into(), (302, vec![("location".into(), "https://github.com/esp-rs/espflash/releases/tag/v4.6.0".into())], vec![])),
             (format!("https://github.com/esp-rs/espflash/releases/download/v4.6.0/espflash-{a2}-unknown-linux-gnu.zip"), ok(&zip)),
         ]);
         let m = manager("esp", st);
@@ -2064,7 +2323,7 @@ mod tests {
         m.install("espflash", "root").unwrap();
         let j = wait(&m, "espflash");
         assert!(j.error.is_none(), "{j:?}");
-        assert!(!m.is_installed("espflash").unwrap().verified, "no checksum is published for it");
+        assert!(m.is_installed("espflash").unwrap().verified, "checked against the digest GitHub publishes for the pinned release");
         // esptool from pip: only its first program is required; the others may be missing
         let d = tmp("esptoolpy");
         let py = d.join("python3");
@@ -2076,7 +2335,7 @@ mod tests {
         let j = wait(&m, "esptool");
         assert!(j.error.is_none(), "{j:?}");
         let e = m.is_installed("esptool").unwrap();
-        assert_eq!((e.bins.as_slice(), e.version.as_str()), (&["esptool".to_string()][..], "v5.5.0"), "{e:?}");
+        assert_eq!((e.bins.as_slice(), e.version.as_str()), (&["esptool".to_string()][..], def("esptool").unwrap().pin), "{e:?}");
         // what the chat may run, and which network check each gets: the chip tools need none
         let mut x = m.extras();
         x.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2111,10 +2370,10 @@ mod tests {
         m.set_on_installed(Arc::new(move |id| s2.lock().unwrap().push(id.to_string())));
         // the plan names the exact command and the folder, before anything runs
         let plan = m.install_plan("codex").unwrap();
-        assert!(plan.contains("`npm install -g @openai/codex`") && plan.contains("npm_config_prefix") && plan.contains(&m.npm_prefix("codex").display().to_string()), "{plan}");
+        assert!(plan.contains(&format!("`npm install -g @openai/codex@{}`", def("codex").unwrap().pin)) && plan.contains("npm_config_prefix") && plan.contains(&m.npm_prefix("codex").display().to_string()), "{plan}");
         assert!(plan.contains("no sudo") && plan.contains("registry.npmjs.org") && plan.contains("Node.js 22 was found"), "{plan}");
         assert!(!record.exists(), "showing the plan runs nothing");
-        assert_eq!(m.install_plan("gemini-cli").unwrap().contains("`npm install -g @google/gemini-cli`"), true);
+        assert_eq!(m.install_plan("gemini-cli").unwrap().contains(&format!("`npm install -g @google/gemini-cli@{}`", def("gemini-cli").unwrap().pin)), true);
         assert!(!m.install_plan("github-copilot").unwrap().contains("npm install") && !m.install_plan("claude-code").unwrap().contains("Node.js is not on this machine"), "the native builds do not need Node.js");
         assert!(m.install_plan("kubectl").is_none(), "a plain download is described by the tile");
         std::env::remove_var("npm_config_prefix");
@@ -2123,13 +2382,13 @@ mod tests {
         assert!(j.error.is_none(), "{j:?}");
         // an argument array with no shell and no sudo, the prefix and cache only for the child
         let rec = std::fs::read_to_string(&record).unwrap();
-        assert!(rec.contains("ARGS install -g @openai/codex\n"), "{rec}");
+        assert!(rec.contains(&format!("ARGS install -g @openai/codex@{}\n", def("codex").unwrap().pin)), "{rec}");
         assert!(rec.contains(&format!("PREFIX={}", m.npm_prefix("codex").display())) && rec.contains("CACHE=") && rec.contains("SUDO_USER=\n"), "{rec}");
         assert!(std::env::var("npm_config_prefix").is_err(), "this process's environment is untouched");
         // linked where the chat and the terminal look, version read from the program, hook told
         assert!(m.bin_dir().join("codex").exists());
         let i = m.is_installed("codex").unwrap();
-        assert!(i.reported.contains("2.1.5") && i.version == "2.1.5", "{i:?}");
+        assert!(i.reported.contains("2.1.5") && i.version == def("codex").unwrap().pin, "{i:?}");
         assert!(m.extras().iter().any(|e| e.name == "codex" && e.host.as_deref() == Some("api.openai.com")));
         assert_eq!(*seen.lock().unwrap(), ["codex"]);
         // removing deletes the folder and the link
@@ -2184,7 +2443,7 @@ mod tests {
         let j = wait(&m, "azure-cli");
         assert!(j.error.is_none(), "{j:?}");
         let i = m.is_installed("azure-cli").unwrap();
-        assert!(i.reported.starts_with("azure-cli") && i.version == "2.64.0", "{i:?}");
+        assert!(i.reported.starts_with("azure-cli") && i.version == def("azure-cli").unwrap().pin, "{i:?}");
         assert!(m.bin_dir().join("az").exists());
         // no python anywhere and no way to fetch one: the catalogue's Python is tried first, and the failure says so; nothing is left behind
         let m2 = Arc::new(CliManager::new(&d.join("cli2")));
@@ -2242,7 +2501,7 @@ mod tests {
         assert!(m.bin_dir().join("node").exists() && m.bin_dir().join("npm").exists());
         // npm ran with the catalogue's folder first on its search path, so its scripts find that `node`
         let rec = std::fs::read_to_string(&record).unwrap();
-        assert!(rec.contains("ARGS install -g @openai/codex\n") && rec.contains(&format!("PATH={}:", m.bin_dir().display())), "{rec}");
+        assert!(rec.contains(&format!("ARGS install -g @openai/codex@{}\n", def("codex").unwrap().pin)) && rec.contains(&format!("PATH={}:", m.bin_dir().display())), "{rec}");
         assert!(m.is_installed("codex").is_some());
         assert_eq!(*told.lock().unwrap(), ["nodejs", "codex"]);
         assert!(m.install_plan("codex").unwrap().contains("Node.js 26 was found"));
@@ -2284,12 +2543,12 @@ mod tests {
         assert!(j.error.is_none(), "{j:?}");
         assert!(m.is_installed("uv").unwrap().verified, "uv came first, checked against the published checksum");
         let p = m.is_installed("python").unwrap();
-        assert_eq!(p.version, "3.12.1", "{p:?}");
+        assert_eq!(p.version, def("python").unwrap().pin, "{p:?}");
         assert!(m.bin_dir().join("python3").exists() && m.bin_dir().join("uv").exists());
         // uv was pointed at this tool's own folder only
         let rec = std::fs::read_to_string(&seen).unwrap();
-        assert!(rec.starts_with("3.12|") && rec.contains("/pkgs/python/") && rec.trim_end().ends_with("/shims"), "{rec}");
-        assert_eq!(m.is_installed("esptool").unwrap().version, "v5.5.0");
+        assert!(rec.starts_with("3.12.16|") && rec.contains("/pkgs/python/") && rec.trim_end().ends_with("/shims"), "{rec}");
+        assert_eq!(m.is_installed("esptool").unwrap().version, def("esptool").unwrap().pin);
     }
 
     #[test]
@@ -2567,13 +2826,14 @@ mod tests {
         ]);
         let m = manager("upgrades", st);
         m.set_target(true, "x86_64");
-        assert_eq!(m.check_latest("codex").unwrap(), "0.99.0");
-        assert_eq!(m.check_latest("aider").unwrap(), "0.90.1");
-        assert_eq!(m.check_latest("python").unwrap(), "3.12.15");
+        // every npm, pip and Python tool is pinned in this release: the answer is the pin, not what the registry says
+        for id in ["codex", "aider", "python"] {
+            assert_eq!(m.check_latest(id).unwrap(), def(id).unwrap().pin);
+        }
         write_fake_installed(&m, "codex", "#!/bin/sh\necho 1\n"); // recorded as version v1
         assert_eq!(m.offer("codex", Some("v2.0.0")), Offer::Upgrade("v2.0.0".into()));
         assert_eq!(m.offer("codex", Some("v1")), Offer::UpToDate);
-        assert_eq!(m.offer("aider", Some("0.90.1")), Offer::Install);
+        assert_eq!(m.offer("aider", Some("0.86.2")), Offer::Install);
     }
 
 
@@ -2666,9 +2926,9 @@ mod tests {
         m.install("duckdb", "root").unwrap();
         let j = wait(&m, "duckdb");
         assert!(j.error.is_none(), "{j:?}");
-        assert!(std::fs::read_to_string(&pip_seen).unwrap().contains("--only-binary=:all: duckdb"));
+        assert!(std::fs::read_to_string(&pip_seen).unwrap().contains("--only-binary=:all: duckdb==1.3.2"));
         let i = m.is_installed("duckdb").unwrap();
-        assert_eq!(i.version, "v1.3.2");
+        assert_eq!(i.version, "1.3.2");
         assert!(i.reported.contains("via Python 3") && i.reported.contains("newest DuckDB wheel built for musl"), "{i:?}");
         // the command in the tools folder is the wrapper around our program; extras keep the DASH tile's read-only network rule
         let link = m.bin_dir().join("duckdb");
@@ -2688,9 +2948,7 @@ mod tests {
         let st = fake(vec![("https://pypi.org/pypi/duckdb/json".into(), ok(br#"{"info":{"version":"1.5.6"},"releases":{"1.5.6":[{"filename":"duckdb-1.5.6-cp312-cp312-manylinux_2_27_x86_64.whl"}],"1.3.2":[{"filename":"duckdb-1.3.2-cp312-cp312-musllinux_1_2_x86_64.whl"}]}}"#))]);
         let m2 = manager("duckdb-latest", st);
         m2.set_target(true, "x86_64");
-        assert_eq!(m2.check_latest("duckdb").unwrap(), "1.3.2", "musl: the newest wheel that exists for it");
-        m2.set_target(false, "x86_64");
-        assert_eq!(m2.check_latest("duckdb").unwrap(), "1.5.6");
+        assert_eq!(m2.check_latest("duckdb").unwrap(), def("duckdb").unwrap().pin, "pinned to the newest wheel that exists for musl");
     }
 
     #[test]
@@ -2803,6 +3061,23 @@ mod tests {
     }
 
     #[test]
+    fn openvpn_has_no_built_in_address_and_the_click_explains_the_gap_and_fetches_nothing() {
+        let d = def("openvpn").unwrap();
+        assert!(matches!(d.source, Source::Setting("vpn.openvpn_download")), "the address is a setting, not a constant");
+        assert!(d.license.contains("GPL-2.0") && d.note.contains("does not ship it") && d.note.contains("none is invented"));
+        let st = Arc::new(Fake { routes: Mutex::new(HashMap::new()), asked: Mutex::new(vec![]) });
+        let m = manager("openvpn", st.clone());
+        let plan = m.install_plan("openvpn").unwrap();
+        assert!(plan.contains("Nothing can be downloaded yet") && plan.contains("vpn.openvpn_download"), "{plan}");
+        m.install("openvpn", "root").unwrap();
+        let j = wait(&m, "openvpn");
+        let e = j.error.unwrap();
+        assert!(e.contains("no download address") && e.contains("does not invent") && e.contains("Nothing was fetched"), "{e}");
+        assert!(st.asked.lock().unwrap().is_empty(), "no request was made");
+        assert!(m.is_installed("openvpn").is_none());
+    }
+
+    #[test]
     fn ffmpeg_comes_as_a_tar_xz_checked_against_the_builders_md5_file() {
         let (arch, _, _) = arch().unwrap();
         let tar = crate::archive::tests::make_tar(&[
@@ -2839,22 +3114,23 @@ mod tests {
     }
 
     #[test]
-    fn seven_zip_comes_from_the_projects_release_page_as_a_tar_xz_and_is_listed_as_not_verified() {
+    fn seven_zip_comes_from_the_projects_release_page_as_a_tar_xz_and_is_listed_as_pinned_and_verified() {
         let d = def("7zip").unwrap();
-        assert!(d.checksum.is_none() && d.bins == [("7zz", "7zzs")] && d.hosts.contains(&"github.com"));
+        assert!(matches!(d.checksum, Some(Checksum::Fixed(_))) && d.bins == [("7zz", "7zzs")] && d.hosts.contains(&"github.com"));
         assert_eq!(tpl_glibc("{v7}", "25.01").unwrap(), "2501");
         let Source::TarXz(tu) = d.source else { panic!("the 7zip entry changed shape") };
-        let url = tpl_glibc(tu, "25.01").unwrap();
-        assert!(url.starts_with("https://github.com/ip7z/7zip/releases/download/25.01/7z2501-linux-"), "{url}");
+        let url = tpl_glibc(tu, d.pin).unwrap();
+        assert!(url.starts_with("https://github.com/ip7z/7zip/releases/download/26.05/7z2605-linux-"), "{url}");
         let tar = crate::archive::tests::make_tar(&[("7zz", b'0', "#!/bin/sh\necho '7zz dynamic'\n", 0o755), ("7zzs", b'0', "#!/bin/sh\necho '7-Zip (z) 25.01 (x64) static'\n", 0o755), ("License.txt", b'0', "LGPL", 0o644)]);
         let xz = crate::xz::make_xz_stored(&tar);
-        let st = fake(vec![("https://github.com/ip7z/7zip/releases/latest".into(), (302, vec![("location".into(), "https://github.com/ip7z/7zip/releases/tag/25.01".into())], vec![])), (url, ok(&xz))]);
+        TEST_FIXED.lock().unwrap().push((url.rsplit('/').next().unwrap().to_string(), sha(&xz)));
+        let st = fake(vec![(url, ok(&xz))]);
         let m = manager("7zip", st);
         m.install("7zip", "root").unwrap();
         let j = wait(&m, "7zip");
         assert!(j.error.is_none() && j.finished, "{j:?}");
         let i = m.is_installed("7zip").unwrap();
-        assert!(!i.verified, "the project publishes no checksum");
+        assert!(i.verified, "checked against the digest GitHub publishes for the pinned release");
         let link = m.bin_dir().join("7zz");
         assert!(link.exists(), "7zz is linked");
         assert!(std::fs::read_to_string(&link).unwrap().contains("static"), "it is the static build, 7zzs");
@@ -2918,6 +3194,6 @@ mod tests {
         m.remove("kubectl").unwrap();
         assert!(!m.pkg_dir("kubectl").exists() && m.rollback("kubectl").is_err());
         // a tool whose vendor publishes only "latest" says so
-        assert!(m.check_latest("aws-cli").unwrap_err().contains("only \"latest\""));
+        assert!(m.check_latest("ffmpeg").unwrap_err().contains("only \"latest\""));
     }
 }

@@ -221,6 +221,17 @@ pub fn human_duration(secs: u64) -> String {
     if d > 0 { format!("{d}d {h}h") } else if h > 0 { format!("{h}h {m}m") } else if m > 0 { format!("{m}m {}s", secs % 60) } else { format!("{secs}s") }
 }
 
+/// Where a short-lived shared file for another process belongs: the RAM-backed `/dev/shm` where it exists, else the temp folder.
+/// (Kept here, in IYAKKI core, so that tiles do not name kernel paths themselves.)
+pub fn shared_memory_dir() -> std::path::PathBuf {
+    let shm = std::path::Path::new("/dev/shm");
+    if shm.is_dir() {
+        shm.to_path_buf()
+    } else {
+        std::env::temp_dir()
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;

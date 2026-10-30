@@ -479,6 +479,8 @@ pub enum ReposAct {
     Connect,
     /// Push the project's branch to `origin` (a review comes first).
     Push,
+    /// "Put this project under version control on Local Gitea" (only offered while the project has no remote).
+    LocalGitea,
     /// Remove `origin` (a confirmation comes first).
     Disconnect,
     CloneMore,
@@ -548,6 +550,7 @@ impl ReposPanel {
                 'c' => ReposAct::CloneMore,
                 'o' => ReposAct::Connect,
                 'u' => ReposAct::Push,
+                'l' => ReposAct::LocalGitea,
                 'd' => ReposAct::Disconnect,
                 'f' => ReposAct::FetchAll,
                 'p' => ReposAct::PullAll,
@@ -567,7 +570,7 @@ impl ReposPanel {
                 self.sel = *i;
                 ReposAct::None
             }
-            Event::Tab(t) if (GIT_BASE + 100..GIT_BASE + 100 + 8).contains(t) => match t - (GIT_BASE + 100) {
+            Event::Tab(t) if (GIT_BASE + 100..GIT_BASE + 100 + 9).contains(t) => match t - (GIT_BASE + 100) {
                 0 => ReposAct::CloneMore,
                 1 => ReposAct::FetchAll,
                 2 => ReposAct::PullAll,
@@ -576,6 +579,7 @@ impl ReposPanel {
                 5 => ReposAct::Connect,
                 6 => ReposAct::Push,
                 7 => ReposAct::Disconnect,
+                8 => ReposAct::LocalGitea,
                 _ => ReposAct::Close,
             },
             Event::Tab(t) if *t >= GIT_BASE + 1000 => {
@@ -630,7 +634,8 @@ impl ReposPanel {
                 g.button(bx, y, 12.0 * s, "Disconnect  d", ERR, Event::Tab(GIT_BASE + 100 + 7));
             } else {
                 bx += g.button(bx, y, 13.0 * s, "Connect to Git or Gitea  o", accent, Event::Tab(GIT_BASE + 100 + 5)) + 12.0 * s;
-                g.text(bx, y + 4.0 * s, 12.0 * s, DIM, "Make a repository on GitHub, GitLab or Gitea, or connect to one you have.", Face::Sans);
+                bx += g.button(bx, y, 13.0 * s, &format!("{}  l", iyakki_agent::quickinstall::gitea::OFFER_LABEL), OK, Event::Tab(GIT_BASE + 100 + 8)) + 12.0 * s;
+                g.text(bx, y + 4.0 * s, 12.0 * s, DIM, "Or a repository on GitHub, GitLab or any host.", Face::Sans);
             }
             y += 36.0 * s;
         }
@@ -682,7 +687,7 @@ impl ReposPanel {
             g.text(x, p.y + p.h - 58.0 * s, 12.0 * s, AMBER, &n, Face::Sans);
         }
         g.button(p.x + p.w - 24.0 * s - 80.0 * s, p.y + p.h - 50.0 * s, 14.0 * s, "Close", accent, Event::Key(Key::Esc));
-        let help = g.fit(12.0 * s, "↑ ↓ choose · r retry · e commands · x remove · k keys · o connect Git · u push · d disconnect · Esc closes", Face::Sans, w - 120.0 * s);
+        let help = g.fit(12.0 * s, "↑ ↓ choose · r retry · e commands · x remove · k keys · o connect Git · l Local Gitea · u push · d disconnect · Esc closes", Face::Sans, w - 120.0 * s);
         g.text(x, p.y + p.h - 42.0 * s, 12.0 * s, DIM, &help, Face::Sans);
     }
 }

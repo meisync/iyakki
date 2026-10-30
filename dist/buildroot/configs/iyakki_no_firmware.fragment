@@ -1,0 +1,9 @@
+# No vendor firmware in the image: appended LAST by build.sh when IYAKKI_IMAGE_PROFILE=release (and available to any recipe that must
+# never carry linux-firmware). The images carry none of the vendor firmware; the person installs what the computer asks for with the
+# "Hardware firmware" item (Store -> Setup; crates/iyakki-agent/src/fwextra.rs, docs/FIRMWARE-LICENCES.md).
+#
+# build.sh already leaves iyakki_firmware.fragment out for a release build; this line is the explicit guard, so a fragment added later
+# cannot bring linux-firmware (and with it the 355 to 1375 files the licence gate flags as `Proprietary`) back in. Every
+# BR2_PACKAGE_LINUX_FIRMWARE_* sub-option depends on it and disappears with it.
+# What stays: BR2_PACKAGE_WIRELESS_REGDB (ISC) -> /lib/firmware/regulatory.db, a separate package with its own legal-info row.
+# BR2_PACKAGE_LINUX_FIRMWARE is not set

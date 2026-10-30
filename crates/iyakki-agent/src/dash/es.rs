@@ -24,7 +24,7 @@ pub fn info() -> KindInfo {
         language: Lang::EsDsl,
         about: "Search and aggregate documents with the Query DSL. Works with OpenSearch too. Use a read-only user.".into(),
         fields,
-        example: "http://localhost:9200".into(),
+        example: "http://localhost:9200 (own server) or cluster://iyakki-data/elasticsearch:9200 (Quick install, runs inside the cluster)".into(),
     }
 }
 

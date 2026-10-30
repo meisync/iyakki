@@ -1,0 +1,44 @@
+# Review file of the RELEASE image profile (`iyakki-relcheck release-image-check`; docs/development/RELEASE-IMAGE-PROFILE.md).
+# kind | value | reason | date        (every row needs a reason of a sentence and a date; `*` in a value matches any run of characters)
+#   forbid-config | SYMBOL-GLOB | reason | date   a Buildroot symbol that must NOT be =y / =m in the .config of a release build
+#   allow-gst-bad | PLUGIN       | reason | date   a gst-plugins-bad plugin (BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_<PLUGIN>) whose source licences were read
+#   allow-fw      | GLOB         | reason | date   a path under /lib/firmware a release image may contain (also what release-firmware.keep may list)
+# Any gst-plugins-bad plugin that is on but not listed here, and any keep-list pattern without an allow-fw row, FAILS the check: adding one is a
+# decision with a reason and a date, not a side effect.
+
+# ---- vendor firmware: none (owner decision 2026-10-27)
+forbid-config | BR2_PACKAGE_LINUX_FIRMWARE | linux-firmware is vendor firmware under many licences (the gate flags 355 to 1375 files as Proprietary); the person installs what the computer needs with the Hardware firmware item | 2026-10-27
+forbid-config | BR2_PACKAGE_LINUX_FIRMWARE_* | every linux-firmware sub-option; none may be on without the package | 2026-10-27
+forbid-config | BR2_PACKAGE_LINUX_FIRMWARE_NVIDIA* | NVIDIA GSP and booter blobs are vendor binaries the owner listed as doubtful | 2026-10-27
+allow-fw | regulatory.db | the wireless regulatory database from the wireless-regdb package (ISC), not from linux-firmware | 2026-10-27
+allow-fw | regulatory.db.p7s | the signature of regulatory.db, same package and licence | 2026-10-27
+
+# ---- codecs: no H.264/AAC, nothing GPL-encoded or patent-bearing in the image
+forbid-config | BR2_PACKAGE_FFMPEG_GPL | a GPL FFmpeg build would make the image GPL-encumbered and ships H.264 encoders | 2026-10-27
+forbid-config | BR2_PACKAGE_FFMPEG_NONFREE | non-free FFmpeg parts cannot be redistributed | 2026-10-27
+forbid-config | BR2_PACKAGE_FFMPEG_FFMPEG | the ffmpeg program is downloaded by the person (Store -> Setup -> Media tools), not shipped | 2026-10-27
+forbid-config | BR2_PACKAGE_FFMPEG_FFPROBE | ffprobe is downloaded by the person, not shipped | 2026-10-27
+forbid-config | BR2_PACKAGE_X264 | x264 is a GPL H.264 encoder | 2026-10-27
+forbid-config | BR2_PACKAGE_X265 | x265 is a GPL HEVC encoder | 2026-10-27
+forbid-config | BR2_PACKAGE_LIBOPENH264 | OpenH264 is a patent-encumbered codec | 2026-10-27
+forbid-config | BR2_PACKAGE_FAAD2 | FAAD2 is a GPL AAC decoder | 2026-10-27
+forbid-config | BR2_PACKAGE_FDK_AAC | fdk-aac is a non-free codec | 2026-10-27
+forbid-config | BR2_PACKAGE_GST1_PLUGINS_UGLY | gst-plugins-ugly carries the patent-bearing and GPL plugins (x264, mpeg2dec, a52dec) | 2026-10-27
+forbid-config | BR2_PACKAGE_GST1_PLUGINS_UGLY_* | every ugly plugin; the whole package stays out | 2026-10-27
+forbid-config | BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_OPENH264 | OpenH264 plugin | 2026-10-27
+forbid-config | BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_X265 | the x265 GStreamer plugin (GPL HEVC encoder) | 2026-10-27
+forbid-config | BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_FAAD | the FAAD GStreamer plugin (GPL AAC decoder) | 2026-10-27
+forbid-config | BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_FDK_AAC | fdk-aac plugin | 2026-10-27
+forbid-config | BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_MPEG2ENC | mpeg2enc plugin (GPL mjpegtools) | 2026-10-27
+forbid-config | BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_MPEGPSMUX | the plugin whose files are under MPL-1.1 and that Buildroot marks UNKNOWN; not needed | 2026-10-27
+forbid-config | BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_DVB | DVB plugin: not needed and not reviewed | 2026-10-27
+
+# ---- gst-plugins-bad: the plugins whose sources were read on 2026-10-27 (see the accept row in legal/image-rules.txt)
+allow-gst-bad | DEBUGUTILS | WPE's multimedia option selects it; 27 of 27 source files state LGPL | 2026-10-27
+allow-gst-bad | MPEGTSDEMUX | WPE's multimedia option selects it (cannot be off); 13 of 13 plugin files and 23 of 23 mpegts library files state LGPL-2.0-or-later; this is the plugin Buildroot marks UNKNOWN | 2026-10-27
+allow-gst-bad | SUBENC | WPE's multimedia option selects it; 5 of 5 files state LGPL | 2026-10-27
+allow-gst-bad | VIDEOPARSERS | needed to parse VP9/AV1 and the container streams; 29 of 31 files state LGPL, the two Dirac helper files have no header | 2026-10-27
+allow-gst-bad | GL | GStreamer GL path of the web engine (iyakki_web.fragment) | 2026-10-27
+allow-gst-bad | OPUS | opusparse for YouTube's audio (iyakki_web.fragment); 5 of 5 files state LGPL | 2026-10-27
+allow-gst-bad | WAYLAND | wayland sink for the private display of the web engine; 21 of 21 files state LGPL | 2026-10-27
+allow-gst-bad | WPE | the WPE source plugin; 11 of 12 files state LGPL, the header gstwpevideosrc.h has none | 2026-10-27

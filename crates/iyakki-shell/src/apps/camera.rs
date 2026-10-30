@@ -17,7 +17,7 @@ use crate::camera::live::Live;
 use crate::camera::passport::{self, Paper, Spec, SPECS};
 use crate::camera::specs;
 use super::widgets::{Form, FormEvent};
-use crate::camera::{pixels, v4l2, CamDevice, Control, Mode, Opened, Opener, Presence};
+use crate::camera::{pixels, v4l2, CamDevice, Control, Mode, Opened, Opener, Pix, Presence};
 use crate::fx;
 use crate::gfx::{rgb, Face, Gfx, Icon};
 use crate::ui::{Event, Key, DIM, ERR, MUTED, R, TEXT};
@@ -85,6 +85,17 @@ const TICKS_PER_SEC: u64 = 30;
 const PICK_BASE: usize = 7_200;
 const OK_C: [u8; 4] = crate::ui::OK;
 const THUMB_W: u32 = 160;
+/// Under the person's home: the name of the camera they chose.
+pub(crate) const CHOICE_FILE: &str = ".config/iyakki/camera";
+
+pub(crate) fn load_choice(file: &Path) -> String {
+    std::fs::read_to_string(file).map(|t| t.trim().to_string()).unwrap_or_default()
+}
+
+/// The camera to start with: the one the person chose last time when it is connected, else the built-in one, else the first.
+pub(crate) fn preferred(cams: &[CamDevice], saved: &str) -> usize {
+    cams.iter().position(|c| !saved.is_empty() && c.name == saved).or_else(|| cams.iter().position(|c| c.builtin)).unwrap_or(0)
+}
 
 pub struct CameraApp {
     presence: Presence,
@@ -115,6 +126,10 @@ pub struct CameraApp {
     overlay: Overlay,
     ticks: u64,
     last_scan: u64,
+    /// The size the person chose per camera (by name), kept while the app runs.
+    wants: std::collections::HashMap<String, Mode>,
+    /// Where the choice of camera is remembered (in the person's home).
+    choice_file: PathBuf,
 }
 
 fn give_to_account(path: &Path) {
@@ -218,6 +233,8 @@ impl CameraApp {
     pub fn with_parts(mut presence: Presence, opener: Arc<dyn Opener>, pictures: PathBuf, videos: PathBuf) -> CameraApp {
         presence.scan();
         let cams = presence.cameras();
+        let choice_file = pictures.parent().map(|h| h.join(CHOICE_FILE)).unwrap_or_else(|| PathBuf::from(CHOICE_FILE));
+        let cam = preferred(&cams, &load_choice(&choice_file));
         let (tx, rx) = channel();
         let (p2, v2) = (pictures.clone(), videos.clone());
         std::thread::spawn(move || {
@@ -227,7 +244,7 @@ impl CameraApp {
             presence,
             opener,
             cams,
-            cam: 0,
+            cam,
             conn: Conn::None,
             modes: Vec::new(),
             want: None,
@@ -251,6 +268,8 @@ impl CameraApp {
             overlay: Overlay::None,
             ticks: 0,
             last_scan: 0,
+            wants: Default::default(),
+            choice_file,
         };
         a.connect();
         a
@@ -264,6 +283,7 @@ impl CameraApp {
             }
         }
         self.conn = Conn::None;
+        self.modes.clear();
         let Some(dev) = self.cams.get(self.cam).cloned() else { return };
         let (tx, rx) = channel();
         let (op, want) = (self.opener.clone(), self.want);
@@ -548,18 +568,105 @@ impl CameraApp {
 
     fn choose_camera(&mut self, i: usize) {
         if i < self.cams.len() && (i != self.cam || !matches!(self.conn, Conn::Live(_))) {
+            if self.is_recording() {
+                self.overlay = Overlay::None;
+                return self.say("Stop the recording first.", false);
+            }
             self.cam = i;
-            self.want = None;
+            self.want = self.wants.get(&self.cams[i].name).copied();
+            let name = self.cams[i].name.clone();
+            self.remember_choice(&name);
             self.connect();
         }
         self.overlay = Overlay::None;
     }
 
+    /// Keep the choice of camera for next time (best effort; the file belongs to the person).
+    fn remember_choice(&self, name: &str) {
+        if let Some(dir) = self.choice_file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+            crate::camera::own::give_saved(dir);
+        }
+        if std::fs::write(&self.choice_file, format!("{name}\n")).is_ok() {
+            crate::camera::own::give_saved(&self.choice_file);
+        }
+    }
+
+    /// Take the cameras the machine has now: keep the one in use when it is still there; when it is gone, fall back to the
+    /// built-in camera (else the first) and say so.
+    fn apply_cams(&mut self) {
+        let current = self.cams.get(self.cam).cloned();
+        self.cams = self.presence.cameras();
+        match current {
+            Some(c) => match self.cams.iter().position(|n| n.node == c.node && n.name == c.name) {
+                Some(i) => self.cam = i,
+                None => {
+                    self.cam = preferred(&self.cams, "");
+                    self.want = None;
+                    if self.cams.is_empty() {
+                        self.conn = Conn::None;
+                        self.modes.clear();
+                        self.say(format!("{} was disconnected. No camera is connected.", c.name), false);
+                    } else {
+                        let now = self.cams[self.cam].name.clone();
+                        self.connect();
+                        self.say(format!("{} was disconnected; using {now}.", c.name), false);
+                    }
+                }
+            },
+            None => {
+                let saved = load_choice(&self.choice_file);
+                self.cam = preferred(&self.cams, &saved);
+                self.want = self.cams.get(self.cam).and_then(|c| self.wants.get(&c.name).copied());
+                if !self.cams.is_empty() {
+                    self.connect();
+                }
+            }
+        }
+    }
+
+    /// The camera dialog's rows: the name, marked when it is the one in use or the built-in one.
+    pub fn camera_rows(&self) -> Vec<String> {
+        self.cams
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mut tags = Vec::new();
+                if c.builtin {
+                    tags.push("built-in");
+                }
+                if i == self.cam {
+                    tags.push("in use");
+                }
+                if tags.is_empty() { c.name.clone() } else { format!("{}  ({})", c.name, tags.join(", ")) }
+            })
+            .collect()
+    }
+
+    /// Look for cameras again now (the dialog does this when it opens and on its Refresh button).
+    fn refresh_cameras(&mut self) {
+        self.presence.scan();
+        self.apply_cams();
+    }
+
     /// The picture sizes offered for the format in use (MJPEG first), largest last.
     pub fn size_choices(&self) -> Vec<Mode> {
+        // one entry per size: MJPEG for the bigger sizes (a USB camera sends more than a few frames a second only as MJPEG),
+        // else the format in use
         let pix = self.live_mode().map(|m| m.pix);
-        let mut v: Vec<Mode> = self.modes.iter().copied().filter(|m| pix.is_none_or(|p| m.pix == p)).collect();
-        v.sort_by_key(|m| m.width * m.height);
+        let mut v: Vec<Mode> = Vec::new();
+        for m in &self.modes {
+            let same = |o: &Mode| o.width == m.width && o.height == m.height;
+            let mj = self.modes.iter().find(|o| same(o) && o.pix == Pix::Mjpeg).copied();
+            let pick = match mj {
+                Some(j) if m.width > 640 || pix.is_none_or(|p| p == Pix::Mjpeg) => j,
+                _ => *self.modes.iter().find(|o| same(o) && Some(o.pix) == pix).unwrap_or(m),
+            };
+            if !v.contains(&pick) {
+                v.push(pick);
+            }
+        }
+        v.sort_by_key(|m| (m.width * m.height, m.pix != Pix::Mjpeg));
         v
     }
 
@@ -571,6 +678,9 @@ impl CameraApp {
                     return self.say("Stop the recording first.", false);
                 }
                 self.want = Some(m);
+                if let Some(c) = self.cams.get(self.cam) {
+                    self.wants.insert(c.name.clone(), m);
+                }
                 self.connect();
             }
         }
@@ -608,25 +718,14 @@ impl CameraApp {
             }
             self.conn = Conn::Failed(e);
             self.countdown = None;
+            // look at once whether the camera was pulled out, so the built-in one can take over
+            self.last_scan = self.ticks.saturating_sub(60);
         }
         // cameras plugged in or pulled out
         if self.ticks - self.last_scan >= 60 {
             self.last_scan = self.ticks;
             if self.presence.scan() {
-                let current = self.cams.get(self.cam).map(|c| c.node.clone());
-                self.cams = self.presence.cameras();
-                match current.and_then(|n| self.cams.iter().position(|c| c.node == n)) {
-                    Some(i) => self.cam = i,
-                    None => {
-                        self.cam = 0;
-                        self.want = None;
-                        if self.cams.is_empty() {
-                            self.conn = Conn::None;
-                        } else {
-                            self.connect();
-                        }
-                    }
-                }
+                self.apply_cams();
             } else if matches!(self.conn, Conn::None) && !self.cams.is_empty() {
                 self.connect();
             }
@@ -790,10 +889,10 @@ impl CameraApp {
         if y + row_h <= bottom {
             label(g, y, "Camera");
             let name = self.cams.get(self.cam).map(|c| c.name.clone()).unwrap_or_else(|| "none".into());
-            let bw = if self.cams.len() > 1 { g.text_width(13.0 * s, "Change", Face::Bold) + 13.0 * s * 1.7 + 6.0 * s } else { 0.0 };
+            let bw = if !self.cams.is_empty() { g.text_width(13.0 * s, "Change", Face::Bold) + 13.0 * s * 1.7 + 6.0 * s } else { 0.0 };
             let n = g.fit(13.0 * s, &name, Face::Bold, (x + w - value_x - bw).max(10.0));
             g.text(value_x, y + 7.0 * s, 13.0 * s, TEXT, &n, Face::Bold);
-            if self.cams.len() > 1 {
+            if !self.cams.is_empty() {
                 Self::small_button(g, x + w - bw + 6.0 * s, y, s, "Change", Event::Key(Key::Char('c')));
             }
             y += row_h;
@@ -901,17 +1000,17 @@ impl CameraApp {
         match &self.overlay {
             Overlay::None => {}
             Overlay::Cameras | Overlay::Sizes => {
-                let items: Vec<String> = if matches!(self.overlay, Overlay::Cameras) {
-                    self.cams.iter().map(|c| format!("{}  ({})", c.name, c.node)).collect()
-                } else {
-                    self.size_choices().iter().map(|m| m.label()).collect()
-                };
-                let current = if matches!(self.overlay, Overlay::Cameras) { Some(self.cam) } else { self.live_mode().and_then(|m| self.size_choices().iter().position(|c| *c == m)) };
-                let title = if matches!(self.overlay, Overlay::Cameras) { "Choose a camera" } else { "Picture size" };
+                let cams = matches!(self.overlay, Overlay::Cameras);
+                let items: Vec<String> = if cams { self.camera_rows() } else { self.size_choices().iter().map(|m| m.label()).collect() };
+                let current = if cams { Some(self.cam) } else { self.live_mode().and_then(|m| self.size_choices().iter().position(|c| *c == m)) };
+                let title = if cams { "Choose a camera" } else { "Picture size" };
                 let rh = 36.0 * s;
-                let p = fx::modal(g, area, s, 420.0 * s, 80.0 * s + rh * items.len().max(1) as f32, ACCENT, false);
-                let mut y = p.y + fx::modal_title(g, p, s, title, ACCENT);
-                if items.is_empty() {
+                // the camera dialog: rows, a line when there is no other camera, and a Refresh button
+                let note = (cams && self.cams.len() <= 1).then(|| if self.cams.is_empty() { "No camera found. Plug in a USB camera." } else { "No other camera found. Plug one in; it appears here by itself." });
+                let extra = if cams { 16.0 * s + if note.is_some() { 30.0 * s } else { 0.0 } + 44.0 * s } else { 0.0 };
+                let p = fx::modal(g, area, s, 420.0 * s, 80.0 * s + rh * items.len().max(1) as f32 + extra, ACCENT, false);
+                let mut y = fx::modal_title(g, p, s, title, ACCENT);
+                if items.is_empty() && !cams {
                     g.text(p.x + 20.0 * s, y + 8.0 * s, 14.0 * s, MUTED, "Nothing to choose from yet.", Face::Sans);
                 }
                 for (i, it) in items.iter().enumerate() {
@@ -926,11 +1025,19 @@ impl CameraApp {
                     g.hit(row, Event::Tab(PICK_BASE + i), it);
                     y += rh;
                 }
+                if cams {
+                    if let Some(n) = note {
+                        let t = g.fit(13.0 * s, n, Face::Sans, p.w - 40.0 * s);
+                        g.text(p.x + 20.0 * s, y + 6.0 * s, 13.0 * s, MUTED, &t, Face::Sans);
+                        y += 30.0 * s;
+                    }
+                    g.button(p.x + 20.0 * s, y + 8.0 * s, 13.0 * s, "Refresh", fx::CYAN, Event::Key(Key::Char('r')));
+                }
             }
             Overlay::Viewer(i, pm) => {
                 let Some(t) = self.gallery.get(*i) else { return };
                 let p = fx::modal(g, area, s, area.w - 40.0 * s, area.h - 20.0 * s, ACCENT, false);
-                let ty = p.y + fx::modal_title(g, p, s, &name_of(&t.path), ACCENT);
+                let ty = fx::modal_title(g, p, s, &name_of(&t.path), ACCENT);
                 let box_ = R::new(p.x + 16.0 * s, ty, p.w - 32.0 * s, p.y + p.h - ty - 44.0 * s);
                 if let Some(pm) = pm.as_ref().or(t.pm.as_ref()) {
                     let k = (box_.w / pm.width() as f32).min(box_.h / pm.height() as f32);
@@ -945,7 +1052,7 @@ impl CameraApp {
             Overlay::PassportResult => {
                 let Some(pp) = &self.passport_photo else { return };
                 let p = fx::modal(g, area, s, 620.0 * s, 420.0 * s, ACCENT, false);
-                let ty = p.y + fx::modal_title(g, p, s, "Passport photo", ACCENT);
+                let ty = fx::modal_title(g, p, s, "Passport photo", ACCENT);
                 let ph = (p.y + p.h - ty - 70.0 * s).max(40.0);
                 if let Some(pm) = &pp.pm {
                     let k = ph / pm.height() as f32;
@@ -977,7 +1084,7 @@ impl CameraApp {
             Overlay::Countries(q, sel) => {
                 let found = specs::search(q);
                 let p = fx::modal(g, area, s, 620.0 * s, 560.0 * s, ACCENT, false);
-                let mut y = p.y + fx::modal_title(g, p, s, "Passport or visa photo: country", ACCENT);
+                let mut y = fx::modal_title(g, p, s, "Passport or visa photo: country", ACCENT);
                 let shown = if q.is_empty() { "type a country (india, usa visa, schengen…)".to_string() } else { format!("search: {q}") };
                 g.text(p.x + 20.0 * s, y, 14.0 * s, if q.is_empty() { DIM } else { ACCENT }, &shown, Face::Sans);
                 y += 26.0 * s;
@@ -1084,6 +1191,7 @@ impl CameraApp {
                 self.export_sheet(Paper::A4, cx);
             }
             (Overlay::PassportResult, Key::Char('r')) => self.overlay = Overlay::None,
+            (Overlay::Cameras, Key::Char('r')) => self.refresh_cameras(),
             (Overlay::Cameras | Overlay::Sizes, Key::Char(c)) if c.is_ascii_digit() && *c != '0' => {
                 let i = (*c as u8 - b'1') as usize;
                 if i < n {
@@ -1202,7 +1310,8 @@ impl App for CameraApp {
             Event::Tab(n) if *n >= PICK_BASE + 500 && *n <= PICK_BASE + 510 => self.timer = (*n - PICK_BASE - 500) as u8,
             Event::Key(Key::Char('m')) => self.mirror = !self.mirror,
             Event::Key(Key::Char('c')) => {
-                if self.cams.len() > 1 {
+                if self.cams.len() > 1 || (self.cams.len() == 1 && !matches!(self.conn, Conn::Failed(_))) {
+                    self.refresh_cameras();
                     self.overlay = Overlay::Cameras;
                 } else if !self.cams.is_empty() {
                     self.want = None;

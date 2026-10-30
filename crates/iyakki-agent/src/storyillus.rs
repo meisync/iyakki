@@ -554,6 +554,7 @@ impl Resolved {
         format!("{} on {}{}: {}x{}, {}{}", self.model, self.provider, if self.remote { " (another computer)" } else { "" }, self.width, self.height, self.steps.map_or("steps not stated".to_string(), |s| format!("{s} steps")), if self.why.is_empty() { String::new() } else { format!(" ({})", self.why) })
     }
 
+    #[cfg(test)]
     fn of(c: &Cand, why: &str) -> Resolved {
         Self::with(c, why, Quality::Selected, Look::Storybook)
     }

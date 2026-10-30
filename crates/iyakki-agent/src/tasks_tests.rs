@@ -1138,3 +1138,216 @@ fn each_task_has_its_own_live_approval_mode_and_leaving_autopilot_pauses_only_th
     assert_eq!((status(&m, &a), status(&m, &b)), (Status::Paused, Status::Paused), "Auto-approve safe is not Autopilot either: beta paused after its step");
     assert!(au.lock().unwrap().iter().any(|l| l.starts_with(&format!("task.mode {b}: approvals mode changed to Auto-approve safe during run "))));
 }
+
+// ------------------------------------------------------------------------------------------------ fan-out, memory cap, lead summary
+
+mod fanout {
+    use super::*;
+    use crate::tasks::{memory_cap, split_plan, summary_text, PlanStep, Report};
+
+    const GB: u64 = 1 << 30;
+
+    fn step(title: &str, files: &[&str], deps: &[usize]) -> PlanStep {
+        PlanStep { title: title.into(), goal: format!("do {title}"), files: files.iter().map(|s| s.to_string()).collect(), depends_on: deps.to_vec() }
+    }
+
+    #[test]
+    fn independent_steps_share_the_first_wave_and_overlapping_or_dependent_ones_wait() {
+        let s = split_plan(&[step("a", &["src/a.rs"], &[]), step("b", &["src/b.rs"], &[]), step("c", &["src/"], &[]), step("d", &["docs/d.md"], &[0]), step("e", &["x.txt"], &[3])]).unwrap();
+        assert_eq!(s.waves, vec![vec![0, 1], vec![2, 3], vec![4]], "{s:?}");
+        assert!(s.notes.iter().any(|n| n.starts_with("c: shares src") && n.contains("step 1")), "{:?}", s.notes);
+        assert!(s.notes.iter().any(|n| n.starts_with("d: needs step 1")));
+        // a folder meets the files in it, but `src` does not meet `srcs`
+        assert_eq!(split_plan(&[step("a", &["src"], &[]), step("b", &["srcs/x"], &[])]).unwrap().waves, vec![vec![0, 1]]);
+    }
+
+    #[test]
+    fn a_bad_plan_is_refused_with_a_reason() {
+        assert!(split_plan(&[]).unwrap_err().contains("no steps"));
+        assert!(split_plan(&[step("a", &[], &[])]).unwrap_err().contains("scope"));
+        assert!(split_plan(&[step("a", &["x"], &[5])]).unwrap_err().contains("does not exist"));
+        assert!(split_plan(&[step("a", &["x"], &[0])]).unwrap_err().contains("itself"));
+        assert!(split_plan(&[step("a", &["x"], &[1]), step("b", &["y"], &[0])]).unwrap_err().contains("circle"));
+        let many: Vec<PlanStep> = (0..13).map(|i| step(&format!("s{i}"), &[&format!("f{i}")], &[])).collect();
+        assert!(split_plan(&many).unwrap_err().contains("at most"));
+    }
+
+    #[test]
+    fn the_cap_follows_free_memory_never_below_one_and_never_above_the_setting() {
+        let mb = 1500;
+        assert_eq!(memory_cap(4, 0, Some(64 * GB), mb), 4);
+        assert_eq!(memory_cap(9, 0, Some(64 * GB), mb), 6, "the hard cap");
+        // 2 GB reserve + 3 GB free for two more tasks of 1.5 GB
+        assert_eq!(memory_cap(6, 1, Some(5 * GB + GB / 10), mb), 3);
+        assert_eq!(memory_cap(6, 2, Some(GB), mb), 2, "running tasks are never stopped by the cap");
+        assert_eq!(memory_cap(6, 0, Some(GB), mb), 1, "one task may always run");
+        assert_eq!(memory_cap(6, 0, None, mb), 2, "unknown memory: careful");
+        assert_eq!(memory_cap(1, 0, None, mb), 1);
+    }
+
+    #[test]
+    fn low_memory_holds_queued_tasks_with_the_reason_and_they_start_when_memory_is_free() {
+        let root = repo("memcap");
+        let gate = Arc::new(AtomicBool::new(true));
+        let g2 = gate.clone();
+        let s: Script = Arc::new(move |spec, etx, _, _| {
+            while g2.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            std::fs::write(spec.tree.join("f.txt"), "x").unwrap();
+            finish_with(&etx, "done");
+        });
+        let m = manager(&root, s);
+        let free = Arc::new(Mutex::new(2 * (1u64 << 30) + (1u64 << 29)));
+        let f2 = free.clone();
+        m.set_memory_source(Some(Arc::new(move || Some(*f2.lock().unwrap()))));
+        m.set_concurrency(4);
+        assert_eq!(m.effective_concurrency(), 1, "2.5 GB free leaves room for one task");
+        let ids: Vec<String> = (0..3).map(|i| m.spawn(nt(&format!("t{i}"))).unwrap()).collect();
+        until("one running", || m.counts().0 == 1);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(m.counts(), (1, 0, 2), "the other two wait");
+        let q = m.get(&ids[1]).unwrap();
+        assert!(q.last.starts_with("waiting for memory") && q.last.contains("1500 MB"), "{}", q.last);
+        // memory frees up: the nudge of the UI starts them (at most every 5 s, so call pump as the nudge does)
+        *free.lock().unwrap() = 64u64 << 30;
+        m.pump();
+        until("three running", || m.counts().0 == 3);
+        gate.store(false, Ordering::SeqCst);
+        for id in &ids {
+            done(&m, id);
+        }
+        // the setting is kept for the workspace
+        m.set_task_memory_mb(900);
+        let m2 = Manager::open(&root, &root.join("FEATURES.md"));
+        assert_eq!((m2.concurrency(), m2.task_memory_mb()), (4, 900));
+    }
+
+    #[test]
+    fn fan_out_starts_the_first_wave_in_separate_worktrees_and_the_next_after_the_merge() {
+        let root = repo("fanout");
+        let s: Script = Arc::new(|spec, etx, _, _| {
+            let name = if spec.task.title == "a" { "a.rs" } else if spec.task.title == "b" { "b.rs" } else { "c.rs" };
+            assert!(spec.prompt.contains("Your scope: change only"), "{}", spec.prompt);
+            std::fs::write(spec.tree.join(name), "x\n").unwrap();
+            finish_with(&etx, &format!("wrote {name}"));
+        });
+        let m = manager(&root, s);
+        let (split, ids) = m.fan_out(vec![step("a", &["a.rs"], &[]), step("b", &["b.rs"], &[]), step("c", &["c.rs"], &[0, 1])], "builtin", "").unwrap();
+        assert_eq!((split.waves.len(), ids.len()), (2, 2));
+        let (t0, t1) = (m.get(&ids[0]).unwrap(), m.get(&ids[1]).unwrap());
+        assert_ne!(t0.tree, t1.tree);
+        assert!(t0.tree.starts_with(root.join(".iyakki/tasks")) && t0.branch != t1.branch);
+        for id in &ids {
+            done(&m, id);
+        }
+        assert_eq!(m.list().len(), 2, "wave 2 waits for the merge");
+        assert_eq!(m.plan().unwrap().waiting(), 1);
+        assert!(m.fan_out(vec![step("z", &["z"], &[])], "builtin", "").unwrap_err().contains("already running"));
+        m.merge(&ids[0]).unwrap();
+        assert_eq!(m.list().len(), 2, "one task of the wave is still unmerged");
+        m.merge(&ids[1]).unwrap();
+        until("wave 2", || m.list().len() == 3);
+        let c = m.list().into_iter().find(|t| t.title == "c").unwrap();
+        assert!(c.tree.join("a.rs").exists() && c.tree.join("b.rs").exists(), "wave 2 starts from the merged result");
+        done(&m, &c.id);
+        assert!(m.plan().is_none(), "no waves are left");
+        assert!(!root.join(".iyakki/tasks/plan.json").exists());
+    }
+
+    #[test]
+    fn a_discarded_task_stops_the_plan_instead_of_starting_work_that_needs_it() {
+        let root = repo("fanout-stop");
+        let m = manager(&root, writer("a.rs", "x\n"));
+        let (_, ids) = m.fan_out(vec![step("a", &["a.rs"], &[]), step("b", &["b.rs"], &[0])], "builtin", "").unwrap();
+        done(&m, &ids[0]);
+        m.discard(&ids[0]).unwrap();
+        m.pump();
+        assert!(m.plan().is_none());
+        assert_eq!(m.list().len(), 1, "step b never started");
+    }
+
+    #[test]
+    fn the_lead_summary_says_what_each_task_did_the_conflicts_and_the_merge_order() {
+        let root = repo("summary");
+        let s: Script = Arc::new(|spec, etx, _, _| {
+            // t "x" and "y" both change a.txt (an overlap), "z" adds its own file
+            match spec.task.title.as_str() {
+                "x" => std::fs::write(spec.tree.join("a.txt"), "one\nX\nthree\n").unwrap(),
+                "y" => std::fs::write(spec.tree.join("a.txt"), "one\nY\nthree\n").unwrap(),
+                _ => std::fs::write(spec.tree.join("z.txt"), "z\n").unwrap(),
+            }
+            finish_with(&etx, &format!("{} is done\nsecond line", spec.task.title));
+        });
+        let m = manager(&root, s);
+        assert!(m.lead_summary().is_none(), "nothing to report yet");
+        let ids: Vec<String> = ["x", "y", "z"].iter().map(|t| m.spawn(nt(t)).unwrap()).collect();
+        for id in &ids {
+            done(&m, id);
+        }
+        until("the automatic summary of all three", || m.last_summary().starts_with("3 task(s)"));
+        let text = m.last_summary();
+        assert!(text.starts_with("3 task(s) finished: 3 done."), "{text}");
+        assert!(text.contains(&format!("{} \"z\" done: changed 1 file(s): z.txt", ids[2])) && text.contains("It reported: z is done"), "{text}");
+        assert!(text.contains(&format!("Overlap: a.txt was changed by {} and {}", ids[0], ids[1])), "{text}");
+        assert!(text.contains(&format!("To merge, in this order: {}, {}", ids[2], ids[0])), "z (no overlap) first: {text}");
+        // after x is merged y conflicts with the main branch
+        m.merge(&ids[0]).unwrap();
+        let again = m.lead_summary().unwrap();
+        assert!(again.contains(&format!("Conflict: {} \"y\" conflicts with the main branch in a.txt", ids[1])) && again.contains("(rebase first)"), "{again}");
+    }
+
+    #[test]
+    fn the_summary_text_covers_failures_blocked_files_nothing_to_merge_and_waiting_steps() {
+        let r = |id: &str, st: Status, files: &[&str]| Report { id: id.into(), title: id.to_uppercase(), status: st, files: files.iter().map(|s| s.to_string()).collect(), conflicts: vec![], blocking: vec![], tests: String::new(), said: String::new(), error: String::new() };
+        let mut bad = r("t2", Status::Failed, &[]);
+        bad.error = "over the token budget".into();
+        let mut blocked = r("t3", Status::Done, &["m.rs"]);
+        blocked.blocking = vec!["m.rs".into()];
+        blocked.tests = "tests passed".into();
+        let t = summary_text(&[r("t1", Status::Done, &[]), bad, blocked], 2);
+        assert!(t.starts_with("3 task(s) finished: 2 done, 1 failed."), "{t}");
+        assert!(t.contains("t2 \"T2\" FAILED: over the token budget; changed nothing."), "{t}");
+        assert!(t.contains("t1 \"T1\" done: changed nothing; tests not run."), "{t}");
+        assert!(t.contains("Blocked: t3 touches m.rs") && t.contains("tests passed"), "{t}");
+        assert!(t.contains("To merge, in this order: t3") && t.contains("2 more plan step(s)"), "{t}");
+        assert!(summary_text(&[r("t1", Status::Failed, &[])], 0).contains("Nothing to merge."));
+    }
+
+    #[test]
+    fn the_lead_tools_plan_and_status_work_and_a_bad_plan_is_refused_before_the_person_is_asked() {
+        let root = repo("plantool");
+        let m = manager(&root, writer("p.rs", "x\n"));
+        struct Nop;
+        impl Tools for Nop {
+            fn defs(&self) -> Vec<crate::agent::ToolDef> {
+                vec![]
+            }
+            fn call(&self, n: &str, _: &serde_json::Value) -> Result<String, String> {
+                Ok(n.into())
+            }
+            fn describe(&self, n: &str, _: &serde_json::Value) -> String {
+                n.into()
+            }
+        }
+        let tt = TaskTools::new(Arc::new(Nop), m.clone(), "builtin", "");
+        let plan = tt.defs().into_iter().find(|d| d.spec.name == "task_plan").unwrap();
+        assert_eq!(plan.risk, crate::agent::Risk::Ask);
+        assert!(!tt.approved_always("task_plan") && !tt.pre_approved("task_plan"));
+        let args = json!({"steps": [{"title": "a", "goal": "do a", "files": ["a.rs"]}, {"title": "b", "goal": "do b", "files": ["../etc/passwd", "/abs"]}, {"title": "c", "goal": "do c", "files": ["c.rs"], "depends_on": [1]}]});
+        assert!(tt.refusal("task_plan", &args).unwrap().contains("scope"), "unsafe paths are dropped, so b has none");
+        let ok = json!({"steps": [{"title": "a", "goal": "do a", "files": ["a.rs"]}, {"title": "b", "goal": "do b", "files": ["b.rs"]}, {"title": "c", "goal": "do c", "files": ["c.rs"], "depends_on": [1, 2]}]});
+        assert!(tt.refusal("task_plan", &ok).is_none());
+        let pv = tt.preview("task_plan", &ok).unwrap();
+        assert!(pv.contains("Now, in parallel: a; b") && pv.contains("After the merge of wave 1: c"), "{pv}");
+        let out = tt.call("task_plan", &ok).unwrap();
+        assert!(out.contains("Started 2 task(s)"), "{out}");
+        assert!(tt.refusal("task_plan", &ok).unwrap().contains("already running"));
+        let ids: Vec<String> = m.list().iter().map(|t| t.id.clone()).collect();
+        for id in &ids {
+            done(&m, id);
+        }
+        let st = tt.call("task_status", &json!({})).unwrap();
+        assert!(st.contains("task(s) finished") && st.contains("To merge, in this order"), "{st}");
+    }
+}

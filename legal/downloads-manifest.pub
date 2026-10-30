@@ -1,0 +1,5 @@
+# The public key (64 hex characters) that signs fetched downloads manifests. Built into the program.
+# `unset` would mean no key. The key below was made on 2026-10-28; the private half is held by the owner, outside the repository.
+# Never put a private key here.
+
+5eb1dfe1d8eeb40b2b1aace60ce6272700b391c8a942ab13c47f12c506c2972d

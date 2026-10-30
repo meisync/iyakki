@@ -81,7 +81,7 @@ fn m_moves_the_selected_tile_through_a_list_and_undo_puts_it_back_once() {
     assert!(ids.contains(&"to:work".to_string()) && ids.contains(&"new".to_string()), "{ids:?}");
     pick(&mut sh, "to:work");
     assert!(sh.lay.menu.is_none());
-    assert!(sh.layout_notice().is_some_and(|n| n.contains("Moved CHAT to Work")), "{:?}", sh.layout_notice());
+    assert!(sh.layout_notice().is_some_and(|n| n.contains("Moved CHAT to Build")), "{:?}", sh.layout_notice());
     assert!(!names(&sh).contains(&"CHAT".to_string()));
     assert!(in_group(&mut sh, "work").contains(&"CHAT".to_string()));
     assert_eq!(saved(&sh, "alice").placed.get("sys:chat").map(String::as_str), Some("work"), "kept for this person");
@@ -136,7 +136,7 @@ fn right_click_menu_moves_picks_up_and_resets_and_a_chip_takes_a_dropped_tile() 
     pick(&mut sh, "pickup");
     assert!(sh.lay.carry.is_some());
     sh.render(&mut g);
-    click(&mut sh, &mut g, "group Work");
+    click(&mut sh, &mut g, "group Build");
     assert!(sh.lay.carry.is_none());
     assert!(in_group(&mut sh, "work").contains(&second));
     // Reset layout puts everything back
@@ -191,7 +191,7 @@ fn new_groups_are_named_with_checks_and_can_be_made_from_the_plus_chip_or_the_mo
     key(&mut sh, Key::Enter);
     assert!(sh.lay.card.is_none(), "16 characters are fine");
     assert_eq!(sh.current_group().name, "1234567890123456");
-    assert_eq!(sh.groups().len(), 5);
+    assert_eq!(sh.groups().len(), 6);
     // empty custom groups show, with a hint instead of tiles
     assert_eq!(sh.group_items().len(), 1);
     assert!(matches!(sh.group_items()[0], LItem::Empty));
@@ -316,15 +316,15 @@ fn an_app_that_names_a_group_goes_there_or_the_person_is_asked_once_and_their_mo
     with_apps(&mut sh, &mut g, vec![entry("calc", "Calc", "system"), entry("plain", "Plain", ""), entry("odd", "Odd", "Web & MEDIA")]);
     assert!(sh.lay.card.is_none());
     assert!(in_group(&mut sh, "system").contains(&"Calc".to_string()));
-    assert!(in_group(&mut sh, "work").contains(&"Plain".to_string()));
+    assert!(in_group(&mut sh, "apps").contains(&"Plain".to_string()));
     assert!(in_group(&mut sh, "web-media").contains(&"Odd".to_string()));
     // a group that does not exist: the card, not silently
     with_apps(&mut sh, &mut g, vec![entry("chess", "Chess", "Games"), entry("go", "Go", "games")]);
     assert!(matches!(&sh.lay.card, Some(Card::Ask { asked, .. }) if asked == "Games"));
     assert!(sh.layout.groups.is_empty(), "nothing is created before the person says so");
-    assert!(in_group(&mut sh, "work").contains(&"Chess".to_string()), "meanwhile it is in Work");
+    assert!(in_group(&mut sh, "apps").contains(&"Chess".to_string()), "meanwhile it is in Apps");
     sh.render(&mut g);
-    assert!(sh.hits().iter().any(|h| h.label == "Create") && sh.hits().iter().any(|h| h.label == "Put it in Work"));
+    assert!(sh.hits().iter().any(|h| h.label == "Create") && sh.hits().iter().any(|h| h.label == "Put it in Apps"));
     click(&mut sh, &mut g, "Create");
     assert!(sh.lay.card.is_none());
     assert_eq!(sh.layout.groups.len(), 1);
@@ -336,8 +336,8 @@ fn an_app_that_names_a_group_goes_there_or_the_person_is_asked_once_and_their_mo
     // the other answer, remembered per app
     with_apps(&mut sh, &mut g, vec![entry("tune", "Tune", "Music")]);
     assert!(matches!(&sh.lay.card, Some(Card::Ask { .. })));
-    click(&mut sh, &mut g, "Put it in Work");
-    assert!(sh.layout.groups.len() == 1 && in_group(&mut sh, "work").contains(&"Tune".to_string()));
+    click(&mut sh, &mut g, "Put it in Apps");
+    assert!(sh.layout.groups.len() == 1 && in_group(&mut sh, "apps").contains(&"Tune".to_string()));
     sh.render(&mut g);
     assert!(sh.lay.card.is_none(), "not asked again");
     sh.refresh_custom();
@@ -346,7 +346,7 @@ fn an_app_that_names_a_group_goes_there_or_the_person_is_asked_once_and_their_mo
     with_apps(&mut sh, &mut g, vec![entry("zed", "Zed", "Edits")]);
     key(&mut sh, Key::Esc);
     assert!(sh.layout.groups.len() == 1 && sh.lay.card.is_none());
-    assert_eq!(sh.layout.app_groups["zed"].target, "work");
+    assert_eq!(sh.layout.app_groups["zed"].target, "apps");
     // the person's move wins over a changed `group` in an update
     with_apps(&mut sh, &mut g, vec![entry("chess", "Chess", "Games")]);
     let _ = in_group(&mut sh, &games);
@@ -357,15 +357,15 @@ fn an_app_that_names_a_group_goes_there_or_the_person_is_asked_once_and_their_mo
     with_apps(&mut sh, &mut g, vec![entry("chess", "Chess", "Brand new group")]);
     assert!(sh.lay.card.is_none(), "and a moved app is not asked about");
     assert!(in_group(&mut sh, "system").contains(&"Chess".to_string()));
-    // a name that cannot be a group falls back to Work, with the reason
+    // a name that cannot be a group falls back to Apps, with the reason
     with_apps(&mut sh, &mut g, vec![entry("long", "Long", "A group name that is far too long")]);
     click(&mut sh, &mut g, "Create");
-    assert!(in_group(&mut sh, "work").contains(&"Long".to_string()));
+    assert!(in_group(&mut sh, "apps").contains(&"Long".to_string()));
     assert!(sh.toast_text().is_some_and(|t| t.contains("16")), "{:?}", sh.toast_text());
 }
 
 #[test]
-fn deleting_the_group_an_app_asked_for_sends_it_to_work_without_asking_again() {
+fn deleting_the_group_an_app_asked_for_sends_it_to_apps_without_asking_again() {
     let (mut sh, mut g) = alice();
     with_apps(&mut sh, &mut g, vec![entry("chess", "Chess", "Games")]);
     click(&mut sh, &mut g, "Create");
@@ -377,7 +377,7 @@ fn deleting_the_group_an_app_asked_for_sends_it_to_work_without_asking_again() {
     click(&mut sh, &mut g, "Delete group");
     sh.render(&mut g);
     assert!(sh.lay.card.is_none());
-    assert!(in_group(&mut sh, "work").contains(&"Chess".to_string()));
+    assert!(in_group(&mut sh, "apps").contains(&"Chess".to_string()));
 }
 
 #[test]
@@ -409,12 +409,12 @@ fn tiles_a_person_cannot_see_are_never_shown_after_a_move_and_moving_changes_no_
     key(&mut sh, Key::Char('o'));
     login(&mut sh, "gus", "guestpass1");
     sh.render(&mut g);
-    let _ = in_group(&mut sh, "home");
+    let _ = in_group(&mut sh, "work");
     let i = names(&sh).iter().position(|n| n == "CLI").unwrap();
     sh.sel = i;
     key(&mut sh, Key::Char('m'));
-    pick(&mut sh, "to:work");
-    let _ = in_group(&mut sh, "work");
+    pick(&mut sh, "to:home");
+    let _ = in_group(&mut sh, "home");
     let i = names(&sh).iter().position(|n| n == "CLI").unwrap();
     sh.sel = i;
     key(&mut sh, Key::Enter);
@@ -495,17 +495,167 @@ fn the_help_overlay_and_the_hint_line_mention_moving_tiles() {
     let (_, lines) = sh.help_lines();
     let all = lines.join("\n");
     assert!(all.contains("m · move the selected tile") && all.contains("+ chip") && all.contains("u · undo"), "{all}");
-    assert!(all.contains("Home, Web & Media, Work, System"));
+    assert!(all.contains("Ask & Create, Build, Media, Data, Devices & System, Apps"));
 }
 
 #[test]
-fn the_default_layout_draws_the_four_chips_where_chip_rects_puts_them() {
+fn the_default_layout_draws_the_five_chips_where_chip_rects_puts_them() {
     let (sh, g) = alice();
     let labels: Vec<String> = sh.groups().iter().map(|g| g.label().to_string()).collect();
-    assert_eq!(labels, vec!["Home", "Web & Media", "Work", "System"]);
+    assert_eq!(labels, vec!["Ask & Create", "Build", "Media", "Data", "Devices & System"], "Apps shows with the first installed tile");
     let l: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
     let want = launcher::chip_rects(scale_for(g.width(), g.height()), &l);
     let got: Vec<R> = sh.chip_row().chips.iter().map(|(_, r)| *r).collect();
     assert_eq!(got, want, "the Tab order and the default look are unchanged by the + chip");
     assert!(sh.layout.is_default());
+}
+
+// ---------------------------------------------------------------- default groups, Apps, reset, persistence, sizes
+
+#[test]
+fn the_default_grouping_covers_every_tile_exactly_once_and_apps_is_empty_until_something_is_installed() {
+    let (mut sh, _) = shell_with_users("lay-default");
+    let mut g = Gfx::new(1280, 720);
+    login(&mut sh, "root", "rootpass12");
+    sh.render(&mut g);
+    assert!(sh.layout.is_default());
+    let mut seen: Vec<String> = Vec::new();
+    for gr in sh.groups() {
+        seen.extend(in_group(&mut sh, &gr.id));
+    }
+    let mut want: Vec<String> = TILES.iter().filter(|t| t.group.is_some()).map(|t| t.label.to_string()).collect();
+    seen.sort();
+    want.sort();
+    assert_eq!(seen, want, "every tile in exactly one group");
+    assert!(!seen.contains(&"SETTINGS".to_string()));
+    assert_eq!(sh.groups().iter().map(|x| x.label().to_string()).collect::<Vec<_>>(), ["Ask & Create", "Build", "Media", "Data", "Devices & System"]);
+    assert_eq!(in_group(&mut sh, "home"), ["CHAT", "RAG", "SKILLS", "CALENDAR", "TALES", "VOICE", "LAB", "LEARN"]);
+    for l in ["AI IDE", "GIT", "FLOWS", "K8S", "EDIT"] {
+        assert!(in_group(&mut sh, "work").contains(&l.to_string()), "{l} is in Build");
+    }
+    // the same for every role: each tile they have is in one group
+    for who in [("alice", "alicepass1"), ("gus", "guestpass1")] {
+        key(&mut sh, Key::Char('o'));
+        login(&mut sh, who.0, who.1);
+        sh.render(&mut g);
+        let mut seen: Vec<String> = Vec::new();
+        for gr in sh.groups() {
+            seen.extend(in_group(&mut sh, &gr.id));
+        }
+        let mut want: Vec<String> = sh.visible_tiles().iter().map(|t| t.label.to_string()).collect();
+        seen.sort();
+        want.sort();
+        assert_eq!(seen, want, "{who:?}");
+    }
+}
+
+#[test]
+fn a_tile_installed_later_lands_in_apps_without_a_restart_and_a_named_group_wins() {
+    let (mut sh, mut g) = alice();
+    assert!(!sh.groups().iter().any(|x| x.id == "apps"), "no Apps tab yet");
+    with_apps(&mut sh, &mut g, vec![entry("calc", "Calc", "")]);
+    let apps = sh.groups().into_iter().find(|x| x.id == "apps").expect("the Apps group appears by itself");
+    assert_eq!(apps.label(), "Apps");
+    assert_eq!(in_group(&mut sh, "apps"), ["Calc"]);
+    assert!(sh.lay.card.is_none(), "no question: Apps is the default");
+    // a second tile arrives while the shell runs
+    with_apps(&mut sh, &mut g, vec![entry("calc", "Calc", ""), entry("clock", "Clock", "")]);
+    assert_eq!(in_group(&mut sh, "apps"), ["Calc", "Clock"]);
+    // an app that names a built-in group goes there instead
+    with_apps(&mut sh, &mut g, vec![entry("calc", "Calc", ""), entry("tbl", "Tbl", "Data")]);
+    assert!(in_group(&mut sh, "data").contains(&"Tbl".to_string()));
+    assert_eq!(in_group(&mut sh, "apps"), ["Calc"]);
+    // removing the last one hides the tab again; the person can move a tile out of Apps and back
+    sh.set_group(Group::Home);
+    key(&mut sh, Key::Char('m'));
+    pick(&mut sh, "to:apps");
+    assert!(in_group(&mut sh, "apps").contains(&"CHAT".to_string()));
+    with_apps(&mut sh, &mut g, vec![]);
+    assert!(sh.groups().iter().any(|x| x.id == "apps"), "CHAT is still there");
+}
+
+#[test]
+fn the_arrangement_is_saved_per_person_and_survives_a_restart_and_reset_to_default_puts_the_tiles_back() {
+    let (mut sh, mut g) = alice();
+    click(&mut sh, &mut g, "new group");
+    typ(&mut sh, "Daily");
+    key(&mut sh, Key::Enter);
+    let daily = gid(&sh, "Daily");
+    sh.set_group(Group::Home);
+    key(&mut sh, Key::Char('m'));
+    pick(&mut sh, &format!("to:{daily}"));
+    // rename it
+    let _ = in_group(&mut sh, &daily);
+    key(&mut sh, Key::Char('g'));
+    pick(&mut sh, "rename");
+    for _ in 0..5 {
+        key(&mut sh, Key::Backspace);
+    }
+    typ(&mut sh, "Routine");
+    key(&mut sh, Key::Enter);
+    assert_eq!(gid(&sh, "Routine"), daily);
+    let on_disk = saved(&sh, "alice");
+    assert_eq!(on_disk.groups.len(), 1);
+    assert_eq!(on_disk.groups[0].label, "Routine");
+    assert_eq!(on_disk.placed.get("sys:chat"), Some(&daily));
+    // a restart: sign out and in again reads the file
+    key(&mut sh, Key::Char('o'));
+    login(&mut sh, "alice", "alicepass1");
+    sh.render(&mut g);
+    assert_eq!(in_group(&mut sh, &daily), ["CHAT"]);
+    assert_eq!(gid(&sh, "Routine"), daily);
+    // Reset to default layout: the tile goes home (the group stays), and the menu says so
+    let _ = in_group(&mut sh, &daily);
+    key(&mut sh, Key::Char('g'));
+    assert!(sh.lay.menu.as_ref().unwrap().1.items.iter().any(|i| i.id == "reset-all" && i.label == "Reset to default layout"));
+    pick(&mut sh, "reset-all");
+    assert!(saved(&sh, "alice").placed.is_empty());
+    assert!(in_group(&mut sh, "home").contains(&"CHAT".to_string()));
+    // delete the group: nothing disappears
+    let _ = in_group(&mut sh, &daily);
+    key(&mut sh, Key::Char('g'));
+    pick(&mut sh, "delete");
+    click(&mut sh, &mut g, "Delete group");
+    assert!(saved(&sh, "alice").groups.is_empty());
+    assert!(in_group(&mut sh, "home").contains(&"CHAT".to_string()));
+    // another person is untouched
+    assert!(saved(&sh, "root").is_default());
+}
+
+#[test]
+fn the_chips_and_tiles_fit_four_screen_sizes_with_six_built_in_groups_and_ones_of_the_persons_own() {
+    for (w, h) in [(1280u32, 720u32), (1024, 600), (800, 480), (480, 600)] {
+        let (mut sh, _) = shell_with_users(&format!("lay-size-{w}"));
+        login(&mut sh, "root", "rootpass12");
+        sh.resize_for_test(w, h);
+        let mut g = Gfx::new(w, h);
+        sh.custom = vec![entry("calc", "Calc", "")];
+        sh.custom_at = sh.tick.max(1);
+        sh.layout.create_group("Daily").unwrap();
+        sh.layout.create_group("Games").unwrap();
+        let s = scale_for(w, h);
+        for gr in sh.groups() {
+            sh.set_group(gr.clone());
+            sh.render(&mut g);
+            let row = sh.chip_row();
+            let mut chips: Vec<R> = row.chips.iter().map(|(_, r)| *r).collect();
+            chips.extend(row.more);
+            chips.push(row.plus);
+            for (i, a) in chips.iter().enumerate() {
+                assert!(a.x >= 0.0 && a.x + a.w <= w as f32, "{w}x{h} {}: chip {a:?}", gr.id);
+                assert!(chips[i + 1..].iter().all(|b| a.x + a.w <= b.x + 0.5), "{w}x{h}: chips overlap");
+            }
+            assert!(row.chips.iter().any(|(i, _)| sh.groups()[*i] == gr), "{w}x{h}: the shown group has a chip");
+            let n = sh.group_items().len();
+            let cap = launcher::per_page(w, h, s);
+            for p in 0..launcher::page_count(n, cap) {
+                let rs = launcher::page_rects(w, h, s, n, p);
+                for (i, a) in rs.iter().enumerate() {
+                    assert!(a.x >= 0.0 && a.x + a.w <= w as f32 && a.y + a.h <= h as f32, "{w}x{h} {}: tile {a:?}", gr.id);
+                    assert!(chips.iter().all(|c| c.y + c.h <= a.y), "{w}x{h}: a tile under the chips");
+                    assert!(rs[i + 1..].iter().all(|b| a.x + a.w <= b.x + 0.5 || b.x + b.w <= a.x + 0.5 || a.y + a.h <= b.y || b.y + b.h <= a.y), "{w}x{h}: tiles overlap");
+                }
+            }
+        }
+    }
 }

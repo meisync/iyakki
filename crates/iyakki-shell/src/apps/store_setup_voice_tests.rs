@@ -72,7 +72,7 @@ fn pressing_install_opens_the_review_with_both_licences_and_starts_nothing_until
     let c = a.setup.confirm.as_ref().expect("the review is open");
     assert_eq!(c.steps, [Item::Lemonade, Item::VoicePack]);
     let t = c.review.join("\n");
-    for need in ["MIT License", "Apache License", "espeak-ng (GPL-3.0-or-later)", "Not shipped with IYAKKI; downloaded at your click", "Kokoro reads English only", "about 75 MB", "about 330 MB"] {
+    for need in ["IYAKKI provides integration code only", "Lemonade (Apache-2.0)", "espeak-ng (GPL-3.0-or-later)", "Not shipped with IYAKKI; downloaded at your click", "Kokoro reads English only", "about 75 MB", "about 330 MB"] {
         assert!(t.contains(need), "{need}");
     }
     assert!(a.setup.popup.is_none(), "the popup makes room for the review");
@@ -90,7 +90,7 @@ fn pressing_install_opens_the_review_with_both_licences_and_starts_nothing_until
     assert_eq!(a.setup.confirm.as_ref().unwrap().scroll, 10);
     a.handle(&Event::Key(Key::End), &cx);
     let last = a.setup.confirm.as_ref().unwrap().scroll;
-    assert!(last > 100, "the Apache text makes it long: {last}");
+    assert!(last > 13, "the review (no licence texts any more: IYAKKI ships none for this item) is still longer than one screen: {last}");
     a.handle(&Event::Key(Key::PageDown), &cx);
     assert_eq!(a.setup.confirm.as_ref().unwrap().scroll, last, "never past the end");
     a.handle(&Event::Key(Key::Home), &cx);

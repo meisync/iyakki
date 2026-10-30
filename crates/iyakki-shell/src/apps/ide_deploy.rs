@@ -326,6 +326,12 @@ mod tests {
     use iyakki_agent::devcluster::{ClusterProfile, Source};
     use iyakki_agent::wsexec::FakeRunner;
 
+    /// The registry probe asks the fake runner (what curl used to say), never the machine's own 127.0.0.1:5000.
+    fn fake_probe(mut t: K8sTools, r: Arc<dyn iyakki_agent::wsexec::Runner>) -> K8sTools {
+        t.registry_probe = Some(crate::apps::ide_fakeprobe_tests::registry_probe(r));
+        t
+    }
+
     fn tools(tag: &str) -> (Arc<K8sTools>, Arc<FakeRunner>, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!("iyakki-deploy-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -333,7 +339,7 @@ mod tests {
         std::fs::write(root.join("app/Dockerfile"), "FROM scratch\n").unwrap();
         let r = Arc::new(FakeRunner::new(&["kubectl", "podman", "k3s"]));
         let p = ClusterProfile { name: "k3s".into(), kubeconfig: "/tmp/k.yaml".into(), context: "default".into(), server: "https://127.0.0.1:6443".into(), source: Source::K3s, exists: true, readable: true, tested: true, reachable: true, k3s: true, local: true, version: String::new(), can_i: String::new(), problem: String::new(), fix: String::new() };
-        (Arc::new(K8sTools::new(r.clone(), p, "shop-dev", "Shop", &root, Arc::new(|_, _| {}))), r, root)
+        (Arc::new(fake_probe(K8sTools::new(r.clone(), p, "shop-dev", "Shop", &root, Arc::new(|_, _| {})), r.clone())), r, root)
     }
 
     fn until(f: impl Fn() -> bool) {
@@ -368,7 +374,7 @@ mod tests {
         let (t, r, _root) = tools("names-cluster");
         answers(&r);
         let mut t = Arc::try_unwrap(t).ok().expect("the only owner");
-        let f = Flow::deploy(Arc::new(K8sTools::new(t.run.clone(), t.profile.clone(), "shop-dev", "Shop", &t.root, Arc::new(|_, _| {}))), Plan { image: "web".into(), dir: "app".into(), manifest: String::new(), port: 8080, approve_all: false });
+        let f = Flow::deploy(Arc::new(fake_probe(K8sTools::new(t.run.clone(), t.profile.clone(), "shop-dev", "Shop", &t.root, Arc::new(|_, _| {})), t.run.clone())), Plan { image: "web".into(), dir: "app".into(), manifest: String::new(), port: 8080, approve_all: false });
         until(|| f.asking() == Some(0));
         assert_eq!(f.title, "Deploy web to shop-dev on cluster \"k3s\"", "the resolved profile's name when the registry has one cluster");
         assert!(f.steps()[2].title.ends_with("to namespace shop-dev on cluster \"k3s\""), "{}", f.steps()[2].title);

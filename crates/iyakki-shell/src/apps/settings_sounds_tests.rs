@@ -20,7 +20,7 @@ fn key(a: &mut SettingsApp, cx: &AppCx, k: Key) {
 fn status(a: &SettingsApp) -> String {
     a.status().map(|s| s.0.clone()).unwrap_or_default()
 }
-fn goto(a: &mut SettingsApp, cx: &AppCx, t: Tab) {
+fn goto(a: &mut SettingsApp, _cx: &AppCx, t: Tab) {
     a.go_to(t);
 }
 fn settle(a: &mut SettingsApp, cx: &AppCx) {
@@ -130,6 +130,8 @@ fn only_administrators_change_them() {
 #[test]
 fn preview_plays_the_cue_through_the_play_command_and_says_so() {
     let cx = admin("sysnd-preview");
+    // the cue goes through the configured play command; the mixer (on by default) would take it instead
+    cx.services.update_sound(|s| s.mixer = false).unwrap();
     let out = temp_dir("sysnd-preview-out").join("played.wav");
     cx.services.settings.lock().unwrap().update(|s| s.voice.play_cmd = format!("sh -c 'cat > {}'", out.display())).unwrap();
     let mut a = SettingsApp::new(&cx);
@@ -199,4 +201,52 @@ fn a_cloud_machine_without_sound_does_not_list_the_page() {
     let c = iyakki_agent::cloudmode::cloud_mode(iyakki_agent::cloudmode::Setting::Auto, &iyakki_agent::cloudmode::Facts::bare());
     let a = SettingsApp::new(&cx).with_cloud(c);
     assert!(!a.tabs().contains(&Tab::SystemSounds) && !a.tabs().contains(&Tab::Sound));
+}
+
+/// Where each row's switch or card is drawn, by label.
+fn spots(g: &Gfx) -> Vec<(String, i32)> {
+    g.hits.iter().map(|h| (h.label.clone(), h.rect.y as i32)).collect()
+}
+
+#[test]
+fn a_click_on_a_row_near_the_bottom_leaves_the_list_where_it_is() {
+    let cx = admin("sysnd-click");
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::SystemSounds);
+    // a window that shows only some rows; a key scrolls the choice into view
+    let (w, h) = (800u32, 260u32);
+    for _ in 0..4 {
+        key(&mut a, &cx, Key::Down);
+        draw(&mut a, &cx, w, h);
+    }
+    let before = draw(&mut a, &cx, w, h);
+    let top = a.win[a.tab].top();
+    assert!(top > 0, "the window is small enough to scroll");
+    // click the last row that is drawn
+    let last = before.hits.iter().filter_map(|x| match x.ev { Event::Row(i) => Some(i), Event::Sub(i, _) => Some(i as usize), _ => None }).max().unwrap();
+    a.handle(&Event::Row(last), &cx);
+    assert_eq!(a.sel(), last);
+    let after = draw(&mut a, &cx, w, h);
+    assert_eq!(a.win[a.tab].top(), top, "a click does not scroll the list");
+    for (label, y) in spots(&before) {
+        assert!(spots(&after).contains(&(label.clone(), y)), "{label} moved after the click");
+    }
+}
+
+#[test]
+fn the_wheel_scrolls_the_rows_and_not_the_choice_and_a_key_comes_back_to_the_choice() {
+    let cx = admin("sysnd-wheel");
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::SystemSounds);
+    let (w, h) = (800u32, 260u32);
+    draw(&mut a, &cx, w, h);
+    assert_eq!(a.win[a.tab].top(), 0);
+    a.handle(&Event::Scroll(-1), &cx);
+    assert!(a.win[a.tab].top() > 0, "the wheel scrolled the rows");
+    assert_eq!(a.sel(), 0, "the choice stayed");
+    draw(&mut a, &cx, w, h);
+    key(&mut a, &cx, Key::Down);
+    draw(&mut a, &cx, w, h);
+    let t = a.win[a.tab].top();
+    assert!(t <= a.sel(), "the key showed the choice (top {t}, choice {})", a.sel());
 }

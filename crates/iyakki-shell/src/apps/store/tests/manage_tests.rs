@@ -234,7 +234,7 @@ fn updating_one_item_shows_the_new_permissions_applies_only_after_the_yes_and_ca
     assert!(a.life_of(&key_).unwrap().pinned.is_some());
     let g = draw(&mut a, &cx, 1280, 720);
     assert!(g.hits.iter().any(|h| h.label.starts_with("shout")) && !g.hits.iter().any(|h| h.label == "Update"), "a pinned item has no Update button");
-    let log = std::fs::read_to_string(std::env::temp_dir().join(format!("iyakki-shell-{}-mg-one", std::process::id())).join("audit.log")).unwrap_or_default();
+    let log = std::fs::read_to_string(iyakki_agent::testdir::find("iyakki-shell", "mg-one").join("audit.log")).unwrap_or_default();
     assert!(log.contains("store.update") && log.contains("store.rollback"), "{log}");
 }
 

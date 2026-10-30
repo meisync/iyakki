@@ -16,3 +16,26 @@ iyakki_tmp_clean() {
 }
 # percent of inodes used on a path ("" when unknown)
 inode_pct() { df -i "${1:-/tmp}" 2>/dev/null | tail -n1 | awk '{gsub(/%/, "", $5); print $5}' | tr -dc '0-9'; }
+
+# KI-060: tests must leave nothing behind. A test run gets its OWN folder inside TMPDIR (iyakki_run_tmp_begin), removed whole at the end
+# (iyakki_run_tmp_end); the entries "iyakki-*" of the system /tmp are counted before and after, and growth fails the step (a test that
+# ignores TMPDIR and writes to /tmp itself). Usage:  iyakki_run_tmp_begin; cargo test ...; iyakki_run_tmp_end   (the end returns 1 on growth)
+iyakki_count_sys_tmp() { find "${IYAKKI_SYS_TMP:-/tmp}" -maxdepth 1 -name 'iyakki-*' 2>/dev/null | wc -l; }
+iyakki_run_tmp_begin() {
+  IYAKKI_TMP_BEFORE="$(iyakki_count_sys_tmp)"
+  IYAKKI_RUN_TMP="$(mktemp -d "$TMPDIR/run-XXXXXX")"
+  export IYAKKI_RUN_TMP_PREV="$TMPDIR" TMPDIR="$IYAKKI_RUN_TMP"
+}
+iyakki_run_tmp_end() {
+  local left after rc=0
+  left="$(find "$IYAKKI_RUN_TMP" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)"
+  rm -rf "$IYAKKI_RUN_TMP"
+  export TMPDIR="$IYAKKI_RUN_TMP_PREV"
+  after="$(iyakki_count_sys_tmp)"
+  echo "test temp folders: $left were left in the run folder (removed); system /tmp iyakki-* entries: $IYAKKI_TMP_BEFORE before, $after after"
+  if [ "$after" -gt "$IYAKKI_TMP_BEFORE" ]; then
+    echo "FAIL: the tests left $((after - IYAKKI_TMP_BEFORE)) new iyakki-* entries in the system /tmp: they ignore TMPDIR" >&2
+    rc=1
+  fi
+  return $rc
+}

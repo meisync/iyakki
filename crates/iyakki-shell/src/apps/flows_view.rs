@@ -150,6 +150,7 @@ impl FlowsApp {
             self.draw_chat(g, c, s, cx, tick);
         }
         self.draw_modal(g, area, s, tick);
+        self.tip_rect = self.tip.draw(g, s);
     }
 
     fn draw_chat(&mut self, g: &mut Gfx, r: R, s: f32, cx: &AppCx, tick: u64) {
@@ -161,8 +162,9 @@ impl FlowsApp {
         g.text(r.x + 12.0 * s + aw, r.y + 9.0 * s, 11.0 * s, DIM, "builds and fixes flows", Face::Sans);
         g.button(r.x + r.w - 60.0 * s, r.y + 2.0 * s, 11.0 * s, "Hide", MUTED, Event::Tab(id::CHAT_HIDE));
         fx::accent_line(g, r.x + 12.0 * s, r.y + head - 2.0, r.w - 24.0 * s, 1.5, if focused { MAGENTA } else { ACCENT }, tick, s);
-        let content = R::new(r.x + 2.0 * s, r.y + head, r.w - 4.0 * s, (r.h - head - 2.0 * s).max(0.0));
         g.hit(R::new(r.x, r.y + head, r.w, r.h - head), Event::Tab(id::CHAT_PANE), "chat pane");
+        let strip = if self.fail.is_some() { super::flows_fail::draw_offer_strip(g, R::new(r.x + 4.0 * s, r.y + head + 2.0 * s, r.w - 8.0 * s, 0.0), s, self.fail.as_ref().is_some_and(|f| f.needs_person)) + 4.0 * s } else { 0.0 };
+        let content = R::new(r.x + 2.0 * s, r.y + head + strip, r.w - 4.0 * s, (r.h - head - strip - 2.0 * s).max(0.0));
         let chat = &mut self.chat;
         super::with_caret(focused, || route::render_slot(g, CHAT_SLOT, |g| App::render(chat, g, content, s, cx, tick)));
     }
@@ -241,32 +243,36 @@ impl FlowsApp {
         match self.tab {
             Tab::Design if has => {
                 let sel = !self.sel.is_empty() || self.sel_edge.is_some();
-                btn(g, &mut fl2, "Add step", ACCENT, id::ADD, true);
+                btn(g, &mut fl2, "Close (Esc)", CYAN, id::CLOSE, true);
+                btn(g, &mut fl2, "Add step (a)", ACCENT, id::ADD, true);
                 btn(g, &mut fl2, "Undo", MUTED, id::UNDO, !self.undo.is_empty());
                 btn(g, &mut fl2, "Redo", MUTED, id::REDO, !self.redo.is_empty());
                 btn(g, &mut fl2, "Copy", MUTED, id::COPY, !self.sel.is_empty());
                 btn(g, &mut fl2, "Paste", MUTED, id::PASTE, !self.clip.nodes.is_empty());
-                btn(g, &mut fl2, "Delete", ERR, id::DELETE, sel);
+                btn(g, &mut fl2, "Delete (Del)", ERR, id::DELETE, sel);
                 btn(g, &mut fl2, "Arrange", MUTED, id::ARRANGE, true);
+                btn(g, &mut fl2, "Flow settings (s)", MUTED, id::CARD_SETTINGS, true);
                 btn(g, &mut fl2, "Fit", MUTED, id::FIT, true);
                 btn(g, &mut fl2, if self.text.is_some() { "Canvas" } else { "Text" }, MUTED, id::TEXT, true);
                 btn(g, &mut fl2, "Test step", CYAN, id::TEST, self.sel.len() == 1 && self.testing.is_none());
-                btn(g, &mut fl2, "Run", OK, id::RUN, true);
-                btn(g, &mut fl2, "Publish", ACCENT, id::PUBLISH, true);
-                btn(g, &mut fl2, "History", MUTED, id::HISTORY, true);
+                btn(g, &mut fl2, "Run (r)", OK, id::RUN, true);
+                btn(g, &mut fl2, "Publish (p)", ACCENT, id::PUBLISH, true);
+                btn(g, &mut fl2, "History (h)", MUTED, id::HISTORY, true);
                 btn(g, &mut fl2, "Export", MUTED, id::EXPORT, true);
                 btn(g, &mut fl2, "Import", MUTED, id::IMPORT, true);
             }
             Tab::Design => {
-                btn(g, &mut fl2, "New flow", ACCENT, id::NEW, true);
-                btn(g, &mut fl2, "From template", CYAN, id::TEMPLATE, true);
-                btn(g, &mut fl2, "Import", MUTED, id::IMPORT, true);
+                btn(g, &mut fl2, "New flow (n)", ACCENT, id::NEW, true);
+                btn(g, &mut fl2, "From template (t)", CYAN, id::TEMPLATE, true);
+                btn(g, &mut fl2, "Import (i)", MUTED, id::IMPORT, true);
+                btn(g, &mut fl2, if self.book.offer() { "Agent help on failure: on (o)" } else { "Agent help on failure: off (o)" }, MUTED, id::OFFER, true);
             }
             Tab::Run => {
                 let (run, node) = (self.run.as_ref(), self.run_node.as_ref());
                 let st = run.map(|r| r.status);
                 let nstate = run.zip(node).and_then(|(r, n)| r.nodes.get(n)).map(|n| n.state);
-                btn(g, &mut fl2, "Cancel run", ERR, id::R_CANCEL, st.is_some_and(|s| !s.is_terminal()));
+                btn(g, &mut fl2, "Close (Esc)", CYAN, id::R_BACK, true);
+                btn(g, &mut fl2, "Stop run (c)", ERR, id::R_CANCEL, st.is_some_and(|s| !s.is_terminal()));
                 btn(g, &mut fl2, "Retry step", CYAN, id::R_RETRY, matches!(nstate, Some(NodeState::Failed | NodeState::Interrupted | NodeState::Cancelled)));
                 if self.refused_program().is_some() {
                     btn(g, &mut fl2, "Allow this program", AMBER, id::R_ALLOW, true);
@@ -300,11 +306,18 @@ impl FlowsApp {
         let pad = 12.0 * s;
         let r = R::new(body.x + pad, body.y, body.w - 2.0 * pad, body.h - 8.0 * s);
         if self.flows.is_empty() {
-            fx::empty_state(g, r, s, Icon::Flows, "No flows yet", "Make one with New flow, start from a template (health check, backup, build and deploy, website monitor, gRPC call, daily report), or open the assistant and say: build a flow that checks my site every 5 minutes.", ACCENT);
+            fx::empty_state(g, r, s, Icon::Flows, "No workflows yet - press N or ask the chat to make one", "N makes a new flow. T starts from a template (health check, backup, build and deploy, website monitor, gRPC call, daily report). Or open the assistant with Ctrl+I and say: build a flow that checks my site every 5 minutes.", ACCENT);
             self.draw_status(g, R::new(r.x, r.y + r.h - 22.0 * s, r.w, 22.0 * s), s);
             return;
         }
         let row_h = 52.0 * s;
+        let mut failed: std::collections::BTreeSet<String> = Default::default();
+        let mut seen: std::collections::BTreeSet<&str> = Default::default();
+        for x in self.runs.iter().filter(|x| x.parent.is_none() && x.status != RunStatus::Scheduled) {
+            if seen.insert(x.flow_id.as_str()) && x.status == RunStatus::Failed {
+                failed.insert(x.flow_id.clone());
+            }
+        }
         let list = R::new(r.x, r.y + 4.0 * s, r.w, r.h - 30.0 * s);
         let visible = ((list.h / row_h).floor() as usize).max(1);
         let first = self.list_sel.saturating_sub(visible - 1).min(self.flows.len().saturating_sub(visible));
@@ -324,6 +337,9 @@ impl FlowsApp {
             };
             if f.production {
                 tag(g, "production", ERR, false);
+            }
+            if failed.contains(&f.id) {
+                tag(g, "last run failed", ERR, true);
             }
             if f.agent_changed {
                 tag(g, "agent changed", MAGENTA, true);
@@ -367,6 +383,9 @@ impl FlowsApp {
             }
             top += h + 6.0 * s;
         }
+        for b in self.banners() {
+            top += super::flows_fail::draw_banner(g, R::new(body.x + pad, top, body.w - 2.0 * pad, 0.0), s, &b) + 6.0 * s;
+        }
         let status_h = 24.0 * s;
         let inner = R::new(body.x + pad, top, body.w - 2.0 * pad, (body.y + body.h - top - status_h - 4.0 * s).max(40.0));
         if self.text.is_some() {
@@ -375,7 +394,8 @@ impl FlowsApp {
             return;
         }
         let pal_w = if inner.w >= 960.0 * s { 176.0 * s } else { 0.0 };
-        let want_props = (self.sel.len() == 1 || self.sel_edge.is_some()) && inner.w >= 640.0 * s;
+        // the flow's own settings are drawn when nothing is selected, so they can always be reached
+        let want_props = inner.w >= 640.0 * s;
         let prop_w = if want_props { (inner.w * 0.27).clamp_safe(250.0 * s, 330.0 * s) } else { 0.0 };
         let gap = 8.0 * s;
         let canvas = R::new(inner.x + if pal_w > 0.0 { pal_w + gap } else { 0.0 }, inner.y, inner.w - pal_w - prop_w - if pal_w > 0.0 { gap } else { 0.0 } - if prop_w > 0.0 { gap } else { 0.0 }, inner.h);
@@ -401,8 +421,10 @@ impl FlowsApp {
             let p = Paint { flow: &self.flow, reg: &self.reg, view: self.view, rect: canvas, selected: &selected, sel_edge: self.sel_edge, hover: &hover, issues: &self.issue_map, run: None, connecting: conn.as_ref().map(|(f, p)| (f, *p)), rubber, tick, s };
             paint::draw_graph(g, &p);
         }
+        let (fl, vw, sl) = (self.flow.clone(), self.view, self.sel.clone());
+        self.offer_node_tips(g, canvas, vw, &fl, None, &sl, s);
         if self.flow.nodes.is_empty() {
-            fx::empty_state(g, canvas, s, Icon::Flows, "An empty flow", "Add a step with Add step, or tell the assistant what the flow should do.", ACCENT);
+            fx::empty_state(g, canvas, s, Icon::Flows, "An empty flow - press A to add a step", "Add step (a) puts a step on the canvas. Or open the assistant with Ctrl+I and tell it what the flow should do. Esc closes the flow; it is saved.", ACCENT);
         }
         // zoom buttons and the minimap
         let zb = 26.0 * s;
@@ -501,12 +523,17 @@ impl FlowsApp {
     /// The list editor: what small windows get instead of a canvas (steps as rows, their connections as text, the form beside).
     fn draw_list_editor(&mut self, g: &mut Gfx, body: R, s: f32, tick: u64) {
         self.sync_props();
+        let mut body = body;
+        for b in self.banners() {
+            let h = super::flows_fail::draw_banner(g, R::new(body.x + 8.0 * s, body.y, body.w - 16.0 * s, 0.0), s, &b) + 6.0 * s;
+            body = R::new(body.x, body.y + h, body.w, (body.h - h).max(40.0));
+        }
         let pad = 8.0 * s;
         let status_h = 22.0 * s;
         let inner = R::new(body.x + pad, body.y, body.w - 2.0 * pad, body.h - status_h - 4.0 * s);
         g.text(inner.x, inner.y + 2.0 * s, 11.0 * s, DIM, "A small window edits as a list. Design on the canvas in a larger window (1000 px wide).", Face::Sans);
         let top = inner.y + 18.0 * s;
-        let two = inner.w >= 560.0 * s && (self.sel.len() == 1 || self.sel_edge.is_some());
+        let two = inner.w >= 560.0 * s;
         let list_w = if two { (inner.w * 0.46).max(240.0 * s) } else { inner.w };
         let list = R::new(inner.x, top, list_w, inner.y + inner.h - top);
         fx::panel(g, list, s, ACCENT);
@@ -538,17 +565,18 @@ impl FlowsApp {
         self.draw_status(g, R::new(inner.x, inner.y + inner.h + 4.0 * s, inner.w, status_h), s);
     }
 
+    /// The footer: the keys of this screen and focus, always; a message (saved, started, refused) takes the left half when there is room.
     pub(super) fn draw_status(&mut self, g: &mut Gfx, r: R, s: f32) {
+        let hint = self.footer_hint();
         match &self.status {
+            Some((t, ok)) if r.w >= 760.0 * s => {
+                let half = r.w * 0.5;
+                fx::status_line(g, r.x, r.y, half - 8.0 * s, s, t, *ok);
+                g.text_fit(r.x + half, r.y + 3.0 * s, 11.5 * s, DIM, &hint, Face::Sans, r.w - half - 4.0 * s);
+            }
             Some((t, ok)) => fx::status_line(g, r.x, r.y, r.w, s, t, *ok),
             None => {
-                let hint = match self.tab {
-                    Tab::Design if self.cur.is_some() => "drag a step to move it · drag from a round port to connect · wheel zooms · Delete removes · F1 lists every key",
-                    Tab::Design => "pick a flow, or make one",
-                    Tab::Run => "click a step for its input, output and log · Rerun from here after a fix",
-                    Tab::Board => "click a run to open it · Shift+click selects several",
-                };
-                g.text_fit(r.x + 4.0 * s, r.y + 3.0 * s, 12.0 * s, DIM, hint, Face::Sans, r.w - 8.0 * s);
+                g.text_fit(r.x + 4.0 * s, r.y + 3.0 * s, 12.0 * s, DIM, &hint, Face::Sans, r.w - 8.0 * s);
             }
         }
     }
@@ -557,9 +585,13 @@ impl FlowsApp {
 
     pub(super) fn draw_modal(&mut self, g: &mut Gfx, area: R, s: f32, tick: u64) {
         let blink = super::blink(tick);
+        if matches!(self.modal, Some(Modal::Suggestions(_))) {
+            self.draw_suggestions(g, area, s);
+            return;
+        }
         let Some(m) = self.modal.as_mut() else { return };
         match m {
-            Modal::Name(form, _) | Modal::Import(form) => form.render(g, area, s, ACCENT, blink),
+            Modal::Name(form, _) | Modal::Import(form) | Modal::RunInputs(form, _, _) => form.render(g, area, s, ACCENT, blink),
             Modal::Templates(p, _) | Modal::AddNode(p, _) => p.render(g, area, s, ACCENT),
             Modal::Confirm(text, _) => super::widgets::render_confirm(g, area, s, text, "Yes"),
             Modal::Publish(f) => {
@@ -598,6 +630,7 @@ impl FlowsApp {
                 }
                 g.button(x + 110.0 * s, by, 12.5 * s, "Cancel", MUTED, Event::Key(crate::ui::Key::Esc));
             }
+            Modal::Suggestions(_) => {}
             Modal::History(h) => {
                 let p = fx::modal(g, area, s, 760.0 * s, 520.0 * s, ACCENT, false);
                 let y0 = fx::modal_title(g, p, s, "Versions", ACCENT);
@@ -625,7 +658,8 @@ impl FlowsApp {
                 }
                 let by = p.y + p.h - 44.0 * s;
                 g.button(x, by, 12.0 * s, "Roll back to this", AMBER, Event::Key(crate::ui::Key::Char('r')));
-                g.button(x + 190.0 * s, by, 12.0 * s, "Close", MUTED, Event::Key(crate::ui::Key::Esc));
+                g.button(x + 190.0 * s, by, 12.0 * s, "Drop this version", ERR, Event::Key(crate::ui::Key::Char('x')));
+                g.button(x + 380.0 * s, by, 12.0 * s, "Close", MUTED, Event::Key(crate::ui::Key::Esc));
             }
             Modal::Result(title, log) => {
                 let p = fx::modal(g, area, s, 640.0 * s, 440.0 * s, ACCENT, false);

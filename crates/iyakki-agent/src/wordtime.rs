@@ -25,6 +25,29 @@ const PAUSE_LIGHT: f32 = 90.0;
 pub const STALL_MS: f32 = 900.0;
 /// Start latency of a speaker process (milliseconds between starting it and hearing the first sound).
 pub const START_LATENCY_MS: f32 = 90.0;
+/// A heard position that has not moved for this long (ms) means the sound is starved: the clock stops with it.
+pub const HEARD_STILL_MS: f32 = 60.0;
+/// A step back of the heard position smaller than this (ms) while the sound runs is jitter of the estimate, not a rewind.
+pub const JITTER_BACK_MS: f32 = 25.0;
+/// Loudness (0 to 1, see `story::envelope`) at or below which a 20 ms frame counts as silence when looking for pauses.
+pub const PIN_QUIET: f32 = 0.03;
+/// The shortest silence inside speech that is taken for a pause of the punctuation.
+pub const PIN_MIN_MS: f32 = 60.0;
+/// Milliseconds per value of the loudness list.
+pub const ENV_FRAME_MS: f32 = 20.0;
+/// The most words the highlight moves ahead in one correction (a longer jump is taken in steps by the next polls).
+pub const MAX_LEAP_WORDS: usize = 4;
+
+/// What [`WordTimeline::fitted_pinned`] did, for the log line of a sentence.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FitReport {
+    /// Real speech length / the model's length for the same words (1.0: the model fits as it is).
+    pub stretch: f32,
+    /// Silences of the sound matched to punctuation.
+    pub pins: usize,
+    /// The largest difference between the plain fitted time of a pinned boundary and its pinned time (ms).
+    pub worst_boundary_error_ms: f32,
+}
 
 /// One word: its characters `start..end` in the text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +178,19 @@ pub fn word_units(w: &str) -> f32 {
     if c.is_empty() {
         return 0.0;
     }
+    // abbreviations are said in full ("Doctor"), numbers by their spoken length ("nineteen eighty-four")
+    let low: String = w.to_lowercase();
+    match low.as_str() {
+        "dr" | "mr" | "vs" => return 2.0,
+        "mrs" => return 3.0,
+        "ms" | "st" | "no" => return 1.2,
+        "etc" => return 4.0,
+        _ => {}
+    }
+    if c.iter().all(|ch| ch.is_ascii_digit()) {
+        const SPOKEN: [f32; 6] = [0.0, 1.2, 2.0, 4.0, 5.5, 6.5];
+        return if c.len() < SPOKEN.len() { SPOKEN[c.len()] } else { 1.3 * c.len() as f32 };
+    }
     let mut units = 0.0f32;
     let mut vowel_run = false;
     let mut prev_virama = false;
@@ -207,6 +243,10 @@ pub fn word_units(w: &str) -> f32 {
 /// The pause (ms at normal speed) that the characters between two words ask for.
 fn pause_between(gap: &[char]) -> f32 {
     let mut p = 0.0f32;
+    // a spaced hyphen is a dash
+    if gap.len() >= 3 && gap.contains(&'-') && gap.iter().all(|c| c.is_whitespace() || *c == '-') {
+        p = PAUSE_LIGHT;
+    }
     for ch in gap {
         let q = match ch {
             '.' | '!' | '?' | '\u{2026}' | '\u{3002}' | '\u{FF01}' | '\u{FF1F}' | '\u{0964}' | '\u{0965}' | '\u{06D4}' | '\u{061F}' | '\n' => PAUSE_HARD,
@@ -217,6 +257,23 @@ fn pause_between(gap: &[char]) -> f32 {
         p = p.max(q);
     }
     p
+}
+
+/// The pause after word `i` of `words`: [`pause_between`] of the characters up to the next word, except that the full stop of
+/// an abbreviation ("Dr.", "Mr.", "e.g.", an initial like "J.") is no sentence end and gets none.
+fn gap_after(c: &[char], words: &[WordSpan], i: usize) -> f32 {
+    let w = words[i];
+    let next = words.get(i + 1).map_or(c.len(), |n| n.start);
+    let gap = &c[w.end.min(c.len())..next.max(w.end).min(c.len())];
+    if gap.first() == Some(&'.') && i + 1 < words.len() {
+        let word: String = c[w.start..w.end].iter().collect::<String>().to_lowercase();
+        let abbr = matches!(word.as_str(), "dr" | "mr" | "mrs" | "ms" | "st" | "prof" | "sr" | "jr" | "vs" | "etc" | "no" | "inc" | "ltd" | "co" | "mt" | "e.g" | "i.e")
+            || (word.chars().count() == 1 && c[w.start].is_uppercase());
+        if abbr && gap.len() == 2 && gap[1] == ' ' && c.get(next).is_some_and(|ch| ch.is_alphanumeric()) {
+            return 0.0;
+        }
+    }
+    pause_between(gap)
 }
 
 /// Words with their start times: which word is being said at a given time.
@@ -243,6 +300,181 @@ impl WordTimeline {
         Self::build(text, 1.0, Some(duration_ms))
     }
 
+    /// Timing spread over the speech of a sound that is `duration_ms` long and starts with `lead_ms` and ends with `trail_ms`
+    /// of silence (measured from the sound, see `story::speech_edges`): the words fill the speech between them, the pause after
+    /// the last word is not given any of it. Engines pad their sounds with silence, and spreading the words over the padding too
+    /// makes every word late, the later ones the most. Falls back to [`WordTimeline::fitted`] when the edges leave no room.
+    pub fn fitted_in(text: &str, duration_ms: f32, lead_ms: f32, trail_ms: f32) -> WordTimeline {
+        let plain = Self::fitted(text, duration_ms);
+        if !duration_ms.is_finite() || duration_ms <= 0.0 || plain.words.is_empty() {
+            return plain;
+        }
+        let (lead, trail) = (lead_ms.max(0.0), trail_ms.max(0.0));
+        let speech = duration_ms - lead - trail;
+        if !lead.is_finite() || !trail.is_finite() || speech < duration_ms * 0.2 || (lead < 1.0 && trail < 1.0) {
+            return plain;
+        }
+        let raw = Self::build(text, 1.0, None);
+        let c: Vec<char> = text.chars().collect();
+        let last_end = raw.words.last().map_or(0, |w| w.end);
+        let tail = pause_between(&c[last_end.min(c.len())..]);
+        let model = raw.total_ms() - tail;
+        if model <= 0.0 {
+            return plain;
+        }
+        let k = speech / model;
+        let n = raw.words.len();
+        let mut begin: Vec<f32> = raw.begin[..n].iter().map(|b| lead + b * k).collect();
+        begin.push(duration_ms);
+        WordTimeline { words: raw.words, begin, fitted: true }
+    }
+
+    /// The one builder for a sound whose PCM is known (`env`: loudness per [`ENV_FRAME_MS`], see `story::envelope`): like
+    /// [`WordTimeline::fitted_in`], but the silences found inside the speech (>= [`PIN_MIN_MS`]) are pinned to the punctuation
+    /// of the text (commas, dashes, full stops inside the sentence) by a monotone matching of their positions, and the words
+    /// between two pins are spread over exactly the speech between them by their syllable-like weights. A pause the model
+    /// puts in the wrong place, or too long or short, can then not push all later words late: the error cannot grow beyond one
+    /// stretch between pins. Without usable silences it is `fitted_in`.
+    pub fn fitted_pinned(text: &str, duration_ms: f32, lead_ms: f32, trail_ms: f32, env: &[f32]) -> (WordTimeline, FitReport) {
+        let base = Self::fitted_in(text, duration_ms, lead_ms, trail_ms);
+        let mut rep = FitReport { stretch: 1.0, ..FitReport::default() };
+        let n = base.words.len();
+        if n < 2 || !duration_ms.is_finite() || duration_ms <= 0.0 || env.is_empty() {
+            rep.stretch = Self::stretch_vs_model(text, duration_ms - lead_ms.max(0.0) - trail_ms.max(0.0));
+            return (base, rep);
+        }
+        let (s0, s1) = (lead_ms.max(0.0), (duration_ms - trail_ms.max(0.0)).max(0.0));
+        rep.stretch = Self::stretch_vs_model(text, s1 - s0);
+        if s1 - s0 < duration_ms * 0.2 {
+            return (base, rep);
+        }
+        let c: Vec<char> = text.chars().collect();
+        let raw = Self::build(text, 1.0, None);
+        let last_end = raw.words[n - 1].end;
+        let model_total = raw.total_ms() - pause_between(&c[last_end.min(c.len())..]);
+        if model_total <= 0.0 {
+            return (base, rep);
+        }
+        let k = (s1 - s0) / model_total;
+        // silences inside the speech: (start, end) in ms
+        let mut sil: Vec<(f32, f32)> = Vec::new();
+        let mut run: Option<usize> = None;
+        for (j, e) in env.iter().chain(std::iter::once(&1.0)).enumerate() {
+            if *e <= PIN_QUIET {
+                run.get_or_insert(j);
+            } else if let Some(a) = run.take() {
+                let (x, y) = (a as f32 * ENV_FRAME_MS, j as f32 * ENV_FRAME_MS);
+                if y - x >= PIN_MIN_MS && x > s0 + ENV_FRAME_MS && y < s1 - ENV_FRAME_MS {
+                    sil.push((x, y));
+                }
+            }
+        }
+        // punctuation slots: (word before, expected centre of the pause in the plain fit)
+        let mut slots: Vec<(usize, f32)> = Vec::new();
+        for i in 0..n - 1 {
+            let p = gap_after(&c, &raw.words, i);
+            if p > 0.0 {
+                slots.push((i, s0 + (raw.begin[i + 1] - p / 2.0) * k));
+            }
+        }
+        if sil.is_empty() || slots.is_empty() {
+            return (base, rep);
+        }
+        // monotone matching, best total closeness; a match farther than the tolerance is not allowed
+        let tol = 250.0f32.max((s1 - s0) * 0.2);
+        let (ns, nl) = (sil.len(), slots.len());
+        let mut dp = vec![vec![0.0f32; nl + 1]; ns + 1];
+        for a in 1..=ns {
+            for b in 1..=nl {
+                let d = ((sil[a - 1].0 + sil[a - 1].1) / 2.0 - slots[b - 1].1).abs();
+                let mut best = dp[a - 1][b].max(dp[a][b - 1]);
+                if d <= tol {
+                    best = best.max(dp[a - 1][b - 1] + (tol - d));
+                }
+                dp[a][b] = best;
+            }
+        }
+        let mut pins: Vec<(usize, f32, f32)> = Vec::new();
+        let (mut a, mut b) = (ns, nl);
+        while a > 0 && b > 0 {
+            let d = ((sil[a - 1].0 + sil[a - 1].1) / 2.0 - slots[b - 1].1).abs();
+            if d <= tol && (dp[a][b] - (dp[a - 1][b - 1] + (tol - d))).abs() < 1e-3 {
+                pins.push((slots[b - 1].0, sil[a - 1].0, sil[a - 1].1));
+                a -= 1;
+                b -= 1;
+            } else if dp[a - 1][b] >= dp[a][b - 1] {
+                a -= 1;
+            } else {
+                b -= 1;
+            }
+        }
+        pins.reverse();
+        if pins.is_empty() {
+            return (base, rep);
+        }
+        // weight of word i alone, and of the gap after it when it is not a pin
+        let unit = |i: usize| -> f32 {
+            let w: String = c[raw.words[i].start..raw.words[i].end].iter().collect();
+            word_units(&w) * UNIT_MS
+        };
+        let gap = |i: usize| -> f32 { gap_after(&c, &raw.words, i) };
+        let mut begin = vec![0.0f32; n + 1];
+        let mut first = 0usize;
+        let mut t0 = s0;
+        for pi in 0..=pins.len() {
+            let (last, t1, next0) = match pins.get(pi) {
+                Some((i, x, y)) => (*i, *x, (*y - 10.0).max(*x)),
+                None => (n - 1, s1, s1),
+            };
+            let total: f32 = (first..=last).map(|i| unit(i) + if i < last { gap(i) } else { 0.0 }).sum();
+            let span = (t1 - t0).max(0.0);
+            let mut acc = 0.0f32;
+            for i in first..=last {
+                begin[i] = t0 + if total > 0.0 { acc / total * span } else { 0.0 };
+                acc += unit(i) + if i < last { gap(i) } else { 0.0 };
+            }
+            first = last + 1;
+            t0 = next0;
+        }
+        begin[n] = duration_ms;
+        for i in 1..=n {
+            if begin[i] < begin[i - 1] {
+                begin[i] = begin[i - 1];
+            }
+        }
+        for (i, _, _) in &pins {
+            let e = (base.begin[i + 1] - begin[i + 1]).abs();
+            rep.worst_boundary_error_ms = rep.worst_boundary_error_ms.max(e);
+        }
+        rep.pins = pins.len();
+        (WordTimeline { words: raw.words, begin, fitted: true }, rep)
+    }
+
+    /// Speech length divided by the length the model gives the same words (1.0: the model is right; above 1: the voice is
+    /// slower than the model).
+    fn stretch_vs_model(text: &str, speech_ms: f32) -> f32 {
+        let raw = Self::build(text, 1.0, None);
+        let c: Vec<char> = text.chars().collect();
+        let last_end = raw.words.last().map_or(0, |w| w.end);
+        let model = raw.total_ms() - pause_between(&c[last_end.min(c.len())..]);
+        if model > 0.0 && speech_ms > 0.0 {
+            speech_ms / model
+        } else {
+            1.0
+        }
+    }
+
+    /// One line per word for the developer (DEBUG log): index, text, start and end in milliseconds.
+    pub fn debug_line(&self, text: &str) -> String {
+        let c: Vec<char> = text.chars().collect();
+        let mut s = String::new();
+        for (i, w) in self.words.iter().enumerate() {
+            let t: String = c[w.start.min(c.len())..w.end.min(c.len())].iter().collect();
+            s.push_str(&format!("{i}:{t}@{:.0}-{:.0} ", self.begin[i], self.begin[i + 1]));
+        }
+        s
+    }
+
     /// Timing measured elsewhere (the engine's own word times, or a recognition aligned to the text, see `speechtime`):
     /// `begin` holds where each word of `text` starts, in milliseconds, then the end of the sound. None when the count does
     /// not match the words of `text` or the times are not finite and rising (equal times are allowed).
@@ -263,9 +495,8 @@ impl WordTimeline {
             begin.push(t);
             let s: String = c[w.start..w.end].iter().collect();
             t += word_units(&s) * UNIT_MS * slow;
-            let next = words.get(i + 1).map_or(c.len(), |n| n.start);
             // closing marks directly after the word belong to it; the rest of the gap too
-            t += pause_between(&c[w.end..next.max(w.end)]) * slow;
+            t += gap_after(&c, &words, i) * slow;
         }
         begin.push(t);
         if let Some(d) = fit {
@@ -470,6 +701,37 @@ impl WordClock {
         }
     }
 
+    /// The speaker reports how much of the piece has been heard (`played_ms`): the clock is set to it, and runs on from there
+    /// while the sound `advancing`; when the sound stands still (starved) the clock stands still with it.
+    ///
+    /// The sound is the truth, so the clock goes to it at once, forward as far as it is (a stall that ends, a sentence that
+    /// began late: the word jumps to where the sound is, that is the fastest catch-up there is) and backward too, except for a
+    /// step back of less than [`JITTER_BACK_MS`] while the sound runs, which is the speaker's position estimate wobbling: the
+    /// word never flickers back, and the clock is at most that far ahead of the sound.
+    pub fn follow(&mut self, played_ms: f32, now: f32, advancing: bool) {
+        if !self.started {
+            return;
+        }
+        let mut played_ms = played_ms;
+        if advancing && self.since.is_some() {
+            let cur = self.position(now);
+            if played_ms < cur && cur - played_ms < JITTER_BACK_MS {
+                played_ms = cur;
+            }
+            // never leap more than a few words at once; the next polls (15 ms apart) carry on
+            if let (Some(a), Some(b)) = (self.tl.word_at(cur), self.tl.word_at(played_ms)) {
+                if b > a + MAX_LEAP_WORDS {
+                    played_ms = self.tl.start_ms(a + MAX_LEAP_WORDS).unwrap_or(played_ms);
+                }
+            }
+        }
+        self.base = played_ms + self.latency;
+        self.since = advancing.then_some(now);
+        self.frozen_at = now;
+        self.offset = 0.0;
+        self.exact = None;
+    }
+
     /// Jump so that word `i` is being said at `now`.
     pub fn seek_word(&mut self, i: usize, now: f32) {
         let t = self.tl.start_ms(i.min(self.tl.len().saturating_sub(1))).unwrap_or(0.0);
@@ -480,6 +742,11 @@ impl WordClock {
         self.offset = 0.0;
         self.exact = None;
         self.started = true;
+    }
+
+    /// Where the clock is in the sound at `now`, in milliseconds (what the word shown is chosen by).
+    pub fn position(&self, now: f32) -> f32 {
+        self.elapsed(self.at(now))
     }
 
     /// Milliseconds of the sound played at `now` (frozen while paused, minus the start latency, plus the calibration).
@@ -539,6 +806,60 @@ impl WordClock {
     /// The characters of the word being said at `now`.
     pub fn range(&self, now: f32) -> Option<(usize, usize)> {
         self.current(now).and_then(|i| self.tl.span(i)).map(|w| (w.start, w.end))
+    }
+}
+
+/// What a [`HeardFollower`] saw during one piece, for the log line of a sentence.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HeardStats {
+    pub polls: u32,
+    /// The longest time between two polls of the speaker (ms): the highlight cannot be fresher than this.
+    pub max_gap_ms: f32,
+    /// The most the clock was behind the sound at a poll (ms): how far one correction had to jump forward.
+    pub max_behind_ms: f32,
+    /// The most the clock was ahead of the sound at a poll (ms).
+    pub max_ahead_ms: f32,
+    /// The last heard position given (ms, after the offset).
+    pub last_played_ms: f32,
+}
+
+/// Feeds the heard position of the speaker into a [`WordClock`]: the one place that decides whether the sound moves (a position
+/// that stands still for [`HEARD_STILL_MS`] stops the clock), and measures how the clock and the sound agree.
+#[derive(Clone, Debug, Default)]
+pub struct HeardFollower {
+    heard: Option<(f32, f32)>,
+    last_poll: Option<f32>,
+    stats: HeardStats,
+}
+
+impl HeardFollower {
+    pub fn new() -> HeardFollower {
+        HeardFollower::default()
+    }
+
+    /// The speaker says `played_ms` of the piece were heard at `now` (both in the clock's units and already corrected by the
+    /// person's highlight offset).
+    pub fn poll(&mut self, k: &mut WordClock, played_ms: f32, now: f32) {
+        let advancing = self.heard.is_none_or(|(prev, at)| played_ms != prev || now - at < HEARD_STILL_MS);
+        if self.heard.is_none_or(|(prev, _)| played_ms != prev) {
+            self.heard = Some((played_ms, now));
+        }
+        if k.started {
+            let cur = k.position(now);
+            self.stats.max_behind_ms = self.stats.max_behind_ms.max(played_ms - cur);
+            self.stats.max_ahead_ms = self.stats.max_ahead_ms.max(cur - played_ms);
+        }
+        if let Some(t) = self.last_poll {
+            self.stats.max_gap_ms = self.stats.max_gap_ms.max(now - t);
+        }
+        self.last_poll = Some(now);
+        self.stats.polls += 1;
+        self.stats.last_played_ms = played_ms;
+        k.follow(played_ms, now, advancing);
+    }
+
+    pub fn stats(&self) -> HeardStats {
+        self.stats
     }
 }
 
@@ -916,5 +1237,423 @@ mod tests {
         c.boundary_char(0, 5.0);
         assert_eq!(c.current(100.0), None);
         assert_eq!(c.range(100.0), None);
+    }
+}
+
+#[cfg(test)]
+mod follow_tests {
+    use super::*;
+
+    #[test]
+    fn a_clock_that_follows_the_heard_position_stands_still_while_the_sound_does() {
+        let tl = WordTimeline::estimate("one two three four five six seven eight", 1.0);
+        let mut k = WordClock::new(tl, 0.0);
+        k.start(0.0);
+        k.follow(0.0, 10.0, false); // nothing is audible yet (the lead): the first word waits
+        assert_eq!(k.elapsed(400.0), 0.0);
+        k.follow(300.0, 500.0, true); // 300 ms are heard
+        assert!((k.elapsed(520.0) - 320.0).abs() < 0.01);
+        k.follow(340.0, 540.0, false); // the sound stalls: the clock freezes at what was heard
+        assert_eq!(k.elapsed(540.0), 340.0);
+        assert_eq!(k.elapsed(5000.0), 340.0, "no word advances during the stall");
+        k.follow(340.0, 5000.0, true);
+        assert!(k.elapsed(5100.0) > 340.0);
+    }
+}
+
+/// A simulation of what the reader does while it reads aloud: a fake speaker reports the heard position, the reader polls it
+/// every 15 ms into a [`WordClock`] through a [`HeardFollower`], and the page asks for the lit word on every UI tick. The true
+/// word is known (the sound is made from a known timeline), so lag is measured, not argued.
+#[cfg(test)]
+mod lag_tests {
+    use super::*;
+
+    const POLL_MS: f32 = 15.0;
+    const UI_MS: f32 = 33.0;
+
+    /// The sentence as the speaker says it: word durations that differ from the model's by up to +-25 % (so the test is not
+    /// the model checking itself), `lead` ms of silence before and `trail` ms after the speech, scaled by `speed` (2.0: twice as fast).
+    struct Spoken {
+        text: String,
+        /// Where each word really starts in the sound, then the end of the sound (ms).
+        truth: Vec<f32>,
+        audio_ms: f32,
+        lead: f32,
+        trail: f32,
+    }
+
+    fn spoken(text: &str, speed: f32, lead: f32, trail: f32, seed: u32) -> Spoken {
+        let model = WordTimeline::estimate(text, 1.0);
+        let n = model.len();
+        let mut rng = seed.wrapping_mul(2654435761).wrapping_add(12345);
+        let mut begin = vec![lead];
+        let mut t = lead;
+        for i in 0..n {
+            rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+            let jitter = 0.75 + ((rng >> 16) & 0xFF) as f32 / 255.0 * 0.5;
+            let mut dur = model.end_ms(i).unwrap() - model.start_ms(i).unwrap();
+            if i == n - 1 {
+                // the pause after the last word is silence at the end of the sound, not speech
+                let c: Vec<char> = text.chars().collect();
+                dur -= pause_between(&c[model.span(i).unwrap().end..]);
+            }
+            let dur = dur / speed * jitter;
+            t += dur;
+            begin.push(t);
+        }
+        let audio_ms = t + trail;
+        // the last entry is the end of the speech; words are said from lead to there
+        Spoken { text: text.to_string(), truth: begin, audio_ms, lead, trail }
+    }
+
+    impl Spoken {
+        fn true_word(&self, pos: f32) -> usize {
+            let n = self.truth.len() - 1;
+            self.truth[..n].partition_point(|b| *b <= pos).saturating_sub(1).min(n - 1)
+        }
+    }
+
+    /// The speaker: heard position of the piece that sounds from `audible_at`, frozen inside the `stalls` (start, end) windows.
+    struct Speaker {
+        audible_at: f32,
+        stalls: Vec<(f32, f32)>,
+        /// Constant error of the position estimate (ms): positive reports the sound further than it is.
+        bias: f32,
+        wobble: f32,
+    }
+
+    impl Speaker {
+        fn true_pos(&self, now: f32) -> f32 {
+            let mut t = (now - self.audible_at).max(0.0);
+            for (a, b) in &self.stalls {
+                let (a, b) = (a - self.audible_at, b - self.audible_at);
+                if t > a {
+                    t -= (t.min(b) - a).max(0.0);
+                }
+            }
+            t
+        }
+        fn heard(&self, now: f32) -> f32 {
+            // a few ms of wobble from the mixer thread's timing
+            let w = ((now as i64 * 7) % 5) as f32 / 4.0 * self.wobble;
+            if self.true_pos(now) <= 0.0 { 0.0 } else { (self.true_pos(now) + self.bias + w).max(0.0) }
+        }
+    }
+
+    struct Run {
+        /// Largest |lit word - spoken word| over the sentence, in words.
+        worst_words: usize,
+        /// Largest delay of the clock behind the true position (ms), where the sound was running.
+        worst_lag_ms: f32,
+        worst_ahead_ms: f32,
+        /// Time after a stall ends until the lit word is the spoken word again (ms), the largest.
+        worst_catch_up_ms: f32,
+        stats: HeardStats,
+    }
+
+    /// Read `sentences` in a row. `tl` builds the timeline the reader uses for a sentence.
+    fn run(sentences: &[Spoken], stalls: &[(f32, f32)], bias: f32, tl: &dyn Fn(&Spoken) -> WordTimeline) -> Vec<Run> {
+        let mut out = Vec::new();
+        let mut start = 100.0f32; // when the first piece begins (the speaker is audible 80 ms later)
+        for s in sentences {
+            let sp = Speaker { audible_at: start + 80.0, stalls: stalls.to_vec(), bias, wobble: 6.0 };
+            let mut k = WordClock::new(tl(s), START_LATENCY_MS);
+            k.start(start);
+            let mut f = HeardFollower::new();
+            let (mut next_poll, mut next_ui) = (start, start);
+            let (mut worst_words, mut worst_lag, mut worst_ahead, mut worst_catch) = (0usize, 0.0f32, 0.0f32, 0.0f32);
+            let mut off_since: Option<f32> = None;
+            let mut now = start;
+            loop {
+                if now >= next_poll {
+                    f.poll(&mut k, sp.heard(now), now);
+                    next_poll += POLL_MS;
+                }
+                if now >= next_ui {
+                    next_ui += UI_MS;
+                    let pos = sp.true_pos(now);
+                    if pos > s.lead + 50.0 && pos < s.audio_ms - s.trail {
+                        let lit = k.current(now).unwrap();
+                        let truth = s.true_word(pos);
+                        // right when within a word of the spoken one, or when the spoken word is within 120 ms of the lit one's time
+                        let near = |w: usize| s.truth[w] - 120.0 <= pos && pos <= s.truth[w + 1] + 120.0;
+                        let miss = if near(lit) { 0 } else { lit.abs_diff(truth) };
+                        worst_words = worst_words.max(miss);
+                        let lag = pos - k.position(now);
+                        worst_lag = worst_lag.max(lag);
+                        worst_ahead = worst_ahead.max(-lag);
+                        // after a stall: how long the lit word stays more than one word off
+                        if miss > 1 {
+                            let t0 = *off_since.get_or_insert(now);
+                            worst_catch = worst_catch.max(now - t0);
+                        } else {
+                            off_since = None;
+                        }
+                    }
+                }
+                if sp.true_pos(now) >= s.audio_ms {
+                    break;
+                }
+                now += 1.0;
+            }
+            out.push(Run { worst_words, worst_lag_ms: worst_lag, worst_ahead_ms: worst_ahead, worst_catch_up_ms: worst_catch, stats: f.stats() });
+            // the reader moves on when the sound has ended; the next piece starts at once
+            start = now;
+        }
+        out
+    }
+
+    const TEXTS: [&str; 4] = [
+        "The old fox woke early and ran across the quiet meadow towards home.",
+        "Nobody noticed, because the rain was loud on the roof of the barn.",
+        "\"Wait for me,\" said the little owl, and then it was gone.",
+        "Morning came slowly; the farmer opened the gate and counted his sheep twice.",
+    ];
+
+    fn sentences(speed: f32) -> Vec<Spoken> {
+        TEXTS.iter().enumerate().map(|(i, t)| spoken(t, speed, 60.0, 250.0, i as u32 + 1)).collect()
+    }
+
+    fn fitted(s: &Spoken) -> WordTimeline {
+        WordTimeline::fitted_in(&s.text, s.audio_ms, s.lead, s.trail)
+    }
+
+    #[test]
+    fn at_normal_and_fast_speed_the_lit_word_stays_within_one_word_and_the_clock_within_40_ms_of_the_sound() {
+        for speed in [0.8f32, 1.0, 1.5, 2.0, 2.5] {
+            let runs = run(&sentences(speed), &[], 0.0, &fitted);
+            for (i, r) in runs.iter().enumerate() {
+                assert!(r.worst_words <= 1, "speed {speed} sentence {i}: lit word {} words from the spoken one", r.worst_words);
+                assert!(r.worst_lag_ms <= 40.0, "speed {speed} sentence {i}: the clock lags the sound by {} ms", r.worst_lag_ms);
+                assert!(r.worst_ahead_ms <= 40.0, "speed {speed} sentence {i}: the clock is ahead of the sound by {} ms", r.worst_ahead_ms);
+                assert!(r.stats.max_gap_ms <= 16.0, "polls keep their cadence: {}", r.stats.max_gap_ms);
+            }
+        }
+    }
+
+    #[test]
+    fn a_stall_that_ends_is_caught_up_at_once_and_the_clock_never_runs_ahead_of_a_stalled_sound() {
+        // the sound stops for 400 ms in the middle of the first sentence (the speaker was starved), and again in the third
+        let s = sentences(1.0);
+        let stalls = [(1500.0, 1900.0)];
+        let runs = run(&s[..1], &stalls, 0.0, &fitted);
+        let r = &runs[0];
+        assert!(r.worst_words <= 1, "{}", r.worst_words);
+        assert!(r.worst_ahead_ms <= 80.0, "the clock ran {} ms ahead of the stalled sound (60 ms still-detection + a poll)", r.worst_ahead_ms);
+        assert!(r.worst_catch_up_ms <= UI_MS * 2.0, "{} ms to be back on the word after the stall", r.worst_catch_up_ms);
+        assert!(r.worst_lag_ms <= 40.0, "{}", r.worst_lag_ms);
+    }
+
+    #[test]
+    fn several_sentences_in_a_row_each_start_on_their_first_word_with_no_leftover_lag() {
+        let runs = run(&sentences(1.5), &[], 0.0, &fitted);
+        assert_eq!(runs.len(), 4);
+        for (i, r) in runs.iter().enumerate() {
+            assert!(r.worst_words <= 1 && r.worst_lag_ms <= 40.0, "sentence {i}: {} words, {} ms", r.worst_words, r.worst_lag_ms);
+            // a sentence's clock ends where the sound ends
+            assert!((r.stats.last_played_ms - sentences(1.5)[i].audio_ms).abs() <= 20.0, "sentence {i}: heard {} of {}", r.stats.last_played_ms, sentences(1.5)[i].audio_ms);
+        }
+    }
+
+    #[test]
+    fn taking_the_silence_of_the_sound_out_of_the_fit_makes_the_late_words_on_time() {
+        // 250 ms of silence after the speech: a fit over the whole sound puts every word late, the last ones the most
+        let s = spoken(TEXTS[0], 1.0, 60.0, 250.0, 1);
+        let plain = WordTimeline::fitted(&s.text, s.audio_ms);
+        let trimmed = fitted(&s);
+        let n = plain.len();
+        let err = |tl: &WordTimeline| (0..n).map(|i| (tl.start_ms(i).unwrap() - s.truth[i]).abs()).fold(0.0f32, f32::max);
+        // (the truth has +-25 % jitter per word, so the bound is the model's own spread)
+        assert!(err(&trimmed) < err(&plain), "trimmed {} ms vs plain {} ms", err(&trimmed), err(&plain));
+        assert!(trimmed.start_ms(0).unwrap() >= 59.0 && trimmed.total_ms() == s.audio_ms);
+        // with no silence to take out it is the plain fit
+        assert_eq!(WordTimeline::fitted_in(&s.text, 3000.0, 0.0, 0.0), WordTimeline::fitted(&s.text, 3000.0));
+        // silence that leaves no room is ignored
+        assert_eq!(WordTimeline::fitted_in(&s.text, 1000.0, 600.0, 600.0), WordTimeline::fitted(&s.text, 1000.0));
+    }
+
+    #[test]
+    fn a_constant_error_of_the_heard_position_is_the_error_of_the_lit_word_and_the_offset_removes_it() {
+        // the speaker reports 350 ms less than is heard (the old card-buffer subtraction): the clock lags by exactly that
+        let late = run(&sentences(1.5), &[], -350.0, &fitted);
+        assert!(late.iter().all(|r| (300.0..=400.0).contains(&r.worst_lag_ms)), "{:?}", late.iter().map(|r| r.worst_lag_ms).collect::<Vec<_>>());
+        // at 1.5x speech a word is about 270 ms: that is more than a word
+        assert!(late.iter().any(|r| r.worst_words >= 1));
+        // an offset of -350 (the person tunes the highlight earlier) puts it back
+        let fixed = run(&sentences(1.5), &[], 0.0, &fitted);
+        assert!(fixed.iter().all(|r| r.worst_lag_ms <= 40.0));
+    }
+
+    #[test]
+    fn the_heard_position_wobbling_a_few_ms_never_steps_the_clock_back() {
+        let tl = WordTimeline::estimate("one two three four five six seven eight", 1.0);
+        let mut k = WordClock::new(tl, START_LATENCY_MS);
+        k.start(0.0);
+        let mut f = HeardFollower::new();
+        let mut last = 0.0f32;
+        for step in 1..200 {
+            let now = step as f32 * 15.0;
+            let p = now + if step % 2 == 0 { -10.0 } else { 10.0 };
+            f.poll(&mut k, p, now);
+            let pos = k.position(now);
+            assert!(pos + 0.01 >= last, "stepped back from {last} to {pos} at {now}");
+            assert!((pos - now).abs() <= 10.5, "{pos} vs {now}: at most the wobble ahead");
+            last = pos;
+        }
+        // a real rewind (a new piece, a seek) is followed
+        f.poll(&mut k, 10.0, 3200.0);
+        assert!(k.position(3200.0) < 100.0);
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    /// A voice whose true word times differ from the character model: `ramp` makes it start fast and end slow (first word
+    /// `1/ramp` of the model, last `ramp` times), commas pause `comma_ms`, full stops inside `stop_ms`; `lead`/`trail` of padding.
+    struct Voice {
+        truth: Vec<f32>,
+        env: Vec<f32>,
+        audio_ms: f32,
+        lead: f32,
+        trail: f32,
+    }
+
+    fn voice(text: &str, ramp: f32, comma_ms: f32, lead: f32, trail: f32) -> Voice {
+        let c: Vec<char> = text.chars().collect();
+        let spans = words_of(text);
+        let n = spans.len();
+        let mut truth = Vec::new();
+        let mut quiet: Vec<(f32, f32)> = Vec::new();
+        let mut t = lead;
+        for (i, w) in spans.iter().enumerate() {
+            truth.push(t);
+            let s: String = c[w.start..w.end].iter().collect();
+            let f = (1.0 / ramp) * (ramp * ramp).powf(i as f32 / (n.max(2) - 1) as f32);
+            t += word_units(&s) * UNIT_MS * f;
+            if i + 1 < n {
+                let p = gap_after(&c, &spans, i);
+                if p > 0.0 {
+                    let d = if p >= PAUSE_HARD { comma_ms * 2.0 } else { comma_ms };
+                    quiet.push((t, t + d));
+                    t += d;
+                }
+            }
+        }
+        truth.push(t);
+        let audio_ms = t + trail;
+        let frames = (audio_ms / ENV_FRAME_MS).ceil() as usize;
+        let env = (0..frames)
+            .map(|j| {
+                let (a, b) = (j as f32 * ENV_FRAME_MS, (j + 1) as f32 * ENV_FRAME_MS);
+                let silent = a + 1.0 < lead || b > t + 1.0 || quiet.iter().any(|(x, y)| a >= *x - 1.0 && b <= *y + 1.0);
+                if silent {
+                    0.0
+                } else {
+                    0.4
+                }
+            })
+            .collect();
+        Voice { truth, env, audio_ms, lead, trail }
+    }
+
+    fn worst(tl: &WordTimeline, v: &Voice) -> f32 {
+        (0..tl.len()).map(|i| (tl.start_ms(i).unwrap() - v.truth[i]).abs()).fold(0.0, f32::max)
+    }
+
+    const TEXTS: [&str; 5] = [
+        "Well, the extraordinary thing about the old lighthouse, which nobody had visited for years, was its light.",
+        "He ran. She did not; they waited, quietly, in the cold, until morning came and the snow stopped.",
+        "In 1984, Dr. Smith paid 250 dollars for it - a lot of money, then.",
+        "Internationalization is hard, but cats sit on mats, and dogs run in the park.",
+        "Short one.",
+    ];
+
+    #[test]
+    fn pinned_words_stay_within_120_ms_of_the_true_times_where_the_plain_fit_drifts() {
+        let mut plain_worst = 0.0f32;
+        for (k, text) in TEXTS.iter().enumerate() {
+            for (ramp, comma) in [(1.0, 100.0), (1.1, 140.0), (1.15, 90.0), (1.15, 260.0)] {
+                let v = voice(text, ramp, comma, 160.0, 380.0);
+                let plain = WordTimeline::fitted_in(text, v.audio_ms, v.lead, v.trail);
+                let (pin, rep) = WordTimeline::fitted_pinned(text, v.audio_ms, v.lead, v.trail, &v.env);
+                plain_worst = plain_worst.max(worst(&plain, &v));
+                if text.chars().filter(|c| matches!(c, ',' | ';' | '.' | '-')).count() > 1 && *text != TEXTS[4] {
+                    assert!(rep.pins >= 1, "text {k} ramp {ramp}: no pin");
+                }
+                let e = worst(&pin, &v);
+                assert!(e <= 120.0, "text {k} ramp {ramp} comma {comma}: pinned error {e:.0} ms (plain {:.0}), pins {}, truth {:?}; {}", worst(&plain, &v), rep.pins, v.truth.iter().map(|x| *x as i32).collect::<Vec<_>>(), pin.debug_line(text));
+                assert!((pin.total_ms() - v.audio_ms).abs() < 1.0);
+                assert!(rep.stretch.is_finite() && rep.stretch > 0.2);
+                assert!((0..pin.len()).all(|i| pin.start_ms(i) <= pin.end_ms(i)), "never runs backwards");
+            }
+        }
+        assert!(plain_worst > 120.0, "the synthetic voices must really drift without pinning ({plain_worst:.0})");
+    }
+
+    #[test]
+    fn pinning_beats_the_plain_fit_on_average_and_never_runs_backwards() {
+        let (mut ep, mut ef) = (0.0f32, 0.0f32);
+        for text in &TEXTS[..4] {
+            let v = voice(text, 1.8, 200.0, 200.0, 300.0);
+            let plain = WordTimeline::fitted_in(text, v.audio_ms, v.lead, v.trail);
+            let (pin, _) = WordTimeline::fitted_pinned(text, v.audio_ms, v.lead, v.trail, &v.env);
+            ep += worst(&pin, &v);
+            ef += worst(&plain, &v);
+            for i in 1..pin.len() {
+                assert!(pin.start_ms(i) >= pin.start_ms(i - 1));
+            }
+        }
+        assert!(ep < ef, "pinned {ep:.0} vs plain {ef:.0}");
+    }
+
+    #[test]
+    fn indic_and_unpunctuated_text_and_missing_pcm_fall_back_cleanly() {
+        for text in ["நான் நேற்று கடைக்குச் சென்றேன், ஆனால் அது மூடியிருந்தது. பிறகு வீடு திரும்பினேன்.", "मैं कल बाज़ार गया, लेकिन दुकान बंद थी। फिर घर लौट आया।", "no punctuation at all in this one sentence here"] {
+            let v = voice(text, 1.5, 150.0, 120.0, 300.0);
+            let (pin, rep) = WordTimeline::fitted_pinned(text, v.audio_ms, v.lead, v.trail, &v.env);
+            let plain = WordTimeline::fitted_in(text, v.audio_ms, v.lead, v.trail);
+            // without punctuation there is nothing to pin: the plain fit, never worse
+            assert!(worst(&pin, &v) <= worst(&plain, &v) + 1.0, "{text}: {:.0}; {}", worst(&pin, &v), pin.debug_line(text));
+            if rep.pins == 0 {
+                assert_eq!(pin, plain);
+            }
+            assert!(rep.stretch > 0.0);
+            let (none, r2) = WordTimeline::fitted_pinned(text, v.audio_ms, v.lead, v.trail, &[]);
+            assert_eq!(r2.pins, 0);
+            assert_eq!(none, WordTimeline::fitted_in(text, v.audio_ms, v.lead, v.trail));
+        }
+    }
+
+    /// The whole path of a sentence: the speaker's heard position drives the clock, polled every 15 ms; the highlighted word
+    /// is compared with the word really being said, and never jumps more than the limit.
+    #[test]
+    fn the_follower_with_a_pinned_timeline_tracks_the_true_word_and_never_leaps() {
+        for text in &TEXTS[..4] {
+            let v = voice(text, 1.8, 180.0, 160.0, 380.0);
+            let (tl, _) = WordTimeline::fitted_pinned(text, v.audio_ms, v.lead, v.trail, &v.env);
+            let n = tl.len();
+            let mut k = WordClock::new(tl, START_LATENCY_MS);
+            let mut f = HeardFollower::new();
+            k.start(0.0);
+            let (mut last, mut worst_late) = (0usize, 0.0f32);
+            let mut now = 0.0f32;
+            while now < v.audio_ms {
+                f.poll(&mut k, now, now);
+                let w = k.current(now).unwrap_or(0);
+                assert!(w >= last && w <= last + MAX_LEAP_WORDS, "{text}: {last} -> {w} at {now}");
+                last = w;
+                // how late is the highlight: the true time the shown word started, versus now
+                if now >= v.lead && now < v.truth[n] {
+                    let shown = k.current(now).unwrap_or(0).min(n - 1);
+                    worst_late = worst_late.max(now - v.truth[shown]).max(0.0);
+                    let ahead = v.truth[shown] - now;
+                    assert!(ahead < 130.0, "{text}: word {shown} lit {ahead:.0} ms early at {now}");
+                }
+                now += 15.0;
+            }
+            assert!(last >= n - 1, "ends on the last word");
+        }
     }
 }

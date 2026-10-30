@@ -41,6 +41,7 @@ pub fn main_glyph(t: MainTab) -> Glyph {
         MainTab::Notes => Glyph::Note,
         MainTab::Browser => Glyph::Globe,
         MainTab::K8s => Glyph::K8s,
+        MainTab::Git => Glyph::Git,
     }
 }
 
@@ -463,23 +464,27 @@ impl IdeApp {
         let y = r.y + 2.0 * s;
         let counts = w.board.file.as_ref().map(|f| f.board.len());
         let bounds = R::new(0.0, 0.0, g.width() as f32, g.height() as f32);
-        let items: Vec<(MainTab, String, Glyph)> = MainTab::ALL
+        let git_ok = cx.session.policy.allows_app(iyakki_sec::policy::App::Git);
+        // the tab's click id is its place in MainTab::ALL, also when an account without the Git tile does not see it
+        let items: Vec<(usize, MainTab, String, Glyph)> = MainTab::ALL
             .iter()
-            .map(|t| {
+            .enumerate()
+            .filter(|(_, t)| **t != MainTab::Git || git_ok)
+            .map(|(idx, t)| {
                 let label = match (t, counts) {
                     (MainTab::Board, Some(n)) => format!("Board {n}"),
                     (MainTab::Editor, _) if w.editor.any_unsaved() => "Editor ●".to_string(),
                     (MainTab::Notes, _) if w.notes.counts().0 > 0 => format!("Context {}", w.notes.counts().0),
                     _ => t.label().to_string(),
                 };
-                (*t, label, main_glyph(*t))
+                (idx, *t, label, main_glyph(*t))
             })
             .collect();
         // the names go with the pictures while they fit (the "board unsaved" note needs room too); narrower: pictures only
-        let need: f32 = items.iter().map(|(t, l, _)| chrome::icon_tab_width(g, s, l, true, w.main_tab == *t, None)).sum::<f32>() + if w.board.is_dirty() { 110.0 * s } else { 0.0 };
+        let need: f32 = items.iter().map(|(_, t, l, _)| chrome::icon_tab_width(g, s, l, true, w.main_tab == *t, None)).sum::<f32>() + if w.board.is_dirty() { 110.0 * s } else { 0.0 };
         let show_text = need <= r.w - 8.0 * s;
-        for (i, (t, label, gl)) in items.iter().enumerate() {
-            x += chrome::icon_tab(g, x, y, s, *gl, label, show_text, None, w.main_tab == *t, accent, Event::Tab(T_MAIN + i), label, bounds);
+        for (i, t, label, gl) in items.iter() {
+            x += chrome::icon_tab(g, x, y, s, *gl, label, show_text, None, w.main_tab == *t, accent, Event::Tab(T_MAIN + *i), label, bounds);
         }
         if w.board.is_dirty() {
             g.text(x + 6.0 * s, y + (m.tab_h * s - g.line_height(m.font_small * s, Face::Bold)) / 2.0, m.font_small * s, AMBER, "board unsaved", Face::Bold);
@@ -510,6 +515,15 @@ impl IdeApp {
             MainTab::Tasks => {
                 w.tasks.set_root(&w.meta.root_path().display().to_string());
                 w.tasks.draw(g, R::new(content.x + 4.0 * s, content.y + 2.0 * s, content.w - 8.0 * s, content.h - 4.0 * s), s, focused && no_dialog, accent, tick)
+            }
+            MainTab::Git => {
+                if !git_ok {
+                    g.text(content.x + 14.0 * s, content.y + 14.0 * s, 14.0 * s, MUTED, "Your account may not use Git.", Face::Sans);
+                } else {
+                    let root = w.root();
+                    let v = w.gitview.get_or_insert_with(|| super::ide_gitview::GitTabView::new(cx, root, if cfg!(test) { super::git_tile::Rig::offline() } else { super::git_tile::Rig::system() }));
+                    super::component::route::render_slot(g, super::ide_gitview::GIT, |g| v.draw(g, content, s, cx, tick, focused && no_dialog));
+                }
             }
             MainTab::K8s => {
                 let (name, warn) = (w.meta.name.clone(), w.ns_warning.clone());

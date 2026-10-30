@@ -372,6 +372,8 @@ pub struct Net {
     pub allow: Allow,
     pub stop: Stop,
     pub timing: Timing,
+    /// The approved certificate and any completed chains of this playback (shared with the radio).
+    pub tls: iyakki_proxy::TlsPlan,
 }
 
 impl Net {
@@ -395,7 +397,7 @@ impl Net {
             if !(self.allow)(&host) {
                 return Err(FetchErr::Final(format!("your account may not reach {host}")));
             }
-            let head = self.streamer.open(&url, &[("Accept".into(), "*/*".into())]).map_err(|e| FetchErr::Retry(format!("could not connect: {e}")))?;
+            let head = self.tls.open(&*self.streamer, &url, &[("Accept".into(), "*/*".into())]).map_err(|e| FetchErr::Retry(format!("could not connect: {e}")))?;
             if (300..400).contains(&head.status) {
                 let loc = head.header("location").ok_or_else(|| FetchErr::Final("a redirect without a place to go".into()))?;
                 url = resolve_ref_redirect(&url, loc).map_err(FetchErr::Final)?;
@@ -710,7 +712,7 @@ mod tests {
     use crate::audiofmt::tests::adts_frame;
 
     fn net(f: Arc<FakeNet>, allow: impl Fn(&str) -> bool + Send + Sync + 'static) -> Net {
-        Net { streamer: f, allow: Arc::new(allow), stop: Arc::new(|| false), timing: Timing { scale: 2000 } }
+        Net { streamer: f, allow: Arc::new(allow), stop: Arc::new(|| false), timing: Timing { scale: 2000 }, tls: Default::default() }
     }
 
     fn mp3(n: usize) -> Vec<u8> {
@@ -910,5 +912,17 @@ mod tests {
         // not a playlist
         let f = fake_net(vec![(&format!("{base}x.m3u8"), ok(b"<html>".to_vec()))]);
         assert!(HlsReader::start(net(f, |_| true), &format!("{base}x.m3u8"), None).is_err());
+    }
+
+    #[test]
+    fn the_follower_uses_the_approved_certificate_for_its_own_host_only() {
+        let f = fake_net(vec![("https://cdn.example.org/a.m3u8", ok(b"#EXTM3U\n".to_vec())), ("https://other.example.org/b.m3u8", ok(b"#EXTM3U\n".to_vec()))]);
+        let mut n = net(f.clone(), |_| true);
+        n.tls = iyakki_proxy::TlsPlan::new(Some(("cdn.example.org", 443, "AB:CD")));
+        // the fake network cannot pin, which shows the request took the pinned road
+        let e = n.get("https://cdn.example.org/a.m3u8", 1000).unwrap_err().text();
+        assert!(e.contains("cannot pin"), "{e}");
+        assert!(f.asked.lock().unwrap().is_empty(), "nothing went out the ordinary way");
+        assert!(n.get("https://other.example.org/b.m3u8", 1000).is_ok(), "other hosts are checked normally");
     }
 }

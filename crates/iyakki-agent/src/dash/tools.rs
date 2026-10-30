@@ -64,6 +64,26 @@ pub struct Env {
     pub audit: Arc<dyn Fn(&str, &str) + Send + Sync>,
     /// Answers shared between panels and between the screen and the tools.
     pub cache: Arc<FetchCache>,
+    /// The accounts of the machine, for dashboards shared between them. The shell sets the real one.
+    pub people: Arc<dyn People>,
+}
+
+/// Which accounts exist and where their homes are. Dashboards shared by or with a name that is gone are not shown.
+pub trait People: Send + Sync {
+    fn exists(&self, name: &str) -> bool;
+    fn home(&self, name: &str, data_dir: &std::path::Path) -> PathBuf;
+}
+
+/// Every name is an account and homes are where [`crate::scope::home_root`] puts them (what the agent alone can know).
+pub struct AnyPeople;
+
+impl People for AnyPeople {
+    fn exists(&self, _: &str) -> bool {
+        true
+    }
+    fn home(&self, name: &str, data_dir: &std::path::Path) -> PathBuf {
+        crate::scope::home_root(name, data_dir)
+    }
 }
 
 /// Reads vault references: `uvault:` from the person's vault, `vault:` and `ext:` from the system resolver. Nothing else.
@@ -85,6 +105,12 @@ impl SecretResolver for ServicesResolver {
 impl Env {
     pub fn from_services(svc: &Arc<Services>, user: &str, policy: &Policy) -> Env {
         let data_dir = svc.dir().to_path_buf();
+        // sources the older Quick install saved with a baked-in cluster IP get the stable address (once)
+        super::cluster::migrate_all(&data_dir, user);
+        // the default dashboards (the local k3s), once per account; a person who edits or deletes one keeps it that way
+        if policy.apps.contains(&App::Dash) {
+            let _ = super::seed::seed_defaults(&data_dir, &crate::scope::home_root(user, &data_dir), user, policy.manage_users);
+        }
         let (p, u, d) = (policy.clone(), user.to_string(), data_dir.clone());
         let work = data_dir.join("dash").join("work");
         let _ = std::fs::create_dir_all(&work);
@@ -98,6 +124,7 @@ impl Env {
                 runner: Arc::new(crate::wsexec::System),
                 path_ok: Arc::new(move |path| crate::scope::FileRoots::new(&p, &u, &d).read_ok(&p, &u, path)),
                 work_dir: work,
+                cluster: Arc::new(super::cluster::KubeCluster::new(svc.k3sdev.clone(), std::time::Duration::from_secs(10))),
             },
             data_dir,
             now_ms: Arc::new(|| crate::clock::now_unix() * 1000),
@@ -111,6 +138,7 @@ impl Env {
             },
             audit: Arc::new(|_, _| {}),
             cache: FetchCache::new(),
+            people: Arc::new(AnyPeople),
         }
     }
 
@@ -163,20 +191,69 @@ impl Env {
         if !self.policy.apps.contains(&App::Dash) {
             return Err(DashError::config("your account may not use the dashboards"));
         }
+        // a dashboard shared with this account brings its own source, which only answers what that dashboard shows
+        if id.starts_with(super::share::SHARE_PREFIX) {
+            return self.shared_source(id);
+        }
         let cfg = self.sources().get(id).ok_or_else(|| {
             let names = self.sources().list().into_iter().map(|s| s.name).collect::<Vec<_>>().join(", ");
             DashError::config(format!("there is no source `{id}`")).fix(if names.is_empty() { "Add one in the DASH tile's connector manager.".to_string() } else { format!("Use one of: {names}") })
         })?;
+        // the cluster is the administrators' own; everyone else reaches it only through a dashboard shared with them
+        if cfg.kind == "kube" && !self.is_admin() {
+            return Err(DashError::config("the local cluster is open to administrators, or through a dashboard one of them shared with you").fix("Ask an administrator to share a dashboard with you."));
+        }
         let url = cfg.value("url");
         if !url.is_empty() {
             let host = url.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or("");
             let host = host.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map_or(host, |x| x.0).trim_matches(['[', ']']);
+            // a Service of the cluster is judged by its NAME (<service>.<namespace>.svc), never by the IP it resolves to
+            let host = match super::cluster::parse(url) {
+                Some(Ok(r)) => r.policy_host(),
+                Some(Err(e)) => return Err(DashError::config(format!("the address of the source is not right: {e}")).fix("Write it as cluster://<namespace>/<service>:<port>.")),
+                None => host.to_string(),
+            };
+            let host = host.as_str();
             if !self.policy.allows_host(host) {
                 return Err(DashError::config(format!("your account may not reach {host}")).fix("Ask an administrator to allow this host in your network policy."));
             }
         }
         let src = super::registry::build(&cfg, &self.deps)?;
         Ok((cfg, src))
+    }
+
+    /// Bring the sources Quick install saved earlier up to the stable cluster addresses (cheap; run whenever DASH or its Sources page opens).
+    pub fn migrate_sources(&self) -> bool {
+        super::cluster::migrate_all(&self.data_dir, &self.user)
+    }
+
+    /// What could be done for a source that points at localhost (asks the cluster; run it off the screen thread).
+    pub fn repair_plan(&self, id: &str) -> super::cluster::RepairPlan {
+        match self.sources().get(id) {
+            Some(c) => super::cluster::repair_plan(&c, self.deps.cluster.as_ref()),
+            None => super::cluster::RepairPlan::NotLocal,
+        }
+    }
+
+    /// Rewrite the address of a source that points at localhost to the cluster Service of its kind (the person pressed "Use cluster address").
+    /// Only an administrator; the rest of the source (name, sign-in, options) is kept; saved through the normal path and audited.
+    pub fn use_cluster_address(&self, id: &str) -> Result<String, String> {
+        if !self.policy.apps.contains(&App::Dash) || !self.policy.manage_settings {
+            return Err("only an administrator may change a data source's address this way; ask one, or edit the source by hand".into());
+        }
+        let store = self.sources();
+        let mut cfg = store.get(id).ok_or_else(|| format!("there is no source `{id}`"))?;
+        let new = super::cluster::repair_url(&cfg, self.deps.cluster.as_ref())?;
+        if let Some(Ok(r)) = super::cluster::parse(&new) {
+            if !self.policy.allows_host(&r.policy_host()) {
+                return Err(format!("your network policy does not allow {}; ask an administrator", r.policy_host()));
+            }
+        }
+        cfg.values.insert("url".into(), new.clone());
+        let sid = cfg.id.clone();
+        store.save(cfg)?;
+        (self.audit)("dash.source_repaired", &format!("{sid} -> {new}"));
+        Ok(new)
     }
 
     /// A run context for the dashboard's current variables (query variables are resolved by the screen).
@@ -777,7 +854,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut deps = deps(up, &[("uvault:svc.prom", SECRET)], Arc::new(FakeRunner::new(&[])));
         deps.work_dir = dir.clone();
-        let e = Env { user: "amy".into(), policy: Role::Admin.template(), data_dir: dir.clone(), home: dir.join("home"), deps, now_ms: Arc::new(|| NOW), vault_names: Arc::new(Vec::new), vault_set: Arc::new(|_, _| Ok(())), audit: Arc::new(|_, _| {}), cache: FetchCache::new() };
+        let e = Env { user: "amy".into(), policy: Role::Admin.template(), data_dir: dir.clone(), home: dir.join("home"), deps, now_ms: Arc::new(|| NOW), vault_names: Arc::new(Vec::new), vault_set: Arc::new(|_, _| Ok(())), audit: Arc::new(|_, _| {}), cache: FetchCache::new(), people: Arc::new(AnyPeople) };
         let mut c = cfg("prometheus", HOST);
         c.id = "prom".into();
         c.name = "Prod Prometheus".into();

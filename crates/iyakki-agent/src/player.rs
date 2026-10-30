@@ -246,13 +246,9 @@ pub fn audio_args(file: &str, start: f64) -> Vec<String> {
 
 fn spawn(prog: &str, args: &[String], stdin: bool) -> Result<Child, String> {
     use std::os::unix::process::CommandExt;
-    Command::new(prog)
-        .args(args)
-        .process_group(0)
-        .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
-        .stdout(if stdin { Stdio::null() } else { Stdio::piped() })
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut cmd = Command::new(prog);
+    cmd.args(args).process_group(0).stdin(if stdin { Stdio::piped() } else { Stdio::null() }).stdout(if stdin { Stdio::null() } else { Stdio::piped() }).stderr(Stdio::piped());
+    crate::aacpipe::spawn_retry(&mut cmd)
         .map_err(|e| format!("could not start {}: {e}", prog.rsplit('/').next().unwrap_or(prog)))
 }
 

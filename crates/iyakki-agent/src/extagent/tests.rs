@@ -262,6 +262,10 @@ fn the_next_message_resumes_the_vendor_session_and_the_flags_hold_the_agent_to_t
     for p in ["Bash(kubectl *)", "Bash(k3s *)", "Bash(kubeadm *)", "Bash(docker rm *)", "Bash(sudo *)"] {
         assert!(dis.contains(p), "{p} in {dis}");
     }
+    // long foreground commands are refused so the agent turns to job_start (its instructions say the same)
+    for p in ["Bash(cargo build *)", "Bash(npm install *)", "Bash(docker build *)", "Bash(make *)"] {
+        assert!(dis.contains(p), "{p} in {dis}");
+    }
     // only the workspace is added; the working folder is the workspace
     let adds: Vec<&String> = a.windows(2).filter(|w| w[0] == "--add-dir").map(|w| &w[1]).collect();
     assert_eq!(adds, vec![&rig.ws.display().to_string()]);
@@ -1098,4 +1102,16 @@ fn a_failed_agent_run_names_the_lost_drive_only_while_it_is_lost() {
     let lost = classify_failure("Claude Code", "Sign in.", "EIO: Input/output error, open '/home/admin/.claude/x'");
     iyakki_storage::loss::set_thread_override(None);
     assert!(lost.contains("Claude Code cannot work right now") && lost.contains("drive is not available"), "{lost}");
+}
+
+#[test]
+fn long_foreground_commands_are_refused_only_when_the_job_tools_are_offered() {
+    use super::claude_code::{ClaudeCode, LONG_BASH};
+    let with = ClaudeCode::disallowed_with_jobs();
+    let without = ClaudeCode::disallowed();
+    for p in LONG_BASH {
+        assert!(with.contains(&format!("Bash({p} *)")), "{p}");
+        assert!(!without.contains(&format!("Bash({p} *)")), "{p} must not be refused without the job tools");
+    }
+    assert!(with.starts_with(&without), "the cluster and container rules stay");
 }

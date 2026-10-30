@@ -10,11 +10,13 @@
 //!   machine. It reports every step through a callback (the job's log) and turns failures into a sentence with the fix.
 //! * [`remove`]: deletes the namespace (the images in it go with it) after the person typed its name.
 //!
-//! **How it is used.** Pods pull `localhost:<nodePort>/<repo>:<tag>`: containerd allows plain HTTP for `localhost`, and a NodePort is
-//! reachable on every Ready node at localhost, so no node needs a `registries.yaml`, a restart or root (the cluster is not restarted).
-//! IYAKKI pushes to `<node address>:<nodePort>` with [`crate::ocipush`] (no docker or podman). The registry has no sign-in: it is
-//! reachable by anything that can reach the node's NodePort, like every NodePort Service; the plan and the docs say so, and the way to
-//! keep it on this machine is the machine's firewall (`k3sdev::ports()` lists 30500 among the ports).
+//! **How it is used.** The registry has no sign-in, so it is never published on the network: the Service is ClusterIP and the Deployment
+//! binds `hostPort: <port>` with `hostIP: 127.0.0.1` (the pattern of the Gitea loopback port). Pods and the node pull
+//! `localhost:<port>/<repo>:<tag>` (containerd allows plain HTTP for `localhost`, so no node needs a `registries.yaml`, a restart or
+//! root), and IYAKKI pushes to `localhost:<port>` with [`crate::ocipush`] (no docker or podman). Only a single-node cluster on this
+//! machine fits (the dev cluster); a cluster on another machine is refused. An older install that is a NodePort Service (open on the
+//! LAN, found 2026-10-28) is converted by [`regsetup::close_legacy`]: by [`create`] (quick-install registry), by the next start of the
+//! managed cluster (`k3sdev`), and by the registry setup `apply`; every conversion is audited as `registry.nodeport.closed`.
 //!
 //! Programs started: `kubectl` through the [`Runner`] (or `k3s kubectl` for the managed cluster, see [`K3sKubectl`]); nothing else.
 
@@ -226,11 +228,14 @@ pub fn inspect(run: &Arc<dyn Runner>, http: &dyn RegistryHttp, t: &Target) -> St
         return if not_found(&c) { State::Absent } else { State::Unknown(explain_kubectl(&c)) };
     }
     let sj: Value = serde_json::from_str(&s.stdout).unwrap_or(Value::Null);
-    let Some(port) = sj["spec"]["ports"].as_array().and_then(|p| p.iter().find_map(|p| p["nodePort"].as_u64())).map(|p| p as u16) else {
-        return State::Unknown(format!("The Service {IN_NS}/{IN_NAME} exists but has no NodePort; remove the registry and create it again."));
-    };
     let d = k.read(&["get", "deployment", IN_NAME, "-n", IN_NS, "-o", "json"]);
-    let ready = d.ok() && serde_json::from_str::<Value>(&d.stdout).is_ok_and(|j| j["status"]["readyReplicas"].as_u64().unwrap_or(0) >= 1);
+    let dj: Value = if d.ok() { serde_json::from_str(&d.stdout).unwrap_or(Value::Null) } else { Value::Null };
+    let ready = dj["status"]["readyReplicas"].as_u64().unwrap_or(0) >= 1;
+    // the loopback hostPort of the Deployment; an older install had a NodePort Service (still readable, and converted by `create`)
+    let port = regsetup::hostport_of(&dj).or_else(|| sj["spec"]["ports"].as_array().and_then(|p| p.iter().find_map(|p| p["nodePort"].as_u64())).map(|p| p as u16));
+    let Some(port) = port else {
+        return State::Unknown(format!("The Service {IN_NS}/{IN_NAME} exists but its registry has no port on this machine; remove the registry and create it again."));
+    };
     let pvc = k.read(&["get", "pvc", "registry-data", "-n", IN_NS, "-o", "jsonpath={.spec.resources.requests.storage}"]);
     let storage = if pvc.ok() && !pvc.stdout.trim().is_empty() { pvc.stdout.trim().to_string() } else { "emptyDir".into() };
     let mut info = Info { push: t.push_address(port), pull: pull_address(port), node_port: port, ready, images: None, repositories: 0, storage };
@@ -302,7 +307,7 @@ pub const SIZES_GI: [u32; 4] = [5, 10, 20, 50];
 /// The text shown before the button is pressed: what will be created, in plain words.
 pub fn describe_plan(size_gi: u32, t: &Target) -> String {
     format!(
-        "A local image registry will be created in the cluster{}:\n- namespace {IN_NS}\n- the CNCF Distribution registry (docker.io/library/registry:2, Apache-2.0), pulled once from Docker Hub by the cluster\n- a {size_gi} Gi volume (StorageClass local-path unless the cluster has another default), so the images survive restarts\n- a NodePort Service (30500, or the next free port): pods and the node pull localhost:<port>, IYAKKI pushes to {}:<port>\nThe cluster is NOT restarted and no node file is changed. The registry has no sign-in: anything that can reach this machine's NodePort can push to it, so keep that port off untrusted networks.",
+        "A local image registry will be created in the cluster{}:\n- namespace {IN_NS}\n- the CNCF Distribution registry (docker.io/library/registry:2, Apache-2.0), pulled once from Docker Hub by the cluster\n- a {size_gi} Gi volume (StorageClass local-path unless the cluster has another default), so the images survive restarts\n- a ClusterIP Service and a port on 127.0.0.1 of the node (30500, or the next free port): pods and the node pull localhost:<port>, IYAKKI pushes to {}:<port>\nThe cluster is NOT restarted and no node file is changed. The registry has no sign-in, so it is NOT published on the network (no NodePort): only this machine can reach it. A registry from an older version that was open on NodePort 30500 is converted the same way.",
         if t.name.is_empty() { String::new() } else { format!(" \"{}\"", t.name) },
         if t.on_this_machine() { "localhost" } else { t.node_host.as_str() }
     )
@@ -314,16 +319,23 @@ pub fn create(run: &Arc<dyn Runner>, http: &dyn RegistryHttp, t: &Target, o: &Op
         return Err(format!("{} Gi is not a volume size (1 to 500)", o.size_gi));
     }
     say("[1/6] checking the cluster");
+    let k0 = kc(run, t);
     let (nodes_ready, storage_class, mut facts) = match check_dependency(run, t) {
         Dependency::Met { nodes_ready, storage_class, facts } => (nodes_ready, storage_class, facts),
         Dependency::Missing(m) => return Err(m),
     };
     say(&format!("      cluster{} is reachable, {nodes_ready} node(s) Ready, StorageClass {storage_class}", if t.name.is_empty() { String::new() } else { format!(" \"{}\"", t.name) }));
+    // an older install is open on the network (NodePort, no password): close it first, whatever else happens
+    let converted = regsetup::close_legacy(&|a: &[&str]| k0.kubectl(a, 20, 60))?;
+    if let Some(line) = &converted {
+        say(&format!("      SECURITY: {line}"));
+    }
     match inspect(run, http, t) {
-        State::Ready(i) => {
+        State::Ready(i) if converted.is_none() => {
             say(&format!("[6/6] the registry exists already: {}", status_line(&State::Ready(i.clone()))));
             return Ok(i);
         }
+        State::Ready(_) => say("      the registry was converted; applying its objects again"),
         State::Starting(_, why) => say(&format!("      a registry exists but is not ready ({why}); applying it again")),
         State::Unknown(e) => return Err(e),
         State::Absent => {}
@@ -362,9 +374,20 @@ pub fn create(run: &Arc<dyn Runner>, http: &dyn RegistryHttp, t: &Target, o: &Op
     let file = o.work_dir.join("iyakki-registry.yaml");
     std::fs::write(&file, &lint.text).map_err(|e| format!("{}: {e}", file.display()))?;
     say("[3/6] applying the registry objects (volume, Deployment, Service)");
+    let kube = |args: &[&str]| {
+        let o = k.kubectl(args, 10, 30);
+        crate::pvcguard::KOut { ok: o.ok(), stdout: o.stdout.clone(), text: o.combined() }
+    };
+    let g = crate::pvcguard::guard(&lint.text, Some(IN_NS), &kube)?;
+    for n in &g.notes {
+        say(&format!("      {n}"));
+    }
+    if g.manifest.trim() != lint.text.trim() {
+        std::fs::write(&file, &g.manifest).map_err(|e| format!("{}: {e}", file.display()))?;
+    }
     let a = k.kubectl(&["apply", "-f", &file.display().to_string(), "-n", IN_NS], 20, 90);
     if !a.ok() {
-        return Err(format!("kubectl apply failed: {}", explain_kubectl(&a.combined())));
+        return Err(format!("kubectl apply failed: {}", crate::pvcguard::explain_apply_error(&explain_kubectl(&a.combined()))));
     }
     for l in a.stdout.lines().filter(|l| !l.trim().is_empty()).take(6) {
         say(&format!("      {}", l.trim()));

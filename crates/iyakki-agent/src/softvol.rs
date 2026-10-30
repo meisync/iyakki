@@ -106,6 +106,11 @@ pub enum Plan {
     Mix { card: u32, device: u32, mix: Mix },
     /// The same softvol over the device alone (`plughw`): one program at a time. Used where `dmix` cannot open the device.
     Soft { card: u32, device: u32 },
+    /// [`Plan::Soft`] for a device with fixed periods (the T2 Mac's `aaudio`), plus the engine's own PCM ([`WEB_PCM`]): `plug > softvol >
+    /// plughw` plays the players' S16 stereo, but the engine's WebAudio output could not be installed on it (the page then froze on its
+    /// synchronous start of the output), so the engine gets `plug > softvol > hw` (measured on a MacBookPro16,2: no freeze, a media
+    /// element's tone plays). `channels` is what the device was probed to take.
+    SoftWeb { card: u32, device: u32, channels: u32 },
     /// The same softvol over `hw` itself (no `plughw` under it): for a device with fixed periods, where `plug > softvol > plughw`
     /// cannot install its parameters at a rate other than the device's (the T2 Mac's `aaudio`: one-frame periods, 4 channels of
     /// 24-bit in 32). The `plug` above the volume does every conversion. One program at a time.
@@ -117,13 +122,13 @@ pub enum Plan {
 impl Plan {
     pub fn card(&self) -> u32 {
         match self {
-            Plan::Mix { card, .. } | Plan::Soft { card, .. } | Plan::Direct { card, .. } | Plan::Hw { card, .. } => *card,
+            Plan::Mix { card, .. } | Plan::Soft { card, .. } | Plan::SoftWeb { card, .. } | Plan::Direct { card, .. } | Plan::Hw { card, .. } => *card,
         }
     }
 
     fn device(&self) -> u32 {
         match self {
-            Plan::Mix { device, .. } | Plan::Soft { device, .. } | Plan::Direct { device, .. } | Plan::Hw { device, .. } => *device,
+            Plan::Mix { device, .. } | Plan::Soft { device, .. } | Plan::SoftWeb { device, .. } | Plan::Direct { device, .. } | Plan::Hw { device, .. } => *device,
         }
     }
 
@@ -179,11 +184,16 @@ fn fan_route(channels: u32) -> String {
 /// `audioresample` and `audioconvert` do the rest. Client-side name: [`WEB_PCM`], selected for the engine by
 /// [`WEB_ALSA_CONF`].
 fn web_pcm(channels: u32) -> String {
+    web_pcm_over(channels, SOFTVOL_PCM)
+}
+
+/// [`web_pcm`] over the softvol named `slave`.
+fn web_pcm_over(channels: u32, slave: &str) -> String {
     if channels < 2 {
         // unknown (or the unprobed one-channel guess for the T2 speaker): no web PCM, the engine keeps `default`
         return String::new();
     }
-    let mut t = format!("pcm.{WEB_PCM}route {{\n    type route\n    slave {{\n        pcm \"{SOFTVOL_PCM}\"\n        channels {channels}\n    }}\n    ttable {{\n");
+    let mut t = format!("pcm.{WEB_PCM}route {{\n    type route\n    slave {{\n        pcm \"{slave}\"\n        channels {channels}\n    }}\n    ttable {{\n");
     for dst in 0..channels {
         t.push_str(&format!("        {}.{dst} 1.0\n", dst % 2));
     }
@@ -236,6 +246,22 @@ pub fn config_text_boost(plan: &Plan, boost_db: u32) -> String {
              {}",
             softvol_block(*card, &format!("plughw:{card},{device}"), boost_db, false)
         ),
+        // the channels are unknown (the unprobed one-channel guess): no engine PCM, exactly the plain plan
+        Plan::SoftWeb { card, device, channels } if *channels < 2 => config_text_boost(&Plan::Soft { card: *card, device: *device }, boost_db),
+        Plan::SoftWeb { card, device, .. } => {
+            let max_db = MAX_DB + boost_db.min(MAX_BOOST_DB) as f32;
+            // the same control (name, card, range) under a second softvol over hw itself: one slider, two ways in
+            let hw_vol = {
+                format!("pcm.{WEB_PCM}vol {{\n    type softvol\n    slave.pcm \"hw:{card},{device}\"\n    control {{\n        name \"{CONTROL}\"\n        card {card}\n    }}\n    min_dB {MIN_DB:.1}\n    max_dB {max_db:.1}\n}}\n")
+            };
+            format!(
+                "{MARKER}\n\
+                 # The output has no hardware volume: {SOFTVOL_PCM} is a software volume (control '{CONTROL}' on card {card}); one program at a time.\n\
+                 # {WEB_PCM} is the web engine's way in, over hw itself (the engine's WebAudio output cannot be installed on plughw here).\n\
+                 {}{hw_vol}pcm.{WEB_PCM} {{\n    type plug\n    slave.pcm \"{WEB_PCM}vol\"\n}}\n",
+                softvol_block(*card, &format!("plughw:{card},{device}"), boost_db, false)
+            )
+        }
         Plan::Direct { card, device, channels } => format!(
             "{MARKER}\n\
              # The output has no hardware volume and fixed periods: {SOFTVOL_PCM} is a software volume (control '{CONTROL}' on card {card}) straight\n\
@@ -342,10 +368,11 @@ impl Runner for System {
         // player is ended (the speaker is a one-owner device, see [`Gate`])
         let end = Instant::now() + PRIME_HOLD;
         loop {
-            match child.try_wait() {
-                Ok(Some(st)) if st.success() => return Ok(()),
-                Ok(Some(st)) => return Err(format!("aplay -D {pcm} ended with {st} (the device may be busy)")),
-                Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(10)),
+            match iyakki_core_api::child_status(&mut child) {
+                st if st.success() => return Ok(()),
+                // the status was taken by another reaper: it ended, and what it did is unknown, so it is not taken for a success
+                st if st.is_over() => return Err(format!("aplay -D {pcm} ended ({}; the device may be busy)", st.describe())),
+                _ if Instant::now() < end => std::thread::sleep(Duration::from_millis(10)),
                 _ => {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -493,7 +520,7 @@ impl Softvol {
             // the T2's aaudio (fixed-period class, `!sized`): dmix spins a whole core on it whatever its settings (measured on a
             // MacBookPro16,2: 90 % of a core for a stereo stream against 2 % without it, with the real periods of the patched
             // driver, apple-bce patch 0003), so the volume sits straight over plughw; one program at a time
-            Plan::Mix { card, device, mix } if !mix.sized => Plan::Soft { card: *card, device: *device },
+            Plan::Mix { card, device, mix } if !mix.sized => Plan::SoftWeb { card: *card, device: *device, channels: mix.channels },
             p => p.clone(),
         };
         let level = level.min(100);
@@ -504,7 +531,7 @@ impl Softvol {
             }
             let card = match plan {
                 Plan::Hw { .. } => return Synced { managed: true, ..Default::default() },
-                Plan::Mix { card, .. } | Plan::Soft { card, .. } | Plan::Direct { card, .. } => card,
+                Plan::Mix { card, .. } | Plan::Soft { card, .. } | Plan::SoftWeb { card, .. } | Plan::Direct { card, .. } => card,
             };
             let mut prime_failed = false;
             if st.level != Some(level) {
@@ -531,7 +558,7 @@ impl Softvol {
                             log::info!("sound: could not open {PCM} on card {card} either way: {e}");
                             let device = plan.device();
                             st.exclusive.retain(|d| *d != (card, device));
-                            if matches!(plan, Plan::Soft { .. } | Plan::Direct { .. }) {
+                            if matches!(plan, Plan::Soft { .. } | Plan::SoftWeb { .. } | Plan::Direct { .. }) {
                                 let back = wanted.clone();
                                 let _ = self.write_plan(&mut st, &back);
                             }
@@ -906,6 +933,23 @@ mod tests {
         assert!(!config_text(&Plan::Hw { card: 0, device: 0 }).contains(WEB_PCM));
         // the engine's own file: the system's configuration, then the web PCM is the default
         assert_eq!(WEB_ALSA_CONF, "</usr/share/alsa/alsa.conf>\npcm.!default iyakkiweb\n");
+    }
+
+    #[test]
+    fn the_t2_keeps_plughw_for_the_players_and_gives_the_engine_a_web_pcm_over_hw_with_the_same_slider() {
+        // MacBookPro16,2: the players' S16 stereo plays through plug > softvol > plughw, but the engine's WebAudio could not start
+        // its output on that chain (the page froze on the synchronous start); it gets linear > route > softvol > hw
+        let t = config_text(&Plan::SoftWeb { card: 0, device: 0, channels: 4 });
+        assert!(t.starts_with(MARKER) && braces(&t) == 0, "{t}");
+        assert!(t.contains("slave.pcm \"plughw:0,0\"") && t.contains("pcm.!default {\n    type plug\n    slave.pcm \"iyakkivol\""), "{t}");
+        assert!(t.contains("pcm.iyakkiwebvol {\n    type softvol\n    slave.pcm \"hw:0,0\""), "{t}");
+        assert_eq!(t.matches("name \"IYAKKI\"").count(), 2, "one control, two softvols");
+        assert!(t.ends_with("pcm.iyakkiweb {\n    type plug\n    slave.pcm \"iyakkiwebvol\"\n}\n"), "{t}");
+        assert!(!t.contains("iyakkiwebroute") && !t.contains("type linear"), "{t}");
+        // the volume boost reaches both ways in
+        assert!(config_text_boost(&Plan::SoftWeb { card: 0, device: 0, channels: 4 }, 6).matches("max_dB 6.0").count() == 2);
+        // an unprobed one-channel guess is exactly the plain plan
+        assert_eq!(config_text(&Plan::SoftWeb { card: 0, device: 0, channels: 1 }), config_text(&Plan::Soft { card: 0, device: 0 }));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Connect a workspace to a git service (Gitea): create the repository through the API (private by default, with IYAKKI's own token from
 //! the vault), set `origin` in the workspace's git configuration (the URL never holds a credential), and push the current branch after a
-//! second approval. The token travels only in a 0600 temp file for curl (`-K`) and in environment variables for git; never in an
+//! second approval. The token travels only in memory (the in-house HTTP client) and in environment variables for git; never in an
 //! argument, a URL, a log or a result.
 
 use std::path::{Path, PathBuf};
@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use super::engine::first_line;
 use super::installed::{self, Installed, WsLink};
-use super::secrets::SecretFile;
 use super::*;
 use crate::wsexec::Runner;
 
@@ -26,45 +25,39 @@ pub trait Http: Send + Sync {
     fn request(&self, method: &str, url: &str, token: Option<&str>, body: Option<&str>) -> Result<HttpResp, String>;
 }
 
-/// curl through the [`Runner`], with everything that may hold a secret in a private temp config file.
-pub struct CurlHttp {
-    pub run: Arc<dyn Runner>,
-    pub tmp: PathBuf,
+/// The in-house HTTP client ([`crate::gitnet::NetGit`]): the image has no curl. The token lives in memory only and is sent as
+/// `Authorization: token <t>`; it is never in an argument, a file or a message.
+pub struct NetHttp {
+    pub net: Arc<dyn crate::gitconn::GitHttp>,
 }
 
-fn curl_quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r"))
+impl Default for NetHttp {
+    fn default() -> Self {
+        NetHttp { net: Arc::new(crate::gitnet::NetGit::default()) }
+    }
 }
 
-impl Http for CurlHttp {
+impl Http for NetHttp {
     fn request(&self, method: &str, url: &str, token: Option<&str>, body: Option<&str>) -> Result<HttpResp, String> {
-        if !self.run.has("curl") {
-            return Err("curl is not installed".into());
-        }
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Err("only http and https addresses are used".into());
         }
-        let mut cfg = format!("silent\nshow-error\nmax-time = 20\nurl = {}\nrequest = {}\nwrite-out = \"\\n%{{http_code}}\"\n", curl_quote(url), curl_quote(method));
-        if let Some(t) = token {
-            cfg.push_str(&format!("header = {}\n", curl_quote(&format!("Authorization: token {t}"))));
+        let r = crate::gitconn::Req {
+            method: method.into(),
+            url: url.into(),
+            token: token.map(str::to_string),
+            style: crate::gitconn::Style::Token,
+            body: body.map(str::to_string),
+            cert: None,
+            accept: None,
+            max_bytes: 256 * 1024,
+            timeout_s: 20,
+        };
+        match self.net.send(&r) {
+            Ok(o) => Ok(HttpResp { status: o.status, body: o.body }),
+            Err(crate::gitconn::NetErr::Unreachable(m)) => Err(if m.trim().is_empty() { "could not connect".into() } else { first_line(&m) }),
+            Err(crate::gitconn::NetErr::Tls(m)) | Err(crate::gitconn::NetErr::Other(m)) => Err(first_line(&m)),
         }
-        cfg.push_str("header = \"Accept: application/json\"\n");
-        if let Some(b) = body {
-            cfg.push_str(&format!("header = \"Content-Type: application/json\"\ndata = {}\n", curl_quote(b)));
-        }
-        let f = SecretFile::new(&self.tmp, &cfg)?;
-        let o = self.run.run(&std::env::temp_dir(), &["curl".into(), "-K".into(), f.path.display().to_string()], &[], Duration::from_secs(30), 256 * 1024, None);
-        drop(f);
-        if o.missing {
-            return Err("curl is not installed".into());
-        }
-        let text = o.stdout;
-        let (b, code) = text.rsplit_once('\n').ok_or_else(|| if o.stderr.trim().is_empty() { "no answer".to_string() } else { first_line(&o.stderr) })?;
-        let status: u16 = code.trim().parse().map_err(|_| first_line(&o.stderr))?;
-        if status == 0 {
-            return Err(if o.stderr.trim().is_empty() { "could not connect".into() } else { first_line(&o.stderr) });
-        }
-        Ok(HttpResp { status, body: b.to_string() })
     }
 }
 
@@ -196,7 +189,7 @@ pub fn plan_connect(pl: &Platform, inst: &Installed, ws: &WsInfo, o: &ConnectOpt
     if !pl.vault.has(inst.token_vault().unwrap_or("-")) {
         p.blockers.push("the IYAKKI token of this service is not in your vault (unlock the vault, or connect again)".into());
     }
-    if inst.options.get("exposure") == "ClusterIP" {
+    if inst.options.get("exposure") == "ClusterIP" && gitea::Gitea::loopback_of(&inst.options).is_none() {
         p.blockers.push("this Gitea is only reachable inside the cluster (ClusterIP); expose it with NodePort or Ingress to connect a workspace".into());
     }
     if base.starts_with("http://") {

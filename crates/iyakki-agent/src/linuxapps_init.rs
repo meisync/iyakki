@@ -492,12 +492,8 @@ fn init(spec: &Spec) -> Result<Never, String> {
         Ok(_) => return Err("the sandbox folder holds a file named .old; delete the sandbox and create it again".into()),
         Err(_) => std::fs::create_dir(&put_old).map_err(|e| format!("{put_old}: {e}"))?,
     }
-    let (r, p) = (cs(root)?, cs(&put_old)?);
-    // SAFETY: pivot_root(new_root, put_old) with valid strings.
-    if unsafe { libc::syscall(libc::SYS_pivot_root, r.as_ptr(), p.as_ptr()) } != 0 {
-        return Err(os("pivot_root"));
-    }
-    std::env::set_current_dir("/").map_err(|e| format!("chdir /: {e}"))?;
+    enter_root(root, &put_old).map_err(|e| format!("entering the sandbox failed: {e}"))?;
+    std::env::set_current_dir("/").map_err(|e| format!("entering the sandbox failed: chdir /: {e}"))?;
     // from here "/" is the sandbox; the host is at /.old until it is detached below, and a link inside the sandbox can only lead inside it
     let old = |p: &str| format!("/.old{p}");
     // /proc: this pid namespace's own
@@ -586,6 +582,64 @@ fn init(spec: &Spec) -> Result<Never, String> {
     eprintln!("linuxapp-init: could not run {}: {e}", spec.cmd[0]);
     // SAFETY: leave at once.
     unsafe { libc::_exit(127) }
+}
+
+/// The file system type of the mount at `/`, from the text of `/proc/self/mountinfo` (the last entry for `/` is the one on top). A system started
+/// from an initramfs reports `rootfs`: that mount has no parent, so `pivot_root` refuses it with EINVAL.
+pub(crate) fn root_fstype(mountinfo: &str) -> Option<String> {
+    let mut found = None;
+    for line in mountinfo.lines() {
+        let Some((before, after)) = line.split_once(" - ") else { continue };
+        if before.split_whitespace().nth(4) == Some("/") {
+            found = after.split_whitespace().next().map(str::to_string);
+        }
+    }
+    found
+}
+
+pub(crate) fn root_cannot_pivot(mountinfo: &str) -> bool {
+    root_fstype(mountinfo).as_deref() == Some("rootfs")
+}
+
+/// Make `root` (already a mount point of its own) the root of this process. First choice: `pivot_root`, with the host left at `put_old`.
+/// When the current root is the initramfs's `rootfs` (every IYAKKI image, found 2026-10-29 on a Mac: `pivot_root: Invalid argument`), the
+/// way `switch_root` does it: the host tree is bound at `put_old`, the sandbox is moved over `/` and `chroot(".")` makes it the root.
+/// Either way the host is at `/.old` afterwards, so the setup after this works the same, and `/.old` is detached at the end.
+/// Isolation in the second mode, honestly: the old root mount stays in the kernel under the new one, so it is not reachable by any path, the
+/// process holds no descriptor into it, and it has no capabilities left to mount, chroot, pivot_root, unshare or setns (the seccomp list
+/// refuses those too); it is a chroot plus a covered mount, not a replaced root.
+/// Tests set this to take the move way on a PC whose root could be pivoted.
+#[cfg(test)]
+pub(crate) static FORCE_MOVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn enter_root(root: &str, put_old: &str) -> Result<(), String> {
+    let (r, p) = (cs(root)?, cs(put_old)?);
+    #[allow(unused_mut)]
+    let mut rootfs = root_cannot_pivot(&std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default());
+    #[cfg(test)]
+    if FORCE_MOVE.load(std::sync::atomic::Ordering::SeqCst) {
+        rootfs = true;
+    }
+    if !rootfs {
+        // SAFETY: pivot_root(new_root, put_old) with valid strings.
+        if unsafe { libc::syscall(libc::SYS_pivot_root, r.as_ptr(), p.as_ptr()) } == 0 {
+            return Ok(());
+        }
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::EINVAL) {
+            return Err(format!("pivot_root: {e}"));
+        }
+    }
+    // the move way
+    mnt("/", put_old, "", libc::MS_BIND | libc::MS_REC, "").map_err(|e| format!("keeping the host at /.old: {e}"))?;
+    std::env::set_current_dir(root).map_err(|e| format!("chdir {root}: {e}"))?;
+    mnt(".", "/", "", libc::MS_MOVE, "").map_err(|e| format!("moving the sandbox over /: {e}"))?;
+    let dot = cs(".")?;
+    // SAFETY: valid path.
+    if unsafe { libc::chroot(dot.as_ptr()) } != 0 {
+        return Err(os("chroot"));
+    }
+    Ok(())
 }
 
 /// The mount flags the kernel locks when a namespace is copied from an unprivileged user (read-only, no set-user-id, no devices, no
@@ -710,5 +764,19 @@ mod tests {
         assert_eq!(p[p.len() - 2].k, 0x7fff_0000);
         assert!(p[p.len() - 1].k & 0xffff == libc::EPERM as u32);
         assert!(denied.len() < 250, "a jump distance has to fit in a byte");
+    }
+    #[test]
+    fn the_root_mount_type_is_read_from_mountinfo() {
+        let initramfs = "1 1 0:2 / / rw - rootfs rootfs rw,size=1000k\n20 1 0:19 / /proc rw,nosuid - proc proc rw\n";
+        assert_eq!(root_fstype(initramfs).as_deref(), Some("rootfs"));
+        assert!(root_cannot_pivot(initramfs));
+        let ext4 = "25 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n26 25 0:5 / /dev rw - devtmpfs udev rw\n";
+        assert_eq!(root_fstype(ext4).as_deref(), Some("ext4"));
+        assert!(!root_cannot_pivot(ext4));
+        // a file system mounted on top of the initramfs's `/` is the root that counts
+        let stacked = "1 1 0:2 / / rw - rootfs rootfs rw\n30 1 0:25 / / rw - tmpfs tmpfs rw\n";
+        assert_eq!(root_fstype(stacked).as_deref(), Some("tmpfs"));
+        assert_eq!(root_fstype(""), None);
+        assert!(!root_cannot_pivot("garbage"));
     }
 }

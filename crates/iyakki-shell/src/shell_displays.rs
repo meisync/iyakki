@@ -39,6 +39,22 @@ impl Shell {
         }
     }
 
+    /// The display being drawn now.
+    pub(in crate::shell) fn panes_drawing_display(&self) -> usize {
+        self.panes.d.drawing
+    }
+
+    /// Pretend display `k` is being drawn (tests of what only the main display shows).
+    #[cfg(test)]
+    pub(in crate::shell) fn test_set_drawing_display(&mut self, k: usize) {
+        self.panes.d.drawing = k;
+    }
+
+    /// The pane in focus on the working display, when there is a workspace.
+    pub(in crate::shell) fn panes_focus_index(&self) -> Option<usize> {
+        self.panes.ws.as_ref().map(|ws| ws.focus)
+    }
+
     pub(in crate::shell) fn panes_active_display(&self) -> usize {
         self.panes.d.active
     }
@@ -452,6 +468,7 @@ impl Shell {
         self.panes.ws = Some(wk);
         self.panes.d.inactive = true;
         self.panes.d.drawing = k;
+        self.vol.rects.retain(|p| p.disp != k);
         g.hits.clear();
         g.clear_probes();
         g.mouse = self.disp_mouse(k);
@@ -464,8 +481,28 @@ impl Shell {
         self.panes.d.other_hits[k] = std::mem::take(&mut g.hits);
     }
 
+    /// Settings -> Displays "Touch calibration": the display being asked shows a bright prompt, the others a quiet one.
+    fn draw_touch_prompt(&mut self, g: &mut Gfx, k: usize) {
+        let Some(asked) = crate::touchmap::shared().calibrating().map(str::to_string) else { return };
+        let (w, h) = (g.width() as f32, g.height() as f32);
+        let s = scale_for(g.width(), g.height());
+        let mine = self.panes.d.list.get(k).is_some_and(|d| d.name == asked);
+        g.rect(0.0, 0.0, w, h, [3, 5, 14, if mine { 215 } else { 170 }]);
+        let (title, color) = if mine { ("Touch this screen".to_string(), crate::fx::CYAN) } else { (format!("Touch the highlighted screen ({asked})"), DIM) };
+        let size = if mine { h * 0.09 } else { 30.0 * s };
+        let tw = g.text_width(size, &title, Face::Bold);
+        g.text((w - tw) / 2.0, h * 0.38, size, color, &title, Face::Bold);
+        if mine {
+            let sub = "With the touch screen that belongs to this display. Esc skips it.";
+            let sw = g.text_width(22.0 * s, sub, Face::Sans);
+            g.text((w - sw) / 2.0, h * 0.38 + size * 1.5, 22.0 * s, TEXT, sub, Face::Sans);
+            g.rrect_outline(8.0 * s, 8.0 * s, w - 16.0 * s, h - 16.0 * s, 12.0 * s, 4.0 * s, crate::fx::CYAN);
+        }
+    }
+
     /// Settings -> Displays "Identify": a big number on each screen for a few seconds.
     fn draw_identify(&mut self, g: &mut Gfx, k: usize) {
+        self.draw_touch_prompt(g, k);
         if !hub().identifying(now_ms()) {
             return;
         }

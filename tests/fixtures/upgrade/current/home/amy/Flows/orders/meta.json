@@ -1,0 +1,20 @@
+{
+  "draft_rev": 0,
+  "published": 1,
+  "schema": 1,
+  "tags": {
+    "stable": 1
+  },
+  "versions": [
+    {
+      "approved_by": "",
+      "at_ms": 1700000000000,
+      "author": "amy",
+      "changelog": "first version",
+      "changes": [],
+      "hash": "0000000000000000",
+      "label": "first",
+      "version": 1
+    }
+  ]
+}

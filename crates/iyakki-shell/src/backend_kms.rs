@@ -445,6 +445,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// The loop on a real machine. Not run in tests (it needs a real card and real input devices).
 fn run_loop(shell: &mut crate::shell::Shell, mut kms: Kms<crate::display::kms::RealDrm>, stop: &AtomicBool, max_displays: usize) -> Result<(), String> {
     let _ = max_displays;
+    crate::touchmap::init(&shell.display_dir());
     // the text console stays off while the shell owns the screens
     std::mem::forget(crate::backend::GraphicsMode::enter());
     let plan_shared = Mutex::new(kms.plan().clone());
@@ -459,14 +460,69 @@ fn run_loop(shell: &mut crate::shell::Shell, mut kms: Kms<crate::display::kms::R
         let input = std::thread::Builder::new().name("iyakki-input".into()).stack_size(8 * 1024 * 1024).spawn_scoped(sc, move || {
             let mut st = InputState::new(b0.max(1) as u32, b1.max(1) as u32);
             let mut devs: Vec<Device> = Vec::new();
+            let mut targets: Vec<(String, Option<crate::touchmap::OutRect>)> = Vec::new();
+            let mut logged: Vec<(String, String)> = Vec::new();
+            let mut mapped: Option<(Vec<crate::touchmap::OutRect>, Vec<String>, u64)> = None;
             let mut last_scan = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);
             while !stop.load(Ordering::Relaxed) && !quit.load(Ordering::Relaxed) {
                 let plan = lock(&plan_shared).clone();
                 let (bw, bh) = plan.bounds();
                 st.w = bw.max(1);
                 st.h = bh.max(1);
-                for (raw, abs, pad) in poll_devices(&mut devs, 10) {
-                    for ev in (match pad { Some(range) => st.feed_pad(raw, &range), None => st.feed(raw, abs) }) {
+                // each touch screen is mapped onto the display it belongs to; looked at again when the displays, the touch
+                // devices or the person's choices change
+                {
+                    let keys: Vec<String> = devs.iter().filter_map(|d| d.touch.as_ref().map(|t| t.key.clone())).collect();
+                    let outs = crate::touchmap::outs_of_plan(&plan);
+                    let gen = crate::touchmap::shared().generation();
+                    let now_key = (outs.clone(), keys.clone(), gen);
+                    if mapped.as_ref() != Some(&now_key) {
+                        let tdevs: Vec<std::sync::Arc<crate::touchmap::TouchDev>> = devs.iter().filter_map(|d| d.touch.clone()).collect();
+                        targets = crate::touchmap::refresh(&tdevs, &outs, &mut logged);
+                        mapped = Some(now_key);
+                    }
+                    crate::touchmap::shared().tick(crate::touchmap::now_ms());
+                }
+                let keys_before: Vec<String> = devs.iter().filter_map(|d| d.touch.as_ref().map(|t| t.key.clone())).collect();
+                let mut batch: Vec<Event> = Vec::new();
+                for (raw, abs, pad, touch) in poll_devices(&mut devs, 10) {
+                    let evs = match (pad, touch) {
+                        (Some(range), _) => st.feed_pad(raw, &range),
+                        (None, Some(t)) => {
+                            let target = targets.iter().find(|x| x.0 == t.key).and_then(|x| x.1.as_ref());
+                            let o = st.feed_touch(raw, &t, target);
+                            let mut m = crate::touchmap::shared();
+                            if m.calibrating().is_some() {
+                                // this tap teaches which display the device belongs to; it does not click
+                                if o.down {
+                                    if let Some((_, disp)) = m.tap(&t.key, crate::touchmap::now_ms()) {
+                                        log::info!("touch: {} {} -> {disp} (taught by the touch calibration)", t.id, t.name);
+                                    }
+                                }
+                                Vec::new()
+                            } else {
+                                o.events
+                            }
+                        }
+                        _ => {
+                            let evs = st.feed(raw, abs);
+                            let mut m = crate::touchmap::shared();
+                            if m.calibrating().is_some() && evs.contains(&Event::Key(crate::ui::Key::Esc)) {
+                                m.skip_calibration(crate::touchmap::now_ms()); // nothing to touch on this display
+                                Vec::new()
+                            } else {
+                                evs
+                            }
+                        }
+                    };
+                    batch.extend(evs);
+                }
+                // a touch screen that was unplugged lifts its finger
+                for k in keys_before.iter().filter(|k| !devs.iter().any(|d| d.touch.as_ref().is_some_and(|t| &t.key == *k))) {
+                    batch.extend(st.touch_gone(k));
+                }
+                {
+                    for ev in batch {
                         // the pointer lives on the arrangement: pull it back onto an output and tell the display it is on
                         let (cx, cy) = plan.clamp(st.x, st.y);
                         st.x = cx;
@@ -506,6 +562,7 @@ fn run_loop(shell: &mut crate::shell::Shell, mut kms: Kms<crate::display::kms::R
         let mut last_req = Instant::now();
         let mut last_look = Instant::now();
         let mut seen_gen = u64::MAX;
+        let mut seen_calib = 0u64;
         let mut first = true;
         let mut ptr_shown: Option<(usize, i32, i32)> = None;
         while !stop.load(Ordering::Relaxed) && !quit.load(Ordering::Relaxed) {
@@ -577,6 +634,11 @@ fn run_loop(shell: &mut crate::shell::Shell, mut kms: Kms<crate::display::kms::R
                     Ok(_) => {}
                     Err(e) => log::warn!("shell: a display change could not be shown: {e}"),
                 }
+            }
+            let cg = crate::touchmap::shared().generation();
+            if cg != seen_calib {
+                seen_calib = cg; // the touch calibration prompt appears, moves on or ends
+                dirty = true;
             }
             let (px, py) = *lock(&pointer);
             let loc = kms.plan().locate(px, py);

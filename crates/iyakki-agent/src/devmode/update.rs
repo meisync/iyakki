@@ -619,6 +619,14 @@ fn latest_prev(env: &Env) -> Option<(String, String)> {
 
 /// Do the update. The caller has checked the scope; `plan` is run again here (the device decides, not the computer).
 pub fn apply(env: &Env, m: &Manifest, force: bool, who: &str) -> Result<Value, String> {
+    apply_with_entry(env, m, force, who, None)
+}
+
+/// [`apply`], with the boot menu's "previous version" entry pointing at `entry` (`id` of a folder in `boot-prev/`, version) instead of
+/// the copy of the version being replaced. The Update centre's rollback uses it: while the files are replaced, the entry starts the
+/// version being restored, so a power cut cannot leave only the version that was being left. The version being replaced is still
+/// saved in `boot-prev/`.
+pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: Option<(String, String)>) -> Result<Value, String> {
     let p = plan(env, m, force)?;
     let staging = env.staging();
     // 1. the staged files are the right ones
@@ -666,11 +674,12 @@ pub fn apply(env: &Env, m: &Manifest, force: bool, who: &str) -> Result<Value, S
         env.dm.log(who, "", "dev.update.prev", &format!("kept {} in boot-prev/{}", run.on_disk(), prev.as_ref().map(|p| p.0.as_str()).unwrap_or("")), true);
     }
     let prev = prev.or_else(|| latest_prev(env));
+    let entry_prev = entry.or_else(|| prev.clone());
     drop(ro);
     // 3. the menu entry for it goes into the CURRENT menu first, then the marker
     let vol = env.boot.open(true)?;
     let cfg_now = find_ci(&vol.root, "boot/grub/grub.cfg").and_then(|p| std::fs::read_to_string(p).ok());
-    if let (Some((id, ver)), Some(cfg)) = (&prev, &cfg_now) {
+    if let (Some((id, ver)), Some(cfg)) = (&entry_prev, &cfg_now) {
         if touches_kernel {
             let with = with_previous_entry(cfg, id, ver)?;
             replace_file(env, &vol, "boot/grub/grub.cfg", Either::Bytes(with.as_bytes()))?;
@@ -696,7 +705,7 @@ pub fn apply(env: &Env, m: &Manifest, force: bool, who: &str) -> Result<Value, S
         env.dm.log(who, "", "dev.update.file", &format!("writing {n} ({} bytes)", f.size), true);
         if key(n) == "boot/grub/grub.cfg" {
             let new_cfg = std::fs::read_to_string(staging.join(n)).map_err(|e| e.to_string())?;
-            let out = match &prev {
+            let out = match &entry_prev {
                 Some((id, ver)) => with_previous_entry(&new_cfg, id, ver)?,
                 None => new_cfg,
             };

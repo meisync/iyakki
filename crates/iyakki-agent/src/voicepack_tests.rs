@@ -113,7 +113,7 @@ const WAIT: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_secs(5);
 
 #[test]
-fn the_review_lists_the_downloads_where_it_runs_both_licence_texts_and_the_espeak_ng_note() {
+fn the_review_lists_the_downloads_where_it_runs_the_licence_boundary_and_the_espeak_ng_note() {
     for there in [true, false] {
         let lines = review_lines(there);
         assert!(review_has_required(&lines), "{there}");
@@ -129,30 +129,25 @@ fn the_review_lists_the_downloads_where_it_runs_both_licence_texts_and_the_espea
         assert!(t.contains("Kokoro reads English only") && t.contains("Whisper tiny understands many languages"));
         // settings, self-test, Undo
         assert!(t.contains("speech to text = Whisper-Tiny, reading voice = kokoro-v1") && t.contains("Remove puts the old ones back") && t.contains("plain pass or fail"));
-        // licences: names first, then the texts
-        assert!(t.contains("MIT, Copyright (c) 2022 OpenAI") && t.contains("Kokoro-82M weights: Apache-2.0"));
-        assert!(t.contains("Permission is hereby granted, free of charge") && t.contains("Apache License") && t.contains("Version 2.0, January 2004") && t.contains("TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION"));
-        // the GPL part, said plainly: never linked, never shipped
+        // the boundary: integration code only, the models keep their own licences
+        assert!(t.contains("IYAKKI provides integration code only") && t.contains("keep their own licences") && t.contains("never redistributes them"));
+        assert!(!t.contains("Apache License") && !t.contains("Permission is hereby granted"), "no licence text is shown as if it covered the models");
         assert!(t.contains("espeak-ng (GPL-3.0-or-later)") && t.contains("separate program") && t.contains("never links it and never ships it"));
         assert!(t.contains("Not shipped with IYAKKI; downloaded at your click"));
-        // the texts come after the names, so they are read before the button
-        assert!(t.find("Permission is hereby").unwrap() > t.find("Licences (the texts are below").unwrap());
     }
     // Lemonade there or not changes only the line about it
     let (a, b) = (review_lines(true).join("\n"), review_lines(false).join("\n"));
     assert!(a.contains("nothing else is downloaded") && b.contains("it is installed first, with k3s"));
     // the card's one-line licence says the same
-    assert!(Item::VoicePack.licence().contains("MIT") && Item::VoicePack.licence().contains("Apache-2.0") && Item::VoicePack.licence().contains("espeak-ng") && Item::VoicePack.licence().contains("not shipped with IYAKKI; downloaded at your click"));
-    // the Apache text is the real one (the project's own LICENSE file, which is Apache-2.0)
-    assert!(APACHE_2.contains("Apache License") && APACHE_2.contains("Version 2.0") && APACHE_2.len() > 10_000);
-    assert!(MIT_WHISPER.starts_with("MIT License") && MIT_WHISPER.contains("OpenAI"));
+    let l = Item::VoicePack.licence();
+    assert!(l.contains("integration code only") && l.contains("own licences") && l.contains("not shipped with IYAKKI; downloaded at your click"), "{l}");
 }
 
 #[test]
 fn the_item_is_a_voice_item_that_needs_lemonade_in_the_usual_order_and_is_never_installed_by_the_image() {
     assert_eq!(Item::parse("voice-pack"), Some(Item::VoicePack));
     assert_eq!(Item::VoicePack.group(), Group::Voice);
-    assert_eq!(crate::quickinstall::items_of(Group::Voice), [Item::Kokoro, Item::IndicTts, Item::VoicePack]);
+    assert_eq!(crate::quickinstall::items_of(Group::Voice), [Item::Kokoro, Item::VoicePack]);
     assert_eq!(Item::VoicePack.needs(), &[Item::Lemonade]);
     assert_eq!(order(Item::VoicePack, &|_| false), [Item::K3s, Item::Lemonade, Item::VoicePack]);
     assert_eq!(order(Item::VoicePack, &|i| i == Item::K3s), [Item::Lemonade, Item::VoicePack]);
@@ -175,7 +170,7 @@ fn the_step_pulls_both_models_records_them_tests_marks_and_asks_for_the_settings
     crate::quickinstall::run_step(Item::VoicePack, &mut f, WAIT, POLL).unwrap();
     assert_eq!(f.calls, ["pull Whisper-Tiny", "pull kokoro-v1", "record Whisper-Tiny,kokoro-v1", "selftest", "mark voice-pack Whisper-Tiny and kokoro-v1 in Lemonade", "after voice-pack"]);
     assert!(f.lines.iter().any(|l| l.contains("Self-test passed")));
-    assert!(f.lines[0].contains("MIT") && f.lines[0].contains("espeak-ng") && f.lines[0].contains("not shipped with IYAKKI; downloaded at your click"), "the log opens with the licences");
+    assert!(f.lines[0].contains("integration code only") && f.lines[0].contains("not shipped with IYAKKI; downloaded at your click"), "the log opens with the licences");
     assert_eq!(crate::jobs::progress_hint(&f.lines.join("\n")), Some(100.0));
 }
 

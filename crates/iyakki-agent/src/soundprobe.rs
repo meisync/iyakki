@@ -247,9 +247,9 @@ pub fn aplay_dump(card: u32, device: u32) -> Result<String, String> {
     let (so, se) = (child.stdout.take(), child.stderr.take());
     let end = Instant::now() + Duration::from_secs(3);
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(st)) => break st,
-            Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(10)),
+        match iyakki_core_api::child_status(&mut child) {
+            st if st.is_over() => break st,
+            _ if Instant::now() < end => std::thread::sleep(Duration::from_millis(10)),
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -273,7 +273,7 @@ pub fn aplay_dump(card: u32, device: u32) -> Result<String, String> {
     if text.contains("FORMAT:") {
         Ok(text)
     } else {
-        Err(format!("aplay ended with {status}: {}", text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim()))
+        Err(format!("aplay ended with {}: {}", status.describe(), text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim()))
     }
 }
 

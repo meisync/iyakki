@@ -39,7 +39,7 @@ fn a_cluster_that_goes_down_and_a_full_disk_are_warnings_in_the_administrators_i
     }
     let notes = sh.services_for_demo().inbox.list("root");
     assert!(notes.iter().any(|n| n.title == "The dev cluster keeps failing and was stopped" && n.body.contains("stopped trying")), "the give-up is announced too");
-    let down: Vec<_> = notes.iter().filter(|n| n.title == "The dev cluster went down").collect();
+    let down: Vec<_> = notes.iter().filter(|n| n.title == "The dev cluster stopped and was restarted").collect();
     assert_eq!(down.len(), 1, "{:?}", notes.iter().map(|n| n.title.clone()).collect::<Vec<_>>());
     assert!(down[0].body.contains("boom: out of memory") && down[0].kind == iyakki_agent::inbox::Kind::Warning, "{:?}", down[0]);
     assert!(sh.toast_text().is_some_and(|t| t.contains("The dev cluster")), "{:?}", sh.toast_text());
@@ -47,7 +47,7 @@ fn a_cluster_that_goes_down_and_a_full_disk_are_warnings_in_the_administrators_i
     for _ in 0..65 {
         sh.handle(&Event::Tick);
     }
-    assert_eq!(sh.services_for_demo().inbox.list("root").iter().filter(|n| n.title == "The dev cluster went down").count(), 1);
+    assert_eq!(sh.services_for_demo().inbox.list("root").iter().filter(|n| n.title == "The dev cluster stopped and was restarted").count(), 1);
     // a nearly full disk
     k.refresh_health();
     k.check_disk_for_test(91);

@@ -113,6 +113,8 @@ pub struct StartRequest {
     pub at_ms: Option<i64>,
     pub idempotency_key: Option<String>,
     pub parent: Option<String>,
+    /// Permissions the person gave this run only (see [`Run::grants`]); set by the screen after an "Allow this time".
+    pub grants: Vec<String>,
 }
 
 impl StartRequest {
@@ -321,6 +323,7 @@ impl Inner {
 /// A run with every node pending and every edge open (the engine starts from it; tests drive the graph rules with it).
 pub fn blank_run(id: &str, flow: Flow, inputs: Value, trigger: TriggerInfo, now: i64) -> Run {
     let mut r = Run {
+        grants: vec![],
         id: id.to_string(),
         flow_id: flow.id.clone(),
         flow,
@@ -460,6 +463,7 @@ impl Engine {
         let mut run = blank_run(&id, flow, inputs, req.trigger.clone(), now);
         run.idempotency_key = req.idempotency_key.clone();
         run.parent = req.parent.clone();
+        run.grants = req.grants.clone();
         if let Some(at) = req.at_ms.filter(|a| *a > now) {
             run.status = RunStatus::Scheduled;
             run.scheduled_ms = Some(at);
@@ -639,6 +643,28 @@ impl Engine {
         self.inner.host.audit("flow.node.retry", &format!("{run_id}/{node}"));
         self.ensure_driver(run_id);
         self.inner.send(run_id, Ctl::RetryNode { node: node.into() });
+        Ok(())
+    }
+
+    /// "Allow this time": give the run one permission and run its stopped steps again. Only the screen calls this, after the person's own answer.
+    pub fn grant_run(&self, run_id: &str, permission: &str, by: &str) -> Result<(), String> {
+        let r = self.inner.get(run_id).ok_or("no such run")?;
+        if r.status.is_terminal() {
+            return Err("that run is over".into());
+        }
+        let stopped: Vec<String> = r.nodes.iter().filter(|(_, n)| n.state == NodeState::Failed && n.needs_person && n.permission == permission).map(|(k, _)| k.clone()).collect();
+        if stopped.is_empty() {
+            return Err("no step of that run is waiting for this permission".into());
+        }
+        self.inner.update(run_id, |r| {
+            if !r.grants.iter().any(|g| g == permission) {
+                r.grants.push(permission.to_string());
+            }
+        });
+        self.inner.host.audit("flow.permission.granted_once", &format!("{run_id} {permission} by {by}"));
+        for n in stopped {
+            self.retry_node(run_id, &n)?;
+        }
         Ok(())
     }
 

@@ -261,14 +261,14 @@ fn the_show_hide_table_per_profile_for_every_item() {
                 ("cpu4", Elasticsearch) => assert!(matches!(v, Vis::NotRecommended(_))),
                 ("unknown", MacHost) => assert_eq!(v, Vis::Show),
                 // CPU-friendly and unrelated tools are always shown
-                (_, Node | Python | K3s | DuckDb | Registry | ClaudeCode | Copilot | Kokoro | IndicTts | Ffmpeg | MacFirmware | MacCamera | LinuxApps | LinuxWindows | FwQualcommBt | FwRealtekNet | FwBroadcomNet | FwAtheros9170) => assert_eq!(v, Vis::Show, "{name} {i:?}"),
+                (_, Node | Python | K3s | DuckDb | Registry | ClaudeCode | Copilot | Kokoro | Ffmpeg | MacFirmware | MacCamera | LinuxApps | LinuxWindows | FwQualcommBt | FwRealtekNet | FwBroadcomNet | FwAtheros9170) => assert_eq!(v, Vis::Show, "{name} {i:?}"),
                 _ => {}
             }
         }
     }
     // the hard rules: core and CPU tools never hide anywhere
     for (name, p) in profiles() {
-        for i in [Kokoro, IndicTts, K3s, Node, Python, ClaudeCode] {
+        for i in [Kokoro, K3s, Node, Python, ClaudeCode] {
             assert!(rule(&p, i).shown(), "{name} {i:?}");
         }
     }

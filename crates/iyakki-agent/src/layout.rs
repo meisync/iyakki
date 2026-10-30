@@ -10,7 +10,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// The built-in groups: (id, label). They stay as they are: they cannot be renamed, deleted or reordered.
-pub const BUILTIN: [(&str, &str); 4] = [("home", "Home"), ("web-media", "Web & Media"), ("work", "Work"), ("system", "System")];
+/// The ids are the ones of the first four-group layout (`home`, `web-media`, `work`, `system`), so saved layouts keep working;
+/// only the names changed. `apps` is where tiles installed later (custom tile apps, Store apps) go until the person moves them.
+pub const BUILTIN: [(&str, &str); 6] = [("home", "Ask & Create"), ("work", "Build"), ("web-media", "Media"), ("data", "Data"), ("system", "Devices & System"), ("apps", "Apps")];
+/// The group a tile of a Store or developer-mode app is in when nothing else says.
+pub const DEFAULT_APPS: &str = "apps";
 /// Longest group name, in characters.
 pub const MAX_NAME: usize = 16;
 /// Most groups a person can make.
@@ -94,10 +98,12 @@ impl Layout {
         if n.is_empty() {
             return None;
         }
-        // old section names: Assistant became Home, and the sample apps still say "My apps" (the section it was; now Work)
+        // old section names: Assistant became Home, "Web & Media" became Media, "My apps" is Apps; "Home", "Work" and "System"
+        // still find the groups that were renamed Ask & Create, Build and Devices & System
         let n = match n.as_str() {
             "assistant" => "home".to_string(),
-            "my apps" | "my-apps" => "work".to_string(),
+            "my apps" | "my-apps" => "apps".to_string(),
+            "web & media" => "web-media".to_string(),
             _ => n,
         };
         BUILTIN.iter().find(|(i, l)| *i == n || l.to_lowercase() == n).map(|(i, _)| i.to_string()).or_else(|| self.groups.iter().find(|g| g.label.to_lowercase() == n).map(|g| g.id.clone()))
@@ -116,7 +122,7 @@ impl Layout {
             return Err("The name has a character that cannot be shown.".into());
         }
         let low = n.to_lowercase();
-        let taken = BUILTIN.iter().any(|(i, l)| *i == low || l.to_lowercase() == low) || matches!(low.as_str(), "assistant" | "all" | "my apps" | "my-apps") || self.groups.iter().any(|g| g.label.to_lowercase() == low && Some(g.id.as_str()) != except);
+        let taken = BUILTIN.iter().any(|(i, l)| *i == low || l.to_lowercase() == low) || matches!(low.as_str(), "assistant" | "all" | "my apps" | "my-apps" | "web & media") || self.groups.iter().any(|g| g.label.to_lowercase() == low && Some(g.id.as_str()) != except);
         if taken {
             return Err(format!("There is already a group called “{n}”."));
         }
@@ -166,7 +172,7 @@ impl Layout {
         self.placed.retain(|_, g| g != id);
         self.order.remove(id);
         for c in self.app_groups.values_mut().filter(|c| c.target == id) {
-            c.target = "work".into();
+            c.target = DEFAULT_APPS.into();
         }
         Ok(n)
     }
@@ -229,15 +235,15 @@ impl Layout {
     pub fn app_default(&self, name: &str, declared: &str) -> (String, Option<String>) {
         let d = declared.trim();
         if d.is_empty() {
-            return ("work".into(), None);
+            return (DEFAULT_APPS.into(), None);
         }
         if let Some(id) = self.find(d) {
             return (id, None);
         }
         match self.app_groups.get(name) {
             Some(c) if c.asked.eq_ignore_ascii_case(d) && self.exists(&c.target) => (c.target.clone(), None),
-            Some(c) if c.asked.eq_ignore_ascii_case(d) => ("work".into(), None),
-            _ => ("work".into(), Some(d.to_string())),
+            Some(c) if c.asked.eq_ignore_ascii_case(d) => (DEFAULT_APPS.into(), None),
+            _ => (DEFAULT_APPS.into(), Some(d.to_string())),
         }
     }
 
@@ -250,11 +256,11 @@ impl Layout {
                 Ok(id) => id,
                 Err(e) => {
                     note = Some(e);
-                    "work".into()
+                    DEFAULT_APPS.into()
                 }
             }
         } else {
-            "work".into()
+            DEFAULT_APPS.into()
         };
         self.app_groups.insert(name.to_string(), AppChoice { asked: asked.trim().to_string(), target: target.clone() });
         (target, note)
@@ -319,7 +325,7 @@ mod tests {
         assert!(l.create_group("").is_err() && l.create_group("   ").is_err());
         assert!(l.create_group("12345678901234567").is_err(), "17 characters");
         assert!(l.create_group("1234567890123456").is_ok(), "16 characters");
-        for n in ["work", "WORK", "Home", "system", "Web & Media", "web-media", "assistant"] {
+        for n in ["work", "WORK", "Home", "system", "Web & Media", "web-media", "assistant", "Build", "Ask & Create", "Media", "Data", "Devices & System", "apps"] {
             assert!(l.create_group(n).is_err(), "{n}");
         }
         assert!(l.create_group("games").is_ok());
@@ -370,30 +376,42 @@ mod tests {
     #[test]
     fn an_app_that_names_a_group_goes_there_or_the_person_is_asked_once() {
         let mut l = Layout::default();
-        assert_eq!(l.app_default("a", ""), ("work".into(), None));
+        assert_eq!(l.app_default("a", ""), ("apps".into(), None));
         assert_eq!(l.app_default("a", "web & MEDIA"), ("web-media".into(), None), "a built-in group, any case");
         assert_eq!(l.app_default("a", "Assistant"), ("home".into(), None));
-        assert_eq!(l.app_default("a", "My apps"), ("work".into(), None), "the old name of Work: no question");
-        assert_eq!(l.app_default("a", "Games"), ("work".into(), Some("Games".into())), "missing: ask");
+        assert_eq!(l.app_default("a", "My apps"), ("apps".into(), None), "the old name of Apps: no question");
+        assert_eq!(l.app_default("a", "Games"), ("apps".into(), Some("Games".into())), "missing: ask");
         let (id, note) = l.answer_app_group("a", "Games", true);
         assert!(note.is_none() && l.exists(&id));
         assert_eq!(l.app_default("a", "Games"), (id.clone(), None));
         assert_eq!(l.app_default("b", "games"), (id.clone(), None), "another app finds the group by name now");
         // the other answer
-        assert_eq!(l.app_default("c", "Music"), ("work".into(), Some("Music".into())));
+        assert_eq!(l.app_default("c", "Music"), ("apps".into(), Some("Music".into())));
         l.answer_app_group("c", "Music", false);
-        assert_eq!(l.app_default("c", "Music"), ("work".into(), None), "remembered, not asked again");
-        assert_eq!(l.app_default("c", "Radio shows"), ("work".into(), Some("Radio shows".into())), "a different group asked for later: ask again");
-        // deleting the group the app was created for sends it to Work without asking again
+        assert_eq!(l.app_default("c", "Music"), ("apps".into(), None), "remembered, not asked again");
+        assert_eq!(l.app_default("c", "Radio shows"), ("apps".into(), Some("Radio shows".into())), "a different group asked for later: ask again");
+        // deleting the group the app was created for sends it to Apps without asking again
         assert_eq!(l.delete_group(&id), Ok(1));
-        assert_eq!(l.app_default("a", "Games"), ("work".into(), None));
+        assert_eq!(l.app_default("a", "Games"), ("apps".into(), None));
         // the person's own move wins over the app
-        l.place("app:a", "system", "work").unwrap();
+        l.place("app:a", "system", "apps").unwrap();
         assert_eq!(l.group_of("app:a", "web"), "system");
-        // a name that cannot be a group (too long) falls back to Work with a reason
+        // a name that cannot be a group (too long) falls back to Apps with a reason
         let (t, note) = l.answer_app_group("d", "A group name that is far too long", true);
-        assert_eq!(t, "work");
+        assert_eq!(t, "apps");
         assert!(note.is_some());
+    }
+
+    #[test]
+    fn the_six_built_in_groups_keep_the_old_ids_and_the_old_names_still_find_them() {
+        assert_eq!(BUILTIN.iter().map(|(_, l)| *l).collect::<Vec<_>>(), ["Ask & Create", "Build", "Media", "Data", "Devices & System", "Apps"]);
+        assert!(BUILTIN.iter().all(|(_, l)| l.chars().count() <= MAX_NAME));
+        let l = Layout::default();
+        for (old, id) in [("Home", "home"), ("Web & Media", "web-media"), ("work", "work"), ("System", "system"), ("My apps", "apps"), ("Assistant", "home"), ("devices & system", "system")] {
+            assert_eq!(l.find(old).as_deref(), Some(id), "{old}");
+        }
+        assert_eq!(l.app_default("x", "Web & Media"), ("web-media".into(), None), "an app.json from before the rename");
+        assert_eq!(l.app_default("x", ""), ("apps".into(), None), "no group named: Apps");
     }
 
     #[test]

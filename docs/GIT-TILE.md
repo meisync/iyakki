@@ -90,11 +90,37 @@ Read-only on hosts; a token is never shown, logged, put in an address, an audit 
 (connection and repository name) when a repository is opened, and the clone, fetch, pull and push lines the AI IDE's jobs write
 (`git.clone.start`, `git.fetch.start`, `git.pull.start`, `git.push`). The data of each view says where it comes from (the connection's place label).
 
+## In the AI IDE (the Git tab)
+
+The AI IDE has a **Git** tab after K8s (Ctrl+Shift+L, again to go back to the editor; the same tab strip and style as K8s). It is there for every account that may
+open the GIT tile (all roles but guests); others see no tab. It has two sub-views that never mix, chosen with the two buttons at the top:
+
+* **This project**: when the folder open in the IDE is a git working copy, the branch with ahead and behind and its upstream, the changed files (a letter
+  for the status: M changed, A added, D deleted, R renamed, ? new and not tracked, U conflict; "staged" when staged), the recent commits, and a viewer for the diff of
+  a changed file (against the last commit) or of a commit. Enter or a click shows the diff; `o` or **Open in editor** opens the file in the IDE editor (an
+  untracked file has no diff and says so; a deleted file has nothing to open). Tab moves between the lists and the diff, `r` reads again, `c` goes to the
+  connections. It is read with the git program (`status`, `log`, `diff`, `show`; `LocalRepo::working` and `diff_head` in `gitbrowse.rs`), on a thread, only
+  while the tab is drawn and again every 5 seconds. A clean copy, a folder that is not a repository (how to start one) and a missing git program have their own words.
+* **Connections**: this tile, drawn inside the tab: the connection picker (the list of Settings, Git; the last choice is remembered per person and shared with the tile),
+  the repositories of the host, and a repository's files, commits, branches (default marked), tags, issues and diffs. Esc at the top returns to This project.
+  With no connection it says *Connect a Git host...* and offers **Add connection...** (Settings, Git).
+
+Read-only: **clone, fetch, pull, push and "open in the AI IDE" are refused in the tab** with the reason; they stay with the IDE's Repositories panel and Connect Git, which
+ask first. With the Git tab open the chat gets a read-only context block (branch, ahead and behind, changed files by status and path, last commits, the file whose
+diff is shown; never an address, a token or file text); the assistant uses the terminal tools it already has for anything else. No token is read or drawn by the working-copy view
+(no credential is involved), and the Connections view uses the tile's own token handling.
+
+## Connect Git or Gitea: a Gitea already on your cluster
+
+When Add connection opens (and when you press R on the Gitea list) IYAKKI asks the dev cluster, read-only and in the background, for a ready Deployment that says Gitea. One that Platform services has no record of is listed as "Gitea on this computer (found on your cluster)" with its namespace; a record for the same namespace is shown instead, never both. If this computer has no address for it or IYAKKI has no token for it, the row says so in plain words and the one button is "Set it up (Quick install: Gitea)", which runs the existing Quick install item (it keeps the existing volume). When the cluster is not running or kubectl fails, nothing changes. Nothing secret is shown or logged; the audit line is `git.discover.cluster found <namespace>`.
+
+A Platform services deploy over a Gitea that exists keeps how it is reachable (a ClusterIP Gitea stays ClusterIP) unless you choose another exposure. Git API calls, the connection test and the certificate fingerprint use IYAKKI's own HTTP(S) client; no `curl` is needed.
+
 ## Files and tests
 
 `crates/iyakki-agent/src/gitbrowse.rs` (the readers, the diff parser, the clone finder; `gitbrowse_tests.rs`), `gitconn.rs` (the request now has an
 Accept type, an answer limit and a time limit), `crates/iyakki-shell/src/apps/git_tile.rs`, `git_tile_repo.rs`, `git_tile_ui.rs`,
-`git_tile_repo_ui.rs`, `git_tile_tests.rs`, `shell_git_tests.rs`, and the two small `open_item` hooks in Settings (`git:add`) and the AI IDE (`ws:<id>`).
+`git_tile_repo_ui.rs`, `git_tile_tests.rs`, `shell_git_tests.rs`, `crates/iyakki-shell/src/apps/ide_gitview.rs` (the AI IDE's Git tab; `ide_gitview_tests.rs`), and the two small `open_item` hooks in Settings (`git:add`) and the AI IDE (`ws:<id>`).
 The tests use a scripted host (Gitea, GitHub and GitLab JSON) and a scripted git; one test clones a local repository with the real git and the real
 jobs and browses it.
 

@@ -236,7 +236,7 @@ fn cameras_are_chosen_and_sizes_changed_and_hotplug_follows() {
     // sizes of the format in use only (MJPEG), small to large
     key(&mut r, Key::Char('r'));
     let sizes = r.app.size_choices();
-    assert_eq!(sizes.iter().map(|m| m.width).collect::<Vec<_>>(), vec![320, 640, 1280]);
+    assert_eq!(sizes.iter().map(|m| (m.width, m.pix)).collect::<Vec<_>>(), vec![(320, crate::camera::Pix::Mjpeg), (640, crate::camera::Pix::Mjpeg), (640, crate::camera::Pix::Yuyv), (1280, crate::camera::Pix::Mjpeg)]);
     key(&mut r, Key::Char('1'));
     pump(&mut r, "the new size", |a| a.live_mode().is_some_and(|m| m.width == 320) && a.live().is_some_and(|l| l.preview().is_some_and(|p| p.1.width == 320)));
     // the camera in use is pulled out: the other one takes over within a few seconds
@@ -314,4 +314,128 @@ fn camera_screenshots() {
     shot(&mut r, "camera-photo.png");
     key(&mut r, Key::Char('3'));
     shot(&mut r, "camera-passport.png");
+}
+
+fn two_cams(tag: &str) -> Rig {
+    // the built-in camera (2 nodes, sysfs name with the driver's trailing colon) and a USB 4K camera (2 nodes)
+    let mut r = rig(tag, 0, FakeOpener::default());
+    r.machine.plug_webcam(0, "FaceTime HD Camera (Built-in):");
+    r.machine.plug_webcam(2, "EMEET SmartCam Nova 4K");
+    r.app = CameraApp::with_parts(r.machine.presence(), r.opener.clone(), r.dir.join("Pictures"), r.dir.join("Videos"));
+    r
+}
+
+fn rows(g: &Gfx) -> Vec<(String, R)> {
+    g.hits.iter().filter(|h| h.label != "backdrop" && matches!(h.ev, Event::Tab(n) if (PICK_BASE..PICK_BASE + 500).contains(&n))).map(|h| (h.label.clone(), h.rect)).collect()
+}
+
+#[test]
+fn four_nodes_of_two_cameras_make_two_rows_with_the_built_in_and_the_one_in_use_marked() {
+    let mut r = two_cams("rows");
+    ready(&mut r);
+    assert_eq!(r.app.camera_names(), vec!["FaceTime HD Camera (Built-in)", "EMEET SmartCam Nova 4K"]);
+    assert_eq!(r.app.camera_rows(), vec!["FaceTime HD Camera (Built-in)  (built-in, in use)", "EMEET SmartCam Nova 4K"]);
+    // metadata-only nodes never count
+    assert_eq!(r.opener.opened.lock().unwrap().last().unwrap().0, "video0");
+}
+
+#[test]
+fn the_camera_dialog_has_its_rows_inside_the_dialog_at_every_size() {
+    for (w, h, s) in [(1280u32, 720u32, 1.0f32), (2560, 1600, 2.0), (640, 360, 0.6)] {
+        let mut r = two_cams("layout");
+        ready(&mut r);
+        key(&mut r, Key::Char('c'));
+        assert!(matches!(r.app.overlay, Overlay::Cameras));
+        let mut g = Gfx::new(w, h);
+        let area = R::new(0.0, 46.0 * s, w as f32, h as f32 - 46.0 * s);
+        r.app.render(&mut g, area, s, &r.cx, 0);
+        let rs = rows(&g);
+        assert_eq!(rs.len(), 2, "{w}x{h}: one row per camera");
+        let panel = g.hits.iter().find(|x| x.label == "Refresh").expect("Refresh button").rect;
+        for (name, rc) in rs.iter().map(|(n, r)| (n.as_str(), *r)).chain(std::iter::once(("Refresh", panel))) {
+            assert!(rc.x >= area.x && rc.x + rc.w <= area.x + area.w && rc.y >= area.y && rc.y + rc.h <= area.y + area.h, "{name} inside the screen at {w}x{h}");
+            assert!(rc.h > 4.0 && rc.w > 20.0, "{name} has a size at {w}x{h}");
+        }
+        // rows and button share one dialog: the button lies below the last row and not far from it
+        let last = rs.last().unwrap().1;
+        assert!(panel.y > last.y + last.h - 1.0 && panel.y < last.y + last.h + 120.0 * s, "{w}x{h}");
+    }
+}
+
+#[test]
+fn choosing_a_row_switches_the_stream_keeps_sizes_per_camera_and_remembers_the_choice() {
+    let mut r = two_cams("switch");
+    ready(&mut r);
+    key(&mut r, Key::Char('c'));
+    r.app.handle(&Event::Tab(PICK_BASE + 1), &r.cx);
+    assert!(matches!(r.app.overlay, Overlay::None));
+    ready(&mut r);
+    assert_eq!(r.opener.opened.lock().unwrap().last().unwrap().0, "video2", "the USB camera streams");
+    key(&mut r, Key::Char('r'));
+    key(&mut r, Key::Char('1'));
+    pump(&mut r, "320 on the USB camera", |a| a.live_mode().is_some_and(|m| m.width == 320));
+    // back to the built-in one: its own default size, not 320; then the USB camera again gets its 320 back
+    key(&mut r, Key::Char('c'));
+    r.app.handle(&Event::Tab(PICK_BASE), &r.cx);
+    pump(&mut r, "the built-in", |a| a.live_mode().is_some_and(|m| m.width != 320));
+    key(&mut r, Key::Char('c'));
+    r.app.handle(&Event::Tab(PICK_BASE + 1), &r.cx);
+    pump(&mut r, "320 again", |a| a.live_mode().is_some_and(|m| m.width == 320));
+    // the next start opens the camera chosen last time
+    let again = CameraApp::with_parts(r.machine.presence(), r.opener.clone(), r.dir.join("Pictures"), r.dir.join("Videos"));
+    assert_eq!(again.camera_rows()[1], "EMEET SmartCam Nova 4K  (in use)");
+}
+
+#[test]
+fn hotplug_adds_and_removes_rows_and_a_pulled_camera_falls_back_to_the_built_in_one_with_a_message() {
+    let mut r = rig("hot", 0, FakeOpener::default());
+    r.machine.plug_webcam(0, "FaceTime HD Camera (Built-in):");
+    r.app = CameraApp::with_parts(r.machine.presence(), r.opener.clone(), r.dir.join("Pictures"), r.dir.join("Videos"));
+    ready(&mut r);
+    key(&mut r, Key::Char('c'));
+    let mut g = Gfx::new(1280, 720);
+    let area = R::new(0.0, 46.0, 1280.0, 674.0);
+    r.app.render(&mut g, area, 1.0, &r.cx, 0);
+    assert_eq!(rows(&g).len(), 1);
+    // empty-state text and Refresh with only one camera
+    assert!(g.hits.iter().any(|h| h.label == "Refresh"));
+    // the USB camera is plugged in while the dialog is open: Refresh finds it
+    r.machine.plug_webcam(2, "EMEET SmartCam Nova 4K");
+    key(&mut r, Key::Char('r'));
+    assert_eq!(r.app.camera_names().len(), 2);
+    r.app.handle(&Event::Tab(PICK_BASE + 1), &r.cx);
+    ready(&mut r);
+    assert_eq!(r.opener.opened.lock().unwrap().last().unwrap().0, "video2");
+    // pulled out while in use: the built-in one takes over and the person is told
+    r.machine.unplug("video2");
+    r.machine.unplug("video3");
+    pump(&mut r, "the fall back", |a| a.camera_names().len() == 1 && a.live().is_some_and(|l| l.preview().is_some()));
+    assert_eq!(r.opener.opened.lock().unwrap().last().unwrap().0, "video0");
+    assert!(r.app.status_text().unwrap().contains("was disconnected; using FaceTime HD Camera (Built-in)"), "{:?}", r.app.status_text());
+}
+
+#[test]
+fn the_dialog_says_there_is_no_other_camera_and_hidden_cameras_are_left_out() {
+    let mut r = rig("empty", 1, FakeOpener::default());
+    ready(&mut r);
+    key(&mut r, Key::Char('c'));
+    assert!(matches!(r.app.overlay, Overlay::Cameras), "one camera still opens the dialog");
+    let src = include_str!("../camera.rs");
+    assert!(src.contains("No other camera found."));
+    let mut g = Gfx::new(1280, 720);
+    r.app.render(&mut g, R::new(0.0, 46.0, 1280.0, 674.0), 1.0, &r.cx, 0);
+    assert_eq!(rows(&g).len(), 1);
+    assert!(g.hits.iter().any(|h| h.label == "Refresh"));
+    // a camera the person may not use is not in the list
+    let m = FakeMachine::new("hidden");
+    m.plug_webcam(0, "Secret Cam");
+    m.plug_webcam(2, "C270");
+    let mut p = m.presence();
+    p.set_hidden(vec!["secret".into()]);
+    p.scan();
+    assert_eq!(p.cameras().iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["C270"]);
+    // the assistant's camera list is the same list
+    use iyakki_agent::camtools::CameraBackend;
+    let a = crate::camera::agentcam::AgentCamera::with(m.presence(), Arc::new(FakeOpener::default()));
+    assert_eq!(a.cameras(), vec!["video0: Secret Cam", "video2: C270"]);
 }

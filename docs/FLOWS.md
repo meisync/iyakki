@@ -199,6 +199,76 @@ screenshots and visibility by size need the WebKit helper (verified with it, see
 propose the upgrade through the catalog's installer.
 The status code is read from grpcurl's `ERROR:\n  Code: Unavailable` text; the mapping to retry classes is the table above.
 
+### Camera node (`cam_photo`)
+
+`cam_photo {device?, keep?}` takes one picture and gives `path` (a JPEG) and `taken_at` (unix seconds). The camera is private, so it runs only when the **person** switched on
+**Camera allowed** in the flow's settings (`defaults.camera.allowed`; the assistant cannot, and a flow from a file, an import or the Store arrives with it off). A run that
+nobody started by hand (a schedule, an event) also needs **Camera also when nobody is there** (`defaults.camera.unattended`). The picture is saved in a private folder of the run
+(`<flows data>/camera/<run>/`, never in Pictures), the camera-in-use sign shows while it is taken, and the file is deleted when the run ends unless the node has `keep` on. It
+goes nowhere except to the model of a later `agent` step with `images`, which is the model chosen in SETTINGS: a cloud model would receive it (the node's log says so; prefer a
+model on this computer). When a later step shows the picture to a model that cannot look at pictures, the node fails *before* taking it. Failures are plain: not allowed, nobody
+started the run, no camera connected, camera in use. A specific `device` is only checked against the connected cameras; the shell takes the picture with the camera it uses.
+Samples: *Is the person sleeping?* and *Camera: is a person there?* (the model answers one JSON object; the prompt treats the picture as untrusted data, describes only what is
+visible and never says who anyone is). Two more samples run the data science scripts of `docs/samples/data-science/` through `python3`: they start with a check that fails
+with a plain "toolkit not installed yet" message when scikit-learn or OpenCV cannot be imported. Not tested with a real camera or a real Qwen-VL model.
+
+### Node cards, icons and the tooltip card
+
+A node card shows a small vector icon for its kind (drawn by the shell itself, in the kind's accent colour; one per kind, browser steps included: play, flag, globe, terminal,
+window, spark, braces, plug, diamond, fork, two lines, merge, clock, tick, bell, nested squares, loop arrow, camera, and variants for the browser steps) and the step's name on
+ONE line, cut with an ellipsis only when it really does not fit. The kind and the settings summary are not on the card any more: they are in the tooltip and the step's panel. In a
+run, a round badge on the card's top-right corner shows the state (tick, cross, spinner, dot, dash, raised hand for "waiting for you", circular arrow for a retry); problems and
+warnings are a triangle with their count. Below 50% zoom a card shows its icon alone. The card's size, its ports and their hit areas are unchanged.
+
+Rest the pointer on a node for about 350 ms (or hold a finger on it for 600 ms, or select it with the keyboard and press `?`) and a **tooltip card** appears near the pointer, kept
+inside the window: the full name, the kind, the id, the settings summary, in a run the state, time, attempt and the first lines of the error or output, and the step's
+problems and warnings in full. The badge on the corner has its own small card. A move, a click or Esc puts it away. It works in the Design and the Run views.
+
+### Which model looks at a picture
+
+A step that shows a picture to a model (an agent step with `images`, and the camera step's check before it takes a picture) does not assume the chat model can see.
+It asks the resolver (`visionmodel.rs`): the step's own model if it can see; else **Settings -> Models -> Vision model** (key `v`, also `iyakki dev config set model.vision PROVIDER/MODEL`;
+empty means automatic); else the chat model if it can see; else one is **picked from the providers' own lists** (the lists saved at the last refresh, no network call).
+The pick prefers the chat model's provider, then the others, on this computer before on the network; models the server itself labels `vision` before models only the name
+says can see (the label is trusted: `Qwen3.5-4B-MTP-GGUF` and `Gemma-4-E2B-it-GGUF` are vision models though their names do not say so); Qwen first, then the rest; the
+smallest download first when sizes are known. The pick is kept per chat provider for the session until **Refresh models**. A model the server must still load gets a
+generous time (at least 5 minutes) and the log says "Loading the vision model (first use)".
+
+Where the picture goes is always said from the real address of the provider that will receive it: a loopback address is "on this computer"; a private or link-local address,
+a `.local` name or another cluster is "on another computer on your network (host)"; anything else is "a CLOUD service (host)". The run log, the permission popup and the
+flow settings all use the same words and name the model. A cloud vision model is **never picked silently** for a camera picture: if only a cloud one is found the step
+asks for your choice (choosing it as the Vision model is the confirmation). When none is found the step stops with "No vision model found on PROVIDER. Install one, for
+example a Qwen vision model, then press Refresh models" as a *needs your choice* failure: the fixing agent is not asked, no attempt is spent, and the card (taken from
+the engine's own message) offers **Open Settings -> Models** and **Refresh models** (which reads the lists again and runs the step again). Nothing is downloaded by itself.
+
+### Permission requests
+
+When a step stops for want of a permission only the person can give (today: the camera, and the camera when nobody started the run), the person does not hunt for the
+setting. The step's failure becomes a **permission request**:
+
+* **Popup.** If someone is signed in, a dialog opens over whatever is on the screen with the exact text of the permission (for the camera the same text as the
+  settings switch: the picture goes only to the model chosen for the flow, a cloud model would receive it, prefer a local one), the flow and step names, and which model
+  that is and whether it is on this computer or a cloud service. It is shown for ten minutes; keys 1 to 4, Esc is Not now.
+* **Inbox.** Always, popup or not, signed in or not: an entry on the INBOX Approvals page (open it, read the text, choose) and one note (one per run and step; a repeat adds
+  nothing). The run stays in "needs you" until it is answered. Dismissing the step's card withdraws the request.
+* **Answers.** *Allow this time*: a grant on THIS run only (`Run.grants`), the stopped step runs again (a run that had already ended runs again with the grant); the flow is not
+  changed and the next run asks again. *Always allow for this flow*: switches the person's own setting on in the draft (`defaults.camera.allowed`, or `unattended` for the
+  separate permission) and publishes that one change as a new version when nothing else is waiting in the draft, otherwise it stays in the draft until published.
+  *Not now*: the popup goes, the entry stays. *Block*: `defaults.camera.blocked`, the flow stops asking; undo with "Camera permission requests" in the flow settings.
+* **Separate permissions.** "Camera also when nobody is there" is its own request with its own text; Allow this time for it grants only that.
+* **Who can answer.** Only the signed-in person's own input in the shell (the popup or the INBOX). No tool, the assistant, the fixing agent, an imported flow, a web API token
+  or a paired computer's `iyakki dev input` can: developer-mode input is refused for permission requests ("answer on the device itself"). There is no setting to relax this.
+  Every answer is audited (`flow.permission.*`: run, permission, step, who; no secrets).
+
+**Permissions are never "fixed" by the agent.** A step that stops because a permission only the person can give is off (camera not allowed, a run nobody started, a
+browser session or trust not given, the account's browser or host rules, a missing vault entry) fails as a *consent* failure: the fixing agent is not asked, no attempt
+or budget is spent, and nothing is proposed. The step's card says what to switch on and offers **Open flow settings** (also on the failure banner and in the chat offer).
+The healing classifier refuses outright any patch that sets or removes a consent, trust or reach setting (camera, allowed, unattended, trusted, profile, channels, room,
+schedule, trigger, runner, hosts, anything under `defaults`), and any step setting the kind does not have: `camera_allowed` on a step is not read by the engine, never
+grants the camera (only `defaults.camera.allowed`, set by the person, does) and is an error that stops publishing. A pending proposal is labelled "proposed by the
+assistant, not applied until you approve"; an approved one is noted "proposed by the assistant, approved by NAME". A draft that already has such a key: remove it in the
+Text view of the flow, or roll the draft back from History to the published version.
+
 ## Runners (the real ones are in the agent's `flows/host.rs`)
 
 * **local**: the node runs in a worker thread of this process; `cli` goes through `wsexec::Runner` (argument array, cut-down
@@ -267,6 +337,33 @@ Steps, after all attempts failed:
 Everything is audited (`flow.heal.diagnosis`, `.proposed`, `.applied`, `.approved`, `.rejected`, `.verified`, `.failed`, `.budget`), and
 the model never sees credentials, addresses of the vault, or the secret values (the redactor runs on the context).
 
+## Assist: copilot and autopilot (`assist.rs`, `assist_store.rs`, `assist_run.rs`)
+
+Each flow has an **Assist** setting (flow settings, shown when no step is selected): `off` (default), `copilot` or `autopilot`. It is stored in the flow
+(`defaults.assist`, written only when it is not the default, so a flow from before this setting loads as off and its content hash still verifies) and is
+read from the **published** version, so switching it on is a published, diffed change. Imported flows, Store templates, samples and flows made by the
+assistant start with it off; the assistant's tools refuse to set it (only the person, in the screen). Full design, decisions and limits:
+[`development/FLOW-AUTOPILOT-PLAN.md`](development/FLOW-AUTOPILOT-PLAN.md).
+
+* **Copilot.** After a failed run (the newest finished run of a flow, once) the configured agent is asked for a fix of the failing step (the same redacted failure
+  context and JSON patch as healing; no tools). The harness classifies the patch, applies it to a copy of the **published** version (never to your draft), checks the
+  result (validation, the classifier) and tries the changed step once with the recorded input if it is read-only. The result is a **suggestion** stored with the flow:
+  the proposed version, its diff, the reason, the checks, the trial and the guard lines. A strip on the open flow says so (**Review**); the list shows the diff;
+  **Approve and publish** puts the change in the draft and opens the ordinary Publish dialog (the store still refuses an agent's change without an approver);
+  **Reject** takes it out. Newer, compatible library versions of a step become **upgrade** suggestions the same way (never published by themselves).
+* **Autopilot.** The same, and with the flow's *autopilot may publish a tested fix* switch on, a FIX is published by itself when **all** guards pass: the checks and
+  the trial passed, the diff is small (`max_diff_nodes`, `max_diff_fields`), no new external effect, nothing protected touched (credentials, trust flags, camera or
+  channel permission, schedule, runner, allow-lists, the heal policy, the assist setting itself), no new host, the draft was the published version, and the caps
+  (per flow and per account per day, drafts per day, spend per day and per fix) hold. A failed guard turns the publish into a question that carries the reasons.
+  The version records `agent:assist` and `policy:autopilot` as its approver, the audit and the bell say what happened, and the version is **watched**: if one of its
+  first `watch_runs` (3) runs fails, the previous content is published again, autopilot is paused for `cooldown_hours` (24) and the bell asks you. **Roll back** and
+  **Pause autopilot** are one click on the strip.
+* **Never automatic**: apply-to-runs (always asks), delete (never), an upgrade (always asks), a production flow. An account switch (`enabled`) turns every flow's
+  assist off at once. A fix of a fix is bounded (two published versions in a row by the agent, then it waits for you).
+
+The model is the configured chat model today (a named agent profile with fallback models and budgets is the next slice). Checked with a scripted model, the real
+engine and store, and the real host; **not** with a real model or a real unattended run.
+
 ## Versioning, publishing, pulling (`store.rs`)
 
 ```
@@ -304,7 +401,7 @@ OR as in cron) with a time zone (`local`, `UTC`, `+05:30` or an IANA name read f
 `anchor`), `once` (`at`), `calendar` (fires when a CALENDAR event whose title contains `match` starts; uses the calendar store),
 `file_change` (a path polled every 10 s by size and modified time), `on_failure` (another flow's run failed), `event` (an INBOX or named event),
 `chat` ("run it" through the assistant), `webhook` (**planned**: an authenticated local HTTP endpoint needs the server's token
-scheme and is not built; the trigger can be declared and shows "planned"; `flow_run` and the idempotency key are the manual substitute).
+scheme and is not routed; the request gate in `flows/webhook.rs` is built and tested (header `X-Iyakki-Timestamp` unix seconds, `X-Iyakki-Signature: sha256=` HMAC-SHA256 of `<timestamp>.<body>` with a vault secret, 5-minute window, replays refused with 409, 30 calls a minute per path, the signature is the run's idempotency key) but no HTTP route calls it yet; the trigger can be declared and shows "planned"; `flow_run` and the idempotency key are the manual substitute).
 Each timed trigger has `missed` (`skip`, `run_once`, `catch_up(n)`: what to do for the ticks that passed while IYAKKI was off or the
 schedule was paused), `overlap` (`skip`, `queue`, `allow`: when the previous run is still going), `jitter_s`, `enabled`. Pausing a flow's
 schedules is one switch; the next five fire times are listed in the SCHEDULE view. The scheduler state (last fire, next fire, paused) is
@@ -328,7 +425,7 @@ time limit, the overlap policy of the timed triggers, the default heal mode and 
   and whose value is a literal (use `{{secret.NAME}}`).
 * **No shell**, anywhere. Commands are arrays; templates are data only.
 * **The agent never publishes, never widens its own autonomy, and never changes credentials**; its edits go to drafts and are badged and
-  audited; `flow_publish`, `flow_rollback`, `flow_apply_to_runs` and `flow_set_heal_policy` (when widening) are *hard-ask*: they ask every
+  audited (the one exception is a flow whose owner switched on Assist autopilot with automatic publishing: see "Assist: copilot and autopilot", after the healing section); `flow_publish`, `flow_rollback`, `flow_apply_to_runs` and `flow_set_heal_policy` (when widening) are *hard-ask*: they ask every
   time, in every mode, including Auto and Autopilot (`never auto`).
 * **Sandbox**: the k3s-job runner (above) is the isolation for untrusted commands.
 * Imported flows are validated like edited ones and arrive as drafts; a flow from outside never has heal mode above `suggest` and never
@@ -359,6 +456,30 @@ published, "agent changed") and the assistant pane (`ChatApp::with_flows`) at th
 * **At 800x480** the canvas is **view and run only** with a note ("design on a larger screen or use the list editor"); the **list editor**
   (nodes in order with their edges as text, edit fields in the properties panel) works at every size. Decision: a list editor is more
   useful than a cramped canvas.
+* **Closing and results** (`flows_fail.rs`): every flow view has a visible **Close (Esc)** (RUN too). Esc is one step back: in DESIGN it
+  deselects, then closes the flow; in RUN it returns to the screen the run was opened from (never out of FLOWS); on the list and the
+  board it leaves FLOWS. A flow saves after every change, so closing never loses work: the status line says "Closed ... saved in its
+  draft". Only text that was refused (a field with an error, a text view that is not a valid flow) asks first (`y` closes, Esc or Enter
+  keeps editing). **Run (r)** starts the flow; a flow with required inputs asks for them in a form first (the missing one is focused).
+  The RUN view has a banner under its header: while going "n of m steps done" with **Stop run (c)**; when done "Succeeded in ..." or
+  "Run failed at step X: reason" with **Run again (a)** (same inputs) and **Open log (l)** (the failed step, Log tab).
+* **A key hint footer** on every screen and focus (`footer_hint`, also the app's `hint()` for the shell and F1): the list, the canvas
+  with and without a selection, the settings form, the text view, the step search, the assistant, RUN and BOARD each show their own keys.
+  Empty states say what to do next ("No workflows yet - press N or ask the chat to make one"). The list tags flows whose last run failed.
+* **The agent jumps in on failure** (`iyakki-agent::flows::failfix`, `flows_fail.rs`): when the newest run of the open flow failed
+  (manual, scheduled or triggered; a scheduled failure shows when you next open the flow) and you have not dismissed it, a calm card at
+  the top of the flow says "Run failed at step X: reason" with **Ask the agent to fix (F)**, **Open log (L)** and **Dismiss (x)**.
+  "Ask the agent" opens the assistant on that flow, selects the failed run and sends a prepared request: flow id and name, run, failed
+  step, the redacted reason and the last 12 log lines of the step as data, the NAMES of the inputs (never values; input values and
+  credentials found in the text are removed), and the instruction to call `flow_explain_failure` and `flow_get`, explain, and propose ONE
+  fix with `flow_edit` on the open flow. The tools are the ordinary ones: `flow_edit`, `flow_run`, `flow_publish`, `flow_rollback` all ask
+  the person (a test pins their risk), so nothing is edited or re-run by itself; Auto approvals are ended for the fix turn. At most
+  **3 attempts** per failing streak of a flow (the count is per flow and starts again after a run of it succeeds); the third request tells the
+  assistant to stop and say why if the cause is still unclear, and the fourth click is refused with the reason. The assistant never opens
+  by itself. If the assistant is **already open** over the flow when you open it (or when it fails while you watch), the assistant says in
+  the thread once per failed run: "The last run failed at step X: reason. Want me to look into it...", and the assistant pane shows
+  **Yes, fix it** and **Not now**. Dismiss (and Not now) is remembered per run in `<data>/flows/<user>/failure_cards.json` (run ids and
+  counts only); a new failed run brings a new card. The offer can be turned off on the list ("Agent help on failure", key `o`; default on).
 * One caret, one keyboard owner, selectable text everywhere, no network or blocking work on the UI thread: the engine has its own threads;
   the screen polls a snapshot (every 250 ms while something runs, otherwise on a change) and sends commands over a channel; the graph layout is cached
   and redrawn on a change or a tick only.
@@ -370,7 +491,45 @@ Tools (`agent/flows/tools.rs`, wired like DASH's): **Safe** `flow_list`, `flow_g
 `flow_explain_failure`. **Ask** `flow_create` (a draft from a structured description), `flow_edit` (a patch of a *draft*: nodes, edges, config; it
 never touches a published version), `flow_run` (now, or at a time), `flow_cancel`. **Hard-ask** `flow_publish`, `flow_rollback`,
 `flow_apply_to_runs`, `flow_set_heal_policy` (only when it widens the agent's autonomy). Inside the tile the chat is given a compact, redacted
-picture of the open flow and the latest runs (at most 3,500 characters, no secrets, no addresses of the vault).
+picture of the open flow and the latest runs (at most 5,200 characters, no secrets, no addresses of the vault; see "What the assistant is told").
+
+**Flows first.** The chat in this tile is told it works on workflows: the `flow_*` tools come first in its list, "create" always means a flow
+(the app-building tools `app_scaffold`, `tile_*`, `app_preflight` and `app_bump_version` are not offered here and refuse if called; apps are
+built in the AI IDE), and when a flow is open a request to change it is a `flow_edit` of that flow (a draft; the reply lists the steps
+added, changed and removed; publishing is still the person's). A new flow is made only when none is open or a new one is asked for.
+Each workflow has its own conversation: switching the open flow (or closing it) switches the chat to that flow's thread, and nothing of one
+thread goes into another's request.
+
+**What the assistant is told (`context_text`).** With every message the chat is given, first, the open flow: id and name, version and
+state (never published, published as version N, "the draft has unpublished changes"), the selected step and tab, every step with its kind and
+retry, the declared input NAMES (never values), the edges and the trigger or schedule; then the newest runs of that flow (status, steps done,
+error); then, for the newest failed run, the failed step (id, title, kind), the attempt counts, the redacted reason, the run's input names and
+the last 12 redacted log lines; after that the list of all flows and the run counts. The open part is never cut for the rest. Input values
+and credentials are removed (the same cleaning as the failure card); the whole picture is bounded.
+
+**Three ways to the same context.** (1) The assistant pane inside FLOWS (button "Assistant", Ctrl+I, F6 to move to it) shares the tile's open
+flow. (2) "Ask the agent to fix" on the failure card opens that pane and sends the prepared request through the same path. (3) The ordinary
+CHAT tile: when the person leaves FLOWS the tile remembers the flow last open there (id and name only, in memory, per person), and a CHAT
+tile opened afterwards works on it: the same flows-first prompt, flow tools and picture, and the flow's own thread. The CHAT header then
+shows a chip "Flow: NAME" (in red with "(last run failed)" when the latest run failed) with "x Detach"; detaching forgets the flow. The
+record ends at sign-out, when the flow is deleted, on Detach, and after 4 hours without using FLOWS.
+
+**Check it on the device.** Each time a chat starts with flows context the system log gets one line, visible in `dev dmesg` / `dev logs`:
+`chat: flows context flow=<id> name=<name> failed_run=<id|none>` (no secrets).
+
+**Missing input: `ask_form`.** `flow_run` refuses a run that lacks a required input and hands over ready fields built from the flow's declared
+inputs (`secret` inputs become secret fields). The assistant then calls `ask_form` (title, 1 to 6 fields of kind text, number, choice,
+yes-no, secret or path, with required, default, choices and help; lengths and counts are bounded and checked). The chat opens the shared
+form dialog: Tab / Shift+Tab or the mouse move between fields, Enter walks and submits on the last field, Ctrl+S submits, Esc cancels. A
+missing required value or a bad number or choice shows an error and keeps the form open. The values go back as the next message; Esc sends
+`Form cancelled.`. A secret field is masked and goes straight into the person's vault as `flow.<name>`; only `{{secret.flow.<name>}}` is sent
+on, and the audit line holds the number of fields only.
+
+**Deleting.** `flow_delete` (a whole flow) and `flow_drop_version` (one published version) are hard-ask like publishing, and the screen has
+the same actions (`d` on the list, `x` in the history). The confirmation names the flow and version and what is lost; Enter does not confirm
+(`y` does; Esc, `n` and Enter keep everything). A flow with unfinished runs, or a version an unfinished run uses, is refused with the reason.
+The current published version (so the only one) is never dropped. Runs keep their own copy of the flow. Audit: `flow.delete`,
+`flow.version.drop`, id and name only.
 
 ## Store hook
 
@@ -378,29 +537,29 @@ Flow templates and node packs are `extension` items with target `flows` (`ext_ki
 (`templates::all()` is the built-in list; an installed template is read from the same JSON shape); the Store's own screen is the Store
 agent's job. Six templates ship: HTTP health check every minute with an alert, nightly backup by CLI with retry and backoff, build, test and
 deploy to a k3s sandbox Job, website change monitor (browser node), gRPC call with deadline and retry (grpcurl), daily report (query, agent
-summary, notify).
+summary, notify), plus four samples: Is the person sleeping?, Camera: is a person there?, Scikit-learn test set and model, OpenCV shapes and motion.
 
 ## Files
 
 `crates/iyakki-flow/src/`: `kinds/browser_qa.rs` (the browser nodes), `report.rs` (the QA report), `model.rs`, `retry.rs`, `expr.rs`, `minire.rs` (a copy of the agent's small regex engine; the engine may not depend on the agent),
 `graph.rs` (readiness, dead paths), `kinds/` (the registry and the nodes), `validate.rs`, `engine.rs` and `driver.rs` (runs, threads, healing loop),
 `runstore.rs`, `sched.rs`, `store.rs` (versions, library, diff), `heal.rs` (patches and the harness's classification), `layout.rs`, `templates.rs`,
-`host.rs` (the seam, `FakeHost`, `FakeClock`). Tests: `crates/iyakki-flow/tests/` (engine, heal, kinds, versions, properties).
+`host.rs` (the seam, `FakeHost`, `FakeClock`), `assist.rs`, `assist_store.rs`, `assist_run.rs` (copilot and autopilot). Tests: `crates/iyakki-flow/tests/` (engine, heal, kinds, versions, properties, assist).
 `crates/iyakki-agent/src/flows/`: `host.rs` (HTTP, commands, sandbox Job, browser, model, vault, INBOX), `browser.rs` (the run's browser session, approvals, budgets, downloads, baselines), `qa_fixture.rs` and `browser_tests.rs` (a fixture web server and the in-house page engine double), `mod.rs` (environment, building and editing flows,
 what the model is told), `tools.rs` (the assistant's tools), `tests.rs`. `crates/iyakki-shell/src/apps/`: `flows.rs` (state, mouse), `flows_keys.rs`,
 `flows_view.rs` (top bar, designer, list editor, dialogs), `flows_canvas.rs` (geometry), `flows_paint.rs`, `flows_props.rs` (the form), `flows_run.rs`,
-`flows_board.rs`, `flows_tests.rs`.
+`flows_board.rs`, `flows_fail.rs` (closing, the result banner, the failure card, the key hints), `flows_tests.rs`. Agent side of the failure card: `crates/iyakki-agent/src/flows/failfix.rs`. Assist: agent `flows/assist.rs` (the account's store and the unattended pass), shell `flows_assist.rs` (strip, list, rollback, pause).
 
 ## Built, partial, planned
 
-Rows `F-FLOW-01` to `F-FLOW-20` in `FEATURES.md` carry the status and the tests. In short:
+Rows `F-FLOW-01` to `F-FLOW-26` in `FEATURES.md` carry the status and the tests. In short:
 
 * **Built and tested**: the engine, retries and backoff, expressions, versioning, publishing, rollback, the library and pulling updated steps into other runs,
   scheduling, the HTTP, command, gRPC (through grpcurl), remote, script, condition, switch, delay, approval, notify, sub-flow and for-each nodes, the healing
-  loop and its classification, the assistant's tools and their risk levels, the nine templates, the tile's three tabs.
+  loop and its classification, the assistant's tools and their risk levels, the thirteen templates, the tile's three tabs.
 * **Built and tested with a real page engine**: the Browser (QA) nodes, the QA report with HTML and JSON export, the baseline comparison, the three QA templates (see `FLOWS-QA.md`; the real-WebKit test is `live_login_form_screenshots_console_and_downloads_with_real_webkit`, ignored by default, run here with python3-gi and Xvfb).
 * **Partial**: the sandbox Job runner (tested with a fake kubectl), the older `browser` node (tested with a fake host), the WPE helper of the image (the QA nodes were run against the WebKitGTK helper only), agent steps (configured model only, no tools),
   healing by the built-in model only, the Store's screen for flow templates, the tile (never looked at in a real window).
 * **Planned, not faked**: Thrift (the node can be placed, refuses to run), webhook triggers, the remote runner, tools and external agents inside an agent
   step, command stdin, YAML text view, a middle-button pan.
-* **Not verified**: a real model's patches, a real cluster, a real browser page, a real grpcurl run, the screens in a real window and on the Mac mini.
+* **Not verified**: how the closing, the result banner and the failure card look and feel on the Mac mini and with a real model's diagnosis; a real model's patches, a real cluster, a real browser page, a real grpcurl run, the screens in a real window and on the Mac mini.

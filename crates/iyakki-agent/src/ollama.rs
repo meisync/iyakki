@@ -176,7 +176,9 @@ impl OllamaServer {
                 let mut c = self.child.lock().unwrap();
                 match c.as_mut() {
                     Some(ch) => {
-                        if let Ok(Some(status)) = ch.try_wait() {
+                        let life = iyakki_core_api::child_status(ch);
+                        if life.is_over() {
+                            let status = life.describe();
                             *c = None;
                             drop(c);
                             if self.current(gen) {
@@ -221,17 +223,16 @@ impl OllamaServer {
         unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM) };
         let t = Instant::now();
         loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if t.elapsed() > Duration::from_secs(10) => {
+            match iyakki_core_api::child_status(&mut child) {
+                s if s.is_over() => break,
+                _ if t.elapsed() > Duration::from_secs(10) => {
                     // SAFETY: as above.
                     unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
                     let _ = child.kill();
                     let _ = child.wait();
                     break;
                 }
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(_) => break,
+                _ => std::thread::sleep(Duration::from_millis(50)),
             }
         }
         self.set_state(OllamaState::Stopped);
@@ -351,5 +352,40 @@ mod tests {
         assert_eq!(probe(port).as_deref(), Some("0.39.0"), "it is still there");
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod gone_tests {
+    use super::*;
+
+    /// The PID-1 reaper took the status of the ollama process: the monitor must still notice that it is gone.
+    #[test]
+    fn a_server_whose_exit_status_was_taken_by_the_reaper_is_seen_as_exited() {
+        let d = crate::archive::tests::tmp("ol-gone");
+        let o = OllamaServer::new(&d, Arc::new(CliManager::new(&d.join("cli"))));
+        let c = std::process::Command::new("true").spawn().unwrap();
+        iyakki_core_api::steal_status(c.id());
+        *o.child.lock().unwrap() = Some(c);
+        o.set_state(OllamaState::Starting);
+        o.monitor(0);
+        match o.state() {
+            OllamaState::Failed(why) => assert!(why.contains("ollama exited") && why.contains("not available"), "{why}"),
+            s => panic!("a dead server was not noticed: {s:?}"),
+        }
+        assert!(o.child.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn stop_does_not_hang_on_a_server_whose_status_was_taken() {
+        let d = crate::archive::tests::tmp("ol-gone-stop");
+        let o = OllamaServer::new(&d, Arc::new(CliManager::new(&d.join("cli"))));
+        let c = std::process::Command::new("true").spawn().unwrap();
+        iyakki_core_api::steal_status(c.id());
+        *o.child.lock().unwrap() = Some(c);
+        let t = Instant::now();
+        assert!(o.stop().is_ok());
+        assert!(t.elapsed() < Duration::from_secs(2));
+        assert_eq!(o.state(), OllamaState::Stopped);
     }
 }

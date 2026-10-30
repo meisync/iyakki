@@ -265,7 +265,7 @@ impl Shell {
         }
     }
 
-    fn ws_mark_dirty(&mut self, i: usize) {
+    pub(super) fn ws_mark_dirty(&mut self, i: usize) {
         if let Some(p) = self.panes.ws.as_mut().and_then(|ws| ws.panes.get_mut(i)) {
             p.dirty = true;
         }
@@ -770,6 +770,7 @@ impl Shell {
             || self.devpop.open
             || self.brand.open
             || self.installs.open
+            || self.startup.open
             || self.battery.open
             || self.panes.picker.is_some()
             || self.panes.card.is_some()
@@ -988,6 +989,7 @@ impl Shell {
             }
         }
         self.panes.ws = Some(ws);
+        self.draw_bar_overlay(g, s);
         for i in crashed {
             if self.panes.ws.as_ref().is_some_and(|ws| ws.focus == i) {
                 self.screen = Screen::Launcher;
@@ -1035,10 +1037,23 @@ impl Shell {
             draw_bell(g, r, 8.0 * s, s, self.badge, false);
             x = r.x - 6.0 * s - d;
         }
+        let help_w = g.text_width(13.0 * s, "F1  Help", Face::Bold) + 22.0 * s;
+        // Home, the speaker and Settings (the same icons as on every other bar), as many as fit before the buttons still to come
+        {
+            let floor = 20.0 * s + name_w + 40.0 * s;
+            let reserve = 3.0 * (d + 6.0 * s) + help_w + 6.0 * s;
+            let home = self.panes.d.inactive || self.home_applies();
+            let placed = self.place_extras(x + d, floor + reserve, floor + reserve, d, 6.0 * s, home);
+            for (e, ex) in &placed {
+                self.draw_extra(g, *e, R::new(*ex, y, d, d), s * 0.8, crate::fx::CYAN, 18.0 * s);
+            }
+            if let Some((_, lx)) = placed.first() {
+                x = lx - 6.0 * s - d;
+            }
+        }
         x = btn(g, x, Some(Icon::Devices), "", Event::Key(Key::F(8)), "devices", d);
         x = btn(g, x, Some(Icon::Camera), "", Event::Key(Key::F(12)), "screenshot", d);
         x = btn(g, x, Some(Icon::Clipboard), "", Event::Key(Key::Ctrl('V')), "clipboard history", d);
-        let help_w = g.text_width(13.0 * s, "F1  Help", Face::Bold) + 22.0 * s;
         x = btn(g, x, None, "F1  Help", Event::Key(Key::F(1)), "help", help_w);
         // the clock, left of the buttons
         let (time, date) = (clock_time_text(&self.clock), self.clock.date_text());
@@ -1049,9 +1064,17 @@ impl Shell {
         let (show_date, wide) = if x - total - 8.0 * s > left_limit { (true, total) } else if x - tw - 8.0 * s > left_limit { (false, tw) } else { (false, 0.0) };
         // the battery chip (laptops only), left of the clock (or of the buttons when the clock has no room)
         let bat_right = if wide > 0.0 { x - wide - 8.0 * s - 6.0 * s } else { x - 4.0 * s };
+        let mut chip_left = if wide > 0.0 { x - wide - 8.0 * s } else { x };
         match self.battery.plan(g, s, bat_right, left_limit, 4.0 * s, bh - 8.0 * s, 13.0 * s) {
-            Some(p) => self.battery.draw_chip(g, &p, s),
+            Some(p) => {
+                chip_left = p.rect.x;
+                self.battery.draw_chip(g, &p, s);
+            }
             None => self.battery.anchor = None,
+        }
+        // developer mode's DEV sign: the same on every bar and every display
+        if let Some(sign) = self.dev_sign.clone() {
+            draw_dev_sign(g, chip_left - 4.0 * s, bh / 2.0, s, &sign, left_limit, self.devask.pulse(self.tick));
         }
         if wide > 0.0 {
             let b = R::new(x - wide - 8.0 * s, 4.0 * s, wide + 16.0 * s, bh - 8.0 * s);

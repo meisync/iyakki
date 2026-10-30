@@ -31,7 +31,7 @@ use iyakki_agent::voice::SpeakOpts;
 use super::chat_view::{self, ChatView, NoPics, TOGGLE_BASE};
 use super::chatpic::PicCache;
 use super::model_picker::{self, Current, ModelList, Pick, TopRow};
-use super::neon::{glow_card, round_button, Glyph};
+use super::neon::{glow_alphas, glow_bounds, glow_card, glow_card_keep, glow_ring_again, round_button, Glyph, GlowRing};
 use super::widgets::{menu_list, select_box, select_width, PickEvent, Picker};
 use super::{blink, App, AppCx, Flow};
 use crate::fx::{self, mix, with_alpha, CYAN, MAGENTA, PANEL, WELL};
@@ -109,6 +109,7 @@ const T_COVERAGE: usize = 143;
 const T_PICS_GO: usize = 215;
 const T_PICS_SKIP: usize = 216;
 const T_PICS_CANCEL: usize = 217;
+#[allow(dead_code)] // reserved token id
 const T_LOOK: usize = 144;
 const T_QUALITY: usize = 145;
 const T_STORYMODEL: usize = 146;
@@ -265,6 +266,78 @@ struct ULay {
     text: String,
     kind: UKind,
     lines: Vec<(String, usize)>,
+}
+
+/// What a frame of the story text is drawn with (the same for every line of the frame).
+struct TextCtx {
+    area: R,
+    base_y: f32,
+    size: f32,
+    s: f32,
+    /// The unit and character range being read, when something is.
+    hl_range: Option<(usize, (usize, usize))>,
+    cur_word: Option<(usize, usize)>,
+    /// The sentence is lit (Settings → Voice).
+    lit: bool,
+    tick: u64,
+}
+
+/// Where the word being said sits on its line: characters `c0..c1` of the line at `off` (width `mw`), and the eased fill `ex`, `ew`.
+struct WordAt {
+    unit: usize,
+    li: usize,
+    c0: usize,
+    c1: usize,
+    off: f32,
+    ex: f32,
+    ew: f32,
+}
+
+/// What the last whole drawing of a story being read aloud left on the screen, so the frames after it can repaint just what
+/// moves: the lines of the sentence and word being said, the player bar and the glow around the text card. Everything else on
+/// the screen is the same until a whole frame is drawn again (anything unexpected asks for one).
+struct Anim {
+    /// The text area, the top of the first line (scrolled), the text size, the scale, the scroll and the top of every unit.
+    text: R,
+    base_y: f32,
+    size: f32,
+    s: f32,
+    scroll: f32,
+    tops: Vec<f32>,
+    /// What was lit.
+    unit: usize,
+    range: (usize, usize),
+    word: Option<(usize, usize)>,
+    hl: Highlight,
+    /// The pictures' slots (with their galleries) on screen: a line next to one is not repainted alone.
+    slots: Vec<R>,
+    /// The glow of the text card, and the strength it was drawn with.
+    ring: Option<GlowRing>,
+    ring_alpha: (u8, u8),
+    /// The player bar, the rectangle around it and what was under it.
+    player: R,
+    bar: (i32, i32, i32, i32),
+    bar_under: Vec<u8>,
+    /// The caret of the idea box blinks: its phase when drawn (a change asks for a whole frame).
+    caret: bool,
+    blink: bool,
+    /// What else is on the screen, summed up (see `StoryApp::view_sig`).
+    sig: u64,
+    /// Frames painted this way since the whole one.
+    streak: u32,
+}
+
+/// The characters `a..b` of a unit that fall on one line (`first` is where the line starts in the unit, `line` its text): the
+/// characters inside the line, and the widths of the text before them and of them.
+fn span_in_line(g: &mut Gfx, line: &str, first: usize, a: usize, b: usize, sz: f32, face: Face) -> Option<(usize, usize, f32, f32)> {
+    let n = line.chars().count();
+    let (lo, hi) = (a.max(first), b.min(first + n));
+    if lo >= hi {
+        return None;
+    }
+    let pre: String = line.chars().take(lo - first).collect();
+    let mid: String = line.chars().skip(lo - first).take(hi - lo).collect();
+    Some((lo - first, hi - first, g.text_width(sz, &pre, face), g.text_width(sz, &mid, face)))
 }
 
 // ------------------------------------------------------------------------------------------------------------ pictures
@@ -678,6 +751,14 @@ pub struct StoryApp {
     line_tops: Vec<f32>,
     lay: Vec<ULay>,
     lay_key: (i32, i32),
+    /// What the last whole frame left for the partial ones while the story is read aloud (see [`Anim`]).
+    anim: Option<Anim>,
+    /// The rectangles the last partial frame painted.
+    live_out: Vec<(i32, i32, i32, i32)>,
+    /// The shell's heartbeat count minus this app's, to know the phase of the caret between whole frames.
+    tick_off: u64,
+    /// Pictures scaled to the size they are drawn at: (picture key, slot width, slot height, scale in thousandths, pixels). A few are kept.
+    pic_scaled: Vec<(u64, i32, i32, i32, tiny_skia::Pixmap)>,
     // the composer
     pane_open: bool,
     menu: Option<Menu>,
@@ -724,6 +805,12 @@ pub struct StoryApp {
     modal: Option<Modal>,
     host_save: Option<(String, Vec<u8>)>,
     ticks: u64,
+    /// The word that was lit at the last heartbeat, to repaint the moment it changes instead of at the slow cadence.
+    seen_word: Option<(usize, usize)>,
+    /// The word last looked at between heartbeats (see `App::poll_redraw_due`).
+    polled_word: Option<(usize, usize)>,
+    /// (heartbeat, whether a frame is due) so both redraw questions of one heartbeat get the same answer.
+    frame_due_at: (u64, bool),
     dirty: bool,
     /// Where the form's fields were drawn last (relative to the content top), to scroll them into view.
     bar_rect: Option<R>,
@@ -810,7 +897,12 @@ impl StoryApp {
             pic_tx,
             pic_rx,
             pic_cache: PicCache::default(),
-            reader: Reader::new(),
+            reader: {
+                // the browser's "Stop it" dialog can name TALES while it reads and stop it cleanly (soundhold.rs)
+                let r = Reader::new();
+                r.announce_holder();
+                r
+            },
             chunks: Vec::new(),
             chunked_units: 0,
             live: false,
@@ -835,6 +927,10 @@ impl StoryApp {
             line_tops: Vec::new(),
             lay: Vec::new(),
             lay_key: (0, 0),
+            anim: None,
+            live_out: Vec::new(),
+            tick_off: 0,
+            pic_scaled: Vec::new(),
             pane_open: true,
             menu: None,
             menu_sel: 0,
@@ -869,6 +965,9 @@ impl StoryApp {
             modal: None,
             host_save: None,
             ticks: 0,
+            seen_word: None,
+            polled_word: None,
+            frame_due_at: (u64::MAX, false),
             dirty: true,
             bar_rect: None,
             pic_buttons: Vec::new(),
@@ -2776,7 +2875,7 @@ impl StoryApp {
             return;
         }
         let Some(st) = cx.services.pull_status().into_iter().find(|s| s.provider == p && s.model == m) else { return };
-        let mut log = |a: &mut StoryApp, d: String| {
+        let log = |a: &mut StoryApp, d: String| {
             let mut ev = piclog::decision_event(now_secs(), plk::PULL, &a.story_name(), 0, "", &d);
             (ev.provider, ev.model) = (p.clone(), m.clone());
             a.log_pic_events(vec![ev]);
@@ -2910,7 +3009,7 @@ impl StoryApp {
         if let Some(Modal::PicLog(v)) = &self.modal {
             let max = v.total.get().saturating_sub(v.rows.get());
             let at = v.top.get().min(max) as i64;
-            let to = (at + d).clamp(0, max as i64) as usize;
+            let to = (at + d).clamp_safe(0, max as i64) as usize;
             v.top.set(to);
             v.at_end.set(to == max);
             self.dirty = true;
@@ -4688,23 +4787,25 @@ impl StoryApp {
             self.lay.clear();
             self.lay_key = key;
         }
-        let mut units: Vec<(String, UKind)> = Vec::new();
-        if !self.story.title.is_empty() {
-            units.push((self.story.title.clone(), UKind::Hidden));
-        }
-        for b in &self.story.blocks {
-            units.push((b.text().to_string(), if matches!(b, Block::Heading(_)) { UKind::Heading } else { UKind::Para }));
-        }
-        if !self.story.partial.trim().is_empty() {
-            units.push((self.story.partial.clone(), UKind::Partial));
-        }
-        self.lay.truncate(units.len());
-        for (i, (text, kind)) in units.into_iter().enumerate() {
+        // the units, in order, without copying their text (a long story would copy it every frame): the title (not drawn), the
+        // headings and paragraphs, the sentence still being written
+        let shift = usize::from(!self.story.title.is_empty());
+        let partial = !self.story.partial.trim().is_empty();
+        let count = shift + self.story.blocks.len() + usize::from(partial);
+        self.lay.truncate(count);
+        for i in 0..count {
+            let (text, kind): (&str, UKind) = if i < shift {
+                (self.story.title.as_str(), UKind::Hidden)
+            } else if let Some(b) = self.story.blocks.get(i - shift) {
+                (b.text(), if matches!(b, Block::Heading(_)) { UKind::Heading } else { UKind::Para })
+            } else {
+                (self.story.partial.as_str(), UKind::Partial)
+            };
             if self.lay.get(i).is_some_and(|l| l.text == text && l.kind == kind) {
                 continue;
             }
             let (sz, face) = if kind == UKind::Heading { (size * 1.18, Face::Bold) } else { (size, Face::Sans) };
-            let lines = if kind == UKind::Hidden { Vec::new() } else { g.wrap(sz, &text, face, width) };
+            let lines = if kind == UKind::Hidden { Vec::new() } else { g.wrap(sz, text, face, width) };
             let chars: Vec<char> = text.chars().collect();
             let mut pos = 0usize;
             let mut with_start = Vec::with_capacity(lines.len());
@@ -4716,7 +4817,7 @@ impl StoryApp {
                 with_start.push((l, pos));
                 pos += n;
             }
-            let lay = ULay { text, kind, lines: with_start };
+            let lay = ULay { text: text.to_string(), kind, lines: with_start };
             if i < self.lay.len() {
                 self.lay[i] = lay;
             } else {
@@ -4853,13 +4954,30 @@ impl StoryApp {
             }
             (PicState::Ready, Some(b)) => {
                 g.rrect(slot.x, slot.y, slot.w, slot.h, 12.0 * s, rgb(14, 18, 36));
-                match self.pic_cache.draw_bytes(g, key, &b, slot.w, s) {
-                    Ok(rd) => {
+                // the picture scaled to the size it is drawn at is kept (keyed by the picture, the slot and the scale), so a frame is a
+                // plain copy: scaling a 1344x768 picture took milliseconds every frame
+                let ident = (key, slot.w.round() as i32, slot.h.round() as i32, (s * 1000.0) as i32);
+                let at = match self.pic_scaled.iter().position(|e| (e.0, e.1, e.2, e.3) == ident) {
+                    Some(i) => Ok(i),
+                    None => self.pic_cache.draw_bytes(g, key, &b, slot.w, s).and_then(|rd| {
                         let (pw, ph) = (rd.pm.width() as f32, rd.pm.height() as f32);
                         let k = (slot.w / pw).min(slot.h / ph);
-                        let (dw, dh) = (pw * k, ph * k);
+                        let (iw, ih) = ((pw * k).round().max(1.0) as u32, (ph * k).round().max(1.0) as u32);
+                        let mut scaled = tiny_skia::Pixmap::new(iw, ih).ok_or("the picture is too small to show")?;
                         let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
-                        g.pm.draw_pixmap(0, 0, rd.pm.as_ref().as_ref(), &paint, tiny_skia::Transform::from_translate(slot.x + (slot.w - dw) / 2.0, slot.y + (slot.h - dh) / 2.0).pre_scale(k, k), None);
+                        scaled.draw_pixmap(0, 0, rd.pm.as_ref().as_ref(), &paint, tiny_skia::Transform::from_scale(iw as f32 / pw, ih as f32 / ph), None);
+                        if self.pic_scaled.len() >= 10 {
+                            self.pic_scaled.remove(0);
+                        }
+                        self.pic_scaled.push((ident.0, ident.1, ident.2, ident.3, scaled));
+                        Ok(self.pic_scaled.len() - 1)
+                    }),
+                };
+                match at {
+                    Ok(i) => {
+                        let scaled = &self.pic_scaled[i].4;
+                        let (dx, dy) = ((slot.x + (slot.w - scaled.width() as f32) / 2.0).round() as i32, (slot.y + (slot.h - scaled.height() as f32) / 2.0).round() as i32);
+                        g.pm.draw_pixmap(dx, dy, scaled.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
                     }
                     Err(e) => {
                         let m = g.fit(12.0 * s, &format!("The picture cannot be shown: {e}"), Face::Sans, slot.w - 16.0 * s);
@@ -4957,7 +5075,7 @@ impl StoryApp {
         y += hh + 10.0 * s;
         let card = R::new(x, y, w, (player.y - 8.0 * s - y).max(40.0 * s));
         let glow = if matches!(snap.status, Status::Playing) { 0.3 + 0.7 * self.level } else { 0.15 };
-        glow_card(g, card, s, ACCENT, MAGENTA, glow);
+        let ring = glow_card_keep(g, card, s, ACCENT, MAGENTA, glow);
         let pad = 18.0 * s;
         let mut ty = card.y + 12.0 * s;
         let tw = card.w - 2.0 * pad - 12.0 * s;
@@ -4972,6 +5090,7 @@ impl StoryApp {
         let (slot_w, slot_h) = Self::pic_slot(area_txt.w, s);
         let mut tops = Vec::with_capacity(self.lay.len());
         let mut slots: Vec<(usize, f32)> = Vec::new(); // (picture index, y offset)
+        let mut slot_rects: Vec<(f32, f32)> = Vec::new(); // (y offset, height with the gallery)
         let mut total = 0.0;
         for (i, l) in self.lay.iter().enumerate() {
             if l.kind == UKind::Hidden {
@@ -4984,6 +5103,7 @@ impl StoryApp {
             for (pi, p) in self.pics.iter().enumerate() {
                 if p.scene.place_before == i {
                     slots.push((pi, total));
+                    slot_rects.push((total, slot_h + self.gallery_h(pi, slot_w, s)));
                     total += slot_h + self.gallery_h(pi, slot_w, s) + gap;
                 }
             }
@@ -5029,8 +5149,9 @@ impl StoryApp {
         }
         self.pic_buttons.clear();
         self.gal_hits.clear();
-        let mut ypos = area_txt.y - scroll;
         let base_y = area_txt.y - scroll;
+        let tc = TextCtx { area: area_txt, base_y, size, s, hl_range, cur_word, lit: self.highlight.sentence(), tick };
+        let word = self.ease_word(g, &lay, &tops, &tc);
         g.clipped(area_txt, |g| {
             for (pi, off) in &slots {
                 let slot = R::new(area_txt.x, base_y + off, slot_w, slot_h);
@@ -5044,64 +5165,15 @@ impl StoryApp {
                 }
                 let (sz, face) = if l.kind == UKind::Heading { (size * 1.18, Face::Bold) } else { (size, Face::Sans) };
                 let hl = g.line_height(sz, face);
-                ypos = base_y + tops[i];
-                let current = hl_range.filter(|(u, _)| *u == i);
-                let lit = self.highlight.sentence();
-                let base = if l.kind == UKind::Heading { ACCENT } else if l.kind == UKind::Partial { MUTED } else if reading && lit && current.is_none() { MUTED } else { TEXT };
-                if current.is_some() && lit {
+                let ypos = base_y + tops[i];
+                if tc.hl_range.is_some_and(|(u, _)| u == i) && tc.lit {
                     // a soft bar along the paragraph being read
                     g.rrect(area_txt.x - 10.0 * s, ypos - 2.0 * s, 4.0 * s, l.lines.len() as f32 * hl + 4.0 * s, 2.0 * s, ACCENT);
                 }
                 for (li, (line, ls)) in l.lines.iter().enumerate() {
                     let ly = ypos + li as f32 * hl;
                     if ly + hl >= area_txt.y - hl && ly <= area_txt.y + area_txt.h + hl {
-                        // the characters of this line that are inside the range (sentence, then word), as pixels
-                        let n = line.chars().count();
-                        let span_of = |g: &mut Gfx, a: usize, b: usize| -> Option<(usize, usize, f32, f32)> {
-                            let (lo, hi) = (a.max(*ls), b.min(ls + n));
-                            if lo >= hi {
-                                return None;
-                            }
-                            let pre: String = line.chars().take(lo - ls).collect();
-                            let mid: String = line.chars().skip(lo - ls).take(hi - lo).collect();
-                            Some((lo - ls, hi - ls, g.text_width(sz, &pre, face), g.text_width(sz, &mid, face)))
-                        };
-                        if let (true, Some((_, (a, b)))) = (lit, current) {
-                            if let Some((_, _, off, mw)) = span_of(g, a, b) {
-                                g.rrect(area_txt.x + off - 3.0 * s, ly - 1.0, mw + 6.0 * s, hl + 2.0, 5.0 * s, with_alpha(ACCENT, 70));
-                                self.sentence_rects.push(R::new(area_txt.x + off - 3.0 * s, ly - 1.0, mw + 6.0 * s, hl + 2.0));
-                            }
-                        }
-                        // the word being said: a solid rounded fill under dark text, easing from the word before it
-                        let mut word_at: Option<(usize, usize, f32, f32)> = None;
-                        if let (Some((_, _)), Some((wa, wb))) = (current, cur_word) {
-                            if let Some((c0, c1, off, mw)) = span_of(g, wa, wb) {
-                                let (ex, ew) = match self.word_vis {
-                                    Some((u, l0, x, w)) if u == i && l0 == li => (x + (off - x) * 0.6, w + (mw - w) * 0.6),
-                                    _ => (off, mw),
-                                };
-                                self.word_vis = Some((i, li, ex, ew));
-                                g.rrect(area_txt.x + ex - 3.0 * s, ly - 1.0, ew + 6.0 * s, hl + 2.0, 5.0 * s, WORD_FILL);
-                                self.word_rect = Some(R::new(area_txt.x + ex - 3.0 * s, ly - 1.0, ew + 6.0 * s, hl + 2.0));
-                                word_at = Some((c0, c1, off, mw));
-                            }
-                        }
-                        let shown = if l.kind == UKind::Partial && li + 1 == l.lines.len() { format!("{line}{}", ".".repeat(1 + (tick / 10 % 3) as usize)) } else { line.clone() };
-                        match word_at {
-                            Some((c0, c1, off, _)) => {
-                                // three runs, so the word can be dark on its fill: before, the word, after
-                                let chars: Vec<char> = shown.chars().collect();
-                                let (c1, c0) = (c1.min(chars.len()), c0.min(chars.len()));
-                                let (a, m, z): (String, String, String) = (chars[..c0].iter().collect(), chars[c0..c1].iter().collect(), chars[c1..].iter().collect());
-                                g.text(area_txt.x, ly, sz, base, &a, face);
-                                g.text(area_txt.x + off, ly, sz, WORD_INK, &m, face);
-                                let zx = g.text_width(sz, &format!("{a}{m}"), face);
-                                g.text(area_txt.x + zx, ly, sz, base, &z, face);
-                            }
-                            None => {
-                                g.text(area_txt.x, ly, sz, base, &shown, face);
-                            }
-                        }
+                        self.draw_line(g, l, i, li, ly, &tc, &word);
                     }
                     self.line_map.push((i, *ls));
                     self.line_tops.push(ly);
@@ -5112,7 +5184,6 @@ impl StoryApp {
                 g.text(area_txt.x, area_txt.y, size, MUTED, &format!("The storyteller is thinking{}", ".".repeat(1 + (tick / 10 % 3) as usize)), Face::Sans);
             }
         });
-        let _ = ypos;
         self.lay = lay;
         self.pane.end(g, ACCENT);
         // the buttons of the pictures go on top of the text area's press region
@@ -5141,7 +5212,258 @@ impl StoryApp {
         if self.tmax > 0.0 {
             fx::scrollbar(g, R::new(card.x + card.w - 14.0 * s, area_txt.y, 6.0 * s, area_txt.h), s, (self.tscroll / lh) as usize, (area_txt.h / lh) as usize, (total / lh) as usize, ACCENT);
         }
+        // the frames after this one repaint only what moves while the story is read aloud, when nothing else is going on
+        let bar_rect = glow_bounds(player, s);
+        let keep = matches!(snap.status, Status::Playing) && reading && self.partial_possible() && ring.as_ref().is_none_or(|r| r.depth() as f32 <= 8.0 * s) && {
+            // the glow of the text card and the one of the player are repainted separately: they must not share pixels
+            let c = glow_bounds(card, s);
+            c.0 + c.2 <= bar_rect.0 || bar_rect.0 + bar_rect.2 <= c.0 || c.1 + c.3 <= bar_rect.1 || bar_rect.1 + bar_rect.3 <= c.1
+        };
+        self.tick_off = tick.wrapping_sub(self.ticks);
+        let under = if keep { g.grab(bar_rect) } else { Vec::new() };
         self.player_bar(g, player, s, &snap, tick);
+        self.anim = if keep {
+            let caret = self.focus == Focus::Idea && (self.wide || self.pane_open);
+            let slot_screen = slot_rects.iter().map(|(off, h)| R::new(area_txt.x, base_y + off, slot_w, *h)).collect();
+            Some(Anim { text: area_txt, base_y, size, s, scroll, tops, unit: snap.unit, range: snap.range, word: cur_word, hl: self.highlight, slots: slot_screen, ring, ring_alpha: glow_alphas(glow), player, bar: bar_rect, bar_under: under, caret, blink: blink(tick), sig: self.view_sig(), streak: 0 })
+        } else {
+            None
+        };
+    }
+
+    /// The frames between two whole ones while the story is read aloud: repaint the lines of the sentence and word that were
+    /// lit and are lit now, the glow of the text card when the sound level moved it, and the player bar, over the whole frame
+    /// drawn last. Returns the rectangles painted, or `None` when something else changed (the whole frame is drawn then).
+    fn live_animate(&mut self, g: &mut Gfx) -> Option<Vec<(i32, i32, i32, i32)>> {
+        let mut a = self.anim.take()?;
+        let lay = std::mem::take(&mut self.lay);
+        let out = self.animate_in(g, &mut a, &lay);
+        self.lay = lay;
+        if out.is_some() {
+            a.streak += 1;
+            self.anim = Some(a);
+        }
+        out
+    }
+
+    fn animate_in(&mut self, g: &mut Gfx, a: &mut Anim, lay: &[ULay]) -> Option<Vec<(i32, i32, i32, i32)>> {
+        if !self.partial_possible() || !matches!(self.reader.status(), Status::Playing) || a.sig != self.view_sig() || a.streak >= 40 || self.highlight != a.hl {
+            return None;
+        }
+        let tick = self.ticks.wrapping_add(self.tick_off);
+        if a.caret && blink(tick) != a.blink {
+            return None;
+        }
+        let snap = self.reader.snapshot();
+        let u = a.unit;
+        let l = lay.get(u).filter(|l| l.kind != UKind::Hidden)?;
+        if snap.unit != u || a.tops.len() != lay.len() || lay.iter().map(|l| l.lines.len()).sum::<usize>() != self.line_map.len() {
+            return None;
+        }
+        let cur_word = if self.highlight.word() { snap.word } else { None };
+        // the page scrolls toward the word: that moves every line, a whole frame does it
+        let lh = g.line_height(a.size, Face::Sans);
+        if self.tscroll != a.scroll {
+            return None;
+        }
+        if self.manual_unit != Some(u) {
+            let at = cur_word.map_or(snap.range.0, |w| w.0);
+            let k = l.lines.iter().rposition(|(_, st0)| *st0 <= at).unwrap_or(0);
+            let target = (a.tops[u] + k as f32 * lh - a.text.h * 0.3).clamp_safe(0.0, self.tmax);
+            if target != self.tscroll {
+                return None;
+            }
+        }
+        let (sz, face) = if l.kind == UKind::Heading { (a.size * 1.18, Face::Bold) } else { (a.size, Face::Sans) };
+        let hl = g.line_height(sz, face);
+        // the lines whose lit part changes: where the sentence and the word were, and where they are
+        let touching = |from: (usize, usize)| -> Vec<usize> { l.lines.iter().enumerate().filter(|(_, (line, ls))| from.0 < ls + line.chars().count() && from.1 > *ls).map(|(k, _)| k).collect() };
+        let mut dirty: Vec<usize> = Vec::new();
+        if self.highlight.sentence() {
+            dirty.extend(touching(a.range));
+            dirty.extend(touching(snap.range));
+        }
+        if self.highlight.word() {
+            for w in [a.word, cur_word].into_iter().flatten() {
+                dirty.extend(touching(w));
+            }
+        }
+        dirty.sort_unstable();
+        dirty.dedup();
+        let top = a.base_y + a.tops[u];
+        let mut bands: Vec<R> = Vec::new();
+        for &k in &dirty {
+            let ly = top + k as f32 * hl;
+            let (y0, y1) = ((ly - 2.0).max(a.text.y).floor(), (ly + hl + 2.0).min(a.text.y + a.text.h).ceil());
+            if y1 <= y0 {
+                continue; // scrolled out of view
+            }
+            let band = R::new(a.text.x.floor(), y0, a.text.w.ceil(), y1 - y0);
+            if a.slots.iter().any(|sl| sl.y < band.y + band.h && sl.y + sl.h > band.y) {
+                return None; // next to a picture: not repainted alone
+            }
+            bands.push(band);
+        }
+        let tc = TextCtx { area: a.text, base_y: a.base_y, size: a.size, s: a.s, hl_range: Some((u, snap.range)), cur_word, lit: self.highlight.sentence(), tick };
+        if cur_word.is_none() {
+            self.word_vis = None;
+        }
+        let word = self.ease_word(g, lay, &a.tops, &tc);
+        self.word_rect = None;
+        self.sentence_rects.clear();
+        let mut rects: Vec<(i32, i32, i32, i32)> = Vec::new();
+        for band in bands {
+            g.clipped_near(band, hl + 8.0 + 12.0 * a.s, |g| {
+                g.rect(band.x, band.y, band.w, band.h, PANEL);
+                // every line that touches the band (the neighbours too: the fill covered a little of them)
+                for (i, ul) in lay.iter().enumerate() {
+                    if ul.kind == UKind::Hidden {
+                        continue;
+                    }
+                    let uh = if ul.kind == UKind::Heading { g.line_height(a.size * 1.18, Face::Bold) } else { lh };
+                    let utop = a.base_y + a.tops[i];
+                    if utop > band.y + band.h {
+                        break;
+                    }
+                    if utop + ul.lines.len() as f32 * uh < band.y {
+                        continue;
+                    }
+                    for li in 0..ul.lines.len() {
+                        let ly = utop + li as f32 * uh;
+                        if ly + uh >= band.y - 2.0 && ly - 1.0 <= band.y + band.h {
+                            self.draw_line(g, ul, i, li, ly, &tc, &word);
+                        }
+                    }
+                }
+            });
+            rects.push((band.x as i32, band.y as i32, band.w as i32, band.h as i32));
+        }
+        // the glow of the text card follows the sound level
+        let glow = 0.3 + 0.7 * self.level;
+        let alpha = glow_alphas(glow);
+        if alpha != a.ring_alpha {
+            if let Some(r) = &a.ring {
+                glow_ring_again(g, r, ACCENT, MAGENTA, glow);
+                rects.extend(r.rects());
+            }
+            a.ring_alpha = alpha;
+        }
+        // the player bar: its bars and progress move every frame
+        let bar = a.bar;
+        let bar_r = R::new(bar.0 as f32, bar.1 as f32, bar.2 as f32, bar.3 as f32);
+        g.clipped_near(bar_r, 8.0 * a.s, |g| {
+            g.put(bar, &a.bar_under);
+            self.player_bar(g, a.player, a.s, &snap, tick);
+        });
+        rects.push(bar);
+        a.unit = u;
+        a.range = snap.range;
+        a.word = cur_word;
+        Some(rects)
+    }
+
+    /// Nothing but the reading itself moves on this screen: no story being written, no picture or audio being made, no
+    /// menu, dialog, error or selection.
+    fn partial_possible(&self) -> bool {
+        matches!(self.page, Page::Story)
+            && self.gen.is_none()
+            && self.audio_job.is_none()
+            && self.alt_running.is_none()
+            && self.alt_jobs.is_empty()
+            && !self.pics.iter().any(|p| matches!(p.state, PicState::Working | PicState::Queued))
+            && self.error.is_none()
+            && self.modal.is_none()
+            && self.menu.is_none()
+            && self.drag_o.is_none()
+            && !self.pane.has_selection()
+    }
+
+    /// A summary of what is on the screen besides the reading, to notice a change the partial frames cannot show.
+    fn view_sig(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.story.title.as_str(), self.story.blocks.len(), self.story.partial.len(), self.story.words(), self.pics.len(), self.held, self.ver, self.ver_count, self.pane_open, self.wide, std::mem::discriminant(&self.focus)).hash(&mut h);
+        for p in &self.pics {
+            (p.key, p.alts.len(), std::mem::discriminant(&p.state)).hash(&mut h);
+        }
+        (self.saved.as_ref().map(|e| (e.id.as_str(), e.favourite, e.has_audio)), self.saved_audio.is_some(), self.note.as_ref().map(|n| (n.0.as_str(), n.1)), self.run_model.as_str(), self.turning_on, self.install.is_some()).hash(&mut h);
+        (self.chip_wanted(), self.read_hint().map(|x| x.0), self.voices.len(), self.takes_speed, self.prefs.speed.to_bits(), self.prefs.voice.as_deref()).hash(&mut h);
+        h.finish()
+    }
+
+    /// Where the word being said sits on its line, and the fill that eases toward it (kept for the next frame). Call once per
+    /// frame, before the lines are drawn.
+    fn ease_word(&mut self, g: &mut Gfx, lay: &[ULay], tops: &[f32], tc: &TextCtx) -> Option<WordAt> {
+        let (Some((u, _)), Some((wa, wb))) = (tc.hl_range, tc.cur_word) else { return None };
+        let l = lay.get(u).filter(|l| l.kind != UKind::Hidden)?;
+        let (sz, face) = if l.kind == UKind::Heading { (tc.size * 1.18, Face::Bold) } else { (tc.size, Face::Sans) };
+        let hl = g.line_height(sz, face);
+        for (li, (line, ls)) in l.lines.iter().enumerate() {
+            let ly = tc.base_y + tops.get(u).copied()? + li as f32 * hl;
+            if !(ly + hl >= tc.area.y - hl && ly <= tc.area.y + tc.area.h + hl) {
+                continue;
+            }
+            if let Some((c0, c1, off, mw)) = span_in_line(g, line, *ls, wa, wb, sz, face) {
+                let (ex, ew) = match self.word_vis {
+                    Some((uu, l0, x, w)) if uu == u && l0 == li => (x + (off - x) * 0.6, w + (mw - w) * 0.6),
+                    _ => (off, mw),
+                };
+                self.word_vis = Some((u, li, ex, ew));
+                return Some(WordAt { unit: u, li, c0, c1, off, ex, ew });
+            }
+        }
+        None
+    }
+
+    /// One line of the story: the lit sentence and word behind it, then its text.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_line(&mut self, g: &mut Gfx, l: &ULay, i: usize, li: usize, ly: f32, tc: &TextCtx, word: &Option<WordAt>) {
+        let (s, area_txt) = (tc.s, tc.area);
+        let (sz, face) = if l.kind == UKind::Heading { (tc.size * 1.18, Face::Bold) } else { (tc.size, Face::Sans) };
+        let hl = g.line_height(sz, face);
+        let (line, ls) = (&l.lines[li].0, l.lines[li].1);
+        let current = tc.hl_range.filter(|(u, _)| *u == i);
+        let reading = tc.hl_range.is_some();
+        let base = if l.kind == UKind::Heading { ACCENT } else if l.kind == UKind::Partial { MUTED } else if reading && tc.lit && current.is_none() { MUTED } else { TEXT };
+        // the characters of this line that are inside the range (sentence, then word), as pixels
+        if let (true, Some((_, (a, b)))) = (tc.lit, current) {
+            if let Some((_, _, off, mw)) = span_in_line(g, line, ls, a, b, sz, face) {
+                g.rrect(area_txt.x + off - 3.0 * s, ly - 1.0, mw + 6.0 * s, hl + 2.0, 5.0 * s, with_alpha(ACCENT, 70));
+                let r = R::new(area_txt.x + off - 3.0 * s, ly - 1.0, mw + 6.0 * s, hl + 2.0);
+                if !self.sentence_rects.contains(&r) {
+                    self.sentence_rects.push(r);
+                }
+            }
+        }
+        // the word being said: a solid rounded fill under dark text, easing from the word before it
+        let word_at = word.as_ref().filter(|w| w.unit == i && w.li == li);
+        if let Some(w) = word_at {
+            // the width of the word itself, again (the eased fill has its own)
+            g.rrect(area_txt.x + w.ex - 3.0 * s, ly - 1.0, w.ew + 6.0 * s, hl + 2.0, 5.0 * s, WORD_FILL);
+            self.word_rect = Some(R::new(area_txt.x + w.ex - 3.0 * s, ly - 1.0, w.ew + 6.0 * s, hl + 2.0));
+        }
+        let dots;
+        let shown: &str = if l.kind == UKind::Partial && li + 1 == l.lines.len() {
+            dots = format!("{line}{}", ".".repeat(1 + (tc.tick / 10 % 3) as usize));
+            &dots
+        } else {
+            line
+        };
+        match word_at {
+            Some(w) => {
+                // three runs, so the word can be dark on its fill: before, the word, after
+                let chars: Vec<char> = shown.chars().collect();
+                let (c1, c0) = (w.c1.min(chars.len()), w.c0.min(chars.len()));
+                let (a, m, z): (String, String, String) = (chars[..c0].iter().collect(), chars[c0..c1].iter().collect(), chars[c1..].iter().collect());
+                g.text(area_txt.x, ly, sz, base, &a, face);
+                g.text(area_txt.x + w.off, ly, sz, WORD_INK, &m, face);
+                let zx = g.text_width(sz, &format!("{a}{m}"), face);
+                g.text(area_txt.x + zx, ly, sz, base, &z, face);
+            }
+            None => {
+                g.text(area_txt.x, ly, sz, base, shown, face);
+            }
+        }
     }
 
     fn player_bar(&mut self, g: &mut Gfx, r: R, s: f32, snap: &st::Snapshot, tick: u64) {
@@ -5421,6 +5743,23 @@ impl StoryApp {
     }
 }
 
+impl StoryApp {
+    /// A frame is due at this heartbeat while reading: every third one (the level bars and the glow, about 10 a second), and at
+    /// once at any heartbeat when the lit word changed since the last one, so a word is on screen within one heartbeat (33 ms) of
+    /// the clock reaching it, not within three (100 ms: at fast speech a word is only 150 ms long).
+    fn reading_frame_due(&mut self) -> bool {
+        let word = if matches!(self.reader.status(), Status::Playing) { self.reader.snapshot().word } else { None };
+        if self.frame_due_at.0 == self.ticks && word == self.seen_word {
+            return self.frame_due_at.1;
+        }
+        let new_tick = self.frame_due_at.0 != self.ticks;
+        let due = (new_tick && self.ticks % 3 == 0) || word != self.seen_word;
+        self.seen_word = word;
+        self.frame_due_at = (self.ticks, due);
+        due
+    }
+}
+
 impl App for StoryApp {
     fn keeps_screen_on(&self) -> bool {
         matches!(self.reader.status(), Status::Playing | Status::Buffering)
@@ -5593,10 +5932,62 @@ impl App for StoryApp {
 
     fn wants_redraw(&mut self) -> bool {
         if self.animating() {
-            self.ticks % 3 == 0
+            self.reading_frame_due()
         } else {
             std::mem::take(&mut self.dirty)
         }
+    }
+
+    fn idle_redraw_ms(&self) -> u64 {
+        // nothing is read or made: only a caret blinks (every 500 ms) and the clock moves
+        if self.animating() {
+            100
+        } else {
+            250
+        }
+    }
+
+    fn wants_fast_poll(&self) -> bool {
+        self.highlight.word() && matches!(self.reader.status(), Status::Playing)
+    }
+
+    fn poll_redraw_due(&mut self) -> bool {
+        let word = self.reader.snapshot().word;
+        let changed = word != self.polled_word;
+        self.polled_word = word;
+        changed
+    }
+
+    fn redraw_kind(&mut self) -> super::browser_full::Redraw {
+        use super::browser_full::Redraw;
+        if !self.animating() {
+            return if std::mem::take(&mut self.dirty) { Redraw::Full } else { Redraw::None };
+        }
+        if !self.reading_frame_due() {
+            return Redraw::None;
+        }
+        // reading aloud with nothing else going on: only the lit words, the glow and the player bar move
+        if !std::mem::take(&mut self.dirty) && self.anim.is_some() && self.partial_possible() {
+            return Redraw::Live;
+        }
+        Redraw::Full
+    }
+
+    fn live_draw(&mut self, g: &mut Gfx) -> Option<(i32, i32, i32, i32)> {
+        let rects = self.live_animate(g)?;
+        let (x0, y0) = (rects.iter().map(|r| r.0).min()?, rects.iter().map(|r| r.1).min()?);
+        let (x1, y1) = (rects.iter().map(|r| r.0 + r.2).max()?, rects.iter().map(|r| r.1 + r.3).max()?);
+        self.live_out = rects;
+        Some((x0, y0, x1 - x0, y1 - y0))
+    }
+
+    fn live_rects(&self) -> Vec<(i32, i32, i32, i32)> {
+        self.live_out.clone()
+    }
+
+    fn live_full_every_ms(&self) -> u64 {
+        // the shell still draws the whole screen now and then, as a safety net
+        1500
     }
 
     fn take_host_save(&mut self) -> Option<(String, Vec<u8>)> {
@@ -6006,6 +6397,7 @@ mod tests {
 
     #[test]
     fn the_story_is_spoken_in_order_while_it_is_written_and_the_page_follows_along() {
+        let _route = iyakki_agent::mixer::pin_command_route(); // these play through the speaker command
         let t = Teller::with(STORY, None, 15);
         let (mut a, cx, _) = make("tales-read", &t);
         let _ = draw(&mut a, &cx, 1280, 720, 0);
@@ -6335,6 +6727,7 @@ mod tests {
 
     #[test]
     fn play_pause_stop_and_replay_end_the_speaker_process() {
+        let _route = iyakki_agent::mixer::pin_command_route(); // these play through the speaker command
         let t = Teller::new(STORY);
         let (mut a, cx, _) = make("tales-ctl", &t);
         let dir = temp_dir("tales-ctl-eng");
@@ -6390,6 +6783,7 @@ mod tests {
 
     #[test]
     fn a_speech_engine_that_fails_is_reported_on_the_page() {
+        let _route = iyakki_agent::mixer::pin_command_route(); // these play through the speaker command
         let t = Teller::new(STORY);
         let (mut a, cx, _) = make("tales-err", &t);
         let dir = temp_dir("tales-err-eng");
@@ -6454,6 +6848,7 @@ mod tests {
 
     #[test]
     fn audio_is_saved_next_to_the_story_and_heard_again_later_without_a_speech_engine() {
+        let _route = iyakki_agent::mixer::pin_command_route(); // these play through the speaker command
         let t = Teller::new(STORY);
         let (mut a, cx, home) = make("tales-audio", &t);
         let dir = temp_dir("tales-audio-eng");
@@ -6714,6 +7109,7 @@ mod tests {
 
     #[test]
     fn every_page_fits_at_the_screen_sizes_with_no_overlap() {
+        let _route = iyakki_agent::mixer::pin_command_route(); // these play through the speaker command
         let long = STORY.replace("\n\nShe walked", &"\n\nAnother long paragraph about the river, the reeds and the night wind that went on for quite a while without stopping.".repeat(8));
         let t = Teller::new(&long);
         let (mut a, cx, _) = make("tales-geo", &t);
@@ -9639,4 +10035,7 @@ J
         cx.services.host_tts.helper_stop();
         assert!(!hv.helper_active());
     }
+
+    // frame cost of the reading view (a separate file; items are part of this module)
+    include!("story_perf_tests.rs");
 }

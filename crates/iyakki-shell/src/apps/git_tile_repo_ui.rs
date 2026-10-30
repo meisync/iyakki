@@ -1,6 +1,7 @@
 //! GIT: the drawing of the repository view: header (back, name, tabs, branch or tag, actions) and one body per tab. Wide and medium
 //! screens show a list and a viewer side by side; a phone-sized one shows one of them at a time (Back returns to the list).
 
+use crate::safeclamp::SafeClamp;
 use iyakki_agent::gitbrowse::{EntryKind, LineKind};
 
 use super::git_tile::*;
@@ -248,7 +249,7 @@ impl GitApp {
                     }
                     let (_, lay) = m.layout.as_ref().unwrap();
                     let max_top = (lay.height - view.h).max(0.0);
-                    m.top = m.top.clamp(0.0, max_top);
+                    m.top = m.top.clamp_safe(0.0, max_top);
                     let top = m.top;
                     let hh = lay.height;
                     g.clipped(view, |g| {

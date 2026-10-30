@@ -97,6 +97,8 @@ pub enum MainTab {
     /// A web page inside the IDE (the app just deployed, or whatever the assistant is testing): see `ide_browser`.
     Browser,
     K8s,
+    /// This project's git working copy and the Git connections' repositories, read-only (`ide_gitview`).
+    Git,
 }
 
 /// Who has the keyboard. Exactly one owner at a time; a blinking caret is shown only for an owner that is a text input.
@@ -120,6 +122,10 @@ pub enum Owner {
     K8s,
     /// A dialog of the cluster view (chooser or deploy steps: y/a approve).
     K8sDialog,
+    /// The Git tab (single-letter keys: Enter diff, o open in the editor, r refresh, c connections).
+    Git,
+    /// The Git tab's connection filter: a text input.
+    GitText,
     /// The Browser tab's address field: a text input.
     BrowserAddr,
     /// The page in the Browser tab: letters, clicks and the wheel go to the page (Esc hands the keyboard back).
@@ -141,7 +147,7 @@ pub enum Owner {
 impl Owner {
     /// A text input: every printable key is typed into it, and its caret blinks.
     pub fn is_text(self) -> bool {
-        matches!(self, Owner::Editor | Owner::BoardFilter | Owner::Dialog | Owner::Composer | Owner::Terminal | Owner::Search | Owner::BrowserAddr | Owner::NotesText)
+        matches!(self, Owner::Editor | Owner::GitText | Owner::BoardFilter | Owner::Dialog | Owner::Composer | Owner::Terminal | Owner::Search | Owner::BrowserAddr | Owner::NotesText)
     }
 }
 
@@ -172,6 +178,8 @@ impl Ws {
                 MainTab::Browser => Owner::BrowserPage,
                 MainTab::K8s if self.k8s.as_ref().is_some_and(|k| k.has_modal()) => Owner::K8sDialog,
                 MainTab::K8s => Owner::K8s,
+                MainTab::Git if self.gitview.as_ref().is_some_and(|g| g.wants_text()) => Owner::GitText,
+                MainTab::Git => Owner::Git,
             },
             Pane::Bottom => match self.bottom_tab {
                 BTab::Terminal => Owner::Terminal,
@@ -184,7 +192,7 @@ impl Ws {
 }
 
 impl MainTab {
-    pub const ALL: [MainTab; 6] = [MainTab::Editor, MainTab::Board, MainTab::Tasks, MainTab::Notes, MainTab::Browser, MainTab::K8s];
+    pub const ALL: [MainTab; 7] = [MainTab::Editor, MainTab::Board, MainTab::Tasks, MainTab::Notes, MainTab::Browser, MainTab::K8s, MainTab::Git];
     pub fn label(self) -> &'static str {
         match self {
             MainTab::Editor => "Editor",
@@ -193,6 +201,7 @@ impl MainTab {
             MainTab::Notes => "Context",
             MainTab::Browser => "Browser",
             MainTab::K8s => "K8s",
+            MainTab::Git => "Git",
         }
     }
 }
@@ -235,6 +244,8 @@ pub struct Ws {
     pub cov_plan: Option<iyakki_agent::coverage::Plan>,
     pub search: SearchPanel,
     pub k8s: Option<K8sView>,
+    /// The Git tab (made when first shown): this project's working copy and the Git connections.
+    pub gitview: Option<super::ide_gitview::GitTabView>,
     /// The Browser tab's page, made when the tab is first shown (one per workspace: there is never a second browser surface).
     pub browser: Option<super::ide_browser::IdeBrowser>,
     /// Addresses offered as buttons in the Browser tab: found by the dev-server scan, the cluster's Services and the last page.
@@ -367,11 +378,17 @@ impl Ws {
         let p = self.reachable_profile()?;
         let (run, _) = cluster_world()?;
         let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+        #[cfg(test)]
+        let probe_run = run.clone();
         let mut t = K8sTools::new(run, p, &self.cfg.namespace(&self.meta.name), &self.meta.name, &self.root(), Arc::new(move |a, d| audit.record(&user, &format!("k8s.{a}"), d)));
         t.cluster_phrase = iyakki_agent::clusters::phrase_for(cx.services.dir(), &cx.session.user, &self.meta.name);
         t.registry_setting = self.cfg.k8s.registry.clone();
         t.registry_pull = self.cfg.k8s.registry_pull.clone();
         t.registry_kind = self.cfg.k8s.registry_kind.clone();
+        #[cfg(test)]
+        {
+            t.registry_probe = Some(crate::apps::ide_fakeprobe_tests::registry_probe(probe_run));
+        }
         Some(Arc::new(t))
     }
 
@@ -712,6 +729,7 @@ impl IdeApp {
             cov_plan: None,
             search: SearchPanel::new(&root),
             k8s: None,
+            gitview: None,
             browser: None,
             dev_ports: super::ide_browser::DevScan::default(),
             board,
@@ -1439,7 +1457,13 @@ impl IdeApp {
                 if let Some((run, _)) = cluster_world() {
                     let cfg = w.cfg.k8s.clone();
                     std::thread::spawn(move || {
-                        let s = iyakki_agent::regsetup::status(&cfg, &*run);
+                        #[cfg_attr(not(test), allow(unused_mut))]
+                        let mut s = iyakki_agent::regsetup::status(&cfg, &*run);
+                        #[cfg(test)]
+                        if !s.push.is_empty() {
+                            // unit tests never probe the real network: the fake runner answers
+                            s.reachable = crate::apps::ide_fakeprobe_tests::reachable(&*run, &s.push);
+                        }
                         *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(s);
                     });
                 }
@@ -1505,7 +1529,7 @@ impl IdeApp {
             .choice(&format!("Where images go (now: {})", saved.chip().replacen("registry: ", "", 1)), &names, pre)
             .text("Existing registry (option C): host:port", &addr, "e.g. 192.168.1.68:30500; http unless the scheme below says https")
             .choice("Scheme (option C)", &["http", "https"], 0)
-            .text("NodePort (option A)", "", "empty: 30500, or the next free one");
+            .text("Port on this machine (option A)", "", "empty: 30500 on 127.0.0.1 (this machine only), or the next free one");
         registry_form_hint(&mut f);
         self.modal = Some(Modal::Form(FormKind::Registry, f));
     }
@@ -1717,7 +1741,7 @@ impl IdeApp {
                     }
                     "in-cluster" if !f.value(3).is_empty() => match f.value(3).parse::<u16>() {
                         Ok(p) if (30500..=32767).contains(&p) => args["node_port"] = p.into(),
-                        _ => return fail(self, kind, f, "The NodePort is a number from 30500 to 32767.".into()),
+                        _ => return fail(self, kind, f, "The port is a number from 30500 to 32767.".into()),
                     },
                     _ => {}
                 }
@@ -2014,7 +2038,21 @@ impl IdeApp {
         let user = cx.session.user.clone();
         let mut acts = Vec::new();
         let mut wants: Vec<(usize, super::ide_k8s::Want)> = Vec::new();
+        let mut git_open: Option<String> = None;
         for (i, w) in self.ws.iter_mut().enumerate() {
+            if active == Some(i) && w.main_tab == MainTab::Git {
+                if let Some(g) = w.gitview.as_mut() {
+                    if g.tick(cx) {
+                        self.redraw = true;
+                    }
+                    if let Some(r) = g.take_request() {
+                        self.request = Some(r);
+                    }
+                    if let Some(p) = g.take_open() {
+                        git_open = Some(p);
+                    }
+                }
+            }
             // the chat and the editor of every workspace keep working in the background
             w.chat.handle(&Event::Tick, cx);
             w.editor.handle(&Event::Tick, cx);
@@ -2164,6 +2202,9 @@ impl IdeApp {
         for (i, want) in wants {
             self.handle_k8s_want(i, want, cx);
         }
+        if let Some(p) = git_open {
+            self.open_file(&p, Some(1), cx);
+        }
         if tick % 1800 == 0 {
             self.save_all();
         }
@@ -2279,6 +2320,10 @@ impl IdeApp {
             Key::Ctrl('K') => {
                 let on = self.active_ws().is_some_and(|w| w.main_tab == MainTab::K8s && w.focus == Pane::Main);
                 self.show_main(if on { MainTab::Editor } else { MainTab::K8s });
+            }
+            Key::Ctrl('L') => {
+                let on = self.active_ws().is_some_and(|w| w.main_tab == MainTab::Git && w.focus == Pane::Main);
+                self.show_main(if on { MainTab::Editor } else { MainTab::Git });
             }
             Key::Ctrl('O') => {
                 let on = self.active_ws().is_some_and(|w| w.main_tab == MainTab::Browser && w.focus == Pane::Main);
@@ -2411,15 +2456,25 @@ impl IdeApp {
                             w.set_focus(Pane::Tree);
                         }
                     }
+                    MainTab::Git => {
+                        let used = w.gitview.as_mut().is_some_and(|g| g.handle(ev, cx));
+                        if !used && matches!(k, Key::Esc) {
+                            w.set_focus(Pane::Tree);
+                        }
+                        if let Some(p) = w.gitview.as_mut().and_then(|g| g.take_open()) {
+                            open = Some((p, 1));
+                        }
+                    }
                 },
                 Pane::Chat => {
                     if matches!(k, Key::Enter) {
                         // what the editor shows goes with the question
                         let root = w.root();
-                        let ctx = w.editor.path().map(|p| {
+                        let git_ctx = if w.main_tab == MainTab::Git { w.gitview.as_ref().and_then(|g| g.context_block()) } else { None };
+                        let ctx = if let Some(c) = git_ctx { Some(format!("The person has the Git tab open. What it shows (read-only; paths and counts only):\n{c}")) } else { w.editor.path().map(|p| {
                             let sel = w.editor.selection_info();
                             iyakki_edit::proposal::edit_context(&workspace::rel_of(&root, p), w.editor.lang().name(), &w.editor.text(), sel.as_ref().map(|(a, b, t)| (*a, *b, t.as_str())))
-                        });
+                        }) };
                         w.chat.set_file_context(ctx);
                     }
                     // Esc with nothing to dismiss (no recording, no dialog) leaves the composer for the editor
@@ -2758,7 +2813,7 @@ impl App for IdeApp {
             "Ctrl+B  show / hide the file tree",
             "Ctrl+J  show / hide the bottom panel",
             "Ctrl+Shift+E / D / C / T  focus the tree / editor / chat / terminal",
-            "Ctrl+Shift+B  feature board    Ctrl+Shift+O  browser (the app you deployed)    Ctrl+Shift+K  cluster view",
+            "Ctrl+Shift+B  feature board    Ctrl+Shift+O  browser (the app you deployed)    Ctrl+Shift+K  cluster view    Ctrl+Shift+L  Git",
             "Ctrl+Shift+A  send the selection (or file) to the chat",
             "Ctrl+Shift+←→↑↓  resize the focused pane",
             "F5  run the file (scripts) or the project's run command",
@@ -2767,6 +2822,7 @@ impl App for IdeApp {
             "Ctrl+=  Ctrl+-  looser / denser IDE (Comfortable, Compact, Dense)",
             "Tree: n new file · N new folder · F2 rename · Delete delete · / find · h show hidden folders",
             "Board: Tab view · [ ] move · e comment · b blocker · a add · x delete · i ask AI · Ctrl+Z undo",
+            "Git: Enter diff · o open the file in the editor · Tab list · r refresh · c connections (Esc back to this project) · / filter repositories",
             "Cluster: Tab kind · Enter details · l logs · r refresh · n namespace · o open the selected Service in the Browser tab",
             "Browser: Ctrl+L address · Esc hands the keyboard back · ← → ⟳ buttons · Reader / Full · ↗ open in the Browser tile; the assistant's clicks show with a banner (Stop, Take over)",
             "A blinking caret means typing goes there: letters are shortcuts only in the tree, the cluster table, the board and the problems list; Esc leaves a text field",
@@ -2796,6 +2852,9 @@ impl App for IdeApp {
             }
             Event::MouseMove(x, y) if self.platform.is_none() => {
                 self.mouse = (*x, *y);
+                if let Some(g) = self.active.and_then(|i| self.ws.get_mut(i)).filter(|w| w.main_tab == MainTab::Git).and_then(|w| w.gitview.as_mut()) {
+                    g.mouse(*x, *y);
+                }
                 // the page under the pointer sees it (hover, the cursor shape, the end of a drag)
                 if let Some(w) = self.active.and_then(|i| self.ws.get_mut(i)).filter(|w| w.main_tab == MainTab::Browser) {
                     if let Some(b) = w.browser.as_mut().filter(|b| b.page_rect.contains(*x, *y)) {
@@ -2891,6 +2950,22 @@ impl App for IdeApp {
         // clicks that belong to the embedded browser
         if let Some(inner) = super::component::route::decode_slot(ev, super::component::route::BROWSER) {
             self.browser_route(inner, cx);
+            return Flow::Stay;
+        }
+        // clicks that belong to the Git tab
+        if let Some(inner) = super::component::route::decode_slot(ev, super::ide_gitview::GIT) {
+            if let Some(i) = self.active {
+                let w = &mut self.ws[i];
+                w.set_focus(Pane::Main);
+                w.compact_pane = Pane::Main;
+                w.main_tab = MainTab::Git;
+                if let Some(g) = w.gitview.as_mut() {
+                    g.handle(&inner, cx);
+                }
+                if let Some(p) = w.gitview.as_mut().and_then(|g| g.take_open()) {
+                    self.open_file(&p, Some(1), cx);
+                }
+            }
             return Flow::Stay;
         }
         // clicks and typing that belong to a child app (the editor or the chat)
@@ -3025,6 +3100,11 @@ impl App for IdeApp {
                             MainTab::Notes => {
                                 w.notes.handle(&ev);
                             }
+                            MainTab::Git => {
+                                if let Some(g) = w.gitview.as_mut() {
+                                    g.handle(&ev, cx);
+                                }
+                            }
                             MainTab::K8s | MainTab::Tasks => {}
                         },
                         Pane::Chat => {
@@ -3071,6 +3151,11 @@ impl App for IdeApp {
                             MainTab::Tasks => tasks_act = Some(w.tasks.handle(ev)),
                             MainTab::Notes => {
                                 w.notes.handle(ev);
+                            }
+                            MainTab::Git => {
+                                if let Some(g) = w.gitview.as_mut() {
+                                    g.handle(ev, cx);
+                                }
                             }
                         },
                         Pane::Bottom => match w.bottom_tab {

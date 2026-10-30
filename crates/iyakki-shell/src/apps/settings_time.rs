@@ -13,6 +13,14 @@
 use super::*;
 use iyakki_agent::clock::{self, Zone};
 
+/// One setting read through the core contract (`settings.get`, docs/development/CORE-CONTRACT.md) instead of from the store directly:
+/// the first screen on the contract. `None` when the call is refused, so the page falls back to what it had (no behaviour change).
+fn contract_setting(cx: &AppCx, key: &str) -> Option<iyakki_agent::core_contract::SettingValue> {
+    use iyakki_agent::core_contract::{CallContext, Settings as _};
+    let ctx = CallContext::local(&cx.session.user, cx.session.policy.manage_settings);
+    iyakki_agent::contract_local::core_for(&cx.services).settings.get(&ctx, key).ok()
+}
+
 /// Changes the clock for a sync (the real one needs root; tests record).
 pub(super) type ClockSetter = Arc<dyn Fn(f64) -> Result<(), String> + Send + Sync>;
 /// Looks the time zone up (the real one asks an internet service in the background; tests answer at once).
@@ -243,7 +251,18 @@ impl SettingsApp {
 
     /// The rows the page shows: (label, value, is it a warning).
     pub(super) fn time_rows(&self, cx: &AppCx) -> Vec<(&'static str, String, bool)> {
-        let t = Self::time_settings(cx);
+        use iyakki_agent::core_contract::SettingValue;
+        let mut t = Self::time_settings(cx);
+        // the zone, the network-time switch and the server are read through the core contract
+        if let Some(SettingValue::Text(z)) = contract_setting(cx, "time.zone") {
+            t.zone = z;
+        }
+        if let Some(SettingValue::Bool(b)) = contract_setting(cx, "time.no_ntp") {
+            t.no_ntp = b;
+        }
+        if let Some(SettingValue::Text(n)) = contract_setting(cx, "time.ntp_server") {
+            t.ntp_server = n;
+        }
         let z = Zone::system();
         let now = clock::now_unix();
         let (h12, secs) = crate::uisize::load_clock(Self::svc(cx).dir(), &cx.session.user);

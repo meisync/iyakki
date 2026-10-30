@@ -631,6 +631,7 @@ fn plan_answers(r: &FakeRunner) {
     r.answer("get service registry", r#"{"spec":{"ports":[{"nodePort":30500}]}}"#);
     r.answer("create secret generic", "secret/private-store created");
     r.answer("label secret", "secret/private-store labeled");
+    r.fail("get pvc", 1, "Error from server (NotFound): persistentvolumeclaims not found");
     r.answer("apply -f", "created");
     r.answer("rollout status", "deployment \"private-store\" successfully rolled out");
     r.answer("rollout restart", "restarted");

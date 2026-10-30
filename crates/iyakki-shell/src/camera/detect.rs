@@ -67,8 +67,31 @@ pub struct CamDevice {
     /// `video0`
     pub node: String,
     pub path: PathBuf,
+    /// The name from sysfs (`/sys/class/video4linux/videoN/name`), cleaned up; the card name when sysfs has none.
     pub name: String,
     pub caps: Caps,
+    /// The built-in camera of the machine (FaceTime HD, an integrated webcam), not a plugged-in one.
+    pub builtin: bool,
+    /// Which physical camera this node belongs to: the nodes of one device (pictures, metadata) share it.
+    pub physical: String,
+}
+
+/// A sysfs camera name without the trailing colon the UVC driver leaves (`FaceTime HD Camera (Built-in):`) and without the
+/// doubled form (`HD 4MP WEBCAM: HD 4MP WEBCAM`).
+pub fn clean_name(raw: &str) -> String {
+    let t = raw.trim();
+    if let Some((a, b)) = t.split_once(": ") {
+        if a.trim() == b.trim() {
+            return a.trim().to_string();
+        }
+    }
+    t.trim_end_matches(':').trim().to_string()
+}
+
+/// Is this the machine's own camera? By its driver or name, or because the USB port says the device is fixed.
+pub fn is_builtin(name: &str, driver: &str, removable: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    driver == "facetimehd" || n.contains("built-in") || n.contains("builtin") || n.contains("facetime") || n.contains("integrated") || n.contains("internal") || removable.trim() == "fixed"
 }
 
 pub type Query = Box<dyn Fn(&Path) -> Option<Caps> + Send + Sync>;
@@ -83,6 +106,8 @@ pub struct Presence {
     /// The Broadcom FaceTime HD camera (PCI 14e4:1570) of a MacBook is on this machine.
     facetime_pci: bool,
     scanned: bool,
+    /// Lower-case name parts of cameras the person may not use; they are left out of the list.
+    hidden: Vec<String>,
 }
 
 fn node_number(n: &str) -> u32 {
@@ -98,7 +123,7 @@ impl Presence {
     pub fn with(roots: Roots, query: Query) -> Presence {
         let apple = std::fs::read_to_string(roots.sys.join("class/dmi/id/sys_vendor")).is_ok_and(|v| v.contains("Apple"));
         let facetime_pci = has_facetime_pci(&roots.sys);
-        Presence { roots, query, known: BTreeMap::new(), apple, facetime_pci, scanned: false }
+        Presence { roots, query, known: BTreeMap::new(), apple, facetime_pci, scanned: false, hidden: Vec::new() }
     }
 
     /// Nothing at all: no camera, never looks (the tests' default).
@@ -128,8 +153,14 @@ impl Presence {
                 }
                 let sysname = std::fs::read_to_string(class.join(&node).join("name")).unwrap_or_default().trim().to_string();
                 let cam = (self.query)(&path).filter(Caps::is_camera).map(|caps| {
-                    let name = if caps.card.is_empty() { if sysname.is_empty() { node.clone() } else { sysname.clone() } } else { caps.card.clone() };
-                    CamDevice { node: node.clone(), path: path.clone(), name, caps }
+                    let cleaned = clean_name(&sysname);
+                    let name = if !cleaned.is_empty() { cleaned } else if !caps.card.is_empty() { clean_name(&caps.card) } else { node.clone() };
+                    // the USB device above the interface: its path tells the nodes of one camera apart from another camera's
+                    let usb = std::fs::canonicalize(class.join(&node).join("device")).ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                    let removable = usb.as_ref().map(|d| std::fs::read_to_string(d.join("removable")).unwrap_or_default()).unwrap_or_default();
+                    let physical = usb.map(|d| d.display().to_string()).unwrap_or_else(|| format!("{}|{}", caps.bus, caps.card));
+                    let builtin = is_builtin(&name, &caps.driver, &removable);
+                    CamDevice { node: node.clone(), path: path.clone(), name, caps, builtin, physical }
                 });
                 self.known.insert(node, (devno, cam));
             }
@@ -139,15 +170,32 @@ impl Presence {
         self.cameras() != before
     }
 
-    /// The cameras, in node order (video0, video2, video10).
+    /// Cameras the person may not use are left out of [`Presence::cameras`].
+    pub fn set_hidden(&mut self, names: Vec<String>) {
+        self.hidden = names.into_iter().map(|n| n.to_ascii_lowercase()).filter(|n| !n.is_empty()).collect();
+    }
+
+    /// One entry per physical camera, in node order (video0, video2, video10): the picture node of each (the lowest when
+    /// a device shows several, so the metadata node of a webcam never counts), without the cameras that are hidden.
     pub fn cameras(&self) -> Vec<CamDevice> {
-        let mut v: Vec<CamDevice> = self.known.values().filter_map(|(_, c)| c.clone()).collect();
-        v.sort_by_key(|c| node_number(&c.node));
+        let mut all: Vec<CamDevice> = self.known.values().filter_map(|(_, c)| c.clone()).collect();
+        all.sort_by_key(|c| node_number(&c.node));
+        let mut v: Vec<CamDevice> = Vec::new();
+        for c in all {
+            if v.iter().any(|o| o.physical == c.physical) {
+                continue;
+            }
+            let n = c.name.to_ascii_lowercase();
+            if self.hidden.iter().any(|h| n.contains(h.as_str())) {
+                continue;
+            }
+            v.push(c);
+        }
         v
     }
 
     pub fn available(&self) -> bool {
-        self.known.values().any(|(_, c)| c.is_some())
+        !self.cameras().is_empty()
     }
 
     pub fn scanned(&self) -> bool {

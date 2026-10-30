@@ -1,0 +1,23 @@
+[
+  {
+    "id": "prometheus",
+    "kind": "prometheus",
+    "name": "Home Prometheus",
+    "values": {
+      "url": "http://192.0.2.10:9090",
+      "auth": "bearer"
+    },
+    "secrets": {
+      "token": "uvault:svc.prometheus"
+    }
+  },
+  {
+    "id": "logs",
+    "kind": "elasticsearch",
+    "name": "Home logs",
+    "values": {
+      "url": "http://192.0.2.11:9200"
+    },
+    "secrets": {}
+  }
+]

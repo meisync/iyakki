@@ -298,7 +298,7 @@ fn actions_run_quickly_or_say_why_not() {
     assert!(run_act(&p, &Act::ToggleMute(0)).unwrap().starts_with("Sound on"));
     let mut p2 = probe_at(&r);
     p2.can_scan = false;
-    assert!(run_act(&p2, &Act::BluetoothScan).unwrap_err().contains("Bluetooth service"));
+    assert!(run_act(&p2, &Act::BluetoothScan).unwrap_err().contains("Bluetooth controller"));
     let empty = tmp("acts-empty");
     std::fs::create_dir_all(empty.join("proc")).unwrap();
     assert!(run_act(&probe_at(&empty), &Act::TestSound).unwrap_err().contains("No sound card"));

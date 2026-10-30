@@ -407,6 +407,11 @@ impl NodeKind for Approval {
     }
 }
 
+/// `inbox, Matrix` -> `["inbox", "matrix"]`.
+fn channel_names(list: &str) -> Vec<String> {
+    list.split([',', ';', ' ']).map(|c| c.trim().to_ascii_lowercase()).filter(|c| !c.is_empty()).collect()
+}
+
 struct Notify;
 impl NodeKind for Notify {
     fn id(&self) -> &'static str {
@@ -416,7 +421,7 @@ impl NodeKind for Notify {
         "Notify"
     }
     fn blurb(&self) -> &'static str {
-        "Puts a note in the INBOX."
+        "Puts a note in the INBOX, and tells you in a Matrix room if you ask."
     }
     fn category(&self) -> &'static str {
         "Human"
@@ -426,21 +431,48 @@ impl NodeKind for Notify {
             Field::new("title", "Title", FieldKind::Text, "").required(),
             Field::new("body", "Text", FieldKind::Multiline, "may use {{ templates }}"),
             Field::new("level", "Level", FieldKind::Choice(&["info", "warn", "error"]), "").default(json!("info")),
+            Field::new("channels", "Also tell me by", FieldKind::Text, "inbox, matrix (the INBOX note is always made). Matrix needs the account in Settings, Notifications"),
+            Field::new("room", "Matrix room", FieldKind::Text, "the name you saved the room under; empty: your only or main room"),
+            Field::new("attach", "Picture", FieldKind::Text, "a camera step's file, for example {{ nodes.cam.output.path }}; only a picture of this run can be sent"),
+            Field::new("dry_run", "Dry run", FieldKind::Bool, "check and show what would be sent, send nothing"),
         ]
     }
     fn validate(&self, node: &Node, _f: &Flow) -> Vec<Issue> {
+        let mut v = vec![];
         if s(&node.config, "title").trim().is_empty() {
-            vec![Issue::error(&node.id, "give a title")]
-        } else {
-            vec![]
+            v.push(Issue::error(&node.id, "give a title"));
         }
+        for c in channel_names(s(&node.config, "channels")) {
+            if c != "matrix" && c != "inbox" {
+                v.push(Issue::error(&node.id, format!("unknown channel `{c}` (use inbox or matrix)")));
+            }
+        }
+        v
     }
-    fn run(&self, cx: &NodeCx, _n: &Node, cfg: &Value) -> NodeResult {
+    fn run(&self, cx: &NodeCx, node: &Node, cfg: &Value) -> NodeResult {
         let level = if s(cfg, "level").is_empty() { "info" } else { s(cfg, "level") };
         let n = Notice { title: s(cfg, "title").to_string(), body: s(cfg, "body").to_string(), level: level.to_string(), flow_id: cx.flow.id.clone(), run_id: cx.run_id.to_string(), needs_you: false };
         cx.host.notify(&n).map_err(NodeError::new)?;
         cx.log(format!("notified: {}", n.title));
-        Ok(NodeOutput::out(json!({"sent": true, "title": n.title})))
+        let mut out = json!({"sent": true, "title": n.title});
+        let extra: Vec<String> = channel_names(s(cfg, "channels")).into_iter().filter(|c| c != "inbox").collect();
+        if !extra.is_empty() {
+            let c = crate::host::ChannelNotice { channels: extra, room: s(cfg, "room").trim().to_string(), attach: s(cfg, "attach").trim().to_string(), dry_run: b(cfg, "dry_run", false), dedupe_key: format!("{}:{}:{}", cx.flow.id, cx.run_id, node.id) };
+            // the INBOX note is made; a channel that cannot be reached is said plainly and does not fail the run
+            match cx.host.notify_channels(&n, &c) {
+                Ok(lines) => {
+                    for l in &lines {
+                        cx.log(l.clone());
+                    }
+                    out["channels"] = json!({"ok": true, "lines": lines});
+                }
+                Err(e) => {
+                    cx.log(format!("not sent through {}: {e}", c.channels.join(", ")));
+                    out["channels"] = json!({"ok": false, "error": e});
+                }
+            }
+        }
+        Ok(NodeOutput::out(out))
     }
 }
 

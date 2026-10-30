@@ -329,7 +329,8 @@ impl SettingsApp {
         let cfg = Self::agents_cfg(cx);
         let cache = &Self::svc(cx).ext_status;
         let all = cfg.all();
-        g.text(a.x, a.y, 14.0 * s, MUTED, "Coding agents you installed and signed into. They answer the chat next to the built-in models (Ctrl+P in the chat) and obey IYAKKI's approvals.", Face::Sans);
+        let intro = g.fit(14.0 * s, "Coding agents you installed and signed into. They answer the chat next to the built-in models (Ctrl+P in the chat) and obey IYAKKI's approvals.", Face::Sans, a.w);
+        g.text(a.x, a.y, 14.0 * s, MUTED, &intro, Face::Sans);
         let mut y = a.y + 30.0 * s;
         let sel = self.sel().min(all.len().saturating_sub(1));
         for (i, ag) in all.iter().enumerate() {

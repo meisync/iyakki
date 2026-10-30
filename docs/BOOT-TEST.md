@@ -1,7 +1,8 @@
 # Testing IYAKKI on real hardware
 
 This is the first cut for trying IYAKKI on your own machines: an Intel/AMD 64-bit PC (booted from USB) and an
-Apple Silicon Mac mini (run in a virtual machine). **Nothing here has been tried on real hardware yet.** Only QEMU
+Apple Silicon Mac mini (run in a virtual machine). **Real hardware so far (2026-10-26):** a Mac mini 2018, a 2020 MacBook Pro with the T2 chip (USB and internal disk) and one AMD PC booted; see
+[HARDWARE.md](HARDWARE.md) for the list and what is still untested (an Intel + NVIDIA PC and an AMD + NVIDIA PC are planned). Elsewhere only QEMU
 (BIOS, UEFI without Secure Boot, and ARM64) was used. The first thing to run on any machine is the hardware check.
 
 ## What you need

@@ -441,6 +441,7 @@ impl SettingsApp {
             Key::Char('l') => self.dc_logs(cx),
             Key::Char('p') => self.dc_upgrade(cx),
             Key::Char('a') => self.dc_autostart(cx),
+            Key::Char('f') => self.dc_fixed_ip(cx),
             Key::Char('z') => self.dc_typed_form(cx, DcForm::Reset),
             Key::Char('U') => self.dc_typed_form(cx, DcForm::Uninstall),
             _ => {}
@@ -776,7 +777,7 @@ impl SettingsApp {
             .choice(&format!("Where images go (now: {})", saved.chip().replacen("registry: ", "", 1)), &names, pre)
             .text("Existing registry (option C): host:port", &addr, "e.g. 192.168.1.68:30500; http unless the scheme below says https")
             .choice("Scheme (option C)", &["http", "https"], 0)
-            .text("NodePort (option A)", "", "empty: 30500, or the next free one");
+            .text("Port on this machine (option A)", "", "empty: 30500 on 127.0.0.1 (this machine only), or the next free one");
         self.open_form(FormKind::Dc(DcForm::Registry), f);
     }
 
@@ -879,6 +880,21 @@ impl SettingsApp {
         let svc = cx.services.k3sdev.clone();
         cx.audit.record(&cx.session.user, "devcluster.upgrade.lookup", "");
         self.start("looking for a newer k3s release", move || JobOut::Dc(DcOut::UpgradePlan(svc.upgrade_plan(&*st))));
+    }
+
+    /// "Use a fixed node address (experimental)": on tries it at the next start; k3s refusing it switches it off by itself.
+    fn dc_fixed_ip(&mut self, cx: &AppCx) {
+        if !self.admin(cx) {
+            return;
+        }
+        if cx.services.k3sdev.installed().is_none() {
+            return self.fail("IYAKKI has not installed a cluster here.");
+        }
+        let on = !cx.services.k3sdev.fixed_node_ip_enabled();
+        match cx.services.k3sdev.set_fixed_node_ip(on, &cx.session.user) {
+            Ok(()) => self.ok(if on { "A fixed node address (experimental) is on: it is tried at the next start, and switched off again by itself if k3s refuses it." } else { "The fixed node address is off: k3s uses the network address from the next start." }),
+            Err(e) => self.fail(e),
+        }
     }
 
     fn dc_autostart(&mut self, cx: &AppCx) {
@@ -1093,10 +1109,13 @@ impl SettingsApp {
                 } else if h.restarts > 0 {
                     d.push_str(&format!(" · restarted {}x: {}", h.restarts, h.last_restart_reason));
                 }
+                if h.last_exit_at > 0 && h.failed_reason.is_empty() {
+                    d.push_str(&format!(" · {}", exit_line(h.last_exit_at, &h.last_exit_reason)));
+                }
                 let running = matches!(h.state.as_str(), "running" | "starting");
                 let mut b: Vec<(&str, [u8; 4], char)> = Vec::new();
                 b.push(if running { ("Stop", ERR, 'o') } else { ("Start", ACCENT, 'b') });
-                b.extend([("Restart", TEXT, 'e'), ("Logs", TEXT, 'l'), ("Upgrade", TEXT, 'p'), ("Autostart", TEXT, 'a'), ("Reset", ERR, 'z'), ("Uninstall", ERR, 'U')]);
+                b.extend([("Restart", TEXT, 'e'), ("Logs", TEXT, 'l'), ("Upgrade", TEXT, 'p'), ("Autostart", TEXT, 'a'), ("Fixed address", TEXT, 'f'), ("Reset", ERR, 'z'), ("Uninstall", ERR, 'U')]);
                 ("Local cluster managed by IYAKKI".into(), d, b)
             }
             Situation::Foreign(f) | Situation::Window { found: f } if !f.is_empty() => {
@@ -1180,3 +1199,9 @@ impl SettingsApp {
 #[cfg(test)]
 #[path = "settings_devcluster_tests.rs"]
 mod tests;
+
+/// "stopped unexpectedly at 2026-10-27 09:14 UTC: <reason>" for the Dev cluster page.
+pub fn exit_line(at: i64, reason: &str) -> String {
+    let short: String = reason.chars().take(160).collect();
+    format!("stopped unexpectedly at {}: {short}", iyakki_agent::devmode::stamp(at))
+}

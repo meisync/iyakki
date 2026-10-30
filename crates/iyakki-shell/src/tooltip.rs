@@ -53,6 +53,8 @@ pub struct Tooltip {
     changed: bool,
     /// The text of the panel drawn last (None when the last frame drew none): what tests and the shell can read back.
     pub shown: Option<String>,
+    /// Heartbeats a resting pointer waits (the default is [`POINTER_DELAY`]).
+    pointer_delay: u32,
 }
 
 impl Default for Tooltip {
@@ -63,12 +65,24 @@ impl Default for Tooltip {
 
 impl Tooltip {
     pub fn new() -> Tooltip {
-        Tooltip { by: By::Keyboard, idle: 0, active: false, put_away: false, pos: (-1, -1), offer: None, was: false, changed: false, shown: None }
+        Tooltip { by: By::Keyboard, idle: 0, active: false, put_away: false, pos: (-1, -1), offer: None, was: false, changed: false, shown: None, pointer_delay: POINTER_DELAY }
+    }
+
+    /// A tooltip that shows after `beats` heartbeats of a resting pointer (30 a second) instead of half a second.
+    pub fn with_pointer_delay(mut self, beats: u32) -> Tooltip {
+        self.pointer_delay = beats;
+        self
+    }
+
+    /// Show the tooltip of the keyboard selection now (the `i` key).
+    pub fn show_now(&mut self) {
+        (self.by, self.idle, self.active, self.put_away) = (By::Keyboard, HOLD_DELAY, true, false);
+        self.sync();
     }
 
     fn delay(&self) -> u32 {
         if self.by == By::Pointer {
-            POINTER_DELAY
+            self.pointer_delay
         } else {
             HOLD_DELAY
         }

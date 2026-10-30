@@ -100,10 +100,21 @@ fn single_pane_mode_gives_the_app_the_whole_area_below_the_header() {
     open_app(&mut sh, PApp::Ide);
     let mut g = Gfx::new(w, h);
     sh.render(&mut g);
+    // the IDE's status bar appears once its first background look (cluster, workspace) has been answered: give it a few beats
+    // (waits for the condition instead of a fixed number of beats: a loaded machine answers the background look late)
+    let low_now = |sh: &Shell| sh.hits().iter().map(|x| x.rect.y + x.rect.h).fold(0.0f32, f32::max);
+    for _ in 0..1000 {
+        sh.handle(&Event::Tick);
+        sh.render(&mut g);
+        if low_now(&sh) > h as f32 * 0.9 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let s = scale_for(w, h);
     assert!(!sh.ws_active(), "no pane layout is on by default");
     // the IDE's lowest region ends inside the screen and its status bar's bottom is the screen's bottom
-    let low = sh.hits().iter().map(|x| x.rect.y + x.rect.h).fold(0.0f32, f32::max);
+    let low = low_now(&sh);
     assert!(low <= h as f32 + 0.5 && low > h as f32 * 0.9, "the IDE reaches the bottom of the screen ({low} of {h}), header {}", HEADER_H * s);
 }
 

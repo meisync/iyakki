@@ -80,7 +80,7 @@ pub(super) fn key(name: &str, account: &str, scopes: &[Scope]) -> DevKey {
 pub(super) fn call(r: &Rig, k: &DevKey, policy: &iyakki_sec::policy::Policy, method: &str, path: &str, q: &[(&str, &str)], body: &[u8]) -> Option<Out> {
     let audit = |_: &str, _: &str| {};
     let tail = |n: usize| vec!["1 root login ok".to_string(); n.min(3)];
-    let cx = Ctx { dm: &r.dm, key: k, policy, role: policy_role(policy), hostname: "iyakki-test", paths: &r.paths, audit_tail: &tail, audit: &audit, firewall_file: r.dir.join("firewall.json"), home: Some({ let h = r.dir.join("acct-home"); std::fs::create_dir_all(&h).unwrap(); h }), svc: None, ext: None, own_port: 7979, power: &|_| {}, boot: None, release: "", volatile: false, data_free: None };
+    let cx = Ctx { dm: &r.dm, key: k, policy, role: policy_role(policy), hostname: "iyakki-test", paths: &r.paths, audit_tail: &tail, audit: &audit, firewall_file: r.dir.join("firewall.json"), home: Some({ let h = r.dir.join("acct-home"); std::fs::create_dir_all(&h).unwrap(); h }), svc: None, ext: None, own_port: 7979, power: &|_| {}, boot: None, release: "", volatile: false, data_free: None, kube: None };
     let qs = |n: &str| q.iter().find(|(k, _)| *k == n).map(|(_, v)| v.to_string()).unwrap_or_default();
     api::handle(&cx, method, path, &qs, body)
 }
@@ -513,6 +513,56 @@ fn sessions_end_when_a_computer_is_revoked_a_scope_is_taken_away_or_developer_mo
     let held: Vec<_> = (0..sessions::MAX_PER_COMPUTER).map(|i| sessions::open(&r.dir, "mac", "root", Scope::Forward, &format!("f{i}"), now).unwrap()).collect();
     assert!(sessions::open(&r.dir, "mac", "root", Scope::Forward, "one too many", now).is_err());
     drop(held);
+}
+
+#[test]
+fn automatic_approval_is_chosen_by_an_administrator_for_hours_and_never_covers_root_power_or_a_revoked_computer() {
+    let r = rig("autoshell");
+    let adm = admin();
+    wr(&r.dir.join("devmode/keys.json"), &serde_json::to_string(&vec![key("laptop", "root", &[Scope::Install, Scope::Shell, Scope::Power]), key("mac", "bob", &[Scope::Install, Scope::Shell]), key("plain", "root", &[Scope::Install])]).unwrap());
+    let laptop = r.dm.keys().into_iter().find(|k| k.name == "laptop").unwrap();
+    let mac = r.dm.keys().into_iter().find(|k| k.name == "mac").unwrap();
+    // off by default: a request waits for the person at the screen
+    assert_eq!(r.dm.shell_request(&mac, false, 5, "").unwrap(), ShellStatus::Pending);
+    // only an administrator switches it on, and only for a computer that holds the shell scope
+    assert!(r.dm.shell_auto_on(&userp(), "bob", "mac", 4).is_err());
+    assert!(r.dm.shell_auto_on(&adm, "root", "plain", 4).is_err());
+    assert!(r.dm.shell_auto_on(&adm, "root", "nobody", 4).is_err());
+    let a = r.dm.shell_auto_on(&adm, "root", "mac", 100_000).unwrap();
+    assert_eq!(a.until - r.dm.now(), grants::AUTO_MAX_HOURS as i64 * 3600, "capped");
+    // the next request is granted at once, as a plain shell, for the minutes asked
+    match r.dm.shell_request(&mac, false, 7, "").unwrap() {
+        ShellStatus::Granted(g) => assert_eq!((g.as_root, g.once, g.expires - r.dm.now(), g.by.as_str()), (false, false, 420, "automatic approval")),
+        s => panic!("expected a grant, got {s:?}"),
+    }
+    assert!(r.dm.shell_pending().is_empty(), "no card is left waiting");
+    // root is always asked, whoever the account is; the other computers are unaffected
+    r.dm.shell_auto_on(&adm, "root", "laptop", 4).unwrap();
+    r.dm.shell_end(&adm, "root", "laptop").unwrap();
+    match r.dm.shell_request(&laptop, true, 5, "").unwrap() {
+        ShellStatus::Pending => {}
+        s => panic!("a root request must wait for approval, got {s:?}"),
+    }
+    assert!(r.dm.shell_pending()[0].as_root);
+    // power is never covered
+    r.dm.shell_end(&adm, "root", "laptop").unwrap();
+    assert_eq!(r.dm.grant_request(&laptop, "power", false, 5, "").unwrap(), ShellStatus::Pending);
+    // it ends by itself
+    r.clock.store(NOW + 4 * 3600 + 1, Ordering::SeqCst);
+    assert!(!r.dm.shell_auto_active("laptop") && r.dm.shell_auto_list().iter().any(|x| x.computer == "mac"));
+    r.clock.store(NOW + grants::AUTO_MAX_HOURS as i64 * 3600, Ordering::SeqCst);
+    assert!(r.dm.shell_auto_list().is_empty());
+    // the administrator switches it off, a revoke forgets it, and developer mode off stops it
+    r.clock.store(NOW, Ordering::SeqCst);
+    r.dm.shell_auto_on(&adm, "root", "mac", 4).unwrap();
+    r.dm.shell_auto_off(&adm, "root", "mac").unwrap();
+    assert!(!r.dm.shell_auto_active("mac"));
+    r.dm.shell_auto_on(&adm, "root", "mac", 4).unwrap();
+    r.dm.revoke(&adm, "root", "mac").unwrap();
+    assert!(!r.dm.shell_auto_list().iter().any(|x| x.computer == "mac"), "a revoked computer is forgotten");
+    r.dm.shell_auto_on(&adm, "root", "laptop", 4).unwrap();
+    r.dm.disable(&adm, "root").unwrap();
+    assert!(!r.dm.shell_auto_active("laptop"), "developer mode off: asked again");
 }
 
 #[test]

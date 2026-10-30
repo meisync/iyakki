@@ -79,7 +79,8 @@ fn the_launcher_bar_fits_the_clock_and_the_devices_button_at_four_sizes() {
             let s = scale_for(w, h);
             let power = sh.session.as_ref().unwrap().policy.power;
             let bell = sh.inbox_allowed();
-            let n = 3 + power as usize + bell as usize + 1; // logout, camera, devices, clipboard (+ power, bell)
+            let _ = (power, bell);
+            let n = sh.bar_slots().count; // logout, camera, devices, clipboard (+ power, bell, panes) and the speaker and Settings
             let buttons: Vec<R> = (0..n).map(|i| header_button(w, s, i)).collect();
             for (i, b) in buttons.iter().enumerate() {
                 assert!(b.x >= 0.0 && b.x + b.w <= w as f32 && b.y >= 0.0 && b.y + b.h <= 90.0 * s, "{who:?} {w}x{h} button {i} {b:?}");

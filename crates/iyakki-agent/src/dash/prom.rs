@@ -22,7 +22,7 @@ pub fn info() -> KindInfo {
         language: Lang::PromQl,
         about: "Metrics from Prometheus, VictoriaMetrics, Mimir or Thanos (their HTTP API).".into(),
         fields: net_fields("http://localhost:9090"),
-        example: "http://localhost:9090".into(),
+        example: "http://localhost:9090 (own server) or cluster://iyakki-monitoring/prometheus:9090 (Quick install, runs inside the cluster)".into(),
     }
 }
 

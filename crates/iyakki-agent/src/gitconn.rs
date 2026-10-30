@@ -522,6 +522,10 @@ pub struct ClusterGitea {
     pub token_vault: String,
     /// Why it cannot be used from here yet (empty: it can).
     pub problem: String,
+    /// The namespace it runs in (empty when the record does not say).
+    pub namespace: String,
+    /// Found on the cluster itself, with no platform-services record (see `gitdiscover`).
+    pub found: bool,
 }
 
 pub fn cluster_gitea(dir: &Path, user: &str) -> Vec<ClusterGitea> {
@@ -532,12 +536,12 @@ pub fn cluster_gitea(dir: &Path, user: &str) -> Vec<ClusterGitea> {
             let url = i.web_url().unwrap_or_default().trim_end_matches('/').to_string();
             let problem = if i.token_vault().is_none() {
                 "IYAKKI has no token for it".to_string()
-            } else if i.options.get("exposure") == "ClusterIP" {
+            } else if i.options.get("exposure") == "ClusterIP" && crate::platform::gitea::Gitea::loopback_of(&i.options).is_none() {
                 "only reachable inside the cluster (expose it with NodePort or Ingress)".to_string()
             } else {
                 String::new()
             };
-            ClusterGitea { instance: i.id.clone(), title: i.title.clone(), url, token_vault: i.token_vault().unwrap_or_default().to_string(), problem }
+            ClusterGitea { instance: i.id.clone(), title: i.title.clone(), url, token_vault: i.token_vault().unwrap_or_default().to_string(), problem, namespace: i.namespace.clone(), found: false }
         })
         .collect()
 }
@@ -609,12 +613,15 @@ pub trait GitHttp: Send + Sync {
 /// What [`CurlGit`] says when the answer did not fit the byte limit of the request (the status line at its end was cut off).
 pub const TOO_BIG: &str = "the answer is larger than the limit";
 
-/// curl through the [`Runner`], with the token in a private temp config file.
+/// curl through the [`Runner`], with the token in a private temp config file. Tests only: the image has no curl, production uses
+/// [`crate::gitnet::NetGit`].
+#[cfg(test)]
 pub struct CurlGit {
     pub run: Arc<dyn Runner>,
     pub tmp: PathBuf,
 }
 
+#[cfg(test)]
 fn q(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r"))
 }
@@ -635,6 +642,7 @@ pub fn parse_curl(text: &str) -> Option<Resp> {
     }
 }
 
+#[cfg(test)]
 impl GitHttp for CurlGit {
     fn send(&self, r: &Req) -> Result<Resp, NetErr> {
         if !self.run.has("curl") {
@@ -692,6 +700,7 @@ impl GitHttp for CurlGit {
     }
 }
 
+#[cfg(test)]
 fn first_pem(text: &str) -> Option<String> {
     let s = text.find("-----BEGIN CERTIFICATE-----")?;
     let e = text[s..].find("-----END CERTIFICATE-----")? + s + "-----END CERTIFICATE-----".len();

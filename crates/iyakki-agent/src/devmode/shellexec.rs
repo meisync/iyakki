@@ -180,6 +180,85 @@ pub fn close(dm: &DevMode, sid: u64, computer: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The device nodes every ordinary command line uses (`> /dev/null`, `2>/dev/null`, `/dev/urandom`, `/dev/tty`): name, kernel major and
+/// minor. They must be character devices that anybody may open for reading and writing (mode 0666).
+pub const STD_NODES: [(&str, u32, u32); 6] = [("null", 1, 3), ("zero", 1, 5), ("full", 1, 7), ("random", 1, 8), ("urandom", 1, 9), ("tty", 5, 0)];
+
+/// What a standard node is like now: `None` when it does not exist, else (is a character device, permission bits, major, minor).
+pub type NodeNow = Option<(bool, u32, u32, u32)>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NodeFix {
+    /// Remove whatever is there (a plain file or a link) and make the character device again.
+    Recreate,
+    Chmod(u32),
+}
+
+/// What has to be done to one standard node so that a command running as an ordinary user can open it. A device that is right (0666,
+/// the right numbers) needs nothing.
+pub fn node_fix(want: (u32, u32), now: NodeNow) -> Vec<NodeFix> {
+    match now {
+        None => vec![NodeFix::Recreate],
+        Some((false, ..)) => vec![NodeFix::Recreate],
+        Some((true, _, maj, min)) if (maj, min) != want => vec![NodeFix::Recreate],
+        Some((true, mode, ..)) if mode & 0o666 != 0o666 => vec![NodeFix::Chmod(0o666)],
+        Some(_) => vec![],
+    }
+}
+
+/// Make the standard device nodes of `dev` usable by every user (the data folder of an image started from RAM can have `/dev/null`
+/// as root-only, which made every redirect of a shell command fail with "can't create /dev/null: Permission denied"). Needs root;
+/// returns what it did and what it could not do, for the activity log. Does nothing for the nodes that are right.
+pub fn ensure_std_nodes(dev: &Path) -> Vec<String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    let mut notes = Vec::new();
+    for (name, maj, min) in STD_NODES {
+        let p = dev.join(name);
+        let now: NodeNow = std::fs::symlink_metadata(&p).ok().map(|m| {
+            let rdev = m.rdev();
+            let (a, b) = (libc::major(rdev), libc::minor(rdev));
+            (m.file_type().is_char_device(), m.mode() & 0o7777, a, b)
+        });
+        for fix in node_fix((maj, min), now) {
+            let r: Result<(), String> = match fix {
+                NodeFix::Chmod(m) => std::fs::set_permissions(&p, std::fs::Permissions::from_mode(m)).map_err(|e| e.to_string()),
+                NodeFix::Recreate => {
+                    let _ = std::fs::remove_file(&p);
+                    let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).map_err(|e| e.to_string());
+                    c.and_then(|c| {
+                        // SAFETY: mknod(2) with a valid NUL-terminated path; it creates a character device node.
+                        let rc = unsafe { libc::mknod(c.as_ptr(), libc::S_IFCHR | 0o666, libc::makedev(maj, min)) };
+                        if rc != 0 {
+                            return Err(std::io::Error::last_os_error().to_string());
+                        }
+                        // the process umask must not take the bits away again
+                        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o666)).map_err(|e| e.to_string())
+                    })
+                }
+            };
+            notes.push(match r {
+                Ok(()) => format!("{}: {}", p.display(), match fix { NodeFix::Chmod(_) => "made usable by everyone", NodeFix::Recreate => "made again as a device" }),
+                Err(e) => format!("{}: could not be fixed ({e})", p.display()),
+            });
+        }
+    }
+    notes
+}
+
+/// The environment a command of the shell starts with (nothing is inherited from the device's own process). `path` is the PATH.
+pub fn command_env(home: &Path, user: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()),
+        ("HOME", home.display().to_string()),
+        ("USER", user.to_string()),
+        ("LOGNAME", user.to_string()),
+        ("SHELL", "/bin/sh".to_string()),
+        ("TERM", "dumb".to_string()),
+        ("LANG", "C.UTF-8".to_string()),
+        ("IYAKKI_DEV", "1".to_string()),
+    ]
+}
+
 fn cwd_file_wrapper() -> &'static str {
     // $1 folder, $2 command line; the folder after the command goes to fd 3 so the next line starts there
     "cd -- \"$1\" 2>/dev/null; eval \"$2\"; rc=$?; pwd >&3 2>/dev/null; exit $rc"
@@ -207,15 +286,14 @@ pub fn exec(dm: &DevMode, sid: u64, computer: &str, line: &str) -> Result<(u64, 
     let (r_fd, w_fd) = (fds[0], fds[1]);
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-c").arg(cwd_file_wrapper()).arg("iyakki-dev").arg(&cwd).arg(line);
-    cmd.env_clear()
-        .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-        .env("HOME", &home)
-        .env("USER", &s.ident.user)
-        .env("LOGNAME", &s.ident.user)
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
-        .env("LANG", "C.UTF-8")
-        .env("IYAKKI_DEV", "1")
+    // the device nodes a redirect needs, when this process may make them right (it runs the commands as another user)
+    // SAFETY: geteuid(2) takes no arguments and cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        for n in ensure_std_nodes(Path::new("/dev")) {
+            dm.log(&s.computer, &s.account, "dev.shell.devnodes", &n, !n.contains("could not"));
+        }
+    }
+    cmd.env_clear().envs(command_env(&home, &s.ident.user))
         .current_dir(if cwd.is_dir() { &cwd } else { Path::new("/") })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

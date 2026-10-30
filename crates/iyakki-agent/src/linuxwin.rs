@@ -120,7 +120,7 @@ pub fn install(la: &LinuxApps, st: &dyn Streamer, sink: Option<Sink>, say: &mut 
         let pk: Vec<String> = DISPLAY_PACKAGES.iter().map(|s| s.to_string()).collect();
         let o = la.apt_install(SANDBOX, &pk, sink)?;
         if !o.ok() {
-            return Err(format!("apt could not install the packages: {}", last_lines(&o.combined(), 6)));
+            return Err(apt_failure("the packages", &o.combined()));
         }
         write_script(la)?;
         if !is_ready_root(&la.rootfs_of(SANDBOX)) {
@@ -156,12 +156,23 @@ pub fn install_program(la: &LinuxApps, package: &str, sink: Option<Sink>) -> Res
         let _ = la.set_network(SANDBOX, false);
     }
     let o = r?;
-    if o.ok() { Ok(()) } else { Err(format!("apt could not install {package}: {}", last_lines(&o.combined(), 6))) }
+    if o.ok() { Ok(()) } else { Err(apt_failure(package, &o.combined())) }
 }
 
 /// Remove the sandbox with everything in it (the name must be typed).
 pub fn remove(la: &LinuxApps, typed: &str) -> Result<u64, String> {
     la.delete(SANDBOX, typed)
+}
+
+/// Why apt (run in the sandbox) failed, for the Installs row and the saved error. When the sandbox itself could not start, its own message
+/// comes first and whole (`linuxapp-init: entering the sandbox failed: pivot_root: ...`), as one line that reads from the left; otherwise
+/// the last lines of apt's output.
+pub(crate) fn apt_failure(what: &str, output: &str) -> String {
+    let init: Vec<&str> = output.lines().map(str::trim).filter_map(|l| l.strip_prefix("linuxapp-init:")).map(str::trim).filter(|l| !l.starts_with("note:")).collect();
+    if let Some(first) = init.first() {
+        return format!("the sandbox could not start: {first} (apt did not run)");
+    }
+    format!("apt could not install {what}: {}", last_lines(output, 6))
 }
 
 fn last_lines(t: &str, n: usize) -> String {
@@ -326,7 +337,7 @@ impl Proc for Child {
         Some(self.0.id())
     }
     fn alive(&mut self) -> bool {
-        matches!(self.0.try_wait(), Ok(None))
+        iyakki_core_api::child_status(&mut self.0).is_running()
     }
     fn kill(&mut self) {
         let _ = self.0.kill();

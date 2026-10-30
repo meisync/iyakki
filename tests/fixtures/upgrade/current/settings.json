@@ -1,0 +1,150 @@
+{
+  "agents": {
+    "claude": {
+      "advisor_only": false,
+      "allow_auto": false,
+      "command": "",
+      "custom_models": [],
+      "enabled": true,
+      "key_ref": "",
+      "model": ""
+    },
+    "copilot": {
+      "advisor_only": false,
+      "allow_auto": false,
+      "command": "",
+      "custom_models": [],
+      "enabled": true,
+      "key_ref": "",
+      "model": ""
+    },
+    "custom": [],
+    "default": null
+  },
+  "battery": {
+    "hide_percent": false,
+    "no_shutdown": false,
+    "no_warnings": false
+  },
+  "chat": {
+    "model": "qwen3:8b",
+    "provider": "local"
+  },
+  "cloud": "auto",
+  "embedding": {
+    "model": "nomic-embed-text",
+    "provider": "local"
+  },
+  "external_rag": [],
+  "keyboard": {
+    "fn_mode": "",
+    "iso_layout": null,
+    "repeat_delay_ms": 0,
+    "repeat_rate": 0,
+    "scroll_momentum": null,
+    "scroll_smooth": null,
+    "scroll_speed_pct": 0,
+    "swap_opt_cmd": null,
+    "touchbar": "",
+    "touchbar_flip": 0,
+    "touchbar_strips": [],
+    "trackpad_natural": null,
+    "trackpad_tap": null,
+    "wheel_lines": 0,
+    "wheel_natural": null
+  },
+  "media_download_max_mb": 512,
+  "no_tool_routing": false,
+  "no_workspace_history": true,
+  "providers": [
+    {
+      "base_url": "http://127.0.0.1:11434",
+      "default_model": "qwen3:8b",
+      "enabled": true,
+      "id": "local",
+      "key_ref": null,
+      "kind": "ollama",
+      "models": [
+        "qwen3:8b",
+        "nomic-embed-text"
+      ]
+    },
+    {
+      "base_url": null,
+      "default_model": null,
+      "enabled": true,
+      "id": "cloud",
+      "key_ref": "vault:cloud-key",
+      "kind": "openai",
+      "models": [
+        "gpt-example"
+      ]
+    }
+  ],
+  "rag": {
+    "chunk_max": 900,
+    "overlap": 120,
+    "top_k": 7,
+    "use_external": false
+  },
+  "schema": 1,
+  "screensaver_signin": {
+    "after_min": 5,
+    "battery_shorter": true,
+    "dim_pct": 50,
+    "first": "saver",
+    "style": "logo",
+    "then_off_min": 10
+  },
+  "secret_providers": {},
+  "show_all_ai": false,
+  "silence_limit_secs": 150,
+  "sound": {
+    "boosts": {},
+    "highlight_offset_ms": 0,
+    "levels": {},
+    "mixer": false,
+    "muted": false,
+    "output": "",
+    "volume_modes": {},
+    "volume_pct": 100,
+    "web_mix": false
+  },
+  "sounds": {
+    "enabled": true,
+    "job_done": true,
+    "login": true,
+    "logout": true,
+    "notify": true,
+    "offset_db": -12
+  },
+  "think_limit_secs": 90,
+  "time": {
+    "hour12": false,
+    "no_ntp": false,
+    "ntp_server": "",
+    "seconds": false,
+    "zone": "Europe/Paris",
+    "zone_auto": false,
+    "zone_checked_at": 0,
+    "zone_note": ""
+  },
+  "token_price_cents_per_mtok": 150,
+  "tool_log_days": 5,
+  "vault": {
+    "keyfile": null,
+    "lock_on_admin_logout": true
+  },
+  "voice": {
+    "align_words": true,
+    "auto_send": false,
+    "highlight": "sentence_and_word",
+    "play_cmd": "aplay -q",
+    "record_cmd": "arecord -q -f S16_LE -r 16000 -c 1 -t raw",
+    "remote_ok": [],
+    "speak_replies": false,
+    "speed_pct": 100,
+    "stt": null,
+    "tts": null
+  }
+}

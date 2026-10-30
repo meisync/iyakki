@@ -92,7 +92,7 @@ fn cloud_id(p: Page) -> &'static str {
     match p {
         Page::Media => "media",
         Page::Mac => "mac",
-        Page::Menu | Page::About | Page::Setup | Page::Gpu | Page::Linux | Page::Settings | Page::Developer | Page::Setup => "",
+        Page::Menu | Page::About | Page::Setup | Page::Gpu | Page::Linux | Page::Settings | Page::Developer => "",
     }
 }
 

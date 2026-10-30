@@ -19,8 +19,9 @@ done
 mkdir -p "$TREE/boot/grub/fonts" "$TREE/boot/grub/themes/iyakki"
 cp "$BOARD/grub/iyakki-bg.png" "$TREE/boot/grub/themes/iyakki/iyakki-bg.png"
 cp "$BOARD/grub/theme.txt" "$TREE/boot/grub/themes/iyakki/theme.txt"
+UNISRC=""
 for f in "$HOST_DIR/share/grub/unicode.pf2" "$BUILD_DIR"/grub2-*/unicode.pf2 /usr/share/grub/unicode.pf2 /usr/share/grub2/unicode.pf2 /boot/grub/fonts/unicode.pf2; do
-  if [ -f "$f" ]; then cp "$f" "$TREE/boot/grub/fonts/unicode.pf2"; break; fi
+  if [ -f "$f" ]; then cp "$f" "$TREE/boot/grub/fonts/unicode.pf2"; UNISRC="$f"; break; fi
 done
 # Bigger fonts for the menu and the text under the logo (the 16 pixel Unifont is small on a 2560 x 1600 screen), made here when
 # grub-mkfont and DejaVu are on the build machine (Latin only, about 40 KB each): the menu rows in DejaVu Sans Bold 30 (no hinting:
@@ -31,8 +32,18 @@ done
 # name it silently uses the one loaded last: with the menu font loaded, the terminal text became DejaVu 30 letters in Unifont's
 # narrow grid (wide gaps, cut tails). So the theme names Unifont in full.
 MENUFONT=""; TERMFONT=""
-for f in /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf /usr/share/fonts/dejavu/DejaVuSans-Bold.ttf /usr/share/fonts/TTF/DejaVuSans-Bold.ttf; do [ -f "$f" ] && MENUFONT="$f" && break; done
-for f in /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf /usr/share/fonts/dejavu/DejaVuSansMono.ttf /usr/share/fonts/TTF/DejaVuSansMono.ttf; do [ -f "$f" ] && TERMFONT="$f" && break; done
+# The fonts are made from the DejaVu files IN THIS REPOSITORY (crates/iyakki-shell/assets, licence text DEJAVU-LICENSE.txt, listed in
+# legal/assets.txt): a licence that is recorded, not whatever the build machine has. The build machine's DejaVu is only a fallback for
+# the development images; the RELEASE image (IYAKKI_IMAGE_PROFILE=release) never uses it.
+ASSETS="$BOARD/../../../../crates/iyakki-shell/assets"
+[ -f "$ASSETS/DejaVuSans-Bold.ttf" ] && MENUFONT="$ASSETS/DejaVuSans-Bold.ttf"
+[ -f "$ASSETS/DejaVuSansMono.ttf" ] && TERMFONT="$ASSETS/DejaVuSansMono.ttf"
+if [ -z "$MENUFONT" ] && [ "${IYAKKI_IMAGE_PROFILE:-}" != release ]; then
+  for f in /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf /usr/share/fonts/dejavu/DejaVuSans-Bold.ttf /usr/share/fonts/TTF/DejaVuSans-Bold.ttf; do [ -f "$f" ] && MENUFONT="$f" && break; done
+fi
+if [ -z "$TERMFONT" ] && [ "${IYAKKI_IMAGE_PROFILE:-}" != release ]; then
+  for f in /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf /usr/share/fonts/dejavu/DejaVuSansMono.ttf /usr/share/fonts/TTF/DejaVuSansMono.ttf; do [ -f "$f" ] && TERMFONT="$f" && break; done
+fi
 GMF="$(command -v grub-mkfont || command -v grub2-mkfont || true)"
 THEME="$TREE/boot/grub/themes/iyakki/theme.txt"
 if [ -n "$MENUFONT" ] && [ -n "$TERMFONT" ] && [ -n "$GMF" ] \
@@ -45,6 +56,28 @@ if [ -n "$MENUFONT" ] && [ -n "$TERMFONT" ] && [ -n "$GMF" ] \
 else
   rm -f "$TREE/boot/grub/fonts/iyakki-menu.pf2" "$TREE/boot/grub/fonts/iyakki-term.pf2"
   echo "post-image: no grub-mkfont or DejaVu Sans Bold/Mono: the menu keeps the 16 pixel font" >&2
+fi
+# Where the boot fonts came from and under what licence (legal/image-rules.txt `own` row): the text travels with the fonts, on the ISO and in
+# the install template. The DejaVu licence is the repository's own copy; unicode.pf2's origin is the file named below.
+FL="$TREE/boot/grub/fonts/FONTS-LICENSE.txt"
+{
+  cat "$BOARD/grub/FONTS-LICENSE.txt"
+  echo
+  echo "Built with this image:"
+  if [ -n "$UNISRC" ]; then echo "  unicode.pf2   copied from $UNISRC (sha256 $(sha256sum "$UNISRC" | cut -d' ' -f1))"; else echo "  unicode.pf2   not present"; fi
+  if [ -f "$TREE/boot/grub/fonts/iyakki-menu.pf2" ]; then
+    echo "  iyakki-menu.pf2   grub-mkfont of $(basename "$MENUFONT") (sha256 $(sha256sum "$MENUFONT" | cut -d' ' -f1))"
+    echo "  iyakki-term.pf2   grub-mkfont of $(basename "$TERMFONT") (sha256 $(sha256sum "$TERMFONT" | cut -d' ' -f1))"
+  else echo "  iyakki-menu.pf2, iyakki-term.pf2   not present"; fi
+  echo
+  echo "---- DejaVu fonts licence (copy of crates/iyakki-shell/assets/DEJAVU-LICENSE.txt) ----"
+  cat "$ASSETS/DEJAVU-LICENSE.txt" 2>/dev/null || echo "(the repository's DEJAVU-LICENSE.txt was not found)"
+} > "$FL"
+if [ "${IYAKKI_IMAGE_PROFILE:-}" = release ]; then
+  [ -f "$ASSETS/DEJAVU-LICENSE.txt" ] || { echo "post-image: release image: crates/iyakki-shell/assets/DEJAVU-LICENSE.txt is missing" >&2; exit 1; }
+  if [ -n "$MENUFONT$TERMFONT" ] && ! { [ "$MENUFONT" = "$ASSETS/DejaVuSans-Bold.ttf" ] && [ "$TERMFONT" = "$ASSETS/DejaVuSansMono.ttf" ]; }; then
+    echo "post-image: release image: the menu fonts must come from the repository's DejaVu files" >&2; exit 1
+  fi
 fi
 [ -f "$TREE/boot/grub/fonts/unicode.pf2" ] || echo "post-image: no unicode.pf2 found; the boot menu will be plain text (install grub-common on the build machine)" >&2
 # Secure Boot (docs/SECURE-BOOT.md): with IYAKKI_SB_KEY and IYAKKI_SB_CERT set, the kernel is signed and the ISO's EFI partition is

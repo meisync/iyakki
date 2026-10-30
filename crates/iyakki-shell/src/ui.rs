@@ -860,16 +860,23 @@ impl TextField {
     }
 
     pub fn render(&self, g: &mut Gfx, r: R, focused: bool, s: f32, blink_on: bool, face: Face, id: usize) {
-        self.draw(g, r, focused, s, blink_on, face, id, true);
+        self.draw(g, r, focused, s, blink_on, face, id, true, (0.0, 0.0));
+    }
+
+    /// Like [`TextField::render`], with room kept free inside the frame at the left and right (a chip or a button drawn over it
+    /// by the caller): the text, caret and clipboard button stay clear of those parts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_inset(&self, g: &mut Gfx, r: R, focused: bool, s: f32, blink_on: bool, face: Face, id: usize, inset: (f32, f32)) {
+        self.draw(g, r, focused, s, blink_on, face, id, true, inset);
     }
 
     /// Text only (no box, no clipboard button): for terminal-style lines. `r` is the text area.
     pub fn render_bare(&self, g: &mut Gfx, r: R, focused: bool, s: f32, blink_on: bool, face: Face, id: usize) {
-        self.draw(g, r, focused, s, blink_on, face, id, false);
+        self.draw(g, r, focused, s, blink_on, face, id, false, (0.0, 0.0));
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw(&self, g: &mut Gfx, r: R, focused: bool, s: f32, blink_on: bool, face: Face, id: usize, boxed: bool) {
+    fn draw(&self, g: &mut Gfx, r: R, focused: bool, s: f32, blink_on: bool, face: Face, id: usize, boxed: bool, inset: (f32, f32)) {
         #[cfg(test)]
         let legacy = LEGACY_RINGS.with(|c| c.get());
         #[cfg(not(test))]
@@ -881,7 +888,7 @@ impl TextField {
         }
         g.hit(r, Event::Focus(id), "field");
         crate::ctxmenu::note_field(crate::ctxmenu::FieldNote { rect: r, id, focused, has_selection: self.selection().is_some(), empty: self.value.is_empty(), secret: self.mask });
-        let (size, pad) = if boxed { (17.0 * s, 12.0 * s) } else { (16.0 * s, 0.0) };
+        let (size, pad) = if boxed { (17.0 * s, 12.0 * s + inset.0) } else { (16.0 * s, 0.0) };
         if boxed {
             crate::fx::field_frame(g, r, s, focused, crate::fx::CYAN);
         }
@@ -889,12 +896,14 @@ impl TextField {
         let ty = if boxed { r.y + (r.h - lh) / 2.0 } else { r.y };
         let chars: Vec<char> = if self.mask { vec!['•'; self.len()] } else { self.value.chars().collect() };
         if chars.is_empty() && !focused {
-            g.text(r.x + pad, ty, size, DIM, &self.placeholder, face);
+            // a hint longer than the box is shortened with an ellipsis (it used to run out of the box at the large text sizes)
+            let hint = g.fit(size, &self.placeholder, face, (r.w - pad - if boxed { 12.0 * s + inset.1 } else { 0.0 }).max(10.0));
+            g.text(r.x + pad, ty, size, DIM, &hint, face);
             *self.layout.borrow_mut() = FieldLayout { start: 0, text_x: pad, advances: vec![0.0] };
             return;
         }
         let icon_room = if focused && boxed { 30.0 * s } else { 0.0 };
-        let max_w = (r.w - 2.0 * pad - 4.0 * s - icon_room).max(10.0);
+        let max_w = (r.w - pad - 12.0 * s - inset.1 - 4.0 * s - icon_room).max(10.0);
         let cursor = self.cursor().min(chars.len());
         let width_of = |g: &mut Gfx, from: usize, to: usize| g.text_width(size, &chars[from..to].iter().collect::<String>(), face);
         // scroll just enough to keep the caret visible
@@ -932,7 +941,7 @@ impl TextField {
         *self.layout.borrow_mut() = FieldLayout { start, text_x: pad, advances };
         if focused && boxed {
             // clipboard button: opens the clipboard history picker
-            let (bx, by, bs) = (r.x + r.w - 28.0 * s, r.y + (r.h - 22.0 * s) / 2.0, 22.0 * s);
+            let (bx, by, bs) = (r.x + r.w - inset.1 - 28.0 * s, r.y + (r.h - 22.0 * s) / 2.0, 22.0 * s);
             let hot = g.hovered(R::new(bx, by, bs, bs));
             g.rrect(bx, by, bs, bs, 6.0 * s, if hot { rgb(60, 72, 110) } else { rgb(34, 42, 70) });
             g.icon(crate::gfx::Icon::Clipboard, bx + bs / 2.0, by + bs / 2.0, 14.0 * s, MUTED);

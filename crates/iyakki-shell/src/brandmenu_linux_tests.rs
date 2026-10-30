@@ -3,7 +3,6 @@
 //! returns the actions the shell would do (`shell_linux.rs`, tested through the shell).
 
 use super::*;
-use super::linux_page::*;
 
 const SIZES: [(u32, u32); 4] = [(1280, 720), (1920, 1080), (1024, 600), (800, 480)];
 

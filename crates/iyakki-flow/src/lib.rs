@@ -6,8 +6,13 @@
 //! * [`kinds`]: the registry of node kinds. [`validate`]: checks a flow.
 //! * [`engine`], [`driver`], [`runstore`]: runs, threads, persistence, recovery.
 //! * [`sched`]: cron, intervals, missed and overlap policies. [`store`]: files, versions, publishing, the library.
+//! * [`assist`], [`assist_store`], [`assist_run`]: the per-flow `assist` setting (off, copilot, autopilot), its permission matrix and guards,
+//!   suggestions and counters, and the agent's work on failed runs.
 //! * [`heal`]: patches the agent may propose and the harness's classification. [`templates`]: ready-made flows.
 
+pub mod assist;
+pub mod assist_run;
+pub mod assist_store;
 pub mod driver;
 pub mod engine;
 pub mod expr;

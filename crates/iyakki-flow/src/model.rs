@@ -121,6 +121,32 @@ pub struct Defaults {
     /// Browser nodes: how the run's browser session is made and approved.
     #[serde(default, skip_serializing_if = "BrowserDefaults::is_default")]
     pub browser: BrowserDefaults,
+    /// Camera nodes: the person's explicit permission (nothing here is ever set by the assistant or arrives with an import).
+    #[serde(default, skip_serializing_if = "CameraDefaults::is_default")]
+    pub camera: CameraDefaults,
+    /// Whether and how far a configured agent may fix and upgrade this flow by itself (see `assist`). Off unless the person sets it.
+    #[serde(default, skip_serializing_if = "AssistPolicy::is_default")]
+    pub assist: AssistPolicy,
+}
+
+impl CameraDefaults {
+    pub fn is_default(&self) -> bool {
+        *self == CameraDefaults::default()
+    }
+}
+
+/// Settings of a flow's camera node (`cam_photo`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CameraDefaults {
+    /// The person allows this flow to take pictures with the camera. Off: the camera step fails with a plain message.
+    #[serde(default)]
+    pub allowed: bool,
+    /// Also when nobody started the run by hand (a schedule, an event, a file change). Off: only runs the person starts.
+    #[serde(default)]
+    pub unattended: bool,
+    /// The person said "Block" to a permission request: the flow stops asking (switch it back in the flow's settings).
+    #[serde(default)]
+    pub blocked: bool,
 }
 
 impl BrowserDefaults {
@@ -160,7 +186,114 @@ fn d_keep() -> usize {
 
 impl Default for Defaults {
     fn default() -> Defaults {
-        Defaults { timeout_ms: d_timeout(), retry: RetryPolicy::default(), heal: HealPolicy::default(), runner: RunnerKind::Local, max_parallel: d_par(), max_concurrent_runs: d_conc(), keep_runs: d_keep(), sandbox: Sandbox::default(), browser: BrowserDefaults::default() }
+        Defaults { timeout_ms: d_timeout(), retry: RetryPolicy::default(), heal: HealPolicy::default(), runner: RunnerKind::Local, max_parallel: d_par(), max_concurrent_runs: d_conc(), keep_runs: d_keep(), sandbox: Sandbox::default(), browser: BrowserDefaults::default(), camera: CameraDefaults::default(), assist: AssistPolicy::default() }
+    }
+}
+
+/// How far the configured agent works on this flow. A file written before this setting existed has none and loads as `Off`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistMode {
+    /// The agent does nothing on its own (the person can still ask it by hand).
+    #[default]
+    Off,
+    /// The agent drafts fixes and upgrades and shows them; the person approves and publishes.
+    Copilot,
+    /// The agent drafts and tests by itself and, only when `auto_publish` is on and every guard passes, publishes (and tells the person).
+    Autopilot,
+}
+
+impl AssistMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            AssistMode::Off => "off",
+            AssistMode::Copilot => "copilot",
+            AssistMode::Autopilot => "autopilot",
+        }
+    }
+    pub fn parse(s: &str) -> Option<AssistMode> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "off" => AssistMode::Off,
+            "copilot" | "co-pilot" => AssistMode::Copilot,
+            "autopilot" | "auto-pilot" => AssistMode::Autopilot,
+            _ => return None,
+        })
+    }
+}
+
+/// The per-flow `assist` setting: the mode, what the agent may work on and the limits it works within.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AssistPolicy {
+    #[serde(default)]
+    pub mode: AssistMode,
+    /// Autopilot may publish a tested fix by itself. Off: autopilot drafts and tests, and publishing asks. Never set by the assistant.
+    #[serde(default)]
+    pub auto_publish: bool,
+    /// Classes of work the agent may do on this flow.
+    #[serde(default = "a_yes")]
+    pub allow_fix: bool,
+    #[serde(default)]
+    pub allow_upgrade: bool,
+    /// Publishes by the agent per flow per day, and drafts it may make per flow per day.
+    #[serde(default = "a_pub")]
+    pub max_publish_per_day: u32,
+    #[serde(default = "a_drafts")]
+    pub max_drafts_per_day: u32,
+    /// What the agent may spend on this flow, per day and per fix, in cents.
+    #[serde(default = "a_day_cents")]
+    pub max_cents_per_day: u64,
+    #[serde(default = "a_fix_cents")]
+    pub max_cents_per_fix: u64,
+    /// The most steps and the most changed settings a change may touch to be published without asking.
+    #[serde(default = "a_nodes")]
+    pub max_diff_nodes: u32,
+    #[serde(default = "a_fields")]
+    pub max_diff_fields: u32,
+    /// A version the agent published is rolled back when one of its first this-many runs fails.
+    #[serde(default = "a_watch")]
+    pub watch_runs: u32,
+    /// After a rollback autopilot pauses (and asks) for this many hours.
+    #[serde(default = "a_cool")]
+    pub cooldown_hours: u32,
+}
+
+fn a_yes() -> bool {
+    true
+}
+fn a_pub() -> u32 {
+    1
+}
+fn a_drafts() -> u32 {
+    4
+}
+fn a_day_cents() -> u64 {
+    50
+}
+fn a_fix_cents() -> u64 {
+    10
+}
+fn a_nodes() -> u32 {
+    2
+}
+fn a_fields() -> u32 {
+    10
+}
+fn a_watch() -> u32 {
+    3
+}
+fn a_cool() -> u32 {
+    24
+}
+
+impl Default for AssistPolicy {
+    fn default() -> AssistPolicy {
+        AssistPolicy { mode: AssistMode::Off, auto_publish: false, allow_fix: true, allow_upgrade: false, max_publish_per_day: a_pub(), max_drafts_per_day: a_drafts(), max_cents_per_day: a_day_cents(), max_cents_per_fix: a_fix_cents(), max_diff_nodes: a_nodes(), max_diff_fields: a_fields(), watch_runs: a_watch(), cooldown_hours: a_cool() }
+    }
+}
+
+impl AssistPolicy {
+    pub fn is_default(&self) -> bool {
+        *self == AssistPolicy::default()
     }
 }
 
@@ -667,6 +800,12 @@ pub struct NodeRun {
     /// What a waiting node waits for.
     #[serde(default)]
     pub waiting: String,
+    /// The step failed on a permission only the person can give (the screen offers the flow's settings, never the fixing agent).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_person: bool,
+    /// Which permission that was (`camera`, `camera_unattended`; empty when it cannot be asked for).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub permission: String,
     #[serde(default)]
     pub log: Vec<String>,
     /// The node definition changed under this run (a patch or a pulled update) before this node ran: its version note.
@@ -752,6 +891,9 @@ pub struct AppliedPatch {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Run {
+    /// Permissions the person gave THIS run only ("Allow this time"): `camera`, `camera_unattended`. They live on the run and never change the flow.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<String>,
     pub id: String,
     pub flow_id: String,
     /// The flow as it was when the run began (the pinned version), with the node updates and patches applied since.

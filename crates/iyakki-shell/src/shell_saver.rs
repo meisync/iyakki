@@ -150,7 +150,12 @@ impl Shell {
     /// earlier), nothing while the screen is off.
     pub fn redraw_interval_ms(&self) -> u64 {
         match self.saver.m.stage() {
-            Stage::Awake | Stage::Dim => 100,
+            Stage::Awake | Stage::Dim if self.tick < self.live_until => self.live_every_ms,
+            Stage::Awake | Stage::Dim => match &self.screen {
+                // nothing moves and nothing is drawn over the app: it says how rarely the safety redraw has to come
+                Screen::App(app, _) if self.live_clear() => app.idle_redraw_ms(),
+                _ => 100,
+            },
             Stage::Saver => 1000,
             Stage::Off => 60_000,
         }

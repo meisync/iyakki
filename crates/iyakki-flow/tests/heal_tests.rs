@@ -158,7 +158,7 @@ fn a_fix_that_is_not_simple_waits_for_you_even_when_automatic_fixes_are_on() {
 fn an_edited_fix_is_classified_again() {
     let e = env("heal-edit");
     slow_server(&e);
-    let wrong = patch("a", vec![PatchOp::SetConfig { path: "allow_domains".into(), value: json!(["*"]) }]);
+    let wrong = patch("a", vec![PatchOp::SetConfig { path: "headers.Authorization".into(), value: json!("Bearer x") }]);
     e.host.propose(Ok(proposal(wrong)));
     e.publish(flow_timeout_default_small(flow_with(HealMode::AutoFixSimple)));
     let id = start(&e, "h");
@@ -390,4 +390,96 @@ fn a_restart_while_the_agent_was_looking_asks_again() {
     let r = e2.engine.wait_for(&id, Duration::from_secs(5), |r| r.status == RunStatus::Blocked).unwrap();
     assert_eq!(r.heal[0].state, CardState::Proposed);
     assert!(r.heal[0].diagnosis.contains("interrupted by a restart"));
+}
+
+// ------------------------------------------------------------------------------------------------ consent is never "fixed" by the agent
+
+fn camera_flow(mode: HealMode) -> Flow {
+    let mut f = linear("h");
+    f.nodes[1] = Node::new("a", "cam_photo", json!({}));
+    f.defaults.heal = HealPolicy { mode, ..Default::default() };
+    f
+}
+
+#[test]
+fn a_step_refused_for_want_of_the_persons_permission_never_goes_to_the_agent_and_spends_no_attempt() {
+    for mode in [HealMode::Suggest, HealMode::AutoFixSimple, HealMode::AlwaysAsk] {
+        let e = env(&format!("heal-consent-{mode:?}"));
+        e.host.cam_results.lock().unwrap().push_back(Err(NodeError::consent("This flow is not allowed to use the camera. Switch it on in the flow's settings.")));
+        e.host.propose(Ok(proposal(patch("a", vec![PatchOp::SetConfig { path: "camera_allowed".into(), value: json!(true) }]))));
+        e.publish(camera_flow(mode));
+        let id = start(&e, "h");
+        let r = e.engine.wait_for(&id, Duration::from_secs(10), |r| r.status == RunStatus::Blocked || r.status.is_terminal()).unwrap();
+        assert_eq!(r.status, RunStatus::Blocked, "{mode:?}");
+        assert_eq!(e.host.heal_requests.lock().unwrap().len(), 0, "{mode:?}: the agent was not asked");
+        assert_eq!(r.heal_spent, 0, "no attempt spent");
+        assert_eq!(r.heal_cents, 0);
+        assert_eq!(r.heal.len(), 1);
+        let c = &r.heal[0];
+        assert!(c.patch.is_none() && c.state == CardState::Proposed && c.note == iyakki_flow::driver::CONSENT_NOTE, "{c:?}");
+        assert!(c.diagnosis.contains("needs your permission") && c.diagnosis.contains("not allowed to use the camera"), "{}", c.diagnosis);
+        assert!(r.blocked.contains("needs you"), "{}", r.blocked);
+        assert!(e.store.get_draft("h").unwrap().node("a").unwrap().config.get("camera_allowed").is_none(), "nothing was written");
+    }
+}
+
+#[test]
+fn a_proposal_that_touches_consent_or_invents_a_step_setting_is_refused_and_attributed_to_the_assistant() {
+    let e = env("heal-bogus");
+    // the assistant proposes a made-up step setting that would "allow" the camera (this is what the device showed)
+    let mut f = camera_flow(HealMode::Suggest);
+    f.defaults.camera.allowed = true;
+    f.nodes[1].retry = Some(RetryPolicy::fixed(1, 0));
+    e.host.cam_results.lock().unwrap().push_back(Err(NodeError::new("the camera gave no picture")));
+    e.host.propose(Ok(proposal(patch("a", vec![PatchOp::SetConfig { path: "camera_allowed".into(), value: json!(true) }]))));
+    e.publish(f);
+    let id = start(&e, "h");
+    let r = e.engine.wait_for(&id, Duration::from_secs(10), |r| r.status == RunStatus::Blocked || r.status.is_terminal()).unwrap();
+    let c = &r.heal[0];
+    assert!(c.patch.is_none(), "refused patches are not offered: {c:?}");
+    assert!(c.note.starts_with("refused:") && c.note.contains("camera_allowed"), "{}", c.note);
+    assert!(e.store.get_draft("h").unwrap().node("a").unwrap().config.get("camera_allowed").is_none());
+    // a step setting the kind does not have is refused even when its name looks harmless
+    let e = env("heal-unknown");
+    let mut f = camera_flow(HealMode::Suggest);
+    f.defaults.camera.allowed = true;
+    f.nodes[1].retry = Some(RetryPolicy::fixed(1, 0));
+    e.host.cam_results.lock().unwrap().push_back(Err(NodeError::new("the camera gave no picture")));
+    e.host.propose(Ok(proposal(patch("a", vec![PatchOp::SetConfig { path: "warm_up_seconds".into(), value: json!(2) }]))));
+    e.publish(f);
+    let id = start(&e, "h");
+    let r = e.engine.wait_for(&id, Duration::from_secs(10), |r| r.status == RunStatus::Blocked || r.status.is_terminal()).unwrap();
+    assert!(r.heal[0].note.contains("not a setting of this kind of step"), "{}", r.heal[0].note);
+}
+
+#[test]
+fn an_approved_proposal_is_noted_as_the_assistants_and_a_pending_one_says_it_is_not_applied() {
+    let e = env("heal-note");
+    slow_server(&e);
+    e.host.propose(Ok(proposal(set_timeout_5s())));
+    e.publish(flow_timeout_default_small(flow_with(HealMode::Suggest)));
+    let id = start(&e, "h");
+    let r = e.engine.wait_for(&id, Duration::from_secs(10), |r| r.status == RunStatus::Blocked).unwrap();
+    assert_eq!(r.heal[0].note, "proposed by the assistant, not applied until you approve");
+    e.engine.card_decide(&id, &r.heal[0].id, CardDecision::Approve { by: "user:me".into() }).unwrap();
+    let r = e.engine.wait_for(&id, Duration::from_secs(10), |r| r.status.is_terminal()).unwrap();
+    let note = &r.nodes["a"].note;
+    assert!(note.starts_with("proposed by the assistant, approved by user:me"), "{note}");
+    assert!(!note.contains("fixed by user"), "{note}");
+}
+
+#[test]
+fn a_made_up_camera_key_on_a_step_is_an_error_and_never_grants_the_camera() {
+    let reg = Registry::builtin();
+    let mut f = camera_flow(HealMode::Off);
+    f.nodes[1].config = json!({"camera_allowed": true});
+    let issues = iyakki_flow::validate::validate_flow(&f, &reg);
+    assert!(issues.iter().any(|i| i.level == iyakki_flow::kinds::Level::Error && i.msg.contains("camera_allowed")), "{issues:?}");
+    // so the flow cannot even be published with it; the person removes it by clearing the step's settings (or discarding the draft)
+    let e = env("heal-bogus-key");
+    let id = f.id.clone();
+    e.store.create(f.clone(), "user:me").unwrap();
+    let err = e.store.publish(&id, &iyakki_flow::store::PublishReq { by: "user:me", label: "", changelog: "x", approved_by: None }).unwrap_err();
+    assert!(err.contains("camera_allowed"), "{err}");
+    assert!(!f.defaults.camera.allowed, "a step key never grants the camera: only the flow's own setting does");
 }

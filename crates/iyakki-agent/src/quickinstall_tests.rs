@@ -35,6 +35,7 @@ struct Fake {
     lem_looks: usize,
     slept: Duration,
     marks: Vec<(Item, String)>,
+    registered: Vec<String>,
     /// What each prerequisite's own install says (default: ready).
     deps: Vec<(Item, DepState)>,
 }
@@ -71,6 +72,10 @@ impl StepEnv for Fake {
     fn install_cli(&mut self, id: &str) -> Result<String, String> {
         self.calls.push(format!("cli {id}"));
         Ok("v1.1.3".into())
+    }
+    fn register_dash_source(&mut self, cfg: crate::dash::connector::SourceConfig) -> Result<(), String> {
+        self.registered.push(format!("{}|{}|{}", cfg.id, cfg.name, cfg.value("url")));
+        Ok(())
     }
     fn kubectl_apply(&mut self, name: &str, manifest: &str) -> Result<String, String> {
         self.calls.push(if name == "elasticsearch" { "apply".into() } else { format!("apply {name}") });
@@ -177,6 +182,8 @@ fn elasticsearch_waits_for_the_cluster_then_applies_waits_for_the_rollout_and_sa
     assert!(f.lines.iter().any(|l| l.contains("deployment.apps/elasticsearch created")));
     assert_eq!(f.marks[0].0, Item::Elasticsearch);
     assert!(f.marks[0].1.contains("elasticsearch.iyakki-data.svc:9200"));
+    assert_eq!(f.registered, ["elasticsearch-cluster|Cluster Elasticsearch|cluster://iyakki-data/elasticsearch:9200"], "a DASH source by the stable address, not a baked-in IP or localhost");
+    assert!(f.marks[0].1.contains("cluster://iyakki-data/elasticsearch:9200"));
     assert_eq!(crate::jobs::progress_hint(&f.lines.join("\n")), Some(100.0));
 }
 
@@ -276,7 +283,7 @@ fn every_item_has_a_section_a_licence_and_the_pairs_say_pick_one_or_both() {
     for g in Group::ALL {
         assert!(!items_of(g).is_empty(), "{g:?}");
     }
-    assert_eq!(items_of(Group::Voice), [Item::Kokoro, Item::IndicTts, Item::VoicePack]);
+    assert_eq!(items_of(Group::Voice), [Item::Kokoro, Item::VoicePack]);
     assert_eq!(items_of(Group::LocalModels), [Item::Lemonade, Item::Ollama, Item::MacHost, Item::GpuVulkan, Item::GpuNvidia]);
     assert_eq!(items_of(Group::AiCoding), [Item::ClaudeCode, Item::Copilot]);
     assert!(Group::Voice.note().contains("pick one or both") && Group::LocalModels.note().contains("pick one or both"));
@@ -288,8 +295,7 @@ fn every_item_has_a_section_a_licence_and_the_pairs_say_pick_one_or_both() {
         }
     }
     assert!(!Item::MacHost.runs_as_job() && Item::MacHost.needs().is_empty() && Item::MacHost.licence().contains("nothing is installed by IYAKKI"), "the Mac model host row is a guide, not a job");
-    assert!(Item::IndicTts.licence().contains("open owner decision"), "the unclear weights licence is said plainly");
-    assert!(Item::Kokoro.licence().contains("Apache-2.0"));
+    assert!(Item::Kokoro.licence().contains("integration code only") && Item::Kokoro.licence().contains("own licence"));
     assert_eq!(order(Item::Kokoro, &|_| false), [Item::K3s, Item::Lemonade, Item::Kokoro]);
     // the runtime an npm tool installs with comes first, like k3s before DuckDB (when the catalogue says the tool is an npm one)
     let npm = matches!(crate::clis::def("github-copilot").map(|d| d.source), Some(crate::clis::Source::Npm(_)));
@@ -298,7 +304,6 @@ fn every_item_has_a_section_a_licence_and_the_pairs_say_pick_one_or_both() {
     assert_eq!(order_text(&order(Item::DuckDb, &|_| false)), "1. k3s  \u{2192}  2. Python 3  \u{2192}  3. DuckDB");
     assert_eq!(order(Item::Lemonade, &|i| i == Item::K3s), [Item::Lemonade]);
     assert_eq!(Item::Lemonade.cli_id(), None, "Lemonade is a Deployment in k3s, not a catalogue program");
-    assert_eq!(order(Item::IndicTts, &|_| false), [Item::K3s, Item::IndicTts]);
 }
 
 #[test]
@@ -344,7 +349,7 @@ fn the_lemonade_manifest_is_loopback_only_runs_as_the_images_user_and_has_a_pinn
 }
 
 #[test]
-fn kokoro_deploys_lemonade_itself_when_it_is_not_there_waits_for_it_then_pulls_the_model_and_indic_tts_is_never_a_job() {
+fn kokoro_deploys_lemonade_itself_when_it_is_not_there_waits_for_it_then_pulls_the_model() {
     // Lemonade answers already: nothing is applied
     let mut f = Fake::default();
     run_step(Item::Kokoro, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap();
@@ -361,18 +366,6 @@ fn kokoro_deploys_lemonade_itself_when_it_is_not_there_waits_for_it_then_pulls_t
     let mut f = Fake { lem_after: usize::MAX, ..Default::default() };
     assert!(run_step(Item::Kokoro, &mut f, Duration::from_secs(20), Duration::from_secs(5)).unwrap_err().contains("k3s was not installed"));
     assert!(f.calls.is_empty());
-    let mut f = Fake::default();
-    assert!(run_step(Item::IndicTts, &mut f, Duration::from_secs(20), Duration::from_secs(5)).unwrap_err().contains("Platform services"));
-    // starting Indic-TTS starts only its k3s job; the deploy itself is the Platform services review
-    let t = Tmp::new("indic");
-    let jobs = Jobs::new(&t.0.join("jobs"));
-    let l = Launch { exe: fake_program(&t), data: t.0.join("data") };
-    let started = start(&jobs, "alice", Item::IndicTts, &|_| false, &l).unwrap();
-    assert_eq!(started.iter().map(|j| item_of(j)).collect::<Vec<_>>(), [Some(Item::K3s)]);
-    assert!(start(&jobs, "bob", Item::IndicTts, &|i| i == Item::K3s, &l).unwrap().is_empty());
-    for j in started {
-        jobs.wait("alice", &j.id, Duration::from_secs(20)).unwrap();
-    }
 }
 
 #[test]
@@ -651,7 +644,15 @@ fn the_camera_firmware_job_is_an_item_with_its_own_command_and_is_recognised_whi
 #[test]
 fn the_firmware_packs_are_hardware_items_with_their_own_job_licence_and_cli_word() {
     let packs = [Item::FwQualcommBt, Item::FwRealtekNet, Item::FwBroadcomNet, Item::FwAtheros9170];
-    assert_eq!(items_of(Group::Firmware), packs);
+    let mut with_hw = packs.to_vec();
+    with_hw.push(Item::FwHardware);
+    assert_eq!(items_of(Group::Firmware), with_hw, "the four packs and the Hardware firmware item");
+    let h = Item::FwHardware;
+    assert_eq!(Item::parse(h.id()), Some(h));
+    assert!(h.fw_def().is_none() && h.is_hardware() && !h.runs_as_job() && h.group() == Group::Firmware && h.needs().is_empty());
+    assert!(h.licence().contains("never shipped") && h.licence().contains("Various per file"));
+    let hs = hardware_firmware_spec(&Launch { exe: "/usr/bin/iyakki".into(), data: "/var/lib/iyakki".into() }, &HwFirmwareOpts { from: Some("/media/usb".into()), with: vec!["nvidia".into()], link: None });
+    assert_eq!(hs.cmd, Cmd::Argv(["/usr/bin/iyakki", "quick-install", "fw-hardware", "--data", "/var/lib/iyakki", "--from", "/media/usb", "--with", "nvidia"].map(String::from).to_vec()));
     assert_eq!(Group::Firmware.title(), "Hardware firmware");
     for i in packs {
         let d = i.fw_def().expect("a pack");

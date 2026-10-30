@@ -7,6 +7,7 @@
 #   web: x86_64 only, OPTIONAL: adds the full web engine (WPE WebKit + the iyakki-webview-helper, Mesa, GStreamer).
 #        Output in target/buildroot-web. WEB_H264=1 also ships H.264/AAC. WEB_AV_ADDON=0 leaves out the inactive audio and video bridge
 #        (default 1: only the LGPL gst-libav plugin, no FFmpeg; the person downloads the libraries). See docs/FULL-BROWSER.md.
+#        WEB_MEDIA=1 adds camera, microphone, screen share and WebRTC for pages (default 0: it rebuilds WPE WebKit, ~9 h; configs/iyakki_web_media.fragment).
 #   WITH_FFMPEG=1 (any variant): also build ffmpeg + ffprobe (LGPL, no ffplay) into the image: configs/iyakki_media.fragment.
 #   x86_64 (default): BIOS+UEFI hybrid ISO.  aarch64: UEFI disk image for VMs on Apple Silicon Macs / ARM64 boards.
 # Needs: rustup + musl-tools (static iyakki), and Buildroot's host deps (see its manual).
@@ -20,6 +21,20 @@ case "$ARCH" in
   aarch64) RUST_TARGET=aarch64-unknown-linux-musl ; OUT="${2:-$ROOT/target/buildroot-$VARIANT-aarch64}" ;;
   *) echo "ARCH must be x86_64 or aarch64" >&2; exit 2 ;;
 esac
+# IYAKKI_IMAGE_PROFILE=release (docs/development/RELEASE-IMAGE-PROFILE.md): the RELEASE image. The vendor firmware fragment is NOT added
+# (no linux-firmware package), configs/iyakki_no_firmware.fragment + iyakki_release.fragment are, post-build.sh applies the profile, and the
+# output goes to target/buildroot-VARIANT-release unless a directory is given. H.264/AAC (WEB_H264, WITH_FFMPEG) and the restricted-firmware
+# build are refused. (IYAKKI_PROFILE further down is the CARGO profile.)
+IMAGE_PROFILE="${IYAKKI_IMAGE_PROFILE:-}"
+case "$IMAGE_PROFILE" in
+  "") ;;
+  release)
+    sh "$HERE/board/iyakki/release-profile.sh" env || exit 2
+    [ "$VARIANT" != hw ] || { echo "build.sh: the hw variant IS the vendor-firmware image; a release image is built from libre, mac, web or macweb" >&2; exit 2; }
+    [ -n "${2:-}" ] || OUT="$OUT-release"
+    export IYAKKI_IMAGE_PROFILE=release ;;
+  *) echo "build.sh: IYAKKI_IMAGE_PROFILE must be empty or release (got '$IMAGE_PROFILE')" >&2; exit 2 ;;
+esac
 BR_VERSION="${BR_VERSION:-2026.02.3}"
 BR_DIR="${BR_DIR:-$ROOT/target/buildroot-src/buildroot-$BR_VERSION}"
 
@@ -31,15 +46,17 @@ fi
 mkdir -p "$OUT"
 cp "$HERE/configs/iyakki_${ARCH}_defconfig" "$OUT/defconfig"
 [ "$VARIANT" = "hw" ] && cat "$HERE/configs/iyakki_firmware.fragment" >> "$OUT/defconfig"
+# the release profile has no vendor firmware: the mac and macweb recipes below leave the firmware fragment out (it is a plain file list)
+FWFRAG="$HERE/configs/iyakki_firmware.fragment"; [ "$IMAGE_PROFILE" != release ] || FWFRAG=/dev/null
 if [ "$VARIANT" = "mac" ]; then
   [ "$ARCH" = "x86_64" ] || { echo "the mac variant is x86_64 only (Apple Silicon is a separate effort: docs/MAC-HARDWARE.md)" >&2; exit 2; }
-  cat "$HERE/configs/iyakki_firmware.fragment" "$HERE/configs/iyakki_mac.fragment" >> "$OUT/defconfig"
+  cat "$FWFRAG" "$HERE/configs/iyakki_mac.fragment" >> "$OUT/defconfig"
 fi
 if [ "$VARIANT" = "macweb" ]; then
   [ "$ARCH" = "x86_64" ] || { echo "the macweb variant is x86_64 only" >&2; exit 2; }
   # firmware + Mac drivers first, then the web engine: the Mac fragment sets the kernel fragment list, the web fragment the rootfs
   # overlay and post-build hooks; no option is set by both, so the order does not change the result
-  cat "$HERE/configs/iyakki_firmware.fragment" "$HERE/configs/iyakki_mac.fragment" >> "$OUT/defconfig"
+  cat "$FWFRAG" "$HERE/configs/iyakki_mac.fragment" >> "$OUT/defconfig"
 fi
 if [ "$VARIANT" = "web" ] || [ "$VARIANT" = "macweb" ]; then
   [ "$ARCH" = "x86_64" ] || { echo "the $VARIANT variant is x86_64 only for now" >&2; exit 2; }
@@ -49,11 +66,16 @@ if [ "$VARIANT" = "web" ] || [ "$VARIANT" = "macweb" ]; then
   if [ "${WEB_CROCUS:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_crocus.fragment" >> "$OUT/defconfig"; fi
   if [ "${WEB_H264:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_h264.fragment" >> "$OUT/defconfig"
   elif [ "${WEB_AV_ADDON:-1}" = 1 ]; then cat "$HERE/configs/iyakki_web_av_addon.fragment" >> "$OUT/defconfig"; fi
+  # OPTIONAL, default OFF: camera, microphone, screen share and WebRTC in the page (WPE media-stream + GStreamer capture and webrtc plugins).
+  # Rebuilds WPE WebKit (about 9 h without ccache). docs/development/BROWSER-MEDIA-DEVICES.md. external.mk reads IYAKKI_WEB_MEDIA.
+  if [ "${WEB_MEDIA:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_media.fragment" >> "$OUT/defconfig"; export IYAKKI_WEB_MEDIA=1; else export IYAKKI_WEB_MEDIA=0; fi
   export IYAKKI_WEB_H264="${WEB_H264:-0}"
   # the inactive audio and video bridge (default on; WEB_H264=1 ships the whole codec instead)
   if [ "${WEB_H264:-0}" != 1 ] && [ "${WEB_AV_ADDON:-1}" = 1 ]; then export IYAKKI_WEB_AV_ADDON=1; else export IYAKKI_WEB_AV_ADDON=0; fi
   if [ "${WEB_IRIS:-0}" = 1 ] || [ "${WEB_CROCUS:-0}" = 1 ]; then export IYAKKI_WEB_INTEL_GL=1; else export IYAKKI_WEB_INTEL_GL=0; fi
 fi
+# the release profile, last: it is the final word on firmware, codecs and the plugin set (see the fragments' comments)
+if [ "$IMAGE_PROFILE" = release ]; then cat "$HERE/configs/iyakki_no_firmware.fragment" "$HERE/configs/iyakki_release.fragment" >> "$OUT/defconfig"; fi
 # OPTIONAL, any variant: ffmpeg and ffprobe (LGPL build) for IYAKKI's own media player. docs/MEDIA-PLAYER.md.
 if [ "${WITH_FFMPEG:-0}" = 1 ]; then cat "$HERE/configs/iyakki_media.fragment" >> "$OUT/defconfig"; fi
 # OPTIONAL, x86_64 mac/macweb (the kernel donor of the PC image): NVIDIA's open GPU kernel modules, built out of tree (package/nvidia-open).

@@ -16,6 +16,8 @@ pub mod keepalive;
 pub mod host;
 #[cfg(feature = "shell")]
 pub mod browsertest;
+#[cfg(feature = "shell")]
+pub mod svc;
 pub mod net;
 
 use std::sync::atomic::{AtomicBool, Ordering};

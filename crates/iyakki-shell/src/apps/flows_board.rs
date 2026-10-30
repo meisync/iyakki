@@ -124,7 +124,7 @@ impl FlowsApp {
         let top = y + 40.0 * s;
         let avail = R::new(inner.x, top, inner.w, (inner.y + inner.h - top).max(0.0));
         if total == 0 && self.runs.is_empty() {
-            fx::empty_state(g, avail, s, Icon::Runs, "Nothing has run yet", "Runs from schedules, from the Run button and from the assistant appear here, in lanes: Scheduled, Running, Needs you, Failed, Done.", ACCENT);
+            fx::empty_state(g, avail, s, Icon::Runs, "Nothing has run yet", "Runs from schedules, from the Run button and from the assistant appear here, in lanes: Scheduled, Running, Needs you, Failed, Done. Press n to make a flow, or ask the assistant.", ACCENT);
             self.draw_next(g, R::new(avail.x, avail.y + avail.h - 90.0 * s, avail.w.min(420.0 * s), 90.0 * s), s, now);
             self.draw_status(g, R::new(inner.x, inner.y + inner.h + 4.0 * s, inner.w, status_h), s);
             return;
@@ -184,7 +184,7 @@ impl FlowsApp {
             if y + 18.0 * s > r.y + r.h {
                 break;
             }
-            let name = self.flows.iter().find(|f| f.id == *flow).map(|f| f.name.clone()).unwrap_or_else(|| flow.clone());
+            let name = self.flow_names.iter().find(|(id, _)| id == flow).map(|(_, n)| n.clone()).unwrap_or_else(|| flow.clone());
             let w1 = g.text_width(11.5 * s, &when_text(*at, now), Face::Bold) + 8.0 * s;
             g.text(r.x + 12.0 * s, y, 11.5 * s, OK, &when_text(*at, now), Face::Bold);
             g.text_fit(r.x + 12.0 * s + w1.max(70.0 * s), y, 11.5 * s, TEXT, &format!("{name} · {trig}"), Face::Sans, r.w - w1.max(70.0 * s) - 24.0 * s);

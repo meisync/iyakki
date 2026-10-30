@@ -25,6 +25,13 @@
 #     copy-firmware.sh, uncompressed) into /lib/firmware instead of the kernel donor's pruned one; post-build.sh then prunes it with
 #     board/iyakki/pc-firmware.keep (all GPUs, common PC Wi-Fi/Bluetooth/Ethernet). ./run.sh build-pc-layered does it (docs/GPU-K3S.md).
 # --fast-zstd: zstd -3 instead of -19 (quick tests; the file is bigger, do not release it).
+# IYAKKI_IMAGE_PROFILE=release (docs/development/RELEASE-IMAGE-PROFILE.md): the RELEASE image. No vendor firmware of any kind (the donor's
+#     /lib/firmware contributes only regulatory.db; --firmware-from is refused; board/iyakki/pc-firmware.keep and mac-firmware.keep are not
+#     used, release-firmware.keep is), no NVIDIA GSP, no Apple/Broadcom blobs, no H.264/AAC codec libraries; the GPU drivers are held back
+#     until firmware exists (gpu-fw-guard); /etc/iyakki-release says IMAGE_PROFILE=release, FIRMWARE=none; the person installs what the
+#     computer needs with "Hardware firmware". The output goes to target/buildroot-VARIANT-release (the development images stay untouched).
+#     (IYAKKI_PROFILE below is the CARGO profile; it has nothing to do with this.)
+#       IYAKKI_IMAGE_PROFILE=release ./dist/buildroot/repack.sh pc --base target/buildroot-web --kernel-from target/buildroot-mac
 # Secure Boot: run it with the same IYAKKI_SB_KEY / IYAKKI_SB_CERT as the build (a change from signed to unsigned is FULL for
 # changed.sh); modules are not signed again (they already are), the kernel and the EFI image are, as in post-image.sh.
 set -eu
@@ -49,7 +56,15 @@ case "$KFROM" in ""|/*) ;; *) KFROM="$ROOT/$KFROM" ;; esac
 ARCH="${ARCH:-x86_64}"
 [ "$ARCH" = x86_64 ] || { echo "repack.sh: x86_64 only (the ARM disk image is built by its own post-image step: use the full build)" >&2; exit 2; }
 RUST_TARGET=x86_64-unknown-linux-musl
-: "${OUT:=$ROOT/target/buildroot-$VARIANT}"
+IMAGE_PROFILE="${IYAKKI_IMAGE_PROFILE:-}"
+case "$IMAGE_PROFILE" in ""|release) ;; *) echo "repack.sh: IYAKKI_IMAGE_PROFILE must be empty or release (got '$IMAGE_PROFILE')" >&2; exit 2 ;; esac
+if [ "$IMAGE_PROFILE" = release ]; then
+  : "${OUT:=$ROOT/target/buildroot-$VARIANT-release}"
+  sh "$HERE/board/iyakki/release-profile.sh" env || exit 2
+  [ -z "$FWFROM" ] || { echo "repack.sh: --firmware-from puts vendor firmware in the image; a release image (IYAKKI_IMAGE_PROFILE=release) has none" >&2; exit 2; }
+else
+  : "${OUT:=$ROOT/target/buildroot-$VARIANT}"
+fi
 PROFILE="${IYAKKI_PROFILE:-release}"
 if [ "$PROFILE" = release ]; then PFLAG=--release; else PFLAG="--profile $PROFILE"; fi
 : "${BASE:=$OUT}"
@@ -65,7 +80,7 @@ say() { echo "repack: $*"; }
 die() { echo "repack: $*" >&2; exit 1; }
 
 # ---- prerequisites ----
-[ -s "$IMG/rootfs.cpio.zst" ] || die "no $IMG/rootfs.cpio.zst: nothing to repack, do a full build"
+[ -s "$IMG/rootfs.cpio.zst" ] || die "no $IMG/rootfs.cpio.zst: nothing to repack, do a full build$( [ "$IMAGE_PROFILE" = release ] && echo " (a release image is repacked from a finished build: give --base, e.g. --base target/buildroot-web --kernel-from target/buildroot-mac)" )"
 [ -d "$BLD/buildroot-fs/rootfs.iso9660.tmp/boot" ] || die "no ISO tree in $BLD/buildroot-fs: do a full build"
 [ -f "$BASE/.config" ] || die "no $BASE/.config"
 ls "$BLD"/grub2-*/build-i386-pc/grub-core/boot_hybrid.img >/dev/null 2>&1 || die "no grub2 build tree in $BLD (post-image needs boot_hybrid.img)"
@@ -74,9 +89,9 @@ FAKEROOT="$HOSTD/bin/fakeroot"; [ -x "$FAKEROOT" ] || FAKEROOT="$(command -v fak
 [ -n "$FAKEROOT" ] || die "fakeroot not found"
 command -v cpio >/dev/null || die "cpio not found"; command -v rsync >/dev/null || die "rsync not found"
 # the PC image: the full linux-firmware set comes from the source tree of the kernel donor (its copy-firmware.sh), post-build.sh prunes it
-if [ "$VARIANT" = pc ] && [ -z "$FWFROM" ] && [ -n "$KFROM" ]; then FWFROM="$(ls -d "$KFROM"/build/linux-firmware-* 2>/dev/null | head -n1 || true)"; fi
+if [ "$VARIANT" = pc ] && [ -z "$FWFROM" ] && [ -n "$KFROM" ] && [ "$IMAGE_PROFILE" != release ]; then FWFROM="$(ls -d "$KFROM"/build/linux-firmware-* 2>/dev/null | head -n1 || true)"; fi
 case "$FWFROM" in ""|/*) ;; *) FWFROM="$ROOT/$FWFROM" ;; esac
-if [ "$VARIANT" = pc ] || [ -n "$FWFROM" ]; then
+if { [ "$VARIANT" = pc ] && [ "$IMAGE_PROFILE" != release ]; } || [ -n "$FWFROM" ]; then
   [ -f "$FWFROM/copy-firmware.sh" ] && [ -f "$FWFROM/WHENCE" ] || die "variant pc needs the linux-firmware source tree (copy-firmware.sh, WHENCE): give --firmware-from DIR or --kernel-from a build that has build/linux-firmware-*"
   [ -f "$HERE/board/iyakki/pc-firmware.keep" ] || die "no board/iyakki/pc-firmware.keep"
 fi
@@ -90,17 +105,18 @@ set -- $POSTIMG; PI_SCRIPT="$1"; GI_SCRIPT="$BR_DIR/$2"
 # the PC image: its initial RAM disk (the whole GPU and Wi-Fi firmware set) does not fit the 256 MB boot volume of the other variants:
 # the install template gets a 512 MB one (iyakki-usb takes the size from the image; a 4096-byte-sector drive gets its own fixed 320 MiB)
 PC_GI_CFG=""
-if [ "$VARIANT" = pc ]; then
+if [ "$VARIANT" = pc ] && [ "$IMAGE_PROFILE" != release ]; then
   case "$PIARGS" in *genimage-install.cfg*) PC_GI_CFG="$OUT/.repack/genimage-install-pc.cfg"; PIARGS="$(printf '%s' "$PIARGS" | sed "s#[^ ]*genimage-install\.cfg#$PC_GI_CFG#")" ;; *) die "unexpected genimage arguments for the pc variant: $PIARGS" ;; esac
 fi
 [ "$CARGO" = 1 ] || [ -f "$BIN" ] || die "$BIN is missing: cargo build $PFLAG --target $RUST_TARGET -p iyakki-core (or use --cargo)"
 
 # every graft must be possible before anything is unpacked (the package built in BASE, the list known)
+GERR="$(mktemp)"
 for g in $GRAFTS; do
   [ -f "$HERE/graft/$g.list" ] || die "no graft list $HERE/graft/$g.list"
-  sh "$HERE/graft.sh" "$g" "$BASE/target" "$BASE" --dry-run >/dev/null 2>"$STAGE.graft.err" || { cat "$STAGE.graft.err" >&2; rm -f "$STAGE.graft.err"; die "graft $g is not possible from $BASE/target"; }
-  rm -f "$STAGE.graft.err"
+  sh "$HERE/graft.sh" "$g" "$BASE/target" "$BASE" --dry-run >/dev/null 2>"$GERR" || { cat "$GERR" >&2; rm -f "$GERR"; die "graft $g is not possible from $BASE/target"; }
 done
+rm -f "$GERR"
 
 # the base build must have been made with the same WEB_* switches as this run asks for (they change packages, not just files)
 for pair in "WEB_IRIS:iyakki_web_iris" "WEB_CROCUS:iyakki_web_crocus"; do
@@ -130,6 +146,7 @@ export IYAKKI_VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$ROOT/Cargo.toml
 export IYAKKI_BUILD_DATE="$(date -u +%Y-%m-%d)"
 export IYAKKI_GIT_DESCRIBE="$(cd "$ROOT" && git describe --tags --always --dirty 2>/dev/null || echo unknown)"
 export IYAKKI_VARIANT="$VARIANT-x86_64"
+if [ "$IMAGE_PROFILE" = release ]; then export IYAKKI_IMAGE_PROFILE=release; else unset IYAKKI_IMAGE_PROFILE || true; fi
 export IYAKKI_WEB_H264="${WEB_H264:-0}"
 if [ "${WEB_H264:-0}" != 1 ] && [ "${WEB_AV_ADDON:-1}" = 1 ]; then export IYAKKI_WEB_AV_ADDON=1; else export IYAKKI_WEB_AV_ADDON=0; fi
 if [ "${WEB_IRIS:-0}" = 1 ] || [ "${WEB_CROCUS:-0}" = 1 ]; then export IYAKKI_WEB_INTEL_GL=1; else export IYAKKI_WEB_INTEL_GL=0; fi
@@ -140,6 +157,7 @@ say "variant      $VARIANT ($OUT)"
 [ -z "$KFROM" ] || say "kernel from  $KFROM (bzImage, /lib/modules, /lib/firmware)"
 [ -z "$GRAFTS" ] || say "grafts       $GRAFTS (from $BASE/target)"
 [ -z "$FWFROM" ] || say "firmware     the whole set from $FWFROM, pruned by board/iyakki/pc-firmware.keep"
+[ "$IMAGE_PROFILE" != release ] || say "profile      RELEASE: no vendor firmware (only regulatory.db, board/iyakki/release-firmware.keep), no codec libraries, GPU drivers held until firmware exists; AV bridge $( [ "${IYAKKI_RELEASE_AV_BRIDGE:-1}" = 0 ] && echo dropped || echo 'parked (inactive)' )"
 say "overlays     $OVERLAYS"
 say "post-build   $HOOKS"
 say "post-image   $PI_SCRIPT, then $GI_SCRIPT $PIARGS"
@@ -171,8 +189,15 @@ zstd -dc "$IMG/rootfs.cpio.zst" | cpio -idm --quiet --no-absolute-filenames
 OLD_SB="$(sed -n 's/^\(SECURE_BOOT_CERT_SHA1=.*\)$/\1/p' etc/iyakki-release 2>/dev/null || true)"
 if [ -n "$KFROM" ]; then
   rm -rf lib/modules lib/firmware
-  cpio -idm --quiet --no-absolute-filenames 'lib/modules' 'lib/modules/*' 'lib/firmware' 'lib/firmware/*' < "$KFROM/images/rootfs.cpio"
-  [ -d lib/modules ] && [ -d lib/firmware ] || { echo "graft: the kernel build has no /lib/modules or /lib/firmware" >&2; exit 1; }
+  if [ "${IYAKKI_IMAGE_PROFILE:-}" = release ]; then
+    # release: the donor's modules, and of its firmware folder only the regulatory database (wireless-regdb, ISC); the rest is vendor firmware
+    cpio -idm --quiet --no-absolute-filenames 'lib/modules' 'lib/modules/*' 'lib/firmware/regulatory.db' 'lib/firmware/regulatory.db.p7s' < "$KFROM/images/rootfs.cpio"
+    mkdir -p lib/firmware
+    [ -d lib/modules ] || { echo "graft: the kernel build has no /lib/modules" >&2; exit 1; }
+  else
+    cpio -idm --quiet --no-absolute-filenames 'lib/modules' 'lib/modules/*' 'lib/firmware' 'lib/firmware/*' < "$KFROM/images/rootfs.cpio"
+    [ -d lib/modules ] && [ -d lib/firmware ] || { echo "graft: the kernel build has no /lib/modules or /lib/firmware" >&2; exit 1; }
+  fi
   [ "$(ls lib/modules)" = "$(basename "$(ls -d lib/modules/*/ | head -n1)")" ] || { echo "graft: more than one kernel version in /lib/modules" >&2; exit 1; }
 fi
 # out-of-tree modules built alone in the kernel donor (`make -C target/buildroot-mac snd-hda-macbookpro`, docs/MAC-HARDWARE.md): a .ko in the
@@ -215,19 +240,61 @@ if [ -f "$NEWH" ] && [ -f usr/libexec/iyakki/webview-helper ] && [ "$NEWH" -nt "
   cp -f "$NEWH" usr/libexec/iyakki/webview-helper; chmod 0755 usr/libexec/iyakki/webview-helper
   echo "repack: web engine helper refreshed from $NEWH"
 fi
+# the shared camera plugin (dist/webview/wpe-helper/camshare.c) travels with the helper: copy it when it is newer or the image has none
+NEWP="$BASE/target/usr/lib/gstreamer-1.0/libgstiyakkicamshare.so"
+if [ -f "$NEWP" ] && [ -d usr/lib/gstreamer-1.0 ] && { [ ! -f usr/lib/gstreamer-1.0/libgstiyakkicamshare.so ] || [ "$NEWP" -nt "$IMG/rootfs.cpio.zst" ]; }; then
+  cp -f "$NEWP" usr/lib/gstreamer-1.0/libgstiyakkicamshare.so; chmod 0755 usr/lib/gstreamer-1.0/libgstiyakkicamshare.so
+  echo "repack: shared camera plugin refreshed from $NEWP"
+fi
+# the microphone plugin (dist/webview/wpe-helper/micshare.c) the same way
+NEWM="$BASE/target/usr/lib/gstreamer-1.0/libgstiyakkimic.so"
+if [ -f "$NEWM" ] && [ -d usr/lib/gstreamer-1.0 ] && { [ ! -f usr/lib/gstreamer-1.0/libgstiyakkimic.so ] || [ "$NEWM" -nt "$IMG/rootfs.cpio.zst" ]; }; then
+  cp -f "$NEWM" usr/lib/gstreamer-1.0/libgstiyakkimic.so; chmod 0755 usr/lib/gstreamer-1.0/libgstiyakkimic.so
+  echo "repack: microphone plugin refreshed from $NEWM"
+fi
+# the MP3 decoder plugin (dist/webview/wpe-helper/mp3dec.c) the same way
+NEW3="$BASE/target/usr/lib/gstreamer-1.0/libgstiyakkimp3.so"
+if [ -f "$NEW3" ] && [ -d usr/lib/gstreamer-1.0 ] && { [ ! -f usr/lib/gstreamer-1.0/libgstiyakkimp3.so ] || [ "$NEW3" -nt "$IMG/rootfs.cpio.zst" ]; }; then
+  cp -f "$NEW3" usr/lib/gstreamer-1.0/libgstiyakkimp3.so; chmod 0755 usr/lib/gstreamer-1.0/libgstiyakkimp3.so
+  echo "repack: MP3 decoder plugin refreshed from $NEW3"
+fi
+# the engine's never-failing sound output plugin (dist/webview/wpe-helper/websink.c) the same way
+NEW4="$BASE/target/usr/lib/gstreamer-1.0/libgstiyakkiwebsink.so"
+if [ -f "$NEW4" ] && [ -d usr/lib/gstreamer-1.0 ] && { [ ! -f usr/lib/gstreamer-1.0/libgstiyakkiwebsink.so ] || [ "$NEW4" -nt "$IMG/rootfs.cpio.zst" ]; }; then
+  cp -f "$NEW4" usr/lib/gstreamer-1.0/libgstiyakkiwebsink.so; chmod 0755 usr/lib/gstreamer-1.0/libgstiyakkiwebsink.so
+  echo "repack: web sound output plugin refreshed from $NEW4"
+fi
+# GStreamer plugins the Buildroot packages gained after the packed image was made: the MediaRecorder pipeline of the engine needs
+# `encodebin` (gst-plugins-base, plugin "encoding") and `uritranscodebin` (gst-plugins-bad, plugin "transcode"): copy when newer or missing
+for P in libgstencoding libgsttranscode; do
+  NEWG="$BASE/target/usr/lib/gstreamer-1.0/$P.so"
+  if [ -f "$NEWG" ] && [ -d usr/lib/gstreamer-1.0 ] && { [ ! -f usr/lib/gstreamer-1.0/$P.so ] || [ "$NEWG" -nt "$IMG/rootfs.cpio.zst" ]; }; then
+    cp -f "$NEWG" usr/lib/gstreamer-1.0/$P.so; chmod 0755 usr/lib/gstreamer-1.0/$P.so
+    echo "repack: recorder plugin $P refreshed from $NEWG"
+  fi
+done
 for g in $GRAFTS; do
   sh "$HERE/graft.sh" "$g" "$BASE/target" "$STAGE/root" | tail -n 1
 done
 for d in $OVERLAYS; do
   rsync -a --ignore-times --keep-dirlinks --chmod=u=rwX,go=rX --exclude .empty --exclude '*~' "$d/" "$STAGE/root/"
 done
+# files of packages the base build no longer selects (Buildroot keeps them in target/ after a rebuild without the package): pruned in a release
+# image, with no legal-info row they would be unexplained; IYAKKI_PRUNE_STALE=1 does it for a development image too, 0 never
+if [ "${IYAKKI_PRUNE_STALE:-$( [ "${IYAKKI_IMAGE_PROFILE:-}" = release ] && echo 1 || echo 0 )}" = 1 ]; then
+  if [ -f "$BASE/build/packages-file-list.txt" ] && [ -f "$BASE/.config" ]; then
+    sh "$HERE/board/iyakki/prune-stale-packages.sh" "$BASE/build/packages-file-list.txt" "$BASE/.config" "$BR_DIR/package" "$STAGE/root"
+  else
+    echo "repack: no package list or .config in $BASE: stale packages not pruned" >&2
+  fi
+fi
 # modules are already signed in the old image; the hooks must not sign them again (the certificate line is put back below)
 SB_KEY_SAVE="${IYAKKI_SB_KEY:-}"; unset IYAKKI_SB_KEY IYAKKI_SB_CERT || true
 for s in $HOOKS; do sh "$s" "$STAGE/root"; done
 [ -z "$OLD_SB" ] || echo "$OLD_SB" >> etc/iyakki-release
 find . | LC_ALL=C sort | cpio --quiet -o -H newc > "$STAGE/bin/rootfs.cpio"
 EOS
-export STAGE IMG OVERLAYS HOOKS KFROM BASE FWFROM GRAFTS HERE
+export STAGE IMG OVERLAYS HOOKS KFROM BASE FWFROM GRAFTS HERE IMAGE_PROFILE BR_DIR
 say "unpacking, applying overlays and hooks, packing (fakeroot)"
 # Buildroot's fakeroot script has the absolute path of the tree it was built in baked in (here a folder that has since been renamed:
 # "libfakeroot.so not found, aborting"): when it is the host tree's own script, name the library and the daemon of THIS tree

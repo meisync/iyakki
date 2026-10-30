@@ -12,11 +12,8 @@ use crate::rootfs;
 use crate::wsexec::FakeRunner;
 
 fn tmp(tag: &str) -> PathBuf {
-    let base = std::env::var("TMPDIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
-    let d = base.join(format!("iyakki-linwin-{tag}-{}", std::process::id()));
-    let _ = rootfs::remove_tree(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    // the window's socket lives below this folder: a short path (the code refuses more than 100 bytes)
+    crate::testdir::short("iyakki-linwin", tag)
 }
 
 /// A `gui` sandbox made by hand (no download): a root with the display server's file, optionally the script.
@@ -363,4 +360,14 @@ fn a_debian_alternatives_link_counts_as_the_display_server() {
     std::fs::remove_file(&x).unwrap();
     assert!(!ready(&la));
     let _ = rootfs::remove_tree(&d);
+}
+
+#[test]
+fn a_sandbox_that_cannot_start_is_named_first_and_whole() {
+    let out = "linuxapp-init: note: no cgroup v2 here\nlinuxapp-init: entering the sandbox failed: pivot_root: Invalid argument (os error 22)\n";
+    let m = apt_failure("the packages", out);
+    assert_eq!(m, "the sandbox could not start: entering the sandbox failed: pivot_root: Invalid argument (os error 22) (apt did not run)");
+    assert!(!m.contains("..."), "{m}");
+    let plain = apt_failure("curl", "Reading package lists...\nE: Unable to locate package curl\n");
+    assert!(plain.starts_with("apt could not install curl: ") && plain.contains("Unable to locate"), "{plain}");
 }

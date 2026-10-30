@@ -856,7 +856,7 @@ fn extracted_data_and_a_screenshot_feed_later_nodes_conditions_and_a_vision_mode
     q.env.svc.settings.lock().unwrap().update(|s| s.chat = Some(crate::settings::ModelChoice { provider: "p".into(), model: "llama3:8b".into() })).unwrap();
     let r = q.run_flow(f.clone());
     assert_eq!(r.status, RunStatus::Failed);
-    assert!(r.nodes["see"].error.contains("not one that can look at pictures"), "{}", r.nodes["see"].error);
+    assert!(r.nodes["see"].error.contains("No vision model found"), "{}", r.nodes["see"].error);
     // a vision-capable model gets the PNG
     q.env.svc.settings.lock().unwrap().update(|s| s.chat = Some(crate::settings::ModelChoice { provider: "p".into(), model: "gpt-4o".into() })).unwrap();
     f.id = "dataflow2".into();

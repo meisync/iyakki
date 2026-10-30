@@ -881,3 +881,33 @@ fn a_recording_stops_when_the_app_is_left() {
     drop(a);
     assert!(r.cfg.dropped.load(Ordering::SeqCst), "closing the app ends the recording");
 }
+
+#[test]
+fn the_microphone_choice_is_saved_for_the_browser_and_comes_back_when_the_tile_opens() {
+    let b = bench("voice-mic-saved");
+    let two = vec![Mic { id: "plughw:0,0".into(), label: "Analog".into(), usb: false }, usb()];
+    let r = recs(two.clone(), "x");
+    let mut a = b.app_with_recs(r.clone());
+    click(&mut a, &b.cx, T_TAB_DICT);
+    click(&mut a, &b.cx, T_MIC);
+    for c in "usb".chars() {
+        key(&mut a, &b.cx, Key::Char(c));
+    }
+    key(&mut a, &b.cx, Key::Enter);
+    assert_eq!(b.cx.services.voice_settings().mic, "plughw:1,0", "the Voice tile writes the setting the Browser reads");
+    // a new tile starts on the saved microphone, and automatic (nothing chosen) records the first one, not the playback-only default
+    let mut again = b.app_with_recs(recs(two, "x"));
+    click(&mut again, &b.cx, T_TAB_DICT);
+    again.look(&b.cx);
+    assert_eq!(again.mic_i, 2);
+    b.cx.services.set_voice_mic("").unwrap();
+    let r2 = recs(vec![Mic { id: "plughw:0,1".into(), label: "Digital Mic".into(), usb: false }], "x");
+    let mut auto = b.app_with_recs(r2.clone());
+    click(&mut auto, &b.cx, T_TAB_DICT);
+    click(&mut auto, &b.cx, T_REC);
+    assert!(r2.started.lock().unwrap()[0].0.contains("-D plughw:0,1"), "{:?}", r2.started.lock().unwrap());
+    auto.stop_record(&b.cx, false);
+}
+
+#[path = "voice_rec_tests.rs"]
+mod rec;

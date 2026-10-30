@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "sources": [
+    {
+      "id": "prometheus",
+      "kind": "prometheus",
+      "name": "Home Prometheus",
+      "secrets": {
+        "token": "uvault:svc.prometheus"
+      },
+      "values": {
+        "auth": "bearer",
+        "url": "http://192.0.2.10:9090"
+      }
+    }
+  ]
+}

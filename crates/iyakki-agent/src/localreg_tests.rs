@@ -9,7 +9,12 @@ pub struct St {
     pub ready_node: bool,
     pub storage: Option<String>,
     pub ns: bool,
-    pub svc_port: Option<u16>,
+    /// The Service exists.
+    pub svc: bool,
+    /// The NodePort of a Service from an older install (open on the network).
+    pub node_port: Option<u16>,
+    /// The loopback hostPort of the Deployment.
+    pub host_port: Option<u16>,
     pub size: String,
     pub ready: bool,
     pub rollout_ok: bool,
@@ -56,19 +61,38 @@ impl Runner for Cluster {
         }
         if has("get services -A") {
             let mut items: Vec<Value> = st.other_ports.iter().map(|p| serde_json::json!({ "metadata": { "name": "x", "namespace": "other" }, "spec": { "ports": [{ "nodePort": p }] } })).collect();
-            if let Some(p) = st.svc_port {
-                items.push(serde_json::json!({ "metadata": { "name": "registry", "namespace": "iyakki-registry" }, "spec": { "ports": [{ "nodePort": p }] } }));
+            if st.svc {
+                let port = match st.node_port {
+                    Some(p) => serde_json::json!({ "port": 5000, "nodePort": p }),
+                    None => serde_json::json!({ "port": 5000 }),
+                };
+                items.push(serde_json::json!({ "metadata": { "name": "registry", "namespace": "iyakki-registry" }, "spec": { "type": if st.node_port.is_some() { "NodePort" } else { "ClusterIP" }, "ports": [port] } }));
             }
             return ok(serde_json::json!({ "items": items }).to_string());
         }
         if has("get service registry") {
-            return match st.svc_port {
-                Some(p) => ok(serde_json::json!({ "spec": { "ports": [{ "port": 5000, "nodePort": p }] } }).to_string()),
-                None => bad("Error from server (NotFound): services \"registry\" not found"),
+            return if st.svc {
+                match st.node_port {
+                    Some(p) => ok(serde_json::json!({ "spec": { "type": "NodePort", "ports": [{ "port": 5000, "nodePort": p }] } }).to_string()),
+                    None => ok(serde_json::json!({ "spec": { "type": "ClusterIP", "ports": [{ "port": 5000 }] } }).to_string()),
+                }
+            } else {
+                bad("Error from server (NotFound): services \"registry\" not found")
             };
         }
         if has("get deployment registry") {
-            return ok(serde_json::json!({ "status": { "readyReplicas": if st.ready { 1 } else { 0 } } }).to_string());
+            let ports: Vec<Value> = st.host_port.iter().map(|p| serde_json::json!({ "containerPort": 5000, "hostPort": p, "hostIP": "127.0.0.1" })).collect();
+            return ok(serde_json::json!({ "spec": { "template": { "spec": { "containers": [{ "name": "registry", "ports": ports }] } } }, "status": { "readyReplicas": if st.ready { 1 } else { 0 } } }).to_string());
+        }
+        if has("patch service registry") {
+            st.node_port = None;
+            return ok("service/registry patched".into());
+        }
+        if has("patch deployment registry") {
+            let body = argv.last().cloned().unwrap_or_default();
+            let j: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+            st.host_port = j["spec"]["template"]["spec"]["containers"][0]["ports"][0]["hostPort"].as_u64().map(|p| p as u16);
+            return ok("deployment.apps/registry patched".into());
         }
         if has("get pvc registry-data") {
             return if st.size.is_empty() { bad("NotFound") } else { ok(st.size.clone()) };
@@ -83,13 +107,18 @@ impl Runner for Cluster {
             st.ns = true;
             return ok("namespace/iyakki-registry created".into());
         }
+        if has("get pvc") {
+            return if st.svc && !st.size.is_empty() { ok(format!("{{\"spec\":{{\"storageClassName\":\"local-path\",\"resources\":{{\"requests\":{{\"storage\":\"{}\"}}}}}}}}", st.size)) } else { bad("Error from server (NotFound): persistentvolumeclaims \"registry-data\" not found") };
+        }
         if has("apply -f") {
             if let Some(e) = st.apply_error.clone() {
                 return bad(&e);
             }
             let file = argv.iter().position(|a| a == "-f").and_then(|i| argv.get(i + 1)).cloned().unwrap_or_default();
             let text = std::fs::read_to_string(&file).unwrap_or_default();
-            st.svc_port = text.lines().find_map(|l| l.trim().strip_prefix("nodePort: ")).and_then(|p| p.parse().ok());
+            st.node_port = text.lines().find_map(|l| l.trim().strip_prefix("nodePort: ")).and_then(|p| p.parse().ok());
+            st.host_port = text.lines().find_map(|l| l.trim().strip_prefix("hostPort: ")).and_then(|p| p.parse().ok());
+            st.svc = true;
             st.size = text.lines().find_map(|l| l.trim().strip_prefix("storage: ")).unwrap_or("").to_string();
             st.manifest = text;
             st.ready = st.rollout_ok;
@@ -100,7 +129,9 @@ impl Runner for Cluster {
         }
         if has("delete namespace") {
             st.ns = false;
-            st.svc_port = None;
+            st.svc = false;
+            st.node_port = None;
+            st.host_port = None;
             st.ready = false;
             return ok("namespace \"iyakki-registry\" deleted".into());
         }
@@ -169,7 +200,7 @@ fn create_builds_the_objects_and_needs_no_node_change() {
     assert_eq!(info.storage, "10Gi");
     assert_eq!(info.images, Some(0));
     let m = c.st.lock().unwrap().manifest.clone();
-    for want in ["image: docker.io/library/registry:2", "kind: PersistentVolumeClaim", "storageClassName: local-path", "storage: 10Gi", "type: NodePort", "nodePort: 30500", "kind: Deployment", "mountPath: /var/lib/registry", "allowPrivilegeEscalation: false"] {
+    for want in ["image: docker.io/library/registry:2", "kind: PersistentVolumeClaim", "storageClassName: local-path", "storage: 10Gi", "type: ClusterIP", "hostPort: 30500", "hostIP: 127.0.0.1", "kind: Deployment", "mountPath: /var/lib/registry", "allowPrivilegeEscalation: false"] {
         assert!(m.contains(want), "{want} missing in\n{m}");
     }
     // the order: namespace, then objects, then the rollout
@@ -226,7 +257,8 @@ fn a_registry_that_exists_but_is_not_ready_is_applied_again() {
     {
         let mut st = c.st.lock().unwrap();
         st.ns = true;
-        st.svc_port = Some(30500);
+        st.svc = true;
+        st.host_port = Some(30500);
         st.size = "10Gi".into();
         st.pods = r#"{"items":[{"status":{"containerStatuses":[{"state":{"waiting":{"reason":"ImagePullBackOff"}}}]}}]}"#.into();
     }
@@ -295,15 +327,111 @@ fn failures_say_what_to_do() {
 }
 
 #[test]
-fn a_cluster_on_another_machine_is_pushed_to_at_its_address_and_pulled_as_localhost() {
+fn a_cluster_on_another_machine_is_refused_because_the_registry_listens_on_loopback_only() {
     let d = tmp("remote");
     let c = Cluster::healthy();
     let t = Target { name: "lab".into(), kubeconfig: "/k".into(), context: "lab".into(), node_host: "10.9.8.7".into() };
-    let info = create(&rt(&c), &FakeRegistry::default(), &t, &opts(&d), &mut |_| {}).unwrap();
-    assert_eq!((info.push.as_str(), info.pull.as_str()), ("10.9.8.7:30500", "localhost:30500"));
-    assert!(c.lines().iter().any(|l| l.contains("--context lab")), "{:?}", c.lines());
-    assert!(describe_plan(10, &t).contains("10.9.8.7:<port>") && describe_plan(10, &t).contains("NOT restarted"));
+    let e = create(&rt(&c), &FakeRegistry::default(), &t, &opts(&d), &mut |_| {}).unwrap_err();
+    assert!(e.contains("127.0.0.1") && e.contains("10.9.8.7") && e.contains("another computer"), "{e}");
+    assert!(!c.did("apply -f") && !c.did("create namespace"), "nothing is created: {:?}", c.lines());
+    assert!(describe_plan(10, &t).contains("NOT published on the network") && describe_plan(10, &t).contains("NOT restarted"));
     let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn the_registry_manifest_has_no_network_exposure() {
+    let d = tmp("noexpose");
+    let c = Cluster::healthy();
+    create(&rt(&c), &FakeRegistry::default(), &target(), &opts(&d), &mut |_| {}).unwrap();
+    let m = c.st.lock().unwrap().manifest.clone();
+    assert!(!m.contains("NodePort") && !m.contains("nodePort") && !m.contains("LoadBalancer") && !m.contains("0.0.0.0") && !m.contains("hostNetwork"), "{m}");
+    // every hostPort has a loopback hostIP right after it
+    let lines: Vec<&str> = m.lines().map(str::trim).collect();
+    let hp: Vec<usize> = (0..lines.len()).filter(|i| lines[*i].starts_with("hostPort:")).collect();
+    assert_eq!(hp.len(), 1, "{m}");
+    assert_eq!(lines[hp[0] + 1], "hostIP: 127.0.0.1", "{m}");
+    assert!(m.contains("type: ClusterIP"));
+    // the pull address the nodes use does not change, and no node file is written
+    let env = regsetup::PlanEnv { kube: Some(KubeCtx::default()), facts: Facts { storage_class: Some("local-path".into()), ..Facts::default() }, ..regsetup::PlanEnv::default() };
+    let plan = regsetup::plan(&RegistryOption::InCluster { node_port: 0 }, &env).unwrap();
+    assert_eq!((plan.registry.as_str(), plan.pull.as_str()), ("localhost:30500", "localhost:30500"));
+    assert!(plan.file.is_none(), "no registries.yaml for the node");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn an_existing_nodeport_registry_is_converted_to_loopback_and_audited() {
+    let d = tmp("migrate");
+    let c = Cluster::healthy();
+    {
+        let mut st = c.st.lock().unwrap();
+        st.ns = true;
+        st.svc = true;
+        st.node_port = Some(30500);
+        st.size = "10Gi".into();
+        st.ready = true;
+    }
+    let reg = FakeRegistry::default();
+    // the old install is found and still readable
+    assert!(matches!(inspect(&rt(&c), &reg, &target()), State::Ready(_)));
+    let mut said = Vec::new();
+    let info = create(&rt(&c), &reg, &target(), &opts(&d), &mut |l| said.push(l.to_string())).unwrap();
+    let lines = c.lines();
+    let pos = |w: &str| lines.iter().position(|l| l.contains(w)).unwrap_or_else(|| panic!("{w} not called: {lines:?}"));
+    assert!(pos("patch service registry") < pos("patch deployment registry") && pos("patch deployment registry") < pos("apply -f"), "{lines:?}");
+    assert!(lines[pos("patch service registry")].contains("ClusterIP") && !lines[pos("patch service registry")].contains("nodePort"), "{lines:?}");
+    assert!(lines[pos("patch deployment registry")].contains("\"hostIP\":\"127.0.0.1\"") && lines[pos("patch deployment registry")].contains("\"hostPort\":30500"), "{lines:?}");
+    {
+        let st = c.st.lock().unwrap();
+        assert_eq!((st.node_port, st.host_port), (None, Some(30500)), "the NodePort is gone, the loopback port is the same number");
+        assert!(!st.manifest.contains("nodePort"));
+    }
+    assert_eq!((info.pull.as_str(), info.node_port), ("localhost:30500", 30500));
+    assert!(said.iter().any(|l| l.contains("SECURITY") && l.contains("NodePort 30500 closed") && l.contains("127.0.0.1:30500")), "{said:?}");
+    // the second run has nothing to convert
+    c.calls.lock().unwrap().clear();
+    create(&rt(&c), &reg, &target(), &opts(&d), &mut |_| {}).unwrap();
+    assert!(!c.did("patch") && !c.did("apply"), "{:?}", c.lines());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn closing_the_nodeport_reports_what_failed_and_does_nothing_without_a_registry() {
+    let none = Cluster::healthy();
+    let run = rt(&none);
+    let k = kc(&run, &target());
+    assert_eq!(regsetup::close_legacy(&|a: &[&str]| k.kubectl(a, 5, 10)).unwrap(), None);
+    assert!(!none.did("patch"));
+    // a converted registry (ClusterIP, hostPort) is left alone
+    let done = Cluster::healthy();
+    {
+        let mut st = done.st.lock().unwrap();
+        st.svc = true;
+        st.host_port = Some(30500);
+    }
+    let run = rt(&done);
+    let k = kc(&run, &target());
+    assert_eq!(regsetup::close_legacy(&|a: &[&str]| k.kubectl(a, 5, 10)).unwrap(), None);
+    assert!(!done.did("patch"));
+    // a Service that cannot be patched: the person is told the port is still open
+    struct Refuse;
+    impl Runner for Refuse {
+        fn run(&self, _c: &std::path::Path, argv: &[String], _e: &[(String, String)], _t: Duration, _cap: usize, _s: Option<crate::wsexec::Sink>) -> Out {
+            let l = argv.join(" ");
+            if l.contains("get service registry") {
+                Out { code: Some(0), stdout: r#"{"spec":{"type":"NodePort","ports":[{"port":5000,"nodePort":30500}]}}"#.into(), ..Default::default() }
+            } else {
+                Out { code: Some(1), stderr: "forbidden".into(), ..Default::default() }
+            }
+        }
+        fn has(&self, _: &str) -> bool {
+            true
+        }
+    }
+    let run: Arc<dyn Runner> = Arc::new(Refuse);
+    let k = kc(&run, &target());
+    let e = regsetup::close_legacy(&|a: &[&str]| k.kubectl(a, 5, 10)).unwrap_err();
+    assert!(e.contains("still open on NodePort 30500") && e.contains("forbidden"), "{e}");
 }
 
 #[test]

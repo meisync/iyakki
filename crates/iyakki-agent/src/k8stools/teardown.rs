@@ -6,7 +6,6 @@
 //! `iyakki.dev/workspace=<name>` (put on at the first apply). `default`, `kube-*`, `iyakki-registry` and anything unlabelled are
 //! refused with the manual command. Never on a production-looking cluster or one that only came from the environment.
 
-use std::time::Duration;
 
 use serde_json::Value;
 
@@ -244,28 +243,16 @@ impl K8sTools {
         (!push.is_empty() && kind != "none").then_some(push)
     }
 
-    fn curl(&self, args: &[&str]) -> super::Out {
-        let mut a: Vec<String> = vec!["curl".into(), "-sS".into(), "--max-time".into(), "8".into()];
-        a.extend(args.iter().map(|s| s.to_string()));
-        self.run.run(&std::env::temp_dir(), &a, &[], Duration::from_secs(15), 256 * 1024, None)
-    }
-
     /// The repositories under `<namespace>/` in the registry with their tags.
     fn registry_images(&self) -> Result<Vec<(String, Vec<String>)>, String> {
         let reg = self.registry_base().ok_or("no registry is set up for this workspace")?;
-        if !self.run.has("curl") {
-            return Err("curl is not installed".into());
-        }
-        let c = self.curl(&["-f", &format!("http://{reg}/v2/_catalog?n=1000")]);
-        if !c.ok() {
-            return Err(format!("the registry {reg} did not answer: {}", first_line(&Self::out_text(&c))));
-        }
-        let j: Value = serde_json::from_str(&c.stdout).map_err(|_| "the registry's catalog was not readable".to_string())?;
+        let c = crate::netprobe::get_body(&format!("http://{reg}/v2/_catalog?n=1000"), 8, 256 * 1024).map_err(|e| format!("the registry {reg} did not answer: {e}"))?;
+        let j: Value = serde_json::from_str(&c).map_err(|_| "the registry's catalog was not readable".to_string())?;
         let prefix = format!("{}/", self.ns);
         let mut out = Vec::new();
         for r in j["repositories"].as_array().cloned().unwrap_or_default().iter().filter_map(Value::as_str).filter(|r| r.starts_with(&prefix)) {
-            let t = self.curl(&["-f", &format!("http://{reg}/v2/{r}/tags/list")]);
-            let tags: Vec<String> = serde_json::from_str::<Value>(&t.stdout).ok().and_then(|j| j["tags"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())).unwrap_or_default();
+            let t = crate::netprobe::get_body(&format!("http://{reg}/v2/{r}/tags/list"), 8, 256 * 1024).unwrap_or_default();
+            let tags: Vec<String> = serde_json::from_str::<Value>(&t).ok().and_then(|j| j["tags"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())).unwrap_or_default();
             out.push((r.to_string(), tags));
         }
         Ok(out)
@@ -300,16 +287,16 @@ impl K8sTools {
         for (repo, tags) in &images {
             let mut digests: Vec<String> = Vec::new();
             for t in tags {
-                let h = self.curl(&["-I", "-H", "Accept: application/vnd.docker.distribution.manifest.v2+json", "-H", "Accept: application/vnd.oci.image.manifest.v1+json", &format!("http://{reg}/v2/{repo}/manifests/{t}")]);
-                if let Some(d) = h.stdout.lines().find_map(|l| l.to_lowercase().strip_prefix("docker-content-digest:").map(|d| d.trim().to_string())) {
+                let h = crate::netprobe::call("GET", &format!("http://{reg}/v2/{repo}/manifests/{t}"), Some("application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json"), 8, 256 * 1024, false);
+                if let Some(d) = h.ok().and_then(|a| a.header("docker-content-digest").map(str::to_string)) {
                     if !digests.contains(&d) {
                         digests.push(d);
                     }
                 }
             }
             for d in digests {
-                let o = self.curl(&["-o", "/dev/null", "-w", "%{http_code}", "-X", "DELETE", &format!("http://{reg}/v2/{repo}/manifests/{d}")]);
-                match o.stdout.trim() {
+                let code = crate::netprobe::call("DELETE", &format!("http://{reg}/v2/{repo}/manifests/{d}"), None, 8, 4096, false).map(|a| a.status.to_string()).unwrap_or_else(|e| e);
+                match code.as_str() {
                     "202" => deleted += 1,
                     "405" => return Err(format!("the registry {reg} does not allow deleting images. To allow it, start the registry with REGISTRY_STORAGE_DELETE_ENABLED=true (the in-cluster registry from Registry… A has it on; a registry you run yourself needs the setting). IYAKKI does not change a registry's settings. Nothing was deleted.")),
                     code => notes.push(format!("{repo}@{d}: HTTP {code}")),

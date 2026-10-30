@@ -33,9 +33,49 @@ pub const NODE_NAME: &str = "iyakki-dev";
 pub const POD_NAME: &str = "iyakki-k3s";
 pub const DISK_ALERT_PCT: u8 = 85;
 const DISK_CLEAR_PCT: u8 = 80;
+/// How much of a kubectl answer is kept; the big one is for the dashboards' list of every pod.
+pub const KUBECTL_CAP: usize = 256 * 1024;
+pub const KUBECTL_BIG_CAP: usize = 8 << 20;
 /// At most this many unexpected exits within [`FAIL_WINDOW`] before the supervisor gives up.
 const MAX_FAILURES: usize = 5;
 const FAIL_WINDOW: Duration = Duration::from_secs(600);
+/// The node address of the managed cluster: an address of its own on a dummy interface that IYAKKI owns, so it never changes with
+/// Wi-Fi/DHCP (k3s/kube-proxy end themselves when the node address changes). Link-local, never routed; the LAN reaches NodePorts
+/// through the machine's own addresses (kube-proxy answers on every local address), the kubeconfig keeps 127.0.0.1.
+pub const NODE_NET_IF: &str = "iyakki-k8s";
+pub const NODE_IP: &str = "10.255.77.1";
+/// How the fixed node address is carried, in the order tried: a dummy interface, a bridge (no dummy module in the kernel), the loopback
+/// interface (always there; flannel then runs host-gw, a single node needs no tunnel).
+const NODE_NET_KINDS: [&str; 2] = ["dummy", "bridge"];
+const NODE_NET_LO: &str = "lo";
+/// Node addresses earlier versions used and left on the interface (link-local ones are refused by the API server's endpoint reconciler).
+const OLD_NODE_IPS: [&str; 1] = ["169.254.77.1"];
+
+/// The interface that carries the node address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeNet {
+    pub ip: String,
+    pub iface: String,
+    /// flannel runs host-gw instead of vxlan: on the loopback and on a bridge (which has no ports, so no carrier, and vxlan on a
+    /// device without carrier is the risky part). A dummy interface keeps vxlan.
+    pub host_gw: bool,
+}
+
+/// At most this long after its start an exit of k3s counts as "the fixed node address was refused".
+const NODE_IP_EARLY: Duration = Duration::from_secs(90);
+
+/// Does the end of the log look like k3s refusing the node address (the Mac: `cannot use public IP ... with endpoint reconciler:
+/// may not be in the link-local range`)?
+pub fn log_shows_node_ip_refusal(text: &str) -> bool {
+    let t = text.to_lowercase();
+    ["node-ip", "nodeip", "endpoint reconciler", "link-local", "flannel", "interface"].iter().any(|k| t.contains(k)) || (t.contains("invalid value") && (t.contains("address") || t.contains(" ip") || t.contains("node")))
+}
+
+fn refusal_line(text: &str) -> String {
+    text.lines().rev().map(str::trim).find(|l| log_shows_node_ip_refusal(l)).unwrap_or("").chars().take(300).collect()
+}
+/// A k3s that is running but whose API did not answer this long after it had been Ready is stopped and restarted (a failure).
+const UNRESPONSIVE_AFTER: Duration = Duration::from_secs(120);
 /// The data partition must have at least this much free room to install.
 pub const MIN_FREE: u64 = 3 << 30;
 
@@ -184,6 +224,37 @@ pub fn exit_text(st: &std::process::ExitStatus) -> String {
     }
 }
 
+/// What `try_wait` says about the k3s process, read the way this machine needs: IYAKKI is PID 1 and its reaper (`waitpid(-1)`) can take
+/// the exit status of ANY child, k3s included. `Child::try_wait` then fails with ECHILD instead of reporting the exit, and code that
+/// treats an error as "still running" never notices that k3s is gone (the Mac: no k3s, no audit, state stuck on starting).
+pub enum ChildLife {
+    Alive,
+    /// The text for the log and the audit.
+    Ended(String),
+}
+
+pub fn child_life(ch: &mut std::process::Child) -> ChildLife {
+    match ch.try_wait() {
+        Ok(None) => ChildLife::Alive,
+        Ok(Some(st)) => ChildLife::Ended(format!("k3s exited ({})", exit_text(&st))),
+        Err(e) => {
+            // SAFETY: signal 0 only asks whether the process exists.
+            let gone = e.raw_os_error() == Some(libc::ECHILD) || (unsafe { libc::kill(ch.id() as i32, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH));
+            if gone {
+                ChildLife::Ended("k3s exited (its exit status is not available: another reaper took it)".into())
+            } else {
+                ChildLife::Alive
+            }
+        }
+    }
+}
+
+/// k3s's own children (containerd, shims that stayed in its process group) must not outlive it and block the restart.
+fn kill_leftovers(pid: u32) {
+    // SAFETY: signalling the process group the leader created with `process_group(0)`; nothing happens when the group is gone.
+    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+}
+
 /// The IPv4 address of the interface that carries the default route (`route_text` is /proc/net/route), as 4 bytes in text.
 fn default_route_iface(route_text: &str) -> Option<String> {
     route_text.lines().skip(1).find_map(|l| {
@@ -217,6 +288,10 @@ fn iface_ipv4(name: &str) -> Option<String> {
     found
 }
 
+/// No k3s process for this long while the state says it should run: the watchdog takes over.
+const GONE_AFTER: Duration = Duration::from_secs(20);
+/// The fixed node address counts as having worked after the node was Ready this long with it.
+const WORKED_AFTER: Duration = Duration::from_secs(60);
 /// How long the supervisor may go without a heartbeat before the watchdog takes over.
 const STALL_AFTER: Duration = Duration::from_secs(150);
 
@@ -375,6 +450,11 @@ impl Layout {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
+    /// Layout of `state.json` (see `iyakki-schema`): 0 = alpha.1.
+    pub schema: u32,
+    /// Fields a newer release wrote: kept, and written back.
+    #[serde(flatten)]
+    pub extra: iyakki_schema::Extra,
     pub backend: Backend,
     pub version: String,
     pub sha256: String,
@@ -391,19 +471,36 @@ pub struct State {
     pub restarts: u32,
     pub last_restart_reason: String,
     pub last_restart_at: i64,
+    /// The fixed node address the cluster was started with last (empty: never, or the address of the default route was used).
+    pub node_ip: String,
+    /// The last unexpected exit (unix seconds; 0: none) and why, for the Dev cluster page.
+    pub last_exit_at: i64,
+    pub last_exit_reason: String,
+    /// The fixed node address was refused by k3s (or never became Ready): later starts leave it out until it is switched on again.
+    pub node_ip_disabled: bool,
+    /// The cluster became Ready with the fixed node address at least once on this machine.
+    pub node_ip_worked: bool,
 }
 
-fn load_state(l: &Layout) -> Option<State> {
-    serde_json::from_str(&std::fs::read_to_string(l.state()).ok()?).ok()
+/// `state.json`: schema 1 stamps the alpha.1 layout (later fields have serde defaults).
+pub const STATE_SCHEMA: iyakki_schema::Spec = iyakki_schema::Spec { name: "dev cluster state", current: 1, migrations: &[iyakki_schema::Migration { to: 1, what: "stamp the alpha.1 layout", run: |_| {} }] };
+
+/// The remembered installation. A damaged file is moved aside (`state.json.corrupt-<time>`, with a line for the audit log): the
+/// cluster's data folder is not touched, only the note that IYAKKI manages it is lost.
+pub(crate) fn load_state(l: &Layout) -> Option<State> {
+    let p = l.state();
+    if !p.exists() {
+        return None;
+    }
+    match iyakki_schema::load_typed::<State>(&STATE_SCHEMA, &p, iyakki_schema::now_secs()) {
+        (iyakki_schema::Outcome::Corrupt { .. } | iyakki_schema::Outcome::Missing, ..) => None,
+        (_, st, _) => Some(st),
+    }
 }
 
-fn save_state(l: &Layout, s: &State) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::create_dir_all(&l.root).map_err(io_err)?;
-    let tmp = l.root.join("state.json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(s).map_err(io_err)?).map_err(io_err)?;
-    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    std::fs::rename(&tmp, l.state()).map_err(io_err)
+/// Refuses to overwrite a file written by a newer release.
+pub(crate) fn save_state(l: &Layout, s: &State) -> Result<(), String> {
+    iyakki_schema::save_typed(&STATE_SCHEMA, &l.state(), s, 0o600)
 }
 
 // ------------------------------------------------------------------------------------------------ does a cluster exist already?
@@ -547,9 +644,28 @@ fn instance_flags(i: &Instance) -> Vec<String> {
 }
 
 pub fn server_args_for(l: &Layout, i: &Instance) -> Vec<String> {
+    server_args_with(l, i, None)
+}
+
+/// The arguments with a fixed node address (`--node-ip`, the interface flannel uses): `None` leaves k3s to pick the address of the
+/// default route (the old behaviour, also the fallback when the dummy interface cannot be made).
+pub fn server_args_with(l: &Layout, i: &Instance, node_ip: Option<&NodeNet>) -> Vec<String> {
     let mut v: Vec<String> = ["server", "--data-dir", &l.data().display().to_string(), "--write-kubeconfig", &l.kubeconfig().display().to_string(), "--write-kubeconfig-mode", "600", "--disable", "traefik", "--disable", "servicelb", "--node-name", &i.node_name].iter().map(|s| s.to_string()).collect();
+    if let Some(n) = node_ip {
+        v.push(format!("--node-ip={}", n.ip));
+        v.push(format!("--flannel-iface={}", n.iface));
+        if n.host_gw {
+            // vxlan needs an interface with carrier; one node has no peers to tunnel to
+            v.push("--flannel-backend=host-gw".into());
+        }
+    }
     v.extend(instance_flags(i));
     v
+}
+
+/// "NodeIPs changed for the node" in the end of k3s's log: kube-proxy ended k3s because the node address changed.
+pub fn log_shows_node_ip_change(text: &str) -> bool {
+    text.contains("NodeIPs changed")
 }
 
 fn podman_create(l: &Layout, image: &str, i: &Instance) -> Vec<String> {
@@ -713,7 +829,7 @@ pub fn ports_for(i: &Instance) -> Vec<(String, &'static str)> {
 fn ports_common() -> Vec<(String, &'static str)> {
     vec![
         ("8472/udp".into(), "flannel VXLAN between nodes"),
-        ("30000-32767/tcp".into(), "NodePort services (the in-cluster registry uses 30500)"),
+        ("30000-32767/tcp".into(), "NodePort services (the in-cluster registry is not one: it listens on 127.0.0.1:30500 only)"),
     ]
 }
 
@@ -762,13 +878,19 @@ pub enum Alert {
     /// The supervisor gave up after repeated failures, or the node never became Ready.
     GaveUp(String),
     Disk(u8),
+    /// k3s refused the fixed node address; the cluster runs on the network address.
+    NodeIpRefused(String),
+    /// Services open on the LAN (NodePort or LoadBalancer) that no document lists: one line each.
+    Exposure(Vec<String>),
 }
 
 impl Alert {
     pub fn title_body(&self) -> (String, String) {
         match self {
-            Alert::Down(why) => ("The dev cluster went down".into(), format!("{why}. IYAKKI is restarting it. Settings \u{2192} Dev cluster or SYSTEM shows the log.")),
-            Alert::GaveUp(why) => ("The dev cluster keeps failing and was stopped".into(), format!("{why}. Settings \u{2192} Dev cluster or SYSTEM shows the log; Start tries again once the cause is fixed.")),
+            Alert::Down(why) => ("The dev cluster stopped and was restarted".into(), format!("{why}. IYAKKI is restarting it (with a back-off). Settings \u{2192} Dev cluster or SYSTEM shows the log.")),
+            Alert::GaveUp(why) => ("The dev cluster keeps failing and was stopped".into(), format!("IYAKKI gave up: {why}. Settings \u{2192} Dev cluster or SYSTEM shows the log; Start tries again once the cause is fixed.")),
+            Alert::NodeIpRefused(why) => ("The fixed node address was refused; the cluster runs on the network address".into(), format!("{why}. The cluster was started again without it and stays that way until you switch \"Use a fixed node address (experimental)\" on in Settings \u{2192} Dev cluster.")),
+            Alert::Exposure(v) => ("The dev cluster has Services open on your network that are not on the list".into(), format!("{}. A NodePort or LoadBalancer Service can be reached from other computers (the firewall is off by default). IYAKKI changes nothing by itself: if you did not expect this, change the Service to ClusterIP or turn the firewall on (Settings \u{2192} Firewall); if you did, you can ignore this.", v.join("; "))),
             Alert::Disk(p) => (format!("The dev cluster's disk is {p}% full"), format!("The data partition holding the cluster is over {DISK_ALERT_PCT}% full. Free space (remove unused images or namespaces), or Reset the cluster in Settings \u{2192} Dev cluster."))
         }
     }
@@ -792,6 +914,9 @@ pub struct Health {
     pub restarts: u32,
     pub last_restart_reason: String,
     pub autostart: bool,
+    /// The last unexpected exit of k3s (unix seconds; 0: none) and why.
+    pub last_exit_at: i64,
+    pub last_exit_reason: String,
     pub checked_at: i64,
     /// "waiting for the network..." while the start waits for a default route; empty otherwise.
     pub note: String,
@@ -851,6 +976,16 @@ struct Overrides {
     /// Tests: the address the default route's interface has now (`Some(None)`: none).
     ip: Option<Option<String>>,
     stall_after: Option<Duration>,
+    /// Tests: make the stable node address (the dummy interface) as in production.
+    stable_node_ip: bool,
+    /// Tests: how long a missing k3s process is tolerated before the watchdog acts.
+    gone_after: Option<Duration>,
+    /// Tests: how long Ready with the fixed address makes it "worked".
+    worked_after: Option<Duration>,
+    /// Tests: how long a start may take to become Ready before it counts as a failure.
+    ready_limit: Option<Duration>,
+    /// Tests: how long an unanswering API is tolerated.
+    unresponsive: Option<Duration>,
     /// Tests: the clock the start gate and the step detection look at.
     clock: Option<Arc<dyn ClockSource>>,
 }
@@ -866,6 +1001,8 @@ pub struct K3sDev {
     gen: AtomicU64,
     health: Mutex<Health>,
     alerts: Mutex<Vec<Alert>>,
+    /// The unexpected exposure last reported (so one change gives one warning).
+    exposure_seen: Mutex<String>,
     disk_alerted: AtomicBool,
     /// An outage was already announced (cleared when the node is Ready again or the cluster is started by hand).
     outage: AtomicBool,
@@ -880,8 +1017,16 @@ pub struct K3sDev {
     beat_at: Mutex<Instant>,
     /// The address of the default route's interface when k3s was last started (an exit after it changed is a move, not a crash).
     spawn_ip: Mutex<Option<String>>,
+    /// When k3s was last started (for "it ended early").
+    spawn_at: Mutex<Option<Instant>>,
+    /// The fixed node address k3s was started with (None: it follows the default route).
+    node_ip_used: Mutex<Option<NodeNet>>,
     /// When k3s was last started: the monotonic time and the length of the log then (to look at its first minutes only).
     spawn_mark: Mutex<Option<(Duration, u64)>>,
+}
+
+fn first_line(t: &str) -> String {
+    t.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no message").chars().take(200).collect()
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -909,6 +1054,7 @@ impl K3sDev {
             gen: AtomicU64::new(0),
             health: Mutex::new(Health::default()),
             alerts: Mutex::new(Vec::new()),
+            exposure_seen: Mutex::new(String::new()),
             disk_alerted: AtomicBool::new(false),
             outage: AtomicBool::new(false),
             audit: Mutex::new(None),
@@ -918,6 +1064,8 @@ impl K3sDev {
             start_lock: Mutex::new(()),
             beat_at: Mutex::new(Instant::now()),
             spawn_ip: Mutex::new(None),
+            spawn_at: Mutex::new(None),
+            node_ip_used: Mutex::new(None),
             spawn_mark: Mutex::new(None),
         });
         if installed && d.inst.primary {
@@ -1003,6 +1151,29 @@ impl K3sDev {
     #[doc(hidden)]
     pub fn assume_ip(&self, ip: Option<&str>) {
         lock(&self.over).ip = Some(ip.map(str::to_string));
+    }
+
+    /// Tests: make the stable node address like production (the `ip` program is the fake runner's).
+    #[doc(hidden)]
+    pub fn assume_stable_node_ip(&self) {
+        lock(&self.over).stable_node_ip = true;
+    }
+
+    #[doc(hidden)]
+    pub fn assume_worked_after(&self, d: Duration) {
+        lock(&self.over).worked_after = Some(d);
+    }
+
+    /// Tests: a start that is not Ready after this long is a failure (restarted, then given up after repeats).
+    #[doc(hidden)]
+    pub fn assume_ready_limit(&self, d: Duration) {
+        lock(&self.over).ready_limit = Some(d);
+    }
+
+    /// Tests: a running k3s whose API does not answer for this long is restarted.
+    #[doc(hidden)]
+    pub fn assume_unresponsive_after(&self, d: Duration) {
+        lock(&self.over).unresponsive = Some(d);
     }
 
     /// Tests: the supervisor counts as stalled after this long without a heartbeat.
@@ -1136,6 +1307,11 @@ impl K3sDev {
 
     fn quiet(&self) -> bool {
         lock(&self.over).quiet
+    }
+
+    /// Write a line to the audit through the sink the shell set (other modules that have no audit of their own use it).
+    pub fn audit_line(&self, user: &str, action: &str, detail: &str) {
+        self.audit(user, action, detail);
     }
 
     fn audit(&self, user: &str, action: &str, detail: &str) {
@@ -1468,6 +1644,117 @@ impl K3sDev {
         Ok(())
     }
 
+    /// Makes sure an interface with the fixed node address exists: a dummy interface, else a bridge, else the loopback interface
+    /// (`ip addr add ... dev lo`). `None`: the fixed address is switched off (refused earlier), or none of them worked (no `ip`, not
+    /// allowed): k3s then follows the default route as before, and the audit line says what each step answered. Addresses an older
+    /// version left on the bridge or `lo` are removed; with the fixed address off the bridge goes too.
+    fn prepare_node_ip(&self) -> Option<NodeNet> {
+        {
+            let o = lock(&self.over);
+            if o.quiet && !o.stable_node_ip {
+                return None;
+            }
+        }
+        let tmp = std::env::temp_dir();
+        let ip = |args: &[&str]| self.run.run(&tmp, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &[], Duration::from_secs(10), 4096, None);
+        let disabled = self.installed().is_some_and(|s| s.node_ip_disabled);
+        if !self.run.has("ip") {
+            if !disabled {
+                self.audit("system", "devcluster.node-ip-fallback", "the `ip` program is missing: k3s follows the address of the default route");
+            }
+            return None;
+        }
+        let addr_on = |dev: &str, a: &str| {
+            let o = ip(&["ip", "-o", "addr", "show", "dev", dev]);
+            o.ok() && o.stdout.contains(a)
+        };
+        // addresses of older versions (and every address when the fixed one is off) are taken off again
+        for dev in [NODE_NET_IF, NODE_NET_LO] {
+            for old in OLD_NODE_IPS.iter().copied().chain(disabled.then_some(NODE_IP)) {
+                if addr_on(dev, old) {
+                    let _ = ip(&["ip", "addr", "del", &format!("{old}/32"), "dev", dev]);
+                    self.audit("system", "devcluster.node-ip-cleanup", &format!("{old} removed from {dev}"));
+                }
+            }
+        }
+        if disabled {
+            if ip(&["ip", "-o", "link", "show", "dev", NODE_NET_IF]).ok() {
+                let _ = ip(&["ip", "link", "del", NODE_NET_IF]);
+            }
+            return None;
+        }
+        let ifaces = [NODE_NET_IF, NODE_NET_LO];
+        let mut chosen: Option<(String, bool)> = None;
+        for d in ifaces {
+            if addr_on(d, NODE_IP) {
+                let dummy = d == NODE_NET_IF && ip(&["ip", "-d", "link", "show", "dev", d]).stdout.contains("dummy");
+                chosen = Some((d.to_string(), !dummy));
+                break;
+            }
+        }
+        let mut tried: Vec<String> = Vec::new();
+        if chosen.is_none() {
+            let cidr = format!("{NODE_IP}/32");
+            for kind in NODE_NET_KINDS {
+                let add = ip(&["ip", "link", "add", NODE_NET_IF, "type", kind]);
+                let exists = !add.ok() && add.combined().contains("exists");
+                if !add.ok() && !exists {
+                    tried.push(format!("{kind}: {}", first_line(&add.combined())));
+                    continue;
+                }
+                let a = ip(&["ip", "addr", "replace", &cidr, "dev", NODE_NET_IF]);
+                let u = ip(&["ip", "link", "set", NODE_NET_IF, "up"]);
+                if a.ok() && u.ok() {
+                    chosen = Some((NODE_NET_IF.to_string(), kind != "dummy"));
+                    break;
+                }
+                tried.push(format!("{kind}: {}", first_line(&if !a.ok() { a.combined() } else { u.combined() })));
+                let _ = ip(&["ip", "link", "del", NODE_NET_IF]);
+            }
+            if chosen.is_none() {
+                let a = ip(&["ip", "addr", "add", &cidr, "dev", NODE_NET_LO]);
+                if a.ok() || a.combined().contains("exists") {
+                    chosen = Some((NODE_NET_LO.to_string(), true));
+                } else {
+                    tried.push(format!("loopback: {}", first_line(&a.combined())));
+                }
+            }
+            match &chosen {
+                Some((d, _)) => self.audit("system", "devcluster.node-ip", &format!("{NODE_IP} on {d}{}", if tried.is_empty() { String::new() } else { format!(" (before that: {})", tried.join("; ")) })),
+                None => {
+                    self.audit("system", "devcluster.node-ip-fallback", &format!("could not give the node a fixed address ({}): k3s follows the address of the default route", tried.join("; ")));
+                    return None;
+                }
+            }
+        }
+        let (iface, host_gw) = chosen?;
+        if let Some(mut s) = self.installed() {
+            if s.node_ip != NODE_IP {
+                if !s.node_ip.is_empty() || s.restarts > 0 || s.installed_at > 0 {
+                    // a node registered earlier with another address: k3s accepts the change; kube-proxy may end k3s once
+                    // while the node object changes, and that exit is restarted without counting (see `log_shows_node_ip_change`)
+                    self.audit("system", "devcluster.node-ip-migrate", &format!("{} -> {NODE_IP}", if s.node_ip.is_empty() { "the address of the default route" } else { &s.node_ip }));
+                }
+                s.node_ip = NODE_IP.into();
+                let _ = save_state(&self.layout, &s);
+            }
+        }
+        Some(NodeNet { ip: NODE_IP.to_string(), iface, host_gw })
+    }
+
+    /// Settings -> Dev cluster -> "Use a fixed node address (experimental)". Off after k3s refused it; switching on tries it at the next start.
+    pub fn set_fixed_node_ip(&self, on: bool, user: &str) -> Result<(), String> {
+        let mut s = self.installed().ok_or("no cluster is installed by IYAKKI here")?;
+        s.node_ip_disabled = !on;
+        save_state(&self.layout, &s)?;
+        self.audit(user, "devcluster.fixed-node-ip", if on { "on (takes effect at the next start)" } else { "off (takes effect at the next start)" });
+        Ok(())
+    }
+
+    pub fn fixed_node_ip_enabled(&self) -> bool {
+        self.installed().is_some_and(|s| !s.node_ip_disabled)
+    }
+
     fn spawn_native(&self) -> Result<Child, String> {
         use std::os::unix::process::CommandExt;
         let l = &self.layout;
@@ -1486,7 +1773,10 @@ impl K3sDev {
         *lock(&self.spawn_mark) = self.clock_src().map(|c| (c.mono(), log.metadata().map(|m| m.len()).unwrap_or(0)));
         let log2 = log.try_clone().map_err(io_err)?;
         let mut cmd = Command::new(l.bin());
-        cmd.args(server_args_for(l, &self.inst))
+        *lock(&self.spawn_at) = Some(Instant::now());
+        let node_ip = self.prepare_node_ip();
+        *lock(&self.node_ip_used) = node_ip.clone();
+        cmd.args(server_args_with(l, &self.inst, node_ip.as_ref()))
             .env_clear()
             .env("PATH", format!("{}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", l.root.join("bin").display()))
             .env("HOME", &l.root)
@@ -1597,16 +1887,39 @@ impl K3sDev {
     /// Looks at the supervisor from outside: when it has not shown a sign of life for a long time (blocked, or gone) while the cluster
     /// is meant to run, it takes over: the exit of k3s is recorded and k3s is started again, or a new supervisor replaces the old one.
     fn watchdog(self: Arc<Self>, gen: u64, backend: Backend) {
+        let mut gone_since: Option<Instant> = None;
         while self.current(gen) {
             let every = lock(&self.over).poll.unwrap_or(Duration::from_secs(5)).max(Duration::from_millis(20));
             if !self.pause(gen, every) {
                 return;
             }
             let stale = lock(&self.over).stall_after.unwrap_or(STALL_AFTER);
+            // no k3s process although the state says it should run, for more than 20 s: the supervisor is blind or gone
+            let gone_after = lock(&self.over).gone_after.unwrap_or(GONE_AFTER);
+            let stale = if self.gone_for(gen, backend, &mut gone_since, gone_after) { Duration::ZERO } else { stale };
             if self.watchdog_step(gen, backend, stale) {
                 return;
             }
         }
+    }
+
+    /// Has the k3s process been missing for `after` while the state says Starting or Running? (`since` remembers when it was first seen.)
+    #[doc(hidden)]
+    pub fn gone_for(&self, gen: u64, backend: Backend, since: &mut Option<Instant>, after: Duration) -> bool {
+        if backend != Backend::Native || !self.current(gen) || !matches!(self.state(), Svc::Starting | Svc::Running) {
+            *since = None;
+            return false;
+        }
+        let missing = match lock(&self.child).as_mut() {
+            // no handle: the supervisor is waiting (network, clock, back-off) or has just taken it; the stall check covers a lost one
+            None => false,
+            Some(ch) => matches!(child_life(ch), ChildLife::Ended(_)),
+        };
+        if !missing {
+            *since = None;
+            return false;
+        }
+        since.get_or_insert_with(Instant::now).elapsed() >= after
     }
 
     /// One look of the watchdog; true: it took over (this watchdog is done, a new supervisor and watchdog run).
@@ -1621,8 +1934,9 @@ impl K3sDev {
             match c.as_mut() {
                 None => gone = Some("the handle of the k3s process was lost".to_string()),
                 Some(ch) => {
-                    if let Ok(Some(st)) = ch.try_wait() {
-                        gone = Some(format!("k3s exited ({})", exit_text(&st)));
+                    if let ChildLife::Ended(what) = child_life(ch) {
+                        kill_leftovers(ch.id());
+                        gone = Some(what);
                         *c = None;
                     }
                 }
@@ -1678,7 +1992,11 @@ impl K3sDev {
         let mut began = Instant::now();
         let mut failures: Vec<Instant> = Vec::new();
         let mut last_disk = Instant::now() - Duration::from_secs(3600);
+        let mut last_exposure = Instant::now() - Duration::from_secs(3600);
         let mut chmodded = false;
+        let (mut was_ready, mut not_ready_since, mut forced): (bool, Option<Instant>, Option<String>) = (false, None, None);
+        let (mut addr_restarts, mut nodeip_exits) = (0usize, 0usize);
+        let mut ready_since: Option<Instant> = None;
         while self.current(gen) {
             self.beat();
             // 0. did the clock jump (the network time arrived)? Then k3s, started at the fake date, is started again once.
@@ -1721,17 +2039,49 @@ impl K3sDev {
                     }
                 }
             }
+            // 0c. the primary address changed while k3s runs (Wi-Fi/DHCP): say so; restart only when k3s follows that address
+            if backend == Backend::Native && forced.is_none() {
+                let (then, now_ip) = (lock(&self.spawn_ip).clone(), self.default_ip());
+                if let (true, Some(a), Some(b)) = (self.has_route(), then, now_ip) {
+                    if a != b && lock(&self.child).as_mut().is_some_and(|ch| matches!(ch.try_wait(), Ok(None))) {
+                        *lock(&self.spawn_ip) = Some(b.clone());
+                        let fixed = lock(&self.node_ip_used).clone();
+                        if let Some(n) = fixed.map(|n| n.ip) {
+                            self.log_line(&format!("the machine's address changed {a} -> {b}; the node address stays {n}"));
+                            self.audit("system", "devcluster.address-changed", &format!("{a} -> {b}; the node address is fixed ({n}), k3s keeps running"));
+                        } else if addr_restarts < MAX_CLOCK_RESTARTS {
+                            addr_restarts += 1;
+                            if let Err(e) = self.restart_native_for_clock(backend, "devcluster.restart-address-changed", &format!("the machine's address changed {a} -> {b} and k3s follows it")) {
+                                self.set_svc(Svc::Failed(format!("address change; restarting failed: {e}")));
+                                return "restarting failed".into();
+                            }
+                            began = Instant::now();
+                            was_ready = false;
+                            not_ready_since = None;
+                            continue;
+                        } else {
+                            self.audit("system", "devcluster.address-changed", &format!("{a} -> {b}; too many restarts for address changes, k3s is left alone"));
+                        }
+                    }
+                }
+            }
             // 1. has it died?
             let died: Option<String> = match backend {
                 Backend::Native => {
                     let mut c = lock(&self.child);
                     match c.as_mut() {
-                        Some(ch) => match ch.try_wait() {
-                            Ok(Some(status)) => {
+                        Some(ch) => match child_life(ch) {
+                            ChildLife::Ended(what) => {
+                                let pid = ch.id();
                                 *c = None;
-                                Some(format!("k3s exited ({}); the end of its log: {}", exit_text(&status), self.log_tail_text(3).replace('\n', " | ")))
+                                kill_leftovers(pid);
+                                let base = format!("{what}; the end of its log: {}", self.log_tail_text(3).replace('\n', " | "));
+                                Some(match forced.take() {
+                                    Some(f) => format!("{f}; {base}"),
+                                    None => base,
+                                })
                             }
-                            _ => None,
+                            ChildLife::Alive => None,
                         },
                         None => Some("the handle of the k3s process was lost (it is not tracked any more)".to_string()),
                     }
@@ -1749,8 +2099,43 @@ impl K3sDev {
                 self.log_line(reason.split("; the end of its log").next().unwrap_or(&reason));
                 // the machine moved to another network (the stick travels): k3s ends itself when its node address changes. That is
                 // expected: no failure, no alert, start it again at once so the node takes the new address.
+                let ready_before = was_ready;
+                ready_since = None;
+                was_ready = false;
+                not_ready_since = None;
+                // the fixed node address was refused (k3s ended early with a message about it, or never got Ready with it): do not retry
+                // that setup. Start once more without it and remember, so later starts skip it. The cluster matters more than the address.
+                let fixed = lock(&self.node_ip_used).clone();
+                if let (Some(_), false) = (fixed, ready_before) {
+                    let tail = self.log_tail_text(8);
+                    let early = lock(&self.spawn_at).is_some_and(|t| t.elapsed() < NODE_IP_EARLY);
+                    let worked = self.installed().is_some_and(|s| s.node_ip_worked);
+                    let refused_early = early && log_shows_node_ip_refusal(&tail) && !log_shows_node_ip_change(&tail);
+                    let never_ready = reason.contains("did not become Ready") && !worked;
+                    if refused_early || never_ready {
+                        let line = Some(refusal_line(&tail)).filter(|l| !l.is_empty()).unwrap_or_else(|| reason.chars().take(300).collect());
+                        if let Some(mut st) = self.installed() {
+                            st.node_ip_disabled = true;
+                            let _ = save_state(&self.layout, &st);
+                        }
+                        self.audit("system", "devcluster.node-ip-rejected", &line);
+                        self.log_line(&format!("the fixed node address was refused ({line}); starting k3s without it"));
+                        self.alerts_push(Alert::NodeIpRefused(line));
+                        self.set_svc(Svc::Starting);
+                        if let Err(e) = self.spawn_backend(backend) {
+                            self.set_svc(Svc::Failed(format!("{reason}; restarting without the fixed address failed: {e}")));
+                            return "restarting failed".into();
+                        }
+                        began = Instant::now();
+                        continue;
+                    }
+                }
                 let (then, now_ip) = (lock(&self.spawn_ip).clone(), self.default_ip());
-                if self.has_route() && then.is_some() && now_ip.is_some() && then != now_ip {
+                let ip_moved = self.has_route() && then.is_some() && now_ip.is_some() && then != now_ip;
+                // kube-proxy ends k3s when the node address changes: also the one time a node registered with the Wi-Fi address gets the fixed one
+                let node_ip_log = nodeip_exits < MAX_CLOCK_RESTARTS && log_shows_node_ip_change(&self.log_tail_text(8));
+                if ip_moved || node_ip_log {
+                    nodeip_exits += 1;
                     self.audit("system", "devcluster.exited-ip-changed", &format!("{reason}; address {} -> {}", then.unwrap_or_default(), now_ip.unwrap_or_default()));
                     self.set_svc(Svc::Starting);
                     if let Err(e) = self.spawn_backend(backend) {
@@ -1797,6 +2182,7 @@ impl K3sDev {
                     self.alerts_push(Alert::Down(reason.clone()));
                 }
                 self.audit("system", "devcluster.exited", &reason);
+                self.note_exit(&reason);
                 if failures.len() > MAX_FAILURES {
                     let why = format!("{reason}; it failed {MAX_FAILURES} times within {} minutes, so IYAKKI stopped trying", FAIL_WINDOW.as_secs() / 60);
                     self.set_svc(Svc::Failed(why.clone()));
@@ -1812,18 +2198,22 @@ impl K3sDev {
                     Ok(()) => {
                         self.note_restart(&reason, true);
                         self.audit("system", "devcluster.restart", &reason);
+                        self.audit("system", "devcluster.restart.auto", &format!("after the back-off, restart {} of at most {MAX_FAILURES}", failures.len()));
                     }
                     Err(e) => {
                         self.set_svc(Svc::Failed(format!("{reason}; restarting failed: {e}")));
                         return "restarting failed".into();
                     }
                 }
+                began = Instant::now();
                 continue;
             }
             // 2. is the node ready?
             let ready = self.kubeconfig_ready(backend) && self.kubectl(&["get", "nodes", "-o", "jsonpath={.items[*].status.conditions[?(@.type=='Ready')].status}"]).stdout.contains("True");
             if self.current(gen) {
                 if ready {
+                    was_ready = true;
+                    not_ready_since = None;
                     if !chmodded {
                         use std::os::unix::fs::PermissionsExt;
                         let _ = std::fs::set_permissions(self.layout.kubeconfig(), std::fs::Permissions::from_mode(0o600));
@@ -1833,9 +2223,40 @@ impl K3sDev {
                         self.outage.store(false, Ordering::SeqCst);
                         self.set_svc(Svc::Running);
                         self.audit("system", "devcluster.ready", "");
+                        self.close_legacy_registry();
+                        ready_since = Some(Instant::now());
                     }
                 } else if self.state() == Svc::Running {
                     self.set_svc(Svc::Starting);
+                }
+                // a k3s that was Ready and whose API does not answer any more is stuck, not slow: stop it, the death path restarts it
+                if !ready && was_ready && backend == Backend::Native && forced.is_none() {
+                    let since = *not_ready_since.get_or_insert_with(Instant::now);
+                    let limit = lock(&self.over).unresponsive.unwrap_or(UNRESPONSIVE_AFTER);
+                    if since.elapsed() >= limit {
+                        let mut c = lock(&self.child);
+                        if let Some(ch) = c.as_mut() {
+                            forced = Some(format!("k3s was running but its API did not answer for {} s", since.elapsed().as_secs()));
+                            // SAFETY: signalling the process group we created with `process_group(0)`.
+                            unsafe { libc::kill(-(ch.id() as i32), libc::SIGKILL) };
+                            let _ = ch.wait();
+                            drop(c);
+                            continue;
+                        }
+                    }
+                }
+            }
+            // the fixed address has worked once the node stayed Ready for a minute with it (not at the first Ready)
+            if let (Some(t), Svc::Running) = (ready_since, self.state()) {
+                let after = lock(&self.over).worked_after.unwrap_or(WORKED_AFTER);
+                if t.elapsed() >= after && lock(&self.node_ip_used).is_some() {
+                    ready_since = None;
+                    if let Some(mut st) = self.installed() {
+                        if !st.node_ip_worked {
+                            st.node_ip_worked = true;
+                            let _ = save_state(&self.layout, &st);
+                        }
+                    }
                 }
             }
             // 3. health, disk alert
@@ -1845,7 +2266,25 @@ impl K3sDev {
                 self.check_disk(&h);
                 *lock(&self.health) = h;
             }
-            if began.elapsed() > Duration::from_secs(900) && self.state() == Svc::Starting {
+            if self.state() == Svc::Running && last_exposure.elapsed() >= Duration::from_secs(if lock(&self.over).poll.is_some() { 0 } else { 600 }) {
+                last_exposure = Instant::now();
+                self.check_exposure();
+            }
+            let ready_limit = lock(&self.over).ready_limit.unwrap_or(Duration::from_secs(900));
+            if began.elapsed() > ready_limit && self.state() == Svc::Starting {
+                // a k3s that is alive but never gets Ready (an address change under it, a stuck start) is a failure like any other:
+                // it is stopped, and the death path restarts it with the back-off and gives up only after repeated failures
+                if backend == Backend::Native && forced.is_none() {
+                    let mut c = lock(&self.child);
+                    if let Some(ch) = c.as_mut() {
+                        forced = Some(format!("the node did not become Ready within {} s", began.elapsed().as_secs()));
+                        // SAFETY: signalling the process group we created with `process_group(0)`.
+                        unsafe { libc::kill(-(ch.id() as i32), libc::SIGKILL) };
+                        let _ = ch.wait();
+                        drop(c);
+                        continue;
+                    }
+                }
                 self.set_svc(Svc::Failed("the node did not become Ready within fifteen minutes".into()));
                 self.alerts_push(Alert::GaveUp("the node did not become Ready within fifteen minutes".into()));
                 return "the node did not become Ready".into();
@@ -1881,6 +2320,27 @@ impl K3sDev {
         self.check_disk(&Health { disk_pct: Some(pct), ..Default::default() });
     }
 
+    /// Looks at the Services open on the LAN and compares them with the documented ones ([`crate::exposure`]). Reports only: an audit
+    /// line `devcluster.exposure.unexpected` and an inbox warning, once per change of the list; never changes a Service.
+    pub fn check_exposure(&self) {
+        let o = self.kubectl(&["get", "svc", "-A", "-o", "json"]);
+        if !o.ok() {
+            return;
+        }
+        let Ok(r) = crate::exposure::check(&o.stdout) else { return };
+        let sig = r.signature();
+        let mut seen = lock(&self.exposure_seen);
+        if *seen == sig {
+            return;
+        }
+        *seen = sig.clone();
+        drop(seen);
+        if !r.unexpected.is_empty() {
+            self.audit("system", "devcluster.exposure.unexpected", &sig);
+            self.alerts_push(Alert::Exposure(r.unexpected.iter().map(|e| e.line()).collect()));
+        }
+    }
+
     fn check_disk(&self, h: &Health) {
         if let Some(p) = h.disk_pct {
             if p >= DISK_ALERT_PCT && !self.disk_alerted.swap(true, Ordering::SeqCst) {
@@ -1888,6 +2348,15 @@ impl K3sDev {
             } else if p < DISK_CLEAR_PCT {
                 self.disk_alerted.store(false, Ordering::SeqCst);
             }
+        }
+    }
+
+    /// Remembers the last unexpected exit for the Dev cluster page ("stopped unexpectedly at ...").
+    fn note_exit(&self, reason: &str) {
+        if let Some(mut s) = self.installed() {
+            s.last_exit_at = now();
+            s.last_exit_reason = reason.chars().take(400).collect();
+            let _ = save_state(&self.layout, &s);
         }
     }
 
@@ -1904,6 +2373,11 @@ impl K3sDev {
 
     /// `kubectl` against the managed cluster: `k3s kubectl` (native) or `podman exec` (Podman). Never needs a kubectl on the machine.
     pub fn kubectl(&self, args: &[&str]) -> Out {
+        self.kubectl_cap(args, KUBECTL_CAP)
+    }
+
+    /// [`K3sDev::kubectl`] with a larger output limit (the dashboards read every pod of the cluster).
+    pub fn kubectl_cap(&self, args: &[&str], cap: usize) -> Out {
         let backend = self.installed().map(|s| s.backend).unwrap_or_default();
         let kc = self.layout.kubeconfig().display().to_string();
         let mut argv: Vec<String> = match backend {
@@ -1913,7 +2387,17 @@ impl K3sDev {
         argv.push("--request-timeout=10s".into());
         argv.extend(args.iter().map(|s| s.to_string()));
         let env: Vec<(String, String)> = if backend == Backend::Native { vec![("KUBECONFIG".into(), kc)] } else { vec![] };
-        self.run.run(&self.layout.root, &argv, &env, Duration::from_secs(20), 256 * 1024, None)
+        self.run.run(&self.layout.root, &argv, &env, Duration::from_secs(20), cap, None)
+    }
+
+    /// The in-cluster registry of an older install is a NodePort Service, open to the network without a password: convert it (Service
+    /// to ClusterIP, Deployment to a 127.0.0.1 hostPort) when the cluster becomes Ready. Quiet when there is no registry.
+    pub fn close_legacy_registry(&self) {
+        match crate::regsetup::close_legacy(&|a: &[&str]| self.kubectl(a)) {
+            Ok(Some(line)) => self.audit("system", "registry.nodeport.closed", &line),
+            Ok(None) => {}
+            Err(e) => self.audit("system", "registry.nodeport.close-failed", &e),
+        }
     }
 
     /// Stop it (SIGTERM to the process group, SIGKILL after 30 s; `podman stop` for the container).
@@ -2002,7 +2486,19 @@ impl K3sDev {
         }
         match std::fs::symlink_metadata(p) {
             Ok(m) if m.file_type().is_symlink() => Err(format!("{} is a link; nothing was deleted", p.display())),
-            Ok(_) => std::fs::remove_dir_all(p).map_err(|e| format!("{}: {e}", p.display())),
+            Ok(_) => {
+                // the cluster's own threads may still be writing a last log or state file as the folder goes: "directory not
+                // empty" then is not final, remove again
+                let mut r = std::fs::remove_dir_all(p);
+                for _ in 0..10 {
+                    if !matches!(&r, Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                    r = std::fs::remove_dir_all(p);
+                }
+                r.map_err(|e| format!("{}: {e}", p.display()))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(format!("{}: {e}", p.display())),
         }
@@ -2125,6 +2621,8 @@ impl K3sDev {
         h.restarts = st.restarts;
         h.autostart = st.autostart;
         h.last_restart_reason = st.last_restart_reason.clone();
+        h.last_exit_at = st.last_exit_at;
+        h.last_exit_reason = st.last_exit_reason.clone();
         let s = self.state();
         h.state = s.word().to_string();
         h.note = if matches!(s, Svc::Starting) { lock(&self.net_note).clone() } else { String::new() };

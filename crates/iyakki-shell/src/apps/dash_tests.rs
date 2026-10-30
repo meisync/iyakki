@@ -30,6 +30,9 @@ impl Upstream for Up {
         self.seen.lock().unwrap().push(format!("{line} || {:?}", headers.iter().map(|h| h.0.clone()).collect::<Vec<_>>()));
         for (k, status, body) in &self.rules {
             if line.contains(k.as_str()) {
+                if *status == 0 {
+                    return Err(body.clone());
+                }
                 return Ok(UpstreamResponse { status: *status, body: body.clone().into_bytes() });
             }
         }
@@ -65,6 +68,7 @@ fn matrix(n: usize) -> String {
 fn up() -> Arc<Up> {
     Arc::new(Up {
         rules: vec![
+            ("http://localhost:".into(), 0, "Connection refused (os error 111)".into()),
             ("query_range".into(), 200, matrix(3)),
             ("/api/v1/query?".into(), 200, r#"{"status":"success","data":{"resultType":"vector","result":[{"metric":{"instance":"a"},"value":[1792069200,"42.5"]}]}}"#.into()),
             ("label/__name__/values".into(), 200, r#"{"status":"success","data":["node_load1","up","node_cpu_seconds_total"]}"#.into()),
@@ -85,6 +89,10 @@ struct Fixture {
 }
 
 fn fixture(tag: &str) -> Fixture {
+    fixture_c(tag, Arc::new(iyakki_agent::dash::cluster::NoCluster), true)
+}
+
+fn fixture_c(tag: &str, cluster: Arc<dyn iyakki_agent::dash::cluster::ClusterApi>, admin: bool) -> Fixture {
     let cx = cx_with_admin_store(tag);
     let dir = temp_dir(&format!("dash-{tag}"));
     let up = up();
@@ -93,10 +101,10 @@ fn fixture(tag: &str) -> Fixture {
     let (v1, v2, a1) = (vault.clone(), vault.clone(), audit.clone());
     let env = Arc::new(Env {
         user: cx.session.user.clone(),
-        policy: cx.session.policy.clone(),
+        policy: if admin { cx.session.policy.clone() } else { iyakki_sec::policy::Role::User.template() },
         data_dir: dir.clone(),
         home: dir.join("home"),
-        deps: Deps { transport: Arc::new(Tr(up.clone())), secrets: Arc::new(Sec), runner: Arc::new(FakeRunner::new(&[])), path_ok: Arc::new(|_| true), work_dir: dir.clone() },
+        deps: Deps { transport: Arc::new(Tr(up.clone())), secrets: Arc::new(Sec), runner: Arc::new(FakeRunner::new(&[])), path_ok: Arc::new(|_| true), work_dir: dir.clone(), cluster },
         now_ms: Arc::new(|| NOW),
         vault_names: Arc::new(move || v1.lock().unwrap().iter().map(|x| x.0.clone()).collect()),
         vault_set: Arc::new(move |n, v| {
@@ -105,6 +113,7 @@ fn fixture(tag: &str) -> Fixture {
         }),
         audit: Arc::new(move |k, d| a1.lock().unwrap().push(format!("{k} {d}"))),
         cache: iyakki_agent::dash::multi::FetchCache::new(),
+        people: Arc::new(iyakki_agent::dash::tools::AnyPeople),
     });
     let mut c = iyakki_agent::dash::connector::SourceConfig { id: "prom".into(), kind: "prometheus".into(), name: "Prod".into(), ..Default::default() };
     c.values.insert("url".into(), "http://prom.internal:9090".into());
@@ -194,7 +203,7 @@ fn the_tile_is_registered_once_in_the_work_group_and_roles_follow_policy() {
     let t: Vec<_> = crate::shell::tiles_for_test().into_iter().filter(|t| t.0 == PApp::Dash).collect();
     assert_eq!(t.len(), 1, "one tile");
     assert_eq!(t[0].1, "DASH");
-    assert_eq!(crate::launcher::Group::of(PApp::Dash), Some(crate::launcher::Group::Work));
+    assert_eq!(crate::launcher::Group::of(PApp::Dash), Some(crate::launcher::Group::Data));
     for r in [Role::Admin, Role::Operator, Role::User] {
         assert!(r.template().apps.contains(&PApp::Dash), "{r:?}");
     }
@@ -789,4 +798,328 @@ fn the_audit_log_and_the_assistants_context_never_hold_the_secret() {
     assert!(!all.contains(SECRET), "{all}");
     let seen = f.up.seen.lock().unwrap().join("\n");
     assert!(!seen.contains(SECRET), "never in a URL or a body");
+}
+
+// ---------------------------------------------------------------------------------------------------------- unreachable sources and the repair
+
+use iyakki_agent::dash::cluster::{ClusterApi, SvcInfo};
+
+/// A cluster that holds exactly these Services.
+struct FixedCluster(Vec<SvcInfo>);
+impl ClusterApi for FixedCluster {
+    fn service(&self, ns: &str, name: &str) -> Result<SvcInfo, DashError> {
+        self.0.iter().find(|s| s.ns == ns && s.name == name).cloned().ok_or_else(|| DashError::config(format!("no Service {name} in {ns}")))
+    }
+    fn services(&self) -> Result<Vec<SvcInfo>, DashError> {
+        Ok(self.0.clone())
+    }
+    fn host_listens(&self, _: u16) -> bool {
+        false
+    }
+}
+
+use iyakki_agent::dash::connector::DashError;
+
+fn prom_svc() -> SvcInfo {
+    SvcInfo { ns: "iyakki-monitoring".into(), name: "prometheus".into(), kind: "ClusterIP".into(), cluster_ip: "10.43.4.4".into(), ports: vec![("http".into(), 9090)], app: "prometheus".into(), ready: Some(true) }
+}
+
+fn local_source(f: &Fixture, id: &str, kind: &str, name: &str, url: &str) {
+    let mut c = iyakki_agent::dash::connector::SourceConfig { id: id.into(), kind: kind.into(), name: name.into(), ..Default::default() };
+    c.values.insert("url".into(), url.into());
+    f.env.sources().save(c).unwrap();
+}
+
+/// The owner's Mac: Prometheus is in the cluster, Elasticsearch and ClickHouse are not.
+fn broken_board(tag: &str, admin: bool) -> Fixture {
+    let mut f = fixture_c(tag, Arc::new(FixedCluster(vec![prom_svc()])), admin);
+    let mut c = f.env.sources().get("prom").unwrap();
+    c.values.insert("url".into(), "http://localhost:9090".into());
+    f.env.sources().save(c).unwrap();
+    f.app.reload_for_test();
+    let mut d = Dashboard::new("", "Node");
+    for (i, t) in ["CPU", "Memory", "Disk"].iter().enumerate() {
+        d.add_panel(Panel::new("", t, "prom", Visual::Line, "up", Grid::new(0, i as i32 * 8, 12, 8))).unwrap();
+    }
+    f.app.open_dashboard_for_test(d);
+    settle(&mut f);
+    f
+}
+
+/// Draw until a button with this label shows up (the cluster is asked in the background).
+fn wait_for_label(f: &mut Fixture, label: &str) -> Gfx {
+    for _ in 0..300 {
+        tick(f, 1);
+        let g = draw(f, 1280, 720);
+        if g.hits.iter().any(|h| h.label == label) {
+            return g;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("no `{label}` button");
+}
+
+#[test]
+fn panels_that_fail_the_same_way_get_one_banner_and_the_repair_waits_for_the_click() {
+    let mut f = broken_board("banner", true);
+    let g = wait_for_label(&mut f, "Use cluster address");
+    // one banner for the source, and its button and `Open Sources`
+    let banner_buttons = g.hits.iter().filter(|h| h.ev == Event::Tab(id::REPAIR)).count();
+    assert_eq!(banner_buttons, 1);
+    assert!(g.hits.iter().any(|h| h.label == "Open Sources"));
+    // nothing changed by itself
+    let before = f.env.sources().get("prom").unwrap();
+    assert_eq!(before.value("url"), "http://localhost:9090");
+    assert!(!f.audit.lock().unwrap().iter().any(|l| l.contains("source_repaired")));
+    // the click rewrites the address, keeps the rest, audits, and the panels load again
+    f.app.handle(&Event::Tab(id::REPAIR), &f.cx);
+    for _ in 0..300 {
+        tick(&mut f, 1);
+        draw(&mut f, 1280, 720);
+        if f.env.sources().get("prom").unwrap().value("url").starts_with("cluster://") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let after = f.env.sources().get("prom").unwrap();
+    assert_eq!(after.value("url"), "cluster://iyakki-monitoring/prometheus:9090");
+    let mut expect = before.clone();
+    expect.values.insert("url".into(), after.value("url").into());
+    assert_eq!(after, expect, "name, sign-in and secrets are kept");
+    assert_eq!(f.audit.lock().unwrap().iter().filter(|l| l.starts_with("dash.source_repaired")).count(), 1);
+    for _ in 0..200 {
+        tick(&mut f, 1);
+        if (0..3).all(|i| f.app.has_frame_for_test(&format!("p{}", i + 1))) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!((0..3).all(|i| f.app.has_frame_for_test(&format!("p{}", i + 1))), "the panels refreshed through the cluster address");
+    let g = draw(&mut f, 1280, 720);
+    assert!(!g.hits.iter().any(|h| h.label == "Open Sources"), "the banner is gone");
+}
+
+#[test]
+fn a_person_who_is_not_an_administrator_cannot_repair_and_nothing_changes() {
+    let mut f = broken_board("nonadmin", false);
+    f.app.handle(&Event::Tab(id::REPAIR), &f.cx);
+    f.app.handle(&Event::Tab(id::REPAIR_P), &f.cx);
+    for _ in 0..60 {
+        tick(&mut f, 1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(f.env.sources().get("prom").unwrap().value("url"), "http://localhost:9090");
+    assert!(!f.audit.lock().unwrap().iter().any(|l| l.contains("source_repaired")));
+    let st = f.app.status_for_test();
+    assert!(st.contains("administrator"), "{st}");
+}
+
+#[test]
+fn the_banner_and_the_short_panel_state_fit_at_the_four_sizes() {
+    let mut f = broken_board("sizes", true);
+    wait_for_label(&mut f, "Use cluster address");
+    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+        for chat in [false, true] {
+            f.app.set_chat_for_test(chat);
+            let g = draw(&mut f, w, h);
+            let (a, s) = area(w, h);
+            let ctx = format!("{w}x{h} chat={chat}");
+            for hit in &g.hits {
+                if hit.label == "backdrop" || hit.label == "slot-mark" {
+                    continue;
+                }
+                let r = hit.rect;
+                assert!(r.x >= -1.0 && r.y >= a.y - s * 40.0 && r.x + r.w <= w as f32 + 1.0 && r.y + r.h <= h as f32 + 1.0, "{ctx}: `{}` at {r:?}", hit.label);
+            }
+            assert!(super::component::route::duplicate_ids(&g.hits).is_empty(), "{ctx}");
+            if w == 800 && chat {
+                continue; // the chat takes the whole window: the board is not drawn
+            }
+            let banner = g.hits.iter().find(|h| h.ev == Event::Tab(id::REPAIR)).unwrap_or_else(|| panic!("{ctx}: the banner button is missing"));
+            // the board's panels start below the banner
+            for (_, r) in f.app.panel_rects_for_test() {
+                let overlap = r.x < banner.rect.x + banner.rect.w && banner.rect.x < r.x + r.w && r.y < banner.rect.y + banner.rect.h && banner.rect.y < r.y + r.h;
+                assert!(!overlap, "{ctx}: a panel {r:?} is under the banner button {:?}", banner.rect);
+            }
+        }
+    }
+}
+
+#[test]
+fn the_sources_page_offers_install_remove_fix_all_and_remove_duplicate_for_the_owners_sources() {
+    let mut f = broken_board("sources", true);
+    local_source(&f, "elasticsearch", "elasticsearch", "Elasticsearch", "http://localhost:9200");
+    local_source(&f, "clickhouse", "clickhouse", "ClickHouse", "http://localhost:8123");
+    f.app.go_for_test("sources");
+    f.app.reload_for_test();
+    wait_for_label(&mut f, "Fix all");
+    let sel = |f: &mut Fixture, id: &str| {
+        let i = f.env.sources().list().iter().position(|s| s.id == id).unwrap();
+        f.app.handle(&Event::Row(id::ROW_SRC + i), &f.cx);
+    };
+    // Elasticsearch is not in the cluster: install it from Setup
+    sel(&mut f, "elasticsearch");
+    wait_for_label(&mut f, "Install Elasticsearch (Store -> Setup)");
+    f.app.handle(&Event::Tab(id::S_REPAIR), &f.cx);
+    assert_eq!(f.app.take_request(), Some(("store".into(), "setup:elasticsearch".into())));
+    assert_eq!(f.env.sources().get("elasticsearch").unwrap().value("url"), "http://localhost:9200", "nothing changed");
+    // ClickHouse has its installer item too now: the same Install, not a bare Remove
+    sel(&mut f, "clickhouse");
+    wait_for_label(&mut f, "Install ClickHouse (Store -> Setup)");
+    f.app.handle(&Event::Tab(id::S_REPAIR), &f.cx);
+    assert_eq!(f.app.take_request(), Some(("store".into(), "setup:clickhouse".into())));
+    assert!(f.env.sources().get("clickhouse").is_some());
+    // Fix all points only the sources whose Service exists at the cluster; the other two keep their own choice
+    f.app.handle(&Event::Tab(id::S_FIXALL), &f.cx);
+    for _ in 0..200 {
+        tick(&mut f, 1);
+        draw(&mut f, 1280, 720);
+        if f.env.sources().get("prom").unwrap().value("url").starts_with("cluster://") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(f.env.sources().get("prom").unwrap().value("url"), "cluster://iyakki-monitoring/prometheus:9090");
+    assert_eq!(f.env.sources().get("elasticsearch").unwrap().value("url"), "http://localhost:9200");
+    assert_eq!(f.env.sources().get("clickhouse").unwrap().value("url"), "http://localhost:8123");
+    // a second source with the same address (the shared Cluster Prometheus) is offered for removal
+    local_source(&f, "prometheus-cluster", "prometheus", "Cluster Prometheus", "cluster://iyakki-monitoring/prometheus:9090");
+    f.app.reload_for_test();
+    sel(&mut f, "prom");
+    let g = draw(&mut f, 1280, 720);
+    assert!(g.hits.iter().any(|h| h.label == "Remove duplicate"));
+}
+
+/// A board of three panels on a localhost ClickHouse that is not installed anywhere.
+fn not_installed_board(tag: &str) -> Fixture {
+    let mut f = fixture_c(tag, Arc::new(FixedCluster(vec![prom_svc()])), true);
+    local_source(&f, "clickhouse", "clickhouse", "ClickHouse", "http://localhost:8123");
+    f.app.reload_for_test();
+    let mut d = Dashboard::new("", "Events");
+    for (i, t) in ["Rows", "Errors", "Latency"].iter().enumerate() {
+        d.add_panel(Panel::new("", t, "clickhouse", Visual::Line, "select 1", Grid::new(0, i as i32 * 8, 12, 8))).unwrap();
+    }
+    f.app.open_dashboard_for_test(d);
+    settle(&mut f);
+    f
+}
+
+#[test]
+fn a_source_for_a_service_that_is_not_installed_says_so_with_install_and_remove_and_the_panels_add_no_buttons() {
+    let mut f = not_installed_board("notinst");
+    let g = wait_for_label(&mut f, "Install");
+    // one banner with its own two buttons plus Open Sources; the title says plainly what is missing
+    assert!(g.hits.iter().any(|h| h.label == "Remove this source" && h.ev == Event::Tab(id::REMOVE)));
+    assert!(g.hits.iter().any(|h| h.label == "Open Sources"));
+    assert_eq!(g.hits.iter().filter(|h| h.label == "Install").count(), 1, "one Install, not one per panel");
+    assert!(g.text_log.iter().any(|t| t.2.contains("ClickHouse is not installed")), "the banner names it: {:?}", g.text_log);
+    assert!(!g.text_log.iter().any(|t| t.2.contains("Source ClickHouse is not reachable")), "no 'not reachable' wording");
+    // the panels carry no repair button of their own (no id in the REPAIR_P range, no second Install)
+    assert!(!g.hits.iter().any(|h| matches!(h.ev, Event::Tab(n) if (id::REPAIR_P..id::REPAIR_P + 100).contains(&n))));
+    assert!(!g.hits.iter().any(|h| h.label == "Use cluster address"));
+    // Install opens Store -> Setup at the ClickHouse item; nothing else changes
+    f.app.handle(&Event::Tab(id::REPAIR), &f.cx);
+    assert_eq!(f.app.take_request(), Some(("store".into(), "setup:clickhouse".into())));
+    assert!(f.env.sources().get("clickhouse").is_some());
+    // Remove this source asks first, and the answer removes it
+    f.app.handle(&Event::Tab(id::REMOVE), &f.cx);
+    assert!(f.app.modal_open_for_test());
+    key(&mut f, Key::Esc);
+    assert!(f.env.sources().get("clickhouse").is_some(), "cancel keeps it");
+}
+
+#[test]
+fn the_not_installed_banner_fits_at_the_four_sizes() {
+    let mut f = not_installed_board("notinst-sizes");
+    wait_for_label(&mut f, "Install");
+    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+        let g = draw(&mut f, w, h);
+        for hit in g.hits.iter().filter(|h| matches!(h.label.as_str(), "Install" | "Remove this source" | "Open Sources")) {
+            let r = hit.rect;
+            assert!(r.x >= -1.0 && r.x + r.w <= w as f32 + 1.0 && r.y + r.h <= h as f32 + 1.0, "{w}x{h}: `{}` at {r:?}", hit.label);
+        }
+        assert!(super::component::route::duplicate_ids(&g.hits).is_empty(), "{w}x{h}");
+    }
+}
+
+#[test]
+fn the_list_shares_the_cluster_dashboard_only_after_a_plain_confirmation_and_shows_with_whom() {
+    let mut f = fixture("share");
+    f.env.sources().save(iyakki_agent::dash::seed::default_source()).unwrap();
+    let t = iyakki_agent::dash::templates::find("k3s-local").unwrap();
+    f.env.dashboards().save(&t.instantiate("kube-local", "k3s-local")).unwrap();
+    f.app.reload_for_test();
+    f.app.select_list_for_test(0);
+    // h asks for the names, then for a confirmation; Esc at the confirmation shares nothing
+    key(&mut f, Key::Char('h'));
+    assert!(f.app.modal_open_for_test());
+    types(&mut f, "bob, carol");
+    key(&mut f, Key::Enter);
+    assert!(f.app.modal_open_for_test(), "the confirmation is showing");
+    key(&mut f, Key::Esc);
+    assert!(!f.app.modal_open_for_test() && f.env.shared_with("k3s-local").is_empty());
+    assert!(f.audit.lock().unwrap().iter().all(|l| !l.starts_with("dash.shared")));
+    // again, and confirm
+    key(&mut f, Key::Char('h'));
+    types(&mut f, "bob:operator, carol");
+    key(&mut f, Key::Enter);
+    key(&mut f, Key::Char('y'));
+    use iyakki_agent::dash::share::Grant;
+    assert_eq!(f.env.shared_with("k3s-local"), [Grant::operator("bob"), Grant::viewer("carol")]);
+    assert!(f.app.status_for_test().contains("Shared with bob (operator), carol (viewer)"), "{}", f.app.status_for_test());
+    assert!(f.audit.lock().unwrap().iter().any(|l| l == "dash.shared k3s-local: bob (operator), carol (viewer)"));
+    // the list says with whom
+    let g = draw(&mut f, 1280, 720);
+    let _ = g;
+    assert_eq!(f.app.shared_text_for_test("k3s-local"), "bob (operator), carol (viewer)");
+    // an empty list stops sharing, after a confirmation too
+    f.app.select_list_for_test(0);
+    key(&mut f, Key::Char('h'));
+    for _ in 0..30 {
+        key(&mut f, Key::Backspace);
+    }
+    key(&mut f, Key::Enter);
+    key(&mut f, Key::Char('y'));
+    assert!(f.env.shared_with("k3s-local").is_empty());
+    assert!(f.audit.lock().unwrap().iter().any(|l| l == "dash.unshared k3s-local: bob, carol"));
+}
+
+#[test]
+fn an_account_that_is_not_an_administrator_cannot_share_and_a_viewer_cannot_save_or_export() {
+    let mut f = fixture_c("share-user", Arc::new(iyakki_agent::dash::cluster::NoCluster), false);
+    let mut d = Dashboard::new("notes", "Notes");
+    d.add_panel(Panel::new("t", "T", "", Visual::Text, "", Grid::new(0, 0, 6, 4))).unwrap();
+    f.env.dashboards().save(&d).unwrap();
+    f.app.reload_for_test();
+    f.app.select_list_for_test(0);
+    key(&mut f, Key::Char('h'));
+    types(&mut f, "bob");
+    key(&mut f, Key::Enter);
+    key(&mut f, Key::Char('y'));
+    assert!(f.app.status_for_test().contains("only an administrator"), "{}", f.app.status_for_test());
+    assert!(f.env.shared_with("notes").is_empty());
+    // a dashboard open as a viewer cannot be saved or exported
+    let mut shared = Dashboard::new("share:amy/k3s-local", "Cluster");
+    shared.add_panel(Panel::new("t", "T", "", Visual::Text, "", Grid::new(0, 0, 6, 4))).unwrap();
+    f.app.open_dashboard_for_test(shared);
+    key(&mut f, Key::Ctrl('s'));
+    assert!(f.app.status_for_test().contains("not shared with you"), "{}", f.app.status_for_test());
+    assert!(f.env.dashboards().list().iter().all(|e| e.id == "notes"));
+}
+
+#[test]
+fn the_dialog_refuses_an_unknown_role_and_a_viewer_row_says_what_you_are() {
+    let mut f = fixture("share-role");
+    f.env.sources().save(iyakki_agent::dash::seed::default_source()).unwrap();
+    let t = iyakki_agent::dash::templates::find("k3s-local").unwrap();
+    f.env.dashboards().save(&t.instantiate("kube-local", "k3s-local")).unwrap();
+    f.app.reload_for_test();
+    f.app.select_list_for_test(0);
+    key(&mut f, Key::Char('h'));
+    types(&mut f, "bob:boss");
+    key(&mut f, Key::Enter);
+    assert!(f.app.modal_open_for_test(), "the form stays open with the error");
+    assert!(f.env.shared_with("k3s-local").is_empty());
+    key(&mut f, Key::Esc);
+    assert!(!f.app.modal_open_for_test());
 }

@@ -22,6 +22,21 @@ pub struct Request {
     /// Revalidation of a kept answer: sent as `If-None-Match` and `If-Modified-Since` (empty for none).
     pub if_none_match: String,
     pub if_modified_since: String,
+    /// A `Range` header value such as `bytes=0-0` (empty for none), for transports that send it.
+    pub range: String,
+    /// Extra request headers the person set for this address (Settings -> Browser -> Custom headers). Values are secret-like: the
+    /// `Debug` text shows names only. Not carried over a redirect: the next address is judged again.
+    pub extra: ExtraHeaders,
+}
+
+/// Header (name, value) pairs whose values must never reach a log: `Debug` prints the names.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct ExtraHeaders(pub Vec<(String, String)>);
+
+impl std::fmt::Debug for ExtraHeaders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.0.iter().map(|(n, _)| format!("{n}: <hidden>"))).finish()
+    }
 }
 
 impl Request {
@@ -53,6 +68,9 @@ pub struct Response {
     pub expires: String,
     /// The `Age` header in seconds (how long a shared cache already held the answer).
     pub age: u64,
+    /// Every response header as sent, in order, names as the server wrote them (values cut to 1000 characters, at most 80 headers).
+    /// Empty for transports that do not keep them. Cookies and credentials are in here too: whoever shows them must scrub them.
+    pub headers: Vec<(String, String)>,
 }
 
 pub trait Fetch: Send + Sync {
@@ -229,7 +247,9 @@ pub fn fetch_following(f: &dyn Fetch, req: Request, allow: &dyn Fn(&str) -> bool
                 cookie: String::new(),
                 priority: req.priority,
                 if_none_match: String::new(),
+                range: String::new(),
                 if_modified_since: String::new(),
+                extra: ExtraHeaders::default(),
                 url: next,
             };
             continue;

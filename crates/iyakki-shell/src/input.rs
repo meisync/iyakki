@@ -123,6 +123,8 @@ pub struct InputState {
     pending_touch: bool,
     /// Touchpad gesture state (one pad at a time; a second pad shares it).
     pad: crate::touchpad::Touchpad,
+    /// Touch screens, each with its own slots and the display its touch started on (`touchscreen.rs`).
+    touches: crate::touchscreen::Touches,
     started: std::time::Instant,
     /// Wheel and trackpad movement becomes smooth pixel steps here (`scrolleng.rs`); [`InputState::scroll_tick`] hands them out.
     scroll: crate::scrolleng::ScrollEngine,
@@ -137,7 +139,7 @@ pub struct InputState {
 
 impl InputState {
     pub fn new(w: u32, h: u32) -> InputState {
-        InputState { shift: false, ctrl: false, alt: false, caps: false, x: w as i32 / 2, y: h as i32 / 2, w: w as i32, h: h as i32, abs: (0, 0), slot: 0, pending_touch: false, pad: crate::touchpad::Touchpad::new(), started: std::time::Instant::now(), scroll: crate::scrolleng::ScrollEngine::new(), wheel_legacy: 0, wheel_hires: 0, fake_ms: None, scroll_due: None }
+        InputState { shift: false, ctrl: false, alt: false, caps: false, x: w as i32 / 2, y: h as i32 / 2, w: w as i32, h: h as i32, abs: (0, 0), slot: 0, pending_touch: false, pad: crate::touchpad::Touchpad::new(), touches: Default::default(), started: std::time::Instant::now(), scroll: crate::scrolleng::ScrollEngine::new(), wheel_legacy: 0, wheel_hires: 0, fake_ms: None, scroll_due: None }
     }
 
     fn now_ms(&self) -> u64 {
@@ -213,6 +215,29 @@ impl InputState {
     fn clamp(&mut self) {
         self.x = self.x.clamp_safe(0, self.w - 1);
         self.y = self.y.clamp_safe(0, self.h - 1);
+    }
+
+    /// An event of a touch screen, mapped onto the display rectangle `target` of the desktop (`None`: no display owns it).
+    /// Positions come out as desktop positions; the pointer follows the finger.
+    pub fn feed_touch(&mut self, r: Raw, dev: &crate::touchmap::TouchDev, target: Option<&crate::touchmap::OutRect>) -> crate::touchscreen::TouchOut {
+        let out = self.touches.feed(r, dev, target);
+        for e in &out.events {
+            if let Event::MouseMove(x, y) | Event::MouseDown(x, y) | Event::MouseUp(x, y) = e {
+                (self.x, self.y) = (*x, *y);
+            }
+        }
+        out
+    }
+
+    /// [`InputState::feed_touch`] for a single picture: the device covers the whole screen.
+    pub fn feed_touch_full(&mut self, r: Raw, dev: &crate::touchmap::TouchDev) -> Vec<Event> {
+        let whole = crate::touchmap::OutRect { name: String::new(), x: 0, y: 0, w: self.w, h: self.h, internal: false, rot: crate::touchmap::Rot::R0 };
+        self.feed_touch(r, dev, Some(&whole)).events
+    }
+
+    /// A touch screen was unplugged: a finger still on it is lifted.
+    pub fn touch_gone(&mut self, key: &str) -> Vec<Event> {
+        self.touches.gone(key)
     }
 
     /// `abs_max` is the device's (max_x, max_y) when it is an absolute pointer (tablet, QEMU usb-tablet).
@@ -376,6 +401,8 @@ pub struct Device {
     pub is_keyboard: bool,
     /// `Some` for a touchpad (multi-touch, finger tools, not a touch screen): its events go to `InputState::feed_pad`.
     pub pad: Option<crate::touchpad::PadRange>,
+    /// `Some` for a touch screen or digitizer: its positions are mapped onto the display it belongs to (`touchmap.rs`).
+    pub touch: Option<std::sync::Arc<crate::touchmap::TouchDev>>,
 }
 
 impl Device {
@@ -415,6 +442,30 @@ fn device_name(fd: RawFd) -> String {
     let mut buf = [0u8; 256];
     // SAFETY: EVIOCGNAME writes at most `len` bytes (a NUL-terminated name) into our buffer.
     let r = unsafe { libc::ioctl(fd, ioc_read(0x06, buf.len() as u32) as _, buf.as_mut_ptr()) };
+    if r <= 0 {
+        return String::new();
+    }
+    let n = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
+/// EVIOCGID: (bus type, vendor, product); bus 3 is USB.
+fn device_id(fd: RawFd) -> (u16, u16, u16) {
+    let mut id = [0u16; 4];
+    // SAFETY: EVIOCGID fills one input_id (four u16).
+    let r = unsafe { libc::ioctl(fd, ioc_read(0x02, 8) as _, id.as_mut_ptr()) };
+    if r < 0 {
+        (0, 0, 0)
+    } else {
+        (id[0], id[1], id[2])
+    }
+}
+
+/// EVIOCGPHYS: the port path the device hangs on ("usb-0000:00:14.0-3.3/input0"), empty when it has none.
+fn device_phys(fd: RawFd) -> String {
+    let mut buf = [0u8; 128];
+    // SAFETY: EVIOCGPHYS writes at most `len` bytes (a NUL-terminated string) into our buffer.
+    let r = unsafe { libc::ioctl(fd, ioc_read(0x07, buf.len() as u32) as _, buf.as_mut_ptr()) };
     if r <= 0 {
         return String::new();
     }
@@ -532,7 +583,7 @@ fn open_device(path: &str) -> Option<Device> {
         // SAFETY: as above, for ABS_MT_TOUCH_MAJOR (0x30).
         let rm = unsafe { libc::ioctl(fd, ioc_read(0x40 + 0x30, std::mem::size_of::<AbsInfo>() as u32) as _, &mut major as *mut AbsInfo) };
         let pad = crate::touchpad::PadRange { x_min: mt_x.min, x_max: mt_x.max, y_min: mt_y.min, y_max: mt_y.max, major_max: if rm >= 0 { major.max } else { 0 } };
-        return Some(Device { file, path: path.into(), abs_max: None, is_keyboard: false, pad: Some(pad) });
+        return Some(Device { file, path: path.into(), abs_max: None, is_keyboard: false, pad: Some(pad), touch: None });
     }
     let has_btn = has_bit(&key_bits, BTN_LEFT) || has_bit(&key_bits, BTN_TOUCH);
     let mut rel_bits = [0u8; 4];
@@ -545,7 +596,19 @@ fn open_device(path: &str) -> Option<Device> {
     // volume and media keys often sit on a node of their own ("Consumer Control", "Video Bus", "Power Button")
     let has_fn_keys = crate::fnkeys::KEYS.iter().any(|i| has_bit(&key_bits, i.code));
     if is_keyboard || is_mouse || abs_max.is_some() || has_fn_keys {
-        Some(Device { file, path: path.into(), abs_max, is_keyboard, pad: None })
+        // a touch screen or digitizer (INPUT_PROP_DIRECT or BTN_TOUCH) belongs to one display; a tablet pointer spans the desktop
+        let touch = if abs_max.is_some() && !is_keyboard && (is_direct(fd) || has_bit(&key_bits, BTN_TOUCH)) {
+            let mt = mrx >= 0 && mry >= 0 && mt_x.max > mt_x.min && mt_y.max > mt_y.min;
+            let (x, y) = if mt { ((mt_x.min, mt_x.max), (mt_y.min, mt_y.max)) } else { ((abs.min, abs.max), (abs_y.min, abs_y.max)) };
+            let (bus, vendor, product) = device_id(fd);
+            let phys = device_phys(fd);
+            let id = format!("{vendor:04x}:{product:04x}");
+            let key = format!("{id}@{}", if phys.is_empty() { path.to_string() } else { phys });
+            Some(std::sync::Arc::new(crate::touchmap::TouchDev { key, id, name: device_name(fd), usb: bus == 3, mt, x, y }))
+        } else {
+            None
+        };
+        Some(Device { file, path: path.into(), abs_max, is_keyboard, pad: None, touch })
     } else {
         None
     }
@@ -676,9 +739,12 @@ impl Drop for BackgroundScan {
     }
 }
 
+/// One event with its device's absolute range (tablets), pad range (touchpads) and touch screen description.
+pub type Polled = (Raw, Option<(i32, i32)>, Option<crate::touchpad::PadRange>, Option<std::sync::Arc<crate::touchmap::TouchDev>>);
+
 /// Wait up to `timeout_ms` for input, then read everything available. Dead devices are dropped.
 /// Each event comes with its device's absolute range (tablets) and pad range (touchpads).
-pub fn poll_devices(devs: &mut Vec<Device>, timeout_ms: i32) -> Vec<(Raw, Option<(i32, i32)>, Option<crate::touchpad::PadRange>)> {
+pub fn poll_devices(devs: &mut Vec<Device>, timeout_ms: i32) -> Vec<Polled> {
     let mut out = Vec::new();
     if devs.is_empty() {
         std::thread::sleep(std::time::Duration::from_millis(timeout_ms.max(0) as u64));
@@ -700,7 +766,7 @@ pub fn poll_devices(devs: &mut Vec<Device>, timeout_ms: i32) -> Vec<(Raw, Option
                 if n == 0 {
                     break;
                 }
-                out.extend(parse_events(&buf[..n]).into_iter().map(|r| (r, devs[i].abs_max, devs[i].pad)));
+                out.extend(parse_events(&buf[..n]).into_iter().map(|r| (r, devs[i].abs_max, devs[i].pad, devs[i].touch.clone())));
             }
         }
     }
@@ -1033,7 +1099,7 @@ mod tests {
             let mut st = InputState::new(1920, 1080);
             let mut t = 1000u64;
             let mut steps = Vec::new();
-            let mut frame = |st: &mut InputState, t: &mut u64, dy: i32, lift: bool, steps: &mut Vec<Event>| {
+            let frame = |st: &mut InputState, t: &mut u64, dy: i32, lift: bool, steps: &mut Vec<Event>| {
                 *t += 16;
                 st.fake_ms = Some(*t);
                 for slot in 0..2 {

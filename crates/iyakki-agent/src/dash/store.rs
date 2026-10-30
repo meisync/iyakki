@@ -9,28 +9,64 @@ use super::model::{Dashboard, MAX_PANELS};
 pub const MAX_FILE_BYTES: u64 = 2 << 20;
 pub const MAX_SOURCES: usize = 40;
 
-fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, data).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+/// `dash/sources-<user>.json`. Schema 0 (alpha.1) was a bare list of sources; schema 1 is `{"schema":1,"sources":[..]}`.
+pub const SOURCES_SCHEMA: iyakki_schema::Spec = iyakki_schema::Spec { name: "dashboard sources", current: 1, migrations: &[iyakki_schema::Migration { to: 1, what: "wrap the bare list of sources in an object", run: |v| iyakki_schema::wrap_list(v, "sources") }] };
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct SourcesFile {
+    schema: u32,
+    sources: Vec<SourceConfig>,
+    #[serde(flatten)]
+    extra: iyakki_schema::Extra,
+}
+
+fn write_sources(path: &Path, all: &[SourceConfig], extra: iyakki_schema::Extra) -> Result<(), String> {
+    iyakki_schema::save_typed(&SOURCES_SCHEMA, path, &SourcesFile { schema: 1, sources: all.to_vec(), extra }, 0o600)
 }
 
 // ------------------------------------------------------------------------------------------------------ sources
 
 pub struct Sources {
     file: PathBuf,
+    /// The sources every account sees (Quick install registers its cluster services there when no account is named).
+    system: Option<PathBuf>,
 }
 
 impl Sources {
     pub fn open(data_dir: &Path, user: &str) -> Sources {
-        Sources { file: data_dir.join("dash").join(format!("sources-{user}.json")) }
+        Sources { file: data_dir.join("dash").join(format!("sources-{user}.json")), system: (user != "system").then(|| data_dir.join("dash").join("sources-system.json")) }
     }
 
+    fn read_file(f: &Path) -> SourcesFile {
+        iyakki_schema::load_typed::<SourcesFile>(&SOURCES_SCHEMA, f, iyakki_schema::now_secs()).1
+    }
+
+    fn read(f: &Path) -> Vec<SourceConfig> {
+        Self::read_file(f).sources
+    }
+
+    /// Only this account's own file (what is saved and rewritten).
+    pub fn own(&self) -> Vec<SourceConfig> {
+        Self::read(&self.file)
+    }
+
+    /// The account's sources, then the shared ones it has not replaced by an id of its own.
     pub fn list(&self) -> Vec<SourceConfig> {
-        std::fs::read_to_string(&self.file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+        let mut all = self.own();
+        if let Some(s) = &self.system {
+            for c in Self::read(s) {
+                if !all.iter().any(|x| x.id == c.id) {
+                    all.push(c);
+                }
+            }
+        }
+        all
+    }
+
+    /// Is this source one of the shared ones (and not replaced by the account)?
+    pub fn is_shared(&self, id: &str) -> bool {
+        !self.own().iter().any(|x| x.id == id) && self.system.as_ref().is_some_and(|s| Self::read(s).iter().any(|x| x.id == id))
     }
 
     pub fn get(&self, id: &str) -> Option<SourceConfig> {
@@ -44,24 +80,27 @@ impl Sources {
         if !problems.is_empty() {
             return Err(problems.join("; "));
         }
-        let mut all = self.list();
-        match all.iter().position(|s| s.id == cfg.id) {
-            Some(i) => all[i] = cfg,
-            None if all.len() >= MAX_SOURCES => return Err(format!("at most {MAX_SOURCES} sources")),
-            None => all.push(cfg),
+        let SourcesFile { mut sources, extra, .. } = Self::read_file(&self.file);
+        match sources.iter().position(|s| s.id == cfg.id) {
+            Some(i) => sources[i] = cfg,
+            None if sources.len() >= MAX_SOURCES => return Err(format!("at most {MAX_SOURCES} sources")),
+            None => sources.push(cfg),
         }
-        write_atomic(&self.file, serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?.as_bytes())
+        write_sources(&self.file, &sources, extra)
     }
 
     pub fn remove(&self, id: &str) -> Result<bool, String> {
-        let mut all = self.list();
-        let n = all.len();
-        all.retain(|s| s.id != id);
-        if all.len() == n {
-            return Ok(false);
+        let mut removed = false;
+        for f in std::iter::once(&self.file).chain(self.system.iter()) {
+            let SourcesFile { mut sources, extra, .. } = Self::read_file(f);
+            let n = sources.len();
+            sources.retain(|s| s.id != id);
+            if sources.len() != n {
+                write_sources(f, &sources, extra)?;
+                removed = true;
+            }
         }
-        write_atomic(&self.file, serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?.as_bytes())?;
-        Ok(true)
+        Ok(removed)
     }
 
     /// An id for a new source of `kind`: `prometheus`, `prometheus-2`, ...
@@ -199,7 +238,14 @@ impl Dashboards {
         // a credential pasted into a query is never written to a file
         let mut clean = d.clone();
         scrub_dashboard(&mut clean);
-        write_atomic(&p, serde_json::to_string_pretty(&clean).map_err(|e| e.to_string())?.as_bytes())
+        let text = serde_json::to_string_pretty(&clean).map_err(|e| e.to_string())?;
+        // the version being replaced is kept next to it (`<id>.json.bak`) when it differs: an operator's save and the owner's own save can cross
+        if let Ok(prev) = std::fs::read(&p) {
+            if prev != text.as_bytes() {
+                let _ = iyakki_schema::write_atomic(&p.with_extension("json.bak"), &prev, 0o644);
+            }
+        }
+        iyakki_schema::write_atomic(&p, text.as_bytes(), 0o644)
     }
 
     pub fn delete(&self, id: &str) -> Result<bool, String> {
@@ -208,6 +254,7 @@ impl Dashboards {
             return Ok(false);
         }
         std::fs::remove_file(&p).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(p.with_extension("json.bak"));
         Ok(true)
     }
 

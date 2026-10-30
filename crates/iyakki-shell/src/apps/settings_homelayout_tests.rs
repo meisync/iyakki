@@ -26,7 +26,7 @@ fn typ(a: &mut SettingsApp, cx: &AppCx, s: &str) {
 fn status(a: &SettingsApp) -> String {
     a.status().map(|s| s.0.clone()).unwrap_or_default()
 }
-fn goto(a: &mut SettingsApp, cx: &AppCx) {
+fn goto(a: &mut SettingsApp, _cx: &AppCx) {
     a.go_to(Tab::HomeLayout);
 }
 fn layout(cx: &AppCx) -> Layout {
@@ -45,8 +45,8 @@ fn everyone_has_the_page_and_it_makes_renames_orders_and_deletes_groups() {
     let mut a = SettingsApp::new(&cx);
     goto(&mut a, &cx);
     let rows = SettingsApp::hl_rows(&cx);
-    assert!(matches!(&rows[0], HlRow::Group { name, builtin: true, .. } if name == "Home"));
-    assert_eq!(rows.iter().filter(|r| matches!(r, HlRow::Group { .. })).count(), 4);
+    assert!(matches!(&rows[0], HlRow::Group { name, builtin: true, .. } if name == "Ask & Create"));
+    assert_eq!(rows.iter().filter(|r| matches!(r, HlRow::Group { .. })).count(), 6);
     // new group, with the checks
     key(&mut a, &cx, Key::Char('n'));
     assert!(a.has_modal());
@@ -83,7 +83,7 @@ fn everyone_has_the_page_and_it_makes_renames_orders_and_deletes_groups() {
     assert!(layout(&cx).groups.iter().any(|g| g.label == "Play"));
     // built-in groups cannot be renamed, deleted or ordered
     for (k, what) in [('r', "names"), ('x', "deleted"), ('[', "stay")] {
-        select(&mut a, &cx, "Work");
+        select(&mut a, &cx, "Build");
         key(&mut a, &cx, Key::Char(k));
         assert!(!a.has_modal(), "{k}");
         assert!(status(&a).contains(what), "{k}: {}", status(&a));

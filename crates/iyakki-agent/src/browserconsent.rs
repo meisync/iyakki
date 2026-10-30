@@ -38,6 +38,8 @@ pub enum ConsentKind {
     Step,
     /// The assistant needs the person to do something (a code, a captcha) and press Continue.
     Handover,
+    /// A flow step stopped for want of a permission only the person can give (the camera): see `flows/permission.rs`.
+    Permission,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +51,14 @@ pub enum Answer {
     ApproveAll,
     OneByOne,
     Continue,
+    /// A permission request: this run only. It never changes the flow.
+    AllowOnce,
+    /// A permission request: switch the permission on in the flow's own settings.
+    AlwaysAllow,
+    /// A permission request: ask me later (the popup goes, the inbox entry stays).
+    NotNow,
+    /// A permission request: stop asking for this flow.
+    Block,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,6 +81,10 @@ pub struct ConsentRequest {
     pub detail: String,
     pub choices: Vec<ConsentChoice>,
     pub since: i64,
+    /// What the answer acts on (a permission request: run, step, permission), never shown.
+    pub payload: String,
+    /// The popup was dismissed ("Not now"); the entry stays in the INBOX.
+    pub quiet: bool,
 }
 
 #[derive(Default)]
@@ -78,6 +92,8 @@ struct CState {
     open: Vec<ConsentRequest>,
     done: HashMap<String, Answer>,
     next: u64,
+    /// Developer-mode input is being delivered: permission requests cannot be answered by it.
+    synthetic: bool,
 }
 
 /// The requests waiting for the person, like [`crate::secretreq::SecretRequests`].
@@ -151,9 +167,43 @@ impl ConsentStore {
             ConsentKind::Interact => (format!("Act on your behalf on {domain}?"), interact_choices(domain)),
             ConsentKind::Step => (format!("Approve this action on {domain}?"), vec![choice(Answer::Allow, "Allow this action"), choice(Answer::Deny, "Deny")]),
             ConsentKind::Handover => ("The assistant needs you".to_string(), vec![choice(Answer::Continue, "Continue"), choice(Answer::Deny, "Cancel")]),
+            ConsentKind::Permission => ("A flow needs your permission".to_string(), vec![]),
         };
-        g.open.push(ConsentRequest { id: id.clone(), user: user.into(), kind, domain: domain.into(), title, text: clean(text, 600), detail: clean(detail, 600), choices, since: now });
+        g.open.push(ConsentRequest { id: id.clone(), user: user.into(), kind, domain: domain.into(), title, text: clean(text, 600), detail: clean(detail, 600), choices, since: now, payload: String::new(), quiet: false });
         Ok(id)
+    }
+
+    /// A flow's permission request. One per (person, run, step, permission): a repeat returns `Ok(None)` and adds nothing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_permission(&self, user: &str, flow_id: &str, title: &str, text: &str, payload: &str, now: i64) -> Result<Option<String>, String> {
+        let mut g = self.lock();
+        if g.open.iter().any(|r| r.user == user && r.kind == ConsentKind::Permission && r.payload == payload) {
+            return Ok(None);
+        }
+        // old requests of runs nobody came back to
+        g.open.retain(|r| !(r.kind == ConsentKind::Permission && now - r.since > 7 * 86_400));
+        if g.open.iter().filter(|r| r.user == user).count() >= MAX_PENDING {
+            return Err("too many questions are waiting; answer them first".into());
+        }
+        g.next += 1;
+        let id = format!("bc{}", g.next);
+        let clean = |s: &str, n: usize| -> String { s.chars().filter(|c| !c.is_control() || *c == '\n').take(n).collect() };
+        let choices = vec![choice(Answer::AllowOnce, "Allow this time"), choice(Answer::AlwaysAllow, "Always allow for this flow"), choice(Answer::NotNow, "Not now"), choice(Answer::Block, "Block")];
+        g.open.push(ConsentRequest { id: id.clone(), user: user.into(), kind: ConsentKind::Permission, domain: flow_id.into(), title: clean(title, 160), text: clean(text, 1800), detail: String::new(), choices, since: now, payload: payload.into(), quiet: false });
+        Ok(Some(id))
+    }
+
+    /// Withdraw the permission requests of a run (it was dismissed or is over).
+    pub fn withdraw_permissions(&self, user: &str, run_id: &str) -> usize {
+        let mut g = self.lock();
+        let n = g.open.len();
+        g.open.retain(|r| !(r.user == user && r.kind == ConsentKind::Permission && r.payload.split('|').next() == Some(run_id)));
+        n - g.open.len()
+    }
+
+    /// Developer-mode input is arriving (true) or has been delivered (false): a permission request is not answered by it.
+    pub fn set_synthetic(&self, on: bool) {
+        self.lock().synthetic = on;
     }
 
     pub fn pending(&self, user: &str) -> Vec<ConsentRequest> {
@@ -170,6 +220,15 @@ impl ConsentStore {
         let Some(pos) = g.open.iter().position(|r| r.id == id && r.user == user) else { return Err("that question is not waiting any more".into()) };
         if !g.open[pos].choices.iter().any(|c| c.answer == answer) {
             return Err("that is not one of the choices".into());
+        }
+        if g.open[pos].kind == ConsentKind::Permission {
+            if g.synthetic {
+                return Err("A permission is answered on the device itself: input sent from a paired computer (developer mode) cannot give it.".into());
+            }
+            if answer == Answer::NotNow {
+                g.open[pos].quiet = true;
+                return Ok(());
+            }
         }
         g.open.remove(pos);
         g.done.insert(id.to_string(), answer);

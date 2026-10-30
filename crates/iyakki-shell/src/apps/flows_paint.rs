@@ -190,6 +190,14 @@ pub fn draw_graph(g: &mut Gfx, p: &Paint) {
     });
 }
 
+/// The name shown on a node's card at scale `s` and zoom `z`: the whole name, cut with an ellipsis only when it does not fit the one line.
+pub fn card_title(g: &mut Gfx, n: &Node, _s: f32, z: f32) -> String {
+    let (pad, ic) = (9.0 * z, 15.0 * z);
+    let ts = (11.5 * z).max(10.0);
+    let room = NODE_W * z - pad - ic - 5.0 * z - 6.0 * z;
+    g.fit(ts, n.title(), Face::Bold, room)
+}
+
 fn draw_node(g: &mut Gfx, p: &Paint, n: &Node) {
     let (r, s, z) = (p.rect, p.s, p.view.zoom);
     let (sx, sy) = p.view.to_screen(r, (n.pos.x, n.pos.y));
@@ -216,26 +224,29 @@ fn draw_node(g: &mut Gfx, p: &Paint, n: &Node) {
     g.rrect(sx, sy, w, h, rad, if hover { fx::mix(fx::WELL, accent, 0.18) } else { fx::mix(fx::PANEL, accent, 0.10) });
     g.rrect(sx, sy, 5.0 * s * z, h, rad.min(5.0 * s * z), with_alpha(accent, if dim { 90 } else { 255 }));
     g.rrect_outline(sx, sy, w, h, rad, if selected { 2.2 } else { 1.4 }, with_alpha(border, if dim { 120 } else { 255 }));
-    if z >= 0.45 {
-        let pad = 12.0 * s * z;
-        let ts = (13.0 * s * z).max(10.0);
-        let title = g.fit(ts, n.title(), Face::Bold, w - pad - 28.0 * s * z);
-        g.text(sx + pad, sy + 7.0 * s * z, ts, if dim { MUTED } else { TEXT }, &title, Face::Bold);
-        let label = p.reg.get(&n.kind).map(|k| k.label().to_string()).unwrap_or_else(|| n.kind.clone());
-        let desc = p.reg.get(&n.kind).map(|k| k.describe(n)).unwrap_or_default();
-        let sub = if desc.is_empty() || desc.starts_with(&label) { label.clone() } else { format!("{label} · {desc}") };
-        let ss = (10.5 * s * z).max(10.0);
-        let sub = g.fit(ss, &sub, Face::Sans, w - pad - 10.0 * s * z);
-        g.text(sx + pad, sy + 7.0 * s * z + ts * 1.35, ss, DIM, &sub, Face::Sans);
+    let icon_c = if dim { with_alpha(accent, 130) } else { accent };
+    if z < 0.5 {
+        // zoomed far out: the icon alone, as large as the card allows
+        super::flows_icons::draw_kind(g, &n.kind, sx + w / 2.0, sy + h / 2.0, h * 0.55, icon_c);
+    } else {
+        let pad = 9.0 * z;
+        let ic = 15.0 * z;
+        super::flows_icons::draw_kind(g, &n.kind, sx + pad + ic / 2.0, sy + 8.0 * z + ic / 2.0, ic, icon_c);
+        // one line: the step's name, cut with an ellipsis only when it really does not fit; the kind and the settings are in the
+        // tooltip and the step's panel, not on the card
+        let ts = (11.5 * z).max(10.0);
+        let tx = sx + pad + ic + 5.0 * z;
+        let title = card_title(g, n, s, z);
+        g.text(tx, sy + 8.0 * z + (ic - ts * 1.2) / 2.0, ts, if dim { MUTED } else { TEXT }, &title, Face::Bold);
         // badges on the bottom edge: retry, sandbox, the agent's change, problems
         let mut bx = sx + pad;
-        let by = sy + h - 17.0 * s * z;
-        let bs = (9.5 * s * z).max(10.0);
+        let by = sy + h - 19.0 * z;
+        let bs = (9.5 * z).max(10.0);
         let badge = |g: &mut Gfx, text: &str, c: [u8; 4], x: &mut f32| {
             let tw = g.text_width(bs, text, Face::Bold);
-            g.rrect(*x, by, tw + 8.0 * s * z, 14.0 * s * z, 5.0 * s * z, with_alpha(c, 50));
-            g.text(*x + 4.0 * s * z, by + 1.0 * s * z, bs, c, text, Face::Bold);
-            *x += tw + 12.0 * s * z;
+            g.rrect(*x, by, tw + 8.0 * z, 14.0 * z, 5.0 * z, with_alpha(c, 50));
+            g.text(*x + 4.0 * z, by + 1.0 * z, bs, c, text, Face::Bold);
+            *x += tw + 12.0 * z;
         };
         if let Some(rp) = &n.retry {
             if rp.total_attempts() > 1 {
@@ -249,12 +260,19 @@ fn draw_node(g: &mut Gfx, p: &Paint, n: &Node) {
             badge(g, "agent changed", MAGENTA, &mut bx);
         }
         if let Some((e, wn)) = p.issues.get(&n.id) {
-            if *e > 0 {
-                badge(g, &format!("{e} problem{}", if *e == 1 { "" } else { "s" }), ERR, &mut bx);
-            } else if *wn > 0 {
-                badge(g, &format!("{wn} warning{}", if *wn == 1 { "" } else { "s" }), AMBER, &mut bx);
+            if *e + *wn > 0 {
+                // the problem or warning as an icon with its count; the words are in the tooltip
+                let isz = 14.0 * z;
+                super::flows_icons::draw_alert(g, bx + isz / 2.0, by + 7.0 * z, isz, *e > 0);
+                let txt = (e + wn).to_string();
+                g.text(bx + isz + 3.0 * z, by + 1.0 * z, bs, if *e > 0 { ERR } else { AMBER }, &txt, Face::Bold);
             }
         }
+    }
+    // the run state as a round icon on the card's top right corner (the words are in the tooltip and the chip below the card)
+    if let (Some(st), true) = (run_state, z >= 0.3) {
+        let bsz = (15.0 * z).max(10.0);
+        super::flows_icons::draw_state(g, st, sx + w - 3.0 * z, sy + 3.0 * z, bsz, p.tick);
     }
     // ports
     let (ins, outs, can_fail) = node_ports(p.reg, n);

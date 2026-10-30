@@ -490,6 +490,7 @@ const ECC_PER_BLOCK: [[usize; MAX_VERSION]; 4] = [
 const BLOCKS: [[usize; MAX_VERSION]; 4] = [[1, 1, 1, 1, 1, 2, 2, 2, 2, 4], [1, 1, 1, 2, 2, 4, 4, 4, 5, 5], [1, 1, 2, 2, 4, 4, 6, 6, 8, 8], [1, 1, 2, 4, 4, 4, 5, 6, 8, 8]];
 
 /// The data codewords of a version at a level (also used by the tests that build symbols).
+#[cfg(test)]
 pub(crate) fn data_codewords(ver: usize, level: usize) -> usize {
     qr::raw_modules(ver) / 8 - ECC_PER_BLOCK[level][ver - 1] * BLOCKS[level][ver - 1]
 }

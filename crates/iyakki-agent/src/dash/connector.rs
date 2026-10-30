@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use zeroize::Zeroizing;
 
-use super::frame::Frame;
+use super::frame::{self, Frame};
 
 /// Hard limits applied by every connector (a request may ask for less, never more).
 pub const MAX_ROWS: usize = 10_000;
@@ -199,6 +199,9 @@ pub enum Lang {
     PromQl,
     Sql,
     EsDsl,
+    Cypher,
+    /// The name of a view of the local cluster (`dash/kube.rs`).
+    Kube,
 }
 
 impl Lang {
@@ -207,6 +210,8 @@ impl Lang {
             Lang::PromQl => "PromQL",
             Lang::Sql => "SQL",
             Lang::EsDsl => "Elasticsearch query (JSON)",
+            Lang::Cypher => "Cypher (graph)",
+            Lang::Kube => "view name (cluster)",
         }
     }
 }
@@ -214,7 +219,7 @@ impl Lang {
 /// Common connection fields (address, authentication, TLS, proxy, timeout).
 pub fn net_fields(default_url: &str) -> Vec<Field> {
     vec![
-        Field::new("url", "Address", FieldKind::Url, "http:// or https:// with the port").required().default(default_url),
+        Field::new("url", "Address", FieldKind::Url, "http:// or https:// with the port; a Service of the cluster: cluster://namespace/service:port").required().default(default_url),
         Field::new("auth", "Sign-in", FieldKind::Choice(vec!["none".into(), "basic".into(), "bearer".into(), "api_key".into()]), "how the server knows you").default("none"),
         Field::new("username", "User name", FieldKind::Text, "for basic sign-in; prefer a read-only user"),
         Field::new("password", "Password", FieldKind::Secret, "vault reference of the password (basic)"),
@@ -290,8 +295,11 @@ pub fn url_problems(label: &str, v: &str) -> Vec<String> {
     if v.is_empty() {
         return bad;
     }
-    if !(v.starts_with("http://") || v.starts_with("https://")) {
-        bad.push(format!("{label}: must start with http:// or https://"));
+    match crate::dash::cluster::parse(v) {
+        Some(Err(e)) => bad.push(format!("{label}: {e}")),
+        Some(Ok(_)) => {}
+        None if !(v.starts_with("http://") || v.starts_with("https://")) => bad.push(format!("{label}: must start with http:// or https:// (or cluster://<namespace>/<service>:<port> for a Service of the cluster)")),
+        None => {}
     }
     let rest = v.split("://").nth(1).unwrap_or("");
     if rest.split(['/', '?', '#']).next().unwrap_or("").contains('@') {
@@ -463,6 +471,8 @@ pub struct Deps {
     /// Files a SQL text may name (DuckDB): the account's readable folders.
     pub path_ok: Arc<dyn Fn(&std::path::Path) -> bool + Send + Sync>,
     pub work_dir: std::path::PathBuf,
+    /// The managed cluster, for `cluster://` addresses and for saying where an instance really is.
+    pub cluster: Arc<dyn crate::dash::cluster::ClusterApi>,
 }
 
 // ------------------------------------------------------------------------------------------------------ HTTP
@@ -476,6 +486,9 @@ pub struct Http {
     /// Every secret value in use (a password, a token, the encoded basic header): removed from anything that comes back.
     secrets: Vec<Zeroizing<String>>,
     what: String,
+    cluster: Arc<dyn crate::dash::cluster::ClusterApi>,
+    /// The Service this address named (resolved to its IP at build time), if it was a cluster address.
+    origin: Option<crate::dash::cluster::ClusterRef>,
 }
 
 impl fmt::Debug for Http {
@@ -484,6 +497,7 @@ impl fmt::Debug for Http {
     }
 }
 
+#[derive(Debug)]
 pub struct Reply {
     pub status: u16,
     pub body: Vec<u8>,
@@ -504,7 +518,19 @@ impl Reply {
 impl Http {
     /// Build from a config: the address, the sign-in headers (secrets resolved now) and the transport options.
     pub fn from_config(cfg: &SourceConfig, d: &Deps, what: &str) -> Result<Http, DashError> {
-        let base = cfg.value("url").trim_end_matches('/').to_string();
+        let mut base = cfg.value("url").trim_end_matches('/').to_string();
+        let mut origin = None;
+        match crate::dash::cluster::parse(&base) {
+            Some(Err(e)) => return Err(DashError::config(format!("{what}: the cluster address `{}` is not right: {e}", frame::clip(&base, 80))).fix("Write it as cluster://<namespace>/<service>:<port>, for example cluster://iyakki-data/elasticsearch:9200.")),
+            Some(Ok(r)) => {
+                base = crate::dash::cluster::resolve(d.cluster.as_ref(), &r).map_err(|mut e| {
+                    e.message = format!("{what}: {}", e.message);
+                    e
+                })?;
+                origin = Some(r);
+            }
+            None => {}
+        }
         if !(base.starts_with("http://") || base.starts_with("https://")) {
             return Err(DashError::config(format!("{what}: the address `{base}` must start with http:// or https://")).fix("Edit the source and give the full address, for example http://localhost:9090"));
         }
@@ -555,11 +581,11 @@ impl Http {
         if let Some(k) = &o.client_key {
             secrets.push(k.clone());
         }
-        Ok(Http { up, base, auth, secrets, what: what.to_string() })
+        Ok(Http { up, base, auth, secrets, what: what.to_string(), cluster: d.cluster.clone(), origin })
     }
 
     pub fn for_test(up: Arc<dyn Upstream>, base: &str) -> Http {
-        Http { up, base: base.trim_end_matches('/').into(), auth: vec![], secrets: vec![], what: "test".into() }
+        Http { up, base: base.trim_end_matches('/').into(), auth: vec![], secrets: vec![], what: "test".into(), cluster: Arc::new(crate::dash::cluster::NoCluster), origin: None }
     }
 
     pub fn base(&self) -> &str {
@@ -627,19 +653,49 @@ impl Http {
 
     fn net_error(&self, e: &str) -> DashError {
         let l = e.to_ascii_lowercase();
+        let (host, port) = self.host_port();
+        let local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "0.0.0.0") || host.ends_with(".localhost");
+        if l.contains("refused") && local {
+            // nothing listens here: say where the instance really is (best effort, the cluster may not run)
+            let found = self.cluster.services().map(|s| crate::dash::cluster::candidates(&s)).unwrap_or_default();
+            return crate::dash::cluster::localhost_refused(&self.what, port, &found);
+        }
+        if let Some(o) = &self.origin {
+            // a stale cluster IP must not survive a failed connect
+            self.cluster.forget(&o.ns, &o.svc);
+        }
+        let dns = l.contains("dns") || l.contains("resolve") || l.contains("lookup") || l.contains("no such host") || l.contains("name or service");
+        if dns && (host.ends_with(".svc") || host.contains(".svc.") || host.ends_with(".cluster.local") || (!host.contains('.') && !local && host.parse::<std::net::IpAddr>().is_err())) {
+            return crate::dash::cluster::svc_name_unresolvable(&self.what, &host);
+        }
         let (msg, fix) = if l.contains("refused") {
-            ("connection refused", "Nothing is listening at that address and port. Check the address, that the server is running, and any firewall.")
+            match &self.origin {
+                Some(o) => ("connection refused", format!("The Service {}/{} exists but its pod did not accept the connection on that port. Check `kubectl -n {} get pods` and that the port is the one the pod serves.", o.ns, o.svc, o.ns)),
+                None => ("connection refused", "Nothing is listening at that address and port. Check the address, that the server is running, and any firewall.".to_string()),
+            }
         } else if l.contains("timed out") || l.contains("timeout") {
-            ("the server did not answer in time", "Check the address, or raise the timeout in the source (up to 120 s), or use a shorter time range.")
+            ("the server did not answer in time", "Check the address, or raise the timeout in the source (up to 120 s), or use a shorter time range.".to_string())
         } else if l.contains("certificate") || l.contains("tls") || l.contains("ssl") || l.contains("unknownissuer") || l.contains("invalid peer") {
-            ("the TLS certificate was not accepted", "Add the server's CA certificate file to the source. Only as a last resort, switch on 'Skip certificate checks' (not safe).")
+            ("the TLS certificate was not accepted", "Add the server's CA certificate file to the source. Only as a last resort, switch on 'Skip certificate checks' (not safe).".to_string())
         } else if l.contains("dns") || l.contains("resolve") || l.contains("lookup") || l.contains("no such host") || l.contains("name or service") {
-            ("the host name could not be found", "Check the spelling of the host name, or use its IP address.")
+            ("the host name could not be found", "Check the spelling of the host name, or use its IP address. A Service of the cluster is written cluster://<namespace>/<service>:<port>.".to_string())
         } else {
-            ("the server could not be reached", "Check the address and your network.")
+            ("the server could not be reached", "Check the address and your network.".to_string())
         };
         // the transport's text may name the URL (never a credential: those travel in headers); keep it short
         DashError::new(ErrKind::Network, format!("{}: {msg} ({})", self.what, crate::dash::frame::clip(e.lines().next().unwrap_or(""), 120))).fix(fix)
+    }
+
+    /// Host and port of the address in use (the port defaults by scheme).
+    fn host_port(&self) -> (String, u16) {
+        let rest = self.base.split("://").nth(1).unwrap_or("");
+        let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let https = self.base.starts_with("https");
+        let (h, p) = match auth.rsplit_once(':') {
+            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => (h, p.parse().unwrap_or(0)),
+            _ => (auth, if https { 443 } else { 80 }),
+        };
+        (h.trim_matches(['[', ']']).to_ascii_lowercase(), p)
     }
 }
 
@@ -650,7 +706,7 @@ pub fn vault_error(what: &str, key: &str, reference: &str, e: &str) -> DashError
     if l.contains("locked") {
         DashError::config(format!("{what}: your vault is locked, so the {key} cannot be read")).fix("Unlock the vault (sign in again with your password) and test the source again.")
     } else if l.contains("not found") || l.contains("no such") || l.contains("missing") {
-        DashError::config(format!("{what}: the vault entry `{name}` is missing")).fix("Pick another entry for this source, or create the entry in SETTINGS > Vault.")
+        DashError::config(format!("{what}: the {key} is not in your vault yet (entry `{name}`)")).fix("If you just installed this service, its password is waiting for your vault: sign in with your password or open SETTINGS > Vault > Unlock, and it is saved by itself. Otherwise pick another entry for this source, or create the entry in SETTINGS > Vault.")
     } else {
         DashError::config(format!("{what}: the vault entry `{name}` could not be read")).fix("Check the vault (SETTINGS > Vault), then test the source again.")
     }
@@ -668,6 +724,10 @@ pub fn server_message(body: &[u8]) -> String {
         }
         if let Some(e) = v.get("error").and_then(Value::as_str) {
             return e.to_string();
+        }
+        // Neo4j's Query API: {"errors":[{"code":"Neo.ClientError...","message":"..."}]}
+        if let Some(m) = v.pointer("/errors/0/message").and_then(Value::as_str) {
+            return m.to_string();
         }
         if let Some(e) = v.get("exception").and_then(Value::as_str) {
             return e.trim().to_string();
@@ -871,6 +931,7 @@ pub mod fake {
             runner,
             path_ok: Arc::new(|p| p.starts_with("/home/amy")),
             work_dir: std::env::temp_dir(),
+            cluster: Arc::new(crate::dash::cluster::NoCluster),
         }
     }
 

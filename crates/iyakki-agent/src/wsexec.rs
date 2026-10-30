@@ -19,11 +19,14 @@ pub struct Out {
     pub truncated: bool,
     /// The program was not found.
     pub missing: bool,
+    /// The program ended but its exit status was taken by another reaper (the PID-1 one): `code` is unknown, the output is complete.
+    pub status_lost: bool,
 }
 
 impl Out {
     pub fn ok(&self) -> bool {
-        self.code == Some(0)
+        // a lost status is not a failure by itself: the output is complete; an error text says it did not work
+        self.code == Some(0) || (self.status_lost && !self.timed_out && self.stderr.trim().is_empty())
     }
     pub fn combined(&self) -> String {
         if self.stderr.is_empty() { self.stdout.clone() } else if self.stdout.is_empty() { self.stderr.clone() } else { format!("{}\n{}", self.stdout, self.stderr) }
@@ -108,6 +111,23 @@ pub fn spawn_exec(cmd: &mut Command) -> std::io::Result<std::process::Child> {
     }
 }
 
+/// Wait for the child to end or for `timeout`: (exit code, timed out, status lost). A status another reaper took (`Gone`, the PID-1 reaper
+/// does that) is an end with an unknown code, never a timeout and never a failure by itself.
+pub(crate) fn wait_for_end(child: &mut std::process::Child, timeout: Duration) -> (Option<i32>, bool, bool) {
+    let start = Instant::now();
+    loop {
+        match iyakki_core_api::child_status(child) {
+            iyakki_core_api::ChildState::Running if start.elapsed() > timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return (None, true, false);
+            }
+            iyakki_core_api::ChildState::Running => std::thread::sleep(Duration::from_millis(15)),
+            s => return (s.code(), false, s == iyakki_core_api::ChildState::Gone),
+        }
+    }
+}
+
 /// Like [`run_argv`], also copying the output into `sink` while the program runs.
 pub fn run_argv_sink(cwd: &Path, argv: &[String], env: &[(String, String)], timeout: Duration, cap: usize, sink: Option<Sink>) -> Out {
     let Some(prog) = argv.first() else { return Out { stderr: "no command".into(), ..Default::default() } };
@@ -123,30 +143,14 @@ pub fn run_argv_sink(cwd: &Path, argv: &[String], env: &[(String, String)], time
     }
     let mut child = match spawn_exec(&mut cmd) {
         Ok(c) => c,
-        Err(e) => return Out { stderr: format!("{prog}: {e}"), missing: e.kind() == std::io::ErrorKind::NotFound, ..Default::default() },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Out { stderr: not_installed(prog), missing: true, ..Default::default() },
+        Err(e) => return Out { stderr: format!("{prog}: {e}"), ..Default::default() },
     };
     let (so, se) = (child.stdout.take().map(|r| read_capped(r, cap, sink.clone())), child.stderr.take().map(|r| read_capped(r, cap, sink.clone())));
-    let start = Instant::now();
-    let (mut code, mut timed_out) = (None, false);
-    loop {
-        match child.try_wait() {
-            Ok(Some(st)) => {
-                code = st.code();
-                break;
-            }
-            Ok(None) if start.elapsed() > timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                timed_out = true;
-                break;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(15)),
-            Err(_) => break,
-        }
-    }
+    let (code, timed_out, status_lost) = wait_for_end(&mut child, timeout);
     let (a, ca) = so.and_then(|h| h.join().ok()).unwrap_or_default();
     let (b, cb) = se.and_then(|h| h.join().ok()).unwrap_or_default();
-    Out { code, stdout: String::from_utf8_lossy(&a).into_owned(), stderr: String::from_utf8_lossy(&b).into_owned(), timed_out, truncated: ca || cb, missing: false }
+    Out { code, stdout: String::from_utf8_lossy(&a).into_owned(), stderr: String::from_utf8_lossy(&b).into_owned(), timed_out, truncated: ca || cb, missing: false, status_lost }
 }
 
 /// The one way the dev-cluster code starts programs (`kubectl`, `podman`, `docker`, `k3s`, `curl`): argument arrays, a
@@ -231,6 +235,14 @@ impl FakeRunner {
         self.rules.lock().unwrap().push((contains.into(), Out { code: Some(code), stderr: stderr.into(), ..Default::default() }));
         self
     }
+    /// Makes a program count as installed.
+    pub fn programs_add(&self, p: &str) {
+        self.programs.lock().unwrap().push(p.to_string());
+    }
+    /// Forgets every scripted answer (a test changes what the world says).
+    pub fn forget(&self) {
+        self.rules.lock().unwrap().clear();
+    }
     pub fn calls(&self) -> Vec<Call> {
         self.calls.lock().unwrap().clone()
     }
@@ -256,6 +268,12 @@ impl Runner for FakeRunner {
 }
 
 /// Is a program of this name on `PATH`?
+/// The words for a program that is not on this system (never the raw "No such file or directory (os error 2)").
+pub fn not_installed(prog: &str) -> String {
+    let name = prog.rsplit('/').next().unwrap_or(prog);
+    format!("`{name}` is not installed on this system, so this could not run.")
+}
+
 pub fn on_path(name: &str) -> bool {
     std::env::var("PATH").unwrap_or_default().split(':').any(|d| !d.is_empty() && Path::new(d).join(name).is_file())
 }
@@ -296,6 +314,7 @@ mod tests {
         assert!(o.timed_out && o.code.is_none());
         let o = run_argv(&d, &["no-such-program-xyz".into()], &[], Duration::from_secs(1), 10);
         assert!(o.missing, "{o:?}");
+        assert!(o.stderr.contains("is not installed on this system") && !o.stderr.contains("os error"), "plain words, not the OS error: {}", o.stderr);
         let o = run_argv(&d, &["pwd".into()], &[], Duration::from_secs(2), 100);
         assert!(o.ok());
         let o = run_argv(&d, &["sh".into(), "-c".into(), "echo $SECRET_TOKEN".into()], &[], Duration::from_secs(2), 100);

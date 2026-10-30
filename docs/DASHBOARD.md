@@ -1,7 +1,7 @@
 # DASH: dashboards over pluggable data sources
 
 DASH (Work group) draws graphs and tables from systems you already run: Prometheus, Elasticsearch or OpenSearch,
-ClickHouse and DuckDB today, more later. The assistant works on the open dashboard beside it. Everything the tile does is
+ClickHouse, DuckDB, Neo4j and the k3s cluster of this machine today, more later. A dashboard for the local cluster is there from the start (see "Local cluster (k3s)"). The assistant works on the open dashboard beside it. Everything the tile does is
 read-only.
 
 ```
@@ -46,10 +46,11 @@ pub trait DataSource: Send + Sync {
 | `prometheus` | `/api/v1/query`, `query_range`, `label/__name__/values`, `series`, `status/buildinfo` | PromQL | metrics, then labels | step from the range and the chart width, never more than 11,000 points; also VictoriaMetrics, Mimir, Thanos |
 | `elasticsearch` | `POST /<index>/_search`, `_cat/indices`, `_mapping`, `/`, `_cluster/health` | the search body as JSON; the index in "Index / table / file" | indices, then flattened fields with types | hits become a table; `date_histogram` and `terms` aggregations (nested too) become tables and one series per term; builders for "over time" and "top values"; also OpenSearch. ES\|QL is not built |
 | `clickhouse` | HTTP interface, `POST /?default_format=JSON&readonly=2&max_execution_time=...&max_result_rows=...` | SQL | databases, tables, columns (named parameters) | use a user that is read-only on the server too |
+| `kube` | the local k3s cluster through the managed kubectl (see "Local cluster (k3s)") | the name of a view | the views | no address, no secret; fixed read-only `get`s |
 | `duckdb` | the `duckdb` command (see below) | SQL | tables of a database file, or the data files | CSV, Parquet, JSON through `read_csv_auto('/full/path')` and friends |
 
 Planned, designed for by the seam: PostgreSQL, MySQL, SQLite, Loki, InfluxDB, a Grafana-style JSON data source, CSV and
-Parquet files through `iyakki-data`, Kubernetes metrics, plain HTTP JSON.
+Parquet files through `iyakki-data`, other Kubernetes clusters, plain HTTP JSON.
 
 ### DuckDB: the CLI, not a linked crate (decision)
 
@@ -86,6 +87,7 @@ changes.
     `GET [/<index>]/_mapping`; no `_bulk`, `_delete_by_query`, `_update`, `_reindex`, `_doc`, nothing with `..` or `%2e`.
     Index names are letters, digits and `-_.*,:+`.
   * Prometheus: only the query, series, label, targets, metadata, rules and alerts calls; never `/api/v1/admin/*` or `/-/*`.
+  * Neo4j (Cypher): one query per request, sent through the Query API as a read transaction (`accessMode: Read`, the server refuses writes) after a text check that refuses CREATE, MERGE, DELETE, SET, REMOVE, CALL, LOAD, FOREACH, DROP, USE and user or server commands. The graph database of Store -> Setup is added as the source `Cluster graph database`.
   * DuckDB: a database file is opened `-readonly`; every file path inside the SQL must be absolute, free of `..`, and inside
     the account's readable folders (`FileRoots`); network addresses are refused.
   * The servers are asked to enforce it too where they can (ClickHouse `readonly=2`).
@@ -104,6 +106,141 @@ changes.
   stay inside the account's folders.
 * **The model never sees** an address, a user name or a secret: the assistant's context and tool answers name sources by
   name and kind. The tool results are marked untrusted (they are data) and are kept out of the tool log.
+
+## Services of the cluster (`dash/cluster.rs`)
+
+The Elasticsearch and Prometheus that Store -> Setup puts in the managed cluster are `ClusterIP` Services. Their `*.svc` names exist only
+inside the cluster and **nothing listens on this machine's localhost**, so `http://localhost:9200` or `:9090` is refused. A source address may
+instead name the Service:
+
+* `cluster://<namespace>/<service>:<port>`, for example `cluster://iyakki-data/elasticsearch:9200` or
+  `cluster://iyakki-monitoring/prometheus:9090` (`cluster+https://` for TLS), or
+* `http(s)://<service>.<namespace>.svc[.cluster.local]:<port>`.
+
+At every connect IYAKKI asks the managed `kubectl` (`K3sDev::kubectl`) for the Service and its Endpoints, and talks to the Service's **current**
+cluster IP (k3s runs natively here, so cluster IPs are reachable from this machine). The answer is remembered for 10 s and forgotten after a
+failed connect, so a recreated Service never leaves a stale IP in the source. With no cluster, a missing Service or port, no ready pod, a
+headless or ExternalName Service, or a loopback / link-local / multicast IP the source says so in plain words and nothing is sent.
+
+Policy: the account's network policy (`net_hosts`) is asked about the **name** `<service>.<namespace>.svc`, never about the IP it resolves to. An
+IP typed by hand is judged as itself, so an arbitrary private IP is not newly allowed. The request goes to an IP literal (no DNS to rebind) and the
+HTTP client follows no redirect.
+
+Quick install registers `Cluster Elasticsearch` (id `elasticsearch-cluster`) and `Cluster Prometheus` (id `prometheus-cluster`, an older one with
+a baked-in cluster IP is rewritten once when DASH opens) with these addresses. **ClickHouse** works the same way
+(`cluster://<namespace>/<service>:8123`) but has no installer item yet; one would need a pinned vendor image, a manifest like the others
+(unprivileged Deployment, claim, ClusterIP Service on 8123, a read-only user created for dashboards) and a `register_dash_source` call.
+
+**Repairing a localhost source.** A source that points at `http://localhost:9090` (the old form default) cannot work: the board then shows ONE banner per
+source ("Source Prometheus is not reachable: nothing listens on this machine at port 9090", the fix on its own lines) instead of the same red box in every
+panel, and the panels show a short state. The cluster is asked (in the background) what could be done, and the button says it:
+**Use cluster address** (the Service exists: only the address changes, through the normal save, audited as `dash.source_repaired`, administrators only,
+never without the click), **Install Elasticsearch (Store -> Setup)** (nothing in the cluster: Setup opens on that item) or **Remove source** (ClickHouse has no
+installer item). The Sources page has the same button for the selected source, **Fix all** (every source whose Service exists, one click; the install/remove
+choices stay yours) and **Remove duplicate** (same kind and address as another source). Sources that Quick install saved for every account
+(`sources-system.json`) are listed for all accounts; a baked-in cluster IP of `prometheus-cluster` is rewritten to the `cluster://` form whenever DASH or
+its Sources page opens.
+
+**Add source** pre-fills the address from what is really there: a matching Service in the cluster (by name, label and port) as
+`cluster://...`, else a process listening on localhost, else it stays empty and says why. A failed connect names the cause: nothing listens on
+this machine at that port (and where the instance is), `.svc` names only work inside the cluster, no cluster, Service not found, no ready pod,
+refused, timeout, TLS, sign-in.
+
+## Local cluster (k3s)
+
+A dashboard named **Local cluster (k3s)** (id `k3s-local`) is saved for every **administrator** account (policy `manage_users`) the first time DASH (or the assistant's
+dashboard tools) opens, together with the source **Local cluster (k3s)** (id `kube-local`, kind `kube`). No setup, no Prometheus, no address and no
+secret: the source asks the managed k3s (`K3sDev::kubectl`) directly. It refreshes every 30 s.
+
+**What it shows** (20 panels): cluster state, k3s version, nodes ready, cluster age and how long the nodes have been Ready, and whether metrics-server
+answers; six counts (nodes not ready, pods with problems, deployments not fully available, warnings in the last hour, services open on the LAN that are
+not documented, volume claims not Bound); nodes with roles, version and bad conditions (MemoryPressure, DiskPressure, SchedulingDisabled ...); pods by
+phase and by namespace; pods in CrashLoopBackOff, ImagePullBackOff, Pending, Failed, Evicted, not ready or stuck Terminating, each with the reason (the
+container's message, the last exit such as `OOMKilled (exit 137)`, or why the scheduler cannot place it) and the restart count; the ten containers that
+restarted most; deployments with fewer available replicas than wanted (or `ProgressDeadlineExceeded`); CPU and memory per node (with percent of what
+the node can allocate), per namespace and for the fifteen pods using most memory; warning events of the last hour; NodePort and LoadBalancer services,
+each marked `documented: ...` (`exposure::DOCUMENTED`) or `NOT documented: open on the LAN`; volume claims with phase, size and, when the kubelet reports
+it, usage.
+
+**Views.** A query on a `kube` source is the *name of a view*, nothing else: `cluster`, `nodes`, `node_states`, `pods_by_phase`, `pods_by_namespace`,
+`pod_problems`, `top_restarts`, `deployments_unavailable`, `node_usage`, `namespace_cpu`, `namespace_memory`, `pod_usage`, `warning_events`,
+`exposed_services`, `pvcs` and the counts `stat_nodes_not_ready`, `stat_pods_with_problems`, `stat_deployments_unavailable`, `stat_warnings_last_hour`,
+`stat_exposed_undocumented`, `stat_pvcs_not_bound`. The schema browser lists them; you can build your own panels from them like from any source (the
+assistant too: `dash_describe` lists the views, `dash_panel_add` takes the name). The language shown in the editor is "view name (cluster)".
+
+**Read-only, by construction.** The text of a query never reaches kubectl. The source can ask only for what `KubeRead` (`dash/cluster.rs`) lists: `version`,
+`get nodes|pods|events (type=Warning)|deployments|svc|pvc -A -o json`, `get --raw` on `metrics.k8s.io` nodes and pods, and one node's kubelet volume
+summary (the node name must be a DNS-style name). No `apply`, `delete`, `scale`, `patch`, `exec`, `logs`, `port-forward`, and **no Secrets** (the same rule as
+developer mode's `kube` scope). A query that starts with a write word (`delete pods`, `apply -f`, `scale ...`) is refused as a write before the cluster is
+asked, and anything that is not a view name is refused as a bad query. From each object only named fields are read: container commands, environment
+values and annotations are never copied, and the free text that is kept (statuses, events) is cut to one line and passed through the credential detector.
+The source needs the `dash` app in the role like every source. **The cluster is the administrators' own**: the `kube` connector is refused for any other account
+(whatever source it saved, also one in the shared system file), and nobody but an administrator is seeded. Everyone else reaches the cluster only through a
+dashboard an administrator shared with them (next section), and then sees only the views that dashboard shows.
+
+**When the cluster is down.** Stopped, starting, not installed or not answering: the first panel says `not running` with the reason (`k3s is stopped`,
+`k3s is not installed by IYAKKI on this machine`, ...), each table shows one row "cluster is not running", and charts and counts are empty with the same
+sentence as a notice. Nothing is red. When the API answers but the failure is something else (for example a permission error), the first panel says
+`not answering` and the other panels show the error.
+
+**CPU and memory need metrics-server**, which k3s ships in `kube-system`. While it does not answer (a minute after start, or when disabled with
+`--disable metrics-server`) the first panel says `not available: the metrics API is not answering ...` and the CPU and memory panels say the same; the rest
+of the dashboard works. **Volume usage** comes from the kubelet's summary and is blank where the kubelet does not report it (volumes backed by a plain
+host folder, such as k3s's default `local-path`, usually report none; the panel says so).
+
+**Cost and limits.** kubectl runs as a process (about 20 s at most, 8 MB of answer). Answers are kept for 10 s, so the panels that refresh together make
+one call per kind of object. Lists are cut at 20,000 items and tables at 200 rows (pods with problems, volume claims) with a notice.
+
+**Private, and shared by choice, with three roles.** The dashboard belongs to the administrator it was made for and is private to them. In the dashboard list, **Share**
+(key `h`) asks for account names (comma separated; the accounts must exist; up to 20) and then asks to confirm, in plain words: the viewers will be able to see
+the live state of this machine's k3s cluster (node, pod, namespace and deployment names, restarts and reasons, event messages, services and open ports, CPU and
+memory, volume claims); they cannot change anything, read Secrets, logs or a shell, or edit, share or export your dashboard; you can stop at any time. Each account is a **viewer** (looks only; the default) or an **operator** (`bob:operator, carol`); roles can be changed or removed later and the confirmation says what the
+role can do. Share with an empty list to stop (also confirmed). The list rows say `shared with bob (operator), carol (viewer)` for the owner and `you are operator` / `you are viewer` for a shared one; audit lines `dash.shared`,
+`dash.share_role`, `dash.unshared` and `dash.edited_shared` carry the dashboard id, account names and roles, nothing else.
+
+| | Owner | Operator | Viewer |
+|---|---|---|---|
+| look at the dashboard (the views it shows) | yes | yes | yes |
+| change panels, layout, time range, refresh; saved into the owner's dashboard | yes | **yes** | no (in memory only, never saved) |
+| rename, delete, export, source settings | yes | no | no |
+| share, re-share, unshare, change roles | yes | no | no |
+| queries of their own, other views, Secrets, logs, exec | (the owner's own rights) | no | no |
+
+An operator's save (`Env::save_dashboard`) is checked against the owner's file: the title, description, variables and default source stay the owner's, each panel
+must use the dashboard's own cluster source (viewer copies carry `share:...` source ids, mapped back on save) and a view the owner's saved dashboard already
+shows; a new view needs the owner. **If the owner changed the dashboard after the operator opened it, nothing is written** and the operator is told to open it again
+and redo the change; so the owner is never overwritten silently. Every save of a dashboard keeps the version it replaces as `Dashboards/<id>.json.bak` (one deep, removed
+with the dashboard), so the owner can step back from an operator's change and the other way round; the owner's own save does not check for an operator's change in
+between, it replaces it and the operator's version is the `.bak`. `shares.json` keeps `with` (everybody) and `operators` (a subset); a file from before roles has no
+`operators`, so everybody in it is a viewer, and a damaged role list reads as no operators.
+* Only a dashboard that uses nothing but the local cluster source can be shared (the source holds no address and no secret). If the owner later adds a panel on another
+  source, the share stops working until she removes it.
+* The list is in `<data>/dash/shares.json` (owner, dashboard, accounts) and is read on every list, open and query: unsharing, deleting the dashboard (its shares end
+  with it, and a new dashboard with the same id is not shared again), a viewer's account being removed (not shown any more) or the owner's account being removed
+  take effect at the next read. A damaged or hand-edited file widens nothing (bad names and ids are dropped).
+* A recipient sees the dashboard titled `<title> (shared by <owner>)`, id `share:<owner>/<id>`. That is not a valid dashboard id, so it cannot be saved by the ordinary path, renamed, deleted,
+  re-shared or exported (an operator's save goes through the checked path above; an export is refused and would carry no source anyway). The viewer's panels use the owner's source through a wrapper that
+  answers only the views that dashboard shows: no query of their own, no other view, and still no Secrets, logs or exec. A viewer may rearrange or change the open
+  copy in memory (and the assistant may work on it); none of it is saved or visible to anyone else. The account role (policy) does not matter: an operator in the
+  account sense is not given the cluster, only a share is.
+* An account without the `dash` app (guests) gets nothing even when named.
+
+**Seeded once.** `dash/seed.rs` saves the source and the dashboard when an account has not been seeded, and records that in
+`<data dir>/dash/seeded-<user>.json` (`{"seeded":["k3s-local"]}`; an account that is not an administrator is neither seeded nor marked, so one promoted later is seeded then). It never overwrites a dashboard or a source that already has that id, and after the
+first time it does nothing: **a dashboard you edited keeps your edits, and one you deleted does not come back**. If saving fails (a read-only disk) nothing is
+recorded and the next opening tries again.
+
+**To get it back or reset it:**
+* DASH > Dashboards > under the templates, **Local cluster (k3s)** makes a fresh copy (new id) next to yours. It needs a source of kind Kubernetes: if you
+  deleted `kube-local`, add one (Sources > Add source > Kubernetes (local k3s), cluster `local`).
+* To have the original recreated under its own id, delete `k3s-local` (and `kube-local`) if they exist and remove `"k3s-local"` from
+  `<data dir>/dash/seeded-<user>.json` (or delete the file); it is seeded again the next time DASH opens. `seed::reset_default` does the same and also
+  overwrites an existing `k3s-local` and `kube-local` with the shipped ones.
+
+**Verified and not.** Tested with fake kubectl answers (`dash/kube_fixtures/*.json`, `dash/kube_tests.rs`): every view, the broken, empty, huge and odd
+inputs, the cluster down, metrics missing, that only fixed `get`s are ever issued, the seeding rules. **Not verified on a real k3s**: the exact JSON this
+k3s version prints, the real metrics-server answers and their timing, the kubelet volume statistics, the 20 s kubectl limit on a large cluster, and how the
+20 panels look on a real window.
 
 ## Dashboards
 
@@ -227,12 +364,12 @@ own key, apart from the ordinary chat.
 ## Files
 
 `crates/iyakki-agent/src/dash/`: `connector.rs` (seam, errors, HTTP), `frame.rs`, `readonly.rs`, `prom.rs`, `es.rs`,
-`clickhouse.rs`, `duckdb.rs`, `registry.rs`, `model.rs`, `engine.rs`, `multi.rs` (queries in parallel, the shared cache, partial results), `expr.rs` (the expression stage), `templates.rs`, `store.rs`, `session.rs` (the open
+`clickhouse.rs`, `duckdb.rs`, `neo4j.rs`, `kube.rs` (the local cluster, with `kube_fixtures/` and `kube_tests.rs`), `seed.rs` (default dashboards, once per administrator), `share.rs` (sharing, view only, with `share_tests.rs`), `registry.rs`, `model.rs`, `engine.rs`, `multi.rs` (queries in parallel, the shared cache, partial results), `expr.rs` (the expression stage), `templates.rs`, `store.rs`, `session.rs` (the open
 dashboard, undo, the context), `explain.rs`, `tools.rs`. `crates/iyakki-shell/src/apps/`: `dash.rs` (the app),
 `dash_charts.rs` (renderers and the maths under them), `dash_query.rs` (query box), `dash_tests.rs`.
 
 ## Not done
 
-Alerting and annotations, share links, per-panel refresh, ES|QL, Prometheus `targets`, a linked DuckDB, the other connectors
+Alerting and annotations, share links, per-panel refresh, ES|QL, Prometheus `targets`, a linked DuckDB, other clusters than the local one, the other connectors
 listed above, a remote backend (the seam is ready for it). Not verified here: a real server of each kind, a real DuckDB, a real
 TLS server, bare metal, a real model.

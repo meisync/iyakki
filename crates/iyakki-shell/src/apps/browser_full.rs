@@ -21,9 +21,22 @@ pub const AREA_FULL: usize = 902;
 const START_TIMEOUT: Duration = Duration::from_secs(25);
 /// A wheel notch in the protocol (1/120 notch units).
 const NOTCH: i32 = 120;
-/// A pixel step of the shell's scroll engine (positive = up) as the protocol's wheel units (positive = down, 120 a notch).
-pub(super) fn wheel_units(px: i32) -> i32 {
-    (-(px as f32) * NOTCH as f32 / crate::scrolleng::NOTCH_PX).round() as i32
+/// The helper's size of one protocol notch in the page's CSS pixels (`on_wheel` in `dist/webview/wpe-helper/helper.c`: 120 units = 53).
+const HELPER_NOTCH_CSS: f32 = 53.0;
+/// A pixel step of the shell's scroll engine (positive = up) as the protocol's wheel units (positive = down, 120 a notch), not yet
+/// rounded. A click moves the page [`crate::scrolleng::SCREEN_NOTCH_PX`] on screen at any UI scale, like the Settings lists; the page's
+/// zoom makes its CSS pixels bigger or smaller, so the CSS distance is that divided by the zoom (1.0 = normal).
+pub(super) fn wheel_units_f(px: f32, zoom: f32) -> f32 {
+    let notches = -px / crate::scrolleng::NOTCH_PX;
+    notches * crate::scrolleng::SCREEN_NOTCH_PX / zoom.clamp(0.25, 5.0) / HELPER_NOTCH_CSS * NOTCH as f32
+}
+
+/// Whole units for `units`, the fraction kept in `carry` for the next step (so slow trackpad steps are not lost to rounding).
+pub(super) fn take_whole(units: f32, carry: &mut f32) -> i32 {
+    let total = *carry + units;
+    let whole = total.round();
+    *carry = total - whole;
+    whole as i32
 }
 
 /// Rows at the top of the page area that the browser's own chrome draws over (see `Full::draw_pending`).
@@ -37,6 +50,8 @@ pub enum Note {
     Titled(String),
     /// The helper went to a host the account may not open; it has been told to go back.
     Refused { url: String, host: String },
+    /// A top-level address with no web host (`file:`, a broken `http:`): shown, the tab is left alone.
+    NoAddress { scheme: String },
     /// The helper wants to save a file; the shell's download code decides.
     Download { url: String, name: String },
     /// The page copied text.
@@ -47,8 +62,15 @@ pub enum Note {
     Trouble(String),
     /// The sound doctor's short note for the browser bar (`Some`), or the end of it (`None`).
     Sound(Option<String>),
+    /// The page plays and somebody else holds the speaker: ask whether to stop them (`soundask.rs`).
+    SoundAsk(iyakki_agent::soundhold::Found),
     /// The page tried to play media without a decoder here (the helper's `MediaUnsupported`): `video`, `audio` or `both`.
     NeedsAv(String),
+    /// One developer-tools line from the page (the helper's `DevEvent`); stored only when the person turned developer tools for the chat agent on.
+    Dev(String),
+    /// The page asks for the camera / microphone / screen (the helper's `PermissionRequest`): `kinds` are `media_kind` bits. The browser
+    /// decides (`browser_media.rs`) and answers with [`Full::answer_permission`]; no answer means no.
+    Media { id: u32, kinds: u8, origin: String },
 }
 
 /// What a view needs the shell to do about a change (see [`Full::redraw_kind`]).
@@ -68,6 +90,8 @@ pub struct Full {
     pub url: String,
     pub loading: bool,
     pub progress: u8,
+    /// When the current load began (None while idle): the browser shows a "taking long" hint after a while.
+    pub load_started: Option<Instant>,
     pub can_back: bool,
     pub can_forward: bool,
     pub cursor: u8,
@@ -75,6 +99,8 @@ pub struct Full {
     pub page_focus: bool,
     /// The page is in DOM fullscreen: the browser shows only the page, over the whole pane, until the page leaves (or Esc asks it to).
     pub fullscreen: bool,
+    /// The devices the page captures now (`media_kind` bits), for the "camera is on" indicator.
+    pub capture: u8,
     /// Where the page area was drawn last (screen pixels), for turning absolute mouse positions into page ones.
     rect: R,
     /// The left button is held down inside the page (a drag), so moves arrive as presses repeated by the shell.
@@ -96,6 +122,8 @@ pub struct Full {
     pub visited: String,
     scale_hello: f32,
     zoom_pct: u32,
+    /// The part of a wheel unit not yet sent.
+    wheel_carry: f32,
     zoom_sent: u32,
     started: Instant,
     ready: bool,
@@ -157,11 +185,13 @@ impl Full {
             url: String::new(),
             loading: true,
             progress: 0,
+            load_started: Some(Instant::now()),
             can_back: false,
             can_forward: false,
             cursor: proto::cursor::DEFAULT,
             page_focus: true,
             fullscreen: false,
+            capture: 0,
             rect: R::new(0.0, 0.0, w as f32, h as f32),
             pressed: false,
             last_mouse: None,
@@ -175,6 +205,7 @@ impl Full {
             visited: String::new(),
             scale_hello: st.scale.max(0.1),
             zoom_pct: (st.zoom * 100.0).round() as u32,
+            wheel_carry: 0.0,
             zoom_sent: 100,
             started: Instant::now(),
             ready: false,
@@ -224,8 +255,24 @@ impl Full {
         self.view.send(m)
     }
 
-    pub fn navigate(&mut self, url: &str) {
+    /// A load begins (or is asked for): the bar starts from nothing again instead of showing the last page's number.
+    fn load_begins(&mut self) {
         self.loading = true;
+        self.progress = 0;
+        self.load_started = Some(Instant::now());
+        self.redraw = true;
+    }
+
+    /// Seconds the current load has been going (`None` when nothing is loading).
+    pub fn loading_secs(&self) -> Option<f32> {
+        if !self.loading {
+            return None;
+        }
+        self.load_started.map(|t| t.elapsed().as_secs_f32())
+    }
+
+    pub fn navigate(&mut self, url: &str) {
+        self.load_begins();
         self.view.send(ToHelper::Navigate(url.to_string()));
     }
 
@@ -248,12 +295,15 @@ impl Full {
     }
 
     pub fn reload(&mut self) {
-        self.loading = true;
+        self.load_begins();
         self.view.send(ToHelper::Reload { hard: false });
     }
 
     pub fn stop(&mut self) {
         self.view.send(ToHelper::Stop);
+        self.loading = false;
+        self.load_started = None;
+        self.redraw = true;
     }
 
     pub fn back(&mut self) {
@@ -268,6 +318,21 @@ impl Full {
         self.zoom_pct = (zoom * 100.0).round() as u32;
         let s = self.scale_hello;
         self.send_zoom(s);
+    }
+
+    /// Tell the engine where the shell writes its screen for a granted share (empty ends it).
+    pub fn send_screen_source(&mut self, path: &str) {
+        self.view.send(ToHelper::ScreenSource(path.to_string()));
+    }
+
+    /// The person clicked "stop": end what the page captures (`media_kind` bits).
+    pub fn stop_capture(&mut self, kinds: u8) {
+        self.view.send(ToHelper::StopCapture { kinds });
+    }
+
+    /// Tell the engine what the person (or the policy) decided about request `id`.
+    pub fn answer_permission(&mut self, id: u32, allow: bool) {
+        self.view.send(ToHelper::PermissionAnswer { id, allow });
     }
 
     /// Esc in fullscreen: ask the page to leave (it answers with `Fullscreen(false)`, which restores the bars). The bars stay
@@ -292,6 +357,11 @@ impl Full {
                 self.redraw = true;
             }
         }
+    }
+
+    /// The engine has painted at least once.
+    pub fn has_picture(&self) -> bool {
+        self.pm.is_some()
     }
 
     pub fn is_ready(&self) -> bool {
@@ -347,27 +417,40 @@ impl Full {
                     self.redraw = true;
                 }
                 WvEvent::Url(u) => {
-                    if !url_allowed(&u, allow) {
-                        let host = iyakki_sec::url_host(&u).unwrap_or_else(|| u.chars().take(60).collect());
-                        // go back to where we were; with no earlier page, to a blank one
-                        if self.can_back {
-                            self.view.send(ToHelper::Back);
-                        } else if self.good_url.is_empty() {
-                            self.view.send(ToHelper::Navigate("about:blank".into()));
-                        } else {
-                            self.view.send(ToHelper::Navigate(self.good_url.clone()));
+                    match classify_url(&u, allow) {
+                        // not a navigation of the tab (empty, `javascript:`): nothing changes
+                        UrlVerdict::Ignore => {}
+                        UrlVerdict::NoAddress(scheme) => {
+                            self.notes.push(Note::NoAddress { scheme });
                         }
-                        self.notes.push(Note::Refused { url: u, host });
-                    } else {
-                        if u.starts_with("http") {
-                            self.good_url = u.clone();
+                        UrlVerdict::Refuse(host) => {
+                            // go back to where we were; with no earlier page, to a blank one
+                            if self.can_back {
+                                self.view.send(ToHelper::Back);
+                            } else if self.good_url.is_empty() {
+                                self.view.send(ToHelper::Navigate("about:blank".into()));
+                            } else {
+                                self.view.send(ToHelper::Navigate(self.good_url.clone()));
+                            }
+                            self.notes.push(Note::Refused { url: u, host });
                         }
-                        self.url = u.clone();
-                        self.notes.push(Note::Navigated(u));
+                        UrlVerdict::Pass => {
+                            if u.starts_with("http") {
+                                self.good_url = u.clone();
+                            }
+                            self.url = u.clone();
+                            self.notes.push(Note::Navigated(u));
+                        }
                     }
                     self.redraw = true;
                 }
                 WvEvent::Loading { loading, progress } => {
+                    if loading && !self.loading {
+                        self.load_started = Some(Instant::now());
+                    }
+                    if !loading {
+                        self.load_started = None;
+                    }
                     self.loading = loading;
                     self.progress = progress;
                     self.redraw = true;
@@ -400,8 +483,18 @@ impl Full {
                     self.notes.push(Note::NeedsAv(w));
                     self.redraw = true;
                 }
+                WvEvent::DevEvent(l) => self.notes.push(Note::Dev(l)),
+                WvEvent::PermissionRequest { id, kinds, origin } => self.notes.push(Note::Media { id, kinds, origin }),
+                WvEvent::CaptureState(k) => {
+                    if self.capture != k {
+                        self.capture = k;
+                        self.redraw = true;
+                    }
+                }
                 WvEvent::Crashed(r) => self.notes.push(Note::Trouble(r)),
                 WvEvent::Log(l) => {
+                    // kept (cleaned of page addresses and credentials) for DOCTOR and `dev logs --system engine`
+                    iyakki_agent::enginelog::keep(&l);
                     self.sound.on_log(&l);
                     log::debug!("webview: {l}");
                     if self.log.len() >= 60 {
@@ -410,6 +503,7 @@ impl Full {
                     self.log.push_back(l);
                 }
                 WvEvent::Exited(why) => {
+                    iyakki_agent::enginelog::keep(&format!("the helper stopped: {why}"));
                     self.gone = Some(why.clone());
                     self.notes.push(Note::Gone(why));
                     self.redraw = true;
@@ -441,6 +535,28 @@ impl Full {
                 }
             }
         }
+        if let Some(f) = self.sound.take_ask() {
+            self.notes.push(Note::SoundAsk(f));
+        }
+        // another player (the radio's dialog) asked the browser to stop
+        if self.sound.take_stop_request() {
+            self.eval(super::browser_sound::PAUSE_JS, 2000);
+        }
+    }
+
+    /// The speaker was freed (the person chose "Stop it"): make the page's media open its sound again.
+    pub fn reconnect_sound(&mut self) {
+        self.eval(iyakki_agent::sounddoctor::RECONNECT_JS, 2000);
+    }
+
+    /// Something drawn over the page changed (the sound dialog): paint again.
+    pub fn want_redraw(&mut self) {
+        self.redraw = true;
+    }
+
+    /// "Cancel" on the sound dialog: it may come back later.
+    pub fn sound_ask_cancelled(&mut self) {
+        self.sound.ask_cancelled();
     }
 
     /// Copy the changed part of the helper's picture into ours (BGRA premultiplied to opaque RGBA over white).
@@ -496,7 +612,8 @@ impl Full {
         // the page's own white where no picture has arrived yet (or the area grew and the helper has not caught up): only the part
         // the picture does not cover (the picture is drawn over the rest, so filling it first would write the whole area twice)
         let Some(pm) = &self.pm else {
-            g.rect(view.x, view.y, view.w, view.h, [255, 255, 255, 255]);
+            // a calm dark placeholder (not the page's white) until the first picture arrives
+            g.rect(view.x, view.y, view.w, view.h, super::browser_chrome::PLACEHOLDER);
             return;
         };
         let (pw, ph) = (pm.width() as i32, pm.height() as i32);
@@ -611,7 +728,7 @@ impl Full {
     pub fn wheel(&mut self, notches: i32) -> bool {
         let Some((x, y)) = self.last_mouse else { return false };
         let (x, y) = self.dev(x, y);
-        self.view.send(ToHelper::Wheel { x, y, dx: 0, dy: -notches * NOTCH, mods: 0 });
+        self.view.send(ToHelper::Wheel { x, y, dx: 0, dy: take_whole(wheel_units_f(notches as f32 * crate::scrolleng::NOTCH_PX, self.zoom_pct as f32 / 100.0), &mut self.wheel_carry), mods: 0 });
         true
     }
 
@@ -621,7 +738,7 @@ impl Full {
     pub fn wheel_px(&mut self, px: i32) -> bool {
         let Some((x, y)) = self.last_mouse else { return false };
         let (x, y) = self.dev(x, y);
-        self.view.send(ToHelper::Wheel { x, y, dx: 0, dy: wheel_units(px), mods: 0 });
+        self.view.send(ToHelper::Wheel { x, y, dx: 0, dy: take_whole(wheel_units_f(px as f32, self.zoom_pct as f32 / 100.0), &mut self.wheel_carry), mods: 0 });
         true
     }
 
@@ -636,16 +753,49 @@ impl Full {
     }
 }
 
+/// What the tab does with an address the engine reports for the TAB (the engine reports top-level navigations only; frames and
+/// resources never come here, they are covered by the blocker and the policy in the network layer).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UrlVerdict {
+    /// Take it as the tab's address.
+    Pass,
+    /// Not a navigation of the tab: empty, `javascript:`.
+    Ignore,
+    /// A scheme that has no web host (`file:`, `http:` without a host): say so, keep the tab.
+    NoAddress(String),
+    /// A real host the account may not open.
+    Refuse(String),
+}
+
+pub fn classify_url(url: &str, allow: &dyn Fn(&str) -> bool) -> UrlVerdict {
+    let u = url.trim();
+    if u.is_empty() {
+        return UrlVerdict::Ignore;
+    }
+    let scheme = u.split(':').next().unwrap_or("").to_ascii_lowercase();
+    if u.contains(':') && matches!(scheme.as_str(), "about" | "data" | "blob") {
+        return UrlVerdict::Pass;
+    }
+    if scheme == "javascript" {
+        return UrlVerdict::Ignore;
+    }
+    match iyakki_sec::url_host(u) {
+        Some(h) if !h.is_empty() => {
+            if allow(&h) {
+                UrlVerdict::Pass
+            } else {
+                UrlVerdict::Refuse(h)
+            }
+        }
+        _ => UrlVerdict::NoAddress(scheme.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')).take(12).collect()),
+    }
+}
+
 /// An address the account may open: `about:`, `data:` and `blob:` pages have no host; anything else needs a host the
 /// account is allowed.
 pub fn url_allowed(url: &str, allow: &dyn Fn(&str) -> bool) -> bool {
-    if url.starts_with("about:") || url.starts_with("data:") || url.starts_with("blob:") {
-        return true;
-    }
-    match iyakki_sec::url_host(url) {
-        Some(h) => allow(&h),
-        None => false,
-    }
+    // only a page address the tab takes over: `javascript:` and an empty address are not navigations (the tab ignores them) and are not "allowed" addresses either
+    classify_url(url, allow) == UrlVerdict::Pass
 }
 
 fn nav_sym(n: Nav) -> u32 {
@@ -702,15 +852,40 @@ mod tests {
 
     #[test]
     fn smooth_pixel_steps_become_fractions_of_a_notch_in_the_protocols_units() {
-        // 54 nominal pixels are one notch (120 units); positive pixels scroll up, positive units scroll down
-        assert_eq!(wheel_units(54), -120);
-        assert_eq!(wheel_units(-54), 120);
-        assert_eq!(wheel_units(27), -60);
-        assert_eq!(wheel_units(3), -7, "a 3 px step is a small fraction, not a whole notch");
-        assert_eq!(wheel_units(0), 0);
-        // nothing is lost over a click delivered as steps: 9 steps of 6 px = one notch (within rounding)
-        let sum: i32 = (0..9).map(|_| wheel_units(6)).sum();
-        assert!((sum + 120).abs() <= 5, "{sum}");
+        let u = |px: f32| wheel_units_f(px, 1.0);
+        // one click (54 nominal px) moves the page 40 screen px = 40/53 of the helper's notch; positive px scroll up, positive units down
+        let notch = 120.0 * crate::scrolleng::SCREEN_NOTCH_PX / HELPER_NOTCH_CSS;
+        assert!((u(-54.0) - notch).abs() < 0.01 && (u(54.0) + notch).abs() < 0.01, "{}", u(-54.0));
+        assert!((u(27.0) + notch / 2.0).abs() < 0.01);
+        assert_eq!(u(0.0), 0.0);
+        // a click delivered as 9 steps adds up to the same as one step; the carry loses nothing to rounding
+        let mut c = 0.0;
+        let sum: i32 = (0..9).map(|_| take_whole(u(-6.0), &mut c)).sum();
+        assert!((sum as f32 - notch).abs() <= 0.5 && c.abs() <= 0.5, "{sum} {c}");
+        let mut c = 0.0;
+        let tiny: i32 = (0..100).map(|_| take_whole(u(-0.5), &mut c)).sum(); // 50 px of slow touchpad travel
+        assert!((tiny as f32 - u(-50.0)).abs() <= 0.5, "{tiny}");
+    }
+
+    #[test]
+    fn the_page_moves_the_same_on_screen_distance_per_click_as_settings_at_every_zoom() {
+        // the screen distance of a click is units/120 * 53 css px * zoom (css px on screen), and equals the Settings list step at UI scale 1
+        for zoom in [0.5_f32, 1.0, 1.5, 2.0, 3.0] {
+            let screen = wheel_units_f(-crate::scrolleng::NOTCH_PX, zoom) / 120.0 * HELPER_NOTCH_CSS * zoom;
+            assert!((screen - crate::scrolleng::SCREEN_NOTCH_PX).abs() < 0.01, "zoom {zoom}: {screen}");
+        }
+        // a wheel rolled the other way goes the other way, touchpad pixels pass through in proportion (no acceleration)
+        assert!(wheel_units_f(10.0, 1.0) < 0.0 && wheel_units_f(-10.0, 1.0) > 0.0);
+        assert!((wheel_units_f(-20.0, 1.0) - 2.0 * wheel_units_f(-10.0, 1.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn the_browser_is_eased_by_the_shell_like_every_tile_so_the_feel_is_the_same() {
+        // the engine takes the shell's eased pixel steps as precise deltas: the same ease as Settings, nothing eased twice
+        let mut e = crate::scrolleng::ScrollEngine::new();
+        e.wheel(120, &crate::scrolleng::ScrollConfig::default());
+        let first = e.tick(16, false);
+        assert!(first > 0 && (first as f32) < crate::scrolleng::NOTCH_PX, "a click arrives in several steps, not one jump: {first}");
     }
 
     #[test]

@@ -56,6 +56,18 @@ tiles that would do nothing there. A future cloud image variant only needs `VARI
 Automatic. The local-hardware images (`libre`, `hw`, `mac`, `macweb`, `aarch64`) have a screen, input and sound, so they stay in desktop
 mode unless asked.
 
+## A limited cloud deployment: the web service as the way in
+
+A cloud machine does not need the desktop at all. `iyakki serve --profile cloud --config /etc/iyakki/service.json` runs the **cloud
+profile** of the web service (`docs/development/MINIMAL-WEBSERVICE.md`, section 9) instead of the shell: HTTPS only, sign-in with the
+machine's accounts, and only the allow-listed assistant, flows (read) and data routes. It is cloud mode applied to the service: no local
+shell UI, no hardware tiles, nothing that needs sound, camera, USB or firmware, no developer-mode install of unsigned apps and no
+firewall change through the API. A test asserts that every app its routes need is `Class::Remote` in `cloudmode.rs`, that no route or
+tool names hardware, and that a hardware tool a model asks for is refused. Example configuration for a container or VM:
+`dist/service/service.cloud.json` (listen address, `allow_from`, certificate paths, token store, profile). A load balancer checks
+`GET /healthz` (alive) and `GET /readyz` (ready). The full desktop in a browser (`iyakki serve --web`) stays the other way to use a cloud
+machine; both can run on one machine.
+
 ## What is not tested
 
 Everything is tested with made-up `/sys` trees and the shell's own render; no real server or cloud VM was booted. How a given cloud

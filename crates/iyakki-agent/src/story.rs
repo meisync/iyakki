@@ -680,6 +680,23 @@ pub fn envelope(wav: &[u8]) -> (Vec<f32>, f32) {
     (env, secs)
 }
 
+/// The silence at the start and at the end of a sound, ms, from its [`envelope`] (20 ms per value) and its length: engines pad
+/// their sounds, and the words are timed over the speech between the paddings. (0, 0) when the sound has no clear speech.
+pub fn speech_edges(env: &[f32], secs: f32) -> (f32, f32) {
+    const QUIET: f32 = 0.03;
+    const FRAME_MS: f32 = 20.0;
+    let total = secs * 1000.0;
+    let (Some(a), Some(b)) = (env.iter().position(|e| *e > QUIET), env.iter().rposition(|e| *e > QUIET)) else { return (0.0, 0.0) };
+    if total <= 0.0 || b <= a {
+        return (0.0, 0.0);
+    }
+    // a word begins a little before its first loud frame
+    let lead = (a as f32 * FRAME_MS - FRAME_MS).max(0.0);
+    let trail = (total - (b + 1) as f32 * FRAME_MS).max(0.0);
+    let cap = total * 0.35;
+    (lead.min(cap), trail.min(cap))
+}
+
 /// Join the WAV pieces into one file with a short silence between sentences and a longer one between paragraphs.
 pub fn assemble_audio(chunks: &[Chunk], wavs: &[Arc<Vec<u8>>]) -> Result<Vec<u8>, String> {
     assemble_audio_timed(chunks, wavs).map(|(w, _)| w)
@@ -764,6 +781,11 @@ pub trait Playing: Send {
     fn spoken_word(&mut self) -> Option<(usize, usize)> {
         None
     }
+    /// How many milliseconds of this piece have actually been heard, when the speaker can tell (the mixer subtracts its lead and
+    /// stands still while the sound is starved). None: the clock estimates from the wall time as before.
+    fn played_ms(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 /// Starts playing a WAV file on the speaker.
@@ -778,6 +800,9 @@ impl Playing for voice::Player {
     fn stop(&mut self) {
         voice::Player::stop(self)
     }
+    fn played_ms(&mut self) -> Option<u64> {
+        voice::Player::played_ms(self)
+    }
 }
 
 /// The speaker command of Settings → Voice (`aplay -q` by default): the WAV goes to its standard input.
@@ -787,7 +812,7 @@ pub struct CommandSink {
 
 impl Sink for CommandSink {
     fn play(&self, wav: &[u8]) -> Result<Box<dyn Playing>, String> {
-        Ok(Box::new(voice::Player::start(&self.play_cmd, wav)?))
+        Ok(Box::new(voice::Player::start_streamed(&self.play_cmd, wav)?))
     }
 }
 
@@ -866,6 +891,8 @@ struct St {
     wavs: Vec<Option<Arc<Vec<u8>>>>,
     envs: Vec<Vec<f32>>,
     secs: Vec<f32>,
+    /// The silence at the start and at the end of each piece's sound (ms), measured from it: the words fill the speech between.
+    edges: Vec<(f32, f32)>,
     /// Word times measured for each piece (the engine's own, or an alignment), when there are any.
     timed: Vec<Option<Timed>>,
     /// Where the word times of the clock come from.
@@ -907,6 +934,34 @@ impl St {
 
     /// The clock for piece `i`: its measured word times when there are any, else fitted to its sound when the length is
     /// known, a rate estimate otherwise; and where the times come from.
+    /// How the estimate was fitted to the sound of piece `i` (None when the times were measured or the length is unknown).
+    fn fit_report(&self, i: usize) -> Option<wordtime::FitReport> {
+        let c = self.chunks.get(i)?;
+        let secs = self.secs.get(i).copied().filter(|s| *s > 0.0)?;
+        if self.timed.get(i).is_some_and(|t| t.is_some()) {
+            return None;
+        }
+        let (lead, trail) = self.edges.get(i).copied().unwrap_or((0.0, 0.0));
+        let env = self.envs.get(i).map(Vec::as_slice).unwrap_or(&[]);
+        Some(WordTimeline::fitted_pinned(&c.text, secs * 1000.0, lead, trail, env).1)
+    }
+
+    /// Which timeline the clock of piece `i` uses, in words, for the log.
+    fn timeline_path(&self, i: usize) -> String {
+        if let Some(Some(t)) = self.timed.get(i) {
+            return format!("{} word times", t.source.label());
+        }
+        let secs = self.secs.get(i).copied().unwrap_or(0.0);
+        if secs <= 0.0 {
+            return "rate estimate: the length of the sound is unknown".into();
+        }
+        match self.fit_report(i) {
+            Some(f) if f.pins > 0 => format!("pinned {} pause(s) to punctuation", f.pins),
+            _ if self.envs.get(i).is_none_or(|e| e.is_empty()) => "plain fit: no loudness".into(),
+            _ => "plain fit: no silences matched to punctuation".into(),
+        }
+    }
+
     fn clock_for(&self, i: usize) -> Option<(WordClock, TimingSource)> {
         if !self.words_on {
             return None;
@@ -916,7 +971,16 @@ impl St {
             return Some((WordClock::new(tl, wordtime::START_LATENCY_MS), src));
         }
         let secs = self.secs.get(i).copied().unwrap_or(0.0);
-        let tl = if secs > 0.0 { WordTimeline::fitted(&c.text, secs * 1000.0) } else { WordTimeline::estimate(&c.text, self.speed) };
+        let (lead, trail) = self.edges.get(i).copied().unwrap_or((0.0, 0.0));
+        let env = self.envs.get(i).map(Vec::as_slice).unwrap_or(&[]);
+        let tl = if secs > 0.0 {
+            let (tl, rep) = WordTimeline::fitted_pinned(&c.text, secs * 1000.0, lead, trail, env);
+            log::debug!("reading: sentence {}: word timeline stretch factor {:.2}, {} pause(s) pinned to punctuation, worst estimated-versus-pinned boundary error {:.0} ms", i + 1, rep.stretch, rep.pins, rep.worst_boundary_error_ms);
+            log::debug!("reading: sentence {} words: {}", i + 1, tl.debug_line(&c.text));
+            tl
+        } else {
+            WordTimeline::estimate(&c.text, self.speed)
+        };
         Some((WordClock::new(tl, wordtime::START_LATENCY_MS), TimingSource::Estimated))
     }
 }
@@ -947,7 +1011,7 @@ impl Reader {
     pub fn new() -> Reader {
         Reader {
             sh: Arc::new(Shared {
-                st: Mutex::new(St { gen: 0, chunks: Vec::new(), wavs: Vec::new(), envs: Vec::new(), secs: Vec::new(), timed: Vec::new(), source: TimingSource::Estimated, cur: 0, status: Status::Idle, paused: false, pause_seq: 0, open: false, started: None, voice_key: String::new(), synth: None, sink: None, fail: None, clock: None, words_on: true, speed: 1.0, epoch: Instant::now(), time: None }),
+                st: Mutex::new(St { gen: 0, chunks: Vec::new(), wavs: Vec::new(), envs: Vec::new(), secs: Vec::new(), edges: Vec::new(), timed: Vec::new(), source: TimingSource::Estimated, cur: 0, status: Status::Idle, paused: false, pause_seq: 0, open: false, started: None, voice_key: String::new(), synth: None, sink: None, fail: None, clock: None, words_on: true, speed: 1.0, epoch: Instant::now(), time: None }),
                 cv: Condvar::new(),
             }),
         }
@@ -968,6 +1032,7 @@ impl Reader {
             let mut wavs = vec![None; chunks.len()];
             let mut envs = vec![Vec::new(); chunks.len()];
             let mut secs = vec![0.0; chunks.len()];
+            let mut edges = vec![(0.0, 0.0); chunks.len()];
             let mut timed = vec![None; chunks.len()];
             if same_voice {
                 for (i, c) in chunks.iter().enumerate() {
@@ -975,6 +1040,7 @@ impl Reader {
                         wavs[i] = st.wavs[i].clone();
                         envs[i] = std::mem::take(&mut st.envs[i]);
                         secs[i] = st.secs[i];
+                        edges[i] = st.edges.get(i).copied().unwrap_or((0.0, 0.0));
                         timed[i] = st.timed.get(i).cloned().flatten();
                     }
                 }
@@ -983,6 +1049,7 @@ impl Reader {
             st.wavs = wavs;
             st.envs = envs;
             st.secs = secs;
+            st.edges = edges;
             st.timed = timed;
             st.voice_key = voice_key.to_string();
             st.cur = from.min(st.chunks.len());
@@ -1011,6 +1078,7 @@ impl Reader {
             st.wavs.push(None);
             st.envs.push(Vec::new());
             st.secs.push(0.0);
+            st.edges.push((0.0, 0.0));
             st.timed.push(None);
         }
         drop(st);
@@ -1078,6 +1146,17 @@ impl Reader {
         matches!(self.lock().status, Status::Buffering | Status::Playing | Status::Paused)
     }
 
+    /// Tell [`crate::soundhold`] that this reader holds the speaker while it reads aloud (the browser's "Stop it" dialog names it
+    /// as TALES and stops it with [`Reader::stop`]). The latest reader announced is the one the dialog stops.
+    pub fn announce_holder(&self) {
+        let (a, b) = (self.clone(), self.clone());
+        crate::soundhold::announce(
+            "tales",
+            Arc::new(move || matches!(a.status(), Status::Buffering | Status::Playing).then(|| "TALES is reading".to_string())),
+            Arc::new(move || b.stop()),
+        );
+    }
+
     pub fn status(&self) -> Status {
         self.lock().status.clone()
     }
@@ -1103,6 +1182,12 @@ impl Reader {
         let word_exact = word.is_some() && st.clock.as_ref().is_some_and(|k| k.mode(now) == wordtime::TimingMode::Exact);
         let timing = if word_exact { TimingSource::Voice } else { st.source };
         Snapshot { status: st.status.clone(), chunk: cur, unit: c.map_or(0, |c| c.unit), range: c.map_or((0, 0), |c| (c.start, c.end)), chunks: total, fraction, ready: st.wavs.iter().filter(|w| w.is_some()).count(), word, word_exact, timing }
+    }
+
+    /// Which timeline the word clock of the piece that plays uses (the same words as the "timeline:" part of the sentence log line).
+    pub fn timeline_note(&self) -> String {
+        let st = self.lock();
+        st.timeline_path(st.cur)
     }
 
     /// The reader's time in milliseconds: the real clock, or the one given to [`Reader::set_time_source`].
@@ -1182,6 +1267,7 @@ fn synth_loop(sh: Arc<Shared>, gen: u64, from: usize, synth: Arc<dyn Synth>) {
                 let need_align = timed.is_none() && st.words_on;
                 if i < st.wavs.len() {
                     st.wavs[i] = Some(w.clone());
+                    st.edges[i] = speech_edges(&env, secs);
                     st.envs[i] = env;
                     st.secs[i] = secs;
                     st.timed[i] = timed;
@@ -1307,6 +1393,8 @@ fn play_loop(sh: Arc<Shared>, gen: u64, from: usize, sink: Arc<dyn Sink>) {
             sh.cv.notify_all();
             let Ok(mut child) = played else { return };
             let mut last_word: Option<(usize, usize)> = None;
+            // (milliseconds heard at the last change, when that was)
+            let mut follower = wordtime::HeardFollower::new();
             loop {
                 let st = sh.st.lock().unwrap_or_else(|e| e.into_inner());
                 if st.gen != gen {
@@ -1321,6 +1409,18 @@ fn play_loop(sh: Arc<Shared>, gen: u64, from: usize, sink: Arc<dyn Sink>) {
                 }
                 let st = sh.cv.wait_timeout(st, POLL).unwrap_or_else(|e| e.into_inner()).0;
                 drop(st);
+                // the speaker says how much was heard: the words follow the sound, so a gap in the sound stops the highlight
+                if let Some(p) = child.played_ms() {
+                    let mut st = sh.st.lock().unwrap_or_else(|e| e.into_inner());
+                    let now = st.now_ms();
+                    if st.gen == gen && !st.paused {
+                        // Settings -> Sound "Highlight timing offset": positive lights the words later
+                        let p = (p as f32 - crate::audiosink::highlight_offset_ms() as f32).max(0.0);
+                        if let Some(k) = st.clock.as_mut() {
+                            follower.poll(k, p, now);
+                        }
+                    }
+                }
                 // the voice itself says which word it is on (browser boundary events)
                 if let Some(w) = child.spoken_word().filter(|w| Some(*w) != last_word) {
                     last_word = Some(w);
@@ -1334,6 +1434,32 @@ fn play_loop(sh: Arc<Shared>, gen: u64, from: usize, sink: Arc<dyn Sink>) {
                     }
                 }
                 if !child.is_playing() {
+                    if child.error().is_none() {
+                        let st = sh.st.lock().unwrap_or_else(|e| e.into_inner());
+                        if st.gen == gen {
+                            let (audio, at) = (st.secs.get(i).copied().unwrap_or(0.0) * 1000.0, st.clock.as_ref().map(|k| k.position(st.now_ms())));
+                            let m = follower.stats();
+                            let fit = st.fit_report(i);
+                            let path = st.timeline_path(i);
+                            if m.polls > 0 {
+                                log::info!(
+                                    "reading: sentence {} of {}: sound {:.0} ms, heard {:.0} ms, word clock at {} ms, clock behind the sound by at most {:.0} ms and ahead by at most {:.0} ms, longest gap between polls {:.0} ms, highlight offset {} ms, timeline: {}, word timeline stretch factor {}, worst estimated-versus-pinned boundary error {}",
+                                    i + 1,
+                                    st.chunks.len(),
+                                    audio,
+                                    m.last_played_ms,
+                                    at.map_or("-".to_string(), |a| format!("{a:.0}")),
+                                    m.max_behind_ms,
+                                    m.max_ahead_ms,
+                                    m.max_gap_ms,
+                                    crate::audiosink::highlight_offset_ms(),
+                                    path,
+                                    fit.map_or("-".to_string(), |f| format!("{:.2}", f.stretch)),
+                                    fit.map_or("-".to_string(), |f| format!("{:.0} ms ({} pinned)", f.worst_boundary_error_ms, f.pins))
+                                );
+                            }
+                        }
+                    }
                     if let Some(e) = child.error() {
                         let mut st = sh.st.lock().unwrap_or_else(|e| e.into_inner());
                         if st.gen == gen {
@@ -1439,8 +1565,7 @@ pub fn tts_status_auto(v: &VoiceSettings, voice_allowed: bool, path: &str, host:
             return TtsStatus::HostUnavailable(e);
         }
         if let Some(p) = program.as_deref().filter(|p| !p.is_empty()) {
-            // the Indic voices' "program" is the address of their server, not a file
-            if id != crate::indic::ENGINE_ID && !Path::new(p).is_file() {
+            if !Path::new(p).is_file() {
                 return TtsStatus::HostUnavailable(format!("{p} is no longer there; open Settings → Voice and press Re-check"));
             }
         }
@@ -3816,6 +3941,205 @@ mod tests {
         time.fetch_add(600 + wordtime::START_LATENCY_MS as u32, Ordering::SeqCst);
         assert_eq!((r.snapshot().timing, r.snapshot().word), (TimingSource::Native, Some((23, 26))));
         r.stop();
+    }
+
+    /// A speaker that reports the heard position from the held time: audible `lag` ms after it was started, then in step with it.
+    struct HeardSink {
+        time: Moved,
+        lag: u32,
+        audio_ms: u32,
+    }
+    struct HeardChild {
+        time: Moved,
+        began: u32,
+        lag: u32,
+        audio_ms: u32,
+    }
+    impl Playing for HeardChild {
+        fn is_playing(&mut self) -> bool {
+            self.pos() < self.audio_ms
+        }
+        fn stop(&mut self) {}
+        fn played_ms(&mut self) -> Option<u64> {
+            Some(self.pos() as u64)
+        }
+    }
+    impl HeardChild {
+        fn pos(&self) -> u32 {
+            self.time.load(Ordering::SeqCst).saturating_sub(self.began + self.lag).min(self.audio_ms)
+        }
+    }
+    impl Sink for HeardSink {
+        fn play(&self, _wav: &[u8]) -> Result<Box<dyn Playing>, String> {
+            Ok(Box::new(HeardChild { time: self.time.clone(), began: self.time.load(Ordering::SeqCst), lag: self.lag, audio_ms: self.audio_ms }))
+        }
+    }
+
+    /// 300 ms of silence, 1500 ms of sound, 400 ms of silence (what an engine's padding looks like).
+    struct PaddedSynth;
+    impl Synth for PaddedSynth {
+        fn synth(&self, _text: &str) -> Result<Vec<u8>, String> {
+            let mut pcm = vec![0i16; 16 * 300];
+            pcm.extend((0..16 * 1500).map(|i| if (i / 40) % 2 == 0 { 8000 } else { -8000 }));
+            pcm.extend(vec![0i16; 16 * 400]);
+            Ok(voice::encode_wav(&pcm, 16_000))
+        }
+    }
+
+    #[test]
+    fn the_silence_around_the_speech_is_measured_and_the_words_are_timed_over_the_speech_only() {
+        let (env, secs) = envelope(&PaddedSynth.synth("x").unwrap());
+        let (lead, trail) = speech_edges(&env, secs);
+        assert!((260.0..=300.0).contains(&lead), "{lead}");
+        assert!((380.0..=420.0).contains(&trail), "{trail}");
+        // nothing but silence, or nothing at all: no edges
+        assert_eq!(speech_edges(&[0.0; 50], 1.0), (0.0, 0.0));
+        assert_eq!(speech_edges(&[], 0.0), (0.0, 0.0));
+        // the reader follows the heard position: the last word is lit when the speech has reached it, not when the padding does
+        let (r, time) = held_reader();
+        let text = "The fox woke early and ran";
+        let sk = Arc::new(HeardSink { time: time.clone(), lag: 0, audio_ms: 2200 });
+        r.start(words_chunks(), 0, false, "v", Arc::new(PaddedSynth), sk);
+        wait_for("playing", || r.status() == Status::Playing);
+        let tl = WordTimeline::fitted_in(text, 2200.0, lead, trail);
+        let plain = WordTimeline::fitted(text, 2200.0);
+        let last_start = tl.start_ms(5).unwrap();
+        assert!(last_start < plain.start_ms(5).unwrap() - 50.0, "the last word starts earlier once the padding is out of the fit: {last_start} vs {}", plain.start_ms(5).unwrap());
+        let began = time.load(Ordering::SeqCst);
+        // run to just after the last word starts in the measured timing: it is lit, the plain fit would still say the one before
+        advance_until("the last word", &time, 20, || r.snapshot().word == Some((4 + 23, 4 + 26)));
+        let at = time.load(Ordering::SeqCst) - began;
+        assert!((last_start - 40.0..=last_start + 80.0).contains(&(at as f32)), "lit at {at} ms, the timing says {last_start}");
+        assert!(plain.word_at(at as f32).unwrap() < 5, "the plain fit is still on an earlier word at that time");
+        r.stop();
+    }
+
+    /// 200 ms lead, "Alpha beta" (700 ms), a 300 ms pause, "gamma delta epsilon" (1200 ms), a 400 ms pause, "zeta eta" (500 ms),
+    /// 400 ms trail: a voice that is fast before the first comma, which the character model cannot know.
+    /// Tests that depend on (or change) the process-wide highlight offset take turns.
+    static OFFSET_TURN: Mutex<()> = Mutex::new(());
+
+    struct CommaSynth;
+    impl Synth for CommaSynth {
+        fn synth(&self, _text: &str) -> Result<Vec<u8>, String> {
+            let mut pcm = vec![0i16; 16 * 200];
+            pcm.extend((0..16 * 700).map(|i| if (i / 40) % 2 == 0 { 8000 } else { -8000 }));
+            pcm.extend(vec![0i16; 16 * 300]);
+            pcm.extend((0..16 * 1200).map(|i| if (i / 40) % 2 == 0 { 8000 } else { -8000 }));
+            pcm.extend(vec![0i16; 16 * 400]);
+            pcm.extend((0..16 * 500).map(|i| if (i / 40) % 2 == 0 { 8000 } else { -8000 }));
+            pcm.extend(vec![0i16; 16 * 400]);
+            Ok(voice::encode_wav(&pcm, 16_000))
+        }
+    }
+
+    /// The same voice as [`CommaSynth`], answered as 32-bit float mono WAV (what Kokoro through Lemonade sends).
+    struct FloatCommaSynth;
+    impl Synth for FloatCommaSynth {
+        fn synth(&self, text: &str) -> Result<Vec<u8>, String> {
+            let w = voice::parse_wav(&CommaSynth.synth(text)?)?;
+            let mut b = Vec::new();
+            b.extend_from_slice(b"RIFF");
+            b.extend(((36 + w.samples.len() * 4) as u32).to_le_bytes());
+            b.extend_from_slice(b"WAVEfmt ");
+            b.extend(16u32.to_le_bytes());
+            b.extend(3u16.to_le_bytes());
+            b.extend(1u16.to_le_bytes());
+            b.extend(w.rate.to_le_bytes());
+            b.extend((w.rate * 4).to_le_bytes());
+            b.extend(4u16.to_le_bytes());
+            b.extend(32u16.to_le_bytes());
+            b.extend_from_slice(b"data");
+            b.extend(((w.samples.len() * 4) as u32).to_le_bytes());
+            for s in &w.samples {
+                b.extend((*s as f32 / 32768.0).to_le_bytes());
+            }
+            Ok(b)
+        }
+    }
+
+    /// The device log showed "sound 0 ms" and no pinning: the engine's 32-bit float WAV was not read, so the sentence got the rate
+    /// estimate with no length at all. Through the entry the shell uses (`Reader::start`), a float WAV is measured, pinned, and the
+    /// log says which timeline ran.
+    #[test]
+    fn a_float_wav_from_the_engine_is_measured_and_pinned_and_the_log_says_which_timeline_ran() {
+        let _turn = OFFSET_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let text = "Alpha beta, gamma delta epsilon, zeta eta.";
+        let audio_ms = 200 + 700 + 300 + 1200 + 400 + 500 + 400;
+        let (r, time) = held_reader();
+        let sk = Arc::new(HeardSink { time: time.clone(), lag: 0, audio_ms });
+        let chunk = Chunk { unit: 0, start: 0, end: text.chars().count(), text: text.into() };
+        r.start(vec![chunk.clone()], 0, false, "v", Arc::new(FloatCommaSynth), sk.clone());
+        wait_for("playing", || r.status() == Status::Playing);
+        assert!(r.timeline_note().starts_with("pinned 2"), "{}", r.timeline_note());
+        let began = time.load(Ordering::SeqCst);
+        advance_until("gamma", &time, 10, || r.snapshot().word == Some((12, 17)));
+        let at = (time.load(Ordering::SeqCst) - began) as f32;
+        assert!((1170.0..=1290.0).contains(&at), "gamma lit at {at} ms, the voice resumes at 1200");
+        r.stop();
+        // a sound that cannot be read at all says so instead of "-"
+        struct Junk;
+        impl Synth for Junk {
+            fn synth(&self, _t: &str) -> Result<Vec<u8>, String> {
+                Ok(vec![1, 2, 3])
+            }
+        }
+        let (r, time) = held_reader();
+        r.start(vec![chunk], 0, false, "v2", Arc::new(Junk), Arc::new(HeardSink { time, lag: 0, audio_ms: 1000 }));
+        wait_for("playing", || r.status() == Status::Playing || matches!(r.status(), Status::Failed(_)));
+        if r.status() == Status::Playing {
+            assert!(r.timeline_note().starts_with("rate estimate"), "{}", r.timeline_note());
+        }
+        r.stop();
+    }
+
+    /// The chat reads one chunk per sentence and TALES reads grouped chunks, both through this reader: the words after a comma
+    /// light up when the voice resumes after its pause, not when a character-proportional model says so.
+    #[test]
+    fn a_pause_of_the_sound_is_pinned_to_the_comma_so_the_words_after_it_light_on_time_in_story_and_chat() {
+        let _turn = OFFSET_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let text = "Alpha beta, gamma delta epsilon, zeta eta.";
+        let audio_ms = 200 + 700 + 300 + 1200 + 400 + 500 + 400;
+        let plain = WordTimeline::fitted_in(text, audio_ms as f32, 200.0, 400.0);
+        assert!((plain.start_ms(2).unwrap() - 1200.0).abs() > 100.0, "the plain fit is off at the comma: {}", plain.start_ms(2).unwrap());
+        for chat in [false, true] {
+            let chunks = if chat { sentence_chunks(text, 200) } else { vec![Chunk { unit: 0, start: 0, end: text.chars().count(), text: text.into() }] };
+            assert_eq!(chunks.len(), 1);
+            let (r, time) = held_reader();
+            let sk = Arc::new(HeardSink { time: time.clone(), lag: 0, audio_ms });
+            r.start(chunks, 0, false, "v", Arc::new(CommaSynth), sk);
+            wait_for("playing", || r.status() == Status::Playing);
+            let began = time.load(Ordering::SeqCst);
+            advance_until("gamma", &time, 10, || r.snapshot().word == Some((12, 17)));
+            let at = (time.load(Ordering::SeqCst) - began) as f32;
+            assert!((1170.0..=1290.0).contains(&at), "chat {chat}: gamma lit at {at} ms, the voice resumes at 1200");
+            advance_until("zeta", &time, 10, || r.snapshot().word == Some((33, 37)));
+            let at = (time.load(Ordering::SeqCst) - began) as f32;
+            assert!((2770.0..=2890.0).contains(&at), "chat {chat}: zeta lit at {at} ms, the voice resumes at 2800");
+            r.stop();
+        }
+    }
+
+    #[test]
+    fn the_highlight_offset_moves_the_lit_word_later_or_earlier_by_that_many_ms() {
+        use crate::audiosink::{highlight_offset_ms, set_highlight_offset_ms};
+        assert_eq!(highlight_offset_ms(), 0, "0 by default");
+        let _turn = OFFSET_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let mut when = Vec::new();
+        for offset in [0i32, 250, -250] {
+            set_highlight_offset_ms(offset);
+            let (r, time) = held_reader();
+            let sk = Arc::new(HeardSink { time: time.clone(), lag: 0, audio_ms: 2200 });
+            r.start(words_chunks(), 0, false, "v", Arc::new(PaddedSynth), sk);
+            wait_for("playing", || r.status() == Status::Playing);
+            let began = time.load(Ordering::SeqCst);
+            advance_until("the fourth word", &time, 5, || r.snapshot().word.is_some_and(|w| w.0 >= 4 + 15));
+            when.push(time.load(Ordering::SeqCst) as i64 - began as i64);
+            r.stop();
+        }
+        set_highlight_offset_ms(0);
+        assert!((when[1] - when[0] - 250).abs() <= 40, "250 ms later: {when:?}");
+        assert!((when[0] - when[2] - 250).abs() <= 40, "250 ms earlier: {when:?}");
     }
 
     #[test]

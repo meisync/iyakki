@@ -42,6 +42,7 @@ ordinary programs through four listed interfaces ([`../BOUNDARY.md`](../BOUNDARY
 | `iyakki-sec` | Roles and policy, revocable capability tokens, entropy, Wi-Fi key derivation |
 | `iyakki-wasm` | wasmtime sandbox with fuel and memory caps, snapshots, speculative branches, replay recording |
 | `iyakki-ledger` | Hash-chained execution ledger with time travel |
+| `iyakki-schema` | Versioned JSON files on the data volume: schema number, migrations, atomic write, backup before the first change, newer file read-only ([`development/DATA-LAYOUT-AND-UPGRADE.md`](development/DATA-LAYOUT-AND-UPGRADE.md)) |
 | `iyakki-vfs` | In-memory filesystem with quota, fork and diff |
 | `iyakki-mem` | Tiered memory (registers, scratchpad, vector store) with paging |
 | `iyakki-hw` | Microphone and camera bridges into WASM guests |

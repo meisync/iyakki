@@ -78,7 +78,7 @@ impl Exposure {
     pub fn explain(self) -> &'static str {
         match self {
             Exposure::ClusterIP => "only pods inside the cluster can reach it (use kubectl port-forward from your machine)",
-            Exposure::NodePort => "reachable on every node's address at the chosen ports: anyone who can reach the nodes can reach it",
+            Exposure::NodePort => "opens the chosen ports on every network address of the nodes: anyone on your network can reach it",
             Exposure::LoadBalancer => "the cluster's load balancer gives it an external address: possibly reachable from outside your network",
             Exposure::Ingress => "reachable through the cluster's ingress controller at the host name you give",
         }
@@ -152,7 +152,7 @@ pub fn common_options(def: &dyn ServiceDef) -> Vec<OptionDef> {
         OptionDef::new("version", "Version", "A pinned version known to IYAKKI.", OptKind::Choice(versions.clone()), versions.last().map(String::as_str).unwrap_or("")),
         OptionDef::new("storage_size", "Storage size", "Size of the PersistentVolumeClaim.", OptKind::Size, "10Gi"),
         OptionDef::new("storage_class", "Storage class", "Empty: the cluster's default class (or local-path).", OptKind::Text, ""),
-        OptionDef::new("exposure", "Exposure", "How it is reachable: NodePort (default), ClusterIP, LoadBalancer or Ingress.", OptKind::Choice(Exposure::ALL.iter().map(|e| e.word().to_string()).collect()), "NodePort"),
+        OptionDef::new("exposure", "Exposure", &format!("How it is reachable; {} is the default. NodePort and LoadBalancer open ports on your network, ClusterIP keeps it inside the cluster, Ingress goes through the ingress controller.", def.default_exposure().word()), OptKind::Choice(Exposure::ALL.iter().map(|e| e.word().to_string()).collect()), def.default_exposure().word()),
         OptionDef::new("ingress_host", "Ingress host", "Only for Ingress: the host name, such as git.example.lan.", OptKind::Text, ""),
         OptionDef::new("admin_user", "Admin user", "The first administrator's login.", OptKind::Text, "iyakki-admin"),
         OptionDef::new("mirror", "Mirror images", "Copy the images through the in-cluster registry (for an air-gapped cluster). Needs the registry set up and docker or podman here.", OptKind::Bool, "false"),
@@ -413,6 +413,15 @@ pub trait ServiceDef: Send + Sync {
     fn default_namespace(&self) -> String {
         format!("iyakki-{}", self.id())
     }
+    /// The exposure used when the person does not choose one. Gitea stays inside the cluster and this machine's loopback; a store that
+    /// other devices add is a NodePort.
+    fn default_exposure(&self) -> Exposure {
+        Exposure::NodePort
+    }
+    /// The first NodePort tried for the HTTP Service (the SSH Service starts at 30222).
+    fn first_node_port(&self) -> u16 {
+        30300
+    }
     fn build(&self, c: &BuildCtx) -> Result<Built, String>;
     fn workloads(&self) -> Vec<Workload>;
     /// A path under the first web URL that answers 200 when the service is healthy.
@@ -517,7 +526,7 @@ pub fn unregister(id: &str) {
 
 /// The built-in services, then the registered ones.
 pub fn specs() -> Vec<Arc<dyn ServiceDef>> {
-    let mut v: Vec<Arc<dyn ServiceDef>> = vec![Arc::new(gitea::Gitea), Arc::new(crate::store::privatestore::PrivateStore), Arc::new(crate::indic::service::IndicTts)];
+    let mut v: Vec<Arc<dyn ServiceDef>> = vec![Arc::new(gitea::Gitea), Arc::new(crate::store::privatestore::PrivateStore)];
     v.extend(extra().lock().unwrap_or_else(|e| e.into_inner()).iter().cloned());
     v
 }
@@ -560,7 +569,7 @@ impl Platform {
             audit,
             env: crate::devcluster::Env::real(),
             tmp: crate::kubeprofiles::temp_dir().unwrap_or_else(std::env::temp_dir),
-            http: Arc::new(connect::CurlHttp { run, tmp: crate::kubeprofiles::temp_dir().unwrap_or_else(std::env::temp_dir) }),
+            http: Arc::new(connect::NetHttp::default()),
             gen: Arc::new(secrets::random_secret),
             live: None,
         }

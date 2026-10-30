@@ -550,7 +550,7 @@ fn a_real_server_answers_on_loopback_and_stops_cleanly() {
     assert_eq!(run.site.clients_served(), 1);
     let addr = run.addr;
     run.stop();
-    assert!(TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_err(), "the port is closed");
+    assert!(refused(addr), "the port is closed");
 }
 
 #[test]
@@ -598,8 +598,22 @@ fn manager(f: &Fx, allow: bool) -> Shares {
     Shares::open(&f.root.parent().unwrap().join("cfg/shares.json"), "alice", f.env(), a, lan)
 }
 
+/// The port refuses connections (within 3 s: a child process forked while the listener was open keeps it alive until its `exec`).
+fn refused(addr: std::net::SocketAddr) -> bool {
+    let end = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_err() {
+            return true;
+        }
+        if std::time::Instant::now() >= end {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    crate::testdir::free_port()
 }
 
 fn draft(f: &Fx) -> Draft {
@@ -705,13 +719,13 @@ fn start_stop_expiry_stop_all_and_restore() {
     // the port stays the same after stop and start
     let port = m.get(&a).unwrap().port;
     m.stop(&a);
-    assert!(TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_err());
+    assert!(refused(addr));
     m.start(&a).unwrap();
     assert_eq!(m.get(&a).unwrap().port, port);
     // expiry
     f.clock.fetch_add(3601, Ordering::SeqCst);
     std::thread::sleep(Duration::from_millis(200));
-    assert!(TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_err(), "the port closes by itself when the time is up");
+    assert!(refused(addr), "the port closes by itself when the time is up");
     m.tick();
     assert_eq!(m.running_count(), 0, "both ended");
     m.start(&a).unwrap();

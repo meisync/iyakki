@@ -1,0 +1,5 @@
+# Rust dependencies whose licence is not on the allow list (crates/iyakki-relcheck/src/spdx.rs CARGO_ALLOW) but were reviewed.
+# name | version or * | licence EXACTLY as the crate states it (a changed licence stops the row applying) | reason | date
+# GPL, AGPL, SSPL, proprietary and unknown licences never belong here without the owner's written decision.
+webpki-roots        | * | CDLA-Permissive-2.0 | Mozilla CA root list as data; permissive data licence, already reviewed in deny.toml and LICENSING.md item 3 | 2026-10-26
+epaint_default_fonts| * | (MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0 | egui's bundled fonts (OFL-1.1, Ubuntu Font Licence): free, redistributable, cover only the font files; scoped exception already in deny.toml; GUI workspace only | 2026-10-26

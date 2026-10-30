@@ -63,8 +63,23 @@ fn folder(cx: &AppCx, name: &str) -> String {
     d.to_string_lossy().into_owned()
 }
 
+/// The port refuses connections (within 3 s: a child process forked while the listener was open keeps it alive until its `exec`).
+fn refused(port: u16) -> bool {
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_err() {
+            return true;
+        }
+        if std::time::Instant::now() >= end {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    iyakki_agent::testdir::free_port()
 }
 
 fn form_for(cx: &AppCx, name: &str, access: usize) -> Form {
@@ -166,7 +181,7 @@ fn start_stop_and_stop_all_with_a_real_server() {
     assert!(rows[0].running && rows[0].clients == 1 && rows[0].left.is_some());
     key(&mut a, &cx, Key::Char('s'));
     assert!(status(&a).contains("Stopped sharing"));
-    assert!(std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().unwrap(), std::time::Duration::from_millis(300)).is_err());
+    assert!(refused(port));
     // start again, then stop all
     key(&mut a, &cx, Key::Char('s'));
     assert_eq!(iyakki_agent::sharedfolder::running_total(), 1);
@@ -175,7 +190,7 @@ fn start_stop_and_stop_all_with_a_real_server() {
     key(&mut a, &cx, Key::Char('x'));
     assert!(status(&a).contains("Stopped 1 share"), "{}", status(&a));
     assert_eq!(iyakki_agent::sharedfolder::running_total(), 0);
-    assert!(std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().unwrap(), std::time::Duration::from_millis(300)).is_err());
+    assert!(refused(port));
     // sign-out stops them too
     key(&mut a, &cx, Key::Char('s'));
     assert_eq!(iyakki_agent::sharedfolder::running_total(), 1);

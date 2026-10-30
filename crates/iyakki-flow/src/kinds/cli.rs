@@ -171,7 +171,7 @@ impl NodeKind for CliKind {
         let r = execute(cx, cfg, argv.clone(), cli, node.config.to_string().contains("{{secret."))?;
         let out = combined(&r);
         if r.missing {
-            return Err(NodeError { message: format!("`{}` was not found", argv[0]), missing: true, output: out, ..Default::default() });
+            return Err(NodeError { message: format!("`{}` was not found: it is not installed on this system. Use the HTTP request step for web calls, or add the program first", argv[0]), missing: true, output: out, ..Default::default() });
         }
         if r.timed_out {
             return Err(NodeError { message: format!("`{}` took longer than {} ms and was stopped", argv[0], cx.timeout_ms), timed_out: true, output: out, ..Default::default() });

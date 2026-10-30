@@ -2,6 +2,7 @@
 //! icons, and TrueType text (DejaVu, bundled). No GPU, window system or Mesa needed, so the same
 //! code draws to a Linux framebuffer on bare metal, to a PNG for tests, or into any window.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::HashMap;
 
 use fontdue::{Font, FontSettings};
@@ -72,6 +73,15 @@ pub enum Icon {
     Lab,
     /// The GIT tile: a branch with three nodes.
     Git,
+    /// The DOCTOR tile: a rounded case with a plus.
+    Doctor,
+    /// The CHECK-UP tile: a clipboard with a tick.
+    Checkup,
+    Learn,
+    /// The top bar's speaker: 0 muted (a cross), 1 low, 2 medium, 3 high (one to three sound waves), 4 no sound output (slashed).
+    Volume(u8),
+    /// The top bar's Home button: a house (roof, walls, door).
+    Home,
 }
 
 type GlyphKey = (char, u32, Face);
@@ -89,9 +99,41 @@ pub struct Gfx {
     bold: Font,
     mono: Font,
     cache: HashMap<GlyphKey, (fontdue::Metrics, Vec<u8>)>,
+    /// The pixels outside a clip rectangle while [`Gfx::clipped`] runs (kept between calls so nothing is allocated per frame).
+    clip_buf: Vec<u8>,
     /// Made the first time text in a script that needs shaping appears (it parses a couple of MB of fonts).
     shaper: Option<crate::shaping::Shaper>,
     shaped_cache: HashMap<(usize, u16, u32), (fontdue::Metrics, Vec<u8>)>,
+    /// Test builds only: every string passed to [`Gfx::text`] with its top-left position, for `TileHarness`.
+    #[cfg(test)]
+    pub text_log: Vec<(f32, f32, String)>,
+    /// While `Some`, every string drawn is kept here (developer mode's `iyakki dev state`, which asks for it a few seconds at a time).
+    /// Capped, and switched on by the shell only for the frames a computer asked for.
+    pub text_cap: Option<Vec<(f32, f32, String)>>,
+    /// Test builds only: what the overflow detector (`monkey_tests`, KI-015) needs: every single-line text with its box and the innermost
+    /// clip it was drawn in, and every opaque fill, both in drawing order (`seq`).
+    #[cfg(test)]
+    pub layout_log: LayoutLog,
+}
+
+/// See [`Gfx::layout_log`].
+#[cfg(test)]
+#[derive(Default)]
+pub struct LayoutLog {
+    pub seq: u32,
+    pub clips: Vec<R>,
+    pub texts: Vec<(u32, R, Option<R>, String)>,
+    pub fills: Vec<(u32, R)>,
+}
+
+#[cfg(test)]
+impl LayoutLog {
+    fn fill(&mut self, x: f32, y: f32, w: f32, h: f32, c: [u8; 4]) {
+        if c[3] >= 250 {
+            self.seq += 1;
+            self.fills.push((self.seq, R::new(x, y, w, h)));
+        }
+    }
 }
 
 fn load(bytes: &[u8]) -> Font {
@@ -166,8 +208,14 @@ impl Gfx {
             bold: load(include_bytes!("../assets/DejaVuSans-Bold.ttf")),
             mono: load(include_bytes!("../assets/DejaVuSansMono.ttf")),
             cache: HashMap::new(),
+            clip_buf: Vec::new(),
             shaper: None,
             shaped_cache: HashMap::new(),
+            #[cfg(test)]
+            text_log: Vec::new(),
+            text_cap: None,
+            #[cfg(test)]
+            layout_log: LayoutLog::default(),
         }
     }
 
@@ -180,26 +228,46 @@ impl Gfx {
     /// back afterwards and click regions are cut to it (dropped when nothing is left). For scrolled content (a transcript, a
     /// list) whose items are taller than the pane or start above it.
     pub fn clipped<T>(&mut self, clip: R, f: impl FnOnce(&mut Gfx) -> T) -> T {
-        let before = self.pm.data().to_vec();
-        let start = self.hits.len();
-        let out = f(self);
         let (w, h) = (self.pm.width() as usize, self.pm.height() as usize);
         let x0 = (clip.x.floor().max(0.0) as usize).min(w);
         let x1 = ((clip.x + clip.w).ceil().max(0.0) as usize).min(w).max(x0);
         let y0 = (clip.y.floor().max(0.0) as usize).min(h);
         let y1 = ((clip.y + clip.h).ceil().max(0.0) as usize).min(h).max(y0);
-        if before.len() == w * h * 4 {
-            let data = self.pm.data_mut();
-            for y in 0..h {
-                let row = y * w * 4;
-                if y < y0 || y >= y1 {
-                    data[row..row + w * 4].copy_from_slice(&before[row..row + w * 4]);
-                } else {
-                    data[row..row + x0 * 4].copy_from_slice(&before[row..row + x0 * 4]);
-                    data[row + x1 * 4..row + w * 4].copy_from_slice(&before[row + x1 * 4..row + w * 4]);
-                }
+        // only what lies outside the rectangle is kept (rows above and below, then the strips left and right of it), in a
+        // buffer that is reused: copying the whole screen each time cost milliseconds per call at 2880x1800
+        let mut saved = std::mem::take(&mut self.clip_buf);
+        saved.clear();
+        let row = w * 4;
+        {
+            let data = self.pm.data();
+            saved.extend_from_slice(&data[..y0 * row]);
+            saved.extend_from_slice(&data[y1 * row..h * row]);
+            for y in y0..y1 {
+                saved.extend_from_slice(&data[y * row..y * row + x0 * 4]);
+                saved.extend_from_slice(&data[y * row + x1 * 4..(y + 1) * row]);
             }
         }
+        let start = self.hits.len();
+        #[cfg(test)]
+        self.layout_log.clips.push(clip);
+        let out = f(self);
+        #[cfg(test)]
+        self.layout_log.clips.pop();
+        if self.pm.data().len() == h * row {
+            let data = self.pm.data_mut();
+            let mut at = 0;
+            let put = |dst: &mut [u8], at: &mut usize| {
+                dst.copy_from_slice(&saved[*at..*at + dst.len()]);
+                *at += dst.len();
+            };
+            put(&mut data[..y0 * row], &mut at);
+            put(&mut data[y1 * row..h * row], &mut at);
+            for y in y0..y1 {
+                put(&mut data[y * row..y * row + x0 * 4], &mut at);
+                put(&mut data[y * row + x1 * 4..(y + 1) * row], &mut at);
+            }
+        }
+        self.clip_buf = saved;
         if self.hits.len() >= start {
             let mut kept = Vec::with_capacity(self.hits.len() - start);
             for mut hit in self.hits.drain(start..) {
@@ -213,6 +281,120 @@ impl Gfx {
             self.hits.extend(kept);
         }
         out
+    }
+
+    /// Like [`Gfx::clipped`] for a drawing that stays near `clip` (within `margin` pixels on every side): only that ring
+    /// around the rectangle is saved and put back, so a small repaint costs the size of the repaint, not of the screen. What `f`
+    /// draws farther away than `margin` stays (the caller promises there is nothing).
+    pub fn clipped_near<T>(&mut self, clip: R, margin: f32, f: impl FnOnce(&mut Gfx) -> T) -> T {
+        let (w, h) = (self.pm.width() as i32, self.pm.height() as i32);
+        let cx0 = (clip.x.floor() as i32).clamp_safe(0, w);
+        let cx1 = ((clip.x + clip.w).ceil() as i32).clamp_safe(cx0, w);
+        let cy0 = (clip.y.floor() as i32).clamp_safe(0, h);
+        let cy1 = ((clip.y + clip.h).ceil() as i32).clamp_safe(cy0, h);
+        let m = margin.ceil().max(0.0) as i32;
+        let (bx0, bx1) = ((cx0 - m).max(0), (cx1 + m).min(w));
+        let (by0, by1) = ((cy0 - m).max(0), (cy1 + m).min(h));
+        // the ring: rows above and below the rectangle (full width of the box), then the strips left and right of it
+        let rings: [(i32, i32, i32, i32); 4] = [(bx0, by0, bx1, cy0), (bx0, cy1, bx1, by1), (bx0, cy0, cx0, cy1), (cx1, cy0, bx1, cy1)];
+        let mut saved = std::mem::take(&mut self.clip_buf);
+        saved.clear();
+        for &(x0, y0, x1, y1) in &rings {
+            self.copy_out(x0, y0, x1, y1, &mut saved);
+        }
+        let start = self.hits.len();
+        #[cfg(test)]
+        self.layout_log.clips.push(clip);
+        let out = f(self);
+        #[cfg(test)]
+        self.layout_log.clips.pop();
+        let mut at = 0;
+        for &(x0, y0, x1, y1) in &rings {
+            at += self.copy_in(x0, y0, x1, y1, &saved[at..]);
+        }
+        self.clip_buf = saved;
+        if self.hits.len() >= start {
+            let mut kept = Vec::with_capacity(self.hits.len() - start);
+            for mut hit in self.hits.drain(start..) {
+                let (nx0, ny0) = (hit.rect.x.max(clip.x), hit.rect.y.max(clip.y));
+                let (nx1, ny1) = ((hit.rect.x + hit.rect.w).min(clip.x + clip.w), (hit.rect.y + hit.rect.h).min(clip.y + clip.h));
+                if nx1 > nx0 && ny1 > ny0 {
+                    hit.rect = R::new(nx0, ny0, nx1 - nx0, ny1 - ny0);
+                    kept.push(hit);
+                }
+            }
+            self.hits.extend(kept);
+        }
+        out
+    }
+
+    /// Append the pixels of the (clamped) box `x0..x1` x `y0..y1`, row by row, to `out`.
+    fn copy_out(&self, x0: i32, y0: i32, x1: i32, y1: i32, out: &mut Vec<u8>) {
+        let (w, h) = (self.pm.width() as i32, self.pm.height() as i32);
+        let (x0, x1, y0, y1) = (x0.clamp_safe(0, w), x1.clamp_safe(0, w), y0.clamp_safe(0, h), y1.clamp_safe(0, h));
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let data = self.pm.data();
+        for y in y0..y1 {
+            let i = (y * w + x0) as usize * 4;
+            out.extend_from_slice(&data[i..i + (x1 - x0) as usize * 4]);
+        }
+    }
+
+    /// Write rows saved by `copy_out` back into the box; returns the bytes used.
+    fn copy_in(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, src: &[u8]) -> usize {
+        let (w, h) = (self.pm.width() as i32, self.pm.height() as i32);
+        let (x0, x1, y0, y1) = (x0.clamp_safe(0, w), x1.clamp_safe(0, w), y0.clamp_safe(0, h), y1.clamp_safe(0, h));
+        if x1 <= x0 || y1 <= y0 {
+            return 0;
+        }
+        let rowb = (x1 - x0) as usize * 4;
+        let data = self.pm.data_mut();
+        for (k, y) in (y0..y1).enumerate() {
+            let i = (y * w + x0) as usize * 4;
+            data[i..i + rowb].copy_from_slice(&src[k * rowb..(k + 1) * rowb]);
+        }
+        rowb * (y1 - y0) as usize
+    }
+
+    /// The pixels of a rectangle (integer pixels, clamped to the screen), row by row.
+    pub fn grab(&self, rect: (i32, i32, i32, i32)) -> Vec<u8> {
+        let mut v = Vec::new();
+        self.copy_out(rect.0, rect.1, rect.0 + rect.2, rect.1 + rect.3, &mut v);
+        v
+    }
+
+    /// Put pixels taken with [`Gfx::grab`] back (same rectangle).
+    pub fn put(&mut self, rect: (i32, i32, i32, i32), px: &[u8]) {
+        self.copy_in(rect.0, rect.1, rect.0 + rect.2, rect.1 + rect.3, px);
+    }
+
+    /// Draw into a small pixmap that holds only `rect`, seeded with `seed` (the pixels of the rectangle as [`Gfx::grab`] gave
+    /// them) or with what is on the screen now, and write it back. `f` draws as usual but gets the rectangle's origin and
+    /// has to subtract it from its coordinates. A large shape that matters only at its edges then costs the size of the edges.
+    /// The pointer position is shifted too, so hover tests keep working; hit regions are not kept.
+    pub fn in_region(&mut self, rect: (i32, i32, i32, i32), seed: Option<&[u8]>, f: impl FnOnce(&mut Gfx, f32, f32)) {
+        let (w, h) = (self.pm.width() as i32, self.pm.height() as i32);
+        let (x0, y0) = (rect.0.clamp_safe(0, w), rect.1.clamp_safe(0, h));
+        let (x1, y1) = ((rect.0 + rect.2).clamp_safe(x0, w), (rect.1 + rect.3).clamp_safe(y0, h));
+        let (rw, rh) = ((x1 - x0) as u32, (y1 - y0) as u32);
+        let Some(mut scratch) = (if rw > 0 && rh > 0 { Pixmap::new(rw, rh) } else { None }) else { return };
+        match seed.filter(|p| p.len() == (rw * rh * 4) as usize) {
+            Some(p) => scratch.data_mut().copy_from_slice(p),
+            None => {
+                let now = self.grab((x0, y0, x1 - x0, y1 - y0));
+                scratch.data_mut().copy_from_slice(&now);
+            }
+        }
+        std::mem::swap(&mut self.pm, &mut scratch);
+        let (mouse, nhits) = (self.mouse, self.hits.len());
+        self.mouse = (mouse.0 - x0, mouse.1 - y0);
+        f(self, x0 as f32, y0 as f32);
+        self.mouse = mouse;
+        self.hits.truncate(nhits);
+        std::mem::swap(&mut self.pm, &mut scratch);
+        self.put((x0, y0, x1 - x0, y1 - y0), scratch.data());
     }
 
     /// Drop every region registered so far (a modal calls this so the dimmed UI behind it can't be clicked).
@@ -340,12 +522,16 @@ impl Gfx {
 
     /// Axis-aligned fill, snapped to whole pixels (crisp edges; avoids tiny-skia's thin-rect hairline path).
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, c: [u8; 4]) {
+        #[cfg(test)]
+        self.layout_log.fill(x, y, w, h, c);
         if let Some(r) = Rect::from_xywh(x.round(), y.round(), w.round().max(1.0), h.round().max(1.0)) {
             self.pm.fill_rect(r, &paint(c), Transform::identity(), None);
         }
     }
 
     pub fn rrect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, c: [u8; 4]) {
+        #[cfg(test)]
+        self.layout_log.fill(x, y, w, h, c);
         if let Some(p) = rrect_path(x, y, w, h, r) {
             self.pm.fill_path(&p, &paint(c), FillRule::Winding, Transform::identity(), None);
         }
@@ -420,6 +606,21 @@ impl Gfx {
 
     /// Draw `s` with its top-left at (x, y). Returns the advance width. Text is clipped to the pixmap.
     pub fn text(&mut self, x: f32, y: f32, size: f32, color: [u8; 4], s: &str, face: Face) -> f32 {
+        #[cfg(test)]
+        {
+            self.text_log.push((x, y, s.to_string()));
+            if !s.contains('\n') && !s.trim().is_empty() {
+                let (tw, th) = (self.text_width(size, s, face), self.line_height(size.round().max(MIN_TEXT_PX), face));
+                self.layout_log.seq += 1;
+                let (seq, clip) = (self.layout_log.seq, self.layout_log.clips.last().copied());
+                self.layout_log.texts.push((seq, R::new(x, y, tw, th), clip, s.to_string()));
+            }
+        }
+        if let Some(v) = self.text_cap.as_mut() {
+            if v.len() < 4000 {
+                v.push((x, y, s.to_string()));
+            }
+        }
         let px = size.round().max(MIN_TEXT_PX);
         let ascent = self.font(face).horizontal_line_metrics(px).map_or(px, |m| m.ascent);
         let base = y + ascent;
@@ -821,6 +1022,47 @@ impl Gfx {
                 waves.cubic_to(x0 + s * 0.78, y0 + s * 0.44, x0 + s * 0.78, y0 + s * 0.56, x0 + s * 0.68, y0 + s * 0.64);
                 waves.move_to(x0 + s * 0.78, y0 + s * 0.24);
                 waves.cubic_to(x0 + s * 0.98, y0 + s * 0.4, x0 + s * 0.98, y0 + s * 0.6, x0 + s * 0.78, y0 + s * 0.76);
+                if let Some(w) = waves.finish() {
+                    self.pm.stroke_path(&w, &p, &st, id, None);
+                }
+            }
+            Icon::Volume(level) => {
+                let mut cone = PathBuilder::new();
+                cone.move_to(x0 + s * 0.08, y0 + s * 0.38);
+                cone.line_to(x0 + s * 0.28, y0 + s * 0.38);
+                cone.line_to(x0 + s * 0.5, y0 + s * 0.18);
+                cone.line_to(x0 + s * 0.5, y0 + s * 0.82);
+                cone.line_to(x0 + s * 0.28, y0 + s * 0.62);
+                cone.line_to(x0 + s * 0.08, y0 + s * 0.62);
+                cone.close();
+                if let Some(c) = cone.finish() {
+                    self.pm.fill_path(&c, &p, FillRule::Winding, id, None);
+                }
+                let mut waves = PathBuilder::new();
+                if level >= 1 && level <= 3 {
+                    waves.move_to(x0 + s * 0.62, y0 + s * 0.38);
+                    waves.cubic_to(x0 + s * 0.72, y0 + s * 0.45, x0 + s * 0.72, y0 + s * 0.55, x0 + s * 0.62, y0 + s * 0.62);
+                }
+                if level >= 2 && level <= 3 {
+                    waves.move_to(x0 + s * 0.7, y0 + s * 0.27);
+                    waves.cubic_to(x0 + s * 0.86, y0 + s * 0.42, x0 + s * 0.86, y0 + s * 0.58, x0 + s * 0.7, y0 + s * 0.73);
+                }
+                if level == 3 {
+                    waves.move_to(x0 + s * 0.78, y0 + s * 0.16);
+                    waves.cubic_to(x0 + s * 1.0, y0 + s * 0.38, x0 + s * 1.0, y0 + s * 0.62, x0 + s * 0.78, y0 + s * 0.84);
+                }
+                if level == 0 {
+                    // a cross where the waves would be: muted
+                    waves.move_to(x0 + s * 0.64, y0 + s * 0.36);
+                    waves.line_to(x0 + s * 0.94, y0 + s * 0.64);
+                    waves.move_to(x0 + s * 0.94, y0 + s * 0.36);
+                    waves.line_to(x0 + s * 0.64, y0 + s * 0.64);
+                }
+                if level >= 4 {
+                    // a slash across the whole cone: there is no sound output
+                    waves.move_to(x0 + s * 0.1, y0 + s * 0.1);
+                    waves.line_to(x0 + s * 0.9, y0 + s * 0.9);
+                }
                 if let Some(w) = waves.finish() {
                     self.pm.stroke_path(&w, &p, &st, id, None);
                 }
@@ -1321,6 +1563,73 @@ impl Gfx {
                     self.pm.fill_path(&d, &p, FillRule::Winding, id, None);
                 }
             }
+            Icon::Doctor => {
+                // a first-aid case: a rounded body with a handle and a plus
+                if let Some(b) = rrect_path(x0 + s * 0.1, y0 + s * 0.28, s * 0.8, s * 0.58, s * 0.1) {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                let mut h = PathBuilder::new();
+                h.move_to(x0 + s * 0.36, y0 + s * 0.28);
+                h.line_to(x0 + s * 0.36, y0 + s * 0.16);
+                h.line_to(x0 + s * 0.64, y0 + s * 0.16);
+                h.line_to(x0 + s * 0.64, y0 + s * 0.28);
+                let mut plus = PathBuilder::new();
+                plus.move_to(x0 + s * 0.5, y0 + s * 0.44);
+                plus.line_to(x0 + s * 0.5, y0 + s * 0.7);
+                plus.move_to(x0 + s * 0.37, y0 + s * 0.57);
+                plus.line_to(x0 + s * 0.63, y0 + s * 0.57);
+                for b in [h.finish(), plus.finish()].into_iter().flatten() {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+            }
+            Icon::Learn => {
+                // an open book: two pages meeting at the spine, with a line of text on each
+                let mut left = PathBuilder::new();
+                left.move_to(x0 + s * 0.5, y0 + s * 0.28);
+                left.line_to(x0 + s * 0.14, y0 + s * 0.2);
+                left.line_to(x0 + s * 0.14, y0 + s * 0.78);
+                left.line_to(x0 + s * 0.5, y0 + s * 0.86);
+                left.close();
+                let mut right = PathBuilder::new();
+                right.move_to(x0 + s * 0.5, y0 + s * 0.28);
+                right.line_to(x0 + s * 0.86, y0 + s * 0.2);
+                right.line_to(x0 + s * 0.86, y0 + s * 0.78);
+                right.line_to(x0 + s * 0.5, y0 + s * 0.86);
+                right.close();
+                let mut lines = PathBuilder::new();
+                lines.move_to(x0 + s * 0.24, y0 + s * 0.42);
+                lines.line_to(x0 + s * 0.42, y0 + s * 0.47);
+                lines.move_to(x0 + s * 0.24, y0 + s * 0.58);
+                lines.line_to(x0 + s * 0.42, y0 + s * 0.63);
+                lines.move_to(x0 + s * 0.76, y0 + s * 0.42);
+                lines.line_to(x0 + s * 0.58, y0 + s * 0.47);
+                for b in [left.finish(), right.finish(), lines.finish()].into_iter().flatten() {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+            }
+            Icon::Checkup => {
+                // a clipboard: a rounded board with a clip, a tick and two lines
+                if let Some(b) = rrect_path(x0 + s * 0.2, y0 + s * 0.18, s * 0.6, s * 0.72, s * 0.08) {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+                let mut clip = PathBuilder::new();
+                clip.move_to(x0 + s * 0.4, y0 + s * 0.18);
+                clip.line_to(x0 + s * 0.4, y0 + s * 0.1);
+                clip.line_to(x0 + s * 0.6, y0 + s * 0.1);
+                clip.line_to(x0 + s * 0.6, y0 + s * 0.18);
+                let mut tick = PathBuilder::new();
+                tick.move_to(x0 + s * 0.32, y0 + s * 0.45);
+                tick.line_to(x0 + s * 0.4, y0 + s * 0.53);
+                tick.line_to(x0 + s * 0.54, y0 + s * 0.36);
+                let mut lines = PathBuilder::new();
+                lines.move_to(x0 + s * 0.32, y0 + s * 0.68);
+                lines.line_to(x0 + s * 0.68, y0 + s * 0.68);
+                lines.move_to(x0 + s * 0.32, y0 + s * 0.8);
+                lines.line_to(x0 + s * 0.56, y0 + s * 0.8);
+                for b in [clip.finish(), tick.finish(), lines.finish()].into_iter().flatten() {
+                    self.pm.stroke_path(&b, &p, &st, id, None);
+                }
+            }
             Icon::Git => {
                 // a branch: a trunk with a side branch, a node at each end
                 let mut t = PathBuilder::new();
@@ -1357,6 +1666,23 @@ impl Gfx {
                     if let Some(d) = dot.finish() {
                         self.pm.fill_path(&d, &p, FillRule::Winding, id, None);
                     }
+                }
+            }
+            Icon::Home => {
+                let mut house = PathBuilder::new();
+                house.move_to(x0 + s * 0.10, y0 + s * 0.50);
+                house.line_to(x0 + s * 0.50, y0 + s * 0.14);
+                house.line_to(x0 + s * 0.90, y0 + s * 0.50);
+                house.move_to(x0 + s * 0.22, y0 + s * 0.44);
+                house.line_to(x0 + s * 0.22, y0 + s * 0.86);
+                house.line_to(x0 + s * 0.78, y0 + s * 0.86);
+                house.line_to(x0 + s * 0.78, y0 + s * 0.44);
+                house.move_to(x0 + s * 0.42, y0 + s * 0.86);
+                house.line_to(x0 + s * 0.42, y0 + s * 0.60);
+                house.line_to(x0 + s * 0.58, y0 + s * 0.60);
+                house.line_to(x0 + s * 0.58, y0 + s * 0.86);
+                if let Some(h) = house.finish() {
+                    self.pm.stroke_path(&h, &p, &st, id, None);
                 }
             }
             Icon::Logout => {
@@ -1416,7 +1742,7 @@ mod tests {
 
     #[test]
     fn every_icon_draws_something() {
-        for icon in [Icon::Chat, Icon::Rag, Icon::Mcp, Icon::Cli, Icon::Users, Icon::Settings, Icon::Clipboard, Icon::Mic, Icon::Speaker, Icon::Runs, Icon::Edit, Icon::Browser, Icon::Camera, Icon::Mesh, Icon::Radio, Icon::Scan, Icon::Skills, Icon::Usage, Icon::Calendar, Icon::System, Icon::Media, Icon::SrePilot, Icon::Ide, Icon::Data, Icon::Tales, Icon::Bell, Icon::Lock, Icon::Power, Icon::Logout, Icon::Store, Icon::Dash, Icon::Flows, Icon::Devices, Icon::Disks, Icon::Lab, Icon::Git] {
+        for icon in [Icon::Chat, Icon::Rag, Icon::Mcp, Icon::Cli, Icon::Users, Icon::Settings, Icon::Clipboard, Icon::Mic, Icon::Speaker, Icon::Runs, Icon::Edit, Icon::Browser, Icon::Camera, Icon::Mesh, Icon::Radio, Icon::Scan, Icon::Skills, Icon::Usage, Icon::Calendar, Icon::System, Icon::Media, Icon::SrePilot, Icon::Ide, Icon::Data, Icon::Tales, Icon::Bell, Icon::Lock, Icon::Power, Icon::Logout, Icon::Store, Icon::Dash, Icon::Flows, Icon::Devices, Icon::Disks, Icon::Lab, Icon::Git, Icon::Doctor, Icon::Checkup, Icon::Learn, Icon::Volume(0), Icon::Volume(1), Icon::Volume(2), Icon::Volume(3), Icon::Volume(4), Icon::Home] {
             let mut g = Gfx::new(96, 96);
             g.clear(rgb(0, 0, 0));
             g.icon(icon, 48.0, 48.0, 80.0, rgb(255, 255, 255));
@@ -1477,5 +1803,53 @@ mod tests {
         let w = g.text(2.0, 4.0, 18.0, rgb(255, 255, 255), "Hello world", Face::Sans);
         assert!(g.shaper.is_none(), "plain English never loads the script fonts");
         assert!(w > 60.0 && ink(&g) > 100);
+    }
+
+    #[test]
+    fn clipped_puts_back_everything_outside_the_rectangle() {
+        let mut g = Gfx::new(40, 30);
+        g.clear(rgb(10, 20, 30));
+        g.clipped(R::new(10.0, 8.0, 12.0, 10.0), |g| g.rect(0.0, 0.0, 40.0, 30.0, rgb(250, 0, 0)));
+        assert_eq!(px(&g, 15, 12)[0], 250, "inside the clip the drawing stays");
+        for (x, y) in [(0, 0), (9, 12), (22, 12), (15, 7), (15, 18), (39, 29)] {
+            assert_eq!(px(&g, x, y), [10, 20, 30, 255], "({x}, {y}) is outside");
+        }
+        // nested: the inner clip is inside the outer one
+        g.clipped(R::new(5.0, 5.0, 30.0, 20.0), |g| g.clipped(R::new(10.0, 8.0, 5.0, 5.0), |g| g.rect(0.0, 0.0, 40.0, 30.0, rgb(0, 250, 0))));
+        assert_eq!(px(&g, 12, 10)[1], 250);
+        assert_eq!(px(&g, 20, 10)[1], 0, "inside the outer clip but outside the inner one: back to the red of before");
+    }
+
+    #[test]
+    fn clipped_near_restores_a_ring_around_the_rectangle_and_leaves_the_rest_alone() {
+        let mut g = Gfx::new(60, 40);
+        g.clear(rgb(10, 20, 30));
+        g.clipped_near(R::new(20.0, 15.0, 10.0, 8.0), 4.0, |g| g.rect(0.0, 0.0, 60.0, 40.0, rgb(250, 0, 0)));
+        assert_eq!(px(&g, 25, 18)[0], 250, "inside");
+        for (x, y) in [(19, 18), (30, 18), (25, 14), (25, 23), (16, 11), (33, 26)] {
+            assert_eq!(px(&g, x, y), [10, 20, 30, 255], "({x}, {y}) is in the ring");
+        }
+        assert_eq!(px(&g, 0, 0)[0], 250, "farther than the margin nothing is put back: the caller promised to draw nothing there");
+    }
+
+    #[test]
+    fn a_region_can_be_grabbed_put_back_and_drawn_in_on_its_own() {
+        let mut g = Gfx::new(50, 30);
+        g.clear(rgb(1, 2, 3));
+        let before = g.grab((10, 5, 20, 10));
+        assert_eq!(before.len(), 20 * 10 * 4);
+        g.in_region((10, 5, 20, 10), None, |g, ox, oy| g.rect(12.0 - ox, 7.0 - oy, 4.0, 3.0, rgb(200, 100, 50)));
+        assert_eq!(px(&g, 13, 8), [200, 100, 50, 255]);
+        assert_eq!(px(&g, 9, 8), [1, 2, 3, 255], "outside the region");
+        assert_eq!(px(&g, 12, 6), [1, 2, 3, 255]);
+        g.put((10, 5, 20, 10), &before);
+        assert_eq!(px(&g, 13, 8), [1, 2, 3, 255], "put back");
+        // seeded with other pixels
+        let seed = vec![9u8; 20 * 10 * 4];
+        g.in_region((10, 5, 20, 10), Some(&seed), |_, _, _| {});
+        assert_eq!(px(&g, 11, 6), [9, 9, 9, 9]);
+        // a rectangle partly off the screen is cut to it
+        g.in_region((40, 20, 30, 30), None, |g, ox, oy| g.rect(45.0 - ox, 25.0 - oy, 3.0, 3.0, rgb(7, 7, 7)));
+        assert_eq!(px(&g, 46, 26)[0], 7);
     }
 }

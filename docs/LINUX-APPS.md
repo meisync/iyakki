@@ -66,7 +66,7 @@ What the sandbox cannot do, and how:
 
 | Rule | How it is done |
 |---|---|
-| It sees only its own files as `/` | `pivot_root` into the sandbox's folder, then the old root is detached: the host's files are not reachable by any path. Links inside the sandbox can only lead inside it. |
+| It sees only its own files as `/` | `pivot_root` into the sandbox's folder, then the old root is detached: the host's files are not reachable by any path. Links inside the sandbox can only lead inside it. **On an IYAKKI image the root is the initramfs (`rootfs`), which `pivot_root` refuses (EINVAL; found 2026-10-29 on the Mac).** There the sandbox is entered the way `switch_root` does it: the host tree is bound at `/.old`, the sandbox folder is moved over `/` (`MS_MOVE`) and `chroot(".")` makes it the root; `/.old` is then detached. The old root mount stays in the kernel underneath, covered: no path reaches it, no descriptor into it is left open, and the process has no capability or system call (mount, chroot, pivot_root, unshare, setns are in the seccomp deny-list; capabilities are dropped) to get at it. That is a chroot plus a covered mount, one step weaker than a replaced root. The mode is chosen from the mount at `/` in `/proc/self/mountinfo` (`rootfs`), and `pivot_root` is also retried this way if it answers EINVAL. |
 | Only folders you mounted show up | A bind mount per folder, **read-only unless you chose read-write** (the mount is also `nosuid`, `nodev`). The folder must pass your file permissions, must not be the data volume (the vault, other people's files, sockets) or a system folder, and a folder replaced by a link after you mounted it is refused when the sandbox starts. Mount points are under `/mnt`, `/home`, `/srv`, `/opt` (never `/etc`, `/usr`, `/proc`...). |
 | No access to IYAKKI's vault, sockets or `/var/lib/iyakki` | Not mounted; the data-folder rule above; nothing of IYAKKI is inside the sandbox. |
 | Not root on the host | A new **user namespace**: ids inside map to ids on the host that have no rights there. Running as root on the host, each sandbox gets its own range of 65,536 ids; otherwise it maps just your own id. Inside, the sandbox user is `user` (id 1000, not root). Only `apt` runs as root *inside* (powerless on the host). |
@@ -190,7 +190,7 @@ The sandbox needs: `CONFIG_NAMESPACES`, `CONFIG_USER_NS`, `CONFIG_PID_NS`, `CONF
 **Checked in the kernel configurations of the libre x86-64, libre aarch64 and web builds (`target/buildroot-*/build/linux-6.12.112/.config`):
 every one of these is `=y`. No kernel rebuild is needed for phase 1.** (The fragment `linux.fragment` sets `USER_NS`, `MEMCG` and `CFS_BANDWIDTH`
 itself; the others come from the defaults and the k3s options.) BusyBox in the image has no `unshare` or `nsenter` applet (`CONFIG_UNSHARE`
-is off), which is why the sandbox is built from system calls in IYAKKI's own code; `chroot` is not used (`pivot_root` is safer).
+is off), which is why the sandbox is built from system calls in IYAKKI's own code; `chroot` alone is not used; it is used only after the mount move, on a `rootfs` root where `pivot_root` is impossible (see the table above).
 The page reads `/proc` and `/sys` when it opens and lists any missing option by name. To verify on a device: open the page (the top line), or
 `iyakki` CLI `linux releases` then create a sandbox. Not present: a veth/NAT for outbound-only networking.
 
@@ -215,7 +215,7 @@ IYAKKI menu page at four screen sizes; the CLI command; Quick install entry; ima
 `linuxapp-init` argument round trip and the seccomp program.
 **Tried for real** (the ignored test `linuxapps_tests::a_real_sandbox_runs_busybox_cannot_see_the_host_and_respects_the_switches`, run with `--ignored
 --test-threads=1`) on a development PC as a normal user: a static BusyBox root, user/mount/pid/uts/ipc/net namespaces, `pivot_root`, `/proc`, `/dev`, mounts
-read-only and read-write, host files invisible, an empty network (only `lo`), mounting refused.
+read-only and read-write, host files invisible, an empty network (only `lo`), mounting refused. The same test run with the initramfs way forced (`a_real_sandbox_entered_the_initramfs_way_behaves_the_same`) passes on the PC. On 2026-10-29 the debug `iyakki` was also run in QEMU (the macweb kernel, a tiny initramfs with a static BusyBox): `pivot_root` in a new mount namespace failed with `Invalid argument` on `/proc/self/mountinfo` `1 1 0:2 / / rw - rootfs rootfs`, and `iyakki linuxapp-init` entered the sandbox, ran a command as pid 1 from the BusyBox root, saw a read-only bound folder, could not read a file of the initramfs by path, `/.old` was empty and `mount` was refused.
 **Not tried:** a real Debian or Ubuntu download and `apt` inside; the wide id range (running as root); cgroup limits; the seccomp filter against a real
 Debian's programs (the test enables it when the kernel offers it); anything on an IYAKKI device or image; Docker Hub and the Ubuntu server's actual answers
 (the format is as documented by the registry and Ubuntu; the checks fail closed); the job program run from the menu; image apps in a real cluster.

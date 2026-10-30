@@ -260,7 +260,7 @@ impl Shell {
             Item::new("pickup", "Pick up, then click a group", ""),
             Item::separator(),
             Item::new("reset-tile", "Reset position", "").enabled(placed),
-            Item::new("reset-all", "Reset layout", "").enabled(!self.layout.placed.is_empty() || !self.layout.order.is_empty()),
+            Item::new("reset-all", "Reset to default layout", "").enabled(!self.layout.placed.is_empty() || !self.layout.order.is_empty()),
         ];
         self.open_menu(MenuKind::Tile(key.to_string()), items, at);
     }
@@ -276,7 +276,7 @@ impl Shell {
             items.push(Item::separator());
         }
         items.push(Item::new("new", "New group…", ""));
-        items.push(Item::new("reset-all", "Reset layout", "").enabled(!self.layout.placed.is_empty() || !self.layout.order.is_empty()));
+        items.push(Item::new("reset-all", "Reset to default layout", "").enabled(!self.layout.placed.is_empty() || !self.layout.order.is_empty()));
         self.open_menu(MenuKind::Chip(gid.to_string()), items, at);
     }
 
@@ -432,7 +432,7 @@ impl Shell {
         let (target, note) = self.layout.answer_app_group(&app, &asked, create);
         self.save_layout();
         self.stale = true;
-        let name = self.layout.label_of(&target).unwrap_or_else(|| "Work".into());
+        let name = self.layout.label_of(&target).unwrap_or_else(|| "Apps".into());
         match note {
             Some(why) => self.say(format!("{title} is in {name}: {why}")),
             None => self.say_info(format!("{title} is in {name}")),
@@ -441,7 +441,7 @@ impl Shell {
 
     /// A right click on the launcher: over a tile or a chip it opens that one's menu. False: not ours (the usual menu opens).
     pub(super) fn layout_right_click(&mut self, x: i32, y: i32) -> bool {
-        if self.session.is_none() || !matches!(self.screen, Screen::Launcher) || self.help || self.brand.open || self.devpop.open || self.installs.open || self.lay.modal() {
+        if self.session.is_none() || !matches!(self.screen, Screen::Launcher) || self.help || self.brand.open || self.devpop.open || self.installs.open || self.startup.open || self.lay.modal() {
             return false;
         }
         if self.lay.carry.take().is_some() {
@@ -483,7 +483,7 @@ impl Shell {
         if self.session.is_none() || !matches!(self.screen, Screen::Launcher) || self.clip.is_some() || self.help || self.ring.is_some() {
             return false;
         }
-        if self.brand.open || self.devpop.open || self.installs.open || self.login.as_ref().is_some_and(|m| !m.hidden()) {
+        if self.brand.open || self.devpop.open || self.installs.open || self.startup.open || self.vol.open || self.login.as_ref().is_some_and(|m| !m.hidden()) {
             return false;
         }
         if matches!(ev, Event::Tick | Event::MouseUp(..) | Event::MouseMove(..)) {
@@ -758,7 +758,7 @@ impl Shell {
                 for (i, line) in g.wrap(15.0 * s, &body, Face::Sans, p.w - 48.0 * s).into_iter().enumerate() {
                     g.text(p.x + 24.0 * s, p.y + 62.0 * s + i as f32 * 22.0 * s, 15.0 * s, MUTED, &line, Face::Sans);
                 }
-                self.card_buttons(g, p, s, "Create", "Put it in Work", focus, false);
+                self.card_buttons(g, p, s, "Create", "Put it in Apps", focus, false);
             }
         }
     }

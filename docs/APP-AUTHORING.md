@@ -77,10 +77,9 @@ If you ask the assistant for "a calculator app for iyakki", this is what it buil
 ```
 
 `id` is the package name and the app's private origin (`https://tile-<id>.iyakki.invalid/`); `icon` is one emoji or a small `.png`/`.svg` in the app (the
-launcher tile shows the first letter of the name in the app's colour, the icon appears in the info panel); `group` is a home screen group: one of the built-in four (Home, Web & Media,
-Work, System; "Assistant" means Home) or a group the person made, matched in any capitals; leave it out for **Work**. A name that matches no group is not created
-silently: the first time the person sees the app they are asked *This app wants to be in the group “X”. Create it?* (**Create** / **Put it in Work**, remembered
-per app and per name; names are 1 to 16 characters, so a longer one falls back to Work). If the person moves the tile themselves, their choice wins over `group`
+launcher tile shows the first letter of the name in the app's colour, the icon appears in the info panel); `group` is a home screen group: one of the built-in ones (Ask & Create, Build, Media, Data, Devices & System, Apps; the old names Home, Web & Media, Work, System still work; "Assistant" means Ask & Create) or a group the person made, matched in any capitals; leave it out for **Apps**. A name that matches no group is not created
+silently: the first time the person sees the app they are asked *This app wants to be in the group “X”. Create it?* (**Create** / **Put it in Apps**, remembered
+per app and per name; names are 1 to 16 characters, so a longer one falls back to Apps). If the person moves the tile themselves, their choice wins over `group`
 on updates, and moving never changes the app's permissions. `tile_ship` and the other publishing tools do not change. Everything is off unless declared. `vault` and `js-eval` are refused by name.
 
 **What the page can draw.** The reader engine's layout: text, headings, lists, tables, boxes, colours and sizes from CSS, simple flex rows, real form controls.

@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(default_mode(&[]), None);
         // opening something that is not a camera fails with a message, never a panic
         assert!(query_caps(Path::new("/nonexistent/video0")).is_none());
-        let dev = CamDevice { node: "video9".into(), path: "/nonexistent/video9".into(), name: "x".into(), caps: parse_caps(&[0; 104]).unwrap() };
+        let dev = CamDevice { node: "video9".into(), path: "/nonexistent/video9".into(), name: "x".into(), caps: parse_caps(&[0; 104]).unwrap(), builtin: false, physical: "x".into() };
         assert!(V4l2Opener.open(&dev, None).is_err());
     }
 }

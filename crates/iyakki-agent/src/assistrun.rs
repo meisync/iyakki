@@ -47,6 +47,8 @@ pub struct Assist {
     pub repair: bool,
     /// Offer only the tool groups the message suggests (plus `more_tools`).
     pub lazy_groups: bool,
+    /// Groups the chat's context needs from the first request (a flow open, a dashboard, an IDE workspace, a browser page).
+    pub context_groups: BTreeSet<Group>,
     /// Run independent read-only calls of one model turn at the same time.
     pub parallel: bool,
     /// Ask the backend for the answer as it is written (`RunEvent::Delta`).
@@ -78,11 +80,11 @@ pub struct Assist {
 
 impl Assist {
     pub fn off() -> Assist {
-        Assist { prepare: None, reminder: None, guard: false, repair: false, lazy_groups: false, parallel: false, stream: false, timing: false, tool_timeouts: false, cap_tokens: 0, max_result_chars: 0, fast_reasoning: false, no_questions: false, autopilot: false, count_new_tokens: false, think_limit: Duration::from_secs(60), silence_limit: Duration::from_secs(120), tool_timeout_cap: None }
+        Assist { prepare: None, reminder: None, guard: false, repair: false, lazy_groups: false, context_groups: BTreeSet::new(), parallel: false, stream: false, timing: false, tool_timeouts: false, cap_tokens: 0, max_result_chars: 0, fast_reasoning: false, no_questions: false, autopilot: false, count_new_tokens: false, think_limit: Duration::from_secs(60), silence_limit: Duration::from_secs(120), tool_timeout_cap: None }
     }
 
     pub fn standard(ctx: ReminderCtx) -> Assist {
-        Assist { prepare: None, reminder: Some(ctx), guard: true, repair: true, lazy_groups: true, parallel: true, stream: true, timing: true, tool_timeouts: true, cap_tokens: 6000, max_result_chars: 6000, fast_reasoning: std::env::var("IYAKKI_THINK").is_err(), no_questions: false, autopilot: false, count_new_tokens: false, think_limit: Duration::from_secs(60), silence_limit: Duration::from_secs(120), tool_timeout_cap: None }
+        Assist { prepare: None, reminder: Some(ctx), guard: true, repair: true, lazy_groups: true, context_groups: BTreeSet::new(), parallel: true, stream: true, timing: true, tool_timeouts: true, cap_tokens: 6000, max_result_chars: 6000, fast_reasoning: std::env::var("IYAKKI_THINK").is_err(), no_questions: false, autopilot: false, count_new_tokens: false, think_limit: Duration::from_secs(60), silence_limit: Duration::from_secs(120), tool_timeout_cap: None }
     }
 }
 
@@ -242,7 +244,7 @@ pub(crate) fn run_loop(backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, mut
         always: HashSet::new(),
         calls_made: 0,
         files: 0,
-        loaded: if lazy { Group::ALL.into_iter().filter(|g| g.always()).chain(toolblock::intent_groups(&request_text)).collect() } else { Group::ALL.into_iter().collect() },
+        loaded: if lazy { toolblock::initial_groups(&history, &assist.context_groups) } else { Group::ALL.into_iter().collect() },
         lg: LoopGuard::default(),
         force_answer: false,
         pre: HashMap::new(),
@@ -314,6 +316,12 @@ pub(crate) fn run_loop(backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, mut
                 Some(s) => s.content.push_str(&format!("\n\n{proto}")),
                 None => req.insert(0, Message::system(proto)),
             }
+        }
+        // where this request's tokens go: logged, and shown in the chat footer
+        let bd = crate::tokenbudget::breakdown(&req, &offered, defs.len() + 1);
+        log::info!("chat: {}", bd.line());
+        if assist.timing {
+            (env.emit)(RunEvent::Budget { bd });
         }
         // budgets are checked before spending: the next prompt's size is known
         let prompt_tokens = estimate_tokens(&req);
@@ -553,6 +561,14 @@ pub(crate) fn run_loop(backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, mut
                 }
                 Err(reason) => return finish(RunEvent::Stopped { reason }),
             }
+            // a form for missing input ends the turn like a question: the chat draws it, the filled values are the next message
+            if call.name == "ask_form" && history.last().is_some_and(|m| !m.content.starts_with("Error:")) {
+                if let Ok(f) = crate::flows::askform::parse(&call.args) {
+                    let shown = f.shown_text();
+                    history.push(Message::assistant(shown.clone()));
+                    return finish(RunEvent::Final { text: shown });
+                }
+            }
             // a tool parked its row and ended the step (Autopilot's hard limits): no further calls, no further model turn
             if let Some(text) = tools.should_end_run() {
                 emit(RunEvent::Model { text: text.clone(), calls: vec![] });
@@ -719,7 +735,7 @@ fn execute_call(env: &Env, st: &mut State, call: &ToolCall) -> Result<String, St
         Ok(format!("Error: {msg}"))
     };
     // the goal is complete: no question, the summary is the answer
-    if call.name == "ask_user" && env.assist.no_questions {
+    if (call.name == "ask_user" || call.name == "ask_form") && env.assist.no_questions {
         return fail("the goal is complete: do not ask anything. Write the summary only.".into());
     }
     // the meta-tool that loads a group of tools

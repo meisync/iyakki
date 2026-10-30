@@ -106,7 +106,14 @@ impl Machine {
             nvidia: iyakki_agent::gpu::has_nvidia(&gpus),
             ram_mb: kb / 1024,
             camera: iyakki_agent::camfw::camera_in(std::path::Path::new("/sys")),
-            fw: Item::ALL.into_iter().filter(|i| i.fw_def().is_some_and(|d| iyakki_agent::fwpack::present_in(std::path::Path::new("/sys"), d))).collect(),
+            fw: Item::ALL
+                .into_iter()
+                .filter(|i| match i.fw_def() {
+                    Some(d) => iyakki_agent::fwpack::present_in(std::path::Path::new("/sys"), d),
+                    // the hardware firmware item is shown where a driver asked for a file that is missing, or when it is installed
+                    None => *i == Item::FwHardware && (iyakki_agent::fwextra::installed(cx.services.dir()).is_some() || !iyakki_agent::fwextra_cli::plan_here(cx.services.dir()).is_empty()),
+                })
+                .collect(),
             ai: Some(iyakki_agent::aiprofile::this_machine(iyakki_agent::modelhost::Hosts::new(cx.services.dir()).list().len())),
             show_all_ai: cx.services.show_all_ai(),
             voice_engines: Some(Self::has_voice_engines(cx)),
@@ -153,6 +160,7 @@ impl Machine {
             Item::GpuNvidia => !self.cloud && self.nvidia,
             Item::MacFirmware => !self.cloud && self.is_mac(),
             Item::MacCamera => !self.cloud && self.camera,
+            Item::FwHardware => !self.cloud && self.fw.contains(&item),
             _ if item.fw_def().is_some() => !self.cloud && self.fw.contains(&item),
             _ => true,
         }
@@ -243,7 +251,7 @@ impl Gk {
             Gk::GetStarted => "Node.js, Python and the k3s cluster: the base for the rest",
             Gk::Ai => "model servers here, or the GPU of a Mac on your network",
             Gk::Voices => "reading voices: English (Kokoro) and Indian languages",
-            Gk::Agents => "Claude Code and GitHub Copilot for the terminal and the AI IDE",
+            Gk::Agents => "Claude Code and GitHub Copilot for the terminal and the AI IDE, and Gitea to keep your work versioned",
             Gk::Data => "DuckDB, Elasticsearch and the local image registry",
             Gk::Media => "the player for video and audio files",
             Gk::Hardware => "GPU for local models, Mac Wi-Fi, Bluetooth and camera firmware",
@@ -270,13 +278,13 @@ impl Gk {
         match item {
             Item::Node | Item::Python | Item::K3s => Gk::GetStarted,
             Item::Lemonade | Item::Ollama | Item::MacHost => Gk::Ai,
-            Item::Kokoro | Item::IndicTts | Item::VoicePack => Gk::Voices,
-            Item::ClaudeCode | Item::Copilot => Gk::Agents,
-            Item::DuckDb | Item::Elasticsearch | Item::Registry => Gk::Data,
+            Item::Kokoro | Item::VoicePack => Gk::Voices,
+            Item::ClaudeCode | Item::Copilot | Item::Gitea | Item::Matrix => Gk::Agents,
+            Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Registry => Gk::Data,
             Item::Ffmpeg => Gk::Media,
             Item::GpuVulkan | Item::GpuNvidia | Item::MacFirmware | Item::MacCamera => Gk::Hardware,
             Item::LinuxApps | Item::LinuxWindows => Gk::LinuxApps,
-            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => Gk::Hardware,
+            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwHardware => Gk::Hardware,
         }
     }
 }
@@ -287,16 +295,19 @@ pub fn icon_of(item: Item) -> Icon {
         Item::Node | Item::Python | Item::ClaudeCode | Item::Copilot => Icon::Cli,
         Item::K3s => Icon::Mesh,
         Item::DuckDb => Icon::Data,
-        Item::Elasticsearch => Icon::Rag,
+        Item::Elasticsearch | Item::OpenSearch => Icon::Rag,
+        Item::Prometheus | Item::ClickHouse | Item::GraphDb => Icon::Data,
+        Item::Gitea => Icon::Git,
+        Item::Matrix => Icon::Chat,
         Item::Registry => Icon::Store,
-        Item::Kokoro | Item::IndicTts | Item::VoicePack => Icon::Speaker,
+        Item::Kokoro | Item::VoicePack => Icon::Speaker,
         Item::Lemonade | Item::Ollama => Icon::Chat,
         Item::MacHost | Item::MacFirmware => Icon::Devices,
         Item::GpuVulkan | Item::GpuNvidia => Icon::System,
         Item::Ffmpeg => Icon::Media,
         Item::MacCamera => Icon::Camera,
         Item::LinuxApps | Item::LinuxWindows => Icon::Ide,
-        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => Icon::Devices,
+        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwHardware => Icon::Devices,
     }
 }
 
@@ -342,6 +353,27 @@ pub enum CardState {
     Earlier,
     /// Found on the machine, not IYAKKI's.
     Elsewhere,
+}
+
+/// The state of a card from what is known: a running job is Installing; the newest job having failed is Failed only when the cluster
+/// shows no healthy object for the item (a failed Retry or an old failed job never turns a running service into Failed).
+pub fn base_state(running: Option<Option<f32>>, newest_job_failed: bool, checking: bool, healthy: bool, bad: Option<String>, pres: Option<&Presence>) -> CardState {
+    if let Some(p) = running {
+        CardState::Installing(p)
+    } else if newest_job_failed && !healthy {
+        CardState::Failed
+    } else if checking {
+        CardState::Checking
+    } else if let (Some(m), Some(Presence::Installed(_))) = (bad, pres) {
+        CardState::NotRunnable(m)
+    } else {
+        match pres {
+            Some(Presence::Installed(_)) => CardState::Installed,
+            Some(Presence::Earlier(_)) => CardState::Earlier,
+            Some(Presence::Elsewhere(_)) => CardState::Elsewhere,
+            _ => CardState::Missing,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -403,8 +435,8 @@ pub struct Card {
 pub fn open_target(item: Item) -> Option<(&'static str, &'static str)> {
     match item {
         Item::Node | Item::Python | Item::ClaudeCode | Item::Copilot => Some(("cli", "")),
-        Item::DuckDb => Some(("data", "")),
-        Item::Kokoro | Item::IndicTts | Item::VoicePack => Some(("voice", "")),
+        Item::DuckDb | Item::Prometheus | Item::ClickHouse | Item::GraphDb => Some(("data", "")),
+        Item::Kokoro | Item::VoicePack => Some(("voice", "")),
         Item::Lemonade | Item::Ollama => Some(("settings", "modelhost:pc")),
         Item::Ffmpeg => Some(("media", "")),
         Item::MacHost => Some(("settings", "modelhost:mac")),
@@ -413,9 +445,11 @@ pub fn open_target(item: Item) -> Option<(&'static str, &'static str)> {
         Item::MacCamera => Some(("camera", "")),
         Item::LinuxApps | Item::LinuxWindows => Some(("brand:linux", "")),
         Item::K3s => Some(("k8s", "")),
-        Item::Elasticsearch | Item::Registry => None,
+        // after the install: Settings, Notifications, with the Matrix account form open at the server's address
+        Item::Matrix => Some(("settings", "matrix:add")),
+        Item::Elasticsearch | Item::OpenSearch | Item::Registry | Item::Gitea => None,
         // the restricted firmware packs have their own licence step (fwpack.rs); this page only says where they stand
-        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => None,
+        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwHardware => None,
     }
 }
 
@@ -425,11 +459,16 @@ pub fn where_text(item: Item) -> &'static str {
         Item::Node | Item::Python | Item::DuckDb | Item::ClaudeCode | Item::Copilot | Item::Ollama | Item::Ffmpeg => "the tools folder on the data partition, linked into the command path (no sudo)",
         Item::K3s => "the data partition: the managed dev cluster",
         Item::Elasticsearch => "the cluster, namespace iyakki-data",
-        Item::Registry => "the cluster, one pod with a volume (node port 30500)",
+        Item::OpenSearch => "the cluster, namespace iyakki-data (ClusterIP only, port 9200, 5 GB volume, about 1.5 GB of memory)",
+        Item::Prometheus => "the cluster, namespace iyakki-monitoring (ClusterIP only, 5 GB volume, read-only access to the cluster)",
+        Item::ClickHouse => "the cluster, namespace iyakki-data (ClusterIP only, HTTP 8123 and native 9000, 5 GB volume, about 1 GB of memory; the password is in your vault as svc.clickhouse)",
+        Item::GraphDb => "the cluster, namespace iyakki-data (ClusterIP only, 5 GB volume, about 500 MB of memory; the password is in your vault as svc.graphdb)",
+        Item::Gitea => "the cluster, namespace iyakki-gitea (ClusterIP; reachable on this machine only at http://127.0.0.1:3300, 10 GB volume; the password and token are in your vault, and the Git connection \"Local Gitea\" is added)",
+        Item::Matrix => "the cluster, namespace iyakki-matrix (ClusterIP only, 5 GB volume, about 512 MB of memory; registration needs a token that is in your vault as svc.matrix.registration-token; federation is off)",
+        Item::Registry => "the cluster, one pod with a volume (port 30500 on this machine only)",
         Item::Lemonade => "the cluster, namespace iyakki-ai, reachable on this machine only (127.0.0.1:13305)",
         Item::Kokoro => "inside Lemonade: the voice model is pulled into it",
         Item::VoicePack => "inside Lemonade in the cluster (both models are pulled into it, on the CPU); the engines are set in Settings \u{2192} Voice",
-        Item::IndicTts => "the cluster, deployed through the Platform services review (Settings)",
         Item::MacHost => "nothing is installed by IYAKKI; you set up the other computer",
         Item::GpuVulkan => "a small device plugin in the cluster; nothing on the system image changes",
         Item::GpuNvidia => "NVIDIA's libraries on the data partition and a device plugin in the cluster",
@@ -437,6 +476,7 @@ pub fn where_text(item: Item) -> &'static str {
         Item::MacCamera => "a driver pack (mac-facetimehd) on the data partition; Apple's files are fetched from Apple's CDN at your click and stay on this machine",
         Item::LinuxApps => "a sandbox named debian on the data partition",
         Item::LinuxWindows => "a sandbox named gui on the data partition (graphical programs in an IYAKKI window)",
+        Item::FwHardware => "a driver pack (fw-hardware) on the data partition that survives restarts; only the files this computer asks for, from the upstream linux-firmware release",
         Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => "a driver pack on the data partition that survives restarts; the files come from the upstream linux-firmware repository",
     }
 }
@@ -484,7 +524,7 @@ pub struct Confirm {
 /// Does installing this item put something into a cluster (so the screen names the cluster and offers the switcher)? Ollama is not here: it
 /// installs on this machine under its own supervisor.
 pub fn deploys_to_cluster(item: Item) -> bool {
-    matches!(item, Item::Registry | Item::Lemonade | Item::VoicePack | Item::IndicTts | Item::DuckDb | Item::Elasticsearch)
+    matches!(item, Item::Registry | Item::Lemonade | Item::VoicePack | Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix)
 }
 
 pub struct Setup {
@@ -510,6 +550,11 @@ pub struct Setup {
     pub uptime: i64,
     /// The licence form of this pack was asked for (the Store opens it), and the restart confirm.
     pub fw_ask: Option<Item>,
+    /// The hardware-firmware item: what the card shows (read by a worker), its last result, and the form was asked for.
+    pub hw_view: Option<iyakki_agent::fwextra_cli::HwView>,
+    hw_slot: Arc<Mutex<Option<iyakki_agent::fwextra_cli::HwView>>>,
+    pub hw_outcome: Option<iyakki_agent::fwpack::Outcome>,
+    pub hw_ask: bool,
     pub reboot_ask: bool,
     pub signin: Vec<(Item, crate::agent_login::State)>,
     pub query: TextField,
@@ -580,6 +625,10 @@ impl Setup {
             fw_outcomes: Vec::new(),
             uptime: 0,
             fw_ask: None,
+            hw_view: None,
+            hw_slot: Default::default(),
+            hw_outcome: None,
+            hw_ask: false,
             reboot_ask: false,
             signin: vec![],
             query: TextField::new("/ search apps and tools", false),
@@ -631,6 +680,7 @@ impl Setup {
         }
         self.refresh_facts(cx);
         self.refresh_jobs(cx);
+        self.refresh_hw(cx);
         self.started = true;
     }
 
@@ -658,7 +708,20 @@ impl Setup {
         }
     }
 
+    /// Read what the hardware-firmware card shows (kernel log, devices, network) on a worker; tests and a fixed machine skip it.
+    pub fn refresh_hw(&mut self, cx: &AppCx) {
+        if self.machine_fixed || cfg!(test) || self.machine.cloud {
+            return;
+        }
+        let (data, home, slot) = (cx.services.dir().to_path_buf(), std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("/root")), self.hw_slot.clone());
+        let _ = std::thread::Builder::new().name("iyakki-setup-hwfw".into()).spawn(move || {
+            let v = iyakki_agent::fwextra_cli::view_now(&data, &home);
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+        });
+    }
+
     fn refresh_jobs(&mut self, cx: &AppCx) {
+        self.hw_outcome = iyakki_agent::fwextra::read_outcome(cx.services.dir());
         self.jobs = qi::install_jobs(&cx.services.jobs, &cx.session.user);
         self.failed = qi::failed_items(&self.jobs);
         if self.machine.camera {
@@ -693,6 +756,10 @@ impl Setup {
         if let Some(f) = self.slot.lock().ok().and_then(|mut x| x.take()) {
             self.facts = Some(f);
             self.refresh_jobs(cx);
+            changed = true;
+        }
+        if let Some(v) = self.hw_slot.lock().ok().and_then(|mut x| x.take()) {
+            self.hw_view = Some(v);
             changed = true;
         }
         if let Some(l) = self.latest_slot.lock().ok().and_then(|mut x| x.take()) {
@@ -764,22 +831,8 @@ impl Setup {
     pub fn card(&self, item: Item) -> Card {
         let pres = self.presence(item).cloned();
         let bad = self.facts.as_ref().and_then(|f| f.unhealthy.iter().find(|(x, _)| *x == item).map(|(_, m)| m.clone()));
-        let state = if let Some(j) = self.running_job(item) {
-            CardState::Installing(j.progress)
-        } else if self.failed.contains(&item) {
-            CardState::Failed
-        } else if self.facts.is_none() {
-            CardState::Checking
-        } else if let (Some(m), Some(Presence::Installed(_))) = (bad.clone(), &pres) {
-            CardState::NotRunnable(m)
-        } else {
-            match &pres {
-                Some(Presence::Installed(_)) => CardState::Installed,
-                Some(Presence::Earlier(_)) => CardState::Earlier,
-                Some(Presence::Elsewhere(_)) => CardState::Elsewhere,
-                _ => CardState::Missing,
-            }
-        };
+        let healthy = self.facts.as_ref().is_some_and(|f| f.healthy.contains(&item));
+        let state = base_state(self.running_job(item).map(|j| j.progress), self.failed.contains(&item), self.facts.is_none(), healthy, bad.clone(), pres.as_ref());
         let latest = self.latest.iter().find(|(x, _)| *x == item).map(|(_, l)| l);
         let signed_out = self.signin.iter().any(|(x, s)| *x == item && matches!(s, crate::agent_login::State::SignedOut));
         let window_block = self.machine.window && (item == Item::K3s || item.needs().contains(&Item::K3s));
@@ -815,6 +868,9 @@ impl Setup {
         let (act, label) = match &state {
             _ if item == Item::MacHost => (Act::Open, "Open guide".to_string()),
             // a restricted firmware pack (fwpack.rs): Install asks for the vendor's licence first (a form of the Store), then runs its own job
+            _ if item == Item::FwHardware && matches!(state, CardState::Installed) && self.hw_reboot_pending() => (Act::Reboot, "Restart to finish".to_string()),
+            _ if item == Item::FwHardware && matches!(state, CardState::Installed) => (Act::Reinstall, "Check again, add or remove".to_string()),
+            _ if item == Item::FwHardware && matches!(state, CardState::Missing | CardState::Earlier | CardState::Checking) => (Act::Install, "See the licences and install".to_string()),
             _ if item.fw_def().is_some() && matches!(state, CardState::Installed) && self.fw_reboot_pending(item) => (Act::Reboot, "Reboot to finish".to_string()),
             _ if item.fw_def().is_some() && matches!(state, CardState::Installed) => (Act::Reinstall, "Reinstall".to_string()),
             _ if item.fw_def().is_some() && matches!(state, CardState::Missing | CardState::Earlier | CardState::Checking) => (Act::Install, "Read the licence and install".to_string()),
@@ -822,7 +878,6 @@ impl Setup {
             CardState::Installing(_) => (Act::Log, "View log".to_string()),
             CardState::Failed if item == Item::MacFirmware && !self.mac_cache.is_empty() => (Act::Retry, "Retry (no new download)".to_string()),
             CardState::Failed => (Act::Retry, "Retry".to_string()),
-            CardState::Missing if item == Item::IndicTts && self.present(Item::K3s) => (Act::Deploy, "Review and deploy".to_string()),
             CardState::Missing if item == Item::MacCamera => (Act::Install, "Install camera driver and firmware".to_string()),
             CardState::Missing => (Act::Install, "Install".to_string()),
             CardState::Installed if signed_out => (Act::SignIn, "Sign in".to_string()),
@@ -845,6 +900,9 @@ impl Setup {
         };
         // the line under the description
         let mut notes: Vec<(String, bool)> = Vec::new();
+        if self.facts.as_ref().is_some_and(|f| f.waiting.contains(&item)) {
+            notes.push(("password waiting for your vault: sign in with your password or open Settings \u{2192} Vault \u{2192} Unlock".to_string(), true));
+        }
         if let Some(n) = self.machine.heavy_note(item) {
             notes.push((n, false));
         }
@@ -879,6 +937,25 @@ impl Setup {
             }
             if !matches!(state, CardState::Installed) {
                 notes.push((format!("Without it: {}", def.without), false));
+            }
+        }
+        if item == Item::FwHardware {
+            if let Some(o) = self.hw_outcome.as_ref().filter(|o| !o.headline.is_empty()) {
+                if !matches!(state, CardState::Installing(_) | CardState::Checking) {
+                    notes.push((o.headline.clone(), !o.installed));
+                }
+            }
+            match &self.hw_view {
+                Some(v) => {
+                    notes.push((v.summary.clone(), false));
+                    for (title, class) in &v.vendors {
+                        notes.push((format!("{title}: {class}"), false));
+                    }
+                    for o in &v.offers {
+                        notes.push((format!("{}{}", if o.ready { "Ready: " } else if o.needs_click { "On your click: " } else { "" }, o.line), false));
+                    }
+                }
+                None => notes.push(("Reading which firmware files this computer asks for…".into(), false)),
             }
         }
         if let Some((_, w)) = self.facts.as_ref().and_then(|f| f.used_by.iter().find(|(x, _)| *x == item)) {
@@ -929,7 +1006,7 @@ impl Setup {
                     Svc::Running
                 }
             })),
-            Item::Elasticsearch | Item::Registry | Item::IndicTts | Item::Lemonade | Item::Kokoro => Some(Svc::Running),
+            Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::Registry | Item::Lemonade | Item::Kokoro => Some(Svc::Running),
             _ => None,
         }
     }
@@ -1055,7 +1132,7 @@ impl Setup {
         }
         let e = self.cluster.clone().unwrap_or_else(iyakki_agent::clusters::ClusterEntry::local_primary);
         let mut t = iyakki_agent::clusters::confirm_text(&format!("Deploy {}", item.title()), &e);
-        if !e.kind.is_local() && item != Item::IndicTts {
+        if !e.kind.is_local() {
             t.push_str(". Setup puts this into the cluster on this machine only: choose \"This machine\" above first");
         }
         Some(t)
@@ -1064,7 +1141,7 @@ impl Setup {
     /// Setup's installers run in this machine's own cluster; the Indic-TTS review (Platform services) follows the active one. Another
     /// cluster is refused with the way out (the other screens use it).
     fn cluster_refusal(cx: &AppCx, item: Item) -> Option<String> {
-        if !deploys_to_cluster(item) || item == Item::IndicTts {
+        if !deploys_to_cluster(item) {
             return None;
         }
         let e = Self::active_cluster(cx);
@@ -1140,6 +1217,14 @@ impl Setup {
     fn start_one(&mut self, cx: &AppCx, item: Item, present: &HashSet<Item>, audit_note: bool) -> Result<usize, String> {
         if !cx.session.policy.manage_settings {
             return Err(format!("Only an administrator can install software for the whole machine (your role is {}).", cx.session.role.name()));
+        }
+        if item == Item::FwHardware {
+            // the licence list comes first: the Store opens its form (vendors, licences, the way to get the files); nothing is fetched before that
+            self.hw_ask = true;
+            if audit_note {
+                self.note = Some(("Read the licences in the form and choose I accept; nothing is downloaded or installed before that.".into(), true));
+            }
+            return Ok(0);
         }
         if item.fw_def().is_some() {
             // the licence comes first: the Store opens its form (vendor, licence summary, folder or stick, "I accept"); nothing is fetched before that
@@ -1240,11 +1325,7 @@ impl Setup {
                 self.confirm_own = None;
                 let present: HashSet<Item> = self.facts.iter().flat_map(|f| f.presence.iter().filter(|(_, p)| p.present()).map(|(i, _)| *i)).collect();
                 match self.start_one(cx, item, &present, true) {
-                    Ok(_) => {
-                        if item == Item::IndicTts {
-                            self.say("Started k3s. When it is Ready, press Review and deploy on Indic-TTS: its deploy review opens (Platform services).", true);
-                        }
-                    }
+                    Ok(_) => {}
                     Err(e) => self.say(e, false),
                 }
                 self.refresh_jobs(cx);
@@ -1256,6 +1337,66 @@ impl Setup {
     pub fn fw_reboot_pending(&self, item: Item) -> bool {
         let now = iyakki_agent::clock::now_unix();
         self.fw_outcomes.iter().any(|(x, o)| *x == item && iyakki_agent::fwpack::reboot_pending(o, now, self.uptime))
+    }
+
+    /// The hardware firmware's last run says a restart is wanted and the machine has not started since.
+    pub fn hw_reboot_pending(&self) -> bool {
+        let now = iyakki_agent::clock::now_unix();
+        self.hw_outcome.as_ref().is_some_and(|o| iyakki_agent::fwpack::reboot_pending(o, now, self.uptime))
+    }
+
+    /// The hardware-firmware form was answered with "I accept": record the acceptance of exactly the list the person saw (audit line),
+    /// then start the job with the way they chose. `source`: "download", "link", "folder" or "received".
+    pub fn hardware_accept_and_start(&mut self, cx: &AppCx, source: &str, folder: Option<std::path::PathBuf>, with_nvidia: bool) -> Result<String, String> {
+        if !cx.session.policy.manage_settings {
+            return Err(format!("Only an administrator can install software for the whole machine (your role is {}).", cx.session.role.name()));
+        }
+        let launch = self.launch_for(cx)?;
+        let from = match source {
+            "folder" => {
+                let f = folder.ok_or("Choose the folder or USB stick with the firmware files.")?;
+                iyakki_agent::scope::check_read(&cx.session.policy, &cx.session.user, &f)?;
+                if !f.is_dir() {
+                    return Err(format!("{} is not a folder", f.display()));
+                }
+                Some(f)
+            }
+            "received" => Some(self.hw_view.as_ref().and_then(|v| v.staging.clone()).ok_or("No files have been received from the other computer yet.")?),
+            _ => None,
+        };
+        let link = if source == "link" { Some(self.hw_view.as_ref().and_then(|v| v.link_iface.clone()).ok_or("No cable to another computer is connected.")?) } else { None };
+        let with: Vec<String> = if with_nvidia { vec!["nvidia".into()] } else { Vec::new() };
+        let plan = iyakki_agent::fwextra_cli::plan_here(&launch.data);
+        let sel = plan.select(&with);
+        if sel.files.is_empty() {
+            return Err("No missing firmware file was found in the kernel log: nothing to install.".into());
+        }
+        iyakki_agent::fwextra::accept(&launch.data, &sel, &cx.session.user, iyakki_agent::clock::now_unix())?;
+        cx.audit.record(&cx.session.user, "firmware.accept", &format!("fw-hardware {} file(s), list {}, linux-firmware {}", sel.unique().len(), &sel.digest(iyakki_agent::fwextra::manifest())[..16], iyakki_agent::fwextra::TAG));
+        let opts = qi::HwFirmwareOpts { from, with, link };
+        let j = qi::start_hardware_firmware(&cx.services.jobs, &cx.session.user, &opts, &launch)?;
+        cx.audit.record(&cx.session.user, "quickinstall.start", &format!("{} ({})", Item::FwHardware.id(), j.label));
+        self.refresh_jobs(cx);
+        Ok(format!("Started: {}. {}; progress is on the tile and beside the clock.", j.label, match source {
+            "folder" => "The files are read from the folder and checked",
+            "received" => "The files the other computer sent are checked",
+            "link" => "The other computer's internet is used through the cable for this job only, then removed",
+            _ => "The files are downloaded from the upstream linux-firmware repository and checked",
+        }))
+    }
+
+    /// Remove the extra firmware (the person chose it in the form): the driver pack and the kept download go; the audit log says so.
+    pub fn hardware_remove(&mut self, cx: &AppCx) -> Result<String, String> {
+        if !cx.session.policy.manage_settings {
+            return Err(format!("Only an administrator can change the machine's firmware (your role is {}).", cx.session.role.name()));
+        }
+        let launch = self.launch_for(cx)?;
+        iyakki_agent::fwextra::remove(&launch.data)?;
+        cx.audit.record(&cx.session.user, "firmware.remove", "fw-hardware");
+        self.hw_outcome = None;
+        self.fixed = false;
+        self.refresh_facts(cx);
+        Ok("Removed the extra firmware (the driver pack and the downloaded pieces). Restart for drivers that already loaded it.".into())
     }
 
     /// The licence form was answered with "I accept": record it (the pack's record and the audit log), then start the pack's job, from a
@@ -1782,13 +1923,18 @@ fn short_about(item: Item) -> &'static str {
         Item::Python => "Python 3 with venv and pip, for Python tools.",
         Item::K3s => "A lightweight Kubernetes cluster on this machine: the base for databases and model servers.",
         Item::DuckDb => "SQL on CSV and Parquet files; the DASH tile uses it.",
-        Item::Elasticsearch => "A search engine, running as one pod in the cluster.",
+        Item::Elasticsearch => "A search engine, one pod in the cluster. Source-available (Elastic License 2.0 or SSPL), not open source; pulled by the cluster, never shipped.",
+        Item::OpenSearch => "An open-source search engine (OpenSearch, Apache-2.0), one pod in the cluster; added to DASH as a source.",
+        Item::Prometheus => "Metrics for the cluster, kept 7 days; added to DASH as a source.",
+        Item::ClickHouse => "An analytics database for DASH (ClickHouse, Apache-2.0); added to DASH as a source, reads only.",
+        Item::GraphDb => "A graph database the assistant can ask about relations (Neo4j, GPL-3.0); added to DASH, reads only.",
+        Item::Gitea => "Keeps your projects versioned: a git service on this machine (MIT); the GIT tile and the AI IDE use it as \"Local Gitea\".",
+        Item::Matrix => "A chat server of your own (Matrix, Apache-2.0): flows and the assistant can message you there; registration needs a token from your vault.",
         Item::Registry => "A place for images built on this device (the private store's server).",
-        Item::ClaudeCode => "Anthropic's coding agent for the terminal and the AI IDE.",
-        Item::Copilot => "GitHub's coding agent; needs a Copilot subscription.",
+        Item::ClaudeCode => "Anthropic's coding agent for the terminal and the AI IDE. Proprietary: downloaded from Anthropic, not shipped.",
+        Item::Copilot => "GitHub's coding agent; needs a Copilot subscription. Proprietary: downloaded from GitHub, not shipped.",
         Item::Kokoro => "An English reading voice, run by Lemonade.",
         Item::VoicePack => "Listening (Whisper tiny) and an English reading voice (Kokoro) in one action, run by Lemonade and set up for you.",
-        Item::IndicTts => "Tamil, Telugu, Malayalam, Kannada, Hindi, Bengali and Marathi voices.",
         Item::Lemonade => "A local model server for chat, embeddings, images and speech.",
         Item::Ollama => "Run language models on this machine; added to Models when it answers.",
         Item::MacHost => "Use the GPU of a Mac (Apple Silicon) or another computer on your network. A guide: you set up that computer.",
@@ -1799,6 +1945,7 @@ fn short_about(item: Item) -> &'static str {
         Item::MacCamera => "The built-in FaceTime HD camera of this MacBook: one click loads the camera driver (part of this image) and fetches Apple's firmware from Apple.",
         Item::LinuxApps => "Run Debian or Ubuntu programs in a sandbox of their own.",
         Item::LinuxWindows => "Show a graphical Linux program in an IYAKKI window (the LINUX WINDOW tile).",
+        Item::FwHardware => "The vendor firmware this computer asks for and lacks (Wi-Fi, Bluetooth, graphics, network): listed with each licence, then downloaded at your click.",
         Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => item.fw_def().map_or("Firmware for hardware in this machine, downloaded at your click.", |d| d.about),
     }
 }

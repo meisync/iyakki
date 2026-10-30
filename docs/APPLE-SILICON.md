@@ -6,6 +6,10 @@ Two ways, and only the first exists today.
 2. **On the bare metal** (dual boot next to macOS) through the Asahi Linux boot chain: **planned, not built, not booted**.
    It can work on M1 and M2, probably on M3 (with limits), and **not at all on M4, M5 or M6 yet**. Sections 1, 3 and 4.
 
+**Owner decision (2026-10-27):** for Apple Silicon IYAKKI goes the VM route (a light VM with k3s and a bridge to a model runner on the Mac);
+the bare-metal Asahi route below is out of scope for now. Design and plan: [`development/APPLE-SILICON-VM-PLAN.md`](development/APPLE-SILICON-VM-PLAN.md)
+(it replaces recipe C of section 2 and route 3 of `APP-MODE-AND-APPLE-SILICON.md`).
+
 Facts below were read on 2026-10-18 from the Asahi Linux documentation (feature-support pages for each generation),
 the `asahi-installer` and `asahi-installer-data` repositories, and news coverage. Asahi's own pages say they give no
 estimates for unfinished work; status words change often, so re-read them before you spend hours.

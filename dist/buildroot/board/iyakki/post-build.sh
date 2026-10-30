@@ -61,15 +61,22 @@ done
 # Mac images (mac, macweb): keep only the firmware Macs and the documented USB Wi-Fi adapters need (board/iyakki/mac-firmware.keep).
 # GRUB reads the initramfs through the Mac firmware's slow USB driver, so this cuts the silent wait at the logo by about half
 # (docs/MAC-HARDWARE.md, "Boot time"). The hw image keeps the whole set.
+# RELEASE image profile (IYAKKI_IMAGE_PROFILE=release, repack.sh / build.sh set it; docs/development/RELEASE-IMAGE-PROFILE.md): the base
+# image keeps no vendor firmware at all, so the mac and pc keep lists below are NOT used; release-firmware.keep is (default: only the
+# wireless-regdb files). The person installs what the computer asks for with the "Hardware firmware" item.
+REL=0; [ "${IYAKKI_IMAGE_PROFILE:-}" = release ] && REL=1
+if [ "$REL" = 0 ]; then
 case "${IYAKKI_VARIANT:-}" in
   mac-*|macweb-*)
     sh "$(dirname "$0")/prune-firmware.sh" "$(dirname "$0")/mac-firmware.keep" "$TARGET_DIR/lib/firmware"
     ;;
 esac
+fi
 
 # The PC image (variant "pc", made by repack.sh from the macweb recipe, docs/GPU-K3S.md): repack.sh has put the whole linux-firmware set in
 # /lib/firmware; keep the GPUs (NVIDIA GSP, all AMD, all Intel), the Wi-Fi, Bluetooth and Ethernet chips of ordinary PCs
 # (board/iyakki/pc-firmware.keep) and drop the rest. The Apple-only drivers of the Mac kernel stay as modules: they bind to nothing on a PC.
+if [ "$REL" = 0 ]; then
 case "${IYAKKI_VARIANT:-}" in
   pc-*)
     # the Intel Wi-Fi files are chosen by what this kernel's iwlwifi asks for (iwlwifi-keep.sh), the rest by the static list
@@ -80,6 +87,10 @@ case "${IYAKKI_VARIANT:-}" in
     rm -f "$PCKEEP"
     ;;
 esac
+fi
+if [ "$REL" = 1 ]; then
+  sh "$(dirname "$0")/release-profile.sh" apply "$TARGET_DIR"
+fi
 
 # Restricted firmware (docs/RESTRICTED-FIRMWARE.md, docs/FIRMWARE-LICENCES.md): files whose licence IYAKKI is not sure it may redistribute are removed from
 # EVERY variant (hw, mac, macweb, pc: the keep lists also exclude them, this catches what a package or a repack brought in). The person installs them from

@@ -171,7 +171,7 @@ impl ScanApp {
             // what the scan found also tells the new-device watch who is on the network
             let seen: Vec<iyakki_agent::devwatch::Neighbor> = self.hosts.values().filter_map(|h| Some(iyakki_agent::devwatch::Neighbor { ip: h.ip.to_string(), mac: h.mac.clone()?.to_lowercase(), iface: "scan".into() })).collect();
             if cx.session.policy.manage_settings {
-                cx.services.devwatch.observe(&seen, iyakki_agent::clock::now_unix());
+                cx.services.devwatch.observe_scan(&seen, iyakki_agent::clock::now_unix());
             }
             cx.audit.record(&cx.session.user, "netscan.done", &format!("{hosts} hosts, {services} services{}", if cancelled { ", stopped" } else { "" }));
         }

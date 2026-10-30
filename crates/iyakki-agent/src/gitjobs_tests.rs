@@ -6,12 +6,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 fn temp(tag: &str) -> PathBuf {
-    let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
-    let mut r = [0u8; 3];
-    iyakki_sec::random_fill(&mut r).unwrap();
-    let d = Path::new(&base).join(format!("gj-{tag}-{:02x}{:02x}{:02x}", r[0], r[1], r[2]));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    // the key socket lives below this folder: a short path (the code refuses more than 100 bytes)
+    crate::testdir::short("gj", tag)
 }
 
 struct Fx {

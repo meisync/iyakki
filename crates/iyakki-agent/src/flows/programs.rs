@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-pub const SAFE: [&str; 28] = ["curl", "wget", "jq", "grep", "sed", "awk", "cat", "head", "tail", "sort", "uniq", "wc", "date", "echo", "test", "true", "false", "sleep", "tr", "cut", "printf", "base64", "sha256sum", "tar", "gzip", "git", "python3", "node"];
+pub const SAFE: [&str; 26] = ["jq", "grep", "sed", "awk", "cat", "head", "tail", "sort", "uniq", "wc", "date", "echo", "test", "true", "false", "sleep", "tr", "cut", "printf", "base64", "sha256sum", "tar", "gzip", "git", "python3", "node"];
 const REFUSED: [&str; 6] = ["sudo", "su", "doas", "dd", "mount", "umount"];
 const SYSTEM_PATHS: [&str; 12] = ["/", "/etc", "/usr", "/bin", "/sbin", "/boot", "/lib", "/var", "/sys", "/proc", "/dev", "/root"];
 
@@ -97,7 +97,9 @@ impl Programs {
         if self.extra().iter().any(|x| x == prog || (!x.contains('/') && *x == b && !prog.contains('/'))) {
             return Ok(());
         }
-        Err(format!("`{prog}` {NOT_ALLOWED}: flows may start the CLI tile's programs and a few safe utilities. An administrator can allow `{prog}`."))
+        // the image ships neither: web calls belong to the HTTP request step (in-house client, host policy, audit)
+        let hint = if matches!(b.as_str(), "curl" | "wget") { " Use the HTTP request step for web calls." } else { "" };
+        Err(format!("`{prog}` {NOT_ALLOWED}: flows may start the CLI tile's programs and a few safe utilities.{hint} An administrator can allow `{prog}`."))
     }
 }
 
@@ -120,11 +122,16 @@ mod tests {
         let ps = p("a");
         let none = |_: &str| false;
         let bin = Path::new("/nonexistent-bin");
-        for ok in ["curl", "jq", "tar", "git", "python3", "echo"] {
+        for ok in ["jq", "tar", "git", "python3", "echo"] {
             assert!(ps.check(ok, &[], &none, bin).is_ok(), "{ok}");
         }
         let e = ps.check("terraform", &[], &none, bin).unwrap_err();
         assert!(e.contains(NOT_ALLOWED));
+        // curl and wget are not on the image: the message points to the HTTP request step, and an administrator can still allow them
+        for web in ["curl", "wget"] {
+            let e = ps.check(web, &[], &none, bin).unwrap_err();
+            assert!(e.contains(NOT_ALLOWED) && e.contains("HTTP request step"), "{e}");
+        }
         assert!(ps.check("terraform", &[], &|n| n == "terraform", bin).is_ok(), "an installed CLI-tile program");
         assert!(ps.check("/usr/bin/curl", &[], &none, bin).is_err(), "a path is not a name on the list");
         ps.add("terraform").unwrap();

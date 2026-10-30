@@ -79,7 +79,7 @@ pub(super) fn preset_words(p: Preset) -> (&'static str, &'static str) {
         Preset::SharedFolders => ("File sharing", "Your local network can open the folders you share (ports 8081-8180)."),
         Preset::K3sApi => ("Kubernetes (k3s) API", "Your local network can talk to this computer's cluster (port 6443)."),
         Preset::NodePorts => ("Kubernetes services", "Your local network can reach what the cluster publishes (ports 30000-32767)."),
-        Preset::StoreNodePort => ("Private app store", "Your local network can open the private app store (port 30300)."),
+        Preset::StoreNodePort => ("Private app store", "Your local network can open the private app store (port 30301)."),
         Preset::DnsService => ("Name server (DNS)", "Your local network can ask this computer to look up names (port 53)."),
         Preset::WebServer => ("Web server", "Your local network can open this computer's web pages (ports 80 and 443)."),
     }

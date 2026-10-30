@@ -65,7 +65,6 @@ impl SpeechEngine {
             SpeechEngine::Http { url, model, .. } => format!("HTTP · {model} · {}", iyakki_sec::url_host(url).unwrap_or_default()),
             SpeechEngine::Command { command } => format!("command · {}", command.split_whitespace().next().unwrap_or("")),
             SpeechEngine::Browser => "browser voice".to_string(),
-            SpeechEngine::Host { engine, program, .. } if engine == crate::indic::ENGINE_ID => format!("{} · server {}", crate::hostengines::Kind::IndicTts.label(), iyakki_sec::url_host(program.as_deref().filter(|p| !p.is_empty()).unwrap_or(crate::indic::DEFAULT_URL)).unwrap_or_default()),
             SpeechEngine::Host { engine, .. } => crate::hostengines::Kind::from_id(engine).map_or_else(|| format!("{engine} (this computer)"), |k| format!("{} (on this computer)", k.label())),
         }
     }
@@ -111,6 +110,9 @@ pub struct VoiceSettings {
     pub align_words: bool,
     /// Speech servers on another machine (`scheme://host:port`) the person agreed to send text and sound to.
     pub remote_ok: Vec<String>,
+    /// The microphone the person chose (an ALSA id such as `plughw:1,0`), empty for automatic. One choice for the Voice tile's dictation and
+    /// for the web pages in the Browser (`voicedesk::share_mic_choice` hands it to the web engine's microphone plugin).
+    pub mic: String,
 }
 
 /// What is highlighted while text is read aloud (TALES, chat).
@@ -148,7 +150,7 @@ impl Highlight {
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        Self { stt: None, tts: None, record_cmd: DEFAULT_RECORD_CMD.into(), play_cmd: DEFAULT_PLAY_CMD.into(), auto_send: false, speak_replies: false, speed_pct: 100, highlight: Highlight::default(), align_words: true, remote_ok: Vec::new() }
+        Self { stt: None, tts: None, record_cmd: DEFAULT_RECORD_CMD.into(), play_cmd: DEFAULT_PLAY_CMD.into(), auto_send: false, speak_replies: false, speed_pct: 100, highlight: Highlight::default(), align_words: true, remote_ok: Vec::new(), mic: String::new() }
     }
 }
 
@@ -165,6 +167,9 @@ impl VoiceSettings {
         }
         if !(50..=200).contains(&self.speed_pct) {
             return Err("speaking speed must be between 50 and 200 percent".into());
+        }
+        if self.mic.len() > 30 || !self.mic.chars().all(|c| c.is_ascii_alphanumeric() || ":,_-".contains(c)) {
+            return Err("microphone: not a sound device name".into());
         }
         validate_command(&self.record_cmd).map_err(|m| format!("record command: {m}"))?;
         validate_command(&self.play_cmd).map_err(|m| format!("play command: {m}"))?;
@@ -289,20 +294,20 @@ pub(crate) fn run_capture(mut cmd: Command, stdin: Option<&[u8]>, timeout: Durat
     });
     let start = Instant::now();
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) if start.elapsed() > timeout => {
+        match iyakki_core_api::child_status(&mut child) {
+            iyakki_core_api::ChildState::Running if start.elapsed() > timeout => {
                 kill_tree(&mut child);
                 return Err(format!("timed out after {} s", timeout.as_secs()));
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(e) => return Err(e.to_string()),
+            iyakki_core_api::ChildState::Running => std::thread::sleep(Duration::from_millis(20)),
+            s => break s,
         }
     };
     let (out, err) = (t_out.join().unwrap_or_default(), t_err.join().unwrap_or_default());
-    if !status.success() {
+    // `Gone`: another reaper took the status; the output is complete but the result is unknown, so it is taken as given
+    if !status.success() && status != iyakki_core_api::ChildState::Gone {
         let tail: String = err.lines().rev().take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join(" | ");
-        return Err(format!("exited with {status}{}", if tail.is_empty() { String::new() } else { format!(": {tail}") }));
+        return Err(format!("exited with {}{}", status.describe(), if tail.is_empty() { String::new() } else { format!(": {tail}") }));
     }
     Ok((out, err))
 }
@@ -337,8 +342,20 @@ pub struct Wav {
     pub samples: Vec<i16>,
 }
 
-/// Parse a 16-bit PCM WAV file.
+/// Parse a WAV file: 16-bit PCM directly; 32/64-bit float (Kokoro answers 32-bit float), 24/32-bit and 8-bit integer samples
+/// are brought to 16-bit first (`audioout::to_pcm16_wav`), so every caller (loudness and length of a sentence, alignment,
+/// joining) sees the sound the speaker plays.
 pub fn parse_wav(b: &[u8]) -> Result<Wav, String> {
+    match parse_wav16(b) {
+        Err(e) if e.starts_with("only 16-bit") => match crate::audioout::to_pcm16_wav(b) {
+            Some(w16) => parse_wav16(&w16),
+            None => Err(e),
+        },
+        r => r,
+    }
+}
+
+fn parse_wav16(b: &[u8]) -> Result<Wav, String> {
     if b.len() < 44 || &b[..4] != b"RIFF" || &b[8..12] != b"WAVE" {
         return Err("not a WAV file".into());
     }
@@ -493,7 +510,7 @@ impl Recorder {
 
     /// Whether the recording process is still running (it exits early if the device is missing/busy).
     pub fn is_alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        iyakki_core_api::child_status(&mut self.child).is_running()
     }
 
     /// Stop recording and return the samples.
@@ -539,11 +556,11 @@ pub fn spawn_player(play_cmd: &str) -> Result<Child, String> {
 pub fn player_failure(child: &mut Child) -> String {
     use std::io::Read;
     let t0 = Instant::now();
-    while t0.elapsed() < Duration::from_millis(400) && matches!(child.try_wait(), Ok(None)) {
+    while t0.elapsed() < Duration::from_millis(400) && iyakki_core_api::child_status(child).is_running() {
         std::thread::sleep(Duration::from_millis(10));
     }
     let Some(mut err) = child.stderr.take() else { return String::new() };
-    if matches!(child.try_wait(), Ok(None)) {
+    if iyakki_core_api::child_status(child).is_running() {
         return String::new(); // still running: nothing to read without blocking
     }
     let mut text = String::new();
@@ -600,11 +617,10 @@ pub fn spawn_media_player(argv: &[String], url: &str) -> Result<Child, String> {
         .map_err(|e| format!("could not start {}: {e}", argv[0]))?;
     // a player that quits at once (no display, a missing codec, a sandbox that blocks it) is reported, not assumed to work
     for _ in 0..40 {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(status)) => return Err(format!("{} stopped right away (exit status {}); it may have no window or sound here", argv[0].rsplit('/').next().unwrap_or(&argv[0]), status.code().map_or("signal".into(), |c| c.to_string()))),
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-            Err(_) => break,
+        match iyakki_core_api::child_status(&mut child) {
+            s if s.success() => break,
+            iyakki_core_api::ChildState::Running => std::thread::sleep(std::time::Duration::from_millis(50)),
+            s => return Err(format!("{} stopped right away ({}); it may have no window or sound here", argv[0].rsplit('/').next().unwrap_or(&argv[0]), s.describe())),
         }
     }
     Ok(child)
@@ -624,11 +640,28 @@ pub struct Player {
     deadline: Option<Instant>,
 }
 
+/// Whether the play command is `aplay` (possibly with options, or given by path).
+pub fn streams_to_one_player(play_cmd: &str) -> bool {
+    play_cmd.split_whitespace().next().and_then(|p| p.rsplit('/').next()).is_some_and(|p| p == "aplay")
+}
+
 impl Player {
     /// Start playing a WAV file as speech (audio is written to the play command's stdin, or mixed when the mixer is on). The
     /// output and the volume of Settings -> Sound apply (see `audioout`, `audiosink`).
     pub fn start(play_cmd: &str, wav: &[u8]) -> Result<Player, String> {
         Player::start_as(crate::mixer::SourceKind::Speech, play_cmd, wav)
+    }
+
+    /// The sentences of one reading: with the mixer off they share one play process, so the card is not closed and primed again
+    /// between sentences (see `audiosink::play_wav_streamed`). It reports itself finished slightly before its sound ends.
+    /// Only `aplay` is shared this way (it is the player whose card is primed again at every start); any other play command
+    /// keeps one process per sentence, as before.
+    pub fn start_streamed(play_cmd: &str, wav: &[u8]) -> Result<Player, String> {
+        if !streams_to_one_player(play_cmd) {
+            return Player::start(play_cmd, wav);
+        }
+        let out = crate::audiosink::play_wav_streamed(crate::mixer::SourceKind::Speech, "speech", wav, play_cmd)?;
+        Ok(Player { child: None, out: Some(out), stop_cmd: None, deadline: None })
     }
 
     /// The same for another kind of sound (it fixes the priority when sounds are mixed).
@@ -649,16 +682,21 @@ impl Player {
         Player { child: Some(child), out: None, stop_cmd, deadline: Some(Instant::now() + max) }
     }
 
+    /// How much of the sound was heard, ms (mixer only; None when the player reports nothing).
+    pub fn played_ms(&self) -> Option<u64> {
+        self.out.as_ref().and_then(|o| o.played_ms())
+    }
+
     pub fn is_playing(&mut self) -> bool {
         if let Some(o) = self.out.as_mut() {
             return o.is_playing();
         }
         let Some(child) = self.child.as_mut() else { return false };
-        if self.deadline.is_some_and(|d| Instant::now() > d) && matches!(child.try_wait(), Ok(None)) {
+        if self.deadline.is_some_and(|d| Instant::now() > d) && iyakki_core_api::child_status(child).is_running() {
             self.stop();
             return false;
         }
-        self.child.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)))
+        self.child.as_mut().is_some_and(|c| iyakki_core_api::child_status(c).is_running())
     }
 
     pub fn wait(&mut self, timeout: Duration) -> bool {
@@ -678,7 +716,7 @@ impl Player {
         }
         if let Some(child) = self.child.as_mut() {
             if let Some(cmd) = self.stop_cmd.take() {
-                if matches!(child.try_wait(), Ok(None)) && !cmd.is_empty() {
+                if iyakki_core_api::child_status(child).is_running() && !cmd.is_empty() {
                     let _ = run_capture(command_for(&cmd, None), None, Duration::from_secs(3));
                 }
             }
@@ -869,12 +907,24 @@ mod tests {
         assert_eq!(&wav[..4], b"RIFF");
         assert_eq!(wav.len(), 44 + 2000);
         let p = parse_wav(&wav).unwrap();
-        assert_eq!((p.rate, p.channels, p.samples.clone()), (16_000, 1, pcm));
+        assert_eq!((p.rate, p.channels, p.samples.clone()), (16_000, 1, pcm.clone()));
         assert!(parse_wav(b"nope").is_err());
         assert!(parse_wav(&wav[..40]).is_err());
         let mut bad = wav.clone();
-        bad[34] = 8; // 8 bits per sample
+        bad[34] = 12; // 12 bits per sample: not a format this reads
         assert!(parse_wav(&bad).unwrap_err().contains("16-bit"));
+        // 32-bit float (what Kokoro answers) is read as 16-bit
+        let mut fl = wav[..36].to_vec();
+        fl[20] = 3;
+        fl[34] = 32;
+        fl.extend(b"data");
+        fl.extend(((pcm.len() * 4) as u32).to_le_bytes());
+        for s in &pcm {
+            fl.extend((*s as f32 / 32768.0).to_le_bytes());
+        }
+        let p = parse_wav(&fl).unwrap();
+        assert_eq!((p.rate, p.channels, p.samples.len()), (16_000, 1, 1000));
+        assert!(p.samples.iter().zip(&pcm).all(|(a, b)| (*a as i32 - *b as i32).abs() <= 1));
         // extra chunks before `data` are skipped
         let mut with_list = wav[..36].to_vec();
         with_list.extend(b"LIST");
@@ -954,6 +1004,7 @@ mod tests {
 
     #[test]
     fn player_feeds_wav_to_the_command_and_can_be_stopped() {
+        let _route = crate::mixer::pin_command_route();
         let d = tmp("play");
         let out = d.join("played.wav");
         let wav = encode_wav(&tone(440.0, 200), 48_000);

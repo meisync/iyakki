@@ -1096,7 +1096,7 @@ fn a_workspace_chat_plans_a_build_on_the_board_which_is_created_by_the_first_row
         say("server.js is written; the board shows what is left."),
         say("The Dockerfile row stays planned; the board has it."),
     ]);
-    let h = start_with(b.clone(), tools, vec![Message::system(format!("SYS{}", crate::boardtools::workspace_prompt("Web", &root, "FEATURES.md"))), Message::user("create a simple nodejs webserver")], RunLimits::default(), std_assist());
+    let h = start_with(b.clone(), tools, vec![Message::system(format!("SYS{}", crate::boardtools::workspace_prompt("Web", &root, "FEATURES.md"))), Message::user("create a simple nodejs webserver")], RunLimits::default(), { let mut a = std_assist(); a.context_groups.insert(crate::toolblock::Group::Workspace); a });
     let ev = drive(&h, |_| Some(Verdict::Approve));
     assert!(final_text(&ev).contains("board"), "{ev:?}");
     // the board tools were offered to the model in the first request, with lazy groups on
@@ -3336,4 +3336,25 @@ mod camera {
         assert!(results(&ev)[0].2.contains("denied"));
         assert!(!home2.join("alice/Pictures").exists());
     }
+}
+
+#[test]
+fn each_request_reports_where_its_tokens_go_and_routing_off_offers_every_tool() {
+    let budget = |ev: &[RunEvent]| ev.iter().find_map(|e| if let RunEvent::Budget { bd } = e { Some(*bd) } else { None }).expect("a Budget event");
+    let run = |a: Assist| {
+        let b = Scripted::new(vec![say("hello")]);
+        let h = start_with(b, Reg::new(&["read_file", "flow_list", "dash_query", "radio_play"]), vec![Message::system("SYS"), Message::user("hello there")], RunLimits::default(), a);
+        drive(&h, |_| Some(Verdict::Approve))
+    };
+    let on = budget(&run(std_assist()));
+    assert_eq!((on.offered, on.total), (2, 5), "read_file and more_tools of the four tools (+ more_tools)");
+    assert!(on.system > 0 && on.history > 0 && on.tools > 0 && on.sum() == on.system + on.tools + on.history + on.outputs);
+    let mut off = std_assist();
+    off.lazy_groups = false;
+    let all = budget(&run(off));
+    assert_eq!(all.offered, 4, "routing off: every tool");
+    assert!(all.offered > on.offered);
+    let mut flows = std_assist();
+    flows.context_groups.insert(crate::toolblock::Group::Flows);
+    assert_eq!(budget(&run(flows)).offered, 3, "the Flows context adds the flow tools");
 }

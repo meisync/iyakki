@@ -898,11 +898,11 @@ pub trait Launcher: Send + Sync {
     }
 }
 
-struct ChildRun(std::process::Child);
+pub(crate) struct ChildRun(pub(crate) std::process::Child);
 
 impl Running for ChildRun {
     fn alive(&mut self) -> bool {
-        matches!(self.0.try_wait(), Ok(None))
+        iyakki_core_api::child_status(&mut self.0).is_running()
     }
     fn stop(&mut self) {
         crate::voice::kill_child(&mut self.0);
@@ -959,7 +959,7 @@ impl Running for BuiltinRun {
 fn launch_builtin(b: &Builtin, target: &str) -> Result<Box<dyn Running>, String> {
     let name = format!("{} (file)", target.rsplit('/').next().unwrap_or("audio"));
     let allow: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(|_| false);
-    b.radio.play(&crate::radio::Station { name: name.clone(), url: format!("file://{target}") }, allow, &(b.play_cmd)());
+    b.radio.play(&crate::radio::Station::new(&name, &format!("file://{target}")), allow, &(b.play_cmd)());
     // a file starts at once or fails at once (a missing sound command, a file that is not MP3)
     for _ in 0..300 {
         match b.radio.state() {
@@ -1505,9 +1505,9 @@ pub mod tests {
         // `sleep` stands in for a player: the launcher is given a program that ignores its argument and stays alive
         let argv = vec!["sleep".to_string(), "30".to_string()];
         let Ok(mut child) = crate::voice::spawn_media_player(&argv[..1], "30") else { return };
-        assert!(matches!(child.try_wait(), Ok(None)));
+        assert!(iyakki_core_api::child_status(&mut child).is_running());
         crate::voice::kill_child(&mut child);
-        assert!(matches!(child.try_wait(), Ok(Some(_))));
+        assert!(iyakki_core_api::child_status(&mut child).is_over());
     }
 
     /// The sample files that ship in `dist/samples` (and in every image under /usr/share/iyakki/samples).

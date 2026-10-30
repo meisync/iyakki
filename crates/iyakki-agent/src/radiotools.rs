@@ -512,7 +512,7 @@ pub fn offered(p: &Policy) -> bool {
 }
 
 pub fn is_radio_tool(name: &str) -> bool {
-    matches!(name, "radio_search" | "radio_play" | "radio_stop" | "radio_pause" | "radio_resume" | "radio_volume" | "radio_save" | "radio_add" | "radio_status")
+    matches!(name, "radio_search" | "radio_play" | "radio_stop" | "radio_pause" | "radio_resume" | "radio_volume" | "radio_save" | "radio_add" | "radio_status" | "radio_trust_certificate")
 }
 
 /// The tool definitions for an account (none without the RADIO app).
@@ -522,7 +522,15 @@ pub fn defs(p: &Policy) -> Vec<ToolDef> {
     }
     let obj = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
     let tool = |name: &str, desc: &str, schema: Value, untrusted: bool| ToolDef { spec: ToolSpec { name: name.into(), description: desc.into(), schema }, risk: Risk::Safe, untrusted };
+    let mut trust = tool(
+        "radio_trust_certificate",
+        "Ask the person to trust the server certificate of a station that failed because its server does not send its full certificate chain (radio_status then names the station, the host and the certificate's SHA-256 fingerprint). Give `station` (its name), `host` and `fingerprint` exactly as radio_status shows them. The person is always asked, with the host and fingerprint on the card; nothing is stored unless they approve. If approved, the station plays again and the exact certificate is remembered for that station only (it asks again when the certificate is renewed). Never call it without the person having asked for this station to be played anyway.",
+        obj(json!({"station": {"type": "string"}, "host": {"type": "string"}, "fingerprint": {"type": "string"}}), &["station", "host", "fingerprint"]),
+        false,
+    );
+    trust.risk = Risk::Ask;
     vec![
+        trust,
         tool(
             "radio_search",
             "Search internet radio stations: the person's saved stations, IYAKKI's built-in list by language, and the online Radio Browser directory (when there is internet). `query` is free text such as \"tamil\", \"tamil fm\", \"kuthu\", \"news\", \"bbc\" or \"jazz\"; words like fm, radio, online and live are ignored. Optional `language` (Tamil, Hindi, ...), `tag` (a genre such as news or devotional) and `limit` (default 8, at most 40). Returns numbered stations with an id for radio_play. Read-only; the online directory lists only MP3 stations that were working at the last check; a few built-in AAC/HLS stations are marked when they need the audio add-on (installed from the RADIO app).",
@@ -551,6 +559,7 @@ pub fn describe(name: &str, args: &Value) -> Option<String> {
     match name {
         "radio_play" => Some(format!("play the radio: {}", s("id").or_else(|| s("name")).or_else(|| s("query")).unwrap_or("the best match"))),
         "radio_search" => Some(format!("search radio stations for “{}”", s("query").or_else(|| s("language")).or_else(|| s("tag")).unwrap_or("everything"))),
+        "radio_trust_certificate" => Some(format!("TRUST the certificate of {} for the station {} (SHA-256 fingerprint {}); only do this if you know the station, because someone on your network could pretend to be it", s("host").unwrap_or("(no host)"), s("station").unwrap_or("(no name)"), s("fingerprint").map(iyakki_proxy::certinfo::fingerprint_groups).unwrap_or_default())),
         "radio_add" => Some(format!("add the station {} to My stations", s("name").unwrap_or("(no name)"))),
         "radio_save" => Some(format!("keep {} in My stations", s("name").unwrap_or("the playing station"))),
         _ => None,
@@ -691,7 +700,10 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str) ->
                 if title.is_empty() { String::new() } else { format!(", now: {}", clean_name(&title)) },
                 radio.volume()
             ),
-            RadioState::Failed { station, why } => format!("{} would not play: {why}", clean_name(&station)),
+            RadioState::Failed { station, why } => {
+                let waiting = radio.cert_problem().filter(|c| c.station == station && c.trustable).map(|c| format!(" [A certificate decision is waiting for the person: station {}, host {}, SHA-256 {}. Only if they ask to play it anyway, use radio_trust_certificate; they are asked first.]", clean_name(&c.station), c.host, iyakki_proxy::certinfo::fingerprint_groups(&c.sha256))).unwrap_or_default();
+                format!("{} would not play: {why}{waiting}", clean_name(&station))
+            }
         }),
         "radio_add" => {
             let n = radio::valid_name(args.get("name").and_then(Value::as_str).unwrap_or(""))?;
@@ -703,6 +715,27 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str) ->
             let st = StationStore::new(svc.dir(), user).add(&n, &u)?;
             svc.toollog.record(svc.tool_log_days(), user, "radio.add", &host, true, "");
             Ok(format!("Added {} to My stations (RADIO app).", st.name))
+        }
+        "radio_trust_certificate" => {
+            // the approval card named the host and the fingerprint; what is stored must be exactly that, and only for the
+            // certificate the radio itself just saw
+            let (station, host, fp) = (s("station").ok_or("say which station")?, s("host").ok_or("say the host")?, s("fingerprint").ok_or("say the fingerprint")?);
+            let problem = radio.cert_problem().ok_or("no station is waiting for a certificate decision; play the station first")?;
+            if !problem.station.eq_ignore_ascii_case(station) || !problem.host.eq_ignore_ascii_case(host) || iyakki_proxy::certinfo::norm_fingerprint(&problem.sha256) != iyakki_proxy::certinfo::norm_fingerprint(fp) {
+                return Err(format!("that is not the certificate waiting for a decision (it is {} for {}, SHA-256 {})", problem.host, problem.station, iyakki_proxy::certinfo::fingerprint_groups(&problem.sha256)));
+            }
+            if !p.allows_host(&problem.host) {
+                return Err(format!("your account may not reach {}", problem.host));
+            }
+            let found = find_by_name(svc, user, &problem.station).ok_or("I do not know that station")?;
+            let store = StationStore::new(svc.dir(), user);
+            store.trust(&Station::new(&found.name, &found.url), &problem)?;
+            svc.toollog.record(svc.tool_log_days(), user, "radio.trust", &problem.host, true, &format!("sha256 {}", iyakki_proxy::certinfo::short_fingerprint(&problem.sha256)));
+            let again = find_by_name(svc, user, &problem.station).ok_or("the station was not kept")?;
+            match start_and_wait(svc, p, user, &again) {
+                Ok(_) => Ok(format!("Trusted the certificate of {} for {} and it plays now. It is remembered for this station only; when the certificate is renewed the person is asked again.", problem.host, problem.station)),
+                Err(why) => Err(format!("Trusted the certificate but the station still would not start: {why}")),
+            }
         }
         "radio_save" => {
             let target = match s("name") {
@@ -732,7 +765,9 @@ fn start_and_wait(svc: &Services, p: &Policy, user: &str, c: &Found) -> Result<u
     svc.toollog.record(svc.tool_log_days(), user, "radio.play", &radio::host_of(&c.url), true, "");
     let pol = p.clone();
     let allow: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(move |h| pol.allows_host(h));
-    svc.radio.play(&Station { name: c.name.clone(), url: c.url.clone() }, allow, &svc.voice_settings().play_cmd);
+    // a saved station carries the certificate its owner approved, when there is one
+    let pin = StationStore::new(svc.dir(), user).list().into_iter().find(|s| s.name == c.name && s.url == c.url).and_then(|s| s.cert_pin);
+    svc.radio.play(&Station { cert_pin: pin, ..Station::new(&c.name, &c.url) }, allow, &svc.voice_settings().play_cmd);
     let t0 = Instant::now();
     loop {
         match svc.radio.state() {
@@ -1020,7 +1055,7 @@ mod tests {
         assert_eq!(w.tools.call("radio_stop", &json!({})).unwrap(), "Stopped the radio.");
         assert_eq!(w.svc.radio.state(), RadioState::Idle);
         // a station started in the app is stopped by the chat as well: it is one player
-        w.svc.radio.play(&Station { name: "From app".into(), url: "https://app.example.org/x".into() }, Arc::new(|_| true), "cat");
+        w.svc.radio.play(&Station::new("From app", "https://app.example.org/x"), Arc::new(|_| true), "cat");
         assert_eq!(w.tools.call("radio_stop", &json!({})).unwrap(), "Stopped the radio.");
     }
 
@@ -1056,5 +1091,66 @@ mod tests {
         }
         assert!(!found.is_empty(), "no Tamil MP3 stations came back");
         assert!(found.iter().all(|f| f.url.starts_with("http") && f.source == Source::Directory));
+    }
+
+    /// A server that sends its leaf only: the usual check fails, an approved exact certificate plays.
+    struct NoIntermediate(Vec<u8>);
+    impl Streamer for NoIntermediate {
+        fn open(&self, url: &str, h: &[(String, String)]) -> Result<StreamHead, String> {
+            if url.contains("radios.example.org") {
+                return Err("io: invalid peer certificate: UnknownIssuer".into());
+            }
+            Streams.open(url, h)
+        }
+        fn open_tls(&self, url: &str, h: &[(String, String)], mode: &iyakki_proxy::TlsMode) -> Result<StreamHead, String> {
+            match mode {
+                iyakki_proxy::TlsMode::Pin(fp) if iyakki_proxy::certinfo::norm_fingerprint(fp) == iyakki_proxy::certinfo::norm_fingerprint(&iyakki_proxy::certinfo::fingerprint(&self.0)) => Streams.open(&url.replace("radios.example.org", "ok.example.org"), h),
+                _ => Err("io: invalid peer certificate: UnknownIssuer".into()),
+            }
+        }
+        fn peer_chain(&self, _: &str, _: u16) -> Result<Vec<Vec<u8>>, String> {
+            Ok(vec![self.0.clone()])
+        }
+    }
+
+    #[test]
+    fn trusting_a_certificate_through_the_chat_always_asks_names_the_host_and_fingerprint_and_stores_only_what_was_approved() {
+        let w = world("trust", &["*"], None);
+        let leaf = iyakki_proxy::testcerts::leaf_der(&["radios.example.org"], None, None);
+        let fp = iyakki_proxy::certinfo::fingerprint(&leaf);
+        w.svc.radio.set_streamer(Arc::new(NoIntermediate(leaf)));
+        // the tool asks in every mode: a hard ask, a card that names the host and the fingerprint, no standing grant
+        let d = w.tools.defs().into_iter().find(|d| d.spec.name == "radio_trust_certificate").expect("offered with the radio app");
+        assert_eq!(d.risk, Risk::Ask);
+        let args = json!({"station": "Hello FM", "host": "radios.example.org", "fingerprint": fp});
+        assert!(crate::agent::hard_ask("radio_trust_certificate", &args).is_some() && crate::agent::hard_ask("radio_trust_certificate", &json!({})).is_some(), "never auto-approved, even in Auto");
+        assert!(crate::grants::blocker("radio_trust_certificate", &args).is_some(), "never covered by a session grant");
+        let card = describe("radio_trust_certificate", &args).unwrap();
+        assert!(card.contains("radios.example.org") && card.contains(&iyakki_proxy::certinfo::fingerprint_groups(&fp)) && card.contains("pretend"), "{card}");
+        // the station fails first, with the specific message
+        w.tools.call("radio_add", &json!({"name": "Hello FM", "url": "https://radios.example.org:8002/3"})).unwrap();
+        let e = w.tools.call("radio_play", &json!({"name": "Hello FM"})).unwrap_err();
+        assert!(e.contains("did not send its full certificate chain"), "{e}");
+        let status = w.tools.call("radio_status", &json!({})).unwrap();
+        assert!(status.contains("radios.example.org") && status.contains(&iyakki_proxy::certinfo::fingerprint_groups(&fp)) && status.contains("radio_trust_certificate"), "{status}");
+        assert!(StationStore::new(w.svc.dir(), "alice").list()[0].cert_pin.is_none(), "nothing is stored by failing");
+        // a call for some other certificate or host stores nothing
+        let wrong = json!({"station": "Hello FM", "host": "radios.example.org", "fingerprint": "00:11"});
+        assert!(w.tools.call("radio_trust_certificate", &wrong).unwrap_err().contains("not the certificate waiting"));
+        let wrong = json!({"station": "Hello FM", "host": "evil.example.org", "fingerprint": fp});
+        assert!(w.tools.call("radio_trust_certificate", &wrong).is_err());
+        assert!(StationStore::new(w.svc.dir(), "alice").list()[0].cert_pin.is_none());
+        // approved: stored with the station, audited with the short form only, and the station plays
+        let r = w.tools.call("radio_trust_certificate", &args).unwrap();
+        assert!(r.contains("plays now"), "{r}");
+        let pin = StationStore::new(w.svc.dir(), "alice").list()[0].cert_pin.clone().unwrap();
+        assert_eq!((pin.host.as_str(), pin.port, pin.sha256.as_str()), ("radios.example.org", 8002, fp.as_str()));
+        let log = w.svc.toollog.list(7, Some("alice"));
+        let entry = log.iter().find(|e| e.tool == "radio.trust").expect("audited");
+        assert_eq!(entry.what, "radios.example.org");
+        assert!(entry.result.contains(&iyakki_proxy::certinfo::short_fingerprint(&fp)) && !entry.result.contains(&fp), "{}", entry.result);
+        // with nothing waiting, the tool has nothing to approve
+        w.svc.radio.stop();
+        assert!(w.tools.call("radio_trust_certificate", &args).unwrap_err().contains("no station is waiting"));
     }
 }

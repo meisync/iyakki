@@ -35,7 +35,7 @@ Nothing here is silent. Every change is a **plan** the person reads, then **appr
 | `status` / `power` / `plan_upgrade` + `upgrade` / `backup` / `plan_remove` + `remove` | The lifecycle, each with its own preview and approval. |
 | `installed.rs` | `installed-services-<user>.json`: the instance id, cluster reference, namespace, version, options, addresses, vault entry **names**, connected workspaces. Never a value. |
 | `secrets.rs` | Generation, the vault, the 0600 temp file that carries a value to `kubectl create secret --from-file`. |
-| `connect.rs` | HTTP through curl (token in a private config file), workspace connect and push. |
+| `connect.rs` | HTTP through the in-house client (`NetHttp` over `gitnet::NetGit`; the token only in memory and the request header, the image has no curl), workspace connect and push. |
 | `tools.rs` | The assistant's tools. |
 
 ### Choosing and guarding the cluster
@@ -119,9 +119,16 @@ One replica (`Recreate` strategy, because the PVC is `ReadWriteOnce`), SQLite on
 `/var/lib/gitea`, `config` → `/etc/gitea`), configuration through `GITEA__section__KEY` environment variables: `INSTALL_LOCK=true`,
 `DISABLE_REGISTRATION=true`, `REQUIRE_SIGNIN_VIEW=true`, `DEFAULT_PRIVATE=private`, `ROOT_URL` from the chosen exposure, SSH on 2222 in the pod
 (built-in server) and the advertised port from the exposure, LFS on, `webhook.ALLOWED_HOST_LIST=external` (webhooks may only call public hosts).
-Two Services: `gitea-http` and `gitea-ssh`. **NodePort** (default) uses the first free ports from 30300 and 30222 (the free ports are found
-in the cluster, an existing install keeps its own) and the clone URLs are shown; ClusterIP, LoadBalancer (needs a *Public host*) and Ingress
-(needs a host; SSH stays a ClusterIP Service) are options.
+Two Services: `gitea-http` and `gitea-ssh`. **ClusterIP with a port on this machine** is the default: the Services stay inside the cluster and the pod
+publishes its web port as a `hostPort` on 127.0.0.1 of the node (`http://127.0.0.1:3300`, option *Port on this machine*; `none` publishes nothing). Nothing
+is open on the network, which is the same shape the Quick install item makes, so the two installers agree. **NodePort** is a deliberate, labelled
+choice that opens ports on every address of the machine (your LAN): it uses the first free ports from 30300 and 30222 and the review warns
+"NodePort OPENS Gitea's ports ... because you chose it". LoadBalancer (needs a *Public host*) and Ingress (needs a host; SSH stays a ClusterIP Service) are
+the other options.
+
+**Deploying again never changes who can reach it.** With the exposure left alone, a Gitea that exists (by record, or by the live Service) keeps its
+exposure, NodePort included. Closing a NodePort Gitea is the person's explicit choice: tick *Close the open NodePorts* (or ask for ClusterIP),
+and the review shows "THIS CLOSES the NodePorts 30300, 30222 ..." before anything is applied. It never widens by itself.
 
 After the pod is ready: create the administrator (`gitea admin user create`), create an **API token for IYAKKI** (`gitea admin user
 generate-access-token`, scopes `write:repository,read:user`) and store it in the vault as `uvault:svc.<instance>.token`. The token is never
@@ -145,6 +152,38 @@ starting with `gitea` or `forgejo`) and offers it in the plan as a warning: "A G
 installing a second one", with its NodePort address as a hint. **Connect to existing** asks for the address and a token the person
 creates in that service (a masked field), checks `/api/v1/version` and `/api/v1/user`, stores the token in the vault, and records the service
 as *connected*: IYAKKI deploys, stops and removes nothing for it (Remove only forgets the record and the token).
+
+### Gitea from Store -> Setup (Quick install)
+
+**Store -> Setup -> Coding agents -> Gitea (versioning for your work)** (`iyakki quick-install gitea`, needs k3s) puts this same Gitea into the
+managed cluster in one click, so there is a place to keep projects versioned without opening Platform services. It is not a second Gitea
+implementation: the job calls `Gitea::build` with fixed options (namespace `iyakki-gitea`, version 1.24.5, ClusterIP, the new option
+`loopback_port`) and applies the objects it returns, so the rootless, unprivileged pod, the probes, the limits, the 10 GB claim and the admin
+Secret are exactly the ones above (`quickinstall_gitea.rs`).
+
+* **Image.** `docker.io/gitea/gitea:1.24.5-rootless@sha256:3595...` (tag and digest of the multi-arch index, read from Docker Hub's registry API).
+  The Platform services wizard still uses the tag alone. Gitea is MIT (the `LICENSE` file of the v1.24.5 release); the cluster pulls the image
+  when you click Install and IYAKKI ships nothing.
+* **Address.** The Services stay ClusterIP. `loopback_port` (ClusterIP only, 1024 or higher) publishes the web port as a `hostPort` bound to
+  `127.0.0.1` of the node, so `git`, the AI IDE and the browser on this machine reach `http://127.0.0.1:3300` (the first free port from 3300
+  to 3309) and no other computer can. The ROOT_URL is that address, so Gitea's own clone addresses are right. Git over HTTP with a token is the
+  first cut; SSH is not published (no `clone-ssh` address is shown). The job checks `/api/healthz` on that address before it goes on and says
+  plainly when nothing answers (port taken, or a cluster network that does not publish host ports on loopback).
+* **Secrets.** The administrator password is generated in the job and goes into the Secret `gitea-admin` through a 0600 file (never an argument, a
+  log or a manifest). The job creates the administrator and an API token with the scopes `write:repository,read:user` inside the pod and parks
+  the token in the Secret `gitea-iyakki-token`. A job has no vault, so IYAKKI (the shell) moves both into your vault as
+  `svc.<instance>.admin-password` and `svc.<instance>.token` (the names this page uses, so `platform_*`, Connect workspace and the connection find them),
+  deletes the token Secret, notes the names in the record and retries while the vault is locked.
+* **The record** in `installed-services-<user>.json` is the one Platform services keeps: `platform_list`, `git_service_status`, the K8S tile and
+  Connect workspace see the instance, Upgrade and Backup work on it, and Remove removes it (the Setup row then says not installed). A
+  `loopback_port` Gitea is not "ClusterIP only" for Connect workspace: that blocker applies when the port is empty.
+* **A Gitea deployed from Platform services already** is used as it is when it is reachable (NodePort, Ingress); when it is ClusterIP only the
+  job stops with a plain message and changes nothing. A Platform-services Gitea with a loopback port is the Quick install's own. **Adoption:** when the
+  cluster holds the Deployment `gitea` and the volume `gitea-data` in `iyakki-gitea` but no record exists, a NodePort one is adopted as it is (the
+  record is written from the live Services, a token is made for the vault, nothing in the cluster changes) and a ClusterIP one is taken over by the
+  idempotent run (its Secret and volume are kept). The other way round, Platform services lists and redeploys the Quick install's record and keeps
+  its loopback port.
+* **The Git connection** "Local Gitea" is added once (found again by the instance it names; a moved port updates it). See `GIT-AND-SSH.md`.
 
 ## Connect a workspace to Gitea
 
@@ -195,6 +234,8 @@ entry names, never a value; the person reveals them in Details.
 
 ## Not verified
 
+* The Quick install item (above) was tested with fakes only: the `hostPort` on `127.0.0.1` with k3s's network, `kubectl exec` of the administrator and
+  token commands, the 20 s limit of the managed `kubectl` for them, and the handoff into a real vault are not tried on a cluster.
 * No real cluster, registry, Gitea, curl, podman or git push was used. The pinned tags (`1.23.8`, `1.24.5-rootless`) and the Gitea command
   line flags (`--scopes`, `--raw`, `--must-change-password=false`, `dump -f ... --type zip --tempdir`) are written from the documentation and must be
   checked on a real run; digests are not pinned yet.

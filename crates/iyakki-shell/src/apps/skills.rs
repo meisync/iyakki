@@ -426,7 +426,11 @@ impl App for SkillsApp {
             }
             ty += 8.0 * s;
             let body = wrap_lines(g, &sk.body, 14.0 * s, Face::Sans, dw - 36.0 * s);
-            let rows = (((y + dh - ty - 10.0 * s) / (19.0 * s)).floor() as usize).max(1);
+            let mut rows = (((y + dh - ty - 10.0 * s) / (19.0 * s)).floor() as usize).max(1);
+            if body.len() > rows {
+                // the "lines x of y" hint takes the last row
+                rows = (((y + dh - ty - 28.0 * s) / (19.0 * s)).floor() as usize).max(1);
+            }
             let first = self.scroll.min(body.len().saturating_sub(rows));
             self.scroll = first;
             for l in body.iter().skip(first).take(rows) {

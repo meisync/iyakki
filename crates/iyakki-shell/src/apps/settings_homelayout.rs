@@ -203,6 +203,6 @@ impl SettingsApp {
 
     pub(super) fn homelayout_buttons(&self) -> Vec<Btn> {
         let (acc, mut_) = (ACCENT, TEXT);
-        vec![("New group", acc, 'n'), ("Rename", mut_, 'r'), ("Delete group", ERR, 'x'), ("Group earlier", mut_, '['), ("Group later", mut_, ']'), ("Move tile", acc, 'm'), ("Put tile back", mut_, 'p'), ("Reset layout", mut_, 'z')]
+        vec![("New group", acc, 'n'), ("Rename", mut_, 'r'), ("Delete group", ERR, 'x'), ("Group earlier", mut_, '['), ("Group later", mut_, ']'), ("Move tile", acc, 'm'), ("Put tile back", mut_, 'p'), ("Reset to default", mut_, 'z')]
     }
 }

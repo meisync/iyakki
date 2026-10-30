@@ -1,0 +1,17 @@
+apple-bce (t2linux apple-bce-drv, commit c7448ca0a58299a78836969ddd3b43761ffac6b1) -- licence record kept by IYAKKI
+
+The upstream repository ships NO licence file (README.md has none, there is no LICENSE or COPYING). The only licence statement in the
+source is in apple_bce.c:
+
+    MODULE_LICENSE("GPL");
+    MODULE_AUTHOR("MrARM");
+
+For the Linux kernel, MODULE_LICENSE("GPL") declares "GNU Public License v2 or later". The project treats the module as GPL-2.0 (IYAKKI's
+package recipe says GPL-2.0, the stricter reading) and ships the module only inside kernel images, with its corresponding source
+(legal-info/sources) and our four patches (dist/buildroot/package/apple-bce/*.patch) under the same licence.
+
+COPYING.GPL-2.0 next to this file is the unmodified text of the GNU General Public License version 2 (Debian's
+/usr/share/common-licenses/GPL-2, copied 2026-10-27), standing in for the licence file upstream does not have.
+
+NOT VERIFIED: that the author agrees with this reading; the upstream project has no statement beyond the MODULE_LICENSE line. If the owner
+wants certainty, the question to ask upstream (github.com/t2linux/apple-bce-drv) is "please add a LICENSE file".

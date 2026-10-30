@@ -1,0 +1,62 @@
+{
+  "time": {
+    "zone": "Europe/Paris",
+    "hour12": false,
+    "seconds": false,
+    "no_ntp": false,
+    "ntp_server": "",
+    "zone_auto": false,
+    "zone_checked_at": 0,
+    "zone_note": ""
+  },
+  "providers": [
+    {
+      "id": "local",
+      "kind": "ollama",
+      "base_url": "http://127.0.0.1:11434",
+      "models": [
+        "qwen3:8b",
+        "nomic-embed-text"
+      ],
+      "default_model": "qwen3:8b",
+      "enabled": true
+    },
+    {
+      "id": "cloud",
+      "kind": "openai",
+      "base_url": null,
+      "key_ref": "vault:cloud-key",
+      "models": [
+        "gpt-example"
+      ],
+      "default_model": null,
+      "enabled": true
+    }
+  ],
+  "chat": {
+    "provider": "local",
+    "model": "qwen3:8b"
+  },
+  "embedding": {
+    "provider": "local",
+    "model": "nomic-embed-text"
+  },
+  "rag": {
+    "chunk_max": 900,
+    "overlap": 120,
+    "top_k": 7,
+    "use_external": false
+  },
+  "external_rag": [],
+  "secret_providers": {},
+  "vault": {
+    "lock_on_admin_logout": true,
+    "keyfile": null
+  },
+  "token_price_cents_per_mtok": 150,
+  "tool_log_days": 5,
+  "media_download_max_mb": 512,
+  "think_limit_secs": 90,
+  "silence_limit_secs": 150,
+  "no_workspace_history": true
+}

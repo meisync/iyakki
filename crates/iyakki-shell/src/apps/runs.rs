@@ -90,7 +90,7 @@ pub fn timeline(log: &RunLog) -> Vec<(String, [u8; 4])> {
                 v.push((format!("  {} {name} {who}", if *approved { "✓ allowed" } else { "✗ denied" }), if *approved { OK } else { ERR }));
             }
             RunEvent::ToolResult { name, ok, text, .. } => v.push((format!("  {} {name}: {}", if *ok { "result" } else { "error" }, one_line(text, 400)), if *ok { MUTED } else { ERR })),
-            RunEvent::Usage { .. } | RunEvent::Delta { .. } | RunEvent::Thinking { .. } => {}
+            RunEvent::Usage { .. } | RunEvent::Delta { .. } | RunEvent::Thinking { .. } | RunEvent::Budget { .. } => {}
             RunEvent::Note { text } => v.push((format!("  · {text}"), rgb(255, 196, 94))),
             RunEvent::Timing { first_token_ms, first_text_ms, total_ms, model_ms, tools_ms, overhead_ms, thinking_ms, .. } => {
                 let s = |ms: &u64| format!("{:.1} s", *ms as f64 / 1000.0);

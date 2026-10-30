@@ -623,6 +623,14 @@ impl Jobs {
         Ok(crate::bugs::redact(&clean_output(&raw)))
     }
 
+    /// Append one line to a job's log (a later step that belongs to the job, such as the vault handoff).
+    pub fn append_log(&self, owner: &str, id: &str, line: &str) -> Result<(), String> {
+        use std::io::Write;
+        let d = { let _g = self.lock(); self.dir(owner, id)? };
+        let mut f = fs::OpenOptions::new().create(true).append(true).open(d.join("log.txt")).map_err(|e| e.to_string())?;
+        writeln!(f, "{line}").map_err(|e| e.to_string())
+    }
+
     pub fn log_len(&self, owner: &str, id: &str) -> u64 {
         self.dir(owner, id).ok().and_then(|d| fs::metadata(d.join("log.txt")).ok()).map_or(0, |m| m.len())
     }

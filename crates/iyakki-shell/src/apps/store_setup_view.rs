@@ -508,7 +508,7 @@ impl Setup {
         row(g, &mut v, "Licence", item.licence(), MUTED);
         row(g, &mut v, "Where it goes", where_text(item), MUTED);
         if let Some(t) = self.deploy_text(item) {
-            row(g, &mut v, "Deploys to", &t, if self.cluster.as_ref().is_some_and(|c| !c.kind.is_local()) && item != Item::IndicTts { AMBER } else { MUTED });
+            row(g, &mut v, "Deploys to", &t, if self.cluster.as_ref().is_some_and(|c| !c.kind.is_local()) { AMBER } else { MUTED });
         }
         let needs = item.needs();
         if let Some(d) = &card.deps {

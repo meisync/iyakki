@@ -24,10 +24,12 @@ iyakki-agent = { path = "../iyakki-agent", optional = true }
 iyakki-remote = { path = "../iyakki-remote", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"], optional = true }
 iyakki-sec.workspace = true
+iyakki-core-api.workspace = true
 iyakki-devctl.workspace = true
 iyakki-storage.workspace = true
 iyakki-zram.workspace = true
 iyakki-fw.workspace = true
+iyakki-vpn = { path = "../iyakki-vpn" }
 iyakki-usb = { path = "../iyakki-usb" }
 iyakki-hwinfo.workspace = true
 iyakki-drivers.workspace = true

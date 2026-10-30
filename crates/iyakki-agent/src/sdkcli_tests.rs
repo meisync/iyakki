@@ -14,7 +14,7 @@ fn tmp(name: &str) -> PathBuf {
 }
 
 fn dev(name: &str) -> Device {
-    Device { name: name.into(), host: "192.0.2.7".into(), port: 7979, fingerprint: "ab:cd".into(), account: "admin".into(), paired_at: 0 }
+    Device { name: name.into(), host: "192.0.2.7".into(), addr: String::new(), port: 7979, fingerprint: "ab:cd".into(), account: "admin".into(), paired_at: 0 }
 }
 
 #[test]

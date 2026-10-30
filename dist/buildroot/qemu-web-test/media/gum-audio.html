@@ -1,0 +1,18 @@
+<!doctype html><meta charset=utf-8><title>MEDIA-TEST gum-audio</title><link rel=stylesheet href=style.css>
+<h1>getUserMedia audio</h1><div id=result>running</div>
+<script src=common.js></script>
+<script>
+// Expected: one live audio track; with the mock microphone an AudioContext analyser sees a non-silent signal within 5 s.
+mediaTest.run('gum-audio', 20000, async function () {
+  var s = await navigator.mediaDevices.getUserMedia({ audio: true });
+  var t = s.getAudioTracks()[0];
+  if (!t || t.readyState !== 'live') throw new Error('no live audio track');
+  var ctx = new AudioContext(), src = ctx.createMediaStreamSource(s), an = ctx.createAnalyser();
+  src.connect(an);
+  var buf = new Float32Array(an.fftSize), peak = 0, until = Date.now() + 5000;
+  while (Date.now() < until && peak < 0.001) { await new Promise(function (r) { setTimeout(r, 200); }); an.getFloatTimeDomainData(buf); for (var i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i])); }
+  t.stop(); ctx.close();
+  if (peak < 0.001) throw new Error('the signal stayed silent');
+  return t.label + ', peak ' + peak.toFixed(3);
+});
+</script>

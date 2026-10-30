@@ -133,7 +133,6 @@ Hardware and service legend used in class B and C:
 | F-VOICE-05 | Read aloud with the engines found on a real image. | S | voice | H1, H4 |
 | F-VOICE-06 | Browser voice helper in a real browser. | S | voice | H4 |
 | F-VOICE-08 | Listen: word highlight against real sound. | S | voice | H8 |
-| F-VOICE-14 | Build the indic-tts Dockerfile and deploy on a real cluster. | M | voice/k8s | H6, C-VOICE-09 |
 | F-VOICE-15 | Word timing with a live Kokoro/Lemonade server. | S | voice | Lemonade host |
 | F-VOICE-16 | Lemonade/Kokoros as reading voice, local and remote. | S | voice | Lemonade host |
 | F-EDIT-15 | Inline completion with a real model. | S | edit | local model |
@@ -260,7 +259,6 @@ Hardware and service legend used in class B and C:
 | F-DRIVERS-13 | Download Apple camera driver on device: legal review. | S | drivers | owner / legal |
 | F-DRIVERS-16 | Broadcom wl pack: Broadcom licence; user-build only. | S | drivers | owner / legal |
 | F-DRIVERS-19 | Asahi installer package: needs M1/M2 Mac to test. | M | drivers | H3 |
-| F-VOICE-09 | Indic TTS weights licence decision. | S | voice | owner / legal |
 | F-VOICE-10 | Native speakers check number tables. | S | voice | reviewers |
 
 ## D. Deferred after beta

@@ -9,15 +9,21 @@
 
 pub mod backend;
 pub mod blocked;
+pub mod devrules;
 pub mod engine;
 pub mod model;
+pub mod namerule;
 pub mod nl;
 pub mod ruleset;
 pub mod service;
 pub mod validate;
 
 #[cfg(test)]
+mod devrules_tests;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod upgrade_tests;
 
 pub use engine::{Engine, Status};
 pub use model::{Config, Kind, Ping, Preset, Proto, Rule};

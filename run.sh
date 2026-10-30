@@ -20,7 +20,8 @@ IYAKKI launcher
                       add --uefi for UEFI instead of BIOS;  ./run.sh vm-reset  forgets that disk
   ./run.sh vm-arm     boot the ARM64 image the way an Apple Silicon VM does (UEFI; slow without KVM, but real);  build-arm builds it
   ./run.sh screens    render every screen to PNG files in /tmp/iyakki-screens
-  ./run.sh test       run the whole automated test suite
+  ./run.sh test       run the whole automated test suite (first the warnings gate)
+  ./run.sh warnings   the warnings gate alone: cargo check of every target must print no warning
   ./run.sh vmtest     boot in QEMU, type into the login screen, save screenshots
   ./run.sh build      build the ISO (first time: ~30-40 min, downloads ~1 GB)
   ./run.sh build-mac  OPTIONAL image for Intel Macs (Mac mini 2014 and similar): adds applesmc, hid_apple, Cirrus audio and the Wi-Fi
@@ -34,6 +35,9 @@ IYAKKI launcher
                       Restricted firmware (Qualcomm Bluetooth, Realtek and Broadcom Ethernet, Atheros AR9170) is NOT in these images; for an image
                       of your OWN use that includes it: IYAKKI_INCLUDE_RESTRICTED_FIRMWARE=1 ./run.sh build-pc-layered (also build-mac, build-macweb).
                       Not for redistribution; docs/RESTRICTED-FIRMWARE.md
+  ./run.sh licence-check [--strict] [--write] [--no-images] [--verbose]  release gate point 7: Cargo licences, assets, downloads, notices/SBOM, legal-info, content scan of every target/buildroot-*/images (exit 1 on FAIL; docs: LICENSING.md)
+  ./run.sh dlmanifest keygen|sign|verify|check|gen  the signed downloads manifest (versions and checksums of the download items; docs/development/DOWNLOADS-MANIFEST.md)
+  ./run.sh image-programs  fails when production code starts a program the images do not ship (list: dist/buildroot/image-programs.txt)
   ./run.sh alpha-check  the gate before an alpha: build, tests, licences, docs links, versions, secrets, QEMU smoke tests (--dry: fast checks only)
   ./run.sh check-macos  cargo check of the window crates for the macOS targets (compiles only; skips when the Rust target is not installed)
   ./run.sh release [version]  collect the images, sign them, write release.json and the download page (docs/RELEASING.md)
@@ -126,10 +130,19 @@ case "${1:-help}" in
     cargo run -q --release -p iyakki-shell --example screens
     echo "Screenshots in /tmp/iyakki-screens:"; ls /tmp/iyakki-screens
     command -v xdg-open >/dev/null && xdg-open /tmp/iyakki-screens >/dev/null 2>&1 || true ;;
+  warnings)
+    # the warnings gate: every crate, every target (lib, bins, tests, examples) must compile with ZERO compiler warnings.
+    # Same cargo cache as a normal check (no RUSTFLAGS change, so no full rebuild); fails on the first warning it finds.
+    shift; exec dist/release/warnings-gate.sh "$@" ;;
   test)
     # tests leak temporary folders: keep them on the disk (not in a small or RAM-backed /tmp) and clean old ones afterwards
     . dist/release/env.sh; trap iyakki_tmp_clean EXIT
-    cargo test --workspace
+    dist/release/warnings-gate.sh
+    # KI-060: the run gets its own temp folder, removed at the end; growth of iyakki-* in the system /tmp fails the step
+    iyakki_run_tmp_begin; rc=0
+    cargo test --workspace || rc=$?
+    iyakki_run_tmp_end || rc=1
+    [ "$rc" -eq 0 ] || exit "$rc"
     (cd crates/iyakki-gui && cargo build -q --bin iyakki-desktop && echo "iyakki-gui: builds") ;;
   vmtest)
     [ -f "$IMG/rootfs.cpio.zst" ] || { echo "No image yet. Run:  ./run.sh build" >&2; exit 1; }
@@ -160,6 +173,15 @@ case "${1:-help}" in
     # collects images + window tarball + documents in target/release-<version>/, signs them (key: ~/.config/iyakki/release.key,
     # made once: back it up), writes release.json and the download page. Details: docs/RELEASING.md
     shift; exec dist/release/release.sh "$@" ;;
+  licence-check|license-check)
+    # the licence and proprietary-software gate (iyakki-relcheck): reads legal/*.txt, Cargo.lock, target/buildroot-*/{legal-info,images}; writes nothing unless --write
+    shift; exec cargo run -q -p iyakki-relcheck -- licence-check . "$@" ;;
+  dlmanifest)
+    # the signed downloads manifest: keygen FILE | sign MANIFEST --key FILE | verify MANIFEST [--pubkey HEX|FILE] | check | gen (docs/development/DOWNLOADS-MANIFEST.md)
+    shift; exec cargo run -q -p iyakki-core -- dlmanifest "$@" ;;
+  image-programs)
+    # the guard against a missing program on the image (the curl bug): scans production code for spawned programs; narrow test, no image needed
+    exec cargo test -q -p iyakki-agent --test image_programs ;;
   alpha-check)
     # the gate before an alpha: build, test, licences, docs links, versions, secrets, QEMU smoke tests -> PASS/FAIL table
     shift; exec dist/release/alpha-check.sh "$@" ;;

@@ -32,13 +32,20 @@ USAGE:
                                       sums and signs the images of a release, writes the download page, checks a download
   iyakki firewall off|status            the emergency way out of a firewall lockout, from a console or SSH: off removes the rules and keeps
                                       the firewall off until it is switched on in Settings (docs/FIREWALL.md); status shows the settings and the kernel
+  iyakki vpn inspect FILE               offline: what is in a local .ovpn or WireGuard .conf (kind, whether it needs a user name and password,
+                                      every setting name with ACCEPTED / IGNORED / REFUSED, block counts); never prints a value or a key
   iyakki top [N]                        what the machine is doing: load, memory and the N busiest processes (default 15)
+  iyakki dlmanifest keygen FILE | sign MANIFEST --key FILE | verify MANIFEST [--pubkey HEX|FILE] | check | gen
+                                      the signed downloads manifest (versions and checksums of the download items; docs/development/DOWNLOADS-MANIFEST.md)
   iyakki quick-install k3s|duckdb|elasticsearch [--data DIR]
                                       one Quick install step (Store -> Setup runs it as a detached job)
   iyakki linux-apps --data DIR --user NAME create|install|remove|upgrade|update|run|import ...
                                       the Linux apps (Debian/Ubuntu sandbox) steps the IYAKKI menu runs as detached jobs (docs/LINUX-APPS.md)
   iyakki store-manage reset|remove --kubeconfig FILE --namespace NS [--delete-data] [--wait SECS] [--force]
                                       the cluster side of resetting or removing the private store (run as a detached job)
+  iyakki serve --profile NAME [--config FILE] [--listen ADDR] [--check]
+                                      only the headless web service of a profile (agent-api, cloud): HTTPS, sign-in required,
+                                      loopback unless the config opts in (docs/development/MINIMAL-WEBSERVICE.md)
   iyakki web [ADDR]                     only the browser front end (no screen needed): ADDR is a port, host:port,
                                       or http:port to speak plain HTTP behind a TLS proxy (default HTTPS on 8443);
                                       also from the boot option iyakki.web=ADDR or the environment IYAKKI_WEB
@@ -56,6 +63,10 @@ USAGE:
   iyakki store-server --data DIR [--listen 0.0.0.0:8080] [--publish-token-file F] [--catalog-key-file F | --catalog-seed-file F]
                       [--read-only] [--require-trusted] [--id ID] [--name N] [--max-body-mib N] | publisher-add --pub-id ID [--pub-name N]
                                       a private app store: signed catalog, packages and publishing over HTTP (docs/STORE.md, section 13)
+  iyakki firmware <list|fetch>          the vendor firmware this computer lacks: list it, or fetch it on another computer and push it over a cable
+                                      (docs/FIRMWARE-LICENCES.md, dist/scripts/firmware-notes/)
+  iyakki usb share-internet [--apply|--undo]
+                                      on a computer joined by a USB-C / Thunderbolt cable: share its internet with the device (docs/DEVELOPER-MODE.md)
   iyakki dev <pair|devices|install|uninstall|list|logs|run|push|screenshot|whoami>
                                       from a developer's computer: pair once with a device in developer mode, then install, upgrade,
                                       remove, open and watch apps on it, push a folder on every change (docs/DEVELOPER-MODE.md)
@@ -235,10 +246,15 @@ fn real_main() -> ExitCode {
         }
         #[cfg(feature = "shell")]
         "quick-install" => ExitCode::from(iyakki_agent::quickinstall::cli_main(&args[1..]).clamp(0, 255) as u8),
+        "dlmanifest" => ExitCode::from(iyakki_agent::dlmanifest::cli_main(&args[1..]).clamp(0, 255) as u8),
+        "firmware" => ExitCode::from(iyakki_agent::fwextra_cli::firmware_main(&args[1..]).clamp(0, 255) as u8),
+        "usb" if args.get(1).map(String::as_str) == Some("share-internet") => ExitCode::from(iyakki_agent::fwextra_cli::share_main(&args[2..]).clamp(0, 255) as u8),
         "linux-apps" => ExitCode::from(iyakki_agent::linuxapps::cli_main(&args[1..]).clamp(0, 255) as u8),
         "store-manage" => ExitCode::from(iyakki_agent::store::privatemanage::cli_main(&args[1..]).clamp(0, 255) as u8),
         "hostname" => hostname_cmd(&args[1..]),
         "firewall" => firewall_cmd(&args[1..]),
+        "vpn" => ExitCode::from(iyakki_vpn::inspect::cli_main(&args[1..]).clamp(0, 255) as u8),
+        "vpn-helper" => ExitCode::from(iyakki_agent::vpn_helper::cli_main(&args[1..]).clamp(0, 255) as u8),
         "ledger-verify" => match args.get(1).map(std::fs::read) {
             Some(Ok(b)) => match iyakki_ledger::Ledger::from_bytes(&b) {
                 Ok(l) => {
@@ -254,6 +270,13 @@ fn real_main() -> ExitCode {
         "swarm-run" => swarm_run(&args[1..]),
         "serve" => {
             log::info!("IYAKKI {} starting", env!("CARGO_PKG_VERSION"));
+            // `serve --profile NAME` (or IYAKKI_PROFILE): only the headless web service of that profile, no shell, no screen
+            #[cfg(feature = "shell")]
+            match iyakki_core::svc::parse_args(serve_args(&args), &|k| std::env::var(k).ok()) {
+                Ok(Some(ask)) => return serve_profile(&ask),
+                Ok(None) => {}
+                Err(e) => return fail(e),
+            }
             // Real boot = we are PID 1 *and* nothing has mounted /proc yet. A container's PID 1 (docker, k3s)
             // already has /proc, and must never try to mount filesystems or load kernel modules.
             let pid1 = std::process::id() == 1 && !std::path::Path::new("/proc/self").exists();
@@ -351,6 +374,23 @@ fn real_main() -> ExitCode {
                         out!("IYAKKI-SELFTEST install2 location {:?}", iyakki_storage::data_location(&iyakki_storage::Roots::real(), dir));
                         mem_report("install2");
                         out!("IYAKKI-SELFTEST install2 marker {:?}", std::fs::read_to_string(dir.join("marker")).unwrap_or_else(|e| format!("missing: {e}")));
+                        iyakki_core::boot::power_off();
+                    }
+                    // upgrade test (dist/buildroot/qemu-upgrade-test.sh): the data volume holds an older release's files (the alpha.1
+                    // fixtures); open the stores the way the system does and say what they hold. Test only: reachable only through the
+                    // self-test boot option; it writes what a normal start would write (the migrations and their `.pre-v*` copies)
+                    #[cfg(feature = "shell")]
+                    Some("upgrade") => {
+                        let dir = std::path::Path::new(iyakki_core::boot::DATA_DIR);
+                        match iyakki_agent::settings::SettingsStore::open(&dir.join("settings.json")) {
+                            Ok(st) => out!("IYAKKI-SELFTEST upgrade settings providers={} chat={} tool_log_days={} read_only={}", st.get().providers.len(), st.get().chat.as_ref().map(|c| c.model.as_str()).unwrap_or("none"), st.get().tool_log_days, st.read_only().is_some()),
+                            Err(e) => out!("IYAKKI-SELFTEST upgrade settings error {e}"),
+                        }
+                        out!("IYAKKI-SELFTEST upgrade sources {}", iyakki_agent::dash::store::Sources::open(dir, "amy").own().len());
+                        let inbox = iyakki_agent::inbox::Inbox::new(&dir.join("inbox"));
+                        let _ = inbox.maintain("amy", 1_700_000_100);
+                        out!("IYAKKI-SELFTEST upgrade inbox {}", inbox.list("amy").iter().map(|n| n.count).sum::<u32>());
+                        out!("IYAKKI-SELFTEST upgrade end");
                         iyakki_core::boot::power_off();
                     }
                     Some("persist2") => {
@@ -769,6 +809,11 @@ fn selftest() {
         Ok(o) => out!("IYAKKI-SELFTEST wasm {}", String::from_utf8_lossy(&o.log)),
         Err(e) => out!("IYAKKI-SELFTEST wasm-error {e}"),
     }
+    // N1: the smallest real call of every runtime path that used to start an external program, against a loopback listener started here
+    // (never the internet); `qemu-test.sh` requires each `IYAKKI-SELFTEST path <name> ok`
+    for l in iyakki_agent::pathcheck::lines() {
+        out!("{l}");
+    }
     out!("IYAKKI-SELFTEST end");
 }
 
@@ -1066,6 +1111,38 @@ fn start_devmode_watch() {
         }
         Err(e) => log::error!("developer mode: {e}"),
     }
+    // the stable device name (mDNS) follows its Settings switch, in its own thread
+    if let Ok(env) = shell_env() {
+        if let Err(e) = iyakki_remote::devname::watch(env) {
+            log::error!("device name: could not start its watcher: {e}");
+        }
+    }
+}
+
+/// `iyakki serve --profile NAME`: the headless web service (docs/development/MINIMAL-WEBSERVICE.md). With `--check` it only
+/// validates the configuration and says what would start.
+#[cfg(feature = "shell")]
+fn serve_profile(ask: &iyakki_core::svc::Ask) -> ExitCode {
+    let chk = match iyakki_core::svc::load(ask) {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    if ask.check_only {
+        out!("{}", iyakki_core::svc::summary(&chk));
+        return ExitCode::SUCCESS;
+    }
+    let env = match shell_env() {
+        Ok(e) => e,
+        Err(e) => return fail(e),
+    };
+    let shutdown = match install_signal_handlers() {
+        Ok(f) => f,
+        Err(e) => return fail(format!("signal setup: {e}")),
+    };
+    match iyakki_core::svc::run(&chk, env, &shutdown) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => fail(e),
+    }
 }
 
 /// `iyakki web [ADDRESS]`: only the browser front end, for a server or a container with no screen.
@@ -1105,5 +1182,24 @@ fn run_shell(a: &[String]) -> ExitCode {
     match iyakki_shell::backend::run_fb(&mut sh, &fb, &shutdown) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fail(e),
+    }
+}
+
+/// The arguments after the command word. As PID 1 the program is started with no arguments at all and the command
+/// defaults to `serve`, so `args` can be empty: `&args[1..]` would panic and the boot would stop.
+fn serve_args(args: &[String]) -> &[String] {
+    args.get(1..).unwrap_or(&[])
+}
+
+#[cfg(test)]
+mod serve_args_tests {
+    use super::serve_args;
+
+    #[test]
+    fn no_arguments_at_boot_give_an_empty_list_instead_of_a_panic() {
+        assert!(serve_args(&[]).is_empty());
+        assert!(serve_args(&["serve".to_string()]).is_empty());
+        let a = ["serve".to_string(), "--profile".to_string(), "agent-api".to_string()];
+        assert_eq!(serve_args(&a), &a[1..]);
     }
 }

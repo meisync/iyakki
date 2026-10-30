@@ -64,6 +64,8 @@ pub struct CliApp {
     history: Vec<String>,
     hist_pos: Option<usize>,
     conns: conn::Conns,
+    /// The check for a newer download list on its own has been asked for once in this window.
+    dl_auto: bool,
 }
 
 impl CliApp {
@@ -71,7 +73,7 @@ impl CliApp {
         let cli = Cli::new(&cx.session.user, cx.session.policy.clone(), cx.host.clone()).with_skills(cx.services.skills.clone(), cx.services.packages.clone()).with_services(cx.services.clone());
         let mut log = ScrollLog::default();
         log.push(format!("IYAKKI terminal — {} ({}). Type `help`, or press F1 for the main commands.", cx.session.user, cx.session.role.name()), MUTED);
-        CliApp { tab: Tab::Terminal, sel: 0, list_top: 0, list_hover: false, mode: Mode::Browse, plan: None, status: None, cli, log, input: TextField::new("", false), history: vec![], hist_pos: None, conns: conn::Conns::new() }
+        CliApp { tab: Tab::Terminal, sel: 0, list_top: 0, list_hover: false, mode: Mode::Browse, plan: None, status: None, cli, log, input: TextField::new("", false), history: vec![], hist_pos: None, conns: conn::Conns::new(), dl_auto: false }
     }
 
     pub fn tab(&self) -> Tab {
@@ -204,6 +206,14 @@ impl CliApp {
                     ask(self, true);
                 }
             }
+            // the person asks for a newer download list now (a background check; the screen keeps working)
+            Event::Key(Key::Char('r')) => {
+                if !Self::can_manage(cx) {
+                    self.status = Some(("Only administrators with a full terminal can check for updates.".into(), false));
+                } else {
+                    iyakki_agent::dlmanifest::fetch::start(&cx.services.clis.manifest_dir(), true);
+                }
+            }
             Event::Key(Key::Char('b')) => {
                 let d = &CATALOG[self.sel.min(n - 1)];
                 if !Self::can_manage(cx) {
@@ -279,6 +289,37 @@ impl CliApp {
         46.0 * s
     }
 
+    /// The download list line: a notice after an applied update, and the "Check for updates" control with the last result in plain words.
+    /// Returns the height used.
+    fn draw_dl_check(&mut self, g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, cx: &AppCx) -> f32 {
+        use iyakki_agent::dlmanifest::fetch;
+        let dir = cx.services.clis.manifest_dir();
+        if !self.dl_auto {
+            self.dl_auto = true;
+            // never in tests: they must not reach the network
+            #[cfg(not(test))]
+            fetch::start(&dir, false);
+        }
+        for (action, detail) in fetch::take_audit() {
+            cx.audit.record(&cx.session.user, &action, &detail);
+        }
+        let st = fetch::status(&dir);
+        let mut used = 0.0;
+        if let Some(n) = &st.notice {
+            let n = g.fit(13.0 * s, n, Face::Sans, w);
+            g.text(x, y, 13.0 * s, OK, &n, Face::Sans);
+            used += 20.0 * s;
+        }
+        let bw = g.button(x, y + used, 12.0 * s, "Check for updates", ACCENT, Event::Key(Key::Char('r')));
+        let line = fetch::status_line(&st, fetch::now_s());
+        let tw = (w - bw - 12.0 * s).max(0.0);
+        if tw > 60.0 * s {
+            let line = g.fit(12.0 * s, &line, Face::Sans, tw);
+            g.text(x + bw + 12.0 * s, y + used + 6.0 * s, 12.0 * s, if st.result.starts_with("refused") { ERR } else { MUTED }, &line, Face::Sans);
+        }
+        used + 12.0 * s * 2.1 + 8.0 * s
+    }
+
     fn draw_clis(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx) {
         let x = area.x + 24.0 * s;
         let w = area.w - 48.0 * s;
@@ -288,6 +329,7 @@ impl CliApp {
             g.text(x, y, 14.0 * s, if *ok { OK } else { ERR }, &m, Face::Sans);
             y += 24.0 * s;
         }
+        y += self.draw_dl_check(g, x, y, w, s, cx);
         let installed = cx.services.clis.installed();
         let list_w = (w * 0.34).clamp_safe(220.0 * s, 360.0 * s);
         let rh = 46.0 * s;
@@ -556,7 +598,7 @@ impl App for CliApp {
         match self.tab {
             Tab::Terminal => "Enter run · ↑↓ history · Ctrl+V paste · PgUp/PgDn scroll · Tab CLIs · Esc back".into(),
             Tab::Connections => self.conns.hint().into(),
-            Tab::Clis => "↑↓ choose · I install · U update to the newest · B go back a version · X remove · S start / T stop the container cluster (k3s) or Ollama · Tab terminal · Esc back".into(),
+            Tab::Clis => "↑↓ choose · I install · U update to the newest · B go back a version · X remove · R check for updates · S start / T stop the container cluster (k3s) or Ollama · Tab terminal · Esc back".into(),
         }
     }
 
@@ -801,11 +843,16 @@ mod tests {
             assert!(g.hits.iter().any(|h| h.label == want), "{want} is listed");
         }
         // the rest of the list is reached by selecting further down (the list scrolls to follow)
-        for _ in 0..10 {
-            app.handle(&Event::Key(Key::Down), &cx);
-        }
-        let g = draw(&mut app, &cx, 1100, 650);
+        // (as many steps as the catalogue needs: it grows, a fixed number of key presses goes stale)
+        let mut g = draw(&mut app, &cx, 1100, 650);
         for want in ["Arduino CLI", "esptool (ESP32/ESP8266)", "espflash (ESP32)", "Azure CLI"] {
+            for _ in 0..CATALOG.len() {
+                if g.hits.iter().any(|h| h.label == want) {
+                    break;
+                }
+                app.handle(&Event::Key(Key::Down), &cx);
+                g = draw(&mut app, &cx, 1100, 650);
+            }
             assert!(g.hits.iter().any(|h| h.label == want), "{want} is listed after scrolling");
         }
         assert!(app.list_top > 0);
@@ -1029,3 +1076,7 @@ mod agents_tests;
 #[cfg(test)]
 #[path = "cli_conn_tests.rs"]
 mod conn_tests;
+
+#[cfg(test)]
+#[path = "cli_dlcheck_tests.rs"]
+mod dlcheck_tests;

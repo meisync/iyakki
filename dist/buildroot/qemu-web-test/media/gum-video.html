@@ -1,0 +1,23 @@
+<!doctype html><meta charset=utf-8><title>MEDIA-TEST gum-video</title><link rel=stylesheet href=style.css>
+<h1>getUserMedia video</h1><div id=result>running</div><video id=v autoplay muted playsinline></video>
+<script src=common.js></script>
+<script>
+// Expected: a live video track whose <video> gets a size (the mock camera is 1280x720 or 640x480) and shows moving pictures:
+// currentTime advances and at least 10 frames arrive in 5 s.
+mediaTest.run('gum-video', 25000, async function () {
+  var s = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+  var v = document.getElementById('v'); v.srcObject = s;
+  await new Promise(function (ok, no) { v.onloadedmetadata = ok; setTimeout(function () { no(new Error('no metadata')); }, 10000); });
+  await v.play();
+  var frames = 0, t0 = v.currentTime;
+  await new Promise(function (done) {
+    var end = Date.now() + 5000;
+    (function tick() { if (Date.now() > end) return done(); if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(function () { frames++; tick(); }); else setTimeout(function () { frames++; tick(); }, 50); })();
+  });
+  var w = v.videoWidth, h = v.videoHeight, moved = v.currentTime - t0;
+  s.getTracks().forEach(function (t) { t.stop(); });
+  if (!w || !h) throw new Error('no picture size');
+  if (frames < 10 || moved <= 0) throw new Error('frames ' + frames + ', time moved ' + moved.toFixed(2));
+  return w + 'x' + h + ', ' + frames + ' frames in 5 s';
+});
+</script>

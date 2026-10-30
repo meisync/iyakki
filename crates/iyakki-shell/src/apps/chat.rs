@@ -38,6 +38,8 @@ const ACCENT: [u8; 4] = rgb(79, 140, 255);
 const SPEAK_PAUSE: usize = 49_900;
 /// The Pause button of a running Autopilot (Ctrl+Shift+A switches Autopilot off instead: the step finishes, then it stops).
 const AP_PAUSE: usize = 49_901;
+/// The X on the chip that names the attached flow.
+pub(crate) const FLOW_CHIP_X: usize = 49_902;
 
 /// The reply being read aloud: which message, what is said (markup removed), its sentences, and how the words said match the
 /// words drawn (see `wordtime::align_words`).
@@ -54,6 +56,8 @@ struct Reading {
 
 #[path = "chat_links.rs"]
 mod chat_links;
+#[path = "chat_form.rs"]
+mod chat_form;
 pub use chat_links::{LinkOut, OpenHow};
 
 /// A chat that belongs to one AI IDE workspace: its tools reach only that folder, its chats are kept apart from every
@@ -105,6 +109,13 @@ pub struct ChatApp {
     links: chat_links::LinkState,
     dash: Option<DashLink>,
     flows: Option<FlowsLink>,
+    /// The ordinary CHAT tile after the person left FLOWS: the flow last open there, kept as context until it is detached, the
+    /// person signs out, the flow is deleted or a few hours pass (see `iyakki_agent::flows::set_last_flow`).
+    sticky: Option<FlowsLink>,
+    /// (name, last run failed, when it was looked at) of the attached flow, for the chip in the header.
+    sticky_chip: Option<(String, bool, std::time::Instant)>,
+    /// The workflow whose thread this chat shows (FLOWS): the conversation is kept per workflow.
+    flow_seen: Option<String>,
     /// Set when the chat lives in an AI IDE workspace.
     project: Option<ProjectScope>,
     /// The open file and selection of the IDE's editor, as marked data for the next plain (non-agent) question.
@@ -185,6 +196,8 @@ pub struct ChatApp {
     last_q: String,
     /// (tokens, cost in cents, files, seconds) of the current or last agent run.
     usage: Option<(u64, f64, u32, u64)>,
+    /// Where the tokens of the latest request went and how many tools it was offered (footer, tooltip).
+    budget: Option<iyakki_agent::tokenbudget::Breakdown>,
     /// The answer so far while the model is still writing it (not part of the saved chat).
     live: String,
     /// Where the last run's time went: (first token ms, first text ms, total ms, model ms, tools ms, our ms, prepare ms).
@@ -213,6 +226,9 @@ pub struct ChatApp {
     cred: Option<credguard::Found>,
     /// The private form for a secret (the vault request this answers, if any).
     secret: Option<(Form, Option<String>)>,
+    /// The form for missing input the assistant asked for (`ask_form`), and the one of the current run waiting for its end.
+    askform: Option<(iyakki_agent::flows::askform::FormSpec, Form)>,
+    askform_call: Option<iyakki_agent::flows::askform::FormSpec>,
     /// A question about the assistant in the person's browser, asked in the open chat (the INBOX shows it too).
     consent: Option<super::browser_consent::ConsentDialog>,
     /// A good-news line next to the errors (what was stored).
@@ -337,6 +353,7 @@ impl ChatApp {
             usage: None,
             live: String::new(),
             timing: None,
+            budget: None,
             thinking: String::new(),
             waiting_since: None,
             think_rx: None,
@@ -350,10 +367,15 @@ impl ChatApp {
             ap_step: String::new(),
             cred: None,
             secret: None,
+            askform: None,
+            askform_call: None,
             consent: None,
             info: None,
             links: Default::default(),
             flows: None,
+            flow_seen: None,
+            sticky: None,
+            sticky_chip: None,
             editor: None,
             edit_focus: false,
             nav_open: true,
@@ -411,11 +433,11 @@ impl ChatApp {
 
     /// The name chats are stored under: the person, or the workspace's own key.
     fn skey(&self, cx: &AppCx) -> String {
-        match (&self.project, &self.dash, &self.flows) {
+        match (&self.project, &self.dash, self.flows.is_some() || self.sticky.is_some()) {
             (Some(p), _, _) => p.key.clone(),
             (None, Some(_), _) => iyakki_agent::dash::tools::chat_key(&cx.session.user),
-            (None, None, Some(_)) => iyakki_agent::flows::chat_key(&cx.session.user),
-            (None, None, None) => cx.session.user.clone(),
+            (None, None, true) => iyakki_agent::flows::chat_key_for(&cx.session.user, self.flow_seen.as_deref()),
+            (None, None, false) => cx.session.user.clone(),
         }
     }
 
@@ -444,6 +466,20 @@ impl ChatApp {
         self.msgs.push(Message::assistant(reply));
         self.last_q = user.to_string();
         self.persist(cx, reply);
+    }
+
+    /// A line the assistant says by itself, without a model call (FLOWS: "the last run failed, want me to fix it?"). Nothing is
+    /// run or changed by it; it stays in the saved chat. Ignored while a turn is going.
+    pub fn local_note(&mut self, cx: &AppCx, reply: &str) {
+        if self.run.is_some() || self.pending.is_some() {
+            return;
+        }
+        self.msgs.push(Message::assistant(reply));
+        if let Some(sess) = self.session.as_mut() {
+            sess.messages = self.older.iter().cloned().chain(self.msgs.iter().filter(|m| m.role != Role::System).cloned()).collect();
+            self.nav_dirty = true;
+            let _ = cx.services.sessions.save(sess);
+        }
     }
 
     /// Send a message now, as if typed (used by "ask the assistant about this feature").
@@ -483,6 +519,8 @@ impl ChatApp {
         self.grants.clear();
         self.error = None;
         self.ask = None;
+        self.askform = None;
+        self.askform_call = None;
         self.ctx = ContextInfo::default();
         self.scroll_px = 0.0;
     }
@@ -537,6 +575,7 @@ impl ChatApp {
         if self.autopilot {
             // Autopilot -> Ask first
             self.autopilot = false;
+            iyakki_agent::dash::share::set_unattended(false);
             self.ap_after_run = false;
             self.approvals = Approvals::Ask;
         } else {
@@ -725,6 +764,7 @@ impl ChatApp {
             return;
         }
         self.autopilot = !self.autopilot;
+        iyakki_agent::dash::share::set_unattended(self.autopilot);
         if self.autopilot {
             if self.approvals == Approvals::Ask {
                 self.approvals = Approvals::Auto;
@@ -757,6 +797,7 @@ impl ChatApp {
     /// Auto ends here unless it was pinned (the person signed out or went to another workspace).
     pub fn end_auto_unless_pinned(&mut self) {
         self.autopilot = false;
+        iyakki_agent::dash::share::set_unattended(false);
         self.ap_after_run = false;
         if self.approvals == Approvals::Auto {
             self.approvals = Approvals::Ask;
@@ -794,7 +835,9 @@ impl ChatApp {
         self.ap_step.clear();
         self.ask = None;
         self.ask_call = None;
+        self.askform_call = None;
         self.usage = None;
+        self.budget = None;
         self.timing = None;
         self.live.clear();
         self.thinking.clear();
@@ -870,6 +913,10 @@ impl ChatApp {
             if self.tasks.is_some() && cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full {
                 system.push_str(iyakki_agent::tasktools::PROMPT_RULE);
             }
+            if cx.session.policy.manage_settings {
+                system.push_str(iyakki_agent::sshtunneltools::PROMPT_RULE);
+                system.push_str(iyakki_agent::vpntools::PROMPT_RULE);
+            }
             if k8s.is_none() {
                 system.push_str("\nNo cluster is connected to this workspace. Never start, install or stop a cluster (k3s server, minikube, kind, kubeadm): it is refused. If the person wants to deploy, tell them to use the K8S panel's Change cluster, or to set a cluster up themselves.");
             }
@@ -884,11 +931,27 @@ impl ChatApp {
             system.push_str("\n\n");
             system.push_str(&iyakki_agent::dash::tools::DashTools::context(&d.env, &d.state));
         }
-        // the FLOWS tile: the rules for working on workflows and a compact, redacted picture of what is open
-        if let Some(f) = &self.flows {
+        // the FLOWS tile (or the CHAT tile that still has the flow last open there): the rules for working on workflows and a
+        // compact, redacted picture of what is open, with the newest failure
+        self.refresh_sticky(cx);
+        let flows_link = self.flows_link();
+        if let Some(f) = &flows_link {
             system.push_str(iyakki_agent::flows::tools::PROMPT_RULES);
             system.push_str("\n\n");
             system.push_str(&iyakki_agent::flows::tools::FlowTools::context(&f.env, &f.open));
+            let (fid, name) = {
+                let o = f.open.lock().unwrap_or_else(|e| e.into_inner());
+                (o.flow.clone(), o.flow.as_ref().and_then(|id| f.env.store.get_draft(id)).map(|x| x.name).unwrap_or_default())
+            };
+            if let Some(fid) = fid {
+                let failed = iyakki_agent::flows::newest_failed_run(&f.env, &fid);
+                log::info!("chat: flows context flow={fid} name={} failed_run={}", iyakki_agent::flows::plain_name(&name, 60), failed.as_deref().unwrap_or("none"));
+            }
+        }
+        // the DATA tab: which table it last showed (file and column names only)
+        if let Some(line) = iyakki_agent::datatools::tab_context(&cx.session.user) {
+            system.push_str("\n\n");
+            system.push_str(&line);
         }
         // recalling memory and skills (it may call an embedding service) and condensing the history happen on the run's own
         // thread, so starting a run never waits on the UI thread
@@ -944,13 +1007,27 @@ impl ChatApp {
             Some(d) => Arc::new(iyakki_agent::dash::tools::DashTools::new(tools_arc, d.env.clone(), d.state.clone())),
             None => tools_arc,
         };
-        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = match &self.flows {
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = match &flows_link {
             Some(f) => Arc::new(iyakki_agent::flows::tools::FlowTools::new(tools_arc, f.env.clone(), f.open.clone())),
             None => tools_arc,
         };
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = match (&self.tasks, &project) {
             (Some(m), Some(_)) if cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full => Arc::new(iyakki_agent::tasktools::TaskTools::new(tools_arc, m.clone(), ext.as_deref().unwrap_or("builtin"), "")),
             _ => tools_arc,
+        };
+        // SSH tunnels: the list is free, every change asks (administrators only: the tunnels are device settings)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            Arc::new(iyakki_agent::sshtunneltools::SshTunnelTools::new(tools_arc, iyakki_agent::sshtunnel_mgr::Manager::shared(&cx.services, &cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d)))))
+        } else {
+            tools_arc
+        };
+        // VPN profiles: the list is free, every change asks (administrators only: routes are device settings)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            Arc::new(iyakki_agent::vpntools::VpnTools::new(tools_arc, iyakki_agent::vpn_mgr::Manager::shared(&cx.services, &cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d)))))
+        } else {
+            tools_arc
         };
         // the job tools sit outermost: an external agent gets them through the bridge like the others
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if iyakki_agent::jobtools::JobTools::offered(&cx.session.policy) {
@@ -969,6 +1046,20 @@ impl ChatApp {
         };
         let reminder = iyakki_agent::toolblock::ReminderCtx { agent_on: true, browser_policy: browser.into(), engine_installed: iyakki_agent::webengine::embedded_available(), screen_available: cx.services.screen.present(), loaded: None };
         let mut assist = iyakki_agent::assistrun::Assist::standard(reminder);
+        {
+            // tool routing (Settings → Models): the groups this chat's context needs from the first request, or every tool
+            use iyakki_agent::toolblock::Group;
+            assist.lazy_groups = !cx.services.settings.lock().unwrap_or_else(|e| e.into_inner()).get().no_tool_routing;
+            if flows_link.is_some() {
+                assist.context_groups.insert(Group::Flows);
+            }
+            if self.dash.is_some() {
+                assist.context_groups.insert(Group::Dash);
+            }
+            if project.is_some() {
+                assist.context_groups.extend([Group::Workspace, Group::Cluster, Group::Build, Group::System, Group::Data]);
+            }
+        }
         {
             // the thinking watchdog's limits (Settings; 0 = the defaults of 60 s of pure thinking and 120 s of silence)
             let st = cx.services.settings.lock().unwrap_or_else(|e| e.into_inner());
@@ -1075,7 +1166,7 @@ impl ChatApp {
             }
         }
         for e in events {
-            if !matches!(e, RunEvent::Delta { .. } | RunEvent::Thinking { .. } | RunEvent::Usage { .. }) {
+            if !matches!(e, RunEvent::Delta { .. } | RunEvent::Thinking { .. } | RunEvent::Usage { .. } | RunEvent::Budget { .. }) {
                 self.live.clear();
             }
             if matches!(e, RunEvent::Delta { .. } | RunEvent::Model { .. } | RunEvent::Final { .. } | RunEvent::Failed { .. } | RunEvent::Stopped { .. }) {
@@ -1102,6 +1193,9 @@ impl ChatApp {
                     if let Some(a) = calls.iter().filter(|c| c.name == "ask_user").find_map(|c| ask_from_args(&c.args)) {
                         self.ask_call = Some(a);
                     }
+                    if let Some(f) = calls.iter().filter(|c| c.name == "ask_form").find_map(|c| iyakki_agent::flows::askform::parse(&c.args).ok()) {
+                        self.askform_call = Some(f);
+                    }
                     if !calls.is_empty() {
                         let tc: Vec<ToolCall> = calls.into_iter().map(|c| ToolCall { id: c.id, name: c.name, args: c.args }).collect();
                         self.msgs.push(Message::assistant_calls(text, tc));
@@ -1127,10 +1221,15 @@ impl ChatApp {
                     self.msgs.push(Message::tool_result(&ToolCall { id, name, args: serde_json::Value::Null }, text));
                 }
                 RunEvent::Usage { tokens, cost_cents, files, seconds } => self.usage = Some((tokens, cost_cents, files, seconds)),
+                RunEvent::Budget { bd } => self.budget = Some(bd),
                 RunEvent::Final { text } if text.trim().is_empty() => self.error = Some("The model returned an empty answer. Try again, or choose another model (Ctrl+P).".into()),
                 RunEvent::Final { text } => {
                     answered = true;
                     self.ask = self.ask_call.take().or_else(|| detect_question(&text));
+                    if let Some(f) = self.askform_call.take() {
+                        self.ask = None;
+                        self.open_ask_form(f);
+                    }
                     self.msgs.push(Message::assistant(text.clone()));
                     self.persist(cx, &text);
                     let msg = self.msgs.len() - 1;
@@ -1434,6 +1533,13 @@ impl ChatApp {
     }
 
     /// "first token in 1.2 s, total 4.8 s": where the last run's time went, for the footer.
+    /// "tools: 28 of 121 · request ~6.2k (system 0.9k, tools 3.1k, chat 1.2k, outputs 1.0k)": what the latest request offered and cost.
+    fn tools_text(&self) -> Option<String> {
+        let b = self.budget.as_ref()?;
+        let k = |n: u64| if n >= 1000 { format!("{:.1}k", n as f64 / 1000.0) } else { n.to_string() };
+        Some(format!("tools: {} of {} · request ~{} (system {}, tools {}, chat {}, outputs {})", b.offered, b.total, k(b.sum()), k(b.system), k(b.tools), k(b.history), k(b.outputs)))
+    }
+
     fn timing_text(&self) -> String {
         match self.timing {
             Some((tok, text, total, _, _, _, _, thought)) if total > 0 => {
@@ -1490,9 +1596,80 @@ impl ChatApp {
         self.nav_dirty = true;
         self.error = None;
         self.ask = None;
+        self.askform = None;
+        self.askform_call = None;
         self.ctx = ContextInfo::default();
         self.scroll_px = 0.0;
         self.input.take();
+    }
+
+    /// The flows this chat works on: the FLOWS tile's own (embedded pane), or the flow still attached to the CHAT tile.
+    fn flows_link(&self) -> Option<FlowsLink> {
+        self.flows.clone().or_else(|| self.sticky.clone())
+    }
+
+    /// The ordinary CHAT tile: pick up (or drop) the flow the person last had open in FLOWS. Cheap when nothing was recorded.
+    fn refresh_sticky(&mut self, cx: &AppCx) {
+        if self.flows.is_some() || self.project.is_some() || self.dash.is_some() {
+            return;
+        }
+        let user = cx.session.user.as_str();
+        let found = iyakki_agent::flows::last_flow_recorded(&cx.services, user)
+            .then(|| iyakki_agent::flows::FlowEnv::open(&cx.services, user, &cx.session.policy).ok())
+            .flatten()
+            .and_then(|env| iyakki_agent::flows::last_flow(&env).map(|(id, name)| (env, id, name)));
+        let Some((env, id, name)) = found else {
+            self.sticky = None;
+            self.sticky_chip = None;
+            return;
+        };
+        let link = self.sticky.get_or_insert_with(|| FlowsLink { env: env.clone(), open: Arc::new(std::sync::Mutex::new(iyakki_agent::flows::Open { tab: "design".into(), ..Default::default() })) });
+        {
+            let mut o = link.open.lock().unwrap_or_else(|e| e.into_inner());
+            if o.flow.as_deref() != Some(id.as_str()) {
+                *o = iyakki_agent::flows::Open { flow: Some(id.clone()), tab: "design".into(), ..Default::default() };
+            }
+        }
+        let stale = self.sticky_chip.as_ref().is_none_or(|(n, _, at)| *n != name || at.elapsed() > std::time::Duration::from_secs(2));
+        if stale {
+            self.sticky_chip = Some((name, iyakki_agent::flows::last_run_failed(&env, &id), std::time::Instant::now()));
+        }
+    }
+
+    /// The text of the chip in the header while a flow is attached, or None.
+    pub fn flow_chip(&self) -> Option<String> {
+        self.sticky.as_ref()?;
+        let (name, failed, _) = self.sticky_chip.as_ref()?;
+        Some(format!("Flow: {name}{}", if *failed { " (last run failed)" } else { "" }))
+    }
+
+    /// The person pressed X on the chip: the flow is no longer context for this chat (and not for the next one).
+    pub fn detach_flow(&mut self, cx: &AppCx) {
+        iyakki_agent::flows::clear_last_flow(&cx.services, &cx.session.user);
+        self.sticky = None;
+        self.sticky_chip = None;
+        self.sync_flow_thread(cx);
+    }
+
+    /// FLOWS: each workflow has its own conversation. When the open workflow changes (or none is open) and nothing is running, the
+    /// chat switches to that workflow's most recent thread (or an empty one): nothing of one flow's conversation is sent as another's.
+    fn sync_flow_thread(&mut self, cx: &AppCx) {
+        self.refresh_sticky(cx);
+        let now = self.flows_link().and_then(|f| f.open.lock().unwrap_or_else(|e| e.into_inner()).flow.clone());
+        if now == self.flow_seen || self.run.is_some() || self.pending.is_some() {
+            return;
+        }
+        self.flow_seen = now;
+        // what is being typed stays in the box: only the conversation changes
+        let draft = self.input.text.clone();
+        self.new_chat();
+        self.input.set(&draft);
+        self.approvals = if is_pinned(cx, &self.skey(cx)) { Approvals::Pinned } else { Approvals::Ask };
+        if let Some(m) = cx.services.sessions.list(&self.skey(cx)).into_iter().next() {
+            if let Some(s) = cx.services.sessions.load(&self.skey(cx), &m.id) {
+                self.open_session(s);
+            }
+        }
     }
 
     fn open_picker(&mut self, cx: &AppCx) {
@@ -1676,7 +1853,7 @@ impl ChatApp {
 
     /// The answer buttons are showing: a question is open and nothing else is asking or running.
     fn chips_active(&self) -> bool {
-        self.ask.is_some() && self.run.is_none() && self.pending.is_none() && self.approval.is_none() && self.consent.is_none() && self.rec.is_none() && self.secret.is_none()
+        self.ask.is_some() && self.run.is_none() && self.pending.is_none() && self.approval.is_none() && self.consent.is_none() && self.rec.is_none() && self.secret.is_none() && self.askform.is_none()
     }
 
     /// The button a key picks: 1-9 the nth answer, Y and N for a yes/no question.
@@ -1993,12 +2170,12 @@ impl App for ChatApp {
 
     /// Smooth wheel steps move the conversation by pixels; the chat list, the message box and every dialog keep whole notches.
     fn scroll_px(&mut self, px: i32, _cx: &AppCx) -> bool {
-        let busy = self.links.card.is_some() || self.secret.is_some() || self.save.is_some() || self.models.is_some() || self.picker.is_some() || self.grants_open || self.jobs_ui.log_open();
+        let busy = self.links.card.is_some() || self.secret.is_some() || self.askform.is_some() || self.save.is_some() || self.models.is_some() || self.picker.is_some() || self.grants_open || self.jobs_ui.log_open();
         if busy || self.input.wheel_taken() || self.nav_hover {
             return false;
         }
         let before = self.scroll_px;
-        self.scroll_px = (self.scroll_px + px as f32 / crate::scrolleng::NOTCH_PX * 40.0).max(0.0);
+        self.scroll_px = (self.scroll_px + px as f32 / crate::scrolleng::NOTCH_PX * crate::scrolleng::SCREEN_NOTCH_PX).max(0.0);
         if self.scroll_px == before && px < 0 {
             crate::scrolleng::note_bound(); // at the newest message: momentum stops
         }
@@ -2007,6 +2184,7 @@ impl App for ChatApp {
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        self.sync_flow_thread(cx);
         if self.link_card_event(ev) {
             return Flow::Stay;
         }
@@ -2022,6 +2200,10 @@ impl App for ChatApp {
                 self.consent_choice(cx, idx);
                 return Flow::Stay;
             }
+        }
+        if self.askform.is_some() && !matches!(ev, Event::Tick) {
+            self.ask_form_key(ev, cx);
+            return Flow::Stay;
         }
         if self.secret.is_some() && !matches!(ev, Event::Tick) {
             self.secret_key(ev, cx);
@@ -2073,6 +2255,9 @@ impl App for ChatApp {
     fn render(&mut self, g: &mut Gfx, full: R, s: f32, cx: &AppCx, tick: u64) {
         self.draw(g, full, s, cx, tick);
         if let Some((f, _)) = &self.secret {
+            f.render(g, full, s, ACCENT, blink(tick));
+        }
+        if let Some((_, f)) = &self.askform {
             f.render(g, full, s, ACCENT, blink(tick));
         }
 
@@ -2134,8 +2319,40 @@ fn pin_file(cx: &AppCx) -> std::path::PathBuf {
     cx.services.dir().join(format!("approval-pins-{}.json", if u.is_empty() { "invalid" } else { &u }))
 }
 
+/// `approval-pins-<user>.json`: what a person kept approved. Schema 0 (alpha.1) was a bare list of keys; schema 1 is
+/// `{"schema":1,"pins":[..]}`. A damaged file is moved aside; a file from a newer release is read and never written.
+pub const PINS_SCHEMA: iyakki_schema::Spec = iyakki_schema::Spec { name: "approval pins", current: 1, migrations: &[iyakki_schema::Migration { to: 1, what: "wrap the bare list of keys in an object", run: |v| iyakki_schema::wrap_list(v, "pins") }] };
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct PinsFile {
+    schema: u32,
+    pins: Vec<String>,
+    #[serde(flatten)]
+    extra: iyakki_schema::Extra,
+}
+
+fn read_pins_file(path: &std::path::Path) -> PinsFile {
+    iyakki_schema::load_typed::<PinsFile>(&PINS_SCHEMA, path, iyakki_schema::now_secs()).1
+}
+
+/// The keys kept approved in this file (upgrade tests read it too).
+pub(crate) fn read_pins(path: &std::path::Path) -> Vec<String> {
+    read_pins_file(path).pins
+}
+
+/// Keep or drop one key in this file; refused (the error says why) when the file is from a newer release.
+pub(crate) fn write_pin(path: &std::path::Path, key: &str, on: bool) -> Result<(), String> {
+    let mut f = read_pins_file(path);
+    f.pins.retain(|k| k != key);
+    if on {
+        f.pins.push(key.to_string());
+    }
+    iyakki_schema::save_typed(&PINS_SCHEMA, path, &f, 0o600)
+}
+
 fn pins(cx: &AppCx) -> Vec<String> {
-    std::fs::read(pin_file(cx)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    read_pins(&pin_file(cx))
 }
 
 fn is_pinned(cx: &AppCx, key: &str) -> bool {
@@ -2143,14 +2360,7 @@ fn is_pinned(cx: &AppCx, key: &str) -> bool {
 }
 
 fn set_pin(cx: &AppCx, key: &str, on: bool) {
-    let mut v = pins(cx);
-    v.retain(|k| k != key);
-    if on {
-        v.push(key.to_string());
-    }
-    if let Ok(b) = serde_json::to_vec(&v) {
-        let _ = std::fs::write(pin_file(cx), b);
-    }
+    let _ = write_pin(&pin_file(cx), key, on);
 }
 
 fn browser_limits(p: &iyakki_sec::policy::Policy, mut l: RunLimits) -> RunLimits {
@@ -2487,6 +2697,7 @@ impl ChatApp {
                 }
             }
             Event::Tab(SPEAK_PAUSE) => self.pause_speaking(),
+            Event::Tab(FLOW_CHIP_X) => self.detach_flow(cx),
             Event::Key(Key::Ctrl('e')) => self.toggle_editor(cx),
             // an answer button under a question, or its key (1-9, Y, N) while nothing is typed
             Event::Tab(n) if (CHIP_BASE..CHIP_BASE + 12).contains(n) && self.chips_active() => self.chip_click(cx, *n - CHIP_BASE),
@@ -2724,7 +2935,9 @@ impl ChatApp {
         let in_ide = self.project.is_some() || self.dash.is_some() || self.flows.is_some();
         let m = super::ide_chrome::cur();
         self.in_ide_now = in_ide;
-        let head_h = if in_ide { 30.0 * s } else { 38.0 * s };
+        let chip_text = if in_ide { None } else { self.flow_chip() };
+        let flow_strip = if chip_text.is_some() { 28.0 * s } else { 0.0 };
+        let head_h = if in_ide { 30.0 * s } else { 38.0 * s } + flow_strip;
         let side = if in_ide { 12.0 * s } else { 24.0 * s };
         // the IDE's own scale, for the small controls it shares with the other panes
         let is = s * m.k / m.chat_k.max(0.1);
@@ -2860,6 +3073,18 @@ impl ChatApp {
                 super::ide_chrome::tooltip(g, R::new(tx, area.y, 0.0, head_h), s, &full_title, bounds);
             }
         }
+        if let Some(t) = &chip_text {
+            // the flow this chat has the context of: visible, and one click to let it go
+            let failed = t.ends_with("(last run failed)");
+            let col = if failed { ERR } else { ACCENT };
+            let (cx0, cy0) = (area.x + 24.0 * s, area.y + 38.0 * s);
+            let tw = g.fit(14.0 * s, t, Face::Sans, (area.w - 24.0 * s * 2.0 - 90.0 * s).max(80.0 * s));
+            let w = g.text_width(14.0 * s, &tw, Face::Sans) + 20.0 * s;
+            g.rrect(cx0, cy0, w, 22.0 * s, 11.0 * s, [col[0], col[1], col[2], 38]);
+            g.rrect_outline(cx0, cy0, w, 22.0 * s, 11.0 * s, 1.0, [col[0], col[1], col[2], 140]);
+            g.text(cx0 + 10.0 * s, cy0 + 3.0 * s, 14.0 * s, TEXT, &tw, Face::Sans);
+            g.button(cx0 + w + 8.0 * s, cy0 + 1.0 * s, 13.0 * s, "× Detach", MUTED, Event::Tab(FLOW_CHIP_X));
+        }
         if nav_shown {
             self.draw_nav(g, nav_rect, s);
         }
@@ -2933,6 +3158,9 @@ impl ChatApp {
             }
             if !self.timing_text().is_empty() {
                 extra = if extra.is_empty() { self.timing_text() } else { format!("{extra} · {}", self.timing_text()) };
+            }
+            if let Some(t) = self.tools_text() {
+                extra = if extra.is_empty() { t } else { format!("{extra} · {t}") };
             }
             let label = if extra.is_empty() { label } else { format!("{label}  ·  {extra}") };
             let label = match self.project_footer() {
@@ -3072,7 +3300,7 @@ impl ChatApp {
             }
         }
         // one keyboard owner: the composer, or the embedded editor, and neither while a dialog of the chat is open
-        let overlay = self.secret.is_some() || self.save.is_some() || self.models.is_some() || self.picker.is_some();
+        let overlay = self.secret.is_some() || self.askform.is_some() || self.save.is_some() || self.models.is_some() || self.picker.is_some();
         let composer_focus = !overlay && !(self.editor.is_some() && self.edit_focus);
         let field_x = if show_mic { mic_x + mic_d + 8.0 * s } else { area.x + side };
         let ph = "Ask anything… (Ctrl+M for a new line)";
@@ -3512,7 +3740,7 @@ mod tests {
         app.msgs.push(Message::tool_result(&list, out));
         app.msgs.push(Message::assistant_calls("", vec![read.clone()]));
         app.msgs.push(Message::tool_result(&read, "private notes"));
-        app.msgs.push(Message::assistant("Two things stand out:\n\n- **meisync-afos** has failing tests in `chat.rs`, so fix those first.\n- The *website* project has not changed in three weeks:\n  - the contact form still posts to the old address\n  - the [pricing page](https://example.test) needs the new plans\n\n```\ncargo test -p iyakki-shell --lib\n```\n\nWant me to draft the plan?".to_string()));
+        app.msgs.push(Message::assistant("Two things stand out:\n\n- **meisync-core** has failing tests in `chat.rs`, so fix those first.\n- The *website* project has not changed in three weeks:\n  - the contact form still posts to the old address\n  - the [pricing page](https://example.test) needs the new plans\n\n```\ncargo test -p iyakki-shell --lib\n```\n\nWant me to draft the plan?".to_string()));
         (app, cx)
     }
 
@@ -5043,6 +5271,10 @@ mod pic_tests;
 #[cfg(test)]
 #[path = "chat_assist_tests.rs"]
 mod assist_tests;
+
+#[cfg(test)]
+#[path = "chat_form_tests.rs"]
+mod form_tests;
 
 #[cfg(test)]
 #[path = "chat_ask_tests.rs"]

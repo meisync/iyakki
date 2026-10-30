@@ -404,6 +404,7 @@ impl IdeApp {
             ReposAct::Close => self.modal = None,
             ReposAct::Connect => self.open_connect_flow(None, cx),
             ReposAct::Push => self.open_push_review(cx),
+            ReposAct::LocalGitea => self.open_local_gitea(cx),
             ReposAct::Disconnect => self.disconnect_card(),
             ReposAct::CloneMore => self.open_clone_dialog(false, cx),
             ReposAct::Refresh => self.git_mark_stale(i),
@@ -746,6 +747,31 @@ impl IdeApp {
         self.redraw = true;
     }
 
+    /// "Put this project under version control on Local Gitea": offered while the project has no remote. With the Quick install item
+    /// Gitea installed, the connection flow starts on the connection "Local Gitea" at the review of the new repository (nothing is
+    /// made or pushed before the person confirms each review); without it, a plain message names Store → Setup.
+    pub fn open_local_gitea(&mut self, cx: &AppCx) {
+        use iyakki_agent::quickinstall::gitea::{offer, Offer};
+        let has_remote = self.git_head().is_some_and(|h| h.origin.is_some());
+        let conns = self.git_keys(cx).conns().list();
+        match offer(has_remote, &conns) {
+            Offer::None => self.git.note = "This project already has a remote; use Change (o) to connect it somewhere else.".into(),
+            Offer::Install(m) => {
+                self.git.note = m.clone();
+                self.notice = Some((m, false));
+            }
+            Offer::Ready(id) => {
+                self.open_connect_flow(Some(&id), cx);
+                if let Some(Modal::Git(g)) = &mut self.modal {
+                    if let GitModal::Connect(f) = &mut **g {
+                        f.start_create();
+                    }
+                }
+            }
+        }
+        self.redraw = true;
+    }
+
     /// The same flow, straight to the push review (the panel's Push button).
     pub fn open_push_review(&mut self, cx: &AppCx) {
         self.open_connect_flow(None, cx);
@@ -794,6 +820,12 @@ impl IdeApp {
                 if let Some(i) = self.active {
                     self.open_platform(i, false, cx);
                 }
+            }
+            WizOut::QuickInstallGitea => {
+                self.git.note = match super::git_wizard::start_quick_install_gitea(cx) {
+                    Ok(m) | Err(m) => m,
+                };
+                self.open_connect_flow(None, cx);
             }
         }
         self.redraw = true;

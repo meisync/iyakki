@@ -320,6 +320,17 @@ impl Store {
         l
     }
 
+    /// Did the private store this copy came from withdraw exactly this package (name, version and hash) in its signed
+    /// `yanked.json`, as last kept on this device? Yanking hides the package from the catalog; this finds the copies that
+    /// are already installed, so they can be marked and offered for removal.
+    pub fn withdrawn_by_source(&self, source_id: &str, name: &str, version: &str, sha256: &str) -> Option<String> {
+        let cfg = self.config();
+        let s = cfg.sources.iter().find(|s| s.id == source_id && !s.pin.is_empty())?;
+        let text = std::fs::read_to_string(self.dir.join("cache").join(format!("{}.yanked.json", s.id))).ok()?;
+        let y = catalog::read_yanked(&text, &s.pin).ok()?;
+        y.iter().any(|(n, v, h)| n == name && v == version && (h == sha256 || sha256.is_empty())).then(|| s.name.clone())
+    }
+
     /// After a fetch of a pinned catalog: keep its signed list of withdrawn packages beside the cache.
     fn pinned_refresh(&self, s: &catalog::SourceCfg, l: Loaded, fetch: &dyn Fetch) -> Loaded {
         if s.pin.is_empty() {

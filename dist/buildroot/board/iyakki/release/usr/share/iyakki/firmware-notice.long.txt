@@ -1,0 +1,7 @@
+Optional hardware firmware is not included (licence).
+This image carries no vendor firmware: it is not ours to hand out under one licence. Wi-Fi, Bluetooth, and the graphics chips of AMD,
+NVIDIA and newer Intel computers may need such files. Ethernet, the keyboard, mouse, storage and the sound codecs work without them, and
+the screen works on the firmware's own graphics mode.
+Install what THIS computer needs: Store -> Setup -> Hardware firmware (needs the internet: Ethernet, a cable to another computer that
+shares its connection, or a USB stick prepared on another computer). You read each vendor licence and click first. Nothing is
+downloaded before that.

@@ -15,6 +15,7 @@ use iyakki_agent::voice::SpeakOpts;
 use iyakki_agent::voicedesk::{self as vd, Capture, Dest, Mic, ReadVoice, Recorders, MAX_RECORD_SECS, MAX_TEXT_CHARS};
 
 use super::multiline::MultiLine;
+use super::voice_rec::{Rec, T_TAB_REC};
 use super::{App, AppCx, Flow};
 use crate::gfx::Icon;
 use crate::ui::{Event, Key, TextField};
@@ -61,6 +62,8 @@ const SPEED_STEP: f32 = 0.05;
 pub enum Area {
     Read,
     Dictate,
+    /// The voice recorder: Record / Stop saves a WAV; the list plays, renames and deletes.
+    Record,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,12 +138,16 @@ pub struct VoiceApp {
     pub(super) mics: Vec<Mic>,
     /// 0 is the default microphone, n the nth of `mics`.
     pub(super) mic_i: usize,
+    /// `mic_i` has been set from the saved choice.
+    mic_seeded: bool,
     pub(super) product: String,
     pub(super) cap: Option<Box<dyn Capture>>,
     pub(super) level: f32,
     pub(super) peak: f32,
     pub(super) transcribing: bool,
     pub(super) stt_rx: Option<Receiver<Result<String, String>>>,
+    /// The recorder (Record mode).
+    pub(super) rec: Rec,
     pub(super) request: Option<(String, String)>,
     pub(super) ticks: u64,
     pub(super) dirty: bool,
@@ -180,12 +187,14 @@ impl VoiceApp {
             rig,
             mics: Vec::new(),
             mic_i: 0,
+            mic_seeded: false,
             product: String::new(),
             cap: None,
             level: 0.0,
             peak: 0.0,
             transcribing: false,
             stt_rx: None,
+            rec: Rec::new(),
             request: None,
             ticks: 0,
             dirty: true,
@@ -206,6 +215,12 @@ impl VoiceApp {
         self.voices = vd::read_voices(&cx.services);
         self.voice_i = keep.and_then(|id| self.voices.iter().position(|v| v.id == id)).unwrap_or(0);
         self.mics = self.rig.recorders.mics();
+        if !self.mic_seeded {
+            // the choice is kept in the voice settings and shared with the Browser (one microphone for both)
+            self.mic_seeded = true;
+            let saved = cx.services.voice_settings().mic;
+            self.mic_i = if saved.is_empty() { 0 } else { self.mics.iter().position(|m| m.id == saved).map_or(0, |i| i + 1) };
+        }
         if self.mic_i > self.mics.len() {
             self.mic_i = 0;
         }
@@ -381,6 +396,10 @@ impl VoiceApp {
         if self.cap.is_some() || self.transcribing {
             return;
         }
+        if self.rec.cap.is_some() {
+            self.say("The recorder is using the microphone. Stop it first.", false);
+            return;
+        }
         if !self.allowed(cx, "record") {
             return;
         }
@@ -402,7 +421,11 @@ impl VoiceApp {
 
     fn record_now(&mut self, cx: &AppCx) {
         self.stop_reading(); // do not record the voice that is reading
-        let mic = self.mic_i.checked_sub(1).and_then(|i| self.mics.get(i));
+        // automatic is the first microphone found (never the playback-only `default` device)
+        let mic = match self.mic_i.checked_sub(1) {
+            Some(i) => self.mics.get(i),
+            None => vd::pick_mic(&self.mics, ""),
+        };
         let cmd = vd::record_cmd_for(&cx.services.voice_settings().record_cmd, mic);
         match self.rig.recorders.start(&cmd, MAX_RECORD_SECS) {
             Ok(c) => {
@@ -489,7 +512,7 @@ impl VoiceApp {
 
     fn on_tick(&mut self, cx: &AppCx) {
         self.ticks += 1;
-        if self.ticks - self.looked >= 60 && self.cap.is_none() && !self.reader.is_active() && self.modal.is_none() {
+        if self.ticks - self.looked >= 60 && self.cap.is_none() && self.rec.cap.is_none() && !self.reader.is_active() && self.modal.is_none() {
             self.look(cx);
             self.dirty = true;
         }
@@ -540,10 +563,11 @@ impl VoiceApp {
                 self.finish_transcript(r);
             }
         }
+        self.rec_tick(cx);
     }
 
     pub(super) fn animating(&self) -> bool {
-        self.cap.is_some() || self.transcribing || self.reader.is_active() || self.level > 0.01
+        self.cap.is_some() || self.transcribing || self.reader.is_active() || self.level > 0.01 || self.rec_animating()
     }
 
     // ------------------------------------------------------------------------------------------------ files
@@ -585,8 +609,9 @@ impl VoiceApp {
 
     fn click(&mut self, n: usize, cx: &AppCx) {
         match n {
-            T_TAB_READ => self.switch(Area::Read),
-            T_TAB_DICT => self.switch(Area::Dictate),
+            T_TAB_READ => self.switch(Area::Read, cx),
+            T_TAB_DICT => self.switch(Area::Dictate, cx),
+            T_TAB_REC => self.switch(Area::Record, cx),
             T_PLAY => self.play(cx, false),
             T_PAUSE => self.pause_toggle(),
             T_STOP => self.stop_reading(),
@@ -628,7 +653,7 @@ impl VoiceApp {
             }
             T_MIC => {
                 self.look(cx);
-                let mut items = vec!["Default microphone".to_string()];
+                let mut items = vec!["Automatic".to_string()];
                 items.extend(self.mics.iter().map(|m| m.label.clone()));
                 self.modal = Some(Modal::MicPick(super::widgets::Picker::new("Microphone", items)));
             }
@@ -637,11 +662,18 @@ impl VoiceApp {
         self.dirty = true;
     }
 
-    fn switch(&mut self, a: Area) {
+    fn switch(&mut self, a: Area, cx: &AppCx) {
         if self.area != a {
+            if self.area == Area::Record {
+                self.rec_leave(cx);
+            }
+            if a == Area::Record {
+                self.rec_refresh(cx);
+            }
             self.area = a;
             self.status = None;
             self.focus = if a == Area::Read { Focus::Text } else { Focus::None };
+            self.dirty = true;
         }
     }
 
@@ -703,7 +735,11 @@ impl VoiceApp {
             },
             Some(Modal::MicPick(mut p)) => match p.handle_event(ev) {
                 super::widgets::PickEvent::Chosen(label) => {
-                    self.mic_i = if label == "Default microphone" { 0 } else { self.mics.iter().position(|m| m.label == label).map_or(0, |i| i + 1) };
+                    self.mic_i = if label == "Automatic" { 0 } else { self.mics.iter().position(|m| m.label == label).map_or(0, |i| i + 1) };
+                    let id = self.mic_i.checked_sub(1).and_then(|i| self.mics.get(i)).map(|m| m.id.clone()).unwrap_or_default();
+                    if let Err(e) = cx.services.set_voice_mic(&id) {
+                        self.say(format!("The microphone choice could not be saved: {e}"), false);
+                    }
                 }
                 super::widgets::PickEvent::Cancel => {}
                 super::widgets::PickEvent::None => self.modal = Some(Modal::MicPick(p)),
@@ -725,17 +761,22 @@ impl VoiceApp {
         // keys that work everywhere
         match k {
             Key::F(2) => {
-                self.switch(Area::Read);
+                self.switch(Area::Read, cx);
                 return Flow::Stay;
             }
             Key::F(3) => {
-                self.switch(Area::Dictate);
+                self.switch(Area::Dictate, cx);
+                return Flow::Stay;
+            }
+            Key::F(4) => {
+                self.switch(Area::Record, cx);
                 return Flow::Stay;
             }
             Key::Ctrl('\n' | '\r') | Key::Ctrl('p' | 'P') => {
                 match (self.area, self.cap.is_some()) {
                     (Area::Dictate, true) => self.stop_record(cx, true),
                     (Area::Dictate, false) => self.start_record(cx),
+                    (Area::Record, _) => {}
                     (Area::Read, _) if self.reader.is_active() => self.pause_toggle(),
                     (Area::Read, _) => self.play(cx, false),
                 }
@@ -801,8 +842,8 @@ impl VoiceApp {
         }
         // no box has the keyboard: single keys are shortcuts
         match (k, self.area) {
-            (Key::Char('r'), _) => self.switch(Area::Read),
-            (Key::Char('d'), _) => self.switch(Area::Dictate),
+            (Key::Char('r'), _) => self.switch(Area::Read, cx),
+            (Key::Char('d'), _) => self.switch(Area::Dictate, cx),
             (Key::Char(' '), Area::Read) => {
                 if self.reader.is_active() {
                     self.pause_toggle();
@@ -822,7 +863,7 @@ impl VoiceApp {
                     self.start_record(cx);
                 }
             }
-            (Key::Char('m'), Area::Dictate) => self.click(T_MIC, cx),
+            (Key::Char('m'), Area::Dictate | Area::Record) => self.click(T_MIC, cx),
             (Key::Char('c'), Area::Dictate) => self.copy_transcript(false),
             (Key::Char('x'), Area::Dictate) => self.copy_transcript(true),
             (Key::Char('b'), Area::Dictate) => self.read_back(),
@@ -849,8 +890,9 @@ impl App for VoiceApp {
 
     fn hint(&self) -> String {
         match self.area {
-            Area::Read => "F2 Read aloud · F3 Dictate · Ctrl+Enter play or pause · Ctrl+O open a file · Esc stop or back".into(),
-            Area::Dictate => "F2 Read aloud · F3 Dictate · Ctrl+Enter record or stop · Esc cancel the recording or go back".into(),
+            Area::Read => "F2 Read aloud · F3 Dictate · F4 Record · Ctrl+Enter play or pause · Ctrl+O open a file · Esc stop or back".into(),
+            Area::Dictate => "F2 Read aloud · F3 Dictate · F4 Record · Ctrl+Enter record or stop · Esc cancel the recording or go back".into(),
+            Area::Record => "F2 Read aloud · F3 Dictate · F4 Record · Space record or stop · Up/Down choose · Enter play · n rename · Delete delete · Esc stop or back".into(),
         }
     }
 
@@ -862,6 +904,8 @@ impl App for VoiceApp {
             "v choose the voice · + and - change the speed (when the voice has one)",
             "Dictate: Ctrl+Enter or Enter starts and stops recording (never without your click); Esc cancels and keeps nothing",
             "Dictate: c copy the transcript · x copy and clear · b read it back · m choose the microphone",
+            "F4: Record. Space or Ctrl+Enter starts and stops (never without your press); the recording is saved as a WAV in your Recordings folder",
+            "Record: Up/Down choose a recording · Enter or p plays and stops it · n renames (Enter saves) · Delete or x deletes after you say y · m microphone · Esc stops",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -888,6 +932,11 @@ impl App for VoiceApp {
         if self.modal.is_some() {
             self.modal_event(ev, cx);
             return Flow::Stay;
+        }
+        if self.area == Area::Record {
+            if let Some(f) = self.rec_handle(ev, cx) {
+                return f;
+            }
         }
         match ev {
             Event::Key(k) => return self.key(k, cx),

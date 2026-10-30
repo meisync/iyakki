@@ -836,7 +836,9 @@ impl PlatformPanel {
                 Some((c, i)) => c[*i].clone(),
                 None => f.tf.value.trim().to_string(),
             };
-            if !v.is_empty() {
+            // an exposure left at its default is "not chosen": a service that exists already keeps how it is reachable (see `platform::kept_gitea_exposure`)
+            let untouched_exposure = f.def.key == "exposure" && v == f.def.default;
+            if !v.is_empty() && !untouched_exposure {
                 o.set(&f.def.key, &v);
             }
         }
@@ -2480,7 +2482,7 @@ pub fn platform_for(cx: &super::AppCx, run: Arc<dyn iyakki_agent::wsexec::Runner
         audit: Arc::new(move |a, d| audit.record(&u2, a, d)),
         env,
         tmp: tmp.clone(),
-        http: Arc::new(connect::CurlHttp { run, tmp }),
+        http: Arc::new(connect::NetHttp::default()),
         gen: Arc::new(platform::secrets::random_secret),
         live: None,
     }

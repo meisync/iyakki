@@ -43,11 +43,11 @@ entries, always "Clipboard history..."). In window mode the clipboard is shared 
 have a slim bar at the top: the host name, the network (*Wi-Fi: NetworkName*, *Ethernet connected* or *no network*), the battery
 when there is one, the time and the date, and a red **Power** button at the right end. The bar only shows things; nothing in it
 opens Settings before you sign in. **Power** (or **Ctrl+P**, or the keyboard's power key) opens a card with **Power off**,
-**Restart** and **Cancel**: Left/Right/Tab move the highlight, **Enter** or **y** does the highlighted choice, **Esc** or any other key closes the card
+**Restart**, **Sleep** (only where the system can sleep; **s** does it) and **Cancel**: Left/Right/Tab move the highlight, **Enter** or **y** does the highlighted choice, **Esc** or any other key closes the card
 and nothing happens. No password is asked, because someone at the machine can pull the plug anyway; the audit log records
 *power.off* or *power.reboot* by "login screen". When the bar is too narrow (a small or phone-sized screen) the date, then the battery, network and host name drop out first; Power and the time stay.
 A session in the browser (remote desktop) never shows the bar or the button, and the power key and Ctrl+P do nothing there before sign-in, so nobody on the network can switch the machine off from the login page.
-Where the system cannot power off (the window mode on a development computer), the card says *This system cannot power off from here*.
+Sleep suspends the machine; the session is locked first, so you sign in again on waking. Some computers (Apple T2 Macs in particular) may not wake from it: see KNOWN-ISSUES.md. Where the system cannot power off (the window mode on a development computer), the card says *This system cannot power off from here*.
 
 **The battery (laptops only).** A laptop shows a small battery next to the clock: green, amber under 20 %, red under 10 %, a white
 bolt while it charges, a plug when the adapter is in and the battery is full or protecting itself, a question mark when the level
@@ -133,9 +133,17 @@ entry; Esc goes back a page and closes; a click outside closes.
 
 ## The launcher
 
-Tiles are sorted into four built-in sections shown as tabs at the top: **Home** (CHAT, RAG, MCP, CLI, SETTINGS, SKILLS, CALENDAR, AI IDE, TALES, VOICE),
-**Web & Media** (BROWSER, RADIO, MEDIA, CAMERA), **Work** (EDIT, RUNS, SRE PILOT, DATA, DASH, FLOWS, LAB) and **System**
-(USERS, NET SCAN, MESH, USAGE, SYSTEM, STORE, K8S, DISKS), plus the groups you make yourself. Custom apps go to the group their app.json names, else Work.
+Tiles are sorted into built-in groups shown as tabs at the top: **Ask & Create** (CHAT, RAG, SKILLS, CALENDAR, TALES, VOICE, LAB),
+**Build** (AI IDE, GIT, FLOWS, K8S, EDIT, CLI, MCP, RUNS, SRE PILOT), **Media** (BROWSER, RADIO, MEDIA, CAMERA), **Data** (DATA, DASH, USAGE)
+and **Devices & System** (SYSTEM, DISKS, NET SCAN, MESH, USERS, STORE, LINUX WINDOW), plus the groups you make yourself. A tile you install later
+(a custom tile app from developer mode, a Store app) appears in the group **Apps** at once, without a restart, unless its app.json names another group or you
+moved it; the Apps tab shows only once it holds something. Nothing disappears: a tile whose group you deleted goes back to its own group.
+**Settings** is not a tile: it is the gear icon in the top bar (same permissions as before; a role that may not open it sees a message), and the key `s`,
+F7 and the IYAKKI menu (F10) open it too. Next to it the **speaker icon** shows IYAKKI's one volume (muted, low, medium, high; crossed when the
+computer has no sound output, and hovering says why). Click it to mute or unmute (the level is kept), turn the mouse wheel over it to change the volume by 5 %
+per notch, press and hold it (or press and drag up and down) for a slider, or press `v` for the slider with the keyboard (Up/Down or +/- change it,
+`m` or Enter mutes, Esc closes). It is the same volume as the volume keys, Settings, Sound and the Devices popover, and every change shows the volume bar.
+To put the tiles back in the groups above use *Reset to default layout* (right-click a tab or a tile, or Settings, Home layout); your own groups stay.
 Arrow keys choose, Enter opens, **Tab / Shift+Tab** (or clicking a tab) switches section (your last section is remembered),
 **PageUp/PageDown**, the wheel or the dots turn the page when a section has more tiles than fit. **1-9** open the Nth tile of the fixed tile table
 (the order of the sections as shipped: CHAT, RAG, MCP, CLI, ...), whichever group a tile has been moved to. A tile with a DEMO ribbon (SRE PILOT)
@@ -155,7 +163,7 @@ The layout is yours: other accounts keep theirs, and it changes only where a til
   tiles go back to their own default group; nothing is uninstalled. The built-in groups have no such entries and cannot be renamed or deleted.
 * **Too many chips for the width** (a phone, many groups): the row ends with a **…** chip that lists the rest; the shown group always has its chip.
 * **Settings → Home layout** does the same with lists: every group (rename, delete, earlier/later), every tile with the group it is in (Move tile,
-  Put tile back) and *Reset layout* (tiles back, your groups stay).
+  Put tile back) and *Reset to default layout* (tiles back, your groups stay).
 * **Apps that name a group.** A Store app's app.json may say `"group": "Games"`. If that is a group you have (any capitals) the app goes there. If not, a
   card asks once: *This app wants to be in the group “Games”. Create it?* **Create** or **Put it in Work**; the answer is remembered for that app. If you
   move the app yourself, your choice wins over the app's `group` on later updates.
@@ -246,10 +254,33 @@ The assistant can only do what your role and policy allow ([`ADMIN-GUIDE.md`](AD
 The bell at the top of every screen (or F9). Three pages (`Tab` or `1 2 3`):
 
 * **Notifications:** reminders that rang, finished runs, new devices. `Enter` open, `r` read, `f` flag, `c` add to the calendar,
-  `s` snooze, `d` delete, `A` all read, `X` clear read.
+  `s` snooze, `d` delete, `g` clear a group, `m` mute the source, `A` all read, `X` clear read. Similar notes are **grouped** into one
+  row, newest first, collapsed: "79 new devices on your network", "41 setup jobs finished", "Health check failed (x4)" (a flow that
+  keeps failing with the same error within an hour is one row with a counter and the last time). `Enter`, Right or Space opens a
+  group's list; there `Enter` opens the item in its app, and for new devices `t` trusts them all and `i` ignores them (marks the group
+  read). A group you have looked at stays as it is; later arrivals start a new row, so a group only holds what is new since you last looked.
+  The first NET SCAN after install is taken as "what is normally here" and raises no new-device notes.
+* **The bell.** The red or amber **number** counts only what needs you: approvals waiting, overdue tasks, errors, warnings, reminders and an
+  assistant waiting for you. Information, new devices, downloads and finished jobs never add to the number; when only those are unread the bell
+  shows a small blue **dot**. "99+" appears only when 100 or more things really need you.
+* **Keeping.** Information, new devices and downloads are kept 7 days, jobs and reminders 14, errors and warnings 30; at most 60 rows per
+  source and 200 in all (flagged rows are kept until you remove them). The first time an older inbox is opened it is grouped and the panel
+  says so once; nothing else is removed.
+* **Mute a source.** `m` on a row cycles that source Show, Quiet (kept in the inbox only: no number, no dot, no sound), Off (not kept). The same
+  choice, for every source, is in **Settings -> Notifications**; it is yours alone.
 * **Tasks:** pending, doing, done; assistants can add to-dos. `n` new, `Enter`/Right next state, `e` edit, `p` priority,
   `c` calendar, `x` drop, `d` delete, `f` filter.
 * **Approvals:** every waiting tool call from any app, one at a time: `y` approve, `n` reject, `Enter` for details.
+
+### Reaching you in a Matrix room (Settings -> Notifications)
+
+Besides the inbox, IYAKKI can write to **you** in a Matrix chat room, for example when a flow finds something. You need a Matrix account on any homeserver (your own, or one you use already). In **Settings -> Notifications** press `a` (Matrix account): give the server address (`https://matrix.example.org`, or `cluster://iyakki-matrix/matrix:8008` for the server from Store), your user name and password (the password is used once and not kept; the access token goes into your vault), and optionally the room id (`!abc:server`, Element: room settings, Advanced). `t` sends a test message, `x` removes the account and its token.
+
+* Only rooms **without end-to-end encryption** work. If a room is encrypted IYAKKI refuses to send and says so; it never sends plain text into an encrypted room. An optional encryption add-on may come later.
+* IYAKKI talks only to the server you typed, and to nothing else. Plain `http://` is accepted only for the cluster and your local network.
+* At most 30 messages an hour per account. In a flow, the **Notify** step has "Also tell me by": write `matrix`, optionally the room name and a camera picture of the same run, or tick Dry run to see what would be sent.
+* Store -> Matrix server (Tuwunel, Apache-2.0) puts a small server of your own in the cluster: registration needs a token that is kept in your vault as `svc.matrix.registration-token`, and it talks to no other server. Register an account with any Matrix client using that token, then add it here.
+* Not built yet: showing incoming messages in the inbox, and the assistant reading or sending messages.
 
 Alarms and reminders ring wherever you are: Enter dismisses, `S` snoozes five minutes.
 
@@ -350,7 +381,7 @@ Bluetooth needs firmware, your data is kept in memory only), each line with a **
 Name of this computer, Where my data is kept). After a crash or a power cut it also says **The last session ended unexpectedly**, with a button to **Last session log** (an administrator's page under System: the last 200 lines of the kernel log kept on the stick, "I have seen it" clears the note; see docs/TROUBLESHOOTING.md). Nothing to fix says "Everything looks fine." You only see lines about pages your role has.
 
 The list on the left has eight headings, in this order, and the pages under them:
-**Overview** · **Account & people** (Account, Vault, Secret providers) · **Apps & AI** (Models, Agents, Skills, RAG, Voice, Indic voices,
+**Overview** · **Account & people** (Account, Vault, Secret providers) · **Apps & AI** (Models, Agents, Skills, RAG, Voice,
 Browser, Host access) · **Network & sharing** (Network, Firewall, Shared folders) · **Display & sound** (Display, Displays, Screen saver, Home layout,
 Sound, System sounds) · **Devices** (Bluetooth, Keyboard) · **System** (Time, Host name, Memory, Storage, Install to disk, Cloud mode) ·
 **Developer** (Developer mode, Dev cluster, Git and SSH keys). The left and right arrow keys walk the pages in that order.
@@ -360,7 +391,7 @@ Sound, System sounds) · **Devices** (Bluetooth, Keyboard) · **System** (Time, 
 there is no dark theme and no sleep (suspend) timer yet). Enter opens the first match, Esc clears the text. If nothing matches, the list says to try one simple word.
 
 Hardware pages and most changes are administrator-only. Keys per page are shown in the header and F1: Models
-`a e d t m b k x c`; Vault `n d Tab l f`; Network `Enter`, `w` join Wi-Fi, `m` private MAC address, `a` apply it now, `r`; Display `u U + -`; Sound `o t + - m M Enter`; Voice
+`a e d t m b k x c`; Vault `n d Tab l f`; Network `Enter`, `w` join Wi-Fi, `m` private MAC address, `a` apply it now, `n` announce the device's name, `r`; Display `u U + -`; Sound `o t + - m M Enter`; Voice
 `s v c m p t y`; Storage `m` make data disk (erases it), `u` compatible USB mode (no UAS); Account `p` change password, `u U` text size; Firewall `1 2 3 a d A`. Details:
 [`ADMIN-GUIDE.md`](ADMIN-GUIDE.md).
 
@@ -404,6 +435,8 @@ checks; driver packs cannot be installed this way. Details and the security mode
 **Private MAC address (Settings, Network).** Every network adapter has a hardware address (the MAC address) that the router sees and
 that tracks you from one network to the next. `m` chooses what IYAKKI shows instead, separately for Ethernet and for Wi-Fi:
 
+**Device name (Settings, Network; administrators).** `n` switches "Announce this device on the local network". The device then answers to a random name such as `iyakki-0a1b2c.local`, so a computer that paired with it for developer mode finds it again when its address changes (`iyakki dev scan` lists such devices). It tells the network only that random name, that this is an IYAKKI device, and that developer mode or the web service is on; it never tells who you are and the name is not made from your name or the host name. On by default; off by default in cloud mode. While on, the firewall list shows the rule "device name (mDNS)"; removing it switches the announcing off. Some Wi-Fi access points block this kind of message between devices.
+
 | Choice | What the router sees | Default for |
 |---|---|---|
 | **Off (hardware address)** | the adapter's real address | Ethernet (so DHCP reservations and router rules keep working) |
@@ -427,9 +460,19 @@ this site · `c` developer panel · `+ - 0` zoom · `R` reader · `U` view sourc
 translate / `M` keep in knowledge (asks each time). **Searching:** words typed in the bar are searched on Bing's plain results page (Settings, Browser: DuckDuckGo, Brave Search or Wikipedia); if that page is busy or asks for a check, the next one is tried and a note says so. Google's own results page only answers with "enable JavaScript", so Google searches are run on your chosen engine too. A name that does not exist (`youtub.com`) shows "Couldn't find ..." with a search for it and, for near misses of popular sites, "Did you mean youtube.com?". YouTube, Gmail, Google sign-in and similar apps need the full engine: the `web` or `macweb` image (the Mac image with the web engine). **In the full engine** click a box and type; the keyboard goes to the page (Esc gives it back to the browser, Ctrl+L is the address bar, Ctrl+T/Ctrl+W tabs); Ctrl+C/Ctrl+V and a page's own Copy button use IYAKKI's clipboard; use a mouse (touchpads are not read). **Limits:** no video, canvas or IndexedDB in the built-in engine; CJK
 and emoji show as boxes; heavy web apps need `F`. Honest list: [`BROWSER-ROADMAP.md`](BROWSER-ROADMAP.md).
 
+**The Browser's tool bar and tabs.** Left to right: Back, Forward, Reload, Start page; then the address bar with the padlock chip (*Secure* or *Not secure*) inside its left edge and the star (bookmark) and **Go** inside its right end (Enter does the same); then small chips: **Reader** (back to the built-in reader), **Notes**, **Scripts on / Scripts off** (a shield: *Scripts allowed on this site* runs the page's programs, which video, maps and mail need; *Scripts blocked* is faster and safer but some sites stop working; hover it for the sentence), **Play**, and the developer-tools chip. A thin bar under the tool bar slides while a page loads and fills as the engine reports; the page area is dark until the first picture arrives. After 15 seconds a card says the page is taking a while, with **Stop** and **Retry**; a page that cannot be reached shows a card in plain words (can't reach the site, you are offline, the certificate cannot be trusted) with **Retry**. Tabs show a spinner while loading and cut long titles with an ellipsis.
+
+**Tab groups.** **Ctrl+Shift+G** puts the tab in a new group (a coloured chip with its name appears in front of the group's tabs; type the name and press Enter, pick one of six colours, or *Ungroup all*); **F2** edits the group of the tab in use; **Ctrl+Shift+U** takes the tab out of its group; clicking the chip folds the group's tabs away (the one in use stays) and unfolds them again. A group with no tab left disappears. Groups are kept for your account with their addresses and come back as tabs that load when you first open them. **Ctrl+Shift+O** (or the grid button at the right end of the strip) opens the tab overview: every tab as a card under its group, a *Search my tabs* box (Enter opens the first match), the × on a card closes the tab, *Add to group* steps the tab through the groups and **+** starts a new one.
+
 **Video that needs H.264 or AAC** (TikTok and similar, full web engine): the image carries no video codec, so such a page used to show a black player. Now a bar over the bottom of the page says "This video needs the audio and video add-on" with **Install**, **Not now** and **Don't ask for this site**. Install opens Store, Setup, where the vendor, the licence (LGPL) and the size are shown and the download starts only when you press its button; afterwards the browser loads the page again. The bar shows once per site and session. H.264 and AAC are patent-licensed formats in some countries; decoding them is your own choice after your own download ([`FULL-BROWSER.md`](FULL-BROWSER.md), Audio and video add-on).
 
+**Developer tools for you** (full web engine): press **F12** or **Ctrl+Shift+I**, or the small **`</>`** chip at the right end of the tool bar (grey while all is well, amber with failed requests, red with errors; it shows their number), to open a panel with **Console** (errors and warnings, with file and line), **Network** (failed and slow requests; *Failed only*, sort by newest or slowest) and **Timings** (first response, DOMContentLoaded, load, the slowest resources). The keys: `1` `2` `3` or Tab switch tabs, `/` filters by text, `l` level, `f` failed only, `s` sort, `x` clear, `y` (or **Copy as text**) copies what is shown, `d` moves the panel to the right, `+` `-` or the mouse on the divider resize it, Esc closes. It collects only while it is open, keeps everything in memory (addresses without query strings, no page content, headers or cookies) and forgets it when you close it; it does not change the chat agent's switch. The Dev tools button beside the address shows the counts of failed requests and console errors. It cannot run scripts (there is no console prompt). It needs the full web build; the panel says so when the page probe is missing. Details: [`FULL-BROWSER.md`](FULL-BROWSER.md).
+
+**Developer tools for the chat agent** (full web engine, off by default): in Settings, Browser, switch on *Developer tools for the chat agent* (key `d`; every change is audited) and the chat assistant can answer "why is this page broken or slow?" with `browser_failed_requests`, `browser_timings` and `browser_console`: failed requests (address without query string, status, time), load times and the slowest resources, and console errors with file and line. Only addresses, numbers and short messages are kept, in small per-person buffers, with tokens and passwords removed; nothing from the page itself is stored, and switching it off forgets what was collected. While it is off the assistant just says it is turned off. Details: [`BROWSER-AGENT.md`](BROWSER-AGENT.md).
+
 **Page fullscreen** (full web engine): a video player's fullscreen button, the `F` key or a double click in the page shows the page over the whole tile, without tabs, bars or status line. **Esc** asks the page to leave fullscreen (the bars come back when it has); leaving by the player's button or by going to another page works too. While a page is fullscreen every other key goes to the page.
+
+**Camera and microphone for a page** (full web engine; needs an image whose engine was built with media-stream, see [`development/BROWSER-MEDIA-DEVICES.md`](development/BROWSER-MEDIA-DEVICES.md)): when a page asks to use the camera or microphone, the browser asks *Allow SITE to use your camera?* with **1 Allow once**, **2 Allow while this site is open**, **3 Always allow this site**, **4 Block this site** and **Not now** (Esc). Only secure sites (https, or this computer) are asked; screen sharing is not offered; a tab in the background never gets a device. While a page captures, a red **Camera on** / **Microphone on** chip stays in the tool bar. Always and Block are remembered for you only. A USB webcam and a USB microphone are the supported devices; the built-in microphone of a T2 MacBook is off. Until the image carries the new engine, such pages still say that the browser does not support media devices.
 
 **Pointer shapes:** on the desktop window, the remote screen and the framebuffer (a real screen) the pointer follows what is under it: a hand over links and buttons, a text bar over fields, a four-way or resize arrow, a slashed circle, a question mark or a crosshair where the full web engine asks for it; the arrow elsewhere.
 
@@ -444,7 +487,7 @@ and emoji show as boxes; heavy web apps need `F`. Honest list: [`BROWSER-ROADMAP
 ### RADIO
 Internet radio in many languages (My stations, Tamil, Telugu, Malayalam, English, Hindi, Spanish, French, Arabic,
 Portuguese, Russian, Chinese, Bengali). Left/Right language, Up/Down station, `Enter` play, `Space`/`s` stop, `[ ]` previous/next,
-`+ -` volume, `a` keep, `n` add your own (name and stream address), `d` delete. Esc leaves; the music keeps playing.
+`+ -` volume, `a` keep, `n` add your own (name and stream address), `d` delete, `t` review a failed station's certificate, `f` forget a trusted certificate. Esc leaves; the music keeps playing.
 MP3 streams, and HLS stations (`.m3u8` playlists) whose segments carry MP3, play with nothing extra. **AAC** stations (AAC+
 such as Hello FM 106.4, HLS stations with AAC such as AIR Kodaikanal) need the **audio add-on**, a separate decoder program
 (ffmpeg, installed from the Store's Setup page). Without it the station says so in one calm line and offers **Install audio
@@ -453,6 +496,23 @@ source and licence shown), and the station you chose is tried again afterwards. 
 add-on" until it is installed. HLS lists are followed live (the newest few segments first, new ones as they appear); encrypted
 HLS (AES-128, SAMPLE-AES) and fragmented-MP4 HLS are not played. AAC+ (HE-AAC) plays through the add-on's own decoder. Every playlist and
 segment address is checked against your account's host policy, and a list may not step down from https to http.
+
+**Secure stations and certificates.** IYAKKI checks a station's HTTPS certificate strictly. Some servers (for example
+`https://radios.crabdance.com:8002/3`) send only their own certificate and forget the intermediate one that links it to a
+trusted authority; browsers quietly look it up, and so does the radio: it fetches the missing issuer certificate from the
+address named inside the certificate (plain `http`, small, certificate files only, allowed by your host policy) and only
+plays when the whole chain then verifies against the built-in list of authorities. Nothing is weakened by this. If that does
+not work, the station fails with "This station's server did not send its full certificate chain (the issuer is missing).
+Browsers hide this; IYAKKI checks strictly.", and shows who the certificate is for, who issued it, until when it is valid and its
+SHA-256 fingerprint. **Review certificate… (`t`)** then asks, in a dialog whose focus starts on **Cancel**, whether to trust
+exactly that certificate for that station: only do it if you know the station, because someone on your network could pretend
+to be it. Nothing is stored unless you choose **Trust this certificate**. The choice belongs to your account and the station
+(a row marked "trusted certificate"), covers only that station's server (a redirect to another host is checked normally; the
+browser and other apps are never affected), still requires the certificate to be for that host name and within its dates, and
+ends when the server shows a different certificate, which happens when it is renewed (Let's Encrypt every 60 to 90 days): the
+station then says "the certificate changed since you trusted it" and asks again, never silently. **Forget trust (`f`)** on
+the station removes it. The chat assistant can ask the same through `radio_trust_certificate`; that always shows an approval
+card with the host and fingerprint, even in Auto mode.
 
 ### MEDIA
 Your music, videos and pictures from folders your account may read. `Tab` pages (Tracks, Artists, Albums, Videos, Playlists,
@@ -574,7 +634,10 @@ the public half to GitHub or Gitea, choose which key each site uses). Details: [
 Open a CSV, TSV or JSON-lines file in a virtual-scrolled table (a million rows are fine). `o` open · header click sort ·
 `/` filter (`price > 10 and contains(name, 'tea')`, `x` clears) · `c`/`r` copy cell/row · `v` filter to this value · `< > =`
 column width · `s` summary · `e` export the view as CSV. Files come from your home folder, your workspaces and shared host
-folders. [`DATA.md`](DATA.md).
+folders. The chat assistant can read tables (`data_open`, `data_query`), create a new CSV from rows it generates
+(`data_create`) and add rows to one (`data_append`); both ask first, naming the file, the columns and the row count. Ask, for
+example, "make a CSV of five sample customers" and then "which are in Chennai?". Editing or deleting rows is not offered.
+[`DATA.md`](DATA.md).
 
 ![Data](media/shots/data.png)
 
@@ -584,6 +647,14 @@ Panels: line, area, bar, stacked bar, pie, donut, gauge, stat, heatmap, table, t
 `a` add, `d` duplicate, `Delete` remove (`Ctrl+Z` undo), `1`-`7` time range, `r` refresh, `v` table view, `i` ask the assistant,
 `Ctrl+I` assistant pane, `Ctrl+S` save. Dashboards are JSON files in your `Dashboards` folder. [`DASHBOARD.md`](DASHBOARD.md).
 
+**Sources inside the cluster.** The Elasticsearch and Prometheus from Store -> Setup run *inside* the cluster: nothing listens on `localhost:9200`
+or `:9090`, and `*.svc` names do not resolve on this machine. Use the sources Setup adds for you (**Cluster Elasticsearch**, **Cluster Prometheus**), or
+write the address as `cluster://<namespace>/<service>:<port>`, for example `cluster://iyakki-data/elasticsearch:9200`,
+`cluster://iyakki-monitoring/prometheus:9090` or `cluster://<namespace>/<service>:8123` for a ClickHouse. IYAKKI looks the Service up each time, so it keeps
+working after the Service is recreated. The cluster must be installed and running. When you add a source, the Address is pre-filled with what is
+really there (or left empty with the reason); a failed Test says what is wrong and what to do.
+A source that still points at `localhost` for something that lives in the cluster is reported once at the top of the board with a button: **Use cluster address**, **Install … (Store -> Setup)** or **Remove source**; on the Sources page **Fix all** does the cluster ones in one click and **Remove duplicate** clears a copy. Nothing changes until you click.
+
 ![Dashboard](media/shots/dash.png)
 
 ### FLOWS
@@ -591,7 +662,23 @@ Design, run, schedule and watch workflows (HTTP, command, browser, gRPC, agent, 
 failed runs can be examined by the assistant, which proposes fixes you approve. Tabs `1 2 3` = DESIGN, RUN, BOARD. DESIGN:
 `a` add step, `f` fit, `g` arrange, `t` text view, `T` test step, `r` run, `p` publish, `h` versions, Ctrl+Z/Y/C/V/D. RUN: `r` retry,
 `s` skip, `R` rerun from here, `c` cancel, `y`/`n` approve/reject. Schedules run while you are signed in. Thrift nodes and
-webhook triggers are planned, not built. [`FLOWS.md`](FLOWS.md).
+webhook triggers are planned, not built. The assistant pane works on the flow you have open (it edits that flow, one conversation per
+flow) and makes flows, never apps; when a run lacks an input it shows a form to fill in (Tab between fields, Enter on the last field or
+Ctrl+S sends, Esc cancels; secrets go to your vault and are never shown to it). `d` on the list deletes a flow and `x` in the history
+drops a version, both after a confirmation where only `y` confirms.
+**Closing and running:** Esc is one step back and the buttons say so ("Close (Esc)"). In a flow it deselects, then closes it
+(everything is saved as you go; only a refused edit asks first); in a run it returns to the flow; on the list it leaves FLOWS. "Run (r)"
+starts the flow and asks for any required input first. The RUN view says how the run went (Succeeded or "failed at step X: reason")
+with "Run again (a)", "Open log (l)" and, while it goes, "Stop run (c)". The line at the bottom always lists the keys of the screen you are on.
+**When a flow fails:** open it and a card says where it failed, with "Ask the agent to fix (F)", "Open log (L)" and "Dismiss (x)". The
+assistant opens on that flow with the error and the end of the log (never your input values or secrets), explains it and proposes a
+fix; every change, and every new run, still asks you first, and it stops after three attempts. If the assistant is already open it
+asks "Want me to fix it?" with "Yes, fix it" and "Not now". On the list, "Agent help on failure" (`o`) turns the offer off.
+**The assistant knows the flow you have open.** In FLOWS (the "Assistant" button or Ctrl+I) it is told which flow is open, its steps,
+the names of its inputs, its version and schedule, its latest runs and, if the last run failed, the failed step, the attempts and the end
+of the log (never your input values or secrets). If you leave FLOWS and open the CHAT tile, it still works on that flow: a chip at the top
+shows "Flow: NAME (last run failed)" and "x Detach" lets it go. Signing out, deleting the flow or four hours without FLOWS also end it.
+[`FLOWS.md`](FLOWS.md).
 
 ![Flows](media/shots/flows.png)
 
@@ -666,9 +753,13 @@ developer mode is marked DEV too and labelled **Developer (local)**; a new build
 * **Changes** are off. An administrator can turn on **Allow changes** (remembered per cluster) to restart or scale a workload, delete a pod, cordon a node or delete another resource (type its name); every change asks first, is recorded and shows its output.
 * Keys: arrows, PageUp/PageDown, Home/End, Enter to open, `/`, `n`, `k`, `l` logs, `y` YAML, `r` refresh, Esc back. The wheel and two-finger scrolling work on the list under the pointer. On a phone-sized window it shows one page at a time with *Back*.
 
-* **Several clusters.** If you have more than one cluster (Settings, Clusters), the K8S tile, the AI IDE's K8s panel and the Store's Setup popups for the items that go into a cluster (Registry, Lemonade, Indic-TTS, DuckDB, Elasticsearch) show the **cluster name** with a small switcher: a list with a coloured dot (green running, grey stopped, red unreachable, amber not checked recently), *local* or *remote*, a GPU badge when known, and *Manage clusters...*. Choosing one only changes where things go; nothing is moved or deleted, and every deploy says the cluster in its question (`Deploy Lemonade to cluster "gpu-box" (remote)`). With one cluster you see no switcher. Setup installs these items into this machine's own cluster only (Indic-TTS's review follows the active one): if another cluster is active, Setup says so and asks you to choose *This machine* in the same popup first. The GPU badge (for example *GPU 2 x NVIDIA GeForce RTX 4090 (24 GB each)*, or *(last known)* when the cluster did not answer the last time) is read from the cluster's nodes in the background; the screen never waits for it.
+* **Several clusters.** If you have more than one cluster (Settings, Clusters), the K8S tile, the AI IDE's K8s panel and the Store's Setup popups for the items that go into a cluster (Registry, Lemonade, DuckDB, Elasticsearch) show the **cluster name** with a small switcher: a list with a coloured dot (green running, grey stopped, red unreachable, amber not checked recently), *local* or *remote*, a GPU badge when known, and *Manage clusters...*. Choosing one only changes where things go; nothing is moved or deleted, and every deploy says the cluster in its question (`Deploy Lemonade to cluster "gpu-box" (remote)`). With one cluster you see no switcher. Setup installs these items into this machine's own cluster only: if another cluster is active, Setup says so and asks you to choose *This machine* in the same popup first. The GPU badge (for example *GPU 2 x NVIDIA GeForce RTX 4090 (24 GB each)*, or *(last known)* when the cluster did not answer the last time) is read from the cluster's nodes in the background; the screen never waits for it.
 
 Details, limits and what is not done: [`K8S-TILE.md`](K8S-TILE.md).
+
+### LEARN
+
+Study plans and quizzes. Ask the chat: "I want to learn programming basics in 21 days", "a yoga session every day for a month", "quiz me with 10 questions on the solar system". The assistant writes the lessons or questions; the program works out the dates, checks them and scores the quiz. The tile has two tabs, PLANS and QUIZZES, over the same store as the chat. In a plan, **click a day (or press Enter) to open its lesson**: the page starts with *What you will learn today* and the assistant writes the lesson as you watch (explanation, worked example, what to do step by step, a practice task, a recap, with pictures); it is saved, so the next time it opens at once. In a lesson: Left / Right move between sections, Space marks the day done, `q` asks a question, `s` makes it simpler, `d` goes deeper, `g` writes it again (asks first), `r` reads it aloud, `c` cancels, Esc goes back to the plan. In the plan, Space ticks a session done; `c` adds the whole plan to your calendar, or takes it out again (the assistant always asks you first). In a quiz, pick an option, see right or wrong with the explanation, press Enter for the next question; the answers are not shown before you answer. If a question looks wrong press `r` (Report a wrong question): it stops counting and the percent is worked out over the rest. Details: [`STUDY.md`](STUDY.md).
 
 ### GIT
 *Work group. For administrators, operators and users; not guests; stays in Cloud mode.* Browse the repositories of your Git hosts without cloning them.
@@ -677,6 +768,7 @@ Details, limits and what is not done: [`K8S-TILE.md`](K8S-TILE.md).
 * **Repositories**: name, description, default branch, private or public, age, stars and size; a green dot means a clone is on this computer. Click a title or `o`/`O` to sort, `/` to filter, *Load more* (`m`) for the next 50. If the host stops answering, the last list stays and the tile tries again; if it asks you to slow down, the line says for how long.
 * **Open one** (Enter): **Files** (folders open as you go; text with line numbers up to 512 KB, the README first and rendered, pictures, and name/size/type for binary or large files), **Commits** (the last 50, with the message and a coloured diff), **Branches** (and tags), **Issues/PRs** (read-only) and **Info** (clone addresses with Copy). `1` to `5` switch tabs, `g` chooses a branch or tag, Esc steps back.
 * **Actions**, each asking first where it changes something: `C` clone into your Repositories folder, `I` open in the AI IDE (offers the clone first if there is none), `F` fetch, `P` pull (asks if the clone has changes of its own), `U` push (its own review), `y` copy the clone address, `w` open the page in the BROWSER (after a yes). Nothing is changed on the host: no delete, rename, settings or issue writing.
+* **In the AI IDE**: the **Git** tab (after K8s, `Ctrl+Shift+L`) has *This project* (the open folder's branch, ahead and behind, changed files with their status, recent commits and the diff of a file or commit; `o` opens the file in the editor) and *Connections* (this tile, with the same connection picker). It only reads; clone, fetch, pull and push stay with the IDE's Repositories panel.
 
 Details, limits and what is not done: [`GIT-TILE.md`](GIT-TILE.md).
 
@@ -758,10 +850,24 @@ Setup is a page of **tiles**, like an app store: one tile for every app, tool or
   last install failed, a small **star** when it is recommended for this machine. Nothing is folded away: everything this machine can
   install is on the page. The tiles fill the width (one column on a phone, up to six on a big screen) and the page scrolls.
 * **Categories.** The bar under the search box: **All**, *Get started* (Node.js, Python 3, k3s), *AI and models* (Lemonade, Ollama,
-  *Use a Mac's GPU* guide), *Voices* (Kokoro, Indic-TTS, **Voice: Whisper tiny + Kokoro**), *Coding agents* (Claude Code, GitHub Copilot), *Data* (DuckDB, Elasticsearch,
+  *Use a Mac's GPU* guide), *Voices* (Kokoro, **Voice: Whisper tiny + Kokoro**), *Coding agents* (Claude Code, GitHub Copilot), *Data* (DuckDB, Elasticsearch, **Prometheus (metrics)**, **ClickHouse (analytics database)**, **Graph database (for AI)**,
   local image registry), *Media* (ffmpeg), *Hardware* (GPU for local models (Vulkan), NVIDIA driver, Mac Wi-Fi and Bluetooth firmware,
   the MacBook camera: shown only when the machine has the hardware, never in cloud mode) and *Linux apps*. Click one to see only
   its tiles; `c` goes to the next one.
+  Elasticsearch and Prometheus run inside the cluster (ClusterIP only): their DASH sources, **Cluster Elasticsearch** and **Cluster Prometheus**, are added for you
+  with the addresses `cluster://iyakki-data/elasticsearch:9200` and `cluster://iyakki-monitoring/prometheus:9090`; nothing listens on `localhost` for them (see the DASH section).
+  **ClickHouse (analytics database)** is ClickHouse (Apache-2.0, its own pod in `iyakki-data`, about 1 GB of memory, not for machines under 3 GB): Setup makes a password for it, keeps it
+  in your vault as `svc.clickhouse` and adds the DASH source **Cluster ClickHouse** (`cluster://iyakki-data/clickhouse:8123`). A ClickHouse source you added by hand at `localhost:8123`
+  shows "ClickHouse is not installed" in DASH with **Install** (opens Setup on this item) and **Remove this source**; once it is installed that source offers **Use cluster address**.
+  **Graph database (for AI)** is Neo4j Community (GPL-3.0, its own pod, about 500 MB of memory, so not for machines under 3 GB): Setup makes a password for it, keeps it
+  in your vault as `svc.graphdb` and adds the DASH source **Cluster graph database** (`cluster://iyakki-data/graphdb:7474`, Cypher, reads only). Ask the assistant
+  about relations ("which things are connected to X") and it uses that source through `dash_describe` and `dash_query`; you write to it yourself with a program of your own
+  (`kubectl -n iyakki-data port-forward svc/graphdb 7474 7687`, user `neo4j`, the password from the vault).
+  **Gitea (versioning for your work)** (under *Coding agents*; needs k3s, about 300 MB of memory) keeps your projects versioned on this machine: it installs a
+  Gitea git service (MIT) in the cluster, makes an administrator with a generated password and an API token that only your vault holds, and adds the
+  Git connection **Local Gitea**. Open it at `http://127.0.0.1:3300` (only this computer can; the Setup row and the job's last line say the address); clone and push with
+  `git` over HTTP using the token. In the AI IDE, a project without a remote shows **Put this project under version control on Local Gitea** in its
+  Repositories panel; the GIT tile lists the repositories (Connections: Local Gitea). Remove it from Settings -> Dev cluster -> Platform services.
 * **Click a tile** (or press Enter on it) and a **popup** opens: what it is, its status (*Installed v1.37 · Running · Update available
   v1.38*, *Not installed*, *Failed* ...), the size and time ("about 45 MB · about a minute"), the licence, where it goes, what it needs
   ("Installs k3s first") and what needs it ("Needed by Lemonade, DuckDB ..."), the memory it wants, and warnings (not enough memory, not
@@ -774,7 +880,7 @@ Setup is a page of **tiles**, like an app store: one tile for every app, tool or
   Recommended · Updates** (`f` cycles). They work together with the category.
 * **Recommended for this machine** (the star, and the *Recommended* chip) comes from what the machine has: no k3s recommends k3s; a GPU
   recommends the GPU entries; a Mac model recommends the Mac firmware; too little memory keeps the heavy ones (Lemonade, Ollama, Kokoro,
-  Indic-TTS, Elasticsearch, the GPU entries) out of the recommendations and puts a plain note in their popup; cloud mode hides the hardware
+  Elasticsearch, the GPU entries) out of the recommendations and puts a plain note in their popup; cloud mode hides the hardware
   tiles; a desktop window never recommends a cluster (and never installs one: the popup says so). **Install all recommended** opens a review
   (every step in order, its size, the total download); `y` or *Install all* starts the jobs.
 * **Who may install.** The same people as before: administrators (installing, upgrading, starting and stopping). Everyone else who has the
@@ -795,6 +901,10 @@ Setup is a page of **tiles**, like an app store: one tile for every app, tool or
 
 ![Store](media/shots/store.png)
 
+## Hardware firmware (Wi-Fi, Bluetooth, graphics that need a vendor file)
+
+IYAKKI images do not carry vendor firmware (licences). If a part of your computer does not work, open **Store, Setup, Hardware firmware**. The card lists which files this computer asked for ("your Wi-Fi card Intel Wi-Fi 6 AX200 needs iwlwifi-cc-a0-*.ucode"), grouped by vendor with what each licence says (free to redistribute with notice, or restricted to the vendor's hardware; NVIDIA graphics firmware is separate), the size, and four ways to get the files, in this order: Ethernet cable to your router, the other computer's internet through a USB-C cable (this session only), a USB stick with a `firmware-extra` folder, or files sent from another computer over the cable. A Wi-Fi chip without firmware cannot use Wi-Fi to fetch it. **See the licences and install** opens a form: choose the way, tick the licences, accept; only then is anything downloaded. The files come from kernel.org's linux-firmware release 20261019 and every file is checked. Drivers reload when that is safe; otherwise the card shows **Restart to finish** and restarts only after you confirm. The same form removes the extra firmware again. Details: `docs/FIRMWARE-LICENCES.md`, `docs/DEVELOPER-MODE.md` section 10.6, `dist/scripts/firmware-notes/README.md`.
+
 ## AI tools and your hardware
 
 Store -> Setup shows the AI tools that make sense for this machine: Apple Silicon (M1 to M6), or a PC with an NVIDIA, AMD or Intel Arc GPU
@@ -803,6 +913,12 @@ without one does not see Lemonade, Ollama or the GPU runtime; a card explains wh
 or more ..."). Settings -> Cloud mode says what IYAKKI found ("NVIDIA GeForce RTX 3060, 12 GB: about 10.5 GB usable for models") and has
 the administrator switch **Show all AI tools** (press A), which lists every tool again as "not recommended". Details:
 [AI-HARDWARE.md](AI-HARDWARE.md).
+
+## Tokens and tool routing in the chat
+
+A model that sees all of IYAKKI's tools on every request spends thousands of tokens on definitions it does not need, and a local model pays for them in waiting time. The chat therefore offers only the tools the conversation needs: the basics (files, web, questions to you, installed packages) always, and the rest (browser, media, radio, calendar, pictures, flows, dashboards, tables, cluster, app building) when the chat was opened from that place, when your words mention it, or when the assistant asks for the group itself (`more_tools`). Nothing becomes unreachable and your account's permissions are unchanged.
+
+The footer shows what the last request cost, for example `tools: 19 of 134 · request ~3.7k (system 1.1k, tools 2.3k, chat 0.1k, outputs 0)`. Settings -> Models -> **Tool routing** (administrator, key `T`) turns it off, which offers every tool on every request. Numbers and details: [development/TOKEN-BUDGET.md](development/TOKEN-BUDGET.md).
 
 ## Choosing a file or a folder
 
@@ -831,6 +947,48 @@ your own desktop; closing the tab leaves it running and the next sign-in finds i
 * **Phone or tablet:** tap to click, hold for a right click, drag with one finger, scroll with two, pinch to zoom (two fingers move
   the view while zoomed; *Reset zoom* undoes it). *Keyboard* in the settings opens the phone's keyboard; *Full screen* hides the browser bars.
 * Copy and paste go through the browser's clipboard (the browser may ask permission to read it).
+
+## Web service: a small part of IYAKKI for programs (no desktop)
+
+`iyakki serve --profile agent-api` runs only a headless web service: no screen, no desktop, no tiles. A program (or a web page of
+your own) signs in over HTTPS and talks to the assistant, with the same approvals as the desktop. Nothing starts unless you ask for a
+profile; `iyakki serve` alone is unchanged.
+
+**Profiles.** `agent-api`: sign-in, chat runs and their history, approvals, models, and a short list of read tools (`now`, `web_search`,
+`web_fetch`, `web_research`, `web_feed`, `web_links`, `weather`, `stock_quote`, `search_documents`, `data_open`, `data_describe`,
+`data_query`). `cloud`: the limited deployment for a server or cloud machine: the same plus read access to your flows and the three data
+tools directly. Neither has file writes, commands, a terminal, the vault, sound, camera, USB, firmware, the firewall or developer mode;
+those routes do not exist (the answer is 404). The other profiles of the plan (`flows-runner`, `data-api`, `tile-host`) are not built yet.
+
+**Safe by default.**
+
+* HTTPS only. The first start makes a self-signed certificate under `<data dir>/service/tls` and logs its SHA-256 fingerprint; give
+  `tls.cert` and `tls.key` to use your own. Clients pin the fingerprint (`iyakki dev` does this for developer mode; any HTTP client can).
+* It listens on `127.0.0.1` only. To reach it from the network set `"lan": true` **and** `"allow_from"` (for example
+  `["192.168.1.0/24"]`); IYAKKI then adds one firewall rule per network for that port (comment "IYAKKI web service"). The whole internet
+  (`0.0.0.0/0`) is refused.
+* Signing in is required for everything except `/healthz`, `/readyz`, `/api/v1/version` and `/api/v1/login`. There is no default account:
+  create one with `iyakki user add NAME --password-file FILE`. `POST /api/v1/login` with `{"name","password"}` returns a bearer token
+  (kept only as a hash; 8 hours idle, 24 hours at most; ends at once when the account is removed). No cookies.
+* A tool that asks first on the desktop asks here too: the run waits, `GET /api/v1/approvals` shows the card, and only the person who
+  owns the run (or an administrator) answers with `POST /api/v1/approvals/{run}/{call}` `{"verdict":"approve"|"deny"}`, one call at a
+  time. Nothing is approved automatically, earlier desktop grants do not count, and an unanswered request is refused after 5 minutes.
+* Limits: 60 requests a minute per person, 10 sign-in tries a minute per address, 4 runs at a time per person, bodies up to 1 MiB.
+* Browsers from other sites are refused (no CORS) unless you list their exact origin in `cors_origins`.
+* Every sign-in, run start, stop, approval answer and data call is one line in the audit log (who, what, address; never a password,
+  token or prompt).
+
+**Starting it.** `iyakki serve --profile cloud --config /etc/iyakki/service.json` (or `IYAKKI_PROFILE`, `IYAKKI_SERVICE_CONFIG`,
+`IYAKKI_LISTEN`). `--check` only validates the configuration and prints what would start. Examples: `dist/service/service.local.json`
+(loopback) and `dist/service/service.cloud.json` (container or VM on a private network, own certificate, token store). Fields:
+`profile`, `listen`, `lan`, `allow_from`, `tls.cert`/`tls.key`, `token_store`, `data_dir`, `cors_origins`, `enable_tools`, `limits`;
+an unknown field is an error. It appears as "Web service" in the startup list, and runs under any supervisor (it is one foreground
+process; SIGTERM stops it after letting running requests finish for up to 10 seconds). For a load balancer use `GET /healthz`
+(alive) and `GET /readyz` (200 only when the data directory is writable).
+
+**The API.** `GET /api/v1/openapi.json` (signed in) is the full list for the running profile, generated from the same table the
+server uses. A run is started with `POST /api/v1/chat/runs` `{"prompt"}` and followed with
+`GET /api/v1/chat/runs/{id}/events?after=N&wait=20` (long poll; WebSocket streaming is not built yet).
 
 ## Roles and what you see
 
@@ -882,7 +1040,7 @@ directly) use the system's default device; engines that make a WAV (piper, espea
 its row), off by default. Normally one program plays at a time. With it on, the radio, reading aloud, alarms and notification sounds
 play together, and the others get quieter while one speaks (alarm, then speech, then notifications, then media and radio, from most to
 least important). While it is on the page shows whether the mixer is running or idle, how much of one processor core it uses and how
-many underruns (small gaps) it had. The browser's own sound is not mixed yet: if you mostly use the browser, leave this off. The
+many underruns (small gaps) it had. The browser's own sound is mixed only if you also turn on the row below it, **Browser sound through the mixer (experimental)** (`W`; needs the mixer; it applies the next time the web engine starts; untested on real hardware, so turn it off if the browser goes silent). Without it, when a page starts to play while the radio, reading aloud or another program holds the sound card, the browser asks "Radio is playing. Stop it so the browser can play?" with **Stop it**, **Keep it** and **Cancel**; the radio asks the same when a station starts while the browser plays. The
 change applies from the next sound, and no app needs to know about it; apps that read aloud through the SDK stop getting *Busy*.
 
 ## System sounds
@@ -923,12 +1081,7 @@ once on a small page that speaks for IYAKKI and shows *connected*; it works on t
 close the tab. In a browser tab on `iyakki web` the browser's own voice is used. In chat, a reply read aloud (`Ctrl+O` switches it on) has the same lit sentence and word, a **Pause**/**Resume** button beside **Stop** (`Ctrl+K`), and a click on a sentence reads from there; *Highlight* in Settings -> Voice (key `h`) turns the word or all of it off. The speech engines are not shipped with the images
 (licences); with none, the story is still written and saved. [`VOICE.md`](VOICE.md).
 
-**Indic voices (Tamil, Telugu, Malayalam, Kannada, Hindi, Bengali, Marathi and more).** espeak-ng is robotic in these languages; Settings -> **Indic voices**
-(administrators) installs neural voices (AI4Bharat Indic-TTS) and switches the reading to them (`e`); female or male with `g`, a test
-with `y`. Each voice is about 260 MB; `d` asks first and shows where it would come from and how big it is, `u` installs from a USB
-stick on a computer that is never online, `x` deletes. The voices run in a small server (on this computer, a PC, or your k3s cluster:
-[`VOICE.md`](VOICE.md)); its address is shown and text is sent only there. If a language is not installed, reading falls back to the
-next engine and the page says why in one line. Default: off. Check the licence note on the page before you pass the voices on.
+**Other languages.** The Indic neural voices were removed on 2026-10-27 (no stated licence for their weights); use espeak-ng, piper or a voice you run through Lemonade.
 
 ## Density and text size
 

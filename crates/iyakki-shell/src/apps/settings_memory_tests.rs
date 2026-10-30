@@ -72,7 +72,7 @@ fn draw(a: &mut SettingsApp, cx: &AppCx, w: u32, h: u32) -> Gfx {
 fn overlaps(a: R, b: R) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
-fn goto_memory(a: &mut SettingsApp, cx: &AppCx) {
+fn goto_memory(a: &mut SettingsApp, _cx: &AppCx) {
     a.go_to(Tab::Memory);
 }
 

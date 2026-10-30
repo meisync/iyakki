@@ -95,6 +95,10 @@ impl ServiceDef for PrivateStore {
         }
         Ok(())
     }
+    fn first_node_port(&self) -> u16 {
+        // fixed, so the exposure check can document it (exposure::DOCUMENTED) whatever else is deployed first
+        30301
+    }
     fn always_mirror(&self) -> bool {
         true
     }

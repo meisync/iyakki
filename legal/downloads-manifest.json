@@ -1,0 +1,427 @@
+{
+  "schema": 1,
+  "sequence": 1,
+  "issued": "2026-10-28",
+  "items": [
+    {
+      "id": "cli:kubectl",
+      "licence": "Apache-2.0",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "float+sum",
+      "url": "https://dl.k8s.io/release/{v}/bin/linux/{arch}/kubectl",
+      "hosts": [
+        "k8s.io"
+      ],
+      "checksum": {
+        "type": "vendor-file",
+        "url": "https://dl.k8s.io/release/{v}/bin/linux/{arch}/kubectl.sha256",
+        "format": "single"
+      }
+    },
+    {
+      "id": "cli:k3s",
+      "covers": [
+        "k3s"
+      ],
+      "licence": "Apache-2.0",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "float+sum",
+      "url": "https://github.com/k3s-io/k3s/releases/download/{ve}/k3s{k3s_suffix}",
+      "hosts": [
+        "github.com",
+        "githubusercontent.com"
+      ],
+      "checksum": {
+        "type": "vendor-file",
+        "url": "https://github.com/k3s-io/k3s/releases/download/{ve}/sha256sum-{arch}.txt",
+        "format": "lines"
+      }
+    },
+    {
+      "id": "cli:helm",
+      "licence": "Apache-2.0",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "float+sum",
+      "url": "https://get.helm.sh/helm-{v}-linux-{arch}.tar.gz",
+      "hosts": [
+        "helm.sh",
+        "azureedge.net",
+        "windows.net"
+      ],
+      "checksum": {
+        "type": "vendor-file",
+        "url": "https://get.helm.sh/helm-{v}-linux-{arch}.tar.gz.sha256sum",
+        "format": "single"
+      }
+    },
+    {
+      "id": "cli:terraform",
+      "licence": "LicenseRef-BUSL-1.1",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "float+sum",
+      "url": "https://releases.hashicorp.com/terraform/{vn}/terraform_{vn}_linux_{arch}.zip",
+      "hosts": [
+        "hashicorp.com"
+      ],
+      "checksum": {
+        "type": "vendor-file",
+        "url": "https://releases.hashicorp.com/terraform/{vn}/terraform_{vn}_SHA256SUMS",
+        "format": "lines"
+      }
+    },
+    {
+      "id": "cli:opentofu",
+      "licence": "MPL-2.0",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "float+sum",
+      "url": "https://github.com/opentofu/opentofu/releases/download/{v}/tofu_{vn}_linux_{arch}.tar.gz",
+      "hosts": [
+        "github.com",
+        "githubusercontent.com"
+      ],
+      "checksum": {
+        "type": "vendor-file",
+        "url": "https://github.com/opentofu/opentofu/releases/download/{v}/tofu_{vn}_SHA256SUMS",
+        "format": "lines"
+      }
+    },
+    {
+      "id": "cli:gh",
+      "licence": "MIT",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "float+sum",
+      "url": "https://github.com/cli/cli/releases/download/{v}/gh_{vn}_linux_{arch}.tar.gz",
+      "hosts": [
+        "github.com",
+        "githubusercontent.com"
+      ],
+      "checksum": {
+        "type": "vendor-file",
+        "url": "https://github.com/cli/cli/releases/download/{v}/gh_{vn}_checksums.txt",
+        "format": "lines"
+      }
+    },
+    {
+      "id": "cli:aws-cli",
+      "licence": "Apache-2.0",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "none-vendor",
+      "version": "2.38.6",
+      "url": "https://awscli.amazonaws.com/awscli-exe-linux-{arch2}-{v}.zip",
+      "hosts": [
+        "amazonaws.com"
+      ]
+    },
+    {
+      "id": "cli:gcloud",
+      "licence": "Apache-2.0",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "none-vendor",
+      "version": "590.0.1",
+      "url": "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-{v}-linux-{arch3}.tar.gz",
+      "hosts": [
+        "google.com",
+        "googleapis.com"
+      ]
+    },
+    {
+      "id": "cli:arduino-cli",
+      "licence": "GPL-3.0-only",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "float+sum",
+      "url": "https://github.com/arduino/arduino-cli/releases/download/{v}/arduino-cli_{vn}_{arduino}.tar.gz",
+      "hosts": [
+        "github.com",
+        "githubusercontent.com"
+      ],
+      "checksum": {
+        "type": "vendor-file",
+        "url": "https://github.com/arduino/arduino-cli/releases/download/{v}/{vn}-checksums.txt",
+        "format": "lines"
+      }
+    },
+    {
+      "id": "cli:esptool",
+      "licence": "GPL-2.0-or-later",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "none-vendor",
+      "version": "5.6.0",
+      "hosts": [
+        "pypi.org",
+        "pythonhosted.org"
+      ]
+    },
+    {
+      "id": "cli:azure-cli",
+      "licence": "MIT",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "none-vendor",
+      "version": "2.91.0",
+      "hosts": [
+        "pypi.org",
+        "pythonhosted.org"
+      ]
+    },
+    {
+      "id": "cli:nodejs",
+      "covers": [
+        "nodejs"
+      ],
+      "licence": "MIT",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "float+sum",
+      "url": "https://{node_dist}/{v}/node-{v}-linux-{node_arch}{node_libc}.tar.gz",
+      "hosts": [
+        "nodejs.org",
+        "alpinelinux.org"
+      ],
+      "checksum": {
+        "type": "vendor-file",
+        "url": "https://{node_dist}/{v}/SHASUMS256.txt",
+        "format": "lines"
+      }
+    },
+    {
+      "id": "cli:uv",
+      "licence": "MIT OR Apache-2.0",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "float+sum",
+      "url": "https://github.com/astral-sh/uv/releases/download/{v}/uv-{arch2}-unknown-linux-musl.tar.gz",
+      "hosts": [
+        "github.com",
+        "githubusercontent.com"
+      ],
+      "checksum": {
+        "type": "vendor-file",
+        "url": "https://github.com/astral-sh/uv/releases/download/{v}/uv-{arch2}-unknown-linux-musl.tar.gz.sha256",
+        "format": "single"
+      }
+    },
+    {
+      "id": "cli:python",
+      "covers": [
+        "python"
+      ],
+      "licence": "LicenseRef-PSF-2.0",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "none-vendor",
+      "version": "3.12.16",
+      "hosts": [
+        "github.com",
+        "githubusercontent.com",
+        "pypi.org"
+      ]
+    },
+    {
+      "id": "cli:claude-code",
+      "covers": [
+        "claude-code"
+      ],
+      "licence": "LicenseRef-Anthropic-commercial",
+      "proprietary": true,
+      "downloaded_not_shipped": true,
+      "kind": "float+sum",
+      "url": "https://downloads.claude.ai/claude-code-releases/{v}/{cplatform}/claude",
+      "hosts": [
+        "claude.ai",
+        "registry.npmjs.org"
+      ],
+      "checksum": {
+        "type": "vendor-file",
+        "url": "https://downloads.claude.ai/claude-code-releases/{v}/manifest.json",
+        "format": "manifest"
+      }
+    },
+    {
+      "id": "cli:github-copilot",
+      "covers": [
+        "github-copilot"
+      ],
+      "licence": "LicenseRef-GitHub-Copilot-terms",
+      "proprietary": true,
+      "downloaded_not_shipped": true,
+      "kind": "float+sum",
+      "url": "https://github.com/github/copilot-cli/releases/download/{v}/copilot-linux{musl}-{arch4}.tar.gz",
+      "hosts": [
+        "github.com",
+        "githubusercontent.com"
+      ],
+      "checksum": {
+        "type": "vendor-file",
+        "url": "https://github.com/github/copilot-cli/releases/download/{v}/SHA256SUMS.txt",
+        "format": "lines"
+      }
+    },
+    {
+      "id": "cli:codex",
+      "licence": "Apache-2.0",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "none-vendor",
+      "version": "0.164.0",
+      "hosts": [
+        "registry.npmjs.org"
+      ]
+    },
+    {
+      "id": "cli:gemini-cli",
+      "licence": "Apache-2.0",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "none-vendor",
+      "version": "0.65.0",
+      "hosts": [
+        "registry.npmjs.org"
+      ]
+    },
+    {
+      "id": "cli:aider",
+      "licence": "Apache-2.0",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "none-vendor",
+      "version": "0.86.2",
+      "hosts": [
+        "pypi.org",
+        "pythonhosted.org"
+      ]
+    },
+    {
+      "id": "cli:ollama",
+      "covers": [
+        "ollama"
+      ],
+      "licence": "MIT",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "float+sum",
+      "url": "https://github.com/ollama/ollama/releases/download/{v}/ollama-linux-{arch}.tar.zst",
+      "hosts": [
+        "github.com",
+        "githubusercontent.com"
+      ],
+      "checksum": {
+        "type": "vendor-file",
+        "url": "https://github.com/ollama/ollama/releases/download/{v}/sha256sum.txt",
+        "format": "lines"
+      }
+    },
+    {
+      "id": "cli:ffmpeg",
+      "covers": [
+        "ffmpeg"
+      ],
+      "licence": "GPL-3.0-only",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "float+sum",
+      "url": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-{arch}-static.tar.xz",
+      "hosts": [
+        "johnvansickle.com"
+      ],
+      "checksum": {
+        "type": "vendor-file",
+        "url": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-{arch}-static.tar.xz.md5",
+        "format": "md5"
+      }
+    },
+    {
+      "id": "cli:duckdb",
+      "covers": [
+        "duckdb"
+      ],
+      "licence": "MIT",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "none-vendor",
+      "version": "1.3.2",
+      "hosts": [
+        "pypi.org",
+        "pythonhosted.org"
+      ]
+    },
+    {
+      "id": "cli:grpcurl",
+      "licence": "MIT",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "float+sum",
+      "url": "https://github.com/fullstorydev/grpcurl/releases/download/{v}/grpcurl_{vn}_linux_{grpc}.tar.gz",
+      "hosts": [
+        "github.com",
+        "githubusercontent.com"
+      ],
+      "checksum": {
+        "type": "vendor-file",
+        "url": "https://github.com/fullstorydev/grpcurl/releases/download/{v}/grpcurl_{vn}_checksums.txt",
+        "format": "lines"
+      }
+    },
+    {
+      "id": "cli:openvpn",
+      "licence": "GPL-2.0-only",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "none-vendor",
+      "version": "from-setting",
+      "hosts": [
+        "openvpn.net"
+      ]
+    },
+    {
+      "id": "mac-firmware",
+      "licence": "LicenseRef-Apple-firmware-no-redistribution",
+      "proprietary": true,
+      "downloaded_not_shipped": true,
+      "kind": "no-pin",
+      "hosts": []
+    },
+    {
+      "id": "mac-camera",
+      "licence": "LicenseRef-Apple-firmware-no-redistribution",
+      "proprietary": true,
+      "downloaded_not_shipped": true,
+      "kind": "no-pin",
+      "hosts": []
+    },
+    {
+      "id": "linux-windows",
+      "licence": "LicenseRef-Debian-per-package",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "no-pin",
+      "hosts": []
+    },
+    {
+      "id": "linux-apps",
+      "licence": "LicenseRef-Debian-Ubuntu-per-package",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "float+sum",
+      "hosts": [
+        "ubuntu.com",
+        "docker.io",
+        "docker.com"
+      ],
+      "checksum": {
+        "type": "vendor-file",
+        "url": "https://cdimage.ubuntu.com/ubuntu-base/releases/{v}/release/SHA256SUMS",
+        "format": "lines"
+      }
+    }
+  ]
+}

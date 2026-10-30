@@ -54,7 +54,113 @@ pub trait Streamer: Send + Sync {
     fn post(&self, _url: &str, _headers: &[(String, String)], _body: &[u8]) -> Result<StreamHead, String> {
         Err("this transport cannot stream a POST".into())
     }
+
+    /// A GET whose certificate check is changed for this one connection (see [`TlsMode`]).
+    fn open_tls(&self, _url: &str, _headers: &[(String, String)], _mode: &TlsMode) -> Result<StreamHead, String> {
+        Err("this transport cannot pin a certificate".into())
+    }
+
+    /// The certificates a server shows (leaf first), read without trusting them or sending anything but the handshake.
+    fn peer_chain(&self, _host: &str, _port: u16) -> Result<Vec<Vec<u8>>, String> {
+        Err("this transport cannot read a server's certificates".into())
+    }
 }
+
+/// How one TLS connection is checked instead of the usual way. Never a general "do not verify".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TlsMode {
+    /// Exactly the leaf certificate with this SHA-256 fingerprint; host name and validity period are still checked.
+    Pin(String),
+    /// The usual check, with these intermediate certificates (DER) added to what the server sent.
+    ExtraChain(Vec<Vec<u8>>),
+}
+
+/// Per-playback TLS exceptions, by `host:port`: at most one approved pin, plus intermediates found for hosts that forgot to
+/// send them. Shared (cheap to clone) between the radio and its HLS follower; lives for one playback.
+#[derive(Clone, Debug, Default)]
+pub struct TlsPlan {
+    pin: Option<(String, String)>,
+    extra: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<Vec<u8>>>>>,
+}
+
+impl TlsPlan {
+    pub fn new(pin: Option<(&str, u16, &str)>) -> TlsPlan {
+        TlsPlan { pin: pin.map(|(h, p, f)| (format!("{}:{p}", h.to_ascii_lowercase()), f.to_string())), extra: Default::default() }
+    }
+
+    fn key(url: &str) -> Option<String> {
+        let (h, p, _) = pintls_split(url)?;
+        Some(format!("{h}:{p}"))
+    }
+
+    /// The exception for the host and port of `url`, if any (https only).
+    pub fn mode_for(&self, url: &str) -> Option<TlsMode> {
+        let k = Self::key(url)?;
+        if let Some((pk, fp)) = &self.pin {
+            if *pk == k {
+                return Some(TlsMode::Pin(fp.clone()));
+            }
+        }
+        self.extra.lock().ok()?.get(&k).map(|v| TlsMode::ExtraChain(v.clone()))
+    }
+
+    pub fn add_chain(&self, url: &str, certs: Vec<Vec<u8>>) {
+        if let (Some(k), Ok(mut m)) = (Self::key(url), self.extra.lock()) {
+            m.insert(k, certs);
+        }
+    }
+
+    /// Open `url` the way this plan says (a plain `open` when the host has no exception).
+    pub fn open(&self, s: &dyn Streamer, url: &str, headers: &[(String, String)]) -> Result<StreamHead, String> {
+        match self.mode_for(url) {
+            Some(m) => s.open_tls(url, headers, &m),
+            None => s.open(url, headers),
+        }
+    }
+}
+
+fn pintls_split(url: &str) -> Option<(String, u16, String)> {
+    #[cfg(feature = "https")]
+    {
+        pintls::split_https(url).ok()
+    }
+    #[cfg(not(feature = "https"))]
+    {
+        let _ = url;
+        None
+    }
+}
+
+pub mod certinfo;
+#[cfg(any(test, feature = "testcerts"))]
+pub mod testcerts {
+    //! Certificates for tests of code that shows or pins a server certificate.
+    use rcgen::{CertificateParams, DnType, KeyPair};
+
+    /// A self-signed certificate (DER) for `names`, optionally with fixed years and a "CA Issuers" address.
+    pub fn leaf_der(names: &[&str], years: Option<(i32, i32)>, aia: Option<&str>) -> Vec<u8> {
+        let mut p = CertificateParams::new(names.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
+        p.distinguished_name.push(DnType::CommonName, names[0]);
+        if let Some((a, b)) = years {
+            p.not_before = rcgen::date_time_ymd(a, 1, 1);
+            p.not_after = rcgen::date_time_ymd(b, 1, 1);
+        }
+        if let Some(u) = aia {
+            let uri = u.as_bytes();
+            let mut ad = vec![0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x02, 0x86, uri.len() as u8];
+            ad.extend_from_slice(uri);
+            let mut seq = vec![0x30, ad.len() as u8];
+            seq.extend(ad);
+            let mut outer = vec![0x30, seq.len() as u8];
+            outer.extend(seq);
+            p.custom_extensions.push(rcgen::CustomExtension::from_oid_content(&[1, 3, 6, 1, 5, 5, 7, 1, 1], outer));
+        }
+        let key = KeyPair::generate().unwrap();
+        p.self_signed(&key).unwrap().der().to_vec()
+    }
+}
+#[cfg(feature = "https")]
+pub mod pintls;
 
 #[derive(Clone, Debug, Default)]
 pub struct HostPolicy {
@@ -312,6 +418,14 @@ pub mod https {
             Ok(StreamHead { status, headers, body: Box::new(resp.into_body().into_reader()) })
         }
 
+        fn open_tls(&self, url: &str, headers: &[(String, String)], mode: &TlsMode) -> Result<StreamHead, String> {
+            crate::pintls::open_tls(url, headers, mode)
+        }
+
+        fn peer_chain(&self, host: &str, port: u16) -> Result<Vec<Vec<u8>>, String> {
+            crate::pintls::peer_chain(host, port)
+        }
+
         fn post(&self, url: &str, headers: &[(String, String)], body: &[u8]) -> Result<StreamHead, String> {
             let mut r = self.agent.post(url);
             for (k, v) in headers {
@@ -448,10 +562,19 @@ pub mod https {
                 if !req.if_modified_since.is_empty() {
                     r = r.header("If-Modified-Since", &req.if_modified_since);
                 }
+                if !req.range.is_empty() {
+                    r = r.header("Range", &req.range);
+                }
+                for (n, v) in &req.extra.0 {
+                    r = r.header(n.as_str(), v.as_str());
+                }
                 r
             };
             let without = |mut r: ureq::RequestBuilder<ureq::typestate::WithoutBody>| {
-                r = r.header("Accept", accept).header("Accept-Language", "en-US,en;q=0.9,*;q=0.5").header("Accept-Encoding", "gzip");
+                r = r.header("Accept", accept).header("Accept-Language", "en-US,en;q=0.9,*;q=0.5");
+                if req.range.is_empty() {
+                    r = r.header("Accept-Encoding", "gzip");
+                }
                 if !req.cookie.is_empty() {
                     r = r.header("Cookie", &req.cookie);
                 }
@@ -463,6 +586,12 @@ pub mod https {
                 }
                 if !req.if_modified_since.is_empty() {
                     r = r.header("If-Modified-Since", &req.if_modified_since);
+                }
+                if !req.range.is_empty() {
+                    r = r.header("Range", &req.range);
+                }
+                for (n, v) in &req.extra.0 {
+                    r = r.header(n.as_str(), v.as_str());
                 }
                 r
             };
@@ -483,6 +612,7 @@ pub mod https {
             let max_age = iyakki_web::cache::max_age(&cache_control);
             let (etag, last_modified, vary, expires) = (header("etag").unwrap_or_default(), header("last-modified").unwrap_or_default(), header("vary").unwrap_or_default(), header("expires").unwrap_or_default());
             let age = header("age").and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
+            let all_headers: Vec<(String, String)> = resp.headers().iter().take(80).map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).chars().take(1000).collect())).collect();
             let announced = header("content-length").and_then(|v| v.trim().parse::<u64>().ok());
             let ct = content_type.to_ascii_lowercase();
             // a video or a song is not read to the end (it can be gigabytes): the start says what it is
@@ -492,14 +622,14 @@ pub mod https {
                 let mut body = Vec::new();
                 let _ = resp.body_mut().as_reader().take(MEDIA_HEAD).read_to_end(&mut body);
                 let content_length = announced.or(Some(body.len() as u64));
-                return Ok(iyakki_web::Response { status, location, content_type, set_cookies, body, content_length, max_age: None, ..Default::default() });
+                return Ok(iyakki_web::Response { status, location, content_type, set_cookies, body, content_length, max_age: None, headers: all_headers, ..Default::default() });
             }
             let gzip = header("content-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("gzip"));
             let mut body = resp.body_mut().with_config().limit(MAX_PAGE).read_to_vec().map_err(|e| format!("the page could not be read completely ({e}); pages over {} MB are not opened", MAX_PAGE >> 20))?;
             if gzip {
                 body = gunzip(&body, MAX_PAGE as usize).map_err(|e| format!("the page was compressed and could not be unpacked ({e})"))?;
             }
-            Ok(iyakki_web::Response { status, location, content_type, set_cookies, body, content_length: None, max_age, cache_control, etag, last_modified, vary, expires, age })
+            Ok(iyakki_web::Response { status, location, content_type, set_cookies, body, content_length: None, max_age, cache_control, etag, last_modified, vary, expires, age, headers: all_headers })
         }
     }
 }

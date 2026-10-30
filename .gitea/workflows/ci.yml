@@ -1,0 +1,81 @@
+# CI for the project's own Gitea server (Gitea Actions, act_runner). The tracked .github/workflows/ci.yml is the GitHub twin.
+# The runner needs a label that matches `runs-on` (register act_runner with the label ubuntu-latest, or change it below), Rust
+# build tools, and the packages installed by the first step. Nothing here builds an image, writes a drive or touches hardware.
+name: ci
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: never
+  # tests leak temporary folders: keep them on the disk of the runner, inside the build tree (docs/RELEASING.md)
+  IYAKKI_TMPDIR: ${{ github.workspace }}/target/tmp
+  # a tag is a release: the licence gate may not be skipped there
+  IYAKKI_RELEASE: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '0' }}
+
+jobs:
+  warnings:
+    name: warnings gate (zero compiler warnings, all targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config musl-tools
+      # a clean runner has no cache, so -D warnings costs nothing extra here; locally ./run.sh warnings does the same without a rebuild
+      - run: RUSTFLAGS="-D warnings" cargo check --workspace --all-targets
+      - run: ./run.sh warnings
+
+  tests:
+    name: whole workspace tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config musl-tools
+      - run: mkdir -p "$IYAKKI_TMPDIR"
+      - run: TMPDIR="$IYAKKI_TMPDIR" cargo test --workspace --no-fail-fast
+      - run: df -h "$IYAKKI_TMPDIR" && df -i "$IYAKKI_TMPDIR"
+        if: always()
+
+  gates:
+    name: named gates (feature matrix, boundary, dependency ratchet, safeclamp scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config musl-tools
+      - run: mkdir -p "$IYAKKI_TMPDIR"
+      # these are inside the workspace run too; they are repeated as their own jobs so a red gate is named in the list
+      - run: TMPDIR="$IYAKKI_TMPDIR" cargo test -p iyakki-core --test feature_matrix
+      - run: TMPDIR="$IYAKKI_TMPDIR" cargo test -p iyakki-core --test boundary
+      - run: TMPDIR="$IYAKKI_TMPDIR" cargo test -p iyakki-core --test dependency_ratchet
+      - run: TMPDIR="$IYAKKI_TMPDIR" cargo test -p iyakki-shell --test safeclamp_scan
+
+  licence:
+    name: licence gate (./run.sh licence-check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config musl-tools
+      - name: ./run.sh licence-check (a missing command is a loud SKIP in a normal run and a FAILURE in a release run)
+        run: |
+          # --no-images: a CI checkout has no target/buildroot-*/images to scan; the image content scan runs on the machine that
+          # built the images (./run.sh licence-check without the flag, before ./run.sh release). docs: LICENSING.md
+          if ./run.sh help 2>&1 | grep -q 'licence-check'; then
+            ./run.sh licence-check --no-images
+          else
+            echo "::warning::SKIPPED: './run.sh licence-check' does not exist in this checkout yet. The licence gate did NOT run."
+            if [ "${IYAKKI_RELEASE:-0}" = "1" ]; then
+              echo "FAIL: this is a release run (tag) and the licence gate is missing. A release without the licence gate is not allowed."
+              exit 1
+            fi
+          fi
+
+  kernel-config:
+    name: kernel config check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y flex bison libelf-dev libssl-dev bc
+      - run: dist/buildroot/verify-kernel-config.sh

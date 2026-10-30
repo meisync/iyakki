@@ -1,0 +1,20 @@
+<!doctype html><meta charset=utf-8><title>MEDIA-TEST display</title><link rel=stylesheet href=style.css>
+<h1>getDisplayMedia</h1><div id=result>running</div><video id=v autoplay muted playsinline></video>
+<script src=common.js></script>
+<script>
+// Expected: the shell asked "Allow ... to share your screen?" (a browser needs a user gesture: click the button; the QEMU test clicks it with the monitor's mouse), a live video track with a size; with mock devices the label is "Mock screen device N".
+var b = document.createElement('button'); b.textContent = 'Share my screen'; document.body.insertBefore(b, document.getElementById('result'));
+function go() {
+  mediaTest.run('display', 30000, async function () {
+    if (!navigator.mediaDevices.getDisplayMedia) throw new Error('getDisplayMedia is undefined');
+    var s = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    var v = document.getElementById('v'); v.srcObject = s;
+    await new Promise(function (ok, no) { v.onloadedmetadata = ok; setTimeout(function () { no(new Error('no metadata')); }, 10000); });
+    var t = s.getVideoTracks()[0], w = v.videoWidth, h = v.videoHeight;
+    s.getTracks().forEach(function (x) { x.stop(); });
+    if (!w || !h) throw new Error('no picture size');
+    return (t.label || 'screen') + ' ' + w + 'x' + h;
+  });
+}
+b.onclick = go;
+</script>

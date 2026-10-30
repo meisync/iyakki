@@ -10,7 +10,7 @@ use super::AppCx;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BrowserConfig {
-    /// Run scripts on every site (when off, only on `js_sites`).
+    /// Run scripts on every site (when off, only on `js_sites`). On by default.
     pub js_all: bool,
     /// Hosts the user has allowed scripts for.
     pub js_sites: BTreeSet<String>,
@@ -34,8 +34,9 @@ pub struct BrowserConfig {
 
 impl Default for BrowserConfig {
     fn default() -> Self {
-        // scripts stay off until the user allows them; the rest is on
-        BrowserConfig { js_all: false, js_sites: BTreeSet::new(), images: true, styles: true, cookies: true, search: SearchEngine::default(), player: String::new(), cache: iyakki_web::net::CacheSize::Auto, smooth: false }
+        // everything is on, scripts included (owner decision 2026-10-28: video, maps, mail and most recorders need them); the person can
+        // block scripts everywhere, or allow them only for chosen sites, in Settings -> Browser
+        BrowserConfig { js_all: true, js_sites: BTreeSet::new(), images: true, styles: true, cookies: true, search: SearchEngine::default(), player: String::new(), cache: iyakki_web::net::CacheSize::Auto, smooth: false }
     }
 }
 
@@ -111,10 +112,10 @@ mod tests {
     use crate::apps::tests::cx_with_admin_store;
 
     #[test]
-    fn the_defaults_keep_scripts_off_and_the_rest_on() {
+    fn the_defaults_have_everything_on_scripts_included() {
         let c = BrowserConfig::default();
-        assert!(!c.js_all && c.images && c.styles && c.cookies);
-        assert!(!c.scripts_for("a.org"));
+        assert!(c.js_all && c.images && c.styles && c.cookies);
+        assert!(c.scripts_for("a.org"));
     }
 
     #[test]
@@ -144,7 +145,8 @@ mod tests {
         let cx = cx_with_admin_store("bcfg2");
         std::fs::write(super::old_sites_path(&cx), r#"["old.org"]"#).unwrap();
         let c = load(&cx);
-        assert!(c.scripts_for("old.org") && !c.scripts_for("new.org"));
+        assert!(c.scripts_for("old.org"));
+        assert!(c.js_sites.contains("old.org"), "the old list is carried into the allowed sites");
         assert!(c.images && c.styles);
     }
 }

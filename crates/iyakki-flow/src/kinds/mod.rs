@@ -12,6 +12,7 @@ use crate::model::*;
 use crate::retry::{ErrClass, NodeError};
 
 pub mod browser_qa;
+pub mod camera;
 pub mod cli;
 pub mod control;
 pub mod http;
@@ -260,6 +261,7 @@ impl Registry {
         cli::register(&mut r);
         other::register(&mut r);
         browser_qa::register(&mut r);
+        camera::register(&mut r);
         r
     }
     pub fn register(&mut self, k: Arc<dyn NodeKind>) {
@@ -270,7 +272,7 @@ impl Registry {
     }
     pub fn all(&self) -> Vec<&Arc<dyn NodeKind>> {
         let order = [
-            "start", "end", "http", "cli", "browser", "agent", "script", "grpc", "thrift", "remote", "condition", "switch", "parallel", "join", "delay", "approval", "notify", "subflow", "foreach", "br_open", "br_screenshot", "br_dom", "br_assert", "br_click", "br_type", "br_fill", "br_submit", "br_key", "br_hover", "br_scroll", "br_select", "br_wait",
+            "start", "end", "http", "cli", "browser", "agent", "script", "grpc", "thrift", "remote", "condition", "switch", "parallel", "join", "delay", "approval", "notify", "subflow", "foreach", "cam_photo", "br_open", "br_screenshot", "br_dom", "br_assert", "br_click", "br_type", "br_fill", "br_submit", "br_key", "br_hover", "br_scroll", "br_select", "br_wait",
             "br_extract", "br_js", "br_frame", "br_viewport", "br_storage", "br_download", "br_compare",
         ];
         let mut v: Vec<&Arc<dyn NodeKind>> = self.kinds.values().collect();

@@ -902,6 +902,20 @@ fn running_an_image_app_applies_a_locked_down_deployment_and_service_through_kub
 #[test]
 #[ignore]
 fn a_real_sandbox_runs_busybox_cannot_see_the_host_and_respects_the_switches() {
+    real_sandbox(false);
+}
+
+/// The same checks through the way used on an initramfs root (move, chroot), forced on this PC.
+#[test]
+#[ignore]
+fn a_real_sandbox_entered_the_initramfs_way_behaves_the_same() {
+    init::FORCE_MOVE.store(true, std::sync::atomic::Ordering::SeqCst);
+    real_sandbox(true);
+    init::FORCE_MOVE.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn real_sandbox(moved: bool) {
+    let _ = moved;
     let bb = *["/usr/bin/busybox", "/bin/busybox"].iter().find(|p| Path::new(p).is_file()).expect("a static busybox on the host");
     let d = tmp("real");
     let root = d.join("rootfs");

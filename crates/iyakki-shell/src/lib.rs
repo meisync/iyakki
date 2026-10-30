@@ -1,9 +1,13 @@
 //! IYAKKI shell: login, role-aware launcher, and the CHAT / RAG / MCP / CLI / Users apps.
+#[cfg(test)]
+mod testmem;
 pub mod accounts;
 pub mod gfx;
 pub mod fx;
 #[cfg(test)]
 mod design_tests;
+#[cfg(test)]
+mod upgrade_tests;
 pub mod shaping;
 pub mod uisize;
 pub mod links;
@@ -19,6 +23,7 @@ pub mod ui;
 pub mod apps;
 pub mod scrolleng;
 pub mod scrolllist;
+pub mod listwindow;
 pub mod tooltip;
 pub mod filepicker;
 #[cfg(test)]
@@ -40,6 +45,7 @@ pub mod clockbar;
 pub mod cues;
 pub mod devinput;
 pub mod devpop;
+pub mod devask;
 pub mod about;
 pub mod brandmenu;
 pub mod agent_login;
@@ -52,6 +58,8 @@ pub mod lossbar;
 pub mod hostname;
 pub mod input;
 pub mod touchpad;
+pub mod touchmap;
+pub mod touchscreen;
 pub mod fnkeys;
 pub mod touchbar;
 pub mod touchbar_host;

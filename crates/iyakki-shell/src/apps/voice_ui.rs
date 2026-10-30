@@ -74,13 +74,18 @@ impl VoiceApp {
         let m = 16.0 * s;
         let (x, w) = (area.x + m, (area.w - 2.0 * m).max(40.0));
         let y = area.y + 10.0 * s;
-        let tabs: Vec<(String, Event)> = vec![("READ ALOUD".into(), Event::Tab(T_TAB_READ)), ("DICTATE".into(), Event::Tab(T_TAB_DICT))];
-        fx::tab_strip(g, x, y, s, w, &tabs, if self.area == Area::Read { 0 } else { 1 }, ACCENT);
+        let tabs: Vec<(String, Event)> = vec![("READ ALOUD".into(), Event::Tab(T_TAB_READ)), ("DICTATE".into(), Event::Tab(T_TAB_DICT)), ("RECORD".into(), Event::Tab(super::voice_rec::T_TAB_REC))];
+        fx::tab_strip(g, x, y, s, w, &tabs, match self.area {
+            Area::Read => 0,
+            Area::Dictate => 1,
+            Area::Record => 2,
+        }, ACCENT);
         let top = y + 14.0 * s * 2.1 + 12.0 * s;
         let body = R::new(x, top, w, (area.y + area.h - top - 8.0 * s).max(40.0));
         match self.area {
             Area::Read => self.draw_read(g, body, s, cx, tick),
             Area::Dictate => self.draw_dictate(g, body, s, cx, tick),
+            Area::Record => self.draw_record(g, body, s, tick),
         }
         self.draw_modal(g, area, s, tick);
     }
@@ -246,7 +251,7 @@ impl VoiceApp {
         } else {
             let label = match self.mic_i.checked_sub(1).and_then(|i| self.mics.get(i)) {
                 Some(m) => m.label.clone(),
-                None => "Default microphone".to_string(),
+                None => "Automatic".to_string(),
             };
             let mw = widgets::select_width(g, s, &label).clamp_safe(170.0 * s, (w * 0.7).max(170.0 * s));
             g.text(x, y + 6.0 * s, size, MUTED, "Microphone", Face::Sans);

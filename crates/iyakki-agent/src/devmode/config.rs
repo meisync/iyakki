@@ -93,6 +93,7 @@ pub const DEFS: &[Def] = &[
     Def { key: "keyboard.scroll_momentum", ty: Ty::Bool, desc: "trackpad scrolling keeps going after the fingers lift" },
     Def { key: "cloud.mode", ty: Ty::Enum(CLOUD), desc: "cloud mode: hide what needs local hardware (auto follows the machine)" },
     Def { key: "model.chat", ty: Ty::Text(120), desc: "chat model: PROVIDER/MODEL (empty: none)" },
+    Def { key: "model.vision", ty: Ty::Text(120), desc: "vision model: PROVIDER/MODEL (empty: the chat model if it can see pictures, else picked automatically)" },
     Def { key: "model.embedding", ty: Ty::Text(120), desc: "embedding model: PROVIDER/MODEL (empty: built-in)" },
     Def { key: "rag.top_k", ty: Ty::Int(1, 50), desc: "passages retrieved per question" },
     Def { key: "rag.use_external", ty: Ty::Bool, desc: "query external knowledge backends too" },
@@ -150,6 +151,7 @@ fn get_value(s: &Settings, key: &str) -> Option<Value> {
             crate::cloudmode::Setting::Off => "off",
         }),
         "model.chat" => json!(choice_text(&s.chat)),
+        "model.vision" => json!(choice_text(&s.vision)),
         "model.embedding" => json!(choice_text(&s.embedding)),
         "rag.top_k" => json!(s.rag.top_k),
         "rag.use_external" => json!(s.rag.use_external),
@@ -226,6 +228,7 @@ fn apply(s: &mut Settings, key: &str, v: &Value) -> Result<(), String> {
             }
         }
         "model.chat" => s.chat = choice_of(s, t)?,
+        "model.vision" => s.vision = choice_of(s, t)?,
         "model.embedding" => s.embedding = choice_of(s, t)?,
         "rag.top_k" => s.rag.top_k = n as usize,
         "rag.use_external" => s.rag.use_external = b.unwrap_or(false),
@@ -236,6 +239,11 @@ fn apply(s: &mut Settings, key: &str, v: &Value) -> Result<(), String> {
         other => return Err(format!("{other} is not in the list of settings a computer may change")),
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub fn set_for_test(s: &mut Settings, key: &str, value: &str) -> Result<(), String> {
+    apply(s, key, &json!(value))
 }
 
 pub fn def(key: &str) -> Option<&'static Def> {

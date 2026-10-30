@@ -327,7 +327,7 @@ fn config_with_token(d: &Dir, body: &str) -> PathBuf {
 fn copilots_plain_file_token_is_found_in_either_shape_and_scrubbed_keeping_everything_else() {
     let d = Dir::new("scrub");
     assert!(copilot_file_token(&d.0).is_none(), "no file");
-    let f = config_with_token(&d, &format!("{{\"firstLaunchAt\":\"2026-10-18\",\"theme\":\"dark\",\"authTokens\":{{\"https://github.com:octocat\":\"{FILE_TOKEN}\"}},\"loggedInUsers\":[{{\"host\":\"https://github.com\",\"login\":\"octocat\"}}],\"lastLoggedInUser\":{{\"host\":\"https://github.com\",\"login\":\"octocat\"}}}}"));
+    let _f = config_with_token(&d, &format!("{{\"firstLaunchAt\":\"2026-10-18\",\"theme\":\"dark\",\"authTokens\":{{\"https://github.com:octocat\":\"{FILE_TOKEN}\"}},\"loggedInUsers\":[{{\"host\":\"https://github.com\",\"login\":\"octocat\"}}],\"lastLoggedInUser\":{{\"host\":\"https://github.com\",\"login\":\"octocat\"}}}}"));
     let t = copilot_file_token(&d.0).unwrap();
     assert_eq!((t.login.as_str(), t.token.as_str()), ("octocat", FILE_TOKEN));
     // the account from the key when no user list says

@@ -70,8 +70,15 @@ pub struct SoundSettings {
     pub boosts: std::collections::BTreeMap<String, u32>,
     /// Which volume a card uses (card id → mode); absent = Automatic. Set from Settings -> Sound -> Advanced.
     pub volume_modes: std::collections::BTreeMap<String, VolumeMode>,
-    /// (experimental) mix sounds with the IYAKKI mixer (`sound.mixer`, see `docs/development/AUDIO-MIXER.md`). Off until tested.
+    /// Mix sounds with the IYAKKI mixer (`sound.mixer`, see `docs/development/AUDIO-MIXER.md`). On by default (owner decision 2026-10-28); the person can switch it off in Settings -> Sound.
     pub mixer: bool,
+    /// (experimental) the web engine's sound goes through the mixer too (`sound.web_mix`, [`crate::webmix`]). Needs `mixer`. Off until tested.
+    #[serde(default)]
+    pub web_mix: bool,
+    /// Moves the highlight of read-aloud words against the heard position of the sound, ms, -500 to 500 (positive: later). 0 is
+    /// the mixer's own model; the person tunes what the card adds that nothing can measure (see [`crate::audiosink::highlight_offset_ms`]).
+    #[serde(default)]
+    pub highlight_offset_ms: i32,
 }
 
 /// Which volume control moves the sound of a card that has a hardware one.
@@ -144,7 +151,7 @@ pub const MAX_LEVELS: usize = 32;
 
 impl Default for SoundSettings {
     fn default() -> Self {
-        SoundSettings { output: String::new(), volume_pct: 100, muted: false, levels: Default::default(), boosts: Default::default(), volume_modes: Default::default(), mixer: false }
+        SoundSettings { output: String::new(), volume_pct: 100, muted: false, levels: Default::default(), boosts: Default::default(), volume_modes: Default::default(), mixer: true, web_mix: false, highlight_offset_ms: 0 }
     }
 }
 
@@ -165,6 +172,9 @@ impl SoundSettings {
         }
         if self.boosts.len() > MAX_LEVELS || self.boosts.iter().any(|(k, v)| k.is_empty() || !output_key_ok(k) || *v > crate::softvol::MAX_BOOST_DB) {
             return Err(format!("the sound boost must be between 0 and {} dB", crate::softvol::MAX_BOOST_DB));
+        }
+        if !(-500..=500).contains(&self.highlight_offset_ms) {
+            return Err("the highlight timing offset must be between -500 and 500 ms".into());
         }
         if self.volume_modes.len() > MAX_LEVELS || self.volume_modes.keys().any(|k| k.is_empty() || !output_key_ok(k)) {
             return Err("the remembered volume controls are not valid".into());
@@ -1616,6 +1626,10 @@ pub fn global() -> &'static Selector {
 pub fn install(prefs: SoundSettings) {
     let g = global();
     g.gain.store(prefs.gain(), Ordering::SeqCst);
+    // the saved switches apply from boot, not only after they are changed in Settings -> Sound
+    crate::mixer::set_enabled(prefs.mixer);
+    crate::webmix::set_wanted(prefs.web_mix);
+    crate::audiosink::set_highlight_offset_ms(prefs.highlight_offset_ms);
     g.lock().prefs = prefs;
     g.active.store(true, Ordering::SeqCst);
     start_watch();
@@ -1650,6 +1664,8 @@ pub fn master_generation() -> u64 {
 pub fn apply_prefs(prefs: SoundSettings) {
     MASTER_GEN.fetch_add(1, Ordering::SeqCst);
     crate::mixer::set_enabled(prefs.mixer);
+    crate::webmix::set_wanted(prefs.web_mix);
+    crate::audiosink::set_highlight_offset_ms(prefs.highlight_offset_ms);
     let g = global();
     if g.is_active() {
         g.set_prefs(prefs);
@@ -2311,9 +2327,12 @@ mod tests {
         assert_eq!(sharing_for(Some(&Plan::Hw { card: 0, device: 0 }), true), Sharing::IyakkiMixer);
         assert_eq!(sharing_for(Some(&Plan::Soft { card: 0, device: 0 }), false), Sharing::OneAtATime);
         assert_eq!(sharing_for(None, true), Sharing::OneAtATime);
-        assert!(!SoundSettings::default().mixer, "off until the owner has tested it");
+        assert!(SoundSettings::default().mixer, "on by default (owner decision 2026-10-28)");
+        assert!(!SoundSettings::default().web_mix, "the browser's own route through the mixer stays off until it is tested with the web sound plugin");
         let old: SoundSettings = serde_json::from_str(r#"{"volume_pct":40}"#).unwrap();
-        assert!(!old.mixer);
+        assert!(old.mixer, "settings saved before the mixer existed get the default");
+        let off: SoundSettings = serde_json::from_str(r#"{"volume_pct":40,"mixer":false}"#).unwrap();
+        assert!(!off.mixer, "a person who switched it off keeps it off");
     }
 
     #[test]
@@ -2321,7 +2340,7 @@ mod tests {
         let t = tree("sharing-t2");
         let fake = crate::softvol::fake::Fake::default();
         let sel = t2_with_softvol(&t, Arc::new(Mutex::new(false)), Arc::new(Mutex::new(false)), fake);
-        sel.set_prefs(SoundSettings::default());
+        sel.set_prefs(SoundSettings { mixer: false, ..Default::default() });
         assert_eq!(sel.refresh().sharing, Sharing::OneAtATime);
         sel.set_prefs(SoundSettings { mixer: true, ..Default::default() });
         let st = sel.refresh();

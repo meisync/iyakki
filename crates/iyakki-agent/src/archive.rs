@@ -61,6 +61,14 @@ fn inflate_stream(input: &mut dyn Read, out: &mut dyn Write, limit: u64) -> Resu
 
 /// `src` (a .gz file) → `dst` (the decompressed bytes).
 pub fn gunzip_file(src: &Path, dst: &Path, limit: u64) -> Result<u64, String> {
+    let mut out = BufWriter::new(File::create(dst).map_err(|e| e.to_string())?);
+    let n = gunzip_to_writer(src, &mut out, limit)?;
+    out.flush().map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
+/// `src` (a .gz file) → `out`, as it is decompressed (nothing is kept on disk).
+pub fn gunzip_to_writer(src: &Path, out: &mut dyn Write, limit: u64) -> Result<u64, String> {
     let mut f = BufReader::new(File::open(src).map_err(|e| e.to_string())?);
     let mut h = [0u8; 10];
     f.read_exact(&mut h).map_err(|_| err("not a gzip file"))?;
@@ -89,10 +97,7 @@ pub fn gunzip_file(src: &Path, dst: &Path, limit: u64) -> Result<u64, String> {
         let mut c = [0u8; 2];
         f.read_exact(&mut c).map_err(|e| e.to_string())?;
     }
-    let mut out = BufWriter::new(File::create(dst).map_err(|e| e.to_string())?);
-    let n = inflate_stream(&mut f, &mut out, limit)?;
-    out.flush().map_err(|e| e.to_string())?;
-    Ok(n)
+    inflate_stream(&mut f, out, limit)
 }
 
 /// Every member of a gzip stream held in memory, decompressed (an Alpine `.apk` is three members: signature, control, files).

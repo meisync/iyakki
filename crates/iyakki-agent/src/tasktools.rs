@@ -8,12 +8,12 @@ use serde_json::{json, Value};
 
 use crate::agent::{Risk, ToolDef, Tools};
 use crate::chat::ToolSpec;
-use crate::tasks::{Manager, NewTask, MAX_PER_CALL};
+use crate::tasks::{split_plan, Manager, NewTask, PlanStep, Split, MAX_PER_CALL};
 
 /// One line for the lead assistant's system prompt.
-pub const PROMPT_RULE: &str = "\nPARALLEL TASKS: for independent pieces of work (\"do these three things in parallel\") call task_spawn: each task runs in its own isolated copy of the workspace and the person reviews and merges the result in the Tasks tab. Tasks cannot see this chat, so write each goal completely. task_status shows how they are doing. You cannot merge or discard them.";
+pub const PROMPT_RULE: &str = "\nPARALLEL TASKS: for independent pieces of work (\"do these three things in parallel\") call task_spawn: each task runs in its own isolated copy of the workspace and the person reviews and merges the result in the Tasks tab. Tasks cannot see this chat, so write each goal completely. task_status shows how they are doing and, when all have finished, what each did, the conflicts and what to merge. For a plan with several steps call task_plan with each step's title, goal, the files it changes and which steps it depends on: independent steps with separate files run in parallel, the rest follow after a merge. You cannot merge or discard them.";
 
-pub const TASK_TOOLS: [&str; 2] = ["task_spawn", "task_status"];
+pub const TASK_TOOLS: [&str; 3] = ["task_spawn", "task_status", "task_plan"];
 
 pub struct TaskTools {
     inner: Arc<dyn Tools>,
@@ -71,13 +71,41 @@ impl TaskTools {
         Ok(out)
     }
 
+    /// The steps of a `task_plan` call.
+    pub fn plan_steps(&self, args: &Value) -> Result<Vec<PlanStep>, String> {
+        let list = args.get("steps").and_then(Value::as_array).ok_or("give `steps`: a list of steps")?;
+        let mut out = Vec::new();
+        for v in list {
+            let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
+            let files = v.get("files").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(|r| r.trim().chars().take(200).collect::<String>()).filter(|r| !r.is_empty() && !r.starts_with('/') && !r.contains("..")).collect()).unwrap_or_default();
+            // step numbers in the call start at 1
+            let depends_on = v.get("depends_on").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).map(|n| (n as usize).wrapping_sub(1)).collect()).unwrap_or_default();
+            out.push(PlanStep { title: s("title").chars().take(100).collect(), goal: s("goal").chars().take(4000).collect(), files, depends_on });
+        }
+        Ok(out)
+    }
+
+    fn plan_text(steps: &[PlanStep], split: &Split) -> String {
+        let name = |i: usize| if steps[i].title.is_empty() { format!("step {}", i + 1) } else { steps[i].title.clone() };
+        let mut out = split.waves.iter().enumerate().map(|(w, v)| format!("{}: {}", if w == 0 { "Now, in parallel".to_string() } else { format!("After the merge of wave {w}") }, v.iter().map(|i| name(*i)).collect::<Vec<_>>().join("; "))).collect::<Vec<_>>().join("\n");
+        for n in &split.notes {
+            out.push_str(&format!("\n  note: {n}"));
+        }
+        out
+    }
+
     fn status_text(&self) -> String {
         let now = crate::clock::now_unix();
         let l = self.mgr.list();
         if l.is_empty() {
             return "No tasks yet.".into();
         }
-        l.iter().filter(|t| !t.status.finished() || now - t.ended < 3600).map(|t| format!("{} · {} · {} · {} · {}", t.id, t.title, t.status.label(), t.progress_text(), crate::agent::truncate(&t.last, 80))).collect::<Vec<_>>().join("\n")
+        let mut out = l.iter().filter(|t| !t.status.finished() || now - t.ended < 3600).map(|t| format!("{} · {} · {} · {} · {}", t.id, t.title, t.status.label(), t.progress_text(), crate::agent::truncate(&t.last, 80))).collect::<Vec<_>>().join("\n");
+        if let Some(sum) = self.mgr.lead_summary() {
+            out.push_str("\n\n");
+            out.push_str(&sum);
+        }
+        out
     }
 }
 
@@ -107,6 +135,21 @@ impl Tools for TaskTools {
             risk: Risk::Ask,
             untrusted: false,
         });
+        let step = json!({"type":"object","properties":{
+            "title":{"type":"string"},
+            "goal":{"type":"string","description":"Everything the step needs to know: it cannot see this chat."},
+            "files":{"type":"array","items":{"type":"string"},"description":"Files or folders (relative) the step changes. Required: steps whose files meet never run at the same time."},
+            "depends_on":{"type":"array","items":{"type":"integer"},"description":"Numbers (from 1) of the steps whose result this one needs; it starts after they are merged."}},
+            "required":["title","goal","files"]});
+        v.push(ToolDef {
+            spec: ToolSpec {
+                name: "task_plan".into(),
+                description: "Split a plan into tasks and start the independent ones in parallel, each in its own worktree. Steps that depend on others, or that change the same files, start after the earlier ones are merged by the person. The person approves the split once.".into(),
+                schema: json!({"type":"object","properties":{"steps":{"type":"array","items":step,"description":"The steps of the plan, at most 12."}},"required":["steps"]}),
+            },
+            risk: Risk::Ask,
+            untrusted: false,
+        });
         v.push(ToolDef { spec: ToolSpec { name: "task_status".into(), description: "List the parallel tasks with their status, progress and last event.".into(), schema: json!({"type":"object","properties":{}}) }, risk: Risk::Safe, untrusted: false });
         v
     }
@@ -128,6 +171,11 @@ impl Tools for TaskTools {
                 }
                 Ok(format!("{}\nThe tasks run in the background; the person reviews and merges them in the Tasks tab. Read progress with task_status.", made.join("\n")))
             }
+            "task_plan" => {
+                let steps = self.plan_steps(args)?;
+                let (split, ids) = self.mgr.fan_out(steps.clone(), &self.default_agent, &self.default_model)?;
+                Ok(format!("Started {} task(s): {}\n{}\nLater waves start by themselves after the person merges the wave before. Read progress with task_status.", ids.len(), ids.join(", "), Self::plan_text(&steps, &split)))
+            }
             "task_status" => Ok(self.status_text()),
             _ => self.inner.call(name, args),
         }
@@ -138,6 +186,12 @@ impl Tools for TaskTools {
             return match self.requested(args) {
                 Ok(l) => format!("Start {} parallel task(s): {}", l.len(), l.iter().map(|t| crate::agent::truncate(if t.title.is_empty() { &t.goal } else { &t.title }, 50)).collect::<Vec<_>>().join("; ")),
                 Err(e) => format!("task_spawn (invalid: {e})"),
+            };
+        }
+        if name == "task_plan" {
+            return match self.plan_steps(args) {
+                Ok(l) => format!("Fan out a plan of {} step(s) into parallel tasks", l.len()),
+                Err(e) => format!("task_plan (invalid: {e})"),
             };
         }
         if name == "task_status" {
@@ -151,6 +205,11 @@ impl Tools for TaskTools {
             let l = self.requested(args).ok()?;
             return Some(l.iter().map(|t| format!("• {} [{}]{}\n  {}", t.title, t.agent, if t.rows.is_empty() { String::new() } else { format!(" rows {}", t.rows.join(", ")) }, crate::agent::truncate(&t.goal, 300))).collect::<Vec<_>>().join("\n"));
         }
+        if name == "task_plan" {
+            let steps = self.plan_steps(args).ok()?;
+            let split = split_plan(&steps).ok()?;
+            return Some(Self::plan_text(&steps, &split));
+        }
         if is_task_tool(name) { None } else { self.inner.preview(name, args) }
     }
 
@@ -159,6 +218,14 @@ impl Tools for TaskTools {
             return match self.requested(args) {
                 Ok(_) if self.mgr.open_count() >= crate::tasks::MAX_OPEN => Some(format!("there are already {} unfinished tasks: ask the person to merge or discard some first", crate::tasks::MAX_OPEN)),
                 Ok(_) => None,
+                Err(e) => Some(e),
+            };
+        }
+        if name == "task_plan" {
+            return match self.plan_steps(args).and_then(|s| split_plan(&s).map(|_| ())) {
+                Ok(()) if self.mgr.plan().is_some() => Some("a plan is already running: its tasks must be merged or discarded first".into()),
+                Ok(()) if self.mgr.open_count() >= crate::tasks::MAX_OPEN => Some(format!("there are already {} unfinished tasks: ask the person to merge or discard some first", crate::tasks::MAX_OPEN)),
+                Ok(()) => None,
                 Err(e) => Some(e),
             };
         }

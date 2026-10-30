@@ -404,7 +404,7 @@ fn publish_rollback_apply_and_heal_policy_are_hard_ask_and_the_rest_ask_or_read(
     for n in ["flow_create", "flow_edit", "flow_run", "flow_cancel", "flow_publish", "flow_rollback", "flow_apply_to_runs", "flow_set_heal_policy"] {
         assert_eq!(risk(n), Risk::Ask, "{n}");
     }
-    assert_eq!(d.len(), 14);
+    assert_eq!(d.len(), 16);
     assert!(d.iter().all(|x| is_flow_tool(&x.spec.name)));
     // no tools for an account without the app, and the wrapped chat never offers them without it
     let mut p = Role::User.template();
@@ -487,7 +487,7 @@ fn runs_are_listed_explained_and_logged_without_secrets() {
     // the context for the tile's chat: compact, with the open flow, never a secret
     let open = Open { flow: Some("check-the-shop".into()), node: Some("ping".into()), run: Some(run_id.clone()), tab: "design".into() };
     let ctx = context_text(&env, &open);
-    assert!(ctx.len() <= 3500 && ctx.contains("OPEN ON SCREEN: selected node ping") && ctx.contains("SELECTED RUN") && ctx.contains("check-the-shop"), "{ctx}");
+    assert!(ctx.len() <= 5200 && ctx.contains("selected node ping") && ctx.contains("SELECTED RUN") && ctx.contains("check-the-shop"), "{ctx}");
     assert!(!ctx.contains("sk-ABCDEFGHIJKLMNOPQRSTUVWX"));
 }
 
@@ -581,7 +581,7 @@ fn the_tools_are_wrapped_for_the_tile_chat_and_the_hard_ask_ones_are_never_appro
     }
     let open: SharedOpen = Arc::new(Mutex::new(Open::default()));
     let t = FlowTools::new(Arc::new(Inner), env.clone(), open.clone());
-    assert_eq!(t.defs().len(), 14);
+    assert_eq!(t.defs().len(), 17, "16 flow tools and ask_form");
     assert_eq!(t.call("something_else", &json!({})).unwrap(), "inner something_else");
     // with a flow open, `flow` may be left out
     call(&env, "flow_create", json!({"name": "Open one", "nodes": [{"id": "n", "kind": "notify", "config": {"title": "hi"}}]})).unwrap();
@@ -672,4 +672,159 @@ fn the_scheduler_starts_at_sign_in_only_for_accounts_with_flows_and_stops_at_sig
     denied.apps.remove(&iyakki_sec::policy::App::Flows);
     assert!(!FlowEnv::start_for_login(&svc, user, &denied));
     let _ = d;
+}
+
+#[test]
+fn the_flows_chat_leads_with_flow_tools_hides_app_creation_and_asks_for_missing_input_with_a_form() {
+    let (env, _d) = env_with("formwrap", policy(&["*"]));
+    struct Inner;
+    impl Tools for Inner {
+        fn defs(&self) -> Vec<crate::agent::ToolDef> {
+            ["list_dir", "app_scaffold", "tile_scaffold", "tile_pack", "tile_ship", "ask_user"]
+                .iter()
+                .map(|n| crate::agent::ToolDef { spec: crate::chat::ToolSpec { name: (*n).into(), description: String::new(), schema: json!({"type": "object"}) }, risk: crate::agent::Risk::Safe, untrusted: false })
+                .collect()
+        }
+        fn call(&self, n: &str, _a: &Value) -> Result<String, String> {
+            Ok(format!("inner {n}"))
+        }
+        fn describe(&self, n: &str, _a: &Value) -> String {
+            n.to_string()
+        }
+    }
+    let open: SharedOpen = Arc::new(Mutex::new(Open::default()));
+    let t = FlowTools::new(Arc::new(Inner), env.clone(), open);
+    let names: Vec<String> = t.defs().into_iter().map(|d| d.spec.name).collect();
+    assert_eq!(names[0], "flow_list");
+    assert!(names[..16].iter().all(|n| n.starts_with("flow_")));
+    assert!(names.contains(&"ask_form".to_string()) && names.contains(&"list_dir".to_string()) && names.contains(&"ask_user".to_string()));
+    for n in ["app_scaffold", "tile_scaffold", "tile_pack", "tile_ship"] {
+        assert!(!names.contains(&n.to_string()), "{n} is not offered in FLOWS");
+        assert!(t.call(n, &json!({})).unwrap_err().contains("Make a flow"));
+    }
+    assert!(PROMPT_RULES.contains("a FLOW (flow_create)") && PROMPT_RULES.contains("never an IYAKKI tile app") && PROMPT_RULES.contains("ask_form"));
+    // ask_form validates, and a bad spec is an error the model can fix
+    assert!(t.call("ask_form", &json!({"title": "x", "fields": [{"name": "a"}]})).unwrap().contains("Stop now"));
+    assert!(t.call("ask_form", &json!({"fields": []})).is_err());
+    assert_eq!(crate::agent::Risk::Safe, t.defs().into_iter().find(|d| d.spec.name == "ask_form").unwrap().risk);
+    // flow_run names the missing inputs and hands over ready fields for the form
+    call(&env, "flow_create", json!({"name": "Needs input", "inputs": [{"name": "target", "type": "string", "required": true}, {"name": "key", "type": "secret", "required": true}], "nodes": [{"id": "n", "kind": "notify", "config": {"title": "hi"}}]})).unwrap();
+    let e = t.call("flow_run", &json!({"flow": "needs-input", "draft": true, "inputs": {"target": "x"}})).unwrap_err();
+    assert!(e.contains("ask_form") && e.contains("\"key\"") && !e.contains("\"target\""), "{e}");
+}
+
+#[test]
+fn deleting_a_flow_and_dropping_a_version_are_hard_ask_named_audited_and_refused_when_unsafe() {
+    let (env, _d) = env_with("deldrop", policy(&["*"]));
+    call(&env, "flow_create", spec()).unwrap();
+    call(&env, "flow_publish", json!({"flow": "check-the-shop", "changelog": "one"})).unwrap();
+    call(&env, "flow_edit", json!({"flow": "check-the-shop", "ops": [{"op": "update_node", "id": "ping", "timeout_ms": 9}]})).unwrap();
+    call(&env, "flow_publish", json!({"flow": "check-the-shop", "changelog": "two"})).unwrap();
+    // the card names the flow and what is lost
+    let p = env.preview("flow_drop_version", &json!({"flow": "check-the-shop", "version": 1}), None).unwrap();
+    assert!(p.contains("Check the shop") && p.contains("version 1 is lost"), "{p}");
+    assert!(describe("flow_delete", &json!({"flow": "check-the-shop"})).contains("DELETE"));
+    assert!(crate::agent::hard_ask("flow_delete", &json!({})).is_some() && crate::agent::hard_ask("flow_drop_version", &json!({})).is_some());
+    // the current version is never dropped, and that is said
+    let e = call(&env, "flow_drop_version", json!({"flow": "check-the-shop", "version": 2})).unwrap_err();
+    assert!(e.contains("current published version"), "{e}");
+    assert!(call(&env, "flow_drop_version", json!({"flow": "check-the-shop", "version": 9})).is_err());
+    // an older one goes
+    call(&env, "flow_drop_version", json!({"flow": "check-the-shop", "version": 1})).unwrap();
+    assert!(env.store.get_version("check-the-shop", 1).is_none() && env.store.get_version("check-the-shop", 2).is_some());
+    assert_eq!(env.store.versions("check-the-shop").len(), 1);
+    let e = call(&env, "flow_drop_version", json!({"flow": "check-the-shop", "version": 2})).unwrap_err();
+    assert!(e.contains("only version"), "{e}");
+    // a flow with an unfinished run is not deleted
+    let o = call(&env, "flow_run", json!({"flow": "check-the-shop"})).unwrap();
+    assert!(o.contains("run"), "{o}");
+    let e = call(&env, "flow_delete", json!({"flow": "check-the-shop"})).unwrap_err();
+    assert!(e.contains("not finished"), "{e}");
+    assert!(env.store.exists("check-the-shop"));
+    let rid = env.engine.summaries()[0].id.clone();
+    env.engine.cancel(&rid).unwrap();
+    let e = call(&env, "flow_delete", json!({"flow": "check-the-shop"}));
+    assert!(e.is_ok() || e.unwrap_err().contains("not finished"));
+}
+
+#[test]
+fn with_a_flow_open_an_update_edits_that_flow_and_shows_what_changed_and_with_none_open_it_must_create() {
+    let (env, _d) = env_with("openedit", policy(&["*"]));
+    call(&env, "flow_create", json!({"name": "Alpha", "nodes": [{"id": "n", "kind": "notify", "config": {"title": "a"}}]})).unwrap();
+    call(&env, "flow_create", json!({"name": "Beta", "nodes": [{"id": "n", "kind": "notify", "config": {"title": "b"}}]})).unwrap();
+    struct Inner;
+    impl Tools for Inner {
+        fn defs(&self) -> Vec<crate::agent::ToolDef> { vec![] }
+        fn call(&self, n: &str, _a: &Value) -> Result<String, String> { Ok(n.into()) }
+        fn describe(&self, n: &str, _a: &Value) -> String { n.into() }
+    }
+    let open: SharedOpen = Arc::new(Mutex::new(Open::default()));
+    let t = FlowTools::new(Arc::new(Inner), env.clone(), open.clone());
+    let ops = json!({"ops": [{"op": "add_node", "id": "extra", "kind": "notify", "config": {"title": "new"}, "after": "n"}]});
+    // none open: the edit needs a flow id (the model creates instead)
+    assert!(t.call("flow_edit", &ops).unwrap_err().contains("give `flow`"));
+    open.lock().unwrap().flow = Some("beta".into());
+    let out = t.call("flow_edit", &ops).unwrap();
+    assert!(out.contains("What changed") && out.contains("extra"), "{out}");
+    assert!(env.store.get_draft("beta").unwrap().node("extra").is_some());
+    assert!(env.store.get_draft("alpha").unwrap().node("extra").is_none(), "the other flow is untouched");
+    assert!(PROMPT_RULES.contains("apply to THAT flow"));
+}
+
+// ------------------------------------------------------------------------------------------------ the open flow and its failure
+
+fn failed_flow(env: &FlowEnv, name: &str, token: &str) -> (String, String) {
+    let spec = json!({"name": name, "inputs": [{"name": "api", "type": "text", "required": true}], "nodes": [{"id": "call", "kind": "http", "name": "Call the site", "config": {"url": "http://127.0.0.1:1/x"}, "retry": {"attempts": 2}}], "edges": [{"from": "start", "to": "call"}], "triggers": [{"kind": "interval", "every_s": 3600}]});
+    let flow = env.create_draft(build_flow(&spec).unwrap(), "user:root").unwrap();
+    env.store.publish(&flow.id, &iyakki_flow::store::PublishReq { by: "user:root", label: "", changelog: "v1", approved_by: Some("user:root") }).unwrap();
+    let mut req = iyakki_flow::StartRequest::new(&flow.id).trigger("manual", "me");
+    req.inputs = json!({"api": token});
+    let run = env.engine.start_run(req).unwrap().run_id;
+    env.engine.wait_for(&run, Duration::from_secs(20), |r| r.status.is_terminal()).unwrap();
+    (flow.id, run)
+}
+
+#[test]
+fn the_context_names_the_open_flow_its_state_inputs_runs_and_the_newest_failure_without_values() {
+    let (env, _d) = env_with("ctx-fail", policy(&["*"]));
+    let token = format!("{}{}", "ghp_", "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2");
+    let (flow, run) = failed_flow(&env, "Nightly check", &token);
+    let open = Open { flow: Some(flow.clone()), tab: "design".into(), ..Default::default() };
+    let c = context_text(&env, &open);
+    assert!(c.contains(&format!("OPEN ON SCREEN: flow `{flow}` \"Nightly check\", published as version 1")), "{c}");
+    assert!(c.contains("node call [http]") && c.contains("inputs (names only): api (required)") && c.contains("trigger"), "{c}");
+    assert!(c.contains("RUNS OF THIS FLOW") && c.contains(&format!("NEWEST FAILED RUN {run}")), "{c}");
+    assert!(c.contains("failed step `call` (Call the site) [http], attempt 2 of 2"), "{c}");
+    assert!(c.contains("run inputs (names only): api"), "{c}");
+    assert!(!c.contains(&token), "the input value never reaches the model");
+    assert!(c.chars().count() <= 5200, "bounded: {}", c.chars().count());
+    assert!(last_run_failed(&env, &flow) && newest_failed_run(&env, &flow).as_deref() == Some(run.as_str()));
+    // without a flow open, no failure is described
+    let none = context_text(&env, &Open { tab: "board".into(), ..Default::default() });
+    assert!(!none.contains("NEWEST FAILED RUN") && none.contains("ALL FLOWS"));
+}
+
+#[test]
+fn the_last_open_flow_is_kept_per_person_bounded_and_cleared_on_delete_and_sign_out() {
+    let (env, _d) = env_with("last-flow", policy(&["*"]));
+    assert!(!last_flow_recorded(&env.svc, &env.user) && last_flow(&env).is_none());
+    call(&env, "flow_create", json!({"name": "Keep me", "nodes": [{"id": "n", "kind": "notify", "config": {"title": "hi"}}]})).unwrap();
+    // bad ids are refused, long names are cut to one line
+    set_last_flow(&env.svc, &env.user, "../x", "bad");
+    assert!(!last_flow_recorded(&env.svc, &env.user));
+    set_last_flow(&env.svc, &env.user, "keep-me", &format!("Keep\nme{}", "x".repeat(300)));
+    let (id, name) = last_flow(&env).unwrap();
+    assert_eq!(id, "keep-me");
+    assert!(name.chars().count() <= 80 && !name.contains('\n'));
+    // another person has none
+    assert!(!last_flow_recorded(&env.svc, "someone-else"));
+    // deleting the flow clears it
+    env.delete_flow("keep-me").unwrap();
+    assert!(last_flow(&env).is_none() && !last_flow_recorded(&env.svc, &env.user));
+    // sign-out clears it
+    call(&env, "flow_create", json!({"name": "Again", "nodes": [{"id": "n", "kind": "notify", "config": {"title": "hi"}}]})).unwrap();
+    set_last_flow(&env.svc, &env.user, "again", "Again");
+    assert!(last_flow(&env).is_some());
+    FlowEnv::stop_for_logout(&env.svc, &env.user);
+    assert!(!last_flow_recorded(&env.svc, &env.user));
 }

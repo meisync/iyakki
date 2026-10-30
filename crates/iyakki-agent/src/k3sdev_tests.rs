@@ -311,7 +311,7 @@ fn a_cluster_that_keeps_dying_is_restarted_with_a_back_off_then_given_up_and_the
     assert_eq!(alerts.iter().filter(|a| matches!(a, Alert::Down(_))).count(), 1, "one announcement per outage, not one per restart: {alerts:?}");
     assert!(w.d.take_alerts().is_empty(), "taken once");
     let (title, body) = alerts[0].title_body();
-    assert!(title.contains("went down") && body.contains("Settings"));
+    assert!(title.contains("stopped and was restarted") && body.contains("Settings"));
     assert!(alerts[1].title_body().0.contains("keeps failing"));
     let a = w.actions();
     assert!(a.iter().filter(|x| *x == "devcluster.restart").count() >= 2 && a.contains(&"devcluster.exited".to_string()), "{a:?}");
@@ -804,7 +804,8 @@ fn k3s_ending_after_the_machine_moved_to_another_network_is_expected_and_restart
     // the stick is on another network: the address changed, and k3s exits itself
     w.d.assume_ip(Some("192.168.50.61"));
     unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
-    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.exited-ip-changed")), "{:?}", w.actions());
+    // the supervisor either sees the exit (exited-ip-changed) or the new address first and restarts k3s itself (restart-address-changed)
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.exited-ip-changed" || a == "devcluster.restart-address-changed")), "{:?}", w.actions());
     assert!(wait_for(10, || try_pid(&w).is_some_and(|p| p != pid) && w.d.state() == Svc::Running));
     assert_eq!(w.d.installed().unwrap().restarts, 0, "a move is not a restart that counts");
     assert!(!w.actions().iter().any(|a| a == "devcluster.exited"));
@@ -813,7 +814,8 @@ fn k3s_ending_after_the_machine_moved_to_another_network_is_expected_and_restart
     let pid = child_pid(&w);
     unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
     assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.exited")), "{:?}", w.actions());
-    w.d.stop("root").unwrap();
+    // clean-up only: once the exit is noticed the supervisor may already have given the cluster up ("not running")
+    let _ = w.d.stop("root");
 }
 
 #[test]
@@ -1172,4 +1174,475 @@ fn an_extra_instance_asks_for_its_own_node_name_to_reset_and_uninstall() {
     assert_eq!(x.d.state(), Svc::NotInstalled);
     assert!(!x.d.layout().root.exists());
     assert!(w.d.layout().root.parent() == x.d.layout().root.parent() && w.d.layout().root != x.d.layout().root);
+}
+
+// ------------------------------------------------------------------------------------------------ stable node address, exits, hangs
+
+/// A stand-in k3s that writes its arguments to its log and stays.
+const LOGARGS_K3S: &str = "#!/bin/sh\ncase \"$1\" in\nserver)\n  kc=\n  for a in \"$@\"; do :; done\n  echo \"ARGS: $*\"\n  while [ $# -gt 0 ]; do if [ \"$1\" = \"--write-kubeconfig\" ]; then kc=\"$2\"; fi; shift; done\n  printf 'apiVersion: v1\\n' > \"$kc\"\n  exec sleep 600;;\nesac\n";
+/// …one that, the first time it runs, ends the way kube-proxy ends k3s when the node address changes.
+const NODEIP_ONCE_K3S: &str = "#!/bin/sh\ncase \"$1\" in\nserver)\n  kc=\n  if [ ! -f \"$0.once\" ]; then touch \"$0.once\"; echo 'node.go:209 \"NodeIPs changed for the node\" node=\"iyakki-dev\"'; exit 1; fi\n  while [ $# -gt 0 ]; do if [ \"$1\" = \"--write-kubeconfig\" ]; then kc=\"$2\"; fi; shift; done\n  printf 'apiVersion: v1\\n' > \"$kc\"\n  exec sleep 600;;\nesac\n";
+
+fn log_text(w: &World) -> String {
+    std::fs::read_to_string(w.d.layout.log()).unwrap_or_default()
+}
+
+fn stable_world(tag: &str, k3s: &str, ip_ok: bool) -> World {
+    let (w, _route) = world_net(tag, k3s, true);
+    w.nodes_ready();
+    w.d.assume_stable_node_ip();
+    if ip_ok {
+        w.run.answer("ip addr replace", "").answer("ip link set", "").answer("ip link add", "").answer("ip link del", "");
+    }
+    w
+}
+
+#[test]
+fn the_arguments_carry_a_fixed_node_address_only_when_asked_and_keep_every_other_flag() {
+    let l = Layout::new(Path::new("/d"));
+    let plain = server_args_for(&l, &Instance::primary());
+    assert!(!plain.iter().any(|a| a.starts_with("--node-ip")), "the old command line is unchanged");
+    let fixed = server_args_with(&l, &Instance::primary(), Some(&NodeNet { ip: NODE_IP.into(), iface: NODE_NET_IF.into(), host_gw: false }));
+    assert!(fixed.contains(&format!("--node-ip={NODE_IP}")) && fixed.contains(&format!("--flannel-iface={NODE_NET_IF}")), "{fixed:?}");
+    for a in &plain {
+        assert!(fixed.contains(a), "{a} is still there");
+    }
+    assert!(!fixed.iter().any(|a| a.starts_with("--flannel-backend")), "vxlan stays on a real interface");
+    let lo = server_args_with(&l, &Instance::primary(), Some(&NodeNet { ip: NODE_IP.into(), iface: "lo".into(), host_gw: true }));
+    assert!(lo.contains(&"--flannel-iface=lo".to_string()) && lo.contains(&"--flannel-backend=host-gw".to_string()), "{lo:?}");
+    assert!(!fixed.iter().any(|a| a.starts_with("--advertise-address") || a.starts_with("--node-external-ip")), "only what is needed: {fixed:?}");
+    assert!(!fixed.iter().any(|a| a.contains("127.0.0.1")), "the node address is not the loopback (flannel needs a real interface)");
+    assert!(NODE_IP.starts_with("10.255."), "a private address outside the pod and service ranges, never link-local (the API server refuses it)");
+}
+
+#[test]
+fn k3s_starts_with_the_fixed_node_address_on_an_interface_iyakki_makes_and_the_first_start_after_an_upgrade_is_audited() {
+    let w = stable_world("k3sdev-nodeip", LOGARGS_K3S, true);
+    w.run.programs_add("ip");
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    let log = log_text(&w);
+    assert!(log.contains(&format!("--node-ip={NODE_IP}")) && log.contains(&format!("--flannel-iface={NODE_NET_IF}")), "{log}");
+    let lines = w.run.lines();
+    assert!(lines.iter().any(|l| l.starts_with(&format!("ip link add {NODE_NET_IF} type dummy"))), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains(&format!("ip addr replace {NODE_IP}/32 dev {NODE_NET_IF}"))), "{lines:?}");
+    assert!(w.actions().contains(&"devcluster.node-ip".to_string()) && w.actions().contains(&"devcluster.node-ip-migrate".to_string()), "{:?}", w.actions());
+    assert_eq!(w.d.installed().unwrap().node_ip, NODE_IP);
+    // the next start finds the interface and the recorded address: nothing to make, nothing to migrate
+    w.d.stop("root").unwrap();
+    w.audit.lock().unwrap().clear();
+    w.run.forget();
+    let before = w.run.lines().len();
+    w.nodes_ready();
+    w.run.answer("ip -o addr show", &format!("inet {NODE_IP}/32 scope global {NODE_NET_IF}"));
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running));
+    assert!(!w.actions().contains(&"devcluster.node-ip-migrate".to_string()) && !w.run.lines()[before..].iter().any(|l| l.contains("link add")), "{:?}", w.actions());
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn when_the_interface_cannot_be_made_k3s_still_starts_the_old_way_and_it_is_audited() {
+    let w = stable_world("k3sdev-nodeip-fallback", LOGARGS_K3S, false);
+    w.run.programs_add("ip");
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    assert!(!log_text(&w).contains("--node-ip"), "{}", log_text(&w));
+    assert!(w.actions().contains(&"devcluster.node-ip-fallback".to_string()), "{:?}", w.actions());
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn k3s_ending_because_the_node_address_changed_is_started_again_without_a_failure_or_an_alert() {
+    let w = stable_world("k3sdev-nodeip-exit", NODEIP_ONCE_K3S, true);
+    w.run.programs_add("ip");
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.exited-ip-changed")), "{:?}", w.actions());
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    assert_eq!(w.d.installed().unwrap().restarts, 0);
+    assert!(!w.actions().iter().any(|a| a == "devcluster.exited") && w.d.take_alerts().is_empty());
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn an_address_change_while_running_is_logged_and_restarts_k3s_only_when_it_follows_that_address() {
+    // fixed node address: logged and audited, k3s keeps running
+    let w = stable_world("k3sdev-addr-fixed", GOOD_K3S, true);
+    w.run.programs_add("ip");
+    w.d.assume_ip(Some("192.168.50.67"));
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running));
+    let pid = child_pid(&w);
+    w.d.assume_ip(Some("192.168.50.66"));
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.address-changed")), "{:?}", w.actions());
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(child_pid(&w), pid, "the same k3s");
+    assert!(log_text(&w).contains("the node address stays"));
+    w.d.stop("root").unwrap();
+    // k3s follows the default route (no fixed address): a deliberate restart
+    let (w, _r) = world_net("k3sdev-addr-follow", GOOD_K3S, true);
+    w.nodes_ready();
+    w.d.assume_ip(Some("192.168.50.67"));
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running));
+    let pid = child_pid(&w);
+    w.d.assume_ip(Some("192.168.50.66"));
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.restart-address-changed")), "{:?}", w.actions());
+    assert!(wait_for(10, || try_pid(&w).is_some_and(|p| p != pid) && w.d.state() == Svc::Running));
+    assert_eq!(w.d.installed().unwrap().restarts, 0, "deliberate, not a failure");
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn a_k3s_that_runs_but_whose_api_stopped_answering_is_killed_restarted_audited_and_announced() {
+    let (w, _r) = world_net("k3sdev-hung", GOOD_K3S, true);
+    w.nodes_ready();
+    w.d.assume_unresponsive_after(Duration::from_millis(300));
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running));
+    let pid = child_pid(&w);
+    // the API is gone (what the Mac showed: refused connections) while the process is still there
+    w.run.forget();
+    w.run.fail("kubectl", 1, "connection refused");
+    assert!(wait_for(15, || w.actions().iter().any(|a| a == "devcluster.restart.auto")), "{:?}", w.actions());
+    assert!(wait_for(10, || try_pid(&w).is_some_and(|p| p != pid)));
+    let a = w.audit.lock().unwrap().clone();
+    let exited = a.iter().find(|x| x.1 == "devcluster.exited").expect("devcluster.exited");
+    assert!(exited.2.contains("API did not answer") && exited.2.contains("signal 9"), "{}", exited.2);
+    let alerts = w.d.take_alerts();
+    assert!(alerts.iter().any(|x| matches!(x, Alert::Down(r) if r.contains("API did not answer"))), "{alerts:?}");
+    let h = w.d.health();
+    assert!(h.last_exit_at > 0 && h.last_exit_reason.contains("API did not answer"), "{h:?}");
+    assert_eq!(w.d.installed().unwrap().restarts, 1);
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn the_first_unexpected_exit_audits_the_code_and_the_last_log_line_alerts_once_and_restarts_with_the_back_off() {
+    let w = running_world("k3sdev-first-exit");
+    let pid = child_pid(&w);
+    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.restart.auto")), "{:?}", w.actions());
+    let a = w.audit.lock().unwrap().clone();
+    let e = a.iter().find(|x| x.1 == "devcluster.exited").unwrap();
+    assert!(e.2.contains("signal 9") && e.2.contains("fake k3s started"), "exit code and log line: {}", e.2);
+    let alerts = w.d.take_alerts();
+    assert_eq!(alerts.len(), 1);
+    assert!(alerts[0].title_body().0.contains("stopped and was restarted"));
+    let h = w.d.health();
+    assert!(h.last_exit_at > 0 && h.last_exit_reason.contains("signal 9"));
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn without_the_dummy_module_the_bridge_is_tried_then_the_loopback_with_host_gw_and_the_errors_are_in_the_audit() {
+    // dummy missing (what the Mac answered), bridge works
+    let (w, _r) = world_net("k3sdev-nodeip-bridge", LOGARGS_K3S, true);
+    w.nodes_ready();
+    w.d.assume_stable_node_ip();
+    w.run.programs_add("ip");
+    w.run.fail("type dummy", 1, "Error: Unknown device type.\nCannot find device \"iyakki-k8s\"");
+    w.run.answer("type bridge", "").answer("ip addr replace", "").answer("ip link set", "");
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    let log = log_text(&w);
+    assert!(log.contains(&format!("--flannel-iface={NODE_NET_IF}")) && log.contains("--flannel-backend=host-gw"), "a bridge has no carrier: host-gw, not vxlan: {log}");
+    let a = w.audit.lock().unwrap().clone();
+    let l = a.iter().find(|x| x.1 == "devcluster.node-ip").expect("audited");
+    assert!(l.2.contains("on iyakki-k8s") && l.2.contains("dummy: Error: Unknown device type"), "{}", l.2);
+    w.d.stop("root").unwrap();
+    // neither dummy nor bridge: the loopback carries the address, flannel runs host-gw on lo
+    let (w, _r) = world_net("k3sdev-nodeip-lo", LOGARGS_K3S, true);
+    w.nodes_ready();
+    w.d.assume_stable_node_ip();
+    w.run.programs_add("ip");
+    w.run.fail("type dummy", 1, "Cannot find device \"iyakki-k8s\"").fail("type bridge", 1, "RTNETLINK answers: Operation not supported");
+    w.run.answer("dev lo", "");
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    let log = log_text(&w);
+    assert!(log.contains(&format!("--node-ip={NODE_IP}")) && log.contains("--flannel-iface=lo") && log.contains("--flannel-backend=host-gw"), "{log}");
+    assert!(w.run.lines().iter().any(|l| l == &format!("ip addr add {NODE_IP}/32 dev lo")), "{:?}", w.run.lines());
+    let a = w.audit.lock().unwrap().clone();
+    let l = a.iter().find(|x| x.1 == "devcluster.node-ip").expect("audited");
+    assert!(l.2.contains("on lo") && l.2.contains("bridge: RTNETLINK"), "{}", l.2);
+    w.d.stop("root").unwrap();
+    // the next start finds the address on lo and changes nothing
+    let before = w.run.lines().len();
+    w.run.forget();
+    w.nodes_ready();
+    w.run.answer("ip -o addr show dev iyakki-k8s", "").answer("ip -o addr show dev lo", &format!("1: lo inet {NODE_IP}/32 scope global lo"));
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running));
+    assert!(!w.run.lines()[before..].iter().any(|l| l.contains("addr add") || l.contains("link add")), "{:?}", w.run.lines());
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn when_every_way_fails_the_fallback_audit_names_each_error() {
+    let w = stable_world("k3sdev-nodeip-allfail", LOGARGS_K3S, false);
+    w.run.programs_add("ip");
+    w.run.fail("type dummy", 1, "Cannot find device \"iyakki-k8s\"").fail("type bridge", 1, "bridge denied").fail("dev lo", 2, "RTNETLINK answers: Operation not permitted");
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    let a = w.audit.lock().unwrap().clone();
+    let l = a.iter().find(|x| x.1 == "devcluster.node-ip-fallback").expect("audited");
+    assert!(l.2.contains("dummy: Cannot find device") && l.2.contains("bridge: bridge denied") && l.2.contains("loopback: RTNETLINK answers: Operation not permitted"), "{}", l.2);
+    assert!(!log_text(&w).contains("--node-ip"));
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn a_k3s_that_stays_alive_but_never_gets_ready_is_restarted_with_the_back_off_and_given_up_only_after_repeats() {
+    let (w, _r) = world_net("k3sdev-notready", GOOD_K3S, true);
+    // the API never answers
+    w.d.assume_ready_limit(Duration::from_millis(300));
+    w.d.start("root").unwrap();
+    assert!(wait_for(20, || matches!(w.d.state(), Svc::Failed(_))), "{:?} {:?}", w.d.state(), w.actions());
+    let a = w.audit.lock().unwrap().clone();
+    let exits: Vec<_> = a.iter().filter(|x| x.1 == "devcluster.exited").collect();
+    assert!(exits.len() > 1 && exits[0].2.contains("did not become Ready"), "restarted before giving up: {a:?}");
+    assert!(w.actions().iter().filter(|x| *x == "devcluster.restart.auto").count() >= 2);
+    let alerts = w.d.take_alerts();
+    assert!(alerts.iter().any(|x| matches!(x, Alert::Down(_))) && alerts.iter().any(|x| matches!(x, Alert::GaveUp(_))), "{alerts:?}");
+}
+
+#[test]
+fn the_fixed_node_address_is_one_the_kubernetes_api_server_accepts() {
+    // verified on the Mac: `169.254.77.1` made k3s exit with "may not be in the link-local range"
+    let ip: std::net::Ipv4Addr = NODE_IP.parse().expect("an IPv4 address");
+    assert!(!ip.is_loopback() && !ip.is_link_local() && !ip.is_multicast() && !ip.is_unspecified() && !ip.is_broadcast(), "{ip}");
+    assert!(ip.is_private(), "a private address, not a public one: {ip}");
+    let o = ip.octets();
+    assert!(!(o[0] == 10 && (o[1] == 42 || o[1] == 43)), "inside the pod or service range: {ip}");
+}
+
+/// A stand-in k3s that ends at once with the message the Mac showed, unless the fixed address is left out.
+const REFUSING_K3S: &str = "#!/bin/sh\ncase \"$1\" in\nserver)\n  kc=\n  case \"$*\" in *--node-ip*) echo 'Error: cannot use public IP 10.255.77.1 with endpoint reconciler: may not be in the link-local range'; exit 1;; esac\n  while [ $# -gt 0 ]; do if [ \"$1\" = \"--write-kubeconfig\" ]; then kc=\"$2\"; fi; shift; done\n  printf 'apiVersion: v1\\n' > \"$kc\"\n  exec sleep 600;;\nesac\n";
+
+fn refusing_world(tag: &str, k3s: &str) -> World {
+    let w = stable_world(tag, k3s, true);
+    w.run.programs_add("ip");
+    w
+}
+
+#[test]
+fn the_pure_refusal_check_knows_the_messages_and_ignores_the_rest() {
+    for t in ["cannot use public IP 10.0.0.1 with endpoint reconciler: may not be in the link-local range", "bad --node-ip value", "flannel exited: failed to find interface", "Invalid value: \"10.0.0.1\": node address", "no interface found"] {
+        assert!(log_shows_node_ip_refusal(t), "{t}");
+    }
+    for t in ["fake k3s started", "boom: cannot bind port 6443", "Invalid value for the port"] {
+        assert!(!log_shows_node_ip_refusal(t), "{t}");
+    }
+}
+
+#[test]
+fn an_early_exit_that_names_the_node_address_is_retried_once_without_it_audited_alerted_and_remembered() {
+    let w = refusing_world("k3sdev-refused", REFUSING_K3S);
+    w.run.answer("ip -o addr show", &format!("1: x inet {NODE_IP}/32 scope global"));
+    w.d.start("root").unwrap();
+    assert!(wait_for(15, || w.actions().iter().any(|a| a == "devcluster.node-ip-rejected")), "{:?}", w.actions());
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    let a = w.audit.lock().unwrap().clone();
+    let r = a.iter().find(|x| x.1 == "devcluster.node-ip-rejected").unwrap();
+    assert!(r.2.contains("link-local range"), "the reason line: {}", r.2);
+    assert_eq!(a.iter().filter(|x| x.1 == "devcluster.node-ip-rejected").count(), 1, "exactly one retry");
+    assert!(!a.iter().any(|x| x.1 == "devcluster.exited" || x.1 == "devcluster.restart.auto"), "no failure counted: {a:?}");
+    assert_eq!(w.d.installed().unwrap().restarts, 0);
+    assert!(w.d.installed().unwrap().node_ip_disabled && !w.d.fixed_node_ip_enabled());
+    let alerts = w.d.take_alerts();
+    assert!(alerts.iter().any(|x| matches!(x, Alert::NodeIpRefused(r) if r.contains("link-local"))), "{alerts:?}");
+    assert!(alerts[0].title_body().0.contains("fixed node address was refused"));
+    // the address is taken off again and the next start leaves it out without trying
+    let lines = w.run.lines();
+    assert!(lines.iter().any(|l| l.starts_with("ip addr del") && l.contains(NODE_IP)), "{lines:?}");
+    w.d.stop("root").unwrap();
+    let before = w.run.lines().len();
+    w.audit.lock().unwrap().clear();
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running));
+    assert!(!w.run.lines()[before..].iter().any(|l| l.contains("addr add") || l.contains("addr replace") || l.contains("link add")), "{:?}", w.run.lines());
+    assert!(!w.actions().iter().any(|a| a == "devcluster.node-ip-rejected"));
+    w.d.stop("root").unwrap();
+    // switched on again by the person: it is tried at the next start (and refused again here)
+    w.d.set_fixed_node_ip(true, "root").unwrap();
+    assert!(w.d.fixed_node_ip_enabled());
+    w.d.start("root").unwrap();
+    assert!(wait_for(15, || w.actions().iter().any(|a| a == "devcluster.node-ip-rejected")), "{:?}", w.actions());
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn a_normal_start_with_the_fixed_address_marks_it_as_worked_and_raises_nothing() {
+    let w = refusing_world("k3sdev-fixed-ok", GOOD_K3S);
+    w.d.assume_worked_after(Duration::from_millis(300));
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    assert!(wait_for(5, || w.d.installed().unwrap().node_ip_worked));
+    assert!(!w.d.installed().unwrap().node_ip_disabled && w.d.take_alerts().is_empty());
+    assert!(!w.actions().iter().any(|a| a == "devcluster.node-ip-rejected"));
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn an_address_an_older_version_left_on_the_bridge_or_lo_is_taken_off_and_the_bridge_goes_when_the_fixed_address_is_off() {
+    let w = refusing_world("k3sdev-cleanup", GOOD_K3S);
+    w.run.answer("ip -o addr show dev iyakki-k8s", "5: iyakki-k8s inet 169.254.77.1/32 scope global iyakki-k8s");
+    w.run.answer("ip -o addr show dev lo", "1: lo inet 169.254.77.1/32 scope global lo");
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    let lines = w.run.lines();
+    assert!(lines.iter().any(|l| l == "ip addr del 169.254.77.1/32 dev iyakki-k8s") && lines.iter().any(|l| l == "ip addr del 169.254.77.1/32 dev lo"), "{lines:?}");
+    assert!(w.actions().iter().filter(|a| *a == "devcluster.node-ip-cleanup").count() == 2);
+    w.d.stop("root").unwrap();
+    // fixed address off: the bridge is removed and k3s starts the old way
+    let w = refusing_world("k3sdev-cleanup-off", LOGARGS_K3S);
+    w.d.set_fixed_node_ip(false, "root").unwrap();
+    w.run.answer("ip -o link show dev iyakki-k8s", "5: iyakki-k8s: <BROADCAST,UP>");
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    assert!(w.run.lines().iter().any(|l| l == "ip link del iyakki-k8s"), "{:?}", w.run.lines());
+    assert!(!log_text(&w).contains("--node-ip"), "{}", log_text(&w));
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn a_k3s_that_never_gets_ready_with_the_fixed_address_is_started_again_without_it() {
+    let w = refusing_world("k3sdev-fixed-notready", GOOD_K3S);
+    w.run.forget();
+    w.run.answer("ip addr replace", "").answer("ip link set", "").answer("ip link add", "").answer("ip link del", "");
+    w.d.assume_ready_limit(Duration::from_millis(400));
+    w.d.start("root").unwrap();
+    assert!(wait_for(15, || w.actions().iter().any(|a| a == "devcluster.node-ip-rejected")), "{:?}", w.actions());
+    assert!(w.d.installed().unwrap().node_ip_disabled);
+    assert!(w.d.take_alerts().iter().any(|x| matches!(x, Alert::NodeIpRefused(_))));
+    w.d.stop("root").unwrap();
+}
+
+// ------------------------------------------------------------------------------------------------ the reaper of PID 1 (the Mac)
+
+/// Steals the exit status of a child the way `iyakki_core::reap_children` (`waitpid(-1)` as PID 1) does.
+fn steal_status(pid: u32) {
+    let mut st = 0;
+    // SAFETY: waits for one child of this process.
+    unsafe { libc::waitpid(pid as i32, &mut st, 0) };
+}
+
+#[test]
+fn a_child_whose_exit_status_was_taken_by_another_reaper_is_an_exit_not_a_running_process() {
+    let mut c = Command::new("sleep").arg("30").spawn().unwrap();
+    assert!(matches!(child_life(&mut c), ChildLife::Alive));
+    unsafe { libc::kill(c.id() as i32, libc::SIGKILL) };
+    steal_status(c.id());
+    // try_wait now fails with ECHILD: the old code took that for "still running" and never noticed the exit
+    assert!(c.try_wait().is_err(), "the premise: std cannot see the exit any more");
+    match child_life(&mut c) {
+        ChildLife::Ended(t) => assert!(t.contains("k3s exited") && t.contains("another reaper"), "{t}"),
+        ChildLife::Alive => panic!("a reaped child is not alive"),
+    }
+    // a normal exit still reports its code
+    let mut c = Command::new("sh").args(["-c", "exit 3"]).spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(matches!(child_life(&mut c), ChildLife::Ended(t) if t.contains("exit status 3")));
+}
+
+#[test]
+fn k3s_killed_and_reaped_behind_the_supervisors_back_is_noticed_audited_and_restarted() {
+    let w = running_world("k3sdev-reaped");
+    let pid = child_pid(&w);
+    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    steal_status(pid);
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.exited")), "{:?}", w.actions());
+    assert!(wait_for(10, || try_pid(&w).is_some_and(|p| p != pid) && w.d.state() == Svc::Running), "{:?}", w.d.state());
+    let a = w.audit.lock().unwrap().clone();
+    let e = a.iter().find(|x| x.1 == "devcluster.exited").unwrap();
+    assert!(e.2.contains("k3s exited") && e.2.contains("fake k3s started"), "{}", e.2);
+    assert!(w.actions().contains(&"devcluster.restart.auto".to_string()));
+    w.d.stop("root").unwrap();
+}
+
+/// Becomes Ready, then ends the way kube-proxy ends k3s (the Mac); the second run stays.
+const READY_THEN_NODEIP_K3S: &str = "#!/bin/sh\ncase \"$1\" in\nserver)\n  kc=\n  while [ $# -gt 0 ]; do if [ \"$1\" = \"--write-kubeconfig\" ]; then kc=\"$2\"; fi; shift; done\n  printf 'apiVersion: v1\\n' > \"$kc\"\n  if [ ! -f \"$0.once\" ]; then touch \"$0.once\"; sleep 1; echo 'node.go:209 \"NodeIPs changed for the node\" node=\"iyakki-dev\" newNodeIPs=[\"10.255.77.1\"]'; exit 1; fi\n  exec sleep 600;;\nesac\n";
+
+#[test]
+fn k3s_ending_after_it_was_ready_with_nodeips_changed_is_started_again_without_a_failure() {
+    let (w, _r) = world_net("k3sdev-ready-nodeip", READY_THEN_NODEIP_K3S, true);
+    w.nodes_ready();
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    assert!(wait_for(15, || w.actions().iter().any(|a| a == "devcluster.exited-ip-changed")), "the branch is reached: {:?}", w.actions());
+    assert!(wait_for(15, || w.d.state() == Svc::Running && w.actions().iter().filter(|a| *a == "devcluster.ready").count() >= 1));
+    assert!(!w.actions().iter().any(|a| a == "devcluster.exited"), "{:?}", w.actions());
+    assert_eq!(w.d.installed().unwrap().restarts, 0);
+    assert!(w.d.take_alerts().is_empty());
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn the_watchdog_sees_a_dead_k3s_process_even_while_the_supervisor_beats() {
+    let w = world("k3sdev-gone");
+    let c = Command::new("sleep").arg("30").spawn().unwrap();
+    let mut since = None;
+    w.d.set_svc(Svc::Running);
+    *lock(&w.d.child) = None;
+    assert!(!w.d.gone_for(0, Backend::Native, &mut since, Duration::ZERO), "no handle: the supervisor is waiting or has taken it");
+    unsafe { libc::kill(c.id() as i32, libc::SIGKILL) };
+    steal_status(c.id());
+    *lock(&w.d.child) = Some(c);
+    assert!(!w.d.gone_for(0, Backend::Native, &mut since, Duration::from_secs(20)), "not yet 20 s");
+    assert!(since.is_some());
+    assert!(w.d.gone_for(0, Backend::Native, &mut since, Duration::ZERO), "gone for long enough");
+    w.d.set_svc(Svc::Stopped);
+    assert!(!w.d.gone_for(0, Backend::Native, &mut since, Duration::ZERO) && since.is_none(), "a stopped cluster is not watched");
+    let _ = lock(&w.d.child).take();
+}
+
+#[test]
+fn the_fixed_address_counts_as_worked_only_after_a_minute_of_ready_not_at_the_first_ready() {
+    let w = refusing_world("k3sdev-worked", GOOD_K3S);
+    w.d.start("root").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!w.d.installed().unwrap().node_ip_worked, "Ready once is not enough");
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn a_cluster_that_becomes_ready_closes_an_old_open_registry_and_audits_it() {
+    let w = world("close-registry");
+    w.run.answer("get service registry", r#"{"spec":{"type":"NodePort","ports":[{"port":5000,"nodePort":30500}]}}"#);
+    w.run.answer("patch", "patched");
+    w.d.close_legacy_registry();
+    let calls = w.run.lines();
+    assert!(calls.iter().any(|l| l.contains("patch service registry")) && calls.iter().any(|l| l.contains("patch deployment registry") && l.contains("127.0.0.1")), "{calls:?}");
+    let a = w.audit.lock().unwrap().clone();
+    assert!(a.iter().any(|(u, act, d)| u == "system" && act == "registry.nodeport.closed" && d.contains("NodePort 30500") && d.contains("127.0.0.1:30500")), "{a:?}");
+    // no registry in the cluster: silent, nothing patched
+    let w2 = world("close-registry-none");
+    w2.d.close_legacy_registry();
+    assert!(!w2.run.lines().iter().any(|l| l.contains("patch")) && w2.audit.lock().unwrap().iter().all(|a| !a.1.starts_with("registry.")));
+}
+
+#[test]
+fn an_unexpected_lan_service_is_audited_and_warned_once_per_change_and_nothing_is_changed() {
+    let w = world("k3sdev-exposure");
+    let st = routes(GOOD_K3S.as_bytes(), &sha(GOOD_K3S.as_bytes()));
+    w.d.install(&w.plan(&st, Backend::Native), &*st, "root").unwrap();
+    let svc = |ns: &str, name: &str, kind: &str, port: u16| format!("{{\"metadata\":{{\"namespace\":\"{ns}\",\"name\":\"{name}\"}},\"spec\":{{\"type\":\"{kind}\",\"ports\":[{{\"port\":80,\"nodePort\":{port}}}]}}}}");
+    // only the documented private store port: nothing to say
+    w.run.answer("get svc -A -o json", &format!("{{\"items\":[{}]}}", svc("iyakki-store", "store", "NodePort", 30301)));
+    w.d.check_exposure();
+    assert!(w.d.take_alerts().is_empty() && !w.actions().iter().any(|a| a == "devcluster.exposure.unexpected"));
+    // a Gitea opened on the LAN: an audit line and one warning
+    w.run.forget();
+    w.run.answer("get svc -A -o json", &format!("{{\"items\":[{},{}]}}", svc("iyakki-store", "store", "NodePort", 30301), svc("iyakki-gitea", "gitea-http", "NodePort", 30300)));
+    w.d.check_exposure();
+    w.d.check_exposure();
+    let alerts = w.d.take_alerts();
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    let (title, body) = alerts[0].title_body();
+    assert!(title.contains("open on your network") && body.contains("iyakki-gitea/gitea-http (NodePort) on port 30300") && body.contains("changes nothing by itself"), "{title} {body}");
+    assert_eq!(w.actions().iter().filter(|a| *a == "devcluster.exposure.unexpected").count(), 1);
+    // nothing but reading was run
+    assert!(w.run.lines().iter().all(|l| !l.contains("patch") && !l.contains("delete") && !l.contains("apply")), "{:?}", w.run.lines());
 }

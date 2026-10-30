@@ -8,7 +8,7 @@ fn cx(tag: &str, role: Role) -> AppCx {
 }
 
 fn full_machine() -> Machine {
-    Machine { model: "MacBookPro14,1".into(), gpus: 1, nvidia: true, ram_mb: 16_000, camera: true, fw: Item::ALL.into_iter().filter(|i| i.fw_def().is_some()).collect(), ..Default::default() }
+    Machine { model: "MacBookPro14,1".into(), gpus: 1, nvidia: true, ram_mb: 16_000, camera: true, fw: Item::ALL.into_iter().filter(|i| i.fw_def().is_some() || *i == Item::FwHardware).collect(), ..Default::default() }
 }
 
 /// A PC with nothing special: no hardware tile, nothing recommended once k3s is there.
@@ -388,7 +388,6 @@ fn the_popup_status_line_and_the_one_button_for_each_state() {
         ("stopped", vec![(Item::K3s, Presence::Installed("k3s v1.31.4 · stopped".into()))], Item::K3s, "Installed v1.31.4 · Stopped", "Start"),
         ("earlier", vec![(Item::DuckDb, Presence::Earlier("cluster down".into()))], Item::DuckDb, "Installed earlier, not running", "Reinstall"),
         ("elsewhere", vec![(Item::Python, Presence::Elsewhere("/usr/bin/python3".into()))], Item::Python, "Found on this machine", "Install own copy"),
-        ("deploy", vec![(Item::K3s, Presence::Installed("v1".into()))], Item::IndicTts, "Not installed", "Review and deploy"),
         ("guide", vec![], Item::MacHost, "Guide", "Open guide"),
         ("camera", vec![], Item::MacCamera, "Not installed", "Install camera driver and firmware"),
         ("service", vec![(Item::Registry, Presence::Installed("deployed".into()))], Item::Registry, "Installed · Running", "Reinstall"),
@@ -430,8 +429,8 @@ fn the_popup_status_line_and_the_one_button_for_each_state() {
 
 #[test]
 fn every_state_marker_is_drawn_on_the_tile() {
-    let (mut a, cx) = mixed("su-markers", Role::Admin);
-    let g = draw(&mut a, &cx, 1920, 1080);
+    let (mut a, cx) = mixed("su-markers", Role::Admin); // tall frame: with the newer items the Registry tile is below 1080 px
+    let g = draw(&mut a, &cx, 1920, 2400);
     let t = |it: Item| tile_rect(&a, it);
     // installed: the tick; missing: none
     assert!(count(&g, top_right(t(Item::Node)), OK, 10) > 20, "tick on an installed tool");
@@ -450,7 +449,7 @@ fn every_state_marker_is_drawn_on_the_tile() {
     // installing: the progress bar, in the store's accent (scroll to the tile first)
     let r = a.setup.spots.iter().find(|(i, _)| *i == Item::Elasticsearch).map(|(_, r)| *r).unwrap();
     a.setup.list.show(r.y, r.y + r.h);
-    let g = draw(&mut a, &cx, 1920, 1080);
+    let g = draw(&mut a, &cx, 1920, 2400);
     let t = |it: Item| tile_rect(&a, it);
     let acc = crate::apps::store::ACCENT;
     assert!(count(&g, R::new(t(Item::Elasticsearch).x, t(Item::Elasticsearch).y + t(Item::Elasticsearch).h * 0.85, t(Item::Elasticsearch).w, t(Item::Elasticsearch).h * 0.15), acc, 10) > 30, "the bar");
@@ -475,7 +474,7 @@ fn search_filter_and_counts_narrow_the_tiles() {
     let n = a.setup.counts().0;
     assert!(n >= 2 && n < all.0, "{n}");
     let shown: Vec<Item> = a.setup.stops();
-    assert!(shown.contains(&Item::Kokoro) && shown.contains(&Item::IndicTts) && !shown.contains(&Item::Node));
+    assert!(shown.contains(&Item::Kokoro) && !shown.contains(&Item::Node));
     let g = draw(&mut a, &cx, 1280, 720);
     assert!(has_hit(&g, Event::Tab(TILE + idx(Item::Kokoro))), "Kokoro's tile is on screen");
     key(&mut a, &cx, Key::Esc);
@@ -532,9 +531,9 @@ fn the_category_bar_narrows_the_page_and_the_keys_cycle_it() {
     let voices = Gk::ALL.iter().position(|g| *g == Gk::Voices).unwrap() + 1;
     a.handle(&Event::Tab(CAT + voices), &cx);
     assert_eq!(a.setup.cat, Some(Gk::Voices));
-    assert_eq!(a.setup.stops(), vec![Item::Kokoro, Item::IndicTts, Item::VoicePack]);
+    assert_eq!(a.setup.stops(), vec![Item::Kokoro, Item::VoicePack]);
     assert_eq!(titles(&a), vec!["Voices"]);
-    assert_eq!(a.setup.counts(), (3, Item::ALL.len()));
+    assert_eq!(a.setup.counts(), (2, Item::ALL.len()), "the two voices (Kokoro and the voice pack)");
     let g = draw(&mut a, &cx, 1280, 720);
     assert!(has_hit(&g, Event::Tab(TILE + idx(Item::Kokoro))) && !has_hit(&g, Event::Tab(TILE + idx(Item::K3s))));
     // the category and the filter work together
@@ -591,16 +590,16 @@ fn install_all_recommended_asks_with_sizes_then_starts_the_jobs() {
 #[test]
 fn install_all_in_this_category_has_the_same_review() {
     let (mut a, cx) = rig("su-cat-all", Role::Admin, full_machine(), facts(&[(Item::DuckDb, Presence::Installed("v1".into()))]));
-    // Data: DuckDB is there; Elasticsearch and the registry are missing and need k3s
-    assert_eq!(a.setup.category_targets(Gk::Data), vec![Item::Elasticsearch, Item::Registry]);
+    // Data: DuckDB is there; Elasticsearch, OpenSearch, Prometheus, ClickHouse, the graph database and the registry are missing and need k3s
+    assert_eq!(a.setup.category_targets(Gk::Data), vec![Item::Elasticsearch, Item::OpenSearch, Item::Prometheus, Item::ClickHouse, Item::GraphDb, Item::Registry]);
     let c = a.setup.plan_category(Gk::Data);
-    assert_eq!(c.title, "Install 2 items in Data services?");
+    assert_eq!(c.title, "Install 6 items in Data services?");
     assert_eq!(c.steps[0], Item::K3s, "what they need comes first");
     // the popup of a Data tile has the button, with the count
     a.setup.open_popup(Item::DuckDb);
     let g = draw(&mut a, &cx, 1280, 720);
     let b = g.hits.iter().find(|h| h.ev == Event::Tab(POP_ALL)).expect("Install all in this category");
-    assert_eq!(b.label, "Install all in Data (2)");
+    assert_eq!(b.label, "Install all in Data (6)");
     a.handle(&Event::Tab(POP_ALL), &cx);
     assert!(a.setup.confirm.is_some());
     let g = draw(&mut a, &cx, 1280, 720);
@@ -651,12 +650,6 @@ fn buttons_start_the_right_job_and_open_the_right_place() {
     assert_eq!(App::take_request(&mut a), Some(("installs".into(), String::new())));
     a.handle(&Event::Tab(POP_LOG), &cx);
     assert_eq!(App::take_request(&mut a), Some(("installs".into(), String::new())));
-    // Indic-TTS with k3s there goes to the Platform services review instead of a job
-    let (mut a, cx) = rig("su-act2", Role::Admin, full_machine(), facts(&[(Item::K3s, Presence::Installed("v1".into()))]));
-    assert_eq!(a.setup.card(Item::IndicTts).act, Act::Deploy);
-    primary(&mut a, &cx, Item::IndicTts);
-    assert_eq!(App::take_request(&mut a), Some(("settings".into(), "platform:indic-tts".into())));
-    assert!(qi::install_jobs(&cx.services.jobs, "root").is_empty());
     // a running cluster opens the K8S tile
     let (mut a, cx) = rig("su-act3", Role::Admin, full_machine(), facts(&[(Item::K3s, Presence::Installed("k3s v1 · running".into()))]));
     primary(&mut a, &cx, Item::K3s);
@@ -1426,4 +1419,19 @@ fn pictures() {
         a.setup.open_popup(Item::K3s);
         draw_in(&mut a, &cx, area, w, h).pm.save_png(dir.join(format!("{tag}-popup.png"))).unwrap();
     }
+}
+
+#[test]
+fn card_state_follows_the_cluster_not_an_old_failed_job() {
+    let installed = Presence::Installed("running in the cluster".into());
+    // healthy Deployment + a failed newest job (a failed Retry, an old outage) = Installed
+    assert_eq!(base_state(None, true, false, true, None, Some(&installed)), CardState::Installed);
+    // even when the marker is gone, the object is what counts (the facts upgrade the presence)
+    assert_eq!(base_state(None, true, false, true, None, Some(&installed)), CardState::Installed);
+    // no object + failed job = Failed
+    assert_eq!(base_state(None, true, false, false, None, Some(&Presence::Missing)), CardState::Failed);
+    // a running job is Installing, healthy or not
+    assert_eq!(base_state(Some(Some(10.0)), true, false, true, None, Some(&installed)), CardState::Installing(Some(10.0)));
+    // nothing known, no job
+    assert_eq!(base_state(None, false, false, false, None, Some(&Presence::Missing)), CardState::Missing);
 }

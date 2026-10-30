@@ -59,7 +59,7 @@ fn tiles_follow_the_mode() {
     for l in ["MEDIA", "RADIO", "CAMERA", "TALES", "VOICE", "DISKS"] {
         assert!(!cloud.contains(&l), "{l} is hidden");
     }
-    for l in ["CHAT", "RAG", "MCP", "CLI", "SKILLS", "CALENDAR", "AI IDE", "EDIT", "DATA", "DASH", "FLOWS", "RUNS", "SRE PILOT", "SYSTEM", "STORE", "USERS", "USAGE", "NET SCAN", "MESH", "BROWSER", "SETTINGS"] {
+    for l in ["CHAT", "RAG", "MCP", "CLI", "SKILLS", "CALENDAR", "AI IDE", "EDIT", "DATA", "DASH", "FLOWS", "RUNS", "SRE PILOT", "SYSTEM", "STORE", "USERS", "USAGE", "NET SCAN", "MESH", "BROWSER"] {
         assert!(cloud.contains(&l), "{l} stays");
     }
     assert_eq!(cloud.len(), all.len() - 6);

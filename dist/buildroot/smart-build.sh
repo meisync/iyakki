@@ -7,7 +7,7 @@
 #                   the listed packages are dirclean-ed first)
 #   FULL because of a toolchain / removed-package change -> stops and says so; add --clean to delete the output dir and rebuild
 # --force-full: skip the decision and run build.sh.  --dry-run: print the decision and the commands, run nothing.
-# Same environment as build.sh (ARCH, WEB_H264, WEB_AV_ADDON, WEB_IRIS, WEB_CROCUS, WITH_FFMPEG, JOBS, IYAKKI_PROFILE). docs/BUILD-INCREMENTAL.md
+# Same environment as build.sh (ARCH, WEB_H264, WEB_AV_ADDON, WEB_MEDIA, WEB_IRIS, WEB_CROCUS, WITH_FFMPEG, JOBS, IYAKKI_PROFILE). docs/BUILD-INCREMENTAL.md
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/../.." && pwd)"
 V=""; FORCE=0; CLEAN=0; DRY=0

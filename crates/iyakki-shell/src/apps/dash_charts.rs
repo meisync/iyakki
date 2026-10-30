@@ -742,6 +742,28 @@ pub fn draw_pie(g: &mut Gfx, body: R, s: f32, m: &Model, o: &Options, donut: boo
     }
 }
 
+/// Bars of named values (a table of a name and a number, as the cluster views answer): one row per name, the longest bar for the largest value.
+pub fn draw_category_bars(g: &mut Gfx, body: R, s: f32, m: &Model, o: &Options) {
+    let max = m.slices.iter().map(|x| x.1).fold(0.0f64, f64::max);
+    if max <= 0.0 {
+        return;
+    }
+    let row_h = 18.0 * s;
+    let rows = ((body.h - 6.0 * s) / row_h).floor().max(1.0) as usize;
+    let label_w = (body.w * 0.34).clamp_safe(60.0 * s, 220.0 * s);
+    let value_w = m.slices.iter().take(rows).map(|(_, v)| g.text_width(11.0 * s, &format_value(*v, o.unit, o.decimals), Face::Mono)).fold(0.0f32, f32::max) + 8.0 * s;
+    let bar_x = body.x + label_w + 6.0 * s;
+    let bar_w = (body.w - label_w - value_w - 12.0 * s).max(10.0);
+    for (i, (name, v)) in m.slices.iter().enumerate().take(rows) {
+        let y = body.y + 4.0 * s + i as f32 * row_h;
+        let label = g.fit(11.0 * s, name, Face::Sans, label_w);
+        g.text(body.x, y, 11.0 * s, MUTED, &label, Face::Sans);
+        let w = (bar_w * (*v / max) as f32).max(2.0);
+        g.rrect(bar_x, y + 2.0 * s, w, row_h - 7.0 * s, 3.0 * s, series_color(0));
+        g.text(bar_x + w + 6.0 * s, y, 11.0 * s, DIM, &format_value(*v, o.unit, o.decimals), Face::Mono);
+    }
+}
+
 // ------------------------------------------------------------------------------------------------------ tables
 
 pub const TABLE_HEAD: usize = 420_000;
@@ -1015,6 +1037,18 @@ mod tests {
                 let rq = t.rows.iter().find(|r| r.0 == "requests").expect("the right-axis series is in the tooltip");
                 assert!(rq.1.ends_with('K') || rq.1.parse::<f64>().is_ok(), "formatted with the right unit: {}", rq.1);
             }
+        }
+    }
+
+    #[test]
+    fn a_bar_chart_of_named_values_has_slices_and_no_lines_and_draws_at_every_size() {
+        let rows: Vec<Vec<serde_json::Value>> = (0..40).map(|i| vec![json!(format!("namespace-{i}")), json!(40 - i)]).collect();
+        let f = Frame { columns: vec![Column { name: "Namespace".into(), ty: ColType::Str }, Column { name: "Pods".into(), ty: ColType::Int }], rows, ..Default::default() };
+        let m = Model::build(&f, Visual::Bar, &Options::default(), (0, 3_600_000));
+        assert!(m.lines.is_empty() && m.slices.len() == 40, "the board draws names and numbers as category bars");
+        for (w, h) in [(800u32, 480u32), (300, 160), (60, 40)] {
+            let mut g = Gfx::new(w, h);
+            draw_category_bars(&mut g, R::new(4.0, 4.0, w as f32 - 8.0, h as f32 - 8.0), 0.9, &m, &Options::default());
         }
     }
 

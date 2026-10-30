@@ -14,12 +14,17 @@ use std::sync::mpsc::{sync_channel, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use iyakki_proxy::{StreamHead, Streamer};
+use iyakki_proxy::certinfo;
+use iyakki_proxy::{StreamHead, Streamer, TlsMode, TlsPlan};
 
 use crate::audiofmt::{self, AacDecoder, AacFactory, Codec, Pcm};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_STATIONS: usize = 200;
+/// The largest issuer certificate fetched from a certificate's own "CA Issuers" address.
+const MAX_ISSUER_CERT: usize = 16 * 1024;
+/// How many issuer certificates are followed upwards.
+const MAX_ISSUER_HOPS: usize = 3;
 
 /// Stations to start from, by language: `(name, stream address)`: MP3, or AAC / HLS ones that need the audio add-on
 /// (`radio_stations::needs_addon`). Each answered when this list was made (24 October 2026); stations move and disappear, so a failing one says why and the person can add their own.
@@ -70,7 +75,64 @@ pub fn band_levels(pcm: &[i16], channels: usize, rate: u32) -> [f32; BANDS] {
 pub struct Station {
     pub name: String,
     pub url: String,
+    /// The certificate the person approved for this station's server (see [`CertPin`]). Old files have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_pin: Option<CertPin>,
 }
+
+impl Station {
+    pub fn new(name: &str, url: &str) -> Station {
+        Station { name: name.to_string(), url: url.to_string(), cert_pin: None }
+    }
+}
+
+/// A server certificate a person chose to trust for one station: the exact leaf certificate (SHA-256) of one host and port.
+/// It is never a general "do not verify": the connection to that host must show exactly this certificate, for that name, within
+/// its dates; a renewed certificate asks again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertPin {
+    pub host: String,
+    pub port: u16,
+    /// Upper-case hex pairs with colons.
+    pub sha256: String,
+}
+
+/// `(host, port)` of an https address (port 443 when none); `None` for anything else.
+pub fn https_endpoint(url: &str) -> Option<(String, u16)> {
+    url.starts_with("https://").then(|| iyakki_proxy::pintls::split_https(url).ok()).flatten().map(|(h, p, _)| (h, p))
+}
+
+/// Why a station's secure connection was stopped, with what the person needs to decide about trusting the certificate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CertProblem {
+    pub station: String,
+    pub url: String,
+    pub host: String,
+    pub port: u16,
+    /// True when the station was trusted before and now shows a different certificate.
+    pub changed: bool,
+    pub sha256: String,
+    pub subject: String,
+    pub issuer: String,
+    /// Unix time.
+    pub not_after: i64,
+    /// Trusting only helps when the certificate is for this host name and still valid.
+    pub trustable: bool,
+    /// The plain-language sentence for the person (also the radio's failure text).
+    pub message: String,
+}
+
+impl CertProblem {
+    pub fn pin(&self) -> CertPin {
+        CertPin { host: self.host.clone(), port: self.port, sha256: self.sha256.clone() }
+    }
+
+    pub fn expiry(&self) -> String {
+        certinfo::date_text(self.not_after)
+    }
+}
+
+pub const UNKNOWN_ISSUER_TEXT: &str = "This station's server did not send its full certificate chain (the issuer is missing). Browsers hide this; IYAKKI checks strictly.";
 
 /// `http://` or `https://`, a host, no sign-in details; returns the address tidied.
 pub fn valid_url(u: &str) -> Result<String, String> {
@@ -125,9 +187,11 @@ impl StationStore {
     }
 
     pub fn add(&self, name: &str, url: &str) -> Result<Station, String> {
-        let st = Station { name: valid_name(name)?, url: valid_url(url)? };
+        let mut st = Station { name: valid_name(name)?, url: valid_url(url)?, cert_pin: None };
         let mut v = self.list();
         if let Some(i) = v.iter().position(|s| s.name.eq_ignore_ascii_case(&st.name)) {
+            // the approval belongs to the server it was given for: kept when the address still points there, gone otherwise
+            st.cert_pin = v[i].cert_pin.clone().filter(|p| https_endpoint(&st.url) == Some((p.host.clone(), p.port)));
             v[i] = st.clone();
         } else {
             if v.len() >= MAX_STATIONS {
@@ -137,6 +201,55 @@ impl StationStore {
         }
         self.save(&v)?;
         Ok(st)
+    }
+
+    /// Keep (`Some`) or forget (`None`) the approved certificate of a station. A station that is not in the list yet (one of the
+    /// built-in presets) is added with the pin. The pin must be for the host and port of the station's own address.
+    pub fn set_pin(&self, station: &Station, pin: Option<CertPin>) -> Result<Station, String> {
+        if let Some(p) = &pin {
+            if https_endpoint(&station.url) != Some((p.host.to_ascii_lowercase(), p.port)) {
+                return Err("a certificate can only be trusted for the server the station's address points to".into());
+            }
+            if certinfo::norm_fingerprint(&p.sha256).len() != 64 {
+                return Err("that is not a SHA-256 fingerprint".into());
+            }
+        }
+        let mut v = self.list();
+        let at = match v.iter().position(|s| s.name.eq_ignore_ascii_case(&station.name)) {
+            Some(i) => i,
+            None => {
+                if v.len() >= MAX_STATIONS {
+                    return Err(format!("that is as many stations as fit ({MAX_STATIONS})"));
+                }
+                v.push(Station { name: valid_name(&station.name)?, url: valid_url(&station.url)?, cert_pin: None });
+                v.len() - 1
+            }
+        };
+        if pin.is_some() && https_endpoint(&v[at].url) != https_endpoint(&station.url) {
+            return Err("the saved station points elsewhere now".into());
+        }
+        v[at].cert_pin = pin;
+        let out = v[at].clone();
+        self.save(&v)?;
+        Ok(out)
+    }
+
+    /// The person's approval of the certificate in `problem`, for `station`: kept only when the certificate is for the host
+    /// name, still valid, and from the very server the station's own address points to.
+    pub fn trust(&self, station: &Station, problem: &CertProblem) -> Result<Station, String> {
+        if !problem.trustable {
+            return Err("this certificate cannot be trusted: it is not for this host name or it is not within its dates".into());
+        }
+        self.set_pin(station, Some(problem.pin()))
+    }
+
+    /// Forget the approved certificate of a station.
+    pub fn forget_trust(&self, name: &str) -> Result<Station, String> {
+        let st = self.list().into_iter().find(|s| s.name.eq_ignore_ascii_case(name)).ok_or("no such station")?;
+        if st.cert_pin.is_none() {
+            return Err("no certificate is trusted for this station".into());
+        }
+        self.set_pin(&st, None)
     }
 
     pub fn remove(&self, name: &str) -> Result<(), String> {
@@ -223,6 +336,8 @@ struct Inner {
     aac: Mutex<Option<AacFactory>>,
     /// Divides the waits of the HLS follower (1 in real use).
     hls_scale: std::sync::atomic::AtomicU32,
+    /// Set when the last start failed on a server certificate the person could decide about.
+    problem: Mutex<Option<CertProblem>>,
 }
 
 /// Reads (`None`) or sets (`Some(percent)`) the master volume; returns the volume in percent.
@@ -238,7 +353,7 @@ type Allow = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 impl Default for RadioPlayer {
     fn default() -> Self {
-        RadioPlayer { inner: Arc::new(Inner { state: Mutex::new(RadioState::Idle), generation: AtomicU64::new(0), paused: std::sync::atomic::AtomicBool::new(false), volume: AtomicU8::new(80), link: Mutex::new(None), streamer: Mutex::new(None), retry_wait: Mutex::new(Duration::from_secs(2)), levels: Mutex::new([0.0; BANDS]), aac: Mutex::new(None), hls_scale: std::sync::atomic::AtomicU32::new(1) }) }
+        RadioPlayer { inner: Arc::new(Inner { state: Mutex::new(RadioState::Idle), generation: AtomicU64::new(0), paused: std::sync::atomic::AtomicBool::new(false), volume: AtomicU8::new(80), link: Mutex::new(None), streamer: Mutex::new(None), retry_wait: Mutex::new(Duration::from_secs(2)), levels: Mutex::new([0.0; BANDS]), aac: Mutex::new(None), hls_scale: std::sync::atomic::AtomicU32::new(1), problem: Mutex::new(None) }) }
     }
 }
 
@@ -320,6 +435,20 @@ impl RadioPlayer {
         matches!(self.state(), RadioState::Connecting(_) | RadioState::Playing { .. })
     }
 
+    /// Tell [`crate::soundhold`] that this radio holds the speaker while it plays (so the browser's "Stop it" dialog can name it
+    /// and stop it cleanly). The latest radio announced is the one the dialog stops.
+    pub fn announce_holder(&self) {
+        let (a, b) = (self.clone(), self.clone());
+        crate::soundhold::announce(
+            "radio",
+            Arc::new(move || match a.state() {
+                RadioState::Playing { station, .. } if !a.is_paused() => Some(format!("Radio is playing {station}")),
+                _ => None,
+            }),
+            Arc::new(move || b.stop()),
+        );
+    }
+
     /// Holds the sound where it is (a file continues from the same spot; a live station carries on live afterwards).
     /// Returns false when nothing is playing.
     pub fn pause(&self) -> bool {
@@ -340,7 +469,13 @@ impl RadioPlayer {
         self.inner.paused.load(Ordering::SeqCst) && self.is_active()
     }
 
+    /// The certificate decision the last failed start is waiting for, if that is why it failed.
+    pub fn cert_problem(&self) -> Option<CertProblem> {
+        self.inner.problem.lock().unwrap().clone()
+    }
+
     pub fn stop(&self) {
+        *self.inner.problem.lock().unwrap() = None;
         self.inner.paused.store(false, Ordering::SeqCst);
         self.inner.generation.fetch_add(1, Ordering::SeqCst);
         *self.inner.state.lock().unwrap() = RadioState::Idle;
@@ -352,6 +487,7 @@ impl RadioPlayer {
         self.inner.paused.store(false, Ordering::SeqCst);
         let gen = self.inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *self.inner.state.lock().unwrap() = RadioState::Connecting(station.name.clone());
+        *self.inner.problem.lock().unwrap() = None;
         let me = self.clone();
         let (station, play_cmd) = (station.clone(), play_cmd.to_string());
         std::thread::Builder::new().name("iyakki-radio".into()).spawn(move || me.run(gen, &station, allow, &play_cmd)).ok();
@@ -369,11 +505,12 @@ impl RadioPlayer {
 
     fn run(&self, gen: u64, station: &Station, allow: Allow, play_cmd: &str) {
         let mut played = false;
+        let plan = TlsPlan::new(station.cert_pin.as_ref().map(|p| (p.host.as_str(), p.port, p.sha256.as_str())));
         for attempt in 0..4 {
             if !self.current(gen) {
                 return;
             }
-            match self.stream_once(gen, station, &allow, play_cmd, &mut played) {
+            match self.stream_once(gen, station, &allow, &plan, play_cmd, &mut played) {
                 Ok(()) => {
                     // a file that has played to its end
                     self.set_state(gen, RadioState::Idle);
@@ -417,7 +554,7 @@ impl RadioPlayer {
         Ok(StreamHead { status: 200, headers: vec![("content-type".into(), "audio/mpeg".into())], body: Box::new(f) })
     }
 
-    fn open(&self, gen: u64, url: &str, allow: &Allow) -> Result<(StreamHead, Codec), StreamEnd> {
+    fn open(&self, gen: u64, station: &Station, url: &str, allow: &Allow, plan: &TlsPlan) -> Result<(StreamHead, Codec), StreamEnd> {
         if let Some(path) = url.strip_prefix("file://") {
             return Self::open_file(path).map(|h| (h, Codec::Mp3));
         }
@@ -431,7 +568,7 @@ impl RadioPlayer {
             if !allow(&host) {
                 return Err(StreamEnd::Failed(format!("your account may not reach {host}")));
             }
-            let head = streamer.open(&url, &[("Icy-MetaData".into(), "1".into()), ("Accept".into(), "*/*".into())]).map_err(|e| StreamEnd::Failed(format!("could not connect: {e}")))?;
+            let head = self.hop(gen, &streamer, plan, station, &url, allow)?;
             if (300..400).contains(&head.status) {
                 let loc = head.header("location").ok_or_else(|| StreamEnd::Failed("the station sent you elsewhere without saying where".into()))?;
                 url = resolve(&url, loc).ok_or_else(|| StreamEnd::Failed("the station's redirect is not usable".into()))?;
@@ -451,7 +588,7 @@ impl RadioPlayer {
                 let text = String::from_utf8_lossy(&raw).to_string();
                 if crate::hls::is_hls(&text) {
                     let me = self.clone();
-                    let net = crate::hls::Net { streamer: streamer.clone(), allow: allow.clone(), stop: Arc::new(move || !me.current(gen)), timing: crate::hls::Timing { scale: self.inner.hls_scale.load(Ordering::Relaxed) } };
+                    let net = crate::hls::Net { streamer: streamer.clone(), allow: allow.clone(), stop: Arc::new(move || !me.current(gen)), timing: crate::hls::Timing { scale: self.inner.hls_scale.load(Ordering::Relaxed) }, tls: plan.clone() };
                     let reader = crate::hls::HlsReader::start(net, &url, Some(&raw)).map_err(|e| if self.current(gen) { StreamEnd::Failed(e) } else { StreamEnd::Stopped })?;
                     let codec = reader.codec();
                     return Ok((StreamHead { status: 200, headers: vec![], body: Box::new(reader) }, codec));
@@ -483,8 +620,101 @@ impl RadioPlayer {
         Err(StreamEnd::Failed("too many redirects".into()))
     }
 
-    fn stream_once(&self, gen: u64, station: &Station, allow: &Allow, play_cmd: &str, played: &mut bool) -> Result<(), StreamEnd> {
-        let (head, codec) = self.open(gen, &station.url, allow)?;
+    /// One request. A secure connection that fails for lack of the issuer's certificate is first completed from the issuer
+    /// address the certificate itself names (`http`, size-capped, DER only, and the result must still lead to a trusted root);
+    /// if that does not help, the person is told what the server showed and may approve exactly that certificate.
+    fn hop(&self, gen: u64, streamer: &Arc<dyn Streamer>, plan: &TlsPlan, station: &Station, url: &str, allow: &Allow) -> Result<StreamHead, StreamEnd> {
+        let headers = [("Icy-MetaData".to_string(), "1".to_string()), ("Accept".to_string(), "*/*".to_string())];
+        let e = match plan.open(&**streamer, url, &headers) {
+            Ok(h) => return Ok(h),
+            Err(e) => e,
+        };
+        if !self.current(gen) {
+            return Err(StreamEnd::Stopped);
+        }
+        let Some((host, port)) = https_endpoint(url) else { return Err(StreamEnd::Failed(format!("could not connect: {e}"))) };
+        let pinned = matches!(plan.mode_for(url), Some(TlsMode::Pin(_)));
+        let changed = pinned && e.contains(iyakki_proxy::pintls::CHANGED);
+        let unknown_issuer = !pinned && iyakki_proxy::pintls::is_unknown_issuer(&e);
+        if !changed && !unknown_issuer {
+            return Err(StreamEnd::Failed(format!("could not connect: {e}")));
+        }
+        let chain = match streamer.peer_chain(&host, port) {
+            Ok(c) => c,
+            Err(_) => return Err(StreamEnd::Failed(format!("could not connect: {e}"))),
+        };
+        let info = match certinfo::parse(&chain[0]) {
+            Ok(i) => i,
+            Err(_) => return Err(StreamEnd::Failed(format!("could not connect: {e}"))),
+        };
+        if unknown_issuer && plan.mode_for(url).is_none() {
+            if let Some(h) = self.complete_chain(streamer, plan, url, &chain[0], &info, allow, &headers) {
+                return Ok(h);
+            }
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        let name_ok = iyakki_proxy::pintls::names_match(&chain[0], &host);
+        let expired = info.not_after < now;
+        let trustable = name_ok && !expired && info.not_before <= now;
+        let trustable = trustable && https_endpoint(&station.url) == Some((host.clone(), port));
+        let who = format!("Its certificate is for {}, issued by {}, valid until {}; SHA-256 {}.", info.subject, info.issuer, certinfo::date_text(info.not_after), certinfo::fingerprint_groups(&info.sha256));
+        let message = if changed {
+            let was = station.cert_pin.as_ref().map(|p| certinfo::short_fingerprint(&p.sha256)).unwrap_or_default();
+            format!("The certificate of {host} changed since you trusted it (it was {was}…). A renewed certificate looks like this (Let's Encrypt renews every 60 to 90 days), and so does someone pretending to be the station; IYAKKI does not trust the new one without asking again. {who}")
+        } else if !name_ok {
+            format!("{UNKNOWN_ISSUER_TEXT} Its certificate is not even for {host}, so it cannot be trusted. {who}")
+        } else if expired {
+            format!("{UNKNOWN_ISSUER_TEXT} Its certificate has also expired. {who}")
+        } else {
+            format!("{UNKNOWN_ISSUER_TEXT} {who}")
+        };
+        if self.current(gen) {
+            *self.inner.problem.lock().unwrap() = Some(CertProblem { station: station.name.clone(), url: url.to_string(), host, port, changed, sha256: info.sha256.clone(), subject: info.subject.clone(), issuer: info.issuer.clone(), not_after: info.not_after, trustable, message: message.clone() });
+        }
+        Err(StreamEnd::Failed(message))
+    }
+
+    /// Fetch the issuer certificate the leaf names (and, when that one is itself issued by an authority the built-in roots do
+    /// not know, the next one up, at most three) and retry with them added. Everything is still verified against the roots.
+    #[allow(clippy::too_many_arguments)]
+    fn complete_chain(&self, streamer: &Arc<dyn Streamer>, plan: &TlsPlan, url: &str, _leaf: &[u8], info: &certinfo::CertInfo, allow: &Allow, headers: &[(String, String)]) -> Option<StreamHead> {
+        let mut found: Vec<Vec<u8>> = Vec::new();
+        let mut next = info.clone();
+        for _ in 0..MAX_ISSUER_HOPS {
+            let mut got = None;
+            for u in next.ca_issuers.iter().take(2) {
+                if !allow(&host_of(u)) {
+                    continue;
+                }
+                let Ok(h) = streamer.open(u, &[("Accept".into(), "application/pkix-cert, */*".into())]) else { continue };
+                if h.status != 200 {
+                    continue;
+                }
+                let mut der = Vec::new();
+                if h.body.take(MAX_ISSUER_CERT as u64 + 1).read_to_end(&mut der).is_err() || der.len() > MAX_ISSUER_CERT || der.first() != Some(&0x30) {
+                    continue;
+                }
+                if let Ok(i) = certinfo::parse(&der) {
+                    got = Some((der, i));
+                    break;
+                }
+            }
+            let (der, i) = got?;
+            found.push(der);
+            if let Ok(head) = streamer.open_tls(url, headers, &TlsMode::ExtraChain(found.clone())) {
+                plan.add_chain(url, found);
+                return Some(head);
+            }
+            if i.self_issued {
+                return None;
+            }
+            next = i;
+        }
+        None
+    }
+
+    fn stream_once(&self, gen: u64, station: &Station, allow: &Allow, plan: &TlsPlan, play_cmd: &str, played: &mut bool) -> Result<(), StreamEnd> {
+        let (head, codec) = self.open(gen, station, &station.url, allow, plan)?;
         // a missing add-on is reported before anything is read
         let aac = if codec == Codec::Aac { Some(self.aac_decoder().map_err(StreamEnd::Failed)?) } else { None };
         let interval = head.header("icy-metaint").and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
@@ -787,7 +1017,8 @@ mod tests {
     }
 
     fn wait_for(p: &RadioPlayer, what: impl Fn(&RadioState) -> bool) -> RadioState {
-        for _ in 0..500 {
+        // polls until the state matches; a generous limit (30 s) so a loaded machine running the whole suite does not starve a worker thread into a false failure
+        for _ in 0..3000 {
             let s = p.state();
             if what(&s) {
                 return s;
@@ -802,7 +1033,7 @@ mod tests {
     }
 
     fn st(url: &str) -> Station {
-        Station { name: "Test FM".into(), url: url.into() }
+        Station::new("Test FM", url)
     }
 
     fn tmp(tag: &str) -> PathBuf {
@@ -1087,6 +1318,10 @@ mod tests {
         p.play(&st("http://r.example.org/hello"), allow_all(), &format!("tee {}", out.display()));
         let s = wait_for(&p, |s| matches!(s, RadioState::Playing { .. }));
         assert!(matches!(&s, RadioState::Playing { kbps: 48, .. }), "{s:?}");
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while fed.lock().unwrap().len() < body.len() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         std::thread::sleep(Duration::from_millis(150));
         p.stop();
         assert_eq!(&fed.lock().unwrap()[..body.len()], &body[..], "the decoder got the stream untouched, from its first byte");
@@ -1181,7 +1416,7 @@ mod tests {
         let p = player(f);
         p.play(&st("https://r.example.org/a"), allow_all(), "tee /dev/null");
         wait_for(&p, |s| matches!(s, RadioState::Playing { .. }));
-        p.play(&Station { name: "Other".into(), url: "https://r.example.org/b".into() }, allow_all(), "tee /dev/null");
+        p.play(&Station::new("Other", "https://r.example.org/b"), allow_all(), "tee /dev/null");
         let s = wait_for(&p, |s| matches!(s, RadioState::Playing { station, .. } if station == "Other"));
         assert!(p.is_active(), "{s:?}");
         p.play(&st("https://r.example.org/a"), allow_all(), "/nonexistent/player -q");
@@ -1213,5 +1448,247 @@ mod tests {
             let _ = std::fs::write(keep, &wav);
         }
         assert!(loud > 500, "there is real sound");
+    }
+
+    // ---------------------------------------------------------------------- server certificates
+
+    fn long_wait(p: &RadioPlayer) -> RadioState {
+        for _ in 0..4000 {
+            let s = p.state();
+            if matches!(s, RadioState::Playing { .. } | RadioState::Failed { .. }) {
+                return s;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        p.state()
+    }
+
+    /// Needs the internet. `cargo test -p iyakki-agent --lib live_incomplete_chain -- --ignored --nocapture`
+    /// (`IYAKKI_RADIO_URL` to try another station). Shows what happens with a server that sends only its leaf certificate: whether
+    /// the issuer could be fetched, or the decision that is offered; then plays once with the approved certificate.
+    #[test]
+    #[ignore]
+    fn live_incomplete_chain() {
+        let url = std::env::var("IYAKKI_RADIO_URL").unwrap_or_else(|_| "https://radios.crabdance.com:8002/3".into());
+        let p = RadioPlayer::default();
+        p.set_streamer(Arc::new(iyakki_proxy::https::UreqStreamer::default()));
+        p.play(&st(&url), allow_all(), "tee /dev/null");
+        let s = long_wait(&p);
+        eprintln!("first try: {s:?}");
+        if let Some(c) = p.cert_problem() {
+            eprintln!("offered: {} | {} <- {} | until {} | {}", c.host, c.subject, c.issuer, c.expiry(), certinfo::fingerprint_groups(&c.sha256));
+            p.stop();
+            let mut station = st(&url);
+            station.cert_pin = Some(c.pin());
+            p.play(&station, allow_all(), "tee /dev/null");
+            let s = long_wait(&p);
+            eprintln!("with the approved certificate: {s:?}");
+        }
+        p.stop();
+    }
+
+    const HOST: &str = "radios.example.org";
+    const URL: &str = "https://radios.example.org:8002/3";
+
+    /// A network where `radios.example.org:8002` sends its leaf only (so the usual check says "unknown issuer").
+    struct TlsFake {
+        leaf: Vec<u8>,
+        /// The certificate the server shows now (a renewal changes it).
+        shown: Mutex<Vec<u8>>,
+        aia: Option<(String, Vec<u8>)>,
+        /// What happened, in order: "open <url>", "pinned <url>", "chain <url>", "fetch <url>".
+        log: Mutex<Vec<String>>,
+        redirect_pinned: bool,
+    }
+
+    impl TlsFake {
+        fn new(aia: Option<&str>) -> Arc<TlsFake> {
+            let leaf = iyakki_proxy::testcerts::leaf_der(&[HOST], None, aia);
+            let inter = aia.map(|u| (u.to_string(), iyakki_proxy::testcerts::leaf_der(&["Test Intermediate"], None, None)));
+            Arc::new(TlsFake { shown: Mutex::new(leaf.clone()), leaf, aia: inter, log: Mutex::new(vec![]), redirect_pinned: false })
+        }
+        fn fp(&self) -> String {
+            certinfo::fingerprint(&self.leaf)
+        }
+        fn mp3(&self) -> Result<StreamHead, String> {
+            Ok(StreamHead { status: 200, headers: vec![("content-type".into(), "audio/mpeg".into())], body: Box::new(Cursor::new(silence(40))) })
+        }
+        fn saw(&self, what: &str) -> bool {
+            self.log.lock().unwrap().iter().any(|l| l.starts_with(what))
+        }
+    }
+
+    impl Streamer for TlsFake {
+        fn open(&self, url: &str, _h: &[(String, String)]) -> Result<StreamHead, String> {
+            self.log.lock().unwrap().push(format!("open {url}"));
+            if let Some((u, der)) = &self.aia {
+                if url == u {
+                    self.log.lock().unwrap().push(format!("fetch {url}"));
+                    return Ok(StreamHead { status: 200, headers: vec![], body: Box::new(Cursor::new(der.clone())) });
+                }
+            }
+            if url == URL {
+                return Err("io: invalid peer certificate: UnknownIssuer".into());
+            }
+            if url.starts_with("https://elsewhere.example.org/") {
+                return self.mp3();
+            }
+            Err("connection refused".into())
+        }
+        fn open_tls(&self, url: &str, _h: &[(String, String)], mode: &TlsMode) -> Result<StreamHead, String> {
+            match mode {
+                TlsMode::Pin(fp) => {
+                    self.log.lock().unwrap().push(format!("pinned {url}"));
+                    let shown = self.shown.lock().unwrap().clone();
+                    if certinfo::norm_fingerprint(fp) != certinfo::norm_fingerprint(&certinfo::fingerprint(&shown)) {
+                        return Err(format!("io: {} (it now shows {})", iyakki_proxy::pintls::CHANGED, certinfo::fingerprint(&shown)));
+                    }
+                    if self.redirect_pinned {
+                        return Ok(StreamHead { status: 302, headers: vec![("location".into(), "https://elsewhere.example.org/live".into())], body: Box::new(Cursor::new(vec![])) });
+                    }
+                    self.mp3()
+                }
+                TlsMode::ExtraChain(c) => {
+                    self.log.lock().unwrap().push(format!("chain {url}"));
+                    match &self.aia {
+                        Some((_, der)) if c == &vec![der.clone()] => self.mp3(),
+                        _ => Err("io: invalid peer certificate: UnknownIssuer".into()),
+                    }
+                }
+            }
+        }
+        fn peer_chain(&self, host: &str, port: u16) -> Result<Vec<Vec<u8>>, String> {
+            assert_eq!((host, port), (HOST, 8002));
+            Ok(vec![self.shown.lock().unwrap().clone()])
+        }
+    }
+
+    fn tls_player(f: Arc<TlsFake>) -> RadioPlayer {
+        let p = RadioPlayer::default();
+        p.set_streamer(f);
+        p.set_retry_wait(Duration::from_millis(30));
+        p
+    }
+
+    #[test]
+    fn a_server_without_its_intermediate_fails_with_a_plain_message_and_the_certificate_to_decide_about() {
+        let f = TlsFake::new(None);
+        let p = tls_player(f.clone());
+        p.play(&st(URL), allow_all(), "tee /dev/null");
+        let RadioState::Failed { why, .. } = wait_for(&p, |s| matches!(s, RadioState::Failed { .. })) else { unreachable!() };
+        assert!(why.starts_with(UNKNOWN_ISSUER_TEXT) && why.contains("Browsers hide this; IYAKKI checks strictly."), "{why}");
+        let c = p.cert_problem().expect("the decision is offered");
+        assert_eq!((c.host.as_str(), c.port, c.changed, c.trustable), (HOST, 8002, false, true));
+        assert_eq!(c.sha256, f.fp());
+        assert_eq!(c.subject, HOST);
+        assert!(why.contains(&certinfo::fingerprint_groups(&c.sha256)) && why.contains(&c.expiry()) && why.contains(&c.issuer));
+        assert!(!f.saw("pinned"), "nothing is trusted without the person");
+        // a new start clears the offer
+        p.play(&st("https://nowhere.example.org/x"), allow_all(), "tee /dev/null");
+        wait_for(&p, |s| matches!(s, RadioState::Failed { .. }));
+        assert!(p.cert_problem().is_none());
+    }
+
+    #[test]
+    fn an_approved_certificate_plays_for_that_host_only_and_a_redirect_elsewhere_is_verified_normally() {
+        let mut f = TlsFake::new(None);
+        Arc::get_mut(&mut f).unwrap().redirect_pinned = true;
+        let p = tls_player(f.clone());
+        let mut station = st(URL);
+        station.cert_pin = Some(CertPin { host: HOST.into(), port: 8002, sha256: f.fp() });
+        p.play(&station, allow_all(), "tee /dev/null");
+        wait_for(&p, |s| matches!(s, RadioState::Playing { .. }));
+        let log = f.log.lock().unwrap().clone();
+        assert_eq!(log[0], format!("pinned {URL}"));
+        assert!(log.contains(&"open https://elsewhere.example.org/live".to_string()), "the redirect target uses the ordinary check: {log:?}");
+        assert!(!log.iter().any(|l| l.starts_with("pinned https://elsewhere")));
+        p.stop();
+    }
+
+    #[test]
+    fn a_changed_certificate_is_refused_says_so_and_is_never_pinned_silently() {
+        let f = TlsFake::new(None);
+        let p = tls_player(f.clone());
+        let mut station = st(URL);
+        station.cert_pin = Some(CertPin { host: HOST.into(), port: 8002, sha256: f.fp() });
+        // the renewal
+        let renewed = iyakki_proxy::testcerts::leaf_der(&[HOST], None, None);
+        *f.shown.lock().unwrap() = renewed.clone();
+        p.play(&station, allow_all(), "tee /dev/null");
+        let RadioState::Failed { why, .. } = wait_for(&p, |s| matches!(s, RadioState::Failed { .. })) else { unreachable!() };
+        assert!(why.contains("changed since you trusted it") && why.contains("renews every 60 to 90 days") && why.contains(&certinfo::fingerprint_groups(&certinfo::fingerprint(&renewed))), "{why}");
+        let c = p.cert_problem().unwrap();
+        assert!(c.changed && c.trustable && c.sha256 == certinfo::fingerprint(&renewed));
+        // the old pin is untouched by the failure: trusting the new one is the person's separate step
+        assert_eq!(station.cert_pin.as_ref().unwrap().sha256, f.fp());
+    }
+
+    #[test]
+    fn a_missing_intermediate_is_fetched_from_the_certificates_own_address_when_the_policy_allows() {
+        let f = TlsFake::new(Some("http://ca.example.org/int.der"));
+        let p = tls_player(f.clone());
+        p.play(&st(URL), allow_all(), "tee /dev/null");
+        wait_for(&p, |s| matches!(s, RadioState::Playing { .. }));
+        assert!(f.saw("fetch http://ca.example.org/int.der") && f.saw("chain"), "{:?}", f.log.lock().unwrap());
+        assert!(p.cert_problem().is_none(), "no prompt is needed");
+        p.stop();
+        // the account's host policy applies to the issuer's address too: refused, so the person is asked instead
+        let f = TlsFake::new(Some("http://ca.example.org/int.der"));
+        let p = tls_player(f.clone());
+        p.play(&st(URL), Arc::new(|h: &str| h != "ca.example.org"), "tee /dev/null");
+        wait_for(&p, |s| matches!(s, RadioState::Failed { .. }));
+        assert!(!f.saw("fetch") && p.cert_problem().is_some());
+    }
+
+    #[test]
+    fn a_certificate_for_another_name_or_past_its_dates_cannot_be_trusted() {
+        for (names, years, why) in [(vec!["other.example.org"], None, "not even for"), (vec![HOST], Some((2019, 2020)), "expired")] {
+            let leaf = iyakki_proxy::testcerts::leaf_der(&names, years, None);
+            let f = Arc::new(TlsFake { shown: Mutex::new(leaf.clone()), leaf, aia: None, log: Mutex::new(vec![]), redirect_pinned: false });
+            let p = tls_player(f);
+            p.play(&st(URL), allow_all(), "tee /dev/null");
+            let RadioState::Failed { why: said, .. } = wait_for(&p, |s| matches!(s, RadioState::Failed { .. })) else { unreachable!() };
+            assert!(said.contains(why), "{said}");
+            assert!(!p.cert_problem().unwrap().trustable);
+        }
+    }
+
+    #[test]
+    fn the_approval_is_kept_per_person_with_the_station_and_old_files_still_parse() {
+        let d = tmp("pins");
+        // a file from before pins existed
+        std::fs::write(d.join("radio-asha.json"), r#"[{"name":"Old FM","url":"https://old.example.org/live.mp3"}]"#).unwrap();
+        let a = StationStore::new(&d, "asha");
+        let b = StationStore::new(&d, "ravi");
+        assert_eq!(a.list()[0].cert_pin, None);
+        let f = TlsFake::new(None);
+        let p = tls_player(f.clone());
+        let station = st(URL);
+        p.play(&station, allow_all(), "tee /dev/null");
+        wait_for(&p, |s| matches!(s, RadioState::Failed { .. }));
+        let problem = p.cert_problem().unwrap();
+        // a station that is not in the list yet (a preset) is added with its pin
+        let kept = a.trust(&station, &problem).unwrap();
+        assert_eq!(kept.cert_pin, Some(CertPin { host: HOST.into(), port: 8002, sha256: f.fp() }));
+        assert_eq!(a.list().len(), 2);
+        assert!(b.list().is_empty(), "another person has not trusted anything");
+        let text = std::fs::read_to_string(d.join("radio-asha.json")).unwrap();
+        assert!(text.contains(&f.fp()) && text.matches("cert_pin").count() == 1, "only the station with a pin has the field: {text}");
+        // saving the same station again under the same address keeps the approval; a new address drops it
+        a.add("Test FM", URL).unwrap();
+        assert!(a.list().iter().find(|s| s.name == "Test FM").unwrap().cert_pin.is_some());
+        a.add("Test FM", "https://elsewhere.example.org/live").unwrap();
+        assert!(a.list().iter().find(|s| s.name == "Test FM").unwrap().cert_pin.is_none());
+        // a pin for some other server is refused, and so is trusting what cannot be trusted
+        assert!(a.set_pin(&Station::new("Old FM", "https://old.example.org/live.mp3"), Some(CertPin { host: HOST.into(), port: 8002, sha256: f.fp() })).is_err());
+        assert!(a.trust(&station, &CertProblem { trustable: false, ..problem.clone() }).is_err());
+        // the saved station now points elsewhere, so the old offer cannot be applied to it
+        assert!(a.trust(&station, &problem).is_err());
+        // forgetting
+        a.add("Test FM", URL).unwrap();
+        a.trust(&station, &problem).unwrap();
+        assert!(a.forget_trust("Test FM").unwrap().cert_pin.is_none());
+        assert!(a.forget_trust("Test FM").is_err());
+        assert!(a.list().iter().all(|s| s.cert_pin.is_none()));
     }
 }

@@ -648,10 +648,12 @@ pub enum Glyph {
     Globe,
     /// A page with a folded corner and lines: the Notes tab.
     Note,
+    /// A branch: two commits on a line and a fork: the Git tab.
+    Git,
 }
 
 impl Glyph {
-    pub const ALL: [Glyph; 27] = [
+    pub const ALL: [Glyph; 28] = [
         Glyph::Editor,
         Glyph::Board,
         Glyph::K8s,
@@ -679,6 +681,7 @@ impl Glyph {
         Glyph::Restart,
         Glyph::Globe,
         Glyph::Note,
+        Glyph::Git,
     ];
 }
 
@@ -749,6 +752,14 @@ pub fn glyph(g: &mut Gfx, glyph: Glyph, cx: f32, cy: f32, size: f32, c: [u8; 4])
             let r = p(0.42, 0.42);
             g.ring(r.0, r.1, size * 0.27, lw, c);
             poly(g, &[(0.62, 0.62), (0.9, 0.9)], false);
+        }
+        Glyph::Git => {
+            poly(g, &[(0.3, 0.2), (0.3, 0.8)], false);
+            poly(g, &[(0.3, 0.55), (0.7, 0.4)], false);
+            for (x, y) in [(0.3, 0.2), (0.3, 0.8), (0.7, 0.4)] {
+                let d = p(x, y);
+                g.ring(d.0, d.1, size * 0.1, lw * 0.9, c);
+            }
         }
         Glyph::Note => {
             poly(g, &[(0.2, 0.1), (0.62, 0.1), (0.84, 0.32), (0.84, 0.9), (0.2, 0.9)], true);

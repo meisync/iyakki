@@ -15,6 +15,7 @@
 //! | `power` | reboot and power off (the `shell` scope includes it) |
 //! | `update` | replace the boot partition files (a system update) |
 //! | `forward` | TCP port forwarding to services listening on the device's own loopback |
+//! | `kube` | read-only look at the dev cluster (`iyakki dev kube get|describe|logs|top|events`); Secrets are never shown |
 
 use iyakki_sec::policy::Policy;
 
@@ -33,10 +34,16 @@ pub enum Scope {
     Power,
     Update,
     Forward,
+    Kube,
 }
 
 impl Scope {
-    pub const ALL: [Scope; 11] = [Scope::Install, Scope::Debug, Scope::Files, Scope::FilesSystem, Scope::Config, Scope::Input, Scope::InputPassword, Scope::Shell, Scope::Power, Scope::Update, Scope::Forward];
+    pub const ALL: [Scope; 12] = [Scope::Install, Scope::Debug, Scope::Files, Scope::FilesSystem, Scope::Config, Scope::Input, Scope::InputPassword, Scope::Shell, Scope::Power, Scope::Update, Scope::Forward, Scope::Kube];
+
+    /// What "grant all diagnostic scopes" gives a computer, to help find a fault: look (debug), read and copy files, drive the screen,
+    /// look at the dev cluster, and ask for a shell (which still needs the approval on this screen every time). Never the system
+    /// update, restart/power, port forwarding, system files, password fields or settings changes.
+    pub const DIAGNOSTIC: [Scope; 5] = [Scope::Debug, Scope::Files, Scope::Input, Scope::Kube, Scope::Shell];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -51,6 +58,7 @@ impl Scope {
             Scope::Power => "power",
             Scope::Update => "update",
             Scope::Forward => "forward",
+            Scope::Kube => "kube",
         }
     }
 
@@ -71,22 +79,24 @@ impl Scope {
             Scope::Power => "Reboot and power off",
             Scope::Update => "SYSTEM UPDATE: replace boot files",
             Scope::Forward => "Forward ports of this device",
+            Scope::Kube => "Look at the dev cluster (read-only)",
         }
     }
 
     pub fn describe(self) -> &'static str {
         match self {
             Scope::Install => "install, upgrade and remove apps, read their logs, open them, take a screenshot",
-            Scope::Debug => "read device info, processes, the kernel and system logs and service status; changes nothing",
+            Scope::Debug => "read device info, processes, the kernel and system logs, service status, a snapshot of the screen's text, inbox titles and the diagnostic bundle; changes nothing",
             Scope::Files => "copy files to and from the account's home folder, workspaces and /tmp/iyakki-dev; delete there",
             Scope::FilesSystem => "read (never write) /etc, /lib/modules and IYAKKI's data folder; passwords, vault and keys are never readable",
             Scope::Config => "change a fixed list of settings (sound, display, time zone, host name, firewall, models, apps); API keys are write-only",
-            Scope::Input => "press keys, tap and type on the screen as if at the keyboard",
+            Scope::Input => "press keys, tap, click a button by its label and type on the screen as if at the keyboard (never into password fields)",
             Scope::InputPassword => "the same while a password field has focus",
             Scope::Shell => "run any command as the account; each use needs your approval on this screen",
             Scope::Power => "restart or switch off this device",
             Scope::Update => "replace the kernel, initrd and boot menu with new ones (the old pair is kept)",
             Scope::Forward => "open TCP ports of this device's own services (local model server, dev cluster) on the computer",
+            Scope::Kube => "read-only kubectl on the dev cluster (get, describe, logs, top, events); Secrets are blocked, nothing can be changed",
         }
     }
 
@@ -98,7 +108,7 @@ impl Scope {
     /// Needs an account that may manage settings (administrator role). The others work with any role that may use developer mode,
     /// within what the role allows.
     pub fn needs_admin(self) -> bool {
-        matches!(self, Scope::Shell | Scope::Update | Scope::Forward | Scope::Power | Scope::FilesSystem)
+        matches!(self, Scope::Shell | Scope::Update | Scope::Forward | Scope::Power | Scope::FilesSystem | Scope::Kube)
     }
 
     /// Scopes that must be on for this one to mean anything.
@@ -199,6 +209,23 @@ impl DevMode {
         if !on {
             super::sessions::end_scope(&self.data, &k.name, s);
         }
+        Ok(k)
+    }
+
+    /// "Grant all diagnostic scopes" (administrators, on the device): adds [`Scope::DIAGNOSTIC`] to what the computer holds. Nothing is
+    /// removed, and the system update, power, forward, system files, password input and settings stay as they were. The 4 h switch-off
+    /// timer of developer mode is not touched.
+    pub fn grant_diagnostic(&self, policy: &Policy, user: &str, computer: &str) -> Result<DevKey, String> {
+        Self::need_admin(policy)?;
+        let _one_at_a_time = super::keys_lock();
+        let mut keys = self.keys();
+        let k = keys.iter_mut().find(|k| k.name == computer).ok_or_else(|| format!("no paired computer called {computer}"))?;
+        for s in Scope::DIAGNOSTIC {
+            k.scopes = toggled(&k.scopes, s, true)?;
+        }
+        let k = k.clone();
+        self.write("keys.json", &keys)?;
+        self.log(user, user, "devmode.scope.grant", &format!("{computer} diagnostic scopes -> now: {}", k.scope_text()), true);
         Ok(k)
     }
 

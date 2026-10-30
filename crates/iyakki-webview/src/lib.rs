@@ -5,6 +5,7 @@
 //! shared file ([`client`]). Nothing here links a web engine, and nothing here has dependencies.
 
 pub mod blit;
+pub mod childstate;
 pub mod client;
 pub mod keys;
 pub mod proto;

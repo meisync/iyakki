@@ -275,24 +275,34 @@ fn in_a_pane_the_cards_stay_inside_the_pane() {
 }
 
 #[test]
-fn a_small_screen_scrolls_to_the_selected_card_and_the_wheel_moves_the_selection() {
+fn a_small_screen_scrolls_to_the_selected_card_and_the_wheel_scrolls_the_cards_not_the_choice() {
     let cx = admin("ss-scroll");
     let mut a = page(&cx);
     a.sel[a.tab] = 9;
     let g = draw(&mut a, &cx, 800, 480);
     assert!(g.hits.iter().any(|h| h.ev == Event::Row(9)), "the last card scrolled into view");
     assert!(!g.hits.iter().any(|h| h.ev == Event::Row(0)), "the first one made room");
-    a.sel[a.tab] = 0;
-    a.handle(&Event::Scroll(-1), &cx);
-    assert_eq!(a.sel(), 1, "the wheel moves down");
-    a.handle(&Event::Row(5), &cx);
-    assert_eq!(a.sel(), 5, "a click on a card selects it");
+    // the wheel moves the cards, the choice stays; the cards above come back
+    a.handle(&Event::Scroll(10), &cx);
+    let g = draw(&mut a, &cx, 800, 480);
+    assert_eq!(a.sel(), 9, "the wheel does not move the choice");
+    assert!(g.hits.iter().any(|h| h.ev == Event::Row(0)), "the wheel scrolled back to the first card");
+    // a click on a card selects it and no card moves
+    let at = |g: &Gfx, i: usize| g.hits.iter().find(|h| h.ev == Event::Row(i)).map(|h| h.rect.y as i32);
+    let shown: Vec<usize> = (0..10).filter(|i| at(&g, *i).is_some()).collect();
+    let last = *shown.last().unwrap();
+    a.handle(&Event::Row(last), &cx);
+    assert_eq!(a.sel(), last, "a click on a card selects it");
+    let after = draw(&mut a, &cx, 800, 480);
+    for i in shown {
+        assert_eq!(at(&after, i), at(&g, i), "card {i} stayed where it was after the click");
+    }
 }
 
 #[test]
 fn the_overview_does_not_ask_for_attention_about_the_saver() {
     let cx = admin("ss-overview");
-    let mut a = SettingsApp::new(&cx);
+    let a = SettingsApp::new(&cx);
     let before = a.attention(&cx).len();
     let c = SaverConfig { first: First::Nothing, ..SaverConfig::default() };
     c.save(cx.services.dir(), "root").unwrap();

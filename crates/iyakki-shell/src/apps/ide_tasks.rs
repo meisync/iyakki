@@ -227,6 +227,8 @@ impl TasksView {
     /// Read the diff and the dry run of the selected task on a worker thread when it changed.
     pub fn tick(&mut self) {
         self.detail.on_tick();
+        // tasks that wait for memory start when it is free again
+        self.mgr.poll();
         let Some(t) = self.selected() else { return };
         if t.status.active() || t.status.finished() || !t.tree.exists() {
             return;
@@ -610,11 +612,12 @@ impl TasksView {
         let mut bx = r.x + pad;
         bx += chrome::text_btn(g, bx, by, s, "+ New task", OK, true, Event::Sub(SUB, Key::Char('n')), "New task", Some("Describe a piece of work to run in its own copy (n)"), bounds) + 4.0 * s;
         bx += chrome::text_btn(g, bx, by, s, "−", MUTED, true, Event::Sub(SUB, Key::Char('-')), "fewer at once", Some("Run fewer tasks at once (-)"), bounds);
-        let max = format!("max {}", self.mgr.concurrency());
+        let (set, now) = (self.mgr.concurrency(), self.mgr.effective_concurrency());
+        let max = if now < set { format!("max {set} · now {now}") } else { format!("max {set}") };
         let w = g.text_width(m.font_small * s, &max, Face::Bold);
         g.text(bx + 4.0 * s, by + (rowh - g.line_height(m.font_small * s, Face::Bold)) / 2.0, m.font_small * s, chrome::muted(), &max, Face::Bold);
         bx += w + 12.0 * s;
-        chrome::text_btn(g, bx, by, s, "+", MUTED, true, Event::Sub(SUB, Key::Char('+')), "more at once", Some("Run more tasks at once, up to 6 (+)"), bounds);
+        chrome::text_btn(g, bx, by, s, "+", MUTED, true, Event::Sub(SUB, Key::Char('+')), "more at once", Some("Run more tasks at once, up to 6; fewer run while memory is low (+)"), bounds);
         let mut top = by + rowh + 6.0 * s;
         // the one queue of approvals, tagged with the task
         let appr = self.mgr.approvals();

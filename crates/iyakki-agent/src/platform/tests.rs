@@ -50,6 +50,7 @@ fn healthy(r: &FakeRunner) {
     r.answer("label namespace", "namespace/iyakki-gitea labeled");
     r.answer("create secret generic", "secret/gitea-admin created");
     r.answer("label secret", "secret/gitea-admin labeled");
+    r.fail("get pvc", 1, "Error from server (NotFound): persistentvolumeclaims not found");
     r.answer("apply -f", "created");
     r.answer("rollout status", "deployment \"gitea\" successfully rolled out");
     r.answer("generate-access-token", &format!("{TOKEN}\n"));
@@ -92,6 +93,11 @@ fn profile(w: &W) -> crate::devcluster::ClusterProfile {
 
 fn gitea() -> Arc<dyn ServiceDef> {
     spec("gitea").unwrap()
+}
+
+/// The NodePort exposure, which is a deliberate choice now (the default keeps Gitea on this machine).
+fn np() -> Options {
+    opts(&[("exposure", "NodePort")])
 }
 
 fn opts(pairs: &[(&str, &str)]) -> Options {
@@ -146,8 +152,8 @@ fn scan_everything(w: &W, extra: &[String]) {
 fn the_gitea_plan_is_rootless_limited_probed_pinned_and_passes_the_manifest_check_cleanly() {
     let w = world("plan");
     healthy(&w.run);
-    let p = plan(&w.pl, &*gitea(), &profile(&w), &Options::default()).unwrap();
-    assert!(p.can_apply() && p.warnings.is_empty(), "{:?} {:?}", p.blockers, p.warnings);
+    let p = plan(&w.pl, &*gitea(), &profile(&w), &np()).unwrap();
+    assert!(p.can_apply() && p.warnings.iter().all(|w| w.starts_with("NodePort OPENS")), "{:?} {:?}", p.blockers, p.warnings);
     let lint = crate::deploylint::lint(&p.manifest, "iyakki-gitea", &|_| false);
     assert!(lint.ok() && lint.warnings.is_empty(), "{}", lint.report());
     let m = &p.manifest;
@@ -174,13 +180,13 @@ fn exposure_options_build_the_right_services_and_bad_options_are_refused() {
     let w = world("exposure");
     healthy(&w.run);
     let pr = profile(&w);
-    let cip = plan(&w.pl, &*gitea(), &pr, &opts(&[("exposure", "ClusterIP")])).unwrap();
+    let cip = plan(&w.pl, &*gitea(), &pr, &opts(&[("exposure", "ClusterIP"), ("loopback_port", "none")])).unwrap();
     assert!(cip.manifest.contains("type: ClusterIP") && !cip.manifest.contains("nodePort") && cip.notes.iter().any(|n| n.contains("port-forward")), "{}", cip.manifest);
     let ing = plan(&w.pl, &*gitea(), &pr, &opts(&[("exposure", "Ingress"), ("ingress_host", "git.example.lan")])).unwrap();
     assert!(ing.manifest.contains("kind: Ingress") && ing.manifest.contains("host: git.example.lan") && ing.urls[0].url == "http://git.example.lan", "{}", ing.manifest);
     let lb = plan(&w.pl, &*gitea(), &pr, &opts(&[("exposure", "LoadBalancer"), ("public_host", "10.0.0.9")])).unwrap();
     assert!(lb.manifest.contains("type: LoadBalancer") && lb.urls[0].url == "http://10.0.0.9:3000");
-    let sized = plan(&w.pl, &*gitea(), &pr, &opts(&[("storage_size", "50Gi"), ("storage_class", "local-path"), ("http_node_port", "31000"), ("admin_user", "gitadmin")])).unwrap();
+    let sized = plan(&w.pl, &*gitea(), &pr, &opts(&[("storage_size", "50Gi"), ("storage_class", "local-path"), ("http_node_port", "31000"), ("exposure", "NodePort"), ("admin_user", "gitadmin")])).unwrap();
     assert!(sized.manifest.contains("storage: 50Gi") && sized.manifest.contains("nodePort: 31000") && sized.manifest.contains("GITEA_ADMIN_USER\n          value: \"gitadmin\""));
     for (k, v, why) in [("namespace", "default", "protected"), ("namespace", "kube-system", "protected"), ("namespace", "iyakki-registry", "protected"), ("namespace", "Bad_NS", "valid namespace"), ("storage_size", "ten", "size"), ("exposure", "Teleport", "Exposure"), ("admin_user", "admin", "reserve"), ("http_node_port", "80", "NodePort"), ("version", "9.9.9", "one of"), ("bogus", "1", "not an option"), ("exposure", "Ingress", "Ingress host"), ("exposure", "LoadBalancer", "Public host"), ("ingress_host", "x.lan", "only used")] {
         let e = plan(&w.pl, &*gitea(), &pr, &opts(&[(k, v)])).unwrap_err();
@@ -249,7 +255,7 @@ fn cluster_problems_are_blockers_in_the_plan_and_apply_refuses_them() {
     // a taken NodePort asked for by number
     let w = world("block-port");
     healthy(&w.run);
-    let p = plan(&w.pl, &*gitea(), &profile(&w), &opts(&[("http_node_port", "30300")])).unwrap();
+    let p = plan(&w.pl, &*gitea(), &profile(&w), &opts(&[("http_node_port", "30300"), ("exposure", "NodePort")])).unwrap();
     assert!(p.blockers.iter().any(|b| b.contains("30300") && b.contains("already used")), "{:?}", p.blockers);
 }
 
@@ -286,8 +292,8 @@ fn an_image_for_the_wrong_cpu_architecture_is_a_warning_and_a_registered_service
     assert!(p.warnings.iter().any(|x| x.contains("amd64 only") || x.contains("published for amd64")) && p.warnings.iter().any(|x| x.contains("pi")), "{:?}", p.warnings);
     assert!(p.can_apply(), "a warning does not block");
     // Gitea is multi-arch: no warning on arm64
-    let g = plan(&pl2, &*gitea(), &profile(&w), &Options::default()).unwrap();
-    assert!(g.warnings.is_empty(), "{:?}", g.warnings);
+    let g = plan(&pl2, &*gitea(), &profile(&w), &np()).unwrap();
+    assert!(g.warnings.iter().all(|w| w.starts_with("NodePort OPENS")), "{:?}", g.warnings);
     unregister("amdonly");
     assert!(spec("amdonly").is_none());
 }
@@ -301,7 +307,7 @@ fn mirroring_plans_pull_tag_push_through_the_in_cluster_registry_or_blocks() {
     let w = world("mirror");
     w.run.answer("get service registry", r#"{"spec":{"ports":[{"nodePort":30500}]}}"#);
     healthy(&w.run);
-    let p = plan(&w.pl, &*gitea(), &profile(&w), &opts(&[("mirror", "true")])).unwrap();
+    let p = plan(&w.pl, &*gitea(), &profile(&w), &opts(&[("mirror", "true"), ("exposure", "NodePort")])).unwrap();
     assert!(p.can_apply(), "{:?}", p.blockers);
     assert_eq!(p.image_refs, vec!["localhost:30500/iyakki-platform/gitea/gitea:1.24.5-rootless"]);
     assert!(p.manifest.contains("image: localhost:30500/iyakki-platform/gitea/gitea:1.24.5-rootless"));
@@ -315,7 +321,7 @@ fn mirroring_plans_pull_tag_push_through_the_in_cluster_registry_or_blocks() {
     // no registry: blocked with the way out
     let w2 = world("mirror2");
     healthy(&w2.run);
-    let p2 = plan(&w2.pl, &*gitea(), &profile(&w2), &opts(&[("mirror", "true")])).unwrap();
+    let p2 = plan(&w2.pl, &*gitea(), &profile(&w2), &opts(&[("mirror", "true"), ("exposure", "NodePort")])).unwrap();
     assert!(p2.blockers.iter().any(|b| b.contains("in-cluster registry")));
 }
 
@@ -326,7 +332,7 @@ fn applying_creates_the_namespace_the_secret_the_objects_waits_sets_up_and_recor
     let w = world("apply");
     healthy(&w.run);
     w.http.answer("GET http://localhost:30301/api/healthz", 200, "{}");
-    let p = plan(&w.pl, &*gitea(), &profile(&w), &Options::default()).unwrap();
+    let p = plan(&w.pl, &*gitea(), &profile(&w), &np()).unwrap();
     let before = w.run.calls().len();
     assert!(apply(&w.pl, &p, false, &mut |_| {}).is_err());
     assert_eq!(w.run.calls().len(), before, "no approval, no command");
@@ -366,7 +372,7 @@ fn applying_creates_the_namespace_the_secret_the_objects_waits_sets_up_and_recor
 fn a_locked_vault_stops_before_the_cluster_is_touched_and_a_failed_secret_rolls_the_vault_back() {
     let w = world("vault");
     healthy(&w.run);
-    let p = plan(&w.pl, &*gitea(), &profile(&w), &Options::default()).unwrap();
+    let p = plan(&w.pl, &*gitea(), &profile(&w), &np()).unwrap();
     w.vault.locked.store(true, std::sync::atomic::Ordering::SeqCst);
     let before = w.run.calls().len();
     let e = apply(&w.pl, &p, true, &mut |_| {}).unwrap_err();
@@ -378,7 +384,7 @@ fn a_locked_vault_stops_before_the_cluster_is_touched_and_a_failed_secret_rolls_
     let w2 = world("vault2");
     w2.run.fail("create secret generic", 1, "forbidden");
     healthy(&w2.run);
-    let p2 = plan(&w2.pl, &*gitea(), &profile(&w2), &Options::default()).unwrap();
+    let p2 = plan(&w2.pl, &*gitea(), &profile(&w2), &np()).unwrap();
     let e = apply(&w2.pl, &p2, true, &mut |_| {}).unwrap_err();
     assert!(e.contains("forbidden") && !e.contains(PLANTED));
     assert!(!w2.vault.has("svc.gitea-iyakki-gitea.admin-password"), "no orphan vault entry");
@@ -393,12 +399,28 @@ fn deploying_again_keeps_the_secret_and_the_ports_and_never_regenerates() {
     w.run.answer("get services -n iyakki-gitea -l", "gitea-http 30345\ngitea-ssh 30346\n");
     healthy(&w.run);
     w.vault.set("svc.gitea-iyakki-gitea.token", TOKEN).unwrap();
-    let p = plan(&w.pl, &*gitea(), &profile(&w), &Options::default()).unwrap();
+    let p = plan(&w.pl, &*gitea(), &profile(&w), &np()).unwrap();
     assert!(!p.create_namespace && p.manifest.contains("nodePort: 30345") && p.manifest.contains("nodePort: 30346"), "{}", p.manifest);
     assert!(p.existing.is_empty());
     let a = apply(&w.pl, &p, true, &mut |_| {}).unwrap_or_else(|e| panic!("{e}"));
     assert!(a.reveal.is_empty() && a.done.iter().any(|d| d.contains("kept the existing Secret")) && a.done.iter().any(|d| d.contains("kept the existing IYAKKI token")), "{:?}", a.done);
     assert!(w.run.lines().iter().all(|l| !l.contains("create secret") && !l.contains("create namespace iyakki") && !l.contains("generate-access-token")));
+}
+
+#[test]
+fn deploying_over_an_existing_bound_volume_leaves_the_claim_out_of_the_apply_and_succeeds() {
+    let w = world("pvc-again");
+    w.run.answer("get pvc gitea-data", r#"{"spec":{"storageClassName":"local-path","resources":{"requests":{"storage":"10Gi"}}},"status":{"phase":"Bound"}}"#);
+    w.run.answer("get secret gitea-admin", "secret/gitea-admin");
+    w.run.answer("get namespace iyakki-gitea", NS_OURS);
+    healthy(&w.run);
+    w.vault.set("svc.gitea-iyakki-gitea.token", TOKEN).unwrap();
+    let p = plan(&w.pl, &*gitea(), &profile(&w), &np()).unwrap();
+    let a = apply(&w.pl, &p, true, &mut |_| {}).unwrap_or_else(|e| panic!("{e}"));
+    assert!(a.done.iter().any(|d| d.contains("gitea-data exists already") && d.contains("data stays")), "{:?}", a.done);
+    let applied = std::fs::read_to_string(&p.manifest_path).unwrap();
+    assert!(!applied.contains("PersistentVolumeClaim") && applied.contains("kind: Deployment"), "{applied}");
+    assert!(w.run.lines().iter().any(|l| l.contains("apply -f")));
 }
 
 // ------------------------------------------------------------------------------------------------ existing gitea
@@ -409,7 +431,7 @@ fn an_existing_gitea_or_forgejo_is_detected_and_connecting_stores_only_the_url_a
     w.run.answer("get deployments,statefulsets,daemonsets -A", "meisync-gitea gitea gitea/gitea:1.22.3\nforge forgejo codeberg.org/forgejo/forgejo:9\nkube-system coredns rancher/coredns:1\n");
     w.run.answer("get services -A", "meisync-gitea gitea-http NodePort 30300\nforge forgejo NodePort 30400\n");
     healthy(&w.run);
-    let p = plan(&w.pl, &*gitea(), &profile(&w), &Options::default()).unwrap();
+    let p = plan(&w.pl, &*gitea(), &profile(&w), &np()).unwrap();
     assert_eq!(p.existing.len(), 2, "{:?}", p.existing);
     assert_eq!((p.existing[0].product.as_str(), p.existing[0].url_hint.as_str()), ("Gitea", "http://localhost:30300"));
     assert_eq!(p.existing[1].product, "Forgejo");
@@ -440,7 +462,7 @@ fn an_existing_gitea_or_forgejo_is_detected_and_connecting_stores_only_the_url_a
 
 fn deployed(w: &W) -> Installed {
     healthy(&w.run);
-    let p = plan(&w.pl, &*gitea(), &profile(w), &Options::default()).unwrap();
+    let p = plan(&w.pl, &*gitea(), &profile(w), &np()).unwrap();
     apply(&w.pl, &p, true, &mut |_| {}).unwrap_or_else(|e| panic!("{e}"));
     installed::find(&w.dir, "alice", &p.instance).unwrap()
 }
@@ -514,7 +536,7 @@ fn upgrades_go_forward_along_pinned_versions_with_a_backup_first_and_do_not_roll
     let w = world("upgrade");
     w.run.answer("get namespace iyakki-gitea", NS_OURS);
     healthy(&w.run);
-    let p0 = plan(&w.pl, &*gitea(), &profile(&w), &opts(&[("version", "1.23.8")])).unwrap();
+    let p0 = plan(&w.pl, &*gitea(), &profile(&w), &opts(&[("version", "1.23.8"), ("exposure", "NodePort")])).unwrap();
     assert!(p0.manifest.contains("1.23.8-rootless"));
     // plan from the recorded old version
     let mut rec = deployed_at(&w, "1.23.8");
@@ -680,22 +702,27 @@ fn the_installed_registry_round_trips_per_user_and_instance_ids_stay_unique_acro
 }
 
 #[test]
-fn curl_carries_the_token_in_a_private_temp_config_that_is_gone_afterwards() {
-    let d = tmp("curl");
-    std::fs::create_dir_all(d.join("ram")).unwrap();
-    let r = Arc::new(FakeRunner::new(&["curl"]));
-    r.answer("curl -K", "{\"login\":\"x\"}\n200");
-    let h = connect::CurlHttp { run: r.clone(), tmp: d.join("ram") };
+fn the_in_house_client_carries_the_token_in_the_header_only_and_needs_no_curl() {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let t = std::thread::spawn(move || {
+        let (mut s, _) = l.accept().unwrap();
+        let mut buf = vec![0u8; 8192];
+        let n = s.read(&mut buf).unwrap();
+        let _ = s.write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 13\r\n\r\n{\"login\":\"x\"}");
+        String::from_utf8_lossy(&buf[..n]).to_string()
+    });
+    let h = connect::NetHttp::default();
     use connect::Http;
-    let o = h.request("POST", "http://localhost:30301/api/v1/user/repos", Some(TOKEN), Some("{\"name\":\"a\"}")).unwrap();
-    assert_eq!((o.status, o.body.as_str()), (200, "{\"login\":\"x\"}"));
-    let l = r.lines();
-    assert_eq!(l.len(), 1);
-    assert!(l[0].starts_with("curl -K ") && !l[0].contains(TOKEN) && !l[0].contains("localhost"), "{l:?}");
-    assert_eq!(std::fs::read_dir(d.join("ram")).unwrap().count(), 0);
+    let o = h.request("POST", &format!("http://127.0.0.1:{port}/api/v1/user/repos"), Some(TOKEN), Some("{\"name\":\"a\"}")).unwrap();
+    assert_eq!((o.status, o.body.as_str()), (201, "{\"login\":\"x\"}"));
+    let seen = t.join().unwrap();
+    assert!(seen.starts_with("POST /api/v1/user/repos HTTP/1.1") && seen.contains(&format!("Authorization: token {TOKEN}")) && seen.ends_with("{\"name\":\"a\"}"), "{seen}");
     assert!(h.request("GET", "ftp://x", None, None).is_err());
-    let none = Arc::new(FakeRunner::new(&[]));
-    assert!(connect::CurlHttp { run: none, tmp: d.join("ram") }.request("GET", "http://x", None, None).unwrap_err().contains("curl"));
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let e = h.request("GET", &format!("http://127.0.0.1:{closed}/"), Some(TOKEN), None).unwrap_err();
+    assert!(!e.contains(TOKEN), "{e}");
 }
 
 // ------------------------------------------------------------------------------------------------ workspace
@@ -860,7 +887,7 @@ fn the_assistant_tools_need_a_listed_cluster_ask_in_every_mode_and_never_see_a_s
     let list = t.call("platform_list", &json!({})).unwrap();
     let id = profile_id(&profile(&w));
     assert!(list.contains(&id) && list.contains("https://127.0.0.1:6443") && list.contains("gitea") && list.contains("- none"), "{list}");
-    let args = json!({"service": "gitea", "profile": id, "namespace": "iyakki-gitea", "options": {"storage_size": "5Gi"}});
+    let args = json!({"service": "gitea", "profile": id, "namespace": "iyakki-gitea", "options": {"storage_size": "5Gi", "exposure": "NodePort"}});
     let card = t.describe("platform_deploy", &args);
     assert!(card.contains("DEPLOY Gitea") && card.contains("https://127.0.0.1:6443") && !card.contains("REFUSED"), "{card}");
     let pv = t.preview("platform_deploy", &args).unwrap();
@@ -931,7 +958,7 @@ fn a_private_store_with_no_registry_says_why_and_asks_for_one() {
     // a service that does not need the registry is not asked to create one
     let w2 = world_no_engine("gitea");
     healthy(&w2.run);
-    assert!(!plan(&w2.pl, &*gitea(), &profile(&w2), &Options::default()).unwrap().needs_registry);
+    assert!(!plan(&w2.pl, &*gitea(), &profile(&w2), &np()).unwrap().needs_registry);
 }
 
 #[test]
@@ -981,4 +1008,84 @@ fn a_failed_push_stops_before_the_cluster_objects_and_says_why() {
     let e = apply_with(&w.pl, &p, true, &mut |_| {}, &reg).unwrap_err();
     assert!(e.contains("pushing the store server image failed") && e.contains("cannot connect"), "{e}");
     assert!(!w.run.lines().iter().any(|l| l.contains("apply -f")), "{:?}", w.run.lines());
+}
+
+#[test]
+fn a_gitea_that_exists_keeps_its_exposure_unless_the_person_chose_one() {
+    let mut facts = ClusterFacts::default();
+    // nothing there: no opinion (the default NodePort applies to a new install)
+    assert!(kept_gitea_exposure(&[], &facts, "iyakki-gitea").is_none());
+    // only the cluster's Service is known (no record): ClusterIP stays ClusterIP
+    facts.services.push(("iyakki-gitea".into(), "gitea-http".into(), "ClusterIP".into(), vec![]));
+    assert_eq!(kept_gitea_exposure(&[], &facts, "iyakki-gitea"), Some(("ClusterIP".to_string(), vec![])));
+    assert!(kept_gitea_exposure(&[], &facts, "other").is_none());
+    // a record wins and brings the loopback port along
+    let mut o = Options::default();
+    o.set("exposure", "ClusterIP");
+    o.set("loopback_port", "3300");
+    let rec = Installed { id: "gitea-iyakki-gitea".into(), service: "gitea".into(), namespace: "iyakki-gitea".into(), options: o, ..Default::default() };
+    assert_eq!(kept_gitea_exposure(&[rec], &facts, "iyakki-gitea"), Some(("ClusterIP".to_string(), vec![("loopback_port".to_string(), "3300".to_string())])));
+}
+
+// ------------------------------------------------------------------------------------------------ Gitea exposure (default narrow)
+
+fn gitea_ports(w: &W, kind: &str) {
+    w.run.answer("get services -A", &format!("default web NodePort 30301\niyakki-gitea gitea-http {kind} 30300\niyakki-gitea gitea-ssh {kind} 30222\n"));
+}
+
+#[test]
+fn a_new_gitea_defaults_to_clusterip_with_the_loopback_port_and_opens_nothing_on_the_network() {
+    let w = world("gitea-default");
+    healthy(&w.run);
+    let p = plan(&w.pl, &*gitea(), &profile(&w), &Options::default()).unwrap();
+    assert_eq!((p.opts.get("exposure"), p.opts.get("loopback_port")), ("ClusterIP", "3300"));
+    assert!(p.can_apply() && p.warnings.is_empty(), "{:?} {:?}", p.blockers, p.warnings);
+    assert!(p.manifest.contains("type: ClusterIP") && !p.manifest.contains("type: NodePort") && !p.manifest.contains("nodePort:"), "{}", p.manifest);
+    assert!(p.manifest.contains("hostIP: 127.0.0.1") && p.manifest.contains("hostPort: 3300"));
+    assert_eq!(p.urls[0].url, "http://127.0.0.1:3300");
+    assert!(p.exposes.iter().any(|e| e.contains("127.0.0.1")) && p.exposes.iter().all(|e| !e.contains("NodePort is open")), "{:?}", p.exposes);
+    // the choice to open it stays, labelled
+    let n = plan(&w.pl, &*gitea(), &profile(&w), &np()).unwrap();
+    assert!(n.manifest.contains("type: NodePort") && n.warnings.iter().any(|x| x.contains("OPENS") && x.contains("because you chose it")), "{:?}", n.warnings);
+    // the option list says what the default is
+    let ex = common_options(&*gitea()).into_iter().find(|d| d.key == "exposure").unwrap();
+    assert_eq!(ex.default, "ClusterIP");
+    // the private store keeps its NodePort default and its own first port
+    let store = crate::store::privatestore::PrivateStore;
+    assert_eq!((common_options(&store).into_iter().find(|d| d.key == "exposure").unwrap().default, store.first_node_port()), ("NodePort".to_string(), 30301));
+}
+
+#[test]
+fn deploying_again_never_widens_and_narrows_only_on_an_explicit_choice_shown_in_the_review() {
+    // a ClusterIP Gitea stays ClusterIP when the person gives nothing
+    let w = world("gitea-keep-cip");
+    gitea_ports(&w, "ClusterIP");
+    w.run.answer("get namespace iyakki-gitea", NS_OURS);
+    healthy(&w.run);
+    let p = plan(&w.pl, &*gitea(), &profile(&w), &Options::default()).unwrap();
+    assert_eq!(p.opts.get("exposure"), "ClusterIP");
+    assert!(!p.manifest.contains("type: NodePort"));
+    // a NodePort Gitea is kept as it is (no silent change either way) and the note says how to close it
+    let w = world("gitea-keep-np");
+    gitea_ports(&w, "NodePort");
+    w.run.answer("get namespace iyakki-gitea", NS_OURS);
+    healthy(&w.run);
+    let p = plan(&w.pl, &*gitea(), &profile(&w), &Options::default()).unwrap();
+    assert_eq!(p.opts.get("exposure"), "NodePort");
+    assert!(p.notes.iter().any(|n| n.contains("it is kept") && n.contains("Close the open NodePorts")), "{:?}", p.notes);
+    assert!(p.warnings.iter().all(|x| !x.contains("CLOSES")), "{:?}", p.warnings);
+    // the close option narrows, and the review says which ports close
+    let c = plan(&w.pl, &*gitea(), &profile(&w), &opts(&[("close_node_ports", "true")])).unwrap();
+    assert_eq!((c.opts.get("exposure"), c.opts.get("loopback_port"), c.opts.get("close_node_ports")), ("ClusterIP", "3300", "false"));
+    assert!(c.warnings.iter().any(|x| x.contains("THIS CLOSES") && x.contains("30300, 30222")), "{:?}", c.warnings);
+    assert!(preview(&c).contains("THIS CLOSES"));
+    assert!(!c.manifest.contains("type: NodePort"));
+    // asking for ClusterIP explicitly over a NodePort one narrows with the same warning
+    let e = plan(&w.pl, &*gitea(), &profile(&w), &opts(&[("exposure", "ClusterIP")])).unwrap();
+    assert!(e.warnings.iter().any(|x| x.contains("THIS CLOSES")), "{:?}", e.warnings);
+    // a fresh install says nothing about closing
+    let w = world("gitea-fresh");
+    healthy(&w.run);
+    let f = plan(&w.pl, &*gitea(), &profile(&w), &opts(&[("exposure", "ClusterIP")])).unwrap();
+    assert!(f.warnings.iter().all(|x| !x.contains("CLOSES")));
 }

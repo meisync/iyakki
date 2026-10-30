@@ -1,0 +1,3 @@
+{"node":{"nodeName":"iyakki-dev"},"pods":[
+{"podRef":{"name":"es-0","namespace":"iyakki-data"},"volume":[{"name":"data","usedBytes":5368709120,"capacityBytes":10737418240,"pvcRef":{"name":"es-data","namespace":"iyakki-data"}},{"name":"tmp","usedBytes":100}]}
+]}

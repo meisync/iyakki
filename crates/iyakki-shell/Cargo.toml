@@ -4,8 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[dev-dependencies]
+iyakki-proxy = { path = "../iyakki-proxy", features = ["testcerts"] }
+
 [dependencies]
 iyakki-agent = { path = "../iyakki-agent" }
+iyakki-vpn = { path = "../iyakki-vpn" }
 iyakki-sec.workspace = true
 iyakki-storage.workspace = true
 iyakki-zram.workspace = true
@@ -23,6 +27,7 @@ iyakki-rfb.workspace = true
 iyakki-ledger.workspace = true
 iyakki-data.workspace = true
 iyakki-flow.workspace = true
+iyakki-schema.workspace = true
 argon2 = { version = "0.5", features = ["std", "rand"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

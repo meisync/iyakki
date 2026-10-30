@@ -90,7 +90,7 @@ subscription limits assume individual use). No live run against the real vendor 
 Every sign-in, app open, denied action, account change, tool decision, screenshot and installs is appended to `audit.log`
 (`/var/lib/iyakki/audit.log`; window mode `~/.local/share/iyakki-dev/audit.log`; mode 0600). Each line is JSON with `ts`, `user`,
 `event`, `detail`, `prev` and `hash`, where `hash` is the SHA-256 of `ts|user|event|detail|prev` and `prev` is the previous line's
-hash (64 zeros for the first). **Verify in the app:** USERS -> `l` shows "Audit log - chain intact (N entries)" or "BROKEN at entry I".
+hash (64 zeros for the first). Every append takes an exclusive file lock (`flock`) on `audit.log`, re-reads the last line under it, writes the line and flushes it to disk before letting go, so the shell, the core and the command line can write at the same time without two lines sharing a `prev`; a line cut short by a power loss is skipped and the next line chains to the last whole one. **Verify in the app:** USERS -> `l` shows "Audit log - chain intact (N entries)" or "BROKEN at entry I".
 **Verify outside IYAKKI** (any machine with Python 3):
 
 ```python
@@ -113,14 +113,15 @@ A clock that is corrected while the system runs (the network time arrives about 
 * **Fixed for one process.** Inside one running IYAKKI (the window, the console shell or `iyakki web`), every write takes a lock: it reads the
   last hash and appends in one step, so two events in the same second can no longer share a `prev`. The old race ("BROKEN at entry N
   but nobody touched it") should not appear in a log that was written only by fixed versions.
-* **Not fixed: old chains and several processes.** A chain that already contains the race stays BROKEN at that entry for good: the code
-  never rewrites or repairs `audit.log` (that would defeat the point). And two IYAKKI processes appending to the same file (a window and
-  `iyakki web` on the same data folder, a script and a shell) do not share the lock and can still collide. Use one process per data folder.
+* **Old chains.** A chain that already contains the race stays BROKEN at that entry for good: the code never rewrites or repairs
+  `audit.log` (that would defeat the point); you start a new one (below). Several IYAKKI processes on one data folder (a window and
+  `iyakki web`, a script and a shell) now share one exclusive file lock (`flock`) on `audit.log`, so they no longer collide.
 * **How to read the report.** "BROKEN at entry I" counts from 0. Look at lines I-1 and I of `audit.log`. If both have the **same `prev`** and
   timestamps within a second or two, it is the old race (or two processes); the entries themselves are fine. If a line was edited, removed or
   reordered, `hash` or `prev` no longer matches and nothing explains it by timing: treat that as tampering, keep a copy of the file, and
   check who had access to the data folder. The chain proves order and integrity, not who wrote it from outside IYAKKI.
-* **Starting a new chain.** There is no in-app reset button and no repair command. The only way, and the way the code supports, is:
+* **Starting a new chain.** In USERS, open the audit log (`l`) and press a capital `N` while it reads BROKEN: the old file is kept beside it as
+  `audit.log.broken-<time>` (never deleted) and the new chain begins with an `audit.restart` line that names it. By hand, the same is:
   sign everyone out and stop IYAKKI, then **move** `audit.log` aside (do not delete it; it is your evidence) with
   `mv /var/lib/iyakki/audit.log /var/lib/iyakki/audit.log.broken-$(date +%F)` (window mode:
   `~/.local/share/iyakki-dev/audit.log`), and start IYAKKI. With no file the next event begins a fresh chain (the first line has 64 zeros as

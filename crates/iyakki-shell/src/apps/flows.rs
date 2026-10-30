@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+use iyakki_agent::flows::failfix::{FailBook, Failure};
 use iyakki_agent::flows::{FlowEnv, Open, SharedOpen};
 use iyakki_flow::engine::{ApplyScope, Counts, NodeTest, NodeUpdateInfo};
 use iyakki_flow::kinds::{Issue, Level, Registry};
@@ -64,6 +65,16 @@ pub mod id {
     pub const APPLY_SCHEDULED: usize = 140;
     pub const APPLY_RUNNING: usize = 141;
     pub const LEAVE_UPDATE: usize = 142;
+    pub const OFFER: usize = 138;
+    pub const FAIL_LOG: usize = 139;
+    pub const CLOSE: usize = 145;
+    pub const R_BACK: usize = 146;
+    pub const R_AGAIN: usize = 147;
+    pub const FAIL_FIX: usize = 148;
+    pub const FAIL_DISMISS: usize = 149;
+    pub const SUG_OPEN: usize = 185;
+    pub const ASSIST_ROLLBACK: usize = 186;
+    pub const ASSIST_PAUSE: usize = 187;
     // run view
     pub const R_CANCEL: usize = 150;
     pub const R_RETRY: usize = 151;
@@ -80,6 +91,9 @@ pub mod id {
     pub const R_OLDER: usize = 165;
     pub const R_ALLOW: usize = 166;
     pub const R_TAB_PICS: usize = 167;
+    pub const CARD_SETTINGS: usize = 169;
+    pub const CARD_MODELS: usize = 191;
+    pub const CARD_REFRESH: usize = 192;
     pub const R_TAB_REPORT: usize = 168;
     pub const R_EXPORT_HTML: usize = 143;
     pub const R_EXPORT_JSON: usize = 144;
@@ -149,9 +163,13 @@ pub(super) enum Modal {
     Confirm(String, Confirmed),
     Publish(PubForm),
     History(HistView),
+    /// The suggested changes of the agent (Assist): list, stored diff, Approve, Reject.
+    Suggestions(super::flows_assist::SugView),
     Import(Form),
     Result(String, ScrollLog),
     EditPatch(String, super::dash_query::QueryBox),
+    /// The values a run needs (the flow's declared inputs): the form asked before a run starts; true: run the draft.
+    RunInputs(Form, bool, Vec<Param>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,7 +182,11 @@ pub(super) enum NameFor {
 pub(super) enum Confirmed {
     DeleteFlow(String),
     Rollback(u32),
+    /// Drop one published version of the open flow (asked for in the history, confirmed with y only).
+    DropVersion(u32),
     AllowProgram(String),
+    /// Close the open flow although something typed was not accepted yet.
+    CloseFlow,
 }
 
 pub(super) struct PubForm {
@@ -252,6 +274,8 @@ pub struct FlowsApp {
     pub(super) redraw: bool,
     pub(super) status: Option<(String, bool)>,
     pub(super) flows: Vec<FlowSummary>,
+    /// (id, name) of every flow, as `flows.list` of the core contract answers it (the first FLOWS read on the contract).
+    pub(super) flow_names: Vec<(String, String)>,
     pub(super) list_sel: usize,
     pub(super) cur: Option<String>,
     pub(super) flow: iyakki_flow::model::Flow,
@@ -259,6 +283,10 @@ pub struct FlowsApp {
     pub(super) undo: Vec<iyakki_flow::model::Flow>,
     pub(super) redo: Vec<iyakki_flow::model::Flow>,
     pub(super) issues: Vec<Issue>,
+    /// The tooltip card of a node (pointer rest, selection, long press).
+    pub(super) tip: crate::tooltip::Tooltip,
+    /// Where the tooltip card was drawn last frame (None: none).
+    pub(super) tip_rect: Option<R>,
     pub(super) issue_map: BTreeMap<String, (usize, usize)>,
     pub(super) view: View,
     pub(super) sel: BTreeSet<String>,
@@ -295,9 +323,23 @@ pub struct FlowsApp {
     /// How far the palette list is scrolled (pixels).
     pub(super) pal_scroll: f32,
     pub(super) cur_changed: bool,
+    /// What the person dismissed, what the assistant already said, the attempts spent (a small file).
+    pub(super) book: FailBook,
+    /// The failed last run of the open flow that the card talks about.
+    pub(super) fail: Option<Failure>,
+    /// The tab a run was opened from (Esc goes back to it).
+    pub(super) ret: Tab,
+    /// The assistant's offer to post in the thread: (run, text).
+    pub(super) pending_note: Option<(String, String)>,
+    /// "Ask the agent to fix" was pressed (it needs the session, so the event handler starts it).
+    pub(super) fix_requested: bool,
+    /// Another app the person asked for ("Open Settings -> Models"): (app, item), taken by the shell.
+    pub(super) jump: Option<(String, String)>,
+    /// What Assist shows for the open flow: waiting suggestions, the watched version, the pause.
+    pub(super) assist: super::flows_assist::AssistUi,
 }
 
-fn stamp_of(env: &FlowEnv, id: &str) -> (u64, u128) {
+pub(super) fn stamp_of(env: &FlowEnv, id: &str) -> (u64, u128) {
     let p = env.dir.join(id).join("flow.json");
     std::fs::metadata(p).map(|m| (m.len(), m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos()))).unwrap_or((0, 0))
 }
@@ -318,6 +360,7 @@ impl FlowsApp {
         let open: SharedOpen = Arc::new(Mutex::new(Open { tab: "design".into(), ..Default::default() }));
         let chat = ChatApp::new().with_agent(cx.session.policy.agent).with_flows(FlowsLink { env: env.clone(), open: open.clone() }).resumed(cx);
         let (tx, rx) = channel();
+        let env_data = env.data.clone();
         let mut a = FlowsApp {
             reg: env.reg.clone(),
             env,
@@ -327,6 +370,7 @@ impl FlowsApp {
             redraw: true,
             status: None,
             flows: vec![],
+            flow_names: vec![],
             list_sel: 0,
             cur: None,
             flow: iyakki_flow::model::Flow::new("", ""),
@@ -369,6 +413,15 @@ impl FlowsApp {
             palette_ids: vec![],
             pal_scroll: 0.0,
             cur_changed: false,
+            book: FailBook::open(&env_data),
+            fail: None,
+            ret: Tab::Design,
+            pending_note: None,
+            fix_requested: false,
+            jump: None,
+            tip_rect: None,
+            tip: crate::tooltip::Tooltip::new().with_pointer_delay(super::flows_tip::NODE_TIP_DELAY),
+            assist: Default::default(),
         };
         a.reload_flows();
         a.refresh_runs();
@@ -404,10 +457,22 @@ impl FlowsApp {
 
     pub(super) fn reload_flows(&mut self) {
         self.flows = self.env.summaries();
+        self.flow_names = self.contract_flow_names();
         self.list_sel = self.list_sel.min(self.flows.len().saturating_sub(1));
     }
 
+    /// The flows' ids and names through the core contract (`flows.list`); empty when the call is refused.
+    fn contract_flow_names(&self) -> Vec<(String, String)> {
+        use iyakki_agent::core_contract::{CallContext, Flows as _};
+        let ctx = CallContext::local(&self.env.user, self.env.policy.manage_settings);
+        iyakki_agent::contract_local::core_for(&self.env.svc).flows_for_env(self.env.clone()).list(&ctx).map(|l| l.into_iter().map(|i| (i.id, i.name)).collect()).unwrap_or_default()
+    }
+
     pub(super) fn sync_open(&mut self) {
+        // the CHAT tile keeps working on the flow last open here (id and name only; cleared at sign-out, on delete or by its chip)
+        if let Some(id) = &self.cur {
+            iyakki_agent::flows::set_last_flow(&self.env.svc, &self.env.user, id, &self.flow.name);
+        }
         let mut o = self.open.lock().unwrap_or_else(|e| e.into_inner());
         o.flow = self.cur.clone();
         o.node = self.sel.iter().next().cloned();
@@ -448,6 +513,7 @@ impl FlowsApp {
 
     pub(super) fn close_flow(&mut self) {
         self.cur = None;
+        self.fail = None;
         self.sel.clear();
         self.sel_edge = None;
         self.text = None;
@@ -543,6 +609,8 @@ impl FlowsApp {
                 self.select_run(&w, false);
             }
         }
+        self.update_fail_card();
+        self.update_assist();
     }
 
     pub(super) fn select_run(&mut self, id: &str, go: bool) {
@@ -552,6 +620,9 @@ impl FlowsApp {
         self.rv.shown = Default::default();
         self.rv.fitted_for.clear();
         if go {
+            if self.tab != Tab::Run {
+                self.ret = self.tab;
+            }
             self.tab = Tab::Run;
         }
         self.sync_open();
@@ -624,10 +695,40 @@ impl FlowsApp {
         }
     }
 
+    /// Run the open flow. A flow with inputs it cannot do without asks for them first, in a form.
     pub(super) fn run_flow(&mut self, draft: bool) {
+        if self.cur.is_none() {
+            return;
+        }
+        if self.flow.inputs.iter().any(|p| p.required && p.default.is_none()) {
+            let mut form = Form::new("Run this flow: its inputs");
+            for p in &self.flow.inputs {
+                let label = format!("{}{}", p.name, if p.required { " (required)" } else { "" });
+                let hint = if p.description.is_empty() { format!("a {} value", if p.ty.is_empty() { "text" } else { &p.ty }) } else { p.description.clone() };
+                if p.ty == "secret" {
+                    form = form.secret(&label, &hint);
+                } else {
+                    let init = match &p.default {
+                        Some(serde_json::Value::String(t)) => t.clone(),
+                        Some(v) => v.to_string(),
+                        None => String::new(),
+                    };
+                    form = form.text(&label, &init, &hint);
+                }
+            }
+            self.modal = Some(Modal::RunInputs(form, draft, self.flow.inputs.clone()));
+            return;
+        }
+        self.start_flow_run(draft, None);
+    }
+
+    pub(super) fn start_flow_run(&mut self, draft: bool, inputs: Option<serde_json::Value>) {
         let Some(id) = self.cur.clone() else { return };
         let mut req = StartRequest::new(&id).trigger("manual", &self.env.who());
         req.draft = draft || self.env.store.published(&id).is_none();
+        if let Some(i) = inputs {
+            req.inputs = i;
+        }
         match self.env.engine.start_run(req) {
             Ok(o) => {
                 self.refresh_runs();
@@ -659,6 +760,7 @@ impl FlowsApp {
         match self.env.store.publish(&id, &iyakki_flow::store::PublishReq { by: &who, label, changelog, approved_by: Some(&who) }) {
             Ok(v) => {
                 iyakki_flow::host::Host::audit(self.env.host.as_ref(), "flow.publish", &format!("{id} v{v} by {who}"));
+                self.env.assist_after_publish(&id, v);
                 if let Some(f) = self.env.store.get_draft(&id) {
                     self.flow = f;
                 }
@@ -754,8 +856,9 @@ impl FlowsApp {
     }
 
     pub(super) fn delete_flow(&mut self, id: &str) {
-        match self.env.store.delete(id) {
-            Ok(()) => {
+        // the environment refuses a flow with unfinished runs and writes the audit line (id and name only)
+        match self.env.delete_flow(id) {
+            Ok(_) => {
                 if self.cur.as_deref() == Some(id) {
                     self.close_flow();
                 }
@@ -946,6 +1049,7 @@ impl FlowsApp {
         self.tick += 1;
         self.poll();
         let _ = self.chat.handle(&Event::Tick, cx);
+        self.deliver_note(cx);
         if self.chat_open && (self.chat.is_running() || self.chat.pending_approval().is_some()) && self.tick % 3 == 0 {
             self.redraw = true;
         }
@@ -959,6 +1063,9 @@ impl FlowsApp {
             if active && !crate::fx::reduced_motion() {
                 self.redraw = true;
             }
+        }
+        if self.tick % 30 == 0 {
+            self.update_assist();
         }
         if self.tick % 15 == 0 {
             // the assistant (or another window) may have changed the draft
@@ -1002,6 +1109,7 @@ impl FlowsApp {
     }
 
     pub(super) fn handle_impl(&mut self, ev: &Event, cx: &AppCx) -> AppFlow {
+        self.tip.event(ev);
         self.poll();
         match ev {
             Event::Tick => return self.on_tick(cx),
@@ -1080,6 +1188,9 @@ impl FlowsApp {
             }
             _ => AppFlow::Stay,
         };
+        if std::mem::take(&mut self.fix_requested) {
+            self.start_fix(cx);
+        }
         self.sync_open();
         f
     }

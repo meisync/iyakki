@@ -9,4 +9,5 @@ description = "The firewall: a policy model (default: block incoming), validatio
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+iyakki-schema.workspace = true
 log.workspace = true

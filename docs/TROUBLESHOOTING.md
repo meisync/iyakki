@@ -370,14 +370,14 @@ Open Settings -> Developer mode -> Connect over USB-C (or run `iyakki dev usb`);
 
 **Symptom.** The Publish form offers only "Deploy a new private store to k3s…" and "Export package file", or the assistant says to go to Settings;
 the audit log has no publish line. The store itself is fine: `kubectl get pods -n iyakki-private-store` shows `private-store` Running and
-`curl http://localhost:30300/catalog.json` answers.
+`curl http://localhost:30301/catalog.json` answers.
 
 **Cause.** The deploy recorded the store and kept its admin token in the vault, but this device's STORE never got it as a catalog with its key
 pinned (the older form only listed stores that were already added).
 
 **Fix.** Press Publish: the store is the first row, "Private store on this device (not added yet)". Choose it, compare the fingerprint on the
 card with `kubectl logs -n iyakki-private-store deploy/private-store` (the line ends with `fingerprint ...`), press **Add it and publish**. On an
-older image: STORE, Settings, Private store, **Add this store** (address `http://localhost:30300`), compare, confirm, then `h` to choose it as the
+older image: STORE, Settings, Private store, **Add this store** (address `http://localhost:30301`), compare, confirm, then `h` to choose it as the
 publishing target. Only an administrator can add a store.
 
 **If the form says the store is not answering.** The pod is not ready or the NodePort is closed: wait a minute after a deploy, or open the K8S

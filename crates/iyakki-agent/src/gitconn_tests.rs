@@ -1,5 +1,5 @@
 use super::*;
-use crate::gitkeys::{MemStore, Session};
+use crate::gitkeys::MemStore;
 use crate::wsexec::FakeRunner;
 
 const FAKE: &str = "tok_FAKEFAKEFAKEFAKE1234";

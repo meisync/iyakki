@@ -30,7 +30,7 @@ fn key(a: &mut SettingsApp, cx: &AppCx, k: Key) {
 fn status(a: &SettingsApp) -> String {
     a.status().map(|s| s.0.clone()).unwrap_or_default()
 }
-fn goto(a: &mut SettingsApp, cx: &AppCx, t: Tab) {
+fn goto(a: &mut SettingsApp, _cx: &AppCx, t: Tab) {
     a.go_to(t);
 }
 fn settle(a: &mut SettingsApp, cx: &AppCx) {

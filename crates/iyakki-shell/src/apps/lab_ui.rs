@@ -120,7 +120,7 @@ impl LabApp {
             Tab::Video => self.video_controls(g, scroll, s, cx, tick),
         });
         self.col_max = (content - scroll.h).max(0.0);
-        self.col_scroll = self.col_scroll.clamp(0.0, self.col_max);
+        self.col_scroll = self.col_scroll.clamp_safe(0.0, self.col_max);
         if self.col_max > 0.0 {
             let (first, vis, total) = (self.col_scroll as usize, scroll.h as usize, content as usize);
             fx::scrollbar(g, R::new(ctl.x + ctl.w - 5.0 * s, scroll.y, 4.0 * s, scroll.h), s, first, vis, total, ACCENT);

@@ -11,6 +11,8 @@ members = [
     "crates/iyakki-agent",
     "crates/iyakki-shell",
     "crates/iyakki-core",
+    "crates/iyakki-core-api",
+    "crates/iyakki-core-fake",
     "crates/iyakki-ui",
     "crates/iyakki-proxy",
     "crates/iyakki-swarm",
@@ -29,10 +31,12 @@ members = [
     "crates/iyakki-flow",
     "crates/iyakki-zram",
     "crates/iyakki-fw",
+    "crates/iyakki-vpn",
     "crates/iyakki-relcheck",
     "crates/iyakki-store-server",
     "crates/iyakki-stage1",
     "crates/iyakki-rfb",
+    "crates/iyakki-schema",
 ]
 
 [workspace.package]
@@ -62,9 +66,23 @@ iyakki-drivers = { path = "crates/iyakki-drivers" }
 iyakki-flow = { path = "crates/iyakki-flow" }
 iyakki-zram = { path = "crates/iyakki-zram" }
 iyakki-fw = { path = "crates/iyakki-fw" }
+iyakki-schema = { path = "crates/iyakki-schema" }
+iyakki-core-api = { path = "crates/iyakki-core-api" }
+iyakki-core-fake = { path = "crates/iyakki-core-fake" }
 thiserror = "2"
 log = "0.4"
 wasmtime = { version = "*", default-features = false, features = ["runtime", "cranelift", "wat", "std"] }
+
+# Development and test builds: line tables only (file and line numbers in backtraces, no variable debug info) and none for
+# dependencies. 2026-10-28: with full debug info target/debug grew to 690 GB and rustc needed 5-6 GB for iyakki-shell.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.test]
+debug = "line-tables-only"
 
 [profile.release]
 lto = true

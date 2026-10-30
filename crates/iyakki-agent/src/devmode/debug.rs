@@ -132,7 +132,9 @@ pub fn syslog(p: &Paths, src: &str, n: usize, audit: &dyn Fn(usize) -> Vec<Strin
             l[l.len().saturating_sub(n)..].iter().map(|s| scrub(s)).collect()
         }
         "audit" => audit(n).into_iter().map(|s| scrub(&s)).collect(),
-        other => return Err(format!("unknown log {other:?}: use shell, boot or audit")),
+        // the web engine's own messages, kept by `enginelog.rs` (page addresses and content were never written)
+        "engine" => engine_lines(&crate::enginelog::dir(), n),
+        other => return Err(format!("unknown log {other:?}: use shell, boot, audit or engine")),
     };
     let mut text = lines.join("\n");
     if text.len() > MAX_TEXT {
@@ -141,6 +143,12 @@ pub fn syslog(p: &Paths, src: &str, n: usize, audit: &dyn Fn(usize) -> Vec<Strin
         text = text[from..].to_string();
     }
     Ok(json!({ "source": src, "lines": lines.len(), "text": text }))
+}
+
+/// The last `n` kept lines of the web engine, `[time] text`, credentials hidden once more.
+pub fn engine_lines(dir: &Path, n: usize) -> Vec<String> {
+    let all = crate::enginelog::read_in(dir);
+    all[all.len().saturating_sub(n)..].iter().map(|(t, s)| scrub(&format!("[{t}] {s}"))).collect()
 }
 
 // -------------------------------------------------------------------------------------------- info
@@ -321,5 +329,20 @@ pub fn status(p: &Paths, data_dir: &Path, firewall_file: &Path) -> Value {
     row("Graphics", if g.is_empty() { "missing" } else { "ready" }, g.iter().map(|x| format!("{} ({})", x["card"].as_str().unwrap_or(""), x["driver"].as_str().unwrap_or("no driver"))).collect::<Vec<_>>().join(", "));
     let me = procs.iter().filter(|x| x.name == "iyakki" || x.name.starts_with("iyakki")).count();
     row("IYAKKI shell/agent", if me > 0 { "running" } else { "unknown" }, format!("{me} process(es)"));
-    json!({ "services": rows })
+    json!({ "services": rows, "startup": startup_rows() })
+}
+
+/// The startup registry ([`crate::startup`]) as rows: id, name, state word, the step text or the reason (credential-filtered).
+pub fn startup_rows() -> Vec<Value> {
+    crate::startup::global()
+        .snapshot()
+        .into_iter()
+        .map(|r| {
+            let detail = match &r.state {
+                crate::startup::StartupState::Failed(why) => why.clone(),
+                _ => r.step.clone(),
+            };
+            json!({ "id": r.id, "name": r.name, "state": r.state.word(), "detail": scrub(&detail), "seconds": r.age })
+        })
+        .collect()
 }

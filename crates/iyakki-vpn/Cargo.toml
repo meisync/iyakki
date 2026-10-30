@@ -1,0 +1,12 @@
+[package]
+name = "iyakki-vpn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The VPN core: profile model, WireGuard .conf and OpenVPN .ovpn sanitisers, secrets that are kept apart, the WireGuard generic-netlink messages, and the pure route, DNS and kill-switch plans. No sockets, no root, no dependencies beyond serde."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

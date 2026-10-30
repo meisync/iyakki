@@ -135,7 +135,16 @@ pub fn info_row(g: &mut Gfx, r: R, s: f32, title: &str, value: &str) {
 
 /// A small heading above a group of rows; returns the height it used.
 pub fn section_title(g: &mut Gfx, x: f32, y: f32, s: f32, title: &str) -> f32 {
-    crate::fx::section_title(g, x, y, 640.0 * s, s, title, crate::fx::CYAN)
+    let h = crate::fx::section_title(g, x, y, 640.0 * s, s, title, crate::fx::CYAN);
+    #[cfg(test)]
+    HEADINGS.with(|v| v.borrow_mut().push(R::new(x, y, 120.0 * s, h)));
+    h
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test aid: every heading drawn on this thread (layout checks of the Settings pages).
+    pub static HEADINGS: std::cell::RefCell<Vec<R>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]

@@ -574,6 +574,7 @@ impl CalendarApp {
 mod tests {
     use super::*;
     use crate::apps::tests::{cx_with_admin_store, services_in, temp_dir, Offline};
+    use crate::apps::tile_harness::TileHarness;
     use std::sync::Arc;
 
     fn admin_cx(tag: &str) -> AppCx {
@@ -600,33 +601,31 @@ mod tests {
     #[test]
     fn moving_around_the_month_selects_days_and_changes_months_correctly() {
         let cx = admin_cx("cal1");
-        let mut a = CalendarApp::new(&cx);
-        a.cur = (2026, 1, 31);
-        a.handle(&Event::Key(Key::PageDown), &cx);
-        assert_eq!(a.selected_date(), (2026, 2, 28), "31 January + a month is the end of February");
-        a.handle(&Event::Key(Key::PageUp), &cx);
-        a.handle(&Event::Key(Key::PageUp), &cx);
-        assert_eq!(a.selected_date(), (2025, 12, 28));
-        a.handle(&Event::Key(Key::Right), &cx);
-        a.handle(&Event::Key(Key::Down), &cx);
-        assert_eq!(a.selected_date(), (2026, 1, 5));
-        a.handle(&Event::Key(Key::Left), &cx);
-        a.handle(&Event::Key(Key::Up), &cx);
-        assert_eq!(a.selected_date(), (2025, 12, 28));
+        let mut t = TileHarness::new(CalendarApp::new(&cx), cx.clone());
+        t.app.cur = (2026, 1, 31);
+        t.key(Key::PageDown);
+        assert_eq!(t.app.selected_date(), (2026, 2, 28), "31 January + a month is the end of February");
+        t.key(Key::PageUp);
+        t.key(Key::PageUp);
+        assert_eq!(t.app.selected_date(), (2025, 12, 28));
+        t.key(Key::Right);
+        t.key(Key::Down);
+        assert_eq!(t.app.selected_date(), (2026, 1, 5));
+        t.key(Key::Left);
+        t.key(Key::Up);
+        assert_eq!(t.app.selected_date(), (2025, 12, 28));
         // clicking a day on the grid selects it (grid starts on the Monday on or before the 1st)
-        a.cur = (2026, 10, 15);
-        a.handle(&Event::Tab(1000), &cx);
-        assert_eq!(a.selected_date(), (2026, 9, 28), "1 October 2026 is a Thursday, so the grid starts on Monday 28 September");
-        a.cur = (2026, 10, 15);
-        a.handle(&Event::Tab(1000 + 13), &cx);
-        assert_eq!(a.selected_date(), (2026, 10, 11));
-        a.handle(&Event::Key(Key::Char('t')), &cx);
-        let today = a.zone.local(iyakki_agent::clock::now_unix());
-        assert_eq!(a.selected_date(), (today.year, today.month, today.day));
+        t.app.cur = (2026, 10, 15);
+        t.send(Event::Tab(1000));
+        assert_eq!(t.app.selected_date(), (2026, 9, 28), "1 October 2026 is a Thursday, so the grid starts on Monday 28 September");
+        t.app.cur = (2026, 10, 15);
+        t.send(Event::Tab(1000 + 13));
+        assert_eq!(t.app.selected_date(), (2026, 10, 11));
+        t.key(Key::Char('t'));
+        let today = t.app.zone.local(iyakki_agent::clock::now_unix());
+        assert_eq!(t.app.selected_date(), (today.year, today.month, today.day));
         // every window size draws
-        for (w, h) in [(1280u32, 720u32), (800, 600), (480, 400), (1920, 1080)] {
-            draw(&mut a, &cx, w, h);
-        }
+        t.draw_at_standard_sizes();
     }
 
     #[test]

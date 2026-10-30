@@ -54,6 +54,7 @@ administrator, side channels, and kernel or firmware bugs in the base system.
 * **The official store root key does not exist yet**: nothing but items built into the image can be "Official", and the update and store
   channels have no production trust anchors.
 * The browser front end uses a self-generated HTTPS certificate; put it behind your own TLS and access control if you expose it at all.
+* Server certificates are always checked. The only exceptions are narrow and never silent: the radio may complete a missing intermediate certificate from the address named in the certificate (verified against the built-in roots afterwards), and a person may pin one station's exact leaf certificate after a confirmation dialog (or an approval card in chat that always asks): host and port, SHA-256 fingerprint, name and dates still checked, a changed certificate refused and never re-pinned silently, audited as `radio.trust` and `radio.trust.revoked`. There is no global "do not verify" for the radio, the browser or any other app (the DASH connector's per-connection option is a separate, labelled setting).
 * The release signing key is new. Its public half is published in the README and on the download page; verify it out of band.
 * Heuristic protections (credential guard, refusal and advice detectors, English phrase tables) can be bypassed.
 * The coding-agent bridge, the dashboards' connectors and the cloud model providers were not checked against the real services (see

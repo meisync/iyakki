@@ -8,6 +8,7 @@
 //! (a call already sent is not recalled: its answer is dropped). Nothing is written to disk except by Save picture. Nothing is
 //! sent to a provider on another computer until the person said yes to that provider in this session.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1030,7 +1031,7 @@ impl LabApp {
             return;
         }
         let mode = if self.even { Sampling::Even } else { Sampling::EveryK(self.every.value.trim().parse::<f64>().unwrap_or(5.0)) };
-        let n = self.nframes.clamp(lab::MIN_FRAMES, lab::MAX_FRAMES);
+        let n = self.nframes.clamp_safe(lab::MIN_FRAMES, lab::MAX_FRAMES);
         cx.audit.record(&cx.session.user, "lab.video", &format!("{n} frames with {} on {}", m.model, m.provider));
         self.frames.clear();
         self.answers = vec![Answer::new(&m, ANS_AREA_A)];
@@ -1650,7 +1651,7 @@ impl App for LabApp {
                     } else if let Some(a) = self.answers.iter_mut().find(|a| a.view.pane.over(mx, my)) {
                         a.view.scroll_by(*d);
                     } else {
-                        self.col_scroll = (self.col_scroll - *d as f32 * 40.0).clamp(0.0, self.col_max);
+                        self.col_scroll = (self.col_scroll - *d as f32 * 40.0).clamp_safe(0.0, self.col_max);
                     }
                 }
             }

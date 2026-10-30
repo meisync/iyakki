@@ -137,7 +137,7 @@ pub struct Probe {
     pub screen: (u32, u32),
     /// Which network a WiFi interface is joined to (asks `iw`; a seam for tests).
     pub wifi: Arc<dyn Fn(&str) -> Option<iyakki_devctl::WifiLink> + Send + Sync>,
-    /// `bluetoothctl` found on the PATH: scanning is possible.
+    /// The kernel lists a configured Bluetooth controller: scanning is possible (through the in-house management channel, no program).
     pub can_scan: bool,
 }
 
@@ -155,7 +155,7 @@ impl Probe {
             volatile,
             screen: (0, 0),
             wifi: Arc::new(move |i| iyakki_devctl::wifi_link(&wifi_roots, i)),
-            can_scan: ["/usr/bin/bluetoothctl", "/bin/bluetoothctl", "/usr/sbin/bluetoothctl"].iter().any(|p| std::path::Path::new(p).exists()),
+            can_scan: iyakki_devctl::btview::controllers().map(|c| c.iter().any(|c| c.configured)).unwrap_or(false),
         }
     }
 }
@@ -525,10 +525,10 @@ pub fn run_act(p: &Probe, act: &Act) -> Result<String, String> {
         Act::BluetoothLoad => p.dev.ctl.bt_load_anyway(),
         Act::BluetoothScan => {
             if !p.can_scan {
-                return Err("Scanning needs the Bluetooth service, which this image does not have yet.".into());
+                return Err("Scanning needs a Bluetooth controller that the kernel lists and that is switched on.".into());
             }
             std::thread::spawn(|| {
-                let _ = std::process::Command::new("bluetoothctl").args(["--timeout", "8", "scan", "on"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+                let _ = iyakki_devctl::btview::scan(0, 8);
             });
             Ok("Scanning for Bluetooth devices for 8 seconds.".into())
         }

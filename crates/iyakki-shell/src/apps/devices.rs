@@ -97,6 +97,9 @@ pub enum Target {
     SoundAdvanced,
     /// Settings -> Sound: mix the sound of several apps (the IYAKKI mixer, experimental).
     SoundMixer,
+    SoundWebMix,
+    /// Advanced: the highlight timing offset of read-aloud words, ms (-500..500).
+    SoundHighlightOffset,
     /// Power a Bluetooth controller (by index) on (`true`) or off.
     BtPower(u16, bool),
     /// Scan for devices for 10 seconds with this controller (proof that it works; never pairs).
@@ -472,6 +475,11 @@ impl DevicesPane {
         self.request = Some((app.into(), String::new()));
     }
 
+    /// [`DevicesHw::ask_open`] with the thing to open in it (Settings' "Share diagnostics" opens DOCTOR with its preview).
+    pub fn ask_open_item(&mut self, app: &str, item: &str) {
+        self.request = Some((app.into(), item.into()));
+    }
+
     pub fn take_request(&mut self) -> Option<(String, String)> {
         self.request.take()
     }
@@ -758,13 +766,18 @@ fn sound_rows(s: &Snapshot, prefs: &iyakki_agent::audioout::SoundSettings, advan
 
 /// What the Sound page says about the experimental mixer: its switch with the explanation and, when it is on, a live status line.
 pub const MIXER_TITLE: &str = "Mix sounds from several apps (experimental)";
-pub const MIXER_HELP: &str = "Radio, voice, alarms and notifications can play together and the others get quieter while one speaks. The web browser's own sound is not mixed yet; if you mostly use the browser, leave this off.";
+pub const MIXER_HELP: &str = "Radio, voice, alarms and notifications can play together and the others get quieter while one speaks. The web browser's own sound is not mixed unless you also turn on the row below; without it, the browser asks before it takes the sound card from a player.";
+
+pub const WEB_MIX_TITLE: &str = "Browser sound through the mixer (experimental)";
+pub const WEB_MIX_HELP: &str = "The web browser's sound is sent into the mixer through a pipe instead of opening the sound card itself, so it can play with the radio and be turned down for speech. Needs the mixer above. Applies the next time the web engine starts. Not tested on real hardware yet: if the browser goes silent, turn it off.";
 
 fn mixer_rows(prefs: &iyakki_agent::audioout::SoundSettings, stats: Option<&iyakki_agent::mixer::Stats>) -> Vec<DevRow> {
     let mut rows = vec![DevRow::new(MIXER_TITLE, MIXER_HELP, Target::SoundMixer).chip(if prefs.mixer { "on" } else { "off" }, if prefs.mixer { WARN } else { DIM })];
+    rows.push(DevRow::new(WEB_MIX_TITLE, WEB_MIX_HELP, Target::SoundWebMix).chip(if prefs.web_mix { "on" } else { "off" }, if prefs.web_mix { WARN } else { DIM }));
+    rows.push(DevRow::new("Browser sound status", iyakki_agent::webmix::status_text(prefs.web_mix, prefs.mixer, iyakki_agent::webmix::tap_state()), Target::Nothing).chip(if prefs.web_mix && prefs.mixer { "on" } else { "off" }, DIM));
     if prefs.mixer {
         let (state, line) = match stats {
-            Some(st) => (if st.sink_open { "running" } else { "idle" }, format!("{} · {} source(s) · {:.1}% of a core · {} underrun(s){}", if st.sink_open { "running" } else { "idle" }, st.sources, st.cpu_percent, st.underruns, st.last_error.as_ref().map(|e| format!(" · last problem: {e}")).unwrap_or_default())),
+            Some(st) => (if st.sink_open { "running" } else { "idle" }, format!("{} · {}{}", if st.sink_open { "running" } else { "idle" }, st.detail(), st.last_error.as_ref().map(|e| format!(" · last problem: {e}")).unwrap_or_default())),
             None => ("idle", "idle · 0 source(s) · 0.0% of a core · 0 underrun(s)".to_string()),
         };
         rows.push(DevRow::new("Mixer status", line, Target::Nothing).chip(state, if state == "running" { OK } else { DIM }));
@@ -776,6 +789,15 @@ fn mixer_rows(prefs: &iyakki_agent::audioout::SoundSettings, stats: Option<&iyak
 fn advanced_sound_rows(s: &Snapshot, prefs: &iyakki_agent::audioout::SoundSettings, choice: &iyakki_agent::audioout::Choice, advanced: bool, rows: &mut Vec<DevRow>) {
     use iyakki_agent::audioout::VolumeMode;
     rows.push(DevRow::new("Advanced", if advanced { "Boost, which volume control, speaker tests. Press A or Enter to hide." } else { "Boost, which volume control, speaker tests. Press A or Enter to show." }, Target::SoundAdvanced).chip(if advanced { "shown" } else { "hidden" }, DIM));
+    if advanced {
+        let ms = prefs.highlight_offset_ms;
+        let chip = if ms == 0 { "0 ms".to_string() } else { format!("{ms:+} ms") };
+        rows.push(
+            DevRow::new("Highlight timing offset", format!("Moves the lit word of TALES and chat read-aloud against the sound: later (+) if the word runs ahead of the voice, earlier (-) if it lags behind. -500 to 500 ms, 0 is the mixer's own measure. Now {chip}. + and - step 25 ms, Enter sets 0."), Target::SoundHighlightOffset)
+                .with_slider(SliderVal { value: ms as i64, min: -500, max: 500, step: 25, unit: " ms" })
+                .chip(chip, if ms == 0 { DIM } else { WARN }),
+        );
+    }
     let (true, Some(o)) = (advanced, choice.output.as_ref()) else { return };
     if s.soft_card.is_some() {
         let db = prefs.boost_for(&o.card_id);
@@ -1038,7 +1060,7 @@ mod tests {
         *fake.volume.lock().unwrap() = Some(iyakki_devctl::Volume { control: "Master".into(), percent: 50, muted: false });
         let (mut p, _, fake) = pane("snd", true, fake);
         let rows = p.rows(DevTab::Sound, 0);
-        assert_eq!(rows.len(), 5, "the output, IYAKKI's volume, the card, the mixer switch, the Advanced switch: {rows:?}");
+        assert_eq!(rows.len(), 8, "the output, IYAKKI's volume, the card, the mixer switch, the browser mixer switch, its status, the mixer status (the mixer is on by default), the Advanced switch: {rows:?}");
         let c = rows.iter().position(|r| matches!(r.target, Target::Card(0))).unwrap();
         assert!(rows[c].title.contains("HDA Intel PCH") && rows[c].chips[0].0 == "50%");
         assert_eq!(p.act(DevTab::Sound, c, &Key::Char('+'), 0).unwrap().result.unwrap(), "Volume 55%.");

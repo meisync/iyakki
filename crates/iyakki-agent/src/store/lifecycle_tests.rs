@@ -797,3 +797,45 @@ fn a_tile_app_that_fails_its_checks_or_disagrees_with_its_header_is_refused_at_i
     // a vault permission in the store information is not a tile permission
     assert!(super::manifest::Permission::parse("tile:vault").is_err());
 }
+
+#[test]
+fn a_copy_the_private_store_yanked_is_marked_withdrawn_and_listed_so_and_can_be_removed() {
+    let mut w = world("life-yanked");
+    let v1 = w.skill("meeting-notes", "1.0.0", &m(&[]));
+    w.publish("skill", "meeting-notes", "1.0.0", &v1, &m(&[]));
+    w.install("meeting-notes");
+    assert_eq!(w.life("skill:meeting-notes").check, Check::UpToDate);
+    let rec = w.f.store.records().get(&record_key("skill", &Scope::Shared, "meeting-notes")).cloned().unwrap();
+    // the store is pinned to a key and kept a signed list of withdrawn packages beside its cache
+    let store_key = new_signing_key().unwrap();
+    let mut cfg = w.f.store.config();
+    let src = cfg.sources.iter_mut().find(|s| s.id == rec.source).expect("the copy remembers its store");
+    src.pin = public_key_hex(&store_key);
+    cfg.save(&w.f.store.dir).unwrap();
+    let write_list = |pkgs: Vec<serde_json::Value>, key: &SigningKey| {
+        let mut doc = serde_json::json!({"v": 1, "id": "t", "serial": 2, "issued": NOW, "packages": pkgs, "key": public_key_hex(key)});
+        let sig = super::trust::sign_doc("yanked", &doc, key);
+        doc["sig"] = serde_json::Value::String(sig);
+        std::fs::create_dir_all(w.f.store.dir.join("cache")).unwrap();
+        std::fs::write(w.f.store.dir.join("cache").join(format!("{}.yanked.json", rec.source)), doc.to_string()).unwrap();
+    };
+    let this = serde_json::json!({"name": "meeting-notes", "version": "1.0.0", "sha256": rec.sha256, "reason": "bad"});
+    // another version withdrawn, or a list signed by some other key: the copy is untouched
+    write_list(vec![serde_json::json!({"name": "meeting-notes", "version": "0.9.0", "sha256": rec.sha256, "reason": "x"})], &store_key);
+    assert_eq!(w.life("skill:meeting-notes").check, Check::UpToDate);
+    write_list(vec![this.clone()], &new_signing_key().unwrap());
+    assert_eq!(w.life("skill:meeting-notes").check, Check::UpToDate);
+    // this version withdrawn by the pinned key: marked, said so in `store list`, and still removable
+    write_list(vec![this], &store_key);
+    let l = w.life("skill:meeting-notes");
+    assert!(matches!(&l.check, Check::Withdrawn(t) if t.contains("withdrew this version") && t.contains("store remove skill:meeting-notes")), "{:?}", l.check);
+    assert_eq!(l.check.label(), "Withdrawn");
+    assert!(l.status_line().contains("withdrawn"));
+    assert!(!l.can_update());
+    let lives = w.lives();
+    let policy = Role::Admin.template();
+    assert!(super::storecmd::list_text(&lives, &[], false).contains("withdrawn"));
+    let opts = super::lifecycle::RemoveOpts::default();
+    w.f.store.remove_item(&w.f.svc, &policy, "root", &lives, &l, &opts, &|_, _| {}).unwrap();
+    assert!(w.f.store.records().get(&record_key("skill", &Scope::Shared, "meeting-notes")).is_none());
+}

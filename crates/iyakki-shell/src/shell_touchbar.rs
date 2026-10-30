@@ -9,7 +9,7 @@
 use super::*;
 use crate::fnkeys::{self, FnKey};
 use crate::touchbar::{self, Action, AgentState, Bar, Choice, Ctx, Recent, SliderKind, Strip};
-use crate::touchbar_host::{Host, Status};
+use crate::touchbar_host::Host;
 use iyakki_agent::keyboard::{self, KeyboardSettings};
 
 /// Heartbeats between two looks at the settings and the backlights (30 a second).

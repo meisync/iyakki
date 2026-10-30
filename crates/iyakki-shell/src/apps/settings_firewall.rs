@@ -174,6 +174,9 @@ pub(super) fn rule_lines(r: &Rule, v: &View, now: i64) -> (String, String) {
     if !r.comment.is_empty() {
         parts.push(r.comment.clone());
     }
+    if iyakki_fw::devrules::is_managed(r) {
+        parts.push("made by developer mode so the developer computer can connect; it goes away with developer mode, or Remove it".to_string());
+    }
     (title, parts.join(" · "))
 }
 

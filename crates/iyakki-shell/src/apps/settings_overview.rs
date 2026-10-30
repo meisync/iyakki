@@ -55,6 +55,14 @@ impl SettingsApp {
                 out.push(Attn { tab: Tab::SessionLog, title: format!("The last session ended unexpectedly ({})", iyakki_storage::crashlog::wall(u.started).split(' ').next().unwrap_or("")), why: "Open the log to see the last kernel messages before it stopped.".into() });
             }
         }
+        if has(Tab::Updates) {
+            let data = &self.storage.data_dir;
+            if let Some(t) = iyakki_agent::devmode::update::interrupted_text(data) {
+                out.push(Attn { tab: Tab::Updates, title: "A system update did not finish".into(), why: t });
+            } else if iyakki_agent::devmode::centre::read_trial(data).is_some_and(|t| t.state == "fell-back") {
+                out.push(Attn { tab: Tab::Updates, title: "The last update did not start, the saved version runs".into(), why: "Open System update to see what happened and what to do.".into() });
+            }
+        }
         if has(Tab::Storage) && self.storage.virtual_disks.is_none() && matches!(iyakki_storage::data_location(&self.storage.roots, &self.storage.data_dir), iyakki_storage::DataLocation::Memory) {
             out.push(Attn { tab: Tab::Storage, title: "Your data is kept in memory only".into(), why: "Accounts, settings and files are forgotten at power-off. Choose a disk to keep them.".into() });
         }
@@ -66,6 +74,7 @@ impl SettingsApp {
         match k {
             Key::Up => self.move_sel(-1, list.len()),
             Key::Down => self.move_sel(1, list.len()),
+            Key::Char('s') if cx.session.policy.allows_app(iyakki_sec::policy::App::Doctor) => self.hw.ask_open_item("doctor", "share"),
             Key::Enter => {
                 if let Some(a) = list.get(self.sel[self.tab].min(list.len().saturating_sub(1))) {
                     self.go_to(a.tab);
@@ -136,6 +145,18 @@ impl SettingsApp {
                 break;
             }
             bx += g.button(bx, by, 14.0 * s, label, TEXT, Event::Tab(ti)) + 8.0 * s;
+        }
+        // a support bundle, previewed in DOCTOR before anything is saved
+        if cx.session.policy.allows_app(iyakki_sec::policy::App::Doctor) {
+            let label = "Share diagnostics";
+            let bw = g.text_width(14.0 * s, label, Face::Bold) + 14.0 * s * 1.7;
+            if bx > a.x && bx + bw > a.x + a.w {
+                bx = a.x;
+                by += 40.0 * s;
+            }
+            if by + 14.0 * s * 2.1 <= bottom {
+                g.button(bx, by, 14.0 * s, label, ACCENT, Event::Key(Key::Char('s')));
+            }
         }
     }
 }

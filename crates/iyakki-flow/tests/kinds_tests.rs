@@ -347,7 +347,7 @@ fn the_browser_node_keeps_the_consent_levels_and_maps_steps() {
 #[test]
 fn the_agent_node_checks_its_answer_against_the_schema() {
     let e = env("k-agent");
-    e.host.agent_results.lock().unwrap().push_back(Ok(AgentResult { text: "Here: {\"summary\": \"all fine\", \"score\": 9}".into(), cents: 3 }));
+    e.host.agent_results.lock().unwrap().push_back(Ok(AgentResult { text: "Here: {\"summary\": \"all fine\", \"score\": 9}".into(), cents: 3, log: vec![] }));
     let f = one("agent", json!({"prompt": "Summarise {{ inputs.topic }}", "tools": ["web_search"], "output_schema": {"required": ["summary"]}, "max_cents": 5}));
     let t = e.engine.test_node(&f, "n", json!({"topic": "tides"}), Value::Null).unwrap();
     assert!(t.ok, "{}", t.error);
@@ -357,10 +357,10 @@ fn the_agent_node_checks_its_answer_against_the_schema() {
     assert_eq!(req.prompt, "Summarise tides");
     assert_eq!(req.tools, vec!["web_search"]);
     assert_eq!(req.max_cents, 5);
-    e.host.agent_results.lock().unwrap().push_back(Ok(AgentResult { text: "{\"other\": 1}".into(), cents: 1 }));
+    e.host.agent_results.lock().unwrap().push_back(Ok(AgentResult { text: "{\"other\": 1}".into(), cents: 1, log: vec![] }));
     let t = test_node(&e, &f);
     assert!(!t.ok && t.error.contains("no `summary`"));
-    e.host.agent_results.lock().unwrap().push_back(Ok(AgentResult { text: "no json at all".into(), cents: 1 }));
+    e.host.agent_results.lock().unwrap().push_back(Ok(AgentResult { text: "no json at all".into(), cents: 1, log: vec![] }));
     assert!(!test_node(&e, &f).ok);
     // a model that wrote the wrong shape may do better next time
     let n = node("agent", json!({}));

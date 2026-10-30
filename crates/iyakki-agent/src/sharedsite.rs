@@ -1075,7 +1075,7 @@ pub fn bind_addr(cfg: &ShareCfg) -> Result<SocketAddr, String> {
 
 pub fn start(cfg: ShareCfg, env: Env) -> Result<Running, String> {
     let addr = bind_addr(&cfg)?;
-    let listener = TcpListener::bind(addr).map_err(|e| if e.kind() == std::io::ErrorKind::AddrInUse { format!("port {} is in use by something else; edit the share and choose another port", cfg.port) } else { format!("could not listen on {addr}: {e}") })?;
+    let listener = bind_retry(addr).map_err(|e| if e.kind() == std::io::ErrorKind::AddrInUse { format!("port {} is in use by something else; edit the share and choose another port", cfg.port) } else { format!("could not listen on {addr}: {e}") })?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let local = listener.local_addr().map_err(|e| e.to_string())?;
     let site = Arc::new(Site::new(cfg, env)?);
@@ -1224,4 +1224,20 @@ fn serve_conn(site: &Arc<Site>, mut s: TcpStream) -> std::io::Result<()> {
     let r = site.respond(&req, ip);
     reply_and_close(site, &mut s, r, head_only);
     Ok(())
+}
+
+/// Bind a listener. A port that was given up a moment ago (a share stopped and started again, a new secret link) can still be
+/// held for a few milliseconds by a child process that was forked while the old listener was open and has not run its `exec`
+/// yet; "address in use" for that long is not a real conflict, so try again briefly before reporting it.
+pub(crate) fn bind_retry(addr: impl std::net::ToSocketAddrs + Copy) -> std::io::Result<TcpListener> {
+    let mut tries = 0;
+    loop {
+        match TcpListener::bind(addr) {
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            r => return r,
+        }
+    }
 }

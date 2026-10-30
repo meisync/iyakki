@@ -11,20 +11,20 @@ use super::DevMode;
 
 const CLUSTER: u64 = 4096;
 
-fn pseudo(n: usize, seed: u8) -> Vec<u8> {
+pub(super) fn pseudo(n: usize, seed: u8) -> Vec<u8> {
     (0..n).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed).wrapping_add((i >> 9) as u8)).collect()
 }
 
-fn board_cfg() -> String {
+pub(super) fn board_cfg() -> String {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist/buildroot/board/iyakki/grub.cfg");
     std::fs::read_to_string(p).unwrap().replace("__KERNEL_PATH__", "/boot/bzImage").replace("__INITRD_PATH__", "/boot/initrd")
 }
 
-struct Rig {
-    dir: PathBuf,
-    boot: DirBoot,
-    dm: DevMode,
-    release: String,
+pub(super) struct Rig {
+    pub(super) dir: PathBuf,
+    pub(super) boot: DirBoot,
+    pub(super) dm: DevMode,
+    pub(super) release: String,
 }
 
 impl Drop for Rig {
@@ -33,7 +33,7 @@ impl Drop for Rig {
     }
 }
 
-fn put(root: &Path, rel: &str, data: &[u8]) {
+pub(super) fn put(root: &Path, rel: &str, data: &[u8]) {
     let p = root.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(p, data).unwrap();
@@ -41,7 +41,7 @@ fn put(root: &Path, rel: &str, data: &[u8]) {
 
 /// A device running 0.1.0-alpha.1 (macweb) with a 14 MB boot partition holding a 6 MB initramfs and a 1 MB kernel (the real ones are
 /// 180 MB and 13 MB on 256 MB: the same proportions).
-fn rig(tag: &str) -> Rig {
+pub(super) fn rig(tag: &str) -> Rig {
     let dir = std::env::temp_dir().join(format!("iyakki-upd-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let boot_root = dir.join("bootpart");
@@ -59,7 +59,7 @@ fn rig(tag: &str) -> Rig {
 }
 
 /// The payload folder of a new version: a new initramfs (1 MB bigger), a new kernel, the same EFI loader, a new theme and menu.
-fn payload(r: &Rig, version: &str, variant: &str, sb: bool, initrd_mb: usize) -> (PathBuf, Manifest) {
+pub(super) fn payload(r: &Rig, version: &str, variant: &str, sb: bool, initrd_mb: usize) -> (PathBuf, Manifest) {
     let d = r.dir.join(format!("payload-{version}-{variant}-{sb}"));
     let _ = std::fs::remove_dir_all(&d);
     put(&d, "boot/bzImage", &pseudo((1 << 20) + 5000, 11));
@@ -77,11 +77,11 @@ fn payload(r: &Rig, version: &str, variant: &str, sb: bool, initrd_mb: usize) ->
     (d, m)
 }
 
-fn env<'a>(r: &'a Rig, data_free: &'a dyn Fn() -> u64, fault: Option<&'a AtomicU64>) -> Env<'a> {
+pub(super) fn env<'a>(r: &'a Rig, data_free: &'a dyn Fn() -> u64, fault: Option<&'a AtomicU64>) -> Env<'a> {
     Env { dm: &r.dm, boot: &r.boot, release: r.release.clone(), volatile: false, data_free, fault_after: fault }
 }
 
-fn stage_all(e: &Env, dir: &Path, m: &Manifest, only: &[String]) {
+pub(super) fn stage_all(e: &Env, dir: &Path, m: &Manifest, only: &[String]) {
     std::fs::create_dir_all(e.dm.data_dir().join("boot-next")).unwrap();
     std::fs::write(e.dm.data_dir().join("boot-next").join(MANIFEST), serde_json::to_vec(m).unwrap()).unwrap();
     for n in only {
@@ -97,11 +97,11 @@ fn stage_all(e: &Env, dir: &Path, m: &Manifest, only: &[String]) {
     }
 }
 
-fn hash(p: &Path) -> String {
+pub(super) fn hash(p: &Path) -> String {
     super::files::sha256_file(p).unwrap()
 }
 
-fn tree_hash(root: &Path, skip: &[&str]) -> Vec<(String, String)> {
+pub(super) fn tree_hash(root: &Path, skip: &[&str]) -> Vec<(String, String)> {
     list_boot(root).into_iter().filter(|(p, _)| !skip.iter().any(|s| p.starts_with(s))).map(|(p, _)| { let h = hash(&root.join(&p)); (p, h) }).collect()
 }
 

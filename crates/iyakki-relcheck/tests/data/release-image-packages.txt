@@ -1,0 +1,98 @@
+# The package set of the RELEASE image profile, as a fixture for crates/iyakki-relcheck/tests/release_image.rs (no build needed).
+# Made 2026-10-27 from the packages that own files in target/buildroot-macweb/images/rootfs.cpio (Buildroot's packages-file-list.txt of the
+# web, mac builds) MINUS linux-firmware, with the licence string of each package as legal-info/manifest.csv prints it (mac build) or as the
+# package recipe declares it (the rest; "-" = the recipe declares none). gst1-plugins-bad is the string Buildroot resolves for the web
+# configuration (mpegtsdemux on). One or two real file paths per package stand for its files. Refresh it when the package set changes:
+# the test only proves that THIS set, plus the profile's own files, passes the scan with legal/image-rules.txt.
+# package | licence | files (space separated)
+busybox | GPL-2.0, bzip2-1.0.4 | bin/arch bin/ash
+e2fsprogs | GPL-2.0, MIT-like with advertising clause (libss and libet) | bin/chattr bin/compile_et
+linux | GPL-2.0 | boot/bzImage lib/modules/6.12.112/kernel/crypto/ecc.ko
+grub2 | GPL-3.0+ | boot/grub/grub.cfg
+skeleton-init-common | - | dev/fd dev/stderr
+dbus | AFL-2.1 or GPL-2.0+ (library, tools), GPL-2.0+ (tools) | etc/dbus-1/session.conf etc/dbus-1/system.conf
+dropbear | MIT, BSD-2-Clause, Public domain, Unlicense, WTFPL | etc/dropbear usr/bin/dbclient
+fontconfig | fontconfig license | etc/fonts/conf.d/10-hinting-slight.conf etc/fonts/conf.d/10-scale-bitmap-fonts.conf
+libnl | LGPL-2.1+ | etc/libnl/classid etc/libnl/pktloc
+wpa_supplicant | BSD-3-Clause | etc/network/if-down.d/wpasupplicant etc/network/if-up.d/wpasupplicant
+ifupdown-scripts | - | etc/network/if-pre-up.d/wait_iface etc/network/nfs_check
+libopenssl | Apache-2.0 | etc/ssl/ct_log_list.cnf etc/ssl/ct_log_list.cnf.dist
+eudev | GPL-2.0+ (programs), LGPL-2.1+ (libraries) | etc/udev/udev.conf lib/libudev.so.1
+musl | MIT | lib/ld-musl-x86_64.so.1 lib/libc.so
+gcc-final | GPL-3.0-with-GCC-exception | lib/libatomic.so lib/libatomic.so.1
+util-linux | GPL-2.0+, BSD-4-Clause, LGPL-2.1+ (libblkid, libfdisk, libmount), BSD-3-Clause (libuuid), BSD-2-Clause (xxhash), ISC (rfkill), MIT (hardlink, flock) | lib/libblkid.so.1 lib/libblkid.so.1.1.0
+apple-bce | GPL-2.0 | lib/modules/6.12.112/updates/apple-bce.ko
+facetimehd | GPL-2.0 | lib/modules/6.12.112/updates/facetimehd.ko lib/modules/6.12.112/updates/videobuf2-dma-sg.ko
+nvidia-open | MIT or GPL-2.0 | lib/modules/6.12.112/updates/nvidia-drm.ko lib/modules/6.12.112/updates/nvidia-modeset.ko
+snd-hda-macbookpro | GPL-2.0 | lib/modules/6.12.112/updates/snd-hda-codec-cs8409.ko
+iproute2 | GPL-2.0+ | sbin/bridge sbin/ctstat
+alsa-utils | GPL-2.0 | usr/bin/alsamixer usr/bin/amixer
+clang | Apache-2.0 with exceptions | usr/bin/amdgpu-arch usr/bin/diagtool
+alsa-lib | LGPL-2.1+ (library), GPL-2.0+ (aserver) | usr/bin/aserver usr/lib/libasound.so
+cage | MIT | usr/bin/cage
+cog | MIT | usr/bin/cog usr/bin/cogctl
+webp | BSD-3-Clause | usr/bin/cwebp usr/bin/dwebp
+libdisplay-info | MIT | usr/bin/di-edid-decode usr/lib/libdisplay-info.so
+libgcrypt | LGPL-2.1+ | usr/bin/dumpsexp usr/bin/hmac256
+libglib2 | LGPL-2.1+ | usr/bin/gapplication usr/bin/gdbus
+git | GPL-2.0, LGPL-2.1+ | usr/bin/git usr/bin/git-cvsserver
+libgpg-error | GPL-2.0+, LGPL-2.1+ | usr/bin/gpg-error usr/bin/gpgrt-config
+gstreamer1 | LGPL-2.1+ | usr/bin/gst-inspect-1.0 usr/bin/gst-launch-1.0
+gst1-plugins-bad | LGPL-2.0+, UNKNOWN | usr/bin/gst-transcoder-1.0 usr/lib/gst-plugins-bad/wpe-extension/libgstwpeextension.so
+harfbuzz | MIT, ISC (ucdn library) | usr/bin/hb-info usr/bin/hb-shape
+icu | ICU License | usr/bin/icuexportdata usr/bin/pkgdata
+libevdev | MIT | usr/bin/libevdev-tweak-device usr/bin/mouse-dpi-tool
+libinput | MIT | usr/bin/libinput usr/lib/libinput.so
+spirv-llvm-translator | NCSA | usr/bin/llvm-spirv usr/lib/libLLVMSPIRVLib.so
+pcre2 | BSD-3-Clause, BSD-2-Clause | usr/bin/pcre2grep usr/bin/pcre2test
+libpsl | MIT, BSD-3-Clause | usr/bin/psl usr/bin/psl-make-dafsa
+spirv-tools | Apache-2.0 | usr/bin/spirv-as usr/bin/spirv-cfg
+sqlite | blessing | usr/bin/sqlite3 usr/lib/libsqlite3.so
+wayland | MIT | usr/bin/wayland-scanner usr/lib/libwayland-client.so
+libcurl | curl | usr/bin/wcurl usr/lib/libcurl.so
+libxml2 | MIT | usr/bin/xmlcatalog usr/bin/xmllint
+libxslt | MIT | usr/bin/xsltproc usr/lib/libexslt.so
+mesa3d | MIT, SGI, Khronos | usr/lib/gbm/dri_gbm.so usr/lib/libEGL.so
+glib-networking | LGPL-2.0+ | usr/lib/gio/modules/libgioopenssl.so
+gst1-plugins-base | LGPL-2.1+ | usr/lib/gstreamer-1.0/include/gst/gl/gstglconfig.h usr/lib/gstreamer-1.0/libgstalsa.so
+gst1-plugins-good | LGPL-2.1+ | usr/lib/gstreamer-1.0/libgstaudiofx.so usr/lib/gstreamer-1.0/libgstaudioparsers.so
+llvm | Apache-2.0 with exceptions | usr/lib/libLLVM-21.so usr/lib/libLLVM.so.21.1
+wpebackend-fdo | BSD-2-Clause | usr/lib/libWPEBackend-fdo-1.0.so usr/lib/libWPEBackend-fdo-1.0.so.1
+wpewebkit | LGPL-2.1+, BSD-2-Clause | usr/lib/libWPEWebKit-2.0.so usr/lib/libWPEWebKit-2.0.so.1
+elfutils | GPL-2.0+ or LGPL-3.0+ (library), , GPL-3.0+ (programs) | usr/lib/libasm-0.194.so usr/lib/libasm.so
+cairo | LGPL-2.1 or MPL-1.1 (library) | usr/lib/libcairo-gobject.so usr/lib/libcairo-gobject.so.2
+ncurses | MIT with advertising clause | usr/lib/libcurses.so usr/lib/libform.so
+dav1d | BSD-2-Clause | usr/lib/libdav1d.so usr/lib/libdav1d.so.7
+libdrm | MIT | usr/lib/libdrm.so usr/lib/libdrm.so.2
+libepoxy | MIT | usr/lib/libepoxy.so usr/lib/libepoxy.so.0
+expat | MIT | usr/lib/libexpat.so usr/lib/libexpat.so.1
+libffi | MIT | usr/lib/libffi.so usr/lib/libffi.so.8
+freetype | FTL or GPL-2.0+ | usr/lib/libfreetype.so usr/lib/libfreetype.so.6
+musl-fts | BSD-3-Clause | usr/lib/libfts.so usr/lib/libfts.so.0
+jpeg-turbo | IJG (libjpeg), BSD-3-Clause (TurboJPEG), Zlib (SIMD) | usr/lib/libjpeg.so usr/lib/libjpeg.so.8
+kmod | LGPL-2.1+ (library) | usr/lib/libkmod.so usr/lib/libkmod.so.2
+nghttp2 | MIT | usr/lib/libnghttp2.so usr/lib/libnghttp2.so.14
+libogg | BSD-3-Clause | usr/lib/libogg.so usr/lib/libogg.so.0
+opus | BSD-3-Clause | usr/lib/libopus.so usr/lib/libopus.so.0
+pixman | MIT | usr/lib/libpixman-1.so usr/lib/libpixman-1.so.0
+libpng | Libpng-2.0 | usr/lib/libpng.so usr/lib/libpng16.so
+seatd | MIT | usr/lib/libseat.so usr/lib/libseat.so.1
+libsoup3 | LGPL-2.0+ | usr/lib/libsoup-3.0.so usr/lib/libsoup-3.0.so.0
+libtasn1 | GPL-3.0+ (tests, tools), LGPL-2.1+ (library) | usr/lib/libtasn1.so usr/lib/libtasn1.so.6
+libvorbis | BSD-3-Clause | usr/lib/libvorbis.so usr/lib/libvorbis.so.0
+libvpx | BSD-3-Clause | usr/lib/libvpx.so usr/lib/libvpx.so.12
+wlroots | MIT | usr/lib/libwlroots-0.19.so
+libwpe | BSD-2-Clause | usr/lib/libwpe-1.0.so usr/lib/libwpe-1.0.so.1
+libxkbcommon | MIT/X11 | usr/lib/libxkbcommon.so usr/lib/libxkbcommon.so.0
+libzlib | Zlib | usr/lib/libz.so usr/lib/libz.so.1
+iyakki-git-ssh | BSD-3-Clause, BSD-2-Clause, ISC, Public Domain | usr/libexec/iyakki/git-ssh
+iyakki-webview-helper | Apache-2.0 | usr/libexec/iyakki/webview-helper
+iw | ISC | usr/sbin/iw
+xkeyboard-config | MIT | usr/share/X11/xkb/compat/README usr/share/X11/xkb/compat/accessx
+ca-certificates | GPL-2.0+ (script), MPL-2.0 (data) | usr/share/ca-certificates/mozilla/ACCVRAIZ1.crt usr/share/ca-certificates/mozilla/AC_RAIZ_FNMT-RCM.crt
+libclc | Apache-2.0 with exceptions or MIT | usr/share/clc/amdgcn--amdhsa.bc usr/share/clc/barts-r600--.bc
+dejavu | - | usr/share/fontconfig/conf.avail/20-unhint-small-dejavu-sans-mono.conf usr/share/fontconfig/conf.avail/20-unhint-small-dejavu-sans.conf
+liberation | OFL-1.1 | usr/share/fonts/liberation/LiberationMono-Bold.ttf usr/share/fonts/liberation/LiberationMono-BoldItalic.ttf
+hwdata | GPL-2.0+, BSD-3-Clause, XFree86 1.0 | usr/share/hwdata/pci.ids usr/share/hwdata/pnp.ids
+shared-mime-info | GPL-2.0 | usr/share/mime/mime.cache
+wireless-regdb | ISC | lib/firmware/regulatory.db lib/firmware/regulatory.db.p7s

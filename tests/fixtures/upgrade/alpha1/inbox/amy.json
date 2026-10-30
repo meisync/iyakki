@@ -1,0 +1,77 @@
+{
+  "notifications": [
+    {
+      "id": "n1",
+      "time": 1700000010,
+      "kind": "device",
+      "title": "New device on your network",
+      "body": "aa:bb:cc:00:00:01 joined",
+      "source": "scan",
+      "read": false,
+      "flagged": false
+    },
+    {
+      "id": "n2",
+      "time": 1700000020,
+      "kind": "device",
+      "title": "New device on your network",
+      "body": "aa:bb:cc:00:00:02 joined",
+      "source": "scan",
+      "read": false,
+      "flagged": false
+    },
+    {
+      "id": "n3",
+      "time": 1700000030,
+      "kind": "device",
+      "title": "New device on your network",
+      "body": "aa:bb:cc:00:00:03 joined",
+      "source": "scan",
+      "read": false,
+      "flagged": false
+    },
+    {
+      "id": "n4",
+      "time": 1700000040,
+      "kind": "info",
+      "title": "Backup finished",
+      "body": "synthetic backup note",
+      "source": "jobs",
+      "read": true,
+      "flagged": false
+    },
+    {
+      "id": "n5",
+      "time": 1700000050,
+      "kind": "warning",
+      "title": "Disk is 90% full",
+      "body": "synthetic warning",
+      "source": "system",
+      "read": false,
+      "flagged": true
+    }
+  ],
+  "tasks": [
+    {
+      "id": "t1",
+      "title": "Water the plants",
+      "notes": "synthetic",
+      "due": 1700086400,
+      "priority": "normal",
+      "status": "pending",
+      "created_by": "user",
+      "created": 1700000000,
+      "updated": 1700000000
+    },
+    {
+      "id": "t2",
+      "title": "Pay the electricity bill",
+      "notes": "",
+      "priority": "high",
+      "status": "done",
+      "created_by": "user",
+      "created": 1700000005,
+      "updated": 1700000009
+    }
+  ]
+}

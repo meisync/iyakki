@@ -1,0 +1,4 @@
+body { font: 18px sans-serif; margin: 24px; background: #101426; color: #e8ecff; }
+#result { padding: 12px 16px; border-radius: 8px; background: #2a2f4a; margin: 12px 0; }
+#result.pass { background: #17472b; } #result.fail { background: #5a1c24; }
+video { width: 320px; background: #000; } a { color: #8fb4ff; }

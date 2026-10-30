@@ -13,6 +13,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
+use iyakki_agent::dash::cluster::RepairPlan;
 use iyakki_agent::dash::connector::{Cancel, DashError, FieldKind as CField, KindInfo, Node, NodeKind, SourceConfig, TestInfo};
 use iyakki_agent::dash::engine::{self, RunCtx};
 use iyakki_agent::dash::multi::Outcome;
@@ -21,13 +22,15 @@ use iyakki_agent::dash::model::*;
 use iyakki_agent::dash::session::{shared, Shared};
 use iyakki_agent::dash::store::{Dashboards, Sources};
 use iyakki_agent::dash::templates;
-use iyakki_agent::dash::tools::Env;
+use iyakki_agent::dash::share::{grants_input, grants_text, parse_grants, Grant, Role};
+use iyakki_agent::dash::tools::{Env, People};
 use iyakki_agent::dash::registry;
 
 use super::chat::{ChatApp, DashLink};
 use super::component::route;
 use super::dash_charts as ch;
 use super::dash_query::QueryBox;
+use super::dash_repair as repair;
 use super::widgets::{Form, FormEvent, PickEvent, Picker};
 use super::{App, AppCx, Flow};
 use crate::ctxmenu::Item;
@@ -101,7 +104,15 @@ pub mod id {
     pub const E_AXIS: usize = 313;
     pub const E_HIDE: usize = 314;
     pub const E_RUN_ONE: usize = 315;
+    pub const SHARE: usize = 316;
     pub const S_DEFAULT: usize = 175;
+    pub const S_REPAIR: usize = 176;
+    pub const S_FIXALL: usize = 177;
+    pub const S_DUP: usize = 178;
+    pub const OPEN_SRC: usize = 179; // the banner's own Open Sources button
+    pub const REPAIR: usize = 1400; // + banner slot (0..40)
+    pub const REPAIR_P: usize = 1500; // + panel index (kept for the click handler; panels draw no button)
+    pub const REMOVE: usize = 1600; // + banner slot: the banner's `Remove this source`
     pub const F_TITLE: usize = 1; // Focus ids
     pub const F_TARGET: usize = 2;
     pub const F_LEGEND: usize = 3;
@@ -137,6 +148,8 @@ struct PData {
     frame: Option<Arc<Frame>>,
     model: Option<ch::Model>,
     err: Option<String>,
+    /// The first failed query as the source reported it: (the source as the panel names it, the error).
+    serr: Option<(String, DashError)>,
     /// Parts of the panel that failed while the rest has data (one line each).
     qerrors: Vec<String>,
     loading: bool,
@@ -153,6 +166,8 @@ enum Msg {
     Preview { gen: u64, range: (i64, i64), out: Outcome },
     Nodes { gen: u64, path: Vec<String>, res: Result<Vec<Node>, DashError> },
     Test { id: String, res: Result<TestInfo, DashError> },
+    Repaired { id: String, res: Result<String, String> },
+    Plans(Vec<(String, String, RepairPlan)>),
     Var { name: String, gen: u64, res: Result<Vec<String>, DashError> },
 }
 
@@ -177,14 +192,20 @@ enum NameFor {
     Rename,
     Import,
     New,
+    /// The accounts a dashboard is shared with (the dashboard is in `share_target`).
+    Share,
 }
 
 #[derive(Clone, PartialEq, Eq)]
 enum Confirmed {
     DeleteSource(String),
     DeleteDashboard(String),
+    /// Share the dashboard with exactly these accounts (empty: stop sharing).
+    Share(String, Vec<Grant>),
     Leave,
     DiscardEditor,
+    /// Save my dashboard although an operator changed it after I opened it.
+    Overwrite,
 }
 
 /// The panel editor: a working copy of the panel, its fields, the schema list and the preview.
@@ -283,6 +304,10 @@ struct Geo {
     plots: HashMap<usize, ch::Plot>,
     col_w: f32,
     row_h: f32,
+    /// The sources of the banners drawn last (the click id is the position).
+    repair_slots: Vec<String>,
+    /// (source, message) of the failures the banners say, so their panels show the short state.
+    banner_keys: Vec<(String, String)>,
 }
 
 pub struct DashApp {
@@ -294,6 +319,11 @@ pub struct DashApp {
     sources: Vec<SourceConfig>,
     src_sel: usize,
     src_status: HashMap<String, (bool, String)>,
+    /// What could be done about each source that points at localhost: (its address when asked, when, the plan).
+    plans: HashMap<String, (String, std::time::Instant, RepairPlan)>,
+    plans_busy: bool,
+    /// Another tile the shell should open next (Store -> Setup on an item).
+    request: Option<(String, String)>,
     list: Vec<iyakki_agent::dash::store::Entry>,
     list_sel: usize,
     data: HashMap<String, PData>,
@@ -322,6 +352,23 @@ pub struct DashApp {
     host_save: Option<(String, Vec<u8>)>,
     cur_ctx: Option<RunCtx>,
     import_notes: Vec<String>,
+    /// For each of my dashboards in the list, the accounts it is shared with.
+    shared: HashMap<String, Vec<Grant>>,
+    /// What I may do with each dashboard shared with me.
+    roles: HashMap<String, Role>,
+    share_target: Option<String>,
+}
+
+/// The accounts of this machine, for sharing: names from the user store, homes where the agent puts them.
+struct StorePeople(Arc<std::sync::Mutex<crate::accounts::UserStore>>);
+
+impl People for StorePeople {
+    fn exists(&self, name: &str) -> bool {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).get(name).is_some()
+    }
+    fn home(&self, name: &str, data_dir: &std::path::Path) -> std::path::PathBuf {
+        iyakki_agent::scope::home_root(name, data_dir)
+    }
 }
 
 fn hash_of<T: Hash>(t: &T) -> u64 {
@@ -343,6 +390,7 @@ impl DashApp {
         // names and ids only reach the audit log, never a value
         let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
         env.audit = Arc::new(move |kind, detail| audit.record(&user, kind, detail));
+        env.people = Arc::new(StorePeople(cx.store.clone()));
         DashApp::with_env(cx, Arc::new(env))
     }
 
@@ -361,6 +409,9 @@ impl DashApp {
             sources: vec![],
             src_sel: 0,
             src_status: HashMap::new(),
+            plans: HashMap::new(),
+            plans_busy: false,
+            request: None,
             list: vec![],
             list_sel: 0,
             data: HashMap::new(),
@@ -389,6 +440,9 @@ impl DashApp {
             host_save: None,
             cur_ctx: None,
             import_notes: vec![],
+            shared: HashMap::new(),
+            roles: HashMap::new(),
+            share_target: None,
         };
         a.reload_lists();
         a
@@ -408,9 +462,12 @@ impl DashApp {
     }
 
     fn reload_lists(&mut self) {
+        self.env.migrate_sources();
         self.sources = self.env.sources().list();
         self.src_sel = self.src_sel.min(self.sources.len().saturating_sub(1));
-        self.list = self.env.dashboards().list();
+        self.list = self.env.list_dashboards();
+        self.shared = self.list.iter().filter(|e| !e.id.starts_with("share:")).map(|e| (e.id.clone(), self.env.shared_with(&e.id))).filter(|(_, v)| !v.is_empty()).collect();
+        self.roles = self.list.iter().filter_map(|e| self.env.my_role(&e.id).map(|r| (e.id.clone(), r))).collect();
         self.list_sel = self.list_sel.min((self.list.len() + templates::all().len()).saturating_sub(1));
     }
 
@@ -585,10 +642,12 @@ impl DashApp {
                     if out.failed() {
                         let text = problems.join("; ");
                         pd.err = Some(text.clone());
+                        pd.serr = out.errors.first().map(|e| (e.source.clone(), e.error.clone()));
                         pd.qerrors.clear();
                         self.state.lock().unwrap_or_else(|e| e.into_inner()).note_error(&id, &p.title, &text, now);
                     } else {
                         pd.err = None;
+                        pd.serr = None;
                         pd.qerrors = problems.clone();
                         pd.frame = Some(Arc::new(out.frame));
                         let mut tmp = std::mem::take(pd);
@@ -658,6 +717,25 @@ impl DashApp {
                         Err(e) => (false, e.to_string()),
                     });
                 }
+                Msg::Plans(v) => {
+                    self.plans_busy = false;
+                    for (id, url, plan) in v {
+                        self.plans.insert(id, (url, std::time::Instant::now(), plan));
+                    }
+                }
+                Msg::Repaired { id, res } => {
+                    self.inflight = self.inflight.saturating_sub(1);
+                    match res {
+                        Ok(url) => {
+                            self.src_status.remove(&id);
+                            self.reload_lists();
+                            let name = self.sources.iter().find(|s| s.id == id).map_or(id.clone(), |s| s.name.clone());
+                            self.say(format!("Source {name} now uses {url}."), true);
+                            self.schedule(true);
+                        }
+                        Err(e) => self.say(e, false),
+                    }
+                }
                 Msg::Var { name, gen, res } => {
                     self.inflight = self.inflight.saturating_sub(1);
                     let _ = gen;
@@ -709,7 +787,37 @@ impl DashApp {
         true
     }
 
+    /// A dashboard shared with me is never exported or shared on, whatever my role.
+    fn view_only(&mut self) -> bool {
+        let shared = self.d.id.starts_with("share:");
+        if shared {
+            self.say("This dashboard is shared with you: only its owner can export or share it.", false);
+        }
+        shared
+    }
+
     fn save(&mut self) {
+        if self.d.id.starts_with("share:") {
+            // an operator's changes go into the owner's dashboard; a viewer's are refused with a sentence
+            let d = self.state.lock().unwrap_or_else(|e| e.into_inner()).dashboard.clone();
+            match self.env.save_dashboard(&d) {
+                Ok(()) => {
+                    self.state.lock().unwrap_or_else(|e| e.into_inner()).mark_saved();
+                    self.say("Saved in the owner's dashboard (they keep their previous version as a backup).", true);
+                }
+                Err(e) => self.say(e, false),
+            }
+            return;
+        }
+        let warn = self.env.overwrite_warning(&self.state.lock().unwrap_or_else(|e| e.into_inner()).dashboard);
+        if let Some(w) = warn {
+            self.modal = Some(Modal::Confirm(format!("{w} Save anyway?"), Confirmed::Overwrite));
+            return;
+        }
+        self.save_own();
+    }
+
+    fn save_own(&mut self) {
         let dashes = self.env.dashboards();
         let r = {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -720,6 +828,7 @@ impl DashApp {
             let r = dashes.save(&st.dashboard);
             if r.is_ok() {
                 st.mark_saved();
+                self.env.note_saved(&st.dashboard.id);
             }
             r
         };
@@ -824,6 +933,9 @@ impl DashApp {
     }
 
     fn export_dashboard(&mut self, _cx: &AppCx) {
+        if self.view_only() {
+            return;
+        }
         let text = Dashboards::export_bundle(&self.d, &self.sources);
         let name = format!("{}.json", iyakki_agent::dash::store::slug(&self.d.title));
         let dir = self.env.home.join("Dashboards").join("exports");
@@ -995,6 +1107,97 @@ impl DashApp {
         self.redraw = true;
     }
 
+    /// Ask the cluster (off the screen thread) what could be done for each source that points at localhost.
+    fn ensure_plans(&mut self) {
+        if self.plans_busy {
+            return;
+        }
+        let stale = |s: &SourceConfig, p: &HashMap<String, (String, std::time::Instant, RepairPlan)>| match p.get(&s.id) {
+            Some((u, t, _)) => u != s.value("url") || t.elapsed() > std::time::Duration::from_secs(30),
+            None => true,
+        };
+        let ids: Vec<String> = self.sources.iter().filter(|s| iyakki_agent::dash::cluster::local_target(s.value("url")).is_some() && iyakki_agent::dash::cluster::default_port(&s.kind).is_some() && stale(s, &self.plans)).map(|s| s.id.clone()).collect();
+        // only while something is on screen that needs it (a failed panel or the Sources page)
+        let needed = self.screen == Screen::Sources || self.data.values().any(|d| d.serr.is_some());
+        if ids.is_empty() || !needed {
+            return;
+        }
+        self.plans_busy = true;
+        let (env, tx) = (self.env.clone(), self.tx.clone());
+        std::thread::spawn(move || {
+            let v = ids.into_iter().map(|id| (env.sources().get(&id).map(|c| c.value("url").to_string()).unwrap_or_default(), env.repair_plan(&id), id)).map(|(u, p, id)| (id, u, p)).collect();
+            let _ = tx.send(Msg::Plans(v));
+        });
+    }
+
+    fn plan_of(&self, key: &str) -> Option<&RepairPlan> {
+        let id = self.src_id(key);
+        let url = self.sources.iter().find(|s| s.id == id).map(|s| s.value("url").to_string())?;
+        self.plans.get(&id).filter(|p| p.0 == url).map(|p| &p.2)
+    }
+
+    /// The click on a repair button: what it does depends on the plan (the cluster address, Setup, or removing a source).
+    fn act_on(&mut self, key: &str) {
+        let id = self.src_id(key);
+        match self.plan_of(&id).cloned() {
+            Some(RepairPlan::NotInstalled { item: Some(i), .. }) => {
+                self.request = Some(("store".into(), format!("setup:{i}")));
+            }
+            Some(RepairPlan::NotInstalled { item: None, label }) => {
+                if let Some(s) = self.sources.iter().find(|s| s.id == id) {
+                    self.modal = Some(Modal::Confirm(format!("Remove the source “{}”? {label} is not installed here.", s.name), Confirmed::DeleteSource(id)));
+                }
+            }
+            Some(RepairPlan::NoCluster(m)) => self.say(format!("The cluster could not be asked: {m}"), false),
+            _ => self.repair_source(&id),
+        }
+    }
+
+    /// "Remove this source" in a banner: after a question (the panels that use it then show an error until another source is picked).
+    fn ask_remove_source(&mut self, key: &str) {
+        let id = self.src_id(key);
+        if let Some(s) = self.sources.iter().find(|s| s.id == id) {
+            self.modal = Some(Modal::Confirm(format!("Remove the source “{}”? Panels that use it show an error until you pick another.", s.name), Confirmed::DeleteSource(id)));
+        }
+    }
+
+    /// One click for every source whose Service is in the cluster; the others keep their own choice (install, remove).
+    fn fix_all(&mut self) {
+        let ids: Vec<String> = self.sources.iter().filter(|s| matches!(self.plan_of(&s.id), Some(RepairPlan::UseCluster(_)))).map(|s| s.id.clone()).collect();
+        let rest: Vec<String> = self.sources.iter().filter_map(|s| match self.plan_of(&s.id) {
+            Some(RepairPlan::NotInstalled { label, item }) => Some(format!("{} ({})", s.name, if item.is_some() { format!("{label} is not installed: Install") } else { "not installed: Remove".to_string() })),
+            _ => None,
+        }).collect();
+        if ids.is_empty() {
+            self.say(if rest.is_empty() { "Nothing to fix.".to_string() } else { format!("Nothing to point at the cluster. Still your choice: {}.", rest.join("; ")) }, false);
+            return;
+        }
+        self.say(format!("Pointing {} source(s) at the cluster…{}", ids.len(), if rest.is_empty() { String::new() } else { format!(" Still your choice afterwards: {}.", rest.join("; ")) }), true);
+        let (env, tx) = (self.env.clone(), self.tx.clone());
+        self.inflight += ids.len();
+        std::thread::spawn(move || {
+            for id in ids {
+                let res = env.use_cluster_address(&id);
+                let _ = tx.send(Msg::Repaired { id, res });
+            }
+        });
+    }
+
+    /// The click on "Use cluster address": the worker asks the cluster and rewrites the address (administrator only, audited).
+    fn repair_source(&mut self, key: &str) {
+        let Some(cfg) = self.env.sources().get(key) else {
+            self.say("That source is gone.", false);
+            return;
+        };
+        let (env, tx, id) = (self.env.clone(), self.tx.clone(), cfg.id.clone());
+        self.say("Looking for it in the cluster…", true);
+        self.inflight += 1;
+        std::thread::spawn(move || {
+            let res = env.use_cluster_address(&id);
+            let _ = tx.send(Msg::Repaired { id, res });
+        });
+    }
+
     fn test_source(&mut self, id: &str) {
         let (env, tx, cancel, sid) = (self.env.clone(), self.tx.clone(), self.cancel.clone(), id.to_string());
         self.src_status.insert(id.to_string(), (true, "testing…".into()));
@@ -1052,6 +1255,14 @@ impl DashApp {
                     let o: Vec<&str> = opts.iter().map(String::as_str).collect();
                     let cur = opts.iter().position(|x| *x == val(&f.key, &f.default)).unwrap_or(0);
                     form = form.choice(&f.label, &o, cur);
+                }
+                _ if f.key == "url" && existing.is_none() && !advanced => {
+                    // never a guess: a Service of the cluster, a process really listening here, or empty with the reason
+                    let (v, help) = match iyakki_agent::dash::cluster::suggest(self.env.deps.cluster.as_ref(), kind) {
+                        Some(s) => (s.url, s.note),
+                        None => (f.default.clone(), f.help.clone()),
+                    };
+                    form = form.text(&f.label, &v, &help);
                 }
                 _ => form = form.text(&f.label, &val(&f.key, &f.default), &f.help),
             }
@@ -1384,8 +1595,18 @@ impl DashApp {
         let n = self.list.len();
         if self.list_sel < n {
             let id = self.list[self.list_sel].id.clone();
-            match self.env.dashboards().load(&id) {
-                Ok(d) => self.open_dashboard(d),
+            match self.env.load_dashboard(&id) {
+                Ok(d) => {
+                    let note = match iyakki_agent::dash::share::parse_share_id(&id) {
+                        Some((owner, _)) if self.roles.get(&id) == Some(&Role::Operator) => Some(format!("You are an operator of {owner}'s dashboard: you can change its panels, time range and refresh (saved to theirs); not share, rename, delete or export it.")),
+                        Some((owner, _)) => Some(format!("Shared with you by {owner}: you are a viewer, you can look, not change.")),
+                        None => self.shared.get(&id).map(|w| format!("Shared with {}.", grants_text(w))),
+                    };
+                    self.open_dashboard(d);
+                    if let Some(n) = note {
+                        self.say(n, true);
+                    }
+                }
                 Err(e) => self.say(e, false),
             }
         } else if let Some(t) = templates::all().get(self.list_sel - n) {
@@ -1621,6 +1842,7 @@ impl DashApp {
                 self.modal = Some(Modal::Name(Form::new("Import a dashboard").path("File", "", "path of a dashboard .json in your home folder", crate::filepicker::PathKind::File, &["json"]), NameFor::Import));
             }
             Key::Char('s') => self.screen = Screen::Sources,
+            Key::Char('h') => self.begin_share(),
             Key::Delete | Key::Char('x') => {
                 if let Some(e) = self.list.get(self.list_sel) {
                     self.modal = Some(Modal::Confirm(format!("Delete the dashboard “{}”? The file is removed.", e.title), Confirmed::DeleteDashboard(e.id.clone())));
@@ -1629,6 +1851,18 @@ impl DashApp {
             _ => {}
         }
         Flow::Stay
+    }
+
+    /// The Share button: ask for the account names, then confirm in plain words what the viewers will see.
+    fn begin_share(&mut self) {
+        let Some(e) = self.list.get(self.list_sel) else { return };
+        if e.id.starts_with("share:") {
+            return self.say("This dashboard was shared with you: only its owner can share it.", false);
+        }
+        let (id, current) = (e.id.clone(), self.shared.get(&e.id).cloned().unwrap_or_default());
+        let f = Form::new(&format!("Share “{}”", e.title)).text("Accounts", &grants_input(&current), "names separated by commas; name:operator lets them change it, otherwise they only look; empty stops sharing");
+        self.share_target = Some(id);
+        self.modal = Some(Modal::Name(f, NameFor::Share));
     }
 
     fn sources_key(&mut self, k: &Key) -> Flow {
@@ -1903,7 +2137,7 @@ impl DashApp {
             id::REFRESH => self.cycle_refresh(),
             id::NOW => self.schedule(true),
             id::ADD => self.add_panel_form(cx),
-            id::SOURCES => {
+            id::SOURCES | id::OPEN_SRC => {
                 self.reload_lists();
                 self.screen = Screen::Sources;
             }
@@ -1953,6 +2187,7 @@ impl DashApp {
                 self.modal = Some(Modal::Name(Form::new("Import a dashboard").path("File", "", "path of a dashboard .json in your home folder", crate::filepicker::PathKind::File, &["json"]), NameFor::Import));
             }
             id::OPEN => self.open_list_item(cx),
+            id::SHARE => self.begin_share(),
             id::DELETE => {
                 if let Some(e) = self.list.get(self.list_sel) {
                     self.modal = Some(Modal::Confirm(format!("Delete the dashboard “{}”? The file is removed.", e.title), Confirmed::DeleteDashboard(e.id.clone())));
@@ -1974,6 +2209,33 @@ impl DashApp {
             id::S_TEST => {
                 if let Some(s) = self.sources.get(self.src_sel).map(|s| s.id.clone()) {
                     self.test_source(&s);
+                }
+            }
+            id::S_REPAIR => {
+                if let Some(s) = self.sources.get(self.src_sel).map(|s| s.id.clone()) {
+                    self.act_on(&s);
+                }
+            }
+            id::S_FIXALL => self.fix_all(),
+            id::S_DUP => {
+                if let Some(s) = self.sources.get(self.src_sel) {
+                    self.modal = Some(Modal::Confirm(format!("Remove the duplicate “{}”? Another source has the same address.", s.name), Confirmed::DeleteSource(s.id.clone())));
+                }
+            }
+            _ if (id::REPAIR..id::REPAIR + 40).contains(&n) => {
+                if let Some(k) = self.geo.repair_slots.get(n - id::REPAIR).cloned() {
+                    self.act_on(&k);
+                }
+            }
+            _ if (id::REMOVE..id::REMOVE + 40).contains(&n) => {
+                if let Some(k) = self.geo.repair_slots.get(n - id::REMOVE).cloned() {
+                    self.ask_remove_source(&k);
+                }
+            }
+            _ if (id::REPAIR_P..id::REPAIR_P + 100).contains(&n) => {
+                let k = self.d.panels.get(n - id::REPAIR_P).and_then(|p| self.data.get(&p.id)).and_then(|d| d.serr.as_ref()).map(|e| e.0.clone());
+                if let Some(k) = k {
+                    self.act_on(&k);
                 }
             }
             id::S_DEL => {
@@ -2273,6 +2535,20 @@ impl DashApp {
                             d.title = v.chars().take(MAX_TITLE).collect();
                             self.open_dashboard(d);
                         }
+                        NameFor::Share => {
+                            let names = match parse_grants(&v) {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    form.error = Some(e);
+                                    self.modal = Some(Modal::Name(form, what));
+                                    return Flow::Stay;
+                                }
+                            };
+                            let id = self.share_target.take().unwrap_or_default();
+                            let before = self.env.shared_with(&id);
+                            let title = self.list.iter().find(|e| e.id == id).map_or(id.clone(), |e| e.title.clone());
+                            self.modal = Some(Modal::Confirm(iyakki_agent::dash::share::share_warning(&title, &names, &before), Confirmed::Share(id, names)));
+                        }
                         NameFor::Import => match self.import_file(&v) {
                             Ok(d) => {
                                 self.open_dashboard(d);
@@ -2317,11 +2593,22 @@ impl DashApp {
                 self.reload_lists();
                 self.say("Source removed.", true);
             }
-            Confirmed::DeleteDashboard(id) => {
-                let _ = self.env.dashboards().delete(&id);
-                self.reload_lists();
-                self.say("Dashboard deleted.", true);
-            }
+            Confirmed::DeleteDashboard(id) => match self.env.delete_dashboard(&id) {
+                Ok(_) => {
+                    self.reload_lists();
+                    self.say("Dashboard deleted.", true);
+                }
+                Err(e) => self.say(e, false),
+            },
+            Confirmed::Share(id, names) => match self.env.set_shares(&id, &names) {
+                Ok(_) => {
+                    self.reload_lists();
+                    let now = self.env.shared_with(&id);
+                    self.say(if now.is_empty() { "Not shared with anyone.".to_string() } else { format!("Shared with {}.", grants_text(&now)) }, true);
+                }
+                Err(e) => self.say(e, false),
+            },
+            Confirmed::Overwrite => self.save_own(),
             Confirmed::Leave => {
                 self.state.lock().unwrap_or_else(|e| e.into_inner()).mark_saved();
                 self.screen = Screen::List;
@@ -2465,7 +2752,7 @@ fn draw_text_panel(g: &mut Gfx, body: R, s: f32, text: &str) {
 
 /// A panel's body: the error, the spinner, or the chart/table/number for its visual.
 #[allow(clippy::too_many_arguments)]
-fn draw_body(g: &mut Gfx, body: R, s: f32, p: &Panel, pd: &mut PData, idx: usize, ptr: ch::Pointer, tick: u64) -> ch::ChartGeo {
+fn draw_body(g: &mut Gfx, body: R, s: f32, p: &Panel, pd: &mut PData, idx: usize, ptr: ch::Pointer, tick: u64, ev: &repair::ErrView) -> ch::ChartGeo {
     let mut geo = ch::ChartGeo::default();
     if p.visual == Visual::Text {
         draw_text_panel(g, body, s, &p.options.text);
@@ -2476,16 +2763,7 @@ fn draw_body(g: &mut Gfx, body: R, s: f32, p: &Panel, pd: &mut PData, idx: usize
         return geo;
     }
     if let Some(e) = &pd.err {
-        g.rrect(body.x, body.y, body.w, body.h.min(130.0 * s), 8.0 * s, with_alpha(ERR, 22));
-        g.rrect_outline(body.x, body.y, body.w, body.h.min(130.0 * s), 8.0 * s, 1.0, with_alpha(ERR, 120));
-        g.circle(body.x + 14.0 * s, body.y + 16.0 * s, 5.0 * s, ERR);
-        g.text(body.x + 28.0 * s, body.y + 8.0 * s, 12.5 * s, ERR, "This panel could not be loaded", Face::Bold);
-        let lines = g.wrap(12.0 * s, e, Face::Sans, body.w - 24.0 * s);
-        let max = (((body.h.min(130.0 * s) - 34.0 * s) / (15.0 * s)) as usize).max(1);
-        for (i, l) in lines.iter().take(max).enumerate() {
-            let l = if i + 1 == max && lines.len() > max { format!("{l}…") } else { l.clone() };
-            g.text(body.x + 12.0 * s, body.y + 30.0 * s + i as f32 * 15.0 * s, 12.0 * s, MUTED, &l, Face::Sans);
-        }
+        repair::panel_error(g, body, s, e, ev);
         return geo;
     }
     let Some(f) = pd.frame.clone() else {
@@ -2521,6 +2799,11 @@ fn draw_body(g: &mut Gfx, body: R, s: f32, p: &Panel, pd: &mut PData, idx: usize
         return geo;
     }
     match p.visual {
+        Visual::Bar | Visual::StackedBar if pd.model.as_ref().is_some_and(|m| m.lines.is_empty() && !m.slices.is_empty()) => {
+            if let Some(m) = &pd.model {
+                ch::draw_category_bars(g, body, s, m, &p.options);
+            }
+        }
         Visual::Line | Visual::Area | Visual::Bar | Visual::StackedBar | Visual::Heatmap => {
             if let Some(m) = &pd.model {
                 geo = ch::draw_xy(g, body, s, m, p.visual, &p.options, ptr, idx, tick);
@@ -2569,6 +2852,7 @@ impl DashApp {
     fn render_impl(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
         self.poll();
         self.sync();
+        self.ensure_plans();
         self.geo.panels.clear();
         self.geo.plots.clear();
         self.geo.area = Some(area);
@@ -2672,6 +2956,36 @@ impl DashApp {
             fx::empty_state(g, board, s, Icon::Dash, "This dashboard has no panels yet", hint, ACCENT);
             return None;
         }
+        // one banner per source that cannot be reached, instead of the same red box in every panel
+        self.geo.repair_slots.clear();
+        self.geo.banner_keys.clear();
+        let mut board = board;
+        let shown: Vec<repair::Group> = repair::banner_groups(self.failed_groups());
+        if !shown.is_empty() && !self.d.panels.is_empty() {
+            let max_fix = if board.h > 300.0 * s { 3 } else { 1 };
+            let mut by = board.y + 2.0 * s;
+            for grp in shown.iter().take(2) {
+                let slot = self.geo.repair_slots.len();
+                self.geo.repair_slots.push(grp.source.clone());
+                self.geo.banner_keys.push((grp.source.clone(), grp.err.message.clone()));
+                let name = self.src_name(&grp.source);
+                let plan = if grp.repairable() { self.plan_of(&grp.source) } else { None };
+                let actions: Vec<(String, Event)> = plan.map(repair::banner_buttons).unwrap_or_default().into_iter().enumerate().map(|(i, (l, removes))| (l, Event::Tab(if removes && i > 0 { id::REMOVE + slot } else { id::REPAIR + slot }))).collect();
+                let title = plan.and_then(repair::banner_title);
+                let note = plan.and_then(repair::plan_note);
+                by += repair::banner(g, board.x + pad, by, board.w - 2.0 * pad, s, &name, grp, max_fix, actions, title.as_deref(), note.as_deref(), Event::Tab(id::OPEN_SRC), true) + 4.0 * s;
+            }
+            if shown.len() > 2 {
+                g.text(board.x + pad, by, 11.5 * s, DIM, &format!("+{} more sources are not reachable (see Sources)", shown.len() - 2), Face::Sans);
+                by += 16.0 * s;
+            }
+            for grp in shown.iter().skip(2) {
+                self.geo.banner_keys.push((grp.source.clone(), grp.err.message.clone()));
+            }
+            let used = (by - board.y).min(board.h * 0.6);
+            board = R::new(board.x, board.y + used, board.w, (board.h - used).max(40.0));
+            self.geo.board = Some(board);
+        }
         let mut tooltip = None;
         let scroll = self.scroll;
         let sel = self.selected();
@@ -2740,6 +3054,33 @@ impl DashApp {
         }
     }
 
+    /// The id of a source as a panel may name it (id or name); unknown names stay as they are.
+    fn src_id(&self, key: &str) -> String {
+        self.sources.iter().find(|s| s.id == key || s.name.eq_ignore_ascii_case(key)).map_or(key.to_string(), |s| s.id.clone())
+    }
+
+    fn src_name(&self, key: &str) -> String {
+        self.sources.iter().find(|s| s.id == key || s.name.eq_ignore_ascii_case(key)).map_or(key.to_string(), |s| s.name.clone())
+    }
+
+    /// Every failure of the open dashboard's panels, grouped by source and message.
+    fn failed_groups(&self) -> Vec<repair::Group> {
+        let items: Vec<(String, DashError)> = self.d.panels.iter().filter_map(|p| self.data.get(&p.id)).filter_map(|d| d.serr.as_ref()).map(|(s, e)| (self.src_id(s), e.clone())).collect();
+        repair::groups(&items)
+    }
+
+    /// The structured error of a failed panel, the short state when a banner says it, and the repair click when it applies.
+    fn err_view(&self, pd: &PData, _idx: usize) -> repair::ErrView {
+        let Some((src, e)) = &pd.serr else { return repair::ErrView::default() };
+        let id = self.src_id(src);
+        let said = self.geo.banner_keys.iter().any(|k| k.0 == id && k.1 == e.message);
+        let many = self.failed_groups().iter().any(|g| g.source == id && g.err.message == e.message && g.count >= 2);
+        let plan = if repair::repairable(e) { self.plan_of(&id) } else { None };
+        // the banner has the buttons; the panel only points at it, once per panel and without a button of its own
+        let hint = if said { plan.and_then(repair::panel_hint) } else { None };
+        repair::ErrView { serr: Some(e.clone()), compact: (said && many).then(|| self.src_name(&id)), hint, note: plan.and_then(repair::plan_note) }
+    }
+
     /// One panel: frame, header, body. Returns the tooltip when the pointer is on its plot.
     fn draw_panel(&mut self, g: &mut Gfx, idx: usize, r: R, s: f32, tick: u64, selected: bool) -> Option<ch::Tooltip> {
         let p = self.d.panels[idx].clone();
@@ -2790,7 +3131,8 @@ impl DashApp {
         let body = R::new(r.x + 8.0 * s, r.y + head_h, r.w - 16.0 * s, (r.h - head_h - 8.0 * s).max(10.0));
         let ptr = self.pointer_for(idx);
         let mut pd = self.data.remove(&p.id).unwrap_or_default();
-        let geo = draw_body(g, body, s, &p, &mut pd, idx, ptr, tick);
+        let ev = self.err_view(&pd, idx);
+        let geo = draw_body(g, body, s, &p, &mut pd, idx, ptr, tick, &ev);
         self.data.insert(p.id.clone(), pd);
         if let Some(pl) = geo.plot {
             if let Some(m) = self.data.get(&p.id).and_then(|d| d.model.as_ref()) {
@@ -2828,7 +3170,7 @@ impl DashApp {
             ch::draw_table(g, inner, s, &f, &p.options, &mut pd.table, idx, ACCENT);
         } else {
             let ptr = ch::Pointer::default();
-            draw_body(g, inner, s, &p, &mut pd, idx, ptr, tick);
+            draw_body(g, inner, s, &p, &mut pd, idx, ptr, tick, &repair::ErrView::default());
         }
         self.data.insert(pid.to_string(), pd);
         if let Some((t, ok)) = &self.status {
@@ -2840,7 +3182,7 @@ impl DashApp {
 
     fn draw_list(&mut self, g: &mut Gfx, main: R, s: f32) {
         let pad = 14.0 * s;
-        let items = vec![tb("New dashboard", id::NEW, ACCENT), tb("Import", id::IMPORT, MUTED), tb("Open", id::OPEN, ACCENT), Tb { enabled: !self.list.is_empty() && self.list_sel < self.list.len(), ..tb("Delete", id::DELETE, ERR) }, tb("Sources", id::SOURCES, MUTED)];
+        let items = vec![tb("New dashboard", id::NEW, ACCENT), tb("Import", id::IMPORT, MUTED), tb("Open", id::OPEN, ACCENT), Tb { enabled: self.list.get(self.list_sel).is_some_and(|e| !e.id.starts_with("share:")), ..tb("Share", id::SHARE, MUTED) }, Tb { enabled: !self.list.is_empty() && self.list_sel < self.list.len(), ..tb("Delete", id::DELETE, ERR) }, tb("Sources", id::SOURCES, MUTED)];
         let tbh = toolbar(g, R::new(main.x + pad, main.y + 6.0 * s, main.w - 2.0 * pad, main.h), s, &items);
         let mut y = main.y + tbh + 18.0 * s;
         let bottom = main.y + main.h - 28.0 * s;
@@ -2873,7 +3215,9 @@ impl DashApp {
                 let e = &self.list[i];
                 let t = g.fit(15.0 * s, &e.title, Face::Bold, w - 160.0 * s);
                 g.text(r.x + 14.0 * s, r.y + 6.0 * s, 15.0 * s, TEXT, &t, Face::Bold);
-                g.text(r.x + 14.0 * s, r.y + 24.0 * s, 11.5 * s, DIM, &format!("{} panel(s) · {}", e.panels, e.id), Face::Sans);
+                let who = if e.id.starts_with("share:") { format!(" · you are {}", self.roles.get(&e.id).map_or("a viewer", |r| r.word())) } else { self.shared.get(&e.id).map_or(String::new(), |w| format!(" · shared with {}", grants_text(w))) };
+                let sub = g.fit(11.5 * s, &format!("{} panel(s) · {}{who}", e.panels, e.id), Face::Sans, w - 160.0 * s);
+                g.text(r.x + 14.0 * s, r.y + 24.0 * s, 11.5 * s, DIM, &sub, Face::Sans);
             } else {
                 let t = &tpl[i - n];
                 let title = g.fit(14.0 * s, t.title, Face::Bold, w - 160.0 * s);
@@ -2915,12 +3259,45 @@ impl DashApp {
             Tb { enabled: have, ..tb("Test", id::S_TEST, OK) },
             Tb { enabled: have, ..tb("Remove", id::S_DEL, ERR) },
         ];
+        let mut items = items;
+        // what can be done about the selected source that points at localhost, and the one-click fix for all of them
+        if let Some(sel) = self.sources.get(self.src_sel) {
+            if let Some(l) = self.plan_of(&sel.id).and_then(repair::plan_label) {
+                items.insert(2, tb(&l, id::S_REPAIR, OK));
+            }
+            let dup = self.sources.iter().any(|o| o.id != sel.id && o.kind == sel.kind && !sel.value("url").is_empty() && o.value("url") == sel.value("url"));
+            if dup {
+                items.insert(2, tb("Remove duplicate", id::S_DUP, ERR));
+            }
+        }
+        if self.sources.iter().any(|s| matches!(self.plan_of(&s.id), Some(RepairPlan::UseCluster(_)))) {
+            items.insert(1, tb("Fix all", id::S_FIXALL, OK));
+        }
         let tbh = toolbar(g, R::new(main.x + pad, main.y + 6.0 * s, main.w - 2.0 * pad, main.h), s, &items);
         let x = main.x + pad;
         let w = main.w - 2.0 * pad;
         let mut y = main.y + tbh + 18.0 * s;
         y += fx::section_title(g, x, y, w, s, "DATA SOURCES", ACCENT);
-        let bottom = main.y + main.h - 56.0 * s;
+        let mut bottom = main.y + main.h - 56.0 * s;
+        // the whole test result of the selected source, with its fix, under the list
+        let detail: Vec<String> = match self.sources.get(self.src_sel).and_then(|c| self.src_status.get(&c.id).map(|st| (c.id.clone(), st.clone()))) {
+            Some((cid, (false, t))) => {
+                let mut t = t;
+                if repair::repairable(&DashError::config(t.clone())) {
+                    if let Some(n) = self.plan_of(&cid).and_then(repair::plan_note) {
+                        t = format!("{} {}", t.split(" (").next().unwrap_or(""), n);
+                    }
+                }
+                g.wrap(11.5 * s, &t, Face::Sans, w).into_iter().take(3).collect()
+            }
+            _ => vec![],
+        };
+        if !detail.is_empty() {
+            bottom -= detail.len() as f32 * 14.5 * s + 4.0 * s;
+            for (i, l) in detail.iter().enumerate() {
+                g.text(x, bottom + 4.0 * s + i as f32 * 14.5 * s, 11.5 * s, ERR, l, Face::Sans);
+            }
+        }
         if !have {
             fx::empty_state(g, R::new(x, y, w, bottom - y), s, Icon::Dash, "No data sources yet", "Add Prometheus, Elasticsearch, ClickHouse or DuckDB. Passwords and tokens are never typed here: pick them from your vault.", ACCENT);
         }
@@ -3098,7 +3475,7 @@ impl DashApp {
             let body = r.inset(8.0 * s);
             let p = ed.preview_panel();
             let ptr = ch::Pointer { hover: Some(self.mouse).filter(|_| self.modal.is_none() && self.drag.is_none()), drag: None };
-            let geo = draw_body(g, body, s, &p, &mut ed.pd, 59, ptr, tick);
+            let geo = draw_body(g, body, s, &p, &mut ed.pd, 59, ptr, tick, &repair::ErrView::default());
             if ed.pd.loading {
                 spinner(g, r.x + r.w - 16.0 * s, r.y + 14.0 * s, 6.0 * s, tick, ACCENT);
             }
@@ -3244,7 +3621,7 @@ impl App for DashApp {
     fn hint(&self) -> String {
         match self.screen {
             Screen::Board => "arrows choose a panel · Enter edit · a add · v table · i ask AI · drag a chart to zoom · Ctrl+Z undo · Ctrl+I assistant · F1 all keys".into(),
-            Screen::List => "Enter open · n new · i import · s sources · Esc leave".into(),
+            Screen::List => "Enter open · n new · i import · h share · s sources · Esc leave".into(),
             Screen::Sources => "a add · e edit · o connection options · t test · Delete remove · Esc back".into(),
             Screen::Editor => "Ctrl+R run · Ctrl+S apply · Tab next field · Esc cancel".into(),
             Screen::Zoom(_) => "arrows move · c copy cell · r copy row · PageUp/Down · Esc back".into(),
@@ -3299,7 +3676,7 @@ impl App for DashApp {
     }
     fn take_request(&mut self) -> Option<(String, String)> {
         // a link clicked in the chat that opens the BROWSER tile (Back returns here)
-        App::take_request(&mut self.chat)
+        self.request.take().or_else(|| App::take_request(&mut self.chat))
     }
     fn context_pick(&mut self, id: &str, cx: &AppCx) -> Flow {
         if id.starts_with("link.") || id == "copymsg" || id == "copycode" {
@@ -3447,6 +3824,9 @@ impl DashApp {
     }
     pub fn cancel_token_for_test(&self) -> Cancel {
         self.cancel.clone()
+    }
+    pub fn shared_text_for_test(&self, id: &str) -> String {
+        self.shared.get(id).map_or(String::new(), |w| grants_text(w))
     }
     pub fn reload_for_test(&mut self) {
         self.reload_lists();

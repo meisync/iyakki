@@ -86,7 +86,7 @@ pub fn ledger_for(log: &RunLog) -> Ledger {
     l.append(LedgerEvent::Input(log.prompt.clone().into_bytes()));
     for e in &log.events {
         match e {
-            RunEvent::Model { .. } | RunEvent::Approval { .. } | RunEvent::Usage { .. } | RunEvent::Final { .. } | RunEvent::Failed { .. } | RunEvent::Stopped { .. } | RunEvent::Note { .. } | RunEvent::Timing { .. } | RunEvent::Delta { .. } | RunEvent::Thinking { .. } => {
+            RunEvent::Model { .. } | RunEvent::Approval { .. } | RunEvent::Usage { .. } | RunEvent::Final { .. } | RunEvent::Failed { .. } | RunEvent::Stopped { .. } | RunEvent::Note { .. } | RunEvent::Timing { .. } | RunEvent::Delta { .. } | RunEvent::Thinking { .. } | RunEvent::Budget { .. } => {
                 l.append(LedgerEvent::ToolOutput { tool: "run".into(), data: serde_json::to_vec(e).unwrap_or_default() })
             }
             RunEvent::Decision { id, name, approved, by } => l.append(LedgerEvent::HostCall { name: format!("decision:{by}"), path: format!("{name}#{id}"), status: *approved as i32 }),
@@ -467,6 +467,7 @@ impl RunSession {
                     RunEvent::Delta { .. } => ("writing the answer".to_string(), None),
                     RunEvent::Thinking { .. } => ("thinking".to_string(), None),
                     RunEvent::Timing { .. } => ("finishing".to_string(), None),
+                    RunEvent::Budget { .. } => ("preparing the request".to_string(), None),
                 };
                 store.live_update(&self.log.id, |r| {
                     r.pending = pending;
@@ -478,7 +479,7 @@ impl RunSession {
                 });
             }
             // the partial answer is for the screen only: the record keeps the final text
-            if !matches!(e, RunEvent::Delta { .. } | RunEvent::Thinking { .. }) {
+            if !matches!(e, RunEvent::Delta { .. } | RunEvent::Thinking { .. } | RunEvent::Budget { .. }) {
                 self.log.events.push(e.clone());
             }
             out.push(e);

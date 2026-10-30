@@ -72,6 +72,8 @@ enum FormKind {
     PrivateStore,
     /// A restricted firmware pack of Setup (fwpack.rs): the vendor's licence, "I accept", and a folder or stick for the offline route.
     FwPack(iyakki_agent::quickinstall::Item),
+    /// The hardware-firmware item (fwextra.rs): action, the way to get the files, a folder, NVIDIA on its own, the licences.
+    FwHardware,
 }
 
 enum Ask {
@@ -1090,6 +1092,32 @@ impl StoreApp {
                     Err(e) => Err(e),
                 }
             }
+            FormKind::FwHardware => {
+                if form.choice_idx(0) == 1 {
+                    match self.setup.hardware_remove(cx) {
+                        Ok(m) => {
+                            self.say(m, true);
+                            self.mode = Mode::Browse;
+                            return true;
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else if form.choice_idx(4) != 1 {
+                    Err("The licences were not accepted, so nothing was downloaded or installed.".to_string())
+                } else {
+                    let source = ["download", "link", "folder", "received"][form.choice_idx(1).min(3)];
+                    let folder = form.value(2);
+                    let folder = (!folder.is_empty()).then(|| std::path::PathBuf::from(folder));
+                    match self.setup.hardware_accept_and_start(cx, source, folder, form.choice_idx(3) == 1) {
+                        Ok(m) => {
+                            self.say(m, true);
+                            self.mode = Mode::Browse;
+                            return true;
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+            }
             FormKind::FwPack(item) => {
                 if form.choice_idx(1) != 1 {
                     Err("The licence was not accepted, so nothing was downloaded or installed.".to_string())
@@ -1476,6 +1504,21 @@ impl App for StoreApp {
                             FormKind::FwPack(item),
                         );
                     }
+                }
+                if std::mem::take(&mut self.setup.hw_ask) {
+                    let v = self.setup.hw_view.clone().unwrap_or_default();
+                    let ways = ["Download (Ethernet, or any internet this computer has)", "Download through the cable, using the other computer's internet (this session only)", "Copy from a USB stick or folder (the path below)", "Use the files the other computer sent over the cable"];
+                    let first = v.offers.iter().position(|o| o.ready || o.needs_click).unwrap_or(0);
+                    let vendors = if v.vendors.is_empty() { "nothing is missing right now".to_string() } else { v.vendors.iter().map(|(t, c)| format!("{t}: {c}")).collect::<Vec<_>>().join("; ") };
+                    self.mode = Mode::Form(
+                        Form::new("Hardware firmware: licences and install")
+                            .choice("What to do", &["Install the firmware listed on the card", "Remove the extra firmware"], 0)
+                            .choice("Where the files come from (a Wi-Fi chip without firmware needs a cable, a stick or the other computer)", &ways, first)
+                            .path("Folder or USB stick (only for the third way)", &v.stick.as_ref().map(|p| p.display().to_string()).unwrap_or_default(), "/media/usb/firmware-extra  (made by dist/scripts/firmware-notes/fetch.sh)", crate::filepicker::PathKind::Folder, &[])
+                            .choice("NVIDIA graphics firmware, shown on its own: only for NVIDIA processors, only for open-source systems, unmodified (the card's Details say what it needs)", &["Leave it out", "Include it"], 0)
+                            .choice(&format!("Licences ({vendors}). The card's Details list every file; the licence texts are kept next to the files"), &["I do not accept", "I have read the licences and accept"], 0),
+                        FormKind::FwHardware,
+                    );
                 }
                 if std::mem::take(&mut self.setup.reboot_ask) {
                     self.mode = Mode::Confirm(Ask::Reboot);
@@ -2826,6 +2869,7 @@ impl StoreApp {
             (Status::Update(v), Some(l)) if l.pinned.is_some() => (format!("Pinned (update {v})"), MUTED),
             (Status::On, Some(l)) => match &l.check {
                 iyakki_agent::store::lifecycle::Check::SourceGone(_) => ("Source gone".to_string(), AMBER),
+                iyakki_agent::store::lifecycle::Check::Withdrawn(_) => ("Withdrawn".to_string(), AMBER),
                 iyakki_agent::store::lifecycle::Check::Offline(_) => ("Can't check offline".to_string(), MUTED),
                 _ => (e.status.label(), status_color(&e.status)),
             },
@@ -3573,7 +3617,7 @@ mod tests {
         key(&mut a, &cx, Key::Char('y'));
         assert!(a.status_text().unwrap().starts_with("Removed"), "{:?}", a.status_text());
         assert!(matches!(a.mode, Mode::Browse), "the page of a removed app closes");
-        let log = std::fs::read_to_string(std::env::temp_dir().join(format!("iyakki-shell-{}-st-install", std::process::id())).join("audit.log")).unwrap_or_default();
+        let log = std::fs::read_to_string(iyakki_agent::testdir::find("iyakki-shell", "st-install").join("audit.log")).unwrap_or_default();
         assert!(log.contains("store.install") && log.contains("store.remove"), "{log}");
     }
 
@@ -4169,7 +4213,7 @@ mod tests {
         }
         assert!(cx.services.clis.installed().is_empty() && !cx.services.mcp.list().iter().any(|s| s.name == "files"));
         let _ = user_scope;
-        let log = std::fs::read_to_string(std::env::temp_dir().join(format!("iyakki-shell-{}-st-inst-act", std::process::id())).join("audit.log")).unwrap_or_default();
+        let log = std::fs::read_to_string(iyakki_agent::testdir::find("iyakki-shell", "st-inst-act").join("audit.log")).unwrap_or_default();
         assert!(log.contains("store.remove") && log.contains("store.toggle"), "{log}");
     }
 
@@ -4748,6 +4792,24 @@ mod tests {
         assert!(log.iter().any(|l| l.contains("quickinstall.start") && l.contains("fw-realtek-net")), "{log:?}");
         assert_eq!(qi::install_jobs(&cx.services.jobs, &cx.session.user).iter().filter_map(qi::item_of).collect::<Vec<_>>(), vec![item]);
         assert_eq!(cx.audit.verify().is_ok(), true, "the chain is intact");
+    }
+
+    #[test]
+    fn the_hardware_firmware_tile_lists_the_licences_first_and_nothing_runs_or_is_recorded_until_i_accept() {
+        use iyakki_agent::quickinstall::{self as qi, Item as QItem};
+        let item = QItem::FwHardware;
+        let (mut a, cx, _host) = fw_rig("st-fw-hardware", Role::Admin, item);
+        let card = a.setup.card(item);
+        assert_eq!(card.label, "See the licences and install", "{card:?}");
+        assert!(card.notes.iter().any(|(n, _)| n.contains("Reading which firmware files")), "{:?}", card.notes);
+        press_tile(&mut a, &cx, item);
+        let (mut form, kind) = take_form(&mut a);
+        assert!(matches!(kind, FormKind::FwHardware) && form.fields.len() == 5, "the form opens with the action, the way, a folder, NVIDIA on its own and the licences");
+        assert!(qi::install_jobs(&cx.services.jobs, &cx.session.user).is_empty());
+        // "I do not accept" (the default) starts and records nothing
+        assert!(!a.submit_form(&cx, &mut form, &kind));
+        assert!(qi::install_jobs(&cx.services.jobs, &cx.session.user).is_empty());
+        assert!(!cx.audit.recent(20).iter().any(|l| l.contains("firmware.accept")), "no acceptance in the audit log");
     }
 
     #[test]

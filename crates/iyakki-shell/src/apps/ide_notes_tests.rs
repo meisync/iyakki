@@ -209,6 +209,9 @@ fn filters_search_and_the_share_switch_work_by_key_and_by_click() {
     key(&mut app, &w.cx, Key::Char('k'));
     assert_eq!(shown(&app).kind, Some(Kind::Gotcha));
     assert_eq!(n_shown(&mut app), 2);
+    // authors cycle in name order: Casey, then Claude Code
+    key(&mut app, &w.cx, Key::Char('u'));
+    assert_eq!(shown(&app).author.as_deref(), Some("Casey"));
     key(&mut app, &w.cx, Key::Char('u'));
     assert_eq!(shown(&app).author.as_deref(), Some("Claude Code"));
     assert_eq!(n_shown(&mut app), 1);
@@ -300,7 +303,8 @@ fn a_read_only_workspace_can_read_notes_but_not_change_them() {
     add(&d, "Keep me", "x", Kind::Decision, false);
     reload(&mut app, &w.cx);
     cur_mut(&mut app).ro = Some(iyakki_agent::workspace::LockInfo { user: "other".into(), session: "s".into(), pid: 1, host: "h".into(), time: 0, opened: 0 });
-    ticks(&mut app, &w.cx, 2);
+    // the tab hands the lock to the notes on a tick: wait for that (a fixed two ticks was too few on a loaded machine)
+    until(&mut app, &w.cx, "the notes know the workspace is read-only", |a| cur(a).notes.read_only);
     key(&mut app, &w.cx, Key::Char('n'));
     assert!(!cur(&app).notes.editing());
     key(&mut app, &w.cx, Key::Char('p'));

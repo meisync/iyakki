@@ -10,7 +10,7 @@ fn tmp(tag: &str) -> std::path::PathBuf {
 
 fn mixer() -> (Mixer, FakeSink) {
     let sink = FakeSink::new();
-    (Mixer::start(MixerCfg { idle_ms: 100, ..MixerCfg::default() }, Box::new(sink.clone())), sink)
+    (Mixer::start(MixerCfg { idle_ms: 100, engine: crate::mixer::EngineCfg::default().no_prefill(), ..MixerCfg::default() }, Box::new(sink.clone())), sink)
 }
 
 fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
@@ -106,7 +106,7 @@ fn the_kinds_have_the_priorities_alarm_speech_notification_media_radio() {
 #[test]
 fn only_the_entry_point_knows_about_the_mixer_setting() {
     // callers never read `sound.mixer` or ask the mixer for a source: they use `audiosink`. The audio output selector
-    // (audioout.rs) applies the setting; the mixer's own files are the mixer.
+    // (audioout.rs) applies the setting; the mixer's own files (webmix.rs feeds the browser's sound in as a source) are the mixer.
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let needles = ["mixer::enabled(", "global_if_enabled(", "mixer::global()", "open_audio_source(", "prefs.mixer", "sound.mixer", "mixer_on"];
     let mut bad = Vec::new();
@@ -122,7 +122,7 @@ fn only_the_entry_point_knows_about_the_mixer_setting() {
                 continue;
             }
             let name = p.file_name().unwrap().to_string_lossy().to_string();
-            if !name.ends_with(".rs") || ["audiosink.rs", "audiosink_tests.rs", "audioout.rs", "audioout_tests.rs"].contains(&name.as_str()) {
+            if !name.ends_with(".rs") || ["audiosink.rs", "audiosink_tests.rs", "audioout.rs", "audioout_tests.rs", "webmix.rs"].contains(&name.as_str()) {
                 continue;
             }
             let text = std::fs::read_to_string(&p).unwrap();

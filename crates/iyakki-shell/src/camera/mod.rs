@@ -9,6 +9,7 @@ pub mod detect;
 pub mod jpeg;
 pub mod live;
 pub mod passport;
+pub mod probe;
 pub mod pixels;
 pub mod specs;
 pub mod v4l2;
@@ -257,7 +258,7 @@ pub mod fake {
 
     /// A camera device entry for the fake.
     pub fn device(node: &str, name: &str) -> CamDevice {
-        CamDevice { node: node.into(), path: format!("/fake/{node}").into(), name: name.into(), caps: detect::Caps { driver: "fake".into(), card: name.into(), bus: "fake".into(), caps: v4l2::CAP_VIDEO_CAPTURE | v4l2::CAP_STREAMING } }
+        CamDevice { node: node.into(), path: format!("/fake/{node}").into(), name: name.into(), caps: detect::Caps { driver: "fake".into(), card: name.into(), bus: "fake".into(), caps: v4l2::CAP_VIDEO_CAPTURE | v4l2::CAP_STREAMING }, builtin: false, physical: node.into() }
     }
 }
 

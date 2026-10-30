@@ -53,6 +53,13 @@ pub struct VersionEntry {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct FlowMeta {
+    /// Layout of the flow's files (see `iyakki-schema`): 0 = alpha.1. A flow whose `meta.json` says a newer schema than
+    /// [`SCHEMA`] knows is read but never written.
+    #[serde(default)]
+    pub schema: u32,
+    /// Fields a newer release wrote: kept, and written back.
+    #[serde(flatten)]
+    pub extra: iyakki_schema::Extra,
     #[serde(default)]
     pub published: u32,
     #[serde(default)]
@@ -93,7 +100,26 @@ pub struct FlowStore {
     lock: Mutex<()>,
 }
 
+/// `meta.json` of a flow (versions, tags, which one is published). Schema 1 stamps the alpha.1 layout; the flow files themselves
+/// (`flow.json`, `versions/vN.json`, `runs/<id>/run.json`) added fields with serde defaults only.
+pub const SCHEMA: iyakki_schema::Spec = iyakki_schema::Spec { name: "flow", current: 1, migrations: &[iyakki_schema::Migration { to: 1, what: "stamp the alpha.1 layout", run: |_| {} }] };
+
+/// A flow folder whose `meta.json` is from a newer release is never written (any of its files).
+fn guard_newer(path: &Path) -> Result<(), String> {
+    for up in [path.parent(), path.parent().and_then(|p| p.parent())].into_iter().flatten() {
+        let m = up.join("meta.json");
+        if m.is_file() {
+            return match iyakki_schema::on_disk_is_newer(&SCHEMA, &m) {
+                Some(n) => Err(iyakki_schema::newer_message(&SCHEMA, n)),
+                None => Ok(()),
+            };
+        }
+    }
+    Ok(())
+}
+
 fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+    guard_newer(path)?;
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d).map_err(|e| format!("cannot create {}: {e}", d.display()))?;
     }
@@ -271,11 +297,14 @@ impl FlowStore {
     }
 
     fn meta(&self, id: &str) -> FlowMeta {
-        self.dir(id).ok().and_then(|d| read_json(&d.join("meta.json"))).unwrap_or_default()
+        match self.dir(id) {
+            Ok(d) if d.join("meta.json").is_file() => iyakki_schema::load_typed::<FlowMeta>(&SCHEMA, &d.join("meta.json"), iyakki_schema::now_secs()).1,
+            _ => FlowMeta::default(),
+        }
     }
 
     fn save_meta(&self, id: &str, m: &FlowMeta) -> Result<(), String> {
-        write_atomic(&self.dir(id)?.join("meta.json"), &serde_json::to_string_pretty(m).unwrap_or_default())
+        iyakki_schema::save_typed(&SCHEMA, &self.dir(id)?.join("meta.json"), m, 0o644)
     }
 
     pub fn meta_of(&self, id: &str) -> FlowMeta {
@@ -435,6 +464,25 @@ impl FlowStore {
             write_atomic(&dir.join("flow.json"), &f.to_json())?;
         }
         self.publish(id, &PublishReq { by, label: "", changelog: &format!("Rolled back to v{to}"), approved_by: Some(by) })
+    }
+
+    /// Remove one published version (its file and its entry). The current published version is never dropped here: publish or roll
+    /// back to another one first. Runs keep their own copy of the flow, so they are not touched.
+    pub fn drop_version(&self, id: &str, version: u32) -> Result<(), String> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = self.dir(id)?;
+        let mut m = self.meta(id);
+        if !m.versions.iter().any(|v| v.version == version) {
+            return Err(format!("version {version} does not exist"));
+        }
+        if m.published == version {
+            return Err(if m.versions.len() == 1 { format!("version {version} is the only version and the one that runs; it is not dropped (delete the flow instead)") } else { format!("version {version} is the current published version; publish or roll back to another version first") });
+        }
+        m.versions.retain(|v| v.version != version);
+        m.tags.retain(|_, v| *v != version);
+        self.save_meta(id, &m)?;
+        let _ = std::fs::remove_file(dir.join("versions").join(format!("v{version}.json")));
+        Ok(())
     }
 
     pub fn tag(&self, id: &str, name: &str, version: u32) -> Result<(), String> {

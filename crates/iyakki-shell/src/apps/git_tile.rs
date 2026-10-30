@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use iyakki_agent::gitbrowse::{self as gb, BrowseErr, Browser, Egress, LocalClone, LocalRepo, Page, RepoItem};
-use iyakki_agent::gitconn::{self, Conns, Connection, CurlGit, GitHttp, Placement};
+use iyakki_agent::gitconn::{self, Conns, Connection, GitHttp, Placement};
 use iyakki_agent::gitjobs::{self, Batch, CloneSpec, ItemState, Op, Phase, RepoStatus, Tools};
 use iyakki_agent::gitkeys::{GitKeys, Who};
 use iyakki_agent::k8sretry::{background_delay, SystemTimer, Timer, Tracker};
@@ -75,6 +75,7 @@ pub(super) const WHEEL_ROWS: i32 = 3;
 /// Repositories are not read again on choosing a host that was read this recently.
 const FRESH_S: u64 = 60;
 const LOG_KEEP: usize = 50;
+pub(super) const EMBEDDED_NO_WRITE: &str = "The Git tab only reads. Clone, fetch and pull are in the Repositories panel of the AI IDE (they ask first).";
 
 // ------------------------------------------------------------------------------------------------ the rig
 
@@ -98,9 +99,8 @@ pub struct Rig {
 
 impl Rig {
     pub fn system() -> Rig {
-        let tmp = iyakki_agent::kubeprofiles::temp_dir().unwrap_or_else(std::env::temp_dir);
         let run: Arc<dyn Runner> = Arc::new(iyakki_agent::wsexec::System);
-        Rig { http: Arc::new(CurlGit { run: run.clone(), tmp: tmp.clone() }), run, timer: Arc::new(SystemTimer::new()), scratch: std::env::temp_dir(), repos_root: None, tools: None, probe: None, run_jobs: true }
+        Rig { http: Arc::new(iyakki_agent::gitnet::NetGit::default()), run, timer: Arc::new(SystemTimer::new()), scratch: std::env::temp_dir(), repos_root: None, tools: None, probe: None, run_jobs: true }
     }
 
     /// Nothing at all answers: no host, no git program. What the shell's own tests get.
@@ -466,6 +466,8 @@ pub struct GitApp {
     pub(super) host_busy: bool,
     /// After a clone that the AI IDE should open: the address key of the clone to look for.
     pub(super) pending_ide: Option<String>,
+    /// Shown inside the AI IDE's Git tab: read-only (clone, fetch, pull and push are the IDE's Repositories panel's).
+    pub(super) embedded: bool,
 }
 
 fn wall_to_log(secs: u64) -> String {
@@ -519,6 +521,7 @@ impl GitApp {
             status_job: None,
             host_busy: false,
             pending_ide: None,
+            embedded: false,
         };
         a.refresh_entries(cx);
         let saved = a.saved_source();
@@ -574,6 +577,14 @@ impl GitApp {
     }
     pub(super) fn wall(&self) -> u64 {
         self.rig.timer.wall_secs()
+    }
+    /// A text input (the list filter) owns the keyboard.
+    pub(super) fn wants_text(&self) -> bool {
+        self.focus == Focus::Filter
+    }
+    /// A review card is waiting for an answer.
+    pub(super) fn has_card(&self) -> bool {
+        self.card.is_some()
     }
     pub(super) fn visible(&self) -> bool {
         self.last_draw.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(500))
@@ -1051,6 +1062,10 @@ impl GitApp {
 
     /// Clone: the review of what is cloned from where into which folder, with whom it signs in.
     pub(super) fn begin_clone(&mut self, then_ide: bool) {
+        if self.embedded {
+            self.say(EMBEDDED_NO_WRITE, false);
+            return;
+        }
         if self.busy() {
             return;
         }
@@ -1103,6 +1118,10 @@ impl GitApp {
     }
 
     pub(super) fn begin_fetch(&mut self, cx: &AppCx) {
+        if self.embedded {
+            self.say(EMBEDDED_NO_WRITE, false);
+            return;
+        }
         if self.busy() {
             return;
         }
@@ -1114,6 +1133,10 @@ impl GitApp {
     }
 
     pub(super) fn begin_status(&mut self, op: Op) {
+        if self.embedded {
+            self.say(EMBEDDED_NO_WRITE, false);
+            return;
+        }
         if self.busy() {
             return;
         }
@@ -1222,6 +1245,10 @@ impl GitApp {
     }
 
     pub(super) fn begin_ide(&mut self, cx: &AppCx) {
+        if self.embedded {
+            self.say(EMBEDDED_NO_WRITE, false);
+            return;
+        }
         match self.target_clone() {
             Some(cl) => self.open_ide(cx, &cl),
             None => {

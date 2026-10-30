@@ -95,6 +95,7 @@ The helper may receive any shell message at any time after Hello, including befo
 | 0x10 | Quit | (empty) |
 | 0x11 | Script | `u32 id`, `u32 timeout_ms`, `str js` (protocol 1.1) |
 | 0x12 | LeaveFullscreen | (empty; optional, protocol 1.1) |
+| 0x13 | PermissionAnswer | `u32 id`, `bool allow` (optional, protocol 1.1) |
 
 **Hello.** `version` is the protocol version (1; a helper that does not know it exits with status 2 after writing a line to
 stderr). `w`,`h`: the size of the picture in *device pixels* (the size of the page area on the shell's screen). `scale_pct`: the
@@ -169,6 +170,11 @@ no message: the shell keeps the latest Frame.
 `wpe_view_backend_dispatch_request_exit_fullscreen`, plus `document.exitFullscreen()`). The helper answers with **Fullscreen**(false)
 when the page has left; the shell keeps showing the page fullscreen until then. Ignored when not fullscreen. A helper that does not know it skips it.
 
+**PermissionAnswer** (optional). The person's (or the policy's) answer to the **PermissionRequest** with the same `id`: `allow` true lets the
+page use what it asked for (WPE: `webkit_permission_request_allow`), false denies. The helper denies by itself when no answer comes within
+60 s, when more than 4 requests wait, when the page navigates, when the web process crashes, and for an unknown `id`. Nothing but this
+message ever allows a request. See `docs/development/BROWSER-MEDIA-DEVICES.md`.
+
 ## 5. Pixels: the shared file and the frame handshake
 
 The file holds **two slots** (0 and 1) of `max_w * max_h * 4` bytes each: slot `k` starts at byte offset `k * max_w * max_h * 4`.
@@ -219,6 +225,9 @@ composites it into the same buffers (GStreamer), so nothing special is needed. U
 | 0x8D | Fullscreen | `bool on` (optional, protocol 1.1) |
 | 0x8E | AudioPlaying | `bool on` (optional, protocol 1.1) |
 | 0x8F | MediaUnsupported | `str need` (optional, protocol 1.1) |
+| 0x90 | DevEvent | `str line` (optional, protocol 1.1) |
+| 0x91 | PermissionRequest | `u32 id`, `u8 kinds`, `str origin` (optional, protocol 1.1) |
+| 0x92 | CaptureState | `u8 kinds` (optional, protocol 1.1) |
 
 * **Ready**: engine name and version for "about" displays (`WPE WebKit` `2.46.3`). Sent once, after Hello.
 * **Title**: the document title; sent when it changes (an empty title is sent as empty).
@@ -241,6 +250,23 @@ composites it into the same buffers (GStreamer), so nothing special is needed. U
   media `error` events (SRC_NOT_SUPPORTED, DECODE), `play()` rejections with `NotSupportedError`, `addSourceBuffer` failures and a video that has
   metadata but no picture size, and posts to the `iyakkiMedia` message handler; the helper forwards it. Sent at most once per page load and frame.
   The shell shows one calm bar offering the audio and video add-on (`docs/FULL-BROWSER.md`). An older shell skips the type.
+* **DevEvent** (optional): one developer-tools line from the page, for the chat agent's developer tools (`docs/BROWSER-AGENT.md`). The helper
+  injects `dev-probe.js` (user script, all frames, document start), which wraps `fetch` and `XMLHttpRequest`, listens for resource `error`
+  events, `window` `error` and `unhandledrejection`, wraps `console.error`/`console.warn`, and observes resource and navigation timing; it posts
+  a string to the `iyakkiDev` message handler. The string has six fields separated by U+001F, the first a kind letter:
+  `F method status ms url error` (failed request; status 0 = no answer), `R initiator bytes ms url ""` (a resource of 300 ms or more),
+  `C level line col source text` (level `error` or `warn`), `P response_ms dcl_ms load_ms url ""` (top frame, once per load, ms after
+  navigation start). The probe reads no bodies, headers or cookies. The helper forwards only strings of at most 1000 bytes that start with
+  one of those letters and a separator, and at most 400 per page load (the page is untrusted and can forge them; the shell treats them as
+  untrusted data). The shell parses and scrubs the line (`devtools::parse_line`) and keeps it only while the person's switch is on; otherwise
+  it drops it at once. An older shell skips the type; a helper without the probe just sends none.
+* **PermissionRequest** (optional): the page asked to use the camera, the microphone or the screen (`getUserMedia`, `getDisplayMedia`), or to see
+  the device names (`enumerateDevices`). `kinds` is a set of bits: 1 microphone, 2 camera, 4 screen, 8 device list only. `origin` is the address
+  of the top-level page the person sees (also for a request made by a frame inside it). The helper keeps the engine's request and waits for
+  **PermissionAnswer**; every other kind of permission (location, notifications, ...) is still denied inside the helper and never reported.
+  The shell never opens a device itself: the engine does, after an allow. An older shell skips the type (the helper then denies after its timeout).
+* **CaptureState** (optional): which devices the page captures now (bits as above, 1 and 2 only; 0 = none), from the engine's
+  `camera-capture-state` and `microphone-capture-state` (active = on). Sent on every change. The shell shows its camera / microphone indicator from it.
 * **Fullscreen**: the page entered (`on` true) or left (false) DOM fullscreen (a player's button, the F key, `requestFullscreen()`, leaving
   by Esc, by navigating or by closing). The helper **must** install the engine's fullscreen hook (WPE: `wpe_view_backend_set_fullscreen_handler`),
   because without one the engine fails the request and the page drops back out at once. While on, the shell shows the page over its whole
@@ -260,8 +286,8 @@ refused (or the address has no valid host and is not `about:`, `data:` or `blob:
 good address, or `about:blank` if there is none), shows a notice and writes an audit entry. The helper therefore reports every top-level change, including redirects. A
 well-behaved helper also blocks top-level navigations to hosts outside `Hello.allow_hosts` itself and writes a Log line. Pop-up
 windows and `target=_blank` links are loaded in the same view (the shell has one page area per tab). Certificate errors are
-**not** bypassable: the load fails (show the engine's error page). Geolocation, camera, microphone, notifications and similar permission requests are
-**denied**. Cookies and storage live only in `Hello.profile`.
+**not** bypassable: the load fails (show the engine's error page). Geolocation, notifications and similar permission requests are
+**denied**; camera and microphone requests are decided by the person in the shell (**PermissionRequest** / **PermissionAnswer**) and denied without an answer. Cookies and storage live only in `Hello.profile`.
 
 ## 8. Keys, modifiers and the shell's key types
 

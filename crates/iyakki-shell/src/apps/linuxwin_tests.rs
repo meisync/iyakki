@@ -20,10 +20,7 @@ use crate::gfx::Gfx;
 use crate::ui::{Event, Key, Nav, R};
 
 fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("iyakki-lwtile-{tag}-{}", std::process::id()));
-    let _ = iyakki_agent::rootfs::remove_tree(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    iyakki_agent::testdir::short("iyakki-lwtile", tag)
 }
 
 fn make_la(data: &Path, network: bool) -> LinuxApps {
@@ -81,7 +78,7 @@ fn red_square() -> Vec<u8> {
 fn serve(listener: UnixListener, srv: Arc<Server>, w: u16, h: u16, alive: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         let Ok((mut c, _)) = listener.accept() else { return };
-        let mut send = |c: &mut std::os::unix::net::UnixStream, b: &[u8]| c.write_all(b).is_ok();
+        let send = |c: &mut std::os::unix::net::UnixStream, b: &[u8]| c.write_all(b).is_ok();
         send(&mut c, b"RFB 003.008\n");
         let mut buf = [0u8; 12];
         if c.read_exact(&mut buf).is_err() {

@@ -67,6 +67,8 @@ enum Mode {
     Secret(Form, String),
     /// A question about the assistant in the person's browser (look at a site, act on it, one action, a hand-over).
     Browser(ConsentDialog),
+    /// The notes inside a group: the group's id and the chosen line (newest first).
+    Group(String, usize),
 }
 
 #[derive(Clone)]
@@ -109,7 +111,13 @@ fn ago(now: i64, t: i64) -> String {
 
 impl InboxApp {
     pub fn new(cx: &AppCx) -> InboxApp {
+        // group an older file and drop what is past its keeping time; say so once
+        let _ = cx.services.inbox.maintain(&cx.session.user, iyakki_agent::clock::now_unix());
+        let notice = cx.services.inbox.take_notice(&cx.session.user);
         let mut a = InboxApp { page: Page::Notifications, notes: vec![], tasks: vec![], approvals: vec![], sel: [0; 3], filter: Filter::All, mode: Mode::Browse, status: None, request: None, zone: Zone::system(), snoozed: 0, pane: crate::textsel::Pane::new(61_400) };
+        if let Some(m) = notice {
+            a.ok(m);
+        }
         a.reload(cx);
         a
     }
@@ -134,6 +142,13 @@ impl InboxApp {
     }
     pub fn filter(&self) -> Filter {
         self.filter
+    }
+    /// The id of the group that is open, if one is.
+    pub fn open_group(&self) -> Option<&str> {
+        match &self.mode {
+            Mode::Group(id, _) => Some(id),
+            _ => None,
+        }
     }
     pub fn dialog_open(&self) -> bool {
         !matches!(self.mode, Mode::Browse)
@@ -239,6 +254,14 @@ impl InboxApp {
 
     fn open_link(&mut self, cx: &AppCx) {
         let Some(n) = self.note().cloned() else { return };
+        if n.is_group() {
+            // a group opens its list; looking at it counts as reading it
+            let _ = cx.services.inbox.mark_read(&cx.session.user, &n.id, true);
+            cx.audit.record(&cx.session.user, "inbox.open", &format!("{}: {}", n.kind.name(), n.title));
+            self.mode = Mode::Group(n.id, 0);
+            self.reload(cx);
+            return;
+        }
         let _ = cx.services.inbox.mark_read(&cx.session.user, &n.id, true);
         cx.audit.record(&cx.session.user, "inbox.open", &format!("{}: {}", n.kind.name(), n.title));
         match &n.link {
@@ -267,6 +290,17 @@ impl InboxApp {
         }
         let Some(n) = self.note().cloned() else { return };
         let r = match k {
+            'm' => return self.mute_source(cx, &n),
+            't' => return self.trust_devices(cx, &n),
+            'i' => cx.services.inbox.mark_read(&u, &n.id, true).map(|_| {
+                cx.audit.record(&u, "inbox.ignore", &n.title);
+                self.ok("Ignored: marked as read, nothing trusted.");
+            }),
+            'g' => {
+                let what = if n.is_group() { format!("Clear this group: {} notifications (“{}”)?", n.count.max(n.items.len() as u32), n.title) } else { format!("Delete “{}”?", n.title) };
+                self.mode = Mode::Confirm(what, Confirmed::Note(n.id.clone()));
+                return;
+            }
             'r' => cx.services.inbox.mark_read(&u, &n.id, !n.read).map(|_| cx.audit.record(&u, "inbox.read", &n.title)),
             'f' => cx.services.inbox.flag(&u, &n.id, !n.flagged).map(|_| cx.audit.record(&u, if n.flagged { "inbox.unflag" } else { "inbox.flag" }, &n.title)),
             's' => cx.services.inbox.snooze(&u, &n.id, now + SNOOZE_SECS).map(|_| {
@@ -292,6 +326,40 @@ impl InboxApp {
         if let Err(e) = r {
             self.fail(e);
         }
+        self.reload(cx);
+    }
+
+    /// Show, then Quiet (panel only), then Off, then Show again, for the source of this note.
+    fn mute_source(&mut self, cx: &AppCx, n: &Notification) {
+        let u = &cx.session.user;
+        if n.source.is_empty() {
+            return self.fail("This note has no source to mute.");
+        }
+        let next = cx.services.inbox.level(u, &n.source).next();
+        match cx.services.inbox.set_level(u, &n.source, next) {
+            Ok(()) => {
+                cx.audit.record(u, "inbox.level", &format!("{} {}", n.source, next.name()));
+                self.ok(format!("{}: {}. Press m again to change it, or use Settings \u{2192} Notifications.", n.source, next.label()));
+            }
+            Err(e) => self.fail(e),
+        }
+        self.reload(cx);
+    }
+
+    /// Trust the devices of a new-devices note (they stop being new) and mark it read.
+    fn trust_devices(&mut self, cx: &AppCx, n: &Notification) {
+        let u = &cx.session.user;
+        if n.kind != Kind::Device {
+            return;
+        }
+        if !cx.session.policy.manage_settings {
+            return self.fail("Only an administrator can trust devices.");
+        }
+        let macs: Vec<&str> = if n.items.is_empty() { n.link.iter().map(|l| l.id.as_str()).collect() } else { n.items.iter().map(|i| i.id.as_str()).collect() };
+        let trusted = macs.iter().filter(|m| !m.is_empty() && cx.services.devwatch.trust(m)).count();
+        let _ = cx.services.inbox.mark_read(u, &n.id, true);
+        cx.audit.record(u, "inbox.trust_devices", &trusted.to_string());
+        self.ok(format!("Trusted {trusted} device{}.", if trusted == 1 { "" } else { "s" }));
         self.reload(cx);
     }
 
@@ -467,7 +535,7 @@ impl App for InboxApp {
     }
     fn hint(&self) -> String {
         match self.page {
-            Page::Notifications => "Tab/1-3 pages · Enter open · r read · f flag · c calendar · s snooze · d delete · A all read · X clear read".into(),
+            Page::Notifications => "Tab/1-3 pages · Enter open (a group shows its list) · r read · f flag · c calendar · s snooze · d delete · g clear group · m mute source · A all read · X clear read".into(),
             Page::Tasks => "Tab/1-3 pages · n new · Enter/→ next · ← back · e edit · p priority · c calendar · x drop · d delete · f filter".into(),
             Page::Approvals => "Tab/1-3 pages · y approve · n reject · Enter details (each one on its own)".into(),
         }
@@ -554,6 +622,43 @@ impl App for InboxApp {
                 }
                 return Flow::Stay;
             }
+            Mode::Group(id, sel) => {
+                let id = id.clone();
+                let note = cx.services.inbox.list(&cx.session.user).into_iter().find(|n| n.id == id);
+                let Some(n) = note else {
+                    self.mode = Mode::Browse;
+                    return Flow::Stay;
+                };
+                let len = n.items.len();
+                match ev {
+                    Event::Row(i) => *sel = (*i).min(len.saturating_sub(1)),
+                    Event::Key(Key::Up) => *sel = sel.saturating_sub(1),
+                    Event::Key(Key::Down) => *sel = (*sel + 1).min(len.saturating_sub(1)),
+                    Event::Key(Key::Esc | Key::Left | Key::Char('q')) => self.mode = Mode::Browse,
+                    Event::Key(Key::Enter) => {
+                        // newest first on screen
+                        let item = len.checked_sub(1 + *sel).and_then(|i| n.items.get(i)).cloned();
+                        if let (Some(l), Some(it)) = (n.link.as_ref().filter(|l| !l.app.is_empty() && l.app != "inbox"), item) {
+                            self.request = Some((l.app.clone(), it.id));
+                            self.mode = Mode::Browse;
+                        }
+                    }
+                    Event::Key(Key::Char('t')) => self.trust_devices(cx, &n),
+                    Event::Key(Key::Char('i')) => {
+                        let _ = cx.services.inbox.mark_read(&cx.session.user, &n.id, true);
+                        cx.audit.record(&cx.session.user, "inbox.ignore", &n.title);
+                        self.mode = Mode::Browse;
+                        self.ok("Ignored: marked as read, nothing trusted.");
+                        self.reload(cx);
+                    }
+                    Event::Key(Key::Char('g')) => self.mode = Mode::Confirm(format!("Clear this group: {} notifications (“{}”)?", n.count.max(len as u32), n.title), Confirmed::Note(n.id.clone())),
+                    Event::Key(Key::Char('m')) => {
+                        self.mute_source(cx, &n);
+                    }
+                    _ => {}
+                }
+                return Flow::Stay;
+            }
             Mode::Detail(_) => {
                 if self.pane.handle(ev) {
                     return Flow::Stay;
@@ -621,7 +726,8 @@ impl App for InboxApp {
             Event::Key(k) => match self.page {
                 Page::Notifications => match k {
                     Key::Enter => self.open_link(cx),
-                    Key::Char(c @ ('r' | 'f' | 'c' | 's' | 'd' | 'A' | 'X')) => self.note_action(cx, *c),
+                    Key::Right | Key::Char(' ') if self.note().is_some_and(Notification::is_group) => self.open_link(cx),
+                    Key::Char(c @ ('r' | 'f' | 'c' | 's' | 'd' | 'A' | 'X' | 'm' | 't' | 'i' | 'g')) => self.note_action(cx, *c),
                     _ => {}
                 },
                 Page::Tasks => self.task_action(cx, ev),
@@ -672,8 +778,8 @@ impl App for InboxApp {
             crate::fx::status_line(g, x, y - 8.0 * s, w, s, m, *ok);
             y += 18.0 * s;
         }
-        let body = R::new(x, y, w, area.y + area.h - y - 66.0 * s);
-        let actions = R::new(x, area.y + area.h - 56.0 * s, w, 44.0 * s);
+        let body = R::new(x, y, w, area.y + area.h - y - 88.0 * s);
+        let actions = R::new(x, area.y + area.h - 78.0 * s, w, 66.0 * s);
         match self.page {
             Page::Notifications => self.draw_notes(g, body, actions, s, now),
             Page::Tasks => self.draw_tasks(g, body, actions, s, now),
@@ -686,6 +792,12 @@ impl App for InboxApp {
             Mode::Browser(d) => d.render(g, area, s),
             Mode::Confirm(text, _) => render_confirm(g, area, s, text, "Yes"),
             Mode::Detail(a) => draw_detail(g, area, s, a, now, &mut self.pane),
+            Mode::Group(id, sel) => {
+                let note = cx.services.inbox.list(&cx.session.user).into_iter().find(|n| n.id == *id);
+                if let Some(n) = note {
+                    draw_group(g, area, s, &n, *sel, now, cx.session.policy.manage_settings);
+                }
+            }
             Mode::Browse => {}
         }
     }
@@ -708,14 +820,40 @@ fn first_visible(sel: usize, fit: usize) -> usize {
     sel.saturating_sub(fit.saturating_sub(1))
 }
 
+/// Buttons in a row; when they do not fit they go on a second line (the area is two lines high), and what still does not fit
+/// is left out (every one has a key).
 fn action_row(g: &mut Gfx, r: R, s: f32, items: &[(&str, [u8; 4], Key)]) {
-    let mut bx = r.x;
-    for (label, col, key) in items {
-        let bw = g.text_width(13.5 * s, label, Face::Bold) + 13.5 * s * 1.7;
-        if bx + bw > r.x + r.w {
-            break;
+    let line = 13.5 * s * 1.7 + 6.0 * s;
+    // where each button goes; None when it does not fit
+    let place = |g: &mut Gfx, strip: bool| -> Vec<Option<(f32, f32, String)>> {
+        let (mut bx, mut by) = (r.x, r.y);
+        items
+            .iter()
+            .map(|(label, _, _)| {
+                let text = if strip { label.split(" (").next().unwrap_or(label).to_string() } else { label.to_string() };
+                let bw = g.text_width(13.5 * s, &text, Face::Bold) + 13.5 * s * 1.7;
+                if bx + bw > r.x + r.w {
+                    bx = r.x;
+                    by += line;
+                }
+                if bx + bw > r.x + r.w || by + line > r.y + r.h + 4.0 * s {
+                    return None;
+                }
+                let at = (bx, by, text);
+                bx += bw + 8.0 * s;
+                Some(at)
+            })
+            .collect()
+    };
+    // full labels (with their key) when everything fits, else the short labels: every key still works
+    let mut spots = place(g, false);
+    if spots.iter().any(Option::is_none) {
+        spots = place(g, true);
+    }
+    for ((_, col, key), spot) in items.iter().zip(spots) {
+        if let Some((x, y, text)) = spot {
+            g.button(x, y, 13.5 * s, &text, *col, Event::Key(key.clone()));
         }
-        bx += g.button(bx, r.y, 13.5 * s, label, *col, Event::Key(key.clone())) + 8.0 * s;
     }
 }
 
@@ -737,10 +875,14 @@ impl InboxApp {
             let tw = r.w - 200.0 * s;
             let t = g.fit(15.5 * s, &format!("{star}{}", n.title), face, tw);
             g.text(r.x + 16.0 * s, r.y + 8.0 * s, 15.5 * s, if n.read { MUTED } else { TEXT }, &t, face);
-            let first_line = n.body.lines().next().unwrap_or("");
-            let b = g.fit(13.0 * s, first_line, Face::Sans, tw);
+            // a group shows what its newest note says, and how many there are
+            let first_line = match n.items.last().filter(|_| n.is_group()) {
+                Some(it) => format!("latest: {}", it.text),
+                None => n.body.lines().next().unwrap_or("").to_string(),
+            };
+            let b = g.fit(13.0 * s, &first_line, Face::Sans, tw);
             g.text(r.x + 16.0 * s, r.y + 34.0 * s, 13.0 * s, DIM, &b, Face::Sans);
-            let meta = format!("{} · {}", n.kind.name(), ago(now, n.time));
+            let meta = if n.is_group() { format!("{} · \u{25b8} {} · last {}", n.kind.name(), n.count.max(n.items.len() as u32), ago(now, n.time)) } else { format!("{} · {}", n.kind.name(), ago(now, n.time)) };
             let mw = g.text_width(12.5 * s, &meta, Face::Sans);
             g.text(r.x + r.w - mw - 14.0 * s, r.y + 10.0 * s, 12.5 * s, kind_color(n.kind), &meta, Face::Sans);
             if !n.source.is_empty() {
@@ -751,7 +893,7 @@ impl InboxApp {
         if self.snoozed > 0 {
             g.text(body.x + body.w - 160.0 * s, actions.y - 18.0 * s, 12.0 * s, DIM, &format!("{} snoozed", self.snoozed), Face::Sans);
         }
-        action_row(g, actions, s, &[("Open", ACCENT, Key::Enter), ("Read (r)", MUTED, Key::Char('r')), ("Flag (f)", AMBER, Key::Char('f')), ("Calendar (c)", BLUE, Key::Char('c')), ("Snooze (s)", MUTED, Key::Char('s')), ("Delete (d)", ERR, Key::Char('d')), ("All read (A)", MUTED, Key::Char('A')), ("Clear read (X)", MUTED, Key::Char('X'))]);
+        action_row(g, actions, s, &[("Open", ACCENT, Key::Enter), ("Read (r)", MUTED, Key::Char('r')), ("Flag (f)", AMBER, Key::Char('f')), ("Calendar (c)", BLUE, Key::Char('c')), ("Snooze (s)", MUTED, Key::Char('s')), ("Delete (d)", ERR, Key::Char('d')), ("Clear group (g)", ERR, Key::Char('g')), ("Mute source (m)", AMBER, Key::Char('m')), ("All read (A)", MUTED, Key::Char('A')), ("Clear read (X)", MUTED, Key::Char('X'))]);
     }
 
     fn draw_tasks(&mut self, g: &mut Gfx, body: R, actions: R, s: f32, now: i64) {
@@ -856,6 +998,43 @@ impl InboxApp {
             action_row(g, actions, s, &[("Approve (y)", OK, Key::Char('y')), ("Reject (n)", ERR, Key::Char('n')), ("Details (Enter)", MUTED, Key::Enter)]);
         }
     }
+}
+
+/// The notes inside a group, newest first, with the actions that make sense for it.
+fn draw_group(g: &mut Gfx, area: R, s: f32, n: &Notification, sel: usize, now: i64, admin: bool) {
+    let p = crate::fx::modal(g, area, s, (area.w - 80.0 * s).min(820.0 * s), area.h - 80.0 * s, ACCENT, false);
+    let head = g.fit(19.0 * s, &n.title, Face::Bold, p.w - 48.0 * s);
+    g.text(p.x + 24.0 * s, p.y + 18.0 * s, 19.0 * s, TEXT, &head, Face::Bold);
+    let more = (n.count as usize).saturating_sub(n.items.len());
+    let sub = format!("{} · {} note{}{}", n.source, n.items.len(), if n.items.len() == 1 { "" } else { "s" }, if more > 0 { format!(" shown, {more} older ones not kept") } else { String::new() });
+    g.text(p.x + 24.0 * s, p.y + 46.0 * s, 12.5 * s, DIM, &sub, Face::Sans);
+    let top = p.y + 72.0 * s;
+    let foot = 2.0 * (13.5 * s * 1.7 + 6.0 * s) + 12.0 * s;
+    let rh = 26.0 * s;
+    let fit = (((p.y + p.h - foot - top) / rh) as usize).max(1);
+    let len = n.items.len();
+    let sel = sel.min(len.saturating_sub(1));
+    let first = first_visible(sel, fit);
+    for (row, i) in (first..len).take(fit).enumerate() {
+        let it = &n.items[len - 1 - i];
+        let r = R::new(p.x + 20.0 * s, top + row as f32 * rh, p.w - 40.0 * s, rh - 2.0 * s);
+        crate::fx::row_at(g, r.x, r.y, r.w, r.h, 6.0 * s, i == sel, g.hovered(r), ACCENT);
+        g.hit(r, Event::Row(i), &format!("{}:{}", n.id, i));
+        let age = ago(now, it.time);
+        let aw = g.text_width(12.5 * s, &age, Face::Sans);
+        g.text(r.x + r.w - aw - 10.0 * s, r.y + 5.0 * s, 12.5 * s, DIM, &age, Face::Sans);
+        let t = g.fit(13.5 * s, &it.text, Face::Sans, r.w - aw - 36.0 * s);
+        g.text(r.x + 12.0 * s, r.y + 4.0 * s, 13.5 * s, TEXT, &t, Face::Sans);
+    }
+    let mut items: Vec<(&str, [u8; 4], Key)> = vec![("Open (Enter)", ACCENT, Key::Enter)];
+    if n.kind == Kind::Device && admin {
+        items.push(("Trust all (t)", OK, Key::Char('t')));
+    }
+    if n.kind == Kind::Device {
+        items.push(("Ignore (i)", MUTED, Key::Char('i')));
+    }
+    items.extend([("Clear group (g)", ERR, Key::Char('g')), ("Mute source (m)", AMBER, Key::Char('m')), ("Close (Esc)", MUTED, Key::Esc)]);
+    action_row(g, R::new(p.x + 24.0 * s, p.y + p.h - foot + 4.0 * s, p.w - 48.0 * s, foot - 8.0 * s), s, &items);
 }
 
 fn draw_detail(g: &mut Gfx, area: R, s: f32, a: &PendingApproval, now: i64, pane: &mut crate::textsel::Pane) {
@@ -1310,5 +1489,140 @@ mod tests {
         a.handle(&Event::Tick, &cx);
         key(&mut a, &cx, Key::Char('n'));
         assert_eq!(c.wait(&step, std::time::Duration::from_millis(20)), Some(Answer::Deny));
+    }
+
+    const NEWDEV: &str = "New device on your network";
+
+    fn nb(ip: &str, mac: &str) -> iyakki_agent::devwatch::Neighbor {
+        iyakki_agent::devwatch::Neighbor { ip: ip.into(), mac: mac.into(), iface: "eth0".into() }
+    }
+
+    #[test]
+    fn a_crowd_of_new_devices_is_one_collapsed_row_that_opens_a_list_and_trusts_or_ignores_them() {
+        let cx = admin_cx("inb_grp");
+        let now = iyakki_agent::clock::now_unix();
+        let dw = &cx.services.devwatch;
+        dw.observe(&[nb("10.0.0.1", "aa:aa:aa:aa:aa:01")], 1);
+        let mut seen = vec![nb("10.0.0.1", "aa:aa:aa:aa:aa:01")];
+        for i in 2..42 {
+            seen.push(nb(&format!("10.0.0.{i}"), &format!("bb:bb:bb:bb:bb:{i:02x}")));
+        }
+        for d in dw.observe(&seen, 2) {
+            cx.services.notify("root", Kind::Device, NEWDEV, &format!("{} ({}) appeared.", d.ip, d.mac), Some(Link::new("scan", &d.mac))).unwrap();
+        }
+        assert_eq!(dw.untrusted_count(), 40);
+        let mut a = InboxApp::new(&cx);
+        assert_eq!(a.notifications().len(), 1, "forty devices, one row");
+        assert_eq!(a.notifications()[0].title, "40 new devices on your network");
+        // collapsed rows draw at every size, with the count and the newest line
+        for (w, h) in [(1280u32, 720u32), (1024, 600), (800, 480), (480, 600)] {
+            let g = draw(&mut a, &cx, w, h);
+            assert!(g.hits.iter().any(|x| x.label == "Clear group (g)" || x.label == "Mute source (m)" || x.label.len() > 4), "{w}x{h}");
+        }
+        // Enter opens the list instead of leaving the inbox; the group counts as looked at
+        key(&mut a, &cx, Key::Enter);
+        assert_eq!(a.open_group(), Some(a.notifications()[0].id.as_str()));
+        assert_eq!(a.take_request(), None);
+        for (w, h) in [(1280u32, 720u32), (1024, 600), (800, 480), (480, 600)] {
+            let g = draw(&mut a, &cx, w, h);
+            assert!(g.hits.iter().any(|x| matches!(x.ev, Event::Key(Key::Esc))), "a Close button at {w}x{h}");
+            assert!(g.hits.iter().filter(|x| matches!(x.ev, Event::Row(_))).count() >= 1);
+        }
+        // a click on a row selects it; Enter opens the device in NET SCAN
+        let g = draw(&mut a, &cx, 1280, 720);
+        let row = g.hits.iter().find(|x| matches!(x.ev, Event::Row(1))).expect("a second line").ev.clone();
+        a.handle(&row, &cx);
+        key(&mut a, &cx, Key::Enter);
+        let (app, id) = a.take_request().expect("opens NET SCAN");
+        assert_eq!(app, "scan");
+        assert!(id.starts_with("bb:bb:bb:bb:bb:"), "{id}");
+        assert!(a.open_group().is_none());
+        // Trust all (t) from the list
+        key(&mut a, &cx, Key::Right);
+        assert!(a.open_group().is_some());
+        key(&mut a, &cx, Key::Char('t'));
+        assert_eq!(dw.untrusted_count(), 0);
+        assert!(a.status_text().unwrap_or("").contains("Trusted 40"), "{:?}", a.status_text());
+        assert!(audit(&cx).contains("inbox.trust_devices"));
+        // Ignore (i) only marks it read
+        cx.services.notify("root", Kind::Device, NEWDEV, "10.0.0.99 (cc) appeared.", Some(Link::new("scan", "cc:cc:cc:cc:cc:99"))).unwrap();
+        cx.services.notify("root", Kind::Device, NEWDEV, "10.0.0.98 (cd) appeared.", Some(Link::new("scan", "cc:cc:cc:cc:cc:98"))).unwrap();
+        a.handle(&Event::Key(Key::Esc), &cx);
+        a.handle(&Event::Tick, &cx);
+        assert_eq!(a.notifications().len(), 2, "looked-at groups stay apart from new arrivals: {:?}", a.notifications().iter().map(|n| &n.title).collect::<Vec<_>>());
+        key(&mut a, &cx, Key::Char('i'));
+        assert!(a.notifications()[0].read && !a.notifications()[0].items.is_empty());
+        assert!(audit(&cx).contains("inbox.ignore"));
+        let _ = now;
+    }
+
+    #[test]
+    fn keys_clear_a_group_and_mute_a_source_in_three_steps_and_the_choice_is_kept_per_person() {
+        let cx = admin_cx("inb_mute");
+        let ib = &cx.services.inbox;
+        let now = iyakki_agent::clock::now_unix();
+        for i in 0..5 {
+            ib.add("root", Kind::Agent, &format!("Job \u{201c}Setup {i}\u{201d} finished"), "ok", "runs", Some(Link::new("runs", "jobs")), now).unwrap();
+        }
+        ib.add("root", Kind::Info, "Hello", "", "system", None, now - 10).unwrap();
+        let mut a = InboxApp::new(&cx);
+        assert_eq!(a.notifications().len(), 2);
+        assert_eq!(a.notifications()[0].title, "5 setup jobs finished");
+        // m: Show -> Quiet -> Off -> Show
+        key(&mut a, &cx, Key::Char('m'));
+        assert_eq!(ib.level("root", "runs").name(), "quiet");
+        assert!(a.status_text().unwrap_or("").contains("Quiet"), "{:?}", a.status_text());
+        assert_eq!(ib.counts("root", now).other, 1, "the quiet source no longer shows as a dot");
+        key(&mut a, &cx, Key::Char('m'));
+        assert_eq!(ib.level("root", "runs").name(), "off");
+        key(&mut a, &cx, Key::Char('m'));
+        assert_eq!(ib.level("root", "runs").name(), "show");
+        assert_eq!(ib.level("bob", "runs").name(), "show", "per person");
+        // g asks, then clears the whole group but not the other note
+        key(&mut a, &cx, Key::Char('g'));
+        assert!(a.dialog_open());
+        key(&mut a, &cx, Key::Char('n'));
+        assert_eq!(a.notifications().len(), 2);
+        key(&mut a, &cx, Key::Char('g'));
+        key(&mut a, &cx, Key::Char('y'));
+        assert_eq!(a.notifications().iter().map(|n| n.title.as_str()).collect::<Vec<_>>(), vec!["Hello"]);
+        // every key has a button, at every size
+        for (w, h) in [(1280u32, 720u32), (1024, 600), (800, 480), (480, 600)] {
+            let g = draw(&mut a, &cx, w, h);
+            assert!(g.hits.iter().any(|x| matches!(x.ev, Event::Key(Key::Char('m')))), "Mute at {w}x{h}");
+        }
+        let log = audit(&cx);
+        assert!(log.contains("inbox.level") && log.contains("inbox.delete"), "{log}");
+    }
+
+    #[test]
+    fn an_old_inbox_file_is_grouped_when_the_panel_opens_and_the_panel_says_so_once() {
+        let d = temp_dir("inb_old");
+        let mut cx = cx_with_admin_store("inb_old");
+        cx.services = services_in(&d, Arc::new(Offline));
+        cx.services.on_login("root", "rootpass12", true);
+        let now = iyakki_agent::clock::now_unix();
+        let mut notes = Vec::new();
+        for i in 0..79 {
+            notes.push(serde_json::json!({"id": format!("d{i}"), "time": now - 100 + i, "kind": "device", "title": NEWDEV, "body": format!("10.0.0.{i} (m{i}) appeared."), "source": "scan", "link": {"app": "scan", "id": format!("m{i}")}, "read": false, "flagged": false, "snoozed_until": 0}));
+        }
+        for i in 0..41 {
+            notes.push(serde_json::json!({"id": format!("j{i}"), "time": now - 200 + i, "kind": "agent", "title": format!("Job \u{201c}Install Python 3.12 ({i}/12)\u{201d} finished"), "body": "", "source": "runs", "read": false, "flagged": false, "snoozed_until": 0}));
+        }
+        notes.push(serde_json::json!({"id": "old", "time": now - 40 * 86_400, "kind": "info", "title": "Ancient", "body": "", "source": "system", "read": true, "flagged": false, "snoozed_until": 0}));
+        notes.push(serde_json::json!({"id": "rem", "time": now - 50, "kind": "reminder", "title": "Reminder: Standup", "body": "", "source": "calendar", "read": false, "flagged": false, "snoozed_until": 0}));
+        let dir = d.join("svc").join("inbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("root.json"), serde_json::to_vec(&serde_json::json!({"notifications": notes, "tasks": []})).unwrap()).unwrap();
+        assert_eq!(cx.services.inbox.list("root").len(), 79 + 41 + 2);
+        let mut a = InboxApp::new(&cx);
+        assert_eq!(a.notifications().len(), 3, "{:?}", a.notifications().iter().map(|n| &n.title).collect::<Vec<_>>());
+        let said = a.status_text().expect("said once").to_string();
+        assert!(said.contains("tidied") && said.contains("122") && said.contains("Nothing else was removed"), "{said}");
+        assert!(draw(&mut a, &cx, 800, 480).hits.len() > 3);
+        // a second panel does not repeat it
+        let b = InboxApp::new(&cx);
+        assert!(b.status_text().is_none());
+        assert_eq!(cx.services.inbox.counts("root", now).attention, 1, "only the reminder needs the person");
     }
 }

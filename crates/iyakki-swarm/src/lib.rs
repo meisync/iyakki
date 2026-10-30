@@ -11,13 +11,22 @@ use std::time::Duration;
 
 use iyakki_wasm::{Sandbox, SandboxConfig};
 use futures::StreamExt;
-use libp2p::request_response::{self, ProtocolSupport};
-use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
-use libp2p::{mdns, noise, tcp, yamux, Multiaddr, PeerId, StreamProtocol};
+use libp2p_core::muxing::StreamMuxerBox;
+use libp2p_core::transport::Transport as _;
+use libp2p_core::upgrade::Version;
+use libp2p_core::Multiaddr;
+use libp2p_identity::{Keypair, PeerId};
+use libp2p_request_response::{self as request_response, ProtocolSupport};
+use libp2p_swarm::{NetworkBehaviour, StreamProtocol, Swarm, SwarmEvent};
+use libp2p_mdns as mdns;
+use libp2p_noise as noise;
+use libp2p_tcp as tcp;
+use libp2p_yamux as yamux;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
-pub use libp2p::{Multiaddr as Addr, PeerId as Peer};
+pub use libp2p_core::Multiaddr as Addr;
+pub use libp2p_identity::PeerId as Peer;
 
 pub const MAX_WASM_BYTES: usize = 4 << 20;
 
@@ -49,6 +58,7 @@ pub enum SwarmError {
 }
 
 #[derive(NetworkBehaviour)]
+#[behaviour(prelude = "libp2p_swarm::derive_prelude")]
 struct Behaviour {
     mdns: mdns::tokio::Behaviour,
     tasks: request_response::cbor::Behaviour<TaskRequest, TaskResponse>,
@@ -82,23 +92,27 @@ impl Node {
     /// Start a node listening on `listen` (e.g. `/ip4/0.0.0.0/tcp/0`). Must be called inside a tokio runtime.
     pub fn start(listen: Multiaddr, cfg: SandboxConfig) -> Result<Node, SwarmError> {
         let e = |x: &dyn std::fmt::Display| SwarmError::Setup(x.to_string());
-        let mut swarm = libp2p::SwarmBuilder::with_new_identity()
-            .with_tokio()
-            .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)
-            .map_err(|x| e(&x))?
-            .with_behaviour(|key| {
-                let peer = key.public().to_peer_id();
-                Ok(Behaviour {
-                    mdns: mdns::tokio::Behaviour::new(mdns::Config::default(), peer)?,
-                    tasks: request_response::cbor::Behaviour::new(
-                        [(StreamProtocol::new("/iyakki/task/1"), ProtocolSupport::Full)],
-                        request_response::Config::default().with_request_timeout(Duration::from_secs(60)),
-                    ),
-                })
-            })
-            .map_err(|x| e(&x))?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
-            .build();
+        let key = Keypair::generate_ed25519();
+        let peer = key.public().to_peer_id();
+        let transport = tcp::tokio::Transport::new(tcp::Config::default())
+            .upgrade(Version::V1Lazy)
+            .authenticate(noise::Config::new(&key).map_err(|x| e(&x))?)
+            .multiplex(yamux::Config::default())
+            .map(|(p, m), _| (p, StreamMuxerBox::new(m)))
+            .boxed();
+        let behaviour = Behaviour {
+            mdns: mdns::tokio::Behaviour::new(mdns::Config::default(), peer).map_err(|x| e(&x))?,
+            tasks: request_response::cbor::Behaviour::new(
+                [(StreamProtocol::new("/iyakki/task/1"), ProtocolSupport::Full)],
+                request_response::Config::default().with_request_timeout(Duration::from_secs(60)),
+            ),
+        };
+        let mut swarm = Swarm::new(
+            transport,
+            behaviour,
+            peer,
+            libp2p_swarm::Config::with_tokio_executor().with_idle_connection_timeout(Duration::from_secs(60)),
+        );
         swarm.listen_on(listen).map_err(|x| e(&x))?;
         let peer_id = *swarm.local_peer_id();
         let sandbox = Arc::new(Sandbox::new(cfg).map_err(|x| e(&x))?);
@@ -136,7 +150,7 @@ impl Node {
                                 if !peers.contains(&p) {
                                     // Every advertised address is tried; unreachable ones (e.g. network
                                     // addresses of virtual interfaces) just fail while another succeeds.
-                                    let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(p)
+                                    let opts = libp2p_swarm::dial_opts::DialOpts::peer_id(p)
                                         .addresses(vec![a])
                                         .extend_addresses_through_behaviour()
                                         .build();

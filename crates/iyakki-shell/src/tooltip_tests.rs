@@ -70,7 +70,7 @@ fn the_tooltip_has_the_full_text_after_the_delay_and_not_before() {
 #[test]
 fn it_hides_on_move_click_release_scroll_and_escape() {
     let (mut g, mut t) = (Gfx::new(800, 600), Tooltip::new());
-    let mut up = |t: &mut Tooltip, g: &mut Gfx| {
+    let up = |t: &mut Tooltip, g: &mut Gfx| {
         pointer_on(t, g, 140, 110);
         pointer_on(t, g, 150, 120);
         ticks(t, POINTER_DELAY);

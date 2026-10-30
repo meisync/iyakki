@@ -479,6 +479,8 @@ struct Entry {
 struct State {
     entries: Vec<Entry>,
     max_concurrency: usize,
+    /// What one task is expected to need, in MB (the memory-aware cap divides the free memory by it).
+    task_mb: u64,
     per_agent: BTreeMap<String, usize>,
     auto_assign: AutoAssign,
     /// Guidance for a running task, delivered when its pause lands.
@@ -494,6 +496,13 @@ struct Inner {
     merge_lock: Mutex<()>,
     /// One git operation on a task's tree at a time: the review thread of the UI and a merge must not fight over `index.lock`.
     git_lock: Mutex<()>,
+    /// Free memory in bytes (tests give a fake; `None` inside: unknown). Default: `/proc/meminfo`.
+    mem_source: Mutex<Option<Arc<dyn Fn() -> Option<u64> + Send + Sync>>>,
+    /// The fan-out plan whose later waves wait for earlier ones to be merged.
+    plan: Mutex<Option<plan::PlanRun>>,
+    /// (key, text) of the last lead summary.
+    summary: Mutex<(String, String)>,
+    last_poll: Mutex<Option<Instant>>,
 }
 
 #[derive(Clone)]
@@ -577,7 +586,7 @@ impl Manager {
         let auto = cfg.as_ref().and_then(|v| v.get("auto_assign").and_then(|n| n.as_str()).map(str::to_string)).unwrap_or_default();
         // agents that claim to be at work were cut off by the restart (the tasks above are already `interrupted`)
         crate::assign::update(root, |d| d.reconcile(&[], now()));
-        Manager { inner: Arc::new(Inner { root: root.into(), features: features.into(), state: Mutex::new(State { entries, max_concurrency: max, per_agent: BTreeMap::new(), auto_assign: AutoAssign::parse(&auto), guidance: BTreeMap::new() }), runner: Mutex::new(None), hooks: Mutex::new(Hooks::default()), merge_lock: Mutex::new(()), git_lock: Mutex::new(()) }) }
+        Manager { inner: Arc::new(Inner { root: root.into(), features: features.into(), state: Mutex::new(State { entries, max_concurrency: max, task_mb: cfg.as_ref().and_then(|v| v.get("task_memory_mb").and_then(|n| n.as_u64())).map_or(plan::DEFAULT_TASK_MB, |n| n.clamp(100, 64_000)), per_agent: BTreeMap::new(), auto_assign: AutoAssign::parse(&auto), guidance: BTreeMap::new() }), runner: Mutex::new(None), hooks: Mutex::new(Hooks::default()), merge_lock: Mutex::new(()), git_lock: Mutex::new(()), mem_source: Mutex::new(None), plan: Mutex::new(plan::PlanRun::load(root)), summary: Mutex::new((String::new(), String::new())), last_poll: Mutex::new(None) }) }
     }
 
     pub fn root(&self) -> &Path {
@@ -873,7 +882,11 @@ impl Manager {
         if self.inner.runner.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
             return;
         }
+        self.advance_plan();
+        #[allow(unused_assignments)]
+        let mut memory_held = false;
         loop {
+            let (avail, per_task) = (self.free_memory(), self.st().task_mb);
             // a task whose rows wait for rows that are not done stays queued (it starts when they are done, or when the person says so)
             let feats = self.board_features();
             let waits: Vec<(String, Vec<String>)> = self.list().iter().filter(|t| t.status == Status::Queued).map(|t| (t.id.clone(), self.waiting_on_with(t, &feats))).filter(|w| !w.1.is_empty()).collect();
@@ -884,7 +897,14 @@ impl Manager {
             let pick = {
                 let s = self.st();
                 let running = s.entries.iter().filter(|e| e.task.status.active()).count();
-                if running >= s.max_concurrency.min(HARD_CAP) {
+                let cap = plan::memory_cap(s.max_concurrency, running, avail, per_task);
+                if running >= cap {
+                    memory_held = running < s.max_concurrency.min(HARD_CAP) && s.entries.iter().any(|e| e.task.status == Status::Queued);
+                    if memory_held {
+                        let msg = format!("waiting for memory ({} free; each task is expected to need {} MB)", plan::gb(avail), per_task);
+                        drop(s);
+                        self.hold_note(&msg);
+                    }
                     None
                 } else {
                     s.entries
@@ -897,6 +917,7 @@ impl Manager {
             let Some(id) = pick else { break };
             self.start(&id);
         }
+        self.maybe_summarize();
     }
 
     fn start(&self, id: &str) {
@@ -1691,6 +1712,8 @@ impl Manager {
         if let Some(c) = self.hooks().cleanup {
             c(&t);
         }
+        // a plan that waited for this task stops, and the place it held is free
+        self.pump();
         Ok(())
     }
 
@@ -1849,3 +1872,6 @@ pub fn autopilot_runner(p: RunnerParts) -> Runner {
         crate::autopilot::start(p.backend.clone(), tools, vec![crate::chat::Message::user(&spec.prompt)], limits, p.assist.clone(), ctx)
     })
 }
+
+mod plan;
+pub use plan::{memory_cap, split_plan, summary_text, PlanStep, Report, Split, DEFAULT_TASK_MB, RESERVE_MB};

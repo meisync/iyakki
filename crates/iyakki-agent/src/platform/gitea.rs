@@ -12,6 +12,27 @@ pub struct Gitea;
 pub const VERSIONS: [&str; 2] = ["1.23.8", "1.24.5"];
 pub const HTTP_PORT: u16 = 3000;
 pub const SSH_LISTEN: u16 = 2222;
+/// The Secret that holds the first administrator's generated password, and its key.
+pub const ADMIN_SECRET: &str = "gitea-admin";
+/// Creates the first administrator inside the pod; the password stays in the pod's environment (from the Secret), never in a command line.
+pub const ADMIN_CREATE_SCRIPT: &str = "gitea admin user create --admin --username \"$GITEA_ADMIN_USER\" --password \"$GITEA_ADMIN_PASSWORD\" --email \"$GITEA_ADMIN_EMAIL\" --must-change-password=false";
+/// Makes the API token IYAKKI uses (`$0` is the token's name); the scopes are the least that creating, pushing and listing repositories needs.
+pub const TOKEN_SCRIPT: &str = "gitea admin user generate-access-token --username \"$GITEA_ADMIN_USER\" --token-name \"$0\" --scopes \"write:repository,read:user\" --raw";
+
+/// The token `gitea admin user generate-access-token --raw` printed (its last non-empty line), checked to look like one.
+pub fn token_from_output(stdout: &str) -> Result<zeroize::Zeroizing<String>, String> {
+    let token = zeroize::Zeroizing::new(stdout.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string());
+    if token.len() < 20 || !token.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err("the token command answered, but not with a token".into());
+    }
+    Ok(token)
+}
+
+/// Whether what the create-administrator command said means the administrator is there already.
+pub fn admin_exists(said: &str) -> bool {
+    let s = said.to_lowercase();
+    s.contains("already exist") || s.contains("already used")
+}
 
 fn labels(c: &BuildCtx, indent: usize) -> String {
     let pad = " ".repeat(indent);
@@ -27,7 +48,27 @@ fn env(name: &str, value: &str) -> String {
     format!("        - name: {name}\n          value: \"{}\"\n", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// Option: a port on THIS machine's loopback (127.0.0.1 only) that the web, API and git-over-HTTP port is published on, with the Service
+/// kept ClusterIP. Nothing outside the machine can reach it; git on this machine and the IDE can.
+pub const LOOPBACK_OPTION: &str = "loopback_port";
+/// Deliberate narrowing of a Gitea that is open on the network (see `engine::plan`).
+pub const CLOSE_OPTION: &str = "close_node_ports";
+/// The loopback port a new Gitea gets when the person gives none (the same as the Quick install item).
+pub const DEFAULT_LOOPBACK: u16 = 3300;
+
 impl Gitea {
+    /// The loopback port, when it is used (ClusterIP exposure and a port given).
+    pub fn loopback(c: &BuildCtx) -> Option<u16> {
+        Self::loopback_of(&c.opts)
+    }
+
+    pub fn loopback_of(o: &Options) -> Option<u16> {
+        if Exposure::parse(o.get("exposure")).ok()? != Exposure::ClusterIP {
+            return None;
+        }
+        o.get(LOOPBACK_OPTION).parse::<u16>().ok().filter(|p| *p >= 1024)
+    }
+
     fn exposure(c: &BuildCtx) -> Exposure {
         Exposure::parse(c.opts.get("exposure")).unwrap_or(Exposure::NodePort)
     }
@@ -39,6 +80,7 @@ impl Gitea {
             Exposure::LoadBalancer => c.opts.get("public_host").to_string(),
             Exposure::NodePort if !c.opts.get("public_host").is_empty() => c.opts.get("public_host").to_string(),
             Exposure::NodePort => c.host.clone(),
+            Exposure::ClusterIP if Self::loopback(c).is_some() => "127.0.0.1".to_string(),
             Exposure::ClusterIP => format!("gitea-http.{}.svc.cluster.local", c.namespace),
         }
     }
@@ -48,6 +90,7 @@ impl Gitea {
         let host = Self::host(c);
         match Self::exposure(c) {
             Exposure::NodePort => (format!("http://{host}:{}/", c.http_port), host, c.ssh_port),
+            Exposure::ClusterIP if Self::loopback(c).is_some() => (format!("http://{host}:{}/", Self::loopback(c).unwrap_or(HTTP_PORT)), host, 22),
             Exposure::ClusterIP => (format!("http://{host}:{HTTP_PORT}/"), host, 22),
             Exposure::LoadBalancer => (format!("http://{host}:{HTTP_PORT}/"), host, 22),
             Exposure::Ingress => (format!("http://{host}/"), host, 22),
@@ -68,6 +111,9 @@ impl ServiceDef for Gitea {
     fn kind(&self) -> &'static str {
         "git"
     }
+    fn default_exposure(&self) -> Exposure {
+        Exposure::ClusterIP
+    }
     fn versions(&self) -> Vec<String> {
         VERSIONS.iter().map(|s| s.to_string()).collect()
     }
@@ -78,13 +124,24 @@ impl ServiceDef for Gitea {
         vec![
             OptionDef::new("public_host", "Public host", "The host name or address people use (needed for LoadBalancer; for NodePort it replaces the node address). Gitea builds its clone URLs from it.", OptKind::Text, ""),
             OptionDef::new("http_node_port", "HTTP NodePort", "NodePort exposure only. Empty: the first free port from 30300.", OptKind::Port, ""),
+            OptionDef::new(LOOPBACK_OPTION, "Port on this machine", "ClusterIP exposure only. A port (1024 or higher) published on 127.0.0.1 of the node, so this machine can use the web page, the API and git over HTTP while nothing else on the network can reach them. Empty: 3300. `none`: not published.", OptKind::Text, ""),
             OptionDef::new("ssh_node_port", "SSH NodePort", "NodePort exposure only. Empty: the first free port from 30222.", OptKind::Port, ""),
+            OptionDef::new(CLOSE_OPTION, "Close the open NodePorts", "Only when this Gitea is open on the network (NodePort) now: switch it to ClusterIP with the loopback port, so only this machine and the cluster reach it. The review shows which ports close.", OptKind::Bool, "false"),
         ]
     }
     fn check_options(&self, o: &Options) -> Result<(), String> {
         let host = o.get("public_host");
         if Exposure::parse(o.get("exposure"))? == Exposure::LoadBalancer && host.is_empty() {
             return Err("Public host: a LoadBalancer's address is not known before it is assigned; give the host name or IP people will use".into());
+        }
+        let lp = o.get(LOOPBACK_OPTION);
+        if !lp.is_empty() && lp != "none" {
+            if Exposure::parse(o.get("exposure"))? != Exposure::ClusterIP {
+                return Err("Port on this machine: only with the ClusterIP exposure (it keeps the Service inside the cluster and publishes one port on 127.0.0.1)".into());
+            }
+            if !lp.parse::<u16>().is_ok_and(|p| p >= 1024) {
+                return Err(format!("Port on this machine: `{lp}` is not a port from 1024 to 65535"));
+            }
         }
         if !host.is_empty() && !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == ':' || c == '[' || c == ']') {
             return Err(format!("Public host: `{host}` is not a host name or address"));
@@ -97,7 +154,7 @@ impl ServiceDef for Gitea {
         let host = Self::host(c);
         let image = c.images.first().ok_or("no image")?;
         let admin = c.opts.get("admin_user");
-        let secret = "gitea-admin";
+        let secret = ADMIN_SECRET;
         let mut m = String::new();
         // storage
         m.push_str(&format!("apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gitea-data\n  labels:\n{}spec:\n  accessModes:\n  - ReadWriteOnce\n", labels(c, 4)));
@@ -130,8 +187,12 @@ impl ServiceDef for Gitea {
             m.push_str(&env(k, v));
         }
         m.push_str(&format!("        - name: GITEA_ADMIN_PASSWORD\n          valueFrom:\n            secretKeyRef:\n              name: {secret}\n              key: password\n"));
+        let hostport = match Self::loopback(c) {
+            Some(p) => format!("          hostPort: {p}\n          hostIP: 127.0.0.1\n"),
+            None => String::new(),
+        };
         m.push_str(&format!(
-            "        ports:\n        - name: http\n          containerPort: {HTTP_PORT}\n        - name: ssh\n          containerPort: {SSH_LISTEN}\n        startupProbe:\n          httpGet:\n            path: /api/healthz\n            port: http\n          periodSeconds: 5\n          failureThreshold: 60\n        readinessProbe:\n          httpGet:\n            path: /api/healthz\n            port: http\n          periodSeconds: 10\n          failureThreshold: 3\n        livenessProbe:\n          httpGet:\n            path: /api/healthz\n            port: http\n          initialDelaySeconds: 60\n          periodSeconds: 20\n          failureThreshold: 6\n        resources:\n          requests:\n            cpu: 100m\n            memory: 256Mi\n          limits:\n            cpu: \"1\"\n            memory: 1Gi\n        securityContext:\n          allowPrivilegeEscalation: false\n          runAsNonRoot: true\n          capabilities:\n            drop:\n            - ALL\n        volumeMounts:\n        - name: data\n          mountPath: /var/lib/gitea\n          subPath: data\n        - name: data\n          mountPath: /etc/gitea\n          subPath: config\n        - name: tmp\n          mountPath: /tmp\n      volumes:\n      - name: data\n        persistentVolumeClaim:\n          claimName: gitea-data\n      - name: tmp\n        emptyDir: {{}}\n---\n"
+            "        ports:\n        - name: http\n          containerPort: {HTTP_PORT}\n{hostport}        - name: ssh\n          containerPort: {SSH_LISTEN}\n        startupProbe:\n          httpGet:\n            path: /api/healthz\n            port: http\n          periodSeconds: 5\n          failureThreshold: 60\n        readinessProbe:\n          httpGet:\n            path: /api/healthz\n            port: http\n          periodSeconds: 10\n          failureThreshold: 3\n        livenessProbe:\n          httpGet:\n            path: /api/healthz\n            port: http\n          initialDelaySeconds: 60\n          periodSeconds: 20\n          failureThreshold: 6\n        resources:\n          requests:\n            cpu: 100m\n            memory: 256Mi\n          limits:\n            cpu: \"1\"\n            memory: 1Gi\n        securityContext:\n          allowPrivilegeEscalation: false\n          runAsNonRoot: true\n          capabilities:\n            drop:\n            - ALL\n        volumeMounts:\n        - name: data\n          mountPath: /var/lib/gitea\n          subPath: data\n        - name: data\n          mountPath: /etc/gitea\n          subPath: config\n        - name: tmp\n          mountPath: /tmp\n      volumes:\n      - name: data\n        persistentVolumeClaim:\n          claimName: gitea-data\n      - name: tmp\n        emptyDir: {{}}\n---\n"
         ));
         // services
         let svc_type = match exposure {
@@ -155,9 +216,13 @@ impl ServiceDef for Gitea {
         let manifest = m.trim_end_matches("---\n").to_string();
         let mut urls = vec![UrlInfo { label: "Gitea".into(), url: root_url.trim_end_matches('/').to_string(), kind: "web".into() }, UrlInfo { label: "API".into(), url: format!("{}api/v1", root_url), kind: "api".into() }];
         urls.push(UrlInfo { label: "Clone over HTTP".into(), url: format!("{root_url}<owner>/<repo>.git"), kind: "clone-http".into() });
-        urls.push(UrlInfo { label: "Clone over SSH".into(), url: if ssh_port == 22 { format!("git@{ssh_host}:<owner>/<repo>.git") } else { format!("ssh://git@{ssh_host}:{ssh_port}/<owner>/<repo>.git") }, kind: "clone-ssh".into() });
+        if Self::loopback(c).is_none() {
+            urls.push(UrlInfo { label: "Clone over SSH".into(), url: if ssh_port == 22 { format!("git@{ssh_host}:<owner>/<repo>.git") } else { format!("ssh://git@{ssh_host}:{ssh_port}/<owner>/<repo>.git") }, kind: "clone-ssh".into() });
+        }
         let mut notes = vec![format!("Gitea runs rootless (uid 1000) with SQLite on the PVC; registration is closed, sign-in is required, and the first administrator is {admin}. Postgres is a later option.")];
-        if exposure == Exposure::ClusterIP {
+        if let (Exposure::ClusterIP, Some(p)) = (exposure, Self::loopback(c)) {
+            notes.push(format!("Published on 127.0.0.1:{p} of the node only (a hostPort bound to the loopback address): this machine can use the web page, the API and git over HTTP; no other computer can. The Service stays ClusterIP. Git over SSH is not published."));
+        } else if exposure == Exposure::ClusterIP {
             notes.push(format!("ClusterIP: reach it from your machine with kubectl port-forward svc/gitea-http {HTTP_PORT}:{HTTP_PORT} -n {}; the ROOT_URL then only works inside the cluster, so use NodePort or Ingress to connect a workspace.", c.namespace));
         }
         if exposure == Exposure::Ingress {
@@ -184,6 +249,9 @@ impl ServiceDef for Gitea {
     fn exposes(&self, o: &Options) -> Vec<String> {
         let e = Exposure::parse(o.get("exposure")).unwrap_or(Exposure::NodePort);
         let mut v = vec![format!("{}: {}", e.word(), e.explain()), "Two Services: gitea-http (web, API, git over HTTP) and gitea-ssh (git over SSH)".into(), "Registration is closed and sign-in is required to view anything; webhooks may only call external (public) hosts".into()];
+        if let (Exposure::ClusterIP, Some(p)) = (e, Self::loopback_of(o)) {
+            v.push(format!("Port {p} on this machine's loopback address (127.0.0.1) only: no other computer can reach it; git over SSH is not published"));
+        }
         if e == Exposure::NodePort {
             v.push("A NodePort is open on every node of the cluster: put a firewall or a NetworkPolicy in front if the network is not trusted".into());
         }
@@ -217,11 +285,10 @@ impl ServiceDef for Gitea {
             p.kc.kubectl(&args, 30, 90)
         };
         // the first administrator; the password stays in the pod's environment (from the Secret), never in a command line here
-        let o = exec("gitea admin user create --admin --username \"$GITEA_ADMIN_USER\" --password \"$GITEA_ADMIN_PASSWORD\" --email \"$GITEA_ADMIN_EMAIL\" --must-change-password=false", "");
-        let said = o.combined().to_lowercase();
+        let o = exec(ADMIN_CREATE_SCRIPT, "");
         if o.ok() {
             lines.push(format!("created the administrator {}", p.opts.get("admin_user")));
-        } else if said.contains("already exist") || said.contains("already used") {
+        } else if admin_exists(&o.combined()) {
             lines.push(format!("the administrator {} already exists", p.opts.get("admin_user")));
         } else {
             return Err(format!("creating the administrator failed: {}", first_line(&o.combined())));
@@ -234,14 +301,11 @@ impl ServiceDef for Gitea {
             return Ok(lines);
         }
         let tname = format!("iyakki-{}", crate::clock::now_unix());
-        let o = exec("gitea admin user generate-access-token --username \"$GITEA_ADMIN_USER\" --token-name \"$0\" --scopes \"write:repository,read:user\" --raw", &tname);
+        let o = exec(TOKEN_SCRIPT, &tname);
         if !o.ok() {
             return Err(format!("creating the API token failed: {}", first_line(&o.combined())));
         }
-        let token = zeroize::Zeroizing::new(o.stdout.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string());
-        if token.len() < 20 || !token.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return Err("the token command answered, but not with a token".into());
-        }
+        let token = token_from_output(&o.stdout)?;
         p.p.vault.set(&name, &token)?;
         p.added_vault.push(name.clone());
         lines.push(format!("created an API token for IYAKKI (vault entry uvault:{name}); it is never shown"));

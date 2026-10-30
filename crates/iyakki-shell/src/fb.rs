@@ -2,6 +2,7 @@
 //! over DRM/KMS (`CONFIG_DRM_FBDEV_EMULATION`), so it works with simpledrm/EFI-GOP, i915,
 //! amdgpu, bochs, virtio-gpu and others without any userspace GPU stack.
 
+use crate::safeclamp::SafeClamp;
 use std::os::fd::AsRawFd;
 
 #[repr(C)]
@@ -565,6 +566,48 @@ impl Framebuffer {
         Ok(rows)
     }
 
+    /// Write only what differs from `old` inside the given rectangles `(x, y, w, h)` of `new` (the rest of the frame is known
+    /// to be unchanged, as when only the highlighted words of a story and a progress bar moved): each row of a rectangle is
+    /// compared over the rectangle's columns alone and written over those columns alone, and `old` follows. With an `old` of
+    /// another size everything is written. Returns the pixels written.
+    pub fn present_rects(&mut self, new: &[u8], old: &mut Vec<u8>, rects: &[(i32, i32, i32, i32)]) -> Result<usize, String> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        if new.len() < w * h * 4 || h == 0 {
+            return Err("frame smaller than the screen".into());
+        }
+        if self.is_released() {
+            return Err("the screen is not ours right now".into());
+        }
+        if old.len() != new.len() {
+            return self.present_banded(new, old).map(|rows| rows * w);
+        }
+        let (fmt, pitch) = (self.format, self.pitch);
+        let dst = self.bytes();
+        let mut written = 0;
+        for &(rx, ry, rw, rh) in rects {
+            let (x0, x1) = (rx.clamp_safe(0, w as i32) as usize, (rx + rw).clamp_safe(0, w as i32) as usize);
+            let (y0, y1) = (ry.clamp_safe(0, h as i32) as usize, (ry + rh).clamp_safe(0, h as i32) as usize);
+            if x1 <= x0 {
+                continue;
+            }
+            for y in y0..y1 {
+                let (a, b) = ((y * w + x0) * 4, (y * w + x1) * 4);
+                if old[a..b] == new[a..b] {
+                    continue;
+                }
+                // the changed stretch of this row inside the rectangle, not all of it
+                let first = (a..b).step_by(4).find(|&i| old[i..i + 4] != new[i..i + 4]).unwrap_or(a);
+                let last = (a..b).step_by(4).rev().find(|&i| old[i..i + 4] != new[i..i + 4]).unwrap_or(a) + 4;
+                let px = (last - first) / 4;
+                let x = (first - y * w * 4) / 4;
+                blit_rect(new, w, h, (x, y, px, 1), fmt, dst, pitch)?;
+                old[first..last].copy_from_slice(&new[first..last]);
+                written += px;
+            }
+        }
+        Ok(written)
+    }
+
     /// Make this framebuffer the picture the monitor shows, without changing its mode or offsets.
     ///
     /// The kernel puts a framebuffer on the monitor only when the text console sets it up, and the console skips that while
@@ -854,5 +897,34 @@ mod tests {
     fn opening_a_non_framebuffer_fails_cleanly() {
         assert!(Framebuffer::open("/dev/null").is_err());
         assert!(Framebuffer::open("/no/such/fb").is_err());
+    }
+
+    #[test]
+    fn presenting_rectangles_writes_only_the_changed_stretch_of_each_row_inside_them() {
+        let (w, h) = (16usize, 10usize);
+        let mut mem = vec![0xEEu8; w * 4 * h];
+        let mk = |mem: &mut Vec<u8>| Framebuffer { _file: Some(std::fs::File::open("/dev/null").unwrap()), id: String::new(), map: mem.as_mut_ptr(), len: mem.len(), width: w as u32, height: h as u32, buffer_width: w as u32, buffer_height: h as u32, visible_source: String::new(), pitch: w * 4, format: XRGB, info: ScreenInfo::default(), notes: vec![], signature: None };
+        let mut old = vec![10u8; w * 4 * h];
+        let mut new = old.clone();
+        // pixels changed: (5,2), (7,2) inside the rectangle; (1,2) in the same row but outside it; (6,8) in another rectangle; (12,5) in none
+        for (x, y) in [(5usize, 2usize), (7, 2), (1, 2), (6, 8), (12, 5)] {
+            new[(y * w + x) * 4] = 99;
+        }
+        let rects = [(4, 1, 6, 3), (5, 7, 4, 2)];
+        assert_eq!(mk(&mut mem).present_rects(&new, &mut old, &rects).unwrap(), 3 + 1, "pixels 5..=7 of row 2 (the stretch between the two changes) and one in the other rectangle");
+        let at = |x: usize, y: usize| mem[(y * w + x) * 4..(y * w + x) * 4 + 4].to_vec();
+        assert_eq!(at(5, 2)[2], 99, "BGRX: red is the third byte");
+        assert_eq!(at(7, 2)[2], 99);
+        assert_eq!(at(6, 8)[2], 99);
+        assert_eq!(at(1, 2), vec![0xEE; 4], "outside the rectangle: not written");
+        assert_eq!(at(12, 5), vec![0xEE; 4]);
+        assert_eq!(old[(2 * w + 5) * 4], 99, "the old frame follows inside the rectangles");
+        assert_eq!(old[(2 * w + 1) * 4], 10, "and nowhere else");
+        // nothing changed in them any more: nothing is written
+        assert_eq!(mk(&mut mem).present_rects(&new, &mut old, &rects).unwrap(), 0);
+        // an old frame of another size: the whole frame is written
+        let mut other = Vec::new();
+        assert_eq!(mk(&mut mem).present_rects(&new, &mut other, &rects).unwrap(), h * w);
+        assert_eq!(other, new);
     }
 }

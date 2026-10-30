@@ -1,0 +1,7 @@
+{"kind":"EventList","items":[
+{"metadata":{"namespace":"default","name":"e1","creationTimestamp":"2026-10-28T11:50:00Z"},"type":"Warning","reason":"BackOff","message":"Back-off restarting failed container web in pod web-crash","count":40,"lastTimestamp":"2026-10-28T11:58:00Z","involvedObject":{"kind":"Pod","name":"web-crash","namespace":"default"}},
+{"metadata":{"namespace":"shop","name":"e2","creationTimestamp":"2026-10-28T11:30:00Z"},"type":"Warning","reason":"FailedScheduling","message":"0/1 nodes are available: 1 Insufficient memory.","series":{"count":7,"lastObservedTime":"2026-10-28T11:45:00Z"},"involvedObject":{"kind":"Pod","name":"unsched","namespace":"shop"}},
+{"metadata":{"namespace":"default","name":"e3","creationTimestamp":"2026-10-28T08:00:00Z"},"type":"Warning","reason":"Old","message":"two hours old","lastTimestamp":"2026-10-28T09:00:00Z","involvedObject":{"kind":"Pod","name":"old","namespace":"default"}},
+{"metadata":{"namespace":"default","name":"e4","creationTimestamp":"2026-10-28T11:59:00Z"},"type":"Normal","reason":"Pulled","message":"fine","lastTimestamp":"2026-10-28T11:59:00Z","involvedObject":{"kind":"Pod","name":"p","namespace":"default"}},
+{"metadata":{"namespace":"default","name":"e5"},"type":"Warning","reason":"NoTime","message":"no timestamps at all","involvedObject":{"kind":"Node","name":"iyakki-dev"}}
+]}

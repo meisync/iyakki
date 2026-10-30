@@ -976,6 +976,34 @@ impl LocalRepo {
         Ok(crate::gitjobs::parse_status(&o.stdout))
     }
 
+    /// The state of the working copy: branch, ahead and behind, and the changed files with their status (one `git status
+    /// --porcelain=v2 --branch`; takes no lock, writes nothing, never touches the network).
+    pub fn working(&self) -> Result<Working, BrowseErr> {
+        let o = self.git(&["status", "--porcelain=v2", "--branch"], 1024 * 1024);
+        if !o.ok() {
+            return Err(lerr(&o));
+        }
+        let mut changes = parse_changes(&o.stdout);
+        let more = changes.len().saturating_sub(CHANGES_MAX);
+        changes.truncate(CHANGES_MAX);
+        Ok(Working { status: crate::gitjobs::parse_status(&o.stdout), changes, more })
+    }
+
+    /// What one changed file differs by against the last commit (staged and not staged together). Read-only.
+    pub fn diff_head(&self, path: &str) -> Result<Diff, BrowseErr> {
+        if !safe_path(path) || path.is_empty() {
+            return Err(BrowseErr::Persistent("That path is not one this tile will ask for.".into()));
+        }
+        let o = self.git(&["diff", "HEAD", "--no-color", "--no-ext-diff", "-M", "--", path], DIFF_MAX + 64 * 1024);
+        if !o.ok() {
+            return Err(lerr(&o));
+        }
+        if o.truncated {
+            return Ok(Diff { files: parse_unified(&o.stdout).files.into_iter().map(|mut f| { f.lines.clear(); f }).collect(), too_large: true });
+        }
+        Ok(parse_unified(&o.stdout))
+    }
+
     fn rf<'a>(&self, rf: &'a str) -> Result<&'a str, BrowseErr> {
         let rf = if rf.is_empty() { "HEAD" } else { rf };
         if safe_ref(rf) { Ok(rf) } else { Err(BrowseErr::Persistent(format!("`{rf}` is not a branch, tag or commit name this tile will ask for."))) }
@@ -1143,6 +1171,112 @@ fn parse_ref_line(l: &str, tag: bool) -> Option<RefInfo> {
         return None;
     }
     Some(RefInfo { name, sha: it.next().unwrap_or("").to_string(), subject: it.next().unwrap_or("").to_string(), default: false, tag, when: it.next().and_then(|t| t.trim().parse().ok()).unwrap_or(0) })
+}
+
+// ------------------------------------------------------------------ the working copy
+
+/// Changed files shown at most.
+pub const CHANGES_MAX: usize = 500;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChangeKind {
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Untracked,
+    Conflicted,
+}
+
+impl ChangeKind {
+    /// The letter a status list shows.
+    pub fn letter(self) -> char {
+        match self {
+            ChangeKind::Modified => 'M',
+            ChangeKind::Added => 'A',
+            ChangeKind::Deleted => 'D',
+            ChangeKind::Renamed => 'R',
+            ChangeKind::Untracked => '?',
+            ChangeKind::Conflicted => 'U',
+        }
+    }
+    pub fn word(self) -> &'static str {
+        match self {
+            ChangeKind::Modified => "changed",
+            ChangeKind::Added => "added",
+            ChangeKind::Deleted => "deleted",
+            ChangeKind::Renamed => "renamed",
+            ChangeKind::Untracked => "new, not tracked",
+            ChangeKind::Conflicted => "conflict",
+        }
+    }
+}
+
+/// One changed file of the working copy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change {
+    pub path: String,
+    /// Where a renamed file came from.
+    pub from: String,
+    pub kind: ChangeKind,
+    /// Part of it is staged.
+    pub staged: bool,
+    /// Part of it is not staged.
+    pub unstaged: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Working {
+    pub status: crate::gitjobs::RepoStatus,
+    pub changes: Vec<Change>,
+    /// Changed files beyond [`CHANGES_MAX`].
+    pub more: usize,
+}
+
+/// Reads the file lines of `git status --porcelain=v2` (ordinary, renamed, unmerged, untracked).
+pub fn parse_changes(out: &str) -> Vec<Change> {
+    let mut v = Vec::new();
+    for l in out.lines() {
+        let kind_of = |x: char, y: char| {
+            if x == 'R' || y == 'R' || x == 'C' || y == 'C' {
+                ChangeKind::Renamed
+            } else if x == 'A' || y == 'A' {
+                ChangeKind::Added
+            } else if x == 'D' || y == 'D' {
+                ChangeKind::Deleted
+            } else {
+                ChangeKind::Modified
+            }
+        };
+        if let Some(r) = l.strip_prefix("1 ") {
+            // <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
+            let mut it = r.splitn(8, ' ');
+            let xy: Vec<char> = it.next().unwrap_or("..").chars().collect();
+            let path = it.nth(6).unwrap_or("");
+            if xy.len() == 2 && !path.is_empty() {
+                v.push(Change { path: path.into(), from: String::new(), kind: kind_of(xy[0], xy[1]), staged: xy[0] != '.', unstaged: xy[1] != '.' });
+            }
+        } else if let Some(r) = l.strip_prefix("2 ") {
+            // <XY> <sub> <mH> <mI> <mW> <hH> <hI> <Xscore> <path><TAB><origPath>
+            let mut it = r.splitn(9, ' ');
+            let xy: Vec<char> = it.next().unwrap_or("..").chars().collect();
+            let rest = it.nth(7).unwrap_or("");
+            let (path, from) = rest.split_once('\t').unwrap_or((rest, ""));
+            if xy.len() == 2 && !path.is_empty() {
+                v.push(Change { path: path.into(), from: from.into(), kind: ChangeKind::Renamed, staged: xy[0] != '.', unstaged: xy[1] != '.' });
+            }
+        } else if let Some(r) = l.strip_prefix("u ") {
+            // <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
+            let path = r.splitn(10, ' ').nth(9).unwrap_or("");
+            if !path.is_empty() {
+                v.push(Change { path: path.into(), from: String::new(), kind: ChangeKind::Conflicted, staged: false, unstaged: true });
+            }
+        } else if let Some(p) = l.strip_prefix("? ") {
+            v.push(Change { path: p.into(), from: String::new(), kind: ChangeKind::Untracked, staged: false, unstaged: true });
+        }
+    }
+    v.sort_by(|a, b| a.path.cmp(&b.path));
+    v
 }
 
 // ------------------------------------------------------------------ clones on this computer

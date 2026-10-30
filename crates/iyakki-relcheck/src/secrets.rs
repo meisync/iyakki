@@ -19,7 +19,7 @@ pub struct Finding {
 }
 
 const SKIP_DIRS: [&str; 6] = ["target", ".git", "node_modules", ".cargo", "legal-info", "buildroot-src"];
-const SECRET_FILE_NAMES: [&str; 8] = [".env", "id_rsa", "id_ed25519", "id_ecdsa", "authorized_keys", "afos_diag", "release.key", ".netrc"];
+const SECRET_FILE_NAMES: [&str; 8] = [".env", "id_rsa", "id_ed25519", "id_ecdsa", "authorized_keys", "iyakki_diag", "release.key", ".netrc"];
 const SECRET_EXTENSIONS: [&str; 4] = ["pem", "key", "p12", "pfx"];
 
 fn is_base64_line(l: &str) -> bool {

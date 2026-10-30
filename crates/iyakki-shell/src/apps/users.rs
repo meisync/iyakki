@@ -227,7 +227,7 @@ impl App for UsersApp {
     fn hint(&self) -> String {
         match &self.mode {
             Mode::List => "click a user, then a button · or n r d p 1-4 a v k b w f m q h s l".into(),
-            Mode::Audit => "click or press any key to return".into(),
+            Mode::Audit => "click or press any key to return · N starts a new log when the chain is BROKEN (the old file is kept)".into(),
             Mode::Form(_) => "Save · Cancel · Tab next field · Ctrl+V paste".into(),
             Mode::ConfirmDelete(_) => "y confirm · Esc cancel".into(),
         }
@@ -248,6 +248,15 @@ impl App for UsersApp {
                 _ => {}
             },
             Mode::Audit => {
+                // N (capital, on purpose) starts a new log when the chain reads BROKEN; the old file is kept aside, never deleted
+                if matches!(ev, Event::Key(Key::Char('N'))) && cx.session.policy.manage_users && cx.audit.verify().is_err() {
+                    self.status = Some(match cx.audit.start_new_log() {
+                        Ok(kept) => {
+                            (format!("A new audit log was started; the broken one is kept as {}", kept.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()), true)
+                        }
+                        Err(e) => (e, false),
+                    });
+                }
                 if matches!(ev, Event::Key(_)) {
                     self.mode = Mode::List;
                 }
@@ -497,6 +506,25 @@ mod tests {
         app.handle(&Event::Key(Key::Enter), &cx);
         assert!(cx.store.lock().unwrap().get("eve").is_none());
         assert_eq!(app.status().unwrap().0, "not permitted");
+    }
+
+    #[test]
+    fn n_in_the_audit_view_starts_a_new_log_only_when_the_chain_is_broken_and_keeps_the_old_file() {
+        let cx = cx_with_admin_store("users5n");
+        cx.audit.record("root", "login", "ok");
+        let mut app = UsersApp::new();
+        app.handle(&Event::Key(Key::Char('l')), &cx);
+        app.handle(&Event::Key(Key::Char('N')), &cx);
+        assert_eq!(app.mode(), &Mode::List);
+        assert!(cx.audit.verify().is_ok() && !cx.audit.recent(5).iter().any(|l| l.contains("audit.restart")), "an intact chain is left alone");
+        cx.audit.record("root", "login", "ok");
+        let text = std::fs::read_to_string(cx.audit.path()).unwrap();
+        std::fs::write(cx.audit.path(), text.replacen("\"login\"", "\"logout\"", 1)).unwrap();
+        assert!(cx.audit.verify().is_err());
+        app.handle(&Event::Key(Key::Char('l')), &cx);
+        app.handle(&Event::Key(Key::Char('N')), &cx);
+        assert!(cx.audit.verify().is_ok());
+        assert!(app.status.as_ref().is_some_and(|(m, ok)| *ok && m.contains("audit.log.broken-")), "{:?}", app.status);
     }
 
     #[test]

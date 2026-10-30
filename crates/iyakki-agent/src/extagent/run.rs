@@ -269,12 +269,12 @@ fn drive(req: RunRequest, etx: Sender<RunEvent>, drx: std::sync::mpsc::Receiver<
     }
     let status = if done.is_some() || stopped || timeout.is_some() || tool_end.is_some() {
         super::proc::kill_group(&mut sp.child, Duration::from_millis(300));
-        sp.child.try_wait().ok().flatten()
+        Some(iyakki_core_api::child_status(&mut sp.child)).filter(|s| s.is_over())
     } else {
         let end = Instant::now() + Duration::from_secs(5);
         loop {
-            match sp.child.try_wait() {
-                Ok(Some(s)) => break Some(s),
+            match iyakki_core_api::child_status(&mut sp.child) {
+                s if s.is_over() => break Some(s),
                 _ if Instant::now() > end => {
                     super::proc::kill_group(&mut sp.child, Duration::from_millis(300));
                     break None;
@@ -342,7 +342,9 @@ fn drive(req: RunRequest, etx: Sender<RunEvent>, drx: std::sync::mpsc::Receiver<
         }
         _ => {
             let code = status.and_then(|s| s.code());
-            if code == Some(0) || (req.agent.plain_text() && code.is_none() && !answer.trim().is_empty()) {
+            // `Gone`: another reaper took the exit status, so the code is unknown; an answer that came through is taken as the result
+            let gone = status == Some(iyakki_core_api::ChildState::Gone);
+            if code == Some(0) || ((gone || req.agent.plain_text() && code.is_none()) && !answer.trim().is_empty()) {
                 if answer.trim().is_empty() && pending_text.trim().is_empty() {
                     emit(RunEvent::Failed { error: format!("{label} finished without an answer. {}", if err_text.trim().is_empty() { String::new() } else { classify_failure(&label, &login, &err_text) }) });
                 } else {

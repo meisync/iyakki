@@ -8,6 +8,8 @@ use iyakki_agent::devmode::{self as dm, DevMode};
 
 /// The automatic switch-off choices, in hours (0: stays on until switched off).
 pub(super) const HOURS: [u32; 6] = [4, 1, 8, 24, 72, 0];
+/// What the "Extend" button adds to the switch-off time.
+pub(super) const EXTEND_HOURS: u32 = 4;
 
 /// What the page keeps between frames.
 #[derive(Default)]
@@ -85,6 +87,36 @@ impl SettingsApp {
                 }
                 Err(e) => self.fail(e),
             },
+            // let the firewall through: the pairing (one time) when a code is on the screen, else the computer the hint names
+            Key::Char('f') => {
+                let hint_src = self.dev_fw_hint(&d).and_then(|h| h.split(" from ").nth(1).map(|x| x.trim_end_matches(": Allow").to_string()));
+                if d.pairing().is_some() {
+                    match d.allow_pairing_through_firewall(p, &user) {
+                        Ok(_) => {
+                            cx.audit.record(&user, "devmode.firewall.request", "pairing (one time)");
+                            self.ok("The firewall lets the local network reach the developer port for ten minutes, or until a computer has paired. The pairing code and the fingerprint are still what protects it.");
+                        }
+                        Err(e) => self.fail(e),
+                    }
+                } else if let Some(src) = hint_src {
+                    match d.allow_peer(p, &user, &src) {
+                        Ok(()) => {
+                            cx.audit.record(&user, "devmode.firewall.request", &format!("{src} while developer mode is on"));
+                            self.ok(format!("The firewall lets {src} reach the developer port while developer mode is on."));
+                        }
+                        Err(e) => self.fail(e),
+                    }
+                } else {
+                    self.fail("Nothing to allow: press p to show a pairing code first, then f.".to_string());
+                }
+            }
+            Key::Char('n') => {
+                let now_on = !d.network_wide();
+                match d.set_network_wide(p, &user, now_on) {
+                    Ok(()) => self.ok(if now_on { "The firewall now lets the whole network of each paired computer reach the developer port (only paired keys can act)." } else { "The firewall lets only the address of each paired computer in." }),
+                    Err(e) => self.fail(e),
+                }
+            }
             Key::Char('c') => {
                 d.cancel_pairing();
                 self.ok("The pairing code is cancelled.");
@@ -103,6 +135,30 @@ impl SettingsApp {
                 }
             }
             Key::Char('l') => self.devel.log = !self.devel.log,
+            // push the automatic switch-off 4 h further (the timer of "h" starts it again from now)
+            Key::Char('t') => match d.extend(p, &user, EXTEND_HOURS) {
+                Ok(st) => {
+                    cx.audit.record(&user, "devmode.extend", &format!("{EXTEND_HOURS} h"));
+                    self.ok(format!("Developer mode now switches off at {}.", dm::stamp(st.until)));
+                }
+                Err(e) => self.fail(e),
+            },
+            // every diagnostic scope for the selected computer, in one go: look, files, screen, cluster, shell (still approved here)
+            Key::Char('G') => {
+                let rows = Self::devmode_keys(cx);
+                let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
+                if let Some(row) = rows.get(sel) {
+                    match d.grant_diagnostic(p, &user, &row.name) {
+                        Ok(nk) => {
+                            cx.audit.record(&user, "devmode.scope.grant", &format!("{} diagnostic scopes", nk.name));
+                            self.ok(format!("{} may now help diagnose: {}. A shell still needs your approval each time; updates and power stay off.", nk.name, nk.scope_text()));
+                        }
+                        Err(e) => self.fail(e),
+                    }
+                } else {
+                    self.fail("No computer is paired yet.".to_string());
+                }
+            }
             Key::Char('s') => self.devel.scope = (self.devel.scope + 1) % Scope::ALL.len(),
             Key::Char(' ') | Key::Char('g') => {
                 let sc = Scope::ALL[self.devel.scope % Scope::ALL.len()];
@@ -128,7 +184,7 @@ impl SettingsApp {
                     }
                 }
             }
-            Key::Char('a') | Key::Char('o') | Key::Char('d') => {
+            Key::Char('a') | Key::Char('o') | Key::Char('d') | Key::Char('y') => {
                 let Some(req) = d.shell_pending().into_iter().next() else {
                     self.fail("No computer is asking for shell access right now.".to_string());
                     return;
@@ -136,6 +192,9 @@ impl SettingsApp {
                 let r = match k {
                     Key::Char('a') => d.shell_approve(p, &user, &req.computer, 10).map(|g| format!("{} may run commands for 10 minutes{}. The top bar shows it.", g.computer, if g.as_root { " as root" } else { "" })),
                     Key::Char('o') => d.shell_approve(p, &user, &req.computer, 0).map(|g| format!("{} may run commands for one session.", g.computer)),
+                    // approve this one and stop asking for a while: a plain shell only (never as root, power or patching)
+                    Key::Char('y') if req.as_root => Err("A request to run as root is always asked each time: press a or o.".to_string()),
+                    Key::Char('y') => d.shell_approve(p, &user, &req.computer, 10).and_then(|g| d.shell_auto_on(p, &user, &req.computer, iyakki_agent::devmode::grants::AUTO_DEFAULT_HOURS).map(|_| format!("{} may run commands; its next requests are approved by themselves for {} hours (never as root). w stops it.", g.computer, iyakki_agent::devmode::grants::AUTO_DEFAULT_HOURS))),
                     _ => d.shell_deny(p, &user, &req.computer).map(|_| format!("{} was refused.", req.computer)),
                 };
                 match r {
@@ -145,6 +204,23 @@ impl SettingsApp {
                     }
                     Err(e) => self.fail(e),
                 }
+            }
+            Key::Char('w') => {
+                let trusted = d.shell_auto_list();
+                if trusted.is_empty() {
+                    self.fail("No computer is approved automatically right now.".to_string());
+                    return;
+                }
+                let mut m = String::new();
+                for a in &trusted {
+                    if let Err(e) = d.shell_auto_off(p, &user, &a.computer) {
+                        self.fail(e);
+                        return;
+                    }
+                    m = format!("{}{}{}", m, if m.is_empty() { "" } else { ", " }, a.computer);
+                }
+                cx.audit.record(&user, "devmode.shell.auto_off", &m);
+                self.ok(format!("{m} must ask for approval again."));
             }
             Key::Char('k') => {
                 // end the selected computer's shell access and disconnect all its sessions
@@ -161,6 +237,12 @@ impl SettingsApp {
         }
     }
 
+    /// "the firewall blocks the developer port ...: Allow" while developer mode is on, the firewall is in force and nothing lets it in.
+    pub(super) fn dev_fw_hint(&self, d: &DevMode) -> Option<String> {
+        let blocked = iyakki_fw::service::block_log().recent();
+        iyakki_fw::devrules::hint(&self.fw.handle.lock(), &blocked, d.state().port(), d.is_on())
+    }
+
     pub(super) fn developer_buttons(&self) -> Vec<Btn> {
         if self.devel.usb_open {
             return self.usb_buttons();
@@ -169,8 +251,14 @@ impl SettingsApp {
         let mut v: Vec<Btn> = vec![(if on { "Switch off" } else { "Switch on" }, if on { ERR } else { ACCENT }, 'e'), ("Switch-off time", TEXT, 'h')];
         if on {
             v.push(("Pair a computer", ACCENT, 'p'));
+            v.push(("Allow in the firewall", ACCENT, 'f'));
+            v.push(("Whole network on/off", TEXT, 'n'));
             v.push(("Cancel code", TEXT, 'c'));
         }
+        if on {
+            v.push(("Extend 4 h", TEXT, 't'));
+        }
+        v.push(("Grant all diagnostic scopes", ACCENT, 'G'));
         v.push(("Next scope", TEXT, 's'));
         v.push(("Scope on/off", TEXT, ' '));
         if on {
@@ -241,8 +329,35 @@ impl SettingsApp {
             y += 8.0 * s;
         }
         if on {
+            let w = d.fw_want();
+            let mut lines: Vec<(String, [u8; 4])> = Vec::new();
+            if let Some(h) = self.dev_fw_hint(&d) {
+                lines.push((format!("{h} (f)"), rgb(255, 196, 94)));
+            }
+            if w.pair_until > 0 {
+                lines.push((format!("Firewall: the local network may reach the developer port until {} or until a computer has paired (rule: developer mode pairing (one time)).", dm::stamp(w.pair_until)), TEXT));
+            }
+            lines.push((if w.network_wide {
+                "Firewall: paired computers are allowed from their whole network (/24). Trade-off: any computer on this network can reach the developer port, though only paired keys can act. n turns it off.".to_string()
+            } else {
+                "Firewall: only the address of each paired computer is let in (default). If its address changes, press f when the hint shows, or n to allow its whole network (any computer there could then reach the port; only paired keys can act).".to_string()
+            }, MUTED));
+            for (t, c) in lines {
+                for w in g.wrap(13.0 * s, &t, Face::Sans, a.w) {
+                    g.text(a.x, y, 13.0 * s, c, &w, Face::Sans);
+                    y += 18.0 * s;
+                }
+            }
+            y += 6.0 * s;
+            for t in d.shell_auto_list() {
+                let line = format!("{} runs commands without asking until {} (never as root). w: ask each time again", t.computer, dm::stamp(t.until));
+                for w in g.wrap(13.0 * s, &line, Face::Sans, a.w) {
+                    g.text(a.x, y, 13.0 * s, MUTED, &w, Face::Sans);
+                    y += 18.0 * s;
+                }
+            }
             for r in d.shell_pending() {
-                let line = format!("{} asks to RUN COMMANDS on this device as {}{}{}. a: 10 minutes · o: one session · d: refuse", r.computer, r.account, if r.as_root { " (as root)" } else { "" }, if r.why.is_empty() { String::new() } else { format!(" — {}", r.why) });
+                let line = format!("{} asks to RUN COMMANDS on this device as {}{}{}. a: 10 minutes · o: one session · y: yes, and stop asking for 4 hours · d: refuse", r.computer, r.account, if r.as_root { " (as root)" } else { "" }, if r.why.is_empty() { String::new() } else { format!(" — {}", r.why) });
                 for w in g.wrap(14.0 * s, &line, Face::Bold, a.w) {
                     g.text(a.x, y, 14.0 * s, ERR, &w, Face::Bold);
                     y += 20.0 * s;
@@ -293,7 +408,12 @@ impl SettingsApp {
         }
         // the switches of the selected computer: one line per scope, the cursor on the one s/space act on
         if let Some(k) = rows.get(sel) {
-            y += controls::section_title(g, a.x, y, s, &format!("What {} may do (s: next, space: on/off)", k.name));
+            y += controls::section_title(g, a.x, y, s, &format!("What {} may do (s: next, space: on/off, G: all diagnostic scopes)", k.name));
+            let note = "Grant all diagnostic scopes gives: debug, files, input, kube and shell (a shell still needs your approval each time). It never gives updates, restart/power, port forwarding, system files, password fields or settings.";
+            for w in g.wrap(12.5 * s, note, Face::Sans, a.w) {
+                g.text(a.x, y, 12.5 * s, MUTED, &w, Face::Sans);
+                y += 17.0 * s;
+            }
             for (i, sc) in Scope::ALL.into_iter().enumerate() {
                 if y + 20.0 * s > a.y + a.h {
                     break;

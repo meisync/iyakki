@@ -21,12 +21,15 @@ impl SettingsApp {
             Key::Char('t') => self.sound_test(cx, target),
             Key::Char('A') => self.sound_advanced(),
             Key::Char('M') => self.sound_mixer(cx),
+            Key::Char('W') => self.sound_web_mix(cx),
             Key::Enter | Key::Char(' ' | 'e') => match target {
                 Some(Target::SoundChoice) => self.sound_choose(cx),
                 Some(Target::SoundOut(key, _)) => self.sound_set_output(cx, &key),
                 Some(Target::SoftVolume) => self.sound_volume(cx, None),
                 Some(Target::SoundAdvanced) => self.sound_advanced(),
                 Some(Target::SoundMixer) => self.sound_mixer(cx),
+                Some(Target::SoundWebMix) => self.sound_web_mix(cx),
+                Some(Target::SoundHighlightOffset) => self.sound_set_highlight_offset(cx, 0),
                 Some(Target::SoundVolMode(card_id)) => self.sound_cycle_mode(cx, &card_id),
                 Some(Target::SoundHwCheck(card, device, control, card_id)) => self.sound_hw_check(cx, card, device, control, card_id),
                 Some(Target::SoundPattern(walk)) => self.sound_pattern(cx, walk),
@@ -39,6 +42,11 @@ impl SettingsApp {
                     let next = (cur + if matches!(k, Key::Char('-')) { -1 } else { 1 }).clamp_safe(0, iyakki_agent::softvol::MAX_BOOST_DB as i32);
                     self.sound_set_boost(cx, &card_id, next as u32);
                 }
+            }
+            // + − on the highlight offset row move it by 25 ms
+            Key::Char('+' | '=' | '-') if matches!(target, Some(Target::SoundHighlightOffset)) => {
+                let cur = Self::svc(cx).sound_settings().highlight_offset_ms;
+                self.sound_set_highlight_offset(cx, cur + if matches!(k, Key::Char('-')) { -25 } else { 25 });
             }
             // + − m change IYAKKI's volume everywhere but on a card's own mixer row
             Key::Char('+' | '=' | '-' | 'm') if !matches!(target, Some(Target::Card(_))) => {
@@ -171,6 +179,50 @@ impl SettingsApp {
             Ok(now) => {
                 cx.audit.record(&cx.session.user, "settings.sound.mixer", if on { "on" } else { "off" });
                 self.ok(if on { "Sound mixer on: sounds from several apps can play together. It applies from the next sound." } else { "Sound mixer off: one app at a time, as before. It applies from the next sound." });
+                self.hw.set_sound(now);
+                self.hw.invalidate();
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+}
+
+/// Settings -> Sound: the switch that sends the web engine's sound into the mixer (`iyakki_agent::webmix`). Administrators only.
+impl SettingsApp {
+    pub(super) fn sound_web_mix(&mut self, cx: &AppCx) {
+        if !self.admin(cx) {
+            return self.fail("Only administrators can change the browser's sound route.");
+        }
+        let on = !Self::svc(cx).sound_settings().web_mix;
+        match Self::svc(cx).update_sound(|s| s.web_mix = on) {
+            Ok(now) => {
+                cx.audit.record(&cx.session.user, "settings.sound.web_mix", if on { "on" } else { "off" });
+                self.ok(if !on {
+                    "Browser sound through the mixer off: the browser opens the sound card itself again from the next web engine start."
+                } else if now.mixer {
+                    "Browser sound through the mixer on (experimental, untested on real hardware). It applies the next time the web engine starts."
+                } else {
+                    "Browser sound through the mixer on, but it does nothing until the mixer above is on."
+                });
+                self.hw.set_sound(now);
+                self.hw.invalidate();
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+}
+
+/// Settings -> Sound -> Advanced: the highlight timing offset (administrators; it is the machine's, like the output).
+impl SettingsApp {
+    pub(super) fn sound_set_highlight_offset(&mut self, cx: &AppCx, ms: i32) {
+        if !self.admin(cx) {
+            return self.fail("Only administrators can change the highlight timing offset.");
+        }
+        let ms = ms.clamp_safe(-500, 500);
+        match Self::svc(cx).update_sound(|s| s.highlight_offset_ms = ms) {
+            Ok(now) => {
+                cx.audit.record(&cx.session.user, "settings.sound.highlight_offset", &ms.to_string());
+                self.ok(format!("Highlight timing offset {ms:+} ms: {}.", if ms == 0 { "the lit word follows the sound as measured" } else if ms > 0 { "the lit word comes later" } else { "the lit word comes earlier" }));
                 self.hw.set_sound(now);
                 self.hw.invalidate();
             }

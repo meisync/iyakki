@@ -23,6 +23,9 @@ use std::sync::Mutex;
 pub const LINE_PX: f32 = 18.0;
 /// A classic wheel click: three lines.
 pub const NOTCH_PX: f32 = 3.0 * LINE_PX;
+/// How far a page of the shell moves on screen for one wheel click, in pixels at UI scale 1 (Settings' lists and the chat use it; the
+/// browser's page uses it too, divided by its zoom, so every tile scrolls the same distance per click).
+pub const SCREEN_NOTCH_PX: f32 = 40.0;
 /// Trackpad travel (a share of the pad's width) that equals one wheel click at 100 %.
 pub const PAD_STEP: f32 = 0.05;
 /// How often steps are made while a scroll is going on (60 frames a second).

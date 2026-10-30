@@ -77,7 +77,7 @@ number of Mac model hosts set up in Models is added to the line ("2 Mac model ho
 | NVIDIA driver | shown when NVIDIA is the best GPU | hidden | hidden | hidden |
 | Use a Mac's GPU | not recommended (own GPU) | recommended | recommended | hidden (this is the Mac) |
 | Elasticsearch | not recommended under 6 GB of RAM | | | |
-| Kokoro, Indic-TTS, everything else | shown (the voices run on the CPU) | | | |
+| Kokoro, everything else | shown (the voices run on the CPU) | | | |
 
 Reasons are plain words on the card and in the popup: "Hidden because this machine has no GPU with 6 GB or more; local models would
 run on the CPU and be very slow." In cloud mode the table is not consulted (cloud mode keeps its own rules). The launcher has no tile

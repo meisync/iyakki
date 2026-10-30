@@ -1,0 +1,28 @@
+# The firmware the RELEASE image profile keeps (IYAKKI_IMAGE_PROFILE=release; docs/development/RELEASE-IMAGE-PROFILE.md).
+# post-build.sh runs prune-firmware.sh with THIS list on /lib/firmware of every variant (mac, macweb, pc, hw) instead of
+# mac-firmware.keep / pc-firmware.keep. Same format as those lists: one pattern per line, relative to /lib/firmware, shell globbing where *
+# also matches '/', '#' lines and blank lines ignored, a line starting with '!' drops matching files even when a pattern keeps them.
+#
+# Owner decision 2026-10-27: the base image keeps only what is Apache-2.0, permissive or otherwise clearly non-violating. Vendor firmware
+# (linux-firmware, NVIDIA GSP, Wi-Fi and Bluetooth blobs, Apple files) is NOT in the base image: the person installs what THIS computer asks
+# for with the "Hardware firmware" item (Store -> Setup; `iyakki quick-install fw-hardware`; crates/iyakki-agent/src/fwextra.rs).
+#
+# DEFAULT: none from linux-firmware. The only entries are the two files of the wireless regulatory database, which come from the
+# wireless-regdb package (ISC licence, a Buildroot package with its own legal-info row), not from linux-firmware.
+# crates/iyakki-relcheck (`release-image-check`, and the test `release_keep_list_keeps_only_regulatory_db`) fails when anything else
+# appears below without a matching reviewed row in legal/image-rules.txt.
+
+regulatory.db
+regulatory.db.p7s
+
+# ---- NOT enabled. Candidates ONLY IF THE OWNER LATER APPROVES redistributing them. Nothing below is active: every line is a comment.
+# Each pack needs the licence text of its LICENCE.* file to travel with the files (board/iyakki/firmware-licences.sh does that) and a
+# reviewed `except` row in legal/image-rules.txt. They are listed so the decision is a one-line change, not a search:
+#   AMD GPU        amdgpu/*, radeon/*   (LICENSE.amdgpu, LICENSE.radeon: redistribution in binary form with the notice; amdgpu/isp_* excluded)
+#   Intel GPU      i915/*, xe/*         (LICENSE.i915: redistribution in binary form with the notice)
+#   Intel Wi-Fi    intel/iwlwifi/* + iwlwifi-*.ucode  (LICENCE.iwlwifi_firmware)
+#   Intel Bluetooth intel/ibt-*         (LICENCE.ibt_firmware)
+#   NVIDIA GSP     nvidia/*             (LICENCE.nvidia: the owner listed these as doubtful; they stay out)
+#   Broadcom/Cypress brcm/*, cypress/*  (LICENCE.broadcom_bcm43xx, LICENCE.cypress)
+#   Apple          never (legal/image-rules.txt deny rows)
+# To enable one, add its patterns above, add the `except` row with a reason and a date, and run `release-image-check`.

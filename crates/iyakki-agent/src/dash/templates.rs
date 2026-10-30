@@ -30,6 +30,7 @@ pub fn all() -> Vec<Template> {
         Template { id: "kube-state", title: "Kubernetes pods (kube-state-metrics)", kind: "prometheus", about: "Pods by phase, restarts, container memory and CPU per namespace.", build: kube_state },
         Template { id: "elasticsearch-health", title: "Elasticsearch: index doc counts and cluster health", kind: "elasticsearch", about: "Documents per index and a rate over time.", build: elasticsearch },
         Template { id: "clickhouse-queries", title: "ClickHouse: system.query_log top queries", kind: "clickhouse", about: "Slowest and most frequent queries of the last day, and queries per minute.", build: clickhouse },
+        Template { id: "k3s-local", title: "Local cluster (k3s)", kind: "kube", about: "The k3s of this machine: nodes, pods and their problems, restarts, deployments, CPU and memory, warnings, exposed services, volumes.", build: k3s_local },
         Template { id: "duckdb-explore", title: "DuckDB: explore a CSV/Parquet file", kind: "duckdb", about: "Row count, first rows and the columns of the first data file of the source.", build: duckdb },
     ]
 }
@@ -103,6 +104,43 @@ fn clickhouse(s: &str) -> Dashboard {
     d
 }
 
+/// The default dashboard of the local cluster; `dash/seed.rs` saves it once for every account. Every panel names a view of the `kube` source.
+fn k3s_local(s: &str) -> Dashboard {
+    let mut d = Dashboard::new("k3s-local", "Local cluster (k3s)");
+    d.description = "Read-only look at the k3s cluster of this machine, refreshed every 30 seconds. Nothing here can change the cluster. CPU and memory need metrics-server (shipped by k3s); the first panel says whether it answers.".into();
+    d.refresh_s = 30;
+    d.default_source = s.into();
+    let p = |id: &str, t: &str, v: Visual, q: &str, g: Grid| Panel::new(id, t, s, v, q, g);
+    let units = |mut p: Panel, u: &[(&str, Unit)]| {
+        p.options.column_units = u.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        p
+    };
+    let stat = |id: &str, t: &str, q: &str, x: i32, th: &[(f64, [u8; 3])]| p(id, t, Visual::Stat, q, Grid::new(x, 4, 4, 4)).unit(Unit::Number).thresholds(th);
+    d.panels = vec![
+        p("cluster", "Cluster", Visual::Table, "cluster", Grid::new(0, 0, 24, 4)),
+        stat("s-nodes", "Nodes not ready", "stat_nodes_not_ready", 0, &[(1.0, RED)]),
+        stat("s-pods", "Pods with problems", "stat_pods_with_problems", 4, &[(1.0, AMBER), (5.0, RED)]),
+        stat("s-deploys", "Deployments unavailable", "stat_deployments_unavailable", 8, &[(1.0, AMBER), (3.0, RED)]),
+        stat("s-warn", "Warnings (last hour)", "stat_warnings_last_hour", 12, &[(1.0, AMBER), (20.0, RED)]),
+        stat("s-exposed", "Exposed, undocumented", "stat_exposed_undocumented", 16, &[(1.0, AMBER)]),
+        stat("s-pvc", "Claims not bound", "stat_pvcs_not_bound", 20, &[(1.0, AMBER)]),
+        p("nodes", "Nodes", Visual::Table, "nodes", Grid::new(0, 8, 14, 7)),
+        p("phase", "Pods by phase", Visual::Donut, "pods_by_phase", Grid::new(14, 8, 10, 7)),
+        p("by-ns", "Pods by namespace", Visual::Bar, "pods_by_namespace", Grid::new(0, 15, 10, 8)),
+        p("problems", "Pods with problems", Visual::Table, "pod_problems", Grid::new(10, 15, 14, 8)),
+        p("restarts", "Most restarts", Visual::Table, "top_restarts", Grid::new(0, 23, 12, 7)),
+        p("deploys", "Deployments not fully available", Visual::Table, "deployments_unavailable", Grid::new(12, 23, 12, 7)),
+        units(p("node-usage", "CPU and memory per node", Visual::Table, "node_usage", Grid::new(0, 30, 24, 6)), &[("CPU %", Unit::Percent), ("Memory", Unit::Bytes), ("Memory %", Unit::Percent)]),
+        p("ns-cpu", "CPU per namespace (millicores)", Visual::Bar, "namespace_cpu", Grid::new(0, 36, 12, 7)).unit(Unit::Number),
+        p("ns-mem", "Memory per namespace", Visual::Bar, "namespace_memory", Grid::new(12, 36, 12, 7)).unit(Unit::Bytes),
+        units(p("pod-usage", "Pods using most memory", Visual::Table, "pod_usage", Grid::new(0, 43, 24, 7)), &[("Memory", Unit::Bytes)]),
+        p("events", "Warning events (last hour)", Visual::Table, "warning_events", Grid::new(0, 50, 24, 8)),
+        p("exposed", "Services open outside the machine", Visual::Table, "exposed_services", Grid::new(0, 58, 12, 7)),
+        units(p("pvcs", "Volume claims", Visual::Table, "pvcs", Grid::new(12, 58, 12, 7)), &[("Size", Unit::Bytes), ("Used", Unit::Bytes), ("Used %", Unit::Percent)]),
+    ];
+    d
+}
+
 fn duckdb(s: &str) -> Dashboard {
     let mut d = Dashboard::new("duckdb-explore", "DuckDB: explore a file");
     d.description = "Edit the queries to name your own file: SELECT * FROM read_csv_auto('/home/you/data.csv'). The source's first data file is used by the starter panels through the `file` variable.".into();
@@ -139,7 +177,7 @@ mod tests {
             }
             assert!(super::super::registry::kind(t.kind).is_some(), "{}", t.id);
         }
-        assert_eq!(all().len(), 5);
+        assert_eq!(all().len(), 6);
     }
 
     #[test]

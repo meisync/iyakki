@@ -19,5 +19,6 @@ serde_json = "1"
 log.workspace = true
 
 [dev-dependencies]
+iyakki-flow.workspace = true
 iyakki-web.workspace = true
 iyakki-sec.workspace = true

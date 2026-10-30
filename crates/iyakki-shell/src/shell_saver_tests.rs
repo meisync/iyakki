@@ -123,7 +123,7 @@ fn a_stray_click_wakes_without_pressing_anything_and_its_release_is_dropped_too(
     let (mut sh, clock) = saver_shell("saver-click", cfg());
     let mut g = Gfx::new(1280, 720);
     sh.render(&mut g);
-    let chip = sh.hits().iter().find(|h| h.label == "group Work").map(|h| (h.rect.x as i32 + 5, h.rect.y as i32 + 5)).expect("the Work chip");
+    let chip = sh.hits().iter().find(|h| h.label == "group Build").map(|h| (h.rect.x as i32 + 5, h.rect.y as i32 + 5)).expect("the Build chip");
     assert_ne!(sh.group, crate::launcher::Group::Work);
     run(&mut sh, &clock, 5 * MIN + 1000);
     assert_eq!(sh.screen_stage(), Stage::Saver);

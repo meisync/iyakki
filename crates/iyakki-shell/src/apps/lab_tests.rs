@@ -200,7 +200,7 @@ fn the_tile_is_in_work_for_everyone_but_guests_and_works_in_a_cloud_session() {
     let tiles = crate::shell::tiles_for_test();
     assert_eq!(tiles.iter().filter(|(a, _)| *a == PApp::Lab).count(), 1);
     assert!(tiles.contains(&(PApp::Lab, "LAB")));
-    assert_eq!(crate::launcher::Group::of(PApp::Lab), Some(crate::launcher::Group::Work));
+    assert_eq!(crate::launcher::Group::of(PApp::Lab), Some(crate::launcher::Group::Home)); // the home screen groups changed (F-SHELL-22, F-SHELL-54): LAB sits in Ask & Create
     assert_eq!((PApp::Lab.id(), PApp::Lab.label().as_str()), ("lab", "LAB"));
     for r in [Role::Admin, Role::Operator, Role::User] {
         assert!(r.template().apps.contains(&PApp::Lab), "{r:?}");

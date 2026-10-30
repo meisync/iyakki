@@ -86,6 +86,9 @@ fn pump(v: &mut WebView, d: Duration, frames: &mut u64) {
                 Event::Fullscreen(on) => println!("  fullscreen: {on}"),
                 Event::AudioPlaying(on) => println!("  audio playing: {on}"),
                 Event::MediaUnsupported(w) => println!("  media without a decoder: {w}"),
+                Event::PermissionRequest { id, kinds, origin } => println!("  permission request {id}: kinds {kinds} from {origin}"),
+                Event::CaptureState(k) => println!("  capturing: {k}"),
+                Event::DevEvent(l) => println!("  developer event: {}", l.replace('\u{1f}', " | ")),
                 Event::ScriptResult { id, ok, json } => println!("  script {id} ok={ok}: {json}"),
                 Event::Cursor(_) => {}
             }
@@ -249,7 +252,7 @@ fn bench(pw: i32, ph: i32) {
     let mut pm = vec![0u8; src.len()];
     let (gw, gh) = (2560i32.max(pw), 1600i32.max(ph + 100));
     let mut screen = vec![0u8; (gw * gh * 4) as usize];
-    let mut time = |name: &str, f: &mut dyn FnMut()| {
+    let time = |name: &str, f: &mut dyn FnMut()| {
         f();
         let t = Instant::now();
         for _ in 0..20 {

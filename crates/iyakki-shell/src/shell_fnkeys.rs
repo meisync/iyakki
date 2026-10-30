@@ -13,7 +13,7 @@ impl Shell {
         self.stale = true;
     }
 
-    fn fn_notice(&mut self, text: impl Into<String>) {
+    pub(super) fn fn_notice(&mut self, text: impl Into<String>) {
         let until = self.tick + fnkeys::OSD_TICKS;
         self.fn_show(Osd::notice(text, until));
     }
@@ -124,11 +124,16 @@ impl Shell {
         }
     }
 
-    fn fn_volume(&mut self, op: VolOp) {
+    pub(super) fn fn_volume(&mut self, op: VolOp) {
+        self.fn_volume_with(|s| fnkeys::volume_apply(s, op));
+    }
+
+    /// Change IYAKKI's one master volume and show the bar, whatever moved it (a key, the top bar's speaker, its wheel or slider).
+    pub(super) fn fn_volume_with(&mut self, f: impl FnOnce(&mut iyakki_agent::audioout::SoundSettings)) {
         if !self.fnk.sound_probe.unwrap_or_else(fnkeys::sound_present) {
             return self.fn_notice(NO_SOUND);
         }
-        match self.env.services.update_sound(|s| fnkeys::volume_apply(s, op)) {
+        match self.env.services.update_sound(f) {
             Ok(now) => {
                 let until = self.tick + fnkeys::OSD_TICKS;
                 self.devpop.invalidate(); // the volume in the top bar's Devices popover follows
@@ -204,9 +209,24 @@ impl Shell {
                 self.env.audit.record(&user, "power.reboot", "power key");
                 self.env.host.reboot();
             }
+            Key::Char('s') if self.env.host.can_sleep() => {
+                self.fnk.power_card = false;
+                self.sleep_now(&user, "power key");
+            }
             _ => self.fnk.power_card = false,
         }
         self.stale = true;
+    }
+
+    /// Sleep: lock the session first (the shell has one lock, signing out, which also seals the vault), audit it, then suspend.
+    /// The call returns after the machine wakes, and the login screen is what is showing.
+    pub(super) fn sleep_now(&mut self, user: &str, detail: &str) {
+        if self.session.is_some() {
+            self.sign_out();
+        }
+        self.stale = true;
+        self.env.audit.record(if user.is_empty() { "login screen" } else { user }, "power.sleep", detail);
+        self.env.host.sleep();
     }
 
     /// Every heartbeat: the display's time, a held key's repeat, the radio keys waiting for the kernel, the saved settings.
@@ -280,25 +300,33 @@ impl Shell {
             return false;
         }
         let Some(sel) = self.lbar.card else { return false };
+        let sleepable = self.env.host.can_sleep();
+        let n = if sleepable { 4 } else { 3 }; // Power off, Restart, [Sleep], Cancel
         let Event::Key(k) = ev else { return true }; // the pointer moving and the heartbeat leave it open
         self.stale = true;
         let choice = match k {
             Key::Left | Key::Up | Key::BackTab => {
-                self.lbar.card = Some((sel + 2) % 3);
+                self.lbar.card = Some((sel + n - 1) % n);
                 return true;
             }
             Key::Right | Key::Down | Key::Tab => {
-                self.lbar.card = Some((sel + 1) % 3);
+                self.lbar.card = Some((sel + 1) % n);
                 return true;
             }
             Key::Enter | Key::Char('y') => sel,
             Key::Char('o') => 0,
             Key::Char('r') => 1,
+            Key::Char('s') if sleepable => 2,
             // Esc and any other key close it without acting
-            _ => 2,
+            _ => n - 1,
         };
         self.lbar.card = None;
-        if choice < 2 {
+        if choice == n - 1 {
+            return true;
+        }
+        if choice == 2 && sleepable {
+            self.login_sleep_act();
+        } else {
             self.login_power_act(choice == 1);
         }
         true
@@ -321,6 +349,15 @@ impl Shell {
         } else {
             self.env.host.power_off();
         }
+    }
+
+    /// Sleep from the login screen (nobody is signed in, so there is nothing to lock): audited as "login screen".
+    fn login_sleep_act(&mut self) {
+        if self.lbar.remote || self.session.is_some() {
+            log::warn!("login sleep: refused (remote session or signed in)");
+            return;
+        }
+        self.sleep_now("", "");
     }
 
     /// The bar's slow work, every heartbeat: read the machine for the network and battery chips while a login screen shows.
@@ -361,7 +398,7 @@ impl Shell {
         self.lbar.last = placed;
         if let Some(sel) = self.lbar.card {
             let can = self.env.host.can_power();
-            crate::loginbar::draw_card(g, w, h, s, sel, can);
+            crate::loginbar::draw_card(g, w, h, s, sel, can, self.env.host.can_sleep());
         }
     }
 }

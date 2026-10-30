@@ -38,7 +38,7 @@ pub fn ctx_for(run: &Run, input: &Value, extra: &[(&str, Value)]) -> Value {
         "vars": run.flow.vars,
         "nodes": Value::Object(nodes),
         "input": input,
-        "run": {"id": run.id, "trigger": run.trigger.kind, "flow": run.flow_id, "version": run.flow.meta.version},
+        "run": {"id": run.id, "trigger": run.trigger.kind, "flow": run.flow_id, "version": run.flow.meta.version, "grants": run.grants},
     });
     if let Value::Object(o) = &mut c {
         if let Some(item) = run.inputs.get("_item") {
@@ -206,7 +206,7 @@ pub fn failed_unrouted(run: &Run) -> Vec<String> {
 
 #[cfg(test)]
 pub fn test_run(flow: Flow) -> Run {
-    let mut r = Run { id: "r1".into(), flow_id: flow.id.clone(), flow, trigger: TriggerInfo { kind: "manual".into(), ..Default::default() }, status: RunStatus::Running, inputs: json!({"n": 2}), outputs: Value::Null, nodes: std::collections::BTreeMap::new(), edges: std::collections::BTreeMap::new(), created_ms: 0, scheduled_ms: None, started_ms: 0, ended_ms: 0, error: String::new(), blocked: String::new(), idempotency_key: None, parent: None, heal: vec![], patches: vec![], heal_spent: 0, heal_cents: 0, pending_updates: std::collections::BTreeMap::new(), log: vec![], rev: 0, runner_note: String::new() };
+    let mut r = Run { grants: vec![], id: "r1".into(), flow_id: flow.id.clone(), flow, trigger: TriggerInfo { kind: "manual".into(), ..Default::default() }, status: RunStatus::Running, inputs: json!({"n": 2}), outputs: Value::Null, nodes: std::collections::BTreeMap::new(), edges: std::collections::BTreeMap::new(), created_ms: 0, scheduled_ms: None, started_ms: 0, ended_ms: 0, error: String::new(), blocked: String::new(), idempotency_key: None, parent: None, heal: vec![], patches: vec![], heal_spent: 0, heal_cents: 0, pending_updates: std::collections::BTreeMap::new(), log: vec![], rev: 0, runner_note: String::new() };
     init(&mut r);
     r
 }

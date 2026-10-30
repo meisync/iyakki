@@ -39,8 +39,13 @@ pub fn default_home() -> PathBuf {
 pub struct Device {
     /// A short name of your choice (the device's host name by default).
     pub name: String,
+    /// The address or the name (`iyakki-0a1b2c.local`) the device was paired at. A name is looked up on the local network (mDNS) when
+    /// the saved address does not answer; the pinned fingerprint decides whether it is the same device.
     pub host: String,
     pub port: u16,
+    /// The last address a name was found at (empty for a device paired by address).
+    #[serde(default)]
+    pub addr: String,
     /// The SHA-256 of the device's certificate, pinned at pairing.
     pub fingerprint: String,
     /// The device account this computer acts as.
@@ -52,10 +57,20 @@ pub struct Device {
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 struct DevicesFile {
+    /// Layout of `devices.json` (see `iyakki-schema`): 0 = alpha.1.
+    #[serde(default)]
+    schema: u32,
     #[serde(default)]
     default: String,
+    #[serde(default)]
     devices: Vec<Device>,
+    /// Fields a newer release wrote: kept, and written back.
+    #[serde(flatten)]
+    extra: iyakki_schema::Extra,
 }
+
+/// The paired devices of this computer (`devices.json`). Schema 1 stamps the alpha.1 layout.
+pub const DEVICES_SCHEMA: iyakki_schema::Spec = iyakki_schema::Spec { name: "paired devices", current: 1, migrations: &[iyakki_schema::Migration { to: 1, what: "stamp the alpha.1 layout", run: |_| {} }] };
 
 /// The computer's folder of developer mode.
 #[derive(Clone, Debug)]
@@ -90,11 +105,11 @@ impl Home {
     }
 
     fn file(&self) -> DevicesFile {
-        std::fs::read(self.dir.join("devices.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        iyakki_schema::load_typed::<DevicesFile>(&DEVICES_SCHEMA, &self.dir.join("devices.json"), iyakki_schema::now_secs()).1
     }
 
     fn save(&self, f: &DevicesFile) -> Result<(), String> {
-        super::write_private(&self.dir.join("devices.json"), &serde_json::to_vec_pretty(f).unwrap_or_default())
+        iyakki_schema::save_typed(&DEVICES_SCHEMA, &self.dir.join("devices.json"), f, 0o600)
     }
 
     pub fn devices(&self) -> Vec<Device> {
@@ -127,6 +142,14 @@ impl Home {
         if f.default == name {
             f.default = f.devices.first().map(|d| d.name.clone()).unwrap_or_default();
         }
+        self.save(&f)
+    }
+
+    /// Remember the address a named device was last reached at.
+    pub fn set_addr(&self, name: &str, addr: &str) -> Result<(), String> {
+        let mut f = self.file();
+        let d = f.devices.iter_mut().find(|d| d.name == name).ok_or_else(|| format!("no paired device called {name}"))?;
+        d.addr = addr.to_string();
         self.save(&f)
     }
 
@@ -168,6 +191,55 @@ pub fn split_host(s: &str, default_port: u16) -> Result<(String, u16), String> {
         Some(_) => Ok((s.to_string(), default_port)),
         None => Ok((s.to_string(), default_port)),
     }
+}
+
+// -------------------------------------------------------------------------------------------- finding a device by its name
+
+/// How long the name lookup waits for an answer.
+pub const RESOLVE_WAIT: Duration = Duration::from_secs(2);
+
+/// The addresses of `name.local` asked on the local network by our own resolver (no system resolver is involved).
+pub fn resolve_local(name: &str) -> Vec<String> {
+    iyakki_netscan::mdns::net::resolve(name, &iyakki_netscan::mdns::net::Ask::new(RESOLVE_WAIT)).iter().map(|a| a.to_string()).collect()
+}
+
+/// Do `attempt` against the device's address. A device paired by name is tried at its saved address first; when that fails (no answer,
+/// refused, or another device's certificate) the name is looked up again, every address found is tried, and the one that passes the
+/// pinned-certificate check becomes the saved address (`note` says `device moved: old -> new`). The fingerprint stays the anchor: an
+/// answer that points to the wrong machine is refused by `attempt` (the TLS check) and changes nothing.
+pub fn reach<T>(d: &Device, home: Option<&Home>, resolver: &dyn Fn(&str) -> Vec<String>, attempt: &mut dyn FnMut(&str) -> Result<T, String>, note: &mut dyn FnMut(&str)) -> Result<T, String> {
+    if !iyakki_netscan::mdns::is_local_name(&d.host) {
+        return attempt(&d.host);
+    }
+    let first = if d.addr.is_empty() { None } else { Some(d.addr.clone()) };
+    let mut last = match &first {
+        Some(a) => match attempt(a) {
+            Ok(v) => return Ok(v),
+            Err(e) => e,
+        },
+        None => String::new(),
+    };
+    let found = resolver(&d.host);
+    if found.is_empty() {
+        return Err(if last.is_empty() { format!("cannot find {} on the local network (is the device on, on the same network, and announcing its name?)", d.host) } else { format!("{last}; and {} did not answer on the local network", d.host) });
+    }
+    for ip in found.iter().filter(|ip| Some(*ip) != first.as_ref()) {
+        match attempt(ip) {
+            Ok(v) => {
+                if let Some(old) = &first {
+                    note(&format!("device moved: {old} -> {ip}"));
+                } else {
+                    note(&format!("{} is at {ip}", d.host));
+                }
+                if let Some(h) = home {
+                    let _ = h.set_addr(&d.name, ip);
+                }
+                return Ok(v);
+            }
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
 }
 
 // -------------------------------------------------------------------------------------------- TLS with a pinned certificate
@@ -333,6 +405,15 @@ pub fn pair(home: &Home, host: &str, port: u16, name: &str, code: &str, expect_f
     }
     let key = home.key()?;
     let pubhex = crate::pkg::public_key_hex(&key);
+    // a name (`iyakki-0a1b2c.local`) is looked up now; the device keeps the name and the address it was found at
+    let by_name = iyakki_netscan::mdns::is_local_name(host);
+    let (name_host, host) = if by_name {
+        let ip = resolve_local(host).into_iter().next().ok_or_else(|| format!("cannot find {host} on the local network (is the device on, on the same network, and announcing its name?)"))?;
+        (Some(host.to_string()), ip)
+    } else {
+        (None, host.to_string())
+    };
+    let host = host.as_str();
     let (fp, info) = hello(host, port)?;
     if let Some(e) = expect_fp {
         if auth::norm_fp(e) != auth::norm_fp(&fp) {
@@ -347,8 +428,8 @@ pub fn pair(home: &Home, host: &str, port: u16, name: &str, code: &str, expect_f
     if !auth::same(answer.as_bytes(), auth::pair_answer(&pk, &fp, &pubhex).as_bytes()) {
         return Err("the device did not prove that it knows the code: nothing was saved (something may be in the middle)".into());
     }
-    let dname = device_name.map(str::to_string).or_else(|| info["name"].as_str().map(str::to_string)).filter(|n| super::valid_name(n)).unwrap_or_else(|| host.replace(':', "-"));
-    let d = Device { name: dname, host: host.to_string(), port, fingerprint: fp, account: v["account"].as_str().unwrap_or("").to_string(), paired_at: crate::clock::now_unix() };
+    let dname = device_name.map(str::to_string).or_else(|| info["name"].as_str().map(str::to_string)).filter(|n| super::valid_name(n)).unwrap_or_else(|| name_host.clone().unwrap_or_else(|| host.to_string()).replace(':', "-"));
+    let d = Device { name: dname, host: name_host.clone().unwrap_or_else(|| host.to_string()), addr: if by_name { host.to_string() } else { String::new() }, port, fingerprint: fp, account: v["account"].as_str().unwrap_or("").to_string(), paired_at: crate::clock::now_unix() };
     home.add(d.clone())?;
     Ok(d)
 }
@@ -359,15 +440,17 @@ pub struct DevClient {
     pub device: Device,
     key: SigningKey,
     pub timeout: Duration,
+    /// Where a moved device's new address is saved.
+    home: Option<Home>,
 }
 
 impl DevClient {
     pub fn new(home: &Home, device: Device) -> Result<DevClient, String> {
-        Ok(DevClient { device, key: home.key()?, timeout: Duration::from_secs(120) })
+        Ok(DevClient { device, key: home.key()?, timeout: Duration::from_secs(120), home: Some(home.clone()) })
     }
 
     pub fn with_key(device: Device, key: SigningKey) -> DevClient {
-        DevClient { device, key, timeout: Duration::from_secs(120) }
+        DevClient { device, key, timeout: Duration::from_secs(120), home: None }
     }
 
     /// A signed request.
@@ -375,7 +458,7 @@ impl DevClient {
         let d = &self.device;
         let mut h = auth::sign_headers(&self.key, method, path, query, body, &d.fingerprint, crate::clock::now_unix())?;
         h.push(("Content-Type".into(), "application/octet-stream".into()));
-        https(&d.host, d.port, Some(&d.fingerprint), method, &target(path, query), &h, body, self.timeout)
+        reach(d, self.home.as_ref(), &resolve_local, &mut |host| https(host, d.port, Some(&d.fingerprint), method, &target(path, query), &h, body, self.timeout), &mut |n| eprintln!("{n}"))
     }
 
     /// A signed request whose answer is JSON (the device's error sentence on failure).
@@ -462,7 +545,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(d.join("id.key")).unwrap().permissions().mode() & 0o777, 0o600);
         assert!(h.device(None).is_err());
-        let dev = |n: &str| Device { name: n.into(), host: "127.0.0.1".into(), port: 1, fingerprint: "AA".into(), account: "root".into(), paired_at: 0 };
+        let dev = |n: &str| Device { name: n.into(), host: "127.0.0.1".into(), addr: String::new(), port: 1, fingerprint: "AA".into(), account: "root".into(), paired_at: 0 };
         h.add(dev("a")).unwrap();
         h.add(dev("b")).unwrap();
         assert_eq!(h.device(None).unwrap().name, "a", "the first is the default");
@@ -472,6 +555,99 @@ mod tests {
         assert_eq!(h.device(None).unwrap().name, "a");
         assert!(h.remove("zz").is_err() && h.set_default("zz").is_err());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn named(addr: &str) -> Device {
+        Device { name: "mac".into(), host: "iyakki-0a1b2c.local".into(), addr: addr.into(), port: 7979, fingerprint: "AA:BB".into(), account: "admin".into(), paired_at: 0 }
+    }
+
+    /// The stand-in for TLS with a pin: only `good` shows the pinned certificate; `other` is another device that took the old address.
+    fn tls(good: &'static str, other: &'static str) -> impl FnMut(&str) -> Result<String, String> {
+        move |ip: &str| {
+            if ip == good {
+                Ok(format!("answered by {ip}"))
+            } else if ip == other {
+                Err("the device's certificate changed (it is 00:11, the one paired was AA:BB): if the device was reinstalled, pair again".into())
+            } else {
+                Err(format!("cannot reach {ip}:7979: timed out"))
+            }
+        }
+    }
+
+    #[test]
+    fn a_device_that_moved_is_found_again_by_its_name_and_the_new_address_is_saved_and_said() {
+        let dir = std::env::temp_dir().join(format!("iyakki-devmoved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = Home::at(&dir);
+        home.add(named("192.168.50.67")).unwrap();
+        let asked = std::cell::Cell::new(0);
+        let resolver = |n: &str| {
+            asked.set(asked.get() + 1);
+            assert_eq!(n, "iyakki-0a1b2c.local");
+            vec!["192.168.50.66".to_string()]
+        };
+        let mut notes = Vec::new();
+        let r = reach(&named("192.168.50.67"), Some(&home), &resolver, &mut tls("192.168.50.66", "none"), &mut |n| notes.push(n.to_string())).unwrap();
+        assert_eq!(r, "answered by 192.168.50.66");
+        assert_eq!(notes, vec!["device moved: 192.168.50.67 -> 192.168.50.66".to_string()]);
+        assert_eq!(home.device(Some("mac")).unwrap().addr, "192.168.50.66", "saved");
+        assert_eq!(home.device(Some("mac")).unwrap().host, "iyakki-0a1b2c.local", "the name stays");
+        // the saved address works: no lookup at all, nothing said
+        let mut notes = Vec::new();
+        reach(&home.device(Some("mac")).unwrap(), Some(&home), &resolver, &mut tls("192.168.50.66", "none"), &mut |n| notes.push(n.to_string())).unwrap();
+        assert_eq!((asked.get(), notes.len()), (1, 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn another_device_at_the_old_address_or_a_forged_answer_does_not_pass_the_pinned_certificate() {
+        // the old address now belongs to another IYAKKI (its certificate differs): the name is looked up, and the real one is used
+        let mut notes = Vec::new();
+        let ok = reach(&named("192.168.50.67"), None, &|_| vec!["192.168.50.67".into(), "192.168.50.66".into()], &mut tls("192.168.50.66", "192.168.50.67"), &mut |n| notes.push(n.to_string())).unwrap();
+        assert_eq!(ok, "answered by 192.168.50.66");
+        assert_eq!(notes, vec!["device moved: 192.168.50.67 -> 192.168.50.66".to_string()]);
+        // a spoofed answer that points only to a machine with another certificate: refused, nothing saved, the error says why
+        let dir = std::env::temp_dir().join(format!("iyakki-devspoof-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = Home::at(&dir);
+        home.add(named("192.168.50.67")).unwrap();
+        let mut notes = Vec::new();
+        let e = reach(&named("192.168.50.67"), Some(&home), &|_| vec!["192.168.50.99".to_string()], &mut tls("192.168.50.66", "192.168.50.99"), &mut |n| notes.push(n.to_string())).unwrap_err();
+        assert!(e.contains("certificate changed"), "{e}");
+        assert!(notes.is_empty() && home.device(Some("mac")).unwrap().addr == "192.168.50.67", "the address is not replaced by a forged one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nobody_answering_and_devices_paired_by_address_are_handled() {
+        let e = reach(&named("192.168.50.67"), None, &|_| vec![], &mut tls("x", "y"), &mut |_| {}).unwrap_err();
+        assert!(e.contains("timed out") && e.contains("iyakki-0a1b2c.local did not answer"), "{e}");
+        let e = reach(&named(""), None, &|_| vec![], &mut tls("x", "y"), &mut |_| {}).unwrap_err();
+        assert!(e.contains("cannot find iyakki-0a1b2c.local on the local network"), "{e}");
+        // a name that was never looked up gets its address from the first answer
+        let mut notes = Vec::new();
+        assert!(reach(&named(""), None, &|_| vec!["192.168.50.66".into()], &mut tls("192.168.50.66", "y"), &mut |n| notes.push(n.to_string())).is_ok());
+        assert_eq!(notes, vec!["iyakki-0a1b2c.local is at 192.168.50.66".to_string()]);
+        // an address is used as it is: no lookup, ever
+        let mut d = named("");
+        d.host = "192.168.50.66".into();
+        assert!(reach(&d, None, &|_| panic!("no lookup for an address"), &mut tls("192.168.50.66", "y"), &mut |_| {}).is_ok());
+        let mut d = named("");
+        d.host = "box.example.com".into();
+        assert!(reach(&d, None, &|_| panic!("no lookup for a DNS name"), &mut |h| Ok::<_, String>(h.to_string()), &mut |_| {}).is_ok());
+    }
+
+    #[test]
+    fn an_old_devices_file_without_the_address_still_loads_and_the_name_is_kept() {
+        let dir = std::env::temp_dir().join(format!("iyakki-devold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("devices.json"), r#"{"schema":1,"default":"a","devices":[{"name":"a","host":"192.168.1.2","port":7979,"fingerprint":"AA","account":"root","paired_at":1}]}"#).unwrap();
+        let home = Home::at(&dir);
+        assert_eq!(home.device(None).unwrap().addr, "");
+        home.add(named("192.168.50.66")).unwrap();
+        assert_eq!(Home::at(&dir).device(Some("mac")).unwrap().addr, "192.168.50.66");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

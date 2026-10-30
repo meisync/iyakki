@@ -6,6 +6,8 @@
 
 use crate::ruleset::{Addr, Ruleset, Step, CHAIN, LOG_GROUP, TABLE};
 
+pub mod tablegen;
+
 const NLM_F_REQUEST: u16 = 1;
 const NLM_F_ACK: u16 = 4;
 const NLM_F_DUMP: u16 = 0x300;
@@ -541,6 +543,44 @@ mod sock {
                 }
             }
             Ok(counters_of_dump(&all))
+        }
+
+        /// Put `spec` in place of whatever table of that name exists, all or nothing (see [`tablegen`]).
+        pub fn apply_table(&mut self, spec: &tablegen::TableSpec) -> Result<(), NlError> {
+            let seq = self.next_seq();
+            let (b, acks) = tablegen::encode_apply(spec, seq).map_err(NlError::Failed)?;
+            self.run(&b, acks)
+        }
+
+        /// Take the table out (nothing else is touched).
+        pub fn remove_table(&mut self, name: &str) -> Result<(), NlError> {
+            let seq = self.next_seq();
+            let (b, acks) = tablegen::encode_remove(name, seq).map_err(NlError::Failed)?;
+            self.run(&b, acks)
+        }
+
+        /// Add (with a lifetime in seconds) or delete one address of a set.
+        pub fn set_elem(&mut self, table: &str, set: &str, ip: std::net::IpAddr, timeout_secs: Option<u64>, add: bool) -> Result<(), NlError> {
+            let seq = self.next_seq();
+            let (b, acks) = tablegen::encode_elem(table, set, ip, timeout_secs, add, seq).map_err(NlError::Failed)?;
+            self.run(&b, acks)
+        }
+
+        /// Is there a table of that name?
+        pub fn table_exists(&mut self, name: &str) -> Result<bool, NlError> {
+            let seq = self.next_seq();
+            self.send(&tablegen::encode_get_table(name, seq))?;
+            let r = self.recv()?;
+            for (t, p) in split_messages(&r) {
+                if t == 2 && p.len() >= 4 {
+                    let code = i32::from_ne_bytes([p[0], p[1], p[2], p[3]]);
+                    return if code == -libc::ENOENT { Ok(false) } else if code == 0 { Ok(true) } else { Err(errno_error(-code)) };
+                }
+                if t == ty(NFT_MSG_NEWTABLE) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         }
 
         pub fn replace(&mut self, rs: &Ruleset) -> Result<(), NlError> {

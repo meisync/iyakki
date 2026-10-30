@@ -125,7 +125,7 @@ editor keeps at least 300 units of width). Sizes, open panes and the focused pan
 | Ctrl+Shift+F | search the project's text (skips `target`, `node_modules`, `.git`, binary and big files; first 300 hits) |
 | Ctrl+B / Ctrl+J | show or hide the tree / the bottom panel |
 | Ctrl+Shift+E, D, C, T | focus the tree, the editor, the chat, the terminal |
-| Ctrl+Shift+B / Ctrl+Shift+G / Ctrl+Shift+Y / Ctrl+Shift+O / Ctrl+Shift+K | the feature board / the tasks / the project context / the browser / the cluster view in the main area (again to go back) |
+| Ctrl+Shift+B / Ctrl+Shift+G / Ctrl+Shift+Y / Ctrl+Shift+O / Ctrl+Shift+K / Ctrl+Shift+L | the feature board / the tasks / the project context / the browser / the cluster view / the Git tab in the main area (again to go back) |
 | Ctrl+Shift+A | put the selection (or the file) in the chat box |
 | Ctrl+Shift+arrows | resize the focused pane (left/right: tree or chat width; up/down: panel height) |
 | F5 | run: `.py .js .sh .wasm` files run the way EDIT runs them; otherwise `commands.run` of the project |
@@ -283,6 +283,21 @@ the address is read over plain http (status, title, text). A pass is kept as evi
 as the check's report (status, title, excerpt, screenshot path, "the row is not done") and into the usual diagnosis of the next
 Autopilot step, and is saved as `http-check-failed.txt` next to the evidence. It never creates a bug row by itself. Deploy rows with
 no outside address (only ClusterIP Services) keep the `deploy_status`-only check.
+
+## The Git tab
+
+The last main tab, after K8s (Ctrl+Shift+L). **This project** shows the folder's git state: branch, ahead and behind, the changed files with their status,
+the recent commits, and the diff of a changed file or a commit; `o` opens the file in the editor. **Connections** shows the repositories of your Git
+connections (the GIT tile inside the tab, with the connection picker). It only reads: clone, fetch, pull, push and commit are not in the tab (the Repositories panel
+and Connect Git above do those, each after a review). The chat is told the project's git state while the tab is open. Account rule: the tab is for the roles that
+may open the GIT tile. Details: [`GIT-TILE.md`](GIT-TILE.md), "In the AI IDE".
+
+**Put this project under version control on Local Gitea.** When the open project has no remote, the Repositories panel (⋯ menu → Repositories…) shows, next to
+*Connect to Git or Gitea*, the button **Put this project under version control on Local Gitea** (key `l`). With Store -> Setup ->
+*Gitea (versioning for your work)* installed it opens Connect Git on the connection "Local Gitea", straight at the review of the new repository
+(name from the project, private, the first commit if there is none): nothing is made until you confirm that review, and the push is a second
+review that asks first, through the same git jobs as every other host. Without Gitea installed the button says so in plain words and names
+Store -> Setup. Projects that already have a remote are not offered it (the key says "already has a remote"). The offer is `quickinstall::gitea::offer`.
 
 ## The cluster view and the connected cluster
 

@@ -465,11 +465,6 @@ pub(super) struct Panel {
     pub finished_at: Option<Instant>,
 }
 
-#[derive(Default)]
-pub(super) struct Rects {
-    pub mode: Option<Mode>,
-}
-
 // ------------------------------------------------------------------------------------------------ the app
 
 pub struct K8sApp {

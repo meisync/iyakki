@@ -61,4 +61,9 @@ impl Shell {
         };
         crate::scrolleng::set_raw(raw);
     }
+
+    /// The open tile wants F12 for itself (the browser's Developer tools): the screenshot key then waits for Print Screen.
+    pub(super) fn app_claims_f12(&self) -> bool {
+        matches!(&self.screen, Screen::App(app, _) if app.claims_f12())
+    }
 }

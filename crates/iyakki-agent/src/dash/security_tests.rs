@@ -199,7 +199,7 @@ fn a_locked_vault_and_a_missing_entry_have_their_own_plain_messages() {
         }
     }
     let up = FakeUp::new();
-    for (err, want, not) in [("vault is locked", "your vault is locked", "missing"), ("secret not found: svc.prom", "the vault entry `svc.prom` is missing", "locked"), ("backend exploded", "could not be read", "locked")] {
+    for (err, want, not) in [("vault is locked", "your vault is locked", "missing"), ("secret not found: svc.prom", "is not in your vault yet (entry `svc.prom`)", "locked"), ("backend exploded", "could not be read", "locked")] {
         let mut d = deps(&up, &[], Arc::new(FakeRunner::new(&[])));
         d.secrets = Arc::new(R(err));
         let e = registry::build(&bearer_source(), &d).err().unwrap();

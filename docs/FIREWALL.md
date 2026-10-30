@@ -131,8 +131,8 @@ unapplied changes (a bad or hand-edited export is refused with the reason and ch
 | Remote desktop / web mode | TCP 8443 (and the port in `iyakki.web=`); from anywhere on a cloud machine | **on** |
 | Shared folders | TCP 8081-8180, where Shared folders picks its ports | off |
 | Kubernetes API | TCP 6443 | off |
-| Kubernetes NodePorts | TCP and UDP 30000-32767 | off |
-| Private store NodePort | TCP 30300 (this machine itself always reaches it: loopback is always allowed) | off |
+| Kubernetes NodePorts | TCP and UDP 30000-32767 (the in-cluster image registry is not in it any more: it listens on 127.0.0.1:30500 only, so no firewall rule is needed or can open it) | off |
+| Private store NodePort | TCP 30301 (this machine itself always reaches it: loopback is always allowed) | off |
 | Allow DNS service | TCP and UDP 53 to this machine, for a machine that runs a DNS server | off |
 | Web server | TCP 80 and 443 (the simple view's "Web server") | off |
 
@@ -173,6 +173,20 @@ Nothing is routed or translated between the cable and other networks: the firewa
 The switch is in Settings -> Developer mode -> Connect over USB-C (`m`) and `iyakki dev usb link --allow-more on|off`; it is kept in `<data>/directlink.json`,
 not in the firewall page's keep-or-revert flow. Without a direct link no rule is added. Interface names are checked before they go into a rule. Tests: `iyakki-fw`
 `a_direct_link_lets_in_only_developer_mode_the_beacon_and_ping_by_default` and two more. Not loaded into a real kernel with a real cable.
+
+## Rules that developer mode makes
+
+With the firewall on, a computer cannot reach developer mode (TCP 7979) unless a rule lets it in; ping may still be answered. While developer mode is on, the agent keeps these rules (`iyakki_fw::devrules`, applied without the 60-second Keep, because they only allow one port from private addresses):
+
+| Reason shown in the list | Who | How long |
+|---|---|---|
+| `developer mode (switches off with it)` | the address each paired computer last connected from (and one you chose with Allow) | while developer mode is on (its switch-off time, else renewed daily) |
+| `developer mode (switches off with it): paired computers on this network` | the /24 around each paired computer, only when you turned on "Whole network" (default off) | same |
+| `developer mode pairing (one time)` | every local network (10/8, 172.16/12, 192.168/16, 169.254/16, fe80::/10, fc00::/7), only after you pressed "Allow in the firewall" while a pairing code is shown | 10 minutes, or until the first computer has paired |
+
+One more rule belongs to the device name rather than to developer mode: `device name (mDNS)` (`iyakki_fw::namerule`), UDP 5353 from the same private networks (IPv4), so computers can ask for `iyakki-<id>.local`. It exists only while Settings, Network, "Announce this device on the local network" is on (default on, off in cloud mode); you can remove it like any rule, and the announcing is then switched off instead of the rule being made again.
+
+Public addresses are never allowed by these rules. They are removed when developer mode goes off (also by its timer) and the pairing rule when the pairing ends or on a restart. Audit lines: `devmode.firewall.allow` and `devmode.firewall.removed` (an address, the port and the reason, no secrets). In Settings -> Firewall each such rule says it was made by developer mode; Remove works as for any rule, and developer mode makes it again at the next look unless you switch it off. Settings -> Developer mode shows "the firewall blocks the developer port 7979: Allow" when the firewall is on and nothing lets it in. Tests: `iyakki-fw` `devrules_tests`, `iyakki-remote` `devfw::tests`. Not run against a real kernel.
 
 ## Applying safely, and getting out of a lockout
 

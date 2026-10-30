@@ -72,7 +72,7 @@ impl Fake {
 }
 
 fn out(code: i32, stdout: &str) -> Out {
-    Out { code: Some(code), stdout: stdout.into(), stderr: String::new(), timed_out: false, truncated: false, missing: false }
+    Out { code: Some(code), stdout: stdout.into(), stderr: String::new(), timed_out: false, truncated: false, missing: false, status_lost: false }
 }
 
 impl GpuEnv for Fake {

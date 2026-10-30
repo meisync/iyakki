@@ -105,7 +105,7 @@ impl Preset {
             Preset::SharedFolders => "Shared folders",
             Preset::K3sApi => "Kubernetes API (6443)",
             Preset::NodePorts => "Kubernetes NodePorts (30000-32767)",
-            Preset::StoreNodePort => "Private store (NodePort 30300)",
+            Preset::StoreNodePort => "Private store (NodePort 30301)",
             Preset::DnsService => "Allow DNS service (port 53) to this machine",
             Preset::WebServer => "Web server (ports 80 and 443)",
         }

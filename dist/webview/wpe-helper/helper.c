@@ -46,9 +46,18 @@
 #include <GLES2/gl2ext.h>
 #include <gbm.h>
 
+#define IYAKKI_MIC_WITH_ALSA 1
+#include "micscan.h"
 #include "proto.h"
 
 #define PROTOCOL_VERSION 1
+#ifndef CAMSHARE_PLUGIN
+#define CAMSHARE_PLUGIN "/usr/lib/gstreamer-1.0/libgstiyakkicamshare.so"
+#endif
+#ifndef MIC_PLUGIN
+#define MIC_PLUGIN "/usr/lib/gstreamer-1.0/libgstiyakkimic.so"
+#define WEBSINK_PLUGIN "/usr/lib/gstreamer-1.0/libgstiyakkiwebsink.so"
+#endif
 #define MAX_SCREEN_W 4096
 #define MAX_SCREEN_H 2304
 
@@ -448,12 +457,16 @@ static void on_progress(void) {
     send_bb(F_LOADING, webkit_web_view_is_loading(G.view) ? 1 : 0, p > 100 ? 100 : p);
 }
 
+static unsigned dev_sent;        /* developer-tools lines sent for this page load (capped, the page is untrusted) */
 static char media_need_sent[8];   /* the last MediaUnsupported sent for this page ("" before any) */
+
+static void permission_deny_all(void);
 
 static void on_load_changed(WebKitWebView *v, WebKitLoadEvent e, gpointer ud) {
     (void)v; (void)ud;
+    if (e == WEBKIT_LOAD_STARTED) permission_deny_all();   /* a question about the old page is void */
     if (e == WEBKIT_LOAD_FINISHED) send_bb(F_LOADING, 0, 100);
-    else if (e == WEBKIT_LOAD_STARTED) { media_need_sent[0] = 0; send_bb(F_LOADING, 1, 0); }
+    else if (e == WEBKIT_LOAD_STARTED) { media_need_sent[0] = 0; dev_sent = 0; send_bb(F_LOADING, 1, 0); }
     send_history();
 }
 
@@ -483,18 +496,157 @@ static void on_target(WebKitWebView *v, WebKitHitTestResult *hit, guint mods, gp
 
 static gboolean reload_later(gpointer v) { webkit_web_view_reload(v); return G_SOURCE_REMOVE; }
 
+/* Crash-loop guard: a second crash within 60 s means reloading the same page will crash again (seen with a camera/microphone page on a
+ * sound card whose capture device cannot be inspected). Stop reloading, say so, and keep the helper alive so the shell can show a button. */
+#define CRASH_WINDOW_US (60 * G_USEC_PER_SEC)
+#define CRASH_LIMIT 2
+static gint64 crash_times[CRASH_LIMIT];
+static int crash_n;
+static uint32_t last_media_kinds;     /* the last camera/microphone/screen request, for the log */
+static char last_media_origin[160];
+
+/* true when this crash is the CRASH_LIMIT-th inside the window (pure: testable with fake times) */
+static gboolean crash_loop(gint64 now_us) {
+    if (crash_n == CRASH_LIMIT) { memmove(crash_times, crash_times + 1, sizeof(crash_times[0]) * (CRASH_LIMIT - 1)); crash_n--; }
+    crash_times[crash_n++] = now_us;
+    return crash_n == CRASH_LIMIT && now_us - crash_times[0] <= CRASH_WINDOW_US;
+}
+
 static void on_crash(WebKitWebView *v, WebKitWebProcessTerminationReason r, gpointer ud) {
     (void)ud;
     G.crashes++;
-    send_str_msg(F_CRASHED, r == WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT ? "the web process used too much memory" : "the web process stopped");
-    if (G.crashes < 5) g_timeout_add(500, reload_later, v);
-    else { logf_("the web process keeps crashing; giving up"); quit_loop(); }
+    permission_deny_all();
+    gboolean media = last_media_kinds != 0;
+    gboolean loop = crash_loop(g_get_monotonic_time());
+    logf_("web process crash %d (reason %d); last media request: kinds=0x%x origin=%s; %s", G.crashes, (int)r, last_media_kinds,
+          last_media_origin[0] ? last_media_origin : "(none)", loop ? "crash loop, not reloading" : "reloading");
+    const char *why = r == WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT ? "the web process used too much memory" : "the web process stopped";
+    if (loop && media) why = "The page's process stopped (media device problem)";
+    else if (loop) why = "The page's process stopped again and again";
+    send_str_msg(F_CRASHED, why);
+    if (!loop) g_timeout_add(500, reload_later, v);
+}
+
+/* Camera / microphone / screen requests (docs/development/BROWSER-MEDIA-DEVICES.md): the person decides, in the shell. Every other kind of
+ * permission (location, notifications, ...) is denied here. The request waits for the shell's PermissionAnswer; silence, a full queue,
+ * a crash or a navigation mean "deny". */
+#define PERMISSION_TIMEOUT_MS 60000
+#define MAX_PENDING_PERMISSIONS 4
+typedef struct { uint32_t id; WebKitPermissionRequest *req; guint timer; } PendingPerm;
+static GPtrArray *pending_perms;
+static uint32_t perm_next = 1;
+
+static void pending_permission_answer_allow(WebKitPermissionRequest *req);
+
+static void perm_finish(PendingPerm *p, gboolean allow) {
+    if (p->timer) g_source_remove(p->timer);
+    if (allow) pending_permission_answer_allow(p->req);
+    else webkit_permission_request_deny(p->req);
+    g_object_unref(p->req);
+    g_free(p);
+}
+
+static gboolean perm_timeout(gpointer data) {
+    PendingPerm *p = data;
+    p->timer = 0;
+    g_ptr_array_remove(pending_perms, p);
+    logf_("permission request %u: no answer in time, denied", p->id);
+    perm_finish(p, FALSE);
+    return G_SOURCE_REMOVE;
+}
+
+/* the one place that allows: only reached from the shell's PermissionAnswer (never from the page) */
+static void pending_permission_answer_allow(WebKitPermissionRequest *req) { webkit_permission_request_allow(req); }
+
+static void permission_answer(uint32_t id, int allow) {
+    if (!pending_perms) return;
+    for (guint i = 0; i < pending_perms->len; i++) {
+        PendingPerm *p = g_ptr_array_index(pending_perms, i);
+        if (p->id == id) {
+            g_ptr_array_remove_index(pending_perms, i);
+            perm_finish(p, allow != 0);
+            return;
+        }
+    }
+}
+
+static void permission_deny_all(void) {
+    while (pending_perms && pending_perms->len) {
+        PendingPerm *p = g_ptr_array_remove_index(pending_perms, pending_perms->len - 1);
+        perm_finish(p, FALSE);
+    }
+}
+
+static int mic_plugin_on;
+/* One line for the system log each time a page asks for the microphone: what the scan finds and what the provider will use. */
+static void log_microphone_request(void) {
+    const char *p = getenv("IYAKKI_MIC_PROC"), *sy = getenv("IYAKKI_MIC_SYS");
+    IyakkiMicScan *sc = micscan_run(p && *p ? p : "/proc/asound", sy && *sy ? sy : "/sys", TRUE);
+    char *r = micscan_report(sc, mic_plugin_on ? "requested by a page" : "requested by a page (microphone plugin not active: stock ALSA path)");
+    fprintf(stderr, "wpe-helper: iyakki-mic: %s\n", r);   /* stderr reaches the system log whole; the shell log line is cut at 512 bytes */
+    logf_("%s", r);
+    g_free(r);
+    micscan_free(sc);
 }
 
 static gboolean on_permission(WebKitWebView *v, WebKitPermissionRequest *req, gpointer ud) {
-    (void)v; (void)ud;
-    webkit_permission_request_deny(req);
+    (void)ud;
+    uint8_t kinds = 0;
+    if (WEBKIT_IS_USER_MEDIA_PERMISSION_REQUEST(req)) {
+        WebKitUserMediaPermissionRequest *um = WEBKIT_USER_MEDIA_PERMISSION_REQUEST(req);
+        if (webkit_user_media_permission_is_for_audio_device(um)) { kinds |= MK_MICROPHONE; log_microphone_request(); }
+        if (webkit_user_media_permission_is_for_video_device(um)) kinds |= MK_CAMERA;
+        if (webkit_user_media_permission_is_for_display_device(um)) kinds |= MK_SCREEN;
+    } else if (WEBKIT_IS_DEVICE_INFO_PERMISSION_REQUEST(req)) {
+        kinds = MK_DEVICE_LIST;
+    }
+    /* a screen share needs a screen source the engine can read (docs/development/BROWSER-MEDIA-DEVICES.md, "Screen share"): only with
+     * the engine's mock display (IYAKKI_WEBVIEW_MOCK_MEDIA=1) or when the image says it has one (IYAKKI_WEBVIEW_SCREEN=1); else no question */
+    if ((kinds & MK_SCREEN) && !getenv("IYAKKI_WEBVIEW_SCREEN") && !getenv("IYAKKI_WEBVIEW_MOCK_MEDIA")) kinds = 0;
+    if (!kinds || !G.ready) { webkit_permission_request_deny(req); return TRUE; }
+    last_media_kinds = kinds;
+    { const char *uri = G.view ? webkit_web_view_get_uri(G.view) : NULL; g_strlcpy(last_media_origin, uri ? uri : "", sizeof last_media_origin); }
+    if (!pending_perms) pending_perms = g_ptr_array_new();
+    if (pending_perms->len >= MAX_PENDING_PERMISSIONS) { webkit_permission_request_deny(req); return TRUE; }
+    PendingPerm *p = g_new0(PendingPerm, 1);
+    p->id = perm_next++;
+    p->req = g_object_ref(req);
+    p->timer = g_timeout_add(PERMISSION_TIMEOUT_MS, perm_timeout, p);
+    g_ptr_array_add(pending_perms, p);
+    Buf b = {0};
+    buf_u32(&b, p->id);
+    buf_u8(&b, kinds);
+    buf_str(&b, webkit_web_view_get_uri(v));   /* the top-level page the person sees, also for a request from a frame in it */
+    send_msg(F_PERMISSION_REQUEST, &b);
+    buf_free(&b);
     return TRUE;
+}
+
+/* the shell's "stop sharing" click: NONE ends the capture in the engine, which then sends the new state */
+static void stop_capture(uint8_t kinds) {
+    if (!G.view) return;
+    if (kinds & MK_MICROPHONE) webkit_web_view_set_microphone_capture_state(G.view, WEBKIT_MEDIA_CAPTURE_STATE_NONE);
+    if (kinds & MK_CAMERA) webkit_web_view_set_camera_capture_state(G.view, WEBKIT_MEDIA_CAPTURE_STATE_NONE);
+    if (kinds & MK_SCREEN) webkit_web_view_set_display_capture_state(G.view, WEBKIT_MEDIA_CAPTURE_STATE_NONE);
+}
+
+static char *screen_path;   /* the file the shell writes its screen into while a screen share is on (read by the screen feeder, when there is one) */
+static void screen_source(const char *path) {
+    g_free(screen_path);
+    screen_path = (path && *path) ? g_strdup(path) : NULL;
+    logf_("screen source: %s", screen_path ? screen_path : "(none)");
+}
+
+static void on_capture_state(GObject *o, GParamSpec *ps, gpointer ud) {
+    (void)o; (void)ps; (void)ud;
+    uint8_t k = 0;
+    if (webkit_web_view_get_microphone_capture_state(G.view) == WEBKIT_MEDIA_CAPTURE_STATE_ACTIVE) k |= MK_MICROPHONE;
+    if (webkit_web_view_get_camera_capture_state(G.view) == WEBKIT_MEDIA_CAPTURE_STATE_ACTIVE) k |= MK_CAMERA;
+    if (webkit_web_view_get_display_capture_state(G.view) == WEBKIT_MEDIA_CAPTURE_STATE_ACTIVE) k |= MK_SCREEN;
+    Buf b = {0};
+    buf_u8(&b, k);
+    send_msg(F_CAPTURE_STATE, &b);
+    buf_free(&b);
 }
 
 static gboolean on_script_dialog(WebKitWebView *v, WebKitScriptDialog *d, gpointer ud) {
@@ -650,6 +802,27 @@ static void on_media_message(WebKitUserContentManager *m, JSCValue *val, gpointe
     if (t && (!strcmp(t, "video") || !strcmp(t, "audio") || !strcmp(t, "both")) && strcmp(t, media_need_sent)) {
         snprintf(media_need_sent, sizeof media_need_sent, "%s", t);
         send_str_msg(F_MEDIA_UNSUPPORTED, t);
+    }
+    g_free(t);
+}
+
+/* ---------------------------------------------------------------------------------------------- developer-tools probe
+ * dev-probe.js (a user script, built into dev-probe.h by the Makefile) posts one text line per failed request, slow resource, console
+ * error/warning or page timing to the iyakkiDev message handler. The line is passed on as it is (the shell parses and scrubs it and
+ * keeps it only when the person turned developer tools for the chat agent on), but the page is untrusted: only strings of at most
+ * 1000 bytes with a known kind letter and U+001F separators are forwarded, and at most DEV_MAX_PER_PAGE per page load. */
+#define DEV_MAX_PER_PAGE 400
+static const char DEV_JS[] =
+#include "dev-probe.h"
+;
+
+static void on_dev_message(WebKitUserContentManager *m, JSCValue *val, gpointer ud) {
+    (void)m; (void)ud;
+    if (!val || !jsc_value_is_string(val) || dev_sent >= DEV_MAX_PER_PAGE) return;
+    char *t = jsc_value_to_string(val);
+    if (t && t[0] && strlen(t) <= 1000 && strchr("FRCPH", t[0]) && t[1] == '\x1f') {
+        dev_sent++;
+        send_str_msg(F_DEV_EVENT, t);
     }
     g_free(t);
 }
@@ -875,6 +1048,9 @@ static void handle(uint8_t ty, const uint8_t *p, size_t n) {
     }
     case T_SCRIPT: { uint32_t id = rd_u32(&r), tmo = rd_u32(&r); char *js = rd_str(&r); if (!r.bad) on_script(id, js, tmo); g_free(js); break; }
     case T_LEAVE_FULLSCREEN: leave_fullscreen(); break;
+    case T_STOP_CAPTURE: { uint8_t kinds = rd_u8(&r); if (!r.bad) stop_capture(kinds); break; }
+    case T_SCREEN_SOURCE: { char *p = rd_str(&r); if (!r.bad) screen_source(p); g_free(p); break; }
+    case T_PERMISSION_ANSWER: { uint32_t id = rd_u32(&r); uint8_t allow = rd_u8(&r); if (!r.bad) permission_answer(id, allow); break; }
     case T_QUIT: quit_loop(); break;
     default: break;   /* unknown: skipped */
     }
@@ -951,6 +1127,65 @@ static void setup_engine(void) {
      * the tail and the agent log shows it): the evidence a silent session needs. The owner can set GST_DEBUG to change it. */
     setenv("GST_DEBUG", "*:1,alsasink:4,autoaudiosink:4", 0);
     setenv("GST_DEBUG_NO_COLOR", "1", 0);
+    /* which sound configuration the engine was given (the agent sets ALSA_CONFIG_PATH on a T2): one line in the log, so a silent or
+     * frozen page can be traced to the set-up it really used */
+    {
+        const char *alsa_conf = getenv("ALSA_CONFIG_PATH");
+        fprintf(stderr, "wpe-helper: sound: ALSA_CONFIG_PATH=%s\n", alsa_conf && *alsa_conf ? alsa_conf : "(unset)");
+    }
+    /* Diagnosis switch: while the file /tmp/iyakki-dev/gst-debug exists (a paired developer computer puts it there), the camera, the
+     * WebRTC and the media-stream pieces log in detail to /tmp/iyakki-dev/gst-debug.log (`iyakki dev files pull`) instead of the tail. */
+    if (access("/tmp/iyakki-dev/gst-debug", F_OK) == 0) {
+        setenv("GST_DEBUG", "*:2,alsasink:6,autoaudiosink:5,audiobasesink:5,v4l2*:5,v4l2src:6,webkit*:5,webrtc*:4,GST_CAPS:4,GST_STATES:3", 1);
+        setenv("GST_DEBUG_FILE", "/tmp/iyakki-dev/gst-debug.log", 1);
+    }
+    /* The engine's media device monitor probes every GStreamer device provider. On the T2 MacBook the ALSA provider cannot open
+     * hw:0,1 and the web process then dereferences a NULL GstObject (g_mutex_lock at 0x18) and crashes. Demote it to rank 0 so it is
+     * not started (the camera comes from the v4l2 provider); IYAKKI_WEBVIEW_ALSA_DEVICES=1 keeps it. Appended to an existing value. */
+    if (!getenv("IYAKKI_WEBVIEW_ALSA_DEVICES")) {
+        const char *old = getenv("GST_PLUGIN_FEATURE_RANK");
+        char *rk = g_strdup_printf("%s%salsadeviceprovider:0", old ? old : "", old && *old ? "," : "");
+        setenv("GST_PLUGIN_FEATURE_RANK", rk, 1);
+        g_free(rk);
+    }
+    /* One open per camera. The engine opens a v4l2src for every getUserMedia call and a USB camera cannot be opened twice (the second
+     * call fails with "Device is busy" and the page waits for ever). dist/webview/wpe-helper/camshare.c is a GStreamer plugin the web
+     * process loads: its device provider wraps the v4l2 provider and every page request is served from one open of the camera. The
+     * raw v4l2 provider goes to rank 0 so the engine lists the wrappers only (it stays reachable by name for the plugin). Without
+     * the plugin file (older image) nothing changes. IYAKKI_WEBVIEW_CAMSHARE=0 turns it off. */
+    if (access(CAMSHARE_PLUGIN, R_OK) == 0 && !(getenv("IYAKKI_WEBVIEW_CAMSHARE") && !strcmp(getenv("IYAKKI_WEBVIEW_CAMSHARE"), "0"))) {
+        const char *old = getenv("GST_PLUGIN_FEATURE_RANK");
+        char *rk = g_strdup_printf("%s%sv4l2deviceprovider:0", old ? old : "", old && *old ? "," : "");
+        setenv("GST_PLUGIN_FEATURE_RANK", rk, 1);
+        g_free(rk);
+        logf_("camera: one open per camera for all page requests (shared camera plugin)");
+    }
+    /* Microphones: dist/webview/wpe-helper/micshare.c is a GStreamer device provider that lists the capture streams of /proc/asound,
+     * opens them through plughw (alsa-lib converts rate, format and channels, which a raw hw: device cannot) and shares one open between
+     * page requests. The stock ALSA provider must not run next to it (it opens every hw: stream "for inspection", logs noise and lists
+     * devices that fail with "Rate doesn't match"): rank 0, whatever IYAKKI_WEBVIEW_ALSA_DEVICES says. IYAKKI_WEBVIEW_MICPROVIDER=0
+     * turns the plugin off (and leaves the stock provider as it was before). Without the plugin file nothing changes. */
+    if (access(MIC_PLUGIN, R_OK) == 0) {
+        const char *old = getenv("GST_PLUGIN_FEATURE_RANK");
+        gboolean off = getenv("IYAKKI_WEBVIEW_MICPROVIDER") && !strcmp(getenv("IYAKKI_WEBVIEW_MICPROVIDER"), "0");
+        char *rk = g_strdup_printf("%s%s%s", old ? old : "", old && *old ? "," : "", off ? "iyakkimic:0" : "iyakkimic:259,alsadeviceprovider:0");
+        setenv("GST_PLUGIN_FEATURE_RANK", rk, 1);
+        g_free(rk);
+        mic_plugin_on = !off;
+        logf_("microphone: %s", off ? "plugin present but switched off (IYAKKI_WEBVIEW_MICPROVIDER=0)" : "capture through plughw (microphone plugin)");
+    }
+    /* The engine's sound output. The usual `autoaudiosink` -> `alsasink` failed to set the T2's sound device up (the channel step of its
+     * hardware parameters is refused through every ALSA chain tried), and a page that uses WebAudio then froze on the failed start; the
+     * same failure can come from any device that is busy or refuses the engine's parameters. dist/webview/wpe-helper/websink.c is a sink
+     * that cannot fail (ALSA the way aplay asks: 16-bit stereo at 48 kHz, silence when the device cannot be used), so it is the engine's
+     * output on every machine. IYAKKI_WEBVIEW_AUDIOSINK=0 keeps the usual output. Without the plugin file nothing changes. */
+    if (access(WEBSINK_PLUGIN, R_OK) == 0 && !(getenv("IYAKKI_WEBVIEW_AUDIOSINK") && !strcmp(getenv("IYAKKI_WEBVIEW_AUDIOSINK"), "0"))) {
+        const char *old = getenv("GST_PLUGIN_FEATURE_RANK");
+        char *rk = g_strdup_printf("%s%siyakkiwebaudiosink:300", old ? old : "", old && *old ? "," : "");
+        setenv("GST_PLUGIN_FEATURE_RANK", rk, 1);
+        g_free(rk);
+        logf_("sound: the engine's output is the never-failing sink (web sound plugin)");
+    }
     wpe_loader_init(getenv("WPE_BACKEND_LIBRARY"));
     if (hw_open()) {
         if (wpe_fdo_initialize_for_egl_display(G.edpy)) G.egl = 1;
@@ -993,7 +1228,12 @@ static void setup_engine(void) {
     webkit_settings_set_enable_mediasource(st, TRUE);
     webkit_settings_set_enable_webaudio(st, TRUE);
     webkit_settings_set_enable_webgl(st, TRUE);
-    webkit_settings_set_enable_media_stream(st, FALSE);
+    /* getUserMedia / enumerateDevices exist in the page only when the engine was built with ENABLE_MEDIA_STREAM (Buildroot option
+     * BR2_PACKAGE_WPEWEBKIT_MEDIA_STREAM; harmless otherwise). Every request is still decided by the person in the shell (on_permission).
+     * IYAKKI_WEBVIEW_MEDIA=0 turns the setting off. Mock devices are for tests only (IYAKKI_WEBVIEW_MOCK_MEDIA=1). */
+    const char *media_env = getenv("IYAKKI_WEBVIEW_MEDIA");
+    webkit_settings_set_enable_media_stream(st, !(media_env && !strcmp(media_env, "0")));
+    if (getenv("IYAKKI_WEBVIEW_MOCK_MEDIA")) webkit_settings_set_enable_mock_capture_devices(st, TRUE);
     webkit_settings_set_enable_encrypted_media(st, FALSE);
     webkit_settings_set_enable_smooth_scrolling(st, TRUE);
     webkit_settings_set_media_playback_requires_user_gesture(st, FALSE);
@@ -1017,6 +1257,11 @@ static void setup_engine(void) {
     WebKitUserScript *mu = webkit_user_script_new(MEDIA_JS, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
     webkit_user_content_manager_add_script(ucm, mu);
     webkit_user_script_unref(mu);
+    webkit_user_content_manager_register_script_message_handler(ucm, "iyakkiDev", NULL);
+    g_signal_connect(ucm, "script-message-received::iyakkiDev", G_CALLBACK(on_dev_message), NULL);
+    WebKitUserScript *du = webkit_user_script_new(DEV_JS, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
+    webkit_user_content_manager_add_script(ucm, du);
+    webkit_user_script_unref(du);
     /* The browser tile is a person's browser, not a kiosk of unattended pages: sound and video may start without a gesture, as in
      * window mode. Without this WebKit answers play() with NotAllowedError for any video that has sound. */
     /* IYAKKI_WEBVIEW_AUTOPLAY: allow (default), muted (only media without sound starts by itself) or deny (a click starts everything).
@@ -1048,6 +1293,9 @@ static void setup_engine(void) {
     g_signal_connect(v, "create", G_CALLBACK(on_create), NULL);
     g_signal_connect(v, "mouse-target-changed", G_CALLBACK(on_target), NULL);
     g_signal_connect(v, "permission-request", G_CALLBACK(on_permission), NULL);
+    g_signal_connect(v, "notify::camera-capture-state", G_CALLBACK(on_capture_state), NULL);
+    g_signal_connect(v, "notify::microphone-capture-state", G_CALLBACK(on_capture_state), NULL);
+    g_signal_connect(v, "notify::display-capture-state", G_CALLBACK(on_capture_state), NULL);
     g_signal_connect(v, "script-dialog", G_CALLBACK(on_script_dialog), NULL);
     g_signal_connect(v, "web-process-terminated", G_CALLBACK(on_crash), NULL);
     g_signal_connect_swapped(webkit_web_view_get_back_forward_list(v), "changed", G_CALLBACK(send_history), NULL);

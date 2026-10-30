@@ -196,7 +196,12 @@ impl Engine {
         self.ctx = ctx;
     }
 
-    pub fn ctx(&self) -> &Ctx {
+    /// The engine's clock (unix seconds).
+    pub fn now(&self) -> i64 {
+        self.clock.now()
+    }
+
+        pub fn ctx(&self) -> &Ctx {
         &self.ctx
     }
 

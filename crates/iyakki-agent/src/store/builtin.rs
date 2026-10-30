@@ -9,7 +9,7 @@ use super::catalog::{sha256_hex, Action, Catalog, Entry};
 use super::manifest::{Meta, PriceModel, Pricing, Publisher};
 use crate::skills::{self, Scope};
 
-pub const SKILLS: [(&str, &str); 17] = [
+pub const SKILLS: [(&str, &str); 21] = [
     ("k3s-dev-best-practices", include_str!("../../../../dist/skills/k3s-dev-best-practices.md")),
     ("lang-python", include_str!("../../../../dist/skills/lang-python.md")),
     ("lang-javascript", include_str!("../../../../dist/skills/lang-javascript.md")),
@@ -27,6 +27,10 @@ pub const SKILLS: [(&str, &str); 17] = [
     ("iyakki-tile-author", include_str!("../../../../dist/skills/iyakki-tile-author.md")),
     ("k3s-build-and-deploy", include_str!("../../../../dist/skills/k3s-build-and-deploy.md")),
     ("k3s-dockerfile-patterns", include_str!("../../../../dist/skills/k3s-dockerfile-patterns.md")),
+    ("k3s-node-webapp", include_str!("../../../../dist/skills/k3s-node-webapp.md")),
+    ("k3s-web-service-patterns", include_str!("../../../../dist/skills/k3s-web-service-patterns.md")),
+    ("iyakki-dev-mode", include_str!("../../../../dist/skills/iyakki-dev-mode.md")),
+    ("iyakki-app-dev-loop", include_str!("../../../../dist/skills/iyakki-app-dev-loop.md")),
 ];
 
 /// The three sample skills (the shell puts the same text in place on the first sign-in; a test keeps them equal).
@@ -109,6 +113,14 @@ fn skill_item(name: &str, md: &str, categories: &[&str], featured: bool) -> Buil
         "Build and deploy to k3s".to_string()
     } else if name == "k3s-dockerfile-patterns" {
         "Dockerfile patterns for k3s".to_string()
+    } else if name == "k3s-node-webapp" {
+        "Node.js web apps on k3s".to_string()
+    } else if name == "k3s-web-service-patterns" {
+        "Web services on k3s (any language)".to_string()
+    } else if name == "iyakki-dev-mode" {
+        "Developer mode: work on a device".to_string()
+    } else if name == "iyakki-app-dev-loop" {
+        "Build an IYAKKI app: the dev loop".to_string()
     } else {
         name.trim_start_matches("sample-").replace('-', " ")
     };
@@ -182,7 +194,8 @@ fn build_all() -> Vec<Built> {
         let meta = Meta {
             title: clip(d.name, 60),
             summary: clip(d.about, 140),
-            description: if matches!(d.source, crate::clis::Source::System) { format!("{}\n\nNothing is downloaded: this comes with the system. Opening it shows what the CLI tile found on this machine and how to get it if it is missing. Home page: {}", d.about, d.home) } else { format!("{}\n\nInstalling opens the CLI tile, which downloads the program from its maker ({}), checks it, and keeps it in IYAKKI's own folder. Home page: {}", d.about, d.hosts.join(", "), d.home) },
+            description: if matches!(d.source, crate::clis::Source::System) { format!("{}\n\nNothing is downloaded: this comes with the system. Opening it shows what the CLI tile found on this machine and how to get it if it is missing. Home page: {}", d.about, d.home) } else { format!("{}\n\nInstalling opens the CLI tile, which downloads the program from its maker ({}), checks it, and keeps it in IYAKKI's own folder. Home page: {}", d.about, d.hosts.join(", "), d.home) }
+                + &cli_licence_text(d),
             publisher: iyakki(),
             categories: vec!["tools".into()],
             permissions: if matches!(d.source, crate::clis::Source::System) { vec![] } else { d.hosts.iter().take(4).map(|h| format!("net:{h}")).collect() },
@@ -190,7 +203,7 @@ fn build_all() -> Vec<Built> {
             ..Default::default()
         };
         let mut e = base_entry(&id, "cli", meta);
-        e.license = String::new();
+        e.license = d.license.to_string();
         e.builtin = String::new();
         e.action = Some(Action { open: "cli".into(), id: d.id.into() });
         e.added = ADDED - 86_400 * 30;
@@ -260,6 +273,44 @@ mod tests {
     }
 
     #[test]
+    fn the_node_and_web_service_skills_fit_reference_each_other_and_carry_the_no_builder_rule() {
+        let get = |n: &str| SKILLS.iter().find(|(k, _)| *k == n).unwrap_or_else(|| panic!("{n} ships")).1;
+        let (node, web) = (get("k3s-node-webapp"), get("k3s-web-service-patterns"));
+        for md in [node, web] {
+            let sk = skills::parse(md, Scope::Shared).expect("parses");
+            assert!(sk.body.chars().count() <= 3950 && md.is_ascii() && sk.triggers.len() <= 12, "{}", sk.name);
+            assert!(!md.contains("/home/") && !md.contains("192.168.") && !md.contains(":latest\n"));
+        }
+        assert!(node.contains("k3s-web-service-patterns") && node.contains("k3s-build-and-deploy") && node.contains("k3s-dockerfile-patterns"));
+        assert!(web.contains("k3s-node-webapp") && web.contains("k3s-build-and-deploy"));
+        for w in ["/healthz", "SIGTERM", "node --test", "vault_request", "deploy_status", "process.env", "ConfigMap", "podman"] {
+            assert!(node.contains(w) || web.contains(w), "{w}");
+        }
+        // when deploy_build says there is no image builder the assistant must not apply an image that was never built
+        assert!(web.contains("neither podman nor docker is installed") && web.contains("ImagePullBackOff") && web.contains("ConfigMap"));
+        assert!(node.contains("No podman or docker"));
+    }
+
+    #[test]
+    fn the_developer_mode_skills_are_complete_short_and_name_the_commands_they_teach() {
+        let get = |n: &str| SKILLS.iter().find(|(name, _)| *name == n).map(|(_, t)| *t).unwrap_or_else(|| panic!("{n} is shipped"));
+        let (dev, lp) = (get("iyakki-dev-mode"), get("iyakki-app-dev-loop"));
+        for (n, t) in [("iyakki-dev-mode", dev), ("iyakki-app-dev-loop", lp)] {
+            let body = t.splitn(3, "---\n").nth(2).unwrap();
+            assert!(body.len() <= 3950, "{n}: {} chars", body.len());
+            assert!(t.is_ascii(), "{n} is ASCII");
+            assert!(t.contains("B- id") && t.contains("bug_report") && t.contains("never F-"), "{n} carries the board rule");
+            assert!(crate::skills::parse(t, crate::skills::Scope::Shared).is_ok(), "{n} parses");
+        }
+        for word in ["iyakki dev pair", "screenshot -o", "patch apply", "update-pack", "NEVER reboot", "input tap X Y", "shell --minutes"] {
+            assert!(dev.contains(word), "dev mode skill names `{word}`");
+        }
+        for word in ["iyakki sdk init", "dev push . --watch --open", "pkg validate", "pkg pack", "iyakki-dev-mode", "iyakki-tile-author"] {
+            assert!(lp.contains(word), "app loop skill names `{word}`");
+        }
+    }
+
+    #[test]
     fn the_shipped_skills_the_samples_the_demo_server_and_the_clis_are_all_there() {
         let c = catalog();
         for (n, _) in SKILLS.iter().chain(SAMPLE_SKILLS.iter()) {
@@ -296,4 +347,24 @@ mod tests {
             }, &super::super::trust::Roots::default(), &[], 0, false).unwrap().0.entries.len() == 1, "{} validates", b.entry.id);
         }
     }
+}
+
+
+/// What the store screen says about a command-line tool's licence and delivery: the licence, that IYAKKI never ships the program (it is
+/// downloaded from its maker at the person's click), a plain warning for source-available and proprietary ones, and what is (not) verified.
+fn cli_licence_text(d: &crate::clis::CliDef) -> String {
+    let mut t = format!("\n\nLicence: {}.", d.license);
+    if !matches!(d.source, crate::clis::Source::System) {
+        t.push_str(" IYAKKI does not ship this program: it is downloaded from its maker at your request and kept in IYAKKI's own folder.");
+    }
+    if d.license.starts_with("Proprietary") {
+        t.push_str(" It is proprietary software under the vendor's terms: downloaded, not shipped, and not open source.");
+    } else if d.license.contains("not open source") {
+        t.push_str(" It is source-available, not open source: you download it yourself, under the vendor's terms, and IYAKKI does not ship it.");
+    }
+    if let Some(w) = d.integrity_warning() {
+        t.push_str("\n\n");
+        t.push_str(&w);
+    }
+    t
 }

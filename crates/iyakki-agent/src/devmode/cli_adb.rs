@@ -120,7 +120,7 @@ fn dmesg(c: &DevClient, args: &Args, out: &mut dyn FnMut(&str)) -> Result<(), St
 
 fn syslog(c: &DevClient, args: &Args, out: &mut dyn FnMut(&str)) -> Result<(), String> {
     let n = args.get("-n").unwrap_or("200").to_string();
-    for src in ["shell", "boot", "audit"] {
+    for src in ["shell", "boot", "audit", "engine"] {
         if let Some(only) = args.get("--source") {
             if only != src {
                 continue;
@@ -140,6 +140,13 @@ fn status(c: &DevClient, out: &mut dyn FnMut(&str)) -> Result<(), String> {
     out(&format!("{:<26} {:<10} {}", "SERVICE", "STATE", "DETAIL"));
     for r in v["services"].as_array().into_iter().flatten() {
         out(&format!("{:<26} {:<10} {}", s(r, "name"), s(r, "state"), s(r, "detail")));
+    }
+    if let Some(rows) = v["startup"].as_array().filter(|a| !a.is_empty()) {
+        out("");
+        out(&format!("{:<26} {:<10} {}", "STARTUP", "STATE", "STEP OR REASON"));
+        for r in rows {
+            out(&format!("{:<26} {:<10} {}", s(r, "name"), s(r, "state"), s(r, "detail")));
+        }
     }
     Ok(())
 }
@@ -359,12 +366,21 @@ fn pull_tree(c: &DevClient, remote: &str, base: &Path, n: &mut usize, out: &mut 
 fn input(c: &DevClient, args: &Args, out: &mut dyn FnMut(&str)) -> Result<(), String> {
     let p = |i: usize| args.pos.get(i).map(String::as_str);
     let n = |i: usize, what: &str| -> Result<i64, String> { p(i).ok_or_else(|| format!("{what} is missing"))?.parse::<i64>().map_err(|_| format!("{what} must be a whole number")) };
-    let body = match p(1).ok_or("usage: iyakki dev input tap X Y | key NAME | text 'abc' | swipe X1 Y1 X2 Y2 [MS]")? {
+    if p(1) == Some("click") {
+        let label = args.pos[2..].join(" ");
+        if label.trim().is_empty() {
+            return Err("usage: iyakki dev input click \"LABEL\"  (the names are listed by `iyakki dev state`)".into());
+        }
+        let v = c.call("POST", "/v1/dev/click", &[], serde_json::json!({ "label": label }).to_string().as_bytes())?;
+        out(&format!("Clicked {:?} in {} (at {},{}).", s(&v, "clicked"), s(&v, "app"), v["x"], v["y"]));
+        return Ok(());
+    }
+    let body = match p(1).ok_or("usage: iyakki dev input tap X Y | key NAME | text 'abc' | swipe X1 Y1 X2 Y2 [MS] | click \"LABEL\"")? {
         "tap" => serde_json::json!({ "kind": "tap", "x": n(2, "X")?, "y": n(3, "Y")? }),
         "swipe" => serde_json::json!({ "kind": "swipe", "x1": n(2, "X1")?, "y1": n(3, "Y1")?, "x2": n(4, "X2")?, "y2": n(5, "Y2")?, "ms": p(6).and_then(|m| m.parse::<u64>().ok()).unwrap_or(300) }),
         "key" => serde_json::json!({ "kind": "key", "name": p(2).ok_or("which key? (Enter, Esc, Tab, Up, Ctrl+c, F5, a)")? }),
         "text" => serde_json::json!({ "kind": "text", "text": args.pos[2..].join(" ") }),
-        other => return Err(format!("unknown input {other:?}: tap, swipe, key, text")),
+        other => return Err(format!("unknown input {other:?}: tap, swipe, key, text, click")),
     };
     c.call("POST", "/v1/dev/input", &[], body.to_string().as_bytes())?;
     out("Sent to the shell on the device's screen.");
@@ -893,9 +909,16 @@ fn forward_cmd(c: &DevClient, args: &Args, out: &mut dyn FnMut(&str)) -> Result<
 // -------------------------------------------------------------------------------------------- system update
 
 fn update_pack(args: &Args, out: &mut dyn FnMut(&str)) -> Result<(), String> {
-    let img = args.pos.get(1).ok_or("usage: iyakki dev update-pack IMAGE.img -o DIR [--version V] [--variant NAME]")?;
+    let img = args.pos.get(1).ok_or("usage: iyakki dev update-pack IMAGE.img -o DIR [--version V] [--variant NAME] [--sign KEYFILE]")?;
     let dir = PathBuf::from(args.get("-o").ok_or("where should the payload go? -o DIR")?);
-    pack(Path::new(img), &dir, args.get("--version"), args.get("--variant"), out)
+    pack(Path::new(img), &dir, args.get("--version"), args.get("--variant"), out)?;
+    // the owner signs a pack for the Update centre (Settings -> System update): the key file holds 64 hex characters and never leaves the owner's computer
+    if let Some(kf) = args.get("--sign") {
+        let key = std::fs::read_to_string(kf).map_err(|e| format!("{kf}: {e}")).and_then(|t| crate::pkg::signing_key_from_hex(&t).map_err(|e| e.to_string()))?;
+        super::centre::sign_pack(&dir, &key)?;
+        out(&format!("Signed: {}", dir.join(super::centre::SIG_FILE).display()));
+    }
+    Ok(())
 }
 
 /// Extract the boot files of an install image into `dir` and write the manifest. The image is only read.

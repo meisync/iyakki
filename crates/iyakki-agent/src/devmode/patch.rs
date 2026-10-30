@@ -476,14 +476,17 @@ impl Live for SysLive {
         let mut ch = std::process::Command::new("/bin/sh").arg("-c").arg(cmd).stdin(std::process::Stdio::null()).spawn().map_err(|e| e.to_string())?;
         let start = std::time::Instant::now();
         loop {
-            match ch.try_wait().map_err(|e| e.to_string())? {
-                Some(s) if s.success() => return Ok(()),
-                Some(s) => return Err(format!("the command ended with {s}")),
-                None if start.elapsed().as_secs() > 60 => {
+            match iyakki_core_api::child_status(&mut ch) {
+                s if s.success() => return Ok(()),
+                // the status was taken by another reaper: it is over, but whether it worked is unknown
+                iyakki_core_api::ChildState::Gone => return Err("the command ended, its exit status is not available (another process took it)".into()),
+                s if s.is_over() => return Err(format!("the command ended with {}", s.describe())),
+                _ if start.elapsed().as_secs() > 60 => {
                     let _ = ch.kill();
+                    let _ = ch.wait();
                     return Err("the command took more than 60 s and was stopped".into());
                 }
-                None => std::thread::sleep(std::time::Duration::from_millis(100)),
+                _ => std::thread::sleep(std::time::Duration::from_millis(100)),
             }
         }
     }

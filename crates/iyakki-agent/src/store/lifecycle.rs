@@ -100,6 +100,8 @@ pub enum Check {
     SourceGone(String),
     /// Withdrawn by the revocation list.
     Revoked,
+    /// The private store it came from withdrew (yanked) this very version; the copy still works until it is removed.
+    Withdrawn(String),
     /// The store could not be reached (or has not been fetched yet), so nothing newer can be known.
     Offline(String),
     /// No way to tell: installed from a file, written by hand, or the vendor publishes no version number.
@@ -117,6 +119,7 @@ impl Check {
             Check::Update => "Update available".into(),
             Check::SourceGone(_) => "Source gone".into(),
             Check::Revoked => "Revoked".into(),
+            Check::Withdrawn(_) => "Withdrawn".into(),
             Check::Offline(_) => "Can't check offline".into(),
             Check::NoWay(_) => "No way to check".into(),
             Check::BuiltIn => "Built in".into(),
@@ -126,7 +129,7 @@ impl Check {
 
     pub fn note(&self) -> String {
         match self {
-            Check::SourceGone(n) | Check::Offline(n) | Check::NoWay(n) => n.clone(),
+            Check::SourceGone(n) | Check::Withdrawn(n) | Check::Offline(n) | Check::NoWay(n) => n.clone(),
             _ => String::new(),
         }
     }
@@ -612,6 +615,8 @@ impl Store {
                     life.check = Check::NoWay("Installed from a paired developer computer (developer mode): it is never updated from a store. Push a new build, or remove it and install the store's version.".into());
                 } else if rec.is_some_and(|r| r.source == "file") {
                     life.check = Check::NoWay("Installed from a file: there is no store to ask. Install a newer file to update it.".into());
+                } else if let Some(store) = rec.and_then(|r| self.withdrawn_by_source(&r.source, &r.name, &r.version, &r.sha256)) {
+                    life.check = Check::Withdrawn(format!("{store} withdrew this version. It still runs, but it is no longer offered: remove it (`store remove {}`) or install the store's newer version.", life.id));
                 } else if !pkg::valid_version(&e.version) {
                     life.check = Check::NoWay("Its version is not a number the store can compare.".into());
                 } else {

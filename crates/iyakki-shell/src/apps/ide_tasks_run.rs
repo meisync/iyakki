@@ -77,6 +77,9 @@ pub fn manager(cx: &AppCx, root: &Path, features: &Path, name: &str) -> Manager 
     let m = Manager::open(root, features);
     m.set_hooks(hooks(cx, name));
     m.set_runner(make_runner(cx, root));
+    // the Tasks tab tests must not depend on how full the machine is; tests of the cap set their own source
+    #[cfg(test)]
+    m.set_memory_source(Some(Arc::new(|| Some(64u64 << 30))));
     m
 }
 

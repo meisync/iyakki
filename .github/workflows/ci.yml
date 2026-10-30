@@ -8,7 +8,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: x86_64-unknown-linux-musl }
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config musl-tools
-      - run: cargo test --workspace
+      - run: RUSTFLAGS="-D warnings" cargo check --workspace --all-targets
+      - run: ./run.sh warnings
+      - run: mkdir -p target/tmp
+      - run: TMPDIR="$PWD/target/tmp" cargo test --workspace --no-fail-fast
+      - name: licence gate (skipped loudly while ./run.sh licence-check does not exist; a failure on a tag)
+        run: |
+          if ./run.sh help 2>&1 | grep -q 'licence-check'; then ./run.sh licence-check --no-images   # no images in CI: the image scan runs where the images are built
+          else
+            echo "::warning::SKIPPED: ./run.sh licence-check does not exist yet; the licence gate did NOT run"
+            case "$GITHUB_REF" in refs/tags/*) echo "FAIL: release run without the licence gate"; exit 1;; esac
+          fi
       - run: cargo build --release --target x86_64-unknown-linux-musl -p iyakki-core
       - run: cargo build -p iyakki-hw --features audio,video
   licenses:

@@ -9,9 +9,10 @@ use serde_json::Value;
 use super::client::{self, DevClient, Home};
 use super::{ops, DEFAULT_PORT};
 
-pub const USAGE: &str = "usage: iyakki dev <command>
-  pair <address[:port]> [--code CODE] [--name THIS-COMPUTER] [--as DEVICE-NAME] [--fingerprint FP]
+pub const USAGE_BASE: &str = "usage: iyakki dev <command>
+  pair <address[:port] | name.local> [--code CODE] [--name THIS-COMPUTER] [--as DEVICE-NAME] [--fingerprint FP]
                                       pair once with the code and fingerprint the device shows (Settings, Developer mode)
+  scan                                list the IYAKKI devices that announce themselves on this network (name, address, services)
   devices [--default NAME | --forget NAME]   the devices this computer paired with
   usb [check|authorize|pair|speed|link|gadget]   connect two computers with ONE cable (Thunderbolt/USB4 or a bridge cable), see the steps
   install <pkg.iyp | folder> [--shared] [--open]   install a tile app, skill, MCP server, extension... (Developer (local))
@@ -24,7 +25,8 @@ pub const USAGE: &str = "usage: iyakki dev <command>
   whoami                              the device, the account this computer acts as, and the scopes it holds
   info | ps | dmesg [--follow] [--grep X] | logs --system | status      look at the device (scope debug)
   files ls|stat|push|pull|rm|mkdir PATH       copy files to and from the device (scope files)
-  input tap X Y | key NAME | text 'abc' | swipe X1 Y1 X2 Y2           drive the screen (scope input)
+  input tap X Y | key NAME | text 'abc' | swipe X1 Y1 X2 Y2 | click \"LABEL\"    drive the screen (scope input)
+{DIAG}
   config list | get KEY | set KEY VALUE | export [FILE] | import FILE      settings through a whitelist (scope config)
   config provider add ID --kind K [--url U] [--key-file F|--key-env V|--key-stdin] | key ID ... | remove ID     (keys are write-only)
   config firewall list | allow VALUE [--ports P] [--proto tcp|udp|both] [--minutes N] | remove ID | keep | revert
@@ -34,9 +36,14 @@ pub const USAGE: &str = "usage: iyakki dev <command>
   patch build DIR -o PACK | show PACK | apply PACK [--live|--next-boot] [--shell] | list | remove ID     hot-patch files of the running system (scope update)
   reboot | poweroff                   restart or switch off the device (approval on its screen)
   update PAYLOAD|IMAGE.img [--force] [--reboot] | update --status    replace the boot files with a newer IYAKKI (scope update)
-  update-pack IMAGE.img -o DIR [--version V] [--variant NAME]       make the payload from an install image (nothing is written to the image)
+  update-pack IMAGE.img -o DIR [--version V] [--variant NAME] [--sign KEYFILE]   make the payload from an install image (nothing is written to the image); --sign adds update.json.sig for Settings -> System update
   screenshot [--display N] [--record SECONDS [--fps N]] [-o FILE|DIR]
 options for every command: --device NAME (default: the first paired), --home DIR (default: ~/.config/iyakki/dev or $IYAKKI_DEV_HOME)";
+
+/// The usage text of `iyakki dev` (the base text with the diagnosis commands in place).
+pub fn usage() -> String {
+    USAGE_BASE.replace("{DIAG}", super::cli_diag::USAGE)
+}
 
 pub(super) struct Args {
     pub(super) pos: Vec<String>,
@@ -45,7 +52,7 @@ pub(super) struct Args {
     pub(super) after: Vec<String>,
 }
 
-const WITH_VALUE: [&str; 31] = ["--code", "--name", "--as", "--fingerprint", "--device", "--home", "-o", "--default", "--forget", "--grep", "-n", "--source", "--display", "--record", "--fps", "--minutes", "--reason", "--lines", "--image", "--set", "--kind", "--url", "--key-file", "--key-env", "--ports", "--proto", "--comment", "--file", "--value", "--version", "--variant"];
+const WITH_VALUE: [&str; 32] = ["--code", "--name", "--as", "--fingerprint", "--device", "--home", "-o", "--default", "--forget", "--grep", "-n", "--source", "--display", "--record", "--fps", "--minutes", "--reason", "--lines", "--image", "--set", "--kind", "--url", "--key-file", "--key-env", "--ports", "--proto", "--comment", "--file", "--value", "--version", "--variant", "--sign"];
 
 impl Args {
     pub(super) fn parse(a: &[String]) -> Result<Args, String> {
@@ -161,7 +168,7 @@ pub fn push(c: &DevClient, dir: &Path, key: &ed25519_dalek::SigningKey, opts: Pu
 pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
     let args = Args::parse(a)?;
     let home = Home::at(&args.get("--home").map(PathBuf::from).unwrap_or_else(client::default_home));
-    let Some(cmd) = args.pos.first().map(String::as_str) else { return Err(USAGE.into()) };
+    let Some(cmd) = args.pos.first().map(String::as_str) else { return Err(usage()) };
     let arg1 = args.pos.get(1).map(String::as_str);
     let connect = || -> Result<DevClient, String> { DevClient::new(&home, home.device(args.get("--device"))?) };
     if let Some(r) = super::cli_adb::run(cmd, &args, &connect, out) {
@@ -170,17 +177,22 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
     if let Some(r) = super::cli_patch::run(cmd, &args, &connect, out) {
         return r;
     }
+    if let Some(r) = super::cli_diag::run(cmd, a, &args, &connect, out) {
+        return r;
+    }
     match cmd {
-        "help" | "--help" => out(USAGE),
+        "help" | "--help" => out(&usage()),
         "usb" => {
             // the raw words after `usb`: it has flags of its own (`--fixed-pair on`)
             let at = a.iter().position(|x| x == "usb").unwrap_or(0);
             return crate::directlink::cli::run(&a[at + 1..], home.dir(), out);
         }
         "pair" => {
-            let (host, port) = client::split_host(arg1.ok_or("usage: iyakki dev pair <address[:port]> [--code CODE]")?, DEFAULT_PORT)?;
-            let (fp, info) = client::hello(&host, port)?;
-            out(&format!("Device {} (IYAKKI {}) at {host}:{port}", info["name"].as_str().unwrap_or("?"), info["version"].as_str().unwrap_or("?")));
+            let (host, port) = client::split_host(arg1.ok_or("usage: iyakki dev pair <address[:port] | name.local> [--code CODE]")?, DEFAULT_PORT)?;
+            // a name like iyakki-0a1b2c.local is looked up on the local network with our own resolver
+            let ip = if iyakki_netscan::mdns::is_local_name(&host) { client::resolve_local(&host).into_iter().next().ok_or_else(|| format!("cannot find {host} on the local network (is the device on, on the same network, and announcing its name?)"))? } else { host.clone() };
+            let (fp, info) = client::hello(&ip, port)?;
+            out(&format!("Device {} (IYAKKI {}) at {host}:{port}{}", info["name"].as_str().unwrap_or("?"), info["version"].as_str().unwrap_or("?"), if ip != host { format!(" ({ip})") } else { String::new() }));
             out(&format!("Its certificate fingerprint: {fp}\nCheck that the device's screen shows the same fingerprint."));
             if info["pairing"].as_bool() != Some(true) {
                 return Err("no pairing code is open on the device: an administrator chooses Pair a computer in Settings, Developer mode".into());
@@ -192,6 +204,16 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
             let name = args.get("--name").map(str::to_string).unwrap_or_else(computer_name);
             let d = client::pair(&home, &host, port, &name, &code, args.get("--fingerprint").or(Some(&fp)), args.get("--as"))?;
             out(&format!("Paired: this computer is “{name}” on {} and acts as the account {}. Saved as device “{}” in {}.", host, d.account, d.name, home.dir().display()));
+        }
+        "scan" => {
+            let found = iyakki_netscan::mdns::net::scan(&iyakki_netscan::mdns::net::Ask::new(Duration::from_secs(2)));
+            if found.is_empty() {
+                out("No IYAKKI device answered. It must be on this network with \"Announce this device on the local network\" on (Settings, Network); some Wi-Fi access points block this kind of message between devices.");
+            }
+            for f in found {
+                let svc: Vec<String> = f.services.iter().map(|(k, p)| format!("{k}:{p}")).collect();
+                out(&format!("{:<24} {:<32} {}", f.host, f.addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(","), svc.join(" ")));
+            }
         }
         "devices" => {
             if let Some(n) = args.get("--forget") {
@@ -208,7 +230,7 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
                 out("No device is paired yet: run `iyakki dev pair <address>`.");
             }
             for d in list {
-                out(&format!("{} {:<16} {}:{}  as {}  key {}", if d.name == def { "*" } else { " " }, d.name, d.host, d.port, d.account, d.fingerprint.chars().take(23).collect::<String>()));
+                out(&format!("{} {:<16} {}{}:{}  as {}  key {}", if d.name == def { "*" } else { " " }, d.name, d.host, if d.addr.is_empty() { String::new() } else { format!(" ({})", d.addr) }, d.port, d.account, d.fingerprint.chars().take(23).collect::<String>()));
             }
             if let Some(k) = home.public_key() {
                 out(&format!("This computer's key: {k}"));
@@ -218,8 +240,11 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
             let c = connect()?;
             let v = c.whoami()?;
             out(&format!("{} ({}:{}): this computer is “{}”, acting as {} ({}); developer mode {}", v["device"].as_str().unwrap_or(""), c.device.host, c.device.port, v["computer"].as_str().unwrap_or(""), v["account"].as_str().unwrap_or(""), v["role"].as_str().unwrap_or(""), v["status"].as_str().unwrap_or("")));
-            let sc: Vec<&str> = v["scopes"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
-            out(&format!("Scopes this computer holds: {} (an administrator grants more on the device: Settings, Developer mode)", if sc.is_empty() { "none".to_string() } else { sc.join(", ") }));
+            let sc: Vec<String> = v["scopes"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+            out(&format!("Scopes this computer holds: {}", if sc.is_empty() { "none".to_string() } else { sc.join(", ") }));
+            for l in super::cli_diag::scope_lines(&sc) {
+                out(&l);
+            }
         }
         "install" => {
             let path = Path::new(arg1.ok_or("usage: iyakki dev install <pkg.iyp | folder> [--shared] [--open]")?);
@@ -290,7 +315,7 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
             std::fs::write(&file, &png).map_err(|e| format!("{}: {e}", file.display()))?;
             out(&format!("Saved {} ({} KB).", file.display(), png.len().div_ceil(1024)));
         }
-        other => return Err(format!("unknown command {other:?}\n{USAGE}")),
+        other => return Err(format!("unknown command {other:?}\n{}", usage())),
     }
     Ok(())
 }

@@ -288,7 +288,7 @@ fn touches_do_nothing_while_the_bar_is_dark_or_locked() {
 #[test]
 fn raw_touch_events_become_positions_along_the_bar() {
     let mut t = RawTouch::new(0, 1000, 2170, false, AXIS_X);
-    let mut run = |t: &mut RawTouch, evs: &[(u16, u16, i32)]| evs.iter().flat_map(|(a, b, c)| t.feed(*a, *b, *c)).collect::<Vec<_>>();
+    let run = |t: &mut RawTouch, evs: &[(u16, u16, i32)]| evs.iter().flat_map(|(a, b, c)| t.feed(*a, *b, *c)).collect::<Vec<_>>();
     let out = run(&mut t, &[(3, 0x39, 5), (3, 0x35, 500), (0, 0, 0), (3, 0x35, 1000), (0, 0, 0), (3, 0x39, -1)]);
     assert_eq!(out, [TouchEv::Down(1085), TouchEv::Move(2169), TouchEv::Up(2169)]);
     // a second finger (slot 1) is ignored; the long axis can be Y; mirrored bars flip

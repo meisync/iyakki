@@ -33,6 +33,8 @@ pub enum VaultState {
 pub struct LoginReport {
     pub user_vault: VaultState,
     pub system_vault: VaultState,
+    /// What happened to the person's protected browser data at sign-in (`profilestore.rs`; `Off` when not protected).
+    pub browser_data: crate::profilestore::SignIn,
 }
 
 pub struct Services {
@@ -46,6 +48,8 @@ pub struct Services {
     pub radio: crate::radio::RadioPlayer,
     /// The online radio directory the chat's radio tools search (with an hour of memory).
     pub radio_dir: crate::radiotools::Directory,
+    /// Developer tools for the chat agent: the per-person switch and the bounded buffers of failed requests, timings and console messages.
+    pub devtools: crate::devtools::DevTools,
     /// The assistant's web client (search, fetch, weather, quotes) and the page each person has open in the browser.
     pub web: crate::webtools::WebClient,
     pub page_snapshot: Mutex<HashMap<String, crate::webtools::PageSnapshot>>,
@@ -61,6 +65,8 @@ pub struct Services {
     pub usage: crate::usage::UsageLog,
     /// Each person's events and alarms, shared by the calendar app, the chat and the terminal.
     pub calendar: crate::calendar::CalendarStore,
+    /// Each person's study plans and quizzes, shared by the LEARN tile and the chat (`docs/STUDY.md`).
+    pub study: crate::study::StudyStore,
     /// Command-line tools installed from the CLI tile (kubectl, aws, gcloud, …).
     pub clis: Arc<crate::clis::CliManager>,
     /// The container cluster (k3s) the assistant can run code in.
@@ -159,6 +165,8 @@ impl Services {
     /// `quick` is used for tests and model listing (short timeout), `slow` for generation.
     pub fn open(dir: &Path, quick: Arc<dyn Upstream>, slow: Arc<dyn Upstream>) -> Result<Arc<Services>, String> {
         let t0 = std::time::Instant::now();
+        // a decrypted browser profile left by a crash is wiped before anybody can sign in (`profilestore.rs`)
+        crate::profilestore::wipe_stale(dir);
         std::fs::create_dir_all(dir.join("vault/users")).map_err(io_err)?;
         let settings = SettingsStore::open(&dir.join("settings.json")).map_err(io_err)?;
         let sys_path = dir.join("vault/system.afv");
@@ -183,8 +191,10 @@ impl Services {
                     // the radio's volume is the master volume, not a second one
                     let r = crate::radio::RadioPlayer::default();
                     r.set_master_link(master_link(&settings_arc));
+                    r.announce_holder();
                     r
                 },
+                devtools: crate::devtools::DevTools::new(dir),
                 radio_dir: crate::radiotools::Directory::new(Arc::new(crate::radiotools::UpstreamFetcher(quick.clone()))),
                 web: crate::webtools::WebClient::new(),
                 page_snapshot: Mutex::new(HashMap::new()),
@@ -194,6 +204,7 @@ impl Services {
                 ext_status: Arc::new(crate::extagent::StatusCache::open(&dir.join("ext-models.json"))),
                 usage: crate::usage::UsageLog::open(&dir.join("usage.jsonl")),
                 calendar: crate::calendar::CalendarStore::new(&dir.join("calendar")),
+                study: crate::study::StudyStore::new(&dir.join("study")),
                 clis: clis.clone(),
                 cluster: Arc::new(crate::cluster::Cluster::new(&dir.join("cluster"), clis.clone())),
                 k3sdev: crate::k3sdev::K3sDev::new(dir, clis.clone(), Arc::new(crate::wsexec::System)),
@@ -638,9 +649,20 @@ impl Services {
         let svc = self.clone();
         let _ = std::thread::Builder::new().name("iyakki-warm".into()).spawn(move || {
             let Some(c) = svc.settings.lock().unwrap().get().chat.clone() else { return };
-            if let Ok(client) = svc.client_for(&c.provider, false) {
-                if let Ok(t) = client.warm_up(&c.model) {
+            let reg = crate::startup::global();
+            reg.starting("models", &format!("loading the model {}", c.model));
+            match svc.client_for(&c.provider, false).and_then(|client| client.warm_up(&c.model)) {
+                Ok(t) => {
                     svc.last_warm_up_ms.store(t, std::sync::atomic::Ordering::Relaxed);
+                    // a model that is not a local one needs no loading
+                    if t == 0 {
+                        reg.disabled("models");
+                    } else {
+                        reg.ready("models");
+                    }
+                }
+                Err(e) => {
+                    reg.failed("models", &format!("{}: {e}", c.model));
                 }
             }
         });
@@ -899,7 +921,28 @@ impl Services {
         if self.agents_cfg().claude.enabled || self.agents_cfg().copilot.enabled {
             self.ext_status.refresh(self.agents_cfg());
         }
-        LoginReport { user_vault: user_state, system_vault: sys_state }
+        let browser_data = crate::profilestore::sign_in_for(self, user);
+        LoginReport { user_vault: user_state, system_vault: sys_state, browser_data }
+    }
+
+    /// Open only the person's own vault with their login password (after an automatic sign-in that had none); no sign-out needed.
+    /// Passwords that waited for it are saved by the next Quick install service check.
+    pub fn unlock_user_vault(&self, user: &str, password: &str) -> Result<(), String> {
+        if self.user_vault_unlocked(user) {
+            return Ok(());
+        }
+        let up = self.user_path(user);
+        if !LocalVault::exists(&up) {
+            return Err("you have no personal vault yet; it is created when you sign in with your password".into());
+        }
+        let slot = format!("user:{user}");
+        match LocalVault::open(&up).and_then(|mut v| v.unlock(&slot, password).map(|_| v)) {
+            Ok(v) => {
+                self.user_vaults.lock().unwrap().insert(user.into(), v);
+                Ok(())
+            }
+            Err(_) => Err("that password does not open your vault".into()),
+        }
     }
 
     fn admin_login_system(&self, slot: &str, password: &str) -> VaultState {
@@ -1086,6 +1129,11 @@ impl Services {
         self.user_vaults.lock().unwrap().contains_key(user)
     }
 
+    /// Close the person's own vault again without signing out (the decrypted secrets are forgotten); `unlock_user_vault` opens it.
+    pub fn lock_user_vault(&self, user: &str) {
+        self.user_vaults.lock().unwrap().remove(user);
+    }
+
     // ------------------------------------------------------------ models
 
     /// Push secret-provider settings into the resolver (call after editing them).
@@ -1163,6 +1211,18 @@ impl Services {
         self.settings.lock().unwrap().get().voice.clone()
     }
 
+    /// The person's microphone (Voice tile and Browser): saved in the voice settings and handed to the web engine. Empty is automatic.
+    pub fn set_voice_mic(&self, id: &str) -> Result<(), String> {
+        self.settings.lock().unwrap().update(|s| s.voice.mic = id.to_string()).map_err(|e| e.to_string())?;
+        self.share_voice_mic();
+        Ok(())
+    }
+
+    /// Write the saved microphone choice where the web engine's microphone plugin reads it (at start and after every change).
+    pub fn share_voice_mic(&self) {
+        crate::voicedesk::share_mic_choice(&crate::voicedesk::mic_share_dir(), &self.voice_settings().mic);
+    }
+
     // ------------------------------------------------------------ sound output (Settings -> Sound)
 
     /// Settings -> Cloud mode: the administrator's choice (Automatic, On, Off).
@@ -1173,6 +1233,20 @@ impl Services {
     /// Change the Cloud mode setting (callers check that the person may).
     pub fn set_cloud_setting(&self, v: crate::cloudmode::Setting) -> Result<(), String> {
         self.settings.lock().unwrap().update(|s| s.cloud = v).map_err(|e| e.to_string())
+    }
+
+    /// Settings -> Network: the person's choice about announcing the device's name (None: the default).
+    pub fn announce_name_setting(&self) -> Option<bool> {
+        self.settings.lock().unwrap().get().announce_name
+    }
+
+    pub fn set_announce_name(&self, v: Option<bool>) -> Result<(), String> {
+        self.settings.lock().unwrap().update(|s| s.announce_name = v).map_err(|e| e.to_string())
+    }
+
+    /// Is the device announcing its name now: the choice, or the default (on, but off in cloud mode).
+    pub fn announce_name_on(&self) -> bool {
+        crate::devname::effective(self.announce_name_setting(), crate::cloudmode::detect(self.cloud_setting()).on)
     }
 
     /// Settings: "Show all AI tools" (default off): the AI tools the hardware profile hides are shown as "not recommended".

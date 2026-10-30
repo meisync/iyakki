@@ -16,10 +16,11 @@ pub fn count(text: &str) -> BTreeMap<String, usize> {
     m
 }
 
-/// The expected summary text: `done 219 · partial 121 · ... · total 397`.
+/// The expected summary text: `done 219 · partial 121 · planned 0 · blocked 0 · deprecated 0 · total 340`. Every status is listed, also when
+/// it has no rows (the core test `matrix_is_consistent` prints it the same way; a status that drops to zero must not change the format).
 pub fn summary(text: &str) -> String {
     let c = count(text);
-    let mut parts: Vec<String> = STATUSES.iter().filter_map(|s| c.get(*s).map(|n| format!("{s} {n}"))).collect();
+    let mut parts: Vec<String> = STATUSES.iter().map(|s| format!("{s} {}", c.get(*s).copied().unwrap_or(0))).collect();
     parts.push(format!("total {}", c.values().sum::<usize>()));
     parts.join(" · ")
 }
@@ -47,11 +48,11 @@ pub fn check(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    const T: &str = "x <!-- summary:start -->done 2 · partial 1 · total 3<!-- summary:end -->\n| F-A-01 | a | P1 | done | P1 | 100% | t | |\n| F-A-02 | b | P1 | done | P1 | 100% | t | |\n| F-A-03 | c | P1 | partial | P1 | 50% | | |\n";
+    const T: &str = "x <!-- summary:start -->done 2 · partial 1 · planned 0 · blocked 0 · deprecated 0 · total 3<!-- summary:end -->\n| F-A-01 | a | P1 | done | P1 | 100% | t | |\n| F-A-02 | b | P1 | done | P1 | 100% | t | |\n| F-A-03 | c | P1 | partial | P1 | 50% | | |\n";
 
     #[test]
     fn totals_are_counted_and_compared() {
-        assert_eq!(summary(T), "done 2 · partial 1 · total 3");
+        assert_eq!(summary(T), "done 2 · partial 1 · planned 0 · blocked 0 · deprecated 0 · total 3");
         assert!(check(T).is_empty());
         assert!(check(&T.replace("done 2", "done 3"))[0].contains("totals line"));
         assert!(check("nothing")[0].contains("markers"));

@@ -172,6 +172,92 @@ fn a_page_whose_video_cannot_be_decoded_reaches_the_shell_as_a_media_event() {
 }
 
 #[test]
+fn a_page_asking_for_the_camera_reaches_the_shell_and_the_answer_reaches_the_helper() {
+    let mut v = WebView::start(config(&["--static"], 200, 100)).unwrap();
+    v.send(ToHelper::Navigate("fake://media/3/meet.example".into()));
+    let ev = until(&mut v, 10, |_, e| e.iter().any(|x| matches!(x, Event::PermissionRequest { .. })));
+    assert!(ev.contains(&Event::PermissionRequest { id: 1, kinds: 3, origin: "https://meet.example/".into() }), "{ev:?}");
+    v.send(ToHelper::PermissionAnswer { id: 1, allow: false });
+    until(&mut v, 10, |_, e| e.iter().any(|x| matches!(x, Event::Log(l) if l.contains("PermissionAnswer") && l.contains("allow: false"))));
+    v.send(ToHelper::Navigate("fake://capture/2".into()));
+    until(&mut v, 10, |_, e| e.contains(&Event::CaptureState(2)));
+}
+
+#[test]
+fn an_allowed_request_starts_capture_and_a_stop_message_ends_it() {
+    let mut v = WebView::start(config(&["--static"], 200, 100)).unwrap();
+    v.send(ToHelper::Navigate("fake://media/6/meet.example".into())); // camera + screen
+    until(&mut v, 10, |_, e| e.iter().any(|x| matches!(x, Event::PermissionRequest { .. })));
+    v.send(ToHelper::PermissionAnswer { id: 1, allow: true });
+    until(&mut v, 10, |_, e| e.contains(&Event::CaptureState(6)));
+    v.send(ToHelper::StopCapture { kinds: 4 });
+    until(&mut v, 10, |_, e| e.contains(&Event::CaptureState(2)));
+    v.send(ToHelper::Navigate("https://a.org/next".into()));
+    until(&mut v, 10, |_, e| e.contains(&Event::CaptureState(0)));
+}
+
+#[test]
+fn the_helper_source_asks_the_shell_for_media_and_denies_on_silence() {
+    // helper.c is built by Buildroot (WPE headers are not here): NOT compiled in this test, only read
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/webview/wpe-helper/helper.c")).unwrap();
+    let hdr = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/webview/wpe-helper/proto.h")).unwrap();
+    assert!(hdr.contains("F_PERMISSION_REQUEST") && hdr.contains("F_CAPTURE_STATE") && hdr.contains("T_PERMISSION_ANSWER") && hdr.contains("T_STOP_CAPTURE") && hdr.contains("T_SCREEN_SOURCE"));
+    assert!(src.contains("case T_PERMISSION_ANSWER") && src.contains("send_msg(F_PERMISSION_REQUEST") && src.contains("PERMISSION_TIMEOUT_MS"));
+    assert!(src.contains("webkit_permission_request_deny"), "deny stays the default");
+    assert_eq!(src.matches("webkit_permission_request_allow(").count(), 1, "one place allows, reached only from the shell's answer");
+    assert!(src.contains("pending_permission_answer_allow(p->req)") && src.contains("permission_deny_all()"));
+    assert!(src.contains("case T_STOP_CAPTURE") && src.contains("case T_SCREEN_SOURCE") && src.contains("webkit_web_view_set_display_capture_state"));
+    assert!(src.contains("webkit_settings_set_enable_media_stream(st, !(media_env"));
+}
+
+#[test]
+fn the_media_build_switch_is_off_by_default_and_the_test_pages_are_in_place() {
+    // the Buildroot side is not run here; this pins the files and the wiring so a rename or a deleted line is noticed
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read = |p: &str| std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
+    let frag = read("dist/buildroot/configs/iyakki_web_media.fragment");
+    for opt in ["BR2_PACKAGE_WPEWEBKIT_MEDIA_STREAM=y", "BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_V4L2=y", "BR2_PACKAGE_GST1_PLUGINS_GOOD_JPEG=y", "BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_WEBRTC=y", "BR2_PACKAGE_LIBNICE=y", "BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_VIDEOTESTSRC=y", "BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_AUDIOTESTSRC=y"] {
+        assert!(frag.lines().any(|l| l.trim() == opt), "{opt}");
+    }
+    assert!(!frag.lines().any(|l| l.starts_with("BR2_PACKAGE_PIPEWIRE")), "PipeWire stays commented out until the screen feeder exists");
+    let build = read("dist/buildroot/build.sh");
+    assert!(build.contains("WEB_MEDIA:-0") && build.contains("iyakki_web_media.fragment") && build.contains("IYAKKI_WEB_MEDIA"), "default OFF");
+    let changed = read("dist/buildroot/changed.sh");
+    assert!(changed.contains("WEB_MEDIA:-0") && changed.contains("iyakki_web_media.fragment"));
+    assert!(read("dist/buildroot/test-changed.sh").contains("WEB_MEDIA=1"));
+    let pkg = read("dist/buildroot/package/iyakki-web-media/iyakki-web-media.mk");
+    assert!(pkg.contains("ifeq ($(IYAKKI_WEB_MEDIA),1)") && pkg.contains("-DENABLE_WEB_RTC=ON"));
+    assert!(!read("dist/buildroot/external.mk").contains("WEB_RTC"), "external.mk stays untouched: editing it forces a full rebuild");
+    let expected = read("dist/buildroot/qemu-web-test/media/expected.json");
+    for (file, name) in [("enumerate.html", "enumerate"), ("gum-audio.html", "gum-audio"), ("gum-video.html", "gum-video"), ("rtc-loopback.html", "rtc-loopback"), ("display.html", "display")] {
+        let html = read(&format!("dist/buildroot/qemu-web-test/media/{file}"));
+        assert!(html.contains(&format!("MEDIA-TEST {name}")) && html.contains(&format!("'{name}'")), "{file} reports {name}");
+        assert!(expected.contains(&format!("\"{file}\"")) && expected.contains(&format!("\"name\": \"{name}\"")), "expected.json has {file}");
+    }
+    assert!(read("dist/buildroot/qemu-web-test/media/rtc-loopback.html").contains("RTCPeerConnection") && read("dist/buildroot/qemu-web-test/media/display.html").contains("getDisplayMedia"));
+}
+
+#[test]
+fn a_page_with_a_failed_request_and_a_console_error_reaches_the_shell_as_dev_events() {
+    let mut v = WebView::start(config(&["--static"], 200, 100)).unwrap();
+    v.send(ToHelper::Navigate("fake://dev".into()));
+    let ev = until(&mut v, 10, |_, e| e.iter().filter(|x| matches!(x, Event::DevEvent(_))).count() >= 3);
+    let lines: Vec<String> = ev.into_iter().filter_map(|e| if let Event::DevEvent(s) = e { Some(s) } else { None }).collect();
+    assert!(lines[0].starts_with("F\u{1f}GET\u{1f}404") && lines[1].starts_with("C\u{1f}error") && lines[2].starts_with("P\u{1f}"), "{lines:?}");
+}
+
+#[test]
+fn the_helper_source_wires_the_dev_probe_with_a_per_page_cap() {
+    // helper.c is built by Buildroot (WPE headers are not here): NOT compiled in this test, only read
+    let src = include_str!("../../../dist/webview/wpe-helper/helper.c");
+    let mk = include_str!("../../../dist/webview/wpe-helper/Makefile");
+    for want in ["iyakkiDev", "F_DEV_EVENT", "#include \"dev-probe.h\"", "DEV_MAX_PER_PAGE", "dev_sent = 0"] {
+        assert!(src.contains(want), "helper.c lacks {want}");
+    }
+    assert!(mk.contains("dev-probe.h: dev-probe.js"));
+}
+
+#[test]
 fn the_helper_source_forwards_only_the_three_media_words_from_the_probe() {
     // helper.c is built by Buildroot (WPE headers are not here): check by reading that the probe and the guard are wired in
     let src = include_str!("../../../dist/webview/wpe-helper/helper.c");

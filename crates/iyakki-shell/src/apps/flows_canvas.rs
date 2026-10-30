@@ -313,6 +313,7 @@ pub fn skeleton(kind: &str) -> Value {
         "foreach" => json!({"items": "{{ input.items }}", "flow": "", "max_items": 100}),
         "join" => json!({"mode": "any"}),
         "end" => json!({"outputs": {}}),
+        "cam_photo" => json!({"keep": false}),
         "br_open" => json!({"url": "http://localhost:8080/", "wait": "idle"}),
         "br_screenshot" => json!({"name": "screenshot"}),
         "br_dom" => json!({"mode": "summary", "console": true}),

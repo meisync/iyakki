@@ -5,9 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# Certificates made on the spot for other crates' tests (never part of a release build).
+testcerts = ["dep:rcgen"]
 default = ["https"]
 # Real HTTPS upstream (ureq + rustls). Disable for a plain-HTTP-only, dependency-light build.
-https = ["dep:ureq"]
+https = ["dep:ureq", "dep:rustls", "dep:webpki-roots"]
 
 [dependencies]
 iyakki-sec.workspace = true
@@ -15,3 +17,11 @@ iyakki-wasm.workspace = true
 iyakki-web.workspace = true
 miniz_oxide = "0.8"
 ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = { version = "1", optional = true }
+sha2 = "0.10"
+
+rcgen = { version = "0.13", optional = true, default-features = false, features = ["crypto", "pem", "ring"] }
+
+[dev-dependencies]
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }

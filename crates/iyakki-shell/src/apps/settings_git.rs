@@ -285,6 +285,13 @@ impl SettingsApp {
                     self.fail("Platform services are in Settings > Dev cluster, which this account does not have.");
                 }
             }
+            WizOut::QuickInstallGitea => {
+                self.git.wiz = None;
+                match crate::apps::git_wizard::start_quick_install_gitea(cx) {
+                    Ok(m) => self.ok(m),
+                    Err(e) => self.fail(e),
+                }
+            }
             WizOut::Done(c) => {
                 self.git.wiz = None;
                 let r = Self::git_rows(cx).iter().position(|r| matches!(r, GRow::Conn(x) if x.id == c.id));
@@ -410,7 +417,11 @@ impl SettingsApp {
             y += 4.0 * s;
         }
         if rows.is_empty() {
-            g.text(a.x, y + 6.0 * s, 14.0 * s, DIM, "No connections or keys yet. Press a to connect Git or Gitea, n to make an SSH key, or i to import one you already use.", Face::Sans);
+            y += 6.0 * s;
+            for w in g.wrap(14.0 * s, "No connections or keys yet. Press a to connect Git or Gitea, n to make an SSH key, or i to import one you already use.", Face::Sans, a.w) {
+                g.text(a.x, y, 14.0 * s, DIM, &w, Face::Sans);
+                y += 20.0 * s;
+            }
             return;
         }
         let sel = self.sel[self.tab].min(rows.len() - 1);

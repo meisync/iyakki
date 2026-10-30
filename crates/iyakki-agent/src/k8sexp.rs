@@ -741,10 +741,6 @@ fn cluster_text(c: &Cluster) -> String {
     }
 }
 
-fn clock() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
-
 impl ExpFeed {
     pub fn start(kube: Arc<dyn Kube>, interval: Duration, ns_interval: Duration) -> ExpFeed {
         ExpFeed::start_with(kube, interval, ns_interval, Retry::system())

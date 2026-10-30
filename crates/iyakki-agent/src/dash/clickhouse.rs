@@ -24,7 +24,7 @@ pub fn info() -> KindInfo {
         language: Lang::Sql,
         about: "SQL on ClickHouse through its HTTP port (8123 or 8443). Create a read-only user for dashboards.".into(),
         fields,
-        example: "http://localhost:8123".into(),
+        example: "http://localhost:8123 (own server) or cluster://<namespace>/<service>:8123 (a ClickHouse inside the cluster)".into(),
     }
 }
 

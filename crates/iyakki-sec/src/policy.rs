@@ -48,10 +48,17 @@ pub enum App {
     Lab,
     /// Browse the repositories of the connected Git hosts and of the clones on this computer (`docs/GIT-TILE.md`).
     Git,
+    /// What is wrong with this computer, in plain words, each with one safe fix button; and the redacted support bundle (`docs/DOCTOR.md`).
+    Doctor,
+    /// A guided hardware self-test: screen, touch, keyboard, pointer, speaker, microphone, camera, monitors, network, Wi-Fi, Bluetooth and
+    /// power, each Pass, Fail or Skipped with advice (`docs/CHECKUP.md`). The camera and microphone steps start on the person's click.
+    Checkup,
+    /// Study plans and quizzes: a lesson schedule the chat writes, and quizzes the person takes and the code scores (`docs/STUDY.md`).
+    Learn,
 }
 
 impl App {
-    pub const ALL: [App; 32] = [App::Chat, App::Rag, App::Mcp, App::Cli, App::Users, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git];
+    pub const ALL: [App; 35] = [App::Chat, App::Rag, App::Mcp, App::Cli, App::Users, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -87,6 +94,9 @@ impl App {
             App::LinuxWin => "linuxwin",
             App::Lab => "lab",
             App::Git => "git",
+            App::Doctor => "doctor",
+            App::Checkup => "checkup",
+            App::Learn => "learn",
         }
     }
 
@@ -98,6 +108,7 @@ impl App {
             App::SrePilot => "SRE PILOT".to_string(),
             App::Ide => "AI IDE".to_string(),
             App::LinuxWin => "LINUX WINDOW".to_string(),
+            App::Checkup => "CHECK-UP".to_string(),
             other => other.id().to_uppercase(),
         }
     }
@@ -336,7 +347,7 @@ impl Role {
                 browser_max_minutes: 20,
             },
             Role::Operator => Policy {
-                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git]),
+                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn]),
                 cli: CliLevel::Full,
                 fs_read: strs(&["{home}", "/shared"]),
                 fs_write: strs(&["{home}", "/shared"]),
@@ -359,7 +370,7 @@ impl Role {
                 browser_max_minutes: 20,
             },
             Role::User => Policy {
-                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Radio, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::Lab, App::Git]),
+                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Radio, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn]),
                 cli: CliLevel::Restricted,
                 fs_read: strs(&["{home}", "/shared"]),
                 fs_write: strs(&["{home}"]),

@@ -113,6 +113,14 @@ for that one connection (curl gets it as its CA file, and git as `GIT_SSL_CAINFO
 * The panel's header shows the connection, host, remote and branch with **Fetch**, **Pull**, **Push…**, **Change…** and **Disconnect**. Disconnecting
   (removing `origin`) is a separate confirmation card; the commits, the files, the server and the connection stay.
 
+**Local Gitea (Quick install).** Store -> Setup -> *Gitea (versioning for your work)* installs a Gitea in the cluster and, once its password and
+token are in your vault, adds the connection **Local Gitea** (kind Gitea, `http://127.0.0.1:3300`, signs in with the token the install made, placement
+"on your cluster"; its token is the platform's own vault entry `svc.<instance>.token`, never copied). Running the install again changes nothing
+(the connection is found by the instance it names; the address follows if it moved; a connection you named "Local Gitea" yourself is left alone and
+this one is called "Local Gitea (IYAKKI)"). The GIT tile and the AI IDE's Git tab (Connections) list it like any other, and **Put this project under
+version control on Local Gitea** in the AI IDE (see `AI-IDE.md`) uses it. Only this machine reaches it, over HTTP with the token; SSH is not
+published. `iyakki-agent::quickinstall::gitea`, `docs/PLATFORM-SERVICES.md`.
+
 **Audit** (host and repository names only, never a token): `git.connect.add`, `.edit`, `.test`, `.trust`, `.default`, `.remove`, `git.repo.create`,
 `git.origin.set`, `git.push`, `git.disconnect`. Every error text passes through the token scrubber, and the token goes to curl in a private temp
 config file, never in a command line.
@@ -171,6 +179,8 @@ Every key use is written to the audit as `git.use clone <host> via key <id>` (or
 trusted and refused hosts, key generation, import and deletion, and removals; never a key, a passphrase or a token. An **assistant** (not a
 person's own click) must be approved once per key per session through an approval card before it can use a key (`Session::needs_approval`);
 today every git operation is started by a person's click, and the assistant has no git tool that reaches the key service.
+
+Related: [SSH tunnels](SSH-TUNNELS.md) use the same key list, the same known hosts file and the same host-key rules to put a web page behind an SSH host on `127.0.0.1`.
 
 ## Which ssh program (the choice)
 

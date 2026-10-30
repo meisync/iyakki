@@ -222,3 +222,40 @@ fn cloud_mode_hides_nothing_here() {
     sh.handle(&Event::Key(Key::Ctrl('p')));
     assert!(sh.lbar.card.is_some());
 }
+
+#[test]
+fn the_login_card_shows_sleep_only_when_the_machine_can_sleep_and_s_sleeps_once() {
+    for (w, h) in SIZES {
+        // not possible: no Sleep button and `s` is just a stray key that closes the card
+        let (mut sh, host) = shell_with_users("lb-nosleep");
+        sh.handle(&Event::Key(Key::Ctrl('p')));
+        rendered(&mut sh, w, h);
+        assert!(!sh.hits().iter().any(|x| x.label == "Sleep"), "{w}x{h}: no dead button");
+        sh.handle(&Event::Key(Key::Char('s')));
+        assert!(sh.lbar.card.is_none() && *host.slept.lock().unwrap() == 0);
+        // possible: the button shows inside the screen, `s` sleeps once, Esc cancels
+        let (mut sh, host) = shell_with_users("lb-sleep");
+        *host.sleepable.lock().unwrap() = true;
+        sh.handle(&Event::Key(Key::Ctrl('p')));
+        rendered(&mut sh, w, h);
+        for label in ["Power off", "Restart", "Sleep", "Cancel"] {
+            let hit = sh.hits().iter().find(|x| x.label == label).unwrap_or_else(|| panic!("{w}x{h}: {label}"));
+            assert!(inside(hit.rect, w, h), "{w}x{h}: {label} {:?}", hit.rect);
+        }
+        sh.handle(&Event::Key(Key::Esc));
+        assert!(sh.lbar.card.is_none() && *host.slept.lock().unwrap() == 0, "Esc cancels");
+        sh.handle(&Event::Key(Key::Ctrl('p')));
+        sh.handle(&Event::Key(Key::Char('s')));
+        assert!(sh.lbar.card.is_none());
+        assert_eq!(*host.slept.lock().unwrap(), 1);
+        assert!(host.powered_off.lock().unwrap().is_none());
+        // the highlighted Sleep (two steps right) with Enter does the same
+        let (mut sh, host) = shell_with_users("lb-sleep2");
+        *host.sleepable.lock().unwrap() = true;
+        sh.handle(&Event::Key(Key::Ctrl('p')));
+        sh.handle(&Event::Key(Key::Right));
+        sh.handle(&Event::Key(Key::Right));
+        sh.handle(&Event::Key(Key::Enter));
+        assert_eq!(*host.slept.lock().unwrap(), 1);
+    }
+}

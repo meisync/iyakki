@@ -24,10 +24,62 @@ script `browserqa.js`); the session, approvals and policy are `crates/iyakki-age
 | `browser_click(id)`, `browser_type(id, text, clear?, submit?)`, `browser_press(key, id?)`, `browser_select(id, option)`, `browser_fill_form(fields)` | interact | account setting *interactive* and your approval for the domain |
 | `browser_login(site, vault_name)` | fills a sign-in from your vault; the secret never passes through the model | interactive; asked every time |
 | `browser_run_script(steps)` | the deterministic runner with the assistant's approvals | interactive |
+| `browser_failed_requests`, `browser_timings`, `browser_console`, `browser_headers` | developer-tools views of the pages open in the BROWSER tile: failed requests, load times and slowest resources, console errors and warnings (see *Developer tools for the chat agent* below) | the account setting is not *off*, and your own switch **Developer tools for the chat agent** (Settings -> Browser, off by default) |
 
 Offered only when the account has the BROWSER app, the account setting is not *off*, and the web engine's helper program exists.
 Otherwise the model gets one tool, `browser_status`, whose description says why (*full engine not installed* / *not enabled for your
 account*), so it can tell you instead of claiming it cannot browse.
+
+## Developer tools for the chat agent
+
+Ask "why is this page blank?" or "what is slow here?" and the assistant can read what a browser's developer tools would show, for the
+pages open in the BROWSER tile's full web engine: `browser_failed_requests` (scripts, pictures, style sheets, fetch and XHR calls that
+got no answer or a 4xx/5xx status, with the address, status or error, time and how often), `browser_timings` (time to the first
+response, DOMContentLoaded and load, in ms after navigation start, and the slowest resources, 300 ms or more) and `browser_console`
+(uncaught errors, rejected promises, `console.error` and `console.warn`, with source file and line). They look at the current page unless
+given `page` (part of an address) or `all_pages`, and they are read-only.
+
+* **Off by default, per person.** Settings -> Browser -> *Developer tools for the chat agent* (key `d`). Turning it on or off is written
+  to the audit log (`settings.browser`). While it is off nothing is recorded, the tools answer that they are turned off and how to turn
+  them on, and turning it off forgets what was collected. Each use of a tool is a tool-log entry (`browser.devtools.*`, on or off, no page data).
+* **What is kept.** Per person three bounded ring buffers (200 failed requests, 300 slow resources, 200 console messages) and the last
+  20 page timings. Addresses lose user info, query string, fragment, `;parameters` and token-like path pieces; message texts are cut to
+  300 characters and `key=value` pairs with a secret-sounding key, `Bearer` values, JWTs, long hex and long letter-digit words become
+  `<redacted>` before anything is stored. No request or response bodies, no headers, no cookies are read by the probe or kept.
+* **Untrusted.** The page can post its own events, so the output is wrapped as untrusted page data like every browser tool's text.
+* **The person's own panel shares these buffers.** The BROWSER tile's Developer tools panel (F12 or Ctrl+Shift+I, `FULL-BROWSER.md`) reads
+  the same buffers through `DevTools::seq` / `snapshot`. Opening it starts collecting for the person for as long as it is open without
+  changing this switch, and the chat tools above still answer "turned off" unless the switch is on; closing it forgets what it collected
+  unless the switch is on, in which case the agent and the panel see the same entries. The panel's *Clear* only hides rows in the panel.
+* **Honest when the probe is missing.** The three probe tools answer from what the page probe reported. When it never reported
+  (no hello, no event: the engine build has no `dev-probe.js`, or the page is shown by the built-in reader) they say *"The page probe
+  is not available in this build, so failed requests, timings and console messages cannot be collected. This is not the same as a clean
+  page."* and the assistant is told never to report "no errors" from that. Every answer, also "turned off", starts with
+  `Page: <address without query or fragment>` taken from the browser's own page note, so it is known even without the probe. The probe
+  sends a hello line (kind `H`) at document start so a quiet page is told apart from a missing probe.
+* **`browser_headers`: the HTTP response headers, without the probe.** IYAKKI fetches them itself: one HEAD request to the open page (or
+  to `url` on the same site), a GET with `Range: bytes=0-0` when the server refuses HEAD, through the web tools' client (host policy,
+  no local addresses, rate limit, time and size caps), at most 5 redirects, each hop listed with its status and scrubbed `Location`.
+  No cookies and no credentials are sent, so the headers can differ from what the signed-in browser received; the answer says so and
+  that it fetched them itself. `Set-Cookie`, `Cookie`, `Authorization`, `Proxy-Authenticate` and token-like values are `<redacted>`,
+  at most 40 headers and 300 characters per value are shown, and a security summary line gives HSTS, CSP, X-Frame-Options,
+  X-Content-Type-Options, Referrer-Policy, Content-Type, Server and Cache-Control. Same switch as the other tools. Sample:
+
+  ```
+  Page: https://en.wikipedia.org/wiki/Main_Page
+  IYAKKI fetched these headers itself with one extra HEAD request (not read from the browser engine), with no cookies ...
+  Request 1: HEAD https://en.wikipedia.org/wiki/Main_Page -> status 200
+  Headers of the last response (status 200, 24 headers):
+  server: mw-web.example
+  set-cookie: <redacted>
+  ...
+  Security summary: HSTS present (max-age=106384710; includeSubDomains; preload); CSP absent; X-Frame-Options absent; ...
+  ```
+
+  Later option: the engine's real headers through `WebKitURIResponse` (`resource-load-started` in `helper.c`), which would include
+  the signed-in session's view; not built.
+* The code is `crates/iyakki-agent/src/devtools.rs`; the events come from the helper (`docs/WEBVIEW-PROTOCOL.md`, DevEvent). It needs the
+  full web engine (the built-in reader is not instrumented). The tools work offline against the buffer.
 
 ## The account setting
 

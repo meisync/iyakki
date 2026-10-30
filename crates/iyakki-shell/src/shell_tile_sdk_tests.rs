@@ -38,7 +38,7 @@ fn an_app_that_uses_the_model_asks_the_person_once_and_the_info_panel_says_what_
     let svc = sh.services_for_demo().clone();
     iyakki_agent::store::tilehub::add_dev(&svc, &iyakki_sec::policy::Role::Admin.template(), "root", &dir).unwrap();
     sh.refresh_custom();
-    sh.set_group(Group::Work);
+    sh.set_group(Group::Apps);
     sh.render(&mut g);
     let items = sh.group_items();
     let i = items.iter().position(|it| matches!(it, LItem::App(e) if e.title == "Asker")).expect("the app's tile");
