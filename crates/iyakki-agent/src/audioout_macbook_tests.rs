@@ -253,7 +253,8 @@ fn the_test_patterns_are_valid_wavs_of_the_right_shape() {
     assert_eq!(u16::from_le_bytes([walk[22], walk[23]]), 4);
     assert_eq!(walk.len(), 44 + 4 * 4 * PATTERN_RATE as usize * 2);
     let peak = walk[44..].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]).abs()).max().unwrap();
-    assert!(peak < 8_000 && peak > 3_000, "quiet: {peak}");
+    // loud enough to hear on a quiet card (a Mac's speakers, where it skips the boost the Stereo test gets), below full scale
+    assert!(peak < 25_000 && peak > 20_000, "audible without clipping: {peak}");
 }
 
 #[test]

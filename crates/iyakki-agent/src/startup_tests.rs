@@ -128,7 +128,7 @@ fn only_the_system_wide_services_show_before_sign_in() {
     let sys = r.summary().system_only();
     assert!(sys.rows.iter().all(|x| x.scope == Scope::System));
     let names: Vec<&str> = sys.rows.iter().map(|x| x.id).collect();
-    assert_eq!(names, vec!["clock", "network", "firewall", "sound", "k3s"]);
+    assert_eq!(names, vec!["network", "clock", "firewall", "sound", "k3s"]);
     assert!(!names.contains(&"web") && !names.contains(&"agent"));
 }
 
@@ -178,6 +178,20 @@ fn up(secs: u64) -> Facts {
 
 fn k(state: &str) -> K3sFact {
     K3sFact { installed: true, autostart: true, state: state.into(), ..K3sFact::default() }
+}
+
+#[test]
+fn the_clock_waits_for_the_network_first_and_the_list_starts_with_the_network() {
+    let (r, _) = reg();
+    // no route yet: a time server cannot answer, so the clock says it waits for the network, not for a time server
+    apply(&r, &Facts { route: false, clock_synced: false, ..up(30) });
+    assert_eq!(r.state("clock"), Some(StartupState::Starting { step: "waiting for the network".into() }));
+    let rows = r.snapshot();
+    let ids: Vec<&str> = rows.iter().map(|x| x.id).collect();
+    assert_eq!(&ids[..3], ["network", "devname", "clock"], "network, then the device name that rides on it, then the clock");
+    // once there is a route, the time server is what is awaited
+    apply(&r, &Facts { route: true, clock_synced: false, ..up(40) });
+    assert_eq!(r.state("clock"), Some(StartupState::Starting { step: "waiting for a time server".into() }));
 }
 
 #[test]

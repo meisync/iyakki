@@ -7,7 +7,7 @@
 //! mounted, for the medium IYAKKI booted from, and for disks that hold other data unless the caller
 //! explicitly forces it. Nothing here shells out except `mke2fs` (no shell, fixed arguments).
 
-use std::io::Read;
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 pub const LABEL: &str = "IYAKKI-DATA";
@@ -309,6 +309,68 @@ pub fn format_pending(roots: &Roots, mke2fs: &Path) -> Result<Option<String>, St
     Ok(Some(dev.name))
 }
 
+/// The first sector of a raw install image with its marked data partition (MBR partition 2 at `part_start`, the last one) stretched to the
+/// end of a disk of `disk_sectors`: `(sector, new size in sectors)`. `None` unless it is an MBR whose entry for that start is type 0x83,
+/// no other partition lies after it and the gain is over 1 MiB. 1 MiB aligned, within the 32-bit sector count of an MBR.
+pub fn grown_mbr(sector0: &[u8], part_start: u64, disk_sectors: u64) -> Option<(Vec<u8>, u64)> {
+    if sector0.len() < 512 || sector0[510..512] != [0x55, 0xAA] {
+        return None;
+    }
+    let entry = |i: usize| {
+        let e = 446 + 16 * i;
+        let u = |o: usize| u32::from_le_bytes([sector0[e + o], sector0[e + o + 1], sector0[e + o + 2], sector0[e + o + 3]]) as u64;
+        (sector0[e + 4], u(8), u(12))
+    };
+    let (i, (kind, start, size)) = (0..4).map(|i| (i, entry(i))).find(|(_, (k, st, _))| *k != 0 && *st == part_start)?;
+    if kind != 0x83 || (0..4).any(|j| j != i && entry(j).0 != 0 && entry(j).1 > start) {
+        return None;
+    }
+    let sectors = ((disk_sectors.checked_sub(start)?).min(0xFFFF_FFFF - start) / 2048) * 2048;
+    if sectors <= size + 2048 {
+        return None;
+    }
+    let mut out = sector0[..512].to_vec();
+    let e = 446 + 16 * i;
+    out[e + 12..e + 16].copy_from_slice(&(sectors as u32).to_le_bytes());
+    out[e + 5..e + 8].copy_from_slice(&[0xFE, 0xFF, 0xFF]);
+    Some((out, sectors))
+}
+
+/// First start after a raw image was written to a stick or disk: the marked data partition is the 1 MiB the image carries, so stretch it
+/// to the end of the drive before it is formatted (the installer does this when it writes; a plain copy of the image does not). Only a
+/// partition still waiting to be formatted, only the last MBR partition, only its size field; the kernel is told with BLKPG so the
+/// mounted boot partition beside it is not disturbed. `Ok(Some(sectors))` when it grew.
+pub fn grow_pending(roots: &Roots) -> Result<Option<u64>, String> {
+    let Some(dev) = find_pending(roots) else { return Ok(None) };
+    let Some(disk) = dev.parent.clone() else { return Ok(None) };
+    let sys = roots.sys_block.join(&disk);
+    let num = |p: &Path| read_trim(p).parse::<u64>().ok();
+    let (Some(start), Some(disk_sectors), Some(index)) = (num(&sys.join(&dev.name).join("start")), num(&sys.join("size")), num(&sys.join(&dev.name).join("partition"))) else { return Ok(None) };
+    let disk_path = roots.dev.join(&disk);
+    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(&disk_path).map_err(|e| format!("{}: {e}", disk_path.display()))?;
+    let mut s0 = [0u8; 512];
+    f.read_exact(&mut s0).map_err(|e| e.to_string())?;
+    let Some((new0, sectors)) = grown_mbr(&s0, start, disk_sectors) else { return Ok(None) };
+    f.seek(std::io::SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    f.write_all(&new0).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    if roots.require_block {
+        use std::os::unix::io::AsRawFd;
+        #[repr(C)]
+        struct Part { start: i64, length: i64, pno: i32, devname: [u8; 64], volname: [u8; 64] }
+        #[repr(C)]
+        struct Arg { op: i32, flags: i32, datalen: i32, data: *mut Part }
+        let mut p = Part { start: (start * 512) as i64, length: (sectors * 512) as i64, pno: index as i32, devname: [0; 64], volname: [0; 64] };
+        let mut a = Arg { op: 3, flags: 0, datalen: std::mem::size_of::<Part>() as i32, data: &mut p };
+        // SAFETY: `a` and `p` live across the call and match the kernel's blkpg_ioctl_arg / blkpg_partition layouts; 0x1269 is BLKPG, op 3 BLKPG_RESIZE_PARTITION.
+        if unsafe { libc::ioctl(f.as_raw_fd(), 0x1269 as _, &mut a) } != 0 {
+            return Err(format!("the partition table was updated but the kernel did not resize {}: {}", dev.name, std::io::Error::last_os_error()));
+        }
+    }
+    Ok(Some(sectors))
+}
+
 /// What the data directory currently lives on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DataLocation {
@@ -397,6 +459,33 @@ pub fn mount_data(roots: &Roots, mounter: &dyn Mounter, data_dir: &Path) -> Resu
     mounter.mount(&dev.path, data_dir)?;
     set_private(data_dir);
     Ok(Some(dev.name))
+}
+
+/// The ext4 UUID in the superblock of `bytes` (the data from offset 1024 of the partition), as `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.
+fn ext_uuid(sb: &[u8]) -> Option<String> {
+    if sb.len() < 120 || sb[56..58] != [0x53, 0xEF] || sb[104..120].iter().all(|b| *b == 0) {
+        return None;
+    }
+    let h: String = sb[104..120].iter().map(|b| format!("{b:02x}")).collect();
+    Some(format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32]))
+}
+
+/// Make `<dev>/disk/by-uuid/<uuid>` -> `../../<name>` for the data partition. The system has no udev, and the kubelet (cAdvisor) finds the
+/// filesystem of its image folder through that directory: without it the log repeats "cannot find filesystem info for device /dev/sda2"
+/// every 10 seconds and the kubelet cannot read its disk use (so it never evicts on disk pressure). Returns the UUID when the link was made.
+pub fn link_disk_uuid(roots: &Roots, name: &str) -> Result<Option<String>, String> {
+    let path = roots.dev.join(name);
+    let mut f = std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut sb = [0u8; 1024];
+    f.seek(std::io::SeekFrom::Start(1024)).map_err(|e| e.to_string())?;
+    f.read_exact(&mut sb).map_err(|e| e.to_string())?;
+    let Some(uuid) = ext_uuid(&sb) else { return Ok(None) };
+    let dir = roots.dev.join("disk/by-uuid");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let link = dir.join(&uuid);
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(format!("../../{name}"), &link).map_err(|e| format!("{}: {e}", link.display()))?;
+    Ok(Some(uuid))
 }
 
 fn set_private(dir: &Path) {
@@ -546,6 +635,54 @@ fn unsafe_sync() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_data_partition_gets_a_by_uuid_link_for_the_kubelet() {
+        let d = std::env::temp_dir().join(format!("iyakki-uuidlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let mut img = vec![0u8; 4096];
+        img[1024 + 56..1024 + 58].copy_from_slice(&[0x53, 0xEF]);
+        img[1024 + 104..1024 + 120].copy_from_slice(&[0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+        std::fs::write(d.join("sda2"), &img).unwrap();
+        std::fs::write(d.join("sda3"), vec![0u8; 4096]).unwrap();
+        let roots = Roots { sys_block: d.join("sys"), dev: d.clone(), mounts: d.join("mounts"), require_block: false };
+        let uuid = link_disk_uuid(&roots, "sda2").unwrap().expect("an ext4 superblock has a uuid");
+        assert_eq!(uuid, "12345678-9abc-def0-1122-334455667788");
+        assert_eq!(std::fs::read_link(d.join("disk/by-uuid").join(&uuid)).unwrap(), Path::new("../../sda2"));
+        assert_eq!(link_disk_uuid(&roots, "sda3").unwrap(), None, "not ext4: no link");
+        assert!(link_disk_uuid(&roots, "sda2").unwrap().is_some(), "a second start replaces the link");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_plain_copy_of_the_image_is_stretched_to_fill_the_drive_but_only_the_last_data_partition() {
+        let mut s0 = [0u8; 512];
+        s0[510..512].copy_from_slice(&[0x55, 0xAA]);
+        let set = |s: &mut [u8; 512], i: usize, kind: u8, start: u32, size: u32| {
+            let e = 446 + 16 * i;
+            s[e + 4] = kind;
+            s[e + 8..e + 12].copy_from_slice(&start.to_le_bytes());
+            s[e + 12..e + 16].copy_from_slice(&size.to_le_bytes());
+        };
+        set(&mut s0, 0, 0xEF, 2048, 524288);
+        set(&mut s0, 1, 0x83, 526336, 2048);
+        let disk = 125_000_000u64; // about 64 GB
+        let (n, sectors) = grown_mbr(&s0, 526336, disk).expect("grows");
+        assert_eq!(sectors, (disk - 526336) / 2048 * 2048);
+        assert_eq!(u32::from_le_bytes(n[446 + 16 + 12..446 + 16 + 16].try_into().unwrap()) as u64, sectors);
+        assert_eq!(&n[446..446 + 16], &s0[446..446 + 16], "the boot partition is untouched");
+        assert!(grown_mbr(&s0, 2048, disk).is_none(), "not the data type");
+        assert!(grown_mbr(&s0, 526336, 526336 + 4096).is_none(), "under 1 MiB to gain");
+        assert!(grown_mbr(&s0, 999, disk).is_none(), "no such partition");
+        let mut later = s0;
+        set(&mut later, 2, 0x83, 900000, 2048);
+        assert!(grown_mbr(&later, 526336, disk).is_none(), "another partition lies after it");
+        let mut bad = s0;
+        bad[511] = 0;
+        assert!(grown_mbr(&bad, 526336, disk).is_none(), "no MBR signature");
+    }
+
     use std::sync::Mutex;
 
     /// A fake machine: /sys/block + /dev as temp dirs, disks as sparse files.

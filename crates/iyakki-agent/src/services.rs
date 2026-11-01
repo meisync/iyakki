@@ -86,6 +86,8 @@ pub struct Services {
     pub ollama: Arc<crate::ollama::OllamaServer>,
     /// MCP servers added from the MCP tile.
     pub mcp: crate::mcp::McpStore,
+    /// UTCP manuals added from the UTCP tile.
+    pub utcp: crate::utcp::UtcpStore,
     /// Installed skill packages and the publishers we trust.
     pub packages: Arc<crate::pkg::Packages>,
     pub sessions: Arc<SessionStore>,
@@ -225,6 +227,7 @@ impl Services {
                     server
                 },
                 mcp: crate::mcp::McpStore::new(&dir.join("mcp-servers.json")),
+                utcp: crate::utcp::UtcpStore::new(&dir.join("utcp-manuals.json")),
                 sessions: Arc::new(SessionStore::new(&dir.join("sessions"), kb.clone())),
                 kb,
                 secret_requests: crate::secretreq::SecretRequests::new(),
@@ -1363,7 +1366,13 @@ impl Services {
         }
         // IYAKKI's own device carries the volume itself; a device named by hand (one output's row) bypasses it
         let wav = crate::audioout::scale_wav(&crate::audioout::test_tone_wav(), crate::audioout::gain_for(out, &args));
-        voice::run_capture(voice::command_for(&args, None), Some(&wav), std::time::Duration::from_secs(8)).map_err(|e| format!("The test sound did not play on {}: {e}", used.as_deref().unwrap_or("the default output")))?;
+        if let Err(e) = voice::run_capture(voice::command_for(&args, None), Some(&wav), std::time::Duration::from_secs(8)) {
+            // the mixer ("Mix sounds from several apps") holds the card open, so a row's own device is busy: play through the mixer instead
+            if device.is_some() && e.to_lowercase().contains("busy") {
+                return self.test_sound(None).map(|m| format!("{m} (the sound mixer has that card open, so the chime went through it)"));
+            }
+            return Err(format!("The test sound did not play on {}: {e}", used.as_deref().unwrap_or("the default output")));
+        }
         Ok(match used {
             Some(d) if d == crate::softvol::PCM => format!("Played a short chime on the output in use (ALSA device {d}, with IYAKKI's volume)."),
             Some(d) => format!("Played a short chime on {d}."),
@@ -1372,7 +1381,7 @@ impl Services {
     }
 
     /// Settings -> Sound -> Advanced: the stereo test (left speaker, then right, 1 s each) through the same chain and at the
-    /// same volume as the radio, or the channel walk (every channel of a four-channel card alone, quiet).
+    /// same volume as the radio, or the channel walk (every channel of a four-channel card alone, at a level that is audible on a quiet card).
     pub fn test_pattern(&self, walk: bool) -> Result<String, String> {
         if self.sound_settings().muted {
             return Err("Sound is muted in Settings → Sound.".into());

@@ -153,6 +153,39 @@ pub fn add_boot_entry(dir: &Path, e: &BootEntry) -> Result<String, String> {
     Ok(name)
 }
 
+/// The entry for the boot partition of a disk with a plain (MBR) table: `None` for anything else (a GPT disk gets its entry from the installer).
+pub fn mbr_boot_entry(sector0: &[u8], sector1: &[u8], number: u32, start_lba: u64, sectors: u64) -> Option<BootEntry> {
+    if sector0.len() < 512 || sector0[510..512] != [0x55, 0xAA] || sector1.starts_with(b"EFI PART") || start_lba == 0 || sectors == 0 {
+        return None;
+    }
+    let sig: [u8; 4] = sector0[440..444].try_into().ok()?;
+    if sig == [0; 4] {
+        return None;
+    }
+    Some(BootEntry { number, start_lba, sectors, signature: Signature::Mbr(sig), file: "\\EFI\\BOOT\\BOOTX64.EFI".into(), args: String::new() })
+}
+
+/// A raw copy of the install image starts as "UEFI OS" in the firmware's boot menu: the firmware names a removable disk's fallback file
+/// itself. Once running, give this computer an entry described "IYAKKI" for the boot partition (partition 1) of the disk that holds the data
+/// volume `data_name`. Only when the firmware has a variable store and no entry of ours; appended, never first (see the top of this file).
+/// `Ok(Some(name))` when one was written.
+pub fn name_running_disk(roots: &iyakki_storage::Roots, dir: &Path, data_name: &str) -> Result<Option<String>, String> {
+    use std::io::Read;
+    if !available(dir) || list_entries(dir).iter().any(|(_, d, _)| d == DESCRIPTION) {
+        return Ok(None);
+    }
+    let Some(disk) = iyakki_storage::list(roots).into_iter().find(|d| d.name == data_name).and_then(|d| d.parent) else { return Ok(None) };
+    let part = iyakki_storage::partition_name(&disk, 1);
+    let num = |p: std::path::PathBuf| std::fs::read_to_string(p).ok().and_then(|t| t.trim().parse::<u64>().ok());
+    let (Some(start), Some(sectors)) = (num(roots.sys_block.join(&disk).join(&part).join("start")), num(roots.sys_block.join(&disk).join(&part).join("size"))) else { return Ok(None) };
+    let mut head = [0u8; 1024];
+    std::fs::File::open(roots.dev.join(&disk)).and_then(|mut f| f.read_exact(&mut head)).map_err(|e| format!("reading the disk's table: {e}"))?;
+    match mbr_boot_entry(&head[..512], &head[512..], 1, start, sectors) {
+        Some(e) => add_boot_entry(dir, &e).map(Some),
+        None => Ok(None),
+    }
+}
+
 /// Is `dir` a writable firmware variable store (a UEFI boot with `efivarfs` mounted)?
 pub fn available(dir: &Path) -> bool {
     dir.join(var_name("BootOrder")).exists() || list_entries(dir).first().is_some()
@@ -166,6 +199,24 @@ pub fn backslashed(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plain_copy_of_the_image_gets_an_entry_named_iyakki_only_for_an_mbr_disk() {
+        let mut s0 = [0u8; 512];
+        s0[510..512].copy_from_slice(&[0x55, 0xAA]);
+        s0[440..444].copy_from_slice(&[0x00, 0x53, 0x46, 0x41]);
+        let blank = [0u8; 512];
+        let e = mbr_boot_entry(&s0, &blank, 1, 2048, 524288).expect("entry");
+        assert_eq!(e.signature, Signature::Mbr([0x00, 0x53, 0x46, 0x41]));
+        let bytes = load_option(&e);
+        let units: Vec<u16> = bytes[6..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|u| *u != 0).collect();
+        assert_eq!(String::from_utf16_lossy(&units), "IYAKKI");
+        let mut gpt = [0u8; 512];
+        gpt[..8].copy_from_slice(b"EFI PART");
+        assert!(mbr_boot_entry(&s0, &gpt, 1, 2048, 524288).is_none(), "a GPT disk is left to the installer");
+        assert!(mbr_boot_entry(&[0u8; 512], &blank, 1, 2048, 524288).is_none(), "no table");
+    }
+
 
     fn entry() -> BootEntry {
         BootEntry { number: 3, start_lba: 2048, sectors: 1_048_576, signature: Signature::Gpt([7; 16]), file: "\\EFI\\BOOT\\BOOTX64.EFI".into(), args: String::new() }

@@ -245,13 +245,17 @@ fn load_driver(env: &mut dyn StepEnv) -> Result<Vec<(u32, Option<String>)>, Stri
         env.say(&format!("  firmware search path: {}", l.firmware().display()));
     }
     for m in ["nvidia", "nvidia-uvm"] {
-        let out = gpu_env(env)?.run(&argv(&["modprobe", m]), Duration::from_secs(120));
+        let out = gpu_env(env)?.run(&nv::modprobe_argv(m), Duration::from_secs(120));
         if out.code != Some(0) {
             let dm = gpu_env(env)?.dmesg();
             let lines = gpu::kernel_lines(&dm, &[]);
             return Err(format!("modprobe {m} failed: {} {}", out.combined().trim(), lines.into_iter().rev().take(4).collect::<Vec<_>>().join(" | ")));
         }
         env.say(&format!("  loaded {m}"));
+    }
+    let saved = nv::allow_power_saving(&root);
+    if !saved.is_empty() {
+        env.say(&format!("  power saving on for {} (the card powers down when idle)", saved.join(", ")));
     }
     match nv::loaded_version(&root) {
         Some(v) if v == nv::NVIDIA_VERSION => env.say(&format!("  the loaded driver is {v}, as pinned")),
@@ -314,11 +318,20 @@ pub fn run_nvidia(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Resu
     } else {
         env.say(&format!("[2/9] downloading {} ({} MB) from download.nvidia.com; it is checked against the checksum pinned in IYAKKI and the one NVIDIA publishes", nv::run_file(), nv::RUN_BYTES >> 20));
         gpu_env(env)?.download_run(&layout)?;
-        env.say("[3/9] download verified; unpacking with `sh <file> --extract-only` (no installer script runs)");
+        env.say("[3/9] download verified; unpacking it here (no installer script runs)");
         let _ = std::fs::remove_dir_all(layout.extracted());
-        let out = gpu_env(env)?.run(&argv(&["sh", &layout.run().display().to_string(), "--extract-only", "--target", &layout.extracted().display().to_string()]), Duration::from_secs(900));
-        if out.code != Some(0) {
-            return Err(format!("unpacking failed (needs `sh`, `tail`, `xz`): {}", out.combined().trim().chars().take(300).collect::<String>()));
+        // the archive is zstd-compressed and NVIDIA's own unpacker carries a glibc `zstd` that cannot run on this system: unpack it natively,
+        // and fall back to `sh <file> --extract-only` only when the file is not of that kind
+        match nv::extract_makeself_zstd(&layout.run(), &layout.extracted()) {
+            Ok(n) => env.say(&format!("  unpacked {n} files from the zstd archive")),
+            Err(why) => {
+                env.say(&format!("  native unpack not possible ({why}); trying `sh <file> --extract-only`"));
+                let _ = std::fs::remove_dir_all(layout.extracted());
+                let out = gpu_env(env)?.run(&argv(&["sh", &layout.run().display().to_string(), "--extract-only", "--target", &layout.extracted().display().to_string()]), Duration::from_secs(900));
+                if out.code != Some(0) {
+                    return Err(format!("unpacking failed (needs `sh`, `tail`, and a `zstd` or `xz` that runs here): {}", out.combined().trim().chars().take(300).collect::<String>()));
+                }
+            }
         }
         let s = nv::stage(&layout.extracted(), &layout)?;
         env.say(&format!("  staged {} libraries (+{} links), {} programs, {} firmware files, Vulkan ICD {} · {} MB in {}", s.libs, s.links, s.bins, s.firmware, if s.icd { "yes" } else { "no" }, s.bytes >> 20, layout.stage().display()));
@@ -377,6 +390,64 @@ pub fn run_nvidia(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Resu
     Ok(())
 }
 
+// ------------------------------------------------------------------------------------------------ the NVIDIA card off and on
+
+/// What the kernel says about each NVIDIA card's power, for the log: `0000:01:00.0 suspended`.
+fn nvidia_power_state(root: &Path) -> String {
+    gpu::detect(root).iter().filter(|g| g.is_nvidia()).map(|g| format!("{} {}", g.pci, std::fs::read_to_string(root.join("sys/bus/pci/devices").join(&g.pci).join("power/runtime_status")).map(|t| t.trim().to_string()).unwrap_or_else(|_| "unknown".into()))).collect::<Vec<_>>().join(", ")
+}
+
+/// Switch the NVIDIA card off (`sleep`) or on again. A laptop card idles at 20 W or more while the driver is loaded and anything (the device
+/// plugin's health checks, a pod) keeps it open, and the driver's own power saving cannot then work. **Off**: stop the NVIDIA device plugin,
+/// unload the driver (the file [`nv::sleep_marker`] keeps it off across a restart), and say what the kernel reports. **On**: remove the file, load
+/// the driver and make the nodes and CDI specs, deploy the plugin. Pods that use the card must be stopped first: the driver does not unload while
+/// one holds it, and then nothing is changed except the plugin, which is put back.
+pub fn run_nvidia_power(env: &mut dyn StepEnv, sleep: bool, _wait: Duration, poll: Duration) -> Result<(), String> {
+    let (root, data) = {
+        let g = gpu_env(env)?;
+        (g.root(), g.data())
+    };
+    let layout = nv::Layout::new(&data);
+    if !layout.staged() {
+        return Err("the NVIDIA driver is not installed: Setup > Hardware > NVIDIA GPU driver".into());
+    }
+    let marker = nv::sleep_marker(&data);
+    let plugin = || nv::plugin_manifest(wl::KUBELET_DIR, &layout.stage().display().to_string());
+    if sleep {
+        env.say("[1/3] stopping the NVIDIA device plugin (its health checks keep the card awake)");
+        let out = gpu_env(env)?.kubectl(&["-n", "kube-system", "delete", "daemonset", "nvidia-device-plugin", "--ignore-not-found", "--wait=true", "--timeout=60s"]);
+        say_lines(env, &out.combined(), 3);
+        env.say("[2/3] unloading the NVIDIA driver");
+        let mut failed = None;
+        for m in ["nvidia-uvm", "nvidia-drm", "nvidia-modeset", "nvidia"] {
+            let o = gpu_env(env)?.run(&argv(&["modprobe", "-r", m]), Duration::from_secs(60));
+            if o.code != Some(0) && failed.is_none() && gpu::module_loaded(&root, &m.replace('-', "_")) {
+                failed = Some(format!("{m}: {}", o.combined().trim()));
+            }
+        }
+        if let Some(why) = failed {
+            // put the plugin back so nothing is left half done
+            let _ = env.kubectl_apply("nvidia-device-plugin", &plugin());
+            return Err(format!("the driver would not unload ({why}). Something still uses the card: stop pods that ask for nvidia.com/gpu (Lemonade with the CUDA backend is one) and try again"));
+        }
+        std::fs::create_dir_all(marker.parent().unwrap_or(Path::new("."))).map_err(|e| e.to_string())?;
+        std::fs::write(&marker, "off\n").map_err(|e| format!("{}: {e}", marker.display()))?;
+        env.sleep(poll);
+        env.say(&format!("[3/3] done: the NVIDIA driver is unloaded and stays off after a restart. The kernel reports: {}", nvidia_power_state(&root)));
+        return Ok(());
+    }
+    env.say("[1/3] loading the NVIDIA driver");
+    let _ = std::fs::remove_file(&marker);
+    let found = load_driver(env)?;
+    env.say("[2/3] writing the CDI specs");
+    write_nvidia_specs(&root, &data, &found)?;
+    env.say("[3/3] deploying the NVIDIA device plugin");
+    let out = env.kubectl_apply("nvidia-device-plugin", &plugin())?;
+    say_lines(env, &out, 3);
+    env.say("done: the node reports nvidia.com/gpu again in a minute or so");
+    Ok(())
+}
+
 // ------------------------------------------------------------------------------------------------ after a start
 
 /// After every start of IYAKKI the RAM holds nothing of what the GPU steps did: put the CDI specs back and, when the NVIDIA step ran,
@@ -391,8 +462,18 @@ pub fn ensure_runtime(root: &Path, data: &Path, run: &mut dyn FnMut(&[String]) -
             out.push(Ok(format!("GPU: render nodes made openable again ({})", changed.join(", "))));
         }
     }
-    if marked(Item::GpuNvidia) {
+    if marked(Item::GpuNvidia) && !nv::sleep_marker(data).exists() {
         let l = nv::Layout::new(data);
+        // the kernel loads the nvidia module by itself a few seconds into the boot, long before this runs, and asks for the GSP firmware when the card
+        // is first opened (by the device plugin or a pod): the search path must name the stage's firmware folder at every start, whether or not the
+        // CDI specs and the modules need doing; without it "Direct firmware load for nvidia/<version>/gsp_ga10x.bin failed" and no pod can use the card
+        if l.staged() {
+            let fw_param = root.join("sys/module/firmware_class/parameters/path");
+            let want = format!("{}\n", l.firmware().display());
+            if fw_param.exists() && std::fs::read_to_string(&fw_param).map(|t| t != want).unwrap_or(true) && std::fs::write(&fw_param, &want).is_ok() {
+                out.push(Ok(format!("GPU: firmware search path set to {}", l.firmware().display())));
+            }
+        }
         let have = cdi_dir(root).join(format!("{}.json", gpucdi::NVIDIA_KIND.replace('/', "-"))).is_file();
         if !have && l.staged() && !gpu::module_loaded(root, "nouveau") {
             let r = (|| -> Result<String, String> {
@@ -401,7 +482,7 @@ pub fn ensure_runtime(root: &Path, data: &Path, run: &mut dyn FnMut(&[String]) -
                     let _ = std::fs::write(&fw_param, format!("{}\n", l.firmware().display()));
                 }
                 for m in ["nvidia", "nvidia-uvm"] {
-                    let o = run(&argv(&["modprobe", m]));
+                    let o = run(&nv::modprobe_argv(m));
                     if o.code != Some(0) {
                         return Err(format!("modprobe {m} failed: {}", o.combined().trim()));
                     }

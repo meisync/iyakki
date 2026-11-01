@@ -214,7 +214,7 @@ pub fn hard_ask(name: &str, args: &Value) -> Option<&'static str> {
         }
         _ => {}
     }
-    if name.starts_with("mcp__") || name.starts_with("pkg_") {
+    if name.starts_with("mcp__") || name.starts_with("utcp__") || name.starts_with("pkg_") {
         return Some("outside tools always ask");
     }
     if name.contains("vault") || name.contains("credential") || name.contains("secret") || name.starts_with("browser_") {
@@ -383,6 +383,10 @@ pub struct UserTools {
     mcp: Mutex<HashMap<String, McpClient>>,
     /// `mcp__<server>__<tool>` → (server, tool), filled by `defs()`.
     mcp_names: Mutex<HashMap<String, (String, String)>>,
+    /// UTCP manuals read this run (`None`: the manual could not be read, so it is not asked again this run).
+    utcp: Mutex<HashMap<String, Option<crate::utcp::Manual>>>,
+    /// `utcp__<manual>__<tool>` → (manual, tool), filled by `defs()`.
+    utcp_names: Mutex<HashMap<String, (String, String)>>,
     /// The player the MEDIA app also uses.
     player: Arc<crate::media::MediaPlayer>,
     /// How long `vault_request` waits for the person to type the secret.
@@ -416,7 +420,7 @@ impl UserTools {
         let cwd = if cwd.is_dir() { cwd } else { PathBuf::from("/") };
         let upstream = services.quick_upstream();
         let browser = crate::browsertools::RunSlot::new(services.clone(), user);
-        UserTools { user: user.into(), policy, services, host, cwd, upstream, mcp_specs, mcp: Mutex::new(HashMap::new()), mcp_names: Mutex::new(HashMap::new()), player: crate::media::shared(), secret_wait: Duration::from_secs(540), browser }
+        UserTools { user: user.into(), policy, services, host, cwd, upstream, mcp_specs, mcp: Mutex::new(HashMap::new()), mcp_names: Mutex::new(HashMap::new()), utcp: Mutex::new(HashMap::new()), utcp_names: Mutex::new(HashMap::new()), player: crate::media::shared(), secret_wait: Duration::from_secs(540), browser }
     }
 
     /// Use another media player (tests give a stand-in).
@@ -584,6 +588,35 @@ impl UserTools {
                 untrusted: true,
             })
             .collect()
+    }
+
+    /// The tools of the UTCP manuals added in the UTCP tile (docs/development/UTCP-PLAN.md). Which accounts may use a manual follows the
+    /// same list as the MCP servers (`allows_mcp`: the outside-tools allow-list). Each manual is read once per run.
+    fn load_utcp(&self) -> Vec<ToolDef> {
+        let mut defs = Vec::new();
+        let mut manuals = self.utcp.lock().unwrap();
+        let mut names = self.utcp_names.lock().unwrap();
+        for stored in self.services.utcp.list().into_iter().filter(|m| self.policy.allows_mcp(&m.name)) {
+            if !manuals.contains_key(&stored.name) {
+                manuals.insert(stored.name.clone(), crate::utcp::fetch_manual(&*self.upstream, &stored.url).ok());
+            }
+            let Some(Some(m)) = manuals.get(&stored.name) else { continue };
+            for t in &m.tools {
+                let full = format!("utcp__{}__{}", safe_name(&stored.name), safe_name(&t.name));
+                names.insert(full.clone(), (stored.name.clone(), t.name.clone()));
+                defs.push(ToolDef {
+                    spec: ToolSpec { name: full, description: format!("[UTCP manual {}] {}", stored.name, t.description), schema: if t.inputs.is_object() { t.inputs.clone() } else { json!({"type": "object"}) } },
+                    risk: Risk::Ask,
+                    untrusted: true,
+                });
+            }
+        }
+        defs
+    }
+
+    /// A `${NAME}` in a manual is the secret called NAME in the system vault; it is read when the call is made and goes nowhere else.
+    fn utcp_secret(&self, name: &str) -> Option<String> {
+        self.services.secrets.resolve(&format!("vault:{name}"), None::<&crate::vault::LocalVault>).ok().map(|z| z.to_string())
     }
 
     fn load_mcp(&self) -> Vec<ToolDef> {
@@ -814,6 +847,7 @@ impl Tools for UserTools {
         }
         d.extend(self.pkg_defs());
         d.extend(self.load_mcp());
+        d.extend(self.load_utcp());
         d
     }
 
@@ -888,6 +922,10 @@ impl Tools for UserTools {
             n if n.starts_with("mcp__") => {
                 let (srv, tool) = self.mcp_names.lock().unwrap().get(n).cloned().unwrap_or_else(|| ("?".into(), n.into()));
                 format!("call tool `{tool}` on MCP server `{srv}` with {}", truncate(&args.to_string(), 160))
+            }
+            n if n.starts_with("utcp__") => {
+                let (man, tool) = self.utcp_names.lock().unwrap().get(n).cloned().unwrap_or_else(|| ("?".into(), n.into()));
+                format!("call tool `{tool}` of UTCP manual `{man}` with {}", truncate(&args.to_string(), 160))
             }
             other => format!("{other} {}", truncate(&args.to_string(), 160)),
         }
@@ -1564,6 +1602,14 @@ impl UserTools {
                 let mut clients = self.mcp.lock().unwrap();
                 let c = clients.get_mut(&server).ok_or("MCP server is not connected")?;
                 c.call(&tool, if args.is_object() { args.clone() } else { json!({}) })
+            }
+            n if n.starts_with("utcp__") => {
+                let (manual, tool) = self.utcp_names.lock().unwrap().get(n).cloned().ok_or("unknown UTCP tool")?;
+                if !p.allows_mcp(&manual) {
+                    return Err(format!("your account may not use the UTCP manual `{manual}`"));
+                }
+                let m = self.utcp.lock().unwrap().get(&manual).cloned().flatten().ok_or("the UTCP manual is not loaded")?;
+                crate::utcp::call(&*self.upstream, &m, &tool, args, &|n| self.utcp_secret(n))
             }
             other => Err(format!("unknown tool `{other}`")),
         }
@@ -3012,6 +3058,52 @@ mod tests {
         let blocked = UserTools::new("alice", pol, w.svc.clone(), w.host.clone(), vec![mock]).with_cwd(&w.home);
         assert!(!blocked.defs().iter().any(|d| d.spec.name.starts_with("mcp__")));
         assert!(blocked.call("mcp__mock__echo", &json!({})).is_err());
+    }
+
+    /// A UTCP manual added in the UTCP tile shows its tools to the assistant, they always ask, the call reaches the tool's own address, and an
+    /// account whose list does not include the manual sees nothing (docs/development/UTCP-PLAN.md).
+    #[test]
+    fn utcp_tools_are_listed_called_and_filtered_like_mcp_tools() {
+        use std::io::{Read, Write};
+        let w = world("utcp", Role::User, |_, _| {});
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen2 = seen.clone();
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut c, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 4096];
+                let n = c.read(&mut buf).unwrap_or(0);
+                let first = String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or("").to_string();
+                seen2.lock().unwrap().push(first.clone());
+                let body = if first.starts_with("GET /utcp") {
+                    format!(r#"{{"utcp_version":"1.0.1","manual_version":"1","info":{{"title":"Docs","version":"1"}},"tools":[{{"name":"echo","description":"Say a word back","inputs":{{"type":"object","properties":{{"word":{{"type":"string"}},"x":{{"type":"integer"}}}},"required":["word"]}},"tool_call_template":{{"call_template_type":"http","url":"http://127.0.0.1:{port}/echo/{{word}}","http_method":"GET"}}}}]}}"#)
+                } else {
+                    r#"{"said":"hi"}"#.to_string()
+                };
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            }
+        });
+        w.svc.utcp.add(crate::utcp::StoredManual { name: "docs".into(), url: format!("http://127.0.0.1:{port}/utcp") }).unwrap();
+        let mut pol = w.tools.policy.clone();
+        pol.mcp_servers = vec!["docs".into()];
+        let mut t = UserTools::new("alice", pol.clone(), w.svc.clone(), w.host.clone(), vec![]).with_cwd(&w.home);
+        t.upstream = Arc::new(iyakki_proxy::https::UreqUpstream::with_timeout(Duration::from_secs(5))); // the test services use a fake network; this one talks to the local server
+        let defs = t.defs();
+        let echo = defs.iter().find(|d| d.spec.name == "utcp__docs__echo").expect("UTCP tool listed");
+        assert_eq!((echo.risk, echo.untrusted), (Risk::Ask, true), "outside tools always ask");
+        assert!(echo.spec.description.contains("UTCP manual docs"));
+        assert!(hard_ask("utcp__docs__echo", &json!({})).is_some(), "Auto mode never runs it without asking");
+        assert_eq!(t.call("utcp__docs__echo", &json!({"word": "hi", "x": 2})).unwrap(), r#"{"said":"hi"}"#);
+        assert_eq!(seen.lock().unwrap()[1], "GET /echo/hi?x=2 HTTP/1.1");
+        assert!(t.describe("utcp__docs__echo", &json!({"word": "hi"})).contains("UTCP manual `docs`"));
+        assert!(t.call("utcp__docs__echo", &json!({"x": 1})).unwrap_err().contains("`word` is required"));
+        // an account whose list does not include the manual never sees its tools
+        pol.mcp_servers = vec![];
+        let blocked = UserTools::new("alice", pol, w.svc.clone(), w.host.clone(), vec![]).with_cwd(&w.home);
+        assert!(!blocked.defs().iter().any(|d| d.spec.name.starts_with("utcp__")));
+        assert!(blocked.call("utcp__docs__echo", &json!({"word": "hi"})).is_err());
     }
 
     /// The user's loop: an empty file named `deploy` made by an earlier write blocked `deploy/registry.yaml` for ever.

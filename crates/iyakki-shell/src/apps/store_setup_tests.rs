@@ -1235,7 +1235,7 @@ fn the_camera_tile_needs_the_camera_and_is_hidden_in_cloud_mode() {
 #[test]
 fn a_firmware_pack_tile_needs_its_hardware_is_hidden_in_cloud_mode_and_says_what_degrades() {
     let packs: Vec<Item> = Item::ALL.into_iter().filter(|i| i.fw_def().is_some()).collect();
-    assert_eq!(packs.len(), 4);
+    assert_eq!(packs.len(), 5);
     // wrong hardware: no tile for any pack
     let (a, _cx) = rig("su-fw1", Role::Admin, plain_machine(), facts(&[]));
     for p in &packs {

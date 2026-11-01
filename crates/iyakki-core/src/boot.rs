@@ -75,13 +75,72 @@ pub fn collect_modaliases(sys_devices: &Path) -> Vec<String> {
     v
 }
 
+/// Longest any one boot step may take before it is stopped (a driver that never finishes loading must not hold the boot screen).
+pub const STEP_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Run a boot helper (`modprobe`, `mdev`), at most [`STEP_LIMIT`]: then it is killed, boot goes on and the log says which one. User space only.
+fn run_limited(cmd: &mut Command) -> bool {
+    run_limited_for(cmd, STEP_LIMIT)
+}
+
+fn run_limited_for(cmd: &mut Command, limit: std::time::Duration) -> bool {
+    let name = cmd.get_program().to_string_lossy().into_owned();
+    let Ok(mut child) = cmd.spawn() else { return false };
+    let start = std::time::Instant::now();
+    loop {
+        let st = iyakki_core_api::child_status(&mut child);
+        if st.is_over() {
+            return true;
+        }
+        if start.elapsed() >= limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            log::warn!("boot: `{name}` did not finish in {} s and was stopped; boot goes on", limit.as_secs());
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+static STAGE: std::sync::Mutex<(String, Option<std::time::Instant>)> = std::sync::Mutex::new((String::new(), None));
+static BOOT_STEPS_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Every 5 s: when the boot stage has not changed for [`STEP_LIMIT`], say so once per stage in the log (and on the kernel log, so the copy on
+/// the data volume and the screen of a verbose start show it). Only reports; the stuck step is stopped by [`run_limited`].
+fn start_stage_watch() {
+    let _ = std::thread::Builder::new().name("boot-watch".into()).spawn(|| {
+        let mut reported = String::new();
+        while !BOOT_STEPS_DONE.load(std::sync::atomic::Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let (stage, since) = STAGE.lock().map(|g| g.clone()).unwrap_or_default();
+            if let Some(t) = since {
+                if t.elapsed() >= STEP_LIMIT && stage != reported {
+                    let line = format!("boot: still on \"{stage}\" after {} s (no progress)", t.elapsed().as_secs());
+                    log::warn!("{line}");
+                    let _ = std::fs::write("/dev/kmsg", format!("iyakki: {line}\n"));
+                    reported = stage;
+                }
+            }
+        }
+    });
+}
+
 /// Report boot progress to the splash screen (a no-op in builds without the shell).
 #[cfg(feature = "shell")]
 pub fn progress(percent: u32, stage: &str) {
+    note_stage(stage);
     iyakki_shell::splash::progress(percent, stage);
 }
 #[cfg(not(feature = "shell"))]
-pub fn progress(_percent: u32, _stage: &str) {}
+pub fn progress(_percent: u32, stage: &str) {
+    note_stage(stage);
+}
+
+fn note_stage(stage: &str) {
+    if let Ok(mut g) = STAGE.lock() {
+        *g = (stage.to_string(), Some(std::time::Instant::now()));
+    }
+}
 
 /// Boot option `iyakki.install=1`: start the installer instead of the desktop.
 pub fn install_mode(cmdline: &str) -> bool {
@@ -229,7 +288,7 @@ fn load_aliases(aliases: &[String], what: &str, from: u32, to: u32) {
     let chunks = aliases.chunks(64).count().max(1);
     for (i, chunk) in aliases.chunks(64).enumerate() {
         progress(from + ((to - from) as usize * i / chunks) as u32, &format!("{what} ({}/{})", i + 1, chunks));
-        let _ = Command::new("modprobe").arg("-b").arg("-a").args(chunk).stderr(std::process::Stdio::null()).status();
+        run_limited(Command::new("modprobe").arg("-b").arg("-a").args(chunk).stderr(std::process::Stdio::null()));
     }
 }
 
@@ -254,7 +313,7 @@ fn coldplug_settle(seen: &mut crate::coldplug::Seen, deferred: &mut Vec<String>)
 fn apple_spi_keyboard() {
     let product = std::fs::read_to_string("/sys/class/dmi/id/product_name").unwrap_or_default();
     let n = iyakki_drivers::applespi::load(&product, |m| {
-        let _ = Command::new("modprobe").arg("-b").arg(m).stderr(std::process::Stdio::null()).status();
+        run_limited(Command::new("modprobe").arg("-b").arg(m).stderr(std::process::Stdio::null()));
     });
     if n > 0 {
         log::info!("Apple SPI keyboard: loaded {}", iyakki_drivers::applespi::MODULES.join(", "));
@@ -286,6 +345,27 @@ fn cs8409_sound() {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     if let Some(l) = cs8409::ensure(&r, &iyakki_drivers::run::System, &RealSys, &|| std::thread::sleep(std::time::Duration::from_millis(500))) {
+        log::info!("{l}");
+    }
+}
+
+/// A Broadcom Wi-Fi chip whose driver found it silent on the first probe (seen on a MacBookPro14,1 after an update: no `wlan0` until
+/// the next restart): reset it (PCI remove and rescan) and load the driver again, at most twice. Machines without such a chip, or
+/// whose Wi-Fi came up, cost one folder read.
+fn wifi_recover() {
+    use iyakki_drivers::wifirecover::{needs_recovery, recover, Roots};
+    // no such chip, or Wi-Fi is already up: nothing to wait for
+    if needs_recovery(&Roots::real()).is_none() {
+        return;
+    }
+    // the driver probes in the background: give an interface a few seconds to appear before calling the chip silent
+    for _ in 0..15 {
+        if iyakki_drivers::wifirecover::has_wireless_interface(&Roots::real()) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    if let Some(l) = recover(&Roots::real(), &iyakki_drivers::run::System, &|ms| std::thread::sleep(std::time::Duration::from_millis(ms)), 2) {
         log::info!("{l}");
     }
 }
@@ -363,6 +443,7 @@ pub fn early_boot() {
 /// The part of boot that login needs: pseudo filesystems, device nodes, the boot screen, the drivers for storage, input
 /// and display, and the data volume. Returns what remains for [`late_boot`], which may run in the background.
 pub fn early_boot_critical() -> LatePlan {
+    start_stage_watch();
     let mut tl = Timeline::new();
     let kernel_secs = std::fs::read_to_string("/proc/uptime").ok().and_then(|u| u.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()));
     KERNEL_SECS.get_or_init(|| kernel_secs);
@@ -388,7 +469,7 @@ pub fn early_boot_critical() -> LatePlan {
     iyakki_drivers::t2input::apply(Path::new("/sys/class/dmi/id/product_name"), Path::new("/etc/modprobe.d"));
     // Hotplug: let the kernel call mdev for new devices (creates nodes, loads modules).
     let _ = std::fs::write("/proc/sys/kernel/hotplug", "/sbin/mdev\n");
-    let _ = Command::new("mdev").arg("-s").status();
+    run_limited(Command::new("mdev").arg("-s"));
     // mdev makes device nodes but loads no drivers; this loads them for every device that appears from now on (a T2 Mac's keyboard
     // behind apple-bce, a USB network adapter plugged in later) and sets up a new network interface
     crate::hotplug::start();
@@ -398,7 +479,7 @@ pub fn early_boot_critical() -> LatePlan {
     crate::display::start(screen_found);
     progress(8, "Preparing the system");
     for m in LOGIN_LOAD {
-        let _ = Command::new("modprobe").arg("-b").arg(m).stderr(std::process::Stdio::null()).status();
+        run_limited(Command::new("modprobe").arg("-b").arg(m).stderr(std::process::Stdio::null()));
     }
     tl.mark("core modules");
     let all = collect_modaliases(Path::new("/sys/devices"));
@@ -415,7 +496,7 @@ pub fn early_boot_critical() -> LatePlan {
     apple_spi_keyboard();
     tl.mark("drivers");
     progress(68, "Setting up devices");
-    let _ = Command::new("mdev").arg("-s").status(); // nodes for devices whose drivers just loaded
+    run_limited(Command::new("mdev").arg("-s")); // nodes for devices whose drivers just loaded
     progress(72, "Opening your storage");
     mount_data_volume();
     clock_floor_after_data();
@@ -444,6 +525,7 @@ pub fn early_boot_critical() -> LatePlan {
     }
     progress(94, "Almost ready");
     log::info!("{}", tl.summary(kernel_secs).replace("boot:", "boot (to login):"));
+    BOOT_STEPS_DONE.store(true, std::sync::atomic::Ordering::Relaxed);
     LatePlan { deferred, seen, tl: Timeline::new() }
 }
 
@@ -461,7 +543,7 @@ pub fn late_boot(mut plan: LatePlan) {
         log::info!("{l}");
     }
     for m in ALWAYS_LOAD.iter().filter(|m| !LOGIN_LOAD.contains(m)) {
-        let _ = Command::new("modprobe").arg("-b").arg(m).stderr(std::process::Stdio::null()).status();
+        run_limited(Command::new("modprobe").arg("-b").arg(m).stderr(std::process::Stdio::null()));
     }
     // Cameras known to need a quirk lose their microphone and are held back, then uvcvideo and snd-usb-audio are loaded
     // by name (they are blacklisted for alias loading); the quirk binds and later hot plugs run in a background thread.
@@ -474,7 +556,8 @@ pub fn late_boot(mut plan: LatePlan) {
         load_aliases(&more, "Starting network and sound", 88, 90);
     }
     cs8409_sound();
-    let _ = Command::new("mdev").arg("-s").status();
+    wifi_recover();
+    run_limited(Command::new("mdev").arg("-s"));
     crate::camera::start();
     plan.tl.mark("late drivers");
     match crate::net::bring_up(Path::new("/etc/iyakki/net.conf"), Path::new("/sys/class/net")) {
@@ -788,7 +871,7 @@ pub fn mount_data_volume() {
             log::info!("data: waiting for the disk (usb storage seen: {usb}, disk listed: {has_disk})");
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
-        let _ = Command::new("mdev").arg("-s").status();
+        run_limited(Command::new("mdev").arg("-s"));
     }
     log::info!("data: storage search took {} ms", start.elapsed().as_millis());
     if iyakki_storage::find_data(&roots).is_none() && iyakki_storage::find_pending(&roots).is_none() {
@@ -802,6 +885,11 @@ pub fn mount_data_volume() {
         if iyakki_storage::find_pending(&roots).is_some() {
             // once, on the first start after an install: the boot screen says why this start takes a little longer
             progress(80, FIRST_START_FORMAT_STAGE);
+        }
+        match iyakki_storage::grow_pending(&roots) {
+            Ok(Some(sectors)) => log::info!("data: first boot, the data partition was stretched to {} MB", sectors * 512 / 1_000_000),
+            Ok(None) => {}
+            Err(e) => log::warn!("data: could not stretch the data partition: {e}"),
         }
         let t_format = std::time::Instant::now();
         let mke2fs = ["/sbin/mke2fs", "/usr/sbin/mke2fs"].iter().map(std::path::PathBuf::from).find(|p| p.exists());
@@ -817,6 +905,16 @@ pub fn mount_data_volume() {
     match mounted {
         Ok(Some(dev)) => {
             log::info!("data: persistent volume {dev} mounted at {DATA_DIR}");
+            match iyakki_storage::link_disk_uuid(&roots, &dev) {
+                Ok(Some(u)) => log::info!("data: /dev/disk/by-uuid/{u} -> {dev} (the kubelet finds the data disk through it)"),
+                Ok(None) => {}
+                Err(e) => log::warn!("data: could not link the data disk by uuid: {e}"),
+            }
+            match iyakki_usb::efi::name_running_disk(&roots, Path::new("/sys/firmware/efi/efivars"), &dev) {
+                Ok(Some(entry)) => log::info!("data: this computer's boot menu now lists the disk as IYAKKI ({entry})"),
+                Ok(None) => {}
+                Err(e) => log::warn!("data: could not name the disk in the boot menu: {e}"),
+            }
             if let Some(conf) = install_conf {
                 let p = Path::new(iyakki_zram::CONF_PATH);
                 if !p.exists() {
@@ -1269,6 +1367,16 @@ mod tests {
         std::os::unix::fs::symlink(&d, d.join("loop/self")).unwrap();
         assert_eq!(collect_modaliases(&d), vec!["pci:v00008086d00007AF0"]);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_boot_helper_that_never_finishes_is_stopped_at_the_limit_and_a_quick_one_is_left_alone() {
+        use std::time::{Duration, Instant};
+        let t = Instant::now();
+        assert!(!super::run_limited_for(Command::new("sleep").arg("30"), Duration::from_millis(300)), "stopped, not finished");
+        assert!(t.elapsed() < Duration::from_secs(5), "boot did not wait for it");
+        assert!(super::run_limited_for(&mut Command::new("true"), Duration::from_secs(5)));
+        assert_eq!(super::STEP_LIMIT, Duration::from_secs(30), "the owner's rule: no boot step runs longer than 30 s");
     }
 
     #[test]

@@ -33,7 +33,7 @@
 #     (IYAKKI_PROFILE below is the CARGO profile; it has nothing to do with this.)
 #       IYAKKI_IMAGE_PROFILE=release ./dist/buildroot/repack.sh pc --base target/buildroot-web --kernel-from target/buildroot-mac
 # Secure Boot: run it with the same IYAKKI_SB_KEY / IYAKKI_SB_CERT as the build (a change from signed to unsigned is FULL for
-# changed.sh); modules are not signed again (they already are), the kernel and the EFI image are, as in post-image.sh.
+# changed.sh); every kernel module that has no signature yet is signed with the key (Secure Boot lockdown refuses unsigned ones), the kernel and the EFI image are signed as in post-image.sh.
 set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -228,10 +228,32 @@ if [ -n "$KFROM" ]; then
     echo "repack: modules added from $KFROM:$added (depmod run)"
   fi
 fi
+# Secure Boot ON locks the kernel down: it loads only modules signed with a key it trusts (the enrolled MOK). A kernel build made without the
+# key leaves its modules unsigned, so on a PC with Secure Boot every driver that is a module (network, Wi-Fi, sound, touchpad, camera) would be
+# refused ("Lockdown: modprobe: unsigned module loading is restricted"). Sign every module that carries no signature yet; modules already
+# signed (the out-of-tree ones above, or a build made with the key) are left as they are.
+if [ -n "${IYAKKI_SB_KEY:-}" ] && [ -n "${IYAKKI_SB_CERT:-}" ] && [ -d lib/modules ]; then
+  SF="${IYAKKI_SIGN_FILE:-$(ls "${KFROM:-$BASE}"/build/linux-[0-9]*/scripts/sign-file "$BASE"/build/linux-[0-9]*/scripts/sign-file 2>/dev/null | head -n1 || true)}"
+  [ -n "$SF" ] && [ -x "$SF" ] || { echo "repack: no scripts/sign-file to sign the kernel modules (set IYAKKI_SIGN_FILE)" >&2; exit 1; }
+  nsigned=0; nalready=0
+  while IFS= read -r ko; do
+    if tail -c 28 "$ko" | grep -q '~Module signature appended~'; then nalready=$((nalready + 1)); continue; fi
+    "$SF" sha256 "$IYAKKI_SB_KEY" "$IYAKKI_SB_CERT" "$ko" || { echo "repack: could not sign $ko" >&2; exit 1; }
+    nsigned=$((nsigned + 1))
+  done <<EOF_MODS
+$(find lib/modules -name '*.ko' | sort)
+EOF_MODS
+  echo "repack: Secure Boot: $nsigned kernel module(s) signed with the key, $nalready already signed"
+fi
 # the PC image: all of linux-firmware (uncompressed, as the kernel of this image reads it), pruned later by the post-build hook
 if [ -n "$FWFROM" ]; then
+  # the wireless regulatory database is not part of linux-firmware (it is the wireless-regdb package, ISC licence): keep the donor's copy,
+  # or cfg80211 logs "failed to load regulatory.db" and every Wi-Fi card runs with the world regulatory domain
+  mkdir -p "$STAGE/regdb"
+  for f in regulatory.db regulatory.db.p7s; do [ -f "lib/firmware/$f" ] && cp -f "lib/firmware/$f" "$STAGE/regdb/$f"; done
   rm -rf lib/firmware; mkdir -p lib/firmware
   (cd "$FWFROM" && sh ./copy-firmware.sh "$STAGE/root/lib/firmware") >/dev/null || { echo "firmware: copy-firmware.sh failed" >&2; exit 1; }
+  for f in regulatory.db regulatory.db.p7s; do [ -f "$STAGE/regdb/$f" ] && [ ! -f "lib/firmware/$f" ] && cp -f "$STAGE/regdb/$f" "lib/firmware/$f"; done
   echo "repack: firmware: the full set from $FWFROM is in place (post-build prunes it)"
 fi
 # a web engine helper rebuilt alone (`make iyakki-webview-helper` in the base tree) is newer than the packed image: take it

@@ -694,6 +694,13 @@ impl Shell {
         self.devpop.set_hidden(c.hidden_device_rows.clone());
         self.devpop.invalidate();
         self.brand.set_cloud(c.clone());
+        // The shell starts before a laptop's sound card and camera have appeared, and a machine that looks like a server at that moment gets
+        // no camera scanner (the empty placeholder). When it turns out to be a desktop after all, the real scanner must take over, or the CAMERA
+        // tile says "no camera" for the whole session (seen on a Lenovo Legion: the kernel had /dev/video0, the app looked in a folder that
+        // does not exist).
+        if !cfg!(test) && c.camera_watch && !self.camera.looks_at_the_machine() {
+            self.camera = crate::camera::Presence::system();
+        }
         self.cloud = c;
         self.stale = true;
     }

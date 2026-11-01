@@ -91,6 +91,12 @@ impl GpuEnv for Fake {
     fn run(&mut self, argv: &[String], _t: Duration) -> Out {
         self.runs.push(argv.join(" "));
         match argv[0].as_str() {
+            "modprobe" if argv[1] == "-r" => {
+                let m = argv[2].replace('-', "_");
+                let t = std::fs::read_to_string(self.root.join("proc/modules")).unwrap();
+                std::fs::write(self.root.join("proc/modules"), t.lines().filter(|l| !l.starts_with(&format!("{m} "))).map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+                out(0, "")
+            }
             "modprobe" => {
                 let m = argv[1].replace('-', "_");
                 let mut t = std::fs::read_to_string(self.root.join("proc/modules")).unwrap();
@@ -340,7 +346,7 @@ fn stage_3_runs_every_step_in_order_and_ends_with_a_pod_that_runs_nvidia_smi() {
     let kinds: Vec<&str> = f.runs.iter().map(|r| r.split_whitespace().next().unwrap()).collect();
     assert_eq!(kinds, ["sh", "modprobe", "modprobe", "mknod", "mknod", "mknod", "mknod"], "{:?}", f.runs);
     assert!(f.runs[0].contains("--extract-only"), "{}", f.runs[0]);
-    assert!(f.runs[1].ends_with("nvidia") && f.runs[2].ends_with("nvidia-uvm"));
+    assert!(f.runs[1].ends_with("nvidia NVreg_DynamicPowerManagement=0x02") && f.runs[2].ends_with("nvidia-uvm"));
     assert!(f.runs.iter().any(|r| r.contains("/dev/nvidiactl c 195 255")) && f.runs.iter().any(|r| r.contains("/dev/nvidia-uvm c 504 0")));
     // both CDI specs
     assert!(f.root.join("var/run/cdi/nvidia.com-gpu.json").is_file() && f.root.join("var/run/cdi/k8s.device-plugin.nvidia.com-gpu.json").is_file());
@@ -473,7 +479,7 @@ fn after_a_start_the_specs_and_the_driver_come_back_from_the_markers() {
     });
     assert!(r.iter().all(|x| x.is_ok()), "{r:?}");
     let c = calls.lock().unwrap();
-    assert!(c.iter().any(|x| x == "modprobe nvidia") && c.iter().any(|x| x == "modprobe nvidia-uvm"));
+    assert!(c.iter().any(|x| x == "modprobe nvidia NVreg_DynamicPowerManagement=0x02") && c.iter().any(|x| x == "modprobe nvidia-uvm"));
     assert!(root.join("var/run/cdi/nvidia.com-gpu.json").is_file());
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -555,4 +561,60 @@ fn the_steps_run_as_detached_jobs_of_the_installer_workspace_with_logs() {
     assert_eq!(s.workspace, crate::quickinstall::WORKSPACE, "the top bar's installer indicator counts this workspace");
     assert_eq!(s.label, "Install NVIDIA GPU driver (CUDA) (2/2, after k3s)");
     assert_eq!(s.cmd, crate::jobs::Cmd::Argv(vec!["/usr/bin/iyakki".into(), "quick-install".into(), "gpu-nvidia".into(), "--data".into(), "/var/lib/iyakki".into()]));
+}
+
+#[test]
+fn the_nvidia_card_can_be_switched_off_and_on_and_stays_off_across_a_start() {
+    let mut f = nvidia_ready_machine("s3-sleep");
+    f.pod_log = f.smi();
+    run_nvidia(&mut f, W, P).unwrap();
+    f.runs.clear();
+    f.kubectl.clear();
+    f.applied.clear();
+    f.lines.clear();
+    run_nvidia_power(&mut f, true, W, P).unwrap();
+    // the plugin goes first, then the modules come out (the main one last), and a file keeps it that way
+    assert!(f.kubectl.iter().any(|k| k.contains("delete daemonset nvidia-device-plugin")), "{:?}", f.kubectl);
+    assert_eq!(f.runs, ["modprobe -r nvidia-uvm", "modprobe -r nvidia-drm", "modprobe -r nvidia-modeset", "modprobe -r nvidia"]);
+    assert!(nv::sleep_marker(&f.data).is_file());
+    assert!(f.said("[3/3] done") && f.said("0000:01:00.0"), "{:?}", f.lines);
+    // a start does not load the driver again while it is off
+    let mut loaded = Vec::new();
+    let r = ensure_runtime(&f.root, &f.data, &mut |a| {
+        loaded.push(a.join(" "));
+        out(0, "")
+    });
+    assert!(r.is_empty() && loaded.is_empty(), "{r:?} {loaded:?}");
+    // on again: the file goes, the driver loads, the plugin is deployed
+    f.runs.clear();
+    f.lines.clear();
+    run_nvidia_power(&mut f, false, W, P).unwrap();
+    assert!(!nv::sleep_marker(&f.data).exists());
+    assert!(f.runs.iter().any(|r| r.starts_with("modprobe nvidia NVreg_")), "{:?}", f.runs);
+    assert!(f.applied.iter().any(|(n, _)| n == "nvidia-device-plugin"));
+}
+
+#[test]
+fn switching_the_nvidia_card_off_before_the_driver_is_installed_is_refused() {
+    let mut f = nvidia_ready_machine("s3-sleep-none");
+    let e = run_nvidia_power(&mut f, true, W, P).unwrap_err();
+    assert!(e.contains("not installed"), "{e}");
+}
+
+#[test]
+fn the_firmware_search_path_is_set_at_every_start_even_when_the_cdi_specs_are_already_there() {
+    // the kernel loads the nvidia module by itself early in the boot; the GSP firmware is asked for when the card is first opened
+    let mut f = nvidia_ready_machine("fwpath");
+    f.pod_log = f.smi();
+    run_nvidia(&mut f, W, P).unwrap();
+    let param = f.root.join("sys/module/firmware_class/parameters/path");
+    std::fs::create_dir_all(param.parent().unwrap()).unwrap();
+    std::fs::write(&param, "\n").unwrap();
+    assert!(f.root.join("var/run/cdi/nvidia.com-gpu.json").is_file(), "the specs are there, as after a restart that kept them");
+    let r = ensure_runtime(&f.root, &f.data, &mut |_a: &[String]| out(0, ""));
+    let want = format!("{}\n", nv::Layout::new(&f.data).firmware().display());
+    assert_eq!(std::fs::read_to_string(&param).unwrap(), want, "{r:?}");
+    assert!(r.iter().any(|x| x.as_ref().is_ok_and(|l| l.contains("firmware search path"))), "{r:?}");
+    // and nothing is written when it is right already
+    assert!(ensure_runtime(&f.root, &f.data, &mut |_a: &[String]| out(0, "")).iter().all(|x| !x.as_ref().is_ok_and(|l| l.contains("firmware search path"))));
 }

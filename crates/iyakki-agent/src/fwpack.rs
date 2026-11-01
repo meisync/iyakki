@@ -3,7 +3,7 @@
 //! own use that includes it (`IYAKKI_INCLUDE_RESTRICTED_FIRMWARE=1`, `docs/RESTRICTED-FIRMWARE.md`). Policy: `LICENSING.md` item 7 and
 //! `docs/FIRMWARE-LICENCES.md` ("when in doubt it is not shipped; the user installs it").
 //!
-//! One detached job per pack (`iyakki quick-install fw-qualcomm-bt|fw-realtek-net|fw-broadcom-net|fw-atheros-carl9170`), the pattern of
+//! One detached job per pack (`iyakki quick-install fw-qualcomm-bt|fw-realtek-net|fw-broadcom-net|fw-atheros-carl9170|fw-mediatek`), the pattern of
 //! `camfw.rs`:
 //!
 //! 1. the matching hardware must be present (PCI or USB ids, [`Def::hw`]) and the licence must have been accepted ([`accept`]: a record on
@@ -143,7 +143,7 @@ pub struct Def {
     pub about: &'static str,
 }
 
-pub const DEFS: [Def; 4] = [
+pub const DEFS: [Def; 5] = [
     Def {
         table_id: "qualcomm-bt",
         pack_id: "fw-qualcomm-bt",
@@ -205,6 +205,19 @@ pub const DEFS: [Def; 4] = [
         reload: &["carl9170"],
         without: "The old AR9170 USB Wi-Fi adapters (AR9170 based, 802.11n draft sticks) do not work: the carl9170 driver needs the file. Adapters with the AR9271 chip (ath9k_htc) are not affected.",
         about: "Old Atheros AR9170 USB Wi-Fi sticks (carl9170 driver).",
+    },
+    Def {
+        table_id: "mediatek",
+        pack_id: "fw-mediatek",
+        title: "MediaTek Wi-Fi and Bluetooth firmware",
+        vendor: "MediaTek",
+        licence_note: "LICENCE.mediatek (MediaTek Inc.): permission to use and redistribute the firmware files with devices containing MediaTek chipsets, but not as part of the Linux kernel or in any other form that would put the files under the GNU General Public License. It is not an open-source licence, so IYAKKI does not ship these files in its images; they are downloaded for you from the upstream linux-firmware repository at your click.",
+        licence_id: "LicenseRef-MediaTek-linux-firmware",
+        pci: &[(0x14c3, &[0x7961, 0x7922, 0x0608, 0x0616, 0x7920, 0x7925, 0x0717, 0x7615, 0x7663, 0x7611, 0x7610, 0x7630, 0x7650, 0x7662, 0x7612, 0x7602])],
+        usb: &[(0x0e8d, &[0x7961, 0x7925])],
+        reload: &["mt7921e", "mt7925e", "mt7921u", "btusb"],
+        without: "Wi-Fi of these MediaTek cards (MT7921, MT7922, MT7925 and the older MT76xx) does not work: the driver finds the card but cannot start it without its firmware files, so there is no Wi-Fi interface. The Bluetooth of the same cards does not work either. Ethernet is not affected.",
+        about: "Wi-Fi and Bluetooth firmware for MediaTek cards, common in recent laptops (for example the MT7921, MT7922 and MT7925 Wi-Fi 6/6E/7 cards).",
     },
 ];
 

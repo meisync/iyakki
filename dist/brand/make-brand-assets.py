@@ -15,72 +15,44 @@ P = lambda *a: os.path.join(ROOT, *a)
 SS = 4  # supersampling
 
 
+def cut_owner_logo(path):
+    """The owner's logo picture (brushed-steel arrow heads with blue circuit light, on a dark grey wall) as an RGBA picture: the wall is the part of the
+    picture that the corners reach through pixels that change by only a few levels from one to the next and stay dark; the steel and the circuit light
+    stop it. Deterministic (no model, no random numbers)."""
+    from collections import deque
+    src = Image.open(path).convert("RGB")
+    a = np.asarray(src).astype(np.int16)
+    lum = a.mean(axis=2)
+    h, w = lum.shape
+    wall = np.zeros((h, w), bool)
+    q = deque()
+    for x0, y0 in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
+        wall[y0, x0] = True
+        q.append((y0, x0))
+    while q:
+        y, x = q.popleft()
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < h and 0 <= nx < w and not wall[ny, nx] and lum[ny, nx] < 100 and abs(lum[ny, nx] - lum[y, x]) <= 3.5:
+                wall[ny, nx] = True
+                q.append((ny, nx))
+    alpha = Image.fromarray(((~wall) * 255).astype(np.uint8))
+    alpha = alpha.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(0.9))
+    out = src.convert("RGBA")
+    out.putalpha(alpha)
+    return out
+
+
 def emblem(size=384, circle=378):
-    """The round emblem: an infinity loop (continuous operation), an I at the top, a compass star below, rings round it."""
-    n = size * SS
-    c = n / 2.0
-    k = SS
-    R = circle / 2.0 * k
-    yy, xx = np.mgrid[0:n, 0:n].astype(np.float32)
-    r = np.hypot(xx + 0.5 - c, yy + 0.5 - c)
-    ang = np.arctan2(yy + 0.5 - c, xx + 0.5 - c)
-    img = np.zeros((n, n, 4), np.float32)
-    # disc: deep navy, lighter towards the middle
-    t = np.clip(r / R, 0, 1)[..., None]
-    disc = np.array([14, 48, 78], np.float32) * (1 - t) + np.array([5, 20, 40], np.float32) * t
-    inside = r <= R
-    img[..., :3] = np.where(inside[..., None], disc, 0)
-    img[..., 3] = inside * 255
-    # outer ring, cyan, with eight slits
-    ring = (r >= 0.845 * R) & (r <= R)
-    slit = np.zeros_like(ring)
-    for i in range(8):
-        a = math.radians(22.5 + 45 * i)
-        d = np.abs(np.sin(ang - a)) * r
-        slit |= (d < 3.2 * k) & (np.cos(ang - a) > 0)
-    ring &= ~slit
-    tr = np.clip((r - 0.845 * R) / (0.155 * R), 0, 1)[..., None]
-    rc = np.array([88, 232, 246], np.float32) * (1 - tr) + np.array([30, 150, 200], np.float32) * tr
-    img[..., :3] = np.where(ring[..., None], rc, img[..., :3])
-    # thin gold ring
-    gold = (r >= 0.775 * R) & (r <= 0.79 * R)
-    img[..., :3] = np.where(gold[..., None], np.array([212, 169, 90], np.float32), img[..., :3])
-    im = Image.fromarray(np.clip(img, 0, 255).astype(np.uint8), "RGBA")
-    d = ImageDraw.Draw(im)
-    # the infinity loop (lemniscate of Bernoulli), glowing
-    a = 0.60 * R
-    pts = []
-    for i in range(0, 721):
-        th = 2 * math.pi * i / 720
-        s = 1 + math.sin(th) ** 2
-        pts.append((c + a * math.cos(th) / s * 1.0, c + 0.02 * R + a * math.sin(th) * math.cos(th) / s * 1.6))
-    glow = Image.new("RGBA", im.size, (0, 0, 0, 0))
-    ImageDraw.Draw(glow).line(pts, fill=(60, 220, 240, 190), width=int(15 * k), joint="curve")
-    glow = glow.filter(ImageFilter.GaussianBlur(7 * k))
-    im = Image.alpha_composite(im, glow)
-    d = ImageDraw.Draw(im)
-    d.line(pts, fill=(96, 236, 250, 255), width=int(8 * k), joint="curve")
-    d.line(pts, fill=(200, 250, 255, 255), width=int(2.5 * k), joint="curve")
-    for i in range(0, 720, 90):
-        x, y = pts[i]
-        rr = 6.5 * k
-        d.ellipse([x - rr, y - rr, x + rr, y + rr], fill=(230, 252, 255, 255))
-    # the letter I, with serifs, at the top
-    ix, top, bot = c, c - 0.74 * R, c - 0.36 * R
-    col = (222, 247, 255, 255)
-    d.rounded_rectangle([ix - 7 * k, top, ix + 7 * k, bot], radius=2 * k, fill=col)
-    d.rounded_rectangle([ix - 22 * k, top, ix + 22 * k, top + 9 * k], radius=2 * k, fill=col)
-    d.rounded_rectangle([ix - 22 * k, bot - 9 * k, ix + 22 * k, bot], radius=2 * k, fill=col)
-    # the compass star at the bottom
-    sx, sy = c, c + 0.58 * R
-    star = []
-    for i in range(16):
-        rad = (0.17 * R if i % 4 == 0 else 0.10 * R if i % 2 == 0 else 0.045 * R)
-        th = math.pi * 2 * i / 16 - math.pi / 2
-        star.append((sx + rad * math.cos(th), sy + rad * math.sin(th)))
-    d.polygon(star, fill=(232, 252, 255, 255))
-    d.ellipse([sx - 4 * k, sy - 4 * k, sx + 4 * k, sy + 4 * k], fill=(30, 130, 180, 255))
-    return im.resize((size, size), Image.LANCZOS)
+    """The logo: the owner's picture (dist/brand/owner-logo.png, supplied 2026-10-31), cut out of its background, centred in a transparent square.
+    `circle` is the widest the picture may be (the old round emblem filled 378 of 384 pixels)."""
+    cut = cut_owner_logo(P("dist/brand/owner-logo.png"))
+    cut = cut.crop(cut.getchannel("A").point(lambda v: 255 if v > 24 else 0).getbbox())
+    k = min(circle * 0.94 / cut.width, circle * 0.94 / cut.height)
+    cut = cut.resize((round(cut.width * k), round(cut.height * k)), Image.LANCZOS)
+    im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    im.alpha_composite(cut, ((size - cut.width) // 2, (size - cut.height) // 2))
+    return im
 
 
 def logo():

@@ -73,6 +73,8 @@ pub struct SystemApp {
     mac_line: Option<String>,
     /// Where sound plays and why (Settings -> Sound), read with the other figures.
     sound_line: String,
+    /// One line per graphics card (name, driver, memory), read with the other figures.
+    gpu_lines: Vec<String>,
     sort: Sort,
     sel: [usize; 4],
     /// The hardware page, read when it is opened or refreshed.
@@ -87,12 +89,26 @@ pub struct SystemApp {
 }
 
 impl SystemApp {
+    /// The graphics cards for the overview, e.g. "AMD Radeon Graphics (Raphael) · driver amdgpu" and "NVIDIA GeForce RTX 4070 Laptop GPU · driver nvidia · 8 GB".
+    /// Virtual display devices are left out; a card with no driver says so (the NVIDIA driver is a download).
+    fn gpu_summary(gpus: &[iyakki_agent::gpu::Gpu]) -> Vec<String> {
+        gpus.iter()
+            .filter(|g| !matches!(g.vendor, iyakki_agent::gpu::Vendor::Other(_)))
+            .map(|g| {
+                let name = if g.name.to_ascii_lowercase().contains(&g.vendor.name().to_ascii_lowercase()) { g.name.clone() } else { format!("{} {}", g.vendor.name(), g.name) };
+                let driver = g.driver.clone().map(|d| format!("driver {d}")).unwrap_or_else(|| "no driver loaded".to_string());
+                let mem = g.vram.filter(|v| *v > 0).map(|v| format!(" · {}", sysinfo::human_bytes(v))).unwrap_or_default();
+                format!("{name} · {driver}{mem}")
+            })
+            .collect()
+    }
+
     pub fn new(_cx: &AppCx) -> SystemApp {
         SystemApp::with_roots(SysRoots::real(), "/var/lib/iyakki".into())
     }
 
     pub fn with_roots(roots: SysRoots, data_dir: std::path::PathBuf) -> SystemApp {
-        SystemApp { page: Page::Overview, roots, data_dir, prev: None, cur: None, history: Vec::new(), proc_cpu: HashMap::new(), net_rate: (0.0, 0.0), mac_line: None, sound_line: String::new(), sort: Sort::Cpu, sel: [0; 4], hardware: Vec::new(), confirm: None, status: None, live: Vec::new(), last_refresh: None, cluster_log: None, health_busy: Default::default() }
+        SystemApp { page: Page::Overview, roots, data_dir, prev: None, cur: None, history: Vec::new(), proc_cpu: HashMap::new(), net_rate: (0.0, 0.0), mac_line: None, sound_line: String::new(), gpu_lines: Vec::new(), sort: Sort::Cpu, sel: [0; 4], hardware: Vec::new(), confirm: None, status: None, live: Vec::new(), last_refresh: None, cluster_log: None, health_busy: Default::default() }
     }
 
     pub fn page(&self) -> Page {
@@ -126,6 +142,7 @@ impl SystemApp {
         self.cur = Some(sample);
         self.mac_line = iyakki_devctl::mac::summary_line(&iyakki_devctl::Roots { sys: self.roots.sys.clone(), proc_: self.roots.proc.clone() });
         self.sound_line = iyakki_agent::audioout::summary_at(&self.roots.proc);
+        self.gpu_lines = Self::gpu_summary(&iyakki_agent::gpu::detect(self.roots.sys.parent().unwrap_or(std::path::Path::new("/"))));
         self.live = cx.services.runs.live().into_iter().filter(|r| Self::is_admin(cx) || r.user == cx.session.user).collect();
         self.last_refresh = Some(now);
         // the dev cluster's health is read in the background every 15 s while it runs (a few kubectl calls)
@@ -532,6 +549,12 @@ impl SystemApp {
         g.text(a.x, y, 14.0 * s, TEXT, "Host name", Face::Bold);
         g.text(a.x + 130.0 * s, y, 14.0 * s, MUTED, &crate::hostname::current("iyakki"), Face::Sans);
         y += 28.0 * s;
+        for (i, line) in self.gpu_lines.iter().enumerate() {
+            g.text(a.x, y, 14.0 * s, TEXT, if i == 0 { "Graphics" } else { "" }, Face::Bold);
+            let t = g.fit(13.0 * s, line, Face::Sans, a.w - 130.0 * s);
+            g.text(a.x + 130.0 * s, y, 13.0 * s, MUTED, &t, Face::Sans);
+            y += 28.0 * s;
+        }
         if !self.sound_line.is_empty() {
             g.text(a.x, y, 14.0 * s, TEXT, "Sound", Face::Bold);
             let t = g.fit(13.0 * s, &self.sound_line, Face::Sans, a.w - 130.0 * s);

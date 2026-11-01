@@ -814,7 +814,7 @@ fn advanced_sound_rows(s: &Snapshot, prefs: &iyakki_agent::audioout::SoundSettin
     }
     rows.push(DevRow::new("Stereo test", "The left speaker for 1 s, then the right one, through the same path and volume as the radio.", Target::SoundPattern(false)));
     if s.mix_channels.is_some_and(|n| n > 2) {
-        rows.push(DevRow::new("Channel walk", "Every channel of this four-channel card alone for 1 s, quiet, to tell which speaker is which.", Target::SoundPattern(true)));
+        rows.push(DevRow::new("Channel walk", "Every channel of this four-channel card alone for 1 s, to tell which speaker is which.", Target::SoundPattern(true)));
     }
 }
 

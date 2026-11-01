@@ -284,7 +284,7 @@ impl Gk {
             Item::Ffmpeg => Gk::Media,
             Item::GpuVulkan | Item::GpuNvidia | Item::MacFirmware | Item::MacCamera => Gk::Hardware,
             Item::LinuxApps | Item::LinuxWindows => Gk::LinuxApps,
-            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwHardware => Gk::Hardware,
+            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek | Item::FwHardware => Gk::Hardware,
         }
     }
 }
@@ -307,7 +307,7 @@ pub fn icon_of(item: Item) -> Icon {
         Item::Ffmpeg => Icon::Media,
         Item::MacCamera => Icon::Camera,
         Item::LinuxApps | Item::LinuxWindows => Icon::Ide,
-        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwHardware => Icon::Devices,
+        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek | Item::FwHardware => Icon::Devices,
     }
 }
 
@@ -449,7 +449,7 @@ pub fn open_target(item: Item) -> Option<(&'static str, &'static str)> {
         Item::Matrix => Some(("settings", "matrix:add")),
         Item::Elasticsearch | Item::OpenSearch | Item::Registry | Item::Gitea => None,
         // the restricted firmware packs have their own licence step (fwpack.rs); this page only says where they stand
-        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwHardware => None,
+        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek | Item::FwHardware => None,
     }
 }
 
@@ -477,7 +477,7 @@ pub fn where_text(item: Item) -> &'static str {
         Item::LinuxApps => "a sandbox named debian on the data partition",
         Item::LinuxWindows => "a sandbox named gui on the data partition (graphical programs in an IYAKKI window)",
         Item::FwHardware => "a driver pack (fw-hardware) on the data partition that survives restarts; only the files this computer asks for, from the upstream linux-firmware release",
-        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => "a driver pack on the data partition that survives restarts; the files come from the upstream linux-firmware repository",
+        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek => "a driver pack on the data partition that survives restarts; the files come from the upstream linux-firmware repository",
     }
 }
 
@@ -776,8 +776,9 @@ impl Setup {
             self.refresh_jobs(cx);
             let after = (self.jobs.iter().map(|j| (j.id.clone(), j.state.clone(), j.progress.map(|p| p as i32))).collect::<Vec<_>>(), self.failed.clone());
             changed |= before != after;
-            // something finished: what is installed changed
-            if before.0.iter().any(|b| b.1 == iyakki_agent::jobs::State::Running) && !self.jobs.iter().any(|j| j.running()) && self.ticks.saturating_sub(self.last_facts) > 5 {
+            // something finished (even while another job still runs, such as a long driver install): what is installed changed
+            let one_finished = before.0.iter().any(|b| b.1 == iyakki_agent::jobs::State::Running && !self.jobs.iter().any(|j| j.id == b.0 && j.running()));
+            if one_finished && self.ticks.saturating_sub(self.last_facts) > 5 {
                 self.last_facts = self.ticks;
                 self.fixed = false;
                 // an upgrade may just have finished: ask the vendors again (in the background)
@@ -1946,7 +1947,7 @@ fn short_about(item: Item) -> &'static str {
         Item::LinuxApps => "Run Debian or Ubuntu programs in a sandbox of their own.",
         Item::LinuxWindows => "Show a graphical Linux program in an IYAKKI window (the LINUX WINDOW tile).",
         Item::FwHardware => "The vendor firmware this computer asks for and lacks (Wi-Fi, Bluetooth, graphics, network): listed with each licence, then downloaded at your click.",
-        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => item.fw_def().map_or("Firmware for hardware in this machine, downloaded at your click.", |d| d.about),
+        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek => item.fw_def().map_or("Firmware for hardware in this machine, downloaded at your click.", |d| d.about),
     }
 }
 

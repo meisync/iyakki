@@ -166,13 +166,15 @@ pub enum Item {
     FwRealtekNet,
     FwBroadcomNet,
     FwAtheros9170,
+    /// MediaTek Wi-Fi and Bluetooth firmware (the pack `fw-mediatek`, same rules as the others): shown only where a MediaTek card is.
+    FwMediatek,
     /// "Hardware firmware" (fwextra.rs): the vendor firmware files this computer asks for and lacks, from the pinned linux-firmware release,
     /// at the person's click ([`start_hardware_firmware`]). The images carry none of them. Shown on every computer.
     FwHardware,
 }
 
 impl Item {
-    pub const ALL: [Item; 31] = [Item::Node, Item::Python, Item::K3s, Item::DuckDb, Item::Elasticsearch, Item::OpenSearch, Item::Prometheus, Item::ClickHouse, Item::GraphDb, Item::Gitea, Item::Matrix, Item::Registry, Item::ClaudeCode, Item::Copilot, Item::Kokoro, Item::VoicePack, Item::Lemonade, Item::Ollama, Item::MacHost, Item::GpuVulkan, Item::GpuNvidia, Item::Ffmpeg, Item::MacFirmware, Item::MacCamera, Item::LinuxApps, Item::LinuxWindows, Item::FwQualcommBt, Item::FwRealtekNet, Item::FwBroadcomNet, Item::FwAtheros9170, Item::FwHardware];
+    pub const ALL: [Item; 32] = [Item::Node, Item::Python, Item::K3s, Item::DuckDb, Item::Elasticsearch, Item::OpenSearch, Item::Prometheus, Item::ClickHouse, Item::GraphDb, Item::Gitea, Item::Matrix, Item::Registry, Item::ClaudeCode, Item::Copilot, Item::Kokoro, Item::VoicePack, Item::Lemonade, Item::Ollama, Item::MacHost, Item::GpuVulkan, Item::GpuNvidia, Item::Ffmpeg, Item::MacFirmware, Item::MacCamera, Item::LinuxApps, Item::LinuxWindows, Item::FwQualcommBt, Item::FwRealtekNet, Item::FwBroadcomNet, Item::FwAtheros9170, Item::FwMediatek, Item::FwHardware];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -206,6 +208,7 @@ impl Item {
             Item::FwRealtekNet => "fw-realtek-net",
             Item::FwBroadcomNet => "fw-broadcom-net",
             Item::FwAtheros9170 => "fw-atheros-carl9170",
+            Item::FwMediatek => "fw-mediatek",
             Item::FwHardware => crate::fwextra::PACK_ID,
         }
     }
@@ -242,7 +245,7 @@ impl Item {
             Item::MacCamera => "MacBook FaceTime camera: driver and firmware (firmware from Apple)",
             Item::LinuxApps => "Linux apps (Debian/Ubuntu)",
             Item::LinuxWindows => "Linux windows (graphical programs)",
-            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => self.fw_def().map_or("Firmware", |d| d.title),
+            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek => self.fw_def().map_or("Firmware", |d| d.title),
             Item::FwHardware => "Hardware firmware (Wi-Fi, Bluetooth, graphics, ...)",
         }
     }
@@ -257,7 +260,7 @@ impl Item {
             Item::Ffmpeg => Group::Media,
             Item::MacFirmware | Item::MacCamera => Group::Mac,
             Item::LinuxApps | Item::LinuxWindows => Group::Linux,
-            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwHardware => Group::Firmware,
+            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek | Item::FwHardware => Group::Firmware,
         }
     }
 
@@ -295,6 +298,7 @@ impl Item {
             Item::FwRealtekNet => "Firmware for PCIe Realtek Ethernet chips (RTL8111/8168, RTL8125 and relatives): 30 small files, about 140 KB. Not in the images (IYAKKI is not sure it may redistribute them): you read and accept the vendor's licence, then the files are downloaded from the upstream linux-firmware repository at a fixed release, each checked for size and SHA-256, installed as a driver pack that survives restarts, and the driver is loaded again; Reboot to finish appears only when the driver needs it. Also installable from a folder or USB stick.",
             Item::FwBroadcomNet => "Firmware for Broadcom wired network chips (Tigon3 tg3, NetXtreme II bnx2, NetXtreme II 10 Gigabit bnx2x): 21 files, about 3 MB. Not in the images (IYAKKI is not sure it may redistribute them): you read and accept the vendor's licence, then the files are downloaded from the upstream linux-firmware repository at a fixed release, each checked for size and SHA-256, installed as a driver pack that survives restarts, and the driver is loaded again; Reboot to finish appears only when the driver needs it. Also installable from a folder or USB stick.",
             Item::FwAtheros9170 => "Firmware for old Atheros AR9170 USB Wi-Fi sticks (carl9170 driver): one file, 13 KB. GPL-2.0 or later; the source is the carl9170fw project. Not in the images (IYAKKI is not sure it may redistribute them): you read and accept the vendor's licence, then the files are downloaded from the upstream linux-firmware repository at a fixed release, each checked for size and SHA-256, installed as a driver pack that survives restarts, and the driver is loaded again; Reboot to finish appears only when the driver needs it. Also installable from a folder or USB stick.",
+            Item::FwMediatek => "Firmware for MediaTek Wi-Fi and Bluetooth cards (MT7921, MT7922, MT7925 and the older MT76xx, common in recent laptops): 28 files, about 9 MB. Not in the images (MediaTek's licence is not an open-source licence): you read and accept the vendor's licence, then the files are downloaded from the upstream linux-firmware repository at a fixed release, each checked for size and SHA-256, installed as a driver pack that survives restarts, and the Wi-Fi driver is loaded again; Reboot to finish appears only when the driver needs it. Also installable from a folder or USB stick.",
         }
     }
 
@@ -327,7 +331,7 @@ impl Item {
             Item::LinuxWindows => "Debian packages, each with its own licence (TigerVNC: GPL-2.0, matchbox: GPL-2.0, Mesa: MIT, xterm: MIT, fonts: free licences), downloaded by apt inside the sandbox at your click, never shipped. \"Debian\" is a registered trademark of Software in the Public Interest, Inc.; IYAKKI does not rebrand it and is not endorsed by it",
             Item::LinuxApps => "Debian and Ubuntu are free software; every package keeps its own licence (/usr/share/doc/<package>/copyright inside the sandbox). Downloaded from the distribution, not shipped. \"Ubuntu\" and \"Debian\" are trademarks of their owners; IYAKKI does not rebrand them",
             Item::Ffmpeg => "GPLv3 (the static build you download from its builder; IYAKKI does not ship it). H.264 and AAC are patent-licensed formats: decoding them is your choice, as in the browser",
-            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => self.fw_def().map_or("", |d| d.licence_note),
+            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek => self.fw_def().map_or("", |d| d.licence_note),
             Item::FwHardware => "Various per file: each vendor's own licence (listed from WHENCE before you click, texts kept next to the files). Free to redistribute with notice for most; some are restricted to the vendor's hardware (MediaTek, Marvell, Qualcomm, Broadcom, NVIDIA). Not in the images: downloaded for you from the upstream linux-firmware repository, never shipped.",
         }
     }
@@ -400,6 +404,7 @@ impl Item {
             Item::LinuxApps => 30,
             Item::LinuxWindows => 250,
             Item::FwQualcommBt | Item::FwRealtekNet | Item::FwAtheros9170 => 1,
+            Item::FwMediatek => 9,
             Item::FwBroadcomNet => 3,
             Item::FwHardware => 5,
         }
@@ -447,7 +452,7 @@ impl Item {
     /// The restricted firmware pack this item installs (fwpack.rs), when it is one.
     pub fn fw_def(self) -> Option<&'static crate::fwpack::Def> {
         match self {
-            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => crate::fwpack::def_for_pack(self.id()),
+            Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek => crate::fwpack::def_for_pack(self.id()),
             _ => None,
         }
     }
@@ -610,7 +615,7 @@ pub fn presence_with(svc: &crate::services::Services, item: Item, lemonade: &dyn
             let n = crate::modelhost::Hosts::new(data).list().len();
             if n == 0 { Presence::Missing } else { Presence::Installed(format!("{n} model host(s) in Models")) }
         }
-        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => match item.fw_def().and_then(|d| crate::fwpack::installed(data, d)) {
+        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek => match item.fw_def().and_then(|d| crate::fwpack::installed(data, d)) {
             Some(r) => Presence::Installed(format!("{} files, {}", r.files.iter().filter(|f| !f.starts_with("licences/")).count(), r.version)),
             None => Presence::Missing,
         },
@@ -2441,7 +2446,7 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
         }
         Item::FwHardware => Err("the hardware firmware has its own job: `iyakki quick-install fw-hardware`".into()),
         Item::MacCamera => Err("the camera firmware has its own job: `iyakki quick-install mac-camera`".into()),
-        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 => Err(format!("this firmware pack has its own job: `iyakki quick-install {}`", item.id())),
+        Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek => Err(format!("this firmware pack has its own job: `iyakki quick-install {}`", item.id())),
         Item::MacHost => Err("the Mac model host is a guide: open it from Store \u{2192} Setup or Settings \u{2192} Models".into()),
         Item::LinuxApps => {
             env.say(crate::linuxapps_dist::LICENCE_NOTE);
@@ -2978,6 +2983,20 @@ pub fn cli_main(args: &[String]) -> i32 {
     // the GPU page's test prompt: not an installable item
     if args.first().is_some_and(|a| a == "gpu-test") {
         return gpu_test_main(args);
+    }
+    // the NVIDIA card off and on (power saving): not an installable item
+    if args.first().is_some_and(|a| a == "gpu-nvidia-sleep" || a == "gpu-nvidia-wake") {
+        let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+        let data = PathBuf::from(flag("--data").unwrap_or_else(|| "/var/lib/iyakki".into()));
+        let user = flag("--user").or_else(|| std::env::var("USER").ok()).unwrap_or_else(|| "system".into());
+        let mut env = RealEnv::new(&data, &user);
+        return match crate::gpu_steps::run_nvidia_power(&mut env, args[0] == "gpu-nvidia-sleep", WAIT_FOR_CLUSTER, Duration::from_secs(5)) {
+            Ok(()) => 0,
+            Err(e) => {
+                println!("error: {e}");
+                1
+            }
+        };
     }
     // passwords waiting for the vault: say which (names only). The running shell saves them by itself as soon as the person's vault is
     // open (sign in with the password, or Settings > Vault > Unlock); this process holds no vault.

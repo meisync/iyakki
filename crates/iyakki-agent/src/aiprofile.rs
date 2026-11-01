@@ -601,11 +601,12 @@ pub fn rule(p: &AiProfile, item: Item) -> Vis {
             }
         }
         Item::GpuNvidia => {
-            let nvidia_best = p.gpus.first().is_some_and(|g| g.vendor == Vendor::Nvidia);
+            // any NVIDIA card counts, not only the first one: on a laptop with AMD graphics and an NVIDIA card the NVIDIA card comes second until its driver tells its memory
+            let nvidia_best = p.gpus.iter().any(|g| g.vendor == Vendor::Nvidia);
             if apple {
                 Vis::Hidden("this is an Apple Silicon Mac: there is no NVIDIA card".into())
             } else if !nvidia_best {
-                Vis::Hidden("the best GPU here is not an NVIDIA one".into())
+                Vis::Hidden("there is no NVIDIA GPU here".into())
             } else if p.capable() || p.unknown() {
                 Vis::Show
             } else {

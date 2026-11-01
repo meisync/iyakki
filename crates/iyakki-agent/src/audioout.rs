@@ -1096,10 +1096,12 @@ pub fn stereo_test_wav() -> Vec<u8> {
     pattern(2, &[0, 1], 523.25, 0.5)
 }
 
-/// Channel walk for a card with `channels` channels (more than two): each channel alone for 1 s, quiet (WAV, 48 kHz).
+/// Channel walk for a card with `channels` channels (more than two): each channel alone for 1 s (WAV, 48 kHz). It goes straight to the
+/// card, past the software volume and its boost, so it needs a level of its own: the Stereo test is half scale and then +12 dB of boost
+/// on a quiet card (a Mac's speakers), and a walk at 0.2 was inaudible there. The person's volume still scales it down.
 pub fn channel_walk_wav(channels: u16) -> Vec<u8> {
     let order: Vec<usize> = (0..channels as usize).collect();
-    pattern(channels, &order, 440.0, 0.2)
+    pattern(channels, &order, 440.0, 0.7)
 }
 
 /// The self-check tone: 2 s of 440 Hz on both channels.
@@ -1740,6 +1742,8 @@ pub fn start_watch() {
     let started = std::thread::Builder::new().name("iyakki-audioout".into()).spawn(|| {
         let mut w = Watch::new();
         loop {
+            // a microphone that records something from the first start: capture controls get their default once per card
+            crate::micdefaults::run();
             w.step(global(), Path::new("/proc"));
             std::thread::sleep(watch_wait(uptime()));
         }

@@ -41,6 +41,9 @@ pub mod fwpack;
 pub mod macfw;
 pub mod macrecovery;
 pub mod mcp;
+pub mod utcp;
+#[cfg(test)]
+mod utcp_tests;
 pub mod providers;
 pub mod vault;
 pub mod profilestore;
@@ -113,6 +116,7 @@ pub mod audioout;
 pub mod audiosink;
 pub mod battery;
 pub mod screensaver;
+pub mod micdefaults;
 pub mod mixer;
 pub mod softvol;
 pub mod quiet;

@@ -23,6 +23,7 @@ pub mod t2input;
 pub mod touchbar;
 #[cfg(target_os = "linux")]
 pub mod usbfs;
+pub mod wifirecover;
 
 pub use apply::{active_ids, apply_boot, firmware_present, install_pack, installed, remove_pack, Fs, Record, Report};
 pub use detect::{Machine, Roots};

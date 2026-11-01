@@ -281,6 +281,48 @@ pub fn star_position(st: &Star, t: f32, cx: f32, cy: f32, radius: f32) -> (f32, 
     (cx + a.cos() * st.r * radius, cy + a.sin() * st.r * radius * 0.62)
 }
 
+/// The pixels of the logo that are the blue circuit light inside the arrow heads: byte offset of the pixel, and its place across the logo
+/// (0 left, 1 right). Found once, from the picture itself.
+fn circuit_pixels() -> &'static Vec<(usize, f32)> {
+    static C: OnceLock<Vec<(usize, f32)>> = OnceLock::new();
+    C.get_or_init(|| {
+        let l = logo();
+        let (w, h) = (l.width() as usize, l.height() as usize);
+        let d = l.data();
+        let mut v = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                let (r, g, b, a) = (d[i] as i32, d[i + 1] as i32, d[i + 2] as i32, d[i + 3] as i32);
+                // opaque and clearly blue (steel is grey: its three channels are close)
+                if a > 250 && b > 70 && b > r + 28 && b > g + 8 {
+                    v.push((i, x as f32 / w as f32));
+                }
+            }
+        }
+        v
+    })
+}
+
+/// A copy of the logo whose circuit light breathes: a soft wave of brightness runs from the left arrow head to the right one (about every
+/// 2.6 s), and the light never goes fully dark between waves. The brushed steel is not touched.
+pub fn pulse_overlay(base: &Pixmap, t: f32) -> Pixmap {
+    let mut out = base.clone();
+    let data = out.data_mut();
+    for &(i, x) in circuit_pixels() {
+        if i + 3 >= data.len() {
+            break;
+        }
+        let wave = ((t * 2.4 - x * 4.2).sin() * 0.5 + 0.5).powi(2);
+        let add = 0.10 + 0.62 * wave;
+        let (r, g, b) = (data[i] as f32, data[i + 1] as f32, data[i + 2] as f32);
+        data[i] = (r + (255.0 - r) * add * 0.35) as u8;
+        data[i + 1] = (g + (255.0 - g) * add * 0.75) as u8;
+        data[i + 2] = (b + (255.0 - b) * add) as u8;
+    }
+    out
+}
+
 /// A copy of the logo with a band of light at `pos` (0 = top left corner, 1 = bottom right) brightening it.
 pub fn shine_overlay(base: &Pixmap, pos: f32) -> Pixmap {
     let mut out = base.clone();
@@ -430,10 +472,10 @@ pub fn draw(g: &mut Gfx, v: &View) {
     shooting_star(g, v.t, wf, hf, s);
 
     // the logo itself: static (same place and size as on the GRUB menu), with a band of light sweeping over it now and then
-    let base = logo();
+    let pulsed = pulse_overlay(logo(), v.t);
     let cycle = v.t % 5.5;
-    let shine = if cycle < 1.4 { Some(shine_overlay(base, -0.15 + cycle / 1.4 * 1.3)) } else { None };
-    let img = shine.as_ref().unwrap_or(base);
+    let shine = if cycle < 1.4 { Some(shine_overlay(&pulsed, -0.15 + cycle / 1.4 * 1.3)) } else { None };
+    let img = shine.as_ref().unwrap_or(&pulsed);
     let k = logo_d / img.width() as f32;
     let paint = PixmapPaint { opacity: 1.0, quality: FilterQuality::Bilinear, ..PixmapPaint::default() };
     let t = Transform::from_translate(cx, cy).pre_scale(k, k);
@@ -610,6 +652,27 @@ mod tests {
         g.save_png(std::path::Path::new(&out)).unwrap();
     }
 
+    /// The boot animation as a picture sequence for a video: `IYAKKI_FRAMES=/dir [IYAKKI_FRAMES_SIZE=1920x1080] [IYAKKI_FRAMES_SECS=9]
+    /// cargo test -p iyakki-shell --lib splash_frames_for_video -- --ignored` writes `f00000.png`, `f00001.png` ... at 30 frames a second.
+    #[test]
+    #[ignore]
+    fn splash_frames_for_video() {
+        let Ok(dir) = std::env::var("IYAKKI_FRAMES") else { return };
+        let size = std::env::var("IYAKKI_FRAMES_SIZE").unwrap_or_else(|_| "1920x1080".into());
+        let (w, h) = size.split_once('x').and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?))).unwrap_or((1920, 1080));
+        let secs: f32 = std::env::var("IYAKKI_FRAMES_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(9.0);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stages = ["Starting the system", "Starting network and sound", "Opening accounts and settings", "Models, tools and vaults ready"];
+        for i in 0..(secs * 30.0) as u32 {
+            let t = i as f32 / 30.0;
+            let fraction = (t / secs).clamp(0.0, 1.0);
+            let stage = stages[((fraction * stages.len() as f32) as usize).min(stages.len() - 1)];
+            let mut g = Gfx::new(w, h);
+            draw(&mut g, &View { t: t + 0.5, fraction, stage, log: None, steps: &[] });
+            g.save_png(&std::path::Path::new(&dir).join(format!("f{i:05}.png"))).unwrap();
+        }
+    }
+
     #[test]
     fn kernel_log_records_are_parsed() {
         assert_eq!(parse_kmsg("6,339,5140900,-;usb 1-1: new device\n SUBSYSTEM=usb\n").as_deref(), Some("usb 1-1: new device"));
@@ -656,8 +719,9 @@ mod tests {
         }
         let (cx, cy, d) = GRUB_LOGO_IN_BG;
         assert!((((x0 + x1) as f32 / 2.0) - cx).abs() <= 2.0 && (((y0 + y1) as f32 / 2.0) - cy).abs() <= 2.0, "emblem centre {x0}..{x1} x {y0}..{y1}");
-        // logo.png's circle fills 378 of its 384 pixels
-        assert!(((x1 - x0) as f32 * 384.0 / 378.0 - d).abs() <= 4.0);
+        // logo.png's arrow heads span about nine tenths of its 384 pixels, and the picture shows them at that size and in that place
+        let share = (x1 - x0) as f32 / d;
+        assert!((0.80..=0.99).contains(&share), "the logo spans {share} of its square");
         // GRUB's "padding" fit: 1080p is the picture times 1.5; a 4:3 or 16:10 screen gets bands
         assert_eq!(logo_rect(1920, 1080), (960.0, 388.5, 450.0));
         assert_eq!(logo_rect(1280, 720), (640.0, 259.0, 300.0));

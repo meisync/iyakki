@@ -106,6 +106,9 @@ pub enum Plan {
     Mix { card: u32, device: u32, mix: Mix },
     /// The same softvol over the device alone (`plughw`): one program at a time. Used where `dmix` cannot open the device.
     Soft { card: u32, device: u32 },
+    /// [`Plan::Soft`] for a device with more than two channels (the MacBookPro's four-channel codec): the stereo signal is copied to every
+    /// channel before it reaches the device, as the shared mixer does, so each speaker plays at full level and not only the front pair.
+    SoftFan { card: u32, device: u32, channels: u32 },
     /// [`Plan::Soft`] for a device with fixed periods (the T2 Mac's `aaudio`), plus the engine's own PCM ([`WEB_PCM`]): `plug > softvol >
     /// plughw` plays the players' S16 stereo, but the engine's WebAudio output could not be installed on it (the page then froze on its
     /// synchronous start of the output), so the engine gets `plug > softvol > hw` (measured on a MacBookPro16,2: no freeze, a media
@@ -122,13 +125,13 @@ pub enum Plan {
 impl Plan {
     pub fn card(&self) -> u32 {
         match self {
-            Plan::Mix { card, .. } | Plan::Soft { card, .. } | Plan::SoftWeb { card, .. } | Plan::Direct { card, .. } | Plan::Hw { card, .. } => *card,
+            Plan::Mix { card, .. } | Plan::Soft { card, .. } | Plan::SoftFan { card, .. } | Plan::SoftWeb { card, .. } | Plan::Direct { card, .. } | Plan::Hw { card, .. } => *card,
         }
     }
 
     fn device(&self) -> u32 {
         match self {
-            Plan::Mix { device, .. } | Plan::Soft { device, .. } | Plan::SoftWeb { device, .. } | Plan::Direct { device, .. } | Plan::Hw { device, .. } => *device,
+            Plan::Mix { device, .. } | Plan::Soft { device, .. } | Plan::SoftFan { device, .. } | Plan::SoftWeb { device, .. } | Plan::Direct { device, .. } | Plan::Hw { device, .. } => *device,
         }
     }
 
@@ -137,6 +140,7 @@ impl Plan {
     fn exclusive_of(&self) -> Plan {
         match self {
             Plan::Mix { card, device, mix } if !mix.sized => Plan::Direct { card: *card, device: *device, channels: mix.channels },
+            Plan::Mix { card, device, mix } if mix.fans_out() => Plan::SoftFan { card: *card, device: *device, channels: mix.channels },
             p => Plan::Soft { card: p.card(), device: p.device() },
         }
     }
@@ -246,6 +250,22 @@ pub fn config_text_boost(plan: &Plan, boost_db: u32) -> String {
              {}",
             softvol_block(*card, &format!("plughw:{card},{device}"), boost_db, false)
         ),
+        Plan::SoftFan { card, device, channels } => {
+            let mut route = format!("pcm.iyakkifan {{\n    type route\n    slave {{\n        pcm \"plughw:{card},{device}\"\n        channels {channels}\n    }}\n    ttable {{\n");
+            for dst in 0..*channels {
+                route.push_str(&format!("        {}.{dst} 1.0\n", dst % 2));
+            }
+            route.push_str("    }\n}\n");
+            // the speaker tests play every channel apart through this one
+            route.push_str(&format!("pcm.iyakkichan {{\n    type plug\n    slave.pcm \"plughw:{card},{device}\"\n}}\n"));
+            format!(
+                "{MARKER}\n\
+                 # The output has no hardware volume: {SOFTVOL_PCM} is a software volume (control '{CONTROL}' on card {card}); one program at a time.\n\
+                 # The device has {channels} channels: the stereo signal is copied to all of them (left on the even ones, right on the odd ones).\n\
+                 {route}{}",
+                softvol_block(*card, "iyakkifan", boost_db, false)
+            )
+        }
         // the channels are unknown (the unprobed one-channel guess): no engine PCM, exactly the plain plan
         Plan::SoftWeb { card, device, channels } if *channels < 2 => config_text_boost(&Plan::Soft { card: *card, device: *device }, boost_db),
         Plan::SoftWeb { card, device, .. } => {
@@ -531,7 +551,7 @@ impl Softvol {
             }
             let card = match plan {
                 Plan::Hw { .. } => return Synced { managed: true, ..Default::default() },
-                Plan::Mix { card, .. } | Plan::Soft { card, .. } | Plan::SoftWeb { card, .. } | Plan::Direct { card, .. } => card,
+                Plan::Mix { card, .. } | Plan::Soft { card, .. } | Plan::SoftFan { card, .. } | Plan::SoftWeb { card, .. } | Plan::Direct { card, .. } => card,
             };
             let mut prime_failed = false;
             if st.level != Some(level) {
@@ -558,7 +578,7 @@ impl Softvol {
                             log::info!("sound: could not open {PCM} on card {card} either way: {e}");
                             let device = plan.device();
                             st.exclusive.retain(|d| *d != (card, device));
-                            if matches!(plan, Plan::Soft { .. } | Plan::SoftWeb { .. } | Plan::Direct { .. }) {
+                            if matches!(plan, Plan::Soft { .. } | Plan::SoftFan { .. } | Plan::SoftWeb { .. } | Plan::Direct { .. }) {
                                 let back = wanted.clone();
                                 let _ = self.write_plan(&mut st, &back);
                             }
@@ -1120,4 +1140,24 @@ mod tests {
         assert!(config_text_boost(&Plan::Soft { card: 0, device: 0 }, 99).contains("max_dB 12.0"));
         assert_eq!(braces(&b), 0);
     }
+
+    #[test]
+    fn a_four_channel_codec_keeps_its_fan_out_when_the_shared_mixer_could_not_be_opened() {
+        // the MacBookPro14,1's codec: the plan is the shared mixer over four channels; when dmix is refused the exclusive plan must still
+        // copy the stereo signal to all four channels, or only the front pair plays and the speakers are quiet
+        let plan = Plan::Mix { card: 0, device: 0, mix: Mix { format: "S32_LE", channels: 4, sized: true, rate: 44_100, probed: true } };
+        let fallback = plan.exclusive_of();
+        assert_eq!(fallback, Plan::SoftFan { card: 0, device: 0, channels: 4 });
+        let t = config_text(&fallback);
+        assert!(t.contains("slave.pcm \"iyakkifan\""), "{t}");
+        assert!(t.contains("pcm \"plughw:0,0\"") && t.contains("channels 4"), "{t}");
+        for (src, dst) in [(0, 0), (1, 1), (0, 2), (1, 3)] {
+            assert!(t.contains(&format!("{src}.{dst} 1.0")), "{src}.{dst} missing in {t}");
+        }
+        assert!(t.contains("pcm.iyakkichan"), "the speaker tests need it: {t}");
+        assert!(t.contains(MARKER));
+        // a plain stereo device is unchanged
+        assert_eq!(Plan::Mix { card: 1, device: 2, mix: Mix::STEREO }.exclusive_of(), Plan::Soft { card: 1, device: 2 });
+    }
+
 }

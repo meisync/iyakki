@@ -487,3 +487,79 @@ fn the_plugin_manifest_uses_cdi_without_hooks_and_the_kubelets_folder() {
     assert!(!m.contains("runtimeClassName") && !m.contains("nvidia-ctk") && !m.contains("nvidia-container-runtime"), "no toolkit, no runtime class");
     assert!(m.contains("app.kubernetes.io/managed-by: iyakki"));
 }
+
+// ---- unpacking the vendor file without NVIDIA's own (glibc) helper
+
+/// A makeself-shaped file: a script header whose `skip=` names the line the payload starts at (binary bytes with newlines in it, like the real
+/// header's embedded program), then a zstd-compressed tar.
+fn fake_run(skip_extra_lines: usize, payload: &[u8]) -> Vec<u8> {
+    let mut h = String::from("#! /bin/sh\nCRCsum=1\nMD5=x\n");
+    let lines_before_payload = 4 + skip_extra_lines; // header lines up to and including the `skip=` line, plus the embedded program
+    h.push_str(&format!("skip={}\n", lines_before_payload + 1));
+    let mut out = h.into_bytes();
+    // an embedded "program" of binary lines (includes bytes that are not text)
+    for i in 0..skip_extra_lines {
+        out.extend_from_slice(&[0x7f, b'E', b'L', b'F', i as u8, 0xff, 0x00, b'\n']);
+    }
+    out.extend_from_slice(payload);
+    out
+}
+
+#[test]
+fn the_vendor_run_file_is_unpacked_here_from_its_zstd_payload() {
+    use crate::archive::tests::make_tar;
+    let tar = make_tar(&[("nvidia-smi", b'0', "smi", 0o755), ("libcuda.so.595.99.02", b'0', "cuda", 0o755), ("firmware/gsp_ga10x.bin", b'0', "gsp", 0o644)]);
+    let z = ruzstd::encoding::compress_to_vec(&tar[..], ruzstd::encoding::CompressionLevel::Fastest);
+    let d = tmp("nvrun");
+    let run = d.join("x.run");
+    std::fs::write(&run, fake_run(7, &z)).unwrap();
+    let dest = d.join("extracted");
+    assert_eq!(extract_makeself_zstd(&run, &dest).unwrap(), 3);
+    assert_eq!(std::fs::read(dest.join("nvidia-smi")).unwrap(), b"smi");
+    assert_eq!(std::fs::read(dest.join("firmware/gsp_ga10x.bin")).unwrap(), b"gsp");
+    // not zstd: another makeself compression is said so (the caller then falls back to `sh <file> --extract-only`)
+    std::fs::write(&run, fake_run(2, b"\x1f\x8b\x08 gzip payload")).unwrap();
+    assert!(extract_makeself_zstd(&run, &d.join("e2")).unwrap_err().contains("not zstd"));
+    // not a makeself file at all
+    std::fs::write(&run, b"ELF binary\n").unwrap();
+    assert!(extract_makeself_zstd(&run, &d.join("e3")).unwrap_err().contains("skip="));
+    // a header that ends before the payload
+    std::fs::write(&run, b"#! /bin/sh\nskip=500\nshort\n").unwrap();
+    assert!(extract_makeself_zstd(&run, &d.join("e4")).unwrap_err().contains("ends before the payload"));
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn the_device_plugin_looks_for_the_driver_where_the_stage_is_mounted() {
+    // the pod stopped with "failed to locate libcuda.so.595.99.02" when its driver root was a folder that is not mounted
+    let m = plugin_manifest("/var/lib/iyakki/k3s/agent/kubelet", "/var/lib/iyakki/gpu/nvidia/595.99.02/stage");
+    assert!(m.contains(&format!("name: NVIDIA_DRIVER_ROOT\n              value: {CONTAINER_ROOT}\n")), "{m}");
+    // the plugin reads its driver root inside the pod from CONTAINER_DRIVER_ROOT (default /driver-root, which does not exist here)
+    assert!(m.contains(&format!("name: CONTAINER_DRIVER_ROOT\n              value: {CONTAINER_ROOT}\n")), "{m}");
+    assert!(m.contains(&format!("mountPath: {CONTAINER_ROOT}")) && !m.contains("/driver-root"));
+    assert!(m.contains(&format!("value: {CONTAINER_ROOT}/lib64")), "the libraries are under lib64 of that root");
+}
+
+#[test]
+fn the_driver_is_loaded_with_dynamic_power_management_and_the_slot_is_let_to_sleep() {
+    assert_eq!(modprobe_argv("nvidia"), ["modprobe", "nvidia", "NVreg_DynamicPowerManagement=0x02"]);
+    assert_eq!(modprobe_argv("nvidia-uvm"), ["modprobe", "nvidia-uvm"], "only the main module takes the option");
+    let root = tmp("nvpower");
+    let dev = root.join("sys/bus/pci/devices");
+    for (addr, class, vendor, ctl) in [("0000:01:00.0", "0x030000", "0x10de", "on"), ("0000:01:00.1", "0x040300", "0x10de", "on"), ("0000:04:00.0", "0x028000", "0x14c3", "on"), ("0000:05:00.0", "0x030000", "0x1002", "on")] {
+        let d = dev.join(addr);
+        std::fs::create_dir_all(d.join("power")).unwrap();
+        std::fs::write(d.join("class"), format!("{class}\n")).unwrap();
+        std::fs::write(d.join("vendor"), format!("{vendor}\n")).unwrap();
+        std::fs::write(d.join("device"), "0x2520\n").unwrap();
+        std::fs::write(d.join("power/control"), format!("{ctl}\n")).unwrap();
+    }
+    let changed = allow_power_saving(&root);
+    assert_eq!(changed, ["0000:01:00.0", "0000:01:00.1"], "the card and its audio function; not the Wi-Fi, not the AMD graphics");
+    let read = |a: &str| std::fs::read_to_string(dev.join(a).join("power/control")).unwrap();
+    assert_eq!(read("0000:01:00.0").trim(), "auto");
+    assert_eq!(read("0000:04:00.0").trim(), "on");
+    assert_eq!(read("0000:05:00.0").trim(), "on");
+    assert!(allow_power_saving(&root).is_empty(), "nothing to change the second time");
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -2614,6 +2614,7 @@ dependencies = [
  "iyakki-drivers",
  "iyakki-edit",
  "iyakki-flow",
+ "iyakki-fw",
  "iyakki-hwinfo",
  "iyakki-js",
  "iyakki-ledger",
@@ -2626,6 +2627,7 @@ dependencies = [
  "iyakki-storage",
  "iyakki-usb",
  "iyakki-vfs",
+ "iyakki-vpn",
  "iyakki-wasm",
  "iyakki-web",
  "iyakki-webview",
@@ -2659,6 +2661,7 @@ dependencies = [
  "iyakki-storage",
  "iyakki-usb",
  "iyakki-vfs",
+ "iyakki-vpn",
  "iyakki-wasm",
  "iyakki-zram",
  "libc",
@@ -2846,6 +2849,7 @@ dependencies = [
  "iyakki-sec",
  "iyakki-storage",
  "iyakki-usb",
+ "iyakki-vpn",
  "iyakki-web",
  "iyakki-webview",
  "iyakki-zram",
@@ -2898,6 +2902,13 @@ name = "iyakki-vfs"
 version = "0.1.0-alpha.1"
 dependencies = [
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "iyakki-vpn"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

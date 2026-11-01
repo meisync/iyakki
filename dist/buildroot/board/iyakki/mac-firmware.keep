@@ -76,19 +76,11 @@ brcm/bcm43xx*
 rtl_nic/rtl8153*
 rtl_nic/rtl8156*
 
-# USB Wi-Fi adapters recommended in docs/MAC-HARDWARE.md section 4: MediaTek MT7612U (mt76x2u), MT7921AU (mt7921u, with its
-# Bluetooth), MT7601U, Atheros AR9271 (ath9k_htc). Also the tiny files of other common USB adapters: AR7010 (ath9k_htc), AR9170
+# USB Wi-Fi adapters recommended in docs/MAC-HARDWARE.md section 4: Atheros AR9271 (ath9k_htc). The MediaTek ones (MT7612U, MT7921AU, MT7601U) are
+# NOT kept: MediaTek's licence is not an open-source one, so the "MediaTek Wi-Fi and Bluetooth firmware" tile (fw-mediatek) installs them. Also the tiny files of other common USB adapters: AR7010 (ath9k_htc), AR9170
 # (the old ar9170 files only; carl9170-1.fw is GPL without a source offer in linux-firmware, so it is NOT kept: a tile installs it),
 # Ralink RT2870/RT3070/RT5370 (rt2800usb).
-# required: mt7662.bin mt7662_rom_patch.bin mediatek/WIFI_RAM_CODE_MT7961_1.bin mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin mediatek/BT_RAM_CODE_MT7961_1_2_hdr.bin mt7601u.bin ath9k_htc/htc_9271-1.4.0.fw
-mt7662.bin
-mt7662_rom_patch.bin
-mediatek/mt7662*
-mediatek/mt7601u.bin
-mt7601u.bin
-mediatek/WIFI_MT7961_*
-mediatek/WIFI_RAM_CODE_MT7961_*
-mediatek/BT_RAM_CODE_MT7961_*
+# required: ath9k_htc/htc_9271-1.4.0.fw
 ath9k_htc/*
 htc_9271.fw
 htc_7010.fw

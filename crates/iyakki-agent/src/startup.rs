@@ -109,10 +109,12 @@ pub struct Def {
     pub tracked: bool,
 }
 
-/// The services, in the order they are listed. Wi-Fi is part of the network: one line for both.
+/// The services, in the order they are listed: the network first (Wi-Fi is part of it: one line for both), the device name that rides on it, then
+/// the clock, which needs the network to reach a time server, then the rest.
 pub const CATALOGUE: [Def; 12] = [
-    Def { id: "clock", name: "Clock", short: "the clock", scope: Scope::System, after: &[], goes: Goes::Time, can_retry: false, tracked: true },
     Def { id: "network", name: "Network and Wi-Fi", short: "the network", scope: Scope::System, after: &[], goes: Goes::Network, can_retry: false, tracked: true },
+    Def { id: "devname", name: "Device name (mDNS)", short: "the device name", scope: Scope::System, after: &["network"], goes: Goes::Network, can_retry: false, tracked: false },
+    Def { id: "clock", name: "Clock", short: "the clock", scope: Scope::System, after: &["network"], goes: Goes::Time, can_retry: false, tracked: true },
     Def { id: "firewall", name: "Firewall", short: "the firewall", scope: Scope::System, after: &[], goes: Goes::Firewall, can_retry: false, tracked: true },
     Def { id: "sound", name: "Sound", short: "sound", scope: Scope::System, after: &[], goes: Goes::Sound, can_retry: false, tracked: true },
     Def { id: "k3s", name: "Dev cluster (k3s)", short: "the cluster", scope: Scope::System, after: &["network", "clock"], goes: Goes::Cluster, can_retry: true, tracked: true },
@@ -121,7 +123,6 @@ pub const CATALOGUE: [Def; 12] = [
     Def { id: "flows", name: "Flows scheduler", short: "the flows scheduler", scope: Scope::Session, after: &[], goes: Goes::Nothing, can_retry: false, tracked: false },
     Def { id: "shares", name: "Shared folders", short: "shared folders", scope: Scope::Session, after: &["network"], goes: Goes::Shares, can_retry: false, tracked: true },
     Def { id: "service", name: "Web service", short: "the web service", scope: Scope::System, after: &["network"], goes: Goes::Nothing, can_retry: false, tracked: false },
-    Def { id: "devname", name: "Device name (mDNS)", short: "the device name", scope: Scope::System, after: &["network"], goes: Goes::Network, can_retry: false, tracked: false },
     Def { id: "agent", name: "Assistant", short: "the assistant", scope: Scope::Session, after: &[], goes: Goes::Nothing, can_retry: false, tracked: true },
 ];
 

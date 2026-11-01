@@ -164,12 +164,12 @@ fn touch(p: &Path, bytes: &[u8]) {
 }
 
 /// The recipes drop the doubtful files: every file of the pinned table is removed by the Mac and the PC keep lists, and what is clearly redistributable
-/// next to them (USB Realtek adapters, Qualcomm Atheros files under LICENSE.QualcommAtheros_ath10k, Intel e100) stays.
+/// next to them (USB Realtek adapters, Qualcomm Atheros files under LICENSE.QualcommAtheros_ath10k, Intel e100); MediaTek's files are in the table now, so they go too stays.
 #[test]
 fn the_keep_lists_of_the_published_images_no_longer_carry_the_restricted_files() {
     let rows = files_of_table();
     assert!(rows.len() >= 70 && rows.iter().filter(|f| f.starts_with("qca/")).count() == 20 && rows.contains(&"carl9170-1.fw".to_string()) && rows.iter().any(|f| f.starts_with("tigon/")) && rows.iter().any(|f| f.starts_with("bnx2/")) && rows.iter().any(|f| f.starts_with("rtl_nic/rtl8168")), "{} files", rows.len());
-    for (list, decoys) in [("board/iyakki/pc-firmware.keep", vec!["rtl_nic/rtl8153b-2.fw", "rtl_nic/rtl8156b-2.fw", "qca/nvm_usb_00000302.bin", "qca/rampatch_usb_00000302.bin", "ar9170-1.fw", "e100/d101m_ucode.bin"]), ("board/iyakki/mac-firmware.keep", vec!["rtl_nic/rtl8153b-2.fw", "rtl_nic/rtl8156b-2.fw", "ar9170-1.fw", "mt7601u.bin"])] {
+    for (list, decoys) in [("board/iyakki/pc-firmware.keep", vec!["rtl_nic/rtl8153b-2.fw", "rtl_nic/rtl8156b-2.fw", "qca/nvm_usb_00000302.bin", "qca/rampatch_usb_00000302.bin", "ar9170-1.fw", "e100/d101m_ucode.bin"]), ("board/iyakki/mac-firmware.keep", vec!["rtl_nic/rtl8153b-2.fw", "rtl_nic/rtl8156b-2.fw", "ar9170-1.fw"])] {
         let dir = tmpdir("keep");
         let fw = dir.join("fw");
         for f in rows.iter().map(String::as_str).chain(decoys.iter().copied()) {

@@ -356,6 +356,64 @@ pub fn wanted_from_manifest(entries: &[ManifestEntry]) -> (Vec<String>, Vec<(Str
     (files, links)
 }
 
+/// Unpack a NVIDIA `.run` (a makeself shell archive: a script header of `skip=N` lines, then a zstd-compressed tar) into `dest` without running
+/// anything. NVIDIA's own `--extract-only` needs a `zstd` program: it uses the host's, else one it carries inside the file, and that one is
+/// built for glibc, so on a musl system ("not found") the unpack fails before a byte is written. Returns the number of files.
+///
+/// `skip=N` counts lines of the header: the payload starts at line N (`tail -n +N`), that is after N-1 newlines. Everything is read straight
+/// through, never more than [`crate::archive::MAX_TOTAL`] bytes of files, and nothing is written outside `dest`.
+pub fn extract_makeself_zstd(run: &Path, dest: &Path) -> Result<usize, String> {
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+    let f = std::fs::File::open(run).map_err(|e| format!("{}: {e}", run.display()))?;
+    let mut r = BufReader::new(f);
+    // the header: the first lines say where the payload starts
+    let mut skip: Option<u64> = None;
+    let mut line = Vec::new();
+    for _ in 0..60 {
+        line.clear();
+        if r.read_until(b'\n', &mut line).map_err(|e| e.to_string())? == 0 {
+            break;
+        }
+        if let Some(v) = line.strip_prefix(b"skip=") {
+            skip = String::from_utf8_lossy(v).trim().parse().ok();
+            break;
+        }
+    }
+    let skip = skip.filter(|n| *n >= 2).ok_or("no `skip=` line in the first lines: not a makeself archive")?;
+    // walk to the start of line `skip`: skip-1 newlines from the beginning of the file (the header holds binary data, so count bytes, not lines of text)
+    r.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    let (mut offset, mut newlines) = (0u64, 0u64);
+    let mut buf = vec![0u8; 1 << 16];
+    'find: loop {
+        let n = r.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("the header ends before the payload".into());
+        }
+        for (i, b) in buf[..n].iter().enumerate() {
+            if *b == b'\n' {
+                newlines += 1;
+                if newlines == skip - 1 {
+                    offset += i as u64 + 1;
+                    break 'find;
+                }
+            }
+        }
+        offset += n as u64;
+        if offset > 64 << 20 {
+            return Err("the header is far longer than a makeself header".into());
+        }
+    }
+    r.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    let mut magic = [0u8; 4];
+    r.read_exact(&mut magic).map_err(|e| e.to_string())?;
+    if magic != [0x28, 0xB5, 0x2F, 0xFD] {
+        return Err("the payload is not zstd-compressed (another makeself compression)".into());
+    }
+    r.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    let dec = ruzstd::decoding::StreamingDecoder::new(r).map_err(|e| format!("the payload is not a zstd stream ({e})"))?;
+    crate::archive::untar_stream(dec, dest, crate::archive::MAX_TOTAL).map(|u| u.files)
+}
+
 /// Copy what containers need from an extracted vendor package (`extracted`, the output of `--extract-only`) to `stage`'s folders.
 /// The package must be the pinned version: `libcuda.so.<version>` has to be in it. The package's `.manifest` says which files are
 /// libraries and which names are links to them ([`wanted_from_manifest`]); without one the versioned `lib*.so.<version>` files are taken
@@ -547,6 +605,44 @@ pub fn loaded_version(root: &Path) -> Option<String> {
 /// Where the stage appears inside containers (the path NVIDIA's CUDA images already search).
 pub const CONTAINER_ROOT: &str = "/usr/local/nvidia";
 
+/// Module parameters for `nvidia`: fine-grained dynamic power management. The card powers itself down when nothing uses it and wakes when a
+/// program asks (about a second), instead of idling at 20 W or more on a laptop. Needs the PCI function's runtime power control on `auto`
+/// ([`allow_power_saving`]).
+pub const MODULE_PARAMS: [&str; 1] = ["NVreg_DynamicPowerManagement=0x02"];
+
+/// The file that says the person switched the NVIDIA card off to save power: while it exists IYAKKI does not load the driver at start.
+pub fn sleep_marker(data: &Path) -> PathBuf {
+    data.join("gpu").join("nvidia-sleep")
+}
+
+/// The `modprobe` command for one module: `nvidia` gets [`MODULE_PARAMS`].
+pub fn modprobe_argv(module: &str) -> Vec<String> {
+    let mut v = vec!["modprobe".to_string(), module.to_string()];
+    if module == "nvidia" {
+        v.extend(MODULE_PARAMS.iter().map(|p| p.to_string()));
+    }
+    v
+}
+
+/// Let the kernel power the NVIDIA cards down when idle: `power/control` = `auto` on every NVIDIA display function and on the other functions
+/// of the same slot (the HDMI audio at `.1`, the USB-C controller). Returns what was changed, as `0000:01:00.0` addresses.
+pub fn allow_power_saving(root: &Path) -> Vec<String> {
+    let dir = root.join("sys/bus/pci/devices");
+    let mut changed = Vec::new();
+    for g in crate::gpu::detect(root).iter().filter(|g| g.is_nvidia()) {
+        let slot = g.pci.rsplit_once('.').map(|(s, _)| s.to_string()).unwrap_or_else(|| g.pci.clone());
+        let mut names: Vec<String> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(&format!("{slot}."))).collect();
+        names.sort();
+        for n in names {
+            let ctl = dir.join(&n).join("power/control");
+            if std::fs::read_to_string(&ctl).map(|t| t.trim() != "auto").unwrap_or(false) && std::fs::write(&ctl, "auto\n").is_ok() {
+                changed.push(n);
+            }
+        }
+    }
+    changed
+}
+
 /// Build the CDI spec of the machine for `kind` (use [`crate::gpucdi::NVIDIA_KIND`] and [`crate::gpucdi::PLUGIN_KIND`]).
 /// * `root`: the file system root (`/`), where `dev/nvidia*` are looked for;
 /// * `l`: the staged vendor files;
@@ -737,7 +833,9 @@ pub fn machine_facts(root: &Path, data: &Path, gpus: &[crate::gpu::Gpu]) -> Fact
 /// each allocation with the CDI name `k8s.device-plugin.nvidia.com/gpu=<index>`, which containerd resolves in the spec IYAKKI wrote.
 /// `kubelet_dir` is the kubelet root of the managed cluster (`<k3s data>/agent/kubelet`).
 ///
-/// The plugin looks for NVML itself: the stage is mounted into the pod and `LD_LIBRARY_PATH` points to it. The plugin's own CDI spec goes to
+/// The plugin looks for NVML itself: the stage is mounted into the pod at [`CONTAINER_ROOT`], which is also its driver root (it looks for
+/// `libcuda`, `libnvidia-ml` and the other driver libraries under `<driver root>/lib64`; a driver root that does not exist makes it stop with
+/// "failed to locate libcuda.so"), and `LD_LIBRARY_PATH` points to it. The plugin's own CDI spec goes to
 /// a throw-away directory (IYAKKI's spec on the host is the one containerd reads).
 pub fn plugin_manifest(kubelet_dir: &str, stage_dir: &str) -> String {
     format!(
@@ -777,7 +875,9 @@ spec:
             - name: CDI_DISABLE_HOOKS
               value: all
             - name: NVIDIA_DRIVER_ROOT
-              value: /driver-root
+              value: {croot}
+            - name: CONTAINER_DRIVER_ROOT
+              value: {croot}
             - name: LD_LIBRARY_PATH
               value: {croot}/lib64
             - name: FAIL_ON_INIT_ERROR

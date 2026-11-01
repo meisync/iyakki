@@ -120,6 +120,11 @@ impl Presence {
         Presence::with(Roots::system(), Box::new(|p: &Path| super::v4l2::query_caps(p)))
     }
 
+    /// Does this one look at the real `/sys` and `/dev` (not the empty placeholder of [`Presence::none`] or a test's folders)?
+    pub fn looks_at_the_machine(&self) -> bool {
+        self.roots == Roots::system()
+    }
+
     pub fn with(roots: Roots, query: Query) -> Presence {
         let apple = std::fs::read_to_string(roots.sys.join("class/dmi/id/sys_vendor")).is_ok_and(|v| v.contains("Apple"));
         let facetime_pci = has_facetime_pci(&roots.sys);
@@ -136,6 +141,10 @@ impl Presence {
         let before = self.cameras();
         let class = self.roots.sys.join("class/video4linux");
         let mut seen = Vec::new();
+        if !self.scanned {
+            let n = std::fs::read_dir(&class).map(|r| r.flatten().count());
+            log::info!("camera: first look at {}: {}", class.display(), match n { Ok(n) => format!("{n} video node(s)"), Err(e) => format!("cannot be read ({e})") });
+        }
         if let Ok(rd) = std::fs::read_dir(&class) {
             for e in rd.flatten() {
                 let node = e.file_name().to_string_lossy().into_owned();
@@ -152,7 +161,13 @@ impl Presence {
                     continue;
                 }
                 let sysname = std::fs::read_to_string(class.join(&node).join("name")).unwrap_or_default().trim().to_string();
-                let cam = (self.query)(&path).filter(Caps::is_camera).map(|caps| {
+                let answer = (self.query)(&path);
+                // one line per node when it is first asked: the log says why a camera that the kernel found is not in the list
+                match &answer {
+                    Some(c) => log::info!("camera: {node} ({devno}) \"{sysname}\": driver {}, caps {:#x}, {}", c.driver, c.caps, if c.is_camera() { "takes pictures" } else { "does not take pictures (no capture, or no streaming)" }),
+                    None => log::info!("camera: {node} ({devno}) \"{sysname}\": the device did not answer VIDIOC_QUERYCAP (could not be opened, or is not a V4L2 device)"),
+                }
+                let cam = answer.filter(Caps::is_camera).map(|caps| {
                     let cleaned = clean_name(&sysname);
                     let name = if !cleaned.is_empty() { cleaned } else if !caps.card.is_empty() { clean_name(&caps.card) } else { node.clone() };
                     // the USB device above the interface: its path tells the nodes of one camera apart from another camera's
@@ -295,6 +310,13 @@ pub(crate) mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(self.dir());
         }
+    }
+
+    #[test]
+    fn the_placeholder_scanner_is_told_apart_from_the_real_one() {
+        // the shell swaps the empty placeholder for the real scanner when the machine turns out to be a desktop
+        assert!(!Presence::none().looks_at_the_machine());
+        assert!(Presence::system().looks_at_the_machine());
     }
 
     #[test]

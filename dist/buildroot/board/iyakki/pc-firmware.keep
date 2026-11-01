@@ -52,9 +52,10 @@ xe/*
 
 # ---- Wi-Fi ----
 # Intel iwlwifi is NOT listed here: post-build.sh adds the patterns that iwlwifi-keep.sh derives from the kernel's own MODULE_FIRMWARE
-# (the newest file of each chip that the kernel can use, and the one below it; 71 MB instead of 265 MB). Realtek, MediaTek,
-# Atheros/Qualcomm and Ralink follow.
-# required: rtw88/rtw8822c_fw.bin rtw89/rtw8852a_fw.bin mediatek/WIFI_RAM_CODE_MT7961_1.bin
+# (the newest file of each chip that the kernel can use, and the one below it; 71 MB instead of 265 MB). Realtek,
+# Atheros/Qualcomm and Ralink follow. MediaTek is not here any more: its licence is not an open-source one, so the "MediaTek Wi-Fi and Bluetooth
+# firmware" tile (Store, Setup, Hardware: fw-mediatek) installs it at the person's click.
+# required: rtw88/rtw8822c_fw.bin rtw89/rtw8852a_fw.bin
 rtw88/*
 rtw89/*
 rtlwifi/*
@@ -62,13 +63,6 @@ rtlwifi/*
 # format" permission) are not shipped (docs/RESTRICTED-FIRMWARE.md): the "Realtek network firmware" tile installs them at the person's click.
 rtl_nic/rtl8153*
 rtl_nic/rtl8156*
-# MediaTek: the PC Wi-Fi 6/7 cards and their Bluetooth (MT7921/MT7922/MT7925), the older MT76xx USB sticks; not the router, TV and phone SoC parts
-mediatek/BT_*
-mediatek/WIFI_*
-mediatek/mt76*
-mediatek/mt7925/*
-mt7601u.bin
-mt7662*.bin
 ath9k_htc/*
 ath10k/*
 # Not shipped: the WCN3990 phone-SoC files fall under LICENSE.qcom (no open-source terms on the Materials, Qualcomm chipsets only) and no PC has that chip.
@@ -98,7 +92,7 @@ rt3290.bin
 rt73.bin
 
 # ---- Bluetooth ----
-# Intel (ibt-*), Realtek, Qualcomm/Atheros, MediaTek (in mediatek/ above).
+# Intel (ibt-*), Realtek, Qualcomm/Atheros, MediaTek (a download item now, see the top of this file).
 # required: intel/ibt-19-0-4.sfi rtl_bt/rtl8761bu_fw.bin
 intel/ibt-*
 rtl_bt/*

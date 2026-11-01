@@ -68,7 +68,8 @@ pub fn apply(reg: &Registry, f: &Facts) {
     } else if f.clock_synced {
         reg.ready("clock");
     } else if f.uptime_secs < CLOCK_LIMIT_SECS {
-        reg.starting("clock", "waiting for a time server");
+        // without a network no time server can answer: say what is really missing
+        reg.starting("clock", if f.route { "waiting for a time server" } else { "waiting for the network" });
     } else {
         // offline: the saved time is good enough, which is what the cluster decides too
         reg.ready("clock");

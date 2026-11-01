@@ -334,3 +334,14 @@ fn garbage_files_never_panic() {
     assert_eq!(detect(Path::new("/nonexistent-iyakki")).line(), "No GPU: CPU only, 0 GB RAM");
     let _ = std::fs::remove_dir_all(&r);
 }
+
+#[test]
+fn the_nvidia_driver_is_offered_on_a_laptop_whose_first_gpu_is_the_amd_one() {
+    // AMD integrated graphics (0x164e, Raphael) and an NVIDIA card (0x2503): the AMD one can come first while the NVIDIA memory is unknown
+    let p = pc(32, &[("0000:01:00.0", "0x10de", "0x2503", vec![]), ("0000:05:00.0", "0x1002", "0x164e", vec![])]);
+    assert!(p.gpus.iter().any(|g| g.vendor == Vendor::Nvidia), "the card is found");
+    assert!(!matches!(rule(&p, Item::GpuNvidia), Vis::Hidden(_)), "{:?}", rule(&p, Item::GpuNvidia));
+    // no NVIDIA card at all: still hidden, with the reason said plainly
+    let amd = pc(32, &[("0000:05:00.0", "0x1002", "0x164e", vec![])]);
+    assert_eq!(rule(&amd, Item::GpuNvidia), Vis::Hidden("there is no NVIDIA GPU here".into()));
+}

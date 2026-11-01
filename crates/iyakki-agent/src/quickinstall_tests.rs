@@ -643,10 +643,10 @@ fn the_camera_firmware_job_is_an_item_with_its_own_command_and_is_recognised_whi
 
 #[test]
 fn the_firmware_packs_are_hardware_items_with_their_own_job_licence_and_cli_word() {
-    let packs = [Item::FwQualcommBt, Item::FwRealtekNet, Item::FwBroadcomNet, Item::FwAtheros9170];
+    let packs = [Item::FwQualcommBt, Item::FwRealtekNet, Item::FwBroadcomNet, Item::FwAtheros9170, Item::FwMediatek];
     let mut with_hw = packs.to_vec();
     with_hw.push(Item::FwHardware);
-    assert_eq!(items_of(Group::Firmware), with_hw, "the four packs and the Hardware firmware item");
+    assert_eq!(items_of(Group::Firmware), with_hw, "the five packs and the Hardware firmware item");
     let h = Item::FwHardware;
     assert_eq!(Item::parse(h.id()), Some(h));
     assert!(h.fw_def().is_none() && h.is_hardware() && !h.runs_as_job() && h.group() == Group::Firmware && h.needs().is_empty());
@@ -659,7 +659,7 @@ fn the_firmware_packs_are_hardware_items_with_their_own_job_licence_and_cli_word
         assert_eq!(Item::parse(i.id()), Some(i), "`iyakki quick-install {}` is the same word", i.id());
         assert_eq!(i.id(), d.pack_id);
         assert!(i.is_hardware() && !i.runs_as_job() && i.group() == Group::Firmware && i.needs().is_empty() && i.cli_id().is_none(), "{i:?}: its own job, only where the hardware is");
-        assert!(i.licence().contains(d.licence_note) && i.about().contains("not sure it may redistribute") && i.about().contains("folder or USB stick") && !i.title().is_empty());
+        assert!(i.licence().contains(d.licence_note) && i.about().contains("Not in the images") && i.about().contains("folder or USB stick") && !i.title().is_empty());
         assert!(i.download_mb() >= 1);
     }
     assert!(Item::FwRealtekNet.licence().contains("hexadecimal or equivalent format") && Item::FwQualcommBt.licence().contains("third-party licence terms") && Item::FwAtheros9170.licence().contains("GPL"));
