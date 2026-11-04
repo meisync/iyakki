@@ -164,6 +164,10 @@ impl K8sApp {
             let lab = if self.show_log { "Hide log" } else { "Show log" };
             let (lx, ly) = c.place(btn_w(g, size, lab));
             g.button(lx, ly + (row_h - size * 2.1) / 2.0, size, lab, MUTED, Event::Tab(T_LOG));
+            if self.admin {
+                let (cx1, cy1) = c.place(btn_w(g, size, "Launch cloud mode"));
+                g.button(cx1, cy1 + (row_h - size * 2.1) / 2.0, size, "Launch cloud mode", MUTED, Event::Tab(super::k8s_cloud::T_CLOUD));
+            }
             // the Allow changes switch
             let on = self.allow_changes();
             let lab = "Allow changes";
@@ -745,7 +749,10 @@ impl K8sApp {
     // ------------------------------------------------------------------------------------------------ overlays
 
     fn draw_overlays(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
-        let _ = cx;
+        if self.cloud.is_some() {
+            self.draw_cloud(g, area, s, cx, tick);
+            return;
+        }
         if let Some(o) = self.overlay {
             let (title, h) = match o {
                 Overlay::Clusters => ("Choose a cluster", 140.0 + 34.0 * self.entries.len() as f32),

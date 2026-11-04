@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::fb::Framebuffer;
 use crate::gfx::{rgb, Gfx};
-use crate::input::{poll_devices, scan_devices, BackgroundScan, Device, InputState};
+use crate::input::{poll_devices, BackgroundScan, Device, InputState};
 use crate::shell::Shell;
 use crate::pointer_sprites::{shape_from_u8, shape_to_u8, sprite};
 use crate::ui::Event;
@@ -221,6 +221,7 @@ fn splash_loop(fb_path: &str) -> Result<(), String> {
     // the console set its mode again, which on some GPUs is a full mode change and a dark screen
     std::mem::forget(GraphicsMode::enter());
     let mut canvas = SplashCanvas::new(fb.width, fb.height);
+    crate::touchscreen::init_from_cmdline();
     let mut input = InputState::new(fb.width, fb.height);
     // the devices are found on a thread of its own: opening one the kernel is still setting up can block for seconds, and the
     // animation must not stop for it
@@ -559,24 +560,33 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
 
     std::thread::scope(|sc| {
         let input_thread = std::thread::Builder::new().name("iyakki-input".into()).stack_size(INPUT_STACK).spawn_scoped(sc, || {
+            crate::touchscreen::init_from_cmdline();
             let mut input = InputState::new(w, h);
             let mut repeat = crate::input::RepeatApplier::default();
-            // due at once: the first scan of the input devices happens here, not before the first picture
-            let mut last_scan = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);
+            // the devices are found on a thread of its own, now and every 2 s: opening an event node the kernel is still setting up
+            // (a hub that resets, a monitor's touch panel) can block for seconds, and this thread must keep reading the keyboard
+            let mut bscan: Option<BackgroundScan> = None;
             while !stop.load(Ordering::Relaxed) && !quit.load(Ordering::Relaxed) {
                 if paused.load(Ordering::SeqCst) {
                     // the screen and keyboard belong to another program: hold nothing open
                     devs.clear();
+                    bscan = None;
                     idle.store(true, Ordering::SeqCst);
                     std::thread::sleep(Duration::from_millis(20));
                     continue;
                 }
                 if idle.swap(false, Ordering::SeqCst) {
-                    scan_devices(&mut devs);
                     input = InputState::new(w, h); // no key looks held down
-                    last_scan = Instant::now();
+                }
+                let touch_keys = |d: &[crate::input::Device]| -> Vec<String> { d.iter().filter_map(|x| x.touch.as_ref().map(|t| t.key.clone())).collect() };
+                let n0 = devs.len();
+                bscan.get_or_insert_with(BackgroundScan::start).take_into(&mut devs); // keyboards and mice found since the last pass
+                // a touch screen that came (again) starts clean (`InputState::touch_devices_changed`)
+                for ev in input.touch_devices_changed(&[], &[], &touch_keys(&devs[n0..])) {
+                    let _ = tx.send(ev);
                 }
                 repeat.tick(&devs);
+                let held = touch_keys(&devs);
                 for (raw, abs, pad, touch) in poll_devices(&mut devs, 10) {
                     for ev in match (pad, touch) { (Some(range), _) => input.feed_pad(raw, &range), (None, Some(t)) => input.feed_touch_full(raw, &t), _ => input.feed(raw, abs) } {
                         if matches!(ev, Event::MouseMove(..) | Event::MouseDown(..)) {
@@ -584,6 +594,10 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                         }
                         let _ = tx.send(ev);
                     }
+                }
+                // a touch screen that left during this pass (dead nodes are dropped by the poll) lifts its finger
+                for ev in input.touch_devices_changed(&held, &touch_keys(&devs), &[]) {
+                    let _ = tx.send(ev);
                 }
                 // the smooth scroll steps due now (about 60 a second while a scroll goes on, none once it settles)
                 for ev in input.scroll_tick() {
@@ -593,10 +607,6 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                 pointer.y.store(input.y, Ordering::Relaxed);
                 if let Err(e) = lock(&screen).move_pointer(pointer.get(), pointer.shape()) {
                     fail(e);
-                }
-                if last_scan.elapsed() > Duration::from_secs(2) {
-                    scan_devices(&mut devs); // keyboards and mice plugged in later
-                    last_scan = Instant::now();
                 }
             }
         });

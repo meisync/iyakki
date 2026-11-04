@@ -104,8 +104,9 @@ impl Extras for FakeExtras {
             Err(ApiError::NotFound("no such flow".into()))
         }
     }
-    fn data_call(&self, p: &Principal, tool: &str, _: &Value) -> ApiResult<String> {
-        Ok(format!("{tool} for {}", p.user))
+    fn data_call(&self, p: &Principal, tool: &str, args: &Value) -> ApiResult<String> {
+        // a `path` argument is echoed so tests can see where the service pointed it
+        Ok(format!("{tool} for {}{}", p.user, args["path"].as_str().map(|x| format!(" at {x}")).unwrap_or_default()))
     }
 }
 
@@ -553,7 +554,8 @@ fn a_body_must_be_json() {
 
 #[test]
 fn audit_lines_exist_for_every_audited_route_and_hold_no_secrets() {
-    let h = harness("cloud", |_| {});
+    // one sign-in per audited route: more routes than the default sign-in limit
+    let h = harness("cloud", |c| c.limits.logins_per_minute = 1000);
     let secret_prompt = "my-very-private-prompt-text";
     h.script.turns.lock().unwrap().push_back(final_turn("ok"));
     for r in ROUTES.iter().filter(|r| r.in_profile(Profile::Cloud) && r.audit) {
@@ -942,3 +944,187 @@ fn the_route_matcher_is_strict() {
         assert!(matches!(find(Profile::AgentApi, "GET", bad), Found::Nothing), "{bad}");
     }
 }
+
+// ------------------------------------------------------------------------------------------------ cloud profile: roles and namespaces
+
+/// root bootstraps as owner; ann and bob join the tenant; root makes namespace `web` and puts ann in it as editor. gus is a stranger.
+fn acme_cloud() -> (H, String, String, String, String) {
+    let h = harness("cloud", |_| {});
+    let (root, ann, bob, gus) = (h.root(), h.ann(), h.login("bob", "bob-password-1"), h.login("gus", "gus-password-1"));
+    assert_eq!(h.call("POST", "/api/v1/tenant/bootstrap", Some(&root), None).0, 200);
+    for who in ["ann", "bob"] {
+        assert_eq!(h.call("POST", "/api/v1/tenant/members", Some(&root), Some(json!({"name": who, "role": "member"}))).0, 200);
+    }
+    assert_eq!(h.call("POST", "/api/v1/namespaces", Some(&root), Some(json!({"name": "web", "action": "create"}))).0, 200);
+    assert_eq!(h.call("POST", "/api/v1/namespaces/web/members", Some(&root), Some(json!({"name": "ann", "role": "editor"}))).0, 200);
+    (h, root, ann, bob, gus)
+}
+
+#[test]
+fn cloud_a_tenant_without_lists_denies_namespaces_and_only_a_service_admin_can_bootstrap_once() {
+    let h = harness("cloud", |_| {});
+    let (root, ann) = (h.root(), h.ann());
+    for t in [&root, &ann] {
+        assert_eq!(h.call("GET", "/api/v1/tenant", Some(t), None).0, 403);
+        assert_eq!(h.call("POST", "/api/v1/data/call", Some(t), Some(json!({"tool": "data_query", "args": {}, "namespace": "web"}))).0, 403);
+        assert_eq!(h.call("POST", "/api/v1/namespaces", Some(t), Some(json!({"name": "web", "action": "create"}))).0, 403);
+    }
+    assert_eq!(h.call("POST", "/api/v1/tenant/bootstrap", Some(&ann), None).0, 403, "not a service administrator");
+    assert_eq!(h.call("POST", "/api/v1/tenant/bootstrap", Some(&root), None).0, 200);
+    assert_eq!(h.call("POST", "/api/v1/tenant/bootstrap", Some(&root), None).0, 403, "only once");
+    let (s, v, _) = h.call("GET", "/api/v1/tenant", Some(&root), None);
+    assert_eq!((s, v["tenant_role"].as_str()), (200, Some("owner")));
+}
+
+#[test]
+fn cloud_a_stranger_is_denied_everywhere_and_a_member_outside_a_namespace_gets_not_found() {
+    let (h, root, ann, bob, gus) = acme_cloud();
+    let read = |t: &str, ns: &str| h.call("POST", "/api/v1/data/call", Some(t), Some(json!({"tool": "data_query", "args": {}, "namespace": ns}))).0;
+    // gus is signed in to the service but not a member of the tenant
+    assert_eq!(h.call("GET", "/api/v1/tenant", Some(&gus), None).0, 403);
+    assert_eq!(h.call("GET", "/api/v1/flows", Some(&gus), None).0, 403);
+    assert_eq!(h.call("GET", "/api/v1/flows/f1", Some(&gus), None).0, 403);
+    assert_eq!(h.call("POST", "/api/v1/data/call", Some(&gus), Some(json!({"tool": "data_query", "args": {}}))).0, 403);
+    assert_eq!(read(&gus, "web"), 403);
+    assert_eq!(h.call("POST", "/api/v1/tenant/members", Some(&gus), Some(json!({"name": "gus", "role": "owner"}))).0, 403);
+    assert_eq!(h.call("POST", "/api/v1/namespaces/web/members", Some(&gus), Some(json!({"name": "gus", "role": "admin"}))).0, 403);
+    // bob is in the tenant, not in web: the same answer as for a namespace that is not there
+    let (s1, v1, _) = h.call("POST", "/api/v1/data/call", Some(&bob), Some(json!({"tool": "data_query", "args": {}, "namespace": "web"})));
+    let (s2, v2, _) = h.call("POST", "/api/v1/data/call", Some(&bob), Some(json!({"tool": "data_query", "args": {}, "namespace": "nothing"})));
+    assert_eq!((s1, &v1), (s2, &v2));
+    assert_eq!(s1, 404);
+    let (s1, v1, _) = h.call("POST", "/api/v1/namespaces/web/members", Some(&bob), Some(json!({"name": "bob", "role": "admin"})));
+    let (s2, v2, _) = h.call("POST", "/api/v1/namespaces/nothing/members", Some(&bob), Some(json!({"name": "bob", "role": "admin"})));
+    assert_eq!((s1, &v1), (s2, &v2));
+    assert_eq!(s1, 404);
+    // bob's own list does not hold the name; ann's does; the owner sees it without being in it
+    let names = |t: &str| -> Vec<String> { h.call("GET", "/api/v1/tenant", Some(t), None).1["namespaces"].as_array().unwrap().iter().map(|n| n["name"].as_str().unwrap().to_string()).collect() };
+    assert!(names(&bob).is_empty());
+    assert_eq!(names(&ann), ["web"]);
+    // root made web, so root administers it; the tenant members list is for admins only
+    assert_eq!(h.call("GET", "/api/v1/tenant", Some(&bob), None).1["members"], json!([]));
+    assert_eq!(h.call("GET", "/api/v1/tenant", Some(&root), None).1["members"].as_array().unwrap().len(), 3);
+    // a plain member cannot change the tenant
+    assert_eq!(h.call("POST", "/api/v1/tenant/members", Some(&bob), Some(json!({"name": "gus", "role": "member"}))).0, 403);
+    assert_eq!(h.call("POST", "/api/v1/namespaces", Some(&bob), Some(json!({"name": "mine", "action": "create"}))).0, 403);
+}
+
+#[test]
+fn cloud_a_tenant_admin_sees_names_but_cannot_read_and_roles_decide_who_reads() {
+    let (h, root, ann, bob, _) = acme_cloud();
+    // adam-like admin: bob becomes a tenant admin, makes a namespace nobody else is in, root is not in it
+    assert_eq!(h.call("POST", "/api/v1/tenant/members", Some(&root), Some(json!({"name": "bob", "role": "admin"}))).0, 200);
+    assert_eq!(h.call("POST", "/api/v1/namespaces", Some(&bob), Some(json!({"name": "secret", "action": "create"}))).0, 200);
+    let (_, v, _) = h.call("GET", "/api/v1/tenant", Some(&root), None);
+    assert!(v["namespaces"].as_array().unwrap().iter().any(|n| n["name"] == "secret" && n["joined"] == false), "{v}");
+    assert_eq!(h.call("POST", "/api/v1/data/call", Some(&root), Some(json!({"tool": "data_query", "args": {}, "namespace": "secret"}))).0, 404, "seen, not readable");
+    // ann (editor of web) reads
+    let (s, v, _) = h.call("POST", "/api/v1/data/call", Some(&ann), Some(json!({"tool": "data_query", "args": {"path": "notes/a.csv"}, "namespace": "web"})));
+    assert_eq!(s, 200, "{v}");
+    let r = v["result"].as_str().unwrap();
+    assert!(r.contains("ns/web/people/ann/notes/a.csv"), "the path comes from the layout: {r}");
+    // viewers read and cannot change who is in the namespace; an editor cannot either
+    assert_eq!(h.call("POST", "/api/v1/namespaces/web/members", Some(&root), Some(json!({"name": "bob", "role": "viewer"}))).0, 200);
+    let (s, _, _) = h.call("POST", "/api/v1/data/call", Some(&bob), Some(json!({"tool": "data_query", "args": {}, "namespace": "web"})));
+    assert_eq!(s, 200);
+    assert_eq!(h.call("POST", "/api/v1/namespaces/web/members", Some(&bob), Some(json!({"name": "bob", "role": "admin"}))).0, 403);
+    assert_eq!(h.call("POST", "/api/v1/namespaces/web/members", Some(&ann), Some(json!({"name": "bob", "role": "editor"}))).0, 403);
+    // removing a person from the tenant takes them out of the namespace at once
+    assert_eq!(h.call("POST", "/api/v1/tenant/members", Some(&root), Some(json!({"name": "ann", "role": "remove"}))).0, 200);
+    assert_eq!(h.call("POST", "/api/v1/data/call", Some(&ann), Some(json!({"tool": "data_query", "args": {}, "namespace": "web"}))).0, 403);
+}
+
+#[test]
+fn cloud_paths_that_leave_the_namespace_folder_are_refused() {
+    let (h, _, ann, _, _) = acme_cloud();
+    for bad in ["../mia/secret", "/etc/passwd", "a/../../b"] {
+        let (s, v, _) = h.call("POST", "/api/v1/data/call", Some(&ann), Some(json!({"tool": "data_query", "args": {"path": bad}, "namespace": "web"})));
+        assert_eq!(s, 400, "{bad}: {v}");
+    }
+    #[cfg(unix)]
+    {
+        let base = h.dir.join("cloud").join("files").join("ns").join("web").join("people").join("ann");
+        std::os::unix::fs::symlink("/", base.join("rootlink")).unwrap();
+        let (s, _, _) = h.call("POST", "/api/v1/data/call", Some(&ann), Some(json!({"tool": "data_query", "args": {"path": "rootlink/etc/passwd"}, "namespace": "web"})));
+        assert_eq!(s, 400, "a link is not followed");
+    }
+    // a namespace name that is not a folder name never reaches the disk
+    let (s, _, _) = h.call("POST", "/api/v1/data/call", Some(&ann), Some(json!({"tool": "data_query", "args": {}, "namespace": "../x"})));
+    assert!(s == 404 || s == 400, "{s}");
+}
+
+#[test]
+fn cloud_every_change_is_audited_in_the_roles_audit_file_and_refused_ones_are_not() {
+    let (h, root, _, bob, _) = acme_cloud();
+    let file = crate::cloudroles::audit_path(&h.dir);
+    let n = std::fs::read_to_string(&file).unwrap().lines().count();
+    assert_eq!(n, 5, "bootstrap, two members, a namespace, a namespace member");
+    assert_eq!(h.call("POST", "/api/v1/tenant/members", Some(&bob), Some(json!({"name": "bob", "role": "owner"}))).0, 403);
+    assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), n);
+    assert_eq!(h.call("POST", "/api/v1/tenant/members", Some(&root), Some(json!({"name": "bob", "role": "bogus"}))).0, 400);
+    assert_eq!(h.call("POST", "/api/v1/namespaces", Some(&root), Some(json!({"name": "web", "action": "create"}))).0, 400, "exists");
+    assert_eq!(h.call("POST", "/api/v1/namespaces", Some(&root), Some(json!({"name": "web", "action": "delete"}))).0, 200);
+    assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), n + 1);
+}
+
+#[test]
+fn the_roles_routes_do_not_exist_outside_the_cloud_profile_and_the_other_profile_is_unchanged() {
+    let h = harness("agent-api", |_| {});
+    let t = h.root();
+    for (m, p) in [("GET", "/api/v1/tenant"), ("POST", "/api/v1/tenant/bootstrap"), ("POST", "/api/v1/tenant/members"), ("POST", "/api/v1/namespaces"), ("POST", "/api/v1/namespaces/web/members")] {
+        assert_eq!(h.call(m, p, Some(&t), Some(json!({"x": 1})).filter(|_| m == "POST")).0, 404, "{p}");
+    }
+    assert!(!h.dir.join("cloud").exists(), "nothing was written");
+    // the cloud profile with no lists keeps the personal routes as they were
+    let c = harness("cloud", |_| {});
+    let ct = c.ann();
+    assert_eq!(c.call("GET", "/api/v1/flows", Some(&ct), None).0, 200);
+    assert_eq!(c.call("POST", "/api/v1/data/call", Some(&ct), Some(json!({"tool": "data_query", "args": {}}))).1["result"], "data_query for ann");
+}
+
+// ------------------------------------------------------------------------------------------------ cloud profile: the vault link
+
+/// The only test that sets the vault variables (the process environment is shared by the parallel tests).
+#[test]
+fn cloud_removal_keeps_the_role_change_and_records_a_pending_rotation_and_readyz_names_the_vault_state() {
+    let (h, root, _ann, bob, _gus) = acme_cloud();
+    // no vault configured: ready, the word says so, a removal has nothing to rotate
+    std::env::remove_var("IYAKKI_VAULT_URL");
+    let (s, v, _) = h.call("GET", "/readyz", None, None);
+    assert_eq!((s, v["vault"].as_str()), (200, Some("not_configured")));
+    let (s, v, _) = h.call("POST", "/api/v1/namespaces/web/members", Some(&root), Some(json!({"name": "ann", "role": "remove"})));
+    assert_eq!(s, 200);
+    assert_eq!(v["rotation"]["pending"], json!([]));
+    // a vault that does not answer: readiness stays 200, the word is unreachable and does not leak the address
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    drop(l);
+    let url = format!("https://127.0.0.1:{port}");
+    std::env::set_var("IYAKKI_VAULT_URL", &url);
+    std::env::set_var("IYAKKI_TENANT", "acme");
+    let (s, v, resp) = h.call("GET", "/readyz", None, None);
+    let body = String::from_utf8_lossy(&resp.body).to_string();
+    assert_eq!((s, v["vault"].as_str()), (200, Some("unreachable")));
+    assert!(!body.contains(&port.to_string()) && !body.contains("127.0.0.1"), "{body}");
+    // a removal from the tenant: the role change stands, the rotation is pending, the person is told what is pending
+    let (s, v, _) = h.call("POST", "/api/v1/tenant/members", Some(&root), Some(json!({"name": "bob", "role": "remove"})));
+    std::env::remove_var("IYAKKI_VAULT_URL");
+    std::env::remove_var("IYAKKI_TENANT");
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["rotation"]["pending"], json!(["tenant"]));
+    assert_ne!(h.call("GET", "/api/v1/tenant", Some(&bob), None).0, 200, "bob is out");
+    let pending = crate::cloudrotate::load_pending(&h.dir).unwrap();
+    assert_eq!((pending[0].scope.as_str(), pending[0].who.as_str()), ("tenant", "bob"));
+    // a bad address is "invalid_address", and nothing shows the text
+    std::env::set_var("IYAKKI_VAULT_URL", "http://not-https");
+    let (_, v, resp) = h.call("GET", "/readyz", None, None);
+    std::env::remove_var("IYAKKI_VAULT_URL");
+    assert_eq!(v["vault"], "invalid_address");
+    assert!(!String::from_utf8_lossy(&resp.body).contains("not-https"));
+    // the agent profile has no vault detail at all
+    let a = harness("agent-api", |_| {});
+    assert!(a.call("GET", "/readyz", None, None).1.get("vault").is_none());
+}
+
+#[path = "files_tests.rs"]
+mod files_tests;

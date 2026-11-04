@@ -3659,6 +3659,10 @@ fn draw_control(g: &mut Gfx, c: &Control, st: &CtlState, r: R, s: f32, focused: 
             g.hit(r, Event::Focus(id), "field");
         }
         ControlKind::Textarea => {
+            if focused {
+                // the box draws itself, so it tells the shell it holds the keyboard focus: the on-screen keyboard opens for a finger
+                crate::ctxmenu::note_field(crate::ctxmenu::FieldNote { rect: r, id, focused: true, has_selection: false, empty: st.value.is_empty(), secret: false });
+            }
             g.rrect(r.x, r.y, r.w, r.h, 8.0 * s, field);
             g.rrect_outline(r.x, r.y, r.w, r.h, 8.0 * s, if focused { 2.0 * s } else { 1.0 * s }, if focused { ACCENT } else { dim });
             let rows = (((r.h - 12.0 * s) / (lh * 1.0)) as usize).max(1);

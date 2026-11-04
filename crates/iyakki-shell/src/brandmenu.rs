@@ -74,10 +74,12 @@ pub enum Page {
     Settings,
     /// Not a page: Settings → Developer mode (administrators only).
     Developer,
+    /// Not a page: opens the Cloud dialog (the tenants signed in to, switching, adding one; `shell_tenant.rs`).
+    Cloud,
 }
 
 /// The entries of the first page: page, title, what it is, the key that opens it.
-pub const ENTRIES: [(Page, &str, &str, char); 7] = [
+pub const ENTRIES: [(Page, &str, &str, char); 8] = [
     (Page::About, "About IYAKKI", "Version, build, kernel, and the licences of everything inside", 'a'),
     (Page::Setup, "Quick install", "Opens Store \u{2192} Setup: cluster, AI servers, voices, coding agents, drivers", 'q'),
     (Page::Media, "Media player", "Play a video or audio file", 'm'),
@@ -85,6 +87,7 @@ pub const ENTRIES: [(Page, &str, &str, char); 7] = [
     (Page::Mac, "Mac drivers", "Wi-Fi firmware, T2 audio, Bluetooth and the USB camera", 'd'),
     (Page::Settings, "Settings", "Network, sound, display, time, models, accounts and more", 's'),
     (Page::Developer, "Developer mode", "Let a paired computer install, run and watch apps here (administrators)", 'v'),
+    (Page::Cloud, "Cloud", "Tenants you are signed in to: switch between them, add one", 'c'),
 ];
 
 /// The name the Cloud mode table (`iyakki_agent::cloudmode::MENU_ENTRIES`) knows a page under ("" for the ones that need no hardware).
@@ -92,7 +95,7 @@ fn cloud_id(p: Page) -> &'static str {
     match p {
         Page::Media => "media",
         Page::Mac => "mac",
-        Page::Menu | Page::About | Page::Setup | Page::Gpu | Page::Linux | Page::Settings | Page::Developer => "",
+        Page::Menu | Page::About | Page::Setup | Page::Gpu | Page::Linux | Page::Settings | Page::Developer | Page::Cloud => "",
     }
 }
 
@@ -303,6 +306,9 @@ impl BrandMenu {
         }
         if p == Page::Developer {
             return Outcome::Jump("settings", "tab:developer".into());
+        }
+        if p == Page::Cloud {
+            return Outcome::Jump("cloud", String::new());
         }
         // the old Quick install page is gone: the entry (and its key q) opens the Store on its Setup tab
         if p == Page::Setup {
@@ -644,7 +650,7 @@ impl BrandMenu {
             Page::Mac => self.draw_mac(g, body, s, tick),
             Page::Gpu => self.draw_gpu(g, body, s),
             Page::Linux => self.draw_linux(g, body, s, tick),
-            Page::Settings | Page::Developer | Page::Setup => {}
+            Page::Settings | Page::Developer | Page::Setup | Page::Cloud => {}
         }
         // the foot: what just happened, else the keys
         let (foot, col) = match &self.note {
@@ -657,7 +663,7 @@ impl BrandMenu {
                     Page::Gpu => "t or Enter: test prompt · r: refresh · i: Store \u{2192} Setup · Esc back",
                     Page::Linux => self.linux_foot(),
                     Page::Mac => "a: download from Apple · f: from the path · l: load Bluetooth anyway · c: copy the prompt · d: STORE \u{2192} Drivers · v: Devices · Esc back",
-                    Page::Settings | Page::Developer | Page::Setup => "",
+                    Page::Settings | Page::Developer | Page::Setup | Page::Cloud => "",
                 }
                 .to_string(),
                 DIM,
@@ -682,6 +688,7 @@ impl BrandMenu {
                 Page::Media => Icon::Media,
                 Page::Mac => Icon::Devices,
                 Page::Developer => Icon::Ide,
+                Page::Cloud => Icon::Mesh,
                 Page::Linux => Icon::Cli,
                 _ => Icon::Settings,
             };

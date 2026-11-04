@@ -179,9 +179,16 @@ pub fn tar_one_file(name: &str, contents: &[u8]) -> Result<Vec<u8>, String> {
     if name.is_empty() || name.len() > 99 || name.contains(['/', '\0']) {
         return Err(format!("`{name}` is not a file name for an image's root"));
     }
+    let mut out = tar_entry(name, 0o555, contents);
+    out.extend_from_slice(&[0u8; 1024]);
+    Ok(out)
+}
+
+/// One tar entry (header and padded contents, no end-of-archive blocks). `name` is at most 99 bytes.
+fn tar_entry(name: &str, mode: u64, contents: &[u8]) -> Vec<u8> {
     let mut h = [0u8; 512];
     h[..name.len()].copy_from_slice(name.as_bytes());
-    octal(&mut h[100..108], 0o555);
+    octal(&mut h[100..108], mode);
     octal(&mut h[108..116], 0);
     octal(&mut h[116..124], 0);
     octal(&mut h[124..136], contents.len() as u64);
@@ -193,10 +200,41 @@ pub fn tar_one_file(name: &str, contents: &[u8]) -> Result<Vec<u8>, String> {
     let sum: u32 = h.iter().map(|b| *b as u32).sum();
     let c = format!("{sum:06o}\0 ");
     h[148..156].copy_from_slice(c.as_bytes());
-    let mut out = Vec::with_capacity(512 + contents.len() + 1536);
+    let mut out = Vec::with_capacity(512 + contents.len() + 512);
     out.extend_from_slice(&h);
     out.extend_from_slice(contents);
     out.resize(out.len() + (512 - contents.len() % 512) % 512, 0);
+    out
+}
+
+/// The image as an OCI image layout in a tar (`oci-layout`, `index.json`, `blobs/sha256/...`): what `docker load`, `podman load` and
+/// `k3s ctr images import` read. `reference` (`iyakki:0.1.0`) is the name the image gets when loaded. Same input, same bytes.
+pub fn layout_tar(img: &Image, reference: &str) -> Result<Vec<u8>, String> {
+    if reference.is_empty() || reference.len() > 200 || reference.contains(|c: char| c.is_whitespace() || c.is_control() || c == '"') {
+        return Err(format!("`{reference}` is not an image name"));
+    }
+    let hex = |d: &str| d.strip_prefix("sha256:").unwrap_or(d).to_string();
+    let manifest_digest = format!("sha256:{}", sha256_hex(&img.manifest));
+    let index = serde_json::json!({
+        "schemaVersion": 2,
+        "manifests": [{
+            "mediaType": MEDIA_MANIFEST,
+            "digest": manifest_digest,
+            "size": img.manifest.len(),
+            "annotations": { "org.opencontainers.image.ref.name": reference, "io.containerd.image.name": reference },
+        }],
+    });
+    let index = serde_json::to_vec(&index).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for (name, bytes) in [
+        ("oci-layout".to_string(), b"{\"imageLayoutVersion\":\"1.0.0\"}".to_vec()),
+        ("index.json".to_string(), index),
+        (format!("blobs/sha256/{}", hex(&manifest_digest)), img.manifest.clone()),
+        (format!("blobs/sha256/{}", hex(&img.config_digest)), img.config.clone()),
+        (format!("blobs/sha256/{}", hex(&img.layer_digest)), img.layer.clone()),
+    ] {
+        out.extend_from_slice(&tar_entry(&name, 0o644, &bytes));
+    }
     out.extend_from_slice(&[0u8; 1024]);
     Ok(out)
 }

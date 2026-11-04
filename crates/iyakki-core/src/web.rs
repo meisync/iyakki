@@ -61,6 +61,8 @@ pub fn start(spec: &WebSpec, env: iyakki_shell::shell::ShellEnv, data_dir: &Path
         .map_err(|e| format!("cannot listen on {}: {e}", spec.addr))?;
     // the sign-in relay page is served here while this front end runs (iyakki_agent::extagent::relay)
     iyakki_agent::extagent::relay::note_web_front_end(server.local_addr().port(), spec.tls);
+    // Settings -> Remote access shows "on (set at boot)" and does not start a second listener
+    iyakki_agent::webaccess::note_boot(server.local_addr().port());
     log::info!("web: browser access on {}://{}", if spec.tls { "https" } else { "http" }, server.local_addr());
     Ok(server)
 }

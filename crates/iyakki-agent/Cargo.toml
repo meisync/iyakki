@@ -46,9 +46,13 @@ argon2 = { version = "0.5", features = ["std"] }
 zeroize = "1"
 sha2 = "0.10"
 miniz_oxide = "0.8"
+# the picture codec (pixelcodec.rs, shared with iyakki-remote) codes and reads PNG tiles with the same crate as the web front end
+tiny-skia = "0.11"
 ruzstd = "0.9"
 nanomp3 = { version = "0.2", default-features = false, features = ["std"] }
 ed25519-dalek = "3"
+# member key pairs for the shared vaults (cloudkeys.rs): X25519 only, no random-number feature (the bytes come from the system)
+x25519-dalek = { version = "3", default-features = false, features = ["zeroize"] }
 # SSH keys protected by a passphrase (aes256-ctr, see sshkey.rs)
 aes = "0.8"
 ctr = "0.9"

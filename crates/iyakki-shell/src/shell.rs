@@ -418,6 +418,10 @@ pub struct Shell {
     fnk: crate::fnkeys::FnState,
     /// The Touch Bar strip of a T2 MacBook (`shell_touchbar.rs`).
     tbar: touchbar_impl::TbState,
+    /// The on-screen keyboard for touch screens (`osk.rs`, `shell_osk.rs`).
+    osk: crate::osk::Osk,
+    /// Cloud tenants: the open sessions, the dialogs and the strip (`shell_tenant.rs`).
+    tenants: shell_tenant::TenantUi,
     /// Cloud mode: what is hidden because this machine has no local screen, sound or camera (`iyakki_agent::cloudmode`).
     cloud: iyakki_agent::cloudmode::CloudMode,
     /// Panes: several apps side by side on one display (`shell_panes.rs`).
@@ -522,7 +526,7 @@ impl Shell {
         };
         // tests run as a desktop unless one asks for cloud mode (`set_cloud_for_test`)
         let cloud = if cfg!(test) { iyakki_agent::cloudmode::CloudMode::desktop() } else { iyakki_agent::cloudmode::detect(env.services.cloud_setting()) };
-        let mut sh = Shell { env, hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, devask: Default::default(), camera: if cfg!(test) || !cloud.camera_watch { crate::camera::Presence::none() } else { crate::camera::Presence::system() }, cam_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
+        let mut sh = Shell { env, hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, devask: Default::default(), camera: if cfg!(test) || !cloud.camera_watch { crate::camera::Presence::none() } else { crate::camera::Presence::system() }, cam_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), osk: Default::default(), tenants: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
         if cloud.on {
             sh.apply_cloud(cloud);
         }
@@ -676,6 +680,20 @@ impl Shell {
     fn visible_tiles(&self) -> Vec<&'static Tile> {
         let admin = self.session.as_ref().is_some_and(|s| s.policy.manage_users);
         TILES.iter().filter(|t| t.group.is_some() && (t.app != PApp::Users || admin) && !self.cloud.hides_app(t.app)).collect()
+    }
+
+    /// The browser hardware (clipboard, sound, microphone, camera) of the signed-in person, when they are in a web browser.
+    pub fn browser_media(&self) -> Option<std::sync::Arc<iyakki_agent::browsermedia::BrowserMedia>> {
+        self.session.as_ref().and_then(|s| iyakki_agent::browsermedia::for_user(&s.user))
+    }
+
+    /// Cloud mode for this machine, with the tiles a connected browser supplies the hardware for shown again.
+    fn detect_cloud(&self) -> iyakki_agent::cloudmode::CloudMode {
+        let c = iyakki_agent::cloudmode::detect(self.env.services.cloud_setting());
+        match self.browser_media() {
+            Some(m) => c.with_browser(&m.sources()),
+            None => c,
+        }
     }
 
     /// Take a Cloud mode decision into the shell and the menus that follow it.
@@ -867,7 +885,7 @@ impl Shell {
     fn sign_in(&mut self, s: Session, password: &str) {
         // the Cloud mode setting may have changed since the last sign-in (Settings -> Cloud mode)
         if !cfg!(test) {
-            let c = iyakki_agent::cloudmode::detect(self.env.services.cloud_setting());
+            let c = self.detect_cloud();
             self.refresh_cloud(c);
         }
         self.env.audit.record(&s.user, "login", s.role.name());
@@ -967,6 +985,7 @@ impl Shell {
         crate::uisize::apply(None);
         crate::filepicker::set_session(None);
         self.lay_sign_out();
+        self.tenants_sign_out();
         self.panes_reset();
         self.stash = None;
         self.badge = Badge::default();
@@ -1271,6 +1290,8 @@ impl Shell {
                 self.brand.close();
                 if app == "devices" {
                     self.toggle_devices();
+                } else if app == "cloud" {
+                    self.open_cloud_dialog();
                 } else {
                     self.jump_to(app, &item);
                 }
@@ -1779,6 +1800,9 @@ impl Shell {
     /// The event for a screen that is on (the saver has already seen it).
     fn handle_awake(&mut self, ev: &Event) {
         use crate::ui::clipboard;
+        if self.osk_intercept(ev) {
+            return;
+        }
         let (prev_mouse, prev_sel) = (self.mouse, self.sel);
         if !matches!(ev, Event::Tick | Event::MouseMove(..)) {
             crate::filepicker::clear_path_field_note(); // drawn again with the next frame if a path field is still there
@@ -1813,8 +1837,17 @@ impl Shell {
         if self.handle_fn_event(ev) {
             return;
         }
+        // the tenant dialogs, the strip and the shown tenant's window (`shell_tenant.rs`)
+        if self.tenant_intercept(ev) {
+            self.stale = true;
+            return;
+        }
         if matches!(ev, Event::Tick) {
             self.tick += 1;
+            // the galaxy behind the sign-in form turns: a frame about 15 times a second (the heartbeat is every 33 ms)
+            if self.tick % 2 == 0 && matches!(self.screen, Screen::Login(_) | Screen::Setup(_)) && self.session.is_none() && !crate::fx::reduced_motion() {
+                self.stale = true;
+            }
             self.fn_tick();
             self.tbar_tick();
             self.check_alarms(iyakki_agent::clock::now_unix());
@@ -2039,8 +2072,9 @@ impl Shell {
             Event::Tick => {
                 self.scroll_sync();
                 // hardware that shows up after the shell started (a slow sound card) changes Cloud mode: look again every 10 s
-                if !cfg!(test) && self.tick % 75 == 0 {
-                    let c = iyakki_agent::cloudmode::detect(self.env.services.cloud_setting());
+                // (and a browser's microphone, camera or sound switched on or off in the page: every two seconds)
+                if !cfg!(test) && (self.tick % 75 == 0 || (self.tick % 15 == 0 && self.browser_media().is_some())) {
+                    let c = self.detect_cloud();
                     self.refresh_cloud(c);
                 }
                 // a camera plugged in or pulled out changes the CAMERA tile within two seconds
@@ -3157,7 +3191,13 @@ impl Shell {
         g.mouse = self.disp_mouse(self.panes_active_display());
         crate::ctxmenu::start_frame();
         crate::fx::background(g);
+        // the sign-in and first-start forms: the boot screen's galaxy turns softly behind the card (the boot screen itself can be over in a
+        // second on a fast start); off with reduced motion
+        if matches!(self.screen, Screen::Login(_) | Screen::Setup(_)) && !panes_drawn_early(self) && !crate::fx::reduced_motion() {
+            crate::splash::draw_galaxy(g, self.tick as f32 * 0.033, w as f32 / 2.0, h as f32 / 2.0, s, 0.55);
+        }
         let tick = self.tick;
+        let auth_lift = self.osk_auth_lift(w, h, s);
         let mut crashed_title: Option<&'static str> = None;
         // several panes: the bar, the panes and the dividers take the place of the one screen
         let panes_drawn = self.ws_active() && {
@@ -3167,8 +3207,8 @@ impl Shell {
         match &mut self.screen {
             _ if panes_drawn => {}
             Screen::HwCheck(c) => c.render(g, w, h, s, tick, &self.env.hostname),
-            Screen::Setup(f) => draw_auth(g, w, h, s, f, true, tick, &self.env.hostname, self.env.data_volatile),
-            Screen::Login(f) => draw_auth(g, w, h, s, f, false, tick, &self.env.hostname, self.env.data_volatile),
+            Screen::Setup(f) => draw_auth(g, w, h, s, f, true, tick, &self.env.hostname, self.env.data_volatile, auth_lift),
+            Screen::Login(f) => draw_auth(g, w, h, s, f, false, tick, &self.env.hostname, self.env.data_volatile, auth_lift),
             Screen::Launcher | Screen::PowerMenu => {
                 self.draw_launcher(g, w, h, s);
                 if matches!(self.screen, Screen::PowerMenu) {
@@ -3287,6 +3327,7 @@ impl Shell {
             self.screen = Screen::Launcher;
             self.app_crashed(name);
         }
+        self.draw_tenants(g, w, h, s);
         if matches!(self.shot, Shot::Snap) {
             self.shot = Shot::Select { snap: g.pm.clone(), first: None };
         }
@@ -3416,6 +3457,7 @@ impl Shell {
             m.draw(g, s, accent);
         }
         self.fields = crate::ctxmenu::fields();
+        self.draw_osk(g, w, h, s);
         self.hits = std::mem::take(&mut g.hits);
         self.probes = g.probes();
         if dev_state {
@@ -4050,11 +4092,23 @@ fn back_rect(w: u32, s: f32) -> R {
     R::new(w as f32 - 114.0 * s, 8.0 * s, 94.0 * s, 30.0 * s)
 }
 
+/// Several panes replace the single screen (and its sign-in form): no galaxy behind them.
+fn panes_drawn_early(sh: &Shell) -> bool {
+    sh.ws_active()
+}
+
+/// The animated logo above the sign-in card: its width and the gap to the card.
+fn auth_logo(s: f32) -> (f32, f32) {
+    (84.0 * s, 10.0 * s)
+}
+
 fn auth_card(w: u32, h: u32, s: f32, n_fields: usize) -> R {
     let cw = (440.0 * s).min(w as f32 - 40.0 * s);
     let ch = (290.0 + 66.0 * n_fields as f32) * s;
-    // the card never reaches up into the top bar
-    R::new((w as f32 - cw) / 2.0, ((h as f32 - ch) / 2.0).max(crate::loginbar::bar_h(s) + 8.0), cw, ch)
+    let (ld, gap) = auth_logo(s);
+    // the logo and the card are centred together; the card never reaches up into the top bar, with the logo above it
+    let top = ((h as f32 - (ch + ld + gap)) / 2.0).max(crate::loginbar::bar_h(s) + 8.0);
+    R::new((w as f32 - cw) / 2.0, top + ld + gap, cw, ch)
 }
 
 fn auth_field_rect(w: u32, h: u32, s: f32, i: usize, n: usize) -> R {
@@ -4062,8 +4116,14 @@ fn auth_field_rect(w: u32, h: u32, s: f32, i: usize, n: usize) -> R {
     R::new(c.x + 32.0 * s, c.y + 168.0 * s + i as f32 * 66.0 * s, c.w - 64.0 * s, 50.0 * s)
 }
 
-fn draw_auth(g: &mut Gfx, w: u32, h: u32, s: f32, f: &Form, setup: bool, tick: u64, hostname: &str, volatile: bool) {
-    let c = auth_card(w, h, s, f.fields.len());
+/// `lift`: pixels the card is moved up so the field being typed in stays above the on-screen keyboard.
+fn draw_auth(g: &mut Gfx, w: u32, h: u32, s: f32, f: &Form, setup: bool, tick: u64, hostname: &str, volatile: bool, lift: f32) {
+    let mut c = auth_card(w, h, s, f.fields.len());
+    c.y -= lift;
+    // the boot screen's logo, animated, above the card (the galaxy turns behind both; reduced motion holds the logo still)
+    let (ld, gap) = auth_logo(s);
+    let lt = if crate::fx::reduced_motion() { 0.0 } else { tick as f32 * 0.033 };
+    crate::splash::draw_logo(g, lt, c.x + c.w / 2.0, c.y - gap - ld / 2.0, ld);
     g.radial_glow(c.x + c.w / 2.0, c.y + c.h / 2.0, c.w * 0.7, [70, 225, 255, 22]);
     crate::fx::modal_panel(g, c, s * 1.4, crate::fx::CYAN, false);
     let tw = g.text_width(54.0 * s, "IYAKKI", Face::Bold);
@@ -4073,7 +4133,9 @@ fn draw_auth(g: &mut Gfx, w: u32, h: u32, s: f32, f: &Form, setup: bool, tick: u
     let sw = g.text_width(15.0 * s, sub, Face::Sans);
     g.text(c.x + (c.w - sw) / 2.0, c.y + 118.0 * s, 15.0 * s, MUTED, sub, Face::Sans);
     for (i, field) in f.fields.iter().enumerate() {
-        field.render(g, auth_field_rect(w, h, s, i, f.fields.len()), i == f.focus, s, (tick / 15) % 2 == 0, Face::Sans, i);
+        let mut fr = auth_field_rect(w, h, s, i, f.fields.len());
+        fr.y -= lift;
+        field.render(g, fr, i == f.focus, s, (tick / 15) % 2 == 0, Face::Sans, i);
     }
     let label = if setup { "Create account" } else { "Sign in" };
     let bw = g.text_width(16.0 * s, label, Face::Bold) + 16.0 * s * 1.7;
@@ -6423,6 +6485,19 @@ mod scroll_impl;
 
 #[path = "shell_touchbar.rs"]
 mod touchbar_impl;
+
+#[path = "shell_tenant.rs"]
+mod shell_tenant;
+
+#[cfg(test)]
+#[path = "shell_tenant_tests.rs"]
+mod tenant_tests;
+
+#[path = "shell_osk.rs"]
+mod osk_impl;
+#[cfg(test)]
+#[path = "shell_osk_tests.rs"]
+mod osk_tests;
 
 #[path = "shell_battery.rs"]
 mod battery_impl;

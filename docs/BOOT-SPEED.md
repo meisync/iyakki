@@ -109,7 +109,7 @@ With the lean layout the kernel and the 1 MB initrd still go there; the system i
    files (`home`, vault, audit log) are on the same volume but outside `iyakki/root/` and are never touched. Updates of single files by checksum
    (an rsync-like delta against the tree) fit the extracted-tree variant.
 The seed `boot/root.sfs` stays as the last-resort root (`iyakki.root=boot`); with 64 MB free it cannot be replaced in place, only by re-running the installer.
-**Not implemented:** the update code, the installer's knowledge of `root.sfs`, GRUB entry for `iyakki.root=boot`.
+**Implemented (2026-11-02, fake boot partition tests only):** the update code (`devmode/update.rs`, F-BOOT-35): the payload's `boot/root.sfs` goes to `iyakki/root/<version>-<sha8>/`, `previous` and `current` are switched as above, the seed is never replaced, and the previous-version menu entry starts the old kernel with `iyakki.root=previous` (first stage: the root the update replaced, or the seed). **Not implemented:** a GRUB entry for `iyakki.root=boot`, the Update centre's rollback for a lean install, a check that the new root's `/lib/modules` matches the new kernel.
 
 ### Installer
 `iyakki-usb --install` clones the whole FAT volume of the image (`fatclone`), so `boot/root.sfs` and the lean initrd arrive without code

@@ -70,6 +70,9 @@ USAGE:
   iyakki dev <pair|devices|install|uninstall|list|logs|run|push|screenshot|whoami>
                                       from a developer's computer: pair once with a device in developer mode, then install, upgrade,
                                       remove, open and watch apps on it, push a folder on every change (docs/DEVELOPER-MODE.md)
+  iyakki cloud <example|manifests|image|bundle|common|deploy>
+                                      a cloud tenant: configuration, Kubernetes manifests, a container image made from this program, and the
+                                      deploy to a cluster (docs/development/CLOUD-MULTITENANT-PLAN.md)
   iyakki sdk <init|doctor|docs>         start a tile/skill/MCP/service project with agent instructions and typings, check this computer for
                                       the device loop, read the guides offline (dist/sdk/README.md); the emulator is specified, not built
 ";
@@ -206,6 +209,18 @@ fn real_main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => fail(e),
         },
+        // a cloud tenant: its image and manifests, put on a cluster (docs/development/CLOUD-MULTITENANT-PLAN.md)
+        #[cfg(feature = "shell")]
+        "cloud" => match iyakki_agent::cloudcli::run(&args[1..], &mut |s| out!("{s}")) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(e),
+        },
+        // the cloud vault service and its keys (docs/development/CLOUD-MULTITENANT-PLAN.md, 3.2)
+        #[cfg(feature = "shell")]
+        "vault" => match iyakki_agent::cloudvaultd::run(&args[1..], &mut |s| out!("{s}")) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(e),
+        },
         // the SDK, the computer's side: start a project, check this computer, read the guides (dist/sdk/README.md; works offline)
         #[cfg(feature = "shell")]
         "sdk" => match iyakki_agent::sdkcli::run(&args[1..], &mut |s| out!("{s}")) {
@@ -298,6 +313,10 @@ fn real_main() -> ExitCode {
                 // storage, input and display are ready and brings up the network and sound in the background.
                 if iyakki_core::boot::cmdline_param(&cmdline, "iyakki.selftest").is_some() {
                     iyakki_core::boot::early_boot();
+                } else if iyakki_core::boot::install_mode(&cmdline) {
+                    // the installer needs storage, input and display only (the critical part); no firewall, driver packs, network, sound,
+                    // Bluetooth or camera: it copies from the boot stick to a disk and restarts (docs/INSTALLER.md)
+                    let _ = iyakki_core::boot::early_boot_critical();
                 } else {
                     let late = std::sync::Arc::new(std::sync::Mutex::new(Some(iyakki_core::boot::early_boot_critical())));
                     let theirs = late.clone();
@@ -1115,6 +1134,12 @@ fn start_devmode_watch() {
     if let Ok(env) = shell_env() {
         if let Err(e) = iyakki_remote::devname::watch(env) {
             log::error!("device name: could not start its watcher: {e}");
+        }
+    }
+    // "Serve this desktop to browsers" (Settings -> Remote access) follows its switch, in its own thread
+    if let Ok(env) = shell_env() {
+        if let Err(e) = iyakki_remote::webswitch::watch(env) {
+            log::error!("remote access: could not start its watcher: {e}");
         }
     }
 }

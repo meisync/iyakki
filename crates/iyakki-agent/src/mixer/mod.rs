@@ -415,6 +415,13 @@ fn run(inner: Arc<Inner>, mut sink: Box<dyn Sink>) {
             idle_ms = 0.0;
             continue;
         }
+        // the chosen output changed while sound plays (Settings → Sound, a monitor plugged in): close the card, the branch below opens
+        // it again on the new device; the sources keep their queues, so what plays goes on after a short gap
+        if sink.is_open() && sink.stale() {
+            log::info!("mixer: the sound output changed; playing on the new one");
+            sink.close();
+            inner.wake.end_us.store(0, Ordering::SeqCst);
+        }
         // the card must be open before audio is taken from the sources
         if !sink.is_open() && engine.wants_sink() {
             if retry_at.is_none_or(|t| Instant::now() >= t) {

@@ -63,8 +63,26 @@ pub fn is_lean_only(path: &str) -> bool {
     name.starts_with("initrd-lean") || name == "stage1.log" || name == "iyakki-lean-failed" || name.ends_with(".before-lean")
 }
 
+/// Does the volume carry its own root (`boot/root.sfs`)?
+pub fn own_root(paths: &[String]) -> bool {
+    paths.iter().any(|p| p.eq_ignore_ascii_case("/boot/root.sfs"))
+}
+
+/// What a stick leaves behind when it runs: not copied to a new disk.
+pub fn is_leftover(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    let name = p.rsplit('/').next().unwrap_or("");
+    name == "stage1.log" || name == "iyakki-lean-failed" || name.ends_with(".before-lean")
+}
+
 /// Does this boot volume carry anything the installer would leave out? (Only then the copy goes through the editing cloner.)
 pub fn needs_cleaning(paths: &[String], grub_cfg: Option<&str>) -> bool {
+    // a boot volume that carries its own root (`boot/root.sfs`: the image's standard fast start) is complete: its small RAM disk, its
+    // menu variables and the root belong together, and the copy keeps them all (without them the new disk would have no RAM disk at all)
+    if own_root(paths) {
+        // only the leftovers of the stick's own runs (the stage-1 log, a failure marker) stay behind
+        return paths.iter().any(|p| is_leftover(p));
+    }
     paths.iter().any(|p| is_lean_only(p)) || grub_cfg.is_some_and(|c| c.contains(BEGIN))
 }
 
@@ -72,11 +90,13 @@ pub fn needs_cleaning(paths: &[String], grub_cfg: Option<&str>) -> bool {
 pub struct LeanFree {
     pub dropped: Vec<String>,
     pub menu_changed: bool,
+    /// The volume carries its own root: the small RAM disk and the menu stay, only the leftovers of the stick's runs are dropped.
+    pub own_root: bool,
 }
 
 impl LeanFree {
     pub fn new() -> LeanFree {
-        LeanFree { dropped: vec![], menu_changed: false }
+        LeanFree { dropped: vec![], menu_changed: false, own_root: false }
     }
 }
 
@@ -92,10 +112,10 @@ fn is_grub_cfg(path: &str) -> bool {
 
 impl Editor for LeanFree {
     fn decide(&mut self, path: &str) -> Edit {
-        if is_lean_only(path) {
+        if (self.own_root && is_leftover(path)) || (!self.own_root && is_lean_only(path)) {
             self.dropped.push(path.to_string());
             Edit::Skip
-        } else if is_grub_cfg(path) {
+        } else if is_grub_cfg(path) && !self.own_root {
             Edit::Rewrite
         } else {
             Edit::Keep
@@ -125,6 +145,18 @@ mod tests {
 
     /// The shape of dist/buildroot/board/iyakki/grub.cfg after lean-install.sh (the block text is the real one).
     pub(crate) const SAMPLE: &str = "set default=\"0\"\nset timeout=\"3\"\n\n# BEGIN lean-boot (this block is managed by dist/buildroot/lean-install.sh and lean-sync.py; the markers are how they find the block again)\ninsmod test\nif [ -f /boot/initrd-lean ]; then\n\tif [ -f $prefix/iyakki-lean-failed ]; then\n\t\tset default=\"IYAKKI\"\n\tfi\n\tmenuentry \"IYAKKI - fast start (lean boot)\" {\n\t\tlinux /boot/bzImage quiet\n\t\tinitrd /boot/initrd-lean\n\t}\nfi\n# END lean-boot\n\nmenuentry \"IYAKKI\" {\n\tlinux /boot/bzImage quiet\n\tinitrd /boot/initrd\n}\n\nmenuentry \"IYAKKI - Install to a disk\" {\n}\n";
+
+    #[test]
+    fn a_boot_volume_with_its_own_root_is_copied_whole() {
+        let own = vec!["/boot/bzImage".to_string(), "/boot/initrd-lean".to_string(), "/boot/root.sfs".to_string()];
+        assert!(!needs_cleaning(&own, Some(SAMPLE)), "the seed-root image is complete: nothing is left out");
+        let used = vec!["/boot/initrd-lean".to_string(), "/boot/root.sfs".to_string(), "/boot/stage1.log".to_string()];
+        assert!(needs_cleaning(&used, Some(SAMPLE)), "a stick that ran leaves a log behind: it is not copied");
+        let mut e = LeanFree { own_root: true, ..LeanFree::new() };
+        assert_eq!((e.decide("/boot/stage1.log"), e.decide("/boot/initrd-lean"), e.decide("/boot/grub/grub.cfg")), (Edit::Skip, Edit::Keep, Edit::Keep));
+        let addon = vec!["/boot/bzImage".to_string(), "/boot/initrd-lean".to_string()];
+        assert!(needs_cleaning(&addon, Some(SAMPLE)), "an add-on fast start (tree on the data volume) is still left out");
+    }
 
     #[test]
     fn the_lean_block_is_taken_out_with_the_same_markers_as_lean_sync() {

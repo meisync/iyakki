@@ -515,6 +515,8 @@ pub struct K8sApp {
     pub(super) ide_ok: bool,
     /// The cluster log (the last kubectl problems) is on screen instead of the lists.
     pub(super) show_log: bool,
+    /// The Launch cloud mode card (`k8s_cloud.rs`).
+    pub(super) cloud: Option<super::k8s_cloud::CloudForm>,
     /// Tests: no waiting before a selection loads its details.
     pub(super) instant: bool,
 }
@@ -575,6 +577,7 @@ impl K8sApp {
             start_job: None,
             ide_ok: false,
             show_log: false,
+            cloud: None,
             instant: cfg!(test),
         };
         a.entries = a.build_entries(kc);
@@ -894,7 +897,7 @@ impl K8sApp {
         self.det.due = Some(if self.instant { Instant::now().checked_sub(SETTLE).unwrap_or_else(Instant::now) } else { Instant::now() });
     }
 
-    fn kube(&self) -> Arc<dyn Kube> {
+    pub(super) fn kube(&self) -> Arc<dyn Kube> {
         self.switch.clone()
     }
 
@@ -1571,6 +1574,7 @@ impl K8sApp {
 
     fn click(&mut self, n: usize, cx: &AppCx) -> Option<Flow> {
         match n {
+            n if (super::k8s_cloud::T_CLOUD..=super::k8s_cloud::T_CLOUD_LAST).contains(&n) => self.cloud_click(n, cx),
             T_CLUSTER => {
                 self.overlay = Some(Overlay::Clusters);
                 self.clusters.sel = self.cur;
@@ -1699,6 +1703,10 @@ impl K8sApp {
     }
 
     fn key(&mut self, k: &Key, cx: &AppCx) -> Flow {
+        // the Launch cloud mode card owns every key while it is open
+        if self.cloud.is_some() {
+            return self.cloud_key(k, cx);
+        }
         // a card for a change: it owns every key
         if self.pending.is_some() {
             return self.card_key(k, cx);

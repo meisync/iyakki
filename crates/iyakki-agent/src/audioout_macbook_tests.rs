@@ -199,7 +199,8 @@ fn the_settings_keep_the_boost_and_the_volume_mode_per_card_and_refuse_nonsense(
     p.set_boost("PCH", 99);
     assert_eq!(p.boost_for("PCH"), crate::softvol::MAX_BOOST_DB);
     p.set_boost("PCH", 0);
-    assert!(p.boosts.is_empty());
+    assert_eq!(p.boost_for("PCH"), 0, "0 is the person's choice of no boost");
+    assert_eq!(p.boost_for("Other"), DEFAULT_BOOST_DB, "an untouched card starts a little up");
     p.set_volume_mode("PCH", VolumeMode::Software);
     assert_eq!(p.volume_mode_for("PCH"), VolumeMode::Software);
     assert_eq!(p.volume_mode_for("other"), VolumeMode::Automatic);
@@ -209,7 +210,7 @@ fn the_settings_keep_the_boost_and_the_volume_mode_per_card_and_refuse_nonsense(
     // an old settings file (no such keys) reads as the defaults
     let old: SoundSettings = serde_json::from_str(r#"{"output":"PCH:3","volume_pct":40}"#).unwrap();
     assert_eq!(old.volume_mode_for("PCH"), VolumeMode::Automatic);
-    assert_eq!(old.boost_for("PCH"), 0);
+    assert_eq!(old.boost_for("PCH"), DEFAULT_BOOST_DB);
     let json = serde_json::to_string(&SoundSettings { volume_modes: [("PCH".to_string(), VolumeMode::Hardware)].into(), ..Default::default() }).unwrap();
     assert!(json.contains("\"hardware\""), "{json}");
 }

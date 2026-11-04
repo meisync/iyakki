@@ -192,6 +192,11 @@ pub fn note_web_front_end(port: u16, tls: bool) {
     *WEB.lock().unwrap_or_else(|e| e.into_inner()) = Some((port, tls));
 }
 
+/// The browser front end was closed (Settings -> Remote access switched off): the relay page is no longer served there.
+pub fn clear_web_front_end() {
+    *WEB.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// `(port, https)` where the page can be reached, or `None` when this device cannot serve it.
 pub fn port() -> Option<(u16, bool)> {
     if let Some(w) = *WEB.lock().unwrap_or_else(|e| e.into_inner()) {

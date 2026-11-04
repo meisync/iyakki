@@ -40,7 +40,7 @@ fn every_x86_boot_entry_has_the_quiet_flicker_free_command_line() {
         }
     }
     let normal = &e.iter().find(|(t, _)| t == "IYAKKI").expect("the normal entry").1;
-    assert!(normal.ends_with("quiet loglevel=3 vt.global_cursor_default=0"), "{normal}");
+    assert!(normal.contains("quiet loglevel=3 vt.global_cursor_default=0"), "{normal}");
     let safe = &e.iter().find(|(t, _)| t.contains("safe graphics")).expect("a safe graphics entry").1;
     assert!(safe.contains("nomodeset") && safe.contains("modprobe.blacklist=i915,"), "{safe}");
     assert!(e.iter().any(|(t, a)| t == "IYAKKI - remote diagnostics (SSH, keys only)" && a.contains("iyakki.ssh=1")));
@@ -137,7 +137,7 @@ fn the_grub_modules_cover_every_command_the_menu_uses() {
 #[test]
 fn every_boot_entry_says_it_is_loading() {
     let cfg = read("board/iyakki/grub.cfg");
-    assert!(cfg.contains("function iyakki_loading") && cfg.contains("Loading IYAKKI... (this takes a few seconds"));
+    assert!(cfg.contains("function iyakki_loading") && cfg.contains("IYAKKI is starting") && cfg.contains("[1/3] Reading the kernel"));
     let entries = cfg.matches("menuentry \"").count();
     let loading = cfg.lines().map(str::trim).collect::<Vec<_>>().windows(2).filter(|w| w[0] == "iyakki_loading" && w[1].starts_with("linux ")).count();
     assert_eq!(loading, entries, "each entry prints the message before GRUB reads the kernel");
@@ -209,14 +209,14 @@ fn the_compatible_usb_mode_entry_and_file_are_in_the_menu_and_change_nothing_by_
     let compat = e.iter().find(|(t, _)| t == "IYAKKI - compatible USB mode (no UAS)").expect("the optional entry");
     assert!(compat.1.contains("usb-storage.quirks=04e8:4001:u") && compat.1.contains("quiet"), "{}", compat.1);
     // only that entry names a quirk itself; the default entry does not
-    assert_eq!(e.iter().filter(|(_, a)| a.contains("usb-storage.quirks=")).count(), 2, "the compatible entry and its lean twin");
+    assert_eq!(e.iter().filter(|(_, a)| a.contains("usb-storage.quirks=")).count(), 1, "only the compatible entry names a quirk");
     let first = cfg.find("menuentry").unwrap();
     let head = &cfg[..first];
     assert!(head.contains("set iyakki_usbq=\"\"") && head.contains("source $prefix/iyakki-usb-compat.cfg"), "the variable is empty unless the file exists");
     assert!(head.find("set iyakki_usbq=\"\"").unwrap() < head.find("source $prefix/iyakki-usb-compat.cfg").unwrap());
     // every other entry reads the variable, right after the kernel path (the rest of each command line is unchanged)
     for (t, a) in &e {
-        if !t.contains("compatible USB mode (no UAS)") {
+        if !t.contains("compatible USB mode (no UAS)") && !t.contains("trouble 5") {
             assert!(a.starts_with("$iyakki_usbq console=tty0"), "{t}: {a}");
         }
     }
@@ -225,41 +225,40 @@ fn the_compatible_usb_mode_entry_and_file_are_in_the_menu_and_change_nothing_by_
     assert!(src.contains("pub const COMPAT_FILE: &str = \"iyakki-usb-compat.cfg\"") && src.contains("set iyakki_usbq="));
 }
 
-/// The fast start (lean boot, docs/BOOT-SPEED.md): two entries that appear only when `boot/initrd-lean` exists, in front of the normal entry
-/// (so they are the first and the default), with the normal command lines and the small RAM disk; the first stage's failure marker makes the
-/// full boot the default again.
+/// The fast start (lean boot, docs/BOOT-SPEED.md): the one first-screen entry, "IYAKKI", reads the small RAM disk when `boot/initrd-lean` is on the
+/// volume and the full one otherwise; the first stage's failure marker makes every entry read the full RAM disk again (when the stick has it). "full start" under
+/// More options always reads the full one.
 #[test]
 fn the_fast_start_entries_come_first_when_installed_and_the_full_boot_is_the_fallback() {
     let cfg = read("board/iyakki/grub.cfg");
     assert!(cfg.contains("set default=\"0\""), "the first entry is the default");
     let e = entries(&cfg);
-    let titles: Vec<&str> = e.iter().map(|(t, _)| t.as_str()).collect();
-    assert_eq!(&titles[..3], ["IYAKKI - fast start (lean boot)", "IYAKKI - fast start + remote diagnostics (SSH, keys only)", "IYAKKI"], "the fast start first, then the full boot");
-    let (lean, lean_ssh, normal) = (&e[0].1, &e[1].1, &e[2].1);
-    assert_eq!(lean, normal, "the fast start has exactly the normal entry's command line");
-    let diag = &e.iter().find(|(t, _)| t == "IYAKKI - remote diagnostics (SSH, keys only)").unwrap().1;
-    assert_eq!(lean_ssh, diag, "the fast start with diagnostics has the diagnostics entry's command line (iyakki.ssh=1)");
-    assert!(lean_ssh.contains("iyakki.ssh=1") && lean.starts_with("$iyakki_usbq console=tty0") && lean.contains("quiet"));
-    // the entries read the small RAM disk and are guarded by its existence; the normal ones still read the full one
-    let guard = cfg.find("if [ -f __INITRD_PATH__-lean ]; then").expect("hidden unless the lean initrd is on the volume");
+    assert_eq!(e[0].0, "IYAKKI", "the first and default entry is the plain IYAKKI");
+    assert!(e[0].1.starts_with("$iyakki_usbq console=tty0") && e[0].1.contains("quiet") && !e[0].1.contains("iyakki.install"));
+    // the block chooses the RAM disk once; every entry but the full start reads it
+    let guard = cfg.find("if [ -f __INITRD_PATH__-lean ]; then").expect("the small RAM disk is used only when it is on the volume");
     let end = cfg[guard..].find("\nfi\n").expect("closed") + guard;
     let block = &cfg[guard..end];
-    assert_eq!(block.matches("initrd __INITRD_PATH__-lean").count(), 2);
-    assert_eq!(block.matches("menuentry \"").count(), 2);
-    assert!(!block.contains("initrd __INITRD_PATH__\n"));
-    // the failure marker of the first stage (crates/iyakki-stage1) puts the full boot back as the default
-    assert!(block.contains("[ -f $prefix/iyakki-lean-failed ]") && block.contains("set default=\"IYAKKI\""));
+    assert!(block.contains("set iyakki_initrd=__INITRD_PATH__-lean"), "{block}");
+    assert!(cfg.contains("set iyakki_initrd=__INITRD_PATH__\n"), "the full RAM disk is the default");
+    assert_eq!(block.matches("menuentry \"").count(), 0);
+    let full_start = cfg.find("menuentry \"IYAKKI - full start").expect("the full start entry");
+    let sub = cfg.find("submenu \"More options...\" {").unwrap();
+    assert!(sub < full_start, "the full start is under More options");
+    let (first_initrd, entry_end) = (cfg.find("initrd $iyakki_initrd").unwrap(), cfg[full_start..].find("\n\t}\n").unwrap() + full_start);
+    assert!(first_initrd < full_start && cfg[full_start..entry_end].contains("initrd __INITRD_PATH__\n"), "the full start reads the full RAM disk");
+    assert_eq!(cfg.matches("initrd __INITRD_PATH__\n").count(), 1, "only the full start names the full RAM disk directly");
+    // the failure marker of the first stage (crates/iyakki-stage1) puts the full RAM disk back
+    assert!(block.contains("[ -f $prefix/iyakki-lean-failed ]") && block.contains("if [ -f __INITRD_PATH__ ]; then"), "a failed fast start reads the full RAM disk only when the volume has it");
     let stage1 = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../iyakki-stage1/src/main.rs")).unwrap();
     assert!(stage1.contains("/s/boot/boot/grub/iyakki-lean-failed"), "the first stage writes the file GRUB looks for");
-    // the lean entries sit between the markers the install scripts use, in front of the normal entry
+    // the choice sits between the markers the install scripts use, in front of the first entry
     let (b1, b2, n) = (cfg.find("# BEGIN lean-boot").unwrap(), cfg.find("# END lean-boot").unwrap(), cfg.find("menuentry \"IYAKKI\" {").unwrap());
     assert!(b1 < guard && guard < b2 && b2 < n);
     assert!(cfg[..guard].contains("insmod test"), "`[ -f` needs GRUB's test module, loaded before");
     // the paths are filled in the same way as the others (post-image.sh replaces __INITRD_PATH__, the suffix stays)
     let filled = cfg.replace("__KERNEL_PATH__", "/boot/bzImage").replace("__INITRD_PATH__", "/boot/initrd");
-    assert!(filled.contains("initrd /boot/initrd-lean") && filled.contains("[ -f /boot/initrd-lean ]"));
-    let nouas = &e.iter().find(|(t, _)| t == "IYAKKI - fast start, compatible USB mode (no UAS)").expect("the fast start with the plain USB driver").1;
-    assert!(nouas.contains("usb-storage.quirks=04e8:4001:u") && nouas.contains("quiet") && !nouas.contains("iyakki.ssh"), "{nouas}");
+    assert!(filled.contains("set iyakki_initrd=/boot/initrd-lean") && filled.contains("[ -f /boot/initrd-lean ]"));
     // the installer script and the first stage agree on the names
     let sh = read("lean-install.sh");
     assert!(sh.contains("initrd-lean") && sh.contains("IYAKKI-BOOT") && sh.contains("IYAKKI-DATA") && sh.contains("iyakki/root"));
@@ -272,9 +271,9 @@ fn the_first_menu_screen_is_short_and_the_rare_starts_are_in_one_submenu() {
     let sub = cfg.find("submenu \"More options...\" {").expect("the submenu");
     assert_eq!(cfg.matches("submenu \"").count(), 1);
     let top: Vec<&str> = cfg[..sub].lines().filter_map(|l| l.strip_prefix("menuentry \"")).filter_map(|r| r.split('"').next()).collect();
-    assert_eq!(top, ["IYAKKI", "IYAKKI - safe graphics (simple framebuffer, no GPU drivers)", "IYAKKI - Install to a disk"], "plus the two fast starts when installed");
+    assert_eq!(top, ["IYAKKI"], "one entry on the first screen; the fast start is what it starts when it is on the stick");
     let rest = &cfg[sub..];
-    for t in ["IYAKKI - remote diagnostics (SSH, keys only)", "IYAKKI - compatible USB mode (no UAS)", "IYAKKI - show boot messages", "IYAKKI - hardware check", "IYAKKI (verbose, boot self-test, power off)", "IYAKKI - NVIDIA driver", "IYAKKI - also in a browser"] {
+    for t in ["IYAKKI - Install to a disk", "IYAKKI - safe graphics", "IYAKKI - full start", "IYAKKI - remote diagnostics (SSH, keys only)", "IYAKKI - compatible USB mode (no UAS)", "IYAKKI - show boot messages", "IYAKKI - hardware check", "IYAKKI (verbose, boot self-test, power off)", "IYAKKI - NVIDIA driver", "IYAKKI - also in a browser", "IYAKKI - touch screen"] {
         assert!(rest.contains(&format!("menuentry \"{t}")), "{t} belongs in the submenu");
         assert!(!cfg[..sub].contains(&format!("menuentry \"{t}")), "{t} is not on the first screen");
     }
@@ -313,6 +312,11 @@ fn every_entry_restarts_after_a_kernel_panic_and_nothing_stricter() {
     assert!(e.len() >= 12);
     for (t, a) in &e {
         let w: Vec<&str> = a.split_whitespace().collect();
+        if t.contains("trouble 5") {
+            // the one entry that stays on the screen after a panic, so the message can be read
+            assert!(w.contains(&"panic=0"), "{t}: {a}");
+            continue;
+        }
         assert!(w.contains(&"panic=20"), "{t}: {a}");
         assert!(!a.contains("oops=panic") && !a.contains("softlockup_panic") && !a.contains("hung_task_panic"), "{t}");
     }

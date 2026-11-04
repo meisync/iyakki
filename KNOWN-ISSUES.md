@@ -188,7 +188,7 @@ other USB cameras, sound devices and drives. `docs/BOOT-TEST.md` is the guide an
 | Settings, Developer mode | 1366x768 | 5 | control: What it installs is labelled Developer (; control: and kernel modules cannot be installed t |
 | Settings, Clusters | 360x740, 800x480, 1366x768 | several | not reached by the old loop; long label/value lines |
 | Settings, Git and SSH keys | 360x740, 800x480, 1366x768 | several | not reached by the old loop; long explanation lines |
-| Settings, SSH tunnels / VPN | 360x740 | several | the page list takes the width |
+| Settings, SSH tunnels / VPN / Remote access | 360x740 | several | the page list takes the width |
 | mesh | 360x740 | 1 | window: Key/Value |
 | radio | 360x740 | 1 | window: ○ STANDBY |
 | radio | 800x480 | 1 | window: VOLUME 100% |
@@ -360,6 +360,14 @@ other USB cameras, sound devices and drives. `docs/BOOT-TEST.md` is the guide an
 * KI-075 **Linux windows install still fails on the Mac** (tried 2026-10-30, image 1028u, after the initramfs fix of the sandbox entry). The Debian download and unpack work; the apt step still fails, and the reason was not captured before the Mac stopped answering. The fix for `pivot_root` is proven in QEMU only; a full apt run inside the sandbox on an image has never completed. Read the Installs row's Log on the Mac for the reason, then fix. Not fixed in this release. (F-LINAPP-03)
 * KI-076 **VPN is untried on hardware** (kernel with WireGuard built, image 1028t onward). The WireGuard module is in the image; no tunnel was brought up against a real server, and the OpenVPN download and the helper were not exercised. Shipped as untested. (F-VPN-11 to F-VPN-16)
 * KI-068 **Download versions and checksums still change only with a new ISO** (2026-10-28). The signed downloads manifest ([docs/development/DOWNLOADS-MANIFEST.md](docs/development/DOWNLOADS-MANIFEST.md), F-QA-11) has its safe core (format, rules, signature, rollback protection, last-good copy, `./run.sh dlmanifest`) and the version lookups of kubectl and helm are wired to it. The fetch is built (F-QA-12: `https://raw.githubusercontent.com/meisync/iyakki-downloads/main/downloads.json`, once per 24 h and on "Check for updates" on the CLIs tab), but it was only tested against a scripted network: the repository may not exist yet (a 404 is a quiet "no update"), the real signed file was never fetched, and nothing ran on the Mac. Every other item still uses the constants in the code. The 35 REVIEW rows are unchanged by this.
+* KI-077 **USB-C touch monitor on the Mac mini: touch is dead after a boot with the cable connected** (measured 2026-11-03, monitor with panel
+  27c0:0859 behind hub 1a40:0101). The panel binds to `hid-multitouch` at 3.6 s, the hub drops at about 4.7 s when the display is taken over and
+  comes back, and no finger event arrives until the USB-C cable is pulled and put back. Not enough: switching the panel or its hub off and on in
+  software (Settings → Keyboard → Probe touch screen, both steps), the monitor's power button, `i915.fastboot=1` (the driver has no such parameter).
+  What worked: plugging the USB-C cable in while the system is running, and (reported by the owner, not logged) the display probe that runs with a
+  monitor already connected, which was removed once and is back; the boot option `iyakki.touchscreen=probe|off|auto` (menu: More options, "touch
+  screen") sets it. A cable from the monitor's separate USB port was not seen by the Mac at all. Unverified: whether the restored probe wakes the
+  panel on a cold boot (needs a new image).
 
 ## Appendix: every row that is not done
 

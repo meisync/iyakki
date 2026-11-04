@@ -53,19 +53,19 @@ echo "$o" | grep -q -- "--yes" || fail "does not ask for --yes"
 o="$(run --boot "$BOOT" --data "$DATA" --lean-out "$OUT" --yes)" || fail "install failed: $o"
 [ -f "$BOOT/boot/initrd-lean" ] && cmp -s "$BOOT/boot/initrd-lean" "$OUT/initrd-lean" || fail "initrd-lean not copied"
 [ -f "$BOOT/boot/grub/grub.cfg.before-lean" ] && cmp -s "$BOOT/boot/grub/grub.cfg.before-lean" "$W/grub.orig" || fail "old grub.cfg not kept"
-grep -q 'menuentry "IYAKKI - fast start (lean boot)"' "$BOOT/boot/grub/grub.cfg" && grep -q "fast start + remote diagnostics" "$BOOT/boot/grub/grub.cfg" || fail "entries not in grub.cfg"
+grep -q 'set iyakki_initrd=' "$BOOT/boot/grub/grub.cfg" && grep -q "iyakki-lean-failed" "$BOOT/boot/grub/grub.cfg" || fail "lean block not in grub.cfg"
 # every old line is still there, in the same order (only the block was added)
 diff <(cat "$W/grub.orig") <(sed '/^# BEGIN lean-boot/,/^# END lean-boot/d' "$BOOT/boot/grub/grub.cfg" | cat -s) >/dev/null || diff "$W/grub.orig" <(sed '/^# BEGIN lean-boot/,/^# END lean-boot/d' "$BOOT/boot/grub/grub.cfg") | head -5
 [ "$(grep -c '^menuentry "IYAKKI"' "$BOOT/boot/grub/grub.cfg")" = 1 ] || fail "normal entry changed"
-first_entry="$(grep -m1 -n 'menuentry' "$BOOT/boot/grub/grub.cfg" | cut -d: -f1)"; normal_line="$(grep -n '^menuentry "IYAKKI" {' "$BOOT/boot/grub/grub.cfg" | head -1 | cut -d: -f1)"
-[ "$first_entry" -lt "$normal_line" ] && grep -m1 'menuentry' "$BOOT/boot/grub/grub.cfg" | grep -q 'fast start (lean boot)' || fail "the fast start is not the first entry"
+first_entry="$(grep -m1 -n 'menuentry' "$BOOT/boot/grub/grub.cfg" | cut -d: -f1)"; block_line="$(grep -n '^# BEGIN lean-boot' "$BOOT/boot/grub/grub.cfg" | head -1 | cut -d: -f1)"
+[ "$block_line" -lt "$first_entry" ] || fail "the lean block is not in front of the first entry"
 grep -q 'set default="0"' "$BOOT/boot/grub/grub.cfg" || fail "default changed"
 R="$DATA/iyakki/root"; [ "$(cat "$R/current")" = id1 ] && [ -f "$R/id1/.lean-complete" ] && [ -x "$R/id1/tree/bin/tool" ] && [ "$(readlink "$R/id1/tree/bin/alias")" = tool ] || fail "tree not in place"
 [ ! -e "$R/previous" ] || fail "previous pointer on a first install"
 [ "$(cat "$DATA/home/file")" = "user data" ] || fail "user data touched"
 ls -A "$R" | grep -q '\.tmp' && fail "temporary folder left"
 [ "$(stat -c %i "$R/id1/tree/bin/tool")" = "$(stat -c %i "$R/id1/tree/bin/tool3")" ] && [ "$(stat -c %i "$R/id1/tree/bin/tool")" = "$(stat -c %i "$R/id1/tree/bin/tool2")" ] || fail "hard links were copied apart"
-ok "install: initrd, menu entries (before the normal one, so the first and the default), tree, pointer, old menu kept, user data untouched"
+ok "install: initrd, menu block (before the first entry), tree, pointer, old menu kept, user data untouched"
 
 # ---- idempotent re-run ------------------------------------------------------------------------------------------------------------------
 S1="$(snapshot)"; o="$(run --boot "$BOOT" --data "$DATA" --lean-out "$OUT" --yes)" || fail "re-run failed: $o"

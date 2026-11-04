@@ -227,6 +227,15 @@ impl SettingsApp {
                 let sys = self.kbd.sys.clone();
                 self.start("testing the screen brightness", move || JobOut::Msg(fnkeys::test_panel(&sys)));
             }
+            Key::Char('h') => {
+                if !self.admin(cx) {
+                    return;
+                }
+                let sys = self.kbd.sys.clone();
+                let level = iyakki_agent::touchprobe::next_level();
+                cx.audit.record(&cx.session.user, "settings.touch.probe", &format!("step {level}"));
+                self.start("probing the touch screen", move || JobOut::Msg(Ok(iyakki_agent::touchprobe::probe(&sys, level))));
+            }
             Key::Char('k') => {
                 if !self.admin(cx) {
                     return;
@@ -283,6 +292,11 @@ impl SettingsApp {
             None => "the kernel's own (250 ms, 30 per second)".into(),
         }, false));
         v.push(("Layout".into(), "US keyboard (other layouts are planned)".into(), false));
+        let panels = iyakki_agent::touchprobe::panels(&self.kbd.sys);
+        v.push(("Touch screen".into(), match panels.len() {
+            0 => "no USB touch screen listed".to_string(),
+            n => format!("{n} found ({}). Touch not working right now? Click Probe touch screen: it switches the screen's USB device off and on", panels.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")),
+        }, false));
         let panel = fnkeys::panel_backlights(&self.kbd.sys);
         v.push(("Screen brightness".into(), match panel.first() {
             Some(l) => format!("{} {}% (steps: {})", l.name, l.percent(), fnkeys::brightness_levels(l.max).len()),
@@ -330,7 +344,10 @@ impl SettingsApp {
             let room = a.y + a.h - y - 90.0 * s;
             y = self.render_scroll_test(g, a, y, s, (a.h * 0.26).clamp_safe(80.0 * s, 190.0 * s).min(room));
         }
-        g.text(a.x, y, 14.0 * s, ACCENT, "Keys IYAKKI reacts to (Up/Down scroll)", Face::Bold);
+        // the rows above can fill a short page (the touch screen row): the heading is drawn only where it fits
+        if y + 20.0 * s <= a.y + a.h {
+            g.text(a.x, y, 14.0 * s, ACCENT, "Keys IYAKKI reacts to (Up/Down scroll)", Face::Bold);
+        }
         y += 24.0 * s;
         let code_w = 250.0 * s;
         let first = self.sel[self.tab].min(fnkeys::KEYS.len().saturating_sub(1));
@@ -392,6 +409,6 @@ impl SettingsApp {
 
     pub(super) fn keyboard_buttons(&self) -> Vec<Btn> {
         let (acc, mut_) = (ACCENT, TEXT);
-        vec![("Function keys", acc, 'f'), ("Touch Bar", acc, 'u'), ("Touch Bar strips", mut_, 'e'), ("Touch Bar flip", mut_, 'l'), ("ISO layout", mut_, 'i'), ("Swap Option/Cmd", mut_, 'o'), ("Repeat delay", mut_, 'd'), ("Repeat rate", mut_, 'r'), ("Trackpad tap", mut_, 'p'), ("Trackpad scroll", mut_, 'n'), ("Scroll speed", mut_, 's'), ("Wheel lines", mut_, 'y'), ("Wheel direction", mut_, 'w'), ("Smooth scrolling", mut_, 'g'), ("Momentum", mut_, 'm'), ("Test screen", acc, 'b'), ("Test keyboard light", mut_, 'k'), ("Test sound", mut_, 't')]
+        vec![("Function keys", acc, 'f'), ("Touch Bar", acc, 'u'), ("Touch Bar strips", mut_, 'e'), ("Touch Bar flip", mut_, 'l'), ("ISO layout", mut_, 'i'), ("Swap Option/Cmd", mut_, 'o'), ("Repeat delay", mut_, 'd'), ("Repeat rate", mut_, 'r'), ("Trackpad tap", mut_, 'p'), ("Trackpad scroll", mut_, 'n'), ("Scroll speed", mut_, 's'), ("Wheel lines", mut_, 'y'), ("Wheel direction", mut_, 'w'), ("Smooth scrolling", mut_, 'g'), ("Momentum", mut_, 'm'), ("Probe touch screen", acc, 'h'), ("Test screen", acc, 'b'), ("Test keyboard light", mut_, 'k'), ("Test sound", mut_, 't')]
     }
 }

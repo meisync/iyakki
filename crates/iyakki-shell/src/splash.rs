@@ -443,6 +443,41 @@ pub fn progress_bar_rect(w: u32, h: u32) -> (f32, f32, f32, f32) {
     layout(w, h).3
 }
 
+/// The galaxy of the boot screen: stars on turning spiral arms around (`cx`, `cy`), twinkling. `dim` (0..=1) scales their light, so the sign-in
+/// screen can show the same motion softly behind its card.
+pub fn draw_galaxy(g: &mut Gfx, t: f32, cx: f32, cy: f32, s: f32, dim: f32) {
+    let (wf, hf) = (g.width() as f32, g.height() as f32);
+    let radius = (wf * wf + hf * hf).sqrt() * 0.5 * 0.9;
+    for st in stars() {
+        let (x, y) = star_position(st, t, cx, cy, radius);
+        if x < -4.0 || y < -4.0 || x > wf + 4.0 || y > hf + 4.0 {
+            continue;
+        }
+        let tw = 0.65 + 0.35 * (t * st.twinkle + st.phase).sin();
+        let b = (st.brightness * tw * dim).clamp(0.0, 1.0);
+        let a = (b * 255.0) as u8;
+        let d = st.size * s * 0.9;
+        if d > 2.0 {
+            // the brightest stars get a faint halo
+            g.circle(x, y, d * 1.8, [st.color[0], st.color[1], st.color[2], (b * 40.0) as u8]);
+        }
+        g.rect(x - d / 2.0, y - d / 2.0, d.max(1.0), d.max(1.0), [st.color[0], st.color[1], st.color[2], a]);
+    }
+}
+
+/// The round logo centred on (`cx`, `cy`), `d` pixels wide, with its soft pulse and the band of light that sweeps over it every few seconds.
+/// The boot screen draws it at the place GRUB showed it; the sign-in form draws it, smaller, above its card.
+pub fn draw_logo(g: &mut Gfx, t: f32, cx: f32, cy: f32, d: f32) {
+    let pulsed = pulse_overlay(logo(), t);
+    let cycle = t % 5.5;
+    let shine = if cycle < 1.4 { Some(shine_overlay(&pulsed, -0.15 + cycle / 1.4 * 1.3)) } else { None };
+    let img = shine.as_ref().unwrap_or(&pulsed);
+    let k = d / img.width() as f32;
+    let paint = PixmapPaint { opacity: 1.0, quality: FilterQuality::Bilinear, ..PixmapPaint::default() };
+    let tf = Transform::from_translate(cx, cy).pre_scale(k, k);
+    g.pm.draw_pixmap(-(img.width() as i32) / 2, -(img.height() as i32) / 2, img.as_ref(), &paint, tf, None);
+}
+
 pub fn draw(g: &mut Gfx, v: &View) {
     let (w, h) = (g.width(), g.height());
     let s = scale(w, h);
@@ -453,33 +488,11 @@ pub fn draw(g: &mut Gfx, v: &View) {
     let (cx, cy, logo_d) = logo_rect(w, h);
 
     // the galaxy: stars on turning spiral arms
-    let radius = (wf * wf + hf * hf).sqrt() * 0.5 * 0.9;
-    for st in stars() {
-        let (x, y) = star_position(st, v.t, cx, cy, radius);
-        if x < -4.0 || y < -4.0 || x > wf + 4.0 || y > hf + 4.0 {
-            continue;
-        }
-        let tw = 0.65 + 0.35 * (v.t * st.twinkle + st.phase).sin();
-        let b = (st.brightness * tw).clamp(0.0, 1.0);
-        let a = (b * 255.0) as u8;
-        let d = st.size * s * 0.9;
-        if d > 2.0 {
-            // the brightest stars get a faint halo
-            g.circle(x, y, d * 1.8, [st.color[0], st.color[1], st.color[2], (b * 40.0) as u8]);
-        }
-        g.rect(x - d / 2.0, y - d / 2.0, d.max(1.0), d.max(1.0), [st.color[0], st.color[1], st.color[2], a]);
-    }
+    draw_galaxy(g, v.t, cx, cy, s, 1.0);
     shooting_star(g, v.t, wf, hf, s);
 
     // the logo itself: static (same place and size as on the GRUB menu), with a band of light sweeping over it now and then
-    let pulsed = pulse_overlay(logo(), v.t);
-    let cycle = v.t % 5.5;
-    let shine = if cycle < 1.4 { Some(shine_overlay(&pulsed, -0.15 + cycle / 1.4 * 1.3)) } else { None };
-    let img = shine.as_ref().unwrap_or(&pulsed);
-    let k = logo_d / img.width() as f32;
-    let paint = PixmapPaint { opacity: 1.0, quality: FilterQuality::Bilinear, ..PixmapPaint::default() };
-    let t = Transform::from_translate(cx, cy).pre_scale(k, k);
-    g.pm.draw_pixmap(-(img.width() as i32) / 2, -(img.height() as i32) / 2, img.as_ref(), &paint, t, None);
+    draw_logo(g, v.t, cx, cy, logo_d);
 
     // the name
     let (ny, ts, ss, (bx, by, bw, bh)) = layout(w, h);

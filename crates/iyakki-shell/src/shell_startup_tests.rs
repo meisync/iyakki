@@ -19,7 +19,7 @@ fn fake(sh: &mut Shell) -> Arc<Registry> {
 
 /// Everything ready except the cluster, which waits for the clock.
 fn cluster_waits(r: &Registry) {
-    for id in ["network", "firewall", "sound", "web", "shares", "agent"] {
+    for id in ["network", "firewall", "sound", "touch", "web", "shares", "agent"] {
         r.ready(id);
     }
     r.starting("clock", "waiting for a time server");
@@ -185,7 +185,7 @@ fn the_strip_says_what_waits_for_what_follows_the_start_and_collapses_when_every
 #[test]
 fn a_failure_stays_with_its_reason_is_audited_once_and_retry_and_open_work() {
     let (mut sh, r) = home("st-fail", ("root", "rootpass12"));
-    for id in ["clock", "network", "firewall", "sound", "web", "shares", "agent"] {
+    for id in ["clock", "network", "firewall", "sound", "touch", "web", "shares", "agent"] {
         r.ready(id);
     }
     r.failed("k3s", "k3s stopped: port 6443 is busy");
@@ -318,7 +318,7 @@ fn the_sign_in_screen_shows_the_system_services_that_are_still_starting_at_five_
             r.starting("clock", "waiting for a time server");
             r.starting("network", "waiting for a connection (cable or Wi-Fi)");
             r.starting("k3s", "starting k3s (about 20 s)");
-            for id in ["firewall", "sound", "web", "shares", "agent"] {
+            for id in ["firewall", "sound", "touch", "web", "shares", "agent"] {
                 r.ready(id);
             }
             beat(&mut sh, 2);
@@ -350,7 +350,7 @@ fn the_sign_in_line_counts_ready_system_services_and_fades_when_they_are_all_up(
     let (mut sh, _) = shell_with_users("st-login-fade");
     let r = fake(&mut sh);
     r.starting("clock", "setting the clock");
-    for id in ["network", "firewall", "sound", "web", "shares", "agent"] {
+    for id in ["network", "firewall", "sound", "touch", "web", "shares", "agent"] {
         r.ready(id);
     }
     r.disabled("k3s");
@@ -397,7 +397,7 @@ fn settings_startup_lists_every_service_for_an_administrator_and_not_for_others(
     r.failed("k3s", "k3s stopped: port 6443 is busy");
     sh.jump_to("settings", "tab:startup");
     assert_eq!(sh.screen_name(), "app:settings");
-    draw(&mut sh, 1280, 720);
+    draw(&mut sh, 1280, 960);
     // the page used the process-wide registry; the rows are the catalogue
     let rows = sh.hits().iter().filter(|h| matches!(h.ev, Event::Row(_))).count();
     assert!(rows >= iyakki_agent::startup::CATALOGUE.len(), "{rows} rows");

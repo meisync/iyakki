@@ -64,7 +64,7 @@ pub(super) fn payload(r: &Rig, version: &str, variant: &str, sb: bool, initrd_mb
     let _ = std::fs::remove_dir_all(&d);
     put(&d, "boot/bzImage", &pseudo((1 << 20) + 5000, 11));
     put(&d, "boot/initrd", &pseudo(initrd_mb << 20, 12));
-    put(&d, "boot/grub/grub.cfg", board_cfg().replace("Loading IYAKKI", "Loading IYAKKI now").as_bytes());
+    put(&d, "boot/grub/grub.cfg", board_cfg().replace("IYAKKI is starting", "IYAKKI is starting now").as_bytes());
     put(&d, "boot/grub/themes/iyakki/theme.txt", b"theme v2\n");
     put(&d, "EFI/BOOT/bootx64.efi", &pseudo(300_000, 3));
     if sb {
@@ -156,7 +156,7 @@ fn an_update_keeps_the_old_version_on_the_data_partition_then_replaces_the_boot_
     assert_eq!(hash(&r.dm.data_dir().join("boot-prev").join(id).join("initrd")), find_old("boot/initrd"));
     // the menu: the new entries, then "previous version" loading from the data partition with the normal command line
     let cfg = std::fs::read_to_string(find_ci(&r.boot.root, "boot/grub/grub.cfg").unwrap()).unwrap();
-    assert!(cfg.contains("Loading IYAKKI now"), "the new menu text is in");
+    assert!(cfg.contains("IYAKKI is starting now"), "the new menu text is in");
     assert!(cfg.contains(&format!("menuentry \"{PREV_TITLE} 0.1.0-alpha.1\"")) && cfg.contains("search --no-floppy --label IYAKKI-DATA --set=iyakki_dp"), "{cfg}");
     assert!(cfg.contains(&format!("linux ($iyakki_dp)/boot-prev/{id}/bzImage $iyakki_usbq console=tty0 console=ttyS0,115200 panic=20 quiet loglevel=3 vt.global_cursor_default=0")), "{cfg}");
     assert!(cfg.contains(&format!("initrd ($iyakki_dp)/boot-prev/{id}/initrd")));
@@ -400,4 +400,122 @@ fn nothing_is_changed_when_the_boot_files_are_already_the_new_ones_and_old_saved
     assert!(latest.contains("0.1.0-alpha.3") && r.dm.data_dir().join("boot-prev").join(latest.lines().next().unwrap()).join("initrd").is_file());
     // applying again with nothing different but the menu: fine, and a payload identical to what is there says so
     let _ = e;
+}
+
+/// A lean install's payload: the usual files, a small initramfs and the system image `boot/root.sfs`.
+fn lean_payload(r: &Rig, version: &str, image_seed: u8) -> (PathBuf, Manifest) {
+    let (d, _) = payload(r, version, "macweb", false, 1);
+    put(&d, "boot/root.sfs", &pseudo(3 << 20, image_seed));
+    let list = list_boot(&d).into_iter().filter(|(p, _)| p != MANIFEST).map(|(p, s)| (p.clone(), s, hash(&d.join(&p)))).collect::<Vec<_>>();
+    let m = build_manifest(&d, &list, None, None, "lean.img").unwrap();
+    write_manifest(&d, &m).unwrap();
+    (d, m)
+}
+
+fn pointer(r: &Rig, name: &str) -> Option<String> {
+    std::fs::read_to_string(r.dm.data_dir().join("iyakki/root").join(name)).ok()
+}
+
+#[test]
+fn a_lean_update_puts_the_system_image_on_the_data_partition_and_leaves_the_boot_partitions_seed_alone() {
+    let r = rig("lean1");
+    put(&r.boot.root, "boot/root.sfs", &pseudo(3 << 20, 90));
+    let seed = hash(&r.boot.root.join("boot/root.sfs"));
+    let (dir, m) = lean_payload(&r, "0.1.0-alpha.2", 91);
+    let free = || 500u64 << 20;
+    let e = env(&r, &free, None);
+    let p = plan(&e, &m, false).unwrap();
+    assert!(p.needs.contains(&"boot/root.sfs".to_string()));
+    assert!(p.notes.iter().any(|n| n.contains("data partition")), "{:?}", p.notes);
+    stage_all(&e, &dir, &m, &p.needs);
+    let out = apply(&e, &m, false, "laptop").unwrap();
+    assert_eq!(out["system_image"], true);
+    let id = root_id(&m).unwrap();
+    assert_eq!(pointer(&r, "current").unwrap(), format!("{id}\nsize={}\n", 3 << 20));
+    assert!(pointer(&r, "previous").is_none(), "the first update's previous root is the seed");
+    let image = r.dm.data_dir().join("iyakki/root").join(&id).join("root.sfs");
+    assert_eq!(hash(&image), m.files.iter().find(|f| f.path == "boot/root.sfs").unwrap().sha256);
+    assert_eq!(hash(&r.boot.root.join("boot/root.sfs")), seed, "the seed image on the boot partition is never replaced");
+    assert!(!r.dm.data_dir().join("boot-next/boot/root.sfs").exists(), "the staged copy was moved, not copied");
+    let cfg = std::fs::read_to_string(r.boot.root.join("boot/grub/grub.cfg")).unwrap();
+    let prev_entry = &cfg[cfg.find("menuentry \"IYAKKI (previous version)").expect("the previous entry")..];
+    assert!(prev_entry.lines().find(|l| l.trim_start().starts_with("linux ")).unwrap().contains("iyakki.root=previous"), "{prev_entry}");
+}
+
+#[test]
+fn a_second_lean_update_keeps_the_old_root_as_previous_and_removes_the_older_ones() {
+    let r = rig("lean2");
+    put(&r.boot.root, "boot/root.sfs", &pseudo(3 << 20, 90));
+    let free = || 500u64 << 20;
+    let mut ids = Vec::new();
+    for (ver, seed) in [("0.1.0-alpha.2", 91u8), ("0.1.0-alpha.3", 92), ("0.1.0-alpha.4", 93)] {
+        let (dir, m) = lean_payload(&r, ver, seed);
+        // the release file of the boot partition moves with each update, so the next one is newer
+        let e = Env { dm: &r.dm, boot: &r.boot, release: r.release.clone(), volatile: false, data_free: &free, fault_after: None };
+        let p = plan(&e, &m, false).unwrap();
+        stage_all(&e, &dir, &m, &p.needs);
+        apply(&e, &m, false, "laptop").unwrap();
+        ids.push(root_id(&m).unwrap());
+    }
+    assert!(pointer(&r, "current").unwrap().starts_with(&ids[2]));
+    assert!(pointer(&r, "previous").unwrap().starts_with(&ids[1]));
+    let dirs: Vec<String> = std::fs::read_dir(r.dm.data_dir().join("iyakki/root")).unwrap().flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(dirs.len(), 2, "the current root and the previous one: {dirs:?}");
+    assert!(!dirs.contains(&ids[0]));
+}
+
+#[test]
+fn a_lean_update_that_is_already_in_place_changes_nothing() {
+    let r = rig("lean3");
+    put(&r.boot.root, "boot/root.sfs", &pseudo(3 << 20, 90));
+    let (dir, m) = lean_payload(&r, "0.1.0-alpha.2", 91);
+    let free = || 500u64 << 20;
+    let e = env(&r, &free, None);
+    let p = plan(&e, &m, false).unwrap();
+    stage_all(&e, &dir, &m, &p.needs);
+    apply(&e, &m, false, "laptop").unwrap();
+    let again = plan(&e, &m, true).unwrap();
+    assert!(!again.needs.iter().any(|n| n == "boot/root.sfs"), "the root is recognised: {:?}", again.needs);
+}
+
+#[test]
+fn an_image_equal_to_the_installed_seed_is_not_sent_again_on_a_fresh_install() {
+    let r = rig("lean4");
+    let (_, m) = lean_payload(&r, "0.1.0-alpha.2", 91);
+    put(&r.boot.root, "boot/root.sfs", &pseudo(3 << 20, 91));
+    let free = || 500u64 << 20;
+    let e = env(&r, &free, None);
+    let p = plan(&e, &m, false).unwrap();
+    assert!(!p.needs.iter().any(|n| n == "boot/root.sfs"), "the seed is already this image");
+}
+
+#[test]
+fn a_lean_image_has_the_small_initrd_and_no_full_one_and_the_update_keeps_it_for_the_previous_entry() {
+    let r = rig("lean5");
+    // a lean install: the small RAM disk and the seed image, no full initrd
+    std::fs::remove_file(r.boot.root.join("boot/initrd")).unwrap();
+    put(&r.boot.root, "boot/initrd-lean", &pseudo(1 << 20, 70));
+    put(&r.boot.root, "boot/root.sfs", &pseudo(3 << 20, 90));
+    let old_lean = hash(&r.boot.root.join("boot/initrd-lean"));
+    let d = r.dir.join("payload-lean5");
+    put(&d, "boot/bzImage", &pseudo((1 << 20) + 9, 11));
+    put(&d, "boot/initrd-lean", &pseudo((1 << 20) + 100, 71));
+    put(&d, "boot/root.sfs", &pseudo(3 << 20, 91));
+    put(&d, "boot/grub/grub.cfg", board_cfg().as_bytes());
+    put(&d, "EFI/BOOT/bootx64.efi", &pseudo(300_000, 3));
+    let list = list_boot(&d).into_iter().map(|(p, s)| (p.clone(), s, hash(&d.join(&p)))).collect::<Vec<_>>();
+    let m = build_manifest(&d, &list, Some("0.1.0-alpha.1"), Some("macweb"), "lean.img").expect("a lean image is a boot partition");
+    verify_payload(&d, &m).unwrap();
+    let free = || 500u64 << 20;
+    let e = env(&r, &free, None);
+    let p = plan(&e, &m, true).unwrap();
+    assert!(p.needs.iter().any(|n| n == "boot/initrd-lean") && p.needs.iter().any(|n| n == "boot/root.sfs"), "{:?}", p.needs);
+    stage_all(&e, &d, &m, &p.needs);
+    apply(&e, &m, true, "laptop").unwrap();
+    let (id, _) = std::fs::read_to_string(r.dm.data_dir().join("boot-prev/latest")).unwrap().split_once('\n').map(|(a, b)| (a.to_string(), b.to_string())).unwrap();
+    assert_eq!(hash(&r.dm.data_dir().join("boot-prev").join(&id).join("initrd")), old_lean, "the small RAM disk that was running is what the previous entry reads");
+    assert_eq!(hash(&r.boot.root.join("boot/initrd-lean")), hash(&d.join("boot/initrd-lean")));
+    // an image with neither RAM disk is still refused
+    let bad = list.iter().filter(|(p, _, _)| !p.contains("initrd")).cloned().collect::<Vec<_>>();
+    assert!(build_manifest(&d, &bad, Some("0.1.0"), Some("macweb"), "x").unwrap_err().contains("boot/initrd"));
 }

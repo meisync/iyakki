@@ -66,6 +66,8 @@ pub mod touchbar_host;
 #[cfg(test)]
 mod touchbar_tests;
 pub mod loginbar;
+pub mod cloudsession;
+pub mod osk;
 pub mod panes;
 pub mod memgate;
 pub mod backend_kms;

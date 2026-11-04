@@ -15,6 +15,9 @@ use crate::startup::{Registry, StartupState};
 const CLOCK_LIMIT_SECS: u64 = 120;
 /// After this long without a default route the network is reported as missing (the cluster keeps waiting for it).
 const NET_GRACE_SECS: u64 = 90;
+/// The network drivers load a few seconds after the sign-in screen; when this much time has passed and no network device (Ethernet or Wi-Fi) is
+/// there at all, nothing is coming: the network is reported as not available at once, and the clock does not wait for it.
+const NO_NIC_GRACE_SECS: u64 = 20;
 /// A sound card shows up late sometimes (USB); after this long "none" is the answer.
 const SOUND_WAIT_SECS: u64 = 30;
 /// Autostart fires within seconds of the start; later, a stopped cluster was stopped on purpose.
@@ -45,6 +48,8 @@ pub struct Facts {
     pub clock_synced: bool,
     /// An IPv4 default route is up.
     pub route: bool,
+    /// The machine has no network device at all (no Ethernet or Wi-Fi in /sys/class/net with hardware behind it).
+    pub no_nic: bool,
     pub k3s: K3sFact,
     /// The firewall is wanted but not in force.
     pub firewall_alert: bool,
@@ -54,6 +59,8 @@ pub struct Facts {
     pub web_engine: bool,
     /// Folder shares being served now.
     pub shares_running: usize,
+    /// USB touch screens, and whether each had its one re-attach ([`crate::touchprobe`]).
+    pub touch: crate::touchprobe::TouchFact,
 }
 
 fn trim_note(t: &str) -> String {
@@ -62,12 +69,14 @@ fn trim_note(t: &str) -> String {
 
 /// Turn the facts into states (only for the polled services).
 pub fn apply(reg: &Registry, f: &Facts) {
+    // nothing to wait for: no network device, and the drivers had their time
+    let no_net = !f.route && f.no_nic && f.uptime_secs >= NO_NIC_GRACE_SECS;
     // the clock: the same gate the cluster uses
     if f.clock_floor_pending {
         reg.starting("clock", "setting the clock");
     } else if f.clock_synced {
         reg.ready("clock");
-    } else if f.uptime_secs < CLOCK_LIMIT_SECS {
+    } else if f.uptime_secs < CLOCK_LIMIT_SECS && !no_net {
         // without a network no time server can answer: say what is really missing
         reg.starting("clock", if f.route { "waiting for a time server" } else { "waiting for the network" });
     } else {
@@ -77,6 +86,8 @@ pub fn apply(reg: &Registry, f: &Facts) {
     // the network
     if f.route {
         reg.ready("network");
+    } else if no_net {
+        reg.disabled("network");
     } else if f.uptime_secs < NET_GRACE_SECS {
         reg.starting("network", "waiting for a connection (cable or Wi-Fi)");
     } else if f.k3s.installed && f.k3s.autostart {
@@ -97,6 +108,16 @@ pub fn apply(reg: &Registry, f: &Facts) {
         reg.starting("sound", "looking for a sound card");
     } else {
         reg.disabled("sound");
+    }
+    // the touch screen: none is nothing to wait for; one is checked once, in software, when the boot has settled
+    if f.touch.panels == 0 || f.touch.attached {
+        if f.touch.panels == 0 {
+            reg.disabled("touch");
+        } else {
+            reg.ready("touch");
+        }
+    } else {
+        reg.starting("touch", "checking the touch screen");
     }
     // the dev cluster
     let k = &f.k3s;
@@ -157,7 +178,9 @@ pub fn apply(reg: &Registry, f: &Facts) {
 /// `firewall_alert`: the firewall is wanted but not in force (the shell asks `iyakki_fw::service::alert()`; this crate does not
 /// depend on the firewall).
 pub fn poll(svc: &Arc<crate::services::Services>, reg: &Registry, firewall_alert: bool) {
-    apply(reg, &gather(svc, firewall_alert));
+    let f = gather(svc, firewall_alert);
+    crate::touchprobe::step(f.uptime_secs);
+    apply(reg, &f);
 }
 
 pub fn gather(svc: &Arc<crate::services::Services>, firewall_alert: bool) -> Facts {
@@ -167,11 +190,13 @@ pub fn gather(svc: &Arc<crate::services::Services>, firewall_alert: bool) -> Fac
         clock_floor_pending: crate::clockfloor::pending(),
         clock_synced: crate::ntp::synced(),
         route: crate::k3sdev::has_default_route(&std::fs::read_to_string(crate::k3sdev::ROUTE_FILE).unwrap_or_default()),
+        no_nic: !std::fs::read_dir("/sys/class/net").map(|d| d.flatten().any(|e| e.path().join("device").exists())).unwrap_or(true),
         k3s: K3sFact { installed: h.installed, autostart: h.autostart, state: h.state.clone(), note: h.note.clone(), failed_reason: h.failed_reason.clone(), node_ready: h.node_ready },
         firewall_alert,
         sound_cards: std::fs::read_to_string("/proc/asound/cards").map(|t| t.lines().filter(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit())).count()).unwrap_or(0),
         web_engine: crate::webengine::offered(),
         shares_running: crate::sharedfolder::running_total(),
+        touch: crate::touchprobe::state(),
     }
 }
 

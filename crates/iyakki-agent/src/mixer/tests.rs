@@ -427,6 +427,28 @@ fn the_service_plays_a_source_to_the_sink_and_lets_the_card_go_when_idle() {
     m.shutdown();
 }
 
+#[test]
+fn a_change_of_the_sound_output_moves_what_is_playing_to_the_new_device() {
+    // a station that plays on and on: the card is opened again when the chosen output changes, the stream goes on, nothing is dropped
+    let sink = FakeSink::new();
+    let m = Mixer::start(fast(), Box::new(sink.clone()));
+    let w = m.open_source(SourceKind::Radio, 48_000, 2).unwrap();
+    let feed = |n: usize| w.write_i16_wait(&vec![6000i16; 960 * 2 * n], Duration::from_secs(2)).unwrap();
+    feed(10);
+    wait_for("the first open", || sink.lock().opens == 1);
+    assert_eq!(sink.lock().closes, 0);
+    sink.lock().stale = true; // Settings → Sound chose another output
+    feed(10);
+    wait_for("the second open on the new device", || sink.lock().opens == 2);
+    let closes = sink.lock().closes;
+    let before = sink.lock().samples.len();
+    assert_eq!(closes, 1, "the old device was let go once");
+    feed(10);
+    wait_for("sound after the move", || sink.lock().samples.len() > before);
+    assert_eq!(sink.lock().opens, 2, "and it stays on the new one");
+    m.shutdown();
+}
+
 impl FakeSink {
     fn is_open_now(&self) -> bool {
         self.lock().open

@@ -40,6 +40,10 @@ use serde::{Deserialize, Serialize};
 pub const NO_OUTPUT: &str = "no sound output: connect a monitor with speakers over HDMI/DP or a USB audio device; built-in speakers on T2 Macs need the apple-bce driver of the Mac image";
 
 /// How often the background watcher takes a full look at the sound hardware (jacks and monitors are in that look).
+/// The loudness a new system starts at (the IYAKKI volume), in percent: comfortable, with headroom for the person to go up.
+pub const DEFAULT_VOLUME_PCT: u32 = 70;
+/// The software boost every card starts with, in dB: a little up (20 % of [`crate::softvol::MAX_BOOST_DB`], rounded). Settings -> Sound -> Advanced changes it.
+pub const DEFAULT_BOOST_DB: u32 = 2;
 pub const WATCH_EVERY: Duration = Duration::from_secs(3);
 /// During the first minute after boot the watcher checks every 2 s whether a sound card or PCM appeared (the built-in
 /// speakers of a MacBookPro14,1 appear about 11 s after boot); a change is looked at at once.
@@ -151,7 +155,7 @@ pub const MAX_LEVELS: usize = 32;
 
 impl Default for SoundSettings {
     fn default() -> Self {
-        SoundSettings { output: String::new(), volume_pct: 100, muted: false, levels: Default::default(), boosts: Default::default(), volume_modes: Default::default(), mixer: true, web_mix: false, highlight_offset_ms: 0 }
+        SoundSettings { output: String::new(), volume_pct: DEFAULT_VOLUME_PCT, muted: false, levels: Default::default(), boosts: Default::default(), volume_modes: Default::default(), mixer: true, web_mix: false, highlight_offset_ms: 0 }
     }
 }
 
@@ -196,16 +200,14 @@ impl SoundSettings {
         }
     }
 
-    /// The boost of this card in dB (0 when none was set).
+    /// The boost of this card in dB: what the person set (0 is a choice too), else [`DEFAULT_BOOST_DB`].
     pub fn boost_for(&self, card_id: &str) -> u32 {
-        self.boosts.get(card_id).copied().unwrap_or(0).min(crate::softvol::MAX_BOOST_DB)
+        self.boosts.get(card_id).copied().unwrap_or(DEFAULT_BOOST_DB).min(crate::softvol::MAX_BOOST_DB)
     }
 
-    /// Set the boost of a card; 0 removes it.
+    /// Set the boost of a card; 0 is kept as the person's choice of no boost (without an entry the default applies).
     pub fn set_boost(&mut self, card_id: &str, db: u32) {
-        if db == 0 {
-            self.boosts.remove(card_id);
-        } else if output_key_ok(card_id) && !card_id.is_empty() && (self.boosts.len() < MAX_LEVELS || self.boosts.contains_key(card_id)) {
+        if output_key_ok(card_id) && !card_id.is_empty() && (self.boosts.len() < MAX_LEVELS || self.boosts.contains_key(card_id)) {
             self.boosts.insert(card_id.to_string(), db.min(crate::softvol::MAX_BOOST_DB));
         }
     }
@@ -2208,7 +2210,7 @@ mod tests {
         assert_eq!(st.device.as_deref(), Some("iyakki"), "players go through the softvol");
         assert_eq!(st.softvol, Some(1));
         let conf = std::fs::read_to_string(t.0.join("asound.conf")).unwrap();
-        assert_eq!(conf, crate::softvol::config_text(&crate::softvol::Plan::Soft { card: 1, device: 0 }), "the T2: no dmix");
+        assert_eq!(conf, crate::softvol::config_text_boost(&crate::softvol::Plan::Soft { card: 1, device: 0 }, DEFAULT_BOOST_DB), "the T2: no dmix");
         assert_eq!(*fake.calls.lock().unwrap(), ["prime iyakki", "amixer -q -c 1 sset IYAKKI 30%"]);
         assert_eq!(sel.gain(), 100, "the softvol scales: IYAKKI's players leave their samples alone");
         assert_eq!(sel.prefs_gain(), 30, "a sound sent to one output by hand still gets the volume");
@@ -2351,7 +2353,7 @@ mod tests {
         assert_eq!(st.sharing, Sharing::IyakkiMixer);
         assert!(st.summary().contains("IYAKKI mixer"));
         let conf = std::fs::read_to_string(t.0.join("asound.conf")).unwrap();
-        assert_eq!(conf, crate::softvol::config_text(&crate::softvol::Plan::Soft { card: 1, device: 0 }), "the mixer writes into the same plughw-based device");
+        assert_eq!(conf, crate::softvol::config_text_boost(&crate::softvol::Plan::Soft { card: 1, device: 0 }, DEFAULT_BOOST_DB), "the mixer writes into the same plughw-based device");
     }
 }
 

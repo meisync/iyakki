@@ -4,8 +4,8 @@
 //! ALC287) `Capture` is muted or at 0 %, so the built-in microphone records silence and the person sees "the microphone does not work".
 //! IYAKKI manages the output volume itself but never touched the input. This module does it **once per card**: the first time a card is seen
 //! with capture controls, every capture volume goes to [`LEVEL`] and every capture switch is switched on; a marker file on the data volume
-//! records that, so a level the person sets later is never overwritten. Boost controls (`Mic Boost`, `Internal Mic Boost`) are left alone:
-//! too much boost distorts, and the default of the driver is usually right.
+//! records that, so a level the person sets later is never overwritten. Boost controls (`Mic Boost`, `Internal Mic Boost`) go to a
+//! little up ([`BOOST_LEVEL`]) at the same time: too much boost distorts, none leaves a quiet microphone.
 //!
 //! The world is reached through two arguments (the `amixer` runner and the marker folder), so tests use fakes and a temporary folder.
 
@@ -14,7 +14,9 @@ use std::path::Path;
 use std::sync::Mutex;
 
 /// The capture level set on first sight, in percent.
-pub const LEVEL: u32 = 80;
+pub const LEVEL: u32 = 70;
+/// The level of the boost controls (`Mic Boost`, `Internal Mic Boost`) on first sight: a little up, since too much boost distorts.
+pub const BOOST_LEVEL: u32 = 20;
 /// Looks at a card that has no capture control before it is given up (the codec of a laptop registers its controls a little after the card).
 const GIVE_UP_AFTER: u32 = 6;
 
@@ -45,6 +47,28 @@ pub fn capture_controls(scontents: &str) -> Vec<Control> {
         }
     }
     out
+}
+
+/// The boost controls (`Mic Boost`, `Internal Mic Boost`, ...) with a volume, in the text of `amixer -c N scontents`.
+pub fn boost_controls(scontents: &str) -> Vec<Control> {
+    let mut out = Vec::new();
+    let mut cur: Option<(String, u32)> = None;
+    for line in scontents.lines() {
+        if let Some(rest) = line.strip_prefix("Simple mixer control '") {
+            cur = rest.rsplit_once("',").and_then(|(n, i)| Some((n.to_string(), i.trim().parse().ok()?)));
+        } else if let (Some((name, index)), Some(caps)) = (&cur, line.trim().strip_prefix("Capabilities:")) {
+            let has = |w: &str| caps.split_whitespace().any(|c| c == w);
+            if (has("cvolume") || has("volume")) && name.to_ascii_lowercase().contains("boost") {
+                out.push(Control { name: name.clone(), index: *index, volume: true, switch: false });
+            }
+        }
+    }
+    out
+}
+
+/// The `amixer` arguments that put each boost control at [`BOOST_LEVEL`].
+pub fn boost_commands(controls: &[Control]) -> Vec<Vec<String>> {
+    controls.iter().map(|c| vec!["-q".to_string(), "sset".to_string(), format!("{},{}", c.name, c.index), format!("{BOOST_LEVEL}%")]).collect()
 }
 
 /// The `amixer` arguments (after `-c N`) that give each control its default: the volume to [`LEVEL`], the capture switch on.
@@ -104,6 +128,12 @@ pub fn step(proc_root: &Path, markers: &Path, amixer: &dyn Fn(&[String]) -> Resu
             continue;
         }
         let mut ok = 0;
+        // the boost controls ride along (their failure does not matter: not every card has one)
+        for cmd in boost_commands(&boost_controls(&out)) {
+            let mut args = vec!["-c".to_string(), c.clone()];
+            args.extend(cmd);
+            let _ = amixer(&args);
+        }
         for cmd in commands(&controls) {
             let mut args = vec!["-c".to_string(), c.clone()];
             args.extend(cmd);
@@ -123,7 +153,7 @@ pub fn step(proc_root: &Path, markers: &Path, amixer: &dyn Fn(&[String]) -> Resu
 // ------------------------------------------------------------------------------------------------ playback
 
 /// The playback level given once to a card's hardware volume, in percent (the IYAKKI volume, one level above, then sets the loudness).
-pub const PLAY_LEVEL: u32 = 100;
+pub const PLAY_LEVEL: u32 = 70;
 /// The output controls of a laptop codec that carry sound to the speakers or the headphones. `Mic`, `Line`, `CD`, `Beep` and the like are left alone:
 /// switching their playback on would feed the microphone back into the speakers.
 const OUTPUT_NAMES: [&str; 10] = ["Master", "Headphone", "Speaker", "PCM", "Front", "Line Out", "Surround", "Center", "LFE", "Side"];
@@ -231,7 +261,7 @@ mod tests {
         assert_eq!(names, ["Capture", "Mic", "Digital"]);
         assert!(c[0].volume && c[0].switch && c[2].switch && !c[2].volume);
         let cmds = commands(&c);
-        assert_eq!(cmds[0], ["-q", "sset", "Capture,0", "80%", "cap"]);
+        assert_eq!(cmds[0], ["-q", "sset", "Capture,0", "70%", "cap"]);
         assert_eq!(cmds[2], ["-q", "sset", "Digital,0", "cap"], "a switch alone is only switched on");
     }
 
@@ -239,7 +269,7 @@ mod tests {
     fn outputs_are_switched_on_and_the_microphone_playback_is_left_off() {
         let c = playback_controls(SCONTENTS);
         assert_eq!(c.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Master"], "Mic playback would feed back; IYAKKI is the software volume");
-        assert_eq!(playback_commands(&c, true)[0], ["-q", "sset", "Master,0", "100%", "unmute"]);
+        assert_eq!(playback_commands(&c, true)[0], ["-q", "sset", "Master,0", "70%", "unmute"]);
         assert_eq!(playback_commands(&c, false)[0], ["-q", "sset", "Master,0", "unmute"], "after the first time only the switch");
     }
 
@@ -257,7 +287,7 @@ mod tests {
         let markers = d.join("m");
         let l = playback_step(&d.join("proc"), &markers, &amixer);
         assert!(l.len() == 1 && l[0].contains("first time"), "{l:?}");
-        assert!(calls.borrow().iter().any(|c| c == "-c 1 -q sset Master,0 100% unmute"), "{:?}", calls.borrow());
+        assert!(calls.borrow().iter().any(|c| c == "-c 1 -q sset Master,0 70% unmute"), "{:?}", calls.borrow());
         assert!(markers.join("Generic.out").exists());
         // the same start does not touch it again
         calls.borrow_mut().clear();
@@ -286,7 +316,10 @@ mod tests {
         let lines = step(&d.join("proc"), &markers, &amixer);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("card 1 (Generic)") && lines[0].contains("3 of 3"), "{}", lines[0]);
-        assert_eq!(calls.borrow().iter().filter(|c| c.contains("sset")).count(), 3);
+        // three capture controls at 70 %, and the two boost controls a little up (20 %)
+        assert_eq!(calls.borrow().iter().filter(|c| c.contains("sset")).count(), 5);
+        assert!(calls.borrow().iter().any(|c| c == "-c 1 -q sset Mic Boost,0 20%") && calls.borrow().iter().any(|c| c == "-c 1 -q sset Internal Mic Boost,0 20%"), "{:?}", calls.borrow());
+        assert!(calls.borrow().iter().any(|c| c == "-c 1 -q sset Capture,0 70% cap"), "{:?}", calls.borrow());
         assert!(markers.join("Generic").exists());
         // the next look finds the marker and does nothing, so the person's own level stays
         calls.borrow_mut().clear();

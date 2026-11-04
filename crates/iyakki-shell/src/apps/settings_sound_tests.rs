@@ -219,15 +219,15 @@ fn iyakki_volume_and_mute_are_saved_from_keys_buttons_and_the_slider_and_only_by
     let mut a = SettingsApp::new(&cx).with_hardware(env.clone());
     goto(&mut a, &cx, Tab::Sound);
     key(&mut a, &cx, Key::Char('-'));
-    assert_eq!(cx.services.sound_settings().volume_pct, 95);
-    assert_eq!(status(&a), "IYAKKI volume 95%.");
+    assert_eq!(cx.services.sound_settings().volume_pct, 65, "a new system starts at 70 %");
+    assert_eq!(status(&a), "IYAKKI volume 65%.");
     key(&mut a, &cx, Key::Char('m'));
     assert!(cx.services.sound_settings().muted);
     assert_eq!(status(&a), "IYAKKI sound muted.");
     assert_eq!(rows(&mut a, &cx)[1].chips[0].0, "muted");
     key(&mut a, &cx, Key::Char('+'));
     let s = cx.services.sound_settings();
-    assert!(!s.muted && s.volume_pct == 100, "louder unmutes: {s:?}");
+    assert!(!s.muted && s.volume_pct == 70, "louder unmutes: {s:?}");
     assert!(cx.audit.recent(10).iter().any(|l| l.contains("settings.sound.volume")));
     // the slider's track and its buttons
     let g = draw(&mut a, &cx, 1280, 720);
@@ -331,7 +331,8 @@ fn the_advanced_sound_rows_toggle_with_a_and_the_boost_and_the_hardware_answer_a
     a.sound_set_boost(&cx, "PCH", 40);
     assert_eq!(cx.services.sound_settings().boost_for("PCH"), iyakki_agent::softvol::MAX_BOOST_DB);
     a.sound_set_boost(&cx, "PCH", 0);
-    assert!(cx.services.sound_settings().boosts.is_empty());
+    assert_eq!(cx.services.sound_settings().boost_for("PCH"), 0, "0 is the person's choice of no boost");
+    assert_eq!(cx.services.sound_settings().boost_for("OtherCard"), iyakki_agent::audioout::DEFAULT_BOOST_DB, "a card nobody set starts a little up");
     // "Did the second tone sound quieter?": y keeps the hardware control, n chooses the software volume
     a.hw_check_done("PCH".into(), Ok("Played.".into()));
     assert!(matches!(a.modal, Some(Modal::Confirm(ConfirmKind::SoundHwWorks(_), _))));

@@ -436,9 +436,9 @@ impl Mode {
     pub fn title(self) -> &'static str {
         match self {
             Mode::WholeDisk => "Whole disk: erase everything on the disk",
-            Mode::FreeSpace => "Free space only: add IYAKKI in unallocated space, touch nothing else",
-            Mode::Reuse => "Use existing partitions: choose which become BOOT and DATA (only those are formatted)",
-            Mode::Custom => "Custom sizes in free space",
+            Mode::FreeSpace => "Free space only: add IYAKKI in free space (on the next page, x deletes a partition to make room)",
+            Mode::Reuse => "Use existing partitions: choose which become BOOT and DATA (only those are formatted; b = BOOT, d = DATA)",
+            Mode::Custom => "Custom sizes in free space (x deletes a partition first)",
         }
     }
     pub const ALL: [Mode; 4] = [Mode::WholeDisk, Mode::FreeSpace, Mode::Reuse, Mode::Custom];
@@ -461,6 +461,9 @@ pub struct Request {
     pub table: TableChoice,
     /// The person typed the confirmation for a disk that holds the running system.
     pub confirm_running_disk: bool,
+    /// Existing partitions (table slot numbers) to delete first, in `free-space` and `custom` mode: their space becomes free space the
+    /// install can use. Each one is listed in the plan as a red `delete` row and needs the erase acknowledgement.
+    pub delete_parts: Vec<u32>,
     pub zram: String,
     pub swapfile: String,
     pub hostname: Option<String>,
@@ -468,7 +471,7 @@ pub struct Request {
 
 impl Default for Request {
     fn default() -> Request {
-        Request { mode: Mode::WholeDisk, gap_start: None, boot_part: None, data_part: None, keep_esp: false, boot_mib: None, data_mib: None, table: TableChoice::Auto, confirm_running_disk: false, zram: "auto".into(), swapfile: "off".into(), hostname: None }
+        Request { mode: Mode::WholeDisk, gap_start: None, boot_part: None, data_part: None, keep_esp: false, boot_mib: None, data_mib: None, table: TableChoice::Auto, confirm_running_disk: false, delete_parts: vec![], zram: "auto".into(), swapfile: "off".into(), hostname: None }
     }
 }
 
@@ -489,6 +492,7 @@ impl Request {
             ("data_mib", opt(self.data_mib)),
             ("table", Json::str(self.table.label().to_ascii_lowercase())),
             ("confirm_running_disk", Json::Bool(self.confirm_running_disk)),
+            ("delete_parts", Json::Arr(self.delete_parts.iter().map(|i| Json::num(u64::from(*i))).collect())),
             ("zram", Json::str(&self.zram)),
             ("swapfile", Json::str(&self.swapfile)),
             ("hostname", self.hostname.as_deref().map_or(Json::Null, Json::str)),
@@ -508,6 +512,9 @@ impl Request {
         r.data_mib = n("data_mib");
         r.table = TableChoice::parse(s("table").unwrap_or("auto"))?;
         r.confirm_running_disk = b("confirm_running_disk");
+        if let Some(a) = j.get("delete_parts").and_then(Json::as_arr) {
+            r.delete_parts = a.iter().map(|v| v.as_u64().map(|n| n as u32).ok_or("delete_parts must be a list of partition numbers")).collect::<Result<_, _>>()?;
+        }
         if let Some(z) = s("zram") {
             r.zram = z.into();
         }
@@ -534,7 +541,7 @@ pub struct SourceSpec {
 impl SourceSpec {
     /// The boot partition size a disk with `sector`-byte sectors needs.
     pub fn boot_required(&self, sector: u32) -> u64 {
-        if sector == 512 { self.boot_bytes } else { ESP_4K_BYTES }.div_ceil(MIB) * MIB
+        if sector == 512 { self.boot_bytes } else { ESP_4K_BYTES.max(self.boot_bytes) }.div_ceil(MIB) * MIB
     }
 }
 
@@ -846,6 +853,32 @@ fn refuse_in_use(p: &Part, what: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The disk as it will be once the partitions in `req.delete_parts` are gone (their space is free space then). Only the free-space and
+/// custom modes delete; the running system's own volumes, swap, extended partitions and logical partitions are refused.
+pub fn model_after_deletes(d: &DiskModel, req: &Request) -> Result<DiskModel, String> {
+    if req.delete_parts.is_empty() {
+        return Ok(d.clone());
+    }
+    if !matches!(req.mode, Mode::FreeSpace | Mode::Custom) {
+        return Err("partitions can be deleted in the free-space and custom modes (whole-disk mode erases everything already; reuse mode formats the partitions you choose)".into());
+    }
+    let mut seen: Vec<u32> = Vec::new();
+    for &i in &req.delete_parts {
+        if seen.contains(&i) {
+            return Err(format!("delete: partition {i} is listed twice"));
+        }
+        seen.push(i);
+        let p = pick_part(d, i, "delete")?;
+        refuse_in_use(p, "delete")?;
+        if d.table == Some(TableKind::Mbr) && i > 4 {
+            return Err(format!("delete: {} is a logical partition inside an extended partition; removing it changes the extended partition's own table, which this installer does not write. Use the other system's disk tool.", p.name));
+        }
+    }
+    let mut m = d.clone();
+    m.parts.retain(|p| !req.delete_parts.contains(&p.index));
+    Ok(m)
+}
+
 /// Build the plan for `req` on disk `d`. Pure; refuses anything unsafe with the reason.
 pub fn build_plan(d: &DiskModel, req: &Request, src: &SourceSpec, uefi: bool) -> Result<Plan, String> {
     let mut warnings = common_checks(d, req)?;
@@ -877,10 +910,22 @@ pub fn build_plan(d: &DiskModel, req: &Request, src: &SourceSpec, uefi: bool) ->
         warnings.push(crate::install::SECURE_BOOT_NOTE.to_string());
     }
     let ss = d.sector as u64;
+    // partitions the person asked to delete first: the install then plans in the disk as it will be without them
+    let after = model_after_deletes(d, req)?;
     match req.mode {
         Mode::WholeDisk => whole_disk(d, req, src, uefi, &mut plan, &mut warnings)?,
-        Mode::FreeSpace | Mode::Custom => free_space(d, req, src, uefi, &mut plan, &mut warnings)?,
+        Mode::FreeSpace | Mode::Custom => free_space(&after, req, src, uefi, &mut plan, &mut warnings)?,
         Mode::Reuse => reuse(d, req, src, &mut plan, &mut warnings)?,
+    }
+    for i in &req.delete_parts {
+        let p = d.part(*i).ok_or_else(|| format!("delete: partition {i} does not exist on {}", d.path))?;
+        plan.steps.push(Step { action: Action::Delete, part: p.name.clone(), index: p.index, first_lba: p.first_lba, sectors: p.sectors, bytes: p.bytes(d.sector), role: None, what: describe_part(p, d.sector), loses: if p.fs.is_empty() { "its contents".into() } else { format!("its {} contents", p.fs) } });
+        if p.is_esp() {
+            warnings.push(format!("{} is an EFI System Partition: deleting it removes the boot loader of whatever system uses it.", p.name));
+        }
+    }
+    if !req.delete_parts.is_empty() {
+        warnings.push(format!("{} partition(s) are deleted first; their space is used for IYAKKI and what they held cannot be recovered.", req.delete_parts.len()));
     }
     plan.steps.sort_by_key(|s| (s.first_lba, s.index));
     // the partitions that must be unmounted: mounted ones the plan destroys (critical mounts were refused above)
@@ -1037,18 +1082,21 @@ fn free_space(d: &DiskModel, req: &Request, src: &SourceSpec, uefi: bool, plan: 
         (None, None) => plan.boot_required,
     };
     let room = gap.bytes(d.sector);
+    // a GPT disk gets the 1 MiB BIOS boot partition too (as a whole-disk install does), unless the existing EFI partition is kept
+    let bios_bytes = if kind == TableKind::Gpt && esp.is_none() { MIB } else { 0 };
+    let room_after_bios = room.saturating_sub(bios_bytes);
     let data_bytes = match req.data_mib {
         Some(m) => m * MIB,
-        None => (room.saturating_sub(boot_bytes)) / MIB * MIB,
+        None => (room_after_bios.saturating_sub(boot_bytes)) / MIB * MIB,
     };
     if data_bytes < MIN_DATA_BYTES {
         return Err(format!("the free space ({}) is too small: IYAKKI needs {} for boot plus at least {} for data. Free more space with the other system's disk tool (shrink a partition); this version never resizes existing filesystems.", human_size(room), human_size(boot_bytes), human_size(MIN_DATA_BYTES)));
     }
-    if boot_bytes + data_bytes > room {
+    if bios_bytes + boot_bytes + data_bytes > room {
         return Err(format!("the sizes ({} boot + {} data) do not fit the free space ({}); nothing existing is shrunk", human_size(boot_bytes), human_size(data_bytes), human_size(room)));
     }
     // partition slots
-    let new_count = if esp.is_some() { 1 } else { 2 };
+    let new_count = if esp.is_some() { 1 } else if bios_bytes > 0 { 3 } else { 2 };
     let used: Vec<u32> = d.parts.iter().map(|p| p.index).collect();
     let mut free_slots: Vec<u32> = Vec::new();
     let max_slot = if kind == TableKind::Gpt { 128 } else { 4 };
@@ -1065,13 +1113,20 @@ fn free_space(d: &DiskModel, req: &Request, src: &SourceSpec, uefi: bool, plan: 
         });
     }
     if kind == TableKind::Mbr {
-        let end = gap.first_lba * ss / 512 + (boot_bytes + data_bytes) / 512;
+        let end = gap.first_lba * ss / 512 + (bios_bytes + boot_bytes + data_bytes) / 512;
         if end > 0xFFFF_FFFF {
             return Err("the new partitions would end beyond 2 TiB, which an MBR cannot address".into());
         }
     }
     let mut cursor = gap.first_lba;
     let mut slots = free_slots.into_iter();
+    if bios_bytes > 0 {
+        let i = slots.next().unwrap();
+        let sectors = bios_bytes / ss;
+        let what = if d.sector == 512 { "BIOS boot (reserved for GRUB on legacy BIOS PCs; this disk starts through UEFI)" } else { "BIOS boot (kept free: 4096-byte sectors start through UEFI)" };
+        plan.steps.push(Step { action: Action::Create, part: format!("new {i}"), index: i, first_lba: cursor, sectors, bytes: bios_bytes, role: Some(Role::Bios), what: what.into(), loses: String::new() });
+        cursor += sectors;
+    }
     if esp.is_none() {
         let i = slots.next().unwrap();
         let sectors = boot_bytes / ss;
@@ -1208,13 +1263,28 @@ pub fn check_plan(d: &DiskModel, plan: &Plan) -> Result<(), String> {
             return Err(format!("internal error: {} is missing from the plan", p.name));
         }
     }
-    // deletes only in whole-disk mode, and then every partition
-    let deletes = plan.steps.iter().filter(|s| s.action == Action::Delete).count();
-    if plan.request.mode != Mode::WholeDisk && deletes > 0 {
-        return Err("internal error: only the whole-disk mode deletes partitions".into());
+    // deletes: every partition in whole-disk mode, exactly the ones asked for in free-space and custom mode, none otherwise
+    let mut deleted: Vec<u32> = plan.steps.iter().filter(|s| s.action == Action::Delete).map(|s| s.index).collect();
+    deleted.sort_unstable();
+    let mut asked = plan.request.delete_parts.clone();
+    asked.sort_unstable();
+    match plan.request.mode {
+        Mode::WholeDisk if deleted.len() != d.parts.len() => return Err("internal error: whole-disk mode must name every partition it deletes".into()),
+        Mode::FreeSpace | Mode::Custom if deleted != asked => return Err("internal error: the plan deletes other partitions than the ones asked for".into()),
+        Mode::Reuse if !deleted.is_empty() => return Err("internal error: reuse mode does not delete partitions".into()),
+        _ => {}
     }
-    if plan.request.mode == Mode::WholeDisk && deletes != d.parts.len() {
-        return Err("internal error: whole-disk mode must name every partition it deletes".into());
+    // every partition of the install is in the plan before anything is written: boot and data always, and on a GPT disk that gets new
+    // partitions (not a reused or kept EFI partition) the BIOS boot partition as well
+    {
+        let has = |r: Role| plan.steps.iter().any(|s| s.role == Some(r) && s.action != Action::Delete);
+        if !has(Role::Boot) || !has(Role::Data) {
+            return Err("internal error: the plan does not configure both the boot and the data partition".into());
+        }
+        let creates = |r: Role| plan.steps.iter().any(|s| s.role == Some(r) && s.action == Action::Create);
+        if plan.table_after == TableKind::Gpt && plan.request.mode != Mode::Reuse && creates(Role::Boot) && !creates(Role::Bios) {
+            return Err("internal error: the plan creates a boot partition on a GPT disk without the BIOS boot partition".into());
+        }
     }
     if plan.table_after == TableKind::Gpt && !plan.new_table {
         let (lo, hi) = d.usable(TableKind::Gpt);

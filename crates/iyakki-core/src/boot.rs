@@ -831,12 +831,18 @@ fn bind_home_on_data() {
 
 /// Mount the IYAKKI-DATA volume (if any) over the data directory so accounts, settings, vaults,
 /// documents and chats survive power-off. Without one, IYAKKI keeps running from RAM.
-/// `iyakki.data=ram` on the kernel command line skips the lookup.
+/// `iyakki.data=ram` on the kernel command line skips the lookup; `iyakki.data=/dev/sdb2` uses that partition.
 pub fn mount_data_volume() {
     let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
     if cmdline_param(&cmdline, "iyakki.data") == Some("ram") {
         log::info!("data: kept in RAM (iyakki.data=ram)");
         return;
+    }
+    // `iyakki.data=/dev/sdb2`: the person chose which partition holds the data; without it the system takes its own (the data volume of
+    // the disk it started from), it does not search the other disks
+    let choice = cmdline_param(&cmdline, "iyakki.data").filter(|c| c.starts_with("/dev/"));
+    if let Some(c) = choice {
+        log::info!("data: the data partition was chosen on the command line: {c}");
     }
     // The lean boot layout (docs/BOOT-SPEED.md): the first stage read the system from the data volume and left it mounted here.
     if dir_is_mount_point(&std::fs::read_to_string("/proc/mounts").unwrap_or_default(), DATA_DIR) {
@@ -857,7 +863,7 @@ pub fn mount_data_volume() {
     let start = std::time::Instant::now();
     let mut announced = false;
     loop {
-        let found = iyakki_storage::find_data(&roots).is_some() || iyakki_storage::find_pending(&roots).is_some();
+        let found = iyakki_storage::find_data_for(&roots, choice).is_some() || iyakki_storage::find_pending(&roots).is_some();
         let has_disk = iyakki_storage::list(&roots).iter().any(|d| d.parent.is_none());
         let usb = usb_storage_present(Path::new("/sys"));
         // a GPT that names the data partition whose device has not appeared yet: give the kernel a few more seconds
@@ -874,14 +880,14 @@ pub fn mount_data_volume() {
         run_limited(Command::new("mdev").arg("-s"));
     }
     log::info!("data: storage search took {} ms", start.elapsed().as_millis());
-    if iyakki_storage::find_data(&roots).is_none() && iyakki_storage::find_pending(&roots).is_none() {
+    if iyakki_storage::find_data_for(&roots, choice).is_none() && iyakki_storage::find_pending(&roots).is_none() {
         for h in iyakki_storage::gpt_hints(&roots) {
             log::warn!("data: the partition table of {} lists IYAKKI-DATA as partition {} ({}) but that device is missing or holds no IYAKKI volume", h.disk, h.number, h.part);
         }
     }
     // first boot after an install: the installer left a marked, unformatted data partition (and the choices made in the installer)
     let install_conf = iyakki_storage::find_pending(&roots).and_then(|d| iyakki_storage::read_pending_conf(&d.path));
-    if iyakki_storage::find_data(&roots).is_none() {
+    if iyakki_storage::find_data_for(&roots, choice).is_none() {
         if iyakki_storage::find_pending(&roots).is_some() {
             // once, on the first start after an install: the boot screen says why this start takes a little longer
             progress(80, FIRST_START_FORMAT_STAGE);
@@ -900,7 +906,7 @@ pub fn mount_data_volume() {
         }
     }
     let t_mount = std::time::Instant::now();
-    let mounted = iyakki_storage::mount_data(&roots, &iyakki_storage::SysMounter, Path::new(DATA_DIR));
+    let mounted = iyakki_storage::mount_data_for(&roots, &iyakki_storage::SysMounter, Path::new(DATA_DIR), choice);
     log::info!("data: mount took {} ms", t_mount.elapsed().as_millis());
     match mounted {
         Ok(Some(dev)) => {
@@ -1218,6 +1224,17 @@ mod tests {
         let late = src.split("pub fn late_boot").nth(1).unwrap();
         assert!(late.find("load_aliases(&plan.deferred").unwrap() < late.find("coldplug_settle(&mut plan.seen").unwrap());
         assert!(late.find("coldplug_settle(&mut plan.seen").unwrap() < late.find("cs8409_sound()").unwrap());
+    }
+
+    #[test]
+    fn install_mode_runs_only_the_critical_boot_and_never_the_late_boot_thread() {
+        let main = include_str!("main.rs");
+        let pid1 = main.split("iyakki.selftest\").is_some()").nth(1).expect("the self-test branch");
+        let install = pid1.find("else if iyakki_core::boot::install_mode(&cmdline)").expect("a branch for install mode");
+        let spawn = pid1.find("iyakki-late-boot").expect("the late boot thread");
+        assert!(install < spawn, "install mode is decided before the late boot thread can start");
+        let branch = &pid1[install..spawn];
+        assert!(branch.contains("early_boot_critical()") && !branch.contains("late_boot("), "storage, input and display only");
     }
 
     #[test]

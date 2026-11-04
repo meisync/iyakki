@@ -74,7 +74,7 @@ fn a_service_waits_for_what_it_needs_and_says_so() {
 #[test]
 fn the_summary_lists_what_is_not_ready_failures_first_then_the_longest_starting() {
     let (r, t) = reg();
-    for id in ["clock", "network", "firewall", "sound", "web", "shares", "agent"] {
+    for id in ["clock", "network", "firewall", "sound", "touch", "web", "shares", "agent"] {
         r.ready(id);
     }
     t.store(110, Ordering::SeqCst);
@@ -86,7 +86,7 @@ fn the_summary_lists_what_is_not_ready_failures_first_then_the_longest_starting(
     let s = r.summary();
     let ids: Vec<&str> = s.rows.iter().map(|x| x.id).collect();
     assert_eq!(ids, vec!["flows", "k3s", "models"], "failed, then the one that began first");
-    assert_eq!(s.ready, 7);
+    assert_eq!(s.ready, 8);
     assert!(!s.all_ready() && s.busy() && s.failed() == 1);
     let l = s.lines(true);
     assert_eq!(l[0].text, "Flows scheduler: could not read the flows");
@@ -104,7 +104,7 @@ fn the_summary_lists_what_is_not_ready_failures_first_then_the_longest_starting(
 #[test]
 fn a_person_who_is_not_an_administrator_sees_names_and_steps_but_no_reasons_and_no_buttons() {
     let (r, _) = reg();
-    for id in ["clock", "network", "firewall", "sound", "web", "shares", "agent"] {
+    for id in ["clock", "network", "firewall", "sound", "touch", "web", "shares", "agent"] {
         r.ready(id);
     }
     r.starting("k3s", "starting k3s (about 20 s)");
@@ -128,7 +128,7 @@ fn only_the_system_wide_services_show_before_sign_in() {
     let sys = r.summary().system_only();
     assert!(sys.rows.iter().all(|x| x.scope == Scope::System));
     let names: Vec<&str> = sys.rows.iter().map(|x| x.id).collect();
-    assert_eq!(names, vec!["network", "clock", "firewall", "sound", "k3s"]);
+    assert_eq!(names, vec!["network", "clock", "firewall", "sound", "touch", "k3s"]);
     assert!(!names.contains(&"web") && !names.contains(&"agent"));
 }
 
@@ -170,6 +170,21 @@ fn the_ready_note_holds_then_fades_then_goes_and_comes_back_when_something_start
     assert_eq!(c.update(false, 31_000), Phase::Done(255));
     assert_eq!(c.update(true, 31_500), Phase::Busy);
     assert_eq!(c.update(false, 40_000), Phase::Done(255), "the hold starts over");
+}
+
+#[test]
+fn a_machine_with_no_network_device_does_not_wait_for_the_network_or_a_time_server() {
+    let (r, _t) = reg();
+    // drivers still loading: it waits as before
+    apply(&r, &Facts { route: false, no_nic: true, clock_synced: false, ..up(10) });
+    assert!(matches!(r.state("network"), Some(StartupState::Starting { .. })));
+    // after the grace time with no device at all: nothing is coming, nothing waits
+    apply(&r, &Facts { route: false, no_nic: true, clock_synced: false, ..up(25) });
+    assert_eq!(r.state("network"), Some(StartupState::Disabled));
+    assert_eq!(r.state("clock"), Some(StartupState::Ready));
+    // a device is there but nothing is connected: the old wait
+    apply(&r, &Facts { route: false, no_nic: false, clock_synced: false, ..up(25) });
+    assert!(matches!(r.state("network"), Some(StartupState::Starting { .. })));
 }
 
 fn up(secs: u64) -> Facts {

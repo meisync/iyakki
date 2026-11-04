@@ -75,6 +75,8 @@ pub enum Goes {
     Time,
     Models,
     Shares,
+    /// Settings -> Remote access (web).
+    Remote,
 }
 
 impl Goes {
@@ -89,6 +91,7 @@ impl Goes {
             Goes::Time => Some("tab:time"),
             Goes::Models => Some("tab:models"),
             Goes::Shares => Some("tab:shares"),
+            Goes::Remote => Some("tab:remote"),
         }
     }
 }
@@ -111,12 +114,14 @@ pub struct Def {
 
 /// The services, in the order they are listed: the network first (Wi-Fi is part of it: one line for both), the device name that rides on it, then
 /// the clock, which needs the network to reach a time server, then the rest.
-pub const CATALOGUE: [Def; 12] = [
+pub const CATALOGUE: [Def; 14] = [
     Def { id: "network", name: "Network and Wi-Fi", short: "the network", scope: Scope::System, after: &[], goes: Goes::Network, can_retry: false, tracked: true },
     Def { id: "devname", name: "Device name (mDNS)", short: "the device name", scope: Scope::System, after: &["network"], goes: Goes::Network, can_retry: false, tracked: false },
     Def { id: "clock", name: "Clock", short: "the clock", scope: Scope::System, after: &["network"], goes: Goes::Time, can_retry: false, tracked: true },
+    Def { id: "webaccess", name: "Remote access (web)", short: "remote access", scope: Scope::System, after: &["network"], goes: Goes::Remote, can_retry: false, tracked: false },
     Def { id: "firewall", name: "Firewall", short: "the firewall", scope: Scope::System, after: &[], goes: Goes::Firewall, can_retry: false, tracked: true },
     Def { id: "sound", name: "Sound", short: "sound", scope: Scope::System, after: &[], goes: Goes::Sound, can_retry: false, tracked: true },
+    Def { id: "touch", name: "Touch screen", short: "the touch screen", scope: Scope::System, after: &[], goes: Goes::Nothing, can_retry: false, tracked: true },
     Def { id: "k3s", name: "Dev cluster (k3s)", short: "the cluster", scope: Scope::System, after: &["network", "clock"], goes: Goes::Cluster, can_retry: true, tracked: true },
     Def { id: "models", name: "Local models", short: "the models", scope: Scope::Session, after: &[], goes: Goes::Models, can_retry: true, tracked: false },
     Def { id: "web", name: "Web engine", short: "the web engine", scope: Scope::Session, after: &[], goes: Goes::Nothing, can_retry: false, tracked: true },

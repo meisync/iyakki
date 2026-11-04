@@ -200,6 +200,8 @@ pub struct EditApp {
     completing: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     /// The text before and after the cursor when the completion was asked for.
     complete_at: Option<(String, String)>,
+    /// Markdown files show rendered in the AI IDE (`edit_preview.rs`); the person can switch a file to the text.
+    md: super::edit_preview::MdPreview,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -322,6 +324,7 @@ impl EditApp {
             running: None,
             completing: None,
             complete_at: None,
+            md: Default::default(),
             output: None,
         }
     }
@@ -577,7 +580,28 @@ impl EditApp {
     }
 
     /// Show the cursor at a 1-based line.
+    /// A Markdown file open in the AI IDE (shown rendered unless the person chose the text).
+    fn md_capable(&self) -> bool {
+        self.ide && !self.embedded && self.path.as_deref().is_some_and(super::edit_preview::is_markdown)
+    }
+
+    /// The rendered view is what is on screen now (not while the assistant's change is being reviewed).
+    pub fn md_previewing(&self) -> bool {
+        self.md_capable() && self.review.is_none() && self.path.as_deref().is_some_and(|p| !self.md.editing(p))
+    }
+
+    pub fn md_set_edit(&mut self, on: bool) {
+        if let Some(p) = self.path.clone() {
+            self.md.set_edit(&p, on);
+            if on {
+                self.follow = true;
+            }
+        }
+    }
+
     pub fn goto_line(&mut self, line: usize) {
+        // somebody asked for a line (a search hit, a problem, a link): that is the text, not the picture
+        self.md_set_edit(true);
         self.buf.goto_line(line.clamp_safe(1, self.buf.line_count().max(1)));
         self.follow = true;
     }
@@ -1505,6 +1529,10 @@ impl EditApp {
             bx += bw + 6.0 * s;
         };
         let in_review = self.review.is_some();
+        if self.md_capable() {
+            // the switch between the rendered page and the text comes first: it is what a Markdown file is mostly about
+            btn(g, if self.md_previewing() { "Edit" } else { "Preview" }, ACCENT, Key::Ctrl('e'), !in_review);
+        }
         btn(g, "Open", ACCENT, Key::Ctrl('o'), !in_review);
         btn(g, "Save", ACCENT, Key::Ctrl('s'), !in_review);
         btn(g, "New", TEXT, Key::Ctrl('n'), !in_review);
@@ -1548,6 +1576,9 @@ impl EditApp {
         self.rows_visible = ((body.h / lh) as usize).max(1);
         if self.review.is_some() {
             self.draw_review(g, body, s, size, lh, cw);
+        } else if self.md_previewing() {
+            let text = self.buf.text();
+            self.md.draw(g, body, s, self.path.as_deref(), &text, ACCENT);
         } else {
             self.draw_buffer(g, body, s, size, lh, cw, tick, cx);
         }
@@ -1938,7 +1969,26 @@ impl App for EditApp {
                 _ => {}
             }
         }
+        if self.md_previewing() {
+            match ev {
+                Event::Key(Key::Ctrl('e') | Key::Char('e') | Key::Enter) => {
+                    self.md_set_edit(true);
+                    return Flow::Stay;
+                }
+                // find and go to line work on the text
+                Event::Key(Key::Ctrl('f' | 'h' | 'g')) => self.md_set_edit(true),
+                Event::Key(k) if self.md.scroll_key(k) => return Flow::Stay,
+                Event::Scroll(d) => {
+                    self.md.scroll_by(*d);
+                    return Flow::Stay;
+                }
+                // nothing is typed into a picture
+                Event::Paste(_) | Event::AreaAt(..) | Event::Key(Key::Char(_) | Key::Backspace | Key::Delete | Key::Tab | Key::BackTab) => return Flow::Stay,
+                _ => {}
+            }
+        }
         match ev {
+            Event::Key(Key::Ctrl('e')) if self.md_capable() => self.md_set_edit(false),
             Event::Key(Key::Ctrl('s')) => self.save(cx),
             // a copy of the open file on the computer the window runs on (window mode): the shell asks where
             Event::Key(Key::Ctrl('H')) => {
@@ -2812,4 +2862,80 @@ mod tests {
         key(&mut n, &cx, Key::F(5));
         assert!(n.status().unwrap().0.contains("Save the file first"));
     }
+
+    fn has_text_area(g: &Gfx) -> bool {
+        g.hits.iter().any(|h| h.label == "editor")
+    }
+
+    #[test]
+    fn a_markdown_file_in_the_ide_opens_as_a_preview_and_the_person_can_switch_to_the_text_and_back() {
+        let (cx, home) = world("md1");
+        let mut a = app_with(&cx, &home, "README.md", "# Title\n\nSome *text* and a list:\n\n- one\n- two\n");
+        a.ide = true;
+        assert!(a.md_previewing(), "a Markdown file is shown rendered first");
+        assert!(!has_text_area(&render(&mut a, &cx)), "no text area is drawn under the picture");
+        // nothing is typed into the picture
+        key(&mut a, &cx, Key::Char('x'));
+        key(&mut a, &cx, Key::Backspace);
+        assert_eq!(a.text(), "# Title\n\nSome *text* and a list:\n\n- one\n- two\n");
+        assert!(!a.is_dirty());
+        // the key e (and the toolbar's Edit, which sends Ctrl+E) opens the text
+        key(&mut a, &cx, Key::Char('e'));
+        assert!(!a.md_previewing());
+        assert!(has_text_area(&render(&mut a, &cx)));
+        key(&mut a, &cx, Key::Char('z'));
+        assert!(a.is_dirty() && a.text().contains('z'), "typing works in the text");
+        // Preview (Ctrl+E) shows the text as it is now, saved or not
+        key(&mut a, &cx, Key::Ctrl('e'));
+        assert!(a.md_previewing());
+        assert!(a.is_dirty(), "the change is still there, unsaved");
+        key(&mut a, &cx, Key::Ctrl('e'));
+        assert!(!a.md_previewing());
+    }
+
+    #[test]
+    fn only_markdown_files_in_the_ide_get_the_preview_and_a_requested_line_opens_the_text() {
+        let (cx, home) = world("md2");
+        let mut code = app_with(&cx, &home, "main.rs", "fn main() {}\n");
+        code.ide = true;
+        assert!(!code.md_previewing());
+        let mut plain = app_with(&cx, &home, "notes.md", "text\n");
+        assert!(!plain.md_previewing(), "outside the IDE (the Edit tile) a Markdown file is the text, as before");
+        plain.ide = true;
+        assert!(plain.md_previewing());
+        plain.goto_line(1);
+        assert!(!plain.md_previewing(), "a search hit or a problem wants the line");
+        // the choice is per file
+        let other = home.join("other.md");
+        std::fs::write(&other, "# o\n").unwrap();
+        plain.open_path(&cx, &other.to_string_lossy()).unwrap();
+        assert!(plain.md_previewing(), "another Markdown file starts as a preview");
+    }
+
+    #[test]
+    fn the_preview_scrolls_by_wheel_and_keys_and_find_switches_to_the_text() {
+        let (cx, home) = world("md3");
+        let body: String = (0..120).map(|i| format!("Line number {i} of the long page.\n\n")).collect();
+        let mut a = app_with(&cx, &home, "long.md", &body);
+        a.ide = true;
+        render(&mut a, &cx);
+        a.handle(&Event::Scroll(-5), &cx);
+        key(&mut a, &cx, Key::PageDown);
+        render(&mut a, &cx);
+        assert!(a.md_previewing(), "scrolling keeps the picture");
+        key(&mut a, &cx, Key::Ctrl('f'));
+        assert!(!a.md_previewing(), "Find works on the text");
+    }
+
+
+    #[test]
+    #[ignore = "writes a picture: IYAKKI_MD_PIC=file.png cargo test -p iyakki-shell md_picture -- --ignored"]
+    fn md_picture() {
+        let Ok(out) = std::env::var("IYAKKI_MD_PIC") else { return };
+        let (cx, home) = world("mdpic");
+        let mut a = app_with(&cx, &home, "README.md", "# IYAKKI\n\nAn **OS for agents**. See `iyakki dev` and [the guide](https://example.org).\n\n## Install\n\n- write the stick\n- boot it\n\n> a quote\n\n```\ncargo build\n```\n");
+        a.ide = true;
+        render(&mut a, &cx).pm.save_png(out).unwrap();
+    }
+
 }

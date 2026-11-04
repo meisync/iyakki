@@ -807,7 +807,7 @@ fn a_system_update_goes_through_plan_stage_and_apply_over_tls_with_the_scope_and
     let pay = f.dir.join("payload");
     put_file(&pay, "boot/bzImage", &blob((1 << 20) + 777, 11));
     put_file(&pay, "boot/initrd", &blob(7 << 20, 12));
-    put_file(&pay, "boot/grub/grub.cfg", cfg.replace("Loading IYAKKI", "Loading IYAKKI 2").as_bytes());
+    put_file(&pay, "boot/grub/grub.cfg", cfg.replace("IYAKKI - screen test", "IYAKKI 2 - screen test").as_bytes());
     put_file(&pay, "EFI/BOOT/bootx64.efi", &blob(300_000, 3));
     put_file(&pay, "boot/iyakki-release", b"VERSION=0.1.0-alpha.2\nVARIANT=macweb\nBUILD_DATE=2026-10-22\n");
     let list: Vec<(String, u64, String)> = update::list_boot(&pay).into_iter().map(|(p, s)| { let h = iyakki_agent::devmode::files::sha256_file(&pay.join(&p)).unwrap(); (p, s, h) }).collect();
@@ -834,7 +834,7 @@ fn a_system_update_goes_through_plan_stage_and_apply_over_tls_with_the_scope_and
         assert_eq!(iyakki_agent::devmode::files::sha256_file(&p).unwrap(), fe.sha256, "{}", fe.path);
     }
     let menu = std::fs::read_to_string(update::find_ci(&boot_root, "boot/grub/grub.cfg").unwrap()).unwrap();
-    assert!(menu.contains("IYAKKI (previous version) 0.1.0-alpha.1") && menu.contains("Loading IYAKKI 2"));
+    assert!(menu.contains("IYAKKI (previous version) 0.1.0-alpha.1") && menu.contains("IYAKKI 2 - screen test"));
     let out = run(&h, &["update", "--status"]).unwrap();
     assert!(out.iter().any(|l| l.contains("0.1.0-alpha.1")), "{out:?}");
     assert!(!f.env.services.dir().join("boot-next").exists());

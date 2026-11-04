@@ -175,6 +175,8 @@ impl Services {
         let system = if LocalVault::exists(&sys_path) { Some(LocalVault::open(&sys_path).map_err(io_err)?) } else { None };
         let secrets = Secrets::new(system, quick.clone());
         secrets.set_providers(settings.get().secret_providers.clone().into_iter().collect());
+        // a cloud instance's common vault (cvault:NAME), when the operator mounted one
+        secrets.set_common(crate::commonvault::load(&crate::commonvault::dir()));
         // models a server said can see pictures (Lemonade's vision label) stay known after a restart
         let vision: Vec<String> = settings.get().providers.iter().flat_map(|p| p.model_kinds.iter().filter(|(_, k)| k.as_str() == "vision").map(|(m, _)| m.clone())).collect();
         crate::providers::note_vision_models(&vision);
@@ -1250,6 +1252,25 @@ impl Services {
     /// Is the device announcing its name now: the choice, or the default (on, but off in cloud mode).
     pub fn announce_name_on(&self) -> bool {
         crate::devname::effective(self.announce_name_setting(), crate::cloudmode::detect(self.cloud_setting()).on)
+    }
+
+    /// Settings -> Remote access (web): is the desktop to be served to browsers, and on which port (always HTTPS).
+    pub fn web_access_on(&self) -> bool {
+        self.settings.lock().unwrap().get().web_access
+    }
+
+    pub fn web_access_port(&self) -> u16 {
+        crate::webaccess::effective_port(self.settings.lock().unwrap().get().web_port)
+    }
+
+    pub fn set_web_access(&self, on: bool) -> Result<(), String> {
+        self.settings.lock().unwrap().update(|s| s.web_access = on).map_err(|e| e.to_string())
+    }
+
+    /// The port the person chose (0: the default, 8443).
+    pub fn set_web_access_port(&self, port: u16) -> Result<(), String> {
+        let port = crate::webaccess::check_port(port)?;
+        self.settings.lock().unwrap().update(|s| s.web_port = port).map_err(|e| e.to_string())
     }
 
     /// Settings: "Show all AI tools" (default off): the AI tools the hardware profile hides are shown as "not recommended".

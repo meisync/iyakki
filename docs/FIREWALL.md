@@ -188,6 +188,15 @@ One more rule belongs to the device name rather than to developer mode: `device 
 
 Public addresses are never allowed by these rules. They are removed when developer mode goes off (also by its timer) and the pairing rule when the pairing ends or on a restart. Audit lines: `devmode.firewall.allow` and `devmode.firewall.removed` (an address, the port and the reason, no secrets). In Settings -> Firewall each such rule says it was made by developer mode; Remove works as for any rule, and developer mode makes it again at the next look unless you switch it off. Settings -> Developer mode shows "the firewall blocks the developer port 7979: Allow" when the firewall is on and nothing lets it in. Tests: `iyakki-fw` `devrules_tests`, `iyakki-remote` `devfw::tests`. Not run against a real kernel.
 
+## Rules that the domain listener makes
+
+The local domain listener (`iyakki cloud listen`, docs/development/CLOUD-MULTITENANT-PLAN.md section 3c) can drive the firewall through
+`iyakki_fw::gaterule`: when a port gets its first route, TCP allow rules for that port are made, listed with the reason `domain listener (closes
+with its last route)`; they go when the port loses its last route or the listener stops. By default they allow the local network only; "anywhere"
+(`0.0.0.0/0` and `::/0`) has to be asked for. They are applied without the 60-second question (they only open ports the person configured
+routes for) and a person's own rules are never touched. A dry run (`gaterule::render`) shows the resulting ruleset as text without applying it.
+Tested with the rule evaluator and fakes only; the command line does not turn the gate on yet.
+
 ## Applying safely, and getting out of a lockout
 
 Edits are a **draft** ("not applied" on the rule). **Apply (y)** puts the whole change in the kernel at once and starts a **60-second confirmation**:

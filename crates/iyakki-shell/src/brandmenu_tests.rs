@@ -23,6 +23,8 @@ fn keys_move_over_the_entries_open_pages_go_back_and_close() {
     assert_eq!(m.handle_key(&Key::Up), Outcome::Nothing, "wraps");
     assert_eq!(m.sel(), m.shown().len() - 1);
     assert!(!m.shown().iter().any(|e| e.0 == Page::Developer), "Developer mode is for administrators");
+    assert_eq!(m.handle_key(&Key::Enter), Outcome::Jump("cloud", String::new()), "the last entry opens the Cloud dialog");
+    assert_eq!(m.handle_key(&Key::Up), Outcome::Nothing);
     assert_eq!(m.handle_key(&Key::Enter), Outcome::Jump("settings", String::new()), "the gear entry opens Settings");
     assert_eq!(m.handle_key(&Key::Up), Outcome::Nothing);
     assert_eq!(m.handle_key(&Key::Enter), Outcome::Opened(Page::Mac));
@@ -36,6 +38,7 @@ fn keys_move_over_the_entries_open_pages_go_back_and_close() {
     m.handle_key(&Key::Esc);
     assert_eq!(m.handle_key(&Key::Char('s')), Outcome::Jump("settings", String::new()));
     assert_eq!(m.handle_hit(&Event::Tab(ENTRY + 5)), Outcome::Jump("settings", String::new()));
+    assert_eq!(m.handle_key(&Key::Char('c')), Outcome::Jump("cloud", String::new()), "c opens Cloud");
     assert_eq!(m.handle_key(&Key::Char('z')), Outcome::Nothing);
     assert_eq!(m.handle_key(&Key::Esc), Outcome::Close, "Esc on the first page closes");
     assert_eq!(m.handle_key(&Key::F(10)), Outcome::Close);

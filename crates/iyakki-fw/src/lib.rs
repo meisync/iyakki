@@ -11,12 +11,14 @@ pub mod backend;
 pub mod blocked;
 pub mod devrules;
 pub mod engine;
+pub mod gaterule;
 pub mod model;
 pub mod namerule;
 pub mod nl;
 pub mod ruleset;
 pub mod service;
 pub mod validate;
+pub mod webrule;
 
 #[cfg(test)]
 mod devrules_tests;

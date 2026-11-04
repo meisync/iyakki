@@ -196,9 +196,38 @@ pub fn list(roots: &Roots) -> Vec<BlockDev> {
     out
 }
 
-/// The IYAKKI-DATA volume, if one is present.
+/// The disk the system was started from: the one that holds the boot volume the first stage left mounted at `/.stage1/boot`.
+/// `None` when the system did not start that way (a live ISO, a test).
+fn boot_disk(roots: &Roots, devs: &[BlockDev]) -> Option<String> {
+    let src = mount_table(roots).into_iter().find(|(_, m)| m == "/.stage1/boot")?.0;
+    let name = Path::new(&src).file_name()?.to_string_lossy().into_owned();
+    let d = devs.iter().find(|d| d.name == name)?;
+    Some(d.parent.clone().unwrap_or(name))
+}
+
+/// The IYAKKI-DATA volume, if one is present: [`find_data_for`] with no explicit choice.
 pub fn find_data(roots: &Roots) -> Option<BlockDev> {
-    list(roots).into_iter().find(|d| d.content == Content::Iyakki && d.mounted_at.is_none())
+    find_data_for(roots, None)
+}
+
+/// The data volume this system uses. It takes **its own**, not whatever it finds:
+/// * `choice` (`iyakki.data=/dev/sdb2` on the kernel command line): exactly that partition, when it is a data volume (or one waiting to
+///   be formatted); nothing else is looked at. This is how a person loads the data of another partition or disk.
+/// * the system started from a disk (the first stage left its boot volume at `/.stage1/boot`): the data volume of that same disk. A
+///   partition of it that is still waiting to be formatted counts as it, so another disk's volume is never taken in its place, and a
+///   boot disk without one stays in RAM until the person chooses.
+/// * no boot disk known (a live ISO, a computer's own disks): the first free data volume, as before.
+pub fn find_data_for(roots: &Roots, choice: Option<&str>) -> Option<BlockDev> {
+    let devs = list(roots);
+    let free = |d: &BlockDev| d.mounted_at.is_none();
+    if let Some(c) = choice.filter(|c| !c.is_empty()) {
+        let name = Path::new(c).file_name()?.to_string_lossy().into_owned();
+        return devs.into_iter().find(|d| d.name == name && d.parent.is_some() && d.content == Content::Iyakki && free(d));
+    }
+    if let Some(bd) = boot_disk(roots, &devs) {
+        return devs.into_iter().find(|d| d.parent.as_deref() == Some(bd.as_str()) && free(d) && d.content == Content::Iyakki);
+    }
+    devs.into_iter().find(|d| d.content == Content::Iyakki && free(d))
 }
 
 /// Can `dev` be turned into the data volume? `Ok(None)` = yes, it is empty;
@@ -229,9 +258,12 @@ pub fn eligibility(dev: &BlockDev, all: &[BlockDev]) -> Result<Option<String>, S
     })
 }
 
-/// A partition marked by the installer and not yet formatted (never one that is mounted).
+/// A partition marked by the installer and not yet formatted (never one that is mounted). When the system started from a disk, only
+/// that disk's own marked partition counts.
 pub fn find_pending(roots: &Roots) -> Option<BlockDev> {
-    list(roots).into_iter().find(|d| d.content == Content::Pending && d.mounted_at.is_none() && d.parent.is_some())
+    let devs = list(roots);
+    let bd = boot_disk(roots, &devs);
+    devs.into_iter().find(|d| d.content == Content::Pending && d.mounted_at.is_none() && d.parent.is_some() && bd.as_ref().is_none_or(|b| d.parent.as_ref() == Some(b)))
 }
 
 /// A partition the GUID partition table of a disk says is the IYAKKI data volume (label `IYAKKI-DATA`, type Linux filesystem),
@@ -454,7 +486,12 @@ impl Mounter for SysMounter {
 
 /// Boot step: mount the IYAKKI-DATA volume over `data_dir`. `Ok(None)` = none present (stay in RAM).
 pub fn mount_data(roots: &Roots, mounter: &dyn Mounter, data_dir: &Path) -> Result<Option<String>, String> {
-    let Some(dev) = find_data(roots) else { return Ok(None) };
+    mount_data_for(roots, mounter, data_dir, None)
+}
+
+/// [`mount_data`] with the partition the person chose (`iyakki.data=/dev/...`), see [`find_data_for`].
+pub fn mount_data_for(roots: &Roots, mounter: &dyn Mounter, data_dir: &Path, choice: Option<&str>) -> Result<Option<String>, String> {
+    let Some(dev) = find_data_for(roots, choice) else { return Ok(None) };
     let _ = std::fs::create_dir_all(data_dir);
     mounter.mount(&dev.path, data_dir)?;
     set_private(data_dir);
@@ -853,6 +890,38 @@ mod tests {
         assert_eq!(l[1].parent.as_deref(), Some("vda"));
         assert_eq!(l[1].content, Content::Iyakki);
         assert_eq!(human(1_500_000_000), "1.5 GB");
+    }
+
+    #[test]
+    fn the_data_volume_of_the_disk_the_system_started_from_wins() {
+        // an internal disk (nvme0n1, sorts first) that holds an old install, and the stick (sda) the system started from
+        let m = machine("bootdisk");
+        m.disk("nvme0n1", None, 64, &[]);
+        m.disk("nvme0n1p1", Some("nvme0n1"), 8, &[(0, b"MSDOS5.0"), (82, b"FAT32")]);
+        m.disk("nvme0n1p2", Some("nvme0n1"), 16, &with(&ext4("IYAKKI-DATA")));
+        m.disk("sda", None, 64, &[]);
+        m.disk("sda1", Some("sda"), 8, &[(0, b"MSDOS5.0"), (82, b"FAT32")]);
+        m.disk("sda2", Some("sda"), 16, &[(0, PENDING_MARKER)]);
+        assert_eq!(find_data(&m.roots).unwrap().name, "nvme0n1p2", "without a boot disk the first volume is used");
+        m.mounted("sda1", "/.stage1/boot");
+        assert!(find_data(&m.roots).is_none(), "the stick's own volume is waiting to be formatted: not the internal disk's");
+        assert_eq!(find_pending(&m.roots).unwrap().name, "sda2");
+        // formatted: now it is the stick's volume that is used
+        m.disk("sda2", Some("sda"), 16, &with(&ext4("IYAKKI-DATA")));
+        assert_eq!(find_data(&m.roots).unwrap().name, "sda2");
+        // a boot disk with no data volume of its own: no other disk is searched; the person chooses with iyakki.data=
+        let m2 = machine("bootdisk2");
+        m2.disk("sda", None, 64, &[]);
+        m2.disk("sda1", Some("sda"), 8, &[(0, b"MSDOS5.0"), (82, b"FAT32")]);
+        m2.disk("sdb", None, 16, &[]);
+        m2.disk("sdb1", Some("sdb"), 16, &with(&ext4("IYAKKI-DATA")));
+        m2.mounted("sda1", "/.stage1/boot");
+        assert!(find_data(&m2.roots).is_none(), "its own volume is missing: it does not take another disk's");
+        assert_eq!(find_data_for(&m2.roots, Some("/dev/sdb1")).unwrap().name, "sdb1", "an explicit choice is honoured");
+        assert!(find_data_for(&m2.roots, Some("/dev/sda1")).is_none(), "a choice that is not a data volume is not used");
+        assert!(find_data_for(&m2.roots, Some("/dev/nope")).is_none());
+        // the choice wins over the system's own volume too
+        assert_eq!(find_data_for(&m.roots, Some("/dev/nvme0n1p2")).unwrap().name, "nvme0n1p2");
     }
 
     #[test]

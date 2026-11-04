@@ -171,9 +171,73 @@ pub fn probe_once_in_background(why: &'static str, found: fn()) {
     let _ = std::thread::Builder::new().name("iyakki-display-probe".into()).spawn(move || probe_once(Path::new(SYS_DRM), why, found));
 }
 
+/// Whether a round of probes also runs while a monitor is already connected (`iyakki.touchscreen=` on the kernel command line).
+///
+/// The probe makes the kernel send a hotplug event and the console set the mode a second time, which on some machines is a full mode
+/// set with the screen dark for a second or more. It is also what appears to wake a USB-C touch monitor (a Mac mini, the panel
+/// 27c0:0859 behind a hub), whose touch stays dead after a boot until the cable is pulled and put back (KNOWN-ISSUES.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbeMode {
+    /// Probe with a monitor connected when a touch screen is present (the default).
+    Auto,
+    /// `iyakki.touchscreen=probe`: always probe, touch screen or not.
+    Always,
+    /// `iyakki.touchscreen=off`: never probe while a monitor is connected.
+    Never,
+}
+
+impl ProbeMode {
+    /// The mode named by the kernel command line.
+    pub fn from_cmdline(cmdline: &str) -> ProbeMode {
+        match crate::boot::cmdline_param(cmdline, "iyakki.touchscreen") {
+            Some("probe") => ProbeMode::Always,
+            Some("off") => ProbeMode::Never,
+            _ => ProbeMode::Auto,
+        }
+    }
+
+    fn wanted(self, touch_screen_present: bool) -> bool {
+        match self {
+            ProbeMode::Always => true,
+            ProbeMode::Never => false,
+            ProbeMode::Auto => touch_screen_present,
+        }
+    }
+}
+
+static PROBE_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn set_probe_mode(m: ProbeMode) {
+    PROBE_MODE.store(m as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn probe_mode() -> ProbeMode {
+    match PROBE_MODE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => ProbeMode::Always,
+        2 => ProbeMode::Never,
+        _ => ProbeMode::Auto,
+    }
+}
+
+/// Is a touch screen among the input devices (a name with "touchscreen" in it, any case)? Reads `/proc/bus/input/devices`.
+fn touch_screen_present() -> bool {
+    std::fs::read_to_string("/proc/bus/input/devices").is_ok_and(|t| input_list_has_touch_screen(&t))
+}
+
+fn input_list_has_touch_screen(list: &str) -> bool {
+    list.lines().any(|l| l.starts_with("N: Name=") && l.to_ascii_lowercase().contains("touchscreen"))
+}
+
 /// See [`probe_once_in_background`]. Returns the connectors that became connected.
 pub fn probe_once(sys_drm: &Path, why: &str, found: fn()) -> Vec<String> {
+    probe_once_with(sys_drm, why, found, probe_mode(), touch_screen_present)
+}
+
+fn probe_once_with(sys_drm: &Path, why: &str, found: fn(), mode: ProbeMode, touch_screen_present: impl Fn() -> bool) -> Vec<String> {
     let before = connected_names(sys_drm);
+    if !before.is_empty() && !mode.wanted(touch_screen_present()) {
+        return Vec::new();
+    }
     if probe_disconnected(sys_drm) == 0 {
         return Vec::new();
     }
@@ -193,6 +257,11 @@ pub const SYS_DRM: &str = "/sys/class/drm";
 pub fn start(found: fn()) {
     let spawned = std::thread::Builder::new().name("iyakki-display".into()).spawn(move || {
         let sys = Path::new(SYS_DRM);
+        let mode = ProbeMode::from_cmdline(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default());
+        set_probe_mode(mode);
+        if mode != ProbeMode::Auto {
+            log::info!("display: iyakki.touchscreen sets the probe with a monitor connected to {mode:?}");
+        }
         let r = search(sys, BOOT_PLAN, &mut std::thread::sleep, &|| false);
         log::info!("{}", r.describe());
         if matches!(r, Outcome::ConnectedAfter(..)) {
@@ -406,5 +475,40 @@ mod tests {
         assert!(probe_once(&d, "test", found).is_empty(), "nothing to probe: returns at once");
         assert_eq!(FOUND.load(std::sync::atomic::Ordering::SeqCst), 0);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_probe_with_a_monitor_connected_follows_the_touch_screen_option() {
+        fn found() {}
+        let lit = |tag: &str| fake(tag, "i915", &[("DP-2", "connected"), ("HDMI-A-1", "disconnected"), ("DP-3", "disconnected")]);
+        // iyakki.touchscreen=probe: always, even with no touch screen
+        let d = lit("probe-always");
+        probe_once_with(&d, "display event", found, ProbeMode::Always, || false);
+        assert_eq!((status(&d, "HDMI-A-1"), status(&d, "DP-3")), ("detect".to_string(), "detect".to_string()));
+        // off: never
+        let d = lit("probe-never");
+        assert!(probe_once_with(&d, "display event", found, ProbeMode::Never, || true).is_empty());
+        assert_eq!(status(&d, "HDMI-A-1"), "disconnected");
+        // auto: only with a touch screen
+        let d = lit("probe-auto-none");
+        probe_once_with(&d, "display event", found, ProbeMode::Auto, || false);
+        assert_eq!(status(&d, "HDMI-A-1"), "disconnected", "no touch screen: left alone");
+        let d = lit("probe-auto-touch");
+        probe_once_with(&d, "display event", found, ProbeMode::Auto, || true);
+        assert_eq!(status(&d, "HDMI-A-1"), "detect");
+        // with nothing connected the round always looks at the others
+        let d = fake("probe-dark", "i915", &[("DP-2", "disconnected"), ("HDMI-A-1", "disconnected")]);
+        probe_once_with(&d, "display event", found, ProbeMode::Never, || false);
+        assert_eq!(status(&d, "HDMI-A-1"), "detect");
+    }
+
+    #[test]
+    fn the_option_is_read_from_the_kernel_command_line_and_the_touch_screen_from_the_input_list() {
+        assert_eq!(ProbeMode::from_cmdline("quiet iyakki.touchscreen=probe"), ProbeMode::Always);
+        assert_eq!(ProbeMode::from_cmdline("iyakki.touchscreen=off quiet"), ProbeMode::Never);
+        assert_eq!(ProbeMode::from_cmdline("iyakki.touchscreen=maybe"), ProbeMode::Auto);
+        assert_eq!(ProbeMode::from_cmdline("quiet"), ProbeMode::Auto);
+        assert!(input_list_has_touch_screen("I: Bus=0003\nN: Name=\"wch.cn TouchScreen\"\nH: Handlers=event4\n"));
+        assert!(!input_list_has_touch_screen("N: Name=\"Apple Internal Keyboard / Trackpad\"\nN: Name=\"USB Optical Mouse\"\n"));
     }
 }

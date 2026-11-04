@@ -7,7 +7,8 @@
 //! vault, and changing one password never re-encrypts the data.
 //!
 //! **Secret references** — settings never hold secrets, only references:
-//! `vault:NAME` (system vault), `uvault:NAME` (the signed-in user's vault), `env:NAME`,
+//! `vault:NAME` (system vault: in a cloud tenant, the tenant's), `uvault:NAME` (the signed-in user's vault), `cvault:NAME` (the
+//! read-only common vault of a cloud instance, see `commonvault.rs`), `env:NAME`,
 //! `file:/abs/path`, and `ext:ALIAS/path#field` (an external provider: HashiCorp Vault / OpenBao,
 //! 1Password Connect).
 //!
@@ -401,6 +402,8 @@ fn fetch_external(cfg: &ProviderConfig, token: &str, path: &str, field: Option<&
 #[derive(Clone)]
 pub struct Secrets {
     pub system: Arc<Mutex<Option<LocalVault>>>,
+    /// The common vault of a cloud instance (`cvault:NAME`): read-only here, kept by the operator (`commonvault.rs`).
+    common: Arc<Mutex<Option<LocalVault>>>,
     providers: Arc<Mutex<HashMap<String, ProviderConfig>>>,
     upstream: Arc<dyn Upstream>,
     cache: Arc<Mutex<HashMap<String, (Instant, Zeroizing<String>)>>>,
@@ -409,12 +412,21 @@ pub struct Secrets {
 
 impl Secrets {
     pub fn new(system: Option<LocalVault>, upstream: Arc<dyn Upstream>) -> Secrets {
-        Secrets { system: Arc::new(Mutex::new(system)), providers: Default::default(), upstream, cache: Default::default(), cache_ttl: Duration::from_secs(60) }
+        Secrets { system: Arc::new(Mutex::new(system)), common: Default::default(), providers: Default::default(), upstream, cache: Default::default(), cache_ttl: Duration::from_secs(60) }
     }
 
     pub fn set_providers(&self, p: HashMap<String, ProviderConfig>) {
         *self.providers.lock().unwrap() = p;
         self.cache.lock().unwrap().clear();
+    }
+
+    /// The common vault (already unlocked), or none. References `cvault:NAME` read from it; nothing in this crate writes to it.
+    pub fn set_common(&self, v: Option<LocalVault>) {
+        *self.common.lock().unwrap() = v;
+    }
+
+    pub fn common_unlocked(&self) -> bool {
+        self.common.lock().unwrap().as_ref().is_some_and(|v| v.is_unlocked())
     }
 
     pub fn system_unlocked(&self) -> bool {
@@ -430,6 +442,10 @@ impl Secrets {
                 Ok(g.as_ref().ok_or(SecretError::Locked)?.get(rest)?)
             }
             "uvault" => Ok(user_vault.ok_or(SecretError::Locked)?.get(rest)?),
+            "cvault" => {
+                let g = self.common.lock().unwrap();
+                Ok(g.as_ref().ok_or(SecretError::Locked)?.get(rest)?)
+            }
             "env" => std::env::var(rest).map(Zeroizing::new).map_err(|_| SecretError::NotFound(format!("environment variable {rest}"))),
             "file" => {
                 if !rest.starts_with('/') {

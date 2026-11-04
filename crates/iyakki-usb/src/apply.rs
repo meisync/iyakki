@@ -28,7 +28,7 @@ use crate::drives::{self, Drive};
 use crate::efi;
 use crate::fatclone::{self, Fat32};
 use crate::fatwrite::Fat32Rw;
-use crate::gpt_install::{GptLayout, TableKind, NAME_BOOT, NAME_DATA};
+use crate::gpt_install::{GptLayout, TableKind, NAME_BIOS, NAME_BOOT, NAME_DATA};
 use crate::install::{self, DiskInfo, SourceInfo, MIB};
 use crate::planner::{build_plan, Action, DiskModel, Mode, Plan, Request, Role, SourceSpec};
 use crate::writer::{Phase, Progress};
@@ -149,10 +149,15 @@ fn new_table(model: &DiskModel, plan: &Plan, s0: &[u8], gpt_now: Option<Table>) 
             let mut t = gpt_now.unwrap_or_else(|| Table { sector_size: model.sector, total_sectors: model.total_sectors(), disk_guid: random_guid(), entries: vec![] });
             // a table made for a smaller disk (or a cloned image) is rewritten for the true size
             t.total_sectors = model.total_sectors();
+            // partitions the person chose to delete go first, so a new partition may take the same slot
+            for st in plan.steps.iter().filter(|s| s.action == Action::Delete) {
+                t.entries.retain(|e| e.index != st.index);
+            }
             for st in &plan.steps {
                 let (ty, name) = match st.role {
                     Some(Role::Boot) => (gpt::TYPE_ESP, NAME_BOOT),
                     Some(Role::Data) => (gpt::TYPE_LINUX_DATA, NAME_DATA),
+                    Some(Role::Bios) => (gpt::TYPE_BIOS_BOOT, NAME_BIOS),
                     _ => continue,
                 };
                 match st.action {
@@ -180,6 +185,11 @@ fn new_table(model: &DiskModel, plan: &Plan, s0: &[u8], gpt_now: Option<Table>) 
                     [g[0], g[1], g[2], g[3] | 1]
                 };
                 s[440..444].copy_from_slice(&sig);
+            }
+            // deleted primary partitions: their 16-byte entry is cleared before the new ones are written
+            for st in plan.steps.iter().filter(|s| s.action == Action::Delete && (1..=4).contains(&s.index)) {
+                let at = 446 + 16 * (st.index as usize - 1);
+                s[at..at + 16].fill(0);
             }
             for st in &plan.steps {
                 let ty = match st.role {
@@ -328,7 +338,7 @@ fn apply_partial(path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, 
                 let items = vol.walk_long()?;
                 let paths: Vec<String> = items.iter().filter(|i| !i.dir).map(|i| i.path.clone()).collect();
                 let cfg = items.iter().find(|i| !i.dir && i.path.eq_ignore_ascii_case("/boot/grub/grub.cfg")).map(|i| vol.read_file(i)).transpose()?.map(|b| String::from_utf8_lossy(&b).into_owned());
-                let mut lean = crate::leanstrip::LeanFree::new();
+                let mut lean = crate::leanstrip::LeanFree { own_root: crate::leanstrip::own_root(&paths), ..crate::leanstrip::LeanFree::new() };
                 let mut plain = fatclone::Unchanged;
                 let editor: &mut dyn fatclone::Editor = if crate::leanstrip::needs_cleaning(&paths, cfg.as_deref()) { &mut lean } else { &mut plain };
                 fatclone::clone_to_with(&mut vol, model.sector, st.bytes, NAME_BOOT, volume_id, editor, &mut |b| {

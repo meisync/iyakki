@@ -128,6 +128,8 @@ pub struct Wizard {
     /// The Sizes page: 0 boot, 1 data.
     pub focus: usize,
     pub sizes: [String; 2],
+    /// The Sizes page: MiB of free space shared by the boot and data partitions (changing one recalculates the other).
+    pub size_room_mib: u64,
     pub progress: (String, u64, u64),
     pub result: String,
 }
@@ -135,7 +137,7 @@ pub struct Wizard {
 impl Wizard {
     pub fn new(disks: Vec<DiskModel>, source: SourceSpec, uefi: bool) -> Wizard {
         let disk_sel = disks.iter().position(|d| Wizard::disk_reason_of(d).is_none()).unwrap_or(0);
-        Wizard { page: Page::Drive, disks, source, uefi, disk_sel, mode_sel: 1, row_sel: 0, req: Request::default(), plan: None, error: None, erase_ack: false, cfocus: CFocus::Install, focus: 0, sizes: [String::new(), String::new()], progress: (String::new(), 0, 0), result: String::new() }
+        Wizard { page: Page::Drive, disks, source, uefi, disk_sel, mode_sel: 1, row_sel: 0, req: Request::default(), plan: None, error: None, erase_ack: false, cfocus: CFocus::Install, focus: 0, sizes: [String::new(), String::new()], size_room_mib: 0, progress: (String::new(), 0, 0), result: String::new() }
     }
 
     /// Why a disk cannot be used in any mode.
@@ -184,7 +186,23 @@ impl Wizard {
             Mode::Custom => r.mode = Mode::FreeSpace,
             _ => {}
         }
-        build_plan(d, &r, &self.source, self.uefi).map(|_| ()).map_err(|e| e.replace(&d.path, "this disk"))
+        match build_plan(d, &r, &self.source, self.uefi) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // a full disk is not a dead end: the free-space pages can delete a partition first. The mode is available when it
+                // would plan once every partition that may be deleted were gone (the person chooses which, on the next page).
+                if matches!(mode, Mode::FreeSpace | Mode::Custom) {
+                    let deletable: Vec<u32> = d.parts.iter().filter(|p| !p.extended && p.in_use().is_none() && !(d.table == Some(TableKind::Mbr) && p.index > 4)).map(|p| p.index).collect();
+                    if !deletable.is_empty() {
+                        let all_gone = Request { delete_parts: deletable, ..r.clone() };
+                        if build_plan(d, &all_gone, &self.source, self.uefi).is_ok() {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(e.replace(&d.path, "this disk"))
+            }
+        }
     }
 
     pub fn rows(&self) -> Vec<Row> {
@@ -195,8 +213,22 @@ impl Wizard {
                 .iter()
                 .map(|p| Row::Part { index: p.index, text: part_text(p, d.sector), bytes: p.bytes(d.sector), usable: !p.extended && p.in_use().is_none() })
                 .collect(),
-            _ => d.free_gaps(d.table.unwrap_or(TableKind::Gpt)).into_iter().map(|g| Row::Gap { first_lba: g.first_lba, bytes: g.bytes(d.sector) }).collect(),
+            _ => {
+                // the free space of the disk as it will be once the marked partitions are gone, and every partition (x marks or unmarks one)
+                let mut after = d.clone();
+                after.parts.retain(|p| !self.req.delete_parts.contains(&p.index));
+                let mut v: Vec<(u64, Row)> = after.free_gaps(d.table.unwrap_or(TableKind::Gpt)).into_iter().map(|g| (g.first_lba, Row::Gap { first_lba: g.first_lba, bytes: g.bytes(d.sector) })).collect();
+                let logical = |p: &crate::planner::Part| d.table == Some(TableKind::Mbr) && p.index > 4;
+                v.extend(d.parts.iter().map(|p| (p.first_lba, Row::Part { index: p.index, text: part_text(p, d.sector), bytes: p.bytes(d.sector), usable: !p.extended && !logical(p) && p.in_use().is_none() })));
+                v.sort_by_key(|(lba, r)| (*lba, matches!(r, Row::Gap { .. })));
+                v.into_iter().map(|(_, r)| r).collect()
+            }
         }
+    }
+
+    /// The first row a person would choose: the first free space in free-space and custom mode.
+    fn first_choice(&self) -> usize {
+        self.rows().iter().position(|r| matches!(r, Row::Gap { .. })).unwrap_or(0)
     }
 
     fn move_sel(sel: &mut usize, n: usize, up: bool) {
@@ -223,7 +255,7 @@ impl Wizard {
 
     pub fn start_mode(&mut self) {
         self.req = Request { mode: self.mode(), zram: self.req.zram.clone(), swapfile: self.req.swapfile.clone(), hostname: self.req.hostname.clone(), keep_esp: self.req.keep_esp, ..Request::default() };
-        self.row_sel = 0;
+        self.row_sel = self.first_choice();
     }
 
     /// Build the plan for the current choices and go to the Plan page; on refusal stay and show why.
@@ -232,13 +264,37 @@ impl Wizard {
         r.mode = self.mode();
         // a disk that holds the running system is changed only after the extra warning on the Confirm page
         r.confirm_running_disk = r.confirm_running_disk || self.disk().running_system;
-        match build_plan(self.disk(), &r, &self.source, self.uefi) {
-            Ok(p) => {
+        let first = build_plan(self.disk(), &r, &self.source, self.uefi);
+        // "keep the existing EFI System Partition" does not fit (the fast start puts the whole system on the boot volume, about 0.5 GB or more):
+        // boot moves to a boot partition of IYAKKI's own in the free space, the other system's EFI partition stays as it is
+        let esp_full = |e: &str| e.starts_with("keep-ESP:") && e.contains("free but");
+        let moved = match &first {
+            Err(e) if r.keep_esp && r.mode != Mode::Reuse && esp_full(e) => {
+                let own = Request { keep_esp: false, ..r.clone() };
+                build_plan(self.disk(), &own, &self.source, self.uefi).ok().map(|mut p| {
+                    p.warnings.insert(0, format!("{} IYAKKI makes its own boot partition in the free space instead; the existing EFI System Partition is not touched.", e.trim_start_matches("keep-ESP: ").split(". Use").next().unwrap_or("The existing EFI System Partition is too small.").trim_end_matches('.').to_string() + "."));
+                    p
+                })
+            }
+            _ => None,
+        };
+        match (moved, first) {
+            (Some(p), _) => {
+                self.req.keep_esp = false;
                 self.plan = Some(p);
                 self.error = None;
                 self.page = Page::Plan;
             }
-            Err(e) => self.error = Some(e),
+            (None, Ok(p)) => {
+                self.plan = Some(p);
+                self.error = None;
+                self.page = Page::Plan;
+            }
+            (None, Err(e)) => {
+                // reuse mode: the partition that was meant to be BOOT is too small; another one can be chosen
+                let hint = if r.keep_esp && r.mode == Mode::Reuse && esp_full(&e) { " Press e to stop using the EFI System Partition, then press b on a bigger FAT32 partition." } else { "" };
+                self.error = Some(format!("{e}{hint}"));
+            }
         }
     }
 
@@ -296,11 +352,31 @@ impl Wizard {
                             self.req.data_part = if self.req.data_part == Some(*index) { None } else { Some(*index) };
                         }
                     }
+                    WKey::Char('x') if self.mode() != Mode::Reuse => match self.rows().get(self.row_sel).cloned() {
+                        Some(Row::Part { index, usable: true, .. }) => {
+                            self.error = None;
+                            if let Some(at) = self.req.delete_parts.iter().position(|i| *i == index) {
+                                self.req.delete_parts.remove(at);
+                            } else {
+                                self.req.delete_parts.push(index);
+                            }
+                            // the free space changed: the cursor stays on the same kind of row
+                            let n = self.rows().len();
+                            self.row_sel = self.row_sel.min(n.saturating_sub(1));
+                        }
+                        Some(Row::Part { .. }) => self.error = Some("That partition is in use or is a container; it cannot be deleted here.".into()),
+                        _ => self.error = Some("Move to a partition to delete it (x), or press Enter on free space.".into()),
+                    },
                     WKey::Enter => match (self.mode(), self.rows().get(self.row_sel).cloned()) {
                         (Mode::Reuse, _) => self.make_plan(),
+                        (_, Some(Row::Part { .. })) => self.error = Some("Press x to delete the partition under the cursor (its space becomes free space), or move to a free space row and press Enter.".into()),
                         (Mode::Custom, Some(Row::Gap { first_lba, bytes })) => {
                             self.req.gap_start = Some(first_lba);
-                            self.sizes = [(self.source.boot_required(self.disk().sector) / (1 << 20)).to_string(), ((bytes.saturating_sub(self.source.boot_required(self.disk().sector))) / (1 << 20)).to_string()];
+                            // the BIOS boot partition (1 MiB) comes out of the free space too on a GPT disk with a boot partition of IYAKKI's own
+                            let bios = if self.disk().table != Some(TableKind::Mbr) && !self.req.keep_esp { 1 } else { 0 };
+                            let boot = self.source.boot_required(self.disk().sector) / (1 << 20);
+                            self.size_room_mib = (bytes / (1 << 20)).saturating_sub(bios);
+                            self.sizes = [boot.to_string(), self.size_room_mib.saturating_sub(boot).to_string()];
                             self.focus = 0;
                             self.page = Page::Sizes;
                         }
@@ -317,8 +393,12 @@ impl Wizard {
                 WKey::Tab | WKey::Up | WKey::Down => self.focus = 1 - self.focus,
                 WKey::Backspace => {
                     self.sizes[self.focus].pop();
+                    self.recalc_sizes();
                 }
-                WKey::Char(c) if c.is_ascii_digit() => self.sizes[self.focus].push(c),
+                WKey::Char(c) if c.is_ascii_digit() => {
+                    self.sizes[self.focus].push(c);
+                    self.recalc_sizes();
+                }
                 WKey::Enter => {
                     let parse = |s: &str| s.trim().parse::<u64>().ok().filter(|v| *v > 0);
                     match (parse(&self.sizes[0]), parse(&self.sizes[1])) {
@@ -358,6 +438,14 @@ impl Wizard {
             }
         }
         Next::Nothing
+    }
+
+    /// A size was typed: the other partition takes the rest of the free space (never below zero; the plan refuses a boot partition
+    /// smaller than the image needs, and a data partition under the minimum).
+    fn recalc_sizes(&mut self) {
+        let typed = self.sizes[self.focus].trim().parse::<u64>().unwrap_or(0);
+        let other = 1 - self.focus;
+        self.sizes[other] = self.size_room_mib.saturating_sub(typed).to_string();
     }
 
     /// The controls of the Confirm page in focus order: the box only when the plan erases data.
@@ -489,6 +577,7 @@ impl Wizard {
                     let line = format!("{}{note}", m.title());
                     if i == self.mode_sel { s.push_str(&format!("{REVERSE} > {} {RESET}{note}\n", m.title())) } else { s.push_str(&format!("   {line}\n")) }
                 }
+                s.push_str(&format!("\n{BOLD}To delete a partition: choose Free space only or Custom, then press x on the partition.\nTo format a partition: choose Use existing partitions, then press b (BOOT) or d (DATA) on it.{RESET}\nNothing is changed before the last page, where you confirm.\n"));
                 s.push_str(&format!("\n{DIM}Dual boot with another system: free-space or reuse mode, and e = keep the existing EFI System Partition ({}){RESET}\n", if self.req.keep_esp { "ON" } else { "off" }));
                 s.push_str(&format!("{DIM}Up/Down: move   Enter: choose   Esc: back{RESET}\n"));
             }
@@ -497,9 +586,11 @@ impl Wizard {
                 let d = self.disk();
                 if self.mode() == Mode::Reuse {
                     s.push_str("b = this partition becomes BOOT (FAT32, formatted)    d = DATA (formatted)    e = keep the existing EFI System Partition as BOOT\n\n");
+                } else {
+                    s.push_str(&format!("x = delete the partition under the cursor first (its space becomes free space; you confirm on the last page; nothing is deleted before that)\n\n"));
                 }
                 for (i, r) in self.rows().iter().enumerate() {
-                    let mark = |idx: u32| if self.req.boot_part == Some(idx) { format!("{GREEN}[BOOT]{RESET}") } else if self.req.data_part == Some(idx) { format!("{GREEN}[DATA]{RESET}") } else { "      ".to_string() };
+                    let mark = |idx: u32| if self.req.delete_parts.contains(&idx) { format!("{RED}[DELETE]{RESET}") } else if self.req.boot_part == Some(idx) { format!("{GREEN}[BOOT]{RESET}") } else if self.req.data_part == Some(idx) { format!("{GREEN}[DATA]{RESET}") } else { "      ".to_string() };
                     let line = match r {
                         Row::Gap { first_lba, bytes } => format!("free space at {:>10}   {:>10}", human_size(first_lba * d.sector as u64), human_size(*bytes)),
                         Row::Part { index, text, usable, .. } => format!("{} {}{}", mark(*index), text, if *usable { String::new() } else { format!("  {RED}(in use or a container: cannot be chosen){RESET}") }),
@@ -512,7 +603,10 @@ impl Wizard {
                 if self.mode() == Mode::Reuse {
                     s.push_str(&format!("\nkeep the existing EFI System Partition: {}\n", if self.req.keep_esp { "yes (only the folder EFI/IYAKKI and a boot entry are added)" } else { "no" }));
                 }
-                s.push_str(&format!("\n{DIM}Up/Down: move   Enter: {}   Esc: back{RESET}\n", if self.mode() == Mode::Reuse { "show the plan" } else { "use this free space" }));
+                if self.mode() != Mode::Reuse && !self.req.delete_parts.is_empty() {
+                    s.push_str(&format!("\n{RED}{} partition(s) marked for deletion: their contents will be lost when you confirm the install.{RESET}\n", self.req.delete_parts.len()));
+                }
+                s.push_str(&format!("\n{DIM}Up/Down: move   Enter: {}   {}Esc: back{RESET}\n", if self.mode() == Mode::Reuse { "show the plan" } else { "use this free space" }, if self.mode() == Mode::Reuse { "" } else { "x: delete/keep a partition   " }));
             }
             Page::Sizes => {
                 title(&mut s, 3, "sizes");

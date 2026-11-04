@@ -598,6 +598,19 @@ monitor on HDMI showed GRUB, then about 30 seconds of "no signal" with a few fli
 | 3.87 s | `8b/10b link not ok, retraining` -> full modeset -> trained at 1.62 Gb/s | consequence of the failed training | as above |
 | 4.32 s | another `fastset requirement not met, forcing full modeset` | i915's own hotplug handling re-committing the framebuffer console's mode after the retrain (most likely; see below) | IYAKKI checked: it never sets a mode, pans, blanks or switches consoles (a test enforces it), keeps the console in graphics mode from 1.2 s on and never switches it back to text |
 
+**Measured on a Mac mini 2018 with a USB-C monitor (2026-11-02/03, `drm.debug=0x106`, kernel 6.12.112 with the cdclk patch).** The monitor (DP-2, a
+portable 1080p panel with a touch screen on its own USB hub) went through **two** full mode sets: at 3.43 s `8b/10b link not ok, retraining`
+(the link the firmware trained was not up when i915 took over; it came back at 1.62 Gb/s: `fastset requirement not met in port_clock (expected
+270000, found 162000)`), and at 4.49 s again (`crtc_clock expected 148872, found 148500`: i915 reads the firmware's mode as 148.872 MHz and the
+monitor's as 148.5 MHz, so the console's commit after a hotplug is a full mode set). At 6.93 s the monitor's USB hub disconnected and came back
+at 8.25 s (the USB-C alternate mode re-negotiated with the link), so the touch screen was dead from about 6.9 s to 10 s, around the time the sign-in
+form appears (5.8 s). The second mode set came right after IYAKKI's own `detect` probes of the unused HDMI connectors (4.03 to 4.49 s). Done
+about it: (1) `display::probe_once` does nothing when a monitor is already connected (no hotplug events from our own probing); (2) the Mac
+kernel builds i915 **in** (`linux-mac.fragment`, `CONFIG_DRM_I915=y`) with its display firmware in the first-stage RAM disk, so all of this
+happens at about 1 to 3 s while the first stage is still waiting for the stick, before the boot animation and the form (not yet measured: needs the
+rebuilt kernel on the Mac). The first retrain itself is the firmware/driver hand-over and is not fixed by this; only moved earlier. Other
+Intel machines show the same takeover blank (a MacBook Pro 2019 too); AMD GPUs (amdgpu) stay modules.
+
 **Why our code is not the 4.32 s trigger.** The boot screen only opens `/dev/fb0`, reads its settings (`FBIOGET_VSCREENINFO`,
 `FBIOGET_FSCREENINFO`), maps it and writes pixels; i915's fbdev has no `open` hook, so none of that commits a mode. The text console
 was put in graphics mode (`KDSETMODE`) at 1.24 s, before i915 loaded; entering graphics mode does not set a mode (only leaving it
@@ -1012,7 +1025,7 @@ What was done (all on paper-measured sizes; nothing rebuilt or booted on a Mac y
 | Step | Effect | Where |
 |---|---|---|
 | Firmware kept to what Macs need | `/lib/firmware` 357 MB to 45 MB (385 files); compressed in the cpio 74 MB to 8 MB; the initramfs 119 MB to about 64 MB. Estimated GRUB wait ~20 s to ~11 s | `board/iyakki/mac-firmware.keep` (the one list), `prune-firmware.sh`, called by `post-build.sh` for `mac` and `macweb` only; a test keeps the required files matched |
-| A message under the logo | "Loading IYAKKI... (this takes a few seconds; from a USB stick on a Mac up to 30 seconds)" and "The screen stays on this logo until the boot animation starts." printed by every entry before GRUB reads the kernel | `grub.cfg` (function `iyakki_loading`) |
+| A message under the logo | numbered steps ("IYAKKI is starting", "[1/3] Reading the kernel...", "[2/3] ...", "[3/3] Starting the kernel...") printed by every entry around GRUB's reads of the kernel and the initrd | `grub.cfg` (function `iyakki_loading`) |
 
 Kept: i915 (skl, kbl, cml, icl), amdgpu (Tonga, Polaris, Vega, Navi 10/12/14/21/23, Southern Islands) and radeon, brcmfmac PCIe (BCM43602, BCM4350) and brcmsmac, Realtek USB Ethernet (RTL8153/RTL8156), MT7612U, MT7921AU (with its Bluetooth), MT7601U, AR9271/AR7010, the old AR9170 files, RT2870-family and the RTL8761B Bluetooth dongles. Dropped: iwlwifi and Intel Bluetooth, ath10k/ath12k, rtw88/rtw89/rtlwifi, bnx2/bnx2x/ice/e100, Marvell, Broadcom SDIO and Cypress, other GPUs. **Since 2026-10-23 the Tigon3 files (`tigon/*`, the BCM57766 of the Mac mini 2014), the PCIe Realtek files (`rtl_nic/rtl81xx`, `rtl8125*`: a dock with an RTL8111/RTL8125) and `carl9170-1.fw` are no longer in any image** (policy: when in doubt it is not shipped; `RESTRICTED-FIRMWARE.md`). The Mac mini 2014 keeps working over Ethernet: tg3 starts without its file, with Energy-Efficient Ethernet off on the BCM57766 (from the driver's behaviour; not checked on a device). Install the "Broadcom Tigon3 network firmware" or "Realtek network firmware" tile in Store, Setup, Hardware to add them. A Mac with a dropped card uses the `hw` image or a driver pack. The `hw` image is unchanged (a PC may have any of those cards); the same list approach could trim it too, but its audience is unknown, so that is the owner's call.
 

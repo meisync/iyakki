@@ -291,11 +291,29 @@ In the desktop window the host computer owns the addresses and this is read-only
 |---|---|---|---|
 | none | the shell on screen / window | always | no listener |
 | 8443/tcp HTTPS (+WebSocket) | `iyakki web`, `iyakki serve --web`, `IYAKKI_WEB=1`, boot option `iyakki.web=1` | only if you start it | the desktop in a browser; people sign in with this machine's accounts; `http:8080` form speaks plain HTTP for a TLS proxy |
+| 8443/tcp HTTPS (+WebSocket) | Settings → Remote access, the button "Serve this desktop to browsers" | only while an administrator has it on | the same front end as above, started and stopped at runtime; HTTPS only; the firewall opens the port for the private networks only, while it is on |
 | 7979/tcp TLS | developer mode (Settings → Developer mode) | only while an administrator has it on (automatic switch-off, 4 h by default) | paired computers only: one-time pairing code, then every request signed by the computer's ed25519 key; installs are labelled Developer (local); revoke keys and read the activity log on the same page ([`DEVELOPER-MODE.md`](DEVELOPER-MODE.md)) |
 | 22/tcp SSH (dropbear) | boot option `iyakki.ssh=1` | only on that boot entry | keys only, no passwords; needs `/etc/iyakki/authorized_keys` baked in at build (`IYAKKI_SSH_AUTHORIZED_KEYS=<file>`) |
 | 11434 (loopback) | Ollama started from the CLI tile | when started | 127.0.0.1 only |
 | 6443/tcp, 10250, 8472/udp, NodePorts 30000-32767 | the dev cluster IYAKKI installs (bare metal) | when installed | API server on every interface with TLS and a token |
 | mDNS + libp2p | `iyakki serve --swarm` | only if you start it | LAN peers; runs WebAssembly tasks with no capabilities |
+
+### Serve this desktop to browsers (Settings → Remote access)
+
+Press **Serve this desktop to browsers** (key `e`, Enter, or tap) to let people open this desktop from a browser on another computer,
+tablet or phone on the same network; press **Stop serving this desktop** to close it again. It is off by default and always HTTPS.
+
+* The page shows the addresses to open (`https://<name>.local:<port>` and one per IP address) and the certificate's SHA-256
+  fingerprint. The browser warns once because the certificate is made by this machine: compare the fingerprint with what the browser
+  shows before you continue. Put your own `cert.pem` and `key.pem` in the `tls/` folder of the data folder to avoid the warning.
+* What it exposes: anyone on the network who knows a sign-in can use this desktop. Sign-in uses this machine's accounts, so every
+  account with a password can open its own session. It will not switch on until an administrator account with a password exists.
+* **Change port** (`p`) sets another port from 1024 to 65535 (default 8443). The listener follows within two seconds.
+* While it is on, the firewall allows that TCP port from the private networks only; the rule is listed on the Firewall page as
+  "remote access web". Removing that rule switches the service off. Switching off removes the rule and closes the port.
+* If the front end was already started at boot (`iyakki.web`, `--web`), the page says "on (set at boot)" and the switch starts nothing
+  more. If the port is in use by another program the page and the startup list ("Remote access (web)") say so and it tries again.
+* Every change is in the audit log (`settings.web_access`, `webaccess.*`).
 
 **Remote front end (`iyakki-remote`):** certificate is made on first start (self-signed; the browser warns once; the SHA-256
 fingerprint is shown on the warning page). Put your own `cert.pem` and `key.pem` in the `tls/` folder of the data folder to avoid

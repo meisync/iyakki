@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MAX_CONNECTIONS: usize = 128;
-const MAX_WS_MESSAGE: usize = 512 * 1024;
+const MAX_WS_MESSAGE: usize = iyakki_agent::browsermedia::MAX_CLIP_IMAGE + 64 * 1024;
 const FIRST_BYTES_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct Config {
@@ -203,6 +203,7 @@ fn route(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/") => Response::html(page::INDEX),
         ("GET", "/decoder.js") => Response::new(200, "text/javascript; charset=utf-8", page::DECODER_JS),
+        ("GET", "/media.js") => Response::new(200, "text/javascript; charset=utf-8", page::MEDIA_JS),
         ("GET", "/healthz") => Response::new(200, "text/plain", "ok"),
         ("GET", "/api/session") => match session {
             Some(s) => Response::json(200, &serde_json::json!({ "user": s.user, "csrf": s.csrf })),
@@ -272,7 +273,15 @@ fn websocket(mut conn: Conn, req: &Request, sh: &Shared) {
     let _ = conn.tcp().set_read_timeout(Some(Duration::from_millis(5)));
     let _ = conn.tcp().set_write_timeout(Some(Duration::from_secs(5)));
     screen.viewing(true);
+    let media = screen.media();
+    if let Some(m) = &media {
+        m.connection(true);
+    }
     let finished = serve_screen(&mut conn, &mut **screen, sh);
+    // whatever the page supplied (microphone, camera, sound) ends with its connection
+    if let Some(m) = &media {
+        m.connection(false);
+    }
     screen.viewing(false);
     if finished {
         drop(screen);
@@ -302,6 +311,7 @@ fn serve_screen(conn: &mut Conn, screen: &mut dyn crate::screen::Screen, sh: &Sh
     let mut buf = vec![0u8; 16 * 1024];
     let t0 = Instant::now();
     let mut v2: Option<V2> = None;
+    let media = screen.media();
     // everything one pass of the loop wants to say goes out in one write (small messages are batched, one packet)
     let mut outbox: Vec<u8> = Vec::new();
     loop {
@@ -353,6 +363,19 @@ fn serve_screen(conn: &mut Conn, screen: &mut dyn crate::screen::Screen, sh: &Sh
                                 outbox.extend(ws::text_frame(&format!(r#"{{"t":"pong","ts":{ts}}}"#)));
                             }
                         }
+                        Input::Media { kind, on } => {
+                            if let Some(m) = &media {
+                                if m.set(kind, on).is_err() {
+                                    outbox.extend(ws::text_frame(&iyakki_agent::browsermedia::BrowserMedia::denial_json(kind)));
+                                }
+                            }
+                        }
+                        Input::AudioOut(on) => {
+                            if let Some(m) = &media {
+                                m.set_audio_out(on);
+                            }
+                        }
+                        Input::Rich { .. } => {}
                         Input::Full => {
                             if let Some(v) = v2.as_mut() {
                                 v.st.reset();
@@ -375,6 +398,15 @@ fn serve_screen(conn: &mut Conn, screen: &mut dyn crate::screen::Screen, sh: &Sh
                     let _ = flush(conn, &mut outbox);
                     let _ = send(conn, ws::close_frame());
                     return false;
+                }
+                Ok(Some(Message::Binary(b))) => {
+                    // the page's microphone, camera and clipboard items; the media state checks, limits and audits them
+                    use iyakki_agent::browsermedia::Accepted;
+                    if let Some(m) = &media {
+                        if let Accepted::Clip(kind) = m.binary(&b) {
+                            screen.input(Input::Rich { kind, bytes: b[1..].to_vec() });
+                        }
+                    }
                 }
                 Ok(Some(_)) => {}
                 Ok(None) => break,
@@ -424,6 +456,23 @@ fn serve_screen(conn: &mut Conn, screen: &mut dyn crate::screen::Screen, sh: &Sh
         }
         for m in screen.take_speech() {
             outbox.extend(ws::text_frame(&m));
+        }
+        if let Some(m) = &media {
+            // (state messages go to a page that said hello; an older page knows nothing of them)
+            if v2.is_some() {
+                for t in m.take_messages() {
+                    outbox.extend(ws::text_frame(&t));
+                }
+            }
+            // sound and clipboard items are binary messages that only a version 2 page understands (it has said hello)
+            if v2.is_some() {
+                for a in m.take_audio() {
+                    outbox.extend(ws::binary_frame(&a));
+                }
+                if let Some(r) = screen.take_rich_copy() {
+                    outbox.extend(ws::binary_frame(&r));
+                }
+            }
         }
         if screen.take_clip_request() {
             outbox.extend(ws::text_frame(r#"{"t":"readclip"}"#));

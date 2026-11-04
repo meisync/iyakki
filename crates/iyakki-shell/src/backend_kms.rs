@@ -435,7 +435,7 @@ use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::gfx::Gfx;
-use crate::input::{poll_devices, scan_devices, Device, InputState};
+use crate::input::{poll_devices, Device, InputState};
 use crate::ui::Event;
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -458,12 +458,15 @@ fn run_loop(shell: &mut crate::shell::Shell, mut kms: Kms<crate::display::kms::R
         let (plan_shared, pointer, quit) = (&plan_shared, &pointer, &quit);
         let tx = tx.clone();
         let input = std::thread::Builder::new().name("iyakki-input".into()).stack_size(8 * 1024 * 1024).spawn_scoped(sc, move || {
+            crate::touchscreen::init_from_cmdline();
             let mut st = InputState::new(b0.max(1) as u32, b1.max(1) as u32);
             let mut devs: Vec<Device> = Vec::new();
             let mut targets: Vec<(String, Option<crate::touchmap::OutRect>)> = Vec::new();
             let mut logged: Vec<(String, String)> = Vec::new();
             let mut mapped: Option<(Vec<crate::touchmap::OutRect>, Vec<String>, u64)> = None;
-            let mut last_scan = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);
+            // found on a thread of its own, now and every 2 s: opening an event node the kernel is still setting up can block for
+            // seconds, and this thread must keep reading the keyboard
+            let scan = crate::input::BackgroundScan::start();
             while !stop.load(Ordering::Relaxed) && !quit.load(Ordering::Relaxed) {
                 let plan = lock(&plan_shared).clone();
                 let (bw, bh) = plan.bounds();
@@ -547,10 +550,7 @@ fn run_loop(shell: &mut crate::shell::Shell, mut kms: Kms<crate::display::kms::R
                     let d = plan.locate(st.x, st.y).map(|(d, _, _)| d);
                     let _ = tx.send((d, ev));
                 }
-                if last_scan.elapsed() > Duration::from_secs(2) {
-                    scan_devices(&mut devs);
-                    last_scan = Instant::now();
-                }
+                scan.take_into(&mut devs); // keyboards and mice found since the last pass
             }
         });
         if input.is_err() {

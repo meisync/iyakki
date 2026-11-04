@@ -25,6 +25,11 @@ pub trait Sink: Send {
     fn latency_ms(&self) -> u32 {
         0
     }
+    /// The sound output chosen in Settings → Sound (or the one in use after a plug) changed since this sink was opened: the mixer
+    /// closes it and opens it again on the new device, so sound that is playing moves at once and does not stay on the old one.
+    fn stale(&self) -> bool {
+        false
+    }
 }
 
 /// The pipe to aplay holds at least this much (the default 64 KB is 340 ms of 48 kHz stereo, hardly more than the mixer's lead).
@@ -46,12 +51,15 @@ pub struct AplaySink {
     /// `--buffer-time`/`--period-time` were accepted by the device (else aplay runs with its own defaults).
     tuned: bool,
     pipe_bytes: i32,
+    /// The count of changes of the chosen output (`audioout::Selector::generation`) and the value it had when this sink opened.
+    generation: fn() -> u64,
+    opened_gen: u64,
 }
 
 impl AplaySink {
     /// The real one: the device is whatever Settings -> Sound chose, looked at each time the sink opens.
     pub fn system() -> AplaySink {
-        AplaySink { program: crate::player::find_program("aplay"), device: Box::new(|| crate::audioout::global().device()), child: None, label: String::new(), tuned: false, pipe_bytes: 0 }
+        AplaySink { program: crate::player::find_program("aplay"), device: Box::new(|| crate::audioout::global().device()), child: None, label: String::new(), tuned: false, pipe_bytes: 0, generation: || crate::audioout::global().generation(), opened_gen: 0 }
     }
 
     /// The command for these parameters (public for tests).
@@ -96,6 +104,7 @@ impl AplaySink {
 impl Sink for AplaySink {
     fn open(&mut self, rate: u32, channels: usize) -> Result<(), String> {
         let Some(prog) = self.program.clone() else { return Err("no sound player was found (aplay is missing)".into()) };
+        self.opened_gen = (self.generation)(); // before the device is read: a change in between shows as stale at once
         let dev = (self.device)();
         self.label = dev.clone().unwrap_or_else(|| "default".into());
         // the device chain is unchanged (plug > softvol > plughw); only aplay's buffer is asked for. A device that refuses those
@@ -148,6 +157,10 @@ impl Sink for AplaySink {
         self.child.is_some()
     }
 
+    fn stale(&self) -> bool {
+        self.child.is_some() && (self.generation)() != self.opened_gen
+    }
+
     fn detail(&self) -> String {
         format!("pipe {} KB, aplay {}", self.pipe_bytes / 1024, if self.tuned { "buffer 500 ms / period 50 ms" } else { "default buffer" })
     }
@@ -184,6 +197,8 @@ pub struct FakeLog {
     pub channels: usize,
     pub fail_open: Option<String>,
     pub open: bool,
+    /// Tests: the chosen output changed since the last open (cleared by the next open).
+    pub stale: bool,
 }
 
 #[derive(Clone, Default)]
@@ -208,6 +223,7 @@ impl Sink for FakeSink {
         }
         l.opens += 1;
         l.open = true;
+        l.stale = false;
         l.rate = rate;
         l.channels = channels;
         Ok(())
@@ -230,6 +246,10 @@ impl Sink for FakeSink {
     }
     fn is_open(&self) -> bool {
         self.lock().open
+    }
+    fn stale(&self) -> bool {
+        let l = self.lock();
+        l.open && l.stale
     }
     fn name(&self) -> String {
         "fake".into()

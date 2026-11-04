@@ -37,6 +37,8 @@ const POLL_CALM: u64 = 150;
 
 pub(super) struct StartupUi {
     pub reg: Arc<Registry>,
+    /// A probe thread is running (see `startup_tick`).
+    pub polling: Arc<std::sync::atomic::AtomicBool>,
     pub open: bool,
     /// The chosen line of the list.
     pub sel: usize,
@@ -67,7 +69,7 @@ impl StartupUi {
         } else {
             startup::global().clone()
         };
-        StartupUi { reg, open: false, sel: 0, calm: Calm::default(), calm_sys: Calm::default(), phase: Phase::Gone, phase_sys: Phase::Gone, shown: String::new(), lines: Vec::new(), strip: None, panel: None, login_line: None, buttons: Vec::new() }
+        StartupUi { reg, polling: Arc::new(std::sync::atomic::AtomicBool::new(false)), open: false, sel: 0, calm: Calm::default(), calm_sys: Calm::default(), phase: Phase::Gone, phase_sys: Phase::Gone, shown: String::new(), lines: Vec::new(), strip: None, panel: None, login_line: None, buttons: Vec::new() }
     }
 }
 
@@ -172,7 +174,19 @@ impl Shell {
         if !cfg!(test) && self.tick % if calm { POLL_CALM } else { POLL_BUSY } == 1 {
             // the assistant lives in this process: ready as soon as the shell beats
             self.startup.reg.ready("agent");
-            iyakki_agent::startup_probe::poll(&self.env.services, &self.startup.reg, iyakki_fw::service::alert());
+            // the probe reads the cluster, the clock, the network and more, and some of those wait for locks or programs: it runs on a
+            // thread of its own (one at a time), so typing on the sign-in form never waits for the start-up sequence
+            if !self.startup.polling.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let (svc, reg, flag) = (self.env.services.clone(), self.startup.reg.clone(), self.startup.polling.clone());
+                let spawned = std::thread::Builder::new().name("iyakki-startup-probe".into()).spawn(move || {
+                    let alert = iyakki_fw::service::alert();
+                    iyakki_agent::startup_probe::poll(&svc, &reg, alert);
+                    flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
+                if spawned.is_err() {
+                    self.startup.polling.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
         }
         for f in self.startup.reg.take_failures() {
             // one line per transition to failed

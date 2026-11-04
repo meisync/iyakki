@@ -517,3 +517,11 @@ fn the_stick_writer_makes_the_same_gpt() {
     let part = bytes_at(&f, plan.gpt.as_ref().unwrap().data.0 * 512, 65536);
     assert_eq!(iyakki_storage::classify(&part), iyakki_storage::Content::Pending);
 }
+
+#[test]
+fn a_4096_byte_sector_disk_gets_a_boot_volume_as_big_as_the_image_needs() {
+    let small = GptLayout::new(64 * GIB, 4096, 100 * MIB).unwrap();
+    assert_eq!(small.bytes(small.esp.1), ESP_4K_BYTES, "a small image keeps the minimum");
+    let slim = GptLayout::new(64 * GIB, 4096, 458 * MIB).unwrap();
+    assert_eq!(slim.bytes(slim.esp.1), 458 * MIB, "a bigger image is not cut to the minimum");
+}

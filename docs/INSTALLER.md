@@ -43,7 +43,19 @@ stick onto a whole disk.
 | `reuse` | You choose two existing partitions: one becomes BOOT (formatted FAT32), one DATA (marked, formatted by the first boot). | everything else |
 | `reuse` / `free-space` with `--keep-esp` | **Dual boot.** The disk's existing EFI System Partition is kept; only the folder `EFI/IYAKKI` (kernel `KERNEL.EFI`, RAM disk `INITRD`) and a UEFI boot entry are added. The data partition is a new one (free space) or a chosen one (reuse). | the other system's loaders and files, untouched |
 
-No mode shrinks or resizes an existing filesystem. If there is no free space, the installer says so and points you to the other
+**Delete a partition first** (`free-space` and `custom` mode; added 2026-11-01 at the owner's request). On the "choose the free space" page every
+partition is listed beside the free space; **x** marks the partition under the cursor (`[DELETE]`, in red) and its space joins the free space
+list, then Enter on a free-space row plans the install there. From the command line: `--delete-part N` (repeatable). Nothing is deleted
+until the last page: the plan shows each one as a red `delete` row, and the confirmation needs the same second, deliberate step as any
+erasing plan (the box "I understand that everything on this drive will be erased", focus starting on Cancel). A full disk no longer makes
+free-space mode "unavailable": it is available when it would plan once the deletable partitions were gone. Refused: a partition of the
+running system (mounted `/`, `/boot`, the IYAKKI data folder...), swap, an extended partition, a logical partition on an MBR disk (its table
+is the extended partition's own), a number that does not exist or is listed twice, and `whole-disk`/`reuse` mode (they already erase, or
+format only the partitions you choose). Deleting an EFI System Partition adds a warning (it removes that system's boot loader). The table
+is changed only by removing those entries (GPT) or clearing their 16 bytes (MBR) before the new ones are written; the other entries,
+the disk GUID, the boot code and the other partitions' bytes stay as they are (tests on disk images pin this).
+
+No mode shrinks or resizes an existing filesystem. If there is no free space and nothing you may delete, the installer says so and points you to the other
 system's own disk tool (Windows Disk Management, GParted, Disk Utility) to shrink a partition first.
 
 A blank disk (no table) in `free-space` mode gets a fresh table with just the two partitions (UEFI only; use `whole-disk` for
@@ -62,7 +74,7 @@ Each rule is in `planner.rs` / `apply.rs` and pinned by a test in `planner_tests
    **Back** and **Cancel** (keyboard: Tab or the arrows move, Enter presses, Esc is Back; the window also takes the mouse and touch).
    * A plan that **erases nothing** (free space, custom sizes into free space, `--keep-esp`, reuse of partitions that hold no
      filesystem) needs that one press.
-   * A plan that **deletes a partition or formats one that holds a filesystem** (whole disk; reuse of a partition with data) needs a
+   * A plan that **deletes a partition or formats one that holds a filesystem** (whole disk; a partition marked for deletion; reuse of a partition with data) needs a
      second, deliberate step that is not typing: the button says `Erase sda (500.1 GB) and install` in red, a box
      "I understand that everything on this drive will be erased" must be ticked first (Space or a click), and the focus starts on
      **Cancel**, so Enter alone never erases.
@@ -79,7 +91,7 @@ Each rule is in `planner.rs` / `apply.rs` and pinned by a test in `planner_tests
 4. **The disk the running system uses** is changed only in the partial modes, only with the extra confirmation
    (`--confirm-running-disk` on the command line, the warning line and the Install button on the Confirm page), and never in `whole-disk` mode.
 5. **The stick IYAKKI started from** is the source of an install and is never a target (boot-time mode removes it from the list).
-6. **Never delete or write a partition that is not in the plan.** Only `whole-disk` deletes (every partition, all named). Kept
+6. **Never delete or write a partition that is not in the plan.** Only `whole-disk` deletes every partition (all named); `free-space`/`custom` delete exactly the ones the person marked (`delete_parts`, checked again by `check_plan`). Kept
    partitions are fingerprinted before (first and last MiB) and compared after; sector 0 of a GPT disk (the protective MBR with
    the other system's boot code) must be byte-identical afterwards, and every old GPT entry (GUID, range, attributes, name) too.
 7. **No shrinking.** A custom size larger than the free space is an error that says so; there is no resize code.
@@ -102,7 +114,7 @@ Each rule is in `planner.rs` / `apply.rs` and pinned by a test in `planner_tests
 
 ```
 Disk /dev/sda (Samsung SSD, 500.1 GB, 512-byte sectors), INTERNAL
-Mode: Free space only: add IYAKKI in unallocated space, touch nothing else
+Mode: Free space only: add IYAKKI in free space (on the next page, x deletes a partition to make room)
 Partition table: GPT -> GPT (existing entries kept as they are)
 
   #  action      partition      start        size        what
@@ -138,6 +150,11 @@ for storage, input and display; the boot splash is skipped so the text is visibl
 supervisor. It opens `/dev/tty0` (the screen's text console and the keyboard), runs the same pages
 (`iyakki_usb::plan_cli::run_boot`), shows "Remove the installation USB stick, then press Enter to restart", and restarts.
 
+**What the boot-time installer starts** (changed 2026-11-01): only the critical part of early boot (storage, input, display). The late part (firewall,
+swap file, driver packs, network, sound, Bluetooth, camera) is skipped: the installer copies from the stick to a disk and restarts, so none of it is needed.
+A test pins that install mode never starts the late-boot thread. The long wait before the pages appear is mostly GRUB reading the initrd, which no
+change in the installer can shorten (see BOOT-SPEED.md).
+
 **What is copied** (the payload is the install image that is booted, read from the boot stick's own boot partition, read-only):
 
 | Target | Content |
@@ -165,6 +182,11 @@ the buttons are keys.
 The stick must be an IYAKKI install stick (made by `iyakki-usb --install`, MBR or GPT). A stick written from the live ISO has no
 boot volume to copy: the installer says so. The list of targets excludes the stick, shows every other disk (internal and USB),
 and offers the same four modes. The same plan and rules apply; the confirmation is rule 2.
+
+**When the existing EFI System Partition is too small** (it is kept with `e` in free-space mode, and the fast start puts the whole system, about
+0.5 GB or more, on the boot volume): the plan does not stop. Boot moves to a boot partition of IYAKKI's own in the free space, the page says so in
+its first warning, and the other system's EFI partition is not touched. In reuse mode the message says to press `e` (stop using the EFI System
+Partition) and `b` on a bigger FAT32 partition. On the command line (`--keep-esp`) the refusal stays, so a script never changes what it asked for.
 
 BIOS (legacy) boot: `whole-disk` installs GRUB for BIOS exactly as before. On a *shared* disk (free space, reuse, keep-ESP)
 legacy BIOS boot is **not** set up: rewriting the first sector of a disk that belongs to another system is not done silently.

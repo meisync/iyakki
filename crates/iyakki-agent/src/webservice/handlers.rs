@@ -6,6 +6,10 @@ use super::server::{json_body, Fail, Shared};
 use super::tools::allowed_set;
 use super::API_VERSION;
 use crate::agent::Verdict;
+use crate::cloudaccess::{Access, Denial, Revoke};
+use crate::cloudrotate::Report;
+use crate::cloudvaultlink::{self, Link};
+use crate::cloudroles::{Action, NsRole, TenantRole};
 use crate::httpmini::Request;
 use iyakki_core_api::{ApiError, Principal};
 use serde::Deserialize;
@@ -29,7 +33,7 @@ fn ok(v: Value) -> Out {
 }
 
 impl Ctx<'_> {
-    fn who(&self) -> &Principal {
+    pub(super) fn who(&self) -> &Principal {
         self.principal.expect("a signed-in route")
     }
     fn query_num(&self, key: &str, max: u64) -> u64 {
@@ -41,10 +45,10 @@ pub fn dispatch(id: &str, c: &Ctx) -> Out {
     match id {
         "healthz" => ok(json!({"status": "ok", "profile": c.sh.profile.name()})),
         "readyz" => match c.sh.deps.extras.ready() {
-            Ok(()) => ok(json!({"status": "ready", "profile": c.sh.profile.name()})),
+            Ok(()) => ok(with_vault(c, json!({"status": "ready", "profile": c.sh.profile.name()}))),
             Err(e) => {
                 log::warn!("service: not ready: {e}");
-                Ok((503, json!({"status": "not ready", "profile": c.sh.profile.name()}), String::new()))
+                Ok((503, with_vault(c, json!({"status": "not ready", "profile": c.sh.profile.name()})), String::new()))
             }
         },
         "version" => ok(json!({"product": "iyakki", "version": env!("CARGO_PKG_VERSION"), "api": API_VERSION, "profile": c.sh.profile.name()})),
@@ -85,9 +89,26 @@ pub fn dispatch(id: &str, c: &Ctx) -> Out {
         }
         "approvals_decide" => approvals_decide(c),
         "admin_status" => ok(json!({"tokens": c.sh.tokens.count(), "runs_going": c.sh.runs.going(), "approvals_pending": c.sh.deps.store.pending_approvals(None).len()})),
-        "flows_list" => ok(json!({"flows": c.sh.deps.extras.flows(c.who())?})),
-        "flows_get" => ok(c.sh.deps.extras.flow_export(c.who(), &c.params[0])?),
+        "flows_list" => {
+            tenant_gate(c)?;
+            ok(json!({"flows": c.sh.deps.extras.flows(c.who())?}))
+        }
+        "flows_get" => {
+            tenant_gate(c)?;
+            ok(c.sh.deps.extras.flow_export(c.who(), &c.params[0])?)
+        }
         "data_call" => data_call(c),
+        "files_list" => super::files::list(c),
+        "files_read" => super::files::read(c),
+        "files_write" => super::files::write(c),
+        "files_delete" => super::files::delete(c),
+        "git_clone" => super::files::clone(c),
+        "git_clones" => super::files::clones(c),
+        "tenant_view" => tenant_view(c),
+        "tenant_bootstrap" => tenant_bootstrap(c),
+        "tenant_member" => tenant_member(c),
+        "ns_manage" => ns_manage(c),
+        "ns_member" => ns_member(c),
         _ => Err(Fail::new(501, "unsupported", "not implemented")),
     }
 }
@@ -184,6 +205,9 @@ fn approvals_decide(c: &Ctx) -> Out {
 struct DataReq {
     tool: String,
     args: Value,
+    /// Work inside this namespace of the tenant (needs the right to read it); without it, the caller's own data as before.
+    #[serde(default)]
+    namespace: Option<String>,
 }
 
 fn data_call(c: &Ctx) -> Out {
@@ -195,6 +219,184 @@ fn data_call(c: &Ctx) -> Out {
     if !r.args.is_object() {
         return Err(Fail::new(400, "invalid_input", "args must be an object"));
     }
-    let out = c.sh.deps.extras.data_call(c.who(), &r.tool, &r.args)?;
-    Ok((200, json!({"result": out}), format!("tool={}", r.tool)))
+    let mut args = r.args.clone();
+    let detail = match &r.namespace {
+        Some(ns) => {
+            // membership first (a member outside the namespace gets the answer for a namespace that is not there), then the path
+            // from the layout and the jail, never built by hand
+            let acc = access(c);
+            let v = acc.check(&c.who().user, &Action::ReadNamespace(ns.clone()));
+            c.sh.deps.audit.record(&c.who().user, "access", &audit_clean_line(&v.audit));
+            denied(&v)?;
+            let base = acc.place(&c.who().user, ns).map_err(|e| Fail::new(400, "invalid_input", &e))?;
+            if let Some(rel) = args.get("path").and_then(|p| p.as_str()) {
+                let real = crate::cloudstorage::jail(&base, rel).map_err(|e| Fail::new(400, "invalid_input", &e))?;
+                args["path"] = json!(real.to_string_lossy());
+            }
+            format!("tool={} namespace={ns}", r.tool)
+        }
+        None => {
+            tenant_gate(c)?;
+            format!("tool={}", r.tool)
+        }
+    };
+    let out = c.sh.deps.extras.data_call(c.who(), &r.tool, &args)?;
+    Ok((200, json!({"result": out}), detail))
+}
+
+// ---------------------------------------------------------------------------------------------- cloud profile: roles and namespaces
+
+fn access(c: &Ctx) -> Access {
+    Access::new(std::path::Path::new(&c.sh.cfg.data_dir))
+}
+
+/// The cloud profile's health detail names the state of its vault link in one word (`cloudvaultlink::status`: not_configured,
+/// invalid_address, unreachable or ok), from `IYAKKI_VAULT_URL`. Never the address, never an error text. It does not change readiness.
+fn with_vault(c: &Ctx, mut v: Value) -> Value {
+    if c.sh.profile.name() == "cloud" {
+        v["vault"] = json!(cloudvaultlink::status(&Link::from_env()));
+    }
+    v
+}
+
+/// A removal and the rotation of the vault scopes the person held (`cloudrotate.rs`): the acting person's own vault secret is used when
+/// this volume holds one; otherwise the rotation is recorded as pending for `iyakki cloud reconcile --retry-rotations`.
+fn revoke(c: &Ctx, by: &str, what: &Revoke) -> Result<(crate::cloudroles::Change, Report), String> {
+    let keys = crate::cloudrotate::actor_keys(std::path::Path::new(&c.sh.cfg.data_dir), by);
+    access(c).revoke(by, what, &Link::from_env(), keys.as_ref())
+}
+
+fn rotation_answer(rep: Option<Report>) -> Value {
+    match rep {
+        None => json!({"ok": true}),
+        Some(r) => json!({"ok": true, "rotation": {"rotated": r.rotated, "nothing_to_do": r.nothing, "pending": r.pending}}),
+    }
+}
+
+fn audit_clean_line(s: &str) -> String {
+    s.chars().filter(|ch| !ch.is_control()).collect()
+}
+
+fn denied(v: &crate::cloudaccess::Verdict) -> Result<(), Fail> {
+    match &v.denial {
+        None => Ok(()),
+        Some(Denial::Forbidden(m)) => Err(Fail::new(403, "denied", m)),
+        Some(Denial::NotFound(m)) => Err(Fail::new(404, "not_found", m)),
+    }
+}
+
+/// Once the tenant has its lists, the routes that are the person's own (flows, data outside a namespace) are for members of the tenant.
+/// A tenant that has no lists yet behaves as before for these; everything about namespaces is denied until the first owner exists.
+fn tenant_gate(c: &Ctx) -> Result<(), Fail> {
+    if !c.sh.profile.is_cloud() {
+        return Ok(());
+    }
+    let acc = access(c);
+    match acc.roles() {
+        Ok(None) => Ok(()),
+        _ => denied(&acc.check(&c.who().user, &Action::EnterTenant)),
+    }
+}
+
+fn tenant_view(c: &Ctx) -> Out {
+    let acc = access(c);
+    denied(&acc.check(&c.who().user, &Action::EnterTenant))?;
+    let r = acc.roles().ok().flatten().ok_or_else(|| Fail::new(403, "denied", "no access"))?;
+    let me = &c.who().user;
+    let role = r.tenant_role(me);
+    let admin = role.is_some_and(|t| t >= TenantRole::Admin);
+    let members: Vec<Value> = if admin { r.tenant.iter().map(|(n, t)| json!({"name": n, "role": format!("{t:?}").to_lowercase()})).collect() } else { vec![] };
+    let namespaces: Vec<Value> = r.visible_namespaces(me).into_iter().map(|(n, m)| json!({"name": n, "role": m.map(|x| format!("{x:?}").to_lowercase()), "joined": m.is_some()})).collect();
+    ok(json!({"user": me, "tenant_role": role.map(|t| format!("{t:?}").to_lowercase()), "members": members, "namespaces": namespaces}))
+}
+
+fn tenant_bootstrap(c: &Ctx) -> Out {
+    // the service route is for the service's administrators; `Access::bootstrap` itself makes it work once
+    let ch = access(c).bootstrap(&c.who().user).map_err(|e| Fail::new(403, "denied", &e))?;
+    Ok((200, json!({"ok": true}), audit_clean_line(&ch.0)))
+}
+
+fn change_err(e: String) -> Fail {
+    if e.contains("no access") || e.contains("not allowed") || e.contains("higher role") || e.contains("only an owner") {
+        Fail::new(403, "denied", &e)
+    } else {
+        Fail::new(400, "invalid_input", &e)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TenantMemberReq {
+    name: String,
+    role: String,
+}
+
+fn tenant_member(c: &Ctx) -> Out {
+    let r: TenantMemberReq = serde_json::from_value(json_body(c.req)?).map_err(|_| Fail::new(400, "invalid_input", "send {\"name\":..., \"role\":\"member|admin|owner|remove\"}"))?;
+    let by = c.who().user.clone();
+    let role = match r.role.as_str() {
+        "member" => Some(TenantRole::Member),
+        "admin" => Some(TenantRole::Admin),
+        "owner" => Some(TenantRole::Owner),
+        "remove" => None,
+        _ => return Err(Fail::new(400, "invalid_input", "the role is member, admin, owner or remove")),
+    };
+    let (ch, rotation) = match role {
+        Some(t) => (access(c).change(|ro| ro.add_tenant_member(&by, &r.name, t)).map_err(change_err)?, None),
+        None => {
+            let (ch, rep) = revoke(c, &by, &Revoke::Tenant { who: r.name.clone() }).map_err(change_err)?;
+            (ch, Some(rep))
+        }
+    };
+    Ok((200, rotation_answer(rotation), audit_clean_line(&ch.0)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamespaceReq {
+    name: String,
+    action: String,
+}
+
+fn ns_manage(c: &Ctx) -> Out {
+    let r: NamespaceReq = serde_json::from_value(json_body(c.req)?).map_err(|_| Fail::new(400, "invalid_input", "send {\"name\":..., \"action\":\"create|delete\"}"))?;
+    let by = c.who().user.clone();
+    let ch = match r.action.as_str() {
+        "create" => access(c).change(|ro| ro.create_namespace(&by, &r.name)),
+        "delete" => access(c).change(|ro| ro.delete_namespace(&by, &r.name)),
+        _ => return Err(Fail::new(400, "invalid_input", "the action is create or delete")),
+    };
+    let ch = ch.map_err(change_err)?;
+    Ok((200, json!({"ok": true}), audit_clean_line(&ch.0)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NsMemberReq {
+    name: String,
+    role: String,
+}
+
+fn ns_member(c: &Ctx) -> Out {
+    let r: NsMemberReq = serde_json::from_value(json_body(c.req)?).map_err(|_| Fail::new(400, "invalid_input", "send {\"name\":..., \"role\":\"viewer|editor|admin|remove\"}"))?;
+    let ns = c.params[0].clone();
+    let by = c.who().user.clone();
+    let acc = access(c);
+    // a member who cannot even see this namespace is told it does not exist, whatever it is called
+    denied(&acc.check(&by, &Action::SeeNamespace(ns.clone())))?;
+    let role = match r.role.as_str() {
+        "viewer" => Some(NsRole::Viewer),
+        "editor" => Some(NsRole::Editor),
+        "admin" => Some(NsRole::Admin),
+        "remove" => None,
+        _ => return Err(Fail::new(400, "invalid_input", "the role is viewer, editor, admin or remove")),
+    };
+    let (ch, rotation) = match role {
+        Some(n) => (acc.change(|ro| ro.add_namespace_member(&by, &ns, &r.name, n)).map_err(change_err)?, None),
+        None => {
+            let (ch, rep) = revoke(c, &by, &Revoke::Namespace { ns: ns.clone(), who: r.name.clone() }).map_err(change_err)?;
+            (ch, Some(rep))
+        }
+    };
+    Ok((200, rotation_answer(rotation), audit_clean_line(&ch.0)))
 }

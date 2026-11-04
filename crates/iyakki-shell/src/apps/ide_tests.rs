@@ -720,6 +720,9 @@ fn ide_the_board_follows_the_editor_and_the_editor_follows_the_board() {
     // typing in the editor and saving updates the board
     app.show_main(MainTab::Editor);
     app.focus_pane(Pane::Main);
+    // a Markdown file opens in its rendered preview; typing needs the editor
+    assert!(cur(&app).editor.md_previewing());
+    cur_mut(&mut app).editor.md_set_edit(true);
     key(&mut app, &w.cx, Key::Char('x'));
     assert!(cur(&app).editor.is_dirty());
     key(&mut app, &w.cx, Key::Ctrl('s'));

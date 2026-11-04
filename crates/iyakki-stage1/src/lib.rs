@@ -351,6 +351,10 @@ pub fn parse_count(text: &str) -> u32 {
 pub struct Options {
     pub shell: bool,
     pub boot_only: bool,
+    /// `iyakki.root=previous`: the root the last update replaced (the boot menu's "previous version" entry), never the current one.
+    pub previous: bool,
+    /// `iyakki.data=/dev/sdb2`: the data partition the person chose; without it the system takes the data volume of its own disk.
+    pub data: Option<String>,
 }
 
 pub fn options(cmdline: &str) -> Options {
@@ -359,15 +363,92 @@ pub fn options(cmdline: &str) -> Options {
         match t {
             "iyakki.stage1=shell" => o.shell = true,
             "iyakki.root=boot" => o.boot_only = true,
-            _ => {}
+            "iyakki.root=previous" => o.previous = true,
+            _ => {
+                if let Some(d) = t.strip_prefix("iyakki.data=").filter(|d| d.starts_with("/dev/")) {
+                    o.data = Some(d.to_string());
+                }
+            }
         }
     }
     o
 }
 
+/// The colour of row `y` of `h` rows of the boot picture: the vertical gradient of GRUB's background (`iyakki-bg.png`: 7,14,28 at the top
+/// to 3,5,12 at the bottom), so the screen goes from GRUB's picture to the boot animation without a black gap.
+pub fn bg_colour(y: u32, h: u32) -> [u8; 3] {
+    let t = if h <= 1 { 0.0 } else { y.min(h - 1) as f32 / (h - 1) as f32 };
+    let mix = |a: f32, b: f32| (a + (b - a) * t).round() as u8;
+    [mix(7.0, 3.0), mix(14.0, 5.0), mix(28.0, 12.0)]
+}
+
+/// One pixel of 32 or 16 bits as the framebuffer wants it, from the (offset, length) of its red, green and blue fields. `None` for a
+/// layout that is not one of those (the screen is left alone).
+pub fn pack_pixel(rgb: [u8; 3], bpp: u32, red: (u32, u32), green: (u32, u32), blue: (u32, u32)) -> Option<u32> {
+    if !(bpp == 32 || bpp == 16) || [red, green, blue].iter().any(|(o, l)| *l == 0 || *l > 8 || o + l > bpp) {
+        return None;
+    }
+    let f = |v: u8, (o, l): (u32, u32)| ((v as u32) >> (8 - l)) << o;
+    Some(f(rgb[0], red) | f(rgb[1], green) | f(rgb[2], blue))
+}
+
+/// The disk a `/dev/...` partition or disk node belongs to: `/dev/sda2` -> `sda`, `/dev/nvme0n1p3` -> `nvme0n1`, `/dev/mmcblk0p2` -> `mmcblk0`.
+pub fn disk_of(dev: &str) -> String {
+    let n = dev.strip_prefix("/dev/").unwrap_or(dev);
+    let digits_off = n.trim_end_matches(|c: char| c.is_ascii_digit());
+    if (n.starts_with("nvme") || n.starts_with("mmcblk")) && digits_off.ends_with('p') && digits_off.len() > 1 {
+        return digits_off[..digits_off.len() - 1].to_string();
+    }
+    if n.starts_with("nvme") || n.starts_with("mmcblk") {
+        return n.to_string(); // the whole disk
+    }
+    digits_off.to_string()
+}
+
+/// Which of the data volumes found is this system's: the one the person chose, else the one on the disk the boot volume is on. With a
+/// boot volume found and no data volume on its disk the answer is `None`: it does not take another disk's. With no boot volume (a
+/// data-only drive) the first one.
+pub fn pick_data(boot: Option<&str>, candidates: &[String], choice: Option<&str>) -> Option<String> {
+    if let Some(c) = choice {
+        return candidates.iter().find(|d| d.as_str() == c).cloned();
+    }
+    match boot {
+        Some(b) => candidates.iter().find(|d| disk_of(d) == disk_of(b)).cloned(),
+        None => candidates.first().cloned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_screen_is_grubs_gradient_in_the_framebuffers_own_pixel_format() {
+        assert_eq!(bg_colour(0, 1080), [7, 14, 28]);
+        assert_eq!(bg_colour(1079, 1080), [3, 5, 12]);
+        assert_eq!(bg_colour(5000, 1080), [3, 5, 12], "past the end stays at the last row");
+        assert_eq!(bg_colour(0, 0), [7, 14, 28]);
+        // XRGB8888 (red at 16, green at 8, blue at 0) and RGB565
+        assert_eq!(pack_pixel([7, 14, 28], 32, (16, 8), (8, 8), (0, 8)), Some(0x070e1c));
+        assert_eq!(pack_pixel([255, 255, 255], 16, (11, 5), (5, 6), (0, 5)), Some(0xffff));
+        assert_eq!(pack_pixel([1, 2, 3], 24, (16, 8), (8, 8), (0, 8)), None, "24 bits is left alone");
+        assert_eq!(pack_pixel([1, 2, 3], 32, (16, 0), (8, 8), (0, 8)), None);
+    }
+
+    #[test]
+    fn a_system_takes_its_own_data_volume_not_the_first_one_found() {
+        assert_eq!(disk_of("/dev/sda2"), "sda");
+        assert_eq!(disk_of("/dev/nvme0n1p3"), "nvme0n1");
+        assert_eq!(disk_of("/dev/mmcblk0p2"), "mmcblk0");
+        assert_eq!(disk_of("/dev/vdb12"), "vdb");
+        let both = vec!["/dev/nvme0n1p2".to_string(), "/dev/sda3".to_string()];
+        assert_eq!(pick_data(Some("/dev/sda2"), &both, None).as_deref(), Some("/dev/sda3"), "the stick's own, though nvme sorts first");
+        assert_eq!(pick_data(Some("/dev/nvme0n1p1"), &both, None).as_deref(), Some("/dev/nvme0n1p2"));
+        assert_eq!(pick_data(Some("/dev/sdb1"), &both, None), None, "no volume on its own disk: none of the others");
+        assert_eq!(pick_data(Some("/dev/sda2"), &both, Some("/dev/nvme0n1p2")).as_deref(), Some("/dev/nvme0n1p2"), "the person's choice wins");
+        assert_eq!(pick_data(Some("/dev/sda2"), &both, Some("/dev/sdz9")), None);
+        assert_eq!(pick_data(None, &both, None).as_deref(), Some("/dev/nvme0n1p2"));
+    }
 
     #[test]
     fn labels_are_read_from_the_first_sectors() {
@@ -502,7 +583,10 @@ mod tests {
     #[test]
     fn overlay_and_cmdline() {
         assert_eq!(overlay_options("/l", "/u", "/w"), "lowerdir=/l,upperdir=/u,workdir=/w");
-        assert_eq!(options("quiet iyakki.stage1=shell iyakki.root=boot"), Options { shell: true, boot_only: true });
+        assert_eq!(options("quiet iyakki.stage1=shell iyakki.root=boot"), Options { shell: true, boot_only: true, previous: false, data: None });
+        assert_eq!(options("quiet iyakki.root=previous"), Options { previous: true, ..Options::default() });
+        assert_eq!(options("iyakki.data=/dev/sdb2").data.as_deref(), Some("/dev/sdb2"));
+        assert_eq!(options("iyakki.data=ram").data, None, "ram is not a partition");
         assert_eq!(options("quiet"), Options::default());
     }
 

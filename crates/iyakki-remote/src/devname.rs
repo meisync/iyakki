@@ -170,7 +170,7 @@ pub fn watch(env: iyakki_shell::shell::ShellEnv) -> std::io::Result<std::thread:
         let dm = iyakki_agent::devmode::DevMode::open(env.services.dir());
         let mut w = Watcher::new(Real::default());
         loop {
-            let want = Want { on: env.services.announce_name_on(), dev_on: dm.is_on(), dev_port: dm.state().port(), web_port: None };
+            let want = Want { on: env.services.announce_name_on(), dev_on: dm.is_on(), dev_port: dm.state().port(), web_port: Some(iyakki_agent::webaccess::read_status(env.services.dir())).filter(|s| s.listening).map(|s| s.port) };
             let reg = iyakki_agent::startup::global();
             let events = w.tick(&want, env.services.dir(), &Handle::Global, reg, &|a, d| env.audit.record("system", a, d));
             for e in events {

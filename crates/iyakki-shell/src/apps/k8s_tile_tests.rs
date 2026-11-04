@@ -1335,3 +1335,281 @@ fn show_log_is_empty_and_calm_when_nothing_failed() {
     f.key('L');
     assert!(!f.app.show_log);
 }
+
+#[test]
+fn launch_cloud_mode_previews_what_blocks_it_then_applies_the_tenant_to_the_selected_cluster() {
+    let mut f = fixture();
+    f.draw();
+    assert!(f.has_hit("Launch cloud mode"));
+    f.click("Launch cloud mode");
+    assert!(f.app.cloud.is_some());
+    for c in "acme".chars() {
+        f.key(c);
+    }
+    f.click("Preview");
+    let t = f.app.cloud.as_ref().unwrap().text.join("\n");
+    assert!(t.contains("Launch cloud mode \"acme\"") && t.contains("BLOCKED") && t.contains("Allow changes"), "changes are off, so it is blocked:\n{t}");
+    // Launch does nothing while blocked
+    f.click("Launch");
+    assert!(f.kube.calls().iter().all(|c| !c.contains("apply")), "{:?}", f.kube.calls());
+    // allow changes, preview again
+    f.press(Key::Esc);
+    assert!(f.app.cloud.is_none());
+    f.click("Allow changes");
+    f.click("Launch cloud mode");
+    for c in "acme".chars() {
+        f.key(c);
+    }
+    f.click("Preview");
+    let t = f.app.cloud.as_ref().unwrap().text.join("\n");
+    assert!(!t.contains("BLOCKED") && t.contains("--- 10-tenant.yaml ---") && t.contains("kind: Namespace"), "{t}");
+    f.kube.answer("apply -f", "namespace/iyakki-acme created");
+    f.click("Launch");
+    f.wait("the launch", |f| f.app.cloud.as_ref().is_some_and(|c| !c.running && c.done.lock().unwrap().is_some()));
+    let calls = f.kube.calls();
+    assert!(calls.iter().any(|c| c.contains("apply -f") && c.contains("10-tenant.yaml")), "{calls:?}");
+    let lines = f.app.cloud.as_ref().unwrap().lines.lock().unwrap().join("\n");
+    assert!(lines.contains("created") && lines.contains("kubectl apply"), "{lines}");
+    assert!(f.audit_text().contains("k8s.cloud.launch"), "{}", f.audit_text());
+}
+
+#[test]
+fn the_vault_choice_cycles_and_the_cluster_s_own_vault_is_blocked_until_its_program_exists() {
+    let mut f = fixture();
+    f.draw();
+    f.click("Launch cloud mode");
+    for c in "acme".chars() {
+        f.key(c);
+    }
+    f.click("Vault: none (the vaults stay on the tenant's volume)");
+    assert_eq!(f.app.cloud.as_ref().unwrap().vault, 1);
+    assert!(f.has_hit("Vault: a remote vault service (address below)"));
+    f.click("Preview");
+    let t = f.app.cloud.as_ref().unwrap().text.join("\n");
+    assert!(t.contains("must start with https://") || t.contains("vault address"), "an empty remote address is refused:\n{t}");
+    f.click("Vault: a remote vault service (address below)");
+    assert_eq!(f.app.cloud.as_ref().unwrap().vault, 2);
+    f.click("Preview");
+    let t = f.app.cloud.as_ref().unwrap().text.join("\n");
+    assert!(t.contains("--- 00-vault-service.yaml ---") && t.contains("iyakki vault serve"), "the vault service is shown and blocked:\n{t}");
+    f.click("Vault: create one in this cluster (not available yet)");
+    assert_eq!(f.app.cloud.as_ref().unwrap().vault, 0, "and back to none");
+}
+
+#[test]
+fn a_person_who_is_not_an_administrator_has_no_launch_button() {
+    let mut f = fixture_with("k8s-cloud-user", Role::User, 1280, 720, 1.0, Managed::Running);
+    f.draw();
+    assert!(!f.has_hit("Launch cloud mode"));
+}
+
+// ---------------------------------------------------------------------------- Launch cloud mode: routes (2026-11-03)
+
+const ROUTES_BTN: &str = "Routes: none (add domain names that reach a service)";
+
+fn type_text(f: &mut Fx, t: &str) {
+    for c in t.chars() {
+        f.key(c);
+    }
+}
+
+/// Open the card with changes allowed, the tenant typed, and the Routes page.
+fn routes_page(f: &mut Fx) {
+    f.draw();
+    f.click("Allow changes");
+    f.click("Launch cloud mode");
+    type_text(f, "acme");
+    f.click(ROUTES_BTN);
+    assert!(f.app.cloud.as_ref().unwrap().routes_page);
+}
+
+fn type_route(f: &mut Fx, domain: &str, service: &str, port: &str) {
+    f.app.cloud.as_mut().unwrap().focus = 4;
+    f.draw();
+    type_text(f, domain);
+    f.press(Key::Tab);
+    type_text(f, service);
+    f.press(Key::Tab);
+    type_text(f, port);
+}
+
+fn route_error(f: &Fx) -> String {
+    f.app.cloud.as_ref().unwrap().route_error.clone().unwrap_or_default()
+}
+
+#[test]
+fn a_route_typed_in_the_launch_card_is_checked_added_and_written_into_the_ingress_the_launch_renders() {
+    let mut f = fixture();
+    routes_page(&mut f);
+    type_route(&mut f, "App.Example.org", "iyakki", "8080");
+    f.click("Add route");
+    let c = f.app.cloud.as_ref().unwrap();
+    assert_eq!(c.routes.len(), 1, "{}", route_error(&f));
+    assert_eq!(c.routes[0].host, "app.example.org", "host names are kept lower case");
+    assert!(c.fields[4].value.is_empty() && c.fields[5].value.is_empty(), "the fields are cleared for the next route");
+    assert!(f.has_hit("remove route app.example.org"));
+    // a second one, https with a Secret made from the person's certificate files
+    f.click("Scheme: http");
+    assert!(f.has_hit("Certificate: file (as a Secret)"), "the certificate source is offered for https");
+    type_route(&mut f, "www.example.org", "iyakki", "8443");
+    f.press(Key::Tab);
+    type_text(&mut f, "tls-www");
+    f.click("Add route");
+    assert_eq!(f.app.cloud.as_ref().unwrap().routes.len(), 2, "{}", route_error(&f));
+    // back to the launch fields: the button counts them, Preview shows the Ingress document
+    f.click("Done");
+    assert!(f.has_hit("Routes: 2"));
+    f.click("Preview");
+    let t = f.app.cloud.as_ref().unwrap().text.join("\n");
+    assert!(!t.contains("BLOCKED"), "{t}");
+    assert!(t.contains("--- 20-routes.yaml ---") && t.contains("app.example.org") && t.contains("www.example.org") && t.contains("tls-www"), "{t}");
+    // Launch sends it to the cluster
+    f.kube.answer("apply -f", "ingress.networking.k8s.io/iyakki-routes created");
+    f.click("Launch");
+    f.wait("the launch", |f| f.app.cloud.as_ref().is_some_and(|c| !c.running && c.done.lock().unwrap().is_some()));
+    assert!(f.kube.calls().iter().any(|c| c.contains("20-routes.yaml")), "{:?}", f.kube.calls());
+    assert!(f.audit_text().contains("routes=2"), "{}", f.audit_text());
+}
+
+#[test]
+fn a_vault_certificate_is_chosen_with_the_switch_and_a_removed_route_is_gone_from_the_launch() {
+    let mut f = fixture();
+    routes_page(&mut f);
+    f.click("Scheme: http");
+    f.click("Certificate: file (as a Secret)");
+    assert!(f.app.cloud.as_ref().unwrap().cert_vault && f.has_hit("Certificate: vault"));
+    type_route(&mut f, "app.example.org", "iyakki", "8080");
+    f.press(Key::Tab);
+    type_text(&mut f, "app-cert");
+    f.click("Add route");
+    let c = f.app.cloud.as_ref().unwrap();
+    assert_eq!(c.routes.len(), 1, "{}", route_error(&f));
+    assert_eq!(c.routes[0].cert, Some(iyakki_agent::cloudroute::CertRef::Vault("app-cert".into())));
+    f.click("remove route app.example.org");
+    assert!(f.app.cloud.as_ref().unwrap().routes.is_empty());
+    f.click("Done");
+    f.click("Preview");
+    let t = f.app.cloud.as_ref().unwrap().text.join("\n");
+    assert!(!t.contains("20-routes.yaml"), "{t}");
+}
+
+#[test]
+fn invalid_route_input_is_refused_in_words_and_changes_nothing() {
+    let mut f = fixture();
+    routes_page(&mut f);
+    // not a host name
+    type_route(&mut f, "not a host!", "iyakki", "8080");
+    f.click("Add route");
+    assert!(route_error(&f).contains("not a host name"), "{}", route_error(&f));
+    // a port that is not a number, then port 0
+    f.app.cloud.as_mut().unwrap().fields[4].set("app.example.org");
+    f.app.cloud.as_mut().unwrap().fields[6].set("80a");
+    f.click("Add route");
+    assert!(route_error(&f).contains("port is a number"), "{}", route_error(&f));
+    f.app.cloud.as_mut().unwrap().fields[6].set("0");
+    f.click("Add route");
+    assert!(route_error(&f).contains("port"), "{}", route_error(&f));
+    f.app.cloud.as_mut().unwrap().fields[6].set("70000");
+    f.click("Add route");
+    assert!(route_error(&f).contains("port is a number"), "{}", route_error(&f));
+    // a service name that is not a name
+    f.app.cloud.as_mut().unwrap().fields[6].set("8080");
+    f.app.cloud.as_mut().unwrap().fields[5].set("Bad_Service");
+    f.click("Add route");
+    assert!(route_error(&f).contains("service"), "{}", route_error(&f));
+    // https without a certificate
+    f.app.cloud.as_mut().unwrap().fields[5].set("iyakki");
+    f.click("Scheme: http");
+    f.click("Add route");
+    assert!(route_error(&f).contains("needs a certificate"), "{}", route_error(&f));
+    // a certificate name that is not a Secret name
+    f.app.cloud.as_mut().unwrap().fields[7].set("Not A Name");
+    f.click("Add route");
+    assert!(route_error(&f).contains("by name"), "{}", route_error(&f));
+    assert!(f.app.cloud.as_ref().unwrap().routes.is_empty(), "nothing was added by any of them");
+    // the same domain, path and port twice
+    f.click("Scheme: https");
+    f.app.cloud.as_mut().unwrap().fields[4].set("app.example.org");
+    f.click("Add route");
+    assert_eq!(f.app.cloud.as_ref().unwrap().routes.len(), 1, "{}", route_error(&f));
+    f.app.cloud.as_mut().unwrap().fields[4].set("app.example.org");
+    f.app.cloud.as_mut().unwrap().fields[5].set("iyakki");
+    f.app.cloud.as_mut().unwrap().fields[6].set("8080");
+    f.click("Add route");
+    assert!(route_error(&f).contains("listed twice"), "{}", route_error(&f));
+    assert_eq!(f.app.cloud.as_ref().unwrap().routes.len(), 1);
+}
+
+#[test]
+fn preview_refuses_a_route_that_was_typed_and_not_added() {
+    let mut f = fixture();
+    routes_page(&mut f);
+    type_route(&mut f, "app.example.org", "iyakki", "8080");
+    f.click("Done");
+    f.click("Preview");
+    let c = f.app.cloud.as_ref().unwrap();
+    assert!(c.routes_page && route_error(&f).contains("did not add it") && c.shown.is_none(), "the person is taken back to the route and told");
+}
+
+#[test]
+fn a_pasted_certificate_or_key_is_refused_and_appears_nowhere() {
+    let mut f = fixture();
+    routes_page(&mut f);
+    f.click("Scheme: http");
+    type_route(&mut f, "app.example.org", "iyakki", "8443");
+    let pem = "-----BEGIN PRIVATE KEY-----MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7TOPSECRETKEYBYTES-----END PRIVATE KEY-----";
+    f.app.cloud.as_mut().unwrap().fields[7].set(pem);
+    f.click("Add route");
+    let e = route_error(&f);
+    assert!(e.contains("by name") && !e.contains("MIIEvQ") && !e.contains("SECRETKEY"), "{e}");
+    assert!(f.app.cloud.as_ref().unwrap().routes.is_empty());
+    // a valid name goes through; then preview, launch, the lines of the launch and the audit trail hold names only
+    f.app.cloud.as_mut().unwrap().fields[7].set("tls-app");
+    f.click("Add route");
+    f.click("Done");
+    f.click("Preview");
+    f.kube.answer("apply -f", "created");
+    f.click("Launch");
+    f.wait("the launch", |f| f.app.cloud.as_ref().is_some_and(|c| !c.running && c.done.lock().unwrap().is_some()));
+    let all = format!("{}\n{}\n{}\n{}", f.app.cloud.as_ref().unwrap().text.join("\n"), f.app.cloud.as_ref().unwrap().lines.lock().unwrap().join("\n"), f.audit_text(), f.kube.calls().join("\n"));
+    assert!(!all.contains("MIIEvQ") && !all.contains("BEGIN") && !all.contains("SECRETKEY"), "{all}");
+    assert!(all.contains("tls-app"));
+}
+
+#[test]
+fn the_routes_page_keys_work_and_the_card_fits_every_size() {
+    let mut f = fixture();
+    routes_page(&mut f);
+    // Tab walks the route fields only (the https certificate field joins when https is chosen); Esc goes back to the launch fields
+    let c = |f: &Fx| f.app.cloud.as_ref().unwrap().focus;
+    assert_eq!(c(&f), 4);
+    f.press(Key::Tab);
+    f.press(Key::Tab);
+    assert_eq!(c(&f), 6);
+    f.press(Key::Tab);
+    assert_eq!(c(&f), 4, "no certificate field on an http route");
+    f.press(Key::Esc);
+    assert!(!f.app.cloud.as_ref().unwrap().routes_page && f.app.cloud.is_some());
+    f.press(Key::Esc);
+    assert!(f.app.cloud.is_none());
+    for (w, h, s) in [(360u32, 740u32, 1.0f32), (800, 480, 1.0), (1280, 720, 1.0), (1280, 960, 1.0), (1920, 1080, 1.5)] {
+        let mut f = fixture_with("k8s-routes-sizes", Role::Admin, w, h, s, Managed::Running);
+        routes_page(&mut f);
+        f.click("Scheme: http");
+        for host in ["a.example.org", "b.example.org", "c.example.org", "d.example.org", "e.example.org"] {
+            type_route(&mut f, host, "iyakki", "8080");
+            f.press(Key::Tab);
+            type_text(&mut f, "tls");
+            f.click("Add route");
+        }
+        f.draw();
+        assert_eq!(f.app.cloud.as_ref().unwrap().routes.len(), 5, "{w}x{h}: {}", route_error(&f));
+        for label in ["Add route", "Done", "Scheme: https", "Certificate: file (as a Secret)", "remove route a.example.org"] {
+            let r = f.g.hits.iter().find(|x| x.label == label).unwrap_or_else(|| panic!("{w}x{h}: no `{label}`")).rect;
+            assert!(r.x >= 0.0 && r.y >= 0.0 && r.x + r.w <= w as f32 + 0.5 && r.y + r.h <= h as f32 + 0.5, "{w}x{h}: `{label}` {r:?} is off the screen");
+        }
+        let p = f.g.hits.iter().find(|x| x.label == "Add route").unwrap().rect;
+        let d = f.g.hits.iter().find(|x| x.label == "Done").unwrap().rect;
+        assert!(p.x + p.w <= d.x + 0.5, "{w}x{h}: the buttons do not overlap");
+    }
+}

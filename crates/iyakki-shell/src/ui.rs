@@ -458,6 +458,17 @@ pub mod clipboard {
         });
     }
 
+    /// A picture that arrived *from* the host clipboard (the web page's): kept in the history, not sent back out.
+    pub fn remember_image(width: u32, height: u32, rgba: Vec<u8>) {
+        S.with(|s| {
+            let mut s = s.borrow_mut();
+            s.items.push_front(Entry::Picture { width, height, rgba: Rc::new(rgba.clone()) });
+            let keep = if s.limit == 0 { DEFAULT_LIMIT } else { s.limit };
+            s.items.truncate(keep);
+            s.image = Some((width, height, rgba));
+        });
+    }
+
     /// The picture last copied, if any.
     pub fn latest_image() -> Option<(u32, u32, Vec<u8>)> {
         S.with(|s| s.borrow().image.clone())

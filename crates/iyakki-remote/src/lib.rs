@@ -16,6 +16,7 @@ pub mod screen;
 pub mod server;
 pub mod session;
 pub mod tls;
+pub mod webswitch;
 pub mod ws;
 
 #[cfg(test)]

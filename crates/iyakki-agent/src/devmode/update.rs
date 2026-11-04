@@ -16,6 +16,13 @@
 //!    buffered writes with one fsync per file: never a synchronous mount (that ran at 47 KB/s on a USB 3 drive);
 //! 5. every file is read back and compared, the marker is removed, the staged files are deleted.
 //!
+//! **A lean install** (`boot/root.sfs`, a 1 MB initramfs, docs/BOOT-SPEED.md): the system image in the payload never goes to the boot
+//! partition. It is written to the data partition as `iyakki/root/<version>-<sha>/root.sfs`, checked, and made the root by the pointer
+//! file `iyakki/root/current` (the old pointer is kept as `previous`); the first stage reads the pointers at every start. The kernel and the
+//! small initramfs are replaced as above, and the boot menu's previous-version entry starts the old kernel with `iyakki.root=previous`,
+//! which makes the first stage take the root the update replaced (or the seed `boot/root.sfs` of the install when there was none). The seed
+//! is never touched, so it stays the last resort (`iyakki.root=boot`). Older roots are removed once the new one is in place.
+//!
 //! An update is refused when the variant differs from the running one (macweb vs pc) unless forced, when the image is older
 //! unless forced, when the Secure Boot signing state would change (never forced: reinstall instead), when the data volume is only
 //! RAM (the previous version could not be kept), when the data partition cannot hold the copy, and when the NEW files grow beyond
@@ -80,7 +87,55 @@ fn key(p: &str) -> String {
     p.to_ascii_lowercase()
 }
 
-const REQUIRED: [&str; 3] = ["boot/bzimage", "boot/initrd", "boot/grub/grub.cfg"];
+const REQUIRED: [&str; 2] = ["boot/bzimage", "boot/grub/grub.cfg"];
+
+/// The first-stage RAM disk of a lean install (about 1 MB); a payload carries it instead of, or beside, the full `boot/initrd`.
+pub const INITRD_LEAN: &str = "boot/initrd-lean";
+
+/// The RAM disk the boot menu reads on this boot volume: the small one when it is there (the lean block of `grub.cfg` prefers it), else the full one.
+fn running_initrd(root: &Path) -> &'static str {
+    if find_ci(root, INITRD_LEAN).is_some() { "boot/initrd-lean" } else { "boot/initrd" }
+}
+
+/// The system image of a lean install.
+pub const ROOT_IMAGE: &str = "boot/root.sfs";
+
+fn is_root_image(p: &str) -> bool {
+    key(p) == ROOT_IMAGE
+}
+
+/// The folder of the data volume that holds the roots of updates (`iyakki/root`).
+fn roots_dir(data: &Path) -> PathBuf {
+    data.join(iyakki_stage1::ROOTS_DIR)
+}
+
+/// The name of the root folder an update makes: the version and the start of the image's SHA-256, so a rebuild of the same version is
+/// another root and a repeated update is recognised.
+pub fn root_id(m: &Manifest) -> Option<String> {
+    let f = m.files.iter().find(|f| is_root_image(&f.path))?;
+    let id = format!("{}-{}", sanitize_id(&m.version), f.sha256.get(..8)?);
+    iyakki_stage1::valid_id(&id).then_some(id)
+}
+
+fn read_pointer(data: &Path, name: &str) -> Option<iyakki_stage1::Pointer> {
+    iyakki_stage1::Pointer::parse(&std::fs::read_to_string(roots_dir(data).join(name)).ok()?)
+}
+
+/// Is this root already in place and the one that starts (an update repeated, or sent twice)?
+fn root_in_place(data: &Path, m: &Manifest) -> bool {
+    let (Some(id), Some(f)) = (root_id(m), m.files.iter().find(|f| is_root_image(&f.path))) else { return false };
+    read_pointer(data, "current").is_some_and(|c| c.id == id) && std::fs::metadata(roots_dir(data).join(&id).join("root.sfs")).is_ok_and(|md| md.is_file() && md.len() == f.size)
+}
+
+/// Write a small file so that a power cut leaves the old one or the new one: a temporary file, fsync, rename, fsync of the folder.
+fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+    let tmp = path.with_file_name(format!("{}.new", path.file_name().unwrap_or_default().to_string_lossy()));
+    let mut w = std::fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    w.write_all(text.as_bytes()).and_then(|_| w.sync_all()).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))?;
+    sync_dir(path);
+    Ok(())
+}
 
 /// Split a version into numbers and a pre-release rank: `0.1.0-alpha.1` < `0.1.0-beta.1` < `0.1.0-rc.1` < `0.1.0`.
 pub fn compare_versions(a: &str, b: &str) -> Ordering {
@@ -134,6 +189,9 @@ pub fn build_manifest(dir: &Path, files: &[(String, u64, String)], version: Opti
             return Err(format!("the image has no {r}: it is not an IYAKKI boot partition"));
         }
     }
+    if !lower.iter().any(|p| p == "boot/initrd" || p == INITRD_LEAN) {
+        return Err("the image has no boot/initrd (and no boot/initrd-lean): it is not an IYAKKI boot partition".into());
+    }
     let secure_boot = lower.iter().any(|p| p == "efi/boot/mmx64.efi" || p == "efi/boot/grubx64.efi");
     Ok(Manifest { format: FORMAT, version, variant, built: rel.as_ref().map(|r| r.build_date.clone()).unwrap_or_default(), source: source.to_string(), secure_boot, files: list })
 }
@@ -175,8 +233,11 @@ pub fn check_manifest(m: &Manifest) -> Result<(), String> {
     }
     for r in REQUIRED {
         if !seen.contains(r) {
-            return Err(format!("the update has no {r}"));
+            return Err(format!("the image has no {r}: it is not an IYAKKI boot partition"));
         }
+    }
+    if !seen.contains("boot/initrd") && !seen.contains(INITRD_LEAN) {
+        return Err("the image has no boot/initrd (and no boot/initrd-lean): it is not an IYAKKI boot partition".into());
     }
     Ok(())
 }
@@ -396,7 +457,19 @@ pub fn plan(env: &Env, m: &Manifest, force: bool) -> Result<Plan, String> {
     }
     let mut needs = Vec::new();
     let (mut same, mut new_alloc, mut old_alloc) = (0usize, 0u64, 0u64);
+    let mut notes_root = false;
     for f in &m.files {
+        // the system image of a lean install goes to the data partition, never to the boot partition (docs/BOOT-SPEED.md)
+        if is_root_image(&f.path) {
+            notes_root = true;
+            let seed_same = existing_hash(&vol.root, &f.path).is_some_and(|(_, _, h)| h == f.sha256) && read_pointer(env.dm.data_dir(), "current").is_none();
+            if seed_same || root_in_place(env.dm.data_dir(), m) {
+                same += 1;
+            } else {
+                needs.push(f.path.clone());
+            }
+            continue;
+        }
         let cfg = key(&f.path) == "boot/grub/grub.cfg";
         match existing_hash(&vol.root, &f.path) {
             // grub.cfg is rewritten with the previous-version entry, so it always counts as changed
@@ -428,8 +501,11 @@ pub fn plan(env: &Env, m: &Manifest, force: bool) -> Result<Plan, String> {
     if needs.is_empty() {
         notes.push("this device already has these boot files".into());
     }
+    if notes_root && needs.iter().any(|n| is_root_image(n)) {
+        notes.push("the system image goes to the data partition (iyakki/root), the boot partition keeps its seed image".into());
+    }
     // the data partition: the previous kernel and initramfs, and the staged files
-    let prev_bytes: u64 = ["boot/bzImage", "boot/initrd"].iter().filter_map(|r| existing_hash(&vol.root, r)).map(|(_, s, _)| s).sum();
+    let prev_bytes: u64 = ["boot/bzImage", running_initrd(&vol.root)].iter().filter_map(|r| existing_hash(&vol.root, r)).map(|(_, s, _)| s).sum();
     let staged: u64 = needs.iter().filter_map(|n| m.files.iter().find(|f| &f.path == n)).map(|f| f.size).sum();
     let free = (env.data_free)();
     let want = prev_bytes + staged + DATA_MARGIN;
@@ -479,7 +555,15 @@ pub const PREV_TITLE: &str = "IYAKKI (previous version)";
 /// `cfg` with a menu entry that starts the version saved in `boot-prev/<id>` on the data partition, right after the normal entry.
 /// An entry of an earlier update is replaced.
 pub fn with_previous_entry(cfg: &str, id: &str, version: &str) -> Result<String, String> {
-    let args = normal_args(cfg).ok_or("the boot menu has no normal IYAKKI entry to copy the command line from")?;
+    with_previous_entry_args(cfg, id, version, "")
+}
+
+/// [`with_previous_entry`], with `extra` added to the command line (`iyakki.root=previous` after an update that changed the system image).
+pub fn with_previous_entry_args(cfg: &str, id: &str, version: &str, extra: &str) -> Result<String, String> {
+    let mut args = normal_args(cfg).ok_or("the boot menu has no normal IYAKKI entry to copy the command line from")?;
+    if !extra.is_empty() {
+        args = format!("{args} {extra}");
+    }
     let mut text = cfg.to_string();
     if let Some(i) = text.find(&format!("menuentry \"{PREV_TITLE}")) {
         // drop the old entry (and the comment line above it)
@@ -617,6 +701,48 @@ fn latest_prev(env: &Env) -> Option<(String, String)> {
     env.prev_root().join(id).join("bzImage").is_file().then(|| (id.to_string(), version.to_string()))
 }
 
+/// Put the staged system image on the data partition and make it the root: the image moves into `iyakki/root/<id>/` (the staging folder is
+/// on the same volume, so nothing is copied), its size and SHA-256 are checked, the old `current` becomes `previous`, then `current` is
+/// switched through a temporary file. A power cut leaves the old pointer (the old root starts) or the new one (the image is complete).
+fn install_root(env: &Env, m: &Manifest) -> Result<(), String> {
+    let f = m.files.iter().find(|f| is_root_image(&f.path)).ok_or("internal: the update has no system image")?;
+    let id = root_id(m).ok_or("the system image has no usable id")?;
+    let dir = roots_dir(env.dm.data_dir());
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let tmp = dir.join(format!("{id}.tmp"));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    let (src, dst) = (env.staging().join(&f.path), tmp.join("root.sfs"));
+    if std::fs::rename(&src, &dst).is_err() {
+        std::fs::copy(&src, &dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+    }
+    std::fs::File::open(&dst).and_then(|h| h.sync_all()).map_err(|e| e.to_string())?;
+    let ok = std::fs::metadata(&dst).is_ok_and(|md| md.len() == f.size) && files::sha256_file(&dst).is_ok_and(|h| h == f.sha256);
+    if !ok {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err("the system image does not match its SHA-256 after it was moved: nothing was changed".into());
+    }
+    let fin = dir.join(&id);
+    if fin.exists() {
+        std::fs::remove_dir_all(&fin).map_err(|e| format!("{}: {e}", fin.display()))?;
+    }
+    std::fs::rename(&tmp, &fin).map_err(|e| format!("{}: {e}", fin.display()))?;
+    sync_dir(&fin);
+    if let Some(old) = std::fs::read_to_string(dir.join("current")).ok().filter(|t| iyakki_stage1::Pointer::parse(t).is_some_and(|p| p.id != id)) {
+        write_atomic(&dir.join("previous"), &old)?;
+    }
+    write_atomic(&dir.join("current"), &format!("{id}\nsize={}\n", f.size))?;
+    // roots no pointer names any more are removed (the seed on the boot partition is not here and stays)
+    let keep: Vec<String> = ["current", "previous"].iter().filter_map(|n| read_pointer(env.dm.data_dir(), n)).map(|p| p.id).collect();
+    for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if e.path().is_dir() && !keep.contains(&name) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+    Ok(())
+}
+
 /// Do the update. The caller has checked the scope; `plan` is run again here (the device decides, not the computer).
 pub fn apply(env: &Env, m: &Manifest, force: bool, who: &str) -> Result<Value, String> {
     apply_with_entry(env, m, force, who, None)
@@ -643,7 +769,10 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
     }
     let ro = env.boot.open(false)?;
     let run = running_from(&env.release, &ro.root);
-    let touches_kernel = p.needs.iter().any(|n| matches!(key(n).as_str(), "boot/bzimage" | "boot/initrd"));
+    let root_new = p.needs.iter().any(|n| is_root_image(n));
+    let touches_kernel = root_new || p.needs.iter().any(|n| matches!(key(n).as_str(), "boot/bzimage" | "boot/initrd" | "boot/initrd-lean"));
+    // after a change of the system image the previous-version entry must start the root that was replaced, not the new one
+    let extra = if root_new { "iyakki.root=previous" } else { "" };
     // 2. the version being replaced goes to the data partition, checked, before the boot partition changes
     let mut prev: Option<(String, String)> = None;
     if touches_kernel {
@@ -657,7 +786,7 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
         let tmp = env.prev_root().join(format!("{id}.tmp"));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        for (rel, name) in [("boot/bzImage", "bzImage"), ("boot/initrd", "initrd")] {
+        for (rel, name) in [("boot/bzImage", "bzImage"), (running_initrd(&ro.root), "initrd")] {
             let (src, _, h) = existing_hash(&ro.root, rel).ok_or_else(|| format!("the boot partition has no {rel} to keep"))?;
             // the data partition is written in the ordinary way: it is not under the fault knob (the boot partition is the one at risk)
             std::fs::copy(&src, tmp.join(name)).map_err(|e| format!("keeping {rel}: {e}"))?;
@@ -681,7 +810,7 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
     let cfg_now = find_ci(&vol.root, "boot/grub/grub.cfg").and_then(|p| std::fs::read_to_string(p).ok());
     if let (Some((id, ver)), Some(cfg)) = (&entry_prev, &cfg_now) {
         if touches_kernel {
-            let with = with_previous_entry(cfg, id, ver)?;
+            let with = with_previous_entry_args(cfg, id, ver, extra)?;
             replace_file(env, &vol, "boot/grub/grub.cfg", Either::Bytes(with.as_bytes()))?;
         }
     }
@@ -691,10 +820,17 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
     std::fs::write(marker_mirror(env.dm.data_dir()), &mjson).map_err(|e| e.to_string())?;
     let marker_path = vol.root.join(MARKER);
     write_bytes(env, &marker_path, &mjson)?;
+    // 4a. a lean install's system image goes to the data partition and becomes the root (the kernel is replaced after it, as docs/BOOT-SPEED.md says)
+    let mut root_done = false;
+    if root_new {
+        env.dm.log(who, "", "dev.update.file", "installing the system image on the data partition", true);
+        install_root(env, m)?;
+        root_done = true;
+    }
     // 4. replace: initramfs, kernel, the rest, the menu last
-    let mut order: Vec<String> = p.needs.clone();
+    let mut order: Vec<String> = p.needs.iter().filter(|n| !is_root_image(n)).cloned().collect();
     let rank = |n: &str| match key(n).as_str() {
-        "boot/initrd" => 0,
+        "boot/initrd" | "boot/initrd-lean" => 0,
         "boot/bzimage" => 1,
         "boot/grub/grub.cfg" => 9,
         _ => 5,
@@ -706,7 +842,7 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
         if key(n) == "boot/grub/grub.cfg" {
             let new_cfg = std::fs::read_to_string(staging.join(n)).map_err(|e| e.to_string())?;
             let out = match &entry_prev {
-                Some((id, ver)) => with_previous_entry(&new_cfg, id, ver)?,
+                Some((id, ver)) => with_previous_entry_args(&new_cfg, id, ver, extra)?,
                 None => new_cfg,
             };
             replace_file(env, &vol, n, Either::Bytes(out.as_bytes()))?;
@@ -738,7 +874,8 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
             }
         }
     }
-    Ok(json!({ "done": true, "changed": order.len(), "from": run.on_disk(), "to": m.version, "previous_entry": prev.is_some(), "message": format!("{} file(s) replaced: IYAKKI {} -> {}; the boot menu keeps \"{PREV_TITLE}\"", order.len(), run.on_disk(), m.version) }))
+    let changed = order.len() + usize::from(root_done);
+    Ok(json!({ "done": true, "changed": changed, "from": run.on_disk(), "to": m.version, "previous_entry": prev.is_some(), "system_image": root_done, "message": format!("{changed} file(s) replaced{}: IYAKKI {} -> {}; the boot menu keeps \"{PREV_TITLE}\"", if root_done { " (the system image on the data partition)" } else { "" }, run.on_disk(), m.version) }))
 }
 
 /// For the page and the CLI: is an update unfinished, and what is kept.

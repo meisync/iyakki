@@ -38,17 +38,11 @@ fn deliver(st: &mut Streamer, canvas: &mut Canvas, level: Level, deflate: bool, 
             }
             None => break,
         }
-        if !st.backlog_more() {
+        if !st.backlog() {
             break;
         }
     }
     sent
-}
-
-impl Streamer {
-    fn backlog_more(&self) -> bool {
-        self.backlog()
-    }
 }
 
 fn same(canvas: &Canvas, img: &[u8], w: usize, h: usize) {

@@ -12,6 +12,7 @@
 pub mod auth;
 pub mod config;
 pub mod deps;
+mod files;
 mod handlers;
 pub mod openapi;
 pub mod real;

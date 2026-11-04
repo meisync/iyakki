@@ -72,6 +72,86 @@ mod linux {
         }
     }
 
+    /// Paint the boot picture's gradient on the framebuffer as soon as it exists: the kernel clears the screen when its console starts,
+    /// and the first stage can spend seconds finding the drive (a USB stick: 3 to 5 s). The screen stays the colour of GRUB's picture and
+    /// of the boot animation that follows, not black. Silent when there is no framebuffer or its format is not a plain 16 or 32 bits.
+    fn paint_background() {
+        #[repr(C)]
+        #[derive(Default)]
+        struct Bitfield {
+            offset: u32,
+            length: u32,
+            msb_right: u32,
+        }
+        #[repr(C)]
+        #[derive(Default)]
+        struct VarInfo {
+            xres: u32,
+            yres: u32,
+            xres_virtual: u32,
+            yres_virtual: u32,
+            xoffset: u32,
+            yoffset: u32,
+            bits_per_pixel: u32,
+            grayscale: u32,
+            red: Bitfield,
+            green: Bitfield,
+            blue: Bitfield,
+            transp: Bitfield,
+            rest: [u32; 20],
+        }
+        #[repr(C)]
+        struct FixInfo {
+            id: [u8; 16],
+            smem_start: libc::c_ulong,
+            smem_len: u32,
+            kind: u32,
+            kind_aux: u32,
+            visual: u32,
+            xpanstep: u16,
+            ypanstep: u16,
+            ywrapstep: u16,
+            line_length: u32,
+            mmio_start: libc::c_ulong,
+            mmio_len: u32,
+            accel: u32,
+            caps: u16,
+            reserved: [u16; 2],
+        }
+        const FBIOGET_VSCREENINFO: libc::c_ulong = 0x4600;
+        const FBIOGET_FSCREENINFO: libc::c_ulong = 0x4602;
+        let Ok(mut f) = std::fs::OpenOptions::new().write(true).open("/dev/fb0") else { return };
+        let fd = f.as_raw_fd();
+        let (mut v, mut x) = (VarInfo::default(), std::mem::MaybeUninit::<FixInfo>::zeroed());
+        // SAFETY: both ioctls fill a structure of the kernel's size and layout (fb_var_screeninfo 160 bytes, fb_fix_screeninfo 80 bytes).
+        let ok = unsafe { libc::ioctl(fd, FBIOGET_VSCREENINFO as _, &mut v as *mut VarInfo) == 0 && libc::ioctl(fd, FBIOGET_FSCREENINFO as _, x.as_mut_ptr()) == 0 };
+        if !ok {
+            return;
+        }
+        // SAFETY: the ioctl above succeeded, so the structure was filled.
+        let x = unsafe { x.assume_init() };
+        let (w, h, bpp) = (v.xres as usize, v.yres as usize, v.bits_per_pixel);
+        let stride = x.line_length as usize;
+        if w == 0 || h == 0 || h > 8192 || w > 16384 || stride < w * (bpp as usize / 8) || (bpp != 32 && bpp != 16) {
+            return;
+        }
+        let mut frame = vec![0u8; stride * h];
+        for y in 0..h {
+            let Some(px) = pack_pixel(bg_colour(y as u32, h as u32), bpp, (v.red.offset, v.red.length), (v.green.offset, v.green.length), (v.blue.offset, v.blue.length)) else { return };
+            let row = &mut frame[y * stride..y * stride + w * (bpp as usize / 8)];
+            for c in row.chunks_exact_mut(bpp as usize / 8) {
+                c.copy_from_slice(&px.to_le_bytes()[..bpp as usize / 8]);
+            }
+        }
+        let _ = std::io::Write::write_all(&mut f, &frame);
+        note(&format!("screen painted {w}x{h} {bpp} bpp"));
+    }
+
+    /// Like [`screen`] when something is wrong or slow; on a good start only the log hears of it (the painted picture stays clean).
+    fn screen_quiet(msg: &str) {
+        note(&format!("screen: {msg}"));
+    }
+
     /// A short status line straight onto the screen's text console (tty0), whatever the log level: a blank screen can be told apart from a working stage.
     fn screen(msg: &str) {
         note(&format!("screen: {msg}"));
@@ -212,15 +292,19 @@ mod linux {
     }
 
     /// (boot device, data device, one report line per block device) among the block devices that exist now.
-    fn scan() -> (Option<String>, Option<String>, Vec<String>) {
-        let (mut boot, mut data) = (None, None);
+    /// `internal`: the machine's own disks (nvme, mmc) are looked at too. They are left alone while a stick may still show up (the internal
+    /// disk of a Mac sits behind its T2 chip, see below), and read when no stick-like disk exists or the wait for one has run out: that is
+    /// how a system installed on the internal disk finds its own boot volume.
+    fn scan(internal: bool, choice: Option<&str>) -> (Option<String>, Option<String>, Vec<String>) {
+        let mut boot = None;
+        let mut datas: Vec<String> = Vec::new();
         let mut report = Vec::new();
         let mut names: Vec<String> = std::fs::read_dir("/sys/class/block").into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         names.sort();
         for n in names {
             // nvme: the internal disk of a Mac sits behind its T2 chip, where a read can stall for a long time, and a read stuck in the kernel
             // would also stop the final exec; the stick is a `sd` (USB, SATA) or `vd` (virtual) disk
-            if ["loop", "ram", "zram", "dm-", "sr", "fd", "nvme", "mmcblk"].iter().any(|p| n.starts_with(p)) {
+            if ["loop", "ram", "zram", "dm-", "sr", "fd"].iter().any(|p| n.starts_with(p)) || (!internal && ["nvme", "mmcblk"].iter().any(|p| n.starts_with(p))) {
                 continue;
             }
             let dev = format!("/dev/{n}");
@@ -246,8 +330,8 @@ mod linux {
             }
             if let Some(l) = ext4_label(&head(&dev, 1024, 1024)) {
                 what = format!("ext {l:?}");
-                if data.is_none() && l == DATA_LABEL {
-                    data = Some(dev.clone());
+                if l == DATA_LABEL {
+                    datas.push(dev.clone());
                 }
             }
             if what.is_empty() {
@@ -255,6 +339,8 @@ mod linux {
             }
             report.push(format!("{n} {} {what}", human_size(sectors)));
         }
+        // this system's own data volume (the person's choice, else the one on the boot volume's disk), not the first one found
+        let data = pick_data(boot.as_deref(), &datas, choice);
         (boot, data, report)
     }
 
@@ -528,9 +614,16 @@ mod linux {
         let mut first_seen: Option<Instant> = None;
         let mut shown = 0u64;
         let mut tried_layout = false;
-        screen("looking for the IYAKKI drive...");
+        paint_background();
+        screen_quiet("looking for the IYAKKI drive...");
         loop {
-            (boot, data, report) = scan();
+            // the internal disks join after 1.5 s when no `sd`/`vd` disk exists, and after 6 s in any case
+            let stick_like = std::fs::read_dir("/sys/class/block").into_iter().flatten().flatten().any(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.starts_with("sd") || n.starts_with("vd")
+            });
+            let internal = start.elapsed() >= Duration::from_secs(6) || (!stick_like && start.elapsed() >= Duration::from_millis(1500));
+            (boot, data, report) = scan(internal, opts.data.as_deref());
             // the disk shows up some time after the kernel starts (a USB SSD: 0.5 to 3 s, behind a Mac's chain maybe later); the decision is
             // in the library (tested)
             if (boot.is_some() || data.is_some()) && first_seen.is_none() {
@@ -572,7 +665,7 @@ mod linux {
         }
         let t_dev = t0.elapsed().as_millis();
         say(&format!("volumes found at {t_dev} ms (boot: {}, data: {})", boot.as_deref().unwrap_or("none"), data.as_deref().unwrap_or("none")));
-        screen("found the drive");
+        screen_quiet("found the drive");
         let mut data_ok = false;
         if let (Some(d), false) = (&data, opts.boot_only) {
             match mnt(d, "/s/data", Some("ext4"), libc::MS_NOSUID | libc::MS_NODEV, "") {
@@ -600,7 +693,8 @@ mod linux {
         }
         // 2. the root: updates on the data volume first, then the seed on the boot volume
         let read_ptr = |name: &str| if data_ok { std::fs::read_to_string(format!("/s/data/{ROOTS_DIR}/{name}")).ok().and_then(|t| Pointer::parse(&t)) } else { None };
-        let (cur, prev) = (read_ptr("current"), read_ptr("previous"));
+        // `iyakki.root=previous` (the boot menu's previous-version entry): the root the last update replaced, else the seed, never the new one
+        let (cur, prev) = (if opts.previous { None } else { read_ptr("current") }, read_ptr("previous"));
         let kind_of = |base: &str| {
             let b = Path::new("/s/data").join(base);
             if b.join("tree").is_dir() { Some(Kind::Tree) } else if b.join("root.sfs").is_file() { Some(Kind::Image) } else { None }
@@ -632,7 +726,7 @@ mod linux {
         };
         let t_root = t0.elapsed().as_millis();
         say(&format!("root {} mounted at {t_root} ms", chosen.path));
-        screen("starting IYAKKI...");
+        screen_quiet("starting IYAKKI...");
         // 3. writable overlay: upper layer on tmpfs (swappable)
         if let Err(e) = mnt("tmpfs", "/upper", Some("tmpfs"), 0, "mode=0755") {
             fail(&e);

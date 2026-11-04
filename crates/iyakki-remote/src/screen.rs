@@ -71,6 +71,14 @@ pub trait Screen: Send {
     fn take_pixels(&mut self) -> Option<Pixels> {
         None
     }
+    /// The browser hardware of this person (clipboard items, sound, microphone, camera), when the screen has any.
+    fn media(&self) -> Option<Arc<iyakki_agent::browsermedia::BrowserMedia>> {
+        None
+    }
+    /// A clipboard item (PNG or HTML) for the page to put on the browser's clipboard: a binary message, already tagged.
+    fn take_rich_copy(&mut self) -> Option<Vec<u8>> {
+        None
+    }
     /// The person signed out.
     fn finished(&self) -> bool;
 }
@@ -139,6 +147,8 @@ enum Out {
     Cursor(&'static str),
     /// The shell wants the text on the person's clipboard (the page reads it and sends it back as a paste).
     ReadClip,
+    /// A picture the shell copied, as a tagged binary message for the page.
+    Rich(Vec<u8>),
 }
 
 /// A person's shell, living on a thread of its own (a shell is not something that can move between threads) and kept
@@ -154,6 +164,8 @@ pub struct ShellScreen {
     pixels: Option<Pixels>,
     /// Messages for the page's speech synthesis; a channel of its own so a slow page never makes one get lost like a frame.
     speech: std::sync::mpsc::Receiver<String>,
+    media: Arc<iyakki_agent::browsermedia::BrowserMedia>,
+    rich: Option<Vec<u8>>,
 }
 
 impl ShellScreen {
@@ -163,6 +175,14 @@ impl ShellScreen {
         let (speech_tx, speech) = std::sync::mpsc::channel::<String>();
         let done = Arc::new(AtomicBool::new(false));
         let user = session.user.clone();
+        // the browser's clipboard, sound, microphone and camera for this person; the shell and the tiles find it by name
+        let audit = env.audit.clone();
+        let who = user.clone();
+        let policy = iyakki_agent::browsermedia::Policy::from_env_value(std::env::var("IYAKKI_BROWSER_MEDIA").ok().as_deref(), iyakki_agent::browsermedia::Policy::allow_all());
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let media = iyakki_agent::browsermedia::BrowserMedia::new(policy, Arc::new(move |a, d| audit.record(&who, a, d)), Some(iyakki_agent::browsermedia::session_dir(&runtime, &user)));
+        iyakki_agent::browsermedia::register(&user, media.clone());
+        let unregister = user.clone();
         let flag = done.clone();
         // the shell and the renderer are stack hungry, as on the console
         std::thread::Builder::new().name("iyakki-web-shell".into()).stack_size(32 * 1024 * 1024).spawn(move || {
@@ -176,9 +196,10 @@ impl ShellScreen {
             if run.is_err() {
                 log::error!("web: a person's shell crashed; their session ends");
             }
+            iyakki_agent::browsermedia::unregister(&unregister);
             flag.store(true, Ordering::Relaxed);
         })?;
-        Ok(ShellScreen { tx, rx, user, done, copied: None, cursor: None, read_clip: false, pixels: None, speech })
+        Ok(ShellScreen { tx, rx, user, done, copied: None, cursor: None, read_clip: false, pixels: None, speech, media, rich: None })
     }
 }
 
@@ -234,7 +255,8 @@ fn shell_loop(mut shell: Shell, cmds: std::sync::mpsc::Receiver<Cmd>, out: std::
                 Cmd::In(Input::Shift(on)) => iyakki_shell::ui::set_shift_held(on),
                 Cmd::In(Input::Speech(e)) => voice.event(e),
                 // the connection answers these itself; they never reach the shell
-                Cmd::In(Input::Hello { .. } | Input::Ack(_) | Input::Quality { .. } | Input::Ping { .. }) => {}
+                Cmd::In(Input::Hello { .. } | Input::Ack(_) | Input::Quality { .. } | Input::Ping { .. } | Input::Media { .. } | Input::AudioOut(_)) => {}
+                Cmd::In(Input::Rich { kind, bytes }) => take_rich(kind, &bytes),
                 Cmd::In(Input::Full) => {
                     need_full = true;
                     dirty = true;
@@ -280,6 +302,11 @@ fn shell_loop(mut shell: Shell, cmds: std::sync::mpsc::Receiver<Cmd>, out: std::
             if shell.take_host_paste_request() {
                 let _ = out.try_send(Out::ReadClip);
             }
+            if let Some((w, h, rgba)) = iyakki_shell::ui::clipboard::take_host_image() {
+                if let Some(msg) = rich_image_message(w, h, rgba) {
+                    let _ = out.try_send(Out::Rich(msg));
+                }
+            }
             if let Some(t) = shell.take_host_copy() {
                 if out.try_send(Out::Copy(t)).is_err() {
                     log::debug!("web: a copied text was dropped (the page is slow)");
@@ -322,6 +349,50 @@ fn shell_loop(mut shell: Shell, cmds: std::sync::mpsc::Receiver<Cmd>, out: std::
         }
     }
     done.store(true, Ordering::Relaxed);
+}
+
+/// A clipboard item from the page into the shell's own clipboard history (on the shell's thread, where that history lives).
+fn take_rich(kind: iyakki_agent::browsermedia::ClipKind, bytes: &[u8]) {
+    use iyakki_agent::browsermedia::{BrowserMedia, ClipKind};
+    use iyakki_shell::ui::clipboard;
+    match kind {
+        ClipKind::Html => {
+            let text: String = BrowserMedia::html_as_text(&String::from_utf8_lossy(bytes)).chars().take(clipboard::MAX_BYTES).collect();
+            if !text.is_empty() {
+                clipboard::remember(&text);
+            }
+        }
+        ClipKind::Image => {
+            if let Ok(pm) = tiny_skia::Pixmap::decode_png(bytes) {
+                if pm.width() <= 4096 && pm.height() <= 4096 {
+                    let mut rgba = pm.data().to_vec();
+                    // the shell keeps straight (not premultiplied) pixels
+                    for p in rgba.chunks_exact_mut(4) {
+                        let a = p[3] as u32;
+                        if a > 0 && a < 255 {
+                            for c in &mut p[..3] {
+                                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+                            }
+                        }
+                    }
+                    clipboard::remember_image(pm.width(), pm.height(), rgba);
+                }
+            }
+        }
+    }
+}
+
+/// A picture the shell copied, as the tagged PNG message for the page (`None` when it is not a sane picture or too big).
+pub fn rich_image_message(w: u32, h: u32, rgba: Vec<u8>) -> Option<Vec<u8>> {
+    let mut data = rgba;
+    for p in data.chunks_exact_mut(4) {
+        let a = p[3] as u32;
+        for c in &mut p[..3] {
+            *c = ((*c as u32 * a + 127) / 255) as u8;
+        }
+    }
+    let png = tiny_skia::Pixmap::from_vec(data, tiny_skia::IntSize::from_wh(w, h)?)?.encode_png().ok()?;
+    iyakki_agent::browsermedia::BrowserMedia::clip_out(iyakki_agent::browsermedia::ClipKind::Image, &png)
 }
 
 /// The smallest rectangle holding every pixel that differs, or `None` when the pictures are the same.
@@ -411,6 +482,10 @@ impl Screen for ShellScreen {
                 self.read_clip = true;
                 None
             }
+            Ok(Out::Rich(m)) => {
+                self.rich = Some(m);
+                None
+            }
             Err(_) => None,
         }
     }
@@ -425,6 +500,14 @@ impl Screen for ShellScreen {
 
     fn take_clip_request(&mut self) -> bool {
         std::mem::take(&mut self.read_clip)
+    }
+
+    fn media(&self) -> Option<Arc<iyakki_agent::browsermedia::BrowserMedia>> {
+        Some(self.media.clone())
+    }
+
+    fn take_rich_copy(&mut self) -> Option<Vec<u8>> {
+        self.rich.take()
     }
 
     fn finished(&self) -> bool {
@@ -447,6 +530,26 @@ mod tests {
         }
         assert_eq!(changed_rect(&a, &b, w, h), Some((2, 3, 5, 3)));
         assert_eq!(changed_rect(&[], &b, w, h), Some((0, 0, w, h)), "no earlier picture means all of it");
+    }
+
+    #[test]
+    fn pictures_and_html_from_the_page_reach_the_clipboard_history_and_pictures_go_back_as_png() {
+        use iyakki_agent::browsermedia::{ClipKind, OUT_CLIP_IMAGE};
+        use iyakki_shell::ui::clipboard;
+        let png = tiny_skia::Pixmap::from_vec(vec![10, 20, 30, 255, 40, 50, 60, 255], tiny_skia::IntSize::from_wh(2, 1).unwrap()).unwrap().encode_png().unwrap();
+        clipboard::clear();
+        take_rich(ClipKind::Image, &png);
+        assert_eq!(clipboard::latest_image(), Some((2, 1, vec![10, 20, 30, 255, 40, 50, 60, 255])));
+        assert!(clipboard::take_host_image().is_none(), "a picture from the page is not sent back to it");
+        take_rich(ClipKind::Image, b"\x89PNG garbage");
+        take_rich(ClipKind::Html, b"<p>Hello <b>there</b></p>");
+        assert_eq!(clipboard::latest().as_deref(), Some("Hello there"));
+        clipboard::copy_image(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255]);
+        let (w, h, rgba) = clipboard::take_host_image().expect("a picture copied in the shell");
+        let m = rich_image_message(w, h, rgba).expect("message");
+        assert_eq!(m[0], OUT_CLIP_IMAGE);
+        assert_eq!(&m[1..9], b"\x89PNG\r\n\x1a\n");
+        assert!(rich_image_message(0, 0, vec![]).is_none());
     }
 
     #[test]

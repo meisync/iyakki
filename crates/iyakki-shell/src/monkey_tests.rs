@@ -756,7 +756,7 @@ const KNOWN_OVERFLOWS: &[(&str, &str)] = &[
     ("settings/Keyboard", "800x480"), ("settings/Keyboard", "1366x768"), ("settings/Time", "360x740"), ("settings/Time", "800x480"),
     ("settings/Time", "1366x768"), ("settings/Host name", "360x740"), ("settings/Host name", "800x480"), ("settings/Last session log", "360x740"),
     ("settings/Startup", "360x740"), ("settings/Memory", "360x740"), ("settings/Memory", "800x480"),
-    ("settings/Storage", "360x740"), ("settings/Storage", "800x480"), ("settings/Cloud mode", "360x740"), ("settings/Cloud mode", "800x480"),
+    ("settings/Storage", "360x740"), ("settings/Storage", "800x480"), ("settings/Cloud mode", "360x740"), ("settings/Cloud mode", "800x480"), ("settings/Cloud access", "360x740"),
     ("settings/Developer mode", "360x740"), ("settings/Developer mode", "800x480"), ("settings/Developer mode", "1366x768"), ("mesh", "360x740"),
     ("radio", "360x740"), ("radio", "800x480"), ("scan", "360x740"), ("scan", "800x480"),
     ("skills", "360x740"), ("usage", "360x740"),
@@ -769,7 +769,7 @@ const KNOWN_OVERFLOWS: &[(&str, &str)] = &[
     ("settings/Clusters", "360x740"), ("settings/Clusters", "800x480"), ("settings/Clusters", "1366x768"),
     ("settings/Git and SSH keys", "360x740"), ("settings/Git and SSH keys", "800x480"), ("settings/Git and SSH keys", "1366x768"),
     // the left page list takes the width at 360: the same cause as every other Settings page at this size
-    ("settings/SSH tunnels", "360x740"), ("settings/VPN", "360x740"),
+    ("settings/SSH tunnels", "360x740"), ("settings/VPN", "360x740"), ("settings/Remote access", "360x740"),
     ("settings/Backup and restore", "360x740"), ("settings/System update", "360x740"),
 ];
 

@@ -66,6 +66,8 @@ pub enum Tab {
     SshTunnels,
     /// Settings -> Network -> VPN: import, enable and configure WireGuard / OpenVPN profiles (docs/development/VPN-CONNECTOR-PLAN.md).
     Vpn,
+    /// Settings -> Remote access: serve this desktop to browsers on the network (docs/ADMIN-GUIDE.md).
+    Remote,
     Time,
     Battery,
     HostName,
@@ -85,6 +87,8 @@ pub enum Tab {
     Account,
     HomeLayout,
     Cloud,
+    /// Settings -> Cloud access: who is in the cloud tenant and its namespaces, with what role (docs/development/CLOUD-MULTITENANT-PLAN.md, 3a).
+    CloudRoles,
     /// Which sources may fill the bell and the inbox (everyone's own choice).
     Notifications,
     /// Settings -> Backup and restore: one file with the person's own data (docs/BACKUP.md).
@@ -98,23 +102,23 @@ impl Tab {
             Tab::Overview => CATEGORIES[0],
             Tab::Account | Tab::Vault | Tab::SecretProviders | Tab::Notifications | Tab::Backup => CATEGORIES[1],
             Tab::Models | Tab::Agents | Tab::Skills | Tab::Rag | Tab::Voice | Tab::Browser | Tab::HostAccess => CATEGORIES[2],
-            Tab::Network | Tab::SshTunnels | Tab::Vpn | Tab::Firewall | Tab::Shares => CATEGORIES[3],
+            Tab::Network | Tab::SshTunnels | Tab::Vpn | Tab::Remote | Tab::Firewall | Tab::Shares => CATEGORIES[3],
             Tab::Display | Tab::Displays | Tab::ScreenSaver | Tab::HomeLayout | Tab::Sound | Tab::SystemSounds => CATEGORIES[4],
             Tab::Bluetooth | Tab::Keyboard => CATEGORIES[5],
-            Tab::Time | Tab::Battery | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Memory | Tab::Storage | Tab::Install | Tab::Updates | Tab::Cloud => CATEGORIES[6],
+            Tab::Time | Tab::Battery | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Memory | Tab::Storage | Tab::Install | Tab::Updates | Tab::Cloud | Tab::CloudRoles => CATEGORIES[6],
             Tab::Developer | Tab::DevCluster | Tab::GitKeys => CATEGORIES[7],
         }
     }
 
     /// Where the page sits in the left list: category first, then this order.
-    pub(crate) const ORDER: [Tab; 39] = [
+    pub(crate) const ORDER: [Tab; 41] = [
         Tab::Overview,
         Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::SecretProviders,
         Tab::Models, Tab::Agents, Tab::Skills, Tab::Rag, Tab::Voice, Tab::Browser, Tab::HostAccess,
-        Tab::Network, Tab::SshTunnels, Tab::Vpn, Tab::Firewall, Tab::Shares,
+        Tab::Network, Tab::SshTunnels, Tab::Vpn, Tab::Remote, Tab::Firewall, Tab::Shares,
         Tab::Display, Tab::Displays, Tab::ScreenSaver, Tab::HomeLayout, Tab::Sound, Tab::SystemSounds,
         Tab::Bluetooth, Tab::Keyboard,
-        Tab::Time, Tab::Battery, Tab::HostName, Tab::SessionLog, Tab::Startup, Tab::Memory, Tab::Storage, Tab::Install, Tab::Updates, Tab::Cloud,
+        Tab::Time, Tab::Battery, Tab::HostName, Tab::SessionLog, Tab::Startup, Tab::Memory, Tab::Storage, Tab::Install, Tab::Updates, Tab::Cloud, Tab::CloudRoles,
         Tab::Developer, Tab::DevCluster, Tab::GitKeys,
     ];
 
@@ -126,7 +130,7 @@ impl Tab {
             Tab::Display | Tab::Displays | Tab::ScreenSaver => Some("display"),
             Tab::Keyboard => Some("keyboard"),
             Tab::Bluetooth => Some("bluetooth"),
-            Tab::Overview | Tab::Models | Tab::Agents | Tab::Rag | Tab::Vault | Tab::Skills | Tab::Network | Tab::Browser | Tab::DevCluster | Tab::Storage | Tab::Memory | Tab::Firewall | Tab::SshTunnels | Tab::Vpn | Tab::Time | Tab::Battery | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Install | Tab::Updates | Tab::Voice | Tab::SecretProviders | Tab::HostAccess | Tab::Developer | Tab::GitKeys | Tab::Shares | Tab::Account | Tab::HomeLayout | Tab::Cloud | Tab::Notifications | Tab::Backup => None,
+            Tab::Overview | Tab::Models | Tab::Agents | Tab::Rag | Tab::Vault | Tab::Skills | Tab::Network | Tab::Browser | Tab::DevCluster | Tab::Storage | Tab::Memory | Tab::Firewall | Tab::SshTunnels | Tab::Vpn | Tab::Remote | Tab::Time | Tab::Battery | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Install | Tab::Updates | Tab::Voice | Tab::SecretProviders | Tab::HostAccess | Tab::Developer | Tab::GitKeys | Tab::Shares | Tab::Account | Tab::HomeLayout | Tab::Cloud | Tab::CloudRoles | Tab::Notifications | Tab::Backup => None,
         }
     }
 
@@ -156,6 +160,7 @@ impl Tab {
             Tab::Firewall => "firewall block incoming connections allow dns hostname ip range cidr port ssh ping nftables nft netfilter lockout revert keep blocked security network",
             Tab::SshTunnels => "ssh tunnel tunnels bastion jump host port forward socks proxy intranet internal web page behind vpn local forward remote site corp enable disable key fingerprint",
             Tab::Vpn => "vpn wireguard openvpn tunnel private network profile import conf ovpn kill switch full hybrid filter domain url split tunnel fail closed provider server endpoint",
+            Tab::Remote => "remote access web service serve browser https port fingerprint certificate address tablet phone another computer pixel stream share desktop sign in vnc rdp",
             Tab::Time => "clock time date timezone time zone utc 12 24 hour am pm seconds ntp sntp network time server sync 1970 battery wrong",
             Tab::Battery => "battery charge charging percent percentage power adapter plug laptop low shutdown critical health cycles time left remaining",
             Tab::HostName => "host name hostname computer name rename network name dns mdns",
@@ -170,6 +175,7 @@ impl Tab {
             Tab::GitKeys => "git ssh key keys ed25519 github gitlab gitea clone repository repositories token deploy key known hosts fingerprint public key qr passphrase agent",
             Tab::Shares => "share shared folder web http website serve publish download upload lan network qr link token password files local network phone preview site",
             Tab::Account => "password profile sign out user login text size font bigger smaller larger name",
+            Tab::CloudRoles => "cloud access roles tenant members namespace owner admin editor viewer member people team invite add remove permission who can audit trail rotate keys",
             Tab::Cloud => "cloud mode server headless remote desktop hide hardware screen sound camera bluetooth keyboard display virtual machine vm no screen auto on off boot parameter iyakki.mode",
             Tab::HomeLayout => "home screen layout tiles groups move group rename delete reset launcher chips web media work system custom app",
         }
@@ -200,6 +206,7 @@ impl Tab {
             Tab::Memory => "RAM, compressed swap in memory (zram) and an optional swap file.",
             Tab::Firewall => "Decide what other computers on the network can reach on this one. Everything is blocked unless you allow it.",
             Tab::SshTunnels => "Open a web page that sits behind an SSH host: each tunnel listens on this device only and can be enabled, disabled, edited or deleted.",
+            Tab::Remote => "Open this desktop in a browser on another computer on your network. Off by default; encrypted; signs in with this machine's accounts.",
             Tab::Vpn => "Import a WireGuard or OpenVPN profile you already have, and choose whether all traffic or only what your filters match goes through it.",
             Tab::Time => "The clock in the top bar: time zone, 12 or 24 hours, and setting the time from the network.",
             Tab::Battery => "How full the battery is, what it is doing, how worn it is, and the low-battery warnings.",
@@ -215,6 +222,7 @@ impl Tab {
             Tab::GitKeys => "SSH keys and tokens for git: which key each git site uses, kept in your vault.",
             Tab::Shares => "Share a folder of yours over HTTP on this network: browse and download, optional uploads, or a small website.",
             Tab::Account => "Your account on this computer.",
+            Tab::CloudRoles => "Who is in the cloud tenant and its namespaces, with what role: add and remove people and namespaces, and read the audit trail.",
             Tab::Cloud => "For servers, cloud machines and remote-desktop-only computers: hide what needs a local screen, speakers or camera.",
             Tab::HomeLayout => "The groups on the home screen and where each tile is listed: make your own groups, move tiles, put everything back.",
         }
@@ -245,6 +253,7 @@ impl Tab {
             Tab::Firewall => "Firewall",
             Tab::SshTunnels => "SSH tunnels",
             Tab::Vpn => "VPN",
+            Tab::Remote => "Remote access",
             Tab::Time => "Time",
             Tab::Battery => "Battery",
             Tab::HostName => "Host name",
@@ -261,6 +270,7 @@ impl Tab {
             Tab::Account => "Account",
             Tab::HomeLayout => "Home layout",
             Tab::Cloud => "Cloud mode",
+            Tab::CloudRoles => "Cloud access",
         }
     }
 }
@@ -285,6 +295,8 @@ mod firewall_page;
 mod sshtun_page;
 #[path = "settings_vpn.rs"]
 mod vpn_page;
+#[path = "settings_remote.rs"]
+mod remote_page;
 #[path = "settings_browserheaders.rs"]
 mod bh_page;
 #[path = "settings_overview.rs"]
@@ -329,6 +341,8 @@ mod browserspeed_page;
 mod browserblock_page;
 #[path = "settings_cloud.rs"]
 mod cloud_page;
+#[path = "settings_cloudroles.rs"]
+mod cloudroles_page;
 #[path = "settings_announce.rs"]
 mod announce_page;
 #[path = "settings_homelayout.rs"]
@@ -385,6 +399,8 @@ enum FormKind {
     Share(shares_page::ShareForm),
     /// Settings → Backup and restore.
     Backup(backup_page::BackupForm),
+    /// Settings -> Remote access: the port.
+    Remote(remote_page::RemoteForm),
     /// Models → Model host on your network: nickname, address, key.
     ModelHost,
     /// (disk name, the user must also type ERASE because the disk holds data)
@@ -656,6 +672,7 @@ pub struct SettingsApp {
     /// Settings -> Network -> SSH tunnels.
     tun: sshtun_page::TunPanel,
     vpn: vpn_page::VpnPanel,
+    remote: remote_page::RemotePanel,
     bh: bh_page::BhPanel,
     time: time::TimePanel,
     hn: time::NamePanel,
@@ -674,6 +691,8 @@ pub struct SettingsApp {
     bat: battery_page::BatPanel,
     /// Cloud mode as decided for this machine: the hardware pages it hides are not in `tabs`.
     cloud: iyakki_agent::cloudmode::CloudMode,
+    /// Cloud access page: the name being typed, the removal waiting for its answer, the lists as last read.
+    roles: cloudroles_page::RolesUi,
 }
 
 fn hf_on() -> bool {
@@ -701,12 +720,14 @@ impl SettingsApp {
             tabs.push(Tab::Firewall);
             tabs.push(Tab::SshTunnels);
             tabs.push(Tab::Vpn);
+            tabs.push(Tab::Remote);
             tabs.push(Tab::HostName);
             tabs.push(Tab::SessionLog);
             tabs.push(Tab::Startup);
             tabs.push(Tab::Updates);
             tabs.push(Tab::Developer);
             tabs.push(Tab::Cloud);
+            tabs.push(Tab::CloudRoles);
         }
         if admin && !hf_on() && install_page::InstallEnv::real().available() {
             tabs.push(Tab::Install);
@@ -735,7 +756,7 @@ impl SettingsApp {
         tabs.push(Tab::Account);
         tabs.push(Tab::Backup);
         tabs.sort_by_key(|t| Tab::ORDER.iter().position(|o| o == t).unwrap_or(usize::MAX));
-        let mut app = SettingsApp { tabs, tab: 0, sel: [0; 48], win: [ListWindow::default(); 48], hw: DevicesPane::new(DeviceEnv::real()), ticks: 0, tip: Default::default(), test_record_ms: 2000, vo_lang: 0, vo_scroll: 0.0, vo_max: 0.0, lem_scroll: 0.0, lem_max: 0.0, lem_view_h: 0.0, lem_rect: R::new(0.0, 0.0, 0.0, 0.0), lem_s: 1.0, lem_focus: false, lem_query: TextField::new("Search models", false), lem_search: false, lem_texts: Vec::new(), section: if admin { 0 } else { 1 }, share_skills: cx.session.policy.manage_skills, nav_query: TextField::new("Search settings", false), nav_focus: false, nav_scroll: 0.0, nav_seen: usize::MAX, mouse: (0, 0), nav_rect: R::new(0.0, 0.0, 0.0, 0.0), nav_s: 1.0, slider_w: Vec::new(), storage: StorageEnv::real(), wifi: WifiEnv::real(), wifi_items: Vec::new(), devices: vec![], modal: None, job: None, host: Default::default(), crash: Default::default(), backup: Default::default(), upd: Default::default(), status: None, dc: Default::default(), mem: Default::default(), disp: Default::default(), fw: Default::default(), tun: Default::default(), vpn: Default::default(), bh: Default::default(), time: Default::default(), hn: Default::default(), inst: Default::default(), devel: Default::default(), git: Default::default(), matrix: Default::default(), shares: Default::default(), mh: Default::default(), kbd: Default::default(), bat: Default::default(), cloud: iyakki_agent::cloudmode::CloudMode::desktop() };
+        let mut app = SettingsApp { tabs, tab: 0, sel: [0; 48], win: [ListWindow::default(); 48], hw: DevicesPane::new(DeviceEnv::real()), ticks: 0, tip: Default::default(), test_record_ms: 2000, vo_lang: 0, vo_scroll: 0.0, vo_max: 0.0, lem_scroll: 0.0, lem_max: 0.0, lem_view_h: 0.0, lem_rect: R::new(0.0, 0.0, 0.0, 0.0), lem_s: 1.0, lem_focus: false, lem_query: TextField::new("Search models", false), lem_search: false, lem_texts: Vec::new(), section: if admin { 0 } else { 1 }, share_skills: cx.session.policy.manage_skills, nav_query: TextField::new("Search settings", false), nav_focus: false, nav_scroll: 0.0, nav_seen: usize::MAX, mouse: (0, 0), nav_rect: R::new(0.0, 0.0, 0.0, 0.0), nav_s: 1.0, slider_w: Vec::new(), storage: StorageEnv::real(), wifi: WifiEnv::real(), wifi_items: Vec::new(), devices: vec![], modal: None, job: None, host: Default::default(), crash: Default::default(), backup: Default::default(), upd: Default::default(), status: None, dc: Default::default(), mem: Default::default(), disp: Default::default(), fw: Default::default(), tun: Default::default(), vpn: Default::default(), remote: Default::default(), bh: Default::default(), time: Default::default(), hn: Default::default(), inst: Default::default(), devel: Default::default(), git: Default::default(), matrix: Default::default(), shares: Default::default(), mh: Default::default(), kbd: Default::default(), bat: Default::default(), cloud: iyakki_agent::cloudmode::CloudMode::desktop(), roles: Default::default() };
         app.bat_sync_tab();
         app.refresh_devices();
         app
@@ -877,7 +898,7 @@ impl SettingsApp {
         self.status.as_ref()
     }
     pub fn has_modal(&self) -> bool {
-        self.modal.is_some() || self.mh.open || self.git_wizard_open()
+        self.modal.is_some() || self.mh.open || self.git_wizard_open() || self.roles_open()
     }
     pub fn is_busy(&self) -> bool {
         self.job.is_some()
@@ -1389,6 +1410,7 @@ impl SettingsApp {
             FormKind::Matrix => self.matrix_submit(cx, form),
             FormKind::Share(k) => self.shares_submit(cx, &k, form),
             FormKind::Backup(k) => self.backup_submit(cx, &k, form),
+            FormKind::Remote(k) => self.remote_submit(cx, &k, form),
             FormKind::ModelHost => self.mh_submit(form),
             FormKind::Mem(f) => self.mem_submit(*f, form),
             FormKind::Fw(k) => self.fw_submit(cx, &k, form),
@@ -2195,8 +2217,9 @@ impl SettingsApp {
             Tab::Displays => self.disp_len(),
             Tab::ScreenSaver => Self::ss_len(cx),
             Tab::Browser if self.bh.open => self.bh_len(cx),
-            Tab::Voice | Tab::Account | Tab::Browser | Tab::Memory | Tab::Time | Tab::Battery | Tab::HostName | Tab::SessionLog | Tab::Cloud => 0,
+            Tab::Voice | Tab::Remote | Tab::Account | Tab::Browser | Tab::Memory | Tab::Time | Tab::Battery | Tab::HostName | Tab::SessionLog | Tab::Cloud => 0,
             Tab::Startup => iyakki_agent::startup::CATALOGUE.len(),
+            Tab::CloudRoles => self.roles_len(cx),
         }
     }
 
@@ -3245,6 +3268,7 @@ impl App for SettingsApp {
             Tab::Notifications => "Up/Down choose a source · s show · q quiet (inbox only) · o off · Enter next level · a Matrix account · t test message · x remove it",
             Tab::SystemSounds => "Up/Down choose · Enter or Space switch on or off · p preview · + louder · − quieter",
             Tab::Cloud => "c change the mode: Automatic, On, Off",
+            Tab::CloudRoles => "Up/Down choose · m add person · n new namespace · a add to namespace · j join · x remove person · d delete namespace",
             Tab::Battery => "p percentage in the top bar · w low battery warnings · s shut down at the critical level (administrators)",
             Tab::Browser if self.bh.open => "a add · e edit · x or Enter enable/disable · d delete · b or Esc back · Up/Down choose",
             Tab::Browser => "H custom headers · a scripts everywhere · i pictures · s styles · c cookies · m smooth pages · d developer tools for the chat agent · P protect browser data · X reset it · f forget the allowed sites",
@@ -3268,6 +3292,7 @@ impl App for SettingsApp {
             Tab::HostAccess => "a share a folder · o options · m read-only/read-write · c convert to a copy · u unlink · i import files · l audit trail",
             Tab::Firewall if !self.fw.advanced => "1 Standard · 2 Open · a add something to allow · d remove · Up/Down choose · A advanced · k keep · v undo",
             Tab::Firewall => "A simple view · a add rule · e edit · x allow on/off · d delete · p presets · y apply (then k keep or v revert within 60 s) · o firewall on/off · u discard changes · r look names up · c copy rules · i import · b clear log · z disable now",
+            Tab::Remote => "e or Enter serve/stop · p change the port · Up/Down scroll",
             Tab::Vpn => "i import a file · p import the clipboard · x or Enter enable/disable · m mode and filters · d delete · r retry · Up/Down choose",
             Tab::SshTunnels => "a add · e edit · x enable/disable · d delete · T test · r retry · c copy the address · k copy the public key · Up/Down choose",
             Tab::Shares => "n new share · s start/stop · c copy the link · q QR code · e edit · t new secret for the link · d delete · x stop all sharing · Up/Down choose",
@@ -3318,12 +3343,14 @@ impl App for SettingsApp {
                 "models" => Some(Tab::Models),
                 "homelayout" => Some(Tab::HomeLayout),
                 "cloud" => Some(Tab::Cloud),
+                "cloudaccess" | "roles" => Some(Tab::CloudRoles),
                 "developer" => Some(Tab::Developer),
                 "git" => Some(Tab::GitKeys),
                 "shares" => Some(Tab::Shares),
                 "backup" | "restore" => Some(Tab::Backup),
                 "firewall" => Some(Tab::Firewall),
                 "vpn" => Some(Tab::Vpn),
+                "remote" | "webaccess" => Some(Tab::Remote),
                 "vault" => Some(Tab::Vault),
                 "browser" => Some(Tab::Browser),
                 "devcluster" => Some(Tab::DevCluster),
@@ -3381,7 +3408,7 @@ impl App for SettingsApp {
         }
         let over_nav = self.nav_rect.contains(self.mouse.0, self.mouse.1);
         let notches = px as f32 / crate::scrolleng::NOTCH_PX;
-        let before = (self.kbd.test.offset, self.lem_scroll, self.vo_scroll, self.nav_scroll);
+        let before = (self.kbd.test.offset, self.lem_scroll, self.vo_scroll, self.nav_scroll, self.remote.scroll);
         let taken = match self.tab() {
             Tab::Keyboard if !over_nav => self.kbd_test_px(px),
             Tab::Models if !over_nav && self.lem_max > 0.0 && self.lem_rect.contains(self.mouse.0, self.mouse.1) => {
@@ -3393,6 +3420,10 @@ impl App for SettingsApp {
                 self.vo_scroll = (self.vo_scroll - notches * crate::scrolleng::SCREEN_NOTCH_PX * self.nav_s).clamp_safe(0.0, self.vo_max);
                 true
             }
+            Tab::Remote if !over_nav => {
+                self.remote_scroll_by(-notches * crate::scrolleng::SCREEN_NOTCH_PX * self.nav_s);
+                true
+            }
             Tab::DevCluster | Tab::Developer | Tab::Memory | Tab::Install | Tab::Models | Tab::Keyboard | Tab::Voice => false,
             _ if over_nav => {
                 let entries = nav::entries(&self.nav_items(), &self.nav_query.value);
@@ -3401,7 +3432,7 @@ impl App for SettingsApp {
             }
             _ => false,
         };
-        if taken && before == (self.kbd.test.offset, self.lem_scroll, self.vo_scroll, self.nav_scroll) {
+        if taken && before == (self.kbd.test.offset, self.lem_scroll, self.vo_scroll, self.nav_scroll, self.remote.scroll) {
             crate::scrolleng::note_bound(); // at an end: momentum stops
         }
         taken
@@ -3445,6 +3476,9 @@ impl App for SettingsApp {
         }
         // a Host access dialog takes every key and click while it is open
         if self.host_dialog_event(ev) {
+            return Flow::Stay;
+        }
+        if self.roles_event(ev, cx) {
             return Flow::Stay;
         }
         if self.modal.is_some() {
@@ -3522,6 +3556,7 @@ impl App for SettingsApp {
                 self.lem_focus = true;
                 self.lem_scroll_by(-*d as f32 * crate::scrolleng::SCREEN_NOTCH_PX * self.nav_s);
             }
+            Event::Scroll(d) if self.tab() == Tab::Remote && !self.nav_rect.contains(self.mouse.0, self.mouse.1) => self.remote_scroll_by(-*d as f32 * crate::scrolleng::SCREEN_NOTCH_PX * self.nav_s),
             Event::Scroll(d) if self.tab() == Tab::Voice && !self.nav_rect.contains(self.mouse.0, self.mouse.1) => {
                 self.vo_scroll = (self.vo_scroll - *d as f32 * crate::scrolleng::SCREEN_NOTCH_PX * self.nav_s).clamp_safe(0.0, self.vo_max);
             }
@@ -3570,6 +3605,7 @@ impl App for SettingsApp {
                 Tab::SystemSounds => self.handle_sysnd(other, cx),
                 Tab::Notifications => self.handle_notifs(other, cx),
                 Tab::Cloud => self.handle_cloud(other, cx),
+                Tab::CloudRoles => self.handle_cloudroles(other, cx),
                 Tab::Battery => self.handle_battery(other, cx),
                 Tab::HostName => self.handle_host_name(other, cx),
                 Tab::SessionLog => self.handle_crash(other, cx),
@@ -3580,6 +3616,7 @@ impl App for SettingsApp {
                 Tab::Firewall => self.handle_firewall(other, cx),
                 Tab::SshTunnels => self.handle_tun(other, cx),
                 Tab::Vpn => self.handle_vpn(other, cx),
+                Tab::Remote => self.handle_remote(other, cx),
                 Tab::Install => self.handle_install(other, cx),
                 Tab::Updates => self.handle_updates(other, cx),
             },
@@ -3649,6 +3686,7 @@ impl App for SettingsApp {
             Tab::SystemSounds => self.render_sysnd(g, body, s, cx),
             Tab::Notifications => self.render_notifs(g, body, s, cx),
             Tab::Cloud => self.render_cloud(g, body, s, cx),
+            Tab::CloudRoles => self.render_cloudroles(g, body, s, cx),
             Tab::Battery => self.render_battery(g, body, s, cx),
             Tab::HostName => self.render_host_name(g, body, s, cx),
             Tab::SessionLog => self.render_crash(g, body, s, cx),
@@ -3659,6 +3697,7 @@ impl App for SettingsApp {
             Tab::Firewall => self.render_firewall(g, body, s, cx),
             Tab::SshTunnels => self.render_tun(g, body, s, cx),
             Tab::Vpn => self.render_vpn(g, body, s, cx),
+            Tab::Remote => self.render_remote(g, body, s, cx),
             Tab::Install => self.render_install(g, body, s),
             Tab::Updates => self.render_updates(g, body, s, cx),
         } }
@@ -3783,6 +3822,7 @@ impl SettingsApp {
             (Tab::SystemSounds, _) => self.sysnd_buttons(),
             (Tab::Notifications, _) => self.notifs_buttons(),
             (Tab::Cloud, _) => vec![("Change mode", ACCENT, 'c')],
+            (Tab::CloudRoles, _) => self.roles_buttons(),
             (Tab::Battery, _) => self.battery_buttons(),
             (Tab::HostName, _) => self.host_name_buttons(),
             (Tab::SessionLog, _) => self.crash_buttons(),
@@ -3794,6 +3834,7 @@ impl SettingsApp {
             (Tab::Firewall, _) => self.fw_buttons(),
             (Tab::SshTunnels, _) => self.tun_buttons(),
             (Tab::Vpn, _) => self.vpn_buttons(),
+            (Tab::Remote, _) => self.remote_buttons(),
             (Tab::Install, _) => self.install_buttons(),
             (Tab::Updates, _) => self.updates_buttons(),
         }
@@ -6040,6 +6081,9 @@ mod bt_tests;
 #[path = "settings_keyboard_tests.rs"]
 mod keyboard_tests;
 #[cfg(test)]
+#[path = "settings_cloudroles_tests.rs"]
+mod cloudroles_tests;
+#[cfg(test)]
 #[path = "settings_battery_tests.rs"]
 mod battery_tests;
 #[cfg(test)]
@@ -6078,6 +6122,9 @@ mod firewall_tests;
 #[cfg(test)]
 #[path = "settings_vpn_tests.rs"]
 mod vpn_tests;
+#[cfg(test)]
+#[path = "settings_remote_tests.rs"]
+mod remote_tests;
 #[cfg(test)]
 #[path = "settings_sshtunnels_tests.rs"]
 mod sshtun_tests;

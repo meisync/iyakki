@@ -364,3 +364,30 @@ fn raw_wheel_events_reach_the_settings_list_as_smooth_pixels_end_to_end() {
     let expect = 3.0 * a.kbd.test.row; // a click is three rows
     assert!((a.kbd.test.offset - expect).abs() <= 2.0, "one click = three rows ({} of {expect})", a.kbd.test.offset);
 }
+
+#[test]
+fn the_probe_touch_screen_button_switches_the_panel_off_and_on_and_a_second_press_resets_the_hub() {
+    let cx = admin("kb-touch");
+    let sys = temp_dir("kb-touch-sys");
+    let hub = sys.join("devices/usb1/1-5");
+    let usb = hub.join("1-5.3");
+    put(&hub, "idVendor", "1a40\n");
+    put(&usb, "idVendor", "27c0\n");
+    put(&hub, "authorized", "1");
+    put(&usb, "authorized", "1");
+    put(&usb, "1-5.3:1.0/input/input4/name", "wch.cn TouchScreen\n");
+    std::fs::create_dir_all(sys.join("class/input")).unwrap();
+    std::os::unix::fs::symlink(usb.join("1-5.3:1.0/input/input4"), sys.join("class/input/input4")).unwrap();
+    let mut a = SettingsApp::new(&cx).with_keyboard_sys(sys);
+    goto(&mut a, &cx, Tab::Keyboard);
+    let text = a.kbd_rows(&cx).iter().map(|(l, v, _)| format!("{l}: {v}")).collect::<Vec<_>>().join("\n");
+    assert!(text.contains("Touch screen: 1 found") && text.contains("Probe touch screen"), "{text}");
+    assert!(a.keyboard_buttons().iter().any(|b| b.0 == "Probe touch screen"));
+    key(&mut a, &cx, Key::Char('h'));
+    settle(&mut a, &cx);
+    assert!(status(&a).contains("switched off and on") && status(&a).contains("press the button again"), "{}", status(&a));
+    key(&mut a, &cx, Key::Char('h'));
+    settle(&mut a, &cx);
+    assert!(status(&a).contains("USB hub"), "{}", status(&a));
+    assert!(cx.audit.recent(20).iter().any(|l| l.contains("settings.touch.probe")));
+}

@@ -138,6 +138,9 @@ pub struct Settings {
     /// Settings -> Network -> "Announce this device on the local network" (mDNS name `iyakki-<id>.local`, `devname`): `None` is the
     /// default (on on a desktop, off in cloud mode), `Some` is the person's choice.
     pub announce_name: Option<bool>,
+    /// Settings -> Remote access (web) -> "Serve this desktop to browsers" (`webaccess`): off by default; `web_port` 0 is the default port 8443.
+    pub web_access: bool,
+    pub web_port: u16,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

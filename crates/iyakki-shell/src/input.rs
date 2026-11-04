@@ -240,6 +240,18 @@ impl InputState {
         self.touches.gone(key)
     }
 
+    /// The touch screens held now are `now`, the ones held a moment ago `before`: whatever state a screen that left, or came back under
+    /// the same key, left behind is dropped (a contact that never lifted would else keep every later touch from being taken; a USB-C
+    /// monitor resets its USB hub when its display link renegotiates, and its touch panel comes back as a new device). `added` are the
+    /// keys of the devices opened since.
+    pub fn touch_devices_changed(&mut self, before: &[String], now: &[String], added: &[String]) -> Vec<Event> {
+        let mut out = Vec::new();
+        for k in before.iter().filter(|k| !now.contains(k)).chain(added.iter()) {
+            out.extend(self.touch_gone(k));
+        }
+        out
+    }
+
     /// `abs_max` is the device's (max_x, max_y) when it is an absolute pointer (tablet, QEMU usb-tablet).
     pub fn feed(&mut self, r: Raw, abs_max: Option<(i32, i32)>) -> Vec<Event> {
         let mut out = Vec::new();
@@ -259,6 +271,9 @@ impl InputState {
                 }
                 BTN_RIGHT if r.value == 1 => out.push(Event::MouseRight(self.x, self.y)),
                 58 if r.value == 1 => self.caps = !self.caps,
+                // an absolute pointer (a touch monitor's mouse-like interface, a tablet) sends the button before the new position in
+                // the same frame: the click is made at the end of the frame, where the finger is, not where the last one was
+                BTN_LEFT if r.value == 1 && abs_max.is_some() => self.pending_touch = true,
                 BTN_LEFT if r.value == 1 => out.push(Event::MouseDown(self.x, self.y)),
                 BTN_LEFT if r.value == 0 => out.push(Event::MouseUp(self.x, self.y)),
                 BTN_TOUCH if r.value == 1 => self.pending_touch = true,
@@ -403,6 +418,9 @@ pub struct Device {
     pub pad: Option<crate::touchpad::PadRange>,
     /// `Some` for a touch screen or digitizer: its positions are mapped onto the display it belongs to (`touchmap.rs`).
     pub touch: Option<std::sync::Arc<crate::touchmap::TouchDev>>,
+    /// Fingers use it: a touch screen, or the mouse-like interface many touch monitors add (named "...TouchScreen", absolute, BTN_LEFT):
+    /// a press on it opens the on-screen keyboard (`osk.rs`) for a text field, however the positions are mapped.
+    pub finger: bool,
 }
 
 impl Device {
@@ -583,7 +601,7 @@ fn open_device(path: &str) -> Option<Device> {
         // SAFETY: as above, for ABS_MT_TOUCH_MAJOR (0x30).
         let rm = unsafe { libc::ioctl(fd, ioc_read(0x40 + 0x30, std::mem::size_of::<AbsInfo>() as u32) as _, &mut major as *mut AbsInfo) };
         let pad = crate::touchpad::PadRange { x_min: mt_x.min, x_max: mt_x.max, y_min: mt_y.min, y_max: mt_y.max, major_max: if rm >= 0 { major.max } else { 0 } };
-        return Some(Device { file, path: path.into(), abs_max: None, is_keyboard: false, pad: Some(pad), touch: None });
+        return Some(Device { file, path: path.into(), abs_max: None, is_keyboard: false, pad: Some(pad), touch: None, finger: false });
     }
     let has_btn = has_bit(&key_bits, BTN_LEFT) || has_bit(&key_bits, BTN_TOUCH);
     let mut rel_bits = [0u8; 4];
@@ -608,7 +626,13 @@ fn open_device(path: &str) -> Option<Device> {
         } else {
             None
         };
-        Some(Device { file, path: path.into(), abs_max, is_keyboard, pad: None, touch })
+        let name = device_name(fd);
+        let lower = name.to_ascii_lowercase();
+        let finger = !is_keyboard && (touch.is_some() || (abs_max.is_some() && (lower.contains("touch") || lower.contains("digitizer"))));
+        if finger {
+            log::info!("input: {name} ({path}) takes fingers: its presses open the on-screen keyboard for a text field{}", if touch.is_some() { "" } else { " (a mouse-like touch interface)" });
+        }
+        Some(Device { file, path: path.into(), abs_max, is_keyboard, pad: None, touch, finger })
     } else {
         None
     }
@@ -690,7 +714,7 @@ pub fn scan_devices(open: &mut Vec<Device>) {
     }
 }
 
-/// Scans for input devices on a thread of its own and hands over the ones it finds. Opening an event device the kernel is still
+/// Scans for input devices on a thread of its own (twice a second) and hands over the ones it finds. Opening an event device the kernel is still
 /// setting up can block for seconds at boot (5.3 s seen on a Mac mini 2018): a screen that animates must not wait for it.
 pub struct BackgroundScan {
     found: std::sync::Arc<std::sync::Mutex<Vec<Device>>>,
@@ -704,17 +728,37 @@ impl BackgroundScan {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (f, s) = (found.clone(), stop.clone());
         let _ = std::thread::Builder::new().name("iyakki-input-scan".into()).spawn(move || {
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // path -> the node's inode: a node the kernel made again under the same name (a driver that binds a second time, as
+            // hid-multitouch does for a touch monitor) is another device and is opened again
+            let mut seen: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+            let ino = |p: &str| {
+                use std::os::unix::fs::MetadataExt;
+                std::fs::metadata(p).map(|m| m.ino()).unwrap_or(0)
+            };
             while !s.load(Relaxed) {
                 // a node that is gone is forgotten: the kernel reuses `event15` for the next device plugged in
-                seen.retain(|p| std::path::Path::new(p).exists());
-                let mut tmp = Vec::new();
-                scan_devices(&mut tmp);
-                let fresh: Vec<Device> = tmp.into_iter().filter(|d| seen.insert(d.path.clone())).collect();
+                seen.retain(|p, i| std::path::Path::new(p).exists() && ino(p) == *i);
+                // only nodes not already handed over are opened: a device in use is never opened a second time
+                let mut fresh: Vec<Device> = Vec::new();
+                for p in event_nodes() {
+                    if s.load(Relaxed) {
+                        break;
+                    }
+                    if seen.contains_key(&p) {
+                        continue;
+                    }
+                    if let Some(d) = open_device(&p) {
+                        let i = ino(&p);
+                        seen.insert(p, i);
+                        fresh.push(d);
+                    }
+                }
                 if !fresh.is_empty() {
                     f.lock().unwrap_or_else(|p| p.into_inner()).extend(fresh);
                 }
-                for _ in 0..20 {
+                // every half second: a touch monitor that resets its USB hub when the display link renegotiates (a USB-C monitor) is back
+                // within that, and its replacement is opened without the 2 s wait this used to have
+                for _ in 0..5 {
                     if s.load(Relaxed) {
                         break;
                     }
@@ -744,6 +788,29 @@ pub type Polled = (Raw, Option<(i32, i32)>, Option<crate::touchpad::PadRange>, O
 
 /// Wait up to `timeout_ms` for input, then read everything available. Dead devices are dropped.
 /// Each event comes with its device's absolute range (tablets) and pad range (touchpads).
+/// A finger came down: a new multi-touch contact, or the touch or left button pressed.
+fn is_finger_down(r: &Raw) -> bool {
+    (r.typ == EV_ABS && r.code == ABS_MT_TRACKING_ID && r.value >= 0) || (r.typ == EV_KEY && (r.code == BTN_TOUCH || r.code == BTN_LEFT) && r.value == 1)
+}
+
+/// The first fingers of a boot are written to the log (which device, what it said, whether the shell used it), so a touch screen that
+/// does nothing can be told apart from one whose events never arrive. Capped so a long session does not fill the log.
+fn log_finger_events(path: &str, evs: &[Raw], echo: bool) {
+    static LOGGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    const MAX: u32 = 40;
+    for r in evs {
+        let down = is_finger_down(r);
+        let up = (r.typ == EV_ABS && r.code == ABS_MT_TRACKING_ID && r.value < 0) || (r.typ == EV_KEY && (r.code == BTN_TOUCH || r.code == BTN_LEFT) && r.value == 0);
+        if !(down || up) {
+            continue;
+        }
+        if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= MAX {
+            return;
+        }
+        log::info!("input: finger {} on {path} (type {} code {} value {}){}", if down { "down" } else { "up" }, r.typ, r.code, r.value, if echo { " - ignored, the multi-touch interface speaks" } else { "" });
+    }
+}
+
 pub fn poll_devices(devs: &mut Vec<Device>, timeout_ms: i32) -> Vec<Polled> {
     let mut out = Vec::new();
     if devs.is_empty() {
@@ -754,6 +821,9 @@ pub fn poll_devices(devs: &mut Vec<Device>, timeout_ms: i32) -> Vec<Polled> {
     // SAFETY: `fds` is a valid array of pollfd for the duration of the call.
     unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
     let mut dead = Vec::new();
+    // the mouse-like interface of a touch monitor repeats what its multi-touch interface says: with both there, only the touch device speaks
+    let has_touch = devs.iter().any(|d| d.touch.is_some());
+    let echo: Vec<bool> = devs.iter().map(|d| has_touch && d.finger && d.touch.is_none()).collect();
     for (i, pf) in fds.iter().enumerate() {
         if pf.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
             dead.push(i);
@@ -766,7 +836,17 @@ pub fn poll_devices(devs: &mut Vec<Device>, timeout_ms: i32) -> Vec<Polled> {
                 if n == 0 {
                     break;
                 }
-                out.extend(parse_events(&buf[..n]).into_iter().map(|r| (r, devs[i].abs_max, devs[i].pad, devs[i].touch.clone())));
+                let evs = parse_events(&buf[..n]);
+                if echo[i] {
+                    continue; // read (so it does not wake us again), not used
+                }
+                if devs[i].finger && evs.iter().any(is_finger_down) {
+                    crate::osk::note_touch();
+                }
+                if devs[i].finger {
+                    log_finger_events(&devs[i].path, &evs, echo[i]);
+                }
+                out.extend(evs.into_iter().map(|r| (r, devs[i].abs_max, devs[i].pad, devs[i].touch.clone())));
             }
         }
     }
@@ -778,6 +858,81 @@ pub fn poll_devices(devs: &mut Vec<Device>, timeout_ms: i32) -> Vec<Polled> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn touch_dev() -> crate::touchmap::TouchDev {
+        crate::touchmap::TouchDev { key: "27c0:0859@usb-1/input0".into(), id: "27c0:0859".into(), name: "TouchScreen".into(), usb: true, mt: true, x: (0, 4095), y: (0, 4095) }
+    }
+
+    fn touch(st: &mut InputState, evs: &[(u16, u16, i32)]) -> Vec<Event> {
+        let d = touch_dev();
+        evs.iter().flat_map(|(t, c, v)| st.feed_touch_full(Raw { typ: *t, code: *c, value: *v }, &d)).collect()
+    }
+
+    fn downs(evs: &[Event]) -> usize {
+        evs.iter().filter(|e| matches!(e, Event::MouseDown(..))).count()
+    }
+
+    #[test]
+    fn a_contact_that_never_lifted_keeps_later_touches_out_until_the_device_change_is_noticed() {
+        let mut st = InputState::new(1920, 1080);
+        let contact = [(EV_ABS, ABS_MT_TRACKING_ID, 7), (EV_ABS, 0x35, 100), (EV_ABS, 0x36, 100), (EV_SYN, SYN_REPORT, 0)];
+        assert_eq!(downs(&touch(&mut st, &contact)), 1, "the first contact is a press");
+        // the monitor's hub resets; the contact was never lifted. A later finger (a new device, the same key) is not taken
+        assert_eq!(downs(&touch(&mut st, &[(EV_ABS, ABS_MT_TRACKING_ID, 8), (EV_ABS, 0x35, 2000), (EV_ABS, 0x36, 2000), (EV_SYN, SYN_REPORT, 0)])), 0, "the stuck contact owns the pointer");
+        // the shell notices the device went and came back: the state is dropped and the stuck finger lifted
+        let k = vec![touch_dev().key];
+        let evs = st.touch_devices_changed(&k, &k, &k);
+        assert!(evs.iter().any(|e| matches!(e, Event::MouseUp(..))), "the stuck finger is lifted");
+        assert_eq!(downs(&touch(&mut st, &[(EV_ABS, ABS_MT_TRACKING_ID, 9), (EV_ABS, 0x35, 2000), (EV_ABS, 0x36, 2000), (EV_SYN, SYN_REPORT, 0)])), 1, "the next touch is a press again");
+    }
+
+    #[test]
+    fn a_device_that_left_is_forgotten_and_one_that_stayed_is_left_alone() {
+        let mut st = InputState::new(1920, 1080);
+        touch(&mut st, &[(EV_ABS, ABS_MT_TRACKING_ID, 1), (EV_ABS, 0x35, 100), (EV_ABS, 0x36, 100), (EV_SYN, SYN_REPORT, 0)]);
+        let k = vec![touch_dev().key];
+        assert!(st.touch_devices_changed(&k, &k, &[]).is_empty(), "still there, nothing new: nothing changes");
+        let evs = st.touch_devices_changed(&k, &[], &[]);
+        assert!(evs.iter().any(|e| matches!(e, Event::MouseUp(..))), "gone: lifted");
+    }
+
+    fn abs_frame(st: &mut InputState, abs: Option<(i32, i32)>, evs: &[(u16, u16, i32)]) -> Vec<Event> {
+        let mut out = Vec::new();
+        for (t, c, v) in evs {
+            out.extend(st.feed(Raw { typ: *t, code: *c, value: *v }, abs));
+        }
+        out
+    }
+
+    #[test]
+    fn a_touch_monitors_button_before_its_position_clicks_where_the_finger_is() {
+        let mut st = InputState::new(1920, 1080);
+        let abs = Some((4095, 4095));
+        // the first touch, near the top left
+        let a = abs_frame(&mut st, abs, &[(EV_KEY, BTN_LEFT, 1), (EV_ABS, ABS_X, 400), (EV_ABS, ABS_Y, 400), (EV_SYN, SYN_REPORT, 0)]);
+        let down = a.iter().find_map(|e| if let Event::MouseDown(x, y) = e { Some((*x, *y)) } else { None }).expect("a press");
+        assert!(down.0 < 300 && down.1 < 200, "at the first finger: {down:?}");
+        abs_frame(&mut st, abs, &[(EV_KEY, BTN_LEFT, 0), (EV_SYN, SYN_REPORT, 0)]);
+        // the second touch, far away: the press is there, not at the first place
+        let b = abs_frame(&mut st, abs, &[(EV_KEY, BTN_LEFT, 1), (EV_ABS, ABS_X, 3600), (EV_ABS, ABS_Y, 3500), (EV_SYN, SYN_REPORT, 0)]);
+        let down = b.iter().find_map(|e| if let Event::MouseDown(x, y) = e { Some((*x, *y)) } else { None }).expect("a press");
+        assert!(down.0 > 1500 && down.1 > 800, "at the second finger, not the first: {down:?}");
+        // a mouse (no absolute range) still clicks at once, as before
+        let mut st = InputState::new(1920, 1080);
+        let c = abs_frame(&mut st, None, &[(EV_KEY, BTN_LEFT, 1)]);
+        assert!(matches!(c.as_slice(), [Event::MouseDown(..)]), "{c:?}");
+    }
+
+    #[test]
+    fn a_finger_coming_down_is_told_from_the_rest_of_a_touch_frame() {
+        let raw = |typ, code, value| Raw { typ, code, value };
+        assert!(is_finger_down(&raw(EV_ABS, ABS_MT_TRACKING_ID, 5)), "a new multi-touch contact");
+        assert!(!is_finger_down(&raw(EV_ABS, ABS_MT_TRACKING_ID, -1)), "lifting is not pressing");
+        assert!(is_finger_down(&raw(EV_KEY, BTN_TOUCH, 1)) && is_finger_down(&raw(EV_KEY, BTN_LEFT, 1)), "the touch or left button of a touch monitor's mouse-like interface");
+        assert!(!is_finger_down(&raw(EV_KEY, BTN_LEFT, 0)) && !is_finger_down(&raw(EV_REL, 0, 3)));
+    }
+
     #[test]
     fn the_background_scan_never_makes_the_caller_wait_and_stops_when_dropped() {
         let t = std::time::Instant::now();

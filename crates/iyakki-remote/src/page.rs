@@ -3,6 +3,9 @@
 /// The decoder (also served at `/decoder.js`; used on the main thread or in a worker).
 pub const DECODER_JS: &str = include_str!("decoder.js");
 
+/// The browser devices bridge (clipboard images and HTML, sound, microphone, camera); served at `/media.js`.
+pub const MEDIA_JS: &str = include_str!("media.js");
+
 pub const INDEX: &str = concat!(r##"<!doctype html>
 <html lang="en">
 <head>
@@ -34,6 +37,16 @@ pub const INDEX: &str = concat!(r##"<!doctype html>
   #panel small { display: block; margin-top: 8px; color: #9aa3c4; }
   #stats { position: fixed; left: 8px; top: 8px; margin: 0; padding: 6px 9px; border-radius: 6px; background: #000b; color: #b9f3c3; font: 12px/1.35 ui-monospace, Menlo, Consolas, monospace; pointer-events: none; white-space: pre; }
   #ime { position: fixed; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; resize: none; }
+  #panel h3 { margin: 14px 0 4px; font-size: 14px; }
+  #panel .dev { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+  #panel .dev button { flex: 1; text-align: left; }
+  #panel .dev button.on { border-color: #ff6b6b; color: #ffb4b4; }
+  #panel input[type=range] { width: 100%; }
+  #rec { position: fixed; left: 50%; top: 8px; transform: translateX(-50%); display: flex; gap: 8px; z-index: 5; }
+  #rec button { font: 13px system-ui, sans-serif; color: #fff; background: #b3202a; border: 0; border-radius: 14px; padding: 5px 12px; cursor: pointer; box-shadow: 0 2px 10px #0008; }
+  #rec button::before { content: "\25CF  "; animation: blink 1.2s infinite; }
+  @keyframes blink { 50% { opacity: .3; } }
+  #askclip { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); font: 14px system-ui, sans-serif; color: #fff; background: #3b55c9; border: 0; border-radius: 16px; padding: 8px 16px; cursor: pointer; z-index: 5; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -66,10 +79,20 @@ pub const INDEX: &str = concat!(r##"<!doctype html>
   <label><input type="checkbox" id="showstats"> Statistics (Ctrl+Alt+S)</label>
   <div class="row"><button id="fs" type="button">Full screen</button><button id="kbd" type="button">Keyboard</button><button id="rz" type="button">Reset zoom</button></div>
   <small id="lvl"></small>
+  <h3>Browser devices</h3>
+  <div class="dev"><button id="dsound" type="button">Start sound</button></div>
+  <label id="dvolrow" hidden>Volume <input type="range" id="dvol" min="0" max="100" value="80"></label>
+  <div class="dev"><button id="dmic" type="button">Microphone: off</button></div>
+  <div class="dev"><button id="dcam" type="button">Camera: off</button></div>
+  <div class="dev"><button id="dclip" type="button">Clipboard reading: off</button></div>
+  <small id="dnote">Each one is off until you switch it on, and you can stop it with one tap.</small>
 </div>
+<div id="rec" hidden role="status"></div>
+<button id="askclip" type="button" hidden></button>
 <pre id="stats" hidden></pre>
 <textarea id="ime" autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false" aria-hidden="true" tabindex="-1"></textarea>
 <script src="/decoder.js"></script>
+<script src="/media.js"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -79,11 +102,51 @@ let csrf = null, ws = null, closing = false, retry = null, chain = Promise.resol
 function showLogin(msg) {
   closing = true;
   if (ws) { try { ws.close(); } catch (e) {} ws = null; }
+  media.disconnected();
   cv.hidden = true; $("status").style.display = "none"; $("gear").hidden = true; $("panel").hidden = true; $("stats").hidden = true;
   $("login").hidden = false; $("err").textContent = msg || "";
   $("go").disabled = false; $("pass").value = ""; (($("user").value ? $("pass") : $("user"))).focus();
 }
 function status(t) { const s = $("status"); s.textContent = t || ""; s.style.display = t ? "block" : "none"; }
+
+// ---- browser devices (clipboard images and HTML, sound, microphone, camera): media.js, the rules are in that file
+function sendBinary(u8) { if (ws && ws.readyState === 1) ws.send(u8); }
+const media = IyakkiMedia.create(
+  { nav: navigator, document, AudioContext: window.AudioContext || window.webkitAudioContext, ClipboardItem: window.ClipboardItem, Blob, TextEncoder,
+    isSecureContext: window.isSecureContext, now: () => Date.now(), setInterval: (f, ms) => setInterval(f, ms) },
+  { sendJson: (o) => send(o), sendBinary, onChange: (s) => renderDevices(s) });
+function mmss(n) { return Math.floor(n / 60) + ":" + String(n % 60).padStart(2, "0"); }
+function renderDevices(s) {
+  const dev = (id, label, on, allowed, extra) => {
+    const b = $(id); b.classList.toggle("on", on);
+    b.textContent = label + (on ? ": on" + (extra || "") + " (tap to stop)" : !s.secure.ok ? ": needs https" : !allowed ? ": not allowed" : ": off");
+    b.disabled = !on && (!s.secure.ok || !allowed);
+  };
+  dev("dmic", "Microphone", s.on.mic, s.allowed.mic, " " + mmss(s.micSeconds) + " of 5:00");
+  dev("dcam", "Camera", s.on.camera, s.allowed.camera);
+  dev("dclip", "Clipboard reading", s.on.clipread, s.allowed.clipread);
+  $("dsound").textContent = s.sound ? "Stop sound" : "Start sound"; $("dsound").classList.remove("on");
+  $("dsound").disabled = !s.allowed.audio || !media.player.ctx && !(window.AudioContext || window.webkitAudioContext);
+  $("dvolrow").hidden = !s.sound;
+  $("dnote").textContent = s.notice || (s.secure.ok ? "Each one is off until you switch it on, and you can stop it with one tap." : s.secure.why);
+  const rec = $("rec"); rec.textContent = "";
+  for (const [on, label, id] of [[s.on.mic, "Recording: microphone " + mmss(s.micSeconds), "dmic"], [s.on.camera, "Camera on", "dcam"]]) {
+    if (!on) continue;
+    const b = document.createElement("button"); b.type = "button"; b.textContent = label + " (tap to stop)"; b.onclick = (e) => media.toggle(id === "dmic" ? "mic" : "camera", e);
+    rec.appendChild(b);
+  }
+  rec.hidden = !rec.firstChild;
+  const ask = $("askclip");
+  ask.hidden = !(s.pendingRead || s.pendingCopy);
+  ask.textContent = s.pendingRead ? "Click to paste from your clipboard" : "Click to copy to your clipboard";
+}
+$("dmic").onclick = (e) => media.toggle("mic", e);
+$("dcam").onclick = (e) => media.toggle("camera", e);
+$("dclip").onclick = (e) => media.toggle("clipread", e);
+$("dsound").onclick = (e) => (media.state.sound ? media.stopSound() : media.startSound(e));
+$("dvol").oninput = () => media.player.setVolume($("dvol").value / 100);
+$("askclip").onclick = (e) => { if (media.state.pendingRead) media.readClipboard(e); else media.finishCopy(e); $("askclip").hidden = true; cv.focus(); };
+renderDevices(media.state);
 
 async function login(ev) {
   ev.preventDefault(); spPrime();
@@ -233,8 +296,9 @@ function connect() {
       rxBytes += m.data.length;
       const j = JSON.parse(m.data);
       if (j.t === "copy" && navigator.clipboard) navigator.clipboard.writeText(j.s).catch(() => {});
+      if (typeof j.t === "string" && j.t.indexOf("media_") === 0) media.onJson(j);
       if (j.t === "cursor") cv.style.cursor = j.c;
-      if (j.t === "readclip" && navigator.clipboard && navigator.clipboard.readText) navigator.clipboard.readText().then((s) => { if (s) send({ t: "paste", s }); }).catch(() => {});
+      if (j.t === "readclip") media.onReadRequest();
       if (j.t === "bye") showLogin("Signed out.");
       if (j.t === "hello_ok" && j.v >= 2) { v2 = true; startPainter(); size(); sendQuality(); }
       if (j.t === "stats") { srv = j; renderStats(); }
@@ -243,11 +307,13 @@ function connect() {
       return;
     }
     rxBytes += m.data.byteLength;
+    // sound and clipboard items share the connection with the picture; the picture's messages start with 2, theirs with 0x10 or more
+    if (v2 && new Uint8Array(m.data, 0, 1)[0] >= 0x10) { media.onBinary(m.data); return; }
     if (v2) onFrame(m.data); else drawLegacy(m.data);
   };
   ws.onclose = async () => {
     if (closing) return;
-    status("Reconnecting…");
+    status("Reconnecting…"); media.disconnected();
     clearInterval(pingTimer);
     clearTimeout(retry);
     retry = setTimeout(async () => {
@@ -277,7 +343,7 @@ cv.addEventListener("keydown", (e) => {
   e.preventDefault();
   send({ t: "key", key: e.key, code: e.code, ctrl, alt: e.altKey, shift: e.shiftKey });
 });
-document.addEventListener("paste", (e) => { if (cv.hidden) return; const s = e.clipboardData && e.clipboardData.getData("text"); if (s) { e.preventDefault(); send({ t: "paste", s }); } });
+document.addEventListener("paste", (e) => { if (cv.hidden || !e.clipboardData) return; e.preventDefault(); media.onPaste(e); });
 
 // ---- touch: tap = click, long press = right click, drag = drag, two fingers = scroll (pinch = zoom, and pan while zoomed)
 const fingers = new Map();

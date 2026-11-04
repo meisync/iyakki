@@ -140,7 +140,7 @@ impl GptLayout {
         let ss = sector_size as u64;
         let (total, al) = (size_bytes / ss, MIB / ss);
         let rebuilt = sector_size != 512;
-        let esp_bytes = if rebuilt { ESP_4K_BYTES } else { source_esp_bytes };
+        let esp_bytes = if rebuilt { ESP_4K_BYTES.max(source_esp_bytes) } else { source_esp_bytes };
         let esp_secs = esp_bytes.div_ceil(MIB) * al;
         let array = gpt::ENTRY_ARRAY_BYTES.div_ceil(ss);
         if total < 2 * al + esp_secs + 2 * array + 8 {

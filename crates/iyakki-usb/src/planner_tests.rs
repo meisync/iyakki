@@ -381,10 +381,14 @@ fn free_space_mode_adds_two_partitions_in_the_gap_and_touches_nothing_else() {
     assert_eq!(plan.steps.iter().filter(|st| st.action == Action::Keep).count(), 4, "all four existing partitions are kept");
     assert!(plan.destroyed().is_empty());
     let creates: Vec<&Step> = plan.steps.iter().filter(|st| st.action == Action::Create).collect();
-    assert_eq!(creates.len(), 2);
+    assert_eq!(creates.len(), 3, "BIOS boot, boot and data");
+    assert_eq!((creates[0].role, creates[0].bytes), (Some(Role::Bios), MIB), "the BIOS boot partition comes first");
     let gap = m.largest_gap(TableKind::Gpt).unwrap();
     assert_eq!(creates[0].index, 5, "the next free slot");
     assert_eq!(creates[0].first_lba, gap.first_lba);
+    let creates: Vec<&Step> = creates.into_iter().skip(1).collect();
+    assert_eq!(creates[0].index, 6);
+    let gap = crate::planner::Gap { first_lba: gap.first_lba + MIB / 512, sectors: gap.sectors - MIB / 512 };
     assert_eq!(creates[0].bytes, spec(&s).boot_required(512), "boot size comes from the image");
     assert_eq!(creates[1].first_lba, gap.first_lba + creates[0].sectors);
     assert_eq!(creates[1].first_lba + creates[1].sectors, gap.first_lba + gap.sectors, "data takes the rest of the gap");
@@ -401,7 +405,7 @@ fn free_space_mode_adds_two_partitions_in_the_gap_and_touches_nothing_else() {
     let p2 = build_plan(&m, &custom, &spec(&s), true).unwrap();
     assert_ne!(p2.digest(), plan.digest());
     let c2: Vec<&Step> = p2.steps.iter().filter(|st| st.action == Action::Create).collect();
-    assert_eq!((c2[0].bytes, c2[1].bytes), (64 * MIB, 2048 * MIB));
+    assert_eq!((c2[0].bytes, c2[1].bytes, c2[2].bytes), (MIB, 64 * MIB, 2048 * MIB));
 }
 
 #[test]
@@ -475,6 +479,30 @@ fn mbr_disks_have_four_primary_slots_and_no_extended_games() {
     assert!(e.contains("uses 3 of the 4"), "{e}");
     let keep = build_plan(&m3, &Request { keep_esp: true, ..free_req() }, &sp, true).unwrap();
     assert_eq!(keep.steps.iter().filter(|s| s.action == Action::Create).count(), 1, "keeping the ESP needs one slot");
+}
+
+#[test]
+fn a_too_small_efi_partition_moves_boot_to_a_partition_of_its_own_and_says_so() {
+    let (dir, _guard) = scratch("wiz-esp-full");
+    let s = src(&dir);
+    let (path, _) = windows_disk(&dir, 40 * GIB, 512);
+    let mut m = model_of(&path, "sda", 40 * GIB, 512, "", false);
+    m.parts[0].fat_free = Some(2 * MIB);
+    let mut w = Wizard::new(vec![m], spec(&s), true);
+    w.handle(WKey::Enter);
+    // free-space mode with the existing EFI System Partition kept: it has no room
+    w.handle(WKey::Char('e'));
+    assert!(w.req.keep_esp);
+    w.handle(WKey::Enter);
+    assert_eq!(w.page, Page::Choose);
+    w.handle(WKey::Enter);
+    assert_eq!(w.page, Page::Plan, "{:?}", w.error);
+    let p = w.plan.as_ref().unwrap();
+    assert!(!p.keep_esp, "the plan has a boot partition of its own");
+    assert_eq!(p.steps.iter().filter(|s| s.action == Action::Create).count(), 3, "BIOS boot, boot and data are all created");
+    assert!(p.warnings[0].contains("free but") && p.warnings[0].contains("own boot partition"), "{:?}", p.warnings);
+    assert!(p.destroyed().is_empty(), "the other system's partitions are untouched");
+    assert!(!w.req.keep_esp);
 }
 
 #[test]
@@ -557,7 +585,7 @@ fn keep_esp_needs_a_free_unmounted_fat32_esp_with_room() {
 
 #[test]
 fn the_request_round_trips_through_the_plan_file() {
-    let r = Request { mode: Mode::Reuse, gap_start: Some(4096), boot_part: Some(2), data_part: Some(3), keep_esp: true, boot_mib: Some(600), data_mib: None, table: TableChoice::Gpt, confirm_running_disk: true, zram: "4G".into(), swapfile: "2G".into(), hostname: Some("box".into()) };
+    let r = Request { mode: Mode::Reuse, gap_start: Some(4096), boot_part: Some(2), data_part: Some(3), keep_esp: true, boot_mib: Some(600), data_mib: None, table: TableChoice::Gpt, confirm_running_disk: true, delete_parts: vec![4, 5], zram: "4G".into(), swapfile: "2G".into(), hostname: Some("box".into()) };
     let j = r.to_json();
     assert_eq!(Request::from_json(&crate::json::Json::parse(&j.pretty()).unwrap()).unwrap(), r);
     assert!(Request::from_json(&crate::json::Json::parse("{\"mode\":\"nope\"}").unwrap()).is_err());
@@ -629,13 +657,14 @@ fn free_space_install_on_a_windows_disk_changes_only_the_table_tail_and_the_new_
     let p = parsed(&path, 512, 6 * GIB);
     assert!(p.primary_ok && p.backup_ok && p.problems.is_empty(), "{:?}", p.problems);
     assert_eq!(p.table.disk_guid, old.disk_guid, "the disk keeps its identity");
-    assert_eq!(p.table.entries.len(), 6);
+    assert_eq!(p.table.entries.len(), 7);
     for e in &old.entries {
         assert_eq!(p.table.entries.iter().find(|x| x.index == e.index).unwrap(), e, "entry {} is byte for byte the same", e.index);
     }
     assert_eq!(old_partition_bytes(&path, &old, 512), before, "old partitions: not one byte changed");
     assert_eq!(bytes_at(&path, 0, 512), sector0, "the protective MBR and the other system's boot code stay");
-    let (boot, data) = (&p.table.entries[4], &p.table.entries[5]);
+    assert_eq!(p.table.entries[4].name, "IYAKKI-BIOS");
+    let (boot, data) = (&p.table.entries[5], &p.table.entries[6]);
     assert_eq!((boot.name.as_str(), boot.type_guid), ("IYAKKI-BOOT", EFI));
     assert_eq!((data.name.as_str(), data.type_guid), ("IYAKKI-DATA", gpt::TYPE_LINUX_DATA));
     assert!(boot.first_lba % 2048 == 0 && data.first_lba % 2048 == 0 && data.first_lba == boot.last_lba + 1);
@@ -653,7 +682,7 @@ fn free_space_install_on_a_windows_disk_changes_only_the_table_tail_and_the_new_
     assert_eq!(iyakki_storage::classify(&bytes_at(&path, data.first_lba * 512, 8192)), iyakki_storage::Content::Pending);
     // a second run sees the new partitions as existing ones and plans in the (now smaller) free space
     let m2 = model_of(&path, "sda", 6 * GIB, 512, "", true);
-    assert_eq!(m2.parts.len(), 6);
+    assert_eq!(m2.parts.len(), 7);
     assert!(tool("sfdisk", &["--verify", path.to_str().unwrap()]).is_none_or(|(ok, out)| ok && !out.contains("overlap")));
     assert!(tool("sgdisk", &["-v", path.to_str().unwrap()]).is_none_or(|(_, out)| out.contains("No problems found")), "sgdisk");
 }
@@ -808,8 +837,8 @@ fn a_4096_byte_sector_disk_gets_a_rebuilt_boot_volume_in_free_space() {
     assert_eq!(old_partition_bytes(&path, &old, 4096), before);
     let p = parsed(&path, 4096, 3 * GIB);
     assert!(p.primary_ok && p.backup_ok);
-    assert_eq!(p.table.entries.len(), 3);
-    let b = &p.table.entries[1];
+    assert_eq!(p.table.entries.len(), 4);
+    let b = p.table.entries.iter().find(|e| e.name == "IYAKKI-BOOT").unwrap();
     let mut h = std::fs::File::open(&path).unwrap();
     assert!(Fat32::open(&mut h, b.first_lba * 4096).unwrap().walk().unwrap().iter().any(|i| i.path == "/BOOT/INITRD"));
     assert_eq!(bytes_at(&path, 3 * GIB - 4096, 8), b"EFI PART");
@@ -920,7 +949,7 @@ fn a_blank_disk_in_free_space_mode_gets_a_fresh_table() {
     run_apply(&path, &m, &req, &s, Some(&plan.digest()), &ApplyEnv::default()).unwrap();
     let p = parsed(&path, 512, 2 * GIB);
     assert!(p.primary_ok && p.backup_ok);
-    assert_eq!(p.table.entries.len(), 2);
+    assert_eq!(p.table.entries.len(), 3, "BIOS boot, boot and data");
     assert!(tool("sgdisk", &["-v", path.to_str().unwrap()]).is_none_or(|(_, out)| out.contains("No problems found")));
 }
 
@@ -1052,12 +1081,18 @@ fn the_pages_explain_unavailable_modes_and_let_reuse_pick_boot_and_data() {
     let m = model_of(&path, "sda", 4 * GIB, 512, "", true);
     let mut w = Wizard::new(vec![m], spec(&s), true);
     w.handle(WKey::Enter);
-    assert!(w.mode_available(Mode::FreeSpace).is_err(), "no free space on this disk");
+    // no free space on this disk, but a partition can be deleted to make some: the mode stays available
+    assert!(w.mode_available(Mode::FreeSpace).is_ok());
     assert!(w.mode_available(Mode::Reuse).is_ok());
-    assert!(w.render(80).contains("unavailable"));
-    w.handle(WKey::Enter); // free space: refused, the reason stays on the page
-    assert_eq!(w.page, Page::Mode);
+    assert!(!w.render(80).contains("unavailable"));
+    w.handle(WKey::Enter); // free space on a full disk: the page where a partition can be deleted first
+    assert_eq!(w.page, Page::Choose);
+    assert!(w.render(100).contains("x = delete the partition"));
+    w.handle(WKey::Enter); // there is no free space row to choose
+    assert_eq!(w.page, Page::Choose);
     assert!(w.error.is_some());
+    w.handle(WKey::Esc);
+    assert_eq!(w.page, Page::Mode);
     w.mode_sel = 2;
     w.handle(WKey::Enter);
     assert_eq!(w.page, Page::Choose);
@@ -1089,14 +1124,22 @@ fn custom_sizes_are_typed_in_mib() {
     assert_eq!(w.page, Page::Choose);
     w.handle(WKey::Enter);
     assert_eq!(w.page, Page::Sizes);
-    w.sizes = ["64".into(), "".into()];
+    w.sizes = ["".into(), "".into()];
+    w.focus = 0;
+    type_str(&mut w, "64");
+    // typing one size recalculates the other: together they fill the free space
+    let room = w.size_room_mib;
+    assert!(room > 3000 && w.sizes[1].parse::<u64>().unwrap() == room - 64, "{:?} of {room}", w.sizes);
     w.focus = 1;
-    type_str(&mut w, "1500");
+    w.handle(WKey::Backspace);
+    let data: u64 = w.sizes[1].parse().unwrap();
+    assert_eq!(w.sizes[0].parse::<u64>().unwrap(), room - data, "the boot size follows the data size");
+    w.sizes = ["64".into(), "1500".into()];
     w.handle(WKey::Enter);
     assert_eq!(w.page, Page::Plan, "{:?}", w.error);
     let p = w.plan.as_ref().unwrap();
     let c: Vec<u64> = p.steps.iter().filter(|s| s.action == Action::Create).map(|s| s.bytes).collect();
-    assert_eq!(c, [64 * MIB, 1500 * MIB]);
+    assert_eq!(c, [MIB, 64 * MIB, 1500 * MIB]);
 }
 
 #[test]
@@ -1182,7 +1225,7 @@ fn a_plan_file_is_written_by_a_dry_run_and_applied_only_with_the_typed_confirmat
     assert_ne!(whole_file_hash(&path), h0);
     let parsed = parsed(&path, 512, 3 * GIB);
     assert!(parsed.primary_ok && parsed.backup_ok);
-    assert_eq!(parsed.table.entries.len(), 3);
+    assert_eq!(parsed.table.entries.len(), 4);
     // the same file now fails the digest: the disk changed since the plan was confirmed
     let e = run_inner(&a(&["--apply-plan", &pf, "--target-file", &p, "--template", &t]), &machine, false).unwrap_err();
     assert!(e.contains("digests differ") || e.contains("no free space") || e.contains("too small"), "{e}");
@@ -1213,7 +1256,7 @@ fn a_gpt_stick_is_a_source_for_the_boot_time_installer() {
     run_apply(&path, &m, &free_req(), &from_stick, Some(&plan.digest()), &ApplyEnv::default()).unwrap();
     assert_eq!(old_partition_bytes(&path, &old, 512), before);
     let p = parsed(&path, 512, 3 * GIB);
-    let boot = &p.table.entries[1];
+    let boot = p.table.entries.iter().find(|e| e.name == "IYAKKI-BOOT").unwrap();
     let mut h = std::fs::File::open(&path).unwrap();
     let mut v = Fat32::open(&mut h, boot.first_lba * 512).unwrap();
     let items = v.walk().unwrap();
@@ -1497,4 +1540,168 @@ fn an_install_from_a_stick_with_the_fast_start_copies_neither_its_menu_entries_n
     let plan2 = build_plan(&m2, &free_req(), &spec(&plain), true).unwrap();
     let rep2 = run_apply(&path2, &m2, &free_req(), &plain, Some(&plan2.digest()), &ApplyEnv::default()).unwrap();
     assert!(!rep2.notes.iter().any(|n| n.contains("fast-start")), "{:?}", rep2.notes);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------
+// deleting an existing partition first (free-space and custom mode), with the erase acknowledgement
+
+/// A 6 GiB GPT disk with no room left: an EFI System Partition, a Windows data partition and a big Linux one.
+fn crowded_gpt(dir: &Path, name: &str) -> (PathBuf, Table) {
+    gpt_disk(dir, name, 6 * GIB, 512, &[ps(1, 100, EFI, "EFI system partition", Fill::Raw(foreign_esp(dir))), ps(101, 2048, MSDATA, "Basic data partition", Fill::Ntfs), ps(2149, 3950, gpt::TYPE_LINUX_DATA, "old linux", Fill::Ext4)])
+}
+
+#[test]
+fn a_partition_chosen_for_deletion_makes_room_and_the_plan_shows_it_as_an_erasing_row() {
+    let (dir, _guard) = scratch("del-plan");
+    let s = src(&dir);
+    let (path, _) = crowded_gpt(&dir, "c.img");
+    let m = model_of(&path, "sda", 6 * GIB, 512, "", true);
+    // without the deletion there is no room
+    assert!(build_plan(&m, &free_req(), &spec(&s), true).is_err());
+    let req = Request { delete_parts: vec![3], ..free_req() };
+    let plan = build_plan(&m, &req, &spec(&s), true).unwrap();
+    let del: Vec<&Step> = plan.steps.iter().filter(|st| st.action == Action::Delete).collect();
+    assert_eq!((del.len(), del[0].part.as_str(), del[0].index), (1, "sda3", 3));
+    assert_eq!(plan.steps.iter().filter(|st| st.action == Action::Keep).count(), 2, "the other two stay");
+    let creates: Vec<&Step> = plan.steps.iter().filter(|st| st.action == Action::Create).collect();
+    assert_eq!((creates.len(), creates[0].index, creates[1].index, creates[2].index), (3, 3, 4, 5), "the freed slot is used again (BIOS boot, boot, data)");
+    assert!(creates[0].first_lba >= del[0].first_lba, "the new partitions start where the deleted one did");
+    assert!(plan.erases_data() && plan.destroyed() == vec!["sda3".to_string()]);
+    let text = plan.render();
+    for want in ["delete", "sda3", "partition(s) are deleted first"] {
+        assert!(text.contains(want) || plan.warnings.iter().any(|w| w.contains(want)), "{want} in\n{text}");
+    }
+    // one button is not enough for a plan that deletes: the erase acknowledgement is needed too
+    assert!(check_confirmation(&plan, &button(&plan, false)).is_err());
+    assert!(check_confirmation(&plan, &button(&plan, true)).is_ok());
+    // the request survives the plan file
+    assert_eq!(Request::from_json(&crate::json::Json::parse(&plan.request.to_json().pretty()).unwrap()).unwrap().delete_parts, vec![3]);
+}
+
+#[test]
+fn deleting_is_refused_where_it_would_hurt_or_make_no_sense() {
+    let (dir, _guard) = scratch("del-refuse");
+    let s = src(&dir);
+    let (path, _) = crowded_gpt(&dir, "r.img");
+    let m = model_of(&path, "sda", 6 * GIB, 512, "", true);
+    let try_mode = |mode: Mode, del: Vec<u32>| build_plan(&m, &Request { mode, delete_parts: del, ..Request::default() }, &spec(&s), true);
+    assert!(try_mode(Mode::WholeDisk, vec![3]).unwrap_err().contains("free-space and custom"));
+    assert!(try_mode(Mode::Reuse, vec![3]).unwrap_err().contains("free-space and custom"));
+    assert!(try_mode(Mode::FreeSpace, vec![9]).unwrap_err().contains("does not exist"));
+    assert!(try_mode(Mode::FreeSpace, vec![3, 3]).unwrap_err().contains("twice"));
+    // the running system's own volume is never deleted
+    let mounted = model_of(&path, "sda", 6 * GIB, 512, "/dev/sda3 / ext4 rw 0 0\n", false);
+    let e = build_plan(&mounted, &Request { delete_parts: vec![3], ..free_req() }, &spec(&s), true).unwrap_err();
+    assert!(e.contains("running system"), "{e}");
+    // an MBR logical partition is not touched
+    let mbr = mbr_disk(&dir, "m.img", 4 * GIB, &[(1, 1000, 0x07, Fill::Ntfs)]);
+    let mm = model_of(&mbr, "sdb", 4 * GIB, 512, "", true);
+    assert!(build_plan(&mm, &Request { delete_parts: vec![5], ..free_req() }, &spec(&s), true).is_err());
+}
+
+#[test]
+fn a_gpt_install_after_deleting_a_partition_removes_only_that_entry_and_keeps_the_others_byte_for_byte() {
+    let (dir, _guard) = scratch("del-apply-gpt");
+    let s = src(&dir);
+    let (path, old) = crowded_gpt(&dir, "g.img");
+    let before = old_partition_bytes(&path, &old, 512);
+    let sector0 = bytes_at(&path, 0, 512);
+    let m = model_of(&path, "sda", 6 * GIB, 512, "", true);
+    let req = Request { delete_parts: vec![3], ..free_req() };
+    let plan = build_plan(&m, &req, &spec(&s), true).unwrap();
+    let rep = run_apply(&path, &m, &req, &s, Some(&plan.digest()), &ApplyEnv::default()).unwrap();
+    assert!(rep.verified);
+    let p = parsed(&path, 512, 6 * GIB);
+    assert!(p.primary_ok && p.backup_ok && p.problems.is_empty(), "{:?}", p.problems);
+    assert_eq!(p.table.entries.len(), 5, "two kept, three new");
+    for e in old.entries.iter().filter(|e| e.index != 3) {
+        assert_eq!(p.table.entries.iter().find(|x| x.index == e.index).unwrap(), e, "entry {} is unchanged", e.index);
+    }
+    let after = old_partition_bytes(&path, &Table { entries: old.entries.iter().filter(|e| e.index != 3).cloned().collect(), ..old.clone() }, 512);
+    assert_eq!(after, before.iter().filter(|(i, _)| *i != 3).cloned().collect::<Vec<_>>(), "the kept partitions: not one byte changed");
+    assert_eq!(bytes_at(&path, 0, 512), sector0, "the protective MBR stays");
+    let names: Vec<&str> = p.table.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(&names[2..], &["IYAKKI-BIOS", "IYAKKI-BOOT", "IYAKKI-DATA"], "{names:?}");
+    assert!(!p.table.entries.iter().any(|e| e.name == "old linux"));
+    assert!(tool("sgdisk", &["-v", path.to_str().unwrap()]).is_none_or(|(_, out)| out.contains("No problems found")), "sgdisk");
+}
+
+#[test]
+fn an_mbr_install_after_deleting_two_partitions_clears_those_entries_and_keeps_boot_code_and_the_rest() {
+    let (dir, _guard) = scratch("del-apply-mbr");
+    let s = src(&dir);
+    let path = mbr_disk(&dir, "d.img", 4 * GIB, &[(1, 1000, 0x07, Fill::Ntfs), (1001, 500, 0x83, Fill::Ext4), (1501, 1000, 0x83, Fill::Ext4), (2501, 1400, 0x07, Fill::Ntfs)]);
+    let s0 = bytes_at(&path, 0, 512);
+    let m = model_of(&path, "sda", 4 * GIB, 512, "", true);
+    assert!(build_plan(&m, &free_req(), &spec(&s), true).is_err(), "four slots are used and no space is left");
+    // one deletion frees only one slot, and the install needs two
+    assert!(build_plan(&m, &Request { delete_parts: vec![4], ..free_req() }, &spec(&s), true).is_err());
+    let req = Request { delete_parts: vec![3, 4], ..free_req() };
+    let plan = build_plan(&m, &req, &spec(&s), true).unwrap();
+    run_apply(&path, &m, &req, &s, Some(&plan.digest()), &ApplyEnv::default()).unwrap();
+    let n0 = bytes_at(&path, 0, 512);
+    assert_eq!(n0[..446], s0[..446], "boot code and signature: unchanged");
+    assert_eq!(n0[446..478], s0[446..478], "the two kept entries: unchanged");
+    assert_eq!((n0[478 + 4], n0[494 + 4]), (0xEF, 0x83), "slots 3 and 4 now hold IYAKKI-BOOT and IYAKKI-DATA");
+    let start = u32::from_le_bytes(n0[478 + 8..478 + 12].try_into().unwrap()) as u64;
+    assert!(start >= 1501 * 2048 && start % 2048 == 0, "the boot partition starts in the freed space");
+    assert_eq!(&n0[510..], &[0x55, 0xAA]);
+    assert!(tool("sfdisk", &["--verify", path.to_str().unwrap()]).is_none_or(|(ok, _)| ok));
+}
+
+#[test]
+fn the_pages_let_a_person_mark_a_partition_for_deletion_and_confirm_it_with_the_erase_box() {
+    use crate::wizard::Row;
+    let (dir, _guard) = scratch("wiz-del");
+    let s = src(&dir);
+    let (path, _) = crowded_gpt(&dir, "w.img");
+    let h0 = whole_file_hash(&path);
+    let internal = model_of(&path, "sda", 6 * GIB, 512, "", false);
+    let mut w = Wizard::new(vec![internal], spec(&s), true);
+    w.handle(WKey::Enter);
+    assert_eq!(w.mode(), Mode::FreeSpace);
+    w.handle(WKey::Enter);
+    assert_eq!(w.page, Page::Choose);
+    // the partitions are listed with the free space, and the cursor starts on the free space
+    let text = w.render(100);
+    assert!(text.contains("x = delete the partition under the cursor") && text.contains("old linux"), "{text}");
+    assert!(matches!(w.rows()[w.row_sel], Row::Gap { .. }));
+    // the little free space is not enough
+    w.handle(WKey::Enter);
+    assert_eq!(w.page, Page::Choose);
+    assert!(w.error.as_deref().is_some_and(|e| e.contains("too small")), "{:?}", w.error);
+    // x on free space explains; on the partition it marks it
+    w.handle(WKey::Char('x'));
+    assert!(w.error.as_deref().is_some_and(|e| e.contains("Move to a partition")));
+    w.row_sel = w.rows().iter().position(|r| matches!(r, Row::Part { index: 3, .. })).unwrap();
+    w.handle(WKey::Enter);
+    assert!(w.error.as_deref().is_some_and(|e| e.contains("Press x")), "Enter on a partition does not install");
+    w.handle(WKey::Char('x'));
+    assert_eq!(w.req.delete_parts, vec![3]);
+    let text = w.render(100);
+    assert!(text.contains("[DELETE]") && text.contains("1 partition(s) marked for deletion"), "{text}");
+    // x again takes the mark off, and once more puts it on
+    w.handle(WKey::Char('x'));
+    assert!(w.req.delete_parts.is_empty());
+    w.handle(WKey::Char('x'));
+    // the freed space is now a big free-space row: choose it
+    w.row_sel = w.rows().iter().position(|r| matches!(r, Row::Gap { bytes, .. } if *bytes > 3 * GIB)).expect("the freed space is listed");
+    w.handle(WKey::Enter);
+    assert_eq!(w.page, Page::Plan, "{:?}", w.error);
+    let plan_text = w.render(100);
+    assert!(plan_text.contains("delete") && plan_text.contains("sda3") && plan_text.contains("create"), "{plan_text}");
+    w.handle(WKey::Enter);
+    assert_eq!(w.page, Page::Confirm);
+    let screen = w.render(100);
+    assert!(screen.contains("Will be ERASED") && screen.contains("sda3") && screen.contains("I understand"), "{screen}");
+    // Install without the box is not a write
+    w.cfocus = CFocus::Install;
+    assert_ne!(w.handle(WKey::Enter), Next::Write, "the erase box has to be ticked first");
+    assert_eq!(whole_file_hash(&path), h0, "the pages never write");
+    // Esc goes back to the list with the mark still there; Mode again clears it
+    w.page = Page::Choose;
+    assert_eq!(w.req.delete_parts, vec![3]);
+    w.page = Page::Mode;
+    w.handle(WKey::Enter);
+    assert!(w.req.delete_parts.is_empty(), "a new choice of mode starts without marks");
 }

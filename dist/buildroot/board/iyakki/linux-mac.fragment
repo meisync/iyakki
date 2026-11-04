@@ -91,7 +91,12 @@ CONFIG_SND_HDA_CODEC_CIRRUS=m
 CONFIG_SND_HDA_CODEC_CA0132=m
 
 # ---- Graphics: Intel (Haswell HD 5000 needs no firmware blob) ------------------------------------------
-CONFIG_DRM_I915=m
+# Built in, not a module: a module is loaded after the system image is mounted (4 to 6 s), so the screen goes dark in the middle of the
+# boot animation while the Intel driver takes the display from the firmware's framebuffer (a full mode set; on a USB-C monitor also
+# a re-negotiation that resets the monitor's USB hub, touch screen included). Built in, it starts with the kernel and that happens at
+# about 1 to 3 s, while the first stage is still waiting for the stick. Its display firmware (DMC) is in the first-stage RAM disk
+# (lean-image.sh), where a built-in driver finds it. docs/MAC-HARDWARE.md "blank screen and flicker at start". Configuration only.
+CONFIG_DRM_I915=y
 # Radeon Pro of the 15"/16" MacBook Pro (555X/560X Polaris 11, Vega 16/20 = Vega 12, 5300M/5500M Navi 14): amdgpu, already
 # in linux.fragment; its firmware (amdgpu/polaris11_*, vega12_*, navi14_*) is in the `hw` firmware set. Patch 0004: 5300M boot.
 CONFIG_DRM_AMDGPU=m
@@ -111,6 +116,11 @@ CONFIG_MFD_INTEL_LPSS_PCI=m
 CONFIG_MFD_INTEL_LPSS_ACPI=m
 CONFIG_KEYBOARD_APPLESPI=m
 CONFIG_INPUT_UINPUT=m
+
+# A touch monitor's panel (27c0:0859 and others) is bound by hid-generic as soon as it appears; a hid-multitouch that loads a second later
+# takes it over, and on a USB-C monitor (whose hub resets while its display link retrains) the panel then stays silent until it is
+# plugged in again. Built in, hid-multitouch is the driver from the first bind and there is no second one.
+CONFIG_HID_MULTITOUCH=y
 
 # ---- Modules: no signature enforcement, so a prebuilt driver-pack module for this exact kernel can load ------------
 # (not set: CONFIG_MODULE_SIG_FORCE, CONFIG_SECURITY_LOCKDOWN_LSM; leaving them unset is the existing behaviour)

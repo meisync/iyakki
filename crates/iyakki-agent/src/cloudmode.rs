@@ -103,6 +103,24 @@ pub fn app_class(app: App) -> Class {
     }
 }
 
+/// What a browser can supply to a session in place of local hardware (`browsermedia.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserSource {
+    SoundOut,
+    Mic,
+    Camera,
+}
+
+/// Which browser sources can stand in for the hardware an app needs. Derived from [`app_class`], so a new app is placed there first.
+pub fn browser_supply(app: App) -> &'static [BrowserSource] {
+    match app_class(app) {
+        Class::Hardware(Need::Audio) if app == App::Voice => &[BrowserSource::SoundOut, BrowserSource::Mic],
+        Class::Hardware(Need::Audio) => &[BrowserSource::SoundOut],
+        Class::Hardware(Need::Camera) => &[BrowserSource::Camera],
+        Class::Hardware(_) | Class::Remote => &[],
+    }
+}
+
 /// The Settings pages that need hardware (by the name Settings knows them under). Network stays: wired settings are remote-safe.
 pub const SETTINGS_PAGES: [(&str, Need); 4] = [("sound", Need::Audio), ("display", Need::Display), ("keyboard", Need::Input), ("bluetooth", Need::Bluetooth)];
 
@@ -221,6 +239,20 @@ impl CloudMode {
         self.hidden_menu_entries.contains(&entry)
     }
 
+    /// The same mode with the apps a connected browser supplies the hardware for shown again (the browser's sound, microphone or
+    /// camera is on for this session). Nothing changes when the mode is off or no source is on.
+    pub fn with_browser(&self, src: &crate::browsermedia::Sources) -> CloudMode {
+        let on = |b: BrowserSource| match b {
+            BrowserSource::SoundOut => src.audio_out,
+            BrowserSource::Mic => src.mic,
+            BrowserSource::Camera => src.camera,
+        };
+        let mut c = self.clone();
+        c.hidden_apps.retain(|a| !browser_supply(*a).iter().any(|b| on(*b)));
+        c.camera_watch |= src.camera;
+        c
+    }
+
     /// The About / Settings line: the mode and why.
     pub fn about_line(&self) -> String {
         format!("{} {}", if self.on { "Cloud mode: on." } else { "Cloud mode: off." }, self.why)
@@ -294,6 +326,36 @@ mod tests {
         for a in [App::Chat, App::Rag, App::Mcp, App::Cli, App::Skills, App::Calendar, App::Ide, App::Edit, App::Data, App::Dash, App::Flows, App::Runs, App::SrePilot, App::System, App::Store, App::Users, App::Usage, App::Scan, App::Mesh, App::Browser, App::Settings, App::K8s] {
             assert_eq!(app_class(a), Class::Remote, "{a:?} is remote-safe");
         }
+    }
+
+    #[test]
+    fn browser_sources_bring_back_the_tiles_they_stand_in_for() {
+        use crate::browsermedia::Sources;
+        // every app has a class, and the browser can supply exactly the audio and camera ones (not DISKS)
+        for a in App::ALL {
+            let sup = browser_supply(a);
+            match app_class(a) {
+                Class::Remote => assert!(sup.is_empty(), "{a:?}"),
+                Class::Hardware(Need::Audio) => assert!(sup.contains(&BrowserSource::SoundOut), "{a:?}"),
+                Class::Hardware(Need::Camera) => assert_eq!(sup, &[BrowserSource::Camera]),
+                Class::Hardware(_) => assert!(sup.is_empty(), "{a:?}"),
+            }
+        }
+        let bare = cloud_mode(Setting::On, &Facts::full());
+        assert!(bare.hides_app(App::Media) && bare.hides_app(App::Camera) && bare.hides_app(App::Voice));
+        let none = Sources::default();
+        assert_eq!(bare.with_browser(&none), bare, "nothing on, nothing changes");
+        let sound = bare.with_browser(&Sources { audio_out: true, ..none });
+        for a in [App::Media, App::Radio, App::Tales, App::Voice] {
+            assert!(!sound.hides_app(a), "{a:?} works with the browser's speakers");
+        }
+        assert!(sound.hides_app(App::Camera) && sound.hides_app(App::Disks));
+        let cam = bare.with_browser(&Sources { camera: true, ..none });
+        assert!(!cam.hides_app(App::Camera) && cam.hides_app(App::Media) && cam.camera_watch);
+        let mic = bare.with_browser(&Sources { mic: true, ..none });
+        assert!(!mic.hides_app(App::Voice) && mic.hides_app(App::Media), "the microphone brings back VOICE (dictation) only");
+        let off = cloud_mode(Setting::Off, &Facts::bare());
+        assert_eq!(off.with_browser(&Sources { camera: true, mic: true, audio_out: true, clip_read: false }), off);
     }
 
     #[test]

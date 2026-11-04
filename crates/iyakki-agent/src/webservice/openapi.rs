@@ -23,7 +23,7 @@ pub fn schemas() -> Map<String, Value> {
     };
     put("Error", obj(json!({"error": obj(json!({"code": {"type": "string", "enum": ["not_found", "denied", "unsupported", "invalid_input", "busy", "io", "unauthorized", "rate_limited", "too_large", "unavailable"]}, "message": s}), &["code", "message"])}), &["error"]));
     put("Ok", obj(json!({"ok": b}), &["ok"]));
-    put("Health", obj(json!({"status": s, "profile": s}), &["status"]));
+    put("Health", obj(json!({"status": s, "profile": s, "vault": s}), &["status"]));
     put("Version", obj(json!({"product": s, "version": s, "api": s, "profile": s}), &["product", "version", "api", "profile"]));
     put("LoginRequest", obj(json!({"name": s, "password": s}), &["name", "password"]));
     put("LoginResponse", obj(json!({"token": s, "expires_in": i, "user": s, "role": s}), &["token", "expires_in", "user", "role"]));
@@ -42,7 +42,20 @@ pub fn schemas() -> Map<String, Value> {
     put("AdminStatus", obj(json!({"tokens": i, "runs_going": i, "approvals_pending": i}), &["tokens", "runs_going", "approvals_pending"]));
     put("FlowList", obj(json!({"flows": any_arr}), &["flows"]));
     put("Flow", json!({"type": "object"}));
-    put("DataCall", obj(json!({"tool": {"type": "string", "enum": ["data_open", "data_describe", "data_query"]}, "args": {"type": "object"}}), &["tool", "args"]));
+    put("DataCall", obj(json!({"tool": {"type": "string", "enum": ["data_open", "data_describe", "data_query"]}, "args": {"type": "object"}, "namespace": s}), &["tool", "args"]));
+    put("TenantView", obj(json!({"user": s, "tenant_role": s, "members": any_arr, "namespaces": any_arr}), &["user", "tenant_role", "members", "namespaces"]));
+    put("TenantMemberChange", obj(json!({"name": s, "role": {"type": "string", "enum": ["member", "admin", "owner", "remove"]}}), &["name", "role"]));
+    put("NamespaceChange", obj(json!({"name": s, "action": {"type": "string", "enum": ["create", "delete"]}}), &["name", "action"]));
+    put("NsMemberChange", obj(json!({"name": s, "role": {"type": "string", "enum": ["viewer", "editor", "admin", "remove"]}}), &["name", "role"]));
+
+    let scope = json!({"type": "string", "enum": ["person", "shared", "personal"]});
+    put("FileList", obj(json!({"path": s, "entries": any_arr}), &["path", "entries"]));
+    put("FileContent", obj(json!({"path": s, "content": s}), &["path", "content"]));
+    put("FileWrite", obj(json!({"scope": scope, "namespace": s, "path": s, "content": s}), &["path", "content"]));
+    put("FileDelete", obj(json!({"scope": scope, "namespace": s, "path": s, "recursive": b}), &["path"]));
+    put("GitClone", obj(json!({"scope": scope, "namespace": s, "url": s, "folder": s, "branch": s, "depth": i}), &["url"]));
+    put("GitCloned", obj(json!({"folder": s, "removed_links": i}), &["folder", "removed_links"]));
+    put("GitCloneList", obj(json!({"clones": any_arr}), &["clones"]));
     put("DataResult", obj(json!({"result": s}), &["result"]));
     m
 }

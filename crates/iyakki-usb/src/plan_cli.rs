@@ -36,6 +36,7 @@ OPTIONS:
   --boot-part <n>        reuse: the partition number that becomes BOOT (FAT32, formatted)
   --data-part <n>        reuse: the partition number that becomes DATA (formatted)
   --keep-esp             dual boot: keep the disk's EFI System Partition; add only EFI/IYAKKI and a boot entry
+  --delete-part N        delete existing partition N first (repeatable; free-space and custom mode); its space is used; erases its data
   --boot-mib <n>, --data-mib <n>    custom sizes
   --table <t>            auto | gpt | mbr (a new table; existing tables are kept)
   --confirm-running-disk the disk holds the running system: changing its free space is allowed after the typed confirmation
@@ -67,6 +68,8 @@ pub struct Opts {
     pub boot_part: Option<u32>,
     pub data_part: Option<u32>,
     pub keep_esp: bool,
+    /// `--delete-part N` (repeatable): delete this existing partition first (free-space and custom mode).
+    pub delete_parts: Vec<u32>,
     pub boot_mib: Option<u64>,
     pub data_mib: Option<u64>,
     pub table: Option<String>,
@@ -100,6 +103,7 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
             "--machine" => o.machine = true,
             "--no-boot-entry" => o.no_boot_entry = true,
             "--keep-esp" => o.keep_esp = true,
+            "--delete-part" => o.delete_parts.push(num(a, it.next())? as u32),
             "--confirm-running-disk" => o.confirm_running_disk = true,
             "--disk" => o.disk = Some(it.next().ok_or("--disk needs a drive name")?.trim_start_matches("/dev/").to_string()),
             "--confirm" => o.confirm = Some(it.next().ok_or("--confirm needs the drive name")?.trim_start_matches("/dev/").to_string()),
@@ -155,6 +159,7 @@ impl Opts {
             data_mib: self.data_mib,
             table: TableChoice::parse(self.table.as_deref().unwrap_or("auto"))?,
             confirm_running_disk: self.confirm_running_disk,
+            delete_parts: self.delete_parts.clone(),
             zram: self.zram.clone().unwrap_or_else(|| "auto".into()),
             swapfile: self.swapfile.clone().unwrap_or_else(|| "off".into()),
             hostname: self.hostname.clone(),
