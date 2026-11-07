@@ -42,7 +42,7 @@ fn the_voice_tile_is_one_tile_in_home_for_everyone_but_guests() {
     assert_eq!((PApp::Voice.id(), PApp::Voice.label().as_str()), ("voice", "VOICE"));
     assert_eq!(Group::of(PApp::Voice), Some(Group::Home));
     assert_eq!(TILES.len(), PApp::ALL.len() - 1, "every app but the inbox has a tile");
-    assert_eq!(PApp::ALL.len(), 35, "LEARN, CHECK-UP, DOCTOR, GIT, LAB, DISKS, LINUX WINDOW, VOICE and K8S are the newest tiles");
+    assert_eq!(PApp::ALL.len(), 37, "LEARN, CHECK-UP, DOCTOR, GIT, LAB, DISKS, LINUX WINDOW, VOICE, K8S, DEV TOOLS and AUTH are the newest tiles");
     for r in [Role::Admin, Role::Operator, Role::User] {
         assert!(r.template().apps.contains(&PApp::Voice), "{r:?}");
     }

@@ -116,6 +116,20 @@ if [ "$SB" = 1 ]; then
   rm -f "$ROOT/EFI/BOOT/bootx64.efi"
   sh "$BOARD/../../secureboot.sh" image - "$ROOT" || { echo "post-image: the Secure Boot signing step failed" >&2; exit 1; }
 fi
+# the extra boot loader (iyakki-boot): EFI/iyakki-boot/{loader.efi,boot.cfg,splash.bmp} when the loader program was built (see the script's header);
+# GRUB's "IYAKKI - new boot loader (test)" entry shows only then. Not signed here: under Secure Boot sign loader.efi with iyakki-boot/tools/sign.sh.
+sh "$BOARD/../../boot-loader-stage.sh" "$ROOT" /boot/initrd || echo "post-image: the extra boot loader was not staged (image is fine without it)" >&2
+# IYAKKI_LOADER_DEFAULT=1 (default 0: GRUB stays the default way in): the loader becomes shim's second stage (EFI/BOOT/grubx64.efi) or, without
+# shim, EFI/BOOT/BOOTX64.EFI, GRUB is kept as EFI/BOOT/grub-recovery.efi (the loader's Recovery row) and GRUB's own "new boot loader (test)"
+# entry is dropped. Signed with the image key when IYAKKI_SB_KEY / IYAKKI_SB_CERT are set, else UNSIGNED (Secure Boot off only).
+# docs/development/GRUB-REPLACEMENT-PLAN.md step 2. The live ISO is not touched: it keeps GRUB (it must start on BIOS too).
+if [ "${IYAKKI_LOADER_DEFAULT:-0}" = 1 ]; then
+  if sh "$BOARD/../../loader-default.sh" esp "$ROOT"; then
+    sh "$BOARD/../../loader-default.sh" grubcfg "$ROOT/boot/grub/grub.cfg"
+  else
+    echo "post-image: IYAKKI_LOADER_DEFAULT=1 but the loader could not be made the default: this image keeps GRUB as the default" >&2
+  fi
+fi
 # partition 2 starts with our marker; the rest is zeros (IYAKKI formats it on first boot)
 dd if=/dev/zero of="$BINARIES_DIR/data-marker.img" bs=1M count=1 2>/dev/null
 printf 'IYAKKI-FORMAT-ME-v1\0' | dd of="$BINARIES_DIR/data-marker.img" conv=notrunc 2>/dev/null

@@ -1,0 +1,9 @@
+[package]
+name = "boot-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Host-testable core of a small boot loader: config, entry choice, boot assessment, command line rules, discovery model, menu model"
+
+[dependencies]

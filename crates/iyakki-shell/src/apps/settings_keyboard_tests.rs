@@ -391,3 +391,75 @@ fn the_probe_touch_screen_button_switches_the_panel_off_and_on_and_a_second_pres
     assert!(status(&a).contains("USB hub"), "{}", status(&a));
     assert!(cx.audit.recent(20).iter().any(|l| l.contains("settings.touch.probe")));
 }
+
+#[test]
+fn the_input_profile_cycles_applies_at_once_is_saved_and_old_files_load() {
+    let cx = admin("kb-profile");
+    let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-profile"));
+    goto(&mut a, &cx, Tab::Keyboard);
+    let prof = |cx: &AppCx| cx.services.settings.lock().unwrap().get().keyboard.profile.clone();
+    assert_eq!(prof(&cx), "", "Automatic is the default");
+    let rows = a.kbd_rows(&cx);
+    assert!(rows[0].0 == "Input profile" && rows[0].1.starts_with("Automatic"), "{rows:?}");
+    assert!(rows.iter().any(|r| r.0 == "What you will see: last key") && rows.iter().any(|r| r.0 == "What you will see: last scroll"));
+    key(&mut a, &cx, Key::Char('v'));
+    assert_eq!((prof(&cx).as_str(), crate::inputprofile::resolved()), ("mac", iyakki_agent::inputprofile::Resolved::Mac), "live without a restart");
+    assert!(a.kbd_rows(&cx)[0].1.starts_with("Mac: Mac (chosen by you)"), "{:?}", a.kbd_rows(&cx)[0]);
+    key(&mut a, &cx, Key::Char('v'));
+    assert_eq!((prof(&cx).as_str(), crate::inputprofile::resolved()), ("pc", iyakki_agent::inputprofile::Resolved::Pc));
+    key(&mut a, &cx, Key::Char('v'));
+    assert_eq!(prof(&cx), "");
+    // the swap row says in one line that the two never swap twice
+    assert!(SettingsApp::kbd_help("ISO layout / Option-Command swap").unwrap().contains("never swaps twice"));
+    // an old settings file without `profile` loads as Automatic
+    let old: iyakki_agent::keyboard::KeyboardSettings = serde_json::from_str("{\"swap_opt_cmd\":true}").unwrap();
+    assert_eq!(old.profile, "");
+}
+
+#[test]
+fn reset_to_profile_defaults_puts_the_pointer_choices_back_and_leaves_the_keyboard_alone() {
+    let cx = admin("kb-reset");
+    let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-reset"));
+    goto(&mut a, &cx, Tab::Keyboard);
+    key(&mut a, &cx, Key::Char('v')); // Mac
+    key(&mut a, &cx, Key::Char('n')); // trackpad natural off
+    key(&mut a, &cx, Key::Char('w')); // wheel natural on
+    key(&mut a, &cx, Key::Char('s')); // speed 150
+    key(&mut a, &cx, Key::Char('r')); // repeat rate
+    let k = |cx: &AppCx| cx.services.settings.lock().unwrap().get().keyboard.clone();
+    assert_eq!((k(&cx).trackpad().1, k(&cx).scroll().wheel_natural, k(&cx).scroll().speed_pct), (false, true, 150));
+    key(&mut a, &cx, Key::Char('x'));
+    let after = k(&cx);
+    assert_eq!((after.trackpad(), after.scroll().wheel_natural, after.scroll().speed_pct), ((true, true), false, 100));
+    assert_eq!((after.profile.as_str(), after.repeat_rate), ("mac", 10), "profile and key repeat are kept");
+    assert!(status(&a).contains("Mac profile's defaults"), "{}", status(&a));
+}
+
+#[test]
+fn every_row_with_a_control_has_a_help_line_and_the_buttons_exist() {
+    let cx = admin("kb-help");
+    let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-help"));
+    goto(&mut a, &cx, Tab::Keyboard);
+    for l in ["Input profile", "Function keys", "Trackpad", "Scrolling", "Touch Bar", "Touch Bar strips", "ISO layout / Option-Command swap", "Key repeat"] {
+        let h = SettingsApp::kbd_help(l).unwrap_or_else(|| panic!("no help for {l}"));
+        assert!(h.len() > 20 && h.len() < 220, "{l}: {h}");
+    }
+    let names: Vec<_> = a.keyboard_buttons().iter().map(|b| b.0).collect();
+    assert!(names.contains(&"Input profile") && names.contains(&"Reset to profile defaults"), "{names:?}");
+    // the existing buttons are all still there
+    for n in ["Function keys", "Touch Bar", "ISO layout", "Swap Option/Cmd", "Repeat delay", "Repeat rate", "Trackpad tap", "Trackpad scroll", "Wheel direction", "Smooth scrolling", "Momentum", "Test keyboard light", "Test sound"] {
+        assert!(names.contains(&n), "{n}");
+    }
+}
+
+#[test]
+fn the_reset_touch_screen_button_is_next_to_the_probe_button_and_a_plain_status_line_is_shown() {
+    let cx = admin("kb-touch-reset");
+    let mut a = SettingsApp::new(&cx).with_keyboard_sys(temp_dir("kb-touch-reset-sys"));
+    goto(&mut a, &cx, Tab::Keyboard);
+    // mouse, touch and keyboard all reach the same button: it has a label and a key
+    assert!(a.keyboard_buttons().iter().any(|b| b.0 == "Reset touch screen" && b.2 == 'z'));
+    assert!(a.keyboard_buttons().iter().any(|b| b.0 == "Probe touch screen"));
+    let text = a.kbd_rows(&cx).iter().map(|(l, v, _)| format!("{l}: {v}")).collect::<Vec<_>>().join("\n");
+    assert!(text.contains("Touch recovery: ") && text.contains("Reset touch screen"), "{text}");
+}

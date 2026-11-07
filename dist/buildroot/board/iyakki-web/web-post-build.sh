@@ -67,6 +67,30 @@ else
     echo "web-post-build: H.264/AAC (gst-libav, FFmpeg programs and libraries) removed from the image (WEB_AV_ADDON=1 keeps an inactive bridge, WEB_H264=1 the whole codec)"
   fi
 fi
+
+# The add-on RECIPE (the image never carries FFmpeg; the administrator supplies the libraries, docs/development/AV-ADDON-BUILD.md): the script
+# that makes the archive, the Buildroot option fragment, the check tool and a README. /local is a link to the data volume's local folder,
+# where the installer looks for ffmpeg-libs-*-linux-musl-<arch>.tar.gz (the agent creates local/packages at first use).
+if [ "${IYAKKI_WEB_AV_ADDON:-0}" = 1 ]; then
+  RECIPE="$TARGET_DIR/usr/share/iyakki/av-addon"
+  mkdir -p "$RECIPE" "$TARGET_DIR/usr/bin"
+  install -m 0755 "$REPO/dist/buildroot/package-av-addon.sh" "$RECIPE/package-av-addon.sh"
+  install -m 0755 "$REPO/dist/addons/ffmpeg-libs/iyakki-av-check" "$RECIPE/iyakki-av-check"
+  install -m 0644 "$REPO/dist/buildroot/configs/iyakki_web_av_addon_libs.fragment" "$RECIPE/iyakki_web_av_addon_libs.fragment"
+  install -m 0644 "$REPO/dist/addons/ffmpeg-libs/README" "$RECIPE/README"
+  install -m 0644 "$REPO/dist/addons/ffmpeg-libs/LICENSES" "$RECIPE/LICENSES"
+  ln -sf ../share/iyakki/av-addon/iyakki-av-check "$TARGET_DIR/usr/bin/iyakki-av-check"
+  # the version map and the build recipe of the iyakki-media-bridge repository (copied there by dist/addons/ffmpeg-libs/sync-bridge.sh, never fetched
+  # here): the agent's "Build it here (k3s)" reads versions.map for this image's IYAKKI version and hands recipe/ to the build Job after checking RECIPE.SHA256
+  mkdir -p "$RECIPE/bridge/recipe/files"
+  install -m 0644 "$REPO/dist/addons/ffmpeg-libs/bridge/versions.map" "$RECIPE/bridge/versions.map"
+  install -m 0644 "$REPO/dist/addons/ffmpeg-libs/bridge/RECIPE.SHA256" "$RECIPE/bridge/RECIPE.SHA256"
+  install -m 0644 "$REPO/dist/addons/ffmpeg-libs/bridge/BRIDGE-SOURCE" "$RECIPE/bridge/BRIDGE-SOURCE"
+  install -m 0644 "$REPO/dist/addons/ffmpeg-libs/bridge/recipe/build.sh" "$RECIPE/bridge/recipe/build.sh"
+  install -m 0644 "$REPO/dist/addons/ffmpeg-libs/bridge/recipe/configure-args.txt" "$RECIPE/bridge/recipe/configure-args.txt"
+  install -m 0644 "$REPO/dist/addons/ffmpeg-libs/bridge/recipe/files/iyakki-av-check" "$RECIPE/bridge/recipe/files/iyakki-av-check"
+  ln -sfn var/lib/iyakki/local "$TARGET_DIR/local"
+fi
 # nothing of FFmpeg's own may remain in the image unless a switch asked for it (checked by dist/buildroot/test-av-addon.sh)
 
 # The browser's persistent profiles live on the data volume (the launcher creates /var/lib/iyakki/web-profile/<user>).

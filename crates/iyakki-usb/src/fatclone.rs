@@ -252,8 +252,34 @@ pub trait Editor {
     fn rewrite(&mut self, path: &str, data: Vec<u8>) -> Vec<u8>;
 }
 
+/// The marker file that makes the boot loader show "Install to a disk" on its first level: only install media carry it (a disk that was installed
+/// from them does not, and neither does an update pack).
+pub const INSTALL_MEDIA_MARKER: &str = "/EFI/iyakki-boot/install-media";
+
+/// Is this the install-media marker (long names, any case)?
+pub fn is_install_media_marker(path: &str) -> bool {
+    path.eq_ignore_ascii_case(INSTALL_MEDIA_MARKER)
+}
+
 /// Copies everything as it is.
 pub struct Unchanged;
+
+/// Another editor's decisions, and the install-media marker left out. Used when a disk is installed FROM a running stick (a block device):
+/// the new disk is not install media. Writing a stick from an image file keeps the marker (it uses the plain editor).
+pub struct WithoutInstallMarker<'a>(pub &'a mut dyn Editor);
+
+impl Editor for WithoutInstallMarker<'_> {
+    fn decide(&mut self, path: &str) -> Edit {
+        if is_install_media_marker(path) {
+            Edit::Skip
+        } else {
+            self.0.decide(path)
+        }
+    }
+    fn rewrite(&mut self, path: &str, data: Vec<u8>) -> Vec<u8> {
+        self.0.rewrite(path, data)
+    }
+}
 
 impl Editor for Unchanged {
     fn decide(&mut self, _: &str) -> Edit {
@@ -524,6 +550,21 @@ pub fn clone_to_with<R: Read + Seek>(src: &mut Fat32<R>, sector: u32, total_byte
 pub(crate) mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn the_install_media_marker_is_never_copied_to_an_installed_disk() {
+        assert!(is_install_media_marker("/EFI/iyakki-boot/install-media") && is_install_media_marker("/efi/IYAKKI-BOOT/Install-Media"));
+        assert!(!is_install_media_marker("/EFI/iyakki-boot/boot.cfg") && !is_install_media_marker("/install-media"));
+        // writing a stick from an image file keeps the marker (the plain and the lean editors do not touch it) ...
+        assert!(matches!(Unchanged.decide("/EFI/iyakki-boot/install-media"), Edit::Keep));
+        assert!(matches!(crate::leanstrip::LeanFree::new().decide("/EFI/iyakki-boot/install-media"), Edit::Keep));
+        // ... installing from a running stick onto a disk leaves it out, whichever editor does the rest
+        let mut plain = Unchanged;
+        assert!(matches!(WithoutInstallMarker(&mut plain).decide("/EFI/iyakki-boot/install-media"), Edit::Skip));
+        assert!(matches!(WithoutInstallMarker(&mut plain).decide("/EFI/iyakki-boot/boot.cfg"), Edit::Keep));
+        let mut lean = crate::leanstrip::LeanFree::new();
+        assert!(matches!(WithoutInstallMarker(&mut lean).decide("/EFI/iyakki-boot/install-media"), Edit::Skip), "also over the lean cloner");
+    }
 
     /// A small FAT32 volume built by hand: `bps`-byte sectors, `spc` sectors per cluster, 8.3 names only, files in the
     /// root, in `BOOT` and in `BOOT/GRUB`, plus a made-up long-name entry (copied verbatim by the cloner).

@@ -13,6 +13,9 @@
 //! Stress addresses: `fake://crash-mid-frame`, `fake://badframes` (pictures that do not fit), `fake://spam` (frames without acks),
 //! `fake://noisy-stderr` (binary and endless stderr); a script starting with `EXIT` kills the helper.
 //!
+//! A press in the top left 100x100 picture pixels focuses a "text box", the 100x100 next to it a "password box", anywhere else
+//! blurs (the shell's focus probe is answered with that).
+//!
 //! Options: `--static` draws no animation (tests that look at exact pixels), `--fps N` (default 30).
 
 use std::fs::OpenOptions;
@@ -38,6 +41,8 @@ struct Fake {
     history: Vec<String>,
     idx: usize,
     busy: [bool; 2],
+    /// What has the focus after the last press: 0 nothing, 1 a text box (top left 100x100), 2 a password box (the 100x100 next to it).
+    input: u8,
     next_slot: u8,
     dirty: Option<Rect>,
     visible: bool,
@@ -226,6 +231,9 @@ impl Fake {
                 self.send(FromHelper::Title(format!("size {}x{}", self.w, self.h)));
             }
             ToHelper::Mouse { kind, x, y, buttons, .. } => {
+                if matches!(kind, MouseKind::Down) {
+                    self.input = if (0..100).contains(&y) && (0..100).contains(&x) { 1 } else if (0..100).contains(&y) && (100..200).contains(&x) { 2 } else { 0 };
+                }
                 let old = self.mouse;
                 self.mouse = (x, y);
                 let pad = |p: (i32, i32)| if p.0 < -4 || p.1 < -4 { Rect::new(0, 0, 0, 0) } else { Rect::new((p.0 - 4).max(0) as u32, (p.1 - 4).max(0) as u32, 9, 9) };
@@ -260,6 +268,10 @@ impl Fake {
                     self.send(FromHelper::ScriptResult { id, ok: true, json: t.to_string() });
                 } else if let Some(t) = js.strip_prefix("THROW:") {
                     self.send(FromHelper::ScriptResult { id, ok: false, json: t.to_string() });
+                } else if js.contains("document.activeElement") {
+                    // the shell's probe of the focused element: \"t\" a text box, \"p\" a password box, empty anything else
+                    let a = ["", "t", "p"][self.input as usize];
+                    self.send(FromHelper::ScriptResult { id, ok: true, json: format!("{a:?}") });
                 } else if js.starts_with("EXIT") {
                     eprintln!("fake helper: exiting during a script");
                     std::process::exit(5);
@@ -370,7 +382,7 @@ fn main() {
             }
         }
     };
-    let mut f = Fake { stream: stream.try_clone().unwrap(), shm, w: 0, h: 0, img: Vec::new(), bar: 0, mouse: (-100, -100), history: Vec::new(), idx: 0, busy: [false; 2], next_slot: 0, dirty: None, visible: true, animate, hung: false, fs: false, audio: false, spam: 0, asked: 0, capturing: 0, hello: hello.clone() };
+    let mut f = Fake { stream: stream.try_clone().unwrap(), shm, w: 0, h: 0, img: Vec::new(), bar: 0, mouse: (-100, -100), history: Vec::new(), idx: 0, busy: [false; 2], input: 0, next_slot: 0, dirty: None, visible: true, animate, hung: false, fs: false, audio: false, spam: 0, asked: 0, capturing: 0, hello: hello.clone() };
     f.send(FromHelper::Ready { version: proto::VERSION, engine: "fake".into(), engine_version: "1".into() });
     f.resize(hello.w, hello.h);
     f.log(format!("got Hello {hello:?}"));

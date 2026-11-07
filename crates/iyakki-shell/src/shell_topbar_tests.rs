@@ -214,9 +214,16 @@ fn the_speaker_in_an_app_mutes_follows_the_wheel_and_drags_one_master_volume() {
     sh.render(&mut g);
     let r = label(&sh, "volume").unwrap();
     click(&mut sh, &mut g, r);
-    assert!(sh.env.services.master().muted, "a click mutes");
-    click(&mut sh, &mut g, r);
+    assert!(sh.volume_slider_open() && !sh.env.services.master().muted, "a click opens the dropdown and changes nothing");
+    let mute = label(&sh, "volume mute").expect("the dropdown's Mute button");
+    click(&mut sh, &mut g, mute);
+    assert!(sh.env.services.master().muted, "its Mute button mutes");
+    let unmute = label(&sh, "volume mute").expect("the same button, now Unmute");
+    click(&mut sh, &mut g, unmute);
     assert!(!sh.env.services.master().muted && sh.env.services.master().percent == 40, "and unmutes keeping the level");
+    sh.handle(&Event::Key(Key::Esc));
+    assert!(!sh.volume_slider_open(), "Esc closes the dropdown");
+    sh.render(&mut g);
     let (x, y) = centre(r);
     sh.handle(&Event::MouseMove(x, y));
     sh.handle(&Event::Scroll(2));

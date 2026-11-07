@@ -18,6 +18,7 @@ pub const fn rgb(r: u8, g: u8, b: u8) -> [u8; 4] {
 }
 
 fn col(c: [u8; 4]) -> Color {
+    let c = crate::theme::themed(c);
     Color::from_rgba8(c[0], c[1], c[2], c[3])
 }
 
@@ -430,6 +431,22 @@ impl Gfx {
         w
     }
 
+    /// A button for fingers: drawn like [`Gfx::button`], but the area that reacts (and lights up under the pointer) is at least
+    /// `hit_h` tall, centred on the drawn pill. Returns the width.
+    #[allow(clippy::too_many_arguments)]
+    pub fn button_touch(&mut self, x: f32, y: f32, size: f32, label: &str, accent: [u8; 4], ev: Event, hit_h: f32) -> f32 {
+        let w = self.text_width(size, label, Face::Bold) + size * 1.7;
+        let h = size * 2.1;
+        let hit_h = hit_h.max(h);
+        let pad = (hit_h - h) / 2.0;
+        let r = R::new(x, y, w, h);
+        let hot = self.hovered(R::new(x, y - pad, w, hit_h));
+        let tc = crate::fx::pill(self, r, size / 14.0, accent, hot, true);
+        self.text(x + size * 0.85, y + (h - self.line_height(size, Face::Bold)) / 2.0, size, tc, label, Face::Bold);
+        self.hit(R::new(x, y - pad, w, hit_h), ev, label);
+        w
+    }
+
     /// Round icon button; `active` highlights it (e.g. recording). Returns its diameter.
     pub fn icon_button(&mut self, x: f32, y: f32, d: f32, icon: Icon, color: [u8; 4], active: bool, ev: Event, label: &str) -> f32 {
         let r = R::new(x, y, d, d);
@@ -621,6 +638,7 @@ impl Gfx {
                 v.push((x, y, s.to_string()));
             }
         }
+        let color = crate::theme::themed(color);
         let px = size.round().max(MIN_TEXT_PX);
         let ascent = self.font(face).horizontal_line_metrics(px).map_or(px, |m| m.ascent);
         let base = y + ascent;

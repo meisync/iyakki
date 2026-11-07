@@ -244,3 +244,104 @@ fn a_tenant_denies_browser_media_by_default_and_the_pod_is_told() {
         assert!(y.contains("IYAKKI_BROWSER_MEDIA, value: deny") && y.matches("env:").count() >= 1, "{y}");
     }
 }
+
+// ---- where the session's sound plays ("Play sound on")
+
+fn later(ms: u64) -> Instant {
+    Instant::now() + Duration::from_millis(ms)
+}
+
+#[test]
+fn the_default_route_is_the_browser_and_the_machine_is_silent_only_while_the_sound_is_on() {
+    let (m, log) = media(Policy::allow_all());
+    assert_eq!(m.sink_mode(), SinkMode::Browser);
+    assert!(!muted_by(&[m.clone()], later(0)), "sound off: the machine plays");
+    m.set_audio_out(true);
+    assert!(muted_by(&[m.clone()], later(0)), "sound on in the browser: the machine is silent");
+    assert!(m.wants_audio() && m.push_audio(48_000, 2, &[1, 2]));
+    m.set_audio_out(false);
+    assert!(!muted_by(&[m.clone()], later(0)), "switched off: restored at once");
+    assert!(!log.lock().unwrap().iter().any(|l| l.starts_with("browser.media.route")), "nothing audited until the person chooses");
+}
+
+#[test]
+fn both_and_the_mac_only_never_silence_the_machine_and_the_mac_only_sends_nothing() {
+    let (m, log) = media(Policy::allow_all());
+    m.set_audio_out(true);
+    m.set_sink_mode(SinkMode::Both);
+    assert!(!muted_by(&[m.clone()], later(0)) && m.wants_audio() && m.push_audio(48_000, 2, &[1, 2]), "both: the machine plays and the page gets a copy");
+    m.set_sink_mode(SinkMode::Mac);
+    assert!(!muted_by(&[m.clone()], later(0)));
+    assert!(!m.wants_audio() && !m.push_audio(48_000, 2, &[1, 2]) && m.take_audio().is_empty(), "the Mac only: nothing is queued for the page");
+    m.set_sink_mode(SinkMode::Browser);
+    assert!(muted_by(&[m.clone()], later(0)));
+    let l = log.lock().unwrap().clone();
+    assert_eq!(l.iter().filter(|x| x.starts_with("browser.media.route")).cloned().collect::<Vec<_>>(), ["browser.media.route both", "browser.media.route mac", "browser.media.route browser"]);
+    assert!(m.take_messages().iter().any(|s| s.contains("\"sink\":\"browser\"")), "the page is told the route");
+}
+
+#[test]
+fn a_dropped_connection_or_a_hung_one_never_leaves_the_machine_muted() {
+    let (m, _) = media(Policy::allow_all());
+    m.connection(true);
+    m.set_audio_out(true);
+    assert!(muted_by(&[m.clone()], later(0)));
+    // the connection keeps asking for sound while it lives
+    m.take_audio();
+    assert!(muted_by(&[m.clone()], later(3_000)));
+    // it hangs or its thread died without telling anyone: after the liveness window the machine plays again
+    assert!(!muted_by(&[m.clone()], later(5_000)), "no pull for longer than SINK_ALIVE");
+    // and a page that goes away says so
+    m.take_audio();
+    assert!(muted_by(&[m.clone()], later(0)));
+    m.connection(false);
+    assert!(!muted_by(&[m.clone()], later(0)), "disconnect restores");
+    assert!(!m.sources().audio_out);
+}
+
+#[test]
+fn only_the_controlling_session_decides_and_other_sessions_are_not_touched() {
+    let (a, _) = media(Policy::allow_all());
+    let (b, _) = media(Policy::allow_all());
+    a.set_audio_out(true);
+    std::thread::sleep(Duration::from_millis(5));
+    b.set_audio_out(true);
+    b.set_sink_mode(SinkMode::Both);
+    assert_eq!(a.sink_mode(), SinkMode::Browser, "another session's choice is not changed");
+    assert!(!muted_by(&[a.clone(), b.clone()], later(0)), "b switched its sound on last: its Both applies, the machine plays");
+    b.set_audio_out(false);
+    assert!(muted_by(&[a.clone(), b.clone()], later(0)), "b is gone: a is controlling again");
+    // a session that is not playing at all never mutes
+    let (c, _) = media(Policy::allow_all());
+    assert!(!muted_by(&[c], later(0)));
+    // both pages get their copy by their own choice
+    b.set_audio_out(true);
+    a.set_sink_mode(SinkMode::Mac);
+    assert!(!a.wants_audio() && b.wants_audio());
+}
+
+#[test]
+fn a_policy_that_forbids_sound_keeps_the_machine_playing() {
+    let (m, log) = media(Policy::deny_all());
+    m.set_audio_out(true);
+    assert!(!muted_by(&[m], later(0)));
+    assert!(log.lock().unwrap().contains(&"browser.media.denied audio".to_string()));
+}
+
+#[test]
+fn the_camera_the_desktop_uses_is_the_one_that_has_it_on_else_the_last_page_that_may() {
+    // (the registry is process wide: this test only looks at names it registered itself, in order)
+    let (a, _) = media(Policy::allow_all());
+    let (b, _) = media(Policy::allow_all());
+    let (c, _) = media(Policy { camera: false, ..Policy::allow_all() });
+    register("cs-user-a", a.clone());
+    register("cs-user-b", b.clone());
+    register("cs-user-c", c.clone());
+    let pick = camera_session().unwrap();
+    assert!(Arc::ptr_eq(&pick, &c) == false, "a page whose policy forbids the camera is never offered");
+    a.set(Kind::Camera, true).unwrap();
+    assert!(Arc::ptr_eq(&camera_session().unwrap(), &a), "the page with the camera on comes first");
+    for u in ["cs-user-a", "cs-user-b", "cs-user-c"] {
+        unregister(u);
+    }
+}

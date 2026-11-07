@@ -612,7 +612,7 @@ fn install_all_in_this_category_has_the_same_review() {
     let items: Vec<Item> = qi::install_jobs(&cx.services.jobs, "root").iter().filter_map(qi::item_of).collect();
     assert!(items.contains(&Item::K3s) && items.contains(&Item::Elasticsearch) && items.contains(&Item::Registry), "{items:?}");
     // a category with nothing missing: a plain answer
-    let (mut b, cxb) = rig("su-cat-all2", Role::Admin, full_machine(), facts(&[(Item::Ffmpeg, Presence::Installed("v7".into()))]));
+    let (mut b, cxb) = rig("su-cat-all2", Role::Admin, full_machine(), facts(&[(Item::Ffmpeg, Presence::Installed("v7".into())), (Item::FfmpegLibs, Presence::Installed("6.1.5".into()))]));
     b.setup.ask_category(Gk::Media);
     assert!(b.setup.confirm.is_none() && b.setup.note.as_ref().is_some_and(|n| n.1 && n.0.contains("Nothing in Media tools")));
     let _ = cxb;
@@ -1187,7 +1187,7 @@ fn the_setup_ids_sit_above_every_id_the_store_uses() {
         assert!((20_000..21_000).contains(&id));
     }
     // and the ranges do not run into each other
-    let ranges = [(FILTER, 5), (INSTALL_ALL, 1), (CONFIRM_YES, 2), (SEARCH, 1), (BAR, 1), (POP_CLOSE, 5), (CAT, 9), (PRIMARY, 32), (DETAILS, 32), (MORE, 32), (TILE, 32), (LOGOUT, 32), (DELETE, 1), (STOP, 32)];
+    let ranges = [(FILTER, 5), (INSTALL_ALL, 1), (CONFIRM_YES, 2), (SEARCH, 1), (BAR, 1), (POP_CLOSE, 5), (CAT, 9), (PRIMARY, 32), (DETAILS, 32), (MORE, 32), (TILE, 32), (LOGOUT, 32), (DELETE, 1), (STOP, 32), (BUILD, 32)];
     for (i, (a, n)) in ranges.iter().enumerate() {
         for (b, m) in ranges.iter().skip(i + 1) {
             assert!(a + n <= *b || b + m <= *a, "{a}+{n} runs into {b}+{m}");

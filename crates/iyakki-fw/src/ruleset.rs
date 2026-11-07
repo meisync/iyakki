@@ -98,11 +98,13 @@ pub struct Ctx {
     pub direct_ifaces: Vec<String>,
     /// Administrator switch "Allow more on direct links": everything is let in on them (default: only [`DEV_PORT`], the beacon and ICMP).
     pub direct_allow_more: bool,
+    /// The interface that internet sharing serves (`iyakki_agent::sharing`) while it is on: only DHCP (UDP 67) and DNS (UDP 53) come in on it.
+    pub share_ifaces: Vec<String>,
 }
 
 impl Default for Ctx {
     fn default() -> Ctx {
-        Ctx { now: 0, ssh_boot: false, ipv6: true, cloud: false, remote_port: None, direct_ifaces: Vec::new(), direct_allow_more: false }
+        Ctx { now: 0, ssh_boot: false, ipv6: true, cloud: false, remote_port: None, direct_ifaces: Vec::new(), direct_allow_more: false, share_ifaces: Vec::new() }
     }
 }
 
@@ -237,6 +239,15 @@ fn direct_rules(name: &str, allow_more: bool, out: &mut Vec<RuleSpec>) {
     out.push(rule("direct link: nothing else (presets and rules for the local network do not apply on the cable)", vec![iif(), Step::Drop]));
 }
 
+/// The "internet sharing" zone of one interface: the devices on the other side of the cable may ask for an address (UDP 67) and for names
+/// (UDP 53) and nothing else. Nothing is allowed for them to reach the machine's own services (no ping, no SSH, no web).
+fn share_rules(name: &str, out: &mut Vec<RuleSpec>) {
+    let iif = || Step::Iif { name: name.to_string(), prefix: false };
+    out.push(rule("sharing: address requests (DHCP)", vec![iif(), Step::Nfproto(NFPROTO_IPV4), Step::L4(17), Step::Dport(67, 67), Step::Accept]));
+    out.push(rule("sharing: name lookups (DNS)", vec![iif(), Step::Nfproto(NFPROTO_IPV4), Step::L4(17), Step::Dport(53, 53), Step::Accept]));
+    out.push(rule("sharing: nothing else from the devices that use this machine's internet", vec![iif(), Step::Drop]));
+}
+
 /// Build the rules. Rules that fail the checks are reported in `problems` and left out (the page validates before it saves,
 /// so this only happens for a hand-edited file).
 pub fn build(cfg: &Config, resolved: &Resolved, ctx: &Ctx) -> Result<Built, String> {
@@ -259,6 +270,9 @@ pub fn build(cfg: &Config, resolved: &Resolved, ctx: &Ctx) -> Result<Built, Stri
     }
     for n in ctx.direct_ifaces.iter().filter(|n| valid_iface(n)) {
         direct_rules(n, ctx.direct_allow_more, &mut out);
+    }
+    for n in ctx.share_ifaces.iter().filter(|n| valid_iface(n)) {
+        share_rules(n, &mut out);
     }
     match cfg.ping {
         Ping::Off => {}

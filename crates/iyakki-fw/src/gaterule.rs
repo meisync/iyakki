@@ -88,11 +88,33 @@ pub fn sync(h: &Handle, ports: &BTreeSet<u16>, reach: Reach, who: &str) -> Resul
     }
     let (new, changes) = plan(e.config(), ports, reach, e.ctx().ipv6);
     if new == *e.config() {
+        // nothing to change, but opening ports on a firewall that does not hold is still refused
+        if !ports.is_empty() {
+            enforcing(&e)?;
+        }
         return Ok(vec![]);
     }
     e.propose(new, who)?;
-    e.keep(who)?;
+    // with the firewall off nothing waits for Keep; the check below then says why the port is not gated
+    if matches!(e.status(), Status::Pending { .. }) {
+        e.keep(who)?;
+    }
+    if !ports.is_empty() {
+        enforcing(&e)?;
+    }
     Ok(changes)
+}
+
+/// Is the firewall really holding (rules in the kernel)? The domain listener opens a port to the network only when it is: with the
+/// firewall off, not protecting or unavailable, an "allow rule" would mean nothing and the port would be open to everybody (fail closed).
+pub fn enforcing(e: &Engine) -> Result<(), String> {
+    match e.status() {
+        Status::On => Ok(()),
+        Status::Pending { .. } => Err("a firewall change is waiting to be kept or undone".into()),
+        Status::Off | Status::OffThisBoot => Err("the firewall is off, so the port cannot be gated".into()),
+        Status::NotProtected(why) => Err(format!("the firewall rules are not in force ({why})")),
+        Status::Unavailable(why) => Err(format!("the firewall is not available ({why})")),
+    }
 }
 
 /// Is any gate rule in the list now?
@@ -168,5 +190,69 @@ mod tests {
         bad.comment = "bad".into();
         base.add(bad);
         assert!(render(&base, &ports(&[9443]), Reach::LocalNetwork, &Ctx::default()).is_err());
+    }
+
+    mod engine_tests {
+        use super::*;
+        use crate::backend::{BackendError, FakeBackend};
+        use crate::engine::{Clock, Resolver, Saved, Store};
+        use std::sync::{Arc, Mutex};
+
+        struct Clk;
+        impl Clock for Clk {
+            fn now(&self) -> i64 {
+                2_000_000
+            }
+        }
+        struct NoDns;
+        impl Resolver for NoDns {
+            fn resolve(&self, _: &str) -> Result<Vec<IpAddr>, String> {
+                Err("none".into())
+            }
+        }
+        struct Mem;
+        impl Store for Mem {
+            fn load(&self) -> Result<Option<Saved>, String> {
+                Ok(None)
+            }
+            fn save(&self, _: &Saved) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        fn rig(boot_off: bool) -> (Handle, FakeBackend) {
+            let be = FakeBackend::default();
+            let mut e = Engine::new(Box::new(be.clone()), Box::new(Clk), Box::new(NoDns), Box::new(Mem));
+            e.boot(boot_off);
+            (Handle::Own(Arc::new(Mutex::new(e))), be)
+        }
+
+        #[test]
+        fn opening_a_port_on_a_working_firewall_succeeds_and_is_idempotent() {
+            let (h, _) = rig(false);
+            assert!(sync(&h, &ports(&[9443]), Reach::LocalNetwork, "t").is_ok());
+            assert!(sync(&h, &ports(&[9443]), Reach::LocalNetwork, "t").is_ok(), "steady state");
+            assert!(present(&h.lock()));
+            assert!(sync(&h, &ports(&[]), Reach::LocalNetwork, "t").is_ok());
+        }
+
+        #[test]
+        fn a_firewall_that_is_off_or_cannot_apply_refuses_to_open_a_port() {
+            let (h, _) = rig(false);
+            {
+                // the administrator switched the firewall off
+                let mut e = h.lock();
+                let mut off = e.config().clone();
+                off.enabled = false;
+                e.propose(off, "t").unwrap();
+                let _ = e.keep("t");
+            }
+            let e = sync(&h, &ports(&[9443]), Reach::LocalNetwork, "t").unwrap_err();
+            assert!(e.contains("off") || e.contains("not in force") || e.contains("not available"), "{e}");
+            let (h, be) = rig(false);
+            be.0.lock().unwrap().fail_replace = Some(BackendError::Failed("kernel said no".into()));
+            assert!(sync(&h, &ports(&[9443]), Reach::LocalNetwork, "t").is_err());
+            assert!(!present(&h.lock()), "nothing half-applied");
+        }
     }
 }

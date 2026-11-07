@@ -301,6 +301,6 @@ impl SettingsApp {
 
     pub(super) fn memory_buttons(&self) -> Vec<Btn> {
         let (acc, mut_) = (ACCENT, TEXT);
-        vec![("Zram", mut_, 'z'), ("Algorithm", mut_, 'c'), ("Swappiness", mut_, 'w'), ("Swap file", mut_, 'f'), ("zswap", mut_, 'x'), ("Preview", acc, 'p'), ("Apply now", acc, 'y'), ("Save for next boots", acc, 'v')]
+        vec![("Zram", mut_, 'z'), ("Algorithm", mut_, 'c'), ("Swappiness", mut_, 'w'), ("Swap file", mut_, 'f'), ("zswap", mut_, 'x'), ("Preview", acc, 'p'), ("Apply now", acc, 'y'), ("Save for next boots", acc, 'v'), ("Read again", mut_, 'r')]
     }
 }

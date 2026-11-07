@@ -67,6 +67,9 @@ USAGE:
                                       (docs/FIRMWARE-LICENCES.md, dist/scripts/firmware-notes/)
   iyakki usb share-internet [--apply|--undo]
                                       on a computer joined by a USB-C / Thunderbolt cable: share its internet with the device (docs/DEVELOPER-MODE.md)
+  iyakki share <start|stop|status|list> [--uplink IFACE] [--via IFACE] [--hours 1-72] [--allow-lan] [--no-isolation]
+                                      give other computers this computer's internet over an Ethernet, USB or Thunderbolt cable: private
+                                      network, address and name service on that cable only, off by itself when idle (docs/development/HOTSPOT-PLAN.md)
   iyakki dev <pair|devices|install|uninstall|list|logs|run|push|screenshot|whoami>
                                       from a developer's computer: pair once with a device in developer mode, then install, upgrade,
                                       remove, open and watch apps on it, push a folder on every change (docs/DEVELOPER-MODE.md)
@@ -227,6 +230,9 @@ fn real_main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => fail(e),
         },
+        // a container's HEALTHCHECK without curl: GET /healthz on the local listener (docs/CLOUD-IMAGES.md)
+        #[cfg(feature = "shell")]
+        "healthcheck" => ExitCode::from(iyakki_agent::healthcheck::cli_main(&args[1..], std::env::var("IYAKKI_HEALTH_URL").ok(), &mut |s| err!("{s}")).clamp(0, 255) as u8),
         "web-open" => match args.get(1) {
             Some(url) => web_open(url),
             None => fail("usage: iyakki web-open URL".into()),
@@ -263,6 +269,8 @@ fn real_main() -> ExitCode {
         "quick-install" => ExitCode::from(iyakki_agent::quickinstall::cli_main(&args[1..]).clamp(0, 255) as u8),
         "dlmanifest" => ExitCode::from(iyakki_agent::dlmanifest::cli_main(&args[1..]).clamp(0, 255) as u8),
         "firmware" => ExitCode::from(iyakki_agent::fwextra_cli::firmware_main(&args[1..]).clamp(0, 255) as u8),
+        "startup-disk" => ExitCode::from(iyakki_agent::startupdisk::cli(&args[1..]).clamp(0, 255) as u8),
+        "share" => ExitCode::from(iyakki_agent::sharing::cli::main(&args[1..]).clamp(0, 255) as u8),
         "usb" if args.get(1).map(String::as_str) == Some("share-internet") => ExitCode::from(iyakki_agent::fwextra_cli::share_main(&args[2..]).clamp(0, 255) as u8),
         "linux-apps" => ExitCode::from(iyakki_agent::linuxapps::cli_main(&args[1..]).clamp(0, 255) as u8),
         "store-manage" => ExitCode::from(iyakki_agent::store::privatemanage::cli_main(&args[1..]).clamp(0, 255) as u8),
@@ -334,6 +342,27 @@ fn real_main() -> ExitCode {
                             iyakki_core::boot::late_boot(plan);
                         }
                     }
+                }
+                // cloud node: install to the internal disk only when the kernel line carries BOTH iyakki.cloud.install=DISK and
+                // iyakki.cloud.confirm=ERASE-DISK (docs/CLOUD-IMAGES.md); the existing installer does the work, once per stick
+                #[cfg(feature = "shell")]
+                match iyakki_agent::cloudseed::install_request(&cmdline) {
+                    Some(Ok(a)) => {
+                        let done = std::path::Path::new(iyakki_core::boot::DATA_DIR).join("cloud-install-done");
+                        if done.exists() {
+                            out!("IYAKKI-CLOUD self-install skipped: this stick already installed once (remove {} to allow it again)", done.display());
+                        } else {
+                            let _ = std::fs::write(&done, "installed\n");
+                            out!("IYAKKI-CLOUD self-install of {} starts", a[1]);
+                            let rc = iyakki_usb::install_cli::run(&a);
+                            out!("IYAKKI-CLOUD self-install exit {rc}: remove the stick and restart");
+                            if rc == 0 {
+                                iyakki_core::boot::power_off();
+                            }
+                        }
+                    }
+                    Some(Err(e)) => out!("IYAKKI-CLOUD {e}"),
+                    None => {}
                 }
                 // install mode (GRUB entry "IYAKKI - Install to a disk", docs/INSTALLER.md): the installer's pages on the console
                 // instead of the desktop; when it ends the machine restarts. Nothing else (shell, web, supervisor) is started.
@@ -455,8 +484,34 @@ fn real_main() -> ExitCode {
                     });
                 }
             }
+            // a cloud node with no administrator: the pairing page holds the web port until the first account exists (docs/CLOUD-IMAGES.md)
+            #[cfg(feature = "web")]
+            let (web_value, adopting) = {
+                let cmd = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+                let users = std::path::PathBuf::from(&iyakki_shell::shell::ShellPaths::default().users);
+                let wanted = iyakki_core::cloudnode::adopt_wanted(&cmd, std::env::var("IYAKKI_ADOPT").ok().as_deref(), &users, &|| iyakki_agent::cloudmode::detect(iyakki_agent::cloudmode::Setting::Auto).on);
+                let value = web_value.clone().unwrap_or_else(|| "1".to_string());
+                let started = wanted
+                    && iyakki_remote::adopt_server::start(
+                        std::path::PathBuf::from(iyakki_core::boot::DATA_DIR),
+                        iyakki_remote::adopt_server::PORT,
+                        Box::new(move || {
+                            if let Some(s) = start_web(&value) {
+                                std::mem::forget(s);
+                                start_devmode_watch();
+                            }
+                        }),
+                    )
+                    .map_err(|e| log::error!("adopt: {e}"))
+                    .is_ok();
+                // a cloud node serves its browser front end by default (nothing else can reach it); a desktop keeps the old rule
+                let cloud_default = || iyakki_agent::cloudmode::detect(iyakki_agent::cloudmode::Setting::Auto).on.then(|| "1".to_string());
+                (if started { None } else { web_value.or_else(cloud_default) }, started)
+            };
             #[cfg(feature = "web")]
             let _web = web_value.as_deref().and_then(start_web);
+            #[cfg(feature = "web")]
+            let _ = adopting;
             // developer mode's listener follows Settings -> Developer mode (off by default; nothing listens until an admin turns it on)
             #[cfg(feature = "web")]
             if _web.is_some() {
@@ -873,6 +928,8 @@ fn build_shell_env() -> Result<iyakki_shell::shell::ShellEnv, String> {
     if std::process::id() == 1 {
         // one-cable links to another computer (Thunderbolt/USB4, a USB bridge cable, a gadget port): link-local addresses without
         // DHCP, the peer beacon, and the firewall's "direct link" zone (`iyakki dev usb`, docs/DEVELOPER-MODE.md)
+        // internet sharing over a cable (`iyakki share`, Settings -> Network -> Share internet): off after every boot, leftovers of a crash removed
+        iyakki_agent::sharing::real::start_system(std::path::Path::new(iyakki_core::boot::DATA_DIR));
         iyakki_agent::directlink::manager::start_system(std::path::Path::new(iyakki_core::boot::DATA_DIR), std::sync::Arc::new(|ifaces, more| iyakki_fw::service::set_direct_links(ifaces, more)));
     }
     if std::process::id() == 1 {
@@ -940,6 +997,8 @@ fn start_shell_thread() {
                 let stop = std::sync::atomic::AtomicBool::new(false);
                 // the boot screen lets go of the display before the desktop draws on it
                 iyakki_core::boot::finish_boot_screen();
+                // the sign-in screen is the first thing the shell draws: tell the boot loader this start worked (docs/BOOT-LOADER.md)
+                iyakki_core::bootconfirm::confirm_soon(std::time::Duration::from_secs(2));
                 // a monitor that woke up during boot but was not seen: one more look (in the background)
                 iyakki_core::display::probe_once_in_background("the desktop started", iyakki_core::boot::screen_found);
                 if let Err(e) = iyakki_shell::backend::run_fb(sh, fb, &stop) {

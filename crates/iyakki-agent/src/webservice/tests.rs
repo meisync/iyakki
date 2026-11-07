@@ -78,6 +78,10 @@ impl ToolSource for FakeSource {
 
 struct FakeExtras {
     ready: AtomicBool,
+    /// (switch, port) of "Serve this desktop to browsers"
+    web: Mutex<(bool, u16)>,
+    /// (person, from, to) of every tenant switch the service reported
+    switched: Arc<Mutex<Vec<(String, String, String)>>>,
 }
 
 impl Extras for FakeExtras {
@@ -99,10 +103,78 @@ impl Extras for FakeExtras {
     }
     fn flow_export(&self, _: &Principal, id: &str) -> ApiResult<Value> {
         if id == "f1" {
-            Ok(json!({"id": "f1", "nodes": []}))
+            Ok(json!({"id": "f1", "name": "Nightly", "nodes": []}))
+        } else if id == "f2" {
+            // needs a person's own Claude sign-in: cannot be scheduled
+            Ok(json!({"id": "f2", "name": "Needs me", "nodes": [{"id": "a", "kind": "agent", "config": {"agent": "claude"}}]}))
+        } else if id == "f3" {
+            // uses a team secret nobody marked for scheduled runs
+            Ok(json!({"id": "f3", "name": "Secret user", "nodes": [{"id": "h", "kind": "http", "config": {"url": "https://x.example.com", "headers": {"Authorization": "Bearer {{secret.api-token}}"}}}]}))
         } else {
             Err(ApiError::NotFound("no such flow".into()))
         }
+    }
+    fn flow_run(&self, _: &Principal, id: &str, draft: bool, inputs: &Value) -> ApiResult<String> {
+        if id != "f1" {
+            return Err(ApiError::NotFound("no such flow".into()));
+        }
+        Ok(format!("r{}{}", if draft { "d" } else { "" }, inputs.as_object().map(|o| o.len()).unwrap_or(0) + 1))
+    }
+    fn flow_runs(&self, _: &Principal, id: &str) -> ApiResult<Vec<Value>> {
+        if id != "f1" {
+            return Err(ApiError::NotFound("no such flow".into()));
+        }
+        Ok((1..=7).rev().map(|n| json!({"id": format!("r{n}"), "flow": "f1", "status": if n == 7 { "blocked" } else { "succeeded" }, "blocked": if n == 7 { "asks: delete the old files?" } else { "" }})).collect())
+    }
+    fn schedules(&self, _: &Principal) -> ApiResult<Vec<Value>> {
+        Ok(vec![json!({"flow": "f1", "name": "Nightly", "published": 1, "active": true, "trigger": {"id": "t1", "kind": "cron", "expr": "0 9 * * *", "tz": "local", "enabled": true}, "next": [1_800_000_000_000i64], "paused": false})])
+    }
+    fn schedule_save(&self, _: &Principal, flow: &str, trigger: &Value) -> ApiResult<Value> {
+        if !["f1", "f2", "f3"].contains(&flow) {
+            return Err(ApiError::NotFound("no such flow".into()));
+        }
+        Ok(json!({"active": true, "trigger": trigger, "next": []}))
+    }
+    fn schedule_delete(&self, _: &Principal, flow: &str, trigger: &str) -> ApiResult<Value> {
+        if flow != "f1" || trigger != "t1" {
+            return Err(ApiError::NotFound("no such trigger".into()));
+        }
+        Ok(json!({"removed": trigger, "timed_left": 0, "active": true}))
+    }
+    fn schedule_pause(&self, _: &Principal, flow: &str, paused: bool) -> ApiResult<Value> {
+        if flow != "f1" {
+            return Err(ApiError::NotFound("no such flow".into()));
+        }
+        Ok(json!({"flow": flow, "paused": paused}))
+    }
+    fn flow_run_get(&self, _: &Principal, id: &str, run: &str) -> ApiResult<Value> {
+        if id != "f1" || run != "r1" {
+            return Err(ApiError::NotFound("no such run".into()));
+        }
+        Ok(json!({"id": "r1", "flow": "f1", "status": "succeeded", "nodes": []}))
+    }
+    fn web_access(&self, _: &Principal) -> ApiResult<Value> {
+        let (on, port) = *self.web.lock().unwrap();
+        Ok(json!({"on": on, "port": port, "listening": on, "boot": false, "error": "", "status": if on { format!("on, port {port}") } else { "off: nothing listens".to_string() }, "urls": if on { vec![format!("https://x.local:{port}")] } else { vec![] }, "fingerprint": "AA:BB", "exposes": "Anyone on this network who knows a sign-in can use this desktop.", "has_admin_password": true}))
+    }
+    fn set_web_access(&self, _: &Principal, on: Option<bool>, port: Option<u16>) -> ApiResult<Vec<(String, String)>> {
+        let mut w = self.web.lock().unwrap();
+        let mut done = vec![];
+        if let Some(p) = port {
+            if p != 0 && p < 1024 {
+                return Err(ApiError::InvalidInput("Choose a port from 1024 to 65535".into()));
+            }
+            w.1 = if p == 0 { 8443 } else { p };
+            done.push(("settings.web_access.port".to_string(), w.1.to_string()));
+        }
+        if let Some(o) = on {
+            w.0 = o;
+            done.push(("settings.web_access".to_string(), format!("{} (port {}, HTTPS)", if o { "on" } else { "off" }, w.1)));
+        }
+        Ok(done)
+    }
+    fn tenant_switched(&self, p: &Principal, from: &str, to: &str) {
+        self.switched.lock().unwrap().push((p.user.clone(), from.into(), to.into()));
     }
     fn data_call(&self, p: &Principal, tool: &str, args: &Value) -> ApiResult<String> {
         // a `path` argument is echoed so tests can see where the service pointed it
@@ -116,6 +188,7 @@ struct H {
     executed: Arc<Mutex<Vec<String>>>,
     script: Arc<Script>,
     dir: std::path::PathBuf,
+    switched: Arc<Mutex<Vec<(String, String, String)>>>,
 }
 
 fn accounts() -> Arc<FakeAccounts> {
@@ -131,18 +204,19 @@ fn harness(profile: &str, tweak: impl FnOnce(&mut ServiceConfig)) -> H {
     let accounts = accounts();
     let executed = Arc::new(Mutex::new(vec![]));
     let script = Arc::new(Script { turns: Mutex::new(VecDeque::new()) });
+    let switched = Arc::new(Mutex::new(Vec::new()));
     let deps = Arc::new(Deps {
         auth: accounts.clone(),
         audit: accounts.clone(),
         store: Arc::new(RunStore::new(&dir.join("runs"))),
         chat: script.clone(),
         tools: Arc::new(FakeSource { executed: executed.clone() }),
-        extras: Arc::new(FakeExtras { ready: AtomicBool::new(true) }),
+        extras: Arc::new(FakeExtras { ready: AtomicBool::new(true), web: Mutex::new((false, 8443)), switched: switched.clone() }),
         system_prompt: "test".into(),
     });
     let id = tls::self_signed(&dir.join("tls"), &[]).expect("certificate");
     let svc = server::start(&chk, deps, id).expect("start");
-    H { svc, accounts, executed, script, dir }
+    H { svc, accounts, executed, script, dir, switched }
 }
 
 fn req(method: &str, path: &str, token: Option<&str>, body: Option<Value>) -> Request {
@@ -326,10 +400,14 @@ fn there_is_no_default_account_and_a_wrong_password_is_401_with_one_answer() {
 fn the_wrong_role_is_403() {
     let h = harness("cloud", |_| {});
     let gus = h.login("gus", "gus-password-1"); // a guest has no agent
-    for (m, p) in [("GET", "/api/v1/models"), ("GET", "/api/v1/chat/runs"), ("POST", "/api/v1/chat/runs"), ("GET", "/api/v1/approvals"), ("GET", "/api/v1/flows"), ("POST", "/api/v1/data/call")] {
+    for (m, p) in [("GET", "/api/v1/models"), ("GET", "/api/v1/chat/runs"), ("POST", "/api/v1/chat/runs"), ("GET", "/api/v1/flows"), ("POST", "/api/v1/data/call")] {
         assert_eq!(h.call(m, p, Some(&gus), Some(json!({"prompt": "x"})).filter(|_| m == "POST")).0, 403, "{m} {p}");
     }
     assert_eq!(h.call("GET", "/api/v1/whoami", Some(&gus), None).0, 200, "whoami needs no app");
+    // the one deliberate exception: the unified approvals list is open to any signed-in person (tenant approvers have no Chat right) and
+    // its handler returns only what that person may see, so a person with no rights gets 200 and an empty list, not 403
+    let (s, v, _) = h.call("GET", "/api/v1/approvals", Some(&gus), None);
+    assert_eq!((s, v["approvals"].clone()), (200, json!([])));
     let ann = h.ann();
     assert_eq!(h.call("GET", "/api/v1/admin/status", Some(&ann), None).0, 403);
     let root = h.root();
@@ -559,7 +637,7 @@ fn audit_lines_exist_for_every_audited_route_and_hold_no_secrets() {
     let secret_prompt = "my-very-private-prompt-text";
     h.script.turns.lock().unwrap().push_back(final_turn("ok"));
     for r in ROUTES.iter().filter(|r| r.in_profile(Profile::Cloud) && r.audit) {
-        let path = r.path.replace("{id}", "abc123abc123").replace("{run}", "abc123abc123").replace("{call}", "c");
+        let path = r.path.replace("{id}", "abc123abc123").replace("{run}", "abc123abc123").replace("{call}", "c").replace("{scope}", "prod").replace("{group}", "g").replace("{kind}", "egress-policy").replace("{team}", "web").replace("{name}", "default");
         let body = match r.id {
             "login" => json!({"name": "root", "password": "wrong-password-xyz"}),
             "runs_start" => json!({"prompt": secret_prompt}),
@@ -724,7 +802,7 @@ fn deps_for(dir: &std::path::Path) -> Arc<Deps> {
         store: Arc::new(RunStore::new(&dir.join("runs"))),
         chat: Arc::new(Script { turns: Mutex::new(VecDeque::new()) }),
         tools: Arc::new(FakeSource { executed: Arc::new(Mutex::new(vec![])) }),
-        extras: Arc::new(FakeExtras { ready: AtomicBool::new(true) }),
+        extras: Arc::new(FakeExtras { ready: AtomicBool::new(true), web: Mutex::new((false, 8443)), switched: Default::default() }),
         system_prompt: "t".into(),
     })
 }
@@ -871,7 +949,7 @@ fn readiness_follows_the_services_and_shutdown_is_graceful() {
     let dir = crate::testdir::unique("webservice", "ready");
     std::fs::create_dir_all(&dir).unwrap();
     let a = accounts();
-    let extras = Arc::new(FakeExtras { ready: AtomicBool::new(false) });
+    let extras = Arc::new(FakeExtras { ready: AtomicBool::new(false), web: Mutex::new((false, 8443)), switched: Default::default() });
     let deps = Arc::new(Deps { auth: a.clone(), audit: a, store: Arc::new(RunStore::new(&dir)), chat: Arc::new(Script { turns: Mutex::new(VecDeque::new()) }), tools: Arc::new(FakeSource { executed: Arc::new(Mutex::new(vec![])) }), extras: extras.clone(), system_prompt: "t".into() });
     let chk = ServiceConfig { listen: "127.0.0.1:0".into(), data_dir: dir.to_string_lossy().into(), ..ServiceConfig::default() }.check().unwrap();
     let svc = server::start(&chk, deps, tls::self_signed(&dir.join("tls"), &[]).unwrap()).unwrap();
@@ -1128,3 +1206,144 @@ fn cloud_removal_keeps_the_role_change_and_records_a_pending_rotation_and_readyz
 
 #[path = "files_tests.rs"]
 mod files_tests;
+
+#[path = "ui_tests.rs"]
+mod ui_tests;
+#[path = "pages_api_tests.rs"]
+mod pages_api_tests;
+
+#[path = "embed_tests.rs"]
+mod embed_tests;
+
+#[path = "tenants_tests.rs"]
+mod tenants_tests;
+
+#[path = "schedules_tests.rs"]
+mod schedules_tests;
+
+#[path = "notifyapi_tests.rs"]
+mod notifyapi_tests;
+
+// ------------------------------------------------------------------------------------------------ tenant configuration
+
+/// Cloud harness with root (owner), ann (admin), bob (member).
+fn cfg_cloud() -> (H, String, String, String) {
+    let h = harness("cloud", |_| {});
+    let (root, ann, bob) = (h.root(), h.ann(), h.login("bob", "bob-password-1"));
+    assert_eq!(h.call("POST", "/api/v1/tenant/bootstrap", Some(&root), None).0, 200);
+    assert_eq!(h.call("POST", "/api/v1/tenant/members", Some(&root), Some(json!({"name": "ann", "role": "admin"}))).0, 200);
+    assert_eq!(h.call("POST", "/api/v1/tenant/members", Some(&root), Some(json!({"name": "bob", "role": "member"}))).0, 200);
+    (h, root, ann, bob)
+}
+
+#[test]
+fn tenantcfg_api_put_get_validate_secret_and_roles() {
+    let (h, _root, ann, bob) = cfg_cloud();
+    let url = "/api/v1/tenant/config/agent.claude";
+    let body = json!({"enabled": true, "values": {"mode": "shared", "terms_ack": true, "daily_requests_per_person": 3, "monthly_requests_team": 30, "allowed_models": ["*"]}, "secrets": {"token": "sk-ant-API-TEST-SECRET"}, "ack_warnings": crate::tenantconfig::safety::rules_table()});
+    // a dry run stores nothing; a member cannot write; an admin can
+    assert_eq!(h.call("POST", &format!("{url}/validate"), Some(&ann), Some(body.clone())).1["valid"], true);
+    assert_eq!(h.call("GET", url, Some(&ann), None).0, 404);
+    assert_eq!(h.call("PUT", url, Some(&bob), Some(body.clone())).0, 403);
+    // no vault is bound in a test service: the secret cannot be stored, and nothing is saved
+    let (s, v, _) = h.call("PUT", url, Some(&ann), Some(body.clone()));
+    assert_eq!(s, 409, "{v}");
+    assert_eq!(h.call("GET", url, Some(&ann), None).0, 404);
+    // with the vault bound the same call works, and nothing ever shows the secret
+    let vault = crate::tenantconfig::vault::MemVault::new();
+    crate::tenantconfig::vault::bind(&h.dir, vault.clone());
+    let (s, v, _) = h.call("PUT", url, Some(&ann), Some(body));
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["state"], "ready");
+    let (s, g, _) = h.call("GET", url, Some(&ann), None);
+    assert_eq!((s, g["values"]["token"].as_str()), (200, Some("[set]")));
+    let (s, g, _) = h.call("GET", url, Some(&bob), None);
+    assert_eq!((s, g["state"].as_str(), g.get("values").is_none()), (200, Some("ready"), true));
+    let (_, l, _) = h.call("GET", "/api/v1/tenant/config", Some(&bob), None);
+    assert_eq!(l["items"].as_array().unwrap().len(), 1);
+    assert!(l.get("registry").is_none());
+    assert!(h.call("GET", "/api/v1/tenant/config", Some(&ann), None).1["registry"]["kinds"].is_array());
+    for out in [g.to_string(), l.to_string(), h.accounts.lines().join("\n"), std::fs::read_to_string(h.dir.join("cloud/config/tenant-config.local.json")).unwrap()] {
+        assert!(!out.contains("API-TEST-SECRET"), "{out}");
+    }
+    assert!(h.accounts.lines().iter().any(|l| l.contains("tenant.config.put") && l.contains("after=")));
+    // versions, rollback, delete
+    assert_eq!(h.call("GET", "/api/v1/tenant/config/versions", Some(&ann), None).1["current"], 1);
+    assert_eq!(h.call("GET", "/api/v1/tenant/config/versions", Some(&bob), None).0, 403);
+    assert_eq!(h.call("POST", "/api/v1/tenant/config/rollback", Some(&ann), Some(json!({"version": 1}))).0, 200);
+    assert_eq!(h.call("DELETE", url, Some(&ann), None).0, 200);
+    assert_eq!(h.call("GET", url, Some(&ann), None).0, 404);
+    assert_eq!(h.call("GET", "/api/v1/tenant/config/mcp.server", Some(&ann), None).0, 404);
+    crate::tenantconfig::vault::unbind(&h.dir);
+}
+
+#[test]
+fn tenantcfg_api_k3s_binding_per_team_and_environment_and_the_managed_file() {
+    let (h, root, ann, bob) = cfg_cloud();
+    assert_eq!(h.call("POST", "/api/v1/namespaces", Some(&root), Some(json!({"name": "web", "action": "create"}))).0, 200);
+    assert_eq!(h.call("POST", "/api/v1/namespaces/web/members", Some(&root), Some(json!({"name": "bob", "role": "admin"}))).0, 200);
+    let vault = crate::tenantconfig::vault::MemVault::new();
+    crate::tenantconfig::vault::bind(&h.dir, vault);
+    let url = "/api/v1/tenant/config/k3s.cluster/web/dev";
+    let b = json!({"enabled": true, "values": {"api_server": "https://web-dev.example.com:6443"}, "secrets": {"credential": "kubeconfig-dev"}, "ack_warnings": crate::tenantconfig::safety::rules_table()});
+    assert_eq!(h.call("PUT", url, Some(&bob), Some(b.clone())).0, 200, "a team admin writes the team's binding");
+    assert_eq!(h.call("GET", url, Some(&bob), None).1["state"], "ready");
+    assert_eq!(h.call("GET", "/api/v1/tenant/config/k3s.cluster/data/dev", Some(&bob), None).0, 404);
+    assert_eq!(h.call("PUT", "/api/v1/tenant/config/k3s.cluster/data/dev", Some(&bob), Some(b.clone())).0, 404);
+    let (_, l, _) = h.call("GET", "/api/v1/tenant/config", Some(&bob), None);
+    assert_eq!(l["items"][0]["reachability"], "unknown");
+    // the operator marks an item as managed in the file
+    let d = h.dir.join("cloud/config");
+    std::fs::write(d.join("tenant-config.json"), json!({"items": [{"kind": "k3s.cluster", "namespace": "web", "name": "dev", "enabled": true, "managed": true, "values": {"api_server": "https://fixed.example.com", "credential": "vault:k3s.cluster/web-dev-credential"}}]}).to_string()).unwrap();
+    let (s, v, _) = h.call("PUT", url, Some(&ann), Some(b));
+    assert_eq!(s, 409, "{v}");
+    let g = h.call("GET", url, Some(&ann), None).1;
+    assert_eq!((g["source"].as_str(), g["managed"].clone()), (Some("file"), json!(true)));
+    assert_eq!(h.call("DELETE", url, Some(&ann), None).0, 409);
+    crate::tenantconfig::vault::unbind(&h.dir);
+}
+
+#[test]
+fn tenantcfg_api_refuses_a_disabled_shared_agent_at_run_start() {
+    let (h, _root, ann, bob) = cfg_cloud();
+    let run = |tok: &str, provider: &str| h.call("POST", "/api/v1/chat/runs", Some(tok), Some(json!({"prompt": "hi", "provider": provider, "model": "sonnet"})));
+    // off by default
+    let (s, v, _) = run(&bob, "claude");
+    assert_eq!(s, 403, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("not switched on"));
+    // other providers are not this gate's business
+    assert_ne!(run(&bob, "local").1["error"]["message"], "this agent is not switched on for the tenant");
+    // switched on per person: the gate lets it through to the model lookup (the test service has no other model)
+    assert_eq!(h.call("PUT", "/api/v1/tenant/config/agent.claude", Some(&ann), Some(json!({"enabled": true, "values": {"allowed_models": ["sonnet"]}, "ack_warnings": crate::tenantconfig::safety::rules_table()}))).0, 200);
+    assert_ne!(run(&bob, "claude").0, 403);
+    // switched off again: refused
+    assert_eq!(h.call("PUT", "/api/v1/tenant/config/agent.claude", Some(&ann), Some(json!({"enabled": false, "values": {}}))).0, 200);
+    assert_eq!(run(&bob, "claude").0, 403);
+    assert!(h.accounts.lines().iter().any(|l| l.contains("tenant.agent.refused")));
+}
+
+#[test]
+fn tenantcfg_api_groups_approver_roles_and_the_approvals_list() {
+    let (h, root, ann, bob) = cfg_cloud();
+    assert_eq!(h.call("POST", "/api/v1/namespaces", Some(&root), Some(json!({"name": "web", "action": "create"}))).0, 200);
+    assert_eq!(h.call("POST", "/api/v1/namespaces/web/members", Some(&root), Some(json!({"name": "bob", "role": "admin"}))).0, 200);
+    // the team's admin defines a group and gives the group the prod approver role; a person outside the tenant is refused
+    assert_eq!(h.call("PUT", "/api/v1/namespaces/web/groups/leads", Some(&bob), Some(json!({"members": ["ann"]}))).0, 200);
+    assert_eq!(h.call("PUT", "/api/v1/namespaces/web/groups/bad", Some(&bob), Some(json!({"members": ["nobody"]}))).0, 400);
+    assert_eq!(h.call("PUT", "/api/v1/namespaces/web/approvers/prod", Some(&bob), Some(json!({"groups": ["leads"]}))).0, 200);
+    let g = h.call("GET", "/api/v1/namespaces/web/approvers", Some(&bob), None).1;
+    assert_eq!(g["approvers"]["prod"]["expanded"], json!(["ann"]));
+    // tenant-wide groups are for tenant admins
+    assert_eq!(h.call("PUT", "/api/v1/namespaces/_tenant/groups/ops", Some(&bob), Some(json!({"members": ["bob"]}))).0, 403);
+    assert_eq!(h.call("PUT", "/api/v1/namespaces/_tenant/groups/ops", Some(&ann), Some(json!({"members": ["bob"]}))).0, 200);
+    // a stranger to the team sees nothing
+    let carl = h.login("gus", "gus-password-1");
+    assert_eq!(h.call("GET", "/api/v1/namespaces/web/approvers", Some(&carl), None).0, 403);
+    // nobody has anything pending
+    assert_eq!(h.call("GET", "/api/v1/tenant/approvals", Some(&bob), None).1["approvals"], json!([]));
+    assert_eq!(h.call("POST", "/api/v1/tenant/approvals/abc123/approve", Some(&bob), None).0, 404);
+    // revoke
+    assert_eq!(h.call("DELETE", "/api/v1/namespaces/web/approvers/prod", Some(&bob), Some(json!({"groups": ["leads"]}))).0, 200);
+    assert_eq!(h.call("GET", "/api/v1/namespaces/web/approvers", Some(&bob), None).1["approvers"], json!({}));
+    assert!(h.accounts.lines().iter().any(|l| l.contains("api.tteam_approver_grant")));
+}

@@ -335,6 +335,13 @@ fn a_model_without_tool_support_switches_to_the_text_protocol() {
 }
 
 #[test]
+fn a_failed_model_call_is_shown_in_plain_words_without_ids() {
+    let raw = r#"HTTP 404: {"detail":"Function '0b1e4a52-7c3d-4f8e-9a6b-123456789abc': Not found for account '123456789012'"}"#;
+    let ev = run(Scripted::new(vec![Err(raw.into())]), Reg::new(WEB), "hi", std_assist());
+    assert!(matches!(ev.last(), Some(RunEvent::Failed { error }) if error.contains("account cannot use this model") && !error.contains("0b1e4a52") && !error.contains("123456789012")), "{ev:?}");
+}
+
+#[test]
 fn a_failing_provider_is_reported_not_swallowed() {
     let b = Scripted::new(vec![Err("HTTP 500: model crashed".into())]);
     let ev = run(b, Reg::new(WEB), "hi", std_assist());

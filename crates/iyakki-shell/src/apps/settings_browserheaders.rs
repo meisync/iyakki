@@ -99,6 +99,7 @@ impl SettingsApp {
             .secret(if edit.is_some() { "Header value (empty keeps the saved one)" } else { "Header value" }, "kept in your vault, never shown")
             .text("Sites (domain filter)", &r.domains, "api.example.org, *.corp.example (a name matches only itself; *. matches subdomains)")
             .text("Only below this address (optional)", &r.prefix, "https://example.org/api")
+            .text("Only when the path matches (regular expression, optional)", &r.path_regex, "^/api/v[0-9]+/   (the path and ?query are tested)")
             .choice("Cookie or Authorization: I know this sign-in goes to those sites", &ACK, usize::from(r.ack));
         self.open_form(FormKind::BrowserHeader(BhForm::Edit(edit.map(|r| r.id))), f);
     }
@@ -116,8 +117,9 @@ impl SettingsApp {
             header: form.value(1).trim().to_string(),
             domains: form.value(3).trim().to_string(),
             prefix: form.value(4).trim().to_string(),
+            path_regex: form.value(5).trim().to_string(),
             enabled: old.as_ref().map_or(true, |o| o.enabled),
-            ack: form.choice_idx(5) == 1,
+            ack: form.choice_idx(6) == 1,
         };
         let value = form.value(2);
         let saved = match (&old, value.is_empty()) {
@@ -165,7 +167,10 @@ impl SettingsApp {
         let fit = self.win[self.tab].fit();
         for (i, r) in rules.iter().enumerate().skip(first).take(fit) {
             let chips: Vec<(&str, [u8; 4])> = vec![if r.enabled { ("\u{25CF} on", OK) } else { ("\u{25CB} off", DIM) }];
-            let sites = if r.prefix.is_empty() { r.domains.clone() } else if r.domains.is_empty() { r.prefix.clone() } else { format!("{} below {}", r.domains, r.prefix) };
+            let mut sites = if r.prefix.is_empty() { r.domains.clone() } else if r.domains.is_empty() { r.prefix.clone() } else { format!("{} below {}", r.domains, r.prefix) };
+            if !r.path_regex.is_empty() {
+                sites = format!("{sites}, path {}", r.path_regex);
+            }
             let sub = format!("{}: {} -> {}", r.header, bh::MASK, sites);
             row(g, &mut self.tip, i, a.x, y, a.w, rh - 6.0 * s, s, i == sel, &r.name, &sub, &chips);
             y += rh;
@@ -178,7 +183,7 @@ impl SettingsApp {
         g.rect(a.x, top - 4.0 * s, a.w, 1.0, [255, 255, 255, 24]);
         let state = if r.enabled { "On" } else { "Off (kept, nothing is sent)" };
         let lines = [
-            (format!("{state}. {} goes to: {}{}.", r.header, if r.domains.is_empty() { "any site below the address" } else { r.domains.as_str() }, if r.prefix.is_empty() { String::new() } else { format!(", only below {}", r.prefix) }), TEXT),
+            (format!("{state}. {} goes to: {}{}.", r.header, if r.domains.is_empty() { "any site below the address" } else { r.domains.as_str() }, if r.prefix.is_empty() { String::new() } else { format!(", only below {}", r.prefix) }) + &if r.path_regex.is_empty() { String::new() } else { format!(", when the path matches {}", r.path_regex) }, TEXT),
             ("Edit with e: leave the value empty to keep the saved one.".to_string(), DIM),
         ];
         let mut ty = top + 4.0 * s;

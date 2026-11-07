@@ -23,16 +23,18 @@ pub enum Entry {
 /// The hit id of the search box (`Event::Focus` → `FocusAt`).
 pub const SEARCH_ID: usize = 900;
 
-const ROW_H: f32 = 34.0;
+const ROW_H: f32 = 48.0;
 const GROUP_H: f32 = 30.0;
 const SEARCH_H: f32 = 48.0;
 
 /// Plain words people type that no page uses itself: what to look for instead. Each right-hand word is in some page's keywords.
 const SYNONYMS: &[(&str, &[&str])] = &[
-    ("dark", &["brightness"]),
+    ("dark", &["theme", "brightness"]),
     ("darker", &["brightness"]),
     ("night", &["brightness"]),
-    ("theme", &["brightness", "text size"]),
+    ("theme", &["theme"]),
+    ("themes", &["theme"]),
+    ("appearance", &["theme"]),
     ("sleep", &["screen", "brightness"]),
     ("screensaver", &["screen", "brightness"]),
     ("mouse", &["bluetooth", "keyboard"]),
@@ -67,10 +69,23 @@ const SYNONYMS: &[(&str, &[&str])] = &[
 /// synonyms must (so "dark", "sleep", "mouse" and "backup" lead somewhere sensible).
 pub fn matches(query: &str, item: &Item) -> bool {
     let hay = format!("{} {} {}", item.label, item.group, item.keywords).to_lowercase();
+    let hay_stems: Vec<String> = hay.split_whitespace().map(stem).collect();
     query.split_whitespace().all(|w| {
         let w = w.to_lowercase();
-        hay.contains(&w) || SYNONYMS.iter().any(|(k, alts)| *k == w && alts.iter().any(|a| hay.contains(a)))
+        let st = stem(&w);
+        hay.contains(&w) || hay_stems.iter().any(|h| *h == st) || SYNONYMS.iter().any(|(k, alts)| *k == w && alts.iter().any(|a| hay.contains(a)))
     })
+}
+
+/// A word without its plural or past ending, so "shares", "shared" and "share" meet ("folders" meets "folder").
+/// Words under four letters are left alone so "ssh", "dns" or "vpn" never shrink to something else.
+fn stem(w: &str) -> String {
+    let w = w.trim_matches(|c: char| !c.is_alphanumeric());
+    if w.chars().count() < 4 {
+        return w.to_string();
+    }
+    let w = ["ing", "ed", "es", "s", "d"].iter().find_map(|e| w.strip_suffix(e).filter(|r| r.chars().count() >= 3)).unwrap_or(w);
+    w.strip_suffix('e').filter(|r| r.chars().count() >= 3).unwrap_or(w).to_string()
 }
 
 /// The list to show: pages that match, each group only if one of its pages does.
@@ -147,7 +162,7 @@ pub fn step_tab(entries: &[Entry], tab: usize, d: i32) -> Option<usize> {
 /// Draw the whole left side into `r`.
 #[allow(clippy::too_many_arguments)]
 pub fn draw(g: &mut Gfx, r: R, s: f32, entries: &[Entry], selected: usize, scroll: f32, query: &TextField, focused: bool, blink_on: bool, accent: [u8; 4]) {
-    g.rrect(r.x, r.y, r.w, r.h, 16.0 * s, rgb(16, 21, 40));
+    g.rrect(r.x, r.y, r.w, r.h, 16.0 * s, crate::ui::FIELD);
     let list_top = r.y + (SEARCH_H + 10.0) * s;
     let view = view_height(r.h, s);
     // a row half out of the list is cut at its edge, not drawn over the page's border or off the window
@@ -202,10 +217,10 @@ pub fn draw(g: &mut Gfx, r: R, s: f32, entries: &[Entry], selected: usize, scrol
     if total > view && view > 0.0 {
         let bh = (view * view / total).max(28.0 * s);
         let by = list_top + (view - bh) * (scroll / (total - view).max(1.0));
-        g.rrect(r.x + r.w - 7.0 * s, by, 4.0 * s, bh, 2.0 * s, rgb(60, 72, 110));
+        g.rrect(r.x + r.w - 7.0 * s, by, 4.0 * s, bh, 2.0 * s, crate::ui::BORDER);
     }
     // the search box covers whatever scrolled under it
-    g.rrect(r.x, r.y, r.w, (SEARCH_H + 10.0) * s, 16.0 * s, rgb(16, 21, 40));
+    g.rrect(r.x, r.y, r.w, (SEARCH_H + 10.0) * s, 16.0 * s, crate::ui::FIELD);
     query.render(g, R::new(r.x + 10.0 * s, r.y + 8.0 * s, r.w - 20.0 * s, SEARCH_H * s - 6.0 * s), focused, s, blink_on, Face::Sans, SEARCH_ID);
 }
 
@@ -225,6 +240,23 @@ mod tests {
 
     fn tabs(e: &[Entry]) -> Vec<usize> {
         e.iter().filter_map(|x| if let Entry::Item { tab, .. } = x { Some(*tab) } else { None }).collect()
+    }
+
+    #[test]
+    fn plurals_and_past_endings_meet_the_page_name_both_ways() {
+        let it = vec![
+            Item { tab: 0, label: "Shared folders", group: "Network", keywords: "share files" },
+            Item { tab: 1, label: "SSH tunnels", group: "Network", keywords: "ssh port forward" },
+            Item { tab: 2, label: "Sound", group: "Devices", keywords: "volume" },
+        ];
+        for q in ["shares", "share", "shared", "folder", "folders", "sharing folders"] {
+            assert_eq!(tabs(&entries(&it, q)), vec![0], "{q}");
+        }
+        assert_eq!(tabs(&entries(&it, "tunnel")), vec![1]);
+        assert_eq!(tabs(&entries(&it, "tunnels")), vec![1]);
+        assert_eq!(tabs(&entries(&it, "volumes")), vec![2]);
+        assert!(entries(&it, "sing").is_empty(), "no loose prefix matches");
+        assert_eq!(stem("ssh"), "ssh");
     }
 
     #[test]

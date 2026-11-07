@@ -1,0 +1,56 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>IYAKKI</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<canvas id="screen" tabindex="0"></canvas>
+<div id="status" role="status"></div>
+<button id="gear" type="button" aria-label="Settings" title="Settings (Ctrl+Alt+Q)">&#9881;</button>
+<div id="panel" hidden role="dialog" aria-label="Settings">
+  <h2>Display</h2>
+  <label>Picture quality
+    <select id="q">
+      <option value="auto">Automatic</option>
+      <option value="lossless">Lossless</option>
+      <option value="balanced">Balanced</option>
+      <option value="low">Low bandwidth</option>
+      <option value="verylow">Very low</option>
+    </select>
+  </label>
+  <label><input type="checkbox" id="saver"> Data saver</label>
+  <label><input type="checkbox" id="showstats"> Statistics (Ctrl+Alt+S)</label>
+  <div class="row"><button id="fs" type="button">Full screen</button></div>
+  <h3>Browser devices</h3>
+  <div class="dev"><button id="dsound" type="button">Start sound</button></div>
+  <label id="dvolrow" hidden>Volume <input type="range" id="dvol" min="0" max="100" value="80"></label>
+  <div class="dev"><button id="dmic" type="button">Microphone: off</button></div>
+  <div class="dev"><button id="dcam" type="button">Camera: off</button></div>
+  <div class="dev"><button id="dclip" type="button">Clipboard reading: off</button></div>
+  <small id="dnote">Each one is off until you switch it on, and you can stop it with one tap.</small>
+  <div id="files" hidden>
+    <h3>Files</h3>
+    <small id="fnote"></small>
+    <div class="row"><button id="fl" type="button">Local folder</button><button id="fr" type="button">Remote folder</button></div>
+    <ul id="flist"></ul>
+  </div>
+</div>
+<div id="rec" hidden role="status"></div>
+<button id="askdev" type="button" hidden></button>
+<button id="askclip" type="button" hidden></button>
+<div id="ask" hidden role="alertdialog" aria-labelledby="asktext">
+  <p id="asktext"></p>
+  <div class="row"><button id="askno" type="button" autofocus>No</button><button id="askyes" type="button">Replace it</button></div>
+</div>
+<pre id="stats" hidden></pre>
+<textarea id="ime" autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false" aria-hidden="true" tabindex="-1"></textarea>
+<script src="/decoder.js"></script>
+<script src="/media.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

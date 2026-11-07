@@ -8,6 +8,7 @@
 
 use super::*;
 use iyakki_agent::devmode::centre as uc;
+use iyakki_agent::store::updatecheck as chk;
 
 /// What the next `y` confirms.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -34,6 +35,8 @@ pub(super) struct UpdPanel {
     /// An install or a rollback is running in the background job.
     pub(super) running: bool,
     pub(super) boot_id: Option<String>,
+    /// The last update check as read from the data folder (re-read every two seconds while the page shows).
+    pub(super) check: Option<(std::time::Instant, Option<chk::Report>)>,
 }
 
 /// Where USB sticks and other drives appear when they are mounted.
@@ -142,6 +145,7 @@ impl SettingsApp {
                 let f = Form::new("Folder with an update").path("Folder (a USB stick shows up under /media or /run/media)", &self.upd.folder, "the folder that holds update.json, or a folder with such folders in it", crate::filepicker::PathKind::Folder, &[]);
                 self.open_form(FormKind::UpdateFolder, f);
             }
+            Key::Char('c') | Key::Char('m') | Key::Char('u') => self.upd_check_key(k, cx),
             Key::Char('n') => {
                 self.upd.ask = UpdAsk::None;
                 self.ok("Nothing was changed.");
@@ -204,7 +208,7 @@ impl SettingsApp {
     }
 
     pub(super) fn updates_buttons(&self) -> Vec<Btn> {
-        let mut v = vec![("Install", ACCENT, 'i'), ("Roll back", TEXT, 'r'), ("Choose folder", TEXT, 'f'), ("Look again", TEXT, 's')];
+        let mut v = vec![("Install", ACCENT, 'i'), ("Roll back", TEXT, 'r'), ("Choose folder", TEXT, 'f'), ("Look again", TEXT, 's'), ("Check for updates", TEXT, 'c'), ("How often", TEXT, 'm'), ("Update list address", TEXT, 'u')];
         if self.upd.ask != UpdAsk::None {
             v.insert(0, ("Yes, do it", ERR, 'y'));
             v.insert(1, ("No", TEXT, 'n'));
@@ -248,6 +252,10 @@ impl SettingsApp {
             line(g, &mut y, 14.0, crate::fx::AMBER, Face::Bold, "Writing the update. Do not remove the drive or switch the computer off.");
         }
         y += 6.0 * s;
+        for (text, col, face) in self.upd_check_lines(_cx) {
+            line(g, &mut y, 13.0, col, face, &text);
+        }
+        y += 6.0 * s;
         if self.upd.found.is_empty() {
             line(g, &mut y, 14.0, MUTED, Face::Sans, "No update found. Put the update folder or USB stick in, then press Look again, or Choose folder.");
         } else {
@@ -277,5 +285,127 @@ impl SettingsApp {
                 None => {}
             }
         }
+    }
+}
+
+// -------------------------------------------------------------------------------------------- the update check (F-UPD-04)
+
+impl SettingsApp {
+    fn upd_report(&mut self, cx: &AppCx) -> Option<chk::Report> {
+        if let Some((at, r)) = &self.upd.check {
+            if at.elapsed() < std::time::Duration::from_secs(2) {
+                return r.clone();
+            }
+        }
+        let r = chk::Report::load(Self::svc(cx).dir());
+        self.upd.check = Some((std::time::Instant::now(), r.clone()));
+        r
+    }
+
+    fn upd_check_settings(cx: &AppCx) -> chk::CheckSettings {
+        Self::svc(cx).settings.lock().map(|s| s.get().update_check.clone()).unwrap_or_default()
+    }
+
+    fn upd_check_save(&mut self, cx: &AppCx, what: &str, f: impl FnOnce(&mut chk::CheckSettings)) -> bool {
+        let r = Self::svc(cx).settings.lock().map(|mut s| s.update(|s| f(&mut s.update_check)));
+        match r {
+            Ok(Ok(_)) => {
+                cx.audit.record(&cx.session.user, "settings.update_check", what);
+                true
+            }
+            Ok(Err(e)) => {
+                self.fail(e.to_string());
+                false
+            }
+            Err(_) => {
+                self.fail("The settings are busy; try again.");
+                false
+            }
+        }
+    }
+
+    /// `c` check now, `m` how often, `u` the address of the system update list. Administrators only.
+    pub(super) fn upd_check_key(&mut self, k: &Key, cx: &AppCx) {
+        if !self.admin(cx) {
+            return;
+        }
+        let cur = Self::upd_check_settings(cx);
+        match k {
+            Key::Char('m') => {
+                let mode = cur.mode.next();
+                if self.upd_check_save(cx, &format!("mode={mode:?}"), |s| s.mode = mode) {
+                    self.ok(format!("Checking for updates: {}.", mode.label()));
+                }
+            }
+            Key::Char('u') => {
+                let f = Form::new("Address of the update list").with_note("Where the newest IYAKKI version is announced (a small JSON file with the version). Leave it empty to check apps only. Nothing is downloaded from it; it only says what is new.").text("Address", &cur.system_url, "https://updates.example.org/iyakki/index.json");
+                self.open_form(FormKind::UpdateSource, f);
+            }
+            _ => {
+                if cur.mode == chk::Mode::Off {
+                    return self.fail("Checking for updates is off. Press m to turn it on.");
+                }
+                let v = self.upd.versions.clone().unwrap_or_else(|| self.upd_centre().versions());
+                let (svc, policy, user) = (cx.services.clone(), cx.session.policy.clone(), cx.session.user.clone());
+                cx.audit.record(&user, "system.update.check", "now");
+                self.upd.check = None;
+                self.start("Checking for updates", move || {
+                    let store = iyakki_agent::store::Store::for_services(&svc);
+                    let fetch = iyakki_agent::store::catalog::HttpFetch(svc.quick_upstream());
+                    let rep = chk::run_and_keep(&store, &svc, &policy, &user, &fetch, &cur, &v.running, &v.variant);
+                    JobOut::Msg(Ok(match (rep.count(), rep.errors.len()) {
+                        (0, 0) => "Everything is up to date.".to_string(),
+                        (0, e) => format!("Nothing new found, but {e} source(s) could not be reached."),
+                        (n, 0) => format!("{n} update(s) available. Nothing was downloaded or installed."),
+                        (n, e) => format!("{n} update(s) available; {e} source(s) could not be reached. Nothing was downloaded or installed."),
+                    }))
+                });
+            }
+        }
+    }
+
+    pub(super) fn upd_source_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
+        if !self.admin(cx) {
+            return Ok(String::new());
+        }
+        let url = chk::check_url(&form.value(0))?;
+        if self.upd_check_save(cx, "system_url", |s| s.system_url = url.clone()) {
+            Ok(if url.is_empty() { "No system update list: only apps are checked.".to_string() } else { "Address saved. Press Check for updates to try it.".to_string() })
+        } else {
+            Err("Could not save.".into())
+        }
+    }
+
+    /// The lines under the versions: how often, when it last looked, what it found, and what it does not do.
+    pub(super) fn upd_check_lines(&mut self, cx: &AppCx) -> Vec<(String, [u8; 4], Face)> {
+        let cfg = Self::upd_check_settings(cx);
+        let mut out = vec![(format!("Checking for updates: {}.{}", cfg.mode.label(), if cfg.system_url.is_empty() { " Apps in your store sources are checked; no system update list is set." } else { " Your apps and the system update list are checked." }), TEXT, Face::Bold)];
+        if cfg.mode == chk::Mode::Daily {
+            out.push(("This computer cannot tell a metered connection yet, so a daily check also runs on one.".into(), MUTED, Face::Sans));
+        }
+        match self.upd_report(cx) {
+            None => out.push(("Not checked yet. Press Check for updates.".into(), MUTED, Face::Sans)),
+            Some(r) => {
+                let ago = iyakki_agent::clock::now_unix().saturating_sub(r.checked_at);
+                let when = match ago {
+                    0..=89 => "just now".to_string(),
+                    90..=5399 => format!("{} minutes ago", ago / 60),
+                    5400..=129_599 => format!("{} hours ago", (ago + 1800) / 3600),
+                    _ => format!("{} days ago", ago / 86_400),
+                };
+                out.push((format!("Last checked {when}. {}", match r.count() { 0 => "Everything is up to date.".to_string(), n => format!("{n} update(s) available. Nothing is downloaded or installed until you do it yourself.") }), if r.count() > 0 { crate::fx::AMBER } else { OK }, Face::Sans));
+                for u in r.updates.iter().take(6) {
+                    let what = match u.kind {
+                        chk::Kind::System => format!("System: IYAKKI {} -> {}. Get the update pack and install it from a folder or stick below.{}", u.from, u.to, if u.note.is_empty() { String::new() } else { format!(" {}", u.note) }),
+                        chk::Kind::App => format!("App: {} {} -> {} ({}).{}", u.title, u.from, u.to, u.source, if u.needs_review() { format!(" Asks for new permissions: {}. Read them in the STORE before you update.", u.new_permissions.join(", ")) } else { String::new() }),
+                    };
+                    out.push((what, if u.needs_review() { crate::fx::AMBER } else { TEXT }, Face::Sans));
+                }
+                for (src, why) in r.errors.iter().take(3) {
+                    out.push((format!("{src}: {why}"), ERR, Face::Sans));
+                }
+            }
+        }
+        out
     }
 }

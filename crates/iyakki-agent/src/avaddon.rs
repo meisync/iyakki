@@ -22,19 +22,30 @@ pub const LIB_DIR_ENV: &str = "IYAKKI_AV_ADDON_DIR";
 /// The Store -> Setup item that downloads the libraries. SEAM: this is the id of the radio side's add-on entry (FFmpeg shared
 /// libraries, LGPL); change it here if the installer names it differently.
 pub const INSTALL_ITEM: &str = "ffmpeg-libs";
+// (the item is installed by `avaddon_install.rs`: a package the administrator puts in /local/packages, an organisation mirror, or the libraries of an installed ffmpeg that pass the checks)
 /// Sonames of the FFmpeg version Buildroot builds today (6.1), used only when the image has no [`ABI_FILE`] (a development run).
-pub const DEFAULT_SONAMES: [&str; 7] = ["libavcodec.so.60", "libavformat.so.60", "libavutil.so.58", "libavfilter.so.9", "libswresample.so.4", "libswscale.so.7", "libpostproc.so.57"];
+/// No `libpostproc`: it can only be built with `--enable-gpl`, and the add-on is LGPL-only (and `gst-libav` does not link it).
+pub const DEFAULT_SONAMES: [&str; 6] = ["libavcodec.so.60", "libavformat.so.60", "libavutil.so.58", "libavfilter.so.9", "libswresample.so.4", "libswscale.so.7"];
+/// Where the Store item puts the add-on, below the data folder (`lib/` inside it is [`lib_dir`]).
+pub const ADDON_SUBDIR: [&str; 2] = ["addons", "ffmpeg"];
+/// What an add-on archive must carry besides `lib/`: the LGPL text, the notice (version, configure line) and the source offer.
+pub const LEGAL_FILES: [&str; 3] = ["COPYING.LGPLv2.1", "NOTICE", "SOURCE-OFFER.txt"];
 
 /// What the person is told above a page whose video needs the add-on (the shell draws it with three buttons).
-pub const BAR_NEEDS: &str = "This video needs the audio and video add-on. Install it (your click, downloaded from the vendor, LGPL, licence shown).";
+pub const BAR_NEEDS: &str = "This video needs the audio and video add-on. IYAKKI does not provide it: an administrator installs it from a file in /local/packages, a mirror, or an installed ffmpeg (licence shown first).";
 /// The add-on is installed but the engine still cannot play the page's media.
 pub const BAR_BROKEN: &str = "The audio and video add-on is installed, but this page's video still cannot be played with it.";
 /// This image was built without the bridge (`WEB_AV_ADDON` off).
-pub const BAR_UNAVAILABLE: &str = "This video needs H.264 or AAC, which this image does not include.";
+pub const BAR_UNAVAILABLE: &str = "This video needs H.264 or AAC, which this image does not include. IYAKKI does not provide the codecs: an administrator can put the add-on file in /local/packages or set a mirror (Store -> Setup -> Browser audio and video).";
 
 /// Where the add-on's libraries live: `IYAKKI_AV_ADDON_DIR`, else `<data>/addons/ffmpeg/lib`.
 pub fn lib_dir(data: &Path) -> PathBuf {
     std::env::var_os(LIB_DIR_ENV).map(PathBuf::from).unwrap_or_else(|| data.join("addons").join("ffmpeg").join("lib"))
+}
+
+/// The folder of the installed add-on: `<data>/addons/ffmpeg`.
+pub fn addon_dir(data: &Path) -> PathBuf {
+    data.join(ADDON_SUBDIR[0]).join(ADDON_SUBDIR[1])
 }
 
 /// The data folder of a browser profile folder (`<data>/web-profile/<user>`).
@@ -84,10 +95,85 @@ pub fn detect_at(plugin_dir: &Path, lib_dir: &Path, sonames: &[String]) -> Addon
     }
 }
 
+/// Checks an unpacked add-on archive (`root/lib/<soname>` for every soname, and the legal files) before it is installed: a
+/// build for another FFmpeg version, a half archive or one without the licence texts is refused with the reason.
+pub fn check_unpacked(root: &Path, sonames: &[String]) -> Result<(), String> {
+    let lib = root.join("lib");
+    let missing: Vec<&String> = sonames.iter().filter(|s| !lib.join(s).is_file()).collect();
+    if !missing.is_empty() {
+        let list: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
+        return Err(format!("this add-on was built for another FFmpeg version than this image's browser engine: it lacks {} (the engine needs {})", list.join(", "), sonames.join(", ")));
+    }
+    for f in LEGAL_FILES {
+        if !root.join(f).is_file() {
+            return Err(format!("the add-on archive has no {f}; the licence texts and the source offer must travel with the libraries"));
+        }
+    }
+    // a library must be a real file of a sensible size, not a link out of the folder
+    for s in sonames {
+        let m = std::fs::symlink_metadata(lib.join(s)).map_err(|e| e.to_string())?;
+        if !m.file_type().is_file() || m.len() < 1024 {
+            return Err(format!("{s} in the add-on archive is not a plain library file"));
+        }
+    }
+    Ok(())
+}
+
+/// Puts a checked, unpacked add-on in place as `addon_dir` (the old one is replaced as a whole: a copy next to it, then two renames).
+pub fn install_unpacked(root: &Path, addon_dir: &Path, sonames: &[String]) -> Result<(), String> {
+    check_unpacked(root, sonames)?;
+    install_tree(root, addon_dir)
+}
+
+/// [`install_unpacked`] without the checks (the caller made its own): copies `root` (plain files only) to `addon_dir`.
+pub fn install_tree(root: &Path, addon_dir: &Path) -> Result<(), String> {
+    let parent = addon_dir.parent().ok_or("no folder for the add-on")?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("could not make {}: {e}", parent.display()))?;
+    let (new, old) = (parent.join(".ffmpeg-new"), parent.join(".ffmpeg-old"));
+    let _ = std::fs::remove_dir_all(&new);
+    let _ = std::fs::remove_dir_all(&old);
+    copy_tree(root, &new)?;
+    if addon_dir.exists() {
+        std::fs::rename(addon_dir, &old).map_err(|e| e.to_string())?;
+    }
+    if let Err(e) = std::fs::rename(&new, addon_dir) {
+        let _ = std::fs::rename(&old, addon_dir);
+        return Err(e.to_string());
+    }
+    let _ = std::fs::remove_dir_all(&old);
+    Ok(())
+}
+
+/// Takes the add-on away (Store -> Setup -> Remove).
+pub fn remove_installed(addon_dir: &Path) {
+    let _ = std::fs::remove_dir_all(addon_dir);
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
+    for e in std::fs::read_dir(from).map_err(|e| e.to_string())?.flatten() {
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        let m = std::fs::symlink_metadata(&src).map_err(|e| e.to_string())?;
+        if m.is_dir() {
+            copy_tree(&src, &dst)?;
+        } else if m.is_file() {
+            std::fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+            std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(m.permissions().mode() & 0o755)).map_err(|e| e.to_string())?;
+        } // links are not copied: an archive is checked to hold plain files
+    }
+    Ok(())
+}
+
 /// [`detect_at`] with this image's places.
 pub fn detect(data: &Path) -> Addon {
     let abi = std::fs::read_to_string(ABI_FILE).unwrap_or_default();
-    detect_at(Path::new(PLUGIN_DIR), &lib_dir(data), &required_sonames(&abi))
+    let found = detect_at(Path::new(PLUGIN_DIR), &lib_dir(data), &required_sonames(&abi));
+    // an add-on built here for another map entry or GStreamer than this image's: the engine starts without it until it is rebuilt (avbuild.rs)
+    if found == Addon::Ready && crate::avbuild::needs_rebuild(data) {
+        return Addon::Absent;
+    }
+    found
 }
 
 /// A short name for the libraries folder's contents (file names and sizes), so a changed add-on gets a new plugin registry.

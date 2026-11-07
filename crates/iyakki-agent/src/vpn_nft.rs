@@ -5,7 +5,7 @@
 //! [`KillSwitchSpec::evaluate`], so the typed rules mean what the plan says; real kernels are covered by the ignored tests in
 //! `iyakki-fw/tests/tablegen_kernel.rs`.
 
-use iyakki_fw::nl::tablegen::{ChainKind, ChainSpec, Expr, IfName, SetSpec, TableSpec};
+use iyakki_fw::nl::tablegen::{ChainKind, ChainSpec, Expr, Hook, IfName, SetSpec, TableSpec};
 use iyakki_vpn::plan::{DnsCaptureSpec, IfMatch, KillSwitchSpec, Proto, Verdict, DNS_CHAIN, DNS_PRIORITY, DNS_TABLE, KS_CHAIN, KS_PRIORITY, KS_TABLE};
 
 fn ifname(m: &IfMatch) -> IfName {
@@ -60,7 +60,7 @@ pub fn guard_table(spec: &KillSwitchSpec) -> Result<TableSpec, String> {
         e.push(if r.verdict == Verdict::Accept { Expr::Accept } else { Expr::Drop });
         rules.push(e);
     }
-    let t = TableSpec { name: KS_TABLE.into(), sets, chains: vec![ChainSpec { name: KS_CHAIN.into(), kind: ChainKind::Filter, priority: KS_PRIORITY, policy_accept: true, rules }] };
+    let t = TableSpec { name: KS_TABLE.into(), sets, chains: vec![ChainSpec { name: KS_CHAIN.into(), kind: ChainKind::Filter, hook: Hook::Output, priority: KS_PRIORITY, policy_accept: true, rules }] };
     t.check()?;
     Ok(t)
 }
@@ -73,7 +73,7 @@ pub fn dns_table(spec: &DnsCaptureSpec) -> Result<TableSpec, String> {
         chains: vec![ChainSpec {
             name: DNS_CHAIN.into(),
             kind: ChainKind::Nat,
-            priority: DNS_PRIORITY,
+            hook: Hook::Output, priority: DNS_PRIORITY,
             policy_accept: true,
             rules: vec![
                 vec![Expr::MarkIs(spec.mark), Expr::Return],
@@ -127,7 +127,7 @@ mod tests {
                     }
                     Expr::Sport(x) => *x == p.p.sport,
                     Expr::Dport(x) => *x == p.p.dport,
-                    Expr::MarkIs(_) | Expr::RedirectPort(_) | Expr::Return => unreachable!("not in a guard"),
+                    Expr::MarkIs(_) | Expr::RedirectPort(_) | Expr::Return | Expr::IifIs(_) | Expr::IifNot(_) | Expr::CtState(_) | Expr::Saddr(..) | Expr::Masquerade => unreachable!("not in a guard"),
                     Expr::Accept => return Verdict::Accept,
                     Expr::Drop => return Verdict::Drop,
                 };

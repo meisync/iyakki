@@ -65,7 +65,11 @@ if [ "$VARIANT" = "web" ] || [ "$VARIANT" = "macweb" ]; then
   if [ "${WEB_IRIS:-0}" = 1 ] || [ "${WEB_CROCUS:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_iris.fragment" >> "$OUT/defconfig"; fi
   if [ "${WEB_CROCUS:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_crocus.fragment" >> "$OUT/defconfig"; fi
   if [ "${WEB_H264:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_h264.fragment" >> "$OUT/defconfig"
-  elif [ "${WEB_AV_ADDON:-1}" = 1 ]; then cat "$HERE/configs/iyakki_web_av_addon.fragment" >> "$OUT/defconfig"; fi
+  elif [ "${WEB_AV_ADDON:-1}" = 1 ]; then
+    cat "$HERE/configs/iyakki_web_av_addon.fragment" >> "$OUT/defconfig"
+    # FFmpeg built LGPL-only with the three decoders, to make the add-on's libraries (docs/development/AV-ADDON-BUILD.md); the image keeps none of it
+    [ "${WITH_FFMPEG:-0}" = 1 ] || cat "$HERE/configs/iyakki_web_av_addon_libs.fragment" >> "$OUT/defconfig"
+  fi
   # OPTIONAL, default OFF: camera, microphone, screen share and WebRTC in the page (WPE media-stream + GStreamer capture and webrtc plugins).
   # Rebuilds WPE WebKit (about 9 h without ccache). docs/development/BROWSER-MEDIA-DEVICES.md. external.mk reads IYAKKI_WEB_MEDIA.
   if [ "${WEB_MEDIA:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_media.fragment" >> "$OUT/defconfig"; export IYAKKI_WEB_MEDIA=1; else export IYAKKI_WEB_MEDIA=0; fi
@@ -115,6 +119,8 @@ rebuild_if_changed() {
   printf '%s' "$sum" > "$stamp"
 }
 rebuild_if_changed grub2 "$(grep '^BR2_TARGET_GRUB2' "$OUT/.config")" new
+# FFmpeg's decoder list and options decide what the add-on's libraries can do (Buildroot does not notice an option change)
+rebuild_if_changed ffmpeg "$(grep '^BR2_PACKAGE_FFMPEG' "$OUT/.config")" no
 PATCH_DIR_LINE="$(grep '^BR2_GLOBAL_PATCH_DIR' "$OUT/.config" || true)"
 KPATCHES="$(cat "$HERE"/board/iyakki/patches/linux/*/*.patch 2>/dev/null || true)"
 case "$PATCH_DIR_LINE" in *board/iyakki/patches*) LNEW=new ;; *) LNEW=no; KPATCHES="" ;; esac

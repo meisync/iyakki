@@ -124,10 +124,14 @@ fn the_grub_modules_cover_every_command_the_menu_uses() {
     };
     let (pc, efi) = (list("BR2_TARGET_GRUB2_BUILTIN_MODULES_PC="), list("BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI="));
     // (the command as a word at the start of a line or after a space, the module that provides it)
-    for (cmd, module) in [("echo", "echo"), ("loadfont", "font"), ("background_image", "gfxterm_background"), ("terminal_output", "gfxterm"), ("search", "search")] {
+    for (cmd, module) in [("echo", "echo"), ("loadfont", "font"), ("background_image", "gfxterm_background"), ("terminal_output", "gfxterm"), ("search", "search"), ("chainloader", "chain")] {
         let used = cfg.lines().map(str::trim).any(|l| l == cmd || l.starts_with(&format!("{cmd} ")) || l.contains(&format!("; {cmd} ")));
         if used {
+            // the new boot loader's entry is UEFI only (hidden on BIOS), so `chain` is needed in the EFI build only
             for (name, mods) in [("PC", &pc), ("EFI", &efi)] {
+                if cmd == "chainloader" && name == "PC" {
+                    continue;
+                }
                 assert!(mods.iter().any(|m| m == module), "grub.cfg uses `{cmd}` but the {name} module list has no `{module}`");
             }
         }
@@ -138,7 +142,8 @@ fn the_grub_modules_cover_every_command_the_menu_uses() {
 fn every_boot_entry_says_it_is_loading() {
     let cfg = read("board/iyakki/grub.cfg");
     assert!(cfg.contains("function iyakki_loading") && cfg.contains("IYAKKI is starting") && cfg.contains("[1/3] Reading the kernel"));
-    let entries = cfg.matches("menuentry \"").count();
+    // the chain-loading entry of the new boot loader starts no kernel through GRUB, so it has no loading text
+    let entries = cfg.matches("menuentry \"").count() - cfg.matches("chainloader ").count();
     let loading = cfg.lines().map(str::trim).collect::<Vec<_>>().windows(2).filter(|w| w[0] == "iyakki_loading" && w[1].starts_with("linux ")).count();
     assert_eq!(loading, entries, "each entry prints the message before GRUB reads the kernel");
 }
@@ -320,4 +325,186 @@ fn every_entry_restarts_after_a_kernel_panic_and_nothing_stricter() {
         assert!(w.contains(&"panic=20"), "{t}: {a}");
         assert!(!a.contains("oops=panic") && !a.contains("softlockup_panic") && !a.contains("hung_task_panic"), "{t}");
     }
+}
+
+/// The extra boot loader (iyakki-boot): a GRUB test entry that chain-loads it on UEFI only, shown only when the image carries it, and the
+/// image step that lays it out with the same kernel, RAM disk and command lines as the plain GRUB entries. GRUB stays the default.
+#[test]
+fn the_new_boot_loader_is_an_extra_test_entry_and_grub_stays_the_default() {
+    let cfg = read("board/iyakki/grub.cfg");
+    assert!(cfg.contains("set default=\"0\""), "GRUB's own first entry stays the default");
+    let sub = cfg.find("submenu \"More options...\"").unwrap();
+    let at = cfg.find("menuentry \"IYAKKI - new boot loader (test)\"").expect("the entry");
+    assert!(at > sub, "inside the test submenu, not on the first screen");
+    let block = &cfg[sub..at];
+    assert!(block.contains("$grub_platform\" = efi") && block.contains("-f /EFI/iyakki-boot/loader.efi"), "UEFI only, and only when the loader is on the volume");
+    assert!(cfg[at..].lines().nth(1).unwrap().trim() == "chainloader /EFI/iyakki-boot/loader.efi");
+    let stage = read("boot-loader-stage.sh");
+    let post = read("board/iyakki/post-image.sh");
+    let lean = read("lean-image.sh");
+    assert!(post.contains("boot-loader-stage.sh") && lean.contains("boot-loader-stage.sh"), "both the install template and the lean image get it");
+    // the loader's entries mirror the GRUB ones: see every_grub_entry_has_a_loader_twin_or_is_listed_as_grub_only_with_a_reason
+    assert!(stage.contains("kernel /boot/bzImage") && stage.contains("EFI/iyakki-boot") && stage.contains("sign.sh"));
+}
+
+/// GRUB entries that the boot loader's menu does not carry, with the reason. Empty today: every start has a twin.
+const GRUB_ONLY: &[(&str, &str)] = &[];
+
+/// Rows of the ENTRIES table of `boot-loader-stage.sh`: (id, level, title, kernel command line).
+fn loader_table() -> Vec<(String, String, String, String)> {
+    let script = read("boot-loader-stage.sh");
+    let body = script.split("ENTRIES='\n").nth(1).expect("the ENTRIES table").split("\n'\n").next().unwrap();
+    body.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let f: Vec<&str> = l.splitn(4, '|').collect();
+            assert_eq!(f.len(), 4, "table row {l:?}");
+            (f[0].into(), f[1].into(), f[2].into(), f[3].into())
+        })
+        .collect()
+}
+
+#[test]
+fn every_grub_entry_has_a_loader_twin_or_is_listed_as_grub_only_with_a_reason() {
+    let grub = entries(&read("board/iyakki/grub.cfg"));
+    let table = loader_table();
+    for (title, args) in &grub {
+        let a = args.replace("$iyakki_usbq ", "");
+        let twin = table.iter().find(|t| t.3 == a);
+        let only = GRUB_ONLY.iter().find(|(t, _)| t == title);
+        assert!(twin.is_some() || only.is_some_and(|(_, why)| !why.is_empty()), "GRUB entry {title:?} has no twin in the ENTRIES table of boot-loader-stage.sh and is not in GRUB_ONLY: {a}");
+        assert!(!(twin.is_some() && only.is_some()), "{title:?} is both twinned and GRUB-only");
+    }
+    for (t, _) in GRUB_ONLY {
+        assert!(grub.iter().any(|(g, _)| g == t), "GRUB_ONLY names {t:?}, which is not in grub.cfg any more");
+    }
+    // and the other way: nothing in the loader's table that GRUB does not start
+    for (id, _, title, cmd) in &table {
+        assert!(grub.iter().any(|(_, a)| a.replace("$iyakki_usbq ", "") == *cmd), "loader entry {id} ({title}) has no GRUB twin: {cmd}");
+    }
+}
+
+#[test]
+fn the_loader_table_makes_a_config_the_loader_accepts() {
+    let table = loader_table();
+    let mut ids = std::collections::HashSet::new();
+    for (id, level, title, cmd) in &table {
+        assert!(ids.insert(id.clone()), "{id} twice");
+        assert!(!id.is_empty() && id.len() <= 32 && id.bytes().all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\\'), "{id}");
+        assert!(matches!(level.as_str(), "top" | "more"), "{id}: level {level}");
+        assert!(!title.is_empty() && title.len() <= 64, "{id}: title");
+        assert!(cmd.bytes().all(|b| (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\') && cmd.contains("console=tty0"), "{id}: command line");
+    }
+    // owner 2026-11-05: the first level is IYAKKI and "Install to a disk" (which the loader shows only on install media: it requires the marker file)
+    let top: Vec<&str> = table.iter().filter(|t| t.1 == "top").map(|t| t.0.as_str()).collect();
+    assert_eq!(top, vec!["iyakki", "install"], "the first level: IYAKKI, then Install to a disk");
+    assert_eq!(table[0].0, "iyakki", "the default start is the first row");
+    // run the real script with a stand-in loader file and read what it wrote (python3 is already needed by the image steps)
+    let tmp = std::env::temp_dir().join(format!("iyakki-loader-stage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("root")).unwrap();
+    // the stage script refuses a loader that was not built with the config path of the image: the stand-in carries the path like the real one
+    std::fs::write(tmp.join("fake.efi"), b"MZ /EFI/iyakki-boot/boot.cfg").unwrap();
+    for (initrd, full) in [("/boot/initrd", false), ("/boot/initrd-lean", true)] {
+        let out = std::process::Command::new("sh")
+            .arg(board().join("boot-loader-stage.sh"))
+            .arg(tmp.join("root"))
+            .arg(initrd)
+            .env("IYAKKI_BOOT_EFI", tmp.join("fake.efi"))
+            .output()
+            .expect("sh");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let cfg = std::fs::read_to_string(tmp.join("root/EFI/iyakki-boot/boot.cfg")).unwrap();
+        assert!(cfg.len() < 32 * 1024, "{} bytes: over the loader's file limit", cfg.len());
+        let n = cfg.lines().filter(|l| l.starts_with("entry ")).count();
+        assert!(n <= 48 && n >= table.len() + 3, "{n} entries");
+        for (id, level, ..) in &table {
+            assert!(cfg.contains(&format!("\nentry {id}\n")), "{id} missing from boot.cfg");
+            let block = cfg.split(&format!("\nentry {id}\n")).nth(1).unwrap().split("\nentry ").next().unwrap();
+            assert_eq!(block.contains("\n  more\n"), level == "more", "{id}: level");
+            assert!(block.contains(&format!("initrd {initrd}\n")), "{id}: RAM disk");
+        }
+        assert_eq!(cfg.contains("\nentry full\n"), full, "the full-start entry is only for a lean image");
+        assert_eq!(cfg.matches("\n  default\n").count(), 1);
+        for (id, file) in [("previous", "/EFI/iyakki-boot/loader.prev.efi"), ("recovery", "/EFI/BOOT/grub-recovery.efi")] {
+            let block = cfg.split(&format!("\nentry {id}\n")).nth(1).expect(id);
+            assert!(block.contains(&format!("requires {file}\n")), "{id} is shown only when its file exists");
+        }
+        assert!(cfg.contains("kind firmware"), "UEFI firmware setup entry");
+        assert!(cfg.contains("splash /EFI/iyakki-boot/splash.bmp") && cfg.contains("\nscan yes\n"));
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `IYAKKI_LOADER_DEFAULT=1` (docs/BOOT-LOADER.md): GRUB-default builds keep the "new boot loader (test)" entry, loader-default builds drop it
+/// and lay the loader out as shim's second stage / BOOTX64.EFI with GRUB as grub-recovery.efi, consistent with the loader's Recovery row.
+#[test]
+fn the_loader_default_option_drops_the_test_entry_and_lays_out_the_recovery_names_and_grub_default_keeps_the_entry() {
+    let post = read("board/iyakki/post-image.sh");
+    let lean = read("lean-image.sh");
+    for (name, text) in [("post-image.sh", &post), ("lean-image.sh", &lean)] {
+        assert!(text.contains("IYAKKI_LOADER_DEFAULT:-0") && text.contains("loader-default.sh"), "{name}: the option (default 0)");
+    }
+    // GRUB-default (the option off): the entry is in the board's grub.cfg, between the markers the script cuts out
+    let cfg = read("board/iyakki/grub.cfg");
+    assert!(cfg.contains("# BEGIN loader-test-entry") && cfg.contains("# END loader-test-entry"));
+    assert!(cfg.find("# BEGIN loader-test-entry").unwrap() < cfg.find("new boot loader (test)").unwrap() && cfg.find("new boot loader (test)").unwrap() < cfg.find("# END loader-test-entry").unwrap());
+    let tmp = std::env::temp_dir().join(format!("iyakki-loader-default-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let sh = |args: &[&str], envs: &[(&str, &Path)]| {
+        let mut c = std::process::Command::new("sh");
+        c.arg(board().join(args[0])).args(&args[1..]).env_remove("IYAKKI_SB_KEY").env_remove("IYAKKI_SB_CERT");
+        for (k, v) in envs {
+            c.env(k, v);
+        }
+        c.output().expect("sh")
+    };
+    // loader-default: the entry is gone, every other entry and the rest of the file are untouched
+    let f = tmp.join("grub.cfg");
+    std::fs::write(&f, &cfg).unwrap();
+    let out = sh(&["loader-default.sh", "grubcfg", f.to_str().unwrap()], &[]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let dropped = std::fs::read_to_string(&f).unwrap();
+    assert!(!dropped.contains("new boot loader (test)") && !dropped.contains("chainloader /EFI/iyakki-boot/loader.efi") && !dropped.contains("loader-test-entry"));
+    assert_eq!(entries(&dropped), entries(&cfg), "all the starts stay");
+    assert_eq!(dropped.matches("menuentry \"").count() + 1, cfg.matches("menuentry \"").count(), "exactly the one test entry went");
+    // the layout, both paths. A stand-in loader staged by the real boot-loader-stage.sh (so boot.cfg has the real Recovery row).
+    std::fs::write(tmp.join("loader.efi"), b"MZ-LOADER /EFI/iyakki-boot/boot.cfg").unwrap();
+    for (path, grub_file, second) in [("shim", "grubx64.efi", "grubx64.efi"), ("plain", "bootx64.efi", "BOOTX64.EFI")] {
+        let root = tmp.join(path);
+        std::fs::create_dir_all(root.join("EFI/BOOT")).unwrap();
+        std::fs::write(root.join("EFI/BOOT").join(grub_file), b"MZ-GRUB").unwrap();
+        if path == "shim" {
+            std::fs::write(root.join("EFI/BOOT/BOOTX64.EFI"), b"MZ-SHIM").unwrap();
+        }
+        let out = sh(&["boot-loader-stage.sh", root.to_str().unwrap(), "/boot/initrd"], &[("IYAKKI_BOOT_EFI", &tmp.join("loader.efi"))]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let out = sh(&["loader-default.sh", "esp", root.to_str().unwrap()], &[]);
+        assert!(out.status.success(), "{path}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("UNSIGNED"), "{path}: no key configured: the message says the loader is unsigned");
+        let b = root.join("EFI/BOOT");
+        assert_eq!(std::fs::read(b.join(second)).unwrap(), b"MZ-LOADER /EFI/iyakki-boot/boot.cfg", "{path}: the loader is started by name");
+        assert_eq!(std::fs::read(b.join("grub-recovery.efi")).unwrap(), b"MZ-GRUB", "{path}: GRUB is kept as the Recovery file");
+        assert_eq!(std::fs::read(root.join("EFI/iyakki-boot/loader.efi")).unwrap(), b"MZ-LOADER /EFI/iyakki-boot/boot.cfg", "{path}: the updater's copy is the same");
+        if path == "shim" {
+            assert_eq!(std::fs::read(b.join("BOOTX64.EFI")).unwrap(), b"MZ-SHIM", "shim is untouched");
+        } else {
+            assert!(!b.join("bootx64.efi").exists(), "plain: only one BOOTX64.EFI");
+        }
+        let cfg = std::fs::read_to_string(root.join("EFI/iyakki-boot/boot.cfg")).unwrap();
+        assert!(cfg.contains("entry recovery\n") && cfg.contains("kernel /EFI/BOOT/grub-recovery.efi\n"), "the Recovery row names the file the script made");
+        // a second run changes nothing (lean-image.sh runs it after the template did)
+        let again = sh(&["loader-default.sh", "esp", root.to_str().unwrap()], &[]);
+        assert!(again.status.success());
+        assert_eq!(std::fs::read(b.join("grub-recovery.efi")).unwrap(), b"MZ-GRUB");
+    }
+    // no loader staged: the script says so and leaves the layout alone (GRUB stays the default)
+    let empty = tmp.join("empty");
+    std::fs::create_dir_all(empty.join("EFI/BOOT")).unwrap();
+    std::fs::write(empty.join("EFI/BOOT/bootx64.efi"), b"MZ-GRUB").unwrap();
+    let out = sh(&["loader-default.sh", "esp", empty.to_str().unwrap()], &[]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(empty.join("EFI/BOOT/bootx64.efi").exists() && !empty.join("EFI/BOOT/grub-recovery.efi").exists());
+    let _ = std::fs::remove_dir_all(&tmp);
 }

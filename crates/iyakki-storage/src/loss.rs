@@ -277,6 +277,9 @@ pub struct Change {
     pub to: State,
 }
 
+/// How long after the first look slow or failed checks are not held against the drive.
+pub const WARMUP_MS: u64 = 60_000;
+
 pub struct Watcher {
     pub baseline: Option<Baseline>,
     pub state: State,
@@ -286,6 +289,10 @@ pub struct Watcher {
     pub lost_at: Option<u64>,
     pub ring: Ring,
     bad_probes: u32,
+    /// The steady clock (ms) at the first look: slow answers while the system is still starting are not a lost drive.
+    first_ms: Option<u64>,
+    /// How long after the first look failed checks are not held against the drive (`WARMUP_MS`; tests set 0).
+    pub warmup_ms: u64,
     /// The new node being watched for stability: (majmin, first seen ms).
     cand: Option<(String, u64)>,
     /// The last refusal told (not repeated every second).
@@ -304,7 +311,7 @@ impl Default for Watcher {
 
 impl Watcher {
     pub fn new() -> Watcher {
-        Watcher { baseline: None, state: State::Healthy, since: 0, lost_at: None, ring: Ring::default(), bad_probes: 0, cand: None, refused: None, note: String::new(), reattached: 0 }
+        Watcher { baseline: None, state: State::Healthy, since: 0, lost_at: None, ring: Ring::default(), bad_probes: 0, first_ms: None, warmup_ms: WARMUP_MS, cand: None, refused: None, note: String::new(), reattached: 0 }
     }
 
     /// Remember the volume mounted at the data folder (when it is a real ext4 device). False when there is none (RAM only).
@@ -349,6 +356,7 @@ impl Watcher {
         if matches!(self.state, State::Reconnecting) {
             return None;
         }
+        let first = *self.first_ms.get_or_insert(now_ms);
         let table = parse_mountinfo(&env.mountinfo());
         let disk = disk_of(&base.dev);
         let mount = mount_at(&table, DATA_DIR);
@@ -369,6 +377,11 @@ impl Watcher {
                     } else {
                         None
                     }
+                }
+                _ if now_ms.saturating_sub(first) < self.warmup_ms => {
+                    // the first minute: the system is busy loading drivers and the check may simply be slow
+                    self.bad_probes = 0;
+                    None
                 }
                 p => {
                     self.bad_probes += 1;

@@ -7,6 +7,7 @@
 #   secureboot.sh sign-pe IN OUT               sign an EFI program (GRUB, or the kernel's EFI stub) with the key
 #   secureboot.sh sign-modules DIR [SIGN-FILE] sign every *.ko under DIR with the key (the kernel's scripts/sign-file)
 #   secureboot.sh grub-image OUT               build the monolithic EFI GRUB with an SBAT section (Buildroot's own settings)
+#   secureboot.sh loader-image IN OUT         the boot loader (iyakki-boot) for shim's second stage: add its SBAT section, then sign it with the key
 #   secureboot.sh stage-esp ESPDIR GRUB-EFI    lay out ESPDIR/EFI/BOOT (shim as BOOTX64.EFI, signed GRUB, MokManager) and the
 #                                              certificate in ESPDIR/EFI/IYAKKI/
 #   secureboot.sh make-fat IMG ESPDIR          a FAT image holding ESPDIR (the ISO's EFI partition)
@@ -125,6 +126,19 @@ cmd_sign_pe() {
   # a file that already carries a signature (a second run, a signed kernel) is signed again from its unsigned body: sbsign adds one
   sbsign --key "$IYAKKI_SB_KEY" --cert "$IYAKKI_SB_CERT" --output "$out" "$in" >/dev/null 2>"$out.err" || { cat "$out.err" >&2; rm -f "$out.err"; die "sbsign failed for $in"; }
   rm -f "$out.err"
+}
+
+# The own boot loader as shim's second stage (docs/development/GRUB-REPLACEMENT-PLAN.md): shim 15.3 and newer refuse a file without an .sbat
+# section, so the section is added first (only our own component name: board/iyakki/loader-sbat.csv), then the file is signed with the same key
+# as GRUB and the kernel. The loader starts the kernel with LoadImage and wraps the firmware's check so shim's MOK list counts (boot-uefi/src/shim.rs).
+cmd_loader_image() {
+  in="${1:?usage: loader-image IN OUT}"; out="${2:?usage: loader-image IN OUT}"
+  need_key; [ -s "$in" ] || die "$in not found (build iyakki-boot first)"
+  tool="$HERE/../../iyakki-boot/tools/add-sbat.sh"; [ -f "$tool" ] || die "$tool not found"
+  tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+  rm -f "$tmp"; sh "$tool" "$in" "$tmp" "$BOARD/loader-sbat.csv" >&2 || die "adding the SBAT section failed"
+  cmd_sign_pe "$tmp" "$out"; rm -f "$tmp"; trap - EXIT
+  echo "loader-image: $out (SBAT iyakki.loader,1; signed with the image key)"
 }
 
 cmd_sign_modules() {
@@ -262,6 +276,7 @@ case "$c" in
   check) cmd_check ;;
   fetch-shim) cmd_fetch_shim "$@" ;;
   sign-pe) cmd_sign_pe "$@" ;;
+  loader-image) cmd_loader_image "$@" ;;
   sign-modules) cmd_sign_modules "$@" ;;
   grub-image) cmd_grub_image "$@" ;;
   stage-esp) cmd_stage_esp "$@" ;;

@@ -21,6 +21,8 @@ pub enum Kind {
     Ollama,
     OpenAi,
     OpenRouter,
+    /// NVIDIA NIM (build.nvidia.com): an OpenAI-compatible endpoint with a free tier; the key starts with `nvapi-`.
+    Nvidia,
     Anthropic,
     Gemini,
     /// Any server speaking the OpenAI chat-completions API; `base_url` is required.
@@ -30,14 +32,22 @@ pub enum Kind {
     Lemonade,
 }
 
+/// NVIDIA NIM's OpenAI-compatible base URL.
+pub const NVIDIA_BASE: &str = "https://integrate.api.nvidia.com/v1";
+/// Every NVIDIA key starts with this.
+pub const NVIDIA_KEY_PREFIX: &str = "nvapi-";
+/// How to get an NVIDIA NIM key, in the words the Settings page shows.
+pub const NVIDIA_STEPS: &str = "NVIDIA NIM gives free access to many models (Llama, Qwen, DeepSeek, Mistral and more). To get a key: 1) open build.nvidia.com in a browser and sign in with a free NVIDIA account; 2) open any model and press Get API Key (or Generate Key); 3) copy the key, it starts with nvapi-; 4) paste it here. No card is needed. Limits: about 40 requests a minute, and the free tier may log requests to improve models, so do not send secrets.";
+
 impl Kind {
-    pub const ALL: [Kind; 7] = [Kind::Ollama, Kind::OpenAi, Kind::OpenRouter, Kind::Anthropic, Kind::Gemini, Kind::Compat, Kind::Lemonade];
+    pub const ALL: [Kind; 8] = [Kind::Ollama, Kind::OpenAi, Kind::OpenRouter, Kind::Nvidia, Kind::Anthropic, Kind::Gemini, Kind::Compat, Kind::Lemonade];
 
     pub fn label(self) -> &'static str {
         match self {
             Kind::Ollama => "Ollama",
             Kind::OpenAi => "OpenAI",
             Kind::OpenRouter => "OpenRouter",
+            Kind::Nvidia => "NVIDIA NIM (free key)",
             Kind::Anthropic => "Anthropic Claude",
             Kind::Gemini => "Google Gemini",
             Kind::Compat => "OpenAI-compatible",
@@ -50,10 +60,19 @@ impl Kind {
             Kind::Ollama => Some("http://localhost:11434"),
             Kind::OpenAi => Some("https://api.openai.com/v1"),
             Kind::OpenRouter => Some("https://openrouter.ai/api/v1"),
+            Kind::Nvidia => Some(NVIDIA_BASE),
             Kind::Anthropic => Some("https://api.anthropic.com/v1"),
             Kind::Gemini => Some("https://generativelanguage.googleapis.com/v1beta"),
             Kind::Compat => None,
             Kind::Lemonade => Some(crate::lemonade::DEFAULT_BASE),
+        }
+    }
+
+    /// How to get a key for this provider (what the Settings page shows next to the key field), where there is something to explain.
+    pub fn key_help(self) -> Option<&'static str> {
+        match self {
+            Kind::Nvidia => Some(NVIDIA_STEPS),
+            _ => None,
         }
     }
 
@@ -1206,6 +1225,10 @@ pub struct ProviderChat {
 }
 
 impl ChatBackend for ProviderChat {
+    fn provider_name(&self) -> String {
+        self.client.cfg.id.clone()
+    }
+
     fn complete(&self, history: &[Message]) -> Result<String, String> {
         self.client.chat(&self.model, history)
     }
@@ -1369,6 +1392,20 @@ mod tests {
         assert!(hdr(&call, "authorization").is_none());
         assert_eq!(strip_think("a<think>x</think>b<think>y</think>c"), "abc");
         assert_eq!(strip_think("a<think>unterminated"), "a");
+    }
+
+    #[test]
+    fn nvidia_nim_is_an_openai_compatible_provider_with_a_key_and_the_steps_to_get_one() {
+        let (c, m) = client(Kind::Nvidia, None, Some("nvapi-abc"), |_, _| (200, r#"{"choices":[{"message":{"content":"ok"}}]}"#.into()));
+        c.chat("meta/llama-3.1-70b-instruct", &convo()).unwrap();
+        let calls = m.calls.lock().unwrap();
+        assert_eq!(calls[0].1, "https://integrate.api.nvidia.com/v1/chat/completions");
+        assert_eq!(hdr(&calls[0], "authorization").as_deref(), Some("Bearer KEY123"));
+        assert!(Kind::Nvidia.needs_key() && ProviderCfg::new("nvidia", Kind::Nvidia).validate().is_err(), "a key is required");
+        let help = Kind::Nvidia.key_help().unwrap();
+        assert!(help.contains("build.nvidia.com") && help.contains("nvapi-") && help.contains("40 requests"), "{help}");
+        assert!(Kind::OpenAi.key_help().is_none());
+        assert_eq!(Kind::ALL.iter().filter(|k| **k == Kind::Nvidia).count(), 1);
     }
 
     #[test]

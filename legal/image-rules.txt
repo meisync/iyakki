@@ -105,6 +105,7 @@ generated | lib/udev/hwdb.bin | udev hardware database compiled from hwdata (GPL
 generated | lib/modules/*/modules.* | module indexes written by depmod from the kernel's modules
 generated | usr/share/doc/linux-firmware/* | licence texts of linux-firmware copied next to the firmware by the image build
 generated | usr/lib/iyakki-av/* | gst-libav moved here by web-post-build.sh; inactive, see the except row
+generated | local | link to the data volume local folder, where the administrator puts the add-on archive (web-post-build.sh)
 generated | usr/bin/analyze-build | scan-build-py helper script of the clang package; source read 2026-10-27 in target/buildroot-web/build/clang-21.1.8/tools/scan-build-py/bin: header "Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions"; Buildroot's file list does not name it (cause not investigated)
 generated | usr/bin/hmaptool | clang package helper script, source clang-21.1.8/utils/hmaptool/hmaptool (installed by that tree's CMake `install(PROGRAMS hmaptool)`); the file has no licence header of its own, the LLVM tree's licence (Apache-2.0 with LLVM exceptions) applies; not named in Buildroot's file list
 generated | usr/bin/intercept-build | scan-build-py helper script of the clang package, LLVM licence header as analyze-build (read 2026-10-27)

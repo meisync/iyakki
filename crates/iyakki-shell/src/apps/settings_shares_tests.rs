@@ -188,6 +188,12 @@ fn start_stop_and_stop_all_with_a_real_server() {
     // the top bar's Devices list carries a Stop action while something is shared
     assert!(iyakki_agent::sharedfolder::running_total() > 0);
     key(&mut a, &cx, Key::Char('x'));
+    assert!(matches!(&a.modal, Some(Modal::Confirm(ConfirmKind::ShareStopAll, _))), "stop all asks first");
+    assert_eq!(iyakki_agent::sharedfolder::running_total(), 1, "nothing stopped before the answer");
+    key(&mut a, &cx, Key::Char('n'));
+    assert!(a.modal.is_none() && iyakki_agent::sharedfolder::running_total() == 1, "any other key keeps sharing");
+    key(&mut a, &cx, Key::Char('x'));
+    key(&mut a, &cx, Key::Char('y'));
     assert!(status(&a).contains("Stopped 1 share"), "{}", status(&a));
     assert_eq!(iyakki_agent::sharedfolder::running_total(), 0);
     assert!(refused(port));
@@ -291,3 +297,29 @@ fn the_page_draws_inside_the_window_at_four_sizes_with_a_qr_code() {
         assert!(!g.hits.is_empty(), "{w}x{h}");
     }
 }
+
+#[test]
+fn receive_a_package_makes_a_ten_minute_password_drop_in_the_packages_folder_and_says_how_to_send_to_it() {
+    let cx = admin("sh-drop");
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Shares);
+    key(&mut a, &cx, Key::Char('r'));
+    let said = status(&a);
+    assert!(said.contains("Ready for 10 minutes") && said.contains("curl -T ffmpeg-libs-") && said.contains("-u iyakki:"), "{said}");
+    let m = SettingsApp::shares(&cx);
+    let drops: Vec<_> = m.list().into_iter().filter(|i| i.cfg.package_drop).collect();
+    assert_eq!(drops.len(), 1);
+    assert!(drops[0].running && drops[0].cfg.folder.ends_with("local/packages") && drops[0].cfg.expiry_secs == 600, "{:?}", drops[0].cfg);
+    assert!(std::fs::metadata(cx.services.dir().join("local/packages")).unwrap().is_dir());
+    // the drop has a real port from the shared-folder range, and the curl line ends in it (never ':0')
+    let port = drops[0].cfg.port;
+    assert!((8081..=8180).contains(&port), "port {port}");
+    assert!(said.contains(&format!(":{port}")) && !said.contains(":0 ") && !said.contains(":0)"), "{said}");
+    assert!(drops[0].urls.iter().all(|u| u.contains(&format!(":{port}"))), "{:?}", drops[0].urls);
+    // the password is in the message but never in the saved share list
+    let pw = said.split("-u iyakki:").nth(1).unwrap().split(' ').next().unwrap().to_string();
+    assert_eq!(pw.len(), 12);
+    assert!(!std::fs::read_to_string(m.file()).unwrap().contains(&pw));
+    m.stop(&drops[0].cfg.id);
+}
+

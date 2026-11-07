@@ -36,7 +36,11 @@ iyakki-flow.workspace = true
 iyakki-vpn = { path = "../iyakki-vpn" }
 # the guard and DNS-redirect tables go through the Firewall's own netlink writer (vpn_nft.rs); the images ship no nft
 iyakki-fw.workspace = true
+# the Wi-Fi hotspot core (pure); the real nl80211 and packet sockets are in nl80211_os.rs
+iyakki-hotspot = { path = "../iyakki-hotspot" }
 iyakki-schema.workspace = true
+# the desktop connector's client, WebSocket framing and picture codec live in the small crate the connector program shares (re-exported here)
+iyakki-link.workspace = true
 iyakki-js.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

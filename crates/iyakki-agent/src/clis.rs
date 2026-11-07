@@ -1517,6 +1517,35 @@ impl CliManager {
         Ok(())
     }
 
+    /// Downloads an address an administrator typed (https only, redirects stay on its host) to `dest`; returns the SHA-256 of what came.
+    /// Used by the browser add-on's mirror (`avaddon_install.rs`): the host is the administrator's own, so it is the only one allowed.
+    pub fn fetch_admin_file(&self, url: &str, dest: &Path) -> Result<String, String> {
+        let st = self.streamer.lock().unwrap().clone().ok_or("no network connection is set up for downloads")?;
+        let host = url.strip_prefix("https://").and_then(|r| r.split(['/', ':', '?', '#']).next()).unwrap_or("").to_ascii_lowercase();
+        let (head, _) = self.open_follow(&*st, url, &[host.as_str()])?;
+        if head.status != 200 {
+            return Err(format!("the mirror answered {}", head.status));
+        }
+        const MAX: u64 = 64 << 20;
+        let mut body = head.body.take(MAX + 1);
+        let mut out = std::io::BufWriter::new(std::fs::File::create(dest).map_err(|e| e.to_string())?);
+        let (mut h, mut buf, mut got) = (Sha256::new(), vec![0u8; 64 * 1024], 0u64);
+        loop {
+            let n = body.read(&mut buf).map_err(|e| format!("the download broke off: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            got += n as u64;
+            if got > MAX {
+                return Err("the download is larger than 64 MB".into());
+            }
+            h.update(&buf[..n]);
+            out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        }
+        out.flush().map_err(|e| e.to_string())?;
+        Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    }
+
     /// `npm install -g` of one package into `target` (the child's `npm_config_prefix`), with the catalogue's Node.js first on the search path.
     fn npm_install(&self, d: &CliDef, pkgname: &str, target: &Path, tmp: &Path) -> Result<(), String> {
         self.set_job(d.id, |j| j.phase = format!("installing {pkgname} with npm (a minute or two)"));

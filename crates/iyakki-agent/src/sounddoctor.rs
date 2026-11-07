@@ -216,6 +216,19 @@ pub fn scan(asound: &Path, proc_root: &Path, helper: u32, own_pid: u32, playing:
     Obs { playing, engine, holder }
 }
 
+/// What the doctor sees when the engine's sound goes through the mixer ([`crate::webmix`]): the engine's streams are then never on the
+/// card (the page writes into a pipe, the mixer's one `aplay` holds the card), so "no running engine stream" is the NORMAL state and
+/// must not raise an alarm, and the holder of the card is the mixer's own writer, which the doctor must never end. `carrying` says that
+/// the tap is handing the page's sound to the mixer: then the engine counts as running. Without sound arriving the engine stays as
+/// scanned (the doctor may still reconnect the page), but the mixer's writer is never named or ended.
+pub fn through_mixer(mut obs: Obs, carrying: bool) -> Obs {
+    obs.holder = None;
+    if carrying {
+        obs.engine = Engine::Running;
+    }
+    obs
+}
+
 /// End an idle holder. Never this process, init, or pid 0 (unknown owner).
 pub fn close_holder(pid: u32, own_pid: u32) -> bool {
     if pid <= 1 || pid == own_pid {
@@ -371,6 +384,23 @@ mod tests {
         assert!(!is_engine(&p, 100, 500) && is_engine(&p, 100, 110) && is_engine(&p, 100, 100));
         assert_eq!(scan(&r.join("none"), &p, 100, 1, true), obs(true, Engine::Closed, None));
         let _ = std::fs::remove_dir_all(&r);
+    }
+
+    #[test]
+    fn a_page_whose_sound_goes_through_the_mixer_is_healthy_and_the_mixers_writer_is_never_ended() {
+        let aplay = Some(Holder { pid: 500, name: "aplay".into(), running: false });
+        // the engine holds no stream, the mixer's aplay holds the card: with sound carried that is fine and quiet
+        let mut d = Doctor::new();
+        for t in 0..30 {
+            let o = through_mixer(obs(true, Engine::Closed, aplay.clone()), true);
+            assert_eq!(o.engine, Engine::Running);
+            assert!(d.step(s(t), &o).is_empty(), "no false alarm at {t}");
+        }
+        // nothing arriving: the doctor may reconnect the page, but never ends the mixer's writer
+        let mut d = Doctor::new();
+        d.step(s(0), &through_mixer(obs(true, Engine::Closed, aplay.clone()), false));
+        let a = d.step(s(3), &through_mixer(obs(true, Engine::Closed, aplay), false));
+        assert_eq!(a, [Action::Note(NOTE_RECONNECTING.into()), Action::Reconnect]);
     }
 
     #[test]

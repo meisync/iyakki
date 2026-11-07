@@ -255,15 +255,15 @@ impl SettingsApp {
         items(&self.fw_cfg())
     }
 
-    /// Apply `c` at once (the engine then asks "Keep these settings?" for 60 seconds). A failure leaves it as a draft so the
-    /// person sees it and can discard it.
+    /// Apply `c` at once. A change that only lets more in is kept at once (it cannot lock anyone out); anything that tightens makes the engine ask
+    /// "Keep these settings?" for 60 seconds. A failure leaves it as a draft so the person sees it and can discard it.
     pub(super) fn fw_commit(&mut self, cx: &AppCx, c: Config, audit: &str, done: &str) {
         let user = cx.session.user.clone();
-        let r = self.fw.handle.lock().propose(c.clone(), &user);
+        let (r, kept) = self.propose_and_keep_if_only_opening(c.clone(), &user);
         match r {
             Ok(()) => {
                 self.fw.draft = None;
-                cx.audit.record(&user, "firewall.apply", audit);
+                cx.audit.record(&user, if kept { "firewall.keep" } else { "firewall.apply" }, audit);
                 let pending = matches!(self.fw.handle.lock().status(), Status::Pending { .. });
                 self.ok(if pending { format!("{done} Choose Keep within 60 seconds, or Undo. If you do nothing it is undone.") } else { done.to_string() });
             }

@@ -80,6 +80,29 @@ pub struct Roles {
     /// namespace -> person -> role.
     #[serde(default)]
     pub namespaces: BTreeMap<String, BTreeMap<String, NsRole>>,
+    /// Named lists of people (no nesting): owner -> group -> people. The owner is a namespace, or [`TENANT_WIDE`] for groups every team may use.
+    #[serde(default)]
+    pub groups: BTreeMap<String, BTreeMap<String, std::collections::BTreeSet<String>>>,
+    /// Approver roles, per namespace: scope (an environment such as `prod`, or a kind such as `k3s.cluster`) -> who holds it. Grants only
+    /// "may approve requests of that scope in this team" and nothing else.
+    #[serde(default)]
+    pub approvers: BTreeMap<String, BTreeMap<String, Holders>>,
+}
+
+/// The owner key of groups every team may use.
+pub const TENANT_WIDE: &str = "*";
+pub const MAX_GROUPS: usize = 50;
+pub const MAX_GROUP_SIZE: usize = 200;
+pub const MAX_HOLDERS: usize = 50;
+pub const MAX_EXPANDED: usize = 1000;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Holders {
+    #[serde(default)]
+    pub people: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    pub groups: std::collections::BTreeSet<String>,
 }
 
 fn plain(s: &str) -> bool {
@@ -170,6 +193,128 @@ impl Roles {
                 (mine.is_some() || t >= TenantRole::Admin).then(|| (n.clone(), mine))
             })
             .collect()
+    }
+
+    /// A team's admin, or a tenant admin or owner, may manage the team's groups and approver roles.
+    pub fn can_manage_team(&self, who: &str, ns: &str) -> bool {
+        self.ns_role(ns, who) == Some(NsRole::Admin) || self.tenant_role(who).is_some_and(|t| t >= TenantRole::Admin)
+    }
+
+    fn manage_owner(&self, by: &str, owner: &str) -> Result<(), String> {
+        let ok = if owner == TENANT_WIDE { self.tenant_role(by).is_some_and(|t| t >= TenantRole::Admin) } else { self.namespaces.contains_key(owner) && self.can_manage_team(by, owner) };
+        if ok {
+            Ok(())
+        } else if self.tenant_role(by).is_none() {
+            Err("no access".into())
+        } else {
+            Err("not allowed (team administrators and tenant administrators only)".into())
+        }
+    }
+
+    /// Set the members of a group (people only: a group cannot contain a group). Audited with who was added and removed.
+    pub fn set_group(&mut self, by: &str, owner: &str, group: &str, members: &[String]) -> Result<Change, String> {
+        self.manage_owner(by, owner)?;
+        if !plain(group) || (owner != TENANT_WIDE && !plain(owner)) {
+            return Err("a group name is letters, digits, - and _".into());
+        }
+        let mut set = std::collections::BTreeSet::new();
+        for m in members {
+            if !plain(m) || self.tenant_role(m).is_none() {
+                return Err(format!("{m} is not a person in this tenant (groups hold people, not other groups)"));
+            }
+            set.insert(m.clone());
+        }
+        if set.len() > MAX_GROUP_SIZE {
+            return Err(format!("a group has at most {MAX_GROUP_SIZE} people"));
+        }
+        let g = self.groups.entry(owner.into()).or_default();
+        if !g.contains_key(group) && g.len() >= MAX_GROUPS {
+            return Err(format!("at most {MAX_GROUPS} groups"));
+        }
+        let old = g.get(group).cloned().unwrap_or_default();
+        let added: Vec<&String> = set.difference(&old).collect();
+        let removed: Vec<&String> = old.difference(&set).collect();
+        let line = format!("group {owner}/{group}: {by} added [{}] removed [{}]", added.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(","), removed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(","));
+        g.insert(group.into(), set);
+        Ok(Change(line))
+    }
+
+    pub fn delete_group(&mut self, by: &str, owner: &str, group: &str) -> Result<Change, String> {
+        self.manage_owner(by, owner)?;
+        let g = self.groups.get_mut(owner).ok_or("no such group")?;
+        g.remove(group).ok_or("no such group")?;
+        if g.is_empty() {
+            self.groups.remove(owner);
+        }
+        for (ns, m) in self.approvers.iter_mut() {
+            if owner == TENANT_WIDE || ns == owner {
+                for h in m.values_mut() {
+                    h.groups.remove(group);
+                }
+            }
+        }
+        Ok(Change(format!("group {owner}/{group}: {by} deleted it")))
+    }
+
+    fn scope_ok(s: &str) -> bool {
+        !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) && !s.starts_with('.')
+    }
+
+    /// Give (`grant`) or take away the approver role for `scope` in team `ns` to people and groups (a group of the team or a tenant-wide one).
+    pub fn change_approvers(&mut self, by: &str, ns: &str, scope: &str, people: &[String], groups: &[String], grant: bool) -> Result<Change, String> {
+        self.manage_owner(by, ns)?;
+        if ns == TENANT_WIDE || !Self::scope_ok(scope) {
+            return Err("a scope is an environment or kind name".into());
+        }
+        for p in people {
+            if !plain(p) || self.tenant_role(p).is_none() {
+                return Err(format!("{p} is not a person in this tenant"));
+            }
+        }
+        for g in groups {
+            let known = self.groups.get(ns).is_some_and(|m| m.contains_key(g)) || self.groups.get(TENANT_WIDE).is_some_and(|m| m.contains_key(g));
+            if grant && !known {
+                return Err(format!("no group {g} in this team or tenant-wide"));
+            }
+        }
+        let h = self.approvers.entry(ns.into()).or_default().entry(scope.into()).or_default();
+        for p in people {
+            if grant { h.people.insert(p.clone()); } else { h.people.remove(p); }
+        }
+        for g in groups {
+            if grant { h.groups.insert(g.clone()); } else { h.groups.remove(g); }
+        }
+        if h.people.len() > MAX_HOLDERS || h.groups.len() > MAX_HOLDERS {
+            return Err(format!("at most {MAX_HOLDERS} people and {MAX_HOLDERS} groups per approver role"));
+        }
+        if h.people.is_empty() && h.groups.is_empty() {
+            if let Some(m) = self.approvers.get_mut(ns) {
+                m.remove(scope);
+            }
+        }
+        let verb = if grant { "granted" } else { "revoked" };
+        Ok(Change(format!("approver {ns}/{scope}: {by} {verb} people [{}] groups [{}]", people.join(","), groups.join(","))))
+    }
+
+    /// The people who hold the approver role for any of `scopes` in `ns` right now: groups expanded, people who left the tenant dropped,
+    /// duplicates collapsed, bounded.
+    pub fn approver_holders(&self, ns: &str, scopes: &[&str]) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        let Some(m) = self.approvers.get(ns) else { return out };
+        for s in scopes {
+            let Some(h) = m.get(*s) else { continue };
+            out.extend(h.people.iter().cloned());
+            for g in &h.groups {
+                let members = self.groups.get(ns).and_then(|x| x.get(g)).or_else(|| self.groups.get(TENANT_WIDE).and_then(|x| x.get(g)));
+                out.extend(members.into_iter().flatten().cloned());
+            }
+        }
+        out.retain(|p| self.tenant_role(p).is_some());
+        while out.len() > MAX_EXPANDED {
+            let last = out.iter().next_back().cloned();
+            if let Some(l) = last { out.remove(&l); }
+        }
+        out
     }
 
     fn need(&self, by: &str, what: Action) -> Result<(), String> {

@@ -106,6 +106,8 @@ pub mod ide_k8s;
 pub mod k8s_tile;
 pub mod git_tile;
 pub mod learn;
+pub mod devtools;
+pub mod auth;
 mod learn_lesson;
 mod learn_ui;
 mod git_tile_repo;

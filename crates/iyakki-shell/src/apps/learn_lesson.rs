@@ -3,6 +3,7 @@
 //! teaching streams in under it, section by section, as the assistant writes it. A saved lesson reopens instantly and needs no model.
 //! All the writing, drawing, cleaning and saving is `iyakki_agent::studylesson`; this file is the page, the keys and the background run.
 
+use crate::safeclamp::SafeClamp;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
@@ -319,7 +320,7 @@ impl LearnApp {
         if n == 0 {
             return;
         }
-        l.cur = (l.cur as i32 + d).clamp(0, n as i32 - 1) as usize;
+        l.cur = (l.cur as i32 + d).clamp_safe(0, n as i32 - 1) as usize;
         l.jump = true;
     }
 

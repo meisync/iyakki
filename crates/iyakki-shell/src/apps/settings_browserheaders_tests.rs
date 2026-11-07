@@ -52,7 +52,7 @@ fn submit(a: &mut SettingsApp, cx: &AppCx, set: &[(usize, &str)], ack: usize) ->
     for (i, v) in set {
         f.set_value(*i, v);
     }
-    f.set_choice(5, ack);
+    f.set_choice(6, ack);
     a.bh_submit(cx, &k, &mut f)
 }
 

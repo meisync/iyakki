@@ -38,9 +38,19 @@ struct Fake {
     registered: Vec<String>,
     /// What each prerequisite's own install says (default: ready).
     deps: Vec<(Item, DepState)>,
+    /// The Store asked for the build route; what the build says.
+    av_requested: bool,
+    av_build: Option<Result<String, String>>,
 }
 
 impl StepEnv for Fake {
+    fn av_build_requested(&mut self) -> bool {
+        std::mem::take(&mut self.av_requested)
+    }
+    fn build_av_addon(&mut self) -> Result<String, String> {
+        self.calls.push("build_av_addon".into());
+        self.av_build.clone().unwrap_or_else(|| Err("no build here".into()))
+    }
     fn dep_state(&mut self, dep: Item) -> DepState {
         self.deps.iter().find(|d| d.0 == dep).map_or(DepState::Ready, |d| d.1.clone())
     }
@@ -319,9 +329,17 @@ fn coding_agents_install_from_the_catalogue_and_servers_ask_to_be_started_and_co
     let mut f = Fake::default();
     run_step(Item::Ffmpeg, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap();
     assert_eq!(f.calls, ["cli ffmpeg"]);
-    assert_eq!(items_of(Group::Media), [Item::Ffmpeg]);
+    assert_eq!(items_of(Group::Media), [Item::Ffmpeg, Item::FfmpegLibs]);
     assert_eq!((Group::Media.title(), Item::Ffmpeg.title()), ("Media", "Media player (ffmpeg)"));
     assert!(Item::Ffmpeg.about().contains("GPLv3") && Item::Ffmpeg.about().contains("checksum"));
+    // the browser's audio and video add-on (the bar's Install button opens this item): supplied by the administrator, LGPL, nothing shipped or hosted by IYAKKI
+    let mut f = Fake::default();
+    assert!(run_step(Item::FfmpegLibs, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap_err().contains("cannot be installed here"));
+    assert!(f.calls.is_empty() || f.calls.iter().all(|c| !c.starts_with("cli ")), "{:?}", f.calls);
+    assert_eq!(Item::parse(crate::avaddon::INSTALL_ITEM), Some(Item::FfmpegLibs));
+    assert!(Item::FfmpegLibs.licence().contains("LGPL") && Item::FfmpegLibs.licence().contains("does not ship it") && Item::FfmpegLibs.licence().contains("source offer") && Item::FfmpegLibs.licence().contains("does not host"));
+    assert!(Item::FfmpegLibs.about().contains("BROWSER") && Item::FfmpegLibs.about().contains("Nothing of FFmpeg is in the image"));
+    assert_eq!(Item::FfmpegLibs.cli_id(), None, "not a download of the CLI catalogue");
     assert_eq!(order(Item::Ffmpeg, &|_| false), [Item::Ffmpeg]);
     assert_eq!(action_label(Item::Ffmpeg, &Presence::Missing, None), "Install Media player (ffmpeg)");
     assert!(action_label(Item::Ffmpeg, &Presence::Installed("version latest".into()), None).starts_with("Update "));
@@ -707,4 +725,20 @@ fn a_firmware_pack_item_reads_as_installed_from_its_driver_pack_record() {
         other => panic!("{other:?}"),
     }
     assert_eq!(presence(&svc, Item::FwQualcommBt), Presence::Missing);
+}
+
+#[test]
+fn the_build_route_of_the_browser_add_on_builds_and_leaves_the_install_to_the_review_and_confirm_step() {
+    let mut f = Fake { av_requested: true, av_build: Some(Ok("The package was built and placed in /local/packages. Nothing is installed yet".into())), ..Default::default() };
+    run_step(Item::FfmpegLibs, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap();
+    assert_eq!(f.calls, ["build_av_addon"]);
+    assert!(f.marks.is_empty(), "the item is not marked installed: the person still reviews and confirms");
+    assert!(f.lines.iter().any(|l| l.contains("Nothing is installed yet")), "{:?}", f.lines);
+    // a failed build is a failed step with its reason
+    let mut f = Fake { av_requested: true, av_build: Some(Err("Checksum failure: ffmpeg-6.1.5.tar.xz".into())), ..Default::default() };
+    assert!(run_step(Item::FfmpegLibs, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap_err().contains("Checksum failure"));
+    // without the request the old route runs (and never builds)
+    let mut f = Fake::default();
+    assert!(run_step(Item::FfmpegLibs, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap_err().contains("cannot be installed here"));
+    assert!(!f.calls.iter().any(|c| c == "build_av_addon"));
 }

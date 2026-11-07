@@ -18,6 +18,8 @@ pub const FN_MODES: [&str; 4] = ["", "media", "fkeys", "auto"];
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeyboardSettings {
+    /// Input profile (`inputprofile`): "" (automatic: Mac when an Apple keyboard or trackpad is found, else PC), "mac" or "pc".
+    pub profile: String,
     /// "" (not touched), "media" (media keys first, Fn+F-key gives F1..F12), "fkeys" (F-keys first) or "auto" (the keyboard decides).
     pub fn_mode: String,
     /// Apple ISO layout fix (swaps the keys left of Z and below Esc); None = not touched.
@@ -96,6 +98,9 @@ pub fn touchbar_override() -> Option<u32> {
 
 impl KeyboardSettings {
     pub fn validate(&self) -> Result<(), String> {
+        if !crate::inputprofile::PROFILES.contains(&self.profile.as_str()) {
+            return Err("the input profile must be automatic, mac or pc".into());
+        }
         if !FN_MODES.contains(&self.fn_mode.as_str()) {
             return Err("the function keys mode must be media keys first, F-keys first or automatic".into());
         }

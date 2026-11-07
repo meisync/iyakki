@@ -43,19 +43,52 @@ pub fn schemas() -> Map<String, Value> {
     put("FlowList", obj(json!({"flows": any_arr}), &["flows"]));
     put("Flow", json!({"type": "object"}));
     put("DataCall", obj(json!({"tool": {"type": "string", "enum": ["data_open", "data_describe", "data_query"]}, "args": {"type": "object"}, "namespace": s}), &["tool", "args"]));
+    put("TenantList", obj(json!({"tenants": any_arr, "current": s, "can_switch": b, "scope": s}), &["tenants", "current", "can_switch", "scope"]));
+    put("TenantSwitch", obj(json!({"tenant": s}), &["tenant"]));
+    put("TenantSwitched", obj(json!({"switched": b, "tenant": {"type": "object"}, "previous": s, "runs_stopped": i, "vault_locked": b, "url": s}), &["switched", "tenant", "previous"]));
     put("TenantView", obj(json!({"user": s, "tenant_role": s, "members": any_arr, "namespaces": any_arr}), &["user", "tenant_role", "members", "namespaces"]));
     put("TenantMemberChange", obj(json!({"name": s, "role": {"type": "string", "enum": ["member", "admin", "owner", "remove"]}}), &["name", "role"]));
     put("NamespaceChange", obj(json!({"name": s, "action": {"type": "string", "enum": ["create", "delete"]}}), &["name", "action"]));
+    put("NsMembers", obj(json!({"name": s, "role": s, "members": any_arr}), &["name", "role", "members"]));
     put("NsMemberChange", obj(json!({"name": s, "role": {"type": "string", "enum": ["viewer", "editor", "admin", "remove"]}}), &["name", "role"]));
+
+    put("WebAccess", obj(json!({"on": b, "port": i, "listening": b, "boot": b, "error": s, "status": s, "urls": strs, "fingerprint": {"type": ["string", "null"]}, "exposes": s, "has_admin_password": b}), &["on", "port", "listening", "status", "urls", "exposes"]));
+    put("WebAccessChange", obj(json!({"on": b, "port": i}), &[]));
 
     let scope = json!({"type": "string", "enum": ["person", "shared", "personal"]});
     put("FileList", obj(json!({"path": s, "entries": any_arr}), &["path", "entries"]));
     put("FileContent", obj(json!({"path": s, "content": s}), &["path", "content"]));
     put("FileWrite", obj(json!({"scope": scope, "namespace": s, "path": s, "content": s}), &["path", "content"]));
     put("FileDelete", obj(json!({"scope": scope, "namespace": s, "path": s, "recursive": b}), &["path"]));
+    put("FileUploaded", obj(json!({"ok": b, "bytes": i, "sha256": s}), &["ok", "bytes", "sha256"]));
+    put("FileBytes", json!({"type": "string", "format": "binary", "description": "the file's bytes (application/octet-stream)"}));
     put("GitClone", obj(json!({"scope": scope, "namespace": s, "url": s, "folder": s, "branch": s, "depth": i}), &["url"]));
     put("GitCloned", obj(json!({"folder": s, "removed_links": i}), &["folder", "removed_links"]));
     put("GitCloneList", obj(json!({"clones": any_arr}), &["clones"]));
+    put("FileMove", obj(json!({"scope": scope, "namespace": s, "from": s, "to": s, "overwrite": b}), &["from", "to"]));
+    put("FileMkdir", obj(json!({"scope": scope, "namespace": s, "path": s}), &["path"]));
+    put("GitStatus", obj(json!({"folder": s, "branch": s, "detached": b, "upstream": s, "ahead": i, "behind": i, "changed": i, "untracked": i, "conflicted": i, "dirty": b, "origin": {"type": ["string", "null"]}, "changes": any_arr, "more": i}), &["folder", "branch", "changes"]));
+    put("GitBranches", obj(json!({"current": {"type": ["string", "null"]}, "branches": any_arr}), &["branches"]));
+    put("GitLog", obj(json!({"page": i, "per": i, "more": b, "commits": any_arr}), &["page", "per", "more", "commits"]));
+    put("GitDiff", obj(json!({"files": any_arr, "too_large": b}), &["files"]));
+    put("ScheduleStatus", json!({"type": "object"}));
+    put("SchedulePreviewed", obj(json!({"expr": s, "zone": s, "next": any_arr}), &["expr", "zone", "next"]));
+    put("ScheduleList", obj(json!({"schedules": any_arr, "limit": i}), &["schedules", "limit"]));
+    put("ScheduleSave", obj(json!({"flow": s, "team": s, "environment": s, "run_as": {"type": "string", "enum": ["owner", "team-service"]}, "trigger": {"type": "object"}}), &["flow", "team", "trigger"]));
+    put("ScheduleSaved", json!({"type": "object"}));
+    put("FlowRun", obj(json!({"draft": b, "inputs": {"type": "object"}}), &[]));
+    put("FlowRunStarted", obj(json!({"run": s, "flow": s}), &["run", "flow"]));
+    put("FlowRunList", obj(json!({"runs": any_arr, "page": i, "per": i, "more": b}), &["runs", "page", "per", "more"]));
+    put("FlowRunView", obj(json!({"id": s, "flow": s, "status": s, "nodes": any_arr}), &["id", "flow", "status"]));
+    put("TenantConfig", json!({"type": "object"}));
+    put("TenantConfigPut", obj(json!({"enabled": b, "values": {"type": "object"}, "secrets": {"type": "object", "description": "setting name to secret value; write-only"}, "namespace": s, "name": s}), &[]));
+    put("TeamApprovers", obj(json!({"people": strs, "groups": strs}), &[]));
+    put("TeamGroup", obj(json!({"members": strs}), &["members"]));
+    put("TenantConfigRollback", obj(json!({"version": i}), &["version"]));
+    put("TenantConfigImport", obj(json!({"doc": {"type": "object"}, "dry_run": b, "replace": b}), &["doc"]));
+    put("NotifList", obj(json!({"notifications": any_arr, "next_before": {"type": ["integer", "null"]}}), &["notifications"]));
+    put("NotifCount", obj(json!({"unread": i, "attention": i, "approvals": i, "overdue": i, "total": i, "red": b}), &["unread", "approvals", "total", "red"]));
+    put("NotifSnooze", obj(json!({"minutes": i, "until": i}), &[]));
     put("DataResult", obj(json!({"result": s}), &["result"]));
     m
 }

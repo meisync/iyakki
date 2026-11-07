@@ -315,3 +315,68 @@ fn the_developer_rows_carry_states_and_filter_credentials() {
     g.disabled("flows");
     g.take_failures();
 }
+
+#[test]
+fn wifi_is_a_background_row_only_beside_a_working_cable_and_never_counts_or_fails() {
+    use crate::startup::{login_view, WIFI_ID};
+    use crate::startup_probe::{wifi_state, WifiRow};
+    let mac = Facts { route: true, wired_route: true, wifi_hw: true, ..up(12) };
+    assert_eq!(wifi_state(&mac), WifiRow::Background);
+    assert_eq!(wifi_state(&Facts { wifi_online: true, ..mac.clone() }), WifiRow::Ready);
+    assert_eq!(wifi_state(&Facts { route: false, wired_route: false, ..mac.clone() }), WifiRow::Hidden, "no link at all: the network row tells the story as before");
+    assert_eq!(wifi_state(&Facts { wifi_hw: false, ..mac.clone() }), WifiRow::Hidden, "no adapter, no row");
+    assert_eq!(wifi_state(&Facts { uptime_secs: 600, ..mac.clone() }), WifiRow::Hidden, "a chip that never answers is left alone after a while");
+    // on the sign-in screen: Wi-Fi is not in the "x of y", not pending, and not red
+    let (r, _) = reg();
+    apply(&r, &Facts { sound_cards: 1, ..mac.clone() });
+    assert!(matches!(r.state(WIFI_ID), Some(StartupState::Starting { .. })));
+    let v = login_view(r.snapshot());
+    assert!(v.wifi_background);
+    assert!(v.pending.iter().all(|x| x.id != WIFI_ID && !x.state.failed()));
+    let without = login_view(r.snapshot().into_iter().filter(|x| x.id != WIFI_ID).collect());
+    assert_eq!((v.ready, v.total), (without.ready, without.total), "the row is not counted");
+    assert!(!without.wifi_background);
+    // the strips and the calm check ignore it too
+    assert!(r.summary().rows.iter().all(|x| x.id != WIFI_ID));
+    // no cable and no route: no Wi-Fi row at all, the line is as it always was
+    let (r2, _) = reg();
+    apply(&r2, &Facts { route: false, wired_route: false, wifi_hw: true, ..up(12) });
+    assert_eq!(r2.state(WIFI_ID), Some(StartupState::Disabled));
+    assert!(!login_view(r2.snapshot()).wifi_background);
+}
+
+#[test]
+fn a_wired_default_route_is_told_from_a_wireless_one() {
+    use crate::startup_probe::wired_default_route;
+    let head = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n";
+    let eth = format!("{head}eth0\t00000000\t0100A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n");
+    let wl = format!("{head}wlan0\t00000000\t0100A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n");
+    let is_wl = |n: &str| n.starts_with("wlan");
+    assert!(wired_default_route(&eth, &is_wl));
+    assert!(!wired_default_route(&wl, &is_wl));
+    assert!(wired_default_route(&format!("{wl}{}", eth.lines().nth(1).unwrap()), &is_wl), "a cable beside Wi-Fi counts");
+    assert!(!wired_default_route(head, &is_wl));
+}
+
+#[test]
+fn the_first_usable_link_makes_the_network_ready_whichever_it_is_and_the_other_one_never_holds_anything() {
+    use crate::startup::{login_view, WIFI_ID};
+    // cable first: network and clock go on, Wi-Fi is a side note
+    let (r, _) = reg();
+    apply(&r, &Facts { route: true, wired_route: true, wifi_hw: true, sound_cards: 1, clock_synced: false, ..up(12) });
+    assert_eq!(r.state("network"), Some(StartupState::Ready));
+    assert_eq!(row(&r, "clock").step, "waiting for a time server");
+    assert!(login_view(r.snapshot()).wifi_background);
+    // Wi-Fi first: the same, the cable that is still coming up is not a row at all
+    let (r2, _) = reg();
+    apply(&r2, &Facts { route: true, wired_route: false, wifi_hw: true, wifi_online: true, sound_cards: 1, ..up(12) });
+    assert_eq!(r2.state("network"), Some(StartupState::Ready));
+    assert_eq!(r2.state(WIFI_ID), Some(StartupState::Ready));
+    assert!(!login_view(r2.snapshot()).wifi_background);
+    // a Wi-Fi chip that never answers is quiet once the cable works, and never red
+    let (r3, _) = reg();
+    apply(&r3, &Facts { route: true, wired_route: true, wifi_hw: true, ..up(100) });
+    apply(&r3, &Facts { route: true, wired_route: true, wifi_hw: true, ..up(400) });
+    assert!(!r3.state(WIFI_ID).unwrap().failed());
+    assert!(login_view(r3.snapshot()).pending.iter().all(|x| !x.state.failed()));
+}

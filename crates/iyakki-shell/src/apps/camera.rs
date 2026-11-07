@@ -226,7 +226,12 @@ pub fn scan_gallery(pictures: &Path, videos: &Path, max: usize) -> Vec<Thumb> {
 impl CameraApp {
     pub fn new(cx: &AppCx) -> CameraApp {
         let home = PathBuf::from(format!("/home/{}", cx.session.user));
-        CameraApp::with_parts(Presence::system(), Arc::new(v4l2::V4l2Opener), home.join("Pictures"), home.join("Videos"))
+        // the camera in use is chosen here and nowhere else: the browser's in a browser session, the machine's otherwise
+        let (presence, opener): (Presence, Arc<dyn Opener>) = match iyakki_agent::browsersource::browser_camera_for(&cx.session.user) {
+            Some(m) => (Presence::browser(), Arc::new(crate::camera::browsercam::BrowserOpener::new(m))),
+            None => (Presence::system(), Arc::new(v4l2::V4l2Opener)),
+        };
+        CameraApp::with_parts(presence, opener, home.join("Pictures"), home.join("Videos"))
     }
 
     /// The app with its cameras and folders given (tests, screenshots).

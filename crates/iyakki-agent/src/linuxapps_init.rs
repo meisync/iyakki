@@ -495,6 +495,17 @@ fn init(spec: &Spec) -> Result<Never, String> {
     enter_root(root, &put_old).map_err(|e| format!("entering the sandbox failed: {e}"))?;
     std::env::set_current_dir("/").map_err(|e| format!("entering the sandbox failed: chdir /: {e}"))?;
     // from here "/" is the sandbox; the host is at /.old until it is detached below, and a link inside the sandbox can only lead inside it
+    if let IdMap::Multi(_) = spec.idmap {
+        // With a whole range of ids the sandbox's root is 0 inside and `base` outside; the user that started it (root on the host) has no id
+        // inside. A file system made inside (the tmpfs for /dev, /tmp) refuses to create files for an id that is not mapped (EOVERFLOW,
+        // "Value too large for defined data type"), so once inside the sandbox (after the pivot: before it the host's folders above the sandbox are not traversable by the mapped id, EACCES on the mount) file creation is done as the sandbox's own root. Only the file-system
+        // identity changes (setfsuid/setfsgid): the capabilities to mount and pivot stay.
+        // SAFETY: plain integer arguments; the previous ids are returned and not needed.
+        unsafe {
+            libc::setfsgid(0);
+            libc::setfsuid(0);
+        }
+    }
     let old = |p: &str| format!("/.old{p}");
     // /proc: this pid namespace's own
     std::fs::create_dir_all("/proc").map_err(|e| e.to_string())?;

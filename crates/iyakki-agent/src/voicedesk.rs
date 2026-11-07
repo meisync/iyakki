@@ -348,17 +348,47 @@ pub fn list_mics(proc_root: &Path) -> Vec<Mic> {
     parse_mics_with(&rd("cards"), &rd("pcm"), t2_capture_allowed(&proc_root.parent().unwrap_or(Path::new("/")).join("sys")))
 }
 
+/// The T2 sound card's microphones: not there, there but hidden on purpose, or allowed by an administrator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum T2Mic {
+    Absent,
+    Off,
+    On,
+}
+
+pub fn t2_mic(proc_root: &Path) -> T2Mic {
+    let cards = std::fs::read_to_string(proc_root.join("asound/cards")).unwrap_or_default();
+    if t2_card_numbers(&cards).is_empty() {
+        T2Mic::Absent
+    } else if t2_capture_allowed(&proc_root.parent().unwrap_or(Path::new("/")).join("sys")) {
+        T2Mic::On
+    } else {
+        T2Mic::Off
+    }
+}
+
+/// Allow (or forbid again) recording from the T2 sound card (`apple_bce` parameter `capture`). Lasts until the next restart. `Err` is one
+/// plain line, for a computer without that driver parameter.
+pub fn set_t2_capture(proc_root: &Path, on: bool) -> Result<(), String> {
+    let p = proc_root.parent().unwrap_or(Path::new("/")).join("sys/module/apple_bce/parameters/capture");
+    if !p.exists() {
+        return Err("this system's sound driver has no switch for the built-in microphone".into());
+    }
+    std::fs::write(&p, if on { "1\n" } else { "0\n" }).map_err(|e| format!("could not change it: {e}"))
+}
+
 /// Whether this computer has a T2 sound card whose microphones are hidden (so the Voice tile can say why none was found).
 pub fn t2_mic_hidden(proc_root: &Path) -> bool {
     let cards = std::fs::read_to_string(proc_root.join("asound/cards")).unwrap_or_default();
     !t2_card_numbers(&cards).is_empty() && !t2_capture_allowed(&proc_root.parent().unwrap_or(Path::new("/")).join("sys"))
 }
 
-/// The record command aimed at one microphone: `-D plughw:1,0` after the program, unless the command names a device itself.
+/// The record command aimed at one microphone: `-D plughw:1,0` after `arecord`, unless the command names a device itself or is another program.
 pub fn record_cmd_for(base: &str, mic: Option<&Mic>) -> String {
     let Some(m) = mic else { return base.to_string() };
     let Ok(args) = voice::split_command(base) else { return base.to_string() };
-    if args.is_empty() || crate::audioout::names_device(&args) {
+    // only ALSA's `arecord` takes -D; a custom recorder (a script, parecord, ffmpeg) is left exactly as the person wrote it
+    if args.is_empty() || args[0].rsplit('/').next() != Some("arecord") || crate::audioout::names_device(&args) {
         return base.to_string();
     }
     let mut a = args;

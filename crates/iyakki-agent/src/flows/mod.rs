@@ -83,6 +83,35 @@ fn now_ms() -> i64 {
 
 static HUB: OnceLock<Mutex<HashMap<String, Arc<FlowEnv>>>> = OnceLock::new();
 
+/// Cloud tenants: changes the engine settings of every account's environment as it is built (the lease gate, quotas, the tenant's
+/// time zone). Set once by `cloudflows::real`; unset on a desktop.
+pub type CloudHook = Arc<dyn Fn(&str, &mut iyakki_flow::engine::EngineCfg) + Send + Sync>;
+pub static CLOUD_HOOK: OnceLock<CloudHook> = OnceLock::new();
+
+/// Cloud tenants: where a flow's notices go instead of the person's own INBOX file (the tenant's notification hub).
+pub type CloudNotify = Arc<dyn Fn(&str, &iyakki_flow::host::Notice) + Send + Sync>;
+pub static CLOUD_NOTIFY: OnceLock<CloudNotify> = OnceLock::new();
+
+/// Cloud tenants: where a flow's `cli` and `browser` steps run (the sandbox) instead of on the pod. In a tenant pod without one they are refused.
+pub type CloudExec = Arc<dyn Fn(&str, &iyakki_flow::host::ExecRequest) -> Result<iyakki_flow::host::ExecResult, iyakki_flow::NodeError> + Send + Sync>;
+pub type CloudBrowser = Arc<dyn Fn(&str, &iyakki_flow::host::BrowserRequest) -> Result<iyakki_flow::host::BrowserResult, iyakki_flow::NodeError> + Send + Sync>;
+pub static CLOUD_EXEC: OnceLock<CloudExec> = OnceLock::new();
+pub static CLOUD_BROWSER: OnceLock<CloudBrowser> = OnceLock::new();
+
+/// Runs going now in all the process's engines, or `None` when the table is busy (the caller then relies on the per-person limit).
+pub fn running_all() -> Option<usize> {
+    let g = HUB.get()?.try_lock().ok()?;
+    Some(g.values().map(|e| e.engine.counts().running).sum())
+}
+
+/// Halt every engine of the process (a clean stop of the tenant service). Runs stay on disk.
+pub fn halt_all() {
+    let envs: Vec<Arc<FlowEnv>> = HUB.get().map(|h| h.lock().unwrap_or_else(|e| e.into_inner()).drain().map(|(_, e)| e).collect()).unwrap_or_default();
+    for e in envs {
+        e.engine.halt();
+    }
+}
+
 /// Whether the account may use FLOWS at all.
 pub fn allowed(p: &Policy) -> bool {
     p.apps.contains(&App::Flows)
@@ -165,6 +194,9 @@ impl FlowEnv {
         let mut cfg = EngineCfg::new(&data);
         cfg.auto_tick = auto_tick;
         cfg.user = user.to_string();
+        if let Some(h) = CLOUD_HOOK.get() {
+            h(user, &mut cfg);
+        }
         // sandbox Jobs: the dev cluster the machine is connected to, never one this code starts
         {
             let (svc2, user2, runner, root) = (svc.clone(), user.to_string(), host.runner.clone(), data.join("jobs"));

@@ -143,7 +143,7 @@ impl SettingsApp {
     }
 
     pub(super) fn shares_buttons(&self) -> Vec<Btn> {
-        vec![("New share…", ACCENT, 'n'), ("Start/Stop", TEXT, 's'), ("Copy link", TEXT, 'c'), ("QR", TEXT, 'q'), ("Edit", TEXT, 'e'), ("New secret", TEXT, 't'), ("Delete", ERR, 'd'), ("Stop all", ERR, 'x')]
+        vec![("New share…", ACCENT, 'n'), ("Receive a package", TEXT, 'r'), ("Start/Stop", TEXT, 's'), ("Copy link", TEXT, 'c'), ("QR", TEXT, 'q'), ("Edit", TEXT, 'e'), ("New secret", TEXT, 't'), ("Delete", ERR, 'd'), ("Stop all", ERR, 'x'), ("Firewall", TEXT, 'f')]
     }
 
     /// Open the form for a new share with `folder` filled in ("Share this folder…" in the IDE and EDIT).
@@ -169,7 +169,18 @@ impl SettingsApp {
                     self.ok(format!("Stopped sharing {}.", i.cfg.name));
                 }
                 Some(i) => match m.start(&i.cfg.id) {
-                    Ok(()) => self.ok(format!("{} is shared now.", i.cfg.name)),
+                    Ok(()) => {
+                        self.ok(format!("{} is shared now.", i.cfg.name));
+                        // other devices reach a share only if the firewall lets them in: ask, with the consequences in plain words, instead of leaving
+                        // the person to find Settings -> Firewall (the change is kept at once: it only opens)
+                        let blocked = i.cfg.access != Access::Local && cx.session.policy.manage_settings && self.fw.writable && super::firewall_page::share_blocked_note(i.cfg.port).is_some();
+                        if blocked {
+                            self.modal = Some(Modal::Confirm(
+                                ConfirmKind::ShareOpenFirewall,
+                                format!("{} is shared, but the firewall blocks other devices from reaching it (port {}). Open the firewall for shared folders on your local network? Only devices on your own network (not the internet) can then reach your shares. Press y to open it, or any other key to leave it closed.", i.cfg.name, i.cfg.port),
+                            ));
+                        }
+                    }
                     Err(e) => self.fail(e),
                 },
                 None => self.fail("Make a share first (n)."),
@@ -203,12 +214,60 @@ impl SettingsApp {
                 }
                 None => self.fail("Choose a share first (Up/Down)."),
             },
+            Key::Char('r') => self.shares_package_drop(cx),
             Key::Char('f') => self.fw_open_shares(cx),
             Key::Char('x') => {
-                let n = sf::stop_everything();
-                self.ok(if n == 0 { "Nothing was being shared.".to_string() } else { format!("Stopped {n} share(s). Nothing is shared now.") });
+                let n = sf::running_total();
+                if n == 0 {
+                    self.ok("Nothing was being shared.");
+                } else {
+                    self.modal = Some(Modal::Confirm(ConfirmKind::ShareStopAll, format!("Stop all {n} running share(s)? People who are downloading right now are cut off. Press y to stop them, or any other key to keep sharing.")));
+                }
             }
             _ => {}
+        }
+    }
+
+    pub(super) fn shares_stop_all(&mut self) {
+        let n = sf::stop_everything();
+        self.ok(if n == 0 { "Nothing was being shared.".to_string() } else { format!("Stopped {n} share(s). Nothing is shared now.") });
+    }
+
+    /// "Receive a package": a ten-minute share of the local packages folder that takes only the audio and video add-on package, behind a password shown here once.
+    /// For sending the file from another computer: the file lands where the add-on installer looks; nothing is installed until an administrator reads the review.
+    fn shares_package_drop(&mut self, cx: &AppCx) {
+        if !self.admin(cx) {
+            return;
+        }
+        let m = Self::shares(cx);
+        let folder = cx.services.dir().join("local").join("packages");
+        if let Err(e) = std::fs::create_dir_all(&folder) {
+            return self.fail(format!("Could not make the packages folder: {e}"));
+        }
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o750));
+        }
+        let password = sf::random_hex(6);
+        let id = match m.create_package_drop(&folder, &password) {
+            Ok(id) => id,
+            Err(e) => return self.fail(e),
+        };
+        if let Err(e) = m.start(&id) {
+            return self.fail(e);
+        }
+        cx.audit.record(&cx.session.user, "share.package_drop", &id);
+        let info = Self::shares_rows(cx).into_iter().find(|i| i.cfg.id == id);
+        let (url, port) = info.map(|i| (i.urls.first().cloned().unwrap_or_default(), i.cfg.port)).unwrap_or_default();
+        let how = format!("curl -T ffmpeg-libs-....tar.gz -u iyakki:{password} {}", url.trim_end_matches('/'));
+        crate::ui::clipboard::copy(&how);
+        self.ok(format!("Ready for 10 minutes. From the other computer: {how}   (copied). Then open Store → Setup → Browser audio and video to install it."));
+        let blocked = self.fw.writable && super::firewall_page::share_blocked_note(port).is_some();
+        if blocked {
+            self.modal = Some(Modal::Confirm(
+                ConfirmKind::ShareOpenFirewall,
+                format!("The package drop is on, but the firewall blocks other computers from reaching it (port {port}). Open the firewall for shared folders on your local network? Press y to open it, or any other key to leave it closed."),
+            ));
         }
     }
 
@@ -318,7 +377,10 @@ impl SettingsApp {
                 ty += 16.0 * s;
             }
         } else if r.cfg.access == Access::Password {
-            g.text(a.x, ty, 12.0 * s, MUTED, "Any user name works; the password goes with every request in clear text.", Face::Sans);
+            for l in g.wrap(12.0 * s, "Visitors type any name and the password. The page is not encrypted, so use this only on a network you trust.", Face::Sans, tw).iter().take(3) {
+                g.text(a.x, ty, 12.0 * s, MUTED, l, Face::Sans);
+                ty += 16.0 * s;
+            }
         }
         if let Some(q) = &qr {
             let m = 3.0 * s;

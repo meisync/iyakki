@@ -451,6 +451,11 @@ impl Setup {
         if card.item == Item::VoicePack && matches!(card.state, CardState::Installed | CardState::Earlier) && admin {
             v.push(Btn { label: "Remove (undo)".into(), accent: ERR, ev: Some(Event::Tab(REMOVE + idx)) });
         }
+        if card.item == Item::FfmpegLibs && admin {
+            // offered when k3s runs; otherwise the button is dim and says why (the file and mirror routes stay)
+            let k3s_up = self.card(Item::K3s).running == Some(true);
+            v.push(Btn { label: "Build it here (k3s)".into(), accent: if k3s_up { ACCENT } else { MUTED }, ev: Some(Event::Tab(BUILD + idx)) });
+        }
         if card.item == Item::K3s && card.running == Some(true) && admin && !card.blocked {
             v.push(Btn { label: "Stop".into(), accent: ERR, ev: Some(Event::Tab(STOP + idx)) });
         }

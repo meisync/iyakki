@@ -10,6 +10,7 @@
 //! tenants signed in to (Show), the remembered ones (sign in), Add a tenant, and Personal. The model (sessions, which one is shown, key and geometry mapping) is `cloudsession.rs`; the remembered list is
 //! `iyakki_agent::cloudtenants`. Nothing of a tenant (picture, titles) is drawn while Personal is shown, only the chip's name and dot.
 
+use crate::safeclamp::SafeClamp;
 use super::*;
 use crate::cloudsession::{self as cs, Connector, Dot, Hub, Session};
 use iyakki_agent::cloudclient::{Input, Pin, Presented, Status, Target};
@@ -765,7 +766,7 @@ impl Shell {
         // (label, dot, active, act), laid out left to right
         let mut chips: Vec<(String, Option<Dot>, bool, Act)> = vec![(personal.to_string(), None, self.tenants.hub.active.is_none() && !panel_open, Act::Machine)];
         let n = self.tenants.hub.sessions.len();
-        let name_max = if n == 0 { 0.0 } else { ((w as f32 - 24.0 * s - 280.0 * s) / n as f32 - 40.0 * s).clamp(40.0 * s, 160.0 * s) };
+        let name_max = if n == 0 { 0.0 } else { ((w as f32 - 24.0 * s - 280.0 * s) / n as f32 - 40.0 * s).clamp_safe(40.0 * s, 160.0 * s) };
         for (i, sess) in self.tenants.hub.sessions.iter().enumerate() {
             let label = g.fit(size, &sess.name, Face::Bold, name_max);
             chips.push((label, Some(sess.dot()), self.tenants.hub.active == Some(i) && !panel_open, Act::Chip(i)));

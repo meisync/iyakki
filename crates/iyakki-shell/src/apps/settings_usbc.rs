@@ -42,7 +42,7 @@ pub(super) struct UsbPanel {
     pub(super) sync: bool,
     shared: Arc<Mutex<Shared>>,
     started: Option<std::time::Instant>,
-    top: usize,
+    pub(super) top: usize,
     pub(super) code: TextField,
     pub(super) code_focus: bool,
 }
@@ -172,6 +172,11 @@ impl SettingsApp {
                 self.devel.usb.code.paste(t);
                 true
             }
+            // a click on one of the buttons below is not typing: it leaves the code box and presses that button
+            Event::Key(_) if self.devel.usb.code_focus && crate::ui::from_click() => {
+                self.devel.usb.code_focus = false;
+                false
+            }
             Event::Key(k) if self.devel.usb.code_focus => {
                 match k {
                     Key::Esc => {
@@ -276,13 +281,16 @@ impl SettingsApp {
         // Last result and what is happening now
         let last = report.as_ref().map(|r| r.last.clone()).unwrap_or_else(|| "Looking at the cable...".into());
         let all_green = report.as_ref().is_some_and(|r| r.checks.iter().all(|c| c.state == State::Pass));
-        for w in g.wrap(14.0 * s, &format!("Last result: {last}"), Face::Bold, a.w) {
+        let top = y;
+        for w in g.wrap(14.0 * s, &format!("Last result: {last} (tap to check again)"), Face::Bold, a.w) {
             if y + 20.0 * s > bottom {
                 return;
             }
             g.text(a.x, y, 14.0 * s, if all_green { OK } else { TEXT }, &w, Face::Bold);
             y += 20.0 * s;
         }
+        g.hit(R::new(a.x, top - 2.0 * s, a.w, (y - top).max(36.0 * s)), Event::Key(Key::Char('r')), "Check again");
+        y = y.max(top + 36.0 * s);
         if let Some(r) = running {
             g.text(a.x, y, 13.0 * s, rgb(255, 196, 94), r, Face::Sans);
             y += 18.0 * s;
@@ -313,6 +321,7 @@ impl SettingsApp {
                 State::Fail => ERR,
                 State::Wait => DIM,
             };
+            let check_top = y;
             g.circle(a.x + 7.0 * s, y + 9.0 * s, 6.0 * s, col);
             let title = g.fit(14.0 * s, c.title, Face::Bold, (a.w - indent).max(40.0 * s));
             g.text(a.x + indent, y, 14.0 * s, TEXT, &title, Face::Bold);
@@ -325,6 +334,16 @@ impl SettingsApp {
                 y += 17.0 * s;
             }
             y += 8.0 * s;
+            // a step that has something to do is a target too: the same key as its button
+            let key = match &c.action {
+                Some(Action::Authorize(_)) => Some('z'),
+                Some(Action::Pair) => Some('p'),
+                Some(Action::Speed) => Some('s'),
+                None => None,
+            };
+            if let Some(k) = key {
+                g.hit(R::new(a.x, check_top, a.w, (y - check_top).max(36.0 * s)), Event::Key(Key::Char(k)), c.title);
+            }
         }
         if y + 60.0 * s > bottom {
             return;
@@ -349,13 +368,25 @@ impl SettingsApp {
             g.text(a.x, y, 13.0 * s, TEXT, &w, Face::Mono);
             y += 18.0 * s;
         }
-        let sets = format!("Fixed private addresses (f): {} · Allow more than developer mode and ping on the cable (m): {}{}", if cfg.fixed_pair { "on" } else { "off" }, if cfg.allow_more { "ON" } else { "off" }, speed.map_or(String::new(), |s| format!(" · last speed {:.2} Gbit/s", s.sample.gbit_per_s())));
-        for w in g.wrap(12.5 * s, &sets, Face::Sans, a.w) {
-            if y + 17.0 * s > bottom {
-                return;
+        let speed_note = speed.map_or(String::new(), |s| format!("Last speed {:.2} Gbit/s", s.sample.gbit_per_s()));
+        let lines = [
+            (format!("Fixed private addresses (tap or f): {}", if cfg.fixed_pair { "on" } else { "off" }), 'f', MUTED),
+            (format!("Allow more than developer mode and ping on the cable (tap or m): {}", if cfg.allow_more { "ON" } else { "off" }), 'm', if cfg.allow_more { ERR } else { MUTED }),
+        ];
+        for (text, k, col) in lines {
+            let top = y;
+            for w in g.wrap(12.5 * s, &text, Face::Sans, a.w) {
+                if y + 17.0 * s > bottom {
+                    return;
+                }
+                g.text(a.x, y, 12.5 * s, col, &w, Face::Sans);
+                y += 17.0 * s;
             }
-            g.text(a.x, y, 12.5 * s, if cfg.allow_more { ERR } else { MUTED }, &w, Face::Sans);
-            y += 17.0 * s;
+            g.hit(R::new(a.x, top - 2.0 * s, a.w, (y - top).max(36.0 * s)), Event::Key(Key::Char(k)), &text);
+            y = y.max(top + 36.0 * s);
+        }
+        if !speed_note.is_empty() && y + 17.0 * s <= bottom {
+            g.text(a.x, y, 12.5 * s, MUTED, &speed_note, Face::Sans);
         }
     }
 }

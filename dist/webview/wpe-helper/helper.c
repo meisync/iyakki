@@ -523,6 +523,9 @@ static void on_crash(WebKitWebView *v, WebKitWebProcessTerminationReason r, gpoi
     const char *why = r == WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT ? "the web process used too much memory" : "the web process stopped";
     if (loop && media) why = "The page's process stopped (media device problem)";
     else if (loop) why = "The page's process stopped again and again";
+    /* always on stderr as well, not only with the debug switch: a crash must be in the system log */
+    fprintf(stderr, "wpe-helper: web process crash %d (reason %d: %s); %s\n", G.crashes, (int)r, why, loop ? "crash loop, not reloading" : "reloading");
+    fflush(stderr);
     send_str_msg(F_CRASHED, why);
     if (!loop) g_timeout_add(500, reload_later, v);
 }
@@ -1330,6 +1333,10 @@ int main(int argc, char **argv) {
     }
     if (!shm) { fprintf(stderr, "usage: webview-helper --socket-fd N --shm PATH\n"); return 2; }
     prctl(PR_SET_PDEATHSIG, SIGTERM);
+    /* One line on stderr (the system log) every time a helper starts, so a restart of the engine is visible even when the person
+     * did not close anything (the shell starts a new helper for a new view; a crash is logged below in on_crash). */
+    fprintf(stderr, "wpe-helper: started pid=%d shm=%s\n", (int)getpid(), shm);
+    fflush(stderr);
     /* Opt in (IYAKKI_WEBVIEW_NICE): the engine's processes (web, network, GPU) are started from this one and inherit its priority.
      * A page that scrolls or plays a video keeps all cores busy; at the shell's priority they would take turns with the shell, whose drawing and input then wait
      * (the cost is on the shell's side of every frame). Linux keeps a nice value per thread: this is the main thread, before any

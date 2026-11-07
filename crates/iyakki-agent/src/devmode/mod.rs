@@ -25,6 +25,7 @@ pub mod kube;
 pub mod state;
 pub mod app;
 pub mod auth;
+pub mod bootcount;
 pub mod bootmount;
 pub mod centre;
 pub mod cli;
@@ -54,6 +55,8 @@ mod tests_adb;
 mod tests_update;
 #[cfg(test)]
 mod tests_centre;
+#[cfg(test)]
+mod tests_bootcount;
 #[cfg(test)]
 mod tests_update_safety;
 #[cfg(test)]

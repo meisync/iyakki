@@ -14,6 +14,7 @@ pub mod pixels;
 pub mod specs;
 pub mod v4l2;
 pub mod agentcam;
+pub mod browsercam;
 pub mod own;
 
 pub use detect::{CamDevice, Presence, Roots};

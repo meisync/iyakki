@@ -178,6 +178,30 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Does going from `old` to `self` only let more in? (Both on; every rule that was in force is still there, as wide and as long-lived; every preset still on;
+    /// pings no stricter; containers still trusted.) Such a change cannot lock anyone out, so it needs no "Keep these rules?" step. Anything else,
+    /// including turning the firewall on, narrowing or removing a rule, or a shorter end time, is a tightening and keeps the 60-second confirmation.
+    pub fn only_opens_from(&self, old: &Config) -> bool {
+        let ping_rank = |p: Ping| match p {
+            Ping::Off => 0,
+            Ping::Local => 1,
+            Ping::Anyone => 2,
+        };
+        if !(old.enabled && self.enabled) || ping_rank(self.ping) < ping_rank(old.ping) || (old.trust_containers && !self.trust_containers) {
+            return false;
+        }
+        if !old.presets.iter().all(|p| self.presets.contains(p)) {
+            return false;
+        }
+        old.rules.iter().filter(|o| o.enabled).all(|o| {
+            self.rules.iter().any(|n| {
+                n.enabled
+                    && (n.kind, &n.value, n.proto, &n.ports, &n.iface) == (o.kind, &o.value, o.proto, &o.ports, &o.iface)
+                    && (n.expires == 0 || (o.expires != 0 && n.expires >= o.expires))
+            })
+        })
+    }
+
     pub fn has(&self, p: Preset) -> bool {
         self.presets.contains(&p)
     }

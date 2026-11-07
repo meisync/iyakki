@@ -322,3 +322,12 @@ fn geometry_and_click_paths_hold_at_four_sizes() {
     a.handle(&ev, &cx);
     assert!(a.has_modal(), "clicking Install opens the questions for the selected disk");
 }
+
+#[test]
+fn the_disk_the_system_runs_from_is_the_source_even_when_a_removable_iyakki_disk_is_plugged_in() {
+    let m = "/dev/nvme0n1p2 /.stage1/boot vfat rw 0 0\n/dev/nvme0n1p3 /var/lib/iyakki ext4 rw 0 0\n";
+    assert_eq!(super::install_page::running_disk(m, &["sda", "nvme0n1"]).as_deref(), Some("nvme0n1"));
+    let m = "/dev/sda2 /.stage1/boot vfat rw 0 0\n";
+    assert_eq!(super::install_page::running_disk(m, &["sda", "sdaa", "nvme0n1"]).as_deref(), Some("sda"));
+    assert_eq!(super::install_page::running_disk("tmpfs /tmp tmpfs rw 0 0\n", &["sda"]), None);
+}

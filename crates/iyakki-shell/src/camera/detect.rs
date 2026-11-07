@@ -108,6 +108,8 @@ pub struct Presence {
     scanned: bool,
     /// Lower-case name parts of cameras the person may not use; they are left out of the list.
     hidden: Vec<String>,
+    /// A camera that is not a device node of this machine: the web browser's camera of a remote session (`browsercam`).
+    browser: Option<CamDevice>,
 }
 
 fn node_number(n: &str) -> u32 {
@@ -128,12 +130,19 @@ impl Presence {
     pub fn with(roots: Roots, query: Query) -> Presence {
         let apple = std::fs::read_to_string(roots.sys.join("class/dmi/id/sys_vendor")).is_ok_and(|v| v.contains("Apple"));
         let facetime_pci = has_facetime_pci(&roots.sys);
-        Presence { roots, query, known: BTreeMap::new(), apple, facetime_pci, scanned: false, hidden: Vec::new() }
+        Presence { roots, query, known: BTreeMap::new(), apple, facetime_pci, scanned: false, hidden: Vec::new(), browser: None }
     }
 
     /// Nothing at all: no camera, never looks (the tests' default).
     pub fn none() -> Presence {
         Presence::with(Roots { sys: "/nonexistent-iyakki-sys".into(), dev: "/nonexistent-iyakki-dev".into() }, Box::new(|_| None))
+    }
+
+    /// The only camera is the web browser's (a remote session has no camera of its own to look at).
+    pub fn browser() -> Presence {
+        let mut p = Presence::none();
+        p.browser = Some(CamDevice { node: "browser".into(), path: PathBuf::from("browser"), name: "Browser camera".into(), caps: Caps { driver: "browser".into(), card: "Browser camera".into(), bus: "web".into(), caps: CAP_VIDEO_CAPTURE | CAP_STREAMING }, builtin: true, physical: "browser".into() });
+        p
     }
 
     /// Look again; true when the list of cameras changed.
@@ -205,6 +214,9 @@ impl Presence {
                 continue;
             }
             v.push(c);
+        }
+        if let Some(b) = &self.browser {
+            v.insert(0, b.clone());
         }
         v
     }

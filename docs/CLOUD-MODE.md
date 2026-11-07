@@ -60,13 +60,24 @@ mode unless asked.
 
 A cloud machine does not need the desktop at all. `iyakki serve --profile cloud --config /etc/iyakki/service.json` runs the **cloud
 profile** of the web service (`docs/development/MINIMAL-WEBSERVICE.md`, section 9) instead of the shell: HTTPS only, sign-in with the
-machine's accounts, and only the allow-listed assistant, flows (read) and data routes. It is cloud mode applied to the service: no local
+machine's accounts, and only the allow-listed assistant, flows (read, start a run, list runs), schedules and data routes. The cloud profile also runs the tenant's schedules with nobody signed in (one leader per tenant volume, quotas, approvals and notifications through the tenant's lists): `docs/development/CLOUD-FLOWS-PLAN.md`. It is cloud mode applied to the service: no local
 shell UI, no hardware tiles, nothing that needs sound, camera, USB or firmware, no developer-mode install of unsigned apps and no
 firewall change through the API. A test asserts that every app its routes need is `Class::Remote` in `cloudmode.rs`, that no route or
 tool names hardware, and that a hardware tool a model asks for is refused. Example configuration for a container or VM:
 `dist/service/service.cloud.json` (listen address, `allow_from`, certificate paths, token store, profile). A load balancer checks
 `GET /healthz` (alive) and `GET /readyz` (ready). The full desktop in a browser (`iyakki serve --web`) stays the other way to use a cloud
 machine; both can run on one machine.
+
+## Commands, scripts and browser sessions: the sandbox
+
+In a tenant pod (the manifest sets `IYAKKI_TENANT_DATA_DIR`) the agent's `run_command` never starts a program on the pod. With the sandbox
+connected (`sandbox::wiring::install`, done at pod start) the command becomes a request: an argv array, limits, a network mode (`none` or
+`proxy`, never direct), labels for the tenant, team, person and run. It passes the tenant's `sandbox.policy` (tiers, image registries, limits,
+roles, approval patterns, concurrency) and then runs as one hardened Kubernetes Job with its own NetworkPolicy (default-deny egress except DNS
+and the egress proxy), a workspace `emptyDir` with a size limit, a deadline and a time-to-live. Without the sandbox connected the command is
+refused, not run. The same layer serves the flows `cli` and `browser` nodes; the optional IYAKKI browser sandbox (a pod per session, off by
+default, `sandbox.policy.browser`) is the third tier. Plan, threat model and what is not tried: `docs/development/CLOUD-SANDBOX-PLAN.md`.
+Verified only with fakes and golden manifests: no cluster, no runtime class (gVisor, Kata) and no namespace-tier pod was used.
 
 ## What is not tested
 

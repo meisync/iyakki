@@ -296,6 +296,13 @@ impl Host for AgentHost {
         if req.argv.is_empty() {
             return Err(NodeError::config("no command"));
         }
+        // a tenant pod never runs a flow's command itself: it goes to the sandbox, and without one it is refused (fail closed)
+        if let Some(h) = super::CLOUD_EXEC.get() {
+            return h(&self.user, req);
+        }
+        if crate::tenantconfig::enforce::data_dir_from_env().is_some() {
+            return Err(NodeError::config("commands do not run on the tenant's pod and the sandbox is not connected here"));
+        }
         match req.runner {
             iyakki_flow::RunnerKind::Local => {
                 if self.policy.cli == CliLevel::Off {
@@ -344,6 +351,12 @@ impl Host for AgentHost {
     }
 
     fn browser(&self, req: &BrowserRequest, cancel: &Cancel) -> Result<BrowserResult, NodeError> {
+        if let Some(h) = super::CLOUD_BROWSER.get() {
+            return h(&self.user, req);
+        }
+        if crate::tenantconfig::enforce::data_dir_from_env().is_some() {
+            return Err(NodeError::config("the browser does not run on the tenant's pod and the sandbox is not connected here"));
+        }
         if let Some(why) = crate::browsertools::unavailable(&self.policy) {
             return Err(NodeError::config(why));
         }
@@ -495,6 +508,10 @@ impl Host for AgentHost {
 
     fn notify(&self, n: &Notice) -> Result<(), String> {
         use crate::inbox::{Kind, Link};
+        if let Some(h) = super::CLOUD_NOTIFY.get() {
+            h(&self.user, n);
+            return Ok(());
+        }
         let kind = match n.level.as_str() {
             "error" => Kind::Error,
             "warn" => Kind::Warning,

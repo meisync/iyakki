@@ -7288,7 +7288,7 @@ mod tests {
             [g.rgba()[o], g.rgba()[o + 1], g.rgba()[o + 2]]
         };
         assert_ne!(px(&g, 40, 40), px(&g, 200, 200), "a gradient, not a flat fill");
-        assert_eq!(px(&g, 21, 21), [8, 11, 26], "the corners are rounded off");
+        assert_eq!(px(&g, 21, 21), [12, 14, 19], "the corners are rounded off");
         let mut g2 = Gfx::new(300, 300);
         g2.clear(rgb(9, 11, 20));
         cover(&mut g2, R::new(20.0, 20.0, 200.0, 200.0), 1.0, "A Totally Different Tale");

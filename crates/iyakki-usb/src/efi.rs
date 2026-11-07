@@ -134,6 +134,94 @@ pub fn list_entries(dir: &Path) -> Vec<(u16, String, Vec<u8>)> {
     out
 }
 
+
+/// Apple's firmware variable namespace (the startup disk the picker and `bless` use live here).
+pub const APPLE_GUID: &str = "7c436110-ab2a-4bbb-a880-fe41995c9f82";
+
+/// What the firmware says about which disk starts, read only: for the question "why did the stick start and not the internal disk?".
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StartupInfo {
+    /// `BootOrder` (entry numbers in the order the firmware tries them).
+    pub boot_order: Vec<u16>,
+    /// `BootCurrent`: the entry this system was started from, when the firmware sets it.
+    pub boot_current: Option<u16>,
+    /// The load options: (number, description).
+    pub entries: Vec<(u16, String)>,
+    /// Apple startup variables found (`efi-boot-device`, `efi-boot-next`, ...): (name, bytes of value).
+    pub apple: Vec<(String, usize)>,
+}
+
+fn u16s(b: &[u8]) -> Vec<u16> {
+    b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+}
+
+/// Read the startup variables in `dir` (efivarfs). Nothing is written.
+pub fn startup_info(dir: &Path) -> StartupInfo {
+    let mut info = StartupInfo::default();
+    info.boot_order = read_var(dir, "BootOrder").map(|v| u16s(&v)).unwrap_or_default();
+    info.boot_current = read_var(dir, "BootCurrent").and_then(|v| u16s(&v).first().copied());
+    info.entries = list_entries(dir).into_iter().map(|(n, d, _)| (n, d)).collect();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if let Some(base) = name.strip_suffix(&format!("-{APPLE_GUID}")) {
+            if base.starts_with("efi-boot") || base.starts_with("boot-") || base == "efi-startup-disk" {
+                let len = std::fs::metadata(e.path()).map(|m| m.len() as usize).unwrap_or(0).saturating_sub(4);
+                info.apple.push((base.to_string(), len));
+            }
+        }
+    }
+    info.apple.sort();
+    info
+}
+
+impl StartupInfo {
+    /// The lines for the log: one fact each, no device paths.
+    pub fn lines(&self) -> Vec<String> {
+        let name = |n: u16| self.entries.iter().find(|e| e.0 == n).map_or(format!("Boot{n:04X}"), |e| format!("Boot{n:04X} \"{}\"", e.1));
+        let order = if self.boot_order.is_empty() { "empty".to_string() } else { self.boot_order.iter().map(|n| name(*n)).collect::<Vec<_>>().join(", ") };
+        let mut v = vec![format!("startup disk: BootOrder: {order}"), format!("startup disk: BootCurrent: {}", self.boot_current.map_or("not set".to_string(), name))];
+        v.push(format!("startup disk: Apple startup variables: {}", if self.apple.is_empty() { "none".to_string() } else { self.apple.iter().map(|(n, l)| format!("{n} ({l} bytes)")).collect::<Vec<_>>().join(", ") }));
+        v
+    }
+}
+
+
+/// Where the order before the change is kept, so that it can be put back (next to nothing else: a plain file in the variables' own folder is not
+/// possible on efivarfs, so the caller passes the data folder).
+pub const ORDER_BACKUP: &str = "startup-order.before";
+
+/// Put the entry described "IYAKKI" first in `BootOrder`, so that this computer starts its own disk before a stick it finds. Only `BootOrder` is
+/// written (never another entry, never Apple's variables); the order before is saved in `backup_dir/startup-order.before` the first time, so
+/// [`revert_boot_order`] can put it back. `Ok(None)`: already first, or there is no entry of ours.
+pub fn own_disk_first(dir: &Path, backup_dir: &Path) -> Result<Option<String>, String> {
+    let ours: Vec<u16> = list_entries(dir).into_iter().filter(|(_, d, _)| d == DESCRIPTION).map(|(n, _, _)| n).collect();
+    let Some(&mine) = ours.first() else { return Ok(None) };
+    let order = read_var(dir, "BootOrder").map(|v| u16s(&v)).unwrap_or_default();
+    if order.first() == Some(&mine) {
+        return Ok(None);
+    }
+    let backup = backup_dir.join(ORDER_BACKUP);
+    if !backup.exists() {
+        std::fs::write(&backup, order.iter().map(|n| format!("{n:04X}")).collect::<Vec<_>>().join(",")).map_err(|e| format!("saving the old boot order: {e}"))?;
+    }
+    let mut next = vec![mine];
+    next.extend(order.iter().copied().filter(|n| *n != mine));
+    let bytes: Vec<u8> = next.iter().flat_map(|n| n.to_le_bytes()).collect();
+    write_var(dir, "BootOrder", &bytes)?;
+    Ok(Some(format!("Boot{mine:04X} is first in the boot order now")))
+}
+
+/// Put the saved order back (and forget the copy). `Ok(false)`: there was nothing saved.
+pub fn revert_boot_order(dir: &Path, backup_dir: &Path) -> Result<bool, String> {
+    let backup = backup_dir.join(ORDER_BACKUP);
+    let Ok(text) = std::fs::read_to_string(&backup) else { return Ok(false) };
+    let order: Vec<u16> = text.trim().split(',').filter(|t| !t.is_empty()).filter_map(|t| u16::from_str_radix(t, 16).ok()).collect();
+    let bytes: Vec<u8> = order.iter().flat_map(|n| n.to_le_bytes()).collect();
+    write_var(dir, "BootOrder", &bytes)?;
+    let _ = std::fs::remove_file(&backup);
+    Ok(true)
+}
+
 /// Create (or, when an entry described "IYAKKI" is already there, replace) our boot entry and append it to `BootOrder`.
 /// Returns the entry's name, for example `Boot0007`.
 pub fn add_boot_entry(dir: &Path, e: &BootEntry) -> Result<String, String> {
@@ -199,6 +287,68 @@ pub fn backslashed(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn put(dir: &Path, base_guid: &str, data: &[u8]) {
+        let mut b = ATTRS.to_le_bytes().to_vec();
+        b.extend_from_slice(data);
+        std::fs::write(dir.join(base_guid), b).unwrap();
+    }
+
+    #[test]
+    fn the_own_disk_can_be_put_first_and_the_old_order_comes_back() {
+        let d = std::env::temp_dir().join(format!("iyakki-ownfirst-{}", std::process::id()));
+        let b = std::env::temp_dir().join(format!("iyakki-ownfirst-bak-{}", std::process::id()));
+        for x in [&d, &b] {
+            let _ = std::fs::remove_dir_all(x);
+            std::fs::create_dir_all(x).unwrap();
+        }
+        let utf = |s: &str| -> Vec<u8> { s.encode_utf16().chain([0u16]).flat_map(|u| u.to_le_bytes()).collect() };
+        let entry = |desc: &str| { let mut v = vec![1, 0, 0, 0, 0, 0]; v.extend(utf(desc)); v };
+        put(&d, &format!("Boot0007-{GLOBAL_GUID}"), &entry("IYAKKI"));
+        put(&d, &format!("Boot0080-{GLOBAL_GUID}"), &entry("Mac OS X"));
+        put(&d, &format!("BootOrder-{GLOBAL_GUID}"), &[0x80, 0, 0x81, 0, 0x07, 0]);
+        assert_eq!(own_disk_first(&d, &b).unwrap().unwrap(), "Boot0007 is first in the boot order now");
+        assert_eq!(startup_info(&d).boot_order, vec![7, 0x80, 0x81], "ours first, the others keep their order");
+        assert_eq!(own_disk_first(&d, &b).unwrap(), None, "already first: nothing to do");
+        assert!(b.join(ORDER_BACKUP).exists());
+        assert!(revert_boot_order(&d, &b).unwrap());
+        assert_eq!(startup_info(&d).boot_order, vec![0x80, 0x81, 7], "the old order is back");
+        assert!(!revert_boot_order(&d, &b).unwrap(), "nothing saved any more");
+        // no entry of ours: nothing is written
+        std::fs::remove_file(d.join(format!("Boot0007-{GLOBAL_GUID}"))).unwrap();
+        assert_eq!(own_disk_first(&d, &b).unwrap(), None);
+        for x in [&d, &b] {
+            let _ = std::fs::remove_dir_all(x);
+        }
+    }
+
+    #[test]
+    fn the_startup_variables_are_read_and_said_in_words_and_nothing_is_written() {
+        let d = std::env::temp_dir().join(format!("iyakki-startup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let utf = |s: &str| -> Vec<u8> { s.encode_utf16().chain([0u16]).flat_map(|u| u.to_le_bytes()).collect() };
+        let entry = |desc: &str| { let mut v = vec![1, 0, 0, 0, 0, 0]; v.extend(utf(desc)); v };
+        put(&d, &format!("Boot0000-{GLOBAL_GUID}"), &entry("IYAKKI"));
+        put(&d, &format!("Boot0080-{GLOBAL_GUID}"), &entry("Mac OS X"));
+        put(&d, &format!("BootOrder-{GLOBAL_GUID}"), &[0x80, 0, 0, 0]);
+        put(&d, &format!("BootCurrent-{GLOBAL_GUID}"), &[0, 0]);
+        put(&d, &format!("efi-boot-device-data-{APPLE_GUID}"), &[1, 2, 3, 4, 5]);
+        put(&d, &format!("unrelated-{APPLE_GUID}"), &[9]);
+        let before: Vec<_> = std::fs::read_dir(&d).unwrap().flatten().map(|e| (e.file_name(), std::fs::read(e.path()).unwrap())).collect();
+        let info = startup_info(&d);
+        assert_eq!(info.boot_order, vec![0x80, 0]);
+        assert_eq!(info.boot_current, Some(0));
+        assert_eq!(info.apple, vec![("efi-boot-device-data".to_string(), 5)], "only the startup variables, not every Apple one");
+        let lines = info.lines();
+        assert!(lines[0].contains("Boot0080 \"Mac OS X\", Boot0000 \"IYAKKI\""), "{lines:?}");
+        assert!(lines[1].contains("BootCurrent: Boot0000 \"IYAKKI\""), "{lines:?}");
+        assert!(lines[2].contains("efi-boot-device-data (5 bytes)"), "{lines:?}");
+        let after: Vec<_> = std::fs::read_dir(&d).unwrap().flatten().map(|e| (e.file_name(), std::fs::read(e.path()).unwrap())).collect();
+        assert_eq!(before.len(), after.len(), "nothing was created or removed");
+        assert_eq!(startup_info(Path::new("/nonexistent")), StartupInfo::default());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn a_plain_copy_of_the_image_gets_an_entry_named_iyakki_only_for_an_mbr_disk() {

@@ -8,6 +8,7 @@
 //! repeat of a held backspace or arrow. The shell draws it and feeds it (`shell_osk.rs`). A key becomes the same `Event::Key` a
 //! physical keyboard would send, so every field, form and editor works with it unchanged.
 
+use crate::safeclamp::SafeClamp;
 use crate::ui::{Event, Key, R};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -22,6 +23,18 @@ pub fn note_touch() {
 /// Has a finger come down since the last call?
 pub fn take_touch() -> bool {
     TOUCHED.swap(false, Ordering::SeqCst)
+}
+
+/// The shell's view of "the last thing used was a finger" (mirrors `Osk::touch`), for tiles that must tell a tap from a click.
+static TOUCH_MODE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_touch_mode(on: bool) {
+    TOUCH_MODE.store(on, Ordering::SeqCst);
+}
+
+/// Is the last input a finger (not a mouse or a physical key)?
+pub fn touch_mode() -> bool {
+    TOUCH_MODE.load(Ordering::SeqCst)
 }
 
 /// Heartbeats a finger must stay on backspace or an arrow before it repeats (30 a second).
@@ -133,7 +146,7 @@ impl Osk {
     }
 
     fn key_height(h: f32, s: f32) -> f32 {
-        (h * 0.07).clamp(44.0 * s.min(1.5), 110.0)
+        (h * 0.07).clamp_safe(44.0 * s.min(1.5), 110.0)
     }
 
     /// The keys for the current layer and shift state inside `area`.

@@ -2,6 +2,7 @@
 //! the certificate fingerprint are shown here, with the addresses to type), the paired computers (revoke one), and the activity log of
 //! everything they did. The rules and the work are in `iyakki_agent::devmode`; the listener is `iyakki_remote::devserver`.
 
+use crate::safeclamp::SafeClamp;
 use super::*;
 use iyakki_agent::devmode::scopes::Scope;
 use iyakki_agent::devmode::{self as dm, DevMode};
@@ -15,9 +16,9 @@ pub(super) const EXTEND_HOURS: u32 = 4;
 #[derive(Default)]
 pub(super) struct DevPanel {
     /// Index into [`HOURS`] for the next switch-on.
-    hours: usize,
+    pub(super) hours: usize,
     /// Show the activity log instead of the computers.
-    log: bool,
+    pub(super) log: bool,
     /// Whether it was on when the page was last drawn (for the buttons).
     on: bool,
     /// The scope the switches act on (index into `Scope::ALL`).
@@ -25,6 +26,12 @@ pub(super) struct DevPanel {
     /// The "Connect over USB-C" page (key `u`) is showing instead of the computers list.
     pub(super) usb_open: bool,
     pub(super) usb: super::usbc_page::UsbPanel,
+    /// A pairing code is on the screen / a computer is approved automatically (for the buttons).
+    pairing_shown: bool,
+    auto_shown: bool,
+    /// How far the page is scrolled (pixels) and the most it can be (set when drawn).
+    pub(super) scroll: f32,
+    pub(super) max: f32,
 }
 
 fn hours_text(h: u32) -> String {
@@ -53,6 +60,18 @@ impl SettingsApp {
         let user = cx.session.user.clone();
         match k {
             Key::Char('u') => self.devel.usb_open = true,
+            Key::Up => self.move_sel(-1, Self::devmode_keys(cx).len()),
+            Key::Down => self.move_sel(1, Self::devmode_keys(cx).len()),
+            Key::PageUp => self.dev_wheel(3),
+            Key::PageDown => self.dev_wheel(-3),
+            // copy the pairing code to type on the other computer
+            Key::Char('C') => match d.pairing() {
+                Some(pc) if d.is_on() => {
+                    crate::ui::clipboard::copy(&pc.code);
+                    self.ok("The pairing code is copied.");
+                }
+                _ => self.fail("No pairing code is showing: press p first.".to_string()),
+            },
             Key::Char('e') | Key::Enter if !d.is_on() => match d.enable(p, &user, HOURS[self.devel.hours]) {
                 Ok(_) => {
                     cx.audit.record(&user, "devmode.on", &hours_text(HOURS[self.devel.hours]));
@@ -184,13 +203,17 @@ impl SettingsApp {
                     }
                 }
             }
-            Key::Char('a') | Key::Char('o') | Key::Char('d') | Key::Char('y') => {
+            Key::Char('a') | Key::Char('4') | Key::Char('8') | Key::Char('1') | Key::Char('o') | Key::Char('d') | Key::Char('y') => {
                 let Some(req) = d.shell_pending().into_iter().next() else {
                     self.fail("No computer is asking for shell access right now.".to_string());
                     return;
                 };
                 let r = match k {
                     Key::Char('a') => d.shell_approve(p, &user, &req.computer, 10).map(|g| format!("{} may run commands for 10 minutes{}. The top bar shows it.", g.computer, if g.as_root { " as root" } else { "" })),
+                    Key::Char(c @ ('4' | '8' | '1')) => {
+                        let hours = match c { '4' => 4, '8' => 8, _ => 12 };
+                        d.shell_approve(p, &user, &req.computer, hours * 60).map(|g| format!("{} may run commands for {hours} hours{}. The top bar shows it.", g.computer, if g.as_root { " as root" } else { "" }))
+                    }
                     Key::Char('o') => d.shell_approve(p, &user, &req.computer, 0).map(|g| format!("{} may run commands for one session.", g.computer)),
                     // approve this one and stop asking for a while: a plain shell only (never as root, power or patching)
                     Key::Char('y') if req.as_root => Err("A request to run as root is always asked each time: press a or o.".to_string()),
@@ -237,6 +260,24 @@ impl SettingsApp {
         }
     }
 
+    /// A click or tap on a line of a list: put the cursor on `row` (a scope) and press the key the line stands for.
+    pub(super) fn dev_sub(&mut self, row: u8, k: &Key, cx: &AppCx) {
+        if self.devel.usb_open {
+            return;
+        }
+        self.devel.scope = row as usize % Scope::ALL.len();
+        self.handle_developer(k, cx);
+    }
+
+    /// The mouse wheel (positive = up): scrolls the page, or the list of checks on the USB-C page.
+    pub(super) fn dev_wheel(&mut self, d: i32) {
+        if self.devel.usb_open {
+            self.devel.usb.top = (self.devel.usb.top as i32 - d).clamp(0, 6) as usize;
+        } else {
+            self.devel.scroll = (self.devel.scroll - d as f32 * crate::scrolleng::SCREEN_NOTCH_PX * self.nav_s.max(0.5)).clamp_safe(0.0, self.devel.max);
+        }
+    }
+
     /// "the firewall blocks the developer port ...: Allow" while developer mode is on, the firewall is in force and nothing lets it in.
     pub(super) fn dev_fw_hint(&self, d: &DevMode) -> Option<String> {
         let blocked = iyakki_fw::service::block_log().recent();
@@ -258,11 +299,20 @@ impl SettingsApp {
         if on {
             v.push(("Extend 4 h", TEXT, 't'));
         }
+        if self.devel.pairing_shown {
+            v.push(("Copy code", ACCENT, 'C'));
+        }
+        if self.devel.auto_shown {
+            v.push(("Ask each time again", TEXT, 'w'));
+        }
         v.push(("Grant all diagnostic scopes", ACCENT, 'G'));
         v.push(("Next scope", TEXT, 's'));
         v.push(("Scope on/off", TEXT, ' '));
         if on {
             v.push(("Approve shell", ERR, 'a'));
+            v.push(("Approve 4 h", ERR, '4'));
+            v.push(("Approve 8 h", ERR, '8'));
+            v.push(("Approve 12 h", ERR, '1'));
             v.push(("Shell once", ERR, 'o'));
             v.push(("Deny shell", TEXT, 'd'));
         }
@@ -278,9 +328,22 @@ impl SettingsApp {
             self.render_usb(g, a, s, cx);
             return;
         }
+        // the page is taller than the window when a code, hints and a request show: it scrolls (wheel, finger, Page keys) and
+        // everything in it that can be clicked is cut to the window, so nothing under the buttons is hit
+        self.devel.scroll = self.devel.scroll.clamp_safe(0.0, self.devel.max);
+        let top = a.y - self.devel.scroll;
+        let shifted = R::new(a.x, top, a.w, a.h + self.devel.scroll);
+        let end = g.clipped(a, |g| self.render_developer_body(g, shifted, s, cx));
+        self.devel.max = (end - top + 12.0 * s - a.h).max(0.0);
+    }
+
+    /// The whole page from `a.y` down; returns where it ends.
+    fn render_developer_body(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) -> f32 {
         let d = Self::devmode(cx);
         let on = d.is_on();
         self.devel.on = on;
+        self.devel.pairing_shown = on && d.pairing().is_some();
+        self.devel.auto_shown = on && !d.shell_auto_list().is_empty();
         let mut y = a.y + controls::section_title(g, a.x, a.y, s, "Install and run apps from your own computer");
         for l in [
             "Like adb for IYAKKI: a paired computer can install, upgrade and remove tile apps, skills, MCP servers and extensions, read their logs, open them on this screen and take a screenshot (iyakki dev ...).".to_string(),
@@ -297,12 +360,14 @@ impl SettingsApp {
         let head = g.fit(16.0 * s, &format!("Developer mode: {word}"), Face::Bold, a.w);
         g.text(a.x, y, 16.0 * s, col, &head, Face::Bold);
         y += 26.0 * s;
-        g.text(a.x, y, 13.0 * s, MUTED, &format!("Port {} (TLS) · next switch-on switches off {}", st.port(), hours_text(HOURS[self.devel.hours])), Face::Sans);
-        y += 24.0 * s;
+        // the switch-off time: tap the line to go to the next choice (h)
+        tap_line(g, a, &mut y, s, 13.0, MUTED, Face::Sans, &format!("Port {} (TLS) · next switch-on switches off {} · tap to change (h)", st.port(), hours_text(HOURS[self.devel.hours])), Some(Event::Key(Key::Char('h'))));
+        y += 6.0 * s;
         if let Some(p) = d.pairing().filter(|_| on) {
-            y += controls::section_title(g, a.x, y, s, "Pair a computer");
+            y += controls::section_title(g, a.x, y, s, "Pair a computer (tap the code to copy it)");
             g.text(a.x, y, 30.0 * s, ACCENT, &p.code, Face::Mono);
-            y += 42.0 * s;
+            g.hit(R::new(a.x, y - 2.0 * s, a.w, 44.0 * s), Event::Key(Key::Char('C')), "Copy the pairing code");
+            y += 46.0 * s;
             let fp = dm::cert_fingerprint(cx.services.dir()).unwrap_or_else(|| "(the certificate is being made: look again in a moment)".into());
             let half = fp.len().div_ceil(2).min(48);
             for part in [&fp[..half.min(fp.len())], &fp[half.min(fp.len())..]] {
@@ -320,53 +385,58 @@ impl SettingsApp {
                 g.text(a.x, y, 13.0 * s, MUTED, &w, Face::Sans);
                 y += 18.0 * s;
             }
-            let granted = p.scopes.join(", ");
-            let line = format!("This computer will be allowed: {granted}. (s picks a scope, g adds or removes it for the new computer; more can be granted after pairing.)");
-            for w in g.wrap(13.0 * s, &line, Face::Sans, a.w) {
-                g.text(a.x, y, 13.0 * s, rgb(255, 196, 94), &w, Face::Sans);
-                y += 18.0 * s;
+            g.text(a.x, y, 13.0 * s, rgb(255, 196, 94), "What the new computer will be allowed (tap a line, or s then g):", Face::Sans);
+            y += 22.0 * s;
+            for (i, sc) in Scope::ALL.into_iter().enumerate() {
+                let held = p.scopes.iter().any(|x| x == sc.id());
+                let cursor = if i == self.devel.scope % Scope::ALL.len() { "▶" } else { " " };
+                let col = if held && sc.dangerous() { ERR } else if held { rgb(255, 196, 94) } else { DIM };
+                let t = g.fit(13.0 * s, &format!("{cursor} [{}] {:<16} {}", if held { "x" } else { " " }, sc.id(), sc.describe()), Face::Mono, a.w);
+                g.text(a.x, y + 5.0 * s, 13.0 * s, col, &t, Face::Mono);
+                g.hit(R::new(a.x, y, a.w, SCOPE_PITCH * s), Event::Sub(i as u8, Key::Char('g')), &format!("New computer: {}", sc.id()));
+                y += SCOPE_PITCH * s;
             }
             y += 8.0 * s;
         }
         if on {
             let w = d.fw_want();
-            let mut lines: Vec<(String, [u8; 4])> = Vec::new();
             if let Some(h) = self.dev_fw_hint(&d) {
-                lines.push((format!("{h} (f)"), rgb(255, 196, 94)));
+                tap_line(g, a, &mut y, s, 13.0, rgb(255, 196, 94), Face::Sans, &format!("{h} (tap or f)"), Some(Event::Key(Key::Char('f'))));
             }
             if w.pair_until > 0 {
-                lines.push((format!("Firewall: the local network may reach the developer port until {} or until a computer has paired (rule: developer mode pairing (one time)).", dm::stamp(w.pair_until)), TEXT));
+                tap_line(g, a, &mut y, s, 13.0, TEXT, Face::Sans, &format!("Firewall: the local network may reach the developer port until {} or until a computer has paired (rule: developer mode pairing (one time)).", dm::stamp(w.pair_until)), None);
             }
-            lines.push((if w.network_wide {
-                "Firewall: paired computers are allowed from their whole network (/24). Trade-off: any computer on this network can reach the developer port, though only paired keys can act. n turns it off.".to_string()
+            let (t, ev) = if w.network_wide {
+                ("Firewall: paired computers are allowed from their whole network (/24). Trade-off: any computer on this network can reach the developer port, though only paired keys can act. Tap or n turns it off.".to_string(), Event::Key(Key::Char('n')))
             } else {
-                "Firewall: only the address of each paired computer is let in (default). If its address changes, press f when the hint shows, or n to allow its whole network (any computer there could then reach the port; only paired keys can act).".to_string()
-            }, MUTED));
-            for (t, c) in lines {
-                for w in g.wrap(13.0 * s, &t, Face::Sans, a.w) {
-                    g.text(a.x, y, 13.0 * s, c, &w, Face::Sans);
-                    y += 18.0 * s;
-                }
-            }
+                ("Firewall: only the address of each paired computer is let in (default). If its address changes, tap the hint above or press f, or tap here (n) to allow its whole network (any computer there could then reach the port; only paired keys can act).".to_string(), Event::Key(Key::Char('n')))
+            };
+            tap_line(g, a, &mut y, s, 13.0, MUTED, Face::Sans, &t, Some(ev));
             y += 6.0 * s;
             for t in d.shell_auto_list() {
-                let line = format!("{} runs commands without asking until {} (never as root). w: ask each time again", t.computer, dm::stamp(t.until));
-                for w in g.wrap(13.0 * s, &line, Face::Sans, a.w) {
-                    g.text(a.x, y, 13.0 * s, MUTED, &w, Face::Sans);
-                    y += 18.0 * s;
-                }
+                let line = format!("{} runs commands without asking until {} (never as root). Tap to ask each time again (w)", t.computer, dm::stamp(t.until));
+                tap_line(g, a, &mut y, s, 13.0, MUTED, Face::Sans, &line, Some(Event::Key(Key::Char('w'))));
             }
-            for r in d.shell_pending() {
-                let line = format!("{} asks to RUN COMMANDS on this device as {}{}{}. a: 10 minutes · o: one session · y: yes, and stop asking for 4 hours · d: refuse", r.computer, r.account, if r.as_root { " (as root)" } else { "" }, if r.why.is_empty() { String::new() } else { format!(" — {}", r.why) });
+            for (n, r) in d.shell_pending().into_iter().enumerate() {
+                let line = format!("{} asks to RUN COMMANDS on this device as {}{}{}.{}", r.computer, r.account, if r.as_root { " (as root)" } else { "" }, if r.why.is_empty() { String::new() } else { format!(" — {}", r.why) }, if n == 0 { "" } else { " (waits its turn)" });
                 for w in g.wrap(14.0 * s, &line, Face::Bold, a.w) {
                     g.text(a.x, y, 14.0 * s, ERR, &w, Face::Bold);
                     y += 20.0 * s;
+                }
+                if n == 0 {
+                    // the answers are buttons as well as keys; they act on the first request in the line
+                    let mut choices: Vec<(&str, [u8; 4], char)> = vec![("10 minutes", ERR, 'a'), ("4 hours", ERR, '4'), ("8 hours", ERR, '8'), ("12 hours", ERR, '1'), ("One session", ERR, 'o')];
+                    if !r.as_root {
+                        choices.push(("Yes, and stop asking for 8 h", ERR, 'y'));
+                    }
+                    choices.push(("Refuse", TEXT, 'd'));
+                    y = request_buttons(g, a, y, s, &choices);
                 }
                 y += 6.0 * s;
             }
             let sessions = dm::sessions::list(cx.services.dir());
             if !sessions.is_empty() {
-                y += controls::section_title(g, a.x, y, s, "Open sessions (k disconnects the selected computer)");
+                y += controls::section_title(g, a.x, y, s, "Open sessions (Disconnect ends the selected computer's)");
                 for x in sessions.iter().take(8) {
                     let t = g.fit(13.0 * s, &format!("{} ({}) · {} · since {}", x.computer, x.account, x.what, dm::stamp(x.started)), Face::Mono, a.w);
                     g.text(a.x, y, 13.0 * s, TEXT, &t, Face::Mono);
@@ -380,51 +450,78 @@ impl SettingsApp {
             let acts = d.activity(60);
             if acts.is_empty() {
                 g.text(a.x, y, 14.0 * s, DIM, "Nothing yet.", Face::Sans);
+                y += 22.0 * s;
             }
             for x in acts {
-                if y > a.y + a.h - 20.0 * s {
-                    break;
-                }
                 let t = g.fit(12.5 * s, &x.line(), Face::Mono, a.w);
                 g.text(a.x, y, 12.5 * s, if x.ok { TEXT } else { ERR }, &t, Face::Mono);
                 y += 18.0 * s;
             }
-            return;
+            return y;
         }
-        y += controls::section_title(g, a.x, y, s, "Paired computers");
+        y += controls::section_title(g, a.x, y, s, "Paired computers (tap one to choose it)");
         let rows = Self::devmode_keys(cx);
         if rows.is_empty() {
-            g.text(a.x, y, 14.0 * s, DIM, if on { "None yet. Press p to show a pairing code." } else { "None. Switch developer mode on (e), then pair a computer (p)." }, Face::Sans);
-            return;
+            let (t, k) = if on { ("None yet. Tap here or press p to show a pairing code.", 'p') } else { ("None. Tap here to switch developer mode on (e), then pair a computer (p).", 'e') };
+            tap_line(g, a, &mut y, s, 14.0, DIM, Face::Sans, t, Some(Event::Key(Key::Char(k))));
+            return y;
         }
         let sel = self.sel[self.tab].min(rows.len() - 1);
         for (i, k) in rows.iter().enumerate() {
-            if y + 64.0 * s > a.y + a.h {
-                break;
-            }
             let used = if k.last_used == 0 { "never used".to_string() } else { format!("last used {}", dm::stamp(k.last_used)) };
             row(g, &mut self.tip, i, a.x, y, a.w, 58.0 * s, s, i == sel, &k.name, &format!("key {} · acts as {} · paired {} by {} · {used} · scopes: {}", k.short(), k.account, dm::stamp(k.added), k.added_by, k.scope_text()), &[(if on { "can connect" } else { "mode off" }, if on { rgb(255, 196, 94) } else { DIM })]);
             y += 66.0 * s;
         }
-        // the switches of the selected computer: one line per scope, the cursor on the one s/space act on
+        // the switches of the selected computer: one line per scope; a tap on a line turns it on or off (space does the same)
         if let Some(k) = rows.get(sel) {
-            y += controls::section_title(g, a.x, y, s, &format!("What {} may do (s: next, space: on/off, G: all diagnostic scopes)", k.name));
+            y += controls::section_title(g, a.x, y, s, &format!("What {} may do (tap a line to turn it on or off; s: next, space: on/off)", k.name));
             let note = "Grant all diagnostic scopes gives: debug, files, input, kube and shell (a shell still needs your approval each time). It never gives updates, restart/power, port forwarding, system files, password fields or settings.";
             for w in g.wrap(12.5 * s, note, Face::Sans, a.w) {
                 g.text(a.x, y, 12.5 * s, MUTED, &w, Face::Sans);
                 y += 17.0 * s;
             }
             for (i, sc) in Scope::ALL.into_iter().enumerate() {
-                if y + 20.0 * s > a.y + a.h {
-                    break;
-                }
                 let held = k.has(sc);
                 let cursor = if i == self.devel.scope % Scope::ALL.len() { "▶" } else { " " };
                 let col = if held && sc.dangerous() { ERR } else if held { rgb(255, 196, 94) } else { DIM };
                 let t = g.fit(13.0 * s, &format!("{cursor} [{}] {:<16} {}", if held { "x" } else { " " }, sc.id(), sc.describe()), Face::Mono, a.w);
-                g.text(a.x, y, 13.0 * s, col, &t, Face::Mono);
-                y += 18.0 * s;
+                g.text(a.x, y + 5.0 * s, 13.0 * s, col, &t, Face::Mono);
+                g.hit(R::new(a.x, y, a.w, SCOPE_PITCH * s), Event::Sub(i as u8, Key::Char(' ')), &format!("{}: {}", k.name, sc.id()));
+                y += SCOPE_PITCH * s;
             }
         }
+        y
     }
+}
+
+/// Height of a tappable scope line (a finger needs about 44 px; the line is drawn small, the target is this tall).
+const SCOPE_PITCH: f32 = 40.0;
+
+/// A wrapped paragraph; with `ev` the whole paragraph (at least 36 px tall) is a target for a click or tap.
+#[allow(clippy::too_many_arguments)]
+fn tap_line(g: &mut Gfx, a: R, y: &mut f32, s: f32, size: f32, col: [u8; 4], face: Face, text: &str, ev: Option<Event>) {
+    let top = *y;
+    for w in g.wrap(size * s, text, face, a.w) {
+        g.text(a.x, *y, size * s, col, &w, face);
+        *y += (size + 5.0) * s;
+    }
+    if let Some(ev) = ev {
+        let h = (*y - top).max(36.0 * s);
+        g.hit(R::new(a.x, top - 2.0 * s, a.w, h), ev, text);
+        *y = top + h;
+    }
+}
+
+/// A row of buttons (44 px tall targets) wrapping at the page width; returns the y below them.
+fn request_buttons(g: &mut Gfx, a: R, y: f32, s: f32, choices: &[(&str, [u8; 4], char)]) -> f32 {
+    let (mut bx, mut by) = (a.x, y);
+    for (label, col, key) in choices {
+        let bw = g.text_width(14.0 * s, label, Face::Bold) + 14.0 * s * 1.7;
+        if bx + bw > a.x + a.w && bx > a.x {
+            bx = a.x;
+            by += BTN_PITCH * s;
+        }
+        bx += g.button_touch(bx, by + (BTN_PITCH - 14.0 * 2.1) * s / 2.0, 14.0 * s, label, *col, Event::Key(Key::Char(*key)), BTN_PITCH * s) + 8.0 * s;
+    }
+    by + BTN_PITCH * s
 }

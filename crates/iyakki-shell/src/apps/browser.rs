@@ -22,7 +22,9 @@ use super::browser_devpanel::{self, Act as DevAct};
 use super::browser_devtools;
 use super::browser_typo;
 use super::browser_media::{self, MediaPerms};
-use super::browser_full::{Full, Note, Redraw, Start, AREA_FULL};
+use super::browser_full::{Full, Note, Redraw, Start, TextFocus, AREA_FULL};
+/// The id the page's focused text box answers to in the shell's field list (the on-screen keyboard follows it).
+pub(super) const PAGE_FIELD: usize = 9540;
 use super::browser_data::{self, Data, Suggestion};
 use super::browser_logins::{self, Cred};
 use super::browser_persist;
@@ -423,6 +425,8 @@ pub struct BrowserApp {
     failed: Option<(Url, String)>,
     /// What the groups looked like when they were last saved (so they are saved only when they change), and the ticks since.
     groups_saved: String,
+    /// The addresses of the tabs outside any group, as last written (see `open_json`).
+    open_saved: String,
     groups_clock: u32,
     /// When the built-in reader's current load began (for the "taking long" card).
     load_started: std::time::Instant,
@@ -526,9 +530,12 @@ impl BrowserApp {
     pub fn new(cx: &AppCx) -> BrowserApp {
         let mut app = BrowserApp::make(cx);
         // the AI IDE's "open in the Browser tile" asked for this page
-        if let Some(u) = OPEN_NEXT.with(|o| o.borrow_mut().take()) {
+        let asked = OPEN_NEXT.with(|o| o.borrow_mut().take());
+        let asked_page = asked.is_some();
+        if let Some(u) = asked {
             app.open_url(&u, cx);
         }
+        app.restore_open(cx, asked_page);
         app.restore_groups(cx);
         app
     }
@@ -575,6 +582,7 @@ impl BrowserApp {
             overview: None,
             failed: None,
             groups_saved: String::new(),
+            open_saved: String::new(),
             groups_clock: 0,
             load_started: std::time::Instant::now(),
             hover_hint: None,
@@ -3320,8 +3328,15 @@ impl BrowserApp {
     /// The page area while the full engine shows the page.
     fn render_full(&mut self, g: &mut Gfx, view: R, s: f32, tick: u64) {
         g.hit(view, Event::Area(AREA_FULL), "page");
+        let keys_ok = self.full_has_keys();
         let Some(f) = self.full.as_mut() else { return };
         f.draw(g, view, s);
+        // a text box in the page has the focus: tell the shell the way a text field does, so the on-screen keyboard opens for a
+        // finger (a password box too; it is a secret field for the developer state). A zero-size rect: a right click on the page
+        // stays the page's, and the keyboard does not need a place (a low box was scrolled up by the probe).
+        if keys_ok && f.text_focus != TextFocus::None {
+            crate::ctxmenu::note_field(crate::ctxmenu::FieldNote { rect: R::new(view.x, view.y, 0.0, 0.0), id: PAGE_FIELD, focused: true, has_selection: false, empty: false, secret: f.text_focus == TextFocus::Password });
+        }
         if !f.is_ready() || !f.has_picture() {
             let host = iyakki_sec::url_host(&f.url).unwrap_or_default();
             let msg_host = if f.is_ready() { host.as_str() } else { "" };
@@ -4402,8 +4417,8 @@ impl App for BrowserApp {
         self.full.as_mut()?.draw_pending(g)
     }
 
-    fn context_items(&mut self, _x: i32, _y: i32) -> Vec<crate::ctxmenu::Item> {
-        use crate::ctxmenu::Item;
+    fn context_items(&mut self, x: i32, y: i32) -> Vec<crate::ctxmenu::Item> {
+        use crate::ctxmenu::{Item, COPY, CUT, PASTE, SELECT_ALL};
         // a link under the pointer (the reader registers each link as a `Row` region)
         self.ctx_link = None;
         if self.full.is_none() {
@@ -4416,6 +4431,15 @@ impl App for BrowserApp {
             }
         }
         let mut v = Vec::new();
+        // a page the engine shows has the keyboard (the person touched or clicked its field first): its text can be cut, copied and
+        // pasted from here, the same entries every other text field offers (the shell sends them as the keys / the clipboard text)
+        if self.view_rect.contains(x, y) && self.full_has_keys() {
+            v.push(Item::new(CUT, "Cut", "Ctrl+X"));
+            v.push(Item::new(COPY, "Copy", "Ctrl+C"));
+            v.push(Item::new(PASTE, "Paste", "Ctrl+V").needs_clip());
+            v.push(Item::new(SELECT_ALL, "Select all", "Ctrl+A"));
+            v.push(Item::separator());
+        }
         if self.ctx_link.is_some() {
             v.push(Item::new("openlink", "Open link", ""));
             v.push(Item::new("opennew", "Open link in new tab", ""));
@@ -4868,10 +4892,42 @@ impl BrowserApp {
     }
 
     /// Keep the groups on disk when they (or the addresses in them) changed; looked at twice a second.
+    /// The addresses of the tabs that are in no group, as JSON (the groups keep their own).
+    fn open_json(&self) -> String {
+        let urls: Vec<String> = (0..self.tabs.len()).filter(|&i| self.groups.of(i).is_none()).map(|i| self.tab_url(i)).filter(|u| browser_groups::keep_open(u)).collect();
+        serde_json::to_string(&urls).unwrap_or_default()
+    }
+
+    /// Bring back the pages that were open last time: the first becomes the tab in use (unless a page was asked for, then it stays and
+    /// they follow), the rest wait unloaded until the person opens them.
+    fn restore_open(&mut self, cx: &AppCx, asked_page: bool) {
+        if self.embedded {
+            return;
+        }
+        let mut first = !asked_page;
+        for u in browser_groups::load_open(cx, MAX_TABS) {
+            if first {
+                self.field.set(&u);
+                self.addr_focus = false;
+                self.lazy = true;
+                first = false;
+            } else if self.tabs.len() < MAX_TABS {
+                self.tabs.push(Some(Self::lazy_state(&u)));
+                self.groups.push_tab();
+            }
+        }
+        self.open_saved = self.open_json();
+    }
+
     fn groups_tick(&mut self, cx: &AppCx) {
         self.groups_clock += 1;
         if self.embedded || self.groups_clock % 15 != 0 {
             return;
+        }
+        let open = self.open_json();
+        if open != self.open_saved {
+            browser_groups::save_open(cx, &open);
+            self.open_saved = open;
         }
         let now = self.groups_json();
         if now != self.groups_saved {
@@ -5236,6 +5292,39 @@ mod tests {
     }
 
     const GUIDE: &str = "<html><head><title>The Guide</title></head><body><h1>Guide</h1><p>Read the <a href=\"/more\">more</a> page or go <a href=\"https://other.org/x\">elsewhere</a>.</p></body></html>";
+
+    #[test]
+    fn the_open_tabs_come_back_when_the_browser_is_opened_again_and_a_closed_one_does_not() {
+        let web = site(vec![("https://a.org/", html(GUIDE)), ("https://b.org/x", html("<html><head><title>Other</title></head><body><p>Second page words.</p></body></html>"))]);
+        let cx = cx_with("tabs-back", web);
+        let mut a = BrowserApp::new(&cx);
+        for (i, u) in ["https://a.org/", "https://b.org/x"].iter().enumerate() {
+            if i > 0 {
+                a.new_tab();
+            }
+            a.open_url(u, &cx);
+            settle(&mut a, &cx);
+        }
+        // the browser looks twice a second; give it the ticks it needs to write
+        for _ in 0..40 {
+            a.handle(&Event::Tick, &cx);
+        }
+        drop(a);
+        let b = BrowserApp::new(&cx);
+        assert_eq!(b.tabs.len(), 2, "both tabs are back");
+        assert_eq!(b.tab_url(0), "https://a.org/");
+        assert_eq!(b.tab_url(1), "https://b.org/x");
+        // closing a tab is remembered as well
+        let mut b = b;
+        b.close_tab(1);
+        for _ in 0..40 {
+            b.handle(&Event::Tick, &cx);
+        }
+        drop(b);
+        let c = BrowserApp::new(&cx);
+        assert_eq!(c.tabs.len(), 1);
+        assert!(!browser_groups::keep_open("about:blank") && !browser_groups::keep_open("file:///etc/passwd") && !browser_groups::keep_open(""));
+    }
 
     #[test]
     fn the_assistant_is_told_which_page_is_open_and_what_is_selected() {
@@ -6597,7 +6686,7 @@ mod tests {
         // the missing add-on: the exact words of the plan
         a.av.dismiss();
         a.av.offer("c.org", Need::Video, Addon::Absent);
-        assert_eq!(browser_av::bar_message(a.av.bar.as_ref().unwrap()), "This video needs the audio and video add-on. Install it (your click, downloaded from the vendor, LGPL, licence shown).");
+        assert_eq!(browser_av::bar_message(a.av.bar.as_ref().unwrap()), iyakki_agent::avaddon::BAR_NEEDS);
         // only the three words from the helper count
         a.offer_av("<script>", "d.org", &cx);
         a.offer_av("both", "", &cx);
@@ -7888,6 +7977,69 @@ mod tests {
         pump(&mut a, &cx, "its picture", |a| a.full.as_ref().is_some_and(|f| f.pixmap().is_some_and(|p| p.pixel(300, 200).is_some_and(|c| c.red() == 255 && c.green() == 0 && c.blue() == 255))));
         let g = frame(&mut a, &cx, 1280, 720);
         assert_eq!(px(&g, view.x + 300.0, view.y + 200.0), [255, 0, 255, 255]);
+    }
+
+    /// The page fields the browser told the shell about in a fresh frame: `(focused, secret)`.
+    fn page_fields(a: &mut BrowserApp, cx: &AppCx) -> Vec<(bool, bool)> {
+        crate::ctxmenu::start_frame();
+        frame(a, cx, 1280, 720);
+        crate::ctxmenu::fields().iter().filter(|f| f.id == PAGE_FIELD).map(|f| (f.focused, f.secret)).collect()
+    }
+
+    /// A press and release in the page at (x, y) of the picture, as a finger or a mouse gives it.
+    fn tap_page(a: &mut BrowserApp, cx: &AppCx, x: f32, y: f32) {
+        a.handle(&Event::AreaAt(AREA_FULL, x, y), cx);
+        let v = a.view_rect;
+        a.handle(&Event::MouseUp((v.x + x) as i32, (v.y + y) as i32), cx);
+    }
+
+    #[test]
+    fn a_text_box_with_the_focus_in_the_page_is_told_to_the_shell_like_a_text_field_and_a_blur_takes_it_back() {
+        let (_fake, cx, mut a, _g) = in_full("full_textfocus", "--static");
+        assert!(page_fields(&mut a, &cx).is_empty(), "nothing is focused in the page");
+        // the fake's top-left 100x100 is a text box: a tap focuses it, the browser asks the page and then says so
+        tap_page(&mut a, &cx, 50.0, 50.0);
+        pump(&mut a, &cx, "the text box found", |a| a.full.as_ref().is_some_and(|f| f.text_focus == TextFocus::Text));
+        assert_eq!(page_fields(&mut a, &cx), vec![(true, false)]);
+        // the keys of the on-screen keyboard are the shell's Key events: they reach the page like a physical key
+        key(&mut a, &cx, Key::Char('x'));
+        pump(&mut a, &cx, "the key at the page", |a| a.full.as_ref().is_some_and(|f| f.log.iter().any(|l| l.contains("Key {") && l.contains("120"))));
+        // a tap on something that is not a text box: the focus is gone, no field
+        tap_page(&mut a, &cx, 400.0, 300.0);
+        pump(&mut a, &cx, "the blur found", |a| a.full.as_ref().is_some_and(|f| f.text_focus == TextFocus::None));
+        assert!(page_fields(&mut a, &cx).is_empty());
+    }
+
+    #[test]
+    fn the_menu_over_a_page_offers_cut_copy_paste_and_select_all_while_the_page_has_the_keys() {
+        let (_fake, cx, mut a, _g) = in_full("full_ctx_edit", "--static");
+        tap_page(&mut a, &cx, 50.0, 50.0);
+        pump(&mut a, &cx, "the text box found", |a| a.full.as_ref().is_some_and(|f| f.text_focus == TextFocus::Text));
+        let v = a.view_rect;
+        let ids = |a: &mut BrowserApp, x: i32, y: i32| a.context_items(x, y).into_iter().map(|i| i.id.to_string()).collect::<Vec<_>>();
+        let over = ids(&mut a, (v.x + 50.0) as i32, (v.y + 50.0) as i32);
+        for want in ["cut", "copy", "paste", "selall"] {
+            assert!(over.iter().any(|i| i == want), "{want} is offered over the page: {over:?}");
+        }
+        assert!(over.iter().any(|i| i == "reload"), "the page entries stay");
+        // the address bar has the keyboard: the shell's own field entries apply there, not the page's
+        key(&mut a, &cx, Key::Ctrl('l'));
+        let bar = ids(&mut a, (v.x + 50.0) as i32, (v.y + 50.0) as i32);
+        assert!(!bar.iter().any(|i| i == "paste"), "{bar:?}");
+        // outside the page area (a tab, the toolbar) nothing is added
+        key(&mut a, &cx, Key::Esc);
+        let outside = ids(&mut a, 5, 5);
+        assert!(!outside.iter().any(|i| i == "paste"), "{outside:?}");
+    }
+
+    #[test]
+    fn a_password_box_in_the_page_is_a_secret_field_and_the_address_bar_takes_the_keyboard_from_the_page() {
+        let (_fake, cx, mut a, _g) = in_full("full_passfocus", "--static");
+        tap_page(&mut a, &cx, 150.0, 50.0);
+        pump(&mut a, &cx, "the password box found", |a| a.full.as_ref().is_some_and(|f| f.text_focus == TextFocus::Password));
+        assert_eq!(page_fields(&mut a, &cx), vec![(true, true)], "a password box is a secret field");
+        key(&mut a, &cx, Key::Ctrl('l'));
+        assert!(page_fields(&mut a, &cx).is_empty(), "the address bar has the keys: the page's box is not the field");
     }
 
     #[test]

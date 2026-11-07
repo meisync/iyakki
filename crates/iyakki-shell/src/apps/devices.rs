@@ -98,6 +98,12 @@ pub enum Target {
     /// Settings -> Sound: mix the sound of several apps (the IYAKKI mixer, experimental).
     SoundMixer,
     SoundWebMix,
+    /// Settings -> Sound, Microphone: one input (its ALSA device, `plughw:2,0`; empty: Automatic).
+    SoundMic(String),
+    /// Settings -> Sound, Microphone: listen for three seconds and say how loud it was.
+    SoundMicTest,
+    /// The Mac's built-in (T2) microphone: allow or forbid it (a risk card first).
+    SoundT2Mic,
     /// Advanced: the highlight timing offset of read-aloud words, ms (-500..500).
     SoundHighlightOffset,
     /// Power a Bluetooth controller (by index) on (`true`) or off.
@@ -108,6 +114,14 @@ pub enum Target {
     BtLoad,
     /// The controller exists but has no firmware: opens Store -> Setup on the Mac firmware card (the shell is asked through [`DevicesPane::take_request`]).
     BtFirmware,
+}
+
+impl Target {
+    /// A row that is a choice (an input, an output) or a harmless switch: a click or a touch does what Enter does, so the page is not
+    /// keyboard-only. Rows that change the machine's connections stay select-then-press, as before.
+    pub fn activates_on_click(&self) -> bool {
+        matches!(self, Target::SoundChoice | Target::SoundOut(..) | Target::SoundMic(_) | Target::SoundMicTest | Target::SoundT2Mic | Target::SoundAdvanced)
+    }
 }
 
 /// A value the row can show as a slider.
@@ -189,6 +203,9 @@ struct Snapshot {
     bt_held: bool,
     /// A MacBookPro13,x/14,x or iMac whose CS8409 codec has no driver (`iyakki_drivers::cs8409`): the line to show.
     cs8409: Option<String>,
+    /// The microphones (capture devices) and whether a T2 sound card's microphones are hidden on purpose.
+    mics: Vec<iyakki_agent::voicedesk::Mic>,
+    mic_t2: iyakki_agent::voicedesk::T2Mic,
 }
 
 /// A scan for Bluetooth devices: running in the background, or its last result.
@@ -212,6 +229,8 @@ pub struct DevicesPane {
     mac: iyakki_devctl::mac::MacEnv,
     /// Settings -> Sound (output choice, IYAKKI's volume), given by the Settings app.
     sound: iyakki_agent::audioout::SoundSettings,
+    /// The microphone the person chose (`VoiceSettings::mic`; empty: Automatic).
+    mic_choice: String,
     /// The Advanced rows of the Sound page are shown.
     advanced: bool,
     /// An app the shell should open next (Bluetooth firmware -> Store, Setup): taken by [`DevicesPane::take_request`].
@@ -224,7 +243,12 @@ impl DevicesPane {
         let mac = iyakki_devctl::mac::MacEnv { roots: env.roots.clone(), ..iyakki_devctl::mac::MacEnv::nowhere(env.ctl.clone()) };
         #[cfg(not(test))]
         let mac = iyakki_devctl::mac::MacEnv { ctl: env.ctl.clone(), roots: env.roots.clone(), ..iyakki_devctl::mac::MacEnv::real() };
-        DevicesPane { env, snap: None, at: 0, mac, sound: Default::default(), scan: Default::default(), advanced: false, request: None }
+        DevicesPane { env, snap: None, at: 0, mac, sound: Default::default(), mic_choice: String::new(), scan: Default::default(), advanced: false, request: None }
+    }
+
+    /// The microphone the person chose, so the Sound page can show it (the page tells the pane before drawing).
+    pub fn set_mic_choice(&mut self, id: String) {
+        self.mic_choice = id;
     }
 
     /// What Settings -> Sound says now (the rows show the choice and the volume).
@@ -299,7 +323,7 @@ impl DevicesPane {
         let (bt_chip, bt_fw, bt_held) = (iyakki_agent::macfw::uart_chip(product.trim()), self.env.ctl.bt_firmware_file(), self.env.ctl.bt_held());
         let bt_needs_fw = needs_bt_firmware(product.trim(), &btc, bt_fw);
         let cs8409 = iyakki_drivers::cs8409::missing_line(&iyakki_drivers::cs8409::Roots { proc_: r.proc_.clone(), sys: r.sys.clone(), lib_modules: "/lib/modules".into() });
-        self.snap = Some(Snapshot { links: iyakki_devctl::links(r), ips: self.env.ctl.ipv4(), rfkill: iyakki_devctl::rfkill_list(r), bt, screen: iyakki_devctl::screen(r), cards: cards.collect(), outputs, soft_card, mix_channels, starting, hw_ignored, busy, mac, btc, bt_chip, bt_fw, bt_needs_fw, bt_held, cs8409 });
+        self.snap = Some(Snapshot { links: iyakki_devctl::links(r), ips: self.env.ctl.ipv4(), rfkill: iyakki_devctl::rfkill_list(r), bt, screen: iyakki_devctl::screen(r), cards: cards.collect(), outputs, soft_card, mix_channels, starting, hw_ignored, busy, mac, btc, bt_chip, bt_fw, bt_needs_fw, bt_held, cs8409, mics: iyakki_agent::voicedesk::list_mics(&r.proc_), mic_t2: iyakki_agent::voicedesk::t2_mic(&r.proc_) });
         self.at = tick;
     }
 
@@ -313,6 +337,7 @@ impl DevicesPane {
     pub fn rows(&mut self, tab: DevTab, tick: u64) -> Vec<DevRow> {
         let host = self.mac.host_managed;
         let sound = self.sound.clone();
+        let mic_choice = self.mic_choice.clone();
         let advanced = self.advanced;
         let scan = self.scan.lock().map(|g| g.clone()).unwrap_or_default();
         let s = self.snap(tick);
@@ -320,7 +345,7 @@ impl DevicesPane {
             DevTab::Network => network_rows(s, host),
             DevTab::Bluetooth => bluetooth_rows(s, &scan),
             DevTab::Display => display_rows(s),
-            DevTab::Sound => sound_rows(s, &sound, advanced),
+            DevTab::Sound => sound_rows(s, &sound, advanced, &mic_choice),
         }
     }
 
@@ -699,7 +724,7 @@ fn display_rows(s: &Snapshot) -> Vec<DevRow> {
     rows
 }
 
-fn sound_rows(s: &Snapshot, prefs: &iyakki_agent::audioout::SoundSettings, advanced: bool) -> Vec<DevRow> {
+fn sound_rows(s: &Snapshot, prefs: &iyakki_agent::audioout::SoundSettings, advanced: bool, mic_choice: &str) -> Vec<DevRow> {
     use iyakki_agent::audioout::{choose, Kind};
     if s.cards.is_empty() && s.outputs.is_empty() {
         if let Some(line) = &s.starting {
@@ -760,9 +785,54 @@ fn sound_rows(s: &Snapshot, prefs: &iyakki_agent::audioout::SoundSettings, advan
         rows.push(card_row(c, v.as_ref(), s.soft_card.or(s.hw_ignored), s.hw_ignored, prefs));
     }
     rows.extend(mixer_rows(prefs, iyakki_agent::mixer::stats_if_enabled().as_ref()));
+    rows.extend(mic_rows(&s.mics, mic_choice, s.mic_t2));
     advanced_sound_rows(s, prefs, &choice, advanced, &mut rows);
     rows
 }
+
+/// The Microphone part of the Sound page: which input is used and why, every input with the one in use marked, the Test row, and (when none was
+/// found) what to plug in. The same choice (`VoiceSettings::mic`) serves dictation and the web pages in the Browser.
+pub fn mic_rows(mics: &[iyakki_agent::voicedesk::Mic], chosen: &str, t2: iyakki_agent::voicedesk::T2Mic) -> Vec<DevRow> {
+    let t2_hidden = t2 == iyakki_agent::voicedesk::T2Mic::Off;
+    let picked = iyakki_agent::voicedesk::pick_mic(mics, chosen);
+    let mut rows = Vec::new();
+    let (sub, chip): (String, (&str, _)) = match picked {
+        Some(m) if !chosen.is_empty() && m.id == chosen => (format!("recording from {} ({})", m.label, m.id), ("CHOSEN", OK)),
+        Some(m) if !chosen.is_empty() => (format!("the chosen microphone is missing: recording from {} ({}) instead", m.label, m.id), ("AUTO", WARN)),
+        Some(m) => (format!("Automatic: recording from {} ({})", m.label, m.id), ("AUTO", OK)),
+        None => (
+            if t2_hidden { "no microphone found: the Mac's built-in microphones are hidden on purpose (they listen all the time). Plug in a USB microphone or a camera with one." } else { "no microphone found: plug in a USB microphone or a camera that has one." }.to_string(),
+            ("NO MIC", WARN),
+        ),
+    };
+    rows.push(DevRow::new("Microphone", sub, Target::SoundMic(String::new())).chip(chip.0, chip.1));
+    for m in mics {
+        let used = picked.is_some_and(|p| p.id == m.id);
+        let mut r = DevRow::new(m.label.clone(), format!("{}{}", m.id, if m.usb { " · USB" } else { "" }), Target::SoundMic(m.id.clone()));
+        if used {
+            r = r.chip("IN USE", OK);
+        }
+        rows.push(r);
+    }
+    if t2 != iyakki_agent::voicedesk::T2Mic::Absent {
+        let on = t2 == iyakki_agent::voicedesk::T2Mic::On;
+        rows.push(
+            DevRow::new(
+                T2_MIC_TITLE,
+                if on { "The Mac's own microphone is allowed until the next restart. Press Enter to forbid it again. If the Mac freezes while you record, restart it: it comes back with this off." } else { T2_MIC_HELP },
+                Target::SoundT2Mic,
+            )
+            .chip(if on { "on" } else { "off" }, if on { WARN } else { DIM }),
+        );
+    }
+    if picked.is_some() {
+        rows.push(DevRow::new("Test microphone", "Press Enter or r, then speak for three seconds: it says how loud it was. A very low number means the microphone is muted or too quiet.", Target::SoundMicTest));
+    }
+    rows
+}
+
+pub const T2_MIC_TITLE: &str = "Use the Mac's built-in microphone (experimental)";
+pub const T2_MIC_HELP: &str = "Off: the T2 chip's sound driver can freeze the whole Mac when it records, so the built-in microphones are hidden. Press Enter to allow them until the next restart (it asks first). A USB microphone or a camera with one needs none of this.";
 
 /// What the Sound page says about the experimental mixer: its switch with the explanation and, when it is on, a live status line.
 pub const MIXER_TITLE: &str = "Mix sounds from several apps (experimental)";
@@ -843,6 +913,40 @@ fn card_row(c: &iyakki_devctl::Card, v: Option<&iyakki_devctl::Volume>, soft_car
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mic(id: &str, label: &str, usb: bool) -> iyakki_agent::voicedesk::Mic {
+        iyakki_agent::voicedesk::Mic { id: id.into(), label: label.into(), usb }
+    }
+
+    #[test]
+    fn the_microphone_section_says_which_input_is_used_and_why_and_what_to_do_when_there_is_none() {
+        let cam = mic("plughw:2,0", "EMEET SmartCam Nova 4K (USB)", true);
+        let desk = mic("plughw:3,0", "USB Audio (USB)", true);
+        // Automatic: the first one, marked AUTO, with the Test row
+        let rows = mic_rows(&[cam.clone(), desk.clone()], "", iyakki_agent::voicedesk::T2Mic::Absent);
+        assert_eq!(rows[0].title, "Microphone");
+        assert!(rows[0].sub.contains("Automatic") && rows[0].sub.contains("EMEET") && rows[0].chips.iter().any(|c| c.0 == "AUTO"), "{:?}", rows[0]);
+        assert!(rows.iter().any(|r| r.target == Target::SoundMicTest), "a Test row when there is a microphone");
+        let used: Vec<&str> = rows.iter().filter(|r| r.chips.iter().any(|c| c.0 == "IN USE")).map(|r| r.title.as_str()).collect();
+        assert_eq!(used, vec!["EMEET SmartCam Nova 4K (USB)"], "exactly one input is marked in use");
+        // a choice that is there
+        let rows = mic_rows(&[cam.clone(), desk.clone()], "plughw:3,0", iyakki_agent::voicedesk::T2Mic::Absent);
+        assert!(rows[0].chips.iter().any(|c| c.0 == "CHOSEN") && rows[0].sub.contains("USB Audio"), "{:?}", rows[0]);
+        assert!(rows.iter().any(|r| r.target == Target::SoundMic("plughw:3,0".into()) && r.chips.iter().any(|c| c.0 == "IN USE")));
+        // a choice that was unplugged: said, and the first one is used instead
+        let rows = mic_rows(&[cam], "plughw:9,0", iyakki_agent::voicedesk::T2Mic::Absent);
+        assert!(rows[0].sub.contains("missing") && rows[0].chips.iter().any(|c| c.0 == "AUTO"), "{:?}", rows[0]);
+        // none at all: what to plug in; no Test row; the T2 reason when the built-in microphones are hidden
+        let rows = mic_rows(&[], "", iyakki_agent::voicedesk::T2Mic::Absent);
+        assert!(rows[0].sub.contains("plug in") && rows[0].chips.iter().any(|c| c.0 == "NO MIC") && rows.iter().all(|r| r.target != Target::SoundMicTest), "{:?}", rows[0]);
+        assert!(mic_rows(&[], "", iyakki_agent::voicedesk::T2Mic::Off)[0].sub.contains("hidden on purpose"));
+        // the switch for the Mac's own microphone: only where a T2 sound chip is, off or on, never on a PC
+        use iyakki_agent::voicedesk::T2Mic;
+        let sw = |t2| mic_rows(&[], "", t2).into_iter().find(|r| r.target == Target::SoundT2Mic);
+        assert!(sw(T2Mic::Absent).is_none());
+        assert!(sw(T2Mic::Off).is_some_and(|r| r.chips.iter().any(|c| c.0 == "off") && r.sub.contains("freeze")));
+        assert!(sw(T2Mic::On).is_some_and(|r| r.chips.iter().any(|c| c.0 == "on")));
+    }
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
@@ -1060,7 +1164,7 @@ mod tests {
         *fake.volume.lock().unwrap() = Some(iyakki_devctl::Volume { control: "Master".into(), percent: 50, muted: false });
         let (mut p, _, fake) = pane("snd", true, fake);
         let rows = p.rows(DevTab::Sound, 0);
-        assert_eq!(rows.len(), 8, "the output, IYAKKI's volume, the card, the mixer switch, the browser mixer switch, its status, the mixer status (the mixer is on by default), the Advanced switch: {rows:?}");
+        assert_eq!(rows.len(), 9, "the output, IYAKKI's volume, the card, the mixer switch, the browser mixer switch, its status, the mixer status (the mixer is on by default), the Microphone row (no microphone in the test machine), the Advanced switch: {rows:?}");
         let c = rows.iter().position(|r| matches!(r.target, Target::Card(0))).unwrap();
         assert!(rows[c].title.contains("HDA Intel PCH") && rows[c].chips[0].0 == "50%");
         assert_eq!(p.act(DevTab::Sound, c, &Key::Char('+'), 0).unwrap().result.unwrap(), "Volume 55%.");

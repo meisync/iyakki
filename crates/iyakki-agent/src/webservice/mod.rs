@@ -12,15 +12,24 @@
 pub mod auth;
 pub mod config;
 pub mod deps;
+pub mod embed;
+mod events;
+mod notifyapi;
 mod files;
+mod flowruns;
+mod gitread;
 mod handlers;
+mod schedules;
 pub mod openapi;
 pub mod real;
 pub mod routes;
 pub mod runs;
 pub mod server;
+pub mod tenants;
+mod tenantcfg;
 pub mod tls;
 pub mod tools;
+pub mod ui;
 
 #[cfg(test)]
 mod tests;
@@ -110,6 +119,7 @@ pub fn run(chk: &config::Checked, deps: std::sync::Arc<deps::Deps>, opener: &dyn
     use std::sync::atomic::Ordering;
     let reg = crate::startup::global();
     reg.starting("service", "starting");
+    let (extras, auth, audit) = (deps.extras.clone(), deps.auth.clone(), deps.audit.clone());
     let started = (|| {
         let identity = if chk.cfg.tls.cert.is_empty() {
             let host = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()).unwrap_or_default();
@@ -138,9 +148,16 @@ pub fn run(chk: &config::Checked, deps: std::sync::Arc<deps::Deps>, opener: &dyn
         }
     };
     reg.ready("service");
+    // the cloud profile also runs the tenant's schedules with nobody signed in (docs/development/CLOUD-FLOWS-PLAN.md)
+    let background = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if chk.profile.is_cloud() {
+        extras.background_start(auth, audit, background.clone());
+    }
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    background.store(true, Ordering::Relaxed);
+    extras.background_stop();
     svc.shutdown(std::time::Duration::from_secs(10));
     reg.stopped("service");
     Ok(())

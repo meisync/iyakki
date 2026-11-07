@@ -21,6 +21,8 @@ pub struct Session {
     pub csrf: String,
     pub created: Instant,
     pub last_seen: Instant,
+    /// The fingerprint of the device key that opened this session, when it was opened with one (revoking the key ends it).
+    pub via_key: Option<String>,
     /// The person's screen; whoever is connected holds the lock.
     pub screen: Arc<Mutex<Box<dyn Screen>>>,
 }
@@ -44,6 +46,11 @@ impl Sessions {
 
     /// Start a session; returns (cookie token, csrf token). Refuses when too many people are signed in.
     pub fn create(&self, user: &str, screen: Box<dyn Screen>) -> Result<(String, String), String> {
+        self.create_via(user, screen, None)
+    }
+
+    /// [`Sessions::create`] for a session opened with a device key (`via_key` is the key's fingerprint).
+    pub fn create_via(&self, user: &str, screen: Box<dyn Screen>, via_key: Option<String>) -> Result<(String, String), String> {
         let mut m = self.map.lock().map_err(|_| "busy".to_string())?;
         m.retain(|_, s| s.last_seen.elapsed() < IDLE);
         if m.len() >= MAX_SESSIONS {
@@ -51,7 +58,7 @@ impl Sessions {
         }
         let (token, csrf) = (random_token()?, random_token()?);
         let now = Instant::now();
-        m.insert(token.clone(), Session { user: user.into(), csrf: csrf.clone(), created: now, last_seen: now, screen: Arc::new(Mutex::new(screen)) });
+        m.insert(token.clone(), Session { user: user.into(), csrf: csrf.clone(), created: now, last_seen: now, via_key, screen: Arc::new(Mutex::new(screen)) });
         Ok((token, csrf))
     }
 
@@ -70,6 +77,14 @@ impl Sessions {
         if let Ok(mut m) = self.map.lock() {
             m.remove(token);
         }
+    }
+
+    /// End every session of `user` that a device key with this fingerprint opened; returns how many.
+    pub fn end_via_key(&self, user: &str, fingerprint: &str) -> usize {
+        let Ok(mut m) = self.map.lock() else { return 0 };
+        let before = m.len();
+        m.retain(|_, s| !(s.user == user && s.via_key.as_deref() == Some(fingerprint)));
+        before - m.len()
     }
 
     pub fn count(&self) -> usize {

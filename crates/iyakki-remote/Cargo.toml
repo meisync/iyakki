@@ -10,6 +10,8 @@ iyakki-shell = { path = "../iyakki-shell" }
 iyakki-agent.workspace = true
 iyakki-fw.workspace = true
 iyakki-sec.workspace = true
+iyakki-link.workspace = true
+iyakki-core-api.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
 sha2 = "0.10"
@@ -19,6 +21,7 @@ serde_json = "1"
 log.workspace = true
 
 [dev-dependencies]
+iyakki-core-fake.workspace = true
 iyakki-flow.workspace = true
 iyakki-web.workspace = true
 iyakki-sec.workspace = true

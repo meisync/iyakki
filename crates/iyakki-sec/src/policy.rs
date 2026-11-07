@@ -55,10 +55,14 @@ pub enum App {
     Checkup,
     /// Study plans and quizzes: a lesson schedule the chat writes, and quizzes the person takes and the code scores (`docs/STUDY.md`).
     Learn,
+    /// Twelve developer tools: JSON, JSON query, Base64, JWT, URL, hashes, UUID and time, regex, diff, converters, ping and a port checker.
+    DevTools,
+    /// One-time codes (an authenticator): TOTP codes in the person's own groups, kept in their own vault (`docs/AUTH.md`).
+    Auth,
 }
 
 impl App {
-    pub const ALL: [App; 35] = [App::Chat, App::Rag, App::Mcp, App::Cli, App::Users, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn];
+    pub const ALL: [App; 37] = [App::Chat, App::Rag, App::Mcp, App::Cli, App::Users, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -97,6 +101,8 @@ impl App {
             App::Doctor => "doctor",
             App::Checkup => "checkup",
             App::Learn => "learn",
+            App::DevTools => "devtools",
+            App::Auth => "auth",
         }
     }
 
@@ -109,6 +115,8 @@ impl App {
             App::Ide => "AI IDE".to_string(),
             App::LinuxWin => "LINUX WINDOW".to_string(),
             App::Checkup => "CHECK-UP".to_string(),
+            App::DevTools => "DEV TOOLS".to_string(),
+            App::Auth => "AUTH".to_string(),
             other => other.id().to_uppercase(),
         }
     }
@@ -347,7 +355,7 @@ impl Role {
                 browser_max_minutes: 20,
             },
             Role::Operator => Policy {
-                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn]),
+                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth]),
                 cli: CliLevel::Full,
                 fs_read: strs(&["{home}", "/shared"]),
                 fs_write: strs(&["{home}", "/shared"]),
@@ -370,7 +378,7 @@ impl Role {
                 browser_max_minutes: 20,
             },
             Role::User => Policy {
-                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Radio, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn]),
+                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Radio, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth]),
                 cli: CliLevel::Restricted,
                 fs_read: strs(&["{home}", "/shared"]),
                 fs_write: strs(&["{home}"]),

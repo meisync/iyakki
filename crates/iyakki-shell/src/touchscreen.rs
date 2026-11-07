@@ -26,6 +26,20 @@ const SLOP: i32 = 12;
 /// A finger that stays this long before it moves keeps the mouse meaning: the drag is a mouse drag (a slider, a text selection, a window).
 const LONG_PRESS: Duration = Duration::from_millis(450);
 
+/// A finger that stays this long without moving beyond the slop opens the context menu when it lifts, instead of clicking. The menu
+/// comes on release, not while the finger is still down: a still finger sends no events, so nothing would wake the code up at
+/// 600 ms, and a menu that pops up under the finger would be tapped by accident. Moving after the hold (from 450 ms on) is still the
+/// mouse drag, so a hold-drag selects text; only a hold that never moves ends in the menu.
+const MENU_HOLD: Duration = Duration::from_millis(600);
+
+/// Set when the last context menu was asked for by a finger, so the shell makes its entries big enough to tap.
+static MENU_BY_TOUCH: AtomicBool = AtomicBool::new(false);
+
+/// Whether the context menu about to open was asked for by a finger (read once per menu).
+pub fn take_touch_menu() -> bool {
+    MENU_BY_TOUCH.swap(false, Ordering::SeqCst)
+}
+
 /// Whether new [`Touches`] start with finger gestures on. The real backends turn it on once at start; the tests leave it off
 /// (a finger is then a plain mouse: press at once, move, release).
 static GESTURES_BY_DEFAULT: AtomicBool = AtomicBool::new(false);
@@ -122,11 +136,13 @@ impl Touches {
 
     pub fn feed(&mut self, r: Raw, dev: &TouchDev, target: Option<&OutRect>) -> TouchOut {
         let gestures = self.gestures;
+        iyakki_agent::touchrecover::note_event();
         let t = self.one(&dev.key);
         match r.typ {
             EV_ABS if dev.mt => match r.code {
                 ABS_MT_SLOT => t.slot = (r.value.max(0) as usize).min(SLOTS - 1),
                 ABS_MT_TRACKING_ID if r.value >= 0 => {
+                    iyakki_agent::touchprobe::note_finger();
                     let s = t.slot;
                     t.fingers[s].down = true;
                     t.begin(s, target);
@@ -147,6 +163,7 @@ impl Touches {
             },
             EV_KEY if !dev.mt && r.code == BTN_TOUCH => {
                 if r.value == 1 {
+                    iyakki_agent::touchprobe::note_finger();
                     t.fingers[0].down = true;
                     t.begin(0, target);
                 } else if r.value == 0 {
@@ -243,10 +260,16 @@ impl One {
             if self.latched.is_some() {
                 match self.mode {
                     Mode::Pending => {
-                        // a tap: the click is made now, where the finger landed
                         out.events.push(Event::MouseMove(self.start.0, self.start.1));
-                        out.events.push(Event::MouseDown(self.start.0, self.start.1));
-                        out.events.push(Event::MouseUp(self.start.0, self.start.1));
+                        if self.since.is_some_and(|t| t.elapsed() >= MENU_HOLD) {
+                            // a press held still: the right-click menu, and no click
+                            MENU_BY_TOUCH.store(true, Ordering::SeqCst);
+                            out.events.push(Event::MouseRight(self.start.0, self.start.1));
+                        } else {
+                            // a tap: the click is made now, where the finger landed
+                            out.events.push(Event::MouseDown(self.start.0, self.start.1));
+                            out.events.push(Event::MouseUp(self.start.0, self.start.1));
+                        }
                     }
                     Mode::Mouse => out.events.push(Event::MouseUp(self.last.0, self.last.1)),
                     Mode::Scroll | Mode::Idle => {}
@@ -402,6 +425,39 @@ mod tests {
         std::thread::sleep(LONG_PRESS + Duration::from_millis(60));
         slide(&mut t, 12000, 2000);
         assert!(matches!(t.gone(&dev().key).as_slice(), [Event::MouseUp(..)]));
+    }
+
+    #[test]
+    fn a_finger_held_still_opens_the_context_menu_on_release_and_does_not_click() {
+        let mut t = gestures();
+        land(&mut t, 16384, 16384);
+        std::thread::sleep(MENU_HOLD + Duration::from_millis(60));
+        assert!(slide(&mut t, 16390, 16390).is_empty(), "a wobble inside the slop changes nothing");
+        let up = lift(&mut t);
+        assert!(matches!(up.as_slice(), [Event::MouseMove(..), Event::MouseRight(x, y)] if (*x - 960).abs() <= 1 && (*y - 540).abs() <= 1), "{up:?}");
+        assert!(take_touch_menu() && !take_touch_menu(), "the shell is told once that a finger asked");
+        // the next touch is a plain tap again
+        land(&mut t, 100, 100);
+        assert!(matches!(lift(&mut t).as_slice(), [Event::MouseMove(..), Event::MouseDown(..), Event::MouseUp(..)]));
+    }
+
+    #[test]
+    fn a_hold_longer_than_the_drag_time_but_shorter_than_the_menu_time_still_clicks() {
+        let mut t = gestures();
+        land(&mut t, 16384, 16384);
+        std::thread::sleep(LONG_PRESS + Duration::from_millis(40));
+        assert_eq!(lift(&mut t).len(), 3);
+    }
+
+    #[test]
+    fn a_hold_then_a_move_is_a_drag_not_a_menu() {
+        let mut t = gestures();
+        land(&mut t, 2000, 2000);
+        std::thread::sleep(MENU_HOLD + Duration::from_millis(60));
+        let moved = slide(&mut t, 12000, 2000);
+        assert!(moved.iter().any(|e| matches!(e, Event::MouseDown(..))), "{moved:?}");
+        let up = lift(&mut t);
+        assert!(matches!(up.as_slice(), [Event::MouseUp(..)]), "{up:?}");
     }
 
     #[test]

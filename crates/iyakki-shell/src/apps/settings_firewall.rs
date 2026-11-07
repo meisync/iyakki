@@ -263,6 +263,15 @@ pub(super) fn share_blocked_note(port: u16) -> Option<String> {
 impl SettingsApp {
     /// The Shared folders page's "f": switch the Shared folders preset on (applied now, confirmed on the Firewall page).
     pub(super) fn fw_open_shares(&mut self, cx: &AppCx) {
+        self.fw_open_shares_impl(cx, true)
+    }
+
+    /// The same, answered "yes" to the card that came up when a share started: the person stays on the Shared folders page.
+    pub(super) fn fw_open_shares_here(&mut self, cx: &AppCx) {
+        self.fw_open_shares_impl(cx, false)
+    }
+
+    fn fw_open_shares_impl(&mut self, cx: &AppCx, go_to_firewall: bool) {
         if !self.admin(cx) {
             return;
         }
@@ -275,15 +284,29 @@ impl SettingsApp {
         }
         c.set_preset(Preset::SharedFolders, true);
         let user = cx.session.user.clone();
-        let r = self.fw.handle.lock().propose(c, &user);
+        let (r, kept) = self.propose_and_keep_if_only_opening(c, &user);
         match r {
             Ok(()) => {
                 cx.audit.record(&user, "firewall.preset", "shares on, from Shared folders");
-                self.open_item("tab:firewall", cx);
-                self.ok("Opened the firewall for shared folders. Press k within 60 seconds to keep it, or v to go back.");
+                if go_to_firewall {
+                    self.open_item("tab:firewall", cx);
+                }
+                self.ok(if kept { "Opened the firewall for shared folders. It stays open until you close it." } else { "Opened the firewall for shared folders. Press k within 60 seconds to keep it, or v to go back." });
             }
             Err(e) => self.fail(format!("Not applied: {e}")),
         }
+    }
+
+    /// Apply `c`; when it only lets more in (nothing can lock the person out) and no earlier change was waiting for Keep, keep it at once, so it does not
+    /// disappear after 60 seconds. Anything that tightens keeps the confirmation. Returns the result and whether it was kept.
+    pub(super) fn propose_and_keep_if_only_opening(&self, c: Config, user: &str) -> (Result<(), String>, bool) {
+        let mut e = self.fw.handle.lock();
+        let before = e.config().clone();
+        let waiting = matches!(e.status(), Status::Pending { .. });
+        let opens = !waiting && c.only_opens_from(&before);
+        let r = e.propose(c, user);
+        let kept = r.is_ok() && opens && matches!(e.status(), Status::Pending { .. }) && e.keep(user).is_ok();
+        (r, kept)
     }
 
     pub(super) fn fw_base(&self) -> Config {
@@ -327,7 +350,11 @@ impl SettingsApp {
             v.insert(0, ("Revert", ERR, 'v'));
             v.insert(0, ("Keep", OK, 'k'));
         }
-        // u discard, r look names up, c copy, i import and b clear the log are keys only (the hint line lists them)
+        // discard, look names up, copy, import and clear the log have keys too (the hint line lists them) and buttons for touch
+        if self.fw.draft.is_some() {
+            v.push(("Discard", TEXT, 'u'));
+        }
+        v.extend([("Look up names", TEXT, 'r'), ("Copy rules", TEXT, 'c'), ("Import", TEXT, 'i'), ("Clear log", TEXT, 'b')]);
         v.extend([("On/off", TEXT, 'o'), ("Disable now", ERR, 'z'), ("Simple view", TEXT, 'A')]);
         v
     }
@@ -411,11 +438,11 @@ impl SettingsApp {
             Key::Char('y') => match self.fw.draft.clone() {
                 None => self.fail("There is nothing to apply: the rules in force are what you see."),
                 Some(c) => {
-                    let r = self.fw.handle.lock().propose(c, &user);
+                    let (r, kept) = self.propose_and_keep_if_only_opening(c, &user);
                     match r {
                         Ok(()) => {
                             self.fw.draft = None;
-                            cx.audit.record(&user, "firewall.apply", "from Settings");
+                            cx.audit.record(&user, if kept { "firewall.keep" } else { "firewall.apply" }, if kept { "from Settings: only opens, kept at once" } else { "from Settings" });
                             let st = self.fw.handle.lock().status();
                             self.ok(if matches!(st, Status::Pending { .. }) { "Applied. Press k within 60 seconds to keep these rules, or v to go back. If nothing is pressed they are taken back." } else { "Applied." });
                         }

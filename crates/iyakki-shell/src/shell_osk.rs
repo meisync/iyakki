@@ -31,6 +31,7 @@ impl Shell {
     pub(super) fn draw_osk(&mut self, g: &mut Gfx, w: u32, h: u32, s: f32) {
         let focus = self.osk_focus();
         let show = self.osk.update(focus);
+        crate::osk::set_touch_mode(self.osk.touch);
         let (wf, hf) = (w as f32, h as f32);
         if !show {
             self.osk.set_frame(None, Vec::new());
@@ -77,6 +78,7 @@ impl Shell {
             Event::MouseDown(x, y) => {
                 if crate::osk::take_touch() {
                     self.osk.touched(self.tick);
+                    crate::osk::set_touch_mode(true);
                     self.stale = true;
                 }
                 if let Some(b) = self.osk.button {
@@ -107,6 +109,7 @@ impl Shell {
             }
             Event::Key(_) if !self.osk.typing => {
                 self.osk.physical_key(self.tick);
+                crate::osk::set_touch_mode(self.osk.touch);
                 false
             }
             _ => false,

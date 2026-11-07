@@ -11,7 +11,26 @@ class H(http.server.SimpleHTTPRequestHandler):
         if p.path == "/report":
             log.write("REPORT " + urllib.parse.unquote(p.query) + "\n"); log.flush()
             self.send_response(204); self.end_headers(); return
-        log.write("GET " + self.path + "\n"); log.flush()
+        log.write("GET " + self.path + (" " + self.headers["Range"] if self.headers.get("Range") else "") + "\n"); log.flush()
+        # byte ranges: the engine's GStreamer HTTP source asks for them and treats a plain 200 as an error (mp4 files)
+        rng = self.headers.get("Range")
+        fs = self.translate_path(self.path)
+        if rng and rng.startswith("bytes=") and os.path.isfile(fs):
+            size = os.path.getsize(fs)
+            a, _, b = rng[6:].partition("-")
+            try:
+                start = int(a) if a else max(0, size - int(b)); end = int(b) if (a and b) else size - 1
+            except ValueError:
+                start, end = 0, size - 1
+            end = min(end, size - 1)
+            if start > end:
+                self.send_response(416); self.send_header("Content-Range", "bytes */%d" % size); self.end_headers(); return
+            self.send_response(206)
+            self.send_header("Content-Type", self.guess_type(fs)); self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size)); self.send_header("Content-Length", str(end - start + 1)); self.end_headers()
+            with open(fs, "rb") as f:
+                f.seek(start); self.wfile.write(f.read(end - start + 1))
+            return
         super().do_GET()
     def log_message(self, *a): pass
 http.server.ThreadingHTTPServer(("0.0.0.0", port), H).serve_forever()

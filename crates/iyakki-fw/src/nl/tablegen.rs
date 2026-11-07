@@ -17,9 +17,13 @@ const NFT_MSG_GETTABLE: u16 = 1;
 const NFT_MSG_NEWSET: u16 = 9;
 const NFT_MSG_NEWSETELEM: u16 = 12;
 const NFT_MSG_DELSETELEM: u16 = 14;
+const NF_INET_LOCAL_IN: u32 = 1;
+const NF_INET_FORWARD: u32 = 2;
 const NF_INET_LOCAL_OUT: u32 = 3;
+const NF_INET_POST_ROUTING: u32 = 4;
 const NFT_RETURN: i32 = -5;
 const META_OIFNAME: u32 = 7;
+const CT_KEY_STATE: u32 = 0;
 const META_MARK: u32 = 3;
 const NFT_SET_TIMEOUT: u32 = 0x10;
 /// `ipaddr` / `ip6addr` in nft's data type table (a hint for listings; the kernel keeps it).
@@ -36,6 +40,30 @@ pub enum ChainKind {
     Nat,
 }
 
+/// Where a chain hooks in. Output is the default (the VPN guard); the others are for the internet-sharing table.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Hook {
+    #[default]
+    Output,
+    Input,
+    Forward,
+    Postrouting,
+}
+
+impl Hook {
+    fn number(self) -> u32 {
+        match self {
+            Hook::Input => NF_INET_LOCAL_IN,
+            Hook::Forward => NF_INET_FORWARD,
+            Hook::Output => NF_INET_LOCAL_OUT,
+            Hook::Postrouting => NF_INET_POST_ROUTING,
+        }
+    }
+}
+
+/// `ct state` bits: established and related (replies), as nftables numbers them.
+pub const CT_ESTABLISHED_RELATED: u32 = 0x2 | 0x4;
+
 /// An interface name, exact or by prefix (`cni*`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IfName {
@@ -48,6 +76,15 @@ pub enum IfName {
 pub enum Expr {
     OifIs(IfName),
     OifNot(IfName),
+    /// The interface the packet came in on (input, forward, postrouting chains).
+    IifIs(IfName),
+    IifNot(IfName),
+    /// Connection tracking state is any of these bits ([`CT_ESTABLISHED_RELATED`]).
+    CtState(u32),
+    /// Source in this network (IPv4 or IPv6, `prefix` bits).
+    Saddr(IpAddr, u8),
+    /// Nat chains on the postrouting hook only: masquerade as the outgoing interface's address.
+    Masquerade,
     /// Destination in this network (`prefix` bits).
     Daddr(IpAddr, u8),
     /// Destination is a member of the named set of the table (family decides the address type).
@@ -79,7 +116,9 @@ pub struct SetSpec {
 pub struct ChainSpec {
     pub name: String,
     pub kind: ChainKind,
-    /// On the OUTPUT hook.
+    /// The hook (OUTPUT unless said otherwise) and the priority on it.
+    #[serde(default)]
+    pub hook: Hook,
     pub priority: i32,
     pub policy_accept: bool,
     pub rules: Vec<Vec<Expr>>,
@@ -133,20 +172,26 @@ impl TableSpec {
 
     fn check_rule(&self, c: &ChainSpec, r: &[Expr]) -> Result<(), String> {
         let last = r.last().ok_or("an empty rule")?;
-        let ends = |e: &Expr| matches!(e, Expr::Accept | Expr::Drop | Expr::Return | Expr::RedirectPort(_));
+        let ends = |e: &Expr| matches!(e, Expr::Accept | Expr::Drop | Expr::Return | Expr::RedirectPort(_) | Expr::Masquerade);
         if !ends(last) || r[..r.len() - 1].iter().any(ends) {
             return Err("a rule must end in exactly one verdict or redirect".into());
         }
         let mut l4: Option<u8> = None;
         for e in r {
             match e {
-                Expr::OifIs(i) | Expr::OifNot(i) => {
+                Expr::OifIs(i) | Expr::OifNot(i) | Expr::IifIs(i) | Expr::IifNot(i) => {
                     let (IfName::Exact(n) | IfName::Prefix(n)) = i;
                     if !name_ok(n, 15) {
                         return Err("not a valid interface name".into());
                     }
                 }
-                Expr::Daddr(ip, p) => {
+                Expr::Masquerade => {
+                    if c.kind != ChainKind::Nat || c.hook != Hook::Postrouting {
+                        return Err("masquerade only works in a nat chain on the postrouting hook".into());
+                    }
+                }
+                Expr::CtState(0) => return Err("an empty connection state".into()),
+                Expr::Daddr(ip, p) | Expr::Saddr(ip, p) => {
                     if u32::from(*p) > if ip.is_ipv4() { 32 } else { 128 } {
                         return Err("prefix too long".into());
                     }
@@ -181,8 +226,8 @@ fn masked(ip: &IpAddr, prefix: u8) -> Vec<u8> {
     b.iter().zip(m).map(|(x, m)| x & m).collect()
 }
 
-fn ifname_cmp(buf: &mut Vec<u8>, op: u32, n: &IfName) {
-    meta_load(buf, META_OIFNAME);
+fn ifname_cmp(buf: &mut Vec<u8>, key: u32, op: u32, n: &IfName) {
+    meta_load(buf, key);
     match n {
         IfName::Exact(s) => {
             let mut d = cstr(s);
@@ -200,8 +245,31 @@ fn nfproto(buf: &mut Vec<u8>, v4: bool) {
 
 fn encode_expr(buf: &mut Vec<u8>, e: &Expr, sets: &[SetSpec], l4: &mut u8) {
     match e {
-        Expr::OifIs(n) => ifname_cmp(buf, CMP_EQ, n),
-        Expr::OifNot(n) => ifname_cmp(buf, CMP_NEQ, n),
+        Expr::OifIs(n) => ifname_cmp(buf, META_OIFNAME, CMP_EQ, n),
+        Expr::OifNot(n) => ifname_cmp(buf, META_OIFNAME, CMP_NEQ, n),
+        Expr::IifIs(n) => ifname_cmp(buf, META_IIFNAME, CMP_EQ, n),
+        Expr::IifNot(n) => ifname_cmp(buf, META_IIFNAME, CMP_NEQ, n),
+        Expr::CtState(mask) => {
+            expr(buf, "ct", |b| {
+                attr(b, 1, &be32(REG1)); // DREG
+                attr(b, 2, &be32(CT_KEY_STATE)); // KEY
+            });
+            bitwise(buf, &mask.to_ne_bytes());
+            cmp(buf, CMP_NEQ, &[0, 0, 0, 0]);
+        }
+        Expr::Saddr(ip, prefix) => {
+            nfproto(buf, ip.is_ipv4());
+            if *prefix == 0 {
+                return;
+            }
+            let (off, len) = if ip.is_ipv4() { (12, 4) } else { (8, 16) };
+            payload_load(buf, PAYLOAD_NETWORK, off, len);
+            if usize::from(*prefix) < len as usize * 8 {
+                bitwise(buf, &mask_bytes(*prefix, len as usize));
+            }
+            cmp(buf, CMP_EQ, &masked(ip, *prefix));
+        }
+        Expr::Masquerade => expr(buf, "masq", |_| {}),
         Expr::Daddr(ip, prefix) => {
             nfproto(buf, ip.is_ipv4());
             if *prefix == 0 {
@@ -318,7 +386,7 @@ pub fn encode_apply(spec: &TableSpec, seq0: u32) -> Result<(Vec<u8>, usize), Str
             attr(b, 1, &cstr(&spec.name));
             attr(b, 3, &cstr(&c.name));
             nest(b, 4, |h| {
-                attr(h, 1, &be32(NF_INET_LOCAL_OUT));
+                attr(h, 1, &be32(c.hook.number()));
                 attr(h, 2, &c.priority.to_be_bytes());
             });
             attr(b, 5, &be32(if c.policy_accept { NF_ACCEPT } else { NF_DROP } as u32));
@@ -393,7 +461,7 @@ mod tests {
             chains: vec![ChainSpec {
                 name: "output".into(),
                 kind: ChainKind::Filter,
-                priority: -10,
+                hook: Hook::Output, priority: -10,
                 policy_accept: true,
                 rules: vec![
                     vec![Expr::OifIs(IfName::Exact("lo".into())), Expr::Accept],
@@ -507,7 +575,7 @@ mod tests {
             chains: vec![ChainSpec {
                 name: "output".into(),
                 kind: ChainKind::Nat,
-                priority: -100,
+                hook: Hook::Output, priority: -100,
                 policy_accept: true,
                 rules: vec![vec![Expr::MarkIs(0x4956_0001), Expr::Return], vec![Expr::L4(17), Expr::Dport(53), Expr::RedirectPort(15353)], vec![Expr::L4(6), Expr::Dport(53), Expr::RedirectPort(15353)]],
             }],
@@ -576,5 +644,37 @@ mod tests {
         assert_eq!(acks, acks0 + 1);
         assert!(b.len() > b0.len());
         assert!(b.windows(4).any(|w| w == [192, 0, 2, 2]));
+    }
+
+    #[test]
+    fn input_forward_and_postrouting_chains_use_their_hooks_and_the_new_steps() {
+        let down = || IfName::Exact("enx0".into());
+        let spec = TableSpec {
+            name: "iyakki_share".into(),
+            sets: vec![],
+            chains: vec![
+                ChainSpec { name: "input".into(), kind: ChainKind::Filter, hook: Hook::Input, priority: -10, policy_accept: true, rules: vec![vec![Expr::IifIs(down()), Expr::L4(17), Expr::Dport(67), Expr::Accept]] },
+                ChainSpec { name: "forward".into(), kind: ChainKind::Filter, hook: Hook::Forward, priority: -10, policy_accept: true, rules: vec![vec![Expr::IifNot(down()), Expr::CtState(CT_ESTABLISHED_RELATED), Expr::Saddr("10.42.0.0".parse().unwrap(), 24), Expr::Accept]] },
+                ChainSpec { name: "post".into(), kind: ChainKind::Nat, hook: Hook::Postrouting, priority: 100, policy_accept: true, rules: vec![vec![Expr::OifIs(IfName::Exact("eth0".into())), Expr::Masquerade]] },
+            ],
+        };
+        let (b, acks) = encode_apply(&spec, 1).unwrap();
+        assert_eq!(acks, 3 + 3 + 3);
+        let m = msgs(&b);
+        let hooks: Vec<u32> = m.iter().filter(|(t, _)| t & 0xff == 3 && t >> 8 == 10).map(|(_, p)| {
+            let h = attrs(&p[4..]).into_iter().find(|(t, _)| *t & 0x7fff == 4).unwrap().1.to_vec();
+            u32::from_be_bytes(attrs(&h).into_iter().find(|(t, _)| *t == 1).unwrap().1.try_into().unwrap())
+        }).collect();
+        assert_eq!(hooks, [1, 2, 4]);
+        let rules: Vec<Vec<String>> = m.iter().filter(|(t, _)| t & 0xff == 6).map(|(_, p)| expr_names(p)).collect();
+        assert_eq!(rules[0], ["meta", "cmp", "meta", "cmp", "payload", "cmp", "immediate"]);
+        assert_eq!(rules[1], ["meta", "cmp", "ct", "bitwise", "cmp", "meta", "cmp", "payload", "bitwise", "cmp", "immediate"]);
+        assert_eq!(rules[2], ["meta", "cmp", "masq"]);
+        let mut e = b"enx0\0".to_vec();
+        e.resize(16, 0);
+        assert!(b.windows(16).any(|w| w == e.as_slice()));
+        let mut bad = spec.clone();
+        bad.chains[0].rules.push(vec![Expr::Masquerade]);
+        assert!(encode_apply(&bad, 1).is_err(), "masquerade outside the nat postrouting chain");
     }
 }

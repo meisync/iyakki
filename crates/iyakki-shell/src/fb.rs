@@ -67,6 +67,55 @@ struct FixInfo {
     reserved: [u16; 2],
 }
 
+/// Whether the pan in [`Framebuffer::scan_out`] is done (`always`, the default) or left out (`skip`): `iyakki.fbset=skip|always` on the
+/// kernel command line, to compare on a monitor whose USB hub drops while the boot screen goes up (KI-077).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FbSet {
+    Always,
+    Skip,
+}
+
+impl FbSet {
+    pub fn from_cmdline(cmdline: &str) -> FbSet {
+        cmdline.split_whitespace().filter_map(|w| w.strip_prefix("iyakki.fbset=")).last().map_or(FbSet::Always, |v| if v == "skip" { FbSet::Skip } else { FbSet::Always })
+    }
+
+    pub fn word(self) -> &'static str {
+        if self == FbSet::Skip { "skip" } else { "always" }
+    }
+}
+
+static FBSET_SKIP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Read `iyakki.fbset=` once (the splash and the shell both call it; the later call wins and is the same text).
+pub fn init_fbset_from_cmdline() -> FbSet {
+    let m = FbSet::from_cmdline(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default());
+    FBSET_SKIP.store(m == FbSet::Skip, std::sync::atomic::Ordering::Relaxed);
+    m
+}
+
+pub fn fbset() -> FbSet {
+    if FBSET_SKIP.load(std::sync::atomic::Ordering::Relaxed) { FbSet::Skip } else { FbSet::Always }
+}
+
+/// Whether the console must be put into graphics mode: only when it is not in it already (`KDGETMODE` answered 1 = `KD_GRAPHICS`).
+pub fn kd_set_needed(current: Option<i32>) -> bool {
+    current != Some(1)
+}
+
+/// Whether two readings of the screen settings differ in anything that makes a GPU driver set a mode again: size, virtual size,
+/// pixel format, timings. The pan offsets and the `activate`/`reserved` words do not count.
+fn mode_differs(a: &VarInfo, b: &VarInfo) -> bool {
+    let key = |v: &VarInfo| {
+        (
+            [v.xres, v.yres, v.xres_virtual, v.yres_virtual, v.bits_per_pixel, v.grayscale, v.nonstd, v.pixclock],
+            [v.left_margin, v.right_margin, v.upper_margin, v.lower_margin, v.hsync_len, v.vsync_len, v.sync, v.vmode, v.rotate, v.colorspace],
+            [v.red, v.green, v.blue, v.transp].map(|f| (f.offset, f.length, f.msb_right)),
+        )
+    };
+    key(a) != key(b)
+}
+
 const FBIOGET_VSCREENINFO: libc::c_ulong = 0x4600;
 const FBIOGET_FSCREENINFO: libc::c_ulong = 0x4602;
 /// `FBIOPAN_DISPLAY`, used only by [`Framebuffer::scan_out`], always with the offsets the screen already has.
@@ -623,6 +672,12 @@ impl Framebuffer {
     pub fn scan_out(&mut self) -> Result<(), String> {
         let Some(file) = self._file.as_ref() else { return Err("the screen is not ours right now".into()) };
         let fd = file.as_raw_fd();
+        if fbset() == FbSet::Skip {
+            log::info!("fb: FBIOPAN_DISPLAY skipped (iyakki.fbset=skip); the screen settings are not touched");
+            // SAFETY: fsync on our own open descriptor
+            unsafe { libc::fsync(fd) };
+            return Ok(());
+        }
         // SAFETY: fsync on our own open descriptor; drivers without a shadow buffer answer EINVAL, which is fine
         unsafe { libc::fsync(fd) };
         let mut var = VarInfo::default();
@@ -632,9 +687,13 @@ impl Framebuffer {
             if libc::ioctl(fd, FBIOGET_VSCREENINFO as _, &mut var as *mut VarInfo) < 0 {
                 return Err(format!("reading the screen settings failed ({})", std::io::Error::last_os_error()));
             }
+            let before = var;
             if libc::ioctl(fd, FBIOPAN_DISPLAY as _, &mut var as *mut VarInfo) < 0 {
                 return Err(format!("showing the framebuffer failed ({})", std::io::Error::last_os_error()));
             }
+            let mut after = VarInfo::default();
+            let reread = libc::ioctl(fd, FBIOGET_VSCREENINFO as _, &mut after as *mut VarInfo) >= 0;
+            log::info!("fb: FBIOPAN_DISPLAY done at offset {},{} (iyakki.fbset=always); mode fields {} by it", before.xoffset, before.yoffset, if reread && mode_differs(&before, &after) { "CHANGED" } else { "unchanged" });
         }
         Ok(())
     }
@@ -664,6 +723,30 @@ mod tests {
 
     const XRGB: PixelFormat = PixelFormat { bpp: 32, r: (16, 8), g: (8, 8), b: (0, 8) };
     const RGB565: PixelFormat = PixelFormat { bpp: 16, r: (11, 5), g: (5, 6), b: (0, 5) };
+
+    #[test]
+    fn the_fbset_option_and_the_skip_decisions_are_pure() {
+        assert_eq!(FbSet::from_cmdline("quiet iyakki.fbset=skip"), FbSet::Skip);
+        assert_eq!(FbSet::from_cmdline("iyakki.fbset=skip iyakki.fbset=always"), FbSet::Always);
+        assert_eq!(FbSet::from_cmdline("quiet"), FbSet::Always);
+        assert_eq!(FbSet::Skip.word(), "skip");
+        assert!(!kd_set_needed(Some(1)), "already graphics: no KDSETMODE");
+        assert!(kd_set_needed(Some(0)) && kd_set_needed(None));
+        let a = VarInfo { xres: 1920, yres: 1080, xres_virtual: 1920, yres_virtual: 1080, bits_per_pixel: 32, ..Default::default() };
+        let mut b = a;
+        b.xoffset = 0;
+        b.yoffset = 7;
+        b.activate = 128;
+        assert!(!mode_differs(&a, &b), "offsets and activate flags are not a mode");
+        b.bits_per_pixel = 16;
+        assert!(mode_differs(&a, &b));
+        let mut c = a;
+        c.red.length = 8;
+        assert!(mode_differs(&a, &c));
+        c = a;
+        c.pixclock = 6734;
+        assert!(mode_differs(&a, &c));
+    }
 
     #[test]
     fn a_released_screen_refuses_writes_and_can_be_released_twice() {

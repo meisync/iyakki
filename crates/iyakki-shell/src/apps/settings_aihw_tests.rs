@@ -51,7 +51,7 @@ fn key_a_switches_show_all_ai_tools_for_an_administrator_saves_it_and_audits_eac
     assert!(status(&a).starts_with("Show all AI tools: on."), "{}", status(&a));
     assert!(audit(&cx).contains("settings.show_all_ai") && audit(&cx).contains("\"detail\":\"on\""), "{}", audit(&cx));
     // the page says so
-    assert!(a.cloud_rows(&cx).iter().any(|(l, v)| l == "Show all AI tools" && v.starts_with("On (press A to change)")));
+    assert!(a.cloud_rows(&cx).iter().any(|(l, v)| l == "Show all AI tools" && v.starts_with("On (press a to change)")));
     key(&mut a, &cx, Key::Char('a'));
     assert!(!cx.services.show_all_ai());
     assert!(status(&a).starts_with("Show all AI tools: off."), "{}", status(&a));

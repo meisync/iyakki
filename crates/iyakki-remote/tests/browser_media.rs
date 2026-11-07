@@ -271,3 +271,30 @@ fn the_microphone_limit_is_told_to_the_page() {
     wait("limit", || !w.media.is_on(Kind::Mic));
     assert!(w.audit.lock().unwrap().iter().any(|l| l == "browser.media.limit mic"));
 }
+
+#[test]
+fn a_tile_asking_for_the_microphone_reaches_the_page_and_a_broadcast_reaches_only_a_started_page() {
+    let (srv, w) = start(Policy::allow_all());
+    let mut s = login(srv.local_addr());
+    text(&mut s, r#"{"t":"hello","v":2}"#);
+    assert_eq!(w.media.request(Kind::Mic), iyakki_agent::browsermedia::Requested::Asked);
+    let (_, p) = until(&mut s, "media_ask", |op, p| op == 1 && String::from_utf8_lossy(p).contains("media_ask"));
+    assert!(String::from_utf8_lossy(&p).contains("\"mic\""));
+    assert!(!w.media.is_on(Kind::Mic), "asking does not switch it on");
+    // the mixer's tap: nothing is taken until the page starts its sound
+    iyakki_agent::browsermedia::register("ann", w.media.clone());
+    assert!(!iyakki_agent::browsermedia::broadcast_audio(48_000, 2, &[1, 2]));
+    text(&mut s, r#"{"t":"audio","on":true}"#);
+    wait("audio on", || w.media.sources().audio_out);
+    assert!(iyakki_agent::browsermedia::broadcast_audio(48_000, 2, &[9, 9]));
+    until(&mut s, "sound message", |op, p| op == 2 && p.first() == Some(&0x10));
+    iyakki_agent::browsermedia::unregister("ann");
+}
+
+#[test]
+fn a_denied_policy_is_not_asked_through_the_page() {
+    let (_srv, w) = start(Policy::deny_all());
+    assert_eq!(w.media.request(Kind::Camera), iyakki_agent::browsermedia::Requested::Denied);
+    assert!(w.audit.lock().unwrap().iter().any(|l| l == "browser.media.denied camera"));
+    assert!(w.media.take_messages().iter().all(|m| !m.contains("media_ask")));
+}

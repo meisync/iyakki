@@ -111,6 +111,11 @@ impl IdleMachine {
         self.grace_until_ms = now_ms.saturating_add(GRACE_MS);
     }
 
+    /// Whole seconds since the last input (what holds and the forced saver do not change: the caller decides what they mean).
+    pub fn idle_secs(&self, now_ms: u64) -> u64 {
+        now_ms.saturating_sub(self.last_input_ms) / 1000
+    }
+
     /// Input arrived while the screen was not awake: true when it wakes the screen (false inside the grace time of a started
     /// preview, when the input is just dropped).
     pub fn wake(&mut self, now_ms: u64) -> bool {

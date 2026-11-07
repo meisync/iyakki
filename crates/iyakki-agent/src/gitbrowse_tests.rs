@@ -441,7 +441,7 @@ fn a_local_clone_is_read_with_git_only_and_read_only_commands() {
     assert_eq!(c.len(), 2);
     assert_eq!((c[0].subject().as_str(), c[0].author.as_str(), c[0].when, c[1].short().as_str()), ("First line", "Ada", 1_792_663_200, "bbbbbbb"));
     assert!(c[0].message.contains("more"));
-    run.answer("show --format= --patch --no-color --no-ext-diff -M abc123 --", DIFF);
+    run.answer("show --format= --patch --no-color --no-ext-diff --no-textconv -M abc123 --", DIFF);
     assert_eq!(l.diff("abc123").unwrap().files.len(), 5);
     run.answer("symbolic-ref --short -q refs/remotes/origin/HEAD", "origin/main\n");
     run.answer("refs/heads", "dev\u{1f}1111\u{1f}Dev work\u{1f}1792663000\nmain\u{1f}2222\u{1f}Main work\u{1f}1792663100\n");

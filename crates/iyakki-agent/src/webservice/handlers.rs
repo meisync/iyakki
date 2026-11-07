@@ -36,6 +36,10 @@ impl Ctx<'_> {
     pub(super) fn who(&self) -> &Principal {
         self.principal.expect("a signed-in route")
     }
+    /// The volume this request works on: the service's own, or that of the tenant the person's session was switched to.
+    pub(super) fn data_dir(&self) -> std::path::PathBuf {
+        super::tenants::data_dir_for(self.sh, self.token, self.principal.map(|p| p.user.as_str()).unwrap_or(""))
+    }
     fn query_num(&self, key: &str, max: u64) -> u64 {
         self.req.query.get(key).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0).min(max)
     }
@@ -84,8 +88,12 @@ pub fn dispatch(id: &str, c: &Ctx) -> Out {
             Ok((200, json!({"ok": true}), format!("run={}", c.params[0])))
         }
         "approvals_list" => {
-            let v: Vec<Value> = c.sh.deps.store.pending_approvals(Some(&c.who().user)).into_iter().map(approval_json).collect();
-            ok(json!({"approvals": v}))
+            // reachable by any signed-in person; what they get depends on their rights: tool-call approvals only with the Chat right,
+            // tenant approvals only as an eligible approver. A person with neither gets an empty list (200), by design.
+            let p = c.who();
+            let chat = p.policy.agent && p.policy.apps.contains(&iyakki_sec::policy::App::Chat);
+            let v: Vec<Value> = if chat { c.sh.deps.store.pending_approvals(Some(&p.user)).into_iter().map(approval_json).collect() } else { vec![] };
+            ok(super::notifyapi::unify(c, v))
         }
         "approvals_decide" => approvals_decide(c),
         "admin_status" => ok(json!({"tokens": c.sh.tokens.count(), "runs_going": c.sh.runs.going(), "approvals_pending": c.sh.deps.store.pending_approvals(None).len()})),
@@ -101,14 +109,37 @@ pub fn dispatch(id: &str, c: &Ctx) -> Out {
         "files_list" => super::files::list(c),
         "files_read" => super::files::read(c),
         "files_write" => super::files::write(c),
+        "files_upload" => super::files::upload(c),
+        "files_download" => super::files::download(c),
         "files_delete" => super::files::delete(c),
+        "files_move" => super::files::move_(c),
+        "files_mkdir" => super::files::mkdir(c),
+        "git_status" => super::gitread::status(c),
+        "git_branches" => super::gitread::branches(c),
+        "git_log" => super::gitread::log(c),
+        "git_diff" => super::gitread::diff(c),
+        id if id.starts_with("sched_") => super::schedules::handle(c, id),
+        "flows_run" => super::flowruns::start(c),
+        "flows_runs" => super::flowruns::list(c),
+        "flows_run_get" => super::flowruns::view(c),
         "git_clone" => super::files::clone(c),
         "git_clones" => super::files::clones(c),
+        "webaccess_get" => {
+            no_desktop_on_a_pod(c)?;
+            ok(c.sh.deps.extras.web_access(c.who())?)
+        }
+        "webaccess_set" => webaccess_set(c),
+        "tenants_list" => super::tenants::list(c),
+        "tenant_switch" => super::tenants::switch(c),
         "tenant_view" => tenant_view(c),
         "tenant_bootstrap" => tenant_bootstrap(c),
         "tenant_member" => tenant_member(c),
         "ns_manage" => ns_manage(c),
+        "ns_members_list" => ns_members_list(c),
         "ns_member" => ns_member(c),
+        id if id.starts_with("notif_") => super::notifyapi::handle(c, id),
+        "events" => Err(Fail::new(426, "invalid_input", "this is a WebSocket: connect with an Upgrade request")),
+        id if id.starts_with("tcfg_") || id.starts_with("tapprovals_") || id.starts_with("tteam_") => super::tenantcfg::handle(c, id),
         _ => Err(Fail::new(501, "unsupported", "not implemented")),
     }
 }
@@ -149,6 +180,9 @@ struct RunReq {
     prompt: String,
     provider: Option<String>,
     model: Option<String>,
+    /// The team whose integration to use (the caller must be in it).
+    #[serde(default)]
+    namespace: Option<String>,
     #[serde(default)]
     tools: Vec<String>,
 }
@@ -161,8 +195,46 @@ fn runs_start(c: &Ctx) -> Out {
         (None, None) => None,
         _ => return Err(Fail::new(400, "invalid_input", "give provider and model together, or neither")),
     };
+    agent_gate(c, model, r.namespace.as_deref())?;
     let id = c.sh.runs.start(c.who(), &r.prompt, model, allowed, c.sh.cfg.limits.concurrent_runs)?;
     Ok((200, json!({"id": id}), format!("run={id} chars={}", r.prompt.len())))
+}
+
+/// A tenant member starting a coding agent (provider `claude` or `copilot`) needs the tenant to have switched that agent on
+/// (`tenantconfig::enforce::agent_gate`: off by default, secret and vault state, allowed models, shared-use limits, audit line).
+fn agent_gate(c: &Ctx, model: Option<(&str, &str)>, team: Option<&str>) -> Result<(), Fail> {
+    let Some((provider, m)) = model else { return Ok(()) };
+    let kind = match provider {
+        "claude" => "agent.claude",
+        "copilot" => "agent.copilot",
+        // a team's own provider, API-key integration or local host: model list, role, per-person and team counters
+        other => return super::tenantcfg::provider_entry_gate(c, other, m, team),
+    };
+    if !c.sh.profile.is_cloud() {
+        return Ok(());
+    }
+    let dir = c.data_dir();
+    if let Some(t) = team {
+        // a team's integration is for the team's people
+        let me = &c.who().user;
+        let roles = Access::new(&dir).roles().ok().flatten();
+        if !roles.is_some_and(|r| r.ns_role(t, me).is_some()) {
+            return Err(Fail::new(404, "not_found", "no such team"));
+        }
+    }
+    struct Sink<'a>(&'a dyn iyakki_core_api::AuditSink);
+    impl crate::tenantconfig::api::ConfigAudit for Sink<'_> {
+        fn record(&self, who: &str, event: &str, detail: &str) {
+            self.0.record(who, event, detail);
+        }
+    }
+    let sink = Sink(c.sh.deps.audit.as_ref());
+    let env = crate::tenantconfig::api::Env { dir: &dir, vault: crate::tenantconfig::vault::for_user(&dir, &c.who().user), audit: &sink };
+    let now = crate::tenantconfig::now_secs();
+    match crate::tenantconfig::enforce::agent_gate(&env, kind, "default", team, &c.who().user, Some(m), now) {
+        crate::tenantconfig::enforce::AgentUse::Allowed { .. } => Ok(()),
+        crate::tenantconfig::enforce::AgentUse::Refused(why) => Err(Fail::new(403, "denied", &why)),
+    }
 }
 
 #[derive(Deserialize)]
@@ -247,7 +319,7 @@ fn data_call(c: &Ctx) -> Out {
 // ---------------------------------------------------------------------------------------------- cloud profile: roles and namespaces
 
 fn access(c: &Ctx) -> Access {
-    Access::new(std::path::Path::new(&c.sh.cfg.data_dir))
+    Access::new(&c.data_dir())
 }
 
 /// The cloud profile's health detail names the state of its vault link in one word (`cloudvaultlink::status`: not_configured,
@@ -262,7 +334,7 @@ fn with_vault(c: &Ctx, mut v: Value) -> Value {
 /// A removal and the rotation of the vault scopes the person held (`cloudrotate.rs`): the acting person's own vault secret is used when
 /// this volume holds one; otherwise the rotation is recorded as pending for `iyakki cloud reconcile --retry-rotations`.
 fn revoke(c: &Ctx, by: &str, what: &Revoke) -> Result<(crate::cloudroles::Change, Report), String> {
-    let keys = crate::cloudrotate::actor_keys(std::path::Path::new(&c.sh.cfg.data_dir), by);
+    let keys = crate::cloudrotate::actor_keys(&c.data_dir(), by);
     access(c).revoke(by, what, &Link::from_env(), keys.as_ref())
 }
 
@@ -287,7 +359,7 @@ fn denied(v: &crate::cloudaccess::Verdict) -> Result<(), Fail> {
 
 /// Once the tenant has its lists, the routes that are the person's own (flows, data outside a namespace) are for members of the tenant.
 /// A tenant that has no lists yet behaves as before for these; everything about namespaces is denied until the first owner exists.
-fn tenant_gate(c: &Ctx) -> Result<(), Fail> {
+pub(super) fn tenant_gate(c: &Ctx) -> Result<(), Fail> {
     if !c.sh.profile.is_cloud() {
         return Ok(());
     }
@@ -399,4 +471,52 @@ fn ns_member(c: &Ctx) -> Out {
         }
     };
     Ok((200, rotation_answer(rotation), audit_clean_line(&ch.0)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebAccessReq {
+    on: Option<bool>,
+    port: Option<u16>,
+}
+
+/// Settings -> Remote access as an API call: the same switch, the same port rule and the same audit lines as the native page.
+fn webaccess_set(c: &Ctx) -> Out {
+    no_desktop_on_a_pod(c)?;
+    let r: WebAccessReq = serde_json::from_value(json_body(c.req)?).map_err(|_| Fail::new(400, "invalid_input", "send {\"on\": true|false} and/or {\"port\": 1024..65535 or 0}"))?;
+    if r.on.is_none() && r.port.is_none() {
+        return Err(Fail::new(400, "invalid_input", "send \"on\" and/or \"port\""));
+    }
+    let done = c.sh.deps.extras.set_web_access(c.who(), r.on, r.port)?;
+    // the native page writes these lines; the route's own `api.webaccess_set` line (who, address, status) comes on top
+    for (event, detail) in &done {
+        c.sh.deps.audit.record(&c.who().user, event, detail);
+    }
+    let detail = done.iter().map(|(e, d)| format!("{e}: {d}")).collect::<Vec<_>>().join("; ");
+    Ok((200, json!({"ok": true}), audit_clean_line(&detail)))
+}
+
+/// What the native page lists under a namespace: its members, only for a namespace the caller is in.
+fn ns_members_list(c: &Ctx) -> Out {
+    let ns = c.params[0].clone();
+    let me = &c.who().user;
+    let acc = access(c);
+    denied(&acc.check(me, &Action::SeeNamespace(ns.clone())))?;
+    let r = acc.roles().ok().flatten().ok_or_else(|| Fail::new(403, "denied", "no access"))?;
+    let Some(mine) = r.ns_role(&ns, me) else {
+        // seen by name (a tenant administrator), not joined: the same refusal as for a namespace that is not there
+        return Err(Fail::new(403, "denied", "no access"));
+    };
+    let mut people: Vec<_> = r.namespaces.get(&ns).into_iter().flatten().collect();
+    people.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    let members: Vec<Value> = people.into_iter().map(|(n, role)| json!({"name": n, "role": format!("{role:?}").to_lowercase()})).collect();
+    ok(json!({"name": ns, "role": format!("{mine:?}").to_lowercase(), "members": members}))
+}
+
+/// A cloud pod has no desktop of its own to serve to browsers, whatever the machine under it has.
+fn no_desktop_on_a_pod(c: &Ctx) -> Result<(), Fail> {
+    if c.sh.profile.is_cloud() {
+        return Err(Fail::new(501, "unsupported", "a cloud pod has no desktop to serve to browsers"));
+    }
+    Ok(())
 }

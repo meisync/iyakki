@@ -308,7 +308,7 @@ impl Centre {
             match up::apply(env, &f.manifest, confirmed, who) {
                 Ok(v) => {
                     let _ = write_trial(self.dm.data_dir(), &Trial { from: p.from.clone(), to: f.manifest.version.clone(), applied: self.dm.now(), boot_id: boot_before, state: "restart".into(), kind: "update".into() });
-                    Ok(format!("{} Restart when you are ready to use IYAKKI {}; the device does not restart by itself.", v["message"].as_str().unwrap_or("Done."), f.manifest.version))
+                    Ok(format!("{} Restart when you are ready to use IYAKKI {}; the device does not restart by itself. {}", v["message"].as_str().unwrap_or("Done."), f.manifest.version, self.arm_counter()))
                 }
                 Err(e) => {
                     self.clean_staging();
@@ -419,7 +419,39 @@ impl Centre {
         let (left, _v) = result?;
         // finished: the entry now offers the version just left (to go forward again)
         self.point_entry_at_latest();
-        Ok(format!("IYAKKI {pver} is back on the boot partition (the version {left} is kept). Restart when you are ready; the device does not restart by itself."))
+        Ok(format!("IYAKKI {pver} is back on the boot partition (the version {left} is kept). Restart when you are ready; the device does not restart by itself. {}", self.arm_counter()))
+    }
+
+    /// Start the boot counter (F-UPD-02) after the files were written, and say in a sentence what will happen. Refused counting is not
+    /// an error of the update: the boot menu entry for the previous version is still there to choose by hand.
+    fn arm_counter(&self) -> String {
+        let armed = self.boot.open(true).and_then(|vol| super::bootcount::arm(&vol.root));
+        match armed {
+            Ok(()) => "If the new start does not reach the first picture, the boot menu starts the saved version by itself on the start after.".into(),
+            Err(e) => format!("The boot menu will not fall back by itself ({e}); choose \"{}\" there if the start fails.", up::PREV_TITLE),
+        }
+    }
+
+    /// The check after a start, for the running system (F-UPD-02): once the data volume is mounted and the shell has shown its first
+    /// picture, a start of the version an update or rollback just wrote is marked good in the boot environment, so the boot menu keeps
+    /// it. Returns a sentence when it marked something. Does nothing when no trial waits, when this is still the start in which the
+    /// update was written, when the data volume is a RAM disk, or when another version than the new one runs.
+    pub fn confirm_boot(&self, boot_id: &str) -> Option<String> {
+        if self.volatile {
+            return None;
+        }
+        let t = read_trial(self.dm.data_dir())?;
+        if t.state != "restart" || (!boot_id.is_empty() && boot_id == t.boot_id) {
+            return None;
+        }
+        if up::compare_versions(&self.versions().running, &t.to) != std::cmp::Ordering::Equal {
+            return None;
+        }
+        let vol = self.boot.open(true).ok()?;
+        match super::bootcount::mark_good(&vol.root) {
+            Ok(true) => Some(format!("IYAKKI {} reached its first picture and is marked good in the boot menu.", t.to)),
+            _ => None,
+        }
     }
 
     /// Rewrite the previous-version entry of the boot menu to the newest saved copy (a tiny file, replaced atomically). Best effort.

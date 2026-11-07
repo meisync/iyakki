@@ -5,6 +5,7 @@
 //! alive in the background, and knows which one is shown (`None` is Personal). Input goes only to the shown one. The shell's drawing and
 //! event wiring are in `shell_tenant.rs`.
 
+use crate::safeclamp::SafeClamp;
 use crate::ui::{Key, Nav};
 use iyakki_agent::cloudclient::{self as cc, Input, Picture, Presented, Status, Target};
 use std::sync::Arc;
@@ -271,8 +272,8 @@ pub fn to_picture(dest: (f32, f32, f32, f32), pic: (u32, u32), x: i32, y: i32) -
     if dw <= 0.0 || dh <= 0.0 || (x as f32) < dx || (y as f32) < dy || (x as f32) >= dx + dw || (y as f32) >= dy + dh {
         return None;
     }
-    let px = (((x as f32 - dx) * pic.0 as f32 / dw) as i32).clamp(0, pic.0 as i32 - 1);
-    let py = (((y as f32 - dy) * pic.1 as f32 / dh) as i32).clamp(0, pic.1 as i32 - 1);
+    let px = (((x as f32 - dx) * pic.0 as f32 / dw) as i32).clamp_safe(0, pic.0 as i32 - 1);
+    let py = (((y as f32 - dy) * pic.1 as f32 / dh) as i32).clamp_safe(0, pic.1 as i32 - 1);
     Some((px, py))
 }
 

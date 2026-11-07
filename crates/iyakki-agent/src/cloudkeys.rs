@@ -161,9 +161,16 @@ impl MemberKeys {
     }
 
     /// The `Authorization` header value for a request to the service: `who` is the member's id there.
+    /// Every call carries a fresh random `nonce` (signed with the rest), so the service can refuse an exact copy of a request it has seen.
     pub fn sign_request(&self, who: &str, method: &str, path: &str, ts: u64, body: &[u8]) -> String {
-        let sig = self.signing().sign(request_text(who, method, path, ts, body).as_bytes());
-        format!("IYAKKI-SIG id={who},ts={ts},sig={}", hex(&sig.to_bytes()))
+        let nonce = hex(&random::<16>().unwrap_or([0u8; 16]));
+        self.sign_request_with_nonce(who, method, path, ts, body, &nonce)
+    }
+
+    /// [`MemberKeys::sign_request`] with a nonce of the caller's choosing (tests of replay protection).
+    pub fn sign_request_with_nonce(&self, who: &str, method: &str, path: &str, ts: u64, body: &[u8], nonce: &str) -> String {
+        let sig = self.signing().sign(request_text(who, method, path, ts, body, Some(nonce)).as_bytes());
+        format!("IYAKKI-SIG id={who},ts={ts},nonce={nonce},sig={}", hex(&sig.to_bytes()))
     }
 }
 
@@ -257,36 +264,46 @@ impl ScopeKey {
 }
 
 /// What a signature covers: the member, the request and the time, so a signed request cannot be turned into another one.
-fn request_text(who: &str, method: &str, path: &str, ts: u64, body: &[u8]) -> String {
-    format!("iyakki-vault-v1\n{who}\n{method}\n{path}\n{ts}\n{}", hex(&Sha256::digest(body)))
+fn request_text(who: &str, method: &str, path: &str, ts: u64, body: &[u8], nonce: Option<&str>) -> String {
+    match nonce {
+        None => format!("iyakki-vault-v1\n{who}\n{method}\n{path}\n{ts}\n{}", hex(&Sha256::digest(body))),
+        Some(n) => format!("iyakki-vault-v2\n{who}\n{method}\n{path}\n{ts}\n{}\n{n}", hex(&Sha256::digest(body))),
+    }
 }
 
 /// A parsed `Authorization: IYAKKI-SIG id=..,ts=..,sig=..` header.
 pub struct SignedRequest {
     pub id: String,
     pub ts: u64,
+    /// Hex, 16 to 64 digits; the service refuses a second request with the same id and nonce.
+    pub nonce: Option<String>,
     sig: [u8; 64],
 }
 
 pub fn parse_authorization(h: &str) -> Option<SignedRequest> {
     let rest = h.strip_prefix("IYAKKI-SIG ")?;
-    let (mut id, mut ts, mut sig) = (None, None, None);
+    let (mut id, mut ts, mut sig, mut nonce) = (None, None, None, None);
     for p in rest.split(',') {
         let (k, v) = p.trim().split_once('=')?;
         match k {
             "id" => id = Some(v.to_string()),
             "ts" => ts = v.parse().ok(),
+            "nonce" => nonce = Some(v.to_string()).filter(|n| (16..=64).contains(&n.len()) && n.bytes().all(|c| c.is_ascii_hexdigit())),
             "sig" => sig = unhex(v).and_then(|b| <[u8; 64]>::try_from(b).ok()),
             _ => return None,
         }
     }
-    Some(SignedRequest { id: id?, ts: ts?, sig: sig? })
+    // a nonce that is present but not valid makes the header invalid
+    if rest.split(',').any(|p| p.trim().starts_with("nonce=")) && nonce.is_none() {
+        return None;
+    }
+    Some(SignedRequest { id: id?, ts: ts?, nonce, sig: sig? })
 }
 
 impl SignedRequest {
     pub fn verify(&self, key: &PublicKeys, method: &str, path: &str, body: &[u8]) -> bool {
         let Some(vk) = unhex32(&key.sign).and_then(|b| VerifyingKey::from_bytes(&b).ok()) else { return false };
-        vk.verify_strict(request_text(&self.id, method, path, self.ts, body).as_bytes(), &Signature::from_bytes(&self.sig)).is_ok()
+        vk.verify_strict(request_text(&self.id, method, path, self.ts, body, self.nonce.as_deref()).as_bytes(), &Signature::from_bytes(&self.sig)).is_ok()
     }
 }
 
@@ -380,5 +397,25 @@ mod tests {
         assert!(!r.verify(&p, "PUT", "/v1/scope/tenant/secrets/x", b"{ }"));
         assert!(!r.verify(&member(6).public(), "PUT", "/v1/scope/tenant/secrets/x", b"{}"));
         assert!(parse_authorization("Bearer abc").is_none() && parse_authorization("IYAKKI-SIG id=a,ts=x,sig=00").is_none());
+    }
+
+    #[test]
+    fn the_nonce_is_signed_random_and_cannot_be_removed_or_changed() {
+        let m = member(5);
+        let p = m.public();
+        let (a, b) = (m.sign_request("acme/alice", "GET", "/v1/x", 1000, b""), m.sign_request("acme/alice", "GET", "/v1/x", 1000, b""));
+        assert_ne!(a, b, "two identical calls differ by their nonce");
+        let ra = parse_authorization(&a).unwrap();
+        assert!(ra.nonce.as_deref().is_some_and(|n| n.len() == 32) && ra.verify(&p, "GET", "/v1/x", b""));
+        // a changed nonce does not verify; a header without the nonce does not verify as the signed one
+        let n = ra.nonce.clone().unwrap();
+        let other = a.replace(&n, &"ab".repeat(16));
+        assert!(!parse_authorization(&other).unwrap().verify(&p, "GET", "/v1/x", b""));
+        let stripped = a.replace(&format!("nonce={n},"), "");
+        assert!(!parse_authorization(&stripped).unwrap().verify(&p, "GET", "/v1/x", b""));
+        // a nonce that is not hex of a fair length makes the header invalid
+        for bad in ["zz", "ab", &"a".repeat(65)] {
+            assert!(parse_authorization(&a.replace(&n, bad)).is_none(), "{bad}");
+        }
     }
 }

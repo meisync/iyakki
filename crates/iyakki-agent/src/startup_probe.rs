@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::startup::{Registry, StartupState};
+use crate::startup::{Registry, StartupState, WIFI_ID};
 
 /// What the clock gate of the cluster waits for, and how long it waits when nobody answers ([`crate::k3sdev::CLOCK_WAIT_LIMIT`]).
 const CLOCK_LIMIT_SECS: u64 = 120;
@@ -22,6 +22,8 @@ const NO_NIC_GRACE_SECS: u64 = 20;
 const SOUND_WAIT_SECS: u64 = 30;
 /// Autostart fires within seconds of the start; later, a stopped cluster was stopped on purpose.
 const AUTOSTART_WAIT_SECS: u64 = 45;
+/// Wi-Fi that is still coming up beside a working cable is only mentioned for this long; after that it is left alone quietly.
+const WIFI_BACKGROUND_SECS: u64 = 180;
 /// A start that takes longer than this says so.
 const SLOW_SECS: u64 = 120;
 
@@ -48,6 +50,12 @@ pub struct Facts {
     pub clock_synced: bool,
     /// An IPv4 default route is up.
     pub route: bool,
+    /// The IPv4 default route runs over a wired (non-wireless) interface.
+    pub wired_route: bool,
+    /// The machine has a Wi-Fi adapter (a wireless interface, or a Wi-Fi chip on the PCI bus that has no interface yet).
+    pub wifi_hw: bool,
+    /// A wireless interface is up (associated).
+    pub wifi_online: bool,
     /// The machine has no network device at all (no Ethernet or Wi-Fi in /sys/class/net with hardware behind it).
     pub no_nic: bool,
     pub k3s: K3sFact,
@@ -65,6 +73,27 @@ pub struct Facts {
 
 fn trim_note(t: &str) -> String {
     t.trim().trim_end_matches(['\u{2026}', '.']).trim().to_string()
+}
+
+/// What the Wi-Fi row shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WifiRow {
+    /// No row: no adapter, or no cable (then the network row is the story), or the background phase is over.
+    Hidden,
+    /// Some link (a cable, in practice) already has the default route and Wi-Fi is not up yet: the first usable link wins.
+    Background,
+    Ready,
+}
+
+/// Pure: the Wi-Fi row from the facts.
+pub fn wifi_state(f: &Facts) -> WifiRow {
+    if f.wifi_online && f.route {
+        WifiRow::Ready
+    } else if f.route && f.wifi_hw && !f.wifi_online && f.uptime_secs < WIFI_BACKGROUND_SECS {
+        WifiRow::Background
+    } else {
+        WifiRow::Hidden
+    }
 }
 
 /// Turn the facts into states (only for the polled services).
@@ -94,6 +123,19 @@ pub fn apply(reg: &Registry, f: &Facts) {
         reg.failed("network", "no network yet: the cluster is waiting for one (connect a cable or Wi-Fi)");
     } else {
         reg.stopped("network");
+    }
+    // Wi-Fi: only a row while a cable already carries the default route and the adapter is not up yet; it never fails and never counts
+    // (see `startup::login_view`). Without a cable the "network" row above tells the story, as it always did.
+    match wifi_state(f) {
+        WifiRow::Background => {
+            reg.starting(WIFI_ID, "starting in the background");
+        }
+        WifiRow::Ready => {
+            reg.ready(WIFI_ID);
+        }
+        WifiRow::Hidden => {
+            reg.disabled(WIFI_ID);
+        }
     }
     // the firewall
     if f.firewall_alert {
@@ -174,18 +216,40 @@ pub fn apply(reg: &Registry, f: &Facts) {
     }
 }
 
+/// Pure: an IPv4 default route over an interface that is not wireless (`is_wireless` tells by name).
+pub fn wired_default_route(route_text: &str, is_wireless: &dyn Fn(&str) -> bool) -> bool {
+    route_text.lines().skip(1).any(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f.len() < 8 || f[0] == "lo" || is_wireless(f[0]) {
+            return false;
+        }
+        let flags = u32::from_str_radix(f[3], 16).unwrap_or(0);
+        f[1] == "00000000" && f[7] == "00000000" && flags & 1 != 0
+    })
+}
+
 /// Read the machine and apply.
 /// `firewall_alert`: the firewall is wanted but not in force (the shell asks `iyakki_fw::service::alert()`; this crate does not
 /// depend on the firewall).
 pub fn poll(svc: &Arc<crate::services::Services>, reg: &Registry, firewall_alert: bool) {
     let f = gather(svc, firewall_alert);
     crate::touchprobe::step(f.uptime_secs);
+    crate::touchrecover::tick(f.uptime_secs);
+    crate::usbawake::step(f.uptime_secs);
+    crate::usbports::step();
+    crate::startupdisk::step(f.uptime_secs);
     apply(reg, &f);
 }
 
 pub fn gather(svc: &Arc<crate::services::Services>, firewall_alert: bool) -> Facts {
     let h = svc.k3sdev.health();
+    let route_text = std::fs::read_to_string(crate::k3sdev::ROUTE_FILE).unwrap_or_default();
+    let wireless = |n: &str| std::path::Path::new("/sys/class/net").join(n).join("wireless").exists();
+    let wifi_ifaces: Vec<String> = std::fs::read_dir("/sys/class/net").map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| wireless(n)).collect()).unwrap_or_default();
     Facts {
+        wired_route: wired_default_route(&route_text, &wireless),
+        wifi_hw: !wifi_ifaces.is_empty() || std::fs::read_dir("/sys/bus/pci/devices").map(|d| d.flatten().any(|e| std::fs::read_to_string(e.path().join("class")).is_ok_and(|c| c.trim().starts_with("0x0280")))).unwrap_or(false),
+        wifi_online: wifi_ifaces.iter().any(|n| std::fs::read_to_string(format!("/sys/class/net/{n}/operstate")).is_ok_and(|t| t.trim() == "up")),
         uptime_secs: std::fs::read_to_string("/proc/uptime").ok().and_then(|t| t.split('.').next().and_then(|s| s.parse().ok())).unwrap_or(u64::MAX / 2),
         clock_floor_pending: crate::clockfloor::pending(),
         clock_synced: crate::ntp::synced(),

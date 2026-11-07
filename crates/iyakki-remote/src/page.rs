@@ -3,6 +3,8 @@
 /// The decoder (also served at `/decoder.js`; used on the main thread or in a worker).
 pub const DECODER_JS: &str = include_str!("decoder.js");
 
+/// Sent with the page: it (and only it) may ask for the camera, the microphone and the clipboard, and play sound.
+pub const PERMISSIONS_POLICY: &str = "camera=(self), microphone=(self), autoplay=(self), clipboard-read=(self), clipboard-write=(self), fullscreen=(self)";
 /// The browser devices bridge (clipboard images and HTML, sound, microphone, camera); served at `/media.js`.
 pub const MEDIA_JS: &str = include_str!("media.js");
 
@@ -42,11 +44,13 @@ pub const INDEX: &str = concat!(r##"<!doctype html>
   #panel .dev button { flex: 1; text-align: left; }
   #panel .dev button.on { border-color: #ff6b6b; color: #ffb4b4; }
   #panel input[type=range] { width: 100%; }
-  #rec { position: fixed; left: 50%; top: 8px; transform: translateX(-50%); display: flex; gap: 8px; z-index: 5; }
+  #rec { position: fixed; left: 50%; top: 8px; transform: translateX(-50%); display: flex; gap: 8px; z-index: 2147483647; }
   #rec button { font: 13px system-ui, sans-serif; color: #fff; background: #b3202a; border: 0; border-radius: 14px; padding: 5px 12px; cursor: pointer; box-shadow: 0 2px 10px #0008; }
   #rec button::before { content: "\25CF  "; animation: blink 1.2s infinite; }
   @keyframes blink { 50% { opacity: .3; } }
+  #askdev { position: fixed; left: 50%; top: 44px; transform: translateX(-50%); font: 14px system-ui, sans-serif; color: #fff; background: #b3202a; border: 2px solid #fff; border-radius: 16px; padding: 8px 18px; cursor: pointer; z-index: 2147483646; }
   #askclip { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); font: 14px system-ui, sans-serif; color: #fff; background: #3b55c9; border: 0; border-radius: 16px; padding: 8px 16px; cursor: pointer; z-index: 5; }
+  #deverr { position: fixed; left: 50%; top: 84px; transform: translateX(-50%); max-width: min(560px, calc(100vw - 32px)); font: 14px/1.4 system-ui, sans-serif; color: #fff; background: #7a1f27; border: 2px solid #fff; border-radius: 12px; padding: 10px 16px; cursor: pointer; z-index: 2147483646; box-shadow: 0 4px 18px #000a; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -81,6 +85,13 @@ pub const INDEX: &str = concat!(r##"<!doctype html>
   <small id="lvl"></small>
   <h3>Browser devices</h3>
   <div class="dev"><button id="dsound" type="button">Start sound</button></div>
+  <label id="dsinkrow">Play sound on
+    <select id="dsink">
+      <option value="browser">This computer (the browser)</option>
+      <option value="both">Both</option>
+      <option value="mac">The Mac only</option>
+    </select>
+  </label>
   <label id="dvolrow" hidden>Volume <input type="range" id="dvol" min="0" max="100" value="80"></label>
   <div class="dev"><button id="dmic" type="button">Microphone: off</button></div>
   <div class="dev"><button id="dcam" type="button">Camera: off</button></div>
@@ -88,6 +99,8 @@ pub const INDEX: &str = concat!(r##"<!doctype html>
   <small id="dnote">Each one is off until you switch it on, and you can stop it with one tap.</small>
 </div>
 <div id="rec" hidden role="status"></div>
+<div id="deverr" hidden role="alert" title="Click to dismiss"></div>
+<button id="askdev" type="button" hidden></button>
 <button id="askclip" type="button" hidden></button>
 <pre id="stats" hidden></pre>
 <textarea id="ime" autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false" aria-hidden="true" tabindex="-1"></textarea>
@@ -120,7 +133,7 @@ function renderDevices(s) {
   const dev = (id, label, on, allowed, extra) => {
     const b = $(id); b.classList.toggle("on", on);
     b.textContent = label + (on ? ": on" + (extra || "") + " (tap to stop)" : !s.secure.ok ? ": needs https" : !allowed ? ": not allowed" : ": off");
-    b.disabled = !on && (!s.secure.ok || !allowed);
+    b.disabled = !on && !allowed;     // (not for an insecure page: the click then says exactly why)
   };
   dev("dmic", "Microphone", s.on.mic, s.allowed.mic, " " + mmss(s.micSeconds) + " of 5:00");
   dev("dcam", "Camera", s.on.camera, s.allowed.camera);
@@ -128,14 +141,20 @@ function renderDevices(s) {
   $("dsound").textContent = s.sound ? "Stop sound" : "Start sound"; $("dsound").classList.remove("on");
   $("dsound").disabled = !s.allowed.audio || !media.player.ctx && !(window.AudioContext || window.webkitAudioContext);
   $("dvolrow").hidden = !s.sound;
+  $("dsink").value = s.sink;
+  $("dsink").disabled = !s.allowed.audio;
+  const de = $("deverr"); de.textContent = s.notice || ""; de.hidden = !s.notice;
   $("dnote").textContent = s.notice || (s.secure.ok ? "Each one is off until you switch it on, and you can stop it with one tap." : s.secure.why);
   const rec = $("rec"); rec.textContent = "";
-  for (const [on, label, id] of [[s.on.mic, "Recording: microphone " + mmss(s.micSeconds), "dmic"], [s.on.camera, "Camera on", "dcam"]]) {
+  for (const [on, label, id] of [[s.on.mic, "Recording: microphone " + mmss(s.micSeconds), "dmic"], [s.on.camera, "Recording: camera", "dcam"]]) {
     if (!on) continue;
     const b = document.createElement("button"); b.type = "button"; b.textContent = label + " (tap to stop)"; b.onclick = (e) => media.toggle(id === "dmic" ? "mic" : "camera", e);
     rec.appendChild(b);
   }
   rec.hidden = !rec.firstChild;
+  const ad = $("askdev");
+  ad.hidden = !s.ask;
+  ad.textContent = s.ask === "mic" ? "A program wants your microphone. Click to allow." : s.ask === "camera" ? "A program wants your camera. Click to allow." : "Click to allow.";
   const ask = $("askclip");
   ask.hidden = !(s.pendingRead || s.pendingCopy);
   ask.textContent = s.pendingRead ? "Click to paste from your clipboard" : "Click to copy to your clipboard";
@@ -143,8 +162,11 @@ function renderDevices(s) {
 $("dmic").onclick = (e) => media.toggle("mic", e);
 $("dcam").onclick = (e) => media.toggle("camera", e);
 $("dclip").onclick = (e) => media.toggle("clipread", e);
+$("dsink").onchange = () => media.setSink($("dsink").value);
+$("deverr").onclick = () => { media.state.notice = ""; renderDevices(media.state); };
 $("dsound").onclick = (e) => (media.state.sound ? media.stopSound() : media.startSound(e));
 $("dvol").oninput = () => media.player.setVolume($("dvol").value / 100);
+$("askdev").onclick = (e) => { const k = media.state.ask; if (k) media.toggle(k, e); cv.focus(); };
 $("askclip").onclick = (e) => { if (media.state.pendingRead) media.readClipboard(e); else media.finishCopy(e); $("askclip").hidden = true; cv.focus(); };
 renderDevices(media.state);
 

@@ -80,6 +80,7 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
         Some("cert") => cert(&a[1..], out),
         Some("listen") => listen(&a[1..], out),
         Some("roles") => roles(&a[1..], out),
+        Some("tenants") => crate::cloudtenantdir::cli(&a[1..], out),
         Some("snapshot") => crate::cloudsnapshot::cli(&a[1..], out),
         Some("reconcile") => reconcile(&a[1..], out),
         Some("deploy") => {
@@ -104,7 +105,7 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
             out(&reach_text(&c));
             Ok(())
         }
-        _ => Err("usage: iyakki cloud <example TENANT | manifests | image | bundle | common | deploy | reconcile | routes | cert | listen | roles | snapshot> (docs/development/CLOUD-MULTITENANT-PLAN.md)\n  listen --routes FILE [--cert-dir DIR] [--bind ADDR] [--redirect-port PORT]\n  \
+        _ => Err("usage: iyakki cloud <example TENANT | manifests | image | bundle | common | deploy | reconcile | routes | cert | listen | roles | tenants | snapshot> (docs/development/CLOUD-MULTITENANT-PLAN.md)\n  listen --routes FILE [--bind ADDR] [--cert-source file|vault ...] [--client-ca HOST=NAME] [--service-dialer ...] [--reach ...] [--no-firewall] [--route-tenant HOST=TENANT] (iyakki cloud listen --help)\n  \
                   manifests --config FILE [-o OUT]\n  image [--out FILE] [--name REF] [--binary PATH] [--arch amd64|arm64] [--push HOST:PORT/REPO:TAG]\n  \
                   bundle --config FILE --out DIR\n  deploy --config FILE [--kubeconfig FILE] [--context NAME] [--apply]\n  \
                   reconcile --dir DIR [--kubeconfig FILE] [--context NAME] [--apply] [--prune]"
@@ -143,24 +144,25 @@ fn reconcile(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
     }
 }
 
-/// `iyakki cloud listen --routes FILE [--cert-dir DIR] [--bind ADDR] [--redirect-port PORT]`: the local domain listener
-/// (`cloudlisten.rs`). Runs until interrupted; follows changes of the routes file and re-reads the certificates once a minute. The
-/// firewall is not driven from here (no gate); `members` routes are not enforced (see the module documentation of `cloudlisten.rs`).
+/// `iyakki cloud listen --routes FILE ...` (full flags: `cloudlisten_setup::USAGE`): the local domain listener (`cloudlisten.rs`). Runs
+/// until interrupted; follows changes of the routes file and re-reads the certificates once a minute. Certificates from files or the vault,
+/// mutual TLS per route, pods through kubectl or cluster DNS, the firewall gate (the listener does not open without it) and tenants are
+/// all chosen by flags (`cloudlisten_setup.rs`); `members` routes are not enforced (see the module documentation of `cloudlisten.rs`).
 fn listen(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
-    use crate::cloudlisten::{FileCerts, Listener, NoGate, Options};
-    let usage = "usage: iyakki cloud listen --routes FILE [--cert-dir DIR] [--bind ADDR] [--redirect-port PORT]";
+    use crate::cloudlisten::{setup, Listener};
+    let usage = format!("usage: {}", setup::USAGE);
+    if a.iter().any(|x| x == "--help" || x == "-h") {
+        out(&usage);
+        return Ok(());
+    }
     let f = opt(a, "--routes").ok_or(usage)?;
     let read = || -> Result<crate::cloudroute::RouteTable, String> { crate::cloudroute::RouteTable::parse(&std::fs::read_to_string(&f).map_err(|e| format!("{f}: {e}"))?) };
     let table = read()?;
-    let mut o = Options::default();
-    if let Some(b) = opt(a, "--bind") {
-        o.bind = b.parse().map_err(|_| format!("--bind \"{b}\" is not an address"))?;
+    let s = setup::build(a, &table, &setup::Deps::real())?;
+    for n in &s.notes {
+        out(n);
     }
-    if let Some(p) = opt(a, "--redirect-port") {
-        o.redirect_port = p.parse().map_err(|_| format!("--redirect-port \"{p}\" is not a port"))?;
-    }
-    let dir = opt(a, "--cert-dir").unwrap_or_else(|| ".".into());
-    let l = Listener::start(table, std::sync::Arc::new(FileCerts::new(dir)), std::sync::Arc::new(NoGate), o)?;
+    let l = Listener::start(table, s.source, s.gate, s.options)?;
     out(&format!("listening on port(s) {:?}; Ctrl-C stops it. Routes marked access members are NOT enforced by this listener.", l.ports()));
     for (h, why) in l.refused() {
         out(&format!("not served over https: {h}: {why}"));

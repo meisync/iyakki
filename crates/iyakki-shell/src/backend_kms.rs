@@ -461,6 +461,7 @@ fn run_loop(shell: &mut crate::shell::Shell, mut kms: Kms<crate::display::kms::R
             crate::touchscreen::init_from_cmdline();
             let mut st = InputState::new(b0.max(1) as u32, b1.max(1) as u32);
             let mut devs: Vec<Device> = Vec::new();
+            let mut reopen_seen = iyakki_agent::touchrecover::reopen_generation();
             let mut targets: Vec<(String, Option<crate::touchmap::OutRect>)> = Vec::new();
             let mut logged: Vec<(String, String)> = Vec::new();
             let mut mapped: Option<(Vec<crate::touchmap::OutRect>, Vec<String>, u64)> = None;
@@ -551,6 +552,7 @@ fn run_loop(shell: &mut crate::shell::Shell, mut kms: Kms<crate::display::kms::R
                     let _ = tx.send((d, ev));
                 }
                 scan.take_into(&mut devs); // keyboards and mice found since the last pass
+                crate::input::apply_reopen(&mut devs, &mut reopen_seen);
             }
         });
         if input.is_err() {

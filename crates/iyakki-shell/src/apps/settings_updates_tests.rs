@@ -265,3 +265,112 @@ fn the_page_fits_at_four_sizes_in_every_state() {
         check(&draw(&mut a, &cx, w, h), "asking to roll back");
     }
 }
+
+// ---------------------------------------------------------------------------------------- the update check (F-UPD-04)
+
+use iyakki_agent::store::updatecheck as chk;
+
+fn check_cfg(cx: &AppCx) -> chk::CheckSettings {
+    cx.services.settings.lock().unwrap().get().update_check.clone()
+}
+
+fn report() -> chk::Report {
+    chk::Report {
+        checked_at: iyakki_agent::clock::now_unix() - 3 * 3600,
+        updates: vec![
+            chk::Update { kind: chk::Kind::System, id: "system".into(), title: "IYAKKI".into(), from: "0.1.0-alpha.1".into(), to: "0.1.0-alpha.3".into(), source: "System update".into(), new_permissions: vec![], note: "Fixes the sound.".into() },
+            chk::Update { kind: chk::Kind::App, id: "skill:notes".into(), title: "Meeting notes".into(), from: "1.0.0".into(), to: "1.2.0".into(), source: "Stick".into(), new_permissions: vec!["reach example.com".into()], note: "asks for permissions the installed version did not".into() },
+        ],
+        errors: vec![("Mirror".into(), "could not reach mirror.example: offline".into())],
+        asked: vec![],
+    }
+}
+
+#[test]
+fn the_page_shows_the_last_check_what_it_found_and_that_nothing_is_downloaded() {
+    let r = rig("chk-show");
+    let cx = cx_with_admin_store("upd-chk-show");
+    let mut a = app(&r, &cx);
+    let none = a.upd_check_lines(&cx).into_iter().map(|l| l.0).collect::<Vec<_>>().join("\n");
+    assert!(none.contains("every day") && none.contains("Not checked yet") && none.contains("cannot tell a metered connection"), "{none}");
+    report().save(cx.services.dir()).unwrap();
+    a.upd.check = None;
+    let text = a.upd_check_lines(&cx).into_iter().map(|l| l.0).collect::<Vec<_>>().join("\n");
+    for want in ["3 hours ago", "2 update(s) available", "Nothing is downloaded or installed until you do it yourself", "System: IYAKKI 0.1.0-alpha.1 -> 0.1.0-alpha.3", "Fixes the sound.", "App: Meeting notes 1.0.0 -> 1.2.0 (Stick)", "Asks for new permissions: reach example.com", "Mirror: could not reach"] {
+        assert!(text.contains(want), "{want} in:\n{text}");
+    }
+    // the buttons are on the page for mouse and touch
+    let g = draw(&mut a, &cx, 1280, 720);
+    for k in ['c', 'm', 'u'] {
+        assert!(g.hits.iter().any(|h| h.ev == Event::Key(Key::Char(k))), "button {k}");
+    }
+}
+
+#[test]
+fn how_often_cycles_and_is_saved_and_audited_and_off_refuses_to_check() {
+    let r = rig("chk-mode");
+    let cx = cx_with_admin_store("upd-chk-mode");
+    let mut a = app(&r, &cx);
+    assert_eq!(check_cfg(&cx).mode, chk::Mode::Daily);
+    press(&mut a, &cx, 'm');
+    assert_eq!(check_cfg(&cx).mode, chk::Mode::Manual);
+    press(&mut a, &cx, 'm');
+    assert_eq!(check_cfg(&cx).mode, chk::Mode::Off);
+    press(&mut a, &cx, 'c');
+    assert!(a.status().is_some_and(|s| !s.1 && s.0.contains("is off")), "{:?}", a.status());
+    assert!(!cx.services.dir().join(chk::FILE).exists(), "nothing was checked");
+    press(&mut a, &cx, 'm');
+    assert_eq!(check_cfg(&cx).mode, chk::Mode::Daily);
+}
+
+#[test]
+fn check_now_runs_in_the_background_keeps_the_answer_and_installs_nothing() {
+    let r = rig("chk-now");
+    let cx = cx_with_admin_store("upd-chk-now");
+    let mut a = app(&r, &cx);
+    let boot_before = boot_initrd(&r);
+    press(&mut a, &cx, 'c');
+    assert!(a.is_busy(), "a background job, the page stays usable");
+    settle(&mut a, &cx);
+    assert!(status(&a).contains("up to date") || status(&a).contains("could not be reached"), "{}", status(&a));
+    let rep = chk::Report::load(cx.services.dir()).unwrap();
+    assert!(rep.checked_at > 0 && rep.updates.is_empty());
+    assert_eq!(boot_initrd(&r), boot_before, "the boot files are untouched");
+}
+
+#[test]
+fn the_update_list_address_is_checked_before_it_is_saved_and_only_administrators_set_it() {
+    let r = rig("chk-url");
+    let cx = cx_with_admin_store("upd-chk-url");
+    let mut a = app(&r, &cx);
+    press(&mut a, &cx, 'u');
+    assert!(a.modal.is_some(), "the form opens");
+    let mut f = Form::new("x").text("Address", "", "");
+    f.set_value(0, "ftp://nope");
+    assert!(a.upd_source_submit(&cx, &f).unwrap_err().contains("https://"));
+    assert_eq!(check_cfg(&cx).system_url, "");
+    f.set_value(0, " https://updates.example/iyakki/index.json ");
+    assert!(a.upd_source_submit(&cx, &f).unwrap().contains("saved"));
+    assert_eq!(check_cfg(&cx).system_url, "https://updates.example/iyakki/index.json");
+    f.set_value(0, "");
+    assert!(a.upd_source_submit(&cx, &f).unwrap().contains("only apps"));
+    // an ordinary user changes nothing
+    let mut ucx = cx_with_admin_store("upd-chk-url-user");
+    ucx.session.user = "amy".into();
+    ucx.session.role = iyakki_sec::policy::Role::User;
+    ucx.session.policy = iyakki_sec::policy::Role::User.template();
+    let mut b = app(&r, &ucx);
+    b.upd_check_key(&Key::Char('m'), &ucx);
+    assert_eq!(check_cfg(&ucx).mode, chk::Mode::Daily);
+}
+
+#[test]
+fn the_overview_says_how_many_updates_the_last_check_found() {
+    let r = rig("chk-over");
+    let cx = cx_with_admin_store("upd-chk-over");
+    let mut a = app(&r, &cx);
+    assert!(!a.attention(&cx).iter().any(|x| x.title.contains("available")));
+    report().save(cx.services.dir()).unwrap();
+    let n = a.attention(&cx).into_iter().find(|x| x.title.contains("available")).expect("an Overview line");
+    assert_eq!((n.tab, n.title.as_str()), (Tab::Updates, "2 updates available"));
+}

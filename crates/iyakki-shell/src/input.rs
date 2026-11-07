@@ -109,6 +109,12 @@ pub struct InputState {
     shift: bool,
     ctrl: bool,
     alt: bool,
+    /// The Windows / Command key (Meta), tracked for the Mac input profile (`inputprofile.rs`).
+    meta: bool,
+    /// A Control+click made a right click (Mac profile): the release that follows is not a click.
+    ctrl_click: bool,
+    /// The last scroll came from a touchpad (true) or a wheel, for the live row of Settings.
+    scroll_from_pad: bool,
     caps: bool,
     pub x: i32,
     pub y: i32,
@@ -139,7 +145,7 @@ pub struct InputState {
 
 impl InputState {
     pub fn new(w: u32, h: u32) -> InputState {
-        InputState { shift: false, ctrl: false, alt: false, caps: false, x: w as i32 / 2, y: h as i32 / 2, w: w as i32, h: h as i32, abs: (0, 0), slot: 0, pending_touch: false, pad: crate::touchpad::Touchpad::new(), touches: Default::default(), started: std::time::Instant::now(), scroll: crate::scrolleng::ScrollEngine::new(), wheel_legacy: 0, wheel_hires: 0, fake_ms: None, scroll_due: None }
+        InputState { shift: false, ctrl: false, alt: false, meta: false, ctrl_click: false, scroll_from_pad: false, caps: false, x: w as i32 / 2, y: h as i32 / 2, w: w as i32, h: h as i32, abs: (0, 0), slot: 0, pending_touch: false, pad: crate::touchpad::Touchpad::new(), touches: Default::default(), started: std::time::Instant::now(), scroll: crate::scrolleng::ScrollEngine::new(), wheel_legacy: 0, wheel_hires: 0, fake_ms: None, scroll_due: None }
     }
 
     fn now_ms(&self) -> u64 {
@@ -163,7 +169,10 @@ impl InputState {
         self.scroll_due = Some(now + crate::scrolleng::FRAME_MS);
         match self.scroll.tick(now, crate::scrolleng::raw()) {
             0 => Vec::new(),
-            px => vec![Event::ScrollPx(px)],
+            px => {
+                crate::inputprofile::note_scroll(px, self.scroll_from_pad);
+                vec![Event::ScrollPx(px)]
+            }
         }
     }
 
@@ -202,10 +211,19 @@ impl InputState {
                     self.clamp();
                     out.push(Event::MouseMove(self.x, self.y));
                 }
+                // Control+click is a right click in the Mac profile
+                PadOut::LeftDown if self.ctrl && crate::inputprofile::resolved() == iyakki_agent::inputprofile::Resolved::Mac => {
+                    self.ctrl_click = true;
+                    out.push(Event::MouseRight(self.x, self.y));
+                }
+                PadOut::LeftUp if std::mem::take(&mut self.ctrl_click) => {}
                 PadOut::LeftDown => out.push(Event::MouseDown(self.x, self.y)),
                 PadOut::LeftUp => out.push(Event::MouseUp(self.x, self.y)),
                 PadOut::RightClick => out.push(Event::MouseRight(self.x, self.y)),
-                PadOut::Scroll(d) => self.scroll.pad(d, now_ms, &scfg),
+                PadOut::Scroll(d) => {
+                    self.scroll_from_pad = true;
+                    self.scroll.pad(d, now_ms, &scfg)
+                }
                 PadOut::ScrollEnd => self.scroll.pad_end(now_ms, &scfg),
             }
         }
@@ -253,6 +271,28 @@ impl InputState {
     }
 
     /// `abs_max` is the device's (max_x, max_y) when it is an absolute pointer (tablet, QEMU usb-tablet).
+    /// The input profile's view of a key press. True when it took the key (the events, if any, are in `out`).
+    fn profile_key(&mut self, code: u16, first: bool, out: &mut Vec<Event>) -> bool {
+        use iyakki_agent::inputprofile as ip;
+        let mac = crate::inputprofile::resolved() == ip::Resolved::Mac;
+        let swap = crate::inputprofile::swap_in_effect();
+        // in the Mac profile the keys are named by their print: the driver's swap is undone here, so it never swaps twice
+        let (command, option) = if mac {
+            let (a, m) = (self.alt, self.meta);
+            if swap { (a, m) } else { (m, a) }
+        } else {
+            (false, false)
+        };
+        let held = ip::Held { command, option, control: self.ctrl, shift: self.shift };
+        match crate::inputprofile::on_press(code, held, first) {
+            Some(evs) => {
+                out.extend(evs);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn feed(&mut self, r: Raw, abs_max: Option<(i32, i32)>) -> Vec<Event> {
         let mut out = Vec::new();
         match r.typ {
@@ -263,6 +303,7 @@ impl InputState {
                     crate::ui::set_shift_held(self.shift);
                 }
                 29 | 97 => self.ctrl = r.value != 0,
+                125 | 126 => self.meta = r.value != 0,
                 56 | 100 => {
                     self.alt = r.value != 0;
                     if r.value == 1 {
@@ -274,6 +315,12 @@ impl InputState {
                 // an absolute pointer (a touch monitor's mouse-like interface, a tablet) sends the button before the new position in
                 // the same frame: the click is made at the end of the frame, where the finger is, not where the last one was
                 BTN_LEFT if r.value == 1 && abs_max.is_some() => self.pending_touch = true,
+                // Mac profile: Control+click is a right click (the release after it is not a click)
+                BTN_LEFT if r.value == 1 && self.ctrl && crate::inputprofile::resolved() == iyakki_agent::inputprofile::Resolved::Mac => {
+                    self.ctrl_click = true;
+                    out.push(Event::MouseRight(self.x, self.y));
+                }
+                BTN_LEFT if r.value == 0 && std::mem::take(&mut self.ctrl_click) => {}
                 BTN_LEFT if r.value == 1 => out.push(Event::MouseDown(self.x, self.y)),
                 BTN_LEFT if r.value == 0 => out.push(Event::MouseUp(self.x, self.y)),
                 BTN_TOUCH if r.value == 1 => self.pending_touch = true,
@@ -293,6 +340,8 @@ impl InputState {
                         out.push(Event::Layout(k));
                     }
                 }
+                // the input profile: Command shortcuts and Option word jumps of the Mac profile, and the live "last key" row
+                c if (r.value == 1 || r.value == 2) && self.profile_key(c, r.value == 1, &mut out) => {}
                 c if r.value == 1 || r.value == 2 => {
                     if translate(c, self.shift, self.caps).is_none() && r.value == 1 && c < 0x100 {
                         crate::fnkeys::note_seen(c); // for Settings -> Keyboard: finding the code of a key
@@ -343,8 +392,14 @@ impl InputState {
                 let (legacy, hires) = (std::mem::take(&mut self.wheel_legacy), std::mem::take(&mut self.wheel_hires));
                 match (hires, legacy) {
                     (0, 0) => {}
-                    (0, clicks) => self.scroll.wheel(clicks * 120, &crate::scrolleng::config()),
-                    (units, _) => self.scroll.wheel(units, &crate::scrolleng::config()),
+                    (0, clicks) => {
+                        self.scroll_from_pad = false;
+                        self.scroll.wheel(clicks * 120, &crate::scrolleng::config())
+                    }
+                    (units, _) => {
+                        self.scroll_from_pad = false;
+                        self.scroll.wheel(units, &crate::scrolleng::config())
+                    }
                 }
                 if std::mem::take(&mut self.pending_touch) {
                     out.push(Event::MouseDown(self.x, self.y));
@@ -697,6 +752,29 @@ impl RepeatApplier {
             }
         }
     }
+}
+
+/// Opens the node of every touch screen again when the touch recovery asked for it (`iyakki_agent::touchrecover`, first step of its
+/// ladder). `seen` is the generation already handled by the caller (start it at the current one). Returns how many were reopened.
+pub fn apply_reopen(devs: &mut [Device], seen: &mut u64) -> usize {
+    use std::os::unix::fs::OpenOptionsExt;
+    let gen = iyakki_agent::touchrecover::reopen_generation();
+    if gen == *seen {
+        return 0;
+    }
+    *seen = gen;
+    let mut n = 0;
+    for d in devs.iter_mut().filter(|d| d.touch.is_some()) {
+        match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&d.path) {
+            Ok(f) => {
+                d.file = f;
+                n += 1;
+            }
+            Err(e) => log::info!("input: touch node {} could not be opened again: {e}", d.path),
+        }
+    }
+    log::info!("input: touch recovery: {n} touch node(s) opened again");
+    n
 }
 
 /// Open every usable keyboard/mouse not already open.
@@ -1350,5 +1428,73 @@ mod tests {
         let mut v = Vec::new();
         scan_devices(&mut v); // works (possibly empty) whether or not /dev/input exists
         let _ = poll_devices(&mut v, 1);
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    use iyakki_agent::keyboard::KeyboardSettings;
+
+    fn press(st: &mut InputState, code: u16) -> Vec<Event> {
+        let a = st.feed(Raw { typ: EV_KEY, code, value: 1 }, None);
+        st.feed(Raw { typ: EV_KEY, code, value: 0 }, None);
+        a
+    }
+    fn hold(st: &mut InputState, code: u16, on: bool) {
+        st.feed(Raw { typ: EV_KEY, code, value: on as i32 }, None);
+    }
+    fn profile(p: &str, swap: Option<bool>, apple: bool) {
+        let devs = if apple { "I: Bus=0003 Vendor=05ac Product=027b Version=0111\nN: Name=\"Apple Inc. Apple Internal Keyboard / Trackpad\"\nH: Handlers=kbd event2\n\n" } else { "" };
+        crate::inputprofile::refresh_from(&KeyboardSettings { profile: p.into(), swap_opt_cmd: swap, ..Default::default() }, devs);
+    }
+
+    #[test]
+    fn mac_profile_command_is_the_shortcut_key_and_pc_is_unchanged() {
+        let mut st = InputState::new(100, 100);
+        profile("mac", None, true);
+        hold(&mut st, 125, true); // left Command (Meta)
+        assert_eq!(press(&mut st, 46), vec![Event::Key(Key::Ctrl('c'))]);
+        assert_eq!(press(&mut st, 47), vec![Event::Key(Key::Ctrl('v'))]);
+        assert_eq!(press(&mut st, 16), vec![], "Command+Q does nothing");
+        assert_eq!(press(&mut st, 105), vec![Event::Key(Key::Home)]);
+        hold(&mut st, 125, false);
+        assert_eq!(press(&mut st, 46), vec![Event::Key(Key::Char('c'))], "plain c after Command is released");
+        hold(&mut st, 29, true);
+        assert_eq!(press(&mut st, 46), vec![Event::Key(Key::Ctrl('c'))], "Control+C stays Control+C");
+        hold(&mut st, 29, false);
+        hold(&mut st, 56, true); // Option
+        assert_eq!(press(&mut st, 105), vec![Event::Key(Key::Nav { nav: Nav::Left, shift: false, ctrl: true })]);
+        hold(&mut st, 56, false);
+        profile("pc", None, true);
+        hold(&mut st, 125, true);
+        assert_eq!(press(&mut st, 46), vec![Event::Key(Key::Char('c'))], "the Windows key does nothing in the PC profile");
+    }
+
+    #[test]
+    fn with_the_driver_swap_on_the_key_printed_command_is_still_command() {
+        let mut st = InputState::new(100, 100);
+        profile("mac", Some(true), true);
+        hold(&mut st, 56, true); // the kernel sends Alt for the swapped Command
+        assert_eq!(press(&mut st, 46), vec![Event::Key(Key::Ctrl('c'))]);
+        hold(&mut st, 56, false);
+        hold(&mut st, 125, true); // and Meta for the Option key: a word jump, not a shortcut
+        assert_eq!(press(&mut st, 46), vec![Event::Key(Key::Char('c'))]);
+        // a PC keyboard: the saved swap is not in effect, Meta is Command
+        profile("mac", Some(true), false);
+        assert_eq!(press(&mut st, 46), vec![Event::Key(Key::Ctrl('c'))]);
+    }
+
+    #[test]
+    fn control_click_is_a_right_click_only_in_the_mac_profile() {
+        let mut st = InputState::new(100, 100);
+        profile("mac", None, true);
+        hold(&mut st, 29, true);
+        let d = st.feed(Raw { typ: EV_KEY, code: BTN_LEFT, value: 1 }, None);
+        let u = st.feed(Raw { typ: EV_KEY, code: BTN_LEFT, value: 0 }, None);
+        assert!(matches!(d.as_slice(), [Event::MouseRight(..)]) && u.is_empty(), "{d:?} {u:?}");
+        profile("pc", None, true);
+        let d = st.feed(Raw { typ: EV_KEY, code: BTN_LEFT, value: 1 }, None);
+        assert!(matches!(d.as_slice(), [Event::MouseDown(..)]), "{d:?}");
     }
 }

@@ -44,6 +44,9 @@ struct Entry {
     user: String,
     created: u64,
     last: Instant,
+    /// The tenant this session works in after a switch (`None`: the one this service was started for). Never saved: a restart
+    /// puts everybody back in their home tenant.
+    tenant: Option<String>,
 }
 
 pub struct Tokens {
@@ -75,7 +78,7 @@ impl Tokens {
         let now = (self.now)();
         let mut m = self.map.lock().unwrap_or_else(|e| e.into_inner());
         for s in list.into_iter().filter(|s| now.saturating_sub(s.created) < self.lifetime).take(MAX_TOKENS) {
-            m.insert(s.h, Entry { user: s.user, created: s.created, last: Instant::now() });
+            m.insert(s.h, Entry { user: s.user, created: s.created, last: Instant::now(), tenant: None });
         }
     }
 
@@ -110,7 +113,7 @@ impl Tokens {
             return Err("too many people are signed in".into());
         }
         let t = new_token()?;
-        m.insert(hash_token(&t), Entry { user: user.into(), created: (self.now)(), last: Instant::now() });
+        m.insert(hash_token(&t), Entry { user: user.into(), created: (self.now)(), last: Instant::now(), tenant: None });
         self.save(&m);
         Ok(t)
     }
@@ -130,6 +133,28 @@ impl Tokens {
         }
         e.last = Instant::now();
         Some(e.user.clone())
+    }
+
+    /// The tenant a session was switched to, if it was (an ended session has none).
+    pub fn tenant_of(&self, token: &str) -> Option<String> {
+        let m = self.map.lock().ok()?;
+        let e = m.get(&hash_token(token))?;
+        if self.expired(e) {
+            return None;
+        }
+        e.tenant.clone()
+    }
+
+    /// Bind a session to a tenant (`None`: back to the home tenant). False when the session has ended.
+    pub fn set_tenant(&self, token: &str, tenant: Option<String>) -> bool {
+        let Ok(mut m) = self.map.lock() else { return false };
+        match m.get_mut(&hash_token(token)) {
+            Some(e) if !self.expired(e) => {
+                e.tenant = tenant;
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn revoke(&self, token: &str) {

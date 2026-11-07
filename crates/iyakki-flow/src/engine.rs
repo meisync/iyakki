@@ -37,11 +37,30 @@ pub struct EngineCfg {
     pub auto_tick: bool,
     /// Who the engine works for (audit lines and inbox notes).
     pub user: String,
+    /// Cloud tenants: who may lead and whether one more queued run may start (see `Gate`). `None` on a desktop.
+    pub gate: Option<Gate>,
+    /// Cloud tenants: the zone `local` means in cron triggers (the tenant's setting) instead of the host's own.
+    pub local_tz: Option<String>,
+}
+
+/// The cloud tenant's hooks into the engine. `lead` says whether this process is the one that runs the tenant's schedules (a replica
+/// without the lease still serves manual runs but starts nothing on a timer); `admit(flow, started_in_this_pass)` says whether one more
+/// queued run may start now (tenant and person quotas); a refused run stays queued and is asked again at the next pass.
+#[derive(Clone)]
+pub struct Gate {
+    pub lead: Arc<dyn Fn() -> bool + Send + Sync>,
+    pub admit: Arc<dyn Fn(&str, usize) -> bool + Send + Sync>,
+}
+
+impl std::fmt::Debug for Gate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Gate")
+    }
 }
 
 impl EngineCfg {
     pub fn new(dir: &std::path::Path) -> EngineCfg {
-        EngineCfg { dir: dir.to_path_buf(), max_runs: 8, auto_tick: false, user: "user".into() }
+        EngineCfg { dir: dir.to_path_buf(), max_runs: 8, auto_tick: false, user: "user".into(), gate: None, local_tz: None }
     }
 }
 
@@ -91,6 +110,8 @@ pub(crate) struct Inner {
     pub persist_lock: Mutex<()>,
     pub last_tick_ms: AtomicI64,
     pub threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// The last tick was made as the leader (a gate that says "not me" makes the next "me" reload the scheduler's file).
+    pub was_leading: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -373,14 +394,18 @@ pub fn bind_inputs(flow: &Flow, given: &Value) -> Result<Value, String> {
 
 impl Engine {
     pub fn new(cfg: EngineCfg, host: Arc<dyn Host>, reg: Arc<Registry>, clock: Arc<dyn Clock>, source: Arc<dyn FlowSource>) -> Engine {
+        let local_tz = cfg.local_tz.clone();
         let sched = Scheduler::new(Some(cfg.dir.join("sched.json")), Arc::new({
             let h = host.clone();
-            move |n: &str| h.tz(n)
+            move |n: &str| match (&local_tz, n.trim()) {
+                (Some(z), "") | (Some(z), "local") => h.tz(z),
+                _ => h.tz(n),
+            }
         }));
         let store = RunStore::new(&cfg.dir);
         let next = store.ids().iter().filter_map(|i| i.strip_prefix('r').and_then(|n| n.parse::<u64>().ok())).max().unwrap_or(0) + 1;
         let auto = cfg.auto_tick;
-        let inner = Arc::new(Inner { cfg, host, reg, clock, source, store, state: Mutex::new(BTreeMap::new()), next_id: AtomicU64::new(next), sched: Mutex::new(sched), halting: AtomicBool::new(false), persist_lock: Mutex::new(()), last_tick_ms: AtomicI64::new(0), threads: Mutex::new(Vec::new()) });
+        let inner = Arc::new(Inner { cfg, host, reg, clock, source, store, state: Mutex::new(BTreeMap::new()), next_id: AtomicU64::new(next), sched: Mutex::new(sched), halting: AtomicBool::new(false), persist_lock: Mutex::new(()), last_tick_ms: AtomicI64::new(0), threads: Mutex::new(Vec::new()), was_leading: AtomicBool::new(false) });
         let e = Engine { inner };
         if auto {
             e.start_background();
@@ -504,7 +529,15 @@ impl Engine {
                 }
             }
         }
+        let mut started = 0usize;
         for id in to_start {
+            let flow = inner.get(&id).map(|r| r.flow_id).unwrap_or_default();
+            if let Some(g) = &inner.cfg.gate {
+                if !(g.admit)(&flow, started) {
+                    break;
+                }
+            }
+            started += 1;
             crate::driver::spawn(inner, &id);
         }
     }
@@ -527,9 +560,17 @@ impl Engine {
         let busy = |f: &str| inner.flow_busy(f);
         let fp = |p: &str| host.file_fingerprint(p);
         let cal = |m: &str, a: i64, b: i64| host.calendar_starts(m, a, b);
-        let fires = {
+        let leading = inner.cfg.gate.as_ref().map_or(true, |g| (g.lead)());
+        let fires = if leading {
             let mut s = inner.sched.lock().unwrap_or_else(|e| e.into_inner());
+            if !inner.was_leading.swap(true, Ordering::SeqCst) && inner.cfg.gate.is_some() {
+                // another process may have fired ticks while this one did not lead: start from what is on the volume
+                s.reload();
+            }
             s.tick(now, &flows, &TickEnv { busy: &busy, fingerprint: &fp, calendar: &cal })
+        } else {
+            inner.was_leading.store(false, Ordering::SeqCst);
+            Vec::new()
         };
         for f in fires {
             let mut t = TriggerInfo { kind: "schedule".into(), by: format!("trigger {}", f.trigger), detail: if f.missed { "missed tick".into() } else { String::new() }, due_ms: Some(f.due_ms) };

@@ -38,6 +38,9 @@ case "$MODE" in tree|both|stick) command -v mke2fs >/dev/null || [ -x /usr/sbin/
 MKE2FS="$(command -v mke2fs || echo /usr/sbin/mke2fs)"
 [ -x "$S1" ] || die "no $S1: cargo build --release --target x86_64-unknown-linux-musl -p iyakki-stage1"
 for f in rootfs.cpio.zst bzImage iyakki-install-x86_64.img; do [ -s "$IMG/$f" ] || die "no $IMG/$f"; done
+# The kernel that goes on the boot volume: the one the build signed for Secure Boot (install-root/boot/bzImage) when there is one, else the plain one.
+# images/bzImage is the unsigned kernel; copying it made lean images that only start with Secure Boot off (found 2026-11-05 in a QEMU Secure Boot run).
+KERNEL="$IMG/bzImage"; [ ! -s "$IMG/install-root/boot/bzImage" ] || KERNEL="$IMG/install-root/boot/bzImage"
 [ -d "$IMG/install-root/EFI" ] || die "no $IMG/install-root"
 IMG="$(cd "$IMG" && pwd)"; mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"; W="$(mktemp -d "${TMPDIR:-/tmp}/lean-XXXXXX")"; trap 'rm -rf "$W"' EXIT
 ID="${IYAKKI_ROOT_ID:-$(date -u +%Y%m%d%H%M%S)}"
@@ -101,7 +104,7 @@ sed -n '/^# BEGIN lean-boot/,/^# END lean-boot/p' "$HERE/board/iyakki/grub.cfg" 
 [ "$MODE" != export ] || { echo "lean-image: exported tree, manifest, grub block and initrd-lean to $OUT"; exit 0; }
 
 # ---- the install template: bigger FAT volume with the lean files ----
-BOOTFILES=$(( $(stat -c %s "$OUT/initrd-lean") + $(stat -c %s "$IMG/bzImage") + $( [ -f "$OUT/root.sfs" ] && stat -c %s "$OUT/root.sfs" || echo 0 ) ))
+BOOTFILES=$(( $(stat -c %s "$OUT/initrd-lean") + $(stat -c %s "$KERNEL") + $( [ -f "$OUT/root.sfs" ] && stat -c %s "$OUT/root.sfs" || echo 0 ) ))
 [ "$MODE" != seed ] || [ "$NOFULL" = 1 ] || BOOTFILES=$(( BOOTFILES + $(stat -c %s "$IMG/rootfs.cpio.zst") ))   # the full initrd stays as the fallback
 SLACK=96; [ "$NOFULL" = 1 ] && SLACK=48
 [ "$FATMB" -gt 0 ] || FATMB=$(( BOOTFILES / 1048576 + SLACK ))
@@ -123,7 +126,7 @@ elif [ "$MODE" = seed ]; then
   "$MMD" -i "$FAT" ::boot ::EFI >/dev/null
   "$MCOPY" -i "$FAT" -s "$IMG/install-root/EFI" ::/ >/dev/null
   "$MCOPY" -i "$FAT" -s "$IMG/install-root/boot/grub" ::boot/ >/dev/null
-  "$MCOPY" -i "$FAT" "$IMG/bzImage" ::boot/bzImage
+  "$MCOPY" -i "$FAT" "$KERNEL" ::boot/bzImage
   [ "$NOFULL" = 1 ] || "$MCOPY" -i "$FAT" "$IMG/rootfs.cpio.zst" ::boot/initrd
   "$MCOPY" -i "$FAT" "$OUT/initrd-lean" ::boot/initrd-lean
   "$MCOPY" -i "$FAT" "$OUT/root.sfs" ::boot/root.sfs
@@ -131,9 +134,42 @@ else
 "$MMD" -i "$FAT" ::boot ::EFI >/dev/null
 "$MCOPY" -i "$FAT" -s "$IMG/install-root/EFI" ::/ >/dev/null
 "$MCOPY" -i "$FAT" -s "$IMG/install-root/boot/grub" ::boot/ >/dev/null
-"$MCOPY" -i "$FAT" "$IMG/bzImage" ::boot/bzImage
+"$MCOPY" -i "$FAT" "$KERNEL" ::boot/bzImage
 "$MCOPY" -i "$FAT" "$OUT/initrd-lean" ::boot/initrd
 [ ! -f "$OUT/root.sfs" ] || "$MCOPY" -i "$FAT" "$OUT/root.sfs" ::boot/root.sfs
+fi
+# IYAKKI_STICK_PACKAGES="FILE ...": the person's own add-on packages (for example the FFmpeg libraries of the browser's audio and video add-on, which the project
+# never ships) go to iyakki-packages/ on the boot volume. The installer clones the whole boot volume, so every disk installed from this stick has them,
+# and the add-on installer looks there (/.stage1/boot/iyakki-packages, read-only), also when the machine runs from the stick itself. Nothing is added by default.
+if [ -n "${IYAKKI_STICK_PACKAGES:-}" ]; then
+  "$MMD" -i "$FAT" ::iyakki-packages >/dev/null 2>&1 || true
+  for f in $IYAKKI_STICK_PACKAGES; do
+    [ -f "$f" ] || die "IYAKKI_STICK_PACKAGES: $f is not a file"
+    "$MCOPY" -o -i "$FAT" "$f" ::iyakki-packages/ || die "could not copy $f to the boot volume (is it full?)"
+    echo "lean-image: package $(basename "$f") -> iyakki-packages/"
+  done
+fi
+# the extra boot loader (iyakki-boot, boot-loader-stage.sh): its entries read the lean RAM disk like GRUB's plain entry does; nothing is added
+# when the loader program has not been built
+LD="$W/loader"; mkdir -p "$LD"
+sh "$HERE/boot-loader-stage.sh" "$LD" /boot/initrd-lean || true
+if [ -f "$LD/EFI/iyakki-boot/loader.efi" ]; then
+  "$MMD" -i "$FAT" ::EFI/iyakki-boot >/dev/null 2>&1 || true
+  if [ "${IYAKKI_LOADER_DEFAULT:-0}" = 1 ]; then
+    # loader-default (loader-default.sh, docs/BOOT-LOADER.md): the loader as shim's second stage / BOOTX64.EFI, GRUB as grub-recovery.efi, the
+    # test entry out of grub.cfg. Done on a copy of the template's EFI/BOOT (the template may already be loader-default: the script is idempotent).
+    mkdir -p "$LD/EFI"; cp -a "$IMG/install-root/EFI/BOOT" "$LD/EFI/BOOT"
+    [ ! -d "$IMG/install-root/EFI/IYAKKI" ] || cp -a "$IMG/install-root/EFI/IYAKKI" "$LD/EFI/IYAKKI"
+    if sh "$HERE/loader-default.sh" esp "$LD"; then
+      for f in "$LD"/EFI/BOOT/*; do "$MCOPY" -o -i "$FAT" "$f" "::EFI/BOOT/$(basename "$f")"; done
+      "$MCOPY" -i "$FAT" ::boot/grub/grub.cfg "$W/grub-ld.cfg"
+      sh "$HERE/loader-default.sh" grubcfg "$W/grub-ld.cfg"
+      "$MCOPY" -o -i "$FAT" "$W/grub-ld.cfg" ::boot/grub/grub.cfg
+    else
+      echo "lean-image: IYAKKI_LOADER_DEFAULT=1 but the loader could not be made the default: GRUB stays the default" >&2
+    fi
+  fi
+  "$MCOPY" -o -i "$FAT" "$LD"/EFI/iyakki-boot/* ::EFI/iyakki-boot/
 fi
 # disk: boot sector + GRUB core (first MiB) from the full template, then our partition table (FAT at 1 MiB, data after it)
 DISK="$OUT/iyakki-lean-x86_64.img"; rm -f "$DISK"

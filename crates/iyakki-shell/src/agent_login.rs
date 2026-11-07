@@ -247,7 +247,7 @@ impl LoginModal {
     pub fn new(agent: &'static str) -> LoginModal {
         let mut field = TextField::new("", false);
         field.max = 4096;
-        LoginModal { agent, stage: if agent == extagent::CLAUDE_CODE { Stage::Choose } else { Stage::Running }, method: 0, sess: None, snap: None, field, qr: None, relay: None, relay_tried: false, said: None, hidden: false, ended_away: false, clip_offer: None, after: None, home: None, started: false, finished_audited: false, scan: Scan::new(CamSource::system()), show_relay: false, screen_w: 0.0, last_qr: None }
+        LoginModal { agent, stage: if agent == extagent::CLAUDE_CODE { Stage::Choose } else { Stage::Running }, method: 0, sess: None, snap: None, field, qr: None, relay: None, relay_tried: false, said: None, hidden: false, ended_away: false, clip_offer: None, after: None, home: None, started: false, finished_audited: false, scan: Scan::new(CamSource::desktop()), show_relay: false, screen_w: 0.0, last_qr: None }
     }
 
     pub fn with_home(mut self, home: &std::path::Path) -> LoginModal {

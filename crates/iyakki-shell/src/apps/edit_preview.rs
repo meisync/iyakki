@@ -2,6 +2,7 @@
 //! `mdtext`), and the toolbar's Edit button (or the key `e`, Enter or Ctrl+E) switches that file to the text editor; Preview (Ctrl+E) goes
 //! back. The choice is kept per file for as long as the editor lives. The preview is of the text in the editor, so unsaved changes show.
 
+use crate::safeclamp::SafeClamp;
 use crate::gfx::{rgb, Gfx};
 use crate::mdtext::{self, Layout};
 use crate::ui::{Key, Nav, R, TEXT};
@@ -47,7 +48,7 @@ impl MdPreview {
 
     pub fn scroll_by(&mut self, notches: i32) {
         // a wheel notch is about three lines
-        self.scroll = (self.scroll - notches as f32 * 54.0).clamp(0.0, (self.page - self.view).max(0.0));
+        self.scroll = (self.scroll - notches as f32 * 54.0).clamp_safe(0.0, (self.page - self.view).max(0.0));
     }
 
     /// Keys that move the page. Returns whether the key was one of them.
@@ -63,7 +64,7 @@ impl MdPreview {
             Key::Char(' ') => self.scroll + page,
             _ => return false,
         };
-        self.scroll = to.clamp(0.0, (self.page - self.view).max(0.0));
+        self.scroll = to.clamp_safe(0.0, (self.page - self.view).max(0.0));
         true
     }
 
@@ -76,7 +77,7 @@ impl MdPreview {
         g.rrect(body.x, body.y, body.w, body.h, 10.0 * s, rgb(12, 15, 28));
         g.rrect_outline(body.x, body.y, body.w, body.h, 10.0 * s, 1.0, [accent[0], accent[1], accent[2], 46]);
         let pad = 18.0 * s;
-        let width = (body.w - 2.0 * pad - 10.0 * s).clamp(80.0, 920.0 * s);
+        let width = (body.w - 2.0 * pad - 10.0 * s).clamp_safe(80.0, 920.0 * s);
         let key = (hash(text), width as u32);
         if self.cache.as_ref().is_none_or(|c| (c.0, c.1) != key) {
             self.cache = Some((key.0, key.1, mdtext::layout_with(g, text, 15.5 * s, width, 1.32)));
@@ -84,7 +85,7 @@ impl MdPreview {
         let Some((_, _, l)) = self.cache.as_ref() else { return };
         self.page = l.height + 2.0 * pad;
         self.view = body.h;
-        self.scroll = self.scroll.clamp(0.0, (self.page - self.view).max(0.0));
+        self.scroll = self.scroll.clamp_safe(0.0, (self.page - self.view).max(0.0));
         let clip = R::new(body.x + 1.0, body.y + 1.0, body.w - 2.0, body.h - 2.0);
         let (x, y) = (body.x + pad, body.y + pad - self.scroll);
         g.clipped(clip, |g| mdtext::draw(g, l, x, y, TEXT, (clip.y, clip.y + clip.h), width));

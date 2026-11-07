@@ -186,3 +186,165 @@ fn a_cut_while_the_boot_files_are_replaced_is_reported_as_unfinished_and_the_nex
     assert!(status(r.dm.data_dir())["interrupted"].is_null());
     assert_eq!(data_tree(&r), data_before);
 }
+
+/// A payload with a new loader (and its config) in the boot loader's folder.
+fn loader_payload(r: &Rig, loader: &[u8]) -> (std::path::PathBuf, Manifest) {
+    let (dir, _) = payload(r, "0.1.0-alpha.2", "macweb", false, 7);
+    put(&dir, "EFI/iyakki-boot/loader.efi", loader);
+    put(&dir, "EFI/iyakki-boot/boot.cfg", b"timeout 3\nentry a\n kernel /boot/bzImage\n");
+    let list = list_boot(&dir).into_iter().filter(|(p, _)| p != MANIFEST).map(|(p, s)| (p.clone(), s, super::files::sha256_file(&dir.join(&p)).unwrap())).collect::<Vec<_>>();
+    let m = build_manifest(&dir, &list, None, None, "test.img").unwrap();
+    write_manifest(&dir, &m).unwrap();
+    (dir, m)
+}
+
+#[test]
+fn an_update_keeps_the_previous_boot_loader_beside_the_new_one() {
+    let r = rig("loader-prev");
+    put(&r.boot.root, "EFI/iyakki-boot/loader.efi", b"OLD LOADER");
+    put(&r.boot.root, "EFI/iyakki-boot/boot.cfg", b"timeout 1\n");
+    let (dir, m) = loader_payload(&r, b"NEW LOADER");
+    let free = || 500u64 << 20;
+    let e = env(&r, &free, None);
+    let p = plan(&e, &m, false).unwrap();
+    stage_all(&e, &dir, &m, &p.needs);
+    apply(&e, &m, false, "laptop").unwrap();
+    let d = r.boot.root.join("EFI/iyakki-boot");
+    assert_eq!(std::fs::read(d.join("loader.efi")).unwrap(), b"NEW LOADER");
+    assert_eq!(std::fs::read(d.join("loader.prev.efi")).unwrap(), b"OLD LOADER", "the loader the menu offers as the previous version");
+    assert!(std::fs::read_to_string(d.join("boot.cfg")).unwrap().contains("entry a"));
+    let left: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".upd")).collect();
+    assert!(left.is_empty(), "no temporary files stay behind: {left:?}");
+}
+
+#[test]
+fn a_power_cut_while_the_loader_is_written_leaves_the_old_loader_whole() {
+    let free = || 500u64 << 20;
+    // the loader is written near the end of an update (after the kernel and initramfs); sweep the cut over the whole write budget
+    let total: u64 = 2 * (7 << 20) + 4 * (1 << 20) + 400_000;
+    let mut saw_cut_with_old_loader = false;
+    for k in (0..total).step_by((total / 40).max(1) as usize) {
+        let r2 = rig(&format!("loader-cut-{k}"));
+        put(&r2.boot.root, "EFI/iyakki-boot/loader.efi", b"OLD LOADER");
+        let (dir2, m2) = loader_payload(&r2, &vec![7u8; 90_000]);
+        let left = AtomicU64::new(k);
+        let e2 = env(&r2, &free, Some(&left));
+        let p2 = plan(&e2, &m2, false).unwrap();
+        stage_all(&e2, &dir2, &m2, &p2.needs);
+        if apply(&e2, &m2, false, "laptop").is_err() {
+            let now = std::fs::read(r2.boot.root.join("EFI/iyakki-boot/loader.efi")).unwrap();
+            assert!(now == b"OLD LOADER" || now == vec![7u8; 90_000], "cut at {k}: the loader is half written ({} bytes)", now.len());
+            saw_cut_with_old_loader |= now == b"OLD LOADER";
+        }
+    }
+    assert!(saw_cut_with_old_loader);
+}
+
+#[test]
+fn the_loader_folder_is_recognised() {
+    assert!(in_loader_dir("EFI/iyakki-boot/boot.cfg") && in_loader_dir("efi/IYAKKI-BOOT/loader.efi"));
+    assert!(!in_loader_dir("EFI/BOOT/bootx64.efi") && !in_loader_dir("EFI/iyakki-boot") && !in_loader_dir("boot/iyakki-boot/x"));
+}
+
+/// A shim-chain boot volume (shim, MokManager, `grubx64.efi` = GRUB) and a payload of a loader-default image: `grubx64.efi` is the loader,
+/// `grub-recovery.efi` is the GRUB, and the loader's folder is there. `loader_default` false makes the GRUB-default payload (the way back).
+fn chain_payload(r: &Rig, version: &str, loader_default: bool, grub: &[u8], loader: &[u8]) -> (std::path::PathBuf, Manifest) {
+    let (dir, _) = payload(r, version, "macweb", true, 7);
+    put(&dir, "EFI/BOOT/grubx64.efi", if loader_default { loader } else { grub });
+    if loader_default {
+        put(&dir, "EFI/BOOT/grub-recovery.efi", grub);
+        put(&dir, "EFI/iyakki-boot/loader.efi", loader);
+        put(&dir, "EFI/iyakki-boot/boot.cfg", b"timeout 3\nentry recovery\n kind chain\n kernel /EFI/BOOT/grub-recovery.efi\n");
+    }
+    let list = list_boot(&dir).into_iter().filter(|(p, _)| p != MANIFEST).map(|(p, s)| (p.clone(), s, super::files::sha256_file(&dir.join(&p)).unwrap())).collect::<Vec<_>>();
+    let m = build_manifest(&dir, &list, None, None, "test.img").unwrap();
+    write_manifest(&dir, &m).unwrap();
+    (dir, m)
+}
+
+fn chain_rig(tag: &str, grub: &[u8]) -> Rig {
+    let r = rig(tag);
+    put(&r.boot.root, "EFI/BOOT/grubx64.efi", grub);
+    put(&r.boot.root, "EFI/BOOT/mmx64.efi", &super::tests_update::pseudo(1000, 4));
+    r
+}
+
+/// The first move of an installed GRUB-default image to a loader-default one: `grubx64.efi` (shim's second stage) is swapped from GRUB to the
+/// loader and GRUB appears as `grub-recovery.efi`. Whatever moment the power goes, the second stage is one whole file (GRUB or the loader), and
+/// as soon as it is the loader, GRUB's recovery copy is whole beside it.
+#[test]
+fn the_first_move_to_a_loader_default_image_never_leaves_the_second_stage_broken_or_without_recovery() {
+    let free = || 500u64 << 20;
+    let grub = vec![0x47u8; 400_000];
+    let loader = vec![0x4cu8; 90_000];
+    let total: u64 = 2 * (7 << 20) + 4 * (1 << 20) + 1_000_000;
+    let (mut saw_old, mut saw_new) = (false, false);
+    for k in (0..total).step_by((total / 60).max(1) as usize).chain([u64::MAX / 4]) {
+        let r = chain_rig(&format!("chain-cut-{k}"), &grub);
+        let (dir, m) = chain_payload(&r, "0.1.0-alpha.2", true, &grub, &loader);
+        let left = AtomicU64::new(k);
+        let e = env(&r, &free, Some(&left));
+        let p = plan(&e, &m, false).unwrap();
+        assert!(p.needs.iter().any(|n| n == "EFI/BOOT/grub-recovery.efi") && p.needs.iter().any(|n| n == "EFI/BOOT/grubx64.efi"), "{:?}", p.needs);
+        stage_all(&e, &dir, &m, &p.needs);
+        let res = apply(&e, &m, false, "laptop");
+        if k > total {
+            res.as_ref().unwrap();
+        }
+        let second = std::fs::read(r.boot.root.join("EFI/BOOT/grubx64.efi")).unwrap();
+        assert!(second == grub || second == loader, "cut at {k}: the second stage is half written ({} bytes)", second.len());
+        if second == loader {
+            saw_new = true;
+            assert_eq!(std::fs::read(r.boot.root.join("EFI/BOOT/grub-recovery.efi")).unwrap(), grub, "cut at {k}: the loader is the second stage but GRUB's recovery copy is not whole");
+            assert!(r.boot.root.join("EFI/iyakki-boot/boot.cfg").is_file() && r.boot.root.join("EFI/iyakki-boot/loader.efi").is_file(), "cut at {k}: loader files missing");
+        } else {
+            saw_old = true;
+        }
+        // a recovery copy, when present, is whole (written beside and renamed), and no temporary file is named like a boot program
+        if let Ok(rec) = std::fs::read(r.boot.root.join("EFI/BOOT/grub-recovery.efi")) {
+            assert_eq!(rec, grub, "cut at {k}: grub-recovery.efi is half written");
+        }
+        assert_eq!(std::fs::read(r.boot.root.join("EFI/BOOT/mmx64.efi")).unwrap(), super::tests_update::pseudo(1000, 4));
+        if res.is_ok() {
+            let left: Vec<String> = ["EFI/BOOT", "EFI/iyakki-boot"].iter().flat_map(|d| std::fs::read_dir(r.boot.root.join(d)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect::<Vec<_>>()).filter(|n| n.ends_with(".upd")).collect();
+            assert!(left.is_empty(), "{left:?}");
+        }
+    }
+    assert!(saw_old && saw_new, "the sweep must see a cut before and after the swap");
+}
+
+/// The way back: a GRUB-default pack puts GRUB on `grubx64.efi` again (atomically); the recovery copy and the loader's folder stay.
+#[test]
+fn a_grub_default_pack_puts_grub_back_as_the_second_stage_and_leaves_the_loader_files() {
+    let free = || 500u64 << 20;
+    let grub = vec![0x47u8; 400_000];
+    let loader = vec![0x4cu8; 90_000];
+    let r = chain_rig("chain-back", &loader);
+    put(&r.boot.root, "EFI/BOOT/grub-recovery.efi", &grub);
+    put(&r.boot.root, "EFI/iyakki-boot/loader.efi", &loader);
+    let (dir, m) = chain_payload(&r, "0.1.0-alpha.2", false, &grub, &loader);
+    let e = env(&r, &free, None);
+    let p = plan(&e, &m, false).unwrap();
+    stage_all(&e, &dir, &m, &p.needs);
+    apply(&e, &m, false, "laptop").unwrap();
+    assert_eq!(std::fs::read(r.boot.root.join("EFI/BOOT/grubx64.efi")).unwrap(), grub);
+    assert_eq!(std::fs::read(r.boot.root.join("EFI/BOOT/grub-recovery.efi")).unwrap(), grub);
+    assert_eq!(std::fs::read(r.boot.root.join("EFI/iyakki-boot/loader.efi")).unwrap(), loader);
+}
+
+#[test]
+fn the_boot_path_files_are_recognised_and_the_recovery_copy_is_written_before_the_second_stage() {
+    assert!(in_boot_chain("EFI/BOOT/grubx64.efi") && in_boot_chain("efi/boot/BOOTX64.EFI") && in_boot_chain("EFI/BOOT/grub-recovery.efi"));
+    assert!(!in_boot_chain("EFI/iyakki-boot/loader.efi") && !in_boot_chain("EFI/BOOT") && !in_boot_chain("boot/grub/grub.cfg"));
+    let r = chain_rig("chain-order", &[1u8; 1000]);
+    let (_, m) = chain_payload(&r, "0.1.0-alpha.2", true, &[1u8; 1000], &[2u8; 500]);
+    let free = || 500u64 << 20;
+    let e = env(&r, &free, None);
+    let p = plan(&e, &m, false).unwrap();
+    // the writes are logged in order by `apply`; here the rule itself: recovery, loader folder, others, then the by-name files
+    let rank = |n: &str| super::update::efi_write_rank_for_tests(n);
+    assert!(rank("EFI/BOOT/grub-recovery.efi") < rank("EFI/iyakki-boot/boot.cfg"));
+    assert!(rank("EFI/iyakki-boot/loader.efi") < rank("EFI/BOOT/grubx64.efi") && rank("EFI/iyakki-boot/loader.efi") < rank("EFI/BOOT/BOOTX64.EFI"));
+    assert!(rank("EFI/BOOT/mmx64.efi") < rank("EFI/BOOT/grubx64.efi"));
+    assert!(p.needs.len() >= 4);
+}

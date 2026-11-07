@@ -122,6 +122,76 @@ fn listing_and_download_work() {
 }
 
 #[test]
+fn the_upload_and_new_folder_forms_come_before_a_long_list_so_nobody_scrolls_to_find_them() {
+    let f = fixture();
+    for i in 0..300 {
+        std::fs::write(f.root.join(format!("file-{i:03}.txt")), b"x").unwrap();
+    }
+    let s = f.site(|c| {
+        c.upload = true;
+        c.mkdir = true;
+    });
+    let t = get(&s, "/").text();
+    let (up, mk, table) = (t.find("Upload files").unwrap(), t.find("New folder").unwrap(), t.find("<table").unwrap());
+    assert!(up < table && mk < table, "both forms are above the list of 300 files");
+    assert!(t.contains("class=bar"), "they sit in one compact bar");
+    // with uploads off there is no bar at all
+    let ro = f.site(|_| {});
+    assert!(!get(&ro, "/").text().contains("class=bar"));
+}
+
+#[test]
+fn a_package_drop_takes_only_the_add_on_package_and_never_overwrites() {
+    use crate::sharedfolder::package_name_ok;
+    for ok in ["ffmpeg-libs-6.1.5-linux-musl-x86_64.tar.gz", "ffmpeg-libs-6.1.5-linux-musl-aarch64.tar.gz", "ffmpeg-libs-6.1.5-linux-musl-x86_64.tar.gz.sha256"] {
+        assert!(package_name_ok(ok), "{ok}");
+    }
+    for bad in ["evil.sh", "ffmpeg-libs-6.1.5-linux-gnu-x86_64.tar.gz", "ffmpeg-libs-6.1.5-linux-musl-riscv.tar.gz", "ffmpeg-6.1.5-linux-musl-x86_64.tar.gz", "ffmpeg-libs-linux-musl-x86_64.tar.gz.exe", "a.tar.gz"] {
+        assert!(!package_name_ok(bad), "{bad}");
+    }
+    let f = fixture();
+    let s = f.site(|c| {
+        c.upload = true;
+        c.mkdir = false;
+        c.package_drop = true;
+    });
+    let name = "/ffmpeg-libs-6.1.5-linux-musl-x86_64.tar.gz";
+    assert_eq!(run(&s, Req::get(name).method("PUT").body(b"archive"), LAN).status, 201);
+    assert_eq!(std::fs::read(f.root.join(&name[1..])).unwrap(), b"archive");
+    assert_eq!(run(&s, Req::get(name).method("PUT").body(b"again"), LAN).status, 409, "never replaces a file");
+    for p in ["/evil.sh", "/notes.txt", "/ffmpeg-libs-6.1.5-linux-gnu-x86_64.tar.gz"] {
+        assert_eq!(run(&s, Req::get(p).method("PUT").body(b"x"), LAN).status, 400, "{p}");
+        assert!(!f.root.join(&p[1..]).exists());
+    }
+    let (ct, body) = multipart_body(&[("notes.txt", b"1")]);
+    assert_eq!(run(&s, Req::get("/").method("POST").with("content-type", &ct).body(&body), LAN).status, 400, "a form upload is held to the same names");
+    let r = run(&s, Req::get("/").method("POST").with("content-type", "application/x-www-form-urlencoded").body(b"mkdir=docs"), LAN);
+    assert_eq!(r.status, 405, "no new folders");
+}
+
+#[test]
+fn a_package_drop_is_made_only_for_the_local_packages_folder_with_a_password_and_a_short_life() {
+    let f = fixture();
+    let m = manager(&f, true);
+    let wrong = f.root.join("sub");
+    assert!(m.create_package_drop(&wrong, "long enough pw").unwrap_err().contains("local packages"), "any other folder is refused");
+    let good = f.root.join("local/packages");
+    std::fs::create_dir_all(&good).unwrap();
+    assert!(m.create_package_drop(&good, "short").is_err(), "a password of 8 characters or more");
+    let id = m.create_package_drop(&good, "long enough pw").unwrap();
+    let c = m.get(&id).unwrap();
+    assert!(c.package_drop && c.upload && !c.mkdir && !c.overwrite && c.access == Access::Password);
+    assert_eq!((c.expiry_secs, c.max_upload_mb), (600, 64));
+    assert!(c.pass_hash.starts_with("$argon2id$") && !std::fs::read_to_string(m.file()).unwrap().contains("long enough pw"));
+    // a second drop replaces the first
+    let id2 = m.create_package_drop(&good, "another long pw").unwrap();
+    assert_ne!(id, id2);
+    assert_eq!(m.list().iter().filter(|i| i.cfg.package_drop).count(), 1);
+    // it is not edited through the general form
+    assert!(m.update(&id2, &draft(&f)).unwrap_err().contains("not edited"));
+}
+
+#[test]
 fn path_traversal_is_refused_in_every_disguise() {
     let f = fixture();
     let s = f.site(|_| {});

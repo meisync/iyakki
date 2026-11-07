@@ -175,11 +175,23 @@ pub struct EgressProxy {
     hosts: HashMap<String, HostPolicy>,
     upstream: Arc<dyn Upstream>,
     pub max_response: usize,
+    /// An extra rule that can only NARROW what `hosts` allows (for example a tenant's egress policy): asked per host after the
+    /// allow-list; `Some(false)` denies, `Some(true)` and `None` leave the allow-list's answer.
+    narrow: Option<Narrowing>,
 }
+
+/// See [`EgressProxy::with_narrowing`].
+pub type Narrowing = Arc<dyn Fn(&str) -> Option<bool> + Send + Sync>;
 
 impl EgressProxy {
     pub fn new(upstream: Arc<dyn Upstream>) -> Self {
-        Self { hosts: HashMap::new(), upstream, max_response: 1 << 20 }
+        Self { hosts: HashMap::new(), upstream, max_response: 1 << 20, narrow: None }
+    }
+
+    /// Add a rule that can only narrow the allow-list; it never allows a host the list does not.
+    pub fn with_narrowing(mut self, f: Narrowing) -> Self {
+        self.narrow = Some(f);
+        self
     }
 
     /// Hosts currently allowed (lowercase).
@@ -209,6 +221,9 @@ impl NetBackend for EgressProxy {
     fn fetch(&self, method: &str, url: &str, body: &[u8]) -> Result<Vec<u8>, i32> {
         let host = iyakki_sec::url_host(url).ok_or(errno::DENIED)?;
         let policy = self.hosts.get(&host).ok_or(errno::DENIED)?;
+        if self.narrow.as_ref().is_some_and(|f| f(&host) == Some(false)) {
+            return Err(errno::DENIED);
+        }
         // Only the proxy's headers go out: the guest cannot set or override any.
         let mut headers = policy.inject_headers.clone();
         if method == "POST" && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
@@ -665,6 +680,23 @@ mod tests {
     }
     fn fake(resp: &str, status: u16) -> Arc<Fake> {
         Arc::new(Fake { resp: resp.as_bytes().to_vec(), status, seen: Mutex::new(vec![]) })
+    }
+
+    #[test]
+    fn a_narrowing_rule_can_only_deny() {
+        let up = fake("ok", 200);
+        let p = EgressProxy::new(up.clone())
+            .allow_host("a.example.com", HostPolicy::default())
+            .allow_host("b.example.com", HostPolicy::default())
+            .with_narrowing(Arc::new(|h: &str| match h {
+                "b.example.com" => Some(false),
+                "c.example.com" => Some(true), // a "yes" never adds a host the list lacks
+                _ => None,
+            }));
+        assert!(p.fetch("GET", "https://a.example.com/", b"").is_ok());
+        assert_eq!(p.fetch("GET", "https://b.example.com/", b""), Err(errno::DENIED));
+        assert_eq!(p.fetch("GET", "https://c.example.com/", b""), Err(errno::DENIED));
+        assert_eq!(up.seen.lock().unwrap().len(), 1);
     }
 
     #[test]

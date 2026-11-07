@@ -26,6 +26,20 @@ const HOLD_TICKS: u64 = 10;
 /// Clicks of the Home and Settings icons (`Event::Tab`).
 pub(super) const HOME_TAB: usize = 0x4D10;
 pub(super) const GEAR_TAB: usize = 0x4D11;
+/// The three buttons in the speaker's dropdown (`Event::Tab`): louder, quieter, mute or unmute.
+const BTN_UP: usize = 0x4D12;
+const BTN_DOWN: usize = 0x4D13;
+const BTN_MUTE: usize = 0x4D14;
+/// The per-sound rows under them (`Event::Tab`): the quieter button of row `i` is `BTN_SRC + 2 * i`, the louder one the next.
+const BTN_SRC: usize = 0x4D20;
+/// Most sounds listed, and the height of one row and of the heading above them (pixels of a 1.0 scale screen).
+const SRC_MAX: usize = 4;
+const SRC_ROW: f32 = 34.0;
+const SRC_HEAD: f32 = 26.0;
+/// A step of a sound's own level, percent.
+const SRC_STEP: u32 = 10;
+/// The slider strip at the left of the dropdown (pixels of a 1.0 scale screen); the buttons stand right of it.
+const STRIP: f32 = 56.0;
 
 /// The icons every top bar shares, in the order they stand on the bar from left to right. When the bar is too narrow the leftmost go
 /// first: Home is kept longest, then the speaker, then Settings.
@@ -103,14 +117,24 @@ pub(super) struct BarSlots {
     pub count: usize,
 }
 
-/// The popover's panel and the slider track inside it, under the icon `icon` of a screen `w` wide.
-pub(super) fn pop_rects(icon: R, w: u32, s: f32) -> (R, R) {
-    let (pw, ph) = (46.0 * s, 196.0 * s);
+/// The popover's panel and the slider track inside it, under the icon `icon` of a screen `w` wide. The slider stands in the left
+/// strip of the panel ([`STRIP`] wide), the buttons ([`pop_buttons`]) right of it.
+pub(super) fn pop_rects(icon: R, w: u32, s: f32, rows: usize) -> (R, R) {
+    let (pw, ph) = (176.0 * s, 196.0 * s);
+    // the slider keeps its size; the panel grows downwards for the list of sounds
+    let extra = if rows == 0 { 0.0 } else { (SRC_HEAD + rows.min(SRC_MAX) as f32 * SRC_ROW) * s };
     let x = (icon.x + icon.w / 2.0 - pw / 2.0).clamp_safe(8.0 * s, (w as f32 - pw - 8.0 * s).max(8.0 * s));
     let y = icon.y + icon.h + 8.0 * s;
-    let panel = R::new(x, y, pw, ph);
-    let track = R::new(x + pw / 2.0 - 6.0 * s, y + 20.0 * s, 12.0 * s, ph - 20.0 * s - 44.0 * s);
+    let panel = R::new(x, y, pw, ph + extra);
+    let track = R::new(x + STRIP * s / 2.0 - 6.0 * s, y + 20.0 * s, 12.0 * s, ph - 20.0 * s - 44.0 * s);
     (panel, track)
+}
+
+/// The dropdown's three buttons, top to bottom: Louder, Quieter, Mute or Unmute.
+pub(super) fn pop_buttons(panel: R, s: f32) -> [R; 3] {
+    let (x, w, h, gap) = (panel.x + STRIP * s, panel.w - STRIP * s - 10.0 * s, 40.0 * s, 12.0 * s);
+    let top = panel.y + (196.0 * s - (3.0 * h + 2.0 * gap)) / 2.0;
+    [R::new(x, top, w, h), R::new(x, top + h + gap, w, h), R::new(x, top + 2.0 * (h + gap), w, h)]
 }
 
 /// The percent for a pointer at height `y` on the track (the bottom is 0, the top 100).
@@ -126,8 +150,13 @@ pub(super) struct VolUi {
     pub kb: bool,
     /// The icon is pressed: (heartbeat of the press, where, whether the pointer has moved).
     pub press: Option<(u64, (f32, f32), bool)>,
+    /// The press on the icon closed a dropdown that was open: its release must not open it again.
+    pub closing: bool,
     /// The icons drawn in the last frame (every display's bar).
     pub rects: Vec<Placed>,
+    /// The sounds playing, with the person's level for each (percent), listed under the buttons; read when the dropdown opens and
+    /// again about twice a second while it is open.
+    pub sources: Vec<(String, u32)>,
 }
 
 impl Shell {
@@ -303,10 +332,42 @@ impl Shell {
         self.fn_volume_with(|s| fnkeys::volume_apply(s, VolOp::Mute));
     }
 
+    /// Read which sounds are playing and the person's level for each (the dropdown lists them).
+    pub(super) fn vol_refresh_sources(&mut self) {
+        let mut now = iyakki_agent::mixer::active_sources();
+        now.truncate(SRC_MAX);
+        if now != self.vol.sources {
+            self.vol.sources = now;
+            self.stale = true;
+        }
+    }
+
+    /// Row `i` of the list of sounds: its own level goes one step louder or quieter (it multiplies the master volume; 100 is the full
+    /// level and is kept as "no setting").
+    fn vol_source_step(&mut self, i: usize, louder: bool) {
+        let Some((label, pct)) = self.vol.sources.get(i).cloned() else { return };
+        let now = if louder { (pct + SRC_STEP).min(100) } else { pct.saturating_sub(SRC_STEP) };
+        let name = label.clone();
+        match self.env.services.update_sound(move |st| {
+            if now >= 100 {
+                st.source_levels.remove(&name);
+            } else {
+                st.source_levels.insert(name, now);
+            }
+        }) {
+            Ok(_) => {
+                if let Some(row) = self.vol.sources.get_mut(i) {
+                    row.1 = now;
+                }
+            }
+            Err(e) => self.say(e),
+        }
+    }
+
     /// The slider moved to height `y`: the master volume becomes that percent (and the sound comes on).
     fn vol_to_y(&mut self, y: f32) {
         let Some((icon, (w, h))) = self.extra_entry(Extra::Speaker) else { return };
-        let (_, track) = pop_rects(icon, w, scale_for(w, h));
+        let (_, track) = pop_rects(icon, w, scale_for(w, h), self.vol.sources.len());
         let pct = pct_at(track, y);
         let now = self.env.services.sound_settings();
         if now.volume_pct == pct && !now.muted {
@@ -351,7 +412,7 @@ impl Shell {
         }
         let Some((icon, (w, h))) = self.extra_entry(Extra::Speaker) else { return false };
         let s = scale_for(w, h);
-        let (panel, _) = pop_rects(icon, w, s);
+        let (panel, _) = pop_rects(icon, w, s, self.vol.sources.len());
         match ev {
             // the wheel over the icon (or the slider) changes the volume, 5 % a notch, louder upwards
             Event::Scroll(d) if *d != 0 && (icon.contains(self.mouse.0, self.mouse.1) || (self.vol.open && panel.contains(self.mouse.0, self.mouse.1))) => {
@@ -367,8 +428,9 @@ impl Shell {
                     None => {
                         self.vol.press = Some((self.tick, at, false));
                         if self.vol.open && self.vol.kb {
-                            self.vol_close(); // the slider the keyboard opened goes when the icon is pressed again
+                            self.vol_close(); // the dropdown a click or the keyboard opened goes when the icon is pressed again
                             self.vol.press = Some((self.tick, at, false));
+                            self.vol.closing = true;
                         }
                     }
                     Some((t, from, moved)) => {
@@ -388,18 +450,43 @@ impl Shell {
                 true
             }
             // a press or drag on the slider itself
-            Event::AreaAt(AREA_POP, _, dy) => {
-                self.vol_to_y(panel.y + dy);
+            Event::AreaAt(AREA_POP, dx, dy) => {
+                if *dx <= STRIP * s {
+                    self.vol_to_y(panel.y + dy);
+                }
+                self.stale = true;
+                true
+            }
+            // the dropdown's buttons
+            Event::Tab(t) if self.vol.open && (BTN_SRC..BTN_SRC + 2 * SRC_MAX).contains(t) => {
+                self.vol_source_step((*t - BTN_SRC) / 2, (*t - BTN_SRC) % 2 == 1);
+                self.stale = true;
+                true
+            }
+            Event::Tab(BTN_UP) if self.vol.open => {
+                self.fn_volume(VolOp::Up);
+                self.stale = true;
+                true
+            }
+            Event::Tab(BTN_DOWN) if self.vol.open => {
+                self.fn_volume(VolOp::Down);
+                self.stale = true;
+                true
+            }
+            Event::Tab(BTN_MUTE) if self.vol.open => {
+                self.vol_toggle_mute();
                 self.stale = true;
                 true
             }
             Event::MouseUp(..) => {
                 let Some((_, _, moved)) = self.vol.press.take() else { return false };
                 let shown = self.vol.open;
-                if !moved && !shown {
-                    // a plain click
+                let closing = std::mem::take(&mut self.vol.closing);
+                if !moved && !shown && !closing {
+                    // a plain click opens the dropdown: the slider, Louder, Quieter and Mute (it stays until Esc or a click elsewhere)
                     if self.has_sound_output() {
-                        self.vol_toggle_mute();
+                        self.vol.open = true;
+                        self.vol.kb = true;
                     } else {
                         self.fn_notice(fnkeys_impl::NO_SOUND);
                     }
@@ -411,6 +498,9 @@ impl Shell {
                 true
             }
             Event::Tick => {
+                if self.vol.open && self.tick % 15 == 0 {
+                    self.vol_refresh_sources();
+                }
                 if let Some((t, _, false)) = self.vol.press {
                     if !self.vol.open && self.tick.saturating_sub(t) >= HOLD_TICKS && self.has_sound_output() {
                         self.vol.open = true; // held: show the slider
@@ -500,7 +590,7 @@ impl Shell {
                     let sound = self.env.services.sound_settings();
                     let st = self.speaker_state();
                     if self.vol.open && me == self.panes_active_display() {
-                        let (panel, track) = pop_rects(icon, w, s);
+                        let (panel, track) = pop_rects(icon, w, s, self.vol.sources.len());
                         crate::fx::modal_panel(g, panel, s * 0.6, crate::fx::CYAN, false);
                         let frac = if sound.muted { 0.0 } else { sound.volume_pct.min(100) as f32 / 100.0 };
                         g.rrect(track.x, track.y, track.w, track.h, track.w / 2.0, rgb(40, 48, 78));
@@ -512,8 +602,40 @@ impl Shell {
                         g.circle(track.x + track.w / 2.0, ky, 9.0 * s, TEXT);
                         let label = if matches!(st, Speaker::Muted) { "Muted".to_string() } else { format!("{}%", sound.volume_pct.min(100)) };
                         let lw = g.text_width(13.0 * s, &label, Face::Bold);
-                        g.text(panel.x + (panel.w - lw) / 2.0, panel.y + panel.h - 30.0 * s, 13.0 * s, TEXT, &label, Face::Bold);
+                        g.text(panel.x + (STRIP * s - lw) / 2.0, panel.y + 196.0 * s - 30.0 * s, 13.0 * s, TEXT, &label, Face::Bold);
                         g.hit(panel, Event::Area(AREA_POP), "volume slider");
+                        let muted = matches!(st, Speaker::Muted);
+                        for (r, text, tab, name) in pop_buttons(panel, s).into_iter().zip([("Louder  +", BTN_UP, "volume louder"), ("Quieter  -", BTN_DOWN, "volume quieter"), (if muted { "Unmute" } else { "Mute" }, BTN_MUTE, "volume mute")]).map(|(r, (t, e, n))| (r, t, e, n)) {
+                            let hot = g.hovered(r);
+                            let ink = crate::fx::pill(g, r, s, crate::fx::CYAN, hot, true);
+                            let tw = g.text_width(13.0 * s, text, Face::Bold);
+                            g.text(r.x + (r.w - tw) / 2.0, r.y + (r.h - 13.0 * s) / 2.0 - 1.0 * s, 13.0 * s, ink, text, Face::Bold);
+                            g.hit(r, Event::Tab(tab), name);
+                        }
+                        if !self.vol.sources.is_empty() {
+                            let y0 = panel.y + 196.0 * s;
+                            g.rect(panel.x + 12.0 * s, y0 - 2.0 * s, panel.w - 24.0 * s, 1.0, [255, 255, 255, 30]);
+                            g.text(panel.x + 14.0 * s, y0 + 5.0 * s, 12.0 * s, MUTED, "Sounds", Face::Bold);
+                            for (i, (name, pct)) in self.vol.sources.iter().take(SRC_MAX).enumerate() {
+                                let ry = y0 + (SRC_HEAD + i as f32 * SRC_ROW) * s;
+                                let shown: String = name.chars().next().map(|c| c.to_uppercase().collect::<String>() + &name[c.len_utf8()..]).unwrap_or_default();
+                                let shown = g.fit(13.0 * s, &shown, Face::Bold, 62.0 * s);
+                                g.text(panel.x + 14.0 * s, ry + 7.0 * s, 13.0 * s, TEXT, &shown, Face::Bold);
+                                let (bw, bh) = (28.0 * s, 26.0 * s);
+                                let down = R::new(panel.x + panel.w - 12.0 * s - 2.0 * bw - 46.0 * s, ry, bw, bh);
+                                let up = R::new(down.x + bw + 46.0 * s, ry, bw, bh);
+                                for (r, text, tab, hit) in [(down, "-", BTN_SRC + 2 * i, "sound quieter"), (up, "+", BTN_SRC + 2 * i + 1, "sound louder")] {
+                                    let hot = g.hovered(r);
+                                    let ink = crate::fx::pill(g, r, s, crate::fx::CYAN, hot, true);
+                                    let tw = g.text_width(14.0 * s, text, Face::Bold);
+                                    g.text(r.x + (r.w - tw) / 2.0, r.y + (r.h - 14.0 * s) / 2.0 - 1.0 * s, 14.0 * s, ink, text, Face::Bold);
+                                    g.hit(r, Event::Tab(tab), hit);
+                                }
+                                let pl = format!("{pct}%");
+                                let pw = g.text_width(12.0 * s, &pl, Face::Sans);
+                                g.text(down.x + bw + (46.0 * s - pw) / 2.0, ry + 7.0 * s, 12.0 * s, MUTED, &pl, Face::Sans);
+                            }
+                        }
                     } else if g.hovered(icon) && self.vol.press.is_none() {
                         draw_clock_tip(g, w, h, s, icon, &st.tip(&sound));
                     }

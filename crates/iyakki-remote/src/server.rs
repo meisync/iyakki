@@ -28,6 +28,7 @@ struct Shared {
     gate: Arc<dyn Gate>,
     sessions: Sessions,
     logins: RateLimit,
+    replay: crate::devicekeys::Replay,
     tls: Option<Arc<rustls::ServerConfig>>,
     open: AtomicUsize,
     stop: AtomicBool,
@@ -81,7 +82,7 @@ impl Server {
         let listener = TcpListener::bind(&cfg.addr)?;
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
-        let shared = Arc::new(Shared { gate, sessions: Sessions::new(), logins: RateLimit::new(10), tls: cfg.tls, open: AtomicUsize::new(0), stop: AtomicBool::new(false) });
+        let shared = Arc::new(Shared { gate, sessions: Sessions::new(), logins: RateLimit::new(10), replay: crate::devicekeys::Replay::new(), tls: cfg.tls, open: AtomicUsize::new(0), stop: AtomicBool::new(false) });
         let s = shared.clone();
         std::thread::Builder::new().name("iyakki-web-accept".into()).spawn(move || accept_loop(listener, s))?;
         Ok(Server { shared, addr })
@@ -201,7 +202,8 @@ fn route(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
     let secure = sh.tls.is_some();
     let session = req.cookie(COOKIE).and_then(|t| sh.sessions.find(t));
     match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "/") => Response::html(page::INDEX),
+        // the page may use this device's camera and microphone (and play sound): said out loud, so no default of a browser can differ
+        ("GET", "/") => Response::html(page::INDEX).header("Permissions-Policy", page::PERMISSIONS_POLICY),
         ("GET", "/decoder.js") => Response::new(200, "text/javascript; charset=utf-8", page::DECODER_JS),
         ("GET", "/media.js") => Response::new(200, "text/javascript; charset=utf-8", page::MEDIA_JS),
         ("GET", "/healthz") => Response::new(200, "text/plain", "ok"),
@@ -230,16 +232,83 @@ fn route(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
                 Err(LoginError::Other(e)) => Response::error(503, &e),
             }
         }
+        // device sign-in (devicekeys.rs): an Ed25519 signature instead of a password, the same session token after it
+        ("POST", "/api/login-key") => {
+            if !sh.logins.allow(&peer.ip().to_string()) {
+                return Response::error(429, "too many tries, wait a minute");
+            }
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let refused = || Response::error(401, crate::devicekeys::REFUSED);
+            let Some(h) = req.header("authorization") else { return refused() };
+            let Ok((user, key)) = crate::devicekeys::verify_sign_in(h, &req.body, now, &|u| sh.gate.device_keys(u), &sh.replay) else { return refused() };
+            match sh.gate.login_key(&user) {
+                Ok(screen) => match sh.sessions.create_via(&user, screen, Some(iyakki_link::sigscheme::fingerprint(&key))) {
+                    Ok((token, csrf)) => Response::json(200, &serde_json::json!({ "user": user, "csrf": csrf })).header("Set-Cookie", &cookie_header(&token, secure)),
+                    Err(e) => Response::error(503, &e),
+                },
+                Err(LoginError::Invalid | LoginError::Throttled(_)) => refused(),
+                Err(LoginError::Other(e)) => Response::error(503, &e),
+            }
+        }
+        // enrolling and revoking a device key: by a signed-in person (cookie, CSRF value, this origin), for their own account only
+        ("GET", "/api/device-keys") => match session {
+            Some(s) => Response::json(200, &serde_json::json!({ "keys": sh.gate.list_device_keys(&s.user) })),
+            None => Response::error(401, "not signed in"),
+        },
+        ("POST", "/api/device-keys" | "/api/device-keys/revoke") => {
+            let Some(s) = session else { return Response::error(401, "not signed in") };
+            if !same_origin(req) || !req.header("x-csrf").is_some_and(|c| session::same(c, &s.csrf)) {
+                return Response::error(403, "not allowed from here");
+            }
+            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&req.body) else { return Response::error(400, "bad request") };
+            if req.path == "/api/device-keys" {
+                let Some(key) = v.get("key").and_then(|k| k.as_str()) else { return Response::error(400, "send {\"key\": \"ssh-ed25519 AAAA...\"}") };
+                return match sh.gate.enroll_device_key(&s.user, key) {
+                    Ok(fp) => Response::json(200, &serde_json::json!({ "fingerprint": fp })),
+                    Err(e) => Response::error(400, &e),
+                };
+            }
+            let Some(fp) = v.get("fingerprint").and_then(|k| k.as_str()) else { return Response::error(400, "send {\"fingerprint\": \"SHA256:...\"}") };
+            match sh.gate.revoke_device_key(&s.user, fp) {
+                Ok(true) => Response::json(200, &serde_json::json!({ "revoked": true, "sessions_ended": sh.sessions.end_via_key(&s.user, fp) })),
+                Ok(false) => Response::error(404, "no such key"),
+                Err(e) => Response::error(400, &e),
+            }
+        }
         ("POST", "/api/logout") => {
             let Some(token) = req.cookie(COOKIE) else { return Response::error(401, "not signed in") };
             match session {
                 Some(s) if same_origin(req) && req.header("x-csrf").is_some_and(|c| session::same(c, &s.csrf)) => {
                     sh.sessions.end(token);
+                    if let Some(api) = sh.gate.api() {
+                        api.forget(token);
+                    }
                     Response::json(200, &serde_json::json!({ "ok": true })).header("Set-Cookie", &format!("{COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"))
                 }
                 Some(_) => Response::error(403, "not allowed from here"),
                 None => Response::error(401, "not signed in"),
             }
+        }
+        // the web UI's own files (plain HTML, CSS and JS compiled in): no sign-in, nothing private in them, GET only
+        (_, p) if iyakki_agent::webservice::ui::is_ui_path(p) => {
+            let r = iyakki_agent::webservice::ui::serve(req).unwrap_or_else(|| Response::error(404, "not found"));
+            if secure { r.header("Strict-Transport-Security", "max-age=31536000") } else { r }
+        }
+        // the web service's API for that page, behind the same sign-in: its own login, or this server's session (embed.rs)
+        (_, p) if iyakki_agent::webservice::embed::owns(p) => {
+            let Some(api) = sh.gate.api() else { return Response::error(404, "not found") };
+            let cookie = req.cookie(COOKIE);
+            let desk = cookie.zip(session.as_ref()).map(|(c, s)| iyakki_agent::webservice::embed::DesktopSession { cookie: c, user: &s.user });
+            let mut r = api.handle(req, peer.ip(), desk);
+            // signing out from the page ends the desktop session too, so a reload does not sign back in
+            if req.path == "/api/v1/logout" && req.method == "POST" && r.status == 200 {
+                if let Some(c) = cookie {
+                    sh.sessions.end(c);
+                    api.forget(c);
+                    r = r.header("Set-Cookie", &format!("{COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"));
+                }
+            }
+            if secure { r.header("Strict-Transport-Security", "max-age=31536000") } else { r }
         }
         // the sign-in relay page (a login waiting for a code to be pasted from a phone): answered only to the local network
         ("GET" | "POST", p) if p.starts_with("/login/") => crate::relay::respond(req, peer.ip()).unwrap_or_else(|| Response::error(404, "not found")),
@@ -373,6 +442,11 @@ fn serve_screen(conn: &mut Conn, screen: &mut dyn crate::screen::Screen, sh: &Sh
                         Input::AudioOut(on) => {
                             if let Some(m) = &media {
                                 m.set_audio_out(on);
+                            }
+                        }
+                        Input::Sink(mode) => {
+                            if let Some(m) = &media {
+                                m.set_sink_mode(mode);
                             }
                         }
                         Input::Rich { .. } => {}

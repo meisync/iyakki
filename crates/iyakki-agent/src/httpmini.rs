@@ -64,52 +64,71 @@ pub fn parse(buf: &[u8]) -> Parse {
     parse_limited(buf, MAX_BODY)
 }
 
-/// [`parse`] with another limit for the body (developer mode takes packages of several megabytes).
-pub fn parse_limited(buf: &[u8], max_body: usize) -> Parse {
+/// The head of a request, parsed without waiting for (or limiting) the body: the body is left to the caller to stream.
+pub struct Head {
+    /// The request with an empty body.
+    pub req: Request,
+    /// Where the body starts in the buffer.
+    pub body_at: usize,
+    pub content_length: Option<u64>,
+}
+
+/// Parse the head only. `Ok(None)` when the head is not complete yet.
+pub fn parse_head(buf: &[u8]) -> Result<Option<Head>, (u16, &'static str)> {
     let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
-        return if buf.len() > MAX_HEAD { Parse::Bad(431, "request headers too large") } else { Parse::Incomplete };
+        return if buf.len() > MAX_HEAD { Err((431, "request headers too large")) } else { Ok(None) };
     };
     if head_end > MAX_HEAD {
-        return Parse::Bad(431, "request headers too large");
+        return Err((431, "request headers too large"));
     }
-    let Ok(head) = std::str::from_utf8(&buf[..head_end]) else { return Parse::Bad(400, "bad request") };
+    let Ok(head) = std::str::from_utf8(&buf[..head_end]) else { return Err((400, "bad request")) };
     let mut lines = head.split("\r\n");
     let mut first = lines.next().unwrap_or("").split(' ');
     let (Some(method), Some(target), Some(version), None) = (first.next(), first.next(), first.next(), first.next()) else {
-        return Parse::Bad(400, "bad request line");
+        return Err((400, "bad request line"));
     };
     if !version.starts_with("HTTP/1.") {
-        return Parse::Bad(505, "HTTP version not supported");
+        return Err((505, "HTTP version not supported"));
     }
     if !target.starts_with('/') || target.contains(['\0', '\\']) {
-        return Parse::Bad(400, "bad path");
+        return Err((400, "bad path"));
     }
     let mut headers = HashMap::new();
     for l in lines {
-        let Some((k, v)) = l.split_once(':') else { return Parse::Bad(400, "bad header") };
+        let Some((k, v)) = l.split_once(':') else { return Err((400, "bad header")) };
         if headers.len() >= 64 {
-            return Parse::Bad(431, "too many headers");
+            return Err((431, "too many headers"));
         }
         headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
     }
     if headers.contains_key("transfer-encoding") {
-        return Parse::Bad(501, "chunked requests are not supported");
+        return Err((501, "chunked requests are not supported"));
     }
-    let len = match headers.get("content-length") {
-        None => 0,
-        Some(v) => match v.parse::<usize>() {
-            Ok(n) if n <= max_body => n,
-            Ok(_) => return Parse::Bad(413, "request body too large"),
-            Err(_) => return Parse::Bad(400, "bad content length"),
-        },
+    let content_length = match headers.get("content-length") {
+        None => None,
+        Some(v) => Some(v.parse::<u64>().map_err(|_| (400, "bad content length"))?),
     };
-    let body_at = head_end + 4;
-    if buf.len() < body_at + len {
-        return Parse::Incomplete;
-    }
     let (path, q) = target.split_once('?').unwrap_or((target, ""));
     let query = q.split('&').filter(|p| !p.is_empty()).map(|p| p.split_once('=').unwrap_or((p, ""))).map(|(k, v)| (percent_decode(k), percent_decode(v))).collect();
-    Parse::Done(Request { method: method.to_ascii_uppercase(), path: percent_decode(path), query, headers, body: buf[body_at..body_at + len].to_vec() })
+    Ok(Some(Head { req: Request { method: method.to_ascii_uppercase(), path: percent_decode(path), query, headers, body: Vec::new() }, body_at: head_end + 4, content_length }))
+}
+
+/// [`parse`] with another limit for the body (developer mode takes packages of several megabytes).
+pub fn parse_limited(buf: &[u8], max_body: usize) -> Parse {
+    let h = match parse_head(buf) {
+        Ok(Some(h)) => h,
+        Ok(None) => return Parse::Incomplete,
+        Err((code, msg)) => return Parse::Bad(code, msg),
+    };
+    let len = match h.content_length {
+        None => 0,
+        Some(n) if n <= max_body as u64 => n as usize,
+        Some(_) => return Parse::Bad(413, "request body too large"),
+    };
+    if buf.len() < h.body_at + len {
+        return Parse::Incomplete;
+    }
+    Parse::Done(Request { body: buf[h.body_at..h.body_at + len].to_vec(), ..h.req })
 }
 
 pub struct Response {
@@ -124,12 +143,14 @@ fn reason(status: u16) -> &'static str {
         200 => "OK",
         204 => "No Content",
         303 => "See Other",
+        308 => "Permanent Redirect",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         409 => "Conflict",
+        411 => "Length Required",
         413 => "Payload Too Large",
         429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
@@ -163,7 +184,14 @@ impl Response {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = format!("HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n", self.status, reason(self.status), self.body.len()).into_bytes();
+        let mut out = self.to_head_bytes(self.body.len() as u64);
+        out.extend_from_slice(&self.body);
+        out
+    }
+
+    /// The status line and headers for a body of `content_length` bytes that the caller writes itself (a streamed download).
+    pub fn to_head_bytes(&self, content_length: u64) -> Vec<u8> {
+        let mut out = format!("HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n", self.status, reason(self.status), content_length).into_bytes();
         // the page runs nothing from outside and may not be put in a frame
         for (k, v) in [
             ("X-Content-Type-Options", "nosniff"),
@@ -182,7 +210,6 @@ impl Response {
             out.extend_from_slice(format!("{k}: {v}\r\n").as_bytes());
         }
         out.extend_from_slice(b"\r\n");
-        out.extend_from_slice(&self.body);
         out
     }
 }

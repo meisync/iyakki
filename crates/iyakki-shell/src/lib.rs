@@ -9,6 +9,7 @@ mod design_tests;
 #[cfg(test)]
 mod upgrade_tests;
 pub mod shaping;
+pub mod theme;
 pub mod uisize;
 pub mod links;
 pub mod mdtext;
@@ -21,6 +22,7 @@ pub mod ctxmenu;
 pub mod hwcheck;
 pub mod ui;
 pub mod apps;
+pub mod inputprofile;
 pub mod scrolleng;
 pub mod scrolllist;
 pub mod listwindow;

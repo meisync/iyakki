@@ -19,6 +19,8 @@ pub const MOUNTS: &[(&str, &str, &str, u64, &str)] = &[
     ("tmpfs", "/tmp", "tmpfs", 0, "mode=1777"),
     ("cgroup2", "/sys/fs/cgroup", "cgroup2", 0, ""),
     ("efivarfs", "/sys/firmware/efi/efivars", "efivarfs", 0, ""),
+    // root-only (0700): the USB port monitor (`usbports`) reads the xHCI port states from here; nothing else uses it
+    ("debugfs", "/sys/kernel/debug", "debugfs", 0, "mode=0700"),
 ];
 
 /// Mounting is Linux only (the boot code runs as init there); elsewhere the window runs as an ordinary program.
@@ -185,7 +187,7 @@ pub fn run_install_console() -> i32 {
 
 #[cfg(not(target_os = "linux"))]
 pub fn run_install_console() -> i32 {
-    eprintln!("install mode needs the IYAKKI image");
+    crate::console::err_write("install mode needs the IYAKKI image\n");
     1
 }
 
@@ -195,6 +197,10 @@ fn start_boot_screen() {
     let cmd = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
     // install mode draws text on the console: the boot screen would paint over it
     if cmdline_param(&cmd, "iyakki.shell") == Some("0") || install_mode(&cmd) {
+        return;
+    }
+    if cmdline_param(&cmd, "iyakki.bootscreen") == Some("off") {
+        iyakki_shell::splash::note("boot screen skipped (iyakki.bootscreen=off): no thread, nothing is drawn or opened before the desktop");
         return;
     }
     iyakki_shell::splash::mark_started();
@@ -370,6 +376,34 @@ fn wifi_recover() {
     }
 }
 
+/// Bring up the Ethernet adapters that exist and are not up yet, on their own thread (see `net::start_wired`).
+fn start_wired_link() {
+    match crate::net::start_wired(Path::new("/etc/iyakki/net.conf"), Path::new("/sys/class/net"), Path::new(crate::net::KNOWN_WIFI)) {
+        Ok(0) => {}
+        Ok(n) => log::info!("net: {n} wired adapter(s) coming up on their own thread"),
+        Err(e) => log::error!("net config: {e}"),
+    }
+}
+
+/// [`wifi_recover`] and the Wi-Fi join on a background thread: nothing in boot (sign-in, the cable, the late drivers, other services)
+/// waits for a Wi-Fi chip that answers slowly or not at all. An interface that appears is set up here, or by the hot-plug listener.
+fn wifi_in_background() {
+    let r = std::thread::Builder::new().name("iyakki-wifi-start".into()).spawn(|| {
+        wifi_recover();
+        match crate::net::bring_up_new(Path::new("/etc/iyakki/net.conf"), Path::new("/sys/class/net"), Path::new(crate::net::KNOWN_WIFI), None) {
+            Ok(done) if !done.started.is_empty() => {
+                log::info!("net: set up in the background: {}", done.started.join(", "));
+                iyakki_fw::service::network_changed();
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("net: wifi: {e}"),
+        }
+    });
+    if let Err(e) = r {
+        log::warn!("wifi: background thread: {e}");
+    }
+}
+
 /// Mandatory "always load" modules that have no modalias (crypto for WiFi/WPA, RNG, etc). `thunderbolt` and `thunderbolt_net` are
 /// here as well as being found by their aliases (PCI ids, `tbsvc:`): a one-cable link to another computer (`iyakki dev usb`) must not
 /// depend on the alias table. A kernel without them (not a Mac or PC image) ignores the failed modprobe.
@@ -513,6 +547,16 @@ pub fn early_boot_critical() -> LatePlan {
     tl.mark("storage");
     memory_setup();
     tl.mark("memory");
+    // a cloud node's config drive (hostname, network, first account, certificate, tenant files): docs/CLOUD-IMAGES.md
+    #[cfg(feature = "shell")]
+    {
+        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+        let variant = iyakki_agent::relinfo::ReleaseInfo::load(Path::new(iyakki_agent::relinfo::RELEASE_FILE)).map(|r| r.variant).unwrap_or_default();
+        for l in iyakki_agent::cloudseed::boot(&cmdline, &variant, DATA_DIR) {
+            log::info!("cloud seed: {l}");
+            crate::console::out_write(&format!("IYAKKI-CLOUD seed: {l}\n"));
+        }
+    }
     if let Some(h) = configured_hostname() {
         let _ = std::fs::write("/etc/hostname", format!("{h}\n"));
     }
@@ -549,6 +593,9 @@ pub fn late_boot(mut plan: LatePlan) {
     // by name (they are blacklisted for alias loading); the quirk binds and later hot plugs run in a background thread.
     crate::camera::prepare_boot();
     load_aliases(&plan.deferred, "Starting network and sound", 70, 90);
+    // The cable first, on its own thread: an Ethernet adapter that exists now is brought up at once, before the Wi-Fi reset below, the
+    // sound check and the camera, none of which it needs (the Mac mini's cable used to wait about 20 s for them).
+    start_wired_link();
     // children created by the network, sound and Bluetooth drivers (a Wi-Fi chip's Bluetooth function, a codec behind a bridge)
     {
         let mut more = Vec::new();
@@ -556,11 +603,13 @@ pub fn late_boot(mut plan: LatePlan) {
         load_aliases(&more, "Starting network and sound", 88, 90);
     }
     cs8409_sound();
-    wifi_recover();
+    // Wi-Fi never holds the boot: the reset of a silent chip (up to about 16 s), its interface and its join run on a thread of their own
+    wifi_in_background();
     run_limited(Command::new("mdev").arg("-s"));
     crate::camera::start();
     plan.tl.mark("late drivers");
-    match crate::net::bring_up(Path::new("/etc/iyakki/net.conf"), Path::new("/sys/class/net")) {
+    start_wired_link(); // an adapter whose driver came later
+    match crate::net::bring_up_basic(Path::new("/etc/iyakki/net.conf"), Path::new("/sys/class/net"), Path::new(crate::net::KNOWN_WIFI)) {
         Ok(errs) => errs.iter().for_each(|e| log::warn!("net: {e}")),
         Err(e) => log::error!("net config: {e}"),
     }
@@ -979,7 +1028,7 @@ pub fn cmdline_param<'a>(cmdline: &'a str, key: &str) -> Option<&'a str> {
 /// Flush disks and restart the machine.
 #[cfg(not(target_os = "linux"))]
 pub fn reboot() {
-    eprintln!("reboot is not available on this OS (IYAKKI runs as a program here, not as the init system)");
+    crate::console::err_write("reboot is not available on this OS (IYAKKI runs as a program here, not as the init system)\n");
 }
 
 #[cfg(target_os = "linux")]
@@ -997,7 +1046,7 @@ pub fn reboot() {
 /// Flush disks and power the machine off (never returns on success).
 #[cfg(not(target_os = "linux"))]
 pub fn power_off() {
-    eprintln!("power off is not available on this OS (IYAKKI runs as a program here, not as the init system)");
+    crate::console::err_write("power off is not available on this OS (IYAKKI runs as a program here, not as the init system)\n");
 }
 
 #[cfg(target_os = "linux")]
@@ -1041,7 +1090,7 @@ pub fn sleep_state_available() -> bool {
 /// Suspend the machine and return after it wakes. The session is not marked clean (the program keeps running).
 #[cfg(not(target_os = "linux"))]
 pub fn sleep() {
-    eprintln!("sleep is not available on this OS");
+    crate::console::err_write("sleep is not available on this OS\n");
 }
 
 #[cfg(target_os = "linux")]
@@ -1159,6 +1208,14 @@ mod tests {
         assert_eq!(super::persistent_host_key(&key, true, &mut |_: &Path| false), None);
         assert_eq!(super::ssh_host_key_command("/k"), vec!["dropbearkey", "-t", "ed25519", "-f", "/k"]);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_boot_screen_can_be_switched_off_before_it_starts_a_thread() {
+        assert_eq!(super::cmdline_param("quiet iyakki.bootscreen=off", "iyakki.bootscreen"), Some("off"));
+        let src = include_str!("boot.rs");
+        let f = src.split("fn start_boot_screen() {").nth(1).unwrap();
+        assert!(f.find("iyakki.bootscreen").unwrap() < f.find("mark_started()").unwrap() && f.find("iyakki.bootscreen").unwrap() < f.find("thread::Builder").unwrap());
     }
 
     #[test]
@@ -1281,6 +1338,23 @@ mod tests {
         assert!(!d("acpi:PNP0303:"), "PS/2 keyboard");
         assert!(!d("platform:simple-framebuffer"));
         assert!(!d("something:we-have-never-seen"), "unknown classes stay on the critical path");
+    }
+
+    #[test]
+    fn the_cable_starts_before_the_late_drivers_end_and_wifi_recovery_never_runs_on_the_boot_thread() {
+        let src = include_str!("boot.rs");
+        let late = src.split("pub fn late_boot").nth(1).unwrap().split("pub const SSH_KEYS_SRC").next().unwrap();
+        let wired = late.find("start_wired_link();").unwrap();
+        assert!(wired < late.find("cs8409_sound();").unwrap() && wired < late.find("wifi_in_background();").unwrap(), "the cable before the Wi-Fi reset");
+        assert!(!late.contains("wifi_recover();"), "the reset of a silent Wi-Fi chip is only called inside its own thread");
+        let thread = src.split("fn wifi_in_background").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(thread.contains("thread::Builder") && thread.contains("wifi_recover();"));
+        // neither link waits for the other: the cable thread never touches Wi-Fi and the Wi-Fi thread never waits for the cable
+        let net = include_str!("net.rs");
+        let wired_fn = net.split("pub fn start_wired").nth(1).unwrap().split("pub fn bring_up_basic").next().unwrap();
+        assert!(!wired_fn.contains("wifi_recover") && !wired_fn.contains(".join()"), "the cable thread knows nothing of Wi-Fi and is never joined");
+        assert!(!thread.contains(".join()") && !thread.contains("start_wired"), "the Wi-Fi thread does not wait for the cable");
+        assert!(!late.contains("net::bring_up("), "Ethernet and Wi-Fi are not brought up in the boot sequence itself");
     }
 
     #[test]

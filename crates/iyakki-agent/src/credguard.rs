@@ -47,7 +47,7 @@ fn run_len(s: &str, ok: impl Fn(char) -> bool) -> usize {
 /// A prefixed key format: (prefix, what, minimum characters after the prefix, allowed characters).
 fn prefixed(w: &str) -> Option<&'static str> {
     let alnum_ = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
-    let rules: [(&str, &str, usize, fn(char) -> bool); 11] = [
+    let rules: &[(&str, &str, usize, fn(char) -> bool)] = &[
         ("sk-", "API key", 20, |c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
         ("ghp_", "GitHub token", 20, |c| c.is_ascii_alphanumeric() || c == '_'),
         ("gho_", "GitHub token", 20, |c| c.is_ascii_alphanumeric() || c == '_'),
@@ -59,9 +59,25 @@ fn prefixed(w: &str) -> Option<&'static str> {
         ("AIza", "Google API key", 30, |c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
         ("xapp-", "Slack token", 10, |c| c.is_ascii_alphanumeric() || c == '-'),
         ("eyJ", "JSON web token", 30, |c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'),
+        // model providers and common services (their own prefixes; the random part must be long, so a word such as "hf_model" is not a key)
+        ("nvapi-", "NVIDIA API key", 30, |c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+        ("gsk_", "Groq API key", 30, |c| c.is_ascii_alphanumeric()),
+        ("hf_", "Hugging Face token", 30, |c| c.is_ascii_alphanumeric()),
+        ("pplx-", "Perplexity API key", 30, |c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+        ("xai-", "xAI API key", 30, |c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+        ("r8_", "Replicate token", 30, |c| c.is_ascii_alphanumeric()),
+        ("glpat-", "GitLab token", 20, |c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+        ("ghr_", "GitHub token", 20, |c| c.is_ascii_alphanumeric() || c == '_'),
+        ("npm_", "npm token", 30, |c| c.is_ascii_alphanumeric()),
+        ("sk_live_", "Stripe key", 16, |c| c.is_ascii_alphanumeric()),
+        ("rk_live_", "Stripe key", 16, |c| c.is_ascii_alphanumeric()),
+        ("SG.", "SendGrid key", 40, |c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'),
+        ("dop_v1_", "DigitalOcean token", 40, |c| c.is_ascii_hexdigit()),
+        ("shpat_", "Shopify token", 30, |c| c.is_ascii_hexdigit()),
+        ("ya29.", "Google OAuth token", 40, |c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'),
     ];
     let _ = alnum_;
-    for (p, what, min, ok) in rules {
+    for &(p, what, min, ok) in rules {
         if let Some(rest) = w.strip_prefix(p) {
             if run_len(rest, ok) >= min && (p != "eyJ" || rest.matches('.').count() >= 2) {
                 return Some(what);
@@ -261,6 +277,38 @@ mod tests {
             "version 2.4.1-beta3 is out",
             "",
         ] {
+            assert_eq!(detect(t), None, "{t}");
+        }
+    }
+
+    /// Made-up values with the shape of each provider's key (never a real one).
+    #[test]
+    fn model_provider_and_service_keys_are_found_by_their_prefix_and_their_names_are_not() {
+        let rnd = "aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xY3zA5bC7dE9fG1hJ3kL5";
+        for (prefix, what) in [
+            ("nvapi-", "NVIDIA API key"),
+            ("gsk_", "Groq API key"),
+            ("hf_", "Hugging Face token"),
+            ("pplx-", "Perplexity API key"),
+            ("xai-", "xAI API key"),
+            ("r8_", "Replicate token"),
+            ("glpat-", "GitLab token"),
+            ("npm_", "npm token"),
+            ("sk_live_", "Stripe key"),
+            ("ya29.", "Google OAuth token"),
+        ] {
+            let key = format!("{prefix}{rnd}");
+            let f = detect(&format!("use {key} for the provider")).unwrap_or_else(|| panic!("{prefix} is not found"));
+            assert_eq!(f.what, what, "{prefix}");
+            assert!(!f.redacted.contains(&key) && f.redacted.contains(PLACEHOLDER), "{prefix}: {}", f.redacted);
+            assert_eq!(f.value, key);
+        }
+        // a key inside the Python snippet people paste
+        let snippet = format!("client = OpenAI(\n  base_url = \"https://integrate.api.nvidia.com/v1\",\n  api_key = \"nvapi-{rnd}\"\n)");
+        let f = detect(&snippet).expect("the key in a pasted snippet");
+        assert!(!f.redacted.contains(rnd), "{}", f.redacted);
+        // the prefixes alone, short words and model names are ordinary writing
+        for t in ["the hf_model folder", "use nvapi- keys from build.nvidia.com", "gsk_ is the Groq prefix", "xai-grok is a model name", "npm_config", "pick glpat- for GitLab", "sk_live_ keys"] {
             assert_eq!(detect(t), None, "{t}");
         }
     }

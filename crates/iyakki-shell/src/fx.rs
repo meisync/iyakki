@@ -18,11 +18,11 @@ use crate::ui::{Event, R, BG_BOTTOM, BG_TOP, CARD, CARD_HOVER, DIM, ERR, MUTED, 
 pub const CYAN: [u8; 4] = rgb(70, 225, 255);
 pub const MAGENTA: [u8; 4] = rgb(255, 80, 190);
 /// The darkest glass: players, charts, the sides of a screen.
-pub const PANEL: [u8; 4] = rgb(8, 11, 26);
+pub const PANEL: [u8; 4] = rgb(12, 14, 19);
 /// A step lighter than [`PANEL`]: inputs, chips and buttons at rest.
-pub const WELL: [u8; 4] = rgb(18, 24, 46);
+pub const WELL: [u8; 4] = rgb(21, 23, 31);
 /// Amber for "needs attention" (warnings), next to [`ERR`] and [`OK`].
-pub const AMBER: [u8; 4] = rgb(255, 196, 94);
+pub const AMBER: [u8; 4] = rgb(240, 192, 104);
 
 /// Sizes (before scaling) that every screen uses.
 pub mod size {
@@ -94,7 +94,7 @@ pub fn readable(fg: [u8; 4], bg: [u8; 4], min: f32) -> [u8; 4] {
 
 thread_local! {
     static REDUCED_MOTION: Cell<bool> = const { Cell::new(false) };
-    static BG_CACHE: RefCell<Option<((u32, u32), Vec<u8>)>> = const { RefCell::new(None) };
+    static BG_CACHE: RefCell<Option<((u32, u32, u32), Vec<u8>)>> = const { RefCell::new(None) };
 }
 
 /// Switch the small header animation off (people who dislike motion). The background never moves.
@@ -112,7 +112,7 @@ pub fn reduced_motion() -> bool {
 /// "particles". It is drawn once per size into a cache and copied afterwards (a memory copy, well under a millisecond),
 /// so a frame never pays for the gradients again.
 pub fn background(g: &mut Gfx) {
-    let size = (g.width(), g.height());
+    let size = (g.width(), g.height(), crate::theme::generation());
     BG_CACHE.with(|c| {
         let mut c = c.borrow_mut();
         let fresh = matches!(&*c, Some((sz, _)) if *sz == size);
@@ -130,7 +130,7 @@ pub fn background(g: &mut Gfx) {
 
 /// How many sizes are cached (one: the last), for tests.
 pub fn background_cached_size() -> Option<(u32, u32)> {
-    BG_CACHE.with(|c| c.borrow().as_ref().map(|(s, _)| *s))
+    BG_CACHE.with(|c| c.borrow().as_ref().map(|(s, _)| (s.0, s.1)))
 }
 
 fn build_background(g: &mut Gfx) -> Vec<u8> {
@@ -223,6 +223,14 @@ pub fn card(g: &mut Gfx, r: R, s: f32, accent: [u8; 4], glow: f32) {
     g.rrect(r.x, r.y, r.w, r.h, rad, CARD);
     g.rect(r.x + rad * 0.6, r.y + 1.0, r.w - rad * 1.2, 1.0, [255, 255, 255, 16]);
     g.rrect_outline(r.x, r.y, r.w, r.h, rad, 1.0 * s, with_alpha(mix(accent, MAGENTA, 0.25), (60.0 + 90.0 * glow.min(1.0)) as u8));
+    always_border(g, r.x, r.y, r.w, r.h, rad, s);
+}
+
+/// High contrast only: a solid, thick border so no card, row or field ever depends on a faint tint to be seen.
+pub fn always_border(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, rad: f32, s: f32) {
+    if crate::theme::is_high_contrast() {
+        g.rrect_outline(x, y, w, h, rad, 1.2 * s.max(0.8), crate::ui::BORDER);
+    }
 }
 
 /// The darkest panel (a chart well, a side list, a code box): [`PANEL`] with a hairline border.
@@ -230,6 +238,7 @@ pub fn panel(g: &mut Gfx, r: R, s: f32, accent: [u8; 4]) {
     let rad = size::R_CARD * s;
     g.rrect(r.x, r.y, r.w, r.h, rad, PANEL);
     g.rrect_outline(r.x, r.y, r.w, r.h, rad, 1.0 * s, with_alpha(accent, 48));
+    always_border(g, r.x, r.y, r.w, r.h, rad, s);
 }
 
 /// A recessed well inside a card (a sparkline, an input background).
@@ -248,7 +257,7 @@ pub fn row_at(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, rad: f32, selected: b
     let s = (rad / size::R_ROW).max(0.5);
     if selected {
         g.rrect(x, y, w, h, rad, over(rgb(30, 38, 68), with_alpha(accent, 44)));
-        g.rrect_outline(x, y, w, h, rad, 1.2 * s, with_alpha(accent, 190));
+        g.rrect_outline(x, y, w, h, rad, 1.2 * s * crate::theme::ring(), with_alpha(accent, 190));
         g.rrect(x + 1.5 * s, y + h * 0.2, 3.0 * s, h * 0.6, 1.5 * s, accent);
     } else if hot {
         g.rrect(x, y, w, h, rad, CARD_HOVER);
@@ -266,6 +275,7 @@ pub fn glass(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, rad: f32, accent: [u8;
         g.rect(x + rad * 0.7, y + 1.0, w - rad * 1.4, 1.0, [255, 255, 255, 12]);
     }
     g.rrect_outline(x, y, w, h, rad, 1.0, with_alpha(accent, 34));
+    always_border(g, x, y, w, h, rad, 1.0);
 }
 
 /// The fill a text on a [`list_row`] is read against (for contrast checks).
@@ -309,17 +319,18 @@ pub fn pill(g: &mut Gfx, r: R, s: f32, accent: [u8; 4], hot: bool, enabled: bool
         g.rrect(r.x, r.y, r.w, r.h, rad, rgb(24, 29, 48));
         return rgb(104, 114, 142);
     }
-    let base = if hot { rgb(40, 50, 86) } else { rgb(24, 31, 56) };
+    let base = if hot { rgb(44, 49, 64) } else { rgb(28, 31, 40) };
     let (fill, line) = match v {
         Variant::Primary => (over(base, with_alpha(accent, if hot { 54 } else { 30 })), with_alpha(accent, if hot { 255 } else { 190 })),
         Variant::Danger => (over(base, with_alpha(ERR, if hot { 60 } else { 34 })), with_alpha(ERR, if hot { 255 } else { 190 })),
-        Variant::Secondary => (base, if hot { with_alpha(accent, 200) } else { rgb(66, 77, 114) }),
+        Variant::Secondary => (base, if hot { with_alpha(accent, 200) } else { rgb(66, 72, 90) }),
     };
     if hot {
         g.rrect_glow(r.x, r.y, r.w, r.h, rad, 4.0 * s, with_alpha(if v == Variant::Danger { ERR } else { accent }, 80));
     }
     g.rrect(r.x, r.y, r.w, r.h, rad, fill);
-    g.rrect_outline(r.x, r.y, r.w, r.h, rad, 1.2 * s.max(0.8), line);
+    g.rrect_outline(r.x, r.y, r.w, r.h, rad, 1.2 * s.max(0.8) * if hot { crate::theme::ring() } else { 1.0 }, line);
+    always_border(g, r.x, r.y, r.w, r.h, rad, s);
     readable(accent, fill, 4.5)
 }
 
@@ -489,10 +500,20 @@ pub fn status_line(g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, text: &str, ok: 
     // every app's failure line: an I/O error caused by a lost boot drive names the drive (iyakki_storage::loss, healthy: unchanged)
     let text = if ok { text.to_string() } else { iyakki_storage::loss::reword(text) };
     let text = text.as_str();
-    g.circle(x + 5.0 * s, y + 8.0 * s, 4.0 * s, c);
-    g.circle(x + 5.0 * s, y + 8.0 * s, 7.0 * s, with_alpha(c, 40));
-    let t = g.fit(14.0 * s, text, Face::Sans, w - 20.0 * s);
-    g.text(x + 18.0 * s, y, 14.0 * s, c, &t, Face::Sans);
+    // not colour alone: a tick in a disc for success, an exclamation mark in a disc for a problem
+    let (cx, cy) = (x + 7.0 * s, y + 8.0 * s);
+    g.circle(cx, cy, 9.0 * s, with_alpha(c, 40));
+    g.circle(cx, cy, 7.0 * s, c);
+    let ink = rgb(10, 14, 26);
+    if ok {
+        g.line(cx - 3.2 * s, cy + 0.2 * s, cx - 1.0 * s, cy + 2.6 * s, 1.8 * s, ink);
+        g.line(cx - 1.0 * s, cy + 2.6 * s, cx + 3.4 * s, cy - 2.6 * s, 1.8 * s, ink);
+    } else {
+        g.line(cx, cy - 4.0 * s, cx, cy + 1.2 * s, 1.9 * s, ink);
+        g.circle(cx, cy + 3.5 * s, 1.1 * s, ink);
+    }
+    let t = g.fit(14.0 * s, text, Face::Sans, w - 24.0 * s);
+    g.text(x + 22.0 * s, y, 14.0 * s, c, &t, Face::Sans);
 }
 
 /// A permission/feature toggle chip (label, on or off): green neon when on, a dim outline when off, accent outline on hover.
@@ -611,7 +632,10 @@ pub fn field_frame(g: &mut Gfx, r: R, s: f32, focused: bool, accent: [u8; 4]) {
         g.rrect_glow(r.x, r.y, r.w, r.h, rad, 3.0 * s, with_alpha(accent, 60));
     }
     g.rrect(r.x, r.y, r.w, r.h, rad, crate::ui::FIELD);
-    g.rrect_outline(r.x, r.y, r.w, r.h, rad, if focused { 1.8 * s } else { 1.0 }, if focused { accent } else { rgb(62, 72, 108) });
+    g.rrect_outline(r.x, r.y, r.w, r.h, rad, if focused { 1.8 * s * crate::theme::ring() } else { 1.0 }, if focused { accent } else { rgb(62, 72, 108) });
+    if !focused {
+        always_border(g, r.x, r.y, r.w, r.h, rad, s);
+    }
 }
 
 // ------------------------------------------------------------------------------------------------------------ glyphs

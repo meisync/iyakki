@@ -33,12 +33,13 @@
 use crate::cloudkeys::{self, MemberKeys, PublicKeys, ScopeKey, Wrapped};
 use crate::cloudroles::{self, Action, Roles};
 use crate::cloudstorage::plain_name;
+use crate::cloudvaultguard::{self, Guard, Limits, Refused};
 use crate::httpmini::{parse_limited, Parse, Request, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,7 +48,7 @@ use std::time::Duration;
 const MAX_BODY: usize = 256 * 1024;
 const MAX_SECRETS: usize = 5000;
 const MAX_SEALED_HEX: usize = 128 * 1024;
-const CLOCK_SKEW: u64 = 120;
+const CLOCK_SKEW: u64 = cloudvaultguard::CLOCK_SKEW;
 const MAX_CONNECTIONS: usize = 64;
 
 // ---- who and what -----------------------------------------------------------------------------------------------------------------
@@ -105,6 +106,8 @@ enum Op {
     Read,
     Write,
     Manage,
+    /// What a rotation needs: a writer of the scope (a namespace editor, a tenant admin). See [`Store::rotate`].
+    Rotate,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -114,6 +117,8 @@ pub enum VaultError {
     NotFound,
     Conflict(String),
     Invalid(String),
+    /// Too many requests (or too many failures) from this key or address: try again after this many seconds.
+    RateLimited(u64),
     Io,
 }
 
@@ -125,6 +130,7 @@ impl VaultError {
             VaultError::NotFound => 404,
             VaultError::Conflict(_) => 409,
             VaultError::Invalid(_) => 400,
+            VaultError::RateLimited(_) => 429,
             VaultError::Io => 500,
         }
     }
@@ -135,6 +141,7 @@ impl VaultError {
             VaultError::Denied => "no access".into(),
             VaultError::NotFound => "not found".into(),
             VaultError::Conflict(m) | VaultError::Invalid(m) => m.clone(),
+            VaultError::RateLimited(_) => "too many requests: slow down".into(),
             VaultError::Io => "internal error".into(),
         }
     }
@@ -200,12 +207,24 @@ pub struct Store {
     data: PathBuf,
     /// One writer at a time: the files are the state.
     lock: Mutex<()>,
+    /// Replays and rates (`cloudvaultguard.rs`).
+    guard: Mutex<Guard>,
 }
 
 impl Store {
     pub fn open(data: &Path) -> Result<Store, String> {
+        Store::open_at(data, unix_now())
+    }
+
+    /// [`Store::open`] with the clock given (the replay log is read against it).
+    pub fn open_at(data: &Path, now: u64) -> Result<Store, String> {
         std::fs::create_dir_all(data).map_err(|e| format!("{}: {e}", data.display()))?;
-        Ok(Store { data: data.to_path_buf(), lock: Mutex::new(()) })
+        Ok(Store { data: data.to_path_buf(), lock: Mutex::new(()), guard: Mutex::new(Guard::open(data, now, Limits::default())) })
+    }
+
+    /// Other limits than the defaults (tests; a deployment that needs them).
+    pub fn set_limits(&self, l: Limits) {
+        self.guard.lock().unwrap_or_else(|e| e.into_inner()).set_limits(l);
     }
 
     fn operators_path(&self) -> PathBuf {
@@ -262,18 +281,57 @@ impl Store {
         write_json(&path, &m).map_err(|_| "cannot write the key list".to_string())
     }
 
-    /// Checks the signed request and says who sent it. `now` is seconds since 1970.
+    /// Checks the signed request and says who sent it. `now` is seconds since 1970. Without a source address only the key-side checks
+    /// apply (freshness, replay, the key's rate); [`Store::authenticate_from`] adds the source's.
     pub fn authenticate(&self, method: &str, path: &str, body: &[u8], header: Option<&str>, now: u64) -> R<Principal> {
-        let sr = header.and_then(cloudkeys::parse_authorization).ok_or(VaultError::Unauthenticated)?;
-        let who = Principal::parse(&sr.id).ok_or(VaultError::Unauthenticated)?;
-        if sr.ts.abs_diff(now) > CLOCK_SKEW {
-            return Err(VaultError::Unauthenticated);
+        self.authenticate_from(method, path, body, header, now, None)
+    }
+
+    /// In order: the source's bucket; the header; the clock (120 s either way); the enrolled key and the signature; the nonce (required) not
+    /// seen before; the key's bucket. Failures count against the source only (never against the name claimed), and a locked source
+    /// still gets through when its request verifies (see `cloudvaultguard.rs`).
+    pub fn authenticate_from(&self, method: &str, path: &str, body: &[u8], header: Option<&str>, now: u64, source: Option<IpAddr>) -> R<Principal> {
+        let g = &mut *self.guard.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ip) = source {
+            g.source_allowed(ip, now).map_err(VaultError::RateLimited)?;
         }
-        let keys = self.keys_of(&who)?.ok_or(VaultError::Unauthenticated)?;
-        if sr.verify(&keys, method, path, body) {
-            Ok(who)
-        } else {
-            Err(VaultError::Unauthenticated)
+        let verdict = (|| -> R<(Principal, cloudkeys::SignedRequest)> {
+            let sr = header.and_then(cloudkeys::parse_authorization).ok_or(VaultError::Unauthenticated)?;
+            let who = Principal::parse(&sr.id).ok_or(VaultError::Unauthenticated)?;
+            if sr.ts.abs_diff(now) > CLOCK_SKEW || sr.nonce.is_none() {
+                return Err(VaultError::Unauthenticated);
+            }
+            let keys = self.keys_of(&who)?.ok_or(VaultError::Unauthenticated)?;
+            if sr.verify(&keys, method, path, body) {
+                Ok((who, sr))
+            } else {
+                Err(VaultError::Unauthenticated)
+            }
+        })();
+        let fail = |g: &mut Guard, e: VaultError| {
+            if let Some(ip) = source {
+                let left = g.locked_for(ip, now);
+                if left > 0 {
+                    return VaultError::RateLimited(left);
+                }
+                g.failed(ip, now);
+            }
+            e
+        };
+        let (who, sr) = match verdict {
+            Ok(v) => v,
+            Err(VaultError::Io) => return Err(VaultError::Io),
+            Err(e) => return Err(fail(g, e)),
+        };
+        match g.accept(&sr.id, sr.nonce.as_deref().unwrap_or(""), sr.ts, now) {
+            Ok(()) => {
+                if let Some(ip) = source {
+                    g.succeeded(ip, now);
+                }
+                Ok(who)
+            }
+            Err(Refused::Slow(s)) => Err(VaultError::RateLimited(s)),
+            Err(Refused::Rejected(_)) => Err(fail(g, VaultError::Unauthenticated)),
         }
     }
 
@@ -335,7 +393,8 @@ impl Store {
                 let action = match (s, op) {
                     (Scope::Common, Op::Read) | (Scope::Tenant, Op::Read) => Some(Action::EnterTenant),
                     (Scope::Common, _) => None,
-                    (Scope::Tenant, _) => Some(Action::ManageTenantMembers),
+                    (Scope::Tenant, Op::Write | Op::Rotate | Op::Manage) => Some(Action::ManageTenantMembers),
+                    (Scope::Namespace(n), Op::Rotate) => Some(Action::WriteNamespace(n.clone())),
                     (Scope::Namespace(n), Op::Read) => Some(Action::ReadNamespace(n.clone())),
                     (Scope::Namespace(n), Op::Write) => Some(Action::WriteNamespace(n.clone())),
                     (Scope::Namespace(n), Op::Manage) => Some(Action::ManageNamespaceMembers(n.clone())),
@@ -432,6 +491,13 @@ impl Store {
         Ok(d.wraps.keys().cloned().collect())
     }
 
+    /// Who holds a wrap in the scope, for someone who may rotate it (a writer of the scope; see [`Store::rotate`]). [`Store::members`] stays
+    /// for the people who manage the scope.
+    pub fn rotation_members(&self, p: &Principal, s: &Scope) -> R<Vec<String>> {
+        let (_, d) = self.open_scope(p, s, Op::Rotate)?;
+        Ok(d.wraps.keys().cloned().collect())
+    }
+
     /// Add a member: the caller (who holds the key) sends the key wrapped for them. The person must already be in the roles for this
     /// scope; the service cannot check the wrap opens, only that it is the right shape.
     pub fn add_member(&self, p: &Principal, s: &Scope, who: &str, wrap: &Wrapped) -> R<()> {
@@ -461,9 +527,28 @@ impl Store {
     /// Rotate the scope's key: `generation` is the next one, `wraps` the new key wrapped for everyone who keeps access (all current
     /// holders except `remove`), `values` every secret sealed again. The old wraps and values are replaced, so the removed person's key
     /// opens nothing that was written from now on, and the file no longer holds their wrap.
+    ///
+    /// **Who may rotate.** A person who manages the scope may rotate it and remove anyone. A *writer* of the scope (a namespace editor, which
+    /// is what a tenant's pod is given; a tenant admin for the tenant scope) may rotate it too, under two conditions the service
+    /// checks itself: they hold a wrap, and they remove nobody who the tenant's roles still entitle to the scope. So a pod can finish
+    /// the rotation that follows a revoked role (the roles file is the authority; a rotation is only catching up with it) or change the
+    /// key of its own scope without removing anyone, but cannot use rotation to cut a member off.
     pub fn rotate(&self, p: &Principal, s: &Scope, remove: Option<&str>, generation: u64, wraps: &BTreeMap<String, Wrapped>, values: &BTreeMap<String, String>) -> R<()> {
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let (path, d) = self.open_scope(p, s, Op::Manage)?;
+        let (path, d) = self.open_scope(p, s, Op::Rotate)?;
+        if self.allow(p, s, Op::Manage).is_err() {
+            if let (Some(r), Principal::Member { tenant, .. }) = (remove, p) {
+                let roles = self.roles_of(tenant)?;
+                let entitled = match s {
+                    Scope::Tenant => roles.tenant_role(r).is_some(),
+                    Scope::Namespace(n) => roles.ns_role(n, r).is_some(),
+                    Scope::Common => true,
+                };
+                if entitled {
+                    return Err(VaultError::Denied);
+                }
+            }
+        }
         let me = self.member_id(p, s);
         if remove == Some(me.as_str()) {
             return invalid("you cannot remove yourself");
@@ -493,7 +578,12 @@ impl Store {
 
     /// One request, already read: sign-in, route, answer. Nothing but the kind of route and the status is logged.
     pub fn handle(&self, req: &Request, now: u64) -> Response {
-        let who = match self.authenticate(&req.method, &req.path, &req.body, req.header("authorization"), now) {
+        self.handle_from(req, now, None)
+    }
+
+    /// [`Store::handle`] for a request that came from `source` (its rate limits and lockout apply).
+    pub fn handle_from(&self, req: &Request, now: u64, source: Option<IpAddr>) -> Response {
+        let who = match self.authenticate_from(&req.method, &req.path, &req.body, req.header("authorization"), now, source) {
             Ok(w) => w,
             Err(e) => return fail(&e),
         };
@@ -521,6 +611,7 @@ impl Store {
             ("POST", ["v1", "scope", s]) => self.create_scope(p, &scope(s)?, &wrap_of(body)?).map(|_| json!({"generation": 1})),
             ("GET", ["v1", "scope", s, "wrap"]) => self.my_wrap(p, &scope(s)?).map(|(g, w)| json!({"generation": g, "wrap": w})),
             ("GET", ["v1", "scope", s, "members"]) => self.members(p, &scope(s)?).map(|m| json!({"members": m})),
+            ("GET", ["v1", "scope", s, "rotation-members"]) => self.rotation_members(p, &scope(s)?).map(|m| json!({"members": m})),
             ("GET", ["v1", "scope", s, "secrets"]) => self.list(p, &scope(s)?).map(|n| json!({"names": n})),
             ("GET", ["v1", "scope", s, "secrets", n]) => self.get(p, &scope(s)?, n).map(|(g, v)| json!({"generation": g, "value": v})),
             ("PUT", ["v1", "scope", s, "secrets", n]) => {
@@ -541,7 +632,11 @@ impl Store {
 }
 
 fn fail(e: &VaultError) -> Response {
-    Response::json(e.status(), &json!({"error": e.message()}))
+    let r = Response::json(e.status(), &json!({"error": e.message()}));
+    match e {
+        VaultError::RateLimited(s) => r.header("Retry-After", &s.max(&1).to_string()),
+        _ => r,
+    }
 }
 
 fn unix_now() -> u64 {
@@ -632,6 +727,7 @@ pub fn start(addr: SocketAddr, data: &Path, tls: Option<(&Path, &Path)>) -> Resu
 
 fn connection(sock: TcpStream, cfg: &Arc<rustls::ServerConfig>, store: &Store) {
     let _ = sock.set_nodelay(true);
+    let peer = sock.peer_addr().ok().map(|a| a.ip());
     let _ = sock.set_nonblocking(false);
     let _ = sock.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = sock.set_write_timeout(Some(Duration::from_secs(10)));
@@ -641,7 +737,7 @@ fn connection(sock: TcpStream, cfg: &Arc<rustls::ServerConfig>, store: &Store) {
     let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
     let resp = loop {
         match parse_limited(&buf, MAX_BODY) {
-            Parse::Done(r) => break store.handle(&r, unix_now()),
+            Parse::Done(r) => break store.handle_from(&r, unix_now(), peer),
             Parse::Bad(code, msg) => break Response::json(code, &json!({"error": msg})),
             Parse::Incomplete => {}
         }
@@ -674,13 +770,23 @@ pub struct Client {
 impl Client {
     fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
         let bytes = body.map(|b| b.to_string().into_bytes()).unwrap_or_default();
-        let auth = self.keys.sign_request(&self.who.id(), method, path, unix_now(), &bytes);
-        let mut headers = vec![("Authorization".to_string(), auth)];
-        if body.is_some() {
-            headers.push(("Content-Type".into(), "application/json".into()));
-        }
-        let r = crate::devmode::client::https(&self.host, self.port, self.fingerprint.as_deref(), method, path, &headers, &bytes, Duration::from_secs(15))?;
-        let v = r.json();
+        let mut tries = 0;
+        let (r, v) = loop {
+            // a new signature (and nonce) every time: the service refuses a request it has seen
+            let auth = self.keys.sign_request(&self.who.id(), method, path, unix_now(), &bytes);
+            let mut headers = vec![("Authorization".to_string(), auth)];
+            if body.is_some() {
+                headers.push(("Content-Type".into(), "application/json".into()));
+            }
+            let r = crate::devmode::client::https(&self.host, self.port, self.fingerprint.as_deref(), method, path, &headers, &bytes, Duration::from_secs(15))?;
+            let v = r.json();
+            tries += 1;
+            if r.status == 429 && tries < 4 {
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+            break (r, v);
+        };
         if r.status == 200 {
             Ok(v)
         } else {
@@ -750,6 +856,12 @@ impl Client {
         self.call("POST", "/v1/enroll", Some(&json!({"name": name, "keys": keys}))).map(|_| ())
     }
 
+    /// Change the scope's key without removing anyone (a routine rotation, or a pod rotating its own namespace's key). Needs the right
+    /// to rotate the scope (see [`Store::rotate`]).
+    pub fn rotate_key(&self, s: &Scope) -> Result<(), String> {
+        self.rotate_to(s, None)
+    }
+
     /// Rotate `who` out of `s` if there is anything to rotate: no scope, or `who` holding no wrap in it, is "nothing to do" (a role
     /// that was never given a vault key). Any other failure is an error, to be retried.
     pub fn rotate_out(&self, s: &Scope, who: &str) -> Result<bool, String> {
@@ -758,7 +870,7 @@ impl Client {
             Err(e) => return Err(e),
             Ok(_) => {}
         }
-        let members = self.call("GET", &format!("/v1/scope/{}/members", s.name()), None)?;
+        let members = self.call("GET", &format!("/v1/scope/{}/rotation-members", s.name()), None)?;
         if !members["members"].as_array().into_iter().flatten().any(|m| m.as_str() == Some(who)) {
             return Ok(false);
         }
@@ -767,12 +879,16 @@ impl Client {
 
     /// Remove a member by rotating: open every value, make a new key, wrap it for everyone who stays, seal every value again.
     pub fn remove_member(&self, s: &Scope, who: &str) -> Result<(), String> {
+        self.rotate_to(s, Some(who))
+    }
+
+    fn rotate_to(&self, s: &Scope, remove: Option<&str>) -> Result<(), String> {
         let (g, old) = self.scope_key(s)?;
-        let members = self.call("GET", &format!("/v1/scope/{}/members", s.name()), None)?;
+        let members = self.call("GET", &format!("/v1/scope/{}/rotation-members", s.name()), None)?;
         let new = ScopeKey::generate()?;
         let ng = g + 1;
         let mut wraps = BTreeMap::new();
-        for m in members["members"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|m| *m != who) {
+        for m in members["members"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|m| remove != Some(*m)) {
             let keys = if m == self.member_name(s) { self.keys.public() } else { self.public_keys(m)? };
             wraps.insert(m.to_string(), new.wrap(&s.name(), m, ng, &keys)?);
         }
@@ -782,7 +898,7 @@ impl Client {
             let plain = old.open(&s.name(), &n, g, v["value"].as_str().unwrap_or(""))?;
             values.insert(n.clone(), new.seal(&s.name(), &n, ng, &plain)?);
         }
-        self.call("POST", &format!("/v1/scope/{}/rotate", s.name()), Some(&json!({"remove": who, "generation": ng, "wraps": wraps, "values": values}))).map(|_| ())
+        self.call("POST", &format!("/v1/scope/{}/rotate", s.name()), Some(&json!({"remove": remove, "generation": ng, "wraps": wraps, "values": values}))).map(|_| ())
     }
 }
 
@@ -1269,5 +1385,189 @@ mod tests {
         let a = ["enroll", "--data", &d.0.display().to_string(), "--id", "acme/zed", "--keys", &first].map(String::from);
         run(&a, &mut out).unwrap();
         assert!(Store::open(&d.0).unwrap().keys_of(&member("acme", "zed")).unwrap().is_some());
+    }
+
+    // ---- replay, clock and rate limits -------------------------------------------------------------------------------------------------
+
+    const NOW: u64 = 1_000_000;
+    const PATH: &str = "/v1/scope/tenant/secrets";
+
+    fn acme_at(d: &Dir, now: u64) -> Store {
+        let s = Store::open_at(&d.0, now).unwrap();
+        let mut r = Roles::new("alice").unwrap();
+        r.add_tenant_member("alice", "bob", TenantRole::Member).unwrap();
+        cloudroles::save(&cloudroles::path(&s.tenant_dir("acme").unwrap()), &r).unwrap();
+        s.enroll(&member("acme", "alice"), &keys(1).public()).unwrap();
+        s.enroll(&member("acme", "bob"), &keys(2).public()).unwrap();
+        s
+    }
+
+    fn signed(k: &MemberKeys, id: &str, ts: u64) -> String {
+        k.sign_request(id, "GET", PATH, ts, b"")
+    }
+
+    fn auth(s: &Store, h: &str, now: u64) -> R<Principal> {
+        s.authenticate("GET", PATH, b"", Some(h), now)
+    }
+
+    fn ip(n: u8) -> IpAddr {
+        IpAddr::from([10, 0, 0, n])
+    }
+
+    #[test]
+    fn a_copy_of_a_signed_request_is_refused_and_a_new_signature_is_not() {
+        let d = Dir::new();
+        let s = acme_at(&d, NOW);
+        let h = signed(&keys(1), "acme/alice", NOW);
+        assert_eq!(auth(&s, &h, NOW), Ok(member("acme", "alice")));
+        assert_eq!(auth(&s, &h, NOW), Err(VaultError::Unauthenticated), "the same bytes again");
+        assert_eq!(auth(&s, &h, NOW + 30), Err(VaultError::Unauthenticated), "still inside its window");
+        assert_eq!(auth(&s, &signed(&keys(1), "acme/alice", NOW), NOW), Ok(member("acme", "alice")), "the same call, signed again");
+        // the same nonce under another id is another request; under the same id it is a replay even for another path
+        let n = "ab".repeat(16);
+        let a = keys(1).sign_request_with_nonce("acme/alice", "GET", PATH, NOW, b"", &n);
+        let b = keys(2).sign_request_with_nonce("acme/bob", "GET", PATH, NOW, b"", &n);
+        assert!(auth(&s, &a, NOW).is_ok() && auth(&s, &b, NOW).is_ok());
+        assert_eq!(auth(&s, &a, NOW), Err(VaultError::Unauthenticated));
+        // a request with no nonce (the old form) is not accepted
+        let old = h.replace(&format!("nonce={},", cloudkeys::parse_authorization(&h).unwrap().nonce.unwrap()), "");
+        assert_eq!(auth(&s, &old, NOW), Err(VaultError::Unauthenticated));
+        // through the HTTP side too: the second copy is a 401, the first an ordinary answer
+        let req = |h: &str| Request { method: "GET".into(), path: PATH.into(), query: Default::default(), headers: [("authorization".to_string(), h.to_string())].into(), body: vec![] };
+        let h2 = signed(&keys(1), "acme/alice", NOW);
+        assert_ne!(s.handle(&req(&h2), NOW).status, 401);
+        assert_eq!(s.handle(&req(&h2), NOW).status, 401);
+    }
+
+    #[test]
+    fn the_clock_window_is_120_seconds_either_way() {
+        let d = Dir::new();
+        let s = acme_at(&d, NOW);
+        for (ts, ok) in [(NOW - 120, true), (NOW - 121, false), (NOW - 3600, false), (NOW + 120, true), (NOW + 121, false), (NOW + 86_400, false), (0, false), (u64::MAX, false)] {
+            let r = auth(&s, &signed(&keys(1), "acme/alice", ts), NOW);
+            assert_eq!(r.is_ok(), ok, "ts {ts}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn a_burst_from_one_key_is_slowed_and_the_next_second_it_works_again() {
+        let d = Dir::new();
+        let s = acme_at(&d, NOW);
+        s.set_limits(Limits { key_burst: 5.0, key_per_sec: 1.0, ..Limits::default() });
+        for i in 0..5 {
+            assert!(auth(&s, &signed(&keys(1), "acme/alice", NOW), NOW).is_ok(), "{i}");
+        }
+        assert!(matches!(auth(&s, &signed(&keys(1), "acme/alice", NOW), NOW), Err(VaultError::RateLimited(_))));
+        assert!(auth(&s, &signed(&keys(2), "acme/bob", NOW), NOW).is_ok(), "another key has its own allowance");
+        assert!(auth(&s, &signed(&keys(1), "acme/alice", NOW + 2), NOW + 2).is_ok(), "tokens come back with time");
+        // the answer says how long to wait
+        let req = Request { method: "GET".into(), path: PATH.into(), query: Default::default(), headers: [("authorization".to_string(), signed(&keys(1), "acme/alice", NOW + 2))].into(), body: vec![] };
+        for _ in 0..3 {
+            s.handle(&req, NOW + 2);
+        }
+        let mut limited = req.clone();
+        limited.headers.insert("authorization".into(), signed(&keys(1), "acme/alice", NOW + 2));
+        let r = s.handle(&limited, NOW + 2);
+        assert_eq!(r.status, 429);
+        assert!(r.headers.iter().any(|(k, v)| k == "Retry-After" && v.parse::<u64>().is_ok()));
+    }
+
+    #[test]
+    fn a_source_that_floods_is_slowed_before_anything_is_checked() {
+        let d = Dir::new();
+        let s = acme_at(&d, NOW);
+        s.set_limits(Limits { source_burst: 4.0, source_per_sec: 0.0, fail_max: 1000, ..Limits::default() });
+        let call = |from: IpAddr| s.authenticate_from("GET", PATH, b"", Some("junk"), NOW, Some(from));
+        for _ in 0..4 {
+            assert_eq!(call(ip(1)), Err(VaultError::Unauthenticated));
+        }
+        assert!(matches!(call(ip(1)), Err(VaultError::RateLimited(_))));
+        assert_eq!(call(ip(2)), Err(VaultError::Unauthenticated), "another address is not affected");
+    }
+
+    #[test]
+    fn failures_lock_the_source_but_never_the_owner() {
+        let d = Dir::new();
+        let s = acme_at(&d, NOW);
+        s.set_limits(Limits { fail_max: 3, fail_window: 60, lock_secs: 60, ..Limits::default() });
+        let from = |h: &str, ip: IpAddr, now: u64| s.authenticate_from("GET", PATH, b"", Some(h), now, Some(ip));
+        // someone at .9 guesses with a key that is not alice's, in alice's name
+        let bad = |now| signed(&keys(66), "acme/alice", now);
+        for _ in 0..3 {
+            assert_eq!(from(&bad(NOW), ip(9), NOW), Err(VaultError::Unauthenticated));
+        }
+        assert!(matches!(from(&bad(NOW), ip(9), NOW), Err(VaultError::RateLimited(_))), "locked now");
+        // the lock is on the address: alice is not locked out, from anywhere
+        assert!(from(&signed(&keys(1), "acme/alice", NOW), ip(8), NOW).is_ok(), "alice from another address");
+        assert!(from(&signed(&keys(1), "acme/alice", NOW), ip(9), NOW).is_ok(), "alice from the very address that is locked");
+        // that success cleared the lock for the address: the next failure starts a count again
+        assert_eq!(from(&bad(NOW), ip(9), NOW), Err(VaultError::Unauthenticated));
+        // a lot of bad requests in alice's name from elsewhere do not touch her own key's allowance
+        for _ in 0..50 {
+            let _ = from(&bad(NOW), ip(7), NOW);
+        }
+        for _ in 0..5 {
+            assert!(from(&signed(&keys(1), "acme/alice", NOW), ip(6), NOW).is_ok());
+        }
+        // a lock ends by itself
+        for _ in 0..3 {
+            let _ = from(&bad(NOW), ip(5), NOW);
+        }
+        assert!(matches!(from("junk", ip(5), NOW + 30), Err(VaultError::RateLimited(_))));
+        assert_eq!(from("junk", ip(5), NOW + 61), Err(VaultError::Unauthenticated));
+    }
+
+    #[test]
+    fn a_restart_does_not_make_a_seen_request_new() {
+        let d = Dir::new();
+        let h = signed(&keys(1), "acme/alice", NOW);
+        {
+            let s = acme_at(&d, NOW);
+            assert!(auth(&s, &h, NOW).is_ok());
+        }
+        let s = Store::open_at(&d.0, NOW + 10).unwrap();
+        assert_eq!(auth(&s, &h, NOW + 10), Err(VaultError::Unauthenticated), "replayed after the restart, inside its window");
+        assert!(auth(&s, &signed(&keys(1), "acme/alice", NOW + 10), NOW + 10).is_ok());
+        let log = d.0.join("replay.log");
+        assert!(std::fs::read_to_string(&log).unwrap().lines().count() >= 2);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&log).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        drop(s);
+        // long after: the log is cleaned at start, and the old request is simply too old
+        let s = Store::open_at(&d.0, NOW + 1000).unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
+        assert_eq!(auth(&s, &h, NOW + 1000), Err(VaultError::Unauthenticated));
+    }
+
+    #[test]
+    fn a_damaged_replay_log_falls_back_to_refusing_everything_signed_before_the_start() {
+        let d = Dir::new();
+        std::fs::create_dir_all(&d.0).unwrap();
+        std::fs::write(d.0.join("replay.log"), "this is not a log\n").unwrap();
+        let s = acme_at(&d, NOW);
+        assert_eq!(auth(&s, &signed(&keys(1), "acme/alice", NOW - 5), NOW), Err(VaultError::Unauthenticated), "signed before the start");
+        assert!(auth(&s, &signed(&keys(1), "acme/alice", NOW), NOW).is_ok());
+    }
+
+    #[test]
+    fn the_loopback_service_limits_its_callers_and_the_client_waits_and_retries() {
+        let d = Dir::new();
+        drop(acme_at(&d, unix_now()));
+        let run = start("127.0.0.1:0".parse().unwrap(), &d.0, None).unwrap();
+        let c = |n: u8, u: &str| Client { host: "127.0.0.1".into(), port: run.local_addr().port(), fingerprint: Some(run.fingerprint.clone()), who: member("acme", u), keys: keys(n) };
+        let alice = c(1, "alice");
+        alice.create_scope(&Scope::Tenant).unwrap();
+        for i in 0..20 {
+            alice.put(&Scope::Tenant, &format!("s{i}"), b"v").unwrap();
+        }
+        assert_eq!(alice.list(&Scope::Tenant).unwrap().len(), 20);
+        // one replayed request over the real socket is a 401
+        let h = alice.keys.sign_request("acme/alice", "GET", "/v1/scope/tenant/secrets", unix_now(), b"");
+        let get = || crate::devmode::client::https("127.0.0.1", run.local_addr().port(), Some(&run.fingerprint), "GET", "/v1/scope/tenant/secrets", &[("Authorization".to_string(), h.clone())], b"", Duration::from_secs(10)).unwrap().status;
+        assert_eq!((get(), get()), (200, 401));
+        run.stop();
     }
 }

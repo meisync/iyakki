@@ -112,9 +112,33 @@ pub struct Def {
     pub tracked: bool,
 }
 
+/// The Wi-Fi row: shown only while a wired link carries the default route and the Wi-Fi adapter is still coming up in the background.
+/// It never counts in the "x of y" of the screens and never turns them red (see [`login_view`] and [`Registry::summary`]).
+pub const WIFI_ID: &str = "wifi";
+
+/// What the sign-in line shows: the system services that count, and whether Wi-Fi is starting on the side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoginView {
+    pub ready: usize,
+    pub total: usize,
+    /// Pending, starting or failed services that count (never the Wi-Fi row).
+    pub pending: Vec<Row>,
+    /// Wi-Fi is coming up in the background: said at the end of the line, not counted, not red.
+    pub wifi_background: bool,
+}
+
+/// Pure: from every row of the registry, the rows of the sign-in line.
+pub fn login_view(rows: Vec<Row>) -> LoginView {
+    let wifi_background = rows.iter().any(|r| r.id == WIFI_ID && (r.state.busy() || r.state.failed()));
+    let rows: Vec<Row> = rows.into_iter().filter(|r| r.id != WIFI_ID && r.scope == Scope::System && !matches!(r.state, StartupState::Disabled | StartupState::Stopped)).collect();
+    let ready = rows.iter().filter(|r| r.state == StartupState::Ready).count();
+    let pending = rows.iter().filter(|r| r.state.busy() || r.state.failed()).cloned().collect();
+    LoginView { ready, total: rows.len(), pending, wifi_background }
+}
+
 /// The services, in the order they are listed: the network first (Wi-Fi is part of it: one line for both), the device name that rides on it, then
 /// the clock, which needs the network to reach a time server, then the rest.
-pub const CATALOGUE: [Def; 14] = [
+pub const CATALOGUE: [Def; 15] = [
     Def { id: "network", name: "Network and Wi-Fi", short: "the network", scope: Scope::System, after: &[], goes: Goes::Network, can_retry: false, tracked: true },
     Def { id: "devname", name: "Device name (mDNS)", short: "the device name", scope: Scope::System, after: &["network"], goes: Goes::Network, can_retry: false, tracked: false },
     Def { id: "clock", name: "Clock", short: "the clock", scope: Scope::System, after: &["network"], goes: Goes::Time, can_retry: false, tracked: true },
@@ -122,6 +146,7 @@ pub const CATALOGUE: [Def; 14] = [
     Def { id: "firewall", name: "Firewall", short: "the firewall", scope: Scope::System, after: &[], goes: Goes::Firewall, can_retry: false, tracked: true },
     Def { id: "sound", name: "Sound", short: "sound", scope: Scope::System, after: &[], goes: Goes::Sound, can_retry: false, tracked: true },
     Def { id: "touch", name: "Touch screen", short: "the touch screen", scope: Scope::System, after: &[], goes: Goes::Nothing, can_retry: false, tracked: true },
+    Def { id: WIFI_ID, name: "Wi-Fi", short: "Wi-Fi", scope: Scope::System, after: &[], goes: Goes::Network, can_retry: false, tracked: false },
     Def { id: "k3s", name: "Dev cluster (k3s)", short: "the cluster", scope: Scope::System, after: &["network", "clock"], goes: Goes::Cluster, can_retry: true, tracked: true },
     Def { id: "models", name: "Local models", short: "the models", scope: Scope::Session, after: &[], goes: Goes::Models, can_retry: true, tracked: false },
     Def { id: "web", name: "Web engine", short: "the web engine", scope: Scope::Session, after: &[], goes: Goes::Nothing, can_retry: false, tracked: true },
@@ -367,7 +392,8 @@ impl Registry {
 
     /// The services that are not ready yet (see [`Summary`]).
     pub fn summary(&self) -> Summary {
-        let all = self.snapshot();
+        // the Wi-Fi row (background only) is in the list of Settings, not in the counts or the strips
+        let all: Vec<Row> = self.snapshot().into_iter().filter(|r| r.id != WIFI_ID).collect();
         let tracked = all.iter().filter(|r| !matches!(r.state, StartupState::Disabled)).count();
         let ready = all.iter().filter(|r| r.state == StartupState::Ready).count();
         let mut rows: Vec<Row> = all.into_iter().filter(|r| r.state.busy() || r.state.failed()).collect();

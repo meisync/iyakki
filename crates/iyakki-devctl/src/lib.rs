@@ -90,13 +90,17 @@ pub struct Link {
     pub driver: String,
 }
 
+/// The interface the Wi-Fi hotspot makes next to the Wi-Fi client (an access point). Network set-up, DHCP clients and the Wi-Fi pages never
+/// treat it as a client or an adapter: bringing it up as a client stops the access point.
+pub const HOTSPOT_IFACE: &str = "iyakap0";
+
 /// Real network adapters (not loopback, bridges, tunnels or other software devices).
 pub fn links(r: &Roots) -> Vec<Link> {
     let mut out = Vec::new();
     for d in dirs(&r.sys.join("class/net")) {
         let name = name_of(&d);
-        if name == "lo" || !d.join("device").exists() {
-            continue; // software interfaces have no device behind them
+        if name == "lo" || name == HOTSPOT_IFACE || !d.join("device").exists() {
+            continue; // software interfaces have no device behind them; the hotspot's access point is not an adapter to configure
         }
         let wifi = d.join("wireless").exists() || d.join("phy80211").exists();
         if !wifi && read(d.join("type")).as_deref() != Some("1") {

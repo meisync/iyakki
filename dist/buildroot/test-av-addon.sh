@@ -30,6 +30,9 @@ T="$W/a"; fakeroot_tree "$T"; run "$T" IYAKKI_WEB_AV_ADDON=1
 no_ffmpeg "$T" && ok "no FFmpeg library or program shipped" || bad "FFmpeg left in the image"
 A="$T/usr/share/iyakki/av-addon-abi"
 [ "$(grep -vc '^#' "$A")" = 7 ] && grep -qx 'libavcodec.so.60' "$A" && grep -qx 'libpostproc.so.57' "$A" && ! grep -q avdevice "$A" && ! grep -q '\.3\.100' "$A" && ok "ABI file lists the 7 sonames only" || { cat "$A"; bad "ABI file"; }
+# the version map and the build recipe are installed, and the recipe hash matches the files
+R="$T/usr/share/iyakki/av-addon/bridge"
+[ -f "$R/versions.map" ] && [ -f "$R/recipe/build.sh" ] && [ -f "$R/recipe/files/iyakki-av-check" ] && [ "$(cat "$R/recipe/build.sh" "$R/recipe/configure-args.txt" "$R/recipe/files/iyakki-av-check" | sha256sum | cut -d' ' -f1)" = "$(cat "$R/RECIPE.SHA256")" ] && ok "version map and recipe installed, recipe hash matches" || bad "bridge recipe"
 # a second run (repack) keeps it
 run "$T" IYAKKI_WEB_AV_ADDON=1
 [ -f "$T/usr/lib/iyakki-av/gstreamer-1.0/libgstlibav.so" ] && [ "$(grep -vc '^#' "$A")" = 7 ] && ok "idempotent for a repack" || bad "second run"

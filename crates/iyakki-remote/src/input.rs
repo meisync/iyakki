@@ -30,6 +30,8 @@ pub enum Input {
     Media { kind: iyakki_agent::browsermedia::Kind, on: bool },
     /// The page started (or stopped) playing the session's sound.
     AudioOut(bool),
+    /// Where the session's sound plays: this computer (the browser), both, or the Mac only.
+    Sink(iyakki_agent::browsermedia::SinkMode),
     /// A checked clipboard item from the page (a PNG image or HTML); built by the server from a binary message, never parsed from text.
     Rich { kind: iyakki_agent::browsermedia::ClipKind, bytes: Vec<u8> },
 }
@@ -126,6 +128,7 @@ pub fn parse(text: &str) -> Option<Input> {
         }
         "ping" => Input::Ping { ts: count(&v, "ts", 9.0e15)?, rtt: v.get("rtt").and_then(Value::as_f64).filter(|r| r.is_finite() && (0.0..=60_000.0).contains(r)) },
         "media" => Input::Media { kind: iyakki_agent::browsermedia::Kind::parse(v.get("kind")?.as_str()?)?, on: v.get("on")?.as_bool()? },
+        "sink" => Input::Sink(iyakki_agent::browsermedia::SinkMode::parse(v.get("mode")?.as_str()?)?),
         "audio" => Input::AudioOut(v.get("on").and_then(Value::as_bool).unwrap_or(false)),
         "shift" => Input::Shift(v.get("on").and_then(Value::as_bool).unwrap_or(false)),
         t if t.starts_with("sp_") => Input::Speech(iyakki_agent::hostvoice::FromClient::decode(text)?),
@@ -215,6 +218,8 @@ mod tests {
         assert_eq!(parse(r#"{"t":"media","kind":"screen","on":true}"#), None, "only the three known kinds");
         assert_eq!(parse(r#"{"t":"media","kind":"camera"}"#), None, "on or off must be said");
         assert_eq!(parse(r#"{"t":"audio","on":true}"#), Some(Input::AudioOut(true)));
+        assert_eq!(parse(r#"{"t":"sink","mode":"both"}"#), Some(Input::Sink(iyakki_agent::browsermedia::SinkMode::Both)));
+        assert_eq!(parse(r#"{"t":"sink","mode":"loud"}"#), None, "only the three known routes");
         assert_eq!(parse(r#"{"t":"rich","kind":"image"}"#), None, "clipboard items travel only as binary messages");
         assert_eq!(parse(r#"{"t":"reboot"}"#), None);
         assert_eq!(parse(r#"{"x":1}"#), None);

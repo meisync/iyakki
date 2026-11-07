@@ -73,11 +73,11 @@ pub fn active() -> bool {
 /// What the Sound page says, honestly.
 pub fn status_text(web_mix: bool, mixer_on: bool, tap: Option<TapState>) -> &'static str {
     match (web_mix, mixer_on, tap) {
-        (false, _, _) => "off: the browser opens the sound card by itself (it is not mixed)",
-        (true, false, _) => "on, but it does nothing while the mixer above is off",
-        (true, true, None) => "on: applies the next time the web engine starts (untested on real hardware)",
-        (true, true, Some(TapState::Idle)) => "on: connected, the page is silent (untested on real hardware)",
-        (true, true, Some(TapState::Carrying)) => "on: the page's sound goes through the mixer (untested on real hardware)",
+        (false, _, _) => "off, route: direct to the sound card (not mixed; the radio and the browser exclude each other on a one-program-at-a-time card)",
+        (true, false, _) => "on, but it does nothing while the mixer above is off: the browser opens the sound card by itself",
+        (true, true, None) => "route: through the mixer once the web engine starts (open the Browser again to apply it)",
+        (true, true, Some(TapState::Idle)) => "route: through the mixer (connected, the page is silent now)",
+        (true, true, Some(TapState::Carrying)) => "route: through the mixer, mixed with the radio and other sounds (listed as Browser)",
         (true, true, Some(TapState::Refused)) => "on, but the mixer did not take the page's sound (the card is held by a program outside IYAKKI); the page is silent",
     }
 }
@@ -285,7 +285,12 @@ fn engine_env_with(on: bool, data_dir: &Path, start_tap: &dyn Fn(&Path) -> bool)
     if !start_tap(&fifo) {
         return Vec::new();
     }
-    vec![("ALSA_CONFIG_PATH".to_string(), conf.to_string_lossy().into_owned())]
+    // The engine's sound plugin (websink.c) opens the PCM called by IYAKKI_WEBSINK_DEVICE, and "default" is NOT safe here: the
+    // included alsa.conf loads /etc/asound.conf AFTER this file (its @hooks run once the file is parsed), and that file's own
+    // `pcm.!default` (the exclusive softvol over plughw on a T2 Mac) overrides ours. Proven on the Mac mini: with this file as
+    // ALSA_CONFIG_PATH, `aplay -D default` still went to the card, `aplay -D iyakkiwebmix` went into the file plugin. So the sink
+    // is told the name of our PCM, which nothing else defines.
+    vec![("ALSA_CONFIG_PATH".to_string(), conf.to_string_lossy().into_owned()), ("IYAKKI_WEBSINK_DEVICE".to_string(), PCM.to_string())]
 }
 
 #[cfg(test)]
@@ -434,14 +439,15 @@ mod tests {
         assert!(engine_env_with(true, &d, &|_| false).is_empty());
         let env = engine_env_with(true, &d, &ok);
         assert_eq!(started.get(), 1);
-        assert_eq!(env.len(), 1);
+        assert_eq!(env.len(), 2);
         assert_eq!(env[0].0, "ALSA_CONFIG_PATH");
+        assert_eq!(env[1], ("IYAKKI_WEBSINK_DEVICE".to_string(), "iyakkiwebmix".to_string()), "the sink names our PCM, not `default` that asound.conf overrides");
         assert_eq!(std::fs::read_to_string(d.join("web-alsa-mix.conf")).unwrap(), conf_text(&d.join(FIFO_NAME)).unwrap());
         let _ = std::fs::remove_dir_all(&d);
 
         assert!(status_text(false, true, None).starts_with("off"));
         assert!(status_text(true, false, None).contains("does nothing"));
-        assert!(status_text(true, true, None).contains("untested"));
+        assert!(status_text(true, true, None).contains("through the mixer") && status_text(false, true, None).contains("direct"));
         assert!(status_text(true, true, Some(TapState::Refused)).contains("silent"));
         assert!(status_text(true, true, Some(TapState::Carrying)).contains("through the mixer"));
     }

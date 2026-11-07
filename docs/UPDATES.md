@@ -48,12 +48,29 @@ in front of it, so a person does not need a developer computer. Status of each p
 An update that was cut (power loss) shows on the page and the Overview with the usual sentence: choose "IYAKKI (previous version)" in the boot
 menu, then install again. Roll back is refused while an update is unfinished.
 
+## Checking for updates (F-UPD-04)
+
+System update shows a line for how often to check (every day, only on request, off), when it last looked and what it found. Check for updates
+looks at every store source and, when an administrator set one with Update list address, a small JSON file `{"version": "...", "variant":
+"...", "notes": "..."}` that announces the newest IYAKKI. There is no built-in address. It only reports: nothing is downloaded or installed.
+A system update is installed from a folder or stick on this page; an app update in the STORE, which shows new permissions first (the check
+marks such updates). Packages that are in no catalog (a developer's own) are never listed. The daily check runs while an administrator is
+signed in, with a stable delay of up to an hour per device. This computer cannot tell a metered connection yet, so the daily check also runs
+on one (turn it off or to "only on request" if that matters). Not built: the badge on the STORE tile and in the top bar, Update all, and
+keeping the previous package version for rollback.
+
 ## What is not built or not proven
 
 * **No download from the internet.** There is no update index yet (open decision D6 in docs/development/IMPROVEMENTS-PLAN.md: where it is
   hosted, who signs). Folder and USB stick only. No USB-C cable path on this page (that is `iyakki dev update` from a laptop).
-* **The fall-back is not automatic.** GRUB does not count boots yet (F-UPD-02 stays planned). The check after a start runs when Settings is
-  opened, not at boot.
+* **The automatic fall-back is built and tested with a folder as the boot partition only** (F-UPD-02). An install or a rollback adds a small
+  guard to the boot menu (`grub.cfg`) and sets `iyakki_trial=1` in `boot/grub/grubenv`. At the next start the guard changes it to 2 and boots the
+  new set; the running system sets it to 0 once the data volume is mounted and the shell has drawn its first picture. If the next start finds a 2
+  (the new set never got that far) the menu makes "IYAKKI (previous version)" the default for that start. The guard is only written together with
+  that entry, and nothing is armed when the menu has no guard or no such entry. Not proven: that the image's GRUB has the `loadenv` module and
+  reads `grubenv` from the boot partition (BIOS and UEFI, Secure Boot), and the whole loop on a real machine. A start that is restarted by hand
+  before the first picture also counts as a failed try.
+* The check after a start still runs when Settings is opened (it writes the page's note); the boot counter above is what acts at boot.
 * A power cut during **Roll back** leaves the boot menu entry "IYAKKI (previous version)" pointing at the version being restored (tested with
   a fake power cut in the engine), but this was never run on a real boot partition.
 * Everything above was tested with fake packs and a folder standing in for the boot partition. The real mount of `IYAKKI-BOOT`, the speed of the

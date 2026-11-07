@@ -67,6 +67,14 @@ impl GraphicsMode {
         use std::os::fd::AsRawFd;
         for path in ["/dev/tty0", "/dev/console"] {
             if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(path) {
+                let mut mode: libc::c_int = -1;
+                // SAFETY: KDGETMODE writes one int to the pointer given.
+                let got = unsafe { libc::ioctl(f.as_raw_fd(), Self::KDGETMODE as _, &mut mode as *mut libc::c_int) } == 0;
+                if !crate::fb::kd_set_needed(got.then_some(mode)) {
+                    log::info!("console: already in graphics mode, KDSETMODE skipped ({path})");
+                    return GraphicsMode(Some(f));
+                }
+                log::info!("console: KDSETMODE graphics set ({path}, was {})", if got { mode.to_string() } else { "unknown".into() });
                 // SAFETY: KDSETMODE takes an integer argument (1 = KD_GRAPHICS).
                 if unsafe { libc::ioctl(f.as_raw_fd(), Self::KDSETMODE as _, 1 as libc::c_ulong) } == 0 {
                     return GraphicsMode(Some(f));
@@ -215,6 +223,7 @@ fn keep_open(old: Framebuffer) {
 fn splash_loop(fb_path: &str) -> Result<(), String> {
     use crate::splash::{self, LogTail, View};
     let mut fb = Framebuffer::open(fb_path)?;
+    splash::note(&format!("fbset: iyakki.fbset={}", crate::fb::init_fbset_from_cmdline().word()));
     splash::note(&format!("drawing on {fb_path}: {}", fb.describe()));
     splash::note(&fb.display_line());
     // leave the text console off for good (the shell that follows keeps it so too): switching back to text would make
@@ -309,6 +318,12 @@ fn splash_loop(fb_path: &str) -> Result<(), String> {
     splash::note(&format!("stopped after {frames} frames in {:.1} s (boot finished)", start.elapsed().as_secs_f32()));
     if fb.screen_changed(fb_path) {
         keep_open(fb); // replaced since the last look: closing it could be the unplugged screen's last close
+    } else if crate::fb::fbset() == crate::fb::FbSet::Skip {
+        // iyakki.fbset=skip: the last close of /dev/fb0 (and the unmap) at the end of the boot screen is one of the candidates for KI-077
+        splash::note("fbset=skip: /dev/fb0 left open at the end of the boot screen (no close, no unmap)");
+        keep_open(fb);
+    } else {
+        splash::note("boot screen ends: /dev/fb0 is unmapped and closed now (iyakki.fbset=skip keeps it open)");
     }
     Ok(())
 }
@@ -516,6 +531,7 @@ fn apply_blanks(shell: &mut Shell, screen: &Mutex<Screen>) {
 fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &AtomicBool) -> Result<(), String> {
     let t_start = Instant::now();
     let fb = Framebuffer::open(fb_path)?;
+    crate::fb::init_fbset_from_cmdline();
     let t_open = t_start.elapsed();
     let graphics = GraphicsMode::enter();
     let t_mode = t_start.elapsed();
@@ -563,6 +579,7 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
             crate::touchscreen::init_from_cmdline();
             let mut input = InputState::new(w, h);
             let mut repeat = crate::input::RepeatApplier::default();
+            let mut reopen_seen = iyakki_agent::touchrecover::reopen_generation();
             // the devices are found on a thread of its own, now and every 2 s: opening an event node the kernel is still setting up
             // (a hub that resets, a monitor's touch panel) can block for seconds, and this thread must keep reading the keyboard
             let mut bscan: Option<BackgroundScan> = None;
@@ -586,6 +603,7 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                     let _ = tx.send(ev);
                 }
                 repeat.tick(&devs);
+                crate::input::apply_reopen(&mut devs, &mut reopen_seen);
                 let held = touch_keys(&devs);
                 for (raw, abs, pad, touch) in poll_devices(&mut devs, 10) {
                     for ev in match (pad, touch) { (Some(range), _) => input.feed_pad(raw, &range), (None, Some(t)) => input.feed_touch_full(raw, &t), _ => input.feed(raw, abs) } {
@@ -739,6 +757,13 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                 last_render = Instant::now();
                 if first_picture {
                     first_picture = false;
+                    // the boot counter of a system update (F-UPD-02): this start reached its first picture, so the boot menu keeps it
+                    let data = shell.services_for_demo().dir().to_path_buf();
+                    std::thread::spawn(move || {
+                        if let Some(line) = iyakki_agent::devmode::centre::Centre::real(&data).confirm_boot(&iyakki_agent::devmode::centre::boot_id_now()) {
+                            log::info!("shell: {line}");
+                        }
+                    });
                     // the end of "power on to sign-in screen": the kernel's own clock stamps this line (see dist/buildroot/boot-time.py)
                     log::info!("shell: first picture on screen ({}x{}, first frame took {} ms, {} ms after the display was opened)", w, h, (t1 - t0).as_millis(), t_start.elapsed().as_millis());
                 }

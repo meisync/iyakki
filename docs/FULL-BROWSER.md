@@ -212,7 +212,7 @@ confirm before any image ships these codecs):
 * **What works without any add-on:** YouTube (VP9 and Opus), most video platforms that offer WebM, and any H.264 file through
   the installed ffmpeg in IYAKKI's own player. Sites that only have H.264/AAC do not play video in the browser.
 * **MP3 in the browser (2026-10-28):** the image carries its own MP3 decoder, the GStreamer element `iyakkimp3dec` (`dist/webview/wpe-helper/mp3dec.c`, built around minimp3, CC0 / public domain, the C original of the `nanomp3` crate the radio uses; `crates/iyakki-agent/tests/mp3dec_match.rs` checks both give the same samples). MP3 patents expired in 2017, so it ships in the image, with no download. Found on the Mac: a recorder site whose only format is MP3 stalled on "Processing..." because the engine had no MP3 decoder. The boot self-test decodes a sample through it (`path mp3-decoder`). Only the Mac can say that real pages play.
-* **AAC and H.264 still need the add-on, and the add-on has no download yet (2026-10-28):** `avaddon.rs` expects a Store item `ffmpeg-libs` (FFmpeg 6.1 shared libraries built for musl); `legal/downloads-manifest.json` has none (only `cli:ffmpeg`, a static program the radio uses). Until the owner picks a build, the add-on cannot be installed.
+* **AAC and H.264 need the add-on, which the administrator supplies (decision 2026-11-04):** IYAKKI ships and hosts no FFmpeg, not even the archive. The image carries the inactive bridge plugin and the recipe (`/usr/share/iyakki/av-addon/`); the administrator puts `ffmpeg-libs-*-linux-musl-<arch>.tar.gz` in `/local/packages/`, sets a mirror inside the organisation, or uses the libraries of an installed ffmpeg that pass the checks, reads the NOTICE and confirms. Details: [`development/AV-ADDON-BUILD.md`](development/AV-ADDON-BUILD.md). The CLI `ffmpeg` of the media player does not help the web engine unless it has the six shared libraries.
 
 ## Audio and video add-on (H.264, AAC, MP3 in the browser)
 
@@ -220,7 +220,7 @@ confirm before any image ships these codecs):
 (it is the part that speaks GStreamer's API; the codecs are in FFmpeg's libraries). `web-post-build.sh` parks it in
 `/usr/lib/iyakki-av/gstreamer-1.0/`, a folder GStreamer does not scan, so it is inactive, and removes every FFmpeg library and program.
 `/usr/share/iyakki/av-addon-abi` lists the sonames the plugin was linked against (FFmpeg 6.1: `libavcodec.so.60`, `libavformat.so.60`,
-`libavutil.so.58`, `libavfilter.so.9`, `libswresample.so.4`, `libswscale.so.7`, `libpostproc.so.57`).
+`libavutil.so.58`, `libavfilter.so.9`, `libswresample.so.4`, `libswscale.so.7`; no `libpostproc`, which exists only in a GPL build and which the plugin does not link).
 
 **Why this design (investigated, not built yet).** `gst-libav` hard-links the libraries (DT_NEEDED), it does not `dlopen()` them, so
 there is no switch that makes it load libav* "if present": without the libraries the plugin simply fails to load and GStreamer
@@ -273,13 +273,10 @@ redistribute them. H.264 and AAC are patent-licensed formats in some countries: 
 download, as it is with the ffmpeg of Quick install. IYAKKI's own code only calls the public GStreamer API. The legal opinion
 (RELEASE-READINESS item 23, BETA-PLAN decision 15) should cover this route too: shipped inactive LGPL glue plus a user-initiated download.
 
-**Remaining image-build steps** (nothing here needs the Mac): (1) the existing `target/buildroot-web` has no `libgstlibav.so` any more (the
-old hook deleted it from `target/`): run `make -C target/buildroot-web gst1-libav-reinstall ffmpeg-reinstall` so the plugin and the
-libraries are in `target/` again, then `./build.sh web` (or `smart-build.sh`); `repack.sh` cannot add the plugin to a finished rootfs
-and says so (a warning). (2) Check `cpio -t` of `rootfs.cpio.zst`: `usr/lib/iyakki-av/gstreamer-1.0/libgstlibav.so` present, no `libavcodec`,
-`usr/share/iyakki/av-addon-abi` with seven lines. (3) On a device with the add-on folder filled, run `GST_PLUGIN_PATH_1_0=/usr/lib/iyakki-av/gstreamer-1.0
-LD_LIBRARY_PATH=<folder> GST_REGISTRY_1_0=/tmp/r gst-inspect-1.0 avdec_h264` and then open a TikTok video. (4) Make the add-on's installer
-entry (radio side) provide the libraries listed in the ABI file; its id must match `avaddon::INSTALL_ITEM` (`ffmpeg-libs`).
+**Build, package, install and test (2026-11-04):** see [`development/AV-ADDON-BUILD.md`](development/AV-ADDON-BUILD.md). In short: FFmpeg 6.1.5 is built LGPL-only
+(`configs/iyakki_web_av_addon_libs.fragment`, 30 s of compiling in the existing web tree), `package-av-addon.sh` makes the 1.8 MB archive, the Store -> Setup item `ffmpeg-libs`
+(the administrator's own package, mirror or installed ffmpeg; IYAKKI hosts none) checks every soname of the image's ABI file and the licence in the NOTICE, asks for confirmation and puts it in `<data>/addons/ffmpeg`, and `qemu-av-addon-test.py` showed in QEMU that a page's
+`<video>` with H.264 and AAC reaches `playing` with the add-on and fails with the bar without it. **Remaining:** a real `./build.sh web` (a repack brings the recipe, the check tool and the `/local` link but cannot add the plugin: the Oct 28 rootfs has none) and the Mac test with a real TikTok page.
 `dist/buildroot/test-av-addon.sh` checks the hook on a fake rootfs.
 
 ## Licences

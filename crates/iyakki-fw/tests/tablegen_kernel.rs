@@ -19,7 +19,7 @@ fn guard() -> TableSpec {
         chains: vec![ChainSpec {
             name: "output".into(),
             kind: ChainKind::Filter,
-            priority: -10,
+            hook: Hook::Output, priority: -10,
             policy_accept: true,
             rules: vec![
                 vec![Expr::OifIs(IfName::Exact("lo".into())), Expr::Accept],
@@ -41,7 +41,7 @@ fn dns() -> TableSpec {
         chains: vec![ChainSpec {
             name: "output".into(),
             kind: ChainKind::Nat,
-            priority: -100,
+            hook: Hook::Output, priority: -100,
             policy_accept: true,
             rules: vec![vec![Expr::MarkIs(0x4956_0001), Expr::Return], vec![Expr::L4(17), Expr::Dport(53), Expr::RedirectPort(15353)], vec![Expr::L4(6), Expr::Dport(53), Expr::RedirectPort(15353)]],
         }],

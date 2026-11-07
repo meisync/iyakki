@@ -112,6 +112,7 @@ impl Actions for Acts {
 fn watching() -> (Watcher, Fake) {
     let f = Fake::new();
     let mut w = Watcher::new();
+    w.warmup_ms = 0;
     assert!(w.learn(&f));
     (w, f)
 }
@@ -545,4 +546,19 @@ fn the_compatible_usb_mode_quirk_is_built_from_the_drive_id_only() {
     assert!(compat_file_text("usb-storage.quirks=04e8:4001:u").contains("set iyakki_usbq=\"usb-storage.quirks=04e8:4001:u\""));
     assert!(compat_active("quiet usb-storage.quirks=04e8:4001:u"));
     assert!(!compat_active("quiet"));
+}
+
+#[test]
+fn slow_checks_in_the_first_minute_after_the_start_are_not_a_lost_drive() {
+    let f = Fake::new();
+    let mut w = Watcher::new();
+    assert!(w.learn(&f));
+    *f.probes.borrow_mut() = vec![Probe::TimedOut, Probe::TimedOut, Probe::TimedOut, Probe::TimedOut];
+    assert!(w.tick(&f, 10_000).is_none());
+    assert!(w.tick(&f, 11_000).is_none(), "two in a row while the system is still starting");
+    assert!(w.tick(&f, 30_000).is_none());
+    assert_eq!(w.state, State::Healthy);
+    // a gone device is still a lost drive at any time
+    f.gone();
+    assert_eq!(w.tick(&f, 31_000).unwrap().to, State::Lost);
 }

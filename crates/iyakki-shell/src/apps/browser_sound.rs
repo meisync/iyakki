@@ -147,7 +147,11 @@ impl SoundWatch {
     }
 
     fn step(&mut self, now: Duration, helper: u32, asound: &Path, proc_root: &Path, own_pid: u32) -> Vec<Action> {
-        let obs = sounddoctor::scan(asound, proc_root, helper, own_pid, self.playing());
+        let mut obs = sounddoctor::scan(asound, proc_root, helper, own_pid, self.playing());
+        if iyakki_agent::webmix::active() {
+            // the page's sound goes through the mixer: the engine holds no stream of its own (see sounddoctor::through_mixer)
+            obs = sounddoctor::through_mixer(obs, iyakki_agent::webmix::tap_state() == Some(iyakki_agent::webmix::TapState::Carrying));
+        }
         self.consider_ask(now, &obs, proc_root, own_pid);
         let actions = self.doctor.step(now, &obs);
         for a in &actions {

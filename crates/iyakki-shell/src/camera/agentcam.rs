@@ -30,15 +30,23 @@ pub struct AgentCamera {
     rec: Arc<Mutex<Option<Rec>>>,
     generation: Mutex<u64>,
     settle: u64,
+    /// Use the camera of the web browser the person is in when there is one (the real wiring; off for tests of the machine's cameras).
+    follow_browser: bool,
 }
 
 impl AgentCamera {
     pub fn system() -> AgentCamera {
-        AgentCamera::with(Presence::system(), Arc::new(super::v4l2::V4l2Opener))
+        AgentCamera::with(Presence::system(), Arc::new(super::v4l2::V4l2Opener)).following_the_browser()
+    }
+
+    /// The browser's camera comes first whenever a web page offers one.
+    pub fn following_the_browser(mut self) -> AgentCamera {
+        self.follow_browser = true;
+        self
     }
 
     pub fn with(presence: Presence, opener: Arc<dyn Opener>) -> AgentCamera {
-        AgentCamera { presence: Mutex::new(presence), opener, rec: Arc::new(Mutex::new(None)), generation: Mutex::new(0), settle: SETTLE_FRAMES }
+        AgentCamera { presence: Mutex::new(presence), opener, rec: Arc::new(Mutex::new(None)), generation: Mutex::new(0), settle: SETTLE_FRAMES, follow_browser: false }
     }
 
     /// Keep the first frame (tests).
@@ -47,7 +55,15 @@ impl AgentCamera {
         self
     }
 
+    /// The camera of the web browser the person is in, when there is one (same rule as the CAMERA app: it comes first).
+    fn browser(&self) -> Option<Arc<iyakki_agent::browsermedia::BrowserMedia>> {
+        if self.follow_browser { iyakki_agent::browsersource::browser_camera_for_desktop() } else { None }
+    }
+
     fn first_camera(&self) -> Result<CamDevice, String> {
+        if self.browser().is_some() {
+            return Presence::browser().cameras().into_iter().next().ok_or_else(|| "no camera".to_string());
+        }
         let mut p = self.presence.lock().unwrap_or_else(|e| e.into_inner());
         p.scan();
         p.cameras().into_iter().next().ok_or_else(|| "no camera is connected (plug in a USB camera)".to_string())
@@ -58,7 +74,8 @@ impl AgentCamera {
             return Err("the camera is recording; stop the recording first".into());
         }
         let dev = self.first_camera()?;
-        let o = self.opener.open(&dev, None).map_err(|e| if e.contains("busy") || e.contains("EBUSY") || e.contains("Device or resource busy") { "the camera is in use (is the CAMERA app open? close it and try again)".to_string() } else { e })?;
+        let browser = self.browser().map(|m| Arc::new(super::browsercam::BrowserOpener::new(m)) as Arc<dyn Opener>);
+        let o = browser.as_ref().unwrap_or(&self.opener).open(&dev, None).map_err(|e| if e.contains("busy") || e.contains("EBUSY") || e.contains("Device or resource busy") { "the camera is in use (is the CAMERA app open? close it and try again)".to_string() } else { e })?;
         Ok(Live::start(o.cap))
     }
 
@@ -85,6 +102,9 @@ impl AgentCamera {
 
 impl CameraBackend for AgentCamera {
     fn cameras(&self) -> Vec<String> {
+        if self.browser().is_some() {
+            return Presence::browser().cameras().into_iter().map(|c| format!("{}: {}", c.node, c.name)).collect();
+        }
         let mut p = self.presence.lock().unwrap_or_else(|e| e.into_inner());
         p.scan();
         p.cameras().into_iter().map(|c| format!("{}: {}", c.node, c.name)).collect()
@@ -228,5 +248,43 @@ mod tests {
         assert!(cam.passport(&d, "atlantis", "none").is_err());
         assert!(cam.countries().iter().any(|c| c.id == "in-passport" && c.verified));
         assert!(!cam.countries().iter().any(|c| c.id == "custom"));
+    }
+
+    #[test]
+    fn the_assistants_camera_is_the_browsers_when_a_page_offers_it_and_asks_the_page_first() {
+        use iyakki_agent::browsermedia::{BrowserMedia, Kind, Policy, CH_CAMERA};
+        let dir = std::env::temp_dir().join(format!("iyakki-agentcam-browser-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let m = BrowserMedia::silent(Policy::allow_all());
+        iyakki_agent::browsermedia::register("agentcam-browser-user", m.clone());
+        // a minimal JPEG: SOI, SOF0 of 320x240, a start-of-scan header with a little data, end marker
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xC0, 0, 11, 8];
+        jpeg.extend(240u16.to_be_bytes());
+        jpeg.extend(320u16.to_be_bytes());
+        jpeg.extend([1, 1, 0x11, 0]);
+        jpeg.extend([0xFF, 0xDA, 0, 8, 1, 1, 0, 0, 0x3F, 0, 0x12, 0x34, 0xFF, 0xD9]);
+        let cam = AgentCamera::with(Presence::none(), Arc::new(FakeOpener::default())).without_settling().following_the_browser();
+        assert_eq!(cam.cameras(), vec!["browser: Browser camera"], "listed as the Browser camera");
+        // the person clicks Camera in the page and frames arrive
+        m.set(Kind::Camera, true).unwrap();
+        let feeder = {
+            let (m, jpeg) = (m.clone(), jpeg.clone());
+            std::thread::spawn(move || {
+                for _ in 0..40 {
+                    let mut msg = vec![CH_CAMERA];
+                    msg.extend_from_slice(&jpeg);
+                    m.binary(&msg);
+                    std::thread::sleep(Duration::from_millis(160));
+                }
+            })
+        };
+        let bytes = cam.photo_bytes();
+        feeder.join().unwrap();
+        iyakki_agent::browsermedia::unregister("agentcam-browser-user");
+        assert!(bytes.is_ok(), "{bytes:?}");
+        // a camera tool that does not follow the browser keeps to the machine
+        assert!(AgentCamera::with(Presence::none(), Arc::new(FakeOpener::default())).cameras().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -15,8 +15,11 @@ impl SettingsApp {
     /// Keys of the Sound page about the output and IYAKKI's volume. True when the key was taken here.
     pub(super) fn sound_key(&mut self, k: &Key, cx: &AppCx) -> bool {
         self.hw.set_sound(Self::svc(cx).sound_settings());
+        self.hw.set_mic_choice(Self::svc(cx).voice_settings().mic);
         let target = self.selected_target();
         match k {
+            Key::Char('i') => self.sound_mic_next(cx),
+            Key::Char('r') => self.sound_mic_test(cx),
             Key::Char('o') => self.sound_choose(cx),
             Key::Char('t') => self.sound_test(cx, target),
             Key::Char('A') => self.sound_advanced(),
@@ -28,6 +31,9 @@ impl SettingsApp {
                 Some(Target::SoftVolume) => self.sound_volume(cx, None),
                 Some(Target::SoundAdvanced) => self.sound_advanced(),
                 Some(Target::SoundMixer) => self.sound_mixer(cx),
+                Some(Target::SoundMic(id)) => self.sound_mic_set(cx, &id),
+                Some(Target::SoundMicTest) => self.sound_mic_test(cx),
+                Some(Target::SoundT2Mic) => self.sound_t2_mic(cx),
                 Some(Target::SoundWebMix) => self.sound_web_mix(cx),
                 Some(Target::SoundHighlightOffset) => self.sound_set_highlight_offset(cx, 0),
                 Some(Target::SoundVolMode(card_id)) => self.sound_cycle_mode(cx, &card_id),
@@ -314,5 +320,101 @@ impl SettingsApp {
         let svc = Self::svc(cx).clone();
         cx.audit.record(&cx.session.user, "settings.sound.pattern", if walk { "channel walk" } else { "stereo test" });
         self.start(if walk { "playing the channel walk" } else { "playing the stereo test" }, move || JobOut::Msg(svc.test_pattern(walk)));
+    }
+}
+
+/// Settings -> Sound, Microphone: which input is used (one choice for dictation and for the web pages in the Browser) and a short listening test.
+impl SettingsApp {
+    fn sound_mics(&self) -> Vec<iyakki_agent::voicedesk::Mic> {
+        iyakki_agent::voicedesk::list_mics(&iyakki_agent::voicedesk::proc_root())
+    }
+
+    /// Use this input (empty: Automatic).
+    /// Enter on the built-in microphone row: turning it on asks first (the T2 driver can freeze the Mac); turning it off is immediate.
+    fn sound_t2_mic(&mut self, cx: &AppCx) {
+        if !self.admin(cx) {
+            return self.fail("Only administrators can change this.");
+        }
+        match iyakki_agent::voicedesk::t2_mic(&iyakki_agent::voicedesk::proc_root()) {
+            iyakki_agent::voicedesk::T2Mic::Absent => self.fail("This computer has no T2 sound chip."),
+            iyakki_agent::voicedesk::T2Mic::On => self.sound_t2_mic_apply(cx, false),
+            iyakki_agent::voicedesk::T2Mic::Off => {
+                self.modal = Some(Modal::Confirm(
+                    ConfirmKind::T2Mic,
+                    "Allow the Mac's built-in microphone until the next restart? The T2 chip's sound driver has frozen a whole Mac when it recorded; the unsaved work of the programs running would be lost, and the Mac needs a restart. Nothing is stored: after a restart it is off again. Press y to allow it, or any other key to leave it off.".into(),
+                ));
+            }
+        }
+    }
+
+    pub(super) fn sound_t2_mic_apply(&mut self, cx: &AppCx, on: bool) {
+        if !self.admin(cx) {
+            return;
+        }
+        match iyakki_agent::voicedesk::set_t2_capture(&iyakki_agent::voicedesk::proc_root(), on) {
+            Ok(()) => {
+                cx.audit.record(&cx.session.user, "settings.sound.t2mic", if on { "on" } else { "off" });
+                self.hw.set_mic_choice(Self::svc(cx).voice_settings().mic);
+                self.ok(if on { "The built-in microphone is allowed until the next restart. It appears in the list above: choose it and press r to test." } else { "The built-in microphone is hidden again." });
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
+    pub(super) fn sound_mic_set(&mut self, cx: &AppCx, id: &str) {
+        let svc = Self::svc(cx).clone();
+        match svc.set_voice_mic(id) {
+            Ok(()) => {
+                cx.audit.record(&cx.session.user, "settings.sound.mic", if id.is_empty() { "automatic" } else { id });
+                self.hw.set_mic_choice(id.to_string());
+                let name = self.sound_mics().into_iter().find(|m| m.id == id).map(|m| m.label);
+                self.ok(match name {
+                    Some(n) => format!("Recording from {n} (also for web pages in the Browser)."),
+                    None => "The microphone is chosen automatically.".to_string(),
+                });
+            }
+            Err(e) => self.fail(format!("Could not save the choice: {e}")),
+        }
+    }
+
+    /// `i`: Automatic, then each input in turn.
+    fn sound_mic_next(&mut self, cx: &AppCx) {
+        let mics = self.sound_mics();
+        if mics.is_empty() {
+            return self.fail("No microphone found: plug in a USB microphone or a camera that has one.");
+        }
+        let cur = Self::svc(cx).voice_settings().mic;
+        let next = match mics.iter().position(|m| m.id == cur) {
+            None => mics[0].id.clone(),
+            Some(i) if i + 1 < mics.len() => mics[i + 1].id.clone(),
+            Some(_) => String::new(),
+        };
+        self.sound_mic_set(cx, &next);
+    }
+
+    /// `r`: listen for three seconds and say how loud it was (what Settings -> Voice -> Test mic does, aimed at the chosen input).
+    pub(super) fn sound_mic_test(&mut self, cx: &AppCx) {
+        let svc = Self::svc(cx).clone();
+        let v = svc.voice_settings();
+        let mics = self.sound_mics();
+        let Some(m) = iyakki_agent::voicedesk::pick_mic(&mics, &v.mic) else {
+            return self.fail("No microphone found: plug in a USB microphone or a camera that has one.");
+        };
+        let cmd = iyakki_agent::voicedesk::record_cmd_for(&v.record_cmd, Some(m));
+        let label = m.label.clone();
+        cx.audit.record(&cx.session.user, "settings.sound.mic_test", &m.id);
+        self.start("listening to the microphone (speak now)", move || {
+            JobOut::Msg((|| {
+                let rec = iyakki_agent::voice::Recorder::start(&cmd)?;
+                std::thread::sleep(std::time::Duration::from_millis(3000));
+                let pcm = rec.stop()?;
+                let pk = iyakki_agent::voice::peak(&pcm);
+                if pk < 150 {
+                    Err(format!("{label} opened but it is silent (peak {pk}). Check that it is not muted or too quiet."))
+                } else {
+                    Ok(format!("{label} works: peak level {pk} of 32767."))
+                }
+            })())
+        });
     }
 }

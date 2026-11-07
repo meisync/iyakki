@@ -308,3 +308,23 @@ fn settings_pictures() {
         }
     }
 }
+
+#[test]
+fn the_actions_that_once_had_only_a_key_now_also_have_a_button_to_click_or_touch() {
+    let (mut a, _cx) = admin_app("ia-keyonly");
+    let has = |a: &SettingsApp, keys: &str| {
+        let got: Vec<char> = a.buttons_for(true).iter().map(|b| b.2).collect();
+        for k in keys.chars() {
+            assert!(got.contains(&k), "{:?} has no button for the key {k}", a.tab());
+        }
+    };
+    a.go_to(Tab::Cloud);
+    has(&a, "ca");
+    a.go_to(Tab::Memory);
+    has(&a, "r");
+    a.go_to(Tab::Shares);
+    has(&a, "f");
+    a.go_to(Tab::Firewall);
+    a.fw.advanced = true;
+    has(&a, "rcib");
+}

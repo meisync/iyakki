@@ -1555,6 +1555,16 @@ impl UserTools {
                 let a = Self::cmd_args(args);
                 // never start, stop or install a cluster while one is connected or in a desktop window
                 crate::devcluster::guard(program, &a)?;
+                // a tenant pod never runs a command itself: it goes to the sandbox (docs/development/CLOUD-SANDBOX-PLAN.md), or is refused
+                match crate::sandbox::wiring::route() {
+                    crate::sandbox::wiring::Route::Local => {}
+                    crate::sandbox::wiring::Route::Refuse(why) => return Err(why),
+                    crate::sandbox::wiring::Route::Sandbox(r) => {
+                        crate::exec::check_with(&self.services.clis.extras(), program, &a)?;
+                        let secs = args.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(crate::exec::DEFAULT_SECONDS);
+                        return r.run_command(u, program, &a, secs);
+                    }
+                }
                 if matches!(program, "ssh" | "scp" | "sftp") {
                     // other machines: only hosts the account may reach, only trusted host keys, only keys from the person's vault,
                     // and local files only inside the file scope
@@ -2168,7 +2178,7 @@ mod tests {
         // the model call itself fails
         let b = Script::new(vec![Err("HTTP 401: bad key".into())]);
         let ev = drive(&start_run(b, Fake::new(), RunLimits::default()), |_| None);
-        assert!(matches!(ev.last().unwrap(), RunEvent::Failed { error } if error == "HTTP 401: bad key"));
+        assert!(matches!(ev.last().unwrap(), RunEvent::Failed { error } if error.contains("refused the key") && error.contains("Details: HTTP 401: bad key")), "{:?}", ev.last());
         // a backend with no tool support fails with a clear message (default trait method)
         struct NoTools;
         impl ChatBackend for NoTools {

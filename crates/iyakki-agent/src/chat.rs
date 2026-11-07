@@ -91,6 +91,11 @@ pub struct ModelTurn {
 }
 
 pub trait ChatBackend: Send + Sync {
+    /// The provider's name from the settings, for error messages in plain words (empty when not known).
+    fn provider_name(&self) -> String {
+        String::new()
+    }
+
     fn complete(&self, history: &[Message]) -> Result<String, String>;
 
     /// Like [`complete`](ChatBackend::complete) but the model may answer with tool calls instead.

@@ -140,6 +140,18 @@ pub fn set_direct_links(ifaces: Vec<String>, allow_more: bool) {
     e.network_changed();
 }
 
+/// The interface that internet sharing serves right now (empty list: none). Only DHCP and DNS are let in on it. Called by `iyakki_agent::sharing`.
+pub fn set_share_zone(ifaces: Vec<String>) {
+    let mut e = engine();
+    if e.ctx().share_ifaces == ifaces {
+        return;
+    }
+    let mut c = e.ctx().clone();
+    c.share_ifaces = ifaces;
+    e.set_ctx(c);
+    e.network_changed();
+}
+
 /// Where audit entries go (the shell's audit log). Entries made before this is called are delivered at once.
 pub fn set_audit(f: AuditFn) {
     engine().set_audit(f);
@@ -163,7 +175,7 @@ pub fn is_cloud(cmdline: &str, release: &str) -> bool {
 
 /// The facts about this machine for the generator, from the kernel command line and `/proc`.
 pub fn ctx_from(cmdline: &str, release: &str, ipv6: bool) -> Ctx {
-    Ctx { now: 0, ssh_boot: param(cmdline, "iyakki.ssh") == Some("1"), ipv6, cloud: is_cloud(cmdline, release), remote_port: param(cmdline, "iyakki.web").and_then(web_port), direct_ifaces: Vec::new(), direct_allow_more: false }
+    Ctx { now: 0, ssh_boot: param(cmdline, "iyakki.ssh") == Some("1"), ipv6, cloud: is_cloud(cmdline, release), remote_port: param(cmdline, "iyakki.web").and_then(web_port), direct_ifaces: Vec::new(), direct_allow_more: false, share_ifaces: Vec::new() }
 }
 
 fn ipv6_on() -> bool {

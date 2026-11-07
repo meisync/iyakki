@@ -38,6 +38,11 @@ fn the_record_command_is_aimed_at_the_chosen_microphone_unless_it_names_one() {
     assert_eq!(record_cmd_for("arecord -q -f S16_LE -r 16000 -c 1 -t raw", Some(&usb)), "arecord -D plughw:1,0 -q -f S16_LE -r 16000 -c 1 -t raw");
     assert_eq!(record_cmd_for("arecord -q -D hw:2,0 -t raw", Some(&usb)), "arecord -q -D hw:2,0 -t raw", "a device named by hand wins");
     assert_eq!(record_cmd_for("arecord -q", None), "arecord -q");
+    // a custom recorder (a script, parecord, ffmpeg) is never given an ALSA option it would not understand
+    for custom in ["sh -c 'cat x; sleep 1'", "parecord --raw", "/usr/bin/ffmpeg -f alsa -i default -"] {
+        assert_eq!(record_cmd_for(custom, Some(&usb)), custom);
+    }
+    assert_eq!(record_cmd_for("/usr/bin/arecord -q", Some(&usb)), "/usr/bin/arecord -D plughw:1,0 -q");
 }
 
 #[test]
@@ -83,6 +88,29 @@ fn twenty_thousand_characters_become_short_pieces_that_cover_the_text_and_empty_
     // a bare address or marks have nothing to say
     assert!(pieces("https://example.org/a/b").is_empty() && pieces("*** ###").is_empty());
     assert!(pieces("").is_empty());
+}
+
+#[test]
+fn the_built_in_t2_microphone_can_be_allowed_and_forbidden_again_and_a_pc_has_no_switch() {
+    let d = std::env::temp_dir().join(format!("iyakki-t2sw-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let proc = d.join("proc");
+    std::fs::create_dir_all(proc.join("asound")).unwrap();
+    std::fs::create_dir_all(d.join("sys/module/apple_bce/parameters")).unwrap();
+    std::fs::write(proc.join("asound/cards"), " 0 [Audio          ]: AppleT2x1 - Apple T2 Audio\n 1 [PCH            ]: HDA-Intel - HDA Intel PCH\n").unwrap();
+    std::fs::write(d.join("sys/module/apple_bce/parameters/capture"), "N\n").unwrap();
+    assert_eq!(t2_mic(&proc), T2Mic::Off);
+    set_t2_capture(&proc, true).unwrap();
+    assert_eq!(t2_mic(&proc), T2Mic::On);
+    assert_eq!(std::fs::read_to_string(d.join("sys/module/apple_bce/parameters/capture")).unwrap().trim(), "1");
+    set_t2_capture(&proc, false).unwrap();
+    assert_eq!(t2_mic(&proc), T2Mic::Off);
+    // a PC: no T2 card, and no driver parameter to write
+    std::fs::write(proc.join("asound/cards"), " 0 [PCH            ]: HDA-Intel - HDA Intel PCH\n").unwrap();
+    assert_eq!(t2_mic(&proc), T2Mic::Absent);
+    std::fs::remove_dir_all(d.join("sys/module")).unwrap();
+    assert!(set_t2_capture(&proc, true).unwrap_err().contains("no switch"));
+    std::fs::remove_dir_all(&d).ok();
 }
 
 #[test]

@@ -127,6 +127,19 @@ impl Policy {
             _ => default,
         }
     }
+    /// The policy of one person: the tenant switch, their role and any refinement of theirs (`iyakki-sec`, default deny).
+    pub fn from_sec(p: &iyakki_sec::media::MediaPolicy, user: &str, role: iyakki_sec::policy::Role) -> Policy {
+        use iyakki_sec::media::Device;
+        Policy { mic: p.allows(user, role, Device::Mic), camera: p.allows(user, role, Device::Camera), clip_read: p.allows(user, role, Device::ClipRead), audio: p.allows(user, role, Device::Audio) }
+    }
+    /// The policy of one person in a tenant: the tenant's `media.policy` configuration decides when the tenant has one
+    /// (`IYAKKI_TENANT_DATA_DIR` names its folder); otherwise `fallback` (the machine setting) stays.
+    pub fn for_tenant(fallback: Policy, user: &str, role: iyakki_sec::policy::Role) -> Policy {
+        match crate::tenantconfig::enforce::data_dir_from_env() {
+            Some(dir) => crate::tenantconfig::enforce::media_policy_for(&dir, None, user, role, fallback),
+            None => fallback,
+        }
+    }
     pub fn allows(&self, k: Kind) -> bool {
         match k {
             Kind::Mic => self.mic,
@@ -135,6 +148,35 @@ impl Policy {
         }
     }
 }
+
+/// Where the session's sound is played while a page has its sound on (the page's "Play sound on" choice, kept for the session only).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SinkMode {
+    /// This computer, the browser's: the Mac's own output is silenced for as long as this page's sound is on.
+    #[default]
+    Browser,
+    /// The browser and the machine's own speakers.
+    Both,
+    /// The machine's speakers only: nothing is sent to the page.
+    Mac,
+}
+
+impl SinkMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            SinkMode::Browser => "browser",
+            SinkMode::Both => "both",
+            SinkMode::Mac => "mac",
+        }
+    }
+    pub fn parse(s: &str) -> Option<SinkMode> {
+        [SinkMode::Browser, SinkMode::Both, SinkMode::Mac].into_iter().find(|m| m.name() == s)
+    }
+}
+
+/// A page that has not asked for sound for this long is taken to be gone (a hung or crashed connection): its choice then stops
+/// silencing the machine, whatever state it was left in.
+pub const SINK_ALIVE: Duration = Duration::from_secs(4);
 
 /// Which browser sources are on right now (what the tiles and cloud mode look at).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -161,6 +203,15 @@ pub enum ClipKind {
 pub struct ClipItem {
     pub kind: ClipKind,
     pub bytes: Vec<u8>,
+}
+
+/// The answer to [`BrowserMedia::request`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Requested {
+    Already,
+    /// The page was asked to show its Allow button; the person has to click it.
+    Asked,
+    Denied,
 }
 
 /// What a binary message from the page turned into.
@@ -192,6 +243,10 @@ struct Inner {
     audio_channels: u8,
     audio_seq: u32,
     audio_dropped: u64,
+    sink: SinkMode,
+    /// When the page started its sound, and when the connection last asked for sound (a liveness mark).
+    audio_on_at: Option<Instant>,
+    last_pull: Option<Instant>,
     /// Notices for the page, JSON text (limit reached...).
     notices: Vec<String>,
     /// Changed since the page was last told.
@@ -277,6 +332,11 @@ impl BrowserMedia {
             g.dirty = true;
             if !allowed {
                 g.audio.clear();
+                g.audio_on_at = None;
+            } else {
+                let now = Instant::now();
+                g.audio_on_at = Some(now);
+                g.last_pull = Some(now);
             }
         }
         drop(g);
@@ -284,6 +344,40 @@ impl BrowserMedia {
             (self.audit)("browser.media.denied", "audio");
         }
         self.write_sources();
+    }
+
+    /// The person chose where the session's sound plays. Only this session's own setting; nothing is stored beyond the session.
+    pub fn set_sink_mode(&self, mode: SinkMode) {
+        let mut g = self.lock();
+        if g.sink == mode {
+            return;
+        }
+        g.sink = mode;
+        g.dirty = true;
+        if mode == SinkMode::Mac {
+            g.audio.clear(); // nothing goes to the page now
+        }
+        drop(g);
+        (self.audit)("browser.media.route", mode.name());
+    }
+
+    pub fn sink_mode(&self) -> SinkMode {
+        self.lock().sink
+    }
+
+    /// Does this page get a copy of the session's sound? (Its sound is on and it did not choose "The Mac only".)
+    pub fn wants_audio(&self) -> bool {
+        let g = self.lock();
+        g.audio_out && g.sink != SinkMode::Mac
+    }
+
+    /// Is this page's connection alive and playing at `now`? A page that stopped asking is not.
+    fn playing_at(&self, now: Instant) -> Option<Instant> {
+        let g = self.lock();
+        match (g.audio_out, g.audio_on_at, g.last_pull) {
+            (true, Some(on), Some(pull)) if now.saturating_duration_since(pull) <= SINK_ALIVE => Some(on),
+            _ => None,
+        }
     }
 
     pub fn sources(&self) -> Sources {
@@ -308,12 +402,37 @@ impl BrowserMedia {
         v
     }
 
+    /// One line for the sign the shell draws on every screen while the browser's microphone or camera is live (`None`: neither is).
+    pub fn indicator_text(&self) -> Option<String> {
+        let s = self.sources();
+        match (s.mic, s.camera) {
+            (true, true) => Some("Your browser's microphone and camera are on. Click to stop.".into()),
+            (true, false) => Some("Your browser's microphone is recording. Click to stop.".into()),
+            (false, true) => Some("Your browser's camera is on. Click to stop.".into()),
+            (false, false) => None,
+        }
+    }
+
+    /// The sign was clicked: the microphone and the camera are switched off here (the page is told and stops its devices), and the
+    /// stop is audited. Returns whether anything was on.
+    pub fn stop_capture(&self) -> bool {
+        let was = self.indicator_text().is_some();
+        for k in [Kind::Mic, Kind::Camera] {
+            let _ = self.set(k, false);
+        }
+        if was {
+            (self.audit)("browser.media.stopped", "shell");
+        }
+        was
+    }
+
     /// The `media_state` message for the page (what is allowed and what is on).
     pub fn state_json(&self) -> String {
         let s = self.sources();
         let p = self.policy;
         serde_json::json!({
             "t": "media_state",
+            "sink": self.sink_mode().name(),
             "mic": s.mic, "camera": s.camera, "clipread": s.clip_read,
             "allowed": { "mic": p.mic, "camera": p.camera, "clipread": p.clip_read, "audio": p.audio },
             "mic_limit_s": MIC_LIMIT_SECS,
@@ -335,6 +454,21 @@ impl BrowserMedia {
         }
         v.extend(notices);
         v
+    }
+
+    /// A tile (VOICE, CAMERA) wants a browser source that is off. A source is only ever switched on by the person's own click in the
+    /// page (browsers require it, and it is the permission prompt), so the page is asked to show its "Allow" button.
+    pub fn request(&self, kind: Kind) -> Requested {
+        if self.is_on(kind) {
+            return Requested::Already;
+        }
+        if !self.policy.allows(kind) {
+            (self.audit)("browser.media.denied", kind.name());
+            return Requested::Denied;
+        }
+        self.lock().notices.push(serde_json::json!({ "t": "media_ask", "kind": kind.name() }).to_string());
+        (self.audit)("browser.media.asked", kind.name());
+        Requested::Asked
     }
 
     /// A denial to tell the page about.
@@ -498,7 +632,7 @@ impl BrowserMedia {
     /// Queue 16-bit PCM for the page (interleaved). Returns false when no page is listening (nothing is queued then).
     pub fn push_audio(&self, rate: u32, channels: u8, pcm: &[i16]) -> bool {
         let mut g = self.lock();
-        if !g.audio_out || !(8_000..=96_000).contains(&rate) || !(1..=2).contains(&channels) {
+        if !g.audio_out || g.sink == SinkMode::Mac || !(8_000..=96_000).contains(&rate) || !(1..=2).contains(&channels) {
             return false;
         }
         if (g.audio_rate, g.audio_channels) != (rate, channels) {
@@ -520,6 +654,7 @@ impl BrowserMedia {
     /// Sound messages for the page, each at most [`AUDIO_CHUNK_BYTES`] of sound.
     pub fn take_audio(&self) -> Vec<Vec<u8>> {
         let mut g = self.lock();
+        g.last_pull = Some(Instant::now());
         let mut out = Vec::new();
         while !g.audio.is_empty() {
             let n = g.audio.len().min(AUDIO_CHUNK_BYTES) & !(2 * g.audio_channels.max(1) as usize - 1);
@@ -600,6 +735,45 @@ pub fn unregister(user: &str) {
 
 pub fn for_user(user: &str) -> Option<Arc<BrowserMedia>> {
     registry().lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(u, _)| u == user).map(|(_, m)| m.clone())
+}
+
+/// Does any connected page listen to the session's sound? (The mixer sends nothing, and keeps nothing, when this is false.)
+pub fn audio_listeners() -> bool {
+    registry().lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(_, m)| m.wants_audio())
+}
+
+/// Must the machine's own speakers stay silent right now? Only the controlling session decides: the live page (its connection
+/// asked for sound a moment ago) whose sound was switched on last. It silences the machine only with "This computer (the browser)".
+/// "Both", "The Mac only", a page that went away, switched off or hung, or no page at all: the machine plays as usual.
+pub fn local_muted() -> bool {
+    local_muted_at(Instant::now())
+}
+
+pub fn local_muted_at(now: Instant) -> bool {
+    let all: Vec<Arc<BrowserMedia>> = registry().lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, m)| m.clone()).collect();
+    muted_by(&all, now)
+}
+
+/// The rule of [`local_muted`] over a given set of sessions.
+pub fn muted_by(sessions: &[Arc<BrowserMedia>], now: Instant) -> bool {
+    sessions.iter().filter_map(|m| m.playing_at(now).map(|on| (on, m))).max_by_key(|(on, _)| *on).is_some_and(|(_, m)| m.sink_mode() == SinkMode::Browser)
+}
+
+/// The browser media whose camera the desktop should use: a registered page that may use the camera, one that has it on first, else
+/// the one that connected last.
+pub fn camera_session() -> Option<Arc<BrowserMedia>> {
+    let all: Vec<Arc<BrowserMedia>> = registry().lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, m)| m.clone()).filter(|m| m.policy().camera).collect();
+    all.iter().rev().find(|m| m.is_on(Kind::Camera)).or(all.last()).cloned()
+}
+
+/// Offer the mixer's output (16-bit interleaved PCM) to every page that started its sound. True when at least one took it.
+pub fn broadcast_audio(rate: u32, channels: u8, pcm: &[i16]) -> bool {
+    let all: Vec<Arc<BrowserMedia>> = registry().lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, m)| m.clone()).collect();
+    let mut any = false;
+    for m in all {
+        any |= m.push_audio(rate, channels, pcm);
+    }
+    any
 }
 
 /// Where a session's browser media files go: `<runtime dir>/iyakki-browser-media/<user>`.

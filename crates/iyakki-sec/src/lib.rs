@@ -4,6 +4,7 @@
 //! supervisor issued for it. Tokens are 128-bit random values, unguessable and
 //! revocable. Everything else is denied by default.
 
+pub mod media;
 pub mod policy;
 pub mod wpa;
 

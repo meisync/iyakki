@@ -215,3 +215,43 @@ fn the_provider_reads_the_active_set() {
     activate(vec![]);
     assert!(p(&url("https://prov.example.test/")).is_empty());
 }
+
+#[test]
+fn a_path_regex_narrows_a_rule_on_the_path_and_the_query_and_never_replaces_the_site_filter() {
+    let mut r = rule("X-Test", "api.example.test", "");
+    r.path_regex = "^/api/v[0-9]+/items".into();
+    let c = Compiled::new(&r, "dummy-value".into()).unwrap();
+    assert!(c.matches(&url("https://api.example.test/api/v2/items")));
+    assert!(c.matches(&url("https://api.example.test/api/v10/items/7?x=1")));
+    assert!(!c.matches(&url("https://api.example.test/api/vX/items")), "not a version number");
+    assert!(!c.matches(&url("https://api.example.test/other")));
+    assert!(!c.matches(&url("https://other.example.test/api/v2/items")), "the domain filter still applies");
+    // the query is part of what is tested
+    let mut q = rule("X-Test", "api.example.test", "");
+    q.path_regex = r"\?debug=1$".into();
+    let qc = Compiled::new(&q, "dummy-value".into()).unwrap();
+    assert!(qc.matches(&url("https://api.example.test/a?debug=1")));
+    assert!(!qc.matches(&url("https://api.example.test/a?debug=2")));
+    assert!(!qc.matches(&url("https://api.example.test/a")));
+    // an extension test
+    let mut j = rule("X-Test", "*.example.test", "");
+    j.path_regex = r"\.json$".into();
+    let jc = Compiled::new(&j, "dummy-value".into()).unwrap();
+    assert!(jc.matches(&url("https://a.example.test/data/list.json")));
+    assert!(!jc.matches(&url("https://a.example.test/data/list.html")));
+    // a regex alone sends the header to no site: the domain or prefix is still required
+    let mut alone = rule("X-Test", "", "");
+    alone.path_regex = ".*".into();
+    assert!(check_rule(&alone).is_err(), "a pattern is not a site filter");
+    // a broken pattern is refused in plain words, a runaway one cannot hang
+    let mut bad = rule("X-Test", "api.example.test", "");
+    bad.path_regex = "([a-z".into();
+    assert!(check_rule(&bad).unwrap_err().contains("regular expression"));
+    let mut slow = rule("X-Test", "api.example.test", "");
+    slow.path_regex = "(a*)*b".into();
+    let sc = Compiled::new(&slow, "dummy-value".into()).unwrap();
+    assert!(!sc.matches(&url(&format!("https://api.example.test/{}", "a".repeat(200)))), "the step limit ends it");
+    // an old rule file without the field still loads
+    let old: HeaderRule = serde_json::from_str(r#"{"id":"1","name":"n","domains":"a.example.test","prefix":"","header":"X-Y","enabled":true,"ack":false}"#).unwrap();
+    assert_eq!(old.path_regex, "");
+}

@@ -100,8 +100,14 @@ pub struct Rig {
 
 impl Rig {
     pub fn system() -> Rig {
+        Rig::for_user("")
+    }
+
+    /// The rig of this person's session: the microphone is the browser's in a browser session, the machine's otherwise
+    /// (`iyakki_agent::browsersource::recorders_for`, the one place that decides).
+    pub fn for_user(user: &str) -> Rig {
         Rig {
-            recorders: Arc::new(vd::SystemRecorders),
+            recorders: if user.is_empty() { Arc::new(vd::SystemRecorders) } else { iyakki_agent::browsersource::recorders_for(user) },
             sink: None,
             output: Arc::new(|| {
                 use iyakki_agent::syssounds::CueOut;
@@ -167,7 +173,7 @@ fn new_box() -> MultiLine {
 
 impl VoiceApp {
     pub fn new(cx: &AppCx) -> VoiceApp {
-        VoiceApp::with_rig(cx, Rig::system())
+        VoiceApp::with_rig(cx, Rig::for_user(&cx.session.user))
     }
 
     pub fn with_rig(cx: &AppCx, rig: Rig) -> VoiceApp {
@@ -991,3 +997,7 @@ impl App for VoiceApp {
 #[cfg(test)]
 #[path = "voice_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "voice_browser_tests.rs"]
+mod browser_tests;

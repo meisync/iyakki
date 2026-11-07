@@ -314,6 +314,14 @@ impl Scheduler {
         Scheduler { state, path, tz, dirty: false, last_tick_ms: 0 }
     }
 
+    /// Read the state file again (a process that starts leading after another one did).
+    pub fn reload(&mut self) {
+        if let Some(st) = self.path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()) {
+            self.state = st;
+        }
+        self.dirty = false;
+    }
+
     pub fn save(&mut self) {
         if !self.dirty {
             return;

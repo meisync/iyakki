@@ -1,0 +1,55 @@
+<!doctype html>
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  Copyright IYAKKI contributors. Licensed under the Apache License, Version 2.0 (see LICENSE at the root of the repository).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>IYAKKI</title>
+<link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to the page</a>
+<header class="top" id="top" hidden>
+  <strong class="brand">IYAKKI</strong>
+  <nav id="nav" aria-label="Pages"></nav>
+  <span class="tenant" id="tenant"></span>
+  <span class="bell-slot" id="bell"></span>
+  <span class="who" id="who"></span>
+  <button type="button" id="signout">Sign out</button>
+</header>
+<main id="main" tabindex="-1">
+  <section id="signin" class="card narrow" hidden>
+    <h1>Sign in</h1>
+    <p class="muted">Use your IYAKKI account. The server checks every action; this page only hides what you may not do.</p>
+    <form id="signin-form" autocomplete="on">
+      <label for="user">Name</label>
+      <input id="user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      <label for="pass">Password</label>
+      <input id="pass" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit" class="primary" id="signin-go">Sign in</button>
+    </form>
+  </section>
+  <section id="page" hidden></section>
+  <p id="status" role="status" aria-live="polite"></p>
+</main>
+<noscript><p class="card">This page needs JavaScript. Nothing is sent anywhere else.</p></noscript>
+<script src="/ui/common.js"></script>
+<script src="/ui/files.js"></script>
+<script src="/ui/git.js"></script>
+<script src="/ui/flows.js"></script>
+<script src="/ui/runs.js"></script>
+<script src="/ui/schedules.js"></script>
+<script src="/ui/cloud.js"></script>
+<script src="/ui/remote.js"></script>
+<script src="/ui/tenant.js"></script>
+<script src="/ui/tenantcfg.js"></script>
+<script src="/ui/notifications.js"></script>
+<script src="/ui/bell.js"></script>
+<script src="/ui/app.js"></script>
+</body>
+</html>

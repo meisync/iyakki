@@ -340,7 +340,15 @@ fn apply_partial(path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, 
                 let cfg = items.iter().find(|i| !i.dir && i.path.eq_ignore_ascii_case("/boot/grub/grub.cfg")).map(|i| vol.read_file(i)).transpose()?.map(|b| String::from_utf8_lossy(&b).into_owned());
                 let mut lean = crate::leanstrip::LeanFree { own_root: crate::leanstrip::own_root(&paths), ..crate::leanstrip::LeanFree::new() };
                 let mut plain = fatclone::Unchanged;
-                let editor: &mut dyn fatclone::Editor = if crate::leanstrip::needs_cleaning(&paths, cfg.as_deref()) { &mut lean } else { &mut plain };
+                let inner: &mut dyn fatclone::Editor = if crate::leanstrip::needs_cleaning(&paths, cfg.as_deref()) { &mut lean } else { &mut plain };
+                // a disk installed from a running stick (a block device) is not install media; a stick written from an image FILE keeps the marker that
+                // makes the boot loader show "Install to a disk" (EFI/iyakki-boot/install-media)
+                let from_device = {
+                    use std::os::unix::fs::FileTypeExt;
+                    std::fs::metadata(&src.path).is_ok_and(|m| m.file_type().is_block_device())
+                };
+                let mut without_marker = fatclone::WithoutInstallMarker(inner);
+                let editor: &mut dyn fatclone::Editor = if from_device { &mut without_marker } else { without_marker.0 };
                 fatclone::clone_to_with(&mut vol, model.sector, st.bytes, NAME_BOOT, volume_id, editor, &mut |b| {
                     buf.extend_from_slice(b);
                     if buf.len() >= 4 * MIB as usize {

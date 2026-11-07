@@ -29,9 +29,12 @@ impl InstallEnv {
         InstallEnv { sys: "/sys".into(), dev: "/dev".into(), mounts: "/proc/mounts".into(), swaps: "/proc/swaps".into(), template: None, uefi: install::booted_uefi() }
     }
 
+    fn rd(p: &std::path::Path) -> String {
+        std::fs::read_to_string(p).unwrap_or_default()
+    }
+
     fn disks(&self) -> Vec<DiskInfo> {
-        let rd = |p: &std::path::Path| std::fs::read_to_string(p).unwrap_or_default();
-        let mut d = install::list_disks(&self.sys, &self.dev, &rd(&self.mounts), &rd(&self.swaps));
+        let mut d = install::list_disks(&self.sys, &self.dev, &Self::rd(&self.mounts), &Self::rd(&self.swaps));
         install::probe_contents(&mut d, &self.dev);
         d
     }
@@ -39,7 +42,17 @@ impl InstallEnv {
     fn source(&self, disks: &[DiskInfo]) -> Result<SourceInfo, String> {
         match &self.template {
             Some(t) => install::read_source(t),
-            None => install::find_source(disks, &self.dev, None),
+            None => {
+                // the disk this system runs from is the one to copy (and is never offered as the target); only when that is not an IYAKKI
+                // boot disk does the older rule apply (a removable boot disk wins)
+                let mounts = Self::rd(&self.mounts);
+                if let Some(run) = running_disk(&mounts, &disks.iter().map(|d| d.drive.name.as_str()).collect::<Vec<_>>()) {
+                    if let Ok(s) = install::read_source(&self.dev.join(&run)) {
+                        return Ok(s);
+                    }
+                }
+                install::find_source(disks, &self.dev, None)
+            }
         }
     }
 
@@ -47,6 +60,16 @@ impl InstallEnv {
     pub fn available(&self) -> bool {
         self.source(&self.disks()).is_ok()
     }
+}
+
+/// The disk that holds the running system: the one with the IYAKKI boot or data volume mounted from it (`/proc/mounts` text).
+pub(super) fn running_disk(mounts: &str, names: &[&str]) -> Option<String> {
+    let dev = mounts.lines().filter_map(|l| {
+        let mut f = l.split_whitespace();
+        let (src, at) = (f.next()?, f.next()?);
+        matches!(at, "/.stage1/boot" | "/.stage1/data" | "/var/lib/iyakki").then(|| src.rsplit('/').next().unwrap_or(src).to_string())
+    }).next()?;
+    names.iter().find(|d| (1..=16).any(|n| install::partition_name(d, n) == dev)).map(|d| d.to_string())
 }
 
 pub(super) struct InstallPanel {

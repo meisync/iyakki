@@ -42,6 +42,11 @@ pub struct HeaderRule {
     pub domains: String,
     /// An optional URL prefix (`https://example.org/api`); the rule applies only below it.
     pub prefix: String,
+    /// An optional regular expression the request's path (and query, `/api/v2/items?id=7`) must match, on top of the domain filter and
+    /// the prefix: `^/api/v[0-9]+/`, `\\.json$`. Narrows a rule; never sends a header to a site by itself. Matched by the small in-house
+    /// engine (a step limit stops a pattern that would run forever).
+    #[serde(default)]
+    pub path_regex: String,
     pub header: String,
     pub enabled: bool,
     /// The person ticked "I know" for Cookie or Authorization.
@@ -115,6 +120,12 @@ pub fn check_rule(r: &HeaderRule) -> Result<(), String> {
     }
     let d = filter_of(&r.domains, "domain")?;
     let p = filter_of(&r.prefix, "URL prefix")?;
+    if r.path_regex.len() > MAX_FILTER || r.path_regex.chars().any(char::is_control) {
+        return Err("The path pattern is too long or has a control character.".into());
+    }
+    if !r.path_regex.is_empty() {
+        crate::regex::Regex::new(&r.path_regex, true, false).map_err(|e| format!("The path pattern is not a valid regular expression: {e}"))?;
+    }
     if d.is_none() && p.is_none() {
         return Err("Say which sites get the header: a domain (api.example.org, *.corp.example) or a URL prefix. It is never sent to every site.".into());
     }
@@ -245,6 +256,7 @@ pub struct Compiled {
     value: String,
     domains: Option<FilterSet>,
     prefix: Option<FilterSet>,
+    path: Option<crate::regex::Regex>,
 }
 
 impl std::fmt::Debug for Compiled {
@@ -276,7 +288,7 @@ impl Compiled {
     pub fn new(r: &HeaderRule, value: String) -> Option<Compiled> {
         check_rule(r).ok()?;
         check_value(&value).ok()?;
-        Some(Compiled { name: r.name.clone(), header: r.header.clone(), value, domains: filter_of(&r.domains, "domain").ok()?, prefix: filter_of(&r.prefix, "URL prefix").ok()? })
+        Some(Compiled { name: r.name.clone(), header: r.header.clone(), value, domains: filter_of(&r.domains, "domain").ok()?, prefix: filter_of(&r.prefix, "URL prefix").ok()?, path: (!r.path_regex.is_empty()).then(|| crate::regex::Regex::new(&r.path_regex, true, false).ok()).flatten() })
     }
 
     pub fn matches(&self, url: &iyakki_web::Url) -> bool {
@@ -285,7 +297,11 @@ impl Compiled {
         }
         let text = judged(url);
         let hit = |f: &FilterSet| f.decide_url(&text).is_ok_and(|d| d.route == Route::Tunnel);
-        self.domains.as_ref().is_none_or(hit) && self.prefix.as_ref().is_none_or(hit)
+        let path_ok = self.path.as_ref().is_none_or(|re| match &url.query {
+            Some(q) => re.is_match(&format!("{}?{q}", url.path)),
+            None => re.is_match(&url.path),
+        });
+        self.domains.as_ref().is_none_or(hit) && self.prefix.as_ref().is_none_or(hit) && path_ok
     }
 }
 

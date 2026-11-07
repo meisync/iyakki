@@ -213,8 +213,19 @@ impl Shell {
                 self.fnk.power_card = false;
                 self.sleep_now(&user, "power key");
             }
+            Key::Char('l') if self.session.is_some() => {
+                self.fnk.power_card = false;
+                self.lock_now(&user, "power key");
+            }
             _ => self.fnk.power_card = false,
         }
+        self.stale = true;
+    }
+
+    /// Lock: the shell has one lock, signing out (the screen asks for the password again and the vault is sealed).
+    pub(super) fn lock_now(&mut self, user: &str, detail: &str) {
+        self.env.audit.record(user, "power.lock", detail);
+        self.sign_out();
         self.stale = true;
     }
 
@@ -271,6 +282,7 @@ impl Shell {
         let (tap, _) = k.trackpad();
         crate::input::request_touchpad(tap);
         crate::scrolleng::request_config(k.scroll().into());
+        crate::inputprofile::refresh(&k); // the Apple devices the kernel lists decide Automatic
     }
 }
 

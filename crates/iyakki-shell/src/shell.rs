@@ -268,6 +268,8 @@ const TILES: &[Tile] = &[
     Tile { app: PApp::Git, icon: Icon::Git, label: "GIT", sub: "Browse repositories", accent: crate::apps::git_tile::ACCENT, group: Some(Group::Work) },
     Tile { app: PApp::Doctor, icon: Icon::Doctor, label: "DOCTOR", sub: "Find and fix", accent: crate::apps::doctor::ACCENT, group: Some(Group::System) },
     Tile { app: PApp::Learn, icon: Icon::Learn, label: "LEARN", sub: "Study and quiz", accent: crate::apps::learn::ACCENT, group: Some(Group::Home) },
+    Tile { app: PApp::DevTools, icon: Icon::Edit, label: "DEV TOOLS", sub: "JSON, JWT, QR code", accent: crate::apps::devtools::ACCENT, group: Some(Group::Work) },
+    Tile { app: PApp::Auth, icon: Icon::Lock, label: "AUTH", sub: "One-time codes", accent: crate::apps::auth::ACCENT, group: Some(Group::System) },
     Tile { app: PApp::Checkup, icon: Icon::Checkup, label: "CHECK-UP", sub: "Test the hardware", accent: crate::apps::checkup::ACCENT, group: Some(Group::System) },
 ];
 
@@ -406,6 +408,8 @@ pub struct Shell {
     dev_sign: Option<String>,
     /// A paired computer waits for the administrator to allow commands: pulse, banner and the inline card (`devask.rs`, `shell_devask.rs`).
     devask: crate::devask::DevAsk,
+    /// The one-time time zone question (`shell_tzask.rs`).
+    tzask: shell_tzask::TzAsk,
     /// The USB cameras: the CAMERA tile is greyed while there is none (looked at again every two seconds).
     camera: crate::camera::Presence,
     /// The "camera in use by the assistant" sign was on in the last frame.
@@ -526,7 +530,7 @@ impl Shell {
         };
         // tests run as a desktop unless one asks for cloud mode (`set_cloud_for_test`)
         let cloud = if cfg!(test) { iyakki_agent::cloudmode::CloudMode::desktop() } else { iyakki_agent::cloudmode::detect(env.services.cloud_setting()) };
-        let mut sh = Shell { env, hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, devask: Default::default(), camera: if cfg!(test) || !cloud.camera_watch { crate::camera::Presence::none() } else { crate::camera::Presence::system() }, cam_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), osk: Default::default(), tenants: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
+        let mut sh = Shell { env, hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, devask: Default::default(), tzask: Default::default(), camera: if cfg!(test) || !cloud.camera_watch { crate::camera::Presence::none() } else { crate::camera::Presence::system() }, cam_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), osk: Default::default(), tenants: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
         if cloud.on {
             sh.apply_cloud(cloud);
         }
@@ -945,6 +949,8 @@ impl Shell {
         }
         // documents embedded by a model that is no longer the chosen one are brought up to date, quietly
         if s.policy.manage_settings {
+            // the browser add-on built here no longer matches this image: a note, never an automatic rebuild
+            iyakki_agent::avbuild::notify_if_stale(&self.env.services, &s.user);
             self.env.services.reindex_stale_in_background();
             // (tests never look at the real network)
             #[cfg(not(test))]
@@ -957,6 +963,7 @@ impl Shell {
         // examples to try (once, for administrators): an MCP server, documents and skills
         crate::samples::seed(&self.env, &s.user, &s.policy);
         crate::uisize::apply(Some(crate::uisize::load(self.env.services.dir(), &s.user)));
+        crate::theme::apply(Some(crate::theme::load(self.env.services.dir(), &s.user)));
         crate::filepicker::set_session(Some((&s.user, &s.policy, self.env.services.dir())));
         self.session = Some(s);
         self.load_clipboard_limit();
@@ -983,6 +990,7 @@ impl Shell {
         // `LOGOUT_WAIT` at the latest (a slow or stuck output never holds sign-out back)
         let cue = self.session.is_some().then(|| crate::cues::start(&self.env.services, &self.cloud, iyakki_agent::syssounds::Cue::Logout));
         crate::uisize::apply(None);
+        crate::theme::apply(None);
         crate::filepicker::set_session(None);
         self.lay_sign_out();
         self.tenants_sign_out();
@@ -1026,8 +1034,17 @@ impl Shell {
         }
     }
 
+    /// In a web browser session whose policy allows the camera, the CAMERA tile is usable even when this machine has no camera (a Mac
+    /// mini has none): the app then offers the browser's camera and asks the page to show its Allow button.
+    pub(crate) fn browser_camera_offered(&self) -> bool {
+        self.browser_media().is_some_and(|m| m.policy().camera)
+    }
+
     /// Whether the CAMERA tile is usable (looks first when it has not looked yet).
     fn camera_ready(&mut self) -> bool {
+        if self.browser_camera_offered() {
+            return true;
+        }
         if !self.camera.scanned() {
             self.camera.scan();
         }
@@ -1090,6 +1107,8 @@ impl Shell {
             PApp::Doctor => Box::new(crate::apps::doctor::DoctorApp::new(&cx)),
             PApp::Checkup => Box::new(crate::apps::checkup::CheckupApp::new(&cx)),
             PApp::Learn => Box::new(crate::apps::learn::LearnApp::new(&cx)),
+            PApp::DevTools => Box::new(crate::apps::devtools::DevToolsApp::new(&cx)),
+            PApp::Auth => Box::new(crate::apps::auth::AuthApp::new(&cx)),
             PApp::Inbox => Box::new(crate::apps::inbox::InboxApp::new(&cx)),
         };
         self.env.audit.record(&cx.session.user, "app.open", app.id());
@@ -1816,6 +1835,14 @@ impl Shell {
             self.stale = true;
             return;
         }
+        // the click on the sign "your browser's microphone / camera is on" switches both off (and audits it)
+        if matches!(ev, Event::Tab(914)) {
+            if let Some(m) = self.browser_media() {
+                m.stop_capture();
+            }
+            self.stale = true;
+            return;
+        }
         if let Event::MouseMove(x, y) = ev {
             self.mouse = (*x, *y);
         }
@@ -1891,10 +1918,14 @@ impl Shell {
             if self.tick % 15 == 7 {
                 self.battery_tick();
             }
+            if self.tick % 15 == 9 {
+                self.update_check_tick();
+            }
             if self.tick % 15 == 3 {
                 self.loss_tick();
             }
             self.devask_tick();
+            self.tzask_tick();
             if self.tick % 15 == 0 {
                 self.refresh_badge();
                 // the clock changes the picture only when what it shows changes
@@ -2191,6 +2222,7 @@ impl Shell {
             // the drive banner's buttons answer on every screen, signed in or not
             Event::Tab(n) if crate::lossbar::is_click(*n) => self.loss_event(*n),
             // the developer-mode approval card: its buttons answer on every screen after sign-in
+            Event::Tab(n) if shell_tzask::is_click(*n) && self.tzask.open && self.session.is_some() => self.tzask_event(*n),
             Event::Tab(n) if crate::devask::is_click(*n) && self.session.is_some() => self.devask_event(*n),
             Event::Key(Key::Esc) if self.devask.open && self.session.is_some() => self.devask_event(crate::devask::CLOSE),
             // the battery's countdown and plug-in cards answer on every screen; F4 (or the chip) opens the battery popup
@@ -2493,7 +2525,7 @@ impl Shell {
     /// "Scan QR" was chosen in the clipboard history: the history closes and the camera question opens.
     fn open_clipscan(&mut self) {
         self.clip = None;
-        let src = self.scan_src.clone().unwrap_or_else(crate::scan_core::CamSource::system);
+        let src = self.scan_src.clone().unwrap_or_else(crate::scan_core::CamSource::desktop);
         self.clipscan = Some(Box::new(crate::clip_scan::ClipScan::open(src)));
         self.stale = true;
     }
@@ -2886,7 +2918,9 @@ impl Shell {
                 // a second click on the same row within ~0.4 s also "opens" it (like Enter)
                 let double = matches!(ev, Event::Row(_)) && self.last_click.as_ref().is_some_and(|(t, l)| *l == h.label && self.tick.saturating_sub(*t) <= 12);
                 self.last_click = Some((self.tick, h.label.clone()));
+                crate::ui::set_from_click(true);
                 self.dispatch(&ev);
+                crate::ui::set_from_click(false);
                 crate::ui::set_click_count(1);
                 if double {
                     self.dispatch(&Event::Key(Key::Enter));
@@ -2970,6 +3004,10 @@ impl Shell {
                         Key::Char('s') if self.env.host.can_sleep() => {
                             // locks (signs out) first, so the screen asks for the password on wake
                             self.sleep_now(&user, "");
+                            return;
+                        }
+                        Key::Char('l') if self.session.is_some() => {
+                            self.lock_now(&user, "");
                             return;
                         }
                         _ => {}
@@ -3212,7 +3250,7 @@ impl Shell {
             Screen::Launcher | Screen::PowerMenu => {
                 self.draw_launcher(g, w, h, s);
                 if matches!(self.screen, Screen::PowerMenu) {
-                    draw_power_menu(g, w, h, s, self.env.host.can_sleep());
+                    draw_power_menu(g, w, h, s, self.env.host.can_sleep(), self.session.is_some());
                 }
             }
             Screen::App(..) => {
@@ -3381,6 +3419,7 @@ impl Shell {
         self.loss_render(g, w, h, s);
         if self.session.is_some() {
             crate::devask::render(&mut self.devask, g, w, h, s, self.tick);
+            self.draw_tzask(g, w, h, s);
         }
         if let Some((t, _, info)) = &self.toast {
             crate::fx::toast(g, w as f32, h as f32, s, t, *info);
@@ -3390,7 +3429,7 @@ impl Shell {
         }
         self.draw_login_bar(g, w, h, s);
         if self.fnk.power_card {
-            draw_power_menu(g, w, h, s, self.env.host.can_sleep());
+            draw_power_menu(g, w, h, s, self.env.host.can_sleep(), self.session.is_some());
         }
         // the assistant is using the camera: a red sign on every screen, bottom left, while it lasts
         if let Some(what) = self.env.services.camera.in_use() {
@@ -3403,6 +3442,12 @@ impl Shell {
         if cap != 0 && !in_browser {
             let r = draw_capture_sign(g, h, s, cap, self.cam_sign);
             g.hit(r, Event::Tab(913), "Stop what the page is capturing");
+        }
+        // the person's own browser has its microphone or camera on for this session: a sign on every screen, drawn over every app
+        // (a tile cannot hide it), bottom right, a click stops it
+        if let Some(text) = self.browser_media().and_then(|m| m.indicator_text()) {
+            let r = draw_remote_capture_sign(g, w, h, s, &text);
+            g.hit(r, Event::Tab(914), "Stop the browser's microphone and camera");
         }
         if self.help {
             let (title, lines) = self.help_lines();
@@ -3503,7 +3548,8 @@ impl Shell {
         // ask the system for what it holds: text copied in other programs makes Paste usable
         self.want_host_paste = true;
         self.host_sync_until = self.tick + 90;
-        self.ctx = Some(Menu::open(items, (x, y), (w, h), s, crate::ui::clipboard::can_paste()));
+        let clip = crate::ui::clipboard::can_paste();
+        self.ctx = Some(if crate::touchscreen::take_touch_menu() { Menu::open_touch(items, (x, y), (w, h), s, clip) } else { Menu::open(items, (x, y), (w, h), s, clip) });
     }
 
     /// The menu is open: keys move over it, a click chooses, anything else closes it.
@@ -3782,7 +3828,7 @@ impl Shell {
             };
             let permitted = sess.policy.allows_app(t.app);
             // CAMERA without a camera: greyed with a hint, no lock
-            let missing = t.app == PApp::Camera && !self.camera.available();
+            let missing = t.app == PApp::Camera && !self.camera.available() && !self.browser_camera_offered();
             let allowed = permitted && !missing;
             let selected = i == self.sel;
             let hover = g.hovered(*r);
@@ -4296,47 +4342,36 @@ fn draw_ring(g: &mut Gfx, w: u32, h: u32, s: f32, r: &Ring, tick: u64) {
     g.button(x + 28.0 * s + w1 + 12.0 * s, by, 15.0 * s, "Snooze 5 min (S)", MUTED, Event::Key(Key::Char('s')));
 }
 
-fn draw_power_menu(g: &mut Gfx, w: u32, h: u32, s: f32, sleep: bool) {
+/// The power menu: a dropdown under the top bar's right end (like the speaker's), not a dialog in the middle. Lock only for a signed-in
+/// person (it signs out, which also seals the vault), Sleep only where the machine can sleep.
+fn draw_power_menu(g: &mut Gfx, w: u32, h: u32, s: f32, sleep: bool, lock: bool) {
     g.clear_hits();
-    g.rect(0.0, 0.0, w as f32, h as f32, [0, 0, 0, 200]);
+    g.rect(0.0, 0.0, w as f32, h as f32, [0, 0, 0, 90]);
     g.hit(R::new(0.0, 0.0, w as f32, h as f32), Event::Key(Key::Esc), "backdrop-cancel");
-    // the choices; Sleep only where the machine can sleep (no dead button)
-    let mut items: Vec<(&str, [u8; 4], char)> = vec![("Power off", ERR, 'y'), ("Restart", TEXT, 'r')];
+    let mut items: Vec<(&str, [u8; 4], char)> = vec![];
+    if lock {
+        items.push(("Lock", TEXT, 'l'));
+    }
+    items.push(("Restart", TEXT, 'r'));
     if sleep {
         items.push(("Sleep", TEXT, 's'));
     }
+    items.push(("Power off", ERR, 'y'));
     items.push(("Cancel", MUTED, '\u{1b}'));
     let size = 15.0 * s;
-    let (gap, row_h) = (10.0 * s, size * 2.1 + 10.0 * s);
-    let bw = (500.0 * s).min(w as f32 - 16.0);
-    let inner = bw - 56.0 * s;
-    let widths: Vec<f32> = items.iter().map(|i| g.text_width(size, i.0, Face::Bold) + size * 1.7).collect();
-    // flow the buttons onto as many rows as the card's width needs
-    let mut rows = 1usize;
-    let mut used = 0.0f32;
-    let mut place: Vec<(usize, f32)> = vec![];
-    for wd in &widths {
-        if used > 0.0 && used + gap + wd > inner {
-            rows += 1;
-            used = 0.0;
-        }
-        place.push((rows - 1, used));
-        used += wd + gap;
-    }
-    let bh = (210.0 * s + (rows - 1) as f32 * row_h).min(h as f32 - 8.0);
-    let (x, y) = ((w as f32 - bw) / 2.0, (h as f32 - bh) / 2.0);
+    let (pad, gap, row_h) = (14.0 * s, 8.0 * s, size * 2.1);
+    let bw = (232.0 * s).min(w as f32 - 16.0);
+    let bh = (2.0 * pad + 24.0 * s + items.len() as f32 * (row_h + gap) - gap).min(h as f32 - 8.0);
+    let (x, y) = (w as f32 - bw - 12.0 * s, 44.0 * s);
     g.hit(R::new(x, y, bw, bh), Event::Tick, "backdrop");
     crate::fx::modal_panel(g, R::new(x, y, bw, bh), s, ERR, true);
-    g.icon(Icon::Power, x + 60.0 * s, y + 60.0 * s, 52.0 * s, ERR);
-    g.text(x + 110.0 * s, y + 34.0 * s, 24.0 * s, TEXT, "Power", Face::Bold);
-    let sub = if sleep { "Shut down, restart or sleep this machine." } else { "Shut down or restart this machine." };
-    let sub = g.fit(15.0 * s, sub, Face::Sans, bw - 130.0 * s);
-    g.text(x + 110.0 * s, y + 70.0 * s, 15.0 * s, MUTED, &sub, Face::Sans);
-    let by = y + bh - 62.0 * s - (rows - 1) as f32 * row_h;
-    for (i, (label, accent, k)) in items.iter().enumerate() {
-        let (row, off) = place[i];
+    g.icon(Icon::Power, x + pad + 9.0 * s, y + pad + 10.0 * s, 18.0 * s, ERR);
+    g.text(x + pad + 26.0 * s, y + pad, 16.0 * s, TEXT, "Power", Face::Bold);
+    let mut by = y + pad + 28.0 * s;
+    for (label, accent, k) in &items {
         let ev = if *k == '\u{1b}' { Event::Key(Key::Esc) } else { Event::Key(Key::Char(*k)) };
-        g.button(x + 28.0 * s + off, by + row as f32 * row_h, size, label, *accent, ev);
+        g.button(x + pad, by, size, label, *accent, ev);
+        by += row_h + gap;
     }
 }
 
@@ -4578,6 +4613,20 @@ pub(crate) mod tests {
         let mut g = Gfx::new(1280, 720);
         sh.render(&mut g);
         assert!(big.is_none() || tile(&sh).is_none() || big > tile(&sh), "tiles were bigger for alice");
+    }
+
+    #[test]
+    fn the_theme_a_person_chose_is_applied_at_their_sign_in_and_dark_again_at_the_sign_in_screen() {
+        let (mut sh, _) = shell_with_users("theme");
+        let dir = sh.services_for_demo().dir().to_path_buf();
+        crate::theme::save(&dir, "alice", crate::theme::ThemeId::Light);
+        login(&mut sh, "root", "rootpass12");
+        assert_eq!(crate::theme::current_id(), crate::theme::ThemeId::Dark, "root chose nothing: the approved dark look");
+        key(&mut sh, Key::Char('o'));
+        login(&mut sh, "alice", "alicepass1");
+        assert_eq!(crate::theme::current_id(), crate::theme::ThemeId::Light);
+        key(&mut sh, Key::Char('o'));
+        assert_eq!(crate::theme::current_id(), crate::theme::ThemeId::Dark, "the sign-in screen is always Dark");
     }
 
     #[test]
@@ -5074,7 +5123,7 @@ pub(crate) mod tests {
                 for x in (r.x as i32)..(r.x + r.w) as i32 {
                     let o = (y as usize * g.width() as usize + x as usize) * 4;
                     let p = &g.rgba()[o..o + 3];
-                    if p[0] > 240 && p[1] > 180 && p[1] < 215 && p[2] > 70 && p[2] < 120 {
+                    if p[0] > 230 && p[1] > 180 && p[1] < 215 && p[2] > 70 && p[2] < 120 {
                         n += 1;
                     }
                 }
@@ -5826,6 +5875,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_power_menu_is_a_dropdown_at_the_top_right_and_lock_signs_out_without_powering_off() {
+        let (mut sh, host) = shell_with_users("pwr-lock");
+        let mut g = Gfx::new(1280, 720);
+        click_field(&mut sh, &mut g, 0);
+        typ(&mut sh, "oscar");
+        click_field(&mut sh, &mut g, 1);
+        typ(&mut sh, "operpass12");
+        click(&mut sh, &mut g, "Sign in");
+        sh.screen = Screen::PowerMenu;
+        sh.render(&mut g);
+        let lock = sh.hits().iter().find(|h| h.label == "Lock").map(|h| h.rect).expect("a Lock button for a signed-in person");
+        assert!(lock.x > 1280.0 / 2.0 && lock.y < 360.0, "the menu hangs under the top bar's right end, not in the middle: {lock:?}");
+        sh.handle(&Event::Key(Key::Char('l')));
+        assert!(sh.session.is_none() && sh.screen_name() == "login", "Lock signs out (and seals the vault)");
+        assert!(host.powered_off.lock().unwrap().is_none() && *host.slept.lock().unwrap() == 0, "it never powers off or sleeps");
+        // on the login screen the menu has no Lock
+        sh.screen = Screen::PowerMenu;
+        sh.render(&mut g);
+        assert!(!sh.hits().iter().any(|h| h.label == "Lock"));
+    }
+
+    #[test]
     fn power_menu_sleep_is_hidden_when_impossible_and_locks_the_session_first() {
         let sign_in = |tag: &str, can: bool| {
             let (mut sh, host) = shell_with_users(tag);
@@ -6436,6 +6507,11 @@ mod doctor_tests;
 #[path = "shell_checkup_tests.rs"]
 mod checkup_tests;
 #[cfg(test)]
+#[path = "shell_devtools_tests.rs"]
+mod devtools_tests;
+#[path = "shell_auth_tests.rs"]
+mod auth_tests;
+#[cfg(test)]
 #[path = "shell_learn_tests.rs"]
 mod learn_tests;
 #[cfg(test)]
@@ -6503,12 +6579,22 @@ mod osk_tests;
 mod battery_impl;
 #[path = "shell_saver.rs"]
 mod saver_impl;
+#[path = "shell_power.rs"]
+mod power_impl;
+#[cfg(test)]
+#[path = "shell_power_tests.rs"]
+mod power_tests;
 #[path = "shell_devstate.rs"]
 mod devstate_impl;
 #[path = "shell_loss.rs"]
 mod loss_impl;
 #[path = "shell_devask.rs"]
 mod devask_impl;
+#[path = "shell_tzask.rs"]
+mod shell_tzask;
+#[cfg(test)]
+#[path = "shell_tzask_tests.rs"]
+mod tzask_tests;
 #[cfg(test)]
 #[path = "shell_devask_tests.rs"]
 mod devask_tests;
@@ -6605,6 +6691,22 @@ pub(crate) fn draw_capture_sign(g: &mut Gfx, h: u32, s: f32, bits: u8, above_ass
     r
 }
 
+/// The red sign of a remote session whose browser microphone or camera is live, bottom right. Returns its rectangle (the click target).
+pub(crate) fn draw_remote_capture_sign(g: &mut Gfx, w: u32, h: u32, s: f32, text: &str) -> R {
+    let tw = g.text_width(15.0 * s, text, Face::Bold) + 48.0 * s;
+    let r = R::new((w as f32 - tw - 16.0 * s).max(0.0), h as f32 - 64.0 * s, tw, 34.0 * s);
+    g.rrect_glow(r.x, r.y, r.w, r.h, r.h / 2.0, 8.0 * s, [255, 40, 50, 130]);
+    g.rrect(r.x, r.y, r.w, r.h, r.h / 2.0, rgb(110, 12, 22));
+    g.rrect_outline(r.x, r.y, r.w, r.h, r.h / 2.0, 2.0 * s, rgb(255, 90, 100));
+    g.circle(r.x + 18.0 * s, r.y + r.h / 2.0, 7.0 * s, rgb(255, 60, 70));
+    g.text(r.x + 34.0 * s, r.y + 8.0 * s, 15.0 * s, TEXT, text, Face::Bold);
+    r
+}
+
 #[cfg(test)]
 #[path = "shell_overlap_tests.rs"]
 mod overlap_tests;
+
+#[cfg(test)]
+#[path = "shell_remote_sign_tests.rs"]
+mod remote_sign_tests;

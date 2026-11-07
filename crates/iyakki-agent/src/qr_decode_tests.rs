@@ -254,7 +254,16 @@ fn tables_match_the_standard_and_the_encoder() {
         }
     }
     for v in 1..=MAX_VERSION {
-        assert_eq!((ECC_PER_BLOCK[0][v - 1], BLOCKS[0][v - 1]), (qr::ECC_PER_BLOCK[v], qr::BLOCKS[v]), "version {v} level L agrees with the encoder");
+        assert_eq!((ECC_PER_BLOCK[0][v - 1], BLOCKS[0][v - 1]), (qr::ECC_TABLE[0][v], qr::BLOCK_TABLE[0][v]), "version {v} level L agrees with the encoder");
+    }
+}
+
+#[test]
+fn the_encoder_tables_at_every_level_agree_with_the_readers_up_to_its_largest_version() {
+    for level in 0..4 {
+        for v in 1..=MAX_VERSION {
+            assert_eq!((ECC_PER_BLOCK[level][v - 1], BLOCKS[level][v - 1]), (qr::ECC_TABLE[level][v], qr::BLOCK_TABLE[level][v]), "version {v} level {level}");
+        }
     }
 }
 

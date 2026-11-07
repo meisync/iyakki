@@ -13,11 +13,13 @@
 pub mod engine;
 pub mod resample;
 pub mod sink;
+pub mod tee;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod stress_tests;
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -277,6 +279,7 @@ impl Mixer {
         }
         let id = i.next_id.fetch_add(1, Ordering::SeqCst);
         let shared = SourceShared::new(id, kind, label, rate, channels, exclusive, i.wake.clone());
+        shared.set_level(level_of(label));
         reg.push(shared.clone());
         drop(reg);
         i.pending.lock().unwrap_or_else(|e| e.into_inner()).push(shared.clone());
@@ -549,12 +552,45 @@ fn run(inner: Arc<Inner>, mut sink: Box<dyn Sink>) {
 // ------------------------------------------------------------------------------------------------ the process-wide mixer
 
 static GLOBAL: OnceLock<Mixer> = OnceLock::new();
+
+/// What the person set for each kind of sound (by source name, percent 0 to 100; absent is 100). A source takes its level when it
+/// opens, and [`set_source_levels`] moves the ones already playing.
+static LEVELS: Mutex<BTreeMap<String, u32>> = Mutex::new(BTreeMap::new());
+
+fn level_of(label: &str) -> f32 {
+    LEVELS.lock().unwrap_or_else(|e| e.into_inner()).get(label).map_or(1.0, |p| (*p).min(100) as f32 / 100.0)
+}
+
+/// Replace the per-source levels (from the saved sound settings) and apply them to what is playing now.
+pub fn set_source_levels(levels: &BTreeMap<String, u32>) {
+    *LEVELS.lock().unwrap_or_else(|e| e.into_inner()) = levels.clone();
+    if let Some(m) = GLOBAL.get() {
+        let reg = m.inner.registry.lock().unwrap_or_else(|e| e.into_inner());
+        for s in reg.iter().filter(|s| !s.is_gone()) {
+            s.set_level(level_of(&s.label));
+        }
+    }
+}
+
+/// The sounds playing now, one entry per name, with the person's level for each: what the speaker dropdown lists.
+pub fn active_sources() -> Vec<(String, u32)> {
+    let Some(m) = GLOBAL.get() else { return Vec::new() };
+    let mut seen: Vec<(String, u32)> = Vec::new();
+    for i in m.sources() {
+        if !seen.iter().any(|(l, _)| *l == i.label) {
+            let pct = LEVELS.lock().unwrap_or_else(|e| e.into_inner()).get(&i.label).copied().unwrap_or(100).min(100);
+            seen.push((i.label, pct));
+        }
+    }
+    seen
+}
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// The mixer of this computer (started on first use, on IYAKKI's output).
 pub fn global() -> &'static Mixer {
     GLOBAL.get_or_init(|| {
-        let m = Mixer::start(MixerCfg::default(), Box::new(AplaySink::system()));
+        // the sound also goes to the web pages that listen to the session (nothing is sent when none does)
+        let m = Mixer::start(MixerCfg::default(), Box::new(tee::TeeSink::browser(Box::new(AplaySink::system()))));
         // the software volume lives in the `iyakki` PCM the mixer plays into; where players must scale themselves
         // (no softvol), the factor is applied here
         m.set_master_fn(|| crate::audioout::global().gain() as f32 / 100.0);
@@ -575,7 +611,8 @@ pub fn set_enabled(on: bool) {
 }
 
 pub fn enabled() -> bool {
-    PINNED_OFF.load(Ordering::SeqCst) == 0 && ENABLED.load(Ordering::SeqCst)
+    // a page that listens to the session needs the mixer, whatever Settings -> Sound says: it is where the browser gets its sound
+    PINNED_OFF.load(Ordering::SeqCst) == 0 && (ENABLED.load(Ordering::SeqCst) || crate::browsermedia::audio_listeners())
 }
 
 // Test isolation. The switch is process-wide and any test that changes sound settings flips it, so tests that need a known

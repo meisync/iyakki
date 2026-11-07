@@ -171,7 +171,8 @@ impl SettingsApp {
             let is_group = matches!(row, HlRow::Group { .. });
             if last_kind != Some(is_group) {
                 let title = if is_group { "Groups (your own can be renamed, deleted and put in order)" } else { "Tiles (the group each one is listed in)" };
-                g.text(a.x, y + 4.0 * s, 13.0 * s, DIM, title, Face::Bold);
+                let title = g.fit(13.0 * s, title, Face::Bold, a.w);
+                g.text(a.x, y + 4.0 * s, 13.0 * s, DIM, &title, Face::Bold);
                 y += head_h;
                 last_kind = Some(is_group);
             }

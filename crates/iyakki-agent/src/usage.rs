@@ -426,6 +426,10 @@ impl Metered {
 }
 
 impl ChatBackend for Metered {
+    fn provider_name(&self) -> String {
+        self.inner.provider_name()
+    }
+
     fn complete(&self, history: &[Message]) -> Result<String, String> {
         crate::providers::forget_usage();
         let t0 = std::time::Instant::now();

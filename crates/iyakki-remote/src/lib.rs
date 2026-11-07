@@ -3,8 +3,11 @@
 //! because the browser only ever sees pixels; no tile needs a web version.
 
 pub mod adapt;
+pub mod adopt_server;
+pub mod api;
 pub mod codec;
 pub mod devconfig;
+pub mod devicekeys;
 pub mod devfw;
 pub mod devname;
 pub mod devserver;

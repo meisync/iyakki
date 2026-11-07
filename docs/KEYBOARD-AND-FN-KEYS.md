@@ -79,6 +79,37 @@ Ctrl+Alt+M moves the open app to the next display (with several displays). Ctrl 
   use shows as "a key IYAKKI does not use": that is the code to report.
 * **Table of recognised keys.**
 
+## Input profile: Mac or PC (F-KBD-19)
+
+Settings, Keyboard, **Input profile** (button `v`) chooses how the shortcut keys behave. **Automatic** (the default) uses Mac when the
+kernel lists an Apple keyboard or trackpad (USB, Bluetooth, the T2 and SPI MacBooks; the Touch Bar and a Magic Mouse do not count),
+and PC otherwise. **Mac** and **PC** force it. The choice is saved as `keyboard.profile` (`""`, `mac`, `pc`; a file from before the
+profile loads as Automatic) and works at once. `iyakki dev config keyboard.profile mac` sets it from a paired computer.
+
+| Mac profile | What happens |
+|---|---|
+| Command+C / X / V / A / Z / F / S / W / T / N / L / R | The shortcut the PC's Ctrl+letter is. Command+Shift+Z is redo. |
+| Command+Left / Right | Start / end of the line (Home / End; with Shift it selects). |
+| Command+Up / Down | Top / bottom of the document (Ctrl+Home / End). |
+| Option+Left / Right | Word jump. Option+Backspace deletes the word before; Command+Backspace deletes to the line start. |
+| Command+Tab | The next pane (the same as Ctrl+Alt+Tab; Shift goes back). |
+| Command+Q, Control+Command+Q | Nothing. IYAKKI never quits on a key and has no lock shortcut. |
+| Control+C | Stays Control+C. |
+| Control+click | A right click (a two-finger tap on a trackpad already is one). |
+
+The PC profile is exactly what it was before. **Option/Command swap** (`hid_apple` `swap_opt_cmd`) is the kernel's swap on an Apple keyboard.
+In the Mac profile the keys are named by what is printed on them, so the swap changes nothing there and the two never swap twice; in the
+PC profile the swap is the kernel's alone (the key under your thumb sends Alt). The swap counts only while an Apple keyboard is present.
+
+**Reset to profile defaults** (`x`) puts the pointer choices back: trackpad tap on, trackpad natural, mouse wheel classic, speed 100 %,
+smooth scrolling and momentum on, 3 lines a click. Both profiles start from the same values today. Key repeat, Touch Bar and the Fn mode are left alone.
+
+Under every control the page shows a line of what it does with an example, and a **What you will see** pair of rows: the last key
+(for example `Command+C -> Copy`, `Control+C -> Copy`, `Command+Q -> Quit (ignored ...)`) and the last scroll
+(`Scrolled content up (natural, trackpad)`), so a confused person can see the mapping. Three-finger drag is not built.
+Known gap: Command+C and Control+C both arrive in an app as Ctrl+C; a terminal program inside a Linux window therefore sees an
+interrupt for Command+C (no per-window rule yet).
+
 ## Which backlight
 
 `/sys/class/backlight/*`, best first: `intel_backlight`, `amdgpu_bl*`, `radeon_bl*`, `nvidia*`/`nv_backlight`, `apple-panel-bl`,

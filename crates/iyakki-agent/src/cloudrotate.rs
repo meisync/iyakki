@@ -12,6 +12,14 @@
 //! to rotate and records nothing. A scope that does not exist in the vault, or in which the person holds no wrap, needs nothing and is
 //! reported as such.
 //!
+//! **A pod can finish a rotation itself.** When the acting person holds no key here (the usual case for a removal made on the web
+//! page) and the pod has an identity of its own ([`POD_ACCOUNT_ENV`] names a tenant member whose secret is in
+//! `cloud/vault-keys/NAME.key`, enrolled by a tenant admin and given a wrap in the scopes it serves), the pod asks the vault to rotate with
+//! that identity. The vault decides by the pod's role (`cloudvaultd::Store::rotate`): a namespace editor, or a tenant admin for the
+//! tenant scope, may rotate a scope and may remove a person whom the tenant's roles no longer entitle to it; anything else is refused.
+//! If the pod has no identity, no wrap, or too small a role, the entry stays pending exactly as before and the administrator's retry
+//! (`iyakki cloud reconcile --retry-rotations`) remains the fallback. The audit line names who rotated (the pod's account or the person).
+//!
 //! The acting person's secret is read from `cloud/vault-keys/USER.key` (64 hex digits, mode 0600) on the tenant's volume when the change
 //! comes through the tenant's own service, or from the file named on the command line; a pod normally holds none, so the usual path
 //! for a web removal is "pending", finished by an administrator at a machine that has the key. Nothing secret is written to the audit
@@ -110,21 +118,54 @@ fn set_pending(list: &mut Vec<Pending>, scope: &Scope, who: &str, reason: &str) 
     }
 }
 
-/// Rotate `who` out of each of `scopes`, as `actor`. Never fails: whatever cannot be done is recorded as pending (and audited).
+/// The environment variable that names the pod's own account in the tenant.
+pub const POD_ACCOUNT_ENV: &str = "IYAKKI_VAULT_POD_ACCOUNT";
+
+/// The pod's own identity: the account named by [`POD_ACCOUNT_ENV`] and its secret from this volume. None when either is missing.
+pub fn pod_identity(data_dir: &Path) -> Option<(String, MemberKeys)> {
+    let name = std::env::var(POD_ACCOUNT_ENV).ok().filter(|n| plain_name(n))?;
+    let keys = actor_keys(data_dir, &name)?;
+    Some((name, keys))
+}
+
+/// Rotate `who` out of each of `scopes`, as `actor`. Never fails: whatever cannot be done is recorded as pending (and audited). With no key
+/// for `actor`, the pod's own identity ([`pod_identity`]) is tried.
 pub fn rotate(data_dir: &Path, link: &Link, actor: &str, keys: Option<&MemberKeys>, who: &str, scopes: &[Scope]) -> Report {
+    rotate_with_pod(data_dir, link, actor, keys, pod_identity(data_dir).as_ref(), who, scopes)
+}
+
+/// [`rotate`] with the pod's identity given instead of read from the environment.
+pub fn rotate_with_pod(data_dir: &Path, link: &Link, actor: &str, keys: Option<&MemberKeys>, pod: Option<&(String, MemberKeys)>, who: &str, scopes: &[Scope]) -> Report {
     let mut rep = Report::default();
     let mut list = load_pending(data_dir).unwrap_or_default();
     let mut dirty = false;
     for s in scopes {
+        let mut by = actor;
         let res = match link {
             Link::NotConfigured => Ok(false),
             Link::Invalid(e) => Err(format!("the vault address is not usable: {e}")),
-            Link::Target(t) => try_one(t, actor, keys, s, who),
+            Link::Target(t) => {
+                let first = match keys {
+                    Some(_) => try_one(t, actor, keys, s, who),
+                    None => Err("the acting person holds no vault key here".to_string()),
+                };
+                match (first, pod) {
+                    (Ok(r), _) => Ok(r),
+                    (Err(e), Some((pod_name, pod_keys))) => match try_one(t, pod_name, Some(pod_keys), s, who) {
+                        Ok(r) => {
+                            by = pod_name;
+                            Ok(r)
+                        }
+                        Err(pe) => Err(format!("{e}; the pod's own account {pod_name}: {pe}")),
+                    },
+                    (Err(e), None) => Err(e),
+                }
+            }
         };
         let name = s.name();
         match res {
             Ok(true) => {
-                audit(data_dir, format!("rotation: {name} rotated by {actor}, {who} no longer holds a wrap"));
+                audit(data_dir, format!("rotation: {name} rotated by {by}, {who} no longer holds a wrap"));
                 rep.rotated.push(name);
             }
             Ok(false) => {
@@ -462,5 +503,90 @@ mod tests {
         std::fs::write(&p, keys(1).seed_hex()).unwrap();
         assert_eq!(actor_keys(&d, "alice").unwrap().public(), keys(1).public());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The pod's account: a tenant member (`admin` or not), editor in dev, enrolled with `keys(7)`, holding a wrap in dev and in the tenant scope.
+    fn with_pod(fx: &Fx, tenant_admin: bool) {
+        let mut r = cloudroles::load(&cloudroles::path(&fx.tdir)).unwrap().unwrap();
+        r.add_tenant_member("alice", "pod", if tenant_admin { TenantRole::Admin } else { TenantRole::Member }).unwrap();
+        r.add_namespace_member("alice", "dev", "pod", NsRole::Editor).unwrap();
+        cloudroles::save(&cloudroles::path(&fx.tdir), &r).unwrap();
+        let alice = fx.client(1, "alice");
+        alice.enroll_member("pod", &keys(7).public()).unwrap();
+        alice.add_member(&Scope::Tenant, "pod").unwrap();
+        alice.add_member(&Scope::Namespace("dev".into()), "pod").unwrap();
+    }
+
+    #[test]
+    fn a_pod_with_an_editor_role_finishes_the_rotation_a_removal_left_pending() {
+        let fx = fixture("pod");
+        with_pod(&fx, false);
+        let dev = Scope::Namespace("dev".into());
+        // the web page removes bob from dev: nobody holds a key there, so it is pending
+        let (_, rep) = fx.access().revoke("alice", &Revoke::Namespace { ns: "dev".into(), who: "bob".into() }, &fx.link(), None).unwrap();
+        assert_eq!(rep.pending, ["namespace:dev"]);
+        assert_eq!(generation(&fx, &dev), 1);
+        // the pod asks the vault with its own account
+        let pod = ("pod".to_string(), keys(7));
+        let rep = rotate_with_pod(&fx.tdir, &fx.link(), "alice", None, Some(&pod), "bob", &[dev.clone()]);
+        assert_eq!(rep, Report { rotated: vec!["namespace:dev".into()], ..Report::default() });
+        assert!(fx.client(2, "bob").get(&dev, "token").unwrap_err().starts_with("403"), "bob is cut off");
+        assert_eq!(fx.client(1, "alice").get(&dev, "token").unwrap(), b"value-one");
+        assert_eq!(fx.client(7, "pod").get(&dev, "token").unwrap(), b"value-one", "the pod keeps its wrap");
+        assert_eq!(generation(&fx, &dev), 2);
+        assert!(load_pending(&fx.tdir).unwrap().is_empty(), "the pending entry is gone");
+        assert!(fx.audit().contains("rotation: namespace:dev rotated by pod"), "{}", fx.audit());
+    }
+
+    #[test]
+    fn the_pods_role_decides_what_it_may_rotate_and_the_administrator_retry_stays_the_fallback() {
+        let fx = fixture("pod2");
+        with_pod(&fx, false); // not a tenant admin
+        let (dev, tenant) = (Scope::Namespace("dev".into()), Scope::Tenant);
+        let (_, rep) = fx.access().revoke("alice", &Revoke::Tenant { who: "bob".into() }, &fx.link(), None).unwrap();
+        assert_eq!(rep.pending, ["tenant", "namespace:dev"]);
+        let pod = ("pod".to_string(), keys(7));
+        let rep = rotate_with_pod(&fx.tdir, &fx.link(), "alice", None, Some(&pod), "bob", &[tenant.clone(), dev.clone()]);
+        assert_eq!(rep.rotated, ["namespace:dev"], "an editor may rotate the namespace");
+        assert_eq!(rep.pending, ["tenant"], "the tenant scope needs an admin: the pod is refused");
+        let p = load_pending(&fx.tdir).unwrap();
+        assert_eq!(p.len(), 1);
+        assert!(p[0].reason.contains("pod") && p[0].reason.contains("403"), "{p:?}");
+        assert_eq!(generation(&fx, &tenant), 1);
+        // the administrator's retry finishes it
+        let rep = retry_pending(&fx.tdir, &fx.link(), &[("alice".into(), keys(1))]).unwrap();
+        assert_eq!(rep.rotated, ["tenant"]);
+        assert!(load_pending(&fx.tdir).unwrap().is_empty());
+        assert!(fx.client(2, "bob").get(&tenant, "token").unwrap_err().starts_with("403"));
+    }
+
+    #[test]
+    fn a_pod_cannot_use_rotation_to_cut_off_someone_the_roles_still_entitle() {
+        let fx = fixture("pod3");
+        with_pod(&fx, true);
+        let (dev, tenant) = (Scope::Namespace("dev".into()), Scope::Tenant);
+        let pod = fx.client(7, "pod");
+        // alice and bob are still in dev by the roles: refused, nothing changes (in the tenant scope the pod is an administrator, which is the role's own power)
+        for who in ["alice", "bob"] {
+            assert!(pod.remove_member(&dev, who).unwrap_err().starts_with("403"), "{who}");
+        }
+        assert_eq!(generation(&fx, &dev), 1);
+        // a routine rotation without removal is the pod's to do, in dev (editor) and in the tenant scope (admin); nothing is lost
+        pod.rotate_key(&dev).unwrap();
+        pod.rotate_key(&tenant).unwrap();
+        assert_eq!((generation(&fx, &dev), generation(&fx, &tenant)), (2, 2));
+        for (n, who) in [(1u8, "alice"), (2, "bob")] {
+            assert_eq!(fx.client(n, who).get(&dev, "token").unwrap(), b"value-one", "{who} still reads");
+        }
+        // someone with no wrap, or who is no member of the scope, cannot rotate it
+        assert!(fx.client(3, "carol").rotate_key(&dev).is_err());
+        assert!(fx.client(4, "dave").rotate_key(&dev).is_err());
+        // a pod with no account, or whose key is not enrolled, changes nothing and the entry is pending as before
+        let (_, rep) = fx.access().revoke("alice", &Revoke::Namespace { ns: "dev".into(), who: "bob".into() }, &fx.link(), None).unwrap();
+        assert_eq!(rep.pending, ["namespace:dev"]);
+        let stranger = ("ghost".to_string(), keys(8));
+        let rep = rotate_with_pod(&fx.tdir, &fx.link(), "alice", None, Some(&stranger), "bob", &[dev.clone()]);
+        assert_eq!(rep.pending, ["namespace:dev"]);
+        assert_eq!(generation(&fx, &dev), 2);
     }
 }

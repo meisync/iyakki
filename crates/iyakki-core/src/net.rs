@@ -49,7 +49,11 @@ pub fn list_ifaces(sys_class_net: &Path) -> Vec<Iface> {
             let p = e.path();
             let name = e.file_name().to_string_lossy().into_owned();
             let read = |f: &str| std::fs::read_to_string(p.join(f)).unwrap_or_default().trim().to_string();
-            let kind = if p.join("wireless").exists() || p.join("phy80211").exists() {
+            let kind = if name == iyakki_devctl::HOTSPOT_IFACE {
+                // the hotspot's access point (made by the sharing service next to the Wi-Fi client): never a client to join or run DHCP on,
+                // which would stop the access point a second after it started
+                IfaceKind::Other
+            } else if p.join("wireless").exists() || p.join("phy80211").exists() {
                 IfaceKind::Wifi
             } else if name == "lo" {
                 IfaceKind::Loopback
@@ -293,6 +297,59 @@ pub fn bring_up(conf_path: &Path, sys_class_net: &Path) -> Result<Vec<String>, N
     bring_up_with(conf_path, sys_class_net, Path::new(KNOWN_WIFI))
 }
 
+/// Pure: the interfaces of `all` that boot sets up on the wired path now: Ethernet ones that are not set up yet.
+pub fn wired_todo(all: &[Iface], done: &std::collections::HashMap<String, IfaceKind>) -> Vec<Iface> {
+    all.iter().filter(|i| i.kind == IfaceKind::Ethernet && !done.contains_key(&i.name)).cloned().collect()
+}
+
+/// Pure: the interfaces for the quick, synchronous part of boot (loopback and the like): neither Ethernet nor Wi-Fi.
+pub fn basic_ifaces(all: &[Iface]) -> Vec<Iface> {
+    all.iter().filter(|i| !matches!(i.kind, IfaceKind::Ethernet | IfaceKind::Wifi)).cloned().collect()
+}
+
+fn load_cfg(conf_path: &Path, known: &Path) -> Result<NetConfig, NetError> {
+    let mut cfg = match std::fs::read_to_string(conf_path) {
+        Ok(t) => parse_config(&t)?,
+        Err(_) => NetConfig::default(),
+    };
+    cfg.wifi_known = iyakki_devctl::wifi::KnownStore::new(known).list();
+    Ok(cfg)
+}
+
+/// Boot, first: set up the Ethernet adapters that exist and are not set up yet, on a thread of their own (the first `ip link set up` of
+/// a Tigon3 takes seconds), so nothing else in boot waits for the cable and the cable waits for nothing. Safe to call again: an
+/// adapter is set up once. Returns the number of adapters started.
+pub fn start_wired(conf_path: &Path, sys_class_net: &Path, known: &Path) -> Result<usize, NetError> {
+    let cfg = load_cfg(conf_path, known)?;
+    let todo = {
+        let g = SET_UP.lock().unwrap_or_else(|e| e.into_inner());
+        wired_todo(&list_ifaces(sys_class_net), &g.clone().unwrap_or_default())
+    };
+    if todo.is_empty() {
+        return Ok(0);
+    }
+    remember(&todo);
+    let n = todo.len();
+    let steps = plan(&cfg, &todo);
+    let spawned = std::thread::Builder::new().name("iyakki-net-wired".into()).spawn(move || {
+        for e in execute(&steps) {
+            log::warn!("net: {e}");
+        }
+        iyakki_fw::service::network_changed();
+    });
+    if let Err(e) = spawned {
+        log::warn!("net: wired thread: {e}");
+    }
+    Ok(n)
+}
+
+/// Boot: loopback and the DNS file, now and quickly; Ethernet goes by [`start_wired`] and Wi-Fi by [`bring_up_new`] on a background
+/// thread, so neither can hold the boot back.
+pub fn bring_up_basic(conf_path: &Path, sys_class_net: &Path, known: &Path) -> Result<Vec<String>, NetError> {
+    let cfg = load_cfg(conf_path, known)?;
+    Ok(execute(&plan(&cfg, &basic_ifaces(&list_ifaces(sys_class_net)))))
+}
+
 /// Where the networks joined from Settings are kept.
 pub const KNOWN_WIFI: &str = "/var/lib/iyakki/wifi.json";
 
@@ -407,6 +464,20 @@ mod tests {
     }
 
     #[test]
+    fn boot_brings_the_cable_up_on_its_own_and_leaves_wifi_and_the_rest_out_of_the_quick_part() {
+        let all = vec![Iface { name: "lo".into(), kind: IfaceKind::Loopback }, eth("eth0"), wifi("wlan0"), eth("eth1")];
+        let mut done = std::collections::HashMap::new();
+        assert_eq!(wired_todo(&all, &done).iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["eth0", "eth1"], "Ethernet only, never Wi-Fi");
+        done.insert("eth0".to_string(), IfaceKind::Ethernet);
+        assert_eq!(wired_todo(&all, &done).iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["eth1"], "an adapter is set up once");
+        assert_eq!(basic_ifaces(&all).iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["lo"]);
+        // the plan of the wired part has no supplicant and no Wi-Fi command
+        let steps = plan(&NetConfig::default(), &wired_todo(&all, &Default::default()));
+        assert!(steps.iter().all(|s| !format!("{s:?}").contains("wlan0") && !format!("{s:?}").contains("wpa_supplicant")));
+        assert!(steps.iter().any(|s| format!("{s:?}").contains("udhcpc")));
+    }
+
+    #[test]
     fn an_interface_that_appears_later_is_set_up_once_and_again_after_it_went_away() {
         let d = fake_net("late", &["ethlate0"]);
         let none = d.join("no-such-file");
@@ -480,7 +551,7 @@ mod tests {
     fn classifies_sysfs() {
         let d = std::env::temp_dir().join(format!("iyakki-net-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        for (n, wireless, ty) in [("lo", false, "772"), ("eth0", false, "1"), ("wlan0", true, "1"), ("docker0", false, "1"), ("eth1", false, "1")] {
+        for (n, wireless, ty) in [("lo", false, "772"), ("eth0", false, "1"), ("wlan0", true, "1"), ("docker0", false, "1"), ("eth1", false, "1"), ("iyakap0", true, "1")] {
             std::fs::create_dir_all(d.join(n)).unwrap();
             std::fs::write(d.join(n).join("type"), ty).unwrap();
             std::fs::write(d.join(n).join("address"), if n == "eth1" { "ac:de:48:00:11:22\n" } else { "68:fe:f7:14:24:16\n" }).unwrap();
@@ -496,6 +567,8 @@ mod tests {
                 ("eth0".into(), IfaceKind::Ethernet),
                 // the T2's internal link (apple-bce + cdc_ncm on a Mac mini 2018) is not a network
                 ("eth1".into(), IfaceKind::Other),
+                // the hotspot's access point is never set up as a Wi-Fi client
+                ("iyakap0".into(), IfaceKind::Other),
                 ("lo".into(), IfaceKind::Loopback),
                 ("wlan0".into(), IfaceKind::Wifi)
             ]

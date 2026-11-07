@@ -37,6 +37,9 @@ members = [
     "crates/iyakki-stage1",
     "crates/iyakki-rfb",
     "crates/iyakki-schema",
+    "crates/iyakki-link",
+    "crates/iyakki-connect",
+    "crates/iyakki-hotspot",
 ]
 
 [workspace.package]
@@ -67,6 +70,7 @@ iyakki-flow = { path = "crates/iyakki-flow" }
 iyakki-zram = { path = "crates/iyakki-zram" }
 iyakki-fw = { path = "crates/iyakki-fw" }
 iyakki-schema = { path = "crates/iyakki-schema" }
+iyakki-link = { path = "crates/iyakki-link" }
 iyakki-core-api = { path = "crates/iyakki-core-api" }
 iyakki-core-fake = { path = "crates/iyakki-core-fake" }
 thiserror = "2"

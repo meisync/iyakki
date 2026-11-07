@@ -167,6 +167,9 @@ pub(crate) struct SourceShared {
     ring: Mutex<Ring>,
     space: Condvar,
     gain: AtomicU32,
+    /// The person's level for this kind of sound (Settings / the speaker dropdown), 0.0 to 1.0; multiplies `gain`, which the player
+    /// itself sets for fades and its own volume.
+    level: AtomicU32,
     paused: AtomicBool,
     /// The writer is finished (or gone): play what is queued, then the source ends.
     closed: AtomicBool,
@@ -196,6 +199,7 @@ impl SourceShared {
             ring: Mutex::new(Ring { data: VecDeque::new(), cap }),
             space: Condvar::new(),
             gain: AtomicU32::new(1.0f32.to_bits()),
+            level: AtomicU32::new(1.0f32.to_bits()),
             paused: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             gone: AtomicBool::new(false),
@@ -226,6 +230,19 @@ impl SourceShared {
 
     pub(crate) fn gain(&self) -> f32 {
         f32::from_bits(self.gain.load(Ordering::SeqCst))
+    }
+
+    /// The gain the mix applies: the player's own gain times the person's level for this source.
+    pub(crate) fn mix_gain(&self) -> f32 {
+        self.gain() * self.level()
+    }
+
+    pub(crate) fn level(&self) -> f32 {
+        f32::from_bits(self.level.load(Ordering::SeqCst))
+    }
+
+    pub(crate) fn set_level(&self, l: f32) {
+        self.level.store(l.clamp(0.0, 1.0).to_bits(), Ordering::SeqCst);
     }
 
     pub(crate) fn mark_gone(&self, evicted: bool) {
@@ -493,7 +510,7 @@ impl Engine {
         let epoch = s.epoch.load(Ordering::SeqCst);
         self.slots.push(Slot { s, rs, ready: Vec::new(), scratch: Vec::new(), started: false, gain_prev: 1.0, duck: 1.0, duck_prev: 1.0, hang_ms: 0.0, epoch, underruns: 0, resuming: false, fade_in: false });
         if let Some(sl) = self.slots.last_mut() {
-            sl.gain_prev = f32::from_bits(sl.s.gain.load(Ordering::SeqCst));
+            sl.gain_prev = sl.s.mix_gain();
         }
     }
 
@@ -616,7 +633,7 @@ impl Engine {
             if sl.duck < 0.999 {
                 info.ducking = true;
             }
-            let g_now = f32::from_bits(sl.s.gain.load(Ordering::SeqCst));
+            let g_now = sl.s.mix_gain();
             let (g0, g1) = (sl.gain_prev * sl.duck_prev, g_now * sl.duck);
             sl.gain_prev = g_now;
             let got = supplied[i];

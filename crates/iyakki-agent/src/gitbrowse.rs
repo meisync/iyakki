@@ -922,6 +922,10 @@ pub struct LocalRepo {
     pub dir: PathBuf,
     /// A private folder for pictures read out of git.
     pub tmp: PathBuf,
+    /// The clone belongs to someone else (a person's folder on a shared volume, reached by the web service): the repository's own
+    /// configuration is not trusted. No fsmonitor, hook, pager, external diff or text filter of the clone runs, and the user's and the
+    /// system's git configuration are not read.
+    pub confined: bool,
 }
 
 fn lerr(o: &crate::wsexec::Out) -> BrowseErr {
@@ -938,13 +942,27 @@ fn lerr(o: &crate::wsexec::Out) -> BrowseErr {
 
 impl LocalRepo {
     pub fn new(run: Arc<dyn Runner>, dir: &Path, tmp: &Path) -> LocalRepo {
-        LocalRepo { run, dir: dir.to_path_buf(), tmp: tmp.to_path_buf() }
+        LocalRepo { run, dir: dir.to_path_buf(), tmp: tmp.to_path_buf(), confined: false }
+    }
+
+    /// A reader for a clone that is not trusted (see [`LocalRepo::confined`]).
+    pub fn confined(run: Arc<dyn Runner>, dir: &Path, tmp: &Path) -> LocalRepo {
+        LocalRepo { confined: true, ..LocalRepo::new(run, dir, tmp) }
     }
 
     fn git(&self, args: &[&str], cap: usize) -> crate::wsexec::Out {
-        let mut argv: Vec<String> = vec!["git".into(), "--no-pager".into(), "-c".into(), "core.quotepath=off".into(), "-c".into(), "color.ui=never".into(), "-C".into(), self.dir.display().to_string()];
+        let mut argv: Vec<String> = vec!["git".into(), "--no-pager".into(), "-c".into(), "core.quotepath=off".into(), "-c".into(), "color.ui=never".into()];
+        if self.confined {
+            for c in ["core.fsmonitor=false", "core.hooksPath=/dev/null", "core.pager=cat", "diff.external=", "core.untrackedCache=false", "core.sshCommand=false", "credential.helper="] {
+                argv.extend(["-c".to_string(), c.to_string()]);
+            }
+        }
+        argv.extend(["-C".to_string(), self.dir.display().to_string()]);
         argv.extend(args.iter().map(|s| s.to_string()));
-        let env = vec![("GIT_TERMINAL_PROMPT".to_string(), "0".to_string()), ("LC_ALL".to_string(), "C".to_string()), ("GIT_OPTIONAL_LOCKS".to_string(), "0".to_string())];
+        let mut env = vec![("GIT_TERMINAL_PROMPT".to_string(), "0".to_string()), ("LC_ALL".to_string(), "C".to_string()), ("GIT_OPTIONAL_LOCKS".to_string(), "0".to_string())];
+        if self.confined {
+            env.extend([("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()), ("GIT_CONFIG_GLOBAL".to_string(), "/dev/null".to_string()), ("GIT_ALLOW_PROTOCOL".to_string(), "none".to_string())]);
+        }
         self.run.run(&self.dir, &argv, &env, Duration::from_secs(TIMEOUT_S), cap, None)
     }
 
@@ -994,7 +1012,7 @@ impl LocalRepo {
         if !safe_path(path) || path.is_empty() {
             return Err(BrowseErr::Persistent("That path is not one this tile will ask for.".into()));
         }
-        let o = self.git(&["diff", "HEAD", "--no-color", "--no-ext-diff", "-M", "--", path], DIFF_MAX + 64 * 1024);
+        let o = self.git(&["diff", "HEAD", "--no-color", "--no-ext-diff", "--no-textconv", "-M", "--", path], DIFF_MAX + 64 * 1024);
         if !o.ok() {
             return Err(lerr(&o));
         }
@@ -1002,6 +1020,25 @@ impl LocalRepo {
             return Ok(Diff { files: parse_unified(&o.stdout).files.into_iter().map(|mut f| { f.lines.clear(); f }).collect(), too_large: true });
         }
         Ok(parse_unified(&o.stdout))
+    }
+
+    /// `n` commits of `rf` after skipping `skip` (newest first), plus whether more follow. Used by the web service's paged log.
+    pub fn commits_page(&self, rf: &str, skip: usize, n: usize) -> Result<(Vec<CommitInfo>, bool), BrowseErr> {
+        let rf = self.rf(rf)?;
+        let (sk, take) = (format!("--skip={skip}"), format!("-n{}", n + 1));
+        let o = self.git(&["log", &sk, &take, "--format=%H%x1f%an%x1f%at%x1f%B%x1e", rf, "--"], 2 * 1024 * 1024);
+        if !o.ok() {
+            return Err(lerr(&o));
+        }
+        let mut v: Vec<CommitInfo> = o.stdout.split('\u{1e}').filter_map(|rec| {
+            let rec = rec.trim_start_matches('\n');
+            let mut it = rec.splitn(4, '\u{1f}');
+            let (sha, author, at, msg) = (it.next()?.trim(), it.next()?, it.next()?, it.next().unwrap_or(""));
+            (!sha.is_empty()).then(|| CommitInfo { sha: sha.to_string(), author: author.to_string(), when: at.trim().parse().unwrap_or(0), message: msg.trim_end().to_string() })
+        }).collect();
+        let more = v.len() > n;
+        v.truncate(n);
+        Ok((v, more))
     }
 
     fn rf<'a>(&self, rf: &'a str) -> Result<&'a str, BrowseErr> {
@@ -1127,7 +1164,7 @@ impl RepoReader for LocalRepo {
         if !sha.chars().all(|c| c.is_ascii_hexdigit()) || sha.is_empty() || sha.len() > 64 {
             return Err(BrowseErr::Persistent("That is not a commit id.".into()));
         }
-        let o = self.git(&["show", "--format=", "--patch", "--no-color", "--no-ext-diff", "-M", sha, "--"], DIFF_MAX + 64 * 1024);
+        let o = self.git(&["show", "--format=", "--patch", "--no-color", "--no-ext-diff", "--no-textconv", "-M", sha, "--"], DIFF_MAX + 64 * 1024);
         if !o.ok() {
             return Err(lerr(&o));
         }

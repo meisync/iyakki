@@ -199,3 +199,147 @@ fn the_page_says_when_the_firewall_blocks_the_developer_port_and_f_and_n_ask_for
     key(&mut a, &cx, Key::Char('n'));
     assert!(!d.network_wide());
 }
+
+/// Press the hit region that carries `ev` the way the shell does for a click: from_click is on while it is handled.
+fn tap(a: &mut SettingsApp, cx: &AppCx, g: &Gfx, pick: impl Fn(&crate::ui::Hit) -> bool) {
+    let h = g.hits.iter().find(|h| pick(h)).unwrap_or_else(|| panic!("no such hit region; have {:?}", g.hits.iter().map(|h| h.label.clone()).collect::<Vec<_>>()));
+    assert!(h.rect.h >= 30.0 || h.label.ends_with(": shell"), "{} is too small to tap: {:?}", h.label, h.rect);
+    crate::ui::set_from_click(true);
+    a.handle(&h.ev.clone(), cx);
+    crate::ui::set_from_click(false);
+}
+
+fn pair(d: &DevMode, name: &str) {
+    let p = d.pairing().expect("a code is shown");
+    let k = iyakki_agent::pkg::new_signing_key().unwrap();
+    let pubhex = iyakki_agent::pkg::public_key_hex(&k);
+    d.complete_pairing("AA:BB", name, &pubhex, &dm::auth::pair_proof(&dm::auth::pair_key(&p.code, "AA:BB").unwrap(), "AA:BB", &pubhex, name)).unwrap();
+}
+
+#[test]
+fn every_part_of_the_page_answers_a_click_like_its_key() {
+    use iyakki_agent::devmode::scopes::Scope;
+    let cx = admin("devset-click");
+    let d = DevMode::open(cx.services.dir());
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Developer);
+    // off: the empty list invites switching on; the cycle line and the Switch on button work by click
+    let g = draw(&mut a, &cx, 1280, 800);
+    tap(&mut a, &cx, &g, |h| matches!(h.ev, Event::Key(Key::Char('h'))) && h.label.starts_with("Port"));
+    assert_eq!(a.devel.hours, 1, "a tap on the switch-off line is h");
+    tap(&mut a, &cx, &g, |h| h.label == "Switch-off time");
+    assert_eq!(a.devel.hours, 2);
+    a.devel.hours = 0;
+    tap(&mut a, &cx, &g, |h| h.label == "Switch on");
+    assert!(d.is_on(), "{:?}", a.status());
+    // pair from the empty list's hint, copy by tap, scopes of the new computer by tap
+    let g = draw(&mut a, &cx, 1280, 800);
+    tap(&mut a, &cx, &g, |h| matches!(h.ev, Event::Key(Key::Char('p'))) && h.label.starts_with("None yet"));
+    assert!(d.pairing().is_some());
+    let g = draw(&mut a, &cx, 1280, 1400);
+    tap(&mut a, &cx, &g, |h| h.label == "New computer: debug");
+    assert_eq!(d.pairing().unwrap().scopes, vec!["install", "debug"]);
+    tap(&mut a, &cx, &g, |h| matches!(h.ev, Event::Key(Key::Char('C'))));
+    assert!(a.status().is_some_and(|s| s.0.contains("copied")), "{:?}", a.status());
+    pair(&d, "laptop");
+    pair_again(&mut a, &cx, &d, "desk");
+    // two computers: a click on a row chooses it, a click on a scope line turns that scope on for that computer only
+    let g = draw(&mut a, &cx, 1280, 1400);
+    tap(&mut a, &cx, &g, |h| h.label == "desk" && matches!(h.ev, Event::Row(1)));
+    assert_eq!(a.sel[a.tab], 1);
+    let g = draw(&mut a, &cx, 1280, 1400);
+    tap(&mut a, &cx, &g, |h| h.label == "desk: files");
+    let keys = d.keys();
+    assert!(keys.iter().find(|k| k.name == "desk").unwrap().has(Scope::Files) && !keys.iter().find(|k| k.name == "laptop").unwrap().has(Scope::Files));
+    let g = draw(&mut a, &cx, 1280, 1400);
+    tap(&mut a, &cx, &g, |h| h.label == "desk: files");
+    assert!(!d.keys().iter().find(|k| k.name == "desk").unwrap().has(Scope::Files), "a second tap turns it off");
+    // pending shell request: its buttons sit on the page and reach the same handler as the keys
+    let desk = d.keys().into_iter().find(|k| k.name == "desk").unwrap();
+    let mut desk = desk;
+    d.set_scope(&cx.session.policy, "root", "desk", Scope::Shell, true).unwrap();
+    desk = d.keys().into_iter().find(|k| k.name == desk.name).unwrap();
+    d.shell_request(&desk, false, 30, "debug").unwrap();
+    for (label, hours) in [("4 hours", 4), ("8 hours", 8), ("12 hours", 12)] {
+        let g = draw(&mut a, &cx, 1280, 1400);
+        tap(&mut a, &cx, &g, |h| h.label == label);
+        let gr = d.shell_grant("desk").unwrap_or_else(|| panic!("{label}: {:?}", a.status()));
+        assert!(gr.expires - d.now() > hours * 3600 - 120 && gr.expires - d.now() <= hours * 3600, "{label}");
+        d.shell_end(&cx.session.policy, "root", "desk").unwrap();
+        d.shell_request(&desk, false, 30, "debug").unwrap();
+    }
+    let g = draw(&mut a, &cx, 1280, 1400);
+    tap(&mut a, &cx, &g, |h| h.label == "Refuse");
+    assert!(d.shell_pending().is_empty() && d.shell_grant("desk").is_none());
+    // the log by button, the whole page at a small size still has every row reachable by wheel
+    let g = draw(&mut a, &cx, 1280, 800);
+    tap(&mut a, &cx, &g, |h| h.label == "Activity log");
+    assert!(a.devel.log);
+    let g = draw(&mut a, &cx, 1280, 800);
+    tap(&mut a, &cx, &g, |h| h.label == "Activity log");
+    assert!(!a.devel.log);
+}
+
+fn pair_again(a: &mut SettingsApp, cx: &AppCx, d: &DevMode, name: &str) {
+    key(a, cx, Key::Char('p'));
+    pair(d, name);
+}
+
+#[test]
+fn the_wheel_scrolls_the_page_and_every_row_can_be_reached_at_a_small_size() {
+    let cx = admin("devset-wheel");
+    let d = DevMode::open(cx.services.dir());
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Developer);
+    key(&mut a, &cx, Key::Char('e'));
+    key(&mut a, &cx, Key::Char('p'));
+    pair(&d, "laptop");
+    key(&mut a, &cx, Key::Char('p'));
+    a.mouse = (900, 400);
+    let (w, h) = (1024, 600);
+    let g = draw(&mut a, &cx, w, h);
+    assert!(!g.hits.iter().any(|h| h.label == "laptop: shell"), "the last scope is below the window at first");
+    assert!(a.devel.max > 0.0);
+    let mut seen = false;
+    for _ in 0..60 {
+        a.handle(&Event::Scroll(-1), &cx);
+        let g = draw(&mut a, &cx, w, h);
+        if g.hits.iter().any(|x| x.label == "laptop: shell" && x.rect.h >= 30.0) {
+            seen = true;
+            tap(&mut a, &cx, &g, |x| x.label == "laptop: shell");
+            break;
+        }
+    }
+    assert!(seen, "scrolled to the end: {} of {}", a.devel.scroll, a.devel.max);
+    assert!(d.keys()[0].has(iyakki_agent::devmode::scopes::Scope::Shell));
+    // every region that is registered lies inside the page (not under the button bar)
+    let g = draw(&mut a, &cx, w, h);
+    let bar_top = g.hits.iter().filter(|x| x.label == "Switch off").map(|x| x.rect.y).fold(f32::MAX, f32::min);
+    for x in g.hits.iter().filter(|x| matches!(x.ev, Event::Sub(..) | Event::Row(_))) {
+        assert!(x.rect.y + x.rect.h <= bar_top + 1.0, "{} reaches under the buttons", x.label);
+    }
+    a.handle(&Event::Scroll(100), &cx);
+    assert_eq!(a.devel.scroll, 0.0, "wheel up goes back to the top");
+}
+
+#[test]
+fn the_usb_c_page_answers_clicks_and_the_wheel_and_a_click_leaves_the_code_box() {
+    let cx = admin("devset-usb");
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Developer);
+    let g = draw(&mut a, &cx, 1280, 800);
+    tap(&mut a, &cx, &g, |h| h.label == "Connect over USB-C");
+    assert!(a.devel.usb_open);
+    let g = draw(&mut a, &cx, 1280, 800);
+    assert!(g.hits.iter().any(|h| h.label == "Check again"), "the bar has its buttons");
+    a.handle(&Event::Scroll(-2), &cx);
+    assert_eq!(a.devel.usb.top, 2, "the wheel scrolls the checks");
+    a.handle(&Event::Scroll(10), &cx);
+    assert_eq!(a.devel.usb.top, 0);
+    // typing a code, then a click on Back: leaves the box and goes back, no 'u' typed
+    a.devel.usb.code_focus = true;
+    let g = draw(&mut a, &cx, 1280, 800);
+    tap(&mut a, &cx, &g, |h| h.label == "Back");
+    assert!(!a.devel.usb_open && !a.devel.usb.code_focus);
+    assert_eq!(a.devel.usb.code.value, "");
+}

@@ -476,13 +476,8 @@ pub fn share_main(args: &[String]) -> i32 {
             let _ = std::fs::write(&f, &prev);
         }
     }
-    let r = net::apply(
-        &mut |c| {
-            let o = std::process::Command::new("sh").arg("-c").arg(c).output().map_err(|e| e.to_string())?;
-            if o.status.success() || undo { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).trim().to_string()) }
-        },
-        &cmds,
-    );
+    // the typed firewall writer, the interface ioctls and the forwarding switch: no shell, no `ip`, no `nft` (the lines printed above are for a person doing it by hand)
+    let r = if undo { crate::sharing::real::legacy_undo(&link, &std::fs::read_to_string(prev_forward_file(&link)).map(|s| s.trim().to_string()).unwrap_or_else(|_| "0".into())) } else { crate::sharing::real::legacy_apply(&link, &share.uplink) };
     match r {
         Ok(()) => {
             if undo {

@@ -83,6 +83,10 @@ pub struct SoundSettings {
     /// the mixer's own model; the person tunes what the card adds that nothing can measure (see [`crate::audiosink::highlight_offset_ms`]).
     #[serde(default)]
     pub highlight_offset_ms: i32,
+    /// The person's level for each kind of sound (source name such as `radio` or `Browser` → percent 0 to 100), set in the speaker
+    /// dropdown; it multiplies the master volume. Absent is 100.
+    #[serde(default)]
+    pub source_levels: std::collections::BTreeMap<String, u32>,
 }
 
 /// Which volume control moves the sound of a card that has a hardware one.
@@ -155,7 +159,7 @@ pub const MAX_LEVELS: usize = 32;
 
 impl Default for SoundSettings {
     fn default() -> Self {
-        SoundSettings { output: String::new(), volume_pct: DEFAULT_VOLUME_PCT, muted: false, levels: Default::default(), boosts: Default::default(), volume_modes: Default::default(), mixer: true, web_mix: false, highlight_offset_ms: 0 }
+        SoundSettings { output: String::new(), volume_pct: DEFAULT_VOLUME_PCT, muted: false, levels: Default::default(), boosts: Default::default(), volume_modes: Default::default(), mixer: true, web_mix: false, highlight_offset_ms: 0, source_levels: Default::default() }
     }
 }
 
@@ -179,6 +183,9 @@ impl SoundSettings {
         }
         if !(-500..=500).contains(&self.highlight_offset_ms) {
             return Err("the highlight timing offset must be between -500 and 500 ms".into());
+        }
+        if self.source_levels.len() > MAX_LEVELS || self.source_levels.iter().any(|(k, v)| k.is_empty() || k.len() > 32 || k.chars().any(|c| c.is_control()) || *v > 100) {
+            return Err("the volumes of the sounds are not valid".into());
         }
         if self.volume_modes.len() > MAX_LEVELS || self.volume_modes.keys().any(|k| k.is_empty() || !output_key_ok(k)) {
             return Err("the remembered volume controls are not valid".into());
@@ -1634,6 +1641,7 @@ pub fn install(prefs: SoundSettings) {
     crate::mixer::set_enabled(prefs.mixer);
     crate::webmix::set_wanted(prefs.web_mix);
     crate::audiosink::set_highlight_offset_ms(prefs.highlight_offset_ms);
+    crate::mixer::set_source_levels(&prefs.source_levels);
     g.lock().prefs = prefs;
     g.active.store(true, Ordering::SeqCst);
     start_watch();
@@ -1670,6 +1678,7 @@ pub fn apply_prefs(prefs: SoundSettings) {
     crate::mixer::set_enabled(prefs.mixer);
     crate::webmix::set_wanted(prefs.web_mix);
     crate::audiosink::set_highlight_offset_ms(prefs.highlight_offset_ms);
+    crate::mixer::set_source_levels(&prefs.source_levels);
     let g = global();
     if g.is_active() {
         g.set_prefs(prefs);

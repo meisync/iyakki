@@ -1540,6 +1540,10 @@ struct FixedChat {
 }
 
 impl ChatBackend for FixedChat {
+    fn provider_name(&self) -> String {
+        self.choice.provider.clone()
+    }
+
     fn complete(&self, history: &[Message]) -> Result<String, String> {
         self.svc.client_for(&self.choice.provider, false)?.chat(&self.choice.model, history)
     }
@@ -1558,6 +1562,10 @@ impl ChatBackend for FixedChat {
 }
 
 impl ChatBackend for DynamicChat {
+    fn provider_name(&self) -> String {
+        self.svc.settings.lock().unwrap().get().chat.as_ref().map(|c| c.provider.clone()).unwrap_or_default()
+    }
+
     fn complete(&self, history: &[Message]) -> Result<String, String> {
         let choice: Option<ModelChoice> = self.svc.settings.lock().unwrap().get().chat.clone();
         let c = choice.ok_or("No chat model selected. Open Settings → Models, add a provider and pick a model.")?;

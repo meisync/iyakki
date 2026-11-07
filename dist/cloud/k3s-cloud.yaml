@@ -1,0 +1,133 @@
+# One IYAKKI cloud tenant on K3s / Kubernetes, with the tenant configuration from a ConfigMap and the secret material from Secrets.
+# docs/CLOUD-IMAGES.md ("Kubernetes"). Load the image first:  docker load -i iyakki-cloud-<version>-amd64.tar   (then  k3s ctr images import  or a registry).
+#
+# Secrets (made by you, never stored in this file; the namespace is made by the manifest, so create it ahead):
+#   kubectl create namespace iyakki-acme
+#   kubectl -n iyakki-acme create secret generic iyakki-admin --from-literal=password='a long password'
+#   kubectl -n iyakki-acme create secret generic iyakki-tls --from-file=cert.pem --from-file=key.pem   # your certificate; then un-comment the two tls lines below
+#   (without it the pod makes a self-signed certificate on its volume and the browser warns once)
+#   kubectl -n iyakki-acme create secret generic iyakki-common --from-file=...                   # optional: the operator's common vault (iyakki cloud common ...)
+# Tenant configuration (non-secret: shared agents, models, git, k3s, egress, media; secrets are only referenced as vault:NS/NAME):
+#   edit the ConfigMap iyakki-tenant-config below, or  kubectl -n iyakki-acme create configmap iyakki-tenant-config --from-file=tenant-config.json=my.json --dry-run=client -o yaml | kubectl apply -f -
+#   the pod reads the file on every use, so a changed ConfigMap takes effect without a restart (the kubelet refreshes the mount within about a minute)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: iyakki-acme
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: iyakki-tenant-config
+  namespace: iyakki-acme
+data:
+  tenant-config.json: |
+    {"schema": 1, "items": [
+      {"kind": "egress.policy", "enabled": true, "managed": true, "values": {"mode": "allow_list", "allowed_domains": ["*.example.org"]}},
+      {"kind": "media.policy", "enabled": true, "managed": true, "values": {"media": "deny"}}
+    ]}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: iyakki-data
+  namespace: iyakki-acme
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iyakki
+  namespace: iyakki-acme
+spec:
+  replicas: 1          # one writer for the data volume
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: iyakki
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: iyakki
+    spec:
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: first-account
+          image: iyakki-cloud:0.1.0-alpha.1
+          imagePullPolicy: IfNotPresent
+          args: ["user", "add", "admin", "--role", "admin", "--if-missing", "--password-file", "/secret/password"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/iyakki }
+            - { name: admin, mountPath: /secret, readOnly: true }
+      containers:
+        - name: iyakki
+          image: iyakki-cloud:0.1.0-alpha.1
+          imagePullPolicy: IfNotPresent
+          args: ["serve"]
+          env:
+            - { name: IYAKKI_WEB, value: "1" }
+            - { name: IYAKKI_ADOPT, value: "0" }                        # the account comes from the Secret
+            - { name: IYAKKI_LOG, value: info }
+            - { name: IYAKKI_TENANT_DATA_DIR, value: /var/lib/iyakki }   # where cloud/config/tenant-config.json is read
+            - { name: IYAKKI_BROWSER_MEDIA, value: deny }                # microphone and camera of the browser: allow or deny for the tenant
+          ports:
+            - { name: https, containerPort: 8443 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            exec: { command: ["/iyakki", "healthcheck"] }
+            periodSeconds: 10
+          livenessProbe:
+            exec: { command: ["/iyakki", "healthcheck"] }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "2", memory: 1Gi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/iyakki }
+            - { name: tmp, mountPath: /tmp }
+            - { name: tenant-config, mountPath: /var/lib/iyakki/cloud/config/tenant-config.json, subPath: tenant-config.json, readOnly: true }
+            # - { name: tls, mountPath: /var/lib/iyakki/tls, readOnly: true }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: iyakki-data }
+        - name: tmp
+          emptyDir: {}
+        - name: admin
+          secret: { secretName: iyakki-admin }
+        - name: tenant-config
+          configMap: { name: iyakki-tenant-config }
+        # - name: tls
+        #   secret: { secretName: iyakki-tls }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: iyakki
+  namespace: iyakki-acme
+spec:
+  selector:
+    app.kubernetes.io/name: iyakki
+  ports:
+    - { name: https, port: 8443, targetPort: https }

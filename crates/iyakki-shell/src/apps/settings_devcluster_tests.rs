@@ -676,6 +676,9 @@ fn platform_services_opens_from_the_dev_cluster_page_owns_the_keyboard_and_fits_
     assert!(r.a.dc_platform_open(), "Esc went back from the wizard to the list first");
     r.a.handle(&Event::Key(Key::Esc), &r.cx);
     assert!(!r.a.dc_platform_open() && r.a.tab() == Tab::DevCluster);
+    if r.a.narrow {
+        r.a.handle(&Event::Key(Key::Esc), &r.cx); // a narrow window: the first Esc goes from the page to the list
+    }
     assert!(matches!(r.a.handle(&Event::Key(Key::Esc), &r.cx), Flow::Back));
 }
 

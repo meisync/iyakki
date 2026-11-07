@@ -70,6 +70,11 @@ pub fn probe_disconnected(sys_drm: &Path) -> usize {
     connectors(sys_drm).iter().filter(|c| !c.connected()).filter(|c| std::fs::write(sys_drm.join(&c.sysfs).join("status"), "detect").is_ok()).count()
 }
 
+/// Ask the kernel to look again at every connector, the connected ones too. Returns how many were asked.
+pub fn probe_all(sys_drm: &Path) -> usize {
+    connectors(sys_drm).iter().filter(|c| std::fs::write(sys_drm.join(&c.sysfs).join("status"), "detect").is_ok()).count()
+}
+
 /// How the boot-time search ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -184,6 +189,8 @@ pub enum ProbeMode {
     Always,
     /// `iyakki.touchscreen=off`: never probe while a monitor is connected.
     Never,
+    /// `iyakki.touchscreen=full`: probe every connector, the connected one too (the kernel looks at the live link again; the screen can go dark for a moment).
+    Full,
 }
 
 impl ProbeMode {
@@ -192,13 +199,14 @@ impl ProbeMode {
         match crate::boot::cmdline_param(cmdline, "iyakki.touchscreen") {
             Some("probe") => ProbeMode::Always,
             Some("off") => ProbeMode::Never,
+            Some("full") => ProbeMode::Full,
             _ => ProbeMode::Auto,
         }
     }
 
     fn wanted(self, touch_screen_present: bool) -> bool {
         match self {
-            ProbeMode::Always => true,
+            ProbeMode::Always | ProbeMode::Full => true,
             ProbeMode::Never => false,
             ProbeMode::Auto => touch_screen_present,
         }
@@ -215,6 +223,7 @@ fn probe_mode() -> ProbeMode {
     match PROBE_MODE.load(std::sync::atomic::Ordering::Relaxed) {
         1 => ProbeMode::Always,
         2 => ProbeMode::Never,
+        3 => ProbeMode::Full,
         _ => ProbeMode::Auto,
     }
 }
@@ -235,13 +244,20 @@ pub fn probe_once(sys_drm: &Path, why: &str, found: fn()) -> Vec<String> {
 
 fn probe_once_with(sys_drm: &Path, why: &str, found: fn(), mode: ProbeMode, touch_screen_present: impl Fn() -> bool) -> Vec<String> {
     let before = connected_names(sys_drm);
+    let listing = |l: &[Connector]| l.iter().map(|c| format!("{}={}", c.short(), c.status)).collect::<Vec<_>>().join(" ");
     if !before.is_empty() && !mode.wanted(touch_screen_present()) {
+        log::info!("display: probe ({why}) skipped, mode {mode:?}, with {} connected", before.join(", "));
         return Vec::new();
     }
-    if probe_disconnected(sys_drm) == 0 {
+    let started = std::time::Instant::now();
+    let seen = connectors(sys_drm);
+    let asked = if mode == ProbeMode::Full { probe_all(sys_drm) } else { probe_disconnected(sys_drm) };
+    log::info!("display: probe ({why}) mode {mode:?}: asked {asked} connectors of [{}]", listing(&seen));
+    if asked == 0 {
         return Vec::new();
     }
     std::thread::sleep(Duration::from_millis(300));
+    log::info!("display: probe ({why}) took {} ms, connectors now [{}]", started.elapsed().as_millis(), listing(&connectors(sys_drm)));
     let new: Vec<String> = connected_names(sys_drm).into_iter().filter(|n| !before.contains(n)).collect();
     if !new.is_empty() {
         log::info!("display: {} connected after a probe ({why})", new.join(", "));
@@ -485,6 +501,10 @@ mod tests {
         let d = lit("probe-always");
         probe_once_with(&d, "display event", found, ProbeMode::Always, || false);
         assert_eq!((status(&d, "HDMI-A-1"), status(&d, "DP-3")), ("detect".to_string(), "detect".to_string()));
+        // full: the connected connector is asked too
+        let d = lit("probe-full");
+        probe_once_with(&d, "display event", found, ProbeMode::Full, || false);
+        assert_eq!((status(&d, "DP-2"), status(&d, "HDMI-A-1")), ("detect".to_string(), "detect".to_string()));
         // off: never
         let d = lit("probe-never");
         assert!(probe_once_with(&d, "display event", found, ProbeMode::Never, || true).is_empty());
@@ -506,6 +526,7 @@ mod tests {
     fn the_option_is_read_from_the_kernel_command_line_and_the_touch_screen_from_the_input_list() {
         assert_eq!(ProbeMode::from_cmdline("quiet iyakki.touchscreen=probe"), ProbeMode::Always);
         assert_eq!(ProbeMode::from_cmdline("iyakki.touchscreen=off quiet"), ProbeMode::Never);
+        assert_eq!(ProbeMode::from_cmdline("iyakki.touchscreen=full"), ProbeMode::Full);
         assert_eq!(ProbeMode::from_cmdline("iyakki.touchscreen=maybe"), ProbeMode::Auto);
         assert_eq!(ProbeMode::from_cmdline("quiet"), ProbeMode::Auto);
         assert!(input_list_has_touch_screen("I: Bus=0003\nN: Name=\"wch.cn TouchScreen\"\nH: Handlers=event4\n"));

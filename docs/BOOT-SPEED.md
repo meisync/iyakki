@@ -333,3 +333,17 @@ The kernel log of every boot (lean or normal) is also kept on the data volume ac
   now names "GNU Unifont Regular 16" in full. Seen in QEMU at 2560 x 1600 (`dist/buildroot/qemu-grub-menu-test.py` style harness); not looked at on a real screen yet.
 * **Putting it on a stick.** `lean-install.sh` (stick in a PC) or `lean-remote-refresh.sh --menu-from <images>/install-root/boot/grub` (stick in a running
   Mac): both put the lean block in front of the normal entry; the second also sends the whole new `grub.cfg`, the font and the theme.
+
+## The cable first, Wi-Fi in the background (2026-11-04)
+
+Seen on the Mac mini with a cable and internet: the sign-in line said "Starting 3 of 6 ready" (network, clock and cluster waiting; the clock and
+the cluster wait for the network) until about 31 s. **Proven from the device log (`dmesg-1104c`):** `late_boot` ran the reset of the silent Wi-Fi chip
+(`wifi_recover`, two resets, the log line at 22.0 s, the chip had been rescanned at 16.5 s) before it brought any interface up; the cable
+(`tg3 eth0`) was set up only afterwards (first message at 27.1 s, link at 30.7 s) and the boot summary said "late drivers 17812 ms, network 11153 ms".
+**Not proven:** how much of the 11 s is the `ip link up` of the Tigon3 and how much is the rest of the network step.
+Now: the Ethernet adapters are set up on a thread of their own right after the network drivers load (`net::start_wired`, called from `late_boot`
+before the sound check and the Wi-Fi reset); the Wi-Fi reset and the Wi-Fi join run on another thread (`wifi_in_background`, then `net::bring_up_new`,
+and the hot-plug listener for an interface that shows up later); the boot sequence itself only does loopback and the DNS file (`net::bring_up_basic`).
+On screen, a "Wi-Fi" row exists only while a cable carries the default route and the Wi-Fi adapter is not up (for 3 minutes at most); the sign-in line says
+"Wi-Fi: starting in the background" at its end, the row is not part of the "x of y", does not keep the line busy and never turns it red
+(`startup::login_view`, `startup_probe::wifi_state`). Without a cable, or without a Wi-Fi adapter, nothing changes. Not tried on the Mac yet.

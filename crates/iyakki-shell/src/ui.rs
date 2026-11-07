@@ -151,21 +151,44 @@ pub fn set_shift_held(on: bool) {
     SHIFT.with(|c| c.set(on));
 }
 
+thread_local! {
+    static FROM_CLICK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// True while the event being handled came from a click or touch on a hit region (a button may stand for a key).
+pub fn from_click() -> bool {
+    FROM_CLICK.with(|c| c.get())
+}
+
+pub fn set_from_click(on: bool) {
+    FROM_CLICK.with(|c| c.set(on));
+}
+
 pub fn set_click_count(n: u8) {
     CLICKS.with(|c| c.set(n.clamp(1, 3)));
 }
 
-pub const BG_TOP: [u8; 4] = rgb(20, 25, 44);
-pub const BG_BOTTOM: [u8; 4] = rgb(9, 11, 20);
-pub const CARD: [u8; 4] = rgb(30, 37, 62);
-pub const CARD_HOVER: [u8; 4] = rgb(40, 49, 80);
-pub const CARD_SEL: [u8; 4] = rgb(48, 58, 96);
-pub const TEXT: [u8; 4] = rgb(231, 235, 247);
-pub const MUTED: [u8; 4] = rgb(165, 175, 202);
-pub const DIM: [u8; 4] = rgb(132, 142, 174);
-pub const ERR: [u8; 4] = rgb(255, 120, 120);
-pub const OK: [u8; 4] = rgb(110, 224, 160);
-pub const FIELD: [u8; 4] = rgb(16, 20, 36);
+// The one theme: a classy dark one. Near-black with a slight cool tint, three steps of elevation (page, card/row, raised or
+// hovered), one restrained blue accent (selection, primary buttons, focus ring), soft borders, muted secondary text.
+// Body text on every step keeps at least 4.5:1 contrast (`theme_tests` in this file).
+pub const BG_TOP: [u8; 4] = rgb(22, 24, 31);
+pub const BG_BOTTOM: [u8; 4] = rgb(11, 12, 17);
+/// Elevation 1: cards and list rows at rest (the page itself is elevation 0, [`BG_TOP`] to [`BG_BOTTOM`]).
+pub const CARD: [u8; 4] = rgb(31, 34, 43);
+/// Elevation 2: a card or row under the pointer.
+pub const CARD_HOVER: [u8; 4] = rgb(41, 45, 57);
+/// Elevation 3: the chosen row, menus and dialogs.
+pub const CARD_SEL: [u8; 4] = rgb(46, 52, 70);
+/// The soft border of cards, fields and buttons at rest.
+pub const BORDER: [u8; 4] = rgb(58, 63, 78);
+/// The one accent: selection, primary buttons, the keyboard focus ring.
+pub const ACCENT_MAIN: [u8; 4] = rgb(124, 164, 246);
+pub const TEXT: [u8; 4] = rgb(234, 237, 244);
+pub const MUTED: [u8; 4] = rgb(172, 178, 194);
+pub const DIM: [u8; 4] = rgb(158, 165, 183);
+pub const ERR: [u8; 4] = rgb(255, 128, 128);
+pub const OK: [u8; 4] = rgb(116, 214, 160);
+pub const FIELD: [u8; 4] = rgb(17, 19, 26);
 
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct R {
@@ -1278,5 +1301,39 @@ mod tests {
         f.click(-50.0);
         set_dragging(false);
         assert_eq!(f.selected_text().as_deref(), Some("alpha b"));
+    }
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::*;
+
+    fn lum(c: [u8; 4]) -> f64 {
+        let f = |v: u8| {
+            let v = v as f64 / 255.0;
+            if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2])
+    }
+    fn contrast(a: [u8; 4], b: [u8; 4]) -> f64 {
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn text_keeps_wcag_contrast_on_every_elevation() {
+        let grounds = [("BG_TOP", BG_TOP), ("BG_BOTTOM", BG_BOTTOM), ("CARD", CARD), ("CARD_HOVER", CARD_HOVER), ("CARD_SEL", CARD_SEL), ("FIELD", FIELD), ("PANEL", crate::fx::PANEL), ("WELL", crate::fx::WELL)];
+        for (gn, g) in grounds {
+            for (tn, t) in [("TEXT", TEXT), ("MUTED", MUTED), ("DIM", DIM), ("ERR", ERR), ("OK", OK), ("ACCENT", ACCENT_MAIN), ("AMBER", crate::fx::AMBER)] {
+                let c = contrast(t, g);
+                assert!(c >= 4.5, "{tn} on {gn}: {c:.2}:1");
+            }
+        }
+    }
+
+    #[test]
+    fn the_elevation_steps_rise_and_the_accent_stands_out() {
+        assert!(lum(BG_BOTTOM) < lum(BG_TOP) && lum(BG_TOP) < lum(CARD) && lum(CARD) < lum(CARD_HOVER) && lum(CARD_HOVER) < lum(CARD_SEL));
+        assert!(contrast(BORDER, CARD) >= 1.3);
     }
 }

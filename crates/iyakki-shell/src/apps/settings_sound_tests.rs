@@ -445,7 +445,7 @@ fn the_browser_route_switch_is_off_by_default_says_what_is_true_needs_the_mixer_
     key(&mut a, &cx, Key::Char('W'));
     assert!(status(&a).contains("untested on real hardware"), "{}", status(&a));
     let r = rows(&mut a, &cx);
-    assert!(r.iter().find(|r| r.title == "Browser sound status").unwrap().sub.contains("untested"));
+    assert!(r.iter().find(|r| r.title == "Browser sound status").unwrap().sub.contains("through the mixer"));
     // off again, and old files have it off
     key(&mut a, &cx, Key::Char('W'));
     key(&mut a, &cx, Key::Char('M'));

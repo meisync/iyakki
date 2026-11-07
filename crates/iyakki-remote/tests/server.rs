@@ -150,6 +150,20 @@ fn read_frame(s: &mut TcpStream) -> (u8, Vec<u8>) {
 }
 
 #[test]
+fn the_page_allows_its_own_camera_and_microphone_and_nothing_else_does() {
+    let (srv, _) = start();
+    let (_, head, _) = http(srv.local_addr(), "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    let pp = head.lines().find_map(|l| l.strip_prefix("Permissions-Policy: ")).expect("a Permissions-Policy header on the page");
+    assert!(pp.contains("camera=(self)") && pp.contains("microphone=(self)"), "{pp}");
+    assert!(!pp.contains('*') && !pp.contains("camera=()") && !pp.contains("microphone=()"), "{pp}");
+    // the Content-Security-Policy does not stand in the way of a camera preview, sound or the WebSocket
+    let csp = head.lines().find_map(|l| l.strip_prefix("Content-Security-Policy: ")).unwrap();
+    assert!(csp.contains("connect-src 'self'") && csp.contains("img-src 'self' blob: data:") && !csp.contains("media-src 'none'"), "{csp}");
+    let (_, other, _) = http(srv.local_addr(), "GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(!other.contains("Permissions-Policy"), "only the page carries it");
+}
+
+#[test]
 fn the_page_and_the_health_check_are_served_with_safety_headers() {
     let (srv, _) = start();
     let (code, head, body) = http(srv.local_addr(), "GET / HTTP/1.1\r\nHost: x\r\n\r\n");

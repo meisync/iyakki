@@ -1004,7 +1004,7 @@ fn git_answers(f: &Fx) {
     r.answer("show main:README.md", "# App\n\nA local clone.\n");
     r.answer("show main:main.rs", "fn main() {}\n");
     r.answer("log -n50", "aaaaaaa1111\u{1f}Ada\u{1f}1799999000\u{1f}First line\n\nmore\n\u{1e}\nbbbbbbb2222\u{1f}Bo\u{1f}1799990000\u{1f}Second\n\u{1e}\n");
-    r.answer("show --format= --patch --no-color --no-ext-diff -M aaaaaaa1111 --", DIFF);
+    r.answer("show --format= --patch --no-color --no-ext-diff --no-textconv -M aaaaaaa1111 --", DIFF);
     r.answer("symbolic-ref --short -q refs/remotes/origin/HEAD", "origin/main\n");
     r.answer("refs/heads", "dev\u{1f}1111\u{1f}Dev work\u{1f}1799990000\nmain\u{1f}2222\u{1f}Main work\u{1f}1799999000\n");
     r.answer("refs/tags", "v2\u{1f}3333\u{1f}Release two\u{1f}1799990000\n");

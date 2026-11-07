@@ -674,8 +674,13 @@ pub fn actor_of(user: &str, p: &Policy) -> Actor {
     Actor::from_policy(user, p)
 }
 
+pub mod updatecheck;
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod updatecheck_tests;
 
 #[cfg(test)]
 mod tile_tests;

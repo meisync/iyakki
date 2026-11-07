@@ -577,7 +577,8 @@ pub fn with_previous_entry_args(cfg: &str, id: &str, version: &str, extra: &str)
     let first = text.find("menuentry \"IYAKKI\"").ok_or("no normal entry")?;
     let close = text[first..].find("\n}\n").map(|c| first + c + 3).ok_or("the normal entry is not closed")?;
     text.insert_str(close, &format!("\n{entry}"));
-    Ok(text)
+    // a start that never gets as far as the first picture falls back to this entry by itself (F-UPD-02)
+    super::bootcount::with_guard(&text)
 }
 
 // -------------------------------------------------------------------------------------------- applying
@@ -648,6 +649,41 @@ fn sync_dir(p: &Path) {
     }
 }
 
+/// The boot loader's program and the copy of the one before it (see `replace_file`).
+pub const LOADER_FILE: &str = "EFI/iyakki-boot/loader.efi";
+/// The previous loader, kept next to it.
+pub const LOADER_PREV_FILE: &str = "loader.prev.efi";
+
+/// Is this a file of the boot loader's own folder (`EFI/iyakki-boot/`)?
+pub fn in_loader_dir(rel: &str) -> bool {
+    rel.len() > 16 && rel[..16].eq_ignore_ascii_case("EFI/iyakki-boot/")
+}
+
+/// Is this a file of the removable-media boot path (`EFI/BOOT/`: shim or the loader as `BOOTX64.EFI`, the second stage `grubx64.efi`,
+/// GRUB kept as `grub-recovery.efi`, MokManager)? The firmware starts these by name, so they are replaced like the loader's own files.
+pub fn in_boot_chain(rel: &str) -> bool {
+    rel.len() > 9 && rel[..9].eq_ignore_ascii_case("EFI/BOOT/")
+}
+
+/// Order of the writes among the EFI files (see `apply`): GRUB's recovery copy first, then the loader's own folder, then everything else
+/// in `EFI/`, and the files the firmware or shim start by name (`BOOTX64.EFI`, `grubx64.efi`) last. On the first move to a loader-default
+/// image `grubx64.efi` changes from GRUB to the loader: by then `grub-recovery.efi` (the same GRUB) and the loader's `boot.cfg` are whole
+/// on the volume, so every power cut leaves a second stage that starts and a way back to GRUB.
+fn efi_write_rank(rel: &str) -> u8 {
+    let k = key(rel);
+    match k.as_str() {
+        "efi/boot/grub-recovery.efi" => 3,
+        "efi/boot/grubx64.efi" | "efi/boot/bootx64.efi" => 7,
+        _ if in_loader_dir(rel) => 4,
+        _ => 5,
+    }
+}
+
+#[cfg(test)]
+pub(super) fn efi_write_rank_for_tests(rel: &str) -> u8 {
+    efi_write_rank(rel)
+}
+
 /// Put `data` (a file of the payload, or the generated `grub.cfg`) at `rel` on the boot partition.
 fn replace_file(env: &Env, vol: &BootVol, rel: &str, from: Either<'_>) -> Result<(), String> {
     let size = match &from {
@@ -664,6 +700,34 @@ fn replace_file(env: &Env, vol: &BootVol, rel: &str, from: Either<'_>) -> Result
         Either::File(p) => copy_file(env, p, to),
         Either::Bytes(b) => write_bytes(env, to, b),
     };
+    // IYAKKI's own boot loader (EFI/iyakki-boot/*): never half-written. The old loader is first saved as loader.prev.efi (the loader's
+    // "More options" offers it), then every file here is written beside the old one and renamed; with no room for that the update stops
+    // rather than overwrite in place (a loader that is cut off half way leaves a machine that does not start).
+    // The same rule holds for EFI/BOOT/*: the second stage `grubx64.efi` (GRUB, or the loader on a loader-default image), `BOOTX64.EFI`
+    // and `grub-recovery.efi` are written beside the old file and renamed, also when the file is new (no half file under a name the
+    // loader's Recovery row or shim would start).
+    if in_loader_dir(rel) || in_boot_chain(rel) {
+        if rel.eq_ignore_ascii_case(LOADER_FILE) && dest.exists() {
+            let prev = dest.with_file_name(LOADER_PREV_FILE);
+            let tmp = dest.with_file_name(format!("{LOADER_PREV_FILE}.upd"));
+            copy_file(env, &dest, &tmp)?;
+            std::fs::rename(&tmp, &prev).map_err(|e| format!("{}: {e}", prev.display()))?;
+        }
+        if dest.exists() {
+            if free < alloc(size, vol.cluster) + 2 * vol.cluster {
+                return Err(format!("there is not enough room on the boot partition to replace {rel} safely; nothing was changed in it"));
+            }
+            let tmp = dest.with_file_name(format!("{}.upd", dest.file_name().unwrap_or_default().to_string_lossy()));
+            put(&tmp)?;
+            std::fs::rename(&tmp, &dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+        } else {
+            let tmp = dest.with_file_name(format!("{}.upd", dest.file_name().unwrap_or_default().to_string_lossy()));
+            put(&tmp)?;
+            std::fs::rename(&tmp, &dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+        }
+        sync_dir(&dest);
+        return Ok(());
+    }
     // beside the old file when it fits (atomic rename), else over it
     if dest.exists() && free >= alloc(size, vol.cluster) + 2 * vol.cluster {
         let tmp = dest.with_file_name(format!("{}.upd", dest.file_name().unwrap_or_default().to_string_lossy()));
@@ -833,6 +897,7 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
         "boot/initrd" | "boot/initrd-lean" => 0,
         "boot/bzimage" => 1,
         "boot/grub/grub.cfg" => 9,
+        _ if key(n).starts_with("efi/") => efi_write_rank(n),
         _ => 5,
     };
     order.sort_by(|a, b| rank(a).cmp(&rank(b)).then(a.cmp(b)));

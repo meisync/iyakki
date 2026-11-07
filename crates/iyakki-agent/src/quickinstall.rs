@@ -150,6 +150,9 @@ pub enum Item {
     /// Stage 3: NVIDIA's vendor driver (CUDA): open modules from the image, vendor files downloaded at the click (gpu_nvidia.rs).
     GpuNvidia,
     Ffmpeg,
+    /// The audio and video add-on of the browser (H.264, AAC, MP3): FFmpeg's shared libraries, LGPL-only, built for the image's musl, put in
+    /// `<data>/addons/ffmpeg` where `avaddon.rs` looks. Installed by the CLI catalogue entry `ffmpeg-libs` (clis.rs) at the person's click.
+    FfmpegLibs,
     /// Apple's Wi-Fi and Bluetooth firmware for a T2 Mac, installed as driver packs (macfw.rs).
     MacFirmware,
     /// A first Debian sandbox named `debian` (linuxapps.rs); the Store \u{2192} Setup \u{2192} Linux apps (Open its page) makes more (Ubuntu, other names, folders).
@@ -174,7 +177,7 @@ pub enum Item {
 }
 
 impl Item {
-    pub const ALL: [Item; 32] = [Item::Node, Item::Python, Item::K3s, Item::DuckDb, Item::Elasticsearch, Item::OpenSearch, Item::Prometheus, Item::ClickHouse, Item::GraphDb, Item::Gitea, Item::Matrix, Item::Registry, Item::ClaudeCode, Item::Copilot, Item::Kokoro, Item::VoicePack, Item::Lemonade, Item::Ollama, Item::MacHost, Item::GpuVulkan, Item::GpuNvidia, Item::Ffmpeg, Item::MacFirmware, Item::MacCamera, Item::LinuxApps, Item::LinuxWindows, Item::FwQualcommBt, Item::FwRealtekNet, Item::FwBroadcomNet, Item::FwAtheros9170, Item::FwMediatek, Item::FwHardware];
+    pub const ALL: [Item; 33] = [Item::Node, Item::Python, Item::K3s, Item::DuckDb, Item::Elasticsearch, Item::OpenSearch, Item::Prometheus, Item::ClickHouse, Item::GraphDb, Item::Gitea, Item::Matrix, Item::Registry, Item::ClaudeCode, Item::Copilot, Item::Kokoro, Item::VoicePack, Item::Lemonade, Item::Ollama, Item::MacHost, Item::GpuVulkan, Item::GpuNvidia, Item::Ffmpeg, Item::FfmpegLibs, Item::MacFirmware, Item::MacCamera, Item::LinuxApps, Item::LinuxWindows, Item::FwQualcommBt, Item::FwRealtekNet, Item::FwBroadcomNet, Item::FwAtheros9170, Item::FwMediatek, Item::FwHardware];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -200,6 +203,7 @@ impl Item {
             Item::GpuVulkan => "gpu-vulkan",
             Item::GpuNvidia => "gpu-nvidia",
             Item::Ffmpeg => "ffmpeg",
+            Item::FfmpegLibs => crate::avaddon::INSTALL_ITEM,
             Item::MacFirmware => "mac-firmware",
             Item::MacCamera => CAMERA_JOB,
             Item::LinuxApps => "linux-apps",
@@ -241,6 +245,7 @@ impl Item {
             Item::GpuVulkan => "GPU for local models (Vulkan)",
             Item::GpuNvidia => "NVIDIA GPU driver (CUDA)",
             Item::Ffmpeg => "Media player (ffmpeg)",
+            Item::FfmpegLibs => "Browser audio and video (H.264, AAC)",
             Item::MacFirmware => "Mac Wi-Fi and Bluetooth firmware (from your Mac)",
             Item::MacCamera => "MacBook FaceTime camera: driver and firmware (firmware from Apple)",
             Item::LinuxApps => "Linux apps (Debian/Ubuntu)",
@@ -257,7 +262,7 @@ impl Item {
             Item::ClaudeCode | Item::Copilot => Group::AiCoding,
             Item::Kokoro | Item::VoicePack => Group::Voice,
             Item::Lemonade | Item::Ollama | Item::MacHost | Item::GpuVulkan | Item::GpuNvidia => Group::LocalModels,
-            Item::Ffmpeg => Group::Media,
+            Item::Ffmpeg | Item::FfmpegLibs => Group::Media,
             Item::MacFirmware | Item::MacCamera => Group::Mac,
             Item::LinuxApps | Item::LinuxWindows => Group::Linux,
             Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek | Item::FwHardware => Group::Firmware,
@@ -293,6 +298,7 @@ impl Item {
             Item::LinuxWindows => "Show a graphical Linux program in an IYAKKI window (LINUX WINDOW tile): makes a Debian 12 sandbox named gui and installs, with apt, TigerVNC's X server (it draws into memory), a one-window manager, fonts, software OpenGL and the xterm test program (about 250 MB, never part of an image). No graphics card and no sound in the window",
             Item::LinuxApps => "Run Debian or Ubuntu programs: downloads the official Debian 12 base for you (about 30 MB, checksum-verified, never part of an image) into a sandbox named debian with the network on and no folders mounted; apt installs packages inside it. The Store \u{2192} Setup \u{2192} Linux apps (Open its page) adds Ubuntu, more sandboxes, mounted folders, image apps and the terminal",
             Item::Ffmpeg => "Plays video and audio in IYAKKI (MEDIA tile, camera recordings, Media player). Downloads a static ffmpeg build from its builder (johnvansickle.com), GPLv3, checked with its checksum; about 42 MB",
+            Item::FfmpegLibs => "Lets the BROWSER tile play H.264 video and AAC sound (TikTok and similar pages). You supply FFmpeg's LGPL shared libraries (a file in /local/packages, a mirror inside your organisation, or an ffmpeg you installed that passes the checks); IYAKKI neither ships nor hosts them. You read the licence first; the browser engine uses them at its next start. Nothing of FFmpeg is in the image",
             Item::FwHardware => "The vendor firmware this computer asks for and does not have (Wi-Fi, Bluetooth, graphics, network cards): IYAKKI images do not carry it. The card lists exactly which files your hardware needs and what each vendor's licence says, then downloads only those from the upstream linux-firmware release (kernel.org, a fixed release, every file checked), installs them as a driver pack that survives restarts, and reloads the drivers where that is safe; Restart appears only when needed. A Wi-Fi chip without its firmware needs a wired or USB-C connection, a USB stick or another computer to get it.",
             Item::FwQualcommBt => "Bluetooth patch files for newer Qualcomm laptop chips (QCA6390, WCN3950, WCN3988, WCN7850, QCA6698): 20 files, about 1 MB. Not in the images (IYAKKI is not sure it may redistribute them): you read and accept the vendor's licence, then the files are downloaded from the upstream linux-firmware repository at a fixed release, each checked for size and SHA-256, installed as a driver pack that survives restarts, and the driver is loaded again; Reboot to finish appears only when the driver needs it. Also installable from a folder or USB stick.",
             Item::FwRealtekNet => "Firmware for PCIe Realtek Ethernet chips (RTL8111/8168, RTL8125 and relatives): 30 small files, about 140 KB. Not in the images (IYAKKI is not sure it may redistribute them): you read and accept the vendor's licence, then the files are downloaded from the upstream linux-firmware repository at a fixed release, each checked for size and SHA-256, installed as a driver pack that survives restarts, and the driver is loaded again; Reboot to finish appears only when the driver needs it. Also installable from a folder or USB stick.",
@@ -331,6 +337,7 @@ impl Item {
             Item::LinuxWindows => "Debian packages, each with its own licence (TigerVNC: GPL-2.0, matchbox: GPL-2.0, Mesa: MIT, xterm: MIT, fonts: free licences), downloaded by apt inside the sandbox at your click, never shipped. \"Debian\" is a registered trademark of Software in the Public Interest, Inc.; IYAKKI does not rebrand it and is not endorsed by it",
             Item::LinuxApps => "Debian and Ubuntu are free software; every package keeps its own licence (/usr/share/doc/<package>/copyright inside the sandbox). Downloaded from the distribution, not shipped. \"Ubuntu\" and \"Debian\" are trademarks of their owners; IYAKKI does not rebrand them",
             Item::Ffmpeg => "GPLv3 (the static build you download from its builder; IYAKKI does not ship it). H.264 and AAC are patent-licensed formats: decoding them is your choice, as in the browser",
+            Item::FfmpegLibs => "LGPL-2.1 or later (the libraries you supply: IYAKKI does not ship it and does not host it; the licence texts and the source offer travel with them and you read the archive's NOTICE and the source offer before you confirm). H.264 and AAC are patent-licensed formats in some countries: decoding them is your choice and responsibility",
             Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek => self.fw_def().map_or("", |d| d.licence_note),
             Item::FwHardware => "Various per file: each vendor's own licence (listed from WHENCE before you click, texts kept next to the files). Free to redistribute with notice for most; some are restricted to the vendor's hardware (MediaTek, Marvell, Qualcomm, Broadcom, NVIDIA). Not in the images: downloaded for you from the upstream linux-firmware repository, never shipped.",
         }
@@ -399,6 +406,7 @@ impl Item {
             Item::GpuVulkan => 300,
             Item::GpuNvidia => 400,
             Item::Ffmpeg => 42,
+            Item::FfmpegLibs => 0,
             Item::MacFirmware => 1500,
             Item::MacCamera => 18,
             Item::LinuxApps => 30,
@@ -628,6 +636,7 @@ pub fn presence_with(svc: &crate::services::Services, item: Item, lemonade: &dyn
             _ => Presence::Missing,
         },
         Item::Gitea => gitea::presence(data),
+        Item::FfmpegLibs => crate::avaddon_install::installed_note(data).map_or(Presence::Missing, Presence::Installed),
         other => match other.cli_id() {
             // installed by IYAKKI (its record), else put on the machine by hand (the tools folder, the search path): shown as
             // installed with the version it reports and where, and left alone (never replaced unless asked twice)
@@ -1392,6 +1401,18 @@ pub trait StepEnv {
     fn cluster_ready(&mut self) -> bool;
     /// Install a CLI catalogue program (DuckDB), waiting for it; returns its version.
     fn install_cli(&mut self, id: &str) -> Result<String, String>;
+    /// Install the browser's audio and video add-on from what the administrator supplied (`avaddon_install.rs`); what was installed.
+    fn install_av_addon(&mut self) -> Result<String, String> {
+        Err("the audio and video add-on cannot be installed here".into())
+    }
+    /// Build the browser add-on in an isolated k3s Job (`avbuild.rs`) and put the package in /local/packages; it is NOT installed.
+    fn build_av_addon(&mut self) -> Result<String, String> {
+        Err("building the audio and video add-on is not available here".into())
+    }
+    /// The administrator asked for the build route (the Store wrote the request after the consent text); true once per request.
+    fn av_build_requested(&mut self) -> bool {
+        false
+    }
     /// `kubectl apply` a manifest (kept as `<name>.yaml` in the module's folder); returns what kubectl printed.
     fn kubectl_apply(&mut self, name: &str, manifest: &str) -> Result<String, String>;
     /// Wait for a Deployment's rollout.
@@ -2403,6 +2424,20 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
             }));
             Ok(())
         }
+        Item::FfmpegLibs => {
+            if env.av_build_requested() {
+                // built here (k3s): the package goes to /local/packages and the person installs it through the usual review and confirm
+                let what = env.build_av_addon()?;
+                env.say(&what);
+                return Ok(());
+            }
+            env.say("[0/2] checking the add-on libraries you supplied (a package in /local/packages, a mirror, or your installed ffmpeg)");
+            let what = env.install_av_addon()?;
+            env.say(&format!("[1/2] installed: {what}"));
+            env.mark(item, &what)?;
+            env.say("[2/2] done: the BROWSER tile starts its engine again and plays H.264 and AAC (no FFmpeg is in the image)");
+            Ok(())
+        }
         Item::Lemonade => {
             env.say(&format!("[0/4] Lemonade runs in k3s: checking the cluster first (licence: {})", item.licence()));
             deploy_lemonade(env, wait, poll)?;
@@ -2496,7 +2531,9 @@ impl RealEnv {
     /// `kubectl create secret generic` from 0600 files in a 0700 folder (one per `(key, value)`), removed at once, then the labels. The
     /// values are in no argument, no log and no manifest; `redact` are scrubbed from any error text.
     fn secret_from_values(&mut self, ns: &str, name: &str, values: &[(&str, &str)], labels: &[(&str, &str)], redact: &[&str]) -> Result<(), String> {
-        let dir = state_dir(&self.data).join("secret-tmp");
+        // one folder per call: installs run side by side, and each removes its own folder when it ends
+        static SECRET_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = state_dir(&self.data).join("secret-tmp").join(format!("{}-{}", std::process::id(), SECRET_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let scrub = |t: String| redact.iter().fold(t, |t, r| if r.is_empty() { t } else { t.replace(r, "[redacted]") });
@@ -2729,6 +2766,28 @@ impl StepEnv for RealEnv {
     }
     fn cluster_ready(&mut self) -> bool {
         self.k3s.kubectl(&["get", "nodes", "-o", "jsonpath={.items[*].status.conditions[?(@.type=='Ready')].status}"]).stdout.contains("True")
+    }
+    fn av_build_requested(&mut self) -> bool {
+        crate::avbuild::take_request(&self.data)
+    }
+    fn build_av_addon(&mut self) -> Result<String, String> {
+        let k3s = self.k3s.clone();
+        let kube = move |a: &[&str]| {
+            let o = k3s.kubectl(a);
+            (o.code == Some(0), o.combined())
+        };
+        let map = std::fs::read_to_string(std::path::Path::new(crate::avbuild::BRIDGE_DIR).join("versions.map")).unwrap_or_default();
+        let lines = std::cell::RefCell::new(Vec::<String>::new());
+        let (sleep, say) = (|d: Duration| std::thread::sleep(d), |l: &str| lines.borrow_mut().push(l.to_string()));
+        let cx = crate::avbuild::RunCx { data: &self.data, bridge: std::path::Path::new(crate::avbuild::BRIDGE_DIR), map_text: &map, version: crate::avbuild::IMAGE_VERSION, arch: std::env::consts::ARCH, kubectl: &kube, sleep: &sleep, say: &say, max_polls: 760 };
+        let r = crate::avbuild::build(&cx);
+        let progress = lines.borrow().join("\n");
+        r.map(|m| format!("{progress}\n{m}"))
+    }
+    fn install_av_addon(&mut self) -> Result<String, String> {
+        let places = crate::avaddon_install::Places::here(&self.data);
+        let clis = self.clis.clone();
+        crate::avaddon_install::run(&places, true, &|url, file| clis.fetch_admin_file(url, file))
     }
     fn install_cli(&mut self, id: &str) -> Result<String, String> {
         if let Some(i) = self.clis.installed().into_iter().find(|i| i.id == id) {

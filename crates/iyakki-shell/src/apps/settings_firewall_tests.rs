@@ -134,7 +134,7 @@ fn a_user_who_is_not_an_administrator_cannot_change_anything_even_with_the_keys(
 }
 
 #[test]
-fn adding_a_rule_is_a_draft_until_apply_and_apply_waits_for_keep() {
+fn adding_a_rule_is_a_draft_until_apply_and_a_rule_that_only_opens_is_kept_at_once() {
     let (mut a, cx, r) = app("fw-flow");
     let msg = add(&mut a, &cx, 1, "198.51.100.7").unwrap();
     assert!(msg.contains("not applied yet"), "{msg}");
@@ -142,40 +142,47 @@ fn adding_a_rule_is_a_draft_until_apply_and_apply_waits_for_keep() {
     assert!(view(&r).config.rules.is_empty(), "the firewall has not changed");
     assert_eq!(a.fw_len(), 1, "the page shows the draft");
     key(&mut a, &cx, 'y');
-    assert!(status(&a).contains("60 seconds"), "{}", status(&a));
-    assert!(matches!(view(&r).status, Status::Pending { secs_left: 60 }));
-    assert!(r.be.installed().unwrap().to_text().contains("198.51.100.7"));
-    // the Keep and Revert buttons appear while it waits
-    let g = draw(&mut a, &cx, 1280, 720);
-    assert!(g.hits.iter().any(|h| h.label == "Keep") && g.hits.iter().any(|h| h.label == "Revert"));
-    key(&mut a, &cx, 'k');
-    assert!(status(&a).contains("Kept"), "{}", status(&a));
+    // a rule that only lets more in cannot lock anyone out: it is applied and kept at once, with no Keep step
+    assert_eq!(status(&a), "Applied.", "{}", status(&a));
     assert_eq!(view(&r).status, Status::On);
+    assert!(r.be.installed().unwrap().to_text().contains("198.51.100.7"));
+    let g = draw(&mut a, &cx, 1280, 720);
+    assert!(!g.hits.iter().any(|h| h.label == "Keep" || h.label == "Revert"), "nothing to confirm");
+    r.clock.fetch_add(120, Ordering::SeqCst);
+    r.eng.lock().unwrap().tick();
+    assert!(r.be.installed().unwrap().to_text().contains("198.51.100.7"), "still there after two minutes");
     assert_eq!(r.store.0.lock().unwrap().as_ref().unwrap().config.rules.len(), 1, "saved");
     let g = draw(&mut a, &cx, 1280, 720);
     assert!(!g.hits.iter().any(|h| h.label == "Keep"));
     let log = audit_text(&cx);
-    for ev in ["firewall.rule.add", "firewall.apply", "firewall.keep"] {
+    for ev in ["firewall.rule.add", "firewall.keep"] {
         assert!(log.contains(ev), "{ev} in the audit log:\n{log}");
     }
 }
 
 #[test]
-fn not_pressing_keep_takes_the_rules_back_and_revert_does_it_at_once() {
+fn a_change_that_tightens_waits_for_keep_and_is_taken_back_if_not_pressed() {
     let (mut a, cx, r) = app("fw-revert");
     add(&mut a, &cx, 1, "198.51.100.7").unwrap();
+    key(&mut a, &cx, 'y'); // opens: kept at once
+    assert_eq!(view(&r).config.rules.len(), 1);
+    // removing the rule narrows what is allowed: that one keeps the 60-second confirmation
+    key(&mut a, &cx, 'd');
     key(&mut a, &cx, 'y');
+    assert!(status(&a).contains("60 seconds"), "{}", status(&a));
+    assert!(matches!(view(&r).status, Status::Pending { .. }));
+    assert!(view(&r).config.rules.is_empty());
     r.clock.fetch_add(61, Ordering::SeqCst);
     r.eng.lock().unwrap().tick();
     assert_eq!(view(&r).status, Status::On);
-    assert!(view(&r).config.rules.is_empty(), "taken back by itself");
-    assert!(!r.be.installed().unwrap().to_text().contains("198.51.100.7"));
+    assert_eq!(view(&r).config.rules.len(), 1, "the removal was not confirmed, so the rule is back");
+    assert!(r.be.installed().unwrap().to_text().contains("198.51.100.7"));
     // by hand
-    add(&mut a, &cx, 1, "198.51.100.8").unwrap();
+    key(&mut a, &cx, 'd');
     key(&mut a, &cx, 'y');
     key(&mut a, &cx, 'v');
     assert!(status(&a).contains("Reverted"), "{}", status(&a));
-    assert!(view(&r).config.rules.is_empty());
+    assert_eq!(view(&r).config.rules.len(), 1);
     assert!(audit_text(&cx).contains("firewall.revert"));
 }
 
@@ -419,12 +426,14 @@ fn a_share_the_firewall_blocks_is_pointed_out_and_one_key_opens_the_shared_folde
     // from the Shared folders page
     a.tab = a.tabs.iter().position(|t| *t == Tab::Shares).expect("administrators have Shared folders");
     key(&mut a, &cx, 'f');
-    assert_eq!(a.tab(), Tab::Firewall, "taken to the page where it is kept or reverted");
-    assert!(status(&a).contains("60 seconds"), "{}", status(&a));
-    assert!(matches!(view(&r).status, Status::Pending { .. }));
+    assert_eq!(a.tab(), Tab::Firewall, "taken to the firewall page");
+    assert!(status(&a).contains("stays open"), "opening is kept at once: {}", status(&a));
+    assert_eq!(view(&r).status, Status::On, "nothing waits for Keep, so nothing is taken back after a minute");
     assert!(blocked_note_for(&r.eng.lock().unwrap(), 8081).is_none(), "now open to the local network");
     assert!(audit_text(&cx).contains("firewall.preset"));
-    key(&mut a, &cx, 'k');
+    r.clock.fetch_add(120, Ordering::SeqCst);
+    r.eng.lock().unwrap().tick();
+    assert!(blocked_note_for(&r.eng.lock().unwrap(), 8081).is_none(), "still open two minutes later (this was the bug: it was taken back)");
     key(&mut a, &cx, 'p');
     // asking again changes nothing
     a.modal = None;
@@ -512,11 +521,10 @@ fn standard_is_the_default_open_asks_first_and_locked_down_is_honest() {
 fn adding_a_service_applies_it_at_once_with_the_keep_window_and_remove_takes_it_away() {
     let (mut a, cx, r) = simple("fw-add");
     pick(&mut a, &cx, "Web server");
-    assert!(status(&a).contains("Keep within 60 seconds"), "{}", status(&a));
-    assert!(matches!(view(&r).status, Status::Pending { .. }));
+    assert!(!status(&a).contains("Keep within 60 seconds"), "opening is kept at once: {}", status(&a));
+    assert_eq!(view(&r).status, Status::On);
     assert!(r.eng.lock().unwrap().would_allow_tcp("192.168.1.5".parse().unwrap(), 443), "the local network reaches the web server");
     assert!(!r.eng.lock().unwrap().would_allow_tcp("198.51.100.7".parse().unwrap(), 443), "the internet does not");
-    key(&mut a, &cx, 'k');
     assert!(a.fw_items().iter().any(|i| i.title == "Web server"));
     // adding it again says so
     pick(&mut a, &cx, "Web server");

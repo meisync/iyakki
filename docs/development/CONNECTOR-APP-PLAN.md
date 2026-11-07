@@ -1,7 +1,7 @@
 # Connector app: plan
 
 Status: decided 2026-11-03 (owner): the client is a small program plus the browser already installed on the machine; it must be secure and
-as fast as the IYAKKI desktop. Not built yet. Read with `WEB-UI-PLAN.md` and `CLOUD-MULTITENANT-PLAN.md` (section 3.4).
+as fast as the IYAKKI desktop. Built 2026-11-04 (steps 1 to 5, rows F-CONN-01 to F-CONN-04): `iyakki-link`, `iyakki-connect probe/pin/login/serve/--share/key`, 2.2 MiB (gnu) and 2.35 MiB (musl); tested with fakes and headless Chrome against a fake tenant, not against a real desktop. Read with `WEB-UI-PLAN.md` and `CLOUD-MULTITENANT-PLAN.md` (section 3.4).
 
 ## 1. Shape
 
@@ -9,6 +9,7 @@ as fast as the IYAKKI desktop. Not built yet. Read with `WEB-UI-PLAN.md` and `CL
   (`pixelcodec.rs`) move from the agent crate into a small crate so the program does not pull in the agent.
 * Modes: `probe` / `pin` (show and store the certificate fingerprint, trust on first use), `serve` (a page on the loopback address that shows
   the remote desktop in the installed browser), plain actions (`ls`, `get`, `put`, sign-in, tenants, flows), `--share DIR` for file exchange.
+  Built 2026-11-04: `iyakki-connect tenants HOST USER` lists the tenants the account may use (`GET /api/v1/tenants`); a switch command and `ls` are not built.
 * No browser engine and no GUI toolkit: the installed browser draws the page; clipboard, camera, microphone and audio use its own APIs.
 
 ## 2. Secure

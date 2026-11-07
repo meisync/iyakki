@@ -112,6 +112,11 @@ pub fn read_status(dir: &Path) -> Status {
 }
 
 /// The addresses to type in a browser: the stable name first (`<label>.local`), then each IPv4 address (loopback left out).
+/// The machine's IPv4 addresses without loopback (what the page offers as addresses to open).
+pub fn local_ips() -> Vec<String> {
+    iyakki_devctl::ipv4_addresses().into_iter().map(|(_, ip)| ip).filter(|ip| !ip.starts_with("127.")).collect()
+}
+
 pub fn urls(label: &str, ips: &[String], port: u16) -> Vec<String> {
     let mut v = vec![format!("https://{label}.local:{port}")];
     for ip in ips.iter().filter(|i| !i.starts_with("127.")) {

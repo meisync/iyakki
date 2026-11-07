@@ -1,4 +1,5 @@
 use super::engine::{map_channels, Engine, EngineCfg, SourceKind, SourceShared, SourceWriter, Wake};
+use crate::audioout::SoundSettings;
 use super::resample::Resampler;
 use super::sink::FakeSink;
 use super::*;
@@ -554,4 +555,45 @@ fn a_decoder_pipe_feeds_a_source_as_plain_pcm() {
     wait_for("the pipe audio", || sink.lock().samples.iter().filter(|&&s| s > 6000).count() > 40_000);
     assert!(sink.lock().samples.iter().filter(|&&s| s > 6000).count() < 100_000);
     m.shutdown();
+}
+
+#[test]
+fn a_sources_level_scales_only_that_source_and_multiplies_its_own_gain() {
+    let mut e = Engine::new(cfg());
+    let a = src(&mut e, SourceKind::Media, 48_000, 2);
+    let b = src(&mut e, SourceKind::Media, 48_000, 2);
+    a.s.set_level(0.5);
+    a.write_f32(&vec![0.4; 960 * 2 * 4]);
+    b.write_f32(&vec![0.2; 960 * 2 * 4]);
+    let o = run(&mut e, 2);
+    // the first period may ramp in: look at the second
+    let tail = &o[o.len() / 2..];
+    assert!(tail.iter().all(|v| (v - 0.4).abs() < 1e-3), "0.4 * 0.5 + 0.2 = 0.4, got {}", tail[0]);
+    // the player's own gain (a fade, its own volume) multiplies with the level
+    a.set_gain(0.5);
+    a.write_f32(&vec![0.4; 960 * 2 * 4]);
+    b.write_f32(&vec![0.2; 960 * 2 * 4]);
+    let o = run(&mut e, 3);
+    let tail = &o[o.len() * 2 / 3..];
+    assert!(tail.iter().all(|v| (v - 0.3).abs() < 1e-3), "0.4 * 0.5 * 0.5 + 0.2 = 0.3, got {}", tail[0]);
+}
+
+#[test]
+fn levels_by_name_apply_to_sources_that_open_later_and_are_bounded() {
+    let mut levels = std::collections::BTreeMap::new();
+    levels.insert("Browser".to_string(), 40u32);
+    levels.insert("radio".to_string(), 250u32);
+    set_source_levels(&levels);
+    assert!((level_of("Browser") - 0.4).abs() < 1e-6);
+    assert!((level_of("radio") - 1.0).abs() < 1e-6, "more than 100 is the full level, never a boost");
+    assert!((level_of("speech") - 1.0).abs() < 1e-6, "a name without a setting is at the full level");
+    let s = SoundSettings { source_levels: levels.clone(), ..Default::default() };
+    assert!(s.validate().is_err(), "250 percent is refused");
+    levels.insert("radio".into(), 70);
+    let ok = SoundSettings { source_levels: levels.clone(), ..Default::default() };
+    assert!(ok.validate().is_ok());
+    let json = serde_json::to_string(&ok).unwrap();
+    assert_eq!(serde_json::from_str::<SoundSettings>(&json).unwrap().source_levels.get("Browser"), Some(&40));
+    assert_eq!(serde_json::from_str::<SoundSettings>("{}").unwrap().source_levels.len(), 0, "an old settings file has none");
+    set_source_levels(&Default::default());
 }

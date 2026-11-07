@@ -1,6 +1,6 @@
 # Multi-tenant cloud service: plan
 
-Status: idea recorded 2026-11-02 (owner's notes); step 1 built the same day (section 7). Decisions taken to start, owner to confirm: pod per
+Status: idea recorded 2026-11-02 (owner's notes); step 1 built the same day (section 7). Decisions taken to start, owner to confirm: pod per Tenant-level configuration (shared agents, models, git, k3s per team and environment, egress, media): `TENANT-CONFIG-PLAN.md`, core built 2026-11-04 (F-TCFG-01 to F-TCFG-09).
 tenant, accounts held in each tenant, the common vault written by an operator role, certificates supplied by the person, a file bundle
 as the first image target. Read with `../CLOUD-MODE.md`, `MINIMAL-WEBSERVICE.md`,
 `UI-OS-SPLIT-PLAN.md`, `VPN-CONNECTOR-PLAN.md`, `../K3S-DEV.md`, `../K8S-TILE.md`, `../FIREWALL.md`.
@@ -196,7 +196,8 @@ without downtime) needs a real cluster to confirm.
   `--apply`.
 * Checked here: unit tests (12); the bundle made from the release's static program loads into Docker, the image has the right
   architecture, user and entry point, and starts (`supervisor up`); `kubectl apply --dry-run=client` accepts all seven objects.
-* Not done: shared vaults (step 3), sign-in modes and the switcher (4), domain routing for a local machine (5), the desktop connector (6),
+* Step 4, first part (2026-11-04): **tenant after login**. `GET /api/v1/tenants` lists the tenants the signed-in person belongs to (membership is the tenant's own `roles.json`; `scope=all` for service administrators only); `POST /api/v1/tenant/switch` checks membership on the server, binds that session to the tenant (the volume the next request works on), stops the person's running chats, calls the vault-lock hook and audits; the web UI top bar (`ui/tenant.js`) shows the tenant with a role badge and a drop-down when there are several; `iyakki-connect tenants` lists them. The directory of tenants a pod knows is `cloud/tenants.json` (hand-written; the control plane will write it); a tenant on another host is opened at its address and needs a new sign-in there. Rows F-WEB-41 to F-WEB-43. Tested on fakes and under node; not with a real cluster, several pods or a real browser.
+* Not done: shared vaults (step 3), the rest of sign-in modes and the switcher (4: the desktop shell's Personal/Cloud sessions), domain routing for a local machine (5), the desktop connector (6),
   the control plane (7). Not tried: a real ingress controller, the cloud profile in a pod, volumes that follow a pod.
 
 **2026-11-03 (steps 2 to 5 in part), tested with unit tests and a fake `kubectl`; nothing applied to a real cluster.**
@@ -311,3 +312,67 @@ without downtime) needs a real cluster to confirm.
   (hard stop, no login request reaches the new server, the pin is kept). The screen behind each server is a solid-colour stand-in, as in
   `cloudclient.rs`; the tenant's own desktop is not the thing tested.
 
+
+## Wiring of `iyakki cloud listen` (2026-11-04)
+
+`iyakki cloud listen` now uses the finished listener parts, chosen by flags in `cloudlisten_setup.rs` (`iyakki cloud listen --help` prints
+them). Each step is behind a flag; the defaults fail closed. Tested with fakes for the vault, the firewall and kubectl, and loopback sockets;
+nothing has run on a real network, a real vault service, a real cluster or the real kernel firewall.
+
+* **Certificates from the vault:** `--cert-source vault --vault URL --vault-user NAME --vault-key FILE [--vault-fingerprint F] [--tenant T]
+  [--vault-scope S]`. Chain and key are read into memory on every reload (60 s); nothing is written. A vault that is down means the https
+  hosts are not served (the last good certificate stays while it is valid); there is no fallback to files, and `--cert-dir` together with the
+  vault source is an error. The default stays `--cert-source file`.
+* **Mutual TLS:** `--client-ca HOST=NAME` per https route; the CA comes from the same source (a vault secret). A certificate of another
+  tenant's CA, none, an expired one or an unknown CA is refused (403, or the handshake), and the target is not contacted. A CA the source
+  cannot give turns every client away (503). A name that is not an https route is a configuration error.
+* **Pods:** `--service-dialer port-forward|cluster-dns --namespace NS` hands `Options::dialer` the `cloudlisten_pod` dialers. Without one,
+  Service routes answer 502 and the start-up says so.
+* **Firewall gate (fail closed):** the default gate is the real `FirewallGate` (`iyakki_fw::gaterule::sync` through the engine and its netlink
+  writer). `gaterule::sync` now also checks `gaterule::enforcing`: the engine must be `On` (not off, not "not protected", not unavailable, not
+  waiting for Keep), otherwise opening a port is an error and the listener does not start (ports bound so far are released). If the gate cannot
+  be had at all, `build` fails before any port is bound. `--no-firewall` is accepted only with a loopback `--bind`. `--reach local|anywhere`
+  (default local network). `--firewall-start` starts this process's firewall engine from the saved settings (as the shell does at boot),
+  for a standalone command; without it a standalone `iyakki cloud listen` has a firewall engine that is not booted, so it refuses to open
+  (use it inside the IYAKKI session, or `--firewall-start`).
+* **Tenants:** `--route-tenant HOST=TENANT` (repeatable) and `--tenant-limit N` (default 64). With tenants configured every route must have
+  one (start and `update` refuse a table with a route that has none); the tenant of a connection is that of the route its SNI (passthrough) or
+  Host (http, https) picks; at most N requests or tunnels of one tenant are open at once (503 or a closed passthrough connection beyond that),
+  slots are released when the request or tunnel ends. A mutual-TLS refusal happens before a slot is taken.
+* **Still open:** mTLS on the link from the listener to a pod (`ServiceDialer` returns a plain `TcpStream`; the port-forward is loopback and the
+  cluster-DNS path is plain TCP inside the cluster network; a TLS-wrapping dialer is needed); "control plane mTLS" is only the per-route client CA
+  (no mTLS between `iyakki cloud reconcile` and anything); tenant limits are one number of open requests, not bandwidth or rate; the tenant map
+  is by route host from flags, not read from the tenant configs; one reach for all ports; `members` routes are still not enforced; SSH and
+  WireGuard tunnel targets; the real vault `Reader`, `PortForward` with a real kubectl and the real gate are not exercised by any test.
+
+**2026-11-04, vault hardening, pod rotation, encrypted snapshots, binary files, volumes; unit and loopback tests only, nothing on a real cluster.**
+
+* **Replay and rates (`cloudvaultguard.rs`, `cloudvaultd.rs`):** a signed request now carries a random nonce (`IYAKKI-SIG id,ts,nonce,sig`; the nonce is
+  inside the signature, a request without one is refused). The service refuses a second request with the same (id, nonce) for as long as it could pass the
+  120 s clock window (either direction), keeps the pairs in `replay.log` (0600, read again at start, so a process restart forgets nothing; an unreadable
+  log means "nothing signed before the start is accepted"), and refuses new requests with 429 rather than accept unchecked if the cache (50,000) is full of
+  live entries. Token buckets per key (300 burst, 50/s; counted after the signature verified) and per source address (1000 burst, 200/s; counted first).
+  Five failures from one address inside a minute lock that address for a minute: its failing requests then get 429. **The lockout cannot lock out the
+  owner:** failures count against the address, never against the name a request claims; a request that verifies always gets through, even from a locked
+  address, and clears the lock. Owner recovery if a stolen key floods the service: replace the key with `iyakki vault enroll` (file access is the
+  authority) and restart the service (counters are in memory). The client waits a second and retries on 429, three times. Untested: a full 50,000-entry cache;
+  a power cut that loses the last unsynced lines of `replay.log` (one replay could pass inside its remaining window).
+* **Rotation from a pod:** a pod with an account of its own (`IYAKKI_VAULT_POD_ACCOUNT`, secret in `cloud/vault-keys/NAME.key`, enrolled and given a wrap by a
+  tenant admin) finishes the rotation that follows a removal when nobody else holds a key (`cloudrotate::rotate`). The vault decides by role: a namespace
+  editor (a tenant admin for the tenant scope) may rotate a scope, and may remove only a person the roles no longer entitle to it (the roles file is the
+  authority); it may also rotate without removing anyone (`Client::rotate_key`). A pod with no account, no wrap or too small a role leaves the entry pending
+  and `iyakki cloud reconcile --retry-rotations` stays the fallback. New route `GET /v1/scope/S/rotation-members`.
+* **Snapshots are encrypted at rest when a key is given** (`--key-file F` or the tenant vault): XChaCha20-Poly1305 in 64 KiB chunks bound to position, end of
+  stream, snapshot id and key id; the file list is sealed too. The key is a vault secret `snapshot-key.<id>` in the tenant scope (`snapshot-key.current`
+  names the one in use); `iyakki cloud snapshot key-rotate` makes a new one, `rekey ID` re-seals a snapshot under it (atomic swap). A changed, cut, extended
+  or reordered archive, or the wrong key, is refused before anything is unpacked. Honest limits: the plain tar and compressed archive exist briefly in the
+  snapshot's temporary folder while it is made and during a restore (deleted, not wiped); whoever holds the tenant vault key reads the snapshots.
+* **Binary files:** `PUT /api/v1/files/upload` and `GET /api/v1/files/download` (any bytes, 128 MiB at most, `Content-Length` required and checked before a byte
+  is read, optional `X-Content-SHA256`, streamed in 64 KiB pieces through a private temporary file and a rename; the download opens without following a
+  link and sends exactly the promised length). The listener hands these two routes to `files::serve_stream` after the head; same rights and same jail as the
+  text routes. Not done: range requests, resumable uploads, a total-time limit for a slow upload (each read has the 10 s timeout), the per-person size cap.
+* **`isolation: volumes`** works in the storage layer: each namespace is its own claim (`<volume>-ns-<ns>`, mounted at `<root>/volumes/<claim>`), `personal`
+  stays on the main volume; `resolve_with` asks a `VolumeProvisioner` first and refuses when the claim cannot be created or the mount is not a separate file
+  system (so files never land on the main volume by accident); `volume_claim_manifest` writes the claim. **Still refused where a tenant is configured**
+  (`Isolation::deployable`): the service's manifest does not mount a claim per namespace and there is no worker pod per namespace; moving a namespace's folder
+  onto a new volume is not built.

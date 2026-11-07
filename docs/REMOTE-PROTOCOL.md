@@ -31,6 +31,9 @@ in WebSocket **text** frames unless said otherwise. A page message the server do
 | `shift` | `on` | shift held at the next click |
 | `paste` | `s` | text from the clipboard (at most 200,000 characters) |
 | `full` | | send the whole picture again |
+| `media` | `kind` (`mic`, `camera`, `clipread`), `on` | the person switched a browser device on or off (only from a real click or key in the page; the server answers `media_denied` when the policy forbids it) |
+| `audio` | `on` | the page started or stopped playing the session sound (WebAudio, binary `0x10` messages) |
+| `sink` | `mode` (`browser`, `both`, `mac`) | "Play sound on": **browser** = this computer, and the machine's own speakers are kept silent for as long as this page's sound is on; **both**; **mac** = the Mac only, nothing is sent to the page. The page sends it just before `audio` on and whenever the person changes it. Kept for the session only. |
 | `sp_voices` | `ok`, `voices: [{n, l, d}]` | the page's speech synthesis: `ok` false when it has none; each voice has name `n`, language `l`, `d` true when it is on the device. Sent when the socket opens, when asked (`speak_voices`) and on the browser's `voiceschanged`. At most 400 voices, names cleaned and cut. |
 | `hello` | `v`, `caps: {deflate}` | version 2 handshake (see above); sent once, first |
 | `ack` | `n` | the picture message with sequence `n` is drawn (sent after every message; the server never has more than 2 unacknowledged) |
@@ -146,6 +149,27 @@ browser without `DecompressionStream` says so in `hello` and gets PNG tiles. Tou
 click, one finger drags, two fingers scroll (pinch zooms the view up to 4x; while zoomed two fingers pan); a keyboard button opens the
 phone's keyboard; a full screen button; on a window narrower than the 640 pixel minimum desktop width the picture is scaled to fit.
 Clipboard: the page already bridges it (`copy`, `readclip`, `paste`).
+
+## Browser sound, camera and microphone
+
+Browser devices panel (gear, or Ctrl+Alt+Q): Start sound, Play sound on, Microphone, Camera, Clipboard reading. Everything is off until the
+person clicks it (a real click or key; a script cannot), and each failure is shown in a red line at the top of the page in exact words
+(blocked by you or the browser, blocked by the operating system, no camera found, camera in use by another program, page not in a
+secure context, page policy).
+
+* **Where the sound plays.** The mixer's output (radio, MEDIA, TALES, system sounds, speech) is copied to the page. "This computer (the
+  browser)" is the default once sound is on: the machine's own output is fed silence while the controlling page plays. "Both" plays on
+  both. "The Mac only" sends nothing to the page. The controlling session is the live page whose sound was switched on last; only its
+  choice can silence the machine, other sessions are never touched. The silence ends at once when that page switches its sound off,
+  disconnects, signs out, its shell ends, or just stops answering for 4 seconds (so the machine can never stay muted). A program that
+  started on the play command (mixer off in Settings) before the page's sound began keeps playing on the machine until it ends.
+* **Camera.** The page sends JPEG frames (`0x02`) after the person clicks Camera and allows it in the browser prompt. In a browser
+  session the CAMERA tile is usable even on a machine without a camera (a Mac mini has none), offers "Browser camera", and asks the page
+  to show its Allow button when it is off; the assistant's camera tools use the browser camera first when a page offers one (and still ask
+  the person each time). Needs a secure context: the https:// address (accept the certificate warning once) or localhost.
+* **Page headers.** The page is sent with `Permissions-Policy: camera=(self), microphone=(self), autoplay=(self), clipboard-read=(self), clipboard-write=(self), fullscreen=(self)`.
+  (Without the header browsers allow these for the page too, so the header documents the intent rather than fixing a block.)
+* **Policy.** `IYAKKI_BROWSER_MEDIA=allow|deny` (unset on a desktop = allow, in a pod always set) and the person's role (`iyakki-sec::media`).
 
 ## Security of what the page exposes
 

@@ -69,13 +69,23 @@ pub struct Presented {
 /// (with every signature checked, but any certificate accepted and remembered) and the connection is ended before a byte of
 /// application data goes out.
 pub fn probe(addr: &str, timeout: Duration) -> Result<Presented, String> {
+    let der = probe_der(addr, timeout)?;
+    let info = crate::certinfo::read_cert(&der);
+    let subject = info.as_ref().and_then(|i| i.names.first().cloned()).unwrap_or_else(|| split_addr(addr).map(|(h, _)| h).unwrap_or_default());
+    Ok(Presented { pin: Pin(Sha256::digest(&der).into()), subject, not_after: info.map_or(0, |i| i.not_after) })
+}
+
+/// The pin (SHA-256) of a certificate in DER.
+pub fn pin_of(der: &[u8]) -> Pin {
+    Pin(Sha256::digest(der).into())
+}
+
+/// Like [`probe`] but returns the whole certificate (DER), for a tool that shows more than the first name.
+pub fn probe_der(addr: &str, timeout: Duration) -> Result<Vec<u8>, String> {
     let (mut tls, der) = tls_open(addr, None, timeout).map_err(|e| e.text())?;
     tls.conn.send_close_notify();
     let _ = tls.flush();
-    let der = der.ok_or("the server showed no certificate")?;
-    let info = crate::cloudroute::read_cert(&der);
-    let subject = info.as_ref().and_then(|i| i.names.first().cloned()).unwrap_or_else(|| split_addr(addr).map(|(h, _)| h).unwrap_or_default());
-    Ok(Presented { pin: Pin(Sha256::digest(&der).into()), subject, not_after: info.map_or(0, |i| i.not_after) })
+    der.ok_or_else(|| "the server showed no certificate".to_string())
 }
 
 /// The state of the link. `Refused` and `Closed` are final (the threads have ended); the others change on their own.
@@ -133,19 +143,19 @@ pub struct Picture {
 // ------------------------------------------------------------------------------------------------------------------ the client
 
 /// The sign-in cookie's name (`iyakki_session`, as `iyakki-remote` sets it).
-const COOKIE: &str = "iyakki_session";
+pub(crate) const COOKIE: &str = "iyakki_session";
 /// The biggest WebSocket message accepted from the server (it sends at most 512 KiB itself).
-const MAX_MESSAGE: usize = 8 << 20;
+pub(crate) const MAX_MESSAGE: usize = 8 << 20;
 /// A server picture bigger than this many pixels is refused (the server's own limit is 3840x2160).
 const MAX_PIXELS: usize = 4096 * 4096;
 const MAX_QUEUE: usize = 20_000;
-const IO_TIMEOUT: Duration = Duration::from_secs(8);
+pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long the link may be down (reconnecting) before the client gives up.
 const GIVE_UP: Duration = Duration::from_secs(120);
 /// No message at all (the server sends statistics every second) for this long means the link is dead.
 const SILENT: Duration = Duration::from_secs(20);
 
-type Tls = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
+pub(crate) type Tls = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
 
 /// A live connection to one tenant. Cheap to poll from the shell's frame loop: nothing here blocks the caller.
 ///
@@ -387,7 +397,7 @@ fn stretch(c: &Canvas, w: usize, h: usize) -> Vec<u8> {
 // ------------------------------------------------------------------------------------------------------------------- TLS
 
 #[derive(Debug)]
-enum ConnErr {
+pub(crate) enum ConnErr {
     /// The certificate is not the pinned one (the pin it showed).
     Mismatch(String),
     /// The account or password was refused.
@@ -401,7 +411,7 @@ enum ConnErr {
 }
 
 impl ConnErr {
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         match self {
             ConnErr::Mismatch(m) | ConnErr::Refused(m) | ConnErr::Fatal(m) | ConnErr::Transient(m) | ConnErr::Http(_, m) => m.clone(),
         }
@@ -442,7 +452,7 @@ impl ServerCertVerifier for Verifier {
 }
 
 /// `host` and port of `host:port`, `[v6]:port` or a bare host (port 443).
-fn split_addr(addr: &str) -> Result<(String, u16), String> {
+pub(crate) fn split_addr(addr: &str) -> Result<(String, u16), String> {
     let a = addr.trim();
     if a.is_empty() || a.len() > 300 || a.chars().any(|c| c.is_whitespace() || c.is_control() || c == '/') {
         return Err(format!("{a:?} is not an address"));
@@ -463,7 +473,7 @@ fn split_addr(addr: &str) -> Result<(String, u16), String> {
 
 /// TCP and the TLS handshake to `addr`; nothing but the handshake is sent. With a pin, any other certificate ends in
 /// `ConnErr::Mismatch` before a byte of application data. Also returns the certificate that was shown.
-fn tls_open(addr: &str, pin: Option<Pin>, timeout: Duration) -> Result<(Tls, Option<Vec<u8>>), ConnErr> {
+pub(crate) fn tls_open(addr: &str, pin: Option<Pin>, timeout: Duration) -> Result<(Tls, Option<Vec<u8>>), ConnErr> {
     let (host, port) = split_addr(addr).map_err(ConnErr::Fatal)?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let verifier = Arc::new(Verifier { pin, seen: Mutex::new(None), provider: provider.clone() });
@@ -514,12 +524,12 @@ fn tls_open(addr: &str, pin: Option<Pin>, timeout: Duration) -> Result<(Tls, Opt
 // ------------------------------------------------------------------------------------------------------------------- HTTP
 
 /// A server's sentence made safe to show: printable, short.
-fn clean(s: &str) -> String {
+pub(crate) fn clean(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).take(160).collect()
 }
 
 /// Read the status line and headers (names lower-cased); returns what came after them too.
-fn read_head(tls: &mut Tls) -> Result<(u16, Vec<(String, String)>, Vec<u8>), ConnErr> {
+pub(crate) fn read_head(tls: &mut Tls) -> Result<(u16, Vec<(String, String)>, Vec<u8>), ConnErr> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let at = loop {
@@ -543,7 +553,7 @@ fn read_head(tls: &mut Tls) -> Result<(u16, Vec<(String, String)>, Vec<u8>), Con
 }
 
 /// One HTTP request on a fresh connection; returns status, headers and body.
-fn http(tls: &mut Tls, host: &str, method: &str, path: &str, extra: &[(&str, &str)], body: &[u8]) -> Result<(u16, Vec<(String, String)>, Vec<u8>), ConnErr> {
+pub(crate) fn http(tls: &mut Tls, host: &str, method: &str, path: &str, extra: &[(&str, &str)], body: &[u8]) -> Result<(u16, Vec<(String, String)>, Vec<u8>), ConnErr> {
     let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n", body.len());
     for (k, v) in extra {
         req.push_str(&format!("{k}: {v}\r\n"));
@@ -564,7 +574,7 @@ fn http(tls: &mut Tls, host: &str, method: &str, path: &str, extra: &[(&str, &st
     Ok((status, headers, body))
 }
 
-fn error_text(body: &[u8], status: u16) -> String {
+pub(crate) fn error_text(body: &[u8], status: u16) -> String {
     serde_json::from_slice::<Value>(body).ok().and_then(|v| v["error"].as_str().map(clean)).filter(|s| !s.is_empty()).unwrap_or_else(|| format!("the server answered {status}"))
 }
 
@@ -732,7 +742,7 @@ enum End {
 }
 
 /// A masked client frame.
-fn masked_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn masked_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
     let mut mask = [0u8; 4];
     if iyakki_sec::random_fill(&mut mask).is_err() {
         mask = [0x37, 0xfa, 0x21, 0x3d];
@@ -758,7 +768,7 @@ fn text_msg(s: &str) -> Vec<u8> {
     masked_frame(0x1, s.as_bytes())
 }
 
-enum Msg {
+pub(crate) enum Msg {
     Text(String),
     Binary(Vec<u8>),
     Ping(Vec<u8>),
@@ -767,22 +777,22 @@ enum Msg {
 }
 
 /// Reads the server's (unmasked) WebSocket frames; sizes are bounded before anything is kept.
-struct FrameReader {
+pub(crate) struct FrameReader {
     buf: Vec<u8>,
     partial: Option<(bool, Vec<u8>)>,
     max: usize,
 }
 
 impl FrameReader {
-    fn new(max: usize) -> FrameReader {
+    pub(crate) fn new(max: usize) -> FrameReader {
         FrameReader { buf: Vec::new(), partial: None, max }
     }
 
-    fn push(&mut self, b: &[u8]) {
+    pub(crate) fn push(&mut self, b: &[u8]) {
         self.buf.extend_from_slice(b);
     }
 
-    fn next(&mut self) -> Result<Option<Msg>, &'static str> {
+    pub(crate) fn next(&mut self) -> Result<Option<Msg>, &'static str> {
         loop {
             let b = &self.buf;
             if b.len() < 2 {

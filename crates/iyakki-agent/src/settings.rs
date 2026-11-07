@@ -72,6 +72,9 @@ pub struct TimeSettings {
     pub zone_checked_at: i64,
     /// Which service answered the last lookup, and what it said ("ipapi.co: Asia/Kolkata"), or why it failed.
     pub zone_note: String,
+    /// The administrator has been asked once whether to set the zone from the network (the card after the first sign-in with a
+    /// network); whatever the answer, it is not asked again. Settings -> Time keeps every choice.
+    pub zone_asked: bool,
 }
 
 /// The sign-in screen's saver choices (an administrator changes them; they start as `SaverConfig::signin_default`).
@@ -113,6 +116,10 @@ pub struct Settings {
     pub keyboard: crate::keyboard::KeyboardSettings,
     /// Settings -> Battery (laptops): percentage in the top bar, low-battery warnings, shutdown at the critical level.
     pub battery: crate::battery::BatterySettings,
+    /// Settings -> Power: the power profile, sleep after idle (F-PWR-01).
+    pub power: crate::power::PowerSettings,
+    /// Settings -> System update: how often to look for updates, and the system update index an administrator set (F-UPD-04).
+    pub update_check: crate::store::updatecheck::CheckSettings,
     /// Settings -> Screen saver: what the sign-in screen does when idle (each person's own choices are in their own file, `screensaver`).
     pub screensaver_signin: SigninSaver,
     /// Settings -> Cloud mode: hide what needs local hardware (Automatic follows the machine; see `cloudmode`).

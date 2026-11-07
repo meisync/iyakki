@@ -89,7 +89,7 @@ fn pem_certs(text: &str) -> Vec<Vec<u8>> {
     out
 }
 
-fn roots(extra: &[std::path::PathBuf]) -> Result<rustls::RootCertStore, String> {
+pub(crate) fn roots(extra: &[std::path::PathBuf]) -> Result<rustls::RootCertStore, String> {
     let mut store = rustls::RootCertStore::empty();
     for f in extra.iter().map(|p| p.display().to_string()).chain(CA_FILES.iter().map(|s| s.to_string())) {
         let Ok(t) = std::fs::read_to_string(&f) else { continue };

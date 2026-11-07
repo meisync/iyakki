@@ -95,19 +95,99 @@ pub enum LoginError {
 /// Checks a person's name and password and hands over their screen.
 pub trait Gate: Send + Sync {
     fn login(&self, user: &str, password: &str) -> Result<Box<dyn Screen>, LoginError>;
+
+    /// Device sign-in (`devicekeys.rs`): the Ed25519 public keys enrolled for `user` (none: unknown account, or no key). The default has none.
+    fn device_keys(&self, _user: &str) -> Vec<[u8; 32]> {
+        Vec::new()
+    }
+
+    /// The screen of `user` after their device key was verified. The default refuses.
+    fn login_key(&self, _user: &str) -> Result<Box<dyn Screen>, LoginError> {
+        Err(LoginError::Other("sign-in with a device key is not set up here".into()))
+    }
+
+    /// Enrol a public key (an `ssh-ed25519` line or hex) for the signed-in `user`; returns its fingerprint.
+    fn enroll_device_key(&self, _user: &str, _key: &str) -> Result<String, String> {
+        Err("device keys are not set up here".into())
+    }
+
+    /// Revoke one of `user`'s keys by fingerprint. True when there was one.
+    fn revoke_device_key(&self, _user: &str, _fingerprint: &str) -> Result<bool, String> {
+        Err("device keys are not set up here".into())
+    }
+
+    /// The fingerprints of `user`'s enrolled keys.
+    fn list_device_keys(&self, _user: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The web service's API (`/api/v1/...`) for the page at `/ui/`, answered on this same server. The default has none (404).
+    fn api(&self) -> Option<&iyakki_agent::webservice::embed::Embedded> {
+        None
+    }
 }
 
 pub struct ShellGate {
     env: ShellEnv,
+    keys: Option<Arc<crate::devicekeys::DeviceKeys>>,
+    api: Option<iyakki_agent::webservice::embed::Embedded>,
 }
 
 impl ShellGate {
     pub fn new(env: ShellEnv) -> ShellGate {
-        ShellGate { env }
+        let api = crate::api::embedded(&env);
+        ShellGate { env, keys: None, api }
+    }
+
+    /// Turn on device-key sign-in with these enrolled keys (a session opened by a key has no password, so the vault stays locked).
+    pub fn with_device_keys(mut self, keys: Arc<crate::devicekeys::DeviceKeys>) -> ShellGate {
+        self.keys = Some(keys);
+        self
     }
 }
 
 impl Gate for ShellGate {
+    fn api(&self) -> Option<&iyakki_agent::webservice::embed::Embedded> {
+        self.api.as_ref()
+    }
+
+    fn device_keys(&self, user: &str) -> Vec<[u8; 32]> {
+        self.keys.as_ref().map(|k| k.keys_of(user)).unwrap_or_default()
+    }
+
+    fn login_key(&self, user: &str) -> Result<Box<dyn Screen>, LoginError> {
+        let session = {
+            let mut store = self.env.store.lock().map_err(|_| LoginError::Other("accounts are busy".into()))?;
+            store.refresh();
+            // an account removed since the key was enrolled has no sign-in; the same answer as a wrong key
+            let u = store.get(user).ok_or(LoginError::Invalid)?;
+            iyakki_shell::accounts::Session { user: u.name.clone(), role: u.role, policy: u.policy() }
+        };
+        self.env.audit.record(&session.user, "login.web.key", session.role.name());
+        let screen = ShellScreen::spawn(self.env.share(), session, String::new()).map_err(|e| LoginError::Other(e.to_string()))?;
+        Ok(Box::new(screen))
+    }
+
+    fn enroll_device_key(&self, user: &str, key: &str) -> Result<String, String> {
+        let keys = self.keys.as_ref().ok_or("device keys are not set up here")?;
+        let fp = keys.enroll(user, key)?;
+        self.env.audit.record(user, "devicekey.enroll", &fp);
+        Ok(fp)
+    }
+
+    fn revoke_device_key(&self, user: &str, fp: &str) -> Result<bool, String> {
+        let keys = self.keys.as_ref().ok_or("device keys are not set up here")?;
+        let r = keys.revoke(user, fp)?;
+        if r {
+            self.env.audit.record(user, "devicekey.revoke", fp);
+        }
+        Ok(r)
+    }
+
+    fn list_device_keys(&self, user: &str) -> Vec<String> {
+        self.keys.as_ref().map(|k| k.fingerprints(user)).unwrap_or_default()
+    }
+
     fn login(&self, user: &str, password: &str) -> Result<Box<dyn Screen>, LoginError> {
         let mut store = self.env.store.lock().map_err(|_| LoginError::Other("accounts are busy".into()))?;
         store.refresh();
@@ -178,7 +258,13 @@ impl ShellScreen {
         // the browser's clipboard, sound, microphone and camera for this person; the shell and the tiles find it by name
         let audit = env.audit.clone();
         let who = user.clone();
-        let policy = iyakki_agent::browsermedia::Policy::from_env_value(std::env::var("IYAKKI_BROWSER_MEDIA").ok().as_deref(), iyakki_agent::browsermedia::Policy::allow_all());
+        // the tenant switch (`IYAKKI_BROWSER_MEDIA=allow|deny`; unset on a desktop that serves its own owner means allow, in a pod the
+        // manifest always sets it) and the person's role decide (`iyakki-sec` media policy, default deny)
+        let tenant = match std::env::var("IYAKKI_BROWSER_MEDIA").ok().as_deref().map(str::trim) {
+            None => iyakki_sec::media::MediaPolicy::tenant(true),
+            Some(v) => iyakki_sec::media::MediaPolicy::from_setting(Some(v)),
+        };
+        let policy = iyakki_agent::browsermedia::Policy::for_tenant(iyakki_agent::browsermedia::Policy::from_sec(&tenant, &user, session.role), &user, session.role);
         let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
         let media = iyakki_agent::browsermedia::BrowserMedia::new(policy, Arc::new(move |a, d| audit.record(&who, a, d)), Some(iyakki_agent::browsermedia::session_dir(&runtime, &user)));
         iyakki_agent::browsermedia::register(&user, media.clone());
@@ -255,7 +341,7 @@ fn shell_loop(mut shell: Shell, cmds: std::sync::mpsc::Receiver<Cmd>, out: std::
                 Cmd::In(Input::Shift(on)) => iyakki_shell::ui::set_shift_held(on),
                 Cmd::In(Input::Speech(e)) => voice.event(e),
                 // the connection answers these itself; they never reach the shell
-                Cmd::In(Input::Hello { .. } | Input::Ack(_) | Input::Quality { .. } | Input::Ping { .. } | Input::Media { .. } | Input::AudioOut(_)) => {}
+                Cmd::In(Input::Hello { .. } | Input::Ack(_) | Input::Quality { .. } | Input::Ping { .. } | Input::Media { .. } | Input::AudioOut(_) | Input::Sink(_)) => {}
                 Cmd::In(Input::Rich { kind, bytes }) => take_rich(kind, &bytes),
                 Cmd::In(Input::Full) => {
                     need_full = true;

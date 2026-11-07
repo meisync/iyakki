@@ -223,6 +223,31 @@ fn path(cx: &AppCx) -> std::path::PathBuf {
     cx.services.dir().join(format!("browser-groups-{}.json", super::browser_config::who(cx)))
 }
 
+/// The pages open in tabs that belong to no group when the browser was last used, so they come back the next time it opens
+/// (the groups keep their own tabs, see above). Only web addresses are kept, at most `max`.
+pub fn load_open(cx: &AppCx, max: usize) -> Vec<String> {
+    let text = std::fs::read_to_string(open_path(cx)).unwrap_or_default();
+    let urls: Vec<String> = serde_json::from_str(&text).unwrap_or_default();
+    urls.into_iter().filter(|u| keep_open(u)).take(max).collect()
+}
+
+pub fn save_open(cx: &AppCx, json: &str) {
+    let p = open_path(cx);
+    let tmp = p.with_extension("tmp");
+    if std::fs::write(&tmp, json).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
+}
+
+/// A page worth bringing back: a web address (not a blank tab, a file, a data page or an internal page).
+pub fn keep_open(u: &str) -> bool {
+    u.len() < 2048 && (u.starts_with("https://") || u.starts_with("http://"))
+}
+
+fn open_path(cx: &AppCx) -> std::path::PathBuf {
+    cx.services.dir().join(format!("browser-open-{}.json", super::browser_config::who(cx)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

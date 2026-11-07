@@ -1,0 +1,9 @@
+[package]
+name = "iyakki-hotspot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wi-Fi hotspot (access point) core, in-house and hardware-free: WPA2-PSK key derivation and 4-way handshake (authenticator side), AES key wrap, DHCP server, DNS forwarder, subnet chooser, settings checks and nl80211 message builders."
+
+[dependencies]
+iyakki-sec.workspace = true

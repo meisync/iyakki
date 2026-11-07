@@ -57,7 +57,10 @@ compose() {
     if [ "${WEB_IRIS:-0}" = 1 ] || [ "${WEB_CROCUS:-0}" = 1 ]; then cat "$CFG/iyakki_web_iris.fragment"; fi
     [ "${WEB_CROCUS:-0}" = 1 ] && cat "$CFG/iyakki_web_crocus.fragment"
     if [ "${WEB_H264:-0}" = 1 ]; then cat "$CFG/iyakki_web_h264.fragment"
-    elif [ "${WEB_AV_ADDON:-1}" = 1 ]; then cat "$CFG/iyakki_web_av_addon.fragment"; fi
+    elif [ "${WEB_AV_ADDON:-1}" = 1 ]; then
+      cat "$CFG/iyakki_web_av_addon.fragment"
+      [ "${WITH_FFMPEG:-0}" = 1 ] || cat "$CFG/iyakki_web_av_addon_libs.fragment"
+    fi
     if [ "${WEB_MEDIA:-0}" = 1 ]; then cat "$CFG/iyakki_web_media.fragment"; fi
   fi
   [ "${WITH_FFMPEG:-0}" = 1 ] && cat "$CFG/iyakki_media.fragment"

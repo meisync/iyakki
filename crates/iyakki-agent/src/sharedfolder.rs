@@ -81,6 +81,8 @@ pub struct ShareCfg {
     /// Start again when the owner signs in.
     pub keep_running: bool,
     pub owner: String,
+    /// A "Receive a package" share: its folder is `<data>/local/packages`, it takes only the add-on package and its checksum (see [`package_name_ok`]).
+    pub package_drop: bool,
 }
 
 /// What the form sends.
@@ -167,6 +169,16 @@ pub fn validate_folder(folder: &str, allow_write: &dyn Fn(&str) -> bool, deny: &
     }
     Ok(real)
 }
+
+/// The file names a package drop accepts: the add-on's FFmpeg libraries for a known processor, and the checksum file beside it.
+pub fn package_name_ok(name: &str) -> bool {
+    let n = name;
+    n.starts_with("ffmpeg-libs-") && (n.ends_with("-linux-musl-x86_64.tar.gz") || n.ends_with("-linux-musl-aarch64.tar.gz") || n.ends_with("-linux-musl-x86_64.tar.gz.sha256") || n.ends_with("-linux-musl-aarch64.tar.gz.sha256"))
+}
+
+/// How long a package drop stays open unless the person changes it, and the biggest package it takes.
+pub const PACKAGE_DROP_SECS: u64 = 600;
+pub const PACKAGE_DROP_MB: u64 = 64;
 
 // ------------------------------------------------------------------ the manager
 
@@ -302,9 +314,64 @@ impl Shares {
         Ok(c.id)
     }
 
+    /// "Receive a package": a share of `folder` (which must be `.../local/packages`) with password access, uploads on, no overwriting and no new
+    /// folders, only the add-on package's file names, at most [`PACKAGE_DROP_MB`] MB, open for [`PACKAGE_DROP_SECS`] seconds. The caller has checked that
+    /// the person is an administrator; the file lands where the add-on installer looks, and nothing is installed by the upload.
+    pub fn create_package_drop(&self, folder: &Path, password: &str) -> Result<String, String> {
+        if !folder.ends_with("local/packages") {
+            return Err("A package drop belongs to the local packages folder.".into());
+        }
+        if password.len() < 8 {
+            return Err("Choose a longer password for the drop.".into());
+        }
+        let mut i = self.inner.lock().map_err(|_| "busy".to_string())?;
+        if i.cfgs.len() >= MAX_SHARES {
+            return Err(format!("At most {MAX_SHARES} shares."));
+        }
+        // one drop at a time: an old one is replaced
+        let old: Vec<String> = i.cfgs.iter().filter(|c| c.package_drop).map(|c| c.id.clone()).collect();
+        for id in old {
+            if let Some(mut r) = i.running.remove(&id) {
+                r.stop();
+            }
+            i.cfgs.retain(|c| c.id != id);
+        }
+        // a real port from the shared-folder range (not 0): the address, the curl line and the firewall preset all name it
+        let port = self.pick_port(&i, false)?;
+        let c = ShareCfg {
+            id: random_hex(4),
+            name: "Receive a package".into(),
+            folder: folder.to_string_lossy().into_owned(),
+            mode: Mode::default(),
+            access: Access::Password,
+            upload: true,
+            mkdir: false,
+            overwrite: false,
+            show_hidden: false,
+            max_upload_mb: PACKAGE_DROP_MB,
+            bind: "all".into(),
+            port,
+            token: String::new(),
+            pass_hash: hash_password(password)?,
+            expiry_secs: PACKAGE_DROP_SECS,
+            expires_at: 0,
+            keep_running: false,
+            owner: self.owner.clone(),
+            package_drop: true,
+        };
+        let id = c.id.clone();
+        i.cfgs.push(c);
+        self.save(&i)?;
+        self.audit("share.create", "share=Receive a package mode=package-drop access=Password upload=true");
+        Ok(id)
+    }
+
     pub fn update(&self, id: &str, d: &Draft) -> Result<(), String> {
         let mut i = self.inner.lock().map_err(|_| "busy".to_string())?;
         let pos = i.cfgs.iter().position(|c| c.id == id).ok_or("No such share.")?;
+        if i.cfgs[pos].package_drop {
+            return Err("A package drop is not edited: delete it and make a new one.".into());
+        }
         let old = i.cfgs[pos].clone();
         let mut c = self.build(&i, d, Some(&old))?;
         c.id = old.id.clone();
@@ -342,7 +409,13 @@ impl Shares {
         let pos = i.cfgs.iter().position(|c| c.id == id).ok_or("No such share.")?;
         // the folder may have moved or become unsuitable since it was chosen
         let mut cfg = i.cfgs[pos].clone();
-        let real = validate_folder(&cfg.folder, &*self.allow_write, &self.env.deny).inspect_err(|e| {
+        let checked = if cfg.package_drop {
+            // the folder is fixed: the local packages folder only, however the share file was edited
+            std::fs::canonicalize(&cfg.folder).ok().filter(|r| r.is_dir() && r.ends_with("local/packages")).ok_or_else(|| "The packages folder is missing.".to_string())
+        } else {
+            validate_folder(&cfg.folder, &*self.allow_write, &self.env.deny)
+        };
+        let real = checked.inspect_err(|e| {
             i.errors.insert(id.to_string(), e.clone());
         })?;
         cfg.folder = real.to_string_lossy().into_owned();

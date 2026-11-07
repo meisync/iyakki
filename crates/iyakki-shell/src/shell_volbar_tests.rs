@@ -126,16 +126,22 @@ fn the_speaker_shows_muted_low_medium_high_and_no_output() {
 use iyakki_agent::audioout::SoundSettings;
 
 #[test]
-fn a_click_mutes_and_unmutes_keeping_the_level_like_the_mute_key() {
+fn a_click_opens_the_dropdown_and_its_mute_button_mutes_keeping_the_level_like_the_mute_key() {
     let (mut sh, mut g) = signed("vb-click", ("root", "rootpass12"));
     set_vol(&sh, 60, false);
     let r = icon(&sh);
     click_at(&mut sh, &mut g, r);
+    assert!(sh.volume_slider_open(), "a plain click opens the dropdown");
+    assert_eq!(vol(&sh), (60, false), "and changes nothing by itself");
+    let mute = sh.hits().iter().rev().find(|h| h.label == "volume mute").expect("a Mute button").rect;
+    click_at(&mut sh, &mut g, mute);
     assert_eq!(vol(&sh), (60, true), "muted, the level kept");
     assert_eq!(sh.speaker_state(), Speaker::Muted);
+    assert!(sh.volume_slider_open(), "the dropdown stays open for the next change");
     let o = sh.fnk.osd.clone().expect("the same bar the keys show");
     assert_eq!((o.kind, o.muted), (OsdKind::Volume, true));
-    click_at(&mut sh, &mut g, r);
+    let unmute = sh.hits().iter().rev().find(|h| h.label == "volume mute").expect("the same button, now Unmute").rect;
+    click_at(&mut sh, &mut g, unmute);
     assert_eq!(vol(&sh), (60, false), "unmuted at the same level");
     // the same result as the mute key
     sh.handle(&Event::Tick);
@@ -143,8 +149,40 @@ fn a_click_mutes_and_unmutes_keeping_the_level_like_the_mute_key() {
     sh.handle(&Event::Fn(crate::fnkeys::FnKey::VolumeMute, true));
     assert_eq!(vol(&sh), (60, true));
     sh.handle(&Event::Fn(crate::fnkeys::FnKey::VolumeMute, false));
-    assert!(!sh.volume_slider_open(), "a plain click shows no slider");
+    // clicking the icon again closes the dropdown (and does not open it again)
+    click_at(&mut sh, &mut g, r);
+    assert!(!sh.volume_slider_open(), "a second click on the icon closes it");
     assert_eq!(sh.screen_name(), "launcher");
+}
+
+#[test]
+fn the_dropdown_has_louder_and_quieter_buttons_in_5_percent_steps_and_esc_closes_it() {
+    let (mut sh, mut g) = signed("vb-buttons", ("root", "rootpass12"));
+    set_vol(&sh, 50, false);
+    let r = icon(&sh);
+    click_at(&mut sh, &mut g, r);
+    assert!(sh.volume_slider_open());
+    sh.render(&mut g);
+    for name in ["volume louder", "volume quieter", "volume mute"] {
+        assert!(sh.hits().iter().any(|h| h.label == name), "{name} is on screen");
+    }
+    let up = sh.hits().iter().rev().find(|h| h.label == "volume louder").unwrap().rect;
+    click_at(&mut sh, &mut g, up);
+    click_at(&mut sh, &mut g, up);
+    assert_eq!(vol(&sh), (60, false), "two clicks on Louder: 5 % each");
+    let down = sh.hits().iter().rev().find(|h| h.label == "volume quieter").unwrap().rect;
+    click_at(&mut sh, &mut g, down);
+    assert_eq!(vol(&sh), (55, false));
+    // the buttons are inside the panel and do not overlap each other
+    let (panel, _) = pop_rects(r, sh.size.0, scale_for(sh.size.0, sh.size.1), 0);
+    let btns: Vec<R> = ["volume louder", "volume quieter", "volume mute"].iter().map(|n| sh.hits().iter().rev().find(|h| &h.label == n).unwrap().rect).collect();
+    for b in &btns {
+        assert!(b.x >= panel.x && b.x + b.w <= panel.x + panel.w && b.y >= panel.y && b.y + b.h <= panel.y + panel.h, "{b:?} inside {panel:?}");
+    }
+    assert!(btns[0].y + btns[0].h <= btns[1].y && btns[1].y + btns[1].h <= btns[2].y, "stacked without overlap");
+    key(&mut sh, Key::Esc);
+    assert!(!sh.volume_slider_open());
+    assert_eq!(vol(&sh), (55, false));
 }
 
 #[test]
@@ -194,7 +232,7 @@ fn dragging_from_the_speaker_sets_the_volume_along_the_slider() {
     let r = icon(&sh);
     let (w, h) = sh.size;
     let s = scale_for(w, h);
-    let (_, track) = pop_rects(r, w, s);
+    let (_, track) = pop_rects(r, w, s, 0);
     let (x, y) = centre(r);
     sh.render(&mut g);
     sh.handle(&Event::MouseMove(x, y));
@@ -238,10 +276,10 @@ fn holding_the_speaker_shows_the_slider_and_clicking_in_it_sets_the_volume() {
     assert!(sh.hits().iter().any(|h| h.label == "volume slider"));
     sh.handle(&Event::MouseUp(x, y));
     assert_eq!(vol(&sh), (40, false), "holding is not a click: nothing was muted");
-    // a quick click does not flash the slider
+    // a quick click opens the dropdown and changes nothing
     click_at(&mut sh, &mut g, r);
-    assert!(!sh.volume_slider_open());
-    assert_eq!(vol(&sh), (40, true));
+    assert!(sh.volume_slider_open());
+    assert_eq!(vol(&sh), (40, false));
 }
 
 #[test]
@@ -322,6 +360,8 @@ fn the_volume_in_the_devices_popover_and_settings_follow_the_speaker() {
     assert_eq!(sh.env.services.sound_settings().volume_pct, 55);
     let r = icon(&sh);
     click_at(&mut sh, &mut g, r);
+    let mute = sh.hits().iter().rev().find(|h| h.label == "volume mute").expect("the dropdown's Mute button").rect;
+    click_at(&mut sh, &mut g, mute);
     assert!(sh.env.services.master().muted && sh.env.services.sound_settings().muted);
     // the Devices popover reads the same master volume (devpop::sound_volume_view takes it from the settings)
     assert!(sh.devpop.wants_refresh_idle(), "and is told to read again");
@@ -356,7 +396,7 @@ fn the_bar_icons_fit_without_overlap_at_four_screen_sizes_and_for_every_role() {
             }
             // the slider panel is inside the screen, below the icon, and its track is inside the panel
             if let Some(sp) = sh.speaker_rect() {
-                let (panel, track) = pop_rects(sp, w, s);
+                let (panel, track) = pop_rects(sp, w, s, 0);
                 assert!(panel.x >= 0.0 && panel.x + panel.w <= w as f32 && panel.y > sp.y + sp.h && panel.y + panel.h <= h as f32, "{who:?} {w}x{h}: panel {panel:?}");
                 assert!(track.x >= panel.x && track.x + track.w <= panel.x + panel.w && track.y >= panel.y && track.y + track.h <= panel.y + panel.h);
                 assert!(track.h > 40.0 * s * 0.6, "a track long enough to drag along");
@@ -392,4 +432,47 @@ fn cloud_mode_hides_the_speaker_but_keeps_settings() {
     assert!(slots.speaker.is_none() && slots.settings.is_some(), "{slots:?}");
     key(&mut sh, Key::Char('v'));
     assert!(!sh.volume_slider_open());
+}
+
+#[test]
+fn the_dropdown_lists_the_playing_sounds_and_each_has_its_own_level_that_is_kept_in_the_sound_settings() {
+    let (mut sh, mut g) = signed("vb-sources", ("root", "rootpass12"));
+    set_vol(&sh, 50, false);
+    let r = icon(&sh);
+    click_at(&mut sh, &mut g, r);
+    assert!(sh.volume_slider_open());
+    // nothing is playing: no list
+    sh.render(&mut g);
+    assert!(!sh.hits().iter().any(|h| h.label == "sound quieter"), "no sounds, no rows");
+    let plain = pop_rects(r, sh.size.0, scale_for(sh.size.0, sh.size.1), 0).0;
+    // two sounds are playing (the shell reads them from the mixer; here they are given)
+    sh.vol.sources = vec![("radio".to_string(), 100), ("Browser".to_string(), 100)];
+    sh.render(&mut g);
+    let (panel, _) = pop_rects(r, sh.size.0, scale_for(sh.size.0, sh.size.1), 2);
+    assert!(panel.h > plain.h, "the panel grows for the list");
+    let downs: Vec<R> = sh.hits().iter().filter(|h| h.label == "sound quieter").map(|h| h.rect).collect();
+    let ups: Vec<R> = sh.hits().iter().filter(|h| h.label == "sound louder").map(|h| h.rect).collect();
+    assert_eq!((downs.len(), ups.len()), (2, 2));
+    for b in downs.iter().chain(ups.iter()) {
+        assert!(b.x >= panel.x && b.x + b.w <= panel.x + panel.w && b.y >= panel.y && b.y + b.h <= panel.y + panel.h, "{b:?} inside {panel:?}");
+    }
+    let level = |sh: &Shell, name: &str| sh.env.services.sound_settings().source_levels.get(name).copied();
+    // Browser (the second row) quieter twice: 80; the radio is left alone; the master volume is untouched
+    let second = sh.hits().iter().filter(|h| h.label == "sound quieter").nth(1).unwrap().rect;
+    click_at(&mut sh, &mut g, second);
+    sh.render(&mut g);
+    let second = sh.hits().iter().filter(|h| h.label == "sound quieter").nth(1).unwrap().rect;
+    click_at(&mut sh, &mut g, second);
+    assert_eq!(level(&sh, "Browser"), Some(80));
+    assert_eq!(level(&sh, "radio"), None);
+    assert_eq!(vol(&sh), (50, false), "the master volume did not move");
+    assert!(sh.volume_slider_open(), "the dropdown stays open");
+    // louder to the full level removes the setting; never above 100
+    sh.render(&mut g);
+    for _ in 0..4 {
+        sh.render(&mut g);
+        let up = sh.hits().iter().filter(|h| h.label == "sound louder").nth(1).unwrap().rect;
+        click_at(&mut sh, &mut g, up);
+    }
+    assert_eq!(level(&sh, "Browser"), None, "100 is kept as no setting");
 }

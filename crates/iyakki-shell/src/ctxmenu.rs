@@ -76,21 +76,32 @@ pub struct Menu {
 const ITEM_H: f32 = 30.0;
 const SEP_H: f32 = 9.0;
 const PAD: f32 = 6.0;
+/// An entry's height when a finger asked for the menu: big enough to tap.
+const TOUCH_ITEM_H: f32 = 44.0;
 
 impl Menu {
     /// Opens a menu with its corner at the pointer, moved back inside the `screen` (w, h) when it would stick out.
     pub fn open(items: Vec<Item>, at: (i32, i32), screen: (u32, u32), s: f32, clip_text: bool) -> Menu {
+        Menu::open_sized(items, at, screen, s, clip_text, ITEM_H)
+    }
+
+    /// [`Menu::open`] with entries at least 44 px tall, for a menu a finger opened.
+    pub fn open_touch(items: Vec<Item>, at: (i32, i32), screen: (u32, u32), s: f32, clip_text: bool) -> Menu {
+        Menu::open_sized(items, at, screen, s, clip_text, TOUCH_ITEM_H)
+    }
+
+    fn open_sized(items: Vec<Item>, at: (i32, i32), screen: (u32, u32), s: f32, clip_text: bool, item_h: f32) -> Menu {
         let longest = items.iter().map(|i| i.label.chars().count()).max().unwrap_or(0) as f32;
         let sc = items.iter().map(|i| i.shortcut.chars().count()).max().unwrap_or(0) as f32;
         let w = ((longest * 8.4 + sc * 7.6 + 70.0) * s).max(200.0 * s).min(screen.0 as f32);
-        let h: f32 = items.iter().map(|i| if i.is_separator() { SEP_H * s } else { ITEM_H * s }).sum::<f32>() + 2.0 * PAD * s;
+        let h: f32 = items.iter().map(|i| if i.is_separator() { SEP_H * s } else { item_h * s }).sum::<f32>() + 2.0 * PAD * s;
         let x = (at.0 as f32).min(screen.0 as f32 - w).max(0.0);
         let y = (at.1 as f32).min(screen.1 as f32 - h).max(0.0);
         let rect = R::new(x, y, w, h);
         let mut rects = Vec::new();
         let mut cy = y + PAD * s;
         for i in &items {
-            let ih = if i.is_separator() { SEP_H * s } else { ITEM_H * s };
+            let ih = if i.is_separator() { SEP_H * s } else { item_h * s };
             rects.push(R::new(x + PAD * s, cy, w - 2.0 * PAD * s, ih));
             cy += ih;
         }
@@ -271,6 +282,16 @@ mod tests {
         assert!(m.rect.x >= 0.0 && m.rect.y >= 0.0);
         let tiny = Menu::open(items(), (5, 5), (200, 100), 1.0, true);
         assert!(tiny.rect.x >= 0.0 && tiny.rect.y >= 0.0);
+    }
+
+    #[test]
+    fn a_menu_opened_by_a_finger_has_entries_44_pixels_tall_and_a_tap_chooses() {
+        let m = Menu::open_touch(items(), (100, 80), (1280, 720), 1.0, true);
+        assert_eq!(m.item_rect(1).unwrap().h, 44.0);
+        assert!(m.item_rect(1).unwrap().h > Menu::open(items(), (100, 80), (1280, 720), 1.0, true).item_rect(1).unwrap().h);
+        let r = m.item_rect(1).unwrap();
+        let mut m = m;
+        assert_eq!(m.click((r.x + 5.0) as i32, (r.y + 40.0) as i32), Outcome::Pick(COPY.into()));
     }
 
     #[test]

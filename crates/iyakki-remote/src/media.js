@@ -11,6 +11,7 @@
   const OUT = { audio: 0x10, image: 0x11, html: 0x12 };
   const MIC_RATE = 16000, MIC_LIMIT_S = 300, MAX_CAMERA = 256 * 1024, MAX_IMAGE = 4 * 1024 * 1024, MAX_HTML = 1024 * 1024;
   const KINDS = ["mic", "camera", "clipread"];
+  const SINKS = ["browser", "both", "mac"];
 
   // ---- pure helpers (tested under node)
   function tagged(ch, bytes) {
@@ -43,8 +44,24 @@
     return { channels, rate, seq, samples };
   }
   function secureOk(env) {
-    if (env.isSecureContext === false) return { ok: false, why: "Needs a secure connection (https, or this computer)." };
+    if (env.isSecureContext === false) return { ok: false, why: "The browser treats this page as not secure, so it hides the camera and microphone. Open the https:// address (accept the certificate warning once), or open the page on this computer itself." };
     return { ok: true, why: "" };
+  }
+  // The exact sentence for a getUserMedia failure. `what` is "camera" or "microphone"; `policyOk` is false when the page's own
+  // Permissions-Policy forbids it. The browser's own words (`e.message`) are added for the cases that have no better text.
+  function explain(what, e, policyOk) {
+    const name = (e && e.name) || "Error", msg = (e && e.message) ? String(e.message) : "";
+    if (policyOk === false) return "This page's Permissions-Policy blocks the " + what + ". This is a fault of the page: tell the administrator.";
+    if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+      if (/system/i.test(msg)) return "The computer's operating system blocks your browser from the " + what + ". Allow the browser under Privacy settings (Camera or Microphone), then try again.";
+      return "The browser refused access to the " + what + " (you pressed Block, or blocked this site before). Click the lock or camera icon at the left of the address bar, set the " + what + " to Allow, and click again.";
+    }
+    if (name === "NotFoundError" || name === "DevicesNotFoundError") return "No " + what + " was found on your computer. Plug one in (or check it is switched on) and click again.";
+    if (name === "NotReadableError" || name === "TrackStartError") return "Your " + what + " cannot be read: another program or browser tab is probably using it. Close it and click again.";
+    if (name === "OverconstrainedError" || name === "ConstraintNotSatisfiedError") return "Your " + what + " cannot give the picture this page asks for.";
+    if (name === "SecurityError") return "The browser refuses the " + what + " for security reasons: the page is not in a secure context.";
+    if (name === "AbortError") return "The " + what + " could not be started (the browser aborted it). Try again.";
+    return "Could not start the " + what + " (" + name + (msg ? ": " + msg.slice(0, 120) : "") + ").";
   }
 
   // ---- sound out: PCM chunks into a WebAudio queue with a small jitter buffer
@@ -58,10 +75,17 @@
       p.started = true;
       return true;
     };
-    p.stop = function () { p.started = false; p.next = 0; if (p.ctx && p.ctx.suspend) p.ctx.suspend(); };
+    p.stop = function () { p.started = false; p.next = 0; p.lastSeq = -1; if (p.ctx && p.ctx.suspend) p.ctx.suspend(); };
     p.apply = function () { if (p.gain) p.gain.gain.value = p.muted ? 0 : p.volume; };
     p.setVolume = function (v) { p.volume = Math.max(0, Math.min(1, v)); p.apply(); };
     p.setMuted = function (m) { p.muted = !!m; p.apply(); };
+    p.lastSeq = -1; p.lost = 0;
+    // sequence numbers count up by one; a gap means the server dropped old sound (it never delays it), which is only counted
+    p.seen = function (seq) {
+      if (p.lastSeq >= 0 && seq !== ((p.lastSeq + 1) >>> 0)) p.lost += ((seq - p.lastSeq - 1) >>> 0) % 1000000;
+      p.lastSeq = seq;
+    };
+    p.stats = function () { return { underruns: p.underruns, dropped: p.dropped, lost: p.lost, played: p.played }; };
     p.push = function (a) {
       if (!p.started || !p.ctx) return false;
       const frames = a.samples.length / a.channels, buf = p.ctx.createBuffer(a.channels, frames, a.rate);
@@ -86,11 +110,18 @@
       secure: secureOk(env),
       allowed: { mic: false, camera: false, clipread: false, audio: true },
       on: { mic: false, camera: false, clipread: false },
-      sound: false, level: 0, micSeconds: 0, notice: "", pendingRead: false, pendingCopy: null,
+      sound: false, sink: "browser", level: 0, micSeconds: 0, notice: "", ask: "", pendingRead: false, pendingCopy: null,
     };
     const player = makePlayer(env);
     let mic = null, cam = null;
     const sentOn = { mic: -1e9, camera: -1e9, clipread: -1e9 };
+    // false only when the browser says the page's own Permissions-Policy forbids the feature (Chrome and Edge know; others say nothing)
+    const policyAllows = (what) => {
+      try {
+        const pp = env.document && (env.document.permissionsPolicy || env.document.featurePolicy);
+        return pp && pp.allowsFeature ? pp.allowsFeature(what === "camera" ? "camera" : "microphone") !== false : true;
+      } catch (e) { return true; }
+    };
     const changed = () => io.onChange && io.onChange(st);
     const trusted = (ev) => !!ev && ev.isTrusted === true;
     const say = (t) => { st.notice = t; changed(); };
@@ -140,8 +171,8 @@
       const stream = await env.nav.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 5 } } });
       const video = env.document.createElement("video"), canvas = env.document.createElement("canvas");
       video.muted = true; video.playsInline = true; video.srcObject = stream;
+      cam = { stream, video, canvas, quality: 0.7, busy: false, timer: null };   // set first: a failure below still releases the camera
       if (video.play) await video.play();
-      cam = { stream, video, canvas, quality: 0.7, busy: false, timer: null };
       cam.timer = env.setInterval(() => {
         if (!cam || cam.busy || !video.videoWidth) return;
         const w = Math.min(640, video.videoWidth), h = Math.round(video.videoHeight * w / video.videoWidth);
@@ -162,6 +193,7 @@
     // The switch in the page. `ev` must be the person's own click or key.
     async function toggle(kind, ev) {
       if (KINDS.indexOf(kind) < 0) return false;
+      if (st.ask === kind) { st.ask = ""; changed(); }
       if (st.on[kind]) {                                // one tap to stop
         if (kind === "mic") stopMic(); else if (kind === "camera") stopCamera(); else { st.on.clipread = false; io.sendJson({ t: "media", kind, on: false }); changed(); }
         return true;
@@ -171,7 +203,7 @@
       if (!st.allowed[kind]) { say("This session does not allow it."); return false; }
       try {
         if (kind === "mic" || kind === "camera") {
-          if (!env.nav.mediaDevices || !env.nav.mediaDevices.getUserMedia) { say("This browser cannot reach a " + (kind === "mic" ? "microphone." : "camera.")); return false; }
+          if (!env.nav.mediaDevices || !env.nav.mediaDevices.getUserMedia) { say("This browser has no camera or microphone interface (navigator.mediaDevices is missing). " + (st.secure.ok ? "Use a current Chrome, Firefox, Edge or Safari." : st.secure.why)); return false; }
           if (kind === "mic") await startMic(); else await startCamera();
         } else if (!env.nav.clipboard || !env.nav.clipboard.read) { say("This browser cannot read the clipboard."); return false; }
         st.on[kind] = true; st.notice = ""; sentOn[kind] = env.now();
@@ -180,7 +212,9 @@
         return true;
       } catch (e) {
         if (kind === "mic") stopMic(); else if (kind === "camera") stopCamera();
-        say(e && e.name === "NotAllowedError" ? "The browser or you refused access." : e && e.name === "NotFoundError" ? "No device found." : "Could not start it.");
+        const what = kind === "camera" ? "camera" : kind === "mic" ? "microphone" : "clipboard";
+        if (kind === "clipread") say("The browser did not let the clipboard be read.");
+        else say(explain(what, e, policyAllows(what)));
         return false;
       }
     }
@@ -188,7 +222,16 @@
     function startSound(ev) {
       if (!trusted(ev)) { say("Start the sound with a click."); return false; }
       if (!player.start()) { say("This browser cannot play the session's sound."); return false; }
-      st.sound = true; io.sendJson({ t: "audio", on: true }); changed();
+      st.sound = true; io.sendJson({ t: "sink", mode: st.sink }); io.sendJson({ t: "audio", on: true }); changed();
+      return true;
+    }
+    // "Play sound on": this computer (the browser), both, or the Mac only. Sent at once when the sound is on; else with Start sound.
+    function setSink(mode) {
+      if (SINKS.indexOf(mode) < 0) return false;
+      st.sink = mode;
+      if (st.sound) io.sendJson({ t: "sink", mode });
+      // "The Mac only": nothing comes to the page, so its player is idle (it is switched off here and the server sends nothing)
+      changed();
       return true;
     }
     function stopSound() { player.stop(); st.sound = false; io.sendJson({ t: "audio", on: false }); changed(); }
@@ -252,6 +295,7 @@
       if (j.t === "media_state") {
         for (const k of KINDS) { st.allowed[k] = !!(j.allowed && j.allowed[k]); }
         st.allowed.audio = !(j.allowed && j.allowed.audio === false);
+        if (SINKS.indexOf(j.sink) >= 0) st.sink = j.sink;
         // the server is the authority on what is on (a limit or a reconnect switches things off)
         // (a state message that crossed our own "on" on the way is ignored for a moment)
         const settled = (k) => env.now() - sentOn[k] > 1500;
@@ -261,6 +305,10 @@
         if (st.sound && !st.allowed.audio) stopSound();
         changed(); return true;
       }
+      if (j.t === "media_ask") {                         // a tile (VOICE, CAMERA) wants it: the person's click on the page's button allows it
+        if (KINDS.indexOf(j.kind) >= 0 && !st.on[j.kind]) { st.ask = j.kind; changed(); }
+        return true;
+      }
       if (j.t === "media_denied") { say(j.why || "Not allowed."); return true; }
       if (j.t === "media_limit") { say("The microphone stopped after five minutes."); stopMic(); return true; }
       return false;
@@ -268,17 +316,17 @@
     // A binary message of the server that is not a picture: sound or a clipboard item. True when it was one of those.
     function onBinary(buf) {
       const u = new Uint8Array(buf), t = u[0];
-      if (t === OUT.audio) { const a = parseAudio(u); if (a && st.sound) player.push(a); return true; }
+      if (t === OUT.audio) { const a = parseAudio(u); if (a && st.sound) { player.seen(a.seq); player.push(a); } return true; }
       if (t === OUT.image && u.length > 8 && u.length - 1 <= MAX_IMAGE) { copyIn({ kind: "image", bytes: u.slice(1) }); return true; }
       if (t === OUT.html && u.length > 1 && u.length - 1 <= MAX_HTML) { copyIn({ kind: "html", bytes: u.slice(1) }); return true; }
       return false;
     }
-    function disconnected() { stopMic(); stopCamera(); st.on.clipread = false; st.sound = false; player.stop(); changed(); }
+    function disconnected() { stopMic(); stopCamera(); st.on.clipread = false; st.ask = ""; st.sound = false; player.stop(); changed(); }
 
-    return { state: st, player, toggle, startSound, stopSound, onPaste, onReadRequest, readClipboard, finishCopy, onJson, onBinary, disconnected, copyIn };
+    return { state: st, player, toggle, startSound, stopSound, setSink, onPaste, onReadRequest, readClipboard, finishCopy, onJson, onBinary, disconnected, copyIn };
   }
 
-  const api = { create, tagged, toPcm16k, parseAudio, makePlayer, secureOk, CH, OUT, MIC_LIMIT_S };
+  const api = { create, tagged, toPcm16k, parseAudio, makePlayer, secureOk, explain, SINKS, CH, OUT, MIC_LIMIT_S };
   root.IyakkiMedia = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof self !== "undefined" ? self : globalThis);

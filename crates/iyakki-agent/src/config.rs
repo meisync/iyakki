@@ -78,7 +78,16 @@ impl AiConfig {
     /// Egress proxy that allows exactly the configured chat host, injecting the key as a bearer
     /// token. The key lives only in host memory; sandboxed guests never see it.
     pub fn build_proxy(&self, upstream: Arc<dyn Upstream>) -> EgressProxy {
+        self.build_proxy_for(upstream, crate::tenantconfig::enforce::data_dir_from_env().as_deref())
+    }
+
+    /// Like [`Self::build_proxy`], and when a tenant data folder is given the tenant's `egress.policy` also NARROWS the allowed host
+    /// (a tenant without such a policy changes nothing; one that is switched off or does not list the host denies it).
+    pub fn build_proxy_for(&self, upstream: Arc<dyn Upstream>, tenant_dir: Option<&std::path::Path>) -> EgressProxy {
         let mut p = EgressProxy::new(upstream);
+        if let Some(d) = tenant_dir {
+            p = p.with_narrowing(crate::tenantconfig::enforce::egress_narrowing(d.to_path_buf(), None));
+        }
         if let Some(host) = self.chat_url.as_deref().and_then(iyakki_sec::url_host) {
             let mut pol = HostPolicy { raw_response: true, ..Default::default() };
             if let Some(k) = self.api_key() {
@@ -107,6 +116,29 @@ mod tests {
         assert_eq!(AiConfig::parse("nonsense"), Err(ConfigError::Syntax(1)));
         assert!(matches!(AiConfig::parse("a = b"), Err(ConfigError::UnknownKey(_))));
         assert_eq!(AiConfig::parse("").unwrap().chat_url, None);
+    }
+
+    #[test]
+    fn the_tenant_egress_policy_narrows_the_chat_host() {
+        use iyakki_wasm::NetBackend;
+        struct Ok200;
+        impl Upstream for Ok200 {
+            fn request(&self, _m: &str, _u: &str, _h: &[(String, String)], _b: &[u8]) -> Result<iyakki_proxy::UpstreamResponse, String> {
+                Ok(iyakki_proxy::UpstreamResponse { status: 200, body: b"{}".to_vec() })
+            }
+        }
+        let c = AiConfig::parse("chat.url = https://api.example.com/v1/chat/completions").unwrap();
+        let dir = std::env::temp_dir().join(format!("iyakki-cfg-egress-{}", std::process::id()));
+        let cfgdir = dir.join("cloud").join("config");
+        std::fs::create_dir_all(&cfgdir).unwrap();
+        let call = |d: Option<&std::path::Path>| c.build_proxy_for(Arc::new(Ok200), d).fetch("POST", "https://api.example.com/v1/chat/completions", b"{}").is_ok();
+        assert!(call(None), "no tenant folder: unchanged");
+        assert!(call(Some(&dir)), "a tenant without an egress policy: unchanged");
+        std::fs::write(cfgdir.join("tenant-config.json"), r#"{"schema":1,"items":[{"kind":"egress.policy","enabled":true,"values":{"mode":"allow_list","allowed_domains":["*.corp.example"]}}]}"#).unwrap();
+        assert!(!call(Some(&dir)), "the policy does not list the host: denied");
+        std::fs::write(cfgdir.join("tenant-config.json"), r#"{"schema":1,"items":[{"kind":"egress.policy","enabled":true,"values":{"mode":"allow_list","allowed_domains":["api.example.com"]}}]}"#).unwrap();
+        assert!(call(Some(&dir)), "the policy lists the host: allowed (the proxy's own list still applies)");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

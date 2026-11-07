@@ -8,6 +8,7 @@
 use crate::safeclamp::SafeClamp;
 use super::*;
 use crate::fnkeys;
+use iyakki_agent::inputprofile;
 use iyakki_agent::keyboard::{self, KeyboardSettings};
 
 /// Where the kernel's files are read and written (tests use a fake directory).
@@ -96,6 +97,7 @@ impl SettingsApp {
         let (tap, _) = k.trackpad();
         crate::input::request_touchpad(tap);
         crate::scrolleng::request_config(k.scroll().into());
+        crate::inputprofile::apply(&k);
         match keyboard::apply_apple(&self.kbd.sys, &k) {
             Ok(_) => Some(k),
             Err(e) => {
@@ -112,6 +114,19 @@ impl SettingsApp {
         match k {
             Key::Up => self.sel[self.tab] = self.sel[self.tab].saturating_sub(1),
             Key::Down => self.sel[self.tab] = (self.sel[self.tab] + 1).min(fnkeys::KEYS.len().saturating_sub(1)),
+            Key::Char('v') => {
+                let next = inputprofile::next_choice(&cur.profile);
+                if self.kbd_update(cx, &format!("profile={}", inputprofile::label(next)), |s| s.profile = next.to_string()).is_some() {
+                    self.ok(format!("Input profile: {}. {}", inputprofile::label(next), crate::inputprofile::status_line()));
+                }
+            }
+            Key::Char('x') => {
+                let profile = crate::inputprofile::resolved();
+                let name = if profile == inputprofile::Resolved::Mac { "Mac" } else { "PC" };
+                if self.kbd_update(cx, &format!("pointer defaults={name}"), |s| s.reset_pointer(profile)).is_some() {
+                    self.ok(format!("Pointer choices are back to the {name} profile's defaults (trackpad natural, tap to click, wheel classic, speed 100%)."));
+                }
+            }
             Key::Char('f') => {
                 let next = match cur.fn_mode.as_str() {
                     "" => "media",
@@ -236,6 +251,14 @@ impl SettingsApp {
                 cx.audit.record(&cx.session.user, "settings.touch.probe", &format!("step {level}"));
                 self.start("probing the touch screen", move || JobOut::Msg(Ok(iyakki_agent::touchprobe::probe(&sys, level))));
             }
+            Key::Char('z') => {
+                if !self.admin(cx) {
+                    return;
+                }
+                cx.audit.record(&cx.session.user, "settings.touch.reset", "ladder: re-open, HID rebind, bus reset, module reload");
+                let up = iyakki_agent::doctor::uptime_secs();
+                self.start("resetting the touch screen (touch it now and then)", move || JobOut::Msg(Ok(iyakki_agent::touchrecover::reset_now(up))));
+            }
             Key::Char('k') => {
                 if !self.admin(cx) {
                     return;
@@ -262,11 +285,34 @@ impl SettingsApp {
         }
     }
 
+    /// One line under a row: what the control does, with an example. None for rows without a control.
+    pub(super) fn kbd_help(label: &str) -> Option<&'static str> {
+        Some(match label {
+            "Input profile" => "Automatic uses Mac when an Apple keyboard or trackpad is found. Mac: Command is the shortcut key (Command+C copies, Command+Left = Home). PC: Ctrl+C copies.",
+            "What you will see: last key" => "The key you pressed and what IYAKKI understood, e.g. Command+C -> Copy.",
+            "What you will see: last scroll" => "Which way the content moved on your last scroll, e.g. Scrolled content up (natural, trackpad).",
+            "Function keys" => "What the top row sends first. Example: media keys first makes F10 mute; hold Fn for F10.",
+            "Trackpad" => "Tap to click: a short tap is a click; two fingers tapped is a right click (Mac profile: Control+click too). Three-finger drag is not available.",
+            "Scrolling" => "Natural: the page follows your fingers like a phone. Traditional: it moves the other way. Trackpad and mouse wheel are set apart. Example: the wheel is classic, the trackpad natural.",
+            "Touch Bar" => "What the Touch Bar shows. Example: IYAKKI strip shows system, recent apps and the assistant.",
+            "Touch Bar strips" => "Which strips the Touch Bar cycles through, and a picture flip if it looks mirrored.",
+            "ISO layout / Option-Command swap" => "ISO fixes a swapped ~ and < key. The swap exchanges Option and Command in the keyboard driver; the Mac profile names keys by their print, so it never swaps twice.",
+            "Key repeat" => "How long a key is held before it repeats, and how fast. Example: 300 ms and 20 a second.",
+            _ => return None,
+        })
+    }
+
     /// (label, value, warn) rows above the table.
     pub(super) fn kbd_rows(&self, cx: &AppCx) -> Vec<(String, String, bool)> {
         let k = Self::kbd_settings(cx);
         let a = keyboard::apple_state(&self.kbd.sys);
-        let mut v: Vec<(String, String, bool)> = vec![("Function keys".into(), mode_label(&k.fn_mode).into(), false)];
+        let (last_key, last_scroll) = crate::inputprofile::live_rows();
+        let mut v: Vec<(String, String, bool)> = vec![
+            ("Input profile".into(), format!("{}: {}", inputprofile::label(&k.profile), crate::inputprofile::status_line()), false),
+            ("What you will see: last key".into(), last_key, false),
+            ("What you will see: last scroll".into(), last_scroll, false),
+            ("Function keys".into(), mode_label(&k.fn_mode).into(), false),
+        ];
         v.push((
             "Apple keyboard driver".into(),
             match (a.driver, a.spi) {
@@ -297,6 +343,7 @@ impl SettingsApp {
             0 => "no USB touch screen listed".to_string(),
             n => format!("{n} found ({}). Touch not working right now? Click Probe touch screen: it switches the screen's USB device off and on", panels.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")),
         }, false));
+        v.push(("Touch recovery".into(), format!("{}. Click Reset touch screen: re-opens the input, rebinds the driver, resets that one device", iyakki_agent::touchrecover::status()), false));
         let panel = fnkeys::panel_backlights(&self.kbd.sys);
         v.push(("Screen brightness".into(), match panel.first() {
             Some(l) => format!("{} {}% (steps: {})", l.name, l.percent(), fnkeys::brightness_levels(l.max).len()),
@@ -332,12 +379,22 @@ impl SettingsApp {
         }
         let label_w = (210.0 * s).min(rows_w * 0.38);
         for (label, value, warn) in self.kbd_rows(cx) {
+            if y + 24.0 * s > a.y + a.h {
+                break; // a row that would run past the bottom of a short page is left out
+            }
             g.text(a.x, y, 14.0 * s, MUTED, &label, Face::Sans);
             let lines = g.wrap(14.0 * s, &value, Face::Bold, rows_w - label_w);
             for (i, l) in lines.iter().take(3).enumerate() {
                 g.text(a.x + label_w, y + i as f32 * 18.0 * s, 14.0 * s, if warn { rgb(255, 196, 94) } else { TEXT }, l, Face::Bold);
             }
             y += 24.0 * s + if lines.len() > 1 { 18.0 * s * (lines.len().min(3) - 1) as f32 } else { 0.0 };
+            if let Some(h) = Self::kbd_help(&label) {
+                let hl = g.wrap(12.0 * s, h, Face::Sans, rows_w - label_w);
+                for (i, l) in hl.iter().take(2).enumerate() {
+                    g.text(a.x + label_w, y - 4.0 * s + i as f32 * 15.0 * s, 12.0 * s, DIM, l, Face::Sans);
+                }
+                y += 15.0 * s * hl.len().min(2) as f32;
+            }
         }
         y = y.max(test_bottom) + 6.0 * s; // the table starts below the column
         if !wide {
@@ -409,6 +466,6 @@ impl SettingsApp {
 
     pub(super) fn keyboard_buttons(&self) -> Vec<Btn> {
         let (acc, mut_) = (ACCENT, TEXT);
-        vec![("Function keys", acc, 'f'), ("Touch Bar", acc, 'u'), ("Touch Bar strips", mut_, 'e'), ("Touch Bar flip", mut_, 'l'), ("ISO layout", mut_, 'i'), ("Swap Option/Cmd", mut_, 'o'), ("Repeat delay", mut_, 'd'), ("Repeat rate", mut_, 'r'), ("Trackpad tap", mut_, 'p'), ("Trackpad scroll", mut_, 'n'), ("Scroll speed", mut_, 's'), ("Wheel lines", mut_, 'y'), ("Wheel direction", mut_, 'w'), ("Smooth scrolling", mut_, 'g'), ("Momentum", mut_, 'm'), ("Probe touch screen", acc, 'h'), ("Test screen", acc, 'b'), ("Test keyboard light", mut_, 'k'), ("Test sound", mut_, 't')]
+        vec![("Input profile", acc, 'v'), ("Reset to profile defaults", mut_, 'x'), ("Function keys", acc, 'f'), ("Touch Bar", acc, 'u'), ("Touch Bar strips", mut_, 'e'), ("Touch Bar flip", mut_, 'l'), ("ISO layout", mut_, 'i'), ("Swap Option/Cmd", mut_, 'o'), ("Repeat delay", mut_, 'd'), ("Repeat rate", mut_, 'r'), ("Trackpad tap", mut_, 'p'), ("Trackpad scroll", mut_, 'n'), ("Scroll speed", mut_, 's'), ("Wheel lines", mut_, 'y'), ("Wheel direction", mut_, 'w'), ("Smooth scrolling", mut_, 'g'), ("Momentum", mut_, 'm'), ("Probe touch screen", acc, 'h'), ("Reset touch screen", acc, 'z'), ("Test screen", acc, 'b'), ("Test keyboard light", mut_, 'k'), ("Test sound", mut_, 't')]
     }
 }

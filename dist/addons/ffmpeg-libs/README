@@ -1,0 +1,18 @@
+Browser audio and video add-on (H.264, AAC, MP3): the recipe
+=============================================================
+IYAKKI does not ship, host or download FFmpeg. This image carries only the inactive GStreamer bridge plugin (LGPL glue code,
+/usr/lib/iyakki-av/gstreamer-1.0/libgstlibav.so) and this recipe. The libraries are supplied by you, an administrator.
+
+1. Build the archive (on a build machine with the IYAKKI source tree and Buildroot's prerequisites; about 30 minutes from nothing,
+   a minute in an existing web build tree):
+     WEB_AV_ADDON=1 dist/buildroot/smart-build.sh web          # builds FFmpeg LGPL-only with iyakki_web_av_addon_libs.fragment
+     dist/buildroot/package-av-addon.sh                        # this folder's package-av-addon.sh is a copy of that script
+   It writes ffmpeg-libs-<version>-linux-musl-<arch>.tar.gz: six stripped shared libraries (the sonames in /usr/share/iyakki/av-addon-abi),
+   the LGPL texts, NOTICE (version and the exact configure line) and SOURCE-OFFER.txt. It refuses a GPL or non-free configuration.
+   FFmpeg's patches are Buildroot's package/ffmpeg/0001..0007-*.patch (build fixes for other platforms); they are listed in SOURCE-OFFER.txt.
+2. Put the file in /local/packages/ (a link to <data>/local/packages, writable by administrators only), or on a stick named
+   LOCAL-PACKAGES or in iyakki-packages/ on any stick (read only), or set a mirror address inside your organisation
+   (Settings -> Browser add-on; https only; an optional SHA-256).
+3. Store -> Setup -> Browser audio and video -> Install: read what was found and its NOTICE, confirm, done. iyakki-av-check checks the result.
+   If you installed ffmpeg from the CLI list and it happens to have the six shared libraries built for musl, Setup offers to copy them.
+Patents: H.264 and AAC are patent-licensed formats in some countries; that is your responsibility. See LICENSES.

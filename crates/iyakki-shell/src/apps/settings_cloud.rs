@@ -45,7 +45,7 @@ impl SettingsApp {
             ("Hidden Devices rows".into(), join(c.hidden_device_rows.iter().map(|s| s.to_string()).collect())),
             ("Fn and media keys".into(), if c.fn_keys_off { "off".into() } else { "on".to_string() }),
             ("This machine (AI)".into(), iyakki_agent::aiprofile::this_machine(iyakki_agent::modelhost::Hosts::new(Self::svc(cx).dir()).list().len()).summary()),
-            ("Show all AI tools".into(), format!("{} (press A to change). AI tools this hardware does not suit are hidden unless this is on.", if Self::svc(cx).show_all_ai() { "On" } else { "Off" })),
+            ("Show all AI tools".into(), format!("{} (press a to change). AI tools this hardware does not suit are hidden unless this is on.", if Self::svc(cx).show_all_ai() { "On" } else { "Off" })),
             ("Boot parameter".into(), "iyakki.mode=cloud or iyakki.mode=desktop beats the setting".into()),
         ]
     }

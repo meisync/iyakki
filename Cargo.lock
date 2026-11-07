@@ -2057,9 +2057,11 @@ dependencies = [
  "iyakki-edit",
  "iyakki-flow",
  "iyakki-fw",
+ "iyakki-hotspot",
  "iyakki-hwinfo",
  "iyakki-js",
  "iyakki-ledger",
+ "iyakki-link",
  "iyakki-mem",
  "iyakki-netscan",
  "iyakki-proxy",
@@ -2086,6 +2088,20 @@ dependencies = [
  "thiserror 2.0.21",
  "tiny-skia",
  "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "iyakki-connect"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-link",
+ "iyakki-sec",
+ "libc",
+ "rcgen",
+ "rustls",
+ "serde_json",
+ "sha2 0.10.9",
  "zeroize",
 ]
 
@@ -2196,6 +2212,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "iyakki-hotspot"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-sec",
+]
+
+[[package]]
 name = "iyakki-hw"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -2230,6 +2253,21 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "iyakki-link"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "ed25519-dalek",
+ "iyakki-sec",
+ "log",
+ "miniz_oxide 0.8.9",
+ "rustls",
+ "serde_json",
+ "sha2 0.10.9",
+ "tiny-skia",
+ "zeroize",
 ]
 
 [[package]]
@@ -2273,8 +2311,11 @@ name = "iyakki-remote"
 version = "0.1.0-alpha.1"
 dependencies = [
  "iyakki-agent",
+ "iyakki-core-api",
+ "iyakki-core-fake",
  "iyakki-flow",
  "iyakki-fw",
+ "iyakki-link",
  "iyakki-sec",
  "iyakki-shell",
  "iyakki-web",
@@ -2309,6 +2350,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "libc",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

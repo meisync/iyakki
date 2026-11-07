@@ -46,6 +46,8 @@ pub struct Form {
     pub fields: Vec<FormField>,
     pub focus: usize,
     pub error: Option<String>,
+    /// Words under the title that explain the form (how to get a key, for example); wrapped to the width.
+    pub note: String,
     /// The file picker opened from a path field (it takes every event while open).
     pub picker: std::cell::RefCell<Option<Box<crate::filepicker::FilePicker>>>,
     /// The last check of each path field: (the text checked, the answer).
@@ -54,7 +56,12 @@ pub struct Form {
 
 impl Form {
     pub fn new(title: &str) -> Form {
-        Form { title: title.into(), fields: vec![], focus: 0, error: None, picker: Default::default(), pcache: Default::default() }
+        Form { title: title.into(), fields: vec![], focus: 0, error: None, note: String::new(), picker: Default::default(), pcache: Default::default() }
+    }
+
+    pub fn with_note(mut self, note: &str) -> Form {
+        self.note = note.into();
+        self
     }
 
     pub fn text(mut self, label: &str, init: &str, hint: &str) -> Form {
@@ -346,9 +353,16 @@ impl Form {
         let chip_row = 28.0 * s;
         let mut pitch = 78.0 * s;
         let mut labels_on = true;
+        let note_h = |g: &mut Gfx, me: &Form| -> f32 {
+            if me.note.is_empty() {
+                0.0
+            } else {
+                g.wrap(13.0 * s, &me.note, Face::Sans, inner_w).len() as f32 * 13.0 * s * 1.45 + 10.0 * s
+            }
+        };
         let ideal = |g: &mut Gfx, pitch: f32, labels_on: bool, me: &Form| -> f32 {
             let chips: f32 = me.fields.iter().map(|f| if f.chips.is_empty() { 0.0 } else { me.chip_layout(g, s, inner_w, f, chip_row, labels_on).2 + 4.0 * s }).sum();
-            112.0 * s + pitch * me.fields.len() as f32 + chips + if me.error.is_some() { 30.0 * s } else { 0.0 }
+            note_h(g, me) + 112.0 * s + pitch * me.fields.len() as f32 + chips + if me.error.is_some() { 30.0 * s } else { 0.0 }
         };
         let mut h = ideal(g, pitch, labels_on, self);
         while h > avail && pitch > 62.0 * s {
@@ -363,6 +377,13 @@ impl Form {
         let (x, y, w, h) = (p.x, p.y, p.w, p.h);
         crate::fx::modal_title(g, p, s, &self.title, accent);
         let mut fy = y + 62.0 * s;
+        if !self.note.is_empty() {
+            for line in g.wrap(13.0 * s, &self.note, Face::Sans, inner_w) {
+                g.text(x + 26.0 * s, fy - 2.0 * s, 13.0 * s, MUTED, &line, Face::Sans);
+                fy += 13.0 * s * 1.45;
+            }
+            fy += 10.0 * s;
+        }
         for (i, f) in self.fields.iter().enumerate() {
             let focused = i == self.focus;
             g.text(x + 26.0 * s, fy, 13.0 * s, if focused { TEXT } else { MUTED }, &f.label, Face::Bold);

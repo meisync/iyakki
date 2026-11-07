@@ -35,6 +35,16 @@ impl CamSource {
         CamSource::with(Presence::system(), Arc::new(crate::camera::v4l2::V4l2Opener))
     }
 
+    /// The camera of the desktop's own scans (the clipboard's "Scan QR", the sign-in dialog): the web browser's camera when a browser session
+    /// is connected (the CAMERA app already does this; a scan that opened the machine's camera instead found nothing on a Mac mini without
+    /// a camera, or lit the wrong one), the machine's otherwise.
+    pub fn desktop() -> Arc<CamSource> {
+        match iyakki_agent::browsersource::browser_camera_for_desktop() {
+            Some(m) => CamSource::with(Presence::browser(), Arc::new(crate::camera::browsercam::BrowserOpener::new(m))),
+            None => CamSource::system(),
+        }
+    }
+
     pub fn with(presence: Presence, opener: Arc<dyn Opener>) -> Arc<CamSource> {
         Arc::new(CamSource { presence: Mutex::new(presence), opener })
     }
@@ -338,4 +348,19 @@ pub fn draw_card(g: &mut Gfx, p: R, s: f32, tick: u64, ss: &Session, c: &Card) {
     let by = r.y + r.h - 54.0 * s;
     let b1 = g.button(x, by, 15.0 * s, "Stop camera", ERR, Event::Tab(c.stop));
     g.text(x + b1 + 14.0 * s, by + 8.0 * s, 12.0 * s, DIM, "Esc stops it too", Face::Sans);
+}
+
+#[cfg(test)]
+mod desktop_tests {
+    use super::*;
+    use iyakki_agent::browsermedia::{self, BrowserMedia, Policy};
+
+    #[test]
+    fn a_scan_in_a_browser_session_uses_the_browsers_camera() {
+        let m = BrowserMedia::silent(Policy::allow_all());
+        browsermedia::register("scan-desktop-test-user", m);
+        let dev = CamSource::desktop().first();
+        browsermedia::unregister("scan-desktop-test-user");
+        assert_eq!(dev.expect("the browser's camera is offered").name, "Browser camera");
+    }
 }

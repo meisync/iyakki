@@ -83,6 +83,49 @@ pub fn reattach(usb: &Path) -> std::io::Result<()> {
     std::fs::write(&auth, "1")
 }
 
+/// A finger event was seen on a touch screen this boot (the shell calls [`note_finger`]).
+static FINGER_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The one hub-level re-attach has been started.
+static HUB_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The hub is reset this long after the panel's own re-attach would be due: a panel that is silent after that is the stuck kind.
+pub const HUB_AFTER_SECS: u64 = SETTLE_SECS + 20;
+
+/// Whether a finger event was ever seen this boot.
+pub fn finger_seen() -> bool {
+    FINGER_SEEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn note_finger() {
+    if !FINGER_SEEN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        crate::touchfix::finger_arrived();
+    }
+}
+
+/// Whether the one hub re-attach is due: the boot is old enough, the panels have had their own re-attach, no finger was ever seen, and it
+/// has not been done.
+pub fn hub_reset_due(uptime_secs: u64, panels: usize, panels_attached: bool, finger_seen: bool, hub_done: bool) -> bool {
+    panels > 0 && panels_attached && !finger_seen && !hub_done && uptime_secs >= HUB_AFTER_SECS
+}
+
+/// A hub that may be switched off and on without harm: a hub of its own (not a root hub `usbN`) with no disk below it (the boot drive may
+/// hang on a hub; a disk behind it would be pulled away).
+pub fn hub_is_safe(hub: &Path) -> bool {
+    fn has_block(d: &Path, depth: u32) -> bool {
+        if depth == 0 {
+            return false;
+        }
+        let Ok(rd) = std::fs::read_dir(d) else { return false };
+        rd.flatten().any(|e| {
+            let n = e.file_name();
+            let n = n.to_string_lossy();
+            n == "block" || (e.path().is_dir() && !e.path().is_symlink() && (n.contains(':') || n.starts_with("host") || n.starts_with("target") || n.contains('-')) && has_block(&e.path(), depth - 1))
+        })
+    }
+    let name = hub.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    !name.starts_with("usb") && !has_block(hub, 8)
+}
+
 /// A second press within this many seconds of the first goes a step further (the monitor's hub).
 pub const ESCALATE_SECS: u64 = 180;
 
@@ -134,12 +177,65 @@ pub fn probe(sys: &Path, level: u8) -> String {
     format!("Touch probe: {}. {tail}", said.join(", "))
 }
 
+/// The later rungs of the ladder (KI-077, [`crate::touchfix`]): once per boot, in a thread, when [`crate::touchfix::due`] says so.
+fn start_fix(uptime_secs: u64, found: &[Panel]) {
+    use std::sync::atomic::Ordering::Relaxed;
+    static DECIDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let mode = crate::touchfix::fix_mode(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default());
+    if found.is_empty() {
+        return;
+    }
+    if !DECIDED.swap(true, Relaxed) {
+        log::info!("touch: iyakki.touchfix={mode:?}: {}", match mode {
+            crate::touchfix::FixMode::Off => "no link or controller reset will be tried",
+            crate::touchfix::FixMode::Link => "if no finger event is seen by 45 s: rung 1, the DP link off and on",
+            crate::touchfix::FixMode::Port => "if no finger event is seen by 45 s: rung 1, the DP link off and on, then the root-hub port disabled and enabled",
+            crate::touchfix::FixMode::All => "if no finger event is seen by 45 s: rung 1, the DP link off and on, then the root-hub port disabled and enabled, then rung 2, the xHCI controller unbound and bound",
+        });
+    }
+    let (done, busy) = { let l = LEDGER.lock().unwrap_or_else(|e| e.into_inner()); (l.done.clone(), l.busy) };
+    let attached = state_of(found, &done, busy).attached;
+    if !crate::touchfix::due(mode, uptime_secs, found.len(), attached, finger_seen(), crate::touchfix::FIX_STARTED.load(Relaxed), crate::touchfix::idle_secs()) {
+        return;
+    }
+    if crate::touchfix::FIX_STARTED.swap(true, Relaxed) {
+        return;
+    }
+    let usb = found[0].usb.clone();
+    std::thread::spawn(move || {
+        let out = crate::touchfix::run(&crate::touchfix::RealEnv, Path::new("/sys"), &usb, mode);
+        log::info!("touch: fix ended: {out:?}");
+    });
+}
+
 /// Start the re-attach of every panel that has not had one, when the boot is `uptime_secs` old (not before [`SETTLE_SECS`]). Never waits.
 pub fn step(uptime_secs: u64) {
     if uptime_secs < SETTLE_SECS {
         return;
     }
     let found = panels(Path::new("/sys"));
+    {
+        let l = LEDGER.lock().unwrap_or_else(|e| e.into_inner());
+        let attached = state_of(&found, &l.done, l.busy).attached;
+        use std::sync::atomic::Ordering::Relaxed;
+        if hub_reset_due(uptime_secs, found.len(), attached, FINGER_SEEN.load(Relaxed), HUB_DONE.load(Relaxed)) {
+            HUB_DONE.store(true, Relaxed);
+            for p in &found {
+                match hub_of(&p.usb) {
+                    Some(h) if hub_is_safe(&h) => {
+                        let p = p.clone();
+                        std::thread::spawn(move || match reattach(&h) {
+                            Ok(()) => log::info!("touch: no finger event was ever seen from {}; its USB hub {} was switched off and on once", p.name, h.display()),
+                            Err(e) => log::info!("touch: no finger event from {}; its hub {} could not be re-attached ({e})", p.name, h.display()),
+                        });
+                    }
+                    Some(h) => log::info!("touch: no finger event from {}; its hub {} is left alone (root hub or a disk hangs on it)", p.name, h.display()),
+                    None => {}
+                }
+            }
+        }
+    }
+    start_fix(uptime_secs, &found);
     let mut l = LEDGER.lock().unwrap_or_else(|e| e.into_inner());
     for p in found {
         if l.done.contains(&p.usb) {
@@ -248,6 +344,30 @@ mod tests {
         *LAST_PRESS.lock().unwrap() = None;
         assert_eq!(next_level(), 1);
         assert_eq!(next_level(), 2);
+    }
+
+    #[test]
+    fn the_hub_is_reset_once_and_only_for_a_panel_that_never_gave_a_finger() {
+        assert!(hub_reset_due(HUB_AFTER_SECS, 1, true, false, false));
+        assert!(!hub_reset_due(HUB_AFTER_SECS - 1, 1, true, false, false), "too early");
+        assert!(!hub_reset_due(99, 1, false, false, false), "the panel's own re-attach is not over");
+        assert!(!hub_reset_due(99, 1, true, true, false), "a finger was seen");
+        assert!(!hub_reset_due(99, 1, true, false, true), "already done");
+        assert!(!hub_reset_due(99, 0, true, false, false), "no panel");
+    }
+
+    #[test]
+    fn a_hub_with_a_disk_below_it_or_a_root_hub_is_left_alone() {
+        let t = tempfile_dir("tp7");
+        let hub = t.join("1-5");
+        put(&hub.join("idVendor"), "1a40\n");
+        std::fs::create_dir_all(hub.join("1-5.3")).unwrap();
+        assert!(hub_is_safe(&hub));
+        std::fs::create_dir_all(hub.join("1-5.2/1-5.2:1.0/host6/target6:0:0/6:0:0:0/block/sdb")).unwrap();
+        assert!(!hub_is_safe(&hub), "a disk hangs on it");
+        let root = t.join("usb1");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(!hub_is_safe(&root));
     }
 
     fn tempfile_dir(tag: &str) -> PathBuf {

@@ -1,5 +1,6 @@
-//! A QR code encoder of our own (ISO/IEC 18004 is a public standard): byte mode, error correction level L, versions 1 to 20
-//! (up to 858 bytes), the mask with the lowest penalty. It exists so a sign-in address can be scanned with a phone from a screen that has
+//! A QR code encoder of our own (ISO/IEC 18004 is a public standard): byte mode, error correction levels L, M, Q and H, the mask
+//! with the lowest penalty. [`encode`] makes level L symbols of versions 1 to 20 (up to 858 bytes); [`encode_level`] makes any
+//! level up to version 40 (up to 2953 bytes at level L). It exists so a sign-in address can be scanned with a phone from a screen that has
 //! no browser. No dependency; the tests check the codewords, the format bits and the Reed-Solomon remainder of what it draws.
 
 /// An encoded symbol: `size` x `size` modules, `true` = dark.
@@ -23,11 +24,44 @@ impl Qr {
     }
 }
 
-/// Most bytes a symbol can hold at level L.
+/// Most bytes [`encode`] can hold (level L, version 20).
 pub const MAX_BYTES: usize = 858;
+/// The largest version [`encode_level`] makes (177 x 177 modules).
+pub const MAX_VERSION: usize = 40;
 
-pub(crate) const ECC_PER_BLOCK: [usize; 21] = [0, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28];
-pub(crate) const BLOCKS: [usize; 21] = [0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8];
+/// How much of the symbol may be damaged and still read: about 7%, 15%, 25% and 30%.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    L,
+    M,
+    Q,
+    H,
+}
+
+impl Level {
+    pub const ALL: [Level; 4] = [Level::L, Level::M, Level::Q, Level::H];
+    pub fn letter(self) -> char {
+        ['L', 'M', 'Q', 'H'][self as usize]
+    }
+    /// The two format bits the standard writes for the level (L = 01, M = 00, Q = 11, H = 10).
+    fn format_bits(self) -> usize {
+        [1, 0, 3, 2][self as usize]
+    }
+}
+
+/// Error-correction codewords per block and number of blocks, by level (L, M, Q, H) and version (index 0 is unused).
+pub(crate) const ECC_TABLE: [[usize; 41]; 4] = [
+    [0, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+    [0, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28],
+    [0, 13, 22, 18, 26, 18, 24, 18, 22, 20, 24, 28, 26, 24, 20, 30, 24, 28, 28, 26, 30, 28, 30, 30, 30, 30, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+    [0, 17, 28, 22, 16, 22, 28, 26, 26, 24, 28, 24, 28, 22, 24, 24, 30, 28, 28, 26, 28, 30, 24, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+];
+pub(crate) const BLOCK_TABLE: [[usize; 41]; 4] = [
+    [0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8, 9, 9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25],
+    [0, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49],
+    [0, 1, 1, 2, 2, 4, 4, 6, 6, 8, 8, 8, 10, 12, 16, 12, 17, 16, 18, 21, 20, 23, 23, 25, 27, 29, 34, 34, 35, 38, 40, 43, 45, 48, 51, 53, 56, 59, 62, 65, 68],
+    [0, 1, 1, 2, 4, 4, 4, 5, 6, 8, 8, 11, 11, 16, 16, 18, 16, 19, 21, 25, 25, 25, 34, 30, 32, 35, 37, 40, 42, 45, 48, 51, 54, 57, 60, 63, 66, 70, 74, 77, 81],
+];
 
 pub(crate) fn raw_modules(ver: usize) -> usize {
     let mut r = (16 * ver + 128) * ver + 64;
@@ -41,8 +75,14 @@ pub(crate) fn raw_modules(ver: usize) -> usize {
     r
 }
 
-fn data_codewords(ver: usize) -> usize {
-    raw_modules(ver) / 8 - ECC_PER_BLOCK[ver] * BLOCKS[ver]
+/// The data codewords a symbol of this version and level holds.
+pub fn data_codewords(ver: usize, level: Level) -> usize {
+    raw_modules(ver) / 8 - ECC_TABLE[level as usize][ver] * BLOCK_TABLE[level as usize][ver]
+}
+
+/// The most bytes (byte mode) a symbol of this version and level holds.
+pub fn capacity(ver: usize, level: Level) -> usize {
+    (data_codewords(ver, level) * 8 - 4 - if ver >= 10 { 16 } else { 8 }) / 8
 }
 
 fn gf_mul(x: u8, y: u8) -> u8 {
@@ -83,7 +123,7 @@ pub(crate) fn rs_remainder(data: &[u8], divisor: &[u8]) -> Vec<u8> {
 }
 
 /// The data codewords of `text` for version `ver` (mode, length, bytes, terminator, padding).
-fn data_words(text: &[u8], ver: usize) -> Vec<u8> {
+fn data_words(text: &[u8], ver: usize, level: Level) -> Vec<u8> {
     let mut bits: Vec<bool> = vec![];
     let put = |v: u32, n: usize, bits: &mut Vec<bool>| {
         for i in (0..n).rev() {
@@ -95,7 +135,7 @@ fn data_words(text: &[u8], ver: usize) -> Vec<u8> {
     for &b in text {
         put(b as u32, 8, &mut bits);
     }
-    let cap = data_codewords(ver) * 8;
+    let cap = data_codewords(ver, level) * 8;
     let term = (cap - bits.len()).min(4);
     put(0, term, &mut bits);
     while bits.len() % 8 != 0 {
@@ -103,7 +143,7 @@ fn data_words(text: &[u8], ver: usize) -> Vec<u8> {
     }
     let mut out: Vec<u8> = bits.chunks(8).map(|c| c.iter().fold(0u8, |a, &b| (a << 1) | b as u8)).collect();
     let mut pad = 0xECu8;
-    while out.len() < data_codewords(ver) {
+    while out.len() < data_codewords(ver, level) {
         out.push(pad);
         pad = if pad == 0xEC { 0x11 } else { 0xEC };
     }
@@ -111,8 +151,8 @@ fn data_words(text: &[u8], ver: usize) -> Vec<u8> {
 }
 
 /// Data and error correction codewords, interleaved block by block.
-fn all_words(data: &[u8], ver: usize) -> Vec<u8> {
-    let (nb, ecl) = (BLOCKS[ver], ECC_PER_BLOCK[ver]);
+fn all_words(data: &[u8], ver: usize, level: Level) -> Vec<u8> {
+    let (nb, ecl) = (BLOCK_TABLE[level as usize][ver], ECC_TABLE[level as usize][ver]);
     let raw = raw_modules(ver) / 8;
     let short = nb - raw % nb;
     let short_len = raw / nb;
@@ -173,10 +213,6 @@ impl Grid {
         }
     }
 
-    fn format(&mut self, mask: usize) {
-        self.format_level(mask, 1);
-    }
-
     /// The format bits for a mask and a level (L = 1, M = 0, Q = 3, H = 2, as the standard writes them).
     pub(crate) fn format_level(&mut self, mask: usize, level: usize) {
         let data = (level << 3) | mask;
@@ -233,7 +269,7 @@ pub(crate) fn align_positions(ver: usize) -> Vec<usize> {
     let mut pos = ver * 4 + 10;
     for _ in 1..n {
         v.insert(1, pos);
-        pos -= step;
+        pos = pos.saturating_sub(step); // the last step is not used
     }
     v
 }
@@ -296,13 +332,53 @@ fn penalty(g: &Grid) -> i32 {
     p + k.max(0) * 10
 }
 
-/// Encode `text` (any bytes) as a QR symbol; `None` when it does not fit in [`MAX_BYTES`].
+/// How a Wi-Fi network is secured, as the Wi-Fi QR code names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WifiSecurity {
+    Wpa,
+    Wep,
+    Open,
+}
+
+/// The text phones read from a QR code to join a Wi-Fi network (WPA): `WIFI:T:WPA;S:<name>;P:<password>;;`, with `\ ; , : "` escaped by a backslash.
+pub fn wifi_payload(ssid: &str, pass: &str) -> String {
+    wifi_payload_with(ssid, pass, WifiSecurity::Wpa, false)
+}
+
+/// The Wi-Fi payload for any security (an open network has no password part) and, when `hidden`, `H:true;` for a network that does not announce its name.
+pub fn wifi_payload_with(ssid: &str, pass: &str, security: WifiSecurity, hidden: bool) -> String {
+    fn esc(s: &str) -> String {
+        let mut o = String::with_capacity(s.len() + 4);
+        for c in s.chars() {
+            if matches!(c, '\\' | ';' | ',' | ':' | '"') {
+                o.push('\\');
+            }
+            o.push(c);
+        }
+        o
+    }
+    let (kind, pw) = match security {
+        WifiSecurity::Wpa => ("WPA", format!("P:{};", esc(pass))),
+        WifiSecurity::Wep => ("WEP", format!("P:{};", esc(pass))),
+        WifiSecurity::Open => ("nopass", String::new()),
+    };
+    format!("WIFI:T:{kind};S:{};{pw}{}", esc(ssid), if hidden { "H:true;;" } else { ";" })
+}
+
+/// Encode `text` (any bytes) as a level L QR symbol of version 1 to 20; `None` when it does not fit in [`MAX_BYTES`].
 pub fn encode(text: &[u8]) -> Option<Qr> {
-    let ver = (1..=20).find(|&v| {
-        let need = 4 + if v >= 10 { 16 } else { 8 } + 8 * text.len();
-        need <= data_codewords(v) * 8
-    })?;
-    let words = all_words(&data_words(text, ver), ver);
+    encode_upto(text, Level::L, 20)
+}
+
+/// Encode `text` (any bytes) at an error-correction level, version 1 to [`MAX_VERSION`]; `None` when it does not fit
+/// (see [`capacity`]).
+pub fn encode_level(text: &[u8], level: Level) -> Option<Qr> {
+    encode_upto(text, level, MAX_VERSION)
+}
+
+fn encode_upto(text: &[u8], level: Level, max_ver: usize) -> Option<Qr> {
+    let ver = (1..=max_ver).find(|&v| text.len() <= capacity(v, level))?;
+    let words = all_words(&data_words(text, ver, level), ver, level);
     let size = ver * 4 + 17;
     let mut g = Grid { size, m: vec![false; size * size], f: vec![false; size * size] };
     for i in 0..size {
@@ -321,7 +397,7 @@ pub fn encode(text: &[u8]) -> Option<Qr> {
             }
         }
     }
-    g.format(0);
+    g.format_level(0, level.format_bits());
     g.version_info(ver);
     // the codewords, in the zigzag of the standard
     let mut i = 0usize;
@@ -353,7 +429,7 @@ pub fn encode(text: &[u8]) -> Option<Qr> {
                 }
             }
         }
-        t.format(mask);
+        t.format_level(mask, level.format_bits());
         let p = penalty(&t);
         if best.as_ref().is_none_or(|(bp, _)| p < *bp) {
             best = Some((p, t));
@@ -369,6 +445,11 @@ mod tests {
     /// Read the symbol back the way a scanner does: format bits, unmask, codewords in zigzag order, de-interleave, check every
     /// block's Reed-Solomon remainder, and return the bytes.
     fn decode(q: &Qr) -> Result<Vec<u8>, String> {
+        decode_level(q).map(|(_, b)| b)
+    }
+
+    /// Like [`decode`], and also the level the format bits name.
+    fn decode_level(q: &Qr) -> Result<(Level, Vec<u8>), String> {
         let s = q.size;
         let ver = q.version();
         // format information, first copy
@@ -388,9 +469,7 @@ mod tests {
         if (bits & 0x3FF) != (rem & 0x3FF) {
             return Err("format bits do not check".into());
         }
-        if (bits >> 13) & 3 != 1 {
-            return Err("not level L".into());
-        }
+        let lv = Level::ALL.into_iter().find(|l| l.format_bits() == (bits >> 13) & 3).ok_or("no such level")?;
         let mask = (bits >> 10) & 7;
         // which modules are function modules: draw an empty symbol of the same version
         let mut g = Grid { size: s, m: vec![false; s * s], f: vec![false; s * s] };
@@ -410,7 +489,7 @@ mod tests {
                 }
             }
         }
-        g.format(0);
+        g.format_level(0, lv.format_bits());
         g.version_info(ver);
         let mut words = vec![0u8; raw_modules(ver) / 8];
         let mut i = 0usize;
@@ -433,7 +512,7 @@ mod tests {
             right -= 2;
         }
         // de-interleave
-        let (nb, ecl) = (BLOCKS[ver], ECC_PER_BLOCK[ver]);
+        let (nb, ecl) = (BLOCK_TABLE[lv as usize][ver], ECC_TABLE[lv as usize][ver]);
         let short = nb - words.len() % nb;
         let short_len = words.len() / nb;
         let mut blocks: Vec<Vec<u8>> = vec![vec![]; nb];
@@ -465,7 +544,14 @@ mod tests {
         for j in 0..n {
             out.push((data[start + j] << 4) | (data[start + j + 1] >> 4));
         }
-        Ok(out)
+        Ok((lv, out))
+    }
+
+    #[test]
+    fn wifi_payload_escapes_the_special_characters() {
+        assert_eq!(wifi_payload("iyakki-ab12", "pass word"), "WIFI:T:WPA;S:iyakki-ab12;P:pass word;;");
+        assert_eq!(wifi_payload("a;b,c:d\\e\"f", "x;y"), "WIFI:T:WPA;S:a\\;b\\,c\\:d\\\\e\\\"f;P:x\\;y;;");
+        assert!(encode(wifi_payload(&"s".repeat(32), &"p".repeat(63)).as_bytes()).is_some(), "the longest name and password fit");
     }
 
     #[test]
@@ -502,7 +588,7 @@ mod tests {
         let want = [17, 32, 53, 78, 106, 134, 154, 192, 230, 271, 321, 367, 425, 458, 520, 586, 644, 718, 792, 858];
         for (v, w) in want.iter().enumerate() {
             let cc = if v + 1 >= 10 { 2 } else { 1 };
-            let cap = (data_codewords(v + 1) * 8 - 4 - cc * 8) / 8;
+            let cap = (data_codewords(v + 1, Level::L) * 8 - 4 - cc * 8) / 8;
             assert_eq!(cap, *w, "version {}", v + 1);
         }
     }
@@ -513,6 +599,101 @@ mod tests {
         let i = q.size * 10 + 10;
         q.modules[i] = !q.modules[i];
         assert!(decode(&q).is_err());
+    }
+
+    #[test]
+    fn wifi_payload_has_a_form_for_every_security_and_for_hidden_networks() {
+        assert_eq!(wifi_payload_with("home", "pw", WifiSecurity::Wep, false), "WIFI:T:WEP;S:home;P:pw;;");
+        assert_eq!(wifi_payload_with("cafe", "", WifiSecurity::Open, false), "WIFI:T:nopass;S:cafe;;");
+        assert_eq!(wifi_payload_with("a;b", "x:y", WifiSecurity::Wpa, true), "WIFI:T:WPA;S:a\\;b;P:x\\:y;H:true;;");
+        assert_eq!(wifi_payload_with("c", "", WifiSecurity::Open, true), "WIFI:T:nopass;S:c;H:true;;");
+        assert_eq!(wifi_payload("n", "p"), wifi_payload_with("n", "p", WifiSecurity::Wpa, false));
+    }
+
+    #[test]
+    fn reed_solomon_matches_the_worked_example_of_the_standard_guides() {
+        // 1-M "HELLO WORLD" style example: 16 data codewords, 10 check codewords
+        let data = [32u8, 91, 11, 120, 209, 114, 220, 77, 67, 64, 236, 17, 236, 17, 236, 17];
+        assert_eq!(rs_remainder(&data, &rs_divisor(10)), [196u8, 35, 39, 119, 235, 215, 231, 226, 93, 23]);
+    }
+
+    #[test]
+    fn format_information_matches_the_table_of_the_standard() {
+        // mask 0 at each level (ISO/IEC 18004 table C.1), first copy read as a scanner does
+        for (level, want) in [(Level::L, 0b111011111000100usize), (Level::M, 0b101010000010010), (Level::Q, 0b011010101011111), (Level::H, 0b001011010001001)] {
+            let mut g = Grid { size: 21, m: vec![false; 441], f: vec![false; 441] };
+            g.format_level(0, level.format_bits());
+            let at = |x: usize, y: usize| usize::from(g.m[y * 21 + x]);
+            let mut bits = 0usize;
+            for i in 0..=5 {
+                bits |= at(8, i) << i;
+            }
+            bits |= at(8, 7) << 6 | at(8, 8) << 7 | at(7, 8) << 8;
+            for i in 9..15 {
+                bits |= at(14 - i, 8) << i;
+            }
+            assert_eq!(bits, want, "level {level:?}");
+        }
+    }
+
+    #[test]
+    fn the_tables_give_the_capacities_of_the_standard_at_every_level() {
+        // byte-mode capacity (ISO/IEC 18004 table 7) at a spread of versions
+        let want = [
+            (1, [17, 14, 11, 7]),
+            (5, [106, 84, 60, 44]),
+            (10, [271, 213, 151, 119]),
+            (20, [858, 666, 482, 382]),
+            (27, [1465, 1125, 805, 625]),
+            (30, [1732, 1370, 982, 742]),
+            (40, [2953, 2331, 1663, 1273]),
+        ];
+        for (v, caps) in want {
+            for (l, c) in Level::ALL.into_iter().zip(caps) {
+                assert_eq!(capacity(v, l), c, "version {v} level {l:?}");
+            }
+        }
+        // the data and check codewords add up to the symbol's whole capacity at every version and level
+        for v in 1..=MAX_VERSION {
+            for l in Level::ALL {
+                let (e, b) = (ECC_TABLE[l as usize][v], BLOCK_TABLE[l as usize][v]);
+                assert!(data_codewords(v, l) > 0 && e * b + data_codewords(v, l) == raw_modules(v) / 8, "version {v} level {l:?}");
+            }
+        }
+        assert_eq!(align_positions(7), [6, 22, 38]);
+        assert_eq!(align_positions(32), [6, 34, 60, 86, 112, 138]);
+        assert_eq!(align_positions(36), [6, 24, 50, 76, 102, 128, 154]);
+        assert_eq!(align_positions(40), [6, 30, 58, 86, 114, 142, 170]);
+    }
+
+    #[test]
+    fn every_level_round_trips_with_its_format_bits_and_check_codewords() {
+        for l in Level::ALL {
+            for n in [1usize, 14, 50, 120, 300, 700, 1200, 1663, capacity(40, l) / 2] {
+                let text: Vec<u8> = (0..n).map(|i| (i * 31 + n) as u8).collect();
+                let Some(q) = encode_level(&text, l) else { assert!(n > capacity(MAX_VERSION, l)); continue };
+                let (got, bytes) = decode_level(&q).unwrap_or_else(|e| panic!("{n} bytes at {l:?}: {e}"));
+                assert_eq!((got, bytes), (l, text), "{n} bytes, version {}", q.version());
+                assert!(q.version() >= 1 && q.size == q.version() * 4 + 17);
+            }
+        }
+    }
+
+    #[test]
+    fn the_biggest_symbols_fill_and_one_more_byte_does_not_fit() {
+        for l in Level::ALL {
+            let n = capacity(MAX_VERSION, l);
+            let q = encode_level(&vec![0xA5; n], l).unwrap_or_else(|| panic!("{n} bytes at {l:?} do not fit"));
+            assert_eq!((q.version(), q.size), (40, 177));
+            assert_eq!(decode_level(&q).unwrap().1.len(), n);
+            assert!(encode_level(&vec![0xA5; n + 1], l).is_none(), "{l:?}");
+        }
+        // a higher level never makes a smaller symbol; level L through encode_level is the same as encode
+        let t = b"https://example.test/path?q=1";
+        assert_eq!(encode_level(t, Level::L), encode(t));
+        let sizes: Vec<usize> = Level::ALL.into_iter().map(|l| encode_level(&vec![b'z'; 100], l).unwrap().size).collect();
+        assert!(sizes.windows(2).all(|w| w[0] <= w[1]), "{sizes:?}");
+        assert!(encode(&vec![b'a'; MAX_BYTES + 1]).is_none(), "encode keeps its old limit");
     }
 
     /// Writes symbols as PBM files into the folder named by `QR_DUMP`, for an outside scanner (OpenCV, a phone) to read back.

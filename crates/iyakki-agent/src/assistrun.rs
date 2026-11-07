@@ -377,7 +377,7 @@ pub(crate) fn run_loop(backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, mut
                     (env.emit)(RunEvent::Note { text: "This model has no native tool calling; using a plain-text tool protocol instead (it prints a tool block and IYAKKI runs it).".into() });
                     continue;
                 }
-                return finish(RunEvent::Failed { error: e });
+                return finish(RunEvent::Failed { error: crate::providererr::plain_error(&backend.provider_name(), &e) });
             }
         };
         let (inp, gen) = match usage_reported {

@@ -48,6 +48,8 @@ pub const TILE: usize = SB + 500;
 pub const LOGOUT: usize = SB + 600;
 pub const DELETE: usize = SB + 700;
 pub const STOP: usize = SB + 800;
+/// The popup's "Build it here (k3s)" button of the browser audio and video card.
+pub const BUILD: usize = SB + 760;
 /// The popup's Remove button of the voice pack (Undo: the old speech engines come back, the models it pulled are deleted).
 pub const REMOVE: usize = SB + 850;
 /// The cluster switcher of the popup owns the codes from here (its list rows follow); "Show all AI tools" is the link under the filters.
@@ -281,7 +283,7 @@ impl Gk {
             Item::Kokoro | Item::VoicePack => Gk::Voices,
             Item::ClaudeCode | Item::Copilot | Item::Gitea | Item::Matrix => Gk::Agents,
             Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Registry => Gk::Data,
-            Item::Ffmpeg => Gk::Media,
+            Item::Ffmpeg | Item::FfmpegLibs => Gk::Media,
             Item::GpuVulkan | Item::GpuNvidia | Item::MacFirmware | Item::MacCamera => Gk::Hardware,
             Item::LinuxApps | Item::LinuxWindows => Gk::LinuxApps,
             Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek | Item::FwHardware => Gk::Hardware,
@@ -304,7 +306,7 @@ pub fn icon_of(item: Item) -> Icon {
         Item::Lemonade | Item::Ollama => Icon::Chat,
         Item::MacHost | Item::MacFirmware => Icon::Devices,
         Item::GpuVulkan | Item::GpuNvidia => Icon::System,
-        Item::Ffmpeg => Icon::Media,
+        Item::Ffmpeg | Item::FfmpegLibs => Icon::Media,
         Item::MacCamera => Icon::Camera,
         Item::LinuxApps | Item::LinuxWindows => Icon::Ide,
         Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek | Item::FwHardware => Icon::Devices,
@@ -439,6 +441,7 @@ pub fn open_target(item: Item) -> Option<(&'static str, &'static str)> {
         Item::Kokoro | Item::VoicePack => Some(("voice", "")),
         Item::Lemonade | Item::Ollama => Some(("settings", "modelhost:pc")),
         Item::Ffmpeg => Some(("media", "")),
+        Item::FfmpegLibs => Some(("browser", "")),
         Item::MacHost => Some(("settings", "modelhost:mac")),
         Item::GpuVulkan | Item::GpuNvidia => Some(("brand:gpu", "")),
         Item::MacFirmware => Some(("brand:mac", "")),
@@ -456,7 +459,7 @@ pub fn open_target(item: Item) -> Option<(&'static str, &'static str)> {
 /// "Where it goes", for the details.
 pub fn where_text(item: Item) -> &'static str {
     match item {
-        Item::Node | Item::Python | Item::DuckDb | Item::ClaudeCode | Item::Copilot | Item::Ollama | Item::Ffmpeg => "the tools folder on the data partition, linked into the command path (no sudo)",
+        Item::Node | Item::Python | Item::DuckDb | Item::ClaudeCode | Item::Copilot | Item::Ollama | Item::Ffmpeg | Item::FfmpegLibs => "the tools folder on the data partition, linked into the command path (no sudo)",
         Item::K3s => "the data partition: the managed dev cluster",
         Item::Elasticsearch => "the cluster, namespace iyakki-data",
         Item::OpenSearch => "the cluster, namespace iyakki-data (ClusterIP only, port 9200, 5 GB volume, about 1.5 GB of memory)",
@@ -579,6 +582,8 @@ pub struct Setup {
     pub request: Option<(String, String)>,
     /// What the cluster supervisor says now (read each frame: a lock and a copy); None until read, and in tests.
     pub live_k3s: Option<Svc>,
+    /// The version map the "Build it here" route reads (None: the image's own; tests give one).
+    pub av_map: Option<String>,
     ctl_slot: Arc<Mutex<Option<Result<String, String>>>>,
     /// Deletes a model of this machine's Lemonade (the voice pack's Remove); tests give a fake.
     pub lemonade_delete: Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>,
@@ -646,6 +651,7 @@ impl Setup {
             launch: None,
             request: None,
             live_k3s: None,
+            av_map: None,
             ctl_slot: Default::default(),
             lemonade_delete: Arc::new(iyakki_agent::voicepack::delete_local_model),
             started: false,
@@ -1184,6 +1190,13 @@ impl Setup {
 
     fn start_all(&mut self, cx: &AppCx) {
         let Some(c) = self.confirm.take() else { return };
+        // the consent text of "Build it here (k3s)" was read and confirmed: the install job takes the build route (avbuild.rs)
+        if c.title == iyakki_agent::avbuild::CONFIRM_TITLE {
+            if let Err(e) = iyakki_agent::avbuild::write_request(cx.services.dir()) {
+                self.say(format!("Could not record the request: {e}"), false);
+                return;
+            }
+        }
         let mut present: HashSet<Item> = self.facts.iter().flat_map(|f| f.presence.iter().filter(|(_, p)| p.present()).map(|(i, _)| *i)).collect();
         let mut started = 0usize;
         let mut err = None;
@@ -1321,6 +1334,17 @@ impl Setup {
                 }
                 self.popup = None;
                 self.confirm = Some(self.plan_for(vec![item], "Voice: Whisper tiny + Kokoro: read, then install".into()));
+            }
+            // the browser's add-on: the administrator reads what was found (or where to put the file) and confirms the licences first
+            Act::Install | Act::Retry | Act::Reinstall | Act::Update | Act::OwnCopy if item == Item::FfmpegLibs => {
+                if self.running_job(item).is_some() {
+                    self.say("The browser add-on is being installed: its progress is beside the clock.", false);
+                    return;
+                }
+                self.popup = None;
+                let mut c = self.plan_for(vec![item], "Browser audio and video: read, then confirm".into());
+                c.review = iyakki_agent::avaddon_install::plan(&iyakki_agent::avaddon_install::Places::here(cx.services.dir())).review;
+                self.confirm = Some(c);
             }
             Act::Install | Act::Retry | Act::Reinstall | Act::Update | Act::OwnCopy => {
                 self.confirm_own = None;
@@ -1523,6 +1547,33 @@ impl Setup {
     }
 
     /// The popup's Stop button (an administrator; the primary button of a running cluster is Open).
+    /// "Build it here (k3s)" on the browser audio and video card: gate (k3s running, a map entry for this IYAKKI version), then the consent text with
+    /// its button. Nothing starts before the button; the package is only built and copied to /local/packages (the usual review and confirm follow).
+    pub fn build_here(&mut self, cx: &AppCx) {
+        if !self.admin {
+            self.say(format!("Only an administrator can build software for the whole machine (your role is {}). Ask an administrator.", cx.session.role.name()), false);
+            return;
+        }
+        if self.running_job(Item::FfmpegLibs).is_some() {
+            self.say("The browser add-on is being installed or built: its progress is beside the clock.", false);
+            return;
+        }
+        if self.card(Item::K3s).running != Some(true) {
+            self.say(iyakki_agent::avbuild::NO_K3S_TEXT, false);
+            return;
+        }
+        let map = self.av_map.clone().unwrap_or_else(|| std::fs::read_to_string(std::path::Path::new(iyakki_agent::avbuild::BRIDGE_DIR).join("versions.map")).unwrap_or_default());
+        match iyakki_agent::avbuild::lookup(&map, iyakki_agent::avbuild::IMAGE_VERSION) {
+            Ok(entry) => {
+                self.popup = None;
+                let mut c = self.plan_for(vec![Item::FfmpegLibs], iyakki_agent::avbuild::CONFIRM_TITLE.into());
+                c.review = iyakki_agent::avbuild::consent_text(&entry, std::env::consts::ARCH);
+                self.confirm = Some(c);
+            }
+            Err(e) => self.say(e, false),
+        }
+    }
+
     pub fn stop(&mut self, item: Item, cx: &AppCx) {
         if !self.admin {
             self.say(format!("Only an administrator can stop the cluster (your role is {}). Ask an administrator.", cx.session.role.name()), false);
@@ -1740,6 +1791,7 @@ impl Setup {
             Event::Tab(POP_ALL) => self.ask_category(Gk::of(item)),
             Event::Tab(n) if *n == PRIMARY + idx => self.press(item, cx),
             Event::Tab(n) if *n == STOP + idx => self.stop(item, cx),
+            Event::Tab(n) if *n == BUILD + idx && item == Item::FfmpegLibs => self.build_here(cx),
             Event::Tab(n) if *n == REMOVE + idx && item == Item::VoicePack => self.remove_voice_pack(cx),
             Event::Tab(n) if *n == DETAILS + idx => {
                 if !self.details.remove(&item) {
@@ -1942,6 +1994,7 @@ fn short_about(item: Item) -> &'static str {
         Item::GpuVulkan => "Let pods in the cluster use this machine's GPU through Vulkan.",
         Item::GpuNvidia => "NVIDIA's own driver, so pods can use CUDA.",
         Item::Ffmpeg => "Plays video and audio in IYAKKI (MEDIA tile, camera recordings).",
+        Item::FfmpegLibs => "H.264 video and AAC sound in the BROWSER tile (TikTok and similar pages).",
         Item::MacFirmware => "Apple's Wi-Fi and Bluetooth firmware for a Mac, fetched for your own Mac at your request.",
         Item::MacCamera => "The built-in FaceTime HD camera of this MacBook: one click loads the camera driver (part of this image) and fetches Apple's firmware from Apple.",
         Item::LinuxApps => "Run Debian or Ubuntu programs in a sandbox of their own.",
@@ -1976,3 +2029,7 @@ mod cluster_tests;
 #[cfg(test)]
 #[path = "store_setup_voice_tests.rs"]
 mod voice_tests;
+
+#[cfg(test)]
+#[path = "store_setup_avbuild_tests.rs"]
+mod avbuild_tests;

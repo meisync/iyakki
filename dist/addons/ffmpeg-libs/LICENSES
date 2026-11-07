@@ -1,0 +1,8 @@
+What is in this image for the add-on, and under which licence
+-------------------------------------------------------------
+libgstlibav.so (/usr/lib/iyakki-av/gstreamer-1.0): GStreamer's gst-libav plugin, LGPL-2.1-or-later. It is glue code that calls FFmpeg's
+  libraries; it contains no codec. It is inactive: GStreamer does not scan its folder until the add-on is installed.
+package-av-addon.sh, iyakki-av-check, iyakki_web_av_addon_libs.fragment, this README: IYAKKI, Apache-2.0.
+FFmpeg (libavcodec and the others): NOT in this image. LGPL-2.1-or-later when configured with --disable-gpl --disable-nonfree, which the
+  installer checks in the archive's NOTICE; its texts and source offer travel with the archive you supply.
+Corresponding source of the plugin: Buildroot's legal-info of this image (gst1-libav 1.24.x).

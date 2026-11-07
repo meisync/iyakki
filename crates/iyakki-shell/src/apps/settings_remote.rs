@@ -13,7 +13,7 @@ pub(super) struct RemotePanel {
     /// Whether the switch was on when the page was last drawn (for the button).
     on: bool,
     pub(super) scroll: f32,
-    max: f32,
+    pub(super) max: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,7 +58,7 @@ impl SettingsApp {
     }
 
     fn remote_ips() -> Vec<String> {
-        iyakki_devctl::ipv4_addresses().into_iter().map(|(_, ip)| ip).filter(|ip| !ip.starts_with("127.")).collect()
+        wa::local_ips()
     }
 
     pub(super) fn handle_remote(&mut self, k: &Key, cx: &AppCx) {

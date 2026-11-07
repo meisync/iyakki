@@ -792,12 +792,24 @@ impl Site {
         let mut h = String::new();
         h.push_str("<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">");
         h.push_str(&format!("<title>{} - {}</title>", esc(&self.cfg.name), esc(&title)));
-        h.push_str("<style>:root{color-scheme:light dark}body{font:16px system-ui,sans-serif;margin:0 auto;max-width:56rem;padding:1rem}h1{font-size:1.2rem;word-break:break-all}table{width:100%;border-collapse:collapse}td,th{padding:.55rem .4rem;border-bottom:1px solid #8884;text-align:left}td.n,th.n{text-align:right;white-space:nowrap}a{text-decoration:none;word-break:break-all}a.d{font-weight:600}.m{opacity:.7;font-size:.85rem}form{margin:1rem 0;padding:.6rem;border:1px solid #8886;border-radius:8px}input,button{font:inherit;margin:.2rem 0}@media(max-width:520px){.hide{display:none}}</style>");
+        h.push_str("<style>:root{color-scheme:light dark}body{font:16px system-ui,sans-serif;margin:0 auto;max-width:56rem;padding:1rem}h1{font-size:1.2rem;word-break:break-all}table{width:100%;border-collapse:collapse}td,th{padding:.55rem .4rem;border-bottom:1px solid #8884;text-align:left}td.n,th.n{text-align:right;white-space:nowrap}a{text-decoration:none;word-break:break-all}a.d{font-weight:600}.m{opacity:.7;font-size:.85rem}form{margin:1rem 0;padding:.6rem;border:1px solid #8886;border-radius:8px}input,button{font:inherit;margin:.2rem 0}@media(max-width:520px){.hide{display:none}}.bar{display:flex;flex-wrap:wrap;gap:.6rem;margin:.4rem 0 1rem}.bar form{flex:1 1 17rem;border:1px solid #8886;border-radius:.6rem;padding:.55rem .7rem}</style>");
         h.push_str(&format!("<h1>{} <span class=m>{}</span></h1>", esc(&self.cfg.name), esc(&title)));
         if !g.rel.is_empty() {
             let mut up = g.rel.clone();
             up.pop();
             h.push_str(&format!("<p><a class=d href=\"{}\">&larr; parent folder</a></p>", esc(&self.href(g, &up, true))));
+        }
+        // the upload and new-folder forms come BEFORE the list: with hundreds of files the person must not scroll to the bottom to find them
+        let here = esc(&self.href(g, &g.rel, true));
+        let mut bar = String::new();
+        if self.cfg.upload {
+            bar.push_str(&format!("<form method=post action=\"{here}\" enctype=multipart/form-data><b>Upload files</b><br><input type=file name=f multiple required> <button>Upload</button><div class=m>Up to {} MB each. Files with the same name are {}.</div></form>", self.cfg.max_upload_mb, if self.cfg.overwrite { "replaced" } else { "refused" }));
+        }
+        if self.cfg.upload && self.cfg.mkdir {
+            bar.push_str(&format!("<form method=post action=\"{here}\"><b>New folder</b><br><input name=mkdir maxlength=100 required> <button>Create</button></form>"));
+        }
+        if !bar.is_empty() {
+            h.push_str(&format!("<div class=bar>{bar}</div>"));
         }
         h.push_str("<table><tr><th>Name<th class=n>Size<th class=\"n hide\">Modified");
         for e in &es {
@@ -812,13 +824,6 @@ impl Site {
         }
         if truncated {
             h.push_str("<p class=m>Only the first 5000 entries are listed.</p>");
-        }
-        let here = esc(&self.href(g, &g.rel, true));
-        if self.cfg.upload {
-            h.push_str(&format!("<form method=post action=\"{here}\" enctype=multipart/form-data><b>Upload files</b><br><input type=file name=f multiple required> <button>Upload</button><div class=m>Up to {} MB each. Files with the same name are {}.</div></form>", self.cfg.max_upload_mb, if self.cfg.overwrite { "replaced" } else { "refused" }));
-        }
-        if self.cfg.upload && self.cfg.mkdir {
-            h.push_str(&format!("<form method=post action=\"{here}\"><b>New folder</b><br><input name=mkdir maxlength=100 required> <button>Create</button></form>"));
         }
         let mut r = Reply::bytes(200, "text/html; charset=utf-8", h.into_bytes());
         r.headers.push(("Cache-Control".into(), "no-store".into()));
@@ -840,6 +845,9 @@ impl Site {
         let base = if from_form { name.rsplit(['/', '\\']).next().unwrap_or("").trim() } else { name };
         if !clean_part(base) || base.starts_with('.') || base.len() > 200 {
             return Err(simple(400, "That file name cannot be used."));
+        }
+        if self.cfg.package_drop && !crate::sharedfolder::package_name_ok(base) {
+            return Err(simple(400, "This share takes only the audio and video add-on package (ffmpeg-libs-...-linux-musl-<processor>.tar.gz) and its .sha256 file."));
         }
         Ok(base.to_string())
     }

@@ -316,9 +316,8 @@ impl Shell {
         if matches!(phase, Phase::Gone) {
             return;
         }
-        let rows: Vec<Row> = self.startup.reg.snapshot().into_iter().filter(|r| r.scope == Scope::System && !matches!(r.state, StartupState::Disabled | StartupState::Stopped)).collect();
-        let ready = rows.iter().filter(|r| r.state == StartupState::Ready).count();
-        let pending: Vec<Row> = rows.iter().filter(|r| r.state.busy() || r.state.failed()).cloned().collect();
+        let view = startup::login_view(self.startup.reg.snapshot());
+        let (ready, total, pending, wifi_bg) = (view.ready, view.total, view.pending, view.wifi_background);
         let n_fields = if let Screen::Login(f) | Screen::Setup(f) = &self.screen { f.fields.len() } else { 2 };
         let card = auth_card(w, h, s, n_fields);
         let r = login_rect(w, h, s, card, self.env.data_volatile);
@@ -334,7 +333,10 @@ impl Shell {
                 if pending.len() > 2 {
                     parts.push(format!("+{} more", pending.len() - 2));
                 }
-                format!("Starting {} of {} ready · {}", ready, rows.len(), parts.join(" · "))
+                if wifi_bg {
+                    parts.push("Wi-Fi: starting in the background".to_string());
+                }
+                format!("Starting {} of {} ready · {}", ready, total, parts.join(" · "))
             }
         };
         let text = g.fit(14.0 * s, &text, Face::Sans, r.w - 30.0 * s);

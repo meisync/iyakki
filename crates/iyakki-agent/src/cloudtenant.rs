@@ -136,7 +136,7 @@ impl TenantConfig {
         if !dns_label(&self.tenant) || self.tenant.len() > 40 {
             return Err(format!("tenant \"{}\": use lower-case letters, digits and - (at most 40, starting with a letter)", self.tenant));
         }
-        self.isolation.check()?;
+        self.isolation.deployable()?;
         if let Some(u) = &self.vault_url {
             crate::cloudvault::check_url(u)?;
         }
@@ -321,6 +321,8 @@ pub fn manifests(c: &TenantConfig) -> Result<String, String> {
     // what the browser may supply to the tenant's sessions (the web server of the pod reads it)
     let media = if c.media == crate::browsermedia::Allow::Allow { "allow" } else { "deny" };
     let env = if env.is_empty() { format!("          env:\n            - {{ name: IYAKKI_BROWSER_MEDIA, value: {media} }}\n") } else { format!("{env}            - {{ name: IYAKKI_BROWSER_MEDIA, value: {media} }}\n") };
+    // where the pod reads the tenant's configuration from (`tenantconfig::enforce::data_dir_from_env`): the media policy, the egress policy
+    let env = format!("{env}            - {{ name: IYAKKI_TENANT_DATA_DIR, value: /var/lib/iyakki }}\n");
     let mut mounts = "            - { name: data, mountPath: /var/lib/iyakki }\n            - { name: tmp, mountPath: /tmp }\n".to_string();
     let mut vols = "        - name: data\n          persistentVolumeClaim: { claimName: iyakki-data }\n        - name: tmp\n          emptyDir: {}\n        - name: accounts\n          secret: { secretName: iyakki-accounts }\n".to_string();
     if cloud {

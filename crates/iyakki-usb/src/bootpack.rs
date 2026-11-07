@@ -96,7 +96,7 @@ pub fn extract(image: &Path, out: &Path) -> Result<Vec<Extracted>, String> {
     for it in items.iter().filter(|i| !i.dir) {
         let comps: Vec<&str> = it.path.trim_start_matches('/').split('/').collect();
         let Some(t) = comps.first().and_then(|c| top(c)) else { continue };
-        if comps.len() < 2 {
+        if comps.len() < 2 || crate::fatclone::is_install_media_marker(&it.path) {
             continue;
         }
         if comps.iter().any(|c| !clean_component(c)) {

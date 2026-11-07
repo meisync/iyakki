@@ -1,6 +1,7 @@
 //! IYAKKI supervisor core: host detection, logging, signals, agent task running.
 
 pub mod boot;
+pub mod bootconfirm;
 pub mod bootlog;
 pub use iyakki_storage::crashlog;
 pub mod coldplug;
@@ -19,6 +20,7 @@ pub mod browsertest;
 #[cfg(feature = "shell")]
 pub mod svc;
 pub mod net;
+pub mod cloudnode;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

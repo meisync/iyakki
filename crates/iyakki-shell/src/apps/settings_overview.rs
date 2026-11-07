@@ -62,6 +62,9 @@ impl SettingsApp {
             } else if iyakki_agent::devmode::centre::read_trial(data).is_some_and(|t| t.state == "fell-back") {
                 out.push(Attn { tab: Tab::Updates, title: "The last update did not start, the saved version runs".into(), why: "Open System update to see what happened and what to do.".into() });
             }
+            if let Some(b) = iyakki_agent::store::updatecheck::Report::load(Self::svc(cx).dir()).and_then(|r| r.badge()) {
+                out.push(Attn { tab: Tab::Updates, title: format!("{b} available"), why: "The last check found newer versions. Open System update to see which; nothing is installed until you do it.".into() });
+            }
         }
         if has(Tab::Storage) && self.storage.virtual_disks.is_none() && matches!(iyakki_storage::data_location(&self.storage.roots, &self.storage.data_dir), iyakki_storage::DataLocation::Memory) {
             out.push(Attn { tab: Tab::Storage, title: "Your data is kept in memory only".into(), why: "Accounts, settings and files are forgotten at power-off. Choose a disk to keep them.".into() });

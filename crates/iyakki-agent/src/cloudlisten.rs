@@ -161,6 +161,13 @@ pub struct Options {
     /// Re-read the certificates (and client CAs) from the source this often, so a rotation takes effect by itself. `None`: only on
     /// [`Listener::reload_certs`].
     pub cert_reload: Option<Duration>,
+    /// Tenant resolution: route host (as written in the route, lower case) -> tenant name. Empty: single-tenant listener, nothing below
+    /// applies. When it has entries, EVERY route of the table must be named here (else the table is refused: fail closed), the tenant of
+    /// a connection is found from the route its SNI or Host picks, and a request whose route has no tenant is answered 421.
+    pub tenants: BTreeMap<String, String>,
+    /// Requests and tunnels a tenant may have open at once (only with [`Options::tenants`]); beyond it requests get 503 and passthrough
+    /// connections are closed. One tenant filling its share does not take the shared `max_conns` from the others for longer than it holds it.
+    pub tenant_max_conns: usize,
 }
 
 impl Default for Options {
@@ -177,6 +184,8 @@ impl Default for Options {
             dialer: None,
             client_ca: BTreeMap::new(),
             cert_reload: None,
+            tenants: BTreeMap::new(),
+            tenant_max_conns: 64,
         }
     }
 }
@@ -197,6 +206,55 @@ struct Inner {
     active: AtomicUsize,
     auth: Arc<mtls::AuthState>,
     closed: AtomicBool,
+    tenant_use: Mutex<HashMap<String, usize>>,
+}
+
+/// One open request or tunnel of a tenant; released when dropped.
+struct TenantSlot {
+    inner: Arc<Inner>,
+    tenant: String,
+}
+
+impl Drop for TenantSlot {
+    fn drop(&mut self) {
+        let mut m = self.inner.tenant_use.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = m.get_mut(&self.tenant) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                m.remove(&self.tenant);
+            }
+        }
+    }
+}
+
+/// Tenant resolution for a route. `Ok(None)`: the listener has no tenants. `Err((code, text))`: refuse.
+fn tenant_enter(inner: &Arc<Inner>, route: &Route) -> Result<Option<TenantSlot>, (u16, String)> {
+    if inner.opts.tenants.is_empty() {
+        return Ok(None);
+    }
+    let Some(t) = inner.opts.tenants.get(&route.host.to_ascii_lowercase()) else {
+        return Err((421, "this host belongs to no tenant of this listener".into()));
+    };
+    let mut m = inner.tenant_use.lock().unwrap_or_else(|e| e.into_inner());
+    let n = m.entry(t.clone()).or_insert(0);
+    if *n >= inner.opts.tenant_max_conns {
+        return Err((503, format!("tenant limit reached ({} open); try again shortly", inner.opts.tenant_max_conns)));
+    }
+    *n += 1;
+    Ok(Some(TenantSlot { inner: inner.clone(), tenant: t.clone() }))
+}
+
+fn check_tenants(t: &RouteTable, o: &Options) -> Result<(), String> {
+    if o.tenants.is_empty() {
+        return Ok(());
+    }
+    if o.tenant_max_conns == 0 {
+        return Err("the per-tenant limit is 0, which would refuse every request".into());
+    }
+    match t.routes.iter().find(|r| !o.tenants.contains_key(&r.host.to_ascii_lowercase())) {
+        Some(r) => Err(format!("route {} has no tenant; with tenants configured every route needs one", r.host)),
+        None => Ok(()),
+    }
 }
 
 fn now() -> i64 {
@@ -285,6 +343,7 @@ impl Listener {
     /// Bind every port the table needs, open them in the gate, load the certificates, and start serving.
     pub fn start(table: RouteTable, source: Arc<dyn CertSource>, gate: Arc<dyn PortGate>, opts: Options) -> Result<Listener, String> {
         table.check(&[])?;
+        check_tenants(&table, &opts)?;
         let wanted = wanted_ports(&table, &opts)?;
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let auth = Arc::new(mtls::AuthState::default());
@@ -308,6 +367,7 @@ impl Listener {
                 active: AtomicUsize::new(0),
                 auth: auth2,
                 closed: AtomicBool::new(false),
+                tenant_use: Mutex::new(HashMap::new()),
             }
         });
         let l = Listener { inner, ports: Mutex::new(BTreeMap::new()) };
@@ -372,6 +432,7 @@ impl Listener {
     /// new table is refused or a port cannot be bound.
     pub fn update(&self, table: RouteTable) -> Result<(), String> {
         table.check(&[])?;
+        check_tenants(&table, &self.inner.opts)?;
         let wanted = wanted_ports(&table, &self.inner.opts)?;
         self.bind_ports(&wanted)?;
         *self.inner.table.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(table);
@@ -404,6 +465,11 @@ impl Listener {
     /// The address a port is really bound to.
     pub fn local_addr(&self, port: u16) -> Option<SocketAddr> {
         self.ports.lock().unwrap_or_else(|e| e.into_inner()).get(&port).map(|h| h.addr)
+    }
+
+    /// How many requests or tunnels the tenant has open right now.
+    pub fn tenant_open(&self, tenant: &str) -> usize {
+        self.inner.tenant_use.lock().unwrap_or_else(|e| e.into_inner()).get(tenant).copied().unwrap_or(0)
     }
 
     /// The ports in use.
@@ -769,6 +835,13 @@ fn serve_connection(inner: &Arc<Inner>, tcp: TcpStream, peer: SocketAddr, port: 
             inner.log(&format!("{peer}: {} is a service of a cluster, not reachable from a local listener; closed", r.host));
             return;
         }
+        let _slot = match tenant_enter(inner, r) {
+            Ok(s) => s,
+            Err((code, why)) => {
+                inner.log(&format!("{peer} tls passthrough {}: {why}, closed ({code})", r.host));
+                return;
+            }
+        };
         match inner.dial(&r.target) {
             Ok(up) => {
                 inner.log(&format!("{peer} tls passthrough {} -> {dest} [access {}]", sni.unwrap_or_default(), access_text(r.access)));
@@ -1191,6 +1264,14 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
             return respond(rd.get_mut(), code, &[], &format!("{why}\n"), keep);
         }
     }
+    // the tenant of this connection is the one of the route it picked; its share of open requests is taken here
+    let _slot = match tenant_enter(inner, route) {
+        Ok(s) => s,
+        Err((code, why)) => {
+            inner.log(&format!("{peer} {method} {host_header}{path} {label}: {why}, {code}"));
+            return respond(rd.get_mut(), code, &[], &format!("{why}\n"), keep);
+        }
+    };
     let upgrade = values(&headers, "upgrade").first().map(|v| v.to_string());
     if upgrade.is_some() && !route.websocket {
         inner.log(&format!("{peer} {method} {host_header}{path} {label}: Upgrade refused, 403"));
@@ -1391,6 +1472,8 @@ mod mtls;
 pub mod pod;
 #[path = "cloudlisten_vault.rs"]
 pub mod vault;
+#[path = "cloudlisten_setup.rs"]
+pub mod setup;
 
 #[cfg(test)]
 #[path = "cloudlisten_tests.rs"]

@@ -176,3 +176,118 @@ fn a_key_of_the_keyboard_asks_for_a_new_picture_at_once_and_the_field_shows_it()
     sh.render(&mut without);
     assert_ne!(with.rgba(), without.rgba(), "the field shows the typed letter in the first picture after the press");
 }
+
+// ---------------------------------------------------------------------------------------------------------- a page's text box
+
+/// A tile standing in for the browser showing a page: a text box, a password box and a button. Like the browser's full engine it
+/// tells the shell with `note_field` while one of the boxes has the focus, and it takes keys as a page does.
+struct PageTile {
+    /// 0 nothing, 1 the text box, 2 the password box
+    focus: u8,
+    typed: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+const PAGE_TEXT: usize = 1;
+const PAGE_PASS: usize = 2;
+const PAGE_BUTTON: usize = 3;
+
+impl App for PageTile {
+    fn title(&self) -> &'static str {
+        "Page"
+    }
+    fn icon(&self) -> Icon {
+        Icon::Chat
+    }
+    fn accent(&self) -> [u8; 4] {
+        rgb(0, 255, 0)
+    }
+    fn hint(&self) -> String {
+        String::new()
+    }
+    fn handle(&mut self, ev: &Event, _cx: &AppCx) -> Flow {
+        match ev {
+            Event::Tab(PAGE_TEXT) => self.focus = 1,
+            Event::Tab(PAGE_PASS) => self.focus = 2,
+            Event::Tab(PAGE_BUTTON) => self.focus = 0,
+            Event::Key(Key::Char(c)) if self.focus != 0 => self.typed.lock().unwrap().push(*c),
+            Event::Key(Key::Backspace) if self.focus != 0 => {
+                self.typed.lock().unwrap().pop();
+            }
+            _ => {}
+        }
+        Flow::Stay
+    }
+    fn render(&mut self, g: &mut Gfx, a: R, _s: f32, _cx: &AppCx, _tick: u64) {
+        let (text, pass, button) = (R::new(a.x + 20.0, a.y + 20.0, 300.0, 40.0), R::new(a.x + 20.0, a.y + 80.0, 300.0, 40.0), R::new(a.x + 20.0, a.y + 140.0, 120.0, 40.0));
+        g.hit(text, Event::Tab(PAGE_TEXT), "page text box");
+        g.hit(pass, Event::Tab(PAGE_PASS), "page password box");
+        g.hit(button, Event::Tab(PAGE_BUTTON), "page button");
+        if self.focus != 0 {
+            crate::ctxmenu::note_field(crate::ctxmenu::FieldNote { rect: R::new(a.x, a.y, 0.0, 0.0), id: 9540, focused: true, has_selection: false, empty: false, secret: self.focus == 2 });
+        }
+    }
+}
+
+fn page_shell(tag: &str) -> (Shell, Gfx, std::sync::Arc<std::sync::Mutex<String>>) {
+    let (mut sh, _) = shell_with_users(tag);
+    login(&mut sh, "root", "rootpass12");
+    let typed = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    sh.screen = Screen::App(Box::new(PageTile { focus: 0, typed: typed.clone() }), PApp::Chat);
+    sh.take_stale();
+    (sh, Gfx::new(1280, 720), typed)
+}
+
+fn tap(sh: &mut Shell, g: &mut Gfx, label: &str) {
+    sh.osk.touched(sh.tick);
+    click(sh, g, label);
+    lift(sh);
+}
+
+#[test]
+fn a_tap_on_a_text_box_in_a_page_opens_the_keyboard_and_its_keys_reach_the_box() {
+    let (mut sh, mut g, typed) = page_shell("osk-page-text");
+    assert!(!has(&mut sh, &mut g, "key q"));
+    tap(&mut sh, &mut g, "page text box");
+    assert!(has(&mut sh, &mut g, "key q"), "the keyboard is up for the page's box");
+    type_on_screen(&mut sh, &mut g, "hi");
+    click(&mut sh, &mut g, "key backspace");
+    lift(&mut sh);
+    type_on_screen(&mut sh, &mut g, "ey");
+    assert_eq!(*typed.lock().unwrap(), "hey", "the keys arrive as a physical keyboard's do");
+}
+
+#[test]
+fn a_tap_on_a_password_box_in_a_page_opens_it_too_and_the_box_is_a_secret_field() {
+    let (mut sh, mut g, typed) = page_shell("osk-page-pass");
+    tap(&mut sh, &mut g, "page password box");
+    assert!(has(&mut sh, &mut g, "key q"));
+    assert!(sh.fields.iter().any(|f| f.focused && f.secret), "the developer state sees a secret field, never its text");
+    type_on_screen(&mut sh, &mut g, "pw");
+    assert_eq!(*typed.lock().unwrap(), "pw");
+}
+
+#[test]
+fn a_tap_on_a_button_of_the_page_opens_nothing_and_a_blur_closes_the_keyboard() {
+    let (mut sh, mut g, _) = page_shell("osk-page-blur");
+    tap(&mut sh, &mut g, "page button");
+    assert!(!has(&mut sh, &mut g, "key q") && !has(&mut sh, &mut g, "keyboard"), "no box has the focus: no keyboard, no button");
+    tap(&mut sh, &mut g, "page text box");
+    assert!(has(&mut sh, &mut g, "key q"));
+    // a tap elsewhere in the page (the box loses the focus)
+    tap(&mut sh, &mut g, "page button");
+    assert!(!has(&mut sh, &mut g, "key q"), "the focus left the box: the keyboard goes");
+    assert!(!has(&mut sh, &mut g, "keyboard"));
+}
+
+#[test]
+fn a_mouse_click_on_a_text_box_in_a_page_opens_no_keyboard_but_the_button_does() {
+    let (mut sh, mut g, typed) = page_shell("osk-page-mouse");
+    click(&mut sh, &mut g, "page text box");
+    lift(&mut sh);
+    assert!(!has(&mut sh, &mut g, "key q"), "a click does not open it");
+    assert!(has(&mut sh, &mut g, "keyboard"), "the button is offered");
+    click(&mut sh, &mut g, "keyboard");
+    assert!(has(&mut sh, &mut g, "key q"));
+    click(&mut sh, &mut g, "key z");
+    assert_eq!(*typed.lock().unwrap(), "z");
+}

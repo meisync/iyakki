@@ -466,6 +466,61 @@ fn a_changed_ruleset_waits_sixty_seconds_for_keep_and_then_comes_back() {
 }
 
 #[test]
+fn only_a_change_that_lets_more_in_is_recognised_as_opening() {
+    let mut r = rig();
+    r.e.boot(false);
+    let old = r.e.config().clone();
+    // a new rule, a new preset, looser pings: all opening
+    let mut c = old.clone();
+    c.add(rule(Kind::Ip, "198.51.100.7"));
+    assert!(c.only_opens_from(&old), "a rule added");
+    let mut p = old.clone();
+    p.set_preset(Preset::SharedFolders, true);
+    assert!(p.only_opens_from(&old), "a preset switched on");
+    let mut ping = old.clone();
+    ping.ping = Ping::Anyone;
+    assert!(ping.only_opens_from(&old), "pings answered for anyone");
+    // a rule that stays, with a comment change only
+    let mut base = old.clone();
+    base.add(rule(Kind::Ip, "198.51.100.7"));
+    let mut commented = base.clone();
+    commented.rules[0].comment = "my note".into();
+    assert!(commented.only_opens_from(&base), "a note changes nothing");
+    // tightening: removing a rule, narrowing it, a shorter end time, a preset off, firewall turned on, pings stricter, containers distrusted
+    let mut gone = base.clone();
+    gone.rules.clear();
+    assert!(!gone.only_opens_from(&base), "a rule removed");
+    let mut narrow = base.clone();
+    narrow.rules[0].ports = "22".into();
+    assert!(!narrow.only_opens_from(&base), "a rule narrowed to one port");
+    let mut timed = base.clone();
+    timed.rules[0].expires = 5000;
+    assert!(!timed.only_opens_from(&base), "a rule that now ends");
+    let mut off = base.clone();
+    off.presets.clear();
+    assert!(!off.only_opens_from(&p), "a preset switched off");
+    let mut disabled = base.clone();
+    disabled.enabled = false;
+    assert!(!disabled.only_opens_from(&base) && !base.only_opens_from(&disabled), "turning the firewall off or on is never 'only opens'");
+    let mut stricter = old.clone();
+    stricter.ping = Ping::Off;
+    assert!(!stricter.only_opens_from(&old), "pings stricter than before");
+    let mut distrust = old.clone();
+    distrust.trust_containers = false;
+    assert!(!distrust.only_opens_from(&old), "containers no longer trusted");
+    // a longer end time or no end time is opening
+    let mut a = old.clone();
+    let mut t = rule(Kind::Ip, "198.51.100.9");
+    t.expires = 1000;
+    a.add(t);
+    let mut b = a.clone();
+    b.rules[0].expires = 2000;
+    assert!(b.only_opens_from(&a), "a longer end time");
+    b.rules[0].expires = 0;
+    assert!(b.only_opens_from(&a), "no end time at all");
+}
+
+#[test]
 fn keep_saves_and_revert_by_hand_restores() {
     let mut r = rig();
     r.e.boot(false);
@@ -963,4 +1018,22 @@ fn no_direct_link_means_no_direct_rules_and_a_made_up_name_never_reaches_a_rule(
     assert!(t.contains("enx001122334455") && !t.contains("bad name") && !t.contains("a;b") && !t.contains("waytoolong"), "{t}");
     // the default rules are unchanged by the zone: the same text with a zone only adds lines
     assert!(t.lines().filter(|l| l.contains("direct link")).count() == 5);
+}
+
+// ------------------------------------------------------------------ internet sharing zone
+
+#[test]
+fn the_sharing_zone_lets_in_only_dhcp_and_dns_on_the_shared_interface() {
+    let ctx = Ctx { share_ifaces: vec!["enx00e04c680001".into()], ..Ctx::default() };
+    let b = build(&Config::default(), &Resolved::default(), &ctx).unwrap();
+    let rs = &b.ruleset;
+    let i = "enx00e04c680001";
+    assert!(crate::ruleset::eval(rs, &pkt(i, "10.42.0.10", 17, 67)), "DHCP");
+    assert!(crate::ruleset::eval(rs, &pkt(i, "10.42.0.10", 17, 53)), "DNS");
+    for (l4, port) in [(6u8, 22u16), (6, 53), (6, 7979), (6, 8443), (17, 5353), (17, 7980), (1, 0)] {
+        assert!(!crate::ruleset::eval(rs, &pkt(i, "10.42.0.10", l4, port)), "{l4}/{port} must stay blocked for a device that uses the shared internet");
+    }
+    assert!(!crate::ruleset::eval(rs, &pkt("eth0", "10.42.0.10", 17, 67)), "only on the shared interface");
+    let none = build(&Config::default(), &Resolved::default(), &Ctx { share_ifaces: vec!["a;b".into()], ..Ctx::default() }).unwrap();
+    assert!(!none.ruleset.to_text().contains("sharing:"), "a made-up name never reaches a rule");
 }

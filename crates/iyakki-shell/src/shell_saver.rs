@@ -64,6 +64,8 @@ pub(super) struct SaverUi {
     clock_text: String,
     clock_text_at: u64,
     last_reason: String,
+    /// Power profile and sleep after idle (`shell_power.rs`).
+    pub(super) pw: super::power_impl::PowerIdle,
 }
 
 impl Default for SaverUi {
@@ -92,6 +94,7 @@ impl Default for SaverUi {
             clock_text: String::new(),
             clock_text_at: u64::MAX,
             last_reason: String::new(),
+            pw: Default::default(),
         }
     }
 }
@@ -220,7 +223,7 @@ impl Shell {
     }
 
     /// Something the person is watching, listening to or has to answer keeps the screen on. The reason, for the log and the tests.
-    fn saver_keep_on(&self) -> Option<&'static str> {
+    pub(super) fn saver_keep_on(&self) -> Option<&'static str> {
         match &self.screen {
             Screen::HwCheck(_) => return Some("hardware check"),
             Screen::Setup(_) => return Some("first-run setup"),
@@ -287,6 +290,10 @@ impl Shell {
         if let Some(to) = self.saver.m.step(now, &cfg, self.saver.on_battery, keep.is_some()) {
             log::info!("screen: {:?} -> {:?}{}", from, to, if self.saver.last_reason.is_empty() { String::new() } else { format!(" (kept on by {})", self.saver.last_reason) });
             self.saver_apply(to);
+        }
+        if self.power_idle(now, self.saver.m.idle_secs(now)) {
+            // the wake-up counts as input
+            self.saver.m.activity(now);
         }
         if self.saver.m.stage() == Stage::Saver {
             let every = 1000 / u64::from(saver::fps(self.saver.on_battery, self.saver.remote).max(1));
@@ -385,6 +392,7 @@ impl Shell {
             self.saver.swallow_up = false;
         }
         self.saver.m.activity(now);
+        iyakki_agent::touchfix::note_input();
         let stage = self.saver.m.stage();
         if stage == Stage::Awake && !self.saver.m.in_grace(now) {
             return false;

@@ -1291,3 +1291,325 @@ fn the_dry_run_of_the_gate_shows_the_rules_for_the_ports_without_touching_the_fi
     let none = gate::FirewallGate::dry_run(&base, &[], gate::GateReach::Anywhere, &Ctx::default()).unwrap();
     assert!(!none.contains("domain listener"), "{none}");
 }
+
+// ------------------------------------------------------------------------------------------------------------ wiring: `cloud listen` flags -> setup
+
+const KEYHEX: &str = "0101010101010101010101010101010101010101010101010101010101010101";
+
+struct GateLog {
+    calls: Calls,
+    gate: Arc<gate::FirewallGate>,
+}
+
+struct Rig {
+    vault: FakeVault,
+    gate: Option<Result<GateLog, String>>,
+    dialer: Option<Arc<dyn ServiceDialer>>,
+    gate_asked: Arc<Mutex<Vec<(gate::GateReach, bool)>>>,
+}
+
+fn args(s: &str) -> Vec<String> {
+    s.split_whitespace().map(String::from).collect()
+}
+
+/// Fakes for every dependency of the setup: the vault, the key file, the environment, the firewall and the pod dialer.
+fn deps(r: &Rig) -> setup::Deps {
+    let v = r.vault.clone();
+    let gate_pick: Result<Arc<dyn PortGate>, String> = match &r.gate {
+        Some(Ok(g)) => Ok(g.gate.clone() as Arc<dyn PortGate>),
+        Some(Err(e)) => Err(e.clone()),
+        None => Err("no firewall in this test".into()),
+    };
+    let asked = r.gate_asked.clone();
+    let dialer = r.dialer.clone();
+    setup::Deps {
+        env: Box::new(|_| None),
+        read_file: Box::new(|p| if p == "member.key" { Ok(KEYHEX.into()) } else { Err(format!("{p}: no such file")) }),
+        vault: Box::new(move |_client, _scope| Box::new(v.clone())),
+        gate: Box::new(move |reach, start| {
+            asked.lock().unwrap().push((reach, start));
+            gate_pick.clone()
+        }),
+        port_forward: Box::new(move |_ns, _kc, _ctx| dialer.clone().ok_or_else(|| "no kubectl".to_string())),
+    }
+}
+
+fn rig_with_gate() -> Rig {
+    let (g, calls) = recording_gate(gate::GateReach::LocalNetwork, None);
+    Rig { vault: FakeVault::default(), gate: Some(Ok(GateLog { calls, gate: g })), dialer: None, gate_asked: Arc::default() }
+}
+
+const VAULT_FLAGS: &str = "--cert-source vault --vault https://vault.internal:8445 --vault-fingerprint ab:cd --tenant acme --vault-user bob --vault-key member.key";
+
+fn started(a: &str, routes: Vec<Route>, r: &Rig) -> Result<Listener, String> {
+    let t = table(routes);
+    let mut s = setup::build(&args(a), &t, &deps(r))?;
+    s.options.log = Arc::new(|_| {});
+    Listener::start(t, s.source, s.gate, s.options)
+}
+
+#[test]
+fn the_vault_source_serves_a_vault_certificate_and_writes_no_key_to_disk() {
+    let up = upstream("a");
+    let p = free_port();
+    let (chain, key) = self_signed(A).unwrap();
+    let r = rig_with_gate();
+    r.vault.put_cert("appcert", &chain, &key);
+    let l = started(&format!("{VAULT_FLAGS} --bind 127.0.0.1 --reach local"), vec![https_route(A, up.port, p, "appcert")], &r).unwrap();
+    let (resp, cert) = tls_get(p, A, &trusting(&[&chain], &[&rustls::version::TLS13]), A, "/").unwrap();
+    assert_eq!((resp.0, cert), (200, der(&chain)));
+    assert!(r.gate_asked.lock().unwrap().iter().all(|(reach, start)| *reach == gate::GateReach::LocalNetwork && !*start));
+    drop(l);
+}
+
+#[test]
+fn a_vault_that_is_down_serves_no_https_and_never_falls_back_to_files() {
+    let up = upstream("a");
+    let p = free_port();
+    let r = rig_with_gate();
+    r.vault.fail("appcert-chain", "the vault did not answer");
+    let l = started(&format!("{VAULT_FLAGS} --bind 127.0.0.1"), vec![https_route(A, up.port, p, "appcert")], &r).unwrap();
+    assert_eq!(l.refused().len(), 1, "{:?}", l.refused());
+    let (chain, _) = self_signed(A).unwrap();
+    assert!(tls_get(p, A, &trusting(&[&chain], &[&rustls::version::TLS13]), A, "/").is_err(), "the handshake fails: nothing is served");
+    assert!(up.seen.lock().unwrap().is_empty());
+    // a file source mixed in is a configuration error, not a fallback
+    let t = table(vec![https_route(A, up.port, p, "appcert")]);
+    let e = setup::build(&args(&format!("{VAULT_FLAGS} --cert-dir /somewhere --bind 127.0.0.1")), &t, &deps(&r)).err().unwrap();
+    assert!(e.contains("one place only"), "{e}");
+}
+
+#[test]
+fn the_vault_source_needs_its_address_user_key_and_scope_and_names_what_is_missing() {
+    let r = rig_with_gate();
+    let t = table(vec![https_route(A, 1, 8443, "c")]);
+    let bad = |a: &str| setup::build(&args(a), &t, &deps(&r)).err().unwrap_or_else(|| panic!("accepted: {a}"));
+    assert!(bad("--cert-source vault --bind 127.0.0.1").contains("--vault URL"));
+    assert!(bad("--cert-source vault --vault http://plain --tenant t --vault-user u --vault-key member.key").contains("not usable"));
+    assert!(bad("--cert-source vault --vault https://v:1 --tenant t --vault-key member.key").contains("--vault-user"));
+    assert!(bad("--cert-source vault --vault https://v:1 --tenant t --vault-user u").contains("--vault-key"));
+    assert!(bad("--cert-source vault --vault https://v:1 --tenant t --vault-user u --vault-key nothere").contains("no such file"));
+    assert!(bad("--cert-source vault --vault https://v:1 --tenant t --vault-user u --vault-key member.key --vault-scope bogus").contains("--vault-scope"));
+    assert!(bad("--cert-source vault --vault https://v:1 --vault-user u --vault-key member.key").contains("IYAKKI_TENANT"));
+    assert!(bad("--cert-source nowhere").contains("file or vault"));
+}
+
+fn vault_mtls_rig(ca1: &Ca, ca2: &Ca, hosts: &[&str]) -> (Rig, HashMap<String, String>) {
+    let r = rig_with_gate();
+    let mut chains = HashMap::new();
+    for h in hosts {
+        let (chain, key) = self_signed(h).unwrap();
+        r.vault.put_cert(&h.replace('.', "-"), &chain, &key);
+        chains.insert(h.to_string(), chain);
+    }
+    r.vault.put("ca-one", &ca1.pem);
+    r.vault.put("ca-two", &ca2.pem);
+    (r, chains)
+}
+
+#[test]
+fn mutual_tls_from_flags_takes_the_client_ca_from_the_vault_and_refuses_bad_and_wrong_tenant_certificates() {
+    let (ca1, ca2) = (make_ca("tenant one"), make_ca("tenant two"));
+    let (r, chains) = vault_mtls_rig(&ca1, &ca2, &[M1, M2]);
+    let up = upstream("t");
+    let p = free_port();
+    let routes = vec![https_route(M1, up.port, p, &M1.replace('.', "-")), https_route(M2, up.port, p, &M2.replace('.', "-"))];
+    let flags = format!("{VAULT_FLAGS} --bind 127.0.0.1 --client-ca {M1}=ca-one --client-ca {M2}=ca-two --route-tenant {M1}=one --route-tenant {M2}=two");
+    let l = started(&flags, routes, &r).unwrap();
+    let cfg = |host: &str, id| with_client(&[&chains[host]], id);
+    assert_eq!(status_of(p, M1, &cfg(M1, Some(client_identity(&ca1, "alice", false)))), Ok(200));
+    assert_eq!(status_of(p, M2, &cfg(M2, Some(client_identity(&ca2, "bob", false)))), Ok(200));
+    let reached = up.seen.lock().unwrap().len();
+    // no certificate, a certificate of the other tenant's CA, an expired one, a certificate of an unknown CA
+    assert_eq!(status_of(p, M1, &cfg(M1, None)), Ok(403));
+    assert_eq!(status_of(p, M1, &cfg(M1, Some(client_identity(&ca2, "bob", false)))), Ok(403), "wrong tenant");
+    assert_eq!(status_of(p, M2, &cfg(M2, Some(client_identity(&ca1, "alice", false)))), Ok(403), "wrong tenant");
+    assert_ne!(status_of(p, M1, &cfg(M1, Some(client_identity(&ca1, "alice", true)))), Ok(200));
+    assert_ne!(status_of(p, M1, &cfg(M1, Some(client_identity(&make_ca("rogue"), "mallory", false)))), Ok(200));
+    assert_eq!(up.seen.lock().unwrap().len(), reached, "no refused request reached the target");
+    assert_eq!((l.tenant_open("one"), l.tenant_open("two")), (0, 0), "refused requests hold no tenant slot");
+}
+
+#[test]
+fn a_client_ca_that_the_vault_cannot_give_turns_every_client_away() {
+    let (ca1, ca2) = (make_ca("tenant one"), make_ca("tenant two"));
+    let (r, chains) = vault_mtls_rig(&ca1, &ca2, &[M1]);
+    r.vault.fail("ca-one", "the vault did not answer");
+    let up = upstream("t");
+    let p = free_port();
+    let l = started(&format!("{VAULT_FLAGS} --bind 127.0.0.1 --client-ca {M1}=ca-one"), vec![https_route(M1, up.port, p, &M1.replace('.', "-"))], &r).unwrap();
+    assert_eq!(status_of(p, M1, &with_client(&[&chains[M1]], Some(client_identity(&ca1, "alice", false)))), Ok(503));
+    assert!(up.seen.lock().unwrap().is_empty());
+    drop(l);
+}
+
+#[test]
+fn a_client_ca_on_a_route_that_is_not_https_is_a_configuration_error() {
+    let r = rig_with_gate();
+    let t = table(vec![route(A, "/", 1, 8080), https_route(B, 1, 8443, "c")]);
+    for a in [format!("--client-ca {A}=ca --bind 127.0.0.1"), "--client-ca nothere.example.org=ca".to_string(), format!("--client-ca {B}")] {
+        assert!(setup::build(&args(&a), &t, &deps(&r)).is_err(), "{a}");
+    }
+    assert!(setup::build(&args(&format!("--client-ca {B}=ca --client-ca {B}=other --bind 127.0.0.1")), &t, &deps(&r)).is_err(), "twice");
+}
+
+#[test]
+fn a_service_route_is_reached_through_the_dialer_the_flags_choose() {
+    struct ToPort(u16, Mutex<Vec<String>>);
+    impl ServiceDialer for ToPort {
+        fn dial(&self, name: &str, port: u16, _t: Duration) -> io::Result<TcpStream> {
+            self.1.lock().unwrap().push(format!("{name}:{port}"));
+            TcpStream::connect(("127.0.0.1", self.0))
+        }
+    }
+    let up = upstream("pod");
+    let d = Arc::new(ToPort(up.port, Mutex::new(Vec::new())));
+    let mut r = rig_with_gate();
+    r.dialer = Some(d.clone());
+    let p = free_port();
+    let l = started("--bind 127.0.0.1 --service-dialer port-forward --namespace iyakki-acme", vec![svc_route(A, "web", p)], &r).unwrap();
+    assert_eq!(http(p, &get(A, "/x")).0, 200);
+    assert_eq!(d.1.lock().unwrap().as_slice(), ["web:80"]);
+    drop(l);
+    // the same route without a dialer is a 502, and the setup says so
+    let t = table(vec![svc_route(A, "web", free_port())]);
+    let s = setup::build(&args("--bind 127.0.0.1"), &t, &deps(&r)).unwrap();
+    assert!(s.options.dialer.is_none() && s.notes.iter().any(|n| n.contains("502")));
+    // a dialer needs its namespace, and a kubectl that is missing is an error
+    assert!(setup::build(&args("--bind 127.0.0.1 --service-dialer port-forward"), &t, &deps(&r)).is_err());
+    assert!(setup::build(&args("--bind 127.0.0.1 --service-dialer cluster-dns"), &t, &deps(&r)).is_err());
+    assert!(setup::build(&args("--bind 127.0.0.1 --service-dialer cluster-dns --namespace iyakki-acme"), &t, &deps(&r)).unwrap().options.dialer.is_some());
+    assert!(setup::build(&args("--bind 127.0.0.1 --service-dialer teleport"), &t, &deps(&r)).is_err());
+    let none = Rig { dialer: None, ..rig_with_gate() };
+    assert!(setup::build(&args("--bind 127.0.0.1 --service-dialer port-forward --namespace iyakki-acme"), &t, &deps(&none)).is_err());
+}
+
+#[test]
+fn without_a_working_firewall_the_listener_does_not_open_any_port() {
+    let up = upstream("a");
+    let p = free_port();
+    let t = table(vec![route(A, "/", up.port, p)]);
+    // the firewall is unavailable: no default fallback to "no gate", even on a loopback bind
+    let r = Rig { gate: Some(Err("the kernel firewall is not available".into())), ..rig_with_gate() };
+    let e = setup::build(&args("--bind 127.0.0.1"), &t, &deps(&r)).err().unwrap();
+    assert!(e.contains("does not open") && e.contains("not available"), "{e}");
+    assert!(TcpListener::bind(("127.0.0.1", p)).is_ok(), "no port was bound");
+    // --no-firewall is for loopback only
+    for bind in ["0.0.0.0", "192.168.1.5", "::"] {
+        let e = setup::build(&args(&format!("--no-firewall --bind {bind}")), &t, &deps(&r)).err().unwrap();
+        assert!(e.contains("loopback"), "{bind}: {e}");
+    }
+    assert!(setup::build(&args("--no-firewall"), &t, &deps(&r)).is_err(), "the default bind is every interface");
+    r.gate_asked.lock().unwrap().clear();
+    let s = setup::build(&args("--no-firewall --bind 127.0.0.1"), &t, &deps(&r)).unwrap();
+    assert!(s.notes.iter().any(|n| n.contains("firewall is not driven")));
+    assert!(r.gate_asked.lock().unwrap().is_empty(), "--no-firewall never asks for the firewall");
+}
+
+#[test]
+fn a_gate_that_refuses_one_port_stops_the_listener_and_the_reach_and_start_flags_reach_the_gate() {
+    let up = upstream("a");
+    let (p1, p2) = (free_port(), free_port());
+    let (g, _) = recording_gate(gate::GateReach::Anywhere, Some(p2));
+    let r = Rig { gate: Some(Ok(GateLog { calls: Arc::default(), gate: g.clone() })), ..rig_with_gate() };
+    let e = started("--bind 127.0.0.1 --reach anywhere --firewall-start", vec![route(A, "/", up.port, p1), route(B, "/", up.port, p2)], &r).err().unwrap();
+    assert!(e.contains("the firewall could not be opened"), "{e}");
+    assert!(TcpListener::bind(("127.0.0.1", p2)).is_ok());
+    assert_eq!(r.gate_asked.lock().unwrap().as_slice(), [(gate::GateReach::Anywhere, true)]);
+    assert!(setup::build(&args("--bind 127.0.0.1 --reach everyone"), &table(vec![]), &deps(&r)).is_err());
+    // with a working gate the ports are opened and closed with the listener
+    let r = rig_with_gate();
+    let calls = r.gate.as_ref().unwrap().as_ref().ok().unwrap().calls.clone();
+    let l = started("--bind 127.0.0.1", vec![route(A, "/", up.port, p1)], &r).unwrap();
+    assert_eq!(calls.lock().unwrap().last().unwrap(), &vec![p1]);
+    drop(l);
+    assert_eq!(calls.lock().unwrap().last().unwrap(), &Vec::<u16>::new());
+}
+
+/// An upstream that holds each request until `release` is sent.
+fn holding_upstream() -> (u16, std::sync::mpsc::Sender<()>, Arc<AtomicUsize>) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let rx = Arc::new(Mutex::new(rx));
+    let held = Arc::new(AtomicUsize::new(0));
+    let h2 = held.clone();
+    std::thread::spawn(move || {
+        for c in l.incoming() {
+            let Ok(c) = c else { continue };
+            let (rx, h) = (rx.clone(), h2.clone());
+            std::thread::spawn(move || {
+                let mut r = BufReader::new(c.try_clone().unwrap());
+                let mut w = c;
+                loop {
+                    let mut l = String::new();
+                    if r.read_line(&mut l).unwrap_or(0) == 0 || l == "\r\n" {
+                        break;
+                    }
+                }
+                h.fetch_add(1, Ordering::SeqCst);
+                let _ = rx.lock().unwrap().recv_timeout(Duration::from_secs(20));
+                let _ = w.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nheld");
+            });
+        }
+    });
+    (port, tx, held)
+}
+
+#[test]
+fn each_tenant_has_its_own_limit_and_a_route_without_a_tenant_is_refused() {
+    let (hold_port, release, held) = holding_upstream();
+    let fast = upstream("fast");
+    let p = free_port();
+    let r = rig_with_gate();
+    let routes = vec![route(A, "/", hold_port, p), route(B, "/", fast.port, p)];
+    let l = started(&format!("--bind 127.0.0.1 --route-tenant {A}=acme --route-tenant {B}=globex --tenant-limit 1"), routes.clone(), &r).unwrap();
+    // acme's first request is held open at its upstream
+    let first = std::thread::spawn(move || http(p, &get(A, "/")).0);
+    let t0 = Instant::now();
+    while held.load(Ordering::SeqCst) == 0 && t0.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(l.tenant_open("acme"), 1);
+    // its second is turned away, the other tenant is not affected
+    let r2 = http(p, &get(A, "/"));
+    assert_eq!(r2.0, 503, "{}", text(&r2));
+    assert_eq!(held.load(Ordering::SeqCst), 1, "the second request never reached the target");
+    assert_eq!(http(p, &get(B, "/")).0, 200);
+    release.send(()).unwrap();
+    assert_eq!(first.join().unwrap(), 200);
+    let t0 = Instant::now();
+    while l.tenant_open("acme") != 0 && t0.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!((l.tenant_open("acme"), l.tenant_open("globex")), (0, 0), "slots are released");
+    drop(l);
+    // every route needs a tenant: from the flags, and in the listener itself (also on update)
+    let e = started(&format!("--bind 127.0.0.1 --route-tenant {A}=acme"), routes.clone(), &r).err().unwrap();
+    assert!(e.contains(B) && e.contains("tenant"), "{e}");
+    assert!(setup::build(&args(&format!("--bind 127.0.0.1 --route-tenant nothere.example.org=x")), &table(routes.clone()), &deps(&r)).is_err());
+    assert!(setup::build(&args(&format!("--bind 127.0.0.1 --route-tenant {A}=a --tenant-limit 0")), &table(routes.clone()), &deps(&r)).is_err());
+    assert!(setup::build(&args("--bind 127.0.0.1 --tenant-limit 5"), &table(routes.clone()), &deps(&r)).is_err());
+    let (mut o, _) = opts();
+    o.tenants.insert(A.into(), "acme".into());
+    let l = Listener::start(table(vec![route(A, "/", fast.port, free_port())]), Arc::new(FileCerts::new(tmp("none"))), Arc::new(NoGate), o).unwrap();
+    assert!(l.update(table(vec![route(A, "/", fast.port, free_port()), route(B, "/", fast.port, free_port())])).is_err(), "a new route without a tenant is refused and nothing changes");
+    assert_eq!(l.ports().len(), 1);
+}
+
+#[test]
+fn a_listener_without_tenants_behaves_as_before_and_the_help_text_lists_the_flags() {
+    let up = upstream("a");
+    let p = free_port();
+    let r = rig_with_gate();
+    let l = started("--bind 127.0.0.1", vec![route(A, "/", up.port, p)], &r).unwrap();
+    assert_eq!(http(p, &get(A, "/")).0, 200);
+    assert_eq!(l.tenant_open("acme"), 0);
+    for f in ["--cert-source", "--vault-key", "--client-ca", "--service-dialer", "--reach", "--no-firewall", "--route-tenant", "--tenant-limit", "does NOT open"] {
+        assert!(setup::USAGE.contains(f), "{f}");
+    }
+    // the command prints its help
+    let mut said = Vec::new();
+    crate::cloudcli::run(&args("listen --help"), &mut |l| said.push(l.to_string())).unwrap();
+    assert!(said.join("\n").contains("--cert-source"));
+}

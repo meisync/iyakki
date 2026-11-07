@@ -12,7 +12,7 @@ use super::{DevKey, DevMode};
 /// How long a request waits for the person at the screen.
 pub const REQUEST_SECS: i64 = 120;
 /// The longest a computer may ask for, and the longest a "once" grant lasts.
-pub const MAX_MINUTES: u32 = 240;
+pub const MAX_MINUTES: u32 = 720;
 pub const ONCE_MAX_SECS: i64 = 3600;
 
 fn kind_text(kind: &str) -> &'static str {
@@ -165,7 +165,7 @@ impl DevMode {
         self.shell_read().grants
     }
 
-    /// Approve the waiting request of `computer` (administrators): for `minutes` (1 to 240), or 0 for one session.
+    /// Approve the waiting request of `computer` (administrators): for `minutes` (1 to 720), or 0 for one session.
     pub fn shell_approve(&self, policy: &Policy, user: &str, computer: &str, minutes: u32) -> Result<ShellGrant, String> {
         Self::need_admin(policy)?;
         let _one_at_a_time = super::keys_lock();
@@ -267,7 +267,7 @@ pub struct AutoShell {
 
 /// The longest the automatic approval may be switched on for, and what the card offers.
 pub const AUTO_MAX_HOURS: u32 = 24;
-pub const AUTO_DEFAULT_HOURS: u32 = 4;
+pub const AUTO_DEFAULT_HOURS: u32 = 8;
 
 impl DevMode {
     /// The computers whose shell requests are approved automatically right now.

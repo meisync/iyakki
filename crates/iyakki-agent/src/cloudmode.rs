@@ -52,6 +52,10 @@ pub enum BootMode {
 
 impl BootMode {
     pub fn parse(cmdline: &str) -> Option<BootMode> {
+        // `iyakki.cloud=1` (the cloud images' kernel line) is the same as `iyakki.mode=cloud`; `iyakki.mode=` beats it when both are given
+        if !cmdline.split_whitespace().any(|t| t.starts_with("iyakki.mode=")) {
+            return cmdline.split_whitespace().any(|t| t == "iyakki.cloud=1").then_some(BootMode::Cloud);
+        }
         let v = cmdline.split_whitespace().find_map(|t| t.strip_prefix("iyakki.mode="))?;
         match v {
             "cloud" => Some(BootMode::Cloud),
@@ -99,7 +103,7 @@ pub fn app_class(app: App) -> Class {
         App::Voice => Hardware(Need::Audio),
         // mounting and partitioning the drives of this computer: pointless over a remote desktop, so hidden in cloud mode
         App::Disks => Hardware(Need::Disks),
-        App::Chat | App::Rag | App::Mcp | App::Cli | App::Users | App::Settings | App::Runs | App::Edit | App::Browser | App::Mesh | App::Scan | App::Skills | App::Usage | App::Calendar | App::System | App::SrePilot | App::Inbox | App::Ide | App::Data | App::Store | App::Dash | App::Flows | App::K8s | App::LinuxWin | App::Lab | App::Git | App::Doctor | App::Checkup | App::Learn => Remote,
+        App::Chat | App::Rag | App::Mcp | App::Cli | App::Users | App::Settings | App::Runs | App::Edit | App::Browser | App::Mesh | App::Scan | App::Skills | App::Usage | App::Calendar | App::System | App::SrePilot | App::Inbox | App::Ide | App::Data | App::Store | App::Dash | App::Flows | App::K8s | App::LinuxWin | App::Lab | App::Git | App::Doctor | App::Checkup | App::Learn | App::DevTools | App::Auth => Remote,
     }
 }
 
@@ -404,6 +408,9 @@ mod tests {
         assert_eq!(BootMode::parse("iyakki.mode=desktop"), Some(BootMode::Desktop));
         assert_eq!(BootMode::parse("iyakki.mode=other"), None);
         assert_eq!(BootMode::parse("quiet"), None);
+        assert_eq!(BootMode::parse("quiet iyakki.cloud=1"), Some(BootMode::Cloud));
+        assert_eq!(BootMode::parse("iyakki.cloud=1 iyakki.mode=desktop"), Some(BootMode::Desktop));
+        assert_eq!(BootMode::parse("iyakki.cloud=0"), None);
         let cloud = Facts { boot: Some(BootMode::Cloud), ..Facts::full() };
         let c = cloud_mode(Setting::Off, &cloud);
         assert!(c.on && c.forced && c.hides_app(App::Media) && c.why.contains("iyakki.mode=cloud"));

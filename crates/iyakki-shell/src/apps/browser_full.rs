@@ -138,7 +138,33 @@ pub struct Full {
     next_script: u32,
     /// The sound doctor: is the page playing, and is the sound connected (see `browser_sound.rs`).
     sound: super::browser_sound::SoundWatch,
+    /// What the page's focused element is, as the last probe found it (see [`TextFocus`], [`PROBE_JS`]).
+    pub text_focus: TextFocus,
+    /// When the next probe of the focused element is due, the probe in flight, and how many quick re-probes follow a tap.
+    probe_due: Option<Instant>,
+    probe_id: Option<(u32, Instant)>,
+    probe_again: u8,
+    /// The next probe also lifts the box (the tap was a finger).
+    lift_next: bool,
 }
+
+/// Whether the page's focused element takes typed text: the on-screen keyboard follows it (`Browser::render_full` tells the shell).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TextFocus {
+    #[default]
+    None,
+    Text,
+    /// A password box: the keyboard opens for it too, and the shell treats it as a secret field.
+    Password,
+}
+
+/// Asks the page which element has the focus (descending into same-origin frames and shadow roots): `"t"` for a text box,
+/// text area or editable block, `"p"` for a password box, `""` for anything else. With `LIFT` true it also scrolls a box that
+/// sits low on the screen up to the top fifth, so the on-screen keyboard does not cover it. Nothing about the value is read.
+pub const PROBE_JS: &str = "(function(l){try{var e=document.activeElement,i=0;while(e&&i++<8){if((e.tagName==='IFRAME'||e.tagName==='FRAME')&&e.contentDocument&&e.contentDocument.activeElement){e=e.contentDocument.activeElement}else if(e.shadowRoot&&e.shadowRoot.activeElement){e=e.shadowRoot.activeElement}else break}\
+if(!e||e.disabled||e.readOnly)return '';var t=(e.tagName||'').toUpperCase(),r='';\
+if(t==='TEXTAREA')r='t';else if(t==='INPUT'){var k=(e.type||'text').toLowerCase();if(k==='password')r='p';else if(['text','search','email','url','tel','number',''].indexOf(k)>=0)r='t'}else if(e.isContentEditable)r='t';\
+if(r&&l){var b=e.getBoundingClientRect();if(b.bottom>innerHeight*0.5)window.scrollBy(0,b.top-innerHeight*0.2)}return r}catch(x){return ''}})(LIFT)";
 
 pub struct Start {
     pub helper: PathBuf,
@@ -215,6 +241,11 @@ impl Full {
             frames: 0,
             log: Default::default(),
             script_results: Vec::new(),
+            text_focus: TextFocus::None,
+            probe_due: None,
+            probe_id: None,
+            probe_again: 0,
+            lift_next: false,
             next_script: 1,
             sound: super::browser_sound::SoundWatch::new(),
         };
@@ -282,6 +313,46 @@ impl Full {
         self.next_script = self.next_script.wrapping_add(1).max(1);
         self.view.send(ToHelper::Script { id, js: js.to_string(), timeout_ms });
         id
+    }
+
+    /// A tap, a click or a focus key happened: look at the page's focused element soon (and once more a moment later, for pages
+    /// that move the focus in a script). `lift` (a finger) scrolls a low box up out of the keyboard's way.
+    fn probe_soon(&mut self, lift: bool) {
+        self.lift_next = lift;
+        self.probe_due = Some(Instant::now() + Duration::from_millis(140));
+        self.probe_again = 1;
+    }
+
+    /// Ask for the focused element's kind now and then, and take the answer. While a box has the focus it is asked again twice
+    /// a second, so a blur by the page (a script, Esc, a navigation) closes the on-screen keyboard.
+    fn probe_text_focus(&mut self) {
+        if let Some((id, sent)) = self.probe_id {
+            if let Some((ok, json)) = self.take_script_result(id) {
+                self.probe_id = None;
+                let was = self.text_focus;
+                self.text_focus = if !ok { TextFocus::None } else if json.trim() == "\"p\"" { TextFocus::Password } else if json.trim() == "\"t\"" { TextFocus::Text } else { TextFocus::None };
+                if self.text_focus != was {
+                    self.redraw = true;
+                }
+                if self.probe_again > 0 {
+                    self.probe_again -= 1;
+                    self.probe_due = Some(Instant::now() + Duration::from_millis(350));
+                } else if self.text_focus != TextFocus::None {
+                    self.probe_due = Some(Instant::now() + Duration::from_millis(500));
+                }
+            } else if sent.elapsed() > Duration::from_secs(3) {
+                self.probe_id = None;
+            }
+            return;
+        }
+        let Some(at) = self.probe_due else { return };
+        if Instant::now() < at || !self.ready {
+            return;
+        }
+        self.probe_due = None;
+        let js = PROBE_JS.replace("LIFT", if self.lift_next { "true" } else { "false" });
+        self.lift_next = false;
+        self.probe_id = Some((self.eval(&js, 1000), Instant::now()));
     }
 
     pub fn shm_path(&self) -> PathBuf {
@@ -401,6 +472,7 @@ impl Full {
         if self.gone.is_some() {
             return;
         }
+        self.probe_text_focus();
         for ev in self.view.poll() {
             match ev {
                 WvEvent::Ready { engine, version } => {
@@ -721,6 +793,7 @@ impl Full {
             self.pressed = false;
             let (px, py) = self.dev(x - self.rect.x.round() as i32, y - self.rect.y.round() as i32);
             self.view.send(ToHelper::Mouse { kind: MouseKind::Up, x: px, y: py, button: proto::BUTTON_LEFT, buttons: 0, mods: 0, clicks: 1 });
+            self.probe_soon(crate::osk::touch_mode());
         }
     }
 
@@ -743,6 +816,9 @@ impl Full {
     }
 
     pub fn key(&mut self, k: &Key) {
+        if matches!(k, Key::Tab | Key::BackTab | Key::Enter | Key::Esc) {
+            self.probe_soon(crate::osk::touch_mode());
+        }
         for m in key_events(k) {
             self.view.send(m);
         }
