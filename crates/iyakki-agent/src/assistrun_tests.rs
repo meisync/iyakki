@@ -1706,6 +1706,66 @@ fn a_row_with_no_automatic_check_goes_to_review_at_once_and_is_not_asked_about_a
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A world whose `run_command` records what it ran; `test` is the workspace's `commands.test` (empty: no project file).
+fn test_cmd_world(tag: &str, test: &str, pass: bool) -> (std::path::PathBuf, crate::boardtools::ProjectTools, Arc<Mutex<Vec<String>>>) {
+    let root = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("iyakki-testcmd-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    if !test.is_empty() {
+        let mut c = crate::workspace::ProjectConfig::default();
+        c.commands.test = test.into();
+        c.save(&root).unwrap();
+    }
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let r2 = ran.clone();
+    let inner = Reg::with(&["read_file", "write_file", "run_command"], 0, Box::new(move |n, a| match n {
+        "run_command" => {
+            r2.lock().unwrap().push(a.to_string());
+            if pass { Ok("test result: ok. 3 passed".into()) } else { Err("test result: FAILED. 1 failed".into()) }
+        }
+        o => Ok(format!("{o} ok")),
+    }));
+    let t = crate::boardtools::ProjectTools::new(inner, &root, "Web", &root.join("FEATURES.md")).with_project_test_command(&[&root]);
+    (root, t, ran)
+}
+
+#[test]
+fn the_workspaces_test_command_checks_a_tests_row_when_one_is_named() {
+    let (root, t, ran) = test_cmd_world("named", "cargo test --lib", true);
+    board_call(&t, "board_add", json!({"prefix": "APP", "title": "Run the unit tests"})).unwrap();
+    let r = board_call(&t, "board_update", json!({"id": "F-APP-01", "status": "done", "comment": "all green"})).unwrap();
+    assert!(r.starts_with("updated F-APP-01"), "{r}");
+    assert_eq!(row_status(&root, "F-APP-01").0, "done");
+    assert!(crate::boardtrack::Tracker::new(&root, &root.join("FEATURES.md")).is_verified("F-APP-01"));
+    let ran = ran.lock().unwrap();
+    assert!(ran.len() == 1 && ran[0].contains("cargo") && ran[0].contains("--lib"), "{ran:?}");
+    drop(ran);
+    // a failing command refuses the claim and the row stays as it was
+    let (root2, t2, _) = test_cmd_world("named-fail", "cargo test", false);
+    board_call(&t2, "board_add", json!({"prefix": "APP", "title": "Run the unit tests"})).unwrap();
+    assert!(board_call(&t2, "board_update", json!({"id": "F-APP-01", "status": "done"})).unwrap_err().contains("the check failed"));
+    assert_eq!(row_status(&root2, "F-APP-01").0, "planned");
+    let _ = (std::fs::remove_dir_all(&root), std::fs::remove_dir_all(&root2));
+}
+
+#[test]
+fn without_a_test_command_a_tests_row_goes_to_review_and_the_message_says_there_is_no_check() {
+    let (root, t, ran) = test_cmd_world("none", "", true);
+    board_call(&t, "board_add", json!({"prefix": "APP", "title": "Unit tests pass"})).unwrap();
+    let r = board_call(&t, "board_update", json!({"id": "F-APP-01", "status": "done", "comment": "ran them"})).unwrap();
+    assert!(r.contains("parked as review") && r.contains("names no test command") && r.contains("commands") && r.contains(".iyakki/project.json") && r.contains("needs your OK"), "{r}");
+    assert_eq!(row_status(&root, "F-APP-01").0, "review");
+    assert!(ran.lock().unwrap().is_empty(), "nothing is run");
+    // the refused-done text of the plain call path says the same
+    let e = t.preview_refusal_text("Unit tests pass");
+    assert!(e.contains("names no test command") && e.contains("no automatic test check exists"), "{e}");
+    // an empty command in the file counts as none
+    let (root2, t2, _) = test_cmd_world("blank", "   ", true);
+    board_call(&t2, "board_add", json!({"prefix": "APP", "title": "Unit tests pass"})).unwrap();
+    assert!(board_call(&t2, "board_update", json!({"id": "F-APP-01", "status": "done"})).unwrap().contains("names no test command"));
+    let _ = (std::fs::remove_dir_all(&root), std::fs::remove_dir_all(&root2));
+}
+
 #[test]
 fn pending_rows_wait_for_their_dependency_and_autopilot_comes_back_to_them() {
     let (root, t, audit) = vworld("pending", true);

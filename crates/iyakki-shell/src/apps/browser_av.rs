@@ -30,16 +30,12 @@ fn path(cx: &AppCx) -> std::path::PathBuf {
 }
 
 pub fn load(cx: &AppCx) -> Prefs {
-    std::fs::read_to_string(path(cx)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    iyakki_schema::read_plain("browser sound and picture choices", &path(cx), iyakki_schema::now_secs()).unwrap_or_default()
 }
 
 pub fn save(cx: &AppCx, p: &Prefs) {
     if let Ok(t) = serde_json::to_string(p) {
-        let f = path(cx);
-        let tmp = f.with_extension("tmp");
-        if std::fs::write(&tmp, t).is_ok() {
-            let _ = std::fs::rename(&tmp, &f);
-        }
+        super::browser_config::write_checked("browser sound and picture choices", &path(cx), &t);
     }
 }
 

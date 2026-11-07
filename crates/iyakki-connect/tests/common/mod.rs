@@ -180,6 +180,16 @@ fn serve_one(tls: &mut Tls, texts: &Mutex<Vec<String>>, bins: &Mutex<Vec<Vec<u8>
             }
             answer(tls, 200, "", br#"{"tenants":[{"id":"acme","name":"Acme Ltd","role":"member","current":true},{"id":"beta","name":"Beta\u0007 GmbH","role":"owner","current":false}],"current":"acme","can_switch":true,"scope":"own"}"#);
         }
+        ("POST", "/api/v1/tenant/switch") => {
+            if h("authorization").as_deref() != Some("Bearer tok") {
+                return answer(tls, 401, "", br#"{"error":"sign in"}"#);
+            }
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            match v["tenant"].as_str() {
+                Some("beta") => answer(tls, 200, "", br#"{"switched":true,"tenant":{"id":"beta","name":"Beta\u0007 GmbH","role":"owner","current":true},"previous":"acme","runs_stopped":2,"vault_locked":true,"url":null}"#),
+                _ => answer(tls, 404, "", br#"{"error":"not found"}"#),
+            }
+        }
         ("GET", "/api/v1/files") | ("GET", "/api/v1/files/download") | ("PUT", "/api/v1/files/upload") => {
             if h("authorization").as_deref() != Some("Bearer tok") {
                 return answer(tls, 401, "", br#"{"error":"sign in"}"#);

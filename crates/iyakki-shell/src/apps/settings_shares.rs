@@ -28,6 +28,9 @@ pub(super) enum ShareForm {
 }
 
 const MODES: [&str; 2] = ["Files: browse and download", "Website: serve index.html (no list)"];
+/// The two plain-words lines about passwords on the Shared folders page (kept in constants so a test can read them).
+pub(super) const PASSWORD_HINT_TOP: &str = "A secret link is the safest choice here: anyone who has the link can open it, nobody else. A password is sent in clear over plain HTTP, so someone on the same network could read it. 'Anyone on the local network' needs no link or password.";
+pub(super) const PASSWORD_HINT_ROW: &str = "Visitors type any name and the password. The page is not encrypted, so use this only on a network you trust.";
 const ACCESSES: [&str; 4] = ["Secret link (recommended)", "Password (sent in clear over HTTP)", "Anyone on the local network", "This machine only"];
 const UPLOADS: [&str; 4] = ["Read only", "Visitors may upload new files", "Uploads and new folders", "Uploads, folders and replacing files"];
 
@@ -128,8 +131,10 @@ impl SettingsApp {
     pub(super) fn shares(cx: &AppCx) -> Arc<Shares> {
         let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
         let a2 = user.clone();
-        let allow = sf::allow_fn(cx.session.policy.clone(), &user, cx.services.dir());
-        sf::for_user(cx.services.dir(), &user, Arc::new(move |e, d| audit.record(&a2, e, d)), allow)
+        let admin = cx.session.role == iyakki_sec::policy::Role::Admin;
+        let allow = sf::allow_fn_for(admin, cx.session.policy.clone(), &user, cx.services.dir());
+        let scope = sf::scope_for(admin, &user, cx.services.dir());
+        sf::for_user(cx.services.dir(), &user, Arc::new(move |e, d| audit.record(&a2, e, d)), allow, scope)
     }
 
     pub(super) fn shares_rows(cx: &AppCx) -> Vec<ShareInfo> {
@@ -304,7 +309,7 @@ impl SettingsApp {
         let running = rows.iter().filter(|r| r.running).count();
         for (l, col) in [
             ("Share a folder of yours with other devices on this network: browse and download, or serve a small website. Nothing is shared until you make a share and start it; it is read-only unless you allow uploads; everything stops when you sign out.", MUTED),
-            ("A secret link is the safest choice here: anyone who has the link can open it, nobody else. A password is sent in clear over plain HTTP, so someone on the same network could read it. 'Anyone on the local network' needs no link or password.", MUTED),
+            (PASSWORD_HINT_TOP, MUTED),
         ] {
             for w in g.wrap(13.0 * s, l, Face::Sans, a.w) {
                 g.text(a.x, y, 13.0 * s, col, &w, Face::Sans);
@@ -377,7 +382,7 @@ impl SettingsApp {
                 ty += 16.0 * s;
             }
         } else if r.cfg.access == Access::Password {
-            for l in g.wrap(12.0 * s, "Visitors type any name and the password. The page is not encrypted, so use this only on a network you trust.", Face::Sans, tw).iter().take(3) {
+            for l in g.wrap(12.0 * s, PASSWORD_HINT_ROW, Face::Sans, tw).iter().take(3) {
                 g.text(a.x, ty, 12.0 * s, MUTED, l, Face::Sans);
                 ty += 16.0 * s;
             }

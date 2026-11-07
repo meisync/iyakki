@@ -33,6 +33,7 @@ pub mod privatemanage;
 pub mod privatepub;
 pub mod privatestore;
 pub mod publishflow;
+pub mod ratings;
 pub mod publish;
 pub mod revocation;
 pub mod tile;

@@ -271,7 +271,7 @@ pub fn maybe_askpass(argv0: &str, args: &[String]) -> Option<i32> {
     let prompt = args.first().cloned().unwrap_or_default();
     match askpass_client(&sock, &prompt) {
         Ok(a) => {
-            println!("{a}");
+            crate::qprintln!("{a}");
             Some(0)
         }
         Err(_) => Some(1),

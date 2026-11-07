@@ -62,7 +62,7 @@ impl NetEnv for RealNet {
         (host, 443).to_socket_addrs().map(|mut a| a.any(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_secs(6)).is_ok())).unwrap_or(false)
     }
     fn audit(&mut self, line: &str) {
-        println!("audit: {line}");
+        crate::qprintln!("audit: {line}");
     }
 }
 
@@ -217,20 +217,20 @@ pub fn hardware_main(args: &[String], data: &Path, user: &str) -> i32 {
         return match fwextra::remove(data) {
             Ok(r) => {
                 for l in r.lines {
-                    println!("{l}");
+                    crate::qprintln!("{l}");
                 }
-                println!("Hardware firmware removed (the downloaded pieces and the driver pack). Restart for drivers that already loaded it.");
-                println!("audit: firmware.remove");
+                crate::qprintln!("Hardware firmware removed (the downloaded pieces and the driver pack). Restart for drivers that already loaded it.");
+                crate::qprintln!("audit: firmware.remove");
                 0
             }
             Err(e) => {
-                println!("error: {e}");
+                crate::qprintln!("error: {e}");
                 1
             }
         };
     }
     if has(args, "--delete-download") {
-        println!("deleted {} bytes of kept download pieces", fwextra::delete_leftovers(data));
+        crate::qprintln!("deleted {} bytes of kept download pieces", fwextra::delete_leftovers(data));
         return 0;
     }
     let with = flags(args, "--with");
@@ -239,30 +239,30 @@ pub fn hardware_main(args: &[String], data: &Path, user: &str) -> i32 {
     let log_reqs = fwextra::parse_log(&env.kernel_log(), m);
     fwextra::remember(data, &log_reqs);
     if has(args, "--list") || has(args, "--accept-licence") {
-        println!("Hardware firmware for this computer, linux-firmware {} (commit {}):", m.tag, &m.commit[..10]);
+        crate::qprintln!("Hardware firmware for this computer, linux-firmware {} (commit {}):", m.tag, &m.commit[..10]);
         for l in plan.lines() {
-            println!("{l}");
+            crate::qprintln!("{l}");
         }
         let sel = plan.select(&with);
         if sel.files.is_empty() {
-            println!("No missing firmware file was found in the kernel log.");
+            crate::qprintln!("No missing firmware file was found in the kernel log.");
         } else {
-            println!("Total {} KB with the licence texts.", sel.bytes(m) >> 10);
+            crate::qprintln!("Total {} KB with the licence texts.", sel.bytes(m) >> 10);
         }
         if has(args, "--list") {
             let situation = situation_now(Path::new("/sys"));
-            println!("Ways to get the files:");
+            crate::qprintln!("Ways to get the files:");
             for o in net::offers(&situation) {
-                println!("  [{}] {}", if o.ready { "ready" } else if o.needs_click { "on your click" } else { "not now" }, o.line);
+                crate::qprintln!("  [{}] {}", if o.ready { "ready" } else if o.needs_click { "on your click" } else { "not now" }, o.line);
             }
             return 0;
         }
         if let Err(e) = fwextra::accept(data, &sel, &format!("cli:{user}"), crate::clock::now_unix()) {
-            println!("error: {e}");
+            crate::qprintln!("error: {e}");
             return 1;
         }
-        println!("licences of this list accepted by cli:{user}");
-        println!("audit: firmware.accept list={}", &sel.digest(m)[..16]);
+        crate::qprintln!("licences of this list accepted by cli:{user}");
+        crate::qprintln!("audit: firmware.accept list={}", &sel.digest(m)[..16]);
     }
     let source = match flag(args, "--from") {
         Some(f) => Source::Folder(PathBuf::from(f)),
@@ -273,18 +273,18 @@ pub fn hardware_main(args: &[String], data: &Path, user: &str) -> i32 {
     let session = match flag(args, "--link") {
         Some(iface) if matches!(source, Source::Download) => {
             if !net::valid_iface(&iface) {
-                println!("error: {iface} is not an interface name");
+                crate::qprintln!("error: {iface} is not an interface name");
                 return 2;
             }
             match net::start_session(&mut net_env, &iface, &["git.kernel.org"], has(args, "--link-everything")) {
                 Ok((s, log)) => {
                     for l in log {
-                        println!("{l}");
+                        crate::qprintln!("{l}");
                     }
                     Some(s)
                 }
                 Err(e) => {
-                    println!("error: {e}");
+                    crate::qprintln!("error: {e}");
                     return 1;
                 }
             }
@@ -294,12 +294,12 @@ pub fn hardware_main(args: &[String], data: &Path, user: &str) -> i32 {
     let r = fwextra::run(&mut env, data, &source, &opts);
     if let Some(s) = session {
         let _ = net::stop_session(&mut net_env, &s);
-        println!("the other computer's internet is no longer used by this device");
+        crate::qprintln!("the other computer's internet is no longer used by this device");
     }
     match r {
         Ok(_) => 0,
         Err(e) => {
-            println!("error: {e}");
+            crate::qprintln!("error: {e}");
             1
         }
     }
@@ -312,7 +312,7 @@ pub const FIRMWARE_USAGE: &str = "usage: iyakki firmware list [--log FILE] | fet
 pub fn firmware_main(args: &[String]) -> i32 {
     let m = manifest();
     let Some(sub) = args.first().map(String::as_str) else {
-        println!("{FIRMWARE_USAGE}");
+        crate::qprintln!("{FIRMWARE_USAGE}");
         return 2;
     };
     match sub {
@@ -324,16 +324,16 @@ pub fn firmware_main(args: &[String]) -> i32 {
             };
             let plan = fwextra::build_plan(&fwextra::parse_log(&text, m), &fwextra::read_devs(Path::new("/sys")), m);
             for l in plan.lines() {
-                println!("{l}");
+                crate::qprintln!("{l}");
             }
             if plan.is_empty() {
-                println!("No missing firmware file was found.");
+                crate::qprintln!("No missing firmware file was found.");
             }
             0
         }
         "fetch" => fetch_main(args, m),
         _ => {
-            println!("{FIRMWARE_USAGE}");
+            crate::qprintln!("{FIRMWARE_USAGE}");
             2
         }
     }
@@ -353,48 +353,48 @@ fn fetch_main(args: &[String], m: &Manifest) -> i32 {
         match std::process::Command::new(exe).args(["dev", "dmesg", "--device", d]).output() {
             Ok(o) if o.status.success() => fwextra::build_plan(&fwextra::parse_log(&String::from_utf8_lossy(&o.stdout), m), &[], m),
             Ok(o) => {
-                println!("error: could not read the kernel log of {d}: {}", String::from_utf8_lossy(&o.stderr).trim());
+                crate::qprintln!("error: could not read the kernel log of {d}: {}", String::from_utf8_lossy(&o.stderr).trim());
                 return 1;
             }
             Err(e) => {
-                println!("error: {e}");
+                crate::qprintln!("error: {e}");
                 return 1;
             }
         }
     } else {
-        println!("{FIRMWARE_USAGE}");
+        crate::qprintln!("{FIRMWARE_USAGE}");
         return 2;
     };
     for l in plan.lines() {
-        println!("{l}");
+        crate::qprintln!("{l}");
     }
     let out = PathBuf::from(flag(args, "--out").unwrap_or_else(|| "firmware-fetch".into()));
     let st = streamer();
-    let mut fetch = |url: &str, want: u64, dest: &Path| crate::fwpack::fetch_resume(&*st, url, want, dest, 5, Duration::from_secs(3), &mut |l| println!("{l}"), &|| false);
+    let mut fetch = |url: &str, want: u64, dest: &Path| crate::fwpack::fetch_resume(&*st, url, want, dest, 5, Duration::from_secs(3), &mut |l| crate::qprintln!("{l}"), &|| false);
     let s = match fetch_to_folder(&mut fetch, m, &plan, &with, &out) {
         Ok(s) => s,
         Err(e) => {
-            println!("error: {e}");
+            crate::qprintln!("error: {e}");
             return 1;
         }
     };
-    println!("Fetched and checked {} file(s), {} KB, into {}", s.files, s.bytes >> 10, s.folder.display());
+    crate::qprintln!("Fetched and checked {} file(s), {} KB, into {}", s.files, s.bytes >> 10, s.folder.display());
     if usb {
         let Some(d) = device else {
-            println!("error: --usb-link needs --for DEVICE (a device paired with `iyakki dev pair`)");
+            crate::qprintln!("error: --usb-link needs --for DEVICE (a device paired with `iyakki dev pair`)");
             return 2;
         };
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("iyakki"));
         let st = std::process::Command::new(exe).args(["dev", "files", "push"]).arg(&s.folder).arg("~/firmware-extra").args(["--device", &d]).status();
         match st {
-            Ok(x) if x.success() => println!("Sent. On the device open Store, Setup, Hardware firmware: it checks every file again, shows the licences, and installs only after you click there."),
+            Ok(x) if x.success() => crate::qprintln!("Sent. On the device open Store, Setup, Hardware firmware: it checks every file again, shows the licences, and installs only after you click there."),
             _ => {
-                println!("error: the push did not finish (iyakki dev usb check shows the link); the folder {} is still here", s.folder.display());
+                crate::qprintln!("error: the push did not finish (iyakki dev usb check shows the link); the folder {} is still here", s.folder.display());
                 return 1;
             }
         }
     } else {
-        println!("Copy the folder firmware-extra to a USB stick and choose it on the device (Store, Setup, Hardware firmware, From a USB stick).");
+        crate::qprintln!("Copy the folder firmware-extra to a USB stick and choose it on the device (Store, Setup, Hardware firmware, From a USB stick).");
     }
     0
 }
@@ -418,7 +418,7 @@ pub fn share_main(args: &[String]) -> i32 {
     let link = match net::pick_link(&ifaces, flag(args, "--device").as_deref()) {
         Ok(l) => l,
         Err(e) => {
-            println!("error: {e}");
+            crate::qprintln!("error: {e}");
             return 2;
         }
     };
@@ -430,7 +430,7 @@ pub fn share_main(args: &[String]) -> i32 {
             "unknown".to_string()
         }
         Err(e) => {
-            println!("error: {e}");
+            crate::qprintln!("error: {e}");
             return 2;
         }
     };
@@ -445,26 +445,26 @@ pub fn share_main(args: &[String]) -> i32 {
     let cmds = match cmds {
         Ok(c) => c,
         Err(e) => {
-            println!("error: {e}");
+            crate::qprintln!("error: {e}");
             return 2;
         }
     };
-    println!("{} the internet of this computer ({}) with the cable {} (the device will be {}, this computer {}):", if undo { "Stop sharing" } else { "Share" }, share.uplink, link, net::SHARE_DEVICE, net::SHARE_HOST);
+    crate::qprintln!("{} the internet of this computer ({}) with the cable {} (the device will be {}, this computer {}):", if undo { "Stop sharing" } else { "Share" }, share.uplink, link, net::SHARE_DEVICE, net::SHARE_HOST);
     for c in &cmds {
-        println!("  {c}");
+        crate::qprintln!("  {c}");
     }
     if !undo {
         for l in net::dns_hints(&share) {
-            println!("  {l}");
+            crate::qprintln!("  {l}");
         }
-        println!("This is for Linux. macOS and Windows: {}", net::OTHER_HOSTS);
+        crate::qprintln!("This is for Linux. macOS and Windows: {}", net::OTHER_HOSTS);
     }
     if !has(args, "--apply") && !undo {
-        println!("Nothing was changed. Run the lines above as root yourself, or run this command again with --apply as root (it never calls sudo).");
+        crate::qprintln!("Nothing was changed. Run the lines above as root yourself, or run this command again with --apply as root (it never calls sudo).");
         return 0;
     }
     if !root() {
-        println!("error: this needs root. Run: sudo iyakki usb share-internet{} (nothing was changed)", if undo { " --undo" } else { " --apply" });
+        crate::qprintln!("error: this needs root. Run: sudo iyakki usb share-internet{} (nothing was changed)", if undo { " --undo" } else { " --apply" });
         return 1;
     }
     if !undo {
@@ -483,11 +483,11 @@ pub fn share_main(args: &[String]) -> i32 {
             if undo {
                 let _ = std::fs::remove_file(prev_forward_file(&link));
             }
-            println!("{}", if undo { "Sharing stopped." } else { "Sharing is on. On the device, open Store, Setup, Hardware firmware and choose: use the other computer's internet. Stop with: iyakki usb share-internet --undo" });
+            crate::qprintln!("{}", if undo { "Sharing stopped." } else { "Sharing is on. On the device, open Store, Setup, Hardware firmware and choose: use the other computer's internet. Stop with: iyakki usb share-internet --undo" });
             0
         }
         Err(e) => {
-            println!("error: {e}. Run iyakki usb share-internet --undo to remove what was added.");
+            crate::qprintln!("error: {e}. Run iyakki usb share-internet --undo to remove what was added.");
             1
         }
     }

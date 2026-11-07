@@ -39,6 +39,7 @@ fn read(p: &str) -> String {
 pub fn list_interfaces() -> Vec<IfaceInfo> {
     let routes = gateways_from_route(&read("/proc/net/route"));
     let addrs = sys::ipv4_addresses();
+    let routed = super::plan::routed_ranges_from(&read("/proc/net/route"));
     let mut names: Vec<String> = std::fs::read_dir("/sys/class/net").map(|d| d.flatten().filter_map(|e| e.file_name().into_string().ok()).collect()).unwrap_or_default();
     names.sort();
     names
@@ -55,6 +56,7 @@ pub fn list_interfaces() -> Vec<IfaceInfo> {
                 carrier: read(&format!("{base}/carrier")) == "1",
                 up: flags & 1 != 0,
                 cidrs: addrs.iter().filter(|(i, _)| i == &n).map(|(_, c)| *c).collect(),
+                routed: routed.iter().filter(|(i, _)| i == &n).map(|(_, c)| *c).collect(),
                 default_route: routes.iter().any(|(r, _)| r == &n),
                 rx_bytes: num("rx_bytes"),
                 tx_bytes: num("tx_bytes"),
@@ -106,19 +108,33 @@ fn hotspot_path(data: &Path) -> PathBuf {
     control::dir(data).join("hotspot.json")
 }
 
-/// `(name, password)` of the hotspot; made (and saved) when there is none yet.
+/// `(name, password)` of the hotspot; made (and saved) when there is none yet. A file that cannot be read as the hotspot's settings is moved to
+/// `hotspot.json.corrupt-<time>` first (the old name and password stay in it); when it cannot be moved aside nothing is made over it.
 pub fn hotspot_credentials(data: &Path) -> Result<(String, String), String> {
+    let id = std::fs::read_to_string("/etc/machine-id").unwrap_or_default();
+    hotspot_credentials_for(data, id.trim(), iyakki_schema::now_secs())
+}
+
+/// [`hotspot_credentials`] with the device id and the time given (the id names the default network; the time names a set-aside copy).
+pub fn hotspot_credentials_for(data: &Path, device_id: &str, now: u64) -> Result<(String, String), String> {
     let p = hotspot_path(data);
-    if let Ok(t) = std::fs::read_to_string(&p) {
-        if let Ok(h) = serde_json::from_str::<HotspotFile>(&t) {
-            if iyakki_hotspot::settings::validate_ssid(&h.ssid).is_ok() && iyakki_hotspot::settings::validate_passphrase(&h.passphrase).is_ok() {
-                return Ok((h.ssid, h.passphrase));
+    match std::fs::read_to_string(&p) {
+        Ok(t) => {
+            if let Ok(h) = serde_json::from_str::<HotspotFile>(&t) {
+                if iyakki_hotspot::settings::validate_ssid(&h.ssid).is_ok() && iyakki_hotspot::settings::validate_passphrase(&h.passphrase).is_ok() {
+                    return Ok((h.ssid, h.passphrase));
+                }
+            }
+            match iyakki_schema::move_aside(&p, now) {
+                Some(to) => log::warn!("hotspot: the saved name and password could not be read; kept as {} and new ones made", to.display()),
+                None => return Err(format!("The hotspot's saved name and password ({}) cannot be read and could not be moved aside; they are left as they are", p.display())),
             }
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{}: {e}; it is left as it is", p.display())),
     }
-    let id = std::fs::read_to_string("/etc/machine-id").unwrap_or_default();
-    let s = iyakki_hotspot::settings::HotspotSettings::new_default(id.trim()).map_err(|e| format!("making a password: {e:?}"))?;
-    set_hotspot_credentials(data, &s.ssid, &s.passphrase)?;
+    let s = iyakki_hotspot::settings::HotspotSettings::new_default(device_id).map_err(|e| format!("making a password: {e:?}"))?;
+    write_hotspot(data, &HotspotFile { ssid: s.ssid.clone(), passphrase: s.passphrase.clone(), band: String::new() })?;
     Ok((s.ssid, s.passphrase))
 }
 
@@ -135,25 +151,44 @@ fn write_hotspot(data: &Path, f: &HotspotFile) -> Result<(), String> {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
     let text = serde_json::to_string(f).map_err(|e| e.to_string())?;
-    std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    // whole and atomic, readable by the owner only: a cut during the write never leaves half a password
+    iyakki_schema::write_atomic(&p, text.as_bytes(), 0o600)
 }
 
 /// Default routes taken off the paused Wi-Fi client (a route through a card that is not joined would swallow the hotspot's traffic).
 static PARKED_ROUTES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
+/// The `ip` calls the route parking makes, so a test can use a fake and never touch the real routes.
+trait IpRoute {
+    /// The default-route lines of `client` (`ip -4 route show default dev <client>`); `None` when `ip` cannot be run.
+    fn show_default(&self, client: &str) -> Option<String>;
+    /// `ip -4 route <args>`; true on success.
+    fn route(&self, args: &[&str]) -> bool;
+}
+
+struct RealIp;
+
+impl IpRoute for RealIp {
+    fn show_default(&self, client: &str) -> Option<String> {
+        let out = std::process::Command::new("ip").args(["-4", "route", "show", "default", "dev", client]).output().ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).to_string())
+    }
+    fn route(&self, args: &[&str]) -> bool {
+        std::process::Command::new("ip").arg("-4").arg("route").args(args).status().is_ok_and(|s| s.success())
+    }
+}
+
 fn park_default_routes(client: &str) {
-    let out = std::process::Command::new("ip").args(["-4", "route", "show", "default", "dev", client]).output();
-    let Ok(out) = out else { return };
     let mut parked = PARKED_ROUTES.lock().unwrap_or_else(|e| e.into_inner());
-    for line in String::from_utf8_lossy(&out.stdout).lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let args: Vec<&str> = std::iter::once("route").chain(std::iter::once("del")).chain(line.split_whitespace()).collect();
-        if std::process::Command::new("ip").arg("-4").args(&args).status().is_ok_and(|s| s.success()) {
+    park_with(&RealIp, &mut parked, client);
+}
+
+/// Take every default route off `client`; the ones that were removed are remembered in `parked` (one that could not be removed is not).
+fn park_with(ip: &dyn IpRoute, parked: &mut Vec<String>, client: &str) {
+    let Some(shown) = ip.show_default(client) else { return };
+    for line in shown.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let args: Vec<&str> = std::iter::once("del").chain(line.split_whitespace()).collect();
+        if ip.route(&args) {
             parked.push(line.to_string());
             log::info!("hotspot: default route \"{line}\" taken off {client} while sharing");
         }
@@ -162,9 +197,145 @@ fn park_default_routes(client: &str) {
 
 fn restore_default_routes() {
     let mut parked = PARKED_ROUTES.lock().unwrap_or_else(|e| e.into_inner());
+    restore_with(&RealIp, &mut parked);
+}
+
+/// Put every parked route back, once; the list is empty afterwards (a second call does nothing).
+fn restore_with(ip: &dyn IpRoute, parked: &mut Vec<String>) {
     for line in parked.drain(..) {
-        let args: Vec<&str> = ["route", "add"].into_iter().chain(line.split_whitespace()).collect();
-        let _ = std::process::Command::new("ip").arg("-4").args(&args).status();
+        let args: Vec<&str> = std::iter::once("add").chain(line.split_whitespace()).collect();
+        let _ = ip.route(&args);
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    fn dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("iyakki-hotspot-cred-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn the_first_start_makes_the_name_from_the_device_id_and_a_strong_password_and_keeps_them() {
+        let d = dir("first");
+        let (ssid, pass) = hotspot_credentials_for(&d, "a1b2c3d4-9f3e", 1).unwrap();
+        assert_eq!(ssid, "IYAKKI-9F3E");
+        assert!(iyakki_hotspot::settings::validate_passphrase(&pass).is_ok() && pass.replace('-', "").len() == 16, "{pass}");
+        assert_eq!(hotspot_credentials_for(&d, "another-id", 2).unwrap(), (ssid, pass), "the saved ones are used, not new ones");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(hotspot_path(&d)).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn a_changed_name_and_password_and_the_band_are_kept_together() {
+        let d = dir("change");
+        hotspot_credentials_for(&d, "x", 1).unwrap();
+        set_hotspot_credentials(&d, "Cafe", "correct horse").unwrap();
+        set_hotspot_band(&d, "5").unwrap();
+        assert_eq!(hotspot_credentials_for(&d, "x", 2).unwrap(), ("Cafe".to_string(), "correct horse".to_string()));
+        assert_eq!(hotspot_band(&d), "5");
+        assert!(set_hotspot_credentials(&d, "", "correct horse").is_err() && set_hotspot_credentials(&d, "Cafe", "short").is_err());
+        assert_eq!(hotspot_credentials_for(&d, "x", 3).unwrap().0, "Cafe", "a refused change leaves the saved one");
+    }
+
+    #[test]
+    fn a_damaged_file_is_set_aside_with_its_bytes_and_new_ones_are_made() {
+        let d = dir("damaged");
+        let p = hotspot_path(&d);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, b"{\"ssid\": \"Cafe\", \"passph").unwrap();
+        let (ssid, _) = hotspot_credentials_for(&d, "abcd", 77).unwrap();
+        assert_eq!(ssid, "IYAKKI-ABCD");
+        assert_eq!(std::fs::read(p.with_file_name("hotspot.json.corrupt-77")).unwrap(), b"{\"ssid\": \"Cafe\", \"passph");
+        // a file with a name that is too long counts as damaged too
+        std::fs::write(&p, serde_json::json!({"ssid": "x".repeat(40), "passphrase": "correct horse"}).to_string()).unwrap();
+        assert!(hotspot_credentials_for(&d, "abcd", 78).is_ok());
+        assert!(p.with_file_name("hotspot.json.corrupt-78").exists());
+    }
+
+    #[test]
+    fn a_damaged_file_that_cannot_be_moved_aside_is_not_written_over() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir("nomove");
+        let p = hotspot_path(&d);
+        let sub = p.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(&p, b"not json").unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let cannot_write = std::fs::write(sub.join(".probe"), b"x").is_err();
+        let r = hotspot_credentials_for(&d, "abcd", 5);
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if cannot_write {
+            assert!(r.unwrap_err().contains("could not be moved aside"));
+            assert_eq!(std::fs::read(&p).unwrap(), b"not json");
+        }
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    struct FakeIp {
+        shown: Option<String>,
+        calls: RefCell<Vec<String>>,
+        fail_del: bool,
+    }
+    impl IpRoute for FakeIp {
+        fn show_default(&self, client: &str) -> Option<String> {
+            self.calls.borrow_mut().push(format!("show {client}"));
+            self.shown.clone()
+        }
+        fn route(&self, args: &[&str]) -> bool {
+            self.calls.borrow_mut().push(args.join(" "));
+            !(self.fail_del && args[0] == "del")
+        }
+    }
+    fn fake(shown: Option<&str>, fail_del: bool) -> FakeIp {
+        FakeIp { shown: shown.map(String::from), calls: RefCell::new(vec![]), fail_del }
+    }
+
+    #[test]
+    fn the_default_route_of_the_paused_client_is_taken_off_and_put_back_once() {
+        let ip = fake(Some("default via 192.168.1.1 dev wlan0 proto dhcp metric 600\n"), false);
+        let mut parked = Vec::new();
+        park_with(&ip, &mut parked, "wlan0");
+        assert_eq!(parked, vec!["default via 192.168.1.1 dev wlan0 proto dhcp metric 600".to_string()]);
+        assert_eq!(ip.calls.borrow()[1], "del default via 192.168.1.1 dev wlan0 proto dhcp metric 600");
+        restore_with(&ip, &mut parked);
+        assert!(parked.is_empty());
+        assert_eq!(ip.calls.borrow()[2], "add default via 192.168.1.1 dev wlan0 proto dhcp metric 600");
+        restore_with(&ip, &mut parked);
+        assert_eq!(ip.calls.borrow().len(), 3, "a second restore does nothing");
+    }
+
+    #[test]
+    fn a_route_that_could_not_be_removed_is_not_remembered_and_no_ip_means_nothing_happens() {
+        let ip = fake(Some("default via 10.0.0.1 dev wlan0\n"), true);
+        let mut parked = Vec::new();
+        park_with(&ip, &mut parked, "wlan0");
+        assert!(parked.is_empty());
+        restore_with(&ip, &mut parked);
+        assert_eq!(ip.calls.borrow().len(), 2);
+        let none = fake(None, false);
+        park_with(&none, &mut parked, "wlan0");
+        assert!(parked.is_empty() && none.calls.borrow().len() == 1);
+    }
+
+    #[test]
+    fn several_default_routes_are_all_parked_and_blank_lines_are_ignored() {
+        let ip = fake(Some("default via 10.0.0.1 dev wlan0 metric 100\n\ndefault via 10.0.0.2 dev wlan0 metric 200\n"), false);
+        let mut parked = Vec::new();
+        park_with(&ip, &mut parked, "wlan0");
+        assert_eq!(parked.len(), 2);
     }
 }
 

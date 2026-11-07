@@ -15,6 +15,13 @@ impl iyakki_agent::iyakki_proxy::Upstream for Offline {
     }
 }
 
+/// These tests start real servers and read the process-wide count of running shares, so they take turns.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn admin(tag: &str) -> AppCx {
     let mut cx = cx_with_admin_store(tag);
     let d = temp_dir(&format!("{tag}-svc"));
@@ -25,7 +32,7 @@ fn admin(tag: &str) -> AppCx {
     std::fs::create_dir_all(&home).unwrap();
     let home = std::fs::canonicalize(home).unwrap();
     let allow: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(move |p| std::path::Path::new(p).starts_with(&home));
-    iyakki_agent::sharedfolder::for_user(cx.services.dir(), "root", Arc::new(|_, _| {}), allow);
+    iyakki_agent::sharedfolder::for_user(cx.services.dir(), "root", Arc::new(|_, _| {}), allow, iyakki_agent::sharedfolder::Scope::Admin);
     cx
 }
 
@@ -104,6 +111,7 @@ fn white(g: &Gfx) -> usize {
 
 #[test]
 fn the_form_is_checked_and_read_back_and_nothing_is_shared_by_default() {
+    let _g = serial();
     let cx = admin("shr-form");
     let mut f = form_for(&cx, "docs", 3);
     let d = draft_of_form(&f).unwrap();
@@ -134,27 +142,43 @@ fn the_form_is_checked_and_read_back_and_nothing_is_shared_by_default() {
     f.set_value(5, "OPEN");
     assert!(a.shares_submit(&cx, &ShareForm::New, &mut f).is_ok());
     // creating a share starts nothing
-    assert_eq!(iyakki_agent::sharedfolder::running_total(), 0);
+    // (the process-wide count is not asserted here: another test of this module may have a server running at the same time)
     assert!(SettingsApp::shares_rows(&cx).iter().all(|r| !r.running));
 }
 
 #[test]
 fn folders_outside_the_account_are_refused() {
+    let _g = serial();
     let cx = admin("shr-forbid");
     let mut a = SettingsApp::new(&cx);
-    for p in ["/", "/etc", "/proc", "/sys", "/dev", "/boot", "/home", "/root"] {
+    // even an administrator cannot map the whole filesystem or the system's interfaces
+    for p in ["/", "/proc", "/sys", "/dev"] {
         let mut f = form_for(&cx, "x", 0);
         f.set_value(1, p);
         let e = a.shares_submit(&cx, &ShareForm::New, &mut f).unwrap_err();
-        assert!(e.contains("folder") || e.contains("system"), "{p}: {e}");
+        assert!(e.contains("system"), "{p}: {e}");
     }
-    // a folder that exists but is outside home and workspaces (an administrator may write anywhere, a share may not)
+    // an administrator may map any other folder of the disks (owner rule 2026-11-06)
     let other = temp_dir("shr-other");
     let mut f = form_for(&cx, "y", 0);
     f.set_value(1, &other.to_string_lossy());
-    let e = a.shares_submit(&cx, &ShareForm::New, &mut f).unwrap_err();
-    assert!(e.contains("you may write to"), "{e}");
-    // the system's private data folder
+    assert!(a.shares_submit(&cx, &ShareForm::New, &mut f).is_ok(), "an administrator maps a folder outside the home");
+    // a person who is not an administrator may map only folders inside their own home
+    let mut user = cx.clone();
+    user.session.user = "ursula".into();
+    user.session.role = iyakki_sec::policy::Role::User;
+    user.session.policy = iyakki_sec::policy::Role::User.template();
+    let mut ua = SettingsApp::new(&user);
+    for p in ["/etc", "/boot", "/home", "/root"] {
+        let mut f = form_for(&user, "u", 0);
+        f.set_value(1, p);
+        assert!(ua.shares_submit(&user, &ShareForm::New, &mut f).is_err(), "{p}");
+    }
+    let mut f = form_for(&user, "v", 0);
+    f.set_value(1, &other.to_string_lossy());
+    let e = ua.shares_submit(&user, &ShareForm::New, &mut f).unwrap_err();
+    assert!(e.contains("inside your own home folder"), "{e}");
+    // the system's private data folder is never shared, by anyone
     let mut f = form_for(&cx, "z", 0);
     f.set_value(1, &cx.services.dir().to_string_lossy());
     assert!(a.shares_submit(&cx, &ShareForm::New, &mut f).is_err());
@@ -162,6 +186,7 @@ fn folders_outside_the_account_are_refused() {
 
 #[test]
 fn start_stop_and_stop_all_with_a_real_server() {
+    let _g = serial();
     let cx = admin("shr-run");
     let mut a = SettingsApp::new(&cx);
     goto(&mut a, &cx, Tab::Shares);
@@ -215,6 +240,7 @@ fn start_stop_and_stop_all_with_a_real_server() {
 
 #[test]
 fn the_secret_link_can_be_renewed_and_copied() {
+    let _g = serial();
     let cx = admin("shr-token");
     let mut a = SettingsApp::new(&cx);
     goto(&mut a, &cx, Tab::Shares);
@@ -237,6 +263,7 @@ fn the_secret_link_can_be_renewed_and_copied() {
 
 #[test]
 fn share_this_folder_from_the_ide_or_edit_opens_the_form_filled_in() {
+    let _g = serial();
     let cx = admin("shr-ide");
     let site = folder(&cx, "mysite");
     std::fs::write(std::path::Path::new(&site).join("index.html"), "<h1>hi</h1>").unwrap();
@@ -263,6 +290,7 @@ fn share_this_folder_from_the_ide_or_edit_opens_the_form_filled_in() {
 
 #[test]
 fn the_page_draws_inside_the_window_at_four_sizes_with_a_qr_code() {
+    let _g = serial();
     let cx = admin("shr-draw");
     let mut a = SettingsApp::new(&cx);
     goto(&mut a, &cx, Tab::Shares);
@@ -300,6 +328,7 @@ fn the_page_draws_inside_the_window_at_four_sizes_with_a_qr_code() {
 
 #[test]
 fn receive_a_package_makes_a_ten_minute_password_drop_in_the_packages_folder_and_says_how_to_send_to_it() {
+    let _g = serial();
     let cx = admin("sh-drop");
     let mut a = SettingsApp::new(&cx);
     goto(&mut a, &cx, Tab::Shares);
@@ -323,3 +352,17 @@ fn receive_a_package_makes_a_ten_minute_password_drop_in_the_packages_folder_and
     m.stop(&drops[0].cfg.id);
 }
 
+
+#[test]
+fn the_password_hint_says_in_plain_words_that_it_is_sent_in_clear_and_the_page_is_not_encrypted() {
+    let _g = serial();
+    let top = shares_page::PASSWORD_HINT_TOP;
+    assert!(top.contains("password is sent in clear over plain HTTP") && top.contains("secret link is the safest"), "{top}");
+    assert!(top.contains("needs no link or password"), "{top}");
+    let row = shares_page::PASSWORD_HINT_ROW;
+    assert!(row.contains("not encrypted") && row.contains("network you trust"), "{row}");
+    // plain words: no jargon beyond HTTP, and short enough to read at a glance
+    for t in [top, row] {
+        assert!(!t.contains("TLS") && !t.contains("hash") && t.len() < 300, "{t}");
+    }
+}

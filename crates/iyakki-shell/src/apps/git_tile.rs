@@ -59,6 +59,7 @@ pub(super) const T_COPY_SSH: usize = 33;
 pub(super) const T_COPY_TEXT: usize = 34;
 pub(super) const T_EDIT_CONN: usize = 35;
 pub(super) const T_VIEW_RAW: usize = 36;
+pub(super) const T_SUBMODULES: usize = 37;
 pub(super) const T_SORT: usize = 100; // 100..110
 pub(super) const T_SRC_ROW: usize = 1_000;
 pub(super) const T_ROW: usize = 100_000;
@@ -380,7 +381,22 @@ pub(super) struct Card {
     pub lines: Vec<(String, Tone)>,
     pub yes: &'static str,
     pub no: &'static str,
+    /// A box the person may tick before the yes (the clone's submodules).
+    pub toggle: Option<Toggle>,
 }
+
+pub(super) struct Toggle {
+    pub label: &'static str,
+    pub on: bool,
+    /// What the box does, shown under it while it is off and while it is on.
+    pub note_off: &'static str,
+    pub note_on: &'static str,
+}
+
+/// The box on the clone review. Off by default: a submodule is another address the clone reaches.
+pub(super) const SUBMODULES_LABEL: &str = "Also clone its submodules";
+pub(super) const SUBMODULES_OFF: &str = "Off: only this repository is copied. Any submodule folders stay empty.";
+pub(super) const SUBMODULES_ON: &str = "On: the other repositories it links to (listed in .gitmodules) are copied too, with git's own checks, over https only. file:// and program addresses are refused. They may be large.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Focus {
@@ -537,11 +553,7 @@ impl GitApp {
     /// `/home/<user>/Repositories`, or the account's folder under the data folder when it has no home to write in; the second value is the
     /// folder the jobs' write check must also allow.
     fn default_root(cx: &AppCx) -> (PathBuf, Option<PathBuf>) {
-        let user = &cx.session.user;
-        let home = PathBuf::from(format!("/home/{user}/Repositories"));
-        let fb = cx.services.dir().join("repositories").join(user);
-        let usable = cx.session.policy.allows_write(user, &home.to_string_lossy()) && home.parent().is_some_and(|p| p.is_dir());
-        if usable { (home, None) } else { (fb.clone(), Some(fb)) }
+        iyakki_agent::gitworktools::default_repos_root(cx.services.dir(), &cx.session.user, &cx.session.policy)
     }
 
     pub(super) fn keys(&self, cx: &AppCx) -> GitKeys {
@@ -1021,38 +1033,23 @@ impl GitApp {
 
     // ---------------------------------------------------------------------------------------- actions: review cards
 
-    fn tools(&self, cx: &AppCx) -> Result<Tools, String> {
-        match &self.rig.tools {
-            Some(t) => Ok(t.clone()),
-            None => Tools::detect(&cx.services.clis.search_path()),
-        }
-    }
-
-    /// The jobs' context for a folder: its keys, programs and write check.
+    /// The jobs' context for a folder: its keys, programs and write check (the same set-up the assistant's git tools use).
     pub(super) fn git_ctx(&self, cx: &AppCx, root: &std::path::Path, name: &str) -> Result<gitjobs::Ctx, String> {
-        let tools = self.tools(cx)?;
-        let search = cx.services.clis.search_path();
-        let safe: String = self.user.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')).collect();
-        let mut policy = cx.session.policy.clone();
-        if let Some(fb) = &self.policy_fb {
-            let fb = fb.to_string_lossy().into_owned();
-            if !policy.fs_write.is_empty() && !policy.allows_write(&self.user, &fb) {
-                policy.fs_write.push(fb);
-            }
-        }
-        let u2 = self.user.clone();
-        Ok(gitjobs::Ctx {
-            keys: Arc::new(self.keys(cx)),
-            tools,
-            owner: self.user.clone(),
-            workspace: name.to_string(),
-            root: std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
-            ws_keys: iyakki_agent::workspace::ProjectConfig::load(root).map(|c| c.git_keys).unwrap_or_default(),
-            who: Who::Person,
-            run_dir: cx.services.dir().join("git-run").join(safe),
-            probe: self.rig.probe.clone().unwrap_or_else(|| gitjobs::real_probe(search)),
-            scope: Arc::new(move |p: &std::path::Path| iyakki_agent::scope::check_write(&policy, &u2, p)),
-        })
+        let (audit, user) = (cx.audit.clone(), self.user.clone());
+        gitjobs::user_ctx(
+            &cx.services,
+            gitjobs::CtxFor {
+                user: &self.user,
+                policy: &cx.session.policy,
+                audit: Arc::new(move |a, d| audit.record(&user, a, d)),
+                root,
+                name,
+                extra_write: self.policy_fb.as_deref(),
+                who: Who::Person,
+                tools: self.rig.tools.clone(),
+                probe: self.rig.probe.clone(),
+            },
+        )
     }
 
     /// The clone address for a repository of a connection, by the way the connection signs in.
@@ -1086,7 +1083,7 @@ impl GitApp {
             lines.push(("When it is done the AI IDE opens it as a workspace.".into(), Tone::Dim));
         }
         lines.push(("The files come to this computer; nothing on the host changes.".into(), Tone::Dim));
-        self.card = Some(Card { act: Act::Clone { conn, full, url, then_ide }, title: "Clone this repository?".into(), lines, yes: "Clone", no: "Cancel" });
+        self.card = Some(Card { act: Act::Clone { conn, full, url, then_ide }, title: "Clone this repository?".into(), lines, yes: "Clone", no: "Cancel", toggle: Some(Toggle { label: SUBMODULES_LABEL, on: false, note_off: SUBMODULES_OFF, note_on: SUBMODULES_ON }) });
     }
 
     /// The repository the next action is about: the open one, else the selected row (only repositories of a host can be cloned).
@@ -1160,7 +1157,7 @@ impl GitApp {
                 if st.dirty() {
                     let mut lines = vec![(format!("{} has changes that are not committed ({}).", cl.name, st.summary()), Tone::Warn)];
                     lines.push(("A pull here only moves forward (fast-forward only); it never merges and never rebases. Git stops by itself when a changed file would be overwritten, and tells you which.".into(), Tone::Dim));
-                    self.card = Some(Card { act: Act::Pull { clone: cl }, title: "Pull over local changes?".into(), lines, yes: "Pull, fast-forward only", no: "Cancel" });
+                    self.card = Some(Card { act: Act::Pull { clone: cl }, title: "Pull over local changes?".into(), lines, yes: "Pull, fast-forward only", no: "Cancel", toggle: None });
                 } else {
                     self.start_update(cx, Op::Pull, &cl);
                 }
@@ -1196,7 +1193,7 @@ impl GitApp {
                     lines.push(("Changes that are not committed stay here and are not sent.".into(), Tone::Dim));
                 }
                 lines.push(("Nothing is forced and nothing is deleted on the host: a push that is not a fast-forward is refused by git.".into(), Tone::Dim));
-                self.card = Some(Card { act: Act::Push { clone: cl, branch: st.branch, remote }, title: "Push to the host?".into(), lines, yes: "Push", no: "Cancel" });
+                self.card = Some(Card { act: Act::Push { clone: cl, branch: st.branch, remote }, title: "Push to the host?".into(), lines, yes: "Push", no: "Cancel", toggle: None });
             }
         }
     }
@@ -1212,7 +1209,7 @@ impl GitApp {
             return;
         }
         let lines = vec![(url.clone(), Tone::Bold), ("The BROWSER tile opens this address in a new tab. Nothing is sent to it from here.".into(), Tone::Dim)];
-        self.card = Some(Card { act: Act::Browser { url }, title: "Open this page in the browser?".into(), lines, yes: "Open", no: "Cancel" });
+        self.card = Some(Card { act: Act::Browser { url }, title: "Open this page in the browser?".into(), lines, yes: "Open", no: "Cancel", toggle: None });
     }
 
     pub(super) fn copy_clone_url(&mut self, ssh: Option<bool>) {
@@ -1290,8 +1287,9 @@ impl GitApp {
 
     pub(super) fn confirm(&mut self, cx: &AppCx) {
         let Some(card) = self.card.take() else { return };
+        let submodules = card.toggle.as_ref().is_some_and(|t| t.on);
         match card.act {
-            Act::Clone { conn, full, url, then_ide } => self.start_clone(cx, &conn, &full, &url, then_ide),
+            Act::Clone { conn, full, url, then_ide } => self.start_clone(cx, &conn, &full, &url, then_ide, submodules),
             Act::Pull { clone } => self.start_update(cx, Op::Pull, &clone),
             Act::Push { clone, branch, remote } => self.start_push(cx, &clone, &branch, &remote),
             Act::Browser { url } => {
@@ -1309,6 +1307,13 @@ impl GitApp {
         }
     }
 
+    /// The box of the clone review (key `s`).
+    pub(super) fn flip_submodules(&mut self) {
+        if let Some(t) = self.card.as_mut().and_then(|c| c.toggle.as_mut()) {
+            t.on = !t.on;
+        }
+    }
+
     pub(super) fn cancel_card(&mut self) {
         if let Some(card) = self.card.take() {
             if let Act::Host { host, port } = card.act {
@@ -1320,7 +1325,7 @@ impl GitApp {
         }
     }
 
-    pub(super) fn start_clone(&mut self, cx: &AppCx, conn: &Connection, full: &str, url: &str, then_ide: bool) {
+    pub(super) fn start_clone(&mut self, cx: &AppCx, conn: &Connection, full: &str, url: &str, then_ide: bool, submodules: bool) {
         if let Err(e) = std::fs::create_dir_all(&self.repos_root).map_err(|e| e.to_string()).and_then(|_| iyakki_agent::workspace::ProjectConfig::ensure(&self.repos_root, "Repositories").map(|_| ())) {
             self.say(format!("The Repositories folder {} could not be made: {e}", self.repos_root.display()), false);
             return;
@@ -1333,10 +1338,10 @@ impl GitApp {
                 return;
             }
         };
-        let spec = CloneSpec { url: url.to_string(), branch: String::new(), depth: 0, folder: String::new() };
+        let spec = CloneSpec { url: url.to_string(), branch: String::new(), depth: 0, folder: String::new(), submodules };
         match Batch::plan_clone(ctx, &[spec]) {
             Ok(b) => {
-                cx.audit.record(&self.user, "git.clone.start", &format!("1 repositories into {}", "Repositories"));
+                cx.audit.record(&self.user, "git.clone.start", &format!("1 repositories into {}{}", "Repositories", if submodules { " with submodules" } else { "" }));
                 let name = b.items.first().map(|i| i.folder.clone()).unwrap_or_default();
                 let key = gb::remote_key(url);
                 self.run = Some(Run { batch: b, op: Op::Clone, label: format!("{full} from {}", conn.name), dir: root.join(name), then_ide: then_ide.then_some(key), told: false });
@@ -1415,7 +1420,7 @@ impl GitApp {
                     lines.push((format!("  {}  {}", k.kind, k.fingerprint()), Tone::Bold));
                 }
                 lines.push(("Compare this fingerprint with the one the site publishes or your server's owner gave you. Trust it only if it is the same: nothing is sent to the host before that.".into(), Tone::Dim));
-                self.card = Some(Card { act: Act::Host { host: p.host.clone(), port: p.port }, title: format!("A new host: {}", p.host), lines, yes: "Trust this host", no: "Do not trust" });
+                self.card = Some(Card { act: Act::Host { host: p.host.clone(), port: p.port }, title: format!("A new host: {}", p.host), lines, yes: "Trust this host", no: "Do not trust", toggle: None });
             }
         }
         if let Some((op, label, failed, why, then_ide)) = finished {
@@ -1585,6 +1590,7 @@ impl GitApp {
             T_COPY_HTTPS => self.copy_clone_url(Some(false)),
             T_COPY_SSH => self.copy_clone_url(Some(true)),
             T_BROWSER => self.begin_browser(),
+            T_SUBMODULES => self.flip_submodules(),
             T_YES => self.confirm(cx),
             T_NO => self.cancel_card(),
             T_CLOSE => self.overlay = None,
@@ -1643,6 +1649,7 @@ impl GitApp {
             match k {
                 Key::Esc | Key::Char('n') => self.cancel_card(),
                 Key::Enter | Key::Char('y') => self.confirm(cx),
+                Key::Char('s') => self.flip_submodules(),
                 _ => {}
             }
             return Flow::Stay;

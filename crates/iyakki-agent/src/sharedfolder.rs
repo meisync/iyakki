@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -145,10 +145,21 @@ pub fn valid_name(n: &str) -> bool {
 const FORBIDDEN: [&str; 14] = ["/etc", "/proc", "/sys", "/dev", "/boot", "/root", "/run", "/usr", "/bin", "/sbin", "/lib", "/var", "/opt", "/srv"];
 const TOO_BROAD: [&str; 6] = ["/", "/home", "/mnt", "/media", "/tmp", "/data"];
 
-/// May this folder be shared? It must exist, be a folder the person can write (their home, a workspace, a mounted data
-/// folder: `allow_write` is the account's policy), and not be a system folder, the vault's folder or one of the settings.
-/// Returns the real path.
-pub fn validate_folder(folder: &str, allow_write: &dyn Fn(&str) -> bool, deny: &[PathBuf]) -> Result<PathBuf, String> {
+/// Which folders a person may map as a share (owner rule 2026-11-06): an administrator any folder of the machine's disks, everyone
+/// else only folders inside their own home folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// Any folder, except the whole filesystem, the system's interfaces (`/proc`, `/sys`, `/dev`, `/run`) and the system's private data
+    /// (vault and settings, never shared by anyone).
+    Admin,
+    /// Only a folder inside this home folder (its real path).
+    Home(PathBuf),
+}
+
+/// May this folder be shared? It must exist, be a folder the person can write (`allow_write` is the account's policy), lie in the
+/// person's [`Scope`], and never be the vault's folder or one of the settings. For everyone but an administrator it also must not be a
+/// system folder. Returns the real path.
+pub fn validate_folder(folder: &str, allow_write: &dyn Fn(&str) -> bool, deny: &[PathBuf], scope: &Scope) -> Result<PathBuf, String> {
     let f = folder.trim();
     if f.is_empty() || f.contains('\0') || !f.starts_with('/') {
         return Err("Give the full path of a folder (it starts with /).".into());
@@ -158,10 +169,24 @@ pub fn validate_folder(folder: &str, allow_write: &dyn Fn(&str) -> bool, deny: &
         return Err("That is not a folder.".into());
     }
     let s = real.to_string_lossy().into_owned();
-    if TOO_BROAD.contains(&s.as_str()) || FORBIDDEN.iter().any(|p| real.starts_with(p)) {
-        return Err("That folder is part of the system or holds other people's files; share a folder of your own.".into());
+    match scope {
+        Scope::Admin => {
+            if s == "/" || ["/proc", "/sys", "/dev", "/run"].iter().any(|p| real.starts_with(p)) {
+                return Err("That is the whole system or a system interface; choose a folder on a disk.".into());
+            }
+        }
+        Scope::Home(home) => {
+            if TOO_BROAD.contains(&s.as_str()) || FORBIDDEN.iter().any(|p| real.starts_with(p)) {
+                return Err("That folder is part of the system or holds other people's files; share a folder of your own.".into());
+            }
+            if !real.starts_with(home) {
+                return Err(format!("You can share folders inside your own home folder ({}). An administrator can share other folders.", home.display()));
+            }
+        }
     }
-    if deny.iter().any(|d| real.starts_with(d)) {
+    // the private data itself, and every folder that holds it (the data folder, `/var/lib`, `/var` ...), is never shared, not even by an
+    // administrator: mapping a parent would serve the vault and the settings with everything else
+    if deny.iter().any(|d| real.starts_with(d) || d.starts_with(&real)) {
         return Err("That folder holds the system's private data (vault and settings) and is never shared.".into());
     }
     if !allow_write(&s) {
@@ -195,15 +220,35 @@ pub struct Shares {
     file: PathBuf,
     owner: String,
     env: Env,
-    allow_write: AllowFn,
+    allow_write: RwLock<AllowFn>,
+    /// Which folders this person may map; set again every time the shell asks for the person's shares (their role may have changed).
+    scope: RwLock<Scope>,
     lan: LanFn,
     inner: Mutex<Inner>,
 }
 
 impl Shares {
-    pub fn open(file: &Path, owner: &str, env: Env, allow_write: AllowFn, lan: LanFn) -> Shares {
+    pub fn open(file: &Path, owner: &str, env: Env, allow_write: AllowFn, scope: Scope, lan: LanFn) -> Shares {
         let cfgs: Vec<ShareCfg> = std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-        Shares { file: file.to_path_buf(), owner: owner.into(), env, allow_write, lan, inner: Mutex::new(Inner { cfgs, running: HashMap::new(), errors: HashMap::new() }) }
+        Shares { file: file.to_path_buf(), owner: owner.into(), env, allow_write: RwLock::new(allow_write), scope: RwLock::new(scope), lan, inner: Mutex::new(Inner { cfgs, running: HashMap::new(), errors: HashMap::new() }) }
+    }
+
+    pub fn scope(&self) -> Scope {
+        self.scope.read().map(|s| s.clone()).unwrap_or(Scope::Home(PathBuf::from("/nonexistent")))
+    }
+
+    fn allow(&self) -> AllowFn {
+        self.allow_write.read().map(|a| a.clone()).unwrap_or_else(|_| Arc::new(|_| false))
+    }
+
+    /// The person's rules again (their role may have changed since this was made): the write rule and the folders they may map.
+    pub fn set_rules(&self, allow_write: AllowFn, scope: Scope) {
+        if let Ok(mut s) = self.scope.write() {
+            *s = scope;
+        }
+        if let Ok(mut a) = self.allow_write.write() {
+            *a = allow_write;
+        }
     }
 
     fn audit(&self, event: &str, detail: &str) {
@@ -244,7 +289,7 @@ impl Shares {
         if i.cfgs.iter().any(|c| c.name.eq_ignore_ascii_case(&d.name) && Some(&c.id) != old.map(|o| &o.id)) {
             return Err("Another share has that name.".into());
         }
-        let real = validate_folder(&d.folder, &*self.allow_write, &self.env.deny)?;
+        let real = validate_folder(&d.folder, &*self.allow(), &self.env.deny, &self.scope())?;
         if !EXPIRIES.iter().any(|(_, s)| *s == d.expiry_secs) {
             return Err("Choose 1 hour, 1 day, 7 days or never.".into());
         }
@@ -413,7 +458,7 @@ impl Shares {
             // the folder is fixed: the local packages folder only, however the share file was edited
             std::fs::canonicalize(&cfg.folder).ok().filter(|r| r.is_dir() && r.ends_with("local/packages")).ok_or_else(|| "The packages folder is missing.".to_string())
         } else {
-            validate_folder(&cfg.folder, &*self.allow_write, &self.env.deny)
+            validate_folder(&cfg.folder, &*self.allow(), &self.env.deny, &self.scope())
         };
         let real = checked.inspect_err(|e| {
             i.errors.insert(id.to_string(), e.clone());
@@ -587,18 +632,21 @@ fn registry() -> &'static Mutex<HashMap<Key, Arc<Shares>>> {
 }
 
 /// The manager of `user` (made on first use; the Settings page, the IDE action and sign-out all reach the same one).
-pub fn for_user(data_dir: &Path, user: &str, audit: Arc<dyn Fn(&str, &str) + Send + Sync>, allow_write: AllowFn) -> Arc<Shares> {
+pub fn for_user(data_dir: &Path, user: &str, audit: Arc<dyn Fn(&str, &str) + Send + Sync>, allow_write: AllowFn, scope: Scope) -> Arc<Shares> {
     let mut r = registry().lock().unwrap_or_else(|e| e.into_inner());
-    r.entry((data_dir.to_path_buf(), user.to_string()))
+    let inst = r
+        .entry((data_dir.to_path_buf(), user.to_string()))
         .or_insert_with(|| {
             let u = user.to_string();
             let a2 = audit.clone();
             let audit_user: Arc<dyn Fn(&str, &str) + Send + Sync> = Arc::new(move |ev, d| a2(ev, &format!("user={u} {d}")));
             let env = Env::real(deny_list(data_dir), audit_user);
             let lan: LanFn = Arc::new(lan_addresses);
-            Arc::new(Shares::open(&share_file(data_dir, user), user, env, allow_write, lan))
+            Arc::new(Shares::open(&share_file(data_dir, user), user, env, allow_write.clone(), scope.clone(), lan))
         })
-        .clone()
+        .clone();
+    inst.set_rules(allow_write, scope);
+    inst
 }
 
 /// This machine's IPv4 addresses on the networks around it, private ones first (loopback left out).
@@ -651,4 +699,24 @@ pub fn take_share_ask() -> Option<String> {
 pub fn allow_fn(policy: iyakki_sec::policy::Policy, user: &str, data_dir: &Path) -> Arc<dyn Fn(&str) -> bool + Send + Sync> {
     let (u, d) = (user.to_string(), data_dir.to_path_buf());
     Arc::new(move |p| policy.allows_write(&u, p) && crate::scope::FileRoots::new(&policy, &u, &d).roots.iter().any(|r| Path::new(p).starts_with(r)))
+}
+
+/// The scope of a person's shares from their role: an administrator any folder, everyone else their home folder only.
+pub fn scope_for(admin: bool, user: &str, data_dir: &Path) -> Scope {
+    if admin {
+        Scope::Admin
+    } else {
+        Scope::Home(crate::scope::home_root(user, data_dir))
+    }
+}
+
+/// The write rule of a person's shares: for an administrator the account's own policy (which may write anywhere); for everyone else
+/// the policy AND the folders of the account's file roots (home, workspaces, given folders): [`Scope::Home`] then narrows it to the home.
+pub fn allow_fn_for(admin: bool, policy: iyakki_sec::policy::Policy, user: &str, data_dir: &Path) -> Arc<dyn Fn(&str) -> bool + Send + Sync> {
+    if admin {
+        let u = user.to_string();
+        Arc::new(move |p| policy.allows_write(&u, p))
+    } else {
+        allow_fn(policy, user, data_dir)
+    }
 }

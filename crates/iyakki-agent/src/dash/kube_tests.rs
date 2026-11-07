@@ -689,3 +689,33 @@ fn the_default_dashboard_passes_the_credential_scrub_and_holds_no_address() {
     let json = serde_json::to_string(&d).unwrap();
     assert!(!json.contains("http") && !json.contains("uvault") && !json.contains("token"));
 }
+
+#[test]
+fn building_the_dash_environment_for_an_administrator_seeds_the_default_once_and_never_for_others() {
+    use iyakki_proxy::{Upstream, UpstreamResponse};
+    struct Dead;
+    impl Upstream for Dead {
+        fn request(&self, _: &str, _: &str, _: &[(String, String)], _: &[u8]) -> Result<UpstreamResponse, String> {
+            Err("no network".into())
+        }
+    }
+    let d = std::env::temp_dir().join(format!("iyakki-dashseed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let svc = crate::services::Services::open(&d, Arc::new(Dead), Arc::new(Dead)).unwrap();
+    let admin = Role::Admin.template();
+    let user = Role::User.template();
+    let (root_home, sam_home) = (d.join("homes/root"), d.join("homes/sam"));
+    let home = root_home.clone();
+    let boards = super::store::Dashboards::open(&home);
+    assert!(boards.load(super::seed::DASHBOARD_ID).is_err());
+    let _ = Env::from_services_in(&svc, "root", &admin, root_home.clone());
+    assert!(boards.load(super::seed::DASHBOARD_ID).is_ok(), "the administrator's first Env seeds the default dashboard");
+    // a person who deleted it does not get it back on the next Env
+    boards.delete(super::seed::DASHBOARD_ID).unwrap();
+    let _ = Env::from_services_in(&svc, "root", &admin, root_home.clone());
+    assert!(boards.load(super::seed::DASHBOARD_ID).is_err());
+    // an ordinary account is not seeded
+    let _ = Env::from_services_in(&svc, "sam", &user, sam_home.clone());
+    assert!(super::store::Dashboards::open(&sam_home).load(super::seed::DASHBOARD_ID).is_err());
+    let _ = std::fs::remove_dir_all(&d);
+}

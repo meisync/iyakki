@@ -253,3 +253,34 @@ fn nothing_overlaps_or_leaves_the_screen_for_the_launcher_tile_the_app_bar_and_t
         }
     }
 }
+
+#[test]
+fn the_store_tile_says_how_many_updates_the_last_check_found_at_four_sizes() {
+    use iyakki_agent::store::updatecheck as chk;
+    let (mut sh, _) = shell_with_users("store-update-chip");
+    login(&mut sh, "root", "rootpass12");
+    let svc = sh.services_for_demo().clone();
+    let upd = |id: &str| chk::Update { kind: chk::Kind::App, id: id.into(), title: id.into(), from: "1.0.0".into(), to: "1.1.0".into(), source: "Stick".into(), new_permissions: vec![], note: String::new() };
+    for (n, want) in [(0usize, "Apps and skills"), (1, "1 update"), (2, "2 updates")] {
+        chk::Report { checked_at: 1, updates: (0..n).map(|i| upd(&format!("skill:a{i}"))).collect(), ..Default::default() }.save(svc.dir()).unwrap();
+        for (w, h) in SIZES {
+            let mut g = Gfx::new(w, h);
+            sh.resize_for_test(w, h);
+            let s = scale_for(w, h);
+            sh.leave_app();
+            sh.set_group(Group::System);
+            sh.refresh_badge();
+            sh.render(&mut g);
+            let items = sh.group_items();
+            let i = items.iter().position(|it| matches!(it, LItem::Sys(t) if t.app == PApp::Store)).expect("the STORE tile");
+            sh.sel = i;
+            sh.render(&mut g);
+            let cap = launcher::per_page(w, h, s);
+            let tile = launcher::page_rects(w, h, s, items.len(), i / cap)[i % cap];
+            let hit = g.layout_log.texts.iter().rev().find(|(_, _, _, t)| t == want).unwrap_or_else(|| panic!("{w}x{h}: {want:?} not drawn for {n} update(s)"));
+            let r = hit.1;
+            assert!(r.x >= tile.x - 1.0 && r.x + r.w <= tile.x + tile.w + 1.0 && r.x >= 0.0 && r.x + r.w <= w as f32 && r.y + r.h <= h as f32, "{w}x{h}: {want:?} {r:?} leaves its tile {tile:?}");
+        }
+    }
+    let _ = std::fs::remove_file(svc.dir().join(chk::FILE));
+}

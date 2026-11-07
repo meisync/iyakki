@@ -908,4 +908,39 @@ mod tests {
         std::env::set_var("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()));
         assert!(path_env().is_empty());
     }
+    #[test]
+    fn a_command_started_by_the_panel_in_a_workspace_with_a_missing_sandbox_stops_and_is_not_run_on_the_machine() {
+        let d = std::env::temp_dir().join(format!("iyakki-ide-sbx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let mut c = iyakki_agent::workspace::ProjectConfig::default();
+        c.sandbox = "no-such-sandbox".into();
+        c.save(&d).unwrap();
+        let mut r = Runner::new();
+        r.start(&d, vec!["touch".to_string(), "ran-on-the-machine".to_string()], Duration::from_secs(10));
+        let mut out = None;
+        for _ in 0..500 {
+            if let Some((o, _)) = r.poll() {
+                out = Some(o);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let o = out.expect("the command ended");
+        assert_eq!(o.code, Some(126), "{:?}", o.stderr);
+        assert!(!o.stderr.is_empty(), "the reason is told");
+        assert!(!d.join("ran-on-the-machine").exists(), "the command did not run on the machine");
+        // without a sandbox chosen the same command does run
+        c.sandbox.clear();
+        c.save(&d).unwrap();
+        r.start(&d, vec!["touch".to_string(), "ran-on-the-machine".to_string()], Duration::from_secs(10));
+        for _ in 0..500 {
+            if r.poll().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(d.join("ran-on-the-machine").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

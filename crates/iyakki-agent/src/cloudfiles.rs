@@ -279,6 +279,17 @@ fn sha_hex(b: &[u8]) -> String {
 /// is above `max`; refused, with nothing left behind, when `src` ends early, when a folder or a link is at `file`, or when `want_sha`
 /// (hex SHA-256) does not match what arrived. Returns the byte count and the SHA-256.
 pub fn write_stream(file: &Path, src: &mut dyn std::io::Read, declared: u64, max: u64, want_sha: Option<&str>) -> Result<(u64, String), String> {
+    write_stream_within(file, src, declared, max, want_sha, upload_time_limit(declared))
+}
+
+/// Longest an upload of `declared` bytes may take in total: 120 s plus the time at 64 KiB/s, so a slow trickle cannot hold a connection
+/// and a private temporary file open for ever, while a slow but honest line still finishes.
+pub fn upload_time_limit(declared: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(120 + declared / (64 * 1024))
+}
+
+/// [`write_stream`] with an explicit total-time limit; past it the upload is refused and nothing is left behind.
+pub fn write_stream_within(file: &Path, src: &mut dyn std::io::Read, declared: u64, max: u64, want_sha: Option<&str>, limit: std::time::Duration) -> Result<(u64, String), String> {
     use sha2::{Digest, Sha256};
     use std::io::Write;
     if declared > max {
@@ -300,7 +311,11 @@ pub fn write_stream(file: &Path, src: &mut dyn std::io::Read, declared: u64, max
         use std::os::unix::fs::OpenOptionsExt;
         let mut out = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp).map_err(|e| e.to_string())?;
         let (mut h, mut left, mut buf) = (Sha256::new(), declared, vec![0u8; 64 * 1024]);
+        let started = std::time::Instant::now();
         while left > 0 {
+            if started.elapsed() > limit {
+                return Err(format!("the upload took longer than {} s in total and was stopped", limit.as_secs()));
+            }
             let want = buf.len().min(left as usize);
             let n = src.read(&mut buf[..want]).map_err(|e| format!("the upload was interrupted: {e}"))?;
             if n == 0 {
@@ -641,6 +656,25 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn an_upload_that_takes_too_long_in_total_is_stopped_and_leaves_nothing() {
+        struct Slow;
+        impl std::io::Read for Slow {
+            fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                b[0] = 1;
+                Ok(1)
+            }
+        }
+        let base = dir("slowup");
+        let e = write_stream_within(&base.join("s.bin"), &mut Slow, 100_000, MAX_BINARY, None, std::time::Duration::from_millis(100)).unwrap_err();
+        assert!(e.contains("longer than"), "{e}");
+        assert!(!base.join("s.bin").exists());
+        let left: Vec<_> = std::fs::read_dir(&base).unwrap().flatten().filter(|x| x.file_name().to_string_lossy().starts_with(".iyakki-up")).collect();
+        assert!(left.is_empty());
+        assert!(upload_time_limit(128 * 1024 * 1024) > upload_time_limit(1));
+    }
+
     #[test]
     fn a_download_opens_a_regular_file_only_and_sends_exactly_its_length() {
         let base = dir("down");

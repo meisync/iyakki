@@ -365,7 +365,7 @@ duplicate update).
 
 A refused `done` is no longer a dead end. The model gets the exact next action ("No verification has run for this row. Run
 deploy_status now… or set it to `pending` with `depends_on`"), and the harness does the cheap check itself when a claim arrives:
-`deploy_status` ready for deploy rows, the workspace's test command for rows about tests (`ProjectTools::with_test_command`). A
+`deploy_status` ready for deploy rows, the workspace's test command for rows about tests (`ProjectTools::with_test_command`; the chat and Autopilot tasks pass the `commands.test` of the workspace's `.iyakki/project.json` through `with_project_test_command`, the same setting as the IDE's Tests button; split at spaces, no shell). A workspace that names none has no test check: the refusal and the review note then say "this workspace names no test command (set commands.test in .iyakki/project.json), so no automatic test check exists" and the row waits in `review` for the person's OK. The http check of a row about the app responding is still not built beyond the address check. A
 pass marks the row verified and done. A failure comes back once with its output and 3 attempts; then the harness sets the row
 `pending` (when the notes name another row) or `blocked` and says so, so Autopilot moves on. The same refused claim twice changes
 the row to `pending` instead of a third refusal. `pending` is a status with `depends_on` (the Depends column, or `Depends: …;`

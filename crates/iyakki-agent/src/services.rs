@@ -172,7 +172,20 @@ impl Services {
         std::fs::create_dir_all(dir.join("vault/users")).map_err(io_err)?;
         let settings = SettingsStore::open(&dir.join("settings.json")).map_err(io_err)?;
         let sys_path = dir.join("vault/system.afv");
-        let system = if LocalVault::exists(&sys_path) { Some(LocalVault::open(&sys_path).map_err(io_err)?) } else { None };
+        // A system vault that cannot be read must not stop the whole system from starting (the shell would not come up at all): the
+        // file is left exactly as it is, the administrators are told it is locked (`admin_login_system` never creates a new vault over
+        // an existing file), and a line goes to the audit log.
+        let system = if LocalVault::exists(&sys_path) {
+            match LocalVault::open(&sys_path) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    iyakki_schema::report(format!("system vault {}: cannot be opened ({e}); the file is left as it is and the system vault stays locked", sys_path.display()));
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let secrets = Secrets::new(system, quick.clone());
         secrets.set_providers(settings.get().secret_providers.clone().into_iter().collect());
         // a cloud instance's common vault (cvault:NAME), when the operator mounted one
@@ -857,6 +870,9 @@ impl Services {
     pub fn delete_session(&self, user: &str, id: &str) -> Result<SessionDeleted, String> {
         self.sessions.delete(user, id)?;
         let runs = self.runs.delete_for_session(user, id);
+        // the vendor session id of an external agent and what the chat added to the workspace history go too
+        self.ext_sessions.forget_chat(id);
+        crate::history::History::forget_session_everywhere(&self.kb, user, id);
         let dir = self.dir.join("work").join(user).join(id);
         let files = count_files(&dir);
         if dir.is_dir() {
@@ -1481,6 +1497,15 @@ impl Services {
     /// lists with Reciprocal Rank Fusion. Backend failures become warnings, not errors.
     pub fn search(&self, namespaces: &[&str], query: &str, k: usize) -> (Vec<Hit>, Vec<String>) {
         let mut lists = vec![self.kb.lock().unwrap().search(namespaces, query, k * 2)];
+        let (ext, warnings) = self.search_external(query, k);
+        lists.extend(ext);
+        (fuse(lists, k), warnings)
+    }
+
+    /// The ranked lists of every enabled external backend (one list each; a failing backend becomes a warning). Nothing when the
+    /// settings do not use external backends.
+    pub fn search_external(&self, query: &str, k: usize) -> (Vec<Vec<Hit>>, Vec<String>) {
+        let mut lists = Vec::new();
         let mut warnings = Vec::new();
         let (exts, use_ext) = {
             let s = self.settings.lock().unwrap();
@@ -1507,7 +1532,7 @@ impl Services {
                 }
             }
         }
-        (fuse(lists, k), warnings)
+        (lists, warnings)
     }
 }
 
@@ -1655,6 +1680,10 @@ mod tests {
         s.runs.save(&log("aaaaaaaaaaaa", Some(&one.id))).unwrap();
         s.runs.save(&log("bbbbbbbbbbbb", Some(&two.id))).unwrap();
         s.runs.save(&log("cccccccccccc", None)).unwrap();
+        s.ext_sessions.set(&one.id, "claude-code", "vendor-1");
+        s.ext_sessions.set(&two.id, "claude-code", "vendor-2");
+        crate::history::History::new(s.kb.clone(), "alice", "shop", Some(&one.id)).record("answer", "r", "gone with the chat");
+        crate::history::History::new(s.kb.clone(), "alice", "shop", Some(&two.id)).record("answer", "r", "stays");
         assert_eq!(s.session_files("alice", &one.id), 2);
         assert!(!s.sessions.recall("alice", &one.id, "what is x", 3).is_empty());
         // someone else cannot delete it
@@ -1667,6 +1696,9 @@ mod tests {
         let left: Vec<String> = s.runs.list("alice").into_iter().map(|r| r.id).collect();
         assert_eq!(left.len(), 2, "only that chat's run was removed: {left:?}");
         assert!(w2.join("keep.txt").exists() && s.sessions.load("alice", &two.id).is_some(), "other chats are untouched");
+        assert!(s.ext_sessions.get(&one.id, "claude-code").is_none(), "the vendor session id is cleaned");
+        assert_eq!(s.ext_sessions.get(&two.id, "claude-code").as_deref(), Some("vendor-2"));
+        assert_eq!(crate::history::History::new(s.kb.clone(), "alice", "shop", None).len(), 1, "the chat's workspace history is forgotten");
         assert!(s.delete_session("alice", &one.id).is_err(), "deleting twice is an error, not a crash");
     }
 

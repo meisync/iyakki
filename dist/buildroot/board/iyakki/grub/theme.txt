@@ -4,7 +4,7 @@ title-text: ""
 desktop-image: "iyakki-bg.png"
 desktop-image-scale-method: "padding"
 desktop-color: "#050710"
-terminal-font: "GNU Unifont Regular 16"
+terminal-font: "DejaVu Sans Mono Regular 24"
 # GRUB's terminal window, which it paints (in background_color, set in grub.cfg to the desktop colour) when an entry starts and
 # while it loads the kernel: below the emblem, over the menu, so the logo stays on screen until IYAKKI's boot screen takes over
 # at the same place. GRUB makes it at least 80 x 24 characters (640 x 384 pixels with this font) and centres it when the
@@ -21,12 +21,12 @@ terminal-border: "0"
 	top = 61%
 	width = 72%
 	height = 34%
-	item_font = "GNU Unifont Regular 16"
-	selected_item_font = "GNU Unifont Regular 16"
+	item_font = "DejaVu Sans Bold 30"
+	selected_item_font = "DejaVu Sans Bold 30"
 	item_color = "#9aa6c8"
 	selected_item_color = "#46e1ff"
-	item_height = 22
-	item_padding = 3
+	item_height = 40
+	item_padding = 6
 	item_spacing = 1
 	scrollbar = true
 }
@@ -36,7 +36,7 @@ terminal-border: "0"
 	top = 95%
 	width = 100%
 	align = "center"
-	font = "GNU Unifont Regular 16"
+	font = "DejaVu Sans Bold 30"
 	color = "#5d6a8f"
 	text = "IYAKKI  -  an OS for agents    (Up/Down and Enter choose a start, e edits it)"
 }

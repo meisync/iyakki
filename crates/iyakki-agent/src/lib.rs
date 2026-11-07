@@ -50,6 +50,14 @@ pub mod providers;
 pub mod vault;
 pub mod profilestore;
 pub mod rag;
+pub mod agenticrag;
+pub mod ragtools;
+#[cfg(test)]
+mod agenticrag_tests;
+#[cfg(test)]
+mod ragtools_tests;
+#[cfg(test)]
+mod rageval_tests;
 pub mod rag_ext;
 pub mod services;
 pub mod sessions;
@@ -163,7 +171,14 @@ pub mod ssh;
 pub mod sshkey;
 pub mod sshtunnel;
 pub mod sshtunnel_mgr;
+pub mod gitworktools;
 pub mod sshtunneltools;
+pub mod objectstoragetools;
+pub mod quickuninstalltools;
+#[cfg(test)]
+mod quickuninstalltools_tests;
+#[cfg(test)]
+mod objectstoragetools_tests;
 pub mod vpn_dns;
 pub mod vpn_helper;
 pub mod vpn_mgr;
@@ -175,7 +190,13 @@ mod vpn_mgr_tests;
 #[cfg(test)]
 mod vpntools_tests;
 #[cfg(test)]
+mod gitworktools_tests;
+#[cfg(test)]
 mod sshtunneltools_tests;
+#[cfg(test)]
+mod sharedvault_tests;
+#[cfg(test)]
+mod sharedvaulttools_tests;
 #[cfg(test)]
 mod sshtunnel_tests;
 pub mod gitagent;
@@ -188,6 +209,8 @@ pub mod gitnet;
 pub mod netprobe;
 pub mod nl80211_os;
 pub mod hotspot_radio;
+pub mod meteredlink;
+pub mod quietio;
 pub mod wifi_ap;
 pub mod wifi_ap_host;
 pub mod bnep;
@@ -238,6 +261,7 @@ pub mod devwatch;
 pub mod release;
 pub mod relinfo;
 pub mod sysinfo;
+pub mod sysprocs;
 pub mod inbox;
 pub mod notifyhub;
 pub mod featureboard;
@@ -306,6 +330,11 @@ pub mod cloudvaultd;
 pub mod cloudvaultguard;
 pub mod cloudrotate;
 pub mod cloudvaultlink;
+pub mod sharedvault;
+pub mod sharedvaulttools;
+pub mod toolrouting;
+#[cfg(test)]
+mod toolrouting_tests;
 pub mod tenantconfig;
 pub mod sandbox;
 pub mod commonvault;

@@ -20,7 +20,6 @@ Status: defined and checked without a build; **no release image has been built o
 | `gst-libav` plugin glue | LGPL-2.1+, no codec code | **parked, inactive** in `/usr/lib/iyakki-av` (reviewed `except` row; `IYAKKI_RELEASE_AV_BRIDGE=0` drops it) | activated by the add-on download |
 | ffmpeg program, Claude Code, other CLIs | vendor / GPL | **no** | Quick install |
 | NVIDIA user-space driver, CUDA | NVIDIA | **no** | Quick install "NVIDIA GPU driver" |
-| GRUB `unicode.pf2` | GNU Unifont (GPL-2.0+ with font exception, or OFL-1.1: authors' statement, not verified from a package) | yes, owner may drop it | in the image, record in `boot/grub/fonts/FONTS-LICENSE.txt` |
 | GRUB menu and terminal fonts | DejaVu (Bitstream Vera) | yes | made from the repository's DejaVu files |
 
 ## 2. What a release ISO contains
@@ -106,7 +105,7 @@ profile only "64 packages without a legal-info row" is left (fixed by `legal-col
 | gst1-plugins-bad UNKNOWN | reviewed `accept` row with the files read, fragment pins the plugin set | green in simulation |
 | ~64 packages without legal-info rows | `legal-collect.sh` (web, mac) | needs the real run |
 | apple-bce without licence text | `legal/extra-licences/apple-bce` copied by `legal-collect.sh` | needs the real run |
-| unicode.pf2 / menu fonts licence | `FONTS-LICENSE.txt`, DejaVu from the repository | rows updated; install-root already passed |
+| menu fonts licence | `FONTS-LICENSE.txt`, DejaVu from the repository | rows updated; install-root already passed |
 | skeleton-init-common, ifupdown-scripts, dejavu, clang helpers | rows now cite their evidence (2026-10-27) | rows only |
 | AV bridge missing in macweb | `gst1-libav-reinstall` in the web tree, then the repack | needs the one-package make |
 
@@ -115,8 +114,7 @@ Still red or REVIEW, not touched here: 9 unverified assets, floating download pi
 ## 8. Not verified
 
 No image was built, booted or scanned as a release; the simulation edits a file list, not files. The GPU guard and every row of the hardware
-table are reasoning, not hardware tests (the black-screen risk is the likeliest to matter). Unifont's licence is the authors' statement as
-remembered, not read from a package here. apple-bce's licence is a record of `MODULE_LICENSE("GPL")`; upstream has no licence file. dirac_parse,
+table are reasoning, not hardware tests (the black-screen risk is the likeliest to matter). apple-bce's licence is a record of `MODULE_LICENSE("GPL")`; upstream has no licence file. dirac_parse,
 a few small headers and BSD-style WebM helper files in gst-plugins-bad have no LGPL header. The recipe-level licence strings in the fixture are
 snapshots. The first-boot screen and button do not exist in the shell yet. `WEB_MEDIA=1` adds unreviewed plugins and fails the config check.
 

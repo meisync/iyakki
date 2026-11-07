@@ -26,7 +26,8 @@ pub(super) fn due(t: &iyakki_agent::settings::TimeSettings, admin: bool, online:
 
 impl Shell {
     pub(super) fn tzask_tick(&mut self) {
-        if self.tzask.open || self.tick % 60 != 20 {
+        // not while the screen saver or the dim is showing (the card would be waiting on a desktop nobody sees)
+        if self.tzask.open || self.tick % 60 != 20 || self.screen_stage() != crate::saver::Stage::Awake {
             return;
         }
         let admin = self.session.as_ref().is_some_and(|s| s.policy.manage_settings);

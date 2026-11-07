@@ -101,7 +101,7 @@ pub fn tool_timeout(name: &str) -> Duration {
 
 /// Tools that read and do not depend on each other's side effects: safe to run side by side.
 pub fn parallel_safe(name: &str) -> bool {
-    matches!(name, "web_research" | "web_search" | "web_fetch" | "web_feed" | "web_links" | "weather" | "stock_quote" | "search_documents" | "read_file" | "list_dir" | "now" | "calendar_list" | "alarm_list" | "task_list" | "radio_search" | "media_search" | "list_models" | "store_search" | "store_info")
+    matches!(name, "web_research" | "web_search" | "web_fetch" | "web_feed" | "web_links" | "weather" | "stock_quote" | "search_documents" | "rag_collections" | "rag_search" | "rag_read" | "read_file" | "list_dir" | "now" | "calendar_list" | "alarm_list" | "task_list" | "radio_search" | "media_search" | "list_models" | "store_search" | "store_info")
 }
 
 const MAX_PARALLEL: usize = 4;

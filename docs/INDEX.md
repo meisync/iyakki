@@ -81,7 +81,7 @@
 ## Design and deep dives
 
 [`DESIGN.md`](DESIGN.md) (visual language) · [`EMBEDDING-AND-BACKEND.md`](EMBEDDING-AND-BACKEND.md) (components and a remote backend) ·
-[`ASSISTANT-ROBUSTNESS.md`](ASSISTANT-ROBUSTNESS.md) (tool use, thinking models, speed) · [`WEBVIEW-PROTOCOL.md`](WEBVIEW-PROTOCOL.md) (shell to web-engine
+[`ASSISTANT-ROBUSTNESS.md`](ASSISTANT-ROBUSTNESS.md) (tool use, thinking models, speed) · [`AGENTIC-RAG.md`](AGENTIC-RAG.md) (the assistant's own retrieval: plan, search, grade, rewrite, cite) · [`WEBVIEW-PROTOCOL.md`](WEBVIEW-PROTOCOL.md) (shell to web-engine
 helper) · [`JS-PERFORMANCE.md`](JS-PERFORMANCE.md) · [`BOOT-TEST.md`](BOOT-TEST.md) and [`LOCAL-TEST.md`](LOCAL-TEST.md) (testing on this computer and on real
 hardware) · [`../Agent OS Architecture Specification.md`](<../Agent OS Architecture Specification.md>) (the original design and roadmap).
 

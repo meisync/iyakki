@@ -237,6 +237,17 @@ pub struct TenantInfo {
     pub current: bool,
 }
 
+/// What the server says about a tenant switch (control characters dropped).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Switched {
+    pub tenant: TenantInfo,
+    pub previous: String,
+    pub runs_stopped: u64,
+    pub vault_locked: bool,
+    /// Another address the tenant is served from, when it is not this one.
+    pub url: String,
+}
+
 /// The tenant's `/api/v1/files` routes with a bearer token. Every call is its own pinned connection.
 pub struct FilesApi {
     target: Target,
@@ -335,6 +346,27 @@ impl FilesApi {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    /// Work in another tenant the person belongs to (`POST /api/v1/tenant/switch`). The server checks membership (a tenant the person is
+    /// not in is refused) and says what it stopped and locked; nothing is assumed here.
+    pub fn switch_tenant(&self, id: &str) -> Result<Switched, LinkError> {
+        let body = serde_json::json!({ "tenant": id }).to_string();
+        let (s, b) = self.call("POST", "/api/v1/tenant/switch", &[("Content-Type", "application/json")], body.as_bytes(), 1 << 20)?;
+        match s {
+            404 => return Err(LinkError::Other("this server has no such tenant for you, or no tenant switcher (a machine that is not a pod has none)".into())),
+            200 => {}
+            _ => return Err(Self::fail(s, &b)),
+        }
+        let v: Value = serde_json::from_slice(&b).map_err(|_| LinkError::Other("the answer to the switch is not understood".into()))?;
+        let t = &v["tenant"];
+        Ok(Switched {
+            tenant: TenantInfo { id: clean(t["id"].as_str().unwrap_or("")), name: clean(t["name"].as_str().unwrap_or("")), role: clean(t["role"].as_str().unwrap_or("")), current: true },
+            previous: clean(v["previous"].as_str().unwrap_or("")),
+            runs_stopped: v["runs_stopped"].as_u64().unwrap_or(0),
+            vault_locked: v["vault_locked"].as_bool().unwrap_or(false),
+            url: clean(v["url"].as_str().unwrap_or("")),
+        })
     }
 
     pub fn download(&self, path: &str, max: usize) -> Result<Vec<u8>, LinkError> {

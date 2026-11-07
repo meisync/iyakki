@@ -626,7 +626,7 @@ pub fn rule(p: &AiProfile, item: Item) -> Vis {
                 Vis::Recommended("this machine has no GPU with 6 GB or more for models; the GPU of a Mac on your network can run them".into())
             }
         }
-        Item::Elasticsearch | Item::OpenSearch | Item::ClickHouse | Item::GraphDb | Item::Gitea if p.ram_gb > 0.0 && p.ram_gb * 1024.0 < item.min_ram_mb() as f64 => Vis::NotRecommended(format!("it needs about {} GB of memory and this machine has {:.1} GB", item.min_ram_mb().div_ceil(1024), p.ram_gb)),
+        Item::Elasticsearch | Item::OpenSearch | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::SeaweedFs | Item::RustFs if p.ram_gb > 0.0 && p.ram_gb * 1024.0 < item.min_ram_mb() as f64 => Vis::NotRecommended(format!("it needs about {} GB of memory and this machine has {:.1} GB", item.min_ram_mb().div_ceil(1024), p.ram_gb)),
         _ => Vis::Show,
     }
 }

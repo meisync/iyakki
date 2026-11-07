@@ -780,3 +780,43 @@ fn a_client_wifi_interface_is_never_shared_only_the_hotspot_this_computer_made()
     let r = Request { id: 1, on: true, via: Some(crate::wifi_ap::AP_IFACE.into()), ..Request::default() };
     assert!(make_plan(&ifs, &r, true, &[]).is_ok());
 }
+
+#[test]
+fn the_ranges_the_routing_table_sends_through_a_link_are_read_and_default_and_link_local_ones_are_not() {
+    // /proc/net/route text: wg0 routes 10.42.0.0/16 (little-endian hex), eth0 has the default route, its own /24 and a link-local range
+    let text = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n\
+                eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n\
+                eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n\
+                eth0\t0000FEA9\t00000000\t0001\t0\t0\t1000\t0000FFFF\t0\t0\t0\n\
+                wg0\t00002A0A\t00000000\t0001\t0\t0\t50\t0000FFFF\t0\t0\t0\n\
+                wg0\t00002A0A\t00000000\t0001\t0\t0\t50\t0000FFFF\t0\t0\t0\n\
+                bad\tzzzz\t00000000\t0001\t0\t0\t50\t0000FFFF\t0\t0\t0\n\
+                odd\t00002B0A\t00000000\t0001\t0\t0\t50\t00FF00FF\t0\t0\t0\n";
+    let r = super::plan::routed_ranges_from(text);
+    assert_eq!(r, vec![("eth0".to_string(), cidr("192.168.1.0/24")), ("wg0".to_string(), cidr("10.42.0.0/16"))]);
+    assert!(super::plan::routed_ranges_from("").is_empty());
+}
+
+#[test]
+fn the_hotspot_network_avoids_a_range_only_a_route_names() {
+    // a VPN routes 10.42.0.0/16 and 192.168.43.0/24 although no address of this machine is in them
+    let mut ifs = machine();
+    let mut vpn = IfaceInfo::new("wg0", LinkKind::Other);
+    vpn.routed = vec![cidr("10.42.0.0/16"), cidr("192.168.43.0/24")];
+    ifs.push(vpn);
+    let p = make_plan(&ifs, &start_req(1), false, &[]).unwrap();
+    assert_eq!(p.net.net, cidr("192.168.137.0/24"), "the first two usual networks are taken by the routes");
+    // the same machine without the routes would have taken the first usual network
+    let p = make_plan(&machine(), &start_req(1), false, &[]).unwrap();
+    assert_eq!(p.net.net, cidr("10.42.0.0/24"));
+}
+
+#[test]
+fn a_huge_routed_range_leaves_the_networks_outside_it() {
+    let mut ifs = machine();
+    let mut vpn = IfaceInfo::new("wg0", LinkKind::Other);
+    vpn.routed = vec![cidr("10.0.0.0/8")];
+    ifs.push(vpn);
+    let p = make_plan(&ifs, &start_req(1), false, &[]).unwrap();
+    assert_eq!(p.net.net, cidr("192.168.43.0/24"));
+}

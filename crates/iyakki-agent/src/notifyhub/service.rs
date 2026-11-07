@@ -354,6 +354,13 @@ impl Hub {
         })
     }
 
+    /// The channels that reach this person themselves (their own address is on it), with whether they opted out. A shared webhook
+    /// is the tenant's and not a personal choice, so it is not listed.
+    pub fn personal_channels(&self, user: &str) -> Vec<(String, bool)> {
+        let out = self.with_state(|st| st.optout.get(user).cloned().unwrap_or_default()).unwrap_or_default();
+        self.env.channels().into_iter().filter(|c| matches!(c.kind, ChKind::Email) && c.addresses.contains_key(user)).map(|c| (c.key.clone(), out.contains(&c.key))).collect()
+    }
+
     pub fn queue_len(&self) -> (usize, usize) {
         self.with_state(|st| (st.deliveries.len(), st.dead.len())).unwrap_or((0, 0))
     }

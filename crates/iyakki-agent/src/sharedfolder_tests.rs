@@ -665,7 +665,7 @@ fn connections_are_capped() {
 fn manager(f: &Fx, allow: bool) -> Shares {
     let a: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(move |_| allow);
     let lan: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(|| vec!["192.168.7.20".into(), "10.9.9.9".into()]);
-    Shares::open(&f.root.parent().unwrap().join("cfg/shares.json"), "alice", f.env(), a, lan)
+    Shares::open(&f.root.parent().unwrap().join("cfg/shares.json"), "alice", f.env(), a, Scope::Admin, lan)
 }
 
 /// The port refuses connections (within 3 s: a child process forked while the listener was open keeps it alive until its `exec`).
@@ -694,11 +694,20 @@ fn draft(f: &Fx) -> Draft {
 fn forbidden_and_foreign_folders_are_refused() {
     let f = fixture();
     let m = manager(&f, true);
-    for p in ["/", "/etc", "/etc/ssh", "/proc", "/sys", "/dev", "/boot", "/home", "/root", "relative/dir", "", "/does/not/exist", "/etc/passwd"] {
+    // everyone: not a full path, a folder that does not exist, a file; the whole system and its interfaces even for an administrator
+    for p in ["/", "/proc", "/sys", "/dev", "relative/dir", "", "/does/not/exist", "/etc/passwd"] {
         let mut d = draft(&f);
         d.folder = p.into();
         assert!(m.create(&d).is_err(), "{p}");
     }
+    // a person who is not an administrator is also kept out of the system's folders and of every folder outside their home
+    m.set_rules(Arc::new(|_| true), Scope::Home(std::fs::canonicalize(&f.root).unwrap()));
+    for p in ["/etc", "/etc/ssh", "/boot", "/home", "/root"] {
+        let mut d = draft(&f);
+        d.folder = p.into();
+        assert!(m.create(&d).is_err(), "{p}");
+    }
+    m.set_rules(Arc::new(|_| true), Scope::Admin);
     // a file is not a folder
     let mut d = draft(&f);
     d.folder = f.root.join("a.txt").to_string_lossy().into();
@@ -710,13 +719,15 @@ fn forbidden_and_foreign_folders_are_refused() {
     let mut env = f.env();
     env.deny = vec![f.root.join("sub")];
     let a: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(|_| true);
-    let m3 = Shares::open(&f.root.parent().unwrap().join("c3/shares.json"), "alice", env, a, Arc::new(Vec::new));
+    let m3 = Shares::open(&f.root.parent().unwrap().join("c3/shares.json"), "alice", env, a, Scope::Admin, Arc::new(Vec::new));
     let mut d = draft(&f);
     d.folder = f.root.join("sub").to_string_lossy().into();
     assert!(m3.create(&d).unwrap_err().contains("private"));
     // a folder reached through a symlink is judged by where it really is
     let mut d = draft(&f);
     d.folder = "/tmp/iyakki-test/rt-share/../../../etc".into();
+    // (an administrator may map /etc itself now; the point is that the real place decides, so judge it for a person with a home)
+    m.set_rules(Arc::new(|_| true), Scope::Home(std::fs::canonicalize(&f.root).unwrap()));
     assert!(m.create(&d).is_err());
 }
 
@@ -867,4 +878,69 @@ fn addresses_shown_for_a_share() {
     d3.port = 0;
     assert!(m.create(&d3).is_err());
     let _ = Path::new("/");
+}
+
+// ------------------------------------------------------------------ who may map which folder (owner rule 2026-11-06)
+
+#[test]
+fn an_administrator_may_map_any_folder_of_the_disks_but_not_the_whole_system_its_interfaces_or_the_private_data() {
+    let f = fixture();
+    let yes = |_: &str| true;
+    // a folder outside any home (what an administrator maps: a data disk, another person's folder, /etc)
+    assert!(validate_folder(&f.outside.to_string_lossy(), &yes, &[], &Scope::Admin).is_ok());
+    for p in ["/etc", "/var", "/mnt", "/home"] {
+        if Path::new(p).is_dir() {
+            assert!(validate_folder(p, &yes, &[], &Scope::Admin).is_ok(), "{p} is a folder an administrator may map");
+        }
+    }
+    assert!(validate_folder("/", &yes, &[], &Scope::Admin).unwrap_err().contains("whole system"));
+    for p in ["/proc", "/sys", "/dev"] {
+        assert!(validate_folder(p, &yes, &[], &Scope::Admin).unwrap_err().contains("system interface"), "{p}");
+    }
+    // the system's private data is never shared, by anyone
+    assert!(validate_folder(&f.root.join("sub").to_string_lossy(), &yes, &[f.root.join("sub")], &Scope::Admin).unwrap_err().contains("private"));
+    // the account's own write rule still applies to an administrator
+    assert!(validate_folder(&f.outside.to_string_lossy(), &|_| false, &[], &Scope::Admin).unwrap_err().contains("write"));
+}
+
+#[test]
+fn everyone_else_may_map_only_folders_inside_their_own_home() {
+    let f = fixture();
+    let yes = |_: &str| true;
+    let home = std::fs::canonicalize(&f.root).unwrap();
+    let scope = Scope::Home(home.clone());
+    // the home itself and a folder inside it
+    assert!(validate_folder(&home.to_string_lossy(), &yes, &[], &scope).is_ok());
+    assert!(validate_folder(&home.join("sub").to_string_lossy(), &yes, &[], &scope).is_ok());
+    // another folder, even one the account may write (a workspace or a given folder), is refused with the reason in words
+    let e = validate_folder(&f.outside.to_string_lossy(), &yes, &[], &scope).unwrap_err();
+    assert!(e.contains("inside your own home folder") && e.contains("administrator"), "{e}");
+    // a link inside the home that points out of it does not widen the rule
+    let link = home.join("escape");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&f.outside, &link).unwrap();
+    assert!(validate_folder(&link.to_string_lossy(), &yes, &[], &scope).unwrap_err().contains("inside your own home folder"));
+    // `..` cannot climb out either
+    let climb = format!("{}/sub/../../outside", home.display());
+    assert!(validate_folder(&climb, &yes, &[], &scope).is_err());
+    // system folders stay refused for them
+    assert!(validate_folder("/etc", &yes, &[], &scope).is_err());
+}
+
+#[test]
+fn a_shares_rules_follow_the_role_each_time_and_a_demoted_account_cannot_start_a_share_outside_its_home() {
+    let f = fixture();
+    let m = manager(&f, true);
+    let mut d = draft(&f);
+    d.folder = f.outside.to_string_lossy().into();
+    d.name = "elsewhere".into();
+    let id = m.create(&d).expect("an administrator maps a folder outside any home");
+    // the person is no longer an administrator: the same share is refused at start with the reason, and nothing is deleted
+    m.set_rules(Arc::new(|_| true), Scope::Home(std::fs::canonicalize(&f.root).unwrap()));
+    let e = m.start(&id).unwrap_err();
+    assert!(e.contains("inside your own home folder"), "{e}");
+    assert!(m.list().iter().any(|s| s.cfg.id == id), "the share is kept");
+    // and a new one outside the home is refused at creation
+    d.name = "again".into();
+    assert!(m.create(&d).unwrap_err().contains("inside your own home folder"));
 }

@@ -531,6 +531,30 @@ fn the_new_task_form_takes_budgets_and_refuses_a_number_that_is_not_one() {
     assert_eq!((t.budgets.max_minutes, t.budgets.max_tokens, t.budgets.max_cost_cents), (12, 50_000, 250));
 }
 
+#[test]
+fn a_new_task_goal_that_starts_with_remember_changes_the_context_and_the_rest_is_the_task() {
+    let _r = fake(writer("c.txt", "c\n", Arc::new(AtomicBool::new(false))));
+    let w = world("tasks-ctxgoal");
+    let d = git_project(&w, "alpha");
+    let mut app = IdeApp::new(&w.cx);
+    open(&mut app, &w.cx, "Alpha", &d);
+    // only an instruction: the context changes, no task is made
+    new_task(&mut app, &w.cx, "Rule", "remember that we use pnpm", "");
+    assert!(cur(&app).tasks.mgr.list().is_empty(), "nothing to do but the note");
+    let notes = iyakki_agent::notes::load(&cur(&app).root()).0;
+    let all: Vec<String> = notes.view(&iyakki_agent::notes::Filter::default()).iter().map(|n| format!("{} {}", n.title, n.text)).collect();
+    assert!(all.iter().any(|t| t.contains("pnpm")), "the context has the rule: {all:?}");
+    assert!(cur(&app).ctx_undo.is_some(), "and it can be undone");
+    // an instruction and a task: the task is what is left
+    new_task(&mut app, &w.cx, "Both", "remember that tabs are four spaces. Then add the cart page", "");
+    let tasks = cur(&app).tasks.mgr.list();
+    assert_eq!(tasks.len(), 1);
+    assert!(tasks[0].goal.contains("cart page") && !tasks[0].goal.contains("remember"), "{}", tasks[0].goal);
+    // a plain goal is untouched
+    new_task(&mut app, &w.cx, "Plain", "I remember when this was slow", "");
+    assert!(cur(&app).tasks.mgr.list().iter().any(|t| t.goal == "I remember when this was slow"));
+}
+
 // ------------------------------------------------------------------------------------------------ agents on the board
 
 fn board_click(app: &mut IdeApp, cx: &AppCx, label: &str) {

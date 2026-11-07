@@ -145,3 +145,35 @@ fn the_accounts_network_policy_decides_which_server_a_flow_may_reach() {
     assert!(e.contains("may not reach 127.0.0.1"), "{e}");
     assert_eq!(hs.reqs().len(), before, "nothing was sent");
 }
+
+#[test]
+fn an_imported_flow_sends_nothing_outside_until_switched_on_and_a_second_message_waits_for_the_cool_down() {
+    let hs = FakeHs::start();
+    let r = rig("switch");
+    add_account(&r, &hs);
+    let host = &r.env.host;
+    // an imported flow: its outside channel is off, the sentence says so, nothing reaches the homeserver
+    let mut imp = iyakki_flow::model::Flow::new("imp", "Imported");
+    imp.nodes.push(iyakki_flow::model::Node::new("s", "start", serde_json::json!({})));
+    let got = r.env.import_json(&imp.to_json(), "user:me").unwrap();
+    let n = Notice { flow_id: got.id.clone(), ..notice(&r) };
+    let before = hs.reqs().len();
+    let e = host.notify_channels(&n, &chan("", false)).unwrap_err();
+    assert!(e.contains("not allowed to send outside messages"), "{e}");
+    assert_eq!(hs.reqs().len(), before);
+    assert!(r.svc.inbox.list(&r.user).iter().any(|x| x.title == "Message not sent"), "one INBOX warning");
+    // the person switches it on: it goes
+    host.chan.set(&got.id, true).unwrap();
+    host.notify_channels(&n, &chan("", false)).unwrap();
+    assert_eq!(hs.st.lock().unwrap().events.len(), 1);
+    // a different message from the same flow within the cool-down is refused; the same one again is the same event
+    let other = ChannelNotice { dedupe_key: "imp:run2:n".into(), ..chan("", false) };
+    let e = host.notify_channels(&n, &other).unwrap_err();
+    assert!(e.contains("one every 5 minutes"), "{e}");
+    host.notify_channels(&n, &chan("", false)).unwrap();
+    assert_eq!(hs.st.lock().unwrap().events.len(), 1, "the retry is not a second message");
+    // a flow made here is on from the start
+    let mine = Notice { flow_id: "mine".into(), ..notice(&r) };
+    host.notify_channels(&mine, &ChannelNotice { dedupe_key: "mine:run1:n".into(), ..chan("", false) }).unwrap();
+    assert_eq!(hs.st.lock().unwrap().events.len(), 2);
+}

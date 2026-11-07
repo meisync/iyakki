@@ -65,6 +65,29 @@ fn path(cx: &AppCx) -> std::path::PathBuf {
     cx.services.dir().join(format!("browser-{}.json", who(cx)))
 }
 
+/// The text of a person's browser file. A file that is not valid JSON is moved to `<file>.corrupt-<time>` first (at most three are
+/// kept, an audit line says so) and then reads as missing, so the defaults are used and the damaged bytes are never overwritten.
+pub(super) fn read_checked(what: &str, p: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(p).ok()?;
+    if serde_json::from_str::<serde_json::Value>(&text).is_err() {
+        let _ = iyakki_schema::read_plain::<serde_json::Value>(what, p, iyakki_schema::now_secs());
+        return None;
+    }
+    Some(text)
+}
+
+/// Write a person's browser file atomically, unless a damaged file that could not be moved aside is in the way.
+pub(super) fn write_checked(what: &str, p: &std::path::Path, text: &str) {
+    if let Err(e) = iyakki_schema::plain_writable(what, p) {
+        iyakki_schema::report(e);
+        return;
+    }
+    let tmp = p.with_extension("tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, p);
+    }
+}
+
 fn old_sites_path(cx: &AppCx) -> std::path::PathBuf {
     cx.services.dir().join(format!("browser-js-{}.json", who(cx)))
 }
@@ -75,7 +98,7 @@ fn clean_hosts<I: IntoIterator<Item = String>>(list: I) -> BTreeSet<String> {
 
 pub fn load(cx: &AppCx) -> BrowserConfig {
     let mut c = BrowserConfig::default();
-    if let Ok(text) = std::fs::read_to_string(path(cx)) {
+    if let Some(text) = read_checked("browser settings", &path(cx)) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
             c.js_all = v["js_all"].as_bool().unwrap_or(c.js_all);
             c.images = v["images"].as_bool().unwrap_or(c.images);
@@ -98,12 +121,9 @@ pub fn load(cx: &AppCx) -> BrowserConfig {
 
 pub fn save(cx: &AppCx, c: &BrowserConfig) {
     let p = path(cx);
-    let tmp = p.with_extension("tmp");
     let json = serde_json::json!({ "js_all": c.js_all, "js_sites": c.js_sites, "images": c.images, "styles": c.styles, "cookies": c.cookies, "search": c.search.id(), "player": c.player, "cache": c.cache.id(), "smooth": c.smooth });
     SMOOTH.with(|s| s.set(c.smooth));
-    if std::fs::write(&tmp, json.to_string()).is_ok() {
-        let _ = std::fs::rename(&tmp, &p);
-    }
+    write_checked("browser settings", &p, &json.to_string());
 }
 
 #[cfg(test)]

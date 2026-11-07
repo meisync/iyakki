@@ -865,3 +865,6 @@ fn discover_shows_titles_tags_and_groups_filters_by_them_and_takes_drops_on_grou
     key(&mut a, &cx, Key::Char('w'));
     assert!(a.status_text().unwrap().contains("installs"), "{:?}", a.status_text());
 }
+
+#[path = "rating_tests.rs"]
+mod rating_tests;

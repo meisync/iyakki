@@ -89,6 +89,8 @@ pub fn schemas() -> Map<String, Value> {
     put("NotifList", obj(json!({"notifications": any_arr, "next_before": {"type": ["integer", "null"]}}), &["notifications"]));
     put("NotifCount", obj(json!({"unread": i, "attention": i, "approvals": i, "overdue": i, "total": i, "red": b}), &["unread", "approvals", "total", "red"]));
     put("NotifSnooze", obj(json!({"minutes": i, "until": i}), &[]));
+    put("NotifChannels", obj(json!({"channels": any_arr}), &["channels"]));
+    put("NotifOptout", obj(json!({"channel": s, "out": b}), &["channel", "out"]));
     put("DataResult", obj(json!({"result": s}), &["result"]));
     m
 }
@@ -141,4 +143,27 @@ pub fn document(profile: Profile) -> Value {
         "paths": Value::Object(paths),
         "components": {"securitySchemes": {"bearer": {"type": "http", "scheme": "bearer"}}, "schemas": Value::Object(schemas())},
     })
+}
+
+#[cfg(test)]
+mod drift_tests {
+    use super::*;
+
+    fn checked_in(profile: Profile, file: &str) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/api").join(file);
+        let now = serde_json::to_string_pretty(&document(profile)).unwrap() + "\n";
+        // `IYAKKI_WRITE_OPENAPI=1 cargo test -p iyakki-agent --lib -- the_checked_in_openapi` rewrites the files after a route change
+        if std::env::var_os("IYAKKI_WRITE_OPENAPI").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &now).unwrap();
+        }
+        let have = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{} is missing: run the test with IYAKKI_WRITE_OPENAPI=1", path.display()));
+        assert!(have == now, "{file} is out of date with the route table: run the test with IYAKKI_WRITE_OPENAPI=1 and check the change in");
+    }
+
+    #[test]
+    fn the_checked_in_openapi_documents_are_the_generated_ones() {
+        checked_in(Profile::AgentApi, "openapi-agent-api.json");
+        checked_in(Profile::Cloud, "openapi-cloud.json");
+    }
 }

@@ -516,6 +516,12 @@ pub fn parse_hm(t: &str) -> Option<(u32, u32)> {
 }
 
 /// The sound of an alarm: three rising beeps, twice, about four seconds.
+/// Start the alarm sound as the mixer's alarm kind: it is heard over a radio or a film (they duck under it) and is not held back by the volume of
+/// the other sounds; with the mixer off it goes to the play command as it always did.
+pub fn ring(play_cmd: &str) -> Result<crate::voice::Player, String> {
+    crate::voice::Player::start_as(crate::mixer::SourceKind::Alarm, play_cmd, &alarm_wav())
+}
+
 pub fn alarm_wav() -> Vec<u8> {
     let mut pcm = Vec::new();
     for _ in 0..2 {

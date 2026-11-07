@@ -25,6 +25,10 @@ pub mod deps;
 #[path = "board_deps_tests.rs"]
 mod deps_tests;
 
+#[cfg(test)]
+#[path = "board_review_tests.rs"]
+mod review_tests;
+
 /// `Event::Sub` code of the board's buttons and keys.
 pub const SUB: u8 = 32;
 pub const TAB_BASE: usize = 9_400_000;

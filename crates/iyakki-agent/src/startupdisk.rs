@@ -83,42 +83,42 @@ pub fn cli(args: &[String]) -> i32 {
         None | Some("status") => {
             let l = lines(dir);
             if l.is_empty() {
-                println!("This computer was not started through UEFI (no firmware variables).");
+                crate::qprintln!("This computer was not started through UEFI (no firmware variables).");
                 return 1;
             }
-            l.iter().for_each(|x| println!("{x}"));
+            l.iter().for_each(|x| crate::qprintln!("{x}"));
             0
         }
         Some("own-first") => match iyakki_usb::efi::own_disk_first(dir, &backup) {
             Ok(Some(m)) => {
-                println!("{m}. `iyakki startup-disk revert` puts the old order back.");
+                crate::qprintln!("{m}. `iyakki startup-disk revert` puts the old order back.");
                 0
             }
             Ok(None) => {
-                println!("Nothing to change: IYAKKI's own entry is already first, or this computer has no IYAKKI entry.");
+                crate::qprintln!("Nothing to change: IYAKKI's own entry is already first, or this computer has no IYAKKI entry.");
                 0
             }
             Err(e) => {
-                eprintln!("{e}");
+                crate::qeprintln!("{e}");
                 1
             }
         },
         Some("revert") => match iyakki_usb::efi::revert_boot_order(dir, &backup) {
             Ok(true) => {
-                println!("The earlier boot order is back.");
+                crate::qprintln!("The earlier boot order is back.");
                 0
             }
             Ok(false) => {
-                println!("There is no saved order to put back.");
+                crate::qprintln!("There is no saved order to put back.");
                 0
             }
             Err(e) => {
-                eprintln!("{e}");
+                crate::qeprintln!("{e}");
                 1
             }
         },
         _ => {
-            eprintln!("usage: iyakki startup-disk status | own-first | revert");
+            crate::qeprintln!("usage: iyakki startup-disk status | own-first | revert");
             2
         }
     }

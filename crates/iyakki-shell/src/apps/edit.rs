@@ -586,6 +586,11 @@ impl EditApp {
     }
 
     /// The rendered view is what is on screen now (not while the assistant's change is being reviewed).
+    /// A web address clicked in the Markdown page (the AI IDE opens it in its Browser tab).
+    pub fn take_md_link(&mut self) -> Option<String> {
+        self.md.take_clicked()
+    }
+
     pub fn md_previewing(&self) -> bool {
         self.md_capable() && self.review.is_none() && self.path.as_deref().is_some_and(|p| !self.md.editing(p))
     }
@@ -1822,6 +1827,10 @@ impl App for EditApp {
     }
 
     fn take_request(&mut self) -> Option<(String, String)> {
+        if let Some(u) = self.md.take_clicked() {
+            super::browser::request_open(&u);
+            return Some(("browser".into(), u));
+        }
         iyakki_agent::sharedfolder::take_share_ask().map(|f| ("settings".into(), format!("share:{f}")))
     }
 
@@ -1971,6 +1980,10 @@ impl App for EditApp {
         }
         if self.md_previewing() {
             match ev {
+                Event::Tab(n) if *n >= super::edit_preview::LINK_BASE => {
+                    self.md.click_link(*n - super::edit_preview::LINK_BASE);
+                    return Flow::Stay;
+                }
                 Event::Key(Key::Ctrl('e') | Key::Char('e') | Key::Enter) => {
                     self.md_set_edit(true);
                     return Flow::Stay;
@@ -2064,7 +2077,7 @@ impl App for EditApp {
                 }
             }
             Event::Key(Key::Enter) => {
-                let r = self.buf.newline();
+                let r = if matches!(self.hl.lang(), Lang::Plain | Lang::Markdown) { self.buf.newline() } else { self.buf.newline_pair() };
                 self.do_edit(r);
             }
             Event::Key(Key::Backspace) => {
@@ -2763,10 +2776,11 @@ mod tests {
         let (cx, home) = world("ecode");
         let mut a = app_with(&cx, &home, "x.rs", "");
         typ(&mut a, &cx, "fn f(a: u8) {\n");
-        assert_eq!(a.buffer().line(0), "fn f(a: u8) {", "the parenthesis was typed over, the brace's partner moved down with Enter");
-        assert_eq!(a.buffer().line(1), "    }", "Enter keeps the indent of the line");
+        assert_eq!(a.buffer().line(0), "fn f(a: u8) {", "the parenthesis was typed over");
+        assert_eq!(a.buffer().line(1), "    ", "Enter between the pair opens an indented line");
+        assert_eq!(a.buffer().line(2), "}", "and the closing brace stays on a line of its own");
         typ(&mut a, &cx, "let s = \"hi\";");
-        assert_eq!(a.buffer().line(1), "    let s = \"hi\";}", "the quote pair was typed over: {:?}", a.buffer().line(1));
+        assert_eq!(a.buffer().line(1), "    let s = \"hi\";", "the quote pair was typed over: {:?}", a.buffer().line(1));
         // the caret next to a bracket marks its partner on screen
         key(&mut a, &cx, Key::Up);
         key(&mut a, &cx, Key::End);
@@ -2891,6 +2905,30 @@ mod tests {
         assert!(a.is_dirty(), "the change is still there, unsaved");
         key(&mut a, &cx, Key::Ctrl('e'));
         assert!(!a.md_previewing());
+    }
+
+    #[test]
+    fn a_web_link_in_the_markdown_page_is_clickable_at_four_sizes_and_other_links_are_not_opened() {
+        let (cx, home) = world("md4");
+        let mut a = app_with(&cx, &home, "links.md", "# T\n\nRead [the docs](https://example.com/docs) and [the file](other.md) and [bad](javascript:alert(1)).\n");
+        a.ide = true;
+        for (w, h, sc) in [(1280.0, 720.0, 1.0), (1920.0, 1080.0, 1.5), (1024.0, 600.0, 0.8), (800.0, 480.0, 0.62)] {
+            let mut g = Gfx::new(w as u32, h as u32);
+            g.clear(rgb(0, 0, 0));
+            a.render(&mut g, R::new(0.0, 72.0 * sc, w, h - 72.0 * sc), sc, &cx, 0);
+            let links: Vec<_> = g.hits.iter().filter(|x| x.label == "link").collect();
+            assert!(!links.is_empty(), "{w}x{h}");
+            assert!(links.iter().all(|x| x.rect.x >= 0.0 && x.rect.x + x.rect.w <= w && x.rect.y + x.rect.h <= h + 1.0), "{w}x{h}");
+        }
+        let g = render(&mut a, &cx);
+        let hits: Vec<usize> = g.hits.iter().filter_map(|x| if let (true, Event::Tab(n)) = (x.label == "link", &x.ev) { Some(*n) } else { None }).collect();
+        assert_eq!(hits.len(), 2, "the script link is not drawn as a link at all");
+        for n in hits {
+            a.handle(&Event::Tab(n), &cx);
+        }
+        assert_eq!(a.take_md_link().as_deref(), Some("https://example.com/docs"), "only the web address is handed on");
+        assert!(a.take_md_link().is_none());
+        assert!(a.md_previewing());
     }
 
     #[test]

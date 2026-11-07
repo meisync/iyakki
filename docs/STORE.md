@@ -685,6 +685,45 @@ exported/imported as a file. (F-APPSTORE-25, 26.)
 * The assistant's `store_search` and `store_info` show a person's title, tags and group (read-only); there is no tool that changes them.
 
 
+### 16.1 Your rating and comment (local only)
+
+Each signed-in person can give a package 1 to 5 stars and a short private comment on its page (Installed and Discover), under the
+buttons. It is a note to yourself: one file per account (`ratings-<user>.json` beside the other store files, schema 1, written
+atomically, a damaged file is moved aside), listed nowhere else, never sent, and the code that reads and writes it has no network
+access at all. The key is `kind:name`, not the version, so the rating stays when the package updates, rolls back, or is removed and
+installed again; only **Forget my rating** deletes it.
+
+* **Mouse and touch**: click a star (the star you already gave takes the stars away), *Add a comment* / *Edit comment*,
+  *Forget my rating*.
+* **Keyboard** (on a package's page): `1` to `5` set the stars (the same number again takes them away), `w` writes or edits the
+  comment, `f` forgets the rating.
+* **Comment**: at most 500 characters, one paragraph. A comment that looks like a password, key or token (the same check the chat
+  uses) is refused with a plain sentence and nothing is stored.
+* **Audit**: `store.rate`, `store.rate-comment`, `store.rate-forget`, each with the package name only, never the comment.
+
+### 16.2 Ratings (after beta)
+
+The beta has no shared or averaged ratings: a store server would have to know who rated, and that needs decisions only the owner can
+make. Questions, each with a recommendation:
+
+1. **Identity.** Who is a "reviewer"? A star count is worth something only if one person is one vote. *Recommendation:* the rating
+   is signed by the person's own device key (the one that already signs the dev-mode pairing), the server stores a hash of the
+   public key, and one key gives one rating per package; no names or e-mail addresses.
+2. **Abuse.** Fake and bulk votes, review bombing, a publisher rating their own work. *Recommendation:* only a person who has the
+   package installed (the server asks the device to prove it with a signed install record) may rate; a publisher key cannot rate its
+   own packages; per-key rate limits; show the count next to the average and hide an average under five votes.
+3. **Moderation.** Comments can carry abuse, links or personal data. *Recommendation:* start with stars only; add comments later as
+   plain text (no links, no markup), with a Report button, an administrator queue and removal by the store's administrator; the
+   private store's administrator is the moderator of that store, and the official store needs a named owner and a response promise.
+4. **Privacy.** A rating tells the store what a person installed. *Recommendation:* sharing is opt-in per rating (a "Share this
+   rating" switch, off by default), local ratings stay local, nothing is sent while offline, a shared rating can be withdrawn with
+   the same Forget button, and the server keeps no IP address next to it.
+5. **Where the numbers live.** *Recommendation:* the catalog stays signed and unchanged; averages are a separate small signed file
+   per store (`ratings.json`, updated on a schedule), so a mirror or a stick can carry it and a store without one just shows none.
+6. **Before any of this**, decide whether the official store is in scope at all or only private stores run by an organisation
+   (where identity and moderation are already solved by the administrator). That is the cheapest first step and needs the least trust
+   from strangers.
+
 ## 17. Custom apps (kind `tile`) and publishing from the IDE
 
 A `tile` package is a web app that runs in its own launcher tile; its format, bridge and rules are in docs/APP-AUTHORING.md ("Tile apps").

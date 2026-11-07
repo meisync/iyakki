@@ -20,7 +20,8 @@ use iyakki_link::cloudclient::{probe_der, Client, Pin, Status, Target};
 use iyakki_link::rawlink::{Auth, FilesApi, LinkError, RawWs};
 use iyakki_link::sigscheme::DeviceKey;
 
-pub const USAGE: &str = "usage: iyakki-connect <command>\n  probe HOST[:PORT]          show the certificate (names, validity, SHA-256) without trusting it\n  pin HOST[:PORT] [--yes]    remember the certificate (trust on first use); a changed one is refused\n  unpin HOST[:PORT]          forget a pin (the next pin is a new first use)\n  pins                       list the pinned tenants\n  tenants HOST[:PORT] USER   list the tenants this account may use (* marks the one the sign-in is in); the password is read from stdin\n  login HOST[:PORT] USER     check a sign-in; the password is read from stdin or typed (no echo), never from arguments\n  login HOST[:PORT] USER --key   the same with the device key (nothing secret is sent)\n  key new [--force]          make this device's Ed25519 key (mode 600 in the configuration folder)\n  key enroll HOST[:PORT] USER   sign in with the password once and enrol this device's key (then use --key)\n  key show                   print the public key (ssh-ed25519 line) for the tenant's owner to enrol\n  key import-ssh PATH [--force]   use an unencrypted OpenSSH ssh-ed25519 private key (no RSA)\n  serve HOST[:PORT] --user NAME [--key] [--share DIR [--write]] [--open] [--port N]\n                             show the desktop in your browser at a link on 127.0.0.1 (one-time token); --share DIR lets\n                             the page exchange files with that one folder (read-only unless --write; needs a password sign-in)\n";
+pub const USAGE: &str = "usage: iyakki-connect <command>\n  probe HOST[:PORT]          show the certificate (names, validity, SHA-256) without trusting it\n  pin HOST[:PORT] [--yes]    remember the certificate (trust on first use); a changed one is refused\n  unpin HOST[:PORT]          forget a pin (the next pin is a new first use)\n  pins                       list the pinned tenants\n  tenants HOST[:PORT] USER   list the tenants this account may use (* marks the one the sign-in is in); the password is read from stdin\n  switch HOST[:PORT] USER TENANT   work in another tenant this account belongs to (the server checks it and says what it stopped and locked); the password is read from stdin
+  login HOST[:PORT] USER     check a sign-in; the password is read from stdin or typed (no echo), never from arguments\n  login HOST[:PORT] USER --key   the same with the device key (nothing secret is sent)\n  key new [--force]          make this device's Ed25519 key (mode 600 in the configuration folder)\n  key enroll HOST[:PORT] USER   sign in with the password once and enrol this device's key (then use --key)\n  key show                   print the public key (ssh-ed25519 line) for the tenant's owner to enrol\n  key import-ssh PATH [--force]   use an unencrypted OpenSSH ssh-ed25519 private key (no RSA)\n  serve HOST[:PORT] --user NAME [--key] [--share DIR [--write]] [--open] [--port N]\n                             show the desktop in your browser at a link on 127.0.0.1 (one-time token); --share DIR lets\n                             the page exchange files with that one folder (read-only unless --write; needs a password sign-in)\n";
 
 /// Exit status of a hard stop because the certificate is not the pinned one.
 pub const EXIT_PIN_CHANGED: i32 = 2;
@@ -179,6 +180,29 @@ pub fn run(args: &[String], ctx: &Ctx, input: &mut dyn BufRead, out: &mut dyn Wr
             }
             for t in list {
                 say(out, format!("{} {}  {}  ({})", if t.current { "*" } else { " " }, t.id, t.name, t.role))?;
+            }
+            Ok(())
+        }
+        ("switch", [addr, user, tenant]) => {
+            let pin = ctx.store.get(addr)?.ok_or_else(|| Fail::Error(format!("{addr} is not pinned: run `iyakki-connect pin {addr}` first")))?;
+            let mut password = String::new();
+            input.read_line(&mut password).map_err(|e| Fail::Error(e.to_string()))?;
+            let password = password.trim_end_matches(['\r', '\n']).to_string();
+            if password.is_empty() {
+                return Err(Fail::Error("no password given (type it at the prompt or pipe it in on standard input)".into()));
+            }
+            let target = Target { addr: addr.to_string(), pin };
+            let fail = |e: LinkError| match e {
+                LinkError::PinChanged(m) => Fail::PinChanged(m),
+                LinkError::Refused(m) => Fail::Error(format!("sign-in refused: {m}")),
+                LinkError::Other(m) => Fail::Error(m),
+            };
+            let api = FilesApi::login(&target, user.trim(), &password).map_err(fail)?;
+            let sw = api.switch_tenant(tenant.trim()).map_err(fail)?;
+            say(out, format!("now in {} ({}), you are {}; before: {}", sw.tenant.id, sw.tenant.name, sw.tenant.role, if sw.previous.is_empty() { "-" } else { &sw.previous }))?;
+            say(out, format!("the server stopped {} running chat(s){}", sw.runs_stopped, if sw.vault_locked { " and locked the previous tenant's vault" } else { "" }))?;
+            if !sw.url.is_empty() {
+                say(out, format!("this tenant is also served at {}", sw.url))?;
             }
             Ok(())
         }

@@ -59,6 +59,9 @@ pub const SHOW_ALL_AI: usize = SB + 890;
 #[path = "store_setup_view.rs"]
 mod view;
 
+#[path = "store_setup_remove.rs"]
+pub mod remove;
+
 // ------------------------------------------------------------------------------------------------ the machine
 
 /// What the tab knows about this machine besides what is installed (read once when the tab opens; tests give their own).
@@ -282,7 +285,7 @@ impl Gk {
             Item::Lemonade | Item::Ollama | Item::MacHost => Gk::Ai,
             Item::Kokoro | Item::VoicePack => Gk::Voices,
             Item::ClaudeCode | Item::Copilot | Item::Gitea | Item::Matrix => Gk::Agents,
-            Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Registry => Gk::Data,
+            Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::SeaweedFs | Item::RustFs | Item::Registry => Gk::Data,
             Item::Ffmpeg | Item::FfmpegLibs => Gk::Media,
             Item::GpuVulkan | Item::GpuNvidia | Item::MacFirmware | Item::MacCamera => Gk::Hardware,
             Item::LinuxApps | Item::LinuxWindows => Gk::LinuxApps,
@@ -298,7 +301,7 @@ pub fn icon_of(item: Item) -> Icon {
         Item::K3s => Icon::Mesh,
         Item::DuckDb => Icon::Data,
         Item::Elasticsearch | Item::OpenSearch => Icon::Rag,
-        Item::Prometheus | Item::ClickHouse | Item::GraphDb => Icon::Data,
+        Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::SeaweedFs | Item::RustFs => Icon::Data,
         Item::Gitea => Icon::Git,
         Item::Matrix => Icon::Chat,
         Item::Registry => Icon::Store,
@@ -450,7 +453,7 @@ pub fn open_target(item: Item) -> Option<(&'static str, &'static str)> {
         Item::K3s => Some(("k8s", "")),
         // after the install: Settings, Notifications, with the Matrix account form open at the server's address
         Item::Matrix => Some(("settings", "matrix:add")),
-        Item::Elasticsearch | Item::OpenSearch | Item::Registry | Item::Gitea => None,
+        Item::Elasticsearch | Item::OpenSearch | Item::Registry | Item::Gitea | Item::SeaweedFs | Item::RustFs => None,
         // the restricted firmware packs have their own licence step (fwpack.rs); this page only says where they stand
         Item::FwQualcommBt | Item::FwRealtekNet | Item::FwBroadcomNet | Item::FwAtheros9170 | Item::FwMediatek | Item::FwHardware => None,
     }
@@ -468,6 +471,8 @@ pub fn where_text(item: Item) -> &'static str {
         Item::GraphDb => "the cluster, namespace iyakki-data (ClusterIP only, 5 GB volume, about 500 MB of memory; the password is in your vault as svc.graphdb)",
         Item::Gitea => "the cluster, namespace iyakki-gitea (ClusterIP; reachable on this machine only at http://127.0.0.1:3300, 10 GB volume; the password and token are in your vault, and the Git connection \"Local Gitea\" is added)",
         Item::Matrix => "the cluster, namespace iyakki-matrix (ClusterIP only, 5 GB volume, about 512 MB of memory; registration needs a token that is in your vault as svc.matrix.registration-token; federation is off)",
+        Item::SeaweedFs => "the cluster, namespace iyakki-objects (ClusterIP only, S3 port 8333, 20 GB volume, about 1 GB of memory; the keys are in your vault as svc.seaweedfs.access-key and svc.seaweedfs.secret-key; the connection record is s3.seaweedfs)",
+        Item::RustFs => "the cluster, namespace iyakki-objects (ClusterIP only, S3 port 9000, 20 GB volume, about 1 GB of memory; the keys are in your vault as svc.rustfs.access-key and svc.rustfs.secret-key; the connection record is s3.rustfs)",
         Item::Registry => "the cluster, one pod with a volume (port 30500 on this machine only)",
         Item::Lemonade => "the cluster, namespace iyakki-ai, reachable on this machine only (127.0.0.1:13305)",
         Item::Kokoro => "inside Lemonade: the voice model is pulled into it",
@@ -527,7 +532,7 @@ pub struct Confirm {
 /// Does installing this item put something into a cluster (so the screen names the cluster and offers the switcher)? Ollama is not here: it
 /// installs on this machine under its own supervisor.
 pub fn deploys_to_cluster(item: Item) -> bool {
-    matches!(item, Item::Registry | Item::Lemonade | Item::VoicePack | Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix)
+    matches!(item, Item::Registry | Item::Lemonade | Item::VoicePack | Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::SeaweedFs | Item::RustFs)
 }
 
 pub struct Setup {
@@ -575,6 +580,10 @@ pub struct Setup {
     /// The popup's own scrolling body.
     pub pop_list: ScrollList,
     pub confirm: Option<Confirm>,
+    /// The removal review card (`store_setup_remove.rs`), its result slot and the step it is on.
+    pub rm: Option<remove::RemoveCard>,
+    rm_slot: Arc<Mutex<Option<Result<String, String>>>>,
+    rm_progress: Arc<Mutex<String>>,
     confirm_own: Option<Item>,
     pub note: Option<(String, bool)>,
     /// Replaces the program the jobs run (tests use a stand-in).
@@ -646,6 +655,9 @@ impl Setup {
             list: ScrollList::default(),
             pop_list: ScrollList::default(),
             confirm: None,
+            rm: None,
+            rm_slot: Default::default(),
+            rm_progress: Default::default(),
             confirm_own: None,
             note: None,
             launch: None,
@@ -773,6 +785,7 @@ impl Setup {
             changed = true;
         }
         changed |= self.take_control_result();
+        changed |= self.take_remove_result(cx);
         changed |= self.read_live(cx);
         let running = self.jobs.iter().any(|j| j.running());
         let every = if running { 15 } else { 90 };
@@ -1013,7 +1026,7 @@ impl Setup {
                     Svc::Running
                 }
             })),
-            Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::Registry | Item::Lemonade | Item::Kokoro => Some(Svc::Running),
+            Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::SeaweedFs | Item::RustFs | Item::Registry | Item::Lemonade | Item::Kokoro => Some(Svc::Running),
             _ => None,
         }
     }
@@ -1691,6 +1704,10 @@ impl Setup {
         if let Event::Tick = ev {
             return Some(if self.tick(cx) { Flow::Stay } else { Flow::Stay });
         }
+        // the removal card owns the keyboard
+        if self.rm.is_some() {
+            return self.remove_event(ev, cx);
+        }
         // the review owns the keyboard
         if self.confirm.is_some() {
             if self.confirm_scroll(ev) {
@@ -1793,6 +1810,7 @@ impl Setup {
             Event::Tab(n) if *n == STOP + idx => self.stop(item, cx),
             Event::Tab(n) if *n == BUILD + idx && item == Item::FfmpegLibs => self.build_here(cx),
             Event::Tab(n) if *n == REMOVE + idx && item == Item::VoicePack => self.remove_voice_pack(cx),
+            Event::Tab(n) if *n == remove::RM_OPEN + idx => self.open_remove(item, cx),
             Event::Tab(n) if *n == DETAILS + idx => {
                 if !self.details.remove(&item) {
                     self.details.insert(item);
@@ -1818,6 +1836,7 @@ impl Setup {
                     }
                 }
                 Key::Char('l') => self.request = Some(("installs".into(), String::new())),
+                Key::Char('r') if item != Item::VoicePack && self.can_remove(item) => self.open_remove(item, cx),
                 Key::Char('a') => self.ask_category(Gk::of(item)),
                 Key::Char('o') => {
                     if let Some((app, it)) = open_target(item) {
@@ -1946,6 +1965,9 @@ impl Setup {
     }
 
     pub fn hint(&self) -> String {
+        if let Some(h) = self.remove_hint() {
+            return h;
+        }
         if self.confirm.is_some() {
             return "y or Enter install all · Esc cancel".into();
         }
@@ -1982,6 +2004,8 @@ fn short_about(item: Item) -> &'static str {
         Item::ClickHouse => "An analytics database for DASH (ClickHouse, Apache-2.0); added to DASH as a source, reads only.",
         Item::GraphDb => "A graph database the assistant can ask about relations (Neo4j, GPL-3.0); added to DASH, reads only.",
         Item::Gitea => "Keeps your projects versioned: a git service on this machine (MIT); the GIT tile and the AI IDE use it as \"Local Gitea\".",
+        Item::SeaweedFs => "S3-compatible object storage (SeaweedFS, Apache-2.0, mature): one pod in the cluster; keys in your vault.",
+        Item::RustFs => "S3-compatible object storage in Rust (RustFS, Apache-2.0, young: alpha releases); pick it, SeaweedFS or both.",
         Item::Matrix => "A chat server of your own (Matrix, Apache-2.0): flows and the assistant can message you there; registration needs a token from your vault.",
         Item::Registry => "A place for images built on this device (the private store's server).",
         Item::ClaudeCode => "Anthropic's coding agent for the terminal and the AI IDE. Proprietary: downloaded from Anthropic, not shipped.",
@@ -2033,3 +2057,7 @@ mod voice_tests;
 #[cfg(test)]
 #[path = "store_setup_avbuild_tests.rs"]
 mod avbuild_tests;
+
+#[cfg(test)]
+#[path = "store_setup_remove_tests.rs"]
+mod remove_tests;

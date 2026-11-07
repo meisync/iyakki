@@ -53,7 +53,12 @@ impl AgentHost {
             }
             let attach = if c.attach.is_empty() { None } else { Some(self.run_picture(&n.run_id, &c.attach)?) };
             let text = format!("{}\n{}", n.title.trim(), n.body.trim());
+            // the flow's own switch (off for an imported flow) and the cool-down, before anything leaves
+            self.chan.permit(&n.flow_id, &c.dedupe_key, crate::clock::now_unix())?;
             let r = ms.send("", &c.room, text.trim(), attach, &c.dedupe_key, c.dry_run)?;
+            if !c.dry_run {
+                self.chan.sent(&n.flow_id, &c.dedupe_key, crate::clock::now_unix());
+            }
             Ok::<_, String>(vec![r.note])
         })();
         if let Err(e) = &result {

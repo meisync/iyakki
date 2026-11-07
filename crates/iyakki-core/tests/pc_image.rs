@@ -288,3 +288,12 @@ fn the_build_switch_is_documented_and_never_set_by_the_scripts() {
     }
     assert!(repo("run.sh").contains("IYAKKI_INCLUDE_RESTRICTED_FIRMWARE"), "run.sh help names the switch");
 }
+
+#[test]
+fn every_image_says_whether_it_is_releasable_in_its_release_file() {
+    let pb = read("board/iyakki/post-build.sh");
+    // a non-release image is stamped dev, and bundled when vendor files are inside; the release profile stamps release / none
+    assert!(pb.contains("echo \"IMAGE_PROFILE=dev\"") && pb.contains("echo \"FIRMWARE=bundled\""));
+    let rp = read("board/iyakki/release-profile.sh");
+    assert!(rp.contains("echo \"IMAGE_PROFILE=release\"") && rp.contains("echo \"FIRMWARE=none\""));
+}

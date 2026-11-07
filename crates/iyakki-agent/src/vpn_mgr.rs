@@ -373,6 +373,25 @@ impl Manager {
         Some(Summary { light, line })
     }
 
+    /// Tell the startup registry how the VPN is: nothing enabled is "disabled" (nothing to wait for), connected is ready, coming up is starting,
+    /// and a profile that is enabled but not connected is a failure with the same one line the top bar shows (it never names a key or a server).
+    pub fn report_startup(&self, reg: &crate::startup::Registry) {
+        match self.summary() {
+            None => {
+                reg.disabled("vpn");
+            }
+            Some(Summary { light: Light::Secure, .. }) => {
+                reg.ready("vpn");
+            }
+            Some(Summary { light: Light::Working, line }) => {
+                reg.starting("vpn", line.trim_start_matches("VPN "));
+            }
+            Some(Summary { line, .. }) => {
+                reg.failed("vpn", &line);
+            }
+        }
+    }
+
     pub fn status(&self, id: &str) -> Status {
         self.state.lock().unwrap().get(id).map(|r| r.status.clone()).unwrap_or_default()
     }
@@ -912,6 +931,7 @@ impl Manager {
                 self.connect(&id, now);
             }
         }
+        self.report_startup(crate::startup::global());
     }
 
     fn watch(&self, id: &str, now: u64) {

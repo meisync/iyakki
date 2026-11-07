@@ -1,6 +1,41 @@
-# Firmware and GPU driver licences: what ships, what is downloaded
+# Firmware and GPU driver licences: what the person can download, and the licence text shown first
 
 Not legal advice. This is the owner's working audit of 2026-10-21; `LICENSING.md` items 7, 13 and 14 are the rules, this page gives the reasons. The line IYAKKI follows: **only the legal route**. Anything whose licence does not clearly allow redistribution is downloaded for the person at their request, never shipped.
+
+## Release image: no vendor firmware; this page is the download list
+
+Owner decision 2026-10-27 (confirmed 2026-11-06): the **RELEASE image ships no vendor firmware** (no `linux-firmware`, no NVIDIA GSP, no Wi-Fi or Bluetooth blobs; the only file under `/lib/firmware` is the wireless regulatory database from `wireless-regdb`, ISC). Build it with `IYAKKI_IMAGE_PROFILE=release` (`build.sh`, `repack.sh`; `dist/buildroot/board/iyakki/release-profile.sh`, keep list `release-firmware.keep`, rules `legal/release-profile.txt`, gate `iyakki-relcheck release-image-check`). The rest of this page is the audit of the files the *test and development* images still carry (the default build, labelled not releasable) and, for the release, the list of what the person may download and the licence text shown first. Nothing below is shipped by the project in a release.
+
+**The releasable flag** is in `/etc/iyakki-release` (also copied to `boot/iyakki-release`): a release image has `IMAGE_PROFILE=release` and `FIRMWARE=none`; every other image has `IMAGE_PROFILE=dev` and `FIRMWARE=bundled` when vendor files are inside. Settings -> About shows the row **Firmware**: `none (download)` or `bundled (not releasable)` (`crates/iyakki-agent/src/relinfo.rs`, `ReleaseInfo::releasable()`). An image built with `IYAKKI_INCLUDE_RESTRICTED_FIRMWARE=1` shows the "not for redistribution" note instead and can never be a release.
+
+### What the person can download (Store -> Setup -> Hardware firmware)
+
+One pinned source for all of it: the vendor-neutral `linux-firmware` repository on kernel.org, release **20261019**, commit `a2dcb924f0897368b0b4f305cbf9808cdda90ce0` (`dist/firmware/manifest.txt`: size, SHA-256 and licence texts of every file; code `crates/iyakki-agent/src/fwextra*.rs`). Files are fetched one by one and checked; the licence text of every file (from `WHENCE`) is shown first, grouped by vendor, and kept next to the files. The bytes are never bundled.
+
+| Group in the list (`FAMILIES` in `fwextra.rs`) | Chips | Licence text shown (class) |
+|---|---|---|
+| AMD graphics | amdgpu, radeon | `LICENSE.amdgpu`, `LICENSE.radeon` (free, notice kept) |
+| Intel graphics | i915 (GuC, HuC, DMC), xe | `LICENSE.i915`, `LICENSE.xe` (free, unmodified) |
+| NVIDIA graphics (separate choice) | nouveau with GSP, Turing and newer | `LICENCE.nvidia` (NVIDIA processors only, OSI-licensed operating systems only, unmodified) |
+| Intel Wi-Fi, Intel Bluetooth | iwlwifi, ibt | `LICENCE.iwlwifi_firmware`, `LICENCE.ibt_firmware` (free, unmodified) |
+| Qualcomm Atheros Wi-Fi, Bluetooth | ath10k, ath11k, ath12k, ath6k, ar3k, ath3k, `qca/` | `LICENSE.QualcommAtheros_ath10k`, `LICENSE.QualcommAtheros_ar3k`, `LICENSE.qcom` (Qualcomm chipsets only) |
+| Atheros USB Wi-Fi | ath9k_htc, AR9170 (carl9170) | `LICENCE.open-ath9k-htc-firmware`, `LICENCE.atheros_firmware`, GPL-2.0 |
+| Realtek Wi-Fi, Bluetooth | rtw88, rtw89, rtlwifi, rtl_bt | `LICENCE.rtlwifi_firmware.txt` (free, unmodified) |
+| MediaTek Wi-Fi and Bluetooth | mt76, MT7921/MT7922/MT7925 | `LICENCE.mediatek` (MediaTek devices only, not as part of the kernel) |
+| Broadcom/Cypress Wi-Fi and Bluetooth | brcmfmac | `LICENCE.broadcom_bcm43xx`, `LICENCE.cypress` (their hardware only, complete) |
+| Realtek Ethernet | PCIe r8169 (RTL8111/8168/8125/8126) | `LICENSE.r8169` (old wording: hexadecimal format with the notice) |
+| Broadcom Ethernet | tg3, bnx2, bnx2x | `LICENCE.tigon`, `LICENCE.bnx2`, `LICENCE.bnx2x` (same old wording) |
+| Intel Ethernet (added 2026-11-06) | ice (E800 series), e100 | `LICENSE.ice`, `LICENSE.ice_enhanced`, `LICENCE.e100` (BSD-style) |
+| Ralink, TI, Marvell, server network cards (QLogic, Chelsio, Mellanox, Netronome) | rt2x00, wl18xx, mwifiex, qed, cxgb, mlx, nfp | the file's own `WHENCE` token (vendor agreement: read the full text) |
+
+Gaps and honest limits (2026-11-06):
+
+* **Ethernet that needs no file** (Intel e1000e, igb, igc, ixgbe, Realtek r8169 without the optional patch, USB adapters r8152/ax88179, virtio) works from the first boot. Only Broadcom bnx2/bnx2x server cards (the port does not start), and PCIe Realtek/Broadcom tg3 at reduced function, are better with a file.
+* **No network until firmware is fetched**: nearly every laptop Wi-Fi card (Intel AX200/AX201/AX210/BE200, Realtek RTL88xx/RTL89xx, MediaTek MT7921/MT7922/MT7925, Qualcomm Atheros QCA61xx/WCN685x, Broadcom on PCs); their Bluetooth too. A Wi-Fi card cannot fetch its own firmware.
+* **Offline routes** (no network on the target): a wired Ethernet or USB Ethernet adapter, a USB stick made on another computer (`firmware-extra` folder, an unpacked release, or the release tarball; `dist/scripts/firmware-notes/fetch.sh`), a USB-C cable to another computer that shares its internet (`fwextra_net.rs`, `docs/DEVELOPER-MODE.md` 10.6), or the developer-mode push.
+* **Graphics without firmware**: the kernel has `CONFIG_DRM_SIMPLEDRM`, `SYSFB_SIMPLEFB` and `FB_EFI` (`board/iyakki/linux.fragment`), so the UEFI framebuffer (the mode the firmware chose) works on every GPU; the release profile's `gpu-fw-guard` holds amdgpu, radeon, nouveau, i915 and xe back until their firmware exists so they cannot blank the screen. No mode changes, second screens or GPU rendering until the file is installed. Not tried on hardware without the files; check on the next image build (`docs/development/RELEASE-IMAGE-PROFILE.md`).
+* **Not in the download list**: CPU microcode (Intel/AMD, `intel-ucode`, `amd-ucode`) is not offered; Apple Wi-Fi/Bluetooth/camera firmware is Apple's (fetched on the person's Mac, `LICENSING.md` item 13); the NVIDIA user-space driver is a separate vendor download (`docs/GPU-K3S.md`).
+* The four older packs (Qualcomm Bluetooth, Realtek network, Broadcom network, Atheros AR9170, pinned to 20251011) are also available and are described below.
 
 ## Policy since 2026-10-23: when in doubt it is not shipped; the user installs it
 
@@ -21,7 +56,7 @@ What stayed because the text is clear: Broadcom `brcmfmac` (Macs), Cypress, Inte
 
 `carl9170-1.fw` is GPL-2.0-or-later and `legal-info/` does not contain the carl9170fw source, so shipping it needed a source pointer or a drop. It is **dropped from the images** (Mac and PC keep lists, and stripped from `hw`) and offered as the "Atheros AR9170 USB Wi-Fi firmware" pack. Someone who downloads it receives the binary from the upstream repository; the corresponding source is the carl9170fw project named in `WHENCE`. If the pack ever returns to an image, the written source offer must name that project (`carl9170fw/`, linuxwireless.org) and its commit.
 
-## What the images carry
+## What the test and development images carry (audit; not a release)
 
 | Part | Licence | Shipped? | Condition we must meet | Where it is met |
 |---|---|---|---|---|

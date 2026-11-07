@@ -94,6 +94,23 @@ pub struct Link {
 /// treat it as a client or an adapter: bringing it up as a client stops the access point.
 pub const HOTSPOT_IFACE: &str = "iyakap0";
 
+/// What the kernel says about one network interface by name, software interfaces included: its driver (empty when it has none) and whether
+/// it is wireless. The one place that reads this for everybody else (the metered-link check, the firmware tools); a name that is not a
+/// plain interface name gives nothing.
+pub fn iface_info(r: &Roots, name: &str) -> (String, bool) {
+    if name.is_empty() || name.len() > 32 || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')) {
+        return (String::new(), false);
+    }
+    let base = r.sys.join("class/net").join(name);
+    let driver = std::fs::read_link(base.join("device/driver")).ok().map(|p| name_of(&p)).unwrap_or_default();
+    (driver, base.join("wireless").exists() || base.join("phy80211").exists())
+}
+
+/// The text of the IPv4 routing table; empty when it cannot be read.
+pub fn route_table(r: &Roots) -> String {
+    std::fs::read_to_string(r.proc_.join("net/route")).unwrap_or_default()
+}
+
 /// Real network adapters (not loopback, bridges, tunnels or other software devices).
 pub fn links(r: &Roots) -> Vec<Link> {
     let mut out = Vec::new();

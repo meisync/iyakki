@@ -241,7 +241,7 @@ impl Shell {
         if self.loss.last.as_ref().is_some_and(|s| !s.healthy()) {
             return Some("the drive banner");
         }
-        if self.login.is_some() || self.hostdlg.is_some() || !matches!(self.shot, Shot::Off) || self.fnk.power_card {
+        if self.login.is_some() || self.hostdlg.is_some() || !matches!(self.shot, Shot::Off) || self.fnk.power_card || self.tzask.open {
             return Some("a dialog");
         }
         if self.env.services.radio.is_active() {

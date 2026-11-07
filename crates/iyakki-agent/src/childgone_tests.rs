@@ -66,3 +66,17 @@ fn the_player_and_media_wrappers_see_a_taken_status_as_not_running() {
     assert!(t.elapsed() < Duration::from_secs(2));
     assert_eq!(crate::voice::player_failure(&mut c2), "");
 }
+
+#[test]
+fn the_cli_runner_keeps_the_output_of_a_program_whose_status_was_taken_and_still_fails_a_real_error() {
+    let thief = steal_status_of_marked("gone-clis-1", Duration::from_secs(5));
+    let r = crate::clis::run_quiet("sh", &["-c", "echo v1.2.3; sleep 0.3 # gone-clis-1"], 10);
+    assert_ne!(thief.join().unwrap(), 0, "the test could not take the status");
+    assert_eq!(r.unwrap(), "v1.2.3\n");
+    let thief = steal_status_of_marked("gone-clis-2", Duration::from_secs(5));
+    let r = crate::clis::run_quiet("sh", &["-c", "echo boom >&2; sleep 0.3 # gone-clis-2"], 10);
+    thief.join().unwrap();
+    assert!(r.unwrap_err().contains("boom"));
+    assert_eq!(crate::clis::run_quiet("sh", &["-c", "exit 3"], 10).unwrap_err(), "sh failed: no message");
+    assert!(crate::clis::run_quiet("sh", &["-c", "sleep 5"], 1).unwrap_err().contains("did not finish"));
+}

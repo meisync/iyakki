@@ -72,3 +72,72 @@ fn key_a_does_nothing_for_someone_who_is_not_an_administrator() {
     assert!(!cx.services.show_all_ai());
     assert!(!audit(&cx).contains("settings.show_all_ai"));
 }
+
+#[test]
+fn key_c_cycles_the_cloud_mode_setting_for_an_administrator_saves_it_and_audits_each_change() {
+    use iyakki_agent::cloudmode::Setting;
+    let cx = cx_with_admin_store("cloud-c");
+    let mut a = SettingsApp::new(&cx).on(Tab::Cloud);
+    assert_eq!(cx.services.cloud_setting(), Setting::Auto, "automatic by default");
+    let mut seen = vec![];
+    for _ in 0..3 {
+        key(&mut a, &cx, Key::Char('c'));
+        seen.push(cx.services.cloud_setting());
+        assert!(status(&a).starts_with(&format!("Cloud mode: {}.", cx.services.cloud_setting().label())), "{}", status(&a));
+    }
+    assert_eq!(seen, [Setting::On, Setting::Off, Setting::Auto], "Automatic, On, Off and round again");
+    assert_eq!(audit(&cx).matches("settings.cloud").count(), 3, "one audit line per change");
+    assert!(a.cloud_rows(&cx).iter().any(|(l, v)| l == "Setting" && v == Setting::Auto.label()));
+    // Enter and Space do the same; the choice is in the machine's settings file
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(cx.services.cloud_setting(), Setting::On);
+    key(&mut a, &cx, Key::Char(' '));
+    assert_eq!(cx.services.cloud_setting(), Setting::Off);
+    assert_eq!(cx.services.settings.lock().unwrap().get().cloud, Setting::Off);
+    // the page draws at the four sizes with the new value
+    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+        let (g, _) = draw(&mut a, &cx, w, h);
+        assert_ne!(g.rgba(), Gfx::new(w, h).rgba(), "{w}x{h}");
+    }
+}
+
+#[test]
+fn key_c_does_nothing_for_someone_who_is_not_an_administrator() {
+    use iyakki_agent::cloudmode::Setting;
+    let mut cx = cx_with_admin_store("cloud-c-user");
+    cx.session.role = Role::User;
+    cx.session.policy = Policy::resolve(Role::User, &Default::default());
+    let mut a = SettingsApp::new(&cx).on(Tab::Cloud);
+    key(&mut a, &cx, Key::Char('c'));
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(cx.services.cloud_setting(), Setting::Auto);
+    assert!(!audit(&cx).contains("settings.cloud"));
+}
+
+#[test]
+fn key_r_switches_tool_routing_for_the_person_only_audits_it_and_the_row_fits_at_four_sizes() {
+    let cx = cx_with_admin_store("routing-r");
+    let mut a = SettingsApp::new(&cx).on(Tab::Models);
+    let dir = cx.services.dir().to_path_buf();
+    assert!(!iyakki_agent::toolrouting::person_off(&dir, "root"), "off by default: no override");
+    key(&mut a, &cx, Key::Char('r'));
+    assert!(iyakki_agent::toolrouting::person_off(&dir, "root"));
+    assert!(status(&a).contains("off for you"), "{}", status(&a));
+    assert!(audit(&cx).contains("settings.tool_routing_own") && audit(&cx).contains("\"detail\":\"off\""), "{}", audit(&cx));
+    assert!(!cx.services.settings.lock().unwrap().get().no_tool_routing, "the machine-wide switch is not touched");
+    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+        let (g, _) = draw(&mut a, &cx, w, h);
+        assert_ne!(g.rgba(), Gfx::new(w, h).rgba(), "{w}x{h}");
+    }
+    key(&mut a, &cx, Key::Char('r'));
+    assert!(!iyakki_agent::toolrouting::person_off(&dir, "root"));
+    assert_eq!(audit(&cx).matches("settings.tool_routing_own").count(), 2);
+    // an ordinary user may do it for themselves; it never turns the machine-wide switch back on
+    let mut ucx = cx_with_admin_store("routing-r-user");
+    ucx.session.role = Role::User;
+    ucx.session.policy = Policy::resolve(Role::User, &Default::default());
+    let mut u = SettingsApp::new(&ucx).on(Tab::Models);
+    key(&mut u, &ucx, Key::Char('r'));
+    assert!(iyakki_agent::toolrouting::person_off(ucx.services.dir(), &ucx.session.user));
+    assert!(!ucx.services.settings.lock().unwrap().get().no_tool_routing);
+}

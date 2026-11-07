@@ -343,6 +343,9 @@ fn the_page_draws_at_four_sizes_without_text_leaving_the_screen() {
                 assert!(rect.x >= 0.0 && right <= w as f32 + 0.5 && bottom <= h as f32 + 0.5, "{w}x{h} step {step}: {text:?} at {rect:?} leaves the screen");
             }
             assert!(g.hits.iter().any(|x| matches!(x.ev, Event::Row(_))), "{w}x{h} step {step}: rows are there");
+            if step == 0 {
+                assert!(texts(&g).contains("Shared vault: built-in (not externally reviewed)"), "{w}x{h}: the provider and its label are shown");
+            }
             for x in &g.hits {
                 let r = x.rect;
                 assert!(r.w > 0.0 && r.h > 0.0 && r.x >= 0.0 && r.y >= 0.0 && r.x + r.w <= w as f32 + 0.5 && r.y + r.h <= h as f32 + 0.5, "{w}x{h}: {} {r:?} outside the screen", x.label);
@@ -358,4 +361,21 @@ fn the_page_draws_at_four_sizes_without_text_leaving_the_screen() {
         assert!(g.hits.iter().any(|x| x.ev == Event::Row(a.sel())), "{w}x{h}: the chosen row is drawn");
         key(&mut a, &cx, Key::Home);
     }
+}
+
+#[test]
+fn the_page_names_an_external_provider_and_a_setting_that_cannot_be_used() {
+    let cx = cx_with_admin_store("cr9");
+    seed(&cx, TenantRole::Owner);
+    let mut a = page(&cx);
+    let dir = cx.services.dir().to_path_buf();
+    iyakki_agent::sharedvault::Setting { v: 1, provider: iyakki_agent::sharedvault::Provider::External, external: Some(iyakki_agent::sharedvault::ExternalRef { address: "https://kms.example.invalid".into(), mount: "secret".into(), path: "iyakki/acme".into(), namespace: None, token_secret: "shared-vault-token".into() }) }.save(&dir, "root").unwrap();
+    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+        let t = texts(&draw(&mut a, &cx, w, h));
+        assert!(t.contains("Shared vault: external system") && t.contains("not externally reviewed"), "{w}x{h}: {t}");
+        assert!(!t.contains("kms.example.invalid") && !t.contains("shared-vault-token"), "{w}x{h}: no address or token name on the page");
+    }
+    std::fs::write(iyakki_agent::sharedvault::Setting::path(&dir), "{ damaged").unwrap();
+    let t = texts(&draw(&mut a, &cx, 800, 480));
+    assert!(t.contains("setting unusable") && t.contains("not externally reviewed"), "{t}");
 }

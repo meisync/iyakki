@@ -257,3 +257,74 @@ fn a_sound_card_that_appears_late_brings_the_sound_apps_back() {
     }
     assert!(!sh.refresh_cloud(cloudmode::CloudMode::desktop()), "no change the second time");
 }
+
+#[test]
+fn detect_cloud_adds_back_exactly_the_tiles_the_connected_browser_stands_in_for_and_forgets_them_when_it_leaves() {
+    use iyakki_agent::browsermedia::{register, unregister, BrowserMedia, Policy as MediaPolicy};
+    let mut sh = signed_in("cloud-browser", bare());
+    let base = cloudmode::detect(sh.env.services.cloud_setting());
+    unregister("root");
+    assert_eq!(sh.detect_cloud(), base, "no browser connected: the machine's own facts decide");
+    let m = BrowserMedia::new(MediaPolicy::allow_all(), std::sync::Arc::new(|_, _| {}), None);
+    register("root", m.clone());
+    assert_eq!(sh.detect_cloud(), base.with_browser(&m.sources()), "a connected browser with nothing on changes nothing");
+    m.set_audio_out(true);
+    assert!(m.sources().audio_out, "the policy lets this person hear sound");
+    let with_sound = sh.detect_cloud();
+    assert_eq!(with_sound, base.clone().with_browser(&m.sources()));
+    for a in [PApp::Media, PApp::Radio, PApp::Tales, PApp::Voice] {
+        assert!(!with_sound.hides_app(a), "{a:?} works with the browser's speakers");
+    }
+    assert_eq!(with_sound.hides_app(PApp::Disks), base.hides_app(PApp::Disks), "DISKS never comes back");
+    // the shell's look-again adopts it and drops it when the browser leaves
+    let c = sh.detect_cloud();
+    sh.refresh_cloud(c);
+    assert!(!labels(&sh).is_empty());
+    unregister("root");
+    assert_eq!(sh.detect_cloud(), base);
+}
+
+#[test]
+fn the_live_refresh_of_the_devices_popover_leaves_out_hardware_rows_in_cloud_mode() {
+    use super::header_tests::{small_probe, wait_for_devices};
+    let titles = |sh: &Shell| sh.devpop.snapshot().unwrap().items.into_iter().map(|i| i.title).collect::<Vec<_>>();
+    // a desktop: the made-up machine's reading (read by the background thread of the heartbeat) has the hardware rows
+    let mut desk = signed_in("cloud-live-desk", cloudmode::CloudMode::desktop());
+    desk.devprobe = Some(small_probe("cloud-live-desk"));
+    desk.handle(&Event::Key(Key::F(8)));
+    wait_for_devices(&mut desk);
+    let all = titles(&desk);
+    assert!(all.iter().any(|t| bare().hidden_device_rows.contains(&t.as_str())), "the probe has a hardware row to leave out: {all:?}");
+    // cloud mode: the same machine, the same thread, none of the hardware rows
+    let mut sh = signed_in("cloud-live", bare());
+    sh.devprobe = Some(small_probe("cloud-live"));
+    sh.handle(&Event::Key(Key::F(8)));
+    wait_for_devices(&mut sh);
+    let left = titles(&sh);
+    assert!(!left.is_empty() && left.iter().all(|t| !bare().hidden_device_rows.contains(&t.as_str())), "{left:?}");
+    assert!(left.len() < all.len());
+    // the mode changes while the popover is open: the next reading follows it
+    sh.set_cloud_for_test(cloudmode::CloudMode::desktop());
+    sh.devpop.refresh_now(&small_probe("cloud-live"));
+    assert_eq!(titles(&sh).len(), all.len());
+}
+
+#[test]
+fn the_boot_guard_skips_the_sound_probe_and_the_camera_look_without_the_hardware() {
+    use super::{sound_boot_plan, wants_system_camera, SoundBoot};
+    // the sound-output probe and soft-volume setup follow the mode that the boot reads from the setting and the machine
+    let desktop = cloudmode::CloudMode::desktop();
+    assert_eq!(sound_boot_plan(Setting::Auto, &desktop), SoundBoot::Now);
+    assert_eq!(sound_boot_plan(Setting::Off, &desktop), SoundBoot::Now);
+    assert_eq!(sound_boot_plan(Setting::Auto, &bare()), SoundBoot::WhenReady, "a card that shows up late is still set up");
+    assert_eq!(sound_boot_plan(Setting::On, &forced()), SoundBoot::Never, "forced cloud mode never probes or watches");
+    // the same decision from the real inputs of a machine with no sound card: detect() is what from_paths asks
+    let mode = cloudmode::cloud_mode(Setting::On, &Facts { audio: false, ..Facts::full() });
+    assert_eq!(sound_boot_plan(Setting::On, &mode), SoundBoot::Never);
+    // the camera look: only on a real machine whose mode keeps the camera
+    assert!(wants_system_camera(false, &desktop));
+    assert!(!wants_system_camera(false, &bare()), "a machine with no camera is not looked at every second");
+    assert!(!wants_system_camera(false, &forced()));
+    assert!(!wants_system_camera(true, &desktop), "tests never look at the machine");
+    assert!(wants_system_camera(false, &cloudmode::cloud_mode(Setting::Auto, &Facts { audio: false, ..Facts::full() })), "a camera without a sound card is still watched");
+}

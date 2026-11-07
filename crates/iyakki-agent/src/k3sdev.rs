@@ -2528,6 +2528,42 @@ impl K3sDev {
         Ok(())
     }
 
+    /// Stop the cluster and take the PROGRAM away (the k3s binary, the kubeconfig, the log, scratch space and the record that says IYAKKI
+    /// manages a cluster here) but KEEP the `data` folder (the cluster's database and every volume), so a later install finds them.
+    /// The safe removal of Quick install; [`K3sDev::uninstall`] is the one that deletes everything.
+    pub fn uninstall_keep_data(&self, user: &str) -> Result<(), String> {
+        let st = self.installed().ok_or("no cluster is installed by IYAKKI here")?;
+        self.audit(user, "devcluster.uninstall.keep-data", &self.layout.root.display().to_string());
+        if matches!(self.state(), Svc::Starting | Svc::Running | Svc::Stopping | Svc::Failed(_)) {
+            let _ = self.stop(user);
+        }
+        if st.backend == Backend::Podman && self.run.has("podman") {
+            let _ = self.run.run(&std::env::temp_dir(), &["podman".into(), "rm".into(), "-f".into(), self.inst.pod_name.clone()], &[], Duration::from_secs(60), 4096, None);
+        }
+        if let Some(bin_dir) = self.layout.bin().parent().map(Path::to_path_buf) {
+            self.remove_managed(&bin_dir)?;
+        }
+        let tmp = self.layout.tmp();
+        self.remove_managed(&tmp)?;
+        for f in [self.layout.kubeconfig(), self.layout.log(), self.layout.state()] {
+            if !f.starts_with(&self.layout.root) {
+                return Err(format!("{} is not inside the folder IYAKKI manages; nothing was deleted", f.display()));
+            }
+            match std::fs::remove_file(&f) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{}: {e}", f.display())),
+            }
+        }
+        if !self.quiet() && self.inst.primary {
+            crate::devcluster::register_machine_kubeconfig(None);
+        }
+        self.set_svc(Svc::NotInstalled);
+        *lock(&self.health) = Health::default();
+        self.audit(user, "devcluster.uninstall.keep-data.done", "");
+        Ok(())
+    }
+
     /// Look for a newer release and, if there is one, download and verify it, stop the cluster, replace the program and start again.
     /// Returns the plan that was used (`None`: already current).
     pub fn upgrade_plan(&self, st: &dyn iyakki_proxy::Streamer) -> Result<Option<Plan>, String> {

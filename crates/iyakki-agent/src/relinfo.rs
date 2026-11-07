@@ -19,9 +19,17 @@ pub struct ReleaseInfo {
     pub kernel: String,
     /// `RESTRICTED_FIRMWARE=included`: a build made with IYAKKI_INCLUDE_RESTRICTED_FIRMWARE=1 (docs/RESTRICTED-FIRMWARE.md).
     pub restricted_firmware: bool,
+    /// `IMAGE_PROFILE=release` (dist/buildroot/board/iyakki/release-profile.sh); anything else, or no line, is a development/test image.
+    pub release_profile: bool,
+    /// `FIRMWARE=`: `none` (nothing shipped, the person downloads it), `bundled` (vendor firmware inside), or empty (an older image).
+    pub firmware: String,
 }
 
 /// What About says about such an image.
+/// What About says about a release image / a test image (the releasable flag is machine-readable: `IMAGE_PROFILE=release` + `FIRMWARE=none`).
+pub const FIRMWARE_NONE_NOTE: &str = "none (download)";
+pub const FIRMWARE_BUNDLED_NOTE: &str = "bundled (not releasable)";
+
 pub const RESTRICTED_NOTE: &str = "includes third-party firmware under its own licences: not for redistribution by the IYAKKI project";
 
 impl ReleaseInfo {
@@ -37,10 +45,17 @@ impl ReleaseInfo {
                 "VARIANT" => r.variant = v,
                 "KERNEL" => r.kernel = v,
                 "RESTRICTED_FIRMWARE" => r.restricted_firmware = v == "included",
+                "IMAGE_PROFILE" => r.release_profile = v == "release",
+                "FIRMWARE" => r.firmware = v,
                 _ => {}
             }
         }
         r
+    }
+
+    /// True only for an image that may be published: the release profile with no vendor firmware inside.
+    pub fn releasable(&self) -> bool {
+        self.release_profile && self.firmware == "none" && !self.restricted_firmware
     }
 
     /// The file at `path`, if there is one (a machine that did not boot from an image has none).
@@ -58,6 +73,10 @@ impl ReleaseInfo {
         }
         if self.restricted_firmware {
             v.push(("Firmware", RESTRICTED_NOTE.to_string()));
+        } else if self.releasable() {
+            v.push(("Firmware", FIRMWARE_NONE_NOTE.to_string()));
+        } else if self.firmware == "bundled" {
+            v.push(("Firmware", FIRMWARE_BUNDLED_NOTE.to_string()));
         }
         v
     }
@@ -104,5 +123,16 @@ mod tests {
         let r = ReleaseInfo::parse(&format!("{t}RESTRICTED_FIRMWARE=included\n"));
         assert!(r.restricted_firmware && about_line(Some(&r)).ends_with(RESTRICTED_NOTE) && about_line(Some(&r)).contains("not for redistribution by the IYAKKI project"));
         assert!(!ReleaseInfo::parse(t).restricted_firmware && !about_line(Some(&ReleaseInfo::parse(t))).contains("redistribution"));
+    }
+
+    #[test]
+    fn the_releasable_flag_is_read_from_the_stamp() {
+        let rel = ReleaseInfo::parse("VERSION=1\nIMAGE_PROFILE=release\nFIRMWARE=none\n");
+        assert!(rel.releasable() && rel.rows().contains(&("Firmware", FIRMWARE_NONE_NOTE.to_string())));
+        let dev = ReleaseInfo::parse("VERSION=1\nIMAGE_PROFILE=dev\nFIRMWARE=bundled\n");
+        assert!(!dev.releasable() && dev.rows().contains(&("Firmware", FIRMWARE_BUNDLED_NOTE.to_string())));
+        assert!(!ReleaseInfo::parse("VERSION=1\n").releasable(), "an old image without the stamp is not releasable");
+        assert!(!ReleaseInfo::parse("IMAGE_PROFILE=release\nFIRMWARE=none\nRESTRICTED_FIRMWARE=included\n").releasable());
+        assert!(!ReleaseInfo::parse("IMAGE_PROFILE=release\nFIRMWARE=bundled\n").releasable());
     }
 }

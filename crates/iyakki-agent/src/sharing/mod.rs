@@ -96,6 +96,8 @@ pub struct IfaceInfo {
     pub up: bool,
     /// IPv4 addresses with their prefix.
     pub cidrs: Vec<iyakki_hotspot::subnet::Cidr>,
+    /// Networks the routing table sends through this interface (a VPN's or a router's ranges that the interface itself has no address in); the hotspot avoids them too.
+    pub routed: Vec<iyakki_hotspot::subnet::Cidr>,
     pub default_route: bool,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
@@ -103,7 +105,7 @@ pub struct IfaceInfo {
 
 impl IfaceInfo {
     pub fn new(name: &str, kind: LinkKind) -> IfaceInfo {
-        IfaceInfo { name: name.into(), kind, carrier: true, up: true, cidrs: Vec::new(), default_route: false, rx_bytes: 0, tx_bytes: 0 }
+        IfaceInfo { name: name.into(), kind, carrier: true, up: true, cidrs: Vec::new(), routed: Vec::new(), default_route: false, rx_bytes: 0, tx_bytes: 0 }
     }
 }
 

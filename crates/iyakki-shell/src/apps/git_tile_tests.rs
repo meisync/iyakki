@@ -1105,6 +1105,65 @@ fn clone_shows_a_review_first_and_then_plans_the_clone_into_the_repositories_fol
 }
 
 #[test]
+fn the_clone_review_has_a_submodules_box_that_is_off_until_ticked_and_the_choice_reaches_the_job() {
+    let mut f = fixture();
+    list_with_clone(&mut f, false);
+    f.key('C');
+    assert!(f.has_hit("Also clone its submodules"));
+    let t = f.app.card.as_ref().unwrap().toggle.as_ref().unwrap();
+    assert!(!t.on && t.note_off.starts_with("Off:"), "off by default");
+    // not ticked: the job asks for no submodules
+    f.click("Clone");
+    assert!(!f.app.run.as_ref().unwrap().batch.items[0].spec.submodules);
+    assert!(f.audit_text().contains("git.clone.start") && !f.audit_text().contains("with submodules"), "{}", f.audit_text());
+    // the key `s` and a click on the box both flip it; the note under it follows
+    let mut f = fixture();
+    list_with_clone(&mut f, false);
+    f.key('C');
+    f.key('s');
+    let t = f.app.card.as_ref().unwrap().toggle.as_ref().unwrap();
+    assert!(t.on && t.note_on.contains(".gitmodules") && t.note_on.contains("https only"));
+    f.click("Also clone its submodules");
+    assert!(!f.app.card.as_ref().unwrap().toggle.as_ref().unwrap().on);
+    f.click("Also clone its submodules");
+    assert!(f.app.run.is_none(), "ticking starts nothing");
+    f.click("Clone");
+    let it = &f.app.run.as_ref().unwrap().batch.items[0];
+    assert!(it.spec.submodules && it.url.url == "https://git.example.org/ops/infra.git");
+    assert!(f.audit_text().contains("1 repositories into Repositories with submodules"), "{}", f.audit_text());
+    // the other cards have no box
+    let mut f = fixture();
+    list_with_clone(&mut f, true);
+    f.key('P');
+    f.key('s');
+    assert!(f.app.card.as_ref().is_none_or(|c| c.toggle.is_none()));
+}
+
+#[test]
+fn the_clone_review_with_its_box_fits_at_the_four_sizes() {
+    for (w, h, s) in [(1280u32, 720u32, 1.0f32), (1920, 1080, 1.5), (1024, 600, 0.8), (800, 480, 0.62)] {
+        let mut f = fixture_with("git-tile-box", Role::Admin, w, h, s);
+        open_infra(&mut f);
+        f.app.view = None;
+        f.draw();
+        f.key('C');
+        for on in [false, true] {
+            assert_hits_inside(&f, &format!("{w}x{h} s{s} clone card, box {on}"));
+            let rect = |label: &str| f.g.hits.iter().rev().find(|h| h.label == label).unwrap_or_else(|| panic!("{w}x{h}: no `{label}`")).rect;
+            let (bx, yes, no) = (rect("Also clone its submodules"), rect("Clone"), rect("Cancel"));
+            let apart = |a: crate::ui::R, b: crate::ui::R| a.x + a.w <= b.x + 0.5 || b.x + b.w <= a.x + 0.5 || a.y + a.h <= b.y + 0.5 || b.y + b.h <= a.y + 0.5;
+            assert!(apart(bx, yes) && apart(bx, no) && apart(yes, no), "{w}x{h}: the box and the buttons overlap: {bx:?} {yes:?} {no:?}");
+            assert!(bx.h >= 13.5 * s * 2.0, "{w}x{h}: the box row is big enough to hit");
+            if !on {
+                f.key('s');
+            }
+        }
+        f.press(Key::Esc);
+        assert!(f.app.card.is_none());
+    }
+}
+
+#[test]
 fn a_clone_that_finished_is_listed_with_its_dot_and_a_failed_one_says_why() {
     let mut f = fixture();
     list_with_clone(&mut f, false);
@@ -1655,7 +1714,7 @@ fn a_real_local_repository_is_cloned_by_the_jobs_listed_and_browsed_with_real_gi
     f.app.rig.tools = Some(Tools { git, ssh: Err("no ssh in tests".into()), allow_local: true });
     // clone it through the tile's own job path
     let conn = Connection { name: "Local test".into(), kind: Kind::Gitea, url: "https://git.example.org".into(), ..Default::default() };
-    f.app.start_clone(&f.cx.clone(), &conn, "me/app", &bare.display().to_string(), false);
+    f.app.start_clone(&f.cx.clone(), &conn, "me/app", &bare.display().to_string(), false, false);
     assert!(f.app.run.is_some(), "{:?}", f.app.status);
     f.wait("the clone", |f| f.app.status.as_ref().is_some_and(|s| s.0.starts_with("Cloned") || s.0.contains("failed")));
     assert!(f.app.status.as_ref().unwrap().0.starts_with("Cloned me/app"), "{:?}", f.app.status);

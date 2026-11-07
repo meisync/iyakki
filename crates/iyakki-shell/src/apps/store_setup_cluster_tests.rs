@@ -207,3 +207,27 @@ fn a_user_sees_the_sentence_without_the_link_and_the_link_is_refused_for_them() 
     assert!(!cx.services.show_all_ai());
     assert!(a.setup.note.as_ref().is_some_and(|n| !n.1 && n.0.contains("administrator")));
 }
+
+#[test]
+fn the_object_storage_items_show_in_the_list_and_their_popup_stays_inside_the_screen_at_the_four_sizes() {
+    let m = Machine { ram_mb: 32_000, ..Default::default() };
+    for (w, h, s) in [(1280u32, 720u32, 1.0f32), (1920, 1080, 1.5), (1024, 600, 0.8), (800, 480, 0.62)] {
+        let (mut a, cx) = rig(&format!("ssobj-{w}"), Role::Admin, m.clone(), &[Item::K3s], false);
+        for item in [Item::SeaweedFs, Item::RustFs] {
+            assert_eq!(Gk::of(item), Gk::Data);
+            assert!(deploys_to_cluster(item) && open_target(item).is_none());
+            assert!(where_text(item).contains("iyakki-objects") && where_text(item).contains("ClusterIP only"));
+            a.setup.open_popup(item);
+            let area = R::new(0.0, 46.0 * s, w as f32, h as f32 - 46.0 * s);
+            let mut g = Gfx::new(w, h);
+            g.clear(rgb(9, 11, 20));
+            a.render(&mut g, area, s, &cx, 3);
+            assert!(!g.hits.is_empty(), "{w}x{h} {item:?}");
+            for o in &g.hits {
+                let r = o.rect;
+                assert!(r.x >= -0.5 && r.y >= -0.5 && r.x + r.w <= w as f32 + 0.5 && r.y + r.h <= h as f32 + 0.5, "{w}x{h} {item:?}: `{}` {r:?} leaves the screen", o.label);
+            }
+            a.setup.popup = None;
+        }
+    }
+}

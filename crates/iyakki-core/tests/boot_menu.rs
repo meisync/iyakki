@@ -286,10 +286,14 @@ fn the_first_menu_screen_is_short_and_the_rare_starts_are_in_one_submenu() {
     let post = read("board/iyakki/post-image.sh");
     assert!(post.contains("grub-mkfont") && post.contains("iyakki-menu.pf2"));
     assert!(cfg.contains("loadfont $prefix/fonts/iyakki-menu.pf2") && cfg.contains("loadfont $prefix/fonts/iyakki-term.pf2"));
-    // GRUB finds fonts by the name inside the .pf2; "Unifont Regular 16" is not a match for "GNU Unifont Regular 16" and GRUB then uses
-    // the font loaded last (big letters on a narrow grid: the gap-between-letters bug), so the theme must use the full name
+    // GRUB finds fonts by the name inside the .pf2; a name that matches no loaded font makes GRUB use the font loaded last (the
+    // gap-between-letters bug), so the theme names the DejaVu fonts in full. GRUB's unicode.pf2 (GNU Unifont, licence unverified) is not
+    // shipped any more (owner decision 2026-11-06): no script, theme, config or legal row may mention it.
     let theme = read("board/iyakki/grub/theme.txt");
-    assert!(!theme.contains("\"Unifont Regular 16\"") && theme.contains("terminal-font: \"GNU Unifont Regular 16\""));
+    assert!(theme.contains("terminal-font: \"DejaVu Sans Mono Regular 24\"") && theme.contains("item_font = \"DejaVu Sans Bold 30\""));
+    for (name, text) in [("theme", &theme), ("grub.cfg", &cfg), ("post-image.sh", &post)] {
+        assert!(!text.to_lowercase().contains("unifont") && !text.contains("fonts/unicode.pf2"), "{name} still uses Unifont");
+    }
     assert!(post.contains("DejaVu Sans Mono Regular 24") && post.contains("--no-hinting"));
 }
 

@@ -51,6 +51,8 @@ pub struct AgentHost {
     pub browser_sessions: super::browser::BrowserSessions,
     /// The camera pictures of running flows, deleted with the run, see `flows/camera.rs`.
     pub(super) cam_runs: super::camera::CamRuns,
+    /// Which flows may send outside messages, and the cool-down, see `channel_switch.rs`.
+    pub chan: super::channel_switch::ChannelSwitch,
 }
 
 /// A zone for cron triggers, from the system's zone files.
@@ -112,6 +114,7 @@ impl AgentHost {
             ask_browser: true,
             browser_sessions: Default::default(),
             cam_runs: Default::default(),
+            chan: super::channel_switch::ChannelSwitch::new(data),
         }
     }
 

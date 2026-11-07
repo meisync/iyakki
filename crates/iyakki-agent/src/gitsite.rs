@@ -216,6 +216,32 @@ pub fn split_lines(text: &str) -> Vec<CloneLine> {
         .collect()
 }
 
+/// The addresses a `.gitmodules` file lists (`url = ...` lines), in order. A relative address (`../x.git`) is returned as written.
+pub fn submodule_urls(gitmodules: &str) -> Vec<String> {
+    gitmodules
+        .lines()
+        .filter_map(|l| {
+            let (k, v) = l.trim().split_once('=')?;
+            (k.trim().eq_ignore_ascii_case("url") && !v.trim().is_empty()).then(|| v.trim().to_string())
+        })
+        .collect()
+}
+
+/// Why the submodule address `url` of a repository cloned from `main` must not be fetched, or `None` when its transport is allowed:
+/// `https`, relative to the main address, or `ssh` when the main address is `ssh` too. `file://`, `ext::`, `git://`, `http://`
+/// and a leading dash are refused, as for the main address.
+pub fn submodule_url_problem(url: &str, main: &RepoUrl) -> Option<String> {
+    let u = url.trim();
+    if u.starts_with("./") || u.starts_with("../") {
+        return None;
+    }
+    match parse(u, ParseOptions::default()) {
+        Ok(p) if p.scheme == Scheme::Https || (p.scheme == Scheme::Ssh && main.is_ssh()) => None,
+        Ok(_) => Some(format!("`{}` is not https{}", redact_url(u), if main.is_ssh() { " or ssh" } else { "" })),
+        Err(e) => Some(e),
+    }
+}
+
 pub fn valid_branch(b: &str) -> bool {
     b.is_empty() || (b.len() <= 120 && !b.starts_with(['-', '/']) && !b.ends_with(['/', '.']) && !b.contains("..") && !b.contains("@{") && !b.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\')))
 }

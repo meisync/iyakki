@@ -72,16 +72,12 @@ fn path(cx: &AppCx) -> std::path::PathBuf {
 }
 
 pub fn load(cx: &AppCx) -> Data {
-    std::fs::read_to_string(path(cx)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    iyakki_schema::read_plain("browser data", &path(cx), iyakki_schema::now_secs()).unwrap_or_default()
 }
 
 pub fn save(cx: &AppCx, d: &Data) {
     if let Ok(t) = serde_json::to_string(d) {
-        let p = path(cx);
-        let tmp = p.with_extension("tmp");
-        if std::fs::write(&tmp, t).is_ok() {
-            let _ = std::fs::rename(&tmp, &p);
-        }
+        super::browser_config::write_checked("browser data", &path(cx), &t);
     }
 }
 

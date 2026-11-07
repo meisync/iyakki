@@ -549,3 +549,21 @@ fn requests_are_remembered_when_the_kernel_log_rolls_over() {
     assert!(plan.groups.iter().any(|g| g.title == "Intel Wi-Fi"), "{:?}", plan.groups.iter().map(|g| &g.title).collect::<Vec<_>>());
     let _ = std::fs::remove_dir_all(&data);
 }
+
+#[test]
+fn every_pc_gpu_wifi_ethernet_and_bluetooth_file_of_the_pinned_release_has_a_named_vendor_group() {
+    let m = manifest();
+    // directories of the pinned release that belong to a GPU, Wi-Fi, Ethernet or Bluetooth chip of an ordinary PC
+    let pc = ["amdgpu/", "radeon/", "i915/", "xe/", "nvidia/", "intel/iwlwifi/", "intel/ibt-", "intel/ice/", "e100/", "ath10k/", "ath11k/", "ath12k/", "ath6k/", "ath9k_htc/", "ath3k", "ar3k/", "qca/", "rtw88/", "rtw89/", "rtlwifi/", "rtl_bt/", "rtl_nic/", "mediatek/", "brcm/", "cypress/", "tigon/", "bnx2/", "bnx2x/"];
+    let mut n = 0;
+    for path in m.files.keys().filter(|p| pc.iter().any(|d| p.starts_with(d))) {
+        n += 1;
+        assert!(!family_of(path).0.starts_with("other-"), "{path} has no vendor group");
+    }
+    assert!(n > 500, "{n}");
+    for p in ["intel/ice/ddp/ice.pkg", "ath3k-1.fw"] {
+        if m.files.contains_key(p) {
+            assert!(!family_of(p).0.starts_with("other-"), "{p}");
+        }
+    }
+}

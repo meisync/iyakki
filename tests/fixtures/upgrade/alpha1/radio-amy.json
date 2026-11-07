@@ -1,0 +1,10 @@
+[
+  {
+    "name": "Example Jazz",
+    "url": "https://radio.example.org/jazz.mp3"
+  },
+  {
+    "name": "Example News",
+    "url": "http://news.example.org:8000/live"
+  }
+]

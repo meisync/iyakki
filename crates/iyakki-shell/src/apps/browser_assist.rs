@@ -108,7 +108,7 @@ impl Assist {
         self.stage = match r {
             Ok(text) if !text.trim().is_empty() => Stage::Answer { task, text: text.trim().to_string(), scroll: 0 },
             Ok(_) => Stage::Failed("The assistant sent an empty answer.".into()),
-            Err(e) => Stage::Failed(e),
+            Err(e) => Stage::Failed(iyakki_agent::providererr::plain_error("", &e)),
         };
     }
 
@@ -278,4 +278,19 @@ pub fn remember(cx: &AppCx, title: &str, url: &str, text: &str) -> Result<usize,
     kb.add_document(&ns, &title, url, text, meta).map_err(|e| e.to_string())?;
     cx.audit.record(&cx.session.user, "browser.remember", url.split('/').nth(2).unwrap_or(""));
     Ok(text.chars().count())
+}
+
+#[cfg(test)]
+mod plain_error_tests {
+    use super::*;
+
+    #[test]
+    fn a_provider_failure_is_told_in_plain_words_without_ids() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Err("HTTP 429: quota for account 123456789012 used up".to_string())).unwrap();
+        let mut a = Assist { stage: Stage::Working { task: Task::Summarise, rx }, source: String::new(), what: "this page", url: String::new() };
+        a.poll();
+        let Stage::Failed(msg) = &a.stage else { panic!("expected a failure") };
+        assert!(msg.contains("too many requests") && !msg.contains("123456789012"), "{msg}");
+    }
 }

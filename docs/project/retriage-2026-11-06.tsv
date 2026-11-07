@@ -1,0 +1,856 @@
+ID	class	verdict	confidence	why	next	alt
+F-AI-02	B	keep	high	Needs real API keys; only Ollama exercised live	Run live provider tests with OpenAI, Claude, Gemini keys (owner supplies keys).	
+F-AI-09	B	keep	high	Tested against a fake Lemonade only; unverified against a real one	Run Lemonade server on the Ryzen PC or Mac mini; sign in and check detection.	
+F-AI-10	B	keep	high	Fake Lemonade on loopback only; Models page not seen on the Mac	Open Settings -> Models with a real Lemonade; use a model of each type.	
+F-AI-11	B	keep	high	Fixed build not tried against the real Lemonade server	Download a model through real Lemonade from Mac mini; check completion.	
+F-AI-12	B	keep	high	Fake upstream only; no real NVIDIA key used; steps from owner's description	With a free NVIDIA key list models and chat; compare steps with the vendor page.	
+F-AIHW-01	B	keep	high	'Fake files only: no Apple Silicon, AMD or NVIDIA machine was available'; M6 ids are a guess.	Read the profile on an Apple Silicon machine, an AMD GPU PC and an NVIDIA PC; compare to real memory.	
+F-AIHW-02	B	keep	medium	Tiles page tested at five sizes, 'not looked at by a person'.	Look at the tiles page on the Mac mini and the 4090 PC; confirm hidden-tool reasons read right.	
+F-AIHW-03	B	keep	medium	Layout checked by hit rectangles, 'not looked at by a person'.	On the Mac mini open Settings -> Cloud mode and toggle Show all AI tools; check Store -> Setup lists them.	
+F-AIHW-04	B	keep	high	'Fake kubectl only; no real cluster was read.'	Point at a real cluster with a GPU node and check the badge and reason; also a cluster without GPUs.	
+F-APPLE-01	B	keep	high	'Same limits as F-MODELHOST-02'; route 3 (Linux VM on macOS) documented, not built.	On an M-series Mac run the model with Metal and call it from IYAKKI over the network; VM route is a later build.	
+F-APPS-01	A	keep	medium	Other package types (CLI commands, agents) still to come	Define manifest types for command and agent packages or narrow the claim to skills and tools	
+F-APPS-02	A	keep	medium	Fetching from a store index and a Settings page still to come in note, though STORE tile exists	Re-check against F-APPSTORE rows; if covered there, merge or mark done	
+F-APPS-03	A	keep	low	Note is long and truncated; real-hardware use of pkg_ tools not stated	Read remaining notes gap list and close in tests	
+F-APPS-04	A	keep	high	LAN mirrors through the swarm are not done	Implement swarm mirror of signed catalog or drop that clause from the row	
+F-APPS-05	C	keep	high	Shared/averaged ratings from a store server do not exist; design questions in STORE.md 16.2	Owner decides whether ratings stay local-only or a server-side design (privacy, abuse) is wanted	Keep ratings local-only and mark the row done with that scope
+F-APPS-06	D	deprecate	medium	Planned, 0%, only a model for rows below (nothing ships in base image); concept covered by store and platform services	Remove the row and keep the concrete service rows	
+F-APPS-40	B	keep	medium	TLS left to ingress; server verified by tests only	Run store-server behind a real ingress on k3s and publish and install from the Mac	
+F-APPS-41	B	keep	medium	Private store add flow tested with fakes; no real server run stated	Add a store from a real private store-server address on the Mac STORE tile and check the fingerprint prompt	
+F-APPS-42	B	keep	high	Not run against a real cluster	Deploy the private-store service on k3s on the Mac or a PC and check pod, PVC, probes and publish/install	
+F-APPS-43	A	keep	medium	Notes only point to docs; scaffolds/validate tested but no gap listed and no real-device check stated; unsure of full claim	Verify each assistant tool (app_scaffold, store_validate, store_publish) has a test and then mark done	
+F-APPS-44	B	keep	high	Not deployed to any cluster; aarch64 needs a cross compiler; no file picker	Deploy the built static binary into k3s on a real node and fetch /healthz from another machine	
+F-APPS-45	A	keep	high	WASM modules in tile apps unsupported; launcher shows first letter not icon	Add WASM-in-tile support or drop it from the claim; leave icon limit as known issue	
+F-APPS-46	B	keep	high	Tested at four sizes in tests only; Not tried on hardware	Open an installed tile app from My apps on the Mac mini and check touch and mouse	
+F-APPS-47	B	keep	medium	Tested only against store server code on loopback; no real cluster or remote store	Publish a tile app from the IDE to a private store running on k3s from the Mac	
+F-APPS-48	B	keep	high	Fake cluster only; never run on a real cluster; 127.0.0.1-only claim must be curl-verified	On a k3s node click Create registry, push an image, and curl the NodePort from another computer (must fail)	
+F-APPS-49	B	keep	high	Pushed image has not been pulled by a real containerd	Deploy the private store through the OCI push on a real k3s and see the pod pull and run	
+F-APPS-50	B	keep	high	Scripted kubectl only; not run against a real cluster	Break and repair a real private-store install on k3s (stuck namespace, lost token) and check each state text	
+F-APPS-51	B	keep	high	Same flow not yet run on the MacBookPro16,2 against the real NodePort	Run deploy then Publish then Add it and publish on the MacBook	
+F-APPS-52	A	keep	medium	Audit names only the package; a test for credential refusal exists but audit-line test not confirmed here	grep audit test for store.rate lines not holding the comment, then mark done	
+F-APPSTORE-02	C	keep	high	Official root key has not been generated; official-roots.txt is empty until owner pins one	Owner generates and pins the official root key (see F-APPSTORE-14)	Keep the root key outside the repo and ship the pin at release; until then everything stays Community or Trusted
+F-APPSTORE-06	B	keep	high	HttpFetch has never run against a server; default catalog list empty	Host a signed catalog on the portal or a LAN host and fetch it from the Mac over real HTTP	
+F-APPSTORE-08	C	keep	high	Buy button disabled; no payment provider or token fetch (F-APPSTORE-13)	Owner decides whether paid apps are in scope for 1.0; otherwise keep tokens as file-only	Ship licence tokens as file-only for apps sold elsewhere; no payment inside IYAKKI
+F-APPSTORE-10	B	keep	high	NOT seen on bare metal yet	Open the STORE tile on the Mac mini and click through Installed, Discover, app page, install	
+F-APPSTORE-13	D	keep	high	Needs a business decision on provider and revenue share	Post-1.0 business decision	Do not build payments in IYAKKI; link out to the publisher's own website and accept a licence token file
+F-APPSTORE-14	C	keep	high	Needs project owner: key holder, catalog location, reviewer of publishers	Owner picks key custody, hosting location (portal) and review rules	
+F-APPSTORE-16	A	keep	high	Dashboard connectors/panels, story packs and agent presets are not applied by their tiles yet	Make DASH, TALES and chat apply extension packs of their kinds, or narrow the claim to the mapping only	
+F-APPSTORE-23	B	keep	high	Never run against a real catalog host or real vendor; latest-only tools have no version compare	Check for updates against a hosted catalog and a vendor tool on the Mac	
+F-ARCH-02	A	keep	high	Notes: the ratchet works; the call sites it ratchets are not moved (steps 5-7 of UI-OS-SPLIT-PLAN); indirect helper reads unseen	Move call sites behind iyakki-core step by step until the list is empty	
+F-ARCH-03	D	keep	medium	Notes: nothing calls Sysinfo yet; no core-local, Audio/Disks/Net traits or transport (25%); a large multi-step refactor	Continue UI-OS-SPLIT-PLAN steps 5-7 after beta; not a beta blocker	
+F-ARCH-04	A	keep	medium	Notes: harness takes today's AppCx; only two tests migrated; build-time gain not measured	Migrate more tile tests to TileHarness and take a baseline build timing	
+F-ASSIST-10	B	keep	medium	Phrase tables English only; refusal after tools ran not retried	Add retry after tools ran (A); check with a second live model.	
+F-ASSIST-11	A	keep	medium	Gemini not streamed; MCP servers reconnected per run	Stream Gemini and keep MCP connections (needs a Gemini key to verify).	
+F-ASSIST-14	B	keep	high	Verified with scripted models only, not with a live qwen3:8b	Run stall scenario on live Ollama qwen3:8b.	
+F-ASSIST-15	B	keep	high	Whether qwen3:8b follows the planning rule is not checked live	Ask live qwen3:8b to build a multi-step job in an IDE workspace; check board rows.	
+F-ASSIST-17	B	keep	high	Scripted models only; not watched with qwen3:8b	Watch a live build/deploy; check board row moves.	
+F-ASSIST-18	B	keep	high	Scripted models only; not driven live with qwen3:8b on a real build and deploy	Drive Autopilot live on a real project; stand-alone CHAT lacks it (A).	
+F-ASSIST-19	B	keep	high	Not yet watched with the user's qwen3:8b; English-only phrase tables	Live run with qwen3:8b in auto mode; check no permission questions.	
+F-ASSIST-20	B	keep	medium	Scripted models only; hand-set done indistinguishable from forced	Live run with real model; mark verified-by flag for hand edits (A).	
+F-ASSIST-21	A	keep	medium	http check of an 'app responds' row not built; scripted only	Add the http check for app responds rows with test; then a live run.	
+F-ASSIST-22	A	keep	medium	Limits are global, no Settings screen; token rate not in the footer; scripted stall only	Add per-provider limits and Settings; test with live Ollama as B.	
+F-ASSIST-23	B	keep	high	Scripted models; not yet watched on a real 16-step deploy	Run a live 16-step deploy on the dev cluster with Ollama.	
+F-ASSIST-24	A	keep	high	No Settings screen or IDE button for switch and forgetting; deleting a chat does not call forget_session	Add the UI controls and call forget_session on chat delete, with tests.	
+F-ASSIST-25	B	keep	medium	Scripted models only; code rows with no named file may be too lenient	Live deploy with a model on the dev cluster.	
+F-ASSIST-26	B	keep	high	Not yet watched with qwen2.5-coder:14b on a real deploy	Live deploy run with qwen2.5-coder:14b.	
+F-ASSIST-27	A	keep	medium	Existing duplicate rows not merged; test-name heuristic misreads sentence titles	Merge duplicates on board_add and refine heuristic with tests.	
+F-ASSIST-28	B	keep	medium	English-only phrase lists; scripted models only	Live check with a model; add phrase tables for other languages later (D).	
+F-ASSIST-29	B	keep	medium	Scripted models only; early prose question cannot be retracted	Live Autopilot run on the dev cluster, check no closing question.	
+F-AUTH-01	B	keep	high	Nothing tried on the Mac or any real screen	Open AUTH tile on the Mac mini and check codes against a phone authenticator	
+F-AUTH-03	B	keep	medium	Not tried on the Mac; tests with a fake vault only	Save and reload a code on the Mac mini with the real vault, locked and unlocked	
+F-AUTH-04	B	keep	high	Scan tested with a made-up camera only	Scan a real otpauth QR with the Mac mini/MacBook camera	
+F-AUTH-05	B	keep	medium	60-second clipboard wipe not tried on the Mac	Copy a code on the Mac mini and confirm paste once and wipe after 60 s	
+F-BACKUP-01	A	keep	high	No schedule, network destination, iyakki backup command; system settings, Git, VPN, Gitea, store not covered; no progress or cancel	Add progress and cancel, backup command and the missing areas; test on a real stick	
+F-BACKUP-02	B	keep	medium	Not tried on real media; older formats only tested with a hand-made file	Restore from a real USB stick on the Mac mini and check data returns	
+F-BACKUP-03	B	keep	high	Tested with fake folders; real folder picker and USB stick are for the owner; no progress bar	Try backup and restore page on the Mac mini with a real stick; add progress bar (A)	
+F-BATT-01	B	keep	high	'Fake /sys trees only; no real laptop was read.'	On the MacBook read the battery page and compare with /sys/class/power_supply values.	
+F-BATT-02	B	keep	high	'Drawn only in tests ... not seen on a laptop screen.'	On the MacBook look at the top bar icon for charging, full, low and narrow window.	
+F-BATT-03	B	keep	high	'never triggered on a real machine'; real cut-off percent unknown.	On the MacBook drain to 20/10/5/3 percent and watch the cards and clean shutdown.	
+F-BATT-04	B	keep	medium	'Drawn in tests only'; rows that do not fit a short window are cut.	On the MacBook open Settings -> System -> Battery at the real window size; fix cut rows (code).	
+F-BATT-05	B	keep	high	'Options written, no kernel built and no image booted.'	Rebuild the PC, Mac and hw kernels then check BAT0 under /sys/class/power_supply on the MacBook.	
+F-BELL-01	B	keep	high	'not seen on the real Mac whose inbox had 130 unread notes'.	Open the Mac mini inbox with the 130-note file and check grouping.	
+F-BELL-02	B	keep	medium	'Not looked at on the Mac's screen.'	Look at the bell count and dot on the Mac mini with mixed notes.	
+F-BELL-03	B	keep	medium	'Not tried on the Mac's own 130-note file'; limits are fixed numbers.	Open the Mac mini inbox once and see the one-time grouping message; decide if limits need settings.	
+F-BELL-04	A	keep	low	Only 1 test; behaviour on a machine whose scan already ran is baseline-on-next-scan.	Add a test of first scan baseline then a stranger-only second scan; confirm one grouped row and toast.	
+F-BOOT-01	B	keep	high	Progress 20%: only Mac mini, T2 MacBook and one AMD PC tested; Intel and NVIDIA PCs pending	Run docs/BOOT-TEST.md on more PCs and fill HARDWARE-MATRIX; a living row, never fully closes	
+F-BOOT-02	B	keep	high	Notes: QEMU/OVMF verified; no real PC or T2 Mac tried; initrd not signed; driver packs unsigned	Boot the signed image on a real PC and the T2 Mac; sign initrd via unified image (code task)	
+F-BOOT-04	E	merge:F-BOOT-15	medium	Lazy device broker is the later half of F-BOOT-15 critical path; boot loads every driver today	Fold into F-BOOT-15	
+F-BOOT-08	B	keep	high	Notes: boots in QEMU; never run on a Mac	Run the aarch64 image in UTM on an Apple Silicon Mac	
+F-BOOT-11	C	keep	high	Needs a Microsoft developer account, extended-validation certificate and public shim-review	Owner decides whether to pursue Microsoft signing at all	Stay on route 1 (our own key with a distro-signed shim) and document the one-time key enrolment; label the other as unsupported
+F-BOOT-12	D	keep	high	Planned P3 alternative path, only for firmware that allows custom keys	After beta; niche	
+F-BOOT-13	B	keep	high	Notes: not yet seen on the Mac mini	Boot the Mac mini and look at the splash and progress	
+F-BOOT-14	D	keep	medium	Planned P1 0%: big boot rework; firmware reads about 54 MB slowly; kernel lacks EROFS/overlay	Big change; after beta unless Mac boot time is unacceptable; absorbs F-STORE-06	
+F-BOOT-15	D	keep	medium	Planned P1 0%: critical-path boot ordering; large rework	After beta or when boot time on the Mac justifies it; absorbs F-BOOT-04	
+F-BOOT-19	B	keep	high	Notes: cause not confirmed on the Intel Mac mini; STRICT_LOG QEMU script not run for this change	Boot a new image on the Mac mini and send dmesg splash: lines; run the QEMU script	
+F-BOOT-21	B	keep	high	Notes: fake sysfs only; unverified on the Mac until the image is rebuilt	Boot a new image on the Mac mini with the HDMI converter and watch the monitor come up	
+F-BOOT-22	B	keep	high	Notes: QEMU splash script not run for this change; no new image	Rebuild, run the QEMU splash script, then look at the Mac mini boot	
+F-BOOT-23	B	keep	high	Notes: patch dry-run only, not compiled; link-training recovery is a proposal	Build the Mac image with the i915 patch and boot the Mac mini; implement link training only if flicker remains	
+F-BOOT-24	B	keep	high	Notes: QEMU proven; not yet seen on the Mac mini	Boot the Mac mini and check the splash after GRUB	
+F-BOOT-25	B	keep	high	Notes: sizes measured on a copy; real Mac wait time unmeasured	Rebuild the Mac image and time the GRUB wait on the Mac mini	
+F-BOOT-26	B	keep	high	Notes: QEMU only; cause of Mac 7.5 s mke2fs and 5.3 s gap unconfirmed	First boot on the Mac with the new image; read the dmesg timings	
+F-BOOT-27	B	keep	high	Notes: fake sysfs and loader; not run on a booting machine; MacBookPro14,1 needs it	Boot the MacBookPro14,1 and check pxa2xx-spi.3 loads	
+F-BOOT-28	B	keep	high	Notes: device scripts not run on a Mac yet; QEMU throttle is block-level	Run boot-timeline.sh and lean-check.sh on the Mac mini	
+F-BOOT-29	B	keep	high	Notes: first try on the T2 MacBook FAILED (blank screen), NOT working on a Mac, not in the normal build	Retry on the T2 with the stage1 log helpers; then wire into the build	
+F-BOOT-30	D	keep	medium	Planned P2: designed only; gain not measurable without more boot work	After beta; tied to F-BOOT-14/15 boot speed	
+F-BOOT-31	D	keep	medium	Planned P2 experimental: zswap behind a setting, defaults stay as today	After beta; low value while zram works	
+F-BOOT-32	B	keep	high	Notes: fix tested with fakes; has not run on the Mac; needs image rebuild	Rebuild and replug a USB Ethernet adapter and the T2 keyboard on the MacBookPro16,2	
+F-BOOT-33	B	keep	high	Notes: menu text only until an image carries it; a real panic not provoked	Build an image and provoke a panic in QEMU to see the 20 s restart	
+F-BOOT-35	B	keep	high	Notes: no lean install updated this way on a real machine; kernel/module match not checked	Run dev update on a lean install in QEMU then the Mac	
+F-BOOT-36	B	keep	high	Notes: pure decisions only; not timed on the Mac mini	Boot the Mac mini with cable and Wi-Fi and read the time the first link comes up	
+F-BROW-01	A	keep	medium	Missing: pictures, forms, anchors, find-in-page (note looks stale given later rows)	Re-read note against F-BROW-13/others and close or merge into later BROW rows; try on real sites	
+F-BROW-04	B	keep	medium	qemu-web-test.sh is run by hand and needs a built web image; optional package	Run the web image on the Mac mini and load YouTube and Google; or move to post-1.0	
+F-BROW-05	A	keep	high	Animated WebP first frame only, SVG text and clipping missing, srcset/picture not done	Add SVG text/clip, animated WebP and srcset or narrow the claim	
+F-BROW-06	D	keep	medium	Not yet: floats, absolute positioning, ::before, web fonts, box-shadow, sticky, table styling	Post-1.0 incremental CSS; the real web engine covers heavy pages	
+F-BROW-07	A	keep	medium	Note says cookies live for the session only, nothing saved to disk (may be stale)	Check persistent-cookie code; if absent add a saved jar per user in the vault or data folder	
+F-BROW-08	D	keep	medium	Missing: ES modules, in-page clicks and typing, script navigation, real Shadow DOM, video; own engine superseded by full engine for heavy sites	Post-1.0 or drop; decide if own JS engine is kept for the light reader	
+F-BROW-14	A	keep	medium	Note says pages do not use style sheets yet, which F-BROW-06 contradicts	Verify the switch is wired to CSS in the page engine and fix the note; then done	
+F-BROW-18	D	keep	high	Not yet: layout sizes, real MutationObserver, MSE, video, WebGL; YouTube needs 30 billion instructions	Post-1.0; real engine (WebKit helper) covers heavy sites	
+F-BROW-22	A	keep	high	No progress bar, large files refused, list entry cannot be opened, file inputs not done	Stream downloads with progress and add file uploads and open-from-list	
+F-BROW-23	A	keep	high	No screen for folders or moving bookmarks, no history search box, no thumbnails	Add folder create/move and a history search box	
+F-BROW-24	A	keep	high	Not done: filling names/addresses, passkeys, filling by clicking, removing a saved sign-in from the browser	Add remove-from-browser and click-to-fill; passkeys as separate post-1.0 row	
+F-BROW-25	A	keep	high	Not done: a text-only size, Ctrl+scroll	Add text-only zoom and Ctrl+scroll in the browser tile with tests	
+F-BROW-26	D	keep	medium	One weight only; CJK and colour emoji not included (fonts 10+ MB); word wrap may split joined words	Fix wrapping of joined words (code); CJK as optional font pack after beta	
+F-BROW-28	D	keep	medium	Planned 0%: every element size is zero in the own engine; large work, full engine covers heavy sites	Post-1.0, or drop in favour of the WebKit helper path	
+F-BROW-29	D	keep	medium	Not started: <canvas>, inline <svg>, AVIF, APNG, favicons in own engine	Post-1.0 or drop for the full engine; favicons and inline SVG could be small code tasks	
+F-BROW-30	D	keep	medium	15%: no date/colour/range pickers, file chooser, contenteditable, IME in own engine	Post-1.0; the full engine handles these; add file chooser only if uploads are wanted	
+F-BROW-31	A	keep	medium	Kept only while vault open; 64 KiB entry limit; indexedDB scope partly cut off in notes	Raise size limit by splitting entries or a sealed file; test locked-vault behaviour	
+F-BROW-32	E	merge:F-BROW-33	medium	Planned 0%; reworded as served by the full engine where WebSocket/EventSource/fetch are native, so only a site check remains	Fold into the per-release site check of F-BROW-33	
+F-BROW-33	B	keep	high	Planned 0%: per-release site list on the full engine with harness; no verification yet	Run the ignored browser compat harness on the full engine over real sites (Gmail, Docs, Slack) from a real network	
+F-BROW-34	A	keep	high	Not done: certificate details, known-bad site list, mixed content for scripts and styles	Add certificate details view, mixed-content block for scripts/styles and an optional offline bad-host list	
+F-BROW-35	D	keep	high	Planned 0%: print to PDF, PDF viewer, Office files; large	Post-1.0; PDF viewer could come with the media package	
+F-BROW-36	A	keep	medium	ETag revalidation not built; script interpreter cost remains	Build ETag/If-Modified-Since revalidation in the cache and test	
+F-BROW-37	A	keep	high	No way to add your own short words yet	Add a settings list for custom short words with tests	
+F-BROW-38	D	keep	medium	Planned 0%: screen-reader text, high contrast, pinch zoom, on-screen keyboard	Split: on-screen keyboard and touch pinch (code, tested on a touch screen) from screen reader (post-1.0)	
+F-BROW-39	B	keep	medium	Tested with a stand-in model; not tried against a real provider; read aloud and area screenshot not done	Use Q/S/T with a real provider key on the Mac; then add the missing items	
+F-BROW-40	D	keep	medium	Planned 0%; depends on optional service apps model (F-APPS-06, itself deprecated)	Post-1.0 packaging of the browser; or drop with F-APPS-06	
+F-BROW-41	A	keep	high	Console prompt, inspector and report button not built	Build a console prompt and a report-a-site button; inspector can follow	
+F-BROW-42	D	keep	medium	15%: standards still lacking in the own engine, measured per real site	Post-1.0 incremental; drive by compat harness results	
+F-BROW-43	B	keep	high	Pure-Rust fake helper in tests; real WPE helper checked by hand in QEMU; video needs Xvfb on dev	Run F on the Mac mini with the web image and play a video	
+F-BROW-44	B	keep	medium	Live checks are ignored tests against a local server and signed-out Gemini only	Run the assistant against a real signed-in site with a real provider key on the Mac	
+F-BROW-45	A	keep	low	Live run passed with WebKitGTK locally; note lists no gap and test names exist, but I did not open the module to confirm every step type	Open browsertools.rs, confirm all listed step kinds exist, then mark done	
+F-BROW-50	B	keep	medium	Helper is C: only its source is checked by cargo test; hardware H.264 and a black-player message not done	Rebuild web image and play YouTube on the Mac mini; add the H.264-only message	
+F-BROW-51	B	keep	high	Nothing measured on a Mac; HTTP/2, Happy Eyeballs, lazy pictures, async/defer not done	Measure page loads on the Mac mini; implement the listed speed items or cut the claim	
+F-BROW-54	B	keep	high	Real HTTPS download of lists not clicked through on a device; uBlock list has no button	Click download of EasyList in Settings on the Mac and check rule counts and licence line	
+F-BROW-55	B	keep	high	Never run against a real WPE WebKit; C helper code not compiled	Build the web image so helper.c compiles, load EasyList filters on the Mac and check an ad is blocked	
+F-BROW-56	B	keep	high	Rebuild proposals (WEB_IRIS, brotli, woff2) none built; page-load unchanged	Build web image with the proposed options and measure Google and YouTube on the MacBook	
+F-BROW-57	B	keep	high	Shell's draw time with a live tile not measured; noise large	Measure scrolling with a signed-in tile on the Mac with a person at the keyboard	
+F-BROW-58	B	keep	high	Tile-only painting on real screen not measured; helper change needs next web image build	Build the web image, test Smooth pages and thread default on the Mac mini	
+F-BROW-59	B	keep	high	No test reaches the GPU path; not verified on real hardware	Run the GPU path on the Mac mini and a PC with a render node; check fallback still works	
+F-BROW-61	B	keep	high	Denial case not watched; reconnect, busy-speaker waits and page-audio message never seen on hardware	On the MacBook play YouTube while the radio plays; watch the denial, reconnect and messages	
+F-BROW-62	B	keep	high	Fake helper only; real WPE helper, probe in a real page and bar on screen not run	Open a H.264 page on the Mac with the web image and check the bar appears once per site	
+F-BROW-63	B	keep	high	Scripts check a fake rootfs only; no image built with the flag	Build one web image with WEB_AV_ADDON=1 and one with 0 and compare libraries	
+F-BROW-64	B	keep	medium	Planned 0%: downloaded libraries, installer manifest and playback test missing; links to AV add-on k3s build design	Implement per the AV add-on k3s build row, then play H.264 on the Mac	Do not ship codecs; build FFmpeg on the person's device from vendor sources, or let the person download from the vendor by their click
+F-BROW-65	B	keep	high	helper.c and dev-probe.js NOT compiled or run against a real page	Build the web image, open a failing page, see console and request lines	
+F-BROW-66	A	keep	medium	Built-in reader's network log is not fed to the agent	Feed the reader's network log into the same tools and add a test	
+F-BROW-67	A	keep	medium	F12 reaches the tile only when the shell consults claims_f12 (one-line change not made)	Make the shell consult App::claims_f12 before its screenshot key, add a test	
+F-BROW-68	B	keep	medium	Tested offline with fake events; no real page run	Open the panel on a real page on the Mac and check collection, share, forget	
+F-BROW-69	C	keep	medium	Engine built without media-stream (WEB_MEDIA=1, F-BROW-72); real helper not run; no USB camera tried	Build with WEB_MEDIA=1, then test with a USB camera and mic on the Mac; add the remembered-sites list	
+F-BROW-70	B	keep	high	Engine's capture-state signals and stop not run on a real page	Start camera in a page on the Mac and see the red chip and the screen sign	
+F-BROW-71	D	keep	medium	Engine reads screen only via desktop portal and PipeWire; feeder, in-house portal service and PipeWire in image still to write	Post-1.0 or write the portal/PipeWire feeder; until then mock display only	
+F-BROW-72	B	keep	high	Buildroot has NOT been run with WEB_MEDIA=1; ENABLE_WEB_RTC=ON configure untried	Run a web image build with WEB_MEDIA=1 on the build PC and fix configure errors	
+F-BROW-73	A	keep	high	Pages and helper switch never ran in an engine; QEMU smoke test not written	Write qemu-web-test media smoke using IYAKKI_WEBVIEW_MOCK_MEDIA=1 once F-BROW-72 builds	
+F-BROW-74	B	keep	high	H hello in dev-probe.js and helper.c NOT compiled or run on a real page	Build the web image and open a page; check tools say unavailable vs clean report correctly	
+F-BROW-75	B	keep	medium	Tested with a scripted web; not run against a real site on the Mac	Run browser_headers on a real site from the Mac and check cookies are scrubbed	
+F-BROW-76	B	keep	high	Judged by eye on 1280x720 only; needs the Mac at 2560x1600; start page still text page	Look at the browser tile on the Mac mini at native size, touch and mouse	
+F-BROW-77	B	keep	high	Not tried on the T2 MacBook with the engine; T2 capture streams via plughw unknown	Rebuild the web engine, use a page microphone on the T2 MacBook and read the log line	
+F-BROW-78	B	keep	high	mic-check not run with GStreamer; camera default depends on engine behaviour only the Mac (two cameras) can tell	Pick cameras and microphones on the Mac with two cameras and verify the page uses the chosen one	
+F-BROW-79	A	keep	high	WPE does not send custom headers (needs web process extension); no active-here line; FilterSet not extracted	Show the active-here line, extract FilterSet crate, and add the WPE extension (C) or mark engine unsupported	
+F-BROW-80	B	keep	high	Proven in QEMU only; not on the Mac; bridge plugin needs a full web build; Settings add-on page not built	Full ./build.sh web, boot the Mac, install the add-on and play H.264	Nothing shipped or hosted: administrator supplies the FFmpeg build or builds it on the device from vendor sources
+F-BROW-81	B	keep	high	Real k3s build on the Mac has not been run; capabilities for apk add and hostPath estimates	Run the on-device k3s add-on build on the Mac mini and record time and size	
+F-BROW-82	B	keep	high	Fakes only; real k3s build on the Mac not run	Click Build it here (k3s) on the Mac and read the consent text and the result	
+F-BROW-83	B	keep	high	Fakes only; no network policy seen working; k3s build not run	Run the job on the Mac k3s and confirm egress limited to 53/80/443 with a test pod	
+F-BROW-84	B	keep	medium	Package built with docker on a PC installed and TikTok played on the Mac, but on-device k3s build not run	Complete after F-BROW-83: install a package built by the in-device job	
+F-BROW-85	B	keep	medium	Fakes only; stale-stamp path never seen on a real image with a GStreamer change	Change the image GStreamer in a test build, boot and check the inbox note and engine without add-on	
+F-BROW-86	A	keep	medium	qemu-av-addon-test.py exists but is not cited as a test; script checks a fake root only	Cite and run qemu-av-addon-test.py with the next web image and add it to the tests cell	
+F-BROW-87	C	keep	medium	Package script not run for this change; recipe licence check by hashes only; FFmpeg LGPL build rules, patent codec question	Run package-av-addon.sh on a Buildroot output and add a licence-line test	Ship no codecs; the person builds the LGPL FFmpeg on their device from vendor sources or downloads it from the vendor by their own click
+F-BROW-88	B	keep	high	Full engine lazy-tab path not seen on the Mac	Open tabs with the full engine on the Mac, reopen the browser and see them return	
+F-BROW-89	B	keep	high	The Mac showed no Paste in the browser; cause not proven	Open the context menu over an engine page on the Mac, test Paste with mouse and touch long press	
+F-BROW-90	D	keep	high	Planned 0%, design only; needs the C helper rebuilt	After beta: build a web process extension for headers and plug-ins	
+F-BUG-01	B	keep	medium	Evidence tested with FakeRunner only; bugs not worked as Autopilot rows	Report a bug against a failing pod on the dev cluster; check evidence; decide Autopilot handling (A).	
+F-CAM-01	B	keep	high	Notes: tested with fake packets; no real ONVIF/mDNS/SSDP camera listed as tried	Discover a real IP camera on the LAN from the Mac mini	
+F-CAM-02	D	keep	high	Planned P2 0%: RTSP live grid; depends on GPU broker (F-BOOT-04) and F-APPS-06	Post-beta feature for security cameras	
+F-CAM-03	D	keep	high	Planned P2 0%: recording needs volume encryption (F-STORE-05) which is not built	Post-beta	
+F-CAM-04	D	keep	high	Planned P2 0%: local motion and person detection	Post-beta	
+F-CAM-05	D	keep	high	Planned P3 0%: vision-model event alerts	Post-beta, after F-CAM-02..04	
+F-CAM-12	B	keep	high	Notes: fake sysfs only; the real facetimehd driver's frames never read	Capture a frame from the MacBook built-in camera with firmware installed	
+F-CAM-13	B	keep	medium	Notes: not tried with a real USB camera (EMEET) or 4K MJPEG speed; assistant tools use the first camera	Plug a USB camera into the Mac mini and switch between cameras; make assistant tools follow the choice (code)	
+F-CAM-14	B	keep	high	Notes: tested with a registered page; real camera permission path needs a browser	Scan a QR via browser camera in a real browser session	
+F-CHAT-23	B	keep	high	Notes: no sound was heard; tested with a fake voice at several sizes	Read a reply aloud on the Mac mini and check sentence/word lighting	
+F-CHAT-24	A	keep	high	Notes: Settings Models Test result, browser_assist and rag.rs still show raw errors	Route those three sinks through providererr::plain_error with tests	
+F-CHECKUP-01	B	keep	high	Tested with made-up machines; not run on the Mac or a PC	Run CHECK-UP manual list in docs/CHECKUP.md on Mac mini, MacBook and a PC	
+F-CHECKUP-02	A	keep	high	Signed result file and GPU/k3s/USB steps not built; never seen on a real screen	Build result file and extra steps; look on a real screen	
+F-CHECKUP-03	B	keep	high	Real microphone, camera and sign were not exercised, only fakes	Run camera and mic steps on the Mac mini and MacBook; check device is off after	
+F-CLI-03	B	keep	medium	Notes: tried with real k3s under QEMU/container; remaining items not tried on real machine	Run the k3s start/stop and sandbox checks on the Mac mini and note remaining untried items	
+F-CLI-08	D	keep	high	Notes: not started; 1,800-2,500 lines for pty plus VT100 emulator, needs BOUNDARY rows	Post-beta: implement pty + emulator per docs/CLI-SSH.md	
+F-CLI-09	B	keep	high	Notes: no real download run; musl Claude/Copilot builds untried on the IYAKKI image	Click-install Claude Code and Copilot CLI on the Mac mini image and run them	
+F-CLOCK-01	B	keep	high	'Fakes only; not yet run on a device.'	Boot the MacBook (reads 2024-01-01) and check the clock is lifted at boot and after data mount; reboot offline and see the saved floor used.	
+F-CLOUD-01	B	keep	high	Notes: made-up /sys only; how real cloud hypervisors present displays is unconfirmed; no GRUB entry	Boot in a real cloud VM and check Automatic; add the GRUB entry (code)	
+F-CLOUD-02	B	keep	medium	Notes: Settings Home layout still lists hidden tiles; not seen on a real headless machine	Fix the Home layout list (code) and run on a headless machine/VM	
+F-CLOUD-03	A	keep	medium	Notes: change reaches menus at next sign-in; the page's key press not covered by its own test	Add the key-press test for the Cloud mode page	
+F-CLOUD-04	A	keep	medium	Notes: popover filter tested on a made-up reading, not on a live refresh thread	Add a test with the live refresh path in cloud mode	
+F-CLOUD-05	A	keep	medium	Notes: boot-time guard (ShellEnv::from_paths) and the camera look are not run by a test	Add tests for ShellEnv::from_paths cloud flags and camera watch skipping	
+F-CLOUD-06	B	keep	high	Notes: only against a fake kubectl, never applied to a real cluster; image push to plain-HTTP registry only; routes never applied	Launch cloud mode from the K8S tile on a real k3s cluster and open the tenant	
+F-CLOUD-07	A	keep	high	Notes: no service route calls the roles yet (later wired in F-CLOUD-18); no roles page; key rotation was missing	Check F-CLOUD-18/20/31 cover it, then merge or close; add remaining tests	
+F-CLOUD-08	A	keep	medium	Notes: a volume per namespace is refused as not built; snapshots are F-CLOUD-25	Build isolation: volumes or decide to keep folders only and close	
+F-CLOUD-09	A	keep	medium	Notes: certificates not stored in the vault; listener exists as F-CLOUD-11; table only for cluster Ingress	Store route certificates in the vault and connect to the listener; test	
+F-CLOUD-10	B	keep	high	Notes: nothing in the tenant's pod reads the vault address yet; not applied to a real cluster	Make the tenant pod read IYAKKI_VAULT_URL, then apply on a real cluster	
+F-CLOUD-11	B	keep	high	Notes: loopback only; never run with real DNS and ports 80/443; members route not enforced; no HTTP/2	Run the listener on a machine with real DNS and ports 80/443	
+F-CLOUD-12	A	keep	medium	Notes: tunnels poll every 10 ms with one thread per connection; idle limit one hour	Replace polling with a blocking/epoll pump and test under many connections	
+F-CLOUD-13	A	keep	medium	Notes: vault-backed cert source not built, nothing watches files, no mutual TLS route	Add a vault certificate source, file watch and optionally client-cert routes with tests	
+F-CLOUD-14	A	keep	medium	Notes: command uses a no-op gate (firewall not driven); ClientHello split over TLS records not handled	Handle split ClientHello and connect the PortGate to the firewall with tests	
+F-CLOUD-15	C	keep	medium	Notes: Not reviewed by a cryptographer; permissive crates plus in-house HKDF/HMAC	Owner decides on an external review before relying on shared vaults in production; add test vectors meanwhile	
+F-CLOUD-16	B	keep	high	Notes: loopback only; not built into a container or applied to a cluster; signed request has no nonce (replay in 120 s); no rate limit	Add a nonce and rate limit (code), then run in a container on a cluster	
+F-CLOUD-17	A	keep	medium	Notes: rotation pending when the administrator's key is not at hand; service cannot verify re-sealed ciphertext	Finish pending-rotation flow (F-CLOUD-31) and add verification tests	
+F-CLOUD-18	A	keep	medium	Notes: cloud profile has no file/clone routes at the time; only path argument of data tools jailed (F-CLOUD-24 later adds routes)	Re-check against F-CLOUD-24 and jail all data tools, then close	
+F-CLOUD-19	B	keep	high	Notes: tested only with fake kubectl closures; never run against a real cluster; not a controller	Run reconcile against a real cluster with a dry run then apply	
+F-CLOUD-20	B	keep	high	Notes: layout checked by rectangles only: nobody has looked at the page; does not rotate keys	Look at the page on a screen; wire the key rotation (F-CLOUD-31)	
+F-CLOUD-21	B	keep	high	Notes: loopback TLS with fake screen; timeouts untested; nothing over a real network	Connect the desktop client to a real remote tenant over the internet/LAN	
+F-CLOUD-22	B	keep	medium	Notes: tested with fake network and loopback TLS; no real network	Add a tenant on a real server and accept its fingerprint from the Mac mini	
+F-CLOUD-23	B	keep	high	Notes: Nobody has looked at it on a screen; chips not visible on Personal; wheel scale a guess	Use two tenants on the Mac mini screen and tune the wheel scale	
+F-CLOUD-24	B	keep	medium	Notes: clone route never run against a real remote; no per-person size cap, private-address host not caught, text files only	Clone a real repo in a cloud pod; add size cap and private-address check (code)	
+F-CLOUD-25	B	keep	high	Notes: CronJob not applied to a cluster; no snapshot of a real volume; deploy does not create the CronJob	Take and restore a snapshot on a real cluster volume	
+F-CLOUD-31	B	keep	high	Notes: loopback vault only; pod holds no member secret so removals via the web are usually pending	Decide where the admin key lives; test rotation on a real cluster	
+F-CLOUD-32	A	keep	medium	Notes: loopback only; no rate limit, no nonce (F-CLOUD-44 adds them); replacing a key is operator-only	Confirm F-CLOUD-44 covers enrol route and then close; add key-replacement path if wanted	
+F-CLOUD-33	A	keep	medium	Notes: pod does not yet read or write vault secrets for its own use; pin optional	Make pod use vault secrets (tenant config) and require the pin; add tests	
+F-CLOUD-40	A	keep	medium	Notes: adapter over cloudvaultd::Client not run against a live vault service; iyakki cloud listen does not choose this source (F-CLOUD-49 wires it)	Test the adapter against the loopback vaultd and close with F-CLOUD-49	
+F-CLOUD-41	A	keep	medium	Notes: per route host not path; client identity not passed to target; not settable in route file or CLI; no revocation lists	Move client_ca into the route file and pass identity header; add tests	
+F-CLOUD-42	B	keep	high	Notes: real kubectl port-forward never run; SSH and WireGuard targets not built	Reach a service route through the listener on a real cluster	
+F-CLOUD-43	B	keep	high	Notes: nothing applied to a real kernel; per-route access not known to the gate	Apply the gate rules on the Mac mini or a Linux host and check with the firewall list	
+F-CLOUD-44	A	keep	medium	Notes: unit and loopback tests only; power cut can lose last replay-log lines; 50,000-entry cache not tested	Add the full-cache test and fsync policy test; then close	
+F-CLOUD-45	B	keep	high	Notes: fakes only; pod_identity untested; no real worker pod or vault deployment	Run a worker pod with a vault account on a real cluster	
+F-CLOUD-46	A	keep	medium	Notes: unit tests only; plain archive briefly in temp folder; vault-key command-line path untested	Add test for the vault-key path and write the temp archive inside the encrypting stream	
+F-CLOUD-47	A	keep	medium	Notes: no range requests, no resumable uploads, no total-time limit for slow uploads, no per-person size cap	Add slow-upload time limit and a per-person cap with tests; range/resume later	
+F-CLOUD-48	A	keep	medium	Notes: storage layer with fakes only; tenant config still refuses volumes isolation; no per-namespace claim in manifests and no worker pod per namespace	Build the manifest and worker pod per namespace, or decide folders-only and mark deprecated	
+F-CLOUD-49	B	keep	high	Notes: fakes and loopback only; no real network, vault, cluster or firewall; mTLS listener-to-pod not wired	Run iyakki cloud listen with real vault, cluster and firewall on a host	
+F-CLOUD-50	A	keep	medium	Notes: digest not reproducible with classic builder; arm64 needs cross compiler; no push, manifest list or per-binary SBOM	Use buildx for reproducibility, build arm64 and add SBOM; docker test of the image	
+F-CLOUD-51	A	keep	medium	Notes: the mount step needs a VM run (build-cloud.sh test iso); no Wi-Fi keys beyond net.conf	Run the QEMU VM test of the config drive (no real hardware needed)	
+F-CLOUD-52	B	keep	medium	Notes: code and tests exist; real LAN pairing with a second device not shown	Pair a headless node from another device on a real LAN; check mDNS code exposure	
+F-CLOUD-53	B	keep	high	Notes: Not run on real hardware	Boot with both kernel parameters on a spare PC and check install and the stick marker	
+F-CLOUD-70	B	keep	high	Notes: fakes and fake clock; no pod, no second replica, no restart on a cluster; lease file not consensus	Run two replicas on a cluster with ReadWriteOnce and restart one	
+F-CLOUD-71	A	keep	high	Notes: no time zone database; history_keep and history_days pruning not wired	Wire the pruning by history_keep/days and add a zone rule table or fixed offsets only; tests	
+F-CLOUD-72	A	keep	high	Notes: engine does not ask secret_gate for {{secret.NAME}}; _flows enrolment not built; run token not presented by the engine	Wire secret_gate in the engine, add _flows enrolment and token presentation with tests	
+F-CLOUD-73	A	keep	high	Notes: desktop INBOX approve path not routed through resolve_once; flow has no team field; real engine blocked-node scan untested	Route INBOX approve through resolve_once, add team field and a real-engine test	
+F-CLOUD-74	A	keep	high	Notes: engine Notice has no to or channel field, so a notify step goes only to the run owner	Extend Notice with recipients and test hub fan-out from a notify node	
+F-CLOUD-75	B	keep	high	Notes: K3sJob executor not called by the engine; Job namespace and team are guesses; needs a real cluster	Wire the executor into the engine, then run a cloud flow Job on a real cluster	
+F-CLUSTER-01	A	keep	medium	Notes: Setup installers only go into this machine's own cluster and are refused for other active clusters; further items not done	Make Setup installers and Platform services honour the active cluster, with fake-runner tests	
+F-CLUSTER-02	B	keep	high	Notes: two real k3s servers never started together; shared flannel and cni0 may clash	Start two k3s instances on the Mac and check pod networking	
+F-CLUSTER-03	A	keep	medium	Notes: AI IDE deploy form and Services/Registry dialogs not covered by the switcher	Add the switcher to the remaining IDE dialogs with hit-region tests	
+F-CLUSTER-04	A	keep	medium	Notes: panel not yet reorganised into its own Settings tab; none run against network or real k3s	Move the Clusters page into its own Settings tab; then check on the Mac	
+F-CLUSTER-05	B	keep	high	Notes: fake node JSON and runner only; no kubectl ran against any cluster	Check the GPU badge on a remote cluster with GPUs	
+F-CONN-01	B	keep	medium	Fake server tests only; real sign-in and no-echo prompt untested	Run iyakki-connect login against a real tenant from a PC terminal	
+F-CONN-02	B	keep	high	Not tested: real tenant, sound, camera, clipboard, Firefox, Safari, touch	Run connect serve against a real tenant on a PC and Mac; try sound, clipboard, camera, other browsers	
+F-CONN-03	A	keep	medium	Files API does not take device-key signature; whole file held in memory	Accept device-key signature on files API; stream files instead of holding in memory	
+F-CONN-04	A	keep	high	Nothing builds the shell gate with the key store; replay cache in memory; ssh-agent not built	Wire key store into iyakki serve --web; persist replay cache; optional ssh-agent signing	
+F-CORE-06	A	keep	medium	The Claude CLI runner in clis.rs still has the old pattern; not run on the Mac	Move clis.rs to child_status with a test; then Mac check is B.	
+F-CORE-07	C	keep	high	Five questions await the owner (relay ownership, first-use consent, queued-request expiry, major 1 timing, slice order); no cloud relay	Owner answers the five questions in docs/development/CORE-CONTRACT.md.	
+F-CORE-08	D	keep	medium	Fakes; the other 20+ domains are listed for later migration	Migrate domains one by one after beta; close first-domain fakes when F-CORE-09 is verified.	
+F-CORE-09	A	keep	high	No accounts or jobs domain, no registered vault.use_secret action, camera approval proved against the fake only	Add accounts/jobs domains, register vault.use_secret and a real local-only approval flow, with conformance tests.	
+F-CORE-10	A	keep	high	No Settings page for the switch and grants; no push; chunks as JSON arrays	Add the Settings page for contract scopes with tests; relay stays with owner questions.	
+F-DASH-04	B	keep	high	Notes: duckdb flags and download name never run against a real DuckDB	Run dash::live_tests::duckdb_live with IYAKKI_LIVE_DUCKDB on a PC with the real duckdb CLI	
+F-DASH-06	B	keep	high	Notes: not yet tried on bare metal or with a real server and mouse	Open the DASH tile on the Mac with a real server and mouse; gaps (alerting, annotations) are extras	
+F-DASH-08	B	keep	high	Notes: scripted model only; real model quality unmeasured	Try DASH chat with a real model on a PC and judge queries and spike explanations	
+F-DASH-11	B	keep	high	Notes: fakes only; ClusterIP reach through kube-proxy and podman backend not tried on a real cluster	On the Mac with k3s, add a cluster:// source and query it	
+F-DASH-12	B	keep	high	Notes: fakes only; no ClickHouse installer item (owner decision)	Check the Add source pre-fill on the Mac with k3s running; decide on a ClickHouse installer item	
+F-DASH-13	B	keep	high	Notes: fakes only, NOT tried on the Mac	On the Mac break a localhost source and use the repair button	
+F-DASH-14	B	keep	high	Notes: fakes in tests; real Neo4j checked by hand in Docker but not the in-cluster pod	Run a query against the in-cluster Neo4j pod on the Mac	
+F-DASH-15	B	keep	high	Notes: fake JSON answers only, not run against a real k3s	Open the kube source on the Mac and check every view against real kubectl output	
+F-DASH-16	A	keep	medium	Notes: seeding in Env::from_services is never called by a test; layout at 800x480 not seen	Add a test that Env::from_services seeds the default; then look at 800x480 on screen	
+F-DASH-17	B	keep	high	Notes: fake accounts only; two real signed-in accounts not tried	Share a dashboard between two accounts on the Mac	
+F-DASH-18	B	keep	high	Notes: fake accounts only; owner save overwrites operator changes (kept as .bak)	Try viewer and operator roles with two real accounts on the Mac	
+F-DATA-03	A	keep	high	Notes: result is plain Markdown text in the tool card, no table block or Open in Data viewer button yet	Add a table block and an Open in Data viewer button to the chat tool card, with tests	
+F-DATA-06	B	keep	high	Tools and tests exist; notes say not tried on a device	Ask the assistant on the Mac to create and append a CSV, then see it in the DATA tab	
+F-DATA-07	B	keep	medium	Notes: not tried on a device; context is the last table shown, not an embedded chat pane	Check on the Mac that a created file appears and an append reloads the open table; decide if embedded pane is wanted	
+F-DEV-02	B	keep	high	Tested against made-up /proc and never run on a real device	Run iyakki dev info/ps/dmesg/logs on the Mac over the network and compare with the device	
+F-DEV-04	A	keep	medium	Screenshot sequence has no test of its own; --display N refused	Add a test for screenshot --record PNG sequence, then verify input on the Mac	
+F-DEV-05	B	keep	medium	Not watched that the running shell redraws/applies a changed volume, zone or size	Change volume and size via dev config on the Mac and watch the shell apply it; extend whitelist if wanted	
+F-DEV-07	A	keep	medium	Line mode only: no pty; root user change tested as decision only	Add a pty mode or state line mode as final and mark done; check root switch on a device	
+F-DEV-09	B	keep	high	Never run on a FAT volume or real mount; in-place initramfs write on 256 MB FAT32 untried	Run dev update-pack then dev update on the Mac mini and reboot into the new boot files	
+F-DEV-10	B	keep	high	Fakes only: nothing run on two real machines; gadget plan never applied to real configfs	Connect two computers with a Thunderbolt cable and run dev usb check/pair/speed	
+F-DEV-11	B	keep	high	Tested against made-up machine; real sysfs and sockets not run	Open Settings Developer mode Connect over USB-C on the Mac and walk the steps with a real cable	
+F-DEV-12	B	keep	high	No image built or booted with the new kernel options	Rebuild the kernel, boot on the Mac, check thunderbolt and thunderbolt-net modules load	
+F-DEV-13	B	keep	high	Tests only; not seen on the Mac	Trigger a dev shell request from a PC and see the pulsing DEV sign and approve card on the Mac	
+F-DEVMODE-08	D	deprecate	medium	Not built: type the address the Settings page shows; low priority P3	Drop or move to post-1.0 nice-to-have	
+F-DEVMODE-09	B	keep	high	Boot-critical overlay never ran on a real boot or QEMU	Boot a patch in QEMU first, then on the Mac mini; confirm a bad patch can be rolled back	
+F-DEVMODE-10	B	keep	high	Tested with a fake kubectl; not run against the Mac's real cluster	Run dev kube get/logs/top on the Mac cluster; confirm write verbs refuse	
+F-DEVMODE-11	B	keep	high	Not looked at on the Mac's screen	Run dev state and dev input click on the Mac and compare with what is drawn	
+F-DEVMODE-12	B	keep	medium	Tested only against a made-up machine	Run dev inbox and dev diag on the Mac and check the bundle holds no secrets	
+F-DEVMODE-13	B	keep	high	Cause on the Mac not confirmed; /dev nodes not touched by a test (need root)	Run a dev shell command with 2>/dev/null on the Mac; check /dev mount options	
+F-DEVMODE-14	A	keep	medium	Settings buttons G and t only covered by page's general test	Add tests for G (grant all diagnostic scopes) and t (timer) keys	
+F-DEVMODE-15	B	keep	high	Fake firewall backend only; no real kernel or second computer	With firewall on in the Mac, pair a PC and see TCP 7979 rules appear and vanish with developer mode	
+F-DEVMODE-16	A	keep	high	No test presses keys 4, 8, 1 or checks the 8 hour default by name	Add shell tests for those keys and the 8 hour default	
+F-DEVT-01	B	keep	high	Never looked at on a real screen or with a real finger; touch scroll not driven by a test	Open DEV TOOLS on the Mac mini and the MacBook touch screen	
+F-DEVT-02	A	done	medium	Pure in-house tools, named tests (rfc_4648_vectors, hmac_matches_rfc_4231_case_2, hs256_verifies...) exist in devtools modules; only caveat is big-file UI pause	Optionally parse big JSON off the UI thread	
+F-DEVT-03	A	done	medium	Own regex, diff and converters exist with named tests (literals_classes_and_repeats, the_diff_page_shows_prefixes); notes list only documented subset limits, no hardware caveat	Later: add lookaround/YAML anchors only if wanted (D)	
+F-DEVT-04	B	keep	high	Only 127.0.0.1 tried; real remote host, IPv6, filtered ports not tried	Ping and port-check a real LAN and internet host from the Mac mini	
+F-DEVT-05	B	keep	high	Not tried with a phone camera or external scanner	Scan a Wi-Fi and URL code from the screen with a phone	
+F-DIAGSHARE-01	A	keep	medium	Redaction tests exist but notes admit over-removal and no tar; completeness not code-checked	Review corpus of redaction tests against real log samples from Mac; then close	
+F-DIAGSHARE-02	B	keep	high	Not looked at on a real screen or with a real USB stick; decision D5 open on send	Save a bundle to a real USB stick on the Mac mini; owner decides D5 (file or stick only is fine)	
+F-DISKS-01	B	keep	high	'Fakes only ... nothing was run on a real drive'.	On the Mac mini and a PC list real drives (NVMe, USB, SD) and compare with lsblk.	
+F-DISKS-02	B	keep	high	'no drive was mounted by this code on real hardware'; LUKS/BitLocker refused.	Mount, unmount and eject a real USB stick (FAT, ext4) on the Mac mini.	
+F-DISKS-03	B	keep	medium	'Fakes only.'	As admin, user and guest on the Mac mini plug a stick and check which actions each role gets.	
+F-DISKS-04	B	keep	high	'never run against a real device.'	With a spare USB stick on the Mac mini confirm the refusals (system drive, mounted) and the name check.	
+F-DISKS-05	B	keep	high	'no real kernel, mke2fs or Windows has seen a volume made this way. Verify with a spare USB stick'.	Make GPT and FAT32 on a spare stick, then read it on Linux (fsck.vfat) and on Windows.	
+F-DISKS-06	B	keep	high	'the tile has not been looked at on a real screen with a real drive'; hot-plug toast only while DISKS is open.	Use the DISKS tile on the Mac mini with a real stick; decide on the toast while closed.	
+F-DISKS-07	A	keep	medium	1 test and 'Small edits only'.	Add tests for the Settings Storage open-drives list, the d key and the file picker Drives button.	
+F-DISKS-08	C	keep	medium	'No permissive in-house path is known for the first two' (LUKS, BitLocker); others are future work.	Owner decides: show these volumes as unsupported, or add later items one by one.	Label LUKS/BitLocker/NTFS/exFAT format as unsupported and tell the person to use the vendor or OS tools; only build the in-house parts (resize, MBR extended) later.
+F-DISP-02	A	keep	high	At very large sizes some pages overflow; resolution half planned until DRM/KMS	Fix overflow at Large/Huge (scroll/wrap) with tests; split off the resolution half.	
+F-DISP-03	B	keep	medium	Real backend never run on any machine per notes	Run the shell on Mac mini with KMS; check modes, flips (notes may be stale if Mac already uses it).	
+F-DISP-05	B	keep	high	run_loop and real DRM backend never run with two displays	Connect two monitors to Mac mini; follow docs/MULTI-DISPLAY.md section 6.	
+F-DISP-06	B	keep	high	Drawn on made-up screens; not seen on a real display	Open Settings -> Displays on Mac mini with monitor; Apply, revert timer, mirror/extend.	
+F-DISP-07	B	keep	high	Fake devices only; no real touch panel tried; no rotation	Touch the Mac monitor and an external display; check mapping; add rotation to the plan (code A part).	
+F-DISP-08	B	keep	high	Unit tests only; not tried on the Mac mini touch monitor	Use touch monitor on Mac mini: tap, drag-scroll, hold-drag.	
+F-DISP-09	B	keep	high	KI-077 cold-boot touch not fixed; probe effect unverified on hardware	Cold-boot Mac mini with each iyakki.touchscreen option; bisect an older working image (parked).	
+F-DISP-10	B	keep	high	NOT verified on hardware; probably not enough for the Mac DisplayPort link	Try on a tablet or I2C touch screen; for the Mac see KI-077.	
+F-DISP-11	B	keep	high	NOT tried on touch hardware	Hold a finger 600 ms on the Mac touch monitor; check context menu.	
+F-DISP-12	B	keep	high	This step has not been tried on hardware	After cold boot on Mac mini press Reset touch screen; see if touch returns.	
+F-DOCTOR-01	B	keep	high	Tested with made-up machines only; real probes (lookup, port, /proc, VPN) have not run on a device	Run DOCTOR on Mac mini and a PC and compare findings with reality	
+F-DOCTOR-02	B	keep	high	Never looked at on a real screen; iyakki doctor CLI not built	Open DOCTOR tile on Mac mini; build CLI iyakki doctor and iyakki dev doctor (A)	
+F-DRIVERS-03	B	keep	high	Not seen on a real Mac or in QEMU: symlink following and modprobe -r unverified	On the Mac install a firmware pack, reboot and check the driver found the file via /lib/firmware link	
+F-DRIVERS-05	B	keep	medium	Driver file the person supplies is only tried against synthetic files	On a MacBook supply the real AppleCameraInterface file and extract; check sha256 results	
+F-DRIVERS-07	B	keep	high	NOT seen on bare metal: drawn and clicked in tests only	Open STORE Installed Drivers on the Mac mini and click Install/Remove/Why	
+F-DRIVERS-09	B	keep	high	Never built, never booted, fragment not run through kconfig	Run build.sh mac with the kernel source, boot it on the Mac mini	
+F-DRIVERS-10	C	keep	high	Broadcom wl module never loaded on a Macmini7,1; proprietary driver built by the owner, never shipped	Owner builds wl on a PC and tests scan/association on a Macmini7,1	Keep it as owner-built pack, never shipped; recommend Ethernet or a USB Wi-Fi adapter with an open driver
+F-DRIVERS-11	B	keep	high	Buildroot package only downloaded and patched in scratch; Bluetooth never booted; sound not confirmed heard	Build the Mac image with apple-bce, boot on the Mac mini 2018, play a tone and listen	
+F-DRIVERS-13	E	merge:F-DRIVERS-29	high	Note says it is done by byte ranges in F-DRIVERS-29; same job and button	Fold into F-DRIVERS-29 and remove this row	
+F-DRIVERS-14	D	deprecate	medium	Planned 0% P3, needs the optional Mac image variant first	Move to post-1.0 or drop; fan control can also be left to firmware	
+F-DRIVERS-15	B	keep	high	Never built or booted; Haswell not supported by iris	Build macweb once and boot on the Mac mini 2018, play a video	
+F-DRIVERS-16	C	keep	medium	Broadcom wl source licence and download address may change; Debian patches fit up to 6.12	Owner re-runs build-wl-pack on the build PC for each kernel bump	Never ship the module; owner builds it on their own PC from vendor source (as built), or use an Ethernet or open-driver USB Wi-Fi adapter
+F-DRIVERS-18	B	keep	high	Nothing built into an image and nothing tried on a MacBook yet	Build the Mac image and boot on a T2 MacBook Pro 2019; test keyboard and trackpad	
+F-DRIVERS-20	C	keep	medium	Extracts Apple Wi-Fi/Bluetooth firmware from the person's macOS copy; Bluetooth file names not seen on a Mac; Apple firmware licence question	Run on a real Mac's macOS firmware folder for names; owner decides licence stance	Never ship Apple files; extract only from a copy the person supplies on their own device (as built)
+F-DRIVERS-21	B	keep	medium	Only Macmini8,1 confirmed; other board ids from memory, shown unverified	Read board_name on each T2 Mac model when available and mark verified	
+F-DRIVERS-22	B	keep	high	NOT yet seen on the Mac: blacklist stops alias loading, modprobe still loads	Boot the Mac mini 2018 T2 without firmware and check lsmod and kernel log; then install the pack	
+F-DRIVERS-23	C	keep	medium	Chunk list signature unchecked; uses Apple's recovery download service (terms unknown to us)	Owner decides if the download button stays; add chunk-signature check in code	Make it a person-clicked download only from Apple's own server on their device (as built), or offer the macOS script / disk image route only
+F-DRIVERS-24	B	keep	high	Fake runner only; whole path NOT verified on a Mac	Run Download from Apple on the Mac mini 2018 and confirm Wi-Fi/Bluetooth work after	
+F-DRIVERS-25	C	keep	medium	Download address and asset names from memory, not fetched; 7-Zip LGPL/unRAR restriction	Fetch the real release page and fix names; owner confirms 7-Zip stays person-downloaded	Never ship 7-Zip; person downloads it from the vendor by click, or use the in-house HFS reader only
+F-DRIVERS-27	C	keep	medium	GPL out-of-tree CS8409 module not heard on a Mac; unknown on 6.12.112; licence of Apple codec setup	Test sound on a MacBookPro14,x; owner decides if module ships in Mac image	Build the module on the person's device from the pinned source rather than shipping a binary, or label audio unsupported on those Macs
+F-DRIVERS-28	B	keep	medium	Modules built but nothing run on a MacBook; firmware needs Apple download	Load facetimehd on a MacBook with F-DRIVERS-29 firmware and open the camera tile	
+F-DRIVERS-29	C	keep	medium	Fetches pieces of Apple's macOS update from Apple's CDN; network code only against fake server; nothing ran on a MacBook	Run Install camera driver and firmware on a MacBook; owner confirms the download-on-click stance	Person-clicked download from Apple's server onto their own machine, nothing hosted or shipped (as built); fallback: let the person supply the file
+F-DRIVERS-30	C	keep	medium	Restricted firmware not shipped by owner policy; no image built or booted since; degradation not tried on devices	Build one image with the keep-lists and boot it on a machine needing one of the removed files	Keep not shipping; the person installs from the vendor by their own click (F-DRIVERS-31)
+F-DRIVERS-31	B	keep	high	Fake network and fake /sys only; nothing run on machine with the hardware; id tables from memory	Run quick-install fw-realtek-net etc. on a PC with the matching card and see it load	
+F-DRIVERS-32	B	keep	high	Form and tile not drawn at every window size or seen on a screen	Open Setup Hardware cards on a PC with a matching card and view at the standard sizes	
+F-DRIVERS-33	B	keep	high	No image built with the switch; stamp and Buildroot integration unverified	Run IYAKKI_INCLUDE_RESTRICTED_FIRMWARE=1 ./run.sh build-pc-layered once and check About page	
+F-DRIVERS-40	B	keep	high	Not verified that the BCM4350C0 of a real MacBook accepts the converted file	Load converted .hcd on a MacBook with BCM4350 and check hci0 gets an address	
+F-DRIVERS-41	B	keep	high	Job has not run end to end against Apple's service on the Mac for macOS 11 candidate	Run the Mac firmware job on a BCM4350 MacBookPro13/14 and see macOS 11 chosen and hex converted	
+F-DRIVERS-42	B	keep	high	Wi-Fi scan worked (46 networks) but not associated; owner's chunk mismatch cause unknown	On the MacBookPro16,2 associate to a WPA2 network after the job and run the download twice to see the mismatch	
+F-DRIVERS-50	B	keep	high	Fixtures only; kernel log shapes from memory; never run on a computer lacking firmware	On a PC with a missing-firmware card check the card lists the real file names from dmesg	
+F-DRIVERS-51	B	keep	high	Never installed on a real computer; unverified that modprobe -r/modprobe brings the card up	Install the hardware firmware pack on a PC with a card needing it and reload the driver	
+F-DRIVERS-52	B	keep	high	Nothing verified over a real cable; firewall, Thunderbolt link, ICS not tried	Get firmware onto a Wi-Fi-less PC through each of the four ways, at least Ethernet-share and USB stick	
+F-DRIVERS-53	A	keep	medium	hardware_accept_and_start not covered by a test; card/form not checked at all window sizes	Add a test for the accept-and-start path with an injected log reader, and draw at the four sizes	
+F-EDIT-14	A	keep	high	Notes: Enter between a bracket pair does not open an indented line between them	Implement smart Enter between a pair and add a test	
+F-EDIT-15	D	keep	medium	Progress 40%: inline completions done, language server not done	Language server client is a big job; do after beta	
+F-EDIT-16	A	keep	medium	Notes: no test runner, no input, cannot stop a run, container path tested only up to the explanation	Add stop-run and stdin, a cargo test/pytest runner; container run needs the cluster (B)	
+F-ENGLOG-01	B	keep	high	Not run with the real helper	Browse on the Mac mini and inspect log/engine.log for redaction and rotation	
+F-EXTA-01	B	keep	high	Notes: fake CLIs only; no live vendor run; Copilot event shapes unverified	Run Claude Code and Copilot CLI with a real account on a PC	
+F-EXTA-02	B	keep	high	Notes: not run against a live Claude Code; _meta and permission prompt input from docs	Run a live Claude Code with the bridge and check approval flow	
+F-EXTA-03	B	keep	medium	Notes: session id file not cleaned on chat delete; vendor model lists not available	Fix the session id cleanup (small code task); verify lists with real agents	
+F-EXTA-04	B	keep	medium	Notes: sign-in is shown as a command, not started from IYAKKI	Check Detect/Install/Test with real agent CLIs on a PC	
+F-EXTA-05	B	keep	high	Notes: fake CLI only, no live vendor run; cost total not saved across Resume	Run Autopilot with real Claude Code; small code task: save cost total across Resume	
+F-EXTA-06	B	keep	high	Notes: stand-in node and npm only, no real install run	Install each agent with real npm on the Mac and run it	
+F-EXTA-07	B	keep	high	Notes: stand-in programs only; nothing tried with a real Anthropic or GitHub account	Log in and out with real Claude Code and Copilot accounts on a PC and the Mac	
+F-EXTA-09	B	keep	high	Notes: not tried on a phone or with a real Claude page	Use the phone relay with a real Claude login on the Mac and a phone on the same network	
+F-EXTA-10	B	keep	high	Notes: Copilot config.json shape read from one device report; CLI token injection untested	Log in to Copilot on a PC and check the token moves to the vault; add a test for terminal injection	
+F-EXTA-11	B	keep	high	Notes: fakes only; long approval wait, resume and error events not seen on real Copilot	Run a long approval and a resume with real Copilot CLI	
+F-EXTA-12	B	keep	high	Notes: full bridged run with owner sign-in not repeated	Run a full bridged Copilot session with a signed-in account	
+F-EXTA-13	B	keep	high	Notes: loopback store only; not run against a k3s-deployed store on a device	Run tile_ship against the k3s-deployed store on the Mac	
+F-EXTA-14	B	keep	high	Notes: generated pictures and fake camera only; no real camera or phone screen tried	Read a real Claude login QR from a phone screen with a real camera	
+F-EXTA-15	B	keep	high	Notes: tables above version 10 spot-checked only; not checked against an external encoder or phone	Scan generated codes of several versions and levels with a phone	
+F-FILE-01	D	keep	medium	Planned P2 0%: SFTP server off by default; no OpenSSH/Dropbear sftp-server integration	Post-beta; decide whether a file-server is wanted at all (images ship Dropbear without sftp)	
+F-FILE-02	D	keep	medium	Notes: SSH/sftp batches exist in CLI tile; no file-browser app, no FTPS; Dropbear has no sftp client	Post-beta file-browser app over sftp; FTPS likely dropped	
+F-FLOW-04	B	keep	medium	Notes: agent steps use configured model only; browser step never run on a real page; thrift is F-FLOW-14	Run a flow with http/cli/grpc/browser nodes on the Mac mini; external-agent step is a code task	
+F-FLOW-05	B	keep	high	Notes: Job path tested with fake kubectl only; never run against a real cluster	Run a flow Job on real k3s on the Mac mini	
+F-FLOW-06	B	keep	medium	Notes: only built-in model heals; external agent not wired; no model run for real	Run healing with a real model on the Mac mini	
+F-FLOW-09	B	keep	high	Notes: drawn and clicked only in tests, not looked at in a real window	Use the FLOWS designer on the Mac mini screen with mouse and touch	
+F-FLOW-11	A	keep	medium	Notes: Store screen does not list or install flow templates yet (hook and manifest exist)	Add flow template listing/install in the Store screen with a test	
+F-FLOW-14	D	keep	high	Planned P3 0%: Thrift RPC node refuses to run; not built	Post-beta; gRPC and HTTP nodes cover most cases	
+F-FLOW-15	A	keep	high	Notes: request gate flows/webhook.rs has unit tests but no HTTP route calls it, so no webhook fires	Add the HTTP route on the web service that calls the gate, with a test	
+F-FLOW-16	D	keep	medium	Planned P3 0%: remote runner slot exists, not configured	Post-beta; the remote node already covers calls to a service	
+F-FLOW-17	B	keep	high	Notes: not run on the WPE helper of the image or on the Mac mini; one tab only; early console missed; file input cannot be filled	Run the QA flows on the image's WPE helper on the Mac mini	
+F-FLOW-18	B	keep	medium	Notes: profile shared with browser tile helper not tested together; screenshots may show secrets	Run browser nodes with the browser tile open on the Mac mini; test policy on a real page	
+F-FLOW-19	B	keep	medium	Notes: pixel comparison only; drawn and clicked in tests, not looked at in a real window	View the QA report and regression in the Mac mini window	
+F-FLOW-20	B	keep	high	Notes: picture goes to three provider kinds, never run against a real model	Send a screenshot to a real vision model from an Agent step	
+F-FLOW-21	B	keep	high	Notes: scripted models only; not tried on the device with a real model	Ask the Flows chat to automate something with a real model on the Mac mini	
+F-FLOW-22	B	keep	high	Notes: scripted models only; form is a dialog not a transcript card; answers arrive as next message	Use ask_form with a real model; optionally move the form into the transcript	
+F-FLOW-23	B	keep	high	Notes: Not tried on the device	Delete a flow and drop a version on the Mac mini and check the confirms	
+F-FLOW-24	B	keep	high	Notes: Never looked at on the Mac mini; a first-time user has not tried it	Have a first-time user try Esc/Close behaviour on the Mac mini	
+F-FLOW-25	B	keep	high	Notes: real model's diagnosis never seen; approval card of a fix not walked through on the device; no INBOX notice on failure; one global offer switch	Fail a flow on the Mac mini and walk through the fix card with a real model; add INBOX notice (code)	
+F-FLOW-26	B	keep	high	Notes: Not tried on the device; message saved in thread only if thread existed	Open a failed flow with the pane open on the Mac mini	
+F-FLOW-27	B	keep	high	Notes: tested with scripted model; not tried on the Mac with a real model	Ask the chat about an open failed flow on the Mac mini with a real model	
+F-FLOW-28	B	keep	medium	Notes: Not seen on the device; in memory only; chip only in CHAT tile not AI IDE pane	Leave FLOWS and use CHAT on the Mac mini; optionally persist the context	
+F-FLOW-29	B	keep	high	Notes: fake camera and scripted model only; NOT real camera or Qwen-VL; flow settings screen has no shell test	Run cam_photo with a real camera and a vision model; add the settings shell test (code)	
+F-FLOW-30	B	keep	high	Notes: answers scripted; no real vision model asked	Run the sample with a real vision model and camera	
+F-FLOW-31	B	keep	medium	Notes: toolkit is a planned Quick install item; end-to-end run on a PC venv only, never on the device	Build the datasci add-on, then run the samples on the Mac mini k3s	
+F-FLOW-32	A	keep	medium	Notes: global defaults page, kill switch UI, named agent profile and model choice not built	Build the global assist defaults page and kill switch UI with tests	
+F-FLOW-33	B	keep	medium	Notes: scripted model and fakes only; no whole-flow no-side-effect run; activity log, list marker and CLI readout not built	Run Copilot assist with a real model unattended; build the missing activity log (code)	
+F-FLOW-34	B	keep	high	Notes: fakes only; real model patch quality, cost and a real night unverified; matrix notice and agent profile not built	Run autopilot overnight on the Mac mini with a real model	
+F-FLOW-35	D	keep	medium	Notes: only library steps detected; model names, deprecated settings, CLI versions, template bumps not; no auto-publish by design	Post-beta, extend detection classes	
+F-FLOW-36	B	keep	medium	Notes: Found on the Mac (run r50) agent proposed made-up key; Not re-run on the device	Re-run the camera-not-allowed flow on the Mac mini and confirm no fix attempt	
+F-FLOW-37	A	keep	medium	Notes: only camera permissions use the popup; browser trust/profile and messaging channels not on it yet; not seen on the device	Route browser trust and channel consents through the popup with tests; view on the Mac mini	
+F-FLOW-38	A	keep	medium	Notes: assistant picture tools and browser screenshot-to-model do not use the resolver; Settings picker not draw-tested; pull-model from card not offered	Use the resolver in the picture tools and add draw tests for the picker	
+F-FLOW-39	B	keep	high	Notes: Never looked at on a real screen or touch panel; toolbar tooltips not done; text scale issue at big windows	View the FLOWS canvas on the Mac mini screen and touch; add tooltips (code)	
+F-FW-03	B	keep	high	'not yet run on the image kernel (6.12, modules loaded by modprobe) or on a device'.	Boot the image in QEMU and on the Mac mini, apply a ruleset and read it back; run the ignored tests/kernel.rs there.	
+F-FW-04	B	keep	high	'Tested with a fake kernel, clock and resolver. Not tried on a device.'	On the Mac mini apply, let the 60 s revert fire, Keep, and emergency off over SSH.	
+F-FW-05	B	keep	medium	Fake resolver only; real resolver is getaddrinfo, untried.	On the Mac mini add a host-name rule and change the network; check the resolved set updates.	
+F-FW-06	B	keep	medium	'Shared folders note not drawn on a real screen.'	On the Mac mini open Shared folders with the firewall on, check the note and f key.	
+F-FW-07	B	keep	high	'Not clicked through on a real screen.'	Click through Settings -> Firewall on the Mac mini: draft, Apply, Keep, import JSON.	
+F-FW-08	B	keep	high	'Read from a real kernel in a network namespace ... not on a device.'	On the Mac mini block a connection from a second computer and see it in the last-50 list.	
+F-FW-09	B	keep	high	'Not tried on a device or in the QEMU boot tests.'	Boot in QEMU with the firewall on and with iyakki.firewall=off, then the Mac mini; check it applies before SSH listens.	
+F-FW-10	D	keep	high	Planned 0%: outgoing filtering, sets, per-rule counters, FIREWALL tile, VPN ranges, forwarding.	After beta: pick items; the tile needs a policy table entry and sets need interval encoding.	
+F-FW-12	B	keep	high	'not loaded into a kernel with a real cable'; allow-more switch lives in directlink.json, outside keep-or-revert.	Connect the Mac mini to a PC by one cable, check only 7979/7980/ICMP pass; move the switch into the firewall page (code).	
+F-GIT-01	B	keep	high	'That ISO was not booted or flashed'; git inside the booted image (CA bundle, PATH, env) not seen there.	Boot the grafted ISO on the Mac mini or QEMU and clone a public HTTPS repo and run git-ssh -V; keep git out of the libre image.	
+F-GIT-02	B	keep	high	'Not tried: a clone from GitHub or a Gitea over the network from the Mac or a PC'; git://, LFS, submodules.	On the Mac mini clone several repos from GitHub and a real Gitea in one workspace; try a restart mid-clone.	
+F-GIT-03	B	keep	medium	'Not tried on a large repository ... or on hardware.'	On the Mac mini open a large repo workspace, Fetch all and Pull all; watch the 20 s limit.	
+F-GIT-04	B	keep	high	'Not tried: the image's git-ssh against a real server'; no assistant tool reaches the key service yet.	On the Mac mini generate a key, add it to a real Gitea/GitHub and clone over ssh with git-ssh.	
+F-GIT-05	B	keep	high	'not verified on a real screen or against a real Gitea, GitHub or GitLab server'.	Run the wizard on the Mac mini against real Gitea, GitHub and GitLab tokens; check scope messages.	
+F-GIT-06	B	keep	high	'not run on real hardware or against a real Gitea, GitHub or GitLab host'.	Run it with a real Gitea/GitHub/GitLab host and a real screen on the Mac mini. Check list, sort, paging.	
+F-GIT-07	B	keep	high	'not run on real hardware or against a real Gitea, GitHub or GitLab host'.	Cut the network and hit a real rate limit on the Mac mini; check the retry and messages.	
+F-GIT-08	B	keep	high	'not run on real hardware or against a real Gitea, GitHub or GitLab host'.	Open real repositories on the Mac mini: README, tree, large dirs, binaries, branches.	
+F-GIT-09	B	keep	high	'not run on real hardware or against a real Gitea, GitHub or GitLab host'.	On the Mac mini clone, Pull and Open in AI IDE with a real remote.	
+F-GIT-10	B	keep	high	'not run on real hardware or against a real Gitea, GitHub or GitLab host'.	Check on the Mac mini that no token shows in logs/audit and keyboard/mouse work on screen.	
+F-GIT-11	B	keep	medium	'Tested with a fake git; not run against a real working copy on the device.'	Open a real working copy with renames and spaces in paths on the Mac mini and compare to git status.	
+F-GIT-12	B	keep	high	'Tested with fakes; not seen on the device.'	On the Mac mini open the AI IDE and press Ctrl+Shift+L; check tab state and refusal for a denied account.	
+F-GIT-13	B	keep	medium	'Tested with a fake git'; no write action exists in the tab.	On the Mac mini view a real project's changes and diffs; write actions are a separate decision.	
+F-GIT-14	B	keep	high	'not run against a real Gitea, GitHub or GitLab host'.	On the Mac mini browse a real host from the Git tab and switch connections.	
+F-GIT-15	B	keep	medium	'Tested with fakes'; assistant has no extra git tools here.	On the Mac mini open the Git tab and ask the assistant about the branch; check layout at small sizes.	
+F-GIT-16	B	keep	high	'Tested with fakes; not seen on the device.'	On the Mac mini with the Gitea item installed run Put under version control and review the new repo.	
+F-GIT-17	B	keep	high	'not run on a real cluster or screen'.	On the Mac mini k3s with a Gitea deployment open the wizard and see it listed.	
+F-GIT-18	A	keep	medium	Only 1 test, a generic wizard test; notes: 'The wizard's hint line is not checked by a screenshot test.'	Add a test that the identity step starts empty and shows the server profile only as a hint.	
+F-GIT-19	B	keep	high	'Nothing seen on hardware or on a real network'; saved connection with a token is not covered by a test.	Add a test with a saved-token connection (code), then run git_clone_repo from chat on the Mac mini against a real host.	
+F-GIT-20	B	keep	high	'Scripted-model test with fake file and cluster tools; not seen on the Mac.'	On the Mac mini ask the assistant to add a workspace folder and confirm the card and the IDE list.	
+F-GIT-21	B	keep	medium	Submodule count known only after the clone; submodules over ssh with other keys not handled; no real clone seen.	Clone a real repo with submodules over https on the Mac mini; decide whether ssh submodules with other keys are in scope.	
+F-GPU-01	B	keep	high	Tried end to end with a Radeon 780M; 'Not yet on Intel or on NVIDIA through nouveau/NVK'.	Run the Setup card on an Intel iGPU machine and on the 4090 PC with nouveau/NVK; see Vulkan0 in a pod.	
+F-GPU-02	D	keep	high	Planned 0%: AMD ROCm/KFD compute stage 2, needs a supported card.	After beta: KFD kernel option, AMD device plugin, ROCm images; test on a supported AMD card.	
+F-GPU-03	C	keep	high	'Not run on a real NVIDIA card yet'; 'The vendor download and licence wording need the owner's review.'	Owner reviews the NVIDIA licence wording; then module load, CDI and nvidia-smi in a pod on the 4090 PC.	Keep the vendor driver out of the image: the person clicks to download it from the vendor, or use the open nouveau/NVK Vulkan path (GPU-01) and label the vendor driver unsupported.
+F-GPU-04	B	keep	high	'The image is built; it has not been booted on a PC yet'; kernel options need a rebuild.	Rebuild the kernel with the options, boot the pc image on the 4090 PC and check firmware, Wi-Fi and the GPU entry.	
+F-GPU-05	B	keep	high	Parser checked against a real llama.cpp response; 'The page has not been seen on screen by a person yet.'	Open Store -> Setup GPU page on the Mac mini and run the test prompt; check tokens per second shown.	
+F-HOTSPOT-01	A	keep	high	Pure checks only; nothing stores the settings or reads the device id; passphrase vault entry not built	Store settings, read device id, keep passphrase in the vault	
+F-HOTSPOT-02	A	done	medium	kdf/aes/keywrap exist with published vectors (rfc_6070, fips_197, rfc_3394 tests found); only caveat is non-constant-time AES on handshake data	Optional: constant-time AES if the key ever protects more than a handshake	
+F-HOTSPOT-03	B	keep	medium	Unit tests only; no real phone has accepted these frames (though a PC joined 2026-11-05)	Join with iOS and Android phones and record result	
+F-HOTSPOT-04	B	keep	medium	Only our own supplicant tested; no group key rotation, WPA3, 802.11w	Join with phones and Windows/macOS; add group rekey (A) if wanted	
+F-HOTSPOT-05	B	keep	medium	No socket in this module; real Android and iOS clients not tried	Check DHCP lease on a phone joined to the Mac mini hotspot	
+F-HOTSPOT-06	A	keep	medium	No socket, no resolver list; UDP only; no cache	Wire sockets and resolver list; add TCP retry on truncation	
+F-HOTSPOT-07	A	keep	high	List of ranges in use is not read from the machine; IPv4 only	Read ranges from the machine and add a test with fake interfaces	
+F-HOTSPOT-08	B	keep	high	Golden bytes by hand; whether real radios and phones accept the frames untested; legacy rates only	Join with phones on the Mac mini brcmfmac; add HT/VHT if needed	
+F-HOTSPOT-09	B	keep	high	Accepted combinations per real driver only provable on a real card	Run on Mac mini brcmfmac and a second Wi-Fi card; record capabilities	
+F-HOTSPOT-10	B	keep	high	Real interfaces, ioctls and firewall socket only proved on a machine with a cable (Mac mini)	Run share-internet on the Mac mini with a cable and a laptop	
+F-HOTSPOT-11	B	keep	high	Loading into a live kernel is the Mac step; bridge-family table not written	Load table on the Mac mini and check forwarding and isolation; write bridge table (A)	
+F-HOTSPOT-12	A	keep	high	No Wi-Fi name or passphrase fields, QR code or shell status badge yet	Add fields, QR and badge; then look at the page on a real screen	
+F-HOTSPOT-13	B	keep	high	Needs the Mac mini test with a cable	Run the cable steps from the work report on the Mac mini	
+F-HOTSPOT-14	A	keep	high	No notification to the person (audit only); no tenant-config entry; page only cycles wired setting	Add notification and complete page controls for the other kinds	
+F-HOTSPOT-15	D	keep	high	Only abstractions exist; Bluetooth tethering (BNEP/NAP) not built, 10%	Build BNEP/PAN after beta, or deprecate if not wanted	
+F-HOTSPOT-16	A	keep	medium	Not yet called by a Settings page or the manager; fixtures illustrative, not captures	Call probe from the hotspot page/manager; capture real dumps on Mac mini and keep as fixtures	
+F-HOTSPOT-17	B	keep	medium	VM passes 15/15 on virtual radios, but virtual radios cannot show RF, firmware or regulatory behaviour	Run on a second real Wi-Fi card (mac80211, software handshake) on a PC	
+F-HOTSPOT-18	B	keep	medium	Notes say not re-run after fix, but rows 19/20 record a phone joined on the Mac; WPA2 and 2.4 GHz only; no country page	Re-confirm on Mac, then merge status with F-HOTSPOT-20; add country page (A)	
+F-HOTSPOT-19	A	keep	medium	Ran on the Mac (phone joined, internet worked) but wpa_supplicant calls and route parking have no unit test of their own	Add fake-based tests for DISCONNECT/RECONNECT and route parking, then close	
+F-HOTSPOT-20	B	done	medium	Notes: verified on Mac mini, a phone joined and internet worked (owner, 2026-11-05/06); hostap tests exist (an_association_sends_message_1)	Optionally test a second phone brand	
+F-HOTSPOT-21	A	keep	medium	Band fallback in wifi_ap.rs has no test of its own; QR and band work seen on the Mac	Add a test for band fallback, then close	
+F-HW-02	B	keep	low	Compiles; never run against real devices; may be superseded by devctl/camera code	Check if cpal/v4l path is still used; if not merge into camera/audio rows, else run on a PC with mic and camera.	
+F-HW-03	B	keep	high	Boot path (camera plugged in at power-on) unverified on hardware	Power on Mac mini with the Fullhan webcam plugged in; check camera works.	
+F-IDE-01	B	keep	high	Terminal is a command runner; real keyboard/IME and Mac look not checked; assistant flows scripted	Use the IDE on Mac mini for a full session with a live model; add pty terminal (A, optional).	
+F-IDE-02	B	keep	medium	Real k3s read path only in an ignored test; no tunnels or cloud logins	Open cluster view on the dev k3s on the Mac mini; tunnels are post-beta.	
+F-IDE-05	A	keep	medium	Started/Finished columns and test times_are_set_on_transitions exist in featureboard.rs; only the header total is missing	Close; move the header elapsed total to a new small row if wanted.	
+F-IDE-06	A	keep	medium	Parsers checked on samples only; no commands.coverage field in settings form; pytest -q unmapped	Add coverage field to project settings and sample outputs for more runners.	
+F-IDE-07	A	keep	medium	Skill bodies at 3,950 char limit; Bugs lane is not a separate lane; visual pass not done	Check on a screenshot and decide to mark done; otherwise nothing hardware needed.	
+F-IDE-08	B	keep	medium	Scripted models only; unusual layouts need project setting	Live chat in a few real projects; check the PROJECT STATE block.	
+F-IDE-09	B	keep	high	Not seen with real WebKit/WPE; readonly does not block downloads or posts; verifier not run with a live model	Open the Browser tab on the Mac mini with a deployed app; block downloads in readonly (A).	
+F-IDE-10	B	keep	high	Not run with a live model or a vendor CLI; several listed gaps	Run two parallel tasks with live Claude Code on the Mac mini or PC; add closing prompt (A).	
+F-IDE-11	A	keep	medium	Run opens the app full screen, not a docked Preview tab; docs only; claim mostly met	Decide whether docked preview is wanted; else mark done.	
+F-IDE-12	B	keep	high	Scripted models only; a real model's choices not tested	Ask a live model the owner's prompt and check chosen target.	
+F-IDE-13	B	keep	high	No real model or live Claude Code has shown an agent following or writing notes	Run a task with a real agent; check it reads and writes context notes.	
+F-IDE-14	A	keep	medium	Graph not looked at at every size; no button to fix a hand-made cycle	Add a fix-cycle action and a size check test; then mark done.	
+F-IDE-15	B	keep	high	No run with several real agents; stop of Autopilot only in chat	Run two real agents in a workspace and check cards and names.	
+F-IDE-16	A	keep	medium	New task form and task_spawn goals are not scanned; English phrases only	Scan the New task form and task_spawn goal text with tests.	
+F-IDE-17	A	keep	medium	Hand-off through the real shell covered only by app tests; Autopilot run has no task fields	Add a full-shell hand-off test; accept Autopilot logs as separate and mark done.	
+F-IDE-18	B	keep	high	Panic fix not reproduced to the exact line; not re-tried on the Mac	Click chat box on Mac mini in the IDE.	
+F-IDE-19	B	keep	high	No live model was run against the skills; Dockerfile patterns not built	Ask live model to build and deploy a sample app on dev k3s; check it follows the skill.	
+F-IDE-21	B	keep	high	Fake runners only; no live model run	Run a task_plan with a real model on the dev machine (steps in docs/PARALLEL-TASKS.md).	
+F-IDE-22	B	keep	medium	Not shown as a Tasks panel; no live run	Show the summary in the Tasks tab (A) and run with real tasks.	
+F-IDE-23	A	done	medium	Memory-aware cap is in tasks.rs (task_mb, max_concurrency) with test the_cap_follows_free_memory...; no listed gap	Close.	
+F-IDE-24	A	keep	medium	No tables, images; links not clickable; seen in a test picture only	Add tables and clickable links to the Markdown layout with tests.	
+F-INBOX-04	A	keep	high	Notes: Hub::tick not started by the service; cloud flows' NotifySink not bound to Hub; no opt-out route	Start the worker in the service, bind NotifySink to Hub, add opt-out route and tests	
+F-INBOX-05	A	keep	high	Notes: timers run only when something calls Hub::tick (plan section 8)	Start Hub::tick from the service loop with a test that the timers fire	
+F-INBOX-06	B	keep	high	Notes: transport.rs (TLS mail, https POST, egress checks) not run against any server; Web Push not built	Send a real webhook and a mail through a real server from the Mac mini; Web Push is F-INBOX-09	
+F-INBOX-07	B	keep	high	Notes: never run over real TLS with a browser	Open the notification API and event stream from a real browser over TLS	
+F-INBOX-08	B	keep	high	Notes: logic tested under node; WebSocket through CSP, older Safari and phone layout need a real browser	Open bell and page in Chrome, Safari and a phone	
+F-INBOX-09	D	keep	high	Planned P3: needs valid HTTPS on a public name, service worker, VAPID keys; not built	Post-beta, with the web frontend and public-name decision	
+F-INST-01	B	keep	high	Notes: not run on a real computer (row notes), though a T2 MacBook install is cited in related rows	Install to a second real computer with the stick and boot it	
+F-INST-03	B	keep	high	Notes: other real computers, real 4Kn drive and Secure Boot not tried	Install GPT on other real PCs and a 4Kn drive	
+F-INST-04	D	keep	high	Planned follow-ups: data-volume encryption, aarch64 installer, 4Kn legacy BIOS, Secure Boot	After beta; split rows if any is wanted sooner	
+F-INST-05	B	keep	high	Notes: sparse image files only; not verified on a real Windows/macOS-formatted disk	Run the planner on a real Windows laptop disk and a Mac disk (read only)	
+F-INST-06	B	keep	medium	Notes: pure code on made-up disks; no resizing, UEFI only for shared disk	Run the planner on a real shared disk on a PC; resizing and BIOS are tracked in F-INST-13	
+F-INST-07	B	keep	high	Notes: NEVER run against a block device; no real Windows boot afterwards	Write a plan to a spare real disk on a PC, verify the table and boot Windows afterwards	
+F-INST-08	B	keep	high	Notes: not verified on real firmware; Mac mini uses its own picker; Secure Boot must be off	Dual-boot install on a real UEFI PC and on the Mac mini with Option boot	
+F-INST-09	B	keep	medium	Notes: raw-terminal loop not run against a real terminal in a test	Drive iyakki-usb --plan in a real terminal on a PC	
+F-INST-10	B	keep	high	Notes: NOT booted; no image built for this change; console keyboard unverified	Build an image, boot in QEMU, then on the Mac with a USB keyboard and run the install mode	
+F-INST-11	B	keep	high	Notes: the egui window itself was not clicked through	Click through the window installer on a Linux desktop with pkexec	
+F-INST-12	D	keep	high	Planned P3: Windows and macOS installers not built	After beta	
+F-INST-13	D	keep	high	Planned P3: legacy BIOS boot on a shared disk, only UEFI set up now	After beta; niche old hardware	
+F-INST-14	B	keep	high	Notes: new confirm screen and scaled text not checked on a real screen	Look at the installer screens on the Mac mini and a small screen	
+F-INST-15	B	keep	high	Notes: unit test of the choice only; NOT tried on the Mac; installed-disk copy may lack the system image	Install from an installed Mac disk with a stick plugged in and boot the result	
+F-JOBS-04	B	keep	high	'NOT tried with a real Claude Code session'; hook setting not generated (vendor names unconfirmed).	On a PC with the user's own Claude Code, run a long build and see it call mcp__iyakki__job_start; confirm vendor setting names from vendor docs.	
+F-K3S-27	B	keep	high	'Fake clock and stand-in k3s only; not yet run on a device.'	On the Mac mini start the dev cluster offline and with a time server, step the clock and see one restart in the audit.	
+F-K3S-28	B	keep	high	'Not run with a real k3s: whether the Mac kernel has the dummy module and accepts a link-local node address.'	On the Mac mini start the dev cluster, check node IP 10.255.77.1 and flannel on iyakki-k8s after a Wi-Fi change.	
+F-K3S-29	C	keep	high	'The list of documented ports needs the owner's decision about the Gitea NodePorts (NEXT-PLAN N2).'	Owner decides whether Gitea NodePorts 30300/30222 are LAN-documented or closed; then run check on the Mac's real services.	
+F-K8S-02	B	keep	high	Notes: no rollback or Secrets yet; local registry set up by the person; fakes	Run a deploy on the Mac k3s (live_apply test, deploy_build); add rollback if wanted	
+F-K8S-06	B	keep	high	Notes: nothing applied to a real cluster; registry container and NodePort pull untested	Set up each registry option on a real k3s node on the Mac and pull a pod	
+F-K8S-07	A	done	medium	Checked devcluster.rs, wsexec.rs, ide_tests.rs: pinning, hide, chooser tests exist; notes list only an external-terminal caveat	Nothing; external terminal outside IYAKKI is by design	
+F-K8S-08	B	keep	high	Notes: fake kubectl and curl only, never against a real cluster	Stop, Start and Remove all on the Mac k3s workspace	
+F-K8S-10	B	keep	high	Notes: fake docker/kubectl only	Run a test target build and a test Job on real docker and k3s	
+F-K8S-12	B	keep	high	Notes: fake kubectl, never run against a real remote cluster	Open Settings > Dev cluster on the Mac with a second real cluster	
+F-K8S-13	B	keep	high	Notes: nothing downloaded, no real cluster started; bare-metal box and Podman variant untested	Run Set up a local cluster on the bare-metal machine and a reboot with Autostart	
+F-K8S-14	B	keep	high	Notes: pod count and Ready checked only against a stand-in k3s kubectl	Check the Cluster row and View logs on the Mac with real k3s	
+F-K8S-15	B	keep	high	Notes: never run inside a real pod or against EKS/GKE	Run in a real pod (cloud mode) and test in-cluster profile	
+F-K8S-16	B	keep	high	Notes: fake runner, fake HTTP; never run on a real cluster; image tags and Gitea flags unverified	Deploy a platform service on the Mac k3s and verify pinned tags and flags	
+F-K8S-17	B	keep	high	Notes: never run against a real Gitea	Deploy Gitea on the Mac k3s, create the token, run dump backup	
+F-K8S-18	B	keep	high	Notes: tested at four sizes with fakes only	Walk the Platform services panel on the Mac with real k3s	
+F-K8S-19	B	keep	high	Notes: tried only against a fake kubectl; Podman variant not tried	Open the K8S tile on the Mac against live k3s	
+F-K8S-20	B	keep	high	Notes: fake kubectl canned JSON only	Check namespace picker and auto refresh on a live cluster	
+F-K8S-21	B	keep	high	Notes: fake kubectl only; custom resource instances not browsed	Browse all 17 kinds on live k3s; instances browsing tracked by F-K8S-26	
+F-K8S-22	B	keep	high	Notes: fake kubectl only	Check summary, YAML, Secret Reveal and related objects on live k3s	
+F-K8S-23	B	keep	high	Notes: save to home folder has no test; fake kubectl only	Add a test for save to the home folder, then check logs and follow on live k3s	
+F-K8S-24	B	keep	high	Notes: fake kubectl only; Apply YAML and port-forward out of scope	Try restart, scale, cordon, delete on live k3s with Allow changes	
+F-K8S-25	B	keep	high	Notes: drawn only in tests; no screenshot looked at on a real screen	Look at the K8S tile on the Mac screen and a phone-sized window	
+F-K8S-26	D	keep	high	Planned P3 later items: exec, port-forward, apply YAML, custom resource instances	After beta; exec needs a pty	
+F-K8S-27	B	keep	high	Notes: fakes and a test clock; not verified on a real screen or a restarting cluster	Restart k3s on the Mac while the tile is open and watch the banner	
+F-K8S-29	B	keep	high	Notes: not run on the Mac against a real registry or Gitea	Run registry and Gitea checks on the Mac without curl	
+F-K8S-30	B	keep	high	Notes: fake runners; narrowing an existing NodePort by kubectl apply not run on the Mac	Redeploy Gitea on the Mac and check 30300/30222 close	
+F-K8S-31	B	keep	high	Notes: fake StepEnv only; live_gitea probe not run on the Mac	Run Quick install over an existing Platform services Gitea on the Mac	
+F-KBD-01	B	keep	high	Synthetic events only; no real keyboard or laptop yet	Follow docs/KEYBOARD-AND-FN-KEYS.md checklist on MacBook and a PC laptop.	
+F-KBD-02	B	keep	high	Fake mixer only; not heard on any speaker	Press volume keys on a MacBook with sound; hear change.	
+F-KBD-03	B	keep	high	Fake sysfs only; MacBook backlight name unknown	Press brightness and keyboard-light keys on MacBookPro; read which backlight registers.	
+F-KBD-04	A	keep	medium	Playing paths for radio and player are unproven in tests	Add tests for media keys while radio/player play; then check on hardware.	
+F-KBD-05	B	keep	high	Not tried with a real power button or rfkill device	Press power key and Wi-Fi/airplane keys on a laptop.	
+F-KBD-06	B	keep	high	EVIOCSREP on a writable event device not tried on hardware	Change repeat rate in Settings -> Keyboard on a Mac and a PC; feel it.	
+F-KBD-07	B	keep	high	fnmode meaning to be confirmed on the Mac mini keyboard and MacBook	Switch Function keys mode on Apple keyboards and test F-keys.	
+F-KBD-08	D	keep	high	Not built; needs i2c-dev kernel rebuild and many monitors lack DDC/CI	Post-beta; test on the Mac mini HDMI monitor once i2c-dev is in kernel.	
+F-KBD-09	E	deprecate	medium	Three unrelated ideas never built; mic mute is in F-KBD-01, layouts are niche	Split: mic mute under F-KBD-01, non-US layouts as one post-beta row; drop auto brightness.	
+F-KBD-10	B	keep	high	Gesture code tested with synthetic events only; no pad feel tried	Use MacBookPro14,1 trackpad: tap, two-finger scroll, palm; tune thresholds.	
+F-KBD-11	B	keep	high	Tap, scroll, palm, Touch Bar layout, backlight not checked on the T2 MacBook	On MacBookPro16,2 test trackpad gestures and keyboard backlight with new image.	
+F-KBD-12	C	keep	medium	Wire format written from mainline appletbdrm.c (GPL source read as reference); nothing run on a real Touch Bar	Owner decision on keeping the clean-room claim; then try on MacBookPro16,2.	Rebuild the protocol only from observed USB traces of the device (own capture) plus public notes, or do not ship the Touch Bar display and label it unsupported.
+F-KBD-13	B	keep	high	Fakes only; unknown whether reset helps a stuck device	Run bring-up on MacBookPro16,2 across several cold boots; read log.	
+F-KBD-14	D	keep	medium	Never run on the device; touch needs kernel class not in 6.12	After F-KBD-12/13 work, try strips on the Touch Bar; otherwise post-beta.	
+F-KBD-16	B	keep	high	Not tried on any hardware; kernel suspend not built; T2 wake is known Linux problem KI-073	Enable suspend in kernel and test on a PC laptop; label T2 sleep unsupported.	
+F-KBD-17	B	keep	high	Fake touch only; no real touch panel tried	Use the OSK on a touch laptop/monitor; check page scroll and multi-display placement.	
+F-KBD-18	B	keep	high	Not yet seen working on the Mac mini's USB-C touch monitor; KI-077 open	Cold boot Mac mini with touch monitor; read touchprobe/touchfix log; bisect an older working image.	
+F-KBD-19	B	keep	high	Synthetic events and fixtures only; not tried on a real Mac keyboard	Type Cmd shortcuts on Mac mini keyboard; add lock shortcut and per-window Cmd+C rule (A).	
+F-LAB-01	B	keep	high	'the LAB tile has not been seen on the real machine yet'.	Open LAB on the Mac mini with a real model server; check tabs, refusals and history.	
+F-LAB-02	B	keep	high	'not verified on a real screen, real camera or a real model server'.	Generate and Compare pictures on the Mac mini against a real image model server.	
+F-LAB-03	B	keep	high	'not verified on a real screen, real camera or a real model server'.	Use camera, screen and clipboard pictures with a real vision model on the Mac mini.	
+F-LAB-04	B	keep	high	'not verified on a real screen, real camera or a real model server'; video needs ffmpeg.	On the Mac mini with ffmpeg installed by the person sample a real video and ask a vision model.	
+F-LDR-01	A	keep	medium	Tests cell lists only 1 test since the matrix checks crates/ only; 55 host tests pass elsewhere.	Link the boot-core test names or move the check to cover iyakki-boot, then decide done.	
+F-LDR-02	B	keep	high	'Not tested: mouse clicks, touch, real firmware, the Mac'.	Boot the loader on the Mac mini and a PC with real firmware; try keyboard, touch and mouse.	
+F-LDR-03	B	keep	high	'NOT tried: a real machine, the Mac, Secure Boot'; no image rebuilt with the GRUB chain module.	Rebuild the lean image with the chain module, boot it on the Mac mini and choose the loader entry.	
+F-LDR-04	B	keep	high	'Not tried: a real screen, real touch, the Mac.'	Look at the loader menu on the Mac mini and a touch screen.	
+F-LDR-05	B	keep	high	'NOT verified: real shim and firmware, the Mac (T2 security levels), the owner's real key, MokManager key presses'.	On the Mac mini with Secure Boot and the owner's key enrolled in MOK boot the signed loader and kernel.	
+F-LDR-06	B	keep	high	'Not tried: IYAKKI itself writing efivarfs on real hardware'.	Boot the Mac mini via the loader and check BootConfirm is written and tries refilled.	
+F-LDR-07	B	keep	high	'Not tried: an update on the Mac mini with a loader-default image'; no unit test with sub-folders.	Add a bootpack test with sub-folders (code); update the Mac mini from a loader-default image and cut power mid-way.	
+F-LDR-08	B	keep	high	'NOT done: a full image build with the option, the owner's key, any real machine (the Mac mini's firmware picker, T2, MokManager)'.	Build a full image with IYAKKI_LOADER_DEFAULT=1, sign with the owner's key and boot the Mac mini through shim.	
+F-LINAPP-02	B	keep	medium	'the real servers were never contacted'; GPG signatures not verified; no Debian pin in the release table.	From a PC fetch real Ubuntu and Debian bases through the page; owner picks Debian pin policy; GPG check stays out of scope or is added in-house.	
+F-LINAPP-03	B	keep	high	'NOT tried: running as root, cgroup limits, seccomp under real Debian'; chroot entry 'not yet run on the Mac'.	Run a sandbox on the Mac mini as the signed-in admin and as root; check limits and the initramfs-root entry.	
+F-LINAPP-04	B	keep	high	'apt has never run in a real downloaded Debian/Ubuntu'.	On a PC or the Mac mini create a Debian sandbox and apt install a package; note which maintainer scripts fail.	
+F-LINAPP-05	B	keep	medium	'never looked at on a real screen. Jobs are the stand-in program in the tests.'	Open the IYAKKI menu page l on the Mac mini and create, use and delete a sandbox.	
+F-LINAPP-06	B	keep	medium	'job step itself was tried only with a fake step environment'.	Press the Setup card on the Mac mini and confirm a real debian sandbox exists.	
+F-LINAPP-07	B	keep	high	'A running sandbox command was never exercised through the tile.'	In the CLI tile on the Mac mini run linux new, use, run, apt and bash -c with a pipe.	
+F-LINAPP-08	A	keep	medium	'Tests cover the generated command and the project file, not a command run through the IDE panel.'	Add a test that runs a command through ide_bottom with a sandbox set; real check on the Mac mini follows.	
+F-LINAPP-09	B	keep	high	Examples carry all-zero placeholder digests; 'Never applied to a real cluster'; pin script not run.	Run pin-image-apps.sh with network, apply an image app on the k3s dev cluster and open its port.	
+F-LINAPP-10	D	keep	medium	No container builder in the image; 'an on-device builder ... planned'; debootstrap fails by design.	After beta: on-device builder; meanwhile the documented routes work.	
+F-LINAPP-12	E	merge:F-LINWIN-01	low	Row says the minimal version is built as F-LINWIN-01..08; remaining items are sound, GPU, multi-window, Alt key.	Fold remaining gaps into the LINWIN rows or mark them post-beta.	
+F-LINAPP-13	D	keep	high	Planned 0%: outbound-only network; today network on shares host loopback.	After beta: veth+nftables or user-space stack; until then the warning in the page stays.	
+F-LINAPP-14	E	deprecate	medium	'The IYAKKI kernels have namespaces, so it is not needed on them'; image conversion not built, nothing starts the pod.	Remove the row or keep only a docs note that the pod fallback is unsupported.	
+F-LINWIN-01	A	keep	medium	Real Xvnc run is only an ignored test on a dev PC; no Tight, VNC password, cursor shape; the row says 85% with no stated gap on its own claim.	Add cursor-shape pseudo-encoding or accept the scope and mark done after running the ignored real_window test once.	
+F-LINWIN-03	B	keep	high	'on a device (root, wide id range) that is not expected but was not tried'; not run through the job engine.	On the Mac mini press the Setup item and let apt install xterm and TigerVNC through the job engine.	
+F-LINWIN-05	B	keep	medium	Owner verified the install 2026-11-06 but 'No unit test covers' the setfsuid fix; Chromium sandbox not offered.	Run a window on the Mac mini, press Stop and check no leftover process; note owner's check in the row.	
+F-LINWIN-06	B	keep	high	'Tried against a fake display server'; no Alt key, sound, GPU, one program per tile.	Open LINUX WINDOW on the Mac mini with xterm at several sizes and in a pane; pass Alt in the shell (code) if wanted.	
+F-LOSS-01	B	keep	high	Notes: fakes only; real USB-C pull seen once, not reproduced	Pull the USB-C cable on a MacBook with the stick and watch the states	
+F-LOSS-02	B	keep	high	Notes: drawn from a made-up state only, not seen on a real screen	See the card during a real drive loss	
+F-LOSS-03	A	keep	medium	Notes: not every app's own error path is routed through the helpers	List remaining app error paths and route them via scope::explain_io with tests	
+F-LOSS-04	B	keep	high	Notes: real mount, MS_MOVE and umount2 never run against a real drive	Pull and replug the drive on a real machine and check the reattach	
+F-LOSS-05	B	keep	high	Notes: whether no-UAS helps unknown; GRUB entry untried on real GRUB	Boot Compatible USB mode on the Mac and check the USB speed page	
+F-LOSS-06	B	keep	high	Planned: nothing run on a device	Do the cable-pull test of docs/STORAGE-LOSS.md on the MacBookPro16,2; could merge with F-LOSS-01/04	
+F-MEDIA-01	B	keep	high	Notes: MEDIA tile built and tested with stand-ins; external players and real playback not verified on the Mac	Play MP3 and an external-player file in MEDIA on the Mac mini	
+F-MEDIA-02	D	keep	high	Planned P3 0%: DLNA/UPnP server and casting	Post-beta idea	
+F-MEDIA-03	B	keep	medium	Notes: never verified with a real embedding model; assistant tagging helper has no app button; bpm not detected	Try an embedding model with real library; add a tagging button (small code task)	
+F-MEDIA-04	B	keep	high	Notes: scripted model and stand-in player only; never with a real model or player; queue not advanced for external players	Say play a kutthu song to a real model on the Mac mini	
+F-MEDIA-05	B	keep	medium	Notes: direct links only on loopback tests; optional yt-dlp extractor not done	Download a real file by address on the Mac mini; yt-dlp extractor is optional later	
+F-MEDIA-06	B	keep	high	Notes: tested on loopback servers only; no real remote host or disk-full condition	Run the queue with a real remote host and a full disk on the Mac mini	
+F-MEDIA-07	B	keep	medium	Notes: samples run for real in QEMU; the Mac mini result not listed	Play the sample MP3 and WebM on the Mac mini web image	
+F-MEDIA-08	B	keep	high	Notes: Never run on the Mac mini or a real sound card; lag constant is a guess	Play a video with sound on the Mac mini and tune the lag constant	
+F-MEDIA-09	B	keep	high	Notes: real johnvansickle download and install on the Mac mini not run; Buildroot fragment unbuilt	Click-install the media player on the Mac mini and play a video	
+F-MEM-02	E	deprecate	medium	A built-in cosine store is used; external vector store would add a dependency against build-in-house	Drop unless the built-in store proves too slow at scale.	
+F-MODELHOST-01	B	keep	high	Page not seen on a real screen; flags of the four programs 'need checking against current versions on a real Mac'.	On a real Mac install Ollama, LM Studio, llama.cpp and MLX-LM using the shown flags; fix the page where they differ.	
+F-MODELHOST-02	B	keep	high	'Against loopback fake servers only. Not tried with a real Ollama, LM Studio, llama.cpp or MLX-LM'.	Run Test and Add to Models against real Ollama and LM Studio on a Mac and a PC; record tokens per second.	
+F-MODELHOST-03	B	keep	high	'the real /24 walk was not run'.	Press Scan on a LAN with a Mac running Ollama; confirm it lists and does not add.	
+F-MODELHOST-04	B	keep	high	'Scripted kubectl only; no real cluster was touched.'	On the Mac mini k3s publish a real Mac host, run Test from the cluster; check flannel masquerade and firewall.	
+F-MODELHOST-05	B	keep	high	'not verified on a real screen or with a real Lemonade server and a real omni collection'.	On a PC with Lemonade pull an omni collection, open Settings -> Models and press Use all parts.	
+F-MSG-02	B	keep	high	'Tested only against a fake homeserver ... no real homeserver was used'; encrypted rooms unsupported.	Sign in, sync and send a picture against a real Tuwunel/Synapse server from the Mac mini.	
+F-MSG-03	A	keep	high	'No inbound mirror into the INBOX and no reader agent yet; the assistant has no message tool yet.'	Add the inbound mirror and an approval-gated assistant message tool with tests against the fake homeserver.	
+F-MSG-04	A	keep	high	'No per-flow switch ... for imported flows, no cool-down, quiet hours or escalation (plan section 7).'	Add the per-flow external-channel switch (default off for imported flows) and cool-down with tests.	
+F-MSG-05	B	keep	medium	One account per person in the page; 2 tests; not seen on screen.	On the Mac mini add a Matrix account on the page and send the test message to a real room.	
+F-MSG-06	B	keep	high	'The image and manifest were never run in k3s'.	On the Mac mini k3s install the Matrix server item and check the pod comes up and registration with the token works.	
+F-NAME-01	B	keep	high	NOT on a real network: AP multicast, avahi, DHCP changes unverified	Resolve iyakki-xxxx.local from a PC on the home Wi-Fi and Ethernet.	
+F-NAME-02	B	keep	high	Loopback stand-in only; multicast across a real network unverified	Same check as F-NAME-01 with a PC running avahi or macOS.	
+F-NAME-03	B	keep	high	Not run with the real firewall; web service not announced yet	Toggle Announce on Mac mini; check firewall rules and make web service give its port.	
+F-NAME-04	B	keep	high	Not tried across a real DHCP change or Wi-Fi isolation	Pair by name from a dev PC, change the Mac's IP, run dev command again.	
+F-NET-02	B	keep	high	Never associated with a real access point	Join a WPA2 network on a PC with Wi-Fi and then the Mac mini after firmware install.	
+F-NET-04	D	keep	high	Planned 0%; swarm scheduler beyond first connected peer	Post-beta with the swarm work.	
+F-NET-05	D	keep	high	Using a paired device (HID, A2DP) is not written	Post-beta: HID/A2DP client, or use a USB Bluetooth adapter plus BlueZ as separate programs.	
+F-NET-07	B	keep	high	NOT tried with a real WiFi adapter or access point	Join open/WPA2/hidden networks on Mac mini and MacBook; check saved-network files.	
+F-NET-09	B	keep	high	NOT tried on a real adapter; driver acceptance unknown	On Mac mini (tg3, brcmfmac) set each mode, read the MAC from the router and after reboot.	
+F-NET-10	D	keep	high	Using the bond (HIDP, GATT, A2DP) not written; nothing pairs yet	Post-beta: bonded HID/audio. Pairing UI needs a working controller (F-NET-11).	
+F-NET-11	C	keep	high	macOS recovery images contain no BCM4364 patch file and 'no legal source' for one	Owner decision: accept limit on Mac mini and recommend a USB Bluetooth adapter; label Mac internal Bluetooth unsupported.	Do not ship or fetch Apple/Broadcom firmware; label internal Bluetooth unsupported on this Mac and use a USB Bluetooth adapter whose firmware is in linux-firmware; or user supplies the file themselves.
+F-NET-12	B	keep	high	NOT verified on the Mac: mgmt calls for an address-less controller	Open Settings -> Bluetooth on Mac mini and MacBook; check controller listing, power, scan.	
+F-NET-13	B	keep	high	Fake machines only; not seen on a real Mac	Open Settings -> Bluetooth on Mac mini 2018 and check firmware row and button.	
+F-NET-14	B	keep	high	ioctls, ARP and UDP sockets have never run; no two real machines tried	Connect Mac mini to a PC with a Thunderbolt/USB bridge cable; check link-local addresses.	
+F-NET-15	B	keep	high	Fake sysfs only; fix of USB-C plug-in not shown	On Mac mini plug a stick/phone into USB-C after start; check it appears.	
+F-NET-16	B	keep	high	Fake sysfs only; not read on the Mac	Plug devices on Mac mini and read the log for usbports lines and debugfs portsc.	
+F-NET-17	B	keep	high	Fake variable folder only; T2 firmware may ignore BootOrder	On Mac mini run iyakki startup-disk own-first with a stick inserted at power-on; read status.	
+F-PKG-04	C	keep	high	Image never built; carries firmware blobs for WiFi/NIC/GPU	Owner decision on firmware: ship nothing and keep the by-button download decision.	Do not ship blobs; the person clicks a button to download firmware from the vendor/linux-firmware, or the image stays libre and labels such hardware unsupported.
+F-PKG-05	A	keep	medium	Budgets still to be measured (boot to GRUB/sign-in, idle RAM, image size) then enforced	Measure with boot-time.py in QEMU, write budgets to docs/BETA-PLAN.md and add a CI check; Mac timings are B.	
+F-PKG-06	B	keep	high	macOS diskutil path tested only on sample text, never on a Mac	Run iyakki-usb on a MacBook/Mac mini under macOS to write a stick.	
+F-PKG-07	D	keep	medium	Windows writer planned, 0%	Post-beta: Windows raw-disk writer; for now document using a vendor-neutral tool by the person's own click.	
+F-PKG-08	D	keep	medium	Windowed USB writer planned, 0%	Post-beta GUI after the CLI writers are verified.	
+F-PKG-11	D	keep	medium	98 MB of kernel modules uncompressed; shrink not started	Post-beta (images may grow for hardware per owner): compress modules and move rare drivers to optional download.	
+F-PKG-14	D	keep	medium	Not tested on minimal systemd image or non-Linux kernel; swap checklist followed only by us	Post-beta: try a minimal distro image; otherwise close with a 'containers only' label.	
+F-PKG-15	A	keep	high	Not yet wired into build.sh / run.sh; ccache only proposed; not hardware or Secure Boot tested	Wire changed.sh/repack.sh into build.sh and run.sh per docs/BUILD-INCREMENTAL.md; test repack with Secure Boot signing.	
+F-PWR-01	B	keep	high	'Fakes only ... NOT tried on the Mac or any real machine'; lid and power-button actions not built.	On the Mac mini and a laptop set profiles and sleep-after-idle, check suspend and wake; build lid/power-button actions or mark unsupported.	
+F-QA-05	C	keep	high	Notes: the gate works but current images fail it (proprietary linux-firmware, missing legal-info rows, unlisted PC firmware): owner decisions	Owner decides firmware handling per release image, then wire the gate into CI and make a clean image pass	Do not ship the firmware blobs: the person fetches them by their own button click from the vendor; or build the image on the device from vendor sources
+F-QA-06	C	keep	high	Notes: 38 rows still REVIEW (floating versions, no vendor checksum, Kokoro and Whisper weights, Apple/Debian/apt items)	Owner decides each REVIEW row: pin, mark unsupported, or remove	Keep every item download-only by the person's own click, pin or mark unverified, replace with an in-house or permissive-licence tool, or remove the row
+F-QA-10	A	keep	high	Notes: static scan misses programs named through a constant; QEMU run of each path still open	Extend the scan to constants and add a QEMU smoke run of each path (NEXT-PLAN N1)	
+F-QA-11	C	keep	high	Notes: public key is unset until the owner makes one, so no fetched manifest is accepted; other lookups not done	Owner generates the signing key (kept outside the repo); then wire the remaining item lookups and a relcheck check	
+F-QA-12	C	keep	high	Notes: the downloads repository does not exist yet; nothing fetched from the real address	Owner creates the downloads repository and publishes a signed manifest; then test on the Mac	
+F-QA-13	C	keep	high	Notes: Amazon public key not in the repository (legal/aws-cli-pgp.asc says unset); tests use throw-away keys	Owner or a person fetches the vendor key and verifies its fingerprint; add it; test the real download	
+F-QA-14	B	keep	high	Notes: mechanism only; no hash recorded because none can be computed offline	Download ffmpeg, DuckDB and esptool once on a networked machine, record the sha256 pins, sign the manifest	
+F-QA-15	A	keep	high	Notes: known overflow cases still listed in KNOWN_OVERFLOWS and KI-015; detector not checked by eye	Fix the listed overflows and shrink the lists; then look at a few on screen	
+F-RADIO-03	D	keep	medium	Notes: in-house AAC decoder blocked on codebook tables; Ogg Vorbis/Opus, audiodec helper, directory search box not built; nothing on real stations	Add Vorbis/Opus (in-house) and search box in RADIO app; AAC stays via user-downloaded add-on	
+F-RADIO-05	B	keep	high	Notes: tested with fake networks; not tried against a real HLS station	Play a real MP3-segment HLS station on the Mac mini and check live-edge following	
+F-RADIO-06	B	keep	high	Notes: ffmpeg itself was never run; helper iyakki-audiodec and installer manifest not built	Install the add-on by click on the Mac mini and play an AAC and an HLS-AAC station	
+F-RADIO-07	B	keep	high	Notes: the added stations' streams were not played or checked live	Play each new Tamil Nadu station on the Mac mini; drop dead ones	
+F-RADIO-08	B	keep	high	Notes: run by hand against the real server on the dev PC but not on the Mac	Play the incomplete-chain station on the Mac mini RADIO app	
+F-RADIO-09	B	keep	high	Notes: the dialog was not looked at on a real screen	Open the Review certificate dialog on the Mac mini screen and check readability/focus	
+F-RADIO-10	B	keep	high	Notes: the approval card was not looked at on a screen	Trigger radio_trust_certificate in chat on the Mac mini and view the card	
+F-REL-01	B	keep	high	Notes: /etc/iyakki-release step has not run on a built image; About not looked at on a screen	Build an image, boot in QEMU and look at About and the release file	
+F-REL-05	A	keep	high	Notes: Never run end to end; needs freshly built images; --dry-run and signing library tested	Build the images and run ./run.sh release once end to end (no hardware needed)	
+F-REL-08	C	keep	high	Notes: Not legal advice; open points for a lawyer: Broadcom/Cypress, qca LICENSE.qcom, NVIDIA clause, r8169 wording, GPL source offer carl9170	Owner decides per open point; rebuild with added licence texts before publishing	Do not ship vendor firmware in the base image; let the person download it by their own click from the vendor (as F-REL-09 does), or leave those devices unsupported
+F-REL-09	A	keep	medium	Notes: Not built or booted: no release image exists yet; GPU guard untested on hardware	Build the release profile image, boot it in QEMU and run relcheck; then test GPU guard on the Mac mini	
+F-REL-10	C	keep	medium	Notes: existing images carry files of deselected packages until repacked; Unifont licence statement not verified; fonts path untested in a real build	Repack with the prune step, verify Unifont licence text from the package, rerun the licence scan	Replace Unifont with an in-house/permissive font (DejaVu is already used) or drop it; do not rely on our own reading of licences
+F-SBX-01	B	keep	medium	Tested with fakes only; per-run proxy key injection refused until the egress proxy has a run-scoped interface	Build run-scoped control interface on the egress proxy; test on a real k3s	
+F-SBX-02	B	keep	high	Golden tests only; no cluster, no gVisor/Kata runtime class, no browser pod	Apply manifest on the dev k3s on the Mac mini and run a job	
+F-SBX-03	B	keep	high	Fake cluster and launcher; no real kubeconfig, artifacts or namespace tier in a pod	Wire the team kubeconfig and artifacts; test against k3s	
+F-SBX-04	A	keep	medium	Web page for editing belongs to tenant-config UI work	Finish tenant-config UI page for sandbox.policy, or merge into the tenant-config UI row	
+F-SBX-05	A	keep	high	Nothing installs the runner at pod start; cloud-flows scheduler does not call spec_from_flow_job yet	Install TenantRunner at pod start; call spec_from_flow_job from the scheduler; add tests	
+F-SCRN-01	B	keep	high	'Tried with a fake clock only, not on a real machine.' Browser video does not keep the screen on.	On the Mac mini let the saver start and wake it by each input; build browser-video detection or document the limit.	
+F-SCRN-02	B	keep	high	'CPU and frame cost not measured on hardware'.	On the Mac mini run the saver and read the 'shell: N frames in 10s' log line.	
+F-SCRN-03	B	keep	high	'Fakes only ... not seen on a real panel'; FBIOBLANK depends on the GPU driver.	On the Mac mini and MacBook let the screen go off and wake; check dim levels and backlight restore after a watchdog reset.	
+F-SCRN-04	B	keep	medium	'Looked at in pictures (IYAKKI_PICTURES), not on a device.'	Open Settings -> Display & sound -> Screen saver on the Mac mini and try the keys and Preview.	
+F-SCRN-05	D	keep	high	Planned 0%: lock screen, slideshow, starfield, key chord, browser-video keep-awake.	After beta: pick items; a lock screen needs a design and password flow first.	
+F-SDK-01	B	keep	medium	'the doctor has not been run against a real device'.	Run iyakki sdk init and doctor against a paired Mac mini and check the output.	
+F-SDK-02	D	keep	high	Planned 0%: emulator against fake bridge services; headless harness is the only runner.	After beta: build the emulator on top of the F-SDK-03 harness.	
+F-SDK-03	B	keep	high	'not tried with a real provider, a real tile in the shell on a device or a real speaker'; namespaces missing (SDK-04).	Run a sample tile on the Mac mini calling iyakki.llm with a real model and a speaker.	
+F-SDK-04	D	keep	high	Planned 0%: embed, markdown, audio, media, dash, flows, k3s, speech.listen, money caps.	After beta: each namespace needs its own scope and approval wording first.	
+F-SELFTEST-01	B	keep	high	No QEMU run yet; images predate the step and need repacking	Repack image, run qemu-test.sh and check the pathcheck lines; then Mac mini boot	
+F-SET-07	A	keep	high	'Not every page's choices were reviewed one by one: Voice, Time, Memory, Remote, Browser still need a page-by-page look.'	Review those five pages for click/touch targets and add a per-page test that lists a non-empty option set.	
+F-SETUP-01	B	keep	high	Notes: NOT verified on a real device, with a real install, or the look on Mac mini and MacBook; sizes rounded not measured	Open Store > Setup and do a real install on the Mac mini	
+F-SETUP-03	B	keep	medium	Notes: memory thresholds are our choice, not measured on devices	Check recommendations on the Mac mini and a low-RAM machine; tune thresholds	
+F-SETUP-06	B	keep	high	Notes: not tried on the MacBookPro14,1's pad or a USB wheel; touch dragging on list body not built	Scroll the Setup list with trackpad, wheel and touch on the Mac mini and MacBook	
+F-SETUP-07	B	keep	high	Notes: NOT verified on real device; Update pill never run against vendors; Ollama shows only Installed	Look at the tiles on the Mac mini; check the Update pill against vendors	
+F-SETUP-08	B	keep	high	Notes: Fakes only; no Remove button as the engine has none for a cluster or a server	Open popups on the Mac mini; Remove is an engine code task	
+F-SETUP-09	B	keep	high	Notes: tested only on a made-up data folder; a real Start and Stop from the popup not tried	Start and stop k3s from the Setup popup on the Mac mini	
+F-SETUP-10	B	keep	high	Notes: install itself not tried: real downloads, Lemonade delete call, espeak-ng not verified	Install Voice pack on the Mac mini with Lemonade and run the self-test	
+F-SETUP-11	B	keep	high	Notes: NOT tried on a real cluster: image tag unverified, kubelet/cAdvisor scrapes and cluster-IP reach unconfirmed; no Remove	Install Prometheus on Mac mini k3s and check scrapes; add Remove (code)	
+F-SETUP-12	B	keep	high	Notes: NOT tried on a real cluster or arm64; secret handoff untested; no Remove; PVC may keep old password	Install Neo4j on k3s on the Mac mini and check the vault handoff	
+F-SETUP-13	B	keep	high	Notes: NOT tried on a real cluster: hostPort 127.0.0.1, kubectl exec 20 s limit, secret from files, vault handoff, arm64	Install Gitea via Setup on the Mac mini k3s	
+F-SETUP-14	B	keep	high	Notes: NOT tried on a real cluster or arm64; image not run; uid 101 assumed; no Remove button	Install ClickHouse on the Mac mini k3s and verify startup and uid	
+F-SETUP-15	B	keep	high	Notes: fake kubectl only; NOT tried on the real cluster; resize needs expandable StorageClass	Reinstall an item with a PVC on the Mac mini k3s and confirm data stays	
+F-SETUP-16	B	keep	high	Notes: Fakes only; NOT tried on the Mac (vault left locked, then Unlock); no Unlock form screen test	Install with a locked vault on the Mac mini then Unlock and see the password land	
+F-SHARE-06	B	keep	high	'The folder is typed as a path (no folder picker in the form yet). Not tried on a real screen or from real devices.'	Add a folder picker (code), then share a folder on the Mac mini and open it from a phone and a PC.	
+F-SHARE-07	D	keep	high	Planned 0%: share_folder tool, zip, HTTPS, .local name, IPv6; needs zip writer, certificate story, mDNS.	After beta: decide order; HTTPS needs a certificate approach and a per-use approval card.	
+F-SHARE-08	B	keep	high	'Not yet seen on the Mac.'	On the Mac mini start a share with the firewall on, press y on the card and reach it from a second device.	
+F-SHARE-09	B	keep	high	'Real loopback servers and fakes. Not yet tried over the network from a second computer.'	From a second computer run the shown curl -T upload to the Mac mini drop and check the 64 MB cap and overwrite refusal.	
+F-SHARE-10	A	done	medium	Test the_upload_and_new_folder_forms_come_before_a_long_list exists and asserts class=bar in sharedfolder.rs; no gap in notes.		
+F-SHARE-11	A	keep	medium	'The wording of the password hint has no test of its own.'	Add a test for the password hint text and the same-port consistency of row, curl line and firewall note.	
+F-SHELL-09	D	keep	low	Separate workspace, compiles, no automated UI test, needs a display	Decide if the egui dev window is still wanted; if not deprecate.	
+F-SHELL-10	E	merge:F-DISP-03	medium	KMS renderer exists as display/kms.rs and F-DISP-05; row says bare metal uses fbdev	Merge with F-DISP-03/05 and track the real-card run there.	
+F-SHELL-12	E	merge:F-KBD-10	medium	Touchpad gestures exist in touchpad.rs and are tracked by F-KBD-10/11	Merge into F-KBD-10 and F-KBD-11.	
+F-SHELL-13	B	keep	high	Measured only in QEMU; confirm on the Mac mini; rendering still single-threaded	Check input latency and CPU on Mac mini.	
+F-SHELL-20	B	keep	high	Cross-checked only with cargo check for macOS; no Apple C compiler or Apple silicon run	Build and run ./run.sh window on an Apple silicon Mac with Ollama.	
+F-SHELL-28	B	keep	high	Nothing installed for real; Lemonade package name and command not verified	Run Store -> Setup quick install on a real image with network; check k3s, Node, Lemonade.	
+F-SHELL-31	A	keep	medium	Pointer dragging of tiles and touch long-press menu not built	Add drag-to-group and long-press menu with tests, or accept pick-up and mark done.	
+F-SHELL-34	A	keep	medium	Administrator default layout for new accounts is planned	Add admin default layout setting with tests or move it to its own row and mark this done.	
+F-SHELL-35	B	keep	high	Not yet seen on the Mac or other hardware; no Sleep	Boot Mac mini and view login bar chips.	
+F-SHELL-37	B	keep	high	Drawn only on made-up screens; popups drawn over whole display; touch divider missing	View Ctrl+Alt+2 panes on the Mac mini display.	
+F-SHELL-38	B	keep	medium	Per-app memory costs are estimates, not measured on hardware	Measure real memory per app on Mac mini and update constants in memgate.rs.	
+F-SHELL-39	B	keep	high	Not typed on a real keyboard; window mode has no chords	Press Ctrl+Alt chords on Mac mini; add chords to iyakki-gui (A).	
+F-SHELL-40	B	keep	medium	Not seen on a real device; panic under lock or in app threads not contained	Trigger a panic in an app on Mac mini; add toast-to-card button (A).	
+F-SHELL-41	A	keep	medium	User theme files not built; light-mode colour mapping may look off; Mac switcher verified 2026-11-06	Decide if user theme files are wanted; else mark done after a visual pass.	
+F-SHELL-42	D	keep	high	Wish list; follows F-SHELL-45; fonts must be permissive and in LICENSING.md	Post-beta: bundle a few permissive fonts (OFL/Apache) and add a picker.	
+F-SHELL-43	A	keep	medium	Several non-form path fields not converted; only fake filesystem tried	Convert remaining path fields to the picker with tests; real drop check is B.	
+F-SHELL-45	A	keep	medium	Long run not completed on every app; keys limited	Run the long monkey tests to completion in CI-style run and fix findings.	
+F-SHELL-46	B	keep	medium	Made-up screens only; not tried on MacBook with an external monitor	Run PANE_TABS_ALL=1 once (A) and try panes on MacBook plus monitor.	
+F-SHELL-47	B	keep	high	Fake framebuffers only; not seen on a real screen	Boot new image on Mac mini and look at cursor shapes.	
+F-SHELL-48	B	keep	high	Devices popover tooltip fix not tried; long-press untested on touch	Hover Devices popover rows on Mac mini; long-press on touch.	
+F-SHELL-49	B	keep	high	No real camera or phone screen tried	Scan a QR from a phone with the Mac mini camera in clipboard popup.	
+F-SHELL-50	B	keep	high	Feel of ease and momentum not judged on hardware	Scroll with mouse and trackpad on Mac mini and MacBook.	
+F-SHELL-51	B	keep	medium	Multi-display driver still presents whole frames; not run on a real screen	Make backend_kms use present_rects (A), then check performance on the Mac mini.	
+F-SHELL-52	B	keep	high	Not seen on a real screen	Look at the top bar on Mac mini.	
+F-SHELL-53	B	keep	high	Not tried with real mouse, touch or sound card	Click and wheel the speaker icon on Mac mini.	
+F-SHELL-54	B	keep	high	Layout of the whole group set not looked at on the Mac mini	View home groups on Mac mini.	
+F-SHELL-55	B	keep	high	Not seen on a real screen or a real second display	View bars on Mac mini and a second display.	
+F-SHELL-58	B	keep	high	Not seen on the Mac yet	Open power menu and Lock on Mac mini.	
+F-SHELL-59	B	keep	high	Not seen on the Mac yet; needs a real network and internet detection	Sign in as admin on Mac mini with network; answer the question.	
+F-SND-02	B	keep	high	NOT tried on the Mac mini yet; needs rebuilt image	Boot new image on Mac mini; check Settings -> Sound output list and Automatic pick on HDMI and T2.	
+F-SND-03	B	keep	high	IYAKKI writing asound.conf only unit-tested; YouTube-while-radio to re-test	Mac mini: change volume in Settings, play radio plus browser, check levels.	
+F-SND-04	B	keep	high	NOT heard on the MacBookPro14,1 yet	Play chime and radio on MacBookPro14,1; check dmix S32_LE and IYAKKI control.	
+F-SND-05	B	keep	high	Not checked in the shell after the change; needs image rebuild	Play radio and TALES on MacBookPro16,2 with new image; listen.	
+F-SND-06	B	keep	high	Nobody listened; YouTube not tried; driver patch has not run on a Mac	Boot T2 MacBook image with patch; play YouTube and listen.	
+F-SND-09	B	keep	high	Never run on a real sound card (including T2 Mac)	Enable sound.mixer on Mac mini and MacBook; play cues, radio, check ducking and underruns.	
+F-SND-10	B	keep	high	Tested with fakes; not run on real hardware; two changes without dedicated tests	Add tests for syssounds routing and SDK Busy rule (A), then listen on the Mac mini.	
+F-SND-11	A	keep	medium	Radio, players and browser do not feed the mixer yet	Wire radio and media player through feed_reader with tests; browser via F-SND-15.	
+F-SND-12	E	merge:F-SND-15	medium	Web half is F-SND-15; media player half uncovered and 0%	Fold web half into F-SND-15 and add media-player-through-mixer as a new A task.	
+F-SND-13	A	keep	medium	Alarm kind exists in core but nothing plays an alarm; not started	Add an alarm caller (clock/timer alarm) via audiosink with test; or deprecate if no alarm feature wanted.	
+F-SND-14	B	keep	high	NOT heard on the Mac yet; break cause unproven	Listen to a TALES reading on Mac mini under load.	
+F-SND-15	B	keep	high	NOT proven on hardware: file plugin, clock, latency, pipe permissions	Enable on Mac mini with new image; play YouTube; confirm sound via mixer and A/V sync.	
+F-SND-16	B	keep	high	NOT seen on the Mac: AudioPlaying vs stream state, reconnect after Stop it	Play radio then open a video page on Mac mini; use the dialog.	
+F-SND-17	A	keep	medium	TALES start and media player do not ask yet; outside programs not looked for	Add the dialog to TALES and media player starts with tests; the real-engine check is B.	
+F-SND-19	B	keep	medium	Rows and wording tested at 90%; Test mic on Mac mini not re-run	Open Settings -> Sound -> Microphone on Mac mini with USB mic; run Test.	
+F-SND-20	C	keep	high	NOT tried on a Mac; T2 driver has frozen a Mac when it recorded	Try on a spare T2 MacBook; owner decides if the risky switch ships at all.	Leave the switch removed and label the T2 built-in microphone unsupported; recommend a USB microphone.
+F-SND-21	B	keep	high	Not seen on the Mac yet; browser is one source for all tabs	Open speaker dropdown on Mac mini while radio and browser play; move levels.	
+F-SSHTUN-01	B	keep	high	Fake client only; not run against a real SSH host; -J on images doubtful	Run a tunnel against a real SSH host from the Mac mini image	
+F-SSHTUN-02	B	keep	high	Not clicked through on a real screen	Click through Settings -> Network -> SSH tunnels on the Mac mini	
+F-SSHTUN-03	B	keep	medium	Offered to administrators; real runs with assistant not seen	Ask the assistant to add and test a tunnel on a device with a real host	
+F-STARTUP-01	A	keep	high	'Not wired yet: the web engine's own start step, flows scheduler, quick-install services, VPN'; real boot timing not measured.	Wire those four services into the registry with tests; then measure boot on the Mac mini.	
+F-STARTUP-02	B	keep	high	'not seen on a real screen or a real boot'.	Boot the Mac mini and watch the Home strip, Settings -> Startup and the sign-in line.	
+F-STORE-04	E	merge:F-INST-01	medium	Notes: USB works via iyakki-usb --install; the in-OS installer is F-INST-01	Fold into F-INST-01 and drop this row	
+F-STORE-05	D	keep	high	Planned P3: data volume not encrypted, only vaults are	Full-volume encryption after beta	
+F-STORE-06	E	merge:F-BOOT-14	high	Notes: part of F-BOOT-14; kernel lacks EROFS/SQUASHFS/OVERLAY_FS	Fold into F-BOOT-14	
+F-STORE-07	D	keep	high	Planned P3: evaluate F2FS and Btrfs; ext4 stays for now	After beta; a research item	
+F-STORE-09	B	keep	high	Notes: real bind mount not run on a Mac mini or in QEMU	Boot a disk image in QEMU, then the Mac, and check /home survives power-off	
+F-STUDY-01	B	keep	medium	No real model has written a syllabus through it	Make a plan with a real provider key in chat and check dates	
+F-STUDY-02	B	keep	medium	Not run with a real model; code cannot know if an answer key is true	Create quizzes with a real model; judge quality of keys	
+F-STUDY-03	B	keep	high	Whether a real model follows guidance is unproven	Run the chat tools with a real model and observe counts and calendar asking	
+F-STUDY-04	B	keep	high	Never looked at on a real screen; chat cards are plain text	Open LEARN on the Mac mini and click through plans and quizzes	
+F-STUDY-05	B	keep	high	Scripted models only; picture-model path not run; not seen on a real screen	Generate a lesson with a real model and picture model; view on the Mac mini	
+F-STUDY-06	B	keep	high	Read aloud tested with fake speaker only; real model answers unproven	Use read aloud and ask-a-question on the Mac mini with a real model	
+F-SYS-01	A	keep	medium	Notes list not done: WASM tasks as rows, per-user view, per-process network, disk activity	Add WASM task rows and per-process network/disk columns, or trim the claim to what exists	
+F-SYS-02	A	keep	high	Load/unload not done; waits for device broker F-BOOT-04	Build load/unload via the broker once F-BOOT-04 exists, or split the row and close the read-only page	
+F-SYS-03	B	keep	high	Persistent dropbear host key is not yet tried on hardware	On the Mac mini boot twice with iyakki.ssh=1 and confirm the host key fingerprint is unchanged	
+F-SYS-04	B	keep	high	Fakes only; not run on a Mac	Crash the Mac (sysrq c) on a new image and check kmsg-<boot-id>.log under /var/lib/iyakki/log has the last lines	
+F-SYS-05	B	keep	high	Fakes only; not run on hardware; copy-to-home not built	Pull power on the Mac, reboot, confirm Settings Overview shows the unexpected end and one audit line	
+F-TALES-02	B	keep	high	Notes: no real sound heard; check on bare metal with Settings Voice test speaker	Read a short kids' story aloud on the Mac mini	
+F-TALES-09	B	keep	high	Notes: not verified: sound from a speaker, Firefox/Safari/Edge, the Mac; WebKitGTK has no speechSynthesis	Hear TALES with browser voice from a Mac mini connected browser	
+F-TALES-11	B	keep	high	Notes: verified with scripts only, not against a live Claude Code or Copilot CLI	Write a story through a real Claude Code with a real account	
+F-TALES-13	B	keep	high	Notes: image generation tested only to the request and failure; no real image server; successful image not tested	Generate story pictures with a real image server (Lemonade) on the Mac mini	
+F-TALES-15	B	keep	high	Notes: fakes only; real AgentChat over live Claude Code not exercised; no vision check	Draw story pictures through a real Claude Code or GPT and judge them	
+F-TALES-16	B	keep	medium	Notes: fakes only; how apt a real small model's scene choice is was not judged	Run with a real qwen3:8b and judge scene quality on the Mac mini	
+F-TALES-18	B	keep	high	Notes: no real image or video model; fakes and 8x8 samples; no video player or poster frame; web-link approval not built	Test with a real image model; video clips and link-fetch are later work	
+F-TALES-19	B	keep	high	Notes: not looked at on a real screen; Arabic not mirrored	View word lighting on the Mac mini screen with Latin and Indic text	
+F-TALES-20	B	keep	high	Notes: tested with fakes; newer controls not seen on a real screen or with a real picture server	Use the illustrations option with a real picture server on the Mac mini	
+F-TALES-21	B	keep	high	Notes: measured on build PC only; Mac frame log not read yet	Read the tile-only frame log on the Mac mini during reading	
+F-TCFG-01	A	done	medium	Registry with the nine first-release kinds exists in schema.rs; planned kinds are refused by design; the 'no page yet' note is stale (TCFG-15 is the page).		
+F-TCFG-02	A	keep	medium	Pure resolve works but 'No API stores person layers yet'.	Add person-layer storage and API route plus a test that a person layer can only narrow the team layer.	
+F-TCFG-03	B	keep	high	Tested over a fake vault only; 'Never run against a real vault service'; member key enrolment is an open gap.	Run on a cloud pod with the real vault service: enrol two members, set a shared agent token, read it as both. Code: enrol member keys on sign-up.	
+F-TCFG-04	A	keep	medium	Local files only, read on every request; no cache or watcher, row at 70%.	Decide if a cache/watcher is needed; if not, update notes and mark done after a test of the file-read path under load.	
+F-TCFG-05	A	keep	medium	API tested with fake accounts and in-memory vault only; 'No page uses it yet' is stale after TCFG-15.	Fix notes; add an end-to-end test over the real file store with roles; real check folds into TCFG-03/15.	
+F-TCFG-06	C	keep	high	Wired only in the web run start; 'whether a provider's terms allow a shared key is for the owner to check'.	Owner decides whether shared Claude/Copilot keys are offered; wire desktop/cloud launchers if yes.	Do not offer shared provider keys: keep per-person login as the only mode and label shared as unsupported, or let each person bring their own key.
+F-TCFG-07	B	keep	high	Needs IYAKKI_TENANT_DATA_DIR in the pod manifest (not done) and a browser session; not run in a browser.	Set the env in the pod manifest (code), then on a cloud pod start a browser session with media.policy deny and confirm the device is refused.	
+F-TCFG-08	B	keep	high	'no tenant deploy exists'; quotas not applied; 'Needs a real cluster'.	Build team deploy calling deploy_gate and apply quotas (code), then test on a real k3s cluster with dev/prod bindings.	
+F-TCFG-09	A	keep	high	firewall rules do not read policy, no git push route, daily_tokens_per_person not counted.	Wire iyakki-fw to the tenant egress policy, count tokens per person; push side waits for a push route (or defer).	
+F-TCFG-11	B	keep	high	'Fake vault and fake accounts only; no real provider was called.'	On a cloud pod add a team key with a real provider key, run a request through it, check limits and audit.	
+F-TCFG-12	B	keep	high	'the real caller was never run against a provider or a host'.	Run connection test and model discovery against a real Ollama and one hosted provider key from a PC; add rate limit for discovery (code).	
+F-TCFG-13	A	keep	medium	Pure rules tested; rule texts not reviewed by a native editor; audit_enabled only fires a rule.	Review rule texts in the English-first pass and wire audit_enabled to the real audit switch.	
+F-TCFG-14	B	keep	high	No chat backend calls call_local; 'Never run against a real Ollama or GPU'.	Hook call_local into the chat backend for team hosts (code), then test against a real Ollama on a PC/GPU machine.	
+F-TCFG-15	B	keep	high	Tested under node fake DOM only; phone width never looked at.	Open the tenant settings page in a real browser and on a phone as admin and as member; check badges, forms, denied state.	
+F-TCFG-16	B	keep	high	'Not applied to a real cluster'; tenant-config.json not mounted as a ConfigMap.	Add ConfigMap mount to the manifest (code), apply to a real cluster and confirm policies take effect.	
+F-TOK-01	B	keep	high	'Unverified on the Mac; history and outputs of a long browsing run are not measured yet'.	Run a long browsing chat on the Mac mini and read the chat: tokens log lines; record numbers in TOKEN-BUDGET.md.	
+F-TOK-02	B	keep	high	'not tried on the Mac'.	On the Mac mini ask for flow, table and cluster tasks and check the right group loads or more_tools works.	
+F-TOK-03	A	keep	low	Only 1 test; 'Machine-wide, not per person'.	Add tests for the key T toggle and its audit line; decide if per-person is wanted.	
+F-UPD-01	D	keep	high	Planned 0%: 'Post-beta (v1.x), decided 2026-10-20: the beta only updates apps from the store.'	After beta: build signed bundle format and channel; needs the channel URL and root key from the owner.	
+F-UPD-02	B	keep	high	'NOT tried on the Mac or in QEMU with a broken bundle'; unproven that GRUB has loadenv and grubenv works on real BIOS/UEFI/Secure Boot.	Boot a QEMU image with a broken update (BIOS and UEFI) and then the Mac mini; confirm the counter falls back to the previous entry. Check loadenv module in the image GRUB.	
+F-UPD-03	D	keep	high	Planned 0%: 'Post-beta (v1.x), decided 2026-10-20.'	After beta: overlay initrd with min_base after the full bundle (UPD-01) exists.	
+F-UPD-04	A	keep	medium	Fakes only; not built: STORE/top-bar badge, Update all, kept previous package version, metered-link detection.	Build the badge on the STORE tile and top bar, Update all and previous-version keep with tests; metered detection can be deferred.	
+F-UPD-05	B	keep	high	'NOT tried on the Mac or a real stick'; real FAT mount of the boot partition untested; no pack is signed yet.	On the Mac mini plug a USB stick with a signed update pack and install it via the engine; the owner signs a pack with the release key.	
+F-UPD-06	B	keep	high	'never seen on a screen with a real stick'.	On the Mac mini open Settings -> System update with a real stick, Install and Roll back, confirm the prompts and the restart message.	
+F-UPD-07	B	keep	high	'Rollback of a boot partition was never run on real hardware'; automatic fall-back unproven (UPD-02).	On the Mac mini update, then Roll back and boot the previous entry; check the page notices the fall-back.	
+F-UPG-01	A	keep	medium	Long tail of per-person files still tolerant but silent, not on the schema	Move remaining per-person files onto the schema as their shape changes; or accept tail and cut the row scope	
+F-UPG-02	A	keep	high	Not yet in set: accounts, vault, flow run records, per-person tail; beta fixtures wait for tag	Add fixtures and tests for flow run records and remaining files; beta fixtures at tag	
+F-UPG-03	A	keep	medium	Looks complete in notes but not code-checked in this pass	Confirm the named tests exist and pass, then close	
+F-UPG-04	A	keep	medium	No alpha.1 fixture possible; no migration needed yet (version 1)	Confirm tests pass and close with note that no alpha.1 fixture exists	
+F-UPG-05	A	keep	high	iyakki-usb --update does not exist; no discard-unfinished-update command	Build discard command and usb --update (see F-UPD-02)	
+F-UPG-06	B	keep	high	Stage needs a newly built image; not run on Mac mini or T2 MacBook	Build image, run qemu-upgrade-test.sh, then run checklist on Mac mini and MacBook	
+F-UPG-07	D	keep	high	Waits for the beta tag	Create beta fixtures at tag and run 1.0 loader test	
+F-UPG-08	A	keep	high	users.json, radio, browser files carry no schema stamp; failing move-aside not simulated	Add schema stamp to those files; simulate failing move-aside in a test	
+F-UPG-09	B	keep	medium	Real-stick iyakki-usb --update path needs hardware; notes say mixer switched on after upgrade by decision	Run an alpha.1 stick through update on Mac mini and confirm vault and accounts open	
+F-VAULT-05	A	keep	medium	Guard is heuristic; verified with scripted models only	Add more guard test formats; then a live model check; mark done after sign-off.	
+F-VAULT-06	B	keep	high	NOT tried with a real WebKit profile or the Mac; timed checkpoint and others not done	Enable protection on Mac mini, log in to a site, restart, check sealed file and login kept.	
+F-VOICE-04	B	keep	high	Only fake devices and QEMU audio were used	Speak and listen with a real microphone and speaker on the Mac mini	
+F-VOICE-05	B	keep	high	Notes: no sound heard; espeak-ng, piper, say etc never run for real	Run reading aloud on a PC and the Mac with the installed engines and listen	
+F-VOICE-06	B	keep	high	Notes: helper page never opened in a real browser, no sound heard	Press the voice helper button on the Mac and hear speech in the browser	
+F-VOICE-08	B	keep	high	Notes: no sound heard; word highlight is an estimate for non-browser engines	Listen on the Mac and judge the word highlight; tune UNIT_MS	
+F-VOICE-15	B	keep	high	Notes: tested against fake servers only; not heard against a real Lemonade or whisper	Run alignment against a real Lemonade with a whisper model on a PC	
+F-VOICE-16	B	keep	high	Notes: unverified against a real remote Lemonade	Read aloud through a real remote Lemonade server from the Mac	
+F-VOICE-17	B	keep	high	Notes: needs device; fake Lemonade and fake speaker only, no sound heard	Use READ ALOUD on the Mac with a real Lemonade or engine and listen	
+F-VOICE-18	B	keep	high	Notes: needs device; fake recorder and fake whisper only, no real microphone	Dictate with a USB microphone on a PC or Mac and check the text	
+F-VOICE-19	B	keep	high	Notes: needs device; no sound heard from the system cues	Listen to login, logout and notification cues on the Mac and set levels	
+F-VOICE-20	B	keep	high	Planned verification row; needs microphone and speakers; MacBook built-in mic has no driver	Verify VOICE tile and system sounds with USB microphone and speakers on the Mac mini; merge with F-VOICE-24 if wanted	
+F-VOICE-21	B	keep	high	Notes: simulation only; real card latency on the T2 not measured	Listen on the Mac and measure latency of the lit word; tune offset	
+F-VOICE-22	B	keep	medium	Notes: log line not asserted; owner tunes the offset on the Mac	Tune the offset on the Mac; optionally add a test asserting the per-sentence log line	
+F-VOICE-23	B	keep	high	Notes: fake microphone and speaker only	Record and play back with a USB microphone on the Mac mini	
+F-VOICE-24	B	keep	high	Planned verification of the recorder; needs microphone and speakers	Five minute recording and playback on the Mac mini; could merge into F-VOICE-20	
+F-VPN-01	A	keep	medium	Pure code; not wired into shell, nothing saved, no real provider .conf tried	Wire into manager (F-VPN-11) and try a real provider .conf (B)	
+F-VPN-02	C	keep	medium	No OpenVPN program in any image; source of musl build open; strict allow-list refuses many provider profiles	Owner decides whether OpenVPN is supported at all and where the binary comes from	Do not ship OpenVPN; person downloads the vendor build by own click (F-VPN-06); label OpenVPN unsupported, keep WireGuard only
+F-VPN-03	B	keep	high	Byte vectors never run against a real kernel; no netlink transport; no CONFIG_WIREGUARD kernel	Write netlink transport, build kernel with WireGuard, test on a PC then the Mac mini	
+F-VPN-04	A	keep	medium	Plans only: nothing runs ip or writes resolv.conf; net.rs ignores VPN DNS override	Check F-VPN-11/14 cover apply; make net.rs respect VPN DNS; then close or merge into F-VPN-11	
+F-VPN-05	B	keep	high	Helper from init, roaming/resume, vpn_status, netns tests and kernel rebuild still missing	Build remaining pieces, rebuild kernel, prove on a device with a real WireGuard server	
+F-VPN-06	C	keep	high	Owner decision: no GPL layer in any image; where the musl build comes from is open	Owner picks the download source setting for OpenVPN or drops OpenVPN	Do not ship or host OpenVPN; person pastes vendor build address and clicks download, or build on device from vendor sources, or mark OpenVPN unsupported
+F-VPN-07	A	keep	medium	Data model and plans only; no UI, supervisor, nothing applied	Close once F-VPN-11/12 use the modes on a device; consider merge into F-VPN-11	
+F-VPN-08	C	keep	high	Not called by any browser or proxy; precedence reading awaits owner confirmation	Owner confirms precedence rule; then wire decide_url_for into browser and HTTP client	
+F-VPN-09	B	keep	high	Not run behind the real redirect on a device; DoH/DoT and CNAME targets not covered	Run hybrid mode with a real WireGuard server on a PC and Mac mini; decide about DoH	
+F-VPN-10	B	keep	medium	No real provider file inspected; binary subcommand not run as built	Run iyakki vpn inspect on real provider files from the built binary	
+F-VPN-11	B	keep	high	Proven against FakeSys only; real OsSys not run on a device	Run import/up/down on a PC with a real WireGuard server, then Mac mini	
+F-VPN-12	B	keep	high	Drawn only into a software surface; no top-bar lock or Devices line	Add top bar lock and Devices line; look at the page on the Mac mini	
+F-VPN-13	B	keep	medium	Approval card in the real chat was not looked at	Ask the assistant to add a VPN profile on a device and check the card	
+F-VPN-14	B	keep	high	Loaded only in unshare -rn on the dev machine; never on an image or with real traffic; Firewall tab line not written	Test on a PC image with CONFIG_NFT_NAT/REDIR; write the Firewall kill switch line (A)	
+F-VPN-15	B	keep	high	SO_MARK sockets, real redirect and a real VPN DNS server never exercised; TCP client can delay others	Run with root and a real VPN DNS on a PC; add TCP retry after truncation (A)	
+F-VPN-16	A	keep	high	Nothing starts the helper on an image; session still runs as root; no settings page; never run with real OsSys	Add init service and allowed-user setting; then test on a device (B)	
+F-WASM-06	D	keep	high	Spec goal; snapshot copies linear memory today	Post-beta optimisation.	
+F-WASM-07	D	keep	high	Planned 0%, no notes	Post-beta idea; deprecate if no use case appears.	
+F-WEB-04	D	keep	high	Planned P2: needs app logic split from drawing code (big)	After beta; depends on the UI/OS split	
+F-WEB-05	A	keep	medium	Notes: iyakki-edit has no dependencies and no I/O so it should build for wasm32 as is; not built or wired	Build iyakki-edit for wasm32, add a JS binding and a node smoke test	
+F-WEB-06	B	keep	high	Notes: tried on a real K3s and Docker; not tried on a managed cloud; per-user separation is by role only	Deploy on a managed cloud (a real provider account) and check sign-in	
+F-WEB-13	B	keep	high	Notes: worker, touch, soft keyboard and fullscreen NOT tried in a real browser or on a phone	Open the web client on a phone and a desktop browser and try each gesture	
+F-WEB-14	B	keep	high	Notes: stand-in listener and fake firewall; no real browser or network	Switch Remote access on at the Mac and open it from another computer	
+F-WEB-15	B	keep	high	Notes: not yet seen on screen on real hardware	Open Settings > Remote access on the Mac and press the button	
+F-WEB-16	B	keep	high	Notes: never opened in a real browser; no events WebSocket yet (polling)	Open /ui/ in a real browser on a PC and a phone	
+F-WEB-17	B	keep	high	Notes: not rendered in a real browser; audit trail has no API route yet	Open the page in a browser; add an audit API route (small code task)	
+F-WEB-18	B	keep	high	Notes: real ServicesExtras only compiled, not run	Run the switch through the web page on the Mac	
+F-WEB-19	A	keep	medium	Test exists in webservice/ui_tests.rs but the tests cell names only a module; notes: fakes only	Name the exact test in the tests cell; fakes are enough for a route, then close	
+F-WEB-20	B	keep	high	Notes: not yet tried on a real device or in a browser; file routes cloud-only	Open /ui/ on port 8443 of the Mac from a browser and sign in	
+F-WEB-31	B	keep	high	Notes: not opened in a real browser; no folder picker for moves	Try Files page in a browser on a cloud pod; add a folder picker if wanted	
+F-WEB-32	B	keep	high	Notes: not opened in a real browser; read only	Try Git page in a browser on a cloud pod	
+F-WEB-33	B	keep	high	Notes: not opened in a real browser; run needs a real flow engine in a pod	Run a flow from the web page on a real pod	
+F-WEB-34	B	keep	high	Notes: cookie probe tested with a fake fetch; needs a real browser on 8443	Test the cookie sign-in bridge in a real browser	
+F-WEB-41	B	keep	high	Notes: fakes only; directory file written by hand; never run with real cluster, pods or ingress	Test two tenants on a real cluster with ingress; the control plane that writes tenants.json is a later task	
+F-WEB-42	B	keep	high	Notes: node stand-ins only; never opened in a real browser or at phone width	Switch tenants in a browser on a phone and a desktop	
+F-WEB-43	A	keep	high	Notes: fake tenant over TLS only; no switch command and no ls command in the connector	Add a switch command to iyakki-connect with tests	
+F-WEB-44	B	keep	high	Notes: Linux openat only; not run against a real volume claim	Rename and mkdir on a real cloud volume claim	
+F-WEB-45	B	keep	high	Notes: needs git on the pod; not run on a real pod	Call the git routes on a real pod with a clone	
+F-WEB-46	A	keep	medium	Notes: tested on a fake engine; the real FlowEnv::open is not run in a test; no run-log route	Add a test with the real FlowEnv and a run-log route	
+F-WEB-47	A	keep	medium	Notes: real Extras implementation compiles but is not run in a test; no route for a team admin to pause others' schedules	Test the real implementation with a temp flow store; add an admin pause route	
+F-WEB-48	B	keep	high	Notes: node with fake document only; never opened in a real browser; one-time date input untested	Open the Schedules page in a browser on a real pod	
+F-WEBDEV-01	B	keep	high	Nothing tried in a real browser; Safari/Firefox differences unverified	Copy and paste PNG and HTML in Chrome, Firefox, Safari against a real tenant	
+F-WEBDEV-02	A	keep	high	Nothing in the shell feeds the channel yet; never heard in a real browser (likely superseded by WEBDEV-07 mixer path)	Merge into F-WEBDEV-07 or close after mixer tee proven in a real browser	
+F-WEBDEV-03	B	keep	high	Not tried with a real mic or browser; VOICE tile records via arecord, not this source	Switch VOICE recorder to the browser source (A); try real mic in a browser	
+F-WEBDEV-04	B	keep	high	Not tried with a real camera or browser; data-science hand-over does not read the frame	Try real webcam in a browser; make hand-over read exported frame (A)	
+F-WEBDEV-05	B	keep	medium	No real browser used; role layer (iyakki-sec) not consulted yet	Consult iyakki-sec policy in addition to tenant setting (A); check permission prompts in Chrome, Firefox, Safari	
+F-WEBDEV-06	A	keep	medium	Shell wiring Shell::detect_cloud has no test of its own; tiles visible but not useful over browser	Add a test of Shell::detect_cloud; confirm tiles useful once WEBDEV-03/07 land	
+F-WEBDEV-07	B	keep	high	Node stand-ins and fake sink only; latency and drop rate unmeasured	Play sound through a real browser from the Mac mini and measure drops	
+F-WEBDEV-08	B	keep	high	Fakes only; no real browser, camera or mic	Use VOICE and CAMERA tiles in a browser session on a real tenant	
+F-WEBDEV-09	B	keep	medium	Unit tests only; 1.5 s click race leaves page indicator up	Fix the 1.5 s race (A); view sign in a real browser session	
+F-WEBDEV-10	C	keep	medium	On a desktop with IYAKKI_BROWSER_MEDIA unset the tenant setting counts as allow (decision open)	Owner decides default for desktop (allow or deny)	
+F-WEBDEV-11	B	keep	high	Never heard on a real Mac and browser; mixer-off programs keep playing; latest page wins	Test the three routes on the Mac mini with a browser	
+F-WEBDEV-12	B	keep	high	Not tried with a real browser, camera or the Mac; no virtual camera for other apps	Open CAMERA tile on the Mac mini via a real browser with a webcam	
+F-WEBSVC-01	A	keep	high	'The real Services implementations ... compile but were not run'; serve --profile only with --check; no container, no load test; no WebSocket or metrics.	Add a test running the real Services over the TLS listener; run one container smoke test; metrics/WebSocket can follow.	
+F-WEBSVC-02	A	keep	high	'The SSRF refusal suite of the plan was not written for this route'; developer-mode pairing with api:* scopes planned.	Write the SSRF refusal suite for the web tools; scopes pairing can be a later row.	
+F-WEBSVC-03	B	keep	high	'The firewall rule was built as data and tested; it was not applied to a kernel.'	Start the service with lan:true on the Mac mini or a VM, check the nftables rule and access from an allowed and a blocked network.	
+F-WEBSVC-04	A	keep	high	'There is no checked-in docs/api/openapi.json yet and no generated client; the schemas for event and run objects are loose.'	Generate and check in openapi.json with a drift test and tighten the event and run schemas.	
+F-WEBSVC-05	B	keep	high	'Flows are read-only ... planned. Not run in a container or VM.'	Run the cloud profile in a container or VM and sign in; starting flows and data import are separate code tasks.	
+F-ZRAM-01	B	keep	high	Notes: Not seen on real hardware	Boot the Mac mini and check zram swap and kernel options in dmesg/free	
+F-ZRAM-02	B	keep	medium	Notes: only the switch tested with fake sysfs; zswap needs a swap file to be useful	Enable swapfile and zswap on a Mac mini data volume and check usage	

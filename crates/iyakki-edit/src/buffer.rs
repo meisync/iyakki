@@ -670,6 +670,25 @@ impl Buffer {
         }
     }
 
+    /// Enter for code: between a bracket pair (`{|}`) the closing bracket goes on a line of its own and the caret
+    /// on an indented line between them; anywhere else it is [`Buffer::newline`].
+    pub fn newline_pair(&mut self) -> Result<(), EditError> {
+        if self.selection().is_none() && self.cursor.1 > 0 {
+            let (l, c) = self.cursor;
+            if let (Some(a), Some(b)) = (self.char_at((l, c - 1)), self.char_at((l, c))) {
+                if matches!((a, b), ('(', ')') | ('[', ']') | ('{', '}')) {
+                    let upto: String = self.lines[l].chars().take(c).collect();
+                    let indent: String = upto.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+                    let inner = format!("{indent}{}", " ".repeat(self.tab_width));
+                    self.replace((l, c), (l, c), &format!("\n{inner}\n{indent}"))?;
+                    self.set_cursor((l + 1, clen(&inner)), false);
+                    return Ok(());
+                }
+            }
+        }
+        self.newline()
+    }
+
     /// Backspace that removes a pair written by [`Buffer::type_char`] when the caret is between its two halves.
     pub fn backspace_pair(&mut self) -> Result<(), EditError> {
         if self.selection().is_none() && self.cursor.1 > 0 {
@@ -951,6 +970,22 @@ mod tests {
         w.set_cursor((0, 5), false);
         w.newline().unwrap();
         assert_eq!((w.line(0), w.line(1)), ("hello", " world"));
+    }
+
+    #[test]
+    fn enter_between_a_bracket_pair_opens_an_indented_line_and_keeps_the_closer_on_its_own() {
+        let mut x = b("    fn f() {}");
+        x.set_cursor((0, 12), false);
+        x.newline_pair().unwrap();
+        assert_eq!((x.line(0), x.line(1), x.line(2)), ("    fn f() {", "        ", "    }"));
+        assert_eq!(x.cursor, (1, 8));
+        assert!(x.undo());
+        assert_eq!(x.line(0), "    fn f() {}", "one undo step");
+        // not between a pair: the plain Enter
+        let mut y = b("a(b)");
+        y.set_cursor((0, 2), false);
+        y.newline_pair().unwrap();
+        assert_eq!((y.line(0), y.line(1)), ("a(", "    b)"), "the plain Enter, which deepens after an opener");
     }
 
     #[test]

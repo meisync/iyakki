@@ -327,10 +327,10 @@ The kernel log of every boot (lean or normal) is also kept on the data volume ac
   Code: `lean_marker` in `crates/iyakki-stage1/src/main.rs`; test: `boot_menu.rs` (`the_fast_start_entries_come_first...`). Not exercised on a real stick yet.
 * **Fonts.** The menu rows use DejaVu Sans Bold at 30 pixels (made without hinting, so the letters are evenly spaced) and the text under the logo while the
   kernel loads uses DejaVu Sans Mono at 24 pixels (a terminal needs a monospaced font); `post-image.sh` builds `iyakki-menu.pf2` and `iyakki-term.pf2` with
-  `grub-mkfont` (Latin only, about 40 KB and 8 KB) and only then does the theme name them and make the rows taller. The 2026-10-24 report of "gaps between the
-  letters" was GRUB's font lookup: the theme asked for "Unifont Regular 16" but the file is named "GNU Unifont Regular 16", and GRUB then silently uses the font
-  loaded last, so the loading text was drawn in the menu font's big letters on Unifont's narrow character grid (wide gaps, cut-off tails of g and y). The theme
-  now names "GNU Unifont Regular 16" in full. Seen in QEMU at 2560 x 1600 (`dist/buildroot/qemu-grub-menu-test.py` style harness); not looked at on a real screen yet.
+  `grub-mkfont` (Latin only, about 40 KB and 8 KB) and the theme names them (GRUB's own Unicode font, GNU Unifont, is no longer shipped since 2026-11-06; letters outside Latin show GRUB's missing-character box). The 2026-10-24 report of "gaps between the
+  letters" was GRUB's font lookup: the theme asked for "Unifont Regular 16" but the file was named "GNU Unifont Regular 16", and GRUB then silently uses the font
+  loaded last, so the loading text was drawn in the menu font's big letters on the old font's narrow character grid (wide gaps, cut-off tails of g and y). The theme
+  now names the DejaVu fonts in full. Seen in QEMU at 2560 x 1600 (`dist/buildroot/qemu-grub-menu-test.py` style harness); not looked at on a real screen yet.
 * **Putting it on a stick.** `lean-install.sh` (stick in a PC) or `lean-remote-refresh.sh --menu-from <images>/install-root/boot/grub` (stick in a running
   Mac): both put the lean block in front of the normal entry; the second also sends the whole new `grub.cfg`, the font and the theme.
 

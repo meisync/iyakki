@@ -305,14 +305,14 @@ pub fn main(args: &[String]) -> i32 {
     let spec = match Spec::parse(args) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("linuxapp-init: {e}");
+            crate::qeprintln!("linuxapp-init: {e}");
             return 2;
         }
     };
     match run(&spec) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("linuxapp-init: {e}");
+            crate::qeprintln!("linuxapp-init: {e}");
             125
         }
     }
@@ -331,7 +331,7 @@ fn run(spec: &Spec) -> Result<i32, String> {
         let code = match child(spec, a_w, b_r) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("linuxapp-init: {e}");
+                crate::qeprintln!("linuxapp-init: {e}");
                 125
             }
         };
@@ -400,7 +400,7 @@ fn cgroup_enter(spec: &Spec, pid: i32) -> Option<std::path::PathBuf> {
     }
     let root = Path::new(CGROUP_ROOT);
     if !root.join("cgroup.controllers").is_file() {
-        eprintln!("linuxapp-init: note: no cgroup v2 here, so memory, cpu and process limits are not enforced");
+        crate::qeprintln!("linuxapp-init: note: no cgroup v2 here, so memory, cpu and process limits are not enforced");
         return None;
     }
     let parent = root.join("iyakki-linuxapps");
@@ -429,7 +429,7 @@ fn cgroup_enter(spec: &Spec, pid: i32) -> Option<std::path::PathBuf> {
     match r {
         Ok(()) => Some(dir),
         Err(e) => {
-            eprintln!("linuxapp-init: note: limits are not enforced ({e})");
+            crate::qeprintln!("linuxapp-init: note: limits are not enforced ({e})");
             let _ = std::fs::remove_dir(&dir);
             None
         }
@@ -468,7 +468,7 @@ fn child(spec: &Spec, a_w: i32, b_r: i32) -> Result<i32, String> {
     let code = match init(spec) {
         Ok(never) => match never {},
         Err(e) => {
-            eprintln!("linuxapp-init: {e}");
+            crate::qeprintln!("linuxapp-init: {e}");
             125
         }
     };
@@ -590,7 +590,7 @@ fn init(spec: &Spec) -> Result<Never, String> {
         cmd.env(k, v);
     }
     let e = cmd.exec();
-    eprintln!("linuxapp-init: could not run {}: {e}", spec.cmd[0]);
+    crate::qeprintln!("linuxapp-init: could not run {}: {e}", spec.cmd[0]);
     // SAFETY: leave at once.
     unsafe { libc::_exit(127) }
 }

@@ -183,8 +183,15 @@ impl WebClient {
             }
         }
         let host = url.host.trim_matches(['[', ']']);
-        if host == "localhost" || host.ends_with(".localhost") {
+        if host == "localhost" || host.ends_with(".localhost") || host.trim_end_matches('.') == "localhost" || host.trim_end_matches('.').ends_with(".localhost") {
             return Err("local addresses are not opened by the web tools".into());
+        }
+        // the system's name lookup reads `127.1`, `0x7f.0.0.1`, `0177.0.0.1` and `2130706433` as 127.0.0.1: read them the same way here
+        if let Some(r) = legacy_ipv4(host) {
+            return match r {
+                Some(ip) if !blocked_ip(&IpAddr::V4(ip)) => Ok(()),
+                _ => Err(format!("{host} is a local or private address; the web tools only open the public internet")),
+            };
         }
         if let Ok(ip) = host.parse::<IpAddr>() {
             if blocked_ip(&ip) {
@@ -310,6 +317,57 @@ pub(crate) fn host_of(url: &str) -> String {
     iyakki_sec::url_host(url).unwrap_or_else(|| "the server".into())
 }
 
+/// A host written the way old `inet_aton` reads it: 1 to 4 parts separated by dots, each decimal, `0x` hex or `0` octal, the last part
+/// filling the remaining bytes. `None`: not written like that (an ordinary name or a normal IPv6 address). `Some(None)`: it is written
+/// like an address but is not a usable one (refused). `Some(Some(ip))`: the address the system would connect to.
+pub fn legacy_ipv4(host: &str) -> Option<Option<Ipv4Addr>> {
+    let host = host.trim_end_matches('.');
+    if host.is_empty() || host.contains(':') {
+        return None;
+    }
+    let parts: Vec<&str> = host.split('.').collect();
+    let numeric = |p: &str| -> Option<Option<u64>> {
+        if p.is_empty() {
+            return Some(None);
+        }
+        if let Some(h) = p.strip_prefix("0x").or_else(|| p.strip_prefix("0X")) {
+            return Some(u64::from_str_radix(h, 16).ok().filter(|_| !h.is_empty()));
+        }
+        if !p.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if p.len() > 1 && p.starts_with('0') {
+            return Some(u64::from_str_radix(&p[1..], 8).ok());
+        }
+        Some(p.parse::<u64>().ok())
+    };
+    // only a name whose LAST part is numeric can be an address (`10.example.com` is a name)
+    numeric(parts.last()?)?;
+    if parts.len() > 4 {
+        return Some(None);
+    }
+    let mut vals = Vec::new();
+    for p in &parts {
+        match numeric(p) {
+            Some(Some(v)) => vals.push(v),
+            _ => return Some(None),
+        }
+    }
+    let (last, head) = vals.split_last()?;
+    if head.iter().any(|v| *v > 255) {
+        return Some(None);
+    }
+    let room = 8 * (4 - head.len() as u32);
+    if room < 64 && *last >= (1u64 << room) {
+        return Some(None);
+    }
+    let mut n: u64 = *last;
+    for (i, v) in head.iter().enumerate() {
+        n |= v << (8 * (3 - i as u32));
+    }
+    Some(Some(Ipv4Addr::from(n as u32)))
+}
+
 /// Addresses that are this machine or a machine nearby, not the public internet.
 pub fn blocked_ip(ip: &IpAddr) -> bool {
     match ip {
@@ -328,6 +386,8 @@ fn blocked_v4(a: &Ipv4Addr) -> bool {
         || a.is_multicast()
         || o[0] == 0
         || (o[0] == 100 && (64..128).contains(&o[1])) // carrier-grade NAT
+        || (o[0] == 198 && (o[1] & 0xfe) == 18) // benchmarking
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0) // IETF protocol assignments
         || o[0] >= 240
 }
 
@@ -335,6 +395,19 @@ fn blocked_v6(a: &Ipv6Addr) -> bool {
     let s = a.segments();
     if let Some(v4) = a.to_ipv4_mapped() {
         return blocked_v4(&v4);
+    }
+    // ::a.b.c.d (compatible), 64:ff9b::/96 (NAT64) and 2002::/16 (6to4) carry an IPv4 address inside
+    if s[..6] == [0, 0, 0, 0, 0, 0] {
+        return blocked_v4(&Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8));
+    }
+    if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        return blocked_v4(&Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8));
+    }
+    if s[0] == 0x2002 {
+        return blocked_v4(&Ipv4Addr::new((s[1] >> 8) as u8, s[1] as u8, (s[2] >> 8) as u8, s[2] as u8));
+    }
+    if (s[0] & 0xffc0) == 0xfec0 {
+        return true; // site-local (deprecated)
     }
     a.is_loopback() || a.is_unspecified() || a.is_multicast() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80
 }
@@ -1389,6 +1462,49 @@ mod tests {
         assert!(w.tools.call("web_fetch", &json!({"url": "https://example.com/page"})).is_ok());
         assert!(w.tools.call("web_fetch", &json!({"url": "https://example.com/out"})).unwrap_err().contains("may not reach elsewhere.org"));
         assert!(w.tools.call("web_fetch", &json!({"url": "https://other.org/"})).unwrap_err().contains("may not reach other.org"));
+    }
+
+    /// The SSRF refusal suite for the web tools (and so for the web service's `web_fetch`, `web_links` and the rest): disguised
+    /// loopback and private addresses, odd schemes and ports, names that resolve inside, and redirects into any of them.
+    #[test]
+    fn the_ssrf_refusal_suite_stops_disguised_local_addresses_odd_schemes_and_rebinding_names() {
+        let w = world("ssrf", &["*"], vec![("example.com/to-meta", redirect("http://169.254.169.254/latest/meta-data")), ("example.com/to-v6", redirect("http://[::1]/")), ("example.com/to-dec", redirect("http://2130706433/")), ("example.com/page", page("text/html", "<html><body>ok</body></html>"))]);
+        let refused = |u: &str| {
+            let before = w.web.asked.lock().unwrap().len();
+            let r = w.tools.call("web_fetch", &json!({"url": u}));
+            let after = w.web.asked.lock().unwrap().len();
+            assert!(r.is_err(), "{u} must be refused, got {r:?}");
+            assert_eq!(before, after, "{u}: nothing may be requested");
+        };
+        for u in [
+            "http://127.0.0.1/", "http://127.1/", "http://0x7f.0.0.1/", "http://0177.0.0.1/", "http://2130706433/", "http://0x7f000001/", "http://0/", "http://0.0.0.0/",
+            "http://[::1]/", "http://[::]/", "http://[::ffff:127.0.0.1]/", "http://[::ffff:7f00:1]/", "http://[::127.0.0.1]/", "http://[fe80::1]/", "http://[fec0::1]/", "http://[fd12:3456::1]/",
+            "http://[64:ff9b::7f00:1]/", "http://[2002:7f00:1::]/", "http://[2002:0a00:0001::]/", "http://[::ffff:169.254.169.254]/",
+            "http://localhost/", "http://LOCALHOST/", "http://localhost./", "http://app.localhost/", "http://example.com@127.0.0.1/", "http://127.0.0.1:80@example.com.internal/",
+            "http://10.0.0.1/", "http://172.31.255.255/", "http://192.168.1.1/", "http://100.64.0.1/", "http://169.254.169.254/", "http://224.0.0.1/", "http://255.255.255.255/", "http://198.18.0.1/",
+            "https://example.com:22/", "https://example.com:6443/", "http://example.com:2375/", "http://example.com:0/",
+            "file:///etc/passwd", "ftp://example.com/x", "gopher://example.com/", "data:text/html,hi", "javascript:alert(1)", "http:///etc/passwd", "http://", "",
+            "http://rebind.internal/",
+        ] {
+            refused(u);
+        }
+        // a public page that redirects inside: only the public page is requested, never the inside address
+        for u in ["https://example.com/to-meta", "https://example.com/to-v6", "https://example.com/to-dec"] {
+            let before = w.web.asked.lock().unwrap().len();
+            let e = w.tools.call("web_fetch", &json!({"url": u})).unwrap_err();
+            assert!(e.contains("local or private") || e.contains("not usable"), "{u}: {e}");
+            let asked = w.web.asked.lock().unwrap().clone();
+            assert_eq!(asked.len() - before, 1, "{u}: {asked:?}");
+            assert!(asked.last().unwrap().starts_with("https://example.com/"), "{asked:?}");
+        }
+        // a plain public address still works, so the refusals are not a blanket
+        assert!(w.tools.call("web_fetch", &json!({"url": "https://example.com/page"})).is_ok());
+        for ip in ["198.18.0.1", "2002:7f00:1::", "64:ff9b::7f00:1", "::127.0.0.1", "fec0::1"] {
+            assert!(blocked_ip(&ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["93.184.216.34", "8.8.8.8", "2606:2800:220:1::1"] {
+            assert!(!blocked_ip(&ip.parse().unwrap()), "{ip}");
+        }
     }
 
     #[test]

@@ -101,7 +101,7 @@ fn cleanup(f: Fx) {
 #[test]
 fn several_repositories_land_in_their_own_folders_two_at_a_time_and_project_json_lists_them() {
     let f = fx("multi", true);
-    let specs = vec![spec("https://git.example.org/a/alpha.git"), CloneSpec { url: "https://git.example.org/b/beta".into(), branch: "dev".into(), depth: 1, folder: "second".into() }, spec("https://other.example.org/c/alpha.git"), spec("https://git.example.org/d/delta.git")];
+    let specs = vec![spec("https://git.example.org/a/alpha.git"), CloneSpec { url: "https://git.example.org/b/beta".into(), branch: "dev".into(), depth: 1, folder: "second".into(), submodules: false }, spec("https://other.example.org/c/alpha.git"), spec("https://git.example.org/d/delta.git")];
     let mut b = Batch::plan_clone(f.ctx.clone(), &specs).unwrap();
     let folders: Vec<&str> = b.items.iter().map(|i| i.folder.as_str()).collect();
     assert_eq!(folders, ["alpha", "second", "alpha-2", "delta"], "names from the addresses, de-duplicated, or the one chosen");
@@ -537,4 +537,72 @@ fn a_push_goes_through_the_job_with_the_connections_token_and_trusted_certificat
     assert!(argv.iter().any(|a| a.starts_with("GIT_SSL_CAINFO=") && a.ends_with("g.pem")), "{argv:?}");
     assert!(!argv.join(" ").contains("FAKEFAKEFAKE"));
     cleanup(f);
+}
+
+// ---- submodules
+
+fn clone_once(f: &Fx, s: CloneSpec) -> String {
+    let mut b = Batch::plan_clone(f.ctx.clone(), &[s]).unwrap();
+    wait(&mut b, &f.jobs, 30);
+    assert_eq!(b.done(), 1, "{:?}", b.items[0].state);
+    log_args(&f.jobs)
+}
+
+#[test]
+fn a_clone_asks_for_submodules_only_when_the_request_says_so_and_then_closes_the_other_transports() {
+    let f = fx("subs-off", true);
+    let off = clone_once(&f, spec("https://git.example.org/a/alpha.git"));
+    assert!(!off.contains("recurse") && !off.contains("shallow-submodules") && !off.contains("hooksPath"), "{off}");
+    assert!(off.contains("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper"), "{off}");
+    cleanup(f);
+    // on: the flag, the transports of the main address's kind, no file or program transport, no hooks, no credential helper
+    let f = fx("subs-on", true);
+    let on = clone_once(&f, CloneSpec { url: "https://git.example.org/a/alpha.git".into(), submodules: true, ..Default::default() });
+    for w in ["GIT_CONFIG_COUNT=4", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0= ", "GIT_CONFIG_KEY_1=protocol.file.allow", "GIT_CONFIG_VALUE_1=never", "GIT_CONFIG_KEY_2=protocol.ext.allow", "GIT_CONFIG_VALUE_2=never", "GIT_CONFIG_KEY_3=core.hooksPath", "GIT_CONFIG_VALUE_3=/dev/null"] {
+        assert!(on.contains(w), "missing `{w}` in {on}");
+    }
+    assert!(on.contains("GIT_ALLOW_PROTOCOL=https:file ") || on.contains("GIT_ALLOW_PROTOCOL=https:file\n"), "tests add file for local paths only: {on}");
+    assert!(on.contains("clone --progress --recurse-submodules -- https://git.example.org/a/alpha.git alpha"), "{on}");
+    assert!(!on.contains("--shallow-submodules"), "no depth, no shallow submodules: {on}");
+    cleanup(f);
+    // with a depth the submodules are shallow too
+    let f = fx("subs-depth", true);
+    let deep = clone_once(&f, CloneSpec { url: "https://git.example.org/a/alpha.git".into(), submodules: true, depth: 1, branch: "dev".into(), ..Default::default() });
+    assert!(deep.contains("clone --progress --recurse-submodules --shallow-submodules --branch dev --depth 1 -- "), "{deep}");
+    cleanup(f);
+    // a plain http address cannot be followed into submodules
+    let f = fx("subs-http", true);
+    let e = Batch::plan_clone(f.ctx.clone(), &[CloneSpec { url: "http://git.example.org/a/b.git".into(), submodules: true, ..Default::default() }]).err().unwrap();
+    assert!(e[0].1.contains("only cloned over https:// or ssh"), "{e:?}");
+    assert!(Batch::plan_clone(f.ctx.clone(), &[CloneSpec { url: "http://git.example.org/a/b.git".into(), ..Default::default() }]).is_ok(), "without submodules http is as before");
+    cleanup(f);
+}
+
+#[test]
+fn the_transports_a_clone_with_submodules_may_use_are_https_and_ssh_for_an_ssh_repository_only() {
+    let https = gitsite::parse("https://git.example.org/a/b.git", ParseOptions::default()).unwrap();
+    let ssh = gitsite::parse("ssh://git@git.example.org/a/b.git", ParseOptions::default()).unwrap();
+    assert_eq!(submodule_protocols(&https, false), "https");
+    assert_eq!(submodule_protocols(&ssh, false), "https:ssh");
+    assert_eq!(submodule_protocols(&https, true), "https:file");
+    for (u, bad) in [
+        ("https://git.example.org/a/sub.git", false),
+        ("../sub.git", false),
+        ("./sub.git", false),
+        ("http://git.example.org/a/sub.git", true),
+        ("file:///etc/passwd", true),
+        ("/srv/git/sub.git", true),
+        ("ext::sh -c touch% /tmp/x", true),
+        ("git://git.example.org/a/sub.git", true),
+        ("ssh://git@git.example.org/a/sub.git", true),
+        ("--upload-pack=x", true),
+        ("https://user:secret@git.example.org/a/sub.git", true),
+    ] {
+        let p = gitsite::submodule_url_problem(u, &https);
+        assert_eq!(p.is_some(), bad, "{u}: {p:?}");
+        assert!(!p.unwrap_or_default().contains("secret"), "{u}");
+    }
+    assert!(gitsite::submodule_url_problem("ssh://git@git.example.org/a/sub.git", &ssh).is_none(), "an ssh repository may use ssh submodules");
+    assert_eq!(gitsite::submodule_urls("[submodule \"a\"]\n\tpath = a\n\turl = https://x/a.git\n[submodule \"b\"]\n\tpath = b\n\turl=../b.git\n"), ["https://x/a.git", "../b.git"]);
+    assert!(gitsite::submodule_urls("").is_empty());
 }

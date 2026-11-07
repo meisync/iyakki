@@ -57,7 +57,7 @@ Actions (buttons and keys; each asks first where it changes something):
 
 | Action | Key | What happens |
 |---|---|---|
-| Clone | `C` | A review (what, from which host, into which folder, how it signs in), then the AI IDE's clone job into the Repositories folder, with progress in the status line and the host-key card for a first-time SSH host |
+| Clone | `C` | A review (what, from which host, into which folder, how it signs in, and a box **Also clone its submodules**, key `s`, off by default), then the AI IDE's clone job into the Repositories folder, with progress in the status line and the host-key card for a first-time SSH host |
 | Open in AI IDE | `I` | With a clone: the folder is registered as a workspace (once) and the AI IDE opens it. Without one it offers *Clone* first and opens it when the clone is done |
 | Fetch | `F` | The fetch job at once (it changes nothing of yours) |
 | Pull | `P` | Looks at the clone first; if it has uncommitted changes a card says so, and the pull only fast-forwards |
@@ -66,6 +66,24 @@ Actions (buttons and keys; each asks first where it changes something):
 | Open in browser | `w` | Shows the address and opens the BROWSER tile with it only after your yes |
 
 No delete, rename or settings change of a repository exists in this tile.
+
+### Submodules
+
+The clone review has a box, **Also clone its submodules** (off; `s` or a click flips it). On, the job adds `--recurse-submodules` (and
+`--shallow-submodules` when the clone is shallow). A submodule address is written by the repository's author, so the job narrows what git may
+reach for the whole clone: only `https` (plus `ssh` for a repository cloned over ssh), `protocol.file.allow=never`, `protocol.ext.allow=never`,
+`core.hooksPath=/dev/null` and an empty `credential.helper`. `file://`, `ext::`, `git://` and plain `http://` submodules fail, and a clone with submodules
+of an `http://` address is refused before it starts. The review cannot list the submodules before the files are here; the result of the assistant's clone
+says how many `.gitmodules` listed.
+
+### From the chat
+
+The assistant has the same clone as tools (`git_clone_repo`, `git_clones_list`, `ide_workspace_add`, `ide_workspace_list`; module
+`gitworktools`), offered to accounts that have the Git tile or the AI IDE. The clone and the workspace add ask **every time** (hard-ask list; Auto mode
+and "Allow for this session" do not cover them). The card says what, from which host, into which folder, with or without submodules and how the clone
+signs in. It is the tile's own job (`gitjobs::user_ctx` + `Batch`), https addresses only (an ssh clone needs your confirmation of the host key: use the
+tile). A private repository uses your saved connection for that host by itself; the chat never carries a token (text that looks like one is refused
+without being repeated). The audit records `assistant.git.clone` with the repository, host and folder, and `ide.workspace.add`.
 
 ## How the data is read
 

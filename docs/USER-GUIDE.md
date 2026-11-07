@@ -576,6 +576,17 @@ Overview (processor, memory, load, disks, network, heat), Processes (administrat
 Agents (every run going on; `x` stop, `X` stop all), Hardware (administrators). `Tab` pages. The Overview shows the host name. `iyakki top` shows similar
 output in a terminal.
 
+**Which service is this process?** With the dev cluster running, the Processes tab names the Quick install service or pod of every
+container process (for example `clickhouse (iyakki-data)` instead of an anonymous `java` or `clickhouse-server` under user 101, 1000
+or 10001). The name comes from the process's control group (the pod's uid and container) matched with the cluster's pod list, which is
+read only (`kubectl get pods -A`) and refreshed every 15 seconds. With the cluster off or unreachable the column is simply empty and
+nothing is reported as wrong. `g` (or the "By service" button) adds up the processes of each service; the sort keys `c m n` still
+work. The line under the table shows the chosen pod's processor and memory request and limit, and a process at 90% or more of its
+limit is marked "near limit". `b` (or "What is it busy with") shows the pod's last log lines (secrets hidden, capped) and the
+`kubectl top` numbers, so you can see why a pod sits at a high processor use; it only shows facts. In chat the same is available as
+the read-only tools `system_processes` (top N by processor or memory, with the service) and `system_pod_busy`; both are for
+administrators and need no approval.
+
 ![System](media/shots/system.png)
 
 ### USAGE

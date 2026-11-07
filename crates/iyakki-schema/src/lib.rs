@@ -191,7 +191,89 @@ pub fn move_aside(path: &Path, now: u64) -> Option<PathBuf> {
         to = sibling(path, &format!("corrupt-{now}-{n}"));
         n += 1;
     }
-    fs::rename(path, &to).ok().map(|_| to)
+    let moved = fs::rename(path, &to).ok().map(|_| to);
+    if moved.is_some() {
+        prune_corrupt(path, KEEP_CORRUPT);
+    }
+    moved
+}
+
+/// How many `.corrupt-*` copies of one file are kept (the newest ones).
+pub const KEEP_CORRUPT: usize = 3;
+
+/// Delete the oldest `<file>.corrupt-*` copies beyond `keep`.
+pub fn prune_corrupt(path: &Path, keep: usize) {
+    let (Some(dir), Some(name)) = (path.parent().filter(|d| !d.as_os_str().is_empty()).or(Some(Path::new("."))), path.file_name()) else { return };
+    let prefix = format!("{}.corrupt-", name.to_string_lossy());
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    let mut found: Vec<((u64, u64), PathBuf)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let rest = e.file_name().to_string_lossy().strip_prefix(&prefix)?.to_string();
+            let (a, b) = rest.split_once('-').unwrap_or((&rest, "0"));
+            Some(((a.parse().ok()?, b.parse().ok()?), e.path()))
+        })
+        .collect();
+    found.sort();
+    let extra = found.len().saturating_sub(keep);
+    for (_, p) in found.into_iter().take(extra) {
+        let _ = fs::remove_file(p);
+    }
+}
+
+/// Keep a copy of a file that must STAY where it is although it is damaged (the accounts: moving them away would make the machine
+/// look new and offer the first-run setup to anybody). The copy is `<file>.corrupt-<now>`; nothing is copied again while a copy with
+/// the same bytes exists; at most [`KEEP_CORRUPT`] copies are kept. Returns the copy (new or already there).
+pub fn copy_aside(path: &Path, now: u64) -> Option<PathBuf> {
+    let bytes = fs::read(path).ok()?;
+    let (dir, name) = (path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new(".")), path.file_name()?.to_string_lossy().to_string());
+    for e in fs::read_dir(dir).ok()?.flatten() {
+        if e.file_name().to_string_lossy().starts_with(&format!("{name}.corrupt-")) && fs::read(e.path()).ok().as_deref() == Some(&bytes[..]) {
+            return Some(e.path());
+        }
+    }
+    let mut to = sibling(path, &format!("corrupt-{now}"));
+    let mut n = 1;
+    while to.exists() {
+        to = sibling(path, &format!("corrupt-{now}-{n}"));
+        n += 1;
+    }
+    write_atomic(&to, &bytes, 0o600).ok()?;
+    prune_corrupt(path, KEEP_CORRUPT);
+    Some(to)
+}
+
+/// Read a plain JSON file that has no schema stamp (a per-person list or settings file). `None` when there is no file, or when it
+/// is damaged (not JSON, or it does not fit `T`): a damaged file is moved to `<file>.corrupt-<now>` (nothing is deleted, the
+/// newest [`KEEP_CORRUPT`] copies are kept) and a sentence for the audit log is queued with [`report`]. The caller then uses its defaults.
+pub fn read_plain<T: serde::de::DeserializeOwned>(what: &str, path: &Path, now: u64) -> Option<T> {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            report(format!("{what} {}: cannot be read ({e}); it is left as it is and nothing is saved over it", path.display()));
+            return None;
+        }
+    };
+    match serde_json::from_slice::<T>(&bytes) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            let moved = move_aside(path, now);
+            report(format!("{what} {}: damaged ({e}); {} and started with the defaults", path.display(), moved.as_ref().map(|m| format!("moved to {}", m.display())).unwrap_or_else(|| "could not be moved aside, so nothing will be saved over it".into())));
+            None
+        }
+    }
+}
+
+/// Call before saving a plain file: refuses when a file is there that cannot be read as JSON (it could not be moved aside), so a save
+/// never overwrites a damaged file that was not set aside first.
+pub fn plain_writable(what: &str, path: &Path) -> Result<(), String> {
+    match fs::read(path) {
+        Ok(b) if serde_json::from_slice::<Value>(&b).is_err() => Err(format!("The {what} file is damaged and could not be moved aside; it is left as it is: {}", path.display())),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("The {what} file cannot be read ({e}); it is left as it is: {}", path.display())),
+    }
 }
 
 /// Read a store file for its schema: migrate it (backup first, then an atomic rewrite), leave a newer one alone, move a damaged

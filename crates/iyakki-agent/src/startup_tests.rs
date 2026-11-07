@@ -380,3 +380,16 @@ fn the_first_usable_link_makes_the_network_ready_whichever_it_is_and_the_other_o
     assert!(!r3.state(WIFI_ID).unwrap().failed());
     assert!(login_view(r3.snapshot()).pending.iter().all(|x| !x.state.failed()));
 }
+
+#[test]
+fn the_flows_scheduler_and_the_vpn_are_in_the_catalogue_and_report_through_their_own_calls() {
+    let (r, _t) = reg();
+    assert_eq!(row(&r, "flows").state, StartupState::Disabled);
+    crate::flows::report_scheduler(&r, true);
+    assert_eq!(row(&r, "flows").state, StartupState::Ready);
+    crate::flows::report_scheduler(&r, false);
+    assert_eq!(row(&r, "flows").state, StartupState::Disabled);
+    let vpn = CATALOGUE.iter().find(|d| d.id == "vpn").expect("the VPN has a row");
+    assert!(vpn.after.contains(&"network"));
+    assert_eq!(row(&r, "vpn").state, StartupState::Disabled, "nothing enabled, nothing to wait for");
+}

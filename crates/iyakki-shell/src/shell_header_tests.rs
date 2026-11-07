@@ -21,7 +21,7 @@ fn disjoint(a: R, b: R) -> bool {
 }
 
 /// A made-up machine for the popover: one Ethernet port with a cable.
-fn small_probe(tag: &str) -> crate::devpop::Probe {
+pub(super) fn small_probe(tag: &str) -> crate::devpop::Probe {
     let d = std::env::temp_dir().join(format!("iyakki-hdr-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     for (rel, c) in [("sys/class/net/eth0/device/x", ""), ("sys/class/net/eth0/type", "1\n"), ("sys/class/net/eth0/flags", "0x1003\n"), ("sys/class/net/eth0/carrier", "1\n"), ("sys/class/net/eth0/address", "aa:bb:cc:00:00:01\n")] {
@@ -232,7 +232,7 @@ fn the_clock_redraws_only_when_the_minute_changes() {
 }
 
 /// Tick until the popover has its first reading from the background thread.
-fn wait_for_devices(sh: &mut Shell) {
+pub(super) fn wait_for_devices(sh: &mut Shell) {
     for _ in 0..400 {
         sh.handle(&Event::Tick);
         if sh.devpop.snapshot().is_some() {

@@ -179,7 +179,7 @@ pub fn run_install_console() -> i32 {
     print!("\x1b[9;0]\x1b[2J\x1b[H");
     let _ = std::io::stdout().flush();
     let code = iyakki_usb::plan_cli::run_boot();
-    println!("\nRemove the installation USB stick, then press Enter to restart.");
+    crate::console::out_write("\nRemove the installation USB stick, then press Enter to restart.\n");
     let mut l = String::new();
     let _ = std::io::stdin().read_line(&mut l);
     code
@@ -1432,7 +1432,7 @@ mod tests {
         assert!(early.find("crate::crashlog::start(").unwrap() < early.find("crate::storageloss::start();").unwrap());
         for f in ["pub fn reboot", "pub fn power_off"] {
             let body = boot.split(f).nth(1).unwrap().split("\n}\n").next().unwrap();
-            assert!(body.contains("crashlog::finish_clean(") || body.contains("eprintln"), "{f} marks the session clean before it syncs");
+            assert!(body.contains("crashlog::finish_clean(") || body.contains("eprintln") || body.contains("err_write"), "{f} marks the session clean before it syncs");
         }
     }
 

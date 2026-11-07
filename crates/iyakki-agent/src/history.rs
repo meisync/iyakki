@@ -152,6 +152,22 @@ impl History {
         }
     }
 
+    /// Forget what one chat did in every workspace of this person (the chat does not know its workspace any more).
+    pub fn forget_session_everywhere(kb: &Arc<Mutex<KnowledgeBase>>, user: &str, session: &str) -> usize {
+        let prefix = format!("workspace/{}/", slug(user));
+        let s = slug(session);
+        let mut kb = kb.lock().unwrap_or_else(|e| e.into_inner());
+        let mut n = 0;
+        for ns in kb.namespaces().into_iter().filter(|n| n.starts_with(&prefix)) {
+            for d in kb.docs(&ns) {
+                if parse_tag(&d.title).2 == s && kb.remove_document(&ns, &d.id).is_ok() {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     /// Snippets as text for a prompt, within about `max_chars` characters, each with its id (so the model can cite it).
     pub fn render(snips: &[Snippet], max_chars: usize) -> String {
         let mut s = String::new();
@@ -225,6 +241,20 @@ mod tests {
         h.record("decision", "", "again");
         h.forget_workspace();
         assert!(h.is_empty());
+    }
+
+    #[test]
+    fn deleting_a_chat_forgets_its_history_in_every_workspace_of_that_person_only() {
+        let store = kb();
+        for ws in ["shop", "blog"] {
+            History::new(store.clone(), "alice", ws, Some("s_gone")).record("answer", "r1", "the registry is at port 5000");
+            History::new(store.clone(), "alice", ws, Some("s_keep")).record("answer", "r2", "the cache uses redis");
+        }
+        History::new(store.clone(), "bob", "shop", Some("s_gone")).record("answer", "r3", "bob's note");
+        assert_eq!(History::forget_session_everywhere(&store, "alice", "s_gone"), 2);
+        assert_eq!(History::new(store.clone(), "alice", "shop", None).len(), 1);
+        assert_eq!(History::new(store.clone(), "alice", "blog", None).len(), 1);
+        assert_eq!(History::new(store, "bob", "shop", None).len(), 1, "another person's history stays");
     }
 
     #[test]

@@ -440,6 +440,8 @@ const FAMILIES: &[(&str, &str, &str)] = &[
     ("intel/ibt-", "intel-bt", "Intel Bluetooth"),
     ("i915/", "intel-gpu", "Intel graphics"),
     ("xe/", "intel-gpu", "Intel graphics"),
+    ("intel/ice/", "intel-eth", "Intel Ethernet"),
+    ("e100/", "intel-eth", "Intel Ethernet"),
     ("intel/", "intel-other", "Intel (other)"),
     ("amdgpu/", "amd-gpu", "AMD graphics"),
     ("radeon/", "amd-gpu", "AMD graphics"),
@@ -458,6 +460,14 @@ const FAMILIES: &[(&str, &str, &str)] = &[
     ("ath11k/", "qca-wifi", "Qualcomm Atheros Wi-Fi"),
     ("ath12k/", "qca-wifi", "Qualcomm Atheros Wi-Fi"),
     ("ar3k/", "qca-bt", "Qualcomm Atheros Bluetooth"),
+    ("ath3k", "qca-bt", "Qualcomm Atheros Bluetooth"),
+    ("ath6k/", "qca-wifi", "Qualcomm Atheros Wi-Fi"),
+    ("ti-connectivity/", "ti-wireless", "Texas Instruments Wi-Fi and Bluetooth"),
+    ("qed/", "server-eth", "Server network cards (QLogic, Chelsio, Mellanox, Netronome)"),
+    ("cxgb3/", "server-eth", "Server network cards (QLogic, Chelsio, Mellanox, Netronome)"),
+    ("cxgb4/", "server-eth", "Server network cards (QLogic, Chelsio, Mellanox, Netronome)"),
+    ("mellanox/", "server-eth", "Server network cards (QLogic, Chelsio, Mellanox, Netronome)"),
+    ("netronome/", "server-eth", "Server network cards (QLogic, Chelsio, Mellanox, Netronome)"),
     ("qca/", "qca-bt", "Qualcomm Atheros Bluetooth"),
     ("tigon/", "broadcom-eth", "Broadcom Ethernet"),
     ("bnx2x/", "broadcom-eth", "Broadcom Ethernet"),
@@ -1344,7 +1354,7 @@ impl Env for RealEnv {
     }
     fn audit(&mut self, line: &str) {
         // the job runs as a process of its own: the audit line goes to the job log (the tile copies it to the audit log)
-        println!("audit: {line}");
+        crate::qprintln!("audit: {line}");
     }
     fn free_bytes(&self, dir: &Path) -> Option<u64> {
         crate::k3sdev::space(dir).map(|s| s.0)

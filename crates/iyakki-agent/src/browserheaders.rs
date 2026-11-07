@@ -165,10 +165,11 @@ impl Store {
     }
 
     pub fn list(&self) -> Vec<HeaderRule> {
-        std::fs::read_to_string(&self.path).ok().and_then(|t| serde_json::from_str::<File>(&t).ok()).map(|f| f.rules).unwrap_or_default().into_iter().take(MAX_RULES).collect()
+        iyakki_schema::read_plain::<File>("browser header rules", &self.path, iyakki_schema::now_secs()).map(|f| f.rules).unwrap_or_default().into_iter().take(MAX_RULES).collect()
     }
 
     fn save(&self, rules: &[HeaderRule]) -> Result<(), String> {
+        iyakki_schema::plain_writable("browser header rules", &self.path)?;
         let tmp = self.path.with_extension("tmp");
         let text = serde_json::to_string(&File { rules: rules.to_vec() }).map_err(|e| e.to_string())?;
         std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &self.path)).map_err(|e| format!("The rules could not be saved: {e}"))

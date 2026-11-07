@@ -731,7 +731,29 @@ fn layout_tool(g: &mut Gfx, name: &str, status: ToolStatus, input: &str, input_f
         prims.push(Prim::Hit { x: lab, y: y + box_h - foot_h, w: bw, h: foot_h, act: Act::Toggle });
     }
     y += box_h;
+    // a table the assistant opened can be looked at whole in the DATA app: one click
+    if let (false, Some(path)) = (dim, output.and_then(|o| table_path_of(name, o))) {
+        let label = "Open in Data viewer";
+        let fsz = 12.0 * s;
+        let (fh, fw) = (g.line_height(fsz, Face::Sans), g.text_width(fsz, label, Face::Sans));
+        let (fx, fy) = (lab, y + 5.0 * s);
+        text(&mut prims, fx, fy, fsz, rgb(110, 160, 255), Face::Sans, label);
+        let warn = crate::links::warnings(label, &path);
+        links.push(LinkItem { link: mdtext::LinkRef { warn, text: label.to_string(), url: path }, rects: vec![(fx, fy, fw, fh)], underline: true });
+        y += fh + 6.0 * s;
+    }
     BlockLayout { h: y + 8.0 * s, dot: Some((nlh / 2.0, dot)), prims, toggle: Some(String::new()), sel, zones: vec![], links }
+}
+
+/// The table file a `data_open` result names ("Opened /path/x.csv as d1: ..."), when it can be opened by a link.
+fn table_path_of(tool: &str, out: &str) -> Option<String> {
+    if tool != "data_open" {
+        return None;
+    }
+    let first = out.lines().next()?.strip_prefix("Opened ")?;
+    let (path, _) = first.rsplit_once(" as ")?;
+    let low = path.to_ascii_lowercase();
+    ((low.ends_with(".csv") || low.ends_with(".tsv")) && path.starts_with('/') && !path.contains(char::is_whitespace)).then(|| path.to_string())
 }
 
 fn layout_approval(g: &mut Gfx, tool: &str, summary: &str, detail: &str, w: f32, s: f32) -> BlockLayout {

@@ -1643,6 +1643,13 @@ impl IdeApp {
                     (Ok(m), Ok(t), Ok(c)) => iyakki_agent::tasks::Budgets { max_minutes: if m == 0 { 30 } else { m.min(24 * 60) }, max_tokens: t, max_cost_cents: c, ..Default::default() },
                     (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return fail(self, kind, f, e),
                 };
+                // a goal that starts with "remember that ..." changes the project context first (the person typed it); what is left is the task
+                let goal = match self.context_intent_in_goal(&goal, cx) {
+                    Ok(Some(rest)) if rest.trim().is_empty() => return,
+                    Ok(Some(rest)) => rest,
+                    Ok(None) => goal,
+                    Err(e) => return fail(self, kind, f, e),
+                };
                 match self.spawn_tasks(vec![iyakki_agent::tasks::NewTask { title, goal, rows, agent: agent_id, model, budgets: Some(budgets), ..Default::default() }], cx) {
                     Ok(_) => {}
                     Err(e) => fail(self, kind, f, e),
@@ -2031,6 +2038,11 @@ impl IdeApp {
                 super::chat::LinkOut::Editor { path, line } => self.open_file(&path, line, cx),
             }
         }
+        // a web address clicked in a Markdown page opens in the Browser tab
+        let md_link = self.active.and_then(|i| self.ws.get_mut(i)).and_then(|w| w.editor.take_md_link());
+        if let Some(u) = md_link {
+            self.open_browser(Some(&u), cx);
+        }
         let now = now_secs();
         let tick = self.ticks;
         let active = self.active;
@@ -2284,6 +2296,33 @@ impl IdeApp {
             w.chat.prefill(&rest);
             false
         }
+    }
+
+    /// The New task form's goal is the person's own words: an instruction to change the project context in front of it is done at once
+    /// (like in the composer) and the rest is the task. `Ok(Some(rest))` when the context was changed; `Ok(None)` when the goal is just a
+    /// task or the text is a credential (the task path handles it as before); `Err` when the instruction needs a choice the form cannot ask.
+    /// The assistant's own `task_spawn` goals are written by a model and are never read this way.
+    pub(super) fn context_intent_in_goal(&mut self, goal: &str, cx: &AppCx) -> Result<Option<String>, String> {
+        use iyakki_agent::contextintent as ci;
+        let Some(det) = ci::detect(goal.trim()) else { return Ok(None) };
+        let Some(w) = self.active_mut() else { return Ok(None) };
+        let done = ci::apply(&w.root(), &cx.session.user, &det, w.ctx_last.as_deref(), iyakki_agent::clock::now_unix() as i64);
+        if done.refused {
+            return Ok(None);
+        }
+        if !done.choices.is_empty() {
+            return Err(format!("{}\nSay \"forget\"/\"update\" in the chat to choose one.", done.reply.lines().next().unwrap_or("")));
+        }
+        if let Some(t) = done.touched.clone() {
+            w.ctx_last = Some(t);
+        }
+        if done.undo.is_some() {
+            w.ctx_undo = done.undo.clone();
+        }
+        w.say(done.reply.lines().next().unwrap_or("").to_string(), !done.reply.starts_with("Not"));
+        w.notes.reload();
+        self.redraw = true;
+        Ok(Some(det.rest))
     }
 
     /// Take the last change of the project context back (the top-bar chip, `z` in the Context tab).

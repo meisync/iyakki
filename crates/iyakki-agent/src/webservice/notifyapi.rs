@@ -86,6 +86,13 @@ pub fn handle(c: &Ctx, id: &str) -> Out {
         "notif_unread" => ok(api::read(&hub, &me, nid, false, t).map_err(fail)?, String::new()),
         "notif_ack" => ok(api::ack(&hub, &me, nid, t).map_err(fail)?, String::new()),
         "notif_snooze" => ok(api::snooze(&hub, &me, nid, &json_body(c.req)?, t).map_err(fail)?, String::new()),
+        "notif_channels" => ok(api::channels(&hub, &me), String::new()),
+        "notif_optout" => {
+            let body = json_body(c.req)?;
+            let r = api::optout(&hub, &me, &body).map_err(fail)?;
+            let d = format!("{} {}", body["channel"].as_str().unwrap_or(""), if body["out"].as_bool() == Some(true) { "off" } else { "on" });
+            ok(r, d)
+        }
         "notif_delete" => ok(api::delete(&hub, &me, nid, t).map_err(fail)?, String::new()),
         _ => Err(Fail::new(501, "unsupported", "not implemented")),
     }

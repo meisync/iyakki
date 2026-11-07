@@ -206,17 +206,12 @@ impl Groups {
 
 /// The groups kept for this person: (name, colour, collapsed, addresses).
 pub fn load(cx: &AppCx) -> Vec<(String, usize, bool, Vec<String>)> {
-    let text = std::fs::read_to_string(path(cx)).unwrap_or_default();
-    let saved: Vec<Saved> = serde_json::from_str(&text).unwrap_or_default();
+    let saved: Vec<Saved> = iyakki_schema::read_plain("browser tab groups", &path(cx), iyakki_schema::now_secs()).unwrap_or_default();
     saved.into_iter().filter(|g| !g.urls.is_empty()).map(|g| (g.name, g.color, g.collapsed, g.urls)).collect()
 }
 
 pub fn save(cx: &AppCx, json: &str) {
-    let p = path(cx);
-    let tmp = p.with_extension("tmp");
-    if std::fs::write(&tmp, json).is_ok() {
-        let _ = std::fs::rename(&tmp, &p);
-    }
+    super::browser_config::write_checked("browser tab groups", &path(cx), json);
 }
 
 fn path(cx: &AppCx) -> std::path::PathBuf {
@@ -226,17 +221,12 @@ fn path(cx: &AppCx) -> std::path::PathBuf {
 /// The pages open in tabs that belong to no group when the browser was last used, so they come back the next time it opens
 /// (the groups keep their own tabs, see above). Only web addresses are kept, at most `max`.
 pub fn load_open(cx: &AppCx, max: usize) -> Vec<String> {
-    let text = std::fs::read_to_string(open_path(cx)).unwrap_or_default();
-    let urls: Vec<String> = serde_json::from_str(&text).unwrap_or_default();
+    let urls: Vec<String> = iyakki_schema::read_plain("browser open pages", &open_path(cx), iyakki_schema::now_secs()).unwrap_or_default();
     urls.into_iter().filter(|u| keep_open(u)).take(max).collect()
 }
 
 pub fn save_open(cx: &AppCx, json: &str) {
-    let p = open_path(cx);
-    let tmp = p.with_extension("tmp");
-    if std::fs::write(&tmp, json).is_ok() {
-        let _ = std::fs::rename(&tmp, &p);
-    }
+    super::browser_config::write_checked("browser open pages", &open_path(cx), json);
 }
 
 /// A page worth bringing back: a web address (not a blank tab, a file, a data page or an internal page).

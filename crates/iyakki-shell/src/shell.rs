@@ -101,10 +101,10 @@ impl ShellEnv {
         // cloud mode without sound hardware: no audio probes, no soft volume, no device watcher
         // (the sound card may appear after the shell started: the MacBookPro14,1's does, about 11 s after boot; then the
         // output is set up as soon as it is there, whoever is signed in)
-        if iyakki_agent::cloudmode::detect(services.cloud_setting()).audio_services {
-            services.start_sound_output();
-        } else if !services.cloud_setting().eq(&iyakki_agent::cloudmode::Setting::On) {
-            services.start_sound_output_when_ready();
+        match sound_boot_plan(services.cloud_setting(), &iyakki_agent::cloudmode::detect(services.cloud_setting())) {
+            SoundBoot::Now => services.start_sound_output(),
+            SoundBoot::WhenReady => services.start_sound_output_when_ready(),
+            SoundBoot::Never => {}
         }
         let t_sound = t1.elapsed();
         // model downloads report their progress over time, like the radio
@@ -137,6 +137,34 @@ impl ShellEnv {
             data_volatile: iyakki_storage::data_location(&iyakki_storage::Roots::real(), std::path::Path::new(&p.data)) == iyakki_storage::DataLocation::Memory,
         })
     }
+}
+
+/// What the boot does about the sound output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SoundBoot {
+    /// Probe the outputs and set up the soft volume now.
+    Now,
+    /// No sound card yet: wait for one to appear (some laptops register theirs ten seconds after boot).
+    WhenReady,
+    /// Cloud mode forced on: no probes, no soft volume, no device watcher.
+    Never,
+}
+
+/// Cloud mode without sound hardware skips the sound-output probe and the soft-volume setup at boot; a forced setting never
+/// starts the watcher either.
+pub(crate) fn sound_boot_plan(setting: iyakki_agent::cloudmode::Setting, mode: &iyakki_agent::cloudmode::CloudMode) -> SoundBoot {
+    if mode.audio_services {
+        SoundBoot::Now
+    } else if setting == iyakki_agent::cloudmode::Setting::On {
+        SoundBoot::Never
+    } else {
+        SoundBoot::WhenReady
+    }
+}
+
+/// The once-a-second camera look runs on a real machine whose mode keeps the camera; tests and servers never look.
+pub(crate) fn wants_system_camera(in_test: bool, mode: &iyakki_agent::cloudmode::CloudMode) -> bool {
+    !in_test && mode.camera_watch
 }
 
 /// The browser's network: the HTTP client behind connection limits (6 per host, 32 overall, urgent requests first), with one page
@@ -381,6 +409,8 @@ pub struct Shell {
     stash: Option<(Box<dyn App>, PApp)>,
     /// What the bell shows: unread notifications, approvals waiting, overdue tasks.
     badge: Badge,
+    /// How many updates the last check found (the STORE tile says so); read with the bell's count.
+    update_count: usize,
     /// System sounds: what has been seen so far (see `cues`).
     cues: crate::cues::CueState,
     /// The clock in the top bar, and the rectangle whose hover shows its tooltip this frame.
@@ -530,7 +560,7 @@ impl Shell {
         };
         // tests run as a desktop unless one asks for cloud mode (`set_cloud_for_test`)
         let cloud = if cfg!(test) { iyakki_agent::cloudmode::CloudMode::desktop() } else { iyakki_agent::cloudmode::detect(env.services.cloud_setting()) };
-        let mut sh = Shell { env, hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, devask: Default::default(), tzask: Default::default(), camera: if cfg!(test) || !cloud.camera_watch { crate::camera::Presence::none() } else { crate::camera::Presence::system() }, cam_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), osk: Default::default(), tenants: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
+        let mut sh = Shell { env, hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), update_count: 0, cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, devask: Default::default(), tzask: Default::default(), camera: if wants_system_camera(cfg!(test), &cloud) { crate::camera::Presence::system() } else { crate::camera::Presence::none() }, cam_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), osk: Default::default(), tenants: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
         if cloud.on {
             sh.apply_cloud(cloud);
         }
@@ -720,7 +750,7 @@ impl Shell {
         // no camera scanner (the empty placeholder). When it turns out to be a desktop after all, the real scanner must take over, or the CAMERA
         // tile says "no camera" for the whole session (seen on a Lenovo Legion: the kernel had /dev/video0, the app looked in a folder that
         // does not exist).
-        if !cfg!(test) && c.camera_watch && !self.camera.looks_at_the_machine() {
+        if wants_system_camera(cfg!(test), &c) && !self.camera.looks_at_the_machine() {
             self.camera = crate::camera::Presence::system();
         }
         self.cloud = c;
@@ -917,8 +947,10 @@ impl Shell {
         // shares marked "keep running" start again for this person (everything else in Settings -> Shared folders stays stopped)
         {
             let (audit, user) = (self.env.audit.clone(), s.user.clone());
-            let allow = iyakki_agent::sharedfolder::allow_fn(s.policy.clone(), &s.user, self.env.services.dir());
-            iyakki_agent::sharedfolder::for_user(self.env.services.dir(), &s.user, Arc::new(move |e, d| audit.record(&user, e, d)), allow).restore();
+            let admin = s.role == iyakki_sec::policy::Role::Admin;
+            let allow = iyakki_agent::sharedfolder::allow_fn_for(admin, s.policy.clone(), &s.user, self.env.services.dir());
+            let scope = iyakki_agent::sharedfolder::scope_for(admin, &s.user, self.env.services.dir());
+            iyakki_agent::sharedfolder::for_user(self.env.services.dir(), &s.user, Arc::new(move |e, d| audit.record(&user, e, d)), allow, scope).restore();
         }
         // SSH tunnels the person left enabled start again (their keys are in the vault that was just opened)
         {
@@ -1719,6 +1751,19 @@ impl Shell {
             self.badge = b;
             self.stale = true;
         }
+        let updates = if self.session.is_some() { iyakki_agent::store::updatecheck::Report::load(self.env.services.dir()).map_or(0, |r| r.count()) } else { 0 };
+        if updates != self.update_count {
+            self.update_count = updates;
+            self.stale = true;
+        }
+    }
+
+    /// The line under a tile's name: the STORE tile says how many updates the last check found.
+    pub fn tile_sub(&self, app: PApp, sub: &str) -> String {
+        match (app, self.update_count) {
+            (PApp::Store, n) if n > 0 => format!("{n} update{}", if n == 1 { "" } else { "s" }),
+            _ => sub.to_string(),
+        }
     }
 
     /// A detached job ended (see `docs/JOBS.md`): one note in the inbox for each, whichever app is open, so the bell shows it and
@@ -2391,7 +2436,7 @@ impl Shell {
             }
             if self.tick >= r.next_sound && r.player.as_mut().is_none_or(|p| !p.is_playing()) {
                 let cmd = self.env.services.voice_settings().play_cmd;
-                r.player = iyakki_agent::voice::Player::start(&cmd, &iyakki_agent::calendar::alarm_wav()).ok();
+                r.player = iyakki_agent::calendar::ring(&cmd).ok();
                 r.next_sound = self.tick + 60;
             }
             self.stale = true;
@@ -3845,13 +3890,14 @@ impl Shell {
             }
             let lw = g.text_width(ls, t.label, Face::Bold);
             g.text(x + (r.w - lw) / 2.0, y + 26.0 * s + badge + 18.0 * s + (24.0 * s - ls) / 2.0, ls, if allowed { TEXT } else { DIM }, t.label, Face::Bold);
-            let sub = if allowed { t.sub } else if permitted { self.camera.tile_hint() } else { "Restricted" };
+            let sub = if allowed { self.tile_sub(t.app, t.sub) } else if permitted { self.camera.tile_hint().to_string() } else { "Restricted".to_string() };
+            let sub = sub.as_str();
             let mut ss = 14.0 * s;
             while ss > 8.0 * s && g.text_width(ss, sub, Face::Sans) > fit {
                 ss -= s * 0.5;
             }
             let lw = g.text_width(ss, sub, Face::Sans);
-            g.text(x + (r.w - lw) / 2.0, y + 26.0 * s + badge + 54.0 * s, ss, MUTED, sub, Face::Sans);
+            g.text(x + (r.w - lw) / 2.0, y + 26.0 * s + badge + 54.0 * s, ss, if t.app == PApp::Store && self.update_count > 0 { t.accent } else { MUTED }, sub, Face::Sans);
             if launcher::is_demo(t.app) {
                 crate::fx::demo_ribbon(g, R::new(x, y, r.w, r.h), s);
             }
@@ -6039,6 +6085,24 @@ pub(crate) mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(other.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn f12_belongs_to_the_browser_tile_while_it_is_open_and_is_the_screenshot_key_elsewhere() {
+        let (e, _) = env("shotf12");
+        let mut sh = Shell::new(e);
+        setup_admin(&mut sh);
+        let mut g = Gfx::new(1280, 720);
+        sh.jump_to("browser", "");
+        sh.render(&mut g);
+        assert!(sh.app_claims_f12(), "the browser tile claims F12");
+        key(&mut sh, Key::F(12));
+        assert!(matches!(sh.shot, Shot::Off), "no screenshot while the browser tile has the key");
+        sh.jump_to("chat", "");
+        sh.render(&mut g);
+        assert!(!sh.app_claims_f12());
+        key(&mut sh, Key::F(12));
+        assert!(matches!(sh.shot, Shot::Snap), "elsewhere F12 is still the screenshot key");
     }
 
     #[test]

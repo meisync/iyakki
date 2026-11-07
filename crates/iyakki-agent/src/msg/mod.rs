@@ -16,6 +16,7 @@ pub mod accounts;
 pub mod e2ee;
 pub mod matrix;
 pub mod service;
+pub mod tools;
 
 #[cfg(test)]
 pub(crate) mod fake_hs;

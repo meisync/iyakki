@@ -157,9 +157,11 @@ def main():
         cfg = open(f"{board}/grub.cfg").read().replace("__KERNEL_PATH__", "/boot/bzImage").replace("__INITRD_PATH__", "/boot/initrd")
         open(f"{d}/boot/grub/grub.cfg", "w").write(cfg)
         shutil.copytree(f"{board}/grub", f"{d}/boot/grub/themes/iyakki", ignore=shutil.ignore_patterns("iyakki-bg.png.x"))
-        pf2 = find_first(["/usr/share/grub/unicode.pf2", "/usr/share/grub2/unicode.pf2"])
-        if pf2:
-            shutil.copy(pf2, f"{d}/boot/grub/fonts/unicode.pf2")
+        mk = shutil.which("grub-mkfont") or shutil.which("grub2-mkfont")
+        if mk:
+            assets = os.path.join(HERE, "../../crates/iyakki-shell/assets")
+            run([mk, "-s", "30", "--no-hinting", "--range=0x20-0x7e,0xa0-0x24f", "-o", f"{d}/boot/grub/fonts/iyakki-menu.pf2", f"{assets}/DejaVuSans-Bold.ttf"])
+            run([mk, "-s", "24", "-c", "18", "-d", "6", "--range=0x20-0x7e,0xa0-0xff", "-o", f"{d}/boot/grub/fonts/iyakki-term.pf2", f"{assets}/DejaVuSansMono.ttf"])
         shutil.copy(initrd, f"{d}/boot/initrd")
         if signed:
             shutil.copy(signed_kernel, f"{d}/boot/bzImage")

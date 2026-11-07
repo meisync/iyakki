@@ -792,3 +792,12 @@ fn sign_out_closes_nothing_by_itself_and_says_a_drive_is_still_open_unless_the_s
     assert_eq!(account_owner("nobody", &pw.display().to_string()), None);
     let _ = std::fs::remove_file(pw);
 }
+
+#[test]
+fn encrypted_volumes_are_labelled_unsupported_and_the_person_is_told_what_to_use() {
+    for fs in [Fs::Luks, Fs::BitLocker] {
+        let m = fs.never_mountable().expect("encrypted volumes never mount");
+        assert!(m.contains("Not supported in IYAKKI") && m.contains("unlock needs the key"), "{m}");
+        assert!(m.contains("tools"), "{m}");
+    }
+}

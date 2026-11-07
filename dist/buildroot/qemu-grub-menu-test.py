@@ -28,10 +28,13 @@ subprocess.run(["grub-mkimage", "-O", "x86_64-efi", "-o", os.path.join(esp, "EFI
 open(os.path.join(esp, "boot/grub/grub.cfg"), "w").write(open(os.path.join(board, "grub.cfg")).read().replace("__KERNEL_PATH__", "/boot/bzImage").replace("__INITRD_PATH__", "/boot/initrd"))
 for f in ("iyakki-bg.png", "theme.txt"):
     shutil.copy(os.path.join(board, "grub", f), os.path.join(esp, "boot/grub/themes/iyakki", f))
-font = next((p for p in ("/usr/share/grub/unicode.pf2", "/boot/grub/fonts/unicode.pf2", "/usr/share/grub2/unicode.pf2") if os.path.exists(p)), None)
-if not font:
-    sys.exit("FAIL: no unicode.pf2 on this PC (install grub-common)")
-shutil.copy(font, os.path.join(esp, "boot/grub/fonts/unicode.pf2"))
+assets = os.path.join(here, "../../crates/iyakki-shell/assets")
+for src, out, args in (("DejaVuSans-Bold.ttf", "iyakki-menu.pf2", ["-s", "30", "--no-hinting", "--range=0x20-0x7e,0xa0-0x24f"]),
+                       ("DejaVuSansMono.ttf", "iyakki-term.pf2", ["-s", "24", "-c", "18", "-d", "6", "--range=0x20-0x7e,0xa0-0xff"])):
+    mk = shutil.which("grub-mkfont") or shutil.which("grub2-mkfont")
+    if not mk:
+        sys.exit("FAIL: no grub-mkfont on this PC (install grub-common)")
+    subprocess.run([mk, *args, "-o", os.path.join(esp, "boot/grub/fonts", out), os.path.join(assets, src)], check=True)
 code = next((p for p in ("/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/share/OVMF/OVMF_CODE.fd", "/usr/share/ovmf/OVMF.fd") if os.path.exists(p)), None)
 vars_src = next((p for p in ("/usr/share/OVMF/OVMF_VARS_4M.fd", "/usr/share/OVMF/OVMF_VARS.fd") if os.path.exists(p)), None)
 if not (code and vars_src):

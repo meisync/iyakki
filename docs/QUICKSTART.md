@@ -93,6 +93,12 @@ beside the board.
 **Expected:** the board with panels and a time range; without a data source, panels explain what to connect
 ([`DASHBOARD.md`](DASHBOARD.md)).
 
+**Object storage (S3).** Store, Setup, Cluster: "SeaweedFS (object storage, S3)" and "RustFS (object storage, S3, Rust, young)" install an
+S3-compatible store into the cluster (pick one or both). The licence (Apache-2.0) is shown before Install; the keys are generated into your
+vault (`svc.seaweedfs.access-key`, `svc.seaweedfs.secret-key`, record `s3.seaweedfs`; the same with `rustfs`). The address works inside the cluster only.
+The assistant has `object_storage_status`, `object_storage_install` and `object_storage_remove`; removing keeps the data unless you ask to delete it
+([`PLATFORM-SERVICES.md`](PLATFORM-SERVICES.md)).
+
 ## 7. Read a story aloud
 
 Needs a text-to-speech engine (for example piper) set in **SETTINGS -> Voice** (`v` to set the TTS command, `y` to test).
@@ -112,6 +118,18 @@ and without `sudo`, in a folder under the CLI tile's own data.
 **Expected:** the status says it is installed with a version. Press `g` to put the vendor's sign-in command in the
 terminal line (it is not run for you), run it in a normal terminal, then in **SETTINGS -> Agents** use Claude Code as
 a chat backend (`Ctrl+P` in the chat). Read the terms note first: [`EXTERNAL-AGENTS.md`](EXTERNAL-AGENTS.md#terms-of-service-decision-for-the-owner).
+
+## Removing what Quick install put on the machine
+
+Every item of Store -> Setup can be removed again. Open its tile and press **Remove** (or `r`). A card lists what goes, what stays and, if you tick the box, what is deleted too.
+
+- **Safe by default.** Removing stops the program or the pod and takes away what IYAKKI added (the Deployment and Service, the program and its folder, the Models entry). Your **data stays**: the volume of the item, its database or models, your vault entries and your DASH connections. Installing the item again finds the same volume and the same passwords.
+- **Also delete the data** is a tick, off by default. The card says how much it frees and that it cannot be undone. Items that are only their own data (a Linux sandbox, the Kokoro model, the voice pack) are removed only with this tick.
+- **Dependants.** k3s and Lemonade cannot be removed while other installed items need them: the card lists them. Tick "Also remove first" to remove them together (their data is kept), or remove them yourself first. Tools that only use another (Node.js, Python) get a warning.
+- **Only IYAKKI's own things.** Each target is checked against IYAKKI's namespaces and folders before it is touched; a cluster found on the machine that is not IYAKKI's is never removed.
+- **If it stops half-way,** the card says which step failed and offers **Retry**; running a removal twice is harmless.
+- **Where the data lives.** The volumes of the cluster are folders under the data volume (`k3s-dev/data/storage`); after an install their reclaim policy is set to Retain, so even deleting a claim by hand does not delete the folder. On a live session without a persistent data volume the card warns that everything is lost at the next restart.
+- **From chat:** `quick_install_status` lists the items and `quick_uninstall` removes one. It asks you every time, with the same card, and `delete_data` is false unless you asked for it.
 
 ## Where next
 

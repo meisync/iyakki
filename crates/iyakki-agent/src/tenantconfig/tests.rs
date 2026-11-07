@@ -1380,3 +1380,35 @@ fn tcfg_the_real_vault_binding_maps_references_and_reads_locked_without_access()
     assert_eq!(vault::for_user_with(&d, "mia", &crate::cloudvaultlink::Link::NotConfigured).state(&tenant), SecretState::Set);
     vault::unbind(&d);
 }
+
+#[test]
+fn tcfg_the_file_is_read_fresh_on_every_request_and_stays_consistent_under_load() {
+    let x = t("load");
+    x.write_file(json!({"schema": 1, "items": [{"kind": "media.policy", "enabled": true, "managed": true, "values": {"media": "allow"}}]}));
+    x.put("adam", "egress.policy", &[], json!({"enabled": true, "values": {"allowed_domains": ["a.example.com"]}})).unwrap();
+    let dir = x.dir.clone();
+    // many readers while a writer keeps committing: every read is a whole document (atomic writes), never an error
+    let readers: Vec<_> = (0..8)
+        .map(|_| {
+            let d = dir.clone();
+            std::thread::spawn(move || {
+                let s = super::store::Store::new(&d);
+                for _ in 0..200 {
+                    let c = s.load().expect("a read during a write is whole");
+                    assert!(c.file_error.is_none());
+                    assert!(!c.local.is_empty());
+                }
+            })
+        })
+        .collect();
+    for i in 0..20 {
+        x.put("adam", "egress.policy", &[], json!({"enabled": true, "values": {"allowed_domains": [format!("h{i}.example.com")]}})).unwrap();
+    }
+    for r in readers {
+        r.join().unwrap();
+    }
+    // no cache: an edit of the operator's file is seen by the very next request
+    assert_eq!(x.get("adam", "media.policy", &[]).unwrap()["managed"], true);
+    x.write_file(json!({"schema": 1, "items": []}));
+    assert_eq!(x.get("adam", "media.policy", &[]).map(|v| v["managed"].clone()).unwrap_or(json!(false)), json!(false));
+}

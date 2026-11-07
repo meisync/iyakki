@@ -893,12 +893,32 @@ impl Client {
             wraps.insert(m.to_string(), new.wrap(&s.name(), m, ng, &keys)?);
         }
         let mut values = BTreeMap::new();
+        let mut plains: BTreeMap<String, zeroize::Zeroizing<Vec<u8>>> = BTreeMap::new();
         for n in self.list(s)? {
             let v = self.call("GET", &format!("/v1/scope/{}/secrets/{n}", s.name()), None)?;
-            let plain = old.open(&s.name(), &n, g, v["value"].as_str().unwrap_or(""))?;
-            values.insert(n.clone(), new.seal(&s.name(), &n, ng, &plain)?);
+            let plain = zeroize::Zeroizing::new(old.open(&s.name(), &n, g, v["value"].as_str().unwrap_or(""))?);
+            let sealed = new.seal(&s.name(), &n, ng, &plain)?;
+            // the service cannot read what it stores, so the check is made here: before sending, the new ciphertext must open to the same value
+            if new.open(&s.name(), &n, ng, &sealed).map(zeroize::Zeroizing::new).ok().as_ref() != Some(&plain) {
+                return Err(format!("rotation of {} stopped: {n} did not seal again correctly; nothing was changed", s.name()));
+            }
+            values.insert(n.clone(), sealed);
+            plains.insert(n, plain);
         }
-        self.call("POST", &format!("/v1/scope/{}/rotate", s.name()), Some(&json!({"remove": remove, "generation": ng, "wraps": wraps, "values": values}))).map(|_| ())
+        self.call("POST", &format!("/v1/scope/{}/rotate", s.name()), Some(&json!({"remove": remove, "generation": ng, "wraps": wraps, "values": values})))?;
+        // and after: what the service now holds must open with the new key to the same values (a damaged write is reported at once, not found later)
+        let (g2, check) = self.scope_key(s)?;
+        if g2 != ng {
+            return Err(format!("rotation of {} could not be verified: the service reports generation {g2}, not {ng}", s.name()));
+        }
+        for (n, plain) in &plains {
+            let v = self.call("GET", &format!("/v1/scope/{}/secrets/{n}", s.name()), None)?;
+            let ok = check.open(&s.name(), n, ng, v["value"].as_str().unwrap_or("")).map(zeroize::Zeroizing::new).ok().as_ref() == Some(plain);
+            if !ok {
+                return Err(format!("rotation of {} could not be verified: {n} does not open to the same value with the new key", s.name()));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1365,6 +1385,68 @@ mod tests {
         assert!(e.starts_with("409"), "erin already has a key: {e}");
         assert!(super::run(&a, &mut out).unwrap_err().contains("usage"));
         run.stop();
+    }
+
+    #[test]
+    fn the_enrol_route_is_covered_by_the_nonce_and_the_rate_limits() {
+        let d = Dir::new();
+        let s = acme_with_unenrolled(&d);
+        let body = serde_json::to_vec(&json!({"name": "erin", "keys": keys(60).public()})).unwrap();
+        let req = |ts: u64| Request {
+            method: "POST".into(),
+            path: "/v1/enroll".into(),
+            query: Default::default(),
+            headers: [("authorization".to_string(), keys(4).sign_request("acme/dave", "POST", "/v1/enroll", ts, &body))].into(),
+            body: body.clone(),
+        };
+        let first = req(NOW);
+        assert_eq!(s.handle(&first, NOW).status, 200);
+        // the captured request, sent again, is a replay: refused before the route looks at it (the same keys would be a no-op anyway)
+        assert_eq!(s.handle(&first, NOW + 1).status, 401, "replayed enrol request");
+        // a request signed too long ago is refused too
+        assert_eq!(s.handle(&req(NOW - 500), NOW).status, 401, "old enrol request");
+        // a flood from one address is slowed before the signature is even checked
+        s.set_limits(Limits { source_burst: 3.0, source_per_sec: 0.0, ..Limits::default() });
+        let ip: IpAddr = "192.0.2.9".parse().unwrap();
+        let codes: Vec<u16> = (0..6).map(|i| s.handle_from(&req(NOW + 10 + i), NOW + 10, Some(ip)).status).collect();
+        assert!(codes.contains(&429), "{codes:?}");
+    }
+
+    #[test]
+    fn the_listener_reads_certificates_from_a_live_loopback_vault_through_the_adapter() {
+        use crate::cloudlisten::vault::{Reader, SecretReader, VaultCerts};
+        use crate::cloudlisten::CertSource;
+        use crate::cloudroute::CertRef;
+        let d = Dir::new();
+        drop(acme_at(&d, unix_now()));
+        let run = start("127.0.0.1:0".parse().unwrap(), &d.0, None).unwrap();
+        let port = run.local_addr().port();
+        let client = |n: u8, u: &str| Client { host: "127.0.0.1".into(), port, fingerprint: Some(run.fingerprint.clone()), who: member("acme", u), keys: keys(n) };
+        let alice = client(1, "alice");
+        alice.create_scope(&Scope::Tenant).unwrap();
+        let (chain, key) = crate::cloudroute::self_signed("app.example.test").unwrap();
+        alice.put(&Scope::Tenant, "appcert-chain", chain.as_bytes()).unwrap();
+        alice.put(&Scope::Tenant, "appcert-key", key.as_bytes()).unwrap();
+        alice.put(&Scope::Tenant, "clients-ca", chain.as_bytes()).unwrap();
+        let certs = VaultCerts::new(Box::new(Reader { client: client(1, "alice"), scope: Scope::Tenant }));
+        // the secrets come back sealed on the way in and opened on this side: the listener gets the PEM it was given
+        assert_eq!(certs.load("app.example.test", &CertRef::Vault("appcert".into())).unwrap(), (chain.clone(), key.clone()));
+        assert_eq!(certs.load_client_ca("clients-ca").unwrap(), chain);
+        // a rotation in the vault reaches the next load
+        let (chain2, key2) = crate::cloudroute::self_signed("app.example.test").unwrap();
+        alice.put(&Scope::Tenant, "appcert-chain", chain2.as_bytes()).unwrap();
+        alice.put(&Scope::Tenant, "appcert-key", key2.as_bytes()).unwrap();
+        assert_eq!(certs.load("app.example.test", &CertRef::Vault("appcert".into())).unwrap(), (chain2, key2));
+        // a missing secret, a name that is not a name, and a member without the scope key are errors that hold no secret text
+        let e = certs.load("app.example.test", &CertRef::Vault("nothere".into())).unwrap_err();
+        assert!(e.contains("nothere-chain") && e.contains("404"), "{e}");
+        assert!(certs.load("app.example.test", &CertRef::Vault("../x".into())).is_err());
+        let carol = Reader { client: client(3, "carol"), scope: Scope::Tenant };
+        let e = carol.read("appcert-key").unwrap_err();
+        assert!(!e.contains("BEGIN"), "{e}");
+        // a vault that has gone away is an error, not a hang or a panic
+        run.stop();
+        assert!(certs.load("app.example.test", &CertRef::Vault("appcert".into())).is_err());
     }
 
     #[test]

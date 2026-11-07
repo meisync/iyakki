@@ -590,16 +590,16 @@ fn install_all_recommended_asks_with_sizes_then_starts_the_jobs() {
 #[test]
 fn install_all_in_this_category_has_the_same_review() {
     let (mut a, cx) = rig("su-cat-all", Role::Admin, full_machine(), facts(&[(Item::DuckDb, Presence::Installed("v1".into()))]));
-    // Data: DuckDB is there; Elasticsearch, OpenSearch, Prometheus, ClickHouse, the graph database and the registry are missing and need k3s
-    assert_eq!(a.setup.category_targets(Gk::Data), vec![Item::Elasticsearch, Item::OpenSearch, Item::Prometheus, Item::ClickHouse, Item::GraphDb, Item::Registry]);
+    // Data: DuckDB is there; Elasticsearch, OpenSearch, Prometheus, ClickHouse, the graph database, the two object stores and the registry are missing and need k3s
+    assert_eq!(a.setup.category_targets(Gk::Data), vec![Item::Elasticsearch, Item::OpenSearch, Item::Prometheus, Item::ClickHouse, Item::GraphDb, Item::SeaweedFs, Item::RustFs, Item::Registry]);
     let c = a.setup.plan_category(Gk::Data);
-    assert_eq!(c.title, "Install 6 items in Data services?");
+    assert_eq!(c.title, "Install 8 items in Data services?");
     assert_eq!(c.steps[0], Item::K3s, "what they need comes first");
     // the popup of a Data tile has the button, with the count
     a.setup.open_popup(Item::DuckDb);
     let g = draw(&mut a, &cx, 1280, 720);
     let b = g.hits.iter().find(|h| h.ev == Event::Tab(POP_ALL)).expect("Install all in this category");
-    assert_eq!(b.label, "Install all in Data (6)");
+    assert_eq!(b.label, "Install all in Data (8)");
     a.handle(&Event::Tab(POP_ALL), &cx);
     assert!(a.setup.confirm.is_some());
     let g = draw(&mut a, &cx, 1280, 720);

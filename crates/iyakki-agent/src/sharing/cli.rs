@@ -240,44 +240,44 @@ pub fn main(args: &[String]) -> i32 {
         let b = control::FileBackend { data };
         if args[0] == "wifi-set" {
             let [_, ssid, pass] = args else {
-                eprintln!("usage: iyakki share wifi-set NAME PASSWORD (the password is 8 to 63 characters)");
+                crate::qeprintln!("usage: iyakki share wifi-set NAME PASSWORD (the password is 8 to 63 characters)");
                 return 2;
             };
             return match b.set_hotspot(ssid, pass) {
                 Ok(()) => {
-                    println!("The hotspot is called {ssid:?} now. It takes effect the next time the hotspot starts.");
+                    crate::qprintln!("The hotspot is called {ssid:?} now. It takes effect the next time the hotspot starts.");
                     0
                 }
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    crate::qeprintln!("error: {e}");
                     1
                 }
             };
         }
         return match b.hotspot() {
             Some((s, p)) => {
-                println!("name: {s}\npassword: {p}");
+                crate::qprintln!("name: {s}\npassword: {p}");
                 0
             }
             None => {
-                eprintln!("error: cannot read the hotspot settings (run this as root)");
+                crate::qeprintln!("error: cannot read the hotspot settings (run this as root)");
                 1
             }
         };
     }
     if args.first().map(String::as_str) == Some("wifi-caps") {
         for l in wifi_caps_lines() {
-            println!("{l}");
+            crate::qprintln!("{l}");
         }
         return 0;
     }
     let cmd = match parse(args) {
         Ok(c) => c,
         Err(e) => {
-            println!("{e}");
+            crate::qprintln!("{e}");
             return 2;
         }
     };
     let b = control::FileBackend { data: std::path::PathBuf::from("/var/lib/iyakki") };
-    run(&b, cmd, &mut |l| println!("{l}"), 8000)
+    run(&b, cmd, &mut |l| crate::qprintln!("{l}"), 8000)
 }

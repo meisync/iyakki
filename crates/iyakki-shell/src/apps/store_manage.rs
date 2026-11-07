@@ -151,6 +151,8 @@ pub(super) struct Drag {
 pub(super) enum EditKind {
     Tags(String),
     Alias(String),
+    /// The person's private comment on a package (store_rating.rs).
+    Comment(String),
     /// A new group; `then_move` is an item to put in it at once.
     NewGroup { then_move: Option<String> },
     RenameGroup(String),
@@ -230,6 +232,7 @@ impl StoreApp {
         }
         self.iview = View::from_id(&self.org.view);
         self.org_rev += 1;
+        self.rate = iyakki_agent::store::ratings::Ratings::load(self.store.dir(), &cx.session.user);
     }
 
     pub(super) fn org_save(&mut self) {
@@ -779,7 +782,7 @@ impl StoreApp {
         let word_start = |v: &str| v.rfind(',').map_or(0, |i| i + 1);
         match k {
             Key::Esc => {
-                self.mode = if self.idetail.is_some() { Mode::Detail } else { Mode::Browse };
+                self.mode = self.back_mode();
                 return;
             }
             Key::Tab if matches!(st.kind, EditKind::Tags(_)) => {
@@ -806,9 +809,11 @@ impl StoreApp {
             }
         }
         // Enter: apply
-        let Mode::Edit(st) = std::mem::replace(&mut self.mode, if self.idetail.is_some() { Mode::Detail } else { Mode::Browse }) else { return };
+        let back = self.back_mode();
+        let Mode::Edit(st) = std::mem::replace(&mut self.mode, back) else { return };
         let text = st.field.value.trim().to_string();
         match st.kind {
+            EditKind::Comment(key) => self.save_comment(&key, &text, cx),
             EditKind::Tags(key) => {
                 let tags: Vec<String> = text.split(',').map(str::to_string).collect();
                 match self.org.set_tags(&key, &tags) {

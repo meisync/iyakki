@@ -208,3 +208,41 @@ fn removing_an_account_removes_its_token_rooms_and_position() {
     assert!(!files.contains("home") && !files.contains("s1") && !files.contains(PLAIN), "{files}");
     assert!(r.svc.remove("home").is_err());
 }
+
+#[test]
+fn the_assistant_can_list_accounts_and_send_only_to_a_saved_room_by_name_after_a_card_that_always_asks() {
+    use super::tools::{MessageTools, LIST, SEND};
+    use crate::agent::Tools;
+    use serde_json::json;
+    let hs = FakeHs::start();
+    let r = rig("tool", "ana", None);
+    r.svc.add_matrix("Home", &hs.url(), pw(), "").unwrap();
+    let audit = r.audit.clone();
+    let t = MessageTools::new(Arc::new(crate::assign::tests_support::NoTools), Arc::new(r.svc));
+    let defs = t.defs();
+    assert_eq!(defs.iter().find(|d| d.spec.name == SEND).unwrap().risk, crate::agent::Risk::Ask);
+    assert_eq!(defs.iter().find(|d| d.spec.name == LIST).unwrap().risk, crate::agent::Risk::Safe);
+    // the list shows labels and room names and nothing secret
+    let l = t.call(LIST, &json!({})).unwrap();
+    assert!(l.contains("Home") && l.contains("main") && !l.contains(TOKEN) && !l.contains(PLAIN), "{l}");
+    // the card shows the whole text; it always asks and a standing allow does not skip it
+    let args = json!({"text": "dinner at 7", "room": "main"});
+    let card = t.preview(SEND, &args).unwrap();
+    assert!(card.contains("dinner at 7") && card.contains("\"main\"") && card.contains("Home"), "{card}");
+    assert!(!t.pre_approved(SEND) && !t.approved_always(SEND) && t.grant_blocker(SEND, &args).is_some());
+    assert!(crate::agent::hard_ask(SEND, &args).is_some(), "asks in Auto mode too");
+    // nothing is sent by the preview or a dry run; a real send reaches the room once, and the audit has counts only
+    let dry = t.call(SEND, &json!({"text": "dinner at 7", "dry_run": true})).unwrap();
+    assert!(dry.contains("dry run") && hs.count("PUT", "/send/") == 0, "{dry}");
+    let ok = t.call(SEND, &args).unwrap();
+    assert!(ok.contains("accepted by the homeserver") && hs.count("PUT", "/send/") == 1, "{ok}");
+    assert!(!audit.lock().unwrap().join("\n").contains("dinner"));
+    // refusals: no text, too long, a raw room id, an unknown room, an unknown account; none reaches the homeserver
+    for bad in [json!({"text": "  "}), json!({"text": "x".repeat(super::tools::MAX_TEXT + 1)}), json!({"text": "x", "room": PLAIN}), json!({"text": "x", "room": "attacker"}), json!({"text": "x", "account": "nobody"})] {
+        assert!(t.refusal(SEND, &bad).is_some(), "{bad}");
+        assert!(t.call(SEND, &bad).is_err(), "{bad}");
+    }
+    assert_eq!(hs.count("PUT", "/send/"), 1);
+    // other tools pass through
+    assert!(!super::tools::is_message_tool("now"));
+}

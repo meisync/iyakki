@@ -364,6 +364,8 @@ impl SettingsApp {
         line(g, &mut y, 15.0, TEXT, Face::Bold, &format!("{me}: {} of this tenant", word(mine)));
         let help = if mine >= TenantRole::Admin { "Owners and administrators add people and namespaces; only a namespace's administrators add people to it." } else { "You see the namespaces you are in. Only owners and administrators see the member list." };
         line(g, &mut y, 13.0, MUTED, Face::Sans, help);
+        // which cryptography keeps the shared vault, and that it is not externally reviewed (F-CLOUD-15)
+        line(g, &mut y, 12.0, MUTED, Face::Sans, &iyakki_agent::sharedvault::page_line(Self::svc(cx).dir()));
         y += 4.0 * s;
 
         // the question or the name being typed

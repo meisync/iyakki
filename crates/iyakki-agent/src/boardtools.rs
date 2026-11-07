@@ -58,6 +58,9 @@ pub struct ProjectTools {
     agent_key: Option<String>,
 }
 
+/// Where a workspace names its test command (told to the model and the person when a test row has no check).
+const NO_TEST_CMD: &str = "set \"commands\": {\"test\": \"cargo test\"} in .iyakki/project.json";
+
 #[derive(Default)]
 struct StepState {
     board_updates: usize,
@@ -86,6 +89,20 @@ impl ProjectTools {
     pub fn with_test_command(mut self, program: &str, args: &[&str]) -> ProjectTools {
         self.test_cmd = Some((program.into(), args.iter().map(|a| a.to_string()).collect()));
         self
+    }
+
+    /// The test command the workspace names (`commands.test` in `.iyakki/project.json`, program and arguments split at spaces, no shell),
+    /// looked for in each folder given in turn (a task's copy first, then the workspace). None named: no test check exists, and the
+    /// refusal and the review note say so.
+    pub fn with_project_test_command(self, dirs: &[&Path]) -> ProjectTools {
+        let cmd = dirs.iter().find_map(|d| crate::workspace::ProjectConfig::load(d).ok().map(|c| c.commands.test).filter(|t| !t.trim().is_empty()));
+        match cmd {
+            Some(c) => {
+                let parts: Vec<&str> = c.split_whitespace().collect();
+                self.with_test_command(parts[0], &parts[1..])
+            }
+            None => self,
+        }
     }
 
     /// Where the tracker reports the rows it moves itself (`board.auto`).
@@ -339,7 +356,7 @@ impl ProjectTools {
         let u = Self::update_of(args);
         // done needs proof the harness saw (a successful, verified tool result); the model's say-so, or a Tests text, is not enough
         if u.status.as_deref() == Some("done") && before.status != "done" && !self.track.is_verified(&id) {
-            return Err(format!("refused: {id} cannot be set to done: done needs a passed test or a verified check that the harness saw (a tool result that succeeded, for a deploy a ready rollout). No verification has run for this row. {} Or set it to `partial`, `blocked`, or `pending` with `depends_on` (a row id or what it waits for) and say why in `comment`; the row is unchanged.", Self::next_check(&before.title)));
+            return Err(format!("refused: {id} cannot be set to done: done needs a passed test or a verified check that the harness saw (a tool result that succeeded, for a deploy a ready rollout). No verification has run for this row. {} Or set it to `partial`, `blocked`, or `pending` with `depends_on` (a row id or what it waits for) and say why in `comment`; the row is unchanged.", self.next_check(&before.title)));
         }
         if (Update { at: None, ..u.clone() }) == Update::default() {
             return Err("nothing to change: give status, phase, priority, progress, comment or blocker".into());
@@ -385,16 +402,26 @@ impl ProjectTools {
         s
     }
 
+    #[cfg(test)]
+    pub(crate) fn preview_refusal_text(&self, title: &str) -> String {
+        self.next_check(title)
+    }
+
     /// What would verify a row, in words for the model.
-    fn next_check(title: &str) -> String {
+    fn next_check(&self, title: &str) -> String {
         let k = crate::boardtrack::kinds_of(title);
-        if k.contains(&crate::boardtrack::Kind::Apply) || k.contains(&crate::boardtrack::Kind::Verify) || k.contains(&crate::boardtrack::Kind::Namespace) {
+        let about_tests = title.to_lowercase().contains("test");
+        let mut out = if k.contains(&crate::boardtrack::Kind::Apply) || k.contains(&crate::boardtrack::Kind::Verify) || k.contains(&crate::boardtrack::Kind::Namespace) {
             "Run deploy_status now (or k8s_status) and the harness marks the row done when everything is ready.".to_string()
-        } else if title.to_lowercase().contains("test") {
+        } else if about_tests && self.test_cmd.is_some() {
             "Run the project's test command with run_command now and the harness marks the row done when it passes.".to_string()
         } else {
             "Run the tool that does the step (write_file, deploy_build, deploy_load, k8s_apply) or a read-only check, and the harness marks the row done when it succeeds.".to_string()
+        };
+        if about_tests && self.test_cmd.is_none() {
+            out.push_str(&format!(" This workspace names no test command ({NO_TEST_CMD}), so no automatic test check exists for this row."));
         }
+        out
     }
 
     /// The check that fits the row: Ok(output) passed, Err(output) failed, None when no sensible automatic check exists (the row then
@@ -578,7 +605,12 @@ impl ProjectTools {
             }
             None => {
                 self.verify_fails.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-                Some(Ok(self.park(&id, "review", "work claimed; no automatic check applies, so it needs your OK", None)))
+                let why = if matches!(crate::boardtrack::classify(&f.title, &f.notes), crate::boardtrack::RowKind::Test) && self.test_cmd.is_none() {
+                    format!("work claimed; this workspace names no test command ({NO_TEST_CMD}), so no automatic check exists and it needs your OK")
+                } else {
+                    "work claimed; no automatic check applies, so it needs your OK".to_string()
+                };
+                Some(Ok(self.park(&id, "review", &why, None)))
             }
         }
     }

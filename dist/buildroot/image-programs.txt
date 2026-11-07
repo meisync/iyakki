@@ -49,3 +49,7 @@ exempt store/author.rs text for the person who writes a store entry
 exempt regsetup.rs advice text: a command to run on the node
 optional gst-launch-1.0 only run by the boot self-test when the web engine's MP3 plugin file exists (web images ship it)
 optional gst-inspect-1.0 only run by the boot self-test (web-recorder) when the web engine's MP3 plugin file exists (web images ship it)
+image mount busybox
+image umount busybox
+optional chattr only run to clear the immutable flag of an existing efivarfs variable before the boot confirmation write; failure is ignored (bootconfirm.rs)
+exempt sandbox/admit.rs command-policy words: the check that refuses a script piping a download into an interpreter names curl and the interpreters

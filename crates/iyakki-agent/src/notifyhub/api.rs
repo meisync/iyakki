@@ -83,3 +83,20 @@ pub fn delete(hub: &Hub, user: &str, id: &str, now: i64) -> Result<Value, ApiErr
     hub.bus.publish(user, &super::events::event("count", json!({"unread": hub.inbox.counts(user, now).unread})));
     Ok(json!({"ok": true}))
 }
+
+/// The channels that write to this person, and whether they switched each off for themselves.
+pub fn channels(hub: &Hub, user: &str) -> Value {
+    json!({"channels": hub.personal_channels(user).into_iter().map(|(k, out)| json!({"channel": k, "opted_out": out})).collect::<Vec<_>>()})
+}
+
+/// Switch one of the caller's own channels off or on. Only a channel that has the caller's address can be chosen; the INBOX note is
+/// always made.
+pub fn optout(hub: &Hub, user: &str, body: &Value) -> Result<Value, ApiErr> {
+    let key = body.get("channel").and_then(Value::as_str).unwrap_or("");
+    let out = body.get("out").and_then(Value::as_bool).ok_or_else(|| e(400, "invalid_input", "out is true or false"))?;
+    if !hub.personal_channels(user).iter().any(|(k, _)| k == key) {
+        return Err(e(404, "not_found", "no such channel for you"));
+    }
+    hub.set_optout(user, key, out).map_err(map)?;
+    Ok(json!({"ok": true, "channel": key, "opted_out": out}))
+}

@@ -27,8 +27,8 @@ fn spans(text: &str) -> Vec<(usize, usize)> {
         if c.is_whitespace() {
             if let Some(s) = start.take() {
                 let w = &text[s..i];
-                let lead = w.len() - w.trim_start_matches(['"', '\'', '(', '<', '[', '`']).len();
-                let trail = w.len() - w.trim_end_matches(['"', '\'', ')', '>', ']', '`', ',', ';', '.']).len();
+                let lead = w.len() - w.trim_start_matches(['"', '\'', '(', '<', '[', '`', '{']).len();
+                let trail = w.len() - w.trim_end_matches(['"', '\'', ')', '>', ']', '`', ',', ';', '.', '}']).len();
                 if s + lead < i - trail {
                     v.push((s + lead, i - trail));
                 }
@@ -110,7 +110,8 @@ fn random_like(v: &str, min: usize) -> bool {
 /// A value given explicitly (`password: x`, `token=x`).
 fn explicit_value(v: &str) -> bool {
     let n = v.chars().count();
-    if n < 6 || v.chars().any(char::is_whitespace) {
+    // a reference to another variable (`$DB_PASSWORD`, `${TOKEN}`) is not a value
+    if n < 6 || v.chars().any(char::is_whitespace) || v.starts_with('$') {
         return false;
     }
     let digit = has_digit(v);
@@ -121,9 +122,19 @@ fn explicit_value(v: &str) -> bool {
 
 const KEYWORDS: &[&str] = &["password", "passwd", "pwd", "passphrase", "secret", "token", "apikey", "api_key", "api-key", "credential", "credentials", "bearer"];
 
+/// A label that names a secret: one of the [`KEYWORDS`], or a variable or JSON name that ends in one (`DB_PASSWORD`, `"client_secret"`,
+/// `OPENAI_API_KEY`, `aws_secret_access_key`).
+fn secret_name(name: &str) -> bool {
+    let n = name.trim_matches(|c: char| matches!(c, ':' | '=' | '"' | '\'' | '`')).to_lowercase();
+    if KEYWORDS.contains(&n.as_str()) {
+        return true;
+    }
+    n.contains('_') && ["_password", "_passwd", "_secret", "_token", "_api_key", "_apikey", "_secret_key", "_access_key", "_private_key", "_passphrase"].iter().any(|k| n.ends_with(k))
+}
+
 fn keyword_of(w: &str, prev: Option<&str>) -> bool {
-    let w = w.trim_end_matches([':', '=']).to_lowercase();
-    if KEYWORDS.contains(&w.as_str()) {
+    let w = w.trim_end_matches([':', '=', '"', '\'']).to_lowercase();
+    if secret_name(&w) {
         return true;
     }
     w == "key" && matches!(prev.map(str::to_lowercase).as_deref(), Some("api" | "secret" | "access" | "private"))
@@ -168,7 +179,7 @@ pub fn detect(text: &str) -> Option<Found> {
         } {
             let (mut sep, mut inline) = (w.ends_with(':') || w.ends_with('='), None);
             if let Some((name, val)) = w.split_once(['=', ':']) {
-                if !val.is_empty() && KEYWORDS.contains(&name.to_lowercase().as_str()) {
+                if !val.is_empty() && secret_name(name) {
                     inline = Some((s + name.len() + 1, e));
                     sep = true;
                 }
@@ -277,6 +288,27 @@ mod tests {
             "version 2.4.1-beta3 is out",
             "",
         ] {
+            assert_eq!(detect(t), None, "{t}");
+        }
+    }
+
+    /// The shapes people paste: .env lines, JSON, shell commands, headers, connection strings. All values are made up.
+    #[test]
+    fn pasted_config_formats_are_caught_and_their_neighbours_are_not() {
+        for (t, value) in [
+            ("DB_PASSWORD=Tr0ub4dor&3xyz", "Tr0ub4dor&3xyz"),
+            ("export OPENAI_API_KEY=abcd1234efgh5678ijkl9012", "abcd1234efgh5678ijkl9012"),
+            ("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
+            ("{\"password\": \"hunter2!xyz\", \"user\": \"bob\"}", "hunter2!xyz"),
+            ("{\"client_secret\": \"a1b2c3d4e5f6a7b8c9d0e1f2\"}", "a1b2c3d4e5f6a7b8c9d0e1f2"),
+            ("curl -H \"Authorization: Bearer abc123def456ghi789jkl\" https://x.example/api", "abc123def456ghi789jkl"),
+            ("postgres://admin:S3cr3tPass@db.internal:5432/app", "S3cr3tPass"),
+        ] {
+            let f = detect(t).unwrap_or_else(|| panic!("not found: {t}"));
+            assert!(f.value.contains(value) || value.contains(&f.value), "{t}: found {:?}", f.value);
+            assert!(!f.redacted.contains(value), "{t}: {}", f.redacted);
+        }
+        for t in ["DB_PASSWORD=", "export DB_PASSWORD=$DB_PASSWORD", "{\"password\": \"\"}", "TOKEN_COUNT=4096", "client_secret: <your secret here>", "set API_KEY_FILE=/etc/app/key.txt", "the password field is required"] {
             assert_eq!(detect(t), None, "{t}");
         }
     }

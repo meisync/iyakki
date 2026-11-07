@@ -664,6 +664,26 @@ fn rate_limits_and_opt_outs_apply_per_channel_and_per_recipient() {
 }
 
 #[test]
+fn a_person_can_list_and_switch_off_only_their_own_mail_channel_and_the_inbox_note_is_still_made() {
+    let r = rig("optout-api", vec![webhook(false), email(false)]);
+    let v = super::api::channels(&r.hub, "bob");
+    assert_eq!(v["channels"], serde_json::json!([{"channel": "/mail", "opted_out": false}]), "the shared webhook is not a personal choice");
+    assert_eq!(super::api::channels(&r.hub, "zed")["channels"], serde_json::json!([]), "a person without an address on it sees none");
+    assert_eq!(super::api::optout(&r.hub, "zed", &serde_json::json!({"channel": "/mail", "out": true})).unwrap_err().status, 404);
+    assert_eq!(super::api::optout(&r.hub, "bob", &serde_json::json!({"channel": "/hook", "out": true})).unwrap_err().status, 404, "not a channel for bob");
+    assert_eq!(super::api::optout(&r.hub, "bob", &serde_json::json!({"channel": "/mail"})).unwrap_err().status, 400);
+    super::api::optout(&r.hub, "bob", &serde_json::json!({"channel": "/mail", "out": true})).unwrap();
+    assert_eq!(super::api::channels(&r.hub, "bob")["channels"][0]["opted_out"], true);
+    assert_eq!(super::api::channels(&r.hub, "ann")["channels"][0]["opted_out"], false, "ann is not affected");
+    r.hub.emit_at(&note(Severity::Normal, "x", "", people(&["bob", "ann"])), T0).unwrap();
+    assert!(r.hub.deliveries().iter().all(|d| !(d.channel == "/mail" && d.person == "bob")));
+    assert!(r.hub.deliveries().iter().any(|d| d.channel == "/mail" && d.person == "ann"));
+    assert_eq!(r.hub.inbox.list("bob").len(), 1, "the INBOX note is always made");
+    super::api::optout(&r.hub, "bob", &serde_json::json!({"channel": "/mail", "out": false})).unwrap();
+    assert_eq!(super::api::channels(&r.hub, "bob")["channels"][0]["opted_out"], false);
+}
+
+#[test]
 fn an_unacknowledged_alert_climbs_from_the_owner_to_the_team_admin_to_the_tenant_admin() {
     let r = rig("escalate", vec![]);
     *r.env.rules.lock().unwrap() = Rules { escalate_after_secs: Some(600), ..Rules::default() };

@@ -6,13 +6,7 @@ iyakki-menu.pf2 and iyakki-term.pf2
   and U+00A0-U+00FF). Licence: the Bitstream Vera Fonts licence with the DejaVu public-domain changes; the full text is at the end of this
   file. The converted fonts keep the name "DejaVu ..."; the Vera licence only forbids the names "Bitstream" and "Vera" for modified fonts.
 
-unicode.pf2
-  GRUB's wide Unicode font (GNU Unifont, converted to GRUB's .pf2 format by grub-mkfont), copied from the build machine's grub2-common
-  package or from the Buildroot host tree (the exact path and sha256 are written below by post-image.sh). GNU Unifont is distributed by
-  its authors under the GNU GPL version 2 or later with the GNU font embedding exception, and also under the SIL Open Font License 1.1
-  (https://unifoundry.com/unifont/). Either way the file may be redistributed with the boot loader. NOT VERIFIED: that licence statement is
-  the authors' as known to the project author; the licence file of the particular package the build machine used was not read (Ubuntu's
-  grub2-common ships the font without a separate copyright entry for it). The owner decides whether to accept this or to drop
-  unicode.pf2 (the menu then uses the two DejaVu fonts for Latin text).
+No other font is shipped in the boot loader (GRUB's unicode.pf2 was dropped on 2026-11-06). Characters outside the Latin range show
+GRUB's own missing-character box in the boot menu.
 
 Nothing here is an IYAKKI-made font. Apache-2.0 does not apply to these files.

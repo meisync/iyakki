@@ -104,12 +104,17 @@ impl SecretResolver for ServicesResolver {
 
 impl Env {
     pub fn from_services(svc: &Arc<Services>, user: &str, policy: &Policy) -> Env {
+        Self::from_services_in(svc, user, policy, crate::scope::home_root(user, svc.dir()))
+    }
+
+    /// [`Env::from_services`] with the person's home folder given (tests keep the dashboards out of the real home).
+    pub fn from_services_in(svc: &Arc<Services>, user: &str, policy: &Policy, home: PathBuf) -> Env {
         let data_dir = svc.dir().to_path_buf();
         // sources the older Quick install saved with a baked-in cluster IP get the stable address (once)
         super::cluster::migrate_all(&data_dir, user);
         // the default dashboards (the local k3s), once per account; a person who edits or deletes one keeps it that way
         if policy.apps.contains(&App::Dash) {
-            let _ = super::seed::seed_defaults(&data_dir, &crate::scope::home_root(user, &data_dir), user, policy.manage_users);
+            let _ = super::seed::seed_defaults(&data_dir, &home, user, policy.manage_users);
         }
         let (p, u, d) = (policy.clone(), user.to_string(), data_dir.clone());
         let work = data_dir.join("dash").join("work");
@@ -117,7 +122,7 @@ impl Env {
         Env {
             user: user.into(),
             policy: policy.clone(),
-            home: crate::scope::home_root(user, &data_dir),
+            home,
             deps: Deps {
                 transport: Arc::new(RealTransport),
                 secrets: Arc::new(ServicesResolver { svc: svc.clone(), user: user.into() }),

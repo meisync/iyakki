@@ -448,6 +448,62 @@ fn the_tenant_vault_keeps_the_keys_and_a_rotation_makes_a_new_current_one_that_o
 }
 
 #[test]
+fn the_command_line_uses_the_tenant_vault_key_end_to_end_and_no_plain_archive_is_left_behind() {
+    use crate::cloudroles::Roles;
+    use crate::cloudvaultd::{start, Client, Principal, Scope as VScope, Store};
+    let vdir = crate::testdir::unique("snapkey", "vaultcli");
+    let s = Store::open(&vdir).unwrap();
+    crate::cloudroles::save(&crate::cloudroles::path(&vdir.join("tenants").join("acme")), &Roles::new("alice").unwrap()).unwrap();
+    let ak = crate::cloudkeys::MemberKeys::from_seed([1; 32]);
+    s.enroll(&Principal::Member { tenant: "acme".into(), user: "alice".into() }, &ak.public()).unwrap();
+    drop(s);
+    let run = start("127.0.0.1:0".parse().unwrap(), &vdir, None).unwrap();
+    let port = run.local_addr().port();
+    let client = Client { host: "127.0.0.1".into(), port, fingerprint: Some(run.fingerprint.clone()), who: Principal::Member { tenant: "acme".into(), user: "alice".into() }, keys: ak.clone() };
+    client.create_scope(&VScope::Tenant).unwrap();
+    let (data, files) = tenant_with_noise("enc-vault-cli");
+    let d = data.display().to_string();
+    let vk = data.join("alice.key");
+    std::fs::write(&vk, ak.seed_hex()).unwrap();
+    let (vks, addr) = (vk.display().to_string(), format!("https://127.0.0.1:{port}"));
+    let run_cli = |args: &[&str]| -> Result<Vec<String>, String> {
+        let mut a: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        a.extend(["--data", &d, "--vault-key", &vks, "--as", "alice", "--vault", &addr, "--vault-fingerprint", &run.fingerprint, "--tenant", "acme"].map(String::from));
+        let mut out = Vec::new();
+        cli(&a, &mut |l| out.push(l.to_string())).map(|_| out)
+    };
+    // no key in the vault yet: nothing is made, in the clear or otherwise
+    assert!(run_cli(&["create"]).unwrap_err().contains("key-rotate"));
+    assert!(!data.join("cloud/snapshots").exists() || list(&data.join("cloud/snapshots")).is_empty());
+    assert!(run_cli(&["key-rotate"]).unwrap()[0].contains("current snapshot key"));
+    let said = run_cli(&["create"]).unwrap();
+    assert!(said[0].contains("encrypted with key"), "{said:?}");
+    let snaps = data.join("cloud/snapshots");
+    let id = list(&snaps)[0].0.clone();
+    // only the sealed archive and the manifests are in the folder (no tar, no zst, no staging), and the folder holds no plain contents
+    let mut names: Vec<String> = std::fs::read_dir(snaps.join(&id)).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+    names.sort();
+    assert_eq!(names, ["data.tar.zst.enc", "manifest.json", "manifest.sha256"]);
+    assert!(std::fs::read_dir(&snaps).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with(".making")));
+    assert!(run_cli(&["verify", &id]).unwrap()[0].contains("intact"));
+    let r = run_cli(&["restore", &id]).unwrap();
+    assert!(r[0].contains("restored 4 files"), "{r:?}");
+    let to = data.join("cloud/restored").join(&id);
+    assert_eq!(std::fs::read(to.join("ns/web/shared/noise.bin")).unwrap(), std::fs::read(files.join("ns/web/shared/noise.bin")).unwrap());
+    assert!(std::fs::read_dir(snaps.join(&id)).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with(".restore")));
+    // the member's key file alone, without the vault address, is refused with a reason (nothing is read or written)
+    let a: Vec<String> = ["verify", &id, "--data", &d, "--vault-key", &vks, "--as", "alice"].iter().map(|s| s.to_string()).collect();
+    let e = cli(&a, &mut |_| {});
+    if std::env::var(crate::cloudvaultlink::ENV_URL).is_err() {
+        assert!(e.unwrap_err().contains("no vault address"));
+    }
+    // a vault that has gone away: the sealed snapshot cannot be opened, and nothing is written
+    run.stop();
+    let e = run_cli(&["restore", &id, "--to", &data.join("nope").display().to_string()]).unwrap_err();
+    assert!(!e.is_empty() && !data.join("nope").join("ns").exists(), "{e}");
+}
+
+#[test]
 fn the_command_makes_and_uses_key_files_and_refuses_what_it_cannot_do() {
     let (data, _files) = tenant_with_noise("enc-cli");
     let d = data.display().to_string();

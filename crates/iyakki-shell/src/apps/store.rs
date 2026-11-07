@@ -26,6 +26,8 @@ use crate::ui::{clipboard, Event, Key, TextField, DIM, ERR, MUTED, OK, R, TEXT};
 
 #[path = "store_manage.rs"]
 mod manage;
+#[path = "store_rating.rs"]
+mod rating;
 #[path = "store_setup.rs"]
 pub mod setup;
 use manage::{Drag, EditState, MenuState, Press, RemoveUi, TagsState, View, Zone};
@@ -179,6 +181,8 @@ pub struct StoreApp {
     iupdates: bool,
     /// The person's own arrangement (tags, groups, titles) and how the list is grouped.
     org: Org,
+    /// The person's own ratings and comments (private, local; see store_rating.rs).
+    rate: iyakki_agent::store::ratings::Ratings,
     org_rev: u32,
     iview: View,
     itags: Vec<String>,
@@ -395,6 +399,7 @@ impl StoreApp {
             ctx: Ctx::default(),
             iupdates: false,
             org: Org::default(),
+            rate: iyakki_agent::store::ratings::Ratings::none(),
             org_rev: 0,
             iview: View::Flat,
             itags: vec![],
@@ -1545,6 +1550,9 @@ impl App for StoreApp {
             }
             self.drag = None;
         }
+        if matches!(self.mode, Mode::Detail) && self.rating_event(ev, cx) {
+            return Flow::Stay;
+        }
         // the small dialogs of the management layer
         match (&self.mode, ev) {
             (Mode::Edit(_), Event::Key(k)) => {
@@ -2387,6 +2395,7 @@ impl StoreApp {
             g.text(bx + 4.0 * s, y + 8.0 * s, 12.0 * s, DIM, &n, Face::Sans);
         }
         y += 14.0 * 2.1 * s + 10.0 * s;
+        y += self.render_rating(g, x, y, w, s);
         let r = R::new(x, y, w, (body.y + body.h - y).max(40.0 * s));
         fx::panel(g, r, s, ACCENT);
         let inner = R::new(r.x + 16.0 * s, r.y + 10.0 * s, r.w - 32.0 * s, (r.h - 20.0 * s).max(16.0 * s));
@@ -3298,6 +3307,7 @@ impl StoreApp {
             add(g, &mut y, "Remove (r)", ERR, 242);
         }
         y += bh + 10.0 * s;
+        y += self.render_rating(g, x, y, w, s);
         let r = R::new(x, y, w, (body.y + body.h - y).max(40.0 * s));
         fx::panel(g, r, s, ACCENT);
         let inner = R::new(r.x + 16.0 * s, r.y + 10.0 * s, r.w - 32.0 * s, (r.h - 20.0 * s).max(16.0 * s));

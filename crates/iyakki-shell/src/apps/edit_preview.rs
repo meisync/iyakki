@@ -5,7 +5,7 @@
 use crate::safeclamp::SafeClamp;
 use crate::gfx::{rgb, Gfx};
 use crate::mdtext::{self, Layout};
-use crate::ui::{Key, Nav, R, TEXT};
+use crate::ui::{Event, Key, Nav, R, TEXT};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -24,7 +24,12 @@ pub struct MdPreview {
     page: f32,
     view: f32,
     cache: Option<(u64, u32, Layout)>,
+    /// A web address the person clicked in the page, waiting for the app around the editor to open it.
+    clicked: Option<String>,
 }
+
+/// Clicks on the links of the page arrive as `Event::Tab(LINK_BASE + n)`.
+pub const LINK_BASE: usize = 700_000;
 
 fn hash(text: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -44,6 +49,20 @@ impl MdPreview {
         } else {
             self.edit.remove(p);
         }
+    }
+
+    /// The address of link `n` of the page, when it is a web address (other kinds are not opened from a file).
+    pub fn click_link(&mut self, n: usize) -> bool {
+        let Some(l) = self.cache.as_ref().and_then(|c| c.2.links.get(n)) else { return false };
+        if matches!(crate::links::classify(&l.url), crate::links::Kind::Http { .. }) {
+            self.clicked = Some(l.url.clone());
+        }
+        true
+    }
+
+    /// The web address the person clicked, once.
+    pub fn take_clicked(&mut self) -> Option<String> {
+        self.clicked.take()
     }
 
     pub fn scroll_by(&mut self, notches: i32) {
@@ -89,6 +108,13 @@ impl MdPreview {
         let clip = R::new(body.x + 1.0, body.y + 1.0, body.w - 2.0, body.h - 2.0);
         let (x, y) = (body.x + pad, body.y + pad - self.scroll);
         g.clipped(clip, |g| mdtext::draw(g, l, x, y, TEXT, (clip.y, clip.y + clip.h), width));
+        // the links of the page can be clicked (web addresses only; the rest only shows)
+        for r in l.link_rects(g) {
+            let (y0, y1) = ((y + r.y).max(clip.y), (y + r.y + r.h).min(clip.y + clip.h));
+            if y1 > y0 {
+                g.hit(R::new(x + r.x, y0, r.w, y1 - y0), Event::Tab(LINK_BASE + r.link), "link");
+            }
+        }
         if self.page > self.view {
             crate::fx::scrollbar(g, R::new(body.x + body.w - 8.0 * s, body.y + 6.0 * s, 4.0 * s, body.h - 12.0 * s), s, self.scroll as usize, self.view as usize, self.page as usize, accent);
         }

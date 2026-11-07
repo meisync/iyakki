@@ -220,6 +220,14 @@ in Settings → Git, or *Add connection…* here, in place), then *Create a new 
 commit and `origin` as listed there) or *Connect to an existing repository* (the host's list, or type an address). Pushing is a second review, then
 a normal git job. Details and the safety rules: [`GIT-AND-SSH.md`](GIT-AND-SSH.md), "Connect Git or Gitea".
 
+### From the chat: clone and add a workspace
+
+`git_clone_repo` (url, optional branch, depth and `submodules`), `git_clones_list`, `ide_workspace_add` (an existing folder in your home or Repositories
+folder; once; it refuses a folder outside your account's write scope, the home or Repositories folder itself, and one that overlaps a workspace) and
+`ide_workspace_list` let a request such as "make a workspace from this repository, clone its submodules, read the deployment documents and start k3s" be
+done in the chat: clone (asks), register (asks), `read_file` on the documents, `cluster_status`, `cluster_start` (asks). Details of the clone and its safety:
+[`GIT-TILE.md`](GIT-TILE.md), "From the chat".
+
 ## Targets: what the workspace is for
 
 `.iyakki/project.json` has an optional `"target"`: `iyakki-tile`, `k3s-service`, `mcp-server`, `skill`, `wasm-tool` or `library/other`. The *New app, MCP server or skill…* form (⋯ menu,

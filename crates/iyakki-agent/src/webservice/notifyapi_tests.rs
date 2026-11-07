@@ -328,3 +328,15 @@ fn the_loop_reads_masked_frames_answers_and_ends_when_the_client_goes() {
     assert_eq!(bad.out, ws::close_frame());
     let _ = bus_for(&std::env::temp_dir());
 }
+
+#[test]
+fn the_channel_opt_out_routes_need_a_sign_in_list_only_the_callers_channels_and_refuse_what_is_not_theirs() {
+    let (h, _root, ann, _bob) = cfg_cloud();
+    assert_eq!(h.call("GET", "/api/v1/notifications/channels", None, None).0, 401);
+    assert_eq!(h.call("POST", "/api/v1/notifications/channels/optout", None, Some(json!({"channel": "/mail", "out": true}))).0, 401);
+    let (s, v, _) = h.call("GET", "/api/v1/notifications/channels", Some(&ann), None);
+    assert_eq!((s, v["channels"].as_array().map(Vec::len)), (200, Some(0)), "{v}");
+    // a channel that does not write to the caller, and a body that is not a choice
+    assert_eq!(h.call("POST", "/api/v1/notifications/channels/optout", Some(&ann), Some(json!({"channel": "/mail", "out": true}))).0, 404);
+    assert_eq!(h.call("POST", "/api/v1/notifications/channels/optout", Some(&ann), Some(json!({"channel": "/mail"}))).0, 400);
+}

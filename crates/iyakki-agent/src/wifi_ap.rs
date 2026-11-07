@@ -68,6 +68,29 @@ pub fn params(ifindex: u32, bssid: [u8; 6], ssid: &str, channel: u32, freq: u32,
     }
 }
 
+/// Which channel the access point takes: on the client's channel in whichever band that is ("auto"), or in the band the person chose ("2.4" or "5", the card then moves the client).
+/// A band that cannot host an access point (5 GHz channels need a country first) falls back to 2.4 GHz and the client follows. The second value says the person chose a band.
+fn choose_plan(c: &caps::PhyCaps, band_pref: &str, sta_freq: Option<u32>, country: &str, log: &mut dyn FnMut(String)) -> Result<(caps::ApPlan, Option<u32>), String> {
+    let chosen = match band_pref {
+        "2.4" => Some(caps::BAND_2GHZ),
+        "5" => Some(caps::BAND_5GHZ),
+        _ => None,
+    };
+    let band = chosen.unwrap_or(if sta_freq.is_some_and(|f| f >= 4900) { caps::BAND_5GHZ } else { caps::BAND_2GHZ });
+    let sta_freq = if chosen.is_some() { None } else { sta_freq };
+    let want = caps::Want { concurrent_sta: true, sta_channel_freq: sta_freq, ..caps::Want::new(band, country) };
+    let plan = match caps::can_host_ap(c, &want) {
+        Ok(p) => p,
+        Err(first) if band != caps::BAND_2GHZ => {
+            log(format!("hotspot: not on the client's channel ({}); trying 2.4 GHz", first.reason));
+            let w24 = caps::Want { concurrent_sta: true, sta_channel_freq: None, ..caps::Want::new(caps::BAND_2GHZ, country) };
+            caps::can_host_ap(c, &w24).map_err(|r| r.reason)?
+        }
+        Err(r) => return Err(r.reason),
+    };
+    Ok((plan, chosen))
+}
+
 /// Start the hotspot's radio next to the Wi-Fi client `client` (for example `wlan0`). `Err` is one plain line (with the kernel's own
 /// words when it gave some).
 /// How long the access point waits for the Wi-Fi client to join its network (one channel for both).
@@ -100,26 +123,7 @@ pub fn start(client: &str, ssid: &str, passphrase: &str, band_pref: &str, client
         std::thread::sleep(Duration::from_secs(1));
     }
     log(format!("hotspot: {client} is on {}", sta_freq.map(|f| format!("{f} MHz")).unwrap_or_else(|| "no channel".into())));
-    // the access point goes on the client's channel, in whichever band that is (the card cannot listen on two channels at once)
-    // "auto" follows the client; "2.4" or "5" is the person's choice (the client is then moved to that band by the card)
-    let chosen = match band_pref {
-        "2.4" => Some(caps::BAND_2GHZ),
-        "5" => Some(caps::BAND_5GHZ),
-        _ => None,
-    };
-    let band = chosen.unwrap_or(if sta_freq.is_some_and(|f| f >= 4900) { caps::BAND_5GHZ } else { caps::BAND_2GHZ });
-    let sta_freq = if chosen.is_some() { None } else { sta_freq };
-    let want = caps::Want { concurrent_sta: true, sta_channel_freq: sta_freq, ..caps::Want::new(band, &pr.country) };
-    // the client's own band may not allow an access point (5 GHz channels need a country first): then 2.4 GHz, and the client follows
-    let plan = match caps::can_host_ap(c, &want) {
-        Ok(p) => p,
-        Err(first) if band != caps::BAND_2GHZ => {
-            log(format!("hotspot: not on the client's channel ({}); trying 2.4 GHz", first.reason));
-            let w24 = caps::Want { concurrent_sta: true, sta_channel_freq: None, ..caps::Want::new(caps::BAND_2GHZ, &pr.country) };
-            caps::can_host_ap(c, &w24).map_err(|r| r.reason)?
-        }
-        Err(r) => return Err(r.reason),
-    };
+    let (plan, chosen) = choose_plan(c, band_pref, sta_freq, &pr.country, log)?;
     log(format!("hotspot: {} ({:?}) can host: channel {} ({} MHz), mode {:?}", c.name, c.driver, plan.channel, plan.freq, plan.mode));
     let hs = handshake_mode();
     log(format!("hotspot: handshake by {}", if hs == HandshakeMode::Host { "this computer (host mode)" } else { "the card's firmware (PMK offload)" }));
@@ -215,13 +219,18 @@ pub fn start(client: &str, ssid: &str, passphrase: &str, band_pref: &str, client
 
 /// Ask `wpa_supplicant` (its control socket) to do one thing for the client interface; the answer is its one-line reply.
 fn wpa_command(client: &str, cmd: &str) -> Result<String, String> {
+    wpa_command_at("/run", client, cmd)
+}
+
+/// `wpa_command` with the run directory given (`<dir>/wpa_supplicant/<client>` is the supplicant's socket); tests use a scratch directory.
+fn wpa_command_at(dir: &str, client: &str, cmd: &str) -> Result<String, String> {
     use std::os::unix::net::UnixDatagram;
-    let me = format!("/run/iyakki-wpa-{}", std::process::id());
+    let me = format!("{dir}/iyakki-wpa-{}-{}", std::process::id(), cmd.len());
     let _ = std::fs::remove_file(&me);
     let sock = UnixDatagram::bind(&me).map_err(|e| format!("{me}: {e}"))?;
     let r = (|| {
         sock.set_read_timeout(Some(Duration::from_secs(3))).map_err(|e| e.to_string())?;
-        sock.connect(format!("/run/wpa_supplicant/{client}")).map_err(|e| format!("wpa_supplicant: {e}"))?;
+        sock.connect(format!("{dir}/wpa_supplicant/{client}")).map_err(|e| format!("wpa_supplicant: {e}"))?;
         sock.send(cmd.as_bytes()).map_err(|e| e.to_string())?;
         let mut buf = [0u8; 256];
         let n = sock.recv(&mut buf).map_err(|e| format!("wpa_supplicant did not answer: {e}"))?;
@@ -233,12 +242,20 @@ fn wpa_command(client: &str, cmd: &str) -> Result<String, String> {
 
 /// Let go of the router on the client interface, so the card's one radio belongs to the hotspot. Used when the internet comes from a cable.
 pub fn pause_client(client: &str) -> Result<(), String> {
-    wpa_command(client, "DISCONNECT").and_then(|r| if r == "OK" { Ok(()) } else { Err(format!("wpa_supplicant said {r}")) })
+    pause_client_at("/run", client)
+}
+
+fn pause_client_at(dir: &str, client: &str) -> Result<(), String> {
+    wpa_command_at(dir, client, "DISCONNECT").and_then(|r| if r == "OK" { Ok(()) } else { Err(format!("wpa_supplicant said {r}")) })
 }
 
 /// Join the router again after [`pause_client`].
 pub fn resume_client(client: &str) -> Result<(), String> {
-    wpa_command(client, "RECONNECT").map(|_| ())
+    resume_client_at("/run", client)
+}
+
+fn resume_client_at(dir: &str, client: &str) -> Result<(), String> {
+    wpa_command_at(dir, client, "RECONNECT").map(|_| ())
 }
 
 /// End the access point and remove its interface. Not an error when it is not there.
@@ -276,5 +293,111 @@ mod tests {
         assert!(start("wlan0", "", "longenough1", "auto", false, &mut l).is_err());
         assert!(start("wlan0", "ok", "short", "auto", false, &mut l).is_err());
         assert!(start("not-a-wifi-interface-xyz", "ok", "longenough1", "auto", false, &mut l).unwrap_err().contains("not a Wi-Fi interface"));
+    }
+
+    use caps::{Band, Channel, IfComb, IfLimit, PhyCaps};
+
+    fn chan(freq: u32, flags: &str) -> Channel {
+        Channel { freq, disabled: flags.contains('d'), no_ir: flags.contains('n'), radar: flags.contains('r'), ..Default::default() }
+    }
+
+    /// A one-radio FullMAC card (like the Mac mini's): a client and an access point on one channel; the 5 GHz channels are free to use only with a country.
+    fn card(with_country_5ghz_free: bool) -> PhyCaps {
+        let w5 = if with_country_5ghz_free { "" } else { "n" };
+        PhyCaps {
+            name: "phy0".into(),
+            iftypes: vec![caps::IFTYPE_STATION, caps::IFTYPE_AP],
+            combos: vec![IfComb { limits: vec![IfLimit { max: 2, types: vec![caps::IFTYPE_STATION] }, IfLimit { max: 1, types: vec![caps::IFTYPE_AP] }], max_total: 3, num_channels: 1, sta_ap_bi_match: false }],
+            bands: vec![
+                Band { id: caps::BAND_2GHZ, channels: (1..=11).map(|c| chan(2407 + 5 * c, "")).collect() },
+                Band { id: caps::BAND_5GHZ, channels: [36, 40, 44, 48, 149].iter().map(|c| chan(5000 + 5 * c, w5)).collect() },
+            ],
+            ciphers: vec![caps::CIPHER_CCMP],
+            ap_sme: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn auto_follows_the_clients_channel_in_its_band() {
+        let mut said = Vec::new();
+        let (p, chosen) = choose_plan(&card(true), "auto", Some(5180), "DE", &mut |l| said.push(l)).unwrap();
+        assert_eq!((p.freq, chosen), (5180, None));
+        let (p, _) = choose_plan(&card(true), "auto", Some(2437), "DE", &mut |_| {}).unwrap();
+        assert_eq!(p.freq, 2437);
+        assert!(said.is_empty());
+    }
+
+    #[test]
+    fn a_5ghz_client_without_a_country_falls_back_to_2_4_ghz_and_says_why() {
+        let mut said = Vec::new();
+        let (p, _) = choose_plan(&card(false), "auto", Some(5180), "00", &mut |l| said.push(l)).unwrap();
+        assert!(p.freq < 3000, "2.4 GHz channel, got {}", p.freq);
+        assert!(said.iter().any(|l| l.contains("trying 2.4 GHz")), "{said:?}");
+    }
+
+    #[test]
+    fn a_chosen_band_is_kept_and_a_chosen_5ghz_without_a_country_falls_back() {
+        let (p, chosen) = choose_plan(&card(true), "5", Some(2437), "DE", &mut |_| {}).unwrap();
+        assert!(p.freq >= 5000 && chosen == Some(caps::BAND_5GHZ));
+        let (p, chosen) = choose_plan(&card(true), "2.4", Some(5180), "DE", &mut |_| {}).unwrap();
+        assert!(p.freq < 3000 && chosen == Some(caps::BAND_2GHZ));
+        let (p, _) = choose_plan(&card(false), "5", None, "00", &mut |_| {}).unwrap();
+        assert!(p.freq < 3000);
+    }
+
+    #[test]
+    fn a_card_with_no_2_4_ghz_band_gives_the_reason_when_the_fallback_fails() {
+        let mut c = card(false);
+        c.bands.retain(|b| b.id == caps::BAND_5GHZ);
+        let e = choose_plan(&c, "auto", Some(5180), "00", &mut |_| {}).unwrap_err();
+        assert!(e.contains("2.4 GHz"), "{e}");
+    }
+
+    /// A fake wpa_supplicant: answers each datagram with the given reply and reports what it was asked.
+    fn fake_supplicant(reply: &'static str) -> (String, std::sync::mpsc::Receiver<String>, std::thread::JoinHandle<()>) {
+        use std::os::unix::net::UnixDatagram;
+        let dir = std::env::temp_dir().join(format!("iyakki-wpa-test-{}-{reply}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("wpa_supplicant")).unwrap();
+        let sock = UnixDatagram::bind(dir.join("wpa_supplicant/wlan0")).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let h = std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            if let Ok((n, from)) = sock.recv_from(&mut buf) {
+                tx.send(String::from_utf8_lossy(&buf[..n]).to_string()).unwrap();
+                if let Some(p) = from.as_pathname() {
+                    let _ = sock.send_to(reply.as_bytes(), p);
+                }
+            }
+        });
+        (dir.to_string_lossy().to_string(), rx, h)
+    }
+
+    #[test]
+    fn pausing_sends_disconnect_and_resuming_sends_reconnect() {
+        let (dir, rx, h) = fake_supplicant("OK\n");
+        pause_client_at(&dir, "wlan0").unwrap();
+        assert_eq!(rx.recv().unwrap(), "DISCONNECT");
+        h.join().unwrap();
+        let (dir2, rx2, h2) = fake_supplicant("OK\n");
+        resume_client_at(&dir2, "wlan0").unwrap();
+        assert_eq!(rx2.recv().unwrap(), "RECONNECT");
+        h2.join().unwrap();
+        let _ = (std::fs::remove_dir_all(dir), std::fs::remove_dir_all(dir2));
+    }
+
+    #[test]
+    fn a_refusal_or_a_missing_supplicant_makes_the_pause_fail_cleanly() {
+        let (dir, _rx, h) = fake_supplicant("FAIL\n");
+        let e = pause_client_at(&dir, "wlan0").unwrap_err();
+        assert!(e.contains("FAIL"), "{e}");
+        h.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let none = std::env::temp_dir().join(format!("iyakki-wpa-none-{}", std::process::id()));
+        std::fs::create_dir_all(&none).unwrap();
+        assert!(pause_client_at(none.to_str().unwrap(), "wlan0").unwrap_err().contains("wpa_supplicant"));
+        let _ = std::fs::remove_dir_all(&none);
     }
 }

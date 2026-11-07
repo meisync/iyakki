@@ -257,11 +257,9 @@ impl Registry {
         self.items.iter().find(|w| w.id == id)
     }
 
-    /// Register a folder. The root must exist; the same folder twice is refused (and so is a folder inside or around another
-    /// workspace, which would let two products share files).
-    pub fn add(&mut self, name: &str, root: &Path) -> Result<Workspace, String> {
-        self.reload();
-        let root = std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    /// Whether `root` (a real path) could be registered as `name` now, with the reason when not: the checks of [`Registry::add`],
+    /// without changing anything (the assistant's review card asks before it adds).
+    pub fn check_add(&self, name: &str, root: &Path) -> Result<(), String> {
         if !root.is_dir() {
             return Err(format!("{} is not a folder", root.display()));
         }
@@ -277,13 +275,23 @@ impl Registry {
             if other == root {
                 return Err(format!("{} is already the workspace \"{}\"", root.display(), w.name));
             }
-            if root.starts_with(other) || other.starts_with(&root) {
+            if root.starts_with(other) || other.starts_with(root) {
                 return Err(format!("{} overlaps the workspace \"{}\" ({}): products need separate folders", root.display(), w.name, w.root));
             }
         }
         if self.items.iter().any(|w| w.name.eq_ignore_ascii_case(name)) {
             return Err(format!("there is already a workspace named \"{name}\""));
         }
+        Ok(())
+    }
+
+    /// Register a folder. The root must exist; the same folder twice is refused (and so is a folder inside or around another
+    /// workspace, which would let two products share files).
+    pub fn add(&mut self, name: &str, root: &Path) -> Result<Workspace, String> {
+        self.reload();
+        let root = std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
+        self.check_add(name, &root)?;
+        let name = name.trim();
         let mut r = [0u8; 4];
         iyakki_sec::random_fill(&mut r).map_err(|e| e.to_string())?;
         let id = format!("w_{}", r.iter().map(|b| format!("{b:02x}")).collect::<String>());

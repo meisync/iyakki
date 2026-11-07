@@ -57,6 +57,30 @@ pub fn uplink_names(ifs: &[IfaceInfo]) -> Vec<String> {
     ifs.iter().filter(|i| i.default_route && i.up).map(|i| i.name.clone()).collect()
 }
 
+/// The networks (not the default route) that the routing table (`/proc/net/route` text) sends through each interface, as `(interface, network)`.
+/// A VPN or a router can route a range the machine has no address in; the hotspot must not take that range.
+pub fn routed_ranges_from(text: &str) -> Vec<(String, Cidr)> {
+    let mut v = Vec::new();
+    for l in text.lines().skip(1) {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f.len() < 8 {
+            continue;
+        }
+        let (Ok(dest), Ok(mask)) = (u32::from_str_radix(f[1], 16), u32::from_str_radix(f[7], 16)) else { continue };
+        let (dest, mask) = (dest.swap_bytes(), mask.swap_bytes());
+        // a mask is a run of ones then zeros; anything else is not a network
+        if mask == 0 || mask.leading_ones() + mask.trailing_zeros() != 32 {
+            continue;
+        }
+        if let Some(c) = Cidr::new(Ipv4Addr::from(dest), mask.leading_ones() as u8) {
+            if !link_local(&c) && !v.iter().any(|(i, x): &(String, Cidr)| i == f[0] && *x == c) {
+                v.push((f[0].to_string(), c));
+            }
+        }
+    }
+    v
+}
+
 /// The first resolvers in the text of `/etc/resolv.conf` (IPv4 only), at most three.
 pub fn resolvers_from(text: &str) -> Vec<Ipv4Addr> {
     let mut v: Vec<Ipv4Addr> = Vec::new();
@@ -138,7 +162,7 @@ pub fn make_plan(ifs: &[IfaceInfo], req: &Request, wifi_ap: bool, resolvers: &[I
     }
     free_for_sharing(down)?;
     // a private /24 that overlaps nothing on this computer
-    let avoid: Vec<Cidr> = ifs.iter().flat_map(|i| i.cidrs.iter().copied()).filter(|c| !link_local(c)).collect();
+    let avoid: Vec<Cidr> = ifs.iter().flat_map(|i| i.cidrs.iter().chain(i.routed.iter()).copied()).filter(|c| !link_local(c)).collect();
     let net = choose_subnet(&avoid).ok_or(ShareError::AddressClash)?;
     let mut r = resolvers.to_vec();
     if r.is_empty() {

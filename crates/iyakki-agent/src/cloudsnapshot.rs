@@ -20,8 +20,9 @@
 //!   tenant scope, `snapshot-key.current` names the one to use; a key's id is the start of its SHA-256). A restore authenticates every chunk
 //!   before anything is unpacked, so a changed or truncated archive, or the wrong key, is refused with nothing written. Key rotation:
 //!   [`VaultKeyring::rotate`] makes a new current key (old ones stay so old snapshots still open); [`rekey`] re-seals a snapshot under the
-//!   new one (atomic swap). Honest limits: the tar and the compressed archive exist unencrypted in the snapshot's temporary folder while
-//!   they are made (and during a restore) and are deleted, not wiped; file names are visible on the live volume anyway; whoever holds
+//!   new one (atomic swap). Honest limits: no plain tar or compressed archive is ever a file (they pass through a pipe from the walk to the
+//!   sealer, and from the opener to the unpacker); a restore does unpack the files into the staging folder inside the snapshot, which is
+//!   deleted, not wiped; file names are visible on the live volume anyway; whoever holds
 //!   the tenant's vault key reads the snapshots.
 //! * Not done: roles lists and audit are not part of a snapshot (restoring them over live ones would be a privilege decision); no
 //!   incremental snapshots; a file that changes while it is read stops the snapshot (run again) rather than being stored half-written.
@@ -404,7 +405,7 @@ fn header(name: &str, kind: u8, mode: u32, size: u64) -> Result<[u8; 512], Strin
 }
 
 struct Walk {
-    tar: BufWriter<File>,
+    tar: BufWriter<Box<dyn Write + Send>>,
     items: Vec<Item>,
     skipped: Vec<String>,
 }
@@ -521,30 +522,41 @@ pub fn create_with(source: &Path, snaps: &Path, now: u64, key: Option<&SnapKey>)
 }
 
 fn build(source: &Path, tmp: &Path, id: &str, now: u64, key: Option<&SnapKey>) -> Result<Manifest, String> {
-    let raw = tmp.join("data.tar");
-    let mut w = Walk { tar: BufWriter::new(File::create(&raw).map_err(|e| e.to_string())?), items: vec![], skipped: vec![] };
-    if source.is_dir() {
-        w.dir(source, "")?;
-    }
-    w.tar.write_all(&[0u8; 1024]).map_err(|e| e.to_string())?;
-    w.tar.flush().map_err(|e| e.to_string())?;
-    let Walk { items, skipped, .. } = w;
     let arch = tmp.join(if key.is_some() { ARCHIVE_ENC } else { ARCHIVE });
     let salt = crate::cloudkeys::random::<16>()?;
-    {
-        let src = BufReader::new(File::open(&raw).map_err(|e| e.to_string())?);
-        let mut out = BufWriter::new(File::create(&arch).map_err(|e| e.to_string())?);
-        match key {
-            None => ruzstd::encoding::compress(src, &mut out, ruzstd::encoding::CompressionLevel::Fastest),
-            Some(k) => {
-                let mut sw = SealWriter::new(&mut out, k, id, salt).map_err(|e| e.to_string())?;
-                ruzstd::encoding::compress(src, &mut sw, ruzstd::encoding::CompressionLevel::Fastest);
-                sw.finish().map_err(|e| e.to_string())?;
+    // The tar is never a file: the walk writes into a pipe, the compressor (and, with a key, the sealer) reads it on another thread and
+    // writes the archive, so nothing readable beyond the live files exists on disk while a snapshot is made.
+    let (rd, wr) = std::io::pipe().map_err(|e| e.to_string())?;
+    let (walked, packed) = std::thread::scope(|sc| {
+        let h = sc.spawn(|| -> Result<(), String> {
+            let src = BufReader::new(rd);
+            let mut out = BufWriter::new(File::create(&arch).map_err(|e| e.to_string())?);
+            match key {
+                None => ruzstd::encoding::compress(src, &mut out, ruzstd::encoding::CompressionLevel::Fastest),
+                Some(k) => {
+                    let mut sw = SealWriter::new(&mut out, k, id, salt).map_err(|e| e.to_string())?;
+                    ruzstd::encoding::compress(src, &mut sw, ruzstd::encoding::CompressionLevel::Fastest);
+                    sw.finish().map_err(|e| e.to_string())?;
+                }
             }
-        }
-        out.flush().map_err(|e| e.to_string())?;
-    }
-    let _ = std::fs::remove_file(&raw);
+            out.flush().map_err(|e| e.to_string())
+        });
+        let mut w = Walk { tar: BufWriter::new(Box::new(wr)), items: vec![], skipped: vec![] };
+        let walked = (|| -> Result<(), String> {
+            if source.is_dir() {
+                w.dir(source, "")?;
+            }
+            w.tar.write_all(&[0u8; 1024]).map_err(|e| e.to_string())?;
+            w.tar.flush().map_err(|e| e.to_string())
+        })();
+        let Walk { items, skipped, tar } = w;
+        drop(tar); // the end of the pipe: the compressor finishes
+        let packed = h.join().unwrap_or_else(|_| Err("the archive writer stopped unexpectedly".into()));
+        (walked.map(|_| (items, skipped)), packed)
+    });
+    // a failed archive writer breaks the pipe under the walk: its own reason is the useful one
+    packed?;
+    let (items, skipped) = walked?;
     let full = Manifest {
         format: if key.is_some() { ENC_FORMAT } else { FORMAT },
         id: id.into(),
@@ -694,20 +706,30 @@ pub fn restore_with(snaps: &Path, id: &str, target: &Path, overwrite: bool, keys
                 crate::archive::untar_zst(&snaps.join(id).join(&m.archive), &stage, m.bytes() + (1 << 20))?;
             }
             Some(e) => {
-                // opened to a file beside the staging folder (the plain archive exists only for this restore), unpacked, removed
-                let plain = snaps.join(id).join(format!(".restore-{}.zst", std::process::id()));
+                // opened straight into the unpacker through a pipe: the plain archive is never a file
                 let key = keys.ok_or("give the key")?.get(&e.key_id)?;
-                let r = (|| -> Result<(), String> {
-                    let src = BufReader::new(File::open(snaps.join(id).join(&m.archive)).map_err(|e| e.to_string())?);
-                    let mut out = BufWriter::new(File::create(&plain).map_err(|e| e.to_string())?);
-                    set_mode(&plain, 0o600);
-                    open_stream(src, &mut out, &key, id, &salt_of(e)?)?;
-                    out.flush().map_err(|e| e.to_string())?;
-                    crate::archive::untar_zst(&plain, &stage, m.bytes() + (1 << 20))?;
-                    Ok(())
-                })();
-                let _ = std::fs::remove_file(&plain);
-                r?;
+                let salt = salt_of(e)?;
+                let (rd, wr) = std::io::pipe().map_err(|e| e.to_string())?;
+                let max = m.bytes() + (1 << 20);
+                let archive = snaps.join(id).join(&m.archive);
+                let (unpacked, opened) = std::thread::scope(|sc| {
+                    let h = sc.spawn(|| -> Result<(), String> {
+                        let src = BufReader::new(File::open(&archive).map_err(|e| e.to_string())?);
+                        let mut out = BufWriter::new(wr);
+                        open_stream(src, &mut out, &key, id, &salt)?;
+                        out.flush().map_err(|e| e.to_string())
+                    });
+                    let mut br = BufReader::new(rd);
+                    let unpacked = ruzstd::decoding::StreamingDecoder::new(&mut br).map_err(|e| format!("not a zstd file ({e})")).and_then(|dec| crate::archive::untar_stream(dec, &stage, max));
+                    if unpacked.is_ok() {
+                        // the rest of the stream must still be read to its authenticated end
+                        let _ = std::io::copy(&mut br, &mut std::io::sink());
+                    }
+                    drop(br);
+                    (unpacked, h.join().unwrap_or_else(|_| Err("the archive reader stopped unexpectedly".into())))
+                });
+                unpacked?;
+                opened?;
             }
         }
         for i in m.items.iter().filter(|i| i.kind == "file") {

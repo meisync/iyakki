@@ -9,6 +9,14 @@
     "zone_checked_at": 0,
     "zone_note": ""
   },
+  "sound": {
+    "output": "PCH:3",
+    "volume_pct": 40,
+    "muted": false,
+    "levels": {
+      "PCH:3": 40
+    }
+  },
   "providers": [
     {
       "id": "local",

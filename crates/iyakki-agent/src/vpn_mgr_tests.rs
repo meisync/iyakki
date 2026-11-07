@@ -551,3 +551,27 @@ fn the_summary_for_the_top_bar_follows_the_connection_and_never_names_a_key_or_a
     r.mgr.set_enabled(&id, true, NOW + 4).unwrap();
     assert_eq!(r.mgr.summary().unwrap().light, Light::Open);
 }
+
+#[test]
+fn the_startup_registry_hears_connecting_connected_and_down_without_a_key_or_a_server_in_the_words() {
+    use crate::startup::{Registry, StartupState};
+    let reg = Registry::new(|| 100);
+    let r = rig("startup-report");
+    r.mgr.report_startup(&reg);
+    assert_eq!(reg.state("vpn"), Some(StartupState::Disabled), "nothing enabled");
+    let id = import_full(&r, "Office");
+    r.mgr.set_settings(&id, full_settings(true), NOW).unwrap();
+    r.mgr.set_enabled(&id, true, NOW).unwrap();
+    r.mgr.report_startup(&reg);
+    assert!(matches!(reg.state("vpn"), Some(StartupState::Starting { .. })), "{:?}", reg.state("vpn"));
+    hs(&r, NOW as i64);
+    r.mgr.tick(NOW + 1);
+    r.mgr.report_startup(&reg);
+    assert_eq!(reg.state("vpn"), Some(StartupState::Ready));
+    r.sys.st.lock().unwrap().links.clear();
+    r.mgr.tick(NOW + 2);
+    r.mgr.report_startup(&reg);
+    let Some(StartupState::Failed(why)) = reg.state("vpn") else { panic!("{:?}", reg.state("vpn")) };
+    assert!(why.contains("Office") && !why.contains("203.0.113.9") && !why.contains(&key(0x11)), "{why}");
+    r.mgr.stop_all();
+}

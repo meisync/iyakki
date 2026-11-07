@@ -6,6 +6,7 @@ pub mod askform;
 pub mod assist;
 pub mod browser;
 pub mod camera;
+pub mod channel_switch;
 pub mod failfix;
 pub mod host;
 pub mod permission;
@@ -112,6 +113,15 @@ pub fn halt_all() {
     }
 }
 
+/// Tell the startup registry whether a scheduler is going in this process (an account with flows has one; none going is nothing to wait for).
+pub fn report_scheduler(reg: &crate::startup::Registry, running: bool) {
+    if running {
+        reg.ready("flows");
+    } else {
+        reg.disabled("flows");
+    }
+}
+
 /// Whether the account may use FLOWS at all.
 pub fn allowed(p: &Policy) -> bool {
     p.apps.contains(&App::Flows)
@@ -134,6 +144,7 @@ impl FlowEnv {
         env.engine.recover();
         assist::spawn_ticker(&env);
         g.insert(key, env.clone());
+        report_scheduler(crate::startup::global(), true);
         Ok(env)
     }
 
@@ -158,6 +169,7 @@ impl FlowEnv {
         if let Some(e) = env {
             std::thread::spawn(move || e.engine.halt());
         }
+        report_scheduler(crate::startup::global(), HUB.get().is_some_and(|h| !h.lock().unwrap_or_else(|e| e.into_inner()).is_empty()));
     }
 
     /// Is the account's scheduler going?
@@ -270,7 +282,10 @@ impl FlowEnv {
         if !valid_id(&f.id) {
             f.id = slug(&f.name);
         }
-        self.create_draft(f, by)
+        let f = self.create_draft(f, by)?;
+        // a flow that came from outside may not send outside messages until the person says so
+        self.host.chan.block_new(&f.id);
+        Ok(f)
     }
 
     pub fn export_json(&self, id: &str) -> Result<String, String> {
@@ -287,7 +302,9 @@ impl FlowEnv {
     pub fn from_store_template(&self, payload: &str, by: &str) -> Result<Flow, String> {
         let t = templates::from_json(payload)?;
         let f = templates::instantiate(&t, &t.flow.id, &t.name);
-        self.create_draft(f, by)
+        let f = self.create_draft(f, by)?;
+        self.host.chan.block_new(&f.id);
+        Ok(f)
     }
 
     pub fn from_template(&self, template: &str, name: &str, by: &str) -> Result<Flow, String> {

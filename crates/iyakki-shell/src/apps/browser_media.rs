@@ -337,15 +337,11 @@ pub fn devprefs_path(cx: &AppCx) -> PathBuf {
 
 /// This person's remembered choices (nothing remembered when the file is missing or damaged).
 pub fn load(cx: &AppCx) -> MediaPerms {
-    std::fs::read_to_string(path(cx)).map(|t| MediaPerms::from_json(&t)).unwrap_or_default()
+    super::browser_config::read_checked("browser media choices", &path(cx)).map(|t| MediaPerms::from_json(&t)).unwrap_or_default()
 }
 
 pub fn save(cx: &AppCx, m: &MediaPerms) {
-    let p = path(cx);
-    let tmp = p.with_extension("tmp");
-    if std::fs::write(&tmp, m.to_json().to_string()).is_ok() {
-        let _ = std::fs::rename(&tmp, &p);
-    }
+    super::browser_config::write_checked("browser media choices", &path(cx), &m.to_json().to_string());
 }
 
 /// The audit line: host, kind and what happened. Never a picture, a sound or a device name.

@@ -638,11 +638,11 @@ pub fn relay_token(sock: &str) -> Option<String> {
 /// `iyakki --mcp-tools <socket>`: relay the agent's standard input and output to the run's socket. Returns the exit code.
 pub fn relay_stdio(sock: &str) -> i32 {
     let Some(token) = relay_token(sock) else {
-        eprintln!("IYAKKI_MCP_TOKEN is not set");
+        crate::qeprintln!("IYAKKI_MCP_TOKEN is not set");
         return 2;
     };
     let Ok(mut conn) = UnixStream::connect(sock) else {
-        eprintln!("cannot reach IYAKKI's tool socket {sock}");
+        crate::qeprintln!("cannot reach IYAKKI's tool socket {sock}");
         return 1;
     };
     if writeln!(conn, "{token}").is_err() {

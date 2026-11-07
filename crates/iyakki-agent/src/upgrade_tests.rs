@@ -378,7 +378,7 @@ fn a_damaged_flow_meta_file_is_moved_aside_and_the_flow_itself_is_still_there() 
 
 #[test]
 fn every_registry_is_complete() {
-    for s in [crate::settings::SCHEMA, crate::dash::store::SOURCES_SCHEMA, crate::k3sdev::STATE_SCHEMA, crate::devmode::client::DEVICES_SCHEMA, crate::devwatch::SCHEMA, iyakki_flow::store::SCHEMA] {
+    for s in [crate::settings::SCHEMA, crate::dash::store::SOURCES_SCHEMA, crate::k3sdev::STATE_SCHEMA, crate::devmode::client::DEVICES_SCHEMA, crate::devwatch::SCHEMA, iyakki_flow::store::SCHEMA, crate::store::ratings::SCHEMA] {
         s.check().unwrap();
     }
 }
@@ -446,14 +446,273 @@ fn regenerate_current_fixtures() {
     let _ = fl.meta_of("orders");
     crate::inbox::Inbox::new(&d.join("inbox")).maintain("amy", 1_700_000_100).unwrap();
     let out = fixtures("current");
-    let _ = fs::remove_dir_all(&out);
+    // Only the files this test itself rewrites with this release's code are replaced. Every other file (the firewall and the approval
+    // pins, which other crates write; the accounts, vaults and plain files, which no loader here rewrites) is left as it is in
+    // `current`, and copied from the alpha.1 folder only when `current` has no such file yet.
+    const REGENERATED: [&str; 8] = ["settings.json", "dash/sources-amy.json", "dash/sources-system.json", "k3s-dev/state.json", "devices.json", "devhome/devices.json", "home/amy/Flows/orders/meta.json", "inbox/amy.json"];
     for p in walk(&d) {
         let rel = p.strip_prefix(&d).unwrap();
         if rel.to_string_lossy().contains(".pre-v") {
             continue;
         }
         let to = out.join(rel);
+        if to.exists() && !REGENERATED.contains(&rel.to_string_lossy().as_ref()) {
+            continue;
+        }
         fs::create_dir_all(to.parent().unwrap()).unwrap();
         fs::copy(&p, &to).unwrap();
     }
+}
+
+// ------------------------------------------------------------------------------------------------ fields added since alpha.1
+
+#[test]
+fn settings_fields_added_since_alpha1_start_at_their_defaults_and_what_alpha1_wrote_is_kept() {
+    use crate::settings::{Settings, SettingsStore};
+    let d = data("alpha1", "settings-new-fields");
+    let p = d.join("settings.json");
+    let s = SettingsStore::open(&p).unwrap();
+    let (g, fresh) = (s.get(), Settings::default());
+    // what alpha.1 wrote for the sound (its four fields) is kept as it was ...
+    assert_eq!((g.sound.output.as_str(), g.sound.volume_pct, g.sound.muted), ("PCH:3", 40, false));
+    assert_eq!(g.sound.levels.get("PCH:3"), Some(&40));
+    // ... and the fields of the sound that came later start at their defaults (the mixer is on by default: owner decision 2026-10-28)
+    assert_eq!((&g.sound.boosts, &g.sound.volume_modes, &g.sound.source_levels, g.sound.web_mix, g.sound.highlight_offset_ms), (&fresh.sound.boosts, &fresh.sound.volume_modes, &fresh.sound.source_levels, false, 0));
+    assert!(g.sound.boosts.is_empty() && g.sound.volume_modes.is_empty() && g.sound.source_levels.is_empty());
+    let mut rest = g.sound.clone();
+    (rest.output, rest.volume_pct, rest.levels) = (fresh.sound.output.clone(), fresh.sound.volume_pct, fresh.sound.levels.clone());
+    assert_eq!(rest, fresh.sound, "every other sound field, the mixer choice included, is the default");
+    // the time settings keep alpha.1's choices; the question "set the zone from the network?" has not been asked
+    assert_eq!((g.time.zone.as_str(), g.time.hour12, g.time.zone_auto), ("Europe/Paris", false, false));
+    assert!(!g.time.zone_asked);
+    // the settings that did not exist at all
+    assert_eq!((&g.vision, &g.power, &g.update_check, &g.screensaver_signin, g.announce_name, g.web_access, g.web_port), (&fresh.vision, &fresh.power, &fresh.update_check, &fresh.screensaver_signin, None, false, 0));
+    // saving writes the new fields beside the old ones, and the sound the person had is still theirs
+    let mut s = s;
+    s.update(|x| {
+        x.sound.boosts.insert("PCH".into(), 3);
+    })
+    .unwrap();
+    let t = SettingsStore::open(&p).unwrap();
+    assert_eq!((t.get().sound.output.as_str(), t.get().sound.volume_pct, t.get().sound.boosts.get("PCH")), ("PCH:3", 40, Some(&3)));
+    assert_eq!(t.get().time, s.get().time);
+}
+
+// ------------------------------------------------------------------------------------------------ vaults
+
+struct Dead;
+impl iyakki_proxy::Upstream for Dead {
+    fn request(&self, _: &str, _: &str, _: &[(String, String)], _: &[u8]) -> Result<iyakki_proxy::UpstreamResponse, String> {
+        Err("no network in tests".into())
+    }
+}
+
+const FIXTURE_PASS: &str = "alpha1-fixture-pass";
+
+#[test]
+fn the_vaults_of_alpha1_open_with_the_same_password_sealed_until_then_and_opening_never_writes_them() {
+    use crate::vault::{LocalVault, VaultError};
+    let d = data("alpha1", "vaults");
+    let (sys, amy) = (d.join("vault/system.afv"), d.join("vault/users/amy.afv"));
+    let (sys_bytes, amy_bytes) = (bytes(&sys), bytes(&amy));
+    // opened, a vault is sealed: no secret is readable and even the names are hidden
+    let mut v = LocalVault::open(&sys).unwrap();
+    assert!(!v.is_unlocked() && v.names() == Err(VaultError::Locked) && v.get("cloud-key").is_err());
+    assert_eq!(v.slot_ids(), vec!["user:admin".to_string()]);
+    assert_eq!(v.unlock("user:admin", "a wrong password"), Err(VaultError::BadPassword));
+    assert!(!v.is_unlocked());
+    v.unlock("user:admin", FIXTURE_PASS).unwrap();
+    assert_eq!((v.names().unwrap(), v.get("cloud-key").unwrap().as_str().to_string()), (vec!["cloud-key".to_string()], "fixture-not-a-key".to_string()));
+    v.lock();
+    assert!(!v.is_unlocked() && v.names().is_err(), "locking seals it again");
+    // a person's vault is theirs: another slot name does not open it
+    let mut u = LocalVault::open(&amy).unwrap();
+    assert_eq!(u.unlock("user:admin", FIXTURE_PASS), Err(VaultError::NoSuchSlot));
+    u.unlock("user:amy", FIXTURE_PASS).unwrap();
+    assert_eq!(u.get("note").unwrap().as_str(), "fixture-note");
+    // opening, unlocking and locking changed neither file
+    assert_eq!((bytes(&sys), bytes(&amy)), (sys_bytes.clone(), amy_bytes.clone()));
+    // a change made by this release keeps the old secrets and slots, and the old password still opens it
+    u.set("another", "fixture-two").unwrap();
+    u.add_slot("user:ola", "another-fixture-pass").unwrap();
+    let mut again = LocalVault::open(&amy).unwrap();
+    again.unlock("user:amy", FIXTURE_PASS).unwrap();
+    assert_eq!(again.names().unwrap(), vec!["another".to_string(), "note".to_string()]);
+    assert_eq!(again.slot_ids(), vec!["user:amy".to_string(), "user:ola".to_string()]);
+    assert_eq!(bytes(&sys), sys_bytes, "the system vault was not part of it");
+}
+
+#[test]
+fn signing_in_to_an_alpha1_data_folder_unlocks_both_vaults_and_a_second_sign_in_changes_nothing() {
+    use crate::services::{Services, VaultState};
+    let d = data("alpha1", "vaults-login");
+    let (sys, amy) = (d.join("vault/system.afv"), d.join("vault/users/amy.afv"));
+    let before = (bytes(&sys), bytes(&amy));
+    let svc = Services::open(&d, std::sync::Arc::new(Dead), std::sync::Arc::new(Dead)).unwrap();
+    assert!(!svc.secrets.system_unlocked() && !svc.user_vault_unlocked("amy"), "sealed until somebody signs in with a password");
+    let r = svc.on_login("amy", FIXTURE_PASS, false);
+    assert_eq!((r.user_vault, r.system_vault), (VaultState::Unlocked, VaultState::NotApplicable));
+    assert_eq!(svc.user_names("amy").unwrap(), vec!["note".to_string()]);
+    assert!(!svc.secrets.system_unlocked(), "a plain person does not open the system vault");
+    let r = svc.on_login("admin", FIXTURE_PASS, true);
+    assert_eq!(r.system_vault, VaultState::Unlocked);
+    assert_eq!(svc.system_names().unwrap(), vec!["cloud-key".to_string()]);
+    assert_eq!(svc.system_slots(), vec!["user:admin".to_string()], "the first administrator's slot is the only one");
+    // the first sign-in of the administrator also made their own personal vault; the two that existed are as alpha.1 left them
+    assert_eq!((bytes(&sys), bytes(&amy)), before);
+    svc.on_logout("amy", false);
+    assert!(!svc.user_vault_unlocked("amy"));
+    assert_eq!(svc.on_login("amy", FIXTURE_PASS, false).user_vault, VaultState::Unlocked);
+    assert_eq!((bytes(&sys), bytes(&amy)), before);
+    // the wrong password leaves the vault as it is, locked, and says so (it is not recreated)
+    svc.on_logout("amy", false);
+    assert!(matches!(svc.on_login("amy", "not the password", false).user_vault, VaultState::Locked(_)));
+    assert_eq!(bytes(&amy), before.1);
+}
+
+#[test]
+fn a_vault_from_a_newer_release_or_a_damaged_one_is_refused_never_rewritten_and_only_that_person_is_locked_out() {
+    use crate::services::{Services, VaultState};
+    use crate::vault::{LocalVault, VaultError};
+    let d = data("alpha1", "vaults-bad");
+    let amy = d.join("vault/users/amy.afv");
+    let sys = d.join("vault/system.afv");
+    // newer: the version number is above what this code knows
+    let mut v = json(&amy);
+    v["v"] = 2.into();
+    fs::write(&amy, serde_json::to_vec(&v).unwrap()).unwrap();
+    let newer = bytes(&amy);
+    assert!(matches!(LocalVault::open(&amy), Err(VaultError::Corrupt)));
+    // damaged: cut in the middle
+    let cut = d.join("vault/users/cut.afv");
+    fs::write(&cut, &bytes(&sys)[..40]).unwrap();
+    assert!(matches!(LocalVault::open(&cut), Err(VaultError::Corrupt)));
+    let svc = Services::open(&d, std::sync::Arc::new(Dead), std::sync::Arc::new(Dead)).unwrap();
+    // both people are told "locked" and the files are exactly as they were (a new vault is NOT created over them)
+    assert!(matches!(svc.on_login("amy", FIXTURE_PASS, false).user_vault, VaultState::Locked(_)));
+    assert!(matches!(svc.on_login("cut", FIXTURE_PASS, false).user_vault, VaultState::Locked(_)));
+    assert_eq!(bytes(&amy), newer);
+    assert_eq!(bytes(&cut), &bytes(&sys)[..40]);
+    assert!(corrupt_copies(&d.join("vault/users"), "amy.afv").is_empty());
+    // the administrator's system vault is not affected by it
+    assert_eq!(svc.on_login("admin", FIXTURE_PASS, true).system_vault, VaultState::Unlocked);
+    assert_eq!(svc.system_names().unwrap(), vec!["cloud-key".to_string()]);
+}
+
+// ------------------------------------------------------------------------------------------------ radio stations
+
+#[test]
+fn the_radio_stations_of_alpha1_load_in_order_without_a_pinned_certificate_and_a_change_keeps_them() {
+    use crate::radio::StationStore;
+    let d = data("alpha1", "radio");
+    let p = d.join("radio-amy.json");
+    let original = bytes(&p);
+    let s = StationStore::new(&d, "amy");
+    let list = s.list();
+    assert_eq!(list.iter().map(|x| (x.name.as_str(), x.url.as_str())).collect::<Vec<_>>(), vec![("Example Jazz", "https://radio.example.org/jazz.mp3"), ("Example News", "http://news.example.org:8000/live")]);
+    assert!(list.iter().all(|x| x.cert_pin.is_none()), "the field added after alpha.1 starts empty");
+    assert_eq!(bytes(&p), original, "reading changes nothing, and no backup is made (the shape did not change)");
+    // a station changed by this release: the others stay, and a station without a pin is written exactly as alpha.1 wrote it
+    s.add("Example Talk", "https://talk.example.org/live").unwrap();
+    let after = StationStore::new(&d, "amy").list();
+    assert_eq!(after.len(), 3);
+    assert_eq!(&after[..2], &list[..]);
+    let v = json(&p);
+    assert!(v.as_array().unwrap().iter().all(|x| x.get("cert_pin").is_none() && x.as_object().unwrap().len() == 2));
+    // another person has their own file
+    assert!(StationStore::new(&d, "ben").list().is_empty());
+    assert!(!sibling(&p, "pre-v1").exists());
+}
+
+#[test]
+fn the_other_fixtures_of_the_current_release_load_as_they_are() {
+    use crate::radio::StationStore;
+    use crate::vault::LocalVault;
+    let d = data("current", "others");
+    let (radio, amy) = (d.join("radio-amy.json"), d.join("vault/users/amy.afv"));
+    let before = (bytes(&radio), bytes(&amy));
+    assert_eq!(StationStore::new(&d, "amy").list().len(), 2);
+    let mut v = LocalVault::open(&amy).unwrap();
+    v.unlock("user:amy", FIXTURE_PASS).unwrap();
+    assert_eq!(v.get("note").unwrap().as_str(), "fixture-note");
+    assert_eq!((bytes(&radio), bytes(&amy)), before);
+    assert!(walk(&d).iter().all(|p| !p.to_string_lossy().contains(".pre-v") && !p.to_string_lossy().contains(".corrupt-")));
+}
+
+// ------------------------------------------------------------------------------------------------ damaged plain files are set aside
+
+#[test]
+fn a_damaged_radio_file_is_set_aside_with_its_bytes_and_the_next_station_starts_a_fresh_file() {
+    use crate::radio::StationStore;
+    let d = data("alpha1", "radio-bad");
+    let p = d.join("radio-amy.json");
+    fs::write(&p, b"[{\"name\": \"Example Jazz\", \"url\": ").unwrap();
+    let s = StationStore::new(&d, "amy");
+    assert!(s.list().is_empty());
+    assert!(!p.exists(), "the damaged file is not left in the way");
+    let kept = corrupt_copies(&d, "radio-amy.json");
+    assert_eq!(kept.len(), 1);
+    assert_eq!(bytes(&kept[0]), b"[{\"name\": \"Example Jazz\", \"url\": ");
+    s.add("Example Talk", "https://talk.example.org/live").unwrap();
+    assert_eq!(StationStore::new(&d, "amy").list().len(), 1);
+    assert_eq!(corrupt_copies(&d, "radio-amy.json").len(), 1, "the copy is still there after the save");
+    // valid JSON of the wrong shape is damaged too; and no more than three copies are ever kept
+    for n in 0..5 {
+        fs::write(&p, format!("{{\"wrong\": {n}}}")).unwrap();
+        assert!(s.list().is_empty());
+        fs::write(sibling(&p, &format!("corrupt-{}", 9_000_000_000u64 + n)), b"x").ok();
+    }
+    assert!(corrupt_copies(&d, "radio-amy.json").len() <= 4, "the pruning runs when a file is set aside");
+    fs::write(&p, b"{ broken").unwrap();
+    let _ = s.list();
+    assert_eq!(corrupt_copies(&d, "radio-amy.json").len(), 3);
+    // another person's stations are not touched
+    assert_eq!(bytes(&d.join("inbox/amy.json")), bytes(&fixtures("alpha1").join("inbox/amy.json")));
+}
+
+#[test]
+fn a_damaged_browser_header_rules_file_is_set_aside_and_the_old_bytes_are_kept() {
+    use crate::browserheaders::{Store, Values};
+    struct Nothing;
+    impl Values for Nothing {
+        fn get(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn delete(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    let d = data("alpha1", "headers-bad");
+    let p = d.join("browser-headers-amy.json");
+    fs::write(&p, b"{\"rules\": [ {").unwrap();
+    let store = Store::new(&p, std::sync::Arc::new(Nothing));
+    assert!(store.list().is_empty());
+    assert!(!p.exists());
+    assert_eq!(bytes(&corrupt_copies(&d, "browser-headers-amy.json")[0]), b"{\"rules\": [ {");
+}
+
+#[test]
+fn a_damaged_system_vault_does_not_stop_the_system_and_is_never_overwritten() {
+    use crate::services::{Services, VaultState};
+    let d = data("alpha1", "sysvault-bad");
+    let sys = d.join("vault/system.afv");
+    let cut = bytes(&sys)[..50].to_vec();
+    fs::write(&sys, &cut).unwrap();
+    // the services still start (before: Services::open failed and the shell could not start at all)
+    let svc = Services::open(&d, std::sync::Arc::new(Dead), std::sync::Arc::new(Dead)).unwrap();
+    // an administrator signs in: the message says locked, nothing panics, no new vault is made over the damaged file
+    let r = svc.on_login("admin", FIXTURE_PASS, true);
+    match r.system_vault {
+        VaultState::Locked(m) => assert!(m.contains("system vault"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(bytes(&sys), cut);
+    assert!(!svc.secrets.system_unlocked());
+    // the people with a vault of their own are not affected
+    assert_eq!(svc.on_login("amy", FIXTURE_PASS, false).user_vault, VaultState::Unlocked);
+    assert_eq!(svc.user_names("amy").unwrap(), vec!["note".to_string()]);
+    assert_eq!(bytes(&sys), cut);
 }

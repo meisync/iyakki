@@ -262,6 +262,12 @@ pub fn plan(cfg: &NetConfig, ifaces: &[Iface]) -> Vec<Step> {
     s
 }
 
+/// A running VPN has put its DNS in `/etc/resolv.conf` (marked by its first line): a network step that comes later must not write the
+/// configured name servers over it. The VPN puts the original back itself when it disconnects.
+pub fn keeps_vpn_dns(path: &str, current: Option<&str>) -> bool {
+    path == "/etc/resolv.conf" && current.is_some_and(|t| t.lines().next() == Some(iyakki_vpn::plan::DNS_MARKER))
+}
+
 /// Execute a plan; returns the failures (a missing cable must not stop boot).
 pub fn execute(steps: &[Step]) -> Vec<String> {
     execute_with(steps, &iyakki_devctl::System, &iyakki_devctl::Roots::real(), Path::new("/var/lib/iyakki/mac-secret"))
@@ -274,6 +280,7 @@ pub fn execute_with(steps: &[Step], ctl: &dyn iyakki_devctl::Control, roots: &iy
     let mut secret: Option<Vec<u8>> = None;
     for st in steps {
         let r = match st {
+            Step::Write(p, _) if keeps_vpn_dns(p, std::fs::read_to_string(p).ok().as_deref()) => Ok(()),
             Step::Write(p, c) => std::fs::write(p, c).map_err(|e| format!("write {p}: {e}")),
             Step::Mac { iface, mode, ssid } => {
                 let sec = secret.get_or_insert_with(|| iyakki_devctl::mac::load_secret(secret_path).0);
@@ -734,5 +741,16 @@ mod tests {
         assert!(witness.exists(), "the plan carried on");
         assert_eq!(bad.calls.lock().unwrap().last().unwrap(), "link eth0 up", "the link is back up");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_later_network_step_does_not_write_the_name_servers_over_a_running_vpns_dns() {
+        let vpn = iyakki_vpn::plan::resolv_conf(&["10.2.0.1".parse().unwrap()]);
+        assert!(keeps_vpn_dns("/etc/resolv.conf", Some(&vpn)));
+        assert!(!keeps_vpn_dns("/etc/resolv.conf", Some("nameserver 9.9.9.9\n")), "an ordinary file is written as before");
+        assert!(!keeps_vpn_dns("/etc/resolv.conf", None), "no file: written");
+        assert!(!keeps_vpn_dns("/run/other.conf", Some(&vpn)), "only the resolver file is protected");
+        // the marker must be the first line, not just present
+        assert!(!keeps_vpn_dns("/etc/resolv.conf", Some(&format!("nameserver 1.1.1.1\n{}\n", iyakki_vpn::plan::DNS_MARKER))));
     }
 }

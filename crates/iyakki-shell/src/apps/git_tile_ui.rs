@@ -446,6 +446,7 @@ impl GitApp {
     fn draw_card(&mut self, g: &mut Gfx, area: R, s: f32) {
         let Some(card) = &self.card else { return };
         let (title, lines, yes, no) = (card.title.clone(), card.lines.clone(), card.yes, card.no);
+        let toggle = card.toggle.as_ref().map(|t| (t.label, t.on, if t.on { t.note_on } else { t.note_off }));
         let danger = matches!(card.act, Act::Push { .. });
         let pw = 560.0 * s;
         // the height from the text
@@ -454,7 +455,11 @@ impl GitApp {
         for (t, _) in &lines {
             th += para(g, 0.0, 0.0, inner, 13.5 * s, TEXT, t, 8, false) + 6.0 * s;
         }
-        let h = 56.0 * s + th + 20.0 * s + 13.5 * s * 2.1 + 22.0 * s;
+        let mut box_h = 0.0;
+        if let Some((_, _, note)) = &toggle {
+            box_h = 13.5 * s * 2.1 + para(g, 0.0, 0.0, inner, 12.0 * s, DIM, note, 4, false) + 14.0 * s;
+        }
+        let h = 56.0 * s + th + box_h + 20.0 * s + 13.5 * s * 2.1 + 22.0 * s;
         let p = fx::modal(g, area, s, pw, h, if danger { AMBER } else { ACCENT }, false);
         let mut y = fx::modal_title(g, p, s, &title, if danger { AMBER } else { ACCENT });
         for (t, tone) in &lines {
@@ -469,6 +474,24 @@ impl GitApp {
         }
         y += 8.0 * s;
         let size = 13.5 * s;
+        if let Some((label, on, note)) = toggle {
+            // a box with a tick: the whole row reacts, and `s` flips it
+            let bx = p.x + 26.0 * s;
+            let row = R::new(bx, y, (p.w - 52.0 * s).min(size * 22.0), size * 2.1);
+            let hot = g.hovered(row);
+            let side = size * 1.3;
+            let by = y + (row.h - side) / 2.0;
+            g.rrect_outline(bx, by, side, side, 3.0 * s, 1.5 * s, if hot { ACCENT } else { MUTED });
+            if on {
+                g.line(bx + side * 0.2, by + side * 0.55, bx + side * 0.42, by + side * 0.78, 2.0 * s, ACCENT);
+                g.line(bx + side * 0.42, by + side * 0.78, bx + side * 0.82, by + side * 0.22, 2.0 * s, ACCENT);
+            }
+            g.text(bx + side + 10.0 * s, y + (row.h - g.line_height(size, Face::Bold)) / 2.0, size, TEXT, label, Face::Bold);
+            g.text(row.x + row.w - 40.0 * s, y + (row.h - g.line_height(12.0 * s, Face::Sans)) / 2.0, 12.0 * s, DIM, "s", Face::Sans);
+            g.hit(row, Event::Tab(T_SUBMODULES), label);
+            y += row.h;
+            y += para(g, p.x + 26.0 * s, y, p.w - 52.0 * s, 12.0 * s, DIM, note, 4, true) + 14.0 * s;
+        }
         let w1 = g.button(p.x + 26.0 * s, y, size, yes, if danger { AMBER } else { ACCENT }, Event::Tab(T_YES));
         g.button(p.x + 26.0 * s + w1 + 10.0 * s, y, size, no, MUTED, Event::Tab(T_NO));
         g.text(p.x + 26.0 * s + w1 + 20.0 * s + 100.0 * s, y + 6.0 * s, 12.0 * s, DIM, "y = yes, Esc = no", Face::Sans);

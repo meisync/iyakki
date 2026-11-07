@@ -125,6 +125,8 @@ pub struct Proc {
     /// Resident memory in bytes.
     pub rss: u64,
     pub start_ticks: u64,
+    /// The control-group line of a container process (the kubepods one); empty for a host process.
+    pub cgroup: String,
 }
 
 /// Clock ticks per second, as every Linux reports in `/proc` (USER_HZ is 100 on all supported machines).
@@ -156,6 +158,12 @@ fn parse_stat(text: &str) -> Option<(String, char, u32, u64, u32, u64, u64)> {
     Some((name, state, ppid, ticks, threads, start, rss))
 }
 
+/// The line of a process's control-group text that names a Kubernetes pod (`kubepods`), else empty. Kept short on purpose: it is
+/// only read again by [`crate::sysprocs`] to find the pod.
+pub fn container_cgroup(text: &str) -> String {
+    text.lines().find(|l| l.contains("kubepods")).map(|l| l.chars().take(300).collect()).unwrap_or_default()
+}
+
 /// Every process that is still there when read.
 pub fn processes(r: &SysRoots) -> Vec<Proc> {
     let names = user_names(r);
@@ -167,7 +175,7 @@ pub fn processes(r: &SysRoots) -> Vec<Proc> {
         let status = read(&d.join("status"));
         let uid = status.lines().find_map(|l| l.strip_prefix("Uid:")?.split_whitespace().next()?.parse().ok()).unwrap_or(0);
         let cmd = read(&d.join("cmdline")).split('\0').filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
-        out.push(Proc { pid, ppid, uid, user: names.get(&uid).cloned().unwrap_or_else(|| uid.to_string()), name, cmd, state, threads, ticks, rss: rss_pages * PAGE, start_ticks });
+        out.push(Proc { pid, ppid, uid, user: names.get(&uid).cloned().unwrap_or_else(|| uid.to_string()), name, cmd, state, threads, ticks, rss: rss_pages * PAGE, start_ticks, cgroup: container_cgroup(&read(&d.join("cgroup"))) });
     }
     out.sort_by_key(|p| p.pid);
     out

@@ -458,7 +458,7 @@ impl DevClient {
         let d = &self.device;
         let mut h = auth::sign_headers(&self.key, method, path, query, body, &d.fingerprint, crate::clock::now_unix())?;
         h.push(("Content-Type".into(), "application/octet-stream".into()));
-        reach(d, self.home.as_ref(), &resolve_local, &mut |host| https(host, d.port, Some(&d.fingerprint), method, &target(path, query), &h, body, self.timeout), &mut |n| eprintln!("{n}"))
+        reach(d, self.home.as_ref(), &resolve_local, &mut |host| https(host, d.port, Some(&d.fingerprint), method, &target(path, query), &h, body, self.timeout), &mut |n| crate::qeprintln!("{n}"))
     }
 
     /// A signed request whose answer is JSON (the device's error sentence on failure).

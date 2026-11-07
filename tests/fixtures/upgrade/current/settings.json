@@ -21,6 +21,7 @@
     "custom": [],
     "default": null
   },
+  "announce_name": null,
   "battery": {
     "hide_percent": false,
     "no_shutdown": false,
@@ -39,6 +40,7 @@
   "keyboard": {
     "fn_mode": "",
     "iso_layout": null,
+    "profile": "",
     "repeat_delay_ms": 0,
     "repeat_rate": 0,
     "scroll_momentum": null,
@@ -56,6 +58,12 @@
   "media_download_max_mb": 512,
   "no_tool_routing": false,
   "no_workspace_history": true,
+  "power": {
+    "profile": "balanced",
+    "sleep_after_min": 0,
+    "sleep_experimental": false,
+    "sleep_when_busy": false
+  },
   "providers": [
     {
       "base_url": "http://127.0.0.1:11434",
@@ -102,12 +110,15 @@
   "sound": {
     "boosts": {},
     "highlight_offset_ms": 0,
-    "levels": {},
-    "mixer": false,
+    "levels": {
+      "PCH:3": 40
+    },
+    "mixer": true,
     "muted": false,
-    "output": "",
+    "output": "PCH:3",
+    "source_levels": {},
     "volume_modes": {},
-    "volume_pct": 100,
+    "volume_pct": 40,
     "web_mix": false
   },
   "sounds": {
@@ -125,20 +136,28 @@
     "ntp_server": "",
     "seconds": false,
     "zone": "Europe/Paris",
+    "zone_asked": false,
     "zone_auto": false,
     "zone_checked_at": 0,
     "zone_note": ""
   },
   "token_price_cents_per_mtok": 150,
   "tool_log_days": 5,
+  "update_check": {
+    "metered_ok": false,
+    "mode": "daily",
+    "system_url": ""
+  },
   "vault": {
     "keyfile": null,
     "lock_on_admin_logout": true
   },
+  "vision": null,
   "voice": {
     "align_words": true,
     "auto_send": false,
     "highlight": "sentence_and_word",
+    "mic": "",
     "play_cmd": "aplay -q",
     "record_cmd": "arecord -q -f S16_LE -r 16000 -c 1 -t raw",
     "remote_ok": [],
@@ -146,5 +165,7 @@
     "speed_pct": 100,
     "stt": null,
     "tts": null
-  }
+  },
+  "web_access": false,
+  "web_port": 0
 }

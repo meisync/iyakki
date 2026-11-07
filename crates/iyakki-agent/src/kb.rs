@@ -328,8 +328,9 @@ impl KnowledgeBase {
         items.iter().map(|(title, source, text)| self.add_document(ns, title, source, text, BTreeMap::new())).collect()
     }
 
-    /// Ingest text files under `dir` (recursive, symlinks not followed, bounded count and size).
-    pub fn ingest_dir(&mut self, ns: &str, dir: &Path) -> (usize, usize) {
+    /// The files under `dir` that [`KnowledgeBase::ingest_dir`] would take: text-like names, not larger than [`MAX_DOC_BYTES`], found
+    /// recursively (symlinks not followed, depth and count bounded), in name order.
+    pub fn ingestible_files(dir: &Path) -> Vec<PathBuf> {
         fn walk(d: &Path, out: &mut Vec<PathBuf>, depth: u32) {
             if depth > 6 || out.len() >= 2000 {
                 return;
@@ -351,12 +352,14 @@ impl KnowledgeBase {
         let mut files = Vec::new();
         walk(dir, &mut files, 0);
         files.sort();
+        files.retain(|f| f.extension().and_then(|e| e.to_str()).is_some_and(|e| EXT.contains(&e.to_ascii_lowercase().as_str())) && std::fs::metadata(f).is_ok_and(|m| m.len() as usize <= MAX_DOC_BYTES));
+        files
+    }
+
+    /// Ingest text files under `dir` (recursive, symlinks not followed, bounded count and size).
+    pub fn ingest_dir(&mut self, ns: &str, dir: &Path) -> (usize, usize) {
         let (mut added, mut seen) = (0, 0);
-        for f in files {
-            let ok = f.extension().and_then(|e| e.to_str()).is_some_and(|e| EXT.contains(&e.to_ascii_lowercase().as_str()));
-            if !ok || std::fs::metadata(&f).map_or(true, |m| m.len() as usize > MAX_DOC_BYTES) {
-                continue;
-            }
+        for f in Self::ingestible_files(dir) {
             let Ok(text) = std::fs::read_to_string(&f) else { continue };
             let rel = f.strip_prefix(dir).unwrap_or(&f).display().to_string();
             seen += 1;
@@ -365,6 +368,19 @@ impl KnowledgeBase {
             }
         }
         (added, seen)
+    }
+
+    /// The embedding model a collection was built with.
+    pub fn embedder_of(&self, ns: &str) -> Option<String> {
+        self.ns.get(ns).map(|n| n.embedder_id.clone())
+    }
+
+    /// The chunks of one document, in order: `(index, text)`.
+    pub fn doc_chunks(&self, ns: &str, doc_id: &str) -> Vec<(u32, String)> {
+        let Some(n) = self.ns.get(ns) else { return vec![] };
+        let mut v: Vec<(u32, String)> = n.chunks.iter().filter(|c| c.doc == doc_id).map(|c| (c.idx, c.text.clone())).collect();
+        v.sort_by_key(|c| c.0);
+        v
     }
 
     pub fn remove_document(&mut self, ns: &str, doc_id: &str) -> Result<(), KbError> {

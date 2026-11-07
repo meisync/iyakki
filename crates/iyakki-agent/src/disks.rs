@@ -200,8 +200,8 @@ impl Fs {
     /// Why a plain mount is not possible (encrypted, swap, nothing to mount), or `None`.
     pub fn never_mountable(self) -> Option<&'static str> {
         match self {
-            Fs::Luks => Some("Encrypted (LUKS): unlock needs the key. IYAKKI cannot unlock it yet."),
-            Fs::BitLocker => Some("Encrypted (BitLocker): unlock needs the key. IYAKKI cannot unlock it yet; open it in Windows."),
+            Fs::Luks => Some("Encrypted (LUKS): unlock needs the key. Not supported in IYAKKI: unlock it with the vendor or operating-system tools (for LUKS, cryptsetup on another Linux)."),
+            Fs::BitLocker => Some("Encrypted (BitLocker): unlock needs the key. Not supported in IYAKKI: unlock it in Windows with its own tools."),
             Fs::Apfs => Some("Mac APFS: shown, but Linux cannot read it safely. Use a Mac, or format it as exFAT there."),
             Fs::Swap => Some("Swap space: nothing to open."),
             Fs::Empty => Some("Empty: there is no file system on it."),

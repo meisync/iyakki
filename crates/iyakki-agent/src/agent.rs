@@ -191,6 +191,12 @@ pub fn hard_ask(name: &str, args: &Value) -> Option<&'static str> {
         "vault_request" | "screen_capture" => return Some("secrets and the screen are never released automatically"),
         "camera_photo" | "camera_record_start" | "camera_passport" => return Some("the camera is private: it always asks (Allow for 5 minutes at most)"),
         "ssh_tunnel_add" | "ssh_tunnel_edit" | "ssh_tunnel_enable" | "ssh_tunnel_disable" | "ssh_tunnel_delete" => return Some("changing SSH tunnels (who can reach what through this device) always asks"),
+        "quick_uninstall" => return Some("removing a Quick install item (it can delete data) always asks, with what goes and what stays on the card"),
+        "object_storage_install" | "object_storage_remove" => return Some("installing or removing object storage (it pulls an image, and removing can delete data) always asks"),
+        "rag_sources_add_folder" => return Some("adding a folder to the documents reads many files into the index, so it always asks, with the folder and the file count on the card"),
+        "message_send" => return Some("sending a message to another person or service always asks, with the text on the card"),
+        "shared_vault_provider_set" => return Some("choosing which cryptography keeps the shared vault always asks"),
+        "git_clone_repo" | "ide_workspace_add" => return Some("cloning a repository and adding an AI IDE workspace always ask"),
         "vpn_add" | "vpn_enable" | "vpn_disable" | "vpn_delete" => return Some("changing VPN profiles (which traffic leaves this device, and where) always asks"),
         "store_install" => return Some("installing anything from the store always asks"),
         "store_update" | "store_remove" | "store_rollback" => return Some("updating, removing and rolling back installed apps always asks"),
@@ -794,6 +800,7 @@ impl Tools for UserTools {
         d.extend(crate::dash::tools::defs(p, false));
         d.extend(crate::flows::tools::defs(p));
         d.extend(crate::browsertools::defs(p));
+        d.extend(crate::sysprocs::defs(p));
         d.extend(crate::devtools::defs(p));
         if self.services.screen.present() && !p.fs_write.is_empty() {
             d.push(ToolDef {
@@ -893,6 +900,7 @@ impl Tools for UserTools {
             n if crate::dash::tools::is_dash_tool(n) => crate::dash::tools::describe(n, args),
             n if crate::flows::tools::is_flow_tool(n) => crate::flows::tools::describe(n, args),
             n if crate::browsertools::is_browser_tool(n) => crate::browsertools::describe(n, args),
+            n if crate::sysprocs::is_tool(n) => crate::sysprocs::describe(n, args),
             n if crate::devtools::is_devtools_tool(n) => crate::devtools::describe(n, args).unwrap_or_default(),
             "task_add" => format!("add the task “{}”", s("title")),
             "task_update" => format!("change the task {}", s("id")),
@@ -1504,6 +1512,7 @@ impl UserTools {
             n if crate::dash::tools::is_dash_tool(n) => crate::dash::tools::standalone_call(n, args, &self.services, p, u),
             n if crate::flows::tools::is_flow_tool(n) => crate::flows::tools::standalone_call(n, args, &self.services, p, u),
             n if crate::devtools::is_devtools_tool(n) => crate::devtools::call(n, args, &self.services, p, u),
+            n if crate::sysprocs::is_tool(n) => crate::sysprocs::call(n, args, &self.services, p),
             n if crate::browsertools::is_browser_tool(n) => crate::browsertools::call(n, args, &self.services, p, u, &self.browser, &self.cwd),
             "ask_user" => match crate::assistant_guard::ask_from_args(args) {
                 Some(a) => Ok(format!("The question is shown to the person with answer buttons: {}. Stop now; their answer arrives as their next message.", crate::assistant_guard::ask_text(&a).replace('\n', " "))),

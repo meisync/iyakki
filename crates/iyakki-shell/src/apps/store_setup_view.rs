@@ -331,6 +331,9 @@ impl Setup {
         if let Some(item) = self.popup {
             self.draw_popup(g, area, s, item);
         }
+        if self.rm.is_some() {
+            self.draw_remove(g, area, s);
+        }
         if let Some(c) = &self.confirm {
             let lines = Setup::confirm_lines(c);
             if c.review.is_empty() {
@@ -450,6 +453,9 @@ impl Setup {
         }
         if card.item == Item::VoicePack && matches!(card.state, CardState::Installed | CardState::Earlier) && admin {
             v.push(Btn { label: "Remove (undo)".into(), accent: ERR, ev: Some(Event::Tab(REMOVE + idx)) });
+        }
+        if card.item != Item::VoicePack && self.can_remove(card.item) {
+            v.push(Btn { label: "Remove (r)".into(), accent: ERR, ev: Some(Event::Tab(remove::RM_OPEN + idx)) });
         }
         if card.item == Item::FfmpegLibs && admin {
             // offered when k3s runs; otherwise the button is dim and says why (the file and mirror routes stay)

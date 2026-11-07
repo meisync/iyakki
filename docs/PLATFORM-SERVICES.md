@@ -220,6 +220,43 @@ The tools exist in a workspace chat that has the cluster tools. `profile` must b
 pick a cluster. The approval card names the cluster and its **server**, and its preview is the same exact plan. Results carry the vault
 entry names, never a value; the person reveals them in Details.
 
+## Object storage (Quick install: SeaweedFS and RustFS)
+
+Two S3-compatible stores, both Apache-2.0, are Quick install items in the Cluster section (pick one or both; they use different names in
+the namespace `iyakki-objects`, so they run side by side). They follow the ClickHouse/Matrix item pattern (`quickinstall_objstore.rs`), not
+the `ServiceDef` engine above: nothing of the vendor's is shipped, the cluster pulls the image at the person's click, the licence is shown first.
+
+* **SeaweedFS** is the dependable choice (mature, S3 gateway on port 8333, a bucket `iyakki` made on first start). **RustFS** is the Rust-native
+  and young one (releases are still alpha; S3 port 9000; the first client makes the bucket). Both: ClusterIP only, non-root, 20 GB claim, 1 Gi
+  memory limit. MinIO and Garage are AGPL-3 and are not offered.
+* The access key and secret key are generated at install, written to the Secret `<name>-s3` through 0600 files, read by the pod by reference, and moved
+  into the person's vault as `svc.<name>.access-key` and `svc.<name>.secret-key`, plus the typed record `s3.<name>` (endpoint, region, bucket,
+  path style and the two vault NAMES; never a key). A locked vault is handled by the same pending list as the databases.
+* Chat tools: `object_storage_status` (free; names only), `object_storage_install` and `object_storage_remove` (ask every time). Remove keeps the
+  volume, the Secret and the vault entries unless `delete_data` is true.
+* The endpoint (`http://<name>.iyakki-objects.svc:<port>`) is reachable inside the cluster only. DASH has no S3 source kind yet, so nothing is
+  registered in DASH.
+* Images are pinned by tag; the digest field in `quickinstall_objstore.rs` stays empty until a person fills it from the first real pull (the job
+  logs the `imageID` the cluster resolved). The tags and the container arguments were written offline and are not verified.
+
+## Removing a Quick install item (uninstall)
+
+Each Quick install item has a removal plan next to its install steps (`quickinstall_uninstall.rs`, the `uninstall` submodule). A plan lists named targets only: one object by kind and name, one folder under the item's own root, one vault entry, one DASH source or a named hook (CLI catalogue, driver pack, sandbox). Nothing is deleted by wildcard, label or `--all`.
+
+| Group | Always removed | Kept unless "also delete the data" |
+|---|---|---|
+| Cluster pods (Elasticsearch, OpenSearch, Prometheus, graph database, ClickHouse, Matrix, Gitea, SeaweedFS, RustFS, Lemonade, registry) | Deployment, Service (Prometheus: ConfigMap, ServiceAccount, its read-only ClusterRole and binding; Gitea: its record in installed services; Lemonade: the Models entry) | the volume claim and its retained volume folder, the Secret, the vault entries, the DASH connection (Gitea: the "Local Gitea" Git connection), the namespace where only this item lives |
+| k3s | the cluster is stopped, the k3s program, kubeconfig and log go | the folder `k3s-dev/data` (database and every volume); "also delete" removes the whole `k3s-dev` |
+| Programs (Node.js, Python, DuckDB, Claude Code, Copilot, ffmpeg, Ollama) | the program and its folder in the tools folder (Ollama: also the running server and `ollama-local` in Models) | Ollama's models folder |
+| Add-ons and drivers (browser audio and video, Mac Wi-Fi/Bluetooth/camera, firmware packs, extra firmware, GPU Vulkan/NVIDIA) | the add-on folder or driver pack, the device plugin, the CDI specs | downloaded vendor files (recovery image, NVIDIA `.run`, camera pieces) |
+| Sandboxes, Kokoro, voice pack | nothing without the tick: they are their own data | all of it |
+
+Rules the runner enforces before the first change: kubernetes targets must be in IYAKKI's namespaces (`iyakki-data`, `-monitoring`, `-ai`, `-matrix`, `-gitea`, `-objects`, `iyakki-registry`) or the single `nvidia-device-plugin` in `kube-system`; a namespace is deleted only if one item uses it and only with the data; folders must lie under the item's own root inside the data folder, without `..` and not through a link; vault entries must be `svc.*` or `s3.*` names. Removing k3s or Lemonade while installed items need them is refused with their names. Audit lines: `quickinstall.uninstall.start|done|failed <item> data=kept|deleted`, never a secret or a path.
+
+Data safety: after an install (and when the Setup page refreshes) the volume bound to each item's claim is patched to `persistentVolumeReclaimPolicy: Retain`, because k3s' local-path class defaults to Delete. Deleting the data deletes the claim, then the retained volume object, then its folder under `k3s-dev/data/storage` (only a folder named for that volume).
+
+Chat: `quick_install_status` (read) and `quick_uninstall` (hard ask). Not verified on a real cluster; see `docs/project/test-plans/k3s-and-cluster.md`.
+
 ## Adding a service
 
 1. Implement `platform::ServiceDef` (see `gitea.rs`). `build` returns namespaced objects without a `namespace:` key, without Secret values and

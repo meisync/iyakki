@@ -688,31 +688,31 @@ pub fn cli_main(args: &[String]) -> i32 {
             "--socket" => socket = it.next().cloned().unwrap_or_default(),
             "--allow-uid" => uid = it.next().and_then(|v| v.parse().ok()),
             _ => {
-                eprintln!("usage: iyakki vpn-helper --allow-uid UID [--socket PATH]");
+                crate::qeprintln!("usage: iyakki vpn-helper --allow-uid UID [--socket PATH]");
                 return 2;
             }
         }
     }
     let Some(uid) = uid else {
-        eprintln!("usage: iyakki vpn-helper --allow-uid UID [--socket PATH]");
+        crate::qeprintln!("usage: iyakki vpn-helper --allow-uid UID [--socket PATH]");
         return 2;
     };
     let path = PathBuf::from(&socket);
     let listener = match bind_socket(&path, Some(uid)) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("could not listen at {socket}: {e}");
+            crate::qeprintln!("could not listen at {socket}: {e}");
             return 1;
         }
     };
     let h = match serve(listener, path, PeerPolicy::only(uid), Arc::new(crate::vpn_sys::OsSys::default())) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("could not start: {e}");
+            crate::qeprintln!("could not start: {e}");
             return 1;
         }
     };
-    eprintln!("VPN helper listening at {socket} for user id {uid}");
+    crate::qeprintln!("VPN helper listening at {socket} for user id {uid}");
     loop {
         std::thread::sleep(Duration::from_secs(3600));
         let _ = &h;

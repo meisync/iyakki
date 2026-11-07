@@ -135,3 +135,23 @@ fn only_the_entry_point_knows_about_the_mixer_setting() {
     }
     assert!(bad.is_empty(), "these files talk to the mixer setting directly instead of through audiosink: {bad:?}");
 }
+
+#[test]
+fn an_alarm_is_a_source_of_the_alarm_kind_next_to_a_radio() {
+    let (m, sink) = mixer();
+    let mut radio = open_output_via(Some(&m), SourceKind::Radio, 48_000, 2, "radio", "/nonexistent/player").unwrap();
+    radio.write(&vec![8000i16; 48_000 / 2 * 2]).unwrap();
+    let mut alarm = play_wav_via(Some(&m), SourceKind::Alarm, "alarm", &crate::calendar::alarm_wav(), "/nonexistent/player").unwrap();
+    assert!(alarm.is_mixed() && alarm.kind() == SourceKind::Alarm, "the alarm is not sent to the play command");
+    wait_for("both sources", || m.sources().iter().any(|s| s.kind == SourceKind::Alarm) && m.sources().iter().any(|s| s.kind == SourceKind::Radio));
+    wait_for("alarm samples at the card", || sink.lock().samples.iter().any(|&s| s != 0));
+    alarm.stop();
+    radio.stop();
+    m.shutdown();
+}
+
+#[test]
+fn the_alarm_call_starts_the_alarm_sound_and_a_missing_player_is_an_error_not_a_panic() {
+    // the mixer is off in a test process, so the alarm goes to the play command; a command that is not there says so
+    assert!(crate::calendar::ring("/nonexistent/player").is_err());
+}

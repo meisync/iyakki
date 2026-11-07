@@ -628,3 +628,23 @@ fn two_instances_are_both_listed() {
     w.wait();
     assert_eq!(w.cluster.iter().map(|g| g.namespace.as_str()).collect::<Vec<_>>(), ["a", "b"]);
 }
+
+#[test]
+fn the_identity_step_starts_empty_and_shows_the_servers_profile_only_as_a_hint_at_four_sizes() {
+    let f = fx("idhint");
+    f.gitea_ok();
+    let mut w = GitWizard::new(f.env());
+    to_test(&mut w);
+    press(&mut w, Key::Enter);
+    assert_eq!(w.step, Step::Commits);
+    assert_eq!((w.text("idname").as_str(), w.text("email").as_str()), ("", ""), "nothing is filled in from the profile");
+    for (wd, ht, s) in [(1280u32, 720u32, 1.0f32), (1920, 1080, 1.5), (1024, 600, 0.8), (800, 480, 0.62)] {
+        let mut g = Gfx::new(wd, ht);
+        g.clear(rgb(0, 0, 0));
+        w.render(&mut g, R::new(0.0, 0.0, wd as f32, ht as f32), s, rgb(110, 160, 255), true);
+        let all: String = g.text_log.iter().map(|t| t.2.as_str()).collect::<Vec<_>>().join(" ");
+        assert!(all.contains("Octo Cat") && all.contains("octo@example.org") && all.contains("nothing is filled in for you"), "{wd}x{ht}: the hint is shown: {all}");
+        assert!(g.text_log.iter().all(|t| t.0 >= 0.0 && t.0 < wd as f32 && t.1 >= 0.0 && t.1 < ht as f32), "{wd}x{ht}: text starts on the screen");
+    }
+    assert_eq!((w.text("idname").as_str(), w.text("email").as_str()), ("", ""), "drawing the hint did not fill the fields");
+}

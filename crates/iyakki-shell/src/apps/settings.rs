@@ -1076,7 +1076,7 @@ impl SettingsApp {
                     }
                     JobOut::Models { provider: id, models: r.models, ms: r.latency_ms }
                 }
-                Err(e) => JobOut::Msg(Err(format!("{id}: {e}"))),
+                Err(e) => JobOut::Msg(Err(format!("{id}: {}", iyakki_agent::providererr::plain_error(&id, &e)))),
             }),
         }
     }
@@ -1091,7 +1091,7 @@ impl SettingsApp {
             let r = svc.client_for(&choice.provider, false).and_then(|c| c.chat(&choice.model, &[iyakki_agent::chat::Message::user("Reply with the single word: OK")]));
             JobOut::Msg(match r {
                 Ok(t) => Ok(format!("{} · {} replied: {}", choice.provider, choice.model, t.chars().take(80).collect::<String>())),
-                Err(e) => Err(format!("{}: {e}", choice.provider)),
+                Err(e) => Err(format!("{}: {}", choice.provider, iyakki_agent::providererr::plain_error(&choice.provider, &e))),
             })
         });
     }
@@ -3113,6 +3113,19 @@ impl SettingsApp {
                     Err(e) => self.fail(e.to_string()),
                 }
             }
+            Key::Char('r') => {
+                // each person's own switch (off by default: no override); the machine-wide one stays the administrator's (T)
+                let dir = Self::svc(cx).dir().to_path_buf();
+                let off = !iyakki_agent::toolrouting::person_off(&dir, &cx.session.user);
+                match iyakki_agent::toolrouting::set_person_off(&dir, &cx.session.user, off) {
+                    Ok(()) => {
+                        cx.audit.record(&cx.session.user, "settings.tool_routing_own", if off { "off" } else { "on" });
+                        let machine_off = Self::svc(cx).settings.lock().unwrap().get().no_tool_routing;
+                        self.ok(iyakki_agent::toolrouting::summary(&dir, &cx.session.user, machine_off));
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
             Key::Char('f') if self.admin(cx) => self.detect_servers(cx),
             Key::Char('H') if self.admin(cx) => self.mh_open(cx, true),
             Key::Char('l') if cur.as_ref().is_some_and(|p| p.kind == Kind::Lemonade) => {
@@ -4108,7 +4121,14 @@ impl SettingsApp {
         g.hit(R::new(a.x, a.y + 118.0 * s, a.w, 22.0 * s), Event::Tick, &format!("Vision model: {}", vision_line.0));
         let routing_off = cx.services.settings.lock().unwrap().get().no_tool_routing;
         g.text(a.x, a.y + 96.0 * s, 15.0 * s, MUTED, "Tool routing", Face::Sans);
-        g.text(a.x + 150.0 * s, a.y + 96.0 * s, 15.0 * s, TEXT, if routing_off { "off: every tool is offered on every request  [T]" } else { "on: only the tools the chat needs are offered  [T]" }, Face::Bold);
+        let mine_off = iyakki_agent::toolrouting::person_off(cx.services.dir(), &cx.session.user);
+        let routing_text = match (routing_off, mine_off) {
+            (true, _) => "off for everyone: every tool is offered  [T]",
+            (false, true) => "off for you: every tool is offered  [r] you  [T] machine",
+            (false, false) => "on: only the tools the chat needs  [r] you  [T] machine",
+        };
+        let routing_fit = g.fit(15.0 * s, routing_text, Face::Bold, (a.w - 150.0 * s).max(40.0));
+        g.text(a.x + 150.0 * s, a.y + 96.0 * s, 15.0 * s, TEXT, &routing_fit, Face::Bold);
         // local models that fit this machine (docs/AI-HARDWARE.md): the profile's own words, cut to the width
         let ai = iyakki_agent::aiprofile::this_machine(0);
         g.text(a.x, a.y + 72.0 * s, 15.0 * s, MUTED, "This machine", Face::Sans);

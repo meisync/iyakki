@@ -103,6 +103,20 @@ sh "$(dirname "$0")/restricted-firmware.sh" add "$TARGET_DIR"
 # (board/iyakki/firmware-licences.sh, LICENSING.md item 7). The source tree is Buildroot's build dir, or the donor's when repack.sh assembled the image.
 sh "$(dirname "$0")/firmware-licences.sh" "$TARGET_DIR" ${FWFROM:+"$FWFROM"} ${BUILD_DIR:+"$BUILD_DIR"/linux-firmware-*} ${KFROM:+"$KFROM"/build/linux-firmware-*}
 
+# Releasable flag (machine-readable, shown in About): a release image was stamped IMAGE_PROFILE=release / FIRMWARE=none by release-profile.sh
+# above; every other image is a development/test image and says so, with FIRMWARE=bundled when vendor files are inside /lib/firmware.
+if [ "$REL" = 0 ]; then
+  REL_FILE="$TARGET_DIR/etc/iyakki-release"
+  grep -v -e '^IMAGE_PROFILE=' -e '^FIRMWARE=' "$REL_FILE" > "$REL_FILE.new" || true
+  echo "IMAGE_PROFILE=dev" >> "$REL_FILE.new"
+  if [ -d "$TARGET_DIR/lib/firmware" ] && find "$TARGET_DIR/lib/firmware" \( -type f -o -type l \) 2>/dev/null | grep -v -e '/regulatory\.db$' -e '/regulatory\.db\.p7s$' | grep -q .; then
+    echo "FIRMWARE=bundled" >> "$REL_FILE.new"
+  else
+    echo "FIRMWARE=none" >> "$REL_FILE.new"
+  fi
+  cat "$REL_FILE.new" > "$REL_FILE"; rm -f "$REL_FILE.new"; chmod 0644 "$REL_FILE"
+fi
+
 # Secure Boot (docs/SECURE-BOOT.md): with a signing key every kernel module in the image, the out-of-tree ones included (apple-bce in
 # updates/), gets the owner's signature. The kernel build itself signs nothing (MODULE_SIG_ALL is off), so a build without a key
 # leaves them unsigned and Secure Boot must be off. With Secure Boot on the kernel only loads modules signed by the enrolled key.

@@ -180,7 +180,7 @@ impl Default for Options {
             idle_timeout: Duration::from_secs(15),
             connect_timeout: Duration::from_secs(3),
             upstream_timeout: Duration::from_secs(60),
-            log: Arc::new(|l| eprintln!("cloud listen: {l}")),
+            log: Arc::new(|l| crate::qeprintln!("cloud listen: {l}")),
             dialer: None,
             client_ca: BTreeMap::new(),
             cert_reload: None,

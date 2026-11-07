@@ -7,9 +7,10 @@
 //! ([`MAX_REMEMBERED`]); when it is full of live entries new requests are refused (429), never accepted unchecked. It is **persistent**:
 //! every accepted pair is appended to `replay.log` (mode 0600) in the service's data folder, which is read again at start (expired lines
 //! are dropped and the file rewritten). If that file cannot be read or written the service falls back to a safe rule: nothing signed
-//! before the moment of the start is accepted (`not_before`), which is stricter but cannot be replayed. Not covered: a power cut that
-//! loses the last unsynced lines of the log (the lines are written, not fsynced, per request); a replayed request could then pass once,
-//! inside its remaining window. The restart of the process itself loses nothing.
+//! before the moment of the start is accepted (`not_before`), which is stricter but cannot be replayed. A power cut can lose the last
+//! unsynced lines of the log (the lines are written, not fsynced, per request), so every restart (a start that finds an earlier log) also sets `not_before` to the moment of
+//! the start: a request signed before it is refused even if its line was lost. The cost is that a request signed just before a restart
+//! has to be signed again (the client does that on a 401).
 //!
 //! **Rates.** Per key (the id that signed, counted only after the signature verified) and per source address (counted before anything is
 //! checked). Both are token buckets. A source that fails authentication [`Limits::fail_max`] times inside [`Limits::fail_window`]
@@ -101,8 +102,15 @@ impl Guard {
     pub fn open(data: &Path, now: u64, limits: Limits) -> Guard {
         let log_path = data.join("replay.log");
         let mut g = Guard { limits, seen: BTreeMap::new(), log: None, log_path, not_before: 0, keys: HashMap::new(), sources: HashMap::new() };
+        let restart = g.log_path.exists(); // a first start has nothing to lose
         match g.load(now) {
-            Ok(()) => {}
+            // a power cut can lose the last unsynced lines of the log, so a request signed before this start is never trusted to be new
+            // again: a replay of one that was accepted just before a cut is refused, the owner's next request (signed now) passes
+            Ok(()) => {
+                if restart {
+                    g.not_before = now;
+                }
+            }
             Err(e) => {
                 log::warn!("vault service: replay log: {e}; refusing everything signed before now");
                 g.not_before = now;
@@ -237,5 +245,69 @@ impl Guard {
     #[cfg(test)]
     pub fn remembered(&self) -> usize {
         self.seen.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: u64 = 1_000_000;
+
+    fn dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("iyakki-guard-{tag}-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn quiet() -> Limits {
+        Limits { key_burst: 1e9, key_per_sec: 1e9, source_burst: 1e9, source_per_sec: 1e9, ..Limits::default() }
+    }
+
+    #[test]
+    fn a_full_replay_cache_refuses_new_requests_and_frees_up_when_entries_expire() {
+        let d = dir("full");
+        let mut g = Guard::open(&d, NOW, quiet());
+        for i in 0..MAX_REMEMBERED {
+            assert!(g.accept(&format!("acme/u{}", i % 977), &format!("n{i}"), NOW, NOW).is_ok(), "entry {i}");
+        }
+        assert_eq!(g.remembered(), MAX_REMEMBERED);
+        // never accepted unchecked: a new request waits, a remembered one is still a replay
+        assert_eq!(g.accept("acme/u1", "fresh", NOW, NOW), Err(Refused::Slow(CLOCK_SKEW)));
+        assert_eq!(g.accept("acme/u0", "n0", NOW, NOW), Err(Refused::Rejected("replayed")));
+        assert_eq!(g.remembered(), MAX_REMEMBERED);
+        // once the entries are older than the window they are dropped and the service takes requests again
+        let later = NOW + CLOCK_SKEW + 1;
+        assert!(g.accept("acme/u1", "fresh", later, later).is_ok());
+        assert_eq!(g.remembered(), 1);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_start_refuses_anything_signed_before_it_even_when_its_log_line_was_lost() {
+        let d = dir("cut");
+        {
+            let mut g = Guard::open(&d, NOW, quiet());
+            assert!(g.accept("acme/alice", "n1", NOW, NOW).is_ok());
+            assert!(g.accept("acme/alice", "old", NOW - 100, NOW).is_ok(), "a first start has nothing to lose");
+        }
+        // simulate the power cut: the unsynced line never reached the disk
+        std::fs::write(d.join("replay.log"), "").unwrap();
+        let mut g = Guard::open(&d, NOW + 5, quiet());
+        assert_eq!(g.accept("acme/alice", "n1", NOW, NOW + 5), Err(Refused::Rejected("signed before the service started")));
+        assert!(g.accept("acme/alice", "n2", NOW + 5, NOW + 5).is_ok(), "a request signed after the start still passes");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn an_unwritable_log_refuses_requests_instead_of_forgetting_them() {
+        let d = dir("ro");
+        let mut g = Guard::open(&d, NOW, quiet());
+        // replace the open log handle with a read-only one so that every append fails
+        g.log = Some(std::fs::File::open(d.join("replay.log")).unwrap());
+        assert_eq!(g.accept("acme/alice", "n1", NOW, NOW), Err(Refused::Slow(5)));
+        assert_eq!(g.remembered(), 0);
+        std::fs::remove_dir_all(&d).ok();
     }
 }

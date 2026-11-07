@@ -1278,6 +1278,58 @@ fn tenantcfg_api_put_get_validate_secret_and_roles() {
 }
 
 #[test]
+fn tenantcfg_api_end_to_end_over_the_real_role_files_and_a_live_loopback_vault() {
+    use crate::cloudvaultd::{self, Client, Principal as VPrincipal};
+    use crate::tenantconfig::vault::{self, LinkVault};
+    // the pod's roles are the real files the cloud profile writes (cfg_cloud bootstraps root, then adds ann as admin and bob as member)
+    let (h, _root, ann, bob) = cfg_cloud();
+    assert!(crate::cloudroles::path(&h.dir).exists(), "the roles are a file on the volume, not a fake");
+    // the vault is the real service on the loopback, with ann enrolled as an administrator of tenant "t"
+    let vdir = h.dir.join("vault-service");
+    let store = cloudvaultd::Store::open(&vdir).unwrap();
+    let mut roles = crate::cloudroles::Roles::new("ann").unwrap();
+    roles.add_tenant_member("ann", "bob", crate::cloudroles::TenantRole::Member).unwrap();
+    let tdir = vdir.join("tenants").join("t");
+    std::fs::create_dir_all(tdir.join("cloud")).unwrap();
+    crate::cloudroles::save(&crate::cloudroles::path(&tdir), &roles).unwrap();
+    let ann_keys = crate::cloudkeys::MemberKeys::from_seed([71; 32]);
+    store.enroll(&VPrincipal::Member { tenant: "t".into(), user: "ann".into() }, &ann_keys.public()).unwrap();
+    drop(store);
+    let run = cloudvaultd::start("127.0.0.1:0".parse().unwrap(), &vdir, None).unwrap();
+    let client = Client { host: "127.0.0.1".into(), port: run.local_addr().port(), fingerprint: Some(run.fingerprint.clone()), who: VPrincipal::Member { tenant: "t".into(), user: "ann".into() }, keys: ann_keys };
+    vault::bind(&h.dir, Arc::new(LinkVault { ops: client }));
+    let url = "/api/v1/tenant/config/agent.claude";
+    let body = json!({"enabled": true, "values": {"mode": "shared", "terms_ack": true, "daily_requests_per_person": 3, "monthly_requests_team": 30, "allowed_models": ["*"]}, "secrets": {"token": "sk-ant-E2E-SECRET"}, "ack_warnings": crate::tenantconfig::safety::rules_table()});
+    // roles from the real file decide; the secret goes to the live vault and nowhere else
+    assert_eq!(h.call("PUT", url, Some(&bob), Some(body.clone())).0, 403);
+    let (s, v, _) = h.call("PUT", url, Some(&ann), Some(body));
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["state"], "ready");
+    let (_, g, _) = h.call("GET", url, Some(&ann), None);
+    assert_eq!(g["values"]["token"].as_str(), Some("[set]"));
+    let (_, g2, _) = h.call("GET", url, Some(&bob), None);
+    assert!(g2.get("values").is_none(), "a member sees state only");
+    fn walk(d: &std::path::Path, out: &mut String) {
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if let Ok(t) = std::fs::read(&p) {
+                out.push_str(&String::from_utf8_lossy(&t));
+            }
+        }
+    }
+    let mut all = String::new();
+    walk(&h.dir, &mut all);
+    assert!(!all.contains("E2E-SECRET"), "neither the pod's volume nor the vault service's files hold the secret in the clear");
+    // the vault goes away: the item reads as locked and nothing is lost on the pod's side
+    run.stop();
+    let (_, g, _) = h.call("GET", url, Some(&ann), None);
+    assert_eq!(g["values"]["token"].as_str(), Some("[vault locked]"), "{g}");
+    vault::unbind(&h.dir);
+}
+
+#[test]
 fn tenantcfg_api_k3s_binding_per_team_and_environment_and_the_managed_file() {
     let (h, root, ann, bob) = cfg_cloud();
     assert_eq!(h.call("POST", "/api/v1/namespaces", Some(&root), Some(json!({"name": "web", "action": "create"}))).0, 200);

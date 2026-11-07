@@ -936,7 +936,7 @@ pub fn cli_main(args: &[String]) -> i32 {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
-            println!("error: cannot find this program: {e}");
+            crate::qprintln!("error: cannot find this program: {e}");
             return 1;
         }
     };
@@ -944,7 +944,7 @@ pub fn cli_main(args: &[String]) -> i32 {
     match cli_run(&la, &rest) {
         Ok(()) => 0,
         Err(e) => {
-            println!("error: {e}");
+            crate::qprintln!("error: {e}");
             1
         }
     }
@@ -1021,7 +1021,7 @@ pub fn cli_run(la: &LinuxApps, args: &[String]) -> Result<(), String> {
             }
             let st = iyakki_proxy::https::UreqStreamer::default();
             let req = CreateReq { name, release, network: net, mounts };
-            la.create(&req, &st, &|_, _| Ok(()), &mut |l| println!("{l}")).map(|_| ())
+            la.create(&req, &st, &|_, _| Ok(()), &mut |l| crate::qprintln!("{l}")).map(|_| ())
         }
         "install" => stream(|sink| show(la.apt_install(&name, tail, Some(sink)))),
         "remove" => stream(|sink| show(la.apt_remove(&name, tail, Some(sink)))),
@@ -1037,7 +1037,7 @@ pub fn cli_run(la: &LinuxApps, args: &[String]) -> Result<(), String> {
         "import" => {
             let tarball = tail.first().cloned().ok_or("usage: import <name> <tarball>")?;
             let net = tail.iter().position(|a| a == "--net").and_then(|i| tail.get(i + 1)).map(String::as_str) == Some("on");
-            la.import(&name, Path::new(&tarball), net, &mut |l| println!("{l}")).map(|_| ())
+            la.import(&name, Path::new(&tarball), net, &mut |l| crate::qprintln!("{l}")).map(|_| ())
         }
         other => Err(format!("unknown verb `{other}`")),
     }

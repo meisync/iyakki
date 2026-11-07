@@ -40,3 +40,26 @@ fn tenants_lists_what_the_server_says_marks_the_current_one_and_needs_a_pin_and_
     let (res, _) = go(&c, "\n", &["tenants", addr, common::USER]);
     assert!(matches!(res, Err(Fail::Error(m)) if m.contains("no password")));
 }
+
+#[test]
+fn switch_moves_to_another_tenant_says_what_the_server_stopped_and_refuses_one_that_is_not_yours() {
+    let r = common::start_remote();
+    let d = std::env::temp_dir().join(format!("iyakki-connect-test-switch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let c = Ctx { store: Store::new(&d), timeout: Duration::from_secs(5), interactive: false };
+    let addr = &r.target.addr;
+    let (res, _) = go(&c, "right\n", &["switch", addr, common::USER, "beta"]);
+    assert!(matches!(res, Err(Fail::Error(m)) if m.contains("not pinned")), "an unpinned tenant is not asked");
+    go(&c, "", &["pin", addr, "--yes"]).0.unwrap();
+    let (res, out) = go(&c, "right\n", &["switch", addr, common::USER, "beta"]);
+    res.unwrap();
+    assert!(out.contains("now in beta") && out.contains("you are owner") && out.contains("before: acme"), "{out}");
+    assert!(out.contains("stopped 2 running chat(s) and locked the previous tenant's vault"), "{out}");
+    assert!(!out.contains('\u{7}'), "control characters from the server are not printed");
+    let (res, _) = go(&c, "right\n", &["switch", addr, common::USER, "nope"]);
+    assert!(matches!(res, Err(Fail::Error(m)) if m.contains("no such tenant")));
+    let (res, _) = go(&c, "wrong\n", &["switch", addr, common::USER, "beta"]);
+    assert!(matches!(res, Err(Fail::Error(m)) if m.contains("refused")));
+    let (res, _) = go(&c, "\n", &["switch", addr, common::USER, "beta"]);
+    assert!(matches!(res, Err(Fail::Error(m)) if m.contains("no password")));
+}

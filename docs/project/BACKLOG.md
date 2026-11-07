@@ -175,7 +175,7 @@ Recommended order: A and E now, B as an owner-controlled experiment, C when a ha
 ## Release image profile (2026-10-27)
 - Built as files only, not run: `docs/development/RELEASE-IMAGE-PROFILE.md`. Needs the owner's word: `legal-collect.sh` real run, one-package `gst1-libav-reinstall`, the pc repack with `IYAKKI_IMAGE_PROFILE=release`.
 - Shell owner: show `usr/share/iyakki/firmware-notice.txt` on first boot when `/etc/iyakki-release` has `FIRMWARE=none`, with a button to Store -> Setup -> Hardware firmware.
-- Owner decisions: keep or drop GRUB `unicode.pf2` (Unifont licence unverified); keep the parked gst-libav bridge or drop it (`IYAKKI_RELEASE_AV_BRIDGE=0`); whether any firmware pack may later join the base (`release-firmware.keep` lists candidates, commented).
+- Owner decisions: keep the parked gst-libav bridge or drop it (`IYAKKI_RELEASE_AV_BRIDGE=0`); whether any firmware pack may later join the base (`release-firmware.keep` lists candidates, commented).
 - Test the GPU guard on an AMD, an NVIDIA and a new Intel machine; fix wording "Settings" vs "Store -> Setup".
 
 ## Proposed by the assistant (2026-10-27, for the owner to accept, reorder or drop)

@@ -1840,7 +1840,7 @@ pub struct RunnerParts {
 pub fn autopilot_runner(p: RunnerParts) -> Runner {
     Arc::new(move |spec: RunSpec| {
         let base = (p.tools)(&spec);
-        let mut pt = crate::boardtools::ProjectTools::new(base, &spec.tree, &spec.task.title, &spec.features).with_notes(&spec.agent_name, &spec.root).with_agent(&spec.task.id);
+        let mut pt = crate::boardtools::ProjectTools::new(base, &spec.tree, &spec.task.title, &spec.features).with_notes(&spec.agent_name, &spec.root).with_agent(&spec.task.id).with_project_test_command(&[&spec.tree, &spec.root]);
         if let Some(a) = &p.audit {
             let a = a.clone();
             pt = pt.with_audit(Arc::new(move |k, d| a(k, d)));

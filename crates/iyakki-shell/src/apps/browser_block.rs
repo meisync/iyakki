@@ -52,7 +52,7 @@ fn clean_hosts(list: impl IntoIterator<Item = String>) -> BTreeSet<String> {
 
 pub fn load(cx: &AppCx) -> BlockConfig {
     let mut c = BlockConfig::default();
-    if let Ok(text) = std::fs::read_to_string(config_path(cx)) {
+    if let Some(text) = super::browser_config::read_checked("browser blocker settings", &config_path(cx)) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
             c.enabled = v["enabled"].as_bool().unwrap_or(c.enabled);
             c.allow = clean_hosts(v["allow"].as_array().into_iter().flatten().filter_map(|h| h.as_str().map(str::to_string)));
@@ -62,12 +62,8 @@ pub fn load(cx: &AppCx) -> BlockConfig {
 }
 
 pub fn save(cx: &AppCx, c: &BlockConfig) {
-    let p = config_path(cx);
-    let tmp = p.with_extension("tmp");
     let json = serde_json::json!({ "enabled": c.enabled, "allow": c.allow });
-    if std::fs::write(&tmp, json.to_string()).is_ok() {
-        let _ = std::fs::rename(&tmp, &p);
-    }
+    super::browser_config::write_checked("browser blocker settings", &config_path(cx), &json.to_string());
 }
 
 /// Which person's lists the shared filter holds, and what they looked like (the meta file's text).

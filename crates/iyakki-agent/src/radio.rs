@@ -178,10 +178,12 @@ impl StationStore {
     }
 
     pub fn list(&self) -> Vec<Station> {
-        std::fs::read_to_string(&self.path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+        // a damaged file is moved aside (`.corrupt-<time>`, audit line) before the empty list is used
+        iyakki_schema::read_plain("radio stations", &self.path, iyakki_schema::now_secs()).unwrap_or_default()
     }
 
     fn save(&self, v: &[Station]) -> Result<(), String> {
+        iyakki_schema::plain_writable("radio stations", &self.path)?;
         let tmp = self.path.with_extension("tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(v).map_err(|e| e.to_string())?).and_then(|_| std::fs::rename(&tmp, &self.path)).map_err(|e| e.to_string())
     }

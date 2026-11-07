@@ -247,7 +247,7 @@ impl CloneDialog {
                 errs.push((r.n, format!("`{depth_text}` is not a depth (a whole number, or empty for the full history)")));
                 continue;
             }
-            out.push(iyakki_agent::gitjobs::CloneSpec { url: r.url.clone(), branch: self.branch_of(i), depth, folder: self.cells[i].cols[2].value.trim().to_string() });
+            out.push(iyakki_agent::gitjobs::CloneSpec { url: r.url.clone(), branch: self.branch_of(i), depth, folder: self.cells[i].cols[2].value.trim().to_string(), submodules: false });
         }
         if self.rows.is_empty() {
             errs.push((0, "write at least one repository address, one per line".into()));

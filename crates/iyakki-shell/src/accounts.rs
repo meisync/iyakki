@@ -46,6 +46,9 @@ pub struct UserRecord {
     pub role: Role,
     #[serde(default)]
     pub overrides: PolicyOverride,
+    /// Fields a newer release wrote for this account: kept, and written back on the next save.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl UserRecord {
@@ -65,11 +68,15 @@ pub struct Session {
 #[derive(Serialize, Deserialize, Default)]
 struct StoreFile {
     users: Vec<UserRecord>,
+    /// Fields of the file itself that a newer release wrote: kept, and written back.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 pub struct UserStore {
     path: PathBuf,
     users: Vec<UserRecord>,
+    extra: serde_json::Map<String, serde_json::Value>,
     failures: HashMap<String, (u32, Instant)>,
     dummy_hash: String,
     /// What the file looked like when it was last read or written (when it changed and how big it was), to notice
@@ -92,12 +99,21 @@ fn verify(pw: &str, phc: &str) -> bool {
 
 impl UserStore {
     pub fn open(path: &Path) -> Result<UserStore, AccountError> {
-        let users = match std::fs::read_to_string(path) {
-            Ok(t) => serde_json::from_str::<StoreFile>(&t).map_err(|e| AccountError::Storage(format!("corrupt user file: {e}")))?.users,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        let (users, extra) = match std::fs::read_to_string(path) {
+            Ok(t) => match serde_json::from_str::<StoreFile>(&t) {
+                Ok(f) => (f.users, f.extra),
+                Err(e) => {
+                    // The file stays where it is (moving it away would make the machine look new and offer the first-run setup to
+                    // anybody): sign-in is blocked, and a copy is kept for repair, with a line for the audit log.
+                    let copy = iyakki_schema::copy_aside(path, iyakki_schema::now_secs());
+                    iyakki_schema::report(format!("accounts {}: damaged ({e}); the file is left as it is, sign-in is blocked until it is repaired{}", path.display(), copy.map(|c| format!(" (a copy is kept as {})", c.display())).unwrap_or_default()));
+                    return Err(AccountError::Storage(format!("corrupt user file: {e}")));
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), Default::default()),
             Err(e) => return Err(AccountError::Storage(e.to_string())),
         };
-        Ok(UserStore { path: path.into(), users, failures: HashMap::new(), dummy_hash: hash_password("not-a-real-password")?, stamp: file_stamp(path) })
+        Ok(UserStore { path: path.into(), users, extra, failures: HashMap::new(), dummy_hash: hash_password("not-a-real-password")?, stamp: file_stamp(path) })
     }
 
     /// Read the accounts again if the file was changed by something else since this program last looked.
@@ -111,6 +127,11 @@ impl UserStore {
             Ok(t) => {
                 if let Ok(f) = serde_json::from_str::<StoreFile>(&t) {
                     self.users = f.users;
+                    self.extra = f.extra;
+                } else {
+                    // damaged while running: the accounts already read stay in use, the file is kept as it is, and a copy is kept
+                    let copy = iyakki_schema::copy_aside(&self.path, iyakki_schema::now_secs());
+                    iyakki_schema::report(format!("accounts {}: damaged while running; the accounts already read stay in use{}", self.path.display(), copy.map(|c| format!(" (a copy is kept as {})", c.display())).unwrap_or_default()));
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.users.clear(),
@@ -125,7 +146,7 @@ impl UserStore {
             std::fs::create_dir_all(d).map_err(io)?;
         }
         let tmp = self.path.with_extension("tmp");
-        let json = serde_json::to_string_pretty(&StoreFile { users: self.users.clone() }).map_err(|e| AccountError::Storage(e.to_string()))?;
+        let json = serde_json::to_string_pretty(&StoreFile { users: self.users.clone(), extra: self.extra.clone() }).map_err(|e| AccountError::Storage(e.to_string()))?;
         let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).map_err(io)?;
         f.write_all(json.as_bytes()).and_then(|_| f.sync_all()).map_err(io)?;
         std::fs::rename(&tmp, &self.path).map_err(io)?;
@@ -160,7 +181,7 @@ impl UserStore {
         if self.get(name).is_some() {
             return Err(AccountError::Exists);
         }
-        self.users.push(UserRecord { name: name.into(), hash: hash_password(pw)?, role, overrides: Default::default() });
+        self.users.push(UserRecord { name: name.into(), hash: hash_password(pw)?, role, overrides: Default::default(), extra: Default::default() });
         self.save()
     }
 

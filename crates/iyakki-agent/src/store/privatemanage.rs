@@ -646,18 +646,18 @@ pub fn cli_main(args: &[String]) -> i32 {
     let a = match JobArgs::parse(args) {
         Ok(a) => a,
         Err(e) => {
-            println!("error: {e}");
+            crate::qprintln!("error: {e}");
             return 2;
         }
     };
     let run: Arc<dyn Runner> = Arc::new(crate::wsexec::System);
-    match run_job(&run, &a, &|d| std::thread::sleep(d), &mut |l| println!("{l}")) {
+    match run_job(&run, &a, &|d| std::thread::sleep(d), &mut |l| crate::qprintln!("{l}")) {
         Ok(()) => {
-            println!("done");
+            crate::qprintln!("done");
             0
         }
         Err(e) => {
-            println!("error: {e}");
+            crate::qprintln!("error: {e}");
             1
         }
     }

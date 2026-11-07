@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use iyakki_agent::runs::LiveRun;
 use iyakki_agent::sysinfo::{self, CpuTimes, NetCounters, Proc, SysRoots};
+use iyakki_agent::sysprocs::{self, PodCache, Row};
 
 use super::{App, AppCx, Flow};
 use crate::gfx::{rgb, Face, Gfx, Icon};
@@ -86,6 +87,14 @@ pub struct SystemApp {
     /// The dev cluster's service log (View logs), selectable text.
     cluster_log: Option<crate::apps::ScrollLog>,
     health_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Pod uid to service table of the dev cluster, kept fresh in the background (empty when the cluster is off).
+    pods: PodCache,
+    /// The processes with their service label and near-limit marker, by pid.
+    rows: HashMap<u32, Row>,
+    /// Processes tab: one line per service instead of one per process.
+    grouped: bool,
+    /// Title of the log window (the cluster's own log, or what a pod is busy with).
+    log_title: String,
 }
 
 impl SystemApp {
@@ -108,7 +117,7 @@ impl SystemApp {
     }
 
     pub fn with_roots(roots: SysRoots, data_dir: std::path::PathBuf) -> SystemApp {
-        SystemApp { page: Page::Overview, roots, data_dir, prev: None, cur: None, history: Vec::new(), proc_cpu: HashMap::new(), net_rate: (0.0, 0.0), mac_line: None, sound_line: String::new(), gpu_lines: Vec::new(), sort: Sort::Cpu, sel: [0; 4], hardware: Vec::new(), confirm: None, status: None, live: Vec::new(), last_refresh: None, cluster_log: None, health_busy: Default::default() }
+        SystemApp { page: Page::Overview, roots, data_dir, prev: None, cur: None, history: Vec::new(), proc_cpu: HashMap::new(), net_rate: (0.0, 0.0), mac_line: None, sound_line: String::new(), gpu_lines: Vec::new(), sort: Sort::Cpu, sel: [0; 4], hardware: Vec::new(), confirm: None, status: None, live: Vec::new(), last_refresh: None, cluster_log: None, health_busy: Default::default(), pods: PodCache::new(), rows: HashMap::new(), grouped: false, log_title: String::new() }
     }
 
     pub fn page(&self) -> Page {
@@ -140,6 +149,20 @@ impl SystemApp {
             self.prev = Some(cur);
         }
         self.cur = Some(sample);
+        if Self::is_admin(cx) {
+            let k = &cx.services.k3sdev;
+            self.pods.poll(k.clone(), k.state() == iyakki_agent::k3sdev::Svc::Running, iyakki_agent::clock::now_unix().max(0) as u64);
+            let table = self.pods.table();
+            self.rows = self.cur.as_ref().map(|c| sysprocs::rows(&c.procs, &self.proc_cpu, &table).into_iter().map(|r| (r.pid, r)).collect()).unwrap_or_default();
+            if let Some((pod, text)) = self.pods.take_answer() {
+                let mut l = crate::apps::ScrollLog::default();
+                for line in text.lines() {
+                    l.push(line, [0, 0, 0, 0]);
+                }
+                self.log_title = format!("What {pod} is busy with (select with the mouse, Ctrl+C copies)");
+                self.cluster_log = Some(l);
+            }
+        }
         self.mac_line = iyakki_devctl::mac::summary_line(&iyakki_devctl::Roots { sys: self.roots.sys.clone(), proc_: self.roots.proc.clone() });
         self.sound_line = iyakki_agent::audioout::summary_at(&self.roots.proc);
         self.gpu_lines = Self::gpu_summary(&iyakki_agent::gpu::detect(self.roots.sys.parent().unwrap_or(std::path::Path::new("/"))));
@@ -173,6 +196,7 @@ impl SystemApp {
     fn list_len(&self) -> usize {
         match self.page {
             Page::Overview => 0,
+            Page::Processes if self.grouped => self.sorted_groups().len(),
             Page::Processes => self.cur.as_ref().map_or(0, |c| c.procs.len()),
             Page::Agents => self.live.len(),
             Page::Hardware => self.hardware.len(),
@@ -208,6 +232,10 @@ impl SystemApp {
     }
 
     fn ask_signal(&mut self, hard: bool) {
+        if self.grouped {
+            self.say("Switch grouping off (g) to stop one process.", false);
+            return;
+        }
         let Some(p) = self.selected_proc() else { return };
         if let Some(why) = sysinfo::protected(p.pid) {
             self.say(format!("Process {} cannot be stopped: {why}.", p.pid), false);
@@ -251,7 +279,45 @@ impl SystemApp {
             l.push(line, if line.contains("level=error") || line.contains("Failed") || line.contains("error") { ERR } else { [0, 0, 0, 0] });
         }
         cx.audit.record(&cx.session.user, "devcluster.logs", "");
+        self.log_title = "The dev cluster's log (select with the mouse, Ctrl+C copies)".into();
         self.cluster_log = Some(l);
+    }
+
+    /// The groups of the grouped view, in the order chosen.
+    fn sorted_groups(&self) -> Vec<sysprocs::Group> {
+        let mut rows: Vec<Row> = self.rows.values().cloned().collect();
+        rows.sort_by_key(|r| r.pid);
+        let mut g = sysprocs::groups(&rows);
+        match self.sort {
+            Sort::Cpu => g.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal).then(b.rss.cmp(&a.rss))),
+            Sort::Memory => {}
+            Sort::Pid | Sort::Name => g.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+        }
+        g
+    }
+
+    /// The pod behind the chosen line (process or group), if it runs in the cluster.
+    fn selected_pod(&self) -> Option<(String, String)> {
+        if self.grouped {
+            self.sorted_groups().get(self.sel[1]).and_then(|g| g.pod.clone())
+        } else {
+            let p = self.sorted().get(self.sel[1]).map(|p| p.pid)?;
+            self.rows.get(&p)?.label.as_ref().map(|l| (l.ns.clone(), l.pod.clone()))
+        }
+    }
+
+    /// "What is this busy with": the pod's recent log and usage numbers, read in the background.
+    fn ask_busy(&mut self, cx: &AppCx) {
+        if !Self::is_admin(cx) {
+            return;
+        }
+        let Some((ns, pod)) = self.selected_pod() else {
+            self.say("This line is not a pod of the dev cluster.", false);
+            return;
+        };
+        cx.audit.record(&cx.session.user, "system.pod_busy", &format!("{ns}/{pod}"));
+        self.pods.ask_busy(cx.services.k3sdev.clone(), ns, pod);
+        self.say("Reading the pod's log and usage...", true);
     }
 
     fn stop_selected_agent(&mut self, cx: &AppCx) {
@@ -291,7 +357,7 @@ impl App for SystemApp {
     fn hint(&self) -> String {
         match self.page {
             Page::Overview => "Tab or 1-3 pages · figures update every second · l the dev cluster's log · Esc back".into(),
-            Page::Processes => "↑↓ choose · c m p n sort · k stop it · K kill it · Tab next page · Esc back".into(),
+            Page::Processes => "↑↓ choose · c m p n sort · g by service · b what is it busy with · k stop · K kill · Tab next page · Esc back".into(),
             Page::Agents => "↑↓ choose · x stop this run · X stop all · Tab next page · Esc back".into(),
             Page::Hardware => "↑↓ PgUp PgDn scroll · r read again · Tab next page · Esc back".into(),
         }
@@ -306,6 +372,7 @@ impl App for SystemApp {
             "Agents · every assistant run going on now, with what it waits for",
             "x · stop the chosen run     X · stop every run (yours, or everyone's for administrators)",
             "Hardware (administrators) · what the kernel found, PCI devices with their drivers, loaded drivers; r reads it again",
+            "g · group the processes by service (the pod and Quick install service of a cluster process); b · show what the chosen pod is busy with (log tail, kubectl top)",
             "Process 1 (the system) and this shell are never touched.",
         ]
         .iter()
@@ -379,6 +446,11 @@ impl App for SystemApp {
             Event::Key(Key::Char('m')) if self.page == Page::Processes => self.sort = Sort::Memory,
             Event::Key(Key::Char('p')) if self.page == Page::Processes => self.sort = Sort::Pid,
             Event::Key(Key::Char('n')) if self.page == Page::Processes => self.sort = Sort::Name,
+            Event::Key(Key::Char('g')) | Event::Tab(24) if self.page == Page::Processes => {
+                self.grouped = !self.grouped;
+                self.sel[1] = 0;
+            }
+            Event::Key(Key::Char('b')) | Event::Tab(25) if self.page == Page::Processes => self.ask_busy(cx),
             Event::Key(Key::Char('k')) if self.page == Page::Processes && Self::is_admin(cx) => self.ask_signal(false),
             Event::Key(Key::Char('K')) if self.page == Page::Processes && Self::is_admin(cx) => self.ask_signal(true),
             Event::Key(Key::Char('r')) if self.page == Page::Hardware => self.hardware = hardware_lines(&self.roots),
@@ -436,7 +508,7 @@ impl App for SystemApp {
         }
         if let Some(l) = self.cluster_log.as_mut() {
             let p = crate::fx::modal(g, area, s, 900.0 * s, area.h - 24.0 * s, ACCENT, false);
-            let y0 = crate::fx::modal_title(g, p, s, "The dev cluster's log (select with the mouse, Ctrl+C copies)", ACCENT);
+            let y0 = crate::fx::modal_title(g, p, s, &self.log_title.clone(), ACCENT);
             let bh = 13.0 * s * 2.1;
             l.render(g, R::new(p.x + 24.0 * s, y0 + 4.0 * s, p.w - 48.0 * s, (p.y + p.h - y0 - bh - 40.0 * s).max(40.0 * s)), 13.0 * s, Face::Mono);
             g.button(p.x + 24.0 * s, p.y + p.h - bh - 16.0 * s, 13.0 * s, "Close", MUTED, Event::Tab(92));
@@ -608,16 +680,19 @@ impl SystemApp {
     }
 
     fn render_processes(&mut self, g: &mut Gfx, a: R, s: f32) {
+        if self.grouped {
+            return self.render_groups(g, a, s);
+        }
         let sorted: Vec<&Proc> = self.sorted();
         let header_y = a.y;
-        let cols = [("PID", 14.0), ("USER", 84.0), ("CPU", 204.0), ("MEMORY", 274.0), ("PROCESS", 374.0)];
+        let cols = [("PID", 14.0), ("USER", 84.0), ("CPU", 184.0), ("MEMORY", 244.0), ("SERVICE", 330.0), ("PROCESS", 590.0)];
         crate::fx::table_header(g, a.x, header_y, a.w, s, &cols, ACCENT);
         let sorted_by = format!("sorted by {}", self.sort.label());
         let sbw = g.text_width(12.0 * s, &sorted_by, Face::Sans);
         g.text(a.x + a.w - sbw - 6.0 * s, header_y - 1.0 * s, 12.0 * s, MUTED, &sorted_by, Face::Sans);
         let row_h = 30.0 * s;
         let top = header_y + 20.0 * s;
-        let rows = (((a.y + a.h - top - 46.0 * s) / row_h) as usize).max(1);
+        let rows = (((a.y + a.h - top - 66.0 * s) / row_h) as usize).max(1);
         let sel = self.sel[1].min(sorted.len().saturating_sub(1));
         let first = sel.saturating_sub(rows - 1).min(sorted.len().saturating_sub(rows));
         for (n, p) in sorted.iter().enumerate().skip(first).take(rows) {
@@ -631,22 +706,88 @@ impl SystemApp {
             let cpu = self.proc_cpu.get(&p.pid).copied().unwrap_or(0.0);
             let ty = r.y + 6.0 * s;
             g.text(a.x + 14.0 * s, ty, 14.0 * s, MUTED, &p.pid.to_string(), Face::Mono);
-            let user = g.fit(14.0 * s, &p.user, Face::Sans, 100.0 * s);
+            let user = g.fit(14.0 * s, &p.user, Face::Sans, 90.0 * s);
             g.text(a.x + 84.0 * s, ty, 14.0 * s, TEXT, &user, Face::Sans);
-            g.text(a.x + 204.0 * s, ty, 14.0 * s, if cpu >= 50.0 { AMBER } else { TEXT }, &format!("{cpu:.0}%"), Face::Sans);
-            g.text(a.x + 274.0 * s, ty, 14.0 * s, TEXT, &sysinfo::human_bytes(p.rss), Face::Sans);
+            g.text(a.x + 184.0 * s, ty, 14.0 * s, if cpu >= 50.0 { AMBER } else { TEXT }, &format!("{cpu:.0}%"), Face::Sans);
+            g.text(a.x + 244.0 * s, ty, 14.0 * s, TEXT, &sysinfo::human_bytes(p.rss), Face::Sans);
+            // the service of a cluster process, and the plain marker when it is near a limit its pod has
+            if let Some(row) = self.rows.get(&p.pid) {
+                if let Some(l) = &row.label {
+                    let room = if row.near { 168.0 } else { 250.0 };
+                    let t = g.fit(14.0 * s, &l.text(), Face::Sans, room * s);
+                    g.text(a.x + 330.0 * s, ty, 14.0 * s, ACCENT, &t, Face::Sans);
+                    if row.near {
+                        g.text(a.x + 502.0 * s, ty, 12.0 * s, AMBER, "near limit", Face::Bold);
+                    }
+                }
+            }
             // command lines can run to kilobytes: only the start can be seen, and fitting a long string is slow
             let label = if p.cmd.is_empty() { format!("[{}]", p.name) } else { p.cmd.chars().take(300).collect::<String>() };
-            let label = g.fit(14.0 * s, &label, Face::Sans, a.w - 374.0 * s - 20.0 * s);
-            g.text(a.x + 374.0 * s, ty, 14.0 * s, TEXT, &label, Face::Sans);
+            let label = g.fit(14.0 * s, &label, Face::Sans, (a.w - 590.0 * s - 20.0 * s).max(40.0 * s));
+            g.text(a.x + 590.0 * s, ty, 14.0 * s, TEXT, &label, Face::Sans);
         }
         if sorted.is_empty() {
             crate::fx::empty_state(g, R::new(a.x, top, a.w, 160.0 * s), s, Icon::System, "No processes could be read", "The kernel's process list is not available here.", ACCENT);
         }
-        // the buttons for the chosen one
+        // what the chosen one's pod is allowed
+        let info = sorted.get(sel).and_then(|p| self.rows.get(&p.pid)).and_then(|r| r.label.as_ref().map(|l| format!("pod {} · {}", l.pod, sysprocs::res_text(&l.res)))).unwrap_or_default();
+        let info = g.fit(12.0 * s, &info, Face::Sans, a.w);
+        g.text(a.x, a.y + a.h - 62.0 * s, 12.0 * s, MUTED, &info, Face::Sans);
+        self.process_buttons(g, a, s);
+    }
+
+    fn process_buttons(&self, g: &mut Gfx, a: R, s: f32) {
         let by = a.y + a.h - 38.0 * s;
-        let w1 = g.button(a.x, by, 14.0 * s, "Stop (k)", AMBER, Event::Tab(20));
-        g.button(a.x + w1 + 8.0 * s, by, 14.0 * s, "Kill (K)", ERR, Event::Tab(21));
+        let mut x = a.x;
+        let mut put = |g: &mut Gfx, label: &str, color: [u8; 4], ev: Event| {
+            x += g.button(x, by, 14.0 * s, label, color, ev) + 8.0 * s;
+        };
+        if !self.grouped {
+            put(g, "Stop (k)", AMBER, Event::Tab(20));
+            put(g, "Kill (K)", ERR, Event::Tab(21));
+        }
+        put(g, if self.grouped { "Single processes (g)" } else { "By service (g)" }, ACCENT, Event::Tab(24));
+        put(g, "What is it busy with (b)", ACCENT, Event::Tab(25));
+    }
+
+    /// The grouped view: one line per service (and one for the machine's own processes).
+    fn render_groups(&mut self, g: &mut Gfx, a: R, s: f32) {
+        let groups = self.sorted_groups();
+        let cols = [("SERVICE", 14.0), ("PROCESSES", 330.0), ("CPU", 430.0), ("MEMORY", 500.0), ("REQUEST / LIMIT", 600.0)];
+        crate::fx::table_header(g, a.x, a.y, a.w, s, &cols, ACCENT);
+        let sorted_by = format!("sorted by {}", self.sort.label());
+        let sbw = g.text_width(12.0 * s, &sorted_by, Face::Sans);
+        g.text(a.x + a.w - sbw - 6.0 * s, a.y - 1.0 * s, 12.0 * s, MUTED, &sorted_by, Face::Sans);
+        let row_h = 30.0 * s;
+        let top = a.y + 20.0 * s;
+        let rows = (((a.y + a.h - top - 66.0 * s) / row_h) as usize).max(1);
+        let sel = self.sel[1].min(groups.len().saturating_sub(1));
+        let first = sel.saturating_sub(rows - 1).min(groups.len().saturating_sub(rows));
+        for (n, gr) in groups.iter().enumerate().skip(first).take(rows) {
+            let r = R::new(a.x, top + (n - first) as f32 * row_h, a.w, row_h - 2.0 * s);
+            let (on, hot) = (n == sel, g.hovered(r));
+            if on || hot {
+                crate::fx::row_at(g, r.x, r.y, r.w, r.h, 8.0 * s, on, hot, ACCENT);
+            }
+            g.hit(r, Event::Row(n), "service");
+            let ty = r.y + 6.0 * s;
+            let name_room = if gr.near { 230.0 } else { 306.0 };
+            let name = g.fit(14.0 * s, &gr.name, Face::Sans, name_room * s);
+            g.text(a.x + 14.0 * s, ty, 14.0 * s, if gr.pod.is_some() { ACCENT } else { TEXT }, &name, Face::Sans);
+            if gr.near {
+                g.text(a.x + 250.0 * s, ty, 12.0 * s, AMBER, "near limit", Face::Bold);
+            }
+            g.text(a.x + 330.0 * s, ty, 14.0 * s, TEXT, &gr.count.to_string(), Face::Sans);
+            g.text(a.x + 430.0 * s, ty, 14.0 * s, if gr.cpu >= 50.0 { AMBER } else { TEXT }, &format!("{:.0}%", gr.cpu), Face::Sans);
+            g.text(a.x + 500.0 * s, ty, 14.0 * s, TEXT, &sysinfo::human_bytes(gr.rss), Face::Sans);
+            let lim = gr.res.map(|r| sysprocs::res_text(&r)).unwrap_or_default();
+            let lim = g.fit(12.0 * s, &lim, Face::Sans, (a.w - 600.0 * s - 12.0 * s).max(40.0 * s));
+            g.text(a.x + 600.0 * s, ty + 1.0 * s, 12.0 * s, MUTED, &lim, Face::Sans);
+        }
+        if groups.is_empty() {
+            crate::fx::empty_state(g, R::new(a.x, top, a.w, 160.0 * s), s, Icon::System, "No processes could be read", "The kernel's process list is not available here.", ACCENT);
+        }
+        self.process_buttons(g, a, s);
     }
 
     fn render_hardware(&mut self, g: &mut Gfx, a: R, s: f32) {
@@ -1073,3 +1214,6 @@ mod hardware_tests {
 #[cfg(test)]
 #[path = "system_cluster_tests.rs"]
 mod cluster_tests;
+#[cfg(test)]
+#[path = "system_procs_tests.rs"]
+mod procs_tests;

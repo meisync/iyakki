@@ -343,3 +343,65 @@ fn the_usb_c_page_answers_clicks_and_the_wheel_and_a_click_leaves_the_code_box()
     assert!(!a.devel.usb_open && !a.devel.usb.code_focus);
     assert_eq!(a.devel.usb.code.value, "");
 }
+
+fn paired_laptop(cx: &AppCx, d: &DevMode, a: &mut SettingsApp) {
+    if !d.is_on() {
+        key(a, cx, Key::Char('e'));
+    }
+    key(a, cx, Key::Char('p'));
+    let p = d.pairing().expect("a code is shown");
+    let k = iyakki_agent::pkg::new_signing_key().unwrap();
+    let pubhex = iyakki_agent::pkg::public_key_hex(&k);
+    let fp = "AA:BB";
+    d.complete_pairing(fp, "laptop", &pubhex, &dm::auth::pair_proof(&dm::auth::pair_key(&p.code, fp).unwrap(), fp, &pubhex, "laptop")).unwrap();
+}
+
+#[test]
+fn the_g_key_grants_every_diagnostic_scope_and_never_the_dangerous_ones_and_t_extends_the_timer() {
+    use iyakki_agent::devmode::scopes::Scope;
+    let cx = admin("devset-gt");
+    let d = DevMode::open(cx.services.dir());
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Developer);
+    // G with no computer paired says so and grants nothing
+    key(&mut a, &cx, Key::Char('e'));
+    key(&mut a, &cx, Key::Char('G'));
+    assert!(a.status().is_some_and(|s| s.0.contains("No computer")), "{:?}", a.status());
+    paired_laptop(&cx, &d, &mut a);
+    key(&mut a, &cx, Key::Char('G'));
+    let k = d.keys()[0].clone();
+    for s in [Scope::Debug, Scope::Files, Scope::Input, Scope::Kube, Scope::Shell] {
+        assert!(k.has(s), "{s:?} is a diagnostic scope");
+    }
+    for s in Scope::ALL {
+        if !matches!(s, Scope::Debug | Scope::Files | Scope::Input | Scope::Kube | Scope::Shell) && s.id() != "install" {
+            assert!(!k.scopes.iter().any(|x| x == s.id()), "{s:?} must stay off: {}", k.scope_text());
+        }
+    }
+    assert!(cx.audit.recent(20).iter().any(|l| l.contains("devmode.scope.grant")));
+    // t pushes the switch-off time further and writes an audit line
+    let before = d.state().until;
+    key(&mut a, &cx, Key::Char('t'));
+    assert!(d.state().until > before, "{:?}", a.status());
+    assert!(cx.audit.recent(20).iter().any(|l| l.contains("devmode.extend")));
+}
+
+#[test]
+fn the_keys_4_8_and_1_approve_a_shell_for_4_8_and_12_hours_and_y_uses_the_8_hour_default() {
+    let cx = admin("devset-hours");
+    let d = DevMode::open(cx.services.dir());
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Developer);
+    paired_laptop(&cx, &d, &mut a);
+    key(&mut a, &cx, Key::Char('G')); // the shell scope (still approved here each time)
+    let laptop = d.keys()[0].clone();
+    for (c, hours) in [('4', 4i64), ('8', 8), ('1', 12)] {
+        d.shell_request(&laptop, false, 30, "t").unwrap();
+        key(&mut a, &cx, Key::Char(c));
+        let g = d.shell_grant("laptop").unwrap_or_else(|| panic!("key {c}: {:?}", a.status()));
+        assert_eq!(g.expires - d.now(), hours * 3600, "key {c}");
+        d.shell_end(&iyakki_sec::policy::Role::Admin.template(), "root", "laptop").unwrap();
+    }
+    assert_eq!(iyakki_agent::devmode::grants::AUTO_DEFAULT_HOURS, 8, "the automatic approval defaults to 8 hours");
+    assert_eq!(iyakki_agent::devmode::grants::MAX_MINUTES, 720);
+}

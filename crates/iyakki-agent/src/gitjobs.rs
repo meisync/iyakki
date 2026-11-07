@@ -148,6 +148,10 @@ pub struct CloneSpec {
     pub depth: u32,
     /// The folder name the person chose; empty: from the address.
     pub folder: String,
+    /// Also clone the repository's submodules (`--recurse-submodules`; `--shallow-submodules` when `depth` is set). Off unless the
+    /// person asked: a submodule is another address the clone reaches, so it is only fetched over the transports of
+    /// [`submodule_protocols`].
+    pub submodules: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,6 +237,53 @@ pub struct Ctx {
     pub scope: Arc<dyn Fn(&Path) -> Result<(), String> + Send + Sync>,
 }
 
+/// What [`user_ctx`] needs to know besides the services.
+pub struct CtxFor<'a> {
+    pub user: &'a str,
+    pub policy: &'a iyakki_sec::policy::Policy,
+    pub audit: crate::gitkeys::AuditFn,
+    /// The folder the jobs work in and its name.
+    pub root: &'a Path,
+    pub name: &'a str,
+    /// A folder the write check must also allow (the account's own Repositories folder when it has no home to write in).
+    pub extra_write: Option<&'a Path>,
+    pub who: Who,
+    /// Tests give their own programs and key probe.
+    pub tools: Option<Tools>,
+    pub probe: Option<Probe>,
+}
+
+/// The one way a person's clone, fetch, pull or push is set up, for the Git tile and the assistant's tools alike: the person's
+/// keys and connections, the programs, and the write check of their account.
+pub fn user_ctx(svc: &Arc<crate::services::Services>, a: CtxFor) -> Result<Ctx, String> {
+    let search = svc.clis.search_path();
+    let tools = match a.tools {
+        Some(t) => t,
+        None => Tools::detect(&search)?,
+    };
+    let safe: String = a.user.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')).collect();
+    let mut policy = a.policy.clone();
+    if let Some(fb) = a.extra_write {
+        let fb = fb.to_string_lossy().into_owned();
+        if !policy.fs_write.is_empty() && !policy.allows_write(a.user, &fb) {
+            policy.fs_write.push(fb);
+        }
+    }
+    let user = a.user.to_string();
+    Ok(Ctx {
+        keys: Arc::new(GitKeys::for_services(svc, a.user, a.audit, crate::gitkeys::shared_session())),
+        tools,
+        owner: a.user.to_string(),
+        workspace: a.name.to_string(),
+        root: std::fs::canonicalize(a.root).unwrap_or_else(|_| a.root.to_path_buf()),
+        ws_keys: crate::workspace::ProjectConfig::load(a.root).map(|c| c.git_keys).unwrap_or_default(),
+        who: a.who,
+        run_dir: svc.dir().join("git-run").join(safe),
+        probe: a.probe.unwrap_or_else(|| real_probe(search)),
+        scope: Arc::new(move |p: &Path| crate::scope::check_write(&policy, &user, p)),
+    })
+}
+
 pub struct Batch {
     pub ctx: Ctx,
     pub items: Vec<Item>,
@@ -275,6 +326,10 @@ impl Batch {
                 errors.push((n, format!("`{}` is not a branch name", s.branch)));
                 continue;
             }
+            if s.submodules && !matches!(url.scheme, gitsite::Scheme::Https | gitsite::Scheme::Ssh | gitsite::Scheme::Local) {
+                errors.push((n, "submodules are only cloned over https:// or ssh addresses".into()));
+                continue;
+            }
             if s.depth > 1_000_000 {
                 errors.push((n, "the depth is too large".into()));
                 continue;
@@ -313,7 +368,7 @@ impl Batch {
                 continue;
             }
             let auth = ctx.keys.resolve(&url, &ctx.ws_keys);
-            items.push(Item { op, spec: CloneSpec { url: r.url.clone(), branch: r.branch.clone(), depth: r.depth, folder: r.path.clone() }, url, folder: r.path.clone(), auth, state: ItemState::Queued, job: None, last: String::new(), progress: None, tries: 0 });
+            items.push(Item { op, spec: CloneSpec { url: r.url.clone(), branch: r.branch.clone(), depth: r.depth, folder: r.path.clone(), submodules: false }, url, folder: r.path.clone(), auth, state: ItemState::Queued, job: None, last: String::new(), progress: None, tries: 0 });
         }
         if !errors.is_empty() && items.is_empty() {
             return Err(errors);
@@ -332,7 +387,7 @@ impl Batch {
             return Err(vec![(0, e)]);
         }
         let auth = ctx.keys.resolve(&url, &ctx.ws_keys);
-        let item = Item { op: Op::Push, spec: CloneSpec { url: url.url.clone(), branch: branch.to_string(), depth: 0, folder: folder.to_string() }, url, folder: folder.to_string(), auth, state: ItemState::Queued, job: None, last: String::new(), progress: None, tries: 0 };
+        let item = Item { op: Op::Push, spec: CloneSpec { url: url.url.clone(), branch: branch.to_string(), depth: 0, folder: folder.to_string(), submodules: false }, url, folder: folder.to_string(), auth, state: ItemState::Queued, job: None, last: String::new(), progress: None, tries: 0 };
         Ok(Batch::new(ctx, vec![item]))
     }
 
@@ -626,10 +681,33 @@ pub fn ssh_command(ssh: &Path, known_hosts: &Path, agent_sock: &Path) -> String 
     format!("{} {}", sh_quote(&ssh.display().to_string()), opts.join(" "))
 }
 
+/// The transports a clone with submodules may use: `https` only, plus `ssh` when the repository itself is cloned over ssh (the
+/// person's connection signs in with a key there). Never `http`, `file`, `ext` or `git`: a `.gitmodules` file is written by the
+/// repository's author, not by the person. Tests that clone from local paths add `file`.
+pub fn submodule_protocols(main: &RepoUrl, allow_local: bool) -> String {
+    let mut p = vec!["https"];
+    if main.is_ssh() {
+        p.push("ssh");
+    }
+    if allow_local {
+        p.push("file");
+    }
+    p.join(":")
+}
+
 /// The argument array of one job: `env VAR=… git …`. No secret is in it (sockets are paths, tokens come through askpass).
 pub fn command(ctx: &Ctx, it: &Item, agent: &GitAgent) -> Result<Vec<String>, String> {
-    let mut a: Vec<String> = vec!["env".into(), "GIT_TERMINAL_PROMPT=0".into(), "GIT_OPTIONAL_LOCKS=0".into(), "LC_ALL=C".into(), "GIT_CONFIG_COUNT=1".into(), "GIT_CONFIG_KEY_0=credential.helper".into(), "GIT_CONFIG_VALUE_0=".into()];
-    a.push(if ctx.tools.allow_local { "GIT_ALLOW_PROTOCOL=https:http:ssh:file".into() } else { "GIT_ALLOW_PROTOCOL=https:http:ssh".into() });
+    let recurse = it.op == Op::Clone && it.spec.submodules;
+    let mut a: Vec<String> = vec!["env".into(), "GIT_TERMINAL_PROMPT=0".into(), "GIT_OPTIONAL_LOCKS=0".into(), "LC_ALL=C".into()];
+    // a clone with submodules reaches more addresses than the one the person saw: no program-running or local transports, no hooks
+    // (git passes these settings on to the submodule clones)
+    let config: &[(&str, &str)] = if recurse { &[("credential.helper", ""), ("protocol.file.allow", "never"), ("protocol.ext.allow", "never"), ("core.hooksPath", "/dev/null")] } else { &[("credential.helper", "")] };
+    a.push(format!("GIT_CONFIG_COUNT={}", config.len()));
+    for (i, (k, v)) in config.iter().enumerate() {
+        a.push(format!("GIT_CONFIG_KEY_{i}={k}"));
+        a.push(format!("GIT_CONFIG_VALUE_{i}={v}"));
+    }
+    a.push(format!("GIT_ALLOW_PROTOCOL={}", if recurse { submodule_protocols(&it.url, ctx.tools.allow_local) } else if ctx.tools.allow_local { "https:http:ssh:file".to_string() } else { "https:http:ssh".to_string() }));
     if !it.url.is_ssh() {
         // a server whose certificate the person chose to trust (Settings, Git, Connections): that certificate only
         let conns = ctx.keys.conns();
@@ -648,6 +726,12 @@ pub fn command(ctx: &Ctx, it: &Item, agent: &GitAgent) -> Result<Vec<String>, St
     match it.op {
         Op::Clone => {
             a.extend(["clone".into(), "--progress".into()]);
+            if recurse {
+                a.push("--recurse-submodules".into());
+                if it.spec.depth > 0 {
+                    a.push("--shallow-submodules".into());
+                }
+            }
             if !it.spec.branch.is_empty() {
                 a.extend(["--branch".into(), it.spec.branch.clone()]);
             }

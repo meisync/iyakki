@@ -398,3 +398,30 @@ fn the_prompts_tell_the_model_how_to_write_links() {
     }
     let _ = OpenHow::Click;
 }
+
+#[test]
+fn an_opened_table_has_an_open_in_data_viewer_link_that_asks_the_shell_for_the_data_app_at_four_sizes() {
+    let (cx, _d) = cx_with_backend("lnk13", iyakki_agent::chat::Unconfigured);
+    let home = iyakki_agent::scope::home_root(&cx.session.user, cx.services.dir());
+    std::fs::write(home.join("sales.csv"), "a,b\n1,2\n").unwrap();
+    let path = format!("{}/sales.csv", home.display());
+    let mut app = ChatApp::new();
+    app.msgs.push(Message::user("open my sales table"));
+    let call = iyakki_agent::chat::ToolCall { id: "t1".into(), name: "data_open".into(), args: serde_json::json!({"path": "sales.csv"}) };
+    app.msgs.push(Message::assistant_calls("", vec![call.clone()]));
+    app.msgs.push(Message::tool_result(&call, format!("Opened {path} as d1: 1 rows, 2 columns (x engine, 0 KB).\nColumns: a, b\nFirst rows:\n| a | b |\n|---|---|\n| 1 | 2 |\n")));
+    app.msgs.push(Message::assistant("done".to_string()));
+    for (w, h) in [(1280, 720), (1920, 1080), (1024, 600), (800, 480)] {
+        render_with(&mut app, &cx, w, h);
+        let n = find(&app, "sales.csv");
+        assert!(!app.view.link_screen_rects(n).is_empty(), "{w}x{h}");
+    }
+    let n = find(&app, "sales.csv");
+    click(&mut app, &cx, n);
+    let req = request(&mut app).expect("the DATA app is asked for");
+    assert_eq!(req.0, "data");
+    assert!(req.1.ends_with("sales.csv"));
+    // other tools' results get no such link
+    let (app2, _) = chat_with("lnk14", "done", Some(&format!("Opened {path} as d1: 1 rows")));
+    assert!((0..app2.view.link_count()).all(|n| app2.view.link(n).is_none_or(|l| !l.url.ends_with("sales.csv"))));
+}

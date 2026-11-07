@@ -220,6 +220,18 @@ impl ChatApp {
             self.error = Some(format!("There is no file {}.", real.display()));
             return;
         }
+        // a table is looked at in DATA (the shell comes back to the chat), not edited as text
+        let low = real.to_string_lossy().to_ascii_lowercase();
+        if line.is_none() && (low.ends_with(".csv") || low.ends_with(".tsv")) {
+            if !policy.allows_app(iyakki_sec::policy::App::Data) {
+                self.error = Some("Your account may not use the DATA app.".into());
+                return;
+            }
+            let p = real.to_string_lossy().into_owned();
+            crate::apps::data::request_open(&p, None);
+            self.links.req = Some(("data".into(), p));
+            return;
+        }
         if !policy.allows_app(iyakki_sec::policy::App::Edit) {
             self.error = Some("Your account may not use the editor.".into());
             return;

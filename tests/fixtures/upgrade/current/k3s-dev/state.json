@@ -10,6 +10,8 @@
   "last_restart_at": 1700000100,
   "last_restart_reason": "synthetic",
   "node_ip": "",
+  "node_ip_disabled": false,
+  "node_ip_worked": false,
   "registry_choice": "none",
   "restarts": 2,
   "schema": 1,

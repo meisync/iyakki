@@ -4,7 +4,8 @@
 //! started: `Command::new("x")`, a Runner call whose argv starts with a literal, `let argv/cmd = vec!["x".into(), ..]`. Every such program
 //! must be listed in `dist/buildroot/image-programs.txt` (shipped by the image, optional, host-only or a known gap). A second scan fails on
 //! a literal "curl", "jq", "python3" or "perl" anywhere in production code outside the files that file exempts (command-policy lists).
-//! Limits: a program named through a constant or a variable is not seen.
+//! A program named through a `const NAME: &str = "prog";` is resolved and checked like a literal (`Command::new(NAME)`, `[NAME.into(), ..]`);
+//! one named through a variable or a value computed at run time is not seen (the list of those is printed by `print_the_known_gaps`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -90,6 +91,65 @@ fn spawned(line: &str) -> Vec<String> {
     v
 }
 
+
+/// `const NAME: &str = "lit";` (also `static`, `pub`, `pub(crate)`) in production code: name -> every value it has anywhere.
+fn constants(files: &[PathBuf]) -> BTreeMap<String, BTreeSet<String>> {
+    let mut m: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for f in files {
+        let text = std::fs::read_to_string(f).unwrap_or_default();
+        for (_, line) in production(&text) {
+            let t = line.trim_start();
+            let t = t.strip_prefix("pub(crate) ").or_else(|| t.strip_prefix("pub(super) ")).or_else(|| t.strip_prefix("pub ")).unwrap_or(t);
+            let Some(rest) = t.strip_prefix("const ").or_else(|| t.strip_prefix("static ")) else { continue };
+            let Some((name, tail)) = rest.split_once(": &str = \"") else { continue };
+            let Some((lit, _)) = tail.split_once('"') else { continue };
+            if name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
+                m.entry(name.to_string()).or_default().insert(lit.to_string());
+            }
+        }
+    }
+    m
+}
+
+fn is_program_name(lit: &str) -> bool {
+    lit.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '/') && lit.chars().all(|c| c.is_ascii_alphanumeric() || "_./+-".contains(c))
+}
+
+/// The constant names a production line starts as programs: `Command::new(NAME)`, `Command::new(&NAME)`, and `[NAME.into()` on a
+/// runner line or a `let argv/cmd = vec![NAME.into()`.
+fn spawned_constants(line: &str) -> Vec<String> {
+    let ident = |rest: &str| -> Option<String> {
+        let rest = rest.trim_start().trim_start_matches('&');
+        let id: String = rest.chars().take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_').collect();
+        let after = &rest[id.len()..];
+        (id.len() >= 2 && id.starts_with(|c: char| c.is_ascii_uppercase())).then_some(id).filter(|_| after.starts_with(')') || after.starts_with(".into()") || after.starts_with(".to_string()") || after.starts_with(".to_owned()") || after.starts_with(','))
+    };
+    let mut v = Vec::new();
+    let mut from = 0;
+    while let Some(i) = line[from..].find("Command::new(") {
+        from += i + "Command::new(".len();
+        v.extend(ident(&line[from..]));
+    }
+    let t = line.trim_start();
+    let argv_line = t.starts_with("let mut argv") || t.starts_with("let argv") || t.starts_with("let mut cmd") || t.starts_with("let cmd");
+    if line.contains(".run(") || line.contains(".run_in(") || argv_line {
+        for m in ["&[", "[", "vec!["] {
+            let mut from = 0;
+            while let Some(i) = line[from..].find(m) {
+                from += i + m.len();
+                if let Some(id) = ident(&line[from..]) {
+                    if !line[from..].starts_with(&format!("{id},")) || argv_line || m == "&[" {
+                        v.push(id);
+                    }
+                }
+            }
+        }
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
 struct Listing {
     kinds: BTreeMap<String, (String, String)>,
     exempt: Vec<String>,
@@ -126,10 +186,19 @@ fn every_program_production_code_starts_is_listed_for_the_image() {
     let l = listing();
     let mut unknown: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut used: BTreeSet<String> = BTreeSet::new();
-    for f in sources() {
+    let files = sources();
+    let consts = constants(&files);
+    let mut unresolved: BTreeSet<String> = BTreeSet::new();
+    for f in files {
         let text = std::fs::read_to_string(&f).unwrap();
         for (n, line) in production(&text) {
-            for p in spawned(&line) {
+            for p in spawned(&line).into_iter().chain(spawned_constants(&line).into_iter().flat_map(|c| match consts.get(&c) {
+                Some(vals) => vals.iter().filter(|v| is_program_name(v)).cloned().collect::<Vec<_>>(),
+                None => {
+                    unresolved.insert(c);
+                    Vec::new()
+                }
+            })) {
                 used.insert(p.clone());
                 if !l.kinds.contains_key(&p) {
                     unknown.entry(p).or_default().insert(format!("{}:{n}", f.strip_prefix(root()).unwrap().display()));
@@ -142,6 +211,29 @@ fn every_program_production_code_starts_is_listed_for_the_image() {
     for want in ["git", "modprobe", "aplay", "kubectl"] {
         assert!(used.contains(want), "the scan no longer finds `{want}`: the patterns need updating");
     }
+    if !unresolved.is_empty() {
+        println!("constants used as programs that the scan cannot resolve (not a `const X: &str` in these crates): {unresolved:?}");
+    }
+}
+
+#[test]
+fn the_scan_resolves_programs_named_through_constants() {
+    // a program named by a constant is seen, so an unlisted one fails the first test like a literal would
+    assert_eq!(spawned_constants("let o = Command::new(BIN).arg(\"x\");"), ["BIN"]);
+    assert_eq!(spawned_constants("Command::new(&TOOL)"), ["TOOL"]);
+    assert_eq!(spawned_constants("let r = runner.run(&[PROG.into(), \"-v\".into()]);"), ["PROG"]);
+    assert_eq!(spawned_constants("let argv = vec![HELPER.to_string(), \"a\".into()];"), ["HELPER"]);
+    assert!(spawned_constants("let x = Command::new(path);").is_empty(), "a variable is not a constant");
+    assert!(spawned_constants("let n = LIMITS[0];").is_empty());
+    let dir = std::env::temp_dir().join(format!("iyakki-imgprog-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("a.rs");
+    std::fs::write(&f, "const BIN: &str = \"bluetoothctl\";\npub(crate) static OTHER: &str = \"/usr/bin/foo\";\nconst N: usize = 3;\n#[cfg(test)]\nconst T: &str = \"hidden\";\n").unwrap();
+    let c = constants(&[f]);
+    assert_eq!(c.get("BIN").unwrap().iter().next().unwrap(), "bluetoothctl");
+    assert!(c.contains_key("OTHER") && !c.contains_key("N"));
+    assert!(is_program_name("bluetoothctl") && is_program_name("/usr/bin/foo") && !is_program_name("Hello world") && !is_program_name("--flag"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

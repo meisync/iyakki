@@ -117,7 +117,6 @@ generated | usr/libexec/intercept-* | scan-build-py wrappers of the clang packag
 generated | boot/bzimage | the Linux kernel image (GPL-2.0) built by Buildroot
 generated | boot/initrd | the root file system archive of this image, scanned separately as rootfs.cpio
 generated | efi/boot/bootx64.efi | GRUB EFI image (GPL-3.0+) built from the grub2 package by post-image.sh; with Secure Boot the signed shim/GRUB set replaces it
-generated | boot/grub/fonts/unicode.pf2 | GRUB's Unicode font (GNU Unifont as .pf2) copied from the build machine's grub2-common or the Buildroot host tree by post-image.sh; since 2026-10-27 the licence statement (GPL-2.0-or-later with font embedding exception, or OFL-1.1: the authors', NOT re-read from the package) and the source path and sha256 travel with it in boot/grub/fonts/FONTS-LICENSE.txt; the owner decides whether to accept it
 generated | boot/grub/fonts/iyakki-menu.pf2 | menu font made by grub-mkfont from the repository's crates/iyakki-shell/assets/DejaVuSans-Bold.ttf (Bitstream Vera licence with DejaVu public-domain changes, text DEJAVU-LICENSE.txt, legal/assets.txt) since 2026-10-27; the build machine's DejaVu is a fallback for development images only, never for a release image
 generated | boot/grub/fonts/iyakki-term.pf2 | terminal font made by grub-mkfont from the repository's crates/iyakki-shell/assets/DejaVuSansMono.ttf (same licence and record as iyakki-menu.pf2)
 

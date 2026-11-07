@@ -168,7 +168,7 @@ pub mod mic {
             let cfg = dev.default_input_config().map_err(|e| HwError::Device(e.to_string()))?;
             let (rate, ch, fmt) = (cfg.sample_rate().0, cfg.channels() as usize, cfg.sample_format());
             let (tx, rx) = channel();
-            let err = |e| eprintln!("[iyakki mic] stream error: {e}");
+            let err = |e| { use std::io::Write as _; let _ = writeln!(std::io::stderr(), "[iyakki mic] stream error: {e}"); };
             // Downmix to mono i16.
             let stream = match fmt {
                 cpal::SampleFormat::F32 => dev.build_input_stream(

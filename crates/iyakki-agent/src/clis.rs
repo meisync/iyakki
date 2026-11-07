@@ -2069,23 +2069,25 @@ fn run_quiet_env(program: &str, args: &[&str], env: &[(&str, &str)], seconds: u6
         let _ = tx2.send((false, s));
     });
     let start = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) if start.elapsed().as_secs() >= seconds => {
+    // the PID 1 reaper may take the exit status of this child: then the program has ended but its status is gone (`Gone`)
+    let state = loop {
+        match iyakki_core_api::child_status(&mut child) {
+            iyakki_core_api::ChildState::Running if start.elapsed().as_secs() >= seconds => {
                 let _ = child.kill();
-                let _ = child.wait();
+                let _ = iyakki_core_api::child_wait(&mut child);
                 return Err(format!("{program} did not finish within {seconds} seconds"));
             }
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(30)),
-            Err(e) => return Err(e.to_string()),
+            iyakki_core_api::ChildState::Running => std::thread::sleep(std::time::Duration::from_millis(30)),
+            ended => break ended,
         }
     };
     let (mut out, mut err) = (String::new(), String::new());
     while let Ok((is_out, s)) = rx.recv_timeout(std::time::Duration::from_millis(400)) {
         if is_out { out = s } else { err = s }
     }
-    if status.success() { Ok(if out.trim().is_empty() { err } else { out }) } else { Err(format!("{} failed: {}", program.rsplit('/').next().unwrap_or(program), err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no message"))) }
+    // a status that was taken is not a failure by itself: the output decides (an error line on stderr and nothing on stdout is one)
+    let ok = state.success() || (matches!(state, iyakki_core_api::ChildState::Gone) && (!out.trim().is_empty() || err.trim().is_empty()));
+    if ok { Ok(if out.trim().is_empty() { err } else { out }) } else { Err(format!("{} failed: {}", program.rsplit('/').next().unwrap_or(program), err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no message"))) }
 }
 
 #[cfg(test)]

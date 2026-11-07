@@ -913,8 +913,21 @@ impl ChatApp {
             if self.tasks.is_some() && cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full {
                 system.push_str(iyakki_agent::tasktools::PROMPT_RULE);
             }
+            system.push_str(iyakki_agent::toolrouting::PROMPT_RULE);
+            if iyakki_agent::gitworktools::offered(&cx.session.policy) {
+                system.push_str(iyakki_agent::gitworktools::PROMPT_RULE);
+            }
+            if !iyakki_agent::msg::MessageService::for_services(&cx.services, &cx.session.user, Arc::new(|_, _| {})).accounts().list().is_empty() {
+                system.push_str(iyakki_agent::msg::tools::PROMPT_RULE);
+            }
+            if cx.session.policy.allows_app(iyakki_sec::policy::App::Rag) {
+                system.push_str(iyakki_agent::ragtools::PROMPT_RULE);
+            }
             if cx.session.policy.manage_settings {
                 system.push_str(iyakki_agent::sshtunneltools::PROMPT_RULE);
+                system.push_str(iyakki_agent::objectstoragetools::PROMPT_RULE);
+                system.push_str(iyakki_agent::quickuninstalltools::PROMPT_RULE);
+                system.push_str(iyakki_agent::sharedvaulttools::PROMPT_RULE);
                 system.push_str(iyakki_agent::vpntools::PROMPT_RULE);
             }
             if k8s.is_none() {
@@ -987,7 +1000,7 @@ impl ChatApp {
                 } else {
                     Arc::new(tools)
                 };
-                let mut pt = iyakki_agent::boardtools::ProjectTools::new(base, &p.root, &p.name, &p.features);
+                let mut pt = iyakki_agent::boardtools::ProjectTools::new(base, &p.root, &p.name, &p.features).with_project_test_command(&[&p.root]);
                 let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
                 pt = pt.with_audit(Arc::new(move |k, d| audit.record(&user, k, d)));
                 if !cx.services.settings.lock().unwrap_or_else(|e| e.into_inner()).get().no_workspace_history {
@@ -1022,6 +1035,51 @@ impl ChatApp {
         } else {
             tools_arc
         };
+        // object storage (SeaweedFS, RustFS): status is free, install and remove ask (administrators only: they change the cluster)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
+            Arc::new(iyakki_agent::objectstoragetools::ObjectStorageTools::new(tools_arc, Arc::new(iyakki_agent::objectstoragetools::RealBackend { svc: cx.services.clone(), user: cx.session.user.clone() })))
+        } else {
+            tools_arc
+        };
+        // document retrieval (agentic RAG): search, read and research are free and bound by the account's collections; adding a folder asks
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.allows_app(iyakki_sec::policy::App::Rag) {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            let env = iyakki_agent::ragtools::RagToolsEnv::for_services(&cx.services, &cx.session.user, &cx.session.policy, cx.chat.clone(), Arc::new(move |a, d| audit.record(&user, a, d)));
+            Arc::new(iyakki_agent::ragtools::RagTools::new(tools_arc, env))
+        } else {
+            tools_arc
+        };
+        // Quick install removal: status is free, quick_uninstall asks every time (administrators only)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
+            Arc::new(iyakki_agent::quickuninstalltools::QuickUninstallTools::new(tools_arc, Arc::new(iyakki_agent::quickuninstalltools::RealBackend { svc: cx.services.clone(), user: cx.session.user.clone() })))
+        } else {
+            tools_arc
+        };
+        // messaging: the assistant can list the person's accounts and send to a saved room; every send asks (only once an account exists)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            let msg = iyakki_agent::msg::MessageService::for_services(&cx.services, &cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d)));
+            if msg.accounts().list().is_empty() { tools_arc } else { Arc::new(iyakki_agent::msg::tools::MessageTools::new(tools_arc, Arc::new(msg))) }
+        };
+        // which cryptography keeps the shared vault: reading is free, a change asks every time (administrators only)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
+            Arc::new(iyakki_agent::sharedvaulttools::SharedVaultTools::new(tools_arc, cx.services.dir().to_path_buf(), &cx.session.user))
+        } else {
+            tools_arc
+        };
+        // how tools are offered: reading is free, switching it for this person asks every time (the machine-wide switch is not a tool)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let svc = cx.services.clone();
+            Arc::new(iyakki_agent::toolrouting::ToolRoutingTools::new(tools_arc, cx.services.dir().to_path_buf(), &cx.session.user, Arc::new(move || svc.settings.lock().unwrap_or_else(|e| e.into_inner()).get().no_tool_routing)))
+        };
+        // clone a repository, register an AI IDE workspace: both ask every time (the account needs the Git tile or the AI IDE)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if iyakki_agent::gitworktools::offered(&cx.session.policy) {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            let env = iyakki_agent::gitworktools::GitWorkEnv::for_services(&cx.services, &cx.session.user, &cx.session.policy, Arc::new(move |a, d| audit.record(&user, a, d)));
+            Arc::new(iyakki_agent::gitworktools::GitWorkTools::new(tools_arc, env))
+        } else {
+            tools_arc
+        };
         // VPN profiles: the list is free, every change asks (administrators only: routes are device settings)
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
             let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
@@ -1049,7 +1107,8 @@ impl ChatApp {
         {
             // tool routing (Settings → Models): the groups this chat's context needs from the first request, or every tool
             use iyakki_agent::toolblock::Group;
-            assist.lazy_groups = !cx.services.settings.lock().unwrap_or_else(|e| e.into_inner()).get().no_tool_routing;
+            let machine_off = cx.services.settings.lock().unwrap_or_else(|e| e.into_inner()).get().no_tool_routing;
+            assist.lazy_groups = iyakki_agent::toolrouting::lazy_groups(cx.services.dir(), &cx.session.user, machine_off);
             if flows_link.is_some() {
                 assist.context_groups.insert(Group::Flows);
             }

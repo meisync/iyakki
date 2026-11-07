@@ -114,7 +114,7 @@ impl Shell {
         let settings = svc.settings.lock().map(|s| s.get().update_check.clone()).unwrap_or_default();
         let store = Store::for_services(&svc);
         let last = uc::Report::load(svc.dir()).map_or(0, |r| r.checked_at);
-        if uc::due(&settings, last, store.now(), None, &store.licenses().device_id()) != uc::Due::Now {
+        if uc::due(&settings, last, store.now(), iyakki_agent::meteredlink::metered_now(), &store.licenses().device_id()) != uc::Due::Now {
             return;
         }
         let (policy, user) = (sess.policy.clone(), sess.user.clone());

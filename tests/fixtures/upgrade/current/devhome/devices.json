@@ -3,6 +3,7 @@
   "devices": [
     {
       "account": "admin",
+      "addr": "",
       "fingerprint": "abababababababababababababababababababababababababababababababab",
       "host": "192.0.2.20",
       "name": "board",
@@ -11,6 +12,7 @@
     },
     {
       "account": "",
+      "addr": "",
       "fingerprint": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
       "host": "192.0.2.21",
       "name": "mac",
