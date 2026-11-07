@@ -110,6 +110,7 @@ pub(super) fn gather(cx: &AppCx) -> Facts {
         let m = iyakki_agent::vpn_mgr::Manager::shared(svc, &cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d)));
         m.summary().map(|s| s.light)
     };
+    let graphics = iyakki_agent::webgraphics::status(cx.services.dir());
     Facts {
         mem_total,
         mem_available,
@@ -150,6 +151,8 @@ pub(super) fn gather(cx: &AppCx) -> Facts {
         net: None,
         dev_port_answers: None,
         failed_services,
+        graphics_line: graphics.line.clone(),
+        graphics_fallback: graphics.fallback,
     }
 }
 
@@ -161,7 +164,7 @@ pub(super) fn bundle_inputs(cx: &AppCx, found: &[doctor::Finding]) -> iyakki_age
         version.extend(r.rows().into_iter().map(|(k, v)| format!("{k}: {v}")));
     }
     let services = iyakki_agent::startup::global().report_lines();
-    let hardware = doctor::hardware_text();
+    let hardware = format!("{}\nBrowser graphics: {}", doctor::hardware_text(), iyakki_agent::webgraphics::status(cx.services.dir()).line);
     let mut switches = Vec::new();
     if iyakki_agent::devmode::is_on(cx.services.dir()) {
         switches.push("developer mode".to_string());

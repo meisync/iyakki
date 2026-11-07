@@ -549,7 +549,9 @@ fn flow(g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, items: &[(String, bool, Eve
             cy += h + 8.0 * s;
         }
         if draw {
-            chip(g, cx, cy, s, label, *on, ev.clone());
+            // a chip wider than the panel (a long agent name in a narrow window) shows the start of its text, never past the edge
+            let shown = g.fit(sz, label, Face::Bold, (cw - sz * 1.9).max(sz * 2.0));
+            chip(g, cx, cy, s, &shown, *on, ev.clone());
         }
         cx += cw + 8.0 * s;
     }

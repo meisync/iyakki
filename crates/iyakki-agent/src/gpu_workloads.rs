@@ -227,6 +227,25 @@ pub fn lemonade_patch(g: Gpu, render_gid: Option<u32>) -> String {
     serde_json::json!({ "spec": { "template": { "spec": pod } } }).to_string()
 }
 
+/// The same for the Ollama Deployment of Quick install (`quickinstall::ollama_cluster::manifest`): the device plugin's resource limit
+/// and, for Vulkan, `OLLAMA_VULKAN=1` and the render node's group (the pod runs as user 10001). Nothing privileged is added.
+pub fn ollama_patch(g: Gpu, render_gid: Option<u32>) -> String {
+    let mut container = serde_json::json!({ "name": "ollama", "resources": { "limits": { g.resource(): 1 } } });
+    if g == Gpu::Vulkan {
+        container["env"] = serde_json::json!([{ "name": "OLLAMA_VULKAN", "value": "1" }]);
+    }
+    let mut pod = serde_json::json!({ "containers": [container] });
+    if let (Gpu::Vulkan, Some(gid)) = (g, render_gid) {
+        pod["securityContext"] = serde_json::json!({ "supplementalGroups": [gid] });
+    }
+    serde_json::json!({ "spec": { "template": { "spec": pod } } }).to_string()
+}
+
+/// The patch that takes the GPU away from the Ollama Deployment again.
+pub fn ollama_unpatch() -> String {
+    serde_json::json!({ "spec": { "template": { "spec": { "securityContext": { "supplementalGroups": null }, "containers": [{ "name": "ollama", "env": [{ "name": "OLLAMA_VULKAN", "$patch": "delete" }], "resources": { "limits": { GPU_RESOURCE: null, NVIDIA_RESOURCE: null } } }] } } } }).to_string()
+}
+
 /// The patch that takes the GPU away again (a `null` deletes the key; the env entry is deleted by name).
 pub fn lemonade_unpatch() -> String {
     serde_json::json!({ "spec": { "template": { "spec": { "securityContext": { "supplementalGroups": null }, "containers": [{ "name": "lemonade", "env": [{ "name": "LEMONADE_LLAMACPP", "$patch": "delete" }], "resources": { "limits": { GPU_RESOURCE: null, NVIDIA_RESOURCE: null } } }] } } } }).to_string()

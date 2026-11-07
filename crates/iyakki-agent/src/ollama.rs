@@ -55,6 +55,26 @@ pub fn probe(port: u16) -> Option<String> {
     v.get("version")?.as_str().map(str::to_string)
 }
 
+/// The names of the models the Ollama on a local port lists (`GET /api/tags`).
+pub fn list_models(port: u16) -> Result<Vec<String>, String> {
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(800)).map_err(|e| format!("nothing answers on port {port}: {e}"))?;
+    s.set_read_timeout(Some(Duration::from_secs(10))).map_err(io_err)?;
+    s.set_write_timeout(Some(Duration::from_millis(800))).map_err(io_err)?;
+    s.write_all(b"GET /api/tags HTTP/1.0\r\nHost: localhost\r\n\r\n").map_err(io_err)?;
+    let mut text = String::new();
+    s.take(4 << 20).read_to_string(&mut text).map_err(io_err)?;
+    let body = text.split_once("\r\n\r\n").ok_or("no answer from Ollama")?.1;
+    parse_tags(body)
+}
+
+/// The model names in an `/api/tags` answer.
+pub fn parse_tags(body: &str) -> Result<Vec<String>, String> {
+    let v: serde_json::Value = serde_json::from_str(body.trim()).map_err(|e| format!("not an Ollama answer: {e}"))?;
+    let list = v.get("models").and_then(|m| m.as_array()).ok_or("the answer has no model list")?;
+    Ok(list.iter().filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(str::to_string)).collect())
+}
+
 impl OllamaServer {
     pub fn new(dir: &Path, clis: Arc<CliManager>) -> OllamaServer {
         OllamaServer { dir: dir.into(), clis, port: std::sync::atomic::AtomicU16::new(DEFAULT_PORT), state: Mutex::new(OllamaState::Stopped), child: Mutex::new(None), gen: std::sync::atomic::AtomicU64::new(0), on_ready: Mutex::new(None) }

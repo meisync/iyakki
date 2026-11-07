@@ -464,7 +464,12 @@ fn the_saver_draws_black_with_the_logo_and_the_desktop_comes_back_whole() {
     assert!(g.rgba().chunks(4).any(|p| p[0] > 60 || p[1] > 60 || p[2] > 60), "the logo is there");
     sh.handle(&Event::Key(Key::Char('w')));
     sh.render(&mut g);
-    assert_eq!(g.rgba(), &desktop[..], "the whole desktop is back, not a patch of it");
+    // the desktop shows the time: under load a minute can pass between the first picture and now, so the restored desktop is compared with
+    // a desktop drawn completely, from nothing, at this moment (a patch of it would differ), not with the first picture
+    let _ = &desktop;
+    let mut fresh = Gfx::new(1280, 720);
+    sh.render(&mut fresh);
+    assert_eq!(g.rgba(), fresh.rgba(), "the whole desktop is back, not a patch of it");
 }
 
 #[test]

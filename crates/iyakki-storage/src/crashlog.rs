@@ -453,6 +453,32 @@ pub fn latest_crash(dir: &Path) -> Option<String> {
     v.pop()
 }
 
+/// One finished session as `sessions.tsv` records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Finished {
+    pub boot_id: String,
+    pub started: i64,
+    /// `clean`, `clean-with-errors` or `unclean`.
+    pub how: String,
+    /// Uptime of the last kernel log line the session kept (seconds).
+    pub uptime_s: u64,
+}
+
+impl Finished {
+    /// The session did not end with a clean power-off or reboot.
+    pub fn unclean(&self) -> bool {
+        self.how == "unclean"
+    }
+}
+
+/// The newest finished session in `dir` (the `log` folder): the one before the running session. None when there is no history.
+pub fn last_finished(dir: &Path) -> Option<Finished> {
+    let text = std::fs::read_to_string(dir.join(SESSIONS_FILE)).ok()?;
+    let l = text.lines().rev().find(|l| l.split('\t').count() >= 4)?;
+    let f: Vec<&str> = l.split('\t').collect();
+    Some(Finished { boot_id: f[0].to_string(), started: f[1].parse().ok()?, how: f[2].to_string(), uptime_s: f[3].parse().unwrap_or(0) })
+}
+
 /// `iyakki log sessions` text.
 pub fn sessions_text(dir: &Path, current: Option<&Session>) -> String {
     let mut out = String::from("boot id\tstarted (UTC)\tended\tup (s)\tentry\n");

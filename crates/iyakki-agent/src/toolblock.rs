@@ -113,7 +113,7 @@ pub fn group_of(name: &str) -> Group {
         n if n.starts_with("board_") || n.starts_with("note_") || n.starts_with("context_") || n.starts_with("job_") => Group::Workspace,
         "app_scaffold" | "app_preflight" | "app_bump_version" | "publisher_keys" | "store_validate" | "store_publish" | "store_server_status" | "driver_status" | "driver_install" => Group::Build,
         n if n.starts_with("tile_") => Group::Build,
-        n if n.starts_with("ssh_tunnel_") || n.starts_with("system_") => Group::System,
+        n if n.starts_with("ssh_tunnel_") || n.starts_with("system_") || n.starts_with("browser_graphics_") => Group::System,
         n if n.starts_with("object_storage_") => Group::Cluster,
         "git_clone_repo" | "git_clones_list" | "ide_workspace_add" | "ide_workspace_list" => Group::Workspace,
         "show_svg" | "show_image" | "generate_image" | "screen_capture" => Group::Pictures,
@@ -150,7 +150,7 @@ pub fn intent_groups(text: &str) -> BTreeSet<Group> {
     if has(&t, &["remind", "calendar", "schedule", "alarm", "appointment", "meeting", "task", "todo", "to-do", "wake me", "event", "tomorrow", "inbox", "plan", "lesson", "learn", "study", "quiz", "course", "yoga", "syllabus", "practice", "revision", "days"]) {
         g.insert(Group::Calendar);
     }
-    if has(&t, &["install", "app store", "the store", "skill for", "plugin", "extension", "cluster", "kubectl", "k3s", "iyakki", "tile", "launcher", "publish", "docker", "container", "run code", "python", "node ", "ssh", "aws", "gcloud", "command", "script", "ollama", "model", "pull "]) {
+    if has(&t, &["install", "app store", "the store", "skill for", "plugin", "extension", "cluster", "kubectl", "k3s", "iyakki", "tile", "launcher", "publish", "docker", "container", "run code", "python", "node ", "ssh", "aws", "gcloud", "command", "script", "ollama", "model", "pull ", "graphics", "froze", "freez", "safe mode"]) {
         g.insert(Group::System);
     }
     if has(&t, &["draw", "picture", "image", "diagram", "svg", "chart", "logo", "icon", "camera", "photo", "screen", "plot", "illustrat", "sketch"]) {

@@ -155,7 +155,7 @@ impl Tab {
             Tab::Notifications => "notifications bell inbox badge number dot mute quiet off show sources new devices jobs finished flows errors alerts noise too many 99",
             Tab::SystemSounds => "system sounds chime login logout sign out notification alert job done sound effects cue beep volume quiet preview",
             Tab::Keyboard => "keyboard fn function keys media keys volume brightness backlight apple macbook touch bar f1 f12 repeat rate delay layout iso option command swap key codes pointer mouse trackpad scroll scrolling wheel speed smooth momentum natural direction",
-            Tab::Browser => "web internet browser javascript scripts pictures images styles css cookies privacy sites",
+            Tab::Browser => "web internet browser javascript scripts pictures images styles css cookies privacy sites graphics software hardware gpu freeze safe mode",
             Tab::DevCluster => "clusters multiple several local remote switch active k3s kubernetes cluster kubectl kubeconfig deploy registry namespace podman profile context node bare metal in-cluster service account vault developer",
             Tab::Storage => "disk usb drive data persistence save space format where my data is kept ram power off",
             Tab::Memory => "ram zram swap swappiness compressed memory zstd lz4 zswap pressure out of memory oom",
@@ -346,6 +346,8 @@ mod browserprotect_page;
 #[cfg(test)]
 #[path = "settings_browserprotect_tests.rs"]
 mod browserprotect_tests;
+#[path = "settings_browsergraphics.rs"]
+mod browsergraphics_page;
 #[path = "settings_browserspeed.rs"]
 mod browserspeed_page;
 #[path = "settings_browserblock.rs"]
@@ -2870,7 +2872,7 @@ impl SettingsApp {
         if self.handle_browser_headers(k, cx) {
             return;
         }
-        if self.handle_browser_speed(k, cx) || self.handle_browser_block(k, cx) || self.handle_browser_protect(k, cx) || self.handle_browser_devices(k, cx) {
+        if self.handle_browser_graphics(k, cx) || self.handle_browser_speed(k, cx) || self.handle_browser_block(k, cx) || self.handle_browser_protect(k, cx) || self.handle_browser_devices(k, cx) {
             return;
         }
         let mut c = super::browser_config::load(cx);
@@ -2947,6 +2949,8 @@ impl SettingsApp {
             // an even number of switches ends a row
         }
         y += 6.0 * s;
+        // how the engine draws: near the top too, because it is the answer to a computer that stops when the browser starts
+        y += self.render_browser_graphics(g, a, y, s, cx);
         // only when a camera or microphone is marked "don't use": near the top, because the tab does not scroll
         y += self.render_browser_devices(g, a, y, s, cx);
         y += controls::section_title(g, a.x, y, s, "Search");
@@ -3402,7 +3406,7 @@ impl App for SettingsApp {
             Tab::Power => "e performance · b balanced · v power saver · s sleep after idle (next time) · w sleep while busy (administrators)",
             Tab::Battery => "p percentage in the top bar · w low battery warnings · s shut down at the critical level (administrators)",
             Tab::Browser if self.bh.open => "a add · e edit · x or Enter enable/disable · d delete · b or Esc back · Up/Down choose",
-            Tab::Browser => "H custom headers · a scripts everywhere · i pictures · s styles · c cookies · m smooth pages · d developer tools for the chat agent · P protect browser data · X reset it · f forget the allowed sites",
+            Tab::Browser => "g graphics (automatic, software, hardware) · t try the graphics card again · H custom headers · a scripts everywhere · i pictures · s styles · c cookies · m smooth pages · d developer tools for the chat agent · P protect browser data · X reset it · f forget the allowed sites",
             Tab::DevCluster => "t test · d my default · w workspace default · k next workspace · h hide/show · x disconnect · g registry · P platform services (Gitea, private store) · C clusters (several, local and remote) · v vault profile · r look again · s set up · b/o/e start/stop/restart · l logs",
             Tab::Storage if self.storage.virtual_disks.is_some() => "n new virtual disk · x delete it · m make this disk the data disk (erases it) · r rescan",
             Tab::Storage => "m make this disk the data disk (erases it) · d DISKS tile · o drives at sign-out · u compatible USB mode (no UAS) · r rescan · b reboot",
@@ -6527,6 +6531,9 @@ mod power_tests;
 #[cfg(test)]
 #[path = "settings_screensaver_tests.rs"]
 mod screensaver_tests;
+#[cfg(test)]
+#[path = "settings_browsergraphics_tests.rs"]
+mod browsergraphics_tests;
 #[cfg(test)]
 #[path = "settings_browserspeed_tests.rs"]
 mod browserspeed_tests;

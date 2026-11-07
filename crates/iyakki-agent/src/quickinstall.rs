@@ -100,7 +100,7 @@ impl Group {
             Group::Cluster => "k3s is the base; DuckDB, Elasticsearch, Lemonade and the local image registry install it first when it is missing; object storage: pick one or both (SeaweedFS is the dependable one, RustFS the Rust-native and young one)",
             Group::AiCoding => "coding agents for the terminal and the AI IDE (Node.js is installed first when it is missing); pick one or both",
             Group::Voice => "reading voices; pick one or both (Kokoro: English, through Lemonade, which it installs first); or Voice: Whisper tiny + Kokoro, which also adds listening and sets both up",
-            Group::LocalModels => "model servers on this machine, added to Models when they answer; pick one or both (Lemonade runs in k3s); or use the GPU of a Mac on your network",
+            Group::LocalModels => "model servers on this machine, added to Models when they answer; pick one or both (both run in k3s; an Ollama installed earlier on the host can be moved in); or use the GPU of a Mac on your network",
             Group::Media => "the player for video and audio files (MEDIA tile, IYAKKI menu \u{2192} Media player); it needs nothing else",
             Group::Linux => "Debian and Ubuntu programs (apt) in a sandbox of their own, with a network switch and only the folders you mount; downloaded from the distribution, never shipped (Store \u{2192} Setup \u{2192} Linux apps has the page)",
             Group::Mac => "T2 Macs only: the Wi-Fi and Bluetooth firmware is Apple's, so it is never shipped; it is read from your own Mac or from Apple's recovery download, when you ask (IYAKKI menu \u{2192} Mac drivers has more ways)",
@@ -300,7 +300,7 @@ impl Item {
             Item::Kokoro => "English neural reading voice (kokoro-v1, 82M), pulled into Lemonade; Lemonade (and k3s) are installed first when missing",
             Item::VoicePack => "Listen and speak with one action: Whisper tiny (speech to text, any language it knows) and Kokoro (reading voice, English only), pulled into the Lemonade of this machine (Lemonade and k3s are installed first when missing), set as the engines of Settings \u{2192} Voice and tested. Review first: sizes, licences and what runs where. Remove puts the settings back",
             Item::Lemonade => "Local model server (chat, embeddings, images, whisper, Kokoro): one Deployment in k3s (namespace iyakki-ai), reachable on this machine only (127.0.0.1:13305) and added to Models",
-            Item::Ollama => "Run language models on this machine; started and added to Models as ollama-local",
+            Item::Ollama => ollama_cluster::ABOUT,
             Item::MacHost => "A guide, not an install: use the GPU of a Mac with Apple Silicon (Metal) or of another computer on your network. Shows what to install ON that computer (you do it), tests the connection with tokens per second, adds it to Models and can publish it to the cluster",
             Item::GpuVulkan => "Let pods in k3s use this machine's GPU through Vulkan (AMD, Intel, NVIDIA via nouveau): deploys a small device plugin, tests it with an unprivileged pod and gives Lemonade the GPU. Nothing is downloaded by IYAKKI; the cluster pulls the plugin and a llama.cpp image (about 300 MB)",
             Item::GpuNvidia => "NVIDIA's own driver for CUDA in pods (shown when an NVIDIA GPU is found; Turing or newer): downloads NVIDIA's user-space libraries and GSP firmware for you from download.nvidia.com (about 400 MB, checksum-verified, never part of an image), loads the open kernel modules of this image, deploys NVIDIA's device plugin so pods can ask for nvidia.com/gpu, and tests it with nvidia-smi",
@@ -341,7 +341,7 @@ impl Item {
             Item::Kokoro => "IYAKKI provides integration code only. Lemonade (Apache-2.0) pulls the Kokoro model at your click under the model's own licence, which Lemonade or the model's page states; IYAKKI ships no weights and gives no guarantee about them",
             Item::VoicePack => crate::voicepack::LICENCE_SHORT,
             Item::Lemonade => "Apache-2.0 (the Lemonade server image, pulled by the cluster at your click, not shipped); models and engines that Lemonade or you download have their own licences, outside IYAKKI",
-            Item::Ollama => "MIT; each model you pull has its own licence",
+            Item::Ollama => ollama_cluster::LICENCE,
             Item::MacHost => "nothing is installed by IYAKKI. On the Mac you choose: Ollama (MIT), llama.cpp (MIT), MLX-LM (MIT) or LM Studio (free to use, proprietary)",
             Item::GpuVulkan => "Mesa (MIT) and llama.cpp (MIT) in the pod image; the device plugin is squat/generic-device-plugin (Apache-2.0), pulled by the cluster; IYAKKI ships no GPU driver code of its own",
             Item::GpuNvidia => "kernel modules: MIT / GPL-2.0 (NVIDIA open GPU kernel modules, in the image). User-space libraries, nvidia-smi and GSP firmware: NVIDIA's proprietary driver licence, downloaded by you from NVIDIA, not shipped. Device plugin: Apache-2.0. Pressing Install accepts NVIDIA's licence for the downloaded files",
@@ -359,7 +359,7 @@ impl Item {
     /// What has to be there first.
     pub fn needs(self) -> &'static [Item] {
         match self {
-            Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::SeaweedFs | Item::RustFs | Item::Lemonade | Item::Registry | Item::GpuVulkan | Item::GpuNvidia => &[Item::K3s],
+            Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::SeaweedFs | Item::RustFs | Item::Lemonade | Item::Ollama | Item::Registry | Item::GpuVulkan | Item::GpuNvidia => &[Item::K3s],
             Item::Kokoro | Item::VoicePack => &[Item::Lemonade],
             _ => &[],
         }
@@ -416,7 +416,7 @@ impl Item {
             Item::Kokoro => 350,
             Item::VoicePack => crate::voicepack::WHISPER_MB + crate::voicepack::KOKORO_MB,
             Item::Lemonade => 700,
-            Item::Ollama => 300,
+            Item::Ollama => 1500,
             Item::MacHost => 0,
             Item::GpuVulkan => 300,
             Item::GpuNvidia => 400,
@@ -437,8 +437,8 @@ impl Item {
     pub fn time_text(self) -> &'static str {
         match self {
             Item::MacHost => "a few minutes (your steps)",
-            Item::Elasticsearch | Item::OpenSearch | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::SeaweedFs | Item::RustFs | Item::Lemonade | Item::Kokoro | Item::VoicePack | Item::MacFirmware | Item::GpuNvidia | Item::GpuVulkan => "5 to 15 minutes",
-            Item::K3s | Item::Ollama => "2 to 5 minutes",
+            Item::Elasticsearch | Item::OpenSearch | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::SeaweedFs | Item::RustFs | Item::Lemonade | Item::Ollama | Item::Kokoro | Item::VoicePack | Item::MacFirmware | Item::GpuNvidia | Item::GpuVulkan => "5 to 15 minutes",
+            Item::K3s => "2 to 5 minutes",
             _ => "about a minute",
         }
     }
@@ -652,6 +652,10 @@ pub fn presence_with(svc: &crate::services::Services, item: Item, lemonade: &dyn
             _ => Presence::Missing,
         },
         Item::Gitea => gitea::presence(data),
+        Item::Ollama => {
+            let host = svc.clis.installed().into_iter().find(|i| i.id == "ollama").map(|i| i.version);
+            ollama_cluster::presence(data, host, svc.clis.present_elsewhere("ollama"), &crate::ollama::probe)
+        }
         Item::FfmpegLibs => crate::avaddon_install::installed_note(data).map_or(Presence::Missing, Presence::Installed),
         other => match other.cli_id() {
             // installed by IYAKKI (its record), else put on the machine by hand (the tools folder, the search path): shown as
@@ -703,6 +707,8 @@ pub fn compare(installed: &str, latest: Result<String, String>) -> Latest {
 pub fn installed_version(svc: &crate::services::Services, item: Item) -> Option<String> {
     match item {
         Item::K3s => svc.k3sdev.installed().map(|s| s.version).filter(|v| !v.is_empty()),
+        // the pod runs a pinned image: there is no program version to compare once it runs in the cluster
+        Item::Ollama if marked(svc.dir(), Item::Ollama).is_some_and(|d| ollama_cluster::is_cluster_detail(&d)) => None,
         other => svc.clis.is_installed(other.cli_id()?).map(|i| i.version),
     }
 }
@@ -771,6 +777,7 @@ pub fn cluster_object(item: Item) -> Option<(&'static str, &'static str)> {
         Item::SeaweedFs => (objstore::NS, "seaweedfs"),
         Item::RustFs => (objstore::NS, "rustfs"),
         Item::Gitea => (gitea::NAMESPACE, "gitea"),
+        Item::Ollama => (LEMONADE_NAMESPACE, "ollama"),
         _ => return None,
     })
 }
@@ -1123,12 +1130,24 @@ pub fn service_requests(svc: &std::sync::Arc<crate::services::Services>) -> Vec<
     if let Some(r) = service_start_request(svc) {
         out.push(r.map(|_| "k3s is installed and starting (Settings \u{2192} Dev cluster shows it)".to_string()).map_err(|e| format!("k3s was installed but did not start: {e}")));
     }
-    if take_after(svc.dir(), "ollama").is_some() {
-        out.push(match svc.ollama.start() {
-            Ok(()) => Ok("Ollama is installed and starting; it joins Models as ollama-local when it answers".into()),
-            Err(e) if e.contains("already running") => Ok("Ollama is installed (already running)".into()),
-            Err(e) => Err(format!("Ollama was installed but did not start: {e}")),
+    if take_after(svc.dir(), ollama_cluster::REQ_CONNECT).is_some() {
+        // Ollama runs in the cluster: it joins Models as ollama-local once it answers on its loopback port; when the person moved a host
+        // install over, the host server is stopped only after that (nothing is deleted)
+        let stop_host = take_after(svc.dir(), ollama_cluster::REQ_STOP_HOST).is_some();
+        let me = svc.clone();
+        let _ = std::thread::Builder::new().name("iyakki-ollama-connect".into()).spawn(move || {
+            for _ in 0..90 {
+                if crate::ollama::probe(ollama_cluster::LOCAL_PORT).is_some() {
+                    me.use_cluster_ollama(&format!("http://127.0.0.1:{}", ollama_cluster::LOCAL_PORT));
+                    if stop_host {
+                        let _ = me.ollama.stop();
+                    }
+                    return;
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
         });
+        out.push(Ok(if stop_host { "Ollama is running in the cluster; Models (ollama-local) points at it and the host Ollama is stopped once it answers".to_string() } else { "Ollama is running in the cluster; it joins Models as ollama-local when it answers".to_string() }));
     }
     if take_after(svc.dir(), "lemonade").is_some() {
         let me = svc.clone();
@@ -1526,6 +1545,23 @@ pub trait StepEnv {
     fn objstore_secret(&mut self, _e: &objstore::Engine) -> Result<bool, String> {
         Err("creating the object store's Secret is not available here".into())
     }
+    // ---- Ollama in the cluster (`ollama_cluster`)
+    /// The choice the person made on the review card for an Ollama on the host (taken once); `None`: a plain install.
+    fn ollama_mode(&mut self) -> Option<ollama_cluster::Mode> {
+        None
+    }
+    /// The host Ollama's models folder, its size, and the free room on the data partition.
+    fn ollama_host(&mut self) -> ollama_cluster::HostInfo {
+        ollama_cluster::HostInfo::default()
+    }
+    /// Copy the host models folder into the cluster Ollama's volume (a copy; the host folder is not changed); a plain result line.
+    fn ollama_copy(&mut self, _dir: &Path) -> Result<String, String> {
+        Err("copying the models into the cluster is not available here".into())
+    }
+    /// The model names the Ollama of the cluster (`cluster` true, on its loopback port) or of the host (port 11434) lists.
+    fn ollama_models(&mut self, _cluster: bool) -> Result<Vec<String>, String> {
+        Err("asking Ollama is not available here".into())
+    }
     /// The image id (with its digest) the cluster pulled for a Deployment's first container; `None` where it cannot be read.
     fn image_id(&mut self, _ns: &str, _deploy: &str) -> Option<String> {
         None
@@ -1637,8 +1673,10 @@ spec:
             - containerPort: 9200
           resources:
             requests:
+              cpu: 250m
               memory: 1Gi
             limits:
+              cpu: \"2\"
               memory: 1536Mi
           readinessProbe:
             httpGet:
@@ -1766,6 +1804,7 @@ spec:
               cpu: 100m
               memory: 640Mi
             limits:
+              cpu: \"2\"
               memory: 1Gi
           readinessProbe:
             httpGet:
@@ -2175,7 +2214,11 @@ spec:
               hostIP: 127.0.0.1
           resources:
             requests:
+              cpu: 500m
               memory: 1Gi
+            limits:
+              cpu: \"6\"
+              memory: 16Gi
           readinessProbe:
             httpGet:
               path: /live
@@ -2451,9 +2494,10 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
         Item::Matrix => matrix::run(env, wait, poll),
         Item::SeaweedFs => objstore::run(&objstore::SEAWEEDFS, env, wait, poll),
         Item::RustFs => objstore::run(&objstore::RUSTFS, env, wait, poll),
-        Item::Node | Item::Python | Item::ClaudeCode | Item::Copilot | Item::Ollama | Item::Ffmpeg => {
+        Item::Ollama => ollama_cluster::run(env, wait, poll),
+        Item::Node | Item::Python | Item::ClaudeCode | Item::Copilot | Item::Ffmpeg => {
             let id = item.cli_id().unwrap_or_default();
-            let server = item == Item::Ollama;
+            let server = false;
             let total = if server { 3 } else { 2 };
             env.say(&format!("[0/{total}] installing {} from the CLI catalogue (licence: {})", item.title(), item.licence()));
             let v = env.install_cli(id)?;
@@ -3026,6 +3070,29 @@ impl StepEnv for RealEnv {
     fn record_pulled(&mut self, models: &[String]) -> Result<(), String> {
         crate::voicepack::record_pulled(&self.data, models)
     }
+    fn ollama_mode(&mut self) -> Option<ollama_cluster::Mode> {
+        ollama_cluster::take_mode(&self.data)
+    }
+    fn ollama_host(&mut self) -> ollama_cluster::HostInfo {
+        ollama_cluster::real_host_info(&self.data)
+    }
+    fn ollama_copy(&mut self, dir: &Path) -> Result<String, String> {
+        let sel = format!("app.kubernetes.io/name={}", ollama_cluster::NAME);
+        let pod = self.k3s.kubectl(&["-n", ollama_cluster::NS, "get", "pods", "-l", &sel, "-o", "jsonpath={.items[0].metadata.name}"]);
+        let pod = pod.stdout.trim().to_string();
+        if pod.is_empty() {
+            return Err("the Ollama pod was not found, so nothing was copied".into());
+        }
+        // kubectl cp packs the folder itself and unpacks it with the pod's tar; the host folder is only read
+        let from = format!("{}/.", dir.display());
+        let to = format!("{}/{pod}:/data/models", ollama_cluster::NS);
+        let out = self.k3s.kubectl(&["cp", &from, &to, "-c", ollama_cluster::NAME]);
+        if out.code == Some(0) { Ok("the models were copied".into()) } else { Err(format!("the copy failed ({}); the host Ollama and its models were not touched", out.combined().trim().lines().last().unwrap_or("kubectl cp failed"))) }
+    }
+    fn ollama_models(&mut self, cluster: bool) -> Result<Vec<String>, String> {
+        let port = if cluster { ollama_cluster::LOCAL_PORT } else { crate::ollama::DEFAULT_PORT };
+        crate::ollama::list_models(port)
+    }
     fn lemonade_pull(&mut self, model: &str) -> Result<(), String> {
         let base = crate::lemonade::local_ports().iter().find_map(|p| crate::lemonade::probe_local(*p)).map(|b| b.0).ok_or("Lemonade does not answer")?;
         let up = iyakki_proxy::https::UreqUpstream::with_timeout(Duration::from_secs(3600));
@@ -3298,6 +3365,22 @@ mod matrix_tests;
 #[cfg(test)]
 #[path = "quickinstall_clickhouse_tests.rs"]
 mod clickhouse_tests;
+
+/// What each cluster item may use (CPU and memory requests and limits, the idle profile) and the review's memory warning.
+#[path = "quickinstall_resources.rs"]
+pub mod resources;
+
+/// Ollama as a pod in the cluster (like Lemonade), the move of a host install, and where Ollama runs.
+#[path = "quickinstall_ollama.rs"]
+pub mod ollama_cluster;
+
+#[cfg(test)]
+#[path = "quickinstall_ollama_tests.rs"]
+mod ollama_cluster_tests;
+
+#[cfg(test)]
+#[path = "quickinstall_resources_tests.rs"]
+mod resources_tests;
 
 /// The Gitea item: Platform services' Gitea objects deployed by a Quick install job, with the vault handoff and the Git connection.
 #[path = "quickinstall_gitea.rs"]

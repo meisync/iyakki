@@ -236,3 +236,15 @@ fn the_command_line_tool_prints_the_files() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+
+#[test]
+fn the_last_finished_session_is_the_newest_line_of_the_history() {
+    let d = tmp("lastfin");
+    assert_eq!(last_finished(&d), None, "no history yet");
+    std::fs::write(d.join(SESSIONS_FILE), "aaaa1111\t1793980000\tclean\t300\tquiet\nbbbb2222\t1793981000\tunclean\t42\tquiet\n").unwrap();
+    let f = last_finished(&d).unwrap();
+    assert_eq!((f.boot_id.as_str(), f.started, f.how.as_str(), f.uptime_s, f.unclean()), ("bbbb2222", 1793981000, "unclean", 42, true));
+    std::fs::write(d.join(SESSIONS_FILE), "aaaa1111\t1793980000\tclean-with-errors\t300\tquiet\nnot a line\n").unwrap();
+    assert!(!last_finished(&d).unwrap().unclean(), "damaged lines are skipped; errors in a clean session are still clean");
+    let _ = std::fs::remove_dir_all(&d);
+}

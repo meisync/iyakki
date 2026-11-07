@@ -157,6 +157,12 @@ pub mod recordings;
 pub mod voicepack;
 pub mod scene;
 pub mod webengine;
+pub mod webgraphics;
+pub mod webgraphicstools;
+#[cfg(test)]
+mod webgraphics_tests;
+#[cfg(test)]
+mod webgraphicstools_tests;
 pub mod avaddon;
 pub mod avaddon_install;
 pub mod avbuild;
@@ -174,6 +180,9 @@ pub mod sshtunnel_mgr;
 pub mod gitworktools;
 pub mod sshtunneltools;
 pub mod objectstoragetools;
+pub mod ollamatools;
+#[cfg(test)]
+mod ollamatools_tests;
 pub mod quickuninstalltools;
 #[cfg(test)]
 mod quickuninstalltools_tests;

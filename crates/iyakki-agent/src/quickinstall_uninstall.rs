@@ -79,6 +79,10 @@ pub enum Hook {
     NvidiaCdi,
     /// Take the GPU settings out of the Lemonade Deployment when it exists.
     LemonadeUnpatch,
+    /// Take the GPU settings out of the Ollama Deployment (the one in the cluster) when it exists.
+    OllamaUnpatch,
+    /// Take the `ollama-local` entry out of Models (the Ollama of the cluster; no host server is touched).
+    OllamaProvider,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,7 +138,7 @@ fn data_step(op: Op, text: &str) -> Step {
     Step { op, data: true, unless_data: false, text: text.into() }
 }
 
-fn dir_bytes(p: &Path) -> u64 {
+pub(crate) fn dir_bytes(p: &Path) -> u64 {
     let Ok(m) = std::fs::symlink_metadata(p) else { return 0 };
     if m.is_dir() {
         std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| dir_bytes(&e.path())).sum()
@@ -201,6 +205,18 @@ pub fn plan(item: Item, ctx: &PlanCtx) -> Plan {
         Item::ClaudeCode => cli_plan(item, "claude-code", ctx, "your sign-in, settings and projects (they are in your own folders, never touched)"),
         Item::Copilot => cli_plan(item, "github-copilot", ctx, "your sign-in, settings and projects (they are in your own folders, never touched)"),
         Item::Ffmpeg => cli_plan(item, "ffmpeg", ctx, "your media files"),
+        Item::Ollama if marked(data, Item::Ollama).is_some_and(|d| ollama_cluster::is_cluster_detail(&d)) => {
+            let mut pl = pod_plan(item, Pod { ns: ollama_cluster::NS, name: ollama_cluster::NAME, claim: ollama_cluster::CLAIM.into(), gb: ollama_cluster::STORAGE_GB as u32, what: "your downloaded models", secret: None, vault: vec![], source: None });
+            pl.steps.insert(2, plain(Op::Hook(Hook::OllamaProvider), "the entry ollama-local in Settings, Models"));
+            let host = ollama_cluster::host_models_dir(data);
+            if host.exists() {
+                let root = data.join("ollama");
+                pl.data_bytes = dir_bytes(&host);
+                pl.steps.push(data_step(Op::Path { path: root.clone(), root: root.clone() }, "the models folder of the earlier host Ollama (the folder ollama in the data folder; the move kept it)"));
+                pl.notes.push("The earlier host Ollama program stays installed (remove it from the CLI tile if you do not want it); its models folder is deleted only with the data.".into());
+            }
+            pl
+        }
         Item::Ollama => {
             let mut pl = cli_plan(item, "ollama", ctx, "your downloaded models are in the Ollama folder (see the data step)");
             pl.steps.insert(0, plain(Op::Hook(Hook::OllamaServer), "the running Ollama of IYAKKI and its Models entry ollama-local"));
@@ -302,6 +318,7 @@ pub fn plan(item: Item, ctx: &PlanCtx) -> Plan {
                 item,
                 steps: vec![
                     plain(Op::Hook(Hook::LemonadeUnpatch), "the GPU settings of the Lemonade Deployment (when it exists)"),
+                    plain(Op::Hook(Hook::OllamaUnpatch), "the GPU settings of the Ollama Deployment (when it exists)"),
                     kube(ns, "daemonset", "iyakki-gpu-device-plugin", false, format!("the device plugin iyakki-gpu-device-plugin in {ns}")),
                 ],
                 data_requires: false,
@@ -318,6 +335,7 @@ pub fn plan(item: Item, ctx: &PlanCtx) -> Plan {
                 item,
                 steps: vec![
                     plain(Op::Hook(Hook::LemonadeUnpatch), "the GPU settings of the Lemonade Deployment (when it exists)"),
+                    plain(Op::Hook(Hook::OllamaUnpatch), "the GPU settings of the Ollama Deployment (when it exists)"),
                     plain(Op::Kube { ns: Some("kube-system"), kind: "daemonset", name: "nvidia-device-plugin".into() }, "the device plugin nvidia-device-plugin in kube-system"),
                     plain(Op::Hook(Hook::NvidiaCdi), "the CDI specs of the NVIDIA step"),
                     plain(Op::Path { path: l.extracted(), root: base.clone() }, "the unpacked driver files (folder extracted)"),
@@ -624,6 +642,10 @@ pub fn not_ours(p: &Presence) -> Option<String> {
 
 /// The claims a cluster item keeps its data in: `(namespace, claim)`.
 pub fn claims_of(item: Item) -> Vec<(&'static str, String)> {
+    // the plan of Ollama depends on where it runs (the marker); its claim is the cluster one whichever it is, so it is kept (Retain)
+    if item == Item::Ollama {
+        return vec![(ollama_cluster::NS, ollama_cluster::CLAIM.to_string())];
+    }
     plan(item, &PlanCtx::default()).steps.into_iter().filter_map(|s| if let Op::Claim { ns, name } = s.op { Some((ns, name)) } else { None }).collect()
 }
 
@@ -1011,6 +1033,19 @@ impl UninstallEnv for RealEnv {
                     crate::gpucdi::remove_spec(dir, k);
                 }
                 Ok("the CDI specs are removed".into())
+            }
+            Hook::OllamaProvider => {
+                let n = self.remove_providers(&|p| p.id == "ollama-local");
+                Ok(format!("{n} Models entr{} removed", if n == 1 { "y" } else { "ies" }))
+            }
+            Hook::OllamaUnpatch => {
+                let ns = crate::gpu_workloads::NAMESPACE;
+                let have = self.svc.k3sdev.kubectl(&["-n", ns, "get", "deployment", ollama_cluster::NAME, "-o", "name"]);
+                if have.code != Some(0) {
+                    return say_none("the Ollama Deployment");
+                }
+                let patch = crate::gpu_workloads::ollama_unpatch();
+                self.kubectl(&["-n", ns, "patch", "deployment", ollama_cluster::NAME, "--type=strategic", "-p", &patch]).map(|_| "the GPU settings are taken out of Ollama".into())
             }
             Hook::LemonadeUnpatch => {
                 let ns = crate::gpu_workloads::NAMESPACE;

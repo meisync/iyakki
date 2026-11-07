@@ -322,9 +322,10 @@ fn coding_agents_install_from_the_catalogue_and_servers_ask_to_be_started_and_co
     run_step(Item::ClaudeCode, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap();
     assert_eq!(f.calls, ["cli claude-code"]);
     assert!(f.lines.last().unwrap().contains("claude auth login"));
+    // Ollama is a pod in the cluster now (quickinstall_ollama_tests.rs): the catalogue is not used to install it, it needs the cluster first
     let mut f = Fake::default();
-    run_step(Item::Ollama, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap();
-    assert_eq!(f.calls, ["cli ollama", "after ollama"]);
+    assert!(run_step(Item::Ollama, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap_err().contains("k3s was not installed"));
+    assert!(!f.calls.iter().any(|c| c.starts_with("cli ")), "{:?}", f.calls);
     // the media player: the catalogue's static ffmpeg, no cluster, no runtime first, in its own section
     let mut f = Fake::default();
     run_step(Item::Ffmpeg, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap();

@@ -52,6 +52,9 @@ pub const STOP: usize = SB + 800;
 pub const BUILD: usize = SB + 760;
 /// The popup's Remove button of the voice pack (Undo: the old speech engines come back, the models it pulled are deleted).
 pub const REMOVE: usize = SB + 850;
+/// The popup's two buttons of an Ollama that runs on the host: move it into the cluster, or start fresh there (host models stay).
+pub const OLLAMA_MOVE: usize = SB + 1300;
+pub const OLLAMA_FRESH: usize = SB + 1301;
 /// The cluster switcher of the popup owns the codes from here (its list rows follow); "Show all AI tools" is the link under the filters.
 pub const SWITCH: usize = SB + 900;
 pub const SHOW_ALL_AI: usize = SB + 890;
@@ -462,7 +465,8 @@ pub fn open_target(item: Item) -> Option<(&'static str, &'static str)> {
 /// "Where it goes", for the details.
 pub fn where_text(item: Item) -> &'static str {
     match item {
-        Item::Node | Item::Python | Item::DuckDb | Item::ClaudeCode | Item::Copilot | Item::Ollama | Item::Ffmpeg | Item::FfmpegLibs => "the tools folder on the data partition, linked into the command path (no sudo)",
+        Item::Ollama => "the cluster, namespace iyakki-ai, reachable on this machine only (127.0.0.1:11436), 30 GB volume for the models, up to 16 GB of memory; an Ollama installed earlier runs on the host (the tools folder) until you move it",
+        Item::Node | Item::Python | Item::DuckDb | Item::ClaudeCode | Item::Copilot | Item::Ffmpeg | Item::FfmpegLibs => "the tools folder on the data partition, linked into the command path (no sudo)",
         Item::K3s => "the data partition: the managed dev cluster",
         Item::Elasticsearch => "the cluster, namespace iyakki-data",
         Item::OpenSearch => "the cluster, namespace iyakki-data (ClusterIP only, port 9200, 5 GB volume, about 1.5 GB of memory)",
@@ -529,10 +533,10 @@ pub struct Confirm {
     pub scroll: usize,
 }
 
-/// Does installing this item put something into a cluster (so the screen names the cluster and offers the switcher)? Ollama is not here: it
-/// installs on this machine under its own supervisor.
+/// Does installing this item put something into a cluster (so the screen names the cluster and offers the switcher)? Ollama is here since
+/// it runs as a pod like Lemonade; an Ollama installed earlier on the host stays where it is until the person moves it.
 pub fn deploys_to_cluster(item: Item) -> bool {
-    matches!(item, Item::Registry | Item::Lemonade | Item::VoicePack | Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::SeaweedFs | Item::RustFs)
+    matches!(item, Item::Registry | Item::Lemonade | Item::Ollama | Item::VoicePack | Item::DuckDb | Item::Elasticsearch | Item::OpenSearch | Item::Prometheus | Item::ClickHouse | Item::GraphDb | Item::Gitea | Item::Matrix | Item::SeaweedFs | Item::RustFs)
 }
 
 pub struct Setup {
@@ -593,6 +597,8 @@ pub struct Setup {
     pub live_k3s: Option<Svc>,
     /// The version map the "Build it here" route reads (None: the image's own; tests give one).
     pub av_map: Option<String>,
+    /// What the host Ollama's models folder looks like (None: read it; tests give one).
+    pub ollama_host: Option<qi::ollama_cluster::HostInfo>,
     ctl_slot: Arc<Mutex<Option<Result<String, String>>>>,
     /// Deletes a model of this machine's Lemonade (the voice pack's Remove); tests give a fake.
     pub lemonade_delete: Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>,
@@ -664,6 +670,7 @@ impl Setup {
             request: None,
             live_k3s: None,
             av_map: None,
+            ollama_host: None,
             ctl_slot: Default::default(),
             lemonade_delete: Arc::new(iyakki_agent::voicepack::delete_local_model),
             started: false,
@@ -978,6 +985,9 @@ impl Setup {
                 None => notes.push(("Reading which firmware files this computer asks for…".into(), false)),
             }
         }
+        if item == Item::Ollama && self.ollama_on_host() && !matches!(state, CardState::Installing(_)) {
+            notes.push((format!("{}. Move into the cluster copies its models into a volume of the cluster after you agree; or start fresh there and keep the host models where they are.", qi::ollama_cluster::HOST_WORD), false));
+        }
         if let Some((_, w)) = self.facts.as_ref().and_then(|f| f.used_by.iter().find(|(x, _)| *x == item)) {
             notes.push((w.clone(), false));
         }
@@ -1119,7 +1129,8 @@ impl Setup {
     /// The review for these targets: what would run, in order (dependencies first).
     fn plan_for(&self, targets: Vec<Item>, title: String) -> Confirm {
         let mut present: HashSet<Item> = self.facts.iter().flat_map(|f| f.presence.iter().filter(|(_, p)| p.present()).map(|(i, _)| *i)).collect();
-        let review = if targets.contains(&Item::VoicePack) { iyakki_agent::voicepack::review_lines(present.contains(&Item::Lemonade)) } else { Vec::new() };
+        let installed_before: Vec<Item> = present.iter().copied().collect();
+        let mut review = if targets.contains(&Item::VoicePack) { iyakki_agent::voicepack::review_lines(present.contains(&Item::Lemonade)) } else { Vec::new() };
         let mut steps = Vec::new();
         for t in &targets {
             for s in qi::order(*t, &|i| present.contains(&i)) {
@@ -1130,6 +1141,10 @@ impl Setup {
             }
         }
         let cluster = steps.iter().any(|s| deploys_to_cluster(*s)).then(|| self.deploy_phrase());
+        // the services together may take more than 60 % of the memory: said in plain words in the review
+        if let Some(w) = qi::resources::total_warning(&steps, &installed_before, self.machine.ram_mb) {
+            review.push(w);
+        }
         Confirm { steps, targets, title, cluster, review, scroll: 0 }
     }
 
@@ -1210,7 +1225,26 @@ impl Setup {
                 return;
             }
         }
+        // the review of an Ollama on the host was read and confirmed: the job gets the choice (copy the models, or start fresh)
+        let mode = if c.title == qi::ollama_cluster::MOVE_TITLE { Some(qi::ollama_cluster::Mode::Move) } else if c.title == qi::ollama_cluster::FRESH_TITLE { Some(qi::ollama_cluster::Mode::Fresh) } else { None };
+        if mode == Some(qi::ollama_cluster::Mode::Move) && qi::ollama_cluster::decide(&self.host_info(cx)) != qi::ollama_cluster::Decision::Copy {
+            // the card said why: a move that cannot be done safely in one step starts nothing (Start fresh is the other way)
+            self.confirm = Some(c);
+            self.say("The models cannot be copied safely now. Close this card and choose \"Start fresh in the cluster, keep host models where they are\".", false);
+            return;
+        }
+        if let Some(m) = mode {
+            if let Err(e) = qi::ollama_cluster::write_mode(cx.services.dir(), m) {
+                self.say(format!("Could not record the choice: {e}"), false);
+                return;
+            }
+            cx.audit.record(&cx.session.user, "quickinstall.ollama", if m == qi::ollama_cluster::Mode::Move { "move into the cluster" } else { "start fresh in the cluster" });
+        }
         let mut present: HashSet<Item> = self.facts.iter().flat_map(|f| f.presence.iter().filter(|(_, p)| p.present()).map(|(i, _)| *i)).collect();
+        if mode.is_some() {
+            // the host install counts as present for the order of OTHER items, but the Ollama step itself always runs
+            present.remove(&Item::Ollama);
+        }
         let mut started = 0usize;
         let mut err = None;
         for t in &c.targets {
@@ -1587,6 +1621,51 @@ impl Setup {
         }
     }
 
+    /// Ollama runs on this machine's host (installed earlier): the cluster one is not there.
+    pub fn ollama_on_host(&self) -> bool {
+        matches!(self.presence(Item::Ollama), Some(Presence::Installed(d)) if !qi::ollama_cluster::is_cluster_detail(d) && d.contains(qi::ollama_cluster::HOST_WORD))
+    }
+
+    /// The review card of moving the host Ollama into the cluster (`Mode::Move`) or starting fresh there (`Mode::Fresh`). Nothing runs
+    /// before the person confirms; a move that cannot be done safely in one step is refused here with the other way offered.
+    pub fn ollama_review(&mut self, mode: qi::ollama_cluster::Mode, cx: &AppCx) {
+        use qi::ollama_cluster as oc;
+        if !self.admin {
+            self.say(format!("Only an administrator can move software (your role is {}). Ask an administrator.", cx.session.role.name()), false);
+            return;
+        }
+        if !self.ollama_on_host() {
+            self.say("There is no Ollama on this machine's host to move.", false);
+            return;
+        }
+        if self.running_job(Item::Ollama).is_some() {
+            self.say("Ollama is being installed: its progress is beside the clock.", false);
+            return;
+        }
+        if let Some(why) = Self::cluster_refusal(cx, Item::Ollama) {
+            self.say(why, false);
+            return;
+        }
+        let host = self.host_info(cx);
+        let d = oc::decide(&host);
+        self.popup = None;
+        let title = if mode == oc::Mode::Move { oc::MOVE_TITLE } else { oc::FRESH_TITLE };
+        let mut c = self.plan_for(vec![Item::Ollama], title.into());
+        let mut lines = oc::review_lines(mode, &host, d);
+        lines.extend(std::mem::take(&mut c.review));
+        c.review = lines;
+        self.confirm = Some(c);
+    }
+
+    /// The host Ollama's models folder, its size and the free room (tests give their own).
+    fn host_info(&self, cx: &AppCx) -> qi::ollama_cluster::HostInfo {
+        use qi::ollama_cluster as oc;
+        if let Some(h) = &self.ollama_host {
+            return h.clone();
+        }
+        oc::real_host_info(cx.services.dir())
+    }
+
     pub fn stop(&mut self, item: Item, cx: &AppCx) {
         if !self.admin {
             self.say(format!("Only an administrator can stop the cluster (your role is {}). Ask an administrator.", cx.session.role.name()), false);
@@ -1810,6 +1889,8 @@ impl Setup {
             Event::Tab(n) if *n == STOP + idx => self.stop(item, cx),
             Event::Tab(n) if *n == BUILD + idx && item == Item::FfmpegLibs => self.build_here(cx),
             Event::Tab(n) if *n == REMOVE + idx && item == Item::VoicePack => self.remove_voice_pack(cx),
+            Event::Tab(OLLAMA_MOVE) if item == Item::Ollama => self.ollama_review(qi::ollama_cluster::Mode::Move, cx),
+            Event::Tab(OLLAMA_FRESH) if item == Item::Ollama => self.ollama_review(qi::ollama_cluster::Mode::Fresh, cx),
             Event::Tab(n) if *n == remove::RM_OPEN + idx => self.open_remove(item, cx),
             Event::Tab(n) if *n == DETAILS + idx => {
                 if !self.details.remove(&item) {
@@ -2013,7 +2094,7 @@ fn short_about(item: Item) -> &'static str {
         Item::Kokoro => "An English reading voice, run by Lemonade.",
         Item::VoicePack => "Listening (Whisper tiny) and an English reading voice (Kokoro) in one action, run by Lemonade and set up for you.",
         Item::Lemonade => "A local model server for chat, embeddings, images and speech.",
-        Item::Ollama => "Run language models on this machine; added to Models when it answers.",
+        Item::Ollama => "Run language models on this machine (a pod in the cluster); added to Models when it answers.",
         Item::MacHost => "Use the GPU of a Mac (Apple Silicon) or another computer on your network. A guide: you set up that computer.",
         Item::GpuVulkan => "Let pods in the cluster use this machine's GPU through Vulkan.",
         Item::GpuNvidia => "NVIDIA's own driver, so pods can use CUDA.",
@@ -2061,3 +2142,7 @@ mod avbuild_tests;
 #[cfg(test)]
 #[path = "store_setup_remove_tests.rs"]
 mod remove_tests;
+
+#[cfg(test)]
+#[path = "store_setup_ollama_tests.rs"]
+mod ollama_tests;

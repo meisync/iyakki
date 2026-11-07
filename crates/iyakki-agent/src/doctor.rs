@@ -135,6 +135,9 @@ pub struct Facts {
     pub models_unreachable: Vec<String>,
     // the startup registry
     pub failed_services: Vec<FailedService>,
+    /// The browser graphics mode in words (`webgraphics::Status::line`; empty: unknown) and whether the engine fell back to software.
+    pub graphics_line: String,
+    pub graphics_fallback: bool,
     // memory (kilobytes read from /proc/meminfo, in bytes here; total 0: unknown)
     pub mem_total: u64,
     pub mem_available: u64,
@@ -250,6 +253,14 @@ pub fn vault_locked_with_waiting(f: &Facts) -> Option<Finding> {
     let names = f.vault_waiting.join(", ");
     let text = if f.vault_waiting.len() == 1 { format!("Your vault is locked and a password is waiting to be saved in it ({names}).") } else { format!("Your vault is locked and {} passwords are waiting to be saved in it ({names}).", f.vault_waiting.len()) };
     Some(finding("vault-locked", Severity::Warning, text, String::new(), open("Open the vault to unlock it", "tab:vault")))
+}
+
+/// The browser engine draws in software because the last session stopped right after it started on the graphics card.
+pub fn engine_graphics_fallback(f: &Facts) -> Option<Finding> {
+    if !f.graphics_fallback {
+        return None;
+    }
+    Some(finding("engine-graphics-fallback", Severity::Note, "The browser draws in software (slower) because the last session stopped right after it started on this graphics card.", format!("Browser graphics: {}", f.graphics_line), open("Open Browser settings", "tab:browser")))
 }
 
 /// The web engine crashed lately.
@@ -428,7 +439,7 @@ pub fn failed_services(f: &Facts) -> Vec<Finding> {
 
 /// Every rule, in the order they are listed.
 pub fn diagnose(f: &Facts) -> Vec<Finding> {
-    let single: [fn(&Facts) -> Option<Finding>; 22] = [
+    let single: [fn(&Facts) -> Option<Finding>; 23] = [
         cluster_stopped,
         node_ip_missing,
         unexpected_exposure,
@@ -436,6 +447,7 @@ pub fn diagnose(f: &Facts) -> Vec<Finding> {
         developer_mode_ending,
         vault_locked_with_waiting,
         engine_crashed,
+        engine_graphics_fallback,
         engine_camera,
         engine_microphone,
         no_sound,

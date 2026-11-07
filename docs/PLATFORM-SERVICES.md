@@ -245,9 +245,9 @@ Each Quick install item has a removal plan next to its install steps (`quickinst
 
 | Group | Always removed | Kept unless "also delete the data" |
 |---|---|---|
-| Cluster pods (Elasticsearch, OpenSearch, Prometheus, graph database, ClickHouse, Matrix, Gitea, SeaweedFS, RustFS, Lemonade, registry) | Deployment, Service (Prometheus: ConfigMap, ServiceAccount, its read-only ClusterRole and binding; Gitea: its record in installed services; Lemonade: the Models entry) | the volume claim and its retained volume folder, the Secret, the vault entries, the DASH connection (Gitea: the "Local Gitea" Git connection), the namespace where only this item lives |
+| Cluster pods (Elasticsearch, OpenSearch, Prometheus, graph database, ClickHouse, Matrix, Gitea, SeaweedFS, RustFS, Lemonade, Ollama in the cluster, registry) | Deployment, Service (Prometheus: ConfigMap, ServiceAccount, its read-only ClusterRole and binding; Gitea: its record in installed services; Lemonade and Ollama: the Models entry) | the volume claim and its retained volume folder, the Secret, the vault entries, the DASH connection (Gitea: the "Local Gitea" Git connection), the namespace where only this item lives |
 | k3s | the cluster is stopped, the k3s program, kubeconfig and log go | the folder `k3s-dev/data` (database and every volume); "also delete" removes the whole `k3s-dev` |
-| Programs (Node.js, Python, DuckDB, Claude Code, Copilot, ffmpeg, Ollama) | the program and its folder in the tools folder (Ollama: also the running server and `ollama-local` in Models) | Ollama's models folder |
+| Programs (Node.js, Python, DuckDB, Claude Code, Copilot, ffmpeg, and Ollama when it runs on the host) | the program and its folder in the tools folder (host Ollama: also the running server and `ollama-local` in Models) | the host Ollama's models folder |
 | Add-ons and drivers (browser audio and video, Mac Wi-Fi/Bluetooth/camera, firmware packs, extra firmware, GPU Vulkan/NVIDIA) | the add-on folder or driver pack, the device plugin, the CDI specs | downloaded vendor files (recovery image, NVIDIA `.run`, camera pieces) |
 | Sandboxes, Kokoro, voice pack | nothing without the tick: they are their own data | all of it |
 
@@ -256,6 +256,52 @@ Rules the runner enforces before the first change: kubernetes targets must be in
 Data safety: after an install (and when the Setup page refreshes) the volume bound to each item's claim is patched to `persistentVolumeReclaimPolicy: Retain`, because k3s' local-path class defaults to Delete. Deleting the data deletes the claim, then the retained volume object, then its folder under `k3s-dev/data/storage` (only a folder named for that volume).
 
 Chat: `quick_install_status` (read) and `quick_uninstall` (hard ask). Not verified on a real cluster; see `docs/project/test-plans/k3s-and-cluster.md`.
+
+## Ollama in the cluster (Quick install)
+
+Ollama is a pod now, like Lemonade (`quickinstall_ollama.rs`): namespace `iyakki-ai`, claim `ollama-data` (30 GB, kept when the item is removed:
+the Retain logic knows it), a ClusterIP Service, and the API published on this machine's loopback only at `127.0.0.1:11436` (11434 is a host
+Ollama, 11435 the older GPU Ollama, so a move can run both for a while). The pod is unprivileged (user 10001, no capabilities, no service
+account token; one init container hands the volume over), has a readiness probe and the limits in the table below. The image
+(`docker.io/ollama/ollama`, MIT) is pulled by the cluster at the person's click, pinned by tag; the digest field is empty until the first real
+pull is checked (the job logs the digest the cluster resolved). The item keeps its id `ollama` and its marker `quick-install/ollama.done`; the
+marker text starts with "in the cluster" for the cluster shape, and an older marker or the CLI catalogue record means the host.
+
+* **GPU:** the same mechanism as Lemonade: the Vulkan and NVIDIA GPU steps patch the Deployment `ollama` (`gpu_workloads::ollama_patch`: the
+  device plugin's resource limit, `OLLAMA_VULKAN=1`, the render group); nothing privileged is added. Removing the GPU step takes it out again.
+* **An Ollama on the host keeps working.** The Quick install page shows "Ollama runs on this machine's host" with two buttons. *Move into the
+  cluster* opens a review card (sizes, room, licence, what is kept): after the person agrees, the host models folder is copied into the claim
+  (`kubectl cp`; a copy, nothing is deleted from the host), the job checks that every model the host lists is now in the cluster, and only then
+  the shell points `ollama-local` at the cluster pod and stops the host server (a server IYAKKI did not start is left running). If the
+  folder is over 20 GB, or the data partition cannot hold a second copy plus 2 GB, the card says so and nothing starts; *Start fresh in the
+  cluster, keep host models where they are* is the other way (empty claim, host folder untouched, host server stopped after the cluster one
+  answers).
+* **Chat:** `ollama_status` (free: where it runs, its pod, limits) and `ollama_install` (asks every time; `how` = `cluster`, `move` or `fresh`).
+  Removing goes through `quick_uninstall` with the item `ollama`: the default keeps the claim; "also delete the data" deletes it (and the host
+  models folder a move left behind). Not verified on a real cluster; see `docs/project/test-plans/k3s-and-cluster.md`.
+
+## Resource limits and the idle profile
+
+Every Quick install pod has CPU and memory requests and limits (`quickinstall_resources.rs` is the table; a test compares each manifest with
+it; the item's popup shows the pod name, what it asks for, what it may use and the idle number). The warning in an install review adds the memory
+limits of the selected services and the installed ones and speaks when the total passes 60 % of the machine's memory.
+
+| Service (pod) | CPU asks / up to | Memory asks / up to | Idle memory, measured by the owner on 2026-11-06 |
+|---|---|---|---|
+| ClickHouse | 100m / 1 core | 512 MB / 1 GB | about 775 MB, and about 100 % of one core |
+| OpenSearch | 100m / 2 cores | 1 GB / 1.5 GB | about 990 MB |
+| Elasticsearch | 250m / 2 cores | 1 GB / 1.5 GB | about 925 MB |
+| Neo4j (graph database) | 100m / 2 cores | 640 MB / 1 GB | about 400 MB |
+| Prometheus | 100m / 0.5 core | 256 MB / 768 MB | about 190 MB |
+| Gitea | 100m / 1 core | 256 MB / 1 GB | about 180 MB |
+| Matrix, SeaweedFS, RustFS | 50m to 100m / 1 core | 128 to 256 MB / 512 MB to 1 GB | not measured |
+| Registry | 50m / 0.5 core | 64 MB / 512 MB | not measured |
+| Lemonade, Ollama (model servers) | 500m / 6 cores | 1 to 2 GB / 16 GB | not measured (a loaded model needs the memory) |
+
+ClickHouse used about a core while idle. Why it is busy is not claimed here (the System tile's "What is it busy with" aid is for that). The item
+writes no ClickHouse configuration of its own (no `max_server_memory_usage_to_ram_ratio`, no `background_pool_size`), so none was guessed:
+only the pod's CPU limit (1 core) bounds it. Whether the limits suit a real Mac mini (the cores a model server may take, the 16 GB ceiling) is to be
+checked on the machine.
 
 ## Adding a service
 

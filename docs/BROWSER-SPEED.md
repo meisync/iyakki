@@ -395,3 +395,48 @@ Status: compiles with the web toolchain. Real-hardware result: see the table bel
 Baseline on the Mac before the change (same video playing, load average about 10 because k3s and Elasticsearch were also running):
 web process 4094 ticks in 10 s (4.1 cores), of which 8 llvmpipe threads 2667 (2.7 cores), GStreamer software decode queue 860,
 `drm-engine-render` 0 ns.
+
+## Safe graphics mode (Settings -> Browser -> Graphics)
+
+Why: on a Lenovo 82WM (AMD Radeon 610M, 2560x1600) the whole computer froze about 20 seconds after the engine printed
+`graphics: hardware AMD Radeon 610M (radeonsi, ...) (BGRA read-back)`, with no kernel message and the session recorded as unclean. A
+MacBookPro14,1 (Intel Iris Plus 640) ran the same steps. The cause is **not known**; the suspect is the hardware picture path above (a
+GBM EGL display, dma-buf images, `glReadPixels`) on AMD. Until it is found, a computer must not freeze every time the browser opens.
+
+The setting (one per device, an administrator changes it; in chat `browser_graphics_get` / `browser_graphics_set`, which asks every
+time):
+
+| Choice | What the engine gets |
+| --- | --- |
+| Automatic (default) | the graphics card, and software by itself after a freeze (below) |
+| Software (safe) | `LIBGL_ALWAYS_SOFTWARE=1` and `LP_NUM_THREADS` (half the logical CPUs, the number measured above; a `lp:N` word in `web-tuning` still wins). The helper then logs `graphics: software requested, using shared memory pictures`: no EGL display on the render node, no dma-buf, no read-back |
+| Hardware | the graphics card always, even after a freeze; the engine log and the audit log say what happened. The one exception is an Intel card whose driver is not in this image (`force_software_gl`): software is the only way there |
+
+The `cpu` tuning word (`WEBKIT_SKIA_ENABLE_CPU_RENDERING`) is **not** part of Software: the measurements above show no gain from it, and
+nothing shows it matters for this freeze. It stays an experiment word.
+
+Automatic fall back (`crates/iyakki-agent/src/webgraphics.rs`, the decision is a pure function): at each engine start the last finished
+session is read from `sessions.tsv` (`iyakki_storage::crashlog::last_finished`) and the engine log (`<data>/log/engine.log`). The next
+start draws in software when that session
+
+1. did not end cleanly, and
+2. its last `graphics:` line in the engine log (between its start and this boot's start) is `graphics: hardware ...`, and
+3. its last sign of life (last kernel log line, last engine log line) is at most 10 minutes after that line.
+
+A clean shutdown, a power cut in a session where the engine never started, a session whose engine ran in software, and an unclean end
+more than 10 minutes after the engine started do **not** trigger it. A session is judged once (`judged_boot`). The decision and its
+reason are written to the engine log (`graphics mode: software (...)`) and the audit log (`browser.graphics`), the person gets a short
+toast and the full sentence in the browser's status line: "The last session stopped right after the browser started on this graphics
+card, so the browser now draws in software (slower). Settings, Browser, Graphics changes this."
+
+Memory (`<data>/web-profile/web-graphics-state.json`, next to `web-graphics.json`): the fall back is kept per graphics card
+(`vendor:device`, for example `1002:1681`). It is forgotten when the person changes the setting, presses **Try hardware again**, or a
+later session that started on the card ends cleanly. After a clean session in software the person is **offered** another try (a toast
+and the button); nothing switches back by itself. Both files are versioned (`schema`); a damaged file is moved to `<file>.corrupt-<time>`,
+a file from a newer IYAKKI is left as it is and cannot be changed.
+
+Limits, said plainly: the check can only see a freeze that the clock and the logs show; an engine started with an unset clock gives no
+evidence; the card id is the machine's cards together, so changing an external card counts as a new card. The mode is applied only on the
+image (the helper's own environment); on a desktop window nothing changes.
+
+Verify on the Lenovo: `docs/project/test-plans/pc-uefi-amd.md`, step EXTRA-FREEZE-SAFE.

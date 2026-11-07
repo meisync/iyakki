@@ -64,7 +64,7 @@ fn with_one_cluster_no_popup_shows_a_switcher_and_the_deploy_text_names_this_mac
     }
     assert_eq!(a.setup.deploy_text(Item::Lemonade).unwrap(), "Deploy Lemonade to cluster \"This machine\" (local)");
     assert_eq!(a.setup.deploy_text(Item::Node), None);
-    assert_eq!(a.setup.deploy_text(Item::Ollama), None, "Ollama installs on this machine, not into a cluster");
+    assert_eq!(a.setup.deploy_text(Item::Ollama).unwrap(), "Deploy Ollama to cluster \"This machine\" (local)", "Ollama is a pod in the cluster now, like Lemonade");
 }
 
 #[test]

@@ -138,7 +138,10 @@ Repeat it before anything else on this machine:
 - [ ] EXTRA-FREEZE Repeat the freeze: boot the image, make sure there is no network (unplug Ethernet, Wi-Fi off), open the browser tile, open youtube.com, wait 60 seconds. -> expect the page shows an error or a retry message and the screen keeps responding; if it freezes, **photograph the screen** (the whole screen, including any clock or cursor), note how many seconds after opening it froze, and whether the mouse still moved; if it fails, copy: after the power cycle, `iyakki dev diag` output, the newest `kmsg-<boot-id>.log` and `engine.log` from /var/lib/iyakki/log, and `iyakki dev logs --system`.
   Result: ______ (pass / fail / note)
 
-(This extra step has no row ID and is not part of the 567-row count.)
+- [ ] EXTRA-FREEZE-SAFE Safe graphics mode (Settings -> Browser -> Graphics is on Automatic): boot the image on the laptop and open the browser tile, then open any page in the full engine (for example youtube.com). The browser starts on the graphics card. -> expect it to run, or the computer to freeze. If it freezes, power-cycle (hold the power button), sign in and open the browser again: expect a message at the bottom of the screen saying "The last session stopped right after the browser started on this graphics card, so the browser now draws in software (slower). Settings, Browser, Graphics changes this." and pages that load in software. Then open Settings -> Browser: the Graphics row says "Automatic: software because the last session stopped right after the browser started on this graphics card" and has a "Try hardware again" button. Restart the laptop cleanly (power off from the menu) and open the browser again: the row still says software (not forced back) and, after that clean session, offers to try the card again. Also ask the chat "how is the browser drawing?" (browser_graphics_get) and "switch the browser to software" (it must ask on a card each time). Attach `engine.log` (look for the `graphics mode:` and `graphics: hardware` lines) and `sessions.tsv` from /var/lib/iyakki/log, and the audit line `browser.graphics`.
+  Result: ______ (pass / fail / note)
+
+(These extra steps have no row ID and are not part of the 567-row count.)
 """
 
 PLANS = collections.OrderedDict()

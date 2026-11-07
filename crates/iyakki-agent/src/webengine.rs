@@ -365,19 +365,19 @@ pub fn helper_env(profile: &Path) -> Option<Vec<(String, String)>> {
     }
     let mut v = session_env(profile);
     v.retain(|(k, _)| !k.starts_with("WLR_") && !k.starts_with("LIBSEAT") && k != "SEATD_VTBOUND");
-    let vendors: Vec<String> = (0..4).filter_map(|i| std::fs::read_to_string(format!("/sys/class/drm/card{i}/device/vendor")).ok()).collect();
-    let marker = std::fs::read_to_string(GL_MARKER).unwrap_or_default();
-    let software = force_software_gl(&vendors, &marker);
-    if software {
-        v.push(("LIBGL_ALWAYS_SOFTWARE".into(), "1".into()));
-    }
+    // safe graphics mode (webgraphics.rs): the person's setting, and the fall back to software after a freeze on this card
+    let data = crate::avaddon::data_of_profile(profile);
+    let software = match data {
+        Some(d) => crate::webgraphics::apply(d).software,
+        None => force_software_gl(&drm_gpus().iter().map(|g| g.0.clone()).collect::<Vec<_>>(), &std::fs::read_to_string(GL_MARKER).unwrap_or_default()),
+    };
     // rendering experiments an administrator switches on by writing a word into <data>/web-profile/web-tuning (docs/BROWSER-SPEED.md)
     let mode = profile.parent().and_then(|d| std::fs::read_to_string(d.join("web-tuning")).ok()).unwrap_or_default();
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
     let tuned = tuning_env(&mode, cores);
     // Mesa's software renderer starts one thread per logical CPU by default: half of them unless the web-tuning file says `lp:N`
-    if software && !tuned.iter().any(|(k, _)| k == "LP_NUM_THREADS") {
-        v.push(("LP_NUM_THREADS".into(), llvmpipe_threads(cores).to_string()));
+    if software {
+        v.extend(crate::webgraphics::software_env(cores, &tuned));
     }
     v.extend(tuned);
     // sound: where the sound output is a T2 Mac's, the engine plays through its own PCM (softvol.rs), see web_audio_env
@@ -506,6 +506,16 @@ pub fn filter_env(profile: &Path) -> Vec<(String, String)> {
 
 /// Written by `web-post-build.sh`: `intel` when Mesa was built with an Intel GPU driver (iris or crocus), `software` when not.
 pub const GL_MARKER: &str = "/usr/share/iyakki/web-gl-drivers";
+
+/// `(vendor, device)` file contents of the graphics cards (`/sys/class/drm/card0..3/device/`), as the files hold them (`0x1002`).
+pub fn drm_gpus() -> Vec<(String, String)> {
+    (0..4)
+        .filter_map(|i| {
+            let v = std::fs::read_to_string(format!("/sys/class/drm/card{i}/device/vendor")).ok()?;
+            Some((v, std::fs::read_to_string(format!("/sys/class/drm/card{i}/device/device")).unwrap_or_default()))
+        })
+        .collect()
+}
 
 /// Mesa must be told to use llvmpipe when an Intel GPU is present but this image has no Intel driver in it: otherwise EGL finds the
 /// render node, finds no driver for it and may give up instead of falling back (the Haswell Mac mini on the default web image).

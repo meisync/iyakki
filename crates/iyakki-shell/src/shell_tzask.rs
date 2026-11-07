@@ -62,7 +62,10 @@ impl Shell {
                     t.zone_auto = false;
                     t.zone = "UTC".into();
                 });
-                iyakki_agent::clock::set_chosen_zone("UTC");
+                // (the zone of the whole process: tests leave it alone, other tests compare clock text)
+                if !cfg!(test) {
+                    iyakki_agent::clock::set_chosen_zone("UTC");
+                }
                 self.env.audit.record(&user, "time.zone.set", "UTC");
                 self.say_info("The time zone is UTC. Settings, Time can change it.");
             }

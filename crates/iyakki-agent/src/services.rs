@@ -399,11 +399,34 @@ impl Services {
         let url = url.trim_end_matches('/');
         let mut st = self.settings.lock().unwrap();
         use crate::providers::Kind;
+        // an `ollama-local` that points at the cluster's Ollama is not pulled back to a host one that happens to answer
+        let cluster_url = format!(":{}", crate::quickinstall::ollama_cluster::LOCAL_PORT);
+        if st.get().provider("ollama-local").is_some_and(|p| p.base_url.as_deref().is_some_and(|u| u.trim_end_matches('/').ends_with(&cluster_url))) && !url.ends_with(&cluster_url) {
+            return;
+        }
         let known = st.get().providers.iter().any(|p| p.kind == Kind::Ollama && p.base_url.as_deref().map(|u| u.trim_end_matches('/')) == Some(url));
         if known {
             return;
         }
         let mut p = ProviderCfg::new("ollama-local", Kind::Ollama);
+        p.base_url = Some(url.to_string());
+        let _ = st.upsert_provider(p);
+    }
+
+    /// Point `ollama-local` at the Ollama that runs in the cluster (`url` on its loopback port): the entry the person may already have
+    /// (the host one) keeps its other settings and only gets the new address; when there is none it is added. Never touches another entry.
+    pub fn use_cluster_ollama(&self, url: &str) {
+        use crate::providers::Kind;
+        let url = url.trim_end_matches('/');
+        let mut st = self.settings.lock().unwrap();
+        let mut p = match st.get().provider("ollama-local") {
+            Some(p) if p.kind == Kind::Ollama => p.clone(),
+            Some(_) => return,
+            None => ProviderCfg::new("ollama-local", Kind::Ollama),
+        };
+        if p.base_url.as_deref().map(|u| u.trim_end_matches('/')) == Some(url) {
+            return;
+        }
         p.base_url = Some(url.to_string());
         let _ = st.upsert_provider(p);
     }
@@ -1938,6 +1961,28 @@ mod tests {
         assert_eq!(ps.len(), 1);
         assert_eq!((ps[0].id.as_str(), ps[0].base_url.as_deref()), ("ollama-local", Some("http://127.0.0.1:11434")));
         assert!(st.get().chat.is_none(), "the chat model is the person's choice");
+    }
+
+    #[test]
+    fn the_cluster_ollama_takes_over_ollama_local_and_a_host_one_is_not_pulled_back() {
+        let (s, _, _) = svc("clusterollama", none);
+        s.use_local_ollama("http://127.0.0.1:11434");
+        s.use_cluster_ollama("http://127.0.0.1:11436");
+        s.use_cluster_ollama("http://127.0.0.1:11436/");
+        let url = || {
+            let st = s.settings.lock().unwrap();
+            let ps: Vec<_> = st.get().providers.iter().filter(|p| p.id == "ollama-local").map(|p| p.base_url.clone()).collect();
+            assert_eq!(ps.len(), 1, "one entry, repointed");
+            ps[0].clone()
+        };
+        assert_eq!(url().as_deref(), Some("http://127.0.0.1:11436"));
+        // a host Ollama that still answers on 11434 does not take the entry back
+        s.use_local_ollama("http://127.0.0.1:11434");
+        assert_eq!(url().as_deref(), Some("http://127.0.0.1:11436"));
+        // with no entry at all it is added
+        let (t, _, _) = svc("clusterollama2", none);
+        t.use_cluster_ollama("http://127.0.0.1:11436");
+        assert!(t.settings.lock().unwrap().get().providers.iter().any(|p| p.id == "ollama-local"));
     }
 
     #[test]

@@ -263,6 +263,7 @@ spec:
               cpu: 100m
               memory: {mreq}
             limits:
+              cpu: \"1\"
               memory: {mlim}
           readinessProbe:
             tcpSocket:

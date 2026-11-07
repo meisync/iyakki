@@ -444,3 +444,16 @@ fn a_name_that_cannot_resolve_returns_within_the_wait() {
     let _ = resolves("name.invalid", std::time::Duration::from_millis(1500));
     assert!(t.elapsed() < std::time::Duration::from_secs(3));
 }
+
+#[test]
+fn a_software_fall_back_of_the_browser_graphics_is_a_note_with_the_browser_settings() {
+    let mut f = fine();
+    f.graphics_line = "Automatic: hardware".into();
+    assert!(engine_graphics_fallback(&f).is_none() && diagnose(&f).is_empty(), "hardware is not a finding");
+    f.graphics_fallback = true;
+    f.graphics_line = "Automatic: software because the last session stopped right after the browser started on this graphics card".into();
+    let x = engine_graphics_fallback(&f).expect("a note");
+    assert_eq!((x.severity, x.fix.as_ref().unwrap().action.clone()), (Severity::Note, Action::Settings("tab:browser")));
+    assert!(x.text.contains("software") && x.detail.starts_with("Browser graphics: Automatic: software"));
+    assert_eq!(ids(&f), vec!["engine-graphics-fallback"]);
+}

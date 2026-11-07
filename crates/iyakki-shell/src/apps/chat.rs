@@ -925,7 +925,9 @@ impl ChatApp {
             }
             if cx.session.policy.manage_settings {
                 system.push_str(iyakki_agent::sshtunneltools::PROMPT_RULE);
+                system.push_str(iyakki_agent::webgraphicstools::PROMPT_RULE);
                 system.push_str(iyakki_agent::objectstoragetools::PROMPT_RULE);
+                system.push_str(iyakki_agent::ollamatools::PROMPT_RULE);
                 system.push_str(iyakki_agent::quickuninstalltools::PROMPT_RULE);
                 system.push_str(iyakki_agent::sharedvaulttools::PROMPT_RULE);
                 system.push_str(iyakki_agent::vpntools::PROMPT_RULE);
@@ -1035,9 +1037,22 @@ impl ChatApp {
         } else {
             tools_arc
         };
+        // the browser's graphics mode: reading is free, changing asks every time (administrators only: it is a device setting)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            Arc::new(iyakki_agent::webgraphicstools::GraphicsTools::new(tools_arc, Arc::new(iyakki_agent::webgraphicstools::RealBackend { data: cx.services.dir().to_path_buf(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        } else {
+            tools_arc
+        };
         // object storage (SeaweedFS, RustFS): status is free, install and remove ask (administrators only: they change the cluster)
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
             Arc::new(iyakki_agent::objectstoragetools::ObjectStorageTools::new(tools_arc, Arc::new(iyakki_agent::objectstoragetools::RealBackend { svc: cx.services.clone(), user: cx.session.user.clone() })))
+        } else {
+            tools_arc
+        };
+        // Ollama in the cluster (install, move from the host): status is free, install and move ask (administrators only)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
+            Arc::new(iyakki_agent::ollamatools::OllamaTools::new(tools_arc, Arc::new(iyakki_agent::ollamatools::RealBackend { svc: cx.services.clone(), user: cx.session.user.clone() })))
         } else {
             tools_arc
         };

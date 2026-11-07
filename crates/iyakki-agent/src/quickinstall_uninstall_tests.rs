@@ -430,3 +430,74 @@ fn a_reinstall_reuses_the_same_claim_with_the_same_size() {
         }
     }
 }
+
+// ------------------------------------------------------------------------------------------------ Ollama in the cluster
+
+#[test]
+fn ollama_in_the_cluster_keeps_the_models_claim_by_default_and_deletes_it_with_the_data() {
+    let d = tmp("ollama-cluster");
+    mark_done(&d, Item::Ollama, &ollama_cluster::marker_detail(1, "")).unwrap();
+    let pl = plan(Item::Ollama, &ctx(&d));
+    for s in &pl.steps {
+        check_step(s, &d).unwrap();
+    }
+    let kube_names: Vec<String> = pl.steps.iter().filter_map(|s| match &s.op { Op::Kube { kind, name, .. } => Some(format!("{kind}/{name}")), Op::Claim { name, .. } => Some(format!("claim/{name}")), _ => None }).collect();
+    assert!(kube_names.contains(&"deployment/ollama".to_string()) && kube_names.contains(&"service/ollama".to_string()) && kube_names.contains(&"claim/ollama-data".to_string()));
+    assert!(pl.steps.iter().any(|s| s.op == Op::Hook(Hook::OllamaProvider) && !s.data), "ollama-local leaves Models");
+    assert!(!pl.steps.iter().any(|s| s.op == Op::Hook(Hook::Cli("ollama"))), "no host program is touched for the cluster shape");
+    let r = pl.review(false);
+    assert!(r.goes.iter().any(|g| g.contains("Deployment ollama")) && r.stays.iter().any(|s| s.contains("ollama-data") && s.contains("kept")), "{r:?}");
+    let r = pl.review(true);
+    assert!(r.data.iter().any(|g| g.contains("ollama-data")), "{r:?}");
+    assert_eq!(pl.claim_gb, 30);
+    assert!(pl.always_stays.iter().any(|s| s.contains("iyakki-ai")), "the shared namespace stays");
+}
+
+#[test]
+fn a_moved_ollama_offers_the_earlier_host_models_folder_only_as_data_and_never_by_default() {
+    let d = tmp("ollama-moved");
+    std::fs::create_dir_all(d.join("ollama/models/blobs")).unwrap();
+    std::fs::write(d.join("ollama/models/blobs/x"), vec![0u8; 4096]).unwrap();
+    mark_done(&d, Item::Ollama, &ollama_cluster::marker_detail(1, "; the host models were copied in (the host folder is kept)")).unwrap();
+    let pl = plan(Item::Ollama, &ctx(&d));
+    let host = pl.steps.iter().find(|s| matches!(&s.op, Op::Path { .. })).expect("the host folder step");
+    assert!(host.data, "the earlier folder goes only with the data");
+    check_step(host, &d).unwrap();
+    assert!(pl.review(false).stays.iter().any(|s| s.contains("earlier host Ollama")));
+    assert!(pl.notes.iter().any(|n| n.contains("stays installed")));
+}
+
+#[test]
+fn an_ollama_on_the_host_still_has_its_old_removal_plan() {
+    let d = tmp("ollama-host");
+    mark_done(&d, Item::Ollama, "version 0.5.1").unwrap();
+    let pl = plan(Item::Ollama, &ctx(&d));
+    assert!(pl.steps.iter().any(|s| s.op == Op::Hook(Hook::Cli("ollama"))) && pl.steps.iter().any(|s| s.op == Op::Hook(Hook::OllamaServer)));
+    assert!(pl.steps.iter().any(|s| s.data && matches!(&s.op, Op::Path { .. })));
+    assert!(!pl.steps.iter().any(|s| matches!(&s.op, Op::Claim { .. })));
+}
+
+#[test]
+fn the_gpu_removal_also_takes_the_gpu_out_of_the_ollama_deployment() {
+    let d = tmp("ollama-gpu");
+    for item in [Item::GpuVulkan, Item::GpuNvidia] {
+        let pl = plan(item, &ctx(&d));
+        assert!(pl.steps.iter().any(|s| s.op == Op::Hook(Hook::OllamaUnpatch)), "{item:?}");
+        for s in &pl.steps {
+            check_step(s, &d).unwrap();
+        }
+    }
+}
+
+#[test]
+fn the_ollama_claim_is_retained_whichever_shape_the_marker_says() {
+    assert_eq!(claims_of(Item::Ollama), vec![("iyakki-ai", "ollama-data".to_string())]);
+    let mut calls: Vec<String> = vec![];
+    let mut k = |a: &[&str]| -> Result<String, String> {
+        calls.push(a.join(" "));
+        Ok(if a.join(" ").contains("spec.volumeName") { "pvc-9".into() } else { "Delete".into() })
+    };
+    let done = retain_claims(&mut k, &claims_of(Item::Ollama));
+    assert_eq!(done, ["pvc-9"]);
+    assert!(calls.iter().any(|c| c.contains("-n iyakki-ai get pvc ollama-data")) && calls.iter().any(|c| c.contains("patch pv pvc-9") && c.contains("Retain")));
+}

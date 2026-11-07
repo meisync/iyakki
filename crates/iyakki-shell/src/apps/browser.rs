@@ -2596,6 +2596,19 @@ impl BrowserApp {
             }
         };
         self.share_devices("", 0, cx);
+        // safe graphics mode: what the engine start decided about the graphics card (a fall back after a freeze) is told here
+        let mut graphics_status = None;
+        for p in iyakki_agent::webgraphics::take_pending() {
+            if let Some(a) = &p.audit {
+                cx.audit.record(&cx.session.user, "browser.graphics", a);
+            }
+            if p.status.is_some() {
+                graphics_status = p.status;
+            }
+            if let Some(t) = &p.toast {
+                crate::ui::clipboard::toast(t);
+            }
+        }
         match Full::start(start) {
             Ok(mut f) => {
                 f.navigate(&url);
@@ -2606,7 +2619,7 @@ impl BrowserApp {
                     self.show(page, How::Push);
                 }
                 cx.audit.record(&cx.session.user, "browser.full", &host);
-                self.status = Some((format!("Opening {host} in the full web engine (F or Esc, then Esc again, goes back to the built-in reader)…"), true));
+                self.status = Some((graphics_status.unwrap_or_else(|| format!("Opening {host} in the full web engine (F or Esc, then Esc again, goes back to the built-in reader)…")), true));
             }
             Err(e) => self.status = Some((format!("The full web engine could not be started: {e}"), false)),
         }

@@ -139,6 +139,10 @@ impl GpuEnv for Fake {
         if line.contains(" logs ") && line.contains("gpu-smoke") {
             return out(0, &self.pod_log.clone());
         }
+        // Ollama is not in the cluster in these tests (its GPU patch has its own tests in quickinstall::ollama_cluster_tests)
+        if line.contains("get deployment ollama") {
+            return out(1, "");
+        }
         if line.contains("get deployment lemonade") {
             return out(if self.lemonade { 0 } else { 1 }, "deployment.apps/lemonade");
         }

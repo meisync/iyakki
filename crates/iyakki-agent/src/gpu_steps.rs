@@ -136,6 +136,28 @@ fn lemonade_deployed(env: &mut dyn StepEnv) -> bool {
     }
 }
 
+/// Is the Ollama Deployment of Quick install in the cluster?
+fn ollama_deployed(env: &mut dyn StepEnv) -> bool {
+    match gpu_env(env) {
+        Ok(g) => g.kubectl(&["-n", wl::NAMESPACE, "get", "deployment", crate::quickinstall::ollama_cluster::NAME, "-o", "name"]).code == Some(0),
+        Err(_) => false,
+    }
+}
+
+/// Give the Ollama Deployment the GPU the same way Lemonade gets it (a patch; a failure is a note, not an error).
+fn patch_ollama(env: &mut dyn StepEnv, g: wl::Gpu, gid: Option<u32>) {
+    if !ollama_deployed(env) {
+        return;
+    }
+    let Ok(ge) = gpu_env(env) else { return };
+    let out = ge.kubectl(&["-n", wl::NAMESPACE, "patch", "deployment", crate::quickinstall::ollama_cluster::NAME, "--type", "strategic", "-p", &wl::ollama_patch(g, gid)]);
+    if out.code == Some(0) {
+        env.say(&format!("  Ollama got {} too; it restarts", g.resource()));
+    } else {
+        env.say(&format!("  note: Ollama could not be given the GPU: {}", out.combined().trim()));
+    }
+}
+
 // ------------------------------------------------------------------------------------------------ stage 1
 
 /// Make the DRM render nodes openable by an unprivileged user (mode 0666, as render nodes are on most systems: the kernel checks the GPU
@@ -217,6 +239,7 @@ pub fn run_vulkan(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Resu
     } else {
         env.say("  Lemonade is not installed; install it from Store -> Setup and run this step again to give it the GPU");
     }
+    patch_ollama(env, wl::Gpu::Vulkan, gid);
     let detail = format!("{} ({}); pods ask for {}: 1", usable[0].name, usable[0].render.clone().unwrap_or_default(), wl::GPU_RESOURCE);
     env.mark(Item::GpuVulkan, &detail)?;
     env.say(&format!("[6/6] done: {detail}"));
@@ -384,6 +407,7 @@ pub fn run_nvidia(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Resu
             env.say(&format!("  note: Lemonade could not be given the GPU: {}", out.combined().trim()));
         }
     }
+    patch_ollama(env, wl::Gpu::Nvidia, None);
     let detail = format!("driver {} · {} · pods request nvidia.com/gpu", nv::NVIDIA_VERSION, seen);
     env.mark(Item::GpuNvidia, &detail)?;
     env.say(&format!("[9/9] done: {detail}"));

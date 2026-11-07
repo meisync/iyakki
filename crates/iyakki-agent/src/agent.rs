@@ -187,12 +187,18 @@ pub(crate) fn cost_cents(tokens: u64, price_cents_per_mtok: u32) -> f64 {
 pub fn hard_ask(name: &str, args: &Value) -> Option<&'static str> {
     let text = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("").to_lowercase();
     let argv: Vec<String> = args.get("args").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_lowercase).collect()).unwrap_or_default();
+    // reading the browser's graphics mode is free (the `browser_` prefix below is for site interaction)
+    if name == "browser_graphics_get" {
+        return None;
+    }
     match name {
         "vault_request" | "screen_capture" => return Some("secrets and the screen are never released automatically"),
         "camera_photo" | "camera_record_start" | "camera_passport" => return Some("the camera is private: it always asks (Allow for 5 minutes at most)"),
         "ssh_tunnel_add" | "ssh_tunnel_edit" | "ssh_tunnel_enable" | "ssh_tunnel_disable" | "ssh_tunnel_delete" => return Some("changing SSH tunnels (who can reach what through this device) always asks"),
+        "browser_graphics_set" => return Some("changing how the browser draws can freeze the computer when it starts, so it always asks"),
         "quick_uninstall" => return Some("removing a Quick install item (it can delete data) always asks, with what goes and what stays on the card"),
         "object_storage_install" | "object_storage_remove" => return Some("installing or removing object storage (it pulls an image, and removing can delete data) always asks"),
+        "ollama_install" => return Some("installing Ollama in the cluster, or moving the host Ollama into it (it pulls an image and copies models), always asks"),
         "rag_sources_add_folder" => return Some("adding a folder to the documents reads many files into the index, so it always asks, with the folder and the file count on the card"),
         "message_send" => return Some("sending a message to another person or service always asks, with the text on the card"),
         "shared_vault_provider_set" => return Some("choosing which cryptography keeps the shared vault always asks"),

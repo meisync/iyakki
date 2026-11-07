@@ -451,6 +451,10 @@ impl Setup {
         } else {
             v.push(Btn { label: card.label.clone(), accent: if card.act == Act::Retry { ERR } else { ACCENT }, ev: Some(Event::Tab(PRIMARY + idx)) });
         }
+        if card.item == Item::Ollama && self.ollama_on_host() && admin && self.running_job(Item::Ollama).is_none() {
+            v.push(Btn { label: "Move into the cluster".into(), accent: ACCENT, ev: Some(Event::Tab(OLLAMA_MOVE)) });
+            v.push(Btn { label: "Start fresh in the cluster, keep host models where they are".into(), accent: MUTED, ev: Some(Event::Tab(OLLAMA_FRESH)) });
+        }
         if card.item == Item::VoicePack && matches!(card.state, CardState::Installed | CardState::Earlier) && admin {
             v.push(Btn { label: "Remove (undo)".into(), accent: ERR, ev: Some(Event::Tab(REMOVE + idx)) });
         }
@@ -535,6 +539,14 @@ impl Setup {
         }
         if item.min_ram_mb() > 0 {
             row(g, &mut v, "Memory", &format!("about {} GB or more", item.min_ram_mb().div_ceil(1024)), MUTED);
+        }
+        // what the pod asks for and may use (the manifest carries the same numbers), and what was measured while it was idle
+        if let Some(r) = qi::resources::of(item) {
+            if !(item == Item::Ollama && self.ollama_on_host()) {
+                for (k, t) in r.lines() {
+                    row(g, &mut v, &k, &t, MUTED);
+                }
+            }
         }
         for (t, bad) in &card.notes {
             v.push(Line::Gap(6.0 * s));
