@@ -547,7 +547,7 @@ fn settings_storage_and_the_file_picker_lead_to_the_drives() {
     let mut p = Role::User.template();
     p.fs_read = vec![home.display().to_string()];
     p.fs_write = vec![];
-    let scope = crate::filepicker::Scope::new("amy", &p, iyakki_agent::scope::FileRoots::with_home(&p, "amy", &base, home.clone()));
+    let scope = crate::filepicker::scope_for("amy", &p, iyakki_agent::scope::FileRoots::with_home(&p, "amy", &base, home.clone()));
     let mut pk = crate::filepicker::FilePicker::new(crate::filepicker::PathKind::File, &[], "Choose", &home.to_string_lossy(), scope);
     let drives = Event::Tab(crate::filepicker::TAB_BASE + 7);
     pk.handle_event(&drives);
@@ -565,7 +565,7 @@ fn the_pickers_drives_button_goes_to_the_open_drives_of_the_account_and_is_drawn
     let mut p = Role::User.template();
     p.fs_read = vec![home.display().to_string()];
     p.fs_write = vec![];
-    let mk = |p: &Policy| crate::filepicker::Scope::new("amy", p, iyakki_agent::scope::FileRoots::with_home(p, "amy", &base, home.clone()));
+    let mk = |p: &Policy| crate::filepicker::scope_for("amy", p, iyakki_agent::scope::FileRoots::with_home(p, "amy", &base, home.clone()));
     let drives = Event::Tab(crate::filepicker::TAB_BASE + 7);
     // an open drive and the right to read the folder: the picker goes there
     let mut pk = crate::filepicker::FilePicker::new(crate::filepicker::PathKind::File, &[], "Choose", &home.to_string_lossy(), mk(&p));

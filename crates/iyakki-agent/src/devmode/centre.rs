@@ -236,6 +236,25 @@ impl Centre {
         self.dm.data_dir()
     }
 
+    /// The text of `/etc/iyakki-release` this engine judges versions by.
+    pub fn release_text(&self) -> &str {
+        &self.release
+    }
+
+    /// The boot partition opened read-only, for the checks the component apply makes (its files, the base of a payload).
+    /// Refuses on a device whose data folder is only RAM, and on a boot partition that is not this install's (the real mount only
+    /// finds the IYAKKI-BOOT volume on the data volume's own disk) or does not hold an IYAKKI boot menu.
+    pub fn boot_read(&self) -> Result<up::BootVol, String> {
+        if self.volatile {
+            return Err("this device has no persistent IYAKKI-DATA volume (the session is kept in RAM): a system update could not keep the previous version".into());
+        }
+        let vol = self.boot.open(false).map_err(|e| format!("the boot partition of this install could not be reached: {e}"))?;
+        if up::find_ci(&vol.root, "boot/grub/grub.cfg").is_none() {
+            return Err("the boot volume found does not hold an IYAKKI boot menu, so it is not treated as this install's".into());
+        }
+        Ok(vol)
+    }
+
     fn with_env<T>(&self, f: impl FnOnce(&up::Env) -> T) -> T {
         let data = self.dm.data_dir().to_path_buf();
         let free = || self.data_free.unwrap_or_else(|| super::debug::statvfs(&data).1);
@@ -381,7 +400,13 @@ impl Centre {
             (cfg, run)
         };
         if run.on_disk() == pver {
-            return Err(format!("the boot partition already holds {pver}"));
+            // the same version string is not enough to call it done: a component update keeps the release label, so the kept files differ
+            // from the ones on the partition while the version is the same
+            let vol = self.boot.open(false)?;
+            let holds = [("boot/bzImage", "bzImage"), ("boot/initrd", "initrd")].iter().all(|(rel, name)| up::find_ci(&vol.root, rel).and_then(|p| files::sha256_file(&p).ok()).is_some_and(|h| files::sha256_file(&pdir.join(name)).is_ok_and(|k| k == h)));
+            if holds {
+                return Err(format!("the boot partition already holds {pver}"));
+            }
         }
         // the small files of the payload are made beside the staging folder; the kernel and initramfs are read from boot-prev
         let small = self.dm.data_dir().join("boot-rollback");

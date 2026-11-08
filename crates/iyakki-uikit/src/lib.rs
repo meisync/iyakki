@@ -3,10 +3,13 @@
 //! and the context menu ([`ctxmenu`]). No `iyakki-*` dependency: tile crates build on this and never on the agent.
 //! `iyakki-shell` re-exports every module under its old path (`crate::gfx`, `crate::ui` ...), so tiles compile unchanged.
 
+pub mod blink;
 pub mod card;
 pub mod controls;
 pub mod ctxmenu;
+pub mod filepicker;
 pub mod fx;
+pub mod ide_chrome;
 pub mod gfx;
 pub mod keys;
 pub mod links;
@@ -22,3 +25,4 @@ pub mod theme;
 pub mod tooltip;
 pub mod ui;
 pub mod uisize;
+pub mod widgets;

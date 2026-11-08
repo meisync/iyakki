@@ -1,0 +1,7 @@
+old test path	new test path
+iyakki-shell::apps::calendar::tests::an_event_is_added_with_the_form_shows_in_the_plan_repeats_and_is_deleted_after_asking	iyakki-tile-calendar::tests::an_event_is_added_with_the_form_shows_in_the_plan_repeats_and_is_deleted_after_asking
+iyakki-shell::apps::calendar::tests::moving_around_the_month_selects_days_and_changes_months_correctly	iyakki-tile-calendar::tests::moving_around_the_month_selects_days_and_changes_months_correctly
+iyakki-shell::apps::calendar::tests::the_calendar_can_show_or_hide_the_alarm_schedule_and_alarms_are_set_switched_and_deleted_on_the_clock_tab	iyakki-tile-calendar::tests::the_calendar_can_show_or_hide_the_alarm_schedule_and_alarms_are_set_switched_and_deleted_on_the_clock_tab
+iyakki-shell::apps::ide_chrome::tests::densities_step_and_scale_in_order	iyakki-uikit::ide_chrome::tests::densities_step_and_scale_in_order
+iyakki-shell::apps::ide_chrome::tests::muted_and_dim_text_reads_at_4_5_to_1_on_the_panel	iyakki-uikit::ide_chrome::tests::muted_and_dim_text_reads_at_4_5_to_1_on_the_panel
+iyakki-shell::apps::ide_chrome::tests::pictures_follow_the_density_between_14_and_18_px_and_read_at_4_5_to_1	iyakki-uikit::ide_chrome::tests::pictures_follow_the_density_between_14_and_18_px_and_read_at_4_5_to_1

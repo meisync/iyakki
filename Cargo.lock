@@ -2376,6 +2376,9 @@ dependencies = [
  "iyakki-schema",
  "iyakki-sec",
  "iyakki-storage",
+ "iyakki-tile-api",
+ "iyakki-tile-calendar",
+ "iyakki-tile-usage",
  "iyakki-uikit",
  "iyakki-usb",
  "iyakki-vpn",
@@ -2438,6 +2441,21 @@ name = "iyakki-tile-abi"
 version = "0.1.0-alpha.1"
 
 [[package]]
+name = "iyakki-tile-api"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-uikit",
+]
+
+[[package]]
+name = "iyakki-tile-calendar"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-tile-api",
+ "iyakki-uikit",
+]
+
+[[package]]
 name = "iyakki-tile-example"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -2453,6 +2471,14 @@ dependencies = [
  "iyakki-tile-abi",
  "iyakki-vfs",
  "iyakki-wasm",
+]
+
+[[package]]
+name = "iyakki-tile-usage"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-tile-api",
+ "iyakki-uikit",
 ]
 
 [[package]]

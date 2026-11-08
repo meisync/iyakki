@@ -128,6 +128,9 @@ pub struct Full {
     started: Instant,
     ready: bool,
     pub gone: Option<String>,
+    /// The helper died before it was ready, after choosing a graphics card route (`webgraphics::died_at_start`): the browser falls back
+    /// to software drawing for this card and starts the engine again, once.
+    pub crashed_at_start: bool,
     notes: Vec<Note>,
     visible: bool,
     pub frames: u64,
@@ -235,6 +238,7 @@ impl Full {
             zoom_sent: 100,
             started: Instant::now(),
             ready: false,
+            crashed_at_start: false,
             gone: None,
             notes: Vec::new(),
             visible: true,
@@ -576,6 +580,8 @@ impl Full {
                 }
                 WvEvent::Exited(why) => {
                     iyakki_agent::enginelog::keep(&format!("the helper stopped: {why}"));
+                    let log: Vec<String> = self.log.iter().cloned().collect();
+                    self.crashed_at_start = iyakki_agent::webgraphics::died_at_start(&log, &why, self.ready);
                     self.gone = Some(why.clone());
                     self.notes.push(Note::Gone(why));
                     self.redraw = true;

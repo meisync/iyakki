@@ -5,7 +5,8 @@
 //! files into the inputs the existing machinery takes: an update payload (`update.json` + `boot/...`, what `dev update` and the Update
 //! centre read) for the boot partition's parts, and a patch pack (`IYPATCH1`) for the parts that are files of the running system.
 //!
-//! **Nothing here applies anything to a running system.** The last step is "verified and staged, here is the plan".
+//! **Nothing here applies anything to a running system.** The last step is "verified and staged, here is the plan". Applying is
+//! `compapply.rs`; the record of what is installed (`components-installed.json`) is kept by `compinstalled.rs`.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -27,7 +28,8 @@ pub struct PinnedStore {
 }
 
 /// What this device has: versions, the SHA-256 and (when known) the file of each component's current artifact, and other facts a
-/// `requires` may name (`abi`). Kept in `components-installed.json` in the data folder, written by the step that applies a component.
+/// `requires` may name (`abi`). Kept in `components-installed.json` in the data folder: written after a verified apply
+/// (`compinstalled::record_applied`) and corrected from facts at boot (`compinstalled::correct`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Installed {
@@ -35,6 +37,10 @@ pub struct Installed {
     pub shas: BTreeMap<String, String>,
     pub files: BTreeMap<String, PathBuf>,
     pub extras: BTreeMap<String, String>,
+    /// Where each version came from: `applied` (this device wrote it after a verified apply) or `observed` (read from the running system).
+    pub how: BTreeMap<String, String>,
+    /// Components written but not yet running (a restart is needed), with the boot id of the start in which they were written.
+    pub awaiting: BTreeMap<String, String>,
 }
 
 pub const INSTALLED_FILE: &str = "components-installed.json";
@@ -105,6 +111,8 @@ pub struct Plan {
     pub blocked: Vec<Blocked>,
     pub current: Vec<String>,
     pub notes: Vec<String>,
+    /// The release label the store signed with the list (the payload's version and variant), when it gave one.
+    pub release: Option<cm::ReleaseLabel>,
 }
 
 impl Plan {
@@ -159,7 +167,7 @@ pub fn plan(doc: &Doc, store: &str, channel: &str, inst: &Installed, last_serial
     if last_serial.is_some_and(|s| doc.serial < s) {
         return Err(format!("{store} sent an older component list (serial {}) than the one this device saw before ({}): refused", doc.serial, last_serial.unwrap_or(0)));
     }
-    let mut p = Plan { store: store.to_string(), channel: channel.to_string(), serial: doc.serial, ..Default::default() };
+    let mut p = Plan { store: store.to_string(), channel: channel.to_string(), serial: doc.serial, release: doc.release.clone(), ..Default::default() };
     let mut cand: Vec<&Entry> = vec![];
     for c in cm::COMPONENTS {
         let Some(e) = doc.latest(c, channel) else { continue };
@@ -386,7 +394,7 @@ pub struct Staged {
     pub items: Vec<StagedItem>,
 }
 
-/// Fetch every step of `plan` into `dir`. A delta is applied to the installed file with `bindelta::apply_delta` (its checks: the old file
+/// Fetch every step of `plan` into `dir`. A delta is applied to the installed file with `bindelta::apply_delta_files` (streamed; its checks: the old file
 /// must be the one it was made against, the result must match the hash); when that fails the whole file is fetched instead.
 pub fn stage(plan: &Plan, base: &str, st: &dyn iyakki_proxy::Streamer, inst: &Installed, dir: &Path, retries: u32, progress: &mut dyn FnMut(&str, u64, u64), cancel: &dyn Fn() -> bool) -> Result<Staged, String> {
     let mut staged = Staged { dir: dir.to_path_buf(), items: vec![] };
@@ -422,25 +430,34 @@ fn apply_delta_step(s: &Step, delta_file: &Path, inst: &Installed, dir: &Path) -
     if old_len > crate::bindelta::MAX_FILE || s.size > crate::bindelta::MAX_FILE {
         return Err(format!("larger than the {} MB a difference may make", crate::bindelta::MAX_FILE >> 20));
     }
-    let old = std::fs::read(old_path).map_err(|e| format!("{}: {e}", old_path.display()))?;
-    let delta = std::fs::read(delta_file).map_err(|e| format!("{}: {e}", delta_file.display()))?;
-    let new = crate::bindelta::apply_delta(&old, &delta)?;
-    drop(old);
-    if new.len() as u64 != s.size || crate::bindelta::hex(&crate::bindelta::sha256(&new)) != s.sha256 {
+    if let Some(free) = crate::sharedsite::statvfs_free(dir) {
+        if free < s.size.saturating_add(DISK_MARGIN) {
+            return Err(format!("not enough room to make the new file ({} needed, {} free)", human(s.size.saturating_add(DISK_MARGIN)), human(free)));
+        }
+    }
+    // streamed: the old file is read where the difference points, the result goes to a temporary file with its hash computed on the way
+    let out = dir.join(&s.sha256);
+    let info = crate::bindelta::apply_delta_files(old_path, delta_file, &out)?;
+    if info.new_len != s.size || info.new_sha256 != s.sha256 {
+        let _ = std::fs::remove_file(&out);
         return Err("the result is not the file the signed list promises".into());
     }
-    let (tmp, out) = (dir.join(format!("{}.new", s.sha256)), dir.join(&s.sha256));
-    std::fs::write(&tmp, &new).and_then(|_| std::fs::rename(&tmp, &out)).map_err(|e| format!("{}: {e}", out.display()))?;
     Ok(out)
 }
 
 // ------------------------------------------------------------------------------------------------ hand-over
 
 /// What the staged parts are labelled with when they become an update payload (the IYAKKI release they belong to).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Release {
     pub version: String,
     pub variant: String,
+}
+
+impl From<&cm::ReleaseLabel> for Release {
+    fn from(r: &cm::ReleaseLabel) -> Release {
+        Release { version: r.version.clone(), variant: r.variant.clone() }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -489,6 +506,20 @@ pub fn handover(staged: &Staged, out: &Path, release: &Release, rest_from: Optio
                 if !boot.iter().any(|i| i.step.install_path.eq_ignore_ascii_case(&rel)) {
                     link_or_copy(&rest.join(&rel), &dir.join(&rel))?;
                 }
+            }
+        }
+        // the release file of the boot partition says which IYAKKI these files are: it follows the label the payload is made as (a new file:
+        // the one taken from the installed partition may be a hard link to it)
+        if !boot.iter().any(|i| i.step.install_path.eq_ignore_ascii_case("boot/iyakki-release")) {
+            if let Some(p) = update::find_ci(&dir, "boot/iyakki-release") {
+                let old = std::fs::read_to_string(&p).unwrap_or_default();
+                let mut text = format!("VERSION={}\nVARIANT={}\n", release.version, release.variant);
+                for l in old.lines().filter(|l| !l.starts_with("VERSION=") && !l.starts_with("VARIANT=")) {
+                    text.push_str(l);
+                    text.push('\n');
+                }
+                std::fs::remove_file(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+                std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
             }
         }
         let mut files = vec![];

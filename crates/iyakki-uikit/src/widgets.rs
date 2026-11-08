@@ -476,9 +476,9 @@ pub fn render_confirm(g: &mut Gfx, area: R, s: f32, text: &str, yes_label: &str)
 /// Returns its rectangle.
 #[allow(clippy::too_many_arguments)]
 pub fn select_box(g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, label: &str, open: bool, accent: [u8; 4], ev: Event, hit: &str) -> R {
-    let m = super::ide_chrome::cur();
+    let m = crate::ide_chrome::cur();
     let sz = m.font_small * s + 1.0 * s;
-    let r = R::new(x, y, w, super::ide_chrome::tool(s));
+    let r = R::new(x, y, w, crate::ide_chrome::tool(s));
     let hot = g.hovered(r);
     g.rrect(r.x, r.y, r.w, r.h, 5.0 * s, if hot || open { rgb(34, 44, 78) } else { crate::fx::WELL });
     g.rrect_outline(r.x, r.y, r.w, r.h, 5.0 * s, if open { 1.5 * s } else { 1.0 }, if open { accent } else if hot { crate::fx::with_alpha(accent, 130) } else { rgb(50, 60, 92) });
@@ -493,7 +493,7 @@ pub fn select_box(g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, label: &str, open
 
 /// The natural width of a select box showing `label`.
 pub fn select_width(g: &mut Gfx, s: f32, label: &str) -> f32 {
-    let sz = super::ide_chrome::cur().font_small * s + 1.0 * s;
+    let sz = crate::ide_chrome::cur().font_small * s + 1.0 * s;
     g.text_width(sz, label, Face::Bold) + g.text_width(sz, "▾", Face::Bold) + 28.0 * s
 }
 
@@ -501,8 +501,8 @@ pub fn select_width(g: &mut Gfx, s: f32, label: &str) -> f32 {
 /// sends `close`. Each row is (label, chosen, click). Register it last: the later hit wins. Returns the list's rectangle.
 #[allow(clippy::too_many_arguments)]
 pub fn menu_list(g: &mut Gfx, anchor: R, bounds: R, s: f32, rows: &[(String, bool, Event)], close: Event, accent: [u8; 4]) -> R {
-    let sz = super::ide_chrome::cur().font_small * s + 2.0 * s;
-    let rh = (super::ide_chrome::tool(s) + 4.0 * s).max(sz * 1.9);
+    let sz = crate::ide_chrome::cur().font_small * s + 2.0 * s;
+    let rh = (crate::ide_chrome::tool(s) + 4.0 * s).max(sz * 1.9);
     let w = rows.iter().map(|r| g.text_width(sz, &r.0, Face::Bold)).fold(0.0f32, f32::max) + 40.0 * s;
     let w = w.max(anchor.w).min(bounds.w - 8.0 * s);
     let h = (rows.len() as f32 * rh + 10.0 * s).min(bounds.h - 8.0 * s);

@@ -469,6 +469,11 @@ fn real_main() -> ExitCode {
                 let _ = std::thread::Builder::new().name("iyakki-patch-ok".into()).spawn(|| {
                     std::thread::sleep(std::time::Duration::from_secs(30));
                     iyakki_agent::devmode::patch::mark_boot_good(std::path::Path::new(iyakki_core::boot::DATA_DIR));
+                    // the record of installed system components follows what really runs (kernel release, release file, program version)
+                    match iyakki_agent::store::compinstalled::correct_at_boot(std::path::Path::new(iyakki_core::boot::DATA_DIR), &iyakki_agent::store::compinstalled::Facts::real()) {
+                        Ok(notes) => notes.iter().for_each(|n| eprintln!("components: {n}")),
+                        Err(e) => eprintln!("components: the installed record could not be saved: {e}"),
+                    }
                 });
                 #[cfg(feature = "shell")]
                 if iyakki_core::boot::cmdline_param(&cmdline, "iyakki.shell") != Some("0") {

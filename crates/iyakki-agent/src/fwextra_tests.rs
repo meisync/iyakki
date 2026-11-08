@@ -570,3 +570,16 @@ fn every_pc_gpu_wifi_ethernet_and_bluetooth_file_of_the_pinned_release_has_a_nam
         }
     }
 }
+
+/// The HP Pavilion 16-af0's Meteor Lake card (2026-11-07): i915's own loader words for the GuC, which the generic patterns missed, so
+/// the Store card offered the DMC file only and the card stayed wedged after the install.
+#[test]
+fn the_guc_fetch_failed_wording_of_i915_is_a_request_too() {
+    let m = fake_manifest();
+    let log = "[    0.387068] i915 0000:00:02.0: Direct firmware load for i915/mtl_dmc.bin failed with error -2\n\
+[    0.407144] i915 0000:00:02.0: [drm] *ERROR* GT0: GuC firmware i915/mtl_guc_70.bin: fetch failed -ENOENT\n\
+[    0.407826] i915 0000:00:02.0: [drm] *ERROR* GT1: GuC firmware i915/mtl_guc_70.bin: fetch failed -ENOENT\n\
+[    0.408505] i915 0000:00:02.0: [drm] *ERROR* GT0: GuC initialization failed -ENOENT\n";
+    let names: Vec<String> = parse_log(log, &m).into_iter().map(|r| r.name).collect();
+    assert_eq!(names, vec!["i915/mtl_dmc.bin".to_string(), "i915/mtl_guc_70.bin".to_string()], "each file once, in log order; the summary line without a file name adds nothing");
+}

@@ -69,6 +69,21 @@ this date.
 * After install the driver needs a restart (the card says so). Then check: the interface appears, scan lists networks, join works, the hotspot works if the card supports AP mode, Bluetooth powers on and pairs a device.
 * Evidence to keep: the kernel log lines of the driver, `ip link`, the firmware file names loaded.
 
+## Step 3b: graphics (found 2026-11-07, image 1107i on the T7 stick, developer mode over the network)
+
+The shell draws fine on the framebuffer (screenshots by `iyakki dev screenshot`), the browser's full engine stopped at once:
+"the connection to the helper failed ... (ended by a signal) | MESA: warning: Could not get intel_device_info". Kernel log: i915 found
+METEORLAKE 7d45, then `GuC firmware i915/mtl_guc_70.bin: fetch failed -ENOENT ... Failed to initialize GPU, declaring it wedged!`
+at 0.4 s: on Meteor Lake GuC submission is required, i915 is built into the kernel and probes before the root is mounted, and the lean
+RAM disk carried only the DMC files. The image's root has all five `i915/mtl_*` files; they were simply not reachable at probe time.
+Three changes: (1) `lean-image.sh` puts the DMC, GuC, HuC and GSC files of Meteor Lake and DG2 into `initrd-lean` when the image has them
+(dev images; a release image has none and the Intel graphics firmware card must one day also refresh the early RAM disk, open);
+(2) the firmware detector understands the GuC loader's "fetch failed" wording so the card offers the right file; (3) the browser falls
+back to software drawing in the same session when the helper dies right after a hardware start, and starts again (the owner's rule:
+framebuffer/software when the card is not usable, the card when driver and firmware are there). Verify on the next image: the kernel
+log without "wedged", `graphics: hardware Mesa Intel(R) Arc ...` in the engine log, pages rendering; and on the current image the
+software restart with the page loading.
+
 ## Step 4: the update framework (do this on the first good boot)
 
 1. Turn on **Settings -> Developer mode** on the laptop; pair from the build PC (`iyakki dev pair`, a one-time code the person reads off the screen); the person grants the scopes (update, shell, files, debug, input) and may need to extend the default 4 hour timeout.

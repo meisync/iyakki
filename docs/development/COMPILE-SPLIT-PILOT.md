@@ -113,3 +113,103 @@ These numbers say little about the final win: the dev profile already has increm
 * `cargo test -p iyakki-shell --test safeclamp_scan`; `cargo test -p iyakki-core --test dependency_ratchet`: pass (5 tests).
 * `cargo test -p iyakki-core --test feature_matrix`: fails on the 76 renamed paths until the TSV is applied (see above).
 * Not run: the whole shell suite (as instructed), anything on a device or in QEMU. The shell's `iyakki-gui` and `iyakki-remote` users of `iyakki_shell::gfx/ui` were not rebuilt (`iyakki-gui` is a separate workspace); the paths they use still exist.
+
+## Second step: the first tile crate, `usage` (2026-11-07)
+
+**What moved.** The USAGE tile (`apps/usage.rs`, 395 lines) is now the crate `crates/iyakki-tile-usage` (`git mv` to its `src/lib.rs`; drawing, key handling, `fmt_tokens`, `nice_max` are byte-for-byte the old code except the imports and the context). Its dependency tree is `iyakki-tile-api -> iyakki-uikit` and nothing else: `cargo tree -p iyakki-tile-usage -e normal | grep -c iyakki-agent` prints 0 (also 0 with `-e all`). The shell registers it exactly where it was (`shell.rs`: `PApp::Usage => Box::new(apps::usage::UsageApp::new(&cx))`; `system.rs` still calls `apps::usage::fmt_tokens`, now a re-export).
+
+**The facade, `crates/iyakki-tile-api`** (depends on `iyakki-uikit` only):
+
+| Piece | What it is |
+|---|---|
+| `App` | the tile contract: `title icon accent hint help handle render` (the same names and meaning as the shell's `App`; the other 20 methods of the shell trait stay in the shell until a tile needs them) |
+| `Flow` | `Stay` / `Back` |
+| `TileCx<'a>` | `user: &str`, `manage_settings: bool`, `usage: &dyn UsageSource` |
+| `usage::{Range, Bucket, Series}` | the chart data (plain data, the same fields as the agent's) |
+| `usage::UsageSource` | **2 methods**: `now_unix()`, `series(range, now, Option<user>)` |
+
+So the usage tile needed 2 trait methods and 2 plain fields, well under the limit of ten. The shell side (`apps/usage.rs`, now 150 lines): `ShellUsage(&Services)` implements `UsageSource` with the agent's `UsageLog::series` in `Zone::system()` and converts the agent's `Range/Series` to the facade's (field copy); `UsageApp(iyakki_tile_usage::UsageApp)` implements the shell's `App` by building a `TileCx` from the `AppCx` on each call. Nothing else in the shell changed: `App`, `AppCx`, `Flow` and the 299 other tiles are untouched.
+
+**Tests.** In the tile crate, against a fake `UsageSource` (an in-test log with hours-ago, user, model, tokens): `numbers_and_axes_are_rounded_for_reading`, `the_ranges_switch_and_show_my_usage_or_everyones_for_administrators`, `a_person_without_the_settings_permission_only_ever_sees_their_own_usage` (same assertions as before, same call counts) and the ignored `usage_picture`. Left in the shell because they test the agent: `what_goes_through_the_chat_backend_is_counted_for_the_person_and_the_model` (same path as before), and one new test, `the_shell_adapter_feeds_the_real_usage_log_to_the_tile_crate`, which drives the tile through the shell `App` trait and checks the converted series equals the agent's. The fake is a simplified bucketer; the agent's own `usage::tests` still cover the real bucketing. Renames for `FEATURES.md`: `COMPILE-SPLIT-STEP2-RENAMES.tsv` (3 tests; not applied, so `feature_matrix` fails until it is).
+
+**Ratchet** (`dependency_ratchet.rs`): a tile crate may depend on `iyakki-uikit` and `iyakki-tile-api` only; `iyakki-tile-api` is in `TILE_INFRA` and has its own test (`the_tile_facade_depends_on_the_toolkit_only`: `iyakki-uikit` and nothing else). `tile_crate_deps.allow` stays empty.
+
+**Numbers** (dev profile, warm, one cargo command at a time, `CARGO_BUILD_JOBS=3`, a shared machine where another agent was editing the agent crate, so noisy). The edit is one colour constant changed (a comment-only edit is cheaper still: 4 s and 10 s in the shell, 0.1 s in the tile):
+
+| After a one-line code change in | Command | Seconds |
+|---|---|---|
+| the tile crate `iyakki-tile-usage` | `cargo check -p iyakki-tile-usage` | 0.2, 0.1 |
+| the tile crate | `cargo test -p iyakki-tile-usage --no-run` | 0.3, 0.2 |
+| a tile still in the shell (`apps/mesh.rs`) | `cargo build -p iyakki-shell` | 37.7, 29.7 |
+| a tile still in the shell | `cargo test -p iyakki-shell --lib --no-run` | 30.0, 29.6 |
+
+Running the tile's tests: 3 tests in 0.55 s. First build of the three new crates (uikit already built): about 1.4 s. The goal "fix one app and compile in under a minute" is met for this tile by two orders of magnitude; for a tile still in the shell it is about 30 s of dev build (release/LTO builds were not measured). Not measured: the cold cost, release profile, the whole shell suite.
+
+**Verified:** `cargo test -p iyakki-tile-usage` (3 passed, 1 ignored); `cargo build -p iyakki-shell`; `cargo test -p iyakki-shell --lib -- apps::usage` (2 passed). **Not verified:** a run on a device or in QEMU (not allowed in this step), the screenshot test, the shell's other tests.
+
+### Next tiles, ranked by (services used, lines), with what each needs
+
+Counts are `cx.services.<field>` uses in the tile's non-test code.
+
+| Rank | Tile | Lines | Services | Facade it needs | Other blockers |
+|---|---|---|---|---|---|
+| 1 | calendar | 790 | `calendar` (+ `on_login` in tests) | `CalendarSource` (alarms: list/add/remove/ring state, about 6 methods) and the `Alarm` data types moved to the facade | `widgets::Form` (needs `filepicker`), `blink`: move those two into `iyakki-uikit` first |
+| 2 | learn | 575 + 536 + 446 | `calendar`, `study`, `host_tts`, `voice_settings` | `StudySource`, `Speaker`, `CalendarSource` (more than ten methods in total: split the tile first) | `chatpic::PicCache`, `story::{Synth, Sink}` |
+| 3 | mesh | 853 | `secrets`, `quick_upstream`, `system_set`, `dir` | `MeshSource` (consul client calls) | `widgets::Form`, `blink` |
+| 4 | lab | 1 671 (+ 3 files) | `settings`, `dir` | image-generation source | `multiline`, `widgets`, `ide_chrome`, `chatpic`, `browser_images` |
+| 5 | inbox | 1 628 | 13 services | too many; later | `widgets`, `browser_consent` |
+
+Recommended order: first move `widgets` (with `filepicker`'s picker part) and `blink` behind the facade or into `iyakki-uikit`, which unlocks calendar, mesh and lab; then calendar.
+
+## Third step: `widgets`, `blink`, `filepicker`, `ide_chrome` into the toolkit; the `calendar` tile crate (2026-11-07)
+
+Owner decisions applied: `widgets`, `blink` and the picker go into `iyakki-uikit`; `TileCx` stays one struct (one `&dyn` field per tile family) until more than five tiles are extracted, then it becomes a trait.
+
+**What moved into `iyakki-uikit`** (all with `git mv`; the shell re-exports each under its old path, so no tile file changed):
+
+| Module | Old path | Notes |
+|---|---|---|
+| `widgets` (Form, confirm, pickers, 822 lines, its tests) | `apps/widgets.rs` | `pub use iyakki_uikit::widgets;` in `apps/mod.rs` |
+| `ide_chrome` (383 lines, its tests) | `apps/ide_chrome.rs` | not on the owner's list, but `widgets` calls it for its density metrics and it is pure toolkit code (gfx, fx, ui only), so it moved too |
+| `blink` (`blink`, `caret_allowed`, `with_caret`) | `apps/mod.rs` | `pub use iyakki_uikit::blink::{blink, caret_allowed, with_caret};` |
+| `filepicker` (1 153 lines: the picker modal, the path chip, drops) | `filepicker.rs` | split as below |
+
+**The filepicker split.** The picker's drawing, listing and keys are pure, but it asked the agent for three things: the account's policy and file roots (`Scope` held a `Policy` and `FileRoots`), `explain_io`, and the signed-in session. Now `iyakki-uikit::filepicker` has a trait `ScopeRules` (`home`, `can_read`, `can_write`, `expand`, `explain_io`) and `Scope` wraps an `Rc<dyn ScopeRules>`; `current_scope()` reads a per-thread override (tests) or a per-thread maker function (`set_session_scope`), else `Scope::nothing()`. What stayed in the shell is `crates/iyakki-shell/src/filepicker.rs` (54 lines): `AccountRules` (the real policy and `FileRoots`), `scope_for(user, &policy, roots)` (was `Scope::new(user, &policy, roots)`) and `set_session(...)` (same signature, `shell.rs` unchanged); the rest is `pub use iyakki_uikit::filepicker::*`. The 405 lines of `filepicker_tests.rs` stay in the shell, because they build real accounts (agent `FileRoots`, security `Role`); the test helper `scope_for` there was renamed `account_scope` and two lines of `apps/disks_tile_tests.rs` call `scope_for` instead of `Scope::new`. `iyakki-uikit` still depends on no `iyakki-*` crate (`dependency_ratchet` passes).
+
+**The calendar tile crate, `crates/iyakki-tile-calendar`** (`git mv` of `apps/calendar.rs` to its `src/lib.rs`; the drawing and key code is the old code with `cx.services.calendar.x(&cx.session.user, ..., &self.zone)` turned into `cx.calendar.x(cx.user, ...)`). Dependencies: `iyakki-tile-api` and `iyakki-uikit` only (`cargo tree -p iyakki-tile-calendar -e all | grep -c iyakki-agent` prints 0).
+
+Facade additions (`iyakki-tile-api`): `TileCx` gains `calendar: &dyn CalendarSource` and `audit: &dyn AuditSink`; module `calendar` with the plain data (`Repeat`, `Alarm`, `Occurrence`, `AlarmOccurrence`, `Local`, `Added`), the pure helpers the tile needs (`civil`, `days_from_civil`, `parse_days`, `parse_hm`, `parse_local`, `now_unix`), and `NoCalendar` / `NoAudit` for contexts of tiles that do not use them (the usage tile's tests and the shell's usage adapter).
+
+**Size of `CalendarSource`: 11 methods, over the ~6 to 10 asked.** `local`, `local_to_unix` (the machine's zone, so the tile does not need the agent's `Zone`), `events_in`, `alarms_in`, `add_event`, `remove_event`, `alarms`, `add_alarm`, `remove_alarm`, `set_alarm_enabled`, `next_alarm`. Two of them are the zone. I did not force it down further: merging add/remove would hide meaning. The audit log is a separate one-method trait.
+
+**One cost, said plainly: duplicated pure code.** The tile crate cannot call the agent's `parse_days`, `parse_hm`, `parse_local`, `civil`, `days_from_civil`, and the facade holds copies (about 90 lines), as `Repeat`/`Alarm` shapes are copied. The shell test `the_tile_crates_parsers_agree_with_the_agents` compares the copies with the agent's on tables (times, day lists, dates including leap days and daylight-saving gaps, 11 civil values, repeat and alarm labels), so they cannot drift silently. The cleaner end state is to move those pure helpers into a small crate both depend on; not done now.
+
+**Shell side** (`apps/calendar.rs`, 248 lines): `ShellCalendar { store, zone }` implements `CalendarSource` (field-copy conversions), `ShellAudit` implements `AuditSink`, and `CalendarApp` wraps the tile crate's app plus the `Zone::system()` read once at open, as before. `shell.rs` is unchanged: `crate::apps::calendar::CalendarApp::new(&cx)` still works.
+
+**Tests.** In the tile crate (fake `CalendarSource` in UTC with in-memory events and alarms, fake audit): `moving_around_the_month_selects_days_and_changes_months_correctly`, `an_event_is_added_with_the_form_shows_in_the_plan_repeats_and_is_deleted_after_asking`, `the_calendar_can_show_or_hide_the_alarm_schedule_and_alarms_are_set_switched_and_deleted_on_the_clock_tab` (same steps and assertions as before, except that "stored" is read from the fake and the test no longer drives a shell `TileHarness`; it draws at four sizes instead of the harness's standard sizes), and the ignored `calendar_picture`. In the shell: `the_shell_adapter_connects_the_tile_to_the_real_calendar_and_audit_log` and the parity test above. The fake does not reproduce the real store's monthly/yearly repeat or daylight saving; the agent's own `calendar::tests` still cover that. The 3 FEATURES.md-cited calendar tests and the 3 cited `ide_chrome` tests moved: `COMPILE-SPLIT-STEP3-RENAMES.tsv` (6 lines, not applied, so `feature_matrix` fails until it is). The cited `filepicker_tests::*` paths did not change.
+
+**Numbers** (dev profile unless stated, warm, one cargo command at a time, `CARGO_BUILD_JOBS=3`, under a 9 GB cap; the edit is one colour constant; a machine shared with another agent, so noisy; two runs each where cheap):
+
+| After a one-line code change in | Command | Seconds |
+|---|---|---|
+| the tile crate `iyakki-tile-calendar` | `cargo check -p iyakki-tile-calendar` | 0.8, 0.2 |
+| the tile crate | `cargo test -p iyakki-tile-calendar --no-run` | 0.3, 0.3 |
+| a tile still in the shell (`apps/mesh.rs`) | `cargo build -p iyakki-shell` | 5.0, 4.4 |
+| a tile still in the shell | `cargo test -p iyakki-shell --lib --no-run` | 10.8, 9.8 |
+| the tile crate `iyakki-tile-calendar` | `cargo build --profile device -p iyakki-core` | 5.0 (one run) |
+| a tile still in the shell (`apps/mesh.rs`) | `cargo build --profile device -p iyakki-core` | 34.6 (one run) |
+
+For the real push loop (the `device` profile), a change inside the calendar tile crate costs 5.0 s against 34.6 s for the same change in a tile that is still in the shell: the split helps the loop, about 7 times here. The calendar edit was measured first, then the mesh one; both single runs. The earlier shell figure of about 30 s (Second step) was a dev build before this step; the dev figures here (4-5 s) are much lower, which I cannot fully explain (the warm incremental cache after the long device build, less contention); do not read the dev rows as a gain from this step. Not measured: cold builds (the first `device` build after the move took 349 s), release/LTO, other tiles.
+
+**Verified:** `cargo test -p iyakki-uikit` (128 passed, includes the moved widgets and ide_chrome tests); `cargo test -p iyakki-tile-calendar` (3 passed, 1 ignored); `cargo test -p iyakki-shell --lib -- apps::calendar widgets blink filepicker apps::usage` (18 passed); `cargo build -p iyakki-shell`; `cargo build --profile device -p iyakki-core`; the ratchet results are in the final report. **Not verified:** a run on a device or QEMU (not allowed), the screenshot test, the whole shell suite, a hand look at the calendar on a screen.
+
+### Next tiles after this step
+
+| Rank | Tile | What it needs now |
+|---|---|---|
+| 1 | mesh (853 lines) | `MeshSource` (consul client calls; `secrets`, `quick_upstream`, `system_set`, `dir`). `widgets` and `blink` are unblocked. |
+| 2 | learn (575 + 536 + 446) | `CalendarSource` exists; still `StudySource`, `Speaker`, `chatpic::PicCache`, `story::{Synth, Sink}`. |
+| 3 | lab (1 671 + 3 files) | image-generation source; `multiline`, `chatpic`, `browser_images`. `widgets`, `ide_chrome` and the picker are unblocked. |
+| 4 | inbox | 13 services; later. |
+
+With calendar the extracted tiles are two; at more than five, `TileCx` becomes a trait (owner decision).

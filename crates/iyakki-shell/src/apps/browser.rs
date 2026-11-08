@@ -476,6 +476,8 @@ pub struct BrowserApp {
     auto_full: bool,
     /// The engine stopped or the person left it: heavy sites are no longer sent to it by themselves (no crash loop).
     full_declined: bool,
+    /// The engine was started again in software after it died at its start on the graphics card (once per browser).
+    graphics_retried: bool,
     /// The full engine (helper program or cage/cog) is installed; false makes heavy sites show the "needs the full web engine" banner.
     engine_offered: bool,
     /// The bar over a video the engine cannot decode (H.264 / AAC) and the choices about it (browser_av.rs).
@@ -610,6 +612,7 @@ impl BrowserApp {
             full: None,
             auto_full: !cfg!(test),
             full_declined: false,
+            graphics_retried: false,
             engine_offered: iyakki_agent::webengine::offered(),
             av: browser_av::AvState::new(browser_av::load(cx)),
             av_request: None,
@@ -2574,6 +2577,8 @@ impl BrowserApp {
         Ok(Start {
             env: iyakki_agent::webengine::helper_env(&profile).map(|mut e| {
                 e.extend(browser_block::prepare_full_engine(cx, &profile));
+                // the engine's share of memory and its cache model: the person's Speed and memory choice on this machine
+                e.extend(browser_speed::engine_env(browser_config::load(cx).cache, &browser_speed::machine(cx.services.dir())));
                 e
             }),
             helper,
@@ -2877,6 +2882,51 @@ impl BrowserApp {
         }
     }
 
+    /// The helper died at its start on the graphics card: remember the card for software drawing (`webgraphics::fall_back_now`) and
+    /// tell the person; false when nothing was changed (Hardware chosen, the card already remembered, no card known).
+    fn fall_back_to_software_now(&mut self, why: &str, cx: &AppCx) -> bool {
+        let Ok(profile) = iyakki_agent::webengine::prepare_profile(cx.services.dir(), &cx.session.user) else { return false };
+        let Some(data) = iyakki_agent::avaddon::data_of_profile(&profile) else { return false };
+        let gpu = iyakki_agent::webgraphics::gpu_id(&iyakki_agent::webengine::drm_gpus());
+        match iyakki_agent::webgraphics::fall_back_now(data, &gpu, why) {
+            Ok(()) => {
+                for p in iyakki_agent::webgraphics::take_pending() {
+                    if let Some(a) = &p.audit {
+                        cx.audit.record(&cx.session.user, "browser.graphics", a);
+                    }
+                    if let Some(t) = &p.toast {
+                        crate::ui::clipboard::toast(t);
+                    }
+                    if let Some(s) = p.status {
+                        self.status = Some((s, true));
+                    }
+                }
+                true
+            }
+            Err(e) => {
+                log::info!("browser: the engine died at its start on the card and stays stopped: {e}");
+                false
+            }
+        }
+    }
+
+    /// Start the engine again on `url` (after the fall back to software), without touching the tab's history.
+    fn restart_full_on(&mut self, url: &str, cx: &AppCx) {
+        let Some(helper) = iyakki_agent::webengine::embedded_helper() else { return };
+        self.share_devices("", 0, cx);
+        match self.embedded_start(helper, cx).map(Full::start) {
+            Ok(Ok(mut f)) => {
+                f.navigate(url);
+                self.full = Some(f);
+                cx.audit.record(&cx.session.user, "browser.full.restart", "software drawing after the engine died at its start on the graphics card");
+            }
+            Ok(Err(e)) | Err(e) => {
+                self.full_declined = true;
+                self.status = Some((format!("The full web engine could not be started again in software: {e}"), false));
+            }
+        }
+    }
+
     /// Stop the engine and start it again on the page it showed, without touching the tab's history.
     fn restart_full(&mut self, cx: &AppCx) {
         let Some(f) = self.full.take() else { return };
@@ -2973,9 +3023,19 @@ impl BrowserApp {
             }
             Note::Gone(why) => {
                 let url = self.full.as_ref().map(|f| if f.url.is_empty() { f.good_url.clone() } else { f.url.clone() }).unwrap_or_default();
+                let crashed_at_start = self.full.as_ref().is_some_and(|f| f.crashed_at_start);
                 self.full = None;
-                self.full_declined = true;
                 cx.audit.record(&cx.session.user, "browser.full.crash", &why.chars().take(120).collect::<String>());
+                // the rule: the graphics card when driver and firmware work, software drawing otherwise. The helper died right after it
+                // started on the card (a wedged card, a driver without its firmware): remember the card, start again in software, once
+                if crashed_at_start && !self.graphics_retried && self.fall_back_to_software_now(&why, cx) {
+                    self.graphics_retried = true;
+                    if url.starts_with("http") {
+                        self.restart_full_on(&url, cx);
+                        return;
+                    }
+                }
+                self.full_declined = true;
                 match Url::parse(&url) {
                     Ok(u) if url.starts_with("http") => {
                         self.go(u, How::Replace, cx);

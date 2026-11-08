@@ -1077,7 +1077,7 @@ impl ChatApp {
             let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
             Arc::new(iyakki_agent::updatestools::UpdatesTools::new(tools_arc, Arc::new(iyakki_agent::updatestools::RealBackend { svc: cx.services.clone(), policy: cx.session.policy.clone(), user: cx.session.user.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
         };
-        // system components of the pinned private stores: read-only status and plan (administrators; applying is a later step)
+        // system components of the pinned private stores: the status (free) and the apply (a hard ask whose card is the plan), administrators only
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
             Arc::new(iyakki_agent::componentstools::ComponentsTools::new(tools_arc, Arc::new(iyakki_agent::componentstools::RealBackend { svc: cx.services.clone() })))
         } else {

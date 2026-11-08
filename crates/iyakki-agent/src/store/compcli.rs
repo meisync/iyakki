@@ -12,16 +12,18 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::compmanifest as cm;
-use super::components::{self as comps, human, Installed, PinnedStore, Release};
+use super::components::{self as comps, human, PinnedStore, Release};
 
 pub const USAGE: &str = "iyakki store component <command>
   publish --server URL --token-env NAME --component C --version V --file F [--channel nightly] [--requires k=range]... [--built-from TEXT]
-          [--install-path P] [--delta-from OLD_FILE]...
-                                   upload the artifact (and a delta from each OLD_FILE, which must already be published) and list it
+          [--install-path P] [--release VERSION --release-variant NAME] [--delta-from OLD_FILE]...
+                                   upload the artifact (and a delta from each OLD_FILE, which must already be published) and list it;
+                                   --release says which IYAKKI release (version and image variant) the store's list is signed as
   list --server URL [--key PUBHEX]   what the store offers (verified when the store's public key is given)
   plan --server URL --key PUBHEX [--channel stable] [--data DIR] [--stage DIR [--rest-from BOOTFILES] [--version V] [--variant NAME]]
-                                   what this device would take (installed versions from DIR/components-installed.json); with --stage the
-                                   files are downloaded and checked and an update payload or patch pack is made. Nothing is applied.
+                                   what this device would take (installed versions from DIR/components-installed.json, corrected from the running system); with --stage the
+                                   files are downloaded and checked and an update payload or patch pack is made, labelled with the release the store's
+                                   signed list names (--version/--variant override it). Nothing is applied.
   yank --server URL --token-env NAME --component C [--version V] [--channel CH] [--reason TEXT]
   retention --server URL --token-env NAME [--keep 3] [--apply]
                                    what a cleanup would remove (newest N per component and channel, and the deltas between them); --apply does it";
@@ -98,6 +100,11 @@ pub fn run(args: &[String]) -> Result<String, String> {
                 requires,
                 built_from: a.one("built-from").unwrap_or("").into(),
                 install_path: a.one("install-path").unwrap_or("").into(),
+                release: match (a.one("release"), a.one("release-variant")) {
+                    (Some(v), Some(variant)) => Some(cm::ReleaseLabel { version: v.into(), variant: variant.into() }),
+                    (None, None) => None,
+                    _ => return Err("--release and --release-variant go together".into()),
+                },
                 delta_from: a.many("delta-from").into_iter().map(PathBuf::from).collect(),
             };
             let mut lines = vec![];
@@ -181,6 +188,8 @@ pub struct PublishReq {
     pub requires: BTreeMap<String, String>,
     pub built_from: String,
     pub install_path: String,
+    /// The IYAKKI release this build belongs to; the store signs the newest one it was told in its list.
+    pub release: Option<cm::ReleaseLabel>,
     pub delta_from: Vec<PathBuf>,
 }
 
@@ -296,6 +305,10 @@ pub fn publish_with_chunk(up: &dyn iyakki_proxy::Upstream, base: &str, tok: &str
         upload(up, base, tok, &req.component, &d.sha256, d.size, &Source::Mem(bytes.clone()), chunk, out)?;
     }
     let entry = json!({"component": req.component, "version": req.version, "sha256": sha, "size": size, "requires": req.requires, "channel": req.channel, "built_from": req.built_from, "install_path": req.install_path, "delta": deltas.iter().map(|d| &d.0).collect::<Vec<_>>()});
+    let mut entry = entry;
+    if let Some(r) = &req.release {
+        entry["release"] = json!({"version": r.version, "variant": r.variant});
+    }
     let r = call(up, "POST", &format!("{base}/v1/components"), tok, &[("Content-Type".to_string(), "application/json".to_string())], entry.to_string().as_bytes())?;
     Ok(format!("published {} {} to channel {} (list serial {})", req.component, req.version, req.channel, r["serial"]))
 }
@@ -313,7 +326,7 @@ fn list(up: &dyn iyakki_proxy::Upstream, server: &str, key: Option<&str>) -> Res
         None => {
             let v: Value = serde_json::from_slice(&r.body).map_err(|_| "not a component list".to_string())?;
             let entries: Vec<cm::Entry> = serde_json::from_value(v["components"].clone()).map_err(|e| e.to_string())?;
-            (cm::Doc { id: v["id"].as_str().unwrap_or("").into(), serial: v["serial"].as_u64().unwrap_or(0), issued: 0, entries, yanked: serde_json::from_value(v["yanked"].clone()).unwrap_or_default(), key: v["key"].as_str().unwrap_or("").into() }, "NOT VERIFIED: give --key with the store's public key to check the signature")
+            (cm::Doc { id: v["id"].as_str().unwrap_or("").into(), serial: v["serial"].as_u64().unwrap_or(0), issued: 0, entries, yanked: serde_json::from_value(v["yanked"].clone()).unwrap_or_default(), key: v["key"].as_str().unwrap_or("").into(), release: serde_json::from_value(v["release"].clone()).ok() }, "NOT VERIFIED: give --key with the store's public key to check the signature")
         }
     };
     let mut out = vec![format!("{} (list serial {}, key {}): {note}", doc.id, doc.serial, doc.key.get(..12).unwrap_or(""))];
@@ -334,7 +347,7 @@ fn device_plan(a: &Args) -> Result<String, String> {
     let store = PinnedStore { name: server.to_string(), base: cm::base_of(server), pin: a.need("key")?.to_ascii_lowercase() };
     let up = iyakki_proxy::https::UreqUpstream::default();
     let doc = comps::fetch_doc(&up, &store)?;
-    let inst = a.one("data").map(|d| Installed::load(Path::new(d))).unwrap_or_default();
+    let inst = a.one("data").map(|d| super::compinstalled::current(Path::new(d), &super::compinstalled::Facts::real())).unwrap_or_default();
     let p = comps::plan(&doc, &store.name, a.one("channel").unwrap_or("stable"), &inst, None)?;
     let mut out = comps::plan_text(&p);
     if let Some(dir) = a.one("stage") {
@@ -350,7 +363,12 @@ fn device_plan(a: &Args) -> Result<String, String> {
                 last = (c.to_string(), pct);
             }
         }, &|| false)?;
-        let release = Release { version: a.one("version").unwrap_or("0.0.0").to_string(), variant: a.one("variant").unwrap_or("pc").to_string() };
+        // the label the store signed; the flags override it
+        let from_doc = doc.release.as_ref();
+        let release = Release {
+            version: a.one("version").map(str::to_string).or_else(|| from_doc.map(|r| r.version.clone())).ok_or("the store's list carries no release label: give --version and --variant")?,
+            variant: a.one("variant").map(str::to_string).or_else(|| from_doc.map(|r| r.variant.clone())).ok_or("the store's list carries no release label: give --version and --variant")?,
+        };
         let h = comps::handover(&staged, Path::new(dir), &release, a.one("rest-from").map(Path::new), &inst)?;
         out = format!("{out}\n\n{}", comps::staged_text(&staged, &h));
     }

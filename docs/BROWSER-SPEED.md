@@ -155,6 +155,32 @@ answers are not kept although a single-person browser cache could (conservative 
 * The preload store belongs to one tab slot of the browser (a second tab's load cancels the first's queued early fetches).
 * Machine load during measurement was high; repeat on a quiet machine before quoting percentages.
 
+## 2026-11-07: the graphics card when it works, software when it does not; memory limits per engine
+
+Found on the HP Pavilion 16-af0 (Meteor Lake, image 1107i): the kernel declared the Intel card wedged (GuC firmware missing at probe),
+Mesa fell back to llvmpipe on the card's render node, the helper took it ("graphics: hardware llvmpipe ... on /dev/dri/renderD128") and
+died by a signal before its first frame; the shell showed the page in the reader. Three changes, none measured on hardware yet (the
+next HP image does that):
+
+* **Render node choice** (`helper.c`, `hw_try_node`/`hw_open`): every render node is tried in turn and the first with a real renderer
+  wins; a node that gives only llvmpipe/softpipe is left aside (log: "gives only llvmpipe ..., looking further") so a second card (the
+  HP's NVIDIA, once its GSP firmware is installed) gets its chance; with no card rendering the pictures go through shared memory, the
+  same CPU work as llvmpipe without buffers on a card that is not there. `IYAKKI_WEBVIEW_RENDER_NODE` still pins one node.
+* **Fall back in the same session** (`webgraphics::died_at_start`, `fall_back_now`; `browser.rs` `restart_full_on`): when the helper
+  dies right after a hardware start (a signal, the connection lost) before it is ready, the shell remembers the card as after a
+  freeze, says so (status line, toast, audit `browser.graphics`), and starts the engine again in software, once per browser. Hardware
+  chosen in Settings is never overridden. Before, the fall back only happened at the NEXT start, after judging the previous session.
+* **Memory limit per engine** (`browser_speed::engine_env`, `helper.c`): each tab's web process gets `IYAKKI_WEBVIEW_MEM_MB`, a share
+  of the memory available at its start (Auto a third, Large a half, Small a fifth; 192 MB to 4 GB, never more than the machine), set as
+  WebKit's memory-pressure limit: caches are freed at a third and at half of it, nothing is killed. The network process gets a third of
+  that. WebKit's own default is a share of the whole machine for EVERY process, so several tabs could add up to all of it.
+  `IYAKKI_WEBVIEW_CACHE_MODEL` is `document` (smaller in-memory caches) for the Small choice and for machines with 4 GB or less,
+  `browser` otherwise. Tests: `apps::browser_speed::tests::the_engine_gets_a_share_of_the_available_memory_and_a_cache_model_from_the_choice_and_the_machine`.
+
+What was looked at and left as it is: the frame path (pread from the helper's shared memory into the tile buffer, then one conversion
+copy; a few percent of a core, mmap would save one copy of a changed rectangle and nothing measurable), the reader's history (40
+entries, pictures capped at 60 and 14 MB per page), hidden tabs (already told to stop drawing through the view's activity state).
+
 ## Tuning knobs
 
 Settings -> Browser -> Speed and memory (Auto, Large, Small); `iyakki_web::net::{PER_HOST, GLOBAL}` (6 and 32);

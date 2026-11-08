@@ -372,3 +372,265 @@ pub fn apply_delta(old: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
     }
     Ok(out)
 }
+
+
+// -------------------------------------------------------------------------------------------- applying as a stream
+
+/// A source that can be read and positioned (a file, or bytes in a test).
+pub trait ReadSeek: Read + std::io::Seek {}
+impl<T: Read + std::io::Seek> ReadSeek for T {}
+
+/// The size of every buffer the streaming apply allocates. Memory in use is a few of these, whatever the size of the files.
+pub const STREAM_CHUNK: usize = 64 << 10;
+/// Buffers the streaming apply holds at most: two work chunks, three decoder read-ahead buffers, three compressed-input buffers
+/// (the zstd decoders keep their own window on top; the windows the encoder here writes are a few MiB at most).
+pub const STREAM_BUFFERS: usize = 2 * STREAM_CHUNK + 3 * STREAM_CHUNK + 3 * (16 << 10);
+
+/// What a streaming apply reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamInfo {
+    pub new_len: u64,
+    pub new_sha256: String,
+    /// Bytes of buffers this call allocated (see [`STREAM_BUFFERS`]).
+    pub buffers: usize,
+}
+
+struct Stream {
+    dec: std::io::BufReader<Box<dyn Read>>,
+    raw: u64,
+    used: u64,
+}
+
+impl Stream {
+    fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), String> {
+        if self.used.checked_add(buf.len() as u64).is_none_or(|e| e > self.raw) {
+            return Err("the delta's pieces do not fit the files: it is damaged".into());
+        }
+        self.dec.read_exact(buf).map_err(|e| format!("the delta's data is damaged ({e})"))?;
+        self.used += buf.len() as u64;
+        Ok(())
+    }
+
+    fn varint(&mut self) -> Result<u64, String> {
+        let (mut v, mut shift) = (0u64, 0u32);
+        loop {
+            let mut b = [0u8; 1];
+            self.read_exact(&mut b).map_err(|_| cut())?;
+            if shift > 63 {
+                return Err("the delta's control data is damaged".into());
+            }
+            v |= u64::from(b[0] & 0x7f) << shift;
+            if b[0] & 0x80 == 0 {
+                return Ok(v);
+            }
+            shift += 7;
+        }
+    }
+
+    fn signed(&mut self) -> Result<i64, String> {
+        let u = self.varint()?;
+        Ok(((u >> 1) as i64) ^ -((u & 1) as i64))
+    }
+
+    /// The stream ended exactly where it said it would (nothing more comes out of the decoder).
+    fn finished(&mut self) -> Result<(), String> {
+        let mut b = [0u8; 1];
+        if self.used != self.raw || self.dec.read(&mut b).map_err(|e| format!("the delta's data is damaged ({e})"))? != 0 {
+            return Err("the delta's data has the wrong length: it is damaged".into());
+        }
+        Ok(())
+    }
+}
+
+/// The new file as it is written: every byte goes to the writer and the hash.
+struct Sink {
+    hasher: Sha256,
+    written: u64,
+}
+
+impl Sink {
+    fn emit(&mut self, bytes: &[u8], out: &mut dyn std::io::Write) -> Result<(), String> {
+        out.write_all(bytes).map_err(|e| format!("the new file could not be written: {e}"))?;
+        self.hasher.update(bytes);
+        self.written += bytes.len() as u64;
+        Ok(())
+    }
+}
+
+/// [`apply_delta`] without holding the files in memory: `old` is read where the delta points (seeking), the delta is opened four times
+/// (once to check its trailer, then one reader for each of its three streams, so the control, difference and new-byte streams advance
+/// together), and the result goes to `out` in pieces of [`STREAM_CHUNK`] with its SHA-256 computed on the way. The format is the same,
+/// so a delta made by [`make_delta`] works with either. Every check of the in-memory version is made here too, but bytes may already
+/// have gone to `out` when a later check fails: the caller writes to a temporary file and removes it on `Err` (see [`apply_delta_files`]).
+pub fn apply_delta_stream(old: &mut dyn ReadSeek, open_delta: &dyn Fn() -> std::io::Result<Box<dyn ReadSeek>>, out: &mut dyn std::io::Write) -> Result<StreamInfo, String> {
+    use std::io::{BufReader, SeekFrom};
+    let io = |e: std::io::Error| format!("the delta could not be read: {e}");
+    // 1. the trailer over everything before it, then the header
+    let mut d = open_delta().map_err(io)?;
+    let total = d.seek(SeekFrom::End(0)).map_err(io)?;
+    if total < (HEADER + 32) as u64 {
+        return Err("this is not an IYAKKI binary delta".into());
+    }
+    d.seek(SeekFrom::Start(0)).map_err(io)?;
+    let mut head = [0u8; HEADER];
+    d.read_exact(&mut head).map_err(io)?;
+    if &head[..8] != MAGIC {
+        return Err("this is not an IYAKKI binary delta".into());
+    }
+    let mut h = Sha256::new();
+    h.update(head);
+    let mut buf = vec![0u8; STREAM_CHUNK];
+    let mut left = total - 32 - HEADER as u64;
+    while left > 0 {
+        let n = (left as usize).min(buf.len());
+        d.read_exact(&mut buf[..n]).map_err(io)?;
+        h.update(&buf[..n]);
+        left -= n as u64;
+    }
+    let mut sum = [0u8; 32];
+    d.read_exact(&mut sum).map_err(io)?;
+    if h.finalize().as_slice() != sum {
+        return Err("the delta's checksum does not match: it is damaged, cut off or was changed".into());
+    }
+    let version = u32::from_be_bytes(head[8..12].try_into().unwrap_or([0; 4]));
+    if version != VERSION {
+        return Err(format!("delta version {version} is not understood (this device reads version {VERSION})"));
+    }
+    let be = |a: usize| u64::from_be_bytes(head[a..a + 8].try_into().unwrap_or([0; 8]));
+    let (old_len, new_len) = (be(12), be(20));
+    if old_len > MAX_FILE || new_len > MAX_FILE {
+        return Err(format!("the delta is for a file over {} MB: refused", MAX_FILE >> 20));
+    }
+    let (old_sha, new_sha) = (hex(&head[28..60]), hex(&head[60..92]));
+    // 2. where the three streams are
+    let mut at = HEADER as u64;
+    let mut table = Vec::with_capacity(3);
+    for (n, cap) in [new_len.saturating_mul(3).saturating_add(64), new_len, new_len].into_iter().enumerate() {
+        if at + 16 > total - 32 {
+            return Err(cut());
+        }
+        d.seek(SeekFrom::Start(at)).map_err(io)?;
+        let mut two = [0u8; 16];
+        d.read_exact(&mut two).map_err(io)?;
+        let (raw, zl) = (u64::from_be_bytes(two[..8].try_into().unwrap_or([0; 8])), u64::from_be_bytes(two[8..].try_into().unwrap_or([0; 8])));
+        if raw > cap || zl > total {
+            return Err(format!("the delta's stream {n} announces more data than it can hold: it is damaged"));
+        }
+        let data = at + 16;
+        at = data.checked_add(zl).filter(|e| *e <= total - 32).ok_or_else(cut)?;
+        table.push((data, zl, raw));
+    }
+    if at != total - 32 {
+        return Err("the delta carries more bytes than it lists".into());
+    }
+    drop(d);
+    // 3. the old file is the one the delta was made against
+    let have = old.seek(SeekFrom::End(0)).map_err(|e| format!("the old file could not be read: {e}"))?;
+    old.seek(SeekFrom::Start(0)).map_err(|e| format!("the old file could not be read: {e}"))?;
+    let mismatch = || "the file on this device is not the version this delta was made against (its length or SHA-256 differs): nothing was changed".to_string();
+    if have != old_len {
+        return Err(mismatch());
+    }
+    let mut oh = Sha256::new();
+    let mut left = have;
+    while left > 0 {
+        let n = (left as usize).min(buf.len());
+        old.read_exact(&mut buf[..n]).map_err(|e| format!("the old file could not be read: {e}"))?;
+        oh.update(&buf[..n]);
+        left -= n as u64;
+    }
+    if hex(&oh.finalize()) != old_sha {
+        return Err(mismatch());
+    }
+    // 4. the three streams
+    let mut streams = Vec::with_capacity(3);
+    for (data, zl, raw) in table {
+        let mut r = open_delta().map_err(io)?;
+        r.seek(SeekFrom::Start(data)).map_err(io)?;
+        let src: Box<dyn Read> = Box::new(BufReader::with_capacity(16 << 10, r.take(zl)));
+        let dec = ruzstd::decoding::StreamingDecoder::new(src).map_err(|e| format!("the delta's data is not readable ({e})"))?;
+        streams.push(Stream { dec: BufReader::with_capacity(STREAM_CHUNK, Box::new(dec) as Box<dyn Read>), raw, used: 0 });
+    }
+    let mut extra = streams.pop().ok_or_else(cut)?;
+    let mut diff = streams.pop().ok_or_else(cut)?;
+    let mut ctrl = streams.pop().ok_or_else(cut)?;
+    // 5. walk the pieces
+    let (mut ob, mut db) = (vec![0u8; STREAM_CHUNK], vec![0u8; STREAM_CHUNK]);
+    let (mut sink, mut oldpos) = (Sink { hasher: Sha256::new(), written: 0 }, 0i64);
+    let bad = || "the delta's pieces do not fit the files: it is damaged".to_string();
+    while ctrl.used < ctrl.raw {
+        let add = ctrl.varint()?;
+        let ext = ctrl.varint()?;
+        let seek = ctrl.signed()?;
+        if sink.written.saturating_add(add).saturating_add(ext) > new_len || diff.used.checked_add(add).is_none_or(|x| x > diff.raw) || extra.used.checked_add(ext).is_none_or(|x| x > extra.raw) {
+            return Err(bad());
+        }
+        if add > 0 {
+            if oldpos < 0 || (oldpos as u64).checked_add(add).is_none_or(|x| x > old_len) {
+                return Err(bad());
+            }
+            old.seek(SeekFrom::Start(oldpos as u64)).map_err(|e| format!("the old file could not be read: {e}"))?;
+            let mut left = add;
+            while left > 0 {
+                let n = (left as usize).min(STREAM_CHUNK);
+                old.read_exact(&mut ob[..n]).map_err(|_| "the old file is shorter than it was a moment ago".to_string())?;
+                diff.read_exact(&mut db[..n])?;
+                for (o, x) in ob[..n].iter_mut().zip(&db[..n]) {
+                    *o = o.wrapping_add(*x);
+                }
+                sink.emit(&ob[..n], out)?;
+                left -= n as u64;
+            }
+        }
+        let mut left = ext;
+        while left > 0 {
+            let n = (left as usize).min(STREAM_CHUNK);
+            extra.read_exact(&mut db[..n])?;
+            sink.emit(&db[..n], out)?;
+            left -= n as u64;
+        }
+        oldpos = oldpos.checked_add(add as i64).and_then(|x| x.checked_add(seek)).ok_or_else(bad)?;
+    }
+    ctrl.finished()?;
+    diff.finished().map_err(|_| bad())?;
+    extra.finished().map_err(|_| bad())?;
+    if sink.written != new_len {
+        return Err(bad());
+    }
+    let got = hex(&sink.hasher.finalize());
+    if got != new_sha {
+        return Err("the file made from the delta does not match the SHA-256 the delta promises: nothing was kept".into());
+    }
+    Ok(StreamInfo { new_len, new_sha256: got, buffers: STREAM_BUFFERS })
+}
+
+/// [`apply_delta_stream`] on files: the result is written to `<out>.applying`, flushed to disk and renamed to `out` only when every
+/// check passed. On any failure the temporary file is removed and `out` is not created. Needs room for the new file (plus a margin).
+pub fn apply_delta_files(old: &std::path::Path, delta: &std::path::Path, out: &std::path::Path) -> Result<StreamInfo, String> {
+    use std::io::Write;
+    let tmp = out.with_file_name(format!("{}.applying", out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+    if tmp == old || out == old {
+        return Err("the new file must not be written over the old one".into());
+    }
+    let mut of = std::fs::File::open(old).map_err(|e| format!("{}: {e}", old.display()))?;
+    let delta = delta.to_path_buf();
+    let open = move || -> std::io::Result<Box<dyn ReadSeek>> { Ok(Box::new(std::fs::File::open(&delta)?)) };
+    let result = (|| {
+        let f = std::fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        let mut w = std::io::BufWriter::with_capacity(STREAM_CHUNK, f);
+        let info = apply_delta_stream(&mut of, &open, &mut w)?;
+        w.flush().map_err(|e| format!("{}: {e}", tmp.display()))?;
+        w.get_ref().sync_all().map_err(|e| format!("{}: {e}", tmp.display()))?;
+        Ok::<_, String>(info)
+    })();
+    match result {
+        Ok(info) => std::fs::rename(&tmp, out).map(|_| info).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("{}: {e}", out.display())
+        }),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}

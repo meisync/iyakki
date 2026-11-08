@@ -4,6 +4,12 @@ use crate::webgraphics::*;
 use std::path::PathBuf;
 
 const GPU: &str = "1002:1681";
+
+/// The pending-notice queue is one static: the tests that read it take turns.
+fn pending_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 const T0: i64 = 1_793_980_000; // the previous session started
 const HW: &str = "graphics: hardware AMD Radeon 610M (radeonsi, raphael_mendocino, ACO, DRM 3.61, 6.12.112) on /dev/dri/renderD128 (BGRA read-back)";
 
@@ -195,6 +201,7 @@ fn the_setting_is_saved_versioned_and_changing_it_forgets_the_fall_back() {
 
 #[test]
 fn apply_writes_the_engine_log_the_audit_note_and_the_toast_once() {
+    let _turn = pending_lock();
     let d = data("apply");
     let _ = take_pending();
     let w = world(&d, Some(prev(true, 130)), hw_log());
@@ -283,4 +290,34 @@ fn the_mode_names() {
     }
     assert_eq!(Mode::Automatic.next().next().next(), Mode::Automatic);
     assert_eq!(Mode::from_id("x"), None);
+}
+
+/// KI (HP Pavilion 16-af0, 2026-11-07): the kernel declared the Meteor Lake card wedged (no GuC firmware before the root was mounted);
+/// Mesa could not query the device and the helper died by a signal before its first frame. The shell falls back in the same session.
+#[test]
+fn a_helper_that_dies_right_after_a_hardware_start_falls_back_at_once_but_not_on_a_clean_end_or_a_hardware_setting() {
+    let _turn = pending_lock();
+    let _ = take_pending();
+    let log = vec!["wpe-helper: sound: ALSA_CONFIG_PATH=(unset)".to_string(), "MESA: warning: Could not get intel_device_info.".to_string(), "graphics: hardware llvmpipe (LLVM 21.1.8, 256 bits) on /dev/dri/renderD128 (BGRA read-back)".to_string()];
+    let why = "the connection to the helper failed: Connection reset by peer (os error 104) (ended by a signal)";
+    assert!(died_at_start(&log, why, false));
+    assert!(!died_at_start(&log, why, true), "an engine that was ready and stopped later is a freeze for the next start, not this");
+    assert!(!died_at_start(&log, "exited with status 0", false), "a clean exit is not a crash");
+    assert!(!died_at_start(&["graphics: software requested, using shared memory pictures".to_string()], why, false), "a crash in software mode has nothing to fall back to");
+    let data = std::env::temp_dir().join(format!("iyakki-webgraphics-now-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    assert!(fall_back_now(&data, "", "x").is_err(), "no card known: nothing to remember");
+    fall_back_now(&data, "8086:7d45", "ended by a signal").unwrap();
+    assert!(load_state(&data).fallback_for("8086:7d45").is_some(), "the card is remembered for the next start");
+    // other tests queue notices through apply_with at the same time: look for ours
+    let p = take_pending();
+    let ours = p.iter().find(|x| x.status.as_deref() == Some(CRASH_NOTICE)).expect("the crash notice is queued");
+    assert!(ours.audit.as_deref().unwrap_or("").contains("8086:7d45"));
+    assert!(ours.toast.as_deref().unwrap_or("").len() < 120, "the toast is one short line");
+    assert!(fall_back_now(&data, "8086:7d45", "again").is_err(), "a second crash does not restart the engine in a loop");
+    // the person chose Hardware: the shell never overrides that
+    set_mode(&data, Mode::Hardware).unwrap();
+    assert!(fall_back_now(&data, "8086:7d45", "x").is_err());
+    let _ = std::fs::remove_dir_all(&data);
 }

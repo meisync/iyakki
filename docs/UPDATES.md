@@ -80,6 +80,39 @@ manifest: it records "version X is out" so the badge, the System update page and
 The notice goes to the person who was signed in at the check, not to every administrator. Not built: Update all in one click for the
 system, and keeping the previous package version for rollback.
 
+## System components from a store (apply path)
+
+A private store the person added with its key confirmed can offer separate system parts: kernel, boot, base, core and the kernel layer
+(docs/development/COMPONENT-UPDATES-PLAN.md). The way they are taken is the same machinery as above, not a new one:
+
+* **See it:** the assistant's `components_status`, or the line "Components from <store>: N newer" in Settings -> System update (kept from
+  the last "Check for updates"). Both only read the store's signed list.
+* **Approve it:** the assistant's `components_apply` (a hard ask, never covered by a session grant) or the button **Review and apply** in
+  Settings -> System update. Both show the same review: what changes, how big (only the difference or the whole file), whether a restart is
+  needed, and what is kept to go back to. Approving that review (the card, or `y` on the page) is the approval; it is bound to that exact plan,
+  so a list that changed after it was shown is not installed.
+* **What happens:** each file is downloaded (resuming) and checked against the SHA-256 in the store's signed list; a difference is applied to
+  the installed file as a stream (a few hundred KB of buffers, not the file size). **Kernel, boot and base** become an update payload and go
+  through this page's engine: previous version copied to the data volume and kept in the boot menu as "IYAKKI (previous version)", UPDATING
+  marker, atomic replace, boot counter, trial record. Every written file is then read back against the signed hash; if one differs, the previous
+  version is put back (the same as **Roll back**) and nothing is recorded. **Core** (and the kernel layer) become a patch pack, a difference
+  against the running program, stored for the next start; the running program is not replaced, and the patch start counter turns the layer off
+  by itself if starts keep failing.
+* **What it refuses:** no approval, free space short (work folder, boot partition, data volume), a boot partition that is not this install's
+  (found on the data volume's own disk, with an IYAKKI boot menu), a `requires` range that would break (it names the part to update first), an
+  update already written that waits for a restart or an unfinished one, and a release label that is not the running one unless the base is part
+  of the same update (the base carries the label the first start is checked against).
+* **What it records:** `components-installed.json` in the data folder gets the new versions and hashes only after the read-back succeeded, and
+  marks them as waiting for the restart. At every start (and whenever the page or the assistant reads it) the record is checked against facts: the
+  running kernel release, the `VERSION` of `/etc/iyakki-release` and the version the running program was built as. A record that disagrees is
+  replaced by the fact, so a rollback or a fall-back start cannot leave it lying.
+* **The label:** the store signs the IYAKKI version and image variant its parts belong to into the list (`release`); the payload uses it. A
+  partial update (say only a kernel) must carry the label of the install it goes onto.
+* The computer never restarts by itself.
+
+Not proven: any of this on a real boot partition, a real 400 MB base image, the real mount, a real store, or a restart into the result (see
+docs/development/COMPONENT-UPDATES-PLAN.md, "Built so far").
+
 ## What is not built or not proven
 
 * **No download from the internet.** There is no update index yet (open decision D6 in docs/development/IMPROVEMENTS-PLAN.md: where it is

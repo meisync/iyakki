@@ -23,6 +23,8 @@ pub mod builtin;
 pub mod catalog;
 pub mod compcli;
 pub mod compmanifest;
+pub mod compapply;
+pub mod compinstalled;
 pub mod components;
 pub mod drivers;
 pub mod install;
@@ -702,6 +704,10 @@ mod server_tests;
 
 #[cfg(test)]
 mod components_tests;
+#[cfg(test)]
+mod compinstalled_tests;
+#[cfg(test)]
+mod compapply_tests;
 
 #[cfg(test)]
 mod private_tests;

@@ -341,6 +341,47 @@ static void hw_close(void) {
     G.drm_fd = -1;
 }
 
+/* One render node: open it, bring up GBM, EGL and a GLES2 context on it. 1 when G is set up on it; 0 when it is unusable (everything
+   closed again). `software` says the node gave only Mesa's software renderer (llvmpipe/softpipe): a card the kernel declared wedged, or
+   no driver for it, still hands out a render node and Mesa falls back to llvmpipe on it; that is not the card. */
+static int hw_try_node(const char *path, PFNEGLGETPLATFORMDISPLAYEXTPROC get_pd, int *software) {
+    *software = 0;
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return 0;
+    struct gbm_device *gbm = gbm_create_device(fd);
+    EGLDisplay d = gbm ? get_pd(EGL_PLATFORM_GBM_KHR, gbm, NULL) : EGL_NO_DISPLAY;
+    EGLint maj, min;
+    if (d == EGL_NO_DISPLAY || !eglInitialize(d, &maj, &min)) { if (gbm) gbm_device_destroy(gbm); close(fd); return 0; }
+    G.drm_fd = fd; G.gbm = gbm; G.edpy = d;
+    const char *ext = eglQueryString(G.edpy, EGL_EXTENSIONS);
+    if (!ext || !strstr(ext, "EGL_WL_bind_wayland_display") || !strstr(ext, "EGL_KHR_image_base")) {
+        logf_("graphics: %s lacks wl_bind or image support", path); hw_close(); return 0;
+    }
+    eglBindAPI(EGL_OPENGL_ES_API);
+    EGLint cfg_attr[] = { EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_SURFACE_TYPE, 0, EGL_NONE };
+    EGLConfig cfg; EGLint ncfg = 0;
+    if (!eglChooseConfig(G.edpy, cfg_attr, &cfg, 1, &ncfg) || ncfg < 1) {
+        EGLint a2[] = { EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE };
+        if (!eglChooseConfig(G.edpy, a2, &cfg, 1, &ncfg) || ncfg < 1) { logf_("graphics: %s has no ES2 config", path); hw_close(); return 0; }
+    }
+    EGLint ctx_attr[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
+    G.ectx = eglCreateContext(G.edpy, cfg, EGL_NO_CONTEXT, ctx_attr);
+    if (G.ectx == EGL_NO_CONTEXT || !eglMakeCurrent(G.edpy, EGL_NO_SURFACE, EGL_NO_SURFACE, G.ectx)) {
+        logf_("graphics: %s gives no GLES2 context (0x%x)", path, eglGetError()); hw_close(); return 0;
+    }
+    const char *gl = (const char *)glGetString(GL_EXTENSIONS);
+    G.img_target = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+    if (!G.img_target || !gl || !strstr(gl, "GL_OES_EGL_image")) { logf_("graphics: %s has no GL_OES_EGL_image", path); hw_close(); return 0; }
+    const char *renderer = (const char *)glGetString(GL_RENDERER);
+    if (renderer && (strstr(renderer, "llvmpipe") || strstr(renderer, "softpipe") || strstr(renderer, "SWR"))) *software = 1;
+    G.bgra_ok = strstr(gl, "GL_EXT_read_format_bgra") != NULL;
+    return 1;
+}
+
+/* The rule: the graphics card when its driver and firmware work, software drawing otherwise. Every render node is tried in turn and the
+   first one with a real renderer wins; a node that gives only llvmpipe (a wedged or driverless card: the HP's Meteor Lake without its GuC
+   firmware, 2026-11-07) is left aside so a second card (an NVIDIA one) still gets its chance. When no card renders, the pictures go through
+   shared memory: the same CPU work as llvmpipe, without buffers on a card that is not there. IYAKKI_WEBVIEW_RENDER_NODE pins one node. */
 static int hw_open(void) {
     G.drm_fd = -1; G.edpy = EGL_NO_DISPLAY; G.ectx = EGL_NO_CONTEXT;
     const char *off = getenv("IYAKKI_WEBVIEW_GPU");
@@ -349,43 +390,25 @@ static int hw_open(void) {
     char path[64];
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_pd = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     if (!get_pd) { logf_("graphics: no eglGetPlatformDisplayEXT, using shared memory pictures"); return 0; }
-    for (int i = 0; i < 4 && G.edpy == EGL_NO_DISPLAY; i++) {
+    int tried = 0, soft_nodes = 0;
+    for (int i = 0; i < 4; i++) {
         if (node) { if (i) break; snprintf(path, sizeof path, "%s", node); }
         else snprintf(path, sizeof path, "/dev/dri/renderD%d", 128 + i);
-        int fd = open(path, O_RDWR | O_CLOEXEC);
-        if (fd < 0) continue;
-        struct gbm_device *gbm = gbm_create_device(fd);
-        EGLDisplay d = gbm ? get_pd(EGL_PLATFORM_GBM_KHR, gbm, NULL) : EGL_NO_DISPLAY;
-        EGLint maj, min;
-        if (d != EGL_NO_DISPLAY && eglInitialize(d, &maj, &min)) { G.drm_fd = fd; G.gbm = gbm; G.edpy = d; break; }
-        if (gbm) gbm_device_destroy(gbm);
-        close(fd);
+        int software = 0;
+        if (!hw_try_node(path, get_pd, &software)) continue;
+        tried++;
+        if (software && !node) {
+            logf_("graphics: %s gives only %s (the card is not usable: wedged, or its driver has no firmware), looking further", path, (const char *)glGetString(GL_RENDERER));
+            soft_nodes++; hw_close(); continue;
+        }
+        glGenTextures(1, &G.tex);
+        glGenFramebuffers(1, &G.fbo);
+        logf_("graphics: hardware %s on %s (%s)", (const char *)glGetString(GL_RENDERER), path, G.bgra_ok ? "BGRA read-back" : "RGBA read-back");
+        return 1;
     }
-    if (G.edpy == EGL_NO_DISPLAY) { logf_("graphics: no usable render node, using shared memory pictures"); return 0; }
-    const char *ext = eglQueryString(G.edpy, EGL_EXTENSIONS);
-    if (!ext || !strstr(ext, "EGL_WL_bind_wayland_display") || !strstr(ext, "EGL_KHR_image_base")) {
-        logf_("graphics: display lacks wl_bind or image support, using shared memory pictures"); hw_close(); return 0;
-    }
-    eglBindAPI(EGL_OPENGL_ES_API);
-    EGLint cfg_attr[] = { EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_SURFACE_TYPE, 0, EGL_NONE };
-    EGLConfig cfg; EGLint ncfg = 0;
-    if (!eglChooseConfig(G.edpy, cfg_attr, &cfg, 1, &ncfg) || ncfg < 1) {
-        EGLint a2[] = { EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE };
-        if (!eglChooseConfig(G.edpy, a2, &cfg, 1, &ncfg) || ncfg < 1) { logf_("graphics: no ES2 config, using shared memory pictures"); hw_close(); return 0; }
-    }
-    EGLint ctx_attr[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
-    G.ectx = eglCreateContext(G.edpy, cfg, EGL_NO_CONTEXT, ctx_attr);
-    if (G.ectx == EGL_NO_CONTEXT || !eglMakeCurrent(G.edpy, EGL_NO_SURFACE, EGL_NO_SURFACE, G.ectx)) {
-        logf_("graphics: no GLES2 context (0x%x), using shared memory pictures", eglGetError()); hw_close(); return 0;
-    }
-    const char *gl = (const char *)glGetString(GL_EXTENSIONS);
-    G.img_target = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
-    if (!G.img_target || !gl || !strstr(gl, "GL_OES_EGL_image")) { logf_("graphics: no GL_OES_EGL_image, using shared memory pictures"); hw_close(); return 0; }
-    G.bgra_ok = strstr(gl, "GL_EXT_read_format_bgra") != NULL;
-    glGenTextures(1, &G.tex);
-    glGenFramebuffers(1, &G.fbo);
-    logf_("graphics: hardware %s on %s (%s)", (const char *)glGetString(GL_RENDERER), path, G.bgra_ok ? "BGRA read-back" : "RGBA read-back");
-    return 1;
+    if (soft_nodes) logf_("graphics: no card renders (%d node(s) with a software renderer only), using shared memory pictures", soft_nodes);
+    else if (!tried) logf_("graphics: no usable render node, using shared memory pictures");
+    return 0;
 }
 
 static void mark_all(void) { G.need_full = TRUE; G.back_new = G.back != NULL; schedule_flush(); }
@@ -1218,7 +1241,31 @@ static void setup_engine(void) {
     }
     g_signal_connect(G.session, "download-started", G_CALLBACK(on_download_started), NULL);
 
-    WebKitWebContext *ctx = webkit_web_context_new();
+    /* Memory: the shell says how much this engine may use (IYAKKI_WEBVIEW_MEM_MB, from the machine's memory and the person's Speed and
+       memory choice, webengine/browser_speed); WebKit then frees caches at a third and at half of it instead of waiting for the whole
+       machine to run short (its default limits are a share of the machine for EVERY process, so several tabs could add up to all of it).
+       The network process gets a third of that for its own caches. No kill threshold: a page is never killed for memory here. */
+    WebKitWebContext *ctx = NULL;
+    const char *mem_mb = getenv("IYAKKI_WEBVIEW_MEM_MB");
+    long mem = mem_mb ? strtol(mem_mb, NULL, 10) : 0;
+    if (mem >= 64 && mem <= 65536) {
+        WebKitMemoryPressureSettings *mp = webkit_memory_pressure_settings_new();
+        webkit_memory_pressure_settings_set_memory_limit(mp, (guint)mem);
+        ctx = g_object_new(WEBKIT_TYPE_WEB_CONTEXT, "memory-pressure-settings", mp, NULL);
+        WebKitMemoryPressureSettings *np = webkit_memory_pressure_settings_new();
+        webkit_memory_pressure_settings_set_memory_limit(np, (guint)(mem / 3 < 64 ? 64 : mem / 3));
+        webkit_network_session_set_memory_pressure_settings(np);
+        webkit_memory_pressure_settings_free(mp);
+        logf_("memory: the web process may use %ld MB, the network process %ld MB (caches are freed at a third and at half of it)", mem, mem / 3 < 64 ? 64L : mem / 3);
+    } else {
+        ctx = webkit_web_context_new();
+    }
+    /* IYAKKI_WEBVIEW_CACHE_MODEL: "document" keeps smaller in-memory caches (a machine with little memory, or the person's Small
+       choice), "viewer" the smallest (no back-forward cache: for a kiosk page), anything else WebKit's full browser model. */
+    const char *cm = getenv("IYAKKI_WEBVIEW_CACHE_MODEL");
+    if (cm && !strcmp(cm, "document")) webkit_web_context_set_cache_model(ctx, WEBKIT_CACHE_MODEL_DOCUMENT_BROWSER);
+    else if (cm && !strcmp(cm, "viewer")) webkit_web_context_set_cache_model(ctx, WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER);
+    if (cm && *cm) logf_("memory: cache model %s", cm);
     if (G.locale && *G.locale) {
         const char *langs[] = { G.locale, NULL };
         webkit_web_context_set_preferred_languages(ctx, langs);

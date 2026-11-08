@@ -274,12 +274,42 @@ pub fn check_entry(e: &Entry) -> Result<(), String> {
 
 // ------------------------------------------------------------------------------------------------ the document
 
-/// The document the store serves: only live entries, plus the withdrawn ones so a device that saw them refuses them.
+/// The IYAKKI release the listed components belong to: the version string and the image variant (`0.1.0-alpha.3`, `pc`). It is part of
+/// the signed document, so the update payload a device makes from the components carries the label the store signed, not one typed on a
+/// command line.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReleaseLabel {
+    pub version: String,
+    pub variant: String,
+}
+
+impl ReleaseLabel {
+    pub fn check(&self) -> Result<(), String> {
+        if !valid_version(&self.version) {
+            return Err(format!("the release {:?} is not a version (digits and dots, optional -pre)", self.version));
+        }
+        if !(1..=24).contains(&self.variant.len()) || !self.variant.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(format!("the release variant {:?} is 1 to 24 letters, digits, dashes", self.variant));
+        }
+        Ok(())
+    }
+}
+
+/// [`build_doc_with`] for a store that has no release label.
 pub fn build_doc(store_id: &str, serial: u64, issued: i64, records: &[Record], key: &SigningKey) -> String {
+    build_doc_with(store_id, serial, issued, records, None, key)
+}
+
+/// The document the store serves: only live entries, plus the withdrawn ones so a device that saw them refuses them. `release` (when the
+/// store has one) is signed with the rest.
+pub fn build_doc_with(store_id: &str, serial: u64, issued: i64, records: &[Record], release: Option<&ReleaseLabel>, key: &SigningKey) -> String {
     let mut live: Vec<&Entry> = records.iter().filter(|r| r.yanked.is_none() && !r.purged).map(|r| &r.entry).collect();
     live.sort_by(|a, b| a.component.cmp(&b.component).then(a.channel.cmp(&b.channel)).then_with(|| compare_versions(&a.version, &b.version)));
     let yanked: Vec<Yank> = records.iter().filter_map(|r| r.yanked.as_ref().map(|why| Yank { component: r.entry.component.clone(), version: r.entry.version.clone(), sha256: r.entry.sha256.clone(), channel: r.entry.channel.clone(), reason: why.clone() })).collect();
     let mut doc = json!({"v": 1, "id": store_id, "serial": serial, "issued": issued, "components": live, "yanked": yanked, "key": public_key_hex(key)});
+    if let Some(r) = release {
+        doc["release"] = json!({"version": r.version, "variant": r.variant});
+    }
     let sig = sign_doc(PURPOSE, &doc, key);
     doc["sig"] = Value::String(sig);
     doc.to_string()
@@ -293,6 +323,8 @@ pub struct Doc {
     pub entries: Vec<Entry>,
     pub yanked: Vec<Yank>,
     pub key: String,
+    /// The IYAKKI release the components belong to (signed), when the store says.
+    pub release: Option<ReleaseLabel>,
 }
 
 impl Doc {
@@ -322,7 +354,15 @@ pub fn verify(body: &[u8], pin: &str) -> Result<Doc, String> {
     for e in &entries {
         check_entry(e).map_err(|e| format!("the component list has a bad entry: {e}"))?;
     }
-    Ok(Doc { id: v["id"].as_str().unwrap_or("").to_string(), serial: v["serial"].as_u64().unwrap_or(0), issued: v["issued"].as_i64().unwrap_or(0), entries, yanked, key: key.to_ascii_lowercase() })
+    let release = match v.get("release") {
+        None | Some(Value::Null) => None,
+        Some(r) => {
+            let l: ReleaseLabel = serde_json::from_value(r.clone()).map_err(|e| format!("the component list has a bad release label: {e}"))?;
+            l.check().map_err(|e| format!("the component list has a bad release label: {e}"))?;
+            Some(l)
+        }
+    };
+    Ok(Doc { id: v["id"].as_str().unwrap_or("").to_string(), serial: v["serial"].as_u64().unwrap_or(0), issued: v["issued"].as_i64().unwrap_or(0), entries, yanked, key: key.to_ascii_lowercase(), release })
 }
 
 /// `<store>/v1/components.json` for a catalog address (`.../catalog.json` or a base address).

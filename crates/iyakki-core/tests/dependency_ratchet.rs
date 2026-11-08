@@ -163,13 +163,16 @@ fn the_scanner_counts_what_it_says_and_skips_tests_and_comments() {
 //
 // 1. `iyakki-uikit` (the toolkit: gfx, fx, ui, text fields ...) depends on no `iyakki-*` crate, so a tile crate that uses it never pulls in
 //    the agent. (It is not called `iyakki-ui`: that name is the older headless editor model that `iyakki-gui` uses.)
-// 2. A tile crate (`crates/iyakki-tile-*`) depends on `iyakki-uikit` and on no other `iyakki-*` crate, except the lines in
-//    `data/tile_crate_deps.allow` (which may only shrink). The tile-ABI crates are not tile crates; they are listed in `TILE_INFRA`.
+// 2. A tile crate (`crates/iyakki-tile-*`) depends on `iyakki-uikit` and `iyakki-tile-api` and on no other `iyakki-*` crate, except the
+//    lines in `data/tile_crate_deps.allow` (which may only shrink). The tile-ABI crates and the facade are not tile crates; they are
+//    listed in `TILE_INFRA`.
+// 3. The facade `iyakki-tile-api` depends on `iyakki-uikit` only (never the agent).
 
 const TILE_ALLOW: &str = include_str!("data/tile_crate_deps.allow");
 const UI_CRATE: &str = "iyakki-uikit";
+const API_CRATE: &str = "iyakki-tile-api";
 /// Crates under `iyakki-tile-*` that are the WASM tile interface and its host, not tiles. Not covered by rule 2.
-const TILE_INFRA: [&str; 3] = ["iyakki-tile-abi", "iyakki-tile-host", "iyakki-tile-example"];
+const TILE_INFRA: [&str; 4] = ["iyakki-tile-abi", "iyakki-tile-host", "iyakki-tile-example", API_CRATE];
 
 /// The `iyakki-*` crates a manifest names in `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]` (also `[target.*.…]`).
 fn iyakki_deps(manifest: &str) -> Vec<String> {
@@ -205,6 +208,12 @@ fn the_toolkit_crate_depends_on_no_iyakki_crate() {
     assert!(deps.is_empty(), "{UI_CRATE} must not depend on any iyakki-* crate (it is what tile crates build on, without the agent); found {deps:?}");
 }
 
+#[test]
+fn the_tile_facade_depends_on_the_toolkit_only() {
+    let deps = iyakki_deps(&manifest(API_CRATE));
+    assert_eq!(deps, vec![UI_CRATE.to_string()], "{API_CRATE} may depend on {UI_CRATE} and nothing else named iyakki-* (found {deps:?})");
+}
+
 fn tile_allowed() -> Vec<(String, String)> {
     TILE_ALLOW
         .lines()
@@ -231,7 +240,7 @@ fn tile_crates_depend_only_on_the_toolkit_and_the_list_only_shrinks() {
     names.sort();
     for name in &names {
         for dep in iyakki_deps(&manifest(name)) {
-            if dep == UI_CRATE {
+            if dep == UI_CRATE || dep == API_CRATE {
                 continue;
             }
             if allow.iter().any(|(c, d)| c == name && *d == dep) {
@@ -241,7 +250,7 @@ fn tile_crates_depend_only_on_the_toolkit_and_the_list_only_shrinks() {
             }
         }
     }
-    assert!(bad.is_empty(), "A tile crate may depend only on {UI_CRATE} (or a documented exception in tests/data/tile_crate_deps.allow): {bad:?}");
+    assert!(bad.is_empty(), "A tile crate may depend only on {UI_CRATE} and {API_CRATE} (or a documented exception in tests/data/tile_crate_deps.allow): {bad:?}");
     let stale: Vec<_> = allow.iter().filter(|a| !used.contains(a)).collect();
     assert!(stale.is_empty(), "Good: these exceptions are gone; remove them from tests/data/tile_crate_deps.allow: {stale:?}");
 }

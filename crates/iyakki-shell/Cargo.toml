@@ -11,6 +11,9 @@ iyakki-proxy = { path = "../iyakki-proxy", features = ["testcerts"] }
 [dependencies]
 iyakki-agent = { path = "../iyakki-agent" }
 iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-tile-api = { path = "../iyakki-tile-api" }
+iyakki-tile-usage = { path = "../iyakki-tile-usage" }
+iyakki-tile-calendar = { path = "../iyakki-tile-calendar" }
 iyakki-vpn = { path = "../iyakki-vpn" }
 iyakki-sec.workspace = true
 iyakki-storage.workspace = true

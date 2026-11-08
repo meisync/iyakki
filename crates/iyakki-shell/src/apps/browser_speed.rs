@@ -120,6 +120,40 @@ pub fn numbers(stats: Option<iyakki_web::cache::CacheStats>, c: net::Snapshot) -
     out
 }
 
+// ------------------------------------------------------------------ the full engine's share of memory (2026-11-07)
+
+/// How much memory one full engine (one tab's web process) may use before WebKit frees its caches, in MB. WebKit's own default is a
+/// share of the whole machine for every process, so several tabs could add up to all of it; this is a share of what is available
+/// NOW: Auto a third, Large a half, Small a fifth, kept between 192 MB and 4 GB and never more than the machine has.
+pub fn engine_memory_mb(size: CacheSize, mem_total: u64, mem_available: u64) -> u64 {
+    let avail = if mem_available == 0 { 1024 * net::MIB } else { mem_available };
+    let share = match size {
+        CacheSize::Auto => avail / 3,
+        CacheSize::Large => avail / 2,
+        CacheSize::Small => avail / 5,
+    };
+    let cap = if mem_total == 0 { 4096 * net::MIB } else { mem_total.min(4096 * net::MIB) };
+    (share.clamp(192 * net::MIB, cap) / net::MIB).max(192)
+}
+
+/// WebKit's cache model for the engine: `document` (smaller in-memory caches, no large back-forward cache) for the Small choice and
+/// for machines with 4 GB or less; the full browser model (`browser`) otherwise.
+pub fn engine_cache_model(size: CacheSize, mem_total: u64) -> &'static str {
+    if size == CacheSize::Small || (mem_total > 0 && mem_total <= 4096 * net::MIB) {
+        "document"
+    } else {
+        "browser"
+    }
+}
+
+/// The two engine variables the helper reads (`IYAKKI_WEBVIEW_MEM_MB`, `IYAKKI_WEBVIEW_CACHE_MODEL`, `dist/webview/wpe-helper/helper.c`).
+pub fn engine_env(size: CacheSize, m: &Machine) -> Vec<(String, String)> {
+    vec![
+        ("IYAKKI_WEBVIEW_MEM_MB".to_string(), engine_memory_mb(size, m.mem_total, m.mem_available).to_string()),
+        ("IYAKKI_WEBVIEW_CACHE_MODEL".to_string(), engine_cache_model(size, m.mem_total).to_string()),
+    ]
+}
+
 #[cfg(test)]
 #[path = "browser_speed_tests.rs"]
 mod tests;

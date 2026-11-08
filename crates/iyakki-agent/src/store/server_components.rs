@@ -13,7 +13,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::super::compmanifest::{self as cm, Record};
@@ -53,6 +53,9 @@ impl StreamResp {
 struct CState {
     serial: u64,
     records: Vec<Record>,
+    /// The IYAKKI release the store's list is signed as (the newest a publisher named).
+    #[serde(default)]
+    release: Option<cm::ReleaseLabel>,
 }
 
 /// How a `Range` header applies to a body of `len` bytes.
@@ -310,7 +313,7 @@ impl StoreServer {
     /// `GET /v1/components.json`: signed with the catalog key when asked, from the state.
     pub(super) fn components_doc(&self) -> Resp {
         let st = self.cstate();
-        Resp::new(200, "application/json", cm::build_doc(&self.cfg.id, st.serial.max(1), self.now(), &st.records, &self.key).into_bytes())
+        Resp::new(200, "application/json", cm::build_doc_with(&self.cfg.id, st.serial.max(1), self.now(), &st.records, st.release.as_ref(), &self.key).into_bytes())
     }
 
     /// `POST /v1/components`: publish an entry for blobs that are already uploaded.
@@ -325,6 +328,13 @@ impl StoreServer {
         let mut e: cm::Entry = match serde_json::from_slice(&r.body) {
             Ok(e) => e,
             Err(err) => return Resp::err(400, &format!("not a component entry: {err}")),
+        };
+        let release: Option<cm::ReleaseLabel> = match serde_json::from_slice::<Value>(&r.body).ok().and_then(|v| v.get("release").cloned()).filter(|v| !v.is_null()) {
+            None => None,
+            Some(v) => match serde_json::from_value::<cm::ReleaseLabel>(v).map_err(|e| e.to_string()).and_then(|l| l.check().map(|_| l)) {
+                Ok(l) => Some(l),
+                Err(m) => return Resp::err(422, &format!("not accepted: {m}")),
+            },
         };
         e.added = self.now();
         if e.install_path.is_empty() {
@@ -369,7 +379,15 @@ impl StoreServer {
                 return Resp::err(422, &format!("the delta starts from {}, which is not a full {} artifact this store holds", d.from_sha256, e.component));
             }
         }
+        if let (Some(new), Some(cur)) = (&release, &st.release) {
+            if compare_versions(&new.version, &cur.version) == std::cmp::Ordering::Less {
+                return Resp::err(409, &format!("release {} is older than the {} this store's list is signed as: releases only go up", new.version, cur.version));
+            }
+        }
         st.records.push(Record { entry: e.clone(), owner: owner.clone(), yanked: None, purged: false });
+        if release.is_some() {
+            st.release = release;
+        }
         st.serial += 1;
         if let Err(m) = self.save_cstate(&st) {
             return Resp::err(500, &m);

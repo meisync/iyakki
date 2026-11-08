@@ -409,3 +409,30 @@ fn use_a_store_sets_the_update_list_to_that_stores_announcement_without_typing_a
     b.upd_check_key(&Key::Char('t'), &ucx);
     assert_eq!(check_cfg(&ucx).system_url, "");
 }
+
+#[test]
+fn review_and_apply_shows_the_components_line_and_the_review_and_installs_nothing_until_the_yes() {
+    use crate::apps::settings::updates_page::UpdAsk;
+    use iyakki_agent::store::compapply::{review, save_check, StoreLine};
+    let r = rig("comp");
+    let cx = cx_with_admin_store("upd-comp");
+    let mut a = app(&r, &cx);
+    assert!(a.updates_buttons().iter().any(|b| b.0 == "Review and apply"));
+    // the line from the last check
+    assert!(!a.upd_check_lines(&cx).iter().any(|l| l.0.starts_with("Components from")));
+    save_check(cx.services.dir(), &[StoreLine { store: "Lab store".into(), newer: 2, checked_at: 1, error: String::new() }]);
+    a.upd.comp_lines = None;
+    assert!(a.upd_check_lines(&cx).iter().any(|l| l.0 == "Components from Lab store: 2 newer."));
+    // a review is on screen: the same text the chat card shows, and a plain instruction
+    let plan = iyakki_agent::store::components::Plan { store: "Lab store".into(), channel: "stable".into(), ..Default::default() };
+    let rev = review(&plan, None);
+    let store = iyakki_agent::store::components::PinnedStore { name: "Lab store".into(), base: "http://192.0.2.7:30580".into(), pin: "ab".repeat(32) };
+    *a.upd.comp_review.lock().unwrap() = Some((store, "stable".into(), rev));
+    a.upd.ask = UpdAsk::Components;
+    let lines = a.upd_check_lines(&cx);
+    assert!(lines.iter().any(|l| l.0.contains("Install system components from Lab store")) && lines.iter().any(|l| l.0.contains("Press y to approve")));
+    // n cancels; nothing was recorded or written
+    press(&mut a, &cx, 'n');
+    assert_eq!(a.upd.ask, UpdAsk::None);
+    assert!(!cx.services.dir().join("components-installed.json").exists() && !cx.services.dir().join("component-work").exists());
+}

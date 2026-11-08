@@ -99,7 +99,7 @@ pub mod component;
 pub mod ide;
 pub mod ide_browser;
 pub mod ide_bottom;
-pub mod ide_chrome;
+pub use iyakki_uikit::ide_chrome;
 pub mod ide_deploy;
 pub mod ide_gitview;
 pub mod ide_k8s;
@@ -142,7 +142,7 @@ pub mod devices;
 pub mod settings;
 pub mod settings_nav;
 pub mod users;
-pub mod widgets;
+pub use iyakki_uikit::widgets;
 
 /// What an app asks the shell to do with files dropped on the window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -407,22 +407,7 @@ impl ScrollLog {
     }
 }
 
-/// The blinking caret: on for half a second, off for half, and never while the pane being drawn does not own the keyboard or
-/// the window has lost the system focus (see [`with_caret`]). Every text input and the editor take their caret from here.
-pub fn blink(tick: u64) -> bool {
-    crate::ui::input_focus_allowed() && (tick / 15) % 2 == 0
-}
-
-/// Whether anything that marks "typing goes here" (caret, current-line wash, bracket box) may be drawn now.
-pub fn caret_allowed() -> bool {
-    crate::ui::input_focus_allowed()
-}
-
-/// Draw with the caret allowed (`on`) or hidden: the AI IDE draws the editor and the chat side by side and only the pane
-/// that has the keyboard may show a caret, so a blinking caret always means "typing goes here".
-pub fn with_caret<T>(on: bool, f: impl FnOnce() -> T) -> T {
-    crate::ui::with_input_focus(on, f)
-}
+pub use iyakki_uikit::blink::{blink, caret_allowed, with_caret};
 
 #[cfg(test)]
 mod learn_tests;

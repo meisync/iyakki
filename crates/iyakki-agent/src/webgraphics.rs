@@ -35,6 +35,9 @@ pub const FREEZE_NOTICE: &str = "The last session stopped right after the browse
 /// The sentence when the setting is Hardware and the same thing happened.
 pub const FREEZE_NOTICE_HARDWARE: &str = "The last session stopped right after the browser started on this graphics card. Browser graphics is set to Hardware, so the browser still uses the card. Settings, Browser, Graphics changes this.";
 /// The offer after a clean session in software.
+/// The helper died right after it started on the card (a signal, the connection lost) in THIS session: the fall back happens at once.
+pub const CRASH_NOTICE: &str = "The web engine stopped right after it started on this graphics card, so the browser now draws in software (slower) and the page is loading again. Settings, Browser, Graphics changes this.";
+
 pub const OFFER_NOTICE: &str = "The browser has been drawing in software since the last freeze. If you want, Settings, Browser, Graphics, Try hardware again lets it use the graphics card once more.";
 
 pub const SETTING_SCHEMA: iyakki_schema::Spec = iyakki_schema::Spec { name: "browser graphics setting", current: 1, migrations: &[iyakki_schema::Migration { to: 1, what: "first layout", run: |_| {} }] };
@@ -380,6 +383,49 @@ pub fn set_mode(data: &Path, mode: Mode) -> Result<(), String> {
     Ok(())
 }
 
+/// Did the helper die at its start on the card? The engine was never ready, its log shows it chose a graphics card route
+/// (`graphics: hardware ...`: a render node, also Mesa's llvmpipe on one), and the end was a crash (a signal, the connection
+/// lost), not a clean exit. A card the kernel declared wedged (Meteor Lake without its GuC firmware, 2026-11-07 on the HP) looks
+/// exactly like this: Mesa cannot query the device and the helper dies before its first frame.
+pub fn died_at_start(log: &[String], why: &str, ready: bool) -> bool {
+    if ready {
+        return false;
+    }
+    let on_card = log.iter().any(|l| l.starts_with("graphics: hardware"));
+    let w = why.to_ascii_lowercase();
+    let crash = ["signal", "connection", "reset by peer", "crash", "terminated", "sigsegv", "sigabrt"].iter().any(|k| w.contains(k));
+    on_card && crash
+}
+
+/// The fall back for THIS session, decided by the shell when the helper died at its start on the card ([`died_at_start`]): the card
+/// is remembered like after a freeze, the notice is queued for the status line, the toast and the audit, and the caller starts the
+/// engine again (the next [`apply`] then chooses software). Nothing happens when the setting is Hardware (the person decided) or the
+/// card is already remembered; `Err` says why, so the caller does not restart in a loop.
+pub fn fall_back_now(data: &Path, gpu: &str, reason: &str) -> Result<(), String> {
+    if gpu.is_empty() {
+        return Err("no graphics card is known".into());
+    }
+    let (mode, _) = load_mode(data);
+    if mode == Mode::Hardware {
+        return Err("Browser graphics is set to Hardware".into());
+    }
+    let mut st = load_state(data);
+    if st.fallback_for(gpu).is_some() {
+        return Err(format!("the fall back for card {gpu} is already remembered"));
+    }
+    let now = iyakki_schema::now_secs() as i64;
+    st.fallbacks.retain(|f| f.gpu != gpu);
+    st.fallbacks.push(Fallback { gpu: gpu.to_string(), since: now, reason: reason.to_string() });
+    let keep = st.fallbacks.len().saturating_sub(8);
+    st.fallbacks.drain(..keep);
+    st.offer = false;
+    save_state(data, &st);
+    let audit = format!("Browser graphics: software from now on for card {gpu}, because the web engine stopped right after it started on it ({reason})");
+    log::info!("graphics mode: software (the engine stopped right after its start on card {gpu}: {reason})");
+    PENDING.lock().unwrap_or_else(|e| e.into_inner()).push(Pending { status: Some(CRASH_NOTICE.to_string()), toast: Some(short_of(CRASH_NOTICE)), audit: Some(audit) });
+    Ok(())
+}
+
 /// "Try hardware again": forget the fall back for this card (the setting stays Automatic). The judged session stays judged, so the
 /// same old freeze does not trigger it again; a new freeze will.
 pub fn try_hardware_again(data: &Path, gpu: &str) -> Result<(), String> {
@@ -451,6 +497,7 @@ pub fn short_of(notice: &str) -> String {
         FREEZE_NOTICE => "The browser now draws in software after the last freeze. Settings, Browser, Graphics changes this.",
         FREEZE_NOTICE_HARDWARE => "The last session stopped after the browser started; Hardware is kept. See Settings, Browser, Graphics.",
         OFFER_NOTICE => "You can let the browser use the graphics card again: Settings, Browser, Graphics.",
+        CRASH_NOTICE => "The web engine stopped on the graphics card; the browser now draws in software and loads the page again.",
         other => other,
     }
     .to_string()

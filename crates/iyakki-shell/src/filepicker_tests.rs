@@ -43,18 +43,18 @@ fn fs(name: &str) -> Fs {
     Fs { base, home }
 }
 
-fn scope_for(f: &Fs, role: Role, write: bool) -> Scope {
+fn account_scope(f: &Fs, role: Role, write: bool) -> Scope {
     let mut p = role.template();
     p.fs_read = if role == Role::Guest { vec![] } else { vec![f.home.display().to_string()] };
     p.fs_write = if write { vec![f.home.display().to_string()] } else { vec![] };
     let data = f.base.join("data");
     std::fs::create_dir_all(&data).unwrap();
-    Scope::new("amy", &p, FileRoots::with_home(&p, "amy", &data, f.home.clone()))
+    scope_for("amy", &p, FileRoots::with_home(&p, "amy", &data, f.home.clone()))
 }
 
 fn picker(f: &Fs, kind: PathKind, exts: &[&str]) -> FilePicker {
     let e: Vec<String> = exts.iter().map(|s| s.to_string()).collect();
-    FilePicker::new(kind, &e, "Choose", &f.home.to_string_lossy(), scope_for(f, Role::User, true))
+    FilePicker::new(kind, &e, "Choose", &f.home.to_string_lossy(), account_scope(f, Role::User, true))
 }
 
 fn names(p: &FilePicker) -> Vec<String> {
@@ -188,7 +188,7 @@ fn a_new_folder_is_made_only_where_the_account_may_write() {
     }
     key(&mut p, Key::Enter);
     assert!(f.home.join("fresh").is_dir() && p.sel.as_deref() == Some("fresh") && !p.creating);
-    let mut ro = FilePicker::new(PathKind::Folder, &[], "x", &f.home.to_string_lossy(), scope_for(&f, Role::User, false));
+    let mut ro = FilePicker::new(PathKind::Folder, &[], "x", &f.home.to_string_lossy(), account_scope(&f, Role::User, false));
     ro.handle_event(&Event::Tab(TAB_BASE + 2));
     ro.name.set("nope");
     ro.handle_event(&Event::Tab(TAB_BASE + 6));
@@ -198,20 +198,20 @@ fn a_new_folder_is_made_only_where_the_account_may_write() {
 #[test]
 fn the_picker_shows_only_what_the_account_may_read() {
     let f = fs("roles");
-    let guest = FilePicker::new(PathKind::File, &[], "x", &f.home.to_string_lossy(), scope_for(&f, Role::Guest, false));
+    let guest = FilePicker::new(PathKind::File, &[], "x", &f.home.to_string_lossy(), account_scope(&f, Role::Guest, false));
     assert!(guest.entries().is_empty(), "a guest reads nothing here");
     let mut user = picker(&f, PathKind::File, &[]);
     assert!(!user.go(f.base.join("outside")), "outside the scope");
     assert!(user.error.as_deref().unwrap().contains("may read"));
     assert_eq!(user.dir, f.home);
     let t = f.base.join("outside/secret.txt").to_string_lossy().into_owned();
-    assert_eq!(check(&scope_for(&f, Role::User, false), PathKind::File, &[], &t), Check::NotAllowed);
+    assert_eq!(check(&account_scope(&f, Role::User, false), PathKind::File, &[], &t), Check::NotAllowed);
 }
 
 #[test]
 fn pasted_paths_are_checked_live() {
     let f = fs("check");
-    let sc = scope_for(&f, Role::User, true);
+    let sc = account_scope(&f, Role::User, true);
     let h = f.home.to_string_lossy().into_owned();
     assert_eq!(check(&sc, PathKind::File, &[], ""), Check::Empty);
     assert_eq!(check(&sc, PathKind::File, &[], &format!("{h}/a.txt")), Check::IsFile);
@@ -241,7 +241,7 @@ fn pasted_paths_are_checked_live() {
 #[test]
 fn a_dropped_path_fills_the_field_and_a_file_dropped_on_a_folder_field_uses_its_folder() {
     let f = fs("drop");
-    set_scope_override(Some(scope_for(&f, Role::User, true)));
+    set_scope_override(Some(account_scope(&f, Role::User, true)));
     let mut form = Form::new("t").text("Name", "", "").path("Folder", "", "", PathKind::Folder, &[]).path("File", "", "", PathKind::File, &[]);
     let ev = drop_event(&[f.home.join("a.txt")]).unwrap();
     form.focus = 0; // a plain field has the keyboard: the first path field takes it
@@ -258,7 +258,7 @@ fn a_dropped_path_fills_the_field_and_a_file_dropped_on_a_folder_field_uses_its_
 #[test]
 fn browse_opens_the_picker_over_the_form_and_its_answer_fills_the_field() {
     let f = fs("browse");
-    set_scope_override(Some(scope_for(&f, Role::User, true)));
+    set_scope_override(Some(account_scope(&f, Role::User, true)));
     let mut form = Form::new("t").text("Name", "", "").path("File", "", "", PathKind::File, &["csv"]);
     let mut g = Gfx::new(1280, 720);
     form.render(&mut g, R::new(0.0, 100.0, 1280.0, 620.0), 1.0, [100, 200, 240, 255], true);

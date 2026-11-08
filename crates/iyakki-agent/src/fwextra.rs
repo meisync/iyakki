@@ -250,6 +250,15 @@ pub fn parse_log(text: &str, m: &Manifest) -> Vec<Request> {
             add(t, &drv, &dev);
             continue;
         }
+        // i915's GuC/HuC/GSC loader: "GT0: GuC firmware i915/mtl_guc_70.bin: fetch failed -ENOENT" (the HP's Meteor Lake, 2026-11-07)
+        if let Some(i) = body.find(": fetch failed") {
+            if let Some(t) = body[..i].split_whitespace().last().map(clean_token) {
+                if t.contains('/') || t.contains('.') {
+                    add(t, &drv, &dev);
+                    continue;
+                }
+            }
+        }
         let low = body.to_lowercase();
         if low.contains("firmware") && ["fail", "missing", "can't load", "cannot load", "unable to", "not found", "error -2"].iter().any(|k| low.contains(k)) {
             for w in body.split_whitespace() {

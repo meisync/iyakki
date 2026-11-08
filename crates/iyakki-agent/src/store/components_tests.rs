@@ -747,7 +747,7 @@ fn the_publish_command_uploads_in_pieces_makes_a_delta_and_the_device_downloads_
     assert!(out.contains("published core 1107 to channel stable"), "{out}");
     // pieces of 512 KiB through the library entry point (the command uses 32 MiB): 1.2 MB goes up as three requests
     let up = iyakki_proxy::https::UreqUpstream::default();
-    let req2 = super::compcli::PublishReq { component: "core".into(), version: "1108".into(), channel: "stable".into(), file: f2.clone(), requires: BTreeMap::new(), built_from: "main@def".into(), install_path: String::new(), delta_from: vec![f1.clone()] };
+    let req2 = super::compcli::PublishReq { component: "core".into(), version: "1108".into(), channel: "stable".into(), file: f2.clone(), requires: BTreeMap::new(), built_from: "main@def".into(), install_path: String::new(), release: None, delta_from: vec![f1.clone()] };
     let mut log = vec![];
     let msg = super::compcli::publish_with_chunk(&up, &r.base(), &r.ptoken, &req2, 512 << 10, &mut |s| log.push(s.to_string())).unwrap();
     assert!(msg.contains("published core 1108"), "{msg}");
@@ -904,7 +904,7 @@ fn the_command_line_plans_stages_lists_withdraws_and_cleans_up() {
     assert!(cli_publish(&r, "kernel", "6.12.5", &f, &["--requires", "badformat"]).unwrap_err().contains("name=range"));
     assert!(cli_publish(&r, "kernel", "6.12.5", &f, &["--requires", "core=banana"]).unwrap_err().contains("requires core"));
     cli_publish(&r, "kernel", "6.12.5", &f, &[]).unwrap();
-    let wrong_token = super::compcli::publish_component(&iyakki_proxy::https::UreqUpstream::default(), &r.base(), "iyk_wrong", &super::compcli::PublishReq { component: "kernel".into(), version: "6.12.6".into(), channel: "stable".into(), file: f.clone(), requires: BTreeMap::new(), built_from: String::new(), install_path: String::new(), delta_from: vec![] }, &mut |_| {}).unwrap_err();
+    let wrong_token = super::compcli::publish_component(&iyakki_proxy::https::UreqUpstream::default(), &r.base(), "iyk_wrong", &super::compcli::PublishReq { component: "kernel".into(), version: "6.12.6".into(), channel: "stable".into(), file: f.clone(), requires: BTreeMap::new(), built_from: String::new(), install_path: String::new(), release: None, delta_from: vec![] }, &mut |_| {}).unwrap_err();
     assert!(wrong_token.contains("did not accept the token"), "{wrong_token}");
     // `plan` on the device side: from the store, with the pinned key; nothing installed on record
     let args = |extra: &[&str]| -> Vec<String> { ["component", "plan", "--server", &r.base(), "--key", &r.srv.catalog_key()].iter().chain(extra.iter()).map(|s| s.to_string()).collect() };
@@ -955,4 +955,78 @@ fn the_installed_record_round_trips_and_a_damaged_one_reads_as_empty() {
     std::fs::write(d.join(comps::INSTALLED_FILE), b"{broken").unwrap();
     assert_eq!(Installed::load(&d), Installed::default());
     let _ = std::fs::remove_dir_all(&d);
+}
+
+
+// ---------------------------------------------------------------------------------------- the release label
+
+#[test]
+fn the_signed_list_carries_the_release_label_and_it_only_goes_up() {
+    let r = rig("release", |_| {});
+    let k1 = bytes(1, 4000);
+    // no label yet: the list has none
+    assert_eq!(publish(&r, &r.ptoken, "kernel", "6.12.5", "stable", &k1, &[], &[]).status, 200);
+    let get = |r: &Rig| r.srv.handle(&req("GET", "/v1/components.json", None, b""), "10.0.0.1");
+    assert!(cm::verify(&get(&r).body, &r.srv.catalog_key()).unwrap().release.is_none());
+    // a publish that names a release puts it in the signed list
+    let k2 = bytes(2, 4100);
+    let (_, up) = put_blob(&r, &r.ptoken, "kernel", &k2);
+    assert!(up.status == 200 || up.status == 201);
+    let mut e = entry_json("kernel", "6.12.6", "stable", &k2, &[], &[]);
+    e["release"] = serde_json::json!({"version": "0.1.0-alpha.3", "variant": "pc"});
+    assert_eq!(post_entry(&r, &r.ptoken, &e).status, 200);
+    let body = get(&r).body;
+    let doc = cm::verify(&body, &r.srv.catalog_key()).unwrap();
+    assert_eq!(doc.release, Some(cm::ReleaseLabel { version: "0.1.0-alpha.3".into(), variant: "pc".into() }));
+    // the label is signed: changing it breaks the signature
+    let text = String::from_utf8_lossy(&body).into_owned();
+    assert!(cm::verify(text.replace("0.1.0-alpha.3", "0.1.0-alpha.9").as_bytes(), &r.srv.catalog_key()).is_err());
+    assert!(cm::verify(text.replace("\"pc\"", "\"mac\"").as_bytes(), &r.srv.catalog_key()).is_err());
+    // an older release is refused, a bad one is not accepted, a later one replaces it
+    let k3 = bytes(3, 4200);
+    let (_, up) = put_blob(&r, &r.ptoken, "kernel", &k3);
+    assert!(up.status == 200 || up.status == 201);
+    let mut e3 = entry_json("kernel", "6.12.7", "stable", &k3, &[], &[]);
+    e3["release"] = serde_json::json!({"version": "0.1.0-alpha.2", "variant": "pc"});
+    let older = post_entry(&r, &r.ptoken, &e3);
+    assert_eq!(older.status, 409, "{}", older.text());
+    e3["release"] = serde_json::json!({"version": "not a version", "variant": "pc"});
+    assert_eq!(post_entry(&r, &r.ptoken, &e3).status, 422);
+    e3["release"] = serde_json::json!({"version": "0.1.0-alpha.4", "variant": "p c"});
+    assert_eq!(post_entry(&r, &r.ptoken, &e3).status, 422);
+    e3["release"] = serde_json::json!({"version": "0.1.0-alpha.4", "variant": "pc"});
+    assert_eq!(post_entry(&r, &r.ptoken, &e3).status, 200);
+    assert_eq!(cm::verify(&get(&r).body, &r.srv.catalog_key()).unwrap().release.unwrap().version, "0.1.0-alpha.4");
+}
+
+#[test]
+fn the_staged_payload_is_labelled_with_the_signed_release_unless_flags_override() {
+    let r = rig("release-cli", |_| {});
+    let w = dir("release-cli-work");
+    let f = w.join("kernel");
+    std::fs::write(&f, bytes(31, 80_000)).unwrap();
+    // publishing with only one of the two flags is refused
+    assert!(cli_publish(&r, "kernel", "6.12.5", &f, &["--release", "0.2.1"]).unwrap_err().contains("go together"));
+    cli_publish(&r, "kernel", "6.12.5", &f, &["--release", "0.2.1", "--release-variant", "pc"]).unwrap();
+    let args = |extra: &[&str]| -> Vec<String> { ["component", "plan", "--server", &r.base(), "--key", &r.srv.catalog_key()].iter().chain(extra.iter()).map(|s| s.to_string()).collect() };
+    let rest = w.join("rest");
+    for p in ["boot/grub/grub.cfg", "boot/initrd-lean", "boot/root.sfs"] {
+        std::fs::create_dir_all(rest.join(p).parent().unwrap()).unwrap();
+        std::fs::write(rest.join(p), p.as_bytes()).unwrap();
+    }
+    // no --version/--variant: the signed label is used
+    let out = w.join("out");
+    let t = super::compcli::run(&args(&["--stage", &out.display().to_string(), "--rest-from", &rest.display().to_string()])).unwrap();
+    assert!(t.contains("Update payload for IYAKKI 0.2.1 (pc)"), "{t}");
+    assert!(out.join("update-0.2.1/update.json").is_file());
+    // the flags override it
+    let out2 = w.join("out2");
+    let t = super::compcli::run(&args(&["--stage", &out2.display().to_string(), "--rest-from", &rest.display().to_string(), "--version", "0.2.2", "--variant", "mac"])).unwrap();
+    assert!(t.contains("IYAKKI 0.2.2 (mac)"), "{t}");
+    // a store with no label, and no flags: told what to do
+    let r2 = rig("release-none", |_| {});
+    cli_publish(&r2, "kernel", "6.12.5", &f, &[]).unwrap();
+    let args2: Vec<String> = ["component", "plan", "--server", &r2.base(), "--key", &r2.srv.catalog_key(), "--stage", &w.join("out3").display().to_string(), "--rest-from", &rest.display().to_string()].iter().map(|s| s.to_string()).collect();
+    assert!(super::compcli::run(&args2).unwrap_err().contains("carries no release label"));
+    let _ = std::fs::remove_dir_all(&w);
 }

@@ -865,24 +865,22 @@ fn check_delta_old(target: &Path, path: &str, d: &DeltaSpec) -> Result<(), Strin
 /// (so `dst` is either not there or whole).
 fn write_delta_result(target: &Path, staged: &Path, dst: &Path, path: &str, d: &DeltaSpec) -> Result<u64, String> {
     check_delta_old(target, path, d)?;
-    let old = std::fs::read(target).map_err(|e| format!("{path}: {e}"))?;
-    let blob = std::fs::read(staged).map_err(|e| format!("{path}: {e}"))?;
-    let new = crate::bindelta::apply_delta(&old, &blob).map_err(|e| format!("{path}: {e}"))?;
-    drop(old);
-    if new.len() as u64 != d.new_size || sha256_hex(&new) != d.new_sha256 {
-        return Err(format!("{path}: the file made from the delta is not the one the patch describes (size or SHA-256): nothing was written"));
-    }
     let name = dst.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let tmp = dst.with_file_name(format!(".{name}.delta-new"));
-    let r = std::fs::File::create(&tmp).and_then(|mut f| f.write_all(&new).and_then(|_| f.sync_all())).and_then(|_| std::fs::rename(&tmp, dst));
-    if let Err(e) = r {
+    // streamed: the old file is read where the delta points and the result goes straight to the file beside its final name
+    let info = crate::bindelta::apply_delta_files(target, staged, &tmp).map_err(|e| format!("{path}: {e}"))?;
+    if info.new_len != d.new_size || info.new_sha256 != d.new_sha256 {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{path}: the file made from the delta is not the one the patch describes (size or SHA-256): nothing was written"));
+    }
+    if let Err(e) = std::fs::rename(&tmp, dst) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("{path}: {e}"));
     }
     if let Some(dir) = dst.parent() {
         let _ = std::fs::File::open(dir).and_then(|f| f.sync_all());
     }
-    Ok(new.len() as u64)
+    Ok(info.new_len)
 }
 
 /// The folder a client sends one file of the patch to. Staged files are named by their position, never by the target path.

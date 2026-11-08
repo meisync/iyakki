@@ -65,11 +65,19 @@ mkdir -p bin lib dev proc sys s newroot lower upper
 cp "$S1" init; chmod 0755 init
 cp "$W/root/$BUSY" bin/busybox; chmod 0755 bin/busybox
 cp "$W/root/$MUSL" lib/libc.so; ln -s libc.so lib/ld-musl-x86_64.so.1; ln -s lib lib64
-# the Intel display firmware (DMC, 20 to 60 KB each): a GPU driver built into the kernel starts before the root is mounted and asks for it
-# in the RAM disk; without it the driver runs, only the deepest display power states are off. Not shipped when the image has none.
-if ls "$W/root/lib/firmware/i915/"*_dmc_*.bin >/dev/null 2>&1; then
-  mkdir -p lib/firmware/i915; cp "$W/root/lib/firmware/i915/"*_dmc_*.bin lib/firmware/i915/
-fi
+# Intel GPU firmware the built-in i915 asks for BEFORE the root is mounted, so it must be in the RAM disk (not shipped when the image
+# has none, i.e. a release image):
+#  * the display firmware (DMC, 20 to 60 KB each; `mtl_dmc.bin` has no second underscore): without it the driver runs, only the
+#    deepest display power states are off;
+#  * the GuC, HuC and GSC of the platforms where GuC submission is REQUIRED (Meteor Lake `mtl_*`, Arc/DG2 `dg2_*`, about 2 MB per
+#    platform): without them i915 declares the card wedged at boot (HP Pavilion 16-af0, 2026-11-07: "GuC firmware i915/mtl_guc_70.bin:
+#    fetch failed -ENOENT ... Failed to initialize GPU, declaring it wedged!"), the browser's engine then has no usable card.
+for pat in '*_dmc*.bin' 'mtl_guc_*.bin' 'mtl_huc_*.bin' 'mtl_gsc_*.bin' 'dg2_guc_*.bin' 'dg2_huc_*.bin'; do
+  if ls "$W/root/lib/firmware/i915/"$pat >/dev/null 2>&1; then
+    mkdir -p lib/firmware/i915; cp "$W/root/lib/firmware/i915/"$pat lib/firmware/i915/
+  fi
+done
+[ -d lib/firmware/i915 ] && echo "lean-image: early Intel GPU firmware in the RAM disk: $(ls lib/firmware/i915 | wc -l) files, $(du -sk lib/firmware/i915 | cut -f1) KB"
 find . | LC_ALL=C sort | cpio --quiet -o -H newc | zstd -19 -T0 -q -f -o "$OUT/initrd-lean"
 cd "$W/root"
 if [ "$MODE" = sfs ] || [ "$MODE" = seed ] || [ "$MODE" = both ]; then

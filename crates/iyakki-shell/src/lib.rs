@@ -20,6 +20,7 @@ mod monkey_tests;
 pub use iyakki_uikit::textsel;
 pub use iyakki_uikit::ctxmenu;
 pub mod hwcheck;
+pub mod filepicker;
 pub use iyakki_uikit::ui;
 pub mod apps;
 pub mod inputprofile;
@@ -27,7 +28,6 @@ pub use iyakki_uikit::scrolleng;
 pub use iyakki_uikit::scrolllist;
 pub use iyakki_uikit::listwindow;
 pub use iyakki_uikit::tooltip;
-pub mod filepicker;
 #[cfg(test)]
 mod filepicker_tests;
 pub mod camera;
