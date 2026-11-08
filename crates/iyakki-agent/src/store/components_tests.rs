@@ -840,6 +840,39 @@ fn staged_item(comp: &str, ver: &str, install: &str, file: &Path) -> comps::Stag
 }
 
 #[test]
+fn a_boot_only_update_carries_the_running_system_image_not_the_stale_copy_on_the_boot_partition() {
+    // a lean install: the boot partition still holds the root image of the FIRST install, the running one lives on the data volume. A payload
+    // made from the boot partition alone would switch the next start back to the old image (seen on the Mac mini, 2026-11-08).
+    let w = dir("handover-root");
+    let rest = w.join("rest");
+    for (p, n) in [("boot/bzImage", 1u64), ("boot/grub/grub.cfg", 2), ("boot/initrd-lean", 3), ("boot/root.sfs", 4)] {
+        std::fs::create_dir_all(rest.join(p).parent().unwrap()).unwrap();
+        std::fs::write(rest.join(p), bytes(n, 50_000)).unwrap();
+    }
+    let active = w.join("active-root.sfs");
+    std::fs::write(&active, bytes(99, 50_000)).unwrap();
+    let new_initrd = w.join("i");
+    std::fs::write(&new_initrd, bytes(70, 20_000)).unwrap();
+    let staged = comps::Staged { dir: w.join("st"), items: vec![staged_item("boot", "1107.15", "boot/initrd-lean", &new_initrd)] };
+    let rel = Release { version: "0.1.0".into(), variant: "pc".into() };
+    let ho = comps::handover_with_root(&staged, &w.join("out"), &rel, Some(&rest), Some(&active), &Installed::default()).unwrap();
+    let pay = ho.payload.unwrap();
+    assert_eq!(std::fs::read(pay.join("boot/root.sfs")).unwrap(), std::fs::read(&active).unwrap(), "the payload carries the stale root image");
+    assert_ne!(std::fs::read(pay.join("boot/root.sfs")).unwrap(), std::fs::read(rest.join("boot/root.sfs")).unwrap());
+    assert_eq!(std::fs::read(pay.join("boot/initrd-lean")).unwrap(), std::fs::read(&new_initrd).unwrap());
+    let m = crate::devmode::update::read_manifest(&pay).unwrap();
+    crate::devmode::update::verify_payload(&pay, &m).unwrap();
+    // the stale file on the boot partition was not touched
+    assert_eq!(std::fs::read(rest.join("boot/root.sfs")).unwrap(), bytes(4, 50_000));
+    // a base part in the same update brings its own image: it is not replaced
+    let new_base = w.join("b");
+    std::fs::write(&new_base, bytes(71, 50_000)).unwrap();
+    let staged2 = comps::Staged { dir: w.join("st2"), items: vec![staged_item("base", "1107.15", "boot/root.sfs", &new_base)] };
+    let ho2 = comps::handover_with_root(&staged2, &w.join("out2"), &rel, Some(&rest), Some(&active), &Installed::default()).unwrap();
+    assert_eq!(std::fs::read(ho2.payload.unwrap().join("boot/root.sfs")).unwrap(), std::fs::read(&new_base).unwrap());
+}
+
+#[test]
 fn verified_boot_parts_become_an_update_payload_the_update_machinery_accepts_and_core_becomes_a_patch_pack() {
     let w = dir("handover");
     // what is installed on the boot partition: kernel, menu, start RAM disk, root image

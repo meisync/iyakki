@@ -45,6 +45,7 @@
 | [`QUICKSTART-BUILD.md`](QUICKSTART-BUILD.md) | One page: build an image, run it in a window or VM, write it to a disk, update a running machine, deploy to the cloud |
 | [`JOBS.md`](JOBS.md) | Detached jobs: long commands that outlive the chat, the Jobs strip, `job_start` for the assistant and Claude Code |
 | [`MACOS.md`](MACOS.md) · [`MAC-HARDWARE.md`](MAC-HARDWARE.md) | IYAKKI on a Mac: window, VM, Intel Mac hardware, driver packs |
+| [`BLUETOOTH-INPUT.md`](BLUETOOTH-INPUT.md) | Bluetooth keyboards, mice and game pads (classic HID, no BlueZ): pairing, reconnect, Settings and chat, what is not done (audio, low energy), the test steps for a real keyboard |
 | [`MAC-WIFI-BLUETOOTH-SETUP.md`](MAC-WIFI-BLUETOOTH-SETUP.md) | Wi-Fi and Bluetooth firmware on T2 Macs: script route, Linux-side route, a prompt for an AI agent, checks, rollback |
 | [`YOUTUBE-ON-IYAKKI.md`](YOUTUBE-ON-IYAKKI.md) | YouTube per engine and image (window, web, macweb), Haswell graphics, RAM, test steps, diagnostics |
 

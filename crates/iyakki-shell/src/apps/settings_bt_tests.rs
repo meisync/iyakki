@@ -158,10 +158,10 @@ fn the_rom_state_controller_is_described_with_chip_address_power_and_the_reason(
     assert!(r.iter().any(|x| x.title == "Load the Bluetooth driver anyway" && x.target == Target::BtLoad));
     // the sentences under the page
     let notes = a.hw.bt_notes(0).join(" ");
-    for w in ["no valid address", "This Mac's Bluetooth chip has no firmware file in macOS: the controller runs in its ROM state (limited); a USB Bluetooth adapter is the reliable option", "Pairing and audio are not available yet", "Bluetooth stack", "docs/BETA-PLAN.md"] {
+    for w in ["no valid address", "This Mac's Bluetooth chip has no firmware file in macOS: the controller runs in its ROM state (limited); a USB Bluetooth adapter is the reliable option", "Bluetooth audio (A2DP)", "not available yet"] {
         assert!(notes.contains(w), "{w} in {notes}");
     }
-    assert!(NOT_YET.contains("only reads the controller, powers it and scans"));
+    assert!(NOT_YET.contains("scans, pairs and connects"));
 }
 
 #[test]
@@ -346,4 +346,181 @@ fn the_firmware_button_is_on_the_page_inside_the_window_and_a_click_on_it_asks_f
         a.handle(&ev, &cx);
         assert_eq!(a.take_request(), Some(("quickinstall".to_string(), "mac-firmware".to_string())), "{w}x{h}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------- keyboards, mice and game pads (F-NET-14)
+
+use iyakki_devctl::bthid::{DeviceView, LinkState, PairState};
+
+/// A machine with a working controller, a keyboard that was paired before, and a scan that sees a new mouse.
+struct Pads {
+    devs: Mutex<Vec<DeviceView>>,
+    calls: Mutex<Vec<String>>,
+    pair: Mutex<PairState>,
+    connect_error: Option<String>,
+}
+
+impl Pads {
+    fn new() -> Arc<Pads> {
+        let kbd = DeviceView { address: "AA:BB:CC:DD:EE:01".into(), addr_type: 0, name: "K380".into(), kind: "keyboard".into(), state: LinkState::Disconnected };
+        Arc::new(Pads { devs: Mutex::new(vec![kbd]), calls: Mutex::new(vec![]), pair: Mutex::new(PairState::Idle), connect_error: None })
+    }
+}
+
+impl iyakki_devctl::Control for Pads {
+    fn set_link(&self, _: &str, _: bool) -> Result<(), String> {
+        Ok(())
+    }
+    fn ipv4(&self) -> Vec<(String, String)> {
+        vec![]
+    }
+    fn volume(&self, _: u32) -> Option<iyakki_devctl::Volume> {
+        None
+    }
+    fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_devctl::Volume, String> {
+        Err("no mixer".into())
+    }
+    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_devctl::Volume, String> {
+        Err("no mixer".into())
+    }
+    fn dhcp(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn bt_controllers(&self) -> Result<Vec<Controller>, String> {
+        Ok(vec![Controller { index: 0, configured: true, address: "11:22:33:44:55:66".into(), version: Some(6), manufacturer: 2, supported: 0x281, current: 1, name: "iyakki".into() }])
+    }
+    fn bt_scan(&self, _: u16, _: u64) -> Result<Vec<Found>, String> {
+        let mouse = Found { address: "AA:BB:CC:DD:EE:02".into(), addr_type: 0, rssi: -40, name: "MX Anywhere".into(), class: None, appearance: None, services: vec![], kind: Kind::Mouse };
+        let buds = Found { address: "AA:BB:CC:DD:EE:03".into(), addr_type: 0, rssi: -50, name: "Buds".into(), class: None, appearance: None, services: vec![], kind: Kind::Headphones };
+        let le = Found { address: "AA:BB:CC:DD:EE:04".into(), addr_type: 1, rssi: -60, name: "LE pad".into(), class: None, appearance: None, services: vec![], kind: Kind::Gamepad };
+        let kbd = Found { address: "AA:BB:CC:DD:EE:01".into(), addr_type: 0, rssi: -30, name: "K380".into(), class: None, appearance: None, services: vec![], kind: Kind::Keyboard };
+        Ok(vec![kbd, mouse, buds, le])
+    }
+    fn bt_devices(&self) -> Vec<DeviceView> {
+        self.devs.lock().unwrap().clone()
+    }
+    fn bt_device_connect(&self, a: &str) -> Result<(), String> {
+        self.calls.lock().unwrap().push(format!("connect {a}"));
+        if let Some(e) = &self.connect_error {
+            return Err(e.clone());
+        }
+        self.devs.lock().unwrap().iter_mut().for_each(|d| d.state = LinkState::Connected);
+        Ok(())
+    }
+    fn bt_device_disconnect(&self, a: &str) -> Result<(), String> {
+        self.calls.lock().unwrap().push(format!("disconnect {a}"));
+        self.devs.lock().unwrap().iter_mut().for_each(|d| d.state = LinkState::Disconnected);
+        Ok(())
+    }
+    fn bt_device_forget(&self, a: &str) -> Result<(), String> {
+        self.calls.lock().unwrap().push(format!("forget {a}"));
+        self.devs.lock().unwrap().clear();
+        Ok(())
+    }
+    fn bt_pair(&self, f: &Found) -> Result<(), String> {
+        self.calls.lock().unwrap().push(format!("pair {}", f.address));
+        *self.pair.lock().unwrap() = PairState::Confirm(f.name.clone(), 123456);
+        Ok(())
+    }
+    fn bt_pair_state(&self) -> PairState {
+        self.pair.lock().unwrap().clone()
+    }
+    fn bt_pair_answer(&self, yes: bool) -> bool {
+        self.calls.lock().unwrap().push(format!("answer {yes}"));
+        true
+    }
+}
+
+fn pads_app(tag: &str, ctl: Arc<Pads>) -> (SettingsApp, AppCx) {
+    let cx = admin(tag);
+    let d = temp_dir(&format!("{tag}-pads"));
+    put(&d.join("sys"), "class/bluetooth/hci0/x", "");
+    std::fs::create_dir_all(d.join("proc")).unwrap();
+    let mut a = SettingsApp::new(&cx).with_hardware(DeviceEnv { roots: iyakki_devctl::Roots { sys: d.join("sys"), proc_: d.join("proc") }, ctl });
+    goto(&mut a, &cx, Tab::Bluetooth);
+    (a, cx)
+}
+
+fn select(a: &mut SettingsApp, title: &str) {
+    let r = rows(a);
+    a.sel[a.tab] = r.iter().position(|x| x.title == title).unwrap_or_else(|| panic!("no row {title}: {:?}", r.iter().map(|x| x.title.clone()).collect::<Vec<_>>()));
+}
+
+#[test]
+fn a_paired_keyboard_is_listed_and_enter_connects_and_disconnects_it() {
+    let ctl = Pads::new();
+    let (mut a, cx) = pads_app("pad1", ctl.clone());
+    let r = rows(&mut a);
+    let k = r.iter().find(|x| x.title == "K380").expect("the paired keyboard is listed");
+    assert_eq!(k.target, Target::BtDevice("AA:BB:CC:DD:EE:01".into()));
+    assert!(k.sub.contains("keyboard") && k.sub.contains("paired, not connected") && k.sub.contains("Enter connects"), "{}", k.sub);
+    select(&mut a, "K380");
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(ctl.calls.lock().unwrap().clone(), vec!["connect AA:BB:CC:DD:EE:01"]);
+    assert!(status(&a).contains("Connecting to AA:BB:CC:DD:EE:01"), "{}", status(&a));
+    a.hw.invalidate();
+    let k = rows(&mut a).into_iter().find(|x| x.title == "K380").unwrap();
+    assert!(k.chips.iter().any(|c| c.0 == "connected") && k.sub.contains("Enter disconnects"), "{k:?}");
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(ctl.calls.lock().unwrap().last().unwrap(), "disconnect AA:BB:CC:DD:EE:01");
+}
+
+#[test]
+fn a_failed_connection_shows_the_plain_reason_and_forget_removes_the_device() {
+    let ctl = Pads::new();
+    ctl.devs.lock().unwrap()[0].state = LinkState::Failed("the device did not answer: switch it on, bring it closer and press a key (or its connect button)".into());
+    let (mut a, cx) = pads_app("pad2", ctl.clone());
+    let k = rows(&mut a).into_iter().find(|x| x.title == "K380").unwrap();
+    assert!(k.sub.contains("not connected: the device did not answer: switch it on"), "{}", k.sub);
+    assert!(k.chips.iter().any(|c| c.0 == "failed"));
+    select(&mut a, "K380");
+    key(&mut a, &cx, Key::Char('u'));
+    assert_eq!(ctl.calls.lock().unwrap().clone(), vec!["forget AA:BB:CC:DD:EE:01"]);
+    a.hw.invalidate();
+    assert!(!rows(&mut a).iter().any(|x| x.title == "K380"));
+    // a refusal from the machine is said, not swallowed
+    let bad = Arc::new(Pads { connect_error: Some("that device is not paired".into()), ..Arc::try_unwrap(Pads::new()).ok().unwrap() });
+    let (mut b, cx) = pads_app("pad2b", bad);
+    select(&mut b, "K380");
+    key(&mut b, &cx, Key::Enter);
+    assert!(status(&b).contains("not paired"), "{}", status(&b));
+}
+
+#[test]
+fn a_scan_offers_pairing_for_classic_input_devices_only_and_says_why_for_the_rest() {
+    let ctl = Pads::new();
+    let (mut a, cx) = pads_app("pad3", ctl.clone());
+    key(&mut a, &cx, Key::Char('s'));
+    let r = wait_scan(&mut a, &cx);
+    let m = r.iter().find(|x| x.title == "MX Anywhere").unwrap();
+    assert_eq!(m.target, Target::BtPair("AA:BB:CC:DD:EE:02".into()));
+    assert!(m.sub.contains("mouse") && m.sub.contains("Enter pairs"));
+    assert!(r.iter().find(|x| x.title == "Buds").unwrap().sub.contains("not supported yet (no audio)"));
+    let le = r.iter().find(|x| x.title == "LE pad").unwrap();
+    assert!(le.target == Target::Nothing && le.sub.contains("low energy: not supported yet"), "{}", le.sub);
+    assert_eq!(r.iter().filter(|x| x.title == "K380").count(), 1, "a paired device is listed once, with its connection");
+    select(&mut a, "MX Anywhere");
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(ctl.calls.lock().unwrap().clone(), vec!["pair AA:BB:CC:DD:EE:02"]);
+    // the number to compare is asked, and the answer goes to the pairing
+    let r = rows(&mut a);
+    assert!(r.iter().any(|x| x.title == "Does MX Anywhere show 123456?"));
+    select(&mut a, "Yes, MX Anywhere shows 123456");
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(ctl.calls.lock().unwrap().last().unwrap(), "answer true");
+    select(&mut a, "No, the numbers differ");
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(ctl.calls.lock().unwrap().last().unwrap(), "answer false");
+}
+
+#[test]
+fn a_keyboard_that_wants_a_pin_shows_it_and_a_failed_pairing_says_why() {
+    let ctl = Pads::new();
+    *ctl.pair.lock().unwrap() = PairState::ShowPin("Old keyboard".into(), "004213".into());
+    let (mut a, _cx) = pads_app("pad4", ctl.clone());
+    assert!(rows(&mut a).iter().any(|x| x.title == "Type 004213 on Old keyboard, then press Enter there"));
+    *ctl.pair.lock().unwrap() = PairState::Done(Err("pairing failed: authentication failed (wrong passkey, or the device refused)".into()));
+    a.hw.invalidate();
+    let f = rows(&mut a).into_iter().find(|x| x.title == "Pairing did not work").unwrap();
+    assert!(f.sub.contains("authentication failed"));
 }

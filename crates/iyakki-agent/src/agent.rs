@@ -211,6 +211,7 @@ pub fn hard_ask(name: &str, args: &Value) -> Option<&'static str> {
         "message_send" => return Some("sending a message to another person or service always asks, with the text on the card"),
         "shared_vault_provider_set" => return Some("choosing which cryptography keeps the shared vault always asks"),
         "git_clone_repo" | "ide_workspace_add" => return Some("cloning a repository and adding an AI IDE workspace always ask"),
+        "bluetooth_forget" => return Some("forgetting a Bluetooth device removes its keys, so it must be paired again: it always asks"),
         "vpn_add" | "vpn_enable" | "vpn_disable" | "vpn_delete" => return Some("changing VPN profiles (which traffic leaves this device, and where) always asks"),
         "store_install" => return Some("installing anything from the store always asks"),
         "store_update" | "store_remove" | "store_rollback" => return Some("updating, removing and rolling back installed apps always asks"),

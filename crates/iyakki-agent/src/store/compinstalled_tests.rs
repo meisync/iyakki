@@ -13,7 +13,7 @@ fn dir(tag: &str) -> PathBuf {
 }
 
 fn facts() -> Facts {
-    Facts { kernel_release: Some("6.12.112-iyakki".into()), release_version: Some("0.1.0-alpha.3".into()), core_version: Some("0.1.0-alpha.3".into()), boot_id: Some("boot-A".into()), core_file: None }
+    Facts { kernel_release: Some("6.12.112-iyakki".into()), release_version: Some("0.1.0-alpha.3".into()), core_version: Some("0.1.0-alpha.3".into()), boot_id: Some("boot-A".into()), core_file: None, previous_root: false }
 }
 
 #[test]
@@ -154,5 +154,33 @@ fn the_plan_and_the_status_show_real_installed_values_not_not_on_record() {
     let p = super::components::plan(&doc, "S", "stable", &inst, None).unwrap();
     let t = super::components::plan_text(&p);
     assert!(t.contains("kernel 6.12.112 -> 6.13.0") && !t.contains("not on record"), "{t}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn an_applied_boot_or_base_version_survives_the_restart_while_the_release_label_is_the_same() {
+    // the system can only say its release label for boot and base, not which RAM disk or image file is in place (seen on the Mac mini)
+    let d = dir("boot-keeps");
+    let mut i = Installed::load(&d);
+    correct(&mut i, &facts(), false);
+    assert_eq!(i.release, "0.1.0-alpha.3");
+    i.save(&d).unwrap();
+    let a = Applied1 { component: "boot".into(), version: "1107.15".into(), sha256: "b".repeat(64), file: None, needs_restart: true };
+    record_applied(&d, &[a], "boot-A").unwrap();
+    // after the restart: same label, normal start: the applied version stands (with its hash)
+    let up = Facts { boot_id: Some("boot-B".into()), ..facts() };
+    let mut j = Installed::load(&d);
+    assert!(correct(&mut j, &up, false).is_empty(), "{j:?}");
+    assert_eq!(j.versions["boot"], "1107.15");
+    assert!(j.shas.contains_key("boot") && j.how["boot"] == "applied" && j.awaiting.is_empty());
+    // the start fell back to the previous root: the record follows the system
+    let mut k = Installed::load(&d);
+    let notes = correct(&mut k, &Facts { previous_root: true, ..up.clone() }, false);
+    assert_eq!(k.versions["boot"], "0.1.0-alpha.3");
+    assert!(!k.shas.contains_key("boot") && notes.len() == 1, "{notes:?}");
+    // a new release label (a whole system update): the record follows the system as well
+    let mut m = Installed::load(&d);
+    correct(&mut m, &Facts { release_version: Some("0.1.0-alpha.4".into()), ..up.clone() }, false);
+    assert_eq!(m.versions["boot"], "0.1.0-alpha.4");
     let _ = std::fs::remove_dir_all(&d);
 }

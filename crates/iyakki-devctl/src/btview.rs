@@ -60,7 +60,7 @@ pub fn needs_firmware(c: &Controller, firmware_file: bool) -> bool {
 }
 
 /// The pairing/audio sentence the page always shows.
-pub const NOT_YET: &str = "Pairing and audio are not available yet: they need a Bluetooth stack (decision pending in docs/BETA-PLAN.md). This page only reads the controller, powers it and scans";
+pub const NOT_YET: &str = "Keyboards, mice and game pads (classic Bluetooth) can be paired and used; Bluetooth audio (A2DP) and low-energy keyboards are not available yet. This page reads the controller, powers it, scans, pairs and connects";
 
 /// One controller as the kernel's management interface describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -525,7 +525,7 @@ mod tests {
 
     #[test]
     fn the_wording_is_plain() {
-        for w in ["Pairing and audio are not available yet", "Bluetooth stack", "docs/BETA-PLAN.md"] {
+        for w in ["Bluetooth audio (A2DP)", "not available yet", "game pads"] {
             assert!(NOT_YET.contains(w), "{w}");
         }
         assert_eq!(manufacturer_name(15), "Broadcom");

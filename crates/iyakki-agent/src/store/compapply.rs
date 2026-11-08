@@ -266,6 +266,15 @@ fn recheck_files(prep: &Prepared) -> Result<(), String> {
     Ok(())
 }
 
+/// The system image that is running now, when it lives on the data volume (`iyakki/root/<id>/root.sfs`, the id from the `current`
+/// pointer). `None`: this install keeps its image on the boot partition, where the payload's own copy is the right one.
+fn active_root_image(data: &Path) -> Option<PathBuf> {
+    let roots = data.join(iyakki_stage1::ROOTS_DIR);
+    let ptr = iyakki_stage1::Pointer::parse(&std::fs::read_to_string(roots.join("current")).ok()?)?;
+    let f = roots.join(&ptr.id).join("root.sfs");
+    f.is_file().then_some(f)
+}
+
 /// Read back what the boot-partition parts wrote, against the SHA-256 of the signed list.
 fn verify_boot(svc: &Svc, items: &[&comps::StagedItem], m: &up::Manifest) -> Result<(), String> {
     let vol = svc.centre.boot_read()?;
@@ -337,7 +346,8 @@ pub fn apply_staged(svc: &Svc, prep: &Prepared, approval: Option<&Approval>) -> 
             return Err(format!("not applied: not enough room to prepare the update: {} needed in the work folder, {} free", human(need), human(free)));
         }
         let sub = Staged { dir: prep.staged.dir.clone(), items: boot.iter().map(|i| (*i).clone()).collect() };
-        let ho = comps::handover(&sub, &out, &prep.release, Some(&vol.root), &inst).map_err(|e| format!("not applied: {e}"))?;
+        let active = active_root_image(&svc.data());
+        let ho = comps::handover_with_root(&sub, &out, &prep.release, Some(&vol.root), active.as_deref(), &inst).map_err(|e| format!("not applied: {e}"))?;
         drop(vol);
         let payload = ho.payload.ok_or("not applied: no update payload was made")?;
         let result = (|| {

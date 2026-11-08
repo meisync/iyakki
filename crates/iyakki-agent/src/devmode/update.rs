@@ -177,6 +177,22 @@ pub fn sha256_hex(b: &[u8]) -> String {
 
 /// Make the manifest of a folder of extracted boot files. `release` is the image's `boot/iyakki-release` (KEY=value lines) when it
 /// has one; `version`/`variant` override it (needed for an image without that file).
+/// The running image names its variant with the architecture (`pc-x86_64`, from /etc/iyakki-release) while packs and the store's list say
+/// `pc`: the same image family. Equal, or equal once a trailing `-x86_64` / `-aarch64` (or `_`) architecture is dropped from either side.
+pub fn same_variant(a: &str, b: &str) -> bool {
+    fn base(v: &str) -> &str {
+        for arch in ["x86_64", "aarch64"] {
+            for sep in ['-', '_'] {
+                if let Some(rest) = v.strip_suffix(arch).and_then(|r| r.strip_suffix(sep)) {
+                    return rest;
+                }
+            }
+        }
+        v
+    }
+    a == b || base(a) == base(b)
+}
+
 pub fn build_manifest(dir: &Path, files: &[(String, u64, String)], version: Option<&str>, variant: Option<&str>, source: &str) -> Result<Manifest, String> {
     let rel_text = std::fs::read_to_string(dir.join("boot/iyakki-release")).ok();
     let rel = rel_text.as_deref().map(crate::relinfo::ReleaseInfo::parse);
@@ -211,7 +227,7 @@ pub fn check_manifest(m: &Manifest) -> Result<(), String> {
     if m.version.len() > 64 || m.version.is_empty() || m.version.chars().any(|c| !(c.is_ascii_alphanumeric() || ".-+_".contains(c))) {
         return Err("the version is not valid".into());
     }
-    if m.variant.is_empty() || m.variant.len() > 32 || !m.variant.chars().all(|c| c.is_ascii_alphanumeric()) {
+    if m.variant.is_empty() || m.variant.len() > 32 || !m.variant.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err("the variant is not valid".into());
     }
     let mut seen = std::collections::BTreeSet::new();
@@ -434,7 +450,7 @@ pub fn plan(env: &Env, m: &Manifest, force: bool) -> Result<Plan, String> {
             return Err("this device does not say which image variant it runs (no /etc/iyakki-release), so an update cannot be checked against it; --force accepts that".into());
         }
         notes.push("the running variant is unknown (forced)".into());
-    } else if run.variant != m.variant {
+    } else if !same_variant(&run.variant, &m.variant) {
         if !force {
             return Err(format!("this update is for the {} image and this device runs the {} image: they carry different kernels and drivers (--force to install it anyway)", m.variant, run.variant));
         }

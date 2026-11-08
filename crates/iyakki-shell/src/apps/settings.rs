@@ -2830,7 +2830,7 @@ impl SettingsApp {
         let announce = if self.tab() == Tab::Network { self.announce_line(cx) } else { String::new() };
         let note = match self.tab() {
             Tab::Network => announce.as_str(),
-            Tab::Bluetooth => "Pairing and audio are not available yet. p powers the controller · s scans (10 s) · l loads a held driver.",
+            Tab::Bluetooth => "No Bluetooth audio yet. p powers the controller · s scans (10 s) · Enter pairs, connects or disconnects the selected device · u forgets it · l loads a held driver.",
             Tab::Display => "The desktop uses the screen's best mode. Resolution, arrangement and mirroring of several displays are in Settings, Displays.",
             _ => "o chooses the output (Automatic follows what is connected) · t plays a test chime · the IYAKKI volume is the one master volume: the volume keys, the Devices popover and the radio follow it · A advanced · M mixes sounds from several apps (experimental).",
         };

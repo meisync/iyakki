@@ -41,6 +41,9 @@ pub struct Installed {
     pub how: BTreeMap<String, String>,
     /// Components written but not yet running (a restart is needed), with the boot id of the start in which they were written.
     pub awaiting: BTreeMap<String, String>,
+    /// The release label (`VERSION=` of the release file) the last correction saw. The boot and base parts cannot be read back from the
+    /// running system (only the label can), so an applied version of them stands while the label stays the same.
+    pub release: String,
 }
 
 pub const INSTALLED_FILE: &str = "components-installed.json";
@@ -485,6 +488,13 @@ fn safe_id(s: &str) -> String {
 /// the parts that are not being replaced are taken from it so the payload is a whole boot set. `installed_files` (component -> installed file)
 /// lets a patch pack carry a delta instead of a large file.
 pub fn handover(staged: &Staged, out: &Path, release: &Release, rest_from: Option<&Path>, inst: &Installed) -> Result<Handover, String> {
+    handover_with_root(staged, out, release, rest_from, None, inst)
+}
+
+/// `handover`, with `active_root`: the system image that is really running (on a lean install it lives on the data volume, and the boot
+/// partition may still hold an OLD copy of it from the first install). When this update has no base part, the payload's root image is
+/// that file, never the stale one from the boot partition: a payload carrying the stale image would switch the next start back to it.
+pub fn handover_with_root(staged: &Staged, out: &Path, release: &Release, rest_from: Option<&Path>, active_root: Option<&Path>, inst: &Installed) -> Result<Handover, String> {
     let mut h = Handover::default();
     let (boot, run): (Vec<&StagedItem>, Vec<&StagedItem>) = staged.items.iter().partition(|i| !i.step.install_path.starts_with('/'));
     for i in &staged.items {
@@ -506,6 +516,16 @@ pub fn handover(staged: &Staged, out: &Path, release: &Release, rest_from: Optio
                 if !boot.iter().any(|i| i.step.install_path.eq_ignore_ascii_case(&rel)) {
                     link_or_copy(&rest.join(&rel), &dir.join(&rel))?;
                 }
+            }
+        }
+        if let Some(root) = active_root {
+            let has_base = boot.iter().any(|i| i.step.install_path.eq_ignore_ascii_case("boot/root.sfs"));
+            if !has_base {
+                let dest = update::find_ci(&dir, "boot/root.sfs").unwrap_or_else(|| dir.join("boot/root.sfs"));
+                if dest.exists() {
+                    std::fs::remove_file(&dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+                }
+                link_or_copy(root, &dest)?;
             }
         }
         // the release file of the boot partition says which IYAKKI these files are: it follows the label the payload is made as (a new file:

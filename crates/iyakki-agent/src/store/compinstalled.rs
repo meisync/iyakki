@@ -36,6 +36,8 @@ pub struct Facts {
     pub boot_id: Option<String>,
     /// The file the running program is installed as (its SHA-256 is read at boot when the record has none).
     pub core_file: Option<PathBuf>,
+    /// This start runs the previous root image (`iyakki.root=previous` on the kernel line): the update did not take.
+    pub previous_root: bool,
 }
 
 impl Facts {
@@ -44,7 +46,8 @@ impl Facts {
         let release_version = std::fs::read_to_string(crate::relinfo::RELEASE_FILE).ok().map(|t| crate::relinfo::ReleaseInfo::parse(&t).version).filter(|v| !v.is_empty());
         let core_file = Some(PathBuf::from("/usr/bin/iyakki")).filter(|p| p.is_file()).or_else(|| std::env::current_exe().ok());
         let boot_id = Some(crate::devmode::centre::boot_id_now()).filter(|b| !b.is_empty());
-        Facts { kernel_release: uname_release(), release_version, core_version: Some(crate::relinfo::VERSION.to_string()), boot_id, core_file }
+        let previous_root = crate::cloudmode::kernel_cmdline().split_whitespace().any(|w| w == "iyakki.root=previous");
+        Facts { kernel_release: uname_release(), release_version, core_version: Some(crate::relinfo::VERSION.to_string()), boot_id, core_file, previous_root }
     }
 }
 
@@ -100,6 +103,11 @@ pub fn correct(inst: &mut Installed, f: &Facts, hash_core: bool) -> Vec<String> 
             inst.awaiting.remove(comp);
         }
         let Some(fact) = fact else { continue };
+        // boot and base: the system only says its release label, not which boot RAM disk or image file is in place. A version this device
+        // applied (verified, read back) stands while the label is the one it saw before and the start is not a fall-back to the previous root.
+        if (comp == "boot" || comp == "base") && inst.how.get(comp).is_some_and(|h| h == "applied") && !inst.release.is_empty() && fact == inst.release && !f.previous_root {
+            continue;
+        }
         match inst.versions.get(comp).cloned() {
             Some(rec) if consistent(&rec, &fact) => {}
             Some(rec) => {
@@ -114,6 +122,9 @@ pub fn correct(inst: &mut Installed, f: &Facts, hash_core: bool) -> Vec<String> 
                 inst.how.insert(comp.into(), "observed".into());
             }
         }
+    }
+    if let Some(label) = &f.release_version {
+        inst.release = label.clone();
     }
     if let Some(file) = f.core_file.as_ref().filter(|p| p.is_file()) {
         if inst.versions.contains_key("core") && !inst.files.contains_key("core") {

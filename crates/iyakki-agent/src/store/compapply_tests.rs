@@ -72,7 +72,7 @@ fn tree(root: &Path, skip: &[&str]) -> Vec<(String, String)> {
 }
 
 fn facts(boot_id: &str, core_file: &Path) -> Facts {
-    Facts { kernel_release: Some("6.12.1-iyakki".into()), release_version: Some(LABEL.into()), core_version: Some(LABEL.into()), boot_id: Some(boot_id.into()), core_file: Some(core_file.to_path_buf()) }
+    Facts { kernel_release: Some("6.12.1-iyakki".into()), release_version: Some(LABEL.into()), core_version: Some(LABEL.into()), boot_id: Some(boot_id.into()), core_file: Some(core_file.to_path_buf()), previous_root: false }
 }
 
 fn rig_with(tag: &str, capacity: u64) -> Rig {

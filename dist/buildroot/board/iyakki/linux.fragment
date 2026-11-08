@@ -272,6 +272,9 @@ CONFIG_BT_INTEL=m
 CONFIG_BT_RTL=m
 CONFIG_BT_BCM=m
 CONFIG_BT_MTK=m
+# /dev/uhid: IYAKKI's own Bluetooth keyboard/mouse/game pad support (iyakki-devctl bthid) feeds the reports it reads from the
+# device into the kernel through uhid (F-NET-18). Takes effect with the next kernel build.
+CONFIG_UHID=m
 
 # ---- graphics (DRM/KMS; userspace GBM/Mesa not included) ---------------------
 CONFIG_DRM=y

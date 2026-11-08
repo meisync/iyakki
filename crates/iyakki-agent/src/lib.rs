@@ -217,10 +217,13 @@ pub mod vpn_mgr;
 pub mod vpn_nft;
 pub mod vpn_sys;
 pub mod vpntools;
+pub mod bluetoothtools;
 #[cfg(test)]
 mod vpn_mgr_tests;
 #[cfg(test)]
 mod vpntools_tests;
+#[cfg(test)]
+mod bluetoothtools_tests;
 #[cfg(test)]
 mod gitworktools_tests;
 #[cfg(test)]

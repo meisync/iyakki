@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod bthid;
+pub mod bthid_sys;
 pub mod btmgmt;
 pub mod btview;
 pub mod direct;
@@ -726,6 +728,32 @@ pub trait Control: Send + Sync {
     fn bt_held(&self) -> bool {
         false
     }
+    /// The paired keyboards, mice and game pads with their connection state ([`bthid`]).
+    fn bt_devices(&self) -> Vec<bthid::DeviceView> {
+        Vec::new()
+    }
+    /// Starts connecting a paired device (takes seconds; `bt_devices` shows the state and, on failure, the reason).
+    fn bt_device_connect(&self, _address: &str) -> Result<(), String> {
+        Err("not available here".into())
+    }
+    fn bt_device_disconnect(&self, _address: &str) -> Result<(), String> {
+        Err("not available here".into())
+    }
+    /// Forget the pairing (disconnect and remove the keys).
+    fn bt_device_forget(&self, _address: &str) -> Result<(), String> {
+        Err("not available here".into())
+    }
+    /// Start pairing with a device a scan found (in the background; see `bt_pair_state`).
+    fn bt_pair(&self, _found: &btmgmt::Found) -> Result<(), String> {
+        Err("not available here".into())
+    }
+    fn bt_pair_state(&self) -> bthid::PairState {
+        bthid::PairState::Idle
+    }
+    /// Answer the number comparison of a pairing.
+    fn bt_pair_answer(&self, _yes: bool) -> bool {
+        false
+    }
 }
 
 static BT_LOADER: std::sync::OnceLock<(fn() -> bool, fn() -> Result<String, String>)> = std::sync::OnceLock::new();
@@ -757,6 +785,27 @@ impl Control for System {
     }
     fn bt_held(&self) -> bool {
         BT_LOADER.get().is_some_and(|f| (f.0)())
+    }
+    fn bt_devices(&self) -> Vec<bthid::DeviceView> {
+        bthid::Devices::list(&bthid_sys::RealDevices)
+    }
+    fn bt_device_connect(&self, address: &str) -> Result<(), String> {
+        bthid::Devices::connect(&bthid_sys::RealDevices, address)
+    }
+    fn bt_device_disconnect(&self, address: &str) -> Result<(), String> {
+        bthid::Devices::disconnect(&bthid_sys::RealDevices, address)
+    }
+    fn bt_device_forget(&self, address: &str) -> Result<(), String> {
+        bthid::Devices::forget(&bthid_sys::RealDevices, address)
+    }
+    fn bt_pair(&self, found: &btmgmt::Found) -> Result<(), String> {
+        bthid_sys::hub().pair_start(found)
+    }
+    fn bt_pair_state(&self) -> bthid::PairState {
+        bthid_sys::hub().pair_state()
+    }
+    fn bt_pair_answer(&self, yes: bool) -> bool {
+        bthid_sys::hub().pair_answer(yes)
     }
     fn set_link(&self, name: &str, up: bool) -> Result<(), String> {
         set_link(name, up)

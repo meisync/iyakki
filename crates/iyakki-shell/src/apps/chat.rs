@@ -949,6 +949,7 @@ impl ChatApp {
                 system.push_str(iyakki_agent::thiscomputertools::PROMPT_RULE);
                 system.push_str(iyakki_agent::sharedvaulttools::PROMPT_RULE);
                 system.push_str(iyakki_agent::vpntools::PROMPT_RULE);
+                system.push_str(iyakki_agent::bluetoothtools::PROMPT_RULE);
             }
             if k8s.is_none() {
                 system.push_str("\nNo cluster is connected to this workspace. Never start, install or stop a cluster (k3s server, minikube, kind, kubeadm): it is refused. If the person wants to deploy, tell them to use the K8S panel's Change cluster, or to set a cluster up themselves.");
@@ -1165,6 +1166,8 @@ impl ChatApp {
         } else {
             tools_arc
         };
+        // Bluetooth keyboards, mice and game pads: the list is free, connecting, disconnecting and forgetting ask (administrators only)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings { Arc::new(iyakki_agent::bluetoothtools::BluetoothTools::real(tools_arc)) } else { tools_arc };
         // the job tools sit outermost: an external agent gets them through the bridge like the others
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if iyakki_agent::jobtools::JobTools::offered(&cx.session.policy) {
             let cwd = workdir.clone().unwrap_or_else(|| std::path::PathBuf::from(format!("/home/{}", cx.session.user)));

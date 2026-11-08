@@ -297,9 +297,15 @@ pub fn cloud_mode(setting: Setting, facts: &Facts) -> CloudMode {
     }
 }
 
+/// The kernel command line of this start (`/proc/cmdline`), empty when it cannot be read. The one reader of that file in the agent crate:
+/// other code asks here (the shared kernel-access rule, tests/kernel_single_reader.rs).
+pub fn kernel_cmdline() -> String {
+    std::fs::read_to_string("/proc/cmdline").unwrap_or_default()
+}
+
 /// The real machine: `/sys`, `/proc/cmdline` and `/etc/iyakki-release`.
 pub fn detect(setting: Setting) -> CloudMode {
-    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let cmdline = kernel_cmdline();
     let variant = crate::relinfo::ReleaseInfo::load(Path::new(crate::relinfo::RELEASE_FILE)).map(|r| r.variant).unwrap_or_default();
     cloud_mode(setting, &Facts::probe(Path::new("/"), &cmdline, &variant))
 }

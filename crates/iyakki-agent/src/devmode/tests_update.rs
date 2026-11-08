@@ -248,6 +248,14 @@ fn a_bad_payload_is_refused_before_anything_is_sent() {
     assert!(bad(&|x| x.format = 9).contains("format"));
     assert!(bad(&|x| x.version = "1.0; rm -rf".into()).contains("version"));
     assert!(bad(&|x| x.variant = "pc/../x".into()).contains("variant"));
+    // the running image says `pc-x86_64`, packs and the store say `pc`: the same family; another family or another architecture is not
+    assert!(same_variant("pc-x86_64", "pc") && same_variant("pc", "pc-x86_64") && same_variant("pc-x86_64", "pc-x86_64") && same_variant("pc_x86_64", "pc"));
+    assert!(!same_variant("pc-x86_64", "mac") && !same_variant("mac-x86_64", "pc") && !same_variant("pcweb", "pc") && !same_variant("pc-aarch64", "mac"));
+    {
+        let mut ok = m.clone();
+        ok.variant = "pc-x86_64".into();
+        check_manifest(&ok).unwrap();
+    }
     assert!(bad(&|x| x.files.clear()).contains("files"));
     assert!(bad(&|x| x.files[0].size = MAX_TOTAL + 1).contains("more than an update carries"));
     // damage in the folder is found by the computer before it sends anything
