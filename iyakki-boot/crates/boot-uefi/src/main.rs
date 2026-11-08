@@ -116,6 +116,10 @@ fn poll_keys(ms: usize) -> KeyState {
             match char::from_u32(k.unicode_char as u32) {
                 Some(' ') => keys.space = true,
                 Some(c) if c.is_ascii_alphanumeric() => keys.press_char(c.to_ascii_lowercase()),
+                // Enter, Tab, Backspace
+                Some(c) if (c as u32) != 0 => keys.esc = true,
+                // arrows, Home/End, Page keys, function keys: no character, only a scan code. Any of them asks for the menu.
+                _ if k.scan_code != 0 => keys.esc = true,
                 _ => {}
             }
         }
@@ -306,8 +310,11 @@ fn run() -> Status {
     if oneshot.clear {
         vars::delete(vars::ONESHOT); // always cleared before anything starts
     }
-    let keys = poll_keys(KEY_WINDOW_MS);
-    splash::spent(KEY_WINDOW_MS as u32);
+    // listen for the whole time the logo is up (at least KEY_WINDOW_MS): keys pressed a moment after power-on, or by a slow keyboard
+    // (a Mac's), still open the menu. The time counts toward the splash time, so a start is not slower.
+    let window = KEY_WINDOW_MS.max(c.cfg.splash_ms as usize);
+    let keys = poll_keys(window);
+    splash::spent(window as u32);
     let params = Params {
         items: &c.items,
         default_name: c.cfg.default.as_deref(),

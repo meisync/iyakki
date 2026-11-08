@@ -615,7 +615,8 @@ def t_splash(s):
         need(vm.wait_for(r"TEST-EFI started path=\\current", 30), "kernel did not start after the splash")
         t = vm.text()
         # (the stand-in kernel returns and the loader then opens its "came back" menu; only what came before the kernel counts)
-        need("splash: holding for" in t and "menu: open" not in t.split("TEST-EFI started")[0], "no hold line, or a menu opened before the kernel")
+        # (the logo time is spent listening for keys now, so there may be no separate "holding for" wait left)
+        need("menu: open" not in t.split("TEST-EFI started")[0], "a menu opened before the kernel")
         need(len(re.findall(r"decide: start current \(default\)", t)) == 1, "no default decision")
     finally:
         vm.stop()
@@ -662,6 +663,13 @@ def t_splash(s):
         need(sh.n(MENU_SEL) > sh.w * 20 and sh.n(SPLASH_BG) > sh.w * sh.h // 3 and sh.n(MENU_BG) == 0, "requested menu not on the splash background")
     finally:
         vm.stop()
+    # 4b. any other key (an arrow, Enter) at start asks for the menu too (the listening window is the whole logo time)
+    for name, key in (("h4b", "down"), ("h4c", "ret")):
+        vm = s.vm(name, [(disk(name, splash_cfg("splash /logo.bmp\n" + bg + "splash-ms 1200", timeout=0)), True)], **gfx)
+        try:
+            need(vm.wait_for(r"decide: menu", 60, spam=key), f"the {key} key did not ask for the menu:\n" + vm.text()[-800:])
+        finally:
+            vm.stop()
     # 5. a picture bigger than the screen is scaled down to fit, aspect kept, centred
     vm = s.vm("h5", [(disk("h5", splash_cfg("splash /big.bmp\n" + bg + "splash-ms 3000")), True)], **gfx)
     try:
