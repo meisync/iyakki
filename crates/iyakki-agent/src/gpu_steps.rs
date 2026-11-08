@@ -586,7 +586,9 @@ pub fn ensure_runtime(root: &Path, data: &Path, run: &mut dyn FnMut(&[String]) -
             out.push(Ok(format!("GPU: render nodes made openable again ({})", changed.join(", "))));
         }
     }
-    if marked(Item::GpuNvidia) && !nv::sleep_marker(data).exists() {
+    // the install moves between computers (a disk that is carried from one to another): the marker says the NVIDIA step ran on SOME computer; on one
+    // without an NVIDIA card the driver finds no GPU ("NVRM: No NVIDIA GPU found") and loading it again and again only fills the log
+    if marked(Item::GpuNvidia) && !nv::sleep_marker(data).exists() && gpu::has_nvidia(&gpu::detect(root)) {
         let l = nv::Layout::new(data);
         // the kernel loads the nvidia module by itself a few seconds into the boot, long before this runs, and asks for the GSP firmware when the card
         // is first opened (by the device plugin or a pod): the search path must name the stage's firmware folder at every start, whether or not the

@@ -664,3 +664,23 @@ fn a_lemonade_deployed_after_the_gpu_step_gets_the_gpu_again_unless_the_cpu_was_
     assert!(m.contains("no GPU step"), "{m}");
     let _ = std::fs::remove_dir_all(&f.root);
 }
+
+#[test]
+fn the_nvidia_driver_is_not_loaded_on_a_computer_without_an_nvidia_card() {
+    // the disk was set up on a computer with an NVIDIA card (the marker and the staged files travel with the install), now it boots on one with only an AMD GPU
+    let mut f = Fake::new("restore-no-nvidia-card");
+    f.amd();
+    let (root, data) = (f.root.clone(), f.data.clone());
+    let l = nv::Layout::new(&data);
+    crate::gpu_nvidia::tests::fake_package(&l.extracted(), nv::NVIDIA_VERSION);
+    nv::stage(&l.extracted(), &l).unwrap();
+    crate::quickinstall::mark_done(&data, Item::GpuNvidia, "x").unwrap();
+    let calls = Mutex::new(Vec::<String>::new());
+    let r = ensure_runtime(&root, &data, &mut |a: &[String]| {
+        calls.lock().unwrap().push(a.join(" "));
+        out(0, "")
+    });
+    assert!(r.is_empty(), "nothing to restore without the card: {r:?}");
+    assert!(calls.lock().unwrap().is_empty(), "no modprobe, no mknod: {:?}", calls.lock().unwrap());
+    let _ = std::fs::remove_dir_all(&f.root);
+}
