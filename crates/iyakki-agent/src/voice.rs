@@ -113,6 +113,16 @@ pub struct VoiceSettings {
     /// The microphone the person chose (an ALSA id such as `plughw:1,0`), empty for automatic. One choice for the Voice tile's dictation and
     /// for the web pages in the Browser (`voicedesk::share_mic_choice` hands it to the web engine's microphone plugin).
     pub mic: String,
+    /// A dictation ends by itself when the person pauses after talking (`voicedesk::PauseDetector`).
+    pub auto_stop: bool,
+    /// How long that pause is, in milliseconds (500 to 4000).
+    pub pause_ms: u32,
+    /// After a dictation ended by a pause and its text is in, listen again by itself (until the person presses Stop).
+    pub keep_listening: bool,
+    /// Correct the dictated wording with the chat assistant before it lands in the box (`dictfix`). Off by default.
+    pub fix_wording: bool,
+    /// The Assistant pane beside the Voice tile's transcript is open (`revise`). On by default; the person can collapse it.
+    pub assistant_open: bool,
 }
 
 /// What is highlighted while text is read aloud (TALES, chat).
@@ -150,7 +160,7 @@ impl Highlight {
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        Self { stt: None, tts: None, record_cmd: DEFAULT_RECORD_CMD.into(), play_cmd: DEFAULT_PLAY_CMD.into(), auto_send: false, speak_replies: false, speed_pct: 100, highlight: Highlight::default(), align_words: true, remote_ok: Vec::new(), mic: String::new() }
+        Self { stt: None, tts: None, record_cmd: DEFAULT_RECORD_CMD.into(), play_cmd: DEFAULT_PLAY_CMD.into(), auto_send: false, speak_replies: false, speed_pct: 100, highlight: Highlight::default(), align_words: true, remote_ok: Vec::new(), mic: String::new(), auto_stop: true, pause_ms: 1500, keep_listening: false, fix_wording: false, assistant_open: true }
     }
 }
 
@@ -167,6 +177,9 @@ impl VoiceSettings {
         }
         if !(50..=200).contains(&self.speed_pct) {
             return Err("speaking speed must be between 50 and 200 percent".into());
+        }
+        if !(500..=4000).contains(&self.pause_ms) {
+            return Err("the pause that ends a dictation must be between 0.5 and 4 seconds".into());
         }
         if self.mic.len() > 30 || !self.mic.chars().all(|c| c.is_ascii_alphanumeric() || ":,_-".contains(c)) {
             return Err("microphone: not a sound device name".into());

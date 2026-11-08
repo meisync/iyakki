@@ -205,6 +205,9 @@ pub fn thinking_only() -> bool {
     THINKING_ONLY.with(|f| f.get())
 }
 
+/// What the person reads when a model only thought and wrote no answer (its thinking is never shown as the answer).
+pub const THINKING_ONLY_MESSAGE: &str = "The model only thought and wrote no answer. Try again, lower or turn off the thinking budget in Settings -> Models, or pick another model.";
+
 /// Models whose server said they cannot think: the thinking switch is not sent to them again.
 fn no_think_models() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
@@ -431,11 +434,23 @@ pub struct ProviderClient {
     pub cfg: ProviderCfg,
     secrets: Secrets,
     upstream: Arc<dyn Upstream>,
+    /// Where the per-model request options are kept (`crate::modelopts`); none: no options are sent.
+    options_dir: Option<std::path::PathBuf>,
 }
 
 impl ProviderClient {
     pub fn new(cfg: ProviderCfg, secrets: Secrets, upstream: Arc<dyn Upstream>) -> ProviderClient {
-        ProviderClient { cfg, secrets, upstream }
+        ProviderClient { cfg, secrets, upstream, options_dir: None }
+    }
+
+    /// Send the options the person set for a model (max tokens, temperature, top_p, reasoning budget) with its requests.
+    pub fn with_options_dir(mut self, dir: &std::path::Path) -> ProviderClient {
+        self.options_dir = Some(dir.to_path_buf());
+        self
+    }
+
+    fn model_options(&self, model: &str) -> crate::modelopts::ModelOptions {
+        self.options_dir.as_deref().map(|d| crate::modelopts::get(d, &self.cfg.id, model)).unwrap_or_default()
     }
 
     fn key(&self) -> Result<Option<zeroize::Zeroizing<String>>, String> {
@@ -719,7 +734,11 @@ impl ProviderClient {
 
     pub fn chat(&self, model: &str, history: &[Message]) -> Result<String, String> {
         let turn = self.chat_turn(model, history, &[])?;
-        if turn.text.is_empty() { Err("the model returned no text".into()) } else { Ok(turn.text) }
+        if turn.text.is_empty() {
+            Err(if thinking_only() { THINKING_ONLY_MESSAGE.into() } else { "the model returned no text".into() })
+        } else {
+            Ok(turn.text)
+        }
     }
 
     /// One model turn, optionally offering tools. Messages and tools are converted to each
@@ -755,7 +774,8 @@ impl ProviderClient {
         let turns: Vec<&Message> = history.iter().filter(|m| m.role != Role::System).collect();
         match self.cfg.kind {
             Kind::Anthropic => {
-                let body = anthropic_body(model, &system, &turns, tools, false);
+                let mut body = anthropic_body(model, &system, &turns, tools, false);
+                crate::modelopts::apply_anthropic(&mut body, &self.model_options(model));
                 let v = self.call("POST", &format!("{}/messages", self.cfg.base()?), body.to_string().as_bytes())?;
                 let blocks = v.get("content").and_then(Value::as_array).ok_or("unexpected response shape")?;
                 let text: Vec<&str> = blocks.iter().filter(|b| b.get("type").and_then(Value::as_str) == Some("text")).filter_map(|b| b.get("text")?.as_str()).collect();
@@ -823,7 +843,7 @@ impl ProviderClient {
                 let body = self.openai_body(model, history, tools, false);
                 let v = self.call("POST", &format!("{}/chat/completions", self.openai_base()?), body.to_string().as_bytes())?;
                 let msg = v.pointer("/choices/0/message").ok_or("unexpected response shape (no choices[0].message)")?;
-                let mut text = msg.get("content").and_then(Value::as_str).map(strip_think).unwrap_or_default();
+                let text = msg.get("content").and_then(Value::as_str).map(strip_think).unwrap_or_default();
                 let calls: Vec<ToolCall> = msg
                     .get("tool_calls")
                     .and_then(Value::as_array)
@@ -831,11 +851,11 @@ impl ProviderClient {
                     .unwrap_or_default();
                 let thought = ["reasoning", "reasoning_content", "thinking"].iter().find_map(|k| msg.get(*k).and_then(Value::as_str)).unwrap_or("").trim().to_string();
                 if text.is_empty() && calls.is_empty() && !thought.is_empty() {
-                    // some models put the whole answer in their thinking
-                    text = thought;
+                    // only thinking came back: it is never the answer (the caller says so in plain words)
+                    report_thinking(&thought);
                     THINKING_ONLY.with(|f| f.set(true));
                 }
-                if text.is_empty() && calls.is_empty() && msg.get("content").is_none() {
+                if text.is_empty() && calls.is_empty() && !thinking_only() && msg.get("content").is_none() {
                     return Err("unexpected response shape (no choices[0].message.content)".into());
                 }
                 Ok(ModelTurn { text, calls })
@@ -874,9 +894,14 @@ impl ProviderClient {
             body["keep_alive"] = json!(OLLAMA_KEEP_ALIVE);
             if let Some(r) = REASONING.with(|r| r.get()) {
                 if !no_think_models().lock().map(|m| m.contains(model)).unwrap_or(false) {
-                    body["reasoning_effort"] = json!(r);
+                    body["reasoning_effort"] = json!(if r == crate::modelopts::MINIMAL_EFFORT { "none" } else { r });
                 }
             }
+        }
+        crate::modelopts::apply_openai(&mut body, self.cfg.kind, &self.model_options(model));
+        // a light one-shot call (tidying words) asks for as little thinking as NVIDIA NIM takes: its own `reasoning_budget`, kept to a few tokens
+        if self.cfg.kind == Kind::Nvidia && REASONING.with(|r| r.get()) == Some(crate::modelopts::MINIMAL_EFFORT) {
+            crate::modelopts::apply_minimal_thinking(&mut body);
         }
         body
     }
@@ -1026,10 +1051,9 @@ impl ProviderClient {
                 ToolCall { id: if id.is_empty() { format!("call_{i}") } else { id }, name, args }
             })
             .collect();
-        let mut text = strip_think(&content);
+        let text = strip_think(&content);
         if text.is_empty() && calls.is_empty() && !thought.trim().is_empty() {
-            // the whole answer is in the thinking (the model never wrote a reply): show it rather than nothing
-            text = thought.trim().to_string();
+            // only thinking came back (the model never wrote a reply): it is never the answer
             THINKING_ONLY.with(|f| f.set(true));
         }
         Ok(ModelTurn { text, calls })
@@ -1041,7 +1065,8 @@ impl ProviderClient {
         THINKING_ONLY.with(|f| f.set(false));
         let system: Vec<&str> = history.iter().filter(|m| m.role == Role::System).map(|m| m.content.as_str()).collect();
         let turns: Vec<&Message> = history.iter().filter(|m| m.role != Role::System).collect();
-        let body = anthropic_body(model, &system, &turns, tools, true);
+        let mut body = anthropic_body(model, &system, &turns, tools, true);
+        crate::modelopts::apply_anthropic(&mut body, &self.model_options(model));
         let head = streamer.post(&format!("{}/messages", self.cfg.base()?), &self.headers()?, body.to_string().as_bytes())?;
         if !(200..300).contains(&head.status) {
             let mut raw = Vec::new();
@@ -1121,7 +1146,6 @@ impl ProviderClient {
             if thought.trim().is_empty() {
                 return Err("the model returned no text".into());
             }
-            text = thought.trim().to_string();
             THINKING_ONLY.with(|f| f.set(true));
         }
         Ok(ModelTurn { text, calls })
@@ -1171,6 +1195,17 @@ pub fn reported_usage() -> Option<(u64, u64)> {
 
 pub(crate) fn forget_usage() {
     REPORTED.with(|r| r.set(None));
+    REASONING_TOKENS.with(|r| r.set(None));
+}
+
+thread_local! {
+    static REASONING_TOKENS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Of the tokens the last model call on this thread produced (already counted in the second number of [`reported_usage`]),
+/// how many were thinking, when the provider says (`usage.completion_tokens_details.reasoning_tokens`).
+pub fn reported_reasoning_tokens() -> Option<u64> {
+    REASONING_TOKENS.with(|r| r.get())
 }
 
 /// Read the token counts out of a reply, whichever provider's shape it has.
@@ -1193,6 +1228,9 @@ pub fn usage_in(v: &Value) -> Option<(u64, u64)> {
 pub(crate) fn note_usage(v: &Value) {
     if let Some(u) = usage_in(v) {
         REPORTED.with(|r| r.set(Some(u)));
+        if let Some(t) = v.pointer("/usage/completion_tokens_details/reasoning_tokens").and_then(Value::as_u64) {
+            REASONING_TOKENS.with(|r| r.set(Some(t)));
+        }
     }
 }
 

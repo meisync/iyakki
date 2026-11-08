@@ -33,8 +33,63 @@ pub struct Roots {
 
 impl Roots {
     pub fn real() -> Roots {
-        Roots { sys_block: "/sys/block".into(), dev: "/dev".into(), mounts: "/proc/mounts".into(), require_block: true }
+        Roots { sys_block: "/sys/block".into(), dev: "/dev".into(), mounts: MOUNTS_PATH.into(), require_block: true }
     }
+}
+
+/// The kernel's list of mounts. Every crate reads mounts through [`read_mounts`] / [`mounts_text`] (one reader; gate `kernel_single_reader`).
+pub const MOUNTS_PATH: &str = "/proc/mounts";
+/// The kernel's list of swap areas ([`read_swaps`] / [`swaps_text`]).
+pub const SWAPS_PATH: &str = "/proc/swaps";
+
+/// The text of the kernel's mount list.
+pub fn read_mounts() -> std::io::Result<String> {
+    std::fs::read_to_string(MOUNTS_PATH)
+}
+
+/// The mount list, empty when it cannot be read.
+pub fn mounts_text() -> String {
+    read_mounts().unwrap_or_default()
+}
+
+/// The first word of `<proc>/uptime` (seconds since boot, as the kernel prints it); `None` when unreadable.
+pub fn uptime_token_in(proc: &Path) -> Option<String> {
+    std::fs::read_to_string(proc.join("uptime")).ok().and_then(|u| u.split_whitespace().next().map(str::to_string))
+}
+
+/// Seconds since boot with the fraction, from `<proc>/uptime`; `None` when unreadable or not a number.
+pub fn uptime_in(proc: &Path) -> Option<f64> {
+    uptime_token_in(proc)?.parse().ok()
+}
+
+/// [`uptime_in`] on the real `/proc`.
+pub fn uptime_now() -> Option<f64> {
+    uptime_in(Path::new("/proc"))
+}
+
+/// [`uptime_token_in`] on the real `/proc`.
+pub fn uptime_token() -> Option<String> {
+    uptime_token_in(Path::new("/proc"))
+}
+
+/// The kernel command line (`<proc>/cmdline`); empty when unreadable.
+pub fn cmdline_in(proc: &Path) -> String {
+    std::fs::read_to_string(proc.join("cmdline")).unwrap_or_default()
+}
+
+/// [`cmdline_in`] on the real `/proc`.
+pub fn cmdline_text() -> String {
+    cmdline_in(Path::new("/proc"))
+}
+
+/// The text of the kernel's swap list.
+pub fn read_swaps() -> std::io::Result<String> {
+    std::fs::read_to_string(SWAPS_PATH)
+}
+
+/// The swap list, empty when it cannot be read.
+pub fn swaps_text() -> String {
+    read_swaps().unwrap_or_default()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -671,6 +726,41 @@ fn unsafe_sync() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn uptime_is_read_from_the_given_proc_folder() {
+        let d = std::env::temp_dir().join(format!("iyakki-storage-uptime-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(uptime_in(&d), None, "no file");
+        std::fs::write(d.join("uptime"), "93784.55 180000.00\n").unwrap();
+        assert_eq!(uptime_in(&d), Some(93784.55));
+        assert_eq!(uptime_token_in(&d).as_deref(), Some("93784.55"));
+        std::fs::write(d.join("uptime"), "junk\n").unwrap();
+        assert_eq!(uptime_in(&d), None);
+        assert_eq!(uptime_token_in(&d).as_deref(), Some("junk"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn cmdline_is_read_from_the_given_proc_folder_and_empty_when_missing() {
+        let d = std::env::temp_dir().join(format!("iyakki-storage-cmdline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(cmdline_in(&d), "");
+        std::fs::write(d.join("cmdline"), "quiet iyakki.x=1\n").unwrap();
+        assert_eq!(cmdline_in(&d), "quiet iyakki.x=1\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn kernel_lists_are_read_from_their_fixed_paths_and_empty_when_missing() {
+        assert_eq!((MOUNTS_PATH, SWAPS_PATH), ("/proc/mounts", "/proc/swaps"));
+        assert_eq!(Roots::real().mounts, std::path::PathBuf::from(MOUNTS_PATH));
+        // the real files exist on Linux; both calls must agree with the plain read
+        assert_eq!(mounts_text(), std::fs::read_to_string(MOUNTS_PATH).unwrap_or_default());
+        assert_eq!(read_swaps().is_ok(), std::fs::read_to_string(SWAPS_PATH).is_ok());
+    }
+
     use super::*;
 
     #[test]

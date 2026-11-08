@@ -158,6 +158,12 @@ pub mod voicepack;
 pub mod scene;
 pub mod webengine;
 pub mod webgraphics;
+pub mod modelopts;
+#[cfg(test)]
+mod modelopts_tests;
+pub mod modelopttools;
+#[cfg(test)]
+mod modelopttools_tests;
 pub mod webgraphicstools;
 #[cfg(test)]
 mod webgraphics_tests;
@@ -180,9 +186,26 @@ pub mod sshtunnel_mgr;
 pub mod gitworktools;
 pub mod sshtunneltools;
 pub mod objectstoragetools;
+pub mod updatestools;
+pub mod componentstools;
+#[cfg(test)]
+mod componentstools_tests;
+pub mod sharetools;
+#[cfg(test)]
+mod sharetools_tests;
+#[cfg(test)]
+mod updatestools_tests;
 pub mod ollamatools;
 #[cfg(test)]
 mod ollamatools_tests;
+pub mod lemonadecomputetools;
+pub mod hwprofile;
+#[cfg(test)]
+mod hwprofile_tests;
+pub mod thiscomputertools;
+pub mod dictfix;
+pub mod dictfixtools;
+pub mod revise;
 pub mod quickuninstalltools;
 #[cfg(test)]
 mod quickuninstalltools_tests;
@@ -242,6 +265,9 @@ pub mod study;
 pub mod study_tools;
 pub mod studylesson;
 pub mod archive;
+pub mod bindelta;
+#[cfg(test)]
+mod bindelta_tests;
 pub mod xz;
 pub mod player;
 pub mod clis;
@@ -332,6 +358,7 @@ pub mod cloudlisten;
 pub mod cloudroles;
 pub mod cloudroute;
 pub mod cloudstorage;
+pub mod cloudquota;
 pub mod cloudtenant;
 pub mod cloudvault;
 pub mod cloudkeys;

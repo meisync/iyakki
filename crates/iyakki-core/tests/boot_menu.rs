@@ -447,7 +447,7 @@ fn the_loader_default_option_drops_the_test_entry_and_lays_out_the_recovery_name
     let post = read("board/iyakki/post-image.sh");
     let lean = read("lean-image.sh");
     for (name, text) in [("post-image.sh", &post), ("lean-image.sh", &lean)] {
-        assert!(text.contains("IYAKKI_LOADER_DEFAULT:-0") && text.contains("loader-default.sh"), "{name}: the option (default 0)");
+        assert!(text.contains("IYAKKI_LOADER_DEFAULT:-1") && text.contains("loader-default.sh"), "{name}: the option (default 1 since 2026-11-07: the loader is the default; IYAKKI_LOADER_DEFAULT=0 keeps GRUB)");
     }
     // GRUB-default (the option off): the entry is in the board's grub.cfg, between the markers the script cuts out
     let cfg = read("board/iyakki/grub.cfg");
@@ -511,4 +511,22 @@ fn the_loader_default_option_drops_the_test_entry_and_lays_out_the_recovery_name
     assert_eq!(out.status.code(), Some(3));
     assert!(empty.join("EFI/BOOT/bootx64.efi").exists() && !empty.join("EFI/BOOT/grub-recovery.efi").exists());
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// 2026-11-07: `if loadfont a && loadfont b; then` in the menu's grub.cfg made GRUB draw every menu and message character as a missing-glyph
+/// box on the first screen (the fonts were fine; the 1101 image with one `loadfont` per `if` was readable). One condition per `if`.
+#[test]
+fn the_menu_config_uses_one_condition_per_if_and_the_font_lines_are_nested() {
+    let cfg = read("board/iyakki/grub.cfg");
+    for (n, l) in cfg.lines().enumerate() {
+        let l = l.trim();
+        if l.starts_with("if ") || l.starts_with("elif ") {
+            assert!(!l.contains("&&") && !l.contains("||"), "grub.cfg line {}: `{l}` combines conditions; nest the ifs instead", n + 1);
+        }
+    }
+    let fonts: Vec<&str> = cfg.lines().map(str::trim).filter(|l| l.starts_with("if loadfont ")).collect();
+    assert_eq!(fonts.len(), 2, "{fonts:?}");
+    let ifs = cfg.lines().filter(|l| l.trim().starts_with("if ")).count();
+    let fis = cfg.lines().filter(|l| l.trim() == "fi").count();
+    assert_eq!(ifs, fis, "every `if` of the menu config is closed");
 }

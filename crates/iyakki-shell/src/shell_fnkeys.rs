@@ -281,7 +281,7 @@ impl Shell {
         }
         let (tap, _) = k.trackpad();
         crate::input::request_touchpad(tap);
-        crate::scrolleng::request_config(k.scroll().into());
+        crate::scrolleng::request_config(crate::fnkeys::scroll_config(k.scroll()));
         crate::inputprofile::refresh(&k); // the Apple devices the kernel lists decide Automatic
     }
 }

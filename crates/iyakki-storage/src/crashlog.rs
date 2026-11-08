@@ -589,7 +589,7 @@ fn now_unix() -> i64 {
 }
 
 fn uptime_us() -> u64 {
-    std::fs::read_to_string("/proc/uptime").ok().and_then(|u| u.split_whitespace().next().and_then(|v| v.parse::<f64>().ok())).map_or(0, |s| (s * 1e6) as u64)
+    crate::uptime_now().map_or(0, |s| (s * 1e6) as u64)
 }
 
 fn boot_id() -> String {
@@ -605,7 +605,7 @@ pub fn start(data_dir: &Path) -> Option<Unclean> {
         return None;
     }
     let dir = data_dir.join(LOG_SUBDIR);
-    let session = Session { boot_id: boot_id(), started: now_unix(), cmdline: std::fs::read_to_string("/proc/cmdline").unwrap_or_default().trim().to_string(), clean: false };
+    let session = Session { boot_id: boot_id(), started: now_unix(), cmdline: crate::cmdline_text().trim().to_string(), clean: false };
     let found = begin_session(&dir, &session);
     let shared = Shared::new(dir.join(format!("kmsg-{}.log", session.boot_id)));
     *active = Some(shared.clone());

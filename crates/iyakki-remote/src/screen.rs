@@ -121,6 +121,11 @@ pub trait Gate: Send + Sync {
         Vec::new()
     }
 
+    /// Where the sign-in nonces are remembered across restarts (none: in memory only).
+    fn replay_file(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
     /// The web service's API (`/api/v1/...`) for the page at `/ui/`, answered on this same server. The default has none (404).
     fn api(&self) -> Option<&iyakki_agent::webservice::embed::Embedded> {
         None
@@ -140,6 +145,25 @@ impl ShellGate {
     }
 
     /// Turn on device-key sign-in with these enrolled keys (a session opened by a key has no password, so the vault stays locked).
+    /// A gate with the device keys kept in `<dir>/device-keys` (a damaged file is moved aside and said in the log, never overwritten), so
+    /// the web front end signs in with a key from the first start.
+    pub fn with_key_store(env: ShellEnv, dir: &std::path::Path) -> ShellGate {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let gate = ShellGate::new(env);
+        match crate::devicekeys::DeviceKeys::open_or_aside(dir.join("device-keys"), now) {
+            Ok((keys, aside)) => {
+                if let Some(a) = aside {
+                    log::warn!("web: the device key file was not understood and was moved to {}; enrol the keys again", a.display());
+                }
+                gate.with_device_keys(Arc::new(keys))
+            }
+            Err(e) => {
+                log::warn!("web: device keys are off: {e}");
+                gate
+            }
+        }
+    }
+
     pub fn with_device_keys(mut self, keys: Arc<crate::devicekeys::DeviceKeys>) -> ShellGate {
         self.keys = Some(keys);
         self
@@ -147,6 +171,10 @@ impl ShellGate {
 }
 
 impl Gate for ShellGate {
+    fn replay_file(&self) -> Option<std::path::PathBuf> {
+        self.keys.as_ref().and_then(|k| k.path()).map(|p| p.with_file_name("device-keys.replay"))
+    }
+
     fn api(&self) -> Option<&iyakki_agent::webservice::embed::Embedded> {
         self.api.as_ref()
     }

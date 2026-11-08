@@ -12,11 +12,13 @@ struct Fake {
     logs: RefCell<Vec<String>>,
     /// writes to files that contain this text fail
     fail: Option<&'static str>,
+    /// SET_PROTOCOL(report) calls: "node vendor:product [ifaces]"
+    protocol_calls: RefCell<Vec<String>>,
 }
 
 impl Fake {
     fn new(event_on_wait: Option<u32>) -> Fake {
-        Fake { writes: Default::default(), runs: Default::default(), reopens: Cell::new(0), waits: Cell::new(0), event_on_wait, logs: Default::default(), fail: None }
+        Fake { writes: Default::default(), runs: Default::default(), reopens: Cell::new(0), waits: Cell::new(0), event_on_wait, logs: Default::default(), fail: None, protocol_calls: Default::default() }
     }
     fn wrote(&self) -> Vec<String> {
         self.writes.borrow().iter().map(|(p, v)| format!("{}={v}", p.rsplit('/').next().unwrap_or(p))).collect()
@@ -64,6 +66,10 @@ impl Env for Fake {
     fn log(&self, l: &str) {
         self.logs.borrow_mut().push(l.to_string());
     }
+    fn set_report_protocol(&self, node: &Path, vendor: u16, product: u16, ifaces: &[u8]) -> Result<Vec<String>, String> {
+        self.protocol_calls.borrow_mut().push(format!("{} {vendor:04x}:{product:04x} {ifaces:?}", node.display()));
+        Ok(ifaces.iter().map(|i| format!("interface {i}: report protocol set")).collect())
+    }
 }
 
 fn put(p: &Path, s: &str) {
@@ -92,11 +98,13 @@ struct Usb {
     name: &'static str,
     props: &'static str,
     node: &'static str,
+    /// a second, boot-protocol mouse interface (`:1.2`, class 03 subclass 01 protocol 02) like the wch.cn panel's
+    boot_mouse: bool,
 }
 
 impl Default for Usb {
     fn default() -> Self {
-        Usb { class: "00", iface_class: "03", iface_proto: "00", driver: Some("hid-multitouch"), name: "ILITEK ILITEK-TP", props: DIRECT, node: "1-5.2" }
+        Usb { class: "00", iface_class: "03", iface_proto: "00", driver: Some("hid-multitouch"), name: "ILITEK ILITEK-TP", props: DIRECT, node: "1-5.2", boot_mouse: false }
     }
 }
 
@@ -109,7 +117,18 @@ fn usb_tree(tag: &str, u: Usb) -> (PathBuf, PathBuf) {
     put(&dev.join("bDeviceClass"), &format!("{}\n", u.class));
     let iface = dev.join(format!("{}:1.0", u.node));
     put(&iface.join("bInterfaceClass"), &format!("{}\n", u.iface_class));
+    put(&iface.join("bInterfaceSubClass"), "00\n");
     put(&iface.join("bInterfaceProtocol"), &format!("{}\n", u.iface_proto));
+    put(&iface.join("bInterfaceNumber"), "00\n");
+    put(&dev.join("busnum"), "1\n");
+    put(&dev.join("devnum"), "9\n");
+    if u.boot_mouse {
+        let m = dev.join(format!("{}:1.2", u.node));
+        put(&m.join("bInterfaceClass"), "03\n");
+        put(&m.join("bInterfaceSubClass"), "01\n");
+        put(&m.join("bInterfaceProtocol"), "02\n");
+        put(&m.join("bInterfaceNumber"), "02\n");
+    }
     let hid = "0003:27C0:0859.0001";
     let inp = iface.join(hid).join("input/input7");
     put(&inp.join("name"), &format!("{}\n", u.name));
@@ -363,4 +382,47 @@ fn a_manual_run_on_a_usb_panel_ends_with_the_display_link_retrain_and_always_wri
     let h = Fake::new(None);
     assert_eq!(super::link_retrain(&h, &none), Err("no connected DisplayPort connector".to_string()));
     assert!(h.wrote().is_empty());
+}
+
+#[test]
+fn a_panel_with_a_boot_mouse_interface_gets_the_report_protocol_first_on_that_interface_only_and_nothing_else_is_touched() {
+    let (sys, _) = usb_tree("proto", Usb { boot_mouse: true, ..Default::default() });
+    let f = Fake::new(Some(1));
+    let o = run_ladder(&f, &sys, false, w());
+    assert_eq!(o.tried, vec![Rung::ReportProtocol]);
+    assert_eq!(o.fixed_by, Some(Rung::ReportProtocol));
+    assert_eq!(f.protocol_calls.borrow().as_slice(), ["/dev/bus/usb/001/009 27c0:0859 [2]"], "the node from busnum/devnum, the ids from sysfs, only the boot interface");
+    assert!(f.wrote().is_empty() && f.reopens.get() == 0, "no sysfs write and no reopen before the protocol switch had its chance");
+    assert!(describe(&o).contains("report protocol"));
+    // without an event the ladder goes on as before, the protocol step first
+    let f2 = Fake::new(None);
+    assert_eq!(run_ladder(&f2, &sys, false, w()).tried, vec![Rung::ReportProtocol, Rung::Reopen, Rung::HidRebind, Rung::UsbReset]);
+}
+
+#[test]
+fn a_panel_without_a_boot_interface_has_no_protocol_step_and_the_ladder_is_what_it_was() {
+    let (sys, _) = usb_tree("noproto", Usb::default());
+    let f = Fake::new(None);
+    let o = run_ladder(&f, &sys, false, w());
+    assert_eq!(o.tried, vec![Rung::Reopen, Rung::HidRebind, Rung::UsbReset]);
+    assert!(f.protocol_calls.borrow().is_empty());
+    assert!(prime(&f, &sys).is_empty(), "nothing to prime");
+}
+
+#[test]
+fn prime_switches_the_protocol_once_at_first_sight_and_refuses_an_unsafe_panel() {
+    let (sys, _) = usb_tree("prime", Usb { boot_mouse: true, ..Default::default() });
+    let f = Fake::new(None);
+    let out = prime(&f, &sys);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(out[0].contains("switched to report protocol at first sight"), "{out:?}");
+    assert_eq!(f.protocol_calls.borrow().len(), 1);
+    assert_eq!(f.waits.get(), 0, "prime never waits for an event");
+    assert!(f.wrote().is_empty());
+    // a panel whose device also carries a keyboard interface is refused by the same safety check as the ladder
+    let (sys2, _) = usb_tree("prime-kbd", Usb { boot_mouse: true, iface_proto: "01", ..Default::default() });
+    let f2 = Fake::new(None);
+    let out2 = prime(&f2, &sys2);
+    assert!(out2.len() == 1 && out2[0].contains("not primed"), "{out2:?}");
+    assert!(f2.protocol_calls.borrow().is_empty());
 }

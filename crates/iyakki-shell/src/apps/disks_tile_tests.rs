@@ -555,3 +555,37 @@ fn settings_storage_and_the_file_picker_lead_to_the_drives() {
     assert_eq!(pk.dir, home, "the picker did not move");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn the_pickers_drives_button_goes_to_the_open_drives_of_the_account_and_is_drawn_inside_the_window_at_four_sizes() {
+    let base = std::env::temp_dir().join(format!("pk-drives2-{}", std::process::id()));
+    let home = base.join("home/amy");
+    let media = home.join("media");
+    std::fs::create_dir_all(media.join("STICK")).unwrap();
+    let mut p = Role::User.template();
+    p.fs_read = vec![home.display().to_string()];
+    p.fs_write = vec![];
+    let mk = |p: &Policy| crate::filepicker::Scope::new("amy", p, iyakki_agent::scope::FileRoots::with_home(p, "amy", &base, home.clone()));
+    let drives = Event::Tab(crate::filepicker::TAB_BASE + 7);
+    // an open drive and the right to read the folder: the picker goes there
+    let mut pk = crate::filepicker::FilePicker::new(crate::filepicker::PathKind::File, &[], "Choose", &home.to_string_lossy(), mk(&p));
+    pk.handle_event(&drives);
+    assert_eq!(pk.dir, std::fs::canonicalize(&media).unwrap_or(media.clone()), "{:?}", pk.error);
+    assert!(pk.error.is_none());
+    // no right to read it: it says so and stays
+    let mut none = p.clone();
+    none.fs_read = vec![];
+    let mut pk2 = crate::filepicker::FilePicker::new(crate::filepicker::PathKind::File, &[], "Choose", &home.to_string_lossy(), mk(&none));
+    let before = pk2.dir.clone();
+    pk2.handle_event(&drives);
+    assert_eq!(pk2.dir, before);
+    // the button is drawn whole, inside the window, at the four sizes
+    for (w, h, s) in [(1280u32, 720u32, 1.0f32), (1920, 1080, 1.5), (1024, 600, 0.8), (800, 480, 0.62)] {
+        let mut g = Gfx::new(w, h);
+        pk.render(&mut g, R::new(0.0, 46.0 * s, w as f32, h as f32 - 46.0 * s), s, rgb(90, 200, 160), false);
+        let hit = g.hits.iter().find(|x| x.label.contains("Drives")).unwrap_or_else(|| panic!("{w}x{h}: no Drives button: {:?}", g.hits.iter().map(|x| &x.label).collect::<Vec<_>>()));
+        let r = hit.rect;
+        assert!(r.x >= 0.0 && r.y >= 0.0 && r.x + r.w <= w as f32 && r.y + r.h <= h as f32, "{w}x{h}: {r:?}");
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}

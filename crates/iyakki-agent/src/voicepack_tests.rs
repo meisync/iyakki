@@ -38,6 +38,8 @@ struct Fake {
     fail_delete: Vec<String>,
     list_fails: bool,
     lemonade_down: bool,
+    /// A pull answers OK but Lemonade does not list the model afterwards.
+    pulled_not_listed: bool,
 }
 
 impl StepEnv for Fake {
@@ -89,7 +91,13 @@ impl StepEnv for Fake {
         self.calls.push(format!("pull {model}"));
         match &self.fail_pull {
             Some(m) if m == model => Err("the download stopped at 40%".into()),
-            _ => Ok(()),
+            _ => {
+                // a pulled model is listed afterwards (the step looks again before it marks)
+                if !self.pulled_not_listed && !self.have.iter().any(|m| m == model) {
+                    self.have.push(model.to_string());
+                }
+                Ok(())
+            }
         }
     }
     fn lemonade_models(&mut self) -> Result<Vec<String>, String> {
@@ -221,6 +229,14 @@ fn a_failed_self_test_is_a_plain_failure_that_removes_what_was_pulled_and_sets_n
     let mut f = Fake { have: vec![WHISPER_MODEL.into(), KOKORO_MODEL.into()], selftest: Some(Err("Self-test failed: x".into())), ..Default::default() };
     let e = crate::quickinstall::run_step(Item::VoicePack, &mut f, WAIT, POLL).unwrap_err();
     assert!(e.contains("Nothing was installed") && !f.calls.iter().any(|c| c.starts_with("delete")), "{e} {:?}", f.calls);
+}
+
+#[test]
+fn a_model_lemonade_does_not_list_after_the_pull_fails_the_step_takes_back_the_pull_and_writes_no_marker() {
+    let mut f = Fake { pulled_not_listed: true, ..Default::default() };
+    let e = crate::quickinstall::run_step(Item::VoicePack, &mut f, WAIT, POLL).unwrap_err();
+    assert!(e.starts_with("Verify failed: Lemonade does not list Whisper-Tiny and kokoro-v1 as downloaded"), "{e}");
+    assert!(f.calls.iter().any(|c| c == "delete kokoro-v1") && !f.calls.iter().any(|c| c.starts_with("mark") || c.starts_with("after")), "{:?}", f.calls);
 }
 
 /// A fake speech server: Kokoro answers with a tone, Whisper with this text (or an error).

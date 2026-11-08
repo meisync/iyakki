@@ -175,7 +175,13 @@ pub struct ChatApp {
     save_home: Option<std::path::PathBuf>,
     // voice
     rec: Option<Recorder>,
-    stt_rx: Option<Receiver<Result<String, String>>>,
+    /// Ends the dictation by itself after a pause in the talking.
+    rec_pause: Option<iyakki_agent::voicedesk::PauseDetector>,
+    /// The recording that just ended was ended by a pause: with Keep listening on, the next one starts once its text is in.
+    rec_ended_on_pause: bool,
+    stt_rx: Option<Receiver<(Result<String, String>, Option<iyakki_agent::dictfix::Fixed>)>>,
+    /// The worker is asking the assistant to tidy the dictated wording (Settings -> Voice -> Correct my wording).
+    stt_tidying: Arc<std::sync::atomic::AtomicBool>,
     /// Reads a reply aloud sentence by sentence (the same reader as TALES), so the sentence and word being said can be lit.
     reader: Reader,
     /// The message being read: see [`Reading`].
@@ -338,7 +344,10 @@ impl ChatApp {
             save: None,
             save_home: None,
             rec: None,
+            rec_pause: None,
+            rec_ended_on_pause: false,
             stt_rx: None,
+            stt_tidying: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reader: Reader::new(),
             reading: None,
             click_read: None,
@@ -923,12 +932,21 @@ impl ChatApp {
             if cx.session.policy.allows_app(iyakki_sec::policy::App::Rag) {
                 system.push_str(iyakki_agent::ragtools::PROMPT_RULE);
             }
+            system.push_str(iyakki_agent::updatestools::PROMPT_RULE);
+            if cx.session.policy.manage_settings {
+                system.push_str(iyakki_agent::componentstools::PROMPT_RULE);
+            }
+            system.push_str(iyakki_agent::dictfixtools::PROMPT_RULE);
+            system.push_str(iyakki_agent::sharetools::PROMPT_RULE);
             if cx.session.policy.manage_settings {
                 system.push_str(iyakki_agent::sshtunneltools::PROMPT_RULE);
                 system.push_str(iyakki_agent::webgraphicstools::PROMPT_RULE);
                 system.push_str(iyakki_agent::objectstoragetools::PROMPT_RULE);
                 system.push_str(iyakki_agent::ollamatools::PROMPT_RULE);
+                system.push_str(iyakki_agent::modelopttools::PROMPT_RULE);
                 system.push_str(iyakki_agent::quickuninstalltools::PROMPT_RULE);
+                system.push_str(iyakki_agent::lemonadecomputetools::PROMPT_RULE);
+                system.push_str(iyakki_agent::thiscomputertools::PROMPT_RULE);
                 system.push_str(iyakki_agent::sharedvaulttools::PROMPT_RULE);
                 system.push_str(iyakki_agent::vpntools::PROMPT_RULE);
             }
@@ -1044,9 +1062,36 @@ impl ChatApp {
         } else {
             tools_arc
         };
+        // shared folders: the list is free, every change asks; the manager enforces the folder rule (administrator any folder of the disks, others their home)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            let admin = cx.session.role == iyakki_sec::policy::Role::Admin;
+            let allow = iyakki_agent::sharedfolder::allow_fn_for(admin, cx.session.policy.clone(), &user, cx.services.dir());
+            let scope = iyakki_agent::sharedfolder::scope_for(admin, &user, cx.services.dir());
+            let a2 = user.clone();
+            let shares = iyakki_agent::sharedfolder::for_user(cx.services.dir(), &user, Arc::new(move |e, d| audit.record(&a2, e, d)), allow, scope);
+            Arc::new(iyakki_agent::sharetools::ShareTools::new(tools_arc, Arc::new(iyakki_agent::sharetools::RealApi { shares, svc: cx.services.clone(), user })))
+        };
+        // updates: the status is free, the check asks every time (the backend refuses anyone but an administrator)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            Arc::new(iyakki_agent::updatestools::UpdatesTools::new(tools_arc, Arc::new(iyakki_agent::updatestools::RealBackend { svc: cx.services.clone(), policy: cx.session.policy.clone(), user: cx.session.user.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
+        // system components of the pinned private stores: read-only status and plan (administrators; applying is a later step)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
+            Arc::new(iyakki_agent::componentstools::ComponentsTools::new(tools_arc, Arc::new(iyakki_agent::componentstools::RealBackend { svc: cx.services.clone() })))
+        } else {
+            tools_arc
+        };
         // object storage (SeaweedFS, RustFS): status is free, install and remove ask (administrators only: they change the cluster)
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
             Arc::new(iyakki_agent::objectstoragetools::ObjectStorageTools::new(tools_arc, Arc::new(iyakki_agent::objectstoragetools::RealBackend { svc: cx.services.clone(), user: cx.session.user.clone() })))
+        } else {
+            tools_arc
+        };
+        // model providers and per-model options: listing and reading are free, changing options and fetching a provider's list ask (administrators only)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
+            Arc::new(iyakki_agent::modelopttools::ModelTools::new(tools_arc, Arc::new(iyakki_agent::modelopttools::RealBackend { svc: cx.services.clone() })))
         } else {
             tools_arc
         };
@@ -1069,6 +1114,24 @@ impl ChatApp {
             Arc::new(iyakki_agent::quickuninstalltools::QuickUninstallTools::new(tools_arc, Arc::new(iyakki_agent::quickuninstalltools::RealBackend { svc: cx.services.clone(), user: cx.session.user.clone() })))
         } else {
             tools_arc
+        };
+        // where Lemonade runs (GPU or CPU): status is free, the change asks every time (administrators only)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
+            Arc::new(iyakki_agent::lemonadecomputetools::LemonadeComputeTools::new(tools_arc, Arc::new(iyakki_agent::lemonadecomputetools::RealBackend { svc: cx.services.clone(), user: cx.session.user.clone() })))
+        } else {
+            tools_arc
+        };
+        // which settings belong to this computer (the install can start on several): status is free, the changes ask (administrators only)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
+            Arc::new(iyakki_agent::thiscomputertools::ThisComputerTools::new(tools_arc, Arc::new(iyakki_agent::thiscomputertools::RealBackend { svc: cx.services.clone() })))
+        } else {
+            tools_arc
+        };
+        // correcting dictated wording: status and text_tidy are free (text_tidy only reaches a model on this computer or one already agreed to),
+        // switching the option asks every time
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            Arc::new(iyakki_agent::dictfixtools::DictationWordingTools::new(tools_arc, Arc::new(iyakki_agent::dictfixtools::RealBackend { svc: cx.services.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)), can_change: cx.session.policy.manage_settings })))
         };
         // messaging: the assistant can list the person's accounts and send to a saved room; every send asks (only once an account exists)
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
@@ -1413,6 +1476,8 @@ impl ChatApp {
             Ok(r) => {
                 self.error = None;
                 self.rec = Some(r);
+                self.rec_pause = iyakki_agent::voicedesk::PauseDetector::from_settings(&cx.services.voice_settings());
+                self.rec_ended_on_pause = false;
                 cx.audit.record(&cx.session.user, "voice.record", "");
             }
             Err(e) => self.error = Some(e),
@@ -1424,8 +1489,26 @@ impl ChatApp {
         let Some(rec) = self.rec.take() else { return };
         let svc = cx.services.clone();
         let (tx, rx) = channel();
+        // Correct my wording: the worker tidies the text after the speech engine, so the screen never waits. The text already in the box
+        // and the last two messages of the chat are the context (names, terms); the transcript itself is only ever quoted data.
+        let fix = svc.voice_settings().fix_wording;
+        let ctx = iyakki_agent::dictfix::Context {
+            earlier: self.input.text.clone(),
+            chat: self.msgs.iter().filter(|m| matches!(m.role, iyakki_agent::chat::Role::User | iyakki_agent::chat::Role::Assistant) && m.tool_calls.is_empty() && !m.content.trim().is_empty()).rev().take(iyakki_agent::dictfix::CHAT_MESSAGES).map(|m| m.content.clone()).collect::<Vec<_>>().into_iter().rev().collect(),
+            ..Default::default()
+        };
+        let tidying = self.stt_tidying.clone();
+        tidying.store(false, std::sync::atomic::Ordering::SeqCst);
         std::thread::spawn(move || {
-            let _ = tx.send(rec.stop().and_then(|pcm| svc.transcribe_samples(&pcm)));
+            let r = rec.stop().and_then(|pcm| svc.transcribe_samples(&pcm));
+            let fixed = match (&r, fix) {
+                (Ok(raw), true) => {
+                    tidying.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Some(iyakki_agent::dictfix::fix_wording(&svc, raw, &ctx))
+                }
+                _ => None,
+            };
+            let _ = tx.send((r, fixed));
         });
         self.stt_rx = Some(rx);
     }
@@ -2065,8 +2148,15 @@ impl ChatApp {
                     }
                     true
                 })
-                .and_then(|turn| if turn.text.trim().is_empty() { Err("The model returned an empty answer. Try again, or choose another model (Ctrl+P).".to_string()) } else { Ok(turn.text) })
-                .map(|t| if iyakki_agent::providers::thinking_only() { format!("*(The model wrote no answer, only its thinking; that is shown.)*\n\n{t}") } else { t });
+                .and_then(|turn| {
+                    if iyakki_agent::providers::thinking_only() && turn.text.trim().is_empty() {
+                        Err(iyakki_agent::providers::THINKING_ONLY_MESSAGE.to_string())
+                    } else if turn.text.trim().is_empty() {
+                        Err("The model returned an empty answer. Try again, or choose another model (Ctrl+P).".to_string())
+                    } else {
+                        Ok(turn.text)
+                    }
+                });
             let _ = tx.send((r, info));
         });
         self.pending = Some(rx);
@@ -2136,16 +2226,35 @@ impl ChatApp {
         // the microphone process died by itself (no device, permission, unplugged): report why
         if self.rec.as_mut().is_some_and(|r| !r.is_alive() || r.is_full()) {
             self.finish_recording(cx);
+        } else if let (Some(r), Some(p)) = (&self.rec, self.rec_pause.as_mut()) {
+            // the person paused after talking: stop and turn it into text
+            if p.tick(r.level(), r.elapsed().as_millis() as u64) {
+                self.rec_ended_on_pause = true;
+                self.finish_recording(cx);
+            }
         }
         if let Some(rx) = &self.stt_rx {
-            if let Ok(r) = rx.try_recv() {
+            if let Ok((r, fixed)) = rx.try_recv() {
                 self.stt_rx = None;
+                self.stt_tidying.store(false, std::sync::atomic::Ordering::SeqCst);
                 match r {
-                    Ok(text) => {
+                    Ok(raw) => {
                         self.error = None;
+                        // the corrected words are what is inserted (and auto-sent); when nothing could be corrected the words as heard are
+                        let text = fixed.as_ref().map_or(raw, |f| f.text.clone());
+                        if let Some(f) = &fixed {
+                            cx.audit.record(&cx.session.user, iyakki_agent::dictfix::AUDIT, f.audit_detail());
+                            if let Some(why) = &f.kept_because {
+                                self.info = Some(format!("{}{}", why[..1].to_uppercase(), &why[1..]));
+                            }
+                        }
                         self.input.paste(text.trim_end());
                         if cx.services.voice_settings().auto_send && self.pending.is_none() {
                             self.send(cx);
+                        }
+                        // Keep listening: a pause ended it and its text is in, so listen again (not after the person's own stop or a failure)
+                        if std::mem::take(&mut self.rec_ended_on_pause) && cx.services.voice_settings().keep_listening {
+                            self.start_recording(cx);
                         }
                     }
                     Err(e) => self.error = Some(e),
@@ -2781,7 +2890,10 @@ impl ChatApp {
                 }
             }
             // while recording, Esc cancels the recording and Enter stops it and transcribes
-            Event::Key(Key::Esc) if self.rec.is_some() => self.rec = None,
+            Event::Key(Key::Esc) if self.rec.is_some() => {
+                self.rec = None;
+                self.rec_ended_on_pause = false;
+            }
             // a credential that was kept out of the message: `v` (with an empty box) puts it in the vault, Esc forgets it
             Event::Key(Key::Char('v')) if self.cred.is_some() && self.input.text.is_empty() => {
                 let c = self.cred.clone().unwrap();
@@ -3189,7 +3301,7 @@ impl ChatApp {
             g.rrect(bx, sy + 4.0 * s, bw, 10.0 * s, 5.0 * s, rgb(30, 36, 60));
             g.rrect(bx, sy + 4.0 * s, (bw * lvl).max(6.0 * s), 10.0 * s, 5.0 * s, if lvl > 0.8 { rgb(255, 150, 90) } else { OK });
         } else if self.stt_rx.is_some() {
-            g.text(area.x + side, sy, 15.0 * s, MUTED, &format!("transcribing{}", ".".repeat(1 + (tick / 10 % 3) as usize)), Face::Sans);
+            g.text(area.x + side, sy, 15.0 * s, MUTED, &format!("{}{}", if self.stt_tidying.load(std::sync::atomic::Ordering::SeqCst) { "tidying the wording" } else { "transcribing" }, ".".repeat(1 + (tick / 10 % 3) as usize)), Face::Sans);
         } else if speaking {
             let paused = self.reader.status() == Status::Paused;
             let label = if paused { "paused".to_string() } else { format!("speaking{}", ".".repeat(1 + (tick / 10 % 3) as usize)) };
@@ -4017,6 +4129,45 @@ mod tests {
         assert_eq!(app.messages().len(), 1, "nothing was sent yet");
         assert!(cx.audit.recent(10).iter().any(|l| l.contains("voice.record")));
         assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn correct_my_wording_tidies_the_dictated_text_before_it_lands_in_the_box_and_before_auto_send() {
+        let (mut cx, _d) = cx_with_backend("cv-fix", iyakki_agent::chat::Unconfigured);
+        // real HTTP to the loopback fake (the test services are offline otherwise)
+        let up: Arc<dyn iyakki_agent::iyakki_proxy::Upstream> = Arc::new(iyakki_agent::iyakki_proxy::https::UreqUpstream::with_timeout(std::time::Duration::from_secs(10)));
+        cx.services = crate::apps::tests::services_in(&crate::apps::tests::temp_dir("cv-fix-svc"), up);
+        let rig = Rig::new(&cx, "fix");
+        let fake = crate::apps::lemonade_fake::serve();
+        cx.services.use_local_lemonade(&fake.base(), None);
+        cx.services.settings.lock().unwrap().update(|s| s.chat = Some(iyakki_agent::settings::ModelChoice { provider: "lemonade-local".into(), model: "Qwen3-0.6B-GGUF".into() })).unwrap();
+        // off (the default): the words as heard
+        let mut app = ChatApp::new();
+        app.handle(&Event::Key(Key::Ctrl('r')), &cx);
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        app.handle(&Event::Key(Key::Ctrl('r')), &cx);
+        settle_stt(&mut app, &cx);
+        assert_eq!(app.input_text(), "turn on the lights");
+        assert!(fake.bodies("/api/v1/chat/completions").is_empty());
+        // on: the corrected text is inserted
+        rig.configure(&cx, |v| v.fix_wording = true);
+        let mut app = ChatApp::new();
+        app.handle(&Event::Key(Key::Ctrl('r')), &cx);
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        app.handle(&Event::Key(Key::Ctrl('r')), &cx);
+        settle_stt(&mut app, &cx);
+        assert_eq!(app.input_text(), "Turn on the lights.", "the corrected words are inserted");
+        assert_eq!(fake.bodies("/api/v1/chat/completions").len(), 1);
+        assert!(cx.audit.recent(20).iter().any(|l| l.contains("voice.fixwording")));
+        // auto-send sends the corrected text only
+        rig.configure(&cx, |v| v.auto_send = true);
+        let mut app = ChatApp::new();
+        app.handle(&Event::Key(Key::Ctrl('r')), &cx);
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        app.handle(&Event::Key(Key::Ctrl('r')), &cx);
+        settle_stt(&mut app, &cx);
+        assert_eq!(app.messages().last().unwrap().content, "Turn on the lights.");
+        assert!(!app.messages().iter().any(|m| m.content == "turn on the lights"));
     }
 
     #[test]

@@ -723,6 +723,52 @@ impl Inbox {
         })
     }
 
+    /// One notice kept under `key`, changed in place: a second call with the same key rewrites the text of the same entry (same id)
+    /// instead of adding another. With `unread` the entry is marked unread and moved to the newest time again; without it the
+    /// person's reading state stays. Used for "updates available", which must not pile up day after day.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_keyed(&self, user: &str, key: &str, kind: Kind, title: &str, body: &str, source: &str, link: Option<Link>, unread: bool, now: i64) -> Result<Notification, String> {
+        let title = clean(title, MAX_TITLE, false);
+        if title.is_empty() {
+            return Err("a notification needs a title".into());
+        }
+        let (body, source) = (clean(body, MAX_BODY, true), clean(source, 40, false));
+        let link = link.map(|l| Link { app: clean(&l.app, 24, false), id: clean(&l.id, 64, false) });
+        let key = format!("keyed:{}", clean(key, 60, false));
+        self.edit(user, |d| {
+            if d.levels.get(&source) == Some(&Level::Off) {
+                return Err(format!("notifications from {source} are turned off"));
+            }
+            if let Some(e) = d.notifications.iter_mut().find(|e| e.group == key) {
+                e.kind = kind;
+                e.title = title;
+                e.body = body;
+                e.source = source;
+                e.link = link;
+                if unread {
+                    e.read = false;
+                    e.time = now;
+                    e.snoozed_until = 0;
+                }
+                return Ok(e.clone());
+            }
+            let n = Notification { id: new_id(), time: now, kind, title, body, source, link, read: false, flagged: false, snoozed_until: 0, group: key, count: 1, plural: String::new(), items: Vec::new() };
+            d.notifications.push(n.clone());
+            prune(d, now);
+            Ok(n)
+        })
+    }
+
+    /// Remove the entry kept under `key` (nothing is pending any more). Returns whether there was one.
+    pub fn remove_keyed(&self, user: &str, key: &str) -> Result<bool, String> {
+        let key = format!("keyed:{}", clean(key, 60, false));
+        self.edit(user, |d| {
+            let before = d.notifications.len();
+            d.notifications.retain(|n| n.group != key);
+            Ok(d.notifications.len() != before)
+        })
+    }
+
     /// Remove everything that has been read, except what is flagged. Returns how many went.
     pub fn clear_read(&self, user: &str) -> Result<usize, String> {
         self.edit(user, |d| {

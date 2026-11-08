@@ -865,10 +865,11 @@ mod thinking {
     }
 
     #[test]
-    fn an_answer_that_exists_only_as_thinking_is_shown_with_a_note_not_as_empty() {
+    fn an_answer_that_exists_only_as_thinking_ends_with_a_plain_message_and_never_shows_the_thinking() {
         let (b, _) = replay("qwen3:8b", vec![(200, QWEN_THINKS_THEN_NOTHING.into())]);
         let ev = run_replay(b, "what is the weather in chennai", assist(true));
-        assert!(final_text(&ev).starts_with("Okay, the user is asking about the weather in Chennai"), "{}", final_text(&ev));
+        assert_eq!(final_text(&ev), crate::providers::THINKING_ONLY_MESSAGE, "{}", final_text(&ev));
+        assert!(!final_text(&ev).contains("Okay, the user"), "the thinking is not the answer");
         assert!(notes(&ev).iter().any(|n| n.contains("only its thinking")), "{:?}", notes(&ev));
     }
 

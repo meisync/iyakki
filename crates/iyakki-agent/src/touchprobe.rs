@@ -181,7 +181,7 @@ pub fn probe(sys: &Path, level: u8) -> String {
 fn start_fix(uptime_secs: u64, found: &[Panel]) {
     use std::sync::atomic::Ordering::Relaxed;
     static DECIDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let mode = crate::touchfix::fix_mode(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default());
+    let mode = crate::touchfix::fix_mode(&iyakki_storage::cmdline_text());
     if found.is_empty() {
         return;
     }

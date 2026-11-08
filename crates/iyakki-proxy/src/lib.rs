@@ -132,6 +132,7 @@ fn pintls_split(url: &str) -> Option<(String, u16, String)> {
 }
 
 pub mod certinfo;
+pub mod guard;
 #[cfg(any(test, feature = "testcerts"))]
 pub mod testcerts {
     //! Certificates for tests of code that shows or pins a server certificate.
@@ -393,6 +394,12 @@ pub mod https {
             let body = resp.body_mut().with_config().limit(8 << 20).read_to_vec().map_err(|e| e.to_string())?;
             Ok((UpstreamResponse { status, body }, reply_headers))
         }
+    }
+
+    /// The transport for installs and other downloads: [`UreqStreamer`] with the stall limits of [`crate::guard::Limits::DOWNLOAD`], so a transfer
+    /// that never starts, sends no byte, or goes quiet ends as a "network problem" instead of hanging.
+    pub fn download_streamer() -> std::sync::Arc<dyn crate::Streamer> {
+        std::sync::Arc::new(crate::guard::Guarded::new(UreqStreamer::default(), crate::guard::Limits::DOWNLOAD))
     }
 
     /// Streams over HTTP/HTTPS with no overall time limit (only connecting and the first answer are bounded).

@@ -32,6 +32,7 @@ for t in fakeroot cpio zstd python3; do command -v "$t" >/dev/null || die "missi
 case "$MODE" in sfs|seed|tree|both|export|stick) ;; *) die "--root must be sfs, seed, tree, both, export or stick" ;; esac
 MCOPY="$(command -v mcopy || ls "$ROOT"/target/buildroot-*/host/bin/mcopy 2>/dev/null | head -n1 || true)"; [ "$MODE" = export ] || [ -n "$MCOPY" ] || die "no mcopy (mtools)"
 MMD="$(dirname "${MCOPY:-/nonexistent/x}")/mmd"; [ -x "$MMD" ] || MMD="$(command -v mmd || true)"
+MDIR="$(dirname "${MCOPY:-/nonexistent/x}")/mdir"; [ -x "$MDIR" ] || MDIR="$(command -v mdir || true)"
 if [ "$MODE" != export ]; then for t in mkfs.vfat sfdisk; do command -v "$t" >/dev/null || die "missing $t"; done; fi
 case "$MODE" in sfs|seed|both) command -v mksquashfs >/dev/null || die "missing mksquashfs" ;; esac
 case "$MODE" in tree|both|stick) command -v mke2fs >/dev/null || [ -x /usr/sbin/mke2fs ] || die "missing mke2fs" ;; esac
@@ -150,12 +151,22 @@ if [ -n "${IYAKKI_STICK_PACKAGES:-}" ]; then
   done
 fi
 # the extra boot loader (iyakki-boot, boot-loader-stage.sh): its entries read the lean RAM disk like GRUB's plain entry does; nothing is added
-# when the loader program has not been built
+# when the loader program has not been built. The RAM disk's name on the volume differs by mode: seed and stick keep boot/initrd-lean (GRUB
+# picks it over the full boot/initrd), sfs writes the lean one AS boot/initrd (the only RAM disk). The loader has no such "if the file exists"
+# rule, so it must be told the real name: a loader-default sfs image told /boot/initrd-lean fails with "initrd cannot be read" (2026-11-07).
+case "$MODE" in seed|stick) LD_INITRD=/boot/initrd-lean ;; *) LD_INITRD=/boot/initrd ;; esac
 LD="$W/loader"; mkdir -p "$LD"
-sh "$HERE/boot-loader-stage.sh" "$LD" /boot/initrd-lean || true
+sh "$HERE/boot-loader-stage.sh" "$LD" "$LD_INITRD" || true
 if [ -f "$LD/EFI/iyakki-boot/loader.efi" ]; then
+  # every RAM disk the loader's menu names must be on the volume, except one a `requires` line guards (the "Full start" row names
+  # /boot/initrd and the loader hides it when that file is missing)
+  guarded="$(grep -E '^\s*requires ' "$LD/EFI/iyakki-boot/boot.cfg" | awk '{print $2}' | sort -u)"
+  for p in $(grep -E '^\s*initrd ' "$LD/EFI/iyakki-boot/boot.cfg" | awk '{print $2}' | sort -u); do
+    echo "$guarded" | grep -qxF "$p" && continue
+    "$MDIR" -i "$FAT" "::$p" >/dev/null 2>&1 || die "the loader's menu names $p but the boot volume has no such file (mode $MODE)"
+  done
   "$MMD" -i "$FAT" ::EFI/iyakki-boot >/dev/null 2>&1 || true
-  if [ "${IYAKKI_LOADER_DEFAULT:-0}" = 1 ]; then
+  if [ "${IYAKKI_LOADER_DEFAULT:-1}" = 1 ]; then
     # loader-default (loader-default.sh, docs/BOOT-LOADER.md): the loader as shim's second stage / BOOTX64.EFI, GRUB as grub-recovery.efi, the
     # test entry out of grub.cfg. Done on a copy of the template's EFI/BOOT (the template may already be loader-default: the script is idempotent).
     mkdir -p "$LD/EFI"; cp -a "$IMG/install-root/EFI/BOOT" "$LD/EFI/BOOT"

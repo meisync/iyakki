@@ -933,7 +933,7 @@ pub fn install_with_unload(fs: &apply::Fs, run: &dyn iyakki_drivers::run::Runner
             }
         }
     }
-    apply::install_pack(fs, run, id, version, "LicenseRef-Apple-firmware-supplied-by-the-user", source, "local", p)
+    crate::fwpack::install_checked(fs, run, id, version, "LicenseRef-Apple-firmware-supplied-by-the-user", source, p)
 }
 
 /// The Bluetooth drivers of this machine are set aside (a T2 Mac without the firmware, `t2hold.rs`): "Load the Bluetooth driver anyway"
@@ -1074,7 +1074,7 @@ impl Env for RealEnv {
         crate::k3sdev::space(dir).map(|s| s.0)
     }
     fn data_in_memory(&self) -> bool {
-        in_memory(&std::fs::read_to_string("/proc/mounts").unwrap_or_default(), &self.data)
+        in_memory(&iyakki_storage::read_mounts().unwrap_or_default(), &self.data)
     }
     fn ensure_7zz(&mut self) -> Result<PathBuf, String> {
         if let Some(p) = self.find_7zz() {

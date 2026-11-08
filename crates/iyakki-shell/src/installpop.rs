@@ -247,7 +247,7 @@ mod tests {
     use super::*;
 
     fn job(id: &str, state: State, progress: Option<f32>, ended_ms: u64) -> Job {
-        Job { id: id.into(), label: format!("Install {id}"), command: format!("iyakki quick-install {id}"), cwd: "/".into(), owner: "root".into(), workspace: iyakki_agent::quickinstall::WORKSPACE.into(), pid: 1, state, started_ms: 1, ended_ms, progress, last_line: String::new(), dismissed: false }
+        Job { id: id.into(), label: format!("Install {id}"), command: format!("iyakki quick-install {id}"), cwd: "/".into(), owner: "root".into(), workspace: iyakki_agent::quickinstall::WORKSPACE.into(), pid: 1, state, started_ms: 1, ended_ms, progress, last_line: String::new(), last_active_ms: 0, dismissed: false }
     }
 
     #[test]

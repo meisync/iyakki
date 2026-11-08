@@ -40,6 +40,9 @@ fn lan_options() -> Vec<String> {
     v
 }
 
+/// The one-line rule at the top of the form (owner rule 2026-11-06; the manager enforces it with `sharedfolder::Scope`).
+pub(super) const FOLDER_RULE_HINT: &str = "Administrators can map any folder; everyone else only folders in their own home.";
+
 /// The form for a share. `d` has the values to start from.
 pub(super) fn share_form(d: &Draft, edit: bool) -> Form {
     let lan = lan_options();
@@ -56,8 +59,9 @@ pub(super) fn share_form(d: &Draft, edit: bool) -> Form {
         1
     };
     Form::new(if edit { "Edit shared folder" } else { "Share a folder on the network" })
+        .with_note(FOLDER_RULE_HINT)
         .text("Name", &d.name, "shown to visitors; letters, digits, space - _ .")
-        .path("Folder", &d.folder, "full path of a folder of yours, for example your home folder or a workspace", crate::filepicker::PathKind::Folder, &[])
+        .path("Folder", &d.folder, "full path of the folder, for example one in your home folder", crate::filepicker::PathKind::Folder, &[])
         .choice("Show it as", &MODES, if d.mode == Mode::Website { 1 } else { 0 })
         .choice("Who can open it", &ACCESSES, match d.access {
             Access::Token => 0,

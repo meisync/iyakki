@@ -4,6 +4,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
+use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::fmt::{self, Write};
 use core::ptr::null_mut;
@@ -123,6 +124,30 @@ pub fn set_quiet(on: bool) {
     QUIET.store(on, Ordering::Relaxed);
 }
 
+/// Every `say!` line is also kept here, so the loader can write the whole run to a file on the boot volume (a laptop has no serial
+/// port and the splash hides the console). 96 KB holds the device summary, a long scan and the menu many times over.
+struct LogSlot(UnsafeCell<boot_core::log::LogBuffer>);
+// SAFETY: the loader is single threaded (boot services, one processor); each use is short and no two references are alive at once.
+unsafe impl Sync for LogSlot {}
+static LOG: LogSlot = LogSlot(UnsafeCell::new(boot_core::log::LogBuffer::new(96 * 1024)));
+
+/// A copy of the log so far.
+pub fn log_bytes() -> Vec<u8> {
+    // SAFETY: see `LogSlot`.
+    unsafe { (*LOG.0.get()).bytes().to_vec() }
+}
+
+/// Keeps the formatted text in the log buffer.
+struct LogSink;
+
+impl Write for LogSink {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        // SAFETY: see `LogSlot`.
+        unsafe { (*LOG.0.get()).push_str(s) };
+        Ok(())
+    }
+}
+
 /// Log text without touching the screen: straight to the first serial port the firmware offers. A write that fails or is cut short
 /// switches the serial log off for the rest of the run, so a port with nothing behind it can never slow the start.
 struct SerialLog;
@@ -157,6 +182,7 @@ pub fn print_fmt(args: fmt::Arguments<'_>) {
     if SYSTEM_TABLE.load(Ordering::Relaxed).is_null() {
         return;
     }
+    let _ = LogSink.write_fmt(args);
     if QUIET.load(Ordering::Relaxed) {
         let _ = SerialLog.write_fmt(args);
     } else {

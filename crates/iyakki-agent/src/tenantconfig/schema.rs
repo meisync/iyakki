@@ -264,6 +264,11 @@ static SANDBOX: [Field; 30] = [
     dflt(f("allow_cap_add", Ty::Bool, Merge::And, "added Linux capabilities: blocked by a safety rule"), "false"),
 ];
 
+static STORAGE_QUOTA: [Field; 2] = [
+    dflt(f("place_mb", Ty::Int(1, 100_000_000), Merge::Min, "most one folder may hold, in MiB: a person's folder in a namespace, a namespace's shared folder, a personal folder"), "10240"),
+    dflt(f("tenant_mb", Ty::Int(1, 100_000_000), Merge::Min, "most all folders of the tenant may hold together, in MiB"), "102400"),
+];
+
 static FLOWS_QUOTA: [Field; 7] = [
     dflt(f("max_runs_tenant", Ty::Int(1, 1000), Merge::Min, "workflow runs going at once in the whole tenant"), "4"),
     dflt(f("max_runs_person", Ty::Int(1, 1000), Merge::Min, "workflow runs going at once for one person"), "2"),
@@ -312,6 +317,7 @@ static NOTIFY_ROUTING: [Field; 6] = [
 
 pub static KINDS: &[KindSpec] = &[
     KindSpec { id: "flows.quota", summary: "Limits for workflows and schedules: runs at once, run time, schedules, history", card: Card::Single, fields: &FLOWS_QUOTA, team_level: true, person_override: false, read_values: TenantRole::Member, write: TenantRole::Admin, secret_ns: "" },
+    KindSpec { id: "storage.quota", summary: "Size limits for files: per folder and for the whole tenant (the tenant keeps one volume with a folder per namespace and person)", card: Card::Single, fields: &STORAGE_QUOTA, team_level: true, person_override: false, read_values: TenantRole::Member, write: TenantRole::Admin, secret_ns: "" },
     KindSpec { id: "schedule.timezone", summary: "The time zone schedules use when a trigger says local", card: Card::Single, fields: &SCHEDULE_TZ, team_level: false, person_override: false, read_values: TenantRole::Member, write: TenantRole::Admin, secret_ns: "" },
     KindSpec { id: "flows.unattended", summary: "Team secrets scheduled runs may use while nobody is signed in (a safety warning applies)", card: Card::Collection, fields: &FLOWS_UNATTENDED, team_level: true, person_override: false, read_values: TenantRole::Admin, write: TenantRole::Admin, secret_ns: "flows.unattended" },
     KindSpec { id: "agent.claude", summary: "Claude Code for the tenant: per-person logins (default) or one shared login", card: Card::Single, fields: &CLAUDE, team_level: true, person_override: true, read_values: TenantRole::Admin, write: TenantRole::Admin, secret_ns: "agent.claude" },

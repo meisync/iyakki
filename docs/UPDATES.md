@@ -52,12 +52,33 @@ menu, then install again. Roll back is refused while an update is unfinished.
 
 System update shows a line for how often to check (every day, only on request, off), when it last looked and what it found. Check for updates
 looks at every store source and, when an administrator set one with Update list address, a small JSON file `{"version": "...", "variant":
-"...", "notes": "..."}` that announces the newest IYAKKI. There is no built-in address. It only reports: nothing is downloaded or installed.
-A system update is installed from a folder or stick on this page; an app update in the STORE, which shows new permissions first (the check
-marks such updates). Packages that are in no catalog (a developer's own) are never listed. The daily check runs while an administrator is
-signed in, with a stable delay of up to an hour per device. This computer cannot tell a metered connection yet, so the daily check also runs
-on one (turn it off or to "only on request" if that matters). Not built: the badge on the STORE tile and in the top bar, Update all, and
-keeping the previous package version for rollback.
+"...", "notes": "..."}` that announces the newest IYAKKI. There is no built-in address. Instead of typing one, **Use a store** (key `t`)
+sets the list to the signed announcement of a private store that was added with its key checked: `<store>/v1/system.json` (see
+STORE.md, section 13: `{"version","variant","notes","channel"}`, signed with the store's catalog key; the device accepts it only with
+the pinned key and refuses an unsigned or tampered one; no file means nothing is announced). It only reports: nothing is downloaded or
+installed. A system update is installed from a folder or stick on this page; an app update in the STORE, which shows new permissions first
+(the check marks such updates). Packages that are in no catalog (a developer's own) are never listed.
+
+**When it looks.** The default is every day: a real background timer that runs while an administrator is signed in, with a stable delay of
+up to an hour per device, and once at sign-in when the last look is older than 24 hours. It asks only what was added on this computer
+(stores, folders with a web address, the update list address); the built-in offline catalog is never contacted and with nothing added
+nothing is fetched. It can be set to "only on request" or "off" in System update (How often), Store -> Settings (`o`), `iyakki dev config
+set store.daily_check false` (true/false; "false" never turns off into on) or by chat (`updates_settings_status`, `updates_settings_set`,
+which asks). This computer cannot tell a metered connection yet, so the daily check also runs on one.
+
+**What notifies.** When a check finds something new the device leaves ONE inbox notice for the administrator who was signed in, such as
+"Updates available: 3 apps, system 1107h" (counts for apps and skills, driver packs and the system, with up to three names in its text).
+The notice is replaced in place when the set changes (same entry, never stacked day after day): a new version of anything updates the text
+and marks it unread again; if only fewer updates remain (something was installed) the text follows and the reading state stays; when
+nothing is pending any more it is removed. Dismissing it is respected: the same set is not announced again. A source that cannot be
+reached does not remove the notice or make an old update look new. Clicking it opens the STORE on Installed with the Updates filter (which
+adds a line for a waiting system update) or, when only the system is waiting, Settings -> System update. The same count shows on the STORE
+tile, in a chip in the top bar, in the Overview and on the System update line, and drops at once when an update is installed. The notice
+carries titles and versions only, and nothing is ever installed automatically. Notices from "store" can be quietened or turned off in
+Settings -> Notifications like any source. `updatenotice::announce_system_update(version, notes)` is the hook for the planned component
+manifest: it records "version X is out" so the badge, the System update page and the notice show it until the running version catches up.
+The notice goes to the person who was signed in at the check, not to every administrator. Not built: Update all in one click for the
+system, and keeping the previous package version for rollback.
 
 ## What is not built or not proven
 

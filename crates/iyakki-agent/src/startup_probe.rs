@@ -244,17 +244,17 @@ pub fn poll(svc: &Arc<crate::services::Services>, reg: &Registry, firewall_alert
 pub fn gather(svc: &Arc<crate::services::Services>, firewall_alert: bool) -> Facts {
     let h = svc.k3sdev.health();
     let route_text = std::fs::read_to_string(crate::k3sdev::ROUTE_FILE).unwrap_or_default();
-    let wireless = |n: &str| std::path::Path::new("/sys/class/net").join(n).join("wireless").exists();
-    let wifi_ifaces: Vec<String> = std::fs::read_dir("/sys/class/net").map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| wireless(n)).collect()).unwrap_or_default();
+    let wireless = |n: &str| crate::sysinfo::net_class_root().join(n).join("wireless").exists();
+    let wifi_ifaces: Vec<String> = std::fs::read_dir(crate::sysinfo::net_class_root()).map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| wireless(n)).collect()).unwrap_or_default();
     Facts {
         wired_route: wired_default_route(&route_text, &wireless),
         wifi_hw: !wifi_ifaces.is_empty() || std::fs::read_dir("/sys/bus/pci/devices").map(|d| d.flatten().any(|e| std::fs::read_to_string(e.path().join("class")).is_ok_and(|c| c.trim().starts_with("0x0280")))).unwrap_or(false),
-        wifi_online: wifi_ifaces.iter().any(|n| std::fs::read_to_string(format!("/sys/class/net/{n}/operstate")).is_ok_and(|t| t.trim() == "up")),
-        uptime_secs: std::fs::read_to_string("/proc/uptime").ok().and_then(|t| t.split('.').next().and_then(|s| s.parse().ok())).unwrap_or(u64::MAX / 2),
+        wifi_online: wifi_ifaces.iter().any(|n| std::fs::read_to_string(crate::sysinfo::net_class_root().join(n).join("operstate")).is_ok_and(|t| t.trim() == "up")),
+        uptime_secs: crate::doctor::uptime_secs(),
         clock_floor_pending: crate::clockfloor::pending(),
         clock_synced: crate::ntp::synced(),
         route: crate::k3sdev::has_default_route(&std::fs::read_to_string(crate::k3sdev::ROUTE_FILE).unwrap_or_default()),
-        no_nic: !std::fs::read_dir("/sys/class/net").map(|d| d.flatten().any(|e| e.path().join("device").exists())).unwrap_or(true),
+        no_nic: !std::fs::read_dir(crate::sysinfo::net_class_root()).map(|d| d.flatten().any(|e| e.path().join("device").exists())).unwrap_or(true),
         k3s: K3sFact { installed: h.installed, autostart: h.autostart, state: h.state.clone(), note: h.note.clone(), failed_reason: h.failed_reason.clone(), node_ready: h.node_ready },
         firewall_alert,
         sound_cards: std::fs::read_to_string("/proc/asound/cards").map(|t| t.lines().filter(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit())).count()).unwrap_or(0),

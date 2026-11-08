@@ -43,7 +43,7 @@ impl Listener for Real {
         let names: Vec<String> = [host, format!("{}.local", iyakki_agent::devname::label(&dir))].into_iter().filter(|h| h != ".local" && !h.is_empty()).collect();
         let id = crate::tls::identity(&dir.join("tls"), &names)?;
         let addr = format!("0.0.0.0:{port}");
-        let s = crate::server::Server::start(crate::server::Config { addr, tls: Some(id.config) }, Arc::new(crate::screen::ShellGate::new(self.env.share()))).map_err(|e| {
+        let s = crate::server::Server::start(crate::server::Config { addr, tls: Some(id.config) }, Arc::new(crate::screen::ShellGate::with_key_store(self.env.share(), &dir))).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AddrInUse { format!("port {port} is already in use by another program") } else { format!("cannot listen on port {port}: {e}") }
         })?;
         iyakki_agent::extagent::relay::note_web_front_end(s.local_addr().port(), true);

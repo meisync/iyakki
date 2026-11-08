@@ -7,22 +7,6 @@
 use crate::safeclamp::SafeClamp;
 use crate::ui::R;
 
-/// What a Ctrl+Alt chord asks for (see `docs/MULTI-DISPLAY.md`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LayoutKey {
-    /// Ctrl+Alt+1 to 9: apply template N.
-    Apply(u8),
-    /// Ctrl+Alt+arrow: snap the focused app to that side.
-    Snap(Side),
-    /// Ctrl+Alt+Shift+arrow: move the divider next to the focused pane.
-    Nudge(Side),
-    /// Ctrl+Alt+Tab (Shift: back): focus the next pane.
-    Cycle { back: bool },
-    /// Ctrl+Alt+M: move the focused app to the next display.
-    NextDisplay,
-    /// Ctrl+Alt+0: open the layout picker.
-    Picker,
-}
 
 /// The chord for a key named by its DOM `code` ("ArrowLeft", "Digit3", "Tab", "KeyM") with Ctrl and Alt held.
 pub fn chord_from_name(code: &str, shift: bool) -> Option<LayoutKey> {
@@ -181,14 +165,7 @@ pub struct Divider {
     pub dir: Dir,
 }
 
-/// A side of the display.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Side {
-    Left,
-    Right,
-    Up,
-    Down,
-}
+pub use iyakki_uikit::keys::{LayoutKey, Side};
 
 /// What Ctrl+Alt+arrow does.
 #[derive(Clone, Debug, PartialEq, Eq)]

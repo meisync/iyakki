@@ -391,14 +391,16 @@ pub(crate) fn run_loop(backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, mut
             return finish(RunEvent::Stopped { reason: "stopped by the user".into() });
         }
 
-        // a model that thought and then wrote nothing: ask once more without thinking, else show its thinking as the answer
+        // a model that thought and then wrote nothing: ask once more without thinking, else end with a plain message (the thinking is never the answer)
         if thinking_only && turn.calls.is_empty() {
             if !assist.fast_reasoning && !force_fast {
                 force_fast = true;
                 (env.emit)(RunEvent::Note { text: "The model finished thinking without answering; asking again without thinking.".into() });
                 continue;
             }
-            (env.emit)(RunEvent::Note { text: "The model wrote no answer, only its thinking; that is shown instead.".into() });
+            // the thinking is never the answer: the run ends with one plain sentence
+            (env.emit)(RunEvent::Note { text: "The model wrote no answer, only its thinking; the thinking is not shown as the answer.".into() });
+            turn.text = crate::providers::THINKING_ONLY_MESSAGE.to_string();
         }
         // repair: calls printed as text, wrong names, wrong argument shapes
         if assist.repair {

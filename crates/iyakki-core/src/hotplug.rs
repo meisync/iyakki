@@ -153,7 +153,7 @@ fn modprobe(aliases: &[String]) {
 }
 
 fn set_up_interfaces(only: Option<&str>) {
-    match crate::net::bring_up_new(std::path::Path::new("/etc/iyakki/net.conf"), std::path::Path::new("/sys/class/net"), std::path::Path::new(crate::net::KNOWN_WIFI), only) {
+    match crate::net::bring_up_new(std::path::Path::new("/etc/iyakki/net.conf"), std::path::Path::new(crate::net::SYS_CLASS_NET), std::path::Path::new(crate::net::KNOWN_WIFI), only) {
         Ok(done) if !done.started.is_empty() => {
             log::info!("hotplug: network interface set up: {}", done.started.join(", "));
             iyakki_fw::service::network_changed();

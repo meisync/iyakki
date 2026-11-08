@@ -564,7 +564,7 @@ mod tests;
 
 /// Seconds since the machine started (a huge value when unknown, so "just booted" is never claimed by mistake).
 pub fn uptime_secs() -> u64 {
-    std::fs::read_to_string("/proc/uptime").ok().and_then(|t| t.split('.').next().and_then(|s| s.parse().ok())).unwrap_or(u64::MAX / 2)
+    crate::sysinfo::uptime_f64(crate::sysinfo::proc_root()).map_or(u64::MAX / 2, |v| v as u64)
 }
 
 /// How many sound cards the kernel lists.

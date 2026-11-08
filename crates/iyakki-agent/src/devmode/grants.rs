@@ -106,7 +106,8 @@ impl DevMode {
         }
         let _one_at_a_time = super::keys_lock();
         let mut st = self.shell_read();
-        if let Some(g) = st.grants.iter().find(|g| g.computer == k.name) {
+        // one grant per computer AND kind: a patch approval must not stand in for a shell grant (or replace it, see shell_approve)
+        if let Some(g) = st.grants.iter().find(|g| g.computer == k.name && g.kind == kind) {
             return Ok(ShellStatus::Granted(g.clone()));
         }
         // a computer the administrator chose to trust for a while gets a plain shell grant without a card; never as root, never for
@@ -133,6 +134,30 @@ impl DevMode {
         Ok(ShellStatus::Pending)
     }
 
+    /// The status of `computer` for one kind of approval (`shell`, `power`, `patch`): a grant of another kind does not count.
+    pub fn shell_status_kind(&self, computer: &str, kind: &str) -> ShellStatus {
+        let st = self.shell_read();
+        if let Some(g) = st.grants.iter().find(|g| g.computer == computer && g.kind == kind) {
+            return ShellStatus::Granted(g.clone());
+        }
+        if st.pending.iter().any(|r| r.computer == computer && r.kind == kind) {
+            return ShellStatus::Pending;
+        }
+        if st.denied.iter().any(|(c, _)| c == computer) {
+            return ShellStatus::Denied;
+        }
+        ShellStatus::None
+    }
+
+    /// The valid grant of `computer` of one kind, if any.
+    pub fn shell_grant_kind(&self, computer: &str, kind: &str) -> Option<ShellGrant> {
+        match self.shell_status_kind(computer, kind) {
+            ShellStatus::Granted(g) => Some(g),
+            _ => None,
+        }
+    }
+
+    /// The status of `computer` whatever the kind (the bar, power): the first grant, else a pending request, else a denial.
     pub fn shell_status(&self, computer: &str) -> ShellStatus {
         let st = self.shell_read();
         if let Some(g) = st.grants.iter().find(|g| g.computer == computer) {
@@ -185,7 +210,8 @@ impl DevMode {
         let once = minutes == 0;
         let secs = if once { ONCE_MAX_SECS } else { minutes.min(MAX_MINUTES) as i64 * 60 };
         let g = ShellGrant { kind: r.kind.clone(), computer: computer.into(), account: r.account, as_root: r.as_root, once, expires: now + secs, by: user.into(), since: now };
-        st.grants.retain(|x| x.computer != computer);
+        // a computer may hold one grant of each kind at a time: approving a patch keeps a shell grant (a patch of a system path needs both)
+        st.grants.retain(|x| !(x.computer == computer && x.kind == g.kind));
         st.grants.push(g.clone());
         self.shell_write(&st)?;
         if g.kind == "patch" {
@@ -227,7 +253,7 @@ impl DevMode {
 
     /// A shell session of `computer` closed: a one-session grant ends with it.
     pub fn shell_session_closed(&self, computer: &str) {
-        if self.shell_grant(computer).is_some_and(|g| g.once) {
+        if self.shell_grant_kind(computer, "shell").is_some_and(|g| g.once) {
             self.shell_drop(computer);
             self.log("system", "", "devmode.shell.end", &format!("{computer}: the one-session grant ended with its session"), true);
         }

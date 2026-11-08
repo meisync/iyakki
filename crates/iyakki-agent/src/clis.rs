@@ -868,6 +868,23 @@ impl CliManager {
         None
     }
 
+    /// The independent check before Quick install records a program as installed: it is in the record, its link is in the tools folder and
+    /// runs here, and it runs `--version` right now. Returns the first line it said (or that it ran when it said nothing).
+    pub fn verify_runs(&self, id: &str) -> Result<String, String> {
+        let d = def(id).ok_or_else(|| format!("{id} is not in the catalogue"))?;
+        if self.is_installed(id).is_none() {
+            return Err(format!("{} is not in the list of installed programs", d.name));
+        }
+        if let Some(h) = self.health(id) {
+            return Err(h);
+        }
+        let name = d.bins.first().map(|b| b.0).ok_or_else(|| format!("{} has no program to run", d.name))?;
+        let link = self.bin_dir().join(name);
+        let out = run_quiet(&link.display().to_string(), d.version_args, 60).map_err(|e| format!("`{name} {}` does not run: {e}", d.version_args.join(" ")))?;
+        let line = pick_version_line(&out, id);
+        Ok(if line.is_empty() { "ran without printing a version".to_string() } else { line })
+    }
+
     fn musl_now(&self) -> (bool, &'static str) {
         self.target.lock().unwrap().unwrap_or((is_musl(), std::env::consts::ARCH))
     }

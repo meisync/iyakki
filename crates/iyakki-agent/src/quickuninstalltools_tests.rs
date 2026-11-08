@@ -25,6 +25,16 @@ impl Backend for Fake {
         self.log.lock().unwrap().push(format!("{} {del} {deps}", item.id()));
         Ok("removed".into())
     }
+    fn firmware_card(&self, nv: bool) -> Result<(Vec<String>, String), String> {
+        Ok((vec![format!("Install hardware firmware (nvidia {nv})"), "licence Linux-firmware (redistributable)".into()], format!("list-{nv}")))
+    }
+    fn firmware_install(&self, nv: bool, list: &str) -> Result<String, String> {
+        if list != format!("list-{nv}") {
+            return Err("the list changed".into());
+        }
+        self.log.lock().unwrap().push(format!("firmware accepted+started {list}"));
+        Ok("Started".into())
+    }
 }
 
 fn rig() -> (QuickUninstallTools, Arc<Fake>) {
@@ -67,4 +77,34 @@ fn a_dependency_or_an_unknown_item_is_refused_before_any_card() {
     assert!(t.refusal(WRITE_TOOL, &json!({"item": "nonsense"})).unwrap().contains("not a Quick install item"));
     assert!(t.describe(WRITE_TOOL, &json!({"item": "nonsense"})).contains("invalid"));
     assert!(f.log.lock().unwrap().is_empty());
+}
+
+#[test]
+fn hardware_firmware_asks_every_time_shows_the_licences_and_accepts_only_the_list_the_card_showed() {
+    let (t, f) = rig();
+    let defs = t.defs();
+    let d = defs.iter().find(|d| d.spec.name == FIRMWARE_TOOL).expect("the tool is offered");
+    assert_eq!(d.risk, Risk::Ask);
+    // there is no argument that accepts a licence on the person's behalf
+    assert!(!d.spec.schema.to_string().contains("accept"), "{}", d.spec.schema);
+    assert!(hard_ask(FIRMWARE_TOOL, &json!({})).is_some(), "Auto never runs it");
+    assert!(!t.pre_approved(FIRMWARE_TOOL) && !t.approved_always(FIRMWARE_TOOL));
+    assert!(t.grant_blocker(FIRMWARE_TOOL, &json!({})).is_some());
+    // approving without a card having been shown accepts nothing
+    let e = t.call(FIRMWARE_TOOL, &json!({})).unwrap_err();
+    assert!(e.contains("no licence was accepted"), "{e}");
+    assert!(f.log.lock().unwrap().is_empty());
+    // the card carries the licence lines; the approval then covers that list
+    let card = t.preview(FIRMWARE_TOOL, &json!({})).unwrap();
+    assert!(card.contains("licence Linux-firmware"), "{card}");
+    t.call(FIRMWARE_TOOL, &json!({})).unwrap();
+    assert_eq!(f.log.lock().unwrap().as_slice(), ["firmware accepted+started list-false"]);
+    // a card for another list (the NVIDIA group) is its own approval
+    t.preview(FIRMWARE_TOOL, &json!({"include_nvidia": true})).unwrap();
+    assert!(t.call(FIRMWARE_TOOL, &json!({"include_nvidia": false})).is_err(), "the approval was for the other list");
+}
+
+#[test]
+fn the_status_tool_prompt_explains_a_failed_last_attempt() {
+    assert!(PROMPT_RULE.contains("the last attempt failed") && PROMPT_RULE.contains("never try to accept one yourself"));
 }

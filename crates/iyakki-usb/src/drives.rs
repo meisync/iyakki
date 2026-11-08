@@ -136,7 +136,7 @@ pub fn list_linux(sys: &Path, proc_mounts: &str, swaps: &str) -> Vec<Drive> {
 pub fn list_drives() -> Result<Vec<Drive>, String> {
     #[cfg(target_os = "linux")]
     {
-        Ok(list_linux(Path::new("/sys"), &std::fs::read_to_string("/proc/mounts").unwrap_or_default(), &std::fs::read_to_string("/proc/swaps").unwrap_or_default()))
+        Ok(list_linux(Path::new("/sys"), &iyakki_storage::read_mounts().unwrap_or_default(), &iyakki_storage::read_swaps().unwrap_or_default()))
     }
     #[cfg(target_os = "macos")]
     {

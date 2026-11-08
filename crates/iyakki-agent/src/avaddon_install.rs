@@ -489,6 +489,26 @@ pub fn run(p: &Places, confirmed: bool, fetch: &dyn Fn(&str, &Path) -> Result<St
     out
 }
 
+/// The check before the install is recorded: the libraries now in the add-on folder pass the same check an archive must pass (every
+/// soname a real file, the licence texts and the source offer beside them), and the source is named: `built here` (the package this
+/// IYAKKI built in k3s, BUILD-STAMP), `supplied` (a package, a mirror) or `existing ffmpeg` (the libraries of the installed ffmpeg).
+/// `what` is the line [`run`] returned.
+pub fn verify_installed(data: &Path, sonames: &[String], what: &str) -> Result<String, String> {
+    let dir = avaddon::addon_dir(data);
+    avaddon::check_unpacked(&dir, sonames).map_err(|e| format!("the installed add-on in {} fails its check: {e}", dir.display()))?;
+    Ok(format!("verified: {} library file(s) and the licence files are in place; source: {}", sonames.len(), source_name(&dir, what)))
+}
+
+fn source_name(dir: &Path, what: &str) -> &'static str {
+    if dir.join("BUILD-STAMP").is_file() {
+        "built here"
+    } else if what.starts_with("libraries of the installed ffmpeg") {
+        "existing ffmpeg"
+    } else {
+        "supplied"
+    }
+}
+
 /// What Setup shows for the item: the installed add-on's version line, if its NOTICE is there.
 pub fn installed_note(data: &Path) -> Option<String> {
     let n = std::fs::read_to_string(avaddon::addon_dir(data).join("NOTICE")).ok()?;

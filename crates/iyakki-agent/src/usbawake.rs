@@ -59,7 +59,7 @@ pub fn step(uptime_secs: u64) {
         return;
     }
     RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if switched_off(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default()) {
+    if switched_off(&iyakki_storage::cmdline_text()) {
         return;
     }
     let sleeping = sleeping_controllers(Path::new("/"));

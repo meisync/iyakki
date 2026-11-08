@@ -177,7 +177,7 @@ impl NodeKind for HttpKind {
         if self.remote {
             if let Some(a) = cfg.get("auth").filter(|a| a.is_object()) {
                 let name = s(a, "secret");
-                let secret = cx.host.secret(name).map_err(NodeError::config)?;
+                let secret = cx.host.secret_for_run(&crate::host::RunSecretCx::from_ctx(cx.ctx), name).map_err(NodeError::config)?;
                 cx.redactor.add(&secret);
                 match s(a, "kind") {
                     "bearer" => headers.push(("Authorization".into(), format!("Bearer {secret}"))),

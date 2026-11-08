@@ -552,6 +552,11 @@ mod tests {
         check_layout!(BltPixel, 4, { blue: 0, green: 1, red: 2, reserved: 3 });
         check_layout!(GraphicsOutput, 32, { query_mode: 0, set_mode: 8, blt: 16, mode: 24 });
         check_layout!(SimplePointerState, 16, { relative_movement_x: 0, relative_movement_y: 4, relative_movement_z: 8, left_button: 12, right_button: 13 });
+        check_layout!(DevicePathToText, 16, { convert_device_node_to_text: 0, convert_device_path_to_text: 8 });
+        check_layout!(PciIoAccess, 16, { read: 0, write: 8 });
+        check_layout!(PciIo, 160, { poll_mem: 0, poll_io: 8, mem: 16, io: 32, pci: 48, copy_mem: 64, map: 72, unmap: 80, allocate_buffer: 88, free_buffer: 96, flush: 104, get_location: 112, attributes: 120, get_bar_attributes: 128, set_bar_attributes: 136, rom_size: 144, rom_image: 152 });
+        check_layout!(UsbDeviceDescriptor, 18, { length: 0, bcd_usb: 2, id_vendor: 8, id_product: 10, bcd_device: 12, num_configurations: 17 });
+        check_layout!(UsbIo, 104, { usb_control_transfer: 0, get_device_descriptor: 48, port_reset: 96 });
         check_layout!(SimplePointerMode, 32, { resolution_x: 0, resolution_y: 8, resolution_z: 16, left_button: 24, right_button: 25 });
         check_layout!(SimplePointer, 32, { reset: 0, get_state: 8, wait_for_input: 16, mode: 24 });
         check_layout!(SimpleFileSystem, 16, { revision: 0, open_volume: 8 });
@@ -635,6 +640,95 @@ pub struct SerialIo {
     pub read: *const c_void,
     /// `Mode`.
     pub mode: *const c_void,
+}
+
+// ---- Device summary: device path text, PCI, USB ------------------------------------------------------------------------------
+
+/// `EFI_DEVICE_PATH_TO_TEXT_PROTOCOL`: the firmware prints a device path (the text is pool memory, freed by the caller).
+#[repr(C)]
+pub struct DevicePathToText {
+    /// `ConvertDeviceNodeToText`, not used.
+    pub convert_device_node_to_text: *const c_void,
+    /// `ConvertDevicePathToText(path, display_only, allow_shortcuts)`.
+    pub convert_device_path_to_text:
+        unsafe extern "efiapi" fn(path: *const DevicePathProtocol, display_only: Boolean, allow_shortcuts: Boolean) -> *mut Char16,
+}
+
+/// `EFI_PCI_IO_PROTOCOL_WIDTH`: the unit of one PCI configuration space access.
+pub const PCI_IO_WIDTH_UINT8: u32 = 0;
+pub const PCI_IO_WIDTH_UINT16: u32 = 1;
+pub const PCI_IO_WIDTH_UINT32: u32 = 2;
+
+/// One read/write pair of `EFI_PCI_IO_PROTOCOL` (`Mem`, `Io`, `Pci`).
+#[repr(C)]
+pub struct PciIoAccess {
+    /// `Read(this, width, offset, count, buffer)`: for `Pci` the offset is in configuration space.
+    pub read: unsafe extern "efiapi" fn(this: *mut PciIo, width: u32, offset: u32, count: usize, buffer: *mut c_void) -> Status,
+    /// `Write`, not used.
+    pub write: *const c_void,
+}
+
+/// `EFI_PCI_IO_PROTOCOL`: only `pci.read` and `get_location` are called; the rest keeps the layout.
+#[repr(C)]
+pub struct PciIo {
+    pub poll_mem: *const c_void,
+    pub poll_io: *const c_void,
+    pub mem: PciIoAccess,
+    pub io: PciIoAccess,
+    /// Configuration space.
+    pub pci: PciIoAccess,
+    pub copy_mem: *const c_void,
+    pub map: *const c_void,
+    pub unmap: *const c_void,
+    pub allocate_buffer: *const c_void,
+    pub free_buffer: *const c_void,
+    pub flush: *const c_void,
+    /// `GetLocation(this, segment, bus, device, function)`.
+    pub get_location: unsafe extern "efiapi" fn(this: *mut PciIo, segment: *mut usize, bus: *mut usize, device: *mut usize, function: *mut usize) -> Status,
+    pub attributes: *const c_void,
+    pub get_bar_attributes: *const c_void,
+    pub set_bar_attributes: *const c_void,
+    pub rom_size: u64,
+    pub rom_image: *mut c_void,
+}
+
+/// `EFI_USB_DEVICE_DESCRIPTOR` (the standard 18-byte USB device descriptor).
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UsbDeviceDescriptor {
+    pub length: u8,
+    pub descriptor_type: u8,
+    pub bcd_usb: u16,
+    pub device_class: u8,
+    pub device_sub_class: u8,
+    pub device_protocol: u8,
+    pub max_packet_size0: u8,
+    pub id_vendor: u16,
+    pub id_product: u16,
+    pub bcd_device: u16,
+    pub str_manufacturer: u8,
+    pub str_product: u8,
+    pub str_serial_number: u8,
+    pub num_configurations: u8,
+}
+
+/// `EFI_USB_IO_PROTOCOL`: only `get_device_descriptor` is called; the rest keeps the layout.
+#[repr(C)]
+pub struct UsbIo {
+    pub usb_control_transfer: *const c_void,
+    pub usb_bulk_transfer: *const c_void,
+    pub usb_async_interrupt_transfer: *const c_void,
+    pub usb_sync_interrupt_transfer: *const c_void,
+    pub usb_isochronous_transfer: *const c_void,
+    pub usb_async_isochronous_transfer: *const c_void,
+    /// `UsbGetDeviceDescriptor(this, descriptor)`.
+    pub get_device_descriptor: unsafe extern "efiapi" fn(this: *mut UsbIo, descriptor: *mut UsbDeviceDescriptor) -> Status,
+    pub get_config_descriptor: *const c_void,
+    pub get_interface_descriptor: *const c_void,
+    pub get_endpoint_descriptor: *const c_void,
+    pub get_string_descriptor: *const c_void,
+    pub get_supported_languages: *const c_void,
+    pub port_reset: *const c_void,
 }
 
 /// Shim's lock protocol (`SHIM_LOCK_PROTOCOL_GUID`): `verify` checks an image's bytes against the MOK list and shim's own certificate.

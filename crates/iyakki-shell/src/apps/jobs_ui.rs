@@ -381,6 +381,8 @@ impl JobsUi {
         let j = self.jobs[i].clone();
         let now = now_ms();
         let running = j.running();
+        let quiet = j.quiet_secs(now);
+        let stalled = running && quiet >= QUIET_AFTER_SECS;
         let stopping = self.stopping.contains(&j.id);
         let opened = self.open_id() == Some(j.id.as_str());
         let accent = match &j.state {
@@ -411,6 +413,9 @@ impl JobsUi {
         let d = fs * 1.15;
         let (cx0, cy0) = (row.x + pad + d / 2.0, y1 + bh / 2.0);
         match &j.state {
+            // the spinner turns only while the job shows real signs of work (new output, or CPU used by its processes); when it has gone quiet
+            // it stands still in amber and the row says for how long
+            State::Running if stalled => super::dash::spinner(g, cx0, cy0, d * 0.5, 0, AMBER),
             State::Running => super::dash::spinner(g, cx0, cy0, d * 0.5, tick, CYAN),
             State::Succeeded => {
                 g.line(cx0 - d * 0.32, cy0, cx0 - d * 0.08, cy0 + d * 0.26, 2.2 * s.max(0.8), OK);
@@ -437,7 +442,7 @@ impl JobsUi {
         let bar = R::new(row.x + pad + 2.0 * s, y2 + (lh2 - 7.0 * s) / 2.0, bw, 7.0 * s);
         let mut after = bar.x + bar.w + 8.0 * s;
         if running {
-            self.draw_bar(g, bar, j.progress, tick, s);
+            self.draw_bar(g, bar, j.progress, if stalled { None } else { Some(tick) }, stalled, s);
             if let Some(p) = j.progress {
                 let t = format!("{p:.0}%");
                 g.text(after, y2, fs * 0.95, MUTED, &t, Face::Sans);
@@ -446,6 +451,7 @@ impl JobsUi {
         } else {
             let (word, col) = match &j.state {
                 State::Succeeded => ("succeeded".to_string(), OK),
+                State::Failed(iyakki_agent::jobs::TIMED_OUT_EXIT) => ("timed out".to_string(), ERR),
                 State::Failed(c) => (format!("failed (exit {c})"), ERR),
                 State::Stopped => ("stopped".to_string(), MUTED),
                 _ => ("lost".to_string(), ERR),
@@ -454,25 +460,29 @@ impl JobsUi {
             after = bar.x + g.text_width(fs * 0.95, &word, Face::Bold).max(bw * 0.6) + 8.0 * s;
         }
         let last = if j.last_line.is_empty() { "(no output yet)".to_string() } else { j.last_line.clone() };
+        let last = if stalled { format!("no activity for {} · {last}", fmt_duration(quiet)) } else { last };
         let last = g.fit(fs * 0.95, &last, Face::Mono, (row.x + row.w - pad - after).max(20.0 * s));
         g.text(after, y2, fs * 0.95, DIM, &last, Face::Mono);
         self.geoms.push(RowGeom { id: j.id.clone(), rect: row, log_btn: logb, act_btn: act, bar });
     }
 
     /// The bar: filled to the percentage when the output gives one, else a segment that slides along it.
-    fn draw_bar(&self, g: &mut Gfx, bar: R, progress: Option<f32>, tick: u64, s: f32) {
+    fn draw_bar(&self, g: &mut Gfx, bar: R, progress: Option<f32>, moving: Option<u64>, stalled: bool, s: f32) {
         g.rrect(bar.x, bar.y, bar.w, bar.h, bar.h / 2.0, rgb(34, 42, 72));
-        match progress {
-            Some(p) => {
+        let col = if stalled { AMBER } else { CYAN };
+        match (progress, moving) {
+            (Some(p), _) => {
                 let w = (bar.w * p.clamp(0.0, 100.0) / 100.0).max(bar.h);
-                g.rrect(bar.x, bar.y, w, bar.h, bar.h / 2.0, CYAN);
+                g.rrect(bar.x, bar.y, w, bar.h, bar.h / 2.0, col);
             }
-            None => {
+            (None, Some(tick)) => {
                 let seg = bar.w * 0.3;
                 let travel = bar.w + seg;
                 let pos = (tick as f32 * 2.2 * s.max(0.8)) % travel - seg;
                 g.clipped(bar, |g| g.rrect(bar.x + pos, bar.y, seg, bar.h, bar.h / 2.0, with_alpha(CYAN, 230)));
             }
+            // quiet and no percentage: nothing slides, a still segment says it is waiting
+            (None, None) => g.rrect(bar.x, bar.y, bar.w * 0.12, bar.h, bar.h / 2.0, with_alpha(col, 200)),
         }
     }
 
@@ -511,6 +521,10 @@ impl JobsUi {
         g.clipped(body, |g| o.log.render(g, body, fs * 0.95, Face::Mono));
     }
 }
+
+/// A running job that has shown no sign of work (output, CPU) for this long is shown as quiet, not as busy.
+pub const QUIET_AFTER_SECS: u64 = 20;
+const AMBER: [u8; 4] = rgb(255, 190, 90);
 
 #[cfg(test)]
 mod tests {

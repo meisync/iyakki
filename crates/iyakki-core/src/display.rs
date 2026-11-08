@@ -273,7 +273,7 @@ pub const SYS_DRM: &str = "/sys/class/drm";
 pub fn start(found: fn()) {
     let spawned = std::thread::Builder::new().name("iyakki-display".into()).spawn(move || {
         let sys = Path::new(SYS_DRM);
-        let mode = ProbeMode::from_cmdline(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default());
+        let mode = ProbeMode::from_cmdline(&iyakki_storage::cmdline_text());
         set_probe_mode(mode);
         if mode != ProbeMode::Auto {
             log::info!("display: iyakki.touchscreen sets the probe with a monitor connected to {mode:?}");

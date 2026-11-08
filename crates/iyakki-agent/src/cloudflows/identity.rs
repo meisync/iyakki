@@ -236,6 +236,26 @@ pub fn secret_gate(data: &Path, vault: &dyn SecretStore, team: &str, name: &str)
     }
 }
 
+/// A run asks for the secret `name`. `None`: a person started it, so the host's usual lookup (that person's own vault) applies. `Some`:
+/// nobody is there, so only a team secret that a team admin marked for scheduled runs, of the team of the owner's schedule, is released;
+/// a run with no schedule (an event, a hook, a failure trigger) has no team to take a secret from and gets none. The refusal text starts
+/// with `needs secret`, which the engine treats as a stop only a person can lift and the service announces to the owner and the admins.
+pub fn unattended_secret(data: &Path, vault: &dyn SecretStore, registry: &Registry, user: &str, run: &iyakki_flow::host::RunSecretCx, name: &str) -> Option<Result<String, String>> {
+    if run.attended() {
+        return None;
+    }
+    let Some(sched) = registry.get(user, &run.flow_id) else {
+        return Some(Err(format!("needs secret: `{name}`: this run was not started by a person and has no schedule that names a team, so it cannot use a secret")));
+    };
+    match secret_gate(data, vault, &sched.team, name) {
+        SecretUse::Blocked(why) => Some(Err(why)),
+        SecretUse::Allowed => {
+            let Some(r) = SecretRef::parse(&format!("vault:team/{}/{name}", sched.team)) else { return Some(Err(format!("needs secret: `{name}` is not a valid secret name"))) };
+            Some(vault.use_secret(&r, "flow.unattended", &mut |v| Ok(v.to_string())))
+        }
+    }
+}
+
 /// Problems that stop a schedule from being saved: personal subscription logins and unmarked secrets.
 pub fn unattended_problems(flow: &Flow, data: &Path, vault: &dyn SecretStore, team: &str) -> Vec<String> {
     let mut v = personal_logins(flow);

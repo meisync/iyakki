@@ -11,8 +11,24 @@ fn path(dir: &std::path::Path, user: &str) -> PathBuf {
     dir.join(format!("ui-{who}.json"))
 }
 
+/// The size is a choice of the COMPUTER (a small screen and a big one want other sizes): the program installs these two hooks at start
+/// (`iyakki_agent::hwprofile`). `get` says `None` = use the person's file (no per-computer profile, or the category is shared),
+/// `Some(None)` = this computer has no choice yet (Normal), `Some(Some(i))` = its choice. `set` records a choice for this computer.
+pub type SizeGet = fn(&std::path::Path, &str) -> Option<Option<usize>>;
+pub type SizeSet = fn(&std::path::Path, &str, usize);
+static HOOKS: std::sync::OnceLock<(SizeGet, SizeSet)> = std::sync::OnceLock::new();
+
+pub fn set_computer_hooks(get: SizeGet, set: SizeSet) {
+    let _ = HOOKS.set((get, set));
+}
+
 /// The saved choice (an index into [`LEVELS`]), "Normal" when there is none.
 pub fn load(dir: &std::path::Path, user: &str) -> usize {
+    if let Some((get, _)) = HOOKS.get() {
+        if let Some(per_computer) = get(dir, user) {
+            return per_computer.map_or(NORMAL, |i| i.min(LEVELS.len() - 1));
+        }
+    }
     std::fs::read_to_string(path(dir, user)).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).and_then(|v| v["size"].as_u64()).map_or(NORMAL, |i| (i as usize).min(LEVELS.len() - 1))
 }
 
@@ -32,6 +48,9 @@ pub fn save(dir: &std::path::Path, user: &str, level: usize) {
     let mut v = read(dir, user);
     v["size"] = serde_json::json!(level.min(LEVELS.len() - 1));
     write(dir, user, &v);
+    if let Some((_, set)) = HOOKS.get() {
+        set(dir, user, level.min(LEVELS.len() - 1));
+    }
 }
 
 /// The launcher group the person last used (its id), if any.

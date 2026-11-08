@@ -67,7 +67,8 @@ a boot of IYAKKI on it. Run the **hardware check** boot entry first on any machi
   move the internal disk up in the boot order.
 * **Mac:** hold **Option** (Alt) at the chime to get the boot picker; the stick shows as "EFI Boot".
 * **NVMe:** works (the driver is built in). The disk is named `nvme0n1`; its partitions `nvme0n1p1`, `nvme0n1p2` (and `nvme0n1p3` on a GPT install). Some
-  laptops with RAID or "Intel RST/VMD" mode in the firmware hide the NVMe disk from Linux: set the disk mode to AHCI.
+  laptops with RAID or "Intel RST/VMD" mode in the firmware put the NVMe disk behind a VMD bridge: the VMD driver is built into the
+  kernel (images after 2026-11-07), so the disk shows up as usual; on an older image set the disk mode to AHCI in the firmware instead.
 * **SD cards and eMMC** (`mmcblk0`) are supported as install targets (`mmcblk0p1`, `mmcblk0p2`, and `mmcblk0p3` on a GPT install).
 * **Wi-Fi and some graphics need firmware files** that are not in the default (libre) image: use the **hw** image variant
   (`./run.sh build` builds libre; see `dist/buildroot/build.sh hw`) or a driver pack from the Store.
@@ -81,3 +82,25 @@ Boot the USB stick, open **Settings, System, Install to disk** (or run `iyakki i
 choose the partition table if you do not want **Auto** (GPT for big, 4Kn or UEFI cases, MBR for old BIOS-only PCs), answer the
 questions (compressed memory, swap file, computer name), type the drive name and its size to confirm. Details and
 the exact commands: `docs/ZRAM-AND-INSTALL.md`.
+
+## One install, several computers
+
+The same install (a data volume on an external SSD) can start on several computers: a Mac mini, a Legion laptop, an HP laptop. IYAKKI
+recognises which computer it started on and keeps the settings that belong to a computer apart from the settings that belong to you.
+
+* **Which computer is it?** A short id made from the computer's model names (DMI vendor, product, version and board name). No serial
+  number and no unique machine id is read or stored. A virtual machine gets its own id the same way.
+* **Kept per computer:** the sound output, volume, mute and per-card levels and boosts; the microphone; the sign-in screen saver
+  timings and the text size of each account; keyboard and pointer choices (Apple or PC profile, Fn keys, trackpad and wheel);
+  power and battery choices; and whether Lemonade runs on the GPU or the CPU. The list is one table in `crates/iyakki-agent/src/hwprofile.rs`.
+* **Goes with you:** models and providers, speech engines, the store, the firewall, the time zone, the host name, accounts and the vault.
+* **First start on a new computer:** it starts from automatic (sound output automatic, keyboard profile automatic, normal text size,
+  Lemonade on the GPU); it never copies another computer's values. Administrators get one inbox card, "New computer: ...". The first
+  computer an install ever sees keeps the settings the install already had. Starting on a known computer again restores its own values.
+* **Settings, System, This computer** shows the computer and the others seen, and lets an administrator share a kind of setting between
+  all computers instead of keeping it per computer, copy another computer's settings here, reset this computer's settings, or forget
+  another computer. The chat assistant has the same through `this_computer_status` (free) and `this_computer_set_sharing`,
+  `this_computer_copy_from` and `this_computer_reset` (each asks). `iyakki dev config list` names the computer its values are for.
+* **Files:** `computers/<id>.json` (settings values of that computer), `computers/sharing.json` (the kinds shared by all) and
+  `computers/current` in the data folder. A damaged profile is moved aside (`.corrupt-<time>`) and the global values are used; the
+  global `settings.json` always holds the last values as the fallback.

@@ -1,0 +1,12 @@
+[package]
+name = "iyakki-tile-example"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Example tile: a counter with a button and a text field. tile.wat is the verified build; src/lib.rs is the same app in Rust (wasm32 build unverified)."
+
+[dependencies]
+iyakki-tile-abi = { path = "../iyakki-tile-abi" }
+
+[dev-dependencies]
+iyakki-tile-host = { path = "../iyakki-tile-host" }

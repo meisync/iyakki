@@ -9,3 +9,17 @@ rustflags = ["-C", "link-arg=-Wl,-z,stack-size=8388608"]
 # Test threads get a big stack: the JavaScript sandbox (iyakki-js) runs WebAssembly on the calling thread's stack.
 [env]
 RUST_MIN_STACK = "33554432"
+
+# Faster linker (docs/development/COMPILE-SPEED-PLAN.md, Phase 1 item 3). NOT installed on the dev PC when this was written (`which ld.lld mold`
+# found nothing), so it is OFF. To turn it on: `sudo apt install lld` (LLVM, Apache-2.0 with LLVM exception) or `sudo apt install mold` (MIT), then
+# remove the leading "# " of the block below. This host target is used by `cargo build`, `cargo test` and `cargo check` on the dev PC only:
+# the images (device profile and release) are the musl target, which is not touched here. Cargo cannot scope rustflags to one profile, and
+# changing flags makes cargo rebuild every crate once, so decide once and keep it.
+# [target.x86_64-unknown-linux-gnu]
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]      # or "-fuse-ld=mold"
+#
+# The musl target (device and release profiles share it, so a flag here would also reach a release link): if you want lld for device builds,
+# set it for that shell only, leaving config and release alone. Repeat the stack-size flag from above (an environment value replaces it):
+#   CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C link-arg=-Wl,-z,stack-size=8388608 -C link-arg=-fuse-ld=lld' \
+#     cargo build --profile device --target x86_64-unknown-linux-musl -p iyakki-core
+# (not measured: the linker is not installed here.)

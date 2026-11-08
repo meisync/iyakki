@@ -3,7 +3,7 @@
 //! never on a desktop. Not exercised against a real pod yet (see the plan).
 
 use super::approval::{Resolver, Waits};
-use super::notify::{from_node_notice, NotifySink};
+use super::notify::NotifySink;
 use super::quota::Quota;
 use super::service::{Backend, Counters, RunInfo, TenantScheduler};
 use crate::services::Services;
@@ -129,6 +129,14 @@ pub fn install_hook(data: &Path, leading: Arc<AtomicBool>, counters: Arc<Counter
         let q = quota();
         cfg.max_runs = q.max_runs_person;
         cfg.local_tz = Some(tenant_zone(&data));
+        // finished runs are pruned by the tenant's history_keep and history_days (asked again at every pass)
+        cfg.retention = Some(iyakki_flow::engine::RetentionSource({
+            let q = quota.clone();
+            Arc::new(move || {
+                let q = q();
+                iyakki_flow::runstore::Retention { keep: q.history_keep, days: q.history_days }
+            })
+        }));
         let (lead, counters, last, q2) = (leading.clone(), counters.clone(), last_refusal.clone(), quota.clone());
         cfg.gate = Some(iyakki_flow::engine::Gate {
             lead: Arc::new(move || lead.load(Ordering::Relaxed)),
@@ -179,17 +187,26 @@ pub fn start(svc: Arc<Services>, auth: Arc<dyn Authenticator>, audit: Arc<dyn iy
     {
         // a flow's `notify` step in the cloud goes to the hub (a step that waits for an approval is announced by the approvals file)
         let (sink, tenant, data2) = (sink.clone(), tenant.clone(), data.clone());
-        let hook: crate::flows::CloudNotify = Arc::new(move |user: &str, n: &iyakki_flow::host::Notice| {
+        let hook: crate::flows::CloudNotify = Arc::new(move |user: &str, n: &iyakki_flow::host::Notice, to: &serde_json::Value| {
             if n.needs_you {
                 return;
             }
             let team = crate::cloudroles::load(&crate::cloudroles::path(&data2)).ok().flatten().and_then(|r| r.namespaces.iter().find(|(_, m)| m.contains_key(user)).map(|(t, _)| t.clone())).unwrap_or_default();
-            let _ = sink.emit(&from_node_notice(&tenant, &team, user, n));
+            let _ = sink.emit(&super::notify::from_node_notice_to(&tenant, &team, user, n, to));
         });
         let _ = crate::flows::CLOUD_NOTIFY.set(hook);
     }
     let leading = Arc::new(AtomicBool::new(false));
     install_hook(&data, leading.clone(), sched.counters.clone());
+    {
+        // a run that nobody started by hand reads only the secrets a team admin marked for scheduled runs
+        let (data2, flows2) = (data.clone(), flows_dir.clone());
+        let hook: crate::flows::CloudSecret = Arc::new(move |user: &str, run: &iyakki_flow::host::RunSecretCx, name: &str| {
+            let vault = crate::tenantconfig::vault::for_dir(&data2);
+            super::identity::unattended_secret(&data2, vault.as_ref(), &super::identity::Registry::new(&flows2), user, run, name)
+        });
+        let _ = crate::flows::CLOUD_SECRET.set(hook);
+    }
     // the sandbox: without it a tenant pod refuses commands (fail closed); with it `run_command` and a flow's `cli` and `browser` steps
     // go to a hardened Job on the team's cluster binding
     {

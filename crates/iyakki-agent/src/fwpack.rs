@@ -609,6 +609,36 @@ fn run_inner(env: &mut dyn Env, t: &Table, data: &Path, def: &Def, force: bool, 
 
 // ------------------------------------------------------------------------------------------------ is it installed
 
+/// The check right after a pack was written, before the job says "installed": the record is on the data volume, every file of the pack is
+/// there with the SHA-256 of the bytes that were checked, and the firmware folder has an entry for it (the link, or the image's own copy).
+/// `Ok` is the plain line for the log; a driver that has to load the files is a separate matter (the job says "restart wanted" for it).
+pub fn verify_pack_files(fs: &apply::Fs, id: &str, p: &pack::Pack) -> Result<String, String> {
+    let rec = apply::read_record(fs, id).ok_or_else(|| format!("verify failed: the record of the pack {id} was not written"))?;
+    for f in &p.files {
+        let want = pack::sha256_hex(&iyakki_drivers::b64::decode(&f.data).ok_or_else(|| format!("verify failed: {} is not valid data", f.path))?);
+        let kept = fs.pack_dir(id).join("files").join(&f.path);
+        let got = sha256_file(&kept).map_err(|e| format!("verify failed: {e}"))?;
+        if got != want {
+            return Err(format!("verify failed: {} on the data volume does not match the checked file (SHA-256 {}... instead of {}...)", f.path, &got[..12], &want[..12]));
+        }
+        if !rec.files.contains(&f.path) {
+            return Err(format!("verify failed: {} is not in the pack's record", f.path));
+        }
+        if std::fs::metadata(fs.fw_root.join(&f.path)).is_err() {
+            return Err(format!("verify failed: {} is not in the firmware folder ({})", f.path, fs.fw_root.display()));
+        }
+    }
+    Ok(format!("verified: {} file(s) on the data volume match their SHA-256 and are in the firmware folder", p.files.len()))
+}
+
+/// [`apply::install_pack`] followed by [`verify_pack_files`]: a pack that was written but cannot be read back is a failed install.
+pub fn install_checked(fs: &apply::Fs, run: &dyn iyakki_drivers::run::Runner, id: &str, version: &str, license: &str, source: &str, p: &pack::Pack) -> Result<apply::Report, String> {
+    let mut rep = apply::install_pack(fs, run, id, version, license, source, "local", p)?;
+    let line = verify_pack_files(fs, id, p)?;
+    rep.lines.push(line);
+    Ok(rep)
+}
+
 /// The pack record of an installed pack (even when turned off).
 pub fn installed(data: &Path, def: &Def) -> Option<apply::Record> {
     let (fs, _) = apply::Fs::for_data(data);
@@ -811,7 +841,7 @@ impl Env for RealEnv {
         crate::k3sdev::space(dir).map(|s| s.0)
     }
     fn data_in_memory(&self) -> bool {
-        crate::macfw::in_memory(&std::fs::read_to_string("/proc/mounts").unwrap_or_default(), &self.data)
+        crate::macfw::in_memory(&iyakki_storage::read_mounts().unwrap_or_default(), &self.data)
     }
     fn fetch(&mut self, url: &str, want: u64, dest: &Path) -> Result<(), String> {
         let st = self.streamer.clone();
@@ -820,7 +850,7 @@ impl Env for RealEnv {
     fn install(&mut self, def: &Def, version: &str, source: &str, p: &pack::Pack) -> Result<apply::Report, String> {
         let (fs, real) = apply::Fs::for_data(&self.data);
         let run: Box<dyn iyakki_drivers::run::Runner> = if real { Box::new(iyakki_drivers::run::System) } else { Box::new(iyakki_drivers::run::Dry) };
-        apply::install_pack(&fs, run.as_ref(), def.pack_id, version, def.licence_id, source, "local", p)
+        install_checked(&fs, run.as_ref(), def.pack_id, version, def.licence_id, source, p)
     }
     fn module_state(&self, name: &str) -> ModState {
         module_state_in(&self.sys, name)

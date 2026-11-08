@@ -157,13 +157,41 @@ fn k3s_is_installed_then_started_through_the_supervisor_and_marked() {
     run_step(Item::K3s, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap();
     assert_eq!(f.calls, ["install_k3s", "start"]);
     assert_eq!(f.marks, [(Item::K3s, "installed by Quick install".to_string())]);
-    assert!(f.lines.iter().any(|l| l.starts_with("[1/2] installed: k3s v1.31.1")), "{:?}", f.lines);
+    assert!(f.lines.iter().any(|l| l.starts_with("[1/3] installed: k3s v1.31.1")), "{:?}", f.lines);
     // the [n/m] lines are what the jobs engine shows as progress
     assert_eq!(crate::jobs::progress_hint(&f.lines.join("\n")), Some(100.0));
     // already installed: only the start request
     let mut f = Fake { k3s: true, ..Default::default() };
     run_step(Item::K3s, &mut f, Duration::from_secs(60), Duration::from_secs(5)).unwrap();
     assert_eq!(f.calls, ["start"]);
+}
+
+#[test]
+fn k3s_that_installs_but_never_gets_ready_is_not_marked_as_installed() {
+    let mut f = Fake { ready_after: usize::MAX, ..Default::default() };
+    let e = run_step(Item::K3s, &mut f, Duration::from_secs(60 * 60), Duration::from_secs(5)).unwrap_err();
+    assert!(e.contains("did not become Ready within 10 minutes") && e.contains("not marked as installed"), "{e}");
+    assert!(f.marks.is_empty(), "nothing is marked when the cluster never answers: {:?}", f.marks);
+    assert!(f.slept >= K3S_READY_WAIT && f.slept < K3S_READY_WAIT + Duration::from_secs(60), "it waits the k3s limit, not the long one: {:?}", f.slept);
+}
+
+#[test]
+fn a_step_that_hangs_ends_by_itself_and_one_that_finishes_is_left_alone() {
+    let fired = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let f2 = fired.clone();
+    let w = Watchdog::start("Install k3s", Duration::from_millis(100), move |m| f2.lock().unwrap().push(m));
+    std::thread::sleep(Duration::from_millis(400));
+    drop(w);
+    let got = fired.lock().unwrap().clone();
+    assert_eq!(got.len(), 1);
+    assert!(got[0].starts_with("Install k3s timed out") && got[0].contains("not marked as installed"), "{got:?}");
+    // finished in time: dropped before the deadline, never fires
+    let f3 = fired.clone();
+    let w = Watchdog::start("Install k3s", Duration::from_millis(300), move |m| f3.lock().unwrap().push(m));
+    drop(w);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(fired.lock().unwrap().len(), 1, "no second message");
+    assert!(step_deadline(Item::K3s) >= Duration::from_secs(3600) && step_deadline(Item::GpuNvidia) > step_deadline(Item::K3s));
 }
 
 #[test]
@@ -458,7 +486,7 @@ fn a_runtime_a_tool_needs_is_waited_for_and_its_failure_stops_the_tool() {
 }
 
 fn job_of(item: &str, state: crate::jobs::State, started: u64, last: &str) -> Job {
-    Job { id: format!("j{started}"), label: format!("Install {item}"), command: format!("iyakki quick-install {item} --data /d"), cwd: "/".into(), owner: "root".into(), workspace: WORKSPACE.into(), pid: 1, state, started_ms: started, ended_ms: 0, progress: None, last_line: last.into(), dismissed: false }
+    Job { id: format!("j{started}"), label: format!("Install {item}"), command: format!("iyakki quick-install {item} --data /d"), cwd: "/".into(), owner: "root".into(), workspace: WORKSPACE.into(), pid: 1, state, started_ms: started, ended_ms: 0, progress: None, last_line: last.into(), last_active_ms: 0, dismissed: false }
 }
 
 #[test]

@@ -20,6 +20,7 @@ pub mod cli;
 pub mod control;
 pub mod io;
 pub mod manager;
+pub mod notice;
 pub mod plan;
 pub mod policy;
 pub mod real;

@@ -74,6 +74,10 @@ pub struct Route {
     pub cert: Option<CertRef>,
     #[serde(default)]
     pub access: Access,
+    /// Mutual TLS: the name (in the certificate source) of the CA that signs the client certificates this route accepts. The CA belongs to
+    /// the HOST: if any https route of a host names one, every route of that host asks for a client certificate of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_ca: Option<String>,
 }
 
 fn root() -> String {
@@ -152,6 +156,14 @@ impl RouteTable {
             if let Some(CertRef::Vault(n)) = &r.cert {
                 if !crate::cloudstorage::plain_name(n) {
                     return Err(format!("route {}: \"{n}\" is not a vault name", r.host));
+                }
+            }
+            if let Some(ca) = &r.client_ca {
+                if r.scheme != Scheme::Https {
+                    return Err(format!("route {}: a client CA belongs to an https route (a plain or passthrough route would ignore it)", r.host));
+                }
+                if !crate::cloudstorage::plain_name(ca) {
+                    return Err(format!("route {}: \"{ca}\" is not a name for a client CA", r.host));
                 }
             }
             if r.redirect_http && r.scheme != Scheme::Https {
@@ -332,7 +344,7 @@ mod tests {
     use super::*;
 
     fn svc(host: &str, path: &str, name: &str) -> Route {
-        Route { host: host.into(), path_prefix: path.into(), target: Target::Service { name: name.into(), port: 8080 }, scheme: Scheme::Http, listen: None, websocket: true, redirect_http: false, cert: None, access: Access::Members }
+        Route { host: host.into(), path_prefix: path.into(), target: Target::Service { name: name.into(), port: 8080 }, scheme: Scheme::Http, listen: None, websocket: true, redirect_http: false, cert: None, access: Access::Members, client_ca: None }
     }
     fn table(r: Vec<Route>) -> RouteTable {
         RouteTable { routes: r, ingress_class: None }

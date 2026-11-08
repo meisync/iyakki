@@ -180,7 +180,7 @@ pub(crate) fn run(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Resu
             format!("{in_cluster} inside the cluster")
         }
     };
-    env.mark(Item::OpenSearch, &detail)?;
+    crate::quickinstall::mark_verified(env, Item::OpenSearch, &detail)?;
     env.say(&format!("[5/5] done: {detail}"));
     Ok(())
 }

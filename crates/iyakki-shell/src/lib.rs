@@ -2,31 +2,31 @@
 #[cfg(test)]
 mod testmem;
 pub mod accounts;
-pub mod gfx;
-pub mod fx;
+pub use iyakki_uikit::gfx;
+pub use iyakki_uikit::fx;
 #[cfg(test)]
 mod design_tests;
 #[cfg(test)]
 mod upgrade_tests;
-pub mod shaping;
-pub mod theme;
-pub mod uisize;
-pub mod links;
-pub mod mdtext;
-pub mod safeclamp;
+pub use iyakki_uikit::shaping;
+pub use iyakki_uikit::theme;
+pub use iyakki_uikit::uisize;
+pub use iyakki_uikit::links;
+pub use iyakki_uikit::mdtext;
+pub use iyakki_uikit::safeclamp;
 pub mod crashlog;
 #[cfg(test)]
 mod monkey_tests;
-pub mod textsel;
-pub mod ctxmenu;
+pub use iyakki_uikit::textsel;
+pub use iyakki_uikit::ctxmenu;
 pub mod hwcheck;
-pub mod ui;
+pub use iyakki_uikit::ui;
 pub mod apps;
 pub mod inputprofile;
-pub mod scrolleng;
-pub mod scrolllist;
-pub mod listwindow;
-pub mod tooltip;
+pub use iyakki_uikit::scrolleng;
+pub use iyakki_uikit::scrolllist;
+pub use iyakki_uikit::listwindow;
+pub use iyakki_uikit::tooltip;
 pub mod filepicker;
 #[cfg(test)]
 mod filepicker_tests;

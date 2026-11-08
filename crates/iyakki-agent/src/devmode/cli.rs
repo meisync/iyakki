@@ -33,9 +33,9 @@ pub const USAGE_BASE: &str = "usage: iyakki dev <command>
   app info|permissions|clear-data|reset APP | app data APP [KEY] | app config APP get|set|rm KEY [VALUE]  tile apps from developer mode
   shell [--minutes N] [--root] [--reason TEXT] [-- CMD ARGS]    run commands on the device (scope shell + approval on its screen)
   forward LOCAL:REMOTE                forward 127.0.0.1:LOCAL here to the device's own port REMOTE (scope forward)
-  patch build DIR -o PACK | show PACK | apply PACK [--live|--next-boot] [--shell] | list | remove ID     hot-patch files of the running system (scope update)
+  patch build DIR -o PACK [--delta-from OLD] | show PACK | apply PACK [--live|--next-boot] [--shell] | list | remove ID     hot-patch files of the running system (scope update)
   reboot | poweroff                   restart or switch off the device (approval on its screen)
-  update PAYLOAD|IMAGE.img [--force] [--reboot] | update --status    replace the boot files with a newer IYAKKI (scope update)
+  update PAYLOAD|IMAGE.img [--force] [--reboot] | update --status | update --discard    replace the boot files with a newer IYAKKI (scope update)
   update-pack IMAGE.img -o DIR [--version V] [--variant NAME] [--sign KEYFILE]   make the payload from an install image (nothing is written to the image); --sign adds update.json.sig for Settings -> System update
   screenshot [--display N] [--record SECONDS [--fps N]] [-o FILE|DIR]
 options for every command: --device NAME (default: the first paired), --home DIR (default: ~/.config/iyakki/dev or $IYAKKI_DEV_HOME)";
@@ -52,7 +52,7 @@ pub(super) struct Args {
     pub(super) after: Vec<String>,
 }
 
-const WITH_VALUE: [&str; 32] = ["--code", "--name", "--as", "--fingerprint", "--device", "--home", "-o", "--default", "--forget", "--grep", "-n", "--source", "--display", "--record", "--fps", "--minutes", "--reason", "--lines", "--image", "--set", "--kind", "--url", "--key-file", "--key-env", "--ports", "--proto", "--comment", "--file", "--value", "--version", "--variant", "--sign"];
+const WITH_VALUE: [&str; 33] = ["--code", "--name", "--as", "--fingerprint", "--device", "--home", "-o", "--default", "--forget", "--grep", "-n", "--source", "--display", "--record", "--fps", "--minutes", "--reason", "--lines", "--image", "--set", "--kind", "--url", "--key-file", "--key-env", "--ports", "--proto", "--comment", "--file", "--value", "--version", "--variant", "--sign", "--delta-from"];
 
 impl Args {
     pub(super) fn parse(a: &[String]) -> Result<Args, String> {

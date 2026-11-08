@@ -113,7 +113,7 @@ fn flags_and_the_job_command_round_trip() {
 }
 
 fn test_job() -> Job {
-    Job { id: "j1".into(), label: String::new(), command: String::new(), cwd: "/".into(), owner: "a".into(), workspace: WORKSPACE.into(), pid: 0, state: crate::jobs::State::Running, started_ms: 0, ended_ms: 0, progress: None, last_line: String::new(), dismissed: false }
+    Job { id: "j1".into(), label: String::new(), command: String::new(), cwd: "/".into(), owner: "a".into(), workspace: WORKSPACE.into(), pid: 0, state: crate::jobs::State::Running, started_ms: 0, ended_ms: 0, progress: None, last_line: String::new(), last_active_ms: 0, dismissed: false }
 }
 
 #[test]

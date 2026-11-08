@@ -401,10 +401,10 @@ fn publish_rollback_apply_and_heal_policy_are_hard_ask_and_the_rest_ask_or_read(
     for n in ["flow_list", "flow_get", "flow_runs", "flow_run_status", "flow_logs", "flow_explain_failure"] {
         assert_eq!(risk(n), Risk::Safe, "{n}");
     }
-    for n in ["flow_create", "flow_edit", "flow_run", "flow_cancel", "flow_publish", "flow_rollback", "flow_apply_to_runs", "flow_set_heal_policy"] {
+    for n in ["flow_create", "flow_edit", "flow_run", "flow_cancel", "flow_publish", "flow_rollback", "flow_apply_to_runs", "flow_set_heal_policy", "flow_prune_history"] {
         assert_eq!(risk(n), Risk::Ask, "{n}");
     }
-    assert_eq!(d.len(), 16);
+    assert_eq!(d.len(), 17, "16 flow tools and flow_prune_history");
     assert!(d.iter().all(|x| is_flow_tool(&x.spec.name)));
     // no tools for an account without the app, and the wrapped chat never offers them without it
     let mut p = Role::User.template();
@@ -581,7 +581,7 @@ fn the_tools_are_wrapped_for_the_tile_chat_and_the_hard_ask_ones_are_never_appro
     }
     let open: SharedOpen = Arc::new(Mutex::new(Open::default()));
     let t = FlowTools::new(Arc::new(Inner), env.clone(), open.clone());
-    assert_eq!(t.defs().len(), 17, "16 flow tools and ask_form");
+    assert_eq!(t.defs().len(), 18, "17 flow tools and ask_form");
     assert_eq!(t.call("something_else", &json!({})).unwrap(), "inner something_else");
     // with a flow open, `flow` may be left out
     call(&env, "flow_create", json!({"name": "Open one", "nodes": [{"id": "n", "kind": "notify", "config": {"title": "hi"}}]})).unwrap();
@@ -696,7 +696,7 @@ fn the_flows_chat_leads_with_flow_tools_hides_app_creation_and_asks_for_missing_
     let t = FlowTools::new(Arc::new(Inner), env.clone(), open);
     let names: Vec<String> = t.defs().into_iter().map(|d| d.spec.name).collect();
     assert_eq!(names[0], "flow_list");
-    assert!(names[..16].iter().all(|n| n.starts_with("flow_")));
+    assert!(names[..17].iter().all(|n| n.starts_with("flow_")));
     assert!(names.contains(&"ask_form".to_string()) && names.contains(&"list_dir".to_string()) && names.contains(&"ask_user".to_string()));
     for n in ["app_scaffold", "tile_scaffold", "tile_pack", "tile_ship"] {
         assert!(!names.contains(&n.to_string()), "{n} is not offered in FLOWS");
@@ -827,4 +827,37 @@ fn the_last_open_flow_is_kept_per_person_bounded_and_cleared_on_delete_and_sign_
     assert!(last_flow(&env).is_some());
     FlowEnv::stop_for_logout(&env.svc, &env.user);
     assert!(!last_flow_recorded(&env.svc, &env.user));
+}
+
+#[test]
+fn pruning_the_history_by_the_tool_lists_first_asks_always_and_spares_the_newest_and_the_unfinished() {
+    let (env, _d) = env_with("prunehist", policy(&["*"]));
+    call(&env, "flow_create", json!({"name": "Only tell", "nodes": [{"id": "tell", "kind": "notify", "config": {"title": "hi"}}]})).unwrap();
+    call(&env, "flow_publish", json!({"flow": "only-tell", "changelog": "one"})).unwrap();
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        let o = env.engine.start_run(iyakki_flow::engine::StartRequest::new("only-tell")).unwrap();
+        env.engine.wait_for(&o.run_id, Duration::from_secs(10), |r| r.status.is_terminal()).unwrap();
+        ids.push(o.run_id);
+    }
+    // always asked, with the list on the card
+    assert!(crate::agent::hard_ask("flow_prune_history", &json!({})).is_some());
+    assert!(describe("flow_prune_history", &json!({"keep": 2})).contains("REMOVE"));
+    let card = env.preview("flow_prune_history", &json!({"keep": 2, "days": 0}), None).unwrap();
+    assert!(card.contains("Would remove 2 run(s)") && card.contains(&ids[0]) && !card.contains(&ids[3]), "{card}");
+    // the dry run removes nothing
+    let dry = call(&env, "flow_prune_history", json!({"keep": 2, "days": 0, "dry_run": true})).unwrap();
+    assert!(dry.contains("nothing is removed yet"), "{dry}");
+    assert_eq!(env.engine.summaries().len(), 4);
+    // the real call removes exactly the listed runs and is audited
+    let done = call(&env, "flow_prune_history", json!({"keep": 2, "days": 0})).unwrap();
+    assert!(done.starts_with("Removed 2 run(s)"), "{done}");
+    let left: Vec<String> = env.engine.summaries().into_iter().map(|s| s.id).collect();
+    assert_eq!(left.len(), 2);
+    assert!(left.contains(&ids[2]) && left.contains(&ids[3]));
+    // the newest finished run stays even for keep 1 and days 1 with nothing older than a day
+    let again = call(&env, "flow_prune_history", json!({"keep": 1, "days": 1})).unwrap();
+    assert!(again.starts_with("Removed 1 run(s)"), "{again}");
+    assert_eq!(env.engine.summaries().len(), 1);
+    assert!(call(&env, "flow_prune_history", json!({"keep": 1, "days": 1})).unwrap().contains("nothing to remove"));
 }

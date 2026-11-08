@@ -516,3 +516,32 @@ fn only_the_two_routes_are_streamed() {
         assert!(!crate::webservice::files::is_stream_head(no.as_bytes()), "{no:?}");
     }
 }
+
+#[test]
+fn files_a_folder_and_the_tenant_have_size_limits_and_a_refused_write_leaves_nothing() {
+    let (h, _, ann, _, _) = acme_cloud();
+    let mib = |n: usize| "x".repeat(n * 1024);
+    // the defaults are limits too; then the tenant lowers them: 1 MiB per folder and 1 MiB for the whole tenant
+    std::fs::create_dir_all(h.dir.join("cloud/config")).unwrap();
+    std::fs::write(h.dir.join("cloud/config/tenant-config.json"), json!({"items": [{"kind": "storage.quota", "name": "default", "enabled": true, "values": {"place_mb": 1, "tenant_mb": 1}}]}).to_string()).unwrap();
+    assert_eq!(write(&h, &ann, json!({"namespace": "web", "path": "a.txt", "content": mib(400)})), 200);
+    assert_eq!(write(&h, &ann, json!({"namespace": "web", "path": "b.txt", "content": mib(400)})), 200);
+    // 1.2 MiB in one folder: refused, and the file is not there
+    assert_eq!(write(&h, &ann, json!({"namespace": "web", "path": "c.txt", "content": mib(400)})), 413);
+    assert!(!on_disk(&h, "ns/web/people/ann/c.txt").exists());
+    // replacing a file counts only the difference
+    assert_eq!(write(&h, &ann, json!({"namespace": "web", "path": "a.txt", "content": mib(420)})), 200);
+    // the shared folder has its own room, but the tenant as a whole is full
+    let (s, v, _) = h.call("POST", "/api/v1/files/write", Some(&ann), Some(json!({"scope": "shared", "namespace": "web", "path": "p.md", "content": mib(300)})));
+    assert_eq!(s, 413, "{v}");
+    assert!(v.to_string().contains("tenant"), "{v}");
+    assert!(!on_disk(&h, "ns/web/shared/p.md").exists());
+    // an upload is refused before a byte is read
+    let body = vec![7u8; 300 * 1024];
+    let (s, head, _) = stream(&h, "PUT", "/api/v1/files/upload?namespace=web&path=big.bin", Some(&ann), Some(body.len() as u64), "", Box::new(std::io::Cursor::new(body)));
+    assert_eq!(s, 413, "{head}");
+    assert!(!on_disk(&h, "ns/web/people/ann/big.bin").exists() && tmp_files(&h).is_empty());
+    // deleting makes room again
+    assert_eq!(h.call("POST", "/api/v1/files/delete", Some(&ann), Some(json!({"namespace": "web", "path": "b.txt"}))).0, 200);
+    assert_eq!(write(&h, &ann, json!({"scope": "shared", "namespace": "web", "path": "p.md", "content": mib(300)})), 200);
+}

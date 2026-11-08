@@ -26,7 +26,8 @@ pub struct InstallEnv {
 
 impl InstallEnv {
     pub fn real() -> InstallEnv {
-        InstallEnv { sys: "/sys".into(), dev: "/dev".into(), mounts: "/proc/mounts".into(), swaps: "/proc/swaps".into(), template: None, uefi: install::booted_uefi() }
+        let p = install::Paths::real();
+        InstallEnv { sys: p.sys, dev: p.dev, mounts: p.mounts, swaps: p.swaps, template: None, uefi: install::booted_uefi() }
     }
 
     fn rd(p: &std::path::Path) -> String {

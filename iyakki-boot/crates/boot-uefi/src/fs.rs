@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Read-only access to a FAT volume through the firmware's file protocol. Nothing in this file opens a file for writing.
+//! Access to a FAT volume through the firmware's file protocol. Everything reads, except `Volume::write`, which replaces one
+//! file (the boot log) and is the only place that opens a file for writing.
 
 use crate::sys::{from_ucs2, protocol, ucs2};
 use alloc::string::String;
@@ -105,6 +106,32 @@ impl Volume {
         }
         unsafe { ((*d).close)(d) };
         Some(out)
+    }
+
+    /// Replace the file at `path` with `data` (the whole file; an old one is deleted first so no tail of it survives). The
+    /// directory must exist. `false` when the volume refuses (read-only medium, a firmware without write support): the caller
+    /// carries on, a log that cannot be written must never stop a start.
+    pub fn write(&self, path: &str, data: &[u8]) -> bool {
+        let name = ucs2(&backslash(path));
+        // an old file: open it for writing and delete it (Delete closes the handle, whatever it returns)
+        let mut old: *mut FileProtocol = null_mut();
+        let s = unsafe { ((*self.root).open)(self.root, &mut old, name.as_ptr(), FILE_MODE_READ | FILE_MODE_WRITE, 0) };
+        if !s.is_error() && !old.is_null() {
+            unsafe { ((*old).delete)(old) };
+        }
+        let mut f: *mut FileProtocol = null_mut();
+        let s = unsafe { ((*self.root).open)(self.root, &mut f, name.as_ptr(), FILE_MODE_READ | FILE_MODE_WRITE | FILE_MODE_CREATE, 0) };
+        if s.is_error() || f.is_null() {
+            return false;
+        }
+        let mut n = data.len();
+        let s = unsafe { ((*f).write)(f, &mut n, data.as_ptr() as *const c_void) };
+        let ok = !s.is_error() && n == data.len();
+        unsafe {
+            ((*f).flush)(f);
+            ((*f).close)(f);
+        }
+        ok
     }
 
     /// Does the path exist?

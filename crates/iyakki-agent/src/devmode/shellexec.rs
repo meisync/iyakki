@@ -123,7 +123,7 @@ fn find(dm: &DevMode, sid: u64, computer: &str) -> Result<Arc<Session>, String> 
 
 /// Open a session. Needs the scope (checked by the caller) and a valid grant.
 pub fn open(dm: &DevMode, key: &DevKey, policy: &Policy, passwd: &str, euid: u32, home_fallback: &Path) -> Result<u64, String> {
-    let g = dm.shell_grant(&key.name).filter(|g| g.kind == "shell").ok_or("no shell grant: ask for one first (the administrator approves on the device's screen)")?;
+    let g = dm.shell_grant_kind(&key.name, "shell").ok_or("no shell grant: ask for one first (the administrator approves on the device's screen)")?;
     if !policy.manage_settings {
         return Err(format!("the shell works only for an administrator account; {} is not one", key.account));
     }
@@ -154,7 +154,7 @@ fn reap(dm: DevMode, s: Arc<Session>) {
             }
         }
         let _ = overlong;
-        if s.guard.ended() || idle || !key_ok || !dm.is_on() || dm.shell_grant(&s.computer).is_none() {
+        if s.guard.ended() || idle || !key_ok || !dm.is_on() || dm.shell_grant_kind(&s.computer, "shell").is_none() {
             end(&dm, &s, if idle { "idle" } else { "grant ended, disconnected or revoked" });
             return;
         }

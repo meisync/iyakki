@@ -14,6 +14,7 @@ members = [
     "crates/iyakki-core-api",
     "crates/iyakki-core-fake",
     "crates/iyakki-ui",
+    "crates/iyakki-uikit",
     "crates/iyakki-proxy",
     "crates/iyakki-swarm",
     "crates/iyakki-storage",
@@ -38,6 +39,9 @@ members = [
     "crates/iyakki-rfb",
     "crates/iyakki-schema",
     "crates/iyakki-link",
+    "crates/iyakki-tile-abi",
+    "crates/iyakki-tile-host",
+    "crates/iyakki-tile-example",
     "crates/iyakki-connect",
     "crates/iyakki-hotspot",
 ]
@@ -100,3 +104,15 @@ strip = true
 inherits = "release"
 lto = "thin"
 codegen-units = 16
+
+# Device-test builds (IYAKKI_PROFILE=device ./dist/buildroot/repack.sh ..., docs/development/COMPILE-SPEED-PLAN.md): no LTO, 16 parallel
+# code-generation units and incremental compilation, so a one-line change recompiles only the changed units. The binary is bigger and
+# slower than a release one: for test images and `dev update` pushes only, never for a release (profile.release stays fat LTO).
+[profile.device]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+opt-level = 2
+debug = false
+strip = true

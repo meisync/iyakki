@@ -476,6 +476,9 @@ pub struct Device {
     /// Fingers use it: a touch screen, or the mouse-like interface many touch monitors add (named "...TouchScreen", absolute, BTN_LEFT):
     /// a press on it opens the on-screen keyboard (`osk.rs`) for a text field, however the positions are mapped.
     pub finger: bool,
+    /// The device has delivered at least one event since it was opened. A touch screen that never speaks leaves the word to the
+    /// monitor's mouse-like interface (`mouse_like_muted`).
+    pub spoke: bool,
 }
 
 impl Device {
@@ -656,7 +659,7 @@ fn open_device(path: &str) -> Option<Device> {
         // SAFETY: as above, for ABS_MT_TOUCH_MAJOR (0x30).
         let rm = unsafe { libc::ioctl(fd, ioc_read(0x40 + 0x30, std::mem::size_of::<AbsInfo>() as u32) as _, &mut major as *mut AbsInfo) };
         let pad = crate::touchpad::PadRange { x_min: mt_x.min, x_max: mt_x.max, y_min: mt_y.min, y_max: mt_y.max, major_max: if rm >= 0 { major.max } else { 0 } };
-        return Some(Device { file, path: path.into(), abs_max: None, is_keyboard: false, pad: Some(pad), touch: None, finger: false });
+        return Some(Device { file, path: path.into(), abs_max: None, is_keyboard: false, pad: Some(pad), touch: None, finger: false, spoke: false });
     }
     let has_btn = has_bit(&key_bits, BTN_LEFT) || has_bit(&key_bits, BTN_TOUCH);
     let mut rel_bits = [0u8; 4];
@@ -687,7 +690,7 @@ fn open_device(path: &str) -> Option<Device> {
         if finger {
             log::info!("input: {name} ({path}) takes fingers: its presses open the on-screen keyboard for a text field{}", if touch.is_some() { "" } else { " (a mouse-like touch interface)" });
         }
-        Some(Device { file, path: path.into(), abs_max, is_keyboard, pad: None, touch, finger })
+        Some(Device { file, path: path.into(), abs_max, is_keyboard, pad: None, touch, finger, spoke: false })
     } else {
         None
     }
@@ -871,6 +874,13 @@ fn is_finger_down(r: &Raw) -> bool {
     (r.typ == EV_ABS && r.code == ABS_MT_TRACKING_ID && r.value >= 0) || (r.typ == EV_KEY && (r.code == BTN_TOUCH || r.code == BTN_LEFT) && r.value == 1)
 }
 
+/// Whether a finger device's events are dropped as an echo: the mouse-like interface of a touch monitor (`finger` without a touch
+/// mapping) is muted only while a multi-touch device is present AND has spoken. A multi-touch device that never spoke leaves the
+/// word to the mouse-like interface; touch devices themselves are never muted.
+pub fn mouse_like_muted(finger: bool, is_touch: bool, touch_spoke: bool) -> bool {
+    finger && !is_touch && touch_spoke
+}
+
 /// The first fingers of a boot are written to the log (which device, what it said, whether the shell used it), so a touch screen that
 /// does nothing can be told apart from one whose events never arrive. Capped so a long session does not fill the log.
 fn log_finger_events(path: &str, evs: &[Raw], echo: bool) {
@@ -899,9 +909,12 @@ pub fn poll_devices(devs: &mut Vec<Device>, timeout_ms: i32) -> Vec<Polled> {
     // SAFETY: `fds` is a valid array of pollfd for the duration of the call.
     unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
     let mut dead = Vec::new();
-    // the mouse-like interface of a touch monitor repeats what its multi-touch interface says: with both there, only the touch device speaks
+    // the mouse-like interface of a touch monitor repeats what its multi-touch interface says: while the touch device speaks, only it is
+    // heard. A touch device that has never spoken is a controller left in mouse mode (the Mac mini's wch.cn panel after a cold boot:
+    // its multi-touch interface is silent and only the mouse-like one reports), so then the mouse-like interface is the touch screen.
     let has_touch = devs.iter().any(|d| d.touch.is_some());
-    let echo: Vec<bool> = devs.iter().map(|d| has_touch && d.finger && d.touch.is_none()).collect();
+    let touch_spoke = devs.iter().any(|d| d.touch.is_some() && d.spoke);
+    let echo: Vec<bool> = devs.iter().map(|d| mouse_like_muted(d.finger, d.touch.is_some(), touch_spoke)).collect();
     for (i, pf) in fds.iter().enumerate() {
         if pf.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
             dead.push(i);
@@ -915,6 +928,12 @@ pub fn poll_devices(devs: &mut Vec<Device>, timeout_ms: i32) -> Vec<Polled> {
                     break;
                 }
                 let evs = parse_events(&buf[..n]);
+                if !devs[i].spoke {
+                    devs[i].spoke = true;
+                    if devs[i].finger && devs[i].touch.is_none() && has_touch && !touch_spoke {
+                        log::info!("input: {}: the multi-touch interface has not spoken since it was opened; this mouse-like interface speaks for the touch screen (controller in mouse mode)", devs[i].path);
+                    }
+                }
                 if echo[i] {
                     continue; // read (so it does not wake us again), not used
                 }
@@ -923,6 +942,12 @@ pub fn poll_devices(devs: &mut Vec<Device>, timeout_ms: i32) -> Vec<Polled> {
                 }
                 if devs[i].finger {
                     log_finger_events(&devs[i].path, &evs, echo[i]);
+                    if devs[i].touch.is_none() {
+                        // the recovery ladder counts these too: a panel heard through its mouse-like interface is not a silent one
+                        for _ in &evs {
+                            iyakki_agent::touchrecover::note_event();
+                        }
+                    }
                 }
                 out.extend(evs.into_iter().map(|r| (r, devs[i].abs_max, devs[i].pad, devs[i].touch.clone())));
             }
@@ -1009,6 +1034,19 @@ mod tests {
         assert!(!is_finger_down(&raw(EV_ABS, ABS_MT_TRACKING_ID, -1)), "lifting is not pressing");
         assert!(is_finger_down(&raw(EV_KEY, BTN_TOUCH, 1)) && is_finger_down(&raw(EV_KEY, BTN_LEFT, 1)), "the touch or left button of a touch monitor's mouse-like interface");
         assert!(!is_finger_down(&raw(EV_KEY, BTN_LEFT, 0)) && !is_finger_down(&raw(EV_REL, 0, 3)));
+    }
+
+    /// KI-077: the Mac mini's wch.cn panel comes out of a cold boot in mouse mode: its multi-touch interface is listed but silent and
+    /// only the mouse-like interface reports. The mouse-like interface is muted only once a multi-touch device has actually spoken.
+    #[test]
+    fn mouse_like_interface_speaks_until_the_touch_device_does() {
+        // both present, touch device silent so far: the mouse-like interface is heard
+        assert!(!mouse_like_muted(true, false, false), "controller in mouse mode: the mouse-like interface is the touch screen");
+        // the touch device has spoken: the mouse-like interface is an echo
+        assert!(mouse_like_muted(true, false, true), "with a speaking multi-touch interface the mouse-like one is an echo");
+        // touch devices and ordinary pointers are never muted
+        assert!(!mouse_like_muted(true, true, true) && !mouse_like_muted(true, true, false));
+        assert!(!mouse_like_muted(false, false, true), "a mouse is not an echo of anything");
     }
 
     #[test]

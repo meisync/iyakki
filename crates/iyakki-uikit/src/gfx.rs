@@ -87,6 +87,19 @@ pub enum Icon {
 
 type GlyphKey = (char, u32, Face);
 
+/// A line of text as coverage (same fields as `iyakki_web::svg::TextMask`, which the shell converts it to): `alpha` is `w * h` bytes,
+/// `x` and `y` are the mask's corner relative to the pen on the baseline, `advance` is how far the pen moved.
+#[derive(Clone, Debug, Default)]
+pub struct TextMask {
+    pub advance: f64,
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+    pub alpha: Vec<u8>,
+}
+
+
 pub struct Gfx {
     pub pm: Pixmap,
     /// Clickable regions registered during this frame (later = on top).
@@ -106,19 +119,19 @@ pub struct Gfx {
     shaper: Option<crate::shaping::Shaper>,
     shaped_cache: HashMap<(usize, u16, u32), (fontdue::Metrics, Vec<u8>)>,
     /// Test builds only: every string passed to [`Gfx::text`] with its top-left position, for `TileHarness`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub text_log: Vec<(f32, f32, String)>,
     /// While `Some`, every string drawn is kept here (developer mode's `iyakki dev state`, which asks for it a few seconds at a time).
     /// Capped, and switched on by the shell only for the frames a computer asked for.
     pub text_cap: Option<Vec<(f32, f32, String)>>,
     /// Test builds only: what the overflow detector (`monkey_tests`, KI-015) needs: every single-line text with its box and the innermost
     /// clip it was drawn in, and every opaque fill, both in drawing order (`seq`).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub layout_log: LayoutLog,
 }
 
 /// See [`Gfx::layout_log`].
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 #[derive(Default)]
 pub struct LayoutLog {
     pub seq: u32,
@@ -127,7 +140,7 @@ pub struct LayoutLog {
     pub fills: Vec<(u32, R)>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 impl LayoutLog {
     fn fill(&mut self, x: f32, y: f32, w: f32, h: f32, c: [u8; 4]) {
         if c[3] >= 250 {
@@ -205,17 +218,17 @@ impl Gfx {
             hits: Vec::new(),
             mouse: (-1, -1),
             probes: std::cell::RefCell::new(Vec::new()),
-            sans: load(include_bytes!("../assets/DejaVuSans.ttf")),
-            bold: load(include_bytes!("../assets/DejaVuSans-Bold.ttf")),
-            mono: load(include_bytes!("../assets/DejaVuSansMono.ttf")),
+            sans: load(include_bytes!("../../iyakki-shell/assets/DejaVuSans.ttf")),
+            bold: load(include_bytes!("../../iyakki-shell/assets/DejaVuSans-Bold.ttf")),
+            mono: load(include_bytes!("../../iyakki-shell/assets/DejaVuSansMono.ttf")),
             cache: HashMap::new(),
             clip_buf: Vec::new(),
             shaper: None,
             shaped_cache: HashMap::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             text_log: Vec::new(),
             text_cap: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             layout_log: LayoutLog::default(),
         }
     }
@@ -249,10 +262,10 @@ impl Gfx {
             }
         }
         let start = self.hits.len();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         self.layout_log.clips.push(clip);
         let out = f(self);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         self.layout_log.clips.pop();
         if self.pm.data().len() == h * row {
             let data = self.pm.data_mut();
@@ -304,10 +317,10 @@ impl Gfx {
             self.copy_out(x0, y0, x1, y1, &mut saved);
         }
         let start = self.hits.len();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         self.layout_log.clips.push(clip);
         let out = f(self);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         self.layout_log.clips.pop();
         let mut at = 0;
         for &(x0, y0, x1, y1) in &rings {
@@ -539,7 +552,7 @@ impl Gfx {
 
     /// Axis-aligned fill, snapped to whole pixels (crisp edges; avoids tiny-skia's thin-rect hairline path).
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, c: [u8; 4]) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         self.layout_log.fill(x, y, w, h, c);
         if let Some(r) = Rect::from_xywh(x.round(), y.round(), w.round().max(1.0), h.round().max(1.0)) {
             self.pm.fill_rect(r, &paint(c), Transform::identity(), None);
@@ -547,7 +560,7 @@ impl Gfx {
     }
 
     pub fn rrect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, c: [u8; 4]) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         self.layout_log.fill(x, y, w, h, c);
         if let Some(p) = rrect_path(x, y, w, h, r) {
             self.pm.fill_path(&p, &paint(c), FillRule::Winding, Transform::identity(), None);
@@ -623,7 +636,7 @@ impl Gfx {
 
     /// Draw `s` with its top-left at (x, y). Returns the advance width. Text is clipped to the pixmap.
     pub fn text(&mut self, x: f32, y: f32, size: f32, color: [u8; 4], s: &str, face: Face) -> f32 {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         {
             self.text_log.push((x, y, s.to_string()));
             if !s.contains('\n') && !s.trim().is_empty() {
@@ -666,8 +679,7 @@ impl Gfx {
 
     /// `s` as coverage, for pictures that draw their own text (SVG): white text on a clear pixmap, kept as alpha. The mask's
     /// corner is given relative to the pen on the baseline. Empty when the text is too wide to be worth drawing.
-    pub fn text_mask(&mut self, size: f32, s: &str, face: Face) -> iyakki_web::svg::TextMask {
-        use iyakki_web::svg::TextMask;
+    pub fn text_mask(&mut self, size: f32, s: &str, face: Face) -> TextMask {
         let px = size.round().max(1.0);
         let advance = self.text_width(px, s, face);
         let ascent = self.font(face).horizontal_line_metrics(px).map_or(px, |m| m.ascent);

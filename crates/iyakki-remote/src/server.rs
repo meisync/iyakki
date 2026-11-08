@@ -82,7 +82,11 @@ impl Server {
         let listener = TcpListener::bind(&cfg.addr)?;
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
-        let shared = Arc::new(Shared { gate, sessions: Sessions::new(), logins: RateLimit::new(10), replay: crate::devicekeys::Replay::new(), tls: cfg.tls, open: AtomicUsize::new(0), stop: AtomicBool::new(false) });
+        let replay = match gate.replay_file() {
+            Some(p) => crate::devicekeys::Replay::persistent(p, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())),
+            None => crate::devicekeys::Replay::new(),
+        };
+        let shared = Arc::new(Shared { gate, sessions: Sessions::new(), logins: RateLimit::new(10), replay, tls: cfg.tls, open: AtomicUsize::new(0), stop: AtomicBool::new(false) });
         let s = shared.clone();
         std::thread::Builder::new().name("iyakki-web-accept".into()).spawn(move || accept_loop(listener, s))?;
         Ok(Server { shared, addr })

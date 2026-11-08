@@ -460,6 +460,9 @@ fn config(c: &DevClient, args: &Args, out: &mut dyn FnMut(&str)) -> Result<(), S
     match p(1).ok_or("usage: iyakki dev config list|get|set|export|import|provider|firewall")? {
         "list" => {
             let v = c.call("GET", "/v1/dev/config/list", &[], b"")?;
+            if let Some(c) = v["computer"].as_object() {
+                out(&format!("Values are for this computer: {} (id {}). Sound, display, keyboard, microphone, GPU and power settings are kept per computer.", c.get("label").and_then(Value::as_str).unwrap_or("?"), c.get("id").and_then(Value::as_str).unwrap_or("?")));
+            }
             out(&format!("{:<28} {:<24} {}", "KEY", "VALUE", "TYPE / MEANING"));
             for r in v["settings"].as_array().into_iter().flatten() {
                 let val = match &r["value"] {
@@ -990,7 +993,12 @@ fn update(c: &DevClient, args: &Args, out: &mut dyn FnMut(&str)) -> Result<(), S
         }
         return Ok(());
     }
-    let src = PathBuf::from(args.pos.get(1).ok_or("usage: iyakki dev update PAYLOAD_DIR|IMAGE.img [--force] [--reboot] | --status")?);
+    if args.has("--discard") {
+        let v = c.call("POST", "/v1/dev/update/abort", &[], b"")?;
+        out(v["message"].as_str().unwrap_or("The staged update was thrown away."));
+        return Ok(());
+    }
+    let src = PathBuf::from(args.pos.get(1).ok_or("usage: iyakki dev update PAYLOAD_DIR|IMAGE.img [--force] [--reboot] | --status | --discard")?);
     let mut temp = None;
     let dir = if src.is_file() {
         let t = std::env::temp_dir().join(format!("iyakki-update-{}-{}", std::process::id(), crate::clock::now_unix()));

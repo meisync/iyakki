@@ -43,6 +43,18 @@ if [ ! -d "$BR_DIR" ]; then
   curl -fL "https://buildroot.org/downloads/buildroot-$BR_VERSION.tar.gz" | tar xz -C "$(dirname "$BR_DIR")"
 fi
 
+# Buildroot refuses a GNU-incompatible `install` (the uutils one newer Ubuntu puts on /usr/bin/install: "affected by uutils/coreutils#12166")
+# and stops in its dependency check. Same answer as legal-collect.sh: when /usr/bin/gnuinstall exists, a temporary PATH entry makes
+# `install` GNU's for this run only; nothing in the system changes. (Found again 2026-11-07 on the HP kernel rebuild.)
+if ! install --version 2>/dev/null | grep -q 'GNU coreutils'; then
+  if [ -x /usr/bin/gnuinstall ]; then
+    SHIM="$(mktemp -d)"; ln -s /usr/bin/gnuinstall "$SHIM/install"; export PATH="$SHIM:$PATH"
+    echo "build.sh: /usr/bin/install is not GNU coreutils; using /usr/bin/gnuinstall for this run"
+  else
+    echo "build.sh: WARNING: install is not GNU coreutils and /usr/bin/gnuinstall does not exist; Buildroot will refuse to run (install the gnu-coreutils package)" >&2
+  fi
+fi
+
 mkdir -p "$OUT"
 cp "$HERE/configs/iyakki_${ARCH}_defconfig" "$OUT/defconfig"
 [ "$VARIANT" = "hw" ] && cat "$HERE/configs/iyakki_firmware.fragment" >> "$OUT/defconfig"

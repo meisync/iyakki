@@ -431,6 +431,7 @@ impl NodeKind for Notify {
             Field::new("title", "Title", FieldKind::Text, "").required(),
             Field::new("body", "Text", FieldKind::Multiline, "may use {{ templates }}"),
             Field::new("level", "Level", FieldKind::Choice(&["info", "warn", "error"]), "").default(json!("info")),
+            Field::new("to", "Send to", FieldKind::Text, "cloud tenants only: me (default), team, role:admin, role:tenant_admin, or a person's name; a desktop has one person"),
             Field::new("channels", "Also tell me by", FieldKind::Text, "inbox, matrix (the INBOX note is always made). Matrix needs the account in Settings, Notifications"),
             Field::new("room", "Matrix room", FieldKind::Text, "the name you saved the room under; empty: your only or main room"),
             Field::new("attach", "Picture", FieldKind::Text, "a camera step's file, for example {{ nodes.cam.output.path }}; only a picture of this run can be sent"),
@@ -452,7 +453,7 @@ impl NodeKind for Notify {
     fn run(&self, cx: &NodeCx, node: &Node, cfg: &Value) -> NodeResult {
         let level = if s(cfg, "level").is_empty() { "info" } else { s(cfg, "level") };
         let n = Notice { title: s(cfg, "title").to_string(), body: s(cfg, "body").to_string(), level: level.to_string(), flow_id: cx.flow.id.clone(), run_id: cx.run_id.to_string(), needs_you: false };
-        cx.host.notify(&n).map_err(NodeError::new)?;
+        cx.host.notify_to(&n, cfg.get("to").unwrap_or(&Value::Null)).map_err(NodeError::new)?;
         cx.log(format!("notified: {}", n.title));
         let mut out = json!({"sent": true, "title": n.title});
         let extra: Vec<String> = channel_names(s(cfg, "channels")).into_iter().filter(|c| c != "inbox").collect();

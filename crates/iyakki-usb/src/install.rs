@@ -530,8 +530,29 @@ pub fn execute(plan: &Plan, dry_run: bool, proc_mounts: &str, progress: &mut dyn
     Ok(InstallReport { written: total, head_sha256: sha, dry_run: false })
 }
 
+/// Where the installer looks on a real machine (tests pass a made-up tree instead).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Paths {
+    pub sys: PathBuf,
+    pub dev: PathBuf,
+    pub mounts: PathBuf,
+    pub swaps: PathBuf,
+}
+
+impl Paths {
+    pub fn real() -> Paths {
+        Paths { sys: "/sys".into(), dev: "/dev".into(), mounts: iyakki_storage::MOUNTS_PATH.into(), swaps: iyakki_storage::SWAPS_PATH.into() }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn real_paths_are_the_kernel_ones() {
+        let p = super::Paths::real();
+        assert_eq!((p.sys.to_str(), p.dev.to_str(), p.mounts.to_str(), p.swaps.to_str()), (Some("/sys"), Some("/dev"), Some("/proc/mounts"), Some("/proc/swaps")));
+    }
+
     use super::*;
 
     pub(crate) fn tmp(tag: &str) -> PathBuf {

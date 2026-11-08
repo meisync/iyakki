@@ -49,13 +49,28 @@ fn parse_ca(pem: &str) -> Result<Vec<CertificateDer<'static>>, String> {
     Ok(certs)
 }
 
+/// The CA name of every host that needs a client certificate: the command line's (`Options::client_ca`) and the route file's
+/// (`Route::client_ca`). When both name one for a host the command line wins. Hosts are lower case.
+pub(super) fn wanted(inner: &Inner, t: &RouteTable) -> std::collections::BTreeMap<String, String> {
+    let mut m = std::collections::BTreeMap::new();
+    for r in t.routes.iter().filter(|r| r.scheme == Scheme::Https) {
+        if let Some(n) = &r.client_ca {
+            m.entry(r.host.to_ascii_lowercase()).or_insert_with(|| n.clone());
+        }
+    }
+    for (h, n) in &inner.opts.client_ca {
+        m.insert(h.to_ascii_lowercase(), n.clone());
+    }
+    m
+}
+
 /// Load the CAs of all mutual-TLS routes of `t` again. A CA that fails to load keeps the previous one of that host; a host that never had
 /// one has no verifier, so its route refuses every client (503). Returns one line per host.
 pub(super) fn reload_cas(inner: &Inner, t: &RouteTable) -> Vec<String> {
     let mut lines = Vec::new();
     let mut fresh: HashMap<String, (Arc<dyn ClientCertVerifier>, Vec<CertificateDer<'static>>)> = HashMap::new();
     let old = inner.auth.0.read().unwrap_or_else(|e| e.into_inner());
-    for (host, name) in &inner.opts.client_ca {
+    for (host, name) in &wanted(inner, t) {
         if !t.routes.iter().any(|r| r.scheme == Scheme::Https && r.host.eq_ignore_ascii_case(host)) {
             continue;
         }
@@ -83,7 +98,8 @@ pub(super) fn reload_cas(inner: &Inner, t: &RouteTable) -> Vec<String> {
 /// `None`: let the request through. `Some((status, why))`: refuse it. Called for requests on TLS connections only.
 pub(super) fn verdict(inner: &Inner, route: &Route, sock: &dyn Sock) -> Option<(u16, &'static str)> {
     let host = route.host.to_ascii_lowercase();
-    if !inner.opts.client_ca.keys().any(|k| k.eq_ignore_ascii_case(&host)) {
+    // the CA belongs to the host: a second route of the same host (another path) asks for it too, so a path cannot be a way round
+    if !wanted(inner, &inner.table()).contains_key(&host) {
         return None;
     }
     let verifier = inner.auth.0.read().unwrap_or_else(|e| e.into_inner()).per_host.get(&host).map(|(v, _)| v.clone());
@@ -99,6 +115,15 @@ pub(super) fn verdict(inner: &Inner, route: &Route, sock: &dyn Sock) -> Option<(
         Ok(_) => None,
         Err(_) => Some((403, "the client certificate is not accepted by this route")),
     }
+}
+
+/// The header the target reads to know which client certificate was accepted: the SHA-256 of its DER, in lower-case hex. Empty when the
+/// connection presented none.
+pub(super) fn identity(sock: &dyn Sock) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let certs = sock.peer_certs();
+    let first = certs.first()?;
+    Some(Sha256::digest(first).iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// The verifier the TLS configuration holds. It follows [`AuthState`], so CAs can be replaced without a restart.

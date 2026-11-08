@@ -346,6 +346,16 @@ impl Shares {
         Ok(c)
     }
 
+    /// Every check of [`Shares::create`] (name, folder rule of the person's scope, access, port) without saving anything: what the
+    /// assistant's approval card shows is exactly what create would accept.
+    pub fn check(&self, d: &Draft) -> Result<ShareCfg, String> {
+        let i = self.inner.lock().map_err(|_| "busy".to_string())?;
+        if i.cfgs.len() >= MAX_SHARES {
+            return Err(format!("At most {MAX_SHARES} shares."));
+        }
+        self.build(&i, d, None)
+    }
+
     pub fn create(&self, d: &Draft) -> Result<String, String> {
         let mut i = self.inner.lock().map_err(|_| "busy".to_string())?;
         if i.cfgs.len() >= MAX_SHARES {

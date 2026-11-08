@@ -47,17 +47,17 @@ const RANGES: &[(u32, u32, usize)] = &[
 
 fn bytes(i: usize) -> &'static [u8] {
     match i {
-        0 => include_bytes!("../assets/DejaVuSans.ttf"),
-        1 => include_bytes!("../assets/NotoSansDevanagari-Regular.ttf"),
-        2 => include_bytes!("../assets/NotoSansBengali-Regular.ttf"),
-        3 => include_bytes!("../assets/NotoSansGurmukhi-Regular.ttf"),
-        4 => include_bytes!("../assets/NotoSansGujarati-Regular.ttf"),
-        5 => include_bytes!("../assets/NotoSansTamil-Regular.ttf"),
-        6 => include_bytes!("../assets/NotoSansTelugu-Regular.ttf"),
-        7 => include_bytes!("../assets/NotoSansKannada-Regular.ttf"),
-        8 => include_bytes!("../assets/NotoSansMalayalam-Regular.ttf"),
-        9 => include_bytes!("../assets/NotoSansArabic-Regular.ttf"),
-        _ => include_bytes!("../assets/NotoSansHebrew-Regular.ttf"),
+        0 => include_bytes!("../../iyakki-shell/assets/DejaVuSans.ttf"),
+        1 => include_bytes!("../../iyakki-shell/assets/NotoSansDevanagari-Regular.ttf"),
+        2 => include_bytes!("../../iyakki-shell/assets/NotoSansBengali-Regular.ttf"),
+        3 => include_bytes!("../../iyakki-shell/assets/NotoSansGurmukhi-Regular.ttf"),
+        4 => include_bytes!("../../iyakki-shell/assets/NotoSansGujarati-Regular.ttf"),
+        5 => include_bytes!("../../iyakki-shell/assets/NotoSansTamil-Regular.ttf"),
+        6 => include_bytes!("../../iyakki-shell/assets/NotoSansTelugu-Regular.ttf"),
+        7 => include_bytes!("../../iyakki-shell/assets/NotoSansKannada-Regular.ttf"),
+        8 => include_bytes!("../../iyakki-shell/assets/NotoSansMalayalam-Regular.ttf"),
+        9 => include_bytes!("../../iyakki-shell/assets/NotoSansArabic-Regular.ttf"),
+        _ => include_bytes!("../../iyakki-shell/assets/NotoSansHebrew-Regular.ttf"),
     }
 }
 

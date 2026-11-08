@@ -403,7 +403,7 @@ pub(crate) fn run(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Resu
         env.say("[5/7] asked IYAKKI to add it to Settings \u{2192} Models as ollama-local");
     }
     let detail = marker_detail(models.len(), &how);
-    env.mark(Item::Ollama, &detail)?;
+    crate::quickinstall::mark_verified(env, Item::Ollama, &detail)?;
     env.say(&format!("[6/7] done: {detail}"));
     env.say("[7/7] models are pulled from Settings \u{2192} Models and kept in the volume ollama-data (30 GB claimed); removing Ollama keeps them unless you also delete the data");
     Ok(())

@@ -278,8 +278,8 @@ fn report() -> chk::Report {
     chk::Report {
         checked_at: iyakki_agent::clock::now_unix() - 3 * 3600,
         updates: vec![
-            chk::Update { kind: chk::Kind::System, id: "system".into(), title: "IYAKKI".into(), from: "0.1.0-alpha.1".into(), to: "0.1.0-alpha.3".into(), source: "System update".into(), new_permissions: vec![], note: "Fixes the sound.".into() },
-            chk::Update { kind: chk::Kind::App, id: "skill:notes".into(), title: "Meeting notes".into(), from: "1.0.0".into(), to: "1.2.0".into(), source: "Stick".into(), new_permissions: vec!["reach example.com".into()], note: "asks for permissions the installed version did not".into() },
+            chk::Update { kind: chk::Kind::System, id: "system".into(), title: "IYAKKI".into(), from: "0.1.0-alpha.1".into(), to: "0.1.0-alpha.3".into(), source: "System update".into(), new_permissions: vec![], note: "Fixes the sound.".into(), driver: false },
+            chk::Update { kind: chk::Kind::App, id: "skill:notes".into(), title: "Meeting notes".into(), from: "1.0.0".into(), to: "1.2.0".into(), source: "Stick".into(), new_permissions: vec!["reach example.com".into()], note: "asks for permissions the installed version did not".into(), driver: false },
         ],
         errors: vec![("Mirror".into(), "could not reach mirror.example: offline".into())],
         asked: vec![],
@@ -373,4 +373,39 @@ fn the_overview_says_how_many_updates_the_last_check_found() {
     report().save(cx.services.dir()).unwrap();
     let n = a.attention(&cx).into_iter().find(|x| x.title.contains("available")).expect("an Overview line");
     assert_eq!((n.tab, n.title.as_str()), (Tab::Updates, "2 updates available"));
+}
+
+#[test]
+fn use_a_store_sets_the_update_list_to_that_stores_announcement_without_typing_a_url() {
+    let r = rig("chk-store");
+    let cx = cx_with_admin_store("upd-chk-store");
+    let mut a = app(&r, &cx);
+    // no store with a checked key yet
+    a.upd_check_key(&Key::Char('t'), &cx);
+    assert_eq!(check_cfg(&cx).system_url, "");
+    // two stores with their keys pinned, one without
+    let svc = cx.services.clone();
+    let store = iyakki_agent::store::Store::for_services(&svc);
+    let mut c = store.config();
+    let key = "ab".repeat(32);
+    c.add_pinned("Home store", "http://192.0.2.7:30580/catalog.json", &key).unwrap();
+    c.add_pinned("Work store", "https://work.example/store/catalog.json", &key).unwrap();
+    c.add("Loose", iyakki_agent::store::catalog::SourceKind::Url, "https://loose.example/catalog.json").unwrap();
+    c.save(store.dir()).unwrap();
+    a.upd_check_key(&Key::Char('t'), &cx);
+    assert_eq!(check_cfg(&cx).system_url, "http://192.0.2.7:30580/v1/system.json");
+    a.upd_check_key(&Key::Char('t'), &cx);
+    assert_eq!(check_cfg(&cx).system_url, "https://work.example/store/v1/system.json");
+    a.upd_check_key(&Key::Char('t'), &cx);
+    assert_eq!(check_cfg(&cx).system_url, "http://192.0.2.7:30580/v1/system.json", "it goes round, and the store without a checked key is never offered");
+    assert!(a.upd_check_lines(&cx).iter().any(|l| l.0.contains("announcement of Home store")));
+    assert!(a.updates_buttons().iter().any(|b| b.0 == "Use a store"));
+    // an ordinary user changes nothing
+    let mut ucx = cx_with_admin_store("upd-chk-store-user");
+    ucx.session.user = "amy".into();
+    ucx.session.role = iyakki_sec::policy::Role::User;
+    ucx.session.policy = iyakki_sec::policy::Role::User.template();
+    let mut b = app(&r, &ucx);
+    b.upd_check_key(&Key::Char('t'), &ucx);
+    assert_eq!(check_cfg(&ucx).system_url, "");
 }

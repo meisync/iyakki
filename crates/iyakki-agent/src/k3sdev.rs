@@ -121,7 +121,7 @@ impl ClockSource for RealClock {
     }
     fn mono(&self) -> Duration {
         static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-        let up = std::fs::read_to_string("/proc/uptime").ok().and_then(|t| t.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()));
+        let up = crate::sysinfo::uptime_f64(crate::sysinfo::proc_root());
         up.map(Duration::from_secs_f64).unwrap_or_else(|| START.get_or_init(Instant::now).elapsed())
     }
     fn floor_pending(&self) -> bool {
@@ -1432,7 +1432,7 @@ impl K3sDev {
         }
         let parent = self.layout.root.parent().unwrap_or(Path::new("/")).to_path_buf();
         if lock(&self.over).root.is_none() {
-            if let Some(t) = fs_type_of(&parent, &std::fs::read_to_string("/proc/mounts").unwrap_or_default()) {
+            if let Some(t) = fs_type_of(&parent, &iyakki_storage::read_mounts().unwrap_or_default()) {
                 if matches!(t.as_str(), "tmpfs" | "ramfs" | "rootfs") {
                     v.push(format!("the data folder {} is in memory ({t}), so a cluster would fill the RAM and be lost at every restart; make a data disk first (Settings \u{2192} Storage)", parent.display()));
                 }

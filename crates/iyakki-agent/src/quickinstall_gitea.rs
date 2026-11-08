@@ -166,7 +166,7 @@ fn use_existing(env: &mut dyn StepEnv, other: &Installed) -> Result<(), String> 
     env.request_after(REQUEST)?;
     env.say("[2/2] asked IYAKKI to add it as the Git connection \"Local Gitea\" (its token is already in your vault)");
     let detail = format!("web {web} (from Platform services)");
-    env.mark(Item::Gitea, &detail)?;
+    crate::quickinstall::mark_verified(env, Item::Gitea, &detail)?;
     env.say(&format!("done: {detail}"));
     Ok(())
 }
@@ -208,7 +208,7 @@ fn adopt_nodeport(env: &mut dyn StepEnv, cluster: ClusterRef, records: &[Install
     env.save_service(rec)?;
     env.request_after(REQUEST)?;
     let detail = format!("web {web} (adopted from Platform services)");
-    env.mark(Item::Gitea, &detail)?;
+    crate::quickinstall::mark_verified(env, Item::Gitea, &detail)?;
     env.say(&format!("[3/3] done: {detail}"));
     Ok(())
 }
@@ -308,7 +308,7 @@ pub fn run(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Result<(), 
     env.save_service(rec)?;
     env.request_after(REQUEST)?;
     let detail = detail(port, &admin);
-    env.mark(Item::Gitea, &detail)?;
+    crate::quickinstall::mark_verified(env, Item::Gitea, &detail)?;
     env.say("[8/9] recorded it in your installed services (Settings \u{2192} Dev cluster, the assistant's git_service_status and Connect workspace see it); IYAKKI is putting the password and token into your vault and adding the Git connection \"Local Gitea\"");
     env.say(&format!("[9/9] done: {detail}"));
     Ok(())

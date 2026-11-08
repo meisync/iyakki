@@ -565,7 +565,7 @@ impl SystemApp {
         } else {
             g.text(c.x + 14.0 * s, c.y + 76.0 * s, 12.0 * s, DIM, "no swap", Face::Sans);
         }
-        let zram = memory_extra_line(&iyakki_zram::MemStats::read(&iyakki_zram::Env { proc: self.roots.proc.clone(), sys: self.roots.sys.clone(), dev: "/dev".into() }));
+        let zram = memory_extra_line(&iyakki_zram::MemStats::read(&iyakki_zram::Env::with_roots(self.roots.proc.clone(), self.roots.sys.clone())));
         let zram = g.fit(12.0 * s, &zram, Face::Sans, c.w - 28.0 * s);
         g.text(c.x + 14.0 * s, c.y + 92.0 * s, 12.0 * s, DIM, &zram, Face::Sans);
         // load, uptime, heat

@@ -10,6 +10,7 @@ extern crate alloc;
 mod font;
 mod fs;
 mod gfx;
+mod hwlog;
 mod launch;
 mod scan;
 mod shim;
@@ -43,6 +44,29 @@ const MENU_HEADER: &str = "Choose what to start";
 const MAX_INITRD: usize = 1 << 31;
 /// The variable that forces the text menu even when a graphics output exists (set it from the OS when debugging a screen).
 const TEXT_ONLY_VAR: &str = "BootText";
+/// Where the log of this run is written on the boot volume: beside the configuration file, so a stick plugged into another
+/// computer shows what the loader found, chose and started. Written when the entries are known, right before a start, and after
+/// a start came back. A volume that cannot be written (a CD, a firmware without FAT writing) is simply left without it.
+const LOG_PATH: &str = match option_env!("BOOT_LOG_PATH") {
+    Some(p) => p,
+    None => "/EFI/iyakki-boot/last-boot.log",
+};
+
+/// Where the log goes when the directory of `LOG_PATH` does not exist on this volume (the root always does).
+const LOG_FALLBACK_PATH: &str = "/last-boot.log";
+
+/// Write the log so far to `LOG_PATH` (or `LOG_FALLBACK_PATH`). Says so first, so the file's last line names the moment it was
+/// written, and once more when no file could be written at all.
+fn save_log(vol: &fs::Volume, when: &str) {
+    say!("log: {when}; this log is in {LOG_PATH} on the boot volume\n");
+    if vol.write(LOG_PATH, &sys::log_bytes()) {
+        return;
+    }
+    say!("log: {LOG_PATH} could not be written; trying {LOG_FALLBACK_PATH}\n");
+    if !vol.write(LOG_FALLBACK_PATH, &sys::log_bytes()) {
+        say!("log: no log file could be written (read-only medium or firmware)\n");
+    }
+}
 
 #[global_allocator]
 static ALLOCATOR: sys::Pool = sys::Pool;
@@ -165,10 +189,12 @@ fn start_item(c: &Ctx, item: &Item, tree: &str) -> Result<Status, String> {
                     let line = cmdline::apply(&e.cmdline, &[], &rules).map_err(|_| String::from("the command line is not valid"))?;
                     say!("start: {} kernel={} tree={} initrds={} cmdline={}\n", item.id, kernel, tree, initrds.len(), line);
                     let initrd = read_initrds(c, &initrds)?;
+                    save_log(&c.vol, "about to start"); // the file now ends with the start line above: a kernel that never draws is still named
                     launch::start(c.vol.handle, &kernel, Some(&line), initrd)
                 }
                 Kind::Chain => {
                     say!("start: {} chain={}\n", item.id, kernel);
+                    save_log(&c.vol, "about to start"); // the file now ends with the start line above: a kernel that never draws is still named
                     launch::start(c.vol.handle, &kernel, None, None)
                 }
                 Kind::Firmware => Err(String::from("a firmware entry is not started like a kernel")),
@@ -176,6 +202,7 @@ fn start_item(c: &Ctx, item: &Item, tree: &str) -> Result<Status, String> {
         }
         Action::Firmware => {
             say!("start: {} firmware setup\n", item.id);
+            save_log(&c.vol, "about to start");
             if !vars::request_firmware_setup() {
                 return Err(String::from("the firmware setup request could not be stored"));
             }
@@ -185,11 +212,13 @@ fn start_item(c: &Ctx, item: &Item, tree: &str) -> Result<Status, String> {
         // volume whether or not the scanner is on (the scanner only lists what it finds; these rows are written by the image build).
         Action::Chain(discover::Target::BootVolume { path }) if !c.found.iter().any(|f| f.disc.target == discover::Target::BootVolume { path: path.clone() }) => {
             say!("start: {} chain={}\n", item.id, path);
+            save_log(&c.vol, "about to start"); // the file now ends with the start line above: a kernel that never draws is still named
             launch::start(c.vol.handle, path, None, None)
         }
         Action::Chain(t) => {
             let f = c.found.iter().find(|f| f.disc.target == *t).ok_or_else(|| String::from("this kind of system cannot be started by the UEFI loader"))?;
             say!("start: {} chain={}\n", item.id, f.path);
+            save_log(&c.vol, "about to start"); // the file now ends with the start line above: a kernel that never draws is still named
             launch::start(f.volume, &f.path, None, None)
         }
     }
@@ -212,6 +241,10 @@ fn run() -> Status {
         (None, false) => say!("config: {CONFIG_PATH} read\n"),
     }
     let mut cfg = loaded.config;
+    // what this machine is and what its firmware exposes, then the first write of the log: a start that stops in the splash, the
+    // scan or the menu still leaves the machine's description on the volume
+    hwlog::summary();
+    save_log(&vol, "devices listed");
     // entries that cannot work here are left out: a `requires` file that is not on the volume, firmware setup the firmware cannot do
     let dropped = cfg.drop_unavailable(|p| vol.exists(p), vars::firmware_setup_supported());
     if dropped > 0 {
@@ -226,6 +259,7 @@ fn run() -> Status {
         say!("item: {n} {} \"{}\"{}\n", it.id, it.title, if it.enabled() { "" } else { " (disabled)" });
     }
     let c = Ctx { cfg, items, found, vol, secure };
+    save_log(&c.vol, "entries known");
 
     // boot assessment
     let stored = vars::get(vars::TRIES);
@@ -308,6 +342,7 @@ fn run() -> Status {
             Err(e) => write!(msg, "{} was not started: {e}", item.title).ok(),
         };
         say!("boot: {msg}\n");
+        save_log(&c.vol, "the start came back");
         // it came back: never loop, wait for the person
         (idx, _) = menu(&c, idx, None, true, Some(&msg));
         auto = false;

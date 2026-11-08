@@ -1,5 +1,11 @@
 //! Where a person's files live in a cloud tenant (docs/development/CLOUD-MULTITENANT-PLAN.md, section 3b).
 //!
+//! DECISION: a tenant uses [`Isolation::Folders`] only (the safest option: one set of checks, no claim or worker pod per namespace to get
+//! wrong). What keeps a namespace or a person from filling the shared disk is the explicit size limits of [`crate::cloudquota`]
+//! (`storage.quota`: per folder and per tenant); what keeps them out of each other's files is the rights check plus the path jail below.
+//! The `volumes` code in this file is kept as a tested extension point, but it is DEPRECATED: it is not deployed, and
+//! [`Isolation::deployable`] refuses it on purpose.
+//!
 //! Everything that touches a tenant's files asks [`StorageLayout::locate`] for a [`Place`] (which volume, which folder on it) and never
 //! builds a path itself. With [`Isolation::Folders`] (the first version) every place is a folder of the tenant's one volume; with
 //! [`Isolation::Volumes`] a namespace gets its own volume (claim `<tenant volume>-ns-<namespace>`, mounted at `<root>/volumes/<claim>`), and only
@@ -38,7 +44,7 @@ impl Isolation {
     pub fn deployable(self) -> Result<(), String> {
         match self {
             Isolation::Folders => Ok(()),
-            Isolation::Volumes => Err("isolation \"volumes\" (a volume per namespace) works in the storage layer, but the deployment of it (a claim and a worker pod per namespace) is not built yet; use \"folders\"".into()),
+            Isolation::Volumes => Err("isolation \"volumes\" (a volume per namespace) works in the storage layer, but it is not deployed, by decision (a tenant uses folders with size limits, see storage.quota; a claim and a worker pod per namespace are not built); use \"folders\"".into()),
         }
     }
 }

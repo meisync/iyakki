@@ -18,6 +18,10 @@ impl Env {
     pub fn real() -> Env {
         Env { sys: "/sys".into(), proc: "/proc".into(), dev: "/dev".into() }
     }
+    /// The given `/proc` and `/sys` roots with the real device folder.
+    pub fn with_roots(proc: PathBuf, sys: PathBuf) -> Env {
+        Env { sys, proc, dev: "/dev".into() }
+    }
     pub fn under(root: &Path) -> Env {
         Env { sys: root.join("sys"), proc: root.join("proc"), dev: root.join("dev") }
     }
@@ -379,6 +383,12 @@ fn write_zero_file(path: &Path, bytes: u64) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_with_roots_keeps_the_given_folders_and_the_real_device_folder() {
+        let e = Env::with_roots("/x/proc".into(), "/x/sys".into());
+        assert_eq!((e.proc.to_str(), e.sys.to_str(), e.dev.to_str()), (Some("/x/proc"), Some("/x/sys"), Some("/dev")));
+    }
     use crate::config::{Size, GIB};
     use std::cell::RefCell;
 

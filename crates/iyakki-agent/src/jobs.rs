@@ -42,6 +42,9 @@ const PEEK: u64 = 8 * 1024;
 pub const MAX_TAIL_BYTES: usize = 64 * 1024;
 pub const MAX_TAIL_LINES: usize = 400;
 
+/// The exit code of a step that ran out of time (the `timeout` program's convention).
+pub const TIMED_OUT_EXIT: i32 = 124;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum State {
     Running,
@@ -60,6 +63,7 @@ impl State {
         match self {
             State::Running => "running".into(),
             State::Succeeded => "succeeded".into(),
+            State::Failed(TIMED_OUT_EXIT) => "timed out".into(),
             State::Failed(c) => format!("failed (exit {c})"),
             State::Stopped => "stopped".into(),
             State::Lost => "lost".into(),
@@ -130,6 +134,9 @@ pub struct Job {
     pub progress: Option<f32>,
     /// The last line of output, cleaned and redacted.
     pub last_line: String,
+    /// When the job last showed a sign of work, in ms: new output in its log, or CPU time used by any process of its group (checked
+    /// each time the job is read). 0 for a job that is not running. The screen's spinner moves only while this is recent.
+    pub last_active_ms: u64,
     pub dismissed: bool,
 }
 
@@ -138,6 +145,14 @@ impl Job {
         self.state == State::Running
     }
     /// Seconds it has run (to now while running).
+    /// Seconds since the running job last showed a sign of work (0 when it did just now or is not running).
+    pub fn quiet_secs(&self, now_ms: u64) -> u64 {
+        if !self.running() || self.last_active_ms == 0 {
+            return 0;
+        }
+        now_ms.saturating_sub(self.last_active_ms) / 1000
+    }
+
     pub fn elapsed_secs(&self, now_ms: u64) -> u64 {
         let end = if self.ended_ms > 0 { self.ended_ms } else { now_ms };
         end.saturating_sub(self.started_ms) / 1000
@@ -349,6 +364,51 @@ fn alive(pid: u32, start_ticks: u64) -> bool {
     }
 }
 
+/// CPU time (user + system, in clock ticks) used by every process of the process group `pgid` right now (jobs run in a group of their
+/// own). `None` where there is no `/proc`.
+#[cfg(target_os = "linux")]
+fn group_cpu_ticks(pgid: u32) -> Option<u64> {
+    let mut sum = 0u64;
+    for e in fs::read_dir("/proc").ok()?.flatten() {
+        let name = e.file_name();
+        let Some(pid) = name.to_str().filter(|n| n.bytes().all(|b| b.is_ascii_digit())) else { continue };
+        let Ok(text) = fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+        let Some(rest) = text.rfind(')').map(|i| &text[i + 1..]) else { continue };
+        let f: Vec<&str> = rest.split_whitespace().collect();
+        if f.get(2).and_then(|g| g.parse::<u32>().ok()) == Some(pgid) {
+            sum += f.get(11).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) + f.get(12).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        }
+    }
+    Some(sum)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn group_cpu_ticks(_pgid: u32) -> Option<u64> {
+    None
+}
+
+/// Per job: the CPU ticks last seen and when they last grew (ms).
+static CPU_SEEN: Mutex<Option<std::collections::HashMap<String, (u64, u64)>>> = Mutex::new(None);
+
+/// When this running job last did work, in ms: the later of its log's last write and the last time its group's CPU time grew. The first look
+/// counts as active (it has just been seen), so a job is never called quiet before it has been watched for a while.
+fn last_active(id: &str, pgid: u32, log_modified_ms: u64) -> u64 {
+    let now = now_ms();
+    let mut g = CPU_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let map = g.get_or_insert_with(Default::default);
+    let cpu_at = match group_cpu_ticks(pgid) {
+        Some(t) => {
+            let e = map.entry(id.to_string()).or_insert((t, now));
+            if t > e.0 {
+                *e = (t, now);
+            }
+            e.1
+        }
+        None => 0,
+    };
+    log_modified_ms.max(cpu_at)
+}
+
 fn group_alive(pgid: u32) -> bool {
     // SAFETY: signal 0 only checks that a process of the group exists.
     unsafe { libc::kill(-(pgid as i32), 0) == 0 }
@@ -524,7 +584,13 @@ impl Jobs {
         let cleaned = clean_output(&peek);
         let last = cleaned.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
         let last_line: String = crate::bugs::redact(last).chars().take(160).collect();
-        Job { id: m.id.clone(), label: m.label.clone(), command: crate::bugs::redact(&m.command), cwd: m.cwd.clone(), owner: m.owner.clone(), workspace: m.workspace.clone(), pid: m.pid, state, started_ms: m.started_ms, ended_ms: ended, progress, last_line, dismissed: m.dismissed }
+        let last_active_ms = if state == State::Running {
+            let log_ms = fs::metadata(dir.join("log.txt")).ok().and_then(|x| x.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64);
+            last_active(&m.id, m.pid, log_ms.max(m.started_ms))
+        } else {
+            0
+        };
+        Job { id: m.id.clone(), label: m.label.clone(), command: crate::bugs::redact(&m.command), cwd: m.cwd.clone(), owner: m.owner.clone(), workspace: m.workspace.clone(), pid: m.pid, state, started_ms: m.started_ms, ended_ms: ended, progress, last_line, last_active_ms, dismissed: m.dismissed }
     }
 
     fn list_locked(&self, owner: &str) -> Vec<Job> {
@@ -818,6 +884,29 @@ mod tests {
     }
     fn wait_done(j: &Jobs, id: &str) -> Job {
         j.wait("alice", id, Duration::from_secs(20)).unwrap()
+    }
+
+    #[test]
+    fn a_silent_idle_job_goes_quiet_while_a_busy_one_and_a_talking_one_stay_active() {
+        let t = Tmp::new("quiet");
+        let j = t.jobs();
+        j.start("alice", &sh(&t, "idle", "sleep 30"), &ok).unwrap();
+        j.start("alice", &sh(&t, "busy", "while :; do :; done"), &ok).unwrap();
+        j.start("alice", &sh(&t, "talker", "while :; do echo tick; sleep 0.2; done"), &ok).unwrap();
+        let first: Vec<Job> = ["j1", "j2", "j3"].iter().map(|id| j.get("alice", id).unwrap()).collect();
+        std::thread::sleep(Duration::from_millis(2500));
+        let later: Vec<Job> = ["j1", "j2", "j3"].iter().map(|id| j.get("alice", id).unwrap()).collect();
+        let now = now_ms();
+        assert!(later.iter().all(|x| x.running()), "{later:?}");
+        assert_eq!(later[0].last_active_ms, first[0].last_active_ms, "no output and no CPU: the sign of work does not move");
+        assert!(later[0].quiet_secs(now) >= 2, "the idle job is quiet: {}", later[0].quiet_secs(now));
+        assert!(later[1].last_active_ms > first[1].last_active_ms && later[1].quiet_secs(now) <= 1, "CPU use counts as work");
+        assert!(later[2].last_active_ms > first[2].last_active_ms && later[2].quiet_secs(now) <= 1, "output counts as work");
+        for id in ["j1", "j2", "j3"] {
+            let _ = j.stop("alice", id, Duration::from_millis(200));
+        }
+        // a job that is not running has no quiet time
+        assert_eq!(j.get("alice", "j1").unwrap().quiet_secs(now_ms()), 0);
     }
 
     #[test]

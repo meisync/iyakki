@@ -109,8 +109,25 @@ impl MemStats {
     }
 }
 
+impl MemStats {
+    /// Is any active swap area a zram device?
+    pub fn has_zram_swap(&self) -> bool {
+        self.swaps.iter().any(|w| w.0.starts_with("/dev/zram"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn zram_swap_is_recognised_by_its_device_path() {
+        let mut s = super::MemStats::default();
+        assert!(!s.has_zram_swap());
+        s.swaps.push(("/swapfile".into(), 0, 1, -2));
+        assert!(!s.has_zram_swap());
+        s.swaps.push(("/dev/zram0".into(), 0, 1, 100));
+        assert!(s.has_zram_swap());
+    }
+
     use super::*;
 
     #[test]

@@ -51,9 +51,13 @@ impl Screen for Fake {
 
 struct FakeGate {
     keys: Arc<DeviceKeys>,
+    replay: Option<std::path::PathBuf>,
 }
 
 impl Gate for FakeGate {
+    fn replay_file(&self) -> Option<std::path::PathBuf> {
+        self.replay.clone()
+    }
     fn login(&self, user: &str, password: &str) -> Result<Box<dyn Screen>, LoginError> {
         if user == "alice" && password == "right" {
             Ok(Box::new(Fake { armed: false, sent: false }))
@@ -88,7 +92,7 @@ fn now() -> u64 {
 
 fn plain() -> (Server, Arc<DeviceKeys>) {
     let keys = Arc::new(DeviceKeys::in_memory());
-    let s = Server::start(Config { addr: "127.0.0.1:0".into(), tls: None }, Arc::new(FakeGate { keys: keys.clone() })).unwrap();
+    let s = Server::start(Config { addr: "127.0.0.1:0".into(), tls: None }, Arc::new(FakeGate { keys: keys.clone(), replay: None })).unwrap();
     (s, keys)
 }
 
@@ -247,7 +251,7 @@ fn tls_rig(tag: &str) -> (Server, Arc<DeviceKeys>, Pin, std::path::PathBuf) {
     let id = iyakki_remote::tls::identity(&dir, &["acme.example".into()]).expect("a certificate");
     let pin = Pin::parse(&id.fingerprint).expect("a pin");
     let keys = Arc::new(DeviceKeys::in_memory());
-    let s = Server::start(Config { addr: "127.0.0.1:0".into(), tls: Some(id.config) }, Arc::new(FakeGate { keys: keys.clone() })).unwrap();
+    let s = Server::start(Config { addr: "127.0.0.1:0".into(), tls: Some(id.config) }, Arc::new(FakeGate { keys: keys.clone(), replay: None })).unwrap();
     (s, keys, pin, dir)
 }
 
@@ -283,4 +287,23 @@ fn the_connectors_raw_link_signs_in_with_a_key_over_tls_and_gets_the_tile_stream
     let wrong = iyakki_link::cloudclient::Target { addr: target.addr.clone(), pin: Pin([1; 32]) };
     assert!(matches!(RawWs::open(&wrong, &Auth::Key { user: "alice".into(), key: DeviceKey::from_seed([7; 32]) }), Err(LinkError::PinChanged(_))));
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_signature_captured_before_a_restart_is_refused_by_the_restarted_server() {
+    let dir = std::env::temp_dir().join(format!("iyakki-restart-replay-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let keys = Arc::new(DeviceKeys::in_memory());
+    let k = DeviceKey::from_seed([7; 32]);
+    keys.enroll("alice", &k.public_hex()).unwrap();
+    let start = || Server::start(Config { addr: "127.0.0.1:0".into(), tls: None }, Arc::new(FakeGate { keys: keys.clone(), replay: Some(dir.join("device-keys.replay")) })).unwrap();
+    let h = k.sign_request("alice", "POST", LOGIN_PATH, now(), b"").unwrap();
+    let first = start();
+    assert_eq!(key_login(first.local_addr(), &h).0, 200);
+    first.stop();
+    // the program is started again (a new server, a new memory): the same captured request is still refused
+    let second = start();
+    assert_eq!(key_login(second.local_addr(), &h).0, 401, "replayed after a restart");
+    assert_eq!(key_login(second.local_addr(), &k.sign_request("alice", "POST", LOGIN_PATH, now(), b"").unwrap()).0, 200);
 }

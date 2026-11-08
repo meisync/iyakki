@@ -1,5 +1,6 @@
 # build output
 target/
+target-test/
 crates/iyakki-gui/target/
 *.rlib
 *.o
@@ -52,3 +53,7 @@ dist/tts-indic/models/
 dist/tts-indic/venv/
 *.onnx
 *.pth
+
+# device screenshots and logs saved in the repository folder by tools
+/iyakki-screen-*.png
+/kmsg-previous-*.log

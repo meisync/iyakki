@@ -372,3 +372,37 @@ fn over_a_real_loopback_socket_the_server_answers_limits_and_publishes() {
     stop.store(true, Ordering::SeqCst);
     th.join().unwrap();
 }
+
+// ---------------------------------------------------------------------------------------- the system announcement
+
+#[test]
+fn the_system_announcement_is_served_signed_with_the_catalog_key_and_absent_means_nothing_announced() {
+    let f = fx("sysann", |_| {});
+    let get = |p: &str| f.srv.handle(&req("GET", p, None, b""), "10.0.0.9");
+    // no system.json: nothing announced
+    assert_eq!(get("/v1/system.json").status, 404);
+    // an administrator puts the file in the data folder
+    let raw = br#"{"version":"0.1.0-alpha.9","variant":"macweb","notes":"New boot menu.","channel":"alpha","extra":"ignored"}"#;
+    std::fs::write(f.dir.join("system.json"), raw).unwrap();
+    let r = get("/v1/system.json");
+    assert_eq!((r.status, r.content_type), (200, "application/json"));
+    let a = super::sysannounce::verify(&r.body, &f.srv.catalog_key()).unwrap();
+    assert_eq!((a.version.as_str(), a.variant.as_str(), a.notes.as_str(), a.channel.as_str()), ("0.1.0-alpha.9", "macweb", "New boot menu.", "alpha"));
+    assert!(!String::from_utf8_lossy(&r.body).contains("ignored"));
+    // only the pinned key is accepted, and a changed byte is refused
+    assert!(super::sysannounce::verify(&r.body, &public_key_hex(&new_signing_key().unwrap())).is_err());
+    assert!(super::sysannounce::verify(&r.body, "").is_err());
+    let tampered = String::from_utf8_lossy(&r.body).replace("0.1.0-alpha.9", "9.9.9");
+    assert!(super::sysannounce::verify(tampered.as_bytes(), &f.srv.catalog_key()).is_err());
+    assert!(super::sysannounce::verify(raw, &f.srv.catalog_key()).is_err(), "the plain file is not an announcement");
+    // a damaged file is an error of the store, not a made-up announcement; no version is refused too
+    std::fs::write(f.dir.join("system.json"), b"{not json").unwrap();
+    assert_eq!(get("/v1/system.json").status, 500);
+    std::fs::write(f.dir.join("system.json"), br#"{"notes":"x"}"#).unwrap();
+    assert_eq!(get("/v1/system.json").status, 500);
+    // nobody writes through it, and the catalog is as it was
+    assert_eq!(f.srv.handle(&req("POST", "/v1/system.json", Some(ADMIN), b"{}"), "10.0.0.9").status, 405);
+    let c = get("/catalog.json");
+    assert!(Catalog::parse(&String::from_utf8_lossy(&c.body), &Roots::default(), &[], NOW, true).is_ok());
+    let _ = std::fs::remove_dir_all(&f.dir);
+}

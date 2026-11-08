@@ -366,3 +366,27 @@ fn the_password_hint_says_in_plain_words_that_it_is_sent_in_clear_and_the_page_i
         assert!(!t.contains("TLS") && !t.contains("hash") && t.len() < 300, "{t}");
     }
 }
+
+#[test]
+fn the_form_says_in_one_line_who_may_map_which_folder_and_the_line_fits_at_four_sizes() {
+    let _g = serial();
+    let cx = admin("shr-hint");
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Shares);
+    for edit in [false, true] {
+        let f = share_form(&iyakki_agent::sharedfolder::Draft::default(), edit);
+        assert_eq!(f.note, "Administrators can map any folder; everyone else only folders in their own home.");
+        a.modal = Some(Modal::Form(FormKind::Share(ShareForm::New), f));
+        for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+            let g = draw(&mut a, &cx, w, h);
+            let line = g.layout_log.texts.iter().filter(|(_, _, _, t)| "Administrators can map any folder; everyone else only folders in their own home.".contains(t.as_str()) && !t.is_empty());
+            let rects: Vec<_> = line.map(|x| x.1).collect();
+            assert!(!rects.is_empty(), "{w}x{h}: the hint is drawn");
+            let joined: usize = g.layout_log.texts.iter().filter(|(_, _, _, t)| "Administrators can map any folder; everyone else only folders in their own home.".contains(t.as_str()) && t.len() > 3).map(|x| x.3.len()).sum();
+            assert!(joined >= 60, "{w}x{h}: the whole sentence is drawn ({joined} chars)");
+            for r in rects {
+                assert!(r.x >= 0.0 && r.x + r.w <= w as f32 && r.y >= 0.0 && r.y + r.h <= h as f32, "{w}x{h}: hint {r:?} leaves the window");
+            }
+        }
+    }
+}

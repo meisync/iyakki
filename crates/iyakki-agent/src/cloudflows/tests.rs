@@ -1007,3 +1007,56 @@ fn one_tenants_state_is_invisible_to_another() {
     r2.create_namespace("olga", "web").unwrap();
     assert!(matches!(check(&r2, &sa.registry.list()[0]), OwnerCheck::Pause(_)), "max is nobody in tenant B");
 }
+
+#[test]
+fn a_run_nobody_started_gets_a_secret_only_through_the_gate_of_its_schedules_team() {
+    use iyakki_flow::host::RunSecretCx;
+    let d = dir("unattended-run");
+    let vault = MemVault::new();
+    vault.put(&SecretRef::parse("vault:team/web/api-token").unwrap(), "s3cr3t").unwrap();
+    let reg = Registry::new(&d);
+    let r = roles();
+    reg.upsert(make_schedule(&r, "max", "f", "web", "dev", RunAs::Owner, T0).unwrap()).unwrap();
+    let run = |flow: &str, trigger: &str| RunSecretCx { run_id: "r1".into(), flow_id: flow.into(), trigger: trigger.into() };
+    // a person started it: not decided here (the person's own vault as always)
+    for t in ["manual", "chat", "test", "contract"] {
+        assert!(unattended_secret(&d, vault.as_ref(), &reg, "max", &run("f", t), "api-token").is_none(), "{t}");
+    }
+    // a timer started it, nothing is marked: refused, in the words the service announces
+    let e = unattended_secret(&d, vault.as_ref(), &reg, "max", &run("f", "interval"), "api-token").unwrap().unwrap_err();
+    assert!(e.starts_with("needs secret") && e.contains("not marked"), "{e}");
+    write_config(&d, json!([{"kind": "flows.unattended", "namespace": "web", "name": "api-token", "enabled": true, "values": {"secret": "vault:team/web/api-token", "terms_ack": true}}]));
+    assert_eq!(unattended_secret(&d, vault.as_ref(), &reg, "max", &run("f", "cron"), "api-token"), Some(Ok("s3cr3t".to_string())));
+    // an unknown trigger kind counts as nobody being there
+    assert!(matches!(unattended_secret(&d, vault.as_ref(), &reg, "max", &run("f", "something-new"), "api-token"), Some(Ok(_))));
+    // a hook or event run of a flow that HAS a schedule uses that schedule's team (and the same marks)
+    assert!(matches!(unattended_secret(&d, vault.as_ref(), &reg, "max", &run("f", "webhook"), "api-token"), Some(Ok(_))));
+    // a run with no schedule has no team, so no secret; neither does someone else's flow
+    for (who, flow, t) in [("max", "g", "event"), ("mia", "f", "interval")] {
+        let e = unattended_secret(&d, vault.as_ref(), &reg, who, &run(flow, t), "api-token").unwrap().unwrap_err();
+        assert!(e.starts_with("needs secret") && e.contains("no schedule"), "{who} {flow} {t}: {e}");
+    }
+    // a secret that is not marked, or a locked vault: blocked
+    assert!(unattended_secret(&d, vault.as_ref(), &reg, "max", &run("f", "cron"), "other").unwrap().is_err());
+    let e = unattended_secret(&d, &LockedVault, &reg, "max", &run("f", "cron"), "api-token").unwrap().unwrap_err();
+    assert!(e.contains("locked"), "{e}");
+}
+
+#[test]
+fn a_notify_step_that_names_people_or_a_role_reaches_them_and_a_bad_or_teamless_to_stays_with_the_owner() {
+    use super::notify::from_node_notice_to;
+    let note = iyakki_flow::host::Notice { title: "disk full".into(), body: "b".into(), level: "warn".into(), flow_id: "nightly".into(), run_id: "r7".into(), needs_you: false };
+    let to = |team: &str, v: serde_json::Value| from_node_notice_to("acme", team, "max", &note, &v).recipients;
+    assert_eq!(to("web", json!(null)), Recipients::People(vec!["max".into()]), "no `to`: the owner, as before");
+    assert_eq!(to("web", json!(["mia", "vic"])), Recipients::People(vec!["mia".into(), "vic".into()]));
+    assert_eq!(to("web", json!("team")), Recipients::Team);
+    assert_eq!(to("web", json!("role:admin")), Recipients::Roles(vec![RoleSel::TeamAdmin]));
+    assert_eq!(to("web", json!("role:tenant_admin")), Recipients::Roles(vec![RoleSel::TenantAdmin]));
+    // a team word with no team, an unreadable `to`: the owner only, never more people than the step named
+    assert_eq!(to("", json!("team")), Recipients::People(vec!["max".into()]));
+    assert_eq!(to("", json!("role:admin")), Recipients::People(vec!["max".into()]));
+    assert_eq!(to("web", json!("role:root")), Recipients::People(vec!["max".into()]));
+    assert_eq!(to("web", json!(7)), Recipients::People(vec!["max".into()]));
+    let n = from_node_notice_to("acme", "web", "max", &note, &json!("role:admin"));
+    assert_eq!((n.severity, n.source.as_str(), n.team.as_deref()), (Severity::High, "flow:nightly:r7", Some("web")));
+}

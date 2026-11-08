@@ -41,7 +41,23 @@ pub struct EngineCfg {
     pub gate: Option<Gate>,
     /// Cloud tenants: the zone `local` means in cron triggers (the tenant's setting) instead of the host's own.
     pub local_tz: Option<String>,
+    /// Cloud tenants: how long finished runs are kept (asked again at every pass, so a changed setting is followed). `None`: only each
+    /// flow's own `keep_runs` applies.
+    pub retention: Option<RetentionSource>,
 }
+
+/// Where the engine asks for the retention rule.
+#[derive(Clone)]
+pub struct RetentionSource(pub Arc<dyn Fn() -> crate::runstore::Retention + Send + Sync>);
+
+impl std::fmt::Debug for RetentionSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RetentionSource")
+    }
+}
+
+/// How often the engine applies the retention rule by itself.
+pub const RETENTION_EVERY_MS: i64 = 3_600_000;
 
 /// The cloud tenant's hooks into the engine. `lead` says whether this process is the one that runs the tenant's schedules (a replica
 /// without the lease still serves manual runs but starts nothing on a timer); `admit(flow, started_in_this_pass)` says whether one more
@@ -60,7 +76,7 @@ impl std::fmt::Debug for Gate {
 
 impl EngineCfg {
     pub fn new(dir: &std::path::Path) -> EngineCfg {
-        EngineCfg { dir: dir.to_path_buf(), max_runs: 8, auto_tick: false, user: "user".into(), gate: None, local_tz: None }
+        EngineCfg { dir: dir.to_path_buf(), max_runs: 8, auto_tick: false, user: "user".into(), gate: None, local_tz: None, retention: None }
     }
 }
 
@@ -112,6 +128,8 @@ pub(crate) struct Inner {
     pub threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     /// The last tick was made as the leader (a gate that says "not me" makes the next "me" reload the scheduler's file).
     pub was_leading: AtomicBool,
+    /// When the retention rule was last applied (ms; 0: never).
+    pub last_retention_ms: AtomicI64,
 }
 
 #[derive(Clone)]
@@ -405,7 +423,7 @@ impl Engine {
         let store = RunStore::new(&cfg.dir);
         let next = store.ids().iter().filter_map(|i| i.strip_prefix('r').and_then(|n| n.parse::<u64>().ok())).max().unwrap_or(0) + 1;
         let auto = cfg.auto_tick;
-        let inner = Arc::new(Inner { cfg, host, reg, clock, source, store, state: Mutex::new(BTreeMap::new()), next_id: AtomicU64::new(next), sched: Mutex::new(sched), halting: AtomicBool::new(false), persist_lock: Mutex::new(()), last_tick_ms: AtomicI64::new(0), threads: Mutex::new(Vec::new()), was_leading: AtomicBool::new(false) });
+        let inner = Arc::new(Inner { cfg, host, reg, clock, source, store, state: Mutex::new(BTreeMap::new()), next_id: AtomicU64::new(next), sched: Mutex::new(sched), halting: AtomicBool::new(false), persist_lock: Mutex::new(()), last_tick_ms: AtomicI64::new(0), threads: Mutex::new(Vec::new()), was_leading: AtomicBool::new(false), last_retention_ms: AtomicI64::new(0) });
         let e = Engine { inner };
         if auto {
             e.start_background();
@@ -593,6 +611,10 @@ impl Engine {
             }
         }
         self.pump();
+        if inner.cfg.retention.is_some() && now - inner.last_retention_ms.load(Ordering::SeqCst) >= RETENTION_EVERY_MS {
+            inner.last_retention_ms.store(now, Ordering::SeqCst);
+            let _ = self.retention_apply(None);
+        }
         inner.last_tick_ms.store(now, Ordering::SeqCst);
     }
 
@@ -762,6 +784,33 @@ impl Engine {
         let mut v = self.inner.summaries();
         v.sort_by_key(|s| std::cmp::Reverse((s.created_ms, s.id.len(), s.id.clone())));
         v
+    }
+
+    /// The retention rule in force: the one given, else the tenant's (`cfg.retention`), else none.
+    fn retention_of(&self, given: Option<crate::runstore::Retention>) -> Option<crate::runstore::Retention> {
+        given.or_else(|| self.inner.cfg.retention.as_ref().map(|r| (r.0)()))
+    }
+
+    /// The dry run: which finished runs the rule would remove, and why. Deletes nothing.
+    pub fn retention_plan(&self, given: Option<crate::runstore::Retention>) -> Vec<crate::runstore::PruneItem> {
+        let Some(r) = self.retention_of(given) else { return Vec::new() };
+        crate::runstore::plan_retention(&self.inner.summaries(), &r, self.inner.now())
+    }
+
+    /// Remove what the rule lists (after a person asked, or once an hour by itself in a tenant). Each removal is audited.
+    pub fn retention_apply(&self, given: Option<crate::runstore::Retention>) -> Vec<crate::runstore::PruneItem> {
+        let plan = self.retention_plan(given);
+        for item in &plan {
+            // the engine's own copy and the folder go together; a run that started meanwhile is not touched
+            let finished = self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).get(&item.id).is_none_or(|s| s.run.status.is_terminal());
+            if !finished {
+                continue;
+            }
+            self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).remove(&item.id);
+            self.inner.store.delete(&item.id);
+            self.inner.host.audit("flow.run.prune", &format!("{} of {}: {}", item.id, item.flow_id, item.reason));
+        }
+        plan
     }
 
     pub fn runs_of(&self, flow_id: &str) -> Vec<RunSummary> {

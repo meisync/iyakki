@@ -18,7 +18,7 @@ use crate::services::Services;
 pub const MAX_CHARS: usize = 6000;
 
 pub fn is_flow_tool(name: &str) -> bool {
-    matches!(name, "flow_list" | "flow_get" | "flow_runs" | "flow_run_status" | "flow_logs" | "flow_explain_failure" | "flow_create" | "flow_edit" | "flow_run" | "flow_cancel" | "flow_publish" | "flow_rollback" | "flow_apply_to_runs" | "flow_set_heal_policy" | "flow_delete" | "flow_drop_version")
+    matches!(name, "flow_list" | "flow_get" | "flow_runs" | "flow_run_status" | "flow_logs" | "flow_explain_failure" | "flow_create" | "flow_edit" | "flow_run" | "flow_cancel" | "flow_publish" | "flow_rollback" | "flow_apply_to_runs" | "flow_set_heal_policy" | "flow_delete" | "flow_drop_version" | "flow_prune_history")
 }
 
 pub fn offered(p: &Policy) -> bool {
@@ -56,6 +56,7 @@ pub fn defs(p: &Policy) -> Vec<ToolDef> {
         tool("flow_apply_to_runs", "Give scheduled and running runs the latest published definition of one node: `scope` scheduled (now), running (at the node's next boundary, never mid-node) or both. Incompatible changes (other ports or output names) are refused unless `allow_incompatible`. The person always approves.", obj(json!({"flow": flow_arg.clone(), "node": {"type": "string"}, "scope": {"type": "string", "enum": ["scheduled", "running", "both"]}, "allow_incompatible": {"type": "boolean"}}), &["node", "scope"]), Risk::Ask, false),
         tool("flow_delete", "Delete a whole flow: its draft and every published version go; its runs stay in the history. Refused while the flow has runs that are running or scheduled. The person always confirms, with the flow named.", obj(json!({"flow": flow_arg.clone()}), &[]), Risk::Ask, false),
         tool("flow_drop_version", "Drop one published version of a flow (its content is lost; runs keep their own copy). The current published version is never dropped: publish or roll back to another first. Refused while an active run uses that version. The person always confirms, with the flow and version named.", obj(json!({"flow": flow_arg.clone(), "version": {"type": "integer"}}), &["version"]), Risk::Ask, false),
+        tool("flow_prune_history", "Remove old FINISHED runs from the history (their logs and results go; the flows stay). `keep` = how many finished runs of each flow stay (default: the tenant's history_keep, else 200), `days` = finished runs older than this go (default: the tenant's history_days, else 30; 0 = no age limit). The newest finished run of each flow, runs still going or waiting for someone, and runs with an open fix card are never removed. `dry_run: true` only lists what would go. The person always confirms, and sees the list first.", obj(json!({"keep": {"type": "integer"}, "days": {"type": "integer"}, "dry_run": {"type": "boolean"}}), &[]), Risk::Ask, false),
         tool("flow_set_heal_policy", "Set who may fix failed steps: `mode` off, suggest (the agent proposes, the person approves), auto_fix_simple (simple fixes are applied by themselves), always_ask. Optional `node` for one node, `max_per_run`, `max_per_day`, `cost_cap_cents`, `auto_publish_simple`. Anything but `off` always asks the person.", obj(json!({"flow": flow_arg, "node": {"type": "string"}, "mode": {"type": "string", "enum": ["off", "suggest", "auto_fix_simple", "always_ask"]}, "max_per_run": {"type": "integer"}, "max_per_day": {"type": "integer"}, "cost_cap_cents": {"type": "integer"}, "auto_publish_simple": {"type": "boolean"}}), &["mode"]), Risk::Ask, false),
     ]
 }
@@ -72,6 +73,7 @@ pub fn describe(name: &str, args: &Value) -> String {
         "flow_rollback" => format!("ROLL BACK {flow} to version {}, published as a new version", args.get("version").and_then(Value::as_i64).unwrap_or(0)),
         "flow_delete" => format!("DELETE {flow} with all its versions (this cannot be undone)"),
         "flow_drop_version" => format!("DROP version {} of {flow} (its content is lost)", args.get("version").and_then(Value::as_i64).unwrap_or(0)),
+        "flow_prune_history" => format!("{} finished runs from the history{}", if args.get("dry_run").and_then(Value::as_bool).unwrap_or(false) { "list" } else { "REMOVE" }, match (args.get("keep").and_then(Value::as_u64), args.get("days").and_then(Value::as_u64)) { (None, None) => " (by the tenant's history rule)".to_string(), (k, d) => format!(" (keep {} per flow, older than {} days)", k.map_or("the rule's".to_string(), |k| k.to_string()), d.map_or("the rule's".to_string(), |d| d.to_string())) }),
         "flow_apply_to_runs" => format!("give {} runs of {flow} the newest definition of step {}", s("scope"), s("node")),
         "flow_set_heal_policy" => format!("let the agent {} for {}{}", match s("mode").as_str() { "off" => "not fix anything".to_string(), "suggest" => "propose fixes you approve".to_string(), "auto_fix_simple" => "apply simple fixes by itself".to_string(), "always_ask" => "ask you before every fix".to_string(), o => o.to_string() }, flow, if s("node").is_empty() { String::new() } else { format!(", step {}", s("node")) }),
         other => format!("{other} {}", s("flow")),
@@ -291,6 +293,15 @@ impl FlowEnv {
                 let name = self.delete_flow(&id)?;
                 Ok(format!("Deleted flow `{id}` (\"{name}\") with all its versions. Its runs stay in the history."))
             }
+            "flow_prune_history" => {
+                let rule = self.prune_rule(args);
+                if args.get("dry_run").and_then(Value::as_bool).unwrap_or(false) {
+                    return Ok(prune_text(&self.engine.retention_plan(Some(rule)), true));
+                }
+                let gone = self.engine.retention_apply(Some(rule));
+                self.host_audit("flow.history.prune", &format!("{} run(s) removed by {} (keep {}, days {})", gone.len(), self.who(), rule.keep, rule.days));
+                Ok(prune_text(&gone, false))
+            }
             "flow_drop_version" => {
                 let id = self.flow_id(args, open)?;
                 let v = args.get("version").and_then(Value::as_u64).ok_or("give `version`")? as u32;
@@ -365,6 +376,7 @@ impl FlowEnv {
                 let f = self.store.get_draft(&id)?;
                 Some(format!("Flow `{id}` \"{}\": {} published version(s) and the draft are lost for good. Runs stay in the history.{}", f.name, self.store.versions(&id).len(), self.active_runs_text(&id, None)))
             }
+            "flow_prune_history" => Some(prune_text(&self.engine.retention_plan(Some(self.prune_rule(args))), true)),
             "flow_drop_version" => {
                 let id = self.flow_id(args, open).ok()?;
                 let v = args.get("version")?.as_u64()? as u32;
@@ -380,6 +392,15 @@ impl FlowEnv {
                 Some(store::diff(&cur, &old).text())
             }
             _ => None,
+        }
+    }
+
+    /// The history rule for a prune: what the person gave, else the tenant's `flows.quota`, else the defaults.
+    fn prune_rule(&self, args: &Value) -> iyakki_flow::runstore::Retention {
+        let q = super::super::cloudflows::quota::Quota::load(self.svc.dir(), None);
+        iyakki_flow::runstore::Retention {
+            keep: args.get("keep").and_then(Value::as_u64).map_or(q.history_keep, |k| k.clamp(1, 10_000) as usize),
+            days: args.get("days").and_then(Value::as_u64).map_or(q.history_days, |d| d.min(3650)),
         }
     }
 
@@ -426,6 +447,21 @@ impl FlowEnv {
     fn engine_now(&self) -> i64 {
         crate::clock::now_unix() * 1000
     }
+}
+
+/// The list of runs a prune removes (or would remove), at most 40 shown with the reason, the rest counted.
+fn prune_text(items: &[iyakki_flow::runstore::PruneItem], dry: bool) -> String {
+    if items.is_empty() {
+        return "No finished run is old enough or beyond the limit: nothing to remove.".into();
+    }
+    let mut out = format!("{} {} run(s){}:\n", if dry { "Would remove" } else { "Removed" }, items.len(), if dry { " (nothing is removed yet)" } else { "" });
+    for i in items.iter().take(40) {
+        out.push_str(&format!("- {} of {}: {}\n", i.id, i.flow_id, i.reason));
+    }
+    if items.len() > 40 {
+        out.push_str(&format!("... and {} more\n", items.len() - 40));
+    }
+    out
 }
 
 pub fn standalone_call(name: &str, args: &Value, svc: &Arc<Services>, p: &Policy, user: &str) -> Result<String, String> {
@@ -500,7 +536,7 @@ impl Tools for FlowTools {
     }
     fn approved_always(&self, name: &str) -> bool {
         // publishing and the other hard-ask calls are decided each time
-        if is_flow_tool(name) { !matches!(name, "flow_publish" | "flow_rollback" | "flow_apply_to_runs" | "flow_set_heal_policy" | "flow_delete" | "flow_drop_version") } else { self.inner.approved_always(name) }
+        if is_flow_tool(name) { !matches!(name, "flow_publish" | "flow_rollback" | "flow_apply_to_runs" | "flow_set_heal_policy" | "flow_delete" | "flow_drop_version" | "flow_prune_history") } else { self.inner.approved_always(name) }
     }
     fn grant_blocker(&self, name: &str, args: &Value) -> Option<String> {
         self.inner.grant_blocker(name, args)

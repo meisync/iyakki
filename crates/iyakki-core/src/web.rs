@@ -57,7 +57,7 @@ pub fn start(spec: &WebSpec, env: iyakki_shell::shell::ShellEnv, data_dir: &Path
         }
         None
     };
-    let server = iyakki_remote::server::Server::start(iyakki_remote::server::Config { addr: spec.addr.clone(), tls }, Arc::new(iyakki_remote::screen::ShellGate::new(env)))
+    let server = iyakki_remote::server::Server::start(iyakki_remote::server::Config { addr: spec.addr.clone(), tls }, Arc::new(iyakki_remote::screen::ShellGate::with_key_store(env, data_dir)))
         .map_err(|e| format!("cannot listen on {}: {e}", spec.addr))?;
     // the sign-in relay page is served here while this front end runs (iyakki_agent::extagent::relay)
     iyakki_agent::extagent::relay::note_web_front_end(server.local_addr().port(), spec.tls);

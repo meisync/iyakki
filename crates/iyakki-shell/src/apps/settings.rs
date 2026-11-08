@@ -72,6 +72,8 @@ pub enum Tab {
     Battery,
     /// Settings -> Power: power profile and sleep after idle (F-PWR-01).
     Power,
+    /// Settings -> This computer: which settings are kept per computer (`hwprofile`), the computers this install has seen.
+    Computer,
     HostName,
     /// The kernel log kept across crashes (docs/TROUBLESHOOTING.md).
     SessionLog,
@@ -107,20 +109,20 @@ impl Tab {
             Tab::Network | Tab::SshTunnels | Tab::Vpn | Tab::Remote | Tab::Firewall | Tab::Shares => CATEGORIES[3],
             Tab::Display | Tab::Displays | Tab::ScreenSaver | Tab::HomeLayout | Tab::Sound | Tab::SystemSounds => CATEGORIES[4],
             Tab::Bluetooth | Tab::Keyboard => CATEGORIES[5],
-            Tab::Time | Tab::Battery | Tab::Power | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Memory | Tab::Storage | Tab::Install | Tab::Updates | Tab::Cloud | Tab::CloudRoles => CATEGORIES[6],
+            Tab::Time | Tab::Battery | Tab::Power | Tab::Computer | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Memory | Tab::Storage | Tab::Install | Tab::Updates | Tab::Cloud | Tab::CloudRoles => CATEGORIES[6],
             Tab::Developer | Tab::DevCluster | Tab::GitKeys => CATEGORIES[7],
         }
     }
 
     /// Where the page sits in the left list: category first, then this order.
-    pub(crate) const ORDER: [Tab; 42] = [
+    pub(crate) const ORDER: [Tab; 43] = [
         Tab::Overview,
         Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::SecretProviders,
         Tab::Models, Tab::Agents, Tab::Skills, Tab::Rag, Tab::Voice, Tab::Browser, Tab::HostAccess,
         Tab::Network, Tab::SshTunnels, Tab::Vpn, Tab::Remote, Tab::Firewall, Tab::Shares,
         Tab::Display, Tab::Displays, Tab::ScreenSaver, Tab::HomeLayout, Tab::Sound, Tab::SystemSounds,
         Tab::Bluetooth, Tab::Keyboard,
-        Tab::Time, Tab::Battery, Tab::Power, Tab::HostName, Tab::SessionLog, Tab::Startup, Tab::Memory, Tab::Storage, Tab::Install, Tab::Updates, Tab::Cloud, Tab::CloudRoles,
+        Tab::Time, Tab::Battery, Tab::Power, Tab::Computer, Tab::HostName, Tab::SessionLog, Tab::Startup, Tab::Memory, Tab::Storage, Tab::Install, Tab::Updates, Tab::Cloud, Tab::CloudRoles,
         Tab::Developer, Tab::DevCluster, Tab::GitKeys,
     ];
 
@@ -131,6 +133,7 @@ impl Tab {
             Tab::Sound | Tab::SystemSounds => Some("sound"),
             Tab::Display | Tab::Displays | Tab::ScreenSaver => Some("display"),
             Tab::Keyboard => Some("keyboard"),
+            Tab::Computer => Some("display"),
             Tab::Bluetooth => Some("bluetooth"),
             Tab::Overview | Tab::Models | Tab::Agents | Tab::Rag | Tab::Vault | Tab::Skills | Tab::Network | Tab::Browser | Tab::DevCluster | Tab::Storage | Tab::Memory | Tab::Firewall | Tab::SshTunnels | Tab::Vpn | Tab::Remote | Tab::Time | Tab::Battery | Tab::Power | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Install | Tab::Updates | Tab::Voice | Tab::SecretProviders | Tab::HostAccess | Tab::Developer | Tab::GitKeys | Tab::Shares | Tab::Account | Tab::HomeLayout | Tab::Cloud | Tab::CloudRoles | Tab::Notifications | Tab::Backup => None,
         }
@@ -164,6 +167,7 @@ impl Tab {
             Tab::Vpn => "vpn wireguard openvpn tunnel private network profile import conf ovpn kill switch full hybrid filter domain url split tunnel fail closed provider server endpoint",
             Tab::Remote => "remote access web service serve browser https port fingerprint certificate address tablet phone another computer pixel stream share desktop sign in vnc rdp",
             Tab::Time => "clock time date timezone time zone utc 12 24 hour am pm seconds ntp sntp network time server sync 1970 battery wrong",
+            Tab::Computer => "this computer computers hardware profile several multiple switch disk usb stick ssd move another mac laptop legion hp sound output display keyboard microphone gpu per computer shared copy reset forget",
             Tab::Power => "power profile performance balanced power saver battery life cpu governor frequency turbo fan sleep suspend idle lid power button energy",
             Tab::Battery => "battery charge charging percent percentage power adapter plug laptop low shutdown critical health cycles time left remaining",
             Tab::HostName => "host name hostname computer name rename network name dns mdns",
@@ -212,6 +216,7 @@ impl Tab {
             Tab::Remote => "Open this desktop in a browser on another computer on your network. Off by default; encrypted; signs in with this machine's accounts.",
             Tab::Vpn => "Import a WireGuard or OpenVPN profile you already have, and choose whether all traffic or only what your filters match goes through it.",
             Tab::Time => "The clock in the top bar: time zone, 12 or 24 hours, and setting the time from the network.",
+            Tab::Computer => "Which computer this is, and which settings are kept for each computer the install starts on.",
             Tab::Power => "How fast the processor runs (performance, balanced, power saver) and whether the computer sleeps by itself when it is not used.",
             Tab::Battery => "How full the battery is, what it is doing, how worn it is, and the low-battery warnings.",
             Tab::HostName => "The name of this computer on the network.",
@@ -261,6 +266,7 @@ impl Tab {
             Tab::Time => "Time",
             Tab::Battery => "Battery",
             Tab::Power => "Power",
+            Tab::Computer => "This computer",
             Tab::HostName => "Host name",
             Tab::SessionLog => "Last session log",
             Tab::Startup => "Startup",
@@ -308,6 +314,8 @@ mod share_page;
 mod pagescroll_page;
 #[path = "settings_browserheaders.rs"]
 mod bh_page;
+#[path = "settings_modelopts.rs"]
+mod mo_page;
 #[path = "settings_overview.rs"]
 mod overview_page;
 #[path = "settings_vaultstate.rs"]
@@ -329,6 +337,8 @@ mod kbd_page;
 mod battery_page;
 #[path = "settings_power.rs"]
 mod power_page;
+#[path = "settings_computer.rs"]
+mod computer_page;
 #[path = "settings_screensaver.rs"]
 mod screensaver_page;
 #[path = "settings_browserdev.rs"]
@@ -414,6 +424,8 @@ enum FormKind {
     Matrix,
     /// Settings → Shared folders.
     Share(shares_page::ShareForm),
+    /// The hotspot's Wi-Fi name and password (Share internet page, key n).
+    HotspotWifi,
     /// Settings → Backup and restore.
     Backup(backup_page::BackupForm),
     /// Settings -> Remote access: the port.
@@ -444,6 +456,8 @@ enum FormKind {
     Vpn(vpn_page::VpnForm),
     /// Settings -> Browser -> Custom headers: add or edit a rule.
     BrowserHeader(bh_page::BhForm),
+    /// Settings -> Models: one request option of a model.
+    ModelOpt(mo_page::MoForm),
     /// Settings → Time: the time server; Settings → Host name: the new name.
     TimeServer,
     HostName,
@@ -464,10 +478,14 @@ enum PickKind {
     Embed(String),
     /// The model that looks at pictures (Models, key v): (automatic) or one a provider lists as able to see pictures.
     Vision,
+    /// The model that tidies dictated text and revises text (Models, key y): (the chat model) or one a provider lists.
+    Tidy,
     /// A network from the WiFi scan (or one of the choices below the list).
     Wifi,
     /// A saved WiFi network to forget.
     WifiForget,
+    /// Settings -> Models: the request options of a provider's model, one row each.
+    Options(String),
     /// The vault entry holding an external agent's API key.
     AgentKey(String),
     /// The model of an external agent (a line of its list, or "Custom model id…").
@@ -482,6 +500,8 @@ enum PickKind {
     HomeMove(String),
     /// Settings → Firewall (simple view): the service to allow.
     FwService,
+    /// Settings -> This computer: the other computer to copy settings from, or to forget.
+    Computer(computer_page::CompPick),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -527,6 +547,8 @@ enum ConfirmKind {
     BrowserProtect,
     BrowserUnprotect,
     BrowserReset,
+    /// Settings -> This computer: copy another computer's settings here, reset this computer's, forget another computer.
+    Computer(computer_page::CompAct),
 }
 
 enum Modal {
@@ -544,6 +566,8 @@ enum JobOut {
     /// Settings -> Sound -> Advanced: the two tones of the hardware volume check were played (card id, result).
     HwCheck(String, Result<String, String>),
     Backup(backup_page::BackupOut),
+    /// Settings -> Models: a provider's own list of model ids.
+    ModelList(mo_page::MoList),
 }
 
 struct Job {
@@ -777,6 +801,7 @@ impl SettingsApp {
         tabs.push(Tab::Notifications);
         tabs.push(Tab::ScreenSaver);
         tabs.push(Tab::Power);
+        tabs.push(Tab::Computer);
         tabs.push(Tab::Time);
         tabs.push(Tab::Browser);
         tabs.push(Tab::HostAccess);
@@ -1041,6 +1066,7 @@ impl SettingsApp {
             }
             JobOut::HwCheck(card_id, r) => self.hw_check_done(card_id, r),
             JobOut::Backup(out) => self.backup_job_done(out),
+            JobOut::ModelList(out) => self.mo_list_done(cx, out),
             JobOut::Dc(out) => self.dc_job_done(cx, out),
             JobOut::Mh(out) => self.mh_job_done(cx, out),
             JobOut::Wifi(Err(e)) => self.fail(e),
@@ -1468,9 +1494,11 @@ impl SettingsApp {
             FormKind::Git(k) => self.git_submit(cx, &k, form),
             FormKind::Matrix => self.matrix_submit(cx, form),
             FormKind::Share(k) => self.shares_submit(cx, &k, form),
+            FormKind::HotspotWifi => self.hotspot_wifi_submit(cx, form),
             FormKind::Backup(k) => self.backup_submit(cx, &k, form),
             FormKind::Remote(k) => self.remote_submit(cx, &k, form),
             FormKind::ModelHost => self.mh_submit(form),
+            FormKind::ModelOpt(f) => self.mo_submit(cx, &f, form),
             FormKind::Mem(f) => self.mem_submit(*f, form),
             FormKind::Fw(k) => self.fw_submit(cx, &k, form),
             FormKind::SshTun(k) => self.tun_submit(cx, &k, form),
@@ -1560,6 +1588,12 @@ impl SettingsApp {
         if kind == PickKind::FwService {
             return self.fw_service_pick(cx, item);
         }
+        if let PickKind::Computer(k) = kind {
+            return self.computer_pick(cx, k, item);
+        }
+        if let PickKind::Options(p) = &kind {
+            return self.mo_pick(cx, p, item);
+        }
         if kind == PickKind::SoundOutput {
             return self.sound_pick(cx, item);
         }
@@ -1642,9 +1676,25 @@ impl SettingsApp {
             }
             return;
         }
+        if let PickKind::Tidy = &kind {
+            let choice = if item.starts_with("(the chat model") { None } else { item.split_once("  (").and_then(|x| x.0.split_once('/')).map(|(p, m)| ModelChoice { provider: p.into(), model: m.into() }) };
+            let r = Self::svc(cx).settings.lock().unwrap().update(|s| s.tidy = choice.clone());
+            match r {
+                Ok(()) => {
+                    cx.audit.record(&cx.session.user, "settings.tidy_model", &choice.as_ref().map_or("chat model".to_string(), |c| format!("{}/{}", c.provider, c.model)));
+                    self.ok(match &choice {
+                        Some(c) => format!("Tidy model: {} · {}. Dictated wording and the Assistant pane go there (text on another machine still asks first).", c.provider, c.model),
+                        None => "Tidy model: the chat model.".to_string(),
+                    });
+                }
+                Err(e) => self.fail(e.to_string()),
+            }
+            return;
+        }
         let (r, what, provider) = match &kind {
             PickKind::Zone => return,
             PickKind::Vision => return,
+            PickKind::Tidy => return,
             PickKind::Chat(p) => (
                 Self::svc(cx).settings.lock().unwrap().update(|s| {
                     s.chat = Some(ModelChoice { provider: p.clone(), model: item.into() });
@@ -1655,7 +1705,7 @@ impl SettingsApp {
                 "chat",
                 p,
             ),
-            PickKind::Wifi | PickKind::WifiForget | PickKind::AgentKey(_) | PickKind::AgentModel(_) | PickKind::MacMode(_) | PickKind::Lemonade(_) | PickKind::SoundOutput | PickKind::HomeMove(_) | PickKind::FwService => return,
+            PickKind::Wifi | PickKind::WifiForget | PickKind::Options(_) | PickKind::AgentKey(_) | PickKind::AgentModel(_) | PickKind::MacMode(_) | PickKind::Lemonade(_) | PickKind::SoundOutput | PickKind::HomeMove(_) | PickKind::FwService | PickKind::Computer(_) => return,
             PickKind::Embed(p) => {
                 let choice = if item.starts_with("(built-in") { None } else { Some(ModelChoice { provider: p.clone(), model: item.into() }) };
                 (Self::svc(cx).settings.lock().unwrap().set_embedding(choice), "embedding", p)
@@ -1695,6 +1745,9 @@ impl SettingsApp {
         }
         if let ConfirmKind::Fw(act) = kind {
             return self.fw_confirm(cx, act);
+        }
+        if let ConfirmKind::Computer(act) = kind {
+            return self.computer_confirm(cx, act);
         }
         if let ConfirmKind::VpnDelete(id) = kind {
             return self.vpn_delete(cx, &id);
@@ -1837,6 +1890,23 @@ impl SettingsApp {
             Key::Char('a') if self.admin(cx) => match toggle(cx, &|v| v.auto_send = !v.auto_send) {
                 Ok(()) => self.ok("Auto-send toggled."),
                 Err(e) => self.fail(e.to_string()),
+            },
+            Key::Char('u') if self.admin(cx) => match toggle(cx, &|v| v.auto_stop = !v.auto_stop) {
+                Ok(()) => self.ok(if Self::svc(cx).voice_settings().auto_stop { "Dictation now ends by itself after a pause." } else { "Dictation now ends only when you stop it." }),
+                Err(e) => self.fail(e.to_string()),
+            },
+            Key::Char('U') if self.admin(cx) => self.vo_cycle_pause(cx),
+            Key::Char('K') if self.admin(cx) => match toggle(cx, &|v| v.keep_listening = !v.keep_listening) {
+                Ok(()) => self.ok(if Self::svc(cx).voice_settings().keep_listening { "Keep listening is on: after each pause the text is written and it listens again until Stop." } else { "Keep listening is off." }),
+                Err(e) => self.fail(e.to_string()),
+            },
+            Key::Char('W') if self.admin(cx) => match iyakki_agent::dictfix::set_enabled(&svc, !svc.voice_settings().fix_wording) {
+                Ok(()) => {
+                    let on = svc.voice_settings().fix_wording;
+                    cx.audit.record(&cx.session.user, iyakki_agent::dictfix::AUDIT, if on { "on" } else { "off" });
+                    self.ok(if on { "Correct my wording is on: dictated text is tidied by the chat assistant before it lands in the box." } else { "Correct my wording is off." });
+                }
+                Err(e) => self.fail(e),
             },
             Key::Char('r') if self.admin(cx) => match toggle(cx, &|v| v.speak_replies = !v.speak_replies) {
                 Ok(()) => self.ok("Read replies aloud toggled."),
@@ -2026,6 +2096,20 @@ impl SettingsApp {
             Ok(()) => {
                 cx.audit.record(&cx.session.user, "settings.voice.highlight", next.label());
                 self.ok(format!("While reading aloud: highlight {}.", next.label().to_lowercase()));
+            }
+            Err(e) => self.fail(e.to_string()),
+        }
+    }
+
+    /// The pause that ends a dictation: 1, 1.5, 2, 3 seconds, round again.
+    fn vo_cycle_pause(&mut self, cx: &AppCx) {
+        const PAUSES: [u32; 4] = [1000, 1500, 2000, 3000];
+        let cur = Self::svc(cx).voice_settings().pause_ms;
+        let next = PAUSES.iter().copied().find(|p| *p > cur).unwrap_or(PAUSES[0]);
+        match Self::svc(cx).settings.lock().unwrap().update(|st| st.voice.pause_ms = next) {
+            Ok(()) => {
+                cx.audit.record(&cx.session.user, "settings.voice.pause", &next.to_string());
+                self.ok(format!("A pause of {:.1} s ends a dictation.", next as f32 / 1000.0));
             }
             Err(e) => self.fail(e.to_string()),
         }
@@ -2226,7 +2310,7 @@ impl SettingsApp {
                 (true, Some(SpeechEngine::Http { url, model, .. })) => format!("aligned with {model} on {} ({})", iyakki_sec::url_host(&url).unwrap_or_default(), iyakki_agent::speechtime::locality(&url).label()),
                 (true, _) => "estimated (no speech-to-text server on this computer or allowed)".to_string(),
             };
-            let lines: [(&str, String, [u8; 4]); 8] = [
+            let lines: [(&str, String, [u8; 4]); 10] = [
                 ("Speech-to-text", v.stt.as_ref().map_or("not set up".into(), |e| e.label()), if v.stt.is_some() { OK } else { MUTED }),
                 ("Text-to-speech", match &v.tts {
                     Some(e) => e.label(),
@@ -2235,6 +2319,8 @@ impl SettingsApp {
                 ("Record command", v.record_cmd.clone(), TEXT),
                 ("Play command", v.play_cmd.clone(), TEXT),
                 ("Auto-send speech", if v.auto_send { "on — transcribed text is sent immediately".into() } else { "off — text lands in the input box so you can edit it".into() }, TEXT),
+                ("Dictation ends on a pause", if v.auto_stop { format!("on — after {:.1} s of quiet following your speech (u switches off, U changes the length)", v.pause_ms as f32 / 1000.0) } else { "off — you stop it yourself (u switches on)".into() }, TEXT),
+                ("Correct my wording", if v.fix_wording { "on — the chat assistant tidies dictated text before it lands in the box (W switches off)".into() } else { "off — dictated text is exactly what was heard (W switches on)".into() }, TEXT),
                 ("Read replies aloud", if v.speak_replies { "on".into() } else { "off".into() }, TEXT),
                 ("Highlight while reading", v.highlight.label().to_lowercase(), TEXT),
                 ("Word timing", timing, TEXT),
@@ -2292,7 +2378,7 @@ impl SettingsApp {
             Tab::Displays => self.disp_len(),
             Tab::ScreenSaver => Self::ss_len(cx),
             Tab::Browser if self.bh.open => self.bh_len(cx),
-            Tab::Voice | Tab::Remote | Tab::Account | Tab::Browser | Tab::Memory | Tab::Time | Tab::Battery | Tab::Power | Tab::HostName | Tab::SessionLog | Tab::Cloud => 0,
+            Tab::Voice | Tab::Remote | Tab::Account | Tab::Browser | Tab::Memory | Tab::Time | Tab::Battery | Tab::Power | Tab::Computer | Tab::HostName | Tab::SessionLog | Tab::Cloud => 0,
             Tab::Startup => iyakki_agent::startup::CATALOGUE.len(),
             Tab::CloudRoles => self.roles_len(cx),
         }
@@ -3078,6 +3164,21 @@ impl SettingsApp {
         self.modal = Some(Modal::Form(kind, form));
     }
 
+    /// The chat models the providers list, as `provider/model  (provider)`, for the tidy model picker (small and fast ones first is the person's call).
+    fn tidy_candidates(cx: &AppCx) -> Vec<String> {
+        let provs = cx.services.settings.lock().unwrap().get().providers.clone();
+        let mut out: Vec<String> = Vec::new();
+        for p in provs.iter().filter(|p| p.enabled) {
+            let mut models: Vec<String> = p.models.clone();
+            models.extend(p.default_model.clone());
+            models.extend(iyakki_agent::modelopts::cached_models(&p.id).unwrap_or_default());
+            models.sort();
+            models.dedup();
+            out.extend(models.into_iter().map(|m| format!("{}/{}  ({})", p.id, m, p.kind.label())));
+        }
+        out
+    }
+
     fn handle_models(&mut self, k: &Key, cx: &AppCx) {
         let provs = Self::providers(cx);
         let cur = provs.get(self.sel()).cloned();
@@ -3100,6 +3201,14 @@ impl SettingsApp {
                     return self.fail("No provider lists a vision model yet. Install one (for example a Qwen vision model in Lemonade), then press t on the provider to refresh its list.");
                 }
                 self.modal = Some(Modal::Pick(PickKind::Vision, Picker::new("Vision model", items)));
+            }
+            Key::Char('y') if self.admin(cx) => {
+                let mut items = vec!["(the chat model: nothing separate for tidying)".to_string()];
+                items.extend(Self::tidy_candidates(cx));
+                if items.len() == 1 {
+                    return self.fail("No provider lists a chat model yet. Add a provider and press t on it to refresh its list.");
+                }
+                self.modal = Some(Modal::Pick(PickKind::Tidy, Picker::new("Tidy model", items)));
             }
             Key::Char('p') if self.admin(cx) => {
                 let cur_price = Self::svc(cx).settings.lock().unwrap().get().token_price_cents_per_mtok;
@@ -3131,7 +3240,22 @@ impl SettingsApp {
                 }
             }
             Key::Char('f') if self.admin(cx) => self.detect_servers(cx),
+            Key::Char(c @ ('L' | 'E')) if self.admin(cx) && cur.as_ref().is_some_and(|p| p.kind != Kind::Lemonade) => {
+                let p = cur.expect("checked");
+                self.mo_list(cx, &p, *c == 'E');
+            }
+            Key::Char('o') if cur.as_ref().is_some_and(|p| p.kind != Kind::Lemonade) => {
+                let p = cur.expect("checked");
+                self.mo_options(cx, &p);
+            }
             Key::Char('H') if self.admin(cx) => self.mh_open(cx, true),
+            Key::Char('G') if self.admin(cx) && cur.as_ref().is_some_and(|p| p.kind == Kind::Lemonade) => {
+                use iyakki_agent::lemonadecomputetools::{Backend, RealBackend};
+                let be = RealBackend { svc: Self::svc(cx).clone(), user: cx.session.user.clone() };
+                let next = if be.current() == iyakki_agent::gpu_steps::Compute::Gpu { iyakki_agent::gpu_steps::Compute::Cpu } else { iyakki_agent::gpu_steps::Compute::Gpu };
+                cx.audit.record(&cx.session.user, "settings.lemonade.compute", next.word());
+                self.start(if next == iyakki_agent::gpu_steps::Compute::Gpu { "moving Lemonade to the GPU" } else { "moving Lemonade to the CPU" }, move || JobOut::Msg(be.set(next)));
+            }
             Key::Char('l') if cur.as_ref().is_some_and(|p| p.kind == Kind::Lemonade) => {
                 let id = cur.as_ref().expect("checked").id.clone();
                 self.lem_open(cx, &id);
@@ -3388,7 +3512,7 @@ impl App for SettingsApp {
         }
         match self.tab() {
             Tab::Overview => "Up/Down choose · Enter open the page that fixes it · / find a setting",
-            Tab::Models => "a add · N add NVIDIA NIM (free key) · f detect Ollama/Lemonade · H Mac or GPU host · e edit · d delete · t test · m chat model · v vision model · b embeddings · k key · x on/off · c test chat · l Lemonade models",
+            Tab::Models => "a add · N add NVIDIA NIM (free key) · f detect Ollama/Lemonade · H Mac or GPU host · e edit · d delete · t test · m chat model · v vision model · y tidy model (dictation wording) · b embeddings · k key · x on/off · c test chat · l Lemonade models",
             Tab::Agents => "d detect · i install · l login · o logout · k API key · m model · a Auto · u use for new chats · t test · n add custom · e edit · x hide/show",
             Tab::Rag => "a add backend · t test · r reindex · i ingest documents · / find a page",
             Tab::Backup => "b back up · o open a backup file · Space include/leave out or choose/skip · r restore the chosen things · c close the file · k look again · Up/Down choose",
@@ -3403,6 +3527,7 @@ impl App for SettingsApp {
             Tab::SystemSounds => "Up/Down choose · Enter or Space switch on or off · p preview · + louder · − quieter",
             Tab::Cloud => "c change the mode: Automatic, On, Off",
             Tab::CloudRoles => "Up/Down choose · m add person · n new namespace · a add to namespace · j join · x remove person · d delete namespace",
+            Tab::Computer => "s sound · d display · k keyboard and pointer · m microphone · g GPU · p power: per computer or shared · c copy settings from another computer · r reset this computer · f forget a computer (administrators)",
             Tab::Power => "e performance · b balanced · v power saver · s sleep after idle (next time) · w sleep while busy (administrators)",
             Tab::Battery => "p percentage in the top bar · w low battery warnings · s shut down at the critical level (administrators)",
             Tab::Browser if self.bh.open => "a add · e edit · x or Enter enable/disable · d delete · b or Esc back · Up/Down choose",
@@ -3472,6 +3597,7 @@ impl App for SettingsApp {
                 "time" => Some(Tab::Time),
                 "battery" => Some(Tab::Battery),
                 "power" => Some(Tab::Power),
+                "computer" | "thiscomputer" | "computers" => Some(Tab::Computer),
                 "hostname" => Some(Tab::HostName),
                 "crashlog" | "sessionlog" => Some(Tab::SessionLog),
                 "startup" => Some(Tab::Startup),
@@ -3750,6 +3876,7 @@ impl App for SettingsApp {
                 Tab::CloudRoles => self.handle_cloudroles(other, cx),
                 Tab::Battery => self.handle_battery(other, cx),
                 Tab::Power => self.handle_power(other, cx),
+                Tab::Computer => self.handle_computer(other, cx),
                 Tab::HostName => self.handle_host_name(other, cx),
                 Tab::SessionLog => self.handle_crash(other, cx),
                 Tab::Startup => self.handle_startup(other, cx),
@@ -3856,6 +3983,7 @@ impl App for SettingsApp {
             Tab::CloudRoles => self.render_cloudroles(g, body, s, cx),
             Tab::Battery => self.render_battery(g, body, s, cx),
             Tab::Power => self.render_power(g, body, s, cx),
+            Tab::Computer => self.render_computer(g, body, s, cx),
             Tab::HostName => self.render_host_name(g, body, s, cx),
             Tab::SessionLog => self.render_crash(g, body, s, cx),
             Tab::Startup => self.render_startup(g, body, s, cx),
@@ -3950,7 +4078,7 @@ impl SettingsApp {
         }
         match (self.tab(), admin) {
             (Tab::Overview, _) => vec![],
-            (Tab::Models, true) => vec![("Add", acc, 'a'), ("NVIDIA NIM", acc, 'N'), ("Detect", acc, 'f'), ("Mac / GPU host", acc, 'H'), ("Edit", mut_, 'e'), ("Delete", err, 'd'), ("Test", mut_, 't'), ("Chat model", mut_, 'm'), ("Vision model", mut_, 'v'), ("Embeddings", mut_, 'b'), ("Set key", mut_, 'k'), ("On/Off", mut_, 'x'), ("Agent price", mut_, 'p'), ("Tool routing", mut_, 'T'), ("Test chat", mut_, 'c')],
+            (Tab::Models, true) => vec![("Add", acc, 'a'), ("NVIDIA NIM", acc, 'N'), ("Detect", acc, 'f'), ("Mac / GPU host", acc, 'H'), ("Edit", mut_, 'e'), ("Delete", err, 'd'), ("Test", mut_, 't'), ("Lemonade GPU/CPU", mut_, 'G'), ("Chat model", mut_, 'm'), ("Vision model", mut_, 'v'), ("Embeddings", mut_, 'b'), ("Set key", mut_, 'k'), ("On/Off", mut_, 'x'), ("Agent price", mut_, 'p'), ("Tool routing", mut_, 'T'), ("Test chat", mut_, 'c')],
             (Tab::Models, false) => vec![("Test", mut_, 't'), ("Test chat", mut_, 'c')],
             (Tab::Agents, _) => vec![("Detect", acc, 'd'), ("Install", mut_, 'i'), ("Login", OK, 'l'), ("Logout", mut_, 'o'), ("API key", mut_, 'k'), ("Model", mut_, 'm'), ("Auto", mut_, 'a'), ("Use for new chats", mut_, 'u'), ("Test", mut_, 't'), ("Hide/show", mut_, 'x'), ("Add custom", mut_, 'n'), ("Edit", mut_, 'e'), ("Remove", err, 'R')],
             (Tab::Rag, true) => vec![("Add backend", acc, 'a'), ("Edit", mut_, 'e'), ("Delete", err, 'd'), ("Test", mut_, 't'), ("On/Off", mut_, 'x'), ("Reindex", mut_, 'r'), ("Ingest docs", mut_, 'i')],
@@ -3958,7 +4086,7 @@ impl SettingsApp {
             (Tab::Vault, true) if self.section == 0 => vec![("New secret", acc, 'n'), ("Delete", err, 'd'), ("Lock now", mut_, 'l'), ("Key file", mut_, 'f')],
             (Tab::Vault, _) => vec![("New secret", acc, 'n'), ("Delete", err, 'd'), ("Reset vault", mut_, 'R')],
             (Tab::Voice, true) => vec![
-                ("Speech-to-text", acc, 's'), ("Text-to-speech", acc, 'v'), ("Commands", mut_, 'c'), ("Auto-send", mut_, 'a'), ("Speak replies", mut_, 'r'), ("Clear STT", err, 'S'), ("Clear TTS", err, 'V'),
+                ("Speech-to-text", acc, 's'), ("Text-to-speech", acc, 'v'), ("Commands", mut_, 'c'), ("Auto-send", mut_, 'a'), ("Speak replies", mut_, 'r'), ("Dictation pause", mut_, 'u'), ("Pause length", mut_, 'U'), ("Keep listening", mut_, 'K'), ("Correct wording", mut_, 'W'), ("Clear STT", err, 'S'), ("Clear TTS", err, 'V'),
                 ("Test mic", mut_, 'm'), ("Test speaker", mut_, 'p'), ("Test STT", mut_, 't'),
             ],
             (Tab::Voice, false) => vec![("Test mic", mut_, 'm'), ("Test speaker", mut_, 'p'), ("Test STT", mut_, 't')],
@@ -4001,6 +4129,7 @@ impl SettingsApp {
             (Tab::CloudRoles, _) => self.roles_buttons(),
             (Tab::Battery, _) => self.battery_buttons(),
             (Tab::Power, _) => self.power_buttons(),
+            (Tab::Computer, _) => self.computer_buttons(),
             (Tab::HostName, _) => self.host_name_buttons(),
             (Tab::SessionLog, _) => self.crash_buttons(),
             (Tab::Startup, _) => self.startup_buttons(),
@@ -4098,14 +4227,22 @@ fn row(g: &mut Gfx, tip: &mut Tooltip, idx: usize, x: f32, y: f32, w: f32, h: f3
 
 impl SettingsApp {
     fn render_models(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
-        let (chat, emb, provs) = {
+        let (chat, emb, provs, tidy) = {
             let st = cx.services.settings.lock().unwrap();
-            (st.get().chat.clone(), st.get().embedding.clone(), st.get().providers.clone())
+            (st.get().chat.clone(), st.get().embedding.clone(), st.get().providers.clone(), st.get().tidy.clone())
         };
         let admin = cx.session.policy.manage_settings;
         let fmt = |c: &Option<ModelChoice>, none: &str| c.as_ref().map_or(none.to_string(), |c| format!("{} · {}", c.provider, c.model));
         g.text(a.x, a.y, 15.0 * s, MUTED, "Chat model", Face::Sans);
         g.text(a.x + 150.0 * s, a.y, 15.0 * s, if chat.is_some() { OK } else { ERR }, &fmt(&chat, "none selected"), Face::Bold);
+        // the tidy model (key y) sits on the chat model's row, only when one is set: the page keeps its height
+        if let Some(t) = &tidy {
+            let cw = g.text_width(15.0 * s, &fmt(&chat, "none selected"), Face::Bold);
+            let tx = a.x + 150.0 * s + cw + 18.0 * s;
+            let line = g.fit(15.0 * s, &format!("tidy: {} · {}  [y]", t.provider, t.model), Face::Bold, (a.x + a.w - tx).max(40.0));
+            g.text(tx, a.y, 15.0 * s, MUTED, &line, Face::Bold);
+            g.hit(R::new(tx, a.y - 2.0 * s, (a.x + a.w - tx).max(40.0), 22.0 * s), Event::Tick, &format!("Tidy model: {} · {}", t.provider, t.model));
+        }
         g.text(a.x, a.y + 24.0 * s, 15.0 * s, MUTED, "Embeddings", Face::Sans);
         g.text(a.x + 150.0 * s, a.y + 24.0 * s, 15.0 * s, TEXT, &fmt(&emb, "built-in (hashing, no model needed)"), Face::Bold);
         let price = cx.services.settings.lock().unwrap().get().token_price_cents_per_mtok;
@@ -4186,8 +4323,9 @@ impl SettingsApp {
             // what this Lemonade server has, by type, with a quick action on each model
             let top = y + 4.0 * s;
             self.render_lemonade(g, R::new(a.x, top, a.w, (a.y + a.h - top).max(0.0)), s, cx, p);
-        } else if !provs.is_empty() {
-            g.text(a.x + 4.0 * s, y + 2.0 * s, 13.0 * s, MUTED, if admin { "Select a provider, then Delete / Edit / Models" } else { "Select a provider, then Test" }, Face::Sans);
+        } else if let Some(p) = provs.get(self.sel()).cloned() {
+            let top = y + 2.0 * s;
+            self.mo_render(g, R::new(a.x, top, a.w, (a.y + a.h - top).max(0.0)), s, cx, &p, admin);
         }
     }
 
@@ -4857,7 +4995,7 @@ mod tests {
     fn non_admins_cannot_change_system_settings_and_it_is_audited() {
         let cx = user("set4");
         let mut a = SettingsApp::new(&cx).on(Tab::Models);
-        assert_eq!(a.tabs(), &[Tab::Overview, Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::Models, Tab::Skills, Tab::Rag, Tab::Voice, Tab::Browser, Tab::HostAccess, Tab::Shares, Tab::ScreenSaver, Tab::HomeLayout, Tab::Time, Tab::Power, Tab::GitKeys], "no secret-provider tab for users; everyone has Notifications, Screen saver, Time, Power and Home layout; whoever has the AI IDE has Git and SSH keys");
+        assert_eq!(a.tabs(), &[Tab::Overview, Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::Models, Tab::Skills, Tab::Rag, Tab::Voice, Tab::Browser, Tab::HostAccess, Tab::Shares, Tab::ScreenSaver, Tab::HomeLayout, Tab::Time, Tab::Power, Tab::Computer, Tab::GitKeys], "no secret-provider tab for users; everyone has Notifications, Screen saver, Time, Power, This computer and Home layout; whoever has the AI IDE has Git and SSH keys");
         for k in ['a', 'e', 'd', 'k', 'x'] {
             key(&mut a, &cx, Key::Char(k));
             assert!(!a.has_modal(), "{k}");
@@ -6529,6 +6667,9 @@ mod battery_tests;
 #[path = "settings_power_tests.rs"]
 mod power_tests;
 #[cfg(test)]
+#[path = "settings_computer_tests.rs"]
+mod computer_tests;
+#[cfg(test)]
 #[path = "settings_screensaver_tests.rs"]
 mod screensaver_tests;
 #[cfg(test)]
@@ -6540,6 +6681,9 @@ mod browserspeed_tests;
 #[cfg(test)]
 #[path = "settings_browserheaders_tests.rs"]
 mod browserheaders_tests;
+#[cfg(test)]
+#[path = "settings_modelopts_tests.rs"]
+mod modelopts_tests;
 #[cfg(test)]
 #[path = "settings_browserblock_tests.rs"]
 mod browserblock_tests;

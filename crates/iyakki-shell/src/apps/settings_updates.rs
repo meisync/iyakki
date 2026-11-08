@@ -145,7 +145,7 @@ impl SettingsApp {
                 let f = Form::new("Folder with an update").path("Folder (a USB stick shows up under /media or /run/media)", &self.upd.folder, "the folder that holds update.json, or a folder with such folders in it", crate::filepicker::PathKind::Folder, &[]);
                 self.open_form(FormKind::UpdateFolder, f);
             }
-            Key::Char('c') | Key::Char('m') | Key::Char('u') => self.upd_check_key(k, cx),
+            Key::Char('c') | Key::Char('m') | Key::Char('u') | Key::Char('t') => self.upd_check_key(k, cx),
             Key::Char('n') => {
                 self.upd.ask = UpdAsk::None;
                 self.ok("Nothing was changed.");
@@ -208,7 +208,7 @@ impl SettingsApp {
     }
 
     pub(super) fn updates_buttons(&self) -> Vec<Btn> {
-        let mut v = vec![("Install", ACCENT, 'i'), ("Roll back", TEXT, 'r'), ("Choose folder", TEXT, 'f'), ("Look again", TEXT, 's'), ("Check for updates", TEXT, 'c'), ("How often", TEXT, 'm'), ("Update list address", TEXT, 'u')];
+        let mut v = vec![("Install", ACCENT, 'i'), ("Roll back", TEXT, 'r'), ("Choose folder", TEXT, 'f'), ("Look again", TEXT, 's'), ("Check for updates", TEXT, 'c'), ("How often", TEXT, 'm'), ("Update list address", TEXT, 'u'), ("Use a store", TEXT, 't')];
         if self.upd.ask != UpdAsk::None {
             v.insert(0, ("Yes, do it", ERR, 'y'));
             v.insert(1, ("No", TEXT, 'n'));
@@ -324,6 +324,12 @@ impl SettingsApp {
         }
     }
 
+    /// (name, announcement address) of every enabled store that was added with its key checked.
+    fn upd_stores(cx: &AppCx) -> Vec<(String, String)> {
+        let store = iyakki_agent::store::Store::for_services(Self::svc(cx));
+        store.config().sources.into_iter().filter(|s| s.enabled && !s.pin.is_empty() && s.kind == iyakki_agent::store::catalog::SourceKind::Url).map(|s| (s.name.clone(), iyakki_agent::store::sysannounce::url_for_catalog(&s.location))).collect()
+    }
+
     /// `c` check now, `m` how often, `u` the address of the system update list. Administrators only.
     pub(super) fn upd_check_key(&mut self, k: &Key, cx: &AppCx) {
         if !self.admin(cx) {
@@ -335,6 +341,19 @@ impl SettingsApp {
                 let mode = cur.mode.next();
                 if self.upd_check_save(cx, &format!("mode={mode:?}"), |s| s.mode = mode) {
                     self.ok(format!("Checking for updates: {}.", mode.label()));
+                }
+            }
+            Key::Char('t') => {
+                // the stores added with their key checked: each announces IYAKKI at <store>/v1/system.json, signed with that key
+                let stores = Self::upd_stores(cx);
+                if stores.is_empty() {
+                    return self.fail("No store with a checked key is added yet. Add your private store in the STORE (Settings) first.");
+                }
+                let at = stores.iter().position(|(_, url)| *url == cur.system_url).map_or(0, |i| (i + 1) % stores.len());
+                let (name, url) = stores[at].clone();
+                if self.upd_check_save(cx, &format!("system_url={url} (store {name})"), |s| s.system_url = url.clone()) {
+                    self.upd.check = None;
+                    self.ok(format!("The update list is now {name}'s announcement{}. Press Check for updates to try it. Nothing is downloaded from it.", if stores.len() > 1 { " (press Use a store again for the next store)" } else { "" }));
                 }
             }
             Key::Char('u') => {
@@ -380,6 +399,9 @@ impl SettingsApp {
     pub(super) fn upd_check_lines(&mut self, cx: &AppCx) -> Vec<(String, [u8; 4], Face)> {
         let cfg = Self::upd_check_settings(cx);
         let mut out = vec![(format!("Checking for updates: {}.{}", cfg.mode.label(), if cfg.system_url.is_empty() { " Apps in your store sources are checked; no system update list is set." } else { " Your apps and the system update list are checked." }), TEXT, Face::Bold)];
+        if let Some((name, _)) = Self::upd_stores(cx).into_iter().find(|(_, url)| *url == cfg.system_url) {
+            out.push((format!("The update list is the announcement of {name} (signed with the key you confirmed)."), MUTED, Face::Sans));
+        }
         if cfg.mode == chk::Mode::Daily {
             out.push(("This computer cannot tell a metered connection yet, so a daily check also runs on one.".into(), MUTED, Face::Sans));
         }

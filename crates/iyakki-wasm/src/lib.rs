@@ -157,6 +157,9 @@ impl Snapshot {
     }
 }
 
+/// A host import added with [`Sandbox::with_import`]: (guest memory, i32 arguments) -> i32.
+pub type HostImportFn = Arc<dyn Fn(&mut [u8], &[i32]) -> i32 + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Sandbox {
     engine: Engine,
@@ -188,6 +191,35 @@ impl Sandbox {
     /// every clone of this sandbox shares, so give each time-limited sandbox its own `Sandbox::new`.
     pub fn with_wall_time(mut self, d: std::time::Duration) -> Self {
         self.wall = Some(d);
+        self
+    }
+
+    /// Add one host import `module.name` taking `nparams` i32 parameters and returning one i32.
+    /// `f` gets the guest's linear memory and the arguments. Used by hosts with their own import
+    /// namespace (the tile host registers `iyakki_tile.*`). Additive: the built-in `iyakki.*` imports stay.
+    pub fn with_import(mut self, module: &str, name: &str, nparams: usize, f: HostImportFn) -> Self {
+        let ty = wasmtime::FuncType::new(
+            &self.engine,
+            vec![wasmtime::ValType::I32; nparams],
+            [wasmtime::ValType::I32],
+        );
+        let mut linker = (*self.linker).clone();
+        let r = linker.func_new(module, name, ty, move |mut c, params, results| {
+            let args: Vec<i32> = params.iter().map(|p| p.i32().unwrap_or(0)).collect();
+            let mem = match c.get_export("memory") {
+                Some(Extern::Memory(m)) => m,
+                _ => {
+                    results[0] = wasmtime::Val::I32(errno::BAD_MEMORY);
+                    return Ok(());
+                }
+            };
+            let v = f(mem.data_mut(&mut c), &args);
+            results[0] = wasmtime::Val::I32(v);
+            Ok(())
+        });
+        if r.is_ok() {
+            self.linker = Arc::new(linker);
+        }
         self
     }
 

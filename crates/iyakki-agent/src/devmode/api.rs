@@ -449,7 +449,7 @@ fn grant_route(cx: &Ctx, action: &str, body: &[u8]) -> Out {
         return cx.refuse(action, &e);
     }
     // a repeat of a request that is already waiting or granted just reports it
-    let have = cx.dm.shell_status(&cx.key.name);
+    let have = cx.dm.shell_status_kind(&cx.key.name, kind);
     let st = match have {
         super::grants::ShellStatus::Pending | super::grants::ShellStatus::Granted(_) => have,
         super::grants::ShellStatus::Denied if v["retry"].as_bool() != Some(true) => {
@@ -484,9 +484,9 @@ fn shell_route(cx: &Ctx, action: &str, path: &str, q: &dyn Fn(&str) -> String, b
             match super::shellexec::open(cx.dm, cx.key, cx.policy, &passwd_text(cx), euid, &home) {
                 Ok(sid) => {
                     let cwd = super::shellexec::cwd(cx.dm, sid, comp).unwrap_or_default();
-                    let g = cx.dm.shell_grant(comp);
+                    let g = cx.dm.shell_grant_kind(comp, "shell");
                     cx.did(action, &format!("session {sid} opened{}", if g.as_ref().is_some_and(|g| g.as_root) { " AS ROOT" } else { "" }));
-                    Out::json(200, &json!({ "sid": sid, "cwd": cwd.display().to_string(), "as_root": g.is_some_and(|g| g.as_root), "expires": cx.dm.shell_grant(comp).map(|g| g.expires) }))
+                    Out::json(200, &json!({ "sid": sid, "cwd": cwd.display().to_string(), "as_root": g.as_ref().is_some_and(|g| g.as_root), "expires": g.map(|g| g.expires) }))
                 }
                 Err(e) => fail(e),
             }
@@ -660,14 +660,13 @@ fn update_route(cx: &Ctx, action: &str, path: &str, q: &dyn Fn(&str) -> String, 
                 Out::err(409, &e)
             }
         },
-        "/v1/dev/update/abort" => {
-            if up::interrupted(&data).is_some() {
-                return refuse("an update was interrupted: do not clear it until it has been repeated or the previous version is chosen in the boot menu".into());
+        "/v1/dev/update/abort" => match up::discard_staged(&env) {
+            Ok(v) => {
+                cx.did(action, v["message"].as_str().unwrap_or("staged files removed"));
+                Out::json(200, &v)
             }
-            let _ = std::fs::remove_dir_all(data.join("boot-next"));
-            cx.did(action, "staged files removed");
-            Out::json(200, &json!({ "ok": true }))
-        }
+            Err(e) => refuse(e),
+        },
         "/v1/dev/update/status" => Out::json(200, &up::status(&data)),
         _ => Out::err(404, "not found"),
     }
@@ -687,8 +686,8 @@ fn patch_route(cx: &Ctx, action: &str, path: &str, q: &dyn Fn(&str) -> String, b
     use super::patch as pt;
     let data = cx.dm.data_dir().to_path_buf();
     let free = || cx.data_free.unwrap_or_else(|| debug::statvfs(&data).1);
-    let grant = cx.dm.shell_grant(&cx.key.name);
-    let shell_ok = cx.key.has(Scope::Shell) && scopes::check(cx.key, cx.policy, Scope::Shell).is_ok() && grant.as_ref().is_some_and(|g| g.kind == "shell");
+    let grant = cx.dm.shell_grant_kind(&cx.key.name, "shell");
+    let shell_ok = cx.key.has(Scope::Shell) && scopes::check(cx.key, cx.policy, Scope::Shell).is_ok() && grant.is_some();
     let env = pt::Env { dm: cx.dm, live: &pt::SysLive, root: PathBuf::from("/"), release: cx.release.to_string(), wide: shell_ok, data_free: &free };
     let refuse = |why: String| {
         cx.log(action, &format!("refused: {}", why.chars().take(200).collect::<String>()), false);

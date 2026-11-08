@@ -5,10 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }
 iyakki-proxy = { path = "../iyakki-proxy", features = ["testcerts"] }
 
 [dependencies]
 iyakki-agent = { path = "../iyakki-agent" }
+iyakki-uikit = { path = "../iyakki-uikit" }
 iyakki-vpn = { path = "../iyakki-vpn" }
 iyakki-sec.workspace = true
 iyakki-storage.workspace = true

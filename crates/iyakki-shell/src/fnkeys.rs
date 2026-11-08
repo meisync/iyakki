@@ -15,38 +15,12 @@ use crate::ui::{R, TEXT};
 
 // ------------------------------------------------------------------------------------------------ the key map
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum FnKey {
-    VolumeUp,
-    VolumeDown,
-    VolumeMute,
-    MicMute,
-    BrightnessUp,
-    BrightnessDown,
-    BrightnessAuto,
-    KbdLightUp,
-    KbdLightDown,
-    KbdLightToggle,
-    PlayPause,
-    Next,
-    Prev,
-    Stop,
-    Sleep,
-    Power,
-    RfKill,
-    Wlan,
-    Bluetooth,
-    SwitchVideo,
-    Print,
-    Calc,
-    Homepage,
-}
+pub use iyakki_uikit::keys::FnKey;
 
-impl FnKey {
-    /// Keys that go on changing while held (volume, brightness, keyboard light).
-    pub fn repeats(self) -> bool {
-        matches!(self, FnKey::VolumeUp | FnKey::VolumeDown | FnKey::BrightnessUp | FnKey::BrightnessDown | FnKey::KbdLightUp | FnKey::KbdLightDown)
-    }
+/// The saved scroll preferences as the toolkit's scroll engine wants them (the engine lives in `iyakki-uikit` and cannot name the
+/// agent's type, so this is a function and not a `From` impl).
+pub fn scroll_config(p: iyakki_agent::keyboard::ScrollPrefs) -> crate::scrolleng::ScrollConfig {
+    crate::scrolleng::ScrollConfig { speed_pct: p.speed_pct, wheel_natural: p.wheel_natural, pad_natural: p.pad_natural, smooth: p.smooth, momentum: p.momentum, wheel_lines: p.wheel_lines }
 }
 
 pub struct KeyInfo {

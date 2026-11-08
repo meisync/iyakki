@@ -343,7 +343,7 @@ impl TextRenderer for GfxText<'_> {
     }
     fn render(&mut self, text: &str, style: &TextStyle) -> Option<TextMask> {
         let m = self.0.text_mask(style.size as f32, text, face(style));
-        (m.w > 0).then_some(m)
+        (m.w > 0).then_some(TextMask { advance: m.advance, x: m.x, y: m.y, w: m.w, h: m.h, alpha: m.alpha })
     }
 }
 

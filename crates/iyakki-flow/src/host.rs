@@ -483,6 +483,11 @@ pub trait Host: Send + Sync {
     fn notify(&self, _n: &Notice) -> Result<(), String> {
         Ok(())
     }
+    /// A flow's `notify` step with its own `to` (who should get it: a word like `team` or `role:admin`, or a list of people; `Null` when the
+    /// step names nobody). A desktop has one person, so the default ignores it; a cloud tenant sends it to the people it names.
+    fn notify_to(&self, n: &Notice, _to: &Value) -> Result<(), String> {
+        self.notify(n)
+    }
     /// Tell the person through the channels too. Returns one plain line per channel; an `Err` is one plain sentence and does not fail the run.
     fn notify_channels(&self, _n: &Notice, _c: &ChannelNotice) -> Result<Vec<String>, String> {
         Err("no messaging account is set up on this computer (Settings, Notifications, Matrix account)".into())
@@ -490,6 +495,12 @@ pub trait Host: Send + Sync {
     /// A vault secret by name (never logged: the engine registers it with the redactor).
     fn secret(&self, name: &str) -> Result<String, String> {
         Err(format!("there is no secret `{name}` in your vault"))
+    }
+    /// The same, asked on behalf of ONE RUN: the engine always asks this one (never `secret` directly), so a host can decide by who started
+    /// the run. A cloud tenant refuses a run that nobody started by hand any secret that a team admin did not mark for scheduled runs.
+    /// The default is the plain lookup.
+    fn secret_for_run(&self, _run: &RunSecretCx, name: &str) -> Result<String, String> {
+        self.secret(name)
     }
     fn audit(&self, _action: &str, _detail: &str) {}
     /// Ask the healing agent for a diagnosis and a patch.
@@ -518,7 +529,32 @@ pub trait Host: Send + Sync {
 
 type HttpFn = Arc<dyn Fn(&HttpRequest) -> Result<HttpResponse, NodeError> + Send + Sync>;
 type BrowserOpFn = Arc<dyn Fn(&BrowserOp) -> Result<BrowserOpResult, NodeError> + Send + Sync>;
+/// Whose run asks for a secret: enough for a host to tell a run started by a person from one started by a timer or an event.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunSecretCx {
+    pub run_id: String,
+    pub flow_id: String,
+    /// How the run was started: `manual`, `chat`, `test`, `contract` (a person asked), else a timer, event or hook kind.
+    pub trigger: String,
+}
+
+impl RunSecretCx {
+    /// From the template context of a node (`ctx.run.id`, `.flow`, `.trigger`).
+    pub fn from_ctx(ctx: &Value) -> RunSecretCx {
+        let g = |k: &str| ctx.get("run").and_then(|r| r.get(k)).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        RunSecretCx { run_id: g("id"), flow_id: g("flow"), trigger: g("trigger") }
+    }
+
+    /// A person started this run just now (so it may use that person's own secrets). Anything else, and any trigger this code does not
+    /// know, is "nobody is there".
+    pub fn attended(&self) -> bool {
+        matches!(self.trigger.as_str(), "manual" | "chat" | "test" | "contract")
+    }
+}
+
 type ExecFn = Arc<dyn Fn(&ExecRequest) -> Result<ExecResult, NodeError> + Send + Sync>;
+
+type SecretRule = Arc<dyn Fn(&RunSecretCx, &str) -> Option<Result<String, String>> + Send + Sync>;
 
 /// A host for tests: scripted answers, and a record of what was asked.
 #[derive(Default)]
@@ -544,6 +580,11 @@ pub struct FakeHost {
     pub channel_calls: Mutex<Vec<ChannelNotice>>,
     pub channel_result: Mutex<Option<Result<Vec<String>, String>>>,
     pub secrets: Mutex<BTreeMap<String, String>>,
+    /// What `secret_for_run` was asked (the run and the name), and an optional rule that answers instead of the plain lookup.
+    /// The `to` of every `notify` step that named one (or `Null`).
+    pub notify_tos: Mutex<Vec<Value>>,
+    pub secret_asks: Mutex<Vec<(RunSecretCx, String)>>,
+    pub secret_rule: Mutex<Option<SecretRule>>,
     pub audits: Mutex<Vec<String>>,
     pub clis: Mutex<BTreeMap<String, CliInfo>>,
     pub upgrades: Mutex<Vec<(String, String)>>,
@@ -571,6 +612,10 @@ impl FakeHost {
     }
     pub fn on_browser_op(&self, f: impl Fn(&BrowserOp) -> Result<BrowserOpResult, NodeError> + Send + Sync + 'static) -> &Self {
         *self.browser_op_fn.lock().unwrap() = Some(Arc::new(f));
+        self
+    }
+    pub fn secret_rule(&self, f: impl Fn(&RunSecretCx, &str) -> Option<Result<String, String>> + Send + Sync + 'static) -> &Self {
+        *self.secret_rule.lock().unwrap() = Some(Arc::new(f));
         self
     }
     pub fn secret_is(&self, name: &str, value: &str) -> &Self {
@@ -662,6 +707,10 @@ impl Host for FakeHost {
     fn script(&self, _r: &ScriptRequest, _c: &Cancel) -> Result<Value, NodeError> {
         self.script_results.lock().unwrap().pop_front().unwrap_or(Ok(Value::Null))
     }
+    fn notify_to(&self, n: &Notice, to: &Value) -> Result<(), String> {
+        self.notify_tos.lock().unwrap().push(to.clone());
+        self.notify(n)
+    }
     fn notify(&self, n: &Notice) -> Result<(), String> {
         self.notices.lock().unwrap().push(n.clone());
         Ok(())
@@ -669,6 +718,14 @@ impl Host for FakeHost {
     fn notify_channels(&self, _n: &Notice, c: &ChannelNotice) -> Result<Vec<String>, String> {
         self.channel_calls.lock().unwrap().push(c.clone());
         self.channel_result.lock().unwrap().clone().unwrap_or_else(|| Err("no messaging account is set up on this computer (Settings, Notifications, Matrix account)".into()))
+    }
+    fn secret_for_run(&self, run: &RunSecretCx, name: &str) -> Result<String, String> {
+        self.secret_asks.lock().unwrap().push((run.clone(), name.to_string()));
+        let rule = self.secret_rule.lock().unwrap().clone();
+        if let Some(a) = rule.and_then(|r| r(run, name)) {
+            return a;
+        }
+        self.secret(name)
     }
     fn secret(&self, name: &str) -> Result<String, String> {
         self.secrets.lock().unwrap().get(name).cloned().ok_or_else(|| format!("there is no secret `{name}` in your vault"))

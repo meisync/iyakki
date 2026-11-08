@@ -150,10 +150,24 @@ pub fn say(sink: &dyn NotifySink, tenant: &str, team: &str, people: Vec<String>,
 
 /// An engine notice (`Host::notify`: a flow's `notify` step, a failure) as a notification to the person the run belongs to.
 pub fn from_node_notice(tenant: &str, team: &str, user: &str, n: &iyakki_flow::host::Notice) -> Notification {
+    from_node_notice_to(tenant, team, user, n, &Value::Null)
+}
+
+/// The same, for a `notify` step that names who gets it (`to`: me, team, role:admin, role:tenant_admin, role:approver:<scope>,
+/// role:group:<name>, a person or a list of people). A `to` that cannot be read, or `team`/a team role when the run has no team, goes to the
+/// run's owner only: a note is never lost and never reaches more people than the step named.
+pub fn from_node_notice_to(tenant: &str, team: &str, user: &str, n: &iyakki_flow::host::Notice, to: &Value) -> Notification {
+    let team_opt = Some(team.to_string()).filter(|t| !t.is_empty());
+    let recipients = match recipients_from_node(to, user) {
+        Ok(Recipients::Team) if team_opt.is_none() => Recipients::People(vec![user.to_string()]),
+        Ok(Recipients::Roles(r)) if team_opt.is_none() && r.iter().any(|x| matches!(x, RoleSel::TeamAdmin)) => Recipients::People(vec![user.to_string()]),
+        Ok(r) => r,
+        Err(_) => Recipients::People(vec![user.to_string()]),
+    };
     Notification {
         tenant: tenant.into(),
-        team: Some(team.to_string()).filter(|t| !t.is_empty()),
-        recipients: Recipients::People(vec![user.to_string()]),
+        team: team_opt,
+        recipients,
         severity: severity_of(&n.level),
         title: n.title.chars().take(120).collect(),
         body: n.body.chars().take(600).collect(),

@@ -509,10 +509,18 @@ impl Host for AgentHost {
         }
     }
 
+    fn notify_to(&self, n: &Notice, to: &Value) -> Result<(), String> {
+        if let Some(h) = super::CLOUD_NOTIFY.get() {
+            h(&self.user, n, to);
+            return Ok(());
+        }
+        self.notify(n)
+    }
+
     fn notify(&self, n: &Notice) -> Result<(), String> {
         use crate::inbox::{Kind, Link};
         if let Some(h) = super::CLOUD_NOTIFY.get() {
-            h(&self.user, n);
+            h(&self.user, n, &Value::Null);
             return Ok(());
         }
         let kind = match n.level.as_str() {
@@ -527,6 +535,13 @@ impl Host for AgentHost {
 
     fn notify_channels(&self, n: &Notice, c: &iyakki_flow::host::ChannelNotice) -> Result<Vec<String>, String> {
         self.send_through_channels(n, c)
+    }
+
+    fn secret_for_run(&self, run: &iyakki_flow::host::RunSecretCx, name: &str) -> Result<String, String> {
+        if let Some(answer) = super::CLOUD_SECRET.get().and_then(|h| h(&self.user, run, name)) {
+            return answer;
+        }
+        self.secret(name)
     }
 
     fn secret(&self, name: &str) -> Result<String, String> {

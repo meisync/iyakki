@@ -204,7 +204,7 @@ impl LinuxWinApp {
                 Ok(LinuxApps::new(&data, &user, &exe, Arc::new(iyakki_agent::wsexec::System)))
             }),
             spawn: Arc::new(lw::System),
-            proc_root: "/proc".into(),
+            proc_root: iyakki_agent::sysinfo::proc_root().into(),
         };
         LinuxWinApp::with_rig(cx, rig)
     }

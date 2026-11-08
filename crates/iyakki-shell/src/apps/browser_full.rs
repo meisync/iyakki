@@ -594,7 +594,7 @@ impl Full {
     /// The sound doctor: while the page plays audio, compare it with the kernel's playback streams and recover (see `browser_sound.rs`).
     fn sound_tick(&mut self) {
         let Some(helper) = self.view.pid() else { return };
-        let actions = self.sound.tick(helper, std::path::Path::new(iyakki_agent::quiet::ASOUND), std::path::Path::new("/proc"), std::process::id());
+        let actions = self.sound.tick(helper, std::path::Path::new(iyakki_agent::quiet::ASOUND), iyakki_agent::sysinfo::proc_root(), std::process::id());
         for a in actions {
             match a {
                 iyakki_agent::sounddoctor::Action::Note(n) => self.notes.push(Note::Sound(Some(n))),

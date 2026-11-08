@@ -162,8 +162,7 @@ pub struct DisksApp {
 /// The owner when the account has no passwd entry: the user IYAKKI itself runs as.
 #[cfg(not(test))]
 fn process_owner() -> (u32, u32) {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata("/proc/self").map(|m| (m.uid(), m.gid())).unwrap_or((0, 0))
+    iyakki_agent::sysinfo::self_owner(iyakki_agent::sysinfo::proc_root())
 }
 
 impl DisksApp {

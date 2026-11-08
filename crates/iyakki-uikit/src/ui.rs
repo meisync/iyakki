@@ -73,9 +73,9 @@ pub enum Event {
     /// A key meant for an embedded component (the editor inside the chat) rather than its host.
     Sub(u8, Key),
     /// A media, volume, brightness or other Fn key (true = pressed, false = released). The shell takes it before any app sees it.
-    Fn(crate::fnkeys::FnKey, bool),
+    Fn(crate::keys::FnKey, bool),
     /// A Ctrl+Alt chord for panes and displays (`panes.rs`).
-    Layout(crate::panes::LayoutKey),
+    Layout(crate::keys::LayoutKey),
 }
 
 /// A clickable region registered while drawing. Later registrations sit on top of earlier ones.
@@ -534,7 +534,7 @@ thread_local! {
     static RINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static WINDOW_FOCUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
     static PANE_INPUT_OK: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     static LEGACY_RINGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -574,13 +574,13 @@ pub fn take_focus_rings() -> usize {
 }
 
 /// Test only: are the old always-focused looks on (see [`legacy_rings`])?
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub fn legacy_on() -> bool {
     LEGACY_RINGS.with(|c| c.get())
 }
 
 /// Test only: draw inputs the way they were before the one-owner rule (frame and clipboard button on a constantly "focused" box).
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub fn legacy_rings(on: bool) {
     LEGACY_RINGS.with(|c| c.set(on));
 }
@@ -911,9 +911,9 @@ impl TextField {
 
     #[allow(clippy::too_many_arguments)]
     fn draw(&self, g: &mut Gfx, r: R, focused: bool, s: f32, blink_on: bool, face: Face, id: usize, boxed: bool, inset: (f32, f32)) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         let legacy = LEGACY_RINGS.with(|c| c.get());
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "testing")))]
         let legacy = false;
         // an input looks focused (frame, caret, clipboard button) only when it owns the keyboard of a window that has the focus
         let focused = focused && (legacy || input_focus_allowed());

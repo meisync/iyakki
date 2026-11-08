@@ -214,8 +214,9 @@ entry seed
 
 def t_default(s):
     files = s.boot_files() + s.trees()
-    d = s.disk("a", files, [(CFG_BASIC, "/boot.cfg")])
-    vm = s.vm("a", [(d, True)])
+    # the log directory of the real images exists here too (EFI/iyakki-boot), so the log lands on its real path
+    d = s.disk("a", files, [(CFG_BASIC, "/boot.cfg"), ("log directory", "/EFI/iyakki-boot/README.txt")])
+    vm = s.vm("a", [(d, False)])  # no snapshot: the loader's log file must land in this throwaway disk so it can be read back
     try:
         m = vm.wait_for(r"TEST-EFI started path=(\S+) options=\[([^\]]*)\] initrd=(\d+) sum=([0-9a-f]+)", 90)
         need(m, "the default entry did not start:\n" + vm.text()[-1500:])
@@ -226,6 +227,19 @@ def t_default(s):
         need("start: current kernel=/current/vmlinuz tree=current" in vm.text(), "start line missing")
     finally:
         vm.stop()
+    # the boot log on the volume: the device summary, the entries and the start, written before the kernel ran
+    out = os.path.join(s.dir, "a-last-boot.log")
+    subprocess.run([sys.executable, "-I", os.path.join(HERE, "fatdisk.py"), "get", d, "1", "/EFI/iyakki-boot/last-boot.log", out], check=True)
+    with open(out, "rb") as f:
+        log = f.read().decode("utf-8", "replace")
+    for want in ("boot: loader started", "hw: firmware ", "hw: memory ", "hw: pci ", "hw: disk ", "hw: screen", "hw: input: ",
+                 "config: /boot.cfg read", "item: 0 current", "start: current kernel=/current/vmlinuz tree=current",
+                 "log: about to start; this log is in /EFI/iyakki-boot/last-boot.log"):
+        need(want in log, f"the boot log lacks {want!r}:\n{log[-2000:]}")
+    need("could not be written" not in log, "the log reports a failed write:\n" + log[-800:])
+    # the pre-start write comes after the line that names the kernel: a kernel that hangs still leaves that line in the file
+    need(log.find("start: current kernel=") < log.find("log: about to start"), "the about-to-start write precedes the start line:\n" + log[-800:])
+    need(log.rstrip().endswith("on the boot volume"), "the last line of the file is not the 'about to start' line:\n" + log[-300:])
 
 
 def t_real_kernel(s):

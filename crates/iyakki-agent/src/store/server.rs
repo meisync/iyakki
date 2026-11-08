@@ -21,6 +21,11 @@ use super::revocation::Revocations;
 use super::trust::{Judge, Level, Roots};
 use crate::pkg::{self, newer, public_key_hex, signing_key_from_hex};
 
+#[path = "server_components.rs"]
+mod components;
+
+pub use components::{parse_range, Body, Slice, StreamResp, BUF as BLOB_BUF};
+
 pub const DEFAULT_KINDS: [&str; 8] = ["skill", "tool", "mcp", "agent", "template", "theme", "extension", "tile"];
 
 #[derive(Clone)]
@@ -38,11 +43,17 @@ pub struct Config {
     /// Accept packages signed by a key nobody vouches for (they are listed as Community).
     pub allow_community: bool,
     pub kinds: Vec<String>,
+    /// System components (docs/development/COMPONENT-UPDATES-PLAN.md): the names taken, the largest blob of each (the default for the rest),
+    /// and the room kept free on the data folder's disk beyond an upload.
+    pub component_names: Vec<String>,
+    pub component_caps: HashMap<String, u64>,
+    pub max_component: u64,
+    pub disk_margin: u64,
 }
 
 impl Config {
     pub fn new(data: &Path) -> Config {
-        Config { data: data.to_path_buf(), id: "private-store".into(), name: "Private store".into(), admin_token_hash: None, read_only: false, max_body: 4 << 20, writes_per_min: 20, reads_per_min: 600, fails_per_min: 10, allow_community: true, kinds: DEFAULT_KINDS.iter().map(|s| s.to_string()).collect() }
+        Config { data: data.to_path_buf(), id: "private-store".into(), name: "Private store".into(), admin_token_hash: None, read_only: false, max_body: 4 << 20, writes_per_min: 20, reads_per_min: 600, fails_per_min: 10, allow_community: true, kinds: DEFAULT_KINDS.iter().map(|s| s.to_string()).collect(), component_names: super::compmanifest::COMPONENTS.iter().map(|s| s.to_string()).collect(), component_caps: HashMap::new(), max_component: 1 << 30, disk_margin: 256 << 20 }
     }
 }
 
@@ -117,6 +128,10 @@ pub struct StoreServer {
     write: Mutex<()>,
     rate: Mutex<HashMap<String, Vec<i64>>>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Free bytes of the disk holding a folder (a fake in tests).
+    free_space: Arc<dyn Fn(&Path) -> Option<u64> + Send + Sync>,
+    /// Blobs being uploaded right now (one upload per blob at a time).
+    uploading: Mutex<std::collections::HashSet<String>>,
 }
 
 /// A fingerprint a person can compare: the SHA-256 of the public key, 32 hex characters in groups of four.
@@ -173,7 +188,7 @@ impl StoreServer {
     pub fn open(cfg: Config, key_text: &str) -> Result<StoreServer, String> {
         let key = signing_key_from_hex(key_text).map_err(|e| format!("the catalog key: {e}"))?;
         std::fs::create_dir_all(cfg.data.join("packages")).map_err(|e| format!("{}: {e}", cfg.data.display()))?;
-        let s = StoreServer { cfg, key, write: Mutex::new(()), rate: Mutex::new(HashMap::new()), clock: Arc::new(crate::clock::now_unix) };
+        let s = StoreServer { cfg, key, write: Mutex::new(()), rate: Mutex::new(HashMap::new()), clock: Arc::new(crate::clock::now_unix), free_space: Arc::new(crate::sharedsite::statvfs_free), uploading: Mutex::new(Default::default()) };
         let _g = s.write.lock().unwrap_or_else(|e| e.into_inner());
         let st = s.state();
         s.regenerate(&st, false)?;
@@ -183,6 +198,11 @@ impl StoreServer {
 
     pub fn with_clock(mut self, c: Arc<dyn Fn() -> i64 + Send + Sync>) -> StoreServer {
         self.clock = c;
+        self
+    }
+
+    pub fn with_free_space(mut self, f: Arc<dyn Fn(&Path) -> Option<u64> + Send + Sync>) -> StoreServer {
+        self.free_space = f;
         self
     }
 
@@ -334,6 +354,7 @@ impl StoreServer {
             ("GET", "/catalog.json") => self.file("catalog.json", "application/json"),
             ("GET", "/yanked.json") => self.file("yanked.json", "application/json"),
             ("GET", "/") => self.home(),
+            ("GET", super::sysannounce::PATH) => self.system_announcement(),
             ("GET", "/v1/info") => {
                 let st = self.state();
                 Resp::json(200, json!({"id": self.cfg.id, "name": self.cfg.name, "key": self.catalog_key(), "fingerprint": fingerprint(&self.catalog_key()), "serial": st.serial, "read_only": self.cfg.read_only, "packages": st.packages.len()}))
@@ -348,6 +369,12 @@ impl StoreServer {
                     Err(_) => Resp::err(404, "no such package"),
                 }
             }
+            ("GET", super::compmanifest::PATH) => self.components_doc(),
+            ("POST", "/v1/components") => self.component_publish(r, peer),
+            ("POST", "/v1/components/retention") => self.component_retention(r, peer),
+            ("DELETE", p) if p.starts_with("/v1/components/") => self.component_yank(r, peer),
+            // a small blob through `handle` (tests, tools); the socket code streams the body instead (`blob_put`, `blob_get`)
+            ("PUT", p) if p.starts_with("/v1/blobs/") => self.blob_put(r, r.body.len() as u64, &mut &r.body[..], peer),
             ("POST", "/v1/publish") => self.publish(r, peer),
             ("POST", "/v1/publishers") => self.add_publisher(r, peer),
             ("GET", "/v1/publishers") => match self.auth(r) {
@@ -355,9 +382,23 @@ impl StoreServer {
                 _ => self.unauthorised(peer, &r.path),
             },
             ("DELETE", p) if p.starts_with("/v1/packages/") => self.yank(r, peer),
-            (_, "/healthz" | "/catalog.json" | "/yanked.json" | "/" | "/v1/info" | "/v1/publish" | "/v1/publishers") => Resp::err(405, "method not allowed"),
+            (_, "/healthz" | "/catalog.json" | "/yanked.json" | "/" | "/v1/info" | super::sysannounce::PATH | super::compmanifest::PATH | "/v1/publish" | "/v1/publishers" | "/v1/components") => Resp::err(405, "method not allowed"),
+            (_, p) if p.starts_with("/v1/blobs/") || p.starts_with("/v1/components/") => Resp::err(405, "method not allowed"),
             (_, p) if p.starts_with("/packages/") || p.starts_with("/v1/packages/") => Resp::err(405, "method not allowed"),
             _ => Resp::err(404, "not found"),
+        }
+    }
+
+    /// `GET /v1/system.json`: the content of `system.json` in the data folder, signed with the catalog key when asked. No file: 404
+    /// (nothing is announced). The catalog and everything else are untouched.
+    fn system_announcement(&self) -> Resp {
+        let raw = match std::fs::read(self.path("system.json")) {
+            Ok(b) => b,
+            Err(_) => return Resp::err(404, "nothing announced"),
+        };
+        match super::sysannounce::sign(&raw, &self.cfg.id, self.now(), &self.key) {
+            Ok(doc) => Resp::new(200, "application/json", doc.into_bytes()),
+            Err(e) => Resp::err(500, &e),
         }
     }
 

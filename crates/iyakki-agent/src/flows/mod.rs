@@ -90,8 +90,14 @@ pub type CloudHook = Arc<dyn Fn(&str, &mut iyakki_flow::engine::EngineCfg) + Sen
 pub static CLOUD_HOOK: OnceLock<CloudHook> = OnceLock::new();
 
 /// Cloud tenants: where a flow's notices go instead of the person's own INBOX file (the tenant's notification hub).
-pub type CloudNotify = Arc<dyn Fn(&str, &iyakki_flow::host::Notice) + Send + Sync>;
+/// The third argument is the step's `to` (`Null` when it names nobody).
+pub type CloudNotify = Arc<dyn Fn(&str, &iyakki_flow::host::Notice, &serde_json::Value) + Send + Sync>;
 pub static CLOUD_NOTIFY: OnceLock<CloudNotify> = OnceLock::new();
+
+/// Cloud tenants: which secrets a run that nobody started by hand may read (see `cloudflows::identity::unattended_secret`). `None` answers
+/// "a person is here: the person's own vault as usual". Without a hook (a desktop) every run reads the person's vault.
+pub type CloudSecret = Arc<dyn Fn(&str, &iyakki_flow::host::RunSecretCx, &str) -> Option<Result<String, String>> + Send + Sync>;
+pub static CLOUD_SECRET: OnceLock<CloudSecret> = OnceLock::new();
 
 /// Cloud tenants: where a flow's `cli` and `browser` steps run (the sandbox) instead of on the pod. In a tenant pod without one they are refused.
 pub type CloudExec = Arc<dyn Fn(&str, &iyakki_flow::host::ExecRequest) -> Result<iyakki_flow::host::ExecResult, iyakki_flow::NodeError> + Send + Sync>;

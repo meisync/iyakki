@@ -1,0 +1,8 @@
+[package]
+name = "iyakki-tile-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The tile ABI: events in, display list out, a compact binary encoding, limits and the built-in text metrics. no_std + alloc, no dependencies."
+
+[dependencies]

@@ -83,7 +83,7 @@ pub fn bind_home(data: &Path, home: &Path, mounts_text: &str, on_disk: bool, pid
 #[cfg(target_os = "linux")]
 pub fn bind_home_real(data: &Path, mount: &dyn Fn(&Path, &Path) -> Result<(), String>) -> Vec<String> {
     let on_disk = matches!(iyakki_storage::data_location(&iyakki_storage::Roots::real(), data), iyakki_storage::DataLocation::Disk(_));
-    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    let mounts = iyakki_storage::read_mounts().unwrap_or_default();
     bind_home(data, Path::new(HOME), &mounts, on_disk, std::process::id() == 1, mount)
 }
 

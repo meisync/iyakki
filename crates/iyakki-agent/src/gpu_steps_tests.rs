@@ -622,3 +622,45 @@ fn the_firmware_search_path_is_set_at_every_start_even_when_the_cdi_specs_are_al
     // and nothing is written when it is right already
     assert!(ensure_runtime(&f.root, &f.data, &mut |_a: &[String]| out(0, "")).iter().all(|x| !x.as_ref().is_ok_and(|l| l.contains("firmware search path"))));
 }
+
+#[test]
+fn lemonade_defaults_to_the_gpu_and_a_cpu_choice_is_kept_and_respected() {
+    let mut f = Fake::new("compute-choice");
+    f.amd();
+    f.lemonade = true;
+    f.pod_log = vulkan_log();
+    f.node_after = 1;
+    assert_eq!(lemonade_compute(&f.data), Compute::Gpu, "with nothing chosen it is the GPU");
+    set_lemonade_compute(&f.data, Compute::Cpu).unwrap();
+    assert_eq!(lemonade_compute(&f.data), Compute::Cpu);
+    run_vulkan(&mut f, W, P).unwrap();
+    assert!(!f.kubectl.iter().any(|k| k.contains("patch deployment lemonade")), "the GPU step leaves a CPU Lemonade alone");
+    assert!(f.said("runs on the CPU") || f.said("run on the CPU"));
+    // the choice applied now: GPU patches, CPU takes it away
+    f.kubectl.clear();
+    let m = apply_lemonade_compute(&mut f, Compute::Gpu).unwrap();
+    assert!(m.contains("GPU") && f.kubectl.iter().any(|k| k.contains("patch deployment lemonade") && k.contains("nvidia.com/gpu")), "{m} {:?}", f.kubectl);
+    f.kubectl.clear();
+    let m = apply_lemonade_compute(&mut f, Compute::Cpu).unwrap();
+    assert!(m.contains("CPU") && f.kubectl.iter().any(|k| k.contains("patch deployment lemonade") && k.contains("null")), "{m} {:?}", f.kubectl);
+    let _ = std::fs::remove_dir_all(&f.root);
+}
+
+#[test]
+fn a_lemonade_deployed_after_the_gpu_step_gets_the_gpu_again_unless_the_cpu_was_chosen() {
+    let mut f = Fake::new("compute-reapply");
+    f.amd();
+    f.lemonade = true;
+    f.node_after = 0;
+    reapply_lemonade_gpu(&mut f);
+    assert!(f.kubectl.iter().any(|k| k.contains("patch deployment lemonade")), "{:?}", f.kubectl);
+    f.kubectl.clear();
+    set_lemonade_compute(&f.data, Compute::Cpu).unwrap();
+    reapply_lemonade_gpu(&mut f);
+    assert!(!f.kubectl.iter().any(|k| k.contains("patch deployment lemonade")));
+    // no GPU step installed: nothing to give, said plainly
+    f.node_gpus = 0;
+    let m = apply_lemonade_compute(&mut f, Compute::Gpu).unwrap();
+    assert!(m.contains("no GPU step"), "{m}");
+    let _ = std::fs::remove_dir_all(&f.root);
+}

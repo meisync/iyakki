@@ -357,6 +357,8 @@ pub fn bring_up_basic(conf_path: &Path, sys_class_net: &Path, known: &Path) -> R
     Ok(execute(&plan(&cfg, &basic_ifaces(&list_ifaces(sys_class_net)))))
 }
 
+/// The kernel's network interface folder.
+pub const SYS_CLASS_NET: &str = "/sys/class/net";
 /// Where the networks joined from Settings are kept.
 pub const KNOWN_WIFI: &str = "/var/lib/iyakki/wifi.json";
 

@@ -313,7 +313,7 @@ impl One {
 
 /// Turn the finger gestures on for the real backends, unless `iyakki.touchscroll=0` is on the kernel command line.
 pub fn init_from_cmdline() {
-    let cmd = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let cmd = iyakki_storage::cmdline_text();
     let off = cmd.split_whitespace().any(|w| w == "iyakki.touchscroll=0");
     enable_gestures_by_default(!off);
 }

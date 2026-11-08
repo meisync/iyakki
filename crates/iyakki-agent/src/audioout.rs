@@ -1052,7 +1052,7 @@ pub fn watch_wait(uptime: Duration) -> Duration {
 }
 
 fn uptime() -> Duration {
-    let up = read("/proc/uptime").split_whitespace().next().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1e9);
+    let up = crate::sysinfo::uptime_f64(crate::sysinfo::proc_root()).unwrap_or(1e9);
     Duration::from_secs_f64(up.clamp(0.0, 1e9))
 }
 

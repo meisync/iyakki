@@ -3,7 +3,7 @@
 //! `BOUNDARY.md`. Nothing here ever runs on its own: the Touch Bar code calls it from a background thread and only for the device whose
 //! id was read from sysfs.
 //!
-//! Safety rules kept here: the node opened is the one sysfs named, and its own device descriptor is read back and must be `05ac:8302`
+//! Safety rules kept here (the HID protocol switch at the end follows them for its own device): the node opened is the one sysfs named, and its own device descriptor is read back and must be `05ac:8302`
 //! before any ioctl; the claim fails (EBUSY) rather than taking an interface from another driver (there is no "disconnect driver"
 //! request in this file); a reset is only sent to a node that passed both checks.
 
@@ -245,5 +245,125 @@ mod tests {
         assert!(u.claim(1).is_err(), "a plain file is not a usbfs node");
         assert!(u.reset().is_err());
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+// ---------------------------------------------------------------- HID boot protocol (KI-077)
+//
+// A USB HID touch controller with a boot-protocol mouse interface can be switched to BOOT protocol by the firmware (EDK2-style firmware,
+// Apple's included, binds every boot mouse for its own menus and sends SET_PROTOCOL(boot)). Linux's usbhid never sends SET_PROTOCOL(report)
+// (it only sets idle), and a cheap controller keeps the protocol across bus resets, re-enumeration and driver rebinds: only a power loss
+// (the cable replug) puts it back. In boot protocol the multitouch interface stays silent. `hid_set_report_protocol` sends the one
+// class request the HID specification defines for this (SET_PROTOCOL, bRequest 0x0b, wValue 1 = report protocol) to the named
+// interfaces of the one device named by its node, after reading the device descriptor back and checking vendor and product.
+// Three more usbfs requests: DISCONNECT_CLAIM (the kernel driver is detached from that interface and the interface claimed, the
+// request needs the claim), CONTROL, and IOCTL(CONNECT) which hands the interface back to the kernel driver.
+
+/// `struct usbdevfs_ctrltransfer`
+#[repr(C)]
+pub struct Ctrl {
+    pub request_type: u8,
+    pub request: u8,
+    pub value: u16,
+    pub index: u16,
+    pub length: u16,
+    pub timeout: u32,
+    pub data: *mut libc::c_void,
+}
+
+/// `struct usbdevfs_disconnect_claim`
+#[repr(C)]
+pub struct DisconnectClaim {
+    pub interface: u32,
+    pub flags: u32,
+    pub driver: [u8; 256],
+}
+
+/// `struct usbdevfs_ioctl`
+#[repr(C)]
+pub struct IoctlArg {
+    pub ifno: i32,
+    pub ioctl_code: i32,
+    pub data: *mut libc::c_void,
+}
+
+pub const USBDEVFS_CONTROL: u32 = ioc(RW, 0, std::mem::size_of::<Ctrl>() as u32);
+pub const USBDEVFS_IOCTL: u32 = ioc(RW, 18, std::mem::size_of::<IoctlArg>() as u32);
+pub const USBDEVFS_CONNECT: u32 = ioc(NONE, 23, 0);
+pub const USBDEVFS_DISCONNECT_CLAIM: u32 = ioc(READ, 27, std::mem::size_of::<DisconnectClaim>() as u32);
+/// HID class request `SET_PROTOCOL` and the value for the report protocol (HID 1.11, 7.2.6).
+pub const HID_SET_PROTOCOL: u8 = 0x0b;
+pub const HID_REPORT_PROTOCOL: u16 = 1;
+/// bmRequestType: host to device, class, interface.
+pub const HID_CLASS_INTERFACE_OUT: u8 = 0x21;
+
+/// The control request that puts interface `interface` into report protocol.
+pub fn set_report_protocol_request(interface: u8) -> Ctrl {
+    Ctrl { request_type: HID_CLASS_INTERFACE_OUT, request: HID_SET_PROTOCOL, value: HID_REPORT_PROTOCOL, index: interface as u16, length: 0, timeout: 1000, data: std::ptr::null_mut() }
+}
+
+/// Send SET_PROTOCOL(report) to each of `interfaces` of the device at `node` (`/dev/bus/usb/BBB/DDD`), whose descriptor must read back
+/// as `vendor:product`. Returns one sentence per interface (what happened), or the error that stopped everything before the first request.
+pub fn hid_set_report_protocol(node: &Path, vendor: u16, product: u16, interfaces: &[u8]) -> Result<Vec<String>, UsbError> {
+    let mut file = std::fs::OpenOptions::new().read(true).write(true).open(node).map_err(|e| UsbError::from_errno(e.raw_os_error().unwrap_or(5)))?;
+    let mut d = [0u8; 18];
+    file.read_exact(&mut d).map_err(|_| UsbError::Other(5))?;
+    let (v, p) = (u16::from_le_bytes([d[8], d[9]]), u16::from_le_bytes([d[10], d[11]]));
+    if v != vendor || p != product {
+        return Err(UsbError::Other(19));
+    }
+    let fd = file.as_raw_fd();
+    let mut out = Vec::new();
+    for &i in interfaces {
+        let mut dc = DisconnectClaim { interface: i as u32, flags: 0, driver: [0; 256] };
+        // SAFETY: each request takes a pointer to one struct of the matching layout, alive for the call; `data` is null and `length` 0,
+        // so the kernel reads and writes no buffer.
+        let r = unsafe { libc::ioctl(fd, USBDEVFS_DISCONNECT_CLAIM as _, &mut dc as *mut DisconnectClaim) };
+        if r < 0 {
+            out.push(format!("interface {i}: cannot take it from its driver ({:?})", last_error()));
+            continue;
+        }
+        let mut c = set_report_protocol_request(i);
+        let r = unsafe { libc::ioctl(fd, USBDEVFS_CONTROL as _, &mut c as *mut Ctrl) };
+        let what = if r < 0 { format!("interface {i}: SET_PROTOCOL(report) refused ({:?})", last_error()) } else { format!("interface {i}: report protocol set") };
+        let mut rel = i as u32;
+        unsafe { libc::ioctl(fd, USBDEVFS_RELEASEINTERFACE as _, &mut rel as *mut u32) };
+        let mut back = IoctlArg { ifno: i as i32, ioctl_code: USBDEVFS_CONNECT as i32, data: std::ptr::null_mut() };
+        let r = unsafe { libc::ioctl(fd, USBDEVFS_IOCTL as _, &mut back as *mut IoctlArg) };
+        out.push(if r < 0 { format!("{what}; the kernel driver did not take the interface back ({:?})", last_error()) } else { what });
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    #[test]
+    fn the_usbfs_structures_have_the_kernels_layout_and_request_numbers() {
+        assert_eq!(std::mem::size_of::<Ctrl>(), 24); // 8 bytes of fields, 4 of timeout, the pointer 8-aligned at 16
+        assert_eq!(std::mem::size_of::<DisconnectClaim>(), 264);
+        assert_eq!(std::mem::size_of::<IoctlArg>(), 16);
+        assert_eq!(USBDEVFS_CONTROL, 0xc018_5500); // _IOWR(U, 0, 24 bytes), the value libusb uses on x86-64
+        assert_eq!(USBDEVFS_IOCTL, 0xc010_5512);
+        assert_eq!(USBDEVFS_CONNECT, 0x5517);
+        assert_eq!(USBDEVFS_DISCONNECT_CLAIM, 0x8108_551b);
+    }
+
+    #[test]
+    fn the_set_protocol_request_is_the_hid_class_request_for_report_protocol_on_that_interface() {
+        let c = set_report_protocol_request(2);
+        assert_eq!((c.request_type, c.request, c.value, c.index, c.length), (0x21, 0x0b, 1, 2, 0));
+        assert!(c.data.is_null() && c.timeout > 0);
+    }
+
+    #[test]
+    fn a_node_that_is_not_the_named_device_is_refused_before_any_request() {
+        let d = std::env::temp_dir().join(format!("iyakki-usbfs-proto-{}", std::process::id()));
+        let mut bytes = vec![0u8; 18];
+        bytes[8..12].copy_from_slice(&[0x40, 0x1a, 0x01, 0x01]); // 1a40:0101, a hub, not the touch screen
+        std::fs::write(&d, &bytes).unwrap();
+        assert!(matches!(hid_set_report_protocol(&d, 0x27c0, 0x0859, &[2]), Err(UsbError::Other(19))));
+        let _ = std::fs::remove_file(&d);
     }
 }

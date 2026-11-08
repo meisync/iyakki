@@ -240,6 +240,62 @@ pub fn shared_memory_dir() -> std::path::PathBuf {
     }
 }
 
+/// The real `/proc` folder (the one place the tiles and services get it from; tests pass a made-up root instead).
+pub fn proc_root() -> &'static Path {
+    Path::new("/proc")
+}
+
+/// The real `/sys` folder.
+pub fn sys_root() -> &'static Path {
+    Path::new("/sys")
+}
+
+/// The kernel's network interface folder (`/sys/class/net`): one folder per interface.
+pub fn net_class_root() -> &'static Path {
+    Path::new("/sys/class/net")
+}
+
+/// The kernel command line (`<proc>/cmdline`); empty when unreadable.
+pub fn cmdline(proc: &Path) -> String {
+    iyakki_storage::cmdline_in(proc)
+}
+
+/// Seconds since boot with the fraction, from `<proc>/uptime`; `None` when unreadable.
+pub fn uptime_f64(proc: &Path) -> Option<f64> {
+    iyakki_storage::uptime_in(proc)
+}
+
+/// `MemAvailable` of this machine in bytes (`None` when the line is missing; no fallback to free memory).
+pub fn mem_available_bytes() -> Option<u64> {
+    mem_available_in(proc_root())
+}
+
+fn mem_available_in(proc: &Path) -> Option<u64> {
+    let t = std::fs::read_to_string(proc.join("meminfo")).ok()?;
+    t.lines().find_map(|l| l.strip_prefix("MemAvailable:")).and_then(|v| v.split_whitespace().next()).and_then(|n| n.parse::<u64>().ok()).map(|kb| kb * 1024)
+}
+
+/// Whole seconds since boot on this machine (0 when unreadable).
+pub fn uptime_now() -> u64 {
+    uptime_secs(&SysRoots::real())
+}
+
+/// Installed memory in whole kibibytes (0 when unreadable).
+pub fn mem_total_kb(r: &SysRoots) -> u64 {
+    memory(r).total / 1024
+}
+
+/// The machine's model (`<sys>/class/dmi/id/product_name`), trimmed; empty when unknown.
+pub fn product_name(sys: &Path) -> String {
+    read(&sys.join("class/dmi/id/product_name")).trim().to_string()
+}
+
+/// The user and group that own this process (`<proc>/self`), or root when unreadable.
+pub fn self_owner(proc: &Path) -> (u32, u32) {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(proc.join("self")).map(|m| (m.uid(), m.gid())).unwrap_or((0, 0))
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -335,5 +391,32 @@ pub mod tests {
         // the real machine can be read without panicking
         let real = SysRoots::real();
         assert!(memory(&real).total > 0 && !processes(&real).is_empty() && cpu_count(&real) >= 1);
+    }
+
+    #[test]
+    fn kernel_helpers_read_from_the_given_roots() {
+        let r = machine("helpers");
+        std::fs::write(r.proc.join("cmdline"), "quiet iyakki.x=1\n").unwrap();
+        assert_eq!(cmdline(&r.proc), "quiet iyakki.x=1\n");
+        assert_eq!(cmdline(&r.proc.join("nowhere")), "");
+        assert_eq!(mem_total_kb(&r), 8_000_000);
+        std::fs::create_dir_all(r.sys.join("class/dmi/id")).unwrap();
+        std::fs::write(r.sys.join("class/dmi/id/product_name"), "MacBookPro14,1\n").unwrap();
+        assert_eq!(product_name(&r.sys), "MacBookPro14,1");
+        assert_eq!(product_name(&r.proc.join("nowhere")), "");
+        std::fs::remove_file(r.proc.join("self")).unwrap();
+        std::fs::create_dir_all(r.proc.join("self")).unwrap();
+        let m = std::fs::metadata(r.proc.join("self")).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(self_owner(&r.proc), (m.uid(), m.gid()));
+        assert_eq!(self_owner(&r.proc.join("nowhere")), (0, 0));
+        assert_eq!(uptime_f64(&r.proc), Some(93784.55));
+        assert_eq!(uptime_f64(&r.proc.join("nowhere")), None);
+        assert_eq!(mem_available_in(&r.proc), Some(6_000_000 * 1024));
+        std::fs::write(r.proc.join("meminfo"), "MemTotal: 1 kB\nMemFree: 1 kB\n").unwrap();
+        assert_eq!(mem_available_in(&r.proc), None, "no MemAvailable line, no guess");
+        assert_eq!(net_class_root(), Path::new("/sys/class/net"));
+        assert_eq!(proc_root(), Path::new("/proc"));
+        assert_eq!(sys_root(), Path::new("/sys"));
     }
 }

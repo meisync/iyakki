@@ -25,8 +25,7 @@ pub(super) fn gb(b: Option<u64>) -> String {
 
 /// `MemAvailable` of this machine in bytes.
 pub fn meminfo_available() -> Option<u64> {
-    let t = std::fs::read_to_string("/proc/meminfo").ok()?;
-    t.lines().find_map(|l| l.strip_prefix("MemAvailable:")).and_then(|v| v.split_whitespace().next()).and_then(|n| n.parse::<u64>().ok()).map(|kb| kb * 1024)
+    crate::sysinfo::mem_available_bytes()
 }
 
 // ------------------------------------------------------------------------------------------------ the split

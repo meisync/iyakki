@@ -494,11 +494,23 @@ pub fn empty_state(g: &mut Gfx, r: R, s: f32, icon: Icon, title: &str, hint: &st
     }
 }
 
+static FAILURE_REWRITER: std::sync::OnceLock<fn(&str) -> String> = std::sync::OnceLock::new();
+
+/// The shell registers how a failure line is reworded (`iyakki_storage::loss::reword`: a lost boot drive is named; healthy: unchanged).
+/// The toolkit has no `iyakki-*` dependency, so it cannot call that itself. Set once; a second call is ignored.
+pub fn set_failure_rewriter(f: fn(&str) -> String) {
+    let _ = FAILURE_REWRITER.set(f);
+}
+
+fn reword_failure(text: &str) -> String {
+    FAILURE_REWRITER.get().map_or_else(|| text.to_string(), |f| f(text))
+}
+
 /// The answer to the last action, one line: a coloured dot and the text.
 pub fn status_line(g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, text: &str, ok: bool) {
     let c = if ok { OK } else { ERR };
     // every app's failure line: an I/O error caused by a lost boot drive names the drive (iyakki_storage::loss, healthy: unchanged)
-    let text = if ok { text.to_string() } else { iyakki_storage::loss::reword(text) };
+    let text = if ok { text.to_string() } else { reword_failure(text) };
     let text = text.as_str();
     // not colour alone: a tick in a disc for success, an exclamation mark in a disc for a problem
     let (cx, cy) = (x + 7.0 * s, y + 8.0 * s);

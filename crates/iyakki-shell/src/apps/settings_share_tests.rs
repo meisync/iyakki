@@ -438,3 +438,53 @@ fn there_is_no_qr_code_when_there_is_no_hotspot() {
     assert_eq!(dark, 0);
     assert!(white < 2000, "no white square: {white}");
 }
+
+#[test]
+fn the_hotspot_name_and_password_are_changed_from_the_page_checked_audited_without_the_password_and_the_form_fits_four_sizes() {
+    let cx = admin("sharewifi1");
+    let (mut a, _) = page(&cx, machine());
+    let mem = Arc::new(MemBackend::new(machine(), true));
+    a.share.backend = Some(mem.clone());
+    // key n opens the form with the current name and an empty (kept) password
+    press(&mut a, &cx, 'n');
+    let Some(Modal::Form(FormKind::HotspotWifi, f)) = a.modal.as_ref() else { panic!("the form opens") };
+    assert_eq!(f.value(0), "IYAKKI-TEST");
+    assert!(f.raw(1).is_empty());
+    for (w, h, s) in [(1280u32, 720u32, 1.0f32), (1920, 1080, 1.5), (1024, 600, 0.8), (800, 480, 0.62)] {
+        let mut g = Gfx::new(w, h);
+        a.render(&mut g, R::new(0.0, 46.0 * s, w as f32, h as f32 - 46.0 * s), s, &cx, 0);
+        assert!(g.layout_log.texts.iter().any(|t| t.3.contains("Wi-Fi hotspot name and password")), "{w}x{h}: the form is drawn");
+        for hit in g.hits.iter().filter(|x| x.rect.w > 0.0) {
+            let r = hit.rect;
+            assert!(r.x >= -0.5 && r.y >= -0.5 && r.x + r.w <= w as f32 + 0.5 && r.y + r.h <= h as f32 + 0.5, "{w}x{h}: {:?} {:?}", hit.label, r);
+        }
+    }
+    a.modal = None;
+    let form = |name: &str, pw: &str| {
+        let mut f = Form::new("x").text("Network name", "", "").secret("Password", "");
+        f.set_value(0, name);
+        f.set_value(1, pw);
+        f
+    };
+    // refused: a bad name, a short password; nothing changes
+    assert!(a.hotspot_wifi_submit(&cx, &form("", "long enough pw")).is_err());
+    assert!(a.hotspot_wifi_submit(&cx, &form("Cafe", "short")).is_err());
+    assert_eq!(mem.hotspot().unwrap(), ("IYAKKI-TEST".to_string(), "first password".to_string()));
+    // a new name keeps the password; a new password is stored; the audit line never holds it
+    a.hotspot_wifi_submit(&cx, &form("Cafe", "")).unwrap();
+    assert_eq!(mem.hotspot().unwrap(), ("Cafe".to_string(), "first password".to_string()));
+    let said = a.hotspot_wifi_submit(&cx, &form("Cafe", "second password")).unwrap();
+    assert!(said.contains("next time sharing starts"));
+    assert_eq!(mem.hotspot().unwrap().1, "second password");
+    let log = cx.audit.recent(20).join("\n");
+    assert!(log.contains("settings.share.wifi") && log.contains("name IYAKKI-TEST -> Cafe; password kept") && log.contains("password changed"), "{log}");
+    assert!(!log.contains("second password") && !log.contains("first password"), "{log}");
+    // only an administrator
+    let mut user = admin("sharewifi2");
+    user.session.role = iyakki_sec::policy::Role::User;
+    user.session.policy = iyakki_sec::policy::Role::User.template();
+    let (mut u, _) = page(&admin("sharewifi3"), machine());
+    u.share.backend = Some(mem.clone());
+    assert!(u.hotspot_wifi_submit(&user, &form("Evil", "evil password")).is_err());
+    assert_eq!(mem.hotspot().unwrap().0, "Cafe");
+}

@@ -103,17 +103,22 @@ fn marker_name(id: &str) -> String {
 }
 
 static TRIES: Mutex<Option<HashMap<String, u32>>> = Mutex::new(None);
+static SET_THIS_START: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
 
-/// One look: every card without a marker gets its capture defaults, once. `amixer` runs `amixer <args>` and returns its text; `markers` is the
+/// One look: every card not yet set in this start of IYAKKI gets its capture defaults, once per start. `amixer` runs `amixer <args>` and returns its text; `markers` is the
 /// folder on the data volume. Returns one log line per card that was set up.
 pub fn step(proc_root: &Path, markers: &Path, amixer: &dyn Fn(&[String]) -> Result<String, String>) -> Vec<String> {
     let mut lines = Vec::new();
     let text = std::fs::read_to_string(proc_root.join("asound/cards")).unwrap_or_default();
     for (n, id) in cards(&text) {
         let marker = markers.join(marker_name(&id));
-        if marker.exists() {
+        // nothing saves the mixer (no alsactl state), so every start begins muted again: the defaults go back once per start of IYAKKI, not once per card ever
+        // (the marker only says whether the card was seen before, for the log line)
+        let key = format!("{}:{id}", markers.display());
+        if SET_THIS_START.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).contains(&key) {
             continue;
         }
+        let first = !marker.exists();
         let mut tries = TRIES.lock().unwrap_or_else(|e| e.into_inner());
         let t = tries.get_or_insert_with(HashMap::new).entry(format!("{}:{id}", markers.display())).or_insert(0);
         if *t >= GIVE_UP_AFTER {
@@ -142,9 +147,10 @@ pub fn step(proc_root: &Path, markers: &Path, amixer: &dyn Fn(&[String]) -> Resu
             }
         }
         if ok > 0 {
+            SET_THIS_START.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(key);
             let _ = std::fs::create_dir_all(markers);
             let _ = std::fs::write(&marker, format!("{LEVEL}\n"));
-            lines.push(format!("sound: card {n} ({id}): microphone input set to {LEVEL} % and switched on for {ok} of {} capture control(s), once", controls.len()));
+            lines.push(format!("sound: card {n} ({id}): microphone input set to {LEVEL} % and switched on for {ok} of {} capture control(s){}", controls.len(), if first { ", first time" } else { ", again after the start" }));
         }
     }
     lines
@@ -153,7 +159,9 @@ pub fn step(proc_root: &Path, markers: &Path, amixer: &dyn Fn(&[String]) -> Resu
 // ------------------------------------------------------------------------------------------------ playback
 
 /// The playback level given once to a card's hardware volume, in percent (the IYAKKI volume, one level above, then sets the loudness).
-pub const PLAY_LEVEL: u32 = 70;
+pub const PLAY_LEVEL: u32 = 100;
+/// The most a start gives the headphone output by itself: loud into the ears, and the person can raise it in Settings -> Sound.
+pub const HEADPHONE_LEVEL: u32 = 80;
 /// The output controls of a laptop codec that carry sound to the speakers or the headphones. `Mic`, `Line`, `CD`, `Beep` and the like are left alone:
 /// switching their playback on would feed the microphone back into the speakers.
 const OUTPUT_NAMES: [&str; 10] = ["Master", "Headphone", "Speaker", "PCM", "Front", "Line Out", "Surround", "Center", "LFE", "Side"];
@@ -178,12 +186,18 @@ pub fn playback_controls(scontents: &str) -> Vec<Control> {
 
 /// The `amixer` arguments that switch every output on (`unmute`), and, when `volume` is true, set it to [`PLAY_LEVEL`] first.
 pub fn playback_commands(controls: &[Control], volume: bool) -> Vec<Vec<String>> {
+    playback_commands_at(controls, volume.then_some(PLAY_LEVEL))
+}
+
+/// Like [`playback_commands`] with the level to set, or `None` to only switch the outputs on.
+pub fn playback_commands_at(controls: &[Control], level: Option<u32>) -> Vec<Vec<String>> {
     controls
         .iter()
         .map(|c| {
             let mut a = vec!["-q".to_string(), "sset".to_string(), format!("{},{}", c.name, c.index)];
-            if c.volume && volume {
-                a.push(format!("{PLAY_LEVEL}%"));
+            if let (true, Some(level)) = (c.volume, level) {
+                let level = if c.name == "Headphone" { level.min(HEADPHONE_LEVEL) } else { level };
+                a.push(format!("{level}%"));
             }
             if c.switch {
                 a.push("unmute".to_string());
@@ -219,7 +233,9 @@ pub fn playback_step(proc_root: &Path, markers: &Path, amixer: &dyn Fn(&[String]
         let mut ok = 0;
         // the hardware level is not saved by anything (no alsactl state), so every start begins at the kernel's default, often 0 %: it goes to PLAY_LEVEL
         // each time, and the IYAKKI volume is what the person turns
-        for cmd in playback_commands(&controls, true) {
+        // a level the person chose in Settings is kept per card and comes back here
+        let level = iyakki_devctl::saved_level(markers, &id).unwrap_or(PLAY_LEVEL);
+        for cmd in playback_commands_at(&controls, Some(level)) {
             let mut args = vec!["-c".to_string(), c.clone()];
             args.extend(cmd);
             if amixer(&args).is_ok() {
@@ -231,7 +247,7 @@ pub fn playback_step(proc_root: &Path, markers: &Path, amixer: &dyn Fn(&[String]
             let _ = std::fs::create_dir_all(markers);
             let _ = std::fs::write(&marker, format!("{PLAY_LEVEL}\n"));
         }
-        lines.push(format!("sound: card {n} ({id}): output switched on and set to {PLAY_LEVEL} % for {ok} of {} control(s){}", controls.len(), if first { " (first time)" } else { "" }));
+        lines.push(format!("sound: card {n} ({id}): output switched on and set to {level} % for {ok} of {} control(s){}", controls.len(), if first { " (first time)" } else { "" }));
     }
     lines
 }
@@ -269,7 +285,7 @@ mod tests {
     fn outputs_are_switched_on_and_the_microphone_playback_is_left_off() {
         let c = playback_controls(SCONTENTS);
         assert_eq!(c.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Master"], "Mic playback would feed back; IYAKKI is the software volume");
-        assert_eq!(playback_commands(&c, true)[0], ["-q", "sset", "Master,0", "70%", "unmute"]);
+        assert_eq!(playback_commands(&c, true)[0], ["-q", "sset", "Master,0", "100%", "unmute"]);
         assert_eq!(playback_commands(&c, false)[0], ["-q", "sset", "Master,0", "unmute"], "after the first time only the switch");
     }
 
@@ -287,11 +303,31 @@ mod tests {
         let markers = d.join("m");
         let l = playback_step(&d.join("proc"), &markers, &amixer);
         assert!(l.len() == 1 && l[0].contains("first time"), "{l:?}");
-        assert!(calls.borrow().iter().any(|c| c == "-c 1 -q sset Master,0 70% unmute"), "{:?}", calls.borrow());
+        assert!(calls.borrow().iter().any(|c| c == "-c 1 -q sset Master,0 100% unmute"), "{:?}", calls.borrow());
         assert!(markers.join("Generic.out").exists());
         // the same start does not touch it again
         calls.borrow_mut().clear();
         assert!(playback_step(&d.join("proc"), &markers, &amixer).is_empty() && calls.borrow().is_empty());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_level_the_person_chose_comes_back_at_the_next_start() {
+        let d = std::env::temp_dir().join(format!("iyakki-playlevel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("proc/asound")).unwrap();
+        std::fs::write(d.join("proc/asound/cards"), " 3 [Chosen          ]: HDA-Intel - HD-Audio\n").unwrap();
+        let markers = d.join("m");
+        iyakki_devctl::remember_level(&markers, "Chosen", 60);
+        let calls = RefCell::new(Vec::<String>::new());
+        let amixer = |a: &[String]| -> Result<String, String> {
+            calls.borrow_mut().push(a.join(" "));
+            Ok(if a.last().map(String::as_str) == Some("scontents") { SCONTENTS.to_string() } else { String::new() })
+        };
+        let l = playback_step(&d.join("proc"), &markers, &amixer);
+        assert!(l[0].contains("set to 60 %"), "{l:?}");
+        assert!(calls.borrow().iter().any(|c| c == "-c 3 -q sset Master,0 60% unmute"), "{:?}", calls.borrow());
+        assert_eq!(iyakki_devctl::card_id(&d.join("proc"), 3).as_deref(), Some("Chosen"));
         std::fs::remove_dir_all(&d).ok();
     }
 

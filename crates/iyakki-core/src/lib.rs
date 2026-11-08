@@ -74,7 +74,7 @@ pub fn detect_env() -> HostEnv {
     }
     let rd = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
     classify_env(
-        &rd("/proc/cmdline"),
+        &iyakki_storage::cmdline_text(),
         &rd("/proc/1/cgroup"),
         std::path::Path::new("/.dockerenv").exists(),
         &rd("/sys/class/dmi/id/sys_vendor"),

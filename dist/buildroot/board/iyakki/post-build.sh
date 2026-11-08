@@ -65,7 +65,9 @@ done
 # image keeps no vendor firmware at all, so the mac and pc keep lists below are NOT used; release-firmware.keep is (default: only the
 # wireless-regdb files). The person installs what the computer asks for with the "Hardware firmware" item.
 REL=0; [ "${IYAKKI_IMAGE_PROFILE:-}" = release ] && REL=1
-if [ "$REL" = 0 ]; then
+# repack.sh restored the pruned modules and firmware from its cache (dist/buildroot/repack-cache.sh): do not prune again
+PRUNED=0; [ "${IYAKKI_FW_PRUNED:-0}" = 1 ] && PRUNED=1
+if [ "$REL" = 0 ] && [ "$PRUNED" = 0 ]; then
 case "${IYAKKI_VARIANT:-}" in
   mac-*|macweb-*)
     sh "$(dirname "$0")/prune-firmware.sh" "$(dirname "$0")/mac-firmware.keep" "$TARGET_DIR/lib/firmware"
@@ -76,7 +78,7 @@ fi
 # The PC image (variant "pc", made by repack.sh from the macweb recipe, docs/GPU-K3S.md): repack.sh has put the whole linux-firmware set in
 # /lib/firmware; keep the GPUs (NVIDIA GSP, all AMD, all Intel), the Wi-Fi, Bluetooth and Ethernet chips of ordinary PCs
 # (board/iyakki/pc-firmware.keep) and drop the rest. The Apple-only drivers of the Mac kernel stay as modules: they bind to nothing on a PC.
-if [ "$REL" = 0 ]; then
+if [ "$REL" = 0 ] && [ "$PRUNED" = 0 ]; then
 case "${IYAKKI_VARIANT:-}" in
   pc-*)
     # the Intel Wi-Fi files are chosen by what this kernel's iwlwifi asks for (iwlwifi-keep.sh), the rest by the static list
@@ -87,6 +89,15 @@ case "${IYAKKI_VARIANT:-}" in
     rm -f "$PCKEEP"
     ;;
 esac
+fi
+# repack.sh asked for a snapshot of the pruned modules and firmware (its cache): written whole or not at all
+if [ "$REL" = 0 ] && [ "$PRUNED" = 0 ] && [ -n "${IYAKKI_FW_CACHE_SAVE:-}" ] && [ -d "$TARGET_DIR/lib/modules" ] && [ -d "$TARGET_DIR/lib/firmware" ]; then
+  mkdir -p "$(dirname "$IYAKKI_FW_CACHE_SAVE")"
+  if (cd "$TARGET_DIR" && tar --numeric-owner -cf - lib/modules lib/firmware | zstd -3 -T0 -q -f -o "$IYAKKI_FW_CACHE_SAVE.part") 2>/dev/null; then
+    mv -f "$IYAKKI_FW_CACHE_SAVE.part" "$IYAKKI_FW_CACHE_SAVE"; echo "post-build: modules and firmware cached in $IYAKKI_FW_CACHE_SAVE"
+  else
+    rm -f "$IYAKKI_FW_CACHE_SAVE.part"; echo "post-build: WARNING: could not write the repack cache $IYAKKI_FW_CACHE_SAVE" >&2
+  fi
 fi
 if [ "$REL" = 1 ]; then
   sh "$(dirname "$0")/release-profile.sh" apply "$TARGET_DIR"

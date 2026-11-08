@@ -264,7 +264,7 @@ impl DevicesPane {
 
     /// Does the page look at this computer's own sound cards (not a made-up tree)?
     pub fn real_sound(&self) -> bool {
-        self.env.roots.proc_ == std::path::Path::new("/proc")
+        self.env.roots.proc_ == iyakki_agent::sysinfo::proc_root()
     }
 
     /// The sound outputs seen at the last look.
@@ -869,10 +869,12 @@ fn advanced_sound_rows(s: &Snapshot, prefs: &iyakki_agent::audioout::SoundSettin
         );
     }
     let (true, Some(o)) = (advanced, choice.output.as_ref()) else { return };
-    if s.soft_card.is_some() {
+    // the boost is part of IYAKKI's own volume path: it is offered whenever that path is (or would be) in use, and otherwise shown with the way to turn it on
+    let hw_now = o.uses_hw_volume(prefs.volume_mode_for(&o.card_id));
+    if s.soft_card.is_some() || !hw_now || o.hw_volume.is_some() {
         let db = prefs.boost_for(&o.card_id);
         let mut r = DevRow::new(format!("Boost · {}", o.card_name), "Extra software gain for a card whose speakers are too quiet at 100 %. May distort: loud peaks are clipped. Take effect with the next sound. 0 dB is off.", Target::SoundBoost(o.card_id.clone())).with_slider(SliderVal { value: db as i64, min: 0, max: iyakki_agent::softvol::MAX_BOOST_DB as i64, step: 1, unit: " dB" });
-        r = if db > 0 { r.chip(format!("+{db} dB"), WARN) } else { r.chip("off", DIM) };
+        r = if hw_now && s.soft_card.is_none() { r.chip("needs Software volume control", DIM) } else if db > 0 { r.chip(format!("+{db} dB"), WARN) } else { r.chip("off", DIM) };
         rows.push(r);
     }
     if let Some(ctl) = &o.hw_volume {

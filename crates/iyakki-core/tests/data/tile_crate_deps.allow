@@ -1,0 +1,5 @@
+# Exceptions to the tile-crate rule (tests/dependency_ratchet.rs): a crate named `iyakki-tile-*` may depend on `iyakki-uikit` and nothing else
+# named `iyakki-*`, unless a line here says so. One line per exception: <tile crate> <dependency> <why, until when>.
+# The list may only shrink: a line that no longer matches a real dependency fails the test until it is removed.
+# (Empty: no tile crate exists yet; the first one will need `iyakki-core-api` for the App trait and its context, see
+# docs/development/COMPILE-SPLIT-PILOT.md.)

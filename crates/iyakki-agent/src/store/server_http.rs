@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::server::{Req, Resp, StoreServer};
+use super::server::{Body, Req, Resp, StoreServer, StreamResp};
 
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_CONNECTIONS: usize = 64;
@@ -37,6 +37,7 @@ fn status_text(c: u16) -> &'static str {
     match c {
         200 => "OK",
         201 => "Created",
+        206 => "Partial Content",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
@@ -47,7 +48,9 @@ fn status_text(c: u16) -> &'static str {
         413 => "Payload Too Large",
         422 => "Unprocessable Entity",
         429 => "Too Many Requests",
+        416 => "Range Not Satisfiable",
         431 => "Request Header Fields Too Large",
+        507 => "Insufficient Storage",
         _ => "Internal Server Error",
     }
 }
@@ -63,12 +66,53 @@ fn write_resp(s: &mut TcpStream, r: &Resp) {
     let _ = s.write_all(h.as_bytes()).and_then(|_| s.write_all(&r.body)).and_then(|_| s.flush());
 }
 
+/// Send an answer that may be a file: the head, then the file through a small buffer.
+fn write_stream(s: &mut TcpStream, r: &StreamResp) {
+    let mut h = format!("HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n", r.status, status_text(r.status), r.content_type, r.len);
+    for (k, v) in &r.headers {
+        if !v.contains(['\r', '\n']) {
+            h.push_str(&format!("{k}: {v}\r\n"));
+        }
+    }
+    h.push_str("\r\n");
+    if s.write_all(h.as_bytes()).is_err() {
+        return;
+    }
+    match &r.body {
+        Body::None => {}
+        Body::Bytes(b) => {
+            let _ = s.write_all(b);
+        }
+        Body::File(f) => {
+            let mut src = f.take(r.len);
+            let mut buf = vec![0u8; super::server::BLOB_BUF];
+            loop {
+                match src.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if s.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let _ = s.flush();
+}
+
 fn fail(s: &mut TcpStream, code: u16, msg: &str) {
     write_resp(s, &Resp { status: code, content_type: "application/json", body: format!("{{\"ok\":false,\"error\":{msg:?}}}").into_bytes(), headers: vec![] });
 }
 
+/// A request read from the socket: whole, or (a blob) only its head, with the body bytes already read and the length still to come.
+enum Parsed {
+    Whole(Req),
+    Blob { req: Req, early: Vec<u8>, len: u64 },
+}
+
 /// Read one request. Errors are answered on the socket and turned into `None`.
-fn read_request(s: &mut TcpStream, max_body: usize) -> Option<Req> {
+fn read_request(s: &mut TcpStream, max_body: usize) -> Option<Parsed> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
     let head_end = loop {
@@ -129,6 +173,11 @@ fn read_request(s: &mut TcpStream, max_body: usize) -> Option<Req> {
             }
         },
     };
+    if path.starts_with("/v1/blobs/") && matches!(method, "PUT" | "GET" | "HEAD") {
+        let mut early = buf[head_end + 4..].to_vec();
+        early.truncate(len);
+        return Some(Parsed::Blob { req: Req { method: method.to_string(), path, query, headers, body: Vec::new() }, early, len: len as u64 });
+    }
     if len > max_body + 1024 {
         fail(s, 413, "the body is too large");
         return None;
@@ -145,7 +194,7 @@ fn read_request(s: &mut TcpStream, max_body: usize) -> Option<Req> {
         }
     }
     body.truncate(len);
-    Some(Req { method: method.to_string(), path, query, headers, body })
+    Some(Parsed::Whole(Req { method: method.to_string(), path, query, headers, body }))
 }
 
 /// Serve on `listener` until `stop` is set. Returns when the listener is closed or stopped.
@@ -165,9 +214,26 @@ pub fn serve(server: Arc<StoreServer>, listener: TcpListener, stop: Arc<AtomicBo
                 live.fetch_add(1, Ordering::Relaxed);
                 let (srv, live2) = (server.clone(), live.clone());
                 std::thread::spawn(move || {
-                    if let Some(req) = read_request(&mut s, srv.config().max_body) {
-                        let resp = srv.handle(&req, &peer.ip().to_string());
-                        write_resp(&mut s, &resp);
+                    match read_request(&mut s, srv.config().max_body) {
+                        Some(Parsed::Whole(req)) => {
+                            let resp = srv.handle(&req, &peer.ip().to_string());
+                            write_resp(&mut s, &resp);
+                        }
+                        // a blob streams: the body is never held, in either direction
+                        Some(Parsed::Blob { req, early, len }) => {
+                            let ip = peer.ip().to_string();
+                            if req.method == "PUT" {
+                                let resp = {
+                                    let rest = len.saturating_sub(early.len() as u64);
+                                    let mut body = std::io::Cursor::new(early).chain((&s).take(rest));
+                                    srv.blob_put(&req, len, &mut body, &ip)
+                                };
+                                write_resp(&mut s, &resp);
+                            } else {
+                                write_stream(&mut s, &srv.blob_get(&req, &ip));
+                            }
+                        }
+                        None => {}
                     }
                     live2.fetch_sub(1, Ordering::Relaxed);
                 });
@@ -217,6 +283,19 @@ pub fn run_cli(args: &[String]) -> Result<(), String> {
     }
     if let Some(v) = flags.get("max-body-mib") {
         cfg.max_body = v.parse::<usize>().map_err(|_| "--max-body-mib is a number")?.clamp(1, 10) << 20;
+    }
+    // system components: the largest artifact (MiB) and per-component limits (`kernel=128,base=900`), the free disk kept beyond an upload
+    if let Some(v) = flags.get("max-component-mib") {
+        cfg.max_component = v.parse::<u64>().map_err(|_| "--max-component-mib is a number")?.clamp(1, 8192) << 20;
+    }
+    if let Some(v) = flags.get("component-caps") {
+        for part in v.split(',').filter(|p| !p.trim().is_empty()) {
+            let (name, mib) = part.split_once('=').ok_or("--component-caps is name=MiB,name=MiB")?;
+            cfg.component_caps.insert(name.trim().to_string(), mib.trim().parse::<u64>().map_err(|_| "--component-caps: MiB is a number")?.clamp(1, 8192) << 20);
+        }
+    }
+    if let Some(v) = flags.get("disk-margin-mib") {
+        cfg.disk_margin = v.parse::<u64>().map_err(|_| "--disk-margin-mib is a number")?.min(1 << 20) << 20;
     }
     cfg.read_only = bools.iter().any(|b| b == "read-only");
     cfg.allow_community = !bools.iter().any(|b| b == "require-trusted");

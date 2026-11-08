@@ -234,6 +234,19 @@ impl VoiceApp {
     // ------------------------------------------------------------------------------------------------ dictate
 
     fn draw_dictate(&mut self, g: &mut Gfx, body: R, s: f32, cx: &AppCx, tick: u64) {
+        // the Assistant pane: on the right of the transcript on wide windows, below the box on narrow ones, or a one-line opener when collapsed
+        let open = self.assist_open(cx);
+        let wide = body.w >= 700.0 * s;
+        let (body, side) = if open && wide {
+            let pw = (body.w * 0.35).max(260.0 * s);
+            (R::new(body.x, body.y, body.w - pw - 12.0 * s, body.h), Some(R::new(body.x + body.w - pw, body.y, pw, body.h)))
+        } else {
+            (body, None)
+        };
+        if let Some(r) = side {
+            self.draw_assist(g, r, s, tick);
+        }
+        let below = open && !wide;
         let (x, w) = (body.x, body.w);
         let mut y = body.y;
         let size = 14.0 * s;
@@ -241,7 +254,7 @@ impl VoiceApp {
         let recording = self.cap.is_some();
         // no microphone: say so, in words
         if self.mics.is_empty() && !recording {
-            let text = vd::no_mic_text_t2(&self.product, vd::t2_mic_hidden(std::path::Path::new("/proc")));
+            let text = vd::no_mic_text_t2(&self.product, vd::t2_mic_hidden(iyakki_agent::sysinfo::proc_root()));
             let h = para(g, 0.0, 0.0, w - 24.0 * s, size, TEXT, &text, 8, false);
             let card = R::new(x, y, w, h + 24.0 * s);
             fx::panel(g, card, s, WARN);
@@ -258,6 +271,46 @@ impl VoiceApp {
             let lx = x + g.text_width(size, "Microphone", Face::Sans) + 10.0 * s;
             let r = widgets::select_box(g, lx.min(x + w - 120.0 * s), y, mw.min(w - (lx - x) - 4.0 * s), s, &label, matches!(self.modal, Some(Modal::MicPick(_))), ACCENT, Event::Tab(T_MIC), "microphone");
             y += r.h + gap + 2.0 * s;
+        }
+
+        // Keep listening: after each pause the text is written and it listens again, until Stop
+        {
+            let on = cx.services.voice_settings().keep_listening;
+            let label = if on { "\u{2611} Keep listening" } else { "\u{2610} Keep listening" };
+            let bs = 13.0 * s;
+            let bw = g.button(x, y, bs, label, if on { OK } else { MUTED }, Event::Tab(T_KEEP));
+            g.text(x + bw + 10.0 * s, y + (bs * 2.1 - g.line_height(12.5 * s, Face::Sans)) / 2.0, 12.5 * s, DIM, "after each pause: write the text, then listen again until Stop", Face::Sans);
+            y += bs * 2.1 + gap;
+        }
+
+        // Correct my wording: each part is tidied by the chat assistant before it lands in the box; the last tidied part can be shown as heard
+        {
+            let on = cx.services.voice_settings().fix_wording;
+            let label = if on { "\u{2611} Correct my wording with the assistant" } else { "\u{2610} Correct my wording with the assistant" };
+            let bs = 13.0 * s;
+            let bw = g.button(x, y, bs, label, if on { OK } else { MUTED }, Event::Tab(T_FIX));
+            let mut nx = x + bw + 12.0 * s;
+            if let Some(f) = self.last_fix() {
+                let l = if f.showing_raw { "Undo wording" } else { "Show original" };
+                nx += g.button(nx, y, bs, l, ACCENT, Event::Tab(T_FIX_ORIG)) + 12.0 * s;
+            }
+            let ty = y + (bs * 2.1 - g.line_height(12.5 * s, Face::Sans)) / 2.0;
+            let room = (x + w - nx).max(40.0);
+            if let Some(t) = self.tidy_marker((tick / 10) as usize) {
+                g.text(nx, ty, 12.5 * s, MUTED, &t, Face::Sans);
+            } else if let Some(why) = &self.fix_note {
+                // why the words were kept stays here until the next answer or Clear
+                let t = g.fit(12.5 * s, why, Face::Sans, room);
+                g.text(nx, ty, 12.5 * s, crate::fx::AMBER, &t, Face::Sans);
+                g.hit(R::new(nx, ty, room, 18.0 * s), Event::Tick, why);
+            } else if self.last_fix().is_none() {
+                g.text(nx, ty, 12.5 * s, DIM, "punctuation, capitals and mishearings; your words stay yours", Face::Sans);
+            }
+            y += bs * 2.1 + gap;
+        }
+
+        if !open {
+            y += self.draw_assist_closed(g, x, y, s);
         }
 
         // bottom block
@@ -297,11 +350,16 @@ impl VoiceApp {
             }
         }
         let ty = y + ph + gap;
-        let (text_h, lh) = ((by - ty - gap - 18.0 * s).max(40.0 * s), g.line_height(15.0 * s, Face::Sans));
+        let pane_h = if below { ((by - ty - gap) * 0.62).max(190.0 * s) } else { 0.0 };
+        let (text_h, lh) = ((by - ty - gap - 18.0 * s - pane_h).max(40.0 * s), g.line_height(15.0 * s, Face::Sans));
         let rows = (((text_h - 18.0 * s) / lh) as usize).clamp(2, 40);
         self.transcript.min_rows = rows;
         self.transcript.max_rows = rows;
-        self.transcript.render(g, x, ty, w, s, 15.0 * s, 9.0 * s, 40.0 * s, self.focus == Focus::Transcript, tick, "The transcript appears here. You can edit it.", ACCENT, TRANS_AREA, "transcript", false, true);
+        let box_h = self.transcript.render(g, x, ty, w, s, 15.0 * s, 9.0 * s, 40.0 * s, self.focus == Focus::Transcript, tick, "The transcript appears here. You can edit it.", ACCENT, TRANS_AREA, "transcript", false, true);
+        if below {
+            let py = ty + box_h + gap;
+            self.draw_assist(g, R::new(x, py, w, (by - py - 2.0 * s).max(60.0 * s)), s, tick);
+        }
         self.dictate_bottom(g, x, by, w, s, cx, true);
     }
 
@@ -336,8 +394,8 @@ impl VoiceApp {
     fn draw_modal(&mut self, g: &mut Gfx, area: R, s: f32, _tick: u64) {
         match &self.modal {
             Some(Modal::Consent { text, dest, then }) => {
-                let listening = matches!(then, After::Record);
-                let title = if listening { "Send your voice to another computer?" } else { "Send this text to another computer?" };
+                let listening = matches!(then, After::Record | After::RecordSay);
+                let title = if matches!(then, After::Revise) { "Send your text to the assistant on another computer?" } else if matches!(then, After::RecordFix) { "Send your words to the assistant on another computer?" } else if listening { "Send your voice to another computer?" } else { "Send this text to another computer?" };
                 let p = fx::modal(g, area, s, 560.0 * s, 300.0 * s, WARN, false);
                 let y = fx::modal_title(g, p, s, title, WARN);
                 let lines = g.wrap(14.5 * s, text, Face::Sans, p.w - 52.0 * s);
@@ -353,7 +411,7 @@ impl VoiceApp {
                 g.button(p.x + 26.0 * s + w1 + 12.0 * s, by, 14.0 * s, "No", MUTED, Event::Tab(T_NO));
                 g.text(p.x + p.w - 150.0 * s, by + 6.0 * s, 12.5 * s, DIM, "y yes · Esc no", Face::Sans);
             }
-            Some(Modal::VoicePick(p)) | Some(Modal::MicPick(p)) => p.render(g, area, s, ACCENT),
+            Some(Modal::VoicePick(p)) | Some(Modal::MicPick(p)) | Some(Modal::LangPick(p)) => p.render(g, area, s, ACCENT),
             None => {}
         }
     }

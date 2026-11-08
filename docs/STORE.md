@@ -164,8 +164,14 @@ identity was fake (the review process, see 7), a user who accepts every warning.
   mirrors are tried in order.
 * **Caching.** A downloaded catalog is verified, then cached in `store/cache/`; offline the cache is used and labelled
   with its age. Folder catalogs are read live.
-* **Updates.** A "Check for updates" button; an optional daily check that runs when the tile is opened (off by default;
-  no background process, no telemetry, no identifiers in the request: a plain GET of two files).
+* **Updates.** A "Check for updates" button, and a daily check that runs in the background while an administrator is signed in
+  (a stable delay of up to an hour per device, and once at sign-in when the last look is older than a day). It asks only the stores and
+  the update list address that were added here (a private store, a portal, a folder with a web address); the built-in catalog is never
+  contacted and with nothing added nothing is fetched. No telemetry, no identifiers in the request: a plain GET of two files. It can be
+  turned off or set to "only on request" (Store Settings `o`, System update "How often", `iyakki dev config set store.daily_check
+  false`, or the assistant's `updates_settings_set`, which asks). When something is new the device leaves ONE inbox notice,
+  "Updates available: 3 apps, system 1107h", and the STORE tile and the top bar show the count; see UPDATES.md. Nothing is ever installed
+  by it.
 * **Visible only on request.** None of this is shown by default (see 6): the built-in catalog, the example apps and Discover appear
   when the catalog is switched on or a catalog is added. The assistant's `store_search` sees the same set.
 * **Built-in catalog.** The shipped skills (k3s, ten `lang-*`), the sample skills and MCP demo, the CLI catalog as
@@ -204,7 +210,7 @@ data and what uses it. Tags, groups and your own titles are section 16.
 **The catalog is off by default.** Discover (featured, new, categories, search, filters for Free/Paid, trust level, type),
 Publishers and the example apps appear only after an administrator switches *Show the catalog (coming soon)* on in Settings (key
 `g`) or adds a catalog (a web address, a folder or a USB stick), which switches it on by itself. Settings (administrators) also
-holds the catalogs, trusted keys, the daily check (off), installing from a file and adding a licence. Keys: arrows choose, Enter
+holds the catalogs, trusted keys, the daily check for updates (on by default, only for what you added; `o` switches it), installing from a file and adding a licence. Keys: arrows choose, Enter
 opens, Esc goes back, `/` searches, `i` installs from the catalog, `r` removes, `u` updates, `o` opens, `c` checks for news,
 Tab changes page.
 
@@ -239,6 +245,22 @@ heading was folded, and the installed and running k3s was not on the screen at a
     earlier, not running" and "found on this machine", a small **star** when it is recommended for this machine.
   The status line says it in words: *Running · v1.31.4*, *Installed · v26*, *Update to 1.38*, *Stopped*, *Not installed*,
   *Installing 40 %*, *Failed*.
+* **A step is only "installed" when it was checked** (`quickinstall.rs`, `StepEnv::verify`). Before a step writes its marker it asks for an
+  independent check of what you asked for: a program of the CLI list runs `--version`; a cluster item has all its pods Ready and its
+  Service has an address behind it; Kokoro and the voice pack are listed as downloaded by Lemonade; a GPU step still sees its resource on
+  the node; a firmware pack is read back from the data volume and every file matches its SHA-256; the browser audio and video add-on
+  passes its library check again and the marker names the source (built here, supplied, or the existing ffmpeg). A failed check fails
+  the step as *Verify failed: ...* and no marker is written. The marker keeps what was seen on a line of its own. Items with only their
+  own step's check so far: the registry, k3s itself (it waits for the node to be Ready), the Linux sandboxes, the Mac firmware and camera
+  jobs (their own read-back and "restart wanted" wording), Ollama on the host.
+* **A failed Retry is not hidden by an older install.** A job that fails or times out writes `<item>.failed` (the reason with its time)
+  in the Quick install folder; a success or a removal clears it. While it is there the status line says *installed earlier; the last
+  attempt failed: <reason>*, and the tile shows **Failed** with Retry, unless the cluster shows the item healthy right now. Every failure
+  line, in the job's log and on the tile, starts with its cause class: *Network problem*, *Timed out*, *Disk full*, *Licence or consent
+  needed*, *Dependency failed*, *Cluster not ready*, *Verify failed*, or the plain message when none fits
+  (`quickinstall_cause.rs`). The assistant sees the same words in `quick_install_status` and can install the restricted hardware firmware
+  with `hardware_firmware_install`: its card lists the files and the vendors' licences, and approving the card is your acceptance (the
+  assistant cannot accept for you; a changed list asks again).
 * **The popup** (a click or Enter on a tile; Esc, the close mark or a click outside closes it): the badge, the name, the category, the
   status line (*Installed v1.37 · Running · Update available v1.38*), what it is, and a table: *Size and time*, *Licence*, *Where it goes*,
   *Needs* ("Installs k3s first"), *Needed by* (what depends on it), *Memory*, then the notes (heavy for this machine, not runnable, found
@@ -423,10 +445,37 @@ Code: `store/server.rs` (requests, verification, catalog), `store/server_http.rs
 (the small binary), `catalog.rs` (pin, withdrawn packages).
 
 **What the server does.** `GET /catalog.json` (signed with the store's catalog key, serial up on every change), `GET /packages/<sha256>.iyp`
-(immutable, cached for a year), `GET /yanked.json` (signed), `GET /healthz`, `GET /v1/info` (name, key, fingerprint), `GET /` (a plain HTML
+(immutable, cached for a year), `GET /yanked.json` (signed), `GET /healthz`, `GET /v1/info` (name, key, fingerprint), `GET /v1/system.json` (the system announcement, below), `GET /` (a plain HTML
 page with no script, a content-security policy and a trust badge per app). `POST /v1/publish` takes the raw package or a multipart
 file part, with `Authorization: Bearer <token>`. `DELETE /v1/packages/<name>[/<version>]?reason=...` (administrator) withdraws a
 package. `POST /v1/publishers` and `GET /v1/publishers` (administrator) manage publishers. No CORS headers are ever sent; OPTIONS is refused.
+
+**The system announcement.** If the store's data folder holds a file `system.json` (`{"version": "...", "variant": "...", "notes": "...",
+"channel": "..."}`), `GET /v1/system.json` serves it as a document signed with the catalog key (the same signing helper as the catalog
+and `yanked.json`, purpose `system`, carrying the store id, the time and the key). No file: 404, meaning nothing is announced; a damaged
+file: 500. A device that added the store with its key checked can use `<store>/v1/system.json` as its update list (System update, "Use a
+store"): it accepts the document only when it names exactly the pinned key and the signature holds, and refuses an unsigned, re-keyed or
+tampered one; a store added without checking its key cannot announce anything. It only says which IYAKKI is newest; nothing is
+installed from it. Existing routes and the catalog are unchanged.
+
+**System components (kernel, boot, base, core, kernel-layer).** Separate from packages, so the text/base64 path and its 4-10 MiB caps are
+untouched (docs/development/COMPONENT-UPDATES-PLAN.md, COMPONENT-STORE-FINDINGS.md). Routes:
+
+| Route | Who | What |
+|---|---|---|
+| `PUT /v1/blobs/<sha256>?component=NAME` | administrator or publisher token | the bytes of an artifact or a delta, streamed to `incoming/<sha256>.part` through a 64 KiB buffer while the SHA-256 is computed, moved to `blobs/<sha256>` only when it equals the address; a wrong hash is 422 and nothing is kept. `Content-Length` is required (chunked is refused). A piece of a larger upload carries `Content-Range: bytes a-b/total` (the first piece starts at 0, later ones at the byte the store holds; otherwise 409 with `have`); the hash is checked when the last piece arrives. Limits: `--max-component-mib` (default 1024) and `--component-caps kernel=128,base=900`, 413 above; the free disk must hold the rest of the upload plus `--disk-margin-mib` (default 256), else 507. One upload per blob at a time (409). |
+| `GET /v1/blobs/<sha256>/part` | token | `{"have": n, "exists": bool}`: what the store holds of an unfinished upload (the publish command uses it to resume) |
+| `GET`, `HEAD /v1/blobs/<sha256>` | public (the address is the hash) | streamed from the file, `Range` (one range: `a-b`, `a-`, `-n`) and `If-Range` (the ETag is `"<sha256>"`), 206/416, `Cache-Control: public, max-age=31536000, immutable` |
+| `POST /v1/components` | administrator or publisher | list an entry for blobs already uploaded: `{component, version, sha256, size, requires, channel, built_from, install_path, delta:[{from_sha256, sha256, size}]}`. Refused when: the component is not one the store takes, the artifact or a delta is not on the store or has another size, a `requires` range does not parse (a component name needs a range such as `>=6.12`, `6.12..6.13`, `<2`, `1107`; any other name such as `abi` an exact text), the version is not newer than every version of that component in that channel (withdrawn ones count: a version is never reused), the component name belongs to another publisher, a delta does not start from a full artifact the store holds, the size is above the cap. |
+| `GET /v1/components.json` | public | the signed list (`sign_doc`, purpose `components`, the catalog key): live entries plus a `yanked` list of withdrawn ones. A device accepts it only with the pinned key |
+| `DELETE /v1/components/<component>[/<version>]?channel=&reason=` | administrator or the owner of the name | withdraw: the entry leaves the list and is named in `yanked` |
+| `POST /v1/components/retention?keep=3[&apply=1]` | administrator | the cleanup: keep the newest N live versions per component and channel and the deltas between them; withdrawn versions lose their files (the notice stays); uploads no entry uses (older than a day) and unfinished uploads (older than a week) go too. Without `apply=1` it only reports what would be removed and how many bytes |
+
+Publisher side: `iyakki store component publish|list|plan|yank|retention` (the token only from an environment variable; a clear-text address that is
+not private is refused; a blob goes up in 32 MiB pieces so only one piece is in memory). Device side: `store/components.rs` (plan: a delta from the
+installed file when the store has one for exactly that file, else the whole file; `requires` checked against what will be installed, a refusal names the part
+that goes first; resumable hash-checked download; hand-over as an update payload or a patch pack), and the assistant tool `components_status`
+(read-only). Nothing applies a component to a running system yet.
 
 **What a publish must pass.** The hash and the ed25519 signature (unsigned packages are refused), a kind from the allow-list (skill,
 tool, mcp, agent, template, theme, extension, tile), the size caps of the kind and `--max-body-mib`, a version newer than every version of that
@@ -646,8 +695,10 @@ types the item's name. Data means a folder under `<store>/appdata/<kind>/<scope>
 Roles are unchanged: a non-administrator cannot remove what is shared or a command-line tool, and an MCP server needs an administrator.
 
 **Checking for news.** *Check* (`c`) refreshes the catalogs and revocation lists and asks each installed command-line tool's vendor for its
-newest version, on a background thread; nothing is fetched otherwise. The daily check (STORE, Settings, `o`) stays off by default. The
-Installed page shows an **Updates N** chip, **Update all N (U)** opens a review, then runs one item at a time with progress and ends
+newest version, on a background thread; nothing is fetched otherwise. The daily check (STORE, Settings, `o`) is a real background timer, not a look when the tile is opened, and
+asks only the stores and update list address that were added (nothing is asked when none was). When it finds news it keeps one inbox
+notice (replaced in place, never stacked) and the count on the STORE tile and in the top bar; the count drops as soon as an update is
+installed. The Installed page shows an **Updates N** chip (with a line for a waiting system update when the chip is on), **Update all N (U)** opens a review, then runs one item at a time with progress and ends
 with a report. Tools that publish only "latest" (the pip and npm based ones) have no version number, so they say *no way to check*;
 *Update* still installs the newest. Limit: never run against a real catalog host or vendor, only folders and fake downloads.
 

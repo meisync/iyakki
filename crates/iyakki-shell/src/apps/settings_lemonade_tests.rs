@@ -351,6 +351,11 @@ fn the_header_counts_installed_and_available_and_the_provider_card_never_says_0_
     assert_eq!(SettingsApp::models_summary(&cx, &prov), "2 installed · 115 available");
     let g = draw(&mut a, &cx, 1280, 720);
     assert!(g.hits.iter().any(|h| h.label == "kokoro-v1"));
+    // where Lemonade runs is in the header, the GPU unless the person chose the CPU
+    assert!(a.has_text("runs on the GPU (G switches)"), "{:?}", a.lem_texts);
+    iyakki_agent::gpu_steps::set_lemonade_compute(cx.services.dir(), iyakki_agent::gpu_steps::Compute::Cpu).unwrap();
+    let _ = draw(&mut a, &cx, 1280, 720);
+    assert!(a.has_text("runs on the CPU (G switches)"), "{:?}", a.lem_texts);
     // no list yet: asks to read it; other providers say what they hold
     let none = ProviderCfg::new("lemonade-new", Kind::Lemonade);
     assert_eq!(SettingsApp::models_summary(&cx, &none), "models not read yet: press Test or All models");

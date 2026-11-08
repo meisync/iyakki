@@ -16,7 +16,7 @@ On the boot volume (the FAT partition `IYAKKI-BOOT`, which is the EFI System Par
 GRUB's menu gets "IYAKKI - new boot loader (test)" inside "More options...": `chainloader /EFI/iyakki-boot/loader.efi`. It is shown only on UEFI
 and only when `loader.efi` is on the volume, so BIOS starts, the live ISO and builds without the loader look exactly as before.
 It needs GRUB's `chain` module, which is in the EFI module list of `configs/iyakki_x86_64_defconfig` (a GRUB rebuild).
-GRUB stays the default unless the image is built with `IYAKKI_LOADER_DEFAULT=1` (next section). The plan to make the loader the default and remove GRUB from UEFI images (never from BIOS images until the loader
+Since 2026-11-07 the loader IS the default of every UEFI image build (`IYAKKI_LOADER_DEFAULT` defaults to 1, next section); `IYAKKI_LOADER_DEFAULT=0` keeps GRUB as the default, and a build that never built the loader program keeps GRUB with a message. The plan to make the loader the default and remove GRUB from UEFI images (never from BIOS images until the loader
 has a BIOS stage) is `docs/development/GRUB-REPLACEMENT-PLAN.md`.
 
 ## The menu (under the logo)
@@ -46,11 +46,11 @@ this boot loader" (`EFI/iyakki-boot/loader.prev.efi`), "Recovery (GRUB menu)" (`
 3. `board/iyakki/boot-splash.py` makes the picture from `crates/iyakki-shell/assets/logo.png` (the owner's logo) with the Python standard
    library only.
 
-## The loader as the default: `IYAKKI_LOADER_DEFAULT=1` (default 0)
+## The loader as the default: `IYAKKI_LOADER_DEFAULT` (default 1 since 2026-11-07; 0 keeps GRUB)
 
-With `IYAKKI_LOADER_DEFAULT=1` in the environment of the image build (`board/iyakki/post-image.sh` for the install template, `lean-image.sh`
+With `IYAKKI_LOADER_DEFAULT=1` (the default) in the environment of the image build (`board/iyakki/post-image.sh` for the install template, `lean-image.sh`
 for the lean image; the update pack is made from such an image and needs no option), `dist/buildroot/loader-default.sh` rearranges the
-boot volume after `boot-loader-stage.sh`. Without the option nothing below happens and the alpha images are what they were.
+boot volume after `boot-loader-stage.sh`. With `IYAKKI_LOADER_DEFAULT=0` nothing below happens and the image is laid out as the alpha images were (GRUB default). Owner decision 2026-11-07, after the HP, the Lenovo and the Macs booted through the loader: every pack made from now on carries the loader-default layout, and a pack of such an image moves a GRUB-default disk to loader-default by the rename rule below.
 
 ```
 shim path (the image is signed: IYAKKI_SB_KEY / IYAKKI_SB_CERT set)        plain path (no shim: unsigned image, or an internal disk)
@@ -123,6 +123,31 @@ The loader counts a start it chose by itself (`tries`, 9) and refills the count 
 started drawing (`iyakki_core::bootconfirm`: UEFI variable `BootConfirm`, vendor GUID of the loader, through efivarfs). After `tries` unconfirmed
 starts the loader switches to "previous", after `tries` more it stops and opens its menu with the reason on screen. Choosing by hand never spends a
 try. Details and the update path (`loader.prev.efi`, temp name and rename) are in the replacement plan.
+
+## The boot log on the volume (`EFI/iyakki-boot/last-boot.log`)
+
+A laptop has no serial port and the splash hides the text console, so the loader keeps every line it would have printed and writes
+them to `EFI/iyakki-boot/last-boot.log` on the boot volume (the root `/last-boot.log` when that directory is missing; nothing when the
+medium is read-only). It is written four times in a run, each time the whole log so far: after the device summary, when the entries
+are known, right before a start (the file's last line then says `log: about to start` and the line above it `start: iyakki kernel=...`:
+a kernel that never draws anything is still named), and after a start came back with its error. Added 2026-11-07 for the HP laptop that
+stopped where the Macs and the Lenovo did not; `iyakki-boot/tools/qemu-test.sh` (test a) reads the file back from the test disk.
+
+The log starts with a device summary (`hw:` lines, `crates/boot-uefi/src/hwlog.rs`), read only, nothing connected or changed:
+
+* `hw: firmware`: vendor, revision, UEFI version, Secure Boot, setup mode, TPM 2.0 protocol present or not;
+* `hw: BIOS`, `hw: machine`, `hw: board`: SMBIOS types 0, 1 and 2 (vendor, product, version, family; no serial numbers);
+* `hw: memory`: usable RAM, reserved, MMIO, the highest RAM address;
+* `hw: pci`: every PCI function with vendor:device, class and plain words (an Intel RAID-class function is flagged as VMD: the NVMe behind
+  it needs the `vmd` driver);
+* `hw: usb`: every USB interface with vendor:product, class and the firmware's device path;
+* `hw: disk` / `hw: partition`: size, block size, removable, read-only, whether the firmware can read a file system on it, device path;
+* `hw: screen`: each graphics output's resolution, mode count, pixel format and frame buffer;
+* `hw: input`: counts of keyboards, mice, touch screens (absolute pointer) and serial ports.
+
+To read it, plug the stick into any computer and open the file. To patch a loader on a stick by hand (a loader-default image with shim):
+sign it with `secureboot.sh loader-image IN OUT`, keep the old `EFI/BOOT/grubx64.efi` as `EFI/iyakki-boot/loader.prev.efi` (the
+"Previous version of this boot loader" row), then copy the signed file over `EFI/BOOT/grubx64.efi` and `EFI/iyakki-boot/loader.efi`.
 
 ## What is not carried over
 

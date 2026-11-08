@@ -1,5 +1,7 @@
 # IYAKKI quickstart: a 15-minute tour
 
+Building and installing instead? See [`QUICKSTART-BUILD.md`](QUICKSTART-BUILD.md) (build, window mode, write to disk, update, cloud).
+
 **For:** someone who has IYAKKI running (the easiest way is window mode, see [`INSTALL.md`](INSTALL.md)).
 **You will get:** a signed-in system, a model that answers, an AI IDE project deployed to a local k3s cluster, a table
 and a dashboard, a story read aloud, and Claude Code installed from the CLI tile.

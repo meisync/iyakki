@@ -214,7 +214,7 @@ pub(crate) fn run(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Resu
         }
     };
     env.request_after(REQUEST)?;
-    env.mark(Item::ClickHouse, &detail)?;
+    crate::quickinstall::mark_verified(env, Item::ClickHouse, &detail)?;
     env.say(&format!("[7/7] done: {detail}. IYAKKI is putting the password into your vault as {VAULT_NAME}"));
     Ok(())
 }

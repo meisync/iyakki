@@ -574,7 +574,39 @@ pub fn change_volume(card: u32, delta: Option<i32>) -> Result<Volume, String> {
 
 /// Set the playback volume of a card to `percent` (0..=100).
 pub fn set_volume(card: u32, percent: u32) -> Result<Volume, String> {
-    set_volume_via(&amixer, mutes(), card, percent)
+    let v = set_volume_via(&amixer, mutes(), card, percent)?;
+    if let Some(id) = card_id(Path::new("/proc"), card) {
+        remember_level(Path::new(SOUND_LEVEL_DIR), &id, percent);
+    }
+    Ok(v)
+}
+
+/// Where the hardware level a person chose for each card is kept, so the next start gives it back (nothing else saves the mixer).
+pub const SOUND_LEVEL_DIR: &str = "/var/lib/iyakki/sound-init";
+
+fn level_file(dir: &Path, id: &str) -> std::path::PathBuf {
+    let name: String = id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    dir.join(format!("{name}.level"))
+}
+
+/// Keep `percent` as the person's chosen level for the card `id`.
+pub fn remember_level(dir: &Path, id: &str, percent: u32) {
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(level_file(dir, id), format!("{}\n", percent.min(100)));
+}
+
+/// The level the person chose for the card `id`, if any.
+pub fn saved_level(dir: &Path, id: &str) -> Option<u32> {
+    std::fs::read_to_string(level_file(dir, id)).ok()?.trim().parse::<u32>().ok().map(|p| p.min(100))
+}
+
+/// The id (the name in brackets) of card `card` in `<proc_root>/asound/cards`.
+pub fn card_id(proc_root: &Path, card: u32) -> Option<String> {
+    let text = std::fs::read_to_string(proc_root.join("asound/cards")).ok()?;
+    text.lines().find_map(|l| {
+        let (n, rest) = l.trim_start().split_once(' ')?;
+        (n.parse::<u32>().ok()? == card).then(|| rest.trim_start().strip_prefix('[')?.split_once(']').map(|(i, _)| i.trim().to_string())).flatten()
+    })
 }
 
 // ------------------------------------------------------------------------------------------------ host name

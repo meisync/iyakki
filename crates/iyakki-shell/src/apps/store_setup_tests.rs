@@ -86,6 +86,7 @@ fn job(item: Item, state: iyakki_agent::jobs::State, progress: Option<f32>) -> J
         ended_ms: 0,
         progress,
         last_line: String::new(),
+        last_active_ms: 0,
         dismissed: false,
     }
 }
@@ -807,6 +808,18 @@ fn the_keyboard_walks_the_tiles_opens_the_popup_and_closes_it() {
 }
 
 #[test]
+fn every_card_of_the_catalogue_opens_its_popup_when_clicked() {
+    // the click codes once stopped at 32 items, so the last firmware cards (MediaTek, Hardware firmware) did nothing
+    let (mut a, cx) = rig("su-every-card", Role::Admin, full_machine(), facts(&[]));
+    a.handle(&Event::Tab(4), &cx);
+    for it in Item::ALL {
+        a.setup.popup = None;
+        a.handle(&Event::Tab(TILE + idx(it)), &cx);
+        assert_eq!(a.setup.popup, Some(it), "a click on the {it:?} card opens its popup");
+    }
+}
+
+#[test]
 fn the_voice_tiles_set_up_kokoro_opens_the_popup_of_kokoro() {
     let (mut a, cx) = rig("su-deeplink", Role::Admin, full_machine(), facts(&[]));
     a.setup.query.set("zzz");
@@ -1434,4 +1447,24 @@ fn card_state_follows_the_cluster_not_an_old_failed_job() {
     assert_eq!(base_state(Some(Some(10.0)), true, false, true, None, Some(&installed)), CardState::Installing(Some(10.0)));
     // nothing known, no job
     assert_eq!(base_state(None, false, false, false, None, Some(&Presence::Missing)), CardState::Missing);
+}
+
+#[test]
+fn an_item_installed_earlier_whose_last_attempt_failed_shows_failed_with_the_reason_unless_it_is_healthy_now() {
+    let why = "Network problem: no data from ghcr.io for 60 s";
+    let earlier = Presence::Earlier(format!("{}{why}", iyakki_agent::quickinstall::LAST_FAILED));
+    // the record alone (the job list is gone after a restart) makes the card Failed, with Retry and the reason as a note
+    let (a, _cx) = rig("su-lastfail", Role::Admin, full_machine(), facts(&[(Item::Registry, earlier.clone())]));
+    let c = a.setup.card(Item::Registry);
+    assert_eq!((c.chip.as_str(), c.act, c.label.as_str()), ("Failed", Act::Retry, "Retry"));
+    assert!(c.notes.iter().any(|n| n.0.contains("Installed earlier; the last attempt failed") && n.0.contains(why) && n.1), "{:?}", c.notes);
+    // the same record on an item that the cluster shows healthy right now: Installed (the facts replace the presence, as gather_facts does)
+    let mut f = facts(&[(Item::Elasticsearch, Presence::Installed("http://elasticsearch.iyakki-data.svc:9200".into()))]);
+    f.healthy = vec![Item::Elasticsearch];
+    let (mut a, _cx) = rig("su-lastfail2", Role::Admin, full_machine(), f);
+    a.setup.failed = vec![Item::Elasticsearch];
+    assert_eq!(a.setup.card(Item::Elasticsearch).chip, "Running", "healthy: a failed Retry does not turn a running service into Failed");
+    // a plain "installed earlier, not running" without a failed attempt is unchanged
+    let (a, _cx) = rig("su-lastfail3", Role::Admin, full_machine(), facts(&[(Item::DuckDb, Presence::Earlier("cluster down".into()))]));
+    assert_eq!(a.setup.card(Item::DuckDb).chip, "Installed earlier, not running");
 }

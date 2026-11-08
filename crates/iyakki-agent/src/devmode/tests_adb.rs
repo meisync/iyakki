@@ -565,6 +565,37 @@ fn automatic_approval_is_chosen_by_an_administrator_for_hours_and_never_covers_r
     assert!(!r.dm.shell_auto_active("laptop"), "developer mode off: asked again");
 }
 
+/// A patch of a system path (`/usr/bin/iyakki`) needs the patch card AND a shell grant at the same time. Found 2026-11-07 on the Mac
+/// mini: approving the patch card replaced the computer's shell grant, so such a patch could never be applied. One grant per computer
+/// and kind now; a grant of one kind never stands in for another.
+#[test]
+fn a_patch_approval_keeps_the_shell_grant_and_one_kind_never_stands_in_for_another() {
+    let r = rig("grant-kinds");
+    let adm = admin();
+    wr(&r.dir.join("devmode/keys.json"), &serde_json::to_string(&vec![key("laptop", "root", &[Scope::Install, Scope::Shell, Scope::Update])]).unwrap());
+    let laptop = r.dm.keys().into_iter().find(|k| k.name == "laptop").unwrap();
+    // the shell grant first
+    assert_eq!(r.dm.grant_request(&laptop, "shell", false, 10, "patch touch-mouse-mode").unwrap(), ShellStatus::Pending);
+    r.dm.shell_approve(&adm, "root", "laptop", 10).unwrap();
+    assert!(r.dm.shell_grant_kind("laptop", "shell").is_some());
+    // a shell grant is not a patch approval: the patch request is a new, pending one
+    assert_eq!(r.dm.grant_request(&laptop, "patch", false, 10, "patch touch-mouse-mode").unwrap(), ShellStatus::Pending);
+    assert!(matches!(r.dm.shell_status_kind("laptop", "patch"), ShellStatus::Pending));
+    assert!(r.dm.shell_grant_kind("laptop", "patch").is_none());
+    // approving the patch card keeps the shell grant: both are in force
+    let g = r.dm.shell_approve(&adm, "root", "laptop", 10).unwrap();
+    assert_eq!(g.kind, "patch");
+    assert!(r.dm.shell_grant_kind("laptop", "shell").is_some(), "the shell grant survives the patch approval");
+    assert!(r.dm.shell_grant_kind("laptop", "patch").is_some());
+    assert_eq!(r.dm.shell_grants().len(), 2);
+    // a repeat of either request reports the grant it already has, not the other one
+    assert!(matches!(r.dm.grant_request(&laptop, "shell", false, 10, "").unwrap(), ShellStatus::Granted(g) if g.kind == "shell"));
+    assert!(matches!(r.dm.grant_request(&laptop, "patch", false, 10, "").unwrap(), ShellStatus::Granted(g) if g.kind == "patch"));
+    // forgetting the computer drops every kind
+    r.dm.shell_forget("laptop");
+    assert!(r.dm.shell_grants().is_empty(), "forgetting drops every kind");
+}
+
 #[test]
 fn the_shell_grant_is_asked_for_approved_for_minutes_or_one_session_denied_expired_and_shown_in_the_bar() {
     let r = rig("grant");

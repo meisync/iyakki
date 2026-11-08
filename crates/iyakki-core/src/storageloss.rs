@@ -151,7 +151,7 @@ impl Env for SysEnv {
     }
 
     fn uptime_secs(&self) -> u64 {
-        std::fs::read_to_string("/proc/uptime").ok().and_then(|u| u.split_whitespace().next().and_then(|v| v.parse::<f64>().ok())).map_or(0, |v| v as u64)
+        iyakki_storage::uptime_now().map_or(0, |v| v as u64)
     }
 }
 
@@ -381,7 +381,7 @@ fn run() {
     let env = SysEnv::real();
     // Settings -> Storage -> Compatible USB mode: writes a GRUB file on the boot partition (takes effect at the next start)
     loss::register_compat_writer(write_compat_on_boot_partition);
-    loss::set_compat_active(loss::compat_active(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default()));
+    loss::set_compat_active(loss::compat_active(&iyakki_storage::cmdline_text()));
     let mut w = Watcher::new();
     if !w.learn(&env) {
         log::info!("storage: no ext4 data volume is mounted, nothing to watch");

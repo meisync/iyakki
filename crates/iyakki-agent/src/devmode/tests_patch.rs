@@ -68,7 +68,7 @@ impl Rig {
 }
 
 fn op(path: &str, action: Action) -> Op {
-    Op { path: path.into(), action, kind: Kind::File, mode: None, uid: 0, gid: 0, size: 0, sha256: String::new(), link: None }
+    Op { path: path.into(), action, kind: Kind::File, mode: None, uid: 0, gid: 0, size: 0, sha256: String::new(), link: None, delta: None }
 }
 
 /// A pack made through the real builder from a source folder.
@@ -471,4 +471,205 @@ fn the_running_system_marks_a_start_good_with_the_real_entry_point() {
     std::fs::remove_dir_all(patches_dir(&none.data)).ok();
     mark_boot_good(&none.data);
     assert!(!patches_dir(&none.data).exists());
+}
+
+// ------------------------------------------------------------------------------------------ binary deltas (REMOTE-PATCH-DELTA.md)
+
+fn noise(n: usize, seed: u64) -> Vec<u8> {
+    let mut s = seed | 1;
+    (0..n).map(|_| { s ^= s << 13; s ^= s >> 7; s ^= s << 17; (s >> 24) as u8 }).collect()
+}
+
+fn write_bytes(p: &Path, b: &[u8]) {
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, b).unwrap();
+}
+
+/// A pack that replaces `path` with `new` as a delta against `old` (built through the real builder: a source folder and `--delta-from`).
+fn delta_pack(r: &Rig, id: &str, path: &str, old: &[u8], new: &[u8], mode: &str) -> Pack {
+    let src = r.dir.join(format!("dsrc-{id}"));
+    let _ = std::fs::remove_dir_all(&src);
+    let from = r.dir.join(format!("dold-{id}"));
+    write_bytes(&from, old);
+    write_bytes(&src.join("files").join(path.trim_start_matches('/')), new);
+    let mut o = op(path, Action::Replace);
+    o.mode = Some(mode.into());
+    o.delta = Some(DeltaSpec::default());
+    let m = Manifest { format: FORMAT, id: id.into(), title: format!("delta {id}"), description: String::new(), created: String::new(), base: "*".into(), obsolete_from: None, ops: vec![o], pre: vec![], post: vec![] };
+    std::fs::write(src.join(MANIFEST), serde_json::to_vec(&m).unwrap()).unwrap();
+    decode(&build_with(&src, Some(&from)).unwrap()).unwrap()
+}
+
+/// A program-like file and a changed copy of it (an insertion early on, a few edits later).
+fn old_and_new() -> (Vec<u8>, Vec<u8>) {
+    let old = noise(300_000, 5);
+    let mut new = old.clone();
+    new.splice(1_000..1_000, noise(300, 6));
+    new[200_000..200_050].fill(0xaa);
+    (old, new)
+}
+
+#[test]
+fn a_delta_pack_carries_a_small_blob_and_the_device_makes_the_new_file_live_and_undoes_it() {
+    let r = rig("delta-live");
+    let (old, new) = old_and_new();
+    write_bytes(&r.root.join("usr/bin/bigtool"), &old);
+    let p = delta_pack(&r, "bigtool-fix", "/usr/bin/bigtool", &old, &new, "0755");
+    let o = &p.manifest.ops[0];
+    let d = o.delta.as_ref().unwrap();
+    assert_eq!((d.new_size, d.old_sha256.clone(), d.new_sha256.clone()), (new.len() as u64, sha256_hex(&old), sha256_hex(&new)));
+    assert!(o.size < new.len() as u64 / 10 && p.content[0].1.len() as u64 == o.size, "the pack carries {} bytes for a {} byte file", o.size, new.len());
+    // the pack round trips and its blob is checked like any file
+    assert_eq!(decode(&encode(&p.manifest, &p.content)).unwrap().manifest.ops[0].delta, o.delta);
+    let v = r.apply(&p, false, Mode::Live).unwrap();
+    assert_eq!(v["live_files"], 1);
+    assert_eq!(std::fs::read(r.root.join("usr/bin/bigtool")).unwrap(), new);
+    let layer = patches_dir(&r.data).join("bigtool-fix");
+    assert_eq!(std::fs::read(layer.join("layer/usr/bin/bigtool")).unwrap(), new);
+    assert_eq!(std::fs::metadata(layer.join("layer/usr/bin/bigtool")).unwrap().permissions().mode() & 0o777, 0o755);
+    // what the first stage checks is the size of the file the delta made, and no half-written file is left beside it
+    assert!(std::fs::read_to_string(layer.join("layer.txt")).unwrap().contains(&format!("file {} /usr/bin/bigtool", new.len())));
+    assert!(std::fs::read_dir(layer.join("layer/usr/bin")).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().contains("delta-new")));
+    remove(&r.env(false), "bigtool-fix", "laptop").unwrap();
+    assert_eq!(std::fs::read(r.root.join("usr/bin/bigtool")).unwrap(), old, "the old program comes back");
+}
+
+#[test]
+fn a_delta_against_another_version_is_refused_in_plain_words_before_and_after_sending_and_changes_nothing() {
+    let r = rig("delta-wrong");
+    let (old, new) = old_and_new();
+    let mut other = old.clone();
+    other[10] ^= 1;
+    write_bytes(&r.root.join("usr/bin/bigtool"), &other);
+    let p = delta_pack(&r, "wrong-old", "/usr/bin/bigtool", &old, &new, "0755");
+    // the plan already says so, before a byte is sent
+    let e = plan(&r.env(false), &p.manifest).unwrap_err();
+    assert!(e.contains("not the version this delta was made against") && e.contains("nothing was changed"), "{e}");
+    let e = r.apply(&p, false, Mode::Live).unwrap_err();
+    assert!(e.contains("not the version this delta was made against"), "{e}");
+    assert_eq!(std::fs::read(r.root.join("usr/bin/bigtool")).unwrap(), other);
+    assert!(!patches_dir(&r.data).join("wrong-old").exists() && read_active_for_test(&r).is_empty());
+    assert!(r.live.calls().is_empty());
+    // the file changing between the plan and the apply is caught by the apply itself (the device reads the CURRENT file)
+    write_bytes(&r.root.join("usr/bin/bigtool"), &old);
+    plan(&r.env(false), &p.manifest).unwrap();
+    r.stage(&p);
+    write_bytes(&r.root.join("usr/bin/bigtool"), &other);
+    assert!(apply(&r.env(false), &p.manifest, Mode::Live, "laptop").unwrap_err().contains("not the version"));
+    assert_eq!(std::fs::read(r.root.join("usr/bin/bigtool")).unwrap(), other);
+    assert!(!patches_dir(&r.data).join("wrong-old").exists());
+}
+
+#[test]
+fn a_damaged_staged_delta_and_a_lying_manifest_change_nothing() {
+    let r = rig("delta-bad");
+    let (old, new) = old_and_new();
+    write_bytes(&r.root.join("usr/bin/bigtool"), &old);
+    let p = delta_pack(&r, "bad-delta", "/usr/bin/bigtool", &old, &new, "0755");
+    // a staged blob with one byte changed does not match the manifest's hash
+    r.stage(&p);
+    let f = staging_dir(&r.data, "bad-delta").join(staged_name(0));
+    let mut b = std::fs::read(&f).unwrap();
+    b[50] ^= 1;
+    std::fs::write(&f, b).unwrap();
+    assert!(apply(&r.env(false), &p.manifest, Mode::Live, "laptop").unwrap_err().contains("does not match the manifest"));
+    // a manifest that promises another result than the delta makes: refused, nothing written
+    let mut lie = p.clone_for_test();
+    lie.manifest.ops[0].delta.as_mut().unwrap().new_sha256 = sha256_hex(b"something else");
+    let e = r.apply(&lie, false, Mode::Live).unwrap_err();
+    assert!(e.contains("nothing was written") || e.contains("does not match"), "{e}");
+    assert_eq!(std::fs::read(r.root.join("usr/bin/bigtool")).unwrap(), old);
+    assert!(!patches_dir(&r.data).join("bad-delta").exists());
+}
+
+impl Pack {
+    fn clone_for_test(&self) -> Pack {
+        Pack { manifest: self.manifest.clone(), content: self.content.clone() }
+    }
+}
+
+#[test]
+fn the_program_binary_gets_its_delta_stored_for_the_next_start_only() {
+    let r = rig("delta-pid1");
+    let (old, new) = old_and_new();
+    write_bytes(&r.root.join("usr/bin/iyakki"), &old);
+    let p = delta_pack(&r, "main-fix", "/usr/bin/iyakki", &old, &new, "0755");
+    assert!(r.apply(&p, false, Mode::Live).unwrap_err().contains("shell scope"));
+    let v = r.apply(&p, true, Mode::Live).unwrap();
+    assert_eq!((v["live_files"].clone(), v["needs_reboot"].clone()), (0.into(), true.into()));
+    assert_eq!(std::fs::read(r.root.join("usr/bin/iyakki")).unwrap(), old, "the running program is untouched");
+    assert_eq!(std::fs::read(patches_dir(&r.data).join("main-fix/layer/usr/bin/iyakki")).unwrap(), new, "the layer holds the new program for the next start");
+    assert!(r.live.calls().is_empty());
+}
+
+#[test]
+fn the_size_limit_is_on_the_delta_not_on_the_file_it_makes() {
+    let r = rig("delta-limits");
+    let (old, new) = old_and_new();
+    let mut m = delta_pack(&r, "lim", "/usr/bin/bigtool", &old, &new, "0755").manifest;
+    check_manifest(&m, false).unwrap();
+    // a result of 400 MB from a small delta is fine; over the cap of the produced file is not
+    m.ops[0].delta.as_mut().unwrap().new_size = 400 << 20;
+    check_manifest(&m, false).unwrap();
+    m.ops[0].delta.as_mut().unwrap().new_size = MAX_TARGET + 1;
+    assert!(check_manifest(&m, false).unwrap_err().contains("a delta makes a file of at most"));
+    m.ops[0].delta.as_mut().unwrap().new_size = 10;
+    // a delta over 64 MB is too big; the same size as a plain file is refused too, with the same limit
+    m.ops[0].size = MAX_FILE + 1;
+    assert!(check_manifest(&m, false).unwrap_err().contains("at most 64 MB"));
+    m.ops[0].size = 10;
+    // a delta needs hashes of both files and only replaces
+    m.ops[0].delta.as_mut().unwrap().old_sha256 = "zz".into();
+    assert!(check_manifest(&m, false).unwrap_err().contains("SHA-256 of the old and of the new"));
+    m.ops[0].delta = Some(DeltaSpec { old_sha256: sha256_hex(b"a"), new_sha256: sha256_hex(b"b"), new_size: 1 });
+    m.ops[0].action = Action::Add;
+    assert!(check_manifest(&m, false).unwrap_err().contains("only replaces"));
+    // a space check counts the file the delta makes
+    let (old, new) = old_and_new();
+    write_bytes(&r.root.join("usr/bin/bigtool"), &old);
+    let p = delta_pack(&r, "space", "/usr/bin/bigtool", &old, &new, "0755");
+    let tight = Env { data_free: &|| DATA_MARGIN + 100_000, ..r.env(false) };
+    assert!(plan(&tight, &p.manifest).unwrap_err().contains("data volume"));
+}
+
+#[test]
+fn the_builder_takes_the_old_version_from_a_file_a_pack_or_a_folder_and_says_what_it_cannot_do() {
+    let r = rig("delta-build");
+    let (old, new) = old_and_new();
+    let src = r.dir.join("bsrc");
+    write_bytes(&src.join("files/usr/bin/bigtool"), &new);
+    write_bytes(&src.join("files/usr/bin/other"), b"small other file\n");
+    let mut m = Manifest { format: FORMAT, id: "b".into(), title: "b".into(), description: String::new(), created: String::new(), base: "*".into(), obsolete_from: None, ops: vec![op("/usr/bin/bigtool", Action::Replace)], pre: vec![], post: vec![] };
+    std::fs::write(src.join(MANIFEST), serde_json::to_vec(&m).unwrap()).unwrap();
+    // without --delta-from the file travels whole; with an op marked as a delta, --delta-from is required
+    assert!(decode(&build(&src).unwrap()).unwrap().manifest.ops[0].delta.is_none());
+    m.ops[0].delta = Some(DeltaSpec::default());
+    std::fs::write(src.join(MANIFEST), serde_json::to_vec(&m).unwrap()).unwrap();
+    assert!(build(&src).unwrap_err().contains("--delta-from"));
+    // from a folder laid out like the root
+    let root_old = r.dir.join("old-root");
+    write_bytes(&root_old.join("usr/bin/bigtool"), &old);
+    let a = decode(&build_with(&src, Some(&root_old)).unwrap()).unwrap();
+    assert!(a.manifest.ops[0].delta.is_some() && a.content[0].1.len() < new.len() / 10);
+    // from an old pack that carries the file whole
+    let old_src = r.dir.join("old-src");
+    write_bytes(&old_src.join("files/usr/bin/bigtool"), &old);
+    let mo = Manifest { ops: vec![op("/usr/bin/bigtool", Action::Replace)], ..m.clone() };
+    std::fs::write(old_src.join(MANIFEST), serde_json::to_vec(&mo).unwrap()).unwrap();
+    std::fs::write(r.dir.join("old.ipatch"), build(&old_src).unwrap()).unwrap();
+    let b = decode(&build_with(&src, Some(&r.dir.join("old.ipatch"))).unwrap()).unwrap();
+    assert_eq!(b.manifest.ops[0].delta, a.manifest.ops[0].delta);
+    // a pack that is itself a delta cannot be the old version
+    std::fs::write(r.dir.join("delta.ipatch"), encode(&a.manifest, &a.content)).unwrap();
+    assert!(build_with(&src, Some(&r.dir.join("delta.ipatch"))).unwrap_err().contains("itself a delta"));
+    // a folder without the file: an op marked as a delta cannot be built
+    assert!(build_with(&src, Some(&r.dir.join("old-src/files/usr"))).unwrap_err().contains("no old version"));
+    // unmarked replace ops get a delta where there is an old version and it is smaller; a different file is left whole
+    m.ops = vec![op("/usr/bin/bigtool", Action::Replace), op("/usr/bin/other", Action::Replace)];
+    std::fs::write(src.join(MANIFEST), serde_json::to_vec(&m).unwrap()).unwrap();
+    write_bytes(&root_old.join("usr/bin/other"), b"small other file, older\n");
+    let c = decode(&build_with(&src, Some(&root_old)).unwrap()).unwrap();
+    assert!(c.manifest.ops[0].delta.is_some() && c.manifest.ops[1].delta.is_none());
+    // one old FILE cannot stand for two files
+    assert!(build_with(&src, Some(&root_old.join("usr/bin/bigtool"))).unwrap_err().contains("several"));
 }

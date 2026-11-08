@@ -5,6 +5,15 @@
 //! automatic run only uses steps that cost at most a second of re-enumeration of that one device and is rate limited ([`Limiter`]).
 //!
 //! The ladder, least disruptive first, each step logged and followed by a wait for an event ([`Env::events`]):
+//! 0. `ReportProtocol` (USB panels with a boot-protocol mouse interface, class 03 subclass 01): the HID request SET_PROTOCOL(report) to
+//!    that interface, because firmware that binds boot mice for its own menus (EDK2) can leave such a controller in boot protocol, which
+//!    Linux never switches back. Also run once at the first sight of the panel ([`prime`]). A panel without a boot interface is skipped:
+//!    the Mac mini's wch.cn 27c0:0859 is one (all its interfaces are subclass 00; measured 2026-11-07 over SSH), so this step never
+//!    applied there. What that panel really does after a cold boot: its controller is in MOUSE MODE, the multi-touch interface is listed
+//!    and silent while the mouse-like interface (`:1.2`, report id 7, absolute X/Y and a button) reports every finger; the Device Mode
+//!    feature (report 33) set to 2 by the kernel driver and by hand is ignored by it, only a power loss (the replug) puts it back. The
+//!    shell therefore hears the mouse-like interface whenever the multi-touch one has not spoken (`iyakki-shell::input::mouse_like_muted`)
+//!    and counts those events here through [`note_event`], so this ladder does not reset a panel that is working through that interface.
 //! 1. `Reopen`: the shell opens the evdev node again ([`reopen_generation`]).
 //! 2. `HidRebind`: unbind and bind the HID device from `hid-multitouch` (USB and I2C).
 //! 3. `UsbReset` (USB): `authorized` 0 then 1 of the one USB device; unbind/bind of the `usb` driver if that file cannot be written.
@@ -78,6 +87,9 @@ pub trait Env {
     /// Runs a program (modprobe); true on exit 0.
     fn run(&self, prog: &str, args: &[&str]) -> bool;
     fn log(&self, line: &str);
+    /// SET_PROTOCOL(report) to the HID interfaces `ifaces` of the USB device at `node`, which must read back as `vendor:product`
+    /// (`iyakki_drivers::usbfs::hid_set_report_protocol`). One sentence per interface.
+    fn set_report_protocol(&self, node: &Path, vendor: u16, product: u16, ifaces: &[u8]) -> Result<Vec<String>, String>;
 }
 
 pub struct RealEnv;
@@ -124,6 +136,9 @@ impl Env for RealEnv {
     fn log(&self, line: &str) {
         log::info!("{line}");
         *STATUS.lock().unwrap_or_else(|e| e.into_inner()) = line.trim_start_matches("touch-recover: ").to_string();
+    }
+    fn set_report_protocol(&self, node: &Path, vendor: u16, product: u16, ifaces: &[u8]) -> Result<Vec<String>, String> {
+        iyakki_drivers::usbfs::hid_set_report_protocol(node, vendor, product, ifaces).map_err(|e| format!("{e:?}"))
     }
 }
 
@@ -327,6 +342,8 @@ pub fn check_safe(env: &dyn Env, sys: &Path, t: &Touch) -> Result<(), String> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rung {
+    /// USB panels with a boot-protocol mouse interface only: SET_PROTOCOL(report) to that interface (KI-077, see the module doc).
+    ReportProtocol,
     Reopen,
     HidRebind,
     UsbReset,
@@ -340,6 +357,7 @@ pub enum Rung {
 impl Rung {
     pub fn label(self) -> &'static str {
         match self {
+            Rung::ReportProtocol => "switch the panel's boot-mouse interface to report protocol",
             Rung::Reopen => "re-open the input node",
             Rung::HidRebind => "unbind and bind the HID driver",
             Rung::UsbReset => "reset the USB device",
@@ -348,6 +366,57 @@ impl Rung {
             Rung::LinkRetrain => "retrain the display link (the screen blinks)",
         }
     }
+}
+
+/// The HID interfaces of a USB touch screen that speak the boot protocol (class 03, subclass 01): their `bInterfaceNumber`s. Only
+/// those take SET_PROTOCOL; a panel without one has nothing to switch.
+pub fn boot_interfaces(env: &dyn Env, t: &Touch) -> Vec<u8> {
+    let Some(usb) = t.usb.as_ref() else { return Vec::new() };
+    let leaf = usb.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut v = Vec::new();
+    for e in env.list(usb) {
+        if !e.starts_with(&format!("{leaf}:")) {
+            continue;
+        }
+        let d = usb.join(&e);
+        let hex = |f: &str| env.read(&d.join(f)).and_then(|s| u8::from_str_radix(s.trim(), 16).ok());
+        if hex("bInterfaceClass") == Some(3) && hex("bInterfaceSubClass") == Some(1) {
+            if let Some(n) = hex("bInterfaceNumber") {
+                v.push(n);
+            }
+        }
+    }
+    v.sort_unstable();
+    v
+}
+
+/// The usbfs node of a USB device directory: `/dev/bus/usb/BBB/DDD` from its `busnum` and `devnum`.
+fn usb_node(env: &dyn Env, usb: &Path) -> Option<PathBuf> {
+    let num = |f: &str| env.read(&usb.join(f)).and_then(|s| s.trim().parse::<u32>().ok());
+    Some(PathBuf::from(format!("/dev/bus/usb/{:03}/{:03}", num("busnum")?, num("devnum")?)))
+}
+
+/// The one step every USB panel with a boot interface gets at first sight, before any silence is counted: SET_PROTOCOL(report).
+/// Touches nothing else; one sentence per panel.
+pub fn prime(env: &dyn Env, sys: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for t in discover(env, sys) {
+        if t.bus != Bus::Usb || boot_interfaces(env, &t).is_empty() {
+            continue;
+        }
+        if let Err(why) = check_safe(env, sys, &t) {
+            out.push(format!("{}: not primed: {why}", t.name));
+            continue;
+        }
+        match do_rung(env, sys, &t, Rung::ReportProtocol) {
+            Ok(()) => out.push(format!("{}: boot-mouse interface switched to report protocol at first sight", t.name)),
+            Err(why) => out.push(format!("{}: report protocol not set: {why}", t.name)),
+        }
+    }
+    for l in &out {
+        env.log(&format!("touch-recover: prime: {l}"));
+    }
+    out
 }
 
 pub fn ladder(bus: Bus, module: bool) -> Vec<Rung> {
@@ -408,6 +477,25 @@ fn bind_cycle(env: &dyn Env, driver_dir: &Path, name: &str) -> io::Result<()> {
 fn do_rung(env: &dyn Env, sys: &Path, t: &Touch, r: Rung) -> Result<(), String> {
     let e = |x: io::Error| x.to_string();
     match r {
+        Rung::ReportProtocol => {
+            let usb = t.usb.as_ref().ok_or("no USB device")?;
+            let ifaces = boot_interfaces(env, t);
+            if ifaces.is_empty() {
+                return Err("no boot-protocol HID interface: nothing to switch".into());
+            }
+            let node = usb_node(env, usb).ok_or("busnum/devnum cannot be read")?;
+            let id = |f: &str| env.read(&usb.join(f)).and_then(|s| u16::from_str_radix(s.trim(), 16).ok());
+            let (vendor, product) = (id("idVendor").ok_or("idVendor cannot be read")?, id("idProduct").ok_or("idProduct cannot be read")?);
+            let lines = env.set_report_protocol(&node, vendor, product, &ifaces)?;
+            for l in &lines {
+                env.log(&format!("touch-recover: {}: {l}", t.name));
+            }
+            if lines.iter().all(|l| l.contains("refused") || l.contains("cannot")) {
+                return Err(lines.join("; "));
+            }
+            env.sleep(Duration::from_millis(300));
+            Ok(())
+        }
         Rung::Reopen => {
             env.request_reopen();
             env.sleep(Duration::from_millis(500));
@@ -478,7 +566,11 @@ pub fn run_ladder(env: &dyn Env, sys: &Path, module: bool, wait: Duration) -> Ou
             out.problems.push(why);
             continue;
         }
-        for r in ladder(t.bus, module) {
+        let mut rungs = ladder(t.bus, module);
+        if t.bus == Bus::Usb && !boot_interfaces(env, &t).is_empty() {
+            rungs.insert(0, Rung::ReportProtocol);
+        }
+        for r in rungs {
             // the device may have come back under another HID name: find it again by its ident
             let cur = match discover(env, sys).into_iter().find(|x| x.ident == t.ident) {
                 Some(c) => c,
@@ -646,8 +738,17 @@ pub fn tick(uptime_secs: u64) {
     LAST_TICK.store(uptime_secs.max(1), Relaxed);
     let present = !discover(&RealEnv, Path::new("/sys")).is_empty();
     let mut l = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let first_sight = present && l.watch.since.is_none();
     let v = l.watch.observe(uptime_secs, present, event_count());
-    if v != Verdict::Silent || l.running || !auto_enabled(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default()) {
+    if first_sight && !l.running && auto_enabled(&iyakki_storage::cmdline_text()) {
+        // the protocol switch at first sight: no waiting, no re-enumeration, nothing to rate-limit
+        std::thread::spawn(|| {
+            for s in prime(&RealEnv, Path::new("/sys")) {
+                log::info!("audit: touch.recover prime: {s}");
+            }
+        });
+    }
+    if v != Verdict::Silent || l.running || !auto_enabled(&iyakki_storage::cmdline_text()) {
         return;
     }
     if l.limiter.allow(false, uptime_secs).is_err() {

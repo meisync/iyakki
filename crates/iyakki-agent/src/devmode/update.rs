@@ -950,6 +950,28 @@ pub fn status(data: &Path) -> Value {
     json!({ "interrupted": interrupted(data), "message": interrupted_text(data), "previous_version": prev, "staged_entries": staged })
 }
 
+/// Throw away a payload that was staged but never applied (`iyakki dev update --discard`). Only the update's own folder `boot-next/`
+/// goes; the boot partition, `boot-prev/` and everything else on the data volume are not opened for writing. Safe only while the boot
+/// files are all old, so it is refused when an update is unfinished (the mirror on the data volume or the marker on the boot
+/// partition says so: finish it or choose the previous version in the boot menu) and when the boot partition cannot be read to check.
+pub fn discard_staged(env: &Env) -> Result<Value, String> {
+    let data = env.dm.data_dir();
+    if interrupted(data).is_some() {
+        return Err("an update was interrupted: the boot files may be half old and half new, so it is not discarded. Repeat the update, or choose the previous version in the boot menu".into());
+    }
+    let vol = env.boot.open(false).map_err(|e| format!("the boot partition could not be read to check that no update is half applied ({e}); nothing was discarded"))?;
+    if find_ci(&vol.root, MARKER).is_some() {
+        return Err("the boot partition says an update is half applied, so it is not discarded. Repeat the update, or choose the previous version in the boot menu".into());
+    }
+    let staged = env.staging();
+    if !staged.exists() {
+        return Ok(json!({ "discarded": 0, "message": "No staged update." }));
+    }
+    let n = std::fs::read_dir(&staged).map(|d| d.flatten().count()).unwrap_or(0);
+    std::fs::remove_dir_all(&staged).map_err(|e| format!("{}: {e}", staged.display()))?;
+    Ok(json!({ "discarded": n, "message": format!("The staged update was thrown away ({n} item(s)). The boot files were not touched.") }))
+}
+
 /// Which boot partition files exist (for `plan` output tests).
 pub fn list_boot(root: &Path) -> BTreeMap<String, u64> {
     let mut out = BTreeMap::new();

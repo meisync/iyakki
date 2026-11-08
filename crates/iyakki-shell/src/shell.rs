@@ -88,6 +88,10 @@ impl ShellEnv {
         let quick: Arc<dyn iyakki_agent::iyakki_proxy::Upstream> = Arc::new(UreqUpstream::with_timeout(std::time::Duration::from_secs(10)));
         let slow: Arc<dyn iyakki_agent::iyakki_proxy::Upstream> = Arc::new(UreqUpstream::with_timeout(std::time::Duration::from_secs(300)));
         let services = Services::open(std::path::Path::new(&p.data), quick, slow).map_err(AccountError::Storage)?;
+        // which computer is this? Its sound, display, keyboard... settings are laid over the loaded ones before anything reads them
+        // (`hwprofile`); the display size of an account follows the computer too
+        let computer = iyakki_agent::hwprofile::attach_real(&services);
+        iyakki_uikit::uisize::set_computer_hooks(iyakki_agent::hwprofile::display_size_get, iyakki_agent::hwprofile::display_size_set);
         // the web engine's own messages are kept next to the crash log (`enginelog.rs`)
         iyakki_agent::enginelog::set_dir(&std::path::Path::new(&p.data).join("log"));
         let t_services = t0.elapsed();
@@ -120,6 +124,11 @@ impl ShellEnv {
         let mcp_servers = mcp::load_config(&cfg.mcp_config);
         let t2 = std::time::Instant::now();
         let store = UserStore::open(std::path::Path::new(&p.users))?;
+        // an unknown computer: every administrator gets one card (Settings -> This computer)
+        if let Some(c) = &computer {
+            let admins: Vec<String> = store.list().iter().filter(|u| u.policy().manage_settings).map(|u| u.name.clone()).collect();
+            iyakki_agent::hwprofile::announce_new_computer(&services, c, &admins);
+        }
         log::info!("boot: shell environment took {} ms (services {}, sound {}, accounts {})", t0.elapsed().as_millis(), t_services.as_millis(), t_sound.as_millis(), t2.elapsed().as_millis());
         let audit = Arc::new(AuditLog::new(std::path::Path::new(&p.audit)));
         audit.flush_notes();
@@ -548,6 +557,8 @@ pub(crate) fn scale_for(w: u32, h: u32) -> f32 {
 impl Shell {
     pub fn new(env: ShellEnv) -> Shell {
         crate::crashlog::install();
+        // the toolkit has no storage dependency: it asks the shell how to word a failure line (a lost boot drive is named)
+        crate::fx::set_failure_rewriter(iyakki_storage::loss::reword);
         #[cfg(test)]
         crate::testmem::start();
         let first_run = env.store.lock().map(|s| s.is_empty()).unwrap_or(false);
@@ -1966,6 +1977,9 @@ impl Shell {
             if self.tick % 15 == 9 {
                 self.update_check_tick();
             }
+            if self.tick % 15 == 11 {
+                self.sharing_notice_tick();
+            }
             if self.tick % 15 == 3 {
                 self.loss_tick();
             }
@@ -2287,6 +2301,8 @@ impl Shell {
             // F10 (or a click on the name in the launcher's top bar) opens the IYAKKI menu; the indicator beside the clock the installs
             Event::Key(Key::F(10)) if self.session.is_some() && self.clip.is_none() => self.toggle_brand(),
             Event::Tab(crate::installpop::INDICATOR) if self.session.is_some() && self.clip.is_none() => self.toggle_installs(),
+            Event::Tab(UPDATE_CHIP) if self.session.is_some() && self.clip.is_none() => self.open(PApp::Store),
+            Event::Tab(SHARING_CHIP) if self.session.is_some() && self.clip.is_none() => self.jump_to("settings", "tab:network"),
             Event::Tab(DEV_SIGN) if self.session.is_some() && self.clip.is_none() && self.devask.pending.is_some() => self.devask_event(crate::devask::OPEN),
             Event::Tab(DEV_SIGN) if self.session.is_some() && self.clip.is_none() => self.jump_to("settings", "tab:developer"),
             // the Home icon and F11: back to the tiles from any app; the gear: Settings (the app you were in is kept aside)
@@ -3342,6 +3358,17 @@ impl Shell {
                     } else {
                         self.installs.anchor = None;
                     }
+                    if self.update_count > 0 && !matches!(pa, PApp::Store) {
+                        let label = format!("{} update{}", self.update_count, if self.update_count == 1 { "" } else { "s" });
+                        if let Some(b) = draw_header_chip(g, dev_right, 8.0 * s + 15.0 * s, s, &label, rgb(94, 196, 255), UPDATE_CHIP, "updates waiting", 300.0 * s) {
+                            dev_right = b.x - 6.0 * s;
+                        }
+                    }
+                    if self.session.is_some() && iyakki_agent::sharing::notice::is_on(self.env.services.dir()) {
+                        if let Some(b) = draw_header_chip(g, dev_right, 8.0 * s + 15.0 * s, s, "Sharing internet", rgb(255, 196, 94), SHARING_CHIP, "internet sharing is on", 300.0 * s) {
+                            dev_right = b.x - 6.0 * s;
+                        }
+                    }
                     if let Some(sign) = self.dev_sign.as_deref() {
                         draw_dev_sign(g, dev_right, 8.0 * s + 15.0 * s, s, sign, 300.0 * s, self.devask.pulse(self.tick));
                     }
@@ -4038,6 +4065,26 @@ fn draw_dev_sign(g: &mut Gfx, right: f32, cy: f32, s: f32, sign: &str, left_limi
 
 /// The click of the DEV sign.
 const DEV_SIGN: usize = 1_300_100;
+
+/// The click of the updates chip in the app header.
+const UPDATE_CHIP: usize = 1_300_101;
+/// The click of the "Sharing" chip in the app header.
+const SHARING_CHIP: usize = 1_300_102;
+
+/// A small chip in the app header (updates waiting, internet being shared). `None` when there is no room left of the title limit
+/// (the STORE tile on Home still says it).
+fn draw_header_chip(g: &mut Gfx, right: f32, cy: f32, s: f32, label: &str, color: [u8; 4], id: usize, tip: &str, left_limit: f32) -> Option<R> {
+    let tw = g.text_width(11.5 * s, label, Face::Bold);
+    let b = R::new(right - tw - 14.0 * s, cy - 10.0 * s, tw + 14.0 * s, 20.0 * s);
+    if b.x < left_limit {
+        return None;
+    }
+    g.rrect(b.x, b.y, b.w, b.h, 6.0 * s, crate::fx::with_alpha(color, 40));
+    g.rrect_outline(b.x, b.y, b.w, b.h, 6.0 * s, 1.0, color);
+    g.text(b.x + 7.0 * s, cy - g.line_height(11.5 * s, Face::Bold) / 2.0, 11.5 * s, color, label, Face::Bold);
+    g.hit(b, Event::Tab(id), tip);
+    Some(b)
+}
 
 /// The clock's tooltip, under its box and kept on screen.
 fn draw_clock_tip(g: &mut Gfx, w: u32, h: u32, s: f32, anchor: R, lines: &[(String, bool)]) {

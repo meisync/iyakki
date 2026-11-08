@@ -33,7 +33,7 @@ pub(crate) const MODELS: &str = r#"{"object":"list","data":[
  {"id":"kokoro-v1","owned_by":"lemonade","recipe":"kokoro","size":0.354,"downloaded":true,"labels":["tts"]}
 ]}"#;
 
-fn reply(method: &str, path: &str) -> (u16, &'static str, Vec<u8>) {
+fn reply(method: &str, path: &str, body: &str) -> (u16, &'static str, Vec<u8>) {
     let json = |s: String| (200, "application/json", s.into_bytes());
     match (method, path.split('?').next().unwrap_or("")) {
         ("GET", "/api/v1/health") => json(r#"{"status":"ok","version":"2026.42.1","model_loaded":"Qwen3-0.6B-GGUF","all_models_loaded":[{"model_name":"Qwen3-0.6B-GGUF","type":"llm"}],"max_models":{"llm":1}}"#.into()),
@@ -41,6 +41,11 @@ fn reply(method: &str, path: &str) -> (u16, &'static str, Vec<u8>) {
         ("POST", "/api/v1/images/generations") => json(format!(r#"{{"created":1,"data":[{{"b64_json":"{}"}}]}}"#, iyakki_flow::report::base64(&iyakki_agent::qaimage::Image::blank(8, 8, [30, 140, 90, 255]).to_png()))),
         ("POST", "/api/v1/audio/speech") => (200, "audio/wav", iyakki_agent::voice::encode_wav(&iyakki_agent::voice::tone(440.0, 800), 16_000)),
         ("POST", "/api/v1/audio/transcriptions") => json(r#"{"text":"hello lemonade"}"#.into()),
+        // a tidy request answers with the transcript it quotes, capitalised and ended with a full stop (or "Hello, Lemonade." for the canned one)
+        ("POST", "/api/v1/chat/completions") => {
+            let said = if body.contains("turn on the lights") { "Turn on the lights." } else { "Hello, Lemonade." };
+            json(format!(r#"{{"id":"c1","object":"chat.completion","choices":[{{"index":0,"message":{{"role":"assistant","content":"{said}"}},"finish_reason":"stop"}}]}}"#))
+        }
         ("POST", "/api/v1/load") => json(r#"{"status":"success","message":"Loaded model: SD-Turbo"}"#.into()),
         ("POST", "/api/v1/pull") => (200, "text/event-stream", b"event: progress\ndata: {\"file\":\"sdxl.safetensors\",\"bytes_downloaded\":5,\"bytes_total\":10,\"percent\":50}\n\nevent: complete\ndata: {\"file_index\":1,\"total_files\":1,\"percent\":100}\n\n".to_vec()),
         _ => (404, "application/json", br#"{"error":{"message":"not found"}}"#.to_vec()),
@@ -78,7 +83,7 @@ pub(crate) fn serve() -> FakeLemonade {
                 let mut body = vec![0u8; len];
                 let _ = r.read_exact(&mut body);
                 log.lock().unwrap().push((method.clone(), path.clone(), String::from_utf8_lossy(&body).into_owned()));
-                let (status, ctype, out) = reply(&method, &path);
+                let (status, ctype, out) = reply(&method, &path, &String::from_utf8_lossy(&body));
                 let _ = s.write_all(format!("HTTP/1.1 {status} X\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", out.len()).as_bytes());
                 let _ = s.write_all(&out);
             });

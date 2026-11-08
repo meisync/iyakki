@@ -1360,7 +1360,7 @@ impl Env for RealEnv {
         crate::k3sdev::space(dir).map(|s| s.0)
     }
     fn data_in_memory(&self) -> bool {
-        crate::macfw::in_memory(&std::fs::read_to_string("/proc/mounts").unwrap_or_default(), &self.data)
+        crate::macfw::in_memory(&iyakki_storage::read_mounts().unwrap_or_default(), &self.data)
     }
     fn kernel_log(&self) -> String {
         std::process::Command::new("dmesg").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
@@ -1375,7 +1375,7 @@ impl Env for RealEnv {
     fn install(&mut self, version: &str, source: &str, p: &pack::Pack) -> Result<apply::Report, String> {
         let (fs, real) = apply::Fs::for_data(&self.data);
         let run: Box<dyn iyakki_drivers::run::Runner> = if real { Box::new(iyakki_drivers::run::System) } else { Box::new(iyakki_drivers::run::Dry) };
-        apply::install_pack(&fs, run.as_ref(), PACK_ID, version, "LicenseRef-linux-firmware-various-per-file", source, "local", p)
+        crate::fwpack::install_checked(&fs, run.as_ref(), PACK_ID, version, "LicenseRef-linux-firmware-various-per-file", source, p)
     }
     fn module_state(&self, name: &str) -> ModState {
         crate::fwpack::module_state_in(&self.sys, name)

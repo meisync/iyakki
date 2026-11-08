@@ -15,6 +15,12 @@ CONFIG_EFIVAR_FS=y
 CONFIG_FW_LOADER=y
 CONFIG_HOTPLUG_PCI=y
 CONFIG_HOTPLUG_PCI_PCIE=y
+# x2APIC with interrupt remapping: firmware on current Intel laptops (Meteor Lake and later, e.g. HP Pavilion 16-af0, 2026-11-07) enables
+# x2APIC and can lock the legacy xAPIC off; a kernel without CONFIG_X86_X2APIC then disables the APIC altogether ("Kernel does not
+# support x2APIC"), hidden by quiet, and the start stops before stage 1. IRQ_REMAP is what X2APIC depends on (the Intel IOMMU is built in).
+CONFIG_INTEL_IOMMU=y
+CONFIG_IRQ_REMAP=y
+CONFIG_X86_X2APIC=y
 CONFIG_SERIAL_8250=y
 CONFIG_SERIAL_8250_CONSOLE=y
 CONFIG_CGROUPS=y
@@ -41,6 +47,9 @@ CONFIG_ATA=y
 CONFIG_SATA_AHCI=y
 CONFIG_ATA_PIIX=y
 CONFIG_BLK_DEV_NVME=y
+# Intel VMD (the "Intel RST/VMD" or RAID mode of HP, Dell and Lenovo Intel laptops since 11th gen): without it the NVMe disk behind the
+# VMD bridge is invisible and the installed system stops at "still waiting for the IYAKKI drive". Built in, like the NVMe driver.
+CONFIG_VMD=y
 CONFIG_USB_STORAGE=y
 CONFIG_USB_UAS=y
 CONFIG_MMC=y

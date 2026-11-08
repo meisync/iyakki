@@ -108,6 +108,9 @@ pub struct Update {
     /// Permissions the new version asks for and the installed one did not (plain words).
     pub new_permissions: Vec<String>,
     pub note: String,
+    /// A driver pack (counted apart in the grouped notice).
+    #[serde(default)]
+    pub driver: bool,
 }
 
 impl Update {
@@ -149,6 +152,19 @@ impl Report {
         std::fs::write(&tmp, serde_json::to_vec_pretty(self).unwrap_or_default()).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, dir.join(FILE)).map_err(|e| e.to_string())
     }
+}
+
+/// An app was installed: drop it from the kept answer when the installed version is the one the check offered (or newer), so the badge
+/// and the page stop counting it at once instead of at the next check. Returns whether the answer changed.
+pub fn forget_installed(dir: &Path, kind: &str, name: &str, version: &str) -> bool {
+    let Some(mut r) = Report::load(dir) else { return false };
+    let id = format!("{kind}:{name}");
+    let before = r.updates.len();
+    r.updates.retain(|u| !(u.kind == Kind::App && u.id == id && compare_versions(&u.to, version) != std::cmp::Ordering::Greater));
+    if r.updates.len() == before {
+        return false;
+    }
+    r.save(dir).is_ok()
 }
 
 /// The system update index: what an administrator's mirror (or the portal) says is the newest version.
@@ -233,23 +249,38 @@ pub fn run(store: &Store, svc: &Services, policy: &Policy, user: &str, fetch: &d
             source: it.source_name.clone(),
             note: if added.is_empty() { String::new() } else { "asks for permissions the installed version did not".into() },
             new_permissions: added,
+            driver: it.entry.meta.ext_kind == "driver",
         });
     }
-    // 2. the system: only the address an administrator set
+    // 2. the system: only the address an administrator set (or a store the person added, see `sysannounce`)
     if !settings.system_url.is_empty() {
         rep.asked.push(settings.system_url.clone());
-        match check_url(&settings.system_url).and_then(|u| fetch.get(&u, MAX_INDEX)) {
+        let found: Result<Option<Index>, String> = if super::sysannounce::is_store_announcement(&settings.system_url) {
+            let url = settings.system_url.trim();
+            match cfg.sources.iter().find(|s| !s.pin.is_empty() && s.kind == super::catalog::SourceKind::Url && super::sysannounce::url_for_catalog(&s.location) == url) {
+                None => Err("this address is a store's announcement, but that store is not added with its key checked here, so it is not trusted".into()),
+                Some(src) => match check_url(url).and_then(|u| fetch.get(&u, super::sysannounce::MAX)) {
+                    Err(e) if e.ends_with("answered 404") => Ok(None),
+                    Err(e) => Err(e),
+                    Ok(b) => super::sysannounce::verify(&b, &src.pin).map(|a| Some(Index { version: a.version, variant: a.variant, notes: a.notes })),
+                },
+            }
+        } else {
+            match check_url(&settings.system_url).and_then(|u| fetch.get(&u, MAX_INDEX)) {
+                Err(e) => Err(e),
+                Ok(b) => serde_json::from_slice::<Index>(&b).map(Some).map_err(|_| "the answer is not an update index".to_string()),
+            }
+        };
+        match found {
             Err(e) => rep.errors.push(("System update".into(), e)),
-            Ok(b) => match serde_json::from_slice::<Index>(&b) {
-                Err(_) => rep.errors.push(("System update".into(), "the answer is not an update index".into())),
-                Ok(ix) => {
-                    if !ix.variant.is_empty() && !variant.is_empty() && ix.variant != variant {
-                        // an index for another build of IYAKKI says nothing about this one
-                    } else if compare_versions(&ix.version, running) == std::cmp::Ordering::Greater {
-                        rep.updates.push(Update { kind: Kind::System, id: "system".into(), title: "IYAKKI".into(), from: running.into(), to: ix.version, source: "System update".into(), new_permissions: Vec::new(), note: ix.notes.chars().take(300).collect() });
-                    }
+            Ok(None) => {}
+            Ok(Some(ix)) => {
+                if !ix.variant.is_empty() && !variant.is_empty() && ix.variant != variant {
+                    // an index for another build of IYAKKI says nothing about this one
+                } else if compare_versions(&ix.version, running) == std::cmp::Ordering::Greater {
+                    rep.updates.push(Update { kind: Kind::System, id: "system".into(), title: "IYAKKI".into(), from: running.into(), to: ix.version, source: "System update".into(), new_permissions: Vec::new(), note: ix.notes.chars().take(300).collect(), driver: false });
                 }
-            },
+            }
         }
     }
     rep
@@ -258,7 +289,14 @@ pub fn run(store: &Store, svc: &Services, policy: &Policy, user: &str, fetch: &d
 /// [`run`], and the answer is kept for the page.
 #[allow(clippy::too_many_arguments)]
 pub fn run_and_keep(store: &Store, svc: &Services, policy: &Policy, user: &str, fetch: &dyn Fetch, settings: &CheckSettings, running: &str, variant: &str) -> Report {
-    let rep = run(store, svc, policy, user, fetch, settings, running, variant);
+    let mut rep = run(store, svc, policy, user, fetch, settings, running, variant);
+    if settings.mode != Mode::Off {
+        super::updatenotice::merge_extra(&mut rep, svc.dir(), running);
+    }
     let _ = rep.save(svc.dir());
+    // one grouped notice for everything pending (replaced in place; never installs anything)
+    if settings.mode != Mode::Off {
+        super::updatenotice::announce_report(svc, user, &rep);
+    }
     rep
 }

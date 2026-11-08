@@ -226,7 +226,7 @@ pub(crate) fn run(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Resu
     let detail = format!("http://matrix.{NS}.svc:8008 inside the cluster; IYAKKI address {HOMESERVER}; accounts end with :{SERVER_NAME}");
     env.say(&format!("[6/7] to use it with IYAKKI: register an account with any Matrix client (server {HOMESERVER} is for IYAKKI; a client on another computer needs its own way in), using the registration token from your vault, then Settings, Notifications, Matrix account"));
     env.request_after(REQUEST)?;
-    env.mark(Item::Matrix, &detail)?;
+    crate::quickinstall::mark_verified(env, Item::Matrix, &detail)?;
     env.say(&format!("[7/7] done: {detail}. IYAKKI is putting the registration token into your vault as {VAULT_NAME}"));
     Ok(())
 }

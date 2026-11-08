@@ -120,6 +120,6 @@ fn isolation_defaults_to_folders_and_volumes_is_refused_until_it_is_built() {
     let c = with(|_| {});
     assert_eq!(c.isolation, crate::cloudstorage::Isolation::Folders);
     let e = TenantConfig::parse(r#"{"tenant":"acme","isolation":"volumes"}"#).unwrap_err();
-    assert!(e.contains("not built yet"), "{e}");
+    assert!(e.contains("not deployed, by decision") && e.contains("storage.quota"), "{e}");
     assert!(TenantConfig::parse(r#"{"tenant":"acme","isolation":"folders"}"#).is_ok());
 }

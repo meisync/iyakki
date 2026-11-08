@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn routes_become_an_ingress_document_and_an_image_push_must_name_the_tenants_image() {
         let mut l = launch();
-        l.routes = RouteTable { routes: vec![Route { host: "app.example.org".into(), path_prefix: "/".into(), target: Target::Service { name: "iyakki".into(), port: 8080 }, scheme: Scheme::Http, listen: None, websocket: true, redirect_http: false, cert: None, access: Access::Members }], ingress_class: None };
+        l.routes = RouteTable { routes: vec![Route { host: "app.example.org".into(), path_prefix: "/".into(), target: Target::Service { name: "iyakki".into(), port: 8080 }, scheme: Scheme::Http, listen: None, websocket: true, redirect_http: false, cert: None, access: Access::Members, client_ca: None }], ingress_class: None };
         l.image = ImageStep::Push { dest: "10.0.0.5:5000/iyakki:1".into() };
         let p = plan(&l);
         assert!(p.documents.iter().any(|d| d.0 == "20-routes.yaml"));
@@ -227,7 +227,7 @@ mod tests {
         let mut l = launch();
         l.tenant.image = "10.0.0.5:5000/iyakki:1".into();
         l.image = ImageStep::Push { dest: "10.0.0.5:5000/iyakki:1".into() };
-        l.routes = RouteTable { routes: vec![Route { host: "app.example.org".into(), path_prefix: "/".into(), target: Target::Service { name: "iyakki".into(), port: 8080 }, scheme: Scheme::Http, listen: None, websocket: true, redirect_http: false, cert: None, access: Access::Members }], ingress_class: None };
+        l.routes = RouteTable { routes: vec![Route { host: "app.example.org".into(), path_prefix: "/".into(), target: Target::Service { name: "iyakki".into(), port: 8080 }, scheme: Scheme::Http, listen: None, websocket: true, redirect_http: false, cert: None, access: Access::Members, client_ca: None }], ingress_class: None };
         let p = plan(&l);
         let work = std::env::temp_dir().join(format!("iyakki-launch-{}", std::process::id()));
         let mut calls: Vec<String> = Vec::new();

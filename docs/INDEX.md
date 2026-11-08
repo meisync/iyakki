@@ -42,6 +42,7 @@
 | [`SHARED-FOLDERS.md`](SHARED-FOLDERS.md) | Share a folder over HTTP on the local network (files or a website): modes, the security model, limits, sharing from the AI IDE, troubleshooting |
 | [`FIREWALL.md`](FIREWALL.md) | The firewall: incoming connections blocked by default, rules by host name, IP, range or network, presets, the 60-second Keep, the blocked-connection list, how to get out of a lockout, the kernel mechanism and why it is our own code |
 | [`CLI-SSH.md`](CLI-SSH.md) | The SSH client in the CLI tile: which client, host keys, vault keys, the Connections tab, what the assistant may do |
+| [`QUICKSTART-BUILD.md`](QUICKSTART-BUILD.md) | One page: build an image, run it in a window or VM, write it to a disk, update a running machine, deploy to the cloud |
 | [`JOBS.md`](JOBS.md) | Detached jobs: long commands that outlive the chat, the Jobs strip, `job_start` for the assistant and Claude Code |
 | [`MACOS.md`](MACOS.md) · [`MAC-HARDWARE.md`](MAC-HARDWARE.md) | IYAKKI on a Mac: window, VM, Intel Mac hardware, driver packs |
 | [`MAC-WIFI-BLUETOOTH-SETUP.md`](MAC-WIFI-BLUETOOTH-SETUP.md) | Wi-Fi and Bluetooth firmware on T2 Macs: script route, Linux-side route, a prompt for an AI agent, checks, rollback |

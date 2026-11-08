@@ -145,7 +145,7 @@ fn real_main() -> ExitCode {
     let cmd = args.first().map(String::as_str).unwrap_or(if std::process::id() == 1 { "serve" } else { "help" });
     match cmd {
         "net" => match args.get(1).map(String::as_str) {
-            Some("up") => match iyakki_core::net::bring_up(std::path::Path::new("/etc/iyakki/net.conf"), std::path::Path::new("/sys/class/net")) {
+            Some("up") => match iyakki_core::net::bring_up(std::path::Path::new("/etc/iyakki/net.conf"), std::path::Path::new(iyakki_core::net::SYS_CLASS_NET)) {
                 Ok(errs) => {
                     errs.iter().for_each(|e| err!("iyakki net: {e}"));
                     ExitCode::SUCCESS
@@ -153,7 +153,7 @@ fn real_main() -> ExitCode {
                 Err(e) => fail(e.to_string()),
             },
             Some("status") => {
-                for i in iyakki_core::net::list_ifaces(std::path::Path::new("/sys/class/net")) {
+                for i in iyakki_core::net::list_ifaces(std::path::Path::new(iyakki_core::net::SYS_CLASS_NET)) {
                     out!("{:<12} {:?}", i.name, i.kind);
                 }
                 ExitCode::SUCCESS
@@ -204,6 +204,15 @@ fn real_main() -> ExitCode {
         #[cfg(feature = "shell")]
         "store-server" => match iyakki_agent::store::server_http::run_cli(&args[1..]) {
             Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(e),
+        },
+        // system components of a private store: publish, list, plan (docs/development/COMPONENT-UPDATES-PLAN.md)
+        #[cfg(feature = "shell")]
+        "store" => match iyakki_agent::store::compcli::run(&args[1..]) {
+            Ok(text) => {
+                out!("{text}");
+                ExitCode::SUCCESS
+            }
             Err(e) => fail(e),
         },
         // developer mode, the computer's side: talks to a paired device over its TLS (docs/DEVELOPER-MODE.md)
@@ -313,7 +322,7 @@ fn real_main() -> ExitCode {
                 // /proc must exist before the command line can be read
                 std::env::set_var("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
                 iyakki_core::boot::mount_pseudo_filesystems();
-                let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+                let cmdline = iyakki_storage::cmdline_text();
                 if web_value.is_none() {
                     web_value = iyakki_core::boot::cmdline_param(&cmdline, "iyakki.web").map(String::from);
                 }
@@ -487,7 +496,7 @@ fn real_main() -> ExitCode {
             // a cloud node with no administrator: the pairing page holds the web port until the first account exists (docs/CLOUD-IMAGES.md)
             #[cfg(feature = "web")]
             let (web_value, adopting) = {
-                let cmd = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+                let cmd = iyakki_storage::cmdline_text();
                 let users = std::path::PathBuf::from(&iyakki_shell::shell::ShellPaths::default().users);
                 let wanted = iyakki_core::cloudnode::adopt_wanted(&cmd, std::env::var("IYAKKI_ADOPT").ok().as_deref(), &users, &|| iyakki_agent::cloudmode::detect(iyakki_agent::cloudmode::Setting::Auto).on);
                 let value = web_value.clone().unwrap_or_else(|| "1".to_string());
@@ -711,7 +720,7 @@ fn mem_report(stage: &str) {
     let rd = |p: &str| std::fs::read_to_string(p).unwrap_or_else(|e| format!("missing: {e}"));
     // a swap file is made in the background after login: give it time (up to 40 s) when one is configured
     let wants_file = |c: &str| c.lines().any(|l| l.trim().strip_prefix("swapfile=").is_some_and(|v| v != "off" && v != "0"));
-    if wants_file(&rd(iyakki_zram::CONF_PATH)) || iyakki_core::boot::cmdline_param(&rd("/proc/cmdline"), "iyakki.swapfile").is_some_and(|v| v != "off" && v != "0") {
+    if wants_file(&rd(iyakki_zram::CONF_PATH)) || iyakki_core::boot::cmdline_param(&iyakki_storage::cmdline_text(), "iyakki.swapfile").is_some_and(|v| v != "off" && v != "0") {
         for _ in 0..80 {
             if rd("/proc/swaps").contains(iyakki_zram::SWAPFILE_PATH) {
                 break;
@@ -759,7 +768,7 @@ fn firewall_cmd(args: &[String]) -> ExitCode {
 }
 
 fn hostname_cmd(a: &[String]) -> ExitCode {
-    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let cmdline = iyakki_storage::cmdline_text();
     let conf = std::path::Path::new(iyakki_zram::CONF_PATH);
     match a.first().map(String::as_str) {
         None | Some("show") => {
@@ -852,7 +861,7 @@ fn selftest() {
     for l in iyakki_hwinfo::collect(&iyakki_hwinfo::Roots::real()).to_text().lines().filter(|l| !l.trim().is_empty()) {
         out!("IYAKKI-HWREPORT {l}");
     }
-    for i in iyakki_core::net::list_ifaces(std::path::Path::new("/sys/class/net")) {
+    for i in iyakki_core::net::list_ifaces(std::path::Path::new(iyakki_core::net::SYS_CLASS_NET)) {
         out!("IYAKKI-SELFTEST iface {} {:?}", i.name, i.kind);
     }
     // Voice needs the ALSA command-line tools and a sound device.
@@ -910,7 +919,7 @@ fn shell_env() -> Result<iyakki_shell::shell::ShellEnv, String> {
 #[cfg(feature = "shell")]
 fn build_shell_env() -> Result<iyakki_shell::shell::ShellEnv, String> {
     let host = std::sync::Arc::new(iyakki_core::host::CoreHost::new());
-    let hwcheck = iyakki_core::boot::cmdline_param(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default(), "iyakki.hwcheck") == Some("1");
+    let hwcheck = iyakki_core::boot::cmdline_param(&iyakki_storage::cmdline_text(), "iyakki.hwcheck") == Some("1");
     let paths = iyakki_shell::shell::ShellPaths { hwcheck, ..Default::default() };
     let env = iyakki_shell::shell::ShellEnv::from_paths(&paths, host).map_err(|e| e.to_string())?;
     // firewall changes (and what happened at boot) go into the audit log

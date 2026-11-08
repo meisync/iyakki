@@ -101,6 +101,8 @@ pub struct Settings {
     /// The model that looks at pictures (Settings -> Models -> Vision model); `None` = the chat model if it can see, else one is picked
     /// from the providers (see `visionmodel`).
     pub vision: Option<ModelChoice>,
+    /// The model that tidies text (dictation wording, the Assistant pane, `text_tidy`/`text_revise`); `None` = the chat model.
+    pub tidy: Option<ModelChoice>,
     /// `None` = built-in hashed embeddings (no model needed).
     pub embedding: Option<ModelChoice>,
     pub rag: RagSettings,
@@ -248,6 +250,9 @@ pub struct SettingsStore {
     current: Settings,
     /// Set when the file cannot be written without losing something (written by a newer release, or unreadable): every save says why.
     read_only: Option<String>,
+    /// The computer this install runs on (`hwprofile`): its per-computer values are put over the settings when it is attached and
+    /// written to its profile after every change.
+    computers: Option<crate::hwprofile::Computers>,
 }
 
 impl SettingsStore {
@@ -266,7 +271,7 @@ impl SettingsStore {
         if read_only.is_none() {
             current.schema = SCHEMA.current;
         }
-        Ok(SettingsStore { path: path.into(), current, read_only })
+        Ok(SettingsStore { path: path.into(), current, read_only, computers: None })
     }
 
     /// Why this store cannot be changed (a newer release wrote the file), if so.
@@ -276,6 +281,17 @@ impl SettingsStore {
 
     pub fn get(&self) -> &Settings {
         &self.current
+    }
+
+    /// Binds the store to the computer it runs on: that computer's values are laid over the loaded settings (in memory; the file
+    /// keeps the last values until the next change), and every later change of a per-computer setting is written to its profile.
+    pub fn attach_computers(&mut self, c: crate::hwprofile::Computers) {
+        c.apply(&mut self.current);
+        self.computers = Some(c);
+    }
+
+    pub fn computers(&self) -> Option<&crate::hwprofile::Computers> {
+        self.computers.as_ref()
     }
 
     fn save(&self) -> Result<(), SettingsError> {
@@ -294,6 +310,11 @@ impl SettingsStore {
         if let Err(e) = self.save() {
             self.current = prev;
             return Err(e);
+        }
+        if let Some(c) = &self.computers {
+            if let Err(e) = c.record(&self.current) {
+                log::warn!("computer profile: {e}");
+            }
         }
         Ok(())
     }

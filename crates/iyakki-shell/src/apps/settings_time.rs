@@ -58,7 +58,7 @@ pub(super) struct NamePanel {
 
 impl Default for NamePanel {
     fn default() -> NamePanel {
-        NamePanel { conf: iyakki_zram::CONF_PATH.into(), etc: "/etc/hostname".into(), cmdline: std::fs::read_to_string("/proc/cmdline").unwrap_or_default(), writable: !hf_on(), apply: Arc::new(|n, p| iyakki_devctl::apply_hostname(n, p)), draft: None }
+        NamePanel { conf: iyakki_zram::CONF_PATH.into(), etc: "/etc/hostname".into(), cmdline: iyakki_agent::sysinfo::cmdline(iyakki_agent::sysinfo::proc_root()), writable: !hf_on(), apply: Arc::new(|n, p| iyakki_devctl::apply_hostname(n, p)), draft: None }
     }
 }
 

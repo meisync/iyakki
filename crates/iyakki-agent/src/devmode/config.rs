@@ -78,6 +78,11 @@ pub const DEFS: &[Def] = &[
     Def { key: "voice.speed_pct", ty: Ty::Int(50, 200), desc: "speaking speed in percent" },
     Def { key: "voice.speak_replies", ty: Ty::Bool, desc: "read assistant replies aloud" },
     Def { key: "voice.auto_send", ty: Ty::Bool, desc: "send transcribed speech straight away" },
+    Def { key: "voice.auto_stop", ty: Ty::Bool, desc: "a dictation ends by itself after a pause in the talking (default on)" },
+    Def { key: "voice.keep_listening", ty: Ty::Bool, desc: "listen again after each dictation that ended on a pause, until Stop (default off)" },
+    Def { key: "voice.fix_wording", ty: Ty::Bool, desc: "correct dictated wording with the chat assistant as you talk (default off)" },
+    Def { key: "voice.assistant_open", ty: Ty::Bool, desc: "the Assistant pane beside the Voice tile's transcript is open (default on)" },
+    Def { key: "voice.pause_ms", ty: Ty::Int(500, 4000), desc: "the pause that ends a dictation, in milliseconds (default 1500)" },
     Def { key: "voice.align_words", ty: Ty::Bool, desc: "time the lit word from the sound" },
     Def { key: "voice.tts", ty: Ty::Text(200), desc: "reading voice: PROVIDER/MODEL[/VOICE] of a Lemonade provider (empty: built-in)" },
     Def { key: "voice.stt", ty: Ty::Text(200), desc: "speech-to-text: PROVIDER/MODEL of a Lemonade provider (empty: built-in)" },
@@ -95,9 +100,11 @@ pub const DEFS: &[Def] = &[
     Def { key: "cloud.mode", ty: Ty::Enum(CLOUD), desc: "cloud mode: hide what needs local hardware (auto follows the machine)" },
     Def { key: "model.chat", ty: Ty::Text(120), desc: "chat model: PROVIDER/MODEL (empty: none)" },
     Def { key: "model.vision", ty: Ty::Text(120), desc: "vision model: PROVIDER/MODEL (empty: the chat model if it can see pictures, else picked automatically)" },
+    Def { key: "model.tidy", ty: Ty::Text(120), desc: "model that tidies dictated text and revises text: PROVIDER/MODEL (empty: the chat model; a small fast model answers sooner than a remote reasoning one)" },
     Def { key: "model.embedding", ty: Ty::Text(120), desc: "embedding model: PROVIDER/MODEL (empty: built-in)" },
     Def { key: "rag.top_k", ty: Ty::Int(1, 50), desc: "passages retrieved per question" },
     Def { key: "rag.use_external", ty: Ty::Bool, desc: "query external knowledge backends too" },
+    Def { key: "store.daily_check", ty: Ty::Bool, desc: "look for app and system updates once a day (only the stores and update list address that were added; false: only when asked)" },
     Def { key: "limits.tool_log_days", ty: Ty::Int(0, 365), desc: "days the assistant's tool log is kept (0: default 3)" },
     Def { key: "limits.media_download_max_mb", ty: Ty::Int(0, 102_400), desc: "largest media download in MB (0: default 2048)" },
     Def { key: "limits.think_limit_secs", ty: Ty::Int(0, 3600), desc: "seconds of pure thinking before a retry (0: default 60)" },
@@ -133,6 +140,11 @@ fn get_value(s: &Settings, key: &str) -> Option<Value> {
         "voice.speed_pct" => json!(s.voice.speed_pct),
         "voice.speak_replies" => json!(s.voice.speak_replies),
         "voice.auto_send" => json!(s.voice.auto_send),
+        "voice.auto_stop" => json!(s.voice.auto_stop),
+        "voice.keep_listening" => json!(s.voice.keep_listening),
+        "voice.fix_wording" => json!(s.voice.fix_wording),
+        "voice.assistant_open" => json!(s.voice.assistant_open),
+        "voice.pause_ms" => json!(s.voice.pause_ms),
         "voice.align_words" => json!(s.voice.align_words),
         "voice.tts" => json!(s.voice.tts.as_ref().map(|e| e.label()).unwrap_or_default()),
         "voice.stt" => json!(s.voice.stt.as_ref().map(|e| e.label()).unwrap_or_default()),
@@ -154,9 +166,11 @@ fn get_value(s: &Settings, key: &str) -> Option<Value> {
         }),
         "model.chat" => json!(choice_text(&s.chat)),
         "model.vision" => json!(choice_text(&s.vision)),
+        "model.tidy" => json!(choice_text(&s.tidy)),
         "model.embedding" => json!(choice_text(&s.embedding)),
         "rag.top_k" => json!(s.rag.top_k),
         "rag.use_external" => json!(s.rag.use_external),
+        "store.daily_check" => json!(s.update_check.mode == crate::store::updatecheck::Mode::Daily),
         "limits.tool_log_days" => json!(s.tool_log_days),
         "limits.media_download_max_mb" => json!(s.media_download_max_mb),
         "limits.think_limit_secs" => json!(s.think_limit_secs),
@@ -211,6 +225,11 @@ fn apply(s: &mut Settings, key: &str, v: &Value) -> Result<(), String> {
         "voice.speed_pct" => s.voice.speed_pct = n as u32,
         "voice.speak_replies" => s.voice.speak_replies = b.unwrap_or(false),
         "voice.auto_send" => s.voice.auto_send = b.unwrap_or(false),
+        "voice.auto_stop" => s.voice.auto_stop = b.unwrap_or(true),
+        "voice.keep_listening" => s.voice.keep_listening = b.unwrap_or(false),
+        "voice.fix_wording" => s.voice.fix_wording = b.unwrap_or(false),
+        "voice.assistant_open" => s.voice.assistant_open = b.unwrap_or(true),
+        "voice.pause_ms" => s.voice.pause_ms = n as u32,
         "voice.align_words" => s.voice.align_words = b.unwrap_or(false),
         "keyboard.profile" => s.keyboard.profile = t.into(),
         "keyboard.fn_mode" => s.keyboard.fn_mode = t.into(),
@@ -232,9 +251,18 @@ fn apply(s: &mut Settings, key: &str, v: &Value) -> Result<(), String> {
         }
         "model.chat" => s.chat = choice_of(s, t)?,
         "model.vision" => s.vision = choice_of(s, t)?,
+        "model.tidy" => s.tidy = choice_of(s, t)?,
         "model.embedding" => s.embedding = choice_of(s, t)?,
         "rag.top_k" => s.rag.top_k = n as usize,
         "rag.use_external" => s.rag.use_external = b.unwrap_or(false),
+        "store.daily_check" => {
+            use crate::store::updatecheck::Mode;
+            if b.unwrap_or(false) {
+                s.update_check.mode = Mode::Daily;
+            } else if s.update_check.mode == Mode::Daily {
+                s.update_check.mode = Mode::Manual;
+            }
+        }
         "limits.tool_log_days" => s.tool_log_days = n as u32,
         "limits.media_download_max_mb" => s.media_download_max_mb = n as u32,
         "limits.think_limit_secs" => s.think_limit_secs = n as u32,
@@ -275,7 +303,8 @@ pub fn list(svc: &Services, ext: Option<&dyn ConfigExt>, account: &str) -> Value
             rows.push(json!({ "key": k, "type": ty.name(), "desc": desc, "value": v, "admin": admin }));
         }
     }
-    json!({ "settings": rows, "providers": providers(&s.get().providers) })
+    let computer = s.computers().map(|c| json!({ "id": c.me.id, "label": c.me.label }));
+    json!({ "settings": rows, "providers": providers(&s.get().providers), "computer": computer })
 }
 
 fn providers(list: &[ProviderCfg]) -> Vec<Value> {

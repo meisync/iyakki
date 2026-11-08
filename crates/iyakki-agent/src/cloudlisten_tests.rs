@@ -33,7 +33,7 @@ fn opts() -> (Options, Log) {
 }
 
 fn route(host: &str, prefix: &str, target: u16, listen: u16) -> Route {
-    Route { host: host.into(), path_prefix: prefix.into(), target: Target::Local { port: target }, scheme: Scheme::Http, listen: Some(listen), websocket: true, redirect_http: false, cert: None, access: Access::Public }
+    Route { host: host.into(), path_prefix: prefix.into(), target: Target::Local { port: target }, scheme: Scheme::Http, listen: Some(listen), websocket: true, redirect_http: false, cert: None, access: Access::Public, client_ca: None }
 }
 
 fn https_route(host: &str, target: u16, listen: u16, cert: &str) -> Route {
@@ -1612,4 +1612,155 @@ fn a_listener_without_tenants_behaves_as_before_and_the_help_text_lists_the_flag
     let mut said = Vec::new();
     crate::cloudcli::run(&args("listen --help"), &mut |l| said.push(l.to_string())).unwrap();
     assert!(said.join("\n").contains("--cert-source"));
+}
+
+#[test]
+fn a_client_hello_split_over_several_tls_records_gives_the_same_server_name() {
+    let cfg = trusting(&[], &[&rustls::version::TLS13, &rustls::version::TLS12]);
+    let mut c = rustls::ClientConnection::new(cfg, ServerName::try_from("split.example.org".to_string()).unwrap()).unwrap();
+    let mut whole = Vec::new();
+    c.write_tls(&mut whole).unwrap();
+    assert_eq!(client_hello_sni(&whole), Ok(Hello::Sni(Some("split.example.org".into()))));
+    let hs = &whole[5..];
+    let records = |sizes: &[usize]| {
+        let mut out = Vec::new();
+        let mut rest = hs;
+        for n in sizes {
+            let (a, b) = rest.split_at((*n).min(rest.len()));
+            out.extend_from_slice(&[0x16, 3, 1, (a.len() >> 8) as u8, a.len() as u8]);
+            out.extend_from_slice(a);
+            rest = b;
+        }
+        if !rest.is_empty() {
+            out.extend_from_slice(&[0x16, 3, 1, (rest.len() >> 8) as u8, rest.len() as u8]);
+            out.extend_from_slice(rest);
+        }
+        out
+    };
+    // two records, three, and a split inside the 4-byte handshake header
+    for sizes in [vec![10], vec![40, 40], vec![2], vec![1, 1, 1, 1]] {
+        let v = records(&sizes);
+        assert_eq!(client_hello_sni(&v), Ok(Hello::Sni(Some("split.example.org".into()))), "{sizes:?}");
+        // every cut of the stream before its end is "need more", never a wrong answer
+        for cut in [0, 3, 5, 6, v.len() / 2, v.len() - 1] {
+            assert_eq!(client_hello_sni(&v[..cut]), Ok(Hello::Incomplete), "{sizes:?} cut {cut}");
+        }
+    }
+    // another kind of record in the middle, an empty record, a huge hello: refused
+    let mut mixed = records(&[20]);
+    mixed[0] = 0x17;
+    let first_len = 5 + 20;
+    mixed[first_len] = 0x17;
+    assert!(client_hello_sni(&mixed).is_err());
+    let mut other = records(&[20]);
+    other[25] = 0x15; // the second record is an alert, the hello is not complete
+    assert!(client_hello_sni(&other).is_err());
+    assert!(client_hello_sni(&[0x16, 3, 1, 0, 0]).is_err(), "an empty record");
+    let mut big = vec![0x16, 3, 1, 0x20, 0x00, 1, 0xff, 0xff, 0xff];
+    big.extend(std::iter::repeat(0u8).take(0x2000 - 4));
+    assert_eq!(client_hello_sni(&big), Err("ClientHello too large"));
+    // a stream of full records that never completes a hello stops at the limit
+    let mut endless = Vec::new();
+    for i in 0..4 {
+        endless.extend_from_slice(&[0x16, 3, 1, 0x40, 0x00]);
+        if i == 0 {
+            endless.extend_from_slice(&[1, 0x00, 0x7f, 0xff]);
+            endless.extend(std::iter::repeat(0u8).take(0x4000 - 4));
+        } else {
+            endless.extend(std::iter::repeat(0u8).take(0x4000));
+        }
+    }
+    assert!(client_hello_sni(&endless).is_ok(), "a 32 KiB hello is still within the limit: it is incomplete or parsed, not looped on");
+}
+
+#[test]
+fn many_idle_tunnels_sleep_instead_of_polling_and_still_carry_bytes_both_ways_at_once() {
+    use std::sync::atomic::Ordering;
+    let a = upstream("a");
+    let p = free_port();
+    let (_l, _) = start(vec![route(A, "/", a.port, p)]);
+    let open = || {
+        let mut s = connect(p);
+        s.write_all(format!("GET /ws HTTP/1.1\r\nHost: {A}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: x\r\n\r\n").as_bytes()).unwrap();
+        let mut r = BufReader::new(s.try_clone().unwrap());
+        let mut line = String::new();
+        r.read_line(&mut line).unwrap();
+        assert!(line.starts_with("HTTP/1.1 101"), "{line}");
+        while line != "\r\n" {
+            line.clear();
+            r.read_line(&mut line).unwrap();
+        }
+        let mut w = [0u8; 7];
+        r.read_exact(&mut w).unwrap();
+        (s, r)
+    };
+    let mut conns: Vec<_> = (0..60).map(|_| open()).collect();
+    std::thread::sleep(Duration::from_millis(300)); // let every tunnel settle into its wait
+    let before = TUNNEL_PASSES.load(Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(1500));
+    let idle_passes = TUNNEL_PASSES.load(Ordering::Relaxed) - before;
+    // polling every 10 ms would be about 60 x 150 = 9000 passes in this time; sleeping gives about one a second each (60 to 120)
+    assert!(idle_passes < 600, "idle tunnels still look at their sockets {idle_passes} times in 1.5 s");
+    // and every one of them wakes at once when bytes arrive, in both directions together
+    let t0 = Instant::now();
+    for (i, (s, _)) in conns.iter_mut().enumerate() {
+        s.write_all(format!("msg{i:03}").as_bytes()).unwrap();
+    }
+    for (i, (_, r)) in conns.iter_mut().enumerate() {
+        let mut got = [0u8; 6];
+        r.read_exact(&mut got).unwrap();
+        assert_eq!(&got, format!("msg{i:03}").as_bytes());
+    }
+    assert!(t0.elapsed() < Duration::from_secs(3), "60 tunnels answered in {:?}", t0.elapsed());
+}
+
+#[test]
+fn a_client_ca_named_in_the_route_file_guards_the_whole_host_and_the_target_learns_which_certificate_came() {
+    use sha2::{Digest, Sha256};
+    let ca = make_ca("ca one");
+    let up = upstream("secure");
+    let dir = tmp("mtls-file");
+    let (chain, key) = self_signed(M1).unwrap();
+    write_cert(&dir, "secure", &chain, &key);
+    std::fs::write(dir.join("ca1.ca"), &ca.pem).unwrap();
+    let p = free_port();
+    let mut guarded = https_route(M1, up.port, p, "secure");
+    guarded.client_ca = Some("ca1".into());
+    let mut open_path = https_route(M1, up.port, p, "secure");
+    open_path.path_prefix = "/open".into(); // no client_ca of its own: the HOST is guarded, so this path is too
+    let (o, _) = opts();
+    let _l = Listener::start(table(vec![guarded, open_path]), Arc::new(FileCerts::new(&dir)), Arc::new(NoGate), o).unwrap();
+    let call = |path: &str, id: Option<(Vec<rustls::pki_types::CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>)>, extra: &str| -> Result<u16, String> {
+        let cfg = with_client(&[&chain], id);
+        let (mut s, _, _) = tls_connect(p, M1, &cfg)?;
+        s.get_mut().write_all(format!("GET {path} HTTP/1.1\r\nHost: {M1}\r\n{extra}Connection: close\r\n\r\n").as_bytes()).map_err(|e| e.to_string())?;
+        let mut line = String::new();
+        s.read_line(&mut line).map_err(|e| e.to_string())?;
+        line.split(' ').nth(1).and_then(|c| c.parse().ok()).ok_or_else(|| format!("no answer ({line:?})"))
+    };
+    assert_eq!(call("/", None, ""), Ok(403));
+    assert_eq!(call("/open", None, ""), Ok(403), "another path of a guarded host is guarded too");
+    assert!(saw(&up).is_empty(), "nothing reached the target");
+    let (certs, k) = client_identity(&ca, "alice", false);
+    let want: String = Sha256::digest(certs[0].as_ref()).iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(call("/open", Some((certs.clone(), k.clone_key())), "X-Client-Cert-Sha256: forged\r\n"), Ok(200));
+    let seen = saw(&up).to_lowercase();
+    assert!(seen.contains(&format!("x-client-cert-sha256: {want}")), "{seen}");
+    assert!(!seen.contains("forged"), "a header the client made up is dropped: {seen}");
+}
+
+#[test]
+fn a_route_file_names_a_client_ca_only_on_an_https_route_with_a_plain_name() {
+    let mut r = route(A, "/", 8080, 8443);
+    r.client_ca = Some("ca1".into());
+    assert!(RouteTable { routes: vec![r.clone()], ingress_class: None }.check(&[]).unwrap_err().contains("https route"));
+    let mut h = https_route(A, 8080, 8443, "appcert");
+    h.client_ca = Some("../x".into());
+    assert!(RouteTable { routes: vec![h.clone()], ingress_class: None }.check(&[]).unwrap_err().contains("client CA"));
+    h.client_ca = Some("ca1".into());
+    assert!(RouteTable { routes: vec![h.clone()], ingress_class: None }.check(&[]).is_ok());
+    // it round-trips through the route file and is absent from a file that does not use it
+    let text = serde_json::to_string(&RouteTable { routes: vec![h], ingress_class: None }).unwrap();
+    assert!(text.contains("\"client_ca\":\"ca1\""));
+    assert!(!serde_json::to_string(&RouteTable { routes: vec![https_route(A, 8080, 8443, "appcert")], ingress_class: None }).unwrap().contains("client_ca"));
 }

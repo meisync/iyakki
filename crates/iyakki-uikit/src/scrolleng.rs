@@ -14,9 +14,9 @@
 //! (`input.rs`); the shell turns the pixels into what each tile understands (`shell_scroll.rs`).
 
 use std::collections::VecDeque;
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "testing")))]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "testing")))]
 use std::sync::Mutex;
 
 /// One text line of a nominal screen, in pixels.
@@ -64,12 +64,6 @@ impl Default for ScrollConfig {
 impl ScrollConfig {
     fn speed(&self) -> f32 {
         self.speed_pct.clamp(50, 300) as f32 / 100.0
-    }
-}
-
-impl From<iyakki_agent::keyboard::ScrollPrefs> for ScrollConfig {
-    fn from(p: iyakki_agent::keyboard::ScrollPrefs) -> ScrollConfig {
-        ScrollConfig { speed_pct: p.speed_pct, wheel_natural: p.wheel_natural, pad_natural: p.pad_natural, smooth: p.smooth, momentum: p.momentum, wheel_lines: p.wheel_lines }
     }
 }
 
@@ -194,14 +188,14 @@ impl ScrollEngine {
 // ------------------------------------------------------------------ what the rest of the shell tells the input thread
 
 // In the program these are shared with the input thread; in tests each test thread has its own, so tests do not disturb each other.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "testing")))]
 static CONFIG: Mutex<Option<ScrollConfig>> = Mutex::new(None);
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "testing")))]
 static RAW: AtomicBool = AtomicBool::new(false);
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "testing")))]
 static BOUND: AtomicBool = AtomicBool::new(false);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 thread_local! {
     static CONFIG: std::cell::Cell<Option<ScrollConfig>> = const { std::cell::Cell::new(None) };
     static RAW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -210,54 +204,54 @@ thread_local! {
 
 /// The person's choices, for every scroll from now on (Settings and the ten-second sync of the saved settings call this).
 pub fn request_config(c: ScrollConfig) {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "testing")))]
     {
         *CONFIG.lock().unwrap_or_else(|p| p.into_inner()) = Some(c);
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     CONFIG.with(|v| v.set(Some(c)));
 }
 
 pub fn config() -> ScrollConfig {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "testing")))]
     {
         CONFIG.lock().unwrap_or_else(|p| p.into_inner()).unwrap_or_default()
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     CONFIG.with(|v| v.get()).unwrap_or_default()
 }
 
 /// The open tile makes its own smooth pictures (the browser's engine): the wheel's steps go out without easing.
 pub fn set_raw(on: bool) {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "testing")))]
     RAW.store(on, Ordering::Relaxed);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     RAW.with(|v| v.set(on));
 }
 
 pub fn raw() -> bool {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "testing")))]
     {
         RAW.load(Ordering::Relaxed)
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     RAW.with(|v| v.get())
 }
 
 /// A tile scrolled as far as it can go: momentum and what is still queued stop (the input thread looks at this flag).
 pub fn note_bound() {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "testing")))]
     BOUND.store(true, Ordering::Relaxed);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     BOUND.with(|v| v.set(true));
 }
 
 pub fn take_bound() -> bool {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "testing")))]
     {
         BOUND.swap(false, Ordering::Relaxed)
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     BOUND.with(|v| v.replace(false))
 }
 

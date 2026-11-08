@@ -97,7 +97,7 @@ fn every_page_sits_under_one_of_the_headings_in_a_fixed_order() {
     for t in a.tabs() {
         assert!(Tab::ORDER.contains(t), "{t:?} is missing from Tab::ORDER");
     }
-    assert!(a.tabs().len() <= 40, "the per-page selection table has room");
+    assert!(a.tabs().len() <= 48, "the per-page selection table has room");
 }
 
 #[test]

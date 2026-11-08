@@ -34,7 +34,7 @@ or `date not recorded`.
 | B | Mac mini 2018 (Macmini8,1, T2) | macweb install image on a USB SSD (Samsung T7), 2026-10-18/19 | Gate machine |
 | C | Mac mini 2014 (Macmini7,1), "the older Mac mini" | none | Gate machine only if the owner means this one by "the older Mac mini" (decision 1, section 5) |
 | D | AMD CPU + NVIDIA GPU PC | PC image 2026-10-26 not yet run on it; owner reports an AMD PC booted earlier | Gate machine (the AMD PC) |
-| E | Intel CPU + NVIDIA GPU PC | PC image 2026-10-26, never on real hardware | Gate machine (the Intel PC) |
+| E | Intel CPU + NVIDIA GPU PC: HP Pavilion Laptop 16-af0xxx (Core Ultra, Meteor Lake; NVIDIA 10de:25aa; Insyde F.11) | PC lean image 1107g (kernel with x2APIC) from a Samsung T7, 2026-11-07; the 1107e kernel stopped before stage 1 on it | Gate machine (the Intel PC) |
 | F | Generic Intel iGPU PC | none | Not a gate machine; a result is a bonus |
 | G | AMD iGPU PC | none | Not a gate machine; a result is a bonus |
 | H | QEMU x86_64 | all automated boot, install, persistence tests | Automated gate, not hardware |
@@ -54,11 +54,11 @@ Column letters are the ids of section 1.
 
 | Capability | A | B | C | D | E | F | G | H | I | J | K | L | M |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Boot from USB | verified | verified | untested | partly | untested | untested | untested | verified | verified | not supported | not supported | not supported | not supported |
+| Boot from USB | verified | verified | untested | partly | untested | verified | untested | verified | verified | not supported | not supported | not supported | not supported |
 | Install to internal disk | partly | untested | untested | untested | untested | untested | untested | verified | not supported | not supported | not supported | not supported | not supported |
 | Install to USB drive | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported |
 | Upgrade from previous release | untested | untested | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
-| Secure Boot | untested | untested | not supported | untested | untested | untested | untested | verified | not supported | not supported | not supported | not supported | not supported |
+| Secure Boot | untested | untested | not supported | untested | untested | verified | untested | verified | not supported | not supported | not supported | not supported | not supported |
 | Display, internal | verified | not supported | not supported | untested | untested | untested | untested | verified | verified | untested | not supported | not supported | not supported |
 | Display, external monitor | verified | verified | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
 | Display, hot-plug | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
@@ -93,10 +93,10 @@ Column letters are the ids of section 1.
 
 | Status | Cells |
 |---|---|
-| verified | 24 |
+| verified | 26 |
 | partly | 11 |
 | failing | 2 |
-| untested | 210 |
+| untested | 208 |
 | not supported | 169 |
 | waived | 0 |
 | **total** | **416** |
@@ -112,7 +112,7 @@ Per machine:
 | B | 8 | 1 | 1 | 17 | 5 | 0 |
 | C | 0 | 0 | 0 | 26 | 6 | 0 |
 | D | 0 | 1 | 0 | 30 | 1 | 0 |
-| E | 0 | 0 | 0 | 31 | 1 | 0 |
+| E | 2 | 0 | 0 | 29 | 1 | 0 |
 | F | 0 | 0 | 0 | 31 | 1 | 0 |
 | G | 0 | 1 | 0 | 30 | 1 | 0 |
 | H | 4 | 0 | 0 | 11 | 17 | 0 |
@@ -123,7 +123,7 @@ Per machine:
 | M | 0 | 0 | 0 | 0 | 32 | 0 |
 
 
-The machines that count for the gate are A to E. Their 146 cells that apply (no `no such part`) are: 18 verified, 10 partly, 2 failing, 116 untested.
+The machines that count for the gate are A to E. Their 146 cells that apply (no `no such part`) are: 20 verified, 10 partly, 2 failing, 114 untested.
 
 ## 4. Evidence per machine
 
@@ -277,20 +277,26 @@ Status, date and evidence for every cell. The test step for each cell that is no
 | Developer mode pairing | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
 | Firewall | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
 
-### E. Intel CPU + NVIDIA GPU PC
+### E. Intel CPU + NVIDIA GPU PC: HP Pavilion Laptop 16-af0xxx
+
+HP Pavilion Laptop 16-af0xxx, board 8CB6, Insyde BIOS F.11 (2024-09-26), Intel Meteor Lake (host bridge 8086:7d02, Arc iGPU 8086:7d45 on a
+1920x1200 panel), NVIDIA 10de:25aa as a second GPU without display output, WD NVMe 15b7:5036 (not behind VMD), Realtek RTL8852BE Wi-Fi 10ec:b852
+with Bluetooth on USB 0bda:b85c, camera 05c8:0445, 32 GB; two touch devices; the stick on the USB4 xHCI 8086:7ec0. All from the loader's boot log
+on the stick (`EFI/iyakki-boot/last-boot.log`, docs/BOOT-LOADER.md), 2026-11-07. History: the 1107e kernel (no `CONFIG_X86_X2APIC`) died before
+stage 1 on this machine; the rebuilt kernel boots it (docs/development/HP-LAPTOP-PLAN.md).
 
 | Capability | Status | Date | Evidence | Note |
 |---|---|---|---|---|
-| Boot from USB | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
+| Boot from USB | verified | 2026-11-07 | owner's report ("it booted on hp") after the kernel was rebuilt with x2APIC and interrupt remapping; the loader's log of the failing boot is under the owner's work folder (hp-patch/hp-run-1) | Samsung T7, lean image 1107g, the loader as shim's second stage, default entry with `iyakki.root=boot`. The stick's logs of the successful boot are not yet read back. |
 | Install to internal disk | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
 | Install to USB drive | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
 | Upgrade from previous release | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
-| Secure Boot | untested | — | none | Image is unsigned: Secure Boot off for the test. |
-| Display, internal | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
+| Secure Boot | verified | 2026-11-07 | the loader's log on the stick: "secure boot on", shim and MOK accepted the signed loader and the signed kernel; the same chain booted after the kernel rebuild | The IYAKKI key enrolled in MOK by the owner. |
+| Display, internal | untested | — | none | The boot reached IYAKKI (owner's report); resolution, scale and the Arc iGPU driver not yet checked (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
 | Display, external monitor | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
 | Display, hot-plug | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
-| Touch screen mapping | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
-| Keyboard (and pointer) | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
+| Touch screen mapping | untested | — | none | The firmware lists two absolute-pointer devices; not tried in IYAKKI yet. |
+| Keyboard (and pointer) | untested | — | none | The loader's menu took the keyboard (an entry was chosen by hand on the first run); IYAKKI itself not yet checked. |
 | Touch Bar | not supported | — | none | Apple hardware only. |
 | Fn keys | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
 | Sound out | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
@@ -298,7 +304,7 @@ Status, date and evidence for every cell. The test step for each cell that is no
 | USB camera | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
 | USB microphone | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
 | Built-in camera | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
-| Wi-Fi | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
+| Wi-Fi | untested | — | none | Realtek RTL8852BE (10ec:b852): needs the Realtek firmware the person installs from Store -> Setup (docs/FIRMWARE-LICENCES.md); not tried yet. |
 | Ethernet | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |
 | Bluetooth | untested | — | none | Qualcomm and Realtek Bluetooth chips need firmware the person installs (docs/RESTRICTED-FIRMWARE.md). |
 | USB-C link and internet sharing | untested | — | none | Image built 2026-10-26; booted only in QEMU/UEFI, never on this hardware (docs/project/PC-TEST-SHEET.md sections 3 and 8). |

@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iyakki-store
+  namespace: iyakki-store
+  labels:
+    app.kubernetes.io/name: iyakki-store
+    app.kubernetes.io/part-of: iyakki-store
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate        # one writer on a ReadWriteOnce volume
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: iyakki-store
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: iyakki-store
+        app.kubernetes.io/part-of: iyakki-store
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: store
+          # Built FROM scratch from the static iyakki-store-server (README.md step 1) and pushed to the registry the node trusts.
+          image: localhost:5000/iyakki-store-server:0.1.0-alpha.1
+          imagePullPolicy: IfNotPresent
+          # the server takes `--flag VALUE` (two words), not `--flag=VALUE`
+          args:
+            - store-server
+            - --data
+            - /data
+            - --listen
+            - 0.0.0.0:8080
+            - --id
+            - iyakki-store
+            - --name
+            - IYAKKI store
+            - --publish-token-file
+            - /secrets/admin-token
+            - --catalog-seed-file
+            - /secrets/catalog-seed
+            # The server caps this at 10 MiB whatever is given (clamp 1..10), and a package is text (payload base64):
+            # 10 is the most it can take today. 500 MiB system components need the code change in
+            # docs/development/COMPONENT-STORE-FINDINGS.md; then raise this and the memory limit below.
+            - --max-body-mib
+            - "10"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: "1", memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: secrets, mountPath: /secrets, readOnly: true }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: store-data
+        - name: secrets
+          secret:
+            secretName: store-secrets
+            defaultMode: 0440

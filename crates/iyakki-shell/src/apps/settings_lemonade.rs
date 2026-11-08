@@ -516,7 +516,8 @@ impl SettingsApp {
         } else {
             let counts = if q.is_empty() { format!("{n_installed} installed · {} available", list.len() - n_installed) } else { format!("{n_shown} of {} shown · {n_installed} installed", list.len()) };
             let hint = if self.lem_max > 0.0 { " · wheel or PageUp/PageDown scrolls" } else { "" };
-            format!("{counts} · Lemonade on {host} ({place}) · click a model to use it{hint}")
+            let on = iyakki_agent::gpu_steps::lemonade_compute(Self::svc(cx).dir()).word().to_uppercase();
+            format!("{counts} · Lemonade on {host} ({place}) · runs on the {on} (G switches) · click a model to use it{hint}")
         };
         self.lem_texts = vec![head.clone()];
         let head = g.fit(14.0 * s, &head, Face::Bold, a.w - sbox_w - 12.0 * s);

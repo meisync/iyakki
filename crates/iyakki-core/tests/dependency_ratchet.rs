@@ -157,3 +157,97 @@ fn the_scanner_counts_what_it_says_and_skips_tests_and_comments() {
     assert_eq!(count("fn a() { Command::new(\"x\"); }\n#[cfg(test)]\nmod t { fn b() { Command::new(\"y\"); } }"), 1);
     assert_eq!(count("#[cfg(test)]\nfn helper() { Command::new(\"a\"); }\nfn b() { Command::new(\"b\"); }"), 2, "a test-only function does not end the scan");
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Crate-level rules for the split of the shell (docs/development/COMPILE-SPEED-PLAN.md, Phase 2; docs/development/COMPILE-SPLIT-PILOT.md).
+//
+// 1. `iyakki-uikit` (the toolkit: gfx, fx, ui, text fields ...) depends on no `iyakki-*` crate, so a tile crate that uses it never pulls in
+//    the agent. (It is not called `iyakki-ui`: that name is the older headless editor model that `iyakki-gui` uses.)
+// 2. A tile crate (`crates/iyakki-tile-*`) depends on `iyakki-uikit` and on no other `iyakki-*` crate, except the lines in
+//    `data/tile_crate_deps.allow` (which may only shrink). The tile-ABI crates are not tile crates; they are listed in `TILE_INFRA`.
+
+const TILE_ALLOW: &str = include_str!("data/tile_crate_deps.allow");
+const UI_CRATE: &str = "iyakki-uikit";
+/// Crates under `iyakki-tile-*` that are the WASM tile interface and its host, not tiles. Not covered by rule 2.
+const TILE_INFRA: [&str; 3] = ["iyakki-tile-abi", "iyakki-tile-host", "iyakki-tile-example"];
+
+/// The `iyakki-*` crates a manifest names in `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]` (also `[target.*.…]`).
+fn iyakki_deps(manifest: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_deps = false;
+    for line in manifest.lines() {
+        let l = line.trim();
+        if l.starts_with('[') {
+            let name = l.trim_matches(|c| c == '[' || c == ']');
+            in_deps = name.ends_with("dependencies");
+            continue;
+        }
+        if !in_deps || l.starts_with('#') {
+            continue;
+        }
+        let key = l.split(['=', '.', ' ']).next().unwrap_or("");
+        if key.starts_with("iyakki-") {
+            out.push(key.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn manifest(krate: &str) -> String {
+    std::fs::read_to_string(root().join("crates").join(krate).join("Cargo.toml")).unwrap_or_else(|e| panic!("crates/{krate}/Cargo.toml: {e}"))
+}
+
+#[test]
+fn the_toolkit_crate_depends_on_no_iyakki_crate() {
+    let deps = iyakki_deps(&manifest(UI_CRATE));
+    assert!(deps.is_empty(), "{UI_CRATE} must not depend on any iyakki-* crate (it is what tile crates build on, without the agent); found {deps:?}");
+}
+
+fn tile_allowed() -> Vec<(String, String)> {
+    TILE_ALLOW
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let mut w = l.split_whitespace();
+            (w.next().unwrap().to_string(), w.next().unwrap_or_else(|| panic!("tile allow list: `{l}` needs <crate> <dependency>")).to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn tile_crates_depend_only_on_the_toolkit_and_the_list_only_shrinks() {
+    let allow = tile_allowed();
+    let mut used = Vec::new();
+    let mut bad = Vec::new();
+    let mut names: Vec<String> = std::fs::read_dir(root().join("crates"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("iyakki-tile-") && !TILE_INFRA.contains(&n.as_str()))
+        .collect();
+    names.sort();
+    for name in &names {
+        for dep in iyakki_deps(&manifest(name)) {
+            if dep == UI_CRATE {
+                continue;
+            }
+            if allow.iter().any(|(c, d)| c == name && *d == dep) {
+                used.push((name.clone(), dep));
+            } else {
+                bad.push(format!("{name} -> {dep}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "A tile crate may depend only on {UI_CRATE} (or a documented exception in tests/data/tile_crate_deps.allow): {bad:?}");
+    let stale: Vec<_> = allow.iter().filter(|a| !used.contains(a)).collect();
+    assert!(stale.is_empty(), "Good: these exceptions are gone; remove them from tests/data/tile_crate_deps.allow: {stale:?}");
+}
+
+#[test]
+fn the_manifest_scanner_reads_dependency_tables_only() {
+    let m = "[package]\nname = \"iyakki-x\"\n[dependencies]\niyakki-uikit = { path = \"../iyakki-uikit\" }\niyakki-sec.workspace = true\nserde = \"1\"\n# iyakki-no = 1\n[dev-dependencies]\niyakki-agent = { path = \"../a\" }\n[features]\niyakki-f = []\n";
+    assert_eq!(iyakki_deps(m), vec!["iyakki-agent", "iyakki-sec", "iyakki-uikit"]);
+}

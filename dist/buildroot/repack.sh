@@ -31,6 +31,14 @@
 #     until firmware exists (gpu-fw-guard); /etc/iyakki-release says IMAGE_PROFILE=release, FIRMWARE=none; the person installs what the
 #     computer needs with "Hardware firmware". The output goes to target/buildroot-VARIANT-release (the development images stay untouched).
 #     (IYAKKI_PROFILE below is the CARGO profile; it has nothing to do with this.)
+# IYAKKI_PROFILE=device (default release): the CARGO profile of the program. `device` (Cargo.toml [profile.device]) has no LTO, 16 code-generation
+#     units and incremental compilation: a one-line change builds in seconds to a minute instead of 12 minutes, the binary is bigger and slower.
+#     For test images and `dev update` pushes ONLY; a release image is always built with the release profile. The binary is then taken from
+#     target/x86_64-unknown-linux-musl/device/ (IYAKKI_PROFILE=fast works the same way).
+# The pruned, signed modules + firmware are cached (dist/buildroot/repack-cache.sh, in target/repack-cache, IYAKKI_REPACK_CACHE=0 turns it off):
+#     the first run with a given donor, firmware set, keep lists and signing key prunes and signs as always and saves the result; the next
+#     runs with the same inputs restore it and skip the copy of linux-firmware, the signing of every module and the 1 280 MiB prune.
+# IYAKKI_REPACK_BIN=FILE: install this program instead of target/.../iyakki (dist/buildroot/quick-push.sh uses it).
 #       IYAKKI_IMAGE_PROFILE=release ./dist/buildroot/repack.sh pc --base target/buildroot-web --kernel-from target/buildroot-mac
 # Secure Boot: run it with the same IYAKKI_SB_KEY / IYAKKI_SB_CERT as the build (a change from signed to unsigned is FULL for
 # changed.sh); every kernel module that has no signature yet is signed with the key (Secure Boot lockdown refuses unsigned ones), the kernel and the EFI image are signed as in post-image.sh.
@@ -56,6 +64,7 @@ case "$KFROM" in ""|/*) ;; *) KFROM="$ROOT/$KFROM" ;; esac
 ARCH="${ARCH:-x86_64}"
 [ "$ARCH" = x86_64 ] || { echo "repack.sh: x86_64 only (the ARM disk image is built by its own post-image step: use the full build)" >&2; exit 2; }
 RUST_TARGET=x86_64-unknown-linux-musl
+. "$HERE/repack-cache.sh"
 IMAGE_PROFILE="${IYAKKI_IMAGE_PROFILE:-}"
 case "$IMAGE_PROFILE" in ""|release) ;; *) echo "repack.sh: IYAKKI_IMAGE_PROFILE must be empty or release (got '$IMAGE_PROFILE')" >&2; exit 2 ;; esac
 if [ "$IMAGE_PROFILE" = release ]; then
@@ -95,7 +104,7 @@ if { [ "$VARIANT" = pc ] && [ "$IMAGE_PROFILE" != release ]; } || [ -n "$FWFROM"
   [ -f "$FWFROM/copy-firmware.sh" ] && [ -f "$FWFROM/WHENCE" ] || die "variant pc needs the linux-firmware source tree (copy-firmware.sh, WHENCE): give --firmware-from DIR or --kernel-from a build that has build/linux-firmware-*"
   [ -f "$HERE/board/iyakki/pc-firmware.keep" ] || die "no board/iyakki/pc-firmware.keep"
 fi
-BIN="$ROOT/target/$RUST_TARGET/$PROFILE/iyakki"; SBIN="$ROOT/target/$RUST_TARGET/$PROFILE/iyakki-store-server"
+BIN="${IYAKKI_REPACK_BIN:-$ROOT/target/$RUST_TARGET/$PROFILE/iyakki}"; SBIN="$ROOT/target/$RUST_TARGET/$PROFILE/iyakki-store-server"
 cfgval() { sed -n "s/^$1=\"\(.*\)\"\$/\1/p" "$BASE/.config" | head -n1 | sed "s#\$(BR2_EXTERNAL_IYAKKI_PATH)#$HERE#g"; }
 OVERLAYS="$(cfgval BR2_ROOTFS_OVERLAY)"; HOOKS="$(cfgval BR2_ROOTFS_POST_BUILD_SCRIPT)"
 POSTIMG="$(cfgval BR2_ROOTFS_POST_IMAGE_SCRIPT)"; PIARGS="$(cfgval BR2_ROOTFS_POST_SCRIPT_ARGS)"
@@ -164,15 +173,32 @@ say "post-image   $PI_SCRIPT, then $GI_SCRIPT $PIARGS"
 say "binary       $BIN$( [ "$CARGO" = 1 ] && echo ' (cargo build first)')"
 say "zstd level   $ZL$( [ "$ZL" != 19 ] && echo '  (NOT a release image)')"
 say "secure boot  $( [ -n "${IYAKKI_SB_KEY:-}" ] && [ -n "${IYAKKI_SB_CERT:-}" ] && echo signed || echo unsigned )"
+say "cargo profile $PROFILE$( [ "$PROFILE" != release ] && echo '  (NOT a release binary)')"
+FWC_KEY="$(rc_key 2>/dev/null || true)"; FWC_FILE=""; FWC_LOAD=""
+if [ -n "$FWC_KEY" ]; then
+  FWC_FILE="$(rc_file "$FWC_KEY")"
+  if [ -s "$FWC_FILE" ]; then FWC_LOAD="$FWC_FILE"; say "mod+fw cache hit  $FWC_FILE (no firmware copy, module signing or prune)"; else say "mod+fw cache miss: will be saved to $FWC_FILE"; fi
+else
+  say "mod+fw cache off ($( [ "$IMAGE_PROFILE" = release ] && echo 'release image' || echo 'IYAKKI_REPACK_CACHE=0 or an overlay with firmware' ))"
+fi
 if [ "$DRY" = 1 ]; then
   say "plan: unpack $IMG/rootfs.cpio.zst (fakeroot) -> overlays -> hooks -> cpio+zstd -> post-image + genimage on $STAGE -> move into $IMGD"
   say "dry run: nothing was written"; exit 0
 fi
 
 if [ "$CARGO" = 1 ]; then
-  (cd "$ROOT" && cargo build $PFLAG --target "$RUST_TARGET" -p iyakki-core)
-  (cd "$ROOT" && cargo build $PFLAG --target "$RUST_TARGET" -p iyakki-store-server) && export IYAKKI_STORE_SERVER_BIN="$SBIN" \
-    || echo "repack: WARNING: iyakki-store-server did not build; the image will not carry it" >&2
+  # ONE cargo call for both programs: two calls made cargo build the shared third-party crates twice with different feature sets (and so
+  # iyakki-proxy and iyakki-agent twice: 3 m 49 s in the 2026-11-07 log). The feature sets of the two programs were compared before this
+  # was merged (docs/development/COMPILE-SPEED-PLAN.md, "Measured results"). If the store server cannot be built the main program still is:
+  # the old two-step build is the fallback, and the image then goes without the store server, as before.
+  if (cd "$ROOT" && cargo build $PFLAG --target "$RUST_TARGET" -p iyakki-core -p iyakki-store-server); then
+    export IYAKKI_STORE_SERVER_BIN="$SBIN"
+  else
+    echo "repack: WARNING: the joint build failed; building the main program alone" >&2
+    (cd "$ROOT" && cargo build $PFLAG --target "$RUST_TARGET" -p iyakki-core)
+    (cd "$ROOT" && cargo build $PFLAG --target "$RUST_TARGET" -p iyakki-store-server) && export IYAKKI_STORE_SERVER_BIN="$SBIN" \
+      || echo "repack: WARNING: iyakki-store-server did not build; the image will not carry it" >&2
+  fi
 fi
 [ -f "$BIN" ] || die "$BIN is missing"
 
@@ -187,6 +213,16 @@ set -eu
 cd "$STAGE/root"
 zstd -dc "$IMG/rootfs.cpio.zst" | cpio -idm --quiet --no-absolute-filenames
 OLD_SB="$(sed -n 's/^\(SECURE_BOOT_CERT_SHA1=.*\)$/\1/p' etc/iyakki-release 2>/dev/null || true)"
+# the pruned and signed modules + firmware of an earlier run with the same inputs (repack-cache.sh): restore them and skip the staging below
+FWC_HIT=0
+if [ -n "${FWC_LOAD:-}" ] && [ -s "$FWC_LOAD" ]; then
+  rm -rf lib/modules lib/firmware
+  zstd -dc "$FWC_LOAD" | tar --numeric-owner -xpf - || { echo "repack: the cache $FWC_LOAD is damaged: remove it and run again" >&2; exit 1; }
+  [ -d lib/modules ] && [ -d lib/firmware ] || { echo "repack: the cache $FWC_LOAD has no modules or firmware: remove it and run again" >&2; exit 1; }
+  FWC_HIT=1; export IYAKKI_FW_PRUNED=1
+  echo "repack: modules and firmware restored from the cache $FWC_LOAD (not copied, signed or pruned again)"
+fi
+if [ "$FWC_HIT" != 1 ]; then
 if [ -n "$KFROM" ]; then
   rm -rf lib/modules lib/firmware
   if [ "${IYAKKI_IMAGE_PROFILE:-}" = release ]; then
@@ -256,6 +292,7 @@ if [ -n "$FWFROM" ]; then
   for f in regulatory.db regulatory.db.p7s; do [ -f "$STAGE/regdb/$f" ] && [ ! -f "lib/firmware/$f" ] && cp -f "$STAGE/regdb/$f" "lib/firmware/$f"; done
   echo "repack: firmware: the full set from $FWFROM is in place (post-build prunes it)"
 fi
+fi   # FWC_HIT != 1
 # a web engine helper rebuilt alone (`make iyakki-webview-helper` in the base tree) is newer than the packed image: take it
 NEWH="$BASE/target/usr/libexec/iyakki/webview-helper"
 if [ -f "$NEWH" ] && [ -f usr/libexec/iyakki/webview-helper ] && [ "$NEWH" -nt "$IMG/rootfs.cpio.zst" ]; then
@@ -316,7 +353,9 @@ for s in $HOOKS; do sh "$s" "$STAGE/root"; done
 [ -z "$OLD_SB" ] || echo "$OLD_SB" >> etc/iyakki-release
 find . | LC_ALL=C sort | cpio --quiet -o -H newc > "$STAGE/bin/rootfs.cpio"
 EOS
-export STAGE IMG OVERLAYS HOOKS KFROM BASE FWFROM GRAFTS HERE IMAGE_PROFILE BR_DIR
+# the cache: a hit is restored in the session; a miss asks post-build.sh (right after the prune) to save the result under the key
+if [ -n "$FWC_FILE" ] && [ -z "$FWC_LOAD" ]; then export IYAKKI_FW_CACHE_SAVE="$FWC_FILE"; fi
+export STAGE IMG OVERLAYS HOOKS KFROM BASE FWFROM GRAFTS HERE IMAGE_PROFILE BR_DIR FWC_LOAD
 say "unpacking, applying overlays and hooks, packing (fakeroot)"
 # Buildroot's fakeroot script has the absolute path of the tree it was built in baked in (here a folder that has since been renamed:
 # "libfakeroot.so not found, aborting"): when it is the host tree's own script, name the library and the daemon of THIS tree
@@ -324,7 +363,8 @@ FRARGS=""
 if [ "$FAKEROOT" = "$HOSTD/bin/fakeroot" ] && [ -f "$HOSTD/lib/libfakeroot.so" ] && [ -x "$HOSTD/bin/faked" ]; then FRARGS="-l $HOSTD/lib/libfakeroot.so -f $HOSTD/bin/faked"; fi
 # shellcheck disable=SC2086
 "$FAKEROOT" $FRARGS -- sh "$STAGE/session.sh" >"$STAGE/session.log" 2>&1 || { tail -n 20 "$STAGE/session.log" >&2; die "the unpack/hook/pack step failed (log: $STAGE/session.log)"; }
-sed -n '/^post-build\|^web-post-build\|^prune-firmware\|^repack: web engine helper/p' "$STAGE/session.log" | head -n 10 || true
+[ -z "${IYAKKI_FW_CACHE_SAVE:-}" ] || rc_trim
+sed -n '/^post-build\|^web-post-build\|^prune-firmware\|^repack: web engine helper\|^repack: modules and firmware restored/p' "$STAGE/session.log" | head -n 10 || true
 say "compressing (zstd -$ZL)"
 "$HOSTD/bin/zstd" -$ZL -z -f -T0 -q "$STAGE/bin/rootfs.cpio" -o "$STAGE/bin/rootfs.cpio.zst"
 # the listing must match the old image except for what the hooks changed

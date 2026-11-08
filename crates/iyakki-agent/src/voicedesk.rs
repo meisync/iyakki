@@ -21,6 +21,70 @@ pub const MAX_TEXT_CHARS: usize = 20_000;
 /// The longest recording (seconds).
 pub const MAX_RECORD_SECS: usize = 300;
 
+/// How long a pause after speech ends a dictation, in milliseconds.
+pub const PAUSE_END_MS: u64 = 1500;
+
+/// Ends a dictation by itself when the person stops talking: it watches the microphone level (0.0-1.0, from `Recorder::level`), learns how
+/// loud the room is (the quietest recent level), and calls speech only what is clearly above that **and lasts**: a click, a cough, a key
+/// press or a bump (a spike of a few tenths of a second) is not talking. Talking needs about a quarter of a second of loud frames (a leaky
+/// count, so the little dips between words do not end it); a pause is [`PAUSE_END_MS`] (or the person's own) since the last frame of
+/// confirmed talking. Nothing is decided before talking: waiting for the person to start never ends it. Time is given in, so a test needs no
+/// clock.
+#[derive(Clone, Debug, Default)]
+pub struct PauseDetector {
+    floor: Option<f32>,
+    heard: bool,
+    last_talk_ms: u64,
+    last_tick_ms: u64,
+    /// The leaky count of loud time, in ms (up while loud, down while quiet, 0 to [`TALK_CAP_MS`]).
+    loud_ms: u64,
+    pause_ms: u64,
+}
+
+/// How much loud time makes it talking, and the most the count can hold (so it drains again within about 0.15 s).
+const TALK_MIN_MS: u64 = 250;
+const TALK_CAP_MS: u64 = 400;
+/// The quietest level that can be speech at all, whatever the room.
+const SPEECH_MIN_LEVEL: f32 = 0.15;
+
+impl PauseDetector {
+    /// With the default pause ([`PAUSE_END_MS`]).
+    pub fn new() -> PauseDetector {
+        PauseDetector::with_pause(PAUSE_END_MS)
+    }
+
+    /// With the person's own pause, in milliseconds.
+    pub fn with_pause(ms: u64) -> PauseDetector {
+        PauseDetector { pause_ms: ms.clamp(500, 4000), ..PauseDetector::default() }
+    }
+
+    /// The detector for the person's settings, or `None` when automatic ending is off.
+    pub fn from_settings(v: &crate::voice::VoiceSettings) -> Option<PauseDetector> {
+        v.auto_stop.then(|| PauseDetector::with_pause(v.pause_ms as u64))
+    }
+
+    /// One look at the level at `now_ms`; true when the dictation should end now.
+    pub fn tick(&mut self, level: f32, now_ms: u64) -> bool {
+        let dt = if self.last_tick_ms == 0 { 100 } else { now_ms.saturating_sub(self.last_tick_ms).clamp(1, 500) };
+        self.last_tick_ms = now_ms.max(1);
+        // the room: follows a lower level at once and a higher one slowly, and only from moments that are not loud (so a long sentence
+        // never becomes the floor and ends itself); a room that stays loud for many seconds raises it a little even so
+        let floor = self.floor.unwrap_or(level);
+        let loud = level > (floor * 2.5 + 0.05).max(SPEECH_MIN_LEVEL);
+        self.floor = Some(if !loud {
+            if level < floor { level } else { floor + (level - floor) * 0.05 }
+        } else {
+            floor + (level - floor) * 0.002
+        });
+        self.loud_ms = if loud { (self.loud_ms + dt).min(TALK_CAP_MS) } else { self.loud_ms.saturating_sub(dt) };
+        if loud && self.loud_ms >= TALK_MIN_MS {
+            self.heard = true;
+            self.last_talk_ms = now_ms;
+        }
+        self.heard && now_ms.saturating_sub(self.last_talk_ms) >= self.pause_ms
+    }
+}
+
 /// The speed range of the slider.
 pub const SPEED_MIN: f32 = 0.7;
 pub const SPEED_MAX: f32 = 1.5;
@@ -230,23 +294,30 @@ pub struct Hint {
     pub tag: &'static str,
 }
 
+/// The scripts (and so languages) the Voice tile knows: first code point, last code point, name, BCP 47 tag.
+const SCRIPTS: [(u32, u32, &str, &str); 13] = [
+    (0x0B80, 0x0BFF, "Tamil", "ta-IN"),
+    (0x0C00, 0x0C7F, "Telugu", "te-IN"),
+    (0x0C80, 0x0CFF, "Kannada", "kn-IN"),
+    (0x0D00, 0x0D7F, "Malayalam", "ml-IN"),
+    (0x0900, 0x097F, "Hindi", "hi-IN"),
+    (0x0980, 0x09FF, "Bengali", "bn-IN"),
+    (0x0A80, 0x0AFF, "Gujarati", "gu-IN"),
+    (0x0A00, 0x0A7F, "Punjabi", "pa-IN"),
+    (0x0600, 0x06FF, "Arabic", "ar-SA"),
+    (0x3040, 0x30FF, "Japanese", "ja-JP"),
+    (0x4E00, 0x9FFF, "Chinese", "zh-CN"),
+    (0x0400, 0x04FF, "Russian", "ru-RU"),
+    (0x0000, 0x0000, "English", "en-US"),
+];
+
+/// The names of the languages the Voice tile knows (Translate in the transcript's assistant offers them).
+pub fn language_names() -> Vec<&'static str> {
+    SCRIPTS.iter().map(|x| x.2).collect()
+}
+
 /// The language of `text` by script (None when there are too few letters). Latin letters count as English (a hint, not a test).
 pub fn detect_language(text: &str) -> Option<Hint> {
-    const SCRIPTS: [(u32, u32, &str, &str); 13] = [
-        (0x0B80, 0x0BFF, "Tamil", "ta-IN"),
-        (0x0C00, 0x0C7F, "Telugu", "te-IN"),
-        (0x0C80, 0x0CFF, "Kannada", "kn-IN"),
-        (0x0D00, 0x0D7F, "Malayalam", "ml-IN"),
-        (0x0900, 0x097F, "Hindi", "hi-IN"),
-        (0x0980, 0x09FF, "Bengali", "bn-IN"),
-        (0x0A80, 0x0AFF, "Gujarati", "gu-IN"),
-        (0x0A00, 0x0A7F, "Punjabi", "pa-IN"),
-        (0x0600, 0x06FF, "Arabic", "ar-SA"),
-        (0x3040, 0x30FF, "Japanese", "ja-JP"),
-        (0x4E00, 0x9FFF, "Chinese", "zh-CN"),
-        (0x0400, 0x04FF, "Russian", "ru-RU"),
-        (0x0000, 0x0000, "English", "en-US"),
-    ];
     let mut counts = [0usize; 13];
     let mut letters = 0usize;
     for c in text.chars().take(4000).filter(|c| c.is_alphabetic()) {
@@ -556,7 +627,7 @@ pub fn transcribe(svc: &Services, engine: &SpeechEngine, pcm: &[i16]) -> Result<
         return Err("Nothing was recorded.".into());
     }
     if voice::peak(pcm) < 150 {
-        return Err("I only heard silence. Check the microphone and its volume.".into());
+        return Err(ONLY_SILENCE.into());
     }
     let up = svc.slow_upstream();
     let text = voice::transcribe(engine, &voice::encode_wav(pcm, voice::SAMPLE_RATE), &svc.secrets, up.as_ref()).map_err(|e| match engine {
@@ -564,7 +635,17 @@ pub fn transcribe(svc: &Services, engine: &SpeechEngine, pcm: &[i16]) -> Result<
         SpeechEngine::Http { model, .. } => lemonade::explain_error(model, &e),
         _ => e,
     })?;
-    if text.is_empty() { Err("No speech was recognised.".into()) } else { Ok(text) }
+    if text.is_empty() { Err(NO_SPEECH.into()) } else { Ok(text) }
+}
+
+/// What speech-to-text says when it heard no words.
+pub const NO_SPEECH: &str = "No speech was recognised.";
+/// What the recorder side says when the level never rose above silence.
+pub const ONLY_SILENCE: &str = "I only heard silence. Check the microphone and its volume.";
+
+/// A result that is "no words" (noise, silence), not a failure of the microphone or the engine.
+pub fn is_no_words(e: &str) -> bool {
+    e == NO_SPEECH || e == ONLY_SILENCE
 }
 
 #[cfg(test)]

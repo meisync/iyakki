@@ -179,8 +179,8 @@ fn run_inner(args: &[String]) -> Result<i32, String> {
         return Ok(0);
     }
     let (sys, dev) = (Path::new("/sys"), Path::new("/dev"));
-    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
-    let swaps = std::fs::read_to_string("/proc/swaps").unwrap_or_default();
+    let mounts = iyakki_storage::read_mounts().unwrap_or_default();
+    let swaps = iyakki_storage::read_swaps().unwrap_or_default();
     let mut disks = install::list_disks(sys, dev, &mounts, &swaps);
     install::probe_contents(&mut disks, dev);
     let source = match (&o.template, &o.source) {
@@ -253,7 +253,7 @@ fn run_inner(args: &[String]) -> Result<i32, String> {
             return Ok(2);
         }
     }
-    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    let mounts = iyakki_storage::read_mounts().unwrap_or_default();
     let mut p = progress_printer();
     let r = install::execute(&plan, false, &mounts, &mut p)?;
     println!("\n\nDone. {} written to {} and verified.", human_size(r.written), d.path);

@@ -103,6 +103,18 @@ impl Shell {
         }
     }
 
+    /// Internet sharing ended without being asked to (policy, cable, uplink, idle): one note in the inbox of the person who started it
+    /// and of a signed-in administrator (`sharing::notice`).
+    pub(super) fn sharing_notice_tick(&mut self) {
+        let Some(sess) = self.session.as_ref() else { return };
+        let (user, admin) = (sess.user.clone(), sess.policy.manage_settings);
+        let svc = self.env.services.clone();
+        if iyakki_agent::sharing::notice::tick(&svc, svc.dir(), &user, admin) {
+            self.refresh_badge();
+            self.stale = true;
+        }
+    }
+
     /// The daily update check (a few times a minute this only reads the cached time). Only while an administrator is signed in.
     pub(super) fn update_check_tick(&mut self) {
         use iyakki_agent::store::Store;

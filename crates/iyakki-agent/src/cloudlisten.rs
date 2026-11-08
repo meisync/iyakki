@@ -33,11 +33,11 @@
 //!   so nobody is led to think otherwise. Put a sign-in in front (the IYAKKI web service) or restrict the port with the firewall.
 //! * `Target::Service` (a Kubernetes Service) is reachable only through a [`ServiceDialer`] in [`Options::dialer`] (`pod::PortForward` or
 //!   `pod::ClusterDns`); without one requests to such a route get a 502 that says so.
-//! * Not supported: HTTP/1.0 (505), HTTP/2 (ALPN offers only `http/1.1`), trailers (dropped), a ClientHello split over
-//!   several TLS records, `CONNECT`, absolute-form request targets, and paths with `..` segments (400). Routes are matched on the raw
+//! * Not supported: HTTP/1.0 (505), HTTP/2 (ALPN offers only `http/1.1`), trailers (dropped), `CONNECT`, absolute-form request targets, and paths with `..` segments (400). Routes are matched on the raw
 //!   path, not a decoded one.
-//! * WebSocket and other tunnels over TLS are polled every 10 ms (one thread per connection), which is simple and costs a little latency
-//!   and idle CPU; a tunnel idle for an hour is closed.
+//! * A ClientHello split over several TLS records is put together (up to 32 KiB) before the server name is read.
+//! * WebSocket and other tunnels over TLS keep one thread per connection, which sleeps in `poll(2)` on both sockets while nothing moves
+//!   (one wake-up a second); a tunnel idle for an hour is closed.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
@@ -640,6 +640,10 @@ fn access_text(a: Access) -> &'static str {
 
 trait Sock: Read + Write + Send {
     fn set_timeout(&self, d: Option<Duration>);
+    /// The socket's descriptor, so a tunnel can sleep until something arrives instead of looking every few milliseconds.
+    fn fd(&self) -> Option<std::os::fd::RawFd> {
+        None
+    }
     /// The SNI of the TLS connection, lower case.
     fn sni(&self) -> Option<String> {
         None
@@ -653,6 +657,10 @@ trait Sock: Read + Write + Send {
 impl Sock for TcpStream {
     fn set_timeout(&self, d: Option<Duration>) {
         let _ = self.set_read_timeout(d);
+    }
+    fn fd(&self) -> Option<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+        Some(self.as_raw_fd())
     }
 }
 
@@ -687,6 +695,10 @@ impl Write for Replay {
 impl Sock for rustls::StreamOwned<rustls::ServerConnection, Replay> {
     fn set_timeout(&self, d: Option<Duration>) {
         let _ = self.sock.tcp.set_read_timeout(d);
+    }
+    fn fd(&self) -> Option<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+        Some(self.sock.tcp.as_raw_fd())
     }
     fn sni(&self) -> Option<String> {
         self.conn.server_name().map(|s| s.to_ascii_lowercase())
@@ -727,30 +739,53 @@ impl<'a> Cur<'a> {
     }
 }
 
+/// The most a ClientHello may be (all its records together): far more than any real one, so a stranger cannot make the listener hold more.
+const MAX_HELLO: usize = 32 * 1024;
+
 /// Read the server name out of the start of a TLS connection (our own reader, so a passthrough route can be chosen without terminating
-/// TLS). The ClientHello has to fit in one TLS record.
+/// TLS). A ClientHello split over several TLS handshake records is put together first (at most [`MAX_HELLO`] bytes); any other kind of
+/// record before it is complete is refused.
 pub fn client_hello_sni(b: &[u8]) -> Result<Hello, &'static str> {
-    if b.first().is_some_and(|t| *t != 0x16) || b.get(1).is_some_and(|v| *v != 3) {
-        return Err("not a TLS handshake");
+    let mut joined: Vec<u8> = Vec::new();
+    let mut pos = 0usize;
+    let mut hl = 0usize;
+    loop {
+        let r = &b[pos..];
+        if r.first().is_some_and(|t| *t != 0x16) || r.get(1).is_some_and(|v| *v != 3) {
+            return Err("not a TLS handshake");
+        }
+        if r.len() < 5 {
+            return Ok(Hello::Incomplete);
+        }
+        let rec = (r[3] as usize) << 8 | r[4] as usize;
+        if rec > 16384 {
+            return Err("TLS record too large");
+        }
+        if rec == 0 {
+            return Err("an empty handshake record");
+        }
+        if r.len() < 5 + rec {
+            return Ok(Hello::Incomplete);
+        }
+        joined.extend_from_slice(&r[5..5 + rec]);
+        pos += 5 + rec;
+        if joined.len() >= 4 {
+            if joined[0] != 1 {
+                return Err("not a ClientHello");
+            }
+            hl = (joined[1] as usize) << 16 | (joined[2] as usize) << 8 | joined[3] as usize;
+            if hl > MAX_HELLO {
+                return Err("ClientHello too large");
+            }
+            if hl + 4 <= joined.len() {
+                break;
+            }
+        }
+        if joined.len() > MAX_HELLO + 4 {
+            return Err("ClientHello too large");
+        }
     }
-    if b.len() < 5 {
-        return Ok(Hello::Incomplete);
-    }
-    let rec = (b[3] as usize) << 8 | b[4] as usize;
-    if rec > 16384 {
-        return Err("TLS record too large");
-    }
-    if b.len() < 5 + rec {
-        return Ok(Hello::Incomplete);
-    }
-    let hs = &b[5..5 + rec];
-    if hs.len() < 4 || hs[0] != 1 {
-        return Err("not a ClientHello");
-    }
-    let hl = (hs[1] as usize) << 16 | (hs[2] as usize) << 8 | hs[3] as usize;
-    if hl + 4 > hs.len() {
-        return Err("a ClientHello over several TLS records is not supported");
-    }
+    let hs = &joined[..];
     let bad = "malformed ClientHello";
     let mut c = Cur(&hs[4..4 + hl]);
     c.take(2 + 32).ok_or(bad)?;
@@ -1292,7 +1327,8 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
     let mut head = format!("{method} {target} HTTP/1.1\r\n");
     for (n, v) in &headers {
         let l = n.to_ascii_lowercase();
-        if hop.contains(&l) || l.starts_with("x-forwarded-") || matches!(l.as_str(), "forwarded" | "expect" | "content-length") {
+        // a client cannot make up who it is: the identity headers are the listener's to set, never the client's
+        if hop.contains(&l) || l.starts_with("x-forwarded-") || l.starts_with("x-client-cert-") || matches!(l.as_str(), "forwarded" | "expect" | "content-length") {
             continue;
         }
         head.push_str(&format!("{n}: {v}\r\n"));
@@ -1303,6 +1339,11 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
         _ => {}
     }
     head.push_str(&format!("X-Forwarded-For: {}\r\nX-Forwarded-Proto: {}\r\nX-Forwarded-Host: {host_header}\r\n", peer.ip(), if tls { "https" } else { "http" }));
+    if tls && mtls::wanted(inner, &table).contains_key(&route.host.to_ascii_lowercase()) {
+        if let Some(fp) = mtls::identity(&**rd.get_ref()) {
+            head.push_str(&format!("X-Client-Cert-Sha256: {fp}\r\n"));
+        }
+    }
     match &upgrade {
         Some(u) => head.push_str(&format!("Connection: Upgrade\r\nUpgrade: {u}\r\n")),
         None => head.push_str("Connection: close\r\n"),
@@ -1413,10 +1454,24 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
     keep_after
 }
 
-/// After a `101`: bytes go both ways until either side ends. The client side may be TLS (no way to split it), so both sides are polled
-/// with a short read timeout.
+/// Sleep until one of the descriptors has something to read (or hung up), at most `ms` milliseconds. False when the descriptors cannot be
+/// waited on (the caller then falls back to a short sleep).
+fn wait_readable(fds: &[std::os::fd::RawFd], ms: i32) -> bool {
+    let mut p: Vec<libc::pollfd> = fds.iter().map(|f| libc::pollfd { fd: *f, events: libc::POLLIN, revents: 0 }).collect();
+    let r = unsafe { libc::poll(p.as_mut_ptr(), p.len() as libc::nfds_t, ms) };
+    r >= 0
+}
+
+/// Passes of the tunnel loop that looked at the sockets (counted so a test can show that idle tunnels do not spin).
+#[cfg(test)]
+pub(crate) static TUNNEL_PASSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// After a `101`: bytes go both ways until either side ends. The client side may be TLS (no way to split it into two halves), so each pass
+/// reads both sides with a 1 ms timeout; between passes that moved nothing the thread SLEEPS in `poll(2)` on both descriptors (at most a
+/// second, to notice the idle limit), so an idle tunnel costs one wake-up a second instead of a hundred. Data that rustls already holds is
+/// found by the pass itself (a pass that moved bytes is followed by another one without sleeping).
 fn tunnel_poll(client: &mut BufReader<Box<dyn Sock>>, up: &mut BufReader<TcpStream>) {
-    let poll = Some(Duration::from_millis(10));
+    let poll = Some(Duration::from_millis(1));
     // bytes already read ahead on either side go first
     let ahead = client.buffer().to_vec();
     client.consume(ahead.len());
@@ -1432,8 +1487,17 @@ fn tunnel_poll(client: &mut BufReader<Box<dyn Sock>>, up: &mut BufReader<TcpStre
     let _ = up.get_ref().set_read_timeout(poll);
     let mut buf = vec![0u8; 16 * 1024];
     let mut last = Instant::now();
+    let mut moved = true;
     while last.elapsed() < Duration::from_secs(3600) {
-        let mut moved = false;
+        if !moved {
+            match (client.get_ref().fd(), Some(std::os::fd::AsRawFd::as_raw_fd(up.get_ref()))) {
+                (Some(a), Some(b)) if wait_readable(&[a, b], 1000) => {}
+                _ => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        #[cfg(test)]
+        TUNNEL_PASSES.fetch_add(1, Ordering::Relaxed);
+        moved = false;
         match client.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {

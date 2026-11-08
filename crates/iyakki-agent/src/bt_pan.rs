@@ -110,7 +110,7 @@ fn write_fd(fd: RawFd, data: &[u8]) {
 }
 
 fn mac_of(name: &str) -> Option<Mac> {
-    let t = std::fs::read_to_string(format!("/sys/class/net/{name}/address")).ok()?;
+    let t = std::fs::read_to_string(crate::sysinfo::net_class_root().join(name).join("address")).ok()?;
     t.trim().split(':').map(|p| u8::from_str_radix(p, 16).ok()).collect::<Option<Vec<_>>>()?.try_into().ok()
 }
 

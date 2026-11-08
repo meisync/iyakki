@@ -26,11 +26,11 @@ pub fn step(uptime_secs: u64) {
     for l in lines(efivars) {
         log::info!("{l}");
     }
-    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let cmdline = iyakki_storage::cmdline_text();
     if own_first_off(&cmdline) {
         return;
     }
-    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    let mounts = iyakki_storage::read_mounts().unwrap_or_default();
     let Some(dev) = mount_source(&mounts, DATA_DIR) else { return };
     if !on_internal_disk(Path::new("/sys/block"), &dev) {
         log::info!("startup-disk: running from a removable disk; the boot order stays as it is");

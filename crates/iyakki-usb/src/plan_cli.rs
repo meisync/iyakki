@@ -179,7 +179,7 @@ pub struct Machine {
 
 impl Machine {
     pub fn real() -> Machine {
-        Machine { sys: "/sys".into(), dev: "/dev".into(), proc_mounts: std::fs::read_to_string("/proc/mounts").unwrap_or_default(), swaps: std::fs::read_to_string("/proc/swaps").unwrap_or_default() }
+        Machine { sys: "/sys".into(), dev: "/dev".into(), proc_mounts: iyakki_storage::read_mounts().unwrap_or_default(), swaps: iyakki_storage::read_swaps().unwrap_or_default() }
     }
 }
 
@@ -279,7 +279,7 @@ fn root() -> bool {
 /// Write `plan` for `model`: unmount what the plan lists, then [`apply::apply`].
 pub fn write_plan(o: &Opts, m: &Machine, model: &DiskModel, plan: &Plan, src: &SourceInfo, progress: &mut dyn FnMut(Progress)) -> Result<apply::ApplyReport, String> {
     unmount_planned(plan, model)?;
-    let mounts_now = if o.target_file.is_some() { String::new() } else { std::fs::read_to_string("/proc/mounts").unwrap_or_else(|_| m.proc_mounts.clone()) };
+    let mounts_now = if o.target_file.is_some() { String::new() } else { iyakki_storage::read_mounts().unwrap_or_else(|_| m.proc_mounts.clone()) };
     let env = ApplyEnv { proc_mounts: mounts_now, efivars: efivars(o, plan), dry_run: false };
     let path = o.target_file.clone().unwrap_or_else(|| PathBuf::from(&model.path));
     // the model is read again right before writing: the plan must still be the one the person confirmed
@@ -288,7 +288,7 @@ pub fn write_plan(o: &Opts, m: &Machine, model: &DiskModel, plan: &Plan, src: &S
 }
 
 fn reread(o: &Opts, m: &Machine, model: &DiskModel) -> Result<DiskModel, String> {
-    let mounts = drives::parse_proc_mounts(&std::fs::read_to_string("/proc/mounts").unwrap_or_else(|_| m.proc_mounts.clone()));
+    let mounts = drives::parse_proc_mounts(&iyakki_storage::read_mounts().unwrap_or_else(|_| m.proc_mounts.clone()));
     let path = o.target_file.clone().unwrap_or_else(|| PathBuf::from(&model.path));
     let meta = DiskMeta { name: model.name.clone(), path: model.path.clone(), model: model.model.clone(), serial: model.serial.clone(), removable: model.removable, usb: model.usb, read_only: model.read_only, swap_parts: swap_parts(&m.swaps) };
     let mut f = std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;

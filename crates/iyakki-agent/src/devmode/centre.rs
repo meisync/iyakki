@@ -218,7 +218,7 @@ impl Centre {
 
     /// The device: the boot partition found on the data volume's own disk, `/etc/iyakki-release`, the built-in release key.
     pub fn real(data: &Path) -> Centre {
-        let mounted = std::fs::read_to_string("/proc/mounts").map(|t| super::bootmount::parse_mounts(&t).iter().any(|m| m.dir == data)).unwrap_or(false);
+        let mounted = iyakki_storage::read_mounts().map(|t| super::bootmount::parse_mounts(&t).iter().any(|m| m.dir == data)).unwrap_or(false);
         Centre::new(data, Box::new(super::bootmount::SysBoot::real(data)), std::fs::read_to_string(crate::relinfo::RELEASE_FILE).unwrap_or_default(), !mounted, crate::dlmanifest::builtin_key())
     }
 

@@ -79,6 +79,22 @@ impl SharePanel {
 }
 
 impl SettingsApp {
+    /// The form of key n: a new hotspot name and, when typed, a new password. The password is never audited or shown again here.
+    pub(super) fn hotspot_wifi_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
+        if !self.admin(cx) {
+            return Err("Only administrators can change the hotspot.".into());
+        }
+        let b = self.share.backend(cx);
+        let (old_ssid, old_pass) = b.hotspot().ok_or("The hotspot's name and password cannot be read on this computer.")?;
+        let ssid = form.value(0).trim().to_string();
+        let typed = form.raw(1);
+        let pass = if typed.is_empty() { old_pass } else { typed };
+        b.set_hotspot(&ssid, &pass)?;
+        cx.audit.record(&cx.session.user, "settings.share.wifi", &format!("name {old_ssid} -> {ssid}; password {}", if form.raw(1).is_empty() { "kept" } else { "changed" }));
+        self.share.forget();
+        Ok("Saved. The new Wi-Fi name and password apply the next time sharing starts.".into())
+    }
+
     pub(super) fn share_buttons(&self) -> Vec<Btn> {
         if !self.share.can_start {
             return vec![("Back", TEXT, 'b')];
@@ -215,6 +231,16 @@ impl SettingsApp {
                     }
                 }
             }
+            Key::Char('n') => {
+                if self.admin(cx) {
+                    let (ssid, _) = self.share.backend(cx).hotspot().unwrap_or_default();
+                    let f = Form::new("Wi-Fi hotspot name and password")
+                        .with_note("Phones and laptops join this network. The change applies the next time sharing starts; a running hotspot keeps its old name and password until then.")
+                        .text("Network name", &ssid, "1 to 32 characters")
+                        .secret("Password", "8 to 63 characters; leave empty to keep the current one");
+                    self.open_form(FormKind::HotspotWifi, f);
+                }
+            }
             Key::Char('p') => {
                 if self.admin(cx) {
                     let b = self.share.backend(cx);
@@ -322,7 +348,8 @@ impl SettingsApp {
                     qr_at = Some((lines.len() + 3, q));
                 }
                 lines.push(("Wi-Fi hotspot".into(), 14.0, TEXT, Face::Bold));
-                lines.push((format!("Network name: {ssid}"), 13.0, TEXT, Face::Mono));
+                line_hits.insert(lines.len(), Event::Key(Key::Char('n')));
+                lines.push((format!("Network name: {ssid}   (n or a click changes the name and password)"), 13.0, TEXT, Face::Mono));
                 lines.push((format!("Password: {pass}"), 13.0, TEXT, Face::Mono));
                 let band = match self.share.backend(cx).hotspot_band().as_str() {
                     "2.4" => "2.4 GHz (longer range)",
@@ -334,7 +361,7 @@ impl SettingsApp {
                 }
                 line_hits.insert(lines.len(), Event::Key(Key::Char('w')));
                 lines.push((format!("Band: {band}  (w or a click changes it; takes effect when sharing starts)"), 13.0, TEXT, Face::Sans));
-                lines.push(("It uses this computer's own Wi-Fi card next to its connection to your router. The internet comes from the source above; devices that join get the same protection as on a cable (isolated from each other unless you turn that off). Change the name or password with: iyakki share wifi-set NAME PASSWORD".into(), 12.0, DIM, Face::Sans));
+                lines.push(("It uses this computer's own Wi-Fi card next to its connection to your router. The internet comes from the source above; devices that join get the same protection as on a cable (isolated from each other unless you turn that off). Change the name or password with n (or: iyakki share wifi-set NAME PASSWORD).".into(), 12.0, DIM, Face::Sans));
             }
         }
         let (h, iso, lan) = if on { (st.idle_hours, st.isolate, self.share.allow_lan) } else { (self.share.hours, self.share.isolate, self.share.allow_lan) };

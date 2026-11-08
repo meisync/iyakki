@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn the_last_scroll_row_follows_the_direction_and_the_setting() {
-        crate::scrolleng::request_config(KeyboardSettings::default().scroll().into());
+        crate::scrolleng::request_config(crate::fnkeys::scroll_config(KeyboardSettings::default().scroll()));
         assert_eq!(live_rows().1, "scroll with two fingers or the wheel");
         note_scroll(-40, true);
         assert_eq!(live_rows().1, "Scrolled content up (natural, trackpad)");

@@ -49,6 +49,16 @@ pub(super) fn target(c: &Ctx, scope: Option<&str>, ns: Option<&str>, path: &str,
     Ok((base, full))
 }
 
+/// The size limits of the tenant (`storage.quota`) for a write of `incoming` bytes into `full` inside the place folder `base`; the file that
+/// the write replaces counts only by the difference. 413 and nothing written when a limit would be passed.
+pub(super) fn quota_check(c: &Ctx, base: &std::path::Path, full: &std::path::Path, incoming: u64) -> Result<(), Fail> {
+    let replaced = std::fs::symlink_metadata(full).ok().filter(|m| m.is_file()).map_or(0, |m| m.len());
+    let data = c.data_dir();
+    let q = crate::cloudquota::StorageQuota::load(&data, None);
+    let root = Access::new(&data).files_root();
+    crate::cloudquota::check_write(&q, &root, base, incoming, replaced).map_err(|e| Fail::new(413, "too_large", &e))
+}
+
 pub(super) fn io_fail(e: String) -> Fail {
     if e.contains("no such") {
         Fail::new(404, "not_found", &e)
@@ -96,7 +106,8 @@ pub fn write(c: &Ctx) -> Out {
     if r.path.is_empty() {
         return Err(Fail::new(400, "invalid_input", "give a file path"));
     }
-    let (_, full) = target(c, r.scope.as_deref(), r.namespace.as_deref(), &r.path, true)?;
+    let (base, full) = target(c, r.scope.as_deref(), r.namespace.as_deref(), &r.path, true)?;
+    quota_check(c, &base, &full, r.content.len() as u64)?;
     fs::write_text(&full, &r.content).map_err(io_fail)?;
     Ok((200, json!({"ok": true}), line(&format!("path={} bytes={}", r.path, r.content.len()))))
 }
@@ -192,10 +203,17 @@ pub fn clone(c: &Ctx) -> Out {
         return Err(Fail::new(400, "invalid_input", "the folder is a plain name"));
     }
     tenant_git_guard(c, r.namespace.as_deref(), &r.url)?;
+    quota_check(c, &base, &dest, 1)?; // not yet full (a clone's size is known only after it)
     fs::git_clone(&r.url, &dest, "https", r.branch.as_deref(), r.depth, Duration::from_secs(fs::CLONE_SECS)).map_err(|e| Fail::new(400, "invalid_input", &e))?;
     // a repository can hold links; with core.symlinks=false there should be none, and whatever leaves the folder is removed anyway
     let acc = Access::new(&c.data_dir());
     let removed = acc.after_checkout(&base).map_err(|e| Fail::new(500, "io", &e))?;
+    let (q, root) = (crate::cloudquota::StorageQuota::load(&c.data_dir(), None), acc.files_root());
+    if let Err(e) = crate::cloudquota::check_within(&q, &root, &base) {
+        // a clone that does not fit is removed again, never kept half-allowed
+        let _ = fs::delete(&base, &dest, true);
+        return Err(Fail::new(413, "too_large", &format!("the clone was removed: {e}")));
+    }
     Ok((200, json!({"folder": folder, "removed_links": removed.len()}), line(&format!("folder={folder}"))))
 }
 
@@ -215,7 +233,8 @@ fn require_path(c: &Ctx) -> Result<String, Fail> {
 fn do_upload(c: &Ctx, declared: u64, src: &mut dyn Read) -> Result<(Value, String), Fail> {
     let path = require_path(c)?;
     let sha = c.req.header("x-content-sha256").map(str::to_string);
-    let (_, full) = target(c, q(c, "scope"), q(c, "namespace"), &path, true)?;
+    let (base, full) = target(c, q(c, "scope"), q(c, "namespace"), &path, true)?;
+    quota_check(c, &base, &full, declared)?;
     let (bytes, sum) = fs::write_stream(&full, src, declared, fs::MAX_BINARY, sha.as_deref()).map_err(io_fail)?;
     Ok((json!({"ok": true, "bytes": bytes, "sha256": sum}), line(&format!("path={path} bytes={bytes}"))))
 }

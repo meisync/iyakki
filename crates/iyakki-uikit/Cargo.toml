@@ -1,0 +1,21 @@
+[package]
+name = "iyakki-uikit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The drawing and input toolkit of the framebuffer shell (gfx, fx, ui, theme, text shaping, safe clamp, context menu).
+# Rule (crates/iyakki-core/tests/dependency_ratchet.rs): no `iyakki-*` dependency at all, so a tile crate that uses it never
+# pulls in the agent. (The name is `iyakki-uikit` because `iyakki-ui` is the older headless editor model that `iyakki-gui` uses.)
+
+[dependencies]
+tiny-skia = "0.11"
+fontdue = "0.9"
+rustybuzz = "0.20"
+unicode-bidi = "0.3"
+serde_json = "1"
+
+[features]
+# Test hooks (text and layout logs on `Gfx`, thread-local scroll settings, ...). Compiled for this crate's own tests, and for the
+# shell's tests through its dev-dependency.
+testing = []

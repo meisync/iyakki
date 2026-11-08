@@ -165,7 +165,7 @@ impl Zoom {
             let Some(original) = console::get(1) else { return Zoom { scale: 1, max: 1, original: None } };
             let max = max_scale(original.width, original.height);
             let size = std::fs::read_to_string("/sys/class/graphics/fb0/virtual_size").ok().and_then(|t| parse_virtual_size(&t)).unwrap_or((0, 0));
-            let want = scale_from_cmdline(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default()).unwrap_or_else(|| scale_for_screen(size.0, size.1));
+            let want = scale_from_cmdline(&iyakki_storage::cmdline_text()).unwrap_or_else(|| scale_for_screen(size.0, size.1));
             let mut z = Zoom { scale: 1, max, original: Some(original) };
             z.set(want.min(max));
             z

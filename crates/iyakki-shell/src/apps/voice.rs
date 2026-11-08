@@ -10,6 +10,7 @@ use crate::safeclamp::SafeClamp;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 
+use iyakki_agent::dictfix;
 use iyakki_agent::story::{self as st, Reader, Sink, Status, Synth};
 use iyakki_agent::voice::SpeakOpts;
 use iyakki_agent::voicedesk::{self as vd, Capture, Dest, Mic, ReadVoice, Recorders, MAX_RECORD_SECS, MAX_TEXT_CHARS};
@@ -45,6 +46,9 @@ pub(super) const T_READ_BACK: usize = 34;
 pub(super) const T_MIC: usize = 35;
 pub(super) const T_SETTINGS_VOICE: usize = 36;
 pub(super) const T_T_CLEAR: usize = 37;
+pub(super) const T_KEEP: usize = 38;
+pub(super) const T_FIX: usize = 39;
+pub(super) const T_FIX_ORIG: usize = 42;
 pub(super) const T_YES: usize = 40;
 pub(super) const T_NO: usize = 41;
 
@@ -72,6 +76,8 @@ pub(super) enum Focus {
     Text,
     Transcript,
     Path,
+    /// The Assistant pane's instruction line.
+    Assist,
 }
 
 /// What a yes on the consent card goes on to do.
@@ -79,6 +85,12 @@ pub(super) enum Focus {
 pub(super) enum After {
     Play { selection: bool },
     Record,
+    /// Dictated text would go to the chat model on another machine (Correct my wording); a no records without the correction.
+    RecordFix,
+    /// Text would go to the chat model on another machine (the Assistant pane); a no sends nothing.
+    Revise,
+    /// One spoken instruction for the Assistant pane (the sound goes to the speech engine on another machine).
+    RecordSay,
 }
 
 pub(super) enum Modal {
@@ -86,6 +98,8 @@ pub(super) enum Modal {
     Consent { text: String, dest: Dest, then: After },
     VoicePick(super::widgets::Picker),
     MicPick(super::widgets::Picker),
+    /// The language Translate goes into.
+    LangPick(super::widgets::Picker),
 }
 
 /// The things the app uses that tests replace: the recorders, where the sound goes and whether a sound output exists.
@@ -116,6 +130,14 @@ impl Rig {
         }
     }
 }
+
+/// What the speech worker hands back: the speech engine's text, or why there is none. (The wording correction comes later, per chunk.)
+pub(super) type SttDone = Result<String, String>;
+
+/// Empty results in a row with Keep listening on before it stops by itself.
+pub(super) const EMPTY_LIMIT: u32 = 5;
+/// The one line when it stops because only noise was heard.
+pub(super) const NOISE_STOP: &str = "Stopped listening: I kept hearing noise but no words. Check the microphone level or press Record to start again";
 
 /// A reading in progress or just finished.
 pub(super) struct Job {
@@ -150,8 +172,25 @@ pub struct VoiceApp {
     pub(super) cap: Option<Box<dyn Capture>>,
     pub(super) level: f32,
     pub(super) peak: f32,
+    /// Ends a dictation by itself after a pause in the talking.
+    pause: Option<vd::PauseDetector>,
+    /// The last dictation ended on a pause (not by the person's Stop): with Keep listening on, the next one starts by itself.
+    ended_on_pause: bool,
     pub(super) transcribing: bool,
-    pub(super) stt_rx: Option<Receiver<Result<String, String>>>,
+    pub(super) stt_rx: Option<Receiver<SttDone>>,
+    /// The last chunks of dictated text and their corrections (Correct my wording, in the background; see `voice_fix.rs`).
+    pub(super) fixes: Vec<fix::Chunk>,
+    pub(super) fix_serial: u64,
+    pub(super) fix_tx: std::sync::mpsc::Sender<(u64, dictfix::Fixed)>,
+    pub(super) fix_rx: Receiver<(u64, dictfix::Fixed)>,
+    /// Why the last correction kept the raw words; stays on the Correct-my-wording row until the next answer or Clear.
+    pub(super) fix_note: Option<String>,
+    /// Empty speech-to-text results in a row (Keep listening stops after [`EMPTY_LIMIT`]).
+    pub(super) empty_streak: u32,
+    /// The person said no to sending text to the assistant's machine: no correction until they switch it off and on.
+    fix_declined: bool,
+    /// The Assistant pane beside the transcript.
+    pub(super) assist: assist::Assist,
     /// The recorder (Record mode).
     pub(super) rec: Rec,
     pub(super) request: Option<(String, String)>,
@@ -177,6 +216,7 @@ impl VoiceApp {
     }
 
     pub fn with_rig(cx: &AppCx, rig: Rig) -> VoiceApp {
+        let fixch = fix::fix_channel();
         let mut a = VoiceApp {
             area: Area::Read,
             text: new_box(),
@@ -198,8 +238,18 @@ impl VoiceApp {
             cap: None,
             level: 0.0,
             peak: 0.0,
+            pause: None,
+            ended_on_pause: false,
             transcribing: false,
             stt_rx: None,
+            fixes: Vec::new(),
+            fix_serial: 0,
+            fix_tx: fixch.0,
+            fix_rx: fixch.1,
+            fix_note: None,
+            empty_streak: 0,
+            fix_declined: false,
+            assist: assist::Assist::new(),
             rec: Rec::new(),
             request: None,
             ticks: 0,
@@ -399,6 +449,11 @@ impl VoiceApp {
     // ------------------------------------------------------------------------------------------------ dictating
 
     pub(super) fn start_record(&mut self, cx: &AppCx) {
+        self.start_record_for(cx, false);
+    }
+
+    /// Start recording; `say`: it is one spoken instruction for the Assistant pane, not dictation.
+    pub(super) fn start_record_for(&mut self, cx: &AppCx, say: bool) {
         if self.cap.is_some() || self.transcribing {
             return;
         }
@@ -411,7 +466,7 @@ impl VoiceApp {
         }
         self.look(cx);
         if self.mics.is_empty() {
-            self.say(vd::no_mic_text_t2(&self.product, vd::t2_mic_hidden(std::path::Path::new("/proc"))), false);
+            self.say(vd::no_mic_text_t2(&self.product, vd::t2_mic_hidden(iyakki_agent::sysinfo::proc_root())), false);
             return;
         }
         let Some(engine) = vd::stt_engine(&cx.services) else {
@@ -419,13 +474,21 @@ impl VoiceApp {
             return;
         };
         if let Some((dest, text)) = vd::consent_text(&cx.services, &engine, true) {
-            self.modal = Some(Modal::Consent { text, dest, then: After::Record });
+            self.modal = Some(Modal::Consent { text, dest, then: if say { After::RecordSay } else { After::Record } });
             return;
         }
-        self.record_now(cx);
+        if !say && cx.services.voice_settings().fix_wording && !self.fix_declined {
+            if let dictfix::Target::NeedsConsent(_, server, text) = dictfix::target(&cx.services, None) {
+                let address = server.split_once("://").map_or(server.clone(), |(_, r)| r.to_string());
+                let place = iyakki_agent::speechtime::locality(&server);
+                self.modal = Some(Modal::Consent { text, dest: Dest { name: "the assistant".into(), address, server, place }, then: After::RecordFix });
+                return;
+            }
+        }
+        self.record_now(cx, say);
     }
 
-    fn record_now(&mut self, cx: &AppCx) {
+    fn record_now(&mut self, cx: &AppCx, say: bool) {
         self.stop_reading(); // do not record the voice that is reading
         // automatic is the first microphone found (never the playback-only `default` device)
         let mic = match self.mic_i.checked_sub(1) {
@@ -436,6 +499,9 @@ impl VoiceApp {
         match self.rig.recorders.start(&cmd, MAX_RECORD_SECS) {
             Ok(c) => {
                 self.cap = Some(c);
+                self.assist.say_mode = say;
+                self.pause = vd::PauseDetector::from_settings(&cx.services.voice_settings());
+                self.ended_on_pause = false;
                 self.level = 0.0;
                 self.peak = 0.0;
                 self.status = None;
@@ -452,6 +518,7 @@ impl VoiceApp {
         let Some(cap) = self.cap.take() else { return };
         if !keep {
             drop(cap);
+            self.assist.say_mode = false;
             self.say("Recording cancelled. Nothing was kept.", true);
             return;
         }
@@ -461,26 +528,29 @@ impl VoiceApp {
         };
         let svc = cx.services.clone();
         let (tx, rx) = channel();
+        // the worker only turns the sound into text; Correct my wording runs after the raw words are in the box (voice_fix.rs)
         std::thread::spawn(move || {
-            let _ = tx.send(cap.stop().and_then(|pcm| vd::transcribe(&svc, &engine, &pcm)));
+            let r = cap.stop().and_then(|pcm| vd::transcribe(&svc, &engine, &pcm));
+            let _ = tx.send(r);
         });
         self.stt_rx = Some(rx);
         self.transcribing = true;
         self.dirty = true;
     }
 
-    fn finish_transcript(&mut self, r: Result<String, String>) {
+    fn finish_transcript(&mut self, cx: &AppCx, r: SttDone) {
+        if self.assist.say_mode {
+            self.finish_instruction(r);
+            return;
+        }
         self.transcribing = false;
         self.stt_rx = None;
         match r {
-            Ok(t) => {
-                if !self.transcript.text.is_empty() && !self.transcript.text.ends_with('\n') {
-                    self.transcript.move_to(self.transcript.len(), false);
-                    self.transcript.insert("\n");
-                }
-                self.transcript.move_to(self.transcript.len(), false);
-                self.transcript.insert(&t);
-                self.say(format!("Transcript ready ({} characters). You can edit it.", t.chars().count()), true);
+            Ok(raw) => {
+                self.empty_streak = 0;
+                let svc = &cx.services;
+                let fix = svc.voice_settings().fix_wording && !self.fix_declined;
+                self.add_chunk(cx, raw, fix);
             }
             Err(e) => self.say(e, false),
         }
@@ -495,6 +565,8 @@ impl VoiceApp {
         crate::ui::clipboard::copy(&t);
         if clear {
             self.transcript.take();
+            self.fixes_clear();
+            self.assist_reset();
             self.say(format!("Copied {} characters and cleared the box.", t.chars().count()), true);
         } else {
             self.say(format!("Copied {} characters to the clipboard.", t.chars().count()), true);
@@ -548,13 +620,17 @@ impl VoiceApp {
         }
         // the microphone
         if self.cap.is_some() {
-            let (alive, full, secs, level) = {
+            let (alive, full, secs, level, ms) = {
                 let c = self.cap.as_mut().expect("recording");
-                (c.is_alive(), c.is_full(), c.elapsed().as_secs(), c.level())
+                (c.is_alive(), c.is_full(), c.elapsed().as_secs(), c.level(), c.elapsed().as_millis() as u64)
             };
             self.level = level.max(self.level * 0.85);
             self.peak = level.max(self.peak * 0.97);
-            if !alive {
+            if alive && self.pause.as_mut().is_some_and(|p| p.tick(level, ms)) {
+                // the person stopped talking: end it and start turning it into text, as if they had pressed stop
+                self.ended_on_pause = true;
+                self.stop_record(cx, true);
+            } else if !alive {
                 // the program ended by itself (no device, busy): what it said is the error, anything it did capture is used
                 self.stop_record(cx, true);
             } else if full || secs >= MAX_RECORD_SECS as u64 {
@@ -566,14 +642,43 @@ impl VoiceApp {
         }
         if let Some(rx) = &self.stt_rx {
             if let Ok(r) = rx.try_recv() {
-                self.finish_transcript(r);
+                let dictating = !self.assist.say_mode;
+                let keep = cx.services.voice_settings().keep_listening && self.area == Area::Dictate;
+                let on_pause = std::mem::take(&mut self.ended_on_pause);
+                // noise that ended a recording and gave no words: with Keep listening, listen again without a word (a red line each time
+                // is noise too), and stop with one plain line after EMPTY_LIMIT in a row
+                let empty = dictating && keep && on_pause && r.as_ref().err().is_some_and(|e| vd::is_no_words(e));
+                if empty {
+                    self.transcribing = false;
+                    self.stt_rx = None;
+                    self.empty_streak += 1;
+                    if self.empty_streak >= EMPTY_LIMIT {
+                        self.empty_streak = 0;
+                        self.say(NOISE_STOP, false);
+                    } else {
+                        self.start_record(cx);
+                    }
+                } else {
+                    let ok = r.is_ok() && dictating;
+                    if dictating && !(keep && on_pause) {
+                        self.empty_streak = 0;
+                    }
+                    self.finish_transcript(cx, r);
+                    // Keep listening: the dictation ended on a pause and its raw text is in the box, so listen again at once, without
+                    // waiting for the correction (never after a failure or the person's Stop, so a broken microphone cannot loop)
+                    if ok && on_pause && keep {
+                        self.start_record(cx);
+                    }
+                }
             }
         }
+        self.fix_tick(cx);
+        self.assist_tick();
         self.rec_tick(cx);
     }
 
     pub(super) fn animating(&self) -> bool {
-        self.cap.is_some() || self.transcribing || self.reader.is_active() || self.level > 0.01 || self.rec_animating()
+        self.cap.is_some() || self.transcribing || self.pending_fixes() > 0 || self.assist.working || self.reader.is_active() || self.level > 0.01 || self.rec_animating()
     }
 
     // ------------------------------------------------------------------------------------------------ files
@@ -649,12 +754,47 @@ impl VoiceApp {
             T_SOUND => self.request = Some(("settings".into(), "tab:sound".into())),
             T_SETTINGS_VOICE => self.request = Some(("settings".into(), "voice".into())),
             T_REC => self.start_record(cx),
-            T_REC_STOP => self.stop_record(cx, true),
+            T_REC_STOP => {
+                self.ended_on_pause = false; // the person's Stop ends it for good
+                self.stop_record(cx, true)
+            }
+            T_KEEP => {
+                let on = !cx.services.voice_settings().keep_listening;
+                match cx.services.settings.lock().unwrap().update(|s| s.voice.keep_listening = on) {
+                    Ok(()) => {
+                        cx.audit.record(&cx.session.user, "settings.voice.keep_listening", if on { "on" } else { "off" });
+                        self.say(if on { "Keep listening is on: after each pause the text is written and it listens again until you press Stop." } else { "Keep listening is off: each dictation ends on its pause." }, true);
+                    }
+                    Err(e) => self.say(e.to_string(), false),
+                }
+                self.dirty = true;
+            }
+            T_FIX => {
+                let on = !cx.services.voice_settings().fix_wording;
+                match iyakki_agent::dictfix::set_enabled(&cx.services, on) {
+                    Ok(()) => {
+                        cx.audit.record(&cx.session.user, dictfix::AUDIT, if on { "on" } else { "off" });
+                        self.fix_declined = false;
+                        let msg = match (on, dictfix::target(&cx.services, None)) {
+                            (false, _) => "Correct my wording is off: the transcript is exactly what was heard.".to_string(),
+                            (true, dictfix::Target::NoModel) => "Correct my wording is on, but no chat model is set up, so it does nothing yet. Pick one in Settings -> Models.".to_string(),
+                            (true, _) => "Correct my wording is on: each part is tidied by the assistant before it lands in the box.".to_string(),
+                        };
+                        self.say(msg, true);
+                    }
+                    Err(e) => self.say(e, false),
+                }
+                self.dirty = true;
+            }
+            T_FIX_ORIG => self.toggle_original(),
             T_COPY => self.copy_transcript(false),
             T_COPY_CLEAR => self.copy_transcript(true),
             T_READ_BACK => self.read_back(),
+            n if self.assist_click(n, cx) => {}
             T_T_CLEAR => {
                 self.transcript.take();
+                self.fixes_clear();
+                self.assist_reset();
                 self.focus = Focus::Transcript;
             }
             T_MIC => {
@@ -691,6 +831,9 @@ impl VoiceApp {
             Focus::Transcript => {
                 self.transcript.insert(t);
             }
+            Focus::Assist => {
+                self.assist.input.paste(t);
+            }
             Focus::Text | Focus::None if self.area == Area::Read => {
                 self.stop_reading();
                 self.text.insert(t);
@@ -718,6 +861,9 @@ impl VoiceApp {
         match then {
             After::Play { selection } => self.play(cx, selection),
             After::Record => self.start_record(cx),
+            After::RecordFix => self.start_record(cx),
+            After::RecordSay => self.start_record_for(cx, true),
+            After::Revise => self.assist_resume(cx),
         }
     }
 
@@ -726,9 +872,20 @@ impl VoiceApp {
             Some(Modal::Consent { text, dest, then }) => {
                 let yes = matches!(ev, Event::Key(Key::Char('y' | 'Y')) | Event::Tab(T_YES));
                 let no = matches!(ev, Event::Key(Key::Esc | Key::Char('n' | 'N')) | Event::Tab(T_NO));
+                let fix = matches!(then, After::RecordFix);
+                let revise = matches!(then, After::Revise);
                 self.modal = Some(Modal::Consent { text, dest, then });
                 if yes {
                     self.consent_yes(cx);
+                } else if no && fix {
+                    // no to the assistant's machine: dictate as before, with your words as heard
+                    self.modal = None;
+                    self.fix_declined = true;
+                    self.start_record(cx);
+                    self.say("Nothing was sent to the assistant. Your words stay as heard; switch Correct my wording off and on to be asked again.", true);
+                } else if no && revise {
+                    self.modal = None;
+                    self.assist_declined();
                 } else if no {
                     self.modal = None;
                     self.say("Nothing was sent. Pick a voice on this computer, or say yes to use that one.", true);
@@ -749,6 +906,16 @@ impl VoiceApp {
                 }
                 super::widgets::PickEvent::Cancel => {}
                 super::widgets::PickEvent::None => self.modal = Some(Modal::MicPick(p)),
+            },
+            Some(Modal::LangPick(mut p)) => match p.handle_event(ev) {
+                super::widgets::PickEvent::Chosen(label) => {
+                    if let Some(i) = self.assist.langs.iter().position(|l| *l == label) {
+                        self.assist.lang_i = i;
+                        self.assist_run(cx, iyakki_agent::revise::Kind::Translate(label));
+                    }
+                }
+                super::widgets::PickEvent::Cancel => {}
+                super::widgets::PickEvent::None => self.modal = Some(Modal::LangPick(p)),
             },
             None => {}
         }
@@ -816,6 +983,11 @@ impl VoiceApp {
                     self.path.handle(other);
                 }
             }
+            return Flow::Stay;
+        }
+        if self.focus == Focus::Assist {
+            self.assist_key(k, cx);
+            self.dirty = true;
             return Flow::Stay;
         }
         // copy, cut and select all in the boxes
@@ -909,6 +1081,7 @@ impl App for VoiceApp {
             "Select some text and press Read selection to read only that; click the progress bar to jump",
             "v choose the voice · + and - change the speed (when the voice has one)",
             "Dictate: Ctrl+Enter or Enter starts and stops recording (never without your click); Esc cancels and keeps nothing",
+            "Dictate, Assistant pane: press a button (Shorter, Formal, Translate...) or type an instruction and press Enter; it shows a proposal and changes nothing until Apply; Undo or Ctrl+Z in the pane steps back; select part of the transcript to change only that part",
             "Dictate: c copy the transcript · x copy and clear · b read it back · m choose the microphone",
             "F4: Record. Space or Ctrl+Enter starts and stops (never without your press); the recording is saved as a WAV in your Recordings folder",
             "Record: Up/Down choose a recording · Enter or p plays and stops it · n renames (Enter saves) · Delete or x deletes after you say y · m microphone · Esc stops",
@@ -976,6 +1149,10 @@ impl App for VoiceApp {
                     self.reader.seek((f * n as f32) as usize);
                 }
             }
+            Event::FocusAt(assist::ASSIST_FIELD, x) => {
+                self.focus = Focus::Assist;
+                self.assist.input.click(*x);
+            }
             Event::FocusAt(PATH_FIELD, x) => {
                 self.focus = Focus::Path;
                 self.path.click(*x);
@@ -993,6 +1170,12 @@ impl App for VoiceApp {
         self.draw(g, area, s, cx, tick);
     }
 }
+
+#[path = "voice_assist.rs"]
+pub(crate) mod assist;
+
+#[path = "voice_fix.rs"]
+pub(crate) mod fix;
 
 #[cfg(test)]
 #[path = "voice_tests.rs"]

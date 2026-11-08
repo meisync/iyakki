@@ -51,6 +51,8 @@ struct Pending {
     orig_id: u16,
     question: Vec<u8>,
     born: u64,
+    /// The query as sent to the resolver, kept so a truncated answer can be asked again over TCP.
+    sent: Vec<u8>,
 }
 
 pub struct Forwarder {
@@ -153,7 +155,7 @@ impl Forwarder {
         }
         let mut out = pkt.to_vec();
         out[..2].copy_from_slice(&up_id.to_be_bytes());
-        self.pending.push(Pending { up_id, client: (src, sport), orig_id: u16::from_be_bytes(id), question: pkt[12..q.end].to_ascii_lowercase(), born: now_ms });
+        self.pending.push(Pending { up_id, client: (src, sport), orig_id: u16::from_be_bytes(id), question: pkt[12..q.end].to_ascii_lowercase(), born: now_ms, sent: out.clone() });
         ClientDecision::Forward(out)
     }
 
@@ -187,6 +189,102 @@ impl Forwarder {
         let mut out = pkt.to_vec();
         out[..2].copy_from_slice(&p.orig_id.to_be_bytes());
         Some((p.client.0, p.client.1, out))
+    }
+}
+
+/// What to do with a resolver's answer when truncation matters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Upstream {
+    /// Send these bytes to the client.
+    Reply(Ipv4Addr, u16, Vec<u8>),
+    /// The answer was cut (the TC bit): ask the resolver again over TCP with this length-prefixed frame, and pass the answer to
+    /// [`Forwarder::handle_tcp_answer`] with the same `token`. The pending query stays until it expires.
+    RetryTcp { token: u16, frame: Vec<u8> },
+}
+
+/// A query as one TCP message: a two-byte length, then the packet (RFC 1035 4.2.2).
+pub fn tcp_frame(query: &[u8]) -> Option<Vec<u8>> {
+    let n = u16::try_from(query.len()).ok().filter(|n| *n >= 12)?;
+    let mut f = n.to_be_bytes().to_vec();
+    f.extend_from_slice(query);
+    Some(f)
+}
+
+/// The packet inside a TCP answer: the length prefix must match what arrived exactly and stay within [`MAX_RESPONSE`].
+pub fn untcp(frame: &[u8]) -> Option<&[u8]> {
+    let n = u16::from_be_bytes([*frame.first()?, *frame.get(1)?]) as usize;
+    (n >= 12 && n <= MAX_RESPONSE && frame.len() == n + 2).then(|| &frame[2..])
+}
+
+impl Forwarder {
+    /// [`Forwarder::handle_upstream`], except that a truncated UDP answer (TC bit) is not passed on: it asks for the same question over
+    /// TCP. The client then gets the whole answer, and never sees a cut one it cannot retry (this forwarder does not serve TCP clients).
+    pub fn handle_upstream_tc(&mut self, pkt: &[u8], now_ms: u64) -> Option<Upstream> {
+        self.purge(now_ms);
+        if pkt.len() >= 12 && pkt[2] & 0x80 != 0 && pkt[2] & 0x02 != 0 {
+            let id = u16::from_be_bytes([pkt[0], pkt[1]]);
+            let p = self.pending.iter().find(|p| p.up_id == id)?;
+            if canon_question(pkt)? != p.question {
+                return None;
+            }
+            return Some(Upstream::RetryTcp { token: id, frame: tcp_frame(&p.sent)? });
+        }
+        self.handle_upstream(pkt, now_ms).map(|(ip, port, b)| Upstream::Reply(ip, port, b))
+    }
+
+    /// The answer that came back over TCP for `token`. A cut or odd one is dropped (the client asks again by itself).
+    pub fn handle_tcp_answer(&mut self, token: u16, frame: &[u8], now_ms: u64) -> Option<(Ipv4Addr, u16, Vec<u8>)> {
+        let pkt = untcp(frame)?;
+        if u16::from_be_bytes([pkt[0], pkt[1]]) != token {
+            return None;
+        }
+        self.handle_upstream(pkt, now_ms)
+    }
+}
+
+/// The uplink's resolvers in the order to try: the first one that has not failed lately; a failure moves on, and a success puts a
+/// resolver back in front. At most [`MAX_RESOLVERS`] are kept, loopback and unspecified addresses never (a resolver on the hotspot
+/// itself would loop).
+pub const MAX_RESOLVERS: usize = 4;
+
+#[derive(Debug, Clone, Default)]
+pub struct Resolvers {
+    list: Vec<Ipv4Addr>,
+    /// (resolver, failed at ms)
+    failed: Vec<(Ipv4Addr, u64)>,
+}
+
+/// How long a failed resolver is left alone.
+pub const FAIL_MS: u64 = 30_000;
+
+impl Resolvers {
+    pub fn new(found: &[Ipv4Addr], hotspot: &Cidr) -> Resolvers {
+        let mut list: Vec<Ipv4Addr> = Vec::new();
+        for ip in found.iter().copied().filter(|ip| !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast() && !ip.is_broadcast() && !hotspot.contains(*ip)) {
+            if !list.contains(&ip) && list.len() < MAX_RESOLVERS {
+                list.push(ip);
+            }
+        }
+        Resolvers { list, failed: Vec::new() }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    /// The resolver to ask now: the first that has not failed within [`FAIL_MS`]; when all have, the one that failed longest ago.
+    pub fn pick(&self, now_ms: u64) -> Option<Ipv4Addr> {
+        let recent = |ip: &Ipv4Addr| self.failed.iter().find(|(f, _)| f == ip).filter(|(_, at)| now_ms.saturating_sub(*at) < FAIL_MS).map(|(_, at)| *at);
+        self.list.iter().copied().find(|ip| recent(ip).is_none()).or_else(|| self.list.iter().copied().min_by_key(|ip| recent(ip).unwrap_or(0)))
+    }
+
+    pub fn failed(&mut self, ip: Ipv4Addr, now_ms: u64) {
+        self.failed.retain(|(f, _)| *f != ip);
+        self.failed.push((ip, now_ms));
+    }
+
+    pub fn worked(&mut self, ip: Ipv4Addr) {
+        self.failed.retain(|(f, _)| *f != ip);
     }
 }
 
@@ -360,5 +458,76 @@ mod tests {
             }
         }
         assert!(f.pending_count() <= 64);
+    }
+
+    #[test]
+    fn a_cut_udp_answer_is_asked_again_over_tcp_and_the_whole_answer_reaches_the_client() {
+        let mut f = fw(8);
+        let q = build_query(0x1111, "big.example.org", 16);
+        let ClientDecision::Forward(out) = f.handle_client(CL, 5353, &q, 0x7777, 0) else { panic!() };
+        // the resolver's UDP answer has the TC bit set
+        let mut cut = answer_to(&out);
+        cut[2] |= 0x02;
+        let Some(Upstream::RetryTcp { token, frame }) = f.handle_upstream_tc(&cut, 10) else { panic!("a TCP retry") };
+        assert_eq!(token, 0x7777);
+        assert_eq!(untcp(&frame).unwrap(), &out[..], "the same question under the same id goes over TCP");
+        assert_eq!(f.pending_count(), 1, "the client still waits");
+        // a TCP answer with the wrong length prefix, the wrong id or another question is refused
+        let mut whole = answer_to(&out);
+        let mut framed = (whole.len() as u16).to_be_bytes().to_vec();
+        framed.extend_from_slice(&whole);
+        assert!(f.handle_tcp_answer(token, &framed[..framed.len() - 1], 20).is_none());
+        assert!(f.handle_tcp_answer(token ^ 1, &framed, 20).is_none());
+        let other = build_query(0x7777, "other.example.org", 16);
+        let mut wrong = (answer_to(&other).len() as u16).to_be_bytes().to_vec();
+        wrong.extend_from_slice(&answer_to(&other));
+        assert!(f.handle_tcp_answer(token, &wrong, 20).is_none());
+        let (ip, port, back) = f.handle_tcp_answer(token, &framed, 30).unwrap();
+        assert_eq!((ip, port), (CL, 5353));
+        assert_eq!(&back[..2], &0x1111u16.to_be_bytes(), "the client's own id");
+        whole[..2].copy_from_slice(&0x1111u16.to_be_bytes());
+        assert_eq!(back, whole);
+        assert_eq!(f.pending_count(), 0);
+    }
+
+    #[test]
+    fn an_answer_that_is_not_cut_is_passed_on_as_before_and_a_forged_cut_one_asks_nothing() {
+        let mut f = fw(8);
+        let q = build_query(0x2222, "a.example.org", 1);
+        let ClientDecision::Forward(out) = f.handle_client(CL, 4000, &q, 0x0101, 0) else { panic!() };
+        let mut forged = answer_to(&build_query(0x0101, "evil.example.org", 1));
+        forged[2] |= 0x02;
+        assert!(f.handle_upstream_tc(&forged, 1).is_none(), "another question: nothing is asked");
+        assert!(matches!(f.handle_upstream_tc(&answer_to(&out), 2), Some(Upstream::Reply(ip, 4000, _)) if ip == CL));
+        // junk and an unknown id
+        assert!(f.handle_upstream_tc(&[1, 2, 3], 3).is_none());
+        let mut unknown = answer_to(&out);
+        unknown[2] |= 0x02;
+        assert!(f.handle_upstream_tc(&unknown, 4).is_none());
+        assert!(tcp_frame(&[0; 5]).is_none() && untcp(&[0, 3, 1, 2, 3]).is_none() && untcp(&[]).is_none());
+    }
+
+    #[test]
+    fn the_resolver_list_skips_loopback_and_the_hotspot_itself_moves_on_after_a_failure_and_comes_back() {
+        let net = Cidr::parse("10.42.0.0/24").unwrap();
+        let a = Ipv4Addr::new(192, 168, 1, 1);
+        let b = Ipv4Addr::new(8, 8, 4, 4);
+        let found = [Ipv4Addr::LOCALHOST, SRV, a, a, Ipv4Addr::UNSPECIFIED, b, Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(9, 9, 9, 9), Ipv4Addr::new(5, 5, 5, 5)];
+        let mut r = Resolvers::new(&found, &net);
+        assert_eq!(r.pick(0), Some(a), "in the order found");
+        assert_eq!(r.list.len(), MAX_RESOLVERS);
+        r.failed(a, 100);
+        assert_eq!(r.pick(200), Some(b));
+        r.failed(b, 300);
+        assert_ne!(r.pick(400), Some(a));
+        assert_eq!(r.pick(100 + FAIL_MS), Some(a), "a failed one is tried again after a while");
+        r.worked(b);
+        assert_eq!(r.pick(500), Some(b));
+        let none = Resolvers::new(&[Ipv4Addr::LOCALHOST], &net);
+        assert!(none.is_empty() && none.pick(0).is_none());
+        let mut all = Resolvers::new(&[a, b], &net);
+        all.failed(a, 10);
+        all.failed(b, 20);
+        assert_eq!(all.pick(30), Some(a), "all failed: the one that failed longest ago");
     }
 }

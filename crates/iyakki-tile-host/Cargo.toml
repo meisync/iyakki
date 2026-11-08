@@ -1,0 +1,12 @@
+[package]
+name = "iyakki-tile-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Runs a WASM tile in the iyakki-wasm sandbox: drives init/event/frame, enforces budgets, returns the decoded display list; reference renderer and JSON/SVG exporters."
+
+[dependencies]
+iyakki-tile-abi = { path = "../iyakki-tile-abi" }
+iyakki-wasm.workspace = true
+iyakki-sec.workspace = true
+iyakki-vfs.workspace = true

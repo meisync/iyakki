@@ -109,11 +109,11 @@ fi
 # the extra boot loader (iyakki-boot): EFI/iyakki-boot/{loader.efi,boot.cfg,splash.bmp} when the loader program was built (see the script's header);
 # GRUB's "IYAKKI - new boot loader (test)" entry shows only then. Not signed here: under Secure Boot sign loader.efi with iyakki-boot/tools/sign.sh.
 sh "$BOARD/../../boot-loader-stage.sh" "$ROOT" /boot/initrd || echo "post-image: the extra boot loader was not staged (image is fine without it)" >&2
-# IYAKKI_LOADER_DEFAULT=1 (default 0: GRUB stays the default way in): the loader becomes shim's second stage (EFI/BOOT/grubx64.efi) or, without
+# IYAKKI_LOADER_DEFAULT=1 (the default since 2026-11-07; 0 keeps GRUB as the default way in): the loader becomes shim's second stage (EFI/BOOT/grubx64.efi) or, without
 # shim, EFI/BOOT/BOOTX64.EFI, GRUB is kept as EFI/BOOT/grub-recovery.efi (the loader's Recovery row) and GRUB's own "new boot loader (test)"
 # entry is dropped. Signed with the image key when IYAKKI_SB_KEY / IYAKKI_SB_CERT are set, else UNSIGNED (Secure Boot off only).
 # docs/development/GRUB-REPLACEMENT-PLAN.md step 2. The live ISO is not touched: it keeps GRUB (it must start on BIOS too).
-if [ "${IYAKKI_LOADER_DEFAULT:-0}" = 1 ]; then
+if [ "${IYAKKI_LOADER_DEFAULT:-1}" = 1 ]; then
   if sh "$BOARD/../../loader-default.sh" esp "$ROOT"; then
     sh "$BOARD/../../loader-default.sh" grubcfg "$ROOT/boot/grub/grub.cfg"
   else

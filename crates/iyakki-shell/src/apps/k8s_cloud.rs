@@ -130,6 +130,7 @@ impl CloudForm {
             redirect_http: false,
             cert: cert_ref,
             access: Default::default(),
+            client_ca: None,
         };
         let mut all = self.routes.clone();
         all.push(route.clone());

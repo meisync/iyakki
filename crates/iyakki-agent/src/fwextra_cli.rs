@@ -72,7 +72,7 @@ pub fn read_ifaces_real() -> Vec<Iface> {
     let gws = net::gateways_from_route(&route);
     let v4 = iyakki_devctl::ipv4_addresses();
     let mut out = Vec::new();
-    for e in std::fs::read_dir("/sys/class/net").into_iter().flatten().flatten() {
+    for e in std::fs::read_dir(crate::sysinfo::net_class_root()).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let p = e.path();
         let driver = std::fs::read_link(p.join("device/driver")).ok().and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_default();
@@ -208,7 +208,7 @@ pub fn plan_for_names(names: &[String], m: &Manifest) -> Plan {
 // ------------------------------------------------------------------------------------------------ iyakki quick-install fw-hardware
 
 fn streamer() -> std::sync::Arc<dyn iyakki_proxy::Streamer> {
-    std::sync::Arc::new(iyakki_proxy::https::UreqStreamer::default())
+    iyakki_proxy::https::download_streamer()
 }
 
 pub fn hardware_main(args: &[String], data: &Path, user: &str) -> i32 {
@@ -297,11 +297,11 @@ pub fn hardware_main(args: &[String], data: &Path, user: &str) -> i32 {
         crate::qprintln!("the other computer's internet is no longer used by this device");
     }
     match r {
-        Ok(_) => 0,
-        Err(e) => {
-            crate::qprintln!("error: {e}");
-            1
+        Ok(_) => {
+            crate::quickinstall::clear_failure(data, crate::quickinstall::Item::FwHardware);
+            0
         }
+        Err(e) => crate::quickinstall::failed_exit(data, crate::quickinstall::Item::FwHardware, &e),
     }
 }
 

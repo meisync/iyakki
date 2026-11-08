@@ -201,7 +201,7 @@ pub fn without_storage_limits(job: &mut Value) {
 
 /// Is `/` a RAM file system right now (`rootfs`/`ramfs` in `/proc/mounts`)? The managed dev cluster (`k3sdev.rs`) asks the same.
 pub(crate) fn ramfs_root_now() -> bool {
-    std::fs::read_to_string("/proc/mounts").is_ok_and(|m| m.lines().any(|l| { let mut p = l.split_whitespace(); matches!((p.next(), p.next(), p.next()), (Some("rootfs"), Some("/"), Some("rootfs")) | (Some("none"), Some("/"), Some("ramfs"))) }))
+    iyakki_storage::read_mounts().is_ok_and(|m| m.lines().any(|l| { let mut p = l.split_whitespace(); matches!((p.next(), p.next(), p.next()), (Some("rootfs"), Some("/"), Some("rootfs")) | (Some("none"), Some("/"), Some("ramfs"))) }))
 }
 
 pub struct Cluster {

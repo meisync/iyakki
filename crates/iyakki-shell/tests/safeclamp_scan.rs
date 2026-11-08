@@ -80,7 +80,9 @@ fn offenders(root: &Path) -> Vec<String> {
 
 #[test]
 fn no_clamp_with_computed_bounds_outside_the_safe_helper() {
-    let bad = offenders(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+    // the shell and the toolkit crate it re-exports from (gfx, ui, textsel ... moved to crates/iyakki-uikit)
+    let mut bad = offenders(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+    bad.extend(offenders(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../iyakki-uikit/src")));
     assert!(bad.is_empty(), "use .clamp_safe(..) (crate::safeclamp::SafeClamp) for computed bounds; found .clamp( at: {bad:?}");
 }
 

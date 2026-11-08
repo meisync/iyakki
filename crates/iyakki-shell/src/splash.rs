@@ -99,7 +99,7 @@ pub fn note_to(path: &std::path::Path, msg: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let up = std::fs::read_to_string("/proc/uptime").ok().and_then(|u| u.split_whitespace().next().map(str::to_string)).unwrap_or_else(|| "?".into());
+    let up = iyakki_storage::uptime_token().unwrap_or_else(|| "?".into());
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(f, "[{up}] splash: {msg}");
     }
@@ -652,6 +652,18 @@ mod tests {
             draw(&mut b, &View { t: 1.0, fraction: 0.5, stage: "", log: None, steps: &steps_some });
             assert!(green(&b) > green(&a), "{w}x{h}: ticked boxes are drawn in green");
         }
+    }
+
+    /// `IYAKKI_SHOT=/path.png cargo test -p iyakki-shell --lib splash_log_picture -- --ignored`
+    #[test]
+    #[ignore]
+    fn splash_log_picture() {
+        let Ok(out) = std::env::var("IYAKKI_SHOT") else { return };
+        let lines: Vec<String> = ["Linux version 6.12 (build@iyakki)", "BIOS-provided physical RAM map:", "usb 1-1: new high-speed USB device number 2", "iyakki: [iyakki INFO ] shell: 118 frames in 10s"].iter().map(|s| s.to_string()).collect();
+        let steps: Vec<(&str, bool)> = vec![];
+        let mut g = Gfx::new(1280, 760);
+        draw(&mut g, &View { t: 2.0, fraction: 0.5, stage: "", log: Some(&lines), steps: &steps });
+        g.save_png(std::path::Path::new(&out)).unwrap();
     }
 
     /// `IYAKKI_SHOT=/path.png cargo test -p iyakki-shell --lib splash_checklist_picture -- --ignored`

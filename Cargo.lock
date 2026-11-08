@@ -2376,6 +2376,7 @@ dependencies = [
  "iyakki-schema",
  "iyakki-sec",
  "iyakki-storage",
+ "iyakki-uikit",
  "iyakki-usb",
  "iyakki-vpn",
  "iyakki-web",
@@ -2433,6 +2434,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "iyakki-tile-abi"
+version = "0.1.0-alpha.1"
+
+[[package]]
+name = "iyakki-tile-example"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-tile-abi",
+ "iyakki-tile-host",
+]
+
+[[package]]
+name = "iyakki-tile-host"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-sec",
+ "iyakki-tile-abi",
+ "iyakki-vfs",
+ "iyakki-wasm",
+]
+
+[[package]]
 name = "iyakki-ui"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -2440,6 +2463,17 @@ dependencies = [
  "iyakki-sec",
  "iyakki-vfs",
  "iyakki-wasm",
+]
+
+[[package]]
+name = "iyakki-uikit"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "fontdue",
+ "rustybuzz",
+ "serde_json",
+ "tiny-skia",
+ "unicode-bidi",
 ]
 
 [[package]]

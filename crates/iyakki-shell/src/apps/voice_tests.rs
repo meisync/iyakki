@@ -546,6 +546,98 @@ fn recording_needs_a_click_shows_a_clear_indicator_and_the_transcript_comes_from
 }
 
 #[test]
+fn keep_listening_starts_the_next_dictation_after_a_pause_but_never_after_stop() {
+    let b = bench("voice-keep-listening");
+    let mut a = b.app();
+    key(&mut a, &b.cx, Key::F(3));
+    // off (the default): a dictation that ended on a pause is just over
+    click(&mut a, &b.cx, T_REC);
+    assert!(a.is_recording());
+    a.ended_on_pause = true;
+    a.stop_record(&b.cx, true);
+    wait(&mut a, &b.cx, |a| !a.transcribing);
+    assert!(!a.is_recording(), "off: it does not listen again");
+    // the checkbox turns it on and the Voice settings keep it
+    click(&mut a, &b.cx, T_KEEP);
+    assert!(b.cx.services.voice_settings().keep_listening);
+    let g = draw(&mut a, &b.cx, 1280, 720);
+    assert!(label_hit(&g, "\u{2611} Keep listening"), "the box shows ticked");
+    // on: after a pause-ended dictation and its text, it listens again by itself
+    click(&mut a, &b.cx, T_REC);
+    a.ended_on_pause = true;
+    a.stop_record(&b.cx, true);
+    wait(&mut a, &b.cx, |a| !a.transcribing);
+    assert!(a.is_recording(), "on: it listens again after the pause");
+    assert_eq!(b.recs.started.lock().unwrap().len(), 3);
+    // the person's Stop ends it for good
+    click(&mut a, &b.cx, T_REC_STOP);
+    wait(&mut a, &b.cx, |a| !a.transcribing);
+    assert!(!a.is_recording(), "Stop is final");
+    assert_eq!(b.recs.started.lock().unwrap().len(), 3);
+}
+
+/// The chat model of Settings is the fake Lemonade's (it answers every chat request with "Hello, Lemonade.").
+fn chat_on_the_fake(b: &Bench) {
+    b.cx.services.settings.lock().unwrap().update(|s| s.chat = Some(iyakki_agent::settings::ModelChoice { provider: "lemonade-local".into(), model: "Qwen3-0.6B-GGUF".into() })).unwrap();
+}
+
+#[test]
+fn correct_my_wording_tidies_the_text_in_the_background_and_show_original_restores_what_was_heard() {
+    let b = bench("voice-fixwording");
+    chat_on_the_fake(&b);
+    let mut a = b.app();
+    key(&mut a, &b.cx, Key::F(3));
+    // off by default: the words are exactly what was heard and the assistant is never asked
+    assert!(!b.cx.services.voice_settings().fix_wording);
+    click(&mut a, &b.cx, T_REC);
+    click(&mut a, &b.cx, T_REC_STOP);
+    wait(&mut a, &b.cx, |a| !a.transcribing);
+    assert_eq!(a.transcript.text, "hello lemonade");
+    assert!(b.fake.bodies("/api/v1/chat/completions").is_empty() && a.last_fix().is_none());
+    click(&mut a, &b.cx, T_T_CLEAR);
+    // the checkbox turns it on
+    click(&mut a, &b.cx, T_FIX);
+    assert!(b.cx.services.voice_settings().fix_wording);
+    let g = draw(&mut a, &b.cx, 1280, 720);
+    assert!(label_hit(&g, "\u{2611} Correct my wording with the assistant"), "the box shows ticked");
+    click(&mut a, &b.cx, T_REC);
+    click(&mut a, &b.cx, T_REC_STOP);
+    assert!(a.transcribing);
+    wait(&mut a, &b.cx, |a| !a.transcribing && a.pending_fixes() == 0);
+    assert_eq!(a.transcript.text, "Hello, Lemonade.", "the corrected words replace the raw words in place");
+    assert!(status(&a).contains("tidied the wording"), "{}", status(&a));
+    // one chat call, no tools, the transcript quoted as data
+    let bodies = b.fake.bodies("/api/v1/chat/completions");
+    assert_eq!(bodies.len(), 1);
+    let v: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    assert!(v.get("tools").is_none_or(|t| t.as_array().is_some_and(|a| a.is_empty())), "no tool is offered: {}", bodies[0]);
+    assert!(bodies[0].contains("\\\"hello lemonade\\\""), "{}", bodies[0]);
+    assert!(b.cx.audit.recent(20).iter().any(|l| l.contains("voice.fixwording")));
+    assert!(!b.cx.audit.recent(20).iter().any(|l| l.contains("Hello, Lemonade")), "no text in the audit");
+    // Show original / Undo wording
+    let g = draw(&mut a, &b.cx, 1280, 720);
+    assert!(label_hit(&g, "Show original"));
+    click(&mut a, &b.cx, T_FIX_ORIG);
+    assert_eq!(a.transcript.text, "hello lemonade");
+    let g = draw(&mut a, &b.cx, 1280, 720);
+    assert!(label_hit(&g, "Undo wording"));
+    click(&mut a, &b.cx, T_FIX_ORIG);
+    assert_eq!(a.transcript.text, "Hello, Lemonade.");
+    // a part the person edited is left alone
+    click(&mut a, &b.cx, T_T_CLEAR);
+    a.handle(&Event::Paste("Something else entirely".into()), &b.cx);
+    click(&mut a, &b.cx, T_FIX_ORIG);
+    assert_eq!(a.transcript.text, "Something else entirely");
+    // the second chunk is corrected in the light of the first: the earlier text reaches the prompt
+    click(&mut a, &b.cx, T_REC);
+    click(&mut a, &b.cx, T_REC_STOP);
+    wait(&mut a, &b.cx, |a| !a.transcribing && a.pending_fixes() == 0);
+    let bodies = b.fake.bodies("/api/v1/chat/completions");
+    assert_eq!(bodies.len(), 2);
+    assert!(bodies[1].contains("Something else entirely"), "{}", bodies[1]);
+}
+
+#[test]
 fn the_transcript_is_edited_copied_cleared_and_read_back() {
     let b = bench("voice-copy");
     let mut a = b.app();
@@ -911,3 +1003,215 @@ fn the_microphone_choice_is_saved_for_the_browser_and_comes_back_when_the_tile_o
 
 #[path = "voice_rec_tests.rs"]
 mod rec;
+
+#[path = "voice_assist_tests.rs"]
+mod assist_tests;
+
+// ------------------------------------------------------------------------------------------------ as we talk
+
+use iyakki_agent::dictfix::{Fixed, Reason};
+
+/// A chat model that accepts the call and never answers (so a correction stays pending), set as the chat model with the option on.
+fn silent_model(b: &Bench) {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = vec![];
+        for s in l.incoming().flatten() {
+            held.push(s);
+        }
+    });
+    let mut p = ProviderCfg::new("slow", Kind::Compat);
+    p.base_url = Some(format!("http://127.0.0.1:{port}/v1"));
+    b.cx.services
+        .settings
+        .lock()
+        .unwrap()
+        .update(|s| {
+            s.providers.push(p);
+            s.chat = Some(iyakki_agent::settings::ModelChoice { provider: "slow".into(), model: "m".into() });
+            s.voice.fix_wording = true;
+            s.voice.keep_listening = true;
+        })
+        .unwrap();
+}
+
+fn answer(raw: &str, text: &str) -> Fixed {
+    let changed = text != raw;
+    Fixed { text: text.into(), raw: raw.into(), changed, kept_because: None, needs_consent: None, reason: if changed { Reason::Changed } else { Reason::Unchanged } }
+}
+
+fn kept(raw: &str, reason: Reason, why: &str) -> Fixed {
+    Fixed { text: raw.into(), raw: raw.into(), changed: false, kept_because: Some(why.into()), needs_consent: None, reason }
+}
+
+/// Stop the recording as a pause would, and wait until the speech engine's text is in.
+fn pause_stop(a: &mut VoiceApp, cx: &AppCx) {
+    a.ended_on_pause = true;
+    a.stop_record(cx, true);
+    wait(a, cx, |a| !a.transcribing);
+}
+
+#[test]
+fn the_raw_words_land_at_once_keep_listening_does_not_wait_and_each_correction_finds_its_own_chunk() {
+    let b = bench("voice-fix-async");
+    silent_model(&b);
+    let mut a = b.app();
+    key(&mut a, &b.cx, Key::F(3));
+    click(&mut a, &b.cx, T_REC);
+    pause_stop(&mut a, &b.cx);
+    // the raw words are in the box, the correction is still out, and it listens again without waiting for it
+    assert_eq!(a.transcript.text, "hello lemonade");
+    assert_eq!(a.pending_fixes(), 1);
+    assert_eq!(a.tidy_marker(0).as_deref(), Some("tidying."));
+    assert!(a.is_recording(), "Keep listening restarted at once");
+    pause_stop(&mut a, &b.cx);
+    assert_eq!(a.transcript.text, "hello lemonade\nhello lemonade");
+    assert_eq!(a.pending_fixes(), 2);
+    assert_eq!(a.tidy_marker(1).as_deref(), Some("tidying 2 parts.."));
+    assert!(a.is_recording());
+    let ser: Vec<u64> = a.fixes.iter().map(|c| c.serial).collect();
+    assert_eq!(ser.len(), 2);
+    // the answers come back in the other order: each lands in its own chunk, not by position
+    a.fix_tx.send((ser[1], answer("hello lemonade", "Hello, Lemonade, and welcome."))).unwrap();
+    tick(&mut a, &b.cx);
+    assert_eq!(a.transcript.text, "hello lemonade\nHello, Lemonade, and welcome.");
+    assert_eq!(a.pending_fixes(), 1);
+    a.fix_tx.send((ser[0], answer("hello lemonade", "Hello, Lemonade."))).unwrap();
+    tick(&mut a, &b.cx);
+    assert_eq!(a.transcript.text, "Hello, Lemonade.\nHello, Lemonade, and welcome.", "the later chunk moved with the longer first one");
+    assert_eq!(a.pending_fixes(), 0);
+    assert_eq!(a.tidy_marker(0), None);
+    // Show original works on the newest corrected chunk, at its new place, and Undo wording brings the correction back
+    click(&mut a, &b.cx, T_FIX_ORIG);
+    assert_eq!(a.transcript.text, "Hello, Lemonade.\nhello lemonade");
+    click(&mut a, &b.cx, T_FIX_ORIG);
+    assert_eq!(a.transcript.text, "Hello, Lemonade.\nHello, Lemonade, and welcome.");
+    // a chunk the person edited meanwhile keeps the edit; the correction is dropped quietly
+    pause_stop(&mut a, &b.cx);
+    assert_eq!(a.pending_fixes(), 1);
+    let serial = a.fixes.last().unwrap().serial;
+    let edited = a.transcript.text.replace("\nhello lemonade", "\nhowdy lemonade");
+    a.transcript.set(&edited);
+    a.fix_tx.send((serial, answer("hello lemonade", "Hello, Lemonade."))).unwrap();
+    tick(&mut a, &b.cx);
+    assert_eq!(a.transcript.text, "Hello, Lemonade.\nHello, Lemonade, and welcome.\nhowdy lemonade");
+    assert_eq!(a.pending_fixes(), 0);
+    assert!(a.fix_note.is_none(), "an edit is not a failure");
+    // an answer for a box that was cleared meanwhile is dropped
+    pause_stop(&mut a, &b.cx);
+    let serial = a.fixes.last().unwrap().serial;
+    click(&mut a, &b.cx, T_T_CLEAR);
+    a.fix_tx.send((serial, answer("hello lemonade", "Hello, Lemonade."))).unwrap();
+    tick(&mut a, &b.cx);
+    assert!(a.transcript.is_empty() && a.fixes.is_empty());
+    // the audit carries the kind of result only
+    let lines = b.cx.audit.recent(50);
+    assert!(lines.iter().any(|l| l.contains("voice.fixwording") && l.contains("changed")));
+    assert!(lines.iter().all(|l| !l.contains("Lemonade, and welcome") && !l.contains("howdy")), "no text in the audit");
+    a.stop_record(&b.cx, false);
+}
+
+#[test]
+fn only_the_last_five_corrected_chunks_are_remembered_and_a_moved_chunk_is_found_by_its_text() {
+    let b = bench("voice-fix-keep");
+    let mut a = b.app();
+    key(&mut a, &b.cx, Key::F(3));
+    // the person types in front of a pending chunk: it is found again by its one exact text
+    a.add_chunk(&b.cx, "hello there".into(), false);
+    a.fixes.push(fix::Chunk { serial: 1, start: 0, raw: "hello there".into(), text: String::new(), showing_raw: false, pending: true, changed: false });
+    let t = a.transcript.text.clone();
+    a.transcript.set(&format!("NOTE: {t}"));
+    a.apply_fix(&b.cx, 1, answer("hello there", "Hello there."));
+    assert_eq!(a.transcript.text, "NOTE: Hello there.");
+    assert!(a.last_fix().is_some());
+    // a text that appears twice cannot be told apart: the correction is dropped
+    let mut a = b.app();
+    a.transcript.set("same words\nsame words");
+    a.fixes.push(fix::Chunk { serial: 1, start: 3, raw: "same words".into(), text: String::new(), showing_raw: false, pending: true, changed: false });
+    a.apply_fix(&b.cx, 1, answer("same words", "Same words."));
+    assert_eq!(a.transcript.text, "same words\nsame words");
+    let mut many = b.app();
+    for i in 0..9u64 {
+        many.fixes.push(fix::Chunk { serial: i, start: 0, raw: format!("w{i}"), text: String::new(), showing_raw: false, pending: false, changed: false });
+    }
+    many.fix_serial = 9;
+    many.add_chunk(&b.cx, "tail".into(), false);
+    many.fixes.push(fix::Chunk { serial: 10, start: 0, raw: "tail".into(), text: String::new(), showing_raw: false, pending: true, changed: false });
+    many.apply_fix(&b.cx, 10, answer("tail", "tail"));
+    assert_eq!(many.fixes.len(), fix::KEEP, "{:?}", many.fixes.iter().map(|c| c.serial).collect::<Vec<_>>());
+}
+
+#[test]
+fn the_reason_the_words_were_kept_stays_until_the_next_answer_or_clear_and_the_audit_has_the_kind_only() {
+    let b = bench("voice-fix-note");
+    let mut a = b.app();
+    key(&mut a, &b.cx, Key::F(3));
+    a.add_chunk(&b.cx, "hello world".into(), false);
+    a.fixes.push(fix::Chunk { serial: 1, start: 0, raw: "hello world".into(), text: String::new(), showing_raw: false, pending: true, changed: false });
+    let why = "kept your words as heard: the assistant did not answer within 20 seconds";
+    a.apply_fix(&b.cx, 1, kept("hello world", Reason::Timeout, why));
+    assert_eq!(a.fix_note.as_deref(), Some("kept your words as heard: the assistant did not answer within 20 seconds"));
+    let g = draw(&mut a, &b.cx, 1280, 720);
+    assert!(g.hits.iter().any(|h| h.label.contains("did not answer within 20 seconds")), "the reason is on the screen");
+    // the next chunk's generic line does not wipe it
+    a.add_chunk(&b.cx, "second part".into(), false);
+    assert!(status(&a).starts_with("Transcript ready"));
+    assert!(a.fix_note.is_some());
+    let g = draw(&mut a, &b.cx, 1280, 720);
+    assert!(g.hits.iter().any(|h| h.label.contains("did not answer within 20 seconds")));
+    // the next answer replaces it
+    a.fixes.push(fix::Chunk { serial: 2, start: 12, raw: "second part".into(), text: String::new(), showing_raw: false, pending: true, changed: false });
+    a.apply_fix(&b.cx, 2, answer("second part", "Second part."));
+    assert!(a.fix_note.is_none());
+    // and Clear
+    a.fixes.push(fix::Chunk { serial: 3, start: 0, raw: "x".into(), text: String::new(), showing_raw: false, pending: true, changed: false });
+    a.apply_fix(&b.cx, 3, kept("x", Reason::NoModel, "kept your words as heard: no chat model is set up"));
+    assert!(a.fix_note.is_some());
+    click(&mut a, &b.cx, T_T_CLEAR);
+    assert!(a.fix_note.is_none());
+    let lines = b.cx.audit.recent(50);
+    for kind in ["timeout", "changed", "nomodel"] {
+        assert!(lines.iter().any(|l| l.contains("voice.fixwording") && l.contains(kind)), "{kind}: {lines:?}");
+    }
+    assert!(lines.iter().all(|l| !l.contains("hello world") && !l.contains("Second part")), "no text in the audit");
+}
+
+#[test]
+fn with_keep_listening_empty_results_listen_again_quietly_and_five_in_a_row_stop_with_one_plain_line() {
+    let b = bench("voice-fix-empty");
+    let silent = Arc::new(FakeRecs { mics: vec![usb()], product: "x".into(), cfg: CapCfg { pcm: vec![0; 16_000], ..cap_cfg() }, started: Mutex::new(vec![]) });
+    b.cx.services.settings.lock().unwrap().update(|s| s.voice.keep_listening = true).unwrap();
+    let mut a = b.app_with_recs(silent.clone());
+    key(&mut a, &b.cx, Key::F(3));
+    click(&mut a, &b.cx, T_REC);
+    for n in 1..=4 {
+        pause_stop(&mut a, &b.cx);
+        assert!(a.is_recording(), "empty result {n}: it listens again");
+        assert!(a.status.as_ref().is_none_or(|(_, ok)| *ok), "no red line for an empty result: {:?}", a.status);
+        assert!(a.transcript.is_empty());
+    }
+    // a real transcript starts the count again
+    a.rig.recorders = b.recs.clone();
+    a.stop_record(&b.cx, false);
+    click(&mut a, &b.cx, T_REC);
+    pause_stop(&mut a, &b.cx);
+    assert_eq!(a.transcript.text, "hello lemonade");
+    assert_eq!(a.empty_streak, 0);
+    a.rig.recorders = silent.clone();
+    a.stop_record(&b.cx, false);
+    click(&mut a, &b.cx, T_REC);
+    for _ in 1..=4 {
+        pause_stop(&mut a, &b.cx);
+        assert!(a.is_recording());
+    }
+    pause_stop(&mut a, &b.cx);
+    assert!(!a.is_recording(), "the fifth empty result in a row stops it");
+    assert_eq!(status(&a), "Stopped listening: I kept hearing noise but no words. Check the microphone level or press Record to start again");
+    // without Keep listening the existing message stays
+    b.cx.services.settings.lock().unwrap().update(|s| s.voice.keep_listening = false).unwrap();
+    click(&mut a, &b.cx, T_REC);
+    pause_stop(&mut a, &b.cx);
+    assert!(!a.is_recording());
+    assert!(status(&a).starts_with("I only heard silence"), "{}", status(&a));
+}

@@ -40,7 +40,7 @@ impl HostApi for CoreHost {
     }
 
     fn net_status(&self) -> String {
-        let ifaces = net::list_ifaces(Path::new("/sys/class/net"));
+        let ifaces = net::list_ifaces(Path::new(crate::net::SYS_CLASS_NET));
         let mut s: Vec<String> = ifaces.iter().map(|i| format!("{:<14}{:?}", i.name, i.kind)).collect();
         if let Ok(o) = std::process::Command::new("ip").args(["-br", "-4", "addr"]).output() {
             s.push(String::new());

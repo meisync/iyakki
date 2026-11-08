@@ -158,6 +158,100 @@ fn patch_ollama(env: &mut dyn StepEnv, g: wl::Gpu, gid: Option<u32>) {
     }
 }
 
+// ------------------------------------------------------------------------------------------------ Lemonade: GPU or CPU
+
+/// Where Lemonade runs its models: on the GPU (the default, when a GPU step is installed) or on the CPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compute {
+    Gpu,
+    Cpu,
+}
+
+impl Compute {
+    pub fn word(self) -> &'static str {
+        match self {
+            Compute::Gpu => "gpu",
+            Compute::Cpu => "cpu",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Compute> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "gpu" => Some(Compute::Gpu),
+            "cpu" => Some(Compute::Cpu),
+            _ => None,
+        }
+    }
+}
+
+fn compute_file(data: &Path) -> PathBuf {
+    data.join("lemonade-compute")
+}
+
+/// The person's choice for Lemonade (a file on the data volume); with none made it is the GPU.
+pub fn lemonade_compute(data: &Path) -> Compute {
+    // a computer with its own profile has its own choice (a computer that never chose gets the default, not another computer's choice)
+    match crate::hwprofile::extra_get(data, crate::hwprofile::EXTRA_GPU) {
+        Some(serde_json::Value::String(w)) => return Compute::parse(&w).unwrap_or(Compute::Gpu),
+        Some(_) => return Compute::Gpu,
+        None => {}
+    }
+    std::fs::read_to_string(compute_file(data)).ok().and_then(|t| Compute::parse(&t)).unwrap_or(Compute::Gpu)
+}
+
+/// Keep the choice for the next start and the next install.
+pub fn set_lemonade_compute(data: &Path, c: Compute) -> Result<(), String> {
+    std::fs::create_dir_all(data).map_err(|e| e.to_string())?;
+    crate::hwprofile::extra_set(data, crate::hwprofile::EXTRA_GPU, serde_json::Value::String(c.word().to_string()));
+    std::fs::write(compute_file(data), format!("{}\n", c.word())).map_err(|e| e.to_string())
+}
+
+/// Put Lemonade's Deployment in line with the choice: with `Cpu` the GPU limit and backend are taken away; with `Gpu` it gets the path the cluster
+/// advertises (NVIDIA first, else the Vulkan one). Says what it did; nothing to do when Lemonade is not deployed or no GPU step has been run.
+pub fn apply_lemonade_compute(env: &mut dyn StepEnv, c: Compute) -> Result<String, String> {
+    if !lemonade_deployed(env) {
+        return Ok("Lemonade is not installed yet; the choice is kept for when it is".into());
+    }
+    let (root, nodes_json) = {
+        let g = gpu_env(env)?;
+        (g.root(), g.kubectl(&["get", "nodes", "-o", "json"]).stdout)
+    };
+    let patch = match c {
+        Compute::Cpu => wl::lemonade_unpatch(),
+        Compute::Gpu => {
+            if wl::node_resource_count(&nodes_json, wl::NVIDIA_RESOURCE) > 0 {
+                wl::lemonade_patch(wl::Gpu::Nvidia, None)
+            } else if wl::node_resource_count(&nodes_json, wl::GPU_RESOURCE) > 0 {
+                let nodes: Vec<String> = gpu::vulkan_usable(&gpu::detect(&root)).iter().filter_map(|g| g.render.clone()).collect();
+                let (_, gid) = open_render_nodes(&root, &nodes);
+                wl::lemonade_patch(wl::Gpu::Vulkan, gid)
+            } else {
+                return Ok("no GPU step is installed yet; Lemonade stays on the CPU until it is (Store -> Setup)".into());
+            }
+        }
+    };
+    let out = gpu_env(env)?.kubectl(&["-n", wl::NAMESPACE, "patch", "deployment", "lemonade", "--type", "strategic", "-p", &patch]);
+    if out.code != Some(0) {
+        return Err(format!("could not change where Lemonade runs: {}", out.combined().trim()));
+    }
+    Ok(match c {
+        Compute::Gpu => "Lemonade uses the GPU; it restarts".into(),
+        Compute::Cpu => "Lemonade uses the CPU; it restarts".into(),
+    })
+}
+
+/// After Lemonade was (re)deployed: give it the GPU again when the person's choice is the GPU and a GPU step is installed (applying the
+/// manifest again removes the patch). A note, never an error.
+pub fn reapply_lemonade_gpu(env: &mut dyn StepEnv) {
+    let Some(data) = env.gpu().map(|g| g.data()) else { return };
+    if lemonade_compute(&data) != Compute::Gpu {
+        return;
+    }
+    match apply_lemonade_compute(env, Compute::Gpu) {
+        Ok(m) => env.say(&format!("  {m}")),
+        Err(e) => env.say(&format!("  note: {e}")),
+    }
+}
+
 // ------------------------------------------------------------------------------------------------ stage 1
 
 /// Make the DRM render nodes openable by an unprivileged user (mode 0666, as render nodes are on most systems: the kernel checks the GPU
@@ -230,7 +324,10 @@ pub fn run_vulkan(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Resu
     let seen = wl::smoke_ok(wl::Gpu::Vulkan, &log)?;
     env.say(&format!("  the pod sees: {seen}"));
     env.say("[5/6] Lemonade");
-    if lemonade_deployed(env) {
+    let data = gpu_env(env)?.data();
+    if lemonade_deployed(env) && lemonade_compute(&data) == Compute::Cpu {
+        env.say("  Lemonade is set to run on the CPU; it keeps that (change it in Settings -> Models or by chat)");
+    } else if lemonade_deployed(env) {
         let out = gpu_env(env)?.kubectl(&["-n", wl::NAMESPACE, "patch", "deployment", "lemonade", "--type", "strategic", "-p", &wl::lemonade_patch(wl::Gpu::Vulkan, gid)]);
         if out.code != Some(0) {
             return Err(format!("could not give Lemonade the GPU: {}", out.combined().trim()));
@@ -241,7 +338,7 @@ pub fn run_vulkan(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Resu
     }
     patch_ollama(env, wl::Gpu::Vulkan, gid);
     let detail = format!("{} ({}); pods ask for {}: 1", usable[0].name, usable[0].render.clone().unwrap_or_default(), wl::GPU_RESOURCE);
-    env.mark(Item::GpuVulkan, &detail)?;
+    crate::quickinstall::mark_verified(env, Item::GpuVulkan, &detail)?;
     env.say(&format!("[6/6] done: {detail}"));
     Ok(())
 }
@@ -399,7 +496,10 @@ pub fn run_nvidia(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Resu
     let log = run_smoke_pod(env, wl::Gpu::Nvidia, Duration::from_secs(1200), poll)?;
     say_lines(env, &log, 14);
     let seen = wl::smoke_ok(wl::Gpu::Nvidia, &log)?;
-    if lemonade_deployed(env) {
+    let data = gpu_env(env)?.data();
+    if lemonade_deployed(env) && lemonade_compute(&data) == Compute::Cpu {
+        env.say("  Lemonade is set to run on the CPU; it keeps that");
+    } else if lemonade_deployed(env) {
         let out = gpu_env(env)?.kubectl(&["-n", wl::NAMESPACE, "patch", "deployment", "lemonade", "--type", "strategic", "-p", &wl::lemonade_patch(wl::Gpu::Nvidia, None)]);
         if out.code == Some(0) {
             env.say("  Lemonade got nvidia.com/gpu: 1 and the CUDA backend; it restarts");
@@ -409,7 +509,7 @@ pub fn run_nvidia(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Resu
     }
     patch_ollama(env, wl::Gpu::Nvidia, None);
     let detail = format!("driver {} · {} · pods request nvidia.com/gpu", nv::NVIDIA_VERSION, seen);
-    env.mark(Item::GpuNvidia, &detail)?;
+    crate::quickinstall::mark_verified(env, Item::GpuNvidia, &detail)?;
     env.say(&format!("[9/9] done: {detail}"));
     Ok(())
 }

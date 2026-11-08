@@ -351,7 +351,7 @@ fn unvault(cx: &NodeCx, v: &Value, found: &mut Vec<String>) -> Result<Value, Nod
     Ok(match v {
         Value::String(t) => match t.strip_prefix("vault:") {
             Some(name) if !name.is_empty() && !name.contains(char::is_whitespace) => {
-                let secret = cx.host.secret(name).map_err(NodeError::consent)?;
+                let secret = cx.host.secret_for_run(&crate::host::RunSecretCx::from_ctx(cx.ctx), name).map_err(NodeError::consent)?;
                 cx.redactor.add(&secret);
                 if !found.contains(&secret) {
                     found.push(secret.clone());

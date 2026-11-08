@@ -378,7 +378,7 @@ fn wifi_recover() {
 
 /// Bring up the Ethernet adapters that exist and are not up yet, on their own thread (see `net::start_wired`).
 fn start_wired_link() {
-    match crate::net::start_wired(Path::new("/etc/iyakki/net.conf"), Path::new("/sys/class/net"), Path::new(crate::net::KNOWN_WIFI)) {
+    match crate::net::start_wired(Path::new("/etc/iyakki/net.conf"), Path::new(crate::net::SYS_CLASS_NET), Path::new(crate::net::KNOWN_WIFI)) {
         Ok(0) => {}
         Ok(n) => log::info!("net: {n} wired adapter(s) coming up on their own thread"),
         Err(e) => log::error!("net config: {e}"),
@@ -390,7 +390,7 @@ fn start_wired_link() {
 fn wifi_in_background() {
     let r = std::thread::Builder::new().name("iyakki-wifi-start".into()).spawn(|| {
         wifi_recover();
-        match crate::net::bring_up_new(Path::new("/etc/iyakki/net.conf"), Path::new("/sys/class/net"), Path::new(crate::net::KNOWN_WIFI), None) {
+        match crate::net::bring_up_new(Path::new("/etc/iyakki/net.conf"), Path::new(crate::net::SYS_CLASS_NET), Path::new(crate::net::KNOWN_WIFI), None) {
             Ok(done) if !done.started.is_empty() => {
                 log::info!("net: set up in the background: {}", done.started.join(", "));
                 iyakki_fw::service::network_changed();
@@ -479,7 +479,7 @@ pub fn early_boot() {
 pub fn early_boot_critical() -> LatePlan {
     start_stage_watch();
     let mut tl = Timeline::new();
-    let kernel_secs = std::fs::read_to_string("/proc/uptime").ok().and_then(|u| u.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()));
+    let kernel_secs = iyakki_storage::uptime_now();
     KERNEL_SECS.get_or_init(|| kernel_secs);
     // The kernel starts PID 1 with no PATH; without this, modprobe/ip/udhcpc/mdev are never found.
     std::env::set_var("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
@@ -535,7 +535,7 @@ pub fn early_boot_critical() -> LatePlan {
     mount_data_volume();
     clock_floor_after_data();
     // crash forensics: follow the kernel log into /var/lib/iyakki/log from here on (normal and lean boot alike; docs/TROUBLESHOOTING.md)
-    if dir_is_mount_point(&std::fs::read_to_string("/proc/mounts").unwrap_or_default(), DATA_DIR) {
+    if dir_is_mount_point(&iyakki_storage::read_mounts().unwrap_or_default(), DATA_DIR) {
         if let Some(u) = crate::crashlog::start(Path::new(DATA_DIR)) {
             log::warn!("crashlog: the last session ended unexpectedly (up {} s, last line: {}); its kernel log is kept as {}", u.uptime_s, u.last_line, u.file);
         }
@@ -609,7 +609,7 @@ pub fn late_boot(mut plan: LatePlan) {
     crate::camera::start();
     plan.tl.mark("late drivers");
     start_wired_link(); // an adapter whose driver came later
-    match crate::net::bring_up_basic(Path::new("/etc/iyakki/net.conf"), Path::new("/sys/class/net"), Path::new(crate::net::KNOWN_WIFI)) {
+    match crate::net::bring_up_basic(Path::new("/etc/iyakki/net.conf"), Path::new(crate::net::SYS_CLASS_NET), Path::new(crate::net::KNOWN_WIFI)) {
         Ok(errs) => errs.iter().for_each(|e| log::warn!("net: {e}")),
         Err(e) => log::error!("net config: {e}"),
     }
@@ -894,7 +894,7 @@ pub fn mount_data_volume() {
         log::info!("data: the data partition was chosen on the command line: {c}");
     }
     // The lean boot layout (docs/BOOT-SPEED.md): the first stage read the system from the data volume and left it mounted here.
-    if dir_is_mount_point(&std::fs::read_to_string("/proc/mounts").unwrap_or_default(), DATA_DIR) {
+    if dir_is_mount_point(&iyakki_storage::read_mounts().unwrap_or_default(), DATA_DIR) {
         log::info!("data: the volume under {DATA_DIR} was mounted by the first stage (lean boot)");
         crate::console::out_write(&format!("IYAKKI-BOOT data: persistent volume mounted at {DATA_DIR} (by the first stage)\n"));
         // a copy of the kernel log on the volume, so a start that stops before the sign-in screen can be read on another computer

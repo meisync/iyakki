@@ -21,6 +21,9 @@ pub mod author;
 pub mod authtools;
 pub mod builtin;
 pub mod catalog;
+pub mod compcli;
+pub mod compmanifest;
+pub mod components;
 pub mod drivers;
 pub mod install;
 pub mod keys;
@@ -676,6 +679,8 @@ pub fn actor_of(user: &str, p: &Policy) -> Actor {
 }
 
 pub mod updatecheck;
+pub mod updatenotice;
+pub mod sysannounce;
 
 #[cfg(test)]
 mod tests;
@@ -694,6 +699,9 @@ mod publish_tests;
 
 #[cfg(test)]
 mod server_tests;
+
+#[cfg(test)]
+mod components_tests;
 
 #[cfg(test)]
 mod private_tests;

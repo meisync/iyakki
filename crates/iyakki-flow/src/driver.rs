@@ -42,8 +42,9 @@ pub(crate) enum Final {
 /// Fill in the templates of a node's configuration. Secrets only in the fields the kind names; each secret read is registered with
 /// the redactor so it cannot appear in a log or an output.
 pub(crate) fn resolve_config(host: &Arc<dyn Host>, red: &Redactor, kind: &dyn NodeKind, node: &Node, ctx: &Value) -> Result<Value, NodeError> {
+    let run = crate::host::RunSecretCx::from_ctx(ctx);
     let secret = |name: &str| -> Result<String, String> {
-        let v = host.secret(name)?;
+        let v = host.secret_for_run(&run, name)?;
         red.add(&v);
         Ok(v)
     };
@@ -55,7 +56,9 @@ pub(crate) fn resolve_config(host: &Arc<dyn Host>, red: &Redactor, kind: &dyn No
         let r = if kind.raw_fields().contains(&k.as_str()) {
             v.clone()
         } else if kind.secret_fields().contains(&k.as_str()) {
-            crate::expr::resolve(v, ctx, Some(&secret)).map_err(|e| NodeError::config(format!("`{k}`: {e}")))?
+            // a host that says "needs secret: ..." (a tenant that has not released the secret to this run) needs a person to fix it, not the
+            // fixing agent: the same kind of stop as a missing consent
+            crate::expr::resolve(v, ctx, Some(&secret)).map_err(|e| if e.0.contains("needs secret") { NodeError::consent(format!("`{k}`: {e}")) } else { NodeError::config(format!("`{k}`: {e}")) })?
         } else {
             crate::expr::resolve(v, ctx, None).map_err(|e| NodeError::config(format!("`{k}`: {e}")))?
         };

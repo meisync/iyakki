@@ -179,6 +179,8 @@ pub struct StoreApp {
     ctx: Ctx,
     /// The Updates chip: only what has an update.
     iupdates: bool,
+    /// The kept check's system line ("IYAKKI 1107h is out ..."), empty when no system update waits; read when the lists reload.
+    sys_update: String,
     /// The person's own arrangement (tags, groups, titles) and how the list is grouped.
     org: Org,
     /// The person's own ratings and comments (private, local; see store_rating.rs).
@@ -398,6 +400,7 @@ impl StoreApp {
             lives: vec![],
             ctx: Ctx::default(),
             iupdates: false,
+            sys_update: String::new(),
             org: Org::default(),
             rate: iyakki_agent::store::ratings::Ratings::none(),
             org_rev: 0,
@@ -423,9 +426,8 @@ impl StoreApp {
         if let Some(n) = off.first() {
             a.status = Some((n.clone(), false));
         }
-        if a.store.auto_check_due() && cx.session.policy.apps.contains(&iyakki_sec::policy::App::Store) {
-            a.start_refresh(cx);
-        }
+        // no look when the store is opened any more: the daily check runs in the background while an administrator is signed in
+        // (shell_power.rs) and raises one notice; opening the store only shows what it kept
         a
     }
 
@@ -438,6 +440,10 @@ impl StoreApp {
     }
 
     fn reload(&mut self, cx: &AppCx) {
+        self.sys_update = iyakki_agent::store::updatecheck::Report::load(cx.services.dir())
+            .and_then(|r| r.updates.into_iter().find(|u| u.kind == iyakki_agent::store::updatecheck::Kind::System))
+            .map(|u| format!("System: IYAKKI {} is out (this is {}). Install it from Settings -> System update.", u.to, u.from))
+            .unwrap_or_default();
         self.loaded = self.store.local_catalogs(&cx.services);
         let actor = self.actor(cx);
         self.all_items = self.store.items(&cx.services, &actor, &self.loaded);
@@ -719,10 +725,19 @@ impl StoreApp {
         }
         let slot = Arc::new(Mutex::new(None));
         let (out, st, svc, fetch) = (slot.clone(), self.store.clone(), cx.services.clone(), self.fetch.clone());
+        let (policy, user) = (cx.session.policy.clone(), cx.session.user.clone());
         std::thread::spawn(move || {
             let r = st.refresh(&svc, fetch.as_ref());
             // and the vendors of the command-line tools (their newest version numbers)
             st.check_cli_latest(&svc);
+            // the button is the same check as the daily one: keep the report (Store badge, System update line) and raise the one grouped notice
+            if policy.manage_settings {
+                use iyakki_agent::store::updatecheck as uc;
+                let settings = svc.settings.lock().map(|s| s.get().update_check.clone()).unwrap_or_default();
+                let rel = iyakki_agent::relinfo::ReleaseInfo::parse(&std::fs::read_to_string(iyakki_agent::relinfo::RELEASE_FILE).unwrap_or_default());
+                let running = if rel.version.is_empty() { iyakki_agent::relinfo::VERSION.to_string() } else { rel.version };
+                uc::run_and_keep(&st, &svc, &policy, &user, fetch.as_ref(), &settings, &running, &rel.variant);
+            }
             *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(Done::Refreshed(r));
         });
         self.job = Some(Job { label: "Looking for news in your catalogs…".into(), slot, progress: None });
@@ -874,7 +889,9 @@ impl StoreApp {
         v.push(("Add a private store (check its key)".into(), "its address, then compare the key fingerprint (v)".into(), Some(Key::Char('v')), ACCENT));
         v.push(("Publish here".into(), "make the selected private catalog the default target for publishing (h)".into(), Some(Key::Char('h')), ACCENT));
         v.push(("Show the catalog (coming soon)".into(), if cfg.catalog_enabled { "on: Discover and Publishers are shown, with the built-in catalog (g)".into() } else if !cfg.sources.is_empty() { "on because a catalog is added (g)".into() } else { "off: the store shows only what is installed (g)".into() }, Some(Key::Char('g')), if cfg.catalog_visible() { OK } else { DIM }));
-        v.push(("Daily check for news".into(), if cfg.auto_check { "on: a quick look when you open the store (o)".into() } else { "off: nothing is fetched unless you press c (o)".into() }, Some(Key::Char('o')), if cfg.auto_check { OK } else { DIM }));
+        let mode = cx.map_or(iyakki_agent::store::updatecheck::Mode::Daily, |c| c.services.settings.lock().map(|s| s.get().update_check.mode).unwrap_or_default());
+        let daily = mode == iyakki_agent::store::updatecheck::Mode::Daily;
+        v.push(("Daily check for updates".into(), if daily { "on: once a day it asks only the stores and update list address you added, and leaves one notice (o)".to_string() } else { format!("{}: nothing is asked unless you press c (o)", mode.label()) }, Some(Key::Char('o')), if daily { OK } else { DIM }));
         v.push(("Install from a file".into(), "a package (.iyp) from a stick or download (i)".into(), Some(Key::Char('i')), ACCENT));
         v.push(("Add a licence".into(), "for a paid app; a file or what you copied (l)".into(), Some(Key::Char('l')), ACCENT));
         v.push(("Trust a publisher key".into(), "packages signed by it show as Trusted (t)".into(), Some(Key::Char('t')), ACCENT));
@@ -991,9 +1008,15 @@ impl StoreApp {
             }
             Key::Char('o') => {
                 if admin {
-                    let on = !self.store.config().auto_check;
-                    let _ = self.store.set_auto_check(&self.actor(cx), on);
-                    self.say(if on { "The store will look for news once a day when you open it." } else { "No automatic checks. Nothing is fetched unless you ask." }, true);
+                    use iyakki_agent::store::updatecheck::Mode;
+                    let on = cx.services.settings.lock().map(|s| s.get().update_check.mode != Mode::Daily).unwrap_or(false);
+                    let saved = cx.services.settings.lock().map(|mut s| s.update(|s| s.update_check.mode = if on { Mode::Daily } else { Mode::Manual }).is_ok()).unwrap_or(false);
+                    if saved {
+                        cx.audit.record(&cx.session.user, "settings.update_check", if on { "mode=Daily (store)" } else { "mode=Manual (store)" });
+                        self.say(if on { "Updates are looked for once a day, only at the stores and update list address you added. You get one notice when something is new." } else { "No automatic checks. Nothing is fetched unless you ask." }, true);
+                    } else {
+                        self.say("Could not save the setting; try again.", false);
+                    }
                 } else {
                     need(self);
                 }
@@ -1448,6 +1471,15 @@ impl App for StoreApp {
             self.setup.enter(cx);
             if let Some(it) = iyakki_agent::quickinstall::Item::parse(item.strip_prefix("setup:").unwrap_or(item)) {
                 self.setup.focus_item(it);
+            }
+            return;
+        }
+        // the grouped "Updates available" notice: Installed, with the Updates filter on
+        if item == "updates" {
+            self.switch(Section::Installed);
+            self.reload(cx);
+            if !self.iupdates {
+                self.handle(&Event::Tab(manage::TAB_UPDATES), cx);
             }
             return;
         }
@@ -2957,6 +2989,11 @@ impl StoreApp {
             cx_ += cw + 8.0 * s;
         }
         y += lh + 8.0 * s;
+        if self.iupdates && !self.sys_update.is_empty() {
+            let line = g.fit(12.0 * s, &self.sys_update, Face::Sans, w);
+            g.text(x, y, 12.0 * s, AMBER, &line, Face::Sans);
+            y += lh;
+        }
         if self.ifilter == Some(IType::Driver) {
             self.drivers.render(g, R::new(x, y, w, (body.y + body.h - y).max(60.0 * s)), s);
             return;
@@ -3782,6 +3819,7 @@ mod tests {
         assert!(table.threads.lock().unwrap().iter().all(|t| *t != me), "no network on the UI thread");
         assert!(a.status_text().unwrap().contains("up to date"), "{:?}", a.status_text());
         assert!(a.items.iter().any(|i| i.entry.id == "remote-helper"));
+        assert!(iyakki_agent::store::updatecheck::Report::load(cx.services.dir()).is_some(), "the Check button keeps the report like the daily check (Store badge, System update line, the one notice)");
         // the download and the review also happen off the UI thread
         open_page(&mut a, &cx, "remote-helper");
         key(&mut a, &cx, Key::Char('i'));
@@ -3914,18 +3952,40 @@ mod tests {
     }
 
     #[test]
-    fn settings_show_the_catalogs_keys_and_the_daily_check_which_is_off_until_switched_on() {
+    fn the_updates_notice_opens_the_installed_page_with_the_updates_filter_and_names_a_waiting_system_update() {
+        use iyakki_agent::store::updatecheck as chk;
+        let cx = cx("st-updnote", Role::Admin);
+        let mut a = StoreApp::new(&cx);
+        a.switch(Section::Settings);
+        assert!(a.sys_update.is_empty() && !a.iupdates);
+        let sys = chk::Update { kind: chk::Kind::System, id: "system".into(), title: "IYAKKI".into(), from: "1106h".into(), to: "1107h".into(), source: "System update".into(), new_permissions: vec![], note: String::new(), driver: false };
+        chk::Report { checked_at: 1, updates: vec![sys], ..Default::default() }.save(cx.services.dir()).unwrap();
+        App::open_item(&mut a, "updates", &cx);
+        assert!(matches!(a.section, Section::Installed) && a.iupdates, "Installed with the Updates chip on");
+        assert!(a.sys_update.contains("IYAKKI 1107h is out") && a.sys_update.contains("Settings -> System update"), "{}", a.sys_update);
+        let g = draw(&mut a, &cx, 1280, 720);
+        assert!(g.layout_log.texts.iter().any(|(_, _, _, t)| t.contains("IYAKKI 1107h is out")), "the system line is drawn on the updates page");
+        // opening it again does not switch the filter off
+        App::open_item(&mut a, "updates", &cx);
+        assert!(a.iupdates);
+    }
+
+    #[test]
+    fn settings_show_the_catalogs_keys_and_the_daily_check_for_updates_that_o_switches() {
         let cx = cx("st-set", Role::Admin);
         let mut a = StoreApp::new(&cx);
         cat_on(&mut a, &cx);
         a.switch(Section::Settings);
         let rows = a.settings_rows(Some(&cx));
-        assert!(rows.iter().any(|r| r.0 == "Built-in catalog") && rows.iter().any(|r| r.1.contains("off: nothing is fetched")));
+        assert!(rows.iter().any(|r| r.0 == "Built-in catalog") && rows.iter().any(|r| r.0 == "Daily check for updates" && r.1.starts_with("on: once a day it asks only the stores")));
         assert!(rows.iter().any(|r| r.0 == "IYAKKI release keys" && r.1.contains("none pinned")), "the real key has not been generated yet");
+        let mode = |cx: &AppCx| cx.services.settings.lock().unwrap().get().update_check.mode;
+        assert_eq!(mode(&cx), iyakki_agent::store::updatecheck::Mode::Daily);
         key(&mut a, &cx, Key::Char('o'));
-        assert!(Store::for_services(&cx.services).config().auto_check);
+        assert_eq!(mode(&cx), iyakki_agent::store::updatecheck::Mode::Manual);
+        assert!(a.settings_rows(Some(&cx)).iter().any(|r| r.0 == "Daily check for updates" && r.1.starts_with("only when I press Check now")));
         key(&mut a, &cx, Key::Char('o'));
-        assert!(!Store::for_services(&cx.services).config().auto_check);
+        assert_eq!(mode(&cx), iyakki_agent::store::updatecheck::Mode::Daily);
         // trusting a key shows it in the list and makes its packages Trusted
         let k = new_signing_key().unwrap();
         key(&mut a, &cx, Key::Char('t'));

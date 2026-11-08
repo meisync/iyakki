@@ -10,7 +10,7 @@ use super::cli_adb::{ask_grant, CHUNK};
 use super::client::DevClient;
 use super::patch;
 
-pub const USAGE: &str = "usage: iyakki dev patch <build DIR -o PACK | show PACK|DIR | apply PACK|DIR [--live|--next-boot] [--shell] | list | remove ID>";
+pub const USAGE: &str = "usage: iyakki dev patch <build DIR -o PACK [--delta-from OLD_FILE|PACK|DIR] | show PACK|DIR | apply PACK|DIR [--live|--next-boot] [--shell] | list | remove ID>";
 
 /// Returns `Some(result)` when `cmd` is `patch`.
 pub(super) fn run(cmd: &str, args: &Args, connect: &dyn Fn() -> Result<DevClient, String>, out: &mut dyn FnMut(&str)) -> Option<Result<(), String>> {
@@ -31,10 +31,15 @@ pub(super) fn run(cmd: &str, args: &Args, connect: &dyn Fn() -> Result<DevClient
 fn build(args: &Args, out: &mut dyn FnMut(&str)) -> Result<(), String> {
     let dir = args.pos.get(2).ok_or_else(|| USAGE.to_string())?;
     let to = PathBuf::from(args.get("-o").ok_or("where should the pack go? -o PACK")?);
-    let bytes = patch::build(Path::new(dir))?;
+    let bytes = patch::build_with(Path::new(dir), args.get("--delta-from").map(Path::new))?;
     std::fs::write(&to, &bytes).map_err(|e| format!("{}: {e}", to.display()))?;
     let p = patch::decode(&bytes)?;
     out(&format!("Built {} ({}): {} file(s), {} KB, in {}", p.manifest.id, p.manifest.title, p.manifest.ops.len(), bytes.len().div_ceil(1024), to.display()));
+    for o in &p.manifest.ops {
+        if let Some(d) = &o.delta {
+            out(&format!("  delta {}: {} KB instead of {} KB", o.path, o.size.div_ceil(1024), d.new_size.div_ceil(1024)));
+        }
+    }
     Ok(())
 }
 
@@ -49,6 +54,7 @@ fn show(path: &Path, out: &mut dyn FnMut(&str)) -> Result<(), String> {
     for o in &m.ops {
         let what = match (o.action, o.kind) {
             (patch::Action::Delete, _) => "delete".to_string(),
+            (_, patch::Kind::File) if o.delta.is_some() => format!("replace delta {} bytes -> file of {} bytes", o.size, o.delta.as_ref().map_or(0, |d| d.new_size)),
             (a, patch::Kind::Symlink) => format!("{a:?} link -> {}", o.link.as_deref().unwrap_or("")).to_lowercase(),
             (a, _) => format!("{a:?} {} bytes", o.size).to_lowercase(),
         };

@@ -58,6 +58,8 @@ pub const LEMONADE_NAMESPACE: &str = "iyakki-ai";
 pub const LEMONADE_IMAGE: &str = "ghcr.io/lemonade-sdk/lemonade-server:v2026.42.1@sha256:bd4b89738ca57a90ce3276ddf9270c317d369dc4bc4eded94568d37b88c2bc0d";
 /// How long a step that needs the cluster waits for it to be installed and Ready.
 pub const WAIT_FOR_CLUSTER: Duration = Duration::from_secs(25 * 60);
+/// How long the k3s step waits, after starting the cluster, for it to be Ready before it calls the install failed.
+pub const K3S_READY_WAIT: Duration = Duration::from_secs(10 * 60);
 
 /// The sections of the Quick install page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -309,7 +311,7 @@ impl Item {
             Item::LinuxWindows => "Show a graphical Linux program in an IYAKKI window (LINUX WINDOW tile): makes a Debian 12 sandbox named gui and installs, with apt, TigerVNC's X server (it draws into memory), a one-window manager, fonts, software OpenGL and the xterm test program (about 250 MB, never part of an image). No graphics card and no sound in the window",
             Item::LinuxApps => "Run Debian or Ubuntu programs: downloads the official Debian 12 base for you (about 30 MB, checksum-verified, never part of an image) into a sandbox named debian with the network on and no folders mounted; apt installs packages inside it. The Store \u{2192} Setup \u{2192} Linux apps (Open its page) adds Ubuntu, more sandboxes, mounted folders, image apps and the terminal",
             Item::Ffmpeg => "Plays video and audio in IYAKKI (MEDIA tile, camera recordings, Media player). Downloads a static ffmpeg build from its builder (johnvansickle.com), GPLv3, checked with its checksum; about 42 MB",
-            Item::FfmpegLibs => "Lets the BROWSER tile play H.264 video and AAC sound (TikTok and similar pages). You supply FFmpeg's LGPL shared libraries (a file in /local/packages, a mirror inside your organisation, or an ffmpeg you installed that passes the checks); IYAKKI neither ships nor hosts them. You read the licence first; the browser engine uses them at its next start. Nothing of FFmpeg is in the image",
+            Item::FfmpegLibs => "Lets the BROWSER tile play H.264 video and AAC sound (TikTok and similar pages). Built here from FFmpeg's LGPL sources, or supplied by you (a file in /local/packages, a mirror inside your organisation, or an ffmpeg you installed that passes the checks); IYAKKI neither ships nor hosts them; with nothing supplied, Install downloads the vendors' sources and builds them on this machine in an isolated pod (k3s must be running). You read the licences first; the browser engine uses them at its next start. Nothing of FFmpeg is in the image",
             Item::FwHardware => "The vendor firmware this computer asks for and does not have (Wi-Fi, Bluetooth, graphics, network cards): IYAKKI images do not carry it. The card lists exactly which files your hardware needs and what each vendor's licence says, then downloads only those from the upstream linux-firmware release (kernel.org, a fixed release, every file checked), installs them as a driver pack that survives restarts, and reloads the drivers where that is safe; Restart appears only when needed. A Wi-Fi chip without its firmware needs a wired or USB-C connection, a USB stick or another computer to get it.",
             Item::FwQualcommBt => "Bluetooth patch files for newer Qualcomm laptop chips (QCA6390, WCN3950, WCN3988, WCN7850, QCA6698): 20 files, about 1 MB. Not in the images (IYAKKI is not sure it may redistribute them): you read and accept the vendor's licence, then the files are downloaded from the upstream linux-firmware repository at a fixed release, each checked for size and SHA-256, installed as a driver pack that survives restarts, and the driver is loaded again; Reboot to finish appears only when the driver needs it. Also installable from a folder or USB stick.",
             Item::FwRealtekNet => "Firmware for PCIe Realtek Ethernet chips (RTL8111/8168, RTL8125 and relatives): 30 small files, about 140 KB. Not in the images (IYAKKI is not sure it may redistribute them): you read and accept the vendor's licence, then the files are downloaded from the upstream linux-firmware repository at a fixed release, each checked for size and SHA-256, installed as a driver pack that survives restarts, and the driver is loaded again; Reboot to finish appears only when the driver needs it. Also installable from a folder or USB stick.",
@@ -557,6 +559,7 @@ impl Presence {
             Presence::Missing => "not installed".into(),
             Presence::Installed(d) if d.is_empty() => "installed".into(),
             Presence::Installed(d) => format!("installed · {d}"),
+            Presence::Earlier(d) if d.starts_with(LAST_FAILED) => format!("installed earlier; {d}"),
             Presence::Earlier(d) if d.is_empty() => "installed earlier, not running".into(),
             Presence::Earlier(d) => format!("installed earlier, not running · {d}"),
             Presence::Elsewhere(d) => format!("present (not IYAKKI's) · {d}"),
@@ -573,11 +576,63 @@ fn marker(data: &Path, item: Item) -> PathBuf {
     state_dir(data).join(format!("{}.done", item.id()))
 }
 
-/// Remember that a step finished (what the job's last line said).
+/// Remember that a step finished (what the job's last line said). A success also clears the record of an earlier failed attempt.
 pub fn mark_done(data: &Path, item: Item, detail: &str) -> Result<(), String> {
-    std::fs::create_dir_all(state_dir(data)).map_err(|e| e.to_string())?;
-    std::fs::write(marker(data, item), format!("{}\n{detail}\n", crate::clock::now_unix())).map_err(|e| e.to_string())
+    mark_done_note(data, item, detail, "")
 }
+
+/// [`mark_done`] with what the check before the marker saw (a third line; [`marked`] still returns the detail only).
+pub fn mark_done_note(data: &Path, item: Item, detail: &str, note: &str) -> Result<(), String> {
+    std::fs::create_dir_all(state_dir(data)).map_err(|e| e.to_string())?;
+    let note_line = if note.is_empty() { String::new() } else { format!("{note}\n") };
+    std::fs::write(marker(data, item), format!("{}\n{detail}\n{note_line}", crate::clock::now_unix())).map_err(|e| e.to_string())?;
+    clear_failure(data, item);
+    Ok(())
+}
+
+/// What the independent check saw before the marker was written, when the marker has it.
+pub fn marked_note(data: &Path, item: Item) -> Option<String> {
+    std::fs::read_to_string(marker(data, item)).ok().and_then(|t| t.lines().nth(2).map(|l| l.trim().to_string())).filter(|l| !l.is_empty())
+}
+
+/// Check the thing the person asked for ([`StepEnv::verify`]) and only then write the marker. A failed check fails the step ("Verify
+/// failed: ...") and writes no marker; what the check saw is kept in the marker beside the detail.
+pub fn mark_verified(env: &mut dyn StepEnv, item: Item, detail: &str) -> Result<(), String> {
+    let note = env.verify(item, detail).map_err(|e| format!("Verify failed: {}. {} is not marked as installed", e.trim().trim_end_matches('.'), item.title()))?;
+    if !note.is_empty() {
+        env.say(&format!("  checked: {note}"));
+    }
+    env.set_verified_note(&note);
+    env.mark(item, detail)
+}
+
+// ------------------------------------------------------------------------------------------------ the last attempt failed
+
+fn failed_path(data: &Path, item: Item) -> PathBuf {
+    state_dir(data).join(format!("{}.failed", item.id()))
+}
+
+/// Remember that the newest attempt failed or timed out (the reason with its cause class first, and when). Cleared by a success.
+pub fn record_failure(data: &Path, item: Item, reason: &str) {
+    let _ = std::fs::create_dir_all(state_dir(data));
+    let one_line = reason.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+    let _ = std::fs::write(failed_path(data, item), format!("{}\n{one_line}\n", crate::clock::now_unix()));
+}
+
+/// The newest failed attempt, `(when, reason)`, if no success has come after it.
+pub fn last_failure(data: &Path, item: Item) -> Option<(i64, String)> {
+    let t = std::fs::read_to_string(failed_path(data, item)).ok()?;
+    let mut l = t.lines();
+    let at = l.next()?.trim().parse().ok()?;
+    Some((at, l.next().unwrap_or("").trim().to_string()))
+}
+
+pub fn clear_failure(data: &Path, item: Item) {
+    let _ = std::fs::remove_file(failed_path(data, item));
+}
+
+/// The words that start a presence detail when the newest attempt failed after an earlier install.
+pub const LAST_FAILED: &str = "the last attempt failed: ";
 
 /// The marker a finished step left, with its detail.
 pub fn marked(data: &Path, item: Item) -> Option<String> {
@@ -594,6 +649,16 @@ pub fn presence(svc: &crate::services::Services, item: Item) -> Presence {
 /// Lemonade and Kokoro are decided by that answer, with the marker only as the fallback when nothing answers ("installed
 /// earlier, not running"): a marker can outlive a cluster or volume reset, so it never counts as "installed" by itself.
 pub fn presence_with(svc: &crate::services::Services, item: Item, lemonade: &dyn Fn() -> Option<Vec<crate::lemonade::Model>>) -> Presence {
+    let now = presence_plain_with(svc, item, lemonade);
+    // an old install is still there, but the newest attempt (a Retry, an update) failed: say so; a success clears the record
+    match (&now, last_failure(svc.dir(), item)) {
+        (Presence::Installed(_) | Presence::Earlier(_), Some((_, why))) => Presence::Earlier(format!("{LAST_FAILED}{why}")),
+        _ => now,
+    }
+}
+
+/// [`presence_with`] without the record of a failed last attempt (what is there, whatever the newest attempt did).
+pub fn presence_plain_with(svc: &crate::services::Services, item: Item, lemonade: &dyn Fn() -> Option<Vec<crate::lemonade::Model>>) -> Presence {
     let data = svc.dir();
     match item {
         Item::Lemonade | Item::Kokoro => {
@@ -763,6 +828,9 @@ pub struct Facts {
     pub healthy: Vec<Item>,
     /// Items whose password waits for the person's vault ([`crate::vaultpending`]).
     pub waiting: Vec<Item>,
+    /// Items whose newest attempt failed after an earlier install (the `<item>.failed` record), with the reason (its cause class first).
+    /// An item that is healthy in the cluster right now is not listed.
+    pub failures: Vec<(Item, String)>,
 }
 
 /// The Deployment each cluster item runs as: `(namespace, name)`.
@@ -827,6 +895,10 @@ pub fn gather_facts(svc: &crate::services::Services) -> Facts {
             f.healthy = healthy_from(&o.stdout);
             for it in &f.healthy {
                 if let Some((_, p)) = f.presence.iter_mut().find(|(x, _)| x == it) {
+                    // healthy right now: a failed last attempt (a Retry, an update) does not make it "installed earlier"
+                    if matches!(p, Presence::Earlier(d) if d.starts_with(LAST_FAILED)) {
+                        *p = presence_plain_with(svc, *it, &crate::lemonade::probe_local_models);
+                    }
                     if *p == Presence::Missing {
                         *p = Presence::Installed("running in the cluster".into());
                     }
@@ -834,7 +906,16 @@ pub fn gather_facts(svc: &crate::services::Services) -> Facts {
             }
         }
     }
+    f.failures = f.presence.iter().filter_map(|(it, p)| failure_reason(p).map(|r| (*it, r.to_string()))).collect();
     f
+}
+
+/// The reason of a failed last attempt, when the presence carries it ([`LAST_FAILED`]).
+pub fn failure_reason(p: &Presence) -> Option<&str> {
+    match p {
+        Presence::Earlier(d) => d.strip_prefix(LAST_FAILED),
+        _ => None,
+    }
 }
 
 /// The rows not shown for these GPUs: the NVIDIA driver entry needs an NVIDIA GPU.
@@ -1476,6 +1557,15 @@ pub trait StepEnv {
     fn rollout(&mut self, namespace: &str, name: &str, timeout: Duration) -> Result<(), String>;
     fn sleep(&mut self, d: Duration);
     fn mark(&mut self, item: Item, detail: &str) -> Result<(), String>;
+    /// An independent check of the thing the person asked for, run BEFORE the marker is written (`mark_verified`): a CLI answers
+    /// `--version`, a deployment is Ready and its Service has an address, a model is listed by Lemonade, the add-on's libraries pass
+    /// their check. `Ok(note)`: what was seen (kept in the marker beside the detail); `Err`: the step fails ("Verify failed: ...") and
+    /// no marker is written. The default checks nothing (an item without a cheap independent check keeps its own step's check).
+    fn verify(&mut self, _item: Item, _detail: &str) -> Result<String, String> {
+        Ok(String::new())
+    }
+    /// What the check saw, handed to the next [`StepEnv::mark`] (the real one keeps it in the marker; a fake may ignore it).
+    fn set_verified_note(&mut self, _note: &str) {}
     /// Ask the shell to start and connect a server once it is installed (`ollama`, `lemonade`).
     fn request_after(&mut self, what: &str) -> Result<(), String>;
     /// A Lemonade server answers on this machine.
@@ -2272,6 +2362,8 @@ fn deploy_lemonade(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Res
     for l in out.lines().filter(|l| !l.trim().is_empty()).take(8) {
         env.say(&format!("  {}", l.trim()));
     }
+    // applying the manifest again removes the GPU settings a GPU step gave it: put them back (unless the person chose the CPU)
+    crate::gpu_steps::reapply_lemonade_gpu(env);
     env.say(&format!("waiting for the pod (the first start pulls {LEMONADE_IMAGE}, about 1 GB)"));
     env.rollout(LEMONADE_NAMESPACE, "lemonade", Duration::from_secs(1200))
 }
@@ -2380,11 +2472,11 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
                 return Ok(());
             }
             if env.k3s_present() {
-                env.say("[1/2] k3s is installed already (IYAKKI's dev cluster)");
+                env.say("[1/3] k3s is installed already (IYAKKI's dev cluster)");
             } else {
-                env.say("[0/2] looking up the latest k3s release and its checksum");
+                env.say("[0/3] looking up the latest k3s release and its checksum");
                 let what = env.install_k3s()?;
-                env.say(&format!("[1/2] installed: {what}"));
+                env.say(&format!("[1/3] installed: {what}"));
             }
             match env.link_k3s_tools() {
                 Ok(l) if !l.is_empty() => env.say(&l),
@@ -2392,8 +2484,11 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
                 Err(e) => env.say(&format!("note: {e}")),
             }
             env.request_k3s_start()?;
-            env.say("[2/2] asked IYAKKI to start the cluster (Settings \u{2192} Dev cluster shows it; it also starts with IYAKKI from now on)");
-            env.mark(Item::K3s, "installed by Quick install")?;
+            env.say("[2/3] asked IYAKKI to start the cluster (Settings \u{2192} Dev cluster shows it; it also starts with IYAKKI from now on)");
+            // installed is not running: the item is only marked once the cluster really answers as Ready
+            env.say("[3/3] waiting for the cluster to be Ready");
+            wait_for_cluster(env, wait.min(K3S_READY_WAIT), poll).map_err(|_| format!("k3s was installed, but the cluster did not become Ready within {} minutes; it is not marked as installed. See Settings \u{2192} Dev cluster for why it did not start, then press Retry", K3S_READY_WAIT.as_secs() / 60))?;
+            mark_verified(env, Item::K3s, "installed by Quick install")?;
             Ok(())
         }
         Item::DuckDb => {
@@ -2402,7 +2497,7 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
             env.say("[1/3] k3s is Ready; installing the duckdb program from the CLI catalogue");
             let v = env.install_cli("duckdb")?;
             env.say(&format!("[2/3] duckdb {v} installed (the CLI tile lists it)"));
-            env.mark(Item::DuckDb, &format!("version {v}"))?;
+            mark_verified(env, Item::DuckDb, &format!("version {v}"))?;
             env.say("[3/3] done: run `duckdb` in the CLI tile, or add a DuckDB source in DASH");
             Ok(())
         }
@@ -2422,7 +2517,7 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
                 Ok(()) => env.say(&format!("  added to DASH as the source \"Cluster Elasticsearch\" ({ES_DASH_URL}: IYAKKI looks the Service up each time, nothing listens on localhost)")),
                 Err(e) => env.say(&format!("  could not add it to DASH ({e}); add an Elasticsearch source with {ES_DASH_URL} yourself")),
             }
-            env.mark(Item::Elasticsearch, &detail)?;
+            mark_verified(env, Item::Elasticsearch, &detail)?;
             env.say(&format!("[4/4] done: {detail} (kubectl -n {NAMESPACE} port-forward svc/elasticsearch 9200 to reach it from a program of your own)"));
             Ok(())
         }
@@ -2448,7 +2543,7 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
                     format!("{in_cluster} inside the cluster")
                 }
             };
-            env.mark(Item::Prometheus, &detail)?;
+            mark_verified(env, Item::Prometheus, &detail)?;
             env.say(&format!("[5/5] done: {detail}"));
             Ok(())
         }
@@ -2484,7 +2579,7 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
                 }
             };
             env.request_after("graph-vault")?;
-            env.mark(Item::GraphDb, &detail)?;
+            mark_verified(env, Item::GraphDb, &detail)?;
             env.say(&format!("[7/7] done: {detail}. IYAKKI is putting the password into your vault as {GRAPH_VAULT_NAME}"));
             Ok(())
         }
@@ -2506,7 +2601,7 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
                 env.request_after(id)?;
                 env.say(&format!("[2/{total}] asked IYAKKI to start it and add it to Settings \u{2192} Models"));
             }
-            env.mark(item, &format!("version {v}"))?;
+            mark_verified(env, item, &format!("version {v}"))?;
             env.say(&format!("[{total}/{total}] done{}", match item {
                 Item::ClaudeCode => ": press Login next to it (here, in the CLI list or in Settings \u{2192} Agents; it runs `claude auth login`), then choose it in Settings \u{2192} Agents",
                 Item::Copilot => ": press Login next to it (here, in the CLI list or in Settings \u{2192} Agents; it runs `copilot login`)",
@@ -2527,7 +2622,7 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
             env.say("[0/2] checking the add-on libraries you supplied (a package in /local/packages, a mirror, or your installed ffmpeg)");
             let what = env.install_av_addon()?;
             env.say(&format!("[1/2] installed: {what}"));
-            env.mark(item, &what)?;
+            mark_verified(env, item, &what)?;
             env.say("[2/2] done: the BROWSER tile starts its engine again and plays H.264 and AAC (no FFmpeg is in the image)");
             Ok(())
         }
@@ -2538,7 +2633,7 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
             env.request_after("lemonade")?;
             env.say("[2/4] asked IYAKKI to add it to Settings \u{2192} Models");
             let detail = format!("http://127.0.0.1:{} on this machine; lemonade.{LEMONADE_NAMESPACE}.svc inside the cluster", crate::lemonade::DEFAULT_PORT);
-            env.mark(Item::Lemonade, &detail)?;
+            mark_verified(env, Item::Lemonade, &detail)?;
             env.say(&format!("[3/4] done: {detail}"));
             env.say("[4/4] models are pulled later from Settings \u{2192} Models (kept in the cluster's volume, 30 GB claimed)");
             Ok(())
@@ -2548,7 +2643,7 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
             ensure_lemonade(env, wait, poll)?;
             env.say("[1/3] Lemonade answers; pulling kokoro-v1 (about 330 MB)");
             env.lemonade_pull("kokoro-v1")?;
-            env.mark(Item::Kokoro, "kokoro-v1 in Lemonade")?;
+            mark_verified(env, Item::Kokoro, "kokoro-v1 in Lemonade")?;
             env.say("[2/3] kokoro-v1 is downloaded; asking IYAKKI to make it the reading voice (unless you already chose another one)");
             env.request_after("kokoro")?;
             env.say("[3/3] done: Kokoro reads TALES and chat replies. Change it in Settings \u{2192} Voice, or Settings \u{2192} Models \u{2192} lemonade-local \u{2192} kokoro-v1 \u{2192} Use as reading voice");
@@ -2561,7 +2656,7 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
                 wait_for_cluster(env, wait, poll)?;
             }
             let pull = env.create_registry()?;
-            env.mark(Item::Registry, &format!("pods pull {pull}"))?;
+            mark_verified(env, Item::Registry, &format!("pods pull {pull}"))?;
             env.say(&format!("done: the registry is ready; the private store deploy now pushes its image there (pods pull {pull})"));
             Ok(())
         }
@@ -2569,7 +2664,7 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
         Item::GpuNvidia => crate::gpu_steps::run_nvidia(env, wait, poll),
         Item::MacFirmware => {
             let line = env.mac_firmware()?;
-            env.mark(Item::MacFirmware, &line)?;
+            mark_verified(env, Item::MacFirmware, &line)?;
             Ok(())
         }
         Item::FwHardware => Err("the hardware firmware has its own job: `iyakki quick-install fw-hardware`".into()),
@@ -2579,13 +2674,13 @@ pub fn run_step(item: Item, env: &mut dyn StepEnv, wait: Duration, poll: Duratio
         Item::LinuxApps => {
             env.say(crate::linuxapps_dist::LICENCE_NOTE);
             let line = env.linux_apps()?;
-            env.mark(Item::LinuxApps, &line)?;
+            mark_verified(env, Item::LinuxApps, &line)?;
             Ok(())
         }
         Item::LinuxWindows => {
             env.say(crate::linuxwin::NOTE);
             let line = env.linux_windows()?;
-            env.mark(Item::LinuxWindows, &line)?;
+            mark_verified(env, Item::LinuxWindows, &line)?;
             Ok(())
         }
     }
@@ -2602,6 +2697,8 @@ pub struct RealEnv {
     registry: RegistryArgs,
     /// Where the Mac firmware step reads Apple's files from (`--source`, `--path`).
     mac_source: crate::macfw::Source,
+    /// What the check before the marker saw (written as the marker's third line by the next `mark`).
+    verified_note: String,
 }
 
 /// What `iyakki quick-install registry` was told besides the data folder.
@@ -2615,10 +2712,10 @@ pub struct RegistryArgs {
 impl RealEnv {
     pub fn new(data: &Path, user: &str) -> RealEnv {
         let clis = std::sync::Arc::new(crate::clis::CliManager::new(&data.join("cli")));
-        let streamer: std::sync::Arc<dyn iyakki_proxy::Streamer> = std::sync::Arc::new(iyakki_proxy::https::UreqStreamer::default());
+        let streamer: std::sync::Arc<dyn iyakki_proxy::Streamer> = iyakki_proxy::https::download_streamer();
         clis.set_streamer(streamer.clone());
         let k3s = crate::k3sdev::K3sDev::new(data, clis.clone(), std::sync::Arc::new(crate::wsexec::System));
-        RealEnv { data: data.to_path_buf(), user: user.into(), k3s, clis, streamer, registry: RegistryArgs::default(), mac_source: crate::macfw::Source::Download }
+        RealEnv { data: data.to_path_buf(), user: user.into(), k3s, clis, streamer, registry: RegistryArgs::default(), mac_source: crate::macfw::Source::Download, verified_note: String::new() }
     }
 
     /// `kubectl create secret generic` from 0600 files in a 0700 folder (one per `(key, value)`), removed at once, then the labels. The
@@ -3049,7 +3146,46 @@ impl StepEnv for RealEnv {
         std::thread::sleep(d);
     }
     fn mark(&mut self, item: Item, detail: &str) -> Result<(), String> {
-        mark_done(&self.data, item, detail)
+        let note = std::mem::take(&mut self.verified_note);
+        mark_done_note(&self.data, item, detail, &note)
+    }
+    fn set_verified_note(&mut self, note: &str) {
+        self.verified_note = note.to_string();
+    }
+    fn verify(&mut self, item: Item, detail: &str) -> Result<String, String> {
+        // a program of the CLI catalogue: it runs and says its version
+        // (Ollama in the cluster is a Deployment below; Ollama on the host is a program like the others)
+        if let Some(id) = item.cli_id().filter(|_| item != Item::Ollama || !ollama_cluster::is_cluster_detail(detail)) {
+            return self.clis.verify_runs(id).map(|l| format!("verified: `{id}` ran and said \"{l}\""));
+        }
+        // a Deployment: all its pods Ready and its Service has an address behind it (the pods' readiness probes ask the program itself)
+        if let Some((ns, deploy, svc)) = verify::target(item) {
+            let d = self.k3s.kubectl(&["-n", ns, "get", "deployment", deploy, "-o", "jsonpath={.spec.replicas} {.status.readyReplicas}"]);
+            if d.code != Some(0) {
+                return Err(format!("{deploy} is not in namespace {ns}: {}", d.combined().trim()));
+            }
+            let (_, pods) = verify::ready_from(&d.stdout).map_err(|e| format!("{deploy}: {e}"))?;
+            let e = self.k3s.kubectl(&["-n", ns, "get", "endpoints", svc, "-o", "jsonpath={.subsets[*].addresses[*].ip}"]);
+            let n = verify::endpoints_from(e.code == Some(0), &e.stdout).map_err(|e| format!("{svc}: {e}"))?;
+            return Ok(verify::deployment_note(deploy, svc, pods, n));
+        }
+        match item {
+            // a model: Lemonade itself lists it as downloaded
+            Item::Kokoro => {
+                let have = self.lemonade_models()?;
+                if have.iter().any(|m| m == "kokoro-v1") { Ok("verified: Lemonade lists kokoro-v1 as downloaded".into()) } else { Err("Lemonade does not list kokoro-v1 as downloaded".into()) }
+            }
+            // the add-on: its libraries pass the check again where they are installed, and the source is named
+            Item::FfmpegLibs => crate::avaddon_install::verify_installed(&self.data, &crate::avaddon_install::Places::here(&self.data).sonames, detail),
+            // a GPU: the node still reports the resource pods ask for
+            Item::GpuVulkan | Item::GpuNvidia => {
+                let res = if item == Item::GpuVulkan { crate::gpu_workloads::GPU_RESOURCE } else { crate::gpu_workloads::NVIDIA_RESOURCE };
+                let o = self.k3s.kubectl(&["get", "nodes", "-o", "json"]);
+                let n = crate::gpu_workloads::node_resource_count(&o.stdout, res);
+                if n > 0 { Ok(format!("verified: the node reports {res} = {n}")) } else { Err(format!("the node does not report {res}")) }
+            }
+            _ => Ok(String::new()),
+        }
     }
     fn request_after(&mut self, what: &str) -> Result<(), String> {
         request_after(&self.data, what, &self.user)
@@ -3164,9 +3300,49 @@ pub fn start_registry(jobs: &Jobs, owner: &str, a: &RegistryArgs, k3s_present: b
     jobs.start(owner, &registry_spec(l, a), &|_: &Path| Ok(())).map(|j| vec![j])
 }
 
+/// The longest one install step may run before its job gives up (the step's own waits are shorter; this catches what hangs without a word).
+pub fn step_deadline(item: Item) -> Duration {
+    match item {
+        Item::GpuNvidia | Item::FfmpegLibs | Item::LinuxWindows | Item::LinuxApps | Item::Lemonade | Item::Kokoro | Item::VoicePack | Item::Ollama | Item::MacFirmware => Duration::from_secs(4 * 3600),
+        _ => Duration::from_secs(2 * 3600),
+    }
+}
+
+/// A timer that calls `on_expire` with the reason when the step is still running at its deadline; dropping it (the step ended) cancels it.
+pub struct Watchdog {
+    done: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl Watchdog {
+    pub fn start(what: &str, deadline: Duration, on_expire: impl FnOnce(String) + Send + 'static) -> Watchdog {
+        let done = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let d2 = done.clone();
+        let msg = format!("{what} timed out: it ran for {} minutes without finishing (it is not marked as installed; see the log for the last step, then press Retry)", deadline.as_secs() / 60);
+        std::thread::spawn(move || {
+            let (lock, cv) = &*d2;
+            let g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let (g, _) = cv.wait_timeout_while(g, deadline, |finished| !*finished).unwrap_or_else(|e| e.into_inner());
+            if !*g {
+                drop(g);
+                on_expire(msg);
+            }
+        });
+        Watchdog { done }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        let (lock, cv) = &*self.done;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        cv.notify_all();
+    }
+}
+
 /// Forget that the registry step finished (after the registry was removed).
 pub fn unmark(data: &Path, item: Item) {
     let _ = std::fs::remove_file(marker(data, item));
+    clear_failure(data, item);
 }
 
 /// `iyakki quick-install <k3s|duckdb|elasticsearch> [--data DIR] [--user NAME]`: one step, as the job runs it. Returns the exit code.
@@ -3213,6 +3389,12 @@ pub fn cli_main(args: &[String]) -> i32 {
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let data = PathBuf::from(flag("--data").unwrap_or_else(|| "/var/lib/iyakki".into()));
     let user = flag("--user").or_else(|| std::env::var("USER").ok()).unwrap_or_else(|| "system".into());
+    // a step that neither finishes nor fails ends by itself: exit 124, "timed out", never marked as installed
+    let watchdog_data = data.clone();
+    let _watchdog = Watchdog::start(item.title(), step_deadline(item), move |why| {
+        failed_exit(&watchdog_data, item, &why);
+        std::process::exit(124);
+    });
     if item.fw_def().is_some() {
         return firmware_pack_main(args, item, &data, &user);
     }
@@ -3251,13 +3433,20 @@ pub fn cli_main(args: &[String]) -> i32 {
                     crate::qprintln!("the volume {pv} is set to Retain: its data survives the claim");
                 }
             }
+            clear_failure(&data, item);
             0
         }
-        Err(e) => {
-            crate::qprintln!("error: {e}");
-            1
-        }
+        Err(e) => failed_exit(&data, item, &e),
     }
+}
+
+/// A step ended with an error (or timed out): print the failure line with its cause class first ("Network problem: ...") as the job's
+/// last line, and remember it so a card cannot say Installed from an older marker. Returns the exit code 1.
+pub fn failed_exit(data: &Path, item: Item, err: &str) -> i32 {
+    let line = quickinstall_cause::failure_line(err);
+    crate::qprintln!("error: {line}");
+    record_failure(data, item, &line);
+    1
 }
 
 /// `iyakki quick-install fw-<name> [--data DIR] [--from FOLDER] [--accept-licence] [--force-hardware] [--user NAME]`: a restricted firmware
@@ -3274,7 +3463,7 @@ fn firmware_pack_main(args: &[String], item: Item, data: &Path, user: &str) -> i
         }
         crate::qprintln!("accepted by cli:{user} (recorded in {})", crate::fwpack::work_dir(data, def).display());
     }
-    let streamer: std::sync::Arc<dyn iyakki_proxy::Streamer> = std::sync::Arc::new(iyakki_proxy::https::UreqStreamer::default());
+    let streamer: std::sync::Arc<dyn iyakki_proxy::Streamer> = iyakki_proxy::https::download_streamer();
     let mut env = crate::fwpack::RealEnv::new(data, streamer);
     let force = args.iter().any(|a| a == "--force-hardware");
     let r = match flag("--from") {
@@ -3282,11 +3471,11 @@ fn firmware_pack_main(args: &[String], item: Item, data: &Path, user: &str) -> i
         None => crate::fwpack::run(&mut env, data, def, force),
     };
     match r {
-        Ok(_) => 0,
-        Err(e) => {
-            crate::qprintln!("error: {e}");
-            1
+        Ok(_) => {
+            clear_failure(data, item);
+            0
         }
+        Err(e) => failed_exit(data, item, &e),
     }
 }
 
@@ -3294,14 +3483,14 @@ fn firmware_pack_main(args: &[String], item: Item, data: &Path, user: &str) -> i
 fn camera_firmware_main(args: &[String]) -> i32 {
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let data = PathBuf::from(flag("--data").unwrap_or_else(|| "/var/lib/iyakki".into()));
-    let streamer: std::sync::Arc<dyn iyakki_proxy::Streamer> = std::sync::Arc::new(iyakki_proxy::https::UreqStreamer::default());
+    let streamer: std::sync::Arc<dyn iyakki_proxy::Streamer> = iyakki_proxy::https::download_streamer();
     let mut env = crate::camfw::RealEnv::new(&data, streamer);
     match crate::camfw::run(&mut env, &data) {
-        Ok(_) => 0,
-        Err(e) => {
-            crate::qprintln!("error: {e}");
-            1
+        Ok(_) => {
+            clear_failure(&data, Item::MacCamera);
+            0
         }
+        Err(e) => failed_exit(&data, Item::MacCamera, &e),
     }
 }
 
@@ -3389,3 +3578,19 @@ pub mod gitea;
 #[cfg(test)]
 #[path = "quickinstall_gitea_tests.rs"]
 mod gitea_tests;
+
+/// The cause class of a failed step (network problem, timed out, disk full, licence needed, dependency failed, cluster not ready, verify failed).
+#[path = "quickinstall_cause.rs"]
+pub mod quickinstall_cause;
+
+#[cfg(test)]
+#[path = "quickinstall_cause_tests.rs"]
+mod cause_tests;
+
+#[cfg(test)]
+#[path = "quickinstall_verify_tests.rs"]
+mod verify_tests;
+
+/// Which Deployment and Service an item is, and the plain readings of the checks that run before a marker is written.
+#[path = "quickinstall_verify.rs"]
+pub mod verify;

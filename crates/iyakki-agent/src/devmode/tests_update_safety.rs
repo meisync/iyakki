@@ -348,3 +348,51 @@ fn the_boot_path_files_are_recognised_and_the_recovery_copy_is_written_before_th
     assert!(rank("EFI/BOOT/mmx64.efi") < rank("EFI/BOOT/grubx64.efi"));
     assert!(p.needs.len() >= 4);
 }
+
+#[test]
+fn a_staged_update_that_was_never_applied_can_be_discarded_and_only_its_own_folder_goes() {
+    let r = rig("safe-discard");
+    fill_data(&r);
+    let (dir, m) = payload(&r, "0.1.0-alpha.2", "macweb", false, 7);
+    let free = || 500u64 << 20;
+    let e = env(&r, &free, None);
+    // nothing staged: said plainly
+    assert_eq!(discard_staged(&e).unwrap()["discarded"], 0);
+    let p = plan(&e, &m, false).unwrap();
+    stage_all(&e, &dir, &m, &p.needs);
+    std::fs::create_dir_all(r.dm.data_dir().join("boot-prev/keep")).unwrap();
+    std::fs::write(r.dm.data_dir().join("boot-prev/keep/bzImage"), b"previous").unwrap();
+    let boot_before = tree_hash(&r.boot.root, &[]);
+    let others: Vec<(String, String)> = tree_hash(r.dm.data_dir(), &["boot-next", "devmode"]);
+    let said = discard_staged(&e).unwrap();
+    assert!(said["discarded"].as_u64().unwrap() > 0 && said["message"].as_str().unwrap().contains("boot files were not touched"), "{said}");
+    assert!(!r.dm.data_dir().join("boot-next").exists());
+    assert_eq!(tree_hash(&r.boot.root, &[]), boot_before, "the boot partition is exactly as it was");
+    assert_eq!(tree_hash(r.dm.data_dir(), &["boot-next", "devmode"]), others, "the person's data and the kept previous version are untouched");
+    assert!(status(r.dm.data_dir())["interrupted"].is_null());
+}
+
+#[test]
+fn an_update_cut_while_the_boot_files_are_replaced_is_never_discarded() {
+    let r = rig("safe-discard-cut");
+    fill_data(&r);
+    let (dir, m) = payload(&r, "0.1.0-alpha.2", "macweb", false, 7);
+    let free = || 500u64 << 20;
+    let probe = env(&r, &free, None);
+    let p = plan(&probe, &m, false).unwrap();
+    stage_all(&probe, &dir, &m, &p.needs);
+    let fault = AtomicU64::new(3 << 20);
+    let e = env(&r, &free, Some(&fault));
+    assert!(apply(&e, &m, false, "laptop").unwrap_err().contains("power was cut"));
+    let staged_before = tree_hash(&r.dm.data_dir().join("boot-next"), &[]);
+    let boot_before = tree_hash(&r.boot.root, &[]);
+    let err = discard_staged(&e).unwrap_err();
+    assert!(err.contains("interrupted") && err.contains("previous version"), "{err}");
+    // the mirror on the data volume is gone but the marker on the boot partition remains: still refused
+    std::fs::remove_file(r.dm.data_dir().join("boot-next/UPDATING.json")).unwrap();
+    let err = discard_staged(&e).unwrap_err();
+    assert!(err.contains("half applied"), "{err}");
+    assert!(r.dm.data_dir().join("boot-next").exists(), "the staged files stay for the repeat");
+    assert_eq!(tree_hash(&r.boot.root, &[]), boot_before);
+    assert!(!staged_before.is_empty());
+}

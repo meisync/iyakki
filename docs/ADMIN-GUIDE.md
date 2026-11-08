@@ -75,6 +75,19 @@ finds in one step. Older `ai.conf` `chat.url` / `chat.model` lines are migrated 
 USAGE (the provider's own counts when reported, otherwise about four characters per token). Ollama can be installed and
 started from the CLI tile (listens on 127.0.0.1 only, models under the data folder).
 
+**The provider's own model list and per-model request options.** On a selected provider, **List models** (`L`; `E` for an
+embeddings model) asks the provider for its list (`GET {address}/models`, with the key from the vault; the key is never shown),
+opens a chooser with a search box, and saves the pick exactly as `m` does. The list is kept for the session. If the current model
+is not in a list that was fetched, the page says so in plain words ("The model X is not offered by this provider for this key").
+**Options** (`o`) shows one row per request option of the chat model: `max_tokens` (1 to 1,000,000), `temperature` (0 to 2),
+`top_p` (0 to 1) and `reasoning_budget` (tokens the model may think with; 0 is off). They are kept per `provider/model` in
+`model-options.json` (versioned; a damaged file is moved aside, a newer one is left alone) and an option is sent only when it is
+set. `reasoning_budget` is sent to NVIDIA NIM only (its API takes `reasoning_budget`); for the others the row says "not used by
+this provider". Gemini gets none of the options yet. A reply that carries only thinking (`reasoning_content`, `reasoning`) is
+never shown as the answer, is not read aloud, and ends with one plain sentence; reasoning tokens are counted where the provider
+reports them. The assistant has `models_list` and `model_options_get` (free) and `model_options_set` and `provider_models_fetch`
+(each asks every time, with the old and new values, or the host that gets the key, on the card).
+
 ## External agents (Claude Code, Copilot)
 
 Settings -> Agents (`d` detect, `i` install, `l` sign in, `k` API key, `m` model, `a` Auto, `u` use for new chats, `t` test,

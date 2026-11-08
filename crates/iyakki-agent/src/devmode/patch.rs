@@ -32,7 +32,10 @@ pub const FORMAT: u32 = 1;
 pub const MANIFEST: &str = "patch.json";
 pub const MAGIC: &[u8; 8] = b"IYPATCH1";
 pub const MAX_OPS: usize = 200;
+/// The most a patch file may carry; for a delta file this is the size of the DELTA, not of the file it makes.
 pub const MAX_FILE: u64 = 64 << 20;
+/// The most a delta may make: the size of the file it produces on the device.
+pub const MAX_TARGET: u64 = crate::bindelta::MAX_FILE;
 pub const MAX_TOTAL: u64 = 128 << 20;
 /// Room kept on the data volume beyond a patch (its layer and the copies of what it replaces).
 pub const DATA_MARGIN: u64 = 64 << 20;
@@ -79,6 +82,27 @@ pub struct Op {
     /// The target of a symlink.
     #[serde(default)]
     pub link: Option<String>,
+    /// Present: the content carried for this file is a binary delta (docs/development/REMOTE-PATCH-DELTA.md), `size` and `sha256` are
+    /// the delta's, and the file the device ends up with is the one described here. Only for `replace`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta: Option<DeltaSpec>,
+}
+
+/// What a delta op promises about the file on the device before and after.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct DeltaSpec {
+    /// SHA-256 of the file as it must be on the device now.
+    #[serde(default)]
+    pub old_sha256: String,
+    /// SHA-256 and size of the file that results.
+    #[serde(default)]
+    pub new_sha256: String,
+    #[serde(default)]
+    pub new_size: u64,
+}
+
+fn is_sha(t: &str) -> bool {
+    t.len() == 64 && t.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
 /// The fixed vocabulary of steps. No free command unless the computer holds the `shell` scope and its approval.
@@ -233,11 +257,14 @@ pub fn check_manifest(m: &Manifest, wide: bool) -> Result<(), String> {
         }
         match (o.action, o.kind) {
             (Action::Delete, _) => {
-                if !o.sha256.is_empty() || o.size != 0 || o.link.is_some() {
+                if !o.sha256.is_empty() || o.size != 0 || o.link.is_some() || o.delta.is_some() {
                     return Err(format!("{}: a deletion carries no content", o.path));
                 }
             }
             (_, Kind::Symlink) => {
+                if o.delta.is_some() {
+                    return Err(format!("{}: a link has no delta", o.path));
+                }
                 let l = o.link.as_deref().unwrap_or("");
                 if l.is_empty() || l.len() > 400 || l.contains(['\0', '\n']) || o.size != 0 || !o.sha256.is_empty() {
                     return Err(format!("{}: a symlink needs a link target and no content", o.path));
@@ -247,11 +274,22 @@ pub fn check_manifest(m: &Manifest, wide: bool) -> Result<(), String> {
                 if o.link.is_some() {
                     return Err(format!("{}: a file has no link target", o.path));
                 }
-                if o.sha256.len() != 64 || !o.sha256.bytes().all(|c| c.is_ascii_hexdigit()) {
+                if !is_sha(&o.sha256) {
                     return Err(format!("{} has no valid SHA-256", o.path));
                 }
+                if let Some(d) = &o.delta {
+                    if o.action != Action::Replace {
+                        return Err(format!("{}: a delta only replaces a file that is on the device", o.path));
+                    }
+                    if !is_sha(&d.old_sha256) || !is_sha(&d.new_sha256) {
+                        return Err(format!("{}: a delta needs the SHA-256 of the old and of the new file", o.path));
+                    }
+                    if d.new_size > MAX_TARGET {
+                        return Err(format!("{} would be {} MB: a delta makes a file of at most {} MB", o.path, d.new_size >> 20, MAX_TARGET >> 20));
+                    }
+                }
                 if o.size > MAX_FILE {
-                    return Err(format!("{} is {} MB: a patch file is at most {} MB", o.path, o.size >> 20, MAX_FILE >> 20));
+                    return Err(format!("{} is {} MB: a patch file is at most {} MB{}", o.path, o.size >> 20, MAX_FILE >> 20, if o.delta.is_some() { " (the delta is too big: send the whole file in an update instead)" } else { "" }));
                 }
                 total += o.size;
             }
@@ -291,8 +329,47 @@ pub struct Pack {
 
 /// Make a pack from a folder: `patch.json` (the manifest without sizes and hashes) and `files/<path>`.
 pub fn build(src: &Path) -> Result<Vec<u8>, String> {
+    build_with(src, None)
+}
+
+/// The old version of `path` for a delta, from `from`: a folder laid out like the root (or like a build folder, with `files/`), a pack
+/// (the file it carries whole), or, for a patch that changes one file, that file itself.
+fn old_version(from: &Path, path: &str, single: bool) -> Result<Option<Vec<u8>>, String> {
+    let rel = path.trim_start_matches('/');
+    if from.is_dir() {
+        for p in [from.join(rel), from.join("files").join(rel)] {
+            if p.is_file() {
+                return std::fs::read(&p).map(Some).map_err(|e| format!("{}: {e}", p.display()));
+            }
+        }
+        return Ok(None);
+    }
+    let bytes = std::fs::read(from).map_err(|e| format!("{}: {e}", from.display()))?;
+    if bytes.starts_with(MAGIC) {
+        let pack = decode(&bytes)?;
+        let Some((i, o)) = pack.manifest.ops.iter().enumerate().find(|(_, o)| o.path == path) else { return Ok(None) };
+        if o.delta.is_some() {
+            return Err(format!("{} in {} is itself a delta: give the old program file, or a pack that carries it whole (--delta-from)", path, from.display()));
+        }
+        return Ok(pack.content.into_iter().find(|(j, _)| *j == i).map(|(_, b)| b));
+    }
+    if !single {
+        return Err(format!("--delta-from {} is one file but the patch changes several: give the old pack or a folder laid out like the root", from.display()));
+    }
+    Ok(Some(bytes))
+}
+
+/// [`build`], with `delta_from`: for each file that replaces one on the device, a binary delta against the old version found there
+/// (docs/development/REMOTE-PATCH-DELTA.md). An op that carries `"delta": {}` in `patch.json` must have an old version; without that mark
+/// the delta is used only where it is smaller than the file.
+pub fn build_with(src: &Path, delta_from: Option<&Path>) -> Result<Vec<u8>, String> {
     let text = std::fs::read(src.join(MANIFEST)).map_err(|e| format!("{}: {e}", src.join(MANIFEST).display()))?;
     let mut m: Manifest = serde_json::from_slice(&text).map_err(|e| format!("{MANIFEST}: {e}"))?;
+    let marked = m.ops.iter().filter(|o| o.delta.is_some()).count();
+    if marked > 0 && delta_from.is_none() {
+        return Err("this patch has delta files: say which version they are against with --delta-from OLD_FILE_OR_PACK_OR_FOLDER".into());
+    }
+    let candidates = if marked > 0 { marked } else { m.ops.iter().filter(|o| o.action == Action::Replace && o.kind == Kind::File).count() };
     let mut content = Vec::new();
     for (i, o) in m.ops.iter_mut().enumerate() {
         if o.action == Action::Delete || o.kind == Kind::Symlink {
@@ -303,13 +380,34 @@ pub fn build(src: &Path) -> Result<Vec<u8>, String> {
         if !md.is_file() {
             return Err(format!("{} is not a regular file", p.display()));
         }
-        let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-        o.size = bytes.len() as u64;
-        o.sha256 = sha256_hex(&bytes);
+        if md.len() > MAX_TARGET {
+            return Err(format!("{} is {} MB: more than the {} MB a patch file may become", p.display(), md.len() >> 20, MAX_TARGET >> 20));
+        }
+        let explicit = o.delta.is_some();
+        let mut bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
         if o.mode.is_none() {
             // the file's own mode, so an executable stays one
             o.mode = Some(format!("{:04o}", md.mode() & 0o7777));
         }
+        let wants = explicit || (marked == 0 && o.action == Action::Replace);
+        if let (Some(from), true) = (delta_from, wants) {
+            match old_version(from, &o.path, candidates == 1)? {
+                Some(old) => {
+                    let d = crate::bindelta::make_delta(&old, &bytes);
+                    // a delta that is not smaller than the file is no help (unless it was asked for by name)
+                    if explicit || d.len() < bytes.len() {
+                        o.delta = Some(DeltaSpec { old_sha256: sha256_hex(&old), new_sha256: sha256_hex(&bytes), new_size: bytes.len() as u64 });
+                        bytes = d;
+                    }
+                }
+                None if explicit => return Err(format!("no old version of {} in {}", o.path, from.display())),
+                None => {}
+            }
+        } else if md.len() > MAX_FILE {
+            return Err(format!("{} is {} MB: a patch file is at most {} MB (a delta against the old version, --delta-from, makes it small)", o.path, md.len() >> 20, MAX_FILE >> 20));
+        }
+        o.size = bytes.len() as u64;
+        o.sha256 = sha256_hex(&bytes);
         content.push((i, bytes));
     }
     check_manifest(&m, true)?;
@@ -719,8 +817,10 @@ pub fn plan(env: &Env, m: &Manifest) -> Result<Plan, String> {
         return Err(format!("{MAX_PATCHES} patches are active already: remove one first (iyakki dev patch list)"));
     }
     let bytes: u64 = m.ops.iter().map(|o| o.size).sum();
-    if (env.data_free)() < bytes * 2 + DATA_MARGIN {
-        return Err(format!("the data volume has {} MB free; this patch needs about {} MB (layer and undo copies) plus {} MB spare", (env.data_free)() >> 20, (bytes * 2) >> 20, DATA_MARGIN >> 20));
+    // a delta's layer file and its undo copy are as big as the file it makes
+    let need: u64 = m.ops.iter().map(|o| o.delta.as_ref().map_or(o.size * 2, |d| d.new_size * 2 + o.size)).sum();
+    if (env.data_free)() < need + DATA_MARGIN {
+        return Err(format!("the data volume has {} MB free; this patch needs about {} MB (layer and undo copies) plus {} MB spare", (env.data_free)() >> 20, need >> 20, DATA_MARGIN >> 20));
     }
     let mut notes = Vec::new();
     let mut next_boot_only = Vec::new();
@@ -738,11 +838,51 @@ pub fn plan(env: &Env, m: &Manifest) -> Result<Plan, String> {
             (Action::Add, Some(_)) => notes.push(format!("{} exists already: add will replace it", o.path)),
             _ => {}
         }
+        if let Some(d) = &o.delta {
+            // before a byte is sent: is the file here the one the delta was made against?
+            check_delta_old(&t, &o.path, d)?;
+        }
     }
     if !next_boot_only.is_empty() {
         notes.push(format!("{} file(s) take effect at the next start only (PID 1, kernel modules, firmware)", next_boot_only.len()));
     }
     Ok(Plan { id: m.id.clone(), files: m.ops.len(), bytes, next_boot_only, replaces: dir.join(MANIFEST).exists(), notes })
+}
+
+/// The file on this device must be exactly the version a delta was made against. Says so in plain words; changes nothing.
+fn check_delta_old(target: &Path, path: &str, d: &DeltaSpec) -> Result<(), String> {
+    let md = std::fs::metadata(target).map_err(|e| format!("{path}: {e}"))?;
+    if !md.is_file() || md.len() > MAX_TARGET {
+        return Err(format!("{path} is not a regular file of a size a delta can start from"));
+    }
+    if files::sha256_file(target)? != d.old_sha256 {
+        return Err(format!("{path} on this device is not the version this delta was made against (its SHA-256 differs from the one recorded in the patch): nothing was changed. Build the delta against the program that runs on the device, or send the whole file."));
+    }
+    Ok(())
+}
+
+/// Make the new file from the file on the device and the staged delta; written beside its final name, flushed to disk, then renamed in
+/// (so `dst` is either not there or whole).
+fn write_delta_result(target: &Path, staged: &Path, dst: &Path, path: &str, d: &DeltaSpec) -> Result<u64, String> {
+    check_delta_old(target, path, d)?;
+    let old = std::fs::read(target).map_err(|e| format!("{path}: {e}"))?;
+    let blob = std::fs::read(staged).map_err(|e| format!("{path}: {e}"))?;
+    let new = crate::bindelta::apply_delta(&old, &blob).map_err(|e| format!("{path}: {e}"))?;
+    drop(old);
+    if new.len() as u64 != d.new_size || sha256_hex(&new) != d.new_sha256 {
+        return Err(format!("{path}: the file made from the delta is not the one the patch describes (size or SHA-256): nothing was written"));
+    }
+    let name = dst.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = dst.with_file_name(format!(".{name}.delta-new"));
+    let r = std::fs::File::create(&tmp).and_then(|mut f| f.write_all(&new).and_then(|_| f.sync_all())).and_then(|_| std::fs::rename(&tmp, dst));
+    if let Err(e) = r {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{path}: {e}"));
+    }
+    if let Some(dir) = dst.parent() {
+        let _ = std::fs::File::open(dir).and_then(|f| f.sync_all());
+    }
+    Ok(new.len() as u64)
 }
 
 /// The folder a client sends one file of the patch to. Staged files are named by their position, never by the target path.
@@ -813,10 +953,17 @@ fn write_patch_dir(env: &Env, m: &Manifest, staged: &Path, dir: &Path, base: &st
                 entries.push(format!("link 0 {}", o.path));
             }
             (_, Kind::File) => {
-                std::fs::copy(staged.join(staged_name(i)), &dst).map_err(|e| format!("{}: {e}", o.path))?;
+                // a delta file: the layer holds the file the delta makes, so the size the first stage checks is that file's
+                let size = match &o.delta {
+                    Some(d) => write_delta_result(&t, &staged.join(staged_name(i)), &dst, &o.path, d)?,
+                    None => {
+                        std::fs::copy(staged.join(staged_name(i)), &dst).map_err(|e| format!("{}: {e}", o.path))?;
+                        o.size
+                    }
+                };
                 std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(mode)).map_err(|e| e.to_string())?;
                 chown_best_effort(env.live, &dst, o.uid, o.gid)?;
-                entries.push(format!("file {} {}", o.size, o.path));
+                entries.push(format!("file {size} {}", o.path));
             }
         }
     }

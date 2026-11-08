@@ -104,20 +104,19 @@ impl Machine {
     /// Read this machine (sysfs and proc: a few small reads).
     pub fn detect(cx: &AppCx) -> Machine {
         let gpus = iyakki_agent::gpu::detect(std::path::Path::new("/"));
-        let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
-        let kb = meminfo.lines().find_map(|l| l.strip_prefix("MemTotal:")?.split_whitespace().next()?.parse::<u64>().ok()).unwrap_or(0);
+        let kb = iyakki_agent::sysinfo::mem_total_kb(&iyakki_agent::sysinfo::SysRoots::real());
         Machine {
             cloud: iyakki_agent::cloudmode::detect(cx.services.cloud_setting()).on,
             window: iyakki_agent::webengine::host_session(),
-            model: std::fs::read_to_string("/sys/class/dmi/id/product_name").map(|m| m.trim().to_string()).unwrap_or_default(),
+            model: iyakki_agent::sysinfo::product_name(iyakki_agent::sysinfo::sys_root()),
             gpus: gpus.iter().filter(|g| !g.is_virtual()).count(),
             nvidia: iyakki_agent::gpu::has_nvidia(&gpus),
             ram_mb: kb / 1024,
-            camera: iyakki_agent::camfw::camera_in(std::path::Path::new("/sys")),
+            camera: iyakki_agent::camfw::camera_in(iyakki_agent::sysinfo::sys_root()),
             fw: Item::ALL
                 .into_iter()
                 .filter(|i| match i.fw_def() {
-                    Some(d) => iyakki_agent::fwpack::present_in(std::path::Path::new("/sys"), d),
+                    Some(d) => iyakki_agent::fwpack::present_in(iyakki_agent::sysinfo::sys_root(), d),
                     // the hardware firmware item is shown where a driver asked for a file that is missing, or when it is installed
                     None => *i == Item::FwHardware && (iyakki_agent::fwextra::installed(cx.services.dir()).is_some() || !iyakki_agent::fwextra_cli::plan_here(cx.services.dir()).is_empty()),
                 })
@@ -759,7 +758,7 @@ impl Setup {
         }
         // the restricted firmware packs' results (a few small files) and how long the machine has been up
         self.fw_outcomes = self.machine.fw.iter().chain(Item::ALL.iter().filter(|i| i.fw_def().is_some_and(|d| iyakki_agent::fwpack::installed(cx.services.dir(), d).is_some()))).collect::<std::collections::BTreeSet<_>>().into_iter().filter_map(|i| Some((*i, iyakki_agent::fwpack::read_outcome(cx.services.dir(), i.fw_def()?)?))).collect();
-        self.uptime = std::fs::read_to_string("/proc/uptime").ok().and_then(|t| t.split_whitespace().next()?.split('.').next()?.parse().ok()).unwrap_or(0);
+        self.uptime = iyakki_agent::sysinfo::uptime_now() as i64;
         // who is signed in to the two coding agents (from the remembered status; no program runs here)
         let facts = self.facts.as_ref();
         let installed = |it: Item| facts.is_some_and(|f| f.presence.iter().any(|(x, p)| *x == it && matches!(p, Presence::Installed(_))));
@@ -859,7 +858,9 @@ impl Setup {
         let pres = self.presence(item).cloned();
         let bad = self.facts.as_ref().and_then(|f| f.unhealthy.iter().find(|(x, _)| *x == item).map(|(_, m)| m.clone()));
         let healthy = self.facts.as_ref().is_some_and(|f| f.healthy.contains(&item));
-        let state = base_state(self.running_job(item).map(|j| j.progress), self.failed.contains(&item), self.facts.is_none(), healthy, bad.clone(), pres.as_ref());
+        // the newest attempt failed: its job says so, or (the job list may be gone after a restart) the `<item>.failed` record of an older install
+        let last_failed = self.failed.contains(&item) || pres.as_ref().and_then(qi::failure_reason).is_some();
+        let state = base_state(self.running_job(item).map(|j| j.progress), last_failed, self.facts.is_none(), healthy, bad.clone(), pres.as_ref());
         let latest = self.latest.iter().find(|(x, _)| *x == item).map(|(_, l)| l);
         let signed_out = self.signin.iter().any(|(x, s)| *x == item && matches!(s, crate::agent_login::State::SignedOut));
         let window_block = self.machine.window && (item == Item::K3s || item.needs().contains(&Item::K3s));
@@ -935,6 +936,10 @@ impl Setup {
         }
         if let CardState::NotRunnable(m) = &state {
             notes.push((format!("Installed but not runnable: {m}"), true));
+        }
+        // the cause class first ("Network problem: ..."); an earlier install is still on the machine
+        if let (CardState::Failed, Some(why)) = (&state, pres.as_ref().and_then(qi::failure_reason)) {
+            notes.push((format!("Installed earlier; the last attempt failed. {why}"), true));
         }
         if let (CardState::Elsewhere, Some(Presence::Elsewhere(d))) = (&state, &pres) {
             if item.cli_id().is_some() {
@@ -1388,9 +1393,15 @@ impl Setup {
                     self.say("The browser add-on is being installed: its progress is beside the clock.", false);
                     return;
                 }
+                let found = iyakki_agent::avaddon_install::plan(&iyakki_agent::avaddon_install::Places::here(cx.services.dir()));
+                // nothing supplied (no package, no usable ffmpeg of the person's own): the default is the one the design names, download the vendors' sources and build here
+                if found.source.is_none() && self.card(Item::K3s).running == Some(true) && !self.build_unavailable() {
+                    self.build_here(cx);
+                    return;
+                }
                 self.popup = None;
                 let mut c = self.plan_for(vec![item], "Browser audio and video: read, then confirm".into());
-                c.review = iyakki_agent::avaddon_install::plan(&iyakki_agent::avaddon_install::Places::here(cx.services.dir())).review;
+                c.review = found.review;
                 self.confirm = Some(c);
             }
             Act::Install | Act::Retry | Act::Reinstall | Act::Update | Act::OwnCopy => {
@@ -1596,6 +1607,12 @@ impl Setup {
     /// The popup's Stop button (an administrator; the primary button of a running cluster is Open).
     /// "Build it here (k3s)" on the browser audio and video card: gate (k3s running, a map entry for this IYAKKI version), then the consent text with
     /// its button. Nothing starts before the button; the package is only built and copied to /local/packages (the usual review and confirm follow).
+    /// True when this image has no build recipe for the add-on (the map has no entry for its version), so Install falls back to the supply route.
+    fn build_unavailable(&self) -> bool {
+        let map = self.av_map.clone().unwrap_or_else(|| std::fs::read_to_string(std::path::Path::new(iyakki_agent::avbuild::BRIDGE_DIR).join("versions.map")).unwrap_or_default());
+        iyakki_agent::avbuild::lookup(&map, iyakki_agent::avbuild::IMAGE_VERSION).is_err()
+    }
+
     pub fn build_here(&mut self, cx: &AppCx) {
         if !self.admin {
             self.say(format!("Only an administrator can build software for the whole machine (your role is {}). Ask an administrator.", cx.session.role.name()), false);
@@ -1825,7 +1842,7 @@ impl Setup {
                 self.after_narrow();
                 Some(Flow::Stay)
             }
-            Event::Tab(n) if (TILE..TILE + 32).contains(n) => {
+            Event::Tab(n) if (TILE..TILE + Item::ALL.len()).contains(n) => {
                 if let Some(it) = Item::ALL.get(n - TILE) {
                     self.open_popup(*it);
                 }

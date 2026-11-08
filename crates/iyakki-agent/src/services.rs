@@ -1188,7 +1188,7 @@ impl Services {
 
     pub fn client_for(&self, provider_id: &str, quick: bool) -> Result<ProviderClient, String> {
         let cfg: ProviderCfg = self.settings.lock().unwrap().get().provider(provider_id).cloned().ok_or_else(|| format!("unknown provider `{provider_id}`"))?;
-        Ok(ProviderClient::new(cfg, self.secrets.clone(), if quick { self.quick.clone() } else { self.slow.clone() }))
+        Ok(ProviderClient::new(cfg, self.secrets.clone(), if quick { self.quick.clone() } else { self.slow.clone() }).with_options_dir(&self.dir))
     }
 
     /// The external-agent settings, plus the CLI tile's folder so a Claude Code or Copilot installed from the tile is found.
@@ -1473,7 +1473,7 @@ impl Services {
             return Err("I only heard silence. Check the microphone and its volume.".into());
         }
         let text = voice::transcribe(&engine, &voice::encode_wav(pcm, voice::SAMPLE_RATE), &self.secrets, self.slow.as_ref())?;
-        if text.is_empty() { Err("No speech was recognised.".into()) } else { Ok(text) }
+        if text.is_empty() { Err(crate::voicedesk::NO_SPEECH.into()) } else { Ok(text) }
     }
 
     /// The engine that makes speech for the assistant and the stories: the one of Settings → Voice, else the best engine found

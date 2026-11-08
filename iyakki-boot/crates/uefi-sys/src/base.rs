@@ -239,6 +239,16 @@ pub const SECURITY2_ARCH_PROTOCOL_GUID: Guid = Guid::new(0x94ab2f58, 0x1438, 0x4
 pub const TCG2_PROTOCOL_GUID: Guid = Guid::new(0x607f766c, 0x7455, 0x42be, [0x93, 0x0b, 0xe4, 0xd7, 0x6d, 0xb2, 0x72, 0x0f]);
 /// GPT partition type of an EFI System Partition (not a protocol GUID; found in the partition table).
 pub const GPT_ESP_TYPE_GUID: Guid = Guid::new(0xc12a7328, 0xf81f, 0x11d2, [0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b]);
+/// `EFI_DEVICE_PATH_TO_TEXT_PROTOCOL` (the firmware's own device path printer, e.g. `PciRoot(0x0)/Pci(0x14,0x0)/USB(0x3,0x0)`).
+pub const DEVICE_PATH_TO_TEXT_PROTOCOL_GUID: Guid = Guid::new(0x8b843e20, 0x8132, 0x4852, [0x90, 0xcc, 0x55, 0x1a, 0x4e, 0x4a, 0x7f, 0x1c]);
+/// `EFI_PCI_IO_PROTOCOL` (one per PCI function the firmware found).
+pub const PCI_IO_PROTOCOL_GUID: Guid = Guid::new(0x4cf5b200, 0x68b8, 0x4ca5, [0x9e, 0xec, 0xb2, 0x3e, 0x3f, 0x50, 0x02, 0x9a]);
+/// `EFI_USB_IO_PROTOCOL` (one per USB interface the firmware's USB stack found).
+pub const USB_IO_PROTOCOL_GUID: Guid = Guid::new(0x2b2f68d6, 0x0cd2, 0x44cf, [0x8e, 0x8b, 0xbb, 0xa2, 0x0b, 0x1b, 0x5b, 0x75]);
+/// `EFI_ABSOLUTE_POINTER_PROTOCOL` (touch screens and tablets).
+pub const ABSOLUTE_POINTER_PROTOCOL_GUID: Guid = Guid::new(0x8d59d32b, 0xc655, 0x4ae9, [0x9b, 0x15, 0xf2, 0x59, 0x04, 0x99, 0x2a, 0x43]);
+/// SMBIOS 2 (32-bit entry point) configuration table, on firmware without the SMBIOS 3 one.
+pub const SMBIOS_TABLE_GUID: Guid = Guid::new(0xeb9d2d31, 0x2d88, 0x11d3, [0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d]);
 
 #[cfg(test)]
 mod tests {
@@ -284,6 +294,7 @@ mod tests {
             BLOCK_IO_PROTOCOL_GUID, DEVICE_PATH_PROTOCOL_GUID, FILE_INFO_GUID, FILE_SYSTEM_INFO_GUID, LOAD_FILE2_PROTOCOL_GUID,
             LINUX_EFI_INITRD_MEDIA_GUID, GLOBAL_VARIABLE_GUID, IMAGE_SECURITY_DATABASE_GUID, ACPI_20_TABLE_GUID,
             SMBIOS3_TABLE_GUID, SHIM_LOCK_PROTOCOL_GUID, TCG2_PROTOCOL_GUID, GPT_ESP_TYPE_GUID, SECURITY_ARCH_PROTOCOL_GUID, SECURITY2_ARCH_PROTOCOL_GUID,
+            DEVICE_PATH_TO_TEXT_PROTOCOL_GUID, PCI_IO_PROTOCOL_GUID, USB_IO_PROTOCOL_GUID, ABSOLUTE_POINTER_PROTOCOL_GUID, SMBIOS_TABLE_GUID,
         ];
         for i in 0..all.len() {
             for j in i + 1..all.len() {

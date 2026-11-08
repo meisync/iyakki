@@ -23,12 +23,20 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Does `crates/<krate>` define `fn <name>(`?
+/// Where the source of a named crate is: `crates/<krate>`, else the boot loader's own workspace `iyakki-boot/crates/<krate>` (a standalone
+/// project with its own `cargo test --manifest-path iyakki-boot/Cargo.toml`, so its tests are cited as `boot-core::module::tests::name`).
+fn crate_dir(root: &Path, krate: &str) -> Option<PathBuf> {
+    [root.join("crates").join(krate), root.join("iyakki-boot").join("crates").join(krate)].into_iter().find(|d| d.is_dir())
+}
+
+/// Does the crate `<krate>` define `fn <name>(`?
 fn test_exists(root: &Path, krate: &str, name: &str, cache: &mut BTreeMap<String, String>) -> bool {
     let src = cache.entry(krate.to_string()).or_insert_with(|| {
         let mut files = Vec::new();
         for sub in ["src", "tests"] {
-            rust_files(&root.join("crates").join(krate).join(sub), &mut files);
+            if let Some(d) = crate_dir(root, krate) {
+                rust_files(&d.join(sub), &mut files);
+            }
         }
         files.iter().filter_map(|f| std::fs::read_to_string(f).ok()).collect::<Vec<_>>().join("\n")
     });
@@ -122,10 +130,10 @@ fn check_matrix(text: &str, root: &Path) -> Vec<String> {
             }
             let parts: Vec<&str> = t.split("::").collect();
             let (Some(krate), Some(name)) = (parts.first(), parts.last()) else { continue };
-            if parts.len() < 2 || !root.join("crates").join(krate).is_dir() {
+            if parts.len() < 2 || crate_dir(root, krate).is_none() {
                 problems.push(format!("{}: `{t}` does not name a crate and a test", r.id));
             } else if !test_exists(root, krate, name, &mut cache) {
-                problems.push(format!("{}: test `{t}` not found in crates/{krate}", r.id));
+                problems.push(format!("{}: test `{t}` not found in the crate {krate}", r.id));
             }
         }
     }
@@ -184,4 +192,14 @@ fn the_checker_catches_the_mistakes_it_exists_for() {
     assert!(has(&broken("total ", "total 1"), "totals line is stale") || has(&broken("done ", "done 9"), "totals line is stale"));
     assert!(has(&check_matrix(&format!("{good}\n| F-X-01 | too | few |"), &root), "expected 8 columns"));
     assert!(check_matrix("no table here", &root).iter().any(|x| x.contains("no feature rows")));
+}
+
+#[test]
+fn tests_of_the_boot_loader_workspace_can_be_cited_by_crate_name() {
+    let root = repo_root();
+    let mut cache = BTreeMap::new();
+    assert!(test_exists(&root, "boot-core", "crash_loop_rolls_back_after_n_failures", &mut cache));
+    assert!(test_exists(&root, "boot-core", "hold_key_wins_over_oneshot", &mut cache));
+    assert!(!test_exists(&root, "boot-core", "no_such_boot_test", &mut cache));
+    assert!(crate_dir(&root, "uefi-sys").is_some() && crate_dir(&root, "no-such-crate").is_none());
 }

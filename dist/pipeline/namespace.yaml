@@ -1,0 +1,42 @@
+# Everything of the IYAKKI build/test pipeline lives in this namespace and nowhere else.
+# Remove it all with:  kubectl delete ns iyakki-build
+# (PVs of the local-path class have reclaim policy Delete and go with their claims; the manifests here use hostPath
+# only, so there is nothing else to clean up on the node. Images pushed to the registry are not Kubernetes objects:
+# see README.md "Removing it".)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: iyakki-build
+  labels:
+    app.kubernetes.io/part-of: iyakki-build
+    # the boot test needs a privileged pod (see README.md); this namespace only
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: iyakki-build-quota
+  namespace: iyakki-build
+  labels:
+    app.kubernetes.io/part-of: iyakki-build
+spec:
+  hard:
+    requests.cpu: "8"
+    requests.memory: 10Gi
+    limits.memory: 12Gi
+    pods: "6"
+    persistentvolumeclaims: "0"   # hostPath only; no PVCs, so nothing outlives the namespace
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: iyakki-build-limits
+  namespace: iyakki-build
+  labels:
+    app.kubernetes.io/part-of: iyakki-build
+spec:
+  limits:
+    - type: Container
+      defaultRequest: {cpu: 500m, memory: 512Mi}
+      default: {cpu: "2", memory: 1Gi}
+      max: {cpu: "6", memory: 9Gi}

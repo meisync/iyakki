@@ -103,7 +103,7 @@ pub fn group_of(name: &str) -> Group {
     match name {
         "now" | "web_research" | "web_search" | "web_fetch" | "web_feed" | "web_links" | "weather" | "stock_quote" | "fetch_url" | "http_request" | "browser_page" => Group::Web,
         "list_dir" | "read_file" | "write_file" | "search_documents" | "terminal" => Group::Files,
-        n if n.starts_with("rag_") => Group::Files,
+        n if n.starts_with("rag_") || n.starts_with("share_") => Group::Files,
         n if n.starts_with("data_") => Group::Data,
         n if n.starts_with("flow_") => Group::Flows,
         n if n.starts_with("dash_") => Group::Dash,
@@ -113,7 +113,7 @@ pub fn group_of(name: &str) -> Group {
         n if n.starts_with("board_") || n.starts_with("note_") || n.starts_with("context_") || n.starts_with("job_") => Group::Workspace,
         "app_scaffold" | "app_preflight" | "app_bump_version" | "publisher_keys" | "store_validate" | "store_publish" | "store_server_status" | "driver_status" | "driver_install" => Group::Build,
         n if n.starts_with("tile_") => Group::Build,
-        n if n.starts_with("ssh_tunnel_") || n.starts_with("system_") || n.starts_with("browser_graphics_") => Group::System,
+        n if n.starts_with("ssh_tunnel_") || n.starts_with("system_") || n.starts_with("updates_") || n.starts_with("browser_graphics_") => Group::System,
         n if n.starts_with("object_storage_") => Group::Cluster,
         "git_clone_repo" | "git_clones_list" | "ide_workspace_add" | "ide_workspace_list" => Group::Workspace,
         "show_svg" | "show_image" | "generate_image" | "screen_capture" => Group::Pictures,

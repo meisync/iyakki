@@ -431,7 +431,7 @@ impl Env for RealEnv {
         crate::k3sdev::space(dir).map(|s| s.0)
     }
     fn data_in_memory(&self) -> bool {
-        crate::macfw::in_memory(&std::fs::read_to_string("/proc/mounts").unwrap_or_default(), &self.data)
+        crate::macfw::in_memory(&iyakki_storage::read_mounts().unwrap_or_default(), &self.data)
     }
     fn fetch_part(&mut self, part: &facetime::Part, dest: &Path) -> Result<(), String> {
         let st = self.streamer.clone();
@@ -444,7 +444,7 @@ impl Env for RealEnv {
     fn install(&mut self, version: &str, source: &str, p: &pack::Pack) -> Result<apply::Report, String> {
         let (fs, real) = apply::Fs::for_data(&self.data);
         let run: Box<dyn iyakki_drivers::run::Runner> = if real { Box::new(iyakki_drivers::run::System) } else { Box::new(iyakki_drivers::run::Dry) };
-        apply::install_pack(&fs, run.as_ref(), PACK_ID, version, "LicenseRef-Apple-firmware-supplied-by-the-user", source, "local", p)
+        crate::fwpack::install_checked(&fs, run.as_ref(), PACK_ID, version, "LicenseRef-Apple-firmware-supplied-by-the-user", source, p)
     }
     fn look(&mut self) -> Seen {
         Seen { devices: video_devices_in(&self.sys, Path::new("/dev")) }

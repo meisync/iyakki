@@ -162,3 +162,130 @@ fn the_chosen_microphone_wins_when_present_else_the_first_and_the_choice_is_hand
     assert!(v.validate().is_err());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn a_pause_after_speech_ends_the_dictation_but_waiting_and_speaking_do_not() {
+    let mut d = PauseDetector::new();
+    // the person has not started yet: a quiet room for ten seconds never ends it
+    for t in (0..10_000).step_by(100) {
+        assert!(!d.tick(0.01, t), "waiting to start must not end it");
+    }
+    // speech with the little dips between words: never ends, however long
+    let mut t = 10_000;
+    for i in 0..300 {
+        let level = if i % 7 == 0 { 0.02 } else { 0.5 };
+        assert!(!d.tick(level, t), "talking must not end it (at {t})");
+        t += 100;
+    }
+    // then quiet: ends after the pause, not before
+    let start = t;
+    let mut ended = None;
+    while t < start + 5_000 {
+        if d.tick(0.01, t) {
+            ended = Some(t - start);
+            break;
+        }
+        t += 100;
+    }
+    let ended = ended.expect("a pause ends it");
+    assert!((PAUSE_END_MS - 200..PAUSE_END_MS + 300).contains(&ended), "ended after {ended} ms (counted from the last loud moment)");
+}
+
+#[test]
+fn a_noisy_room_is_not_mistaken_for_speech_and_a_short_breath_does_not_end_it() {
+    let mut d = PauseDetector::new();
+    let mut t = 0;
+    for _ in 0..50 {
+        assert!(!d.tick(0.08, t)); // steady hum
+        t += 100;
+    }
+    for _ in 0..10 {
+        assert!(!d.tick(0.6, t)); // speech over the hum
+        t += 100;
+    }
+    for _ in 0..8 {
+        assert!(!d.tick(0.08, t), "a 0.8 s breath is not a pause");
+        t += 100;
+    }
+    assert!(!d.tick(0.6, t)); // talking again resets it
+    t += 100;
+    let mut ended = false;
+    for _ in 0..20 {
+        ended |= d.tick(0.08, t);
+        t += 100;
+    }
+    assert!(ended, "the hum alone after speech is a pause");
+}
+
+#[test]
+fn the_dictation_pause_follows_the_settings_and_can_be_switched_off() {
+    let mut v = crate::voice::VoiceSettings::default();
+    assert!(v.auto_stop && v.pause_ms == 1500, "on, 1.5 s by default");
+    assert!(PauseDetector::from_settings(&v).is_some());
+    v.pause_ms = 3000;
+    let mut d = PauseDetector::from_settings(&v).unwrap();
+    assert!(!d.tick(0.01, 0));
+    for t in (100..=600).step_by(100) {
+        assert!(!d.tick(0.6, t)); // half a second of talking
+    }
+    assert!(!d.tick(0.01, 700));
+    assert!(!d.tick(0.01, 3_400), "2.8 s of quiet is not yet 3 s");
+    assert!(d.tick(0.01, 3_700));
+    v.pause_ms = 100;
+    assert!(v.validate().is_err(), "too short is refused");
+    v.pause_ms = 1500;
+    v.auto_stop = false;
+    assert!(PauseDetector::from_settings(&v).is_none(), "off: nothing ends a dictation but the person");
+    // old settings files have neither field: they load as on, 1.5 s
+    let old: crate::voice::VoiceSettings = serde_json::from_str(r#"{"auto_send":true}"#).unwrap();
+    assert!(old.auto_stop && old.pause_ms == 1500);
+}
+
+#[test]
+fn clicks_coughs_and_other_short_noises_are_not_talking_and_do_not_keep_a_dictation_open() {
+    // a quiet room with a bump now and then (0.1 s, loud): never counts as talking, so waiting is never ended and nothing is "heard"
+    let mut d = PauseDetector::new();
+    let mut t = 0;
+    for i in 0..200 {
+        let level = if i % 7 == 0 { 0.7 } else { 0.03 };
+        assert!(!d.tick(level, t), "a bump is not talking (at {t})");
+        t += 100;
+    }
+    // real talking, then the room goes back to bumps: the pause still ends it, the bumps do not hold it open
+    for _ in 0..8 {
+        assert!(!d.tick(0.6, t));
+        t += 100;
+    }
+    let start = t;
+    let mut ended = None;
+    for i in 0..60 {
+        let level = if i % 5 == 0 { 0.7 } else { 0.03 };
+        if d.tick(level, t) {
+            ended = Some(t - start);
+            break;
+        }
+        t += 100;
+    }
+    let ended = ended.expect("bumps after the talking do not keep it listening");
+    assert!(ended <= PAUSE_END_MS + 400, "ended after {ended} ms");
+}
+
+#[test]
+fn a_room_that_is_loud_all_the_time_still_ends_after_talking_stops() {
+    let mut d = PauseDetector::new();
+    let mut t = 0;
+    for _ in 0..30 {
+        assert!(!d.tick(0.12, t)); // a steady fan
+        t += 100;
+    }
+    for _ in 0..10 {
+        assert!(!d.tick(0.7, t)); // talking over the fan
+        t += 100;
+    }
+    let mut ended = false;
+    for _ in 0..30 {
+        ended |= d.tick(0.12, t);
+        t += 100;
+    }
+    assert!(ended, "the fan alone is a pause");
+}

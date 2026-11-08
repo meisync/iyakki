@@ -39,7 +39,7 @@ pub(super) struct MemPanel {
 
 impl Default for MemPanel {
     fn default() -> MemPanel {
-        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+        let cmdline = iyakki_agent::sysinfo::cmdline(iyakki_agent::sysinfo::proc_root());
         MemPanel { env: Env::real(), swapper: std::sync::Arc::new(iyakki_zram::KernelSwap), conf: iyakki_zram::CONF_PATH.into(), cmdline, resolved: config::resolve("", ""), draft: Config::default(), stats: MemStats::default(), preview: Vec::new(), report: Default::default(), writable: !hf_on(), ram: 0, loaded: false }
     }
 }
@@ -151,7 +151,7 @@ impl SettingsApp {
             }
             Key::Char('y') => {
                 self.mem.stats = MemStats::read(&self.mem.env);
-                if self.mem.stats.swaps.iter().any(|w| w.0.starts_with("/dev/zram")) {
+                if self.mem.stats.has_zram_swap() {
                     if let Err(why) = iyakki_zram::apply::swapoff_safe(&self.mem.stats) {
                         return self.fail(why);
                     }

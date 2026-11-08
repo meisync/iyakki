@@ -457,7 +457,7 @@ pub(crate) fn run(e: &Engine, env: &mut dyn StepEnv, wait: Duration, poll: Durat
     }
     env.request_after(e.request)?;
     let detail = format!("{} inside the cluster (S3, path style, region {REGION}, bucket {BUCKET}){}", e.endpoint(), if image_id.is_empty() { String::new() } else { format!("; image {image_id}") });
-    env.mark(e.item, &detail)?;
+    crate::quickinstall::mark_verified(env, e.item, &detail)?;
     env.say(&format!("[7/7] done: {detail}. IYAKKI is putting the keys into your vault as {} and {}", e.access_vault(), e.secret_vault()));
     Ok(())
 }

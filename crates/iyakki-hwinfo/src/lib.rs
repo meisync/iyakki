@@ -234,6 +234,22 @@ pub fn secure_boot_summary(secure_boot_on: bool, lockdown_file: Option<&str>) ->
     (mode, note)
 }
 
+/// The DMI fields that name a computer MODEL (never a serial number or the machine's unique id: those identify one unit, and the
+/// per-computer profiles need to recognise a kind of computer without recording anything unique). Empty fields are `None`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DmiIdentity {
+    pub sys_vendor: Option<String>,
+    pub product_name: Option<String>,
+    pub product_version: Option<String>,
+    pub board_name: Option<String>,
+}
+
+/// Reads the model-naming DMI fields (`/sys/class/dmi/id/{sys_vendor,product_name,product_version,board_name}`).
+pub fn dmi_identity(r: &Roots) -> DmiIdentity {
+    let dmi = |f: &str| read(&r.sys.join("class/dmi/id").join(f));
+    DmiIdentity { sys_vendor: dmi("sys_vendor"), product_name: dmi("product_name"), product_version: dmi("product_version"), board_name: dmi("board_name") }
+}
+
 pub fn collect(r: &Roots) -> Report {
     let mut rep = Report::default();
     // system
@@ -441,6 +457,19 @@ mod tests {
         let root = std::env::temp_dir().join(format!("iyakki-hwinfo-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         (Roots { sys: root.join("sys"), proc: root.join("proc") }, root)
+    }
+
+    #[test]
+    fn the_model_fields_are_read_and_no_serial_number_is() {
+        let (r, root) = fake("dmi");
+        put(&root, "sys/class/dmi/id/sys_vendor", "Apple Inc.\n");
+        put(&root, "sys/class/dmi/id/product_name", "Macmini8,1\n");
+        put(&root, "sys/class/dmi/id/product_serial", "C07XXXX\n");
+        put(&root, "sys/class/dmi/id/product_uuid", "1234\n");
+        let d = dmi_identity(&r);
+        assert_eq!((d.sys_vendor.as_deref(), d.product_name.as_deref()), (Some("Apple Inc."), Some("Macmini8,1")));
+        assert_eq!((d.product_version, d.board_name), (None, None));
+        assert_eq!(dmi_identity(&Roots { sys: root.join("none"), proc: root.join("none") }), DmiIdentity::default());
     }
 
     #[test]

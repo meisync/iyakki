@@ -89,7 +89,7 @@ static FBSET_SKIP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 
 /// Read `iyakki.fbset=` once (the splash and the shell both call it; the later call wins and is the same text).
 pub fn init_fbset_from_cmdline() -> FbSet {
-    let m = FbSet::from_cmdline(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default());
+    let m = FbSet::from_cmdline(&iyakki_storage::cmdline_text());
     FBSET_SKIP.store(m == FbSet::Skip, std::sync::atomic::Ordering::Relaxed);
     m
 }

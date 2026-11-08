@@ -203,7 +203,7 @@ pub struct Published {
     pub serial: u64,
 }
 
-fn server_base(server: &str) -> Result<String, String> {
+pub(super) fn server_base(server: &str) -> Result<String, String> {
     let t = server.trim().trim_end_matches('/').trim_end_matches("/catalog.json");
     if !(t.starts_with("https://") || t.starts_with("http://")) || t.len() > 300 || t.chars().any(|c| c.is_control() || c == ' ') {
         return Err("the store address starts with https:// or http://".into());
@@ -260,7 +260,7 @@ pub fn refusal_text(status: u16, why: Option<&str>) -> String {
     }
 }
 
-fn private_host(base: &str) -> bool {
+pub(super) fn private_host(base: &str) -> bool {
     let host = base.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or("");
     let host = host.rsplit_once(':').map_or(host, |(h, _)| h).trim_matches(['[', ']']);
     if host == "localhost" || host == "::1" || host.ends_with(".svc") || host.ends_with(".cluster.local") || host.ends_with(".local") || !host.contains('.') {

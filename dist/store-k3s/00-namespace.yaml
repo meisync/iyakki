@@ -1,0 +1,40 @@
+# Namespace, quota and defaults for OUR store. Remove everything with: kubectl delete namespace iyakki-store
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: iyakki-store
+  labels:
+    app.kubernetes.io/part-of: iyakki-store
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: iyakki-store
+  namespace: iyakki-store
+  labels:
+    app.kubernetes.io/part-of: iyakki-store
+spec:
+  hard:
+    requests.cpu: "1"
+    requests.memory: 1Gi
+    limits.cpu: "2"
+    limits.memory: 2Gi
+    persistentvolumeclaims: "2"
+    requests.storage: 50Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: iyakki-store
+  namespace: iyakki-store
+  labels:
+    app.kubernetes.io/part-of: iyakki-store
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:
+        cpu: 50m
+        memory: 64Mi

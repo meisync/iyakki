@@ -223,7 +223,16 @@ pub fn run(env: &mut dyn StepEnv, wait: Duration, poll: Duration) -> Result<(), 
         Ok(line) => env.say(&format!("[4/6] {line}")),
         Err(e) => return fail(env, &pulled, e),
     }
-    env.mark(Item::VoicePack, &format!("{WHISPER_MODEL} and {KOKORO_MODEL} in Lemonade"))?;
+    // Lemonade itself must list both as downloaded now (the self-test used them, but the list is what Settings and Remove read)
+    match env.lemonade_models() {
+        Ok(now) if [WHISPER_MODEL, KOKORO_MODEL].iter().all(|m| now.iter().any(|x| x == m)) => {}
+        Ok(now) => {
+            let missing: Vec<&str> = [WHISPER_MODEL, KOKORO_MODEL].into_iter().filter(|m| !now.iter().any(|x| x == m)).collect();
+            return fail(env, &pulled, format!("Verify failed: Lemonade does not list {} as downloaded", missing.join(" and ")));
+        }
+        Err(e) => return fail(env, &pulled, format!("Verify failed: could not read Lemonade's models ({e})")),
+    }
+    crate::quickinstall::mark_verified(env, Item::VoicePack, &format!("{WHISPER_MODEL} and {KOKORO_MODEL} in Lemonade"))?;
     env.request_after("voice-pack")?;
     env.say("[5/6] asked IYAKKI to set the engines in Settings \u{2192} Voice (speech to text and reading voice)");
     env.say("[6/6] done: listening uses Whisper tiny, reading uses Kokoro (English only). Remove in the tile's details puts your old settings back");

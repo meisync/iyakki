@@ -131,6 +131,12 @@ code on both. The QEMU emulator: patches work like on hardware because the data 
 
 ## 8. Authority, approval, audit
 
+**One grant per computer and kind (2026-11-07).** `grants.rs` keeps the approvals of a computer per kind (`shell`, `power`, `patch`); before,
+a computer had one slot and approving the patch card replaced its shell grant, so a patch of a wide path (`/usr/bin/iyakki` on the Mac mini)
+was refused with "outside the places a patch may change without the shell scope and its approval" even right after `--shell`. A grant of
+one kind never stands in for another (`shell_status_kind`, `shell_grant_kind`). Test
+`devmode::tests_adb::a_patch_approval_keeps_the_shell_grant_and_one_kind_never_stands_in_for_another`.
+
 * every route needs the `update` scope (administrator accounts only, granted per computer on the device);
 * **approval card, once per computer:** the first `apply` or `remove` is answered `not approved`; the CLI asks (`/v1/dev/grant/ask`, kind
   `patch`), the administrator approves on the device's screen (the top bar shows `PATCH REQUEST from <computer>`); the computer is then

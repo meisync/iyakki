@@ -20,7 +20,7 @@ pub(super) struct KbdPanel {
 
 impl Default for KbdPanel {
     fn default() -> KbdPanel {
-        KbdPanel { sys: "/sys".into(), test: Default::default() }
+        KbdPanel { sys: iyakki_agent::sysinfo::sys_root().into(), test: Default::default() }
     }
 }
 
@@ -96,7 +96,7 @@ impl SettingsApp {
         }
         let (tap, _) = k.trackpad();
         crate::input::request_touchpad(tap);
-        crate::scrolleng::request_config(k.scroll().into());
+        crate::scrolleng::request_config(crate::fnkeys::scroll_config(k.scroll()));
         crate::inputprofile::apply(&k);
         match keyboard::apply_apple(&self.kbd.sys, &k) {
             Ok(_) => Some(k),

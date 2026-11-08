@@ -260,7 +260,7 @@ fn the_store_tile_says_how_many_updates_the_last_check_found_at_four_sizes() {
     let (mut sh, _) = shell_with_users("store-update-chip");
     login(&mut sh, "root", "rootpass12");
     let svc = sh.services_for_demo().clone();
-    let upd = |id: &str| chk::Update { kind: chk::Kind::App, id: id.into(), title: id.into(), from: "1.0.0".into(), to: "1.1.0".into(), source: "Stick".into(), new_permissions: vec![], note: String::new() };
+    let upd = |id: &str| chk::Update { kind: chk::Kind::App, id: id.into(), title: id.into(), from: "1.0.0".into(), to: "1.1.0".into(), source: "Stick".into(), new_permissions: vec![], note: String::new(), driver: false };
     for (n, want) in [(0usize, "Apps and skills"), (1, "1 update"), (2, "2 updates")] {
         chk::Report { checked_at: 1, updates: (0..n).map(|i| upd(&format!("skill:a{i}"))).collect(), ..Default::default() }.save(svc.dir()).unwrap();
         for (w, h) in SIZES {
@@ -283,4 +283,101 @@ fn the_store_tile_says_how_many_updates_the_last_check_found_at_four_sizes() {
         }
     }
     let _ = std::fs::remove_file(svc.dir().join(chk::FILE));
+}
+
+#[test]
+fn the_header_chip_says_how_many_updates_are_waiting_stays_in_the_bar_and_opens_the_store_at_four_sizes() {
+    use iyakki_agent::store::updatecheck as chk;
+    let (mut sh, _) = shell_with_users("header-update-chip");
+    login(&mut sh, "root", "rootpass12");
+    let svc = sh.services_for_demo().clone();
+    let upd = |id: &str| chk::Update { kind: chk::Kind::App, id: id.into(), title: id.into(), from: "1.0.0".into(), to: "1.1.0".into(), source: "Stick".into(), new_permissions: vec![], note: String::new(), driver: false };
+    for (n, want) in [(0usize, ""), (1, "1 update"), (3, "3 updates")] {
+        chk::Report { checked_at: 1, updates: (0..n).map(|i| upd(&format!("skill:a{i}"))).collect(), ..Default::default() }.save(svc.dir()).unwrap();
+        for (w, h) in SIZES {
+            let mut g = Gfx::new(w, h);
+            sh.resize_for_test(w, h);
+            sh.leave_app();
+            sh.refresh_badge();
+            sh.open(PApp::Settings);
+            sh.render(&mut g);
+            let s = scale_for(w, h);
+            let chip = sh.hits().iter().find(|x| x.label == "updates waiting").map(|x| x.rect);
+            if want.is_empty() {
+                assert!(chip.is_none(), "{w}x{h}: no chip without updates");
+                continue;
+            }
+            if chip.is_none() && w < 1024 {
+                continue; // the bar of a small screen is full (clock, bell, buttons): the chip leaves out, the STORE tile and the page say it
+            }
+            let r = chip.unwrap_or_else(|| panic!("{w}x{h}: no chip for {n} update(s); count {} labels {:?}", sh.update_count, sh.hits().iter().map(|x| (x.label.clone(), x.rect.x as i32)).collect::<Vec<_>>()));
+            assert!(g.layout_log.texts.iter().any(|(_, _, _, t)| t == want), "{w}x{h}: {want:?} not drawn");
+            assert!(r.x >= 0.0 && r.x + r.w <= w as f32 && r.y >= 0.0 && r.y + r.h <= HEADER_H * s, "{w}x{h}: chip {r:?} leaves the bar");
+            let back = back_rect(w, s);
+            assert!(r.x + r.w <= back.x || r.y + r.h <= back.y || r.y >= back.y + back.h, "{w}x{h}: chip over Back");
+            if n == 1 {
+                sh.handle(&Event::MouseDown((r.x + r.w / 2.0) as i32, (r.y + r.h / 2.0) as i32));
+                sh.render(&mut g);
+                assert!(matches!(&sh.screen, Screen::App(_, PApp::Store)), "{w}x{h}: a click opens the STORE");
+            }
+        }
+    }
+    let _ = std::fs::remove_file(svc.dir().join(chk::FILE));
+}
+
+#[test]
+fn internet_sharing_that_ended_by_itself_leaves_one_note_and_a_stop_the_person_asked_for_leaves_none() {
+    use iyakki_agent::sharing::{control, State, Status};
+    iyakki_agent::sharing::notice::forget_for_tests();
+    let (mut sh, _) = shell_with_users("sharing-notice");
+    login(&mut sh, "root", "rootpass12");
+    let svc = sh.services_for_demo().clone();
+    let data = svc.dir().to_path_buf();
+    let count = |t: &str| svc.inbox.list("root").iter().filter(|n| n.title == t).count();
+    // the person stopped it: no note
+    control::write_status(&data, &Status { state: State::Off, request_id: 1, ..Status::default() }).unwrap();
+    sh.sharing_notice_tick();
+    assert_eq!(count("Internet sharing stopped") + count("Internet sharing switched off"), 0);
+    // the policy took it away: one warning, however many times the shell looks
+    control::write_status(&data, &Status { state: State::Failed, request_id: 2, note: "The administrator's policy no longer allows sharing.".into(), ..Status::default() }).unwrap();
+    for _ in 0..3 {
+        sh.sharing_notice_tick();
+    }
+    assert_eq!(count("Internet sharing stopped"), 1);
+    // an idle switch-off of a later session is a new note
+    control::write_status(&data, &Status { state: State::Off, request_id: 3, note: "It switched itself off after 2 h with nobody using it.".into(), ..Status::default() }).unwrap();
+    sh.sharing_notice_tick();
+    assert_eq!(count("Internet sharing switched off"), 1);
+    let _ = std::fs::remove_dir_all(control::dir(&data));
+}
+
+#[test]
+fn a_chip_in_the_header_says_internet_is_being_shared_stays_in_the_bar_and_goes_when_it_stops_at_four_sizes() {
+    use iyakki_agent::sharing::{control, State, Status};
+    let (mut sh, _) = shell_with_users("sharing-chip");
+    login(&mut sh, "root", "rootpass12");
+    let svc = sh.services_for_demo().clone();
+    let data = svc.dir().to_path_buf();
+    for (state, want) in [(State::Off, false), (State::On, true), (State::Off, false)] {
+        control::write_status(&data, &Status { state, request_id: 9, ..Status::default() }).unwrap();
+        sh.sharing_notice_tick();
+        for (w, h) in SIZES {
+            let mut g = Gfx::new(w, h);
+            sh.resize_for_test(w, h);
+            sh.leave_app();
+            sh.open(PApp::Settings);
+            sh.render(&mut g);
+            let s = scale_for(w, h);
+            let chip = sh.hits().iter().find(|x| x.label == "internet sharing is on").map(|x| x.rect);
+            if want && chip.is_none() && w < 1024 {
+                continue; // no room left in a small screen's bar: the chip leaves out
+            }
+            assert_eq!(chip.is_some(), want, "{w}x{h} {state:?} app={} labels {:?}", matches!(sh.screen, Screen::App(..)), sh.hits().iter().map(|x| (x.label.clone(), x.rect.x as i32)).collect::<Vec<_>>());
+            if let Some(r) = chip {
+                assert!(r.x >= 0.0 && r.x + r.w <= w as f32 && r.y >= 0.0 && r.y + r.h <= HEADER_H * s, "{w}x{h}: chip {r:?} leaves the bar");
+                assert!(g.layout_log.texts.iter().any(|(_, _, _, t)| t == "Sharing internet"));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(control::dir(&data));
 }

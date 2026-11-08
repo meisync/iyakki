@@ -121,11 +121,13 @@ impl Backend for FileBackend {
 /// An in-memory machine for the page tests: `submit` only stores the request; `set_status` plays the service.
 pub struct MemBackend {
     inner: Mutex<(Vec<IfaceInfo>, bool, Status, Request, super::policy::Policy)>,
+    /// The hotspot's name and password (checked the same way as the real ones).
+    hot: Mutex<(String, String)>,
 }
 
 impl MemBackend {
     pub fn new(ifs: Vec<IfaceInfo>, wifi_ap: bool) -> MemBackend {
-        MemBackend { inner: Mutex::new((ifs, wifi_ap, Status::default(), Request::default(), super::policy::Policy::default())) }
+        MemBackend { inner: Mutex::new((ifs, wifi_ap, Status::default(), Request::default(), super::policy::Policy::default())), hot: Mutex::new(("IYAKKI-TEST".into(), "first password".into())) }
     }
     pub fn set_status(&self, s: Status) {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).2 = s;
@@ -157,6 +159,15 @@ impl Backend for MemBackend {
     }
     fn policy(&self) -> super::policy::Policy {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).4.clone()
+    }
+    fn hotspot(&self) -> Option<(String, String)> {
+        Some(self.hot.lock().unwrap_or_else(|e| e.into_inner()).clone())
+    }
+    fn set_hotspot(&self, ssid: &str, passphrase: &str) -> Result<(), String> {
+        iyakki_hotspot::settings::validate_ssid(ssid).map_err(|e| format!("the network name: {e:?}"))?;
+        iyakki_hotspot::settings::validate_passphrase(passphrase).map_err(|e| format!("the password: {e:?}"))?;
+        *self.hot.lock().unwrap_or_else(|e| e.into_inner()) = (ssid.into(), passphrase.into());
+        Ok(())
     }
     fn set_policy(&self, p: &super::policy::Policy, by: &str, is_admin: bool) -> Result<String, String> {
         if !is_admin {

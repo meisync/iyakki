@@ -691,6 +691,10 @@ impl Store {
         self.raise_highwater(&m.kind, &m.name, &m.version);
         // the replaced version is kept for one generation (rollback); anything older goes
         self.after_install(&old, &rec, review.input.rollback);
+        // the badge and the grouped notice count what is still waiting, not what was just installed
+        if super::updatecheck::forget_installed(svc.dir(), &rec.kind, &rec.name, &rec.version) {
+            super::updatenotice::refresh_existing(svc, &actor.user);
+        }
         Ok(rec)
     }
 
