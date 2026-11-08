@@ -397,6 +397,8 @@ pub fn known_name(vendor: u16, device: u16) -> Option<&'static str> {
         (0x17cb, 0x1103) => "WCN6855 Wi-Fi",
         (0x10ec, 0xc821) => "RTL8821CE Wi-Fi",
         (0x10ec, 0x8852) => "RTL8852AE Wi-Fi",
+        (0x10ec, 0xb852) => "RTL8852BE Wi-Fi",
+        (0x0bda, 0xb85c) => "RTL8852BE Bluetooth",
         _ => return None,
     })
 }

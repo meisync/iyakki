@@ -176,6 +176,9 @@ fn devices_are_read_from_sysfs_and_named_for_the_person() {
     assert_eq!(devs.len(), 3);
     let wifi = devs.iter().find(|d| d.id == "0000:00:14.3").unwrap();
     assert_eq!(dev_phrase(wifi), "your Wi-Fi card Intel Wi-Fi 6 AX200 (8086:2723)");
+    // the HP Pavilion 16-af0 (2026-11-07): Realtek RTL8852BE Wi-Fi on PCI and its Bluetooth half on USB
+    assert_eq!(known_name(0x10ec, 0xb852), Some("RTL8852BE Wi-Fi"));
+    assert_eq!(known_name(0x0bda, 0xb85c), Some("RTL8852BE Bluetooth"));
     let gpu = devs.iter().find(|d| d.driver == "i915").unwrap();
     assert_eq!(class_label(gpu), "graphics card");
     assert_eq!(class_label(devs.iter().find(|d| d.bus == "usb").unwrap()), "Bluetooth adapter");

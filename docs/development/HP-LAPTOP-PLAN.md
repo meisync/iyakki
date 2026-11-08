@@ -57,6 +57,14 @@ On this HP laptop, in the owner's order of importance: **(1) it boots, (2) Wi-Fi
 
 ## Step 3: Wi-Fi and Bluetooth
 
+**2026-11-07, checked in image pc-lean-1107i**: the pc image already carries what this HP needs: kernel modules `rtw89_8852be` (with
+`rtw89_8852b`, `rtw89_8852b_common`, `rtw89_core`, `rtw89_pci`), firmware `rtw89/rtw8852b_fw.bin` and `rtw8852b_fw-1.bin`, `btusb` + `btrtl`
+with `rtl_bt/rtl8852bu_fw.bin` and `rtl8852bu_config.bin`. So no firmware card should be needed for Wi-Fi or Bluetooth on this machine; the
+step is to boot 1107i (or later) on the HP and verify the list below. If the card still asks for firmware, the kernel log names the file and
+the Realtek firmware card in Store -> Setup offers it. The firmware helper names the chip (`RTL8852BE Wi-Fi`, `RTL8852BE Bluetooth`) since
+this date.
+
+
 * In **Store -> Setup** the firmware cards (the family that matches step 1, and "Hardware firmware" for the rest) offer the ways: download from the vendor, through a cable, from a USB stick or folder, or files sent over a cable. The person must accept the vendor licence themselves; do not accept it on their behalf, do not ship the firmware, do not host it.
 * After install the driver needs a restart (the card says so). Then check: the interface appears, scan lists networks, join works, the hotspot works if the card supports AP mode, Bluetooth powers on and pairs a device.
 * Evidence to keep: the kernel log lines of the driver, `ip link`, the firmware file names loaded.
