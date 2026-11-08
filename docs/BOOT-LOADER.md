@@ -124,6 +124,42 @@ started drawing (`iyakki_core::bootconfirm`: UEFI variable `BootConfirm`, vendor
 starts the loader switches to "previous", after `tries` more it stops and opens its menu with the reason on screen. Choosing by hand never spends a
 try. Details and the update path (`loader.prev.efi`, temp name and rename) are in the replacement plan.
 
+## Rows that GRUB's recovery job needs (2026-11-07)
+
+Two first-level rows work without GRUB. The menu is `timeout 0`: it opens only when a key is held, after a start that came back, or when the
+loader stops to wait.
+
+**IYAKKI (previous version).** The system update (`crates/iyakki-agent/src/devmode/update.rs`) already keeps the kernel and RAM disk it replaces
+on the data partition (`boot-prev/<id>/`, ext4), where GRUB reads them. The loader reads FAT only, so a loader that read that partition would
+need an ext4 reader in the boot path (a large new piece, in a program that runs before the kernel and under Secure Boot). Chosen instead: the
+update ALSO copies the same two files to the boot volume, `EFI/iyakki-boot/prev/bzImage` and `prev/initrd`, then writes one marker, `set-plain`
+or `set-oldroot` (the second when the update also replaced the system image: that row adds `iyakki.root=previous`, exactly like GRUB's entry). The
+rows `prev-plain` and `prev-oldroot` in `boot.cfg` `require` their marker, so they exist only when a complete copy exists: the marker is removed
+first and written last, files go through a temporary name and a checked rename. It is best effort: with the lean install the pair is about
+15 MB; a full RAM disk (about 300 MB) usually does not fit beside the new files on the 512 MB volume, then the update says so in its result
+(`loader_copy`) and only the GRUB entry remains. Own code, no new dependency. The row has the same title as GRUB's, shown on the first level
+only when a copy exists (otherwise hidden).
+
+**Automatic fall back.** The default row names the two rows in a new `previous` line. When the boot state says the previous version is due
+(`tries` unconfirmed starts, `BootConfirm` never arrived) the loader starts that row instead of the default, without opening the menu
+(`boot_core::choose::previous_item`). The marker holds `stamp N`, one more with every update; the stamp is stored in the boot state
+(`BootState::sync_stamp`), and a new stamp means a new set was installed, so the tries and the choice of the current version start over (without
+it a rollback would outlive the next update). With no previous copy nothing changes: 9 starts, then the old behaviour (same files, 9 more, then
+the menu waits with the reason on screen). If the previous version fails too, the menu waits as before. Choosing a row by hand never spends a try.
+
+**Install to a disk.** The row starts the same kernel and RAM disk as the normal row with `iyakki.install=1` (the command line is the one GRUB's
+entry uses; a test compares them), so it does not depend on GRUB. It is a first-level row only on install media (`requires
+/EFI/iyakki-boot/install-media`; update packs and installed disks leave the marker out). It is deliberately NOT offered under More options of an
+installed disk: the installer never lists the disk it started from as a target and an installed disk carries no install image, so there is nothing
+useful to offer, while a wipe-a-disk row on the machine's only system disk is a risk (the running desktop's own Install page, `iyakki install`,
+stays for that case). Revisit when a reinstall-to-another-disk use is asked for.
+
+Tests: boot-core (`choose::tests::fallback::*`, `assess::tests::a_new_stamp_*`, `config::tests::previous_names_*`); the generated rows in
+`crates/iyakki-core/tests/boot_menu.rs`; the update side in `devmode::tests_update` (`the_loader_copy_*`); QEMU (`iyakki-boot/tools/qemu-test.sh`,
+tests `k` and `l`, stand-in kernel: sequence of starts and the rows present or absent). Not proven: a real kernel started from the copy on the
+boot volume by the loader (firmware USB reads of the copy), the Install row starting the real installer through the loader, and any of it on a
+real machine.
+
 ## The boot log on the volume (`EFI/iyakki-boot/last-boot.log`)
 
 A laptop has no serial port and the splash hides the text console, so the loader keeps every line it would have printed and writes
@@ -153,4 +189,5 @@ sign it with `secureboot.sh loader-image IN OUT`, keep the old `EFI/BOOT/grubx64
 
 GRUB's Compatible USB mode variable (`iyakki_usbq`, from Settings -> Storage) and the lean-start failure fallback are GRUB features; the loader's
 entries do not read them (the explicit "Compatible USB mode" row is carried). The loader reads FAT only: the previous kernel that `iyakki dev update`
-keeps on the data partition is reached through the GRUB recovery entry.
+keeps on the data partition is also copied to the boot volume for the loader's "IYAKKI (previous version)" row (see above), so GRUB's recovery entry
+is no longer the only way to it.

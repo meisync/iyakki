@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT OR Apache-2.0
 # Boot the UEFI loader under QEMU + OVMF and check the menu, the hold key, the fallback, boot counting and chain loading.
-#   qemu-test.sh [--only a|a2|b|c|d|e|f|g|h|i|j] [--keep] [--lean-image IMAGE.img]
+#   qemu-test.sh [--only a|a2|b|c|d|e|f|g|h|i|j|k|l] [--keep] [--lean-image IMAGE.img]
 # Settings (environment; the defaults are relative to this repository):
 #   CARGO_TARGET_DIR   where `cargo build --release --target x86_64-unknown-uefi -p boot-uefi -p test-efi` put its output
 #   BOOT_EFI, TEST_EFI the two programs (default: under CARGO_TARGET_DIR, else ../target)
@@ -28,7 +28,7 @@ while [ $# -gt 0 ]; do
 		--lean-image) LEAN=$2; shift 2 ;;
 		--only) EXTRA="$EXTRA --only $2"; shift 2 ;;
 		--keep) EXTRA="$EXTRA --keep"; shift ;;
-		*) echo "usage: $0 [--only a|a2|b|c|d|e|f|g|h|i|j] [--keep] [--lean-image IMAGE.img]" >&2; exit 2 ;;
+		*) echo "usage: $0 [--only a|a2|b|c|d|e|f|g|h|i|j|k|l] [--keep] [--lean-image IMAGE.img]" >&2; exit 2 ;;
 	esac
 done
 PATH=$PATH:/usr/sbin

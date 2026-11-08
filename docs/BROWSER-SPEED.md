@@ -159,8 +159,10 @@ answers are not kept although a single-person browser cache could (conservative 
 
 Found on the HP Pavilion 16-af0 (Meteor Lake, image 1107i): the kernel declared the Intel card wedged (GuC firmware missing at probe),
 Mesa fell back to llvmpipe on the card's render node, the helper took it ("graphics: hardware llvmpipe ... on /dev/dri/renderD128") and
-died by a signal before its first frame; the shell showed the page in the reader. Three changes, none measured on hardware yet (the
-next HP image does that):
+died by a signal before its first frame; the shell showed the page in the reader. Three changes; image 1107j on the HP the same evening: the kernel loaded `mtl_dmc.bin`, `mtl_guc_70.bin` (GuC submission enabled) and
+`mtl_huc_gsc.bin`, no "wedged", the engine started on "Mesa Intel(R) Graphics (MTL) on /dev/dri/renderD128" with "the web process may use
+4096 MB, the network process 1365 MB", and YouTube's watch page rendered and played (owner: "browser works on HP"). The same-session
+fall back and the node skipping were not exercised there (the card worked), so those two are tested, not yet seen on hardware:
 
 * **Render node choice** (`helper.c`, `hw_try_node`/`hw_open`): every render node is tried in turn and the first with a real renderer
   wins; a node that gives only llvmpipe/softpipe is left aside (log: "gives only llvmpipe ..., looking further") so a second card (the

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Which item starts: default, one-shot, timeout, hold-a-key recovery.
 
-use crate::item::Item;
+use crate::assess::Tree;
+use crate::config::Entry;
+use crate::item::{Action, Item};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -178,6 +180,18 @@ pub fn decide(p: &Params<'_>) -> Decision {
     Decision::Menu { selected: def, timeout_secs: Some(p.timeout_secs) }
 }
 
+/// The start the loader chose by itself is `idx`. When the boot state says the previous version is due (`tree`) and that entry names
+/// an entry of the previous version (`previous` in the config) that is listed and startable, return that item's index: it starts in
+/// place of `idx`. `None`: start `idx` as it is (the current tree, or no previous version on this volume: the entries whose
+/// `requires` file is missing are not items, so they are never found here).
+pub fn previous_item(entries: &[Entry], items: &[Item], idx: usize, tree: Tree) -> Option<usize> {
+    if tree != Tree::Previous {
+        return None;
+    }
+    let Action::Linux(e) = &items.get(idx)?.action else { return None };
+    entries.get(*e)?.previous.iter().find_map(|id| items.iter().position(|i| &i.id == id && i.enabled()))
+}
+
 /// Ids of the listed (not hidden) items, for tests and the front end.
 pub fn listed(items: &[Item]) -> Vec<String> {
     items.iter().filter(|i| !i.hidden).map(|i| i.id.clone()).collect()
@@ -317,6 +331,110 @@ mod tests {
         assert_eq!(HoldKey::parse("ab"), None);
         assert_eq!(HoldKey::parse(""), None);
         assert_eq!(HoldKey::parse("!"), None);
+    }
+
+    mod fallback {
+        use super::*;
+        use crate::assess::{BootState, Outcome};
+        use crate::config::Config;
+        use crate::discover::all_items;
+
+        const CFG: &str = "timeout 0\ntries 2\n\
+entry iyakki\n kernel /boot/bzImage\n initrd /boot/initrd\n default\n previous prev prev-oldroot\n\
+entry prev\n title IYAKKI (previous version)\n kernel /EFI/p/bzImage\n initrd /EFI/p/initrd\n more\n\
+entry safe\n kernel /boot/bzImage\n more\n";
+
+        /// One start of the loader the way `main` does it: spend a try, pick the item.
+        fn start(state: &mut BootState, cfg: &Config, items: &[Item]) -> Result<usize, ()> {
+            let p = Params { items, default_name: None, timeout_secs: cfg.timeout_secs, oneshot: &none(), keys: KeyState::default(), force_menu: false, wait: false };
+            let mut trial = *state;
+            let outcome = trial.on_start(cfg.tries);
+            let wait = matches!(outcome, Outcome::StopAndWait(_));
+            match decide(&Params { wait, ..p }) {
+                Decision::Boot { index, .. } => {
+                    *state = trial;
+                    Ok(previous_item(&cfg.entries, items, index, trial.tree).unwrap_or(index))
+                }
+                _ => Err(()), // the menu opens and waits
+            }
+        }
+
+        fn setup(text: &str) -> (Config, Vec<Item>) {
+            let mut cfg = Config::parse(text).unwrap();
+            // the way main does it: entries whose file is not on the volume are dropped before the items are made
+            cfg.drop_unavailable(|_| true, true);
+            let items = all_items(&cfg, Vec::new(), false);
+            (cfg, items)
+        }
+
+        fn id_of(items: &[Item], i: usize) -> &str {
+            &items[i].id
+        }
+
+        #[test]
+        fn a_failed_update_falls_back_to_the_previous_version_by_itself() {
+            let (cfg, items) = setup(CFG);
+            let mut st = BootState::fresh(cfg.tries);
+            st.sync_stamp(1, cfg.tries); // the update left stamp 1
+            // the new set never confirms: it gets `tries` starts
+            for _ in 0..2 {
+                assert_eq!(id_of(&items, start(&mut st, &cfg, &items).unwrap()), "iyakki");
+            }
+            // the next start is the previous version, without the menu
+            let i = start(&mut st, &cfg, &items).unwrap();
+            assert_eq!(id_of(&items, i), "prev");
+            assert_eq!(st.reason, crate::assess::Reason::TooManyFailures);
+            // and it stays there: the previous version, once it is confirmed, keeps being the one that starts
+            st.mark_good(cfg.tries);
+            assert_eq!(id_of(&items, start(&mut st, &cfg, &items).unwrap()), "prev");
+            // another update (new stamp) is tried again
+            st.sync_stamp(2, cfg.tries);
+            assert_eq!(id_of(&items, start(&mut st, &cfg, &items).unwrap()), "iyakki");
+        }
+
+        #[test]
+        fn a_confirmed_start_never_falls_back() {
+            let (cfg, items) = setup(CFG);
+            let mut st = BootState::fresh(cfg.tries);
+            for _ in 0..20 {
+                assert_eq!(id_of(&items, start(&mut st, &cfg, &items).unwrap()), "iyakki");
+                st.mark_good(cfg.tries);
+            }
+        }
+
+        #[test]
+        fn when_the_previous_version_fails_too_the_menu_opens_and_waits() {
+            let (cfg, items) = setup(CFG);
+            let mut st = BootState::fresh(cfg.tries);
+            for _ in 0..4 {
+                start(&mut st, &cfg, &items).unwrap();
+            }
+            assert_eq!(start(&mut st, &cfg, &items), Err(()));
+        }
+
+        #[test]
+        fn no_previous_version_keeps_the_old_behaviour_and_ends_in_the_menu() {
+            // the `requires` file of the previous rows is missing: their entries are dropped, the default has nothing to fall back to
+            let mut cfg = Config::parse(CFG).unwrap();
+            cfg.entries.retain(|e| e.id != "prev");
+            let items = all_items(&cfg, Vec::new(), false);
+            let mut st = BootState::fresh(cfg.tries);
+            for _ in 0..4 {
+                assert_eq!(id_of(&items, start(&mut st, &cfg, &items).unwrap()), "iyakki");
+            }
+            assert_eq!(start(&mut st, &cfg, &items), Err(()));
+        }
+
+        #[test]
+        fn the_second_candidate_is_used_when_the_first_is_missing_and_other_entries_are_not_replaced() {
+            let (mut cfg, _) = setup(CFG);
+            cfg.entries[1].id = "prev-oldroot".into();
+            let items = all_items(&cfg, Vec::new(), false);
+            assert_eq!(previous_item(&cfg.entries, &items, 0, Tree::Previous).map(|i| id_of(&items, i)), Some("prev-oldroot"));
+            assert_eq!(previous_item(&cfg.entries, &items, 0, Tree::Current), None);
+            let safe = items.iter().position(|i| i.id == "safe").unwrap();
+            assert_eq!(previous_item(&cfg.entries, &items, safe, Tree::Previous), None);
+        }
     }
 
     #[test]

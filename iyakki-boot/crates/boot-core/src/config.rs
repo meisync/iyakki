@@ -57,6 +57,8 @@ pub const MAX_PATH: usize = 255;
 pub const MAX_SPLASH_MS: u32 = 10_000;
 /// Longest timeout in seconds.
 pub const MAX_TIMEOUT: u32 = 600;
+/// Most ids on a `previous` line (all lines of one entry together).
+pub const MAX_PREVIOUS: usize = 4;
 /// Default `order` of a configured entry.
 pub const DEFAULT_ORDER: i32 = 100;
 /// Tries before a rollback when `tries` is not set.
@@ -100,6 +102,9 @@ pub struct Entry {
     pub more: bool,
     /// Path on the boot volume that must exist, else the entry is left out (`requires`).
     pub requires: Option<String>,
+    /// Ids of entries that start in place of this one when the boot state says "previous version" (`previous`, the first one that is
+    /// listed and startable wins). Empty: this entry has no previous version of its own.
+    pub previous: Vec<String>,
 }
 
 impl Entry {
@@ -295,6 +300,7 @@ impl Config {
             hold: None,
             more: false,
             requires: None,
+            previous: Vec::new(),
         };
         let mut c = Config::empty();
         c.timeout_secs = 0;
@@ -389,6 +395,7 @@ impl Config {
                     hold: None,
                     more: false,
                     requires: None,
+                    previous: Vec::new(),
                 });
                 *block = Block::Entry;
                 return Ok(());
@@ -473,6 +480,20 @@ impl Config {
                         }
                         e.requires = Some(val.to_string());
                     }
+                    "previous" => {
+                        if val.trim().is_empty() {
+                            return Err(ErrorKind::BadValue("previous: entry ids"));
+                        }
+                        for id in val.split_whitespace() {
+                            if !valid_id(id, MAX_ID) {
+                                return Err(ErrorKind::BadValue("previous: entry ids"));
+                            }
+                            if e.previous.len() >= MAX_PREVIOUS {
+                                return Err(ErrorKind::TooMany);
+                            }
+                            e.previous.push(id.to_string());
+                        }
+                    }
                     "order" => e.order = number(val, -100_000, 100_000)? as i32,
                     "hold" => e.hold = Some(HoldKey::parse(val).ok_or(ErrorKind::BadValue("hold: a letter, digit, shift, esc, space or touch"))?),
                     _ => return Err(ErrorKind::UnknownKey(key.to_string())),
@@ -534,6 +555,17 @@ override efi:0:1:/efi/x/y.efi\n  name Renamed\n  hidden no\n  order 3\n";
         assert!(l.fallback && l.config.splash.is_none());
         let long = format!("splash /{}\n{base}", "a".repeat(MAX_PATH));
         assert!(Config::parse(&long).is_err());
+    }
+
+    #[test]
+    fn previous_names_the_entries_that_replace_this_one() {
+        let c = Config::parse("entry a\n kernel /k\n previous p1 p2\n previous p3\nentry p1\n kernel /p\n").unwrap();
+        assert_eq!(c.entries[0].previous, ["p1", "p2", "p3"]);
+        assert!(c.entries[1].previous.is_empty());
+        for bad in ["previous", "previous a b c d e", "previous \"x\""] {
+            assert!(Config::parse(&format!("entry a\n kernel /k\n {bad}\n")).is_err(), "{bad}");
+        }
+        assert!(Config::parse("previous p\nentry a\n kernel /k\n").is_err());
     }
 
     #[test]

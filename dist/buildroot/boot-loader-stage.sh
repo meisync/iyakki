@@ -11,7 +11,10 @@
 # the ONE list the loader's second level is made from; crates/iyakki-core/tests/boot_menu.rs checks that every GRUB entry has a twin in it, so
 # the two menus cannot drift apart. Added after the table: "Previous version" (the loader before the last update, EFI/iyakki-boot/loader.prev.efi),
 # "Recovery (GRUB menu)" (the GRUB kept as EFI/BOOT/grub-recovery.efi on a loader-default image), "Full start" (lean images only), "UEFI firmware
-# setup". Each of those is shown only when its file / the firmware feature exists (`requires`, kind firmware). The Compatible USB mode
+# setup". The previous version of the SYSTEM ("IYAKKI (previous version)", two rows, shown on the first level only when the update kept one on this
+# boot volume: EFI/iyakki-boot/prev/{bzImage,initrd} plus the marker set-plain, or set-oldroot when the update also replaced the system image and
+# the old one must start with iyakki.root=previous; docs/BOOT-LOADER.md) is the same menu row as GRUB's entry of that name, and the default entry
+# names both in `previous`, so an update that is never confirmed good falls back to it by itself. Each of those is shown only when its file / the firmware feature exists (`requires`, kind firmware). The Compatible USB mode
 # variable of GRUB (iyakki_usbq, Settings -> Storage) is not carried over; the explicit "Compatible USB mode" entry is.
 # The splash is the IYAKKI emblem on black (board/iyakki/boot-splash.py).
 set -eu
@@ -63,8 +66,9 @@ cat <<CFG
 # IYAKKI's boot loader. Written by dist/buildroot/boot-loader-stage.sh (the entries come from its ENTRIES table, the same starts as
 # board/iyakki/grub.cfg). The first level lists the "level top" entries and "More options"; "level more" entries are on the second level.
 # IYAKKI confirms a good start by itself (it writes the BootConfirm variable once the sign-in screen is up), so a start that never gets
-# there is counted and after "tries" of them the menu opens and waits. The paths have no {tree}: the files started are always the same ones.
-timeout 3
+# there is counted; after "tries" of them the loader starts the kept previous version by itself (no menu), and if there is none, or it fails
+# "tries" times too, the menu opens and waits. The paths have no {tree}: the files started are always the same ones.
+timeout 0
 scan $SCAN
 tries 9
 splash /EFI/iyakki-boot/splash.bmp
@@ -75,9 +79,14 @@ printf '%s\n' "$ENTRIES" | while IFS='|' read -r id level title cmd; do
 	[ -n "$id" ] || continue
 	printf '\nentry %s\n  title %s\n  kind linux\n  kernel /boot/bzImage\n  initrd %s\n  cmdline %s\n' "$id" "$title" "$INITRD" "$cmd"
 	[ "$level" = more ] && printf '  more\n'
-	[ "$id" = iyakki ] && printf '  default\n'
+	if [ "$id" = iyakki ]; then printf '  default\n  previous prev-plain prev-oldroot\n'; fi
 	# "Install to a disk" is on the first level only on install media: the marker file below is left out of update packs and of installed disks
 	[ "$id" = install ] && printf '  requires /EFI/iyakki-boot/install-media\n'
+	# the previous version of the system: first level, shown only when the update kept one (the marker file names which of the two it is)
+	if [ "$id" = iyakki ]; then
+		printf '\nentry prev-plain\n  title IYAKKI (previous version)\n  kind linux\n  kernel /EFI/iyakki-boot/prev/bzImage\n  initrd /EFI/iyakki-boot/prev/initrd\n  cmdline %s\n  requires /EFI/iyakki-boot/prev/set-plain\n' "$cmd"
+		printf '\nentry prev-oldroot\n  title IYAKKI (previous version)\n  kind linux\n  kernel /EFI/iyakki-boot/prev/bzImage\n  initrd /EFI/iyakki-boot/prev/initrd\n  cmdline %s iyakki.root=previous\n  requires /EFI/iyakki-boot/prev/set-oldroot\n' "$cmd"
+	fi
 done
 # the full RAM disk start: only when the boot volume has both RAM disks (a lean image: INITRD is the lean one)
 if [ "$INITRD" != /boot/initrd ]; then
@@ -87,7 +96,7 @@ fi
 cat <<CFG
 
 entry previous
-  title Previous version of this boot loader
+  title Previous version of the boot loader (if this one has a fault)
   kind chain
   kernel /EFI/iyakki-boot/loader.prev.efi
   requires /EFI/iyakki-boot/loader.prev.efi

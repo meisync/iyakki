@@ -84,6 +84,11 @@ framebuffer/software when the card is not usable, the card when driver and firmw
 log without "wedged", `graphics: hardware Mesa Intel(R) Arc ...` in the engine log, pages rendering; and on the current image the
 software restart with the page loading.
 
+**Result the same evening (image 1107j by `iyakki dev update`, restart by the owner)**: DMC, GuC and HuC loaded, GuC submission enabled, no
+"wedged"; the engine on "Mesa Intel(R) Graphics (MTL)", YouTube's watch page rendering and playing; the only firmware still missing is the
+NVIDIA GSP (`nvidia/595.99.02/gsp_ga10x.bin`, the NVIDIA card in the Store, the person's click). "GT1: can't init GSC proxy due to missing
+mei component" is logged: the media GT's GSC needs `mei_gsc`/`mei_pxp` (not in the kernel config); video decode on the card may want it, open.
+
 ## Step 4: the update framework (do this on the first good boot)
 
 1. Turn on **Settings -> Developer mode** on the laptop; pair from the build PC (`iyakki dev pair`, a one-time code the person reads off the screen); the person grants the scopes (update, shell, files, debug, input) and may need to extend the default 4 hour timeout.

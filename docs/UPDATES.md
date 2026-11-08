@@ -125,6 +125,10 @@ docs/development/COMPONENT-UPDATES-PLAN.md, "Built so far").
   reads `grubenv` from the boot partition (BIOS and UEFI, Secure Boot), and the whole loop on a real machine. A start that is restarted by hand
   before the first picture also counts as a failed try.
 * The check after a start still runs when Settings is opened (it writes the page's note); the boot counter above is what acts at boot.
+* The update also keeps the replaced kernel and RAM disk on the **boot volume** (`EFI/iyakki-boot/prev/`, with a marker file and a stamp) for IYAKKI's
+  own boot loader, which cannot read the data partition. The loader shows "IYAKKI (previous version)" on its first level only when that copy exists,
+  and starts it by itself when the new version is never confirmed good. It is best effort (no room: the result says `loader_copy` and GRUB's entry
+  remains). See docs/BOOT-LOADER.md.
 * A power cut during **Roll back** leaves the boot menu entry "IYAKKI (previous version)" pointing at the version being restored (tested with
   a fake power cut in the engine), but this was never run on a real boot partition.
 * Everything above was tested with fake packs and a folder standing in for the boot partition. The real mount of `IYAKKI-BOOT`, the speed of the

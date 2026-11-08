@@ -171,6 +171,8 @@ if [ -f "$LD/EFI/iyakki-boot/loader.efi" ]; then
   guarded="$(grep -E '^\s*requires ' "$LD/EFI/iyakki-boot/boot.cfg" | awk '{print $2}' | sort -u)"
   for p in $(grep -E '^\s*initrd ' "$LD/EFI/iyakki-boot/boot.cfg" | awk '{print $2}' | sort -u); do
     echo "$guarded" | grep -qxF "$p" && continue
+    # the previous-version rows name the copy an update puts on the boot volume (EFI/iyakki-boot/prev/); a marker file guards them
+    case "$p" in /EFI/iyakki-boot/prev/*) continue ;; esac
     "$MDIR" -i "$FAT" "::$p" >/dev/null 2>&1 || die "the loader's menu names $p but the boot volume has no such file (mode $MODE)"
   done
   "$MMD" -i "$FAT" ::EFI/iyakki-boot >/dev/null 2>&1 || true

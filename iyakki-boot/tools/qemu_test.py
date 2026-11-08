@@ -797,6 +797,109 @@ def t_confirm(s):
         vm.stop()
 
 
+def t_previous(s):
+    """The default entry names the previous version's rows. An update that kept one (a marker file on the boot volume) makes the loader
+    start it by itself once the new version was never confirmed; with no marker the old tries behaviour ends in the waiting menu."""
+    cfg = """timeout 0
+tries 2
+entry current
+  title IYAKKI
+  kernel /current/vmlinuz
+  initrd /current/initrd.img
+  cmdline console=ttyS0 reset newset
+  default
+  previous prev-plain prev-oldroot
+entry prev-plain
+  title IYAKKI (previous version)
+  kernel /previous/vmlinuz
+  initrd /previous/initrd.img
+  cmdline console=ttyS0 oldset
+  more
+  requires /EFI/iyakki-boot/prev/set-plain
+entry prev-oldroot
+  title IYAKKI (previous version)
+  kernel /previous/vmlinuz
+  initrd /previous/initrd.img
+  cmdline console=ttyS0 oldset iyakki.root=previous
+  more
+  requires /EFI/iyakki-boot/prev/set-oldroot
+"""
+    # 1. the update kept a previous version (root image replaced too): 2 starts of the new set, then the old one, by itself
+    marker = "update 0.2\nstamp 7\n"
+    d = s.disk("k1", s.boot_files() + s.trees(), [(cfg, "/boot.cfg"), (marker, "/EFI/iyakki-boot/prev/set-oldroot")])
+    vm = s.vm("k1", [(d, True)])
+    try:
+        m = vm.wait_for(r"decide: menu \(waiting\)|menu: open", 120)
+        t = vm.text()
+        need(m, "the loader never reached a menu:\n" + t[-1500:])
+        need("a new set was installed (stamp 7)" in t, "the stamp of the update was not noticed")
+        starts = re.findall(r"TEST-EFI started path=(\S+) options=\[([^\]]*)\]", t)
+        print(f"      starts: {starts[:4]}", flush=True)
+        need([x[0] for x in starts[:3]] == ["\\current\\vmlinuz", "\\current\\vmlinuz", "\\previous\\vmlinuz"], f"wrong sequence of starts: {starts}")
+        need("iyakki.root=previous" in starts[2][1] and "oldset" in starts[2][1], "the previous version did not get its own command line")
+        need("the current version was not confirmed good; prev-oldroot starts instead" in t, "the fall back was not reported")
+        need(re.findall(r"state: tree=(\w+) tries_left=(\d+)", t)[:3] == [("current", "1"), ("current", "0"), ("previous", "1")], "the tries did not run out before the fall back")
+    finally:
+        vm.stop()
+    # 2. no previous version kept: the rows are left out and the old behaviour (2 current, 2 previous tree = same files, then wait) stays
+    d = s.disk("k2", s.boot_files() + s.trees(), [(cfg, "/boot.cfg")])
+    vm = s.vm("k2", [(d, True)])
+    try:
+        m = vm.wait_for(r"decide: menu \(waiting\)", 120)
+        t = vm.text()
+        need(m, "the loader never stopped to wait:\n" + t[-1500:])
+        need("2 entries left out" in t, "the rows of the previous version were not left out")
+        paths = re.findall(r"TEST-EFI started path=(\S+)", t)
+        need(paths[:4] == ["\\current\\vmlinuz"] * 4, f"a previous version started although none is kept: {paths}")
+        need("starts instead" not in t, "a fall back was reported with no previous version")
+    finally:
+        vm.stop()
+
+
+def staged_cfg(s, initrd="/boot/initrd-lean"):
+    """boot.cfg exactly as dist/buildroot/boot-loader-stage.sh writes it for an image (a stand-in loader file carries the config path)."""
+    stage = os.path.join(HERE, "..", "..", "dist", "buildroot", "boot-loader-stage.sh")
+    if not os.path.isfile(stage):
+        raise Skip("dist/buildroot/boot-loader-stage.sh is not next to this repository")
+    root = tempfile.mkdtemp(prefix="stage-", dir=s.dir)
+    fake = os.path.join(root, "fake.efi")
+    with open(fake, "wb") as f:
+        f.write(b"MZ /EFI/iyakki-boot/boot.cfg")
+    os.makedirs(os.path.join(root, "tree"))
+    env = dict(os.environ, IYAKKI_BOOT_EFI=fake, IYAKKI_LOADER_INSTALL_MEDIA="0")
+    subprocess.run(["sh", stage, os.path.join(root, "tree"), initrd], check=True, env=env, stdout=subprocess.DEVNULL)
+    with open(os.path.join(root, "tree", "EFI", "iyakki-boot", "boot.cfg")) as f:
+        return f.read().replace("timeout 0", "timeout 0\nscan no", 1)
+
+
+def t_rows(s):
+    """The real generated menu on three kinds of volume: install media with a kept previous version, an installed disk with none, an installed
+    disk after an update that also replaced the system image. Which rows exist is read from the loader's own log ("item:" lines)."""
+    cfg = staged_cfg(s)
+    kern = [(s.a.test_efi, "/boot/bzImage")]
+    ird = os.path.join(s.dir, "initrd-rows.img")
+    with open(ird, "wb") as f:
+        f.write(initrd_bytes("rows", 4096))
+    base = s.boot_files() + kern + [(ird, "/boot/initrd-lean"), (ird, "/EFI/iyakki-boot/prev/initrd"), (s.a.test_efi, "/EFI/iyakki-boot/prev/bzImage")]
+    cases = [("l1", [("install media\n", "/EFI/iyakki-boot/install-media"), ("stamp 3\n", "/EFI/iyakki-boot/prev/set-plain")], {"install", "prev-plain"}),
+             ("l2", [], set()),
+             ("l3", [("stamp 4\n", "/EFI/iyakki-boot/prev/set-oldroot")], {"prev-oldroot"})]
+    for name, text, want in cases:
+        d = s.disk(name, base, [(cfg, "/boot.cfg")] + text, size_mb=64)
+        vm = s.vm(name, [(d, True)])
+        try:
+            need(vm.wait_for(r"decide: ", 90), name + ": the loader did not decide:\n" + vm.text()[-800:])
+            t = vm.text()
+            ids = set(re.findall(r"item: \d+ (\S+) ", t))
+            print(f"      {name}: items {sorted(ids)}", flush=True)
+            need({"install", "prev-plain", "prev-oldroot"} & ids == want, f"{name}: wrong rows {sorted(ids)}, want {sorted(want)}")
+            need({"iyakki", "safe"} <= ids, name + ": the ordinary rows are missing")
+            titles = re.findall(r'item: \d+ (?:prev-plain|prev-oldroot) "([^"]*)"', t)
+            need(all(x == "IYAKKI (previous version)" for x in titles), name + ": wrong title")
+        finally:
+            vm.stop()
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--boot-efi", required=True)
@@ -824,6 +927,8 @@ def main():
              ("g. Secure Boot firmware refuses the unsigned loader (negative check)", t_secure_boot),
              ("h. splash: centred, no menu on a normal start, menu on the same background, bad files fall back", t_splash),
              ("j. a start the running system confirms never spends the tries", t_confirm),
+             ("k. a new set that is never confirmed falls back to the kept previous version by itself; none kept: old tries behaviour", t_previous),
+             ("l. the generated menu: Install row only on install media, previous-version row only when one is kept", t_rows),
              ("i. menu under the logo: first level, More options, Esc back, countdown, logo only without a key", t_levels)]
     try:
         for name, fn in tests:

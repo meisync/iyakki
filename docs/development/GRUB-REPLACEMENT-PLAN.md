@@ -95,6 +95,15 @@ firmware, MokManager's key screen with the loader, boot time against GRUB, the T
 
 ## 3. Rollback and recovery
 
+*What remains before GRUB can be dropped (step 3), 2026-11-07:* (a) one release on the owner's machines with the loader-default image: the
+previous-version row started from the boot volume copy by a real kernel (Mac mini, HP, Lenovo), and an unconfirmed update falling back by itself;
+(b) `BootConfirm` written by IYAKKI proven on real hardware (F-LDR-06), because a start that is never confirmed rolls back after 9 tries;
+(c) the Install row started through the loader on real install media; (d) the Secure Boot case: the copy is booted by the signed loader, kernel
+module signing unchanged; (e) the full-RAM-disk install (no room for a copy) decided: shrink, or accept no loader row; (f) GRUB-only features that
+are not carried (Compatible USB mode variable, lean-failed fallback, the `iyakki_trial` counter, which the loader's tries replace) accepted;
+(g) the update's `boot/grub/*` handling made optional when GRUB is gone. BIOS (step 4) is separate.
+
+
 Layers, from the cheapest to the last resort:
 
 1. **Previous loader.** Every update that replaces `EFI/iyakki-boot/loader.efi` first saves the old one as `loader.prev.efi` (temp name, rename; section
@@ -106,6 +115,11 @@ Layers, from the cheapest to the last resort:
    9 unconfirmed starts switch to "previous" (same files), 9 more stop the loader from starting anything by itself, and it opens its menu and waits with
    the reason on screen ("the newest and the previous system both failed to start several times; choose what to start"). That is 18 starts.
    Choosing an entry by hand never spends a try.
+   **Update 2026-11-07:** with the keyed rows below the loader now reaches the previous KERNEL itself and falls back to it by itself (see
+   `docs/BOOT-LOADER.md`, "Rows that GRUB's recovery job needs"): the update copies it to `EFI/iyakki-boot/prev/` on the FAT volume (the
+   loader reads FAT only; an ext4 reader was rejected as too big and risky for the boot path) and the default row's `previous` line names the rows.
+   What GRUB's recovery still does that the loader does not (open): the proof on a real machine and the full-RAM-disk case (too big for the
+   volume, then no row), see section "What remains before step 3".
 3. **Recovery (GRUB menu).** On a loader-default image `EFI/BOOT/grub-recovery.efi` is the old GRUB with its whole menu, including the previous
    kernel and RAM disk that `iyakki dev update` keeps on the data partition ("IYAKKI - previous version ..."). The loader reads FAT only, and the
    data partition is not FAT, so the previous KERNEL is reached through GRUB, not through the loader. This is the reason GRUB stays one release.

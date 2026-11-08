@@ -440,6 +440,39 @@ fn the_loader_table_makes_a_config_the_loader_accepts() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// The two rows the loader must show without GRUB: "Install to a disk" on install media only, "IYAKKI (previous version)" only when an update
+/// kept one. Both on the FIRST level, each behind a `requires` file; the default row names the previous-version rows as its fall back.
+#[test]
+fn the_install_row_and_the_previous_version_rows_are_first_level_rows_with_their_presence_rules() {
+    let tmp = std::env::temp_dir().join(format!("iyakki-loader-rows-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("root")).unwrap();
+    std::fs::write(tmp.join("fake.efi"), b"MZ /EFI/iyakki-boot/boot.cfg").unwrap();
+    let out = std::process::Command::new("sh").arg(board().join("boot-loader-stage.sh")).arg(tmp.join("root")).arg("/boot/initrd-lean").env("IYAKKI_BOOT_EFI", tmp.join("fake.efi")).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cfg = std::fs::read_to_string(tmp.join("root/EFI/iyakki-boot/boot.cfg")).unwrap();
+    let block = |id: &str| cfg.split(&format!("\nentry {id}\n")).nth(1).unwrap_or_else(|| panic!("{id}")).split("\nentry ").next().unwrap().to_string();
+    let first_cmd = block("iyakki").lines().find_map(|l| l.trim().strip_prefix("cmdline ").map(str::to_string)).unwrap();
+    // install: first level, only where the marker file is
+    let inst = block("install");
+    assert!(!inst.contains("\n  more\n") && inst.contains("requires /EFI/iyakki-boot/install-media\n") && inst.contains("iyakki.install=1"));
+    // previous version: first level, two rows, one per marker, the same title as GRUB's entry; the old root only with iyakki.root=previous
+    for (id, marker, root) in [("prev-plain", "set-plain", false), ("prev-oldroot", "set-oldroot", true)] {
+        let b = block(id);
+        assert!(!b.contains("\n  more\n"), "{id} is a first level row");
+        assert!(b.contains("title IYAKKI (previous version)\n") && b.contains(&format!("requires /EFI/iyakki-boot/prev/{marker}\n")), "{id}");
+        assert!(b.contains("kernel /EFI/iyakki-boot/prev/bzImage\n") && b.contains("initrd /EFI/iyakki-boot/prev/initrd\n"), "{id}");
+        assert_eq!(b.contains("iyakki.root=previous"), root, "{id}");
+        assert!(b.contains(&first_cmd), "{id}: same command line as the normal start");
+    }
+    assert!(block("iyakki").contains("\n  previous prev-plain prev-oldroot\n") && block("iyakki").contains("\n  default\n"));
+    // order on the first level: IYAKKI, its previous version, then the installer
+    let pos = |id: &str| cfg.find(&format!("\nentry {id}\n")).unwrap();
+    assert!(pos("iyakki") < pos("prev-plain") && pos("prev-oldroot") < pos("install"));
+    assert!(cfg.contains("\ntimeout 0\n"));
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// `IYAKKI_LOADER_DEFAULT=1` (docs/BOOT-LOADER.md): GRUB-default builds keep the "new boot loader (test)" entry, loader-default builds drop it
 /// and lay the loader out as shim's second stage / BOOTX64.EFI with GRUB as grub-recovery.efi, consistent with the loader's Recovery row.
 #[test]

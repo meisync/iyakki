@@ -649,6 +649,82 @@ fn sync_dir(p: &Path) {
     }
 }
 
+/// The folder of the boot volume that holds a second copy of the previous kernel and initramfs for IYAKKI's own boot loader, which cannot
+/// read the data partition (ext4): `EFI/iyakki-boot/prev/{bzImage,initrd}` and ONE marker, `set-plain` or `set-oldroot` (the second when the
+/// update also replaced the system image, so the old one must start with `iyakki.root=previous`). The marker is written last and removed
+/// first, so the loader's "IYAKKI (previous version)" rows (which `require` it) never see half a copy. It holds `stamp N`, one more than the
+/// stamp before it: the loader trusts a new set again when the stamp changes (boot-core `assess::stamp_of`).
+pub const LOADER_PREV_DIR: &str = "EFI/iyakki-boot/prev";
+pub const PREV_MARKERS: [&str; 2] = ["set-plain", "set-oldroot"];
+
+/// The stamp the next copy gets: the one in the marker now plus one (1..=255, never 0).
+fn next_stamp(dir: &Path) -> u8 {
+    let old = PREV_MARKERS.iter().find_map(|m| std::fs::read_to_string(dir.join(m)).ok()).map(|t| iyakki_boot_stamp(&t)).unwrap_or(0);
+    (old % 255) + 1
+}
+
+/// `stamp N` of a marker text (0: none). The loader's rule, written again here because the loader is a separate program.
+fn iyakki_boot_stamp(text: &str) -> u8 {
+    text.lines().find_map(|l| l.strip_prefix("stamp ")).and_then(|n| n.trim().parse::<u8>().ok()).unwrap_or(0)
+}
+
+/// Remove the loader's copy of the previous version (marker first).
+fn drop_loader_prev(dir: &Path) {
+    for m in PREV_MARKERS {
+        let _ = std::fs::remove_file(dir.join(m));
+    }
+    for f in ["bzImage", "initrd", "bzImage.tmp", "initrd.tmp", "set-plain.tmp", "set-oldroot.tmp"] {
+        let _ = std::fs::remove_file(dir.join(f));
+    }
+    sync_dir(&dir.join("x"));
+}
+
+/// Keep the version being replaced on the boot volume too, for the boot loader. Best effort by design: the data partition copy and GRUB's
+/// entry are the safe net that already exist, so a volume without room (a full RAM disk of 300 MB on a 512 MB volume) or a failed write
+/// only means the loader has no "previous version" row; the old copy is removed first so the loader never starts a mixed pair.
+/// Returns what happened, for the update's notes.
+fn keep_for_loader(vol: &BootVol, env: &Env, bz: &Path, initrd: &Path, version: &str, root_changed: bool, reserve: u64) -> String {
+    let dir = vol.root.join(LOADER_PREV_DIR);
+    if !vol.root.join("EFI/iyakki-boot").is_dir() {
+        return "this boot volume has no IYAKKI boot loader, so no copy for it".into();
+    }
+    let stamp = next_stamp(&dir);
+    drop_loader_prev(&dir);
+    let sizes: u64 = [bz, initrd].iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| alloc(m.len(), vol.cluster)).sum();
+    let free = env.boot.free(vol);
+    if free < sizes + reserve + 6 * vol.cluster {
+        let _ = std::fs::remove_dir(&dir);
+        return format!("the boot volume has {} MB free and the loader's copy of the previous version needs {} MB beside the new files: the boot loader's menu has no previous-version row (GRUB's has)", free >> 20, (sizes + reserve) >> 20);
+    }
+    let go = || -> Result<(), String> {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        for (src, name) in [(bz, "bzImage"), (initrd, "initrd")] {
+            let tmp = dir.join(format!("{name}.tmp"));
+            std::fs::copy(src, &tmp).map_err(|e| format!("{name}: {e}"))?;
+            std::fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+            if files::sha256_file(&tmp)? != files::sha256_file(src)? {
+                return Err(format!("the copy of {name} does not match"));
+            }
+            std::fs::rename(&tmp, dir.join(name)).map_err(|e| e.to_string())?;
+        }
+        let marker = dir.join(if root_changed { "set-oldroot" } else { "set-plain" });
+        let tmp = dir.join("marker.tmp");
+        std::fs::write(&tmp, format!("version {version}\nstamp {stamp}\n")).map_err(|e| e.to_string())?;
+        std::fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &marker).map_err(|e| e.to_string())?;
+        sync_dir(&marker);
+        Ok(())
+    };
+    match go() {
+        Ok(()) => format!("the boot loader's menu keeps IYAKKI {version} as \"{PREV_TITLE}\" (copy on the boot volume, stamp {stamp})"),
+        Err(e) => {
+            drop_loader_prev(&dir);
+            let _ = std::fs::remove_file(dir.join("marker.tmp"));
+            format!("the loader's copy of the previous version could not be written ({e}); GRUB's entry is not affected")
+        }
+    }
+}
+
 /// The boot loader's program and the copy of the one before it (see `replace_file`).
 pub const LOADER_FILE: &str = "EFI/iyakki-boot/loader.efi";
 /// The previous loader, kept next to it.
@@ -866,6 +942,7 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
         prev = Some((id, run.on_disk().to_string()));
         env.dm.log(who, "", "dev.update.prev", &format!("kept {} in boot-prev/{}", run.on_disk(), prev.as_ref().map(|p| p.0.as_str()).unwrap_or("")), true);
     }
+    let initrd_rel = running_initrd(&ro.root);
     let prev = prev.or_else(|| latest_prev(env));
     let entry_prev = entry.or_else(|| prev.clone());
     drop(ro);
@@ -876,6 +953,14 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
         if touches_kernel {
             let with = with_previous_entry_args(cfg, id, ver, extra)?;
             replace_file(env, &vol, "boot/grub/grub.cfg", Either::Bytes(with.as_bytes()))?;
+        }
+    }
+    // the boot loader cannot read the data partition: the version being replaced is also kept on the boot volume (best effort, see keep_for_loader)
+    let mut loader_note = String::new();
+    if touches_kernel {
+        if let (Some(bz), Some(ird)) = (find_ci(&vol.root, "boot/bzImage"), find_ci(&vol.root, initrd_rel)) {
+            loader_note = keep_for_loader(&vol, env, &bz, &ird, run.on_disk(), root_new, p.growth.max(0) as u64);
+            env.dm.log(who, "", "dev.update.prev", &loader_note, true);
         }
     }
     let marker = Marker { from: run.on_disk().to_string(), to: m.version.clone(), started: env.dm.now(), prev_id: prev.as_ref().map(|p| p.0.clone()).unwrap_or_default(), files: p.needs.clone() };
@@ -940,7 +1025,7 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
         }
     }
     let changed = order.len() + usize::from(root_done);
-    Ok(json!({ "done": true, "changed": changed, "from": run.on_disk(), "to": m.version, "previous_entry": prev.is_some(), "system_image": root_done, "message": format!("{changed} file(s) replaced{}: IYAKKI {} -> {}; the boot menu keeps \"{PREV_TITLE}\"", if root_done { " (the system image on the data partition)" } else { "" }, run.on_disk(), m.version) }))
+    Ok(json!({ "done": true, "changed": changed, "from": run.on_disk(), "to": m.version, "previous_entry": prev.is_some(), "loader_copy": loader_note, "system_image": root_done, "message": format!("{changed} file(s) replaced{}: IYAKKI {} -> {}; the boot menu keeps \"{PREV_TITLE}\"", if root_done { " (the system image on the data partition)" } else { "" }, run.on_disk(), m.version) }))
 }
 
 /// For the page and the CLI: is an update unfinished, and what is kept.

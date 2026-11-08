@@ -10,7 +10,7 @@ one-shot choice in UEFI variables, reads held keys, draws the menu (text mode, o
 font; mouse through the simple pointer), starts a Linux kernel through the EFI stub with the initrd offered through the initrd
 protocol, chain-loads other `.efi` loaders, and scans all FAT volumes for other systems (read-only). `crates/test-efi` is a tiny
 stand-in kernel / loader for the tests. `tools/` has the QEMU tests and the signing scripts. See [docs/PLAN.md](docs/PLAN.md) and
-[docs/SIGNING.md](docs/SIGNING.md). Also done 2026-11-04: a GRUB-like menu under the logo with a second level ("More options"), `more` / `requires` / `kind firmware` in the config, an SBAT section tool, the shim chain with MOK (the loader asks shim to verify the kernel it starts), and a confirm variable the running system writes. Not done: the BIOS front end, TPM, real-machine tests.
+[docs/SIGNING.md](docs/SIGNING.md). To use it with another Linux such as Alpine see [docs/OTHER-LINUX.md](docs/OTHER-LINUX.md). Also done 2026-11-04: a GRUB-like menu under the logo with a second level ("More options"), `more` / `requires` / `kind firmware` in the config, an SBAT section tool, the shim chain with MOK (the loader asks shim to verify the kernel it starts), and a confirm variable the running system writes. Not done: the BIOS front end, TPM, real-machine tests.
 
 ## Menu under the logo, second level
 

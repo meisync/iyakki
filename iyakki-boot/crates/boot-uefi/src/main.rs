@@ -52,6 +52,10 @@ const LOG_PATH: &str = match option_env!("BOOT_LOG_PATH") {
     None => "/EFI/iyakki-boot/last-boot.log",
 };
 
+/// The markers the system update leaves with the copy of the previous version on the boot volume (`EFI/iyakki-boot/prev/`). Either one
+/// holds `stamp N`, which changes with every update (boot_core::assess::stamp_of): a changed stamp means a new set was installed.
+const PREV_MARKERS: [&str; 2] = ["/EFI/iyakki-boot/prev/set-plain", "/EFI/iyakki-boot/prev/set-oldroot"];
+
 /// Where the log goes when the directory of `LOG_PATH` does not exist on this volume (the root always does).
 const LOG_FALLBACK_PATH: &str = "/last-boot.log";
 
@@ -264,6 +268,12 @@ fn run() -> Status {
     // boot assessment
     let stored = vars::get(vars::TRIES);
     let mut state = BootState::load(stored.as_deref().filter(|b| b.len() == STATE_LEN), c.cfg.tries);
+    // a system update installed a new set since the state was last judged: trust the new set again (a rollback to the previous version
+    // from an earlier set does not outlive the update that replaced that set)
+    let stamp = PREV_MARKERS.iter().find_map(|p| c.vol.read(p, 512)).and_then(|b| String::from_utf8(b).ok()).map_or(0, |t| boot_core::assess::stamp_of(&t));
+    if state.sync_stamp(stamp, c.cfg.tries) {
+        say!("state: a new set was installed (stamp {stamp}); the tries start over on the current version\n");
+    }
     // the running system confirmed the last start (it writes the confirm variable once the sign-in screen is drawn): refill the tries
     let confirmed = vars::get(vars::CONFIRM).is_some();
     if confirmed {
@@ -321,10 +331,15 @@ fn run() -> Status {
     };
 
     loop {
-        let item = &c.items[idx];
+        let mut item = &c.items[idx];
         let is_linux = matches!(&item.action, Action::Linux(i) if c.cfg.entries[*i].kind == Kind::Linux);
         let tree = if auto && is_linux && wait.is_none() {
             state = trial; // the start the loader chose itself spends a try (and may have switched to the previous tree)
+            // the previous version is due and this volume keeps one: its row starts instead of the default (the menu stays as it is)
+            if let Some(p) = choose::previous_item(&c.cfg.entries, &c.items, idx, trial.tree) {
+                say!("state: the current version was not confirmed good; {} starts instead\n", c.items[p].id);
+                item = &c.items[p];
+            }
             trial.tree
         } else {
             state.manual_start();

@@ -519,3 +519,74 @@ fn a_lean_image_has_the_small_initrd_and_no_full_one_and_the_update_keeps_it_for
     let bad = list.iter().filter(|(p, _, _)| !p.contains("initrd")).cloned().collect::<Vec<_>>();
     assert!(build_manifest(&d, &bad, Some("0.1.0"), Some("macweb"), "x").unwrap_err().contains("boot/initrd"));
 }
+
+fn loader_rig(tag: &str, capacity: u64) -> Rig {
+    let mut r = rig(tag);
+    put(&r.boot.root, "EFI/iyakki-boot/loader.efi", &pseudo(5000, 9));
+    r.boot.capacity = capacity;
+    r
+}
+
+#[test]
+fn the_loader_copy_of_the_previous_version_is_on_the_boot_volume_with_a_marker_and_a_stamp_that_grows() {
+    let r = loader_rig("loadercopy", 60 << 20);
+    let old_bz = hash(&r.boot.root.join("boot/bzImage"));
+    let old_ird = hash(&r.boot.root.join("boot/initrd"));
+    let free = || 500u64 << 20;
+    let e = env(&r, &free, None);
+    let (dir, m) = payload(&r, "0.1.0-alpha.2", "macweb", false, 7);
+    let p = plan(&e, &m, false).unwrap();
+    stage_all(&e, &dir, &m, &p.needs);
+    let v = apply(&e, &m, false, "laptop").unwrap();
+    assert!(v["loader_copy"].as_str().unwrap().contains("stamp 1"), "{v}");
+    let prev = r.boot.root.join(LOADER_PREV_DIR);
+    assert_eq!(hash(&prev.join("bzImage")), old_bz);
+    assert_eq!(hash(&prev.join("initrd")), old_ird);
+    let marker = std::fs::read_to_string(prev.join("set-plain")).unwrap();
+    assert!(marker.contains("version 0.1.0-alpha.1") && marker.contains("stamp 1\n"), "{marker}");
+    assert!(!prev.join("set-oldroot").exists());
+    assert!(std::fs::read_dir(&prev).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().ends_with(".tmp")), "no leftovers");
+    // the next update keeps the version it replaces (the one just installed) and the stamp moves on
+    let new_bz = hash(&r.boot.root.join("boot/bzImage"));
+    let (dir2, m2) = payload(&r, "0.1.0-alpha.3", "macweb", false, 7);
+    let mut r2 = r;
+    r2.release = "VERSION=0.1.0-alpha.2\nVARIANT=macweb\nBUILD_DATE=2026-10-22\n".into();
+    let e2 = env(&r2, &free, None);
+    std::fs::write(dir2.join("boot/bzImage"), pseudo((1 << 20) + 7000, 21)).unwrap();
+    let list = list_boot(&dir2).into_iter().filter(|(p, _)| p.starts_with("boot/") || p.starts_with("EFI/")).map(|(p, s)| (p.clone(), s, super::files::sha256_file(&dir2.join(&p)).unwrap())).collect::<Vec<_>>();
+    let m3 = build_manifest(&dir2, &list, None, None, "test.img").unwrap();
+    write_manifest(&dir2, &m3).unwrap();
+    let _ = m2;
+    let p3 = plan(&e2, &m3, false).unwrap();
+    stage_all(&e2, &dir2, &m3, &p3.needs);
+    apply(&e2, &m3, false, "laptop").unwrap();
+    assert_eq!(hash(&r2.boot.root.join(LOADER_PREV_DIR).join("bzImage")), new_bz);
+    assert!(std::fs::read_to_string(r2.boot.root.join(LOADER_PREV_DIR).join("set-plain")).unwrap().contains("stamp 2\n"));
+}
+
+#[test]
+fn without_room_or_without_the_loader_the_update_still_works_and_leaves_no_half_copy() {
+    // no room beside the new files: the copy is left out, never half written, the update is not refused
+    let r = loader_rig("loaderfull", 14 << 20);
+    put(&r.boot.root, "EFI/iyakki-boot/prev/bzImage", b"stale");
+    put(&r.boot.root, "EFI/iyakki-boot/prev/set-plain", b"stamp 9\n");
+    let free = || 500u64 << 20;
+    let e = env(&r, &free, None);
+    let (dir, m) = payload(&r, "0.1.0-alpha.2", "macweb", false, 7);
+    let p = plan(&e, &m, false).unwrap();
+    stage_all(&e, &dir, &m, &p.needs);
+    let v = apply(&e, &m, false, "laptop").unwrap();
+    assert_eq!(v["done"], true);
+    assert!(v["loader_copy"].as_str().unwrap().contains("no previous-version row"), "{v}");
+    let prev = r.boot.root.join(LOADER_PREV_DIR);
+    assert!(!prev.join("set-plain").exists() && !prev.join("set-oldroot").exists(), "no marker, so the loader shows no row");
+    assert!(!prev.join("bzImage").exists(), "and no stale kernel that a later marker could pair with a new RAM disk");
+    // a boot volume without the loader gets no folder at all
+    let r = rig("noloader");
+    let e = env(&r, &free, None);
+    let (dir, m) = payload(&r, "0.1.0-alpha.2", "macweb", false, 7);
+    let p = plan(&e, &m, false).unwrap();
+    stage_all(&e, &dir, &m, &p.needs);
+    apply(&e, &m, false, "laptop").unwrap();
+    assert!(!r.boot.root.join("EFI/iyakki-boot").exists());
+}
