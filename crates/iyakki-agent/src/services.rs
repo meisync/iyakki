@@ -960,6 +960,8 @@ impl Services {
             }
         };
         let sys_state = if is_admin { self.admin_login_system(&slot, password) } else { VaultState::NotApplicable };
+        // an encrypted home folder (F-STORE-05) opens with the same, just verified, password; a failure leaves a banner, never blocks sign-in
+        let _ = crate::enchome::EncHome::on_login_if_any(&self.dir, user, password);
         // the person's home and vault are known now: what was found for the agents before (HOME=/, nobody signed in) is void
         self.ext_status.invalidate();
         if self.agents_cfg().claude.enabled || self.agents_cfg().copilot.enabled {
@@ -1018,6 +1020,8 @@ impl Services {
     }
 
     pub fn on_logout(&self, user: &str, is_admin: bool) {
+        // the encrypted home folder closes with the sign-in (F-STORE-05)
+        let _ = crate::enchome::EncHome::on_logout_if_any(&self.dir, user);
         self.user_vaults.lock().unwrap().remove(user);
         {
             let mut au = self.agent_user.lock().unwrap_or_else(|e| e.into_inner());
@@ -1040,6 +1044,8 @@ impl Services {
 
     /// Keep vault slots in step when the user changes their own password.
     pub fn on_password_change(&self, user: &str, old: &str, new: &str) {
+        // the encrypted home folder's password slot is re-wrapped (F-STORE-05); the data is not touched
+        let _ = crate::enchome::EncHome::on_password_change_if_any(&self.dir, user, old, new);
         let slot = format!("user:{user}");
         if let Ok(mut v) = LocalVault::open(&self.user_path(user)) {
             let _ = v.change_password(&slot, old, new);
@@ -1055,6 +1061,8 @@ impl Services {
     /// An admin reset someone's password: their personal vault can no longer be opened (by design,
     /// admins cannot read user secrets). Start a fresh empty one at next login by removing the old.
     pub fn reset_user_vault(&self, user: &str) -> Result<(), String> {
+        // an encrypted home keeps its own key: it stays sealed until the recovery key or an administrator slot is used (F-STORE-05)
+        crate::enchome::EncHome::note_admin_reset_if_any(&self.dir, user);
         self.user_vaults.lock().unwrap().remove(user);
         match std::fs::remove_file(self.user_path(user)) {
             Ok(()) => Ok(()),

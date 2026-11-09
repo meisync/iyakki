@@ -321,6 +321,8 @@ struct Inner {
     states: HashMap<String, LinkState>,
     pair: PairState,
     answer: Option<Sender<bool>>,
+    /// Where the passkey or PIN the person typed goes (None sent = the person gave up). Held only while a prompt waits.
+    typed: Option<Sender<Option<String>>>,
     started: Option<Instant>,
     running: bool,
     /// Names devices gave when they connected (by address), for pairing prompts and the entry kept when a phone pairs with us.
@@ -344,7 +346,7 @@ pub fn hub() -> Arc<Hub> {
 impl Hub {
     pub fn new(path: PathBuf) -> Arc<Hub> {
         let store = std::fs::read_to_string(&path).map(|t| Store::parse(&t)).unwrap_or_default();
-        Arc::new(Hub { path, inner: Mutex::new(Inner { store, live: HashMap::new(), states: HashMap::new(), pair: PairState::Idle, answer: None, started: None, running: false, names: HashMap::new(), pairing_until: None }) })
+        Arc::new(Hub { path, inner: Mutex::new(Inner { store, live: HashMap::new(), states: HashMap::new(), pair: PairState::Idle, answer: None, typed: None, started: None, running: false, names: HashMap::new(), pairing_until: None }) })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -669,6 +671,25 @@ impl Hub {
         }
     }
 
+    /// Hands over the passkey or PIN the person typed for a pairing (`None`: the person gave up). False when nothing waits for one. The text
+    /// is checked here as well (6 digits; 1-16 characters) and refused with a plain message; it is never logged.
+    pub fn pair_type(&self, text: Option<String>) -> Result<bool, String> {
+        let g = self.lock();
+        let Some(tx) = g.typed.as_ref() else { return Ok(false) };
+        if let Some(t) = &text {
+            match &g.pair {
+                PairState::TypePasskey(_) => {
+                    crate::bthid::check_typed_passkey(t)?;
+                }
+                PairState::TypePin(..) => {
+                    crate::bthid::check_typed_pin(t)?;
+                }
+                _ => return Ok(false),
+            }
+        }
+        Ok(tx.send(text).is_ok())
+    }
+
     /// Pairs with a classic keyboard, mouse or game pad in the background (the page shows [`PairState`]).
     pub fn pair_start(self: &Arc<Self>, f: &btmgmt::Found) -> Result<(), String> {
         if f.addr_type != ADDR_BREDR && !is_hid_kind(f.kind) {
@@ -679,7 +700,7 @@ impl Hub {
         }
         {
             let g = self.lock();
-            if matches!(g.pair, PairState::Running(_) | PairState::Confirm(..) | PairState::ShowPasskey(..) | PairState::ShowPin(..)) {
+            if matches!(g.pair, PairState::Running(_) | PairState::Confirm(..) | PairState::ShowPasskey(..) | PairState::ShowPin(..) | PairState::TypePasskey(_) | PairState::TypePin(..)) {
                 return Err("pairing is already running".into());
             }
         }
@@ -697,6 +718,7 @@ impl Hub {
             let r = h.pair_run(index, &f, &name, &rx);
             let mut g = h.lock();
             g.answer = None;
+            g.typed = None;
             g.pair = PairState::Done(r.clone());
             drop(g);
             if r.is_ok() && is_hid_kind(f.kind) {
@@ -722,6 +744,34 @@ impl Hub {
         let set = |s: PairState| self.lock().pair = s;
         let nm = name.to_string();
         let phone = f.kind == btmgmt::Kind::Phone;
+        let keyboard = f.kind == btmgmt::Kind::Keyboard;
+        // the passkey or PIN the other device shows, typed on this computer: the prompt is asked again until the page answers
+        let mut waiting: Option<Receiver<Option<String>>> = None;
+        let typing_name = name.to_string();
+        let typed_wait = |waiting: &mut Option<Receiver<Option<String>>>, state: PairState, passkey: bool| -> Answer {
+            let rx = match waiting {
+                Some(rx) => rx,
+                None => {
+                    let (tx, rx) = channel::<Option<String>>();
+                    let mut g = self.lock();
+                    g.typed = Some(tx);
+                    g.pair = state;
+                    waiting.insert(rx)
+                }
+            };
+            let out = match rx.recv_timeout(Duration::from_millis(100)) {
+                Err(RecvTimeoutError::Timeout) => return Answer::Pending,
+                Ok(Some(t)) if passkey => crate::bthid::check_typed_passkey(&t).map(Answer::Passkey).unwrap_or(Answer::No),
+                Ok(Some(t)) => crate::bthid::check_typed_pin(&t).map(Answer::Pin).unwrap_or(Answer::No),
+                Ok(None) | Err(RecvTimeoutError::Disconnected) => Answer::No,
+            };
+            *waiting = None;
+            let mut g = self.lock();
+            g.typed = None;
+            // the entry is sent: the page goes back to "Connecting ..." while the device decides
+            g.pair = PairState::Running(typing_name.clone());
+            out
+        };
         let mut ask = |p: &Prompt| -> Answer {
             match p {
                 Prompt::Confirm { value, hint } => {
@@ -739,12 +789,17 @@ impl Hub {
                     set(PairState::ShowPasskey(nm.clone(), *k));
                     Answer::No
                 }
-                Prompt::PinRequest => {
+                Prompt::PinRequest if keyboard => {
+                    // a keyboard has no display: we choose the PIN, the person types it on the keyboard
                     let pin = random_pin();
                     set(PairState::ShowPin(nm.clone(), pin.clone()));
                     Answer::Pin(pin)
                 }
-                Prompt::PasskeyRequest => Answer::No,
+                Prompt::PinRequest => {
+                    let hint = !phone;
+                    typed_wait(&mut waiting, PairState::TypePin(nm.clone(), hint), false)
+                }
+                Prompt::PasskeyRequest => typed_wait(&mut waiting, PairState::TypePasskey(nm.clone()), true),
             }
         };
         let r = m.pair(index, &f.address, f.addr_type, btmgmt::IO_DISPLAY_YES_NO, &mut ask);

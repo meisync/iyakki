@@ -88,7 +88,28 @@ fn stem(w: &str) -> String {
     w.strip_suffix('e').filter(|r| r.chars().count() >= 3).unwrap_or(w).to_string()
 }
 
-/// The list to show: pages that match, each group only if one of its pages does.
+/// How well the page NAME answers the query (lower is better): the name is the query, starts with it, contains it, or only a
+/// keyword/group/synonym matched. So typing "domains" puts the Domains page before the VPN page that merely lists "domains" as a keyword.
+fn name_score(query: &str, item: &Item) -> u8 {
+    let q = query.trim().to_lowercase();
+    // one letter is browsing, not looking up a name: keep the pages' own order
+    if q.chars().count() < 2 {
+        return 3;
+    }
+    let name = item.label.to_lowercase();
+    if name == q {
+        0
+    } else if name.starts_with(&q) {
+        1
+    } else if name.contains(&q) {
+        2
+    } else {
+        3
+    }
+}
+
+/// The list to show: pages that match, each group only if one of its pages does. With a query, the best name match comes first (in its
+/// group and among the groups); equal matches keep the pages' own order.
 pub fn entries(items: &[Item], query: &str) -> Vec<Entry> {
     let mut out: Vec<Entry> = Vec::new();
     let mut groups: Vec<&'static str> = Vec::new();
@@ -97,11 +118,18 @@ pub fn entries(items: &[Item], query: &str) -> Vec<Entry> {
             groups.push(it.group);
         }
     }
+    let mut per_group: Vec<(u8, &'static str, Vec<&Item>)> = Vec::new();
     for g in groups {
-        let found: Vec<&Item> = items.iter().filter(|i| i.group == g && matches(query, i)).collect();
+        let mut found: Vec<&Item> = items.iter().filter(|i| i.group == g && matches(query, i)).collect();
         if found.is_empty() {
             continue;
         }
+        found.sort_by_key(|i| name_score(query, i)); // stable: equal scores keep the page order
+        let best = found.iter().map(|i| name_score(query, i)).min().unwrap_or(3);
+        per_group.push((best, g, found));
+    }
+    per_group.sort_by_key(|(best, _, _)| *best); // stable: equal scores keep the group order
+    for (_, g, found) in per_group {
         out.push(Entry::Group(g));
         out.extend(found.into_iter().map(|i| Entry::Item { tab: i.tab, label: i.label }));
     }
@@ -330,5 +358,22 @@ mod tests {
         g.hits.clear();
         draw(&mut g, R::new(10.0, 10.0, 260.0, 600.0), 1.0, &[], 0, 0.0, &q, false, true, rgb(120, 170, 255));
         assert!(!g.hits.iter().any(|h| matches!(h.ev, Event::Tab(_))));
+    }
+
+    #[test]
+    fn a_page_whose_name_matches_comes_before_one_that_only_has_the_word_as_a_keyword() {
+        let it = |tab, label: &'static str, group: &'static str, keywords: &'static str| Item { tab, label, group, keywords };
+        let items = [it(0, "VPN", "NETWORK", "dns domains tunnel"), it(1, "Domains", "NETWORK", "names store.local"), it(2, "Firewall", "NETWORK", "ports domains")];
+        let order = |q: &str| entries(&items, q).into_iter().filter_map(|e| if let Entry::Item { label, .. } = e { Some(label) } else { None }).collect::<Vec<_>>();
+        // the exact name first, then the keyword matches in the pages' own order
+        assert_eq!(order("domains"), ["Domains", "VPN", "Firewall"]);
+        assert_eq!(first_tab(&entries(&items, "domains")), Some(1));
+        // a prefix of the name beats a keyword too; an empty query keeps the page order
+        assert_eq!(order("dom")[0], "Domains");
+        assert_eq!(order(""), ["VPN", "Domains", "Firewall"]);
+        // groups: the group holding the best name match comes first
+        let items2 = [it(0, "VPN", "A", "domains"), it(1, "Domains", "B", "")];
+        let e = entries(&items2, "domains");
+        assert!(matches!(e[0], Entry::Group("B")), "{e:?}");
     }
 }

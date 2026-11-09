@@ -260,6 +260,16 @@ CONFIG_CRYPTO_CMAC=y
 CONFIG_CRYPTO_CTR=y
 CONFIG_CRYPTO_SHA256=y
 CONFIG_CRYPTO_ECB=y
+# ---- encrypted per-person home folders (F-STORE-05, docs/development/DATA-VOLUME-ENCRYPTION.md) ---------------------
+# A container file on the data volume is attached to a loop device and mapped through dm-crypt (aes-xts-plain64, 4096-byte
+# sectors) when the person signs in; the key goes in through the device-mapper ioctl (iyakki-storage::dm), no cryptsetup.
+# Built in (=y), not modules: nothing may depend on a module being loaded at the moment of sign-in. Added 2026-11-09, NOT yet built.
+CONFIG_MD=y
+CONFIG_BLK_DEV_DM=y
+CONFIG_DM_CRYPT=y
+CONFIG_BLK_DEV_LOOP=y
+CONFIG_CRYPTO_XTS=y
+CONFIG_CRYPTO_AES_NI_INTEL=y
 CONFIG_CRYPTO_MICHAEL_MIC=m
 
 # ---- Bluetooth (kernel side; no userland stack shipped) ---------------------

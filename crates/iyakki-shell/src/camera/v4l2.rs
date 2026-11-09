@@ -426,6 +426,38 @@ pub fn default_mode(modes: &[Mode]) -> Option<Mode> {
     yu.iter().filter(|m| m.width <= 640).max_by_key(|m| m.width * m.height).or_else(|| yu.iter().min_by_key(|m| m.width * m.height)).map(|m| **m).or_else(|| mj.first().map(|m| **m))
 }
 
+/// The modes to try, best first, when a camera refuses the one chosen: the mode asked for (if the camera offers it), the default
+/// mode, then the other MJPEG sizes up to 1920 wide from large to small, then YUYV up to 640x480 from large to small. Cheap UVC cameras
+/// often answer the probe for the big mode with a timeout (kernel: "Failed to set UVC probe control: -110") and work at a smaller one.
+pub fn candidate_modes(modes: &[Mode], want: Option<Mode>) -> Vec<Mode> {
+    let mut out: Vec<Mode> = Vec::new();
+    let mut push = |m: Mode| {
+        if !out.contains(&m) {
+            out.push(m);
+        }
+    };
+    if let Some(w) = want.filter(|m| modes.contains(m)) {
+        push(w);
+    }
+    if let Some(d) = default_mode(modes) {
+        push(d);
+    }
+    let mut mj: Vec<Mode> = modes.iter().copied().filter(|m| m.pix == Pix::Mjpeg && m.width <= 1920).collect();
+    mj.sort_by_key(|m| std::cmp::Reverse(m.width * m.height));
+    for m in mj {
+        push(m);
+    }
+    let mut yu: Vec<Mode> = modes.iter().copied().filter(|m| m.pix == Pix::Yuyv && m.width <= 640).collect();
+    yu.sort_by_key(|m| std::cmp::Reverse(m.width * m.height));
+    for m in yu {
+        push(m);
+    }
+    out
+}
+
+/// How many modes `open` tries before it gives up (each failed try can cost a few seconds of probe timeout).
+const MAX_TRIES: usize = 6;
+
 impl Opener for V4l2Opener {
     fn open(&self, dev: &CamDevice, want: Option<Mode>) -> Result<Opened, String> {
         let fd = Fd::open(&dev.path)?;
@@ -440,17 +472,46 @@ impl Opener for V4l2Opener {
                 }
             }
         }
-        let mode = want.filter(|m| modes.contains(m)).or_else(|| default_mode(&modes)).ok_or("the camera offers neither MJPEG nor YUYV pictures")?;
-        let mut f: Format = zeroed();
-        f.type_ = BUF_TYPE_VIDEO_CAPTURE;
-        f.fmt.pix = PixFormat { width: mode.width, height: mode.height, pixelformat: if mode.pix == Pix::Mjpeg { FMT_MJPEG } else { FMT_YUYV }, field: FIELD_ANY, ..zeroed() };
-        fd.ioctl(VIDIOC_S_FMT, &mut f).map_err(|e| format!("the camera refused {}x{}: {e}", mode.width, mode.height))?;
-        // SAFETY: `pix` is the member the kernel fills for a capture format.
-        let got = unsafe { f.fmt.pix };
-        let mode = Mode { pix: pix_of(got.pixelformat).unwrap_or(mode.pix), width: got.width, height: got.height };
-        let controls = [(CID_BRIGHTNESS, "Brightness"), (CID_CONTRAST, "Contrast")].iter().filter_map(|(id, n)| control(&fd, *id, n)).collect();
-        let cap = V4l2Capture::start(fd, mode)?;
-        Ok(Opened { cap: Box::new(cap), modes, controls })
+        let ladder = candidate_modes(&modes, want);
+        if ladder.is_empty() {
+            return Err("the camera offers neither MJPEG nor YUYV pictures".into());
+        }
+        let mut first_error: Option<String> = None;
+        let mut tried = 0usize;
+        let mut fd = Some(fd);
+        for want_mode in ladder.into_iter().take(MAX_TRIES) {
+            tried += 1;
+            // a failed try can leave the descriptor in a bad state: a fresh one for each mode
+            let fd_now = match fd.take() {
+                Some(f) => f,
+                None => match Fd::open(&dev.path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        first_error.get_or_insert(e);
+                        break;
+                    }
+                },
+            };
+            let mut f: Format = zeroed();
+            f.type_ = BUF_TYPE_VIDEO_CAPTURE;
+            f.fmt.pix = PixFormat { width: want_mode.width, height: want_mode.height, pixelformat: if want_mode.pix == Pix::Mjpeg { FMT_MJPEG } else { FMT_YUYV }, field: FIELD_ANY, ..zeroed() };
+            if let Err(e) = fd_now.ioctl(VIDIOC_S_FMT, &mut f) {
+                first_error.get_or_insert(format!("the camera refused {}x{}: {e}", want_mode.width, want_mode.height));
+                continue;
+            }
+            // SAFETY: `pix` is the member the kernel fills for a capture format.
+            let got = unsafe { f.fmt.pix };
+            let mode = Mode { pix: pix_of(got.pixelformat).unwrap_or(want_mode.pix), width: got.width, height: got.height };
+            let controls = [(CID_BRIGHTNESS, "Brightness"), (CID_CONTRAST, "Contrast")].iter().filter_map(|(id, n)| control(&fd_now, *id, n)).collect();
+            match V4l2Capture::start(fd_now, mode) {
+                Ok(cap) => return Ok(Opened { cap: Box::new(cap), modes, controls }),
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                }
+            }
+        }
+        let first = first_error.unwrap_or_else(|| "the camera would not start".into());
+        Err(if tried > 1 { format!("{first} (also tried {} other picture size(s))", tried - 1) } else { first })
     }
 }
 
@@ -515,5 +576,22 @@ mod tests {
         assert!(query_caps(Path::new("/nonexistent/video0")).is_none());
         let dev = CamDevice { node: "video9".into(), path: "/nonexistent/video9".into(), name: "x".into(), caps: parse_caps(&[0; 104]).unwrap(), builtin: false, physical: "x".into() };
         assert!(V4l2Opener.open(&dev, None).is_err());
+    }
+
+    #[test]
+    fn a_camera_that_refuses_its_default_mode_gets_a_ladder_of_smaller_ones() {
+        let mj = |w, h| Mode { pix: Pix::Mjpeg, width: w, height: h };
+        let yu = |w, h| Mode { pix: Pix::Yuyv, width: w, height: h };
+        let modes = [mj(1920, 1080), mj(1280, 720), mj(640, 480), mj(320, 240), yu(640, 480), yu(320, 240), yu(1280, 720)];
+        let ladder = candidate_modes(&modes, None);
+        // the default (1280x720 MJPEG) first, then the other MJPEG sizes large to small, then YUYV up to 640x480
+        assert_eq!(ladder, [mj(1280, 720), mj(1920, 1080), mj(640, 480), mj(320, 240), yu(640, 480), yu(320, 240)]);
+        // a mode asked for that the camera offers goes first, one it does not offer is ignored
+        assert_eq!(candidate_modes(&modes, Some(mj(640, 480)))[0], mj(640, 480));
+        assert_eq!(candidate_modes(&modes, Some(mj(800, 600)))[0], mj(1280, 720));
+        // no duplicates, and nothing is invented
+        assert!(ladder.iter().all(|m| modes.contains(m)));
+        assert_eq!(ladder.len(), ladder.iter().collect::<std::collections::HashSet<_>>().len());
+        assert!(candidate_modes(&[], None).is_empty());
     }
 }

@@ -17,8 +17,7 @@
 //!   snapshots" ticked they are black before the recorder or a snapshot stores a picture ([`mask_jpeg_for_storage`]).
 //! * This computer's own USB camera is never watched in the background.
 
-pub use iyakki_camdetect::{alerts, geom, motion, person, settings};
-pub mod events;
+pub use iyakki_camdetect::{alerts, events, geom, motion, person, settings};
 pub mod watch;
 
 use std::path::Path;

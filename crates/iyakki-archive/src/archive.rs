@@ -407,7 +407,10 @@ pub fn unzip(src: &Path, dest: &Path) -> Result<Unpacked, String> {
     Ok(un)
 }
 
-#[cfg(test)]
+/// The test fixtures (`tmp`, `make_tar`, `gzip`, `make_zip`) and this module's tests; other test code in the agent builds archives
+/// with them through the feature `testing`.
+#[cfg(any(test, feature = "testing"))]
+#[allow(dead_code)] // with only the feature on (no test harness) the private helpers of the tests are unused
 pub mod tests {
     use super::*;
     use miniz_oxide::deflate::compress_to_vec;

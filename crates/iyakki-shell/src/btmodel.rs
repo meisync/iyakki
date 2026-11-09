@@ -808,6 +808,32 @@ impl BtModel {
         }
     }
 
+    /// Hands the typed passkey or PIN to the pairing (`None`: the person gave up). A wrong length is refused here with a plain message and the
+    /// prompt stays open. What was typed is never logged, only that something was sent.
+    pub fn pair_type(&mut self, text: Option<String>) -> Result<String, String> {
+        match &text {
+            Some(t) => match &self.pair {
+                PairState::TypePasskey(_) => {
+                    iyakki_devctl::bthid::check_typed_passkey(t)?;
+                }
+                PairState::TypePin(..) => {
+                    iyakki_devctl::bthid::check_typed_pin(t)?;
+                }
+                _ => return Err("Nothing is waiting for a passkey or PIN.".into()),
+            },
+            None => {}
+        }
+        let sent = text.is_some();
+        match self.ctl.bt_pair_type(text) {
+            Ok(true) => {
+                self.say(format!("bluetooth pairing entry {}", if sent { "sent" } else { "cancelled" }));
+                Ok(if sent { "Sent.".into() } else { "Pairing cancelled.".into() })
+            }
+            Ok(false) => Err("Nothing is waiting for a passkey or PIN.".into()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Connect or disconnect a paired input device; a second click while it connects is ignored.
     pub fn connect_toggle(&mut self, address: &str) -> Result<String, String> {
         let k = format!("dev:{}", key(address));
@@ -908,6 +934,7 @@ pub fn pairing_notice(ctl: &dyn Control) -> Option<String> {
     match ctl.bt_pair_state() {
         PairState::Confirm(n, _) | PairState::ConfirmNoNumber(n) => Some(format!("{n} wants to pair. Open Settings, Bluetooth to answer.")),
         PairState::ShowPasskey(n, _) | PairState::ShowPin(n, _) => Some(format!("{n} is pairing: Settings, Bluetooth shows what to type.")),
+        PairState::TypePasskey(n) | PairState::TypePin(n, _) => Some(format!("{n} is pairing: Settings, Bluetooth asks for the number it shows.")),
         _ => None,
     }
 }

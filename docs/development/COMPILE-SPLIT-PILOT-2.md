@@ -102,3 +102,7 @@ Also near the top of the scan and worth a look: agent `macrecovery.rs` 529 (577 
 * Cold-build and release/LTO timings; measuring a real code edit instead of a comment; the `iyakki-remote` test build (an unrelated failure noted above).
 * `events.rs`, `watch.rs`, `sftp.rs`, `sftptools.rs`, `remotefiles.rs`: need clock, services and the vault (see above).
 * Nothing was committed, no image was built, no device or k3s was touched.
+
+## Continued in Pilot 3
+
+See `COMPILE-SPLIT-PILOT-3.md`: clock, camera events, wordtime, QR, archive/xz, bindelta, lints and battery moved; updated candidate list there.

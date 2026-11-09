@@ -6,6 +6,7 @@ license.workspace = true
 
 [dev-dependencies]
 iyakki-sshfs = { path = "../iyakki-sshfs", features = ["testing"] }
+iyakki-archive = { path = "../iyakki-archive", features = ["testing"] }
 iyakki-core-fake = { workspace = true }
 iyakki-proxy = { path = "../iyakki-proxy", features = ["testcerts"] }
 
@@ -18,6 +19,20 @@ iyakki-sshfs.workspace = true
 iyakki-camdetect.workspace = true
 # DISKS: the LUKS and BitLocker header parsers, the typed secret and the rate limit (re-exported as `disks_crypt`)
 iyakki-diskcrypt.workspace = true
+# Battery model and health logic, split out of iyakki-agent. Uses serde (already in the workspace).
+iyakki-battery.workspace = true
+# Deploy-file and Dockerfile lint rules (pure text), split out of iyakki-agent.
+iyakki-lint.workspace = true
+# The binary delta (build and apply), split out of iyakki-agent. Uses sha2 (already in the workspace).
+iyakki-bindelta.workspace = true
+# tar/zip readers and the in-house xz decoder, split out of iyakki-agent.
+iyakki-archive.workspace = true
+# QR code encoder and decoder, split out of iyakki-agent.
+iyakki-qr.workspace = true
+# Number, date and time words (parse and say), split out of iyakki-agent.
+iyakki-wordtime.workspace = true
+# Wall-clock, zones, calendar and time-format helpers, split out of iyakki-agent.
+iyakki-clock.workspace = true
 iyakki-core-api.workspace = true
 iyakki-edit.workspace = true
 iyakki-vfs.workspace = true
@@ -32,6 +47,8 @@ iyakki-wake.workspace = true
 iyakki-rtsp.workspace = true
 # camera recordings: the AES-256-XTS and HMAC primitives of the data-volume crate (camrec_format.rs)
 iyakki-volcrypt.workspace = true
+# Encrypted per-person home folders (F-STORE-05): lifecycle, migration, form state. Re-exported as `iyakki_agent::enchome`.
+iyakki-enchome.workspace = true
 iyakki-webview.workspace = true
 iyakki-data.workspace = true
 iyakki-drivers.workspace = true

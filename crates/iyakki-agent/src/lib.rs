@@ -84,8 +84,8 @@ pub mod doctor;
 pub mod checkup;
 pub mod pathcheck;
 pub mod diagshare;
-pub mod qr;
-pub mod qr_decode;
+pub use iyakki_qr::qr;
+pub use iyakki_qr::qr_decode;
 pub mod sharedfolder;
 pub mod sharedsite;
 #[cfg(test)]
@@ -124,11 +124,16 @@ pub mod voice;
 pub mod backup;
 pub mod audioout;
 pub mod audiosink;
-pub mod battery;
+pub use iyakki_battery as battery;
 pub mod power;
 pub mod screensaver;
 pub mod lockscreen;
 pub mod lockscreentools;
+// Encrypted per-person home folders (F-STORE-05): the lifecycle crate re-exported, and the chat tools.
+pub use iyakki_enchome as enchome;
+pub mod enchometools;
+#[cfg(test)]
+mod enchometools_tests;
 #[cfg(test)]
 mod lockscreentools_tests;
 pub mod accessibility;
@@ -158,7 +163,7 @@ pub mod story;
 pub mod piclog;
 pub mod lab;
 pub mod storyillus;
-pub mod wordtime;
+pub use iyakki_wordtime as wordtime;
 pub mod speechtime;
 pub mod syssounds;
 pub mod browserdev;
@@ -290,7 +295,7 @@ pub mod wifi_ap_host;
 pub use iyakki_devctl::{bnep, bt_pan};
 pub mod msg;
 pub mod gitjobs;
-pub mod clock;
+pub use iyakki_clock as clock;
 pub mod clockfloor;
 pub mod ntp;
 pub mod totp;
@@ -305,13 +310,12 @@ pub mod calendar;
 pub mod study;
 pub mod study_tools;
 pub mod studylesson;
-pub mod archive;
-pub mod bindelta;
-#[cfg(test)]
-mod bindelta_tests;
-#[cfg(test)]
-mod bindelta_stream_tests;
-pub mod xz;
+// `archive::tests` (fixtures) comes through the glob when the dev-dependency turns on the feature `testing`
+pub mod archive {
+    pub use iyakki_archive::archive::*;
+}
+pub use iyakki_bindelta::bindelta;
+pub use iyakki_archive::xz;
 pub mod player;
 pub mod clis;
 pub mod dlmanifest;
@@ -386,8 +390,8 @@ mod disks_tests;
 mod disks_fmt_tests;
 pub mod k8sexp;
 pub mod devcluster;
-pub mod deploylint;
-pub mod dockerlint;
+pub use iyakki_lint::deploylint;
+pub use iyakki_lint::dockerlint;
 pub mod k8stools;
 pub mod k8sretry;
 pub mod exposure;

@@ -34,7 +34,7 @@ compare in big digits with Yes and No; a PIN or a passkey to type on the other d
 phone starts tethering) or the plain reason with Try again and Close. Enter is the default button (Yes when you started the
 pairing, No when the other device did), Esc cancels. The popup traps the keys and clicks, announces its title and the number to a
 screen reader, and also opens when the other device starts the pairing; when Settings is not open the shell shows a notice naming
-the device. Not done: typing a passkey that the other device shows into a field (the backend answers No to that request).
+the device. When the OTHER device shows the number (a phone or a car kit shows a passkey or a PIN, the kernel's User Passkey Request or PIN Code Request), the popup has a typing stage: "Type the passkey shown on <device>" (six boxes, digits only, paste keeps only the digits) or "Type the PIN shown on <device>" (1 to 16 characters; for a mouse or game pad that has none printed, Use 0000 and Use 1234 buttons fill the entry, never for a phone). OK or Enter sends it, Cancel or Esc sends the negative reply, a wrong length is refused in plain words and the popup stays open. The device is watched while you type: if it gives up the popup shows why, and after 45 seconds without an answer the negative reply is sent. A keyboard is the other way round: its PIN or passkey is typed on the keyboard (the page shows it). What you type is wiped when sent, cancelled or closed, is not kept in the pairing state and is never logged (the log only says that an entry was sent or cancelled); the screen reader hears "Passkey, edit, 3 of 6 digits", never the digits. A pairing that a phone starts toward this computer ("Let a phone pair") still answers only the number comparison.
 
 Keys: Up and Down choose a row, Enter its main action, `e` the switch, `s` scan or stop, `/` search, `m` more devices, `t` the
 first phone's tethering, `u` forget the chosen paired device, `a` Advanced, `r` look again. Every button is also reachable with
@@ -141,7 +141,7 @@ Added 2026-11-08, all tested only against fakes and scripted peers (no radio tra
 * AVDTP with a scripted peer (every command, wrong states, wrong values, fragments, hostile bytes), SDP requests and continuation,
   RTP loss, reorder, wrap-around, the audio path with a fake output, the Settings rows and the chat tools.
 
-NOT verified: the real LE connection, SMP pairing and passkey entry, the Add Device auto-connect after a restart, a real keyboard's
+NOT verified: typing a passkey or PIN that a real phone, mouse or game pad shows (only the scripted mgmt socket and the fake machine were used), the real LE connection, SMP pairing and passkey entry, the Add Device auto-connect after a restart, a real keyboard's
 report map; a real phone finding "IYAKKI Audio", pairing with it, choosing SBC settings, streaming, suspend and resume, the sound on
 the speakers, latency, and a mixer source opened from a thread of the hub. The SBC codec has been checked against an independent
 implementation on this development PC only; bit-exactness with every phone's encoder is not proven.

@@ -10,96 +10,6 @@ fn ffmpeg_present() -> bool {
     std::process::Command::new("ffmpeg").arg("-version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
 }
 
-/// Measures the window tables from a reference decoder (ffmpeg) fed with frames that carry one subband sample: the output of block b,
-/// sample j is then exactly D[nsb*b+j] * cos(...) * value, so D follows by least squares over the subbands and several amplitudes.
-/// Run by hand when the tables need to be made again: `IYAKKI_SBC_OUT=path cargo test -p iyakki-devctl measure_window -- --ignored`.
-#[test]
-#[ignore]
-fn measure_window_tables_with_a_reference_decoder() {
-    assert!(ffmpeg_present());
-    let out = std::env::var("IYAKKI_SBC_OUT").expect("IYAKKI_SBC_OUT");
-    let mut text = String::from("//! The synthesis window of the 4 and 8 subband filter banks (the specification's D table: 8 and 4 times the prototype filter).\n//! Measured with `measure_window_tables_with_a_reference_decoder` (sbc_tests.rs) from a reference decoder's output, to the precision of 16-bit audio\n//! averaged over many amplitudes. Replace with the specification's table values to the last digit when they are at hand.\n// SPDX-License-Identifier: Apache-2.0\n\n");
-    for nsb in [4usize, 8] {
-        let p = Params { freq: 2, blocks: 16, mode: ChannelMode::Mono, loudness: false, subbands: nsb as u8, bitpool: 32 };
-        let amps = [5000.0f64, 9000.0, -7000.0, 12000.0];
-        let mut stream = Vec::new();
-        let mut runs = Vec::new();
-        for k in 0..nsb {
-            for &amp in &amps {
-                let mut sf = [[0u8; 8]; 2];
-                sf[0][k] = 15;
-                let bits = allocate(&p, &sf);
-                let b = bits[0][k] as u32;
-                assert!(b >= 2, "target subband got no bits");
-                let levels = ((1u64 << b) - 1) as f64;
-                let q0 = (levels as u32 - 1) / 2;
-                let delta = (amp * levels / (2.0 * 65536.0)).round() as i64;
-                let qa = (q0 as i64 + delta) as u32;
-                let value = ((2.0 * qa as f64 + 1.0) / levels - 1.0) * 65536.0;
-                let mut q = vec![[[0u32; 8]; 2]; 16];
-                for blk in q.iter_mut() {
-                    for sb in 0..nsb {
-                        let bb = bits[0][sb] as u32;
-                        if bb > 0 {
-                            blk[0][sb] = ((1u64 << bb) as u32 - 2) / 2;
-                        }
-                    }
-                }
-                q[0][0][k] = qa;
-                stream.extend(pack_frame(&p, &sf, &[false; 8], &q));
-                // the tail: a frame with nothing in it
-                let sf0 = [[0u8; 8]; 2];
-                let bits0 = allocate(&p, &sf0);
-                let mut q = vec![[[0u32; 8]; 2]; 16];
-                for blk in q.iter_mut() {
-                    for sb in 0..nsb {
-                        let bb = bits0[0][sb] as u32;
-                        if bb > 0 {
-                            blk[0][sb] = ((1u64 << bb) as u32 - 2) / 2;
-                        }
-                    }
-                }
-                stream.extend(pack_frame(&p, &sf0, &[false; 8], &q));
-                runs.push((k, value));
-            }
-        }
-        std::fs::write(scratch("imp.sbc"), &stream).unwrap();
-        let st = std::process::Command::new("ffmpeg").args(["-y", "-loglevel", "error", "-f", "sbc", "-i"]).arg(scratch("imp.sbc")).args(["-f", "s16le", "-ac", "1"]).arg(scratch("imp.raw")).status().unwrap();
-        assert!(st.success());
-        let raw = std::fs::read(scratch("imp.raw")).unwrap();
-        let pcm: Vec<f64> = raw.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]) as f64).collect();
-        let per = 32 * nsb;
-        assert!(pcm.len() >= per * runs.len(), "decoded {} samples", pcm.len());
-        let mut d = vec![0.0f64; 10 * nsb];
-        for b in 0..10 {
-            for j in 0..nsb {
-                let i = if b % 2 == 0 { j } else { nsb + j };
-                let (mut num, mut den) = (0.0, 0.0);
-                for (r, (k, value)) in runs.iter().enumerate() {
-                    let x = pcm[r * per + b * nsb + j];
-                    if x.abs() >= 32760.0 {
-                        continue;
-                    }
-                    let n = (((*k as f64 + 0.5) * (i as f64 + nsb as f64 / 2.0)) * std::f64::consts::PI / nsb as f64).cos() * value;
-                    num += n * x;
-                    den += n * n;
-                }
-                d[nsb * b + j] = num / den;
-            }
-        }
-        text.push_str(&format!("pub static D{}: [f64; {}] = [\n", nsb, 10 * nsb));
-        for row in d.chunks(nsb) {
-            text.push_str("    ");
-            for v in row {
-                text.push_str(&format!("{:.7}, ", v));
-            }
-            text.push('\n');
-        }
-        text.push_str("];\n\n");
-    }
-    std::fs::write(out, text).unwrap();
-}
-
 // ------------------------------------------------------------------------------------------------ the codec
 
 fn p(freq: u8, blocks: u8, mode: ChannelMode, loudness: bool, subbands: u8, bitpool: u8) -> Params {
@@ -332,8 +242,9 @@ fn the_decoder_follows_a_change_of_channels_or_subbands_between_frames() {
 
 // ------------------------------------------------------------------------------------------------ an independent implementation as oracle
 
-/// Runs ffmpeg (a development tool, never shipped: a second, independent SBC implementation) and returns its output file, or `None`
-/// when ffmpeg is not installed.
+/// BLACK-BOX INTEROPERABILITY CHECK ONLY. Runs ffmpeg (a development tool, never shipped, never linked: a second, independent SBC
+/// implementation) as a separate process and returns `Some` when it ran, or `None` when ffmpeg is not installed (the test then skips).
+/// It only compares audio SNR. No constant in this repository derives from ffmpeg's source, tables or output (docs/development/SBC-TABLES.md).
 fn ffmpeg(args: &[&str]) -> Option<()> {
     if !ffmpeg_present() {
         eprintln!("ffmpeg is not installed: the oracle test is skipped");
@@ -403,3 +314,24 @@ fn oracle_an_independent_encoder_makes_frames_that_our_decoder_reads_to_the_same
     }
 }
 
+
+/// Prints the designed tables in the form `sbc_tables.rs` holds them: `IYAKKI_SBC_OUT=path cargo test -p iyakki-devctl print_designed_tables -- --ignored`.
+#[test]
+#[ignore]
+fn print_designed_tables() {
+    let out = std::env::var("IYAKKI_SBC_OUT").expect("IYAKKI_SBC_OUT");
+    let mut text = String::new();
+    for m in [4usize, 8] {
+        let w = crate::sbc_design::designed_window(m);
+        text.push_str(&format!("pub static D{m}_DESIGNED: [f64; {}] = [\n", 10 * m));
+        for row in w.chunks(m.max(8).min(8)) {
+            text.push_str("    ");
+            for v in row {
+                text.push_str(&format!("{:.9}, ", if *v == 0.0 { 0.0 } else { *v }));
+            }
+            text.push('\n');
+        }
+        text.push_str("];\n\n");
+    }
+    std::fs::write(out, text).unwrap();
+}

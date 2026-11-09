@@ -937,6 +937,7 @@ impl ChatApp {
             }
             system.push_str(iyakki_agent::updatestools::PROMPT_RULE);
             system.push_str(iyakki_agent::lockscreentools::PROMPT_RULE);
+            system.push_str(iyakki_agent::enchometools::PROMPT_RULE);
             system.push_str(iyakki_agent::accessibilitytools::PROMPT_RULE);
             system.push_str(iyakki_agent::browsera11y::PROMPT_RULE);
             if cx.session.role != iyakki_sec::policy::Role::Guest {
@@ -1144,6 +1145,12 @@ impl ChatApp {
             let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
             let guest = cx.session.role == iyakki_sec::policy::Role::Guest;
             Arc::new(iyakki_agent::lockscreentools::LockTools::new(tools_arc, Arc::new(iyakki_agent::lockscreentools::RealBackend { dir: cx.services.dir().to_path_buf(), user: cx.session.user.clone(), guest, audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
+        // the encrypted home folder (F-STORE-05): status and plan are free, everything else asks every time and opens a form on the screen
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            let guest = cx.session.role == iyakki_sec::policy::Role::Guest;
+            Arc::new(iyakki_agent::enchometools::EncHomeTools::new(tools_arc, Arc::new(iyakki_agent::enchometools::RealBackend { dir: cx.services.dir().to_path_buf(), user: cx.session.user.clone(), guest, audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
         };
         // accessibility: the status is free, a change asks every time
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {

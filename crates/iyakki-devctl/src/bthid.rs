@@ -862,7 +862,40 @@ pub enum PairState {
     ShowPasskey(String, u32),
     /// Type this PIN on the keyboard, then Enter.
     ShowPin(String, String),
+    /// The other device shows a 6-digit passkey: the person types it here (`bt_pair_type`). Holds only the device name, never a number.
+    TypePasskey(String),
+    /// The other device shows a PIN (1-16 characters) to type here. The flag says the device is one that often has none printed and uses
+    /// 0000 or 1234 (a mouse, a game pad): the page may offer those two as a hint.
+    TypePin(String, bool),
     Done(Result<String, String>),
+}
+
+/// The passkey and the PIN a person types for a pairing: the checks that both the page and the backend make, as a plain message.
+pub fn check_typed_passkey(text: &str) -> Result<u32, String> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Err("Type the 6 digits shown on the other device.".into());
+    }
+    if !t.chars().all(|c| c.is_ascii_digit()) {
+        return Err("A passkey has digits only.".into());
+    }
+    if t.len() != 6 {
+        return Err(format!("A passkey has exactly 6 digits; {} typed so far.", t.len()));
+    }
+    t.parse::<u32>().map_err(|_| "A passkey has exactly 6 digits.".to_string())
+}
+
+pub fn check_typed_pin(text: &str) -> Result<String, String> {
+    if text.is_empty() {
+        return Err("Type the PIN shown on the other device.".into());
+    }
+    if text.chars().count() > 16 || text.len() > 16 {
+        return Err("A PIN has at most 16 characters.".into());
+    }
+    if text.chars().any(|c| c.is_control()) {
+        return Err("A PIN has printable characters only.".into());
+    }
+    Ok(text.to_string())
 }
 
 #[cfg(test)]

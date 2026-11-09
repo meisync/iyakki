@@ -1,0 +1,22 @@
+old test path	new test path
+iyakki-agent::qr::tests::short_text_is_version_one_and_reads_back	iyakki-qr::qr::tests::short_text_is_version_one_and_reads_back
+iyakki-agent::qr::tests::finder_timing_and_dark_module_are_in_place	iyakki-qr::qr::tests::finder_timing_and_dark_module_are_in_place
+iyakki-agent::qr::tests::every_size_boundary_round_trips	iyakki-qr::qr::tests::every_size_boundary_round_trips
+iyakki-agent::qr::tests::capacities_match_the_standard	iyakki-qr::qr::tests::capacities_match_the_standard
+iyakki-agent::qr::tests::a_corrupted_module_is_noticed_by_the_check	iyakki-qr::qr::tests::a_corrupted_module_is_noticed_by_the_check
+iyakki-agent::qr_decode::tests::every_version_and_level_with_every_mask_reads_back	iyakki-qr::qr_decode::tests::every_version_and_level_with_every_mask_reads_back
+iyakki-agent::qr_decode::tests::rotation_by_quarter_turns_and_by_other_angles	iyakki-qr::qr_decode::tests::rotation_by_quarter_turns_and_by_other_angles
+iyakki-agent::qr_decode::tests::a_mirrored_picture_is_read_too	iyakki-qr::qr_decode::tests::a_mirrored_picture_is_read_too
+iyakki-agent::qr_decode::tests::noise_and_uneven_light_are_survived	iyakki-qr::qr_decode::tests::noise_and_uneven_light_are_survived
+iyakki-agent::qr_decode::tests::a_tilted_symbol_is_read_by_way_of_the_alignment_pattern	iyakki-qr::qr_decode::tests::a_tilted_symbol_is_read_by_way_of_the_alignment_pattern
+iyakki-agent::qr_decode::tests::damaged_modules_are_repaired_up_to_the_limit_and_refused_beyond	iyakki-qr::qr_decode::tests::damaged_modules_are_repaired_up_to_the_limit_and_refused_beyond
+iyakki-agent::qr_decode::tests::pictures_without_a_code_give_none_quickly	iyakki-qr::qr_decode::tests::pictures_without_a_code_give_none_quickly
+iyakki-agent::qr_decode::tests::random_frames_and_damaged_symbols_never_panic	iyakki-qr::qr_decode::tests::random_frames_and_damaged_symbols_never_panic
+iyakki-agent::qr::tests::the_tables_give_the_capacities_of_the_standard_at_every_level	iyakki-qr::qr::tests::the_tables_give_the_capacities_of_the_standard_at_every_level
+iyakki-agent::qr::tests::format_information_matches_the_table_of_the_standard	iyakki-qr::qr::tests::format_information_matches_the_table_of_the_standard
+iyakki-agent::qr::tests::reed_solomon_matches_the_worked_example_of_the_standard_guides	iyakki-qr::qr::tests::reed_solomon_matches_the_worked_example_of_the_standard_guides
+iyakki-agent::qr::tests::every_level_round_trips_with_its_format_bits_and_check_codewords	iyakki-qr::qr::tests::every_level_round_trips_with_its_format_bits_and_check_codewords
+iyakki-agent::qr::tests::the_biggest_symbols_fill_and_one_more_byte_does_not_fit	iyakki-qr::qr::tests::the_biggest_symbols_fill_and_one_more_byte_does_not_fit
+iyakki-agent::qr::tests::wifi_payload_has_a_form_for_every_security_and_for_hidden_networks	iyakki-qr::qr::tests::wifi_payload_has_a_form_for_every_security_and_for_hidden_networks
+iyakki-agent::qr_decode_tests::the_encoder_tables_at_every_level_agree_with_the_readers_up_to_its_largest_version	iyakki-qr::qr_decode::tests::the_encoder_tables_at_every_level_agree_with_the_readers_up_to_its_largest_version
+iyakki-agent::qr::wifi_payload_escapes_the_special_characters	iyakki-qr::qr::tests::wifi_payload_escapes_the_special_characters

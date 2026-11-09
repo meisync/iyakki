@@ -265,7 +265,19 @@ fn the_manifest_scanner_reads_dependency_tables_only() {
 /// them gained a dependency on the agent, the shell or a tile, the split would be undone (the crate would rebuild whenever the agent does).
 #[test]
 fn the_crates_split_out_of_the_agent_depend_on_small_leaf_crates_only() {
-    let allowed: [(&str, &[&str]); 3] = [("iyakki-sshfs", &["iyakki-sec"]), ("iyakki-camdetect", &["iyakki-sec", "iyakki-volcrypt"]), ("iyakki-diskcrypt", &[])];
+    // PILOT 3: iyakki-camdetect also takes iyakki-clock (events.rs); the others are std plus crates the agent already had
+    let allowed: [(&str, &[&str]); 10] = [
+        ("iyakki-sshfs", &["iyakki-sec"]),
+        ("iyakki-camdetect", &["iyakki-sec", "iyakki-volcrypt", "iyakki-clock"]),
+        ("iyakki-diskcrypt", &[]),
+        ("iyakki-clock", &[]),
+        ("iyakki-wordtime", &[]),
+        ("iyakki-qr", &[]),
+        ("iyakki-archive", &[]),
+        ("iyakki-bindelta", &[]),
+        ("iyakki-lint", &[]),
+        ("iyakki-battery", &[]),
+    ];
     for (krate, ok) in allowed {
         let deps = iyakki_deps(&manifest(krate));
         let extra: Vec<&String> = deps.iter().filter(|d| !ok.contains(&d.as_str())).collect();

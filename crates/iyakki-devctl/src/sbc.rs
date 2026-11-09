@@ -308,6 +308,7 @@ pub fn allocate(p: &Params, sf: &[[u8; 8]; 2]) -> [[u8; 8]; 2] {
 
 // ------------------------------------------------------------------------------------------------ the filter bank
 
+/// The window in use (see [`crate::sbc_tables`]: the designed one, or the legacy one when the cargo feature `legacy-sbc-window` is on).
 fn window(nsb: usize) -> &'static [f64] {
     if nsb == 4 { &D4 } else { &D8 }
 }
@@ -321,7 +322,7 @@ impl Synth {
     fn new(nsb: usize) -> Synth {
         Synth { v: vec![0.0; 20 * nsb] }
     }
-    fn block(&mut self, nsb: usize, s: &[f64], out: &mut [f64]) {
+    fn block(&mut self, nsb: usize, d: &[f64], s: &[f64], out: &mut [f64]) {
         let v = &mut self.v;
         v.copy_within(0..18 * nsb, 2 * nsb);
         for i in 0..2 * nsb {
@@ -331,7 +332,6 @@ impl Synth {
             }
             v[i] = acc;
         }
-        let d = window(nsb);
         for (j, o) in out.iter_mut().enumerate().take(nsb) {
             let mut x = 0.0;
             for m in 0..10 {
@@ -355,14 +355,13 @@ impl Analysis {
     fn new(nsb: usize) -> Analysis {
         Analysis { x: vec![0.0; 10 * nsb] }
     }
-    fn block(&mut self, nsb: usize, pcm: &[f64], out: &mut [f64]) {
+    fn block(&mut self, nsb: usize, d: &[f64], pcm: &[f64], out: &mut [f64]) {
         let x = &mut self.x;
         x.copy_within(0..9 * nsb, nsb);
         for i in 0..nsb {
             // the newest sample goes to index 0
             x[nsb - 1 - i] = pcm[i];
         }
-        let d = window(nsb);
         let mut y = vec![0.0; 2 * nsb];
         for (i, yi) in y.iter_mut().enumerate() {
             for j in 0..5 {
@@ -469,7 +468,7 @@ impl Decoder {
         let mut out = [0.0f64; 8];
         for (b, blk) in sbs.iter().enumerate() {
             for ch in 0..nch {
-                self.synth[ch].block(nsb, &blk[ch][..nsb], &mut out[..nsb]);
+                self.synth[ch].block(nsb, window(nsb), &blk[ch][..nsb], &mut out[..nsb]);
                 for j in 0..nsb {
                     pcm[(b * nsb + j) * nch + ch] = out[j].round().clamp(-32768.0, 32767.0) as i16;
                 }
@@ -515,7 +514,7 @@ impl Encoder {
             for ch in 0..nch {
                 let inp: Vec<f64> = (0..nsb).map(|j| pcm[(b * nsb + j) * nch + ch] as f64).collect();
                 let mut o = [0.0f64; 8];
-                self.an[ch].block(nsb, &inp, &mut o[..nsb]);
+                self.an[ch].block(nsb, window(nsb), &inp, &mut o[..nsb]);
                 blk[ch] = o;
             }
         }
@@ -595,8 +594,8 @@ impl Encoder {
     }
 }
 
-/// Builds a frame from explicit scale factors, join flags and quantised values (used by the tests and by the tool that measured the
-/// window tables). `q[block][channel][subband]`.
+/// Builds a frame from explicit scale factors, join flags and quantised values (used by the tests).
+/// `q[block][channel][subband]`.
 pub fn pack_frame(p: &Params, sf: &[[u8; 8]; 2], join: &[bool; 8], q: &[[[u32; 8]; 2]]) -> Vec<u8> {
     let (nsb, nch) = (p.subbands as usize, p.channels());
     let bits = allocate(p, sf);
@@ -635,3 +634,17 @@ pub fn pack_frame(p: &Params, sf: &[[u8; 8]; 2], join: &[bool; 8], q: &[[[u32; 8
 #[cfg(test)]
 #[path = "sbc_tests.rs"]
 mod tests;
+
+/// Runs `pcm` (mono, a whole number of blocks) through the analysis and then the synthesis filter bank with the window `da` for the analysis and `ds` for the synthesis, with no
+/// quantisation in between: what the filter bank alone does to a signal. Used to design and to check window tables ([`crate::sbc_design`]).
+pub(crate) fn filter_bank_loop(nsb: usize, da: &[f64], ds: &[f64], pcm: &[f64]) -> Vec<f64> {
+    let (mut an, mut sy) = (Analysis::new(nsb), Synth::new(nsb));
+    let mut out = Vec::with_capacity(pcm.len());
+    let (mut s, mut o) = (vec![0.0; nsb], vec![0.0; nsb]);
+    for blk in pcm.chunks_exact(nsb) {
+        an.block(nsb, da, blk, &mut s);
+        sy.block(nsb, ds, &s, &mut o);
+        out.extend_from_slice(&o);
+    }
+    out
+}

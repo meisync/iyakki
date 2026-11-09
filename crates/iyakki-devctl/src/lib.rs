@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 pub mod bnep;
 pub mod bt_pan;
 pub mod sbc;
+pub mod sbc_design;
 pub mod sbc_tables;
+#[cfg(feature = "legacy-sbc-window")]
+pub mod sbc_tables_legacy;
 pub mod a2dp;
 pub mod a2dp_sys;
 pub mod att;
@@ -771,6 +774,11 @@ pub trait Control: Send + Sync {
     fn bt_pair_answer(&self, _yes: bool) -> bool {
         false
     }
+    /// Hands over the passkey or PIN the person typed for the pairing prompt that waits for one (`None`: the person gave up). `Ok(false)`
+    /// when nothing waits; `Err` is a plain refusal (wrong length) and the prompt stays open. Never logged.
+    fn bt_pair_type(&self, _text: Option<String>) -> Result<bool, String> {
+        Ok(false)
+    }
     /// The phone-as-uplink connection ([`bt_pan`]): the state and, when it failed, the plain reason.
     fn bt_tether_view(&self) -> bt_pan::TetherView {
         bt_pan::TetherView::idle()
@@ -851,6 +859,9 @@ impl Control for System {
     }
     fn bt_pair_answer(&self, yes: bool) -> bool {
         bthid_sys::hub().pair_answer(yes)
+    }
+    fn bt_pair_type(&self, text: Option<String>) -> Result<bool, String> {
+        bthid_sys::hub().pair_type(text)
     }
     fn bt_tether_view(&self) -> bt_pan::TetherView {
         bt_pan::Tether::view(&*bt_pan::tether())

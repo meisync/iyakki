@@ -1,0 +1,17 @@
+old test path	new test path
+iyakki-agent::battery::tests::a_desktop_with_only_mains_shows_nothing	iyakki-battery::tests::a_desktop_with_only_mains_shows_nothing
+iyakki-agent::battery::tests::a_discharging_laptop_with_energy_files	iyakki-battery::tests::a_discharging_laptop_with_energy_files
+iyakki-agent::battery::tests::the_charge_variant_works_the_same	iyakki-battery::tests::the_charge_variant_works_the_same
+iyakki-agent::battery::tests::two_batteries_are_combined_weighted_by_full_capacity	iyakki-battery::tests::two_batteries_are_combined_weighted_by_full_capacity
+iyakki-agent::battery::tests::a_bluetooth_mouse_is_not_the_computers_battery	iyakki-battery::tests::a_bluetooth_mouse_is_not_the_computers_battery
+iyakki-agent::battery::tests::garbage_negative_and_zero_values_are_not_believed	iyakki-battery::tests::garbage_negative_and_zero_values_are_not_believed
+iyakki-agent::battery::tests::time_estimates_only_when_sane	iyakki-battery::tests::time_estimates_only_when_sane
+iyakki-agent::battery::tests::the_estimate_is_smoothed_and_restarts_when_the_state_changes	iyakki-battery::tests::the_estimate_is_smoothed_and_restarts_when_the_state_changes
+iyakki-agent::battery::tests::a_laptop_whose_kernel_has_no_battery_driver_says_so	iyakki-battery::tests::a_laptop_whose_kernel_has_no_battery_driver_says_so
+iyakki-agent::battery::tests::warnings_come_once_per_level	iyakki-battery::tests::warnings_come_once_per_level
+iyakki-agent::battery::tests::a_level_rearms_only_after_the_hysteresis_or_a_cable	iyakki-battery::tests::a_level_rearms_only_after_the_hysteresis_or_a_cable
+iyakki-agent::battery::tests::critical_is_decided_in_one_place_and_is_hard_to_reach	iyakki-battery::tests::critical_is_decided_in_one_place_and_is_hard_to_reach
+iyakki-agent::battery::tests::the_countdown_needs_two_readings_runs_30_seconds_and_then_shuts_down_once	iyakki-battery::tests::the_countdown_needs_two_readings_runs_30_seconds_and_then_shuts_down_once
+iyakki-agent::battery::tests::plugging_in_cancels_the_countdown	iyakki-battery::tests::plugging_in_cancels_the_countdown
+iyakki-agent::battery::tests::a_clock_jump_or_a_stalled_shell_never_cuts_the_30_seconds_short	iyakki-battery::tests::a_clock_jump_or_a_stalled_shell_never_cuts_the_30_seconds_short
+iyakki-agent::battery::tests::nothing_ever_shuts_down_a_machine_that_merely_lacks_battery_data	iyakki-battery::tests::nothing_ever_shuts_down_a_machine_that_merely_lacks_battery_data

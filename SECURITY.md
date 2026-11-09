@@ -49,7 +49,7 @@ administrator, side channels, and kernel or firmware bugs in the base system.
 ## What the alpha does not promise
 
 * **No security review** by anyone outside the project, no penetration test, no fuzzing campaign.
-* **No Secure Boot**, no measured boot, no disk encryption of the data volume (vaults are encrypted, the volume is not).
+* **No Secure Boot**, no measured boot, no disk encryption of the data volume (vaults are encrypted, the volume is not). Encrypted per-person home folders are written but not yet run on a real kernel (docs/development/DATA-VOLUME-ENCRYPTION.md section 14); when they are on, only that person's own folder is protected, and system data (logs, user hashes, service data, TLS and SSH host keys, the boot partition) stays readable.
 * **No stability of formats**: vaults, sessions, ledgers, package and catalog formats can change between alphas without migration.
 * **The official store root key does not exist yet**: nothing but items built into the image can be "Official", and the update and store
   channels have no production trust anchors.

@@ -448,7 +448,13 @@ pub enum Answer {
     No,
     Passkey(u32),
     Pin(String),
+    /// Not answered yet: [`Mgmt::pair`] asks again in a moment (it keeps watching the device meanwhile, so a device that gives up ends the wait).
+    /// Only [`Prompt::PasskeyRequest`] and [`Prompt::PinRequest`] may wait.
+    Pending,
 }
+
+/// How long the person has to type a passkey or PIN the other device shows.
+pub const TYPE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// The management client.
 pub struct Mgmt<T: Transport> {
@@ -456,11 +462,13 @@ pub struct Mgmt<T: Transport> {
     /// Events that arrived while waiting for a command's reply.
     pub events: VecDeque<Packet>,
     pub timeout: Duration,
+    /// How long a passkey or PIN prompt may stay unanswered ([`TYPE_TIMEOUT`]).
+    pub type_timeout: Duration,
 }
 
 impl<T: Transport> Mgmt<T> {
     pub fn new(t: T) -> Mgmt<T> {
-        Mgmt { t, events: VecDeque::new(), timeout: Duration::from_secs(5) }
+        Mgmt { t, events: VecDeque::new(), timeout: Duration::from_secs(5), type_timeout: TYPE_TIMEOUT }
     }
 
     /// The transport (tests look at what was sent).
@@ -673,7 +681,7 @@ impl<T: Transport> Mgmt<T> {
         let mut p = ai.clone();
         p.push(io_cap);
         self.t.send(&encode(OP_PAIR_DEVICE, index, &p))?;
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut deadline = Instant::now() + Duration::from_secs(60);
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -700,8 +708,9 @@ impl<T: Transport> Mgmt<T> {
                     let op = if ask(&Prompt::Confirm { value, hint }) == Answer::Yes { OP_USER_CONFIRM_REPLY } else { OP_USER_CONFIRM_NEG_REPLY };
                     self.t.send(&encode(op, index, &ai))?;
                 }
-                EV_USER_PASSKEY_REQUEST if for_us => match ask(&Prompt::PasskeyRequest) {
-                    Answer::Passkey(k) => {
+                EV_USER_PASSKEY_REQUEST if for_us => match self.await_typed(index, &a, &Prompt::PasskeyRequest, ask)? {
+                    Answer::Passkey(k) if k <= 999_999 => {
+                        deadline = deadline.max(Instant::now() + Duration::from_secs(30));
                         let mut r = ai.clone();
                         r.extend_from_slice(&k.to_le_bytes());
                         self.t.send(&encode(OP_USER_PASSKEY_REPLY, index, &r))?;
@@ -712,8 +721,9 @@ impl<T: Transport> Mgmt<T> {
                     let k = u32::from_le_bytes([pkt.params[7], pkt.params[8], pkt.params[9], pkt.params[10]]);
                     let _ = ask(&Prompt::PasskeyShow(k));
                 }
-                EV_PIN_CODE_REQUEST if for_us => match ask(&Prompt::PinRequest) {
+                EV_PIN_CODE_REQUEST if for_us => match self.await_typed(index, &a, &Prompt::PinRequest, ask)? {
                     Answer::Pin(pin) if !pin.is_empty() && pin.len() <= 16 => {
+                        deadline = deadline.max(Instant::now() + Duration::from_secs(30));
                         let mut r = ai.clone();
                         r.push(pin.len() as u8);
                         let mut b = pin.into_bytes();
@@ -725,6 +735,38 @@ impl<T: Transport> Mgmt<T> {
                 },
                 EV_AUTH_FAILED if for_us && pkt.params.len() >= 8 => return Err(Error::Status(if pkt.params[7] == 0 { 5 } else { pkt.params[7] })),
                 EV_CONNECT_FAILED if for_us && pkt.params.len() >= 8 => return Err(Error::Status(if pkt.params[7] == 0 { 4 } else { pkt.params[7] })),
+                _ => self.events.push_back(pkt),
+            }
+        }
+    }
+
+    /// Asks for a passkey or PIN and keeps asking until it is answered, the time is up (answer No) or the device gives up (an error, nothing is
+    /// sent). While waiting, the device's events are read, so its giving up or the pairing ending is noticed within a fifth of a second.
+    fn await_typed(&mut self, index: u16, a: &[u8; 6], prompt: &Prompt, ask: &mut dyn FnMut(&Prompt) -> Answer) -> Result<Answer, Error> {
+        let until = Instant::now() + self.type_timeout;
+        loop {
+            match ask(prompt) {
+                Answer::Pending => {}
+                other => return Ok(other),
+            }
+            if Instant::now() >= until {
+                return Ok(Answer::No);
+            }
+            let Some(raw) = self.t.recv(Duration::from_millis(200))? else { continue };
+            let pkt = decode(&raw)?;
+            if pkt.index != index {
+                continue;
+            }
+            let for_us = pkt.params.len() >= 7 && pkt.params[..6] == *a;
+            match pkt.code {
+                EV_AUTH_FAILED if for_us && pkt.params.len() >= 8 => return Err(Error::Status(if pkt.params[7] == 0 { 5 } else { pkt.params[7] })),
+                EV_CONNECT_FAILED if for_us && pkt.params.len() >= 8 => return Err(Error::Status(if pkt.params[7] == 0 { 4 } else { pkt.params[7] })),
+                EV_CMD_COMPLETE | EV_CMD_STATUS if pkt.params.len() >= 3 && u16::from_le_bytes([pkt.params[0], pkt.params[1]]) == OP_PAIR_DEVICE => {
+                    if pkt.code == EV_CMD_STATUS && pkt.params[2] == 0 {
+                        continue;
+                    }
+                    return Err(Error::Status(if pkt.params[2] == 0 { 5 } else { pkt.params[2] }));
+                }
                 _ => self.events.push_back(pkt),
             }
         }
@@ -1012,6 +1054,87 @@ mod tests {
         let r = m.t.sent.iter().find(|p| p[0..2] == OP_PIN_CODE_REPLY.to_le_bytes()).unwrap();
         assert_eq!(r[13], 4, "pin length");
         assert_eq!(&r[14..18], b"0000");
+    }
+
+    /// A passkey request (the other device shows the number) and a legacy PIN request, answered from what the person typed.
+    fn typed_fixture(ev: u16, tail: &[u8]) -> (String, [u8; 6], Vec<u8>, Vec<u8>) {
+        let addr = "AA:00:00:00:00:01";
+        let a = parse_addr(addr).unwrap();
+        let mut req = a.to_vec();
+        req.extend_from_slice(tail);
+        let mut done = a.to_vec();
+        done.push(0);
+        (addr.to_string(), a, encode(ev, 0, &req), done)
+    }
+
+    #[test]
+    fn a_passkey_the_person_types_is_sent_as_the_user_passkey_reply_after_a_few_waits() {
+        let (addr, a, req, done) = typed_fixture(EV_USER_PASSKEY_REQUEST, &[0]);
+        let mut m = fake(vec![(OP_PAIR_DEVICE, vec![req]), (OP_USER_PASSKEY_REPLY, vec![complete(OP_PAIR_DEVICE, 0, 0, &done)])]);
+        let mut polls = 0;
+        let mut seen = vec![];
+        m.pair(0, &addr, ADDR_BREDR, IO_DISPLAY_YES_NO, &mut |p| {
+            seen.push(p.clone());
+            polls += 1;
+            if polls < 4 { Answer::Pending } else { Answer::Passkey(42) }
+        })
+        .unwrap();
+        assert!(seen.iter().all(|p| *p == Prompt::PasskeyRequest) && seen.len() == 4, "asked again until answered");
+        let r = m.t.sent.iter().find(|p| p[0..2] == OP_USER_PASSKEY_REPLY.to_le_bytes()).expect("reply sent");
+        assert_eq!(&r[6..12], &a);
+        assert_eq!(u32::from_le_bytes([r[13], r[14], r[15], r[16]]), 42, "000042 keeps its leading zeros as a number");
+        assert!(!m.t.sent.iter().any(|p| p[0..2] == OP_USER_PASSKEY_NEG_REPLY.to_le_bytes()));
+    }
+
+    #[test]
+    fn a_cancelled_a_too_big_and_an_unanswered_passkey_get_the_negative_reply() {
+        for (label, answers) in [("cancel", vec![Answer::No]), ("too big", vec![Answer::Passkey(1_000_000)]), ("timeout", vec![])] {
+            let (addr, _, req, done) = typed_fixture(EV_USER_PASSKEY_REQUEST, &[0]);
+            let mut fail = parse_addr(&addr).unwrap().to_vec();
+            fail.extend_from_slice(&[0, 5]);
+            let _ = done;
+            let mut m = fake(vec![(OP_PAIR_DEVICE, vec![req]), (OP_USER_PASSKEY_NEG_REPLY, vec![encode(EV_AUTH_FAILED, 0, &fail)])]);
+            m.type_timeout = Duration::from_millis(40);
+            let mut q: VecDeque<Answer> = answers.into();
+            let e = m.pair(0, &addr, ADDR_BREDR, IO_DISPLAY_YES_NO, &mut |_| q.pop_front().unwrap_or(Answer::Pending)).unwrap_err();
+            assert!(matches!(e, Error::Status(5)), "{label}");
+            assert!(m.t.sent.iter().any(|p| p[0..2] == OP_USER_PASSKEY_NEG_REPLY.to_le_bytes()), "{label}: negative reply sent");
+            assert!(!m.t.sent.iter().any(|p| p[0..2] == OP_USER_PASSKEY_REPLY.to_le_bytes()), "{label}: no positive reply");
+        }
+    }
+
+    #[test]
+    fn a_device_that_gives_up_while_the_person_types_ends_the_wait_without_a_reply() {
+        let (addr, a, req, _) = typed_fixture(EV_USER_PASSKEY_REQUEST, &[0]);
+        let mut fail = a.to_vec();
+        fail.extend_from_slice(&[0, 5]);
+        let mut m = fake(vec![(OP_PAIR_DEVICE, vec![req, encode(EV_AUTH_FAILED, 0, &fail)])]);
+        let e = m.pair(0, &addr, ADDR_BREDR, IO_DISPLAY_YES_NO, &mut |_| Answer::Pending).unwrap_err();
+        assert!(matches!(e, Error::Status(5)));
+        assert!(!m.t.sent.iter().any(|p| p[0..2] == OP_USER_PASSKEY_REPLY.to_le_bytes() || p[0..2] == OP_USER_PASSKEY_NEG_REPLY.to_le_bytes()), "nothing is sent to a device that left");
+    }
+
+    #[test]
+    fn a_pin_the_person_types_is_sent_and_an_empty_or_long_one_is_refused() {
+        let (addr, a, req, done) = typed_fixture(EV_PIN_CODE_REQUEST, &[0]);
+        let mut m = fake(vec![(OP_PAIR_DEVICE, vec![req]), (OP_PIN_CODE_REPLY, vec![complete(OP_PAIR_DEVICE, 0, 0, &done)])]);
+        let mut n = 0;
+        m.pair(0, &addr, ADDR_BREDR, IO_KEYBOARD_DISPLAY, &mut |p| {
+            assert_eq!(*p, Prompt::PinRequest);
+            n += 1;
+            if n < 3 { Answer::Pending } else { Answer::Pin("4821".into()) }
+        })
+        .unwrap();
+        let r = m.t.sent.iter().find(|p| p[0..2] == OP_PIN_CODE_REPLY.to_le_bytes()).unwrap();
+        assert_eq!((&r[6..12], r[13], &r[14..18]), (&a[..], 4, &b"4821"[..]));
+        for bad in ["", "12345678901234567"] {
+            let (addr, _, req, _) = typed_fixture(EV_PIN_CODE_REQUEST, &[0]);
+            let mut fail = parse_addr(&addr).unwrap().to_vec();
+            fail.extend_from_slice(&[0, 5]);
+            let mut m = fake(vec![(OP_PAIR_DEVICE, vec![req]), (OP_PIN_CODE_NEG_REPLY, vec![encode(EV_AUTH_FAILED, 0, &fail)])]);
+            let _ = m.pair(0, &addr, ADDR_BREDR, IO_KEYBOARD_DISPLAY, &mut |_| Answer::Pin(bad.into()));
+            assert!(m.t.sent.iter().any(|p| p[0..2] == OP_PIN_CODE_NEG_REPLY.to_le_bytes()), "{bad:?} gets the negative reply");
+        }
     }
 
     #[test]

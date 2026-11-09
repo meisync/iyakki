@@ -25,3 +25,15 @@ fn the_hardware_guide_tells_the_person_about_vmd_only_as_a_fallback() {
     assert!(d.contains("VMD"), "docs/HARDWARE.md says nothing about Intel VMD");
     assert!(d.contains("vmd driver") || d.contains("VMD driver"), "docs/HARDWARE.md must say the VMD driver is built in");
 }
+
+#[test]
+fn the_x86_kernel_builds_in_dm_crypt_with_xts_aes_ni_and_loop_for_encrypted_homes() {
+    // F-STORE-05: a container file is attached to a loop device and mapped through dm-crypt (aes-xts-plain64) at sign-in. Built in, not
+    // modules: nothing may depend on a module being loaded at that moment. The Mac variant includes this fragment, and the pc image takes
+    // its kernel from the mac build (repack --kernel-from target/buildroot-mac), so one fragment covers every x86-64 image.
+    let t = fragment("dist/buildroot/board/iyakki/linux.fragment");
+    for want in ["CONFIG_MD=y", "CONFIG_BLK_DEV_DM=y", "CONFIG_DM_CRYPT=y", "CONFIG_BLK_DEV_LOOP=y", "CONFIG_CRYPTO_XTS=y", "CONFIG_CRYPTO_AES_NI_INTEL=y"] {
+        assert!(t.lines().any(|l| l == want), "linux.fragment lacks {want}");
+    }
+    assert!(!t.lines().any(|l| l.starts_with("CONFIG_DM_CRYPT=m") || l.starts_with("CONFIG_CRYPTO_XTS=m")), "must be built in");
+}

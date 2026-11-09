@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 description = "Finds the machine's network, Bluetooth, display and sound hardware and switches it on and off, for the Settings app."
 
+[features]
+# The old window tables (measured from a third-party decoder; NOT for release). On until the designed tables are confirmed on a phone.
+default = ["legacy-sbc-window"]
+legacy-sbc-window = []
+
 [dependencies]
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

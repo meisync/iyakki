@@ -2049,7 +2049,11 @@ dependencies = [
  "chacha20poly1305",
  "ctr",
  "ed25519-dalek",
+ "iyakki-archive",
+ "iyakki-battery",
+ "iyakki-bindelta",
  "iyakki-camdetect",
+ "iyakki-clock",
  "iyakki-core-api",
  "iyakki-core-fake",
  "iyakki-data",
@@ -2057,6 +2061,7 @@ dependencies = [
  "iyakki-diskcrypt",
  "iyakki-drivers",
  "iyakki-edit",
+ "iyakki-enchome",
  "iyakki-flow",
  "iyakki-fw",
  "iyakki-hotspot",
@@ -2064,10 +2069,12 @@ dependencies = [
  "iyakki-js",
  "iyakki-ledger",
  "iyakki-link",
+ "iyakki-lint",
  "iyakki-mem",
  "iyakki-netscan",
  "iyakki-pdf",
  "iyakki-proxy",
+ "iyakki-qr",
  "iyakki-rtsp",
  "iyakki-schema",
  "iyakki-sec",
@@ -2085,6 +2092,7 @@ dependencies = [
  "iyakki-wasm",
  "iyakki-web",
  "iyakki-webview",
+ "iyakki-wordtime",
  "libc",
  "log",
  "miniz_oxide 0.8.9",
@@ -2102,15 +2110,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "iyakki-archive"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "miniz_oxide 0.8.9",
+ "ruzstd",
+]
+
+[[package]]
+name = "iyakki-battery"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "iyakki-bindelta"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "ruzstd",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "iyakki-camdetect"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "iyakki-clock",
  "iyakki-sec",
  "iyakki-volcrypt",
  "serde",
  "serde_json",
  "zeroize",
 ]
+
+[[package]]
+name = "iyakki-clock"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "iyakki-connect"
@@ -2217,6 +2254,19 @@ name = "iyakki-edit"
 version = "0.1.0-alpha.1"
 
 [[package]]
+name = "iyakki-enchome"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-diskcrypt",
+ "iyakki-sec",
+ "iyakki-storage",
+ "iyakki-volcrypt",
+ "serde_json",
+ "sha2 0.10.9",
+ "zeroize",
+]
+
+[[package]]
 name = "iyakki-flow"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -2296,6 +2346,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "iyakki-lint"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "iyakki-mem"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -2333,6 +2390,10 @@ dependencies = [
  "ureq",
  "webpki-roots",
 ]
+
+[[package]]
+name = "iyakki-qr"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "iyakki-relcheck"
@@ -2643,6 +2704,10 @@ version = "0.1.0-alpha.1"
 
 [[package]]
 name = "iyakki-webview"
+version = "0.1.0-alpha.1"
+
+[[package]]
+name = "iyakki-wordtime"
 version = "0.1.0-alpha.1"
 
 [[package]]

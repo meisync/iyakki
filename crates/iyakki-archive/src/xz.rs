@@ -817,9 +817,10 @@ pub fn untar_xz(src: &std::path::Path, dest: &std::path::Path, scratch: &std::pa
     r
 }
 
-/// For tests (here and in `clis.rs`): an `.xz` file that holds `data` in uncompressed LZMA2 chunks (valid format, no compression).
-#[cfg(test)]
-pub(crate) fn make_xz_stored(data: &[u8]) -> Vec<u8> {
+/// For tests (here and in the agent's `clis.rs`, which cannot see a `cfg(test)` item of another crate): an `.xz` file that holds `data`
+/// in uncompressed LZMA2 chunks (valid format, no compression).
+#[doc(hidden)]
+pub fn make_xz_stored(data: &[u8]) -> Vec<u8> {
     let mut x = vec![0xFD, b'7', b'z', b'X', b'Z', 0, 0, 4, 0, 0, 0, 0];
     x.extend_from_slice(&[2, 0, 0x21, 1, 0x16, 0, 0, 0, 0, 0, 0, 0]);
     for (i, c) in data.chunks(65536).enumerate() {

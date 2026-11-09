@@ -12,6 +12,13 @@ members = [
     "crates/iyakki-sshfs",
     "crates/iyakki-camdetect",
     "crates/iyakki-diskcrypt",
+    "crates/iyakki-battery",
+    "crates/iyakki-lint",
+    "crates/iyakki-bindelta",
+    "crates/iyakki-archive",
+    "crates/iyakki-qr",
+    "crates/iyakki-wordtime",
+    "crates/iyakki-clock",
     "crates/iyakki-shell",
     "crates/iyakki-core",
     "crates/iyakki-core-api",
@@ -55,6 +62,7 @@ members = [
     "crates/iyakki-connect",
     "crates/iyakki-hotspot",
     "crates/iyakki-volcrypt",
+    "crates/iyakki-enchome",
     "crates/iyakki-pdf",
     "crates/iyakki-wake",
 ]
@@ -68,6 +76,13 @@ license = "Apache-2.0"
 iyakki-sshfs = { path = "crates/iyakki-sshfs" }
 iyakki-camdetect = { path = "crates/iyakki-camdetect" }
 iyakki-diskcrypt = { path = "crates/iyakki-diskcrypt" }
+iyakki-battery = { path = "crates/iyakki-battery" }
+iyakki-lint = { path = "crates/iyakki-lint" }
+iyakki-bindelta = { path = "crates/iyakki-bindelta" }
+iyakki-archive = { path = "crates/iyakki-archive" }
+iyakki-qr = { path = "crates/iyakki-qr" }
+iyakki-wordtime = { path = "crates/iyakki-wordtime" }
+iyakki-clock = { path = "crates/iyakki-clock" }
 iyakki-sec = { path = "crates/iyakki-sec" }
 iyakki-devctl = { path = "crates/iyakki-devctl" }
 iyakki-web = { path = "crates/iyakki-web" }
@@ -88,6 +103,7 @@ iyakki-hwinfo = { path = "crates/iyakki-hwinfo" }
 iyakki-netscan = { path = "crates/iyakki-netscan" }
 iyakki-rtsp = { path = "crates/iyakki-rtsp" }
 iyakki-volcrypt = { path = "crates/iyakki-volcrypt" }
+iyakki-enchome = { path = "crates/iyakki-enchome" }
 iyakki-data = { path = "crates/iyakki-data" }
 iyakki-drivers = { path = "crates/iyakki-drivers" }
 iyakki-flow = { path = "crates/iyakki-flow" }

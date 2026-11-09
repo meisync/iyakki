@@ -10,6 +10,8 @@ license.workspace = true
 iyakki-sec.workspace = true
 # the AES-256-XTS and HMAC-SHA256 primitives of the data-volume crate (camrec_format.rs)
 iyakki-volcrypt.workspace = true
+# the time of day and zones (events.rs)
+iyakki-clock.workspace = true
 zeroize = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

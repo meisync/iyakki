@@ -48,7 +48,33 @@ struct Dialog {
     ours: bool,
     /// The last thing announced to the screen reader.
     said: String,
+    /// What the person typed for a passkey or PIN the other device shows. Wiped when sent, cancelled or closed (also when dropped), never logged.
+    entry: String,
+    /// A plain message under the entry (a wrong length), spoken when it appears.
+    msg: String,
 }
+
+impl Dialog {
+    fn new(name: String, ours: bool) -> Dialog {
+        Dialog { name, ours, said: String::new(), entry: String::new(), msg: String::new() }
+    }
+
+    /// Overwrites and empties the typed number.
+    fn wipe(&mut self) {
+        let mut b = std::mem::take(&mut self.entry).into_bytes();
+        b.fill(0);
+    }
+}
+
+impl Drop for Dialog {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+/// Digits of a passkey, characters of a PIN.
+const PASSKEY_LEN: usize = 6;
+const PIN_MAX: usize = 16;
 
 enum Block {
     Switch,
@@ -200,7 +226,7 @@ impl BtPage {
 
     fn follow_pairing(&mut self) {
         let state = self.model.pair.clone();
-        let active = matches!(state, PairState::Running(_) | PairState::Confirm(..) | PairState::ConfirmNoNumber(_) | PairState::ShowPasskey(..) | PairState::ShowPin(..));
+        let active = matches!(state, PairState::Running(_) | PairState::Confirm(..) | PairState::ConfirmNoNumber(_) | PairState::ShowPasskey(..) | PairState::ShowPin(..) | PairState::TypePasskey(_) | PairState::TypePin(..));
         if !active && !matches!(state, PairState::Done(_)) {
             self.suppress = false;
         }
@@ -215,12 +241,12 @@ impl BtPage {
         }
         if self.dialog.is_none() && active {
             let name = match &state {
-                PairState::Running(n) | PairState::Confirm(n, _) | PairState::ConfirmNoNumber(n) | PairState::ShowPasskey(n, _) | PairState::ShowPin(n, _) => n.clone(),
+                PairState::Running(n) | PairState::Confirm(n, _) | PairState::ConfirmNoNumber(n) | PairState::ShowPasskey(n, _) | PairState::ShowPin(n, _) | PairState::TypePasskey(n) | PairState::TypePin(n, _) => n.clone(),
                 _ => String::new(),
             };
             self.model.stop_scan();
             self.search_focus = false;
-            self.dialog = Some(Dialog { name, ours: self.model.pair_target.is_some() && matches!(state, PairState::Running(_)), said: String::new() });
+            self.dialog = Some(Dialog::new(name, self.model.pair_target.is_some() && matches!(state, PairState::Running(_))));
         }
         if let Some(d) = &self.dialog {
             let said = dialog_words(state_name(&state).unwrap_or(&d.name), &state);
@@ -300,7 +326,7 @@ impl BtPage {
                 self.model.poll(self.ticks);
                 self.suppress = false;
                 self.search_focus = false;
-                self.dialog = Some(Dialog { name: row.name, ours: true, said: String::new() });
+                self.dialog = Some(Dialog::new(row.name, true));
                 self.follow_pairing();
             }
             Err(e) => self.fail(e),
@@ -513,8 +539,11 @@ impl BtPage {
     }
 
     fn dialog_event(&mut self, ev: &Event) -> bool {
-        let Event::Key(k) = ev else { return true };
         let state = self.model.pair.clone();
+        if matches!(state, PairState::TypePasskey(_) | PairState::TypePin(..)) {
+            return self.typing_event(ev, matches!(state, PairState::TypePasskey(_)));
+        }
+        let Event::Key(k) = ev else { return true };
         let ours = self.dialog.as_ref().is_some_and(|d| d.ours);
         // the answer for Enter: Yes when the person started this pairing, No for a request the other device made
         let enter_yes = ours;
@@ -564,6 +593,70 @@ impl BtPage {
                     self.ok("Pairing cancelled.");
                 }
             }
+        }
+        true
+    }
+
+    /// The popup asks for the passkey or PIN the other device shows: digits (or characters) go into the entry, Enter sends it, Esc gives up.
+    fn typing_event(&mut self, ev: &Event, passkey: bool) -> bool {
+        let max = if passkey { PASSKEY_LEN } else { PIN_MAX };
+        let ok_char = |c: char| if passkey { c.is_ascii_digit() } else { !c.is_control() && c.is_ascii() };
+        let Some(d) = self.dialog.as_mut() else { return true };
+        match ev {
+            Event::Key(Key::Esc) => {
+                d.wipe();
+                let r = self.model.pair_type(None);
+                self.dialog = None;
+                self.suppress = true;
+                match r {
+                    Ok(_) => self.ok("Pairing cancelled."),
+                    Err(e) => self.fail(e),
+                }
+            }
+            Event::Key(Key::Enter) => {
+                let text = std::mem::take(&mut d.entry);
+                match self.model.pair_type(Some(text.clone())) {
+                    Ok(_) => {
+                        let mut t = text.into_bytes();
+                        t.fill(0);
+                        if let Some(d) = self.dialog.as_mut() {
+                            d.msg.clear();
+                        }
+                    }
+                    Err(e) => {
+                        // refused: the typing stays, the reason is said in the popup
+                        if let Some(d) = self.dialog.as_mut() {
+                            d.entry = text;
+                            access::announce(&e);
+                            d.msg = e;
+                        }
+                    }
+                }
+            }
+            Event::Key(Key::Backspace) => {
+                d.entry.pop();
+                d.msg.clear();
+            }
+            Event::Key(Key::Char(c)) => {
+                if ok_char(*c) && d.entry.chars().count() < max {
+                    d.entry.push(*c);
+                    d.msg.clear();
+                } else if passkey && !c.is_ascii_digit() {
+                    d.msg = "A passkey has digits only.".into();
+                }
+            }
+            Event::Paste(t) => {
+                // digits only for a passkey (spaces and dashes in the pasted number are dropped); the rest is cut at the limit
+                let room = max.saturating_sub(d.entry.chars().count());
+                let add: String = t.chars().filter(|c| ok_char(*c)).take(room).collect();
+                if add.is_empty() && !t.is_empty() && passkey {
+                    d.msg = "A passkey has digits only.".into();
+                } else {
+                    d.entry.push_str(&add);
+                    d.msg.clear();
+                }
+            }
+            _ => {}
         }
         true
     }
@@ -666,6 +759,21 @@ impl BtPage {
             ),
             PairState::ShowPasskey(_, k) => (Some(format!("{:03} {:03}", k / 1000, k % 1000)), vec![format!("Type this passkey on {name}, then press Enter there.")], vec![("Cancel".into(), ACCENT, Event::Key(Key::Esc))]),
             PairState::ShowPin(_, p) => (Some(p.clone()), vec![format!("Type this PIN on {name}, then press Enter there.")], vec![("Cancel".into(), ACCENT, Event::Key(Key::Esc))]),
+            PairState::TypePasskey(_) => (
+                None,
+                vec![format!("Type the passkey shown on {name}."), "Then choose OK or press Enter.".into()],
+                vec![("OK".into(), ACCENT, Event::Key(Key::Enter)), ("Cancel".into(), MUTED, Event::Key(Key::Esc))],
+            ),
+            PairState::TypePin(_, hint) => {
+                let mut l = vec![format!("Type the PIN shown on {name} (1 to 16 characters).")];
+                let mut b = vec![("OK".into(), ACCENT, Event::Key(Key::Enter)), ("Cancel".into(), MUTED, Event::Key(Key::Esc))];
+                if *hint {
+                    l.push(format!("If {name} shows no PIN, many use 0000 or 1234."));
+                    b.push(("Use 0000".into(), MUTED, Event::Paste("0000".into())));
+                    b.push(("Use 1234".into(), MUTED, Event::Paste("1234".into())));
+                }
+                (None, l, b)
+            }
             PairState::Done(Ok(_)) => (None, vec!["Paired.".into(), "Connect now?".into()], vec![("Connect now".into(), ACCENT, Event::Key(Key::Enter)), ("Not now".into(), MUTED, Event::Key(Key::Esc))]),
             PairState::Done(Err(e)) => (None, vec!["Pairing did not work.".into(), e.clone()], vec![("Try again".into(), ACCENT, Event::Key(Key::Enter)), ("Close".into(), MUTED, Event::Key(Key::Esc))]),
         };
@@ -686,7 +794,23 @@ impl BtPage {
             }
             bx += bw + 10.0 * s;
         }
-        let digits_h = if digits.is_some() { 74.0 * s } else { 0.0 };
+        let typing = match &state {
+            PairState::TypePasskey(_) => Some(true),
+            PairState::TypePin(..) => Some(false),
+            _ => None,
+        };
+        let msg_lines: Vec<String> = match (typing, d.msg.is_empty()) {
+            (Some(_), false) => g.wrap(14.0 * s, &d.msg, Face::Sans, text_w),
+            _ => vec![],
+        };
+        // the passkey is six boxes, the PIN one box; both sized to fit the popup at any text size
+        let box_w = ((text_w - 5.0 * 6.0 * s) / PASSKEY_LEN as f32).clamp(10.0, 46.0 * s);
+        let entry_h = match typing {
+            Some(true) => (box_w * 1.3).max(30.0 * s).min(60.0 * s) + 12.0 * s,
+            Some(false) => 52.0 * s + 12.0 * s,
+            None => 0.0,
+        };
+        let digits_h = (if digits.is_some() { 74.0 * s } else { 0.0 }) + entry_h + msg_lines.len() as f32 * 19.0 * s;
         let ph = 56.0 * s + digits_h + wrapped.len() as f32 * 21.0 * s + 14.0 * s + rows as f32 * (size * 2.1 + 10.0 * s) + 20.0 * s;
         let p = fx::modal(g, area, s, pw, ph, ACCENT, false);
         let mut y = fx::modal_title(g, p, s, &title, ACCENT) + 4.0 * s;
@@ -700,6 +824,13 @@ impl BtPage {
         for l in &wrapped {
             g.text(p.x + 26.0 * s, y, 15.0 * s, TEXT, l, Face::Sans);
             y += 21.0 * s;
+        }
+        if let Some(passkey) = typing {
+            y = draw_entry(g, p.x + 26.0 * s, y + 4.0 * s, text_w, s, passkey, &d.entry, box_w, (self.ticks / 15) % 2 == 0);
+            for l in &msg_lines {
+                g.text(p.x + 26.0 * s, y, 14.0 * s, WARN, l, Face::Sans);
+                y += 19.0 * s;
+            }
         }
         y += 14.0 * s;
         g.button_flow(p.x + 26.0 * s, y, text_w, size, 10.0 * s, &buttons);
@@ -1115,7 +1246,7 @@ impl BtPage {
 
 fn state_name(state: &PairState) -> Option<&str> {
     match state {
-        PairState::Running(n) | PairState::Confirm(n, _) | PairState::ConfirmNoNumber(n) | PairState::ShowPasskey(n, _) | PairState::ShowPin(n, _) if !n.is_empty() => Some(n),
+        PairState::Running(n) | PairState::Confirm(n, _) | PairState::ConfirmNoNumber(n) | PairState::ShowPasskey(n, _) | PairState::ShowPin(n, _) | PairState::TypePasskey(n) | PairState::TypePin(n, _) if !n.is_empty() => Some(n),
         _ => None,
     }
 }
@@ -1129,9 +1260,60 @@ pub fn dialog_words(name: &str, state: &PairState) -> String {
         PairState::ConfirmNoNumber(_) => format!("Pair with {name}. Accept pairing with {name}? It will not send audio or files. Yes or No."),
         PairState::ShowPasskey(_, k) => format!("Pair with {name}. Type this passkey on {name}: {}.", spaced(format!("{k:06}"))),
         PairState::ShowPin(_, p) => format!("Pair with {name}. Type this PIN on {name}: {}.", spaced(p.clone())),
+        PairState::TypePasskey(_) => format!("Pair with {name}. Type the passkey shown on {name}. Passkey, edit text, 6 digits. Enter to send, Escape to cancel."),
+        PairState::TypePin(_, hint) => format!(
+            "Pair with {name}. Type the PIN shown on {name}. PIN, edit text, 1 to 16 characters.{} Enter to send, Escape to cancel.",
+            if *hint { " If it shows none, many use 0000 or 1234." } else { "" }
+        ),
         PairState::Done(Ok(_)) => format!("Pair with {name}. Paired. Connect now?"),
         PairState::Done(Err(e)) => format!("Pair with {name}. Pairing did not work. {e}"),
     }
+}
+
+/// The entry of the passkey (six boxes, the digits visible: the number is on the other device's screen too) or the PIN (one box). Registers
+/// one field for the screen reader: name and count, never what was typed. Returns the y below it.
+#[allow(clippy::too_many_arguments)]
+fn draw_entry(g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, passkey: bool, entry: &str, box_w: f32, blink: bool) -> f32 {
+    let typed: Vec<char> = entry.chars().collect();
+    let (label, count, h) = if passkey {
+        ("Passkey", format!("{} of {PASSKEY_LEN} digits", typed.len()), (box_w * 1.3).max(30.0 * s).min(60.0 * s))
+    } else {
+        ("PIN", format!("{} of up to {PIN_MAX} characters", typed.len()), 52.0 * s)
+    };
+    let field = R::new(x, y, if passkey { 6.0 * box_w + 5.0 * 6.0 * s } else { w }, h);
+    if passkey {
+        for i in 0..PASSKEY_LEN {
+            let bx = x + i as f32 * (box_w + 6.0 * s);
+            let here = i == typed.len().min(PASSKEY_LEN - 1);
+            g.rrect(bx, y, box_w, h, 8.0 * s, rgb(10, 14, 28));
+            g.rrect_outline(bx, y, box_w, h, 8.0 * s, if here { 2.0 * s } else { 1.0 * s }, if here { ACCENT } else { DIM });
+            let ds = (h * 0.62).min(box_w * 1.1);
+            if let Some(c) = typed.get(i) {
+                let t = c.to_string();
+                let tw = g.text_width(ds, &t, Face::Mono);
+                g.text(bx + (box_w - tw) / 2.0, y + (h - g.line_height(ds, Face::Mono)) / 2.0, ds, TEXT, &t, Face::Mono);
+            } else if here && blink {
+                g.rect(bx + box_w / 2.0 - 1.0 * s, y + h * 0.22, 2.0 * s, h * 0.56, ACCENT);
+            }
+        }
+    } else {
+        g.rrect(x, y, w, h, 10.0 * s, rgb(10, 14, 28));
+        g.rrect_outline(x, y, w, h, 10.0 * s, 2.0 * s, ACCENT);
+        let ds = 30.0 * s;
+        let shown: String = typed.iter().collect();
+        let shown = g.fit(ds, &shown, Face::Mono, w - 28.0 * s);
+        let ty = y + (h - g.line_height(ds, Face::Mono)) / 2.0;
+        g.text(x + 14.0 * s, ty, ds, TEXT, &shown, Face::Mono);
+        if blink {
+            let cw = g.text_width(ds, &shown, Face::Mono);
+            g.rect(x + 16.0 * s + cw, y + h * 0.2, 2.0 * s, h * 0.6, ACCENT);
+        }
+    }
+    g.hit(field, Event::Tick, label);
+    let node_state = State::default().value(count);
+    access::describe(label, &Event::Tick, Meta::new(Role::Field, node_state.clone()).named(label));
+    access::report_focus(access::Node::new(label, Role::Field, node_state));
+    y + h + 12.0 * s
 }
 
 fn buttons_width(g: &mut Gfx, size: f32, labels: &[&str], gap: f32) -> f32 {
@@ -1190,5 +1372,18 @@ fn draw_icon(g: &mut Gfx, icon: Icon, x: f32, y: f32, size: f32, col: [u8; 4]) {
             g.circle(cx, cy, 6.5 * u, rgb(26, 31, 52));
             g.circle(cx, cy, 2.0 * u, col);
         }
+    }
+}
+
+#[cfg(test)]
+mod entry_tests {
+    use super::*;
+
+    #[test]
+    fn the_typed_number_is_overwritten_and_emptied_by_wipe() {
+        let mut d = Dialog::new("Pixel".into(), true);
+        d.entry.push_str("123456");
+        d.wipe();
+        assert!(d.entry.is_empty());
     }
 }

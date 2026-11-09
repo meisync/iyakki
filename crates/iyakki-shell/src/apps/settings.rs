@@ -102,6 +102,8 @@ pub enum Tab {
     Backup,
     /// Settings -> Accessibility: screen reader, high contrast, text size, large pointer, focus ring, reduced motion, sticky and slow keys (docs/ACCESSIBILITY.md).
     Accessibility,
+    /// Settings -> Encrypted home: the person's private folder as an encrypted container that opens at sign-in (F-STORE-05).
+    EncHome,
 }
 
 impl Tab {
@@ -109,7 +111,7 @@ impl Tab {
     fn group(self) -> &'static str {
         match self {
             Tab::Overview => CATEGORIES[0],
-            Tab::Account | Tab::Vault | Tab::SecretProviders | Tab::Notifications | Tab::Backup => CATEGORIES[1],
+            Tab::Account | Tab::Vault | Tab::SecretProviders | Tab::Notifications | Tab::Backup | Tab::EncHome => CATEGORIES[1],
             Tab::Models | Tab::Agents | Tab::Skills | Tab::Rag | Tab::Voice | Tab::Browser | Tab::HostAccess => CATEGORIES[2],
             Tab::Network | Tab::SshTunnels | Tab::Vpn | Tab::Remote | Tab::Domains | Tab::Firewall | Tab::Shares => CATEGORIES[3],
             Tab::Display | Tab::Displays | Tab::ScreenSaver | Tab::HomeLayout | Tab::Sound | Tab::SystemSounds | Tab::Accessibility => CATEGORIES[4],
@@ -120,9 +122,9 @@ impl Tab {
     }
 
     /// Where the page sits in the left list: category first, then this order.
-    pub(crate) const ORDER: [Tab; 45] = [
+    pub(crate) const ORDER: [Tab; 46] = [
         Tab::Overview,
-        Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::SecretProviders,
+        Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::EncHome, Tab::SecretProviders,
         Tab::Models, Tab::Agents, Tab::Skills, Tab::Rag, Tab::Voice, Tab::Browser, Tab::HostAccess,
         Tab::Network, Tab::SshTunnels, Tab::Vpn, Tab::Remote, Tab::Domains, Tab::Firewall, Tab::Shares,
         Tab::Display, Tab::Displays, Tab::ScreenSaver, Tab::HomeLayout, Tab::Sound, Tab::SystemSounds, Tab::Accessibility,
@@ -140,7 +142,7 @@ impl Tab {
             Tab::Keyboard => Some("keyboard"),
             Tab::Computer => Some("display"),
             Tab::Bluetooth => Some("bluetooth"),
-            Tab::Overview | Tab::Models | Tab::Agents | Tab::Rag | Tab::Vault | Tab::Skills | Tab::Network | Tab::Browser | Tab::DevCluster | Tab::Storage | Tab::Memory | Tab::Firewall | Tab::SshTunnels | Tab::Domains | Tab::Vpn | Tab::Remote | Tab::Time | Tab::Battery | Tab::Power | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Install | Tab::Updates | Tab::Voice | Tab::SecretProviders | Tab::HostAccess | Tab::Developer | Tab::GitKeys | Tab::Shares | Tab::Account | Tab::HomeLayout | Tab::Cloud | Tab::CloudRoles | Tab::Notifications | Tab::Backup | Tab::Accessibility => None,
+            Tab::Overview | Tab::Models | Tab::Agents | Tab::Rag | Tab::Vault | Tab::Skills | Tab::Network | Tab::Browser | Tab::DevCluster | Tab::Storage | Tab::Memory | Tab::Firewall | Tab::SshTunnels | Tab::Domains | Tab::Vpn | Tab::Remote | Tab::Time | Tab::Battery | Tab::Power | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Install | Tab::Updates | Tab::Voice | Tab::SecretProviders | Tab::HostAccess | Tab::Developer | Tab::GitKeys | Tab::Shares | Tab::Account | Tab::HomeLayout | Tab::Cloud | Tab::CloudRoles | Tab::Notifications | Tab::Backup | Tab::Accessibility | Tab::EncHome => None,
         }
     }
 
@@ -174,6 +176,7 @@ impl Tab {
             Tab::Remote => "remote access web service serve browser https port fingerprint certificate address tablet phone another computer pixel stream share desktop sign in vnc rdp",
             Tab::Time => "clock time date timezone time zone utc 12 24 hour am pm seconds ntp sntp network time server sync 1970 battery wrong",
             Tab::Computer => "this computer computers hardware profile several multiple switch disk usb stick ssd move another mac laptop legion hp sound output display keyboard microphone gpu per computer shared copy reset forget",
+            Tab::EncHome => "encrypted encryption encrypt home folder private files lock unlock password recovery key admin slot dm-crypt theft stolen lost drive protect move migrate",
             Tab::Accessibility => "accessibility screen reader speak voice blind low vision high contrast text size bigger large pointer cursor focus ring motion animation sticky keys slow keys tremor mouse keyboard only",
             Tab::Power => "power profile performance balanced power saver battery life cpu governor frequency turbo fan sleep suspend idle lid power button energy",
             Tab::Battery => "battery charge charging percent percentage power adapter plug laptop low shutdown critical health cycles time left remaining",
@@ -225,6 +228,7 @@ impl Tab {
             Tab::Vpn => "Import a WireGuard or OpenVPN profile you already have, and choose whether all traffic or only what your filters match goes through it.",
             Tab::Time => "The clock in the top bar: time zone, 12 or 24 hours, and setting the time from the network.",
             Tab::Computer => "Which computer this is, and which settings are kept for each computer the install starts on.",
+            Tab::EncHome => "Keep your private folder encrypted so a lost or stolen computer or drive does not give your files away: it opens at sign-in with your password and closes at sign-out.",
             Tab::Accessibility => "Make the computer easier to use without seeing the screen well or without a mouse: a screen reader, high contrast, bigger text and pointer, sticky and slow keys.",
             Tab::Power => "How fast the processor runs (performance, balanced, power saver) and whether the computer sleeps by itself when it is not used.",
             Tab::Battery => "How full the battery is, what it is doing, how worn it is, and the low-battery warnings.",
@@ -277,6 +281,7 @@ impl Tab {
             Tab::Battery => "Battery",
             Tab::Power => "Power",
             Tab::Accessibility => "Accessibility",
+            Tab::EncHome => "Encrypted home",
             Tab::Computer => "This computer",
             Tab::HostName => "Host name",
             Tab::SessionLog => "Last session log",
@@ -354,6 +359,8 @@ mod power_page;
 mod computer_page;
 #[path = "settings_screensaver.rs"]
 mod screensaver_page;
+#[path = "settings_enchome.rs"]
+mod enchome_page;
 #[path = "settings_browserdev.rs"]
 mod settings_browserdev;
 #[cfg(test)]
@@ -421,6 +428,8 @@ enum FormKind {
     NewSecret(bool),
     /// Open the person's own vault with their login password (they signed in without typing one).
     UnlockVault,
+    /// Settings -> Encrypted home: one step of a form (the logic is `iyakki_agent::enchome::form`).
+    EncHome,
     Keyfile,
     SecretProvider,
     Password,
@@ -527,6 +536,9 @@ enum ConfirmKind {
     Secret(bool, String),
     SecretProvider(String),
     ResetPersonal,
+    /// Settings -> Encrypted home: start moving the existing files (the plan is on screen) / remove the old plain copy.
+    EncMove,
+    EncRemovePlain,
     Skill(iyakki_agent::skills::Scope, String),
     Reboot,
     AgentInstall(String),
@@ -729,6 +741,8 @@ pub struct SettingsApp {
     host: host_access::HostPanel,
     crash: crashlog_page::CrashPanel,
     backup: backup_page::BackupPanel,
+    /// Settings -> Encrypted home.
+    ench: enchome_page::EncPanel,
     upd: updates_page::UpdPanel,
     status: Option<(String, bool)>,
     /// Settings → Dev cluster.
@@ -833,8 +847,11 @@ impl SettingsApp {
         }
         tabs.push(Tab::Account);
         tabs.push(Tab::Backup);
+        if cx.session.role != iyakki_sec::policy::Role::Guest {
+            tabs.push(Tab::EncHome);
+        }
         tabs.sort_by_key(|t| Tab::ORDER.iter().position(|o| o == t).unwrap_or(usize::MAX));
-        let mut app = SettingsApp { tabs, tab: 0, sel: [0; 48], win: [ListWindow::default(); 48], hw: DevicesPane::new(DeviceEnv::real()), bt: BtPage::new(DeviceEnv::real()), ticks: 0, tip: Default::default(), test_record_ms: 2000, vo_lang: 0, vo_scroll: 0.0, vo_max: 0.0, lem_scroll: 0.0, lem_max: 0.0, lem_view_h: 0.0, lem_rect: R::new(0.0, 0.0, 0.0, 0.0), lem_s: 1.0, lem_focus: false, lem_query: TextField::new("Search models", false), lem_search: false, lem_texts: Vec::new(), section: if admin { 0 } else { 1 }, share_skills: cx.session.policy.manage_skills, nav_query: TextField::new("Search settings", false), nav_focus: false, nav_scroll: 0.0, narrow: false, show_list: false, nav_seen: usize::MAX, mouse: (0, 0), nav_rect: R::new(0.0, 0.0, 0.0, 0.0), nav_s: 1.0, slider_w: Vec::new(), storage: StorageEnv::real(), wifi: WifiEnv::real(), wifi_items: Vec::new(), devices: vec![], modal: None, job: None, host: Default::default(), crash: Default::default(), backup: Default::default(), upd: Default::default(), status: None, dc: Default::default(), mem: Default::default(), disp: Default::default(), fw: Default::default(), tun: Default::default(), dom: Default::default(), vpn: Default::default(), remote: Default::default(), share: Default::default(), bh: Default::default(), time: Default::default(), hn: Default::default(), inst: Default::default(), devel: Default::default(), git: Default::default(), matrix: Default::default(), shares: Default::default(), mh: Default::default(), kbd: Default::default(), bat: Default::default(), pw: Default::default(), cloud: iyakki_agent::cloudmode::CloudMode::desktop(), roles: Default::default() };
+        let mut app = SettingsApp { tabs, tab: 0, sel: [0; 48], win: [ListWindow::default(); 48], hw: DevicesPane::new(DeviceEnv::real()), bt: BtPage::new(DeviceEnv::real()), ticks: 0, tip: Default::default(), test_record_ms: 2000, vo_lang: 0, vo_scroll: 0.0, vo_max: 0.0, lem_scroll: 0.0, lem_max: 0.0, lem_view_h: 0.0, lem_rect: R::new(0.0, 0.0, 0.0, 0.0), lem_s: 1.0, lem_focus: false, lem_query: TextField::new("Search models", false), lem_search: false, lem_texts: Vec::new(), section: if admin { 0 } else { 1 }, share_skills: cx.session.policy.manage_skills, nav_query: TextField::new("Search settings", false), nav_focus: false, nav_scroll: 0.0, narrow: false, show_list: false, nav_seen: usize::MAX, mouse: (0, 0), nav_rect: R::new(0.0, 0.0, 0.0, 0.0), nav_s: 1.0, slider_w: Vec::new(), storage: StorageEnv::real(), wifi: WifiEnv::real(), wifi_items: Vec::new(), devices: vec![], modal: None, job: None, host: Default::default(), crash: Default::default(), backup: Default::default(), upd: Default::default(), status: None, dc: Default::default(), mem: Default::default(), disp: Default::default(), fw: Default::default(), tun: Default::default(), dom: Default::default(), vpn: Default::default(), remote: Default::default(), share: Default::default(), bh: Default::default(), time: Default::default(), hn: Default::default(), inst: Default::default(), devel: Default::default(), git: Default::default(), matrix: Default::default(), shares: Default::default(), mh: Default::default(), kbd: Default::default(), bat: Default::default(), pw: Default::default(), cloud: iyakki_agent::cloudmode::CloudMode::desktop(), roles: Default::default(), ench: Default::default() };
         app.bat_sync_tab();
         app.refresh_devices();
         app
@@ -1553,6 +1570,7 @@ impl SettingsApp {
                 Self::read_skill_file(cx, &path).and_then(|md| self.add_skill(cx, &md, shared))
             }
             FormKind::BlockListUrl | FormKind::BlockListFile => self.submit_block_form(&kind, form, cx),
+            FormKind::EncHome => return self.ench_submit(cx, form),
             FormKind::UnlockVault => {
                 let user = cx.session.user.clone();
                 // through the core contract: `vault.unlock` takes the local seat, which only a person at the machine can make
@@ -1751,6 +1769,9 @@ impl SettingsApp {
     }
 
     fn apply_confirm(&mut self, cx: &AppCx, kind: ConfirmKind) {
+        if matches!(kind, ConfirmKind::EncMove | ConfirmKind::EncRemovePlain) {
+            return self.ench_confirm(cx, kind);
+        }
         if matches!(kind, ConfirmKind::HomeDelete(_) | ConfirmKind::HomeReset) {
             return self.hl_confirm(cx, &kind);
         }
@@ -1832,6 +1853,7 @@ impl SettingsApp {
                     format!("Deleted skill `{name}`.")
                 }).map_err(|e| e.to_string())
             }
+            ConfirmKind::EncMove | ConfirmKind::EncRemovePlain => Ok(String::new()), // handled above (ench_confirm)
             ConfirmKind::ResetPersonal => Self::svc(cx).reset_user_vault(&cx.session.user).map(|_| "Personal vault removed; a new empty one is created at your next sign-in.".to_string()),
             _ => return,
         };
@@ -2412,7 +2434,7 @@ impl SettingsApp {
             Tab::Displays => self.disp_len(),
             Tab::ScreenSaver => Self::ss_len(cx),
             Tab::Browser if self.bh.open => self.bh_len(cx),
-            Tab::Voice | Tab::Remote | Tab::Account | Tab::Browser | Tab::Memory | Tab::Time | Tab::Battery | Tab::Power | Tab::Accessibility | Tab::Computer | Tab::HostName | Tab::SessionLog | Tab::Cloud => 0,
+            Tab::Voice | Tab::Remote | Tab::Account | Tab::Browser | Tab::Memory | Tab::Time | Tab::Battery | Tab::Power | Tab::Accessibility | Tab::EncHome | Tab::Computer | Tab::HostName | Tab::SessionLog | Tab::Cloud => 0,
             Tab::Startup => iyakki_agent::startup::CATALOGUE.len(),
             Tab::CloudRoles => self.roles_len(cx),
         }
@@ -3545,6 +3567,7 @@ impl App for SettingsApp {
             Tab::Cloud => "c change the mode: Automatic, On, Off",
             Tab::CloudRoles => "Up/Down choose · m add person · n new namespace · a add to namespace · j join · x remove person · d delete namespace",
             Tab::Computer => "s sound · d display · k keyboard and pointer · m microphone · g GPU · p power: per computer or shared · c copy settings from another computer · r reset this computer · f forget a computer (administrators)",
+            Tab::EncHome => "c make my home encrypted · m move my existing files · u open · r open with the recovery key · l lock now · k new recovery key · a administrator slot · s close with the screen lock · x remove the old plain copy",
             Tab::Accessibility => "r screen reader · t test the voice · n speak notices · c high contrast · u/U bigger/smaller text · p large pointer · f big focus ring · m reduce motion · k sticky keys · w slow keys",
             Tab::Power => "e performance · b balanced · v power saver · s sleep after idle (next time) · w sleep while busy (administrators)",
             Tab::Battery => "p percentage in the top bar · w low battery warnings · s shut down at the critical level (administrators)",
@@ -3617,6 +3640,7 @@ impl App for SettingsApp {
                 "battery" => Some(Tab::Battery),
                 "power" => Some(Tab::Power),
                 "accessibility" | "screenreader" | "access" => Some(Tab::Accessibility),
+                "encryptedhome" | "encrypted" | "encryption" | "enchome" => Some(Tab::EncHome),
                 "computer" | "thiscomputer" | "computers" => Some(Tab::Computer),
                 "hostname" => Some(Tab::HostName),
                 "crashlog" | "sessionlog" => Some(Tab::SessionLog),
@@ -3730,6 +3754,7 @@ impl App for SettingsApp {
             if self.dc_platform_open() {
                 self.dc_platform_event(ev);
             }
+            self.ench_tick(cx);
             self.git_tick(cx);
             self.tun_tick(cx);
             self.dom_tick(cx);
@@ -3906,6 +3931,7 @@ impl App for SettingsApp {
                 Tab::Battery => self.handle_battery(other, cx),
                 Tab::Power => self.handle_power(other, cx),
                 Tab::Accessibility => self.handle_access(other, cx),
+                Tab::EncHome => self.handle_ench(other, cx),
                 Tab::Computer => self.handle_computer(other, cx),
                 Tab::HostName => self.handle_host_name(other, cx),
                 Tab::SessionLog => self.handle_crash(other, cx),
@@ -4022,6 +4048,7 @@ impl App for SettingsApp {
             Tab::Battery => self.render_battery(g, body, s, cx),
             Tab::Power => self.render_power(g, body, s, cx),
             Tab::Accessibility => self.render_access(g, body, s, cx),
+            Tab::EncHome => self.render_ench(g, body, s, cx),
             Tab::Computer => self.render_computer(g, body, s, cx),
             Tab::HostName => self.render_host_name(g, body, s, cx),
             Tab::SessionLog => self.render_crash(g, body, s, cx),
@@ -4168,6 +4195,7 @@ impl SettingsApp {
             (Tab::Battery, _) => self.battery_buttons(),
             (Tab::Power, _) => self.power_buttons(),
             (Tab::Accessibility, _) => self.access_buttons(),
+            (Tab::EncHome, _) => self.ench_buttons(),
             (Tab::Computer, _) => self.computer_buttons(),
             (Tab::HostName, _) => self.host_name_buttons(),
             (Tab::SessionLog, _) => self.crash_buttons(),
@@ -5035,7 +5063,7 @@ mod tests {
     fn non_admins_cannot_change_system_settings_and_it_is_audited() {
         let cx = user("set4");
         let mut a = SettingsApp::new(&cx).on(Tab::Models);
-        assert_eq!(a.tabs(), &[Tab::Overview, Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::Models, Tab::Skills, Tab::Rag, Tab::Voice, Tab::Browser, Tab::HostAccess, Tab::Shares, Tab::ScreenSaver, Tab::HomeLayout, Tab::Accessibility, Tab::Time, Tab::Power, Tab::Computer, Tab::GitKeys], "no secret-provider tab for users; everyone has Notifications, Screen saver, Time, Power, Accessibility, This computer and Home layout; whoever has the AI IDE has Git and SSH keys");
+        assert_eq!(a.tabs(), &[Tab::Overview, Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::EncHome, Tab::Models, Tab::Skills, Tab::Rag, Tab::Voice, Tab::Browser, Tab::HostAccess, Tab::Shares, Tab::ScreenSaver, Tab::HomeLayout, Tab::Accessibility, Tab::Time, Tab::Power, Tab::Computer, Tab::GitKeys], "no secret-provider tab for users; everyone has Notifications, Screen saver, Time, Power, Accessibility, This computer and Home layout; whoever has the AI IDE has Git and SSH keys");
         for k in ['a', 'e', 'd', 'k', 'x'] {
             key(&mut a, &cx, Key::Char(k));
             assert!(!a.has_modal(), "{k}");
@@ -6660,6 +6688,9 @@ mod backup_tests;
 #[cfg(test)]
 #[path = "settings_access_tests.rs"]
 mod access_tests;
+#[cfg(test)]
+#[path = "settings_enchome_tests.rs"]
+mod enchome_tests;
 #[cfg(test)]
 #[path = "settings_updates_tests.rs"]
 mod updates_tests;

@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::camrec_format::{self as fmt, RecKey, RecKind, Segment, SegmentWriter};
-use crate::clock::Local;
+use iyakki_clock::Local;
 
 pub const F_START: u8 = 0x10;
 pub const F_END: u8 = 0x20;
@@ -308,10 +308,15 @@ impl EventStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::Zone;
+    use iyakki_clock::Zone;
 
     fn tmp(name: &str) -> PathBuf {
-        crate::testdir::unique("camevents", name)
+        // a folder of its own per call (process id plus a counter), like the agent's testdir
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let d = std::env::temp_dir().join(format!("camevents-{}-{}-{name}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
     }
     fn local(ms: u64) -> Local {
         Zone::utc().local((ms / 1000) as i64)

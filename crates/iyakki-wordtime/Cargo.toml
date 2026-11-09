@@ -1,0 +1,9 @@
+[package]
+name = "iyakki-wordtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Word-highlight timing for reading aloud (browser boundary events, estimates), split out of iyakki-agent.
+# (docs/development/COMPILE-SPLIT-PILOT-3.md). std only; the agent re-exports the modules under the old paths.
+[dependencies]

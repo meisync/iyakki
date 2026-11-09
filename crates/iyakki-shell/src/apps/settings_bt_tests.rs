@@ -104,6 +104,8 @@ struct Fake {
     tether_refusal: Option<String>,
     audio: Mutex<AudioView>,
     calls: Mutex<Vec<String>>,
+    /// what the person typed for a passkey or PIN prompt (Some(None) = gave up); the calls list never holds it
+    typed: Mutex<Option<Option<String>>>,
 }
 
 impl Fake {
@@ -128,6 +130,7 @@ impl Fake {
             tether_refusal: None,
             audio: Mutex::new(AudioView { ready: true, ..Default::default() }),
             calls: Mutex::new(vec![]),
+            typed: Mutex::new(None),
         }
     }
     fn rom() -> Fake {
@@ -238,6 +241,14 @@ impl iyakki_devctl::Control for Fake {
     fn bt_pair_answer(&self, yes: bool) -> bool {
         self.calls.lock().unwrap().push(format!("answer {yes}"));
         true
+    }
+    fn bt_pair_type(&self, text: Option<String>) -> Result<bool, String> {
+        self.calls.lock().unwrap().push(format!("type {}", if text.is_some() { "sent" } else { "cancelled" }));
+        if !matches!(*self.pair.lock().unwrap(), PairState::TypePasskey(_) | PairState::TypePin(..)) {
+            return Ok(false);
+        }
+        *self.typed.lock().unwrap() = Some(text);
+        Ok(true)
     }
     fn bt_tether_view(&self) -> TetherView {
         self.tether.lock().unwrap().clone()
@@ -1343,4 +1354,182 @@ fn the_page_states_can_be_drawn_to_png_files_for_a_look() {
     tick(&mut b, &cx, 3);
     save(&draw(&mut b, &cx, 1280, 720), "10-needs-firmware");
     save(&draw(&mut b, &cx, 360, 740), "11-needs-firmware-360");
+}
+
+// ---------------------------------------------------------------------------------------------- typing a passkey or PIN shown on the other device
+
+fn type_str(a: &mut SettingsApp, cx: &AppCx, t: &str) {
+    for c in t.chars() {
+        key(a, cx, Key::Char(c));
+    }
+}
+
+#[test]
+fn a_passkey_shown_on_the_other_device_is_typed_here_and_sent_with_the_right_value() {
+    let (mut a, cx, ctl) = pairing("t1", PairState::TypePasskey("Pixel".into()));
+    assert!(a.bt.has_dialog() && a.has_modal());
+    let g = draw(&mut a, &cx, 1280, 720);
+    let l = labels(&g);
+    assert!(l.iter().any(|x| x == "Passkey") && l.iter().any(|x| x == "OK") && l.iter().any(|x| x == "Cancel"), "{l:?}");
+    assert!(!l.iter().any(|x| x == "Scan" || x == "Advanced"), "the focus is trapped: {l:?}");
+    let spoken = crate::access::take_announcements().join(" | ");
+    assert!(spoken.contains("Type the passkey shown on Pixel") && spoken.contains("Passkey, edit text, 6 digits"), "{spoken}");
+    // the keys behind the popup do not reach the page; letters are refused with a plain message; paste keeps digits only
+    key(&mut a, &cx, Key::Char('s'));
+    assert_eq!(ctl.count("scan"), 1);
+    type_str(&mut a, &cx, "12");
+    key(&mut a, &cx, Key::Char('x'));
+    a.handle(&Event::Paste("3 4-5\n6789".into()), &cx);
+    key(&mut a, &cx, Key::Backspace);
+    key(&mut a, &cx, Key::Char('6'));
+    let g = draw(&mut a, &cx, 1280, 720);
+    let node = crate::access::take_focus().expect("the field is focused");
+    let said = node.speak();
+    assert!(said.starts_with("Passkey, edit, 6 of 6 digits"), "{said}");
+    assert!(!said.contains("123456"), "the screen reader never gets the digits");
+    let _ = g;
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(ctl.typed.lock().unwrap().clone(), Some(Some("123456".to_string())), "the reply carries what was typed");
+    assert_eq!(ctl.calls().last().unwrap(), "type sent");
+    let log = audit(&cx).join("\n");
+    assert!(log.contains("bluetooth pairing entry sent"), "{log}");
+    assert!(!log.contains("123456") && !log.contains("1 2 3"), "no digits in the log: {log}");
+    assert!(!crate::access::take_announcements().join(" ").contains("123456"));
+}
+
+#[test]
+fn a_wrong_length_passkey_is_refused_in_plain_words_and_nothing_is_sent() {
+    let (mut a, cx, ctl) = pairing("t2", PairState::TypePasskey("Pixel".into()));
+    type_str(&mut a, &cx, "12345");
+    key(&mut a, &cx, Key::Enter);
+    assert!(ctl.typed.lock().unwrap().is_none(), "nothing sent");
+    let g = draw(&mut a, &cx, 1280, 720);
+    let spoken = crate::access::take_announcements().join(" | ");
+    assert!(spoken.contains("exactly 6 digits"), "{spoken}");
+    assert!(a.bt.has_dialog() && labels(&g).iter().any(|x| x == "OK"), "the popup stays open for a second try");
+    assert!(!spoken.contains("12345"), "{spoken}");
+    key(&mut a, &cx, Key::Enter);
+    key(&mut a, &cx, Key::Char('6'));
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(ctl.typed.lock().unwrap().clone(), Some(Some("123456".to_string())), "the typing was kept, the sixth digit made it right");
+    // nothing typed at all
+    let (mut b, cx2, ctl2) = pairing("t2b", PairState::TypePasskey("Pixel".into()));
+    key(&mut b, &cx2, Key::Enter);
+    assert!(ctl2.typed.lock().unwrap().is_none());
+    assert!(crate::access::take_announcements().join(" | ").contains("Type the 6 digits"));
+    assert!(audit(&cx2).join("\n").find("entry").is_none());
+}
+
+#[test]
+fn cancel_esc_and_a_click_on_cancel_give_the_negative_reply_and_wipe_the_entry() {
+    let (mut a, cx, ctl) = pairing("t3", PairState::TypePasskey("Pixel".into()));
+    type_str(&mut a, &cx, "1234");
+    key(&mut a, &cx, Key::Esc);
+    assert_eq!(ctl.typed.lock().unwrap().clone(), Some(None), "the person gave up: a negative reply");
+    assert!(!a.bt.has_dialog());
+    assert!(audit(&cx).join("\n").contains("bluetooth pairing entry cancelled"));
+    let (mut b, cx2, ctl2) = pairing("t3b", PairState::TypePin("Mouse".into(), true));
+    type_str(&mut b, &cx2, "99");
+    let g = draw(&mut b, &cx2, 1280, 720);
+    click(&mut b, &cx2, &g, "Cancel");
+    assert_eq!(ctl2.typed.lock().unwrap().clone(), Some(None));
+    assert!(!b.bt.has_dialog());
+    // a prompt that comes back for a pairing the person gave up is not shown again
+    *ctl2.pair.lock().unwrap() = PairState::TypePin("Mouse".into(), true);
+    tick(&mut b, &cx2, 3);
+    assert!(!b.bt.has_dialog());
+}
+
+#[test]
+fn the_entry_is_wiped_when_the_popup_closes_for_any_reason() {
+    // the device gave up while the person was typing: the popup shows the failure and the digits are gone
+    let (mut a, cx, ctl) = pairing("t4", PairState::TypePasskey("Pixel".into()));
+    type_str(&mut a, &cx, "1234");
+    *ctl.pair.lock().unwrap() = PairState::Done(Err("pairing failed: timed out".into()));
+    tick(&mut a, &cx, 2);
+    let g = draw(&mut a, &cx, 1280, 720);
+    assert!(labels(&g).iter().any(|l| l == "Try again") && !labels(&g).iter().any(|l| l == "Passkey"), "{:?}", labels(&g));
+    assert!(crate::access::take_announcements().join(" | ").contains("timed out"));
+    let log = audit(&cx).join("\n");
+    assert!(log.contains("failed: pairing failed: timed out") && !log.contains("1234"), "{log}");
+    // nothing waits any more: sending is refused plainly
+    assert!(a.bt.model.pair_type(Some("123456".into())).is_err());
+}
+
+#[test]
+fn a_pin_shown_on_the_other_device_is_typed_here_and_the_common_pins_are_a_hint_only_for_devices_without_one() {
+    // a phone shows its PIN: no hint
+    let (mut a, cx, ctl) = pairing("t5", PairState::TypePin("Pixel".into(), false));
+    let g = draw(&mut a, &cx, 1280, 720);
+    let l = labels(&g);
+    assert!(l.iter().any(|x| x == "PIN") && !l.iter().any(|x| x.starts_with("Use ")), "{l:?}");
+    let spoken = crate::access::take_announcements().join(" | ");
+    assert!(spoken.contains("Type the PIN shown on Pixel") && !spoken.contains("0000"), "{spoken}");
+    type_str(&mut a, &cx, "ab 9!");
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(ctl.typed.lock().unwrap().clone(), Some(Some("ab 9!".to_string())));
+    // 17 characters are cut at 16
+    let (mut b, cx2, ctl2) = pairing("t5b", PairState::TypePin("Pixel".into(), false));
+    type_str(&mut b, &cx2, "12345678901234567");
+    key(&mut b, &cx2, Key::Enter);
+    assert_eq!(ctl2.typed.lock().unwrap().clone().unwrap().unwrap().len(), 16);
+    // empty is refused
+    let (mut c, cx3, ctl3) = pairing("t5c", PairState::TypePin("Pixel".into(), false));
+    key(&mut c, &cx3, Key::Enter);
+    assert!(ctl3.typed.lock().unwrap().is_none());
+    assert!(crate::access::take_announcements().join(" | ").contains("Type the PIN"));
+    // a mouse that has none printed: the two common PINs are offered as buttons that fill the entry
+    let (mut d, cx4, ctl4) = pairing("t5d", PairState::TypePin("Mouse".into(), true));
+    let g = draw(&mut d, &cx4, 1280, 720);
+    assert!(labels(&g).iter().any(|x| x == "Use 0000") && labels(&g).iter().any(|x| x == "Use 1234"));
+    assert!(crate::access::take_announcements().join(" | ").contains("0000 or 1234"));
+    click(&mut d, &cx4, &g, "Use 1234");
+    key(&mut d, &cx4, Key::Enter);
+    assert_eq!(ctl4.typed.lock().unwrap().clone(), Some(Some("1234".to_string())));
+    for c in [&cx, &cx2, &cx3, &cx4] {
+        let log = audit(c).join("\n");
+        assert!(!log.contains("ab 9") && !log.contains("1234") && !log.contains("0000"), "{log}");
+    }
+}
+
+#[test]
+fn the_typing_stages_fit_the_smallest_window_and_the_largest_text_and_work_by_keyboard_alone() {
+    for (w, h) in [(360u32, 740u32), (800, 480), (1280, 720)] {
+        for big in [1.0f32, 2.0] {
+            for start in [PairState::TypePasskey("A device with a rather long name indeed".into()), PairState::TypePin("A device with a rather long name indeed".into(), true)] {
+                let cx = admin("tl");
+                let ctl = Arc::new(Fake { scan: Mutex::new(vec![found("MX Anywhere", "10:00:00:00:00:02", -50, Kind::Mouse)]), pair_on_start: start.clone(), ..Fake::new() });
+                let mut a = SettingsApp::new(&cx).with_hardware(env(&format!("tl-{w}-{big}"), ctl.clone(), "HP Laptop", Some((false, false)), false));
+                a.go_to(Tab::Bluetooth);
+                tick(&mut a, &cx, 3);
+                key(&mut a, &cx, Key::Char('s'));
+                wait_scan(&mut a, &cx);
+                let mut g = draw_big(&mut a, &cx, w, h, big);
+                for _ in 0..12 {
+                    if g.hits.iter().any(|x| x.label == "Pair") {
+                        break;
+                    }
+                    key(&mut a, &cx, Key::Down);
+                    g = draw_big(&mut a, &cx, w, h, big);
+                }
+                click(&mut a, &cx, &g, "Pair");
+                // keyboard only: type, Backspace, type again, Enter
+                type_str(&mut a, &cx, "1234567");
+                key(&mut a, &cx, Key::Backspace);
+                key(&mut a, &cx, Key::Backspace);
+                type_str(&mut a, &cx, "56");
+                let g = draw_big(&mut a, &cx, w, h, big);
+                let (pw, ph) = (w as f32, h as f32);
+                let field = if matches!(start, PairState::TypePasskey(_)) { "Passkey" } else { "PIN" };
+                for l in [field, "OK", "Cancel"] {
+                    let r = g.hits.iter().find(|x| x.label == l).unwrap_or_else(|| panic!("{w}x{h} x{big}: {l} in {:?}", labels(&g))).rect;
+                    assert!(r.x >= 0.0 && r.y >= 72.0 && r.x + r.w <= pw && r.y + r.h <= ph, "{w}x{h} x{big}: {l} {r:?}");
+                }
+                key(&mut a, &cx, Key::Enter);
+                let typed = ctl.typed.lock().unwrap().clone();
+                let want = if matches!(start, PairState::TypePasskey(_)) { "123456" } else { "1234556" };
+                assert_eq!(typed, Some(Some(want.to_string())), "{w}x{h} x{big}");
+            }
+        }
+    }
 }

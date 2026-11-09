@@ -363,3 +363,17 @@ fn every_failure_has_a_plain_reason() {
     assert!(d.line().starts_with("keyboard · AA:BB:CC:DD:EE:FF · not connected: the device did not answer"));
     assert!(is_hid_kind(btmgmt::Kind::Gamepad) && !is_hid_kind(btmgmt::Kind::Headphones));
 }
+
+#[test]
+fn a_typed_passkey_has_exactly_six_digits_and_a_pin_one_to_sixteen_printable_characters() {
+    assert_eq!(check_typed_passkey("000042"), Ok(42));
+    assert_eq!(check_typed_passkey(" 123456 "), Ok(123456));
+    assert!(check_typed_passkey("").unwrap_err().contains("6 digits"));
+    assert!(check_typed_passkey("12345").unwrap_err().contains("exactly 6"));
+    assert!(check_typed_passkey("1234567").unwrap_err().contains("exactly 6"));
+    assert!(check_typed_passkey("12a456").unwrap_err().contains("digits only"));
+    assert!(!check_typed_passkey("12345").unwrap_err().contains("12345"), "the message never repeats the number");
+    assert_eq!(check_typed_pin("0000"), Ok("0000".to_string()));
+    assert!(check_typed_pin("").is_err() && check_typed_pin(&"x".repeat(17)).is_err() && check_typed_pin("a\nb").is_err());
+    assert!(check_typed_pin(&"x".repeat(16)).is_ok());
+}

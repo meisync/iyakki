@@ -1,0 +1,11 @@
+[package]
+name = "iyakki-bindelta"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The binary delta (build and apply), split out of iyakki-agent. Uses sha2 (already in the workspace).
+# (docs/development/COMPILE-SPLIT-PILOT-3.md). std only; the agent re-exports the modules under the old paths.
+[dependencies]
+sha2 = "0.10"
+ruzstd = "0.9"

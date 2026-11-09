@@ -60,6 +60,8 @@ impl Shell {
         self.env.audit.record(&user, "lock", why);
         let vault_was_open = self.env.services.user_vault_unlocked(&user);
         self.env.services.lock_user_vault(&user);
+        // an encrypted home folder closes with the screen when the person chose that (F-STORE-05)
+        let _ = iyakki_agent::enchome::EncHome::on_screen_lock_if_any(self.env.services.dir(), &user);
         // nothing of the desktop stays open over the prompt
         self.ctx = None;
         self.clip = None;
@@ -203,6 +205,8 @@ impl Shell {
 
     /// The password was right: the vault opens with it, the desktop comes back as it was.
     fn lock_open(&mut self, user: &str, pw: &str) {
+        // ... and opens again with the same password (F-STORE-05)
+        let _ = iyakki_agent::enchome::EncHome::on_screen_unlock_if_any(self.env.services.dir(), user, pw);
         let vault = self.env.services.unlock_user_vault(user, pw);
         self.lockui.active = false;
         self.lockui.form = LockUi::fresh_form();

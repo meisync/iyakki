@@ -1,6 +1,6 @@
 # Data volume encryption (F-STORE-05, queue item Q5)
 
-**Status 2026-11-08: design plus slice 1 (pure code, tested on files and memory). Nothing runs on a real volume.** This page builds on
+**Status 2026-11-09: design, slice 1 (pure code) and slices 2-6 (device-mapper module, home lifecycle, Settings page, chat tools, opt-in migration), all tested on a recording fake kernel and temp folders. Nothing has run on a real kernel, loop device or dm-crypt mapping yet; the kernel options are in the fragment but not built.** This page builds on
 `docs/development/LOCK-AND-ENCRYPTION.md` section B (2026-10-24), which designed "encrypt the whole data partition with LUKS2 and
 `cryptsetup`". Since then the owner fixed rules that change the answer: in-house code first, permissive licences only, GPL tools never
 shipped (so no `cryptsetup` on the stick), and the images now do unattended boots (kiosk, cloud, k3s). Where this page differs from
@@ -200,3 +200,60 @@ LUKS2 export. The recovery-key text is checked for typos, but nothing yet enforc
 5. Kernel options (`DM_CRYPT`, `XTS`, AES-NI, loop, device mapper): approve for the next image build, given the boot-test-before-push rule?
 6. Argon2id target: about 1 s on the machine that formats, memory floor 256 MiB. Acceptable on the Mac mini booted from the stick?
 7. Is it acceptable that system data (logs, `users.json` hashes, k3s data, TLS/SSH host keys) stays readable under option B until option A exists?
+
+## 13a. The owner's answers (2026-11-09) and what they decided
+
+All seven as recommended: (1) per-person homes unlocked at sign-in are the first and default route, whole-partition encryption stays a later option for attended machines; (2) own IYAKVOL1 format now, LUKS2 export later; (3) no administrator slot by default (recovery key only), an optional administrator slot the person can allow; (4) the home password is the sign-in password; (5) the next kernel build may add DM_CRYPT, XTS, AES-NI, device mapper and loop; (6) Argon2id calibrated to about 1 s with a 256 MiB memory floor; (7) **system data stays readable until whole-partition encryption exists**: the root images, `users.json` (hashes only), `audit.log`, logs, k3s data, TLS and SSH host keys, `mac-secret`, the other people's folders as far as they are not encrypted, and the whole boot partition. The Settings page says so in its own words.
+
+## 14. What slices 2-6 built, how to rebuild the kernel, and how to test on a real machine
+
+### 14.1 Built (fake kernel and temp folders only)
+
+| Piece | Where | What it does |
+|---|---|---|
+| Kernel options | `dist/buildroot/board/iyakki/linux.fragment` | `CONFIG_MD`, `BLK_DEV_DM`, `DM_CRYPT`, `BLK_DEV_LOOP`, `CRYPTO_XTS`, `CRYPTO_AES_NI_INTEL`, all built in (=y). Test: `iyakki-core` `kernel_storage_drivers` |
+| Device-mapper module | `crates/iyakki-storage/src/dm.rs`, `dm/sys.rs`, `dm/fake.rs` | The only code that opens `/dev/mapper/control`, `/dev/loop-control` and calls `mount(2)` for homes. `Crypt::open` does DEV_CREATE, TABLE_LOAD (`aes-xts-plain64`, 4096-byte sectors, the key in the ioctl buffer flagged `DM_SECURE_DATA_FLAG` and wiped after the call), DEV_SUSPEND-as-resume, and removes the device again if any step fails. No `cryptsetup`, no command line, no environment variable, no log line holds the key. `DmKernel` is the seam: `SysKernel` (real) and `FakeKernel` (decodes and checks every ioctl buffer like the kernel, models loop devices, mappings and a file system per mapping, can fail any step, can lose power). Table: `0 <sectors> crypt aes-xts-plain64 <hexkey> 0 /dev/loopN <payload offset / 512> 1 sector_size:4096`. A 512-byte-sector volume omits the option |
+| Home lifecycle | `crates/iyakki-enchome/src/lib.rs` (new crate; re-exported as `iyakki_agent::enchome`) | create, unlock, lock, confirm recovery key, new recovery key, password change re-wrap, reset after a forgotten password with the recovery key or an administrator slot, administrator slot on/off, lock with the screen lock (the person's choice), status, banners, throttle (the same `iyakki_diskcrypt::Limiter` as DISKS: 2, 5, 15, 30, 60 s, kept for the whole process), Argon2id calibration |
+| Sign-in hooks | `Services::on_login`, `on_logout`, `on_password_change`, `reset_user_vault` (agent `services.rs`), `shell_lock.rs` | One line each, calling `EncHome::*_if_any`; they do nothing at all (one `stat`) for an account without a container |
+| Forms | `crates/iyakki-enchome/src/form.rs` | The logic behind the Settings buttons, tested without a screen |
+| Settings page | `crates/iyakki-shell/src/apps/settings_enchome.rs` (Settings -> Encrypted home, under Account and data) | State in words, make / move / open / open with recovery key / lock / new recovery key / administrator slot / close with the screen lock / remove old plain copy, and what is and is not protected |
+| Chat tools | `crates/iyakki-agent/src/enchometools.rs` | `encrypted_home_status` and `_plan_move` are free; `_create`, `_lock`, `_unlock`, `_new_recovery_key`, `_set_admin_slot` and `_move_files` ask every time and never ride on a session grant. No tool has an argument that could carry a password or a recovery key: the tool leaves a one-word request and the Settings page opens the masked form |
+| Migration | `crates/iyakki-enchome/src/migrate.rs` | Opt-in only. plan (files, folders, links, bytes, skipped sockets and devices, free space, the size of the container), staging mount, copy (modes, owners, links, times), SHA-256 of every file compared again through the decrypting path plus modes, link targets and entry counts, switch (the plain home is renamed `<name>.plain-before-encrypt`, never deleted), removal of the plain copy only when the encrypted home is open and the recovery key was typed back, and the flash statement. A power cut at any step is settled by `recover_interrupted` |
+
+How the pieces answer the rules in sections 3 to 10: the recovery key counts as saved only when the person types it back and it opens the volume (`confirm_recovery`); every wrong password or recovery key gets the same sentence, a mistyped recovery key (check characters) is told apart because it never reached a slot; sign-in never blocks on the home (a sealed home gives a banner and an unmounted `/home/<name>`); an administrator reset marks the home "sealed by reset" and the reset dialog's text comes from `EncHome::reset_warning` (it names what can still open the home).
+
+### 14.2 The kernel rebuild (to be scheduled by the orchestrator; not run)
+
+Which kernel the PC image uses: `repack.sh pc --base target/buildroot-web --kernel-from target/buildroot-mac`, so the kernel, modules and firmware come from the **mac** build (`target/buildroot-mac`), which applies `linux.fragment` and then `linux-mac.fragment`. The new options are therefore in `linux.fragment` (the common x86-64 fragment); no other fragment needs a change. The aarch64 fragment (`board/iyakki-aarch64/linux.fragment`) is not touched: there is no hardware proof for the VM image yet.
+
+```
+dist/buildroot/changed.sh mac          # expect: KERNEL (the fragment changed)
+dist/buildroot/build.sh mac            # build.sh sees the fragment change in its kernel state and runs linux-dirclean itself, then rebuilds the kernel, modules, apple-bce and the other out-of-tree modules
+dist/buildroot/verify-kernel-config.sh # (optional, needs the 6.12.112 source tree: VARIANT=mac) checks that kconfig kept every option
+IYAKKI_SB_KEY=... IYAKKI_SB_CERT=... dist/buildroot/repack.sh pc --base target/buildroot-web --kernel-from target/buildroot-mac --graft git --cargo   # signed, as in docs/BUILD-INCREMENTAL.md
+```
+
+Estimate (docs/BUILD-INCREMENTAL.md): kernel about 15 minutes plus modules, `mac` about 40 minutes in all (kernel, apple-bce, firmware), the pc repack a few minutes. The kernel grows by roughly 150 KiB (dm-mod, dm-crypt, XTS, AES-NI, loop). Boot-test the new image in QEMU before it goes to the Mac (rule: boot-test before push). `mke2fs` already ships in the image (e2fsprogs).
+
+### 14.3 Manual test steps after the next kernel image
+
+1. QEMU (no hardware): boot the pc image with a data disk. `dmesg | grep -i -E "device-mapper|crypt"`; `ls /dev/mapper/control /dev/loop-control` (both must exist; if `/dev/mapper/control` is missing, `DM_CRYPT` or devtmpfs is wrong).
+2. Run the real-kernel test as root inside the VM: `IYAKKI_TEST_DM=1 cargo test -p iyakki-storage dm_real -- --nocapture` (a scratch file, a mapping named `iyakki-test-dm-<pid>`, no real disk). It must print no skip line and pass.
+3. Sign in as a test account with a password. Settings -> Encrypted home -> Make my home encrypted. Check: the recovery key appears once; pressing the button before typing it back does not mark it saved; typing it wrong keeps the card open; typing it right says saved. `mount | grep iyakki-home` shows `/dev/mapper/iyakki-home-<name>` on `/home/<name>`; `dmsetup table` is not installed, so read `ls /dev/mapper`. The container `<data>/home-enc/<name>.ivol` must not contain the text of a file written into the home (`grep -c "<unique words>" <file>` gives 0).
+4. Write files, sign out, `ls /home/<name>` is empty and `/dev/mapper/iyakki-home-<name>` is gone and `losetup -a` lists nothing for the container; sign in with the password: the files are back.
+5. Wrong password at the lock screen and at "Open": the same sentence each time, the wait grows (2, 5, 15 s).
+6. Change the sign-in password in Settings -> Account; sign out and in with the new one (the old one must no longer sign in, and the home opens with the new one). Then open with the recovery key in Settings after an administrator resets the password: the page shows the sealed text and "Open with recovery key" sets the current password.
+7. Allow the administrator slot with a throwaway administrator password; open with it; remove it; it must stop working.
+8. Close with the screen lock: lock the screen, check the mapping is gone, unlock with the password, check it is back. With a terminal open in the home, the lock must report "something still uses your private folder" and not force anything.
+9. Migration: make a test account with some files, a symlink and an executable, Settings -> Encrypted home -> Move my existing files; compare the plan with `find /home/<name> | wc -l`; after the move check the files, the plain copy `<name>.plain-before-encrypt`, then remove it with the recovery key typed back first. Cut the power (QEMU `quit`) in the middle of a large copy and boot again: the next sign-in must say what was done and the files must be whole in one of the two places.
+10. Mac mini and the HP with the T7 install: the same, plus the time of Make (Argon2 calibration at 256 MiB; the Mac mini from a stick will land at more passes or fewer, record the numbers).
+
+### 14.4 Honest limits
+
+* None of 14.3 has been done. Every test so far is on the fake kernel and temp folders; the fake is checked against the kernel's documented ioctl layout (command numbers, `struct dm_ioctl` offsets, `struct dm_target_spec`), but only a real kernel proves it.
+* The Settings page makes the container and runs Argon2id and `mke2fs` on the screen's thread: the page freezes for a few seconds on Make and on every wrong-or-right Open. A background job with a progress bar is still to do, mostly for a big migration.
+* The container is a sparse file with a fixed size chosen at creation (half the free space, between 64 MiB and 32 GiB). Growing it later is not built.
+* A sealed or failed home at sign-in leaves a banner text (`EncHome::take_banner`, shown on this page); a banner on the desktop itself is not wired.
+* The container file is on the data volume, so it is also covered by the volume's backups; the backup tool does not yet know to warn that the copy is encrypted but has no second recovery path.
+* Deleting the plain copy on flash does not erase old blocks (said on the page, in the tool and here). The strong form is a freshly formatted drive.
+* Whole-partition encryption, TPM sealing, LUKS2 export and a header backup export are still later slices (section 12, item 6).
