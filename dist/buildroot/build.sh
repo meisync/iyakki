@@ -138,8 +138,12 @@ KPATCHES="$(cat "$HERE"/board/iyakki/patches/linux/*/*.patch 2>/dev/null || true
 case "$PATCH_DIR_LINE" in *board/iyakki/patches*) LNEW=new ;; *) LNEW=no; KPATCHES="" ;; esac
 # The Mac variant's kernel fragment counts too (Buildroot does not reconfigure the kernel when a fragment changes either).
 # (Only appended for that variant, so the record of the other variants stays what it was and they are not rebuilt.)
+# linux.fragment (every x86-64 image) is part of the kernel's state: a new option in it (DM_CRYPT for encrypted homes, 2026-11-09) must rebuild
+# the kernel, which Buildroot would not do by itself. Only the variants whose kernel uses the iyakki patch dir are recorded, as before.
 KSTATE="$PATCH_DIR_LINE
 $KPATCHES"
+case "$PATCH_DIR_LINE" in *board/iyakki/patches*) KSTATE="$KSTATE
+$(cat "$HERE/board/iyakki/linux.fragment" 2>/dev/null || true)" ;; esac
 case "$PATCH_DIR_LINE" in *board/iyakki/patches*) KSTATE="$KSTATE
 $(cat "$HERE/board/iyakki/linux-mac.fragment")" ;; esac
 rebuild_if_changed linux "$KSTATE" "$LNEW"
