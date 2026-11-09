@@ -14,7 +14,7 @@
 //! * Local files obey the person's file rules through the `local` check the caller supplies.
 
 use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::sshkey::KeyPair;
+pub use iyakki_sshfs::remotefs::{clean_path, Entry, RemoteFs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -78,16 +79,6 @@ pub struct Conn {
     /// Filled in when listing: a password is in the vault.
     #[serde(skip)]
     pub has_password: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Entry {
-    pub name: String,
-    pub is_dir: bool,
-    pub is_link: bool,
-    pub size: u64,
-    pub modified: i64,
-    pub perms: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,22 +150,6 @@ pub struct TransferInfo {
     pub note: String,
     pub rate: u64,
     pub resumed: bool,
-}
-
-/// What one connection can do. Implemented by the SFTP and FTP clients (and by fakes in tests).
-pub trait RemoteFs: Send {
-    /// The canonical path and the entries (folder names `.` and `..` and names with a slash are already dropped).
-    fn list(&mut self, path: &str) -> Result<(String, Vec<Entry>), String>;
-    fn mkdir(&mut self, path: &str) -> Result<(), String>;
-    fn rename(&mut self, from: &str, to: &str) -> Result<(), String>;
-    fn remove_file(&mut self, path: &str) -> Result<(), String>;
-    fn remove_dir(&mut self, path: &str) -> Result<(), String>;
-    /// The size of a file, None when it is not there.
-    fn size(&mut self, path: &str) -> Result<Option<u64>, String>;
-    /// Write the file's bytes from `offset` to `out`. `progress` gets the size of each block and returns false to cancel.
-    fn download(&mut self, remote: &str, offset: u64, out: &mut dyn Write, progress: &mut dyn FnMut(u64) -> bool) -> Result<(), String>;
-    /// Send `src` (already positioned at `offset`) to `remote`, starting at `offset` of the remote file (0: the file is made new).
-    fn upload(&mut self, remote: &str, offset: u64, src: &mut dyn Read, progress: &mut dyn FnMut(u64) -> bool) -> Result<(), String>;
 }
 
 pub enum Cred {
@@ -262,20 +237,6 @@ impl Connector for NetConnector {
 }
 
 // ------------------------------------------------------------------ paths and names
-
-pub fn clean_path(p: &str) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    for s in p.split('/') {
-        match s {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            s => parts.push(s),
-        }
-    }
-    format!("/{}", parts.join("/"))
-}
 
 pub fn join(dir: &str, name: &str) -> String {
     if dir.ends_with('/') { format!("{dir}{name}") } else { format!("{dir}/{name}") }

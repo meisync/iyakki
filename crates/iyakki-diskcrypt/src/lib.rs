@@ -288,3 +288,6 @@ pub fn mapper_name(part: &str) -> String {
 pub fn mapper_path(part: &str) -> String {
     format!("/dev/mapper/{}", mapper_name(part))
 }
+
+#[cfg(test)]
+mod tests;

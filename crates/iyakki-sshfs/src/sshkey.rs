@@ -1,6 +1,6 @@
 //! ed25519 SSH keys, in-house: make one, write and read the OpenSSH private key file format, the public key line and the
 //! `SHA256:` fingerprint, and sign. No ssh-keygen is needed (the images have none), and the private half never has to be a
-//! file: the vault stores the text, [`crate::gitagent`] signs with the key in memory.
+//! file: the vault stores the text, `gitagent` (in the agent) signs with the key in memory.
 //!
 //! * The curve code is `ed25519-dalek` (BSD-3-Clause), already part of the build; everything else is here.
 //! * Reading a key that is protected by a passphrase supports what `ssh-keygen` writes by default: `bcrypt` key derivation
@@ -75,7 +75,7 @@ pub fn put_str(out: &mut Vec<u8>, s: &[u8]) {
     out.extend_from_slice(s);
 }
 
-pub(crate) struct Reader<'a> {
+pub struct Reader<'a> {
     pub b: &'a [u8],
 }
 
@@ -96,13 +96,13 @@ impl<'a> Reader<'a> {
     }
 }
 
-pub(crate) fn b64(data: &[u8]) -> String {
-    crate::story::base64_encode(data)
+pub fn b64(data: &[u8]) -> String {
+    crate::b64::encode(data)
 }
 
-pub(crate) fn unb64(s: &str) -> Option<Vec<u8>> {
+pub fn unb64(s: &str) -> Option<Vec<u8>> {
     let clean: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    crate::models::b64_decode(&clean)
+    crate::b64::decode(&clean)
 }
 
 /// `SHA256:…` of a public key blob, as `ssh-keygen -l` prints it.

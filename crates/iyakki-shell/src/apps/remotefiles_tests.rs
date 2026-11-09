@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 fn admin_cx(tag: &str) -> AppCx {
+    // the person's home is where these tests download to and upload from: keep it out of the developer's real home
+    crate::apps::tests::isolated_home();
     let mut cx = cx_with_admin_store(tag);
     let d = temp_dir(&format!("{tag}-svc"));
     cx.services = services_in(&d, Arc::new(Offline));

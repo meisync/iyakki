@@ -1,7 +1,11 @@
 use super::*;
 
 fn dir(tag: &str) -> PathBuf {
-    crate::testdir::unique("camrecfmt", tag)
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let d = std::env::temp_dir().join(format!("camrecfmt-{}-{}-{tag}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
 }
 
 fn key(b: u8) -> RecKey {

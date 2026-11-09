@@ -5,12 +5,19 @@ edition.workspace = true
 license.workspace = true
 
 [dev-dependencies]
+iyakki-sshfs = { path = "../iyakki-sshfs", features = ["testing"] }
 iyakki-core-fake = { workspace = true }
 iyakki-proxy = { path = "../iyakki-proxy", features = ["testcerts"] }
 
 [dependencies]
 log.workspace = true
 iyakki-sec.workspace = true
+# the SSH, SFTP and FTP protocol code (re-exported here under the old module paths)
+iyakki-sshfs.workspace = true
+# camera motion detection, geometry, settings and the recording format (re-exported here under the old module paths)
+iyakki-camdetect.workspace = true
+# DISKS: the LUKS and BitLocker header parsers, the typed secret and the rate limit (re-exported as `disks_crypt`)
+iyakki-diskcrypt.workspace = true
 iyakki-core-api.workspace = true
 iyakki-edit.workspace = true
 iyakki-vfs.workspace = true

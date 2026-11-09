@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const STATUSES: [&str; 5] = ["done", "partial", "planned", "blocked", "deprecated"];
 const PHASES: [&str; 11] = ["P0", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10"];
@@ -29,19 +30,46 @@ fn crate_dir(root: &Path, krate: &str) -> Option<PathBuf> {
     [root.join("crates").join(krate), root.join("iyakki-boot").join("crates").join(krate)].into_iter().find(|d| d.is_dir())
 }
 
-/// Does the crate `<krate>` define `fn <name>(`?
-fn test_exists(root: &Path, krate: &str, name: &str, cache: &mut BTreeMap<String, String>) -> bool {
-    let src = cache.entry(krate.to_string()).or_insert_with(|| {
-        let mut files = Vec::new();
-        for sub in ["src", "tests"] {
-            if let Some(d) = crate_dir(root, krate) {
-                rust_files(&d.join(sub), &mut files);
-            }
+/// The names `n` for which a source text contains `fn n(`: every `fn ` followed by identifier characters and `(` (the same text match as
+/// searching for the string `fn <name>(`, done once per file instead of once per cited test).
+fn fn_names_in(text: &str, out: &mut BTreeSet<String>) {
+    for (at, _) in text.match_indices("fn ") {
+        let rest = &text[at + 3..];
+        let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(rest.len());
+        if end > 0 && rest[end..].starts_with('(') {
+            out.insert(rest[..end].to_string());
         }
-        files.iter().filter_map(|f| std::fs::read_to_string(f).ok()).collect::<Vec<_>>().join("\n")
-    });
-    let needle = format!("fn {name}(");
-    src.contains(&needle)
+    }
+}
+
+/// The function names of one crate (`src` and `tests`), read once per process and shared by every check in it. This used to concatenate
+/// the crate's whole source into a string for each `check_matrix` call and search it once per cited test: about ten minutes for the agent.
+fn crate_fn_names(root: &Path, krate: &str) -> Arc<BTreeSet<String>> {
+    static INDEX: OnceLock<Mutex<BTreeMap<String, Arc<BTreeSet<String>>>>> = OnceLock::new();
+    let mut index = INDEX.get_or_init(Default::default).lock().unwrap();
+    index
+        .entry(format!("{}::{krate}", root.display()))
+        .or_insert_with(|| {
+            let mut files = Vec::new();
+            for sub in ["src", "tests"] {
+                if let Some(d) = crate_dir(root, krate) {
+                    rust_files(&d.join(sub), &mut files);
+                }
+            }
+            let mut names = BTreeSet::new();
+            for f in &files {
+                if let Ok(text) = std::fs::read_to_string(f) {
+                    fn_names_in(&text, &mut names);
+                }
+            }
+            Arc::new(names)
+        })
+        .clone()
+}
+
+/// Does the crate `<krate>` define `fn <name>(`?
+fn test_exists(root: &Path, krate: &str, name: &str) -> bool {
+    crate_fn_names(root, krate).contains(name)
 }
 
 struct Row {
@@ -99,7 +127,6 @@ fn check_matrix(text: &str, root: &Path) -> Vec<String> {
         problems.push("no feature rows found".into());
     }
     let ids: BTreeSet<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-    let mut cache = BTreeMap::new();
     for r in &rows {
         match r.status.as_str() {
             "done" if r.progress != 100 => problems.push(format!("{}: `done` must be 100% (is {}%)", r.id, r.progress)),
@@ -132,7 +159,7 @@ fn check_matrix(text: &str, root: &Path) -> Vec<String> {
             let (Some(krate), Some(name)) = (parts.first(), parts.last()) else { continue };
             if parts.len() < 2 || crate_dir(root, krate).is_none() {
                 problems.push(format!("{}: `{t}` does not name a crate and a test", r.id));
-            } else if !test_exists(root, krate, name, &mut cache) {
+            } else if !test_exists(root, krate, name) {
                 problems.push(format!("{}: test `{t}` not found in the crate {krate}", r.id));
             }
         }
@@ -197,9 +224,16 @@ fn the_checker_catches_the_mistakes_it_exists_for() {
 #[test]
 fn tests_of_the_boot_loader_workspace_can_be_cited_by_crate_name() {
     let root = repo_root();
-    let mut cache = BTreeMap::new();
-    assert!(test_exists(&root, "boot-core", "crash_loop_rolls_back_after_n_failures", &mut cache));
-    assert!(test_exists(&root, "boot-core", "hold_key_wins_over_oneshot", &mut cache));
-    assert!(!test_exists(&root, "boot-core", "no_such_boot_test", &mut cache));
+    assert!(test_exists(&root, "boot-core", "crash_loop_rolls_back_after_n_failures"));
+    assert!(test_exists(&root, "boot-core", "hold_key_wins_over_oneshot"));
+    assert!(!test_exists(&root, "boot-core", "no_such_boot_test"));
     assert!(crate_dir(&root, "uefi-sys").is_some() && crate_dir(&root, "no-such-crate").is_none());
+}
+
+#[test]
+fn the_function_index_matches_the_text_search_it_replaced() {
+    let mut names = BTreeSet::new();
+    fn_names_in("pub fn alpha(x: u8) {}\n    async fn beta_2() {}\nfn gamma (x: u8) {}\n// fn in_a_comment(\nlet f = |fn_x| fn_x; fn \nfn delta<T>(t: T) {}", &mut names);
+    // `gamma (` has a space before the parenthesis and `delta<` a generic list: neither contains the text `fn name(`, as before
+    assert_eq!(names.into_iter().collect::<Vec<_>>(), ["alpha", "beta_2", "in_a_comment"]);
 }

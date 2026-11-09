@@ -24,7 +24,7 @@ use rustls::{DigitallySignedStruct, SignatureScheme};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::remotefiles::{clean_path, Entry, RemoteFs};
+use crate::remotefs::{clean_path, Entry, RemoteFs};
 use crate::rf_sftp::plain_name;
 
 const MAX_LINE: usize = 4096;
@@ -63,7 +63,7 @@ impl From<String> for FtpErr {
 
 /// `SHA256:` + base64 of the certificate, the same look as an SSH fingerprint.
 pub fn cert_fingerprint(der: &[u8]) -> String {
-    format!("SHA256:{}", crate::story::base64_encode(&Sha256::digest(der)).trim_end_matches('='))
+    format!("SHA256:{}", crate::b64::encode(&Sha256::digest(der)).trim_end_matches('='))
 }
 
 #[derive(Debug)]
@@ -149,7 +149,7 @@ fn tls_config(seen: Arc<Mutex<Option<Vec<u8>>>>) -> Result<Arc<rustls::ClientCon
     Ok(Arc::new(cfg))
 }
 
-pub(crate) fn connect_tcp(host: &str, port: u16, stop: &AtomicBool) -> Result<TcpStream, String> {
+pub fn connect_tcp(host: &str, port: u16, stop: &AtomicBool) -> Result<TcpStream, String> {
     let addrs: Vec<SocketAddr> = (host, port).to_socket_addrs().map_err(|_| format!("could not find {host}"))?.collect();
     let mut last = format!("could not reach {host}:{port}");
     for a in addrs {
@@ -548,7 +548,7 @@ impl RemoteFs for FtpFs {
         }
         .filter(|p| p.starts_with('/') && !p.contains('\0'))
         .map_or_else(|| clean_path(path), |p| clean_path(&p));
-        let now = crate::clock::now_unix();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
         let mut entries = Vec::new();
         let mut used_mlsd = false;
         if !self.no_mlsd {

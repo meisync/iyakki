@@ -260,3 +260,15 @@ fn the_manifest_scanner_reads_dependency_tables_only() {
     let m = "[package]\nname = \"iyakki-x\"\n[dependencies]\niyakki-uikit = { path = \"../iyakki-uikit\" }\niyakki-sec.workspace = true\nserde = \"1\"\n# iyakki-no = 1\n[dev-dependencies]\niyakki-agent = { path = \"../a\" }\n[features]\niyakki-f = []\n";
     assert_eq!(iyakki_deps(m), vec!["iyakki-agent", "iyakki-sec", "iyakki-uikit"]);
 }
+
+/// The feature crates split out of `iyakki-agent` (docs/development/COMPILE-SPLIT-PILOT-2.md) may depend on small leaf crates only. If one of
+/// them gained a dependency on the agent, the shell or a tile, the split would be undone (the crate would rebuild whenever the agent does).
+#[test]
+fn the_crates_split_out_of_the_agent_depend_on_small_leaf_crates_only() {
+    let allowed: [(&str, &[&str]); 3] = [("iyakki-sshfs", &["iyakki-sec"]), ("iyakki-camdetect", &["iyakki-sec", "iyakki-volcrypt"]), ("iyakki-diskcrypt", &[])];
+    for (krate, ok) in allowed {
+        let deps = iyakki_deps(&manifest(krate));
+        let extra: Vec<&String> = deps.iter().filter(|d| !ok.contains(&d.as_str())).collect();
+        assert!(extra.is_empty(), "{krate} may depend on {ok:?} only (found {deps:?}); never on iyakki-agent, iyakki-shell or a tile crate");
+    }
+}

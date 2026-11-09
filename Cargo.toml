@@ -9,6 +9,9 @@ members = [
     "crates/iyakki-mem",
     "crates/iyakki-hw",
     "crates/iyakki-agent",
+    "crates/iyakki-sshfs",
+    "crates/iyakki-camdetect",
+    "crates/iyakki-diskcrypt",
     "crates/iyakki-shell",
     "crates/iyakki-core",
     "crates/iyakki-core-api",
@@ -62,6 +65,9 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+iyakki-sshfs = { path = "crates/iyakki-sshfs" }
+iyakki-camdetect = { path = "crates/iyakki-camdetect" }
+iyakki-diskcrypt = { path = "crates/iyakki-diskcrypt" }
 iyakki-sec = { path = "crates/iyakki-sec" }
 iyakki-devctl = { path = "crates/iyakki-devctl" }
 iyakki-web = { path = "crates/iyakki-web" }

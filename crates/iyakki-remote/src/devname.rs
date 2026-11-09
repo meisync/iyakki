@@ -343,6 +343,7 @@ mod tests {
                 Err("bind 5353: busy".into())
             }
             fn set_services(&mut self, _: Vec<Svc>) {}
+            fn set_extra_names(&mut self, _: Vec<String>) {}
             fn stop(&mut self) {}
             fn status(&self) -> Option<mdns::net::Status> {
                 None

@@ -63,6 +63,24 @@ impl PersonDetector for NotAvailable {
     }
 }
 
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Standard base64 with padding (the same code as the agent's `story::base64_encode`; this crate has no `iyakki-*` dependency for it).
+fn base64_encode(data: &[u8]) -> String {
+    let mut o = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            if i <= c.len() {
+                o.push(B64[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                o.push('=');
+            }
+        }
+    }
+    o
+}
+
 /// The request for the job, as JSON text.
 pub fn request_json(shot: &Shot<'_>, min_confidence: f32) -> String {
     format!(
@@ -70,7 +88,7 @@ pub fn request_json(shot: &Shot<'_>, min_confidence: f32) -> String {
         min_confidence.clamp(0.0, 1.0),
         shot.width,
         shot.height,
-        crate::story::base64_encode(shot.jpeg)
+        base64_encode(shot.jpeg)
     )
 }
 

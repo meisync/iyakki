@@ -6,12 +6,12 @@
 //! * Hostile servers are expected: every length is checked against what is there before anything is allocated, a packet is never over
 //!   [`MAX_PACKET`], counts are bounded, a data block is never longer than what was asked, and names that are paths (`a/b`, `..`, empty)
 //!   are dropped from listings ([`plain_name`]).
-//! * [`SftpFs`] speaks over any stream (the SSH channel, or a loopback socket in tests) and implements [`crate::remotefiles::RemoteFs`].
+//! * [`SftpFs`] speaks over any stream (the SSH channel, or a loopback socket in tests) and implements [`crate::remotefs::RemoteFs`].
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 
-use crate::remotefiles::{Entry, RemoteFs};
+use crate::remotefs::{Entry, RemoteFs};
 
 pub const MAX_PACKET: usize = 256 * 1024;
 /// The data block of one READ or WRITE.
@@ -422,8 +422,8 @@ impl<S: Read + Write + Send> SftpFs<S> {
 
     fn real(&mut self, p: &str) -> Result<String, String> {
         match self.call(&Req::RealPath(p))? {
-            Resp::Name { names, .. } if names.first().is_some_and(|n| n.0.starts_with('/') && !n.0.contains('\0')) => Ok(crate::remotefiles::clean_path(&names[0].0)),
-            Resp::Name { .. } => Ok(crate::remotefiles::clean_path(p)),
+            Resp::Name { names, .. } if names.first().is_some_and(|n| n.0.starts_with('/') && !n.0.contains('\0')) => Ok(crate::remotefs::clean_path(&names[0].0)),
+            Resp::Name { .. } => Ok(crate::remotefs::clean_path(p)),
             Resp::Status { code, msg, .. } => Err(status_text(code, &msg)),
             _ => Err("the server answered with the wrong kind of packet".into()),
         }

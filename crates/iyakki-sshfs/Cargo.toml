@@ -1,0 +1,28 @@
+[package]
+name = "iyakki-sshfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The SSH / SFTP / FTP protocol code, split out of iyakki-agent so it builds and tests alone (docs/development/COMPILE-SPLIT-PILOT-2.md).
+# No account, vault, firewall or manager code lives here: those are the agent's `Gate`, `Rule` and `RemoteFs` implementations.
+[features]
+# test helpers (testdir, testworld) for the agent's tests
+testing = []
+
+[dependencies]
+iyakki-sec.workspace = true
+# the same permissive crates the agent already uses for SSH keys, the SSH transport and FTPS (no new external dependency)
+aes = "0.8"
+ctr = "0.9"
+ed25519-dalek = "3"
+sha2 = "0.10"
+zeroize = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# member key exchange (curve25519-sha256) in the SSH client and server: X25519 only, the bytes come from iyakki-sec
+x25519-dalek = { version = "3", default-features = false, features = ["zeroize"] }
+libc = "0.2"
+
+[dev-dependencies]
+# the FTPS test makes a self-signed certificate (same crate and features as the agent's cloudroute.rs)
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }

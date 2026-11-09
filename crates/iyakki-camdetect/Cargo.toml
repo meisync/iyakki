@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-camdetect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Camera motion detection and the encrypted recording format, split out of iyakki-agent so they build and test alone
+# (docs/development/COMPILE-SPLIT-PILOT-2.md). Pure code: no cameras, no vault, no inbox; the agent's `camdetect::watch` ties them together.
+[dependencies]
+iyakki-sec.workspace = true
+# the AES-256-XTS and HMAC-SHA256 primitives of the data-volume crate (camrec_format.rs)
+iyakki-volcrypt.workspace = true
+zeroize = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

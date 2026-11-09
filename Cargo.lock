@@ -2049,10 +2049,12 @@ dependencies = [
  "chacha20poly1305",
  "ctr",
  "ed25519-dalek",
+ "iyakki-camdetect",
  "iyakki-core-api",
  "iyakki-core-fake",
  "iyakki-data",
  "iyakki-devctl",
+ "iyakki-diskcrypt",
  "iyakki-drivers",
  "iyakki-edit",
  "iyakki-flow",
@@ -2069,6 +2071,7 @@ dependencies = [
  "iyakki-rtsp",
  "iyakki-schema",
  "iyakki-sec",
+ "iyakki-sshfs",
  "iyakki-stage1",
  "iyakki-storage",
  "iyakki-tile-abi",
@@ -2095,6 +2098,17 @@ dependencies = [
  "thiserror 2.0.21",
  "tiny-skia",
  "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "iyakki-camdetect"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-sec",
+ "iyakki-volcrypt",
+ "serde",
+ "serde_json",
  "zeroize",
 ]
 
@@ -2181,6 +2195,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "iyakki-diskcrypt"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "iyakki-drivers"
@@ -2425,6 +2443,22 @@ dependencies = [
  "thiserror 2.0.21",
  "tiny-skia",
  "unicode-bidi",
+]
+
+[[package]]
+name = "iyakki-sshfs"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "aes",
+ "ctr",
+ "ed25519-dalek",
+ "iyakki-sec",
+ "libc",
+ "rcgen",
+ "rustls",
+ "sha2 0.10.9",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
