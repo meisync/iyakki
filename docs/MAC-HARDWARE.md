@@ -284,7 +284,12 @@ What the Mac image does about it:
   and this MacBook Pro, so the Mac Bluetooth pack may well be on it; at every start the relink reads the hardware (DMI vendor and model, the
   ACPI node `BCM2E7C` of the serial-link chip) and leaves that pack aside on a non-T2 Mac with such a chip (unlinked, no driver reload,
   log line "driver pack mac-bt-broadcom: left out on this machine (MacBookPro14,1): ..."), while the Mac mini takes it. Nothing has to
-  be removed by hand any more, and the Mac drivers download is harmless on either machine. The generic Hardware firmware install also no longer reloads the `bluetooth` core module
+  be removed by hand any more, and the Mac drivers download is harmless on either machine. Verified 2026-11-09 on the Mac mini (image
+  1107p): the Mac drivers download run there brought its Wi-Fi back (wlan0 up) and re-created the Bluetooth pack; the start-up log says
+  "driver bluetooth not reloaded: a core module" for the generic pack; the Mac mini's own Bluetooth stays as known (BCM4364, no patch
+  anywhere, no address). The MacBook Pro's side, verified 2026-11-09 with the same stick carrying the re-created pack: start-up log "driver pack
+  mac-bt-broadcom: left out on this machine (MacBookPro14,1): ...", the Mac Wi-Fi pack linked and unused there, Bluetooth and Wi-Fi working
+  (owner: "worked"). One data volume, both Macs, nothing removed by hand. The generic Hardware firmware install also no longer reloads the `bluetooth` core module
   (it did so for a MediaTek file of another machine on the same stick, which re-probed and wedged the chip). Note for a T7 install that moves between machines: removing "Hardware firmware" in the Store also removes this Mac's
   Wi-Fi file (`brcmfmac4350c2-pcie.bin` lives in that pack); install it again and restart. Both detectors now keep a board file's name
   whole instead of cutting it at the space.
