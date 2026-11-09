@@ -217,7 +217,7 @@ pub fn path_text(h: Handle) -> String {
 }
 
 /// The firmware vendor string ("Apple", "American Megatrends", "INSYDE Corp.", "EDK II" ...).
-fn vendor() -> String {
+pub fn vendor() -> String {
     let t = st();
     if t.firmware_vendor.is_null() {
         String::new()

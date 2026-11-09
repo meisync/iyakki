@@ -443,6 +443,8 @@ pub struct BrowserApp {
     pending_scroll: Option<f32>,
     /// Find in page, when the bar is open.
     find: Option<Find>,
+    /// Accessibility of the page: browse mode, the cursor, lists, reading aloud, forced colours (`browser_a11y.rs`).
+    a11y: a11y::A11y,
     /// The assistant panel over the page (Q ask, S summarise, T translate), when open.
     assist: Option<browser_assist::Assist>,
     /// The developer panel's network list (c cycles notes, network, closed) and what it shows.
@@ -597,6 +599,7 @@ impl BrowserApp {
             closed: Vec::new(),
             pending_scroll: None,
             find: None,
+            a11y: a11y::A11y::new(),
             assist: None,
             show_net: false,
             show_blocked: false,
@@ -1036,6 +1039,8 @@ impl BrowserApp {
         // Settings may have changed since the last page
         self.cfg = browser_config::load(cx);
         let (cfg, sites) = (self.cfg.clone(), self.sites.clone());
+        // the page's style sheets are told about the person's choices (`prefers-reduced-motion`, `prefers-contrast`)
+        let (calm, forced) = (self.a11y.eff.freeze_animation || self.a11y.eff.reduce_motion, self.a11y.eff.forced_colors);
         self.focus_ctl = None;
         // the visit is recorded by host only: addresses can carry tokens
         cx.audit.record(&cx.session.user, "browser.visit", &url.host);
@@ -1055,7 +1060,7 @@ impl BrowserApp {
                 let ct = r.content_type.to_ascii_lowercase();
                 (r.status < 400 && r.body.len() <= iyakki_web::style::MAX_SHEET_BYTES && (ct.is_empty() || ct.contains("css") || ct.contains("text/plain"))).then(|| String::from_utf8_lossy(&r.body).into_owned())
             };
-            let vp = iyakki_web::css::Viewport::default();
+            let vp = iyakki_web::css::Viewport { reduce_motion: calm, more_contrast: forced, ..iyakki_web::css::Viewport::default() };
             let styles_on = cfg.styles;
             let build = |u: &Url, tree: &iyakki_web::html::Tree| -> Doc {
                 if styles_on {
@@ -1454,8 +1459,10 @@ impl BrowserApp {
         let Some(href) = page.doc.links.get(link) else { return };
         match page.url.join(href) {
             Ok(u) if u.without_fragment() == page.url.without_fragment() && u.fragment.is_some() => {
-                // an in-page anchor: stay where we are
-                self.status = Some((format!("#{}", u.fragment.unwrap_or_default()), true));
+                // an in-page anchor: stay where we are, and go to the place it names
+                let frag = u.fragment.unwrap_or_default();
+                self.a11y_follow_fragment(&frag);
+                self.status = Some((format!("#{frag}"), true));
             }
             Ok(u) => self.go(u.unwrap_search_link().unwrap_or(u), How::Push, cx),
             Err(e) => self.status = Some((e, false)),
@@ -1992,6 +1999,9 @@ impl BrowserApp {
 
     /// Tab: the next link or form control in reading order.
     fn cycle_focus(&mut self, forward: bool) {
+        if self.a11y_tab(forward) {
+            return;
+        }
         let Some(order) = self.layout.as_ref().map(|l| l.focus.clone()) else { return };
         if order.is_empty() {
             return;
@@ -2165,6 +2175,9 @@ impl BrowserApp {
     fn submit_form(&mut self, form: usize, activator: Option<usize>, cx: &AppCx) {
         let Some(page) = self.page().cloned() else { return };
         let Some(f) = page.doc.forms.get(form) else { return };
+        if self.a11y_validate(form) {
+            return;
+        }
         let mut pairs: Vec<(String, String)> = Vec::new();
         for (i, c) in page.doc.controls.iter().enumerate().filter(|(_, c)| c.form == Some(form)) {
             if c.disabled || c.name.is_empty() && !matches!(c.kind, ControlKind::Submit) {
@@ -2244,6 +2257,11 @@ impl BrowserApp {
             }
             _ => {}
         }
+        if kind == ControlKind::Radio {
+            if let Some(flow) = self.a11y_control_key(c, k, cx) {
+                return Some(flow);
+            }
+        }
         match kind {
             ControlKind::Text | ControlKind::Password => {
                 if *k == Key::Enter {
@@ -2274,15 +2292,20 @@ impl BrowserApp {
             }
             ControlKind::Checkbox | ControlKind::Radio | ControlKind::Submit | ControlKind::Button if matches!(k, Key::Enter | Key::Char(' ')) => {
                 self.click_control(c, 0.0, cx);
+                if matches!(kind, ControlKind::Checkbox | ControlKind::Radio) {
+                    self.a11y_say_control(c);
+                }
                 Some(Flow::Stay)
             }
             ControlKind::Select => match k {
                 Key::Up | Key::Left => {
                     self.step_select(c, -1);
+                    self.a11y_say_control(c);
                     Some(Flow::Stay)
                 }
                 Key::Down | Key::Right => {
                     self.step_select(c, 1);
+                    self.a11y_say_control(c);
                     Some(Flow::Stay)
                 }
                 Key::Enter | Key::Char(' ') => {
@@ -2394,6 +2417,10 @@ impl BrowserApp {
         if self.find.is_some() && !self.addr_focus && self.find_key(k) {
             return Flow::Stay;
         }
+        if self.a11y.rotor.is_some() && !self.addr_focus {
+            self.a11y_rotor_key(k);
+            return Flow::Stay;
+        }
         if self.addr_focus {
             match k {
                 Key::Enter => match self.sug_sel.and_then(|i| self.suggest.get(i)).map(|s| s.url.clone()) {
@@ -2440,6 +2467,9 @@ impl BrowserApp {
             if let Some(flow) = self.key_in_control(c, k, cx) {
                 return flow;
             }
+        }
+        if let Some(flow) = self.a11y_key(k, cx) {
+            return flow;
         }
         let page_h = self.view_h * 0.9;
         match k {
@@ -3902,7 +3932,9 @@ impl BrowserApp {
         let key = key_of(col_w, ps);
         if self.layout.as_ref().is_none_or(|l| l.key != key || l.rev != rev) {
             let night = if self.page().is_some_and(|p| self.data.is_dark(&p.url.host)) { browser_dark::darken(doc) } else { None };
-            self.layout = Some(layout(g, night.as_ref().unwrap_or(doc), col_w, ps, &infos, rev));
+            // forced high-contrast colours and the font floor (Settings -> Accessibility, the Browser's own choices)
+            let adapted = self.a11y_adapt(night.as_ref().unwrap_or(doc));
+            self.layout = Some(layout(g, adapted.as_ref().or(night.as_ref()).unwrap_or(doc), col_w, ps, &infos, rev));
             if let Some(y) = self.pending_scroll.take() {
                 self.scroll = y;
             }
@@ -3938,6 +3970,8 @@ impl BrowserApp {
         }
         let top = view.y + 12.0 * s;
         self.hovered_link = None;
+        let (ring_color, ring_factor) = self.a11y_ring();
+        let anim_tick = if self.a11y.eff.freeze_animation { 0 } else { tick };
         // the page's own background fills the whole view
         if let Some(c) = self.layout.as_ref().and_then(|l| l.canvas) {
             g.rect(view.x, view.y, view.w, view.h, c);
@@ -3996,7 +4030,7 @@ impl BrowserApp {
                     }
                     Kind::Image { idx, link, fit, alpha } => {
                         let r = R::new(dx, dy, p.w, p.h);
-                        draw_image(g, doc.images.get(*idx).map_or("", |i| i.alt.as_str()), states.get(*idx), r, ps, tick, *fit, *alpha);
+                        draw_image(g, doc.images.get(*idx).map_or("", |i| i.alt.as_str()), states.get(*idx), r, ps, anim_tick, *fit, *alpha);
                         if let Some(li) = link {
                             if g.hovered(r) {
                                 self.hovered_link = Some(*li);
@@ -4012,9 +4046,10 @@ impl BrowserApp {
                 }
             }
             if let Some(r) = self.focus_link.and_then(|i| l.links.get(i).copied().flatten()) {
-                g.rrect_outline(col_x + r.x - 3.0 * s, top + r.y - self.scroll - 12.0 * s - 1.0, r.w + 6.0 * s, r.h + 2.0, 4.0 * s, 2.0 * s, ACCENT);
+                g.rrect_outline(col_x + r.x - 3.0 * s, top + r.y - self.scroll - 12.0 * s - 1.0, r.w + 6.0 * s, r.h + 2.0, 4.0 * s, 2.0 * s * ring_factor, ring_color);
             }
         }
+        self.a11y_draw(g, view, col_x, top, s);
         // find in page: the bar over the top of the page
         self.update_find();
         if let Some(f) = &self.find {
@@ -4107,6 +4142,9 @@ impl BrowserApp {
 
 mod pdfhost;
 
+#[path = "browser_a11y.rs"]
+mod a11y;
+
 impl App for BrowserApp {
     fn take_request(&mut self) -> Option<(String, String)> {
         self.av_request.take()
@@ -4164,6 +4202,7 @@ impl App for BrowserApp {
             "F · show this page with the full web engine (WebKit, drawn in this page area; needs its helper program, see docs/FULL-BROWSER.md). With it on: typing, clicks and the wheel go to the page, Esc hands the keyboard back, then F or Esc returns to the built-in reader",
             "Q · ask the assistant about the page or the selection    S · summarise    T · translate to English    M · keep it in your knowledge (RAG)",
             "Esc · leave a field, then leave the browser",
+            "Accessibility (docs/ACCESSIBILITY.md): V browse mode on or off (then H or 1-6 headings, L links, F form fields, B buttons, T tables, R landmarks, I lists, G pictures; Shift goes back; / finds; Ctrl+L is the address bar) · M skip to the main part · K links list, J headings list, E form fields, Z landmarks (type to search, Enter goes there) · A read the article aloud, W the whole page, A again pauses, Esc stops · ? what the page has · arrow keys move inside radio buttons",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -4447,6 +4486,9 @@ impl App for BrowserApp {
                         }
                     }
                     999 => self.popup = None,
+                    n if self.a11y_event(*n) => {
+                        let _ = n;
+                    }
                     n if *n >= 1000 => self.pick_option(n - 1000),
                     500 => self.step_find(false),
                     501 => self.step_find(true),
@@ -4609,6 +4651,9 @@ impl App for BrowserApp {
             super::web_agent::render(g, area, s, &cx.services, &cx.session.user);
             return;
         }
+        self.a11y_refresh(cx);
+        self.a11y_flush(tick);
+        self.a11y_publish(cx);
         let bar_h = chrome::BAR_H * s;
         let tabs_h = chrome::TABS_H * s;
         let status_h = 30.0 * s;
@@ -5324,6 +5369,10 @@ impl Drop for BrowserApp {
 #[cfg(test)]
 #[path = "browser_look_tests.rs"]
 mod look_tests;
+
+#[cfg(test)]
+#[path = "browser_a11y_tests.rs"]
+mod a11y_tests;
 
 #[cfg(test)]
 mod tests {

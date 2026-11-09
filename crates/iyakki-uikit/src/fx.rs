@@ -256,8 +256,9 @@ pub fn list_row(g: &mut Gfx, r: R, s: f32, selected: bool, hot: bool, accent: [u
 pub fn row_at(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, rad: f32, selected: bool, hot: bool, accent: [u8; 4]) {
     let s = (rad / size::R_ROW).max(0.5);
     if selected {
+        crate::access::note_selected(R::new(x, y, w, h));
         g.rrect(x, y, w, h, rad, over(rgb(30, 38, 68), with_alpha(accent, 44)));
-        g.rrect_outline(x, y, w, h, rad, 1.2 * s * crate::theme::ring(), with_alpha(accent, 190));
+        g.rrect_outline(x, y, w, h, rad, 1.2 * s * crate::theme::ring() * crate::access::focus_ring_factor(), with_alpha(accent, 190));
         g.rrect(x + 1.5 * s, y + h * 0.2, 3.0 * s, h * 0.6, 1.5 * s, accent);
     } else if hot {
         g.rrect(x, y, w, h, rad, CARD_HOVER);
@@ -552,6 +553,7 @@ pub fn tile(g: &mut Gfx, r: R, s: f32, accent: [u8; 4], selected: bool, hot: boo
     g.rrect(r.x + 4.0 * s, r.y + 10.0 * s, r.w, r.h, rad, [0, 0, 0, 120]);
     let a = if allowed { accent } else { DIM };
     if selected {
+        crate::access::note_selected(r);
         g.rrect_glow(r.x, r.y, r.w, r.h, rad, 10.0 * s, with_alpha(a, 80));
     }
     g.rrect(r.x, r.y, r.w, r.h, rad, if selected || hot { CARD_HOVER } else { CARD });
@@ -644,7 +646,7 @@ pub fn field_frame(g: &mut Gfx, r: R, s: f32, focused: bool, accent: [u8; 4]) {
         g.rrect_glow(r.x, r.y, r.w, r.h, rad, 3.0 * s, with_alpha(accent, 60));
     }
     g.rrect(r.x, r.y, r.w, r.h, rad, crate::ui::FIELD);
-    g.rrect_outline(r.x, r.y, r.w, r.h, rad, if focused { 1.8 * s * crate::theme::ring() } else { 1.0 }, if focused { accent } else { rgb(62, 72, 108) });
+    g.rrect_outline(r.x, r.y, r.w, r.h, rad, if focused { 1.8 * s * crate::theme::ring() * crate::access::focus_ring_factor() } else { 1.0 }, if focused { accent } else { rgb(62, 72, 108) });
     if !focused {
         always_border(g, r.x, r.y, r.w, r.h, rad, s);
     }

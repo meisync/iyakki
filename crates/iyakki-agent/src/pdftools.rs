@@ -217,6 +217,52 @@ impl Tools for PdfTools {
             _ => self.inner.preview(name, args),
         }
     }
+
+    // Everything below belongs to the tools underneath (a "Allow for 5 minutes" grant for the screen or a camera, session grants and
+    // their scopes, jobs, notes): this layer adds three tools and must not hide what the inner set knows.
+    fn pre_approved(&self, name: &str) -> bool {
+        self.inner.pre_approved(name)
+    }
+
+    fn approved_always(&self, name: &str) -> bool {
+        self.inner.approved_always(name)
+    }
+
+    fn grant_blocker(&self, name: &str, args: &Value) -> Option<String> {
+        self.inner.grant_blocker(name, args)
+    }
+
+    fn grant_scope(&self, name: &str, args: &Value) -> String {
+        self.inner.grant_scope(name, args)
+    }
+
+    fn unresolved_work(&self) -> Vec<String> {
+        self.inner.unresolved_work()
+    }
+
+    fn begin_step(&self) {
+        self.inner.begin_step()
+    }
+
+    fn should_end_run(&self) -> Option<String> {
+        self.inner.should_end_run()
+    }
+
+    fn take_diagnosis(&self) -> Option<(String, String)> {
+        self.inner.take_diagnosis()
+    }
+
+    fn note_external(&self, name: &str, args: &Value, ok: bool) {
+        self.inner.note_external(name, args, ok)
+    }
+
+    fn take_notes(&self) -> Vec<String> {
+        self.inner.take_notes()
+    }
+
+    fn jobs_running(&self) -> Vec<String> {
+        self.inner.jobs_running()
+    }
 }
 
 // ---- the real backend ------------------------------------------------------------------------------------------------------

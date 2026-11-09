@@ -583,7 +583,9 @@ pub fn late_boot(mut plan: LatePlan) {
     swapfile_setup();
     // Driver packs from the data volume (firmware links, modprobe options, matching prebuilt modules) go in before the
     // network, sound and Bluetooth drivers load, so those drivers find their firmware the first time.
-    for l in iyakki_drivers::apply_boot(&iyakki_drivers::Fs::real(), &iyakki_drivers::run::System) {
+    // ... and only the packs that fit this machine (packfit.rs: the Mac Bluetooth patch is left out on a non-T2 Mac whose chip refuses it)
+    let machine = iyakki_drivers::packfit::Machine::read(std::path::Path::new("/sys"));
+    for l in iyakki_drivers::apply_boot_for(&iyakki_drivers::Fs::real(), &iyakki_drivers::run::System, &machine) {
         log::info!("{l}");
     }
     for m in ALWAYS_LOAD.iter().filter(|m| !LOGIN_LOAD.contains(m)) {

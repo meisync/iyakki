@@ -66,6 +66,8 @@ pub struct RecView {
     tick: u64,
     last_info: u64,
     clip_mins: u32,
+    /// The camera's motion events (F-CAM-04), shown as marks on the timeline.
+    motion: Vec<iyakki_tile_api::cameras::MotionRow>,
 }
 
 fn mb_text(mb: u64) -> String {
@@ -78,7 +80,7 @@ fn days_text(d: u32) -> String {
 
 impl RecView {
     pub fn new(cx: &TileCx, id: &str, name: &str) -> RecView {
-        let mut v = RecView { id: id.into(), name: name.into(), info: None, days: vec![], day: 0, frame: None, pix: None, pos_ms: 0, playing: false, note: None, view: View::Main, tick: 0, last_info: 0, clip_mins: 1 };
+        let mut v = RecView { id: id.into(), name: name.into(), info: None, days: vec![], day: 0, frame: None, pix: None, pos_ms: 0, playing: false, note: None, view: View::Main, tick: 0, last_info: 0, clip_mins: 1, motion: vec![] };
         v.reload(cx);
         if let Some(d) = v.days.first() {
             let at = d.spans.first().map_or(d.day_start_ms, |s| s.0);
@@ -139,7 +141,13 @@ impl RecView {
                 }
                 Err(e) => self.say(e, false),
             }
+            self.motion = cx.cameras.motion_events(&self.id, 0, u64::MAX, 2000).unwrap_or_default();
         }
+    }
+
+    /// How many motion marks the selected day's timeline shows.
+    pub fn motion_marks(&self) -> usize {
+        self.days.get(self.day).map_or(0, |d| crate::motion::day_marks(&self.motion, d.day_start_ms).len())
     }
 
     fn opened(&mut self, cx: &TileCx, at: u64) {
@@ -525,6 +533,10 @@ impl RecView {
             for (a, b) in &d.spans {
                 let (x0, x1) = (px(*a), px(*b).max(px(*a) + 2.0));
                 g.rect(x0, bar.y + 1.0, (x1 - x0).min(bar.x + bar.w - x0), bar.h - 2.0, ACCENT);
+            }
+            // motion events of the day, as amber ticks above the bar
+            for f in crate::motion::day_marks(&self.motion, d.day_start_ms) {
+                g.rect(bar.x + f * bar.w - 1.0 * s, bar.y - 7.0 * s, 2.0 * s, 7.0 * s, rgb(255, 196, 90));
             }
             for i in 0..SLOTS {
                 let sx = bar.x + bar.w * i as f32 / SLOTS as f32;

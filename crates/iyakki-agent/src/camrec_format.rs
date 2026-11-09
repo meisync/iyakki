@@ -49,6 +49,8 @@ pub enum RecKind {
     Jpeg = 1,
     /// H.264 access units in Annex-B form, one per record.
     H264 = 2,
+    /// Motion events (F-CAM-04): JSON records and small JPEG thumbnails, see `camdetect::events`.
+    Events = 3,
 }
 
 impl RecKind {
@@ -56,6 +58,7 @@ impl RecKind {
         match b {
             1 => Some(RecKind::Jpeg),
             2 => Some(RecKind::H264),
+            3 => Some(RecKind::Events),
             _ => None,
         }
     }
@@ -63,6 +66,7 @@ impl RecKind {
         match self {
             RecKind::Jpeg => "Motion-JPEG",
             RecKind::H264 => "H.264",
+            RecKind::Events => "motion events",
         }
     }
 }

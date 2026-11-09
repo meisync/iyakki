@@ -1,13 +1,13 @@
 //! iyakki-wake-train --data DIR --out FILE [--epochs N] [--examples N] [--batch N] [--lr F] [--seed N] [--threads N]
 //! Reads DIR/positive, DIR/negative, DIR/background (WAV), trains, writes the weights file (versioned header, checksum).
-#[path = "args.rs"]
-mod args;
+
+
 use iyakki_wake::{dataset::DataSet, train, weights};
 use std::path::PathBuf;
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    let m = args::parse(&a);
+    let m = iyakki_wake::cli::parse(&a);
     let (Some(data), Some(out)) = (m.get("data"), m.get("out")) else {
         eprintln!("usage: iyakki-wake-train --data DIR --out FILE [--epochs N] [--examples N] [--batch N] [--lr F] [--seed N] [--threads N]");
         std::process::exit(2);

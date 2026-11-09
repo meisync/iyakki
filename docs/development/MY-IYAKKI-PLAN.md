@@ -127,3 +127,20 @@ Rules as built (each is a test): control words never reach the model; a transcri
 Verified only with fakes: there is no microphone, speaker or speech engine in the build environment. Unverified on hardware: the latency table, the echo gate (the speaker level is a fixed estimate of 0.35 while speaking until the mixer reports its output level), barge-in with real echo, and speech-engine confidence (the engines in use give none, so only the short-transcript rule fires). The tab's agent has the base tools plus the voice tools; the chat tile's full tool stack (built inside `chat.rs`) is not shared yet, so some tools the chat has are not offered by voice. The voice thread is saved as a chat session titled "Voice conversation"; the chat does not mark its turns yet. Not started: the wake-phrase spotter, echo cancellation, the top-bar mic glyph, results spoken later by the waker, cloud-mode audio streams.
 
 To try it on the Lenovo: see the steps in the report that came with this change (turn on in Voice -> ASSISTANT, tap Talk, speak, listen; try "stop", "louder", "that's all"; ask for something that asks, e.g. "set the follow-up to 5 seconds", and answer by voice, then ask for something on the hard-ask list and see that only the tap approves).
+
+## Wake phrase spotter: what exists (2026-11-08)
+
+Step 4, first cut, in `crates/iyakki-wake` (no dependencies; steps to record and train in [`WAKE-PHRASE.md`](WAKE-PHRASE.md)).
+
+| Piece | Where |
+|---|---|
+| Front end: radix-2 FFT, 25 ms / 10 ms frames, Hann, pre-emphasis, 40 mel, log-mel, per-window normalisation | `fft.rs`, `features.rs` |
+| Model: depthwise-separable CNN over 148 frames (1.5 s), about 16 000 weights (65 KB), f32 forward and backward | `model.rs` |
+| Training (Adam, cross-entropy, seeded, augmentation: gain, shift, noise at random SNR, synthetic room, speed), `iyakki-wake-train`, weights file with header and checksum | `train.rs`, `dataset.rs`, `augment.rs`, `weights.rs`, `src/bin/train.rs` |
+| Data generator `iyakki-wake-gen`: formant speech stub (NOT real speech), plug-in `Tts` trait and a command adapter for a real engine | `synth.rs`, `gen.rs` |
+| Streaming spotter: 3 s memory ring, energy gate, windows every 100 ms, smoothing, threshold, cool-down; `WakeSpotter` trait (arm, mute, indicator) | `spotter.rs` |
+| Evaluation `iyakki-wake-eval`: miss rate and false accepts per hour over a threshold sweep; `--bench` | `eval.rs`, `src/bin/eval.rs` |
+| Settings key `voice.my_iyakki_wake` (off), chat tool `voice_wake_status` (safe), `wake` option on the hard-ask `voice_assistant_set` | `voice.rs`, `devmode/config.rs`, `voiceassisttools.rs` |
+
+Not built: wiring the spotter to the microphone (so opting in starts no listening and the status says so), the top-bar indicator, the second-stage Whisper confirm, the sensitivity/miss counters in the tile. Accuracy on real voices and rooms is unknown: the only trained model so far used synthetic stub speech.
+

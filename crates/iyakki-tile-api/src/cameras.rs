@@ -159,6 +159,80 @@ pub struct RecChange {
     pub max_mb: Option<u64>,
 }
 
+/// How a camera is watched for motion (F-CAM-04). Off unless the owner turned it on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MotionMode {
+    Off,
+    /// Only while the camera's picture is on a screen or it is being recorded.
+    Watched,
+    /// All the time; a red sign shows on every screen.
+    Always,
+}
+
+/// A zone or a privacy mask: corners as fractions of the picture (0.0 to 1.0 from the top left).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShapeInfo {
+    pub name: String,
+    /// Zones: motion counts only inside include zones, never inside exclude zones. Masks ignore it.
+    pub include: bool,
+    pub sensitivity: u8,
+    pub points: Vec<(f32, f32)>,
+}
+
+/// A camera's motion setting and state, as the motion page shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MotionInfo {
+    pub mode: MotionMode,
+    pub sensitivity: u8,
+    pub zones: Vec<ShapeInfo>,
+    pub masks: Vec<ShapeInfo>,
+    /// Masks are also black in recordings and snapshots.
+    pub mask_storage: bool,
+    pub alerts_on: bool,
+    pub alerts_max_per_hour: u32,
+    /// `22:00-06:30` or empty.
+    pub quiet: String,
+    pub alerts_thumbnail: bool,
+    pub person: bool,
+    /// Why there is no person detection (or that there is).
+    pub person_note: String,
+    /// What the watcher is doing, in words.
+    pub state: String,
+    /// A picture was analysed in the last few seconds (the MOTION mark).
+    pub analysing: bool,
+    /// The person is the owner: only they can turn it on, draw shapes, read events.
+    pub owner: bool,
+    pub keep_days: u32,
+}
+
+/// What a motion change asks for; `None` keeps the current value.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MotionChange {
+    pub mode: Option<MotionMode>,
+    pub sensitivity: Option<u8>,
+    pub mask_storage: Option<bool>,
+    pub alerts_on: Option<bool>,
+    pub alerts_max_per_hour: Option<u32>,
+    /// `Some("")` removes the quiet hours.
+    pub quiet: Option<String>,
+    pub alerts_thumbnail: Option<bool>,
+}
+
+/// One motion event, as the events list and the timeline marks show it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MotionRow {
+    pub id: u64,
+    pub start_ms: u64,
+    pub end_ms: Option<u64>,
+    /// Date and time in words (local).
+    pub label: String,
+    pub zone: String,
+    pub score: u8,
+    /// `Some(true)` a person detector said person; `None` not asked or not available.
+    pub person: Option<bool>,
+    pub has_thumb: bool,
+}
+
 pub trait CameraSource {
     /// The cameras this person may watch (USB cameras of this computer first), in a stable order.
     fn cameras(&self) -> Vec<CamInfo>;
@@ -202,6 +276,34 @@ pub trait CameraSource {
     }
     fn rec_audit(&self, _id: &str) -> Result<Vec<AuditRow>, String> {
         Ok(vec![])
+    }
+
+    // ---- motion watching (F-CAM-04); a source without it keeps these defaults
+
+    /// The ids of the cameras whose pictures are being analysed for motion right now (each gets a MOTION mark).
+    fn motion_ids(&self) -> Vec<String> {
+        vec![]
+    }
+    fn motion_info(&self, _id: &str) -> Option<MotionInfo> {
+        None
+    }
+    fn motion_set(&self, _id: &str, _change: &MotionChange) -> Result<(), String> {
+        Err("Motion watching is not available here.".into())
+    }
+    /// Add or replace (by name) a zone (`mask` false) or a privacy mask (`mask` true).
+    fn motion_shape_set(&self, _id: &str, _mask: bool, _shape: &ShapeInfo) -> Result<(), String> {
+        Err("Motion watching is not available here.".into())
+    }
+    fn motion_shape_remove(&self, _id: &str, _mask: bool, _name: &str) -> Result<(), String> {
+        Err("Motion watching is not available here.".into())
+    }
+    /// Events that started between two times, newest first (owner only).
+    fn motion_events(&self, _id: &str, _from_ms: u64, _to_ms: u64, _limit: usize) -> Result<Vec<MotionRow>, String> {
+        Ok(vec![])
+    }
+    /// The thumbnail of an event (owner only).
+    fn motion_thumb(&self, _id: &str, _event: u64) -> Result<Option<Frame>, String> {
+        Ok(None)
     }
 }
 

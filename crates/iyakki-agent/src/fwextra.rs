@@ -236,9 +236,14 @@ pub fn parse_log(text: &str, m: &Manifest) -> Vec<Request> {
     for line in text.lines() {
         let body = line_body(line);
         let (drv, dev) = driver_and_device(body);
-        if let Some(t) = token_after(body, "Direct firmware load for ") {
-            if body.contains("failed") {
-                add(t, &drv, &dev);
+        if let Some(i) = body.find("Direct firmware load for ") {
+            // the name runs up to " failed": Apple board files carry a space ("brcm/brcmfmac4350c2-pcie.Apple Inc.-MacBookPro14,1.bin")
+            let rest = &body[i + "Direct firmware load for ".len()..];
+            if let Some(j) = rest.find(" failed") {
+                let t = clean_token(rest[..j].trim());
+                if !t.is_empty() {
+                    add(t, &drv, &dev);
+                }
             }
             continue;
         }
@@ -1272,11 +1277,28 @@ fn run_inner(env: &mut dyn Env, m: &Manifest, data: &Path, source: &Source, opts
 }
 
 /// The modules that are safe to unload and load again: the drivers that asked, loaded as modules, and not a graphics driver.
+/// Core modules a kernel log line names as the "driver" of a firmware request without being the transport that loads it: reloading
+/// them tears down every controller of that kind. `bluetooth` is the "Bluetooth: hci0: ..." prefix of a Bluetooth firmware line (the
+/// MediaTek patch on a Lenovo); reloading the core on a Mac whose Broadcom chip runs its own firmware re-probed and wedged that chip
+/// (2026-11-08). The transport driver (btusb, hci_uart) is what a file needs, and it is named by its own lines when it is one.
+pub use pack::CORE_MODULES;
+
+pub fn reload_list_of(files: &[Request], loaded: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    for f in files {
+        let d = f.driver.as_str();
+        if !d.is_empty() && !GPU_DRIVERS.contains(&d) && !CORE_MODULES.contains(&d) && pack::valid_module_name(d) && loaded(d) && !v.iter().any(|x| x == d) {
+            v.push(d.to_string());
+        }
+    }
+    v
+}
+
 fn reload_list(env: &dyn Env, sel: &Selection) -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
     for f in &sel.files {
         let d = f.driver.as_str();
-        if !d.is_empty() && !GPU_DRIVERS.contains(&d) && pack::valid_module_name(d) && env.module_state(d) == ModState::Loaded && !v.iter().any(|x| x == d) {
+        if !d.is_empty() && !GPU_DRIVERS.contains(&d) && !CORE_MODULES.contains(&d) && pack::valid_module_name(d) && env.module_state(d) == ModState::Loaded && !v.iter().any(|x| x == d) {
             v.push(d.to_string());
         }
     }

@@ -122,7 +122,7 @@ pub fn simplify(doc: &Doc) -> Option<Doc> {
         let title = Span { text: doc.title.trim().to_string(), style: Style { bold: true, ..Style::default() }, link: None, control: None, image: None, inline: None };
         blocks.insert(0, Block::Text(TextBlock { level: 1, spans: vec![title], ..TextBlock::default() }));
     }
-    Some(Doc { title: doc.title.clone(), canvas: None, blocks, links: doc.links.clone(), controls: Vec::new(), forms: Vec::new(), images: doc.images.clone(), inlines: Vec::new(), truncated: doc.truncated })
+    Some(Doc { title: doc.title.clone(), canvas: None, blocks, links: doc.links.clone(), controls: Vec::new(), forms: Vec::new(), images: doc.images.clone(), inlines: Vec::new(), truncated: doc.truncated, access: None })
 }
 
 #[cfg(test)]

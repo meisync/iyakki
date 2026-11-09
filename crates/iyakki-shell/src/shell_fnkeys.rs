@@ -112,6 +112,8 @@ impl Shell {
                 }
             }
             FnKey::Lock => self.lock_key(),
+            // the accessibility chords are taken earlier (`shell_access.rs`) and never get here
+            FnKey::ScreenReader | FnKey::AccessNext | FnKey::AccessPrev | FnKey::AccessActivate | FnKey::AccessRepeat => {}
             FnKey::Calc => self.fn_notice("There is no calculator app yet"),
             FnKey::Homepage => {
                 let allowed = self.session.as_ref().is_some_and(|s| s.policy.allows_app(PApp::Browser));

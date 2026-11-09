@@ -17,6 +17,7 @@ pub mod known;
 pub mod macboard;
 pub mod modinfo;
 pub mod pack;
+pub mod packfit;
 pub mod run;
 pub mod t2hold;
 pub mod t2input;
@@ -25,7 +26,7 @@ pub mod touchbar;
 pub mod usbfs;
 pub mod wifirecover;
 
-pub use apply::{active_ids, apply_boot, firmware_present, install_pack, installed, remove_pack, Fs, Record, Report};
+pub use apply::{active_ids, apply_boot, firmware_present, install_pack, installed, remove_pack, Fs, Record, Report, apply_boot_for};
 pub use detect::{Machine, Roots};
 pub use known::{Availability, Delivery, Known, Row, Status, KNOWN};
 pub use pack::Pack;

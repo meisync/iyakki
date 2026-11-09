@@ -241,6 +241,17 @@ pub fn scan(index: u16, secs: u64) -> Result<Vec<Found>, String> {
     scan_with(&mut m, index, Duration::from_secs(secs))
 }
 
+/// [`scan`] that ends early when `stop` is set (the page's Stop button); the results so far are returned.
+pub fn scan_until(index: u16, secs: u64, stop: &std::sync::atomic::AtomicBool) -> Result<Vec<Found>, String> {
+    let sock = ControlSocket::open().map_err(|e| format!("cannot open the Bluetooth management channel: {e}"))?;
+    let mut m = Mgmt::new(sock);
+    let types = m.discovery_types(index).map_err(|e| scan_error(&e))?;
+    if types == 0 {
+        return Err("this controller reports neither classic nor low energy Bluetooth, so there is nothing to scan with".into());
+    }
+    m.scan_types_until(index, Duration::from_secs(secs), types, Some(stop)).map_err(|e| scan_error(&e))
+}
+
 /// [`scan`] on any transport (the tests use a scripted one).
 pub fn scan_with<T: Transport>(m: &mut Mgmt<T>, index: u16, dur: Duration) -> Result<Vec<Found>, String> {
     let types = m.discovery_types(index).map_err(|e| scan_error(&e))?;

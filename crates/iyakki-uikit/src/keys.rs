@@ -28,6 +28,15 @@ pub enum FnKey {
     Homepage,
     /// KEY_SCREENLOCK, and Super+L on a PC keyboard: lock the screen.
     Lock,
+    /// Super+Alt+S: the screen reader on or off. Works at the sign-in and the lock screens too (`access.rs`).
+    ScreenReader,
+    /// Super+Alt+Right / Left: the keyboard walk moves to the next / previous control of the screen.
+    AccessNext,
+    AccessPrev,
+    /// Super+Alt+Enter: press the control the keyboard walk stands on.
+    AccessActivate,
+    /// Super+Alt+R: say the last thing again.
+    AccessRepeat,
 }
 
 impl FnKey {

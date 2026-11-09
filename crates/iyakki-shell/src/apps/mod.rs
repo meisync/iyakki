@@ -143,6 +143,7 @@ pub mod ide_tasks_run;
 pub mod ide_layout;
 pub mod ide_tree;
 pub mod ide_ui;
+pub mod bluetooth_page;
 pub mod devices;
 pub mod settings;
 pub mod settings_nav;

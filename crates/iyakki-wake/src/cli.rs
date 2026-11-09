@@ -1,4 +1,4 @@
-// shared by the three tools: tiny "--key value" parsing
+//! Tiny "--key value" parsing shared by the three tools.
 pub fn parse(args: &[String]) -> std::collections::HashMap<String, String> {
     let mut m = std::collections::HashMap::new();
     let mut i = 0;

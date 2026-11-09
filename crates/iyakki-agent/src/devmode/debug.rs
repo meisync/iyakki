@@ -242,7 +242,8 @@ pub fn missing_firmware(recs: &[Kmsg]) -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
     for k in recs {
         if let Some(rest) = k.msg.split("Direct firmware load for ").nth(1) {
-            let name = rest.split_whitespace().next().unwrap_or("").to_string();
+            // up to " failed": a Mac's board file carries a space ("brcm/brcmfmac4350c2-pcie.Apple Inc.-MacBookPro14,1.bin")
+            let name = rest.split(" failed").next().unwrap_or("").trim().to_string();
             if !name.is_empty() && !v.contains(&name) {
                 v.push(name);
             }

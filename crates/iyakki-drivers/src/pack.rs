@@ -105,6 +105,12 @@ pub struct Pack {
     pub why: String,
 }
 
+/// Core modules a kernel log line names as the "driver" of a firmware request without being the transport that loads the file:
+/// reloading them tears down every controller of that kind. `bluetooth` is the "Bluetooth: hci0: ..." prefix of a Bluetooth firmware
+/// line (the MediaTek patch on a Lenovo); reloading the core on a Mac whose Broadcom chip runs its own firmware re-probed and wedged
+/// that chip (MacBookPro14,1, 2026-11-08). Never reloaded, neither at install nor at a start.
+pub const CORE_MODULES: [&str; 2] = ["bluetooth", "usbcore"];
+
 pub fn valid_module_name(n: &str) -> bool {
     (1..=56).contains(&n.len()) && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }

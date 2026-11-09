@@ -221,6 +221,13 @@ impl H264Support for NoH264 {
     }
 }
 
+/// Something that wants a copy of the small decoded pictures of some cameras (motion watching, F-CAM-04). It is called on the stream's
+/// own thread at most [`SMALL_FPS`] times a second per camera, and only for cameras it says it `wants`.
+pub trait FrameTap: Send + Sync {
+    fn wants(&self, camera: &str) -> bool;
+    fn frame(&self, camera: &str, width: u32, height: u32, rgba: &[u8]);
+}
+
 pub struct Env {
     pub data: PathBuf,
     pub secrets: Arc<dyn CamSecrets>,
@@ -254,6 +261,8 @@ struct St {
     want_big: bool,
     last_small: Option<Instant>,
     last_big: Option<Instant>,
+    /// The last time a person (not the motion watcher) asked for a picture.
+    viewed: Option<Instant>,
 }
 
 struct Shared {
@@ -267,10 +276,13 @@ impl Shared {
     }
 }
 
+type TapSlot = Arc<Mutex<Option<Arc<dyn FrameTap>>>>;
+
 pub struct Hub {
     env: Env,
     streams: Mutex<HashMap<String, Arc<Shared>>>,
     last_view: Mutex<HashMap<(String, String), Instant>>,
+    tap: TapSlot,
 }
 
 fn registry() -> &'static Mutex<HashMap<PathBuf, Arc<Hub>>> {
@@ -325,7 +337,7 @@ pub fn shrink(w: u32, h: u32, rgba: &[u8], max_w: u32) -> (u32, u32, Vec<u8>) {
 
 impl Hub {
     pub fn new(env: Env) -> Hub {
-        Hub { env, streams: Mutex::new(HashMap::new()), last_view: Mutex::new(HashMap::new()) }
+        Hub { env, streams: Mutex::new(HashMap::new()), last_view: Mutex::new(HashMap::new()), tap: Arc::new(Mutex::new(None)) }
     }
 
     fn file(&self) -> PathBuf {
@@ -440,24 +452,8 @@ impl Hub {
     /// The newest picture of a camera. Asking starts the stream when none runs and keeps it alive for [`IDLE_STOP`].
     pub fn view(&self, who: &Who, id: &str, big: bool) -> Result<Option<Frame>, String> {
         let spec = self.watchable(who, id)?;
-        let sh = {
-            let mut m = self.streams();
-            m.retain(|_, s| !s.stop.load(Ordering::SeqCst));
-            match m.get(id) {
-                Some(s) => s.clone(),
-                None => {
-                    let s = Arc::new(Shared {
-                        st: Mutex::new(St { status: Status::Connecting, seq: 0, small: None, big: None, latest: None, fps: 0.0, size: (0, 0), touched: Instant::now(), want_big: big, last_small: None, last_big: None }),
-                        stop: AtomicBool::new(false),
-                    });
-                    m.insert(id.to_string(), s.clone());
-                    let (sh2, env) = (s.clone(), self.stream_env());
-                    let id2 = id.to_string();
-                    std::thread::spawn(move || run_stream(sh2, env, id2, spec));
-                    s
-                }
-            }
-        };
+        let sh = self.stream_for(id, spec, big);
+        sh.st().viewed = Some(Instant::now());
         let mut st = sh.st();
         st.touched = Instant::now();
         st.want_big = big;
@@ -474,6 +470,52 @@ impl Hub {
         Ok(f)
     }
 
+    fn stream_for(&self, id: &str, spec: Option<Spec>, big: bool) -> Arc<Shared> {
+        let mut m = self.streams();
+        m.retain(|_, s| !s.stop.load(Ordering::SeqCst));
+        match m.get(id) {
+            Some(s) => s.clone(),
+            None => {
+                let s = Arc::new(Shared {
+                    st: Mutex::new(St { status: Status::Connecting, seq: 0, small: None, big: None, latest: None, fps: 0.0, size: (0, 0), touched: Instant::now(), want_big: big, last_small: None, last_big: None, viewed: None }),
+                    stop: AtomicBool::new(false),
+                });
+                m.insert(id.to_string(), s.clone());
+                let (sh2, env) = (s.clone(), self.stream_env());
+                let id2 = id.to_string();
+                std::thread::spawn(move || run_stream(sh2, env, id2, spec));
+                s
+            }
+        }
+    }
+
+    /// Keep a network camera's stream going without a person looking (the motion watcher, the recorder's neighbour). It does not count
+    /// as being watched, writes no log line, and never starts a USB camera.
+    pub fn keep_alive(&self, id: &str) -> Result<(), String> {
+        if id.starts_with("usb:") {
+            return Err("this computer's own camera is never kept running in the background".into());
+        }
+        let spec = self.specs().into_iter().find(|s| s.id == id).ok_or("no such camera")?;
+        let sh = self.stream_for(id, Some(spec), false);
+        sh.st().touched = Instant::now();
+        Ok(())
+    }
+
+    /// Whether a person asked for this camera's picture within the idle time (it is on a screen).
+    pub fn viewed_recently(&self, id: &str) -> bool {
+        self.streams().get(id).is_some_and(|s| s.st().viewed.is_some_and(|t| t.elapsed() <= self.env.idle))
+    }
+
+    /// Whether the camera's stream is up and delivering pictures right now.
+    pub fn is_live(&self, id: &str) -> bool {
+        self.streams().get(id).is_some_and(|s| s.st().status == Status::Live)
+    }
+
+    /// Install the one picture tap (motion watching).
+    pub fn set_tap(&self, tap: Arc<dyn FrameTap>) {
+        *self.tap.lock().unwrap_or_else(|e| e.into_inner()) = Some(tap);
+    }
+
     fn name_of(&self, id: &str) -> String {
         if let Some(u) = id.strip_prefix("usb:") {
             return self.env.usb.list().into_iter().find(|c| c.id == u).map(|c| c.name).unwrap_or_else(|| id.to_string());
@@ -482,7 +524,7 @@ impl Hub {
     }
 
     fn stream_env(&self) -> StreamEnv {
-        StreamEnv { secrets: self.env.secrets.clone(), usb: self.env.usb.clone(), h264: self.env.h264.clone(), backoff_ms: self.env.backoff_ms, idle: self.env.idle }
+        StreamEnv { secrets: self.env.secrets.clone(), usb: self.env.usb.clone(), h264: self.env.h264.clone(), backoff_ms: self.env.backoff_ms, idle: self.env.idle, tap: self.tap.clone() }
     }
 
     /// Stop every stream now (sign-out, shutdown, tests).
@@ -518,9 +560,15 @@ impl Hub {
             m.get(id).and_then(|s| s.st().latest.clone())
         };
         let Some(pic) = pic else { return Err("this camera has not shown a picture yet; wait until it is live".into()) };
+        // privacy masks the person asked to apply to stored pictures are black before the snapshot is written; a picture that cannot be
+        // masked is not saved
         let bytes = match &*pic {
-            Picture::Jpeg(j) => j.clone(),
-            Picture::Rgba { width, height, data } => (self.env.encode)(*width, *height, data),
+            Picture::Jpeg(j) => crate::camdetect::mask_jpeg_for_storage(&self.env.data, id, j.clone(), &*self.env.encode)?,
+            Picture::Rgba { width, height, data } => {
+                let mut d = data.clone();
+                crate::camdetect::mask_rgba_for_storage(&self.env.data, id, *width, *height, &mut d)?;
+                (self.env.encode)(*width, *height, &d)
+            }
         };
         if bytes.len() < 4 {
             return Err("the picture could not be encoded".into());
@@ -701,6 +749,7 @@ struct StreamEnv {
     h264: Arc<dyn H264Support>,
     backoff_ms: u64,
     idle: Duration,
+    tap: TapSlot,
 }
 
 pub(crate) fn tcp(host: &str, port: u16) -> Result<std::net::TcpStream, FeedErr> {
@@ -890,6 +939,7 @@ fn run_stream(sh: Arc<Shared>, env: StreamEnv, id: String, spec: Option<Spec>) {
                         let due = |last: Option<Instant>, fps: u32| last.is_none_or(|t| t.elapsed() >= Duration::from_millis(1000 / fps as u64));
                         (due(st.last_small, SMALL_FPS), st.want_big && due(st.last_big, BIG_FPS))
                     };
+                    let mut tap_frame: Option<Frame> = None;
                     if small_due || big_due {
                         let small = convert(&pic, if big_due && !small_due { BIG_W } else { SMALL_W });
                         let big = if big_due && small_due { convert(&pic, BIG_W) } else { None };
@@ -910,9 +960,17 @@ fn run_stream(sh: Arc<Shared>, env: StreamEnv, id: String, spec: Option<Spec>) {
                                 if !big_due {
                                     st.size = (s.0, s.1);
                                 }
-                                st.small = Some(mk(s));
+                                let f = mk(s);
+                                tap_frame = Some(f.clone());
+                                st.small = Some(f);
                                 st.last_small = Some(Instant::now());
                             }
+                        }
+                    }
+                    if let Some(f) = tap_frame {
+                        let tap = env.tap.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        if let Some(t) = tap.filter(|t| t.wants(&id)) {
+                            t.frame(&id, f.width, f.height, &f.rgba);
                         }
                     }
                 }

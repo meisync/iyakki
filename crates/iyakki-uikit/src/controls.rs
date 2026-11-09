@@ -102,6 +102,10 @@ pub fn slider_row(g: &mut Gfx, r: R, s: f32, sl: &Slider, accent: [u8; 4]) -> R 
     if sl.enabled {
         // a generous click area around the thin track
         g.hit(R::new(track.x, by, track.w, bs), Event::Area(sl.id), "slider");
+        let said = if sl.unit == "%" { format!("{} percent", sl.value) } else { value.clone() };
+        crate::access::describe("slider", &Event::Area(sl.id), crate::access::Meta::new(crate::access::Role::Slider, crate::access::State::default().value(said)).named(sl.title));
+        crate::access::describe("decrease", &sl.minus, crate::access::Meta::new(crate::access::Role::Button, crate::access::State::default().disabled(!can_minus)).named(&format!("Decrease {}", sl.title)));
+        crate::access::describe("increase", &sl.plus, crate::access::Meta::new(crate::access::Role::Button, crate::access::State::default().disabled(!can_plus)).named(&format!("Increase {}", sl.title)));
     }
     R::new(track.x, by, track.w, bs)
 }
@@ -120,7 +124,8 @@ pub fn switch_row(g: &mut Gfx, r: R, s: f32, title: &str, help: &str, on: bool, 
     let (sx, sy) = (r.x + r.w - 18.0 * s - sw, r.y + (r.h - sh) / 2.0);
     crate::fx::switch(g, R::new(sx, sy, sw, sh), on, enabled, accent, s);
     if enabled {
-        g.hit(r, toggle, title.as_str());
+        g.hit(r, toggle.clone(), title.as_str());
+        crate::access::describe(title.as_str(), &toggle, crate::access::Meta::new(crate::access::Role::Toggle, crate::access::State::default().checked(on)).named(title.as_str()));
     }
 }
 

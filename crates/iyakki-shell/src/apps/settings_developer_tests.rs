@@ -33,7 +33,7 @@ fn draw(a: &mut SettingsApp, cx: &AppCx, w: u32, h: u32) -> Gfx {
 }
 
 fn goto(a: &mut SettingsApp, cx: &AppCx, t: Tab) {
-    for _ in 0..40 {
+    for _ in 0..60 {
         if a.tab() == t {
             return;
         }

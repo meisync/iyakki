@@ -1,15 +1,15 @@
 //! iyakki-wake-gen --out DIR [--voices N] [--seed N] [--tts-command "TEMPLATE"]
 //! Writes synthetic training data (positive/, negative/, background/). Without --tts-command it uses the built-in formant stub, which is NOT
 //! real speech. A template may hold {text} {out} {voice} {speed}; the tool must write a WAV to {out}.
-#[path = "args.rs"]
-mod args;
+
+
 use iyakki_wake::gen::{generate, GenConfig};
 use iyakki_wake::synth::{CommandTts, FormantTts, Tts};
 use std::path::PathBuf;
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    let m = args::parse(&a);
+    let m = iyakki_wake::cli::parse(&a);
     let Some(out) = m.get("out") else {
         eprintln!("usage: iyakki-wake-gen --out DIR [--voices N] [--seed N] [--tts-command \"TEMPLATE\"]");
         std::process::exit(2);

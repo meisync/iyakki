@@ -321,7 +321,7 @@ fn a_click_on_a_microphone_or_output_row_chooses_it_instead_of_only_selecting_it
     assert!(Target::SoundT2Mic.activates_on_click() && Target::SoundChoice.activates_on_click());
     // rows that change the machine's connections stay select-then-press
     assert!(!Target::Ethernet("eth0".into()).activates_on_click() && !Target::Nothing.activates_on_click());
-    assert!(!Target::BtPower(0, true).activates_on_click());
+    assert!(!Target::Radio(vec!["rfkill1".into()]).activates_on_click());
 }
 
 fn click(a: &mut SettingsApp, cx: &AppCx, label: &str) {

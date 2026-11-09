@@ -622,6 +622,14 @@ pub fn bt_tried_from_log(log: &str) -> Vec<String> {
 
 /// The file name (under `brcm/`) to serve: the first name btbcm tried; `BCM.hcd` when the log has none (the last name of its list,
 /// which a UART controller on an Intel Mac always ends with). A name with anything but plain characters is not used.
+/// The kernel log says this Broadcom controller refuses the vendor commands a patch needs: "command disallowed" (-16) to the baud-rate
+/// change (0xfc18) or to the first patch write (0xfc4c). Seen on a MacBookPro14,1 (BCM4350C0 on the serial link, 2026-11-08): Apple's
+/// firmware leaves the chip running its own patch; a second patch is refused and the half-written attempt wedges the chip, while
+/// without any file it has an address and scans. Such a Mac gets no Bluetooth pack.
+pub fn bt_refuses_vendor_commands(log: &str) -> bool {
+    log.lines().any(|l| l.contains("BCM: failed to write update baudrate (-16)") || (l.contains("BCM: Patch command") && l.contains("failed (-16)")))
+}
+
 pub fn hcd_serve_name(tried: &[String]) -> String {
     tried
         .first()
@@ -820,6 +828,16 @@ pub fn options_for_model(dmi_product: &str) -> Options {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_controller_that_answers_command_disallowed_is_told_apart_from_one_that_merely_lacks_the_file() {
+        let refused = "[6.6] Bluetooth: hci0: BCM: failed to write update baudrate (-16)\n[6.6] Bluetooth: hci0: Failed to set baudrate\n[6.8] Bluetooth: hci0: BCM4350C0 UART 37.4 MHz Gamay USI UHE\n[6.8] Bluetooth: hci0: BCM: firmware Patch file not found, tried:\n[6.8] Bluetooth: hci0: BCM: 'brcm/BCM.hcd'\n";
+        assert!(super::bt_refuses_vendor_commands(refused));
+        assert!(super::bt_refuses_vendor_commands("[8.1] Bluetooth: hci0: BCM: Patch command fc4c failed (-16)\n"));
+        let plain = "[4.3] Bluetooth: hci0: BCM4350C0 UART 37.4 MHz Gamay USI UHE\n[4.5] Bluetooth: hci0: BCM: firmware Patch file not found, tried:\n[4.5] Bluetooth: hci0: BCM: 'brcm/BCM.hcd'\n";
+        assert!(!super::bt_refuses_vendor_commands(plain), "a chip that only lacks the file takes the patch");
+        assert!(!super::bt_refuses_vendor_commands("[10.1] Bluetooth: hci0: BCM: failed to write update baudrate (-110)\n"), "a timeout is another story");
+    }
+
     use super::*;
 
     fn tmp(tag: &str) -> PathBuf {

@@ -21,6 +21,9 @@ use std::time::{Duration, Instant};
 use crate::bthid::*;
 use crate::btmgmt::{self, Answer, ControlSocket, Mgmt, Prompt, ADDR_BREDR};
 
+/// Mgmt event: User Confirmation Request (a device is pairing with us and the number must be compared).
+const EV_USER_CONFIRM_REQUEST_EV: u16 = btmgmt::EV_USER_CONFIRM_REQUEST;
+
 const AF_BLUETOOTH: i32 = 31;
 const BTPROTO_L2CAP: i32 = 0;
 const SOL_BLUETOOTH: i32 = 274;
@@ -37,15 +40,29 @@ pub const STORE_PATH: &str = "/var/lib/iyakki/bluetooth.json";
 
 /// `struct sockaddr_l2`: family, PSM, address (kernel byte order), channel id, address type.
 fn sockaddr_l2(addr: [u8; 6], psm: u16) -> [u8; 14] {
+    sockaddr_l2_full(addr, psm, 0, ADDR_BREDR)
+}
+
+/// The same with a fixed channel id and an address type (low energy: channel 4 is the attribute protocol, address type 1 or 2).
+fn sockaddr_l2_full(addr: [u8; 6], psm: u16, cid: u16, addr_type: u8) -> [u8; 14] {
     let mut s = [0u8; 14];
     s[0..2].copy_from_slice(&(AF_BLUETOOTH as u16).to_le_bytes());
     s[2..4].copy_from_slice(&psm.to_le_bytes());
     s[4..10].copy_from_slice(&addr);
-    s[12] = ADDR_BREDR;
+    s[10..12].copy_from_slice(&cid.to_le_bytes());
+    s[12] = addr_type;
     s
 }
 
+/// The L2CAP fixed channel of the low-energy attribute protocol.
+pub const CID_LE_ATT: u16 = 4;
+
 fn new_l2cap() -> io::Result<OwnedFd> {
+    new_l2cap_level(BT_SECURITY_MEDIUM)
+}
+
+/// An L2CAP socket with the given security level (0: none, as the service discovery channel needs; 2: encrypted and authenticated).
+fn new_l2cap_level(level: u8) -> io::Result<OwnedFd> {
     // SAFETY: plain socket call; the descriptor is owned right away
     let fd = unsafe { libc::socket(AF_BLUETOOTH, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, BTPROTO_L2CAP) };
     if fd < 0 {
@@ -54,13 +71,13 @@ fn new_l2cap() -> io::Result<OwnedFd> {
     // SAFETY: fd is fresh and ours
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     // encryption and authentication (a bonded device passes; an unpaired one is refused)
-    let level = BT_SECURITY_MEDIUM as libc::c_int;
+    let level = level as libc::c_int;
     // SAFETY: valid pointer and size for the option value
     unsafe { libc::setsockopt(fd.as_raw_fd(), SOL_BLUETOOTH, BT_SECURITY, &level as *const _ as *const libc::c_void, std::mem::size_of::<libc::c_int>() as u32) };
     Ok(fd)
 }
 
-fn poll_one(fd: RawFd, events: i16, ms: i32) -> i16 {
+pub(crate) fn poll_one(fd: RawFd, events: i16, ms: i32) -> i16 {
     let mut p = libc::pollfd { fd, events, revents: 0 };
     // SAFETY: one valid pollfd
     let n = unsafe { libc::poll(&mut p, 1, ms) };
@@ -94,7 +111,16 @@ impl L2Sock {
                 unsafe { libc::setsockopt(fd.as_raw_fd(), SOL_L2CAP, L2CAP_OPTIONS, o.as_ptr() as *const libc::c_void, len) };
             }
         }
-        let sa = sockaddr_l2(addr, psm);
+        L2Sock::finish_connect(fd, sockaddr_l2(addr, psm), secs)
+    }
+
+    /// Connects to a low-energy device on the attribute protocol's fixed channel (HID over GATT). `addr_type` is 1 (public) or 2 (random).
+    pub fn connect_le(addr: [u8; 6], addr_type: u8, secs: u64) -> Result<L2Sock, HidError> {
+        let fd = new_l2cap().map_err(|e| HidError::Connect(e.raw_os_error().unwrap_or(libc::ENODEV)))?;
+        L2Sock::finish_connect(fd, sockaddr_l2_full(addr, 0, CID_LE_ATT, addr_type), secs)
+    }
+
+    fn finish_connect(fd: OwnedFd, sa: [u8; 14], secs: u64) -> Result<L2Sock, HidError> {
         // SAFETY: sa is 14 readable bytes and the length says so
         let r = unsafe { libc::connect(fd.as_raw_fd(), sa.as_ptr() as *const libc::sockaddr, sa.len() as u32) };
         if r < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EINPROGRESS) {
@@ -146,13 +172,30 @@ impl Channel for L2Sock {
 }
 
 /// A listening L2CAP socket on one PSM (for devices that connect to us).
-struct Listener {
+pub(crate) struct Listener {
     fd: OwnedFd,
 }
 
 impl Listener {
-    fn open(psm: u16) -> io::Result<Listener> {
-        let fd = new_l2cap()?;
+    pub(crate) fn open(psm: u16) -> io::Result<Listener> {
+        Listener::open_with(psm, BT_SECURITY_MEDIUM, None)
+    }
+
+    /// A listener with its own security level and (optionally) a larger incoming L2CAP message size.
+    pub(crate) fn open_with(psm: u16, level: u8, imtu: Option<u16>) -> io::Result<Listener> {
+        let fd = new_l2cap_level(level)?;
+        if let Some(m) = imtu {
+            let mut o = [0u8; 16];
+            let mut len = o.len() as u32;
+            // SAFETY: o is valid for len bytes; the kernel fills in its current options, of which only the message sizes change
+            let got = unsafe { libc::getsockopt(fd.as_raw_fd(), SOL_L2CAP, L2CAP_OPTIONS, o.as_mut_ptr() as *mut libc::c_void, &mut len) };
+            if got == 0 && len >= 4 {
+                o[0..2].copy_from_slice(&m.to_le_bytes());
+                o[2..4].copy_from_slice(&m.to_le_bytes());
+                // SAFETY: same buffer and length the kernel gave
+                unsafe { libc::setsockopt(fd.as_raw_fd(), SOL_L2CAP, L2CAP_OPTIONS, o.as_ptr() as *const libc::c_void, len) };
+            }
+        }
         let sa = sockaddr_l2([0; 6], psm);
         // SAFETY: sa is 14 readable bytes
         if unsafe { libc::bind(fd.as_raw_fd(), sa.as_ptr() as *const libc::sockaddr, sa.len() as u32) } < 0 {
@@ -165,8 +208,12 @@ impl Listener {
         Ok(Listener { fd })
     }
 
+    pub(crate) fn raw(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+
     /// The next device that connected, with its address (display form).
-    fn accept(&self) -> Option<(String, L2Sock)> {
+    pub(crate) fn accept(&self) -> Option<(String, L2Sock)> {
         let mut sa = [0u8; 14];
         let mut len = sa.len() as u32;
         // SAFETY: sa and len are valid for the kernel to fill
@@ -276,6 +323,10 @@ struct Inner {
     answer: Option<Sender<bool>>,
     started: Option<Instant>,
     running: bool,
+    /// Names devices gave when they connected (by address), for pairing prompts and the entry kept when a phone pairs with us.
+    names: HashMap<String, String>,
+    /// Until when this computer accepts pairing that a phone starts (Settings -> Bluetooth "Let a phone pair", `bluetooth_audio_pairing`).
+    pairing_until: Option<Instant>,
 }
 
 pub struct Hub {
@@ -293,7 +344,7 @@ pub fn hub() -> Arc<Hub> {
 impl Hub {
     pub fn new(path: PathBuf) -> Arc<Hub> {
         let store = std::fs::read_to_string(&path).map(|t| Store::parse(&t)).unwrap_or_default();
-        Arc::new(Hub { path, inner: Mutex::new(Inner { store, live: HashMap::new(), states: HashMap::new(), pair: PairState::Idle, answer: None, started: None, running: false }) })
+        Arc::new(Hub { path, inner: Mutex::new(Inner { store, live: HashMap::new(), states: HashMap::new(), pair: PairState::Idle, answer: None, started: None, running: false, names: HashMap::new(), pairing_until: None }) })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -333,6 +384,9 @@ impl Hub {
             // keys first: bonded devices reconnect without pairing again; connectable so they can reach us
             let _ = load_keys(&mut m, *i, &store);
             let _ = m.set_connectable(*i, true);
+            for k in store.devices.iter() {
+                self.auto_connect_le(&mut m, *i, k);
+            }
         }
         self.lock().running = true;
         let (l1, l2) = (Listener::open(PSM_HID_CONTROL), Listener::open(PSM_HID_INTERRUPT));
@@ -360,7 +414,16 @@ impl Hub {
                 }
             };
             match ev.code {
+                EV_USER_CONFIRM_REQUEST_EV => {
+                    let h = self.clone();
+                    let (index, params) = (ev.index, ev.params.clone());
+                    std::thread::spawn(move || h.incoming_confirm(index, &params));
+                }
                 EV_NEW_LINK_KEY | EV_NEW_LTK => {
+                    if ev.code == EV_NEW_LINK_KEY && ev.params.len() >= 8 {
+                        let a = btmgmt::addr_string(&ev.params[1..7]);
+                        self.remember_peer(&a, ev.params[7]);
+                    }
                     let mut g = self.lock();
                     let changed = if ev.code == EV_NEW_LINK_KEY { g.store.note_link_key(&ev.params) } else { g.store.note_ltk(&ev.params) };
                     if changed {
@@ -371,12 +434,23 @@ impl Hub {
                 }
                 btmgmt::EV_DEVICE_CONNECTED if ev.params.len() >= 7 => {
                     let a = btmgmt::addr_string(&ev.params[..6]);
+                    if ev.params.len() >= 13 {
+                        let n = u16::from_le_bytes([ev.params[11], ev.params[12]]) as usize;
+                        if let Some(eir) = ev.params.get(13..13 + n) {
+                            let name = btmgmt::parse_eir(eir).0;
+                            if !name.is_empty() {
+                                self.lock().names.insert(a.to_ascii_uppercase(), name);
+                            }
+                        }
+                    }
                     let known = self.lock().store.device(&a).is_some();
                     if known {
                         let h = self.clone();
+                        let le = ev.params.get(6).is_some_and(|t| *t != ADDR_BREDR);
                         std::thread::spawn(move || {
-                            // the device usually opens the channels itself; if it has not after a moment, we do
-                            std::thread::sleep(Duration::from_secs(3));
+                            // a classic device usually opens the channels itself; if it has not after a moment, we do.
+                            // A low-energy device only has the attribute channel, which we always open: no wait.
+                            std::thread::sleep(Duration::from_secs(if le { 0 } else { 3 }));
                             h.start_session(&a, None, false);
                         });
                     }
@@ -471,6 +545,9 @@ impl Hub {
     fn once(&self, address: &str, socks: Option<(L2Sock, L2Sock)>, stop: &AtomicBool) -> Result<End, HidError> {
         let known = self.lock().store.device(address).cloned().ok_or(HidError::Closed)?;
         let addr = btmgmt::parse_addr(address).ok_or_else(|| HidError::Sdp("bad address".into()))?;
+        if known.addr_type != ADDR_BREDR {
+            return self.once_le(address, &known, addr, stop);
+        }
         let (mut control, mut interrupt) = match socks {
             Some(p) => p,
             None => {
@@ -505,6 +582,43 @@ impl Hub {
         let end = run_session(&mut sess, &mut interrupt, &mut mux, stop);
         sess.close();
         Ok(end)
+    }
+
+    /// One low-energy connection (HID over GATT): the attribute channel, discovery, notifications on, then the same kernel input device.
+    fn once_le(&self, address: &str, known: &Known, addr: [u8; 6], stop: &AtomicBool) -> Result<End, HidError> {
+        let sock = L2Sock::connect_le(addr, known.addr_type, CONNECT_SECS)?;
+        let fd = sock.raw();
+        let mut g = crate::att::Gatt::new(sock);
+        let _ = g.exchange_mtu();
+        let dev = crate::att::discover_hid(&mut g)?;
+        if known.vendor == 0 && dev.vendor != 0 {
+            let mut gd = self.lock();
+            let mut k = known.clone();
+            k.vendor = dev.vendor;
+            k.product = dev.product;
+            gd.store.upsert(k);
+            let s = gd.store.clone();
+            drop(gd);
+            self.save(&s);
+        }
+        let name = if known.name.is_empty() { address.to_string() } else { known.name.clone() };
+        let uf = UhidFile::open()?;
+        let uhid_fd = uf.fd.as_raw_fd();
+        let mut sess = crate::att::HogpSession::open(uf, &mut g, dev, &name, address)?;
+        self.set_state(address, LinkState::Connected);
+        // no control channel on low energy: -1 is ignored by poll
+        let mut mux = Mux { control: -1, interrupt: fd, uhid: uhid_fd };
+        let end = crate::att::run_hogp(&mut sess, &mut g, &mut mux, stop);
+        sess.close();
+        Ok(end)
+    }
+
+    /// Asks the controller to connect to a bonded low-energy device whenever it advertises (the kernel keeps doing it; the device
+    /// switching on then shows up as a connection event and the hub starts its session).
+    fn auto_connect_le(&self, m: &mut Mgmt<ControlSocket>, index: u16, k: &Known) {
+        if k.addr_type != ADDR_BREDR && k.auto {
+            let _ = m.add_device(index, &k.address, k.addr_type, btmgmt::ADD_DEVICE_AUTO_CONNECT);
+        }
     }
 
     fn first_controller(&self) -> Option<u16> {
@@ -557,8 +671,8 @@ impl Hub {
 
     /// Pairs with a classic keyboard, mouse or game pad in the background (the page shows [`PairState`]).
     pub fn pair_start(self: &Arc<Self>, f: &btmgmt::Found) -> Result<(), String> {
-        if f.addr_type != ADDR_BREDR {
-            return Err("this is a low-energy device. Low-energy keyboards and mice need HID over GATT, which is not written yet; classic (BR/EDR) devices work".into());
+        if f.addr_type != ADDR_BREDR && !is_hid_kind(f.kind) {
+            return Err("only low-energy keyboards, mice and game pads (HID over GATT) can be paired; this low-energy device looks like something else".into());
         }
         if !is_pairable_kind(f.kind) {
             return Err(format!("only keyboards, mice, game pads and phones (for their Bluetooth tethering) can be paired in this version (this looks like: {}); audio (A2DP) is not available yet", kind_label(f.kind)));
@@ -601,6 +715,10 @@ impl Hub {
         let sock = ControlSocket::open().map_err(|e| format!("cannot open the Bluetooth management channel: {e}"))?;
         let mut m = Mgmt::new(sock);
         m.prepare(index).map_err(|e| e.to_string())?;
+        if f.addr_type != ADDR_BREDR {
+            // low-energy pairing needs the controller's LE side on (best effort: most controllers have it on)
+            let _ = m.command(btmgmt::OP_SET_LE, index, &[1]);
+        }
         let set = |s: PairState| self.lock().pair = s;
         let nm = name.to_string();
         let phone = f.kind == btmgmt::Kind::Phone;
@@ -633,6 +751,9 @@ impl Hub {
         // nobody else may pair with this computer afterwards
         let _ = m.set_bondable(index, false);
         r.map_err(|e| format!("pairing failed: {e}"))?;
+        if f.addr_type != ADDR_BREDR && is_hid_kind(f.kind) {
+            let _ = m.add_device(index, &f.address, f.addr_type, btmgmt::ADD_DEVICE_AUTO_CONNECT);
+        }
         let mut g = self.lock();
         g.store.upsert(Known { address: f.address.to_ascii_uppercase(), addr_type: f.addr_type, name: f.name.clone(), kind: kind_label(f.kind).into(), descriptor: String::new(), vendor: 0, product: 0, auto: is_hid_kind(f.kind) });
         let s = g.store.clone();
@@ -643,6 +764,102 @@ impl Hub {
 }
 
 impl Hub {
+    /// A device the person paired, by address.
+    pub fn known(&self, address: &str) -> Option<Known> {
+        self.lock().store.device(address).cloned()
+    }
+
+    /// The name a device gave when it connected (empty when not seen).
+    pub fn seen_name(&self, address: &str) -> String {
+        self.lock().names.get(&address.to_ascii_uppercase()).cloned().unwrap_or_default()
+    }
+
+    /// A device that paired with us (a phone choosing this computer in its own Bluetooth list) gets an entry, so it is listed, can be
+    /// forgotten and is trusted by the audio sink. Kept as a "phone" (it is not used as an input device).
+    fn remember_peer(&self, address: &str, addr_type: u8) {
+        let mut g = self.lock();
+        if g.store.device(address).is_some() {
+            return;
+        }
+        let name = g.names.get(&address.to_ascii_uppercase()).cloned().unwrap_or_default();
+        g.store.upsert(Known { address: address.to_ascii_uppercase(), addr_type, name, kind: "phone".into(), descriptor: String::new(), vendor: 0, product: 0, auto: false });
+        let s = g.store.clone();
+        drop(g);
+        self.save(&s);
+    }
+
+    /// Whether pairing that a phone starts is accepted now.
+    pub fn pairing_open(&self) -> bool {
+        self.lock().pairing_until.is_some_and(|t| Instant::now() < t)
+    }
+
+    /// Lets a phone find and pair with this computer for `secs` seconds (discoverable, pairable, listed as a loudspeaker so phones offer
+    /// it for audio), or ends that. The person answers the number comparison on the page ([`PairState::Confirm`]).
+    pub fn set_pairing_open(self: &Arc<Self>, on: bool, secs: u16) -> Result<(), String> {
+        self.ensure_started();
+        let index = self.first_controller().ok_or("there is no Bluetooth controller that is set up")?;
+        let sock = ControlSocket::open().map_err(|e| format!("cannot open the Bluetooth management channel: {e}"))?;
+        let mut m = Mgmt::new(sock);
+        if on {
+            m.prepare(index).map_err(|e| e.to_string())?;
+            m.set_connectable(index, true).map_err(|e| e.to_string())?;
+            // audio / video, loudspeaker; services: rendering and audio (what phones look for when they list speakers)
+            let _ = m.set_device_class(index, 4, 0x14);
+            let _ = m.add_uuid16(index, 0x110b, 0x24);
+            m.set_discoverable(index, true, secs).map_err(|e| e.to_string())?;
+            self.lock().pairing_until = Some(Instant::now() + Duration::from_secs(secs as u64));
+            let h = self.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(secs as u64 + 2));
+                if !h.pairing_open() {
+                    if let (Some(i), Ok(sock)) = (h.first_controller(), ControlSocket::open()) {
+                        // nobody else may pair with this computer afterwards
+                        let _ = Mgmt::new(sock).set_bondable(i, false);
+                    }
+                }
+            });
+        } else {
+            self.lock().pairing_until = None;
+            let _ = m.set_discoverable(index, false, 0);
+            let _ = m.set_bondable(index, false);
+        }
+        Ok(())
+    }
+
+    /// A phone is pairing with us: ask the person (always, with the number when the phone shows one), then answer the kernel. Refused
+    /// when pairing is not open, or when a pairing that the person started is running (that one answers for itself).
+    fn incoming_confirm(&self, index: u16, p: &[u8]) {
+        if p.len() < 12 {
+            return;
+        }
+        let (addr, atype, hint, value) = (btmgmt::addr_string(&p[..6]), p[6], p[7] != 0, u32::from_le_bytes([p[8], p[9], p[10], p[11]]));
+        let (tx, rx) = channel::<bool>();
+        let open = {
+            let mut g = self.lock();
+            if g.answer.is_some() {
+                return;
+            }
+            let open = g.pairing_until.is_some_and(|t| Instant::now() < t);
+            if open {
+                let name = g.names.get(&addr.to_ascii_uppercase()).cloned().filter(|n| !n.is_empty()).unwrap_or_else(|| addr.clone());
+                g.pair = if hint { PairState::ConfirmNoNumber(name) } else { PairState::Confirm(name, value) };
+                g.answer = Some(tx);
+            }
+            open
+        };
+        let yes = open && matches!(rx.recv_timeout(Duration::from_secs(60)), Ok(true));
+        let Ok(sock) = ControlSocket::open() else { return };
+        let mut m = Mgmt::new(sock);
+        let mut a = p[..6].to_vec();
+        a.push(atype);
+        let _ = m.command(if yes { btmgmt::OP_USER_CONFIRM_REPLY } else { btmgmt::OP_USER_CONFIRM_NEG_REPLY }, index, &a);
+        if open {
+            let mut g = self.lock();
+            g.answer = None;
+            g.pair = PairState::Done(if yes { Ok("The phone is paired. It can play audio through this computer.".to_string()) } else { Err("pairing was not confirmed".to_string()) });
+        }
+    }
+
     fn list_inner(&self) -> Vec<DeviceView> {
         let g = self.lock();
         g.store

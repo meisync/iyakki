@@ -388,17 +388,25 @@ struct Screen {
     /// The shape drawn at `pointer_at` (what to erase when it moves or changes).
     shape: Shape,
     k: usize,
+    /// The large pointer option already applied to `k` (whole pixels more per sprite pixel).
+    boost: usize,
 }
 
 impl Screen {
     /// Erase the pointer from the screen (the rectangle of the shape drawn before), then draw `shape` at `to`.
     /// Does nothing when neither the position nor the shape changed.
     fn move_pointer(&mut self, to: Option<(i32, i32)>, shape: Shape) -> Result<(), String> {
-        if self.scene.is_empty() || (to == self.pointer_at && shape == self.shape) {
+        if self.scene.is_empty() || (to == self.pointer_at && shape == self.shape && crate::access::pointer_boost() == self.boost) {
             return Ok(());
         }
         let (wu, hu) = (self.fb.width as usize, self.fb.height as usize);
         self.take_pointer_off()?;
+        // the large pointer option (Settings, Accessibility): the old size was erased above, the new one is drawn below
+        let boost = crate::access::pointer_boost();
+        if boost != self.boost {
+            self.k = (self.k + boost).saturating_sub(self.boost).max(1);
+            self.boost = boost;
+        }
         if let Some((x, y)) = to {
             if let Some((r, patch)) = cursor_patch(&self.scene, wu, hu, shape, x, y, self.k) {
                 self.fb.present_patch(&patch, r)?;
@@ -553,7 +561,7 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
     let mut devs: Vec<Device> = Vec::new();
     let t_scan = t_start.elapsed();
     log::info!("shell: {}x{} framebuffer, {} input device(s) so far (scanned in the background), {} CPU thread(s); display set up in {} ms (open {} ms, console mode {} ms, drawing surface {} ms, input scan {} ms)", w, h, devs.len(), std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1), t_scan.as_millis(), t_open.as_millis(), (t_mode - t_open).as_millis(), (t_gfx - t_mode).as_millis(), (t_scan - t_gfx).as_millis());
-    let screen = Mutex::new(Screen { fb, scene: Vec::new(), pointer_at: None, shape: Shape::Default, k: cursor_scale(w, h) });
+    let screen = Mutex::new(Screen { fb, scene: Vec::new(), pointer_at: None, shape: Shape::Default, k: cursor_scale(w, h), boost: 0 });
     // the machine's own screen: the saver may switch the backlight and the framebuffer's blank state; a screen a crashed shell left
     // dark is switched back on here
     shell.enable_panel_control();
@@ -1070,7 +1078,7 @@ mod tests {
         let mut fb = Framebuffer::in_memory(mem, w, h);
         let scene = vec![50u8; (w * h * 4) as usize];
         fb.present_rect(&scene, (0, 0, w as usize, h as usize)).unwrap();
-        Screen { fb, scene, pointer_at: None, shape: Shape::Default, k }
+        Screen { fb, scene, pointer_at: None, shape: Shape::Default, k, boost: 0 }
     }
 
     #[test]

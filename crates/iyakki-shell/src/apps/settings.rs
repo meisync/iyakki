@@ -22,6 +22,7 @@ use iyakki_agent::story as st;
 use iyakki_agent::voice::{self, Player, Recorder, SpeechEngine};
 
 use super::controls::{self, Slider};
+use super::bluetooth_page::BtPage;
 use super::devices::{DevRow, DevTab, DevicesPane, DeviceEnv, Target};
 use super::settings_nav as nav;
 use super::widgets::{render_confirm, Form, FormEvent, PickEvent, Picker};
@@ -99,6 +100,8 @@ pub enum Tab {
     Notifications,
     /// Settings -> Backup and restore: one file with the person's own data (docs/BACKUP.md).
     Backup,
+    /// Settings -> Accessibility: screen reader, high contrast, text size, large pointer, focus ring, reduced motion, sticky and slow keys (docs/ACCESSIBILITY.md).
+    Accessibility,
 }
 
 impl Tab {
@@ -109,7 +112,7 @@ impl Tab {
             Tab::Account | Tab::Vault | Tab::SecretProviders | Tab::Notifications | Tab::Backup => CATEGORIES[1],
             Tab::Models | Tab::Agents | Tab::Skills | Tab::Rag | Tab::Voice | Tab::Browser | Tab::HostAccess => CATEGORIES[2],
             Tab::Network | Tab::SshTunnels | Tab::Vpn | Tab::Remote | Tab::Domains | Tab::Firewall | Tab::Shares => CATEGORIES[3],
-            Tab::Display | Tab::Displays | Tab::ScreenSaver | Tab::HomeLayout | Tab::Sound | Tab::SystemSounds => CATEGORIES[4],
+            Tab::Display | Tab::Displays | Tab::ScreenSaver | Tab::HomeLayout | Tab::Sound | Tab::SystemSounds | Tab::Accessibility => CATEGORIES[4],
             Tab::Bluetooth | Tab::Keyboard => CATEGORIES[5],
             Tab::Time | Tab::Battery | Tab::Power | Tab::Computer | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Memory | Tab::Storage | Tab::Install | Tab::Updates | Tab::Cloud | Tab::CloudRoles => CATEGORIES[6],
             Tab::Developer | Tab::DevCluster | Tab::GitKeys => CATEGORIES[7],
@@ -117,12 +120,12 @@ impl Tab {
     }
 
     /// Where the page sits in the left list: category first, then this order.
-    pub(crate) const ORDER: [Tab; 44] = [
+    pub(crate) const ORDER: [Tab; 45] = [
         Tab::Overview,
         Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::SecretProviders,
         Tab::Models, Tab::Agents, Tab::Skills, Tab::Rag, Tab::Voice, Tab::Browser, Tab::HostAccess,
         Tab::Network, Tab::SshTunnels, Tab::Vpn, Tab::Remote, Tab::Domains, Tab::Firewall, Tab::Shares,
-        Tab::Display, Tab::Displays, Tab::ScreenSaver, Tab::HomeLayout, Tab::Sound, Tab::SystemSounds,
+        Tab::Display, Tab::Displays, Tab::ScreenSaver, Tab::HomeLayout, Tab::Sound, Tab::SystemSounds, Tab::Accessibility,
         Tab::Bluetooth, Tab::Keyboard,
         Tab::Time, Tab::Battery, Tab::Power, Tab::Computer, Tab::HostName, Tab::SessionLog, Tab::Startup, Tab::Memory, Tab::Storage, Tab::Install, Tab::Updates, Tab::Cloud, Tab::CloudRoles,
         Tab::Developer, Tab::DevCluster, Tab::GitKeys,
@@ -137,7 +140,7 @@ impl Tab {
             Tab::Keyboard => Some("keyboard"),
             Tab::Computer => Some("display"),
             Tab::Bluetooth => Some("bluetooth"),
-            Tab::Overview | Tab::Models | Tab::Agents | Tab::Rag | Tab::Vault | Tab::Skills | Tab::Network | Tab::Browser | Tab::DevCluster | Tab::Storage | Tab::Memory | Tab::Firewall | Tab::SshTunnels | Tab::Domains | Tab::Vpn | Tab::Remote | Tab::Time | Tab::Battery | Tab::Power | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Install | Tab::Updates | Tab::Voice | Tab::SecretProviders | Tab::HostAccess | Tab::Developer | Tab::GitKeys | Tab::Shares | Tab::Account | Tab::HomeLayout | Tab::Cloud | Tab::CloudRoles | Tab::Notifications | Tab::Backup => None,
+            Tab::Overview | Tab::Models | Tab::Agents | Tab::Rag | Tab::Vault | Tab::Skills | Tab::Network | Tab::Browser | Tab::DevCluster | Tab::Storage | Tab::Memory | Tab::Firewall | Tab::SshTunnels | Tab::Domains | Tab::Vpn | Tab::Remote | Tab::Time | Tab::Battery | Tab::Power | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Install | Tab::Updates | Tab::Voice | Tab::SecretProviders | Tab::HostAccess | Tab::Developer | Tab::GitKeys | Tab::Shares | Tab::Account | Tab::HomeLayout | Tab::Cloud | Tab::CloudRoles | Tab::Notifications | Tab::Backup | Tab::Accessibility => None,
         }
     }
 
@@ -167,10 +170,11 @@ impl Tab {
             Tab::Firewall => "firewall block incoming connections allow dns hostname ip range cidr port ssh ping nftables nft netfilter lockout revert keep blocked security network",
             Tab::SshTunnels => "ssh tunnel tunnels bastion jump host port forward socks proxy intranet internal web page behind vpn local forward remote site corp enable disable key fingerprint",
             Tab::Vpn => "vpn wireguard openvpn tunnel private network profile import conf ovpn kill switch full hybrid filter domain url split tunnel fail closed provider server endpoint",
-            Tab::Domains => "domain domains name names dns hostname host local mdns store.local route routes reverse proxy listener port nodeport service k3s certificate https websocket firewall wildcard",
+            Tab::Domains => "domain domains name names dns hostname host local mdns store.local route routes reverse proxy listener port nodeport service k3s certificate https websocket wildcard",
             Tab::Remote => "remote access web service serve browser https port fingerprint certificate address tablet phone another computer pixel stream share desktop sign in vnc rdp",
             Tab::Time => "clock time date timezone time zone utc 12 24 hour am pm seconds ntp sntp network time server sync 1970 battery wrong",
             Tab::Computer => "this computer computers hardware profile several multiple switch disk usb stick ssd move another mac laptop legion hp sound output display keyboard microphone gpu per computer shared copy reset forget",
+            Tab::Accessibility => "accessibility screen reader speak voice blind low vision high contrast text size bigger large pointer cursor focus ring motion animation sticky keys slow keys tremor mouse keyboard only",
             Tab::Power => "power profile performance balanced power saver battery life cpu governor frequency turbo fan sleep suspend idle lid power button energy",
             Tab::Battery => "battery charge charging percent percentage power adapter plug laptop low shutdown critical health cycles time left remaining",
             Tab::HostName => "host name hostname computer name rename network name dns mdns",
@@ -221,6 +225,7 @@ impl Tab {
             Tab::Vpn => "Import a WireGuard or OpenVPN profile you already have, and choose whether all traffic or only what your filters match goes through it.",
             Tab::Time => "The clock in the top bar: time zone, 12 or 24 hours, and setting the time from the network.",
             Tab::Computer => "Which computer this is, and which settings are kept for each computer the install starts on.",
+            Tab::Accessibility => "Make the computer easier to use without seeing the screen well or without a mouse: a screen reader, high contrast, bigger text and pointer, sticky and slow keys.",
             Tab::Power => "How fast the processor runs (performance, balanced, power saver) and whether the computer sleeps by itself when it is not used.",
             Tab::Battery => "How full the battery is, what it is doing, how worn it is, and the low-battery warnings.",
             Tab::HostName => "The name of this computer on the network.",
@@ -271,6 +276,7 @@ impl Tab {
             Tab::Time => "Time",
             Tab::Battery => "Battery",
             Tab::Power => "Power",
+            Tab::Accessibility => "Accessibility",
             Tab::Computer => "This computer",
             Tab::HostName => "Host name",
             Tab::SessionLog => "Last session log",
@@ -395,6 +401,8 @@ mod matrix_page;
 mod shares_page;
 #[path = "settings_backup.rs"]
 mod backup_page;
+#[path = "settings_access.rs"]
+pub(crate) mod access_page;
 #[path = "settings_modelhost.rs"]
 mod modelhost_page;
 pub use install_page::InstallEnv;
@@ -665,8 +673,10 @@ pub struct SettingsApp {
     sel: [usize; 48],
     /// Which rows of a long list are on the page, per page (a click leaves them, a key scrolls to the choice, the wheel scrolls).
     win: [ListWindow; 48],
-    /// Network, Bluetooth, Display and Sound pages.
+    /// Network, Display and Sound pages.
     hw: DevicesPane,
+    /// The Bluetooth page (its own view model; a popup for pairing).
+    bt: BtPage,
     /// Ticks since the app opened (the hardware pages refresh on a timer).
     ticks: u64,
     /// The full text of a row of a list whose line was cut to the width (Devices, paired computers, git hosts).
@@ -813,6 +823,7 @@ impl SettingsApp {
         tabs.push(Tab::Notifications);
         tabs.push(Tab::ScreenSaver);
         tabs.push(Tab::Power);
+        tabs.push(Tab::Accessibility);
         tabs.push(Tab::Computer);
         tabs.push(Tab::Time);
         tabs.push(Tab::Browser);
@@ -823,7 +834,7 @@ impl SettingsApp {
         tabs.push(Tab::Account);
         tabs.push(Tab::Backup);
         tabs.sort_by_key(|t| Tab::ORDER.iter().position(|o| o == t).unwrap_or(usize::MAX));
-        let mut app = SettingsApp { tabs, tab: 0, sel: [0; 48], win: [ListWindow::default(); 48], hw: DevicesPane::new(DeviceEnv::real()), ticks: 0, tip: Default::default(), test_record_ms: 2000, vo_lang: 0, vo_scroll: 0.0, vo_max: 0.0, lem_scroll: 0.0, lem_max: 0.0, lem_view_h: 0.0, lem_rect: R::new(0.0, 0.0, 0.0, 0.0), lem_s: 1.0, lem_focus: false, lem_query: TextField::new("Search models", false), lem_search: false, lem_texts: Vec::new(), section: if admin { 0 } else { 1 }, share_skills: cx.session.policy.manage_skills, nav_query: TextField::new("Search settings", false), nav_focus: false, nav_scroll: 0.0, narrow: false, show_list: false, nav_seen: usize::MAX, mouse: (0, 0), nav_rect: R::new(0.0, 0.0, 0.0, 0.0), nav_s: 1.0, slider_w: Vec::new(), storage: StorageEnv::real(), wifi: WifiEnv::real(), wifi_items: Vec::new(), devices: vec![], modal: None, job: None, host: Default::default(), crash: Default::default(), backup: Default::default(), upd: Default::default(), status: None, dc: Default::default(), mem: Default::default(), disp: Default::default(), fw: Default::default(), tun: Default::default(), dom: Default::default(), vpn: Default::default(), remote: Default::default(), share: Default::default(), bh: Default::default(), time: Default::default(), hn: Default::default(), inst: Default::default(), devel: Default::default(), git: Default::default(), matrix: Default::default(), shares: Default::default(), mh: Default::default(), kbd: Default::default(), bat: Default::default(), pw: Default::default(), cloud: iyakki_agent::cloudmode::CloudMode::desktop(), roles: Default::default() };
+        let mut app = SettingsApp { tabs, tab: 0, sel: [0; 48], win: [ListWindow::default(); 48], hw: DevicesPane::new(DeviceEnv::real()), bt: BtPage::new(DeviceEnv::real()), ticks: 0, tip: Default::default(), test_record_ms: 2000, vo_lang: 0, vo_scroll: 0.0, vo_max: 0.0, lem_scroll: 0.0, lem_max: 0.0, lem_view_h: 0.0, lem_rect: R::new(0.0, 0.0, 0.0, 0.0), lem_s: 1.0, lem_focus: false, lem_query: TextField::new("Search models", false), lem_search: false, lem_texts: Vec::new(), section: if admin { 0 } else { 1 }, share_skills: cx.session.policy.manage_skills, nav_query: TextField::new("Search settings", false), nav_focus: false, nav_scroll: 0.0, narrow: false, show_list: false, nav_seen: usize::MAX, mouse: (0, 0), nav_rect: R::new(0.0, 0.0, 0.0, 0.0), nav_s: 1.0, slider_w: Vec::new(), storage: StorageEnv::real(), wifi: WifiEnv::real(), wifi_items: Vec::new(), devices: vec![], modal: None, job: None, host: Default::default(), crash: Default::default(), backup: Default::default(), upd: Default::default(), status: None, dc: Default::default(), mem: Default::default(), disp: Default::default(), fw: Default::default(), tun: Default::default(), dom: Default::default(), vpn: Default::default(), remote: Default::default(), share: Default::default(), bh: Default::default(), time: Default::default(), hn: Default::default(), inst: Default::default(), devel: Default::default(), git: Default::default(), matrix: Default::default(), shares: Default::default(), mh: Default::default(), kbd: Default::default(), bat: Default::default(), pw: Default::default(), cloud: iyakki_agent::cloudmode::CloudMode::desktop(), roles: Default::default() };
         app.bat_sync_tab();
         app.refresh_devices();
         app
@@ -845,6 +856,7 @@ impl SettingsApp {
 
     /// Replace the machine the hardware pages look at (tests).
     pub fn with_hardware(mut self, env: DeviceEnv) -> SettingsApp {
+        self.bt = BtPage::new(env.clone());
         self.hw = DevicesPane::new(env);
         self
     }
@@ -965,17 +977,21 @@ impl SettingsApp {
         self.status.as_ref()
     }
     pub fn has_modal(&self) -> bool {
-        self.modal.is_some() || self.mh.open || self.git_wizard_open() || self.roles_open()
+        self.modal.is_some() || self.bt.has_dialog() || self.mh.open || self.git_wizard_open() || self.roles_open()
     }
     pub fn is_busy(&self) -> bool {
         self.job.is_some()
     }
 
     fn ok(&mut self, m: impl Into<String>) {
-        self.status = Some((m.into(), true));
+        let m = m.into();
+        crate::access::announce(&m); // a screen reader says what the page says (nothing happens with the reader off)
+        self.status = Some((m, true));
     }
     fn fail(&mut self, m: impl Into<String>) {
-        self.status = Some((m.into(), false));
+        let m = m.into();
+        crate::access::announce(&format!("Error. {m}"));
+        self.status = Some((m, false));
     }
 
     fn admin(&mut self, cx: &AppCx) -> bool {
@@ -997,7 +1013,7 @@ impl SettingsApp {
 
     /// The pages whose rows are windowed by a [`ListWindow`].
     fn scrolls_window(&self) -> bool {
-        matches!(self.tab(), Tab::Network | Tab::SshTunnels | Tab::Domains | Tab::Vpn | Tab::Bluetooth | Tab::Display | Tab::Sound | Tab::SystemSounds | Tab::ScreenSaver)
+        matches!(self.tab(), Tab::Network | Tab::SshTunnels | Tab::Domains | Tab::Vpn | Tab::Display | Tab::Sound | Tab::SystemSounds | Tab::ScreenSaver)
     }
 
     /// The row a pointer event chose (a click on a row, on a button or switch of one, or on a slider's track), if this page windows its rows.
@@ -2376,7 +2392,8 @@ impl SettingsApp {
             Tab::SecretProviders => Self::secret_providers(cx).len(),
             Tab::Skills => Self::svc(cx).skills.list(&cx.session.user).len(),
             Tab::Storage => self.devices.len(),
-            Tab::Network | Tab::Bluetooth | Tab::Display | Tab::Sound => self.dev_rows().len(),
+            Tab::Network | Tab::Display | Tab::Sound => self.dev_rows().len(),
+            Tab::Bluetooth => 1,
             Tab::HostAccess => Self::host_rows(cx).len(),
             Tab::Developer => Self::devmode_keys(cx).len(),
             Tab::GitKeys => Self::git_len(cx),
@@ -2395,7 +2412,7 @@ impl SettingsApp {
             Tab::Displays => self.disp_len(),
             Tab::ScreenSaver => Self::ss_len(cx),
             Tab::Browser if self.bh.open => self.bh_len(cx),
-            Tab::Voice | Tab::Remote | Tab::Account | Tab::Browser | Tab::Memory | Tab::Time | Tab::Battery | Tab::Power | Tab::Computer | Tab::HostName | Tab::SessionLog | Tab::Cloud => 0,
+            Tab::Voice | Tab::Remote | Tab::Account | Tab::Browser | Tab::Memory | Tab::Time | Tab::Battery | Tab::Power | Tab::Accessibility | Tab::Computer | Tab::HostName | Tab::SessionLog | Tab::Cloud => 0,
             Tab::Startup => iyakki_agent::startup::CATALOGUE.len(),
             Tab::CloudRoles => self.roles_len(cx),
         }
@@ -2593,7 +2610,6 @@ impl SettingsApp {
     fn dev_tab(&self) -> Option<DevTab> {
         match self.tab() {
             Tab::Network => Some(DevTab::Network),
-            Tab::Bluetooth => Some(DevTab::Bluetooth),
             Tab::Display => Some(DevTab::Display),
             Tab::Sound => Some(DevTab::Sound),
             _ => None,
@@ -2762,6 +2778,22 @@ impl SettingsApp {
         self.ok(format!("Theme: {}.", ALL[next].name()));
     }
 
+    /// A heartbeat on the Bluetooth page: the model reads the machine and the outcomes go to the system log.
+    fn bt_tick(&mut self, cx: &AppCx) {
+        let ticks = self.ticks;
+        let lines = self.bt.tick(ticks);
+        for l in lines {
+            cx.audit.record(&cx.session.user, "settings.bluetooth", &l);
+        }
+    }
+
+    /// The lines an action of the Bluetooth page wrote (requests and outcomes) go to the system log.
+    fn bt_drain(&mut self, cx: &AppCx) {
+        for l in self.bt.model.take_log() {
+            cx.audit.record(&cx.session.user, "settings.bluetooth", &l);
+        }
+    }
+
     fn handle_hw(&mut self, k: &Key, cx: &AppCx) {
         let Some(tab) = self.dev_tab() else { return };
         if tab == DevTab::Network {
@@ -2782,7 +2814,6 @@ impl SettingsApp {
             Key::Char('a') if tab == DevTab::Network => self.ask_mac_apply(cx),
             Key::Char('n') if tab == DevTab::Network => self.toggle_announce(cx),
             Key::Enter | Key::Char(' ') if tab == DevTab::Network && matches!(self.selected_target(), Some(Target::Mac(..))) => self.choose_mac_mode(cx),
-            Key::Char(c @ ('p' | 's' | 'l' | 'f' | 'e' | 't')) if tab == DevTab::Bluetooth => self.bt_shortcut(*c, cx),
             Key::Char('u') if tab == DevTab::Display => self.change_ui_size(true, cx),
             Key::Char('U') if tab == DevTab::Display => self.change_ui_size(false, cx),
             Key::Char(c @ ('t' | 'T' | '1' | '2' | '3')) if tab == DevTab::Display => self.change_theme(*c, cx),
@@ -2817,41 +2848,6 @@ impl SettingsApp {
         }
     }
 
-    /// Settings -> Bluetooth: the buttons find their own row whatever is selected: `e` the radio switch, `p` powers the controller, `s`
-    /// scans, `t` the phone's tethering (the selected phone, else the first paired one), `l` loads the held driver: select that row and
-    /// press Enter on it.
-    fn bt_shortcut(&mut self, c: char, cx: &AppCx) {
-        let rows = self.dev_rows();
-        let phone = if c == 't' {
-            let sel = self.selected_target();
-            self.hw.bt_tether_target(sel.as_ref())
-        } else {
-            None
-        };
-        let want = |t: &Target| match c {
-            'p' => matches!(t, Target::BtPower(..)),
-            's' => matches!(t, Target::BtScan(_)),
-            'f' => matches!(t, Target::BtFirmware),
-            'e' => matches!(t, Target::Radio(_)),
-            't' => matches!(t, Target::BtTether(a) if phone.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(a))),
-            _ => matches!(t, Target::BtLoad),
-        };
-        match rows.iter().position(|r| want(&r.target)) {
-            Some(i) => {
-                self.sel[self.tab] = i;
-                self.handle_hw(&Key::Enter, cx);
-            }
-            None => self.fail(match c {
-                'p' => "There is no Bluetooth controller to power on (or it is not set up).",
-                's' => "There is no Bluetooth controller to scan with (or it is not set up).",
-                'f' => "Bluetooth does not need firmware on this machine.",
-                'e' => "There is no Bluetooth on/off switch to press here (the controller may need firmware first, or a key on the machine switches it).",
-                't' => "No phone is paired yet. Scan, then press Enter on your phone in the list to pair it (Bluetooth must be on in the phone); then Tether connects its internet.",
-                _ => "No Bluetooth driver is set aside on this machine: nothing to load.",
-            }),
-        }
-    }
-
     fn render_hw(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
         if self.tab() == Tab::Network && self.share.open {
             return self.render_share(g, a, s, cx);
@@ -2859,7 +2855,6 @@ impl SettingsApp {
         let announce = if self.tab() == Tab::Network { self.announce_line(cx) } else { String::new() };
         let note = match self.tab() {
             Tab::Network => announce.as_str(),
-            Tab::Bluetooth => "No audio yet. e radio · p power · s scan · t phone internet · Enter pairs or connects · u forgets · l driver.",
             Tab::Display => "The desktop uses the screen's best mode. Resolution, arrangement and mirroring of several displays are in Settings, Displays.",
             _ => "o chooses the output (Automatic follows what is connected) · t plays a test chime · the IYAKKI volume is the one master volume: the volume keys, the Devices popover and the radio follow it · A advanced · M mixes sounds from several apps (experimental).",
         };
@@ -2875,14 +2870,7 @@ impl SettingsApp {
             y += self.render_ui_size_card(g, R::new(a.x, y, a.w, 74.0 * s), s, cx, compact) + 10.0 * s;
             y += self.render_theme_card(g, R::new(a.x, y, a.w, 74.0 * s), s, compact) + 10.0 * s;
         }
-        // Settings -> Bluetooth: the reasons and the "not available yet" sentence, wrapped, under the rows
-        let notes: Vec<String> = if self.tab() == Tab::Bluetooth {
-            let ticks = self.ticks;
-            let text = self.hw.bt_notes(ticks).join(" ");
-            g.wrap(13.0 * s, &text, Face::Sans, a.w).into_iter().take(((a.h * 0.4) / (17.0 * s)).max(2.0) as usize).collect()
-        } else {
-            Vec::new()
-        };
+        let notes: Vec<String> = Vec::new();
         let low = a.y + a.h - 70.0 * s - if notes.is_empty() { 0.0 } else { (notes.len() as f32 - 1.0) * 17.0 * s };
         // a small screen: the rows above are left out; a click leaves them where they are, a key scrolls to the choice
         let step = |r: &DevRow| if r.slider.is_some() { 90.0 * s } else { 64.0 * s };
@@ -3548,7 +3536,7 @@ impl App for SettingsApp {
             Tab::Vault => "n new · d delete · Tab system/personal · l lock · f key file · u unlock my vault",
             Tab::Skills => "c add from clipboard · a quick create · i import file · d delete",
             Tab::Network => "Enter turn on/off · w join a WiFi network · n announce this device's name · r look again",
-            Tab::Bluetooth => "Enter turn on/off · f firmware (Store, Setup) · p power the controller · s scan (10 s) · l load the driver anyway · r look again",
+            Tab::Bluetooth => "Up/Down choose · Enter does the main action (pair, connect) · e Bluetooth on/off · s scan or stop · / search · t phone tethering · u forget · a Advanced · r look again",
             Tab::Display => "u bigger text · U smaller text · + brighter · − dimmer · r look again",
             Tab::Sound => "o output · t test sound · + louder · − quieter · m mute · Enter use the selected output · A advanced · M mixer · r look again",
             Tab::Keyboard => "f function keys mode · i ISO layout · o swap Option/Command · d repeat delay · r repeat rate · s scroll speed · y wheel lines · w wheel direction · n trackpad direction · g smooth scrolling · m momentum · b test screen · k test keyboard light · t test sound · Up/Down scroll the key table",
@@ -3557,6 +3545,7 @@ impl App for SettingsApp {
             Tab::Cloud => "c change the mode: Automatic, On, Off",
             Tab::CloudRoles => "Up/Down choose · m add person · n new namespace · a add to namespace · j join · x remove person · d delete namespace",
             Tab::Computer => "s sound · d display · k keyboard and pointer · m microphone · g GPU · p power: per computer or shared · c copy settings from another computer · r reset this computer · f forget a computer (administrators)",
+            Tab::Accessibility => "r screen reader · t test the voice · n speak notices · c high contrast · u/U bigger/smaller text · p large pointer · f big focus ring · m reduce motion · k sticky keys · w slow keys",
             Tab::Power => "e performance · b balanced · v power saver · s sleep after idle (next time) · w sleep while busy (administrators)",
             Tab::Battery => "p percentage in the top bar · w low battery warnings · s shut down at the critical level (administrators)",
             Tab::Browser if self.bh.open => "a add · e edit · x or Enter enable/disable · d delete · b or Esc back · Up/Down choose",
@@ -3593,7 +3582,7 @@ impl App for SettingsApp {
     }
 
     fn take_request(&mut self) -> Option<(String, String)> {
-        self.hw.take_request()
+        self.hw.take_request().or_else(|| self.bt.take_request())
     }
 
     fn open_item(&mut self, item: &str, cx: &AppCx) {
@@ -3627,6 +3616,7 @@ impl App for SettingsApp {
                 "time" => Some(Tab::Time),
                 "battery" => Some(Tab::Battery),
                 "power" => Some(Tab::Power),
+                "accessibility" | "screenreader" | "access" => Some(Tab::Accessibility),
                 "computer" | "thiscomputer" | "computers" => Some(Tab::Computer),
                 "hostname" => Some(Tab::HostName),
                 "crashlog" | "sessionlog" => Some(Tab::SessionLog),
@@ -3746,6 +3736,9 @@ impl App for SettingsApp {
             self.vpn_tick(cx);
             self.matrix_tick();
             self.git_wizard_event(ev, cx);
+            if self.tab() == Tab::Bluetooth {
+                self.bt_tick(cx);
+            }
             return Flow::Stay;
         }
         // "Connect Git or Gitea" takes every key and click while it is open
@@ -3769,6 +3762,10 @@ impl App for SettingsApp {
         }
         if self.modal.is_some() {
             self.handle_modal(ev, cx);
+            return Flow::Stay;
+        }
+        if self.tab() == Tab::Bluetooth && cx.session.policy.manage_settings && !(self.nav_focus && matches!(ev, Event::Key(_) | Event::Paste(_))) && self.bt.handle(ev) {
+            self.bt_drain(cx);
             return Flow::Stay;
         }
         if self.mh_event(ev, cx) {
@@ -3888,7 +3885,8 @@ impl App for SettingsApp {
                 Tab::Backup => self.handle_backup(other, cx),
                 Tab::Skills => self.handle_skills(other, cx),
                 Tab::Storage => self.handle_storage(other, cx),
-                Tab::Network | Tab::Bluetooth | Tab::Display | Tab::Sound => self.handle_hw(other, cx),
+                Tab::Network | Tab::Display | Tab::Sound => self.handle_hw(other, cx),
+                Tab::Bluetooth => {}
                 Tab::Voice => self.handle_voice(other, cx),
                     Tab::SecretProviders => self.handle_secret_providers(other, cx),
                 Tab::Account => self.handle_account(other, cx),
@@ -3907,6 +3905,7 @@ impl App for SettingsApp {
                 Tab::CloudRoles => self.handle_cloudroles(other, cx),
                 Tab::Battery => self.handle_battery(other, cx),
                 Tab::Power => self.handle_power(other, cx),
+                Tab::Accessibility => self.handle_access(other, cx),
                 Tab::Computer => self.handle_computer(other, cx),
                 Tab::HostName => self.handle_host_name(other, cx),
                 Tab::SessionLog => self.handle_crash(other, cx),
@@ -3978,6 +3977,12 @@ impl App for SettingsApp {
             g.rrect_outline(nav_r.x, nav_r.y, nav_r.w, nav_r.h, 16.0 * s, 2.0 * s, ACCENT);
         }
         let admin = cx.session.policy.manage_settings;
+        if self.dev_tab().is_some() {
+            // the buttons of a hardware page depend on its snapshot (Bluetooth: Firmware, Load driver); read it before measuring the bar,
+            // or the first frame measures one row and draws two, and the second row falls below the window
+            let ticks = self.ticks;
+            self.hw.prime(ticks);
+        }
         let rows_of_buttons = self.measured_button_rows(g, w, s, admin);
         let btn_h = rows_of_buttons as f32 * BTN_PITCH * s;
         self.slider_w.clear();
@@ -3996,7 +4001,8 @@ impl App for SettingsApp {
             Tab::Backup => self.render_backup(g, body, s, cx),
             Tab::Skills => self.render_skills(g, body, s, cx),
             Tab::Storage => self.render_storage(g, body, s, cx),
-            Tab::Network | Tab::Bluetooth | Tab::Display | Tab::Sound => self.render_hw(g, body, s, cx),
+            Tab::Network | Tab::Display | Tab::Sound => self.render_hw(g, body, s, cx),
+            Tab::Bluetooth => self.bt.render(g, body, s),
             Tab::Voice => self.render_voice(g, body, s, cx),
             Tab::SecretProviders => self.render_secret_providers(g, body, s, cx),
             Tab::Account => self.render_account(g, body, s, cx),
@@ -4015,6 +4021,7 @@ impl App for SettingsApp {
             Tab::CloudRoles => self.render_cloudroles(g, body, s, cx),
             Tab::Battery => self.render_battery(g, body, s, cx),
             Tab::Power => self.render_power(g, body, s, cx),
+            Tab::Accessibility => self.render_access(g, body, s, cx),
             Tab::Computer => self.render_computer(g, body, s, cx),
             Tab::HostName => self.render_host_name(g, body, s, cx),
             Tab::SessionLog => self.render_crash(g, body, s, cx),
@@ -4045,6 +4052,9 @@ impl App for SettingsApp {
         self.render_host_dialog(g, modal_area, s, tick);
         if self.mh_is_open() {
             self.mh_render(g, modal_area, s, cx, tick);
+        }
+        if self.tab() == Tab::Bluetooth {
+            self.bt.render_dialogs(g, modal_area, s);
         }
         match &self.modal {
             Some(Modal::Form(_, f)) => f.render(g, modal_area, s, ACCENT, blink(tick)),
@@ -4125,17 +4135,8 @@ impl SettingsApp {
             (Tab::Voice, false) => vec![("Test mic", mut_, 'm'), ("Test speaker", mut_, 'p'), ("Test STT", mut_, 't')],
             (Tab::Network, _) if self.share.open => self.share_buttons(),
             (Tab::Network, _) => vec![("Share internet", mut_, 'i'), ("Turn on/off", acc, 'e'), ("Join WiFi", acc, 'w'), ("Private MAC", mut_, 'm'), ("Apply MAC now", mut_, 'a'), ("Device name", mut_, 'n'), ("Look again", mut_, 'r')],
-            (Tab::Bluetooth, _) => {
-                let mut v = vec![("On/off", acc, 'e'), ("Power", acc, 'p'), ("Scan (10 s)", acc, 's'), ("Tether", acc, 't'), ("Load driver", mut_, 'l'), ("Look again", mut_, 'r')];
-                if !self.hw.bt_held() {
-                    v.retain(|b| b.2 != 'l'); // the driver button only when a driver is set aside (five fit a phone)
-                }
-                if self.hw.bt_needs_firmware() {
-                    v[0] = ("Firmware", acc, 'f'); // first: it is the fix; the on/off switch row is hidden in this state, so its button makes way (five fit a phone)
-                    v.retain(|b| b.2 != 't'); // and no phone can be used before the controller works
-                }
-                v
-            }
+            // the Bluetooth page draws its own buttons on its rows
+            (Tab::Bluetooth, _) => vec![],
             (Tab::Display, _) => vec![("Brighter", acc, '+'), ("Dimmer", mut_, '-'), ("Look again", mut_, 'r')],
             (Tab::Sound, _) => vec![("Output", acc, 'o'), ("Test sound", acc, 't'), ("Louder", mut_, '+'), ("Quieter", mut_, '-'), ("Mute", mut_, 'm'), ("Mix sounds", mut_, 'M'), ("Advanced", mut_, 'A'), ("Look again", mut_, 'r')],
             (Tab::Storage, _) if self.storage.virtual_disks.is_some() => vec![("New virtual disk", acc, 'n'), ("Delete it", err, 'x'), ("Make data disk", ERR, 'm'), ("Rescan", TEXT, 'r')],
@@ -4166,6 +4167,7 @@ impl SettingsApp {
             (Tab::CloudRoles, _) => self.roles_buttons(),
             (Tab::Battery, _) => self.battery_buttons(),
             (Tab::Power, _) => self.power_buttons(),
+            (Tab::Accessibility, _) => self.access_buttons(),
             (Tab::Computer, _) => self.computer_buttons(),
             (Tab::HostName, _) => self.host_name_buttons(),
             (Tab::SessionLog, _) => self.crash_buttons(),
@@ -5033,7 +5035,7 @@ mod tests {
     fn non_admins_cannot_change_system_settings_and_it_is_audited() {
         let cx = user("set4");
         let mut a = SettingsApp::new(&cx).on(Tab::Models);
-        assert_eq!(a.tabs(), &[Tab::Overview, Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::Models, Tab::Skills, Tab::Rag, Tab::Voice, Tab::Browser, Tab::HostAccess, Tab::Shares, Tab::ScreenSaver, Tab::HomeLayout, Tab::Time, Tab::Power, Tab::Computer, Tab::GitKeys], "no secret-provider tab for users; everyone has Notifications, Screen saver, Time, Power, This computer and Home layout; whoever has the AI IDE has Git and SSH keys");
+        assert_eq!(a.tabs(), &[Tab::Overview, Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::Models, Tab::Skills, Tab::Rag, Tab::Voice, Tab::Browser, Tab::HostAccess, Tab::Shares, Tab::ScreenSaver, Tab::HomeLayout, Tab::Accessibility, Tab::Time, Tab::Power, Tab::Computer, Tab::GitKeys], "no secret-provider tab for users; everyone has Notifications, Screen saver, Time, Power, Accessibility, This computer and Home layout; whoever has the AI IDE has Git and SSH keys");
         for k in ['a', 'e', 'd', 'k', 'x'] {
             key(&mut a, &cx, Key::Char(k));
             assert!(!a.has_modal(), "{k}");
@@ -5862,6 +5864,11 @@ mod tests {
             g.clear(rgb(0, 0, 0));
             g.hits.clear();
             a.render(&mut g, R::new(0.0, 72.0, 1280.0, 3128.0), 1.0, &cx, 0);
+            if t == Tab::Bluetooth {
+                // the Bluetooth page has its own controls (the switch, Advanced) instead of generic rows
+                assert!(g.hits.iter().any(|h| h.label == "Bluetooth") && g.hits.iter().any(|h| h.label == "Advanced"), "{t:?} controls");
+                continue;
+            }
             assert!(g.hits.iter().any(|h| matches!(h.ev, Event::Row(0))), "{t:?} rows are clickable");
             assert!(g.hits.iter().any(|h| h.label == "Look again"), "{t:?} has its buttons");
         }
@@ -6649,6 +6656,10 @@ mod crashlog_tests;
 #[cfg(test)]
 #[path = "settings_backup_tests.rs"]
 mod backup_tests;
+
+#[cfg(test)]
+#[path = "settings_access_tests.rs"]
+mod access_tests;
 #[cfg(test)]
 #[path = "settings_updates_tests.rs"]
 mod updates_tests;

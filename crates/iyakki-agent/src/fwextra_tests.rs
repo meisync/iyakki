@@ -583,3 +583,29 @@ fn the_guc_fetch_failed_wording_of_i915_is_a_request_too() {
     let names: Vec<String> = parse_log(log, &m).into_iter().map(|r| r.name).collect();
     assert_eq!(names, vec!["i915/mtl_dmc.bin".to_string(), "i915/mtl_guc_70.bin".to_string()], "each file once, in log order; the summary line without a file name adds nothing");
 }
+
+/// The kernel names a Mac's board-specific Broadcom file with a space in it (MacBookPro14,1, 2026-11-08): the request keeps the whole
+/// name, and the generic file asked for next is a request of its own.
+#[test]
+fn an_apple_board_file_name_with_a_space_is_read_whole() {
+    let m = fake_manifest();
+    let log = "[    8.037516] brcmfmac 0000:02:00.0: Direct firmware load for brcm/brcmfmac4350c2-pcie.Apple Inc.-MacBookPro14,1.bin failed with error -2\n\
+[    8.037559] brcmfmac 0000:02:00.0: Direct firmware load for brcm/brcmfmac4350c2-pcie.bin failed with error -2\n";
+    let names: Vec<String> = parse_log(log, &m).into_iter().map(|r| r.name).collect();
+    // the board file's name is read whole and then refused as unsafe (a space: no release file is named so), instead of leaving a
+    // truncated "brcmfmac4350c2-pcie.Apple" behind; the generic file the driver asks for next is the request
+    assert_eq!(names, vec!["brcm/brcmfmac4350c2-pcie.bin".to_string()]);
+}
+
+/// 2026-11-08, MacBookPro14,1: the generic install reloaded the `bluetooth` core module (named by the "Bluetooth: hci0:" prefix of a
+/// MediaTek file's request line) and re-probed the Mac's own Broadcom chip, which then wedged. Core modules are never reloaded; the
+/// transport drivers still are.
+#[test]
+fn the_bluetooth_core_module_is_never_reloaded_but_the_transport_drivers_are() {
+    let req = |name: &str, driver: &str| Request { name: name.into(), driver: driver.into(), device: String::new() };
+    let files = vec![req("mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin", "bluetooth"), req("mediatek/WIFI_RAM_CODE_MT7922_1.bin", "mt7921e"), req("rtl_bt/rtl8852bu_fw.bin", "btusb"), req("i915/mtl_guc_70.bin", "i915")];
+    let all_loaded = |_: &str| true;
+    assert_eq!(reload_list_of(&files, &all_loaded), vec!["mt7921e".to_string(), "btusb".to_string()], "no core module, no graphics driver");
+    let none_loaded = |_: &str| false;
+    assert!(reload_list_of(&files, &none_loaded).is_empty(), "a driver that is not loaded is left to the next start");
+}

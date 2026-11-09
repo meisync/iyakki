@@ -543,15 +543,23 @@ fn flow(g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, items: &[(String, bool, Eve
     let h = 28.0 * s;
     let sz = 13.0 * s;
     for (label, on, ev) in items {
-        let cw = (g.text_width(sz, label, Face::Bold) + sz * 1.9).min(w);
+        let natural = g.text_width(sz, label, Face::Bold) + sz * 1.9;
+        let cw = natural.min(w);
         if cx > x && cx + cw > x + w {
             cx = x;
             cy += h + 8.0 * s;
         }
         if draw {
             // a chip wider than the panel (a long agent name in a narrow window) shows the start of its text, never past the edge
-            let shown = g.fit(sz, label, Face::Bold, (cw - sz * 1.9).max(sz * 2.0));
+            // (a chip that fits keeps its whole text: fitting it again to `cw - padding` loses to float rounding and ends it with "…")
+            let shown = if natural <= w { label.clone() } else { g.fit(sz, label, Face::Bold, (cw - sz * 1.9).max(sz * 2.0)) };
             chip(g, cx, cy, s, &shown, *on, ev.clone());
+            if shown != *label {
+                // the chip shows the start of a long text, but its name (tooltips, the screen reader, tests) is the whole text
+                if let Some(h) = g.hits.last_mut() {
+                    h.label = label.clone();
+                }
+            }
         }
         cx += cw + 8.0 * s;
     }

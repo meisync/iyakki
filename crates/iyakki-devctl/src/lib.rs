@@ -8,9 +8,16 @@ use std::path::{Path, PathBuf};
 
 pub mod bnep;
 pub mod bt_pan;
+pub mod sbc;
+pub mod sbc_tables;
+pub mod a2dp;
+pub mod a2dp_sys;
+pub mod att;
+pub mod avdtp;
 pub mod bthid;
 pub mod bthid_sys;
 pub mod btmgmt;
+pub mod btstate;
 pub mod btview;
 pub mod direct;
 pub mod mac;
@@ -722,6 +729,10 @@ pub trait Control: Send + Sync {
     fn bt_scan(&self, _index: u16, _secs: u64) -> Result<Vec<btmgmt::Found>, String> {
         Err("not available here".into())
     }
+    /// A scan that ends early when `stop` is set. The default is the plain scan (it cannot be stopped).
+    fn bt_scan_until(&self, index: u16, secs: u64, _stop: &std::sync::atomic::AtomicBool) -> Result<Vec<btmgmt::Found>, String> {
+        self.bt_scan(index, secs)
+    }
     /// The patch file the kernel asks for (`brcm/BCM.hcd`) exists.
     fn bt_firmware_file(&self) -> bool {
         false
@@ -771,6 +782,20 @@ pub trait Control: Send + Sync {
     fn bt_tether_disconnect(&self) -> Result<(), String> {
         Err("not available here".into())
     }
+    /// Bluetooth audio, the receiving side ([`a2dp`]): who is playing through this computer, whether pairing is open.
+    fn bt_audio_view(&self) -> a2dp::AudioView {
+        a2dp::AudioView { why_not: "not available here".into(), ..Default::default() }
+    }
+    fn bt_audio_connect(&self, _address: &str) -> Result<(), String> {
+        Err("not available here".into())
+    }
+    fn bt_audio_disconnect(&self) -> Result<(), String> {
+        Err("not available here".into())
+    }
+    /// Lets a phone pair with this computer for two minutes (or ends that).
+    fn bt_audio_pairing(&self, _on: bool) -> Result<(), String> {
+        Err("not available here".into())
+    }
 }
 
 static BT_LOADER: std::sync::OnceLock<(fn() -> bool, fn() -> Result<String, String>)> = std::sync::OnceLock::new();
@@ -793,6 +818,9 @@ impl Control for System {
     }
     fn bt_scan(&self, index: u16, secs: u64) -> Result<Vec<btmgmt::Found>, String> {
         btview::scan(index, secs)
+    }
+    fn bt_scan_until(&self, index: u16, secs: u64, stop: &std::sync::atomic::AtomicBool) -> Result<Vec<btmgmt::Found>, String> {
+        btview::scan_until(index, secs, stop)
     }
     fn bt_firmware_file(&self) -> bool {
         Path::new("/lib/firmware/brcm/BCM.hcd").exists()
@@ -832,6 +860,18 @@ impl Control for System {
     }
     fn bt_tether_disconnect(&self) -> Result<(), String> {
         bt_pan::Tether::disconnect(&*bt_pan::tether())
+    }
+    fn bt_audio_view(&self) -> a2dp::AudioView {
+        a2dp::AudioControl::view(&a2dp_sys::RealAudio)
+    }
+    fn bt_audio_connect(&self, address: &str) -> Result<(), String> {
+        a2dp::AudioControl::connect(&a2dp_sys::RealAudio, address)
+    }
+    fn bt_audio_disconnect(&self) -> Result<(), String> {
+        a2dp::AudioControl::disconnect(&a2dp_sys::RealAudio)
+    }
+    fn bt_audio_pairing(&self, on: bool) -> Result<(), String> {
+        a2dp::AudioControl::pairing_open(&a2dp_sys::RealAudio, on)
     }
     fn set_link(&self, name: &str, up: bool) -> Result<(), String> {
         set_link(name, up)

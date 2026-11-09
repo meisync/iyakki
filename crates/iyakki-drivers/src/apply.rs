@@ -299,7 +299,12 @@ pub fn activate(fs: &Fs, run: &dyn Runner, id: &str) -> Result<Report, String> {
         rep.lines.extend(give_back_bluetooth(fs, run, &wanted, "a Bluetooth driver pack is installed"));
     }
     let loaded = fs.loaded_modules();
-    for m in &rec.reload {
+    // a core module in a pack's lists (packs recorded before the rule): never reloaded, see pack::CORE_MODULES
+    let core = |m: &String| pack::CORE_MODULES.contains(&m.as_str());
+    for m in rec.reload.iter().filter(|m| core(m)).chain(rec.load.iter().filter(|m| core(m) && !rec.reload.contains(m))) {
+        rep.lines.push(format!("driver {m} not reloaded: a core module (its transport drivers are enough)"));
+    }
+    for m in rec.reload.iter().filter(|m| !core(m)) {
         if loaded.iter().any(|l| l == m) {
             let _ = run.run("modprobe", &["-r", m]);
         }
@@ -308,7 +313,7 @@ pub fn activate(fs: &Fs, run: &dyn Runner, id: &str) -> Result<Report, String> {
             Err(e) => rep.lines.push(format!("driver {m} did not load: {e}")),
         }
     }
-    for m in rec.load.iter().filter(|m| !rec.reload.contains(m) && !rec.modules.contains(m)) {
+    for m in rec.load.iter().filter(|m| !core(m) && !rec.reload.contains(m) && !rec.modules.contains(m)) {
         match run.run("modprobe", &[m]) {
             Ok(()) => rep.lines.push(format!("driver {m} loaded")),
             Err(e) => rep.lines.push(format!("driver {m} did not load: {e}")),
@@ -365,10 +370,21 @@ pub fn load_bluetooth_anyway(fs: &Fs, run: &dyn Runner) -> Vec<String> {
 /// At every boot, after the data volume is mounted and before the network, sound and Bluetooth drivers load.
 /// Returns log lines. `reload` of already-loaded drivers is skipped here (they have not loaded yet in late boot).
 pub fn apply_boot(fs: &Fs, run: &dyn Runner) -> Vec<String> {
+    apply_boot_for(fs, run, &crate::packfit::Machine::default())
+}
+
+/// [`apply_boot`] on a known machine: a pack that does not fit it ([`crate::packfit::skip_reason`]) is left aside, its files not
+/// linked and its drivers not loaded again, with the reason in the log. The pack stays installed for the machines it fits.
+pub fn apply_boot_for(fs: &Fs, run: &dyn Runner, machine: &crate::packfit::Machine) -> Vec<String> {
     let mut log = Vec::new();
     for rec in installed(fs) {
         if is_disabled(fs, &rec.id) {
             log.push(format!("driver pack {}: turned off", rec.id));
+            continue;
+        }
+        if let Some(why) = crate::packfit::skip_reason(&rec.id, machine) {
+            unlink_farm(fs, &rec.id);
+            log.push(format!("driver pack {}: {why}", rec.id));
             continue;
         }
         match activate(fs, run, &rec.id) {
@@ -544,6 +560,51 @@ mod tests {
         assert!(firmware_present(&f, "brcm/BCM20702A1"));
         assert_eq!(installed(&f).len(), 1);
         assert_eq!(read_record(&f, "bt-fw").unwrap().level, "local");
+    }
+
+    /// The data volume travels between machines: at start-up the Mac Bluetooth pack is left aside on a non-T2 Mac whose chip sits on
+    /// the serial link (MacBookPro14,1, 2026-11-08: the patch is refused and wedges the chip), and linked and loaded on a T2 Mac.
+    #[test]
+    fn boot_leaves_a_pack_that_does_not_fit_this_machine_aside_and_links_it_on_one_it_fits() {
+        use crate::packfit::Machine;
+        let (f, _) = fs("packfit");
+        let run = Recorder::default();
+        install_pack(&f, &run, "mac-bt-broadcom", "1.0.0", "x", "usb", "local", &fwpack()).unwrap();
+        let link = f.fw_root.join("brcm/BCM20702A1-05ac-8289.hcd");
+        assert!(link.exists(), "installed: linked");
+        // the next boot on the 2017 MacBook Pro: nothing linked, no driver loaded, the reason in the log, the pack kept
+        run.calls.lock().unwrap().clear();
+        let mbp = Machine::from_facts("Apple Inc.", "MacBookPro14,1", true);
+        let log = apply_boot_for(&f, &run, &mbp);
+        assert!(log.iter().any(|l| l.starts_with("driver pack mac-bt-broadcom: left out on this machine (MacBookPro14,1)")), "{log:?}");
+        assert!(!link.exists(), "the link from the earlier install is taken away again");
+        assert!(run.calls.lock().unwrap().is_empty(), "no modprobe: {:?}", run.calls.lock().unwrap());
+        assert_eq!(installed(&f).len(), 1, "the pack stays for the machines it fits");
+        // the same volume in the T2 Mac mini: linked and loaded as before
+        let mini = Machine::from_facts("Apple Inc.", "Macmini8,1", true);
+        let log = apply_boot_for(&f, &run, &mini);
+        assert!(log.iter().any(|l| l.contains("mac-bt-broadcom") && l.contains("1 file(s) linked")), "{log:?}");
+        assert!(link.exists());
+        assert!(run.calls.lock().unwrap().contains(&"modprobe btusb".to_string()), "{:?}", run.calls.lock().unwrap());
+    }
+
+    /// A pack recorded with the `bluetooth` core module in its reload list (the generic Hardware firmware pack of a Lenovo's MediaTek
+    /// file, on a stick that then booted a MacBook Pro): the core is never reloaded, the transport driver still is.
+    #[test]
+    fn a_core_module_in_a_packs_reload_list_is_never_reloaded_but_the_transport_driver_is() {
+        let (f, _) = fs("core-reload");
+        let run = Recorder::default();
+        let mut p = fwpack();
+        p.reload = vec!["bluetooth".into(), "btusb".into()];
+        let rep = install_pack(&f, &run, "fw-hardware", "1.0.0", "x", "usb", "local", &p).unwrap();
+        let calls = run.calls.lock().unwrap().clone();
+        assert!(!calls.iter().any(|c| c.contains("bluetooth")), "{calls:?}");
+        assert!(calls.contains(&"modprobe btusb".to_string()), "{calls:?}");
+        assert!(rep.lines.iter().any(|l| l.contains("driver bluetooth not reloaded: a core module")), "{:?}", rep.lines);
+        run.calls.lock().unwrap().clear();
+        let log = apply_boot(&f, &run);
+        assert!(log.iter().any(|l| l.contains("fw-hardware") && l.contains("bluetooth not reloaded") && l.contains("btusb reloaded")), "{log:?}");
+        assert!(!run.calls.lock().unwrap().iter().any(|c| c.contains("bluetooth")));
     }
 
     #[test]

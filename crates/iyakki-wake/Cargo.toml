@@ -6,3 +6,15 @@ license.workspace = true
 description = "The My IYAKKI wake phrase spotter, all in-house: log-mel features, a tiny depthwise-separable CNN with its own training code, a formant speech stub for synthetic data, a streaming detector (memory only, mute and indicator rules) and an evaluation tool. No dependencies."
 
 [dependencies]
+
+[[bin]]
+name = "iyakki-wake-train"
+path = "src/bin/train.rs"
+
+[[bin]]
+name = "iyakki-wake-gen"
+path = "src/bin/gen.rs"
+
+[[bin]]
+name = "iyakki-wake-eval"
+path = "src/bin/eval.rs"

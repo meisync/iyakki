@@ -249,7 +249,7 @@ crashed tile shows the service's sentence and a Reload button (`reset: true`).
 **Verified:** the endpoint through the pipeline and over TLS on a loopback port (events to display list for the example tile, equal to the Rust
 twin's list), budgets (a spinning tile is stopped), refusals (wrong version, junk module), 40 hostile-JSON cases, sign-in and origin, per-person
 isolation, service calls scoped by manifest then by the person's tools, caps and rate limits; the JS renderer against the Rust reference renderer
-(pixel equality, tolerance 0, nine pictures incl. every printable ASCII character) and the page controller, both under node.
-**Not verified:** a real browser (a headless Firefox screenshot comparison is written and runs when Firefox can take screenshots here; see
+(pixel equality, tolerance 0, seven pictures incl. every printable ASCII character) and the page controller, both under node.
+**Not verified:** a real browser (a headless Firefox screenshot comparison is written but was skipped here: the only Firefox is an Ubuntu snap wrapper; see
 the delivering summary for whether it did), latency (not measured), touch on a real touch screen, input methods in a real browser, tiles
 with images (the grey box only), approvals for tile calls, an installed Rust-built tile (only the WAT example exists).

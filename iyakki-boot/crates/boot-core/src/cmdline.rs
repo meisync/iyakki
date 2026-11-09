@@ -97,6 +97,16 @@ fn key_of(p: &str) -> &str {
     p.split('=').next().unwrap_or(p)
 }
 
+/// The line without its serial console parameters (`console=ttyS0,115200` and the like); the count of those dropped. The loader
+/// applies it on Apple firmware: Macs have no serial port, and on the 2016-2017 MacBook Pros `ttyS0` is the serial link of the
+/// Bluetooth chip, so a kernel console there writes the kernel's messages into the Bluetooth controller (seen 2026-11-08 on a
+/// MacBookPro14,1: every HCI command failed or timed out, "forbid DMA for kernel console" on that port). Other consoles stay.
+pub fn without_serial_console(line: &str) -> (String, usize) {
+    let kept: Vec<&str> = params(line).into_iter().filter(|p| !(p.starts_with("console=ttyS") || p.starts_with("earlycon=") && p.contains("ttyS"))).collect();
+    let dropped = params(line).len() - kept.len();
+    (kept.join(" "), dropped)
+}
+
 /// Split a line into parameters (runs of spaces collapse).
 pub fn params(line: &str) -> Vec<&str> {
     line.split(' ').filter(|p| !p.is_empty()).collect()
@@ -153,6 +163,15 @@ pub fn apply(base: &str, edits: &[Edit], rules: &Rules) -> Result<String, CmdErr
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_serial_console_is_dropped_on_request_and_nothing_else_moves() {
+        let line = "console=tty0 console=ttyS0,115200 panic=20 quiet loglevel=3 iyakki.root=boot";
+        assert_eq!(super::without_serial_console(line), ("console=tty0 panic=20 quiet loglevel=3 iyakki.root=boot".to_string(), 1));
+        assert_eq!(super::without_serial_console("console=ttyS1 console=ttyS0,115200n8 quiet"), ("quiet".to_string(), 2));
+        assert_eq!(super::without_serial_console("quiet console=tty0"), ("quiet console=tty0".to_string(), 0), "a screen console is not serial");
+        assert_eq!(super::without_serial_console(""), (String::new(), 0));
+    }
+
     use super::*;
 
     fn r() -> Rules {

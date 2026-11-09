@@ -324,7 +324,7 @@ impl Tts for FormantTts {
         "formant stub (pure Rust, NOT real speech)".into()
     }
     fn voices(&self) -> usize {
-        16
+        64
     }
     fn is_real_speech(&self) -> bool {
         false

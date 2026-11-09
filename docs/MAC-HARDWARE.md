@@ -255,8 +255,44 @@ What the Mac image does about it:
   owner heard the 8-second clip played back). Fix: `micpcm.rs`: once per start the agent asks every capture device for its formats
   (`arecord --dump-hw-params`); a card offering both 32-bit-container formats gets `pcm.iyakkimicCdD` (plug over `hw:C,D`, `format
   S32_LE`) in `/etc/asound.conf`, and the voice recorder, dictation and the browser's microphone plugin (`IYAKKI_WEBVIEW_MIC_PCMS`)
-  open that PCM instead of `plughw:C,D`. Image 1107l; to be verified with the recorder on this Mac. The driver's own note about a "fake
+  open that PCM instead of `plughw:C,D`. Image 1107l, verified the same evening: the voice recorder plays the voice back (owner: "worked"). The driver's own note about a "fake
   24 bits" internal microphone is about level, not this.
+* **Wi-Fi and Bluetooth on a T7 install that moves between machines (2026-11-08)**: the Store's "Hardware firmware" pack holds the
+  files of the machine the card was pressed on (here MediaTek and Realtek files from the Lenovo and the HP), so on this Mac it had
+  nothing for the BCM4350: press the card on each machine; the request is `brcm/brcmfmac4350c2-pcie.bin` (linux-firmware,
+  `LICENCE.broadcom_bcm43xx`). The Mac Wi-Fi pack (`mac-wifi-brcmfmac`, from a macOS image) holds BCM4364 files only. Bluetooth: the
+  Mac Bluetooth pack links `brcm/BCM.hcd`, the kernel finds it on its second try and the patch command fails with EBUSY (-16), as the
+  baud-rate change does; `hci0` has no address. CAUSE FOUND the same evening: the chip hangs off `ttyS0` (`dw-apb-uart.2`, `serial0-0`,
+  driver `hci_uart_bcm`), and the image's kernel command line names that port as the kernel console (`console=ttyS0,115200`, kept for
+  QEMU and PCs with a serial port): "dw-apb-uart.2: forbid DMA for kernel console", then every HCI command fails (-16) or times out (-110),
+  because the kernel's messages go out over the Bluetooth link. The loader now drops the serial console on Apple firmware
+  (`boot-core::cmdline::without_serial_console`, log line "cmdline: N serial console parameter(s) dropped on Apple firmware"; Macs have no
+  serial port, so nothing is lost), which was right in itself, but it did NOT change the chip's answers (verified on image 1107m: no
+  `ttyS` on the command line, the same -16). -16 here is the chip's own HCI status "Command Disallowed" (`bt_to_errno(0x0c)`): it refuses
+  the baud-rate change (0xfc18) and, when the patch file is there, the first patch write (0xfc4c); after that refused write it answers
+  nothing (timeouts), so `hci0` never gets an address. The Mac Bluetooth pack made it worse: its start-up reload of `hci_uart` re-probed
+  the chip (second attempt at 8 s) with the file present, which is what wedged it. Without the pack: one probe, no patch, still no
+  address, `MGMT ver` registered. Reading: Apple's firmware leaves the chip in a state (its own patch running, or low power) that
+  `hci_bcm` cannot reset here (no reset GPIO: "No reset resource"). RESOLVED the same evening: with the Mac Bluetooth pack
+  removed and one restart, the controller has its address (AA:BB:CC:DD:EE:FF, Settings -> Bluetooth), powers on and **scans** (owner:
+  "scan worked"): the chip works as Apple's firmware left it, no patch needed, and the patch is what breaks it. Permanent rule
+  (`iyakki-drivers::appfw::bt_refuses_vendor_commands`, `macfw.rs`): on a Mac without a T2 chip whose serial-link controller answered
+  "command disallowed" in the kernel log, the Mac firmware installer installs the Wi-Fi pack only and says why in the result ("no pack for
+  this Mac's serial-link chip on purpose"). A pack installed before that rule must be removed by hand (Store, Hardware, the Mac Bluetooth
+  card, Remove), and on images before the rule (up to 1107m) the Mac drivers download re-creates it: do not run that download on this
+  Mac until the image with the rule is on it. VERIFIED 2026-11-08 21:30 by the owner: with the Mac Wi-Fi and Bluetooth pack removed and only Hardware firmware installed, Wi-Fi, Bluetooth and sound all work together. **Start-up rule, the same night (`iyakki-drivers::packfit`, image 1107o)**: one data volume moves between the T2 Mac mini
+  and this MacBook Pro, so the Mac Bluetooth pack may well be on it; at every start the relink reads the hardware (DMI vendor and model, the
+  ACPI node `BCM2E7C` of the serial-link chip) and leaves that pack aside on a non-T2 Mac with such a chip (unlinked, no driver reload,
+  log line "driver pack mac-bt-broadcom: left out on this machine (MacBookPro14,1): ..."), while the Mac mini takes it. Nothing has to
+  be removed by hand any more, and the Mac drivers download is harmless on either machine. The generic Hardware firmware install also no longer reloads the `bluetooth` core module
+  (it did so for a MediaTek file of another machine on the same stick, which re-probed and wedged the chip). Note for a T7 install that moves between machines: removing "Hardware firmware" in the Store also removes this Mac's
+  Wi-Fi file (`brcmfmac4350c2-pcie.bin` lives in that pack); install it again and restart. Both detectors now keep a board file's name
+  whole instead of cutting it at the space.
+* **One unexplained restart during radio play (2026-11-08, image 1107l)**: the owner started the Radio tile and the system restarted
+  by itself about 10 s later; not reproduced afterwards (the radio then played through the 32-bit four-channel format with the driver's
+  normal log lines, watched live). No kept crash log holds that session: the kernel log copy ends before the moment, no PANIC line was
+  written, and the session was recorded as a clean end, so a Rust panic of PID 1 (the hook writes to the kernel log, which the copy may
+  miss) is the likeliest reading. Watched item: if it recurs, boot the SSH entry first and keep `dmesg --follow` running.
 * **What works, by the project's own README:** speaker and headphone output (a fixed 44.1 kHz, 24-bit, 4-channel hardware format; other
   formats and rates work through ALSA's default device, which converts). **What does not:** the microphone (no input is connected), sleep and resume (untested, "everything
   is permanently powered on"), and the direct hardware devices `hw:0,0` / `plughw:0,0` have no volume control and are very loud: use the

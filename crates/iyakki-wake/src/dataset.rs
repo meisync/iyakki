@@ -213,7 +213,7 @@ mod tests {
         let mk = |n: &str, f: f32, len: usize| Clip {
             name: n.into(),
             samples: (0..len).map(|i| 0.4 * (i as f32 * f).sin() * (1.0 - (i as f32 / len as f32 - 0.5).abs() * 1.6)).collect(),
-            real: false,
+            real: n.starts_with("real_"),
         };
         let _ = &mut r;
         DataSet {

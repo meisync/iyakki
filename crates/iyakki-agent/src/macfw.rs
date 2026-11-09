@@ -760,11 +760,11 @@ fn run_inner(env: &mut dyn Env, data: &Path, source: &Source, lines: &mut Vec<St
     let res = macboard::resolve(&product, &board_name);
     // the UART Bluetooth controller: a T2 Mac's is known from its model; any other Mac's chip is read from the kernel log, and the
     // file name is the first one btbcm says it tried (BCM.hcd on an Intel Mac)
+    let bt_log = env.bt_log();
     let (uart_chip, hcd_name): (Option<String>, String) = if res.t2 {
         (macboard::uart_bluetooth(&product).then(|| "BCM4364".to_string()), "BCM.hcd".into())
     } else {
-        let log = env.bt_log();
-        (appfw::bt_chip_from_log(&log), appfw::hcd_serve_name(&appfw::bt_tried_from_log(&log)))
+        (appfw::bt_chip_from_log(&bt_log), appfw::hcd_serve_name(&appfw::bt_tried_from_log(&bt_log)))
     };
     if !res.t2 {
         note(env, lines, NON_T2_PLAN.to_string());
@@ -847,9 +847,21 @@ fn run_inner(env: &mut dyn Env, data: &Path, source: &Source, lines: &mut Vec<St
     if taken.len() > 12 {
         note(env, lines, format!("  ... and {} more", taken.len() - 12));
     }
+    // A Mac without a T2 chip whose Bluetooth chip sits on the serial link (the 2016-2017 MacBook Pros, BCM4350C0): Apple's firmware
+    // leaves the chip running its own patch, and the chip answers "command disallowed" to a second patch and to the baud-rate change;
+    // the half-written patch then wedges it, and the pack's start-up reload of hci_uart re-probes it with the file and wedges it at every
+    // start (MacBookPro14,1, 2026-11-08: no address, scans impossible). Without any file the chip is usable as it is (address, scan,
+    // pairing). So no Bluetooth pack is installed on such a Mac, and the reason is in the result.
+    let serial_bt_without_t2 = !res.t2 && uart_chip.is_some() && appfw::bt_refuses_vendor_commands(&bt_log);
+    let bt_pack = if serial_bt_without_t2 && bt_pack.is_some() {
+        notes.push(format!("Bluetooth: this Mac's chip ({}) sits on the serial link and runs Apple's own firmware (the kernel log shows it refusing the vendor commands, \"command disallowed\"); a patch would be refused and a driver reload wedges it, so no Bluetooth pack is installed; it works as it is (address, scan, pairing)", uart_chip.as_deref().unwrap_or("Broadcom")));
+        None
+    } else {
+        bt_pack
+    };
     let wifi_files = wifi_pack.as_ref().map_or(0, |p| p.files.len());
     let bt_files = bt_pack.as_ref().map_or(0, |p| p.files.len());
-    if bt_pack.is_none() {
+    if bt_pack.is_none() && !serial_bt_without_t2 {
         notes.push("no Bluetooth firmware was found in these files".into());
     }
 
@@ -900,6 +912,7 @@ fn run_inner(env: &mut dyn Env, data: &Path, source: &Source, lines: &mut Vec<St
         headline_parts.push(format!("Wi-Fi {} installed: {} appeared", if res.t2 { "firmware" } else { "extra files" }, seen.wifi.join(", ")));
     }
     match (&bt_pack, &seen.bt_address) {
+        (None, _) if serial_bt_without_t2 => headline_parts.push("Bluetooth: no pack for this Mac's serial-link chip on purpose (it runs Apple's own firmware and works as it is)".to_string()),
         (None, _) => headline_parts.push(if matches!(source, Source::Download) { "Bluetooth: Apple's macOS versions for this Mac have no firmware for it, a USB Bluetooth adapter works".to_string() } else { "no Bluetooth firmware was in these files".to_string() }),
         (Some(_), Some(a)) => headline_parts.push(format!("Bluetooth firmware installed: the controller has an address ({a})")),
         (Some(_), None) if seen.bt_controller => {

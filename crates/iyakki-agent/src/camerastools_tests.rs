@@ -328,3 +328,193 @@ fn only_an_administrator_changes_the_limits_for_all_cameras_and_the_floor_has_a_
     assert!(e.contains("floor"), "{e}");
     r.tools.hub.stop_all();
 }
+
+// ------------------------------------------------------------------------------------------------ motion watching (F-CAM-04)
+
+mod motion_tests {
+    use super::*;
+    use crate::camdetect::watch::{MotionEnv, MotionService};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const T0: u64 = 1_700_000_000_000;
+    const W: u32 = 160;
+    const H: u32 = 120;
+
+    struct M {
+        r: Rig,
+        motion: Arc<MotionService>,
+        now: Arc<AtomicU64>,
+        id: String,
+    }
+
+    fn motion_rig(tag: &str) -> M {
+        let r = rig(tag, 50);
+        let now = Arc::new(AtomicU64::new(T0));
+        let n2 = now.clone();
+        let motion = Arc::new(MotionService::new(
+            r.tools.hub.clone(),
+            MotionEnv {
+                now_ms: Arc::new(move || n2.load(Ordering::SeqCst)),
+                zone: Arc::new(crate::clock::Zone::utc),
+                recording: Arc::new(|_| false),
+                on_active: Arc::new(|_| {}),
+                key_every: Duration::ZERO,
+                retention_every: Duration::from_secs(3600),
+            },
+        ));
+        let Rig { tools, svc, audit, dir } = r;
+        let tools = tools.with_motion(motion.clone());
+        let r = Rig { tools, svc, audit, dir };
+        let id = r.tools.hub.save(&amy_who(&r), None, &crate::cameras::NewSpec { name: "Front door".into(), address: "rtsp://127.0.0.1:9/live".into(), user: "admin".into(), allowed: vec!["bob".into()] }, Some("s3cret")).unwrap();
+        M { r, motion, now, id }
+    }
+
+    fn frame(rect: Option<(u32, u32)>) -> Vec<u8> {
+        let mut v = vec![255u8; (W * H * 4) as usize];
+        for y in 0..H {
+            for x in 0..W {
+                let base = 60 + (80 * x / W) + (40 * y / H) + if ((x / 10) + (y / 10)) % 2 == 0 { 25 } else { 0 };
+                let o = ((y * W + x) * 4) as usize;
+                v[o..o + 3].fill(base as u8);
+            }
+        }
+        if let Some((rx, ry)) = rect {
+            for y in ry..(ry + 20).min(H) {
+                for x in rx..(rx + 20).min(W) {
+                    let o = ((y * W + x) * 4) as usize;
+                    v[o..o + 3].fill(250);
+                }
+            }
+        }
+        v
+    }
+
+    impl M {
+        fn feed(&self, f: &[u8]) {
+            self.now.fetch_add(200, Ordering::SeqCst);
+            self.motion.process(&self.id, W, H, f);
+        }
+        fn walk(&self) {
+            for _ in 0..20 {
+                self.feed(&frame(None));
+            }
+            for k in 0..16u32 {
+                self.feed(&frame(Some((10 + k * 5, 80))));
+            }
+            for _ in 0..30 {
+                self.feed(&frame(None));
+            }
+        }
+    }
+
+    #[test]
+    fn the_motion_tools_exist_only_with_a_motion_service_and_the_right_ones_ask_every_time() {
+        let r = rig("mo-defs", 50);
+        assert!(!r.tools.defs().iter().any(|d| d.spec.name.starts_with("camera_motion") || d.spec.name == "camera_zone_set" || d.spec.name == "camera_events_list"));
+        let m = motion_rig("mo-defs2");
+        let defs = m.r.tools.defs();
+        let risk = |n: &str| defs.iter().find(|d| d.spec.name == n).unwrap_or_else(|| panic!("{n} missing")).risk;
+        assert_eq!((risk("camera_motion_status"), risk("camera_events_list")), (Risk::Safe, Risk::Safe));
+        assert_eq!((risk("camera_motion_set"), risk("camera_zone_set")), (Risk::Ask, Risk::Ask));
+        for n in ["camera_motion_set", "camera_zone_set"] {
+            assert!(m.r.tools.grant_blocker(n, &json!({"camera": "x"})).is_some(), "{n}: no standing grant");
+            assert!(!m.r.tools.pre_approved(n) && !m.r.tools.approved_always(n));
+        }
+        for n in ["camera_motion_status", "camera_events_list"] {
+            assert!(defs.iter().find(|d| d.spec.name == n).unwrap().untrusted, "{n}: names come from devices and people");
+        }
+        // turning watching on is a hard ask (Auto mode does not skip it); turning it off and the other changes are not
+        for mode in ["watched", "always"] {
+            assert!(crate::agent::hard_ask("camera_motion_set", &json!({"camera": "x", "mode": mode})).is_some(), "{mode}");
+        }
+        assert!(crate::agent::hard_ask("camera_motion_set", &json!({"camera": "x", "mode": "off"})).is_none());
+        assert!(crate::agent::hard_ask("camera_motion_set", &json!({"camera": "x", "sensitivity": 7})).is_none());
+        for n in ["camera_motion_status", "camera_motion_set", "camera_events_list", "camera_zone_set"] {
+            assert!(TOOLS.contains(&n) && MOTION_RULE.contains(n), "{n}");
+        }
+        assert!(MOTION_RULE.contains("NO person detector"));
+    }
+
+    #[test]
+    fn bad_motion_requests_are_refused_before_asking() {
+        let m = motion_rig("mo-bad");
+        let t = &m.r.tools;
+        for (name, args) in [
+            ("camera_motion_set", json!({"camera": "Front door"})),
+            ("camera_motion_set", json!({"camera": "Front door", "mode": "sometimes"})),
+            ("camera_motion_set", json!({"camera": "Front door", "sensitivity": 11})),
+            ("camera_motion_set", json!({"camera": "Front door", "alerts_enabled": "yes"})),
+            ("camera_motion_set", json!({"mode": "off"})),
+            ("camera_zone_set", json!({"camera": "Front door", "kind": "mask", "name": "x"})),
+            ("camera_zone_set", json!({"camera": "Front door", "kind": "wall", "name": "x", "rect": [0.1, 0.1, 0.5, 0.5]})),
+            ("camera_zone_set", json!({"camera": "Front door", "kind": "mask", "name": "x", "rect": [0.1, 0.1, 0.5]})),
+            ("camera_zone_set", json!({"camera": "Front door", "kind": "mask", "name": "x", "points": [[0.1, 0.1], [0.9, 0.9], [0.9, 0.1], [0.1, 0.9]]})),
+            ("camera_zone_set", json!({"camera": "Front door", "kind": "mask", "name": "x", "points": [[0.1, 0.1], [0.5, 0.5]]})),
+            ("camera_zone_set", json!({"camera": "Front door", "kind": "mask", "name": "x", "points": [[0.1, 1.5], [0.5, 0.5], [0.2, 0.9]]})),
+            ("camera_zone_set", json!({"camera": "Front door", "kind": "zone", "name": "x", "rect": [0.1, 0.1, 0.5, 0.5], "sensitivity": 0})),
+        ] {
+            assert!(t.refusal(name, &args).is_some(), "{name} {args}");
+        }
+        assert!(t.refusal("camera_zone_set", &json!({"camera": "Front door", "kind": "mask", "name": "x", "rect": [0.1, 0.1, 0.5, 0.5]})).is_none());
+        assert!(t.refusal("camera_zone_set", &json!({"camera": "Front door", "kind": "zone", "name": "x", "action": "remove"})).is_none());
+        // the assistant cannot watch this computer's own camera
+        assert!(t.call("camera_motion_set", &json!({"camera": "usb:video0", "mode": "always"})).is_err());
+    }
+
+    #[test]
+    fn the_cards_say_what_is_analysed_what_is_stored_and_that_a_red_sign_shows() {
+        let m = motion_rig("mo-card");
+        let t = &m.r.tools;
+        let on = t.preview("camera_motion_set", &json!({"camera": "Front door", "mode": "always", "alerts_enabled": true, "quiet_hours": "22:00-06:30"})).unwrap();
+        for want in ["START WATCHING", "Front door", "ALL THE TIME", "nothing leaves it", "red sign", "encrypted", "key in your vault", "no person detector", "quiet hours 22:00-06:30"] {
+            assert!(on.contains(want), "{want}: {on}");
+        }
+        let off = t.preview("camera_motion_set", &json!({"camera": "Front door", "mode": "off"})).unwrap();
+        assert!(off.contains("TURN OFF") && !off.contains("START"));
+        let watched = t.preview("camera_motion_set", &json!({"camera": "Front door", "mode": "watched"})).unwrap();
+        assert!(watched.contains("only while its picture is on a screen or it is being recorded"));
+        let mask = t.preview("camera_zone_set", &json!({"camera": "Front door", "kind": "mask", "name": "Street", "rect": [0.5, 0.0, 1.0, 0.5]})).unwrap();
+        assert!(mask.contains("PRIVACY MASK") && mask.contains("Street") && mask.contains("4 corners"), "{mask}");
+        let store = t.preview("camera_motion_set", &json!({"camera": "Front door", "mask_storage": false})).unwrap();
+        assert!(store.contains("STOP blacking out"), "{store}");
+        assert!(t.describe("camera_motion_set", &json!({"camera": "Front door", "mode": "always"})).starts_with("START WATCHING"));
+    }
+
+    #[test]
+    fn motion_by_chat_end_to_end_zones_masks_watch_events_and_status() {
+        let m = motion_rig("mo-e2e");
+        let t = &m.r.tools;
+        // nothing is watched until the owner says so
+        let st = t.call("camera_motion_status", &json!({})).unwrap();
+        assert!(st.contains("Front door") && st.contains("off"), "{st}");
+        assert!(t.call("camera_zone_set", &json!({"camera": "Front door", "kind": "mask", "name": "Street", "rect": [0.5, 0.0, 1.0, 0.4]})).unwrap().contains("privacy mask"));
+        assert!(t.call("camera_zone_set", &json!({"camera": "Front door", "kind": "zone", "name": "Porch", "points": [[0.0, 0.3], [1.0, 0.3], [1.0, 1.0], [0.0, 1.0]], "sensitivity": 6})).unwrap().contains("the zone"));
+        let on = t.call("camera_motion_set", &json!({"camera": "Front door", "mode": "always", "alerts_enabled": true, "alerts_max_per_hour": 3})).unwrap();
+        assert!(on.contains("ON") && on.contains("red sign") && on.contains("cannot tell a person"), "{on}");
+        m.walk();
+        let list = t.call("camera_events_list", &json!({"camera": "Front door", "hours": 1})).unwrap();
+        assert!(list.contains("1 motion event") && list.contains("Porch") && list.contains("strength"), "{list}");
+        assert!(!list.contains("person detector said"), "no guess: {list}");
+        let none = t.call("camera_events_list", &json!({"camera": "Front door", "day": "2001-01-01"})).unwrap();
+        assert!(none.contains("No motion events"), "{none}");
+        let st = t.call("camera_motion_status", &json!({"camera": "Front door"})).unwrap();
+        assert!(st.contains("Watching all the time") && st.contains("Porch") && st.contains("Street") && st.contains("Alerts: on, at most 3 an hour") && st.contains("Person detection is not available"), "{st}");
+        // removing a shape, and the camera audit trail
+        assert!(t.call("camera_zone_set", &json!({"camera": "Front door", "kind": "mask", "name": "street", "action": "remove"})).unwrap().contains("Removed"));
+        assert!(t.call("camera_zone_set", &json!({"camera": "Front door", "kind": "mask", "name": "street", "action": "remove"})).is_err());
+        let log = std::fs::read_to_string(m.r.dir.join("data/cameras/recordings").join(&m.id).join("audit.log")).unwrap();
+        assert!(log.contains("motion.shape") && log.contains("motion.setting") && log.contains("motion.start"));
+        // the person it is shared with: sees that it is watched, nothing else, and cannot turn anything
+        let bob = Who { user: "bob".into(), manage: false, usb_ok: false, home: m.r.dir.join("home/bob"), may_write: Arc::new(|_| true) };
+        let bt = CameraViewTools::new(Arc::new(NoTools), t.hub.clone(), bob, m.r.svc.clone()).with_motion(m.motion.clone());
+        let st = bt.call("camera_motion_status", &json!({"camera": "Front door"})).unwrap();
+        assert!(st.contains("Watching all the time") && !st.contains("Porch") && st.contains("only the owner sees the details"), "{st}");
+        assert!(bt.call("camera_events_list", &json!({"camera": "Front door"})).unwrap_err().contains("only the person who added"));
+        assert!(bt.call("camera_motion_set", &json!({"camera": "Front door", "mode": "off"})).is_err(), "only the owner (or an administrator) can switch it off");
+        assert!(bt.call("camera_zone_set", &json!({"camera": "Front door", "kind": "mask", "name": "x", "rect": [0.1, 0.1, 0.5, 0.5]})).is_err());
+        // off again
+        assert!(t.call("camera_motion_set", &json!({"camera": "Front door", "mode": "off"})).unwrap().contains("OFF"));
+        m.motion.shutdown();
+        t.hub.stop_all();
+    }
+}

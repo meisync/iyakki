@@ -196,6 +196,7 @@ pub fn hard_ask(name: &str, args: &Value) -> Option<&'static str> {
         "camera_photo" | "camera_record_start" | "camera_passport" => return Some("the camera is private: it always asks (Allow for 5 minutes at most)"),
         "camera_recording_set" if text("mode") != "off" && text("mode") != "" => return Some("turning a camera's recording on always asks, with what is stored, where and for how long on the card"),
         "camera_export" => return Some("exporting recorded pictures (the copies are not encrypted) always asks"),
+        "camera_motion_set" if text("mode") != "off" && text("mode") != "" => return Some("turning on motion watching of a camera always asks, with what is analysed, what is stored and that a red sign shows"),
         "disks_unlock" | "disks_lock" => return Some("unlocking and locking encrypted drives always asks; the password is typed on the screen, never given to the assistant"),
         "ssh_tunnel_add" | "ssh_tunnel_edit" | "ssh_tunnel_enable" | "ssh_tunnel_disable" | "ssh_tunnel_delete" => return Some("changing SSH tunnels (who can reach what through this device) always asks"),
         "domain_route_add" | "domain_route_remove" | "domains_listener_set" => return Some("changing domain names, the listener and its firewall opening decides who can reach services on this device, so it always asks"),

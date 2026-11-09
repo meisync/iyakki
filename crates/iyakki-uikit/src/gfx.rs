@@ -444,6 +444,22 @@ impl Gfx {
         w
     }
 
+    /// Buttons in a row that wraps at `x + w` (a narrow window or a large text size gives more rows instead of cutting the last
+    /// button off). Returns the height used and the right edge of the last button on the last row.
+    pub fn button_flow(&mut self, x: f32, y: f32, w: f32, size: f32, gap: f32, items: &[(String, [u8; 4], Event)]) -> (f32, f32) {
+        let (mut bx, mut by) = (x, y);
+        let h = size * 2.1;
+        for (label, accent, ev) in items {
+            let bw = self.text_width(size, label, Face::Bold) + size * 1.7;
+            if bx > x && bx + bw > x + w {
+                bx = x;
+                by += h + gap;
+            }
+            bx += self.button(bx, by, size, label, *accent, ev.clone()) + gap;
+        }
+        (by + h - y, bx - gap)
+    }
+
     /// A button for fingers: drawn like [`Gfx::button`], but the area that reacts (and lights up under the pointer) is at least
     /// `hit_h` tall, centred on the drawn pill. Returns the width.
     #[allow(clippy::too_many_arguments)]

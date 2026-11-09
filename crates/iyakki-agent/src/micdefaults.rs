@@ -265,7 +265,7 @@ pub fn run() {
     static FORMATS_LEARNED: std::sync::Once = std::sync::Once::new();
     FORMATS_LEARNED.call_once(|| {
         let prober = crate::soundprobe::Prober::capture_system();
-        let list = std::fs::read_to_string("/proc/asound/pcm").unwrap_or_default();
+        let list = crate::quiet::pcm_list_text();
         let probe = |c: u32, d: u32| prober.constraints(c, d).map(|k| k.formats);
         for (c, d) in crate::micpcm::learn_cards(&list, &probe) {
             log::info!("microphone: card {c} device {d}: recordings go through {} (its format is named)", crate::micpcm::pcm_name(c, d));

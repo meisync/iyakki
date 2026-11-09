@@ -2,7 +2,7 @@
 # One line per file: <path> <count>. The list may only shrink; lower a number (or delete the line) when a slice is moved to IYAKKI core.
 crates/iyakki-shell/src/apps/camera.rs 1
 crates/iyakki-shell/src/apps/chat.rs 1
-crates/iyakki-shell/src/apps/devices.rs 39
+crates/iyakki-shell/src/apps/devices.rs 33
 crates/iyakki-shell/src/apps/disks_tile.rs 1
 crates/iyakki-shell/src/apps/disks_tile_ui.rs 1
 crates/iyakki-shell/src/apps/scan.rs 2

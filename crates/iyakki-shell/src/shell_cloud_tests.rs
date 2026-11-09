@@ -138,8 +138,9 @@ fn settings_pages_follow_the_mode() {
     for p in ["Network", "Storage", "Time", "Models", "Cloud mode", "Browser"] {
         assert!(cloud.contains(&p), "{p} stays");
     }
-    // Displays and Screen saver go with Display (the same hardware name hides all three)
-    assert_eq!(cloud.len(), desk.len() - 7);
+    assert!(!cloud.contains(&"This computer"), "the per-computer hardware profile page goes with the hardware it describes");
+    // Displays, Screen saver and This computer go with Display (the same hardware name hides all four)
+    assert_eq!(cloud.len(), desk.len() - 8);
     // auto on a cloud image that has the hardware: every page stays; without a screen only Display goes
     let auto = names(cloudmode::cloud_mode(Setting::Auto, &Facts { variant: "cloud".into(), ..Facts::full() }));
     assert_eq!(auto, desk, "pages of hardware that exists stay");
@@ -205,10 +206,13 @@ fn moved_tiles_stay_hidden_and_empty_groups_hide_as_before() {
     sh.layout.placed.insert(radio, Group::Home.id().to_string());
     let home = sh.visible_tiles().into_iter().filter(|t| sh.tile_gid(t) == Group::Home.id()).map(|t| t.label).collect::<Vec<_>>();
     assert!(!home.contains(&"RADIO"), "a hidden tile moved to Home stays hidden: {home:?}");
-    // Web & Media holds BROWSER, which is remote-safe, so the group stays; move BROWSER away and the group has nothing to show
+    // Web & Media holds BROWSER, CAMERAS and PDF, which are remote-safe (no local hardware needed: network cameras, files), so the
+    // group stays; move those three away and the group has nothing to show
     let chips = |sh: &Shell| sh.groups().iter().map(|x| x.label().to_string()).collect::<Vec<_>>();
     assert!(chips(&sh).contains(&Group::WebMedia.label().to_string()));
-    sh.layout.placed.insert(iyakki_agent::layout::sys_key("BROWSER"), Group::Home.id().to_string());
+    for remote_safe in ["BROWSER", "CAMERAS", "PDF"] {
+        sh.layout.placed.insert(iyakki_agent::layout::sys_key(remote_safe), Group::Home.id().to_string());
+    }
     assert!(!chips(&sh).contains(&Group::WebMedia.label().to_string()), "a group whose tiles are all hidden or moved away is not shown");
     sh.set_cloud_for_test(cloudmode::CloudMode::desktop());
     assert!(chips(&sh).contains(&Group::WebMedia.label().to_string()), "on a desktop the hidden tiles bring the group back");

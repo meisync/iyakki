@@ -194,7 +194,15 @@ fn start_item(c: &Ctx, item: &Item, tree: &str) -> Result<Status, String> {
             match e.kind {
                 Kind::Linux => {
                     let rules = Rules { secure_boot: c.secure, ..Rules::default() };
-                    let line = cmdline::apply(&e.cmdline, &[], &rules).map_err(|_| String::from("the command line is not valid"))?;
+                    let mut line = cmdline::apply(&e.cmdline, &[], &rules).map_err(|_| String::from("the command line is not valid"))?;
+                    // Macs have no serial port, and on the 2016-2017 MacBook Pros ttyS0 is the Bluetooth chip's link: no serial console there
+                    if hwlog::vendor().starts_with("Apple") {
+                        let (l, n) = cmdline::without_serial_console(&line);
+                        if n > 0 {
+                            say!("cmdline: {n} serial console parameter(s) dropped on Apple firmware (ttyS0 is the Bluetooth link on these Macs)\n");
+                            line = l;
+                        }
+                    }
                     say!("start: {} kernel={} tree={} initrds={} cmdline={}\n", item.id, kernel, tree, initrds.len(), line);
                     let initrd = read_initrds(c, &initrds)?;
                     save_log(&c.vol, "about to start"); // the file now ends with the start line above: a kernel that never draws is still named

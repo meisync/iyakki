@@ -1009,3 +1009,24 @@ fn a_failed_image_read_stops_the_loop_for_tool_errors_but_goes_on_for_image_erro
     std::fs::remove_dir_all(&root).unwrap();
     std::fs::remove_dir_all(&root2).unwrap();
 }
+
+/// The owner's MacBookPro14,1 as it really answered (2026-11-08): its BCM4350C0 on the serial link refuses the vendor commands
+/// ("command disallowed", -16: the baud-rate change, then the first patch write), the pack's start-up reload of hci_uart re-probed it with
+/// the file and wedged it at every start, and without any file it has an address and scans. Such a Mac gets the Wi-Fi pack only, and
+/// the result says why.
+#[test]
+fn a_macbook_pro_whose_chip_refuses_the_vendor_commands_gets_no_bluetooth_pack_and_is_told_why() {
+    let root = tmp("mbp-refuses");
+    let mut f = macbook(&root);
+    f.bt_log = format!("[6.6] Bluetooth: hci0: BCM: failed to write update baudrate (-16)\n[6.6] Bluetooth: hci0: Failed to set baudrate\n{MBP_LOG}");
+    let o = go(&mut f, &Source::Download).unwrap();
+    assert_eq!(f.installs, vec![PACK_WIFI], "the Wi-Fi board files still come; no Bluetooth pack");
+    assert!(!f.fs.fw_root.join("brcm/BCM.hcd").exists() && !f.fs.data.join("firmware/mac-bt-broadcom").exists());
+    let calls = f.run.calls.lock().unwrap().clone();
+    assert!(!calls.contains(&"modprobe hci_uart".to_string()), "no Bluetooth driver reload: {calls:?}");
+    assert!(o.installed && o.wifi_files == 3 && o.bt_files == 0, "{o:?}");
+    assert!(o.headline.contains("no pack for this Mac's serial-link chip on purpose"), "{}", o.headline);
+    assert!(o.lines.iter().any(|l| l.contains("BCM4350C0") && l.contains("command disallowed") && l.contains("no Bluetooth pack is installed")), "{:?}", o.lines);
+    assert!(!o.lines.iter().any(|l| l.contains("no Bluetooth firmware was found")), "the pack was found and left out on purpose: {:?}", o.lines);
+    std::fs::remove_dir_all(&root).unwrap();
+}

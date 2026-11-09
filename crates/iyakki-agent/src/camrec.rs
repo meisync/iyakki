@@ -33,6 +33,23 @@ use crate::clock::{Local, Zone};
 use iyakki_rtsp as rtsp;
 use iyakki_rtsp::url::scrub;
 
+/// Make the camera's key in its owner's vault when there is none (recordings and motion events share it). A key that is there but
+/// cannot be read (the vault is locked) is a refusal, not a reason to make another key.
+pub(crate) fn ensure_camera_key(secrets: &dyn CamSecrets, spec: &Spec) -> Result<(), String> {
+    let name = key_name(&spec.id);
+    if secrets.has(&spec.owner, &name) {
+        return secrets.get(&spec.owner, &name).map(|_| ()).map_err(|e| format!("the recording key cannot be read: {e}"));
+    }
+    let k = RecKey::generate()?;
+    secrets.set(&spec.owner, &name, &k.to_hex()).map_err(|e| format!("the recording key could not be stored in your vault, so recording was not turned on: {e}"))
+}
+
+/// How many days a camera's recordings (and motion events) are kept; the camera's own setting, else the default.
+pub(crate) fn retention_days(data: &Path, camera: &str) -> u32 {
+    let store: Store = std::fs::read(root_of(data).join("settings.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    store.cameras.iter().find(|c| c.camera == camera).map_or_else(d_days, |c| c.max_days)
+}
+
 /// The vault entry that holds a camera's recording key.
 pub fn key_name(camera: &str) -> String {
     format!("camrec.{camera}")
@@ -366,7 +383,7 @@ impl RecEnv {
     }
 }
 
-fn system_ms() -> u64 {
+pub(crate) fn system_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
@@ -829,14 +846,7 @@ impl Recorder {
     }
 
     fn ensure_key(&self, spec: &Spec) -> Result<(), String> {
-        let name = key_name(&spec.id);
-        let secrets = &self.hub.env().secrets;
-        if secrets.has(&spec.owner, &name) {
-            // a key that is there but cannot be read (the vault is locked) is a refusal, not a reason to make another key
-            return secrets.get(&spec.owner, &name).map(|_| ()).map_err(|e| format!("the recording key cannot be read: {e}"));
-        }
-        let k = RecKey::generate()?;
-        secrets.set(&spec.owner, &name, &k.to_hex()).map_err(|e| format!("the recording key could not be stored in your vault, so recording was not turned on: {e}"))
+        ensure_camera_key(&*self.hub.env().secrets, spec)
     }
 
     fn load_key(&self, spec: &Spec) -> Result<RecKey, String> {
@@ -1265,9 +1275,23 @@ impl Recorder {
                     Ok(unit) => {
                         let ts = (self.env.now_ms)().max(last_ts);
                         last_ts = ts;
+                        let masks_on = crate::camdetect::settings::storage_masks(&self.hub.env().data, &spec.id).is_some();
                         let (data, flags) = match unit {
-                            Unit::Jpeg(j) => (j, fmt::F_KEY),
+                            Unit::Jpeg(j) => match crate::camdetect::mask_jpeg_for_storage(&self.hub.env().data, &spec.id, j, &*self.hub.env().encode) {
+                                Ok(j) => (j, fmt::F_KEY),
+                                Err(e) => {
+                                    // never store a picture the privacy masks could not be applied to
+                                    self.close_segment(&spec.id, &info, cur.take());
+                                    set(RecState::Problem(e));
+                                    return;
+                                }
+                            },
                             Unit::H264 { annex_b, key } => {
+                                if masks_on {
+                                    self.close_segment(&spec.id, &info, cur.take());
+                                    set(RecState::Problem("privacy masks are set for recordings and cannot be applied to H.264 video (no decoder); recording stopped. Remove the masks or switch the camera to Motion-JPEG.".into()));
+                                    return;
+                                }
                                 if cur.is_none() && !key {
                                     continue; // a segment of H.264 starts at a key frame
                                 }
@@ -1651,6 +1675,8 @@ impl Recorder {
                 note.push_str(" This is raw H.264 (Annex-B); open it with a video player of your own (for example VLC or ffplay).");
                 out_path = p;
             }
+            // events live in their own folder and are never listed as recordings
+            RecKind::Events => return fail("nothing was recorded in that time".into()),
         }
         if frames == 0 {
             return fail("nothing was recorded in that time".into());

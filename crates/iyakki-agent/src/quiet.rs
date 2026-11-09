@@ -125,6 +125,12 @@ fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
+/// The text of `/proc/asound/pcm` (one line per sound device), empty when it cannot be read. The one reader of that file besides the
+/// startup probe: other code asks here (the shared kernel-access rule, tests/kernel_single_reader.rs).
+pub fn pcm_list_text() -> String {
+    std::fs::read_to_string("/proc/asound/pcm").unwrap_or_default()
+}
+
 /// The numbers of the sound cards under `root` (`card0`, `card1`, ...).
 pub fn cards(root: &Path) -> Vec<u32> {
     dirs(root).iter().filter_map(|p| file_name(p).strip_prefix("card").and_then(|n| n.parse().ok())).collect()

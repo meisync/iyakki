@@ -918,10 +918,12 @@ impl App for PdfApp {
         }
         g.text(area.x + 20.0 * s, area.y + 18.0 * s, 17.0 * s, TEXT, "PDF viewer", Face::Bold);
         let msg = "Open a PDF from the list, from Downloads in the browser (press O on a PDF page), or ask the assistant to open one.";
-        for (i, l) in g.wrap(13.0 * s, msg, Face::Sans, area.w - 40.0 * s).iter().enumerate() {
+        let lines = g.wrap(13.0 * s, msg, Face::Sans, area.w - 40.0 * s);
+        for (i, l) in lines.iter().enumerate() {
             g.text(area.x + 20.0 * s, area.y + 48.0 * s + i as f32 * 18.0 * s, 13.0 * s, MUTED, l, Face::Sans);
         }
-        let mut y = area.y + 100.0 * s;
+        // the list starts under the last line of the message, however many lines it wraps to on a narrow window
+        let mut y = (area.y + 100.0 * s).max(area.y + 48.0 * s + lines.len() as f32 * 18.0 * s + 12.0 * s);
         if self.list.is_empty() {
             g.text(area.x + 20.0 * s, y, 13.0 * s, DIM, "No PDF files in Downloads yet.", Face::Sans);
         }

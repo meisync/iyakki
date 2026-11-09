@@ -29,11 +29,14 @@ fn sheet_selectors(s: &str) -> Result<Vec<Selector>, String> {
 pub struct Viewport {
     pub width: f32,
     pub height: f32,
+    /// The person asked for less motion (`prefers-reduced-motion: reduce`) / more contrast (`prefers-contrast: more`).
+    pub reduce_motion: bool,
+    pub more_contrast: bool,
 }
 
 impl Default for Viewport {
     fn default() -> Self {
-        Viewport { width: 1280.0, height: 800.0 }
+        Viewport { width: 1280.0, height: 800.0, reduce_motion: false, more_contrast: false }
     }
 }
 
@@ -401,7 +404,21 @@ fn media_feature(f: &str, vp: &Viewport) -> bool {
         "width" => media_len(val, vp).is_some_and(|v| (vp.width - v).abs() < 0.5),
         "orientation" => (val == "landscape") == (vp.width >= vp.height),
         "prefers-color-scheme" => val == "light",
-        "prefers-reduced-motion" => val == "no-preference" || val == "reduce",
+        "prefers-reduced-motion" => match val {
+            "reduce" => vp.reduce_motion,
+            "no-preference" => !vp.reduce_motion,
+            _ => false,
+        },
+        "prefers-contrast" => match val {
+            "more" | "high" => vp.more_contrast,
+            "no-preference" => !vp.more_contrast,
+            _ => false,
+        },
+        "forced-colors" => match val {
+            "active" => vp.more_contrast,
+            "none" => !vp.more_contrast,
+            _ => false,
+        },
         "hover" | "any-hover" => val == "hover" || val.is_empty(),
         "pointer" | "any-pointer" => val == "fine" || val.is_empty(),
         "min-resolution" | "-webkit-min-device-pixel-ratio" | "min-device-pixel-ratio" => {
@@ -1083,7 +1100,7 @@ mod tests {
     use super::*;
 
     fn vp() -> Viewport {
-        Viewport { width: 1100.0, height: 800.0 }
+        Viewport { width: 1100.0, height: 800.0, ..Viewport::default() }
     }
 
     #[test]

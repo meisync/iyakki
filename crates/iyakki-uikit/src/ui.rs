@@ -921,6 +921,11 @@ impl TextField {
             note_focus_ring();
         }
         g.hit(r, Event::Focus(id), "field");
+        let node = crate::access::Node::field(&self.placeholder, &self.value, self.mask);
+        crate::access::describe("field", &Event::Focus(id), crate::access::Meta { name: Some(node.name.clone()), role: Some(crate::access::Role::Field), state: node.state.clone(), hidden: false });
+        if focused {
+            crate::access::report_focus(node);
+        }
         crate::ctxmenu::note_field(crate::ctxmenu::FieldNote { rect: r, id, focused, has_selection: self.selection().is_some(), empty: self.value.is_empty(), secret: self.mask });
         let (size, pad) = if boxed { (17.0 * s, 12.0 * s + inset.0) } else { (16.0 * s, 0.0) };
         if boxed {

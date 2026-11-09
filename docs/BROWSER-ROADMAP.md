@@ -24,7 +24,7 @@ What each still lacks is written on its row in `FEATURES.md`.
 
 ## Then (P1)
 Canvas/SVG/WebP (29), real form controls (30), persistent storage and cookies in the vault (31), real-time web (32), a checked
-list of mail/office web apps (33), printing and PDF (35, started: an in-house PDF reader, viewer and writer, see docs/PDF.md), address-bar suggestions (37, started), accessibility (38), assistant tie-ins
+list of mail/office web apps (33), printing and PDF (35, started: an in-house PDF reader, viewer and writer, see docs/PDF.md), address-bar suggestions (37, started), accessibility (38, started: page tree, keyboard walk, browse mode, spoken focus, forced colours, see docs/ACCESSIBILITY.md section "Browser"), assistant tie-ins
 (39), more CSS and JavaScript standards (42).
 
 ## Later (P2)

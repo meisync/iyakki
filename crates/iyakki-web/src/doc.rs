@@ -256,6 +256,9 @@ pub struct Doc {
     pub images: Vec<ImageRef>,
     pub inlines: Vec<InlineBox>,
     pub truncated: bool,
+    /// What a screen reader needs to know about the page (roles, names, states), made from the same tree; `None` for documents that
+    /// were not made from a page (the reader view, plain text).
+    pub access: Option<std::sync::Arc<crate::a11y::A11yTree>>,
 }
 
 const MAX_BLOCKS: usize = 20_000;
@@ -318,7 +321,12 @@ fn build_with(tree: &Tree, cs: Option<&[Option<Computed>]>, pseudo: HashMap<(usi
     }
     b.walk(0, 0);
     b.flush();
-    b.doc
+    let mut doc = b.doc;
+    let hide = |n: usize| cs.and_then(|c| c.get(n)).and_then(|c| c.as_ref()).is_some_and(|c| c.display == Display::None);
+    let mut tree_a11y = crate::a11y::build(tree, &hide);
+    tree_a11y.attach(&doc.links, &doc.controls);
+    doc.access = Some(std::sync::Arc::new(tree_a11y));
+    doc
 }
 
 /// The first address in a `srcset` ("a.png 1x, b.png 2x" gives "a.png").
@@ -333,7 +341,7 @@ pub fn from_html(src: &str) -> Doc {
 
 /// A plain-text page.
 pub fn from_text(src: &str) -> Doc {
-    Doc { title: String::new(), canvas: None, blocks: vec![Block::Pre(src.chars().take(MAX_TEXT).collect())], links: vec![], controls: vec![], forms: vec![], images: vec![], inlines: vec![], truncated: src.chars().count() > MAX_TEXT }
+    Doc { title: String::new(), canvas: None, blocks: vec![Block::Pre(src.chars().take(MAX_TEXT).collect())], links: vec![], controls: vec![], forms: vec![], images: vec![], inlines: vec![], truncated: src.chars().count() > MAX_TEXT, access: None }
 }
 
 struct Builder<'a> {

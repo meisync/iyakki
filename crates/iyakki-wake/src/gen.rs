@@ -54,7 +54,7 @@ pub struct GenConfig {
 
 impl Default for GenConfig {
     fn default() -> Self {
-        GenConfig { voices: 16, speeds: vec![0.85, 0.95, 1.05, 1.2], seed: 1, background_secs: 20, background_files: 12 }
+        GenConfig { voices: 48, speeds: vec![0.85, 0.95, 1.05, 1.2], seed: 1, background_secs: 20, background_files: 12 }
     }
 }
 

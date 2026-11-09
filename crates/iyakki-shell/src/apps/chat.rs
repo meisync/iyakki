@@ -937,6 +937,8 @@ impl ChatApp {
             }
             system.push_str(iyakki_agent::updatestools::PROMPT_RULE);
             system.push_str(iyakki_agent::lockscreentools::PROMPT_RULE);
+            system.push_str(iyakki_agent::accessibilitytools::PROMPT_RULE);
+            system.push_str(iyakki_agent::browsera11y::PROMPT_RULE);
             if cx.session.role != iyakki_sec::policy::Role::Guest {
                 system.push_str(iyakki_agent::disksunlocktools::PROMPT_RULE);
                 if cx.session.role == iyakki_sec::policy::Role::Admin {
@@ -954,6 +956,7 @@ impl ChatApp {
             system.push_str(iyakki_agent::remotefilestools::PROMPT_RULE);
             if cx.session.policy.allows_app(iyakki_sec::policy::App::Cameras) {
                 system.push_str(iyakki_agent::camerastools::PROMPT_RULE);
+                system.push_str(iyakki_agent::camerastools::MOTION_RULE);
             }
             if cx.session.policy.manage_settings {
                 system.push_str(iyakki_agent::sshtunneltools::PROMPT_RULE);
@@ -969,6 +972,7 @@ impl ChatApp {
                 system.push_str(iyakki_agent::sharedvaulttools::PROMPT_RULE);
                 system.push_str(iyakki_agent::vpntools::PROMPT_RULE);
                 system.push_str(iyakki_agent::bluetoothtools::PROMPT_RULE);
+                system.push_str(iyakki_agent::btaudiotools::PROMPT_RULE);
             }
             if k8s.is_none() {
                 system.push_str("\nNo cluster is connected to this workspace. Never start, install or stop a cluster (k3s server, minikube, kind, kubeadm): it is refused. If the person wants to deploy, tell them to use the K8S panel's Change cluster, or to set a cluster up themselves.");
@@ -1141,6 +1145,16 @@ impl ChatApp {
             let guest = cx.session.role == iyakki_sec::policy::Role::Guest;
             Arc::new(iyakki_agent::lockscreentools::LockTools::new(tools_arc, Arc::new(iyakki_agent::lockscreentools::RealBackend { dir: cx.services.dir().to_path_buf(), user: cx.session.user.clone(), guest, audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
         };
+        // accessibility: the status is free, a change asks every time
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let (audit, user, svc) = (cx.audit.clone(), cx.session.user.clone(), cx.services.clone());
+            Arc::new(iyakki_agent::accessibilitytools::AccessTools::new(tools_arc, Arc::new(iyakki_agent::accessibilitytools::RealBackend { dir: cx.services.dir().to_path_buf(), user: cx.session.user.clone(), voice_ready: Arc::new(move || super::settings::access_page::voice_ready(&svc)), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
+        // the Browser's accessibility choices: the status is free, a change asks every time
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            Arc::new(iyakki_agent::browsera11y::BrowserA11yTools::new(tools_arc, Arc::new(iyakki_agent::browsera11y::RealBackend { dir: cx.services.dir().to_path_buf(), user: cx.session.user.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
         // encrypted drives: the status is free, unlock (the password is typed in the DISKS tile, never given to the model) and lock ask every time
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.role != iyakki_sec::policy::Role::Guest {
             let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
@@ -1266,7 +1280,7 @@ impl ChatApp {
             tools_arc
         };
         // Bluetooth keyboards, mice and game pads: the list is free, connecting, disconnecting and forgetting ask (administrators only)
-        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings { Arc::new(iyakki_agent::bluetoothtools::BluetoothTools::real(tools_arc)) } else { tools_arc };
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings { Arc::new(iyakki_agent::btaudiotools::BtAudioTools::real(Arc::new(iyakki_agent::bluetoothtools::BluetoothTools::real(tools_arc)))) } else { tools_arc };
         // the job tools sit outermost: an external agent gets them through the bridge like the others
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if iyakki_agent::jobtools::JobTools::offered(&cx.session.policy) {
             let cwd = workdir.clone().unwrap_or_else(|| std::path::PathBuf::from(format!("/home/{}", cx.session.user)));

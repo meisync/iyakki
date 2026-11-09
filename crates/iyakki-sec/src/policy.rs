@@ -63,10 +63,12 @@ pub enum App {
     Remote,
     /// Live view of USB and network cameras (RTSP, Motion-JPEG): a grid, snapshots, per-person access (`docs/development/CAMERAS.md`).
     Cameras,
+    /// The PDF viewer: pages, zoom, search, copy text (`docs/PDF.md`).
+    Pdf,
 }
 
 impl App {
-    pub const ALL: [App; 39] = [App::Chat, App::Rag, App::Mcp, App::Cli, App::Users, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras];
+    pub const ALL: [App; 40] = [App::Chat, App::Rag, App::Mcp, App::Cli, App::Users, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras, App::Pdf];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -109,6 +111,7 @@ impl App {
             App::Auth => "auth",
             App::Remote => "remote",
             App::Cameras => "cameras",
+            App::Pdf => "pdf",
         }
     }
 
@@ -362,7 +365,7 @@ impl Role {
                 browser_max_minutes: 20,
             },
             Role::Operator => Policy {
-                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras]),
+                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras, App::Pdf]),
                 cli: CliLevel::Full,
                 fs_read: strs(&["{home}", "/shared"]),
                 fs_write: strs(&["{home}", "/shared"]),
@@ -385,7 +388,7 @@ impl Role {
                 browser_max_minutes: 20,
             },
             Role::User => Policy {
-                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Radio, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras]),
+                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Radio, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras, App::Pdf]),
                 cli: CliLevel::Restricted,
                 fs_read: strs(&["{home}", "/shared"]),
                 fs_write: strs(&["{home}"]),

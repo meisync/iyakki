@@ -1,8 +1,9 @@
 # CAMERAS: live view and recording of USB and network cameras
 
 Feature rows: F-CAM-02 (the tile), F-CAM-15 (the RTSP and HTTP Motion-JPEG client), F-CAM-16 (cameras, vault and access), F-CAM-17
-(the assistant's tools), F-CAM-03 (recording, see "Recording" below). Detection is F-CAM-04 and is not built; nothing here looks at
-what is in a picture.
+(the assistant's tools), F-CAM-03 (recording, see "Recording" below), F-CAM-04 and F-CAM-05 (local motion watching, zones, privacy masks,
+events and inbox alerts, see "Motion watching" below). Nothing looks at what is in a picture unless the owner switched motion watching on
+for that camera.
 
 ## What a person gets
 
@@ -187,6 +188,128 @@ Live views of a USB camera are only in the general audit log (they have no folde
 Everything the tile does is reachable by chat. The tools are offered when the shell gave the tools a recorder
 (`CameraViewTools::with_recorder`).
 
+## Motion watching (F-CAM-04) and alerts (F-CAM-05)
+
+Code: `crates/iyakki-agent/src/camdetect/` (`motion.rs` detector, `geom.rs` polygons and masks, `events.rs` event store, `alerts.rs`
+rate limits, `person.rs` the person hook, `settings.rs` settings on disk, `watch.rs` the service), the picture tap in `cameras.rs`
+(`FrameTap`, `Hub::keep_alive`), the mask hooks in `camrec.rs` and `Hub::snapshot`, the tools in `camerastools.rs`, the page in
+`crates/iyakki-tile-cameras/src/motion.rs`, the shell wiring in `crates/iyakki-shell/src/apps/cameras.rs`. Everything runs on this
+computer; nothing is sent anywhere, no model is used, no new dependency was added.
+
+### The rules
+
+* **Off by default, per camera, owner only.** The owner turns it on from the page (key `m` on a camera, then `w`) or by chat
+  (`camera_motion_set`). Turning it on always shows what is analysed, what is stored and which sign shows; in chat the same text is the
+  approval card and it is a hard ask (Auto mode does not skip it). An administrator may turn it OFF. A person the camera is shared with
+  sees THAT it is watched, nothing else. Network cameras only: this computer's own USB camera is never watched in the background.
+* **Modes.** `watched`: motion is looked for only while the camera's picture is on a screen or the camera is being recorded (both
+  already show a sign: the picture itself, the red REC sign). `always`: the hub's stream is kept running by the watcher and a red sign
+  "REC: Front door (motion watch). Click to stop." shows on every screen while a person is signed in; one click switches it off. In
+  every mode a blue MOTION mark sits on the camera's picture in the grid while its pictures are being analysed. Nothing analyses a
+  camera without one of these.
+* **Stops at sign-out.** The events are encrypted with the camera's key in the owner's vault. When the vault closes the watcher finds
+  the key gone within a second or two, closes the detector and drops pictures; nothing is analysed or stored until the vault opens
+  again, and then the background starts fresh (a scene that changed meanwhile is not an event).
+* **Rights.** Turning on, zones and masks, alert settings, reading events and thumbnails: the camera's owner. A refusal is written to
+  the camera's log (`motion.setting`, `motion.events` with "refused: not the owner"). A stranger does not learn the camera exists.
+
+### The detector (`motion.rs`)
+
+A pure library: it is given the picture, its size and its time, and returns events; no clock, no files. Steps: shrink to a 64-cell
+wide grey grid; a running-average background model per cell whose learning rate adapts (fast for still cells, slow at first for
+changed cells and faster the longer they stay changed, so a parked car is absorbed after about a minute and a half); the median
+brightness ratio and shift of all watched cells are taken out first (clouds, lamps, flicker and exposure changes move every cell the
+same way and are not motion); a per-cell threshold of at least 18 grey levels (scaled by sensitivity 1 to 10) and three times the
+cell's own noise; lone cells dropped, the rest joined into blobs of at least 0.4 % of the watched area; a change touching more than
+60 % of the watched cells (lights on or off, night mode) replaces the background and reports nothing; motion in 2 pictures in a row
+starts an event, 4 seconds without motion ends it, 2 seconds of cool-down, at most 10 minutes per event. The detector gets the hub's
+small decoded picture (up to 480 px wide, at most 5 a second), so it adds no decoding of its own.
+
+Honest limits: it finds change, not people. Wind in a tree, rain, insects at night, reflections and flashing screens can alarm (an
+exclude zone over the tree helps); a slow walker in a dark corner can be missed; a person filling more than 60 % of the watched area
+looks like a global change. False alarm rates on real scenes are unknown.
+
+### Zones and privacy masks (`geom.rs`)
+
+Polygons in picture-relative coordinates (0 to 1). A zone is `include` (with at least one, motion counts only inside the include zones,
+each with its own sensitivity) or `exclude` (never watched). A privacy mask is blacked out in a copy of every picture BEFORE the
+detector, the thumbnail and the person hook see it. A polygon is checked before it is kept: 3 to 32 corners, every corner inside the
+picture, no repeated corner, an area of at least 0.05 % of the picture, no crossing or folded edges; refused in words otherwise, and a
+refusal changes nothing. At most 12 zones and 12 masks per camera; a shape with the same name (any case) replaces. Drawing in the tile:
+`z` zone, `x` exclude, `m` mask; click the corners on the picture; Enter or a click on the first corner closes it and asks for a name
+(and sensitivity); Backspace takes the last corner back, Esc cancels. By chat: `camera_zone_set` with `points` or `rect`.
+
+**"Also in recordings and snapshots"** (`s` on the page, `mask_storage`, off by default): the masks are then black before the recorder
+writes a frame and before a snapshot is saved. Recorded Motion-JPEG frames are decoded, blackened and encoded again (so a masked
+recording is no longer "as received": more CPU, and a little quality loss; not measured), a picture that cannot be decoded or masked is
+not stored and the recorder stops with a visible message, and an H.264 camera with masks set for recordings stops the same way (no
+decoder, so the masks cannot be applied). If the settings file exists but cannot be read, stored pictures are covered completely
+(fail closed). With the box not ticked the masks apply to detection only and recordings are stored exactly as before.
+
+### Events (`events.rs`)
+
+Motion start and end with time, zone, score (1 to 100, the changed share of the watched area) and one small thumbnail (160 px wide,
+from the masked picture) are stored per camera in `<data>/cameras/events/<camera id>/YYYY/MM/DD/HHMMSS.iev`, in the same encrypted file
+format as recordings (`camrec_format`, kind `Events`: AES-256-XTS with encrypt-then-MAC per record, a power cut loses only the last
+record, a changed byte is found and the record is never shown) under the same key (`camrec.<id>` in the owner's vault, made when
+watching is first turned on). No zone name, score or picture is readable on disk; times and sizes of records are, like recordings.
+Retention is the camera's recording `max_days` (default 14, 0 = none) plus a 256 MB cap per camera, checked every 5 minutes, oldest
+first; the file being written is never removed. They show in the Motion page's events list (`e`, with the thumbnail of the selected
+one) and as amber ticks above the day timeline of the recordings page.
+
+### Alerts (`alerts.rs`)
+
+Per camera, off by default, to the owner's inbox (source `cameras`, linking back to the camera). At most `alerts_max_per_hour` notices
+per camera in any rolling hour (default 4, never more than 30); the first event of a burst sends one notice and opens a burst of 10
+minutes; the burst's other events send nothing and ONE grouped notice ("7 more motion events at Front door", with the times) follows
+when it ends; events past the hourly limit are stored but make no notice, and the next notice says how many were held back; quiet hours
+(`22:00-06:30`, may wrap midnight) send nothing, and ONE summary follows when they end. The inbox cannot carry a picture, so the
+thumbnail passes only to a sink that can (none ships yet), and only when the person allowed it (`t` on the page); the notice text says
+the picture is in CAMERAS.
+
+### Person detection (the hook, `person.rs`)
+
+There is no person detector. A heuristic on shapes or motion would only guess, so the default `PersonDetector` ("not available") says
+so in every status and no event is ever labelled person. The route for the real thing is the data-science toolkit
+(`DATA-SCIENCE-ADDON-PLAN.md`): an isolated job on the person's own k3s cluster receives ONE picture and returns boxes. The agent asks
+only for an event that already passed the motion detector, only with the masked picture, and only when the camera's `person` switch is
+on and a detector exists. Request and answer (versioned JSON, checked on the way back, `person::request_json` / `parse_answer`):
+
+```text
+request  {"v":1,"task":"person","min_confidence":0.5,
+          "image":{"format":"jpeg","width":480,"height":270,"data_b64":"..."}}
+answer   {"v":1,"boxes":[{"x":0.41,"y":0.20,"w":0.12,"h":0.55,"confidence":0.91,"label":"person"}]}
+error    {"v":1,"error":"words"}
+```
+
+Boxes are fractions of the picture; at most 50; a box outside the picture, a confidence outside 0 to 1 or a missing number makes the
+whole answer invalid; boxes under `min_confidence` or with another label are ignored. `FakePersonDetector` stands in for tests. Not
+built and not run: the job, the transport to it, the cluster (the cluster was not touched).
+
+**Follow-up, not built (rest of F-CAM-05):** "person at the front door, 02:14". When a detector exists and the person opts in (a
+separate switch, off by default, with a card that says the thumbnail goes to the chat model they chose), the existing chat model gets
+the thumbnail plus the zone and time and writes one line for the notice; it uses the agent's budgets and approvals, and any action
+beyond a notice (switching something on, calling someone) is an ordinary approval. Nothing of this sends a picture anywhere today.
+
+### Chat tools
+
+| Tool | Risk | What |
+|---|---|---|
+| `camera_motion_status` | safe | mode, state, zones, masks, alerts, whether a person detector exists (details for the owner) |
+| `camera_motion_set` | asks every time, no standing grant; **turning ON is a hard ask** (also in Auto) | mode off / watched / always, sensitivity, alerts (on, per hour, quiet hours, thumbnail), `mask_storage`, `person` |
+| `camera_events_list` | safe, owner only | events of the last `hours` (default 24) or of a `day`: time, zone, strength, duration |
+| `camera_zone_set` | asks every time, no standing grant | add or remove a zone, exclude zone or privacy mask from `points` or `rect` |
+
+The tools are offered when the shell gave the tools a motion service (`CameraViewTools::with_motion`).
+
+### Cost
+
+Measured with a standalone build of `motion.rs` and `geom.rs` (rustc, optimisation level 3, no other code) on synthetic 640x480
+pictures at 5 a second: about 0.34 ms per picture for mask plus detection, that is about 0.2 % of one core; at optimisation level 0
+(what the test profile builds) about 6 ms per picture, 3 % of one core. The real pipeline adds the hub's decoding (already done for
+the live view; with nobody watching and "always" mode the watcher is the only reason the stream is decoded). Not measured on the
+target machines, not measured with a real camera, not measured for masked recordings (decode and encode of every frame).
+
 ## Tests
 
 * `iyakki-rtsp`: unit tests for every parser with hostile input, and `tests/loopback.rs` against the fake camera (Digest and Basic,
@@ -205,6 +328,15 @@ Everything the tile does is reachable by chat. The tools are offered when the sh
   `iyakki-tile-cameras::rec_tests` (the REC mark, playback with a fake source, day picker, confirmations, settings form,
   non-owner, H.264 message, log page).
 
+* Motion watching: `iyakki-agent::camdetect::motion::tests` (a moving rectangle, slow lighting drift, mains flicker, camera noise and hot pixels,
+  a sudden global change and recovery, a speck, a blink, a parked object, quiet time and cool-down, zones, per-zone sensitivity),
+  `camdetect::geom::tests` (point in polygon, bad polygons, spans, blackening), `camdetect::alerts::tests` (switch, grouping, hourly limit,
+  quiet hours, thumbnail), `camdetect::person::tests` (not available by default, request, answer checks, fake), `camdetect::events::tests`
+  (round trip, no readable text, wrong key, tampering and power cut, retention), `camdetect::watch::tests` (rights, detection with masks,
+  encryption and retention, vault closing, watched mode, alerts, quiet hours, person hook, shapes, masked recordings and snapshots, a live
+  fake camera feeding the detector, thumbnails, settings), `camerastools::tests::motion_tests` (tools, refusals, cards, end to end),
+  `iyakki-tile-cameras::motion_tests` (the page, drawing, naming, events, marks), `iyakki-shell::apps::cameras::tests` (the shell wiring).
+
 ## Not verified
 
 Recording: **no real camera was recorded** (only the in-house fake camera and scripted feeds), **no long run** (the longest test
@@ -214,6 +346,12 @@ a recording decodes with the in-house JPEG decoder on the tile's own thread, so 
 stutter (not measured). H.264 cannot be played until the video add-on exists. The red sign and the REC pill were drawn in tests
 and not looked at on a real screen. The vault key route is tested with a fake vault and with the real vault only through the existing
 camera password route.
+
+Motion watching: **no real camera was used** (synthetic pictures and the in-house fake camera), **false alarm and miss rates on real
+scenes are unknown** (rain, trees, insects, headlights, auto-exposure and night-mode switching are the likely trouble), the CPU figure is
+from a standalone synthetic run, the red sign, the MOTION mark and the drawing page were drawn in tests and not looked at on a real
+screen, masked recordings were tested with the fake JPEG source and the fake camera only, alerts reach the inbox but no other channel,
+and there is no person detector (the hook is tested with a fake).
 
 Live view:
 
@@ -245,3 +383,16 @@ real screen. The assistant tools are tested with scripted calls, not a real mode
    `camera_recording_set`/the limits) and check the recorder stops with the message, then resumes when you free space.
 10. Sign out and in: recording that was on must start again after sign-in; while signed out nothing is written.
 11. Export a minute: confirm, check `Pictures/camera-<name>-.../frame-000001.jpg` opens, and that the log has an `export` line.
+12. Motion watching, on a network camera you own: open **CAMERAS**, select it, press `m`. Press `w` and read the question (it must say
+    nothing leaves the computer, what is stored, and the sign); press `y` for "while watched". Walk in front of the camera while its picture
+    is on a screen: a blue MOTION mark on the picture and, after a few seconds, an event under `e` with a thumbnail. Press `w` again: the
+    next mode (all the time) asks again; then a red sign "REC: ... (motion watch)" must appear on every screen and a click on it must stop it.
+13. Press `z`, click four corners round the driveway, Enter, name it: only motion inside counts. Press `x` over a tree in the wind. Press
+    `m`, draw a mask over a neighbour's window, name it: the picture in the page still shows it, but the thumbnail of an event must show
+    it black. Press `s` and record a minute: the recording page must show the area black; with `s` off it must not.
+14. Press `a` for alerts and walk around five times: the inbox gets one notice, then one grouped notice ("N more motion events"), and no
+    more than the per-hour limit. Set quiet hours with `c` that include now and walk: nothing arrives until they end, then one summary.
+15. Sign out and in: while signed out no MOTION mark, no event, no sign; after sign-in a camera switched on resumes (the first pictures
+    only settle the background).
+16. Say what false alarms you get and from what (the log line is `motion.start` with the zone and score in the camera's log, `l` on the
+    recordings page).

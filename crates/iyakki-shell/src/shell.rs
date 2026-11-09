@@ -307,7 +307,8 @@ const TILES: &[Tile] = &[
     Tile { app: PApp::Learn, icon: Icon::Learn, label: "LEARN", sub: "Study and quiz", accent: crate::apps::learn::ACCENT, group: Some(Group::Home) },
     Tile { app: PApp::DevTools, icon: Icon::Edit, label: "DEV TOOLS", sub: "JSON, JWT, QR code", accent: crate::apps::devtools::ACCENT, group: Some(Group::Work) },
     Tile { app: PApp::Remote, icon: Icon::Data, label: "REMOTE FILES", sub: "SFTP, FTPS", accent: crate::apps::remotefiles::ACCENT, group: Some(Group::System) },
-    Tile { app: PApp::Cameras, icon: Icon::Camera, label: "CAMERAS", sub: "Live view, snapshots", accent: crate::apps::cameras::ACCENT, group: Some(Group::WebMedia) },
+    Tile { app: PApp::Cameras, icon: Icon::Camera, label: "CAMERAS", sub: "Live view, photos", accent: crate::apps::cameras::ACCENT, group: Some(Group::WebMedia) },
+    Tile { app: PApp::Pdf, icon: Icon::Data, label: "PDF", sub: "Read, search, copy", accent: crate::apps::pdfview::ACCENT, group: Some(Group::WebMedia) },
     Tile { app: PApp::Auth, icon: Icon::Lock, label: "AUTH", sub: "One-time codes", accent: crate::apps::auth::ACCENT, group: Some(Group::System) },
     Tile { app: PApp::Checkup, icon: Icon::Checkup, label: "CHECK-UP", sub: "Test the hardware", accent: crate::apps::checkup::ACCENT, group: Some(Group::System) },
 ];
@@ -343,6 +344,8 @@ fn remember_user(env: &ShellEnv, name: &str) {
 
 pub struct Shell {
     env: ShellEnv,
+    /// Accessibility: the screen reader, the keyboard walk and the saved options (`shell_access.rs`).
+    acc: access_impl::AccessUi,
     /// Hit regions from the last rendered frame (clicks are resolved against these).
     hits: Vec<crate::ui::Hit>,
     /// Clipboard-history picker overlay (Ctrl+Shift+V, right-click, or the clipboard button).
@@ -575,7 +578,7 @@ impl Shell {
         };
         // tests run as a desktop unless one asks for cloud mode (`set_cloud_for_test`)
         let cloud = if cfg!(test) { iyakki_agent::cloudmode::CloudMode::desktop() } else { iyakki_agent::cloudmode::detect(env.services.cloud_setting()) };
-        let mut sh = Shell { env, hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), update_count: 0, cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, devask: Default::default(), tzask: Default::default(), camera: if wants_system_camera(cfg!(test), &cloud) { crate::camera::Presence::system() } else { crate::camera::Presence::none() }, cam_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), osk: Default::default(), tenants: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), lockui: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
+        let mut sh = Shell { env, acc: Default::default(), hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), update_count: 0, cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, devask: Default::default(), tzask: Default::default(), camera: if wants_system_camera(cfg!(test), &cloud) { crate::camera::Presence::system() } else { crate::camera::Presence::none() }, cam_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), osk: Default::default(), tenants: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), lockui: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
         if cloud.on {
             sh.apply_cloud(cloud);
         }
@@ -1173,6 +1176,7 @@ impl Shell {
             PApp::Auth => Box::new(crate::apps::auth::AuthApp::new(&cx)),
             PApp::Remote => Box::new(crate::apps::remotefiles::RemoteFilesApp::new(&cx)),
             PApp::Cameras => Box::new(crate::apps::cameras::CamerasApp::new(&cx)),
+            PApp::Pdf => Box::new(crate::apps::pdfview::PdfApp::new(&cx)),
             PApp::Inbox => Box::new(crate::apps::inbox::InboxApp::new(&cx)),
         };
         self.env.audit.record(&cx.session.user, "app.open", app.id());
@@ -1896,6 +1900,10 @@ impl Shell {
     /// The event for a screen that is on (the saver has already seen it).
     fn handle_awake(&mut self, ev: &Event) {
         use crate::ui::clipboard;
+        // the accessibility keys work on every screen, the sign-in and the lock screen too
+        if self.access_intercept(ev) {
+            return;
+        }
         if self.osk_intercept(ev) {
             return;
         }
@@ -1919,7 +1927,7 @@ impl Shell {
         // the click on the red REC sign switches off every recording of the signed-in person's cameras (and audits it)
         if matches!(ev, Event::Tab(915)) {
             if let Some(s) = &self.session {
-                iyakki_agent::camrec::stop_all_for(self.env.services.dir(), &s.user);
+                crate::apps::cameras::stop_all_signs(self.env.services.dir(), &s.user);
             }
             self.stale = true;
             return;
@@ -1964,6 +1972,7 @@ impl Shell {
             if self.tick % 2 == 0 && matches!(self.screen, Screen::Login(_) | Screen::Setup(_)) && self.session.is_none() && !crate::fx::reduced_motion() {
                 self.stale = true;
             }
+            self.access_tick();
             self.fn_tick();
             self.tbar_tick();
             self.check_alarms(iyakki_agent::clock::now_unix());
@@ -2098,6 +2107,13 @@ impl Shell {
             }
             if self.tick % 90 == 0 {
                 self.check_new_devices();
+            }
+            // a device that wants to pair while Settings is not open: say who and where to answer (the popup opens on the page)
+            #[cfg(not(test))]
+            if self.tick % 30 == 10 && !matches!(self.screen, Screen::App(_, PApp::Settings)) {
+                if let Some(n) = crate::btmodel::next_pairing_notice(&iyakki_devctl::System) {
+                    self.say_info(n);
+                }
             }
             if self.tick % 30 == 15 {
                 // a sound card that came up after the start (the built-in speakers of a MacBook take about 11 s)
@@ -3329,6 +3345,7 @@ impl Shell {
         self.live = false; // a whole scene is drawn: nothing is pending
         g.hits.clear();
         g.clear_probes();
+        crate::access::start_frame();
         let drawing = self.panes_drawing_display();
         self.vol.rects.retain(|p| p.disp != drawing);
         g.mouse = self.disp_mouse(self.panes_active_display());
@@ -3561,7 +3578,7 @@ impl Shell {
         }
         // a camera records (F-CAM-03): a red REC sign on every screen while the signed-in person's recording runs, a click stops it
         if self.session.is_some() {
-            let names = iyakki_agent::camrec::active_names(self.env.services.dir());
+            let names = crate::apps::cameras::sign_names(self.env.services.dir());
             if !names.is_empty() {
                 let below = usize::from(self.cam_sign) + usize::from(cap != 0 && !in_browser);
                 let r = draw_rec_sign(g, h, s, &names, below);
@@ -3630,6 +3647,8 @@ impl Shell {
         self.draw_osk(g, w, h, s);
         self.hits = std::mem::take(&mut g.hits);
         self.probes = g.probes();
+        self.access_observe(true);
+        self.access_draw(g);
         if dev_state {
             self.dev_state_end(g);
         }
@@ -3944,6 +3963,7 @@ impl Shell {
                 LItem::Sys(t) => t,
                 LItem::App(e) => {
                     draw_custom_tile(g, e, *r, s, i == self.sel, tilehub_allowed(&sess.policy));
+                    g.hit(*r, Event::MouseDown((r.x + r.w / 2.0) as i32, (r.y + r.h / 2.0) as i32), &e.title);
                     continue;
                 }
                 LItem::Empty => {
@@ -3951,6 +3971,7 @@ impl Shell {
                     continue;
                 }
             };
+            g.hit(*r, Event::MouseDown((r.x + r.w / 2.0) as i32, (r.y + r.h / 2.0) as i32), t.label); // a region for the keyboard walk; the click itself is resolved by position
             let permitted = sess.policy.allows_app(t.app);
             // CAMERA without a camera: greyed with a hint, no lock
             let missing = t.app == PApp::Camera && !self.camera.available() && !self.browser_camera_offered();
@@ -5350,7 +5371,7 @@ pub(crate) mod tests {
         sh.set_group(Group::Home);
         assert_eq!(names(&sh), vec!["CHAT", "RAG", "SKILLS", "CALENDAR", "TALES", "VOICE", "LAB", "LEARN"]);
         sh.set_group(Group::WebMedia);
-        assert_eq!(names(&sh), vec!["BROWSER", "RADIO", "MEDIA", "CAMERA"]);
+        assert_eq!(names(&sh), vec!["BROWSER", "RADIO", "MEDIA", "CAMERA", "CAMERAS", "PDF"]);
         sh.set_group(Group::System);
         assert!(names(&sh).contains(&"USERS"));
         key(&mut sh, Key::Char('o'));
@@ -5515,8 +5536,8 @@ pub(crate) mod tests {
         at(&mut sh, &mut g, r);
         assert_eq!(sh.screen_name(), format!("app:{}", sh.group_tiles()[cap].app.id()));
         sh.leave_app(); // some tiles keep Esc for themselves (the IDE, K8S)
-        // a small section is a single page: no dots, and the wheel does nothing
-        sh.set_group(Group::WebMedia);
+        // a small section is a single page: no dots, and the wheel does nothing (Data: Web & Media grew to six tiles with CAMERAS and PDF)
+        sh.set_group(Group::Data);
         sh.render(&mut g);
         sh.handle(&Event::Scroll(-1));
         assert_eq!(sh.sel, 0);
@@ -6746,6 +6767,8 @@ mod battery_impl;
 mod saver_impl;
 #[path = "shell_lock.rs"]
 mod lock_impl;
+#[path = "shell_access.rs"]
+mod access_impl;
 #[path = "shell_power.rs"]
 mod power_impl;
 #[cfg(test)]
@@ -6832,6 +6855,10 @@ mod loginbar_tests;
 #[cfg(test)]
 #[path = "shell_lock_tests.rs"]
 mod lock_tests;
+
+#[cfg(test)]
+#[path = "shell_access_tests.rs"]
+mod access_tests;
 
 /// The red "Camera in use by the assistant" sign, bottom left of every screen.
 pub(crate) fn draw_camera_sign(g: &mut Gfx, h: u32, s: f32, what: &str) -> R {

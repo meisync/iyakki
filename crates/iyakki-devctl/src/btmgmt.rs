@@ -44,6 +44,9 @@ pub const OP_USER_CONFIRM_REPLY: u16 = 0x001c;
 pub const OP_USER_CONFIRM_NEG_REPLY: u16 = 0x001d;
 pub const OP_USER_PASSKEY_REPLY: u16 = 0x001e;
 pub const OP_USER_PASSKEY_NEG_REPLY: u16 = 0x001f;
+pub const OP_ADD_DEVICE: u16 = 0x0033;
+pub const OP_SET_DEV_CLASS: u16 = 0x000e;
+pub const OP_ADD_UUID: u16 = 0x0010;
 pub const OP_START_DISCOVERY: u16 = 0x0023;
 pub const OP_STOP_DISCOVERY: u16 = 0x0024;
 pub const OP_CONFIRM_NAME: u16 = 0x0025;
@@ -79,6 +82,16 @@ pub const SET_LE: u32 = 1 << 9;
 pub const DEV_FOUND_CONFIRM_NAME: u32 = 0x02;
 
 /// Address types: BR/EDR (classic), LE public, LE random.
+/// The 17 bytes of an Add UUID command: the 128-bit UUID (little endian) of a 16-bit Bluetooth UUID, then the service class hint.
+pub fn uuid128_le(uuid16: u16, hint: u8) -> Vec<u8> {
+    // 0000xxxx-0000-1000-8000-00805F9B34FB, least significant byte first
+    let mut v = vec![0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, uuid16 as u8, (uuid16 >> 8) as u8, 0x00, 0x00];
+    v.push(hint);
+    v
+}
+
+/// Add Device action: connect in the background whenever the device advertises.
+pub const ADD_DEVICE_AUTO_CONNECT: u8 = 2;
 pub const ADDR_BREDR: u8 = 0;
 pub const ADDR_LE_PUBLIC: u8 = 1;
 pub const ADDR_LE_RANDOM: u8 = 2;
@@ -571,6 +584,11 @@ impl<T: Transport> Mgmt<T> {
 
     /// [`scan`](Self::scan) for the given address types.
     pub fn scan_types(&mut self, index: u16, dur: Duration, types: u8) -> Result<Vec<Found>, Error> {
+        self.scan_types_until(index, dur, types, None)
+    }
+
+    /// [`scan_types`](Self::scan_types) that also ends early (with what it has) when `stop` is set: the Bluetooth page's Stop button.
+    pub fn scan_types_until(&mut self, index: u16, dur: Duration, types: u8, stop: Option<&std::sync::atomic::AtomicBool>) -> Result<Vec<Found>, Error> {
         self.command(OP_START_DISCOVERY, index, &[types])?;
         let mut found: Vec<Found> = Vec::new();
         let deadline = Instant::now() + dur;
@@ -581,11 +599,20 @@ impl<T: Transport> Mgmt<T> {
         let mut pending: Vec<String> = Vec::new();
         loop {
             let end = if pending.is_empty() { deadline } else { name_grace };
-            let left = end.saturating_duration_since(Instant::now());
-            if left.is_zero() {
+            let mut left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() || stop.is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed)) {
                 break;
             }
-            let Some(ev) = self.next_event(left)? else { break };
+            let watching = stop.is_some();
+            if watching {
+                left = left.min(Duration::from_millis(200));
+            }
+            let Some(ev) = self.next_event(left)? else {
+                if watching && Instant::now() < end {
+                    continue; // only the short look at the stop flag ended
+                }
+                break;
+            };
             match ev.code {
                 EV_DEVICE_FOUND if ev.index == index => {
                     if let Some(f) = parse_found(&ev.params) {
@@ -720,6 +747,26 @@ impl<T: Transport> Mgmt<T> {
     }
 
     /// Forgets a paired device (and disconnects it).
+    /// Add Device: tells the controller what to do when this device is seen (action 2: connect in the background; used for bonded
+    /// low-energy keyboards and mice so they reconnect when they advertise).
+    pub fn add_device(&mut self, index: u16, addr: &str, addr_type: u8, action: u8) -> Result<(), Error> {
+        let mut p = parse_addr(addr).ok_or(Error::Protocol("bad address"))?.to_vec();
+        p.push(addr_type);
+        p.push(action);
+        self.command(OP_ADD_DEVICE, index, &p).map(|_| ())
+    }
+
+    /// Set Device Class: the major and minor class the controller advertises (audio / video, loudspeaker is 4 and 0x14 >> 2 = 5 ...).
+    pub fn set_device_class(&mut self, index: u16, major: u8, minor: u8) -> Result<(), Error> {
+        self.command(OP_SET_DEV_CLASS, index, &[major, minor]).map(|_| ())
+    }
+
+    /// Add UUID: tells the controller a service it offers (its 16-bit form on the Bluetooth base) and the service class bits (`hint`, the
+    /// upper byte of the class of device: 0x04 rendering, 0x20 audio) that go with it.
+    pub fn add_uuid16(&mut self, index: u16, uuid: u16, hint: u8) -> Result<(), Error> {
+        self.command(OP_ADD_UUID, index, &uuid128_le(uuid, hint)).map(|_| ())
+    }
+
     pub fn unpair(&mut self, index: u16, addr: &str, addr_type: u8) -> Result<(), Error> {
         let mut p = parse_addr(addr).ok_or(Error::Protocol("bad address"))?.to_vec();
         p.push(addr_type);

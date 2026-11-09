@@ -132,9 +132,25 @@ pub fn recorder_for(cx: &AppCx) -> Arc<iyakki_agent::camrec::Recorder> {
     iyakki_agent::camrec::for_hub(&hub_for(cx))
 }
 
-/// At sign-in: start supervising recordings (those switched on start again by themselves) and the retention checks.
+/// The installation's motion watcher (F-CAM-04), with the inbox as the place its notices go.
+fn motion_from(services: &Arc<iyakki_agent::services::Services>, hub: &Arc<agent::Hub>) -> Arc<iyakki_agent::camdetect::watch::MotionService> {
+    let m = iyakki_agent::camdetect::watch::for_hub(hub);
+    if !m.has_sink() {
+        m.set_sink(Arc::new(iyakki_agent::camdetect::watch::InboxSink(services.clone())));
+    }
+    m
+}
+
+pub fn motion_for(cx: &AppCx) -> Arc<iyakki_agent::camdetect::watch::MotionService> {
+    motion_from(&cx.services, &hub_for(cx))
+}
+
+/// At sign-in: start supervising recordings (those switched on start again by themselves) and the retention checks, and the motion
+/// watcher (watching that the owner switched on starts again once their vault is open).
 pub fn resume_recording(services: &Arc<iyakki_agent::services::Services>, audit: &Arc<crate::accounts::AuditLog>, store: &Arc<Mutex<crate::accounts::UserStore>>) {
-    iyakki_agent::camrec::for_hub(&hub_from(services, audit, store, system_usb()));
+    let hub = hub_from(services, audit, store, system_usb());
+    iyakki_agent::camrec::for_hub(&hub);
+    motion_from(services, &hub);
 }
 
 /// The signed-in person as the hub sees them: their home and file rules decide where a snapshot may go.
@@ -148,15 +164,28 @@ pub fn who_for(cx: &AppCx) -> agent::Who {
 
 static REC_SIGN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// What the red sign says: the cameras that record, and the cameras watched for motion all the time (a camera watched only while its
+/// picture is on a screen or recorded needs no sign of its own: the picture or the REC sign is the indicator).
+pub fn sign_names(data: &std::path::Path) -> Vec<String> {
+    let mut v = iyakki_agent::camrec::active_names(data);
+    v.extend(iyakki_agent::camdetect::watch::active_names(data).into_iter().map(|n| format!("{n} (motion watch)")));
+    v
+}
+
+/// The click on the red sign: every recording and every all-the-time motion watch of the signed-in person's cameras stops.
+pub fn stop_all_signs(data: &std::path::Path, user: &str) -> usize {
+    iyakki_agent::camrec::stop_all_for(data, user) + iyakki_agent::camdetect::watch::stop_all_for(data, user)
+}
+
 /// Whether the red REC sign has to appear or go away since the last call (the shell redraws when it does).
 pub fn rec_sign_changed(data: &std::path::Path) -> bool {
-    let on = !iyakki_agent::camrec::active_names(data).is_empty();
+    let on = !sign_names(data).is_empty();
     on != REC_SIGN.swap(on, std::sync::atomic::Ordering::SeqCst)
 }
 
 /// The assistant's camera tools around `inner`.
 pub fn tools_for(cx: &AppCx, inner: Arc<dyn iyakki_agent::agent::Tools>) -> Arc<dyn iyakki_agent::agent::Tools> {
-    Arc::new(iyakki_agent::camerastools::CameraViewTools::new(inner, hub_for(cx), who_for(cx), cx.services.clone()).with_recorder(recorder_for(cx)))
+    Arc::new(iyakki_agent::camerastools::CameraViewTools::new(inner, hub_for(cx), who_for(cx), cx.services.clone()).with_recorder(recorder_for(cx)).with_motion(motion_for(cx)))
 }
 
 // ------------------------------------------------------------------------------------------------ the tile's source
@@ -164,6 +193,15 @@ pub fn tools_for(cx: &AppCx, inner: Arc<dyn iyakki_agent::agent::Tools>) -> Arc<
 pub struct ShellCameras {
     pub hub: Arc<agent::Hub>,
     pub who: agent::Who,
+}
+
+fn motion_mode_to_api(m: iyakki_agent::camdetect::settings::WatchMode) -> api::MotionMode {
+    use iyakki_agent::camdetect::settings::WatchMode;
+    match m {
+        WatchMode::Off => api::MotionMode::Off,
+        WatchMode::Watched => api::MotionMode::Watched,
+        WatchMode::Always => api::MotionMode::Always,
+    }
 }
 
 fn status_to_api(s: agent::Status) -> api::Status {
@@ -269,6 +307,64 @@ impl api::CameraSource for ShellCameras {
     fn rec_export(&self, id: &str, from_ms: u64, to_ms: u64, confirmed: bool) -> Result<String, String> {
         iyakki_agent::camrec::for_hub(&self.hub).export(&self.who, id, from_ms, to_ms, confirmed).map(|o| format!("{} ({} pictures){}", o.path.display(), o.frames, o.note))
     }
+    fn motion_ids(&self) -> Vec<String> {
+        iyakki_agent::camdetect::watch::analysing_ids(&self.hub.data_dir())
+    }
+    fn motion_info(&self, id: &str) -> Option<api::MotionInfo> {
+        let m = iyakki_agent::camdetect::watch::for_hub(&self.hub);
+        let st = m.status(&self.who, id).ok()?;
+        let c = &st.settings;
+        let shape = |z: &iyakki_agent::camdetect::settings::ShapeRec| api::ShapeInfo { name: z.name.clone(), include: z.include, sensitivity: z.sensitivity, points: z.points.iter().map(|p| (p[0], p[1])).collect() };
+        Some(api::MotionInfo {
+            mode: motion_mode_to_api(c.mode),
+            sensitivity: c.sensitivity,
+            zones: c.zones.iter().map(shape).collect(),
+            masks: c.masks.iter().map(shape).collect(),
+            mask_storage: c.mask_storage,
+            alerts_on: c.alerts.enabled,
+            alerts_max_per_hour: c.alerts.max_per_hour,
+            quiet: c.alerts.quiet.clone(),
+            alerts_thumbnail: c.alerts.thumbnail,
+            person: c.person,
+            person_note: st.person_note,
+            state: st.state,
+            analysing: st.analysing,
+            owner: st.owner,
+            keep_days: st.keep_days,
+        })
+    }
+    fn motion_set(&self, id: &str, c: &api::MotionChange) -> Result<(), String> {
+        use iyakki_agent::camdetect::settings::WatchMode;
+        let m = iyakki_agent::camdetect::watch::for_hub(&self.hub);
+        let any_alert = c.alerts_on.is_some() || c.alerts_max_per_hour.is_some() || c.quiet.is_some() || c.alerts_thumbnail.is_some();
+        let alerts = any_alert.then(|| iyakki_agent::camdetect::watch::AlertChange { enabled: c.alerts_on, max_per_hour: c.alerts_max_per_hour, quiet: c.quiet.clone(), thumbnail: c.alerts_thumbnail, group_s: None });
+        let mode = c.mode.map(|m| match m {
+            api::MotionMode::Off => WatchMode::Off,
+            api::MotionMode::Watched => WatchMode::Watched,
+            api::MotionMode::Always => WatchMode::Always,
+        });
+        m.set(&self.who, id, &iyakki_agent::camdetect::watch::Change { mode, sensitivity: c.sensitivity, mask_storage: c.mask_storage, person: None, alerts }).map(|_| ())
+    }
+    fn motion_shape_set(&self, id: &str, mask: bool, s: &api::ShapeInfo) -> Result<(), String> {
+        use iyakki_agent::camdetect::geom::Pt;
+        let m = iyakki_agent::camdetect::watch::for_hub(&self.hub);
+        let pts: Vec<Pt> = s.points.iter().map(|p| Pt::new(p.0, p.1)).collect();
+        let kind = if mask { iyakki_agent::camdetect::watch::ShapeKind::Mask } else { iyakki_agent::camdetect::watch::ShapeKind::Zone };
+        m.shape_set(&self.who, id, kind, &s.name, s.include, s.sensitivity, &pts)
+    }
+    fn motion_shape_remove(&self, id: &str, mask: bool, name: &str) -> Result<(), String> {
+        let m = iyakki_agent::camdetect::watch::for_hub(&self.hub);
+        m.shape_remove(&self.who, id, if mask { iyakki_agent::camdetect::watch::ShapeKind::Mask } else { iyakki_agent::camdetect::watch::ShapeKind::Zone }, name)
+    }
+    fn motion_events(&self, id: &str, from_ms: u64, to_ms: u64, limit: usize) -> Result<Vec<api::MotionRow>, String> {
+        let m = iyakki_agent::camdetect::watch::for_hub(&self.hub);
+        m.events(&self.who, id, from_ms, to_ms, limit).map(|v| v.into_iter().map(|e| api::MotionRow { id: e.id, start_ms: e.start_ms, end_ms: e.end_ms, label: m.time_text(e.start_ms), zone: e.zone, score: e.peak.max(e.score), person: e.person, has_thumb: e.has_thumb }).collect())
+    }
+    fn motion_thumb(&self, id: &str, event: u64) -> Result<Option<api::Frame>, String> {
+        let m = iyakki_agent::camdetect::watch::for_hub(&self.hub);
+        m.thumb(&self.who, id, event).map(|o| o.map(|(width, height, rgba)| api::Frame { seq: event, width, height, rgba: Arc::new(rgba) }))
+    }
+
     fn rec_audit(&self, id: &str) -> Result<Vec<api::AuditRow>, String> {
         let rec = iyakki_agent::camrec::for_hub(&self.hub);
         rec.audit(&self.who, id, 200).map(|v| v.into_iter().map(|l| api::AuditRow { time: rec.time_text(l.t * 1000), who: l.who, what: if l.detail.is_empty() { l.ev } else { format!("{}: {}", l.ev, l.detail) }, ok: l.ok }).collect())

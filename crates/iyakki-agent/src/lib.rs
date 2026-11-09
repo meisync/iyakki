@@ -131,6 +131,11 @@ pub mod lockscreen;
 pub mod lockscreentools;
 #[cfg(test)]
 mod lockscreentools_tests;
+pub mod accessibility;
+pub mod accessibilitytools;
+pub mod browsera11y;
+#[cfg(test)]
+mod accessibilitytools_tests;
 pub mod micdefaults;
 pub mod micpcm;
 pub mod mixer;
@@ -200,6 +205,7 @@ pub mod sftptools;
 pub mod remotefiles;
 pub mod remotefilestools;
 pub mod cameras;
+pub mod camdetect;
 pub mod camerastools;
 pub mod camrec;
 pub mod camrec_format;
@@ -250,6 +256,7 @@ pub mod vpn_nft;
 pub mod vpn_sys;
 pub mod vpntools;
 pub mod bluetoothtools;
+pub mod btaudiotools;
 #[cfg(test)]
 mod vpn_mgr_tests;
 #[cfg(test)]

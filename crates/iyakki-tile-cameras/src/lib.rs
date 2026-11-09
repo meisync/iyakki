@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 
+pub mod motion;
 pub mod rec;
 
 use iyakki_tile_api::cameras::{CamInfo, Frame, Kind, NewCam, Status};
@@ -38,6 +39,8 @@ enum Screen {
     Confirm(String),
     /// The recordings page of one camera.
     Rec(Box<rec::RecView>),
+    /// The motion page of one camera (zones, privacy masks, alerts, events).
+    Motion(Box<motion::MotionView>),
 }
 
 pub struct CamerasApp {
@@ -55,6 +58,8 @@ pub struct CamerasApp {
     shown: Vec<String>,
     /// The cameras whose recorder is running (each gets a red REC mark on its picture).
     rec_ids: Vec<String>,
+    /// The cameras whose pictures are being analysed for motion (each gets a MOTION mark on its picture).
+    motion_ids: Vec<String>,
 }
 
 impl Default for CamerasApp {
@@ -83,7 +88,7 @@ fn status_color(s: &Status) -> [u8; 4] {
 
 impl CamerasApp {
     pub fn new() -> CamerasApp {
-        CamerasApp { screen: Screen::Grid, cams: vec![], last_refresh: None, layout: 4, first: 0, sel: 0, note: None, flash: None, pix: HashMap::new(), tick: 0, privacy: false, shown: vec![], rec_ids: vec![] }
+        CamerasApp { screen: Screen::Grid, cams: vec![], last_refresh: None, layout: 4, first: 0, sel: 0, note: None, flash: None, pix: HashMap::new(), tick: 0, privacy: false, shown: vec![], rec_ids: vec![], motion_ids: vec![] }
     }
 
     pub fn layout(&self) -> usize {
@@ -104,6 +109,17 @@ impl CamerasApp {
             Screen::Rec(r) => Some(r),
             _ => None,
         }
+    }
+    /// The motion page, when it is open.
+    pub fn motion_page(&self) -> Option<&motion::MotionView> {
+        match &self.screen {
+            Screen::Motion(m) => Some(m),
+            _ => None,
+        }
+    }
+    /// The cameras that showed a MOTION mark on the last frame.
+    pub fn motion_marked(&self) -> &[String] {
+        &self.motion_ids
     }
     /// The cameras that showed a red REC mark on the last frame.
     pub fn rec_marked(&self) -> &[String] {
@@ -139,6 +155,7 @@ impl CamerasApp {
         self.last_refresh = Some(tick);
         self.cams = cx.cameras.cameras();
         self.rec_ids = cx.cameras.recording_ids();
+        self.motion_ids = cx.cameras.motion_ids();
         self.fix_selection();
     }
 
@@ -254,6 +271,14 @@ impl CamerasApp {
                     None => self.say("There is no camera to show recordings of.", false),
                 }
             }
+            Event::Key(Key::Char('m')) | Event::Tab(35) => {
+                let id = big.clone().or_else(|| self.cams.get(self.sel).map(|c| c.id.clone()));
+                match id.and_then(|i| self.cams.iter().find(|c| c.id == i).cloned()) {
+                    Some(c) if c.kind == Kind::Network => self.screen = Screen::Motion(Box::new(motion::MotionView::new(cx, &c.id, &c.name))),
+                    Some(_) => self.say("This computer's own camera is never watched in the background.", false),
+                    None => self.say("There is no camera to watch for motion.", false),
+                }
+            }
             Event::Key(Key::Char('a')) | Event::Tab(30) => self.screen = Screen::Form(Box::new(self.cam_form(cx, None)), None),
             Event::Key(Key::Char('e')) | Event::Tab(32) => match self.cams.get(self.sel).cloned() {
                 Some(c) if c.kind == Kind::Network && c.manage => self.screen = Screen::Form(Box::new(self.cam_form(cx, Some(&c))), Some(c.id)),
@@ -336,6 +361,13 @@ impl CamerasApp {
             g.circle(r.x + 20.0 * s, r.y + 19.0 * s, 5.0 * s, rgb(255, 255, 255));
             g.text(r.x + 31.0 * s, r.y + 12.0 * s, 12.0 * s, rgb(255, 255, 255), "REC", Face::Bold);
         }
+        // a camera whose pictures are being analysed for motion says so on its picture, always
+        if self.motion_ids.contains(&c.id) {
+            let off = if self.rec_ids.contains(&c.id) { 70.0 } else { 0.0 };
+            let w = g.text_width(12.0 * s, "MOTION", Face::Bold) + 24.0 * s;
+            g.rrect(r.x + (8.0 + off) * s, r.y + 8.0 * s, w, 22.0 * s, 11.0 * s, [20, 80, 150, 235]);
+            g.text(r.x + (20.0 + off) * s, r.y + 12.0 * s, 12.0 * s, rgb(255, 255, 255), "MOTION", Face::Bold);
+        }
         if let Some(i) = idx {
             g.hit(r, Event::Row(i), &c.name);
         }
@@ -346,16 +378,13 @@ impl CamerasApp {
         let w = area.w - 40.0 * s;
         let mut y = area.y + 8.0 * s;
         // layout buttons and actions
-        let mut bx = x;
-        for (i, n) in LAYOUTS.iter().enumerate() {
-            let on = *n == self.layout;
-            bx += g.button(bx, y, 13.0 * s, &format!("{n}"), if on { ACCENT } else { MUTED }, Event::Tab(i + 1)) + 6.0 * s;
+        // one row of buttons that wraps (a narrow window or a large text size makes more rows, nothing is cut off)
+        let mut bar: Vec<(String, [u8; 4], Event)> = LAYOUTS.iter().enumerate().map(|(i, n)| (format!("{n}"), if *n == self.layout { ACCENT } else { MUTED }, Event::Tab(i + 1))).collect();
+        for (label, tab, col) in [("Add (a)", 30, ACCENT), ("Snapshot (s)", 31, MUTED), ("Recordings (p)", 34, MUTED), ("Motion (m)", 35, MUTED), ("Edit (e)", 32, MUTED), ("Remove (d)", 33, MUTED)] {
+            bar.push((label.to_string(), col, Event::Tab(tab)));
         }
-        bx += 14.0 * s;
-        for (label, tab, col) in [("Add (a)", 30, ACCENT), ("Snapshot (s)", 31, MUTED), ("Recordings (p)", 34, MUTED), ("Edit (e)", 32, MUTED), ("Remove (d)", 33, MUTED)] {
-            bx += g.button(bx, y, 13.0 * s, label, col, Event::Tab(tab)) + 6.0 * s;
-        }
-        y += 40.0 * s;
+        let (bar_h, _) = g.button_flow(x, y, w, 13.0 * s, 6.0 * s, &bar);
+        y += bar_h.max(34.0 * s) + 6.0 * s;
         let (first, layout) = (self.first, self.layout);
         let visible: Vec<usize> = (first..(first + layout).min(self.cams.len())).collect();
         self.privacy = visible.iter().any(|i| self.cams[*i].kind == Kind::Usb);
@@ -391,15 +420,25 @@ impl CamerasApp {
             self.screen = Screen::Grid;
             return;
         };
-        g.button(x, y, 13.0 * s, "Back (Esc)", MUTED, Event::Key(Key::Esc));
-        g.button(x + 130.0 * s, y, 13.0 * s, "Snapshot (s)", ACCENT, Event::Tab(31));
+        let mut bar = vec![("Back (Esc)".to_string(), MUTED, Event::Key(Key::Esc)), ("Snapshot (s)".to_string(), ACCENT, Event::Tab(31))];
         if c.kind == Kind::Network {
-            g.button(x + 290.0 * s, y, 13.0 * s, "Recordings (p)", MUTED, Event::Tab(34));
+            bar.push(("Recordings (p)".to_string(), MUTED, Event::Tab(34)));
+            bar.push(("Motion (m)".to_string(), MUTED, Event::Tab(35)));
         }
+        let (bar_h, end_x) = g.button_flow(x, y, w, 13.0 * s, 8.0 * s, &bar);
         let sub = format!("{}{}", c.status.label(), if c.fps > 0.5 { format!(" · {:.0} fps", c.fps) } else { String::new() });
         let sub = format!("{sub}{}", if c.size.0 > 0 { format!(" · {}×{}", c.size.0, c.size.1) } else { String::new() });
-        g.text(x + 450.0 * s, y + 4.0 * s, 13.0 * s, status_color(&c.status), &sub, Face::Sans);
-        y += 40.0 * s;
+        // the state sits after the last button when it fits there, else under the buttons
+        let sw = g.text_width(13.0 * s, &sub, Face::Sans);
+        let one_row = bar_h < 13.0 * s * 2.1 * 1.5;
+        if one_row && end_x + 16.0 * s + sw <= x + w {
+            g.text(end_x + 16.0 * s, y + 4.0 * s, 13.0 * s, status_color(&c.status), &sub, Face::Sans);
+            y += bar_h.max(34.0 * s) + 6.0 * s;
+        } else {
+            let sub = g.fit(13.0 * s, &sub, Face::Sans, w);
+            g.text(x, y + bar_h + 4.0 * s, 13.0 * s, status_color(&c.status), &sub, Face::Sans);
+            y += bar_h + 28.0 * s;
+        }
         self.privacy = c.kind == Kind::Usb;
         if self.privacy {
             g.rrect(x, y, w, 24.0 * s, 6.0 * s, [150, 20, 20, 230]);
@@ -429,6 +468,7 @@ impl App for CamerasApp {
             Screen::Form(..) => "Tab next field · Enter save · Esc cancel".into(),
             Screen::Confirm(_) => "y remove · Esc cancel".into(),
             Screen::Rec(ref r) => r.hint(),
+            Screen::Motion(ref m) => m.hint(),
         }
     }
     fn handle(&mut self, ev: &Event, cx: &TileCx) -> Flow {
@@ -450,6 +490,10 @@ impl App for CamerasApp {
                     rec::Out::Back => self.last_refresh = None,
                 }
             }
+            Screen::Motion(mut m) => match m.handle(ev, cx) {
+                motion::Out::Stay => self.screen = Screen::Motion(m),
+                motion::Out::Back => self.last_refresh = None,
+            },
             Screen::Form(mut f, replacing) => match f.handle_event(ev) {
                 FormEvent::Cancel => {}
                 FormEvent::Submit => self.submit_form(cx, f, replacing),
@@ -496,6 +540,10 @@ impl App for CamerasApp {
                 r.render(g, area, s, cx, tick);
                 self.screen = Screen::Rec(r);
             }
+            Screen::Motion(mut m) => {
+                m.render(g, area, s, cx, tick);
+                self.screen = Screen::Motion(m);
+            }
             Screen::Confirm(id) => {
                 let name = self.cams.iter().find(|c| c.id == id).map_or("this camera", |c| c.name.as_str()).to_string();
                 self.screen = Screen::Confirm(id);
@@ -504,7 +552,7 @@ impl App for CamerasApp {
             }
         }
         if let Some((t, ok, at)) = &self.note {
-            if tick.saturating_sub(*at) < 240 && !matches!(self.screen, Screen::Form(..) | Screen::Confirm(_) | Screen::Rec(_)) {
+            if tick.saturating_sub(*at) < 240 && !matches!(self.screen, Screen::Form(..) | Screen::Confirm(_) | Screen::Rec(_) | Screen::Motion(_)) {
                 let t = g.fit(13.0 * s, t, Face::Sans, area.w - 40.0 * s);
                 g.text(area.x + 20.0 * s, area.y + area.h - 26.0 * s, 13.0 * s, if *ok { OK } else { ERR }, &t, Face::Sans);
             }
@@ -512,6 +560,8 @@ impl App for CamerasApp {
     }
 }
 
+#[cfg(test)]
+mod motion_tests;
 #[cfg(test)]
 mod rec_tests;
 #[cfg(test)]

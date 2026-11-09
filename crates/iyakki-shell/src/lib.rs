@@ -2,6 +2,7 @@
 #[cfg(test)]
 mod testmem;
 pub mod accounts;
+pub use iyakki_uikit::access;
 pub use iyakki_uikit::gfx;
 pub use iyakki_uikit::fx;
 #[cfg(test)]
@@ -46,6 +47,7 @@ pub mod saver;
 pub mod clockbar;
 pub mod cues;
 pub mod devinput;
+pub mod btmodel;
 pub mod devpop;
 pub mod devask;
 pub mod about;

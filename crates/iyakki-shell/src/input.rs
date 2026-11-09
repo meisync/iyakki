@@ -132,6 +132,11 @@ pub struct InputState {
     /// Touch screens, each with its own slots and the display its touch started on (`touchscreen.rs`).
     touches: crate::touchscreen::Touches,
     started: std::time::Instant,
+    /// Sticky keys and slow keys (`iyakki_uikit::access`), fed from the options the shell applies.
+    sticky: crate::access::StickyKeys,
+    slow: crate::access::SlowKeys,
+    /// Tests only: sticky and slow keys of this state alone, whatever the shell applied to the process.
+    opts: Option<(bool, u32)>,
     /// Wheel and trackpad movement becomes smooth pixel steps here (`scrolleng.rs`); [`InputState::scroll_tick`] hands them out.
     scroll: crate::scrolleng::ScrollEngine,
     /// The wheel movement of the frame being read (legacy clicks, and the hi-res units a newer wheel sends with them).
@@ -145,7 +150,7 @@ pub struct InputState {
 
 impl InputState {
     pub fn new(w: u32, h: u32) -> InputState {
-        InputState { shift: false, ctrl: false, alt: false, meta: false, ctrl_click: false, scroll_from_pad: false, caps: false, x: w as i32 / 2, y: h as i32 / 2, w: w as i32, h: h as i32, abs: (0, 0), slot: 0, pending_touch: false, pad: crate::touchpad::Touchpad::new(), touches: Default::default(), started: std::time::Instant::now(), scroll: crate::scrolleng::ScrollEngine::new(), wheel_legacy: 0, wheel_hires: 0, fake_ms: None, scroll_due: None }
+        InputState { shift: false, ctrl: false, alt: false, meta: false, ctrl_click: false, scroll_from_pad: false, caps: false, x: w as i32 / 2, y: h as i32 / 2, w: w as i32, h: h as i32, abs: (0, 0), slot: 0, pending_touch: false, pad: crate::touchpad::Touchpad::new(), touches: Default::default(), started: std::time::Instant::now(), sticky: Default::default(), slow: Default::default(), opts: None, scroll: crate::scrolleng::ScrollEngine::new(), wheel_legacy: 0, wheel_hires: 0, fake_ms: None, scroll_due: None }
     }
 
     fn now_ms(&self) -> u64 {
@@ -293,7 +298,57 @@ impl InputState {
         }
     }
 
+    /// One raw event in, UI events out. Slow keys and sticky keys (Settings, Accessibility) stand between the keyboard and the rest.
     pub fn feed(&mut self, r: Raw, abs_max: Option<(i32, i32)>) -> Vec<Event> {
+        let (sticky, slow) = self.opts.unwrap_or_else(|| (crate::access::sticky_enabled(), crate::access::slow_ms()));
+        self.sticky.set_enabled(sticky);
+        self.slow.set_delay(slow);
+        if r.typ == EV_KEY && r.code < 0x100 && modifier_of(r.code).is_none() && self.slow.delay() > 0 {
+            let now = self.now_ms();
+            let mut out = Vec::new();
+            for v in self.slow.filter(r.code, r.value, now) {
+                out.extend(self.feed_sticky(Raw { value: v, ..r }, abs_max));
+            }
+            return out;
+        }
+        self.feed_sticky(r, abs_max)
+    }
+
+    /// Sticky keys: a modifier let go stays on for the next key (pure state in `StickyKeys`); with the option off this is `feed_one`.
+    fn feed_sticky(&mut self, r: Raw, abs_max: Option<(i32, i32)>) -> Vec<Event> {
+        if !self.sticky.enabled() {
+            return self.feed_one(r, abs_max);
+        }
+        if r.typ == EV_KEY {
+            if let Some(m) = modifier_of(r.code) {
+                if r.value != 2 {
+                    self.sticky.modifier(m, r.value != 0);
+                    self.take_sticky_mods();
+                }
+                return Vec::new();
+            }
+        }
+        let pressed = r.typ == EV_KEY && r.value == 1 && (r.code < 0x100 || r.code == BTN_LEFT || r.code == BTN_RIGHT);
+        let out = self.feed_one(r, abs_max);
+        if pressed {
+            self.sticky.key_used();
+            self.take_sticky_mods();
+        }
+        out
+    }
+
+    fn take_sticky_mods(&mut self) {
+        let m = self.sticky.mods();
+        (self.shift, self.ctrl, self.alt, self.meta) = (m.shift, m.ctrl, m.alt, m.meta);
+        crate::ui::set_shift_held(self.shift);
+    }
+
+    /// Latched modifiers wait for the next key (the shell can show a mark).
+    pub fn sticky_latched(&self) -> bool {
+        self.sticky.any_latched()
+    }
+
+    fn feed_one(&mut self, r: Raw, abs_max: Option<(i32, i32)>) -> Vec<Event> {
         let mut out = Vec::new();
         match r.typ {
             EV_KEY => match r.code {
@@ -332,6 +387,13 @@ impl InputState {
                             crate::fnkeys::note_seen(c);
                         }
                         out.push(Event::Fn(fk, r.value != 0));
+                    }
+                }
+                // Super+Alt chords of accessibility (S reader on/off, Right/Left walk, Enter press, R say again): the shell takes them
+                c if self.meta && self.alt && !self.ctrl && r.value == 1 && access_chord(c).is_some() => {
+                    if let Some(k) = access_chord(c) {
+                        out.push(Event::Fn(k, true));
+                        out.push(Event::Fn(k, false));
                     }
                 }
                 // Ctrl+Alt chords for panes and displays (arrows, 0-9, Tab, M): the shell takes them, no app sees a key
@@ -698,6 +760,31 @@ fn open_device(path: &str) -> Option<Device> {
         Some(Device { file, path: path.into(), abs_max, is_keyboard, pad: None, touch, finger, spoke: false })
     } else {
         None
+    }
+}
+
+/// Which modifier an evdev key code is.
+fn modifier_of(code: u16) -> Option<crate::access::Modifier> {
+    use crate::access::Modifier as M;
+    match code {
+        42 | 54 => Some(M::Shift),
+        29 | 97 => Some(M::Ctrl),
+        56 | 100 => Some(M::Alt),
+        125 | 126 => Some(M::Meta),
+        _ => None,
+    }
+}
+
+/// The accessibility chord a key code makes with Super+Alt held.
+fn access_chord(code: u16) -> Option<crate::fnkeys::FnKey> {
+    use crate::fnkeys::FnKey as K;
+    match code {
+        31 => Some(K::ScreenReader),
+        106 | 108 => Some(K::AccessNext),
+        105 | 103 => Some(K::AccessPrev),
+        28 => Some(K::AccessActivate),
+        19 => Some(K::AccessRepeat),
+        _ => None,
     }
 }
 
@@ -1556,5 +1643,89 @@ mod profile_tests {
         profile("pc", None, true);
         let d = st.feed(Raw { typ: EV_KEY, code: BTN_LEFT, value: 1 }, None);
         assert!(matches!(d.as_slice(), [Event::MouseDown(..)]), "{d:?}");
+    }
+
+    // ---- accessibility: the Super+Alt chords, sticky keys and slow keys at the input layer
+
+    fn key(st: &mut InputState, code: u16, value: i32) -> Vec<Event> {
+        st.feed(Raw { typ: EV_KEY, code, value }, None)
+    }
+
+    fn tap(st: &mut InputState, code: u16) -> Vec<Event> {
+        let mut out = key(st, code, 1);
+        out.extend(key(st, code, 0));
+        out
+    }
+
+    #[test]
+    fn super_alt_chords_make_the_accessibility_keys_and_nothing_else_does() {
+        use crate::fnkeys::FnKey as K;
+        let mut st = InputState::new(800, 600);
+        key(&mut st, 125, 1); // Super
+        key(&mut st, 56, 1); // Alt
+        assert_eq!(key(&mut st, 31, 1), vec![Event::Fn(K::ScreenReader, true), Event::Fn(K::ScreenReader, false)], "S");
+        key(&mut st, 31, 0);
+        assert_eq!(key(&mut st, 106, 1)[0], Event::Fn(K::AccessNext, true), "Right");
+        assert_eq!(key(&mut st, 105, 1)[0], Event::Fn(K::AccessPrev, true), "Left");
+        assert_eq!(key(&mut st, 28, 1)[0], Event::Fn(K::AccessActivate, true), "Enter");
+        assert_eq!(key(&mut st, 19, 1)[0], Event::Fn(K::AccessRepeat, true), "R");
+        // Ctrl as well makes it a pane chord, not an accessibility key; Super alone and Alt alone are not chords
+        key(&mut st, 29, 1);
+        assert!(!key(&mut st, 31, 1).iter().any(|e| matches!(e, Event::Fn(K::ScreenReader, _))));
+        key(&mut st, 29, 0);
+        key(&mut st, 125, 0);
+        assert!(!key(&mut st, 31, 1).iter().any(|e| matches!(e, Event::Fn(..))), "Alt+S alone is a plain key");
+    }
+
+    #[test]
+    fn sticky_keys_let_the_chord_be_typed_one_key_at_a_time_and_capitals_with_one_finger() {
+        use crate::fnkeys::FnKey as K;
+        let mut st = InputState::new(800, 600);
+        st.opts = Some((true, 0));
+        assert!(tap(&mut st, 125).is_empty() && tap(&mut st, 56).is_empty(), "the modifiers say nothing by themselves");
+        assert!(st.sticky_latched());
+        let e = tap(&mut st, 31);
+        assert!(e.contains(&Event::Fn(K::ScreenReader, true)), "Super, Alt, S one after the other: {e:?}");
+        assert!(!st.sticky_latched(), "spent by the key");
+        // Shift then a: a capital; then a: small again
+        tap(&mut st, 42);
+        assert_eq!(tap(&mut st, 30), vec![Event::Key(Key::Char('A'))]);
+        assert_eq!(tap(&mut st, 30), vec![Event::Key(Key::Char('a'))]);
+        // Ctrl then s is Ctrl+S
+        tap(&mut st, 29);
+        assert_eq!(tap(&mut st, 31), vec![Event::Key(Key::Ctrl('s'))]);
+        // held in the ordinary way still works, and is not latched afterwards
+        key(&mut st, 42, 1);
+        assert_eq!(key(&mut st, 30, 1), vec![Event::Key(Key::Char('A'))]);
+        key(&mut st, 30, 0);
+        key(&mut st, 42, 0);
+        assert_eq!(tap(&mut st, 30), vec![Event::Key(Key::Char('a'))]);
+        // with the option off, a tapped Shift does nothing to the next key
+        st.opts = Some((false, 0));
+        tap(&mut st, 42);
+        assert_eq!(tap(&mut st, 30), vec![Event::Key(Key::Char('a'))]);
+    }
+
+    #[test]
+    fn slow_keys_drop_a_brush_and_accept_a_held_key_but_never_slow_the_modifiers_or_the_mouse() {
+        let mut st = InputState::new(800, 600);
+        st.opts = Some((false, 500));
+        st.fake_clock(1000);
+        assert!(key(&mut st, 30, 1).is_empty());
+        st.fake_clock(1200);
+        assert!(key(&mut st, 30, 0).is_empty(), "a brush of 200 ms is nothing");
+        st.fake_clock(2000);
+        key(&mut st, 30, 1);
+        st.fake_clock(2600);
+        assert_eq!(key(&mut st, 30, 0), vec![Event::Key(Key::Char('a'))], "held 600 ms counts, once");
+        // a modifier is not delayed: Shift (no wait) then a held key
+        key(&mut st, 42, 1);
+        st.fake_clock(3000);
+        key(&mut st, 30, 1);
+        st.fake_clock(3600);
+        assert_eq!(key(&mut st, 30, 0), vec![Event::Key(Key::Char('A'))]);
+        key(&mut st, 42, 0);
+        // the mouse button is not a key
+        assert!(matches!(key(&mut st, BTN_LEFT, 1).as_slice(), [Event::MouseDown(..)]));
     }
 }

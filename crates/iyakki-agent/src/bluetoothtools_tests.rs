@@ -105,7 +105,7 @@ fn disconnect_and_forget_act_on_the_named_device_and_unknown_or_ambiguous_names_
     }
     let (t, f) = rig(LinkState::Connected);
     f.devs.lock().unwrap().clear();
-    assert!(t.call(READ_TOOL, &json!({})).unwrap().contains("Bluetooth audio is not available yet"));
+    assert!(t.call(READ_TOOL, &json!({})).unwrap().contains("sending sound to Bluetooth headphones is not available yet"));
 }
 
 // ---- a phone's Bluetooth tethering

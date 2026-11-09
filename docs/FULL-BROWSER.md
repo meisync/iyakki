@@ -78,6 +78,8 @@ Try it in window mode: `./run.sh window`, open the BROWSER tile, type `youtube.c
 the helper starts a private invisible X server for the engine. Without it pages work and video does not.) A page is drawn about 20 to 30
 times a second while it changes.
 
+**Accessibility.** A page shown by this engine is a picture to the operating system: the screen reader, browse mode, the lists and the forced colours of the built-in reader do not reach it (see "Browser" in docs/ACCESSIBILITY.md). A person who needs them stays in the built-in reader (F or Esc goes back) for as long as the site works there.
+
 ### The old way: cage and cog (no longer in the image)
 
 Before the helper existed, F handed the screen and keyboard to `cage` (a kiosk Wayland compositor) running `cog`. The `web` image

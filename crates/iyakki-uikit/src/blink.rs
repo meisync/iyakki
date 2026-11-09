@@ -3,7 +3,8 @@
 /// The blinking caret: on for half a second, off for half, and never while the pane being drawn does not own the keyboard or
 /// the window has lost the system focus (see [`with_caret`]). Every text input and the editor take their caret from here.
 pub fn blink(tick: u64) -> bool {
-    crate::ui::input_focus_allowed() && (tick / 15) % 2 == 0
+    // reduced motion: a steady caret that does not blink
+    crate::ui::input_focus_allowed() && (crate::fx::reduced_motion() || (tick / 15) % 2 == 0)
 }
 
 /// Whether anything that marks "typing goes here" (caret, current-line wash, bracket box) may be drawn now.

@@ -1,8 +1,8 @@
 //! iyakki-wake-eval --weights FILE (--data DIR | --positives DIR --background DIR) [--snr DB] [--all]
 //! iyakki-wake-eval --weights FILE --bench
 //! Prints the miss rate and the false accepts per hour for a threshold sweep, or the CPU cost of the streaming spotter.
-#[path = "args.rs"]
-mod args;
+
+
 use iyakki_wake::dataset::DataSet;
 use iyakki_wake::eval::sweep;
 use iyakki_wake::features::SAMPLE_RATE;
@@ -16,7 +16,7 @@ fn load_wavs(dir: &Path) -> Vec<Vec<f32>> {
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    let m = args::parse(&a);
+    let m = iyakki_wake::cli::parse(&a);
     let Some(w) = m.get("weights") else {
         eprintln!("usage: iyakki-wake-eval --weights FILE (--data DIR | --positives DIR --background DIR) [--snr DB] [--all] | --bench");
         std::process::exit(2);
@@ -73,7 +73,7 @@ fn bench(net: iyakki_wake::model::Net) {
     use iyakki_wake::rng::Rng;
     let mut rng = Rng::new(5);
     let secs = 60;
-    let mk = |level: f32, rng: &mut Rng| -> Vec<f32> { (0..secs * SAMPLE_RATE).map(|i| level * (rng.normal() * 0.5 + (i as f32 * 0.07).sin() + (i as f32 * 0.31).sin())).collect() };
+    let mk = |level: f32, rng: &mut Rng| -> Vec<f32> { (0..secs * SAMPLE_RATE).map(|i| { let on = if (i / 8000) % 2 == 0 { 1.0 } else { 0.01 }; level * on * (rng.normal() * 0.5 + (i as f32 * 0.07).sin() + (i as f32 * 0.31).sin()) }).collect() };
     let quiet = mk(0.0003, &mut rng);
     let loud = mk(0.15, &mut rng);
     let run = |x: &[f32]| {

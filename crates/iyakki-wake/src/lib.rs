@@ -14,6 +14,7 @@
 //! voice. Accuracy on real voices and real rooms is unknown until real takes are recorded and the evaluation is run on them.
 
 pub mod augment;
+pub mod cli;
 pub mod dataset;
 pub mod eval;
 pub mod features;

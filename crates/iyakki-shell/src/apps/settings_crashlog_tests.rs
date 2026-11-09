@@ -24,7 +24,7 @@ fn crash(dir: &std::path::Path, lines: usize) {
 }
 
 fn go(a: &mut SettingsApp, cx: &AppCx, t: Tab) {
-    for _ in 0..40 {
+    for _ in 0..60 {
         if a.tab() == t {
             return;
         }

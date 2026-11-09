@@ -11,7 +11,7 @@ use iyakki_uikit::gfx::{rgb, Face, Gfx, Icon};
 use iyakki_uikit::ui::{Event, Key, DIM, ERR, MUTED, OK, R, TEXT};
 use iyakki_uikit::widgets::{render_confirm, Form, FormEvent};
 
-pub const ACCENT: [u8; 4] = rgb(96, 200, 190);
+pub const ACCENT: [u8; 4] = rgb(170, 120, 200);
 const ROW_H: f32 = 30.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -737,9 +737,9 @@ impl RemoteFilesApp {
         let x = area.x + 24.0 * s;
         let w = area.w - 48.0 * s;
         let y = area.y + 10.0 * s;
-        g.button(x, y, 14.0 * s, "New connection", ACCENT, Event::Tab(30));
-        g.button(x + 190.0 * s, y, 14.0 * s, "Transfers (t)", MUTED, Event::Key(Key::Char('t')));
-        let top = y + 48.0 * s;
+        let bar = [("New connection".to_string(), ACCENT, Event::Tab(30)), ("Transfers (t)".to_string(), MUTED, Event::Key(Key::Char('t')))];
+        let (bar_h, _) = g.button_flow(x, y, w, 14.0 * s, 8.0 * s, &bar);
+        let top = y + bar_h.max(38.0 * s) + 10.0 * s;
         if conns.is_empty() {
             iyakki_uikit::fx::empty_state(g, R::new(x, top, w, area.h - 100.0 * s), s, Icon::Data, "No saved connections", "Press n to add an SFTP, FTPS or FTP server. Passwords and keys stay in your vault.", ACCENT);
             return;
